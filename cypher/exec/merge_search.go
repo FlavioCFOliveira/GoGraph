@@ -64,7 +64,7 @@ func NewMergeSearchFnFromPattern(
 	if len(params) == 0 {
 		props, err = parsePropLiteral(propertiesRaw)
 	} else {
-		props, err = parsePropLiteralWithParams(propertiesRaw, params)
+		props, err = parsePropLiteralWithParamsMerge(propertiesRaw, params)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("exec: NewMergeSearchFnFromPattern: parse properties %q: %w", propertiesRaw, err)

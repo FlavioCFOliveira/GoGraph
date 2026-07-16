@@ -189,7 +189,7 @@ func (op *MergeRelationship) WithParams(params map[string]expr.Value) (*MergeRel
 		return op, nil
 	}
 	if op.relPropsRaw != "" {
-		parsed, err := parsePropLiteralWithParams(op.relPropsRaw, params)
+		parsed, err := parsePropLiteralWithParamsMerge(op.relPropsRaw, params)
 		if err != nil {
 			return nil, fmt.Errorf("exec: MergeRelationship: parse rel props %q: %w", op.relPropsRaw, err)
 		}

@@ -648,8 +648,27 @@ func mapHasNullValue(s string) bool {
 // parameter references of the form "$name" from the supplied params map.
 // Unrecognised parameter names yield an error.
 //
-// When params is nil the function behaves identically to parsePropLiteral.
+// When params is nil the function behaves identically to parsePropLiteral. This
+// is the CREATE-context entry point: a value resolving to null is omitted (a
+// null property assignment is a no-op on CREATE).
 func parsePropLiteralWithParams(s string, params map[string]expr.Value) ([]propLiteral, error) {
+	return parsePropLiteralWithParamsCtx(s, params, false)
+}
+
+// parsePropLiteralWithParamsMerge is the MERGE-context entry point: a property
+// whose value resolves to null (via a parameter) can never match its own write,
+// so openCypher raises SemanticError.MergeReadOwnWrites rather than merging with
+// the key omitted — completing the null coverage for the literal-null
+// (PropMapContainsNullLiteral) and runtime-expression-null (buildPropsEvalFn
+// mergeContext) paths across the third arrival route, a parameter (#2035).
+func parsePropLiteralWithParamsMerge(s string, params map[string]expr.Value) ([]propLiteral, error) {
+	return parsePropLiteralWithParamsCtx(s, params, true)
+}
+
+// parsePropLiteralWithParamsCtx parses a Cypher property-map literal with $name
+// substitution. mergeContext selects the null-value policy: false (CREATE) omits
+// a null-valued entry; true (MERGE) raises MergeReadOwnWrites.
+func parsePropLiteralWithParamsCtx(s string, params map[string]expr.Value, mergeContext bool) ([]propLiteral, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return nil, nil
@@ -687,6 +706,14 @@ func parsePropLiteralWithParams(s string, params map[string]expr.Value) ([]propL
 		pv, err := parsePropValueWithParams(valStr, params)
 		if err != nil {
 			if errors.Is(err, ErrPropertyValueIsNull) {
+				if mergeContext {
+					// A MERGE property resolving to null (here via a parameter)
+					// can never match its own write; openCypher raises
+					// MergeReadOwnWrites, matching the literal-null and
+					// runtime-expression-null guards rather than silently merging
+					// with the key omitted (#2035).
+					return nil, fmt.Errorf("cypher: SemanticError.MergeReadOwnWrites: MERGE property %q resolves to a null parameter", key)
+				}
 				continue // null value: openCypher says do not set the property
 			}
 			if errors.Is(err, ErrNestedPropertyValue) {
@@ -746,6 +773,13 @@ func parsePropValueWithParams(s string, params map[string]expr.Value) (lpg.Prope
 		v, ok := params[name]
 		if !ok {
 			return lpg.PropertyValue{}, fmt.Errorf("unbound parameter $%s", name)
+		}
+		// A parameter resolving to null: on CREATE assigning null is a no-op (the
+		// caller omits the key on ErrPropertyValueIsNull); on MERGE the caller
+		// raises MergeReadOwnWrites. Return the typed sentinel so both contexts
+		// are distinguished uniformly with the literal-null path.
+		if v == nil || expr.IsNull(v) {
+			return lpg.PropertyValue{}, ErrPropertyValueIsNull
 		}
 		switch val := v.(type) {
 		case expr.StringValue:

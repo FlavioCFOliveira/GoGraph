@@ -332,7 +332,7 @@ func (op *MergePattern) WithParams(params map[string]expr.Value) (*MergePattern,
 		if n.propsRaw == "" {
 			continue
 		}
-		props, err := parsePropLiteralWithParams(n.propsRaw, params)
+		props, err := parsePropLiteralWithParamsMerge(n.propsRaw, params)
 		if err != nil {
 			return nil, fmt.Errorf("exec: MergePattern: parse node %q properties %q: %w", n.varName, n.propsRaw, err)
 		}
@@ -344,7 +344,7 @@ func (op *MergePattern) WithParams(params map[string]expr.Value) (*MergePattern,
 		if h.relPropsRaw == "" {
 			continue
 		}
-		props, err := parsePropLiteralWithParams(h.relPropsRaw, params)
+		props, err := parsePropLiteralWithParamsMerge(h.relPropsRaw, params)
 		if err != nil {
 			return nil, fmt.Errorf("exec: MergePattern: parse relationship properties %q: %w", h.relPropsRaw, err)
 		}

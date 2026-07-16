@@ -153,7 +153,7 @@ func (op *Merge) WithParams(params map[string]expr.Value) (*Merge, error) {
 	if len(params) == 0 {
 		return op, nil
 	}
-	props, err := parsePropLiteralWithParams(op.propsRaw, params)
+	props, err := parsePropLiteralWithParamsMerge(op.propsRaw, params)
 	if err != nil {
 		return nil, fmt.Errorf("exec: Merge: parse properties %q: %w", op.propsRaw, err)
 	}
