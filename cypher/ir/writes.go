@@ -703,11 +703,13 @@ func (t *translator) setClause(s *ast.Set, child LogicalPlan) (LogicalPlan, erro
 }
 
 // newSetAllForValue produces the correct SetAllProperties shape for the given
-// RHS expression. Variable references become entity-copy operators; map
-// literals become literal-map operators; parameter references become
-// parameter-source operators. Any other expression form is conservatively
-// encoded as a literal-map string so the exec layer's literal-map parser can
-// attempt to handle it (and silently no-op when it cannot).
+// RHS expression. Variable references become entity-copy operators (which also
+// apply a map-valued variable per row); map literals become literal-map
+// operators; parameter references become parameter-source operators. Any other
+// expression form — a map-returning function such as properties(m), a map
+// projection, coalesce, a subscript — becomes an expression-source operator
+// evaluated per row, so the openCypher-valid `SET n = <expr yielding a map>`
+// form is supported rather than rejected by the literal-map parser.
 func newSetAllForValue(entityVar string, value ast.Expression, isReplace bool, child LogicalPlan) *SetAllProperties {
 	switch v := value.(type) {
 	case *ast.Variable:
@@ -729,7 +731,11 @@ func newSetAllForValue(entityVar string, value ast.Expression, isReplace bool, c
 		// a TypeError in the semantic-analysis pass.)
 		return NewSetAllPropertiesFromMap(entityVar, "{}", isReplace, child)
 	default:
-		return NewSetAllPropertiesFromMap(entityVar, value.String(), isReplace, child)
+		// A map-valued expression (properties(m), a map projection, coalesce,
+		// a subscript, …). Evaluated per row; the exec operator dispatches on
+		// the value's runtime kind (map → write entries, node/relationship →
+		// copy, null → clear/no-op, other → TypeError). #2027.
+		return NewSetAllPropertiesFromExpr(entityVar, value, isReplace, child)
 	}
 }
 

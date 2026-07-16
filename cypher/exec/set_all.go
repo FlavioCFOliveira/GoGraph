@@ -78,8 +78,26 @@ type SetAllProperties struct {
 	// Consistency defect matching the literal-only CREATE/MERGE class.
 	mapEvalFn MapEvalFn
 
+	// exprEvalFn evaluates a whole map-valued RHS expression against the current
+	// row for the `SET n = <expr>` / `SET n += <expr>` forms whose right-hand
+	// side is neither a `{…}` literal, a bound entity variable, nor a `$param`
+	// (e.g. `SET n = properties(m)`, a map projection, or coalesce). It returns
+	// the raw expr.Value; the operator dispatches on its runtime kind (map →
+	// write entries, node/relationship → copy properties, null → clear for `=` /
+	// no-op for `+=`, any other kind → TypeError). nil when the source is a
+	// literal map, an entity var, or a parameter. Without it such an expression
+	// used to fail loud at build time (literal-map parser rejected the
+	// stringified expression), leaving the openCypher-valid form unsupported.
+	exprEvalFn ExprValueEvalFn
+
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 }
+
+// ExprValueEvalFn is a per-row evaluator for a whole map-valued RHS expression
+// on a `SET x = <expr>` / `SET x += <expr>` operator. It returns the evaluated
+// value; the operator dispatches on its runtime kind. See
+// [SetAllProperties.WithExprEvalFn].
+type ExprValueEvalFn func(row Row) (expr.Value, error)
 
 // MapEvalFn is a per-row evaluator for a whole property map used by a
 // `SET x = {…}` / `SET x += {…}` operator. Unlike [PropsEvalFn] it also reports
@@ -154,6 +172,29 @@ func NewSetAllPropertiesFromParam(
 	}
 }
 
+// NewSetAllPropertiesFromExpr creates a SetAllProperties operator whose source
+// is an arbitrary map-valued expression evaluated per row (installed via
+// [SetAllProperties.WithExprEvalFn]). It backs the `SET n = <expr>` /
+// `SET n += <expr>` forms whose right-hand side is neither a `{…}` literal, a
+// bound entity variable, nor a `$param` — e.g. `SET n = properties(m)`, a map
+// projection, or coalesce. The evaluated value is dispatched on its runtime
+// kind at apply time (see [SetAllProperties.applyExprValue]).
+func NewSetAllPropertiesFromExpr(
+	entityVar string,
+	isReplace bool,
+	schema map[string]int,
+	child Operator,
+	mutator GraphMutator,
+) *SetAllProperties {
+	return &SetAllProperties{
+		entityVar: entityVar,
+		isReplace: isReplace,
+		schema:    schema,
+		child:     child,
+		mutator:   mutator,
+	}
+}
+
 // WithConstraints attaches a ConstraintRegistry and index.Manager for
 // pre-write enforcement. Both must be non-nil. Returns op for chaining.
 func (op *SetAllProperties) WithConstraints(reg *ConstraintRegistry, mgr *index.Manager) *SetAllProperties {
@@ -189,6 +230,17 @@ func (op *SetAllProperties) WithParams(params map[string]expr.Value) (*SetAllPro
 // exist to prevent. Pass nil to clear. Returns op for chaining.
 func (op *SetAllProperties) WithMapEvalFn(fn MapEvalFn) *SetAllProperties {
 	op.mapEvalFn = fn
+	return op
+}
+
+// WithExprEvalFn attaches a per-row evaluator for a whole map-valued RHS
+// expression (see [ExprValueEvalFn]). The evaluated value is dispatched on its
+// runtime kind at apply time: a map writes its entries (null-valued keys
+// removed), a node/relationship copies its properties, a null clears the target
+// for `=` and is a no-op for `+=`, and any other kind raises a TypeError. Pass
+// nil to clear. Returns op for chaining.
+func (op *SetAllProperties) WithExprEvalFn(fn ExprValueEvalFn) *SetAllProperties {
+	op.exprEvalFn = fn
 	return op
 }
 
@@ -249,17 +301,32 @@ func (op *SetAllProperties) parseParamMap() error {
 	if !isMap {
 		return fmt.Errorf("TypeError: SET %s with $%s: expected a Map but was %s", op.entityVar, op.paramName, v.Kind())
 	}
+	props, nullKeys, err := exprMapValueToEntries(op.entityVar, mv)
+	if err != nil {
+		return err
+	}
+	op.parsedMap = props
+	op.nullKeys = nullKeys
+	return nil
+}
+
+// exprMapValueToEntries converts a runtime [expr.MapValue] to the property
+// entries and null-valued keys used by the whole-entity SET forms. A null value
+// is reported in nullKeys (SET-map semantics REMOVE such keys). A map- or
+// nested-map-valued entry is rejected with InvalidPropertyType (property values
+// are primitives or homogeneous lists of primitives). A list of primitives is
+// routed through the list encoder; any other unconvertible kind is a defensive
+// skip. Shared by the parameter-map ([SetAllProperties.parseParamMap]) and the
+// per-row map-value ([SetAllProperties.applyMapValue]) ingestion paths.
+func exprMapValueToEntries(entityVar string, mv expr.MapValue) (props []propLiteral, nullKeys []string, err error) {
 	for k, vv := range mv {
 		if vv == nil || expr.IsNull(vv) {
-			op.nullKeys = append(op.nullKeys, k)
+			nullKeys = append(nullKeys, k)
 			continue
 		}
 		if !exprValueIsStorable(vv) {
-			return fmt.Errorf("InvalidPropertyType: SET %s: value for key %q is a map or a list of maps, which cannot be stored as a property", op.entityVar, k)
+			return nil, nil, fmt.Errorf("InvalidPropertyType: SET %s: value for key %q is a map or a list of maps, which cannot be stored as a property", entityVar, k)
 		}
-		// A list of primitives is a legal property value; route it through the
-		// list encoder (valueToPropertyValue handles only scalars). Other
-		// unconvertible kinds remain a defensive skip.
 		var pv lpg.PropertyValue
 		var perr error
 		if lst, isList := vv.(expr.ListValue); isList {
@@ -270,9 +337,9 @@ func (op *SetAllProperties) parseParamMap() error {
 		if perr != nil {
 			continue
 		}
-		op.parsedMap = append(op.parsedMap, propLiteral{key: k, value: pv})
+		props = append(props, propLiteral{key: k, value: pv})
 	}
-	return nil
+	return props, nullKeys, nil
 }
 
 // exprValueIsStorable reports whether v can be stored as a property value: a
@@ -330,11 +397,20 @@ func (op *SetAllProperties) Next(out *Row) (bool, error) {
 		return false, fmt.Errorf("exec: SetAllProperties %q: %w", op.entityVar, terr)
 	}
 
-	if op.sourceVar != "" {
+	switch {
+	case op.exprEvalFn != nil:
+		v, evalErr := op.exprEvalFn(childRow)
+		if evalErr != nil {
+			return false, evalErr
+		}
+		if applyErr := op.applyExprValue(target, v); applyErr != nil {
+			return false, applyErr
+		}
+	case op.sourceVar != "":
 		if applyErr := op.applyEntityCopy(target, childRow); applyErr != nil {
 			return false, applyErr
 		}
-	} else {
+	default:
 		if applyErr := op.applyMap(target, childRow); applyErr != nil {
 			return false, applyErr
 		}
@@ -342,6 +418,64 @@ func (op *SetAllProperties) Next(out *Row) (bool, error) {
 
 	*out = childRow
 	return true, nil
+}
+
+// applyExprValue applies a whole map-valued RHS expression (evaluated by
+// [SetAllProperties.exprEvalFn]) to the target, dispatching on the value's
+// runtime kind:
+//   - map: write its entries (null-valued keys removed);
+//   - node/relationship: copy every property from that entity;
+//   - null: clear the target for `=` (replace); no-op for `+=` (append);
+//   - any other kind (scalar, list): a TypeError, since a whole-entity SET RHS
+//     must yield a map (or a node/relationship to copy from).
+func (op *SetAllProperties) applyExprValue(target entityBinding, v expr.Value) error {
+	if v == nil || expr.IsNull(v) {
+		if op.isReplace {
+			op.clearTarget(target)
+		}
+		return nil
+	}
+	switch src := v.(type) {
+	case expr.MapValue:
+		return op.applyMapValue(target, src)
+	case expr.NodeValue:
+		nodeKey, ok := op.mutator.ResolveNodeLabel(graph.NodeID(src.ID))
+		if !ok {
+			return nil // unresolvable source: no-op (null-source semantics)
+		}
+		return op.copyFromSource(target, entityBinding{nodeKey: nodeKey})
+	case expr.RelationshipValue:
+		srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(src.StartID))
+		dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(src.EndID))
+		if !srcOK || !dstOK {
+			return nil
+		}
+		return op.copyFromSource(target, entityBinding{isRel: true, relSrcKey: srcKey, relDstKey: dstKey})
+	default:
+		return fmt.Errorf("TypeError: SET %s: expected a Map, Node or Relationship but was %s", op.entityVar, v.Kind())
+	}
+}
+
+// applyMapValue writes a runtime map value to the target: existing properties
+// are cleared first for `=` (replace); null-valued keys are removed; the
+// remaining entries are written. Shared by the map-valued expression path
+// ([SetAllProperties.applyExprValue]) and the source-variable-is-a-map case
+// ([SetAllProperties.applyEntityCopy]).
+func (op *SetAllProperties) applyMapValue(target entityBinding, mv expr.MapValue) error {
+	props, nullKeys, err := exprMapValueToEntries(op.entityVar, mv)
+	if err != nil {
+		return err
+	}
+	if op.isReplace {
+		op.clearTarget(target)
+	}
+	for _, k := range nullKeys {
+		op.deleteOne(target, k)
+	}
+	for _, p := range props {
+		op.writeOne(target, p.key, p.value)
+	}
+	return nil
 }
 
 // effectiveMap returns the (entries, nullKeys) to apply for the current row:
@@ -387,14 +521,33 @@ func (op *SetAllProperties) targetIsNullRow(row Row) bool {
 // applyEntityCopy reads every property from sourceVar and writes them to the
 // target. The full property snapshot is taken before any write, so reading
 // from a relationship and writing to the same relationship is safe.
+//
+// When the source variable is bound to a MAP value (rather than a node or
+// relationship) — e.g. `UNWIND [{x:1}] AS r … SET n = r` — the map is applied
+// as a whole-entity map, mirroring `SET n = {…}`. Without this the map value
+// falls through resolveEntityBinding's non-entity default and is silently
+// swallowed as a no-op, a fail-silent Consistency defect (#2030).
 func (op *SetAllProperties) applyEntityCopy(target entityBinding, row Row) error {
+	if colIdx, ok := op.schema[op.sourceVar]; ok && colIdx < len(row) {
+		if mv, isMap := row[colIdx].(expr.MapValue); isMap {
+			return op.applyMapValue(target, mv)
+		}
+	}
+
 	src, err := resolveEntityBinding(op.sourceVar, op.schema, op.srcRelCols, row, op.mutator)
 	if err != nil {
 		// Source is missing/null/unbound: treat as no-op (openCypher's
 		// null-source semantics).
 		return nil //nolint:nilerr // missing source variable is a no-op
 	}
+	return op.copyFromSource(target, src)
+}
 
+// copyFromSource writes every property of the resolved source entity to the
+// target. The full property snapshot is taken before any write, so copying a
+// relationship onto itself is safe. Existing target properties are cleared
+// first for `=` (replace) semantics.
+func (op *SetAllProperties) copyFromSource(target, src entityBinding) error {
 	var sourceProps map[string]lpg.PropertyValue
 	if src.isRel {
 		sourceProps = op.mutator.EdgeProperties(src.relSrcKey, src.relDstKey)

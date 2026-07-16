@@ -1586,6 +1586,16 @@ type SetAllProperties struct {
 	// ParamName holds the `$name` reference text (without the dollar sign)
 	// when the source is a parameter. Empty otherwise.
 	ParamName string
+	// ExprAST carries a whole map-valued RHS expression for the
+	// `SET n = <expr>` / `SET n += <expr>` forms whose right-hand side is
+	// neither a `{…}` literal, a bound entity variable, nor a `$param` — e.g.
+	// `SET n = properties(m)`, a map projection, or coalesce. The physical
+	// builder installs a per-row expression evaluator from it; the exec operator
+	// dispatches on the evaluated value's runtime kind (map / node / relationship
+	// / null / other). nil for the SourceVar, MapLiteral, and ParamName forms.
+	// Without it such an openCypher-valid expression fails at build time (the
+	// literal-map parser rejects the stringified expression).
+	ExprAST ast.Expression
 	// Child is the driving subplan.
 	Child LogicalPlan
 }
@@ -1619,6 +1629,21 @@ func NewSetAllPropertiesFromParam(entityVar, paramName string, isReplace bool, c
 		EntityVar: entityVar,
 		IsReplace: isReplace,
 		ParamName: paramName,
+		Child:     child,
+	}
+}
+
+// NewSetAllPropertiesFromExpr creates a SetAllProperties operator whose source
+// is an arbitrary map-valued expression (exprAST) evaluated per row. It backs
+// the `SET n = <expr>` / `SET n += <expr>` forms whose right-hand side is
+// neither a `{…}` literal, a bound entity variable, nor a `$param` — e.g.
+// `SET n = properties(m)`. The physical builder installs a per-row evaluator
+// from exprAST; the exec operator dispatches on the evaluated value's kind.
+func NewSetAllPropertiesFromExpr(entityVar string, exprAST ast.Expression, isReplace bool, child LogicalPlan) *SetAllProperties {
+	return &SetAllProperties{
+		EntityVar: entityVar,
+		IsReplace: isReplace,
+		ExprAST:   exprAST,
 		Child:     child,
 	}
 }

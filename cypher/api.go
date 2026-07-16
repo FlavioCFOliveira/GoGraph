@@ -4499,6 +4499,12 @@ func buildOperatorWrite(
 			sap = exec.NewSetAllPropertiesFromEntity(p.EntityVar, p.SourceVar, p.IsReplace, schemaCopy, child, mutator)
 		case p.ParamName != "":
 			sap = exec.NewSetAllPropertiesFromParam(p.EntityVar, p.ParamName, p.IsReplace, schemaCopy, child, mutator)
+		case p.ExprAST != nil:
+			// A whole map-valued RHS expression (properties(m), a map
+			// projection, coalesce, a subscript, …). Evaluated per row; the
+			// operator dispatches on the value's runtime kind. #2027.
+			sap = exec.NewSetAllPropertiesFromExpr(p.EntityVar, p.IsReplace, schemaCopy, child, mutator)
+			sap = sap.WithExprEvalFn(buildExprMapEvalFn(p.ExprAST, schemaCopy, params, reg, mutator, bopts))
 		default:
 			var bErr error
 			sap, bErr = exec.NewSetAllPropertiesFromMap(p.EntityVar, p.MapLiteral, p.IsReplace, schemaCopy, child, mutator)
@@ -5227,6 +5233,32 @@ func buildMapEvalFn(
 			entries = append(entries, exec.PropEntry{Key: k, Value: pv})
 		}
 		return entries, nullKeys, nil
+	}
+}
+
+// buildExprMapEvalFn constructs an [exec.ExprValueEvalFn] closure that
+// evaluates a whole map-valued RHS expression (exprAST) against each incoming
+// row for a `SET n = <expr>` / `SET n += <expr>` operator. It returns the raw
+// evaluated value; the exec operator dispatches on its runtime kind (map →
+// write entries, node/relationship → copy properties, null → clear for `=` /
+// no-op for `+=`, any other kind → TypeError). The schema includes the entity
+// var, so a self-reference resolves against the pre-SET state. A nil exprAST
+// yields a closure returning null (the empty/clear case).
+func buildExprMapEvalFn(
+	exprAST ast.Expression,
+	schemaCopy map[string]int,
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
+	mutator exec.GraphMutator,
+	bopts *buildOpts,
+) exec.ExprValueEvalFn {
+	scalarSnap := scalarColSnapshot(bopts)
+	return func(row exec.Row) (expr.Value, error) {
+		if exprAST == nil {
+			return expr.Null, nil
+		}
+		rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap)
+		return expr.Eval(exprAST, rowCtx, params, reg)
 	}
 }
 
