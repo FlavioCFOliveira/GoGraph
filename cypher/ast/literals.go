@@ -58,10 +58,15 @@ type StringLiteral struct {
 func (*StringLiteral) astNode()  {}
 func (*StringLiteral) exprNode() {}
 
-// String returns the value enclosed in single quotes with internal single
-// quotes escaped.
+// String returns the value enclosed in single quotes with internal
+// backslashes and single quotes escaped. The backslash is escaped BEFORE the
+// quote so a value ending in a backslash does not fuse with the closing quote
+// when the printed form is later re-parsed (the IR stringify -> reparse round
+// trip used by the CREATE/MERGE/SET property paths); the reparsers and
+// unescapeString reverse exactly this encoding.
 func (n *StringLiteral) String() string {
-	escaped := strings.ReplaceAll(n.Value, "'", "\\'")
+	escaped := strings.ReplaceAll(n.Value, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, "'", `\'`)
 	return "'" + escaped + "'"
 }
 

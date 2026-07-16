@@ -501,6 +501,21 @@ func parsePropLiteralDeferred(s string) ([]propLiteral, error) {
 	return out, nil
 }
 
+// quoteEscaped reports whether the quote byte at index i in s is escaped —
+// that is, preceded by an ODD number of consecutive backslashes. An even count
+// (including zero) means the backslashes are themselves escaped (\\) and the
+// quote is a real string delimiter. A naive s[i-1]=='\\' test misfires on even
+// backslash runs (e.g. the closing quote of the printed form of a value ending
+// in one backslash, "'x\\'"), fusing the quote with the value and corrupting
+// or dropping sibling properties.
+func quoteEscaped(s string, i int) bool {
+	bs := 0
+	for k := i - 1; k >= 0 && s[k] == '\\'; k-- {
+		bs++
+	}
+	return bs%2 == 1
+}
+
 // splitMapItems splits a comma-separated list of map items, respecting
 // string literal boundaries (no nesting of sub-maps is needed for the
 // current IR literal format).
@@ -513,7 +528,7 @@ func splitMapItems(s string) []string {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if inStr {
-			if c == strChar && (i == 0 || s[i-1] != '\\') {
+			if c == strChar && !quoteEscaped(s, i) {
 				inStr = false
 			}
 			continue
@@ -571,7 +586,7 @@ func PropMapContainsNullLiteral(s string) bool {
 		for j := i; j < len(s); j++ {
 			c := s[j]
 			if inStr {
-				if c == strChar && (j == 0 || s[j-1] != '\\') {
+				if c == strChar && !quoteEscaped(s, j) {
 					inStr = false
 				}
 				continue
@@ -907,12 +922,45 @@ func exprListToLPGList(lv expr.ListValue) (lpg.PropertyValue, error) {
 	return lpg.ListValue(elems), nil
 }
 
-// unescapeString handles the most common escape sequences in Cypher strings.
+// unescapeString reverses the escaping applied by the AST printer
+// ([ast.StringLiteral.String]) when the IR stringify -> reparse round trip
+// reads a string value back. It scans the input ONCE, left to right, consuming
+// each backslash escape as a single unit. A single pass is required for
+// correctness: the previous sequential strings.ReplaceAll implementation
+// mangled backslash runs — e.g. a literal backslash-n (the two characters
+// "\\n") printed as "\\\\n" was decoded first to "\\n" and then to a newline,
+// silently corrupting the value. Recognised escapes mirror the printer and the
+// common Cypher set (\" \' \\ \n \t); an unrecognised backslash sequence is
+// passed through verbatim.
 func unescapeString(s string) string {
-	s = strings.ReplaceAll(s, `\"`, `"`)
-	s = strings.ReplaceAll(s, `\'`, `'`)
-	s = strings.ReplaceAll(s, `\\`, `\`)
-	s = strings.ReplaceAll(s, `\n`, "\n")
-	s = strings.ReplaceAll(s, `\t`, "\t")
-	return s
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c != '\\' || i+1 >= len(s) {
+			b.WriteByte(c)
+			continue
+		}
+		i++
+		switch s[i] {
+		case '"':
+			b.WriteByte('"')
+		case '\'':
+			b.WriteByte('\'')
+		case '\\':
+			b.WriteByte('\\')
+		case 'n':
+			b.WriteByte('\n')
+		case 't':
+			b.WriteByte('\t')
+		default:
+			// Unrecognised escape: keep the backslash and the following byte.
+			b.WriteByte('\\')
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
 }
