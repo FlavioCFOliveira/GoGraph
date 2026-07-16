@@ -5154,12 +5154,49 @@ func buildPropsEvalFn(
 			}
 			pv, ok := exprValueToLPGProp(v)
 			if !ok {
-				continue // e.g. a NodeValue: intentionally dropped (Merge1 flake guard)
+				// A node- or relationship-valued property is InvalidPropertyType
+				// (property values are primitives or homogeneous lists of
+				// primitives) — raise rather than silently drop the key (#2025).
+				//
+				// The lone exception is the scalar-vs-NodeID mis-upgrade: a
+				// scalar integer from a known scalar column (an UNWIND element,
+				// an aggregate output, or an integer projection alias) can be
+				// upgraded to a NodeValue by buildRowCtxFromMutator when it
+				// coincides with a live node id. scalarSnap normally prevents
+				// that upgrade; when the source expression is a bare reference
+				// to such a column, drop the mis-upgrade rather than error
+				// (Merge1 flake guard) — a genuine entity reference is never a
+				// scalar column.
+				switch v.(type) {
+				case expr.NodeValue, expr.RelationshipValue:
+					if !valueExprIsScalarCol(vals[i], scalarSnap) {
+						return nil, fmt.Errorf("exec: property %s: InvalidPropertyType: a node or relationship is not a valid property value", k)
+					}
+				}
+				continue
 			}
 			out = append(out, exec.PropEntry{Key: k, Value: pv})
 		}
 		return out, nil
 	}
+}
+
+// valueExprIsScalarCol reports whether e is a bare reference to a known scalar
+// column (an UNWIND element, aggregate output, or integer projection alias, per
+// scalarSnap). Such a column's integer value can be mis-upgraded to a NodeValue
+// by buildRowCtxFromMutator when it coincides with a live node id; a genuine
+// node/relationship variable is never a scalar column. Used to distinguish a
+// mis-upgrade (drop) from a real entity-valued property (InvalidPropertyType).
+func valueExprIsScalarCol(e ast.Expression, scalarSnap map[string]struct{}) bool {
+	if scalarSnap == nil {
+		return false
+	}
+	v, ok := e.(*ast.Variable)
+	if !ok {
+		return false
+	}
+	_, isScalar := scalarSnap[v.Name]
+	return isScalar
 }
 
 // maybePropsEvalFn returns a per-row property evaluator for propsAST when it is
