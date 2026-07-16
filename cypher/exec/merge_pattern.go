@@ -180,6 +180,11 @@ type MergePattern struct {
 	// when every action's RHS is a literal. See [MergePattern.applyActions].
 	onCreateEvals map[string]ValueEvalFn
 	onMatchEvals  map[string]ValueEvalFn
+	// onCreateSetAll / onMatchSetAll carry whole-entity ON CREATE / ON MATCH
+	// SET actions (`SET n = <expr>` / `SET n += <expr>`) on a chain node,
+	// which the per-property [parseMergeActions] path drops (#2031).
+	onCreateSetAll []MergeSetAllAction
+	onMatchSetAll  []MergeSetAllAction
 
 	mutator GraphMutator
 	reg     *ConstraintRegistry // nil means no enforcement
@@ -359,6 +364,40 @@ func (op *MergePattern) WithActionEvals(onCreate, onMatch map[string]ValueEvalFn
 	return op
 }
 
+// WithSetAllActions attaches whole-entity ON CREATE / ON MATCH SET actions
+// (`SET n = <expr>` / `SET n += <expr>`) on a chain node variable, which the
+// per-property action path cannot represent. Each is evaluated per row and
+// applied via [applyWholeEntityValueToNode] (#2031). Returns op for chaining.
+func (op *MergePattern) WithSetAllActions(onCreate, onMatch []MergeSetAllAction) *MergePattern {
+	op.onCreateSetAll = onCreate
+	op.onMatchSetAll = onMatch
+	return op
+}
+
+// applySetAllActions applies each whole-entity SET action to the chain node it
+// names (resolved via b). An action targeting a relationship variable is left
+// to the relationship machinery and skipped here (#2031 covers node targets).
+func (op *MergePattern) applySetAllActions(b binding, evalRow Row, actions []MergeSetAllAction) error {
+	for _, a := range actions {
+		idx, ok := op.nodeIndexByVar(a.TargetVar)
+		if !ok {
+			continue
+		}
+		nodeKey, ok := op.mutator.ResolveNodeLabel(b[idx])
+		if !ok {
+			continue
+		}
+		v, err := a.Eval(evalRow)
+		if err != nil {
+			return err
+		}
+		if err := applyWholeEntityValueToNode(op.mutator, op.reg, op.mgr, a.TargetVar, nodeKey, a.IsReplace, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // WithConstraints attaches a ConstraintRegistry and index.Manager for
 // pre-write enforcement of every fresh node's created properties and of
 // every ON CREATE / ON MATCH node property action — mirroring
@@ -480,6 +519,9 @@ func (op *MergePattern) runForRow(childRow Row) error {
 			if err := op.applyActions(b, row, op.onMatchActions, op.onMatchEvals); err != nil {
 				return err
 			}
+			if err := op.applySetAllActions(b, row, op.onMatchSetAll); err != nil {
+				return err
+			}
 			op.matched = append(op.matched, row)
 		}
 		return nil
@@ -493,6 +535,9 @@ func (op *MergePattern) runForRow(childRow Row) error {
 		return err
 	}
 	if err := op.applyActions(b, row, op.onCreateActions, op.onCreateEvals); err != nil {
+		return err
+	}
+	if err := op.applySetAllActions(b, row, op.onCreateSetAll); err != nil {
 		return err
 	}
 	op.created = true

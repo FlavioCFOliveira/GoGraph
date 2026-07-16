@@ -4892,6 +4892,10 @@ func buildOperatorWrite(
 			buildMergeActionEvals(p.OnCreateExprs, actionSchema, params, reg, mutator, bopts),
 			buildMergeActionEvals(p.OnMatchExprs, actionSchema, params, reg, mutator, bopts),
 		)
+		mp.WithSetAllActions(
+			buildMergeSetAllActions(p.OnCreateSetAll, actionSchema, params, reg, mutator, bopts),
+			buildMergeSetAllActions(p.OnMatchSetAll, actionSchema, params, reg, mutator, bopts),
+		)
 		if constraintReg != nil {
 			mp.WithConstraints(constraintReg, idxMgr)
 		}
@@ -4968,6 +4972,10 @@ func buildOperatorWrite(
 		m.WithActionEvals(
 			buildMergeActionEvals(p.OnCreateExprs, schemaCopy, params, reg, mutator, bopts),
 			buildMergeActionEvals(p.OnMatchExprs, schemaCopy, params, reg, mutator, bopts),
+		)
+		m.WithSetAllActions(
+			buildMergeSetAllActions(p.OnCreateSetAll, schemaCopy, params, reg, mutator, bopts),
+			buildMergeSetAllActions(p.OnMatchSetAll, schemaCopy, params, reg, mutator, bopts),
 		)
 		return m, nil
 
@@ -5260,6 +5268,35 @@ func buildExprMapEvalFn(
 		rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap)
 		return expr.Eval(exprAST, rowCtx, params, reg)
 	}
+}
+
+// buildMergeSetAllActions builds the per-row whole-entity ON CREATE / ON MATCH
+// SET actions (`SET n = <expr>` / `SET n += <expr>`) for a node Merge or
+// MergePattern operator. Each carries the target variable, the `=`/`+=` flag,
+// and a per-row evaluator for the RHS expression (via [buildExprMapEvalFn]);
+// the operator dispatches on the evaluated value's runtime kind. Returns nil
+// when there are no whole-entity items (the common case), keeping the literal
+// fast path untouched. #2031.
+func buildMergeSetAllActions(
+	items []ir.MergeSetAll,
+	schemaCopy map[string]int,
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
+	mutator exec.GraphMutator,
+	bopts *buildOpts,
+) []exec.MergeSetAllAction {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]exec.MergeSetAllAction, 0, len(items))
+	for _, it := range items {
+		out = append(out, exec.MergeSetAllAction{
+			TargetVar: it.TargetVar,
+			IsReplace: it.IsReplace,
+			Eval:      buildExprMapEvalFn(it.Value, schemaCopy, params, reg, mutator, bopts),
+		})
+	}
+	return out
 }
 
 // scalarColSnapshot copies the scalar-column set (UNWIND element variables,

@@ -67,7 +67,13 @@ type Merge struct {
 	// nil when every action's RHS is a literal. See [Merge.applyActions].
 	onCreateEvals map[string]ValueEvalFn
 	onMatchEvals  map[string]ValueEvalFn
-	ctx           context.Context //nolint:containedctx // stored for per-Next ctx check
+	// onCreateSetAll / onMatchSetAll carry whole-entity ON CREATE / ON MATCH
+	// SET actions (`SET n = <expr>` / `SET n += <expr>`) evaluated per row.
+	// The per-property [parseMergeActions] path drops such keyless actions, so
+	// they are applied separately via [applyWholeEntityValueToNode] (#2031).
+	onCreateSetAll []MergeSetAllAction
+	onMatchSetAll  []MergeSetAllAction
+	ctx            context.Context //nolint:containedctx // stored for per-Next ctx check
 
 	// iteration state, reset on each Init call
 	matched    []Row
@@ -173,6 +179,54 @@ func (op *Merge) WithActionEvals(onCreate, onMatch map[string]ValueEvalFn) *Merg
 	op.onCreateEvals = onCreate
 	op.onMatchEvals = onMatch
 	return op
+}
+
+// WithSetAllActions attaches whole-entity ON CREATE / ON MATCH SET actions
+// (`SET n = <expr>` / `SET n += <expr>`), which the per-property action path
+// cannot represent. Each is evaluated per row and applied via
+// [applyWholeEntityValueToNode] (#2031). Returns op for chaining.
+func (op *Merge) WithSetAllActions(onCreate, onMatch []MergeSetAllAction) *Merge {
+	op.onCreateSetAll = onCreate
+	op.onMatchSetAll = onMatch
+	return op
+}
+
+// applySetAllActions applies each whole-entity SET action to the node it names,
+// resolved from row exactly as [Merge.applyActions] resolves a property action.
+func (op *Merge) applySetAllActions(actions []MergeSetAllAction, row Row) error {
+	for _, a := range actions {
+		nodeKey, ok := op.resolveActionNodeKey(a.TargetVar, row)
+		if !ok {
+			continue
+		}
+		v, err := a.Eval(row)
+		if err != nil {
+			return err
+		}
+		if err := applyWholeEntityValueToNode(op.mutator, op.reg, op.mgr, a.TargetVar, nodeKey, a.IsReplace, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// resolveActionNodeKey resolves the node key an ON CREATE / ON MATCH action
+// targets: via the schema column first, then falling back to column 0 when the
+// action names the merge variable and that column carries the node id.
+func (op *Merge) resolveActionNodeKey(targetVar string, row Row) (string, bool) {
+	if id, err := resolveNodeIDFromRow(targetVar, op.schema, row); err == nil {
+		if nodeKey, ok := op.mutator.ResolveNodeLabel(id); ok {
+			return nodeKey, true
+		}
+	}
+	if targetVar == op.nodeVar && len(row) > 0 {
+		if iv, ok := row[0].(expr.IntegerValue); ok {
+			if nodeKey, ok := op.mutator.ResolveNodeLabel(graph.NodeID(iv)); ok {
+				return nodeKey, true
+			}
+		}
+	}
+	return "", false
 }
 
 // WithPropsEvalFn attaches a per-row property evaluator. When fn is non-nil
@@ -303,6 +357,9 @@ func (op *Merge) runOnMatchPath(rows []Row) error {
 		if applyErr := op.applyActions(op.onMatchActions, op.onMatchEvals, rows[i]); applyErr != nil {
 			return fmt.Errorf("exec: Merge: ON MATCH: %w", applyErr)
 		}
+		if applyErr := op.applySetAllActions(op.onMatchSetAll, rows[i]); applyErr != nil {
+			return fmt.Errorf("exec: Merge: ON MATCH: %w", applyErr)
+		}
 	}
 	op.matched = rows
 	return nil
@@ -349,6 +406,9 @@ func (op *Merge) runOnCreatePathWithProps(childRow Row, props []propLiteral) err
 
 	createdRow := op.combineRows(childRow, Row{expr.IntegerValue(int64(nodeID))})
 	if applyErr := op.applyActions(op.onCreateActions, op.onCreateEvals, createdRow); applyErr != nil {
+		return fmt.Errorf("exec: Merge: ON CREATE: %w", applyErr)
+	}
+	if applyErr := op.applySetAllActions(op.onCreateSetAll, createdRow); applyErr != nil {
 		return fmt.Errorf("exec: Merge: ON CREATE: %w", applyErr)
 	}
 	op.created = true

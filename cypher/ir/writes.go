@@ -301,6 +301,10 @@ func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, 
 		// row instead of dropping them as literal-parse failures (#1965).
 		mp.OnCreateExprs = extractMergeSetExprs(m.OnCreate)
 		mp.OnMatchExprs = extractMergeSetExprs(m.OnMatch)
+		// Whole-entity ON CREATE / ON MATCH SET items (`SET n = <expr>`) on a
+		// chain node, which the opaque-string path drops (#2031).
+		mp.OnCreateSetAll = extractMergeSetAll(m.OnCreate)
+		mp.OnMatchSetAll = extractMergeSetAll(m.OnMatch)
 		var plan LogicalPlan = mp
 		if m.Pattern.Variable != nil {
 			plan = applyPathVar(m.Pattern, plan)
@@ -341,6 +345,10 @@ func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, 
 		// dropping it as a literal-parse failure (fail-silent bug, #1965).
 		mergeOp.OnCreateExprs = extractMergeSetExprs(m.OnCreate)
 		mergeOp.OnMatchExprs = extractMergeSetExprs(m.OnMatch)
+		// Whole-entity ON CREATE / ON MATCH SET items (`SET n = <expr>` /
+		// `SET n += <expr>`), which the opaque-string action path drops (#2031).
+		mergeOp.OnCreateSetAll = extractMergeSetAll(m.OnCreate)
+		mergeOp.OnMatchSetAll = extractMergeSetAll(m.OnMatch)
 		plan = mergeOp
 	}
 	// MERGE p = (...) binds a path variable just like MATCH p = (...). Wrap
@@ -482,6 +490,27 @@ func extractMergeSetExprs(items []*ast.SetItem) []MergeSetExpr {
 			continue
 		}
 		out = append(out, MergeSetExpr{TargetVar: recv.Name, Key: prop.Key, Value: si.Value})
+	}
+	return out
+}
+
+// extractMergeSetAll returns a [MergeSetAll] for every ON CREATE / ON MATCH SET
+// item of the whole-entity form `SET <var> = <expr>` / `SET <var> += <expr>`
+// whose target is a bare variable (not a property access) and which carries no
+// label set. The per-property opaque-string path drops such keyless items, so
+// the physical builder needs the RHS AST to install a per-row evaluator (#2031).
+// Property-write items and label-set items are skipped (handled elsewhere).
+func extractMergeSetAll(items []*ast.SetItem) []MergeSetAll {
+	var out []MergeSetAll
+	for _, si := range items {
+		if si == nil || len(si.Labels) > 0 || si.Value == nil {
+			continue
+		}
+		v, isVar := si.Target.(*ast.Variable)
+		if !isVar {
+			continue
+		}
+		out = append(out, MergeSetAll{TargetVar: v.Name, IsReplace: si.Operator == "=", Value: si.Value})
 	}
 	return out
 }

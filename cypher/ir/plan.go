@@ -1857,8 +1857,27 @@ type Merge struct {
 	// opaque-string fast path in [OnCreate]/[OnMatch]).
 	OnCreateExprs []MergeSetExpr
 	OnMatchExprs  []MergeSetExpr
+	// OnCreateSetAll / OnMatchSetAll carry whole-entity ON CREATE / ON MATCH
+	// SET items (`SET n = <expr>` / `SET n += <expr>`) whose target is a node
+	// variable rather than a property. The per-property opaque-string path
+	// drops such keyless items; the physical builder installs a per-row
+	// expression evaluator for each so the whole map/entity value is written
+	// (#2031).
+	OnCreateSetAll []MergeSetAll
+	OnMatchSetAll  []MergeSetAll
 	// Child is the driving subplan.
 	Child LogicalPlan
+}
+
+// MergeSetAll carries a whole-entity ON CREATE / ON MATCH SET item
+// (`SET <TargetVar> = <Value>` / `SET <TargetVar> += <Value>`) on a MERGE. The
+// physical builder installs a per-row evaluator for Value; the exec operator
+// dispatches on the evaluated value's runtime kind (map / node / relationship /
+// null / other). IsReplace selects `=` (true) vs `+=` (false).
+type MergeSetAll struct {
+	TargetVar string
+	IsReplace bool
+	Value     ast.Expression
 }
 
 // MergeSetExpr carries the parsed value-expression AST for a MERGE
@@ -2100,7 +2119,12 @@ type MergePattern struct {
 	// omitted (handled via the opaque-string fast path in [OnCreate]/[OnMatch]).
 	OnCreateExprs []MergeSetExpr
 	OnMatchExprs  []MergeSetExpr
-	Child         LogicalPlan
+	// OnCreateSetAll / OnMatchSetAll carry whole-entity ON CREATE / ON MATCH
+	// SET items on a chain node variable, which the per-property opaque-string
+	// path drops. See [MergeSetAll] (#2031).
+	OnCreateSetAll []MergeSetAll
+	OnMatchSetAll  []MergeSetAll
+	Child          LogicalPlan
 }
 
 // NewMergePattern creates a MergePattern operator for the chain described by
