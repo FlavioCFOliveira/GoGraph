@@ -1070,8 +1070,16 @@ func NewForeach(outer, inner LogicalPlan, argTag uint32) *Foreach {
 func (f *Foreach) Children() []LogicalPlan { return []LogicalPlan{f.Outer, f.Inner} }
 
 // Vars implements LogicalPlan. FOREACH introduces no variable visible after it;
-// downstream sees exactly the outer variables.
-func (f *Foreach) Vars() []string { return f.Outer.Vars() }
+// downstream sees exactly the outer variables. When FOREACH is the leading
+// clause of a query its Outer is nil (there is no preceding pipeline), so it
+// exposes no variables — the nil guard prevents a nil-pointer panic when a
+// following clause (e.g. CREATE, RETURN, a second FOREACH) collects variables.
+func (f *Foreach) Vars() []string {
+	if f.Outer == nil {
+		return nil
+	}
+	return f.Outer.Vars()
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 
