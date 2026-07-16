@@ -388,7 +388,12 @@ func (t *bplus[V]) removeChild(cur any, parent *inode[V], target any) {
 				n.keys = removeAt(n.keys, si)
 			}
 			if len(n.children) == 0 && parent != nil {
-				t.removeChild(parent, nil, n)
+				// Restart the removal from the root so the parent chain is
+				// re-derived at every level. Escalating with removeChild(parent,
+				// nil, n) passed nil as the grandparent, so a parent that itself
+				// became child-less was never removed — upward cleanup reached
+				// only one level and left a dangling empty internal node.
+				t.removeChild(t.root, nil, n)
 			}
 			return
 		}
@@ -400,21 +405,21 @@ func (t *bplus[V]) removeChild(cur any, parent *inode[V], target any) {
 }
 
 // contains reports whether the subtree rooted at cur holds the exact node
-// pointer target (used to route removeChild without re-deriving keys).
+// pointer target (used to route removeChild without re-deriving keys). It
+// recurses to ARBITRARY depth: a shallow (cur + direct-children only) check
+// mis-routes removeChild once the target leaf sits deeper than a grandchild
+// (tree height >= 4), leaving an emptied leaf unlinked from the forward chain
+// but still live in the tree — a silent Range/Serialize corruption.
 func (t *bplus[V]) contains(cur, target any) bool {
-	switch n := cur.(type) {
-	case *leaf[V]:
-		return any(n) == target
-	case *inode[V]:
-		if any(n) == target {
-			return true
-		}
+	if cur == target {
+		return true
+	}
+	if n, ok := cur.(*inode[V]); ok {
 		for _, c := range n.children {
-			if c == target {
+			if t.contains(c, target) {
 				return true
 			}
 		}
-		return false
 	}
 	return false
 }
