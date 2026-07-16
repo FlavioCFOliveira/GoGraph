@@ -450,6 +450,13 @@ func parsePropLiteralDeferred(s string) ([]propLiteral, error) {
 	if s == "" {
 		return nil, nil
 	}
+	if strings.HasPrefix(s, "$") {
+		// A whole property map supplied as a bare parameter — CREATE (n $props).
+		// The binding is not available at plan construction; defer it (return no
+		// entries) so WithParams resolves it via parseWholeMapParam once params
+		// are supplied (#2028), rather than failing the build.
+		return nil, nil
+	}
 	if !strings.HasPrefix(s, "{") || !strings.HasSuffix(s, "}") {
 		return nil, fmt.Errorf("expected map literal enclosed in {}, got %q", s)
 	}
@@ -632,6 +639,16 @@ func parsePropLiteralWithParams(s string, params map[string]expr.Value) ([]propL
 	if s == "" {
 		return nil, nil
 	}
+	// A whole property map supplied as a bare parameter: CREATE (n $props) /
+	// CREATE (a)-[:R $props]->(b). openCypher's node/relationship Properties
+	// production permits a Parameter in place of a map literal. Expand the
+	// parameter's MapValue into property entries here (#2028). MERGE forbids a
+	// parameter as its whole property predicate (InvalidParameterUse) and is
+	// rejected at semantic analysis before reaching this parser, so this path
+	// is exercised only by CREATE.
+	if strings.HasPrefix(s, "$") {
+		return parseWholeMapParam(s, params)
+	}
 	if !strings.HasPrefix(s, "{") || !strings.HasSuffix(s, "}") {
 		return nil, fmt.Errorf("expected map literal enclosed in {}, got %q", s)
 	}
@@ -670,6 +687,35 @@ func parsePropLiteralWithParams(s string, params map[string]expr.Value) ([]propL
 		out = append(out, propLiteral{key: key, value: pv})
 	}
 	return out, nil
+}
+
+// parseWholeMapParam expands a bare `$name` whole property-map parameter into
+// property entries for the CREATE property-map paths (#2028). Semantics mirror
+// a `{…}` literal map on CREATE:
+//   - a non-map, non-null parameter is a TypeError (a scalar/list cannot be a
+//     whole property map);
+//   - a null parameter yields no properties;
+//   - a null-valued map entry is omitted (assigning null on CREATE is a no-op);
+//   - a map- or nested-collection-valued entry is InvalidPropertyType.
+//
+// An unbound parameter is an error.
+func parseWholeMapParam(s string, params map[string]expr.Value) ([]propLiteral, error) {
+	name := strings.TrimPrefix(s, "$")
+	v, ok := params[name]
+	if !ok {
+		return nil, fmt.Errorf("unbound parameter $%s", name)
+	}
+	if v == nil || expr.IsNull(v) {
+		return nil, nil
+	}
+	mv, isMap := v.(expr.MapValue)
+	if !isMap {
+		return nil, fmt.Errorf("TypeError: property map parameter $%s: expected a Map but was %s", name, v.Kind())
+	}
+	// null-valued entries are reported separately by exprMapValueToEntries; on
+	// CREATE they are simply omitted (a null property assignment is a no-op).
+	props, _, err := exprMapValueToEntries("$"+name, mv)
+	return props, err
 }
 
 // parsePropValueWithParams parses a single Cypher literal value string into a
