@@ -4371,7 +4371,7 @@ func buildOperatorWrite(
 		}
 		if p.PropertiesExpr != nil {
 			if ml, ok := p.PropertiesExpr.(*ast.MapLiteral); ok {
-				if fn := buildPropsEvalFn(ml, propsSchema, params, reg, mutator, bopts); fn != nil {
+				if fn := buildPropsEvalFn(ml, propsSchema, params, reg, mutator, bopts, false); fn != nil {
 					cn.WithPropsEvalFn(fn)
 				}
 			}
@@ -4411,7 +4411,7 @@ func buildOperatorWrite(
 				if p.RelVar != "" {
 					delete(relPropsSchema, p.RelVar)
 				}
-				if fn := buildPropsEvalFn(ml, relPropsSchema, params, reg, mutator, bopts); fn != nil {
+				if fn := buildPropsEvalFn(ml, relPropsSchema, params, reg, mutator, bopts, false); fn != nil {
 					cr.WithPropsEvalFn(fn)
 				}
 			}
@@ -5060,7 +5060,19 @@ func mapLiteralHasNonLiteralValue(ml *ast.MapLiteral) bool {
 //     and mutator (for upgrading IntegerValue(NodeID) → NodeValue with properties).
 //  2. Calls [expr.Eval] on each value expression in ml.
 //  3. Converts the resulting [expr.Value] to [lpg.PropertyValue]; entries that
-//     evaluate to Null or to an unsupported type are silently omitted.
+//     evaluate to Null or to an unsupported type are silently omitted — except
+//     that, when mergeContext is true, a value that evaluates to null instead
+//     fails the statement with SemanticError.MergeReadOwnWrites (see below).
+//
+// mergeContext distinguishes a CREATE property map from a MERGE property
+// predicate. On CREATE, assigning a null value to a property is a no-op, so a
+// null-evaluated entry is omitted. On MERGE the property map is also the search
+// predicate, and openCypher forbids merging on a null property value (it can
+// never match its own write); the literal case is rejected at build time via
+// [exec.PropMapContainsNullLiteral], and this raises the same
+// MergeReadOwnWrites error for a value that only evaluates to null at runtime
+// (e.g. `MERGE (n:L {p: row.missing})`) rather than silently merging with the
+// key omitted (#2023).
 //
 // A nil ml produces a nil closure (no-op).
 func buildPropsEvalFn(
@@ -5070,6 +5082,7 @@ func buildPropsEvalFn(
 	reg expr.FunctionRegistry,
 	mutator exec.GraphMutator,
 	bopts *buildOpts,
+	mergeContext bool,
 ) exec.PropsEvalFn {
 	if ml == nil {
 		return nil
@@ -5125,6 +5138,13 @@ func buildPropsEvalFn(
 				return nil, evalErr
 			}
 			if v == nil || expr.IsNull(v) {
+				if mergeContext {
+					// A MERGE property that evaluates to null at runtime can
+					// never match its own write; openCypher raises
+					// MergeReadOwnWrites, matching the literal-null build-time
+					// guard rather than silently merging with the key omitted.
+					return nil, fmt.Errorf("cypher: SemanticError.MergeReadOwnWrites: MERGE property %q evaluates to null", k)
+				}
 				continue // openCypher: assigning null to a property is a no-op
 			}
 			if !isStorableProperty(v) {
@@ -5154,6 +5174,9 @@ func buildPropsEvalFn(
 // cannot drift apart across sites. schema is the row layout the evaluator
 // resolves against (the caller snapshots it for the row the operator will hand
 // the evaluator).
+// maybePropsEvalFn is the MERGE property-map entry point, so it builds the
+// evaluator in merge context: a value that evaluates to null at runtime raises
+// SemanticError.MergeReadOwnWrites rather than being omitted (#2023).
 func maybePropsEvalFn(
 	propsAST ast.Expression,
 	schema map[string]int,
@@ -5166,7 +5189,7 @@ func maybePropsEvalFn(
 	if !ok || ml == nil || !mapLiteralHasNonLiteralValue(ml) {
 		return nil
 	}
-	return buildPropsEvalFn(ml, schema, params, reg, mutator, bopts)
+	return buildPropsEvalFn(ml, schema, params, reg, mutator, bopts, true)
 }
 
 // maybeMapEvalFn returns a per-row [exec.MapEvalFn] for the SET-map source map
