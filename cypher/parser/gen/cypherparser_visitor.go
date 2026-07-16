@@ -285,4 +285,7 @@ type CypherParserVisitor interface {
 
 	// Visit a parse tree produced by CypherParser#reservedWord.
 	VisitReservedWord(ctx *ReservedWordContext) interface{}
+
+	// Visit a parse tree produced by CypherParser#foreachSt.
+	VisitForeachSt(ctx *ForeachStContext) interface{}
 }

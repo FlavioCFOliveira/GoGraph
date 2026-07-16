@@ -582,3 +582,9 @@ func (s *BaseCypherParserListener) EnterReservedWord(ctx *ReservedWordContext) {
 
 // ExitReservedWord is called when production reservedWord is exited.
 func (s *BaseCypherParserListener) ExitReservedWord(ctx *ReservedWordContext) {}
+
+// EnterForeachSt is called when production foreachSt is entered.
+func (s *BaseCypherParserListener) EnterForeachSt(ctx *ForeachStContext) {}
+
+// ExitForeachSt is called when production foreachSt is exited.
+func (s *BaseCypherParserListener) ExitForeachSt(ctx *ForeachStContext) {}

@@ -122,6 +122,7 @@ updatingStatement
     | deleteSt
     | setSt
     | removeSt
+    | foreachSt
     ;
 
 deleteSt
@@ -526,4 +527,7 @@ reservedWord
     | OF
     | ADD
     | DROP
+    ;
+foreachSt
+    : FOREACH LPAREN symbol IN expression STICK updatingStatement+ RPAREN
     ;

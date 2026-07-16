@@ -249,6 +249,8 @@ func positionFromNode(n ast.Node) ast.Position {
 		return v.Pos
 	case *ast.DetachDelete:
 		return v.Pos
+	case *ast.Foreach:
+		return v.Pos
 	}
 	return ast.Position{}
 }
@@ -305,6 +307,26 @@ func (t *translator) optionalMatchClause(m *ast.OptionalMatch, child LogicalPlan
 
 func (t *translator) unwindClause(u *ast.Unwind, child LogicalPlan) (LogicalPlan, error) {
 	return NewUnwindExpr(u.Expr.String(), u.Expr, u.Variable, child), nil
+}
+
+// foreachClause translates FOREACH (var IN expr | updatingClause+). It builds a
+// correlated inner sub-plan — Argument(outer vars) → Unwind(expr AS var) → the
+// body updating clauses — driven once per outer row by the [Foreach] operator,
+// whose side-effects are applied while the outer row passes through unchanged
+// (FOREACH does not alter the surrounding query's cardinality). Nested FOREACH
+// is handled by the recursive updatingClause call.
+func (t *translator) foreachClause(f *ast.Foreach, child LogicalPlan) (LogicalPlan, error) {
+	tag := nextArgTag()
+	var inner LogicalPlan = NewArgumentWithTag(childVarSlice(child), tag)
+	inner = NewUnwindExpr(f.Expr.String(), f.Expr, f.Var, inner)
+	for _, uc := range f.Body {
+		var err error
+		inner, err = t.updatingClause(uc, inner)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return NewForeach(child, inner, tag), nil
 }
 
 func (t *translator) callClause(c *ast.Call, child LogicalPlan) (LogicalPlan, error) {
@@ -436,6 +458,8 @@ func (t *translator) updatingClause(uc ast.UpdatingClause, child LogicalPlan) (L
 		return t.detachDeleteClause(v, child)
 	case *ast.Call:
 		return t.callClause(v, child)
+	case *ast.Foreach:
+		return t.foreachClause(v, child)
 	default:
 		return nil, &TranslateError{UnsupportedClause: fmt.Sprintf("%T", uc)}
 	}

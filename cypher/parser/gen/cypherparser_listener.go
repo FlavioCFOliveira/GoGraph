@@ -286,6 +286,9 @@ type CypherParserListener interface {
 	// EnterReservedWord is called when entering the reservedWord production.
 	EnterReservedWord(c *ReservedWordContext)
 
+	// EnterForeachSt is called when entering the foreachSt production.
+	EnterForeachSt(c *ForeachStContext)
+
 	// ExitScript is called when exiting the script production.
 	ExitScript(c *ScriptContext)
 
@@ -564,4 +567,7 @@ type CypherParserListener interface {
 
 	// ExitReservedWord is called when exiting the reservedWord production.
 	ExitReservedWord(c *ReservedWordContext)
+
+	// ExitForeachSt is called when exiting the foreachSt production.
+	ExitForeachSt(c *ForeachStContext)
 }

@@ -556,7 +556,36 @@ func (v *visitor) VisitUpdatingStatement(ctx *gen.UpdatingStatementContext) inte
 	if d := ctx.DeleteSt(); d != nil {
 		return v.visit(d)
 	}
+	if fe := ctx.ForeachSt(); fe != nil {
+		return v.visit(fe)
+	}
 	return unsupported(ctx, "updatingStatement", "unknown updating statement variant")
+}
+
+// VisitForeachSt handles FOREACH (var IN expr | updatingClause+).
+func (v *visitor) VisitForeachSt(ctx *gen.ForeachStContext) interface{} {
+	listExpr, err := asExpr(v.visit(ctx.Expression()))
+	if err != nil {
+		return &SemaError{Rule: "foreachSt", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	fe := &ast.Foreach{
+		Pos:    positionOf(ctx),
+		EndPos: endPositionOf(ctx),
+		Var:    symbolText(ctx.Symbol()),
+		Expr:   listExpr,
+	}
+	for _, us := range ctx.AllUpdatingStatement() {
+		res := v.visit(us)
+		if e := firstError(res); e != nil {
+			return e
+		}
+		uc, ok := res.(ast.UpdatingClause)
+		if !ok {
+			return unsupported(ctx, "foreachSt", "FOREACH body must contain only updating clauses")
+		}
+		fe.Body = append(fe.Body, uc)
+	}
+	return fe
 }
 
 // VisitCreateSt handles CREATE pattern.

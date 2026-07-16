@@ -378,3 +378,7 @@ func (v *BaseCypherParserVisitor) VisitSymbol(ctx *SymbolContext) interface{} {
 func (v *BaseCypherParserVisitor) VisitReservedWord(ctx *ReservedWordContext) interface{} {
 	return v.VisitChildren(ctx)
 }
+
+func (v *BaseCypherParserVisitor) VisitForeachSt(ctx *ForeachStContext) interface{} {
+	return v.VisitChildren(ctx)
+}

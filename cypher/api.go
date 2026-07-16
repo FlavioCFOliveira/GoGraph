@@ -4994,6 +4994,41 @@ func buildOperatorWrite(
 		)
 		return m, nil
 
+	case *ir.Foreach:
+		// Build the outer (driving) plan first; its vars enter the schema.
+		outer, err := buildOperatorWrite(p.Outer, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
+		if err != nil {
+			return nil, err
+		}
+		// Snapshot the outer schema keys: the loop variable and any variable the
+		// body introduces are scoped to the FOREACH body and must NOT remain
+		// visible after it. The body sub-plan is correlated (it reads the outer
+		// row via the Argument leaf), so it is built against the SAME schema; the
+		// keys it adds are removed again below.
+		preKeys := make(map[string]struct{}, len(schema))
+		for k := range schema {
+			preKeys[k] = struct{}{}
+		}
+		arg := exec.NewArgument()
+		if argByTag != nil {
+			argByTag[p.ArgTag] = arg
+		}
+		inner, err := buildOperatorWrite(p.Inner, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
+		if err != nil {
+			return nil, err
+		}
+		if argByTag != nil {
+			delete(argByTag, p.ArgTag)
+		}
+		// Restore the schema to the outer-only set: the FOREACH operator emits
+		// the outer row unchanged, so downstream must not see the body's columns.
+		for k := range schema {
+			if _, was := preKeys[k]; !was {
+				delete(schema, k)
+			}
+		}
+		return exec.NewForeach(outer, inner, arg), nil
+
 	default:
 		// Fall through to the read-operator builder.
 		// procReg is nil here because buildOperatorWrite is only called from the

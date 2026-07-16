@@ -135,6 +135,13 @@ DROP       : 'DROP';
 // subsequent token id and force a full ATN rewrite of the generated parser, so
 // it is intentionally omitted to keep the generated parser stable.
 
+// FOREACH is defined here, immediately before ID, so it takes the last keyword
+// token id and does not shift the ids of the keyword tokens above it — keeping
+// the post-generation hand patches (which reference tokens by name) applicable
+// with a minimal 3-way merge. It must precede ID so "FOREACH" lexes as the
+// keyword rather than a generic identifier.
+FOREACH: 'FOREACH';
+
 ID: LetterOrDigit+;
 
 ESC_LITERAL    : '`' .*? '`';

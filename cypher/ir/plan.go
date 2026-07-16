@@ -1038,6 +1038,41 @@ func (c *CorrelatedApply) Vars() []string {
 	return out
 }
 
+// Foreach is the FOREACH updating clause: for each element of a list, bind the
+// loop variable and run the body's updating clauses as side-effects, without
+// changing the surrounding query's row cardinality.
+//
+// Inner is a correlated sub-plan whose leftmost leaf is an [Argument] carrying
+// ArgTag: Argument(outer vars) → Unwind(list AS loopVar) → body updating
+// clauses. The [exec.Foreach] operator seeds the Argument with each outer row,
+// drains the inner sub-plan (applying its writes for every list element), then
+// emits the outer row unchanged. The loop variable and any variables the body
+// introduces are scoped to the body and are NOT visible after FOREACH — hence
+// Vars reports only the outer variables.
+type Foreach struct {
+	// Outer is the driving (left) subplan.
+	Outer LogicalPlan
+	// Inner is the correlated body sub-plan; its leftmost leaf must be an
+	// [Argument] whose Tag equals ArgTag.
+	Inner LogicalPlan
+	// ArgTag is shared with the inner Argument leaf so the physical builder can
+	// route the matching exec.Argument instance.
+	ArgTag uint32
+}
+
+// NewForeach creates a Foreach operator with an explicit Argument tag (the
+// caller threads the same tag into the inner sub-plan's Argument leaf).
+func NewForeach(outer, inner LogicalPlan, argTag uint32) *Foreach {
+	return &Foreach{Outer: outer, Inner: inner, ArgTag: argTag}
+}
+
+// Children implements LogicalPlan. Returns [Outer, Inner].
+func (f *Foreach) Children() []LogicalPlan { return []LogicalPlan{f.Outer, f.Inner} }
+
+// Vars implements LogicalPlan. FOREACH introduces no variable visible after it;
+// downstream sees exactly the outer variables.
+func (f *Foreach) Vars() []string { return f.Outer.Vars() }
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 // OptionalApply is the left-outer variant of [CorrelatedApply]. When the inner

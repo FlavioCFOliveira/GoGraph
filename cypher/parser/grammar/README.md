@@ -22,6 +22,18 @@ language, sourced from the community-maintained
 These files are **not** an official openCypher artefact and are not endorsed by
 the openCypher project or Neo4j.
 
+## Local modifications
+
+The vendored grammar is modified locally where the upstream lacks a construct
+GoGraph supports. These changes are **not** in the pinned upstream and must be
+re-applied after any upstream refresh:
+
+- **FOREACH** — the `FOREACH` lexer token (placed immediately before `ID` to
+  avoid shifting existing keyword token ids) and the `foreachSt` parser rule
+  (`FOREACH LPAREN symbol IN expression STICK updatingStatement+ RPAREN`, added
+  as the last parser rule and listed in `updatingStatement`). Implements the
+  openCypher FOREACH updating clause.
+
 ## How to update
 
 1. Identify the new commit hash:

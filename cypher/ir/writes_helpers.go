@@ -24,7 +24,8 @@ func ContainsWrite(p LogicalPlan) bool {
 		*DetachDelete,
 		*Merge,
 		*MergeRelationship,
-		*MergePattern:
+		*MergePattern,
+		*Foreach:
 		return true
 	}
 	for _, ch := range p.Children() {

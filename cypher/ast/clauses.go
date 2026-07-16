@@ -171,6 +171,31 @@ func (d *Delete) String() string {
 	return "DELETE " + strings.Join(parts, ", ")
 }
 
+// Foreach is a FOREACH clause: FOREACH (var IN expr | updatingClause+). For
+// each element of the list the expression yields, the loop variable Var is
+// bound to that element and every clause in Body is executed as a side-effect;
+// FOREACH does not change the surrounding query's row cardinality.
+type Foreach struct {
+	Pos    Position
+	EndPos Position
+	Var    string           // the loop variable, scoped to Body
+	Expr   Expression       // the list the loop iterates over
+	Body   []UpdatingClause // updating clauses run per element
+}
+
+func (*Foreach) astNode()        {}
+func (*Foreach) clauseNode()     {}
+func (*Foreach) updatingClause() {}
+
+// String returns the FOREACH clause.
+func (f *Foreach) String() string {
+	parts := make([]string, len(f.Body))
+	for i, c := range f.Body {
+		parts[i] = c.String()
+	}
+	return "FOREACH (" + f.Var + " IN " + f.Expr.String() + " | " + strings.Join(parts, " ") + ")"
+}
+
 // DetachDelete is a DETACH DELETE clause.
 type DetachDelete struct {
 	Pos         Position
