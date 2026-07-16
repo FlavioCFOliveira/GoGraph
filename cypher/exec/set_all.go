@@ -473,7 +473,9 @@ func (op *SetAllProperties) applyMapValue(target entityBinding, mv expr.MapValue
 		op.deleteOne(target, k)
 	}
 	for _, p := range props {
-		op.writeOne(target, p.key, p.value)
+		if err := op.writeOne(target, p.key, p.value); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -560,7 +562,9 @@ func (op *SetAllProperties) copyFromSource(target, src entityBinding) error {
 	}
 
 	for k, v := range sourceProps {
-		op.writeOne(target, k, v)
+		if err := op.writeOne(target, k, v); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -582,14 +586,20 @@ func (op *SetAllProperties) applyMap(target entityBinding, row Row) error {
 		op.deleteOne(target, k)
 	}
 	for _, p := range parsedMap {
-		op.writeOne(target, p.key, p.value)
+		if err := op.writeOne(target, p.key, p.value); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 // clearTarget removes every property from the target entity. Used to
 // implement `SET n = …` (replace) semantics. For relationships the per-pair
-// removal is mirrored to the per-instance by-handle store (#1686).
+// removal is mirrored to the per-instance by-handle store (#1686). For node
+// writes with a constraint registry attached, each removed value's UNIQUE
+// reservation is released so the registry stays in sync with the graph (a
+// value freed by a replace must become available again) — mirroring
+// delNodePropConstrained in merge_setall.go.
 func (op *SetAllProperties) clearTarget(target entityBinding) {
 	if target.isRel {
 		props := op.mutator.EdgeProperties(target.relSrcKey, target.relDstKey)
@@ -599,43 +609,64 @@ func (op *SetAllProperties) clearTarget(target entityBinding) {
 		return
 	}
 	props := op.mutator.NodeProperties(target.nodeKey)
-	for k := range props {
+	var labels []string
+	if op.reg != nil {
+		labels = op.mutator.NodeLabels(target.nodeKey)
+	}
+	for k, oldVal := range props {
+		if op.reg != nil {
+			op.reg.ReleasePropertyValue(labels, k, oldVal)
+		}
 		op.mutator.DelNodeProperty(target.nodeKey, k)
 	}
 }
 
-// writeOne writes a single (key, value) pair to the target, dispatching to
-// the node or relationship mutator method. Constraint enforcement is
-// applied for node writes when a registry is attached. For relationships the
-// per-pair write is mirrored to the per-instance by-handle store (#1686).
-func (op *SetAllProperties) writeOne(target entityBinding, key string, value lpg.PropertyValue) {
+// writeOne writes a single (key, value) pair to the target, dispatching to the
+// node or relationship mutator method. For node writes with a constraint
+// registry attached, the node's own prior value for key is released before the
+// uniqueness check (so an idempotent self-set — SET n = {pk: <same>} — is not
+// rejected as its own duplicate) and a genuine violation is returned as an
+// error so the enclosing statement rolls back atomically rather than being
+// silently skipped (a partial-commit / silent-data-loss defect). This mirrors
+// setNodePropConstrained in merge_setall.go and the per-property SET path in
+// set.go. For relationships the per-pair write is mirrored to the per-instance
+// by-handle store (#1686).
+func (op *SetAllProperties) writeOne(target entityBinding, key string, value lpg.PropertyValue) error {
 	if target.isRel {
 		if serr := op.mutator.SetEdgeProperty(target.relSrcKey, target.relDstKey, key, value); serr != nil {
-			return
+			return serr
 		}
 		if target.relHandle != 0 {
 			_ = op.mutator.SetEdgePropertyByHandle(target.relSrcKey, target.relDstKey, target.relHandle, key, value)
 		}
-		return
+		return nil
 	}
 	if op.reg != nil {
 		labels := op.mutator.NodeLabels(target.nodeKey)
+		// Release the node's own prior value for this key before the check so an
+		// idempotent self-set is not rejected as its own duplicate.
+		if oldVal, had := op.mutator.NodeProperties(target.nodeKey)[key]; had {
+			op.reg.ReleasePropertyValue(labels, key, oldVal)
+		}
 		if cerr := op.reg.CheckSetProperty(labels, key, value, op.mgr); cerr != nil {
-			return // skip on constraint violation; mirror SetProperty behaviour
+			return cerr
 		}
 	}
 	if serr := op.mutator.SetNodeProperty(target.nodeKey, key, value); serr != nil {
-		return
+		return serr
 	}
 	if op.reg != nil {
 		labels := op.mutator.NodeLabels(target.nodeKey)
 		op.reg.RecordPropertySet(labels, key, value)
 	}
+	return nil
 }
 
 // deleteOne removes a single property from the target, dispatching to the
 // node or relationship mutator method. For relationships the per-pair removal
-// is mirrored to the per-instance by-handle store (#1686).
+// is mirrored to the per-instance by-handle store (#1686). For node writes
+// with a constraint registry attached, the removed value's UNIQUE reservation
+// is released so the registry stays in sync with the graph.
 func (op *SetAllProperties) deleteOne(target entityBinding, key string) {
 	if target.isRel {
 		op.mutator.DelEdgeProperty(target.relSrcKey, target.relDstKey, key)
@@ -643,6 +674,11 @@ func (op *SetAllProperties) deleteOne(target entityBinding, key string) {
 			op.mutator.DelEdgePropertyByHandle(target.relSrcKey, target.relDstKey, target.relHandle, key)
 		}
 		return
+	}
+	if op.reg != nil {
+		if oldVal, had := op.mutator.NodeProperties(target.nodeKey)[key]; had {
+			op.reg.ReleasePropertyValue(op.mutator.NodeLabels(target.nodeKey), key, oldVal)
+		}
 	}
 	op.mutator.DelNodeProperty(target.nodeKey, key)
 }
