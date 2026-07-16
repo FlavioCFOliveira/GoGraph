@@ -250,6 +250,7 @@ func (t *translator) mergeClause(m *ast.Merge, child LogicalPlan) (LogicalPlan, 
 					if ocOk && omOk {
 						mr := NewMergeRelationshipWithActions(r.srcVar, r.dstVar, r.relVar, r.relType, onCreate, onMatch, child)
 						mr.RelProps = r.relProps
+						mr.RelPropsAST = r.relPropsAST
 						mr.Undirected = r.undirected
 						// Carry the non-literal RHS expression ASTs so the
 						// physical builder can evaluate `ON MATCH SET r.n =
@@ -491,6 +492,11 @@ func extractMergeSetExprs(items []*ast.SetItem) []MergeSetExpr {
 type singleHopRel struct {
 	srcVar, dstVar, relVar, relType, relProps string
 	undirected                                bool
+	// relPropsAST is the inline relationship property-map AST, retained so the
+	// physical builder can install a per-row evaluator when the map carries a
+	// non-literal value (e.g. `{kind: r.pk}`). nil when the relationship has no
+	// inline property map.
+	relPropsAST ast.Expression
 }
 
 // mergeSingleHopRel returns a populated [singleHopRel] and true when pp is a
@@ -550,12 +556,13 @@ func mergeSingleHopRel(pp *ast.PathPattern) (singleHopRel, bool) {
 		rp = step.Relationship.Properties.String()
 	}
 	return singleHopRel{
-		srcVar:     src,
-		dstVar:     dst,
-		relVar:     rv,
-		relType:    step.Relationship.Types[0],
-		relProps:   rp,
-		undirected: und,
+		srcVar:      src,
+		dstVar:      dst,
+		relVar:      rv,
+		relType:     step.Relationship.Types[0],
+		relProps:    rp,
+		relPropsAST: step.Relationship.Properties,
+		undirected:  und,
 	}, true
 }
 

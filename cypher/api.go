@@ -4694,9 +4694,36 @@ func buildOperatorWrite(
 		if p.RelProps != "" && exec.PropMapContainsNullLiteral(p.RelProps) {
 			return nil, fmt.Errorf("cypher: SemanticError.MergeReadOwnWrites: MERGE pattern contains a null property literal")
 		}
+		// Snapshot the driving-row schema BEFORE this operator's own relationship
+		// column is added: an inline relationship property map (`{kind: r.pk}`)
+		// references outer/driving variables (the endpoints, an UNWIND element),
+		// never the relationship being created, and the operator evaluates it
+		// against the child row (which has no relationship column yet).
+		relPropsSchema := copySchema(schema)
 		op := exec.NewMergeRelationship(child, srcCol, dstCol, p.RelType, mutator)
 		if p.RelProps != "" {
 			op = op.WithRelProperties(p.RelProps)
+		}
+		// Resolve $param references in the inline relationship property map once,
+		// at build time (constant for the whole execution), into concrete literal
+		// predicates. Without this a parameterised inline property such as
+		// `MERGE (a)-[r:T {kind: $pk}]->(b)` is silently dropped — the literal-only
+		// parser skips $param references — so the created edge stores null.
+		if len(params) > 0 {
+			var wpErr error
+			if op, wpErr = op.WithParams(params); wpErr != nil {
+				return nil, wpErr
+			}
+		}
+		// Row-aware inline relationship property map: when it carries a
+		// non-literal value (a variable reference, property access, or
+		// arithmetic — e.g. `{kind: r.pk}`), install a per-row evaluator so the
+		// value drives both the existing-edge search predicate and the created
+		// edge's properties. Without it the literal-only parser drops the entry
+		// and the edge is created with a null property — a fail-silent
+		// Consistency defect on this both-endpoints-bound MERGE fast path.
+		if fn := maybePropsEvalFn(p.RelPropsAST, relPropsSchema, params, reg, mutator, bopts); fn != nil {
+			op = op.WithRelPropsEvalFn(fn)
 		}
 		if p.Undirected {
 			op = op.WithUndirected(true)
@@ -4793,26 +4820,13 @@ func buildOperatorWrite(
 			schema[nodeKey] = outCol
 			nodeCols[i] = outCol
 			mp.AddFreshNode(n.Var, n.Labels, n.PropsRaw, outCol)
-			if ml, isMap := n.PropsAST.(*ast.MapLiteral); isMap && ml != nil {
-				if mapLiteralHasNonLiteralValue(ml) {
-					if fn := buildPropsEvalFn(ml, propsSchema, params, reg, mutator, bopts); fn != nil {
-						mp.WithNodePropsEvalFn(fn)
-					}
-				}
+			if fn := maybePropsEvalFn(n.PropsAST, propsSchema, params, reg, mutator, bopts); fn != nil {
+				mp.WithNodePropsEvalFn(fn)
 			}
 		}
 		for i, h := range p.Hops {
 			if exec.PropMapContainsNullLiteral(h.RelPropsRaw) {
 				return nil, fmt.Errorf("cypher: SemanticError.MergeReadOwnWrites: MERGE pattern contains a null property literal")
-			}
-			if ml, isMap := h.RelPropsAST.(*ast.MapLiteral); isMap && ml != nil && mapLiteralHasNonLiteralValue(ml) {
-				// Node properties fall back to a per-row PropsEvalFn for a
-				// genuinely non-literal, non-parameter expression (handled
-				// above); relationship properties on a compound pattern do
-				// not have that fallback wired yet (MergeRelationship's own
-				// fast path does not support it either), so reject loudly
-				// here rather than silently drop the value at write time.
-				return nil, fmt.Errorf("cypher: MergePattern: relationship property map on hop %d contains an unsupported non-literal, non-parameter expression; bind the value with a leading MATCH/WITH first", i)
 			}
 			relCol := schemaWidth(schema)
 			relKey := h.RelVar
@@ -4821,6 +4835,20 @@ func buildOperatorWrite(
 			}
 			schema[relKey] = relCol
 			mp.AddHop(h.RelVar, relCol, h.RelType, h.RelPropsRaw, h.Undirected, h.Reversed)
+			// Row-aware inline relationship property map on this hop: when it
+			// carries a non-literal value (a variable reference, property access,
+			// or arithmetic — e.g. `{kind: row.pk}`), install a per-row evaluator
+			// so the value drives BOTH the whole-pattern search predicate and the
+			// created edge's properties, on par with the both-endpoints-bound
+			// MergeRelationship fast path. Evaluated against propsSchema (the
+			// driving-row snapshot taken before any of this pattern's own columns
+			// were added), matching the row the operator hands the evaluator. A
+			// $param value needs no evaluator — WithParams below resolves it to a
+			// literal. Attaches to the hop just added via AddHop. Without this the
+			// value would be silently dropped from both the search and the write.
+			if fn := maybePropsEvalFn(h.RelPropsAST, propsSchema, params, reg, mutator, bopts); fn != nil {
+				mp.WithHopPropsEvalFn(fn)
+			}
 			if bopts != nil {
 				srcCol, dstCol := nodeCols[i], nodeCols[i+1]
 				if h.Reversed {
@@ -4914,12 +4942,8 @@ func buildOperatorWrite(
 		// schema from the snapshot taken right after the boundvars were
 		// added (schemaCopy), which mirrors the row layout the Merge
 		// operator sees at runtime.
-		if ml, isMap := p.NodePropsAST.(*ast.MapLiteral); isMap && ml != nil {
-			if mapLiteralHasNonLiteralValue(ml) {
-				if fn := buildPropsEvalFn(ml, schemaCopy, params, reg, mutator, bopts); fn != nil {
-					m.WithPropsEvalFn(fn)
-				}
-			}
+		if fn := maybePropsEvalFn(p.NodePropsAST, schemaCopy, params, reg, mutator, bopts); fn != nil {
+			m.WithPropsEvalFn(fn)
 		}
 		// Per-row evaluators for non-literal ON CREATE / ON MATCH SET RHS
 		// (e.g. `ON MATCH SET n.num = n.num + 1`). Without these the operator
@@ -5092,6 +5116,33 @@ func buildPropsEvalFn(
 		}
 		return out, nil
 	}
+}
+
+// maybePropsEvalFn returns a per-row property evaluator for propsAST when it is
+// a *ast.MapLiteral carrying at least one non-literal value, or nil otherwise
+// (an absent map, a non-map expression, or an all-literal / $param-only map that
+// needs no per-row evaluation — $param references are resolved once at build
+// time via the operator's WithParams). It centralises the "type-assert
+// *ast.MapLiteral, gate on mapLiteralHasNonLiteralValue, build the evaluator"
+// sequence shared by every MERGE property-map call site — the relationship fast
+// path, the compound pattern's fresh nodes and hops, and the lone-node path — so
+// the non-literal detection and evaluator construction stay in one place and
+// cannot drift apart across sites. schema is the row layout the evaluator
+// resolves against (the caller snapshots it for the row the operator will hand
+// the evaluator).
+func maybePropsEvalFn(
+	propsAST ast.Expression,
+	schema map[string]int,
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
+	mutator exec.GraphMutator,
+	bopts *buildOpts,
+) exec.PropsEvalFn {
+	ml, ok := propsAST.(*ast.MapLiteral)
+	if !ok || ml == nil || !mapLiteralHasNonLiteralValue(ml) {
+		return nil
+	}
+	return buildPropsEvalFn(ml, schema, params, reg, mutator, bopts)
 }
 
 // scalarColSnapshot copies the scalar-column set (UNWIND element variables,

@@ -129,6 +129,15 @@ type mergePatternHop struct {
 	relPropsRaw string
 	relProps    []propLiteral
 	parsed      bool
+	// relPropsEvalFn evaluates this hop's inline relationship property map
+	// against the driving row when it carries a non-literal value (e.g.
+	// `(a)-[:R {kind: row.pk}]->(b)`). nil when every value is a literal
+	// ($param references are resolved at build time into relProps via
+	// [MergePattern.WithParams]). The merged (literal ∪ dynamic) set drives
+	// BOTH the existing-edge search predicate and the created edge's
+	// properties — without it a row-driven inline property is silently dropped
+	// (stored as null on the created edge).
+	relPropsEvalFn PropsEvalFn
 
 	undirected bool
 	reversed   bool // true for `<-`: the edge runs position i+1 → position i
@@ -185,6 +194,16 @@ type MergePattern struct {
 	createdRow Row
 	done       bool
 	firedOnce  bool
+	// hopPropsForRow holds each hop's effective inline relationship property set
+	// (literals merged with any non-literal per-row values) computed ONCE per
+	// driving row in [MergePattern.runForRow]. Both the search predicate
+	// ([MergePattern.expandCandidates]) and the create write
+	// ([MergePattern.createChain]) read the same entry, so a non-deterministic
+	// value (e.g. `{t: timestamp()}`) is evaluated once — the created edge
+	// stores exactly the value the search matched on — and a non-literal map is
+	// not re-evaluated once per frontier binding. Indexed by hop position; len
+	// == len(hops) after runForRow computes it.
+	hopPropsForRow [][]propLiteral
 }
 
 // NewMergePattern creates an empty MergePattern; call AddBoundNode/
@@ -234,6 +253,33 @@ func (op *MergePattern) WithNodePropsEvalFn(fn PropsEvalFn) *MergePattern {
 // [mergeProps]'s zero-cost fast path for the common all-literal case.
 func (op *MergePattern) effectiveNodeProps(n *mergePatternNode, childRow Row) ([]propLiteral, error) {
 	return mergeProps(n.props, n.propsEvalFn, childRow)
+}
+
+// WithHopPropsEvalFn attaches a per-row property evaluator to the
+// most-recently-added hop (mirroring [MergePattern.WithNodePropsEvalFn]). Used
+// when that hop's relationship property map contains a non-literal expression
+// (a variable reference, property access, or arithmetic — e.g.
+// `(a)-[:R {kind: row.pk}]->(b)`) that [parsePropLiteral] cannot resolve at
+// plan-construction time. The dynamic entries are merged with the map's literal
+// entries at both search and create time (see [MergePattern.effectiveHopProps]),
+// taking precedence on key collision. Without this, a hop's row-driven
+// relationship property would be silently dropped from both the search
+// predicate and the created edge — the same defect class this operator exists
+// to eliminate, previously rejected at build time on the compound-pattern path.
+func (op *MergePattern) WithHopPropsEvalFn(fn PropsEvalFn) *MergePattern {
+	if len(op.hops) == 0 || fn == nil {
+		return op
+	}
+	op.hops[len(op.hops)-1].relPropsEvalFn = fn
+	return op
+}
+
+// effectiveHopProps returns h's relationship property predicate for childRow:
+// its static literal entries merged with any per-row dynamic entries. Returns
+// h.relProps unchanged (no allocation) when h has no evaluator, matching
+// [mergeProps]'s zero-cost fast path for the common all-literal case.
+func (op *MergePattern) effectiveHopProps(h *mergePatternHop, childRow Row) ([]propLiteral, error) {
+	return mergeProps(h.relProps, h.relPropsEvalFn, childRow)
 }
 
 // AddHop appends the relationship connecting the two most-recently-added
@@ -405,6 +451,22 @@ func (op *MergePattern) runForRow(childRow Row) error {
 		return err
 	}
 
+	// Evaluate every hop's effective inline relationship property set ONCE for
+	// this driving row, so the search predicate and the create write share a
+	// single evaluation (deterministic, and no per-frontier re-evaluation).
+	if cap(op.hopPropsForRow) < len(op.hops) {
+		op.hopPropsForRow = make([][]propLiteral, len(op.hops))
+	} else {
+		op.hopPropsForRow = op.hopPropsForRow[:len(op.hops)]
+	}
+	for i := range op.hops {
+		props, hpErr := op.effectiveHopProps(&op.hops[i], childRow)
+		if hpErr != nil {
+			return hpErr
+		}
+		op.hopPropsForRow[i] = props
+	}
+
 	bindings, err := op.search(childRow)
 	if err != nil {
 		return fmt.Errorf("exec: MergePattern: search: %w", err)
@@ -527,7 +589,7 @@ func (op *MergePattern) search(childRow Row) ([]binding, error) {
 			if !ok {
 				continue
 			}
-			cands, err := op.expandCandidates(fromKey, hop, target, childRow)
+			cands, err := op.expandCandidates(fromKey, hop, target, childRow, op.hopPropsForRow[hopIdx])
 			if err != nil {
 				return nil, err
 			}
@@ -545,7 +607,12 @@ func (op *MergePattern) search(childRow Row) ([]binding, error) {
 // expandCandidates returns the NodeIDs reachable from fromKey via hop that
 // also satisfy target's predicate (an exact-value filter when target is
 // bound, a label/property filter when fresh).
-func (op *MergePattern) expandCandidates(fromKey string, hop *mergePatternHop, target *mergePatternNode, childRow Row) ([]graph.NodeID, error) {
+func (op *MergePattern) expandCandidates(fromKey string, hop *mergePatternHop, target *mergePatternNode, childRow Row, hopProps []propLiteral) ([]graph.NodeID, error) {
+	// hopProps is the hop's effective inline relationship property predicate for
+	// THIS driving row (literals merged with any non-literal per-row values,
+	// e.g. `{kind: row.pk}`), pre-computed once per row by runForRow, so the
+	// search matches on the evaluated value exactly as the created edge will
+	// carry it.
 	if target.bound {
 		// Only one candidate is possible: the bound value itself. Skip the
 		// neighbour walk (and the seen-set/closure it needs) and directly
@@ -557,7 +624,7 @@ func (op *MergePattern) expandCandidates(fromKey string, hop *mergePatternHop, t
 		if !ok {
 			return nil, fmt.Errorf("exec: MergePattern: bound variable %q is null", target.varName)
 		}
-		if edgeConnects(op.mutator, fromKey, key, hop) {
+		if edgeConnects(op.mutator, fromKey, key, hop, hopProps) {
 			return []graph.NodeID{id}, nil
 		}
 		return nil, nil
@@ -578,7 +645,7 @@ func (op *MergePattern) expandCandidates(fromKey string, hop *mergePatternHop, t
 				return
 			}
 		}
-		if len(hop.relProps) > 0 && !nodeMatchesAllProperties(hop.relProps, op.mutator.EdgeProperties(edgeSrc, edgeDst)) {
+		if len(hopProps) > 0 && !nodeMatchesAllProperties(hopProps, op.mutator.EdgeProperties(edgeSrc, edgeDst)) {
 			return
 		}
 		if !nodeMatchesAllLabels(target.labels, op.mutator.NodeLabels(candKey)) {
@@ -609,31 +676,33 @@ func (op *MergePattern) expandCandidates(fromKey string, hop *mergePatternHop, t
 	return out, nil
 }
 
-// edgeConnects reports whether an edge satisfying hop's type/property
-// predicate connects fromKey to toKey: forward only (fromKey→toKey) for a
-// plain hop, reverse only (toKey→fromKey) when hop.reversed, or either
-// direction when hop.undirected.
-func edgeConnects(mutator GraphMutator, fromKey, toKey string, hop *mergePatternHop) bool {
+// edgeConnects reports whether an edge satisfying hop's type predicate and the
+// per-row property predicate hopProps connects fromKey to toKey: forward only
+// (fromKey→toKey) for a plain hop, reverse only (toKey→fromKey) when
+// hop.reversed, or either direction when hop.undirected. hopProps is the hop's
+// effective inline relationship property set for the current driving row (see
+// [MergePattern.effectiveHopProps]).
+func edgeConnects(mutator GraphMutator, fromKey, toKey string, hop *mergePatternHop, hopProps []propLiteral) bool {
 	checkForward, checkReverse := hop.directions()
-	if checkForward && edgeSatisfiesHop(mutator, fromKey, toKey, hop) {
+	if checkForward && edgeSatisfiesHop(mutator, fromKey, toKey, hop, hopProps) {
 		return true
 	}
-	if checkReverse && edgeSatisfiesHop(mutator, toKey, fromKey, hop) {
+	if checkReverse && edgeSatisfiesHop(mutator, toKey, fromKey, hop, hopProps) {
 		return true
 	}
 	return false
 }
 
 // edgeSatisfiesHop reports whether the directed edge (src, dst) satisfies
-// hop's type and inline property predicate.
-func edgeSatisfiesHop(mutator GraphMutator, src, dst string, hop *mergePatternHop) bool {
+// hop's type and the per-row inline property predicate hopProps.
+func edgeSatisfiesHop(mutator GraphMutator, src, dst string, hop *mergePatternHop, hopProps []propLiteral) bool {
 	if !mutator.HasEdge(src, dst) {
 		return false
 	}
 	if hop.relType != "" && !edgeHasLabel(mutator, src, dst, hop.relType) {
 		return false
 	}
-	if len(hop.relProps) > 0 && !nodeMatchesAllProperties(hop.relProps, mutator.EdgeProperties(src, dst)) {
+	if len(hopProps) > 0 && !nodeMatchesAllProperties(hopProps, mutator.EdgeProperties(src, dst)) {
 		return false
 	}
 	return true
@@ -734,7 +803,12 @@ func (op *MergePattern) createChain(childRow Row) (binding, error) {
 			op.mutator.SetEdgeLabel(srcKey, dstKey, hop.relType)
 			op.mutator.SetEdgeLabelByHandle(srcKey, dstKey, handle, hop.relType)
 		}
-		for _, p := range hop.relProps {
+		// Write the hop's effective inline properties for THIS driving row
+		// (literals merged with any non-literal per-row values, e.g.
+		// `{kind: row.pk}`) — the SAME set the search predicate matched on,
+		// computed once per driving row by runForRow (op.hopPropsForRow), so a
+		// non-deterministic value is stored identically to how it was searched.
+		for _, p := range op.hopPropsForRow[i] {
 			if err := op.mutator.SetEdgeProperty(srcKey, dstKey, p.key, p.value); err != nil {
 				return nil, fmt.Errorf("SetEdgeProperty %s: %w", p.key, err)
 			}

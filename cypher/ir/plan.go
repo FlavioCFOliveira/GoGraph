@@ -1871,6 +1871,17 @@ type MergeRelationship struct {
 	// relationship. When non-empty the exec operator filters the
 	// search by these properties and writes them on creation.
 	RelProps string
+	// RelPropsAST carries the inline relationship property-map AST when it
+	// contains a non-literal value (a variable reference, property access,
+	// or arithmetic expression — e.g. `{kind: r.pk}`). The physical builder
+	// installs a per-row property evaluator from it so the map drives both
+	// the match-search predicate and the created edge's properties. nil when
+	// the map is absent or every value is a literal (or a $param, resolved at
+	// build time via the opaque RelProps string). Without it a row-driven
+	// inline property silently degrades to null on the created edge, since
+	// the literal-only parser drops the non-literal entry (fail-silent
+	// Consistency defect).
+	RelPropsAST ast.Expression
 	// Undirected reports whether the MERGE relationship pattern declares
 	// an undirected hop (`MERGE (a)-[r:T]-(b)`). When true the exec
 	// operator searches for an existing edge in either direction before

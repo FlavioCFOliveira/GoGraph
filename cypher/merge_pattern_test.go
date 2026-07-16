@@ -300,29 +300,34 @@ func TestMergePattern_ParameterizedProperties(t *testing.T) {
 	assertCount(ctx, t, eng, `MATCH (:PX {id: 'p1'})-[:R]->(:PY {id: 'c1'}) RETURN count(*) AS n`, 1)
 }
 
-// TestMergePattern_RejectsNonLiteralRelationshipProperty verifies that a
-// relationship property expression this operator cannot yet evaluate (a
-// variable reference, not a literal or a parameter) is rejected with a
-// clear compile-time error rather than silently dropped at write time.
-func TestMergePattern_RejectsNonLiteralRelationshipProperty(t *testing.T) {
+// TestMergePattern_NonLiteralRelationshipProperty verifies that a relationship
+// property whose value is a non-literal expression (a variable reference from a
+// bound node, `s.v`) is evaluated per driving row, written on the created edge,
+// AND used as the whole-pattern search predicate. This shape was once rejected
+// at build time (neither MERGE path evaluated non-literal relationship
+// properties); it is now supported on par with the both-endpoints-bound
+// MergeRelationship fast path. Previously the value was at risk of being
+// silently dropped to null — a fail-silent Consistency defect.
+func TestMergePattern_NonLiteralRelationshipProperty(t *testing.T) {
 	t.Parallel()
 	eng := newMergePatternEngine(t)
 	ctx := context.Background()
 
 	drainRunInTx(t, eng, `CREATE (:Src {v: 7})`)
-	_, err := eng.RunInTx(ctx, `MATCH (s:Src) MERGE (a:RX {k: 'a'})-[:R {x: s.v}]->(b:RY {k: 'b'})`, nil)
-	if err == nil {
-		t.Fatal("expected an error for a non-literal, non-parameter relationship property expression, got nil")
-	}
-	const wantSubstr = "MergePattern: relationship property map"
-	if !strings.Contains(err.Error(), wantSubstr) {
-		t.Fatalf("error = %q, want it to contain %q (the specific rejection, not an incidental failure)", err.Error(), wantSubstr)
-	}
+	drainRunInTx(t, eng, `MATCH (s:Src) MERGE (a:RX {k: 'a'})-[:R {x: s.v}]->(b:RY {k: 'b'})`)
 
-	// Neither fresh node nor the Src seed node must have been touched by the
-	// rejected statement.
-	assertCount(ctx, t, eng, `MATCH (n:RX) RETURN count(n) AS n`, 0)
-	assertCount(ctx, t, eng, `MATCH (n:RY) RETURN count(n) AS n`, 0)
+	// The created edge carries the evaluated value (integer 7): matching on the
+	// property in the read pattern proves it was written, not dropped to null.
+	assertCount(ctx, t, eng, `MATCH (:RX {k:'a'})-[:R {x: 7}]->(:RY {k:'b'}) RETURN count(*) AS n`, 1)
+	assertCount(ctx, t, eng, `MATCH (n:RX) RETURN count(n) AS n`, 1)
+	assertCount(ctx, t, eng, `MATCH (n:RY) RETURN count(n) AS n`, 1)
+
+	// A second MERGE with the same evaluated value matches the first pattern
+	// (no duplicate) — the value drives the search predicate, not just the
+	// create-time write.
+	drainRunInTx(t, eng, `MATCH (s:Src) MERGE (a:RX {k: 'a'})-[:R {x: s.v}]->(b:RY {k: 'b'})`)
+	assertCount(ctx, t, eng, `MATCH (:RX {k:'a'})-[:R]->(:RY {k:'b'}) RETURN count(*) AS n`, 1)
+	assertCount(ctx, t, eng, `MATCH (n:RX) RETURN count(n) AS n`, 1)
 }
 
 // TestMergePattern_WALDurability verifies a compound MERGE's created nodes

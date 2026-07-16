@@ -56,6 +56,15 @@ type MergeRelationship struct {
 	relPropsRaw        string        // inline `{k: v, …}` source string, "" when absent
 	relPropPredsParsed bool          // tracks one-time parse of relPropsRaw
 	relPropPreds       []propLiteral // parsed predicate values (only literals)
+	// relPropsEvalFn evaluates the inline relationship property map against the
+	// current row when it carries a non-literal value (e.g. `{kind: r.pk}`).
+	// nil when every inline property is a literal ($param references are
+	// resolved at build time into relPropPreds via [MergeRelationship.WithParams]).
+	// The merged (literal ∪ dynamic) property set drives BOTH the existing-edge
+	// search predicate and the created edge's properties, mirroring the node
+	// [Merge] path — without it a row-driven inline property is silently dropped
+	// (stored as null on the created edge).
+	relPropsEvalFn PropsEvalFn
 	// undirected reports whether the source pattern declared `(a)-[:T]-(b)`
 	// (no arrow head). When true, the match search probes both (src, dst)
 	// and (dst, src); the create path still uses the canonical (src, dst)
@@ -150,6 +159,44 @@ func (op *MergeRelationship) WithRelProperties(propsRaw string) *MergeRelationsh
 	op.relPropPredsParsed = false
 	op.relPropPreds = nil
 	return op
+}
+
+// WithRelPropsEvalFn attaches a per-row evaluator for the inline relationship
+// property map when it contains a non-literal value (a variable reference,
+// property access, or arithmetic expression — e.g. `MERGE (a)-[r:T {kind:
+// row.pk}]->(b)`). The merged (literal ∪ dynamic) property set drives both the
+// existing-edge search predicate and the created edge's properties, exactly as
+// the node [Merge] path does via [mergeProps]. Without it the literal-only
+// parser drops the non-literal entry, so the property is neither searched on
+// nor written — the created edge stores null (fail-silent Consistency defect).
+// Pass nil to clear. Returns op for chaining.
+func (op *MergeRelationship) WithRelPropsEvalFn(fn PropsEvalFn) *MergeRelationship {
+	op.relPropsEvalFn = fn
+	return op
+}
+
+// WithParams attaches query parameters for $name substitution in the inline
+// relationship property map, re-parsing the raw map with parameter references
+// resolved to concrete literal values. Mirrors [CreateNode.WithParams]:
+// resolving parameters once here, at build time, is cheaper than a per-row
+// evaluator and is correct because parameter values are constant for the whole
+// query execution. Without it a parameterised inline property such as
+// `MERGE (a)-[r:T {kind: $pk}]->(b)` is silently dropped, since the literal-only
+// parser skips $param references (they are deferred to a resolver). Returns op
+// for chaining.
+func (op *MergeRelationship) WithParams(params map[string]expr.Value) (*MergeRelationship, error) {
+	if len(params) == 0 {
+		return op, nil
+	}
+	if op.relPropsRaw != "" {
+		parsed, err := parsePropLiteralWithParams(op.relPropsRaw, params)
+		if err != nil {
+			return nil, fmt.Errorf("exec: MergeRelationship: parse rel props %q: %w", op.relPropsRaw, err)
+		}
+		op.relPropPreds = parsed
+		op.relPropPredsParsed = true
+	}
+	return op, nil
 }
 
 // WithOnCreate registers ON CREATE SET actions to apply when the edge
@@ -261,7 +308,10 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 		// notices a graph-state inconsistency.
 		return false, fmt.Errorf("exec: MergeRelationship: unresolved endpoint NodeID (src=%d, dst=%d)", srcID, dstID)
 	}
-	// Parse inline property predicates lazily on the first call.
+	// Parse inline property literals lazily on the first call. When WithParams
+	// resolved a parameterised map, relPropPredsParsed is already set and this
+	// is skipped. A non-literal value (e.g. `{kind: r.pk}`) is not captured here
+	// — it is deferred to relPropsEvalFn and merged per row below.
 	if !op.relPropPredsParsed {
 		if op.relPropsRaw != "" {
 			parsed, perr := parsePropLiteral(op.relPropsRaw)
@@ -272,6 +322,16 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 		}
 		op.relPropPredsParsed = true
 	}
+	// Resolve the effective inline property set for THIS row: the parsed
+	// literals merged with any per-row dynamic entries produced by
+	// relPropsEvalFn (non-literal values such as `{kind: r.pk}`). The merged
+	// set drives BOTH the existing-edge search predicate and the created edge's
+	// properties, exactly as the node [Merge] path does — so a row-driven
+	// inline property is matched-on and written rather than silently dropped.
+	effectiveProps, mpErr := mergeProps(op.relPropPreds, op.relPropsEvalFn, row)
+	if mpErr != nil {
+		return false, mpErr
+	}
 	// Match if an edge already exists with the requested type AND the
 	// inline property predicate (if any) holds against the live edge
 	// property map. The type check is essential on a multigraph: HasEdge
@@ -279,7 +339,7 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 	// a `MERGE (a)-[:T2]->(b)` issued after a `T1` edge already exists
 	// would bind to the T1 edge and never create the distinct T2 parallel
 	// edge (rmp #1683). The single-writer guarantee makes this safe.
-	if op.mutator.HasEdge(srcKey, dstKey) && op.edgeHasRequestedType(srcKey, dstKey) && op.matchesRelProps(srcKey, dstKey) {
+	if op.mutator.HasEdge(srcKey, dstKey) && op.edgeHasRequestedType(srcKey, dstKey) && op.matchesRelProps(srcKey, dstKey, effectiveProps) {
 		// Edge labels are per-(src,dst) in the LPG; adding the same
 		// label twice is idempotent. Ensure the requested type is
 		// recorded, then run ON MATCH actions.
@@ -297,7 +357,7 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 		// but with a predicate only a subset can satisfy `r:T
 		// {prop: v}` (Merge5 [5] CREATEs with `name: 'r1'` and
 		// `name: 'r2'`, MERGEs with `name: 'r2'` → only one row).
-		if len(op.relPropPreds) == 0 {
+		if len(effectiveProps) == 0 {
 			if mult := op.mutator.EdgeCreateCount(srcKey, dstKey); mult > 1 {
 				op.pendingRow = emitted
 				op.pendingRemaining = mult - 1
@@ -310,7 +370,7 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 	// exists from dst → src that satisfies the same type-and-property
 	// predicate, bind to that edge rather than creating a new one.
 	// Closes Merge5 [13].
-	if op.undirected && op.mutator.HasEdge(dstKey, srcKey) && op.edgeHasRequestedType(dstKey, srcKey) && op.matchesRelProps(dstKey, srcKey) {
+	if op.undirected && op.mutator.HasEdge(dstKey, srcKey) && op.edgeHasRequestedType(dstKey, srcKey) && op.matchesRelProps(dstKey, srcKey, effectiveProps) {
 		op.mutator.SetEdgeLabel(dstKey, srcKey, op.relType)
 		// Reverse-direction match: the edge is stored (dstKey -> srcKey), so
 		// resolve and mirror against that stored pair (#1684).
@@ -319,7 +379,7 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 			return false, err
 		}
 		emitted := op.emitRow(row, dstID, srcID, dstKey, srcKey)
-		if len(op.relPropPreds) == 0 {
+		if len(effectiveProps) == 0 {
 			if mult := op.mutator.EdgeCreateCount(dstKey, srcKey); mult > 1 {
 				op.pendingRow = emitted
 				op.pendingRemaining = mult - 1
@@ -347,7 +407,7 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 		op.mutator.SetEdgeLabel(srcKey, dstKey, op.relType)
 		op.mutator.SetEdgeLabelByHandle(srcKey, dstKey, handle, op.relType)
 	}
-	for _, p := range op.relPropPreds {
+	for _, p := range effectiveProps {
 		if setErr := op.mutator.SetEdgeProperty(srcKey, dstKey, p.key, p.value); setErr != nil {
 			return false, fmt.Errorf("exec: MergeRelationship: SetEdgeProperty %q: %w", p.key, setErr)
 		}
@@ -366,15 +426,16 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 }
 
 // matchesRelProps reports whether the (src, dst) edge satisfies the inline
-// property predicate captured in relPropPreds. Returns true when no
-// predicate was declared; otherwise every predicate key must be present
-// and Equal to the matching property value on the edge.
-func (op *MergeRelationship) matchesRelProps(srcKey, dstKey string) bool {
-	if len(op.relPropPreds) == 0 {
+// property predicate preds — the per-row effective property set (parsed
+// literals merged with any relPropsEvalFn dynamic entries). Returns true when
+// no predicate was declared; otherwise every predicate key must be present and
+// Equal to the matching property value on the edge.
+func (op *MergeRelationship) matchesRelProps(srcKey, dstKey string, preds []propLiteral) bool {
+	if len(preds) == 0 {
 		return true
 	}
 	live := op.mutator.EdgeProperties(srcKey, dstKey)
-	for _, p := range op.relPropPreds {
+	for _, p := range preds {
 		got, ok := live[p.key]
 		if !ok {
 			return false
