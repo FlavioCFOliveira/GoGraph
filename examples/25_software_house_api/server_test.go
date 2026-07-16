@@ -162,7 +162,7 @@ func TestQueryErrorStatuses(t *testing.T) {
 		wantKind   string
 	}{
 		{"syntax error", `{"query":"MATCH (("}`, http.StatusBadRequest, "bad_request"},
-		{"unsupported feature", `{"query":"FOREACH (x IN [1] | CREATE (:T))"}`, http.StatusBadRequest, "bad_request"},
+		{"unsupported feature", `{"query":"CALL { RETURN 1 AS x } RETURN x"}`, http.StatusBadRequest, "bad_request"},
 		{"unknown function", `{"query":"RETURN nope(1)"}`, http.StatusUnprocessableEntity, "semantic"},
 		{"malformed json", `{"query":`, http.StatusBadRequest, "bad_request"},
 		{"missing query", `{"params":{}}`, http.StatusBadRequest, "bad_request"},
