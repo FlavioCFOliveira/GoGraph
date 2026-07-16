@@ -4801,13 +4801,11 @@ func buildOperatorWrite(
 		if err != nil {
 			return nil, err
 		}
-		// Snapshot schema before any of this MergePattern's own columns are
-		// added. Every node's PropsEvalFn closure evaluates against the
-		// ORIGINAL driving row (properties are computed once per driving
-		// row, before the pattern's own positions are bound) — mirrors
-		// CreateNode's propsSchema snapshot timing.
-		propsSchema := copySchema(schema)
-
+		// Each fresh node's / hop's inline-property evaluator is built against a
+		// schema snapshot taken at its own point in the loops below, so it
+		// includes the pattern node columns assigned to its left and can
+		// reference a fresh same-pattern node (#2024). The operator widens the
+		// row with those bindings at runtime (bindingEvalRow).
 		mp := exec.NewMergePattern(child, mutator)
 		nodeCols := make([]int, len(p.Nodes))
 		for i, n := range p.Nodes {
@@ -4836,7 +4834,14 @@ func buildOperatorWrite(
 			schema[nodeKey] = outCol
 			nodeCols[i] = outCol
 			mp.AddFreshNode(n.Var, n.Labels, n.PropsRaw, outCol)
-			if fn := maybePropsEvalFn(n.PropsAST, propsSchema, params, reg, mutator, bopts); fn != nil {
+			// Evaluate against a schema that includes the pattern's own node
+			// columns assigned so far (this position and every earlier one), so
+			// an inline property can reference a fresh same-pattern node to its
+			// left — e.g. `(a {id:1})-[:R]->(b {k: a.id})`. The operator widens
+			// the row with those bindings at runtime (bindingEvalRow, #2024). A
+			// driving-row reference still resolves: the driving columns are a
+			// subset of this schema.
+			if fn := maybePropsEvalFn(n.PropsAST, copySchema(schema), params, reg, mutator, bopts); fn != nil {
 				mp.WithNodePropsEvalFn(fn)
 			}
 		}
@@ -4862,8 +4867,18 @@ func buildOperatorWrite(
 			// $param value needs no evaluator — WithParams below resolves it to a
 			// literal. Attaches to the hop just added via AddHop. Without this the
 			// value would be silently dropped from both the search and the write.
-			if fn := maybePropsEvalFn(h.RelPropsAST, propsSchema, params, reg, mutator, bopts); fn != nil {
+			// Evaluate against the schema including every node column (assigned
+			// above) plus earlier hop columns, so a hop's inline property can
+			// reference a fresh same-pattern node — e.g. `(a)-[:R {k: a.id}]->(b)`
+			// (#2024). Driving-row references still resolve (subset).
+			if fn := maybePropsEvalFn(h.RelPropsAST, copySchema(schema), params, reg, mutator, bopts); fn != nil {
 				mp.WithHopPropsEvalFn(fn)
+				// A hop whose inline property map references a fresh same-pattern
+				// node must be evaluated per binding, not via the once-per-row
+				// precompute that runs before any position is bound (#2024).
+				if exprRefsAnyVar(h.RelPropsAST, mergePatternNodeVars(p)) {
+					mp.MarkHopRefsPatternNode()
+				}
 			}
 			if bopts != nil {
 				srcCol, dstCol := nodeCols[i], nodeCols[i+1]
@@ -5357,6 +5372,93 @@ func buildMergeSetAllActions(
 		})
 	}
 	return out
+}
+
+// mergePatternNodeVars returns the set of FRESH node variable names in a
+// MergePattern (those the pattern itself introduces). Only fresh nodes need the
+// per-binding property evaluation of #2024: a bound node's value already rides
+// along in the driving row, so an inline property referencing it resolves under
+// the once-per-row precomputation. Anonymous (unnamed) positions are excluded.
+func mergePatternNodeVars(p *ir.MergePattern) map[string]struct{} {
+	out := make(map[string]struct{}, len(p.Nodes))
+	for _, n := range p.Nodes {
+		if !n.Bound && n.Var != "" {
+			out[n.Var] = struct{}{}
+		}
+	}
+	return out
+}
+
+// exprRefsAnyVar reports whether e references any variable named in vars. It
+// walks the expression tree over the node kinds that can carry a variable
+// reference (mirroring the semantic analyser's variable collector). Used to
+// detect an inline property map that references a fresh same-pattern node
+// (#2024). An empty vars set short-circuits to false.
+func exprRefsAnyVar(e ast.Expression, vars map[string]struct{}) bool {
+	if e == nil || len(vars) == 0 {
+		return false
+	}
+	found := false
+	var walk func(x ast.Expression)
+	walk = func(x ast.Expression) {
+		if x == nil || found {
+			return
+		}
+		switch v := x.(type) {
+		case *ast.Variable:
+			if _, ok := vars[v.Name]; ok {
+				found = true
+			}
+		case *ast.Property:
+			walk(v.Receiver)
+		case *ast.LabelPredicate:
+			walk(v.Receiver)
+		case *ast.BinaryOp:
+			walk(v.Left)
+			walk(v.Right)
+		case *ast.UnaryOp:
+			walk(v.Operand)
+		case *ast.FunctionInvocation:
+			for _, arg := range v.Args {
+				walk(arg)
+			}
+		case *ast.SubscriptExpr:
+			walk(v.Expr)
+			walk(v.Index)
+		case *ast.SliceExpr:
+			walk(v.Expr)
+			walk(v.From)
+			walk(v.To)
+		case *ast.ListLiteral:
+			for _, el := range v.Elements {
+				walk(el)
+			}
+		case *ast.MapLiteral:
+			for _, val := range v.Values {
+				walk(val)
+			}
+		case *ast.CaseExpression:
+			walk(v.Subject)
+			for _, alt := range v.Alternatives {
+				walk(alt.Condition)
+				walk(alt.Consequent)
+			}
+			walk(v.ElseExpr)
+		case *ast.ReduceExpr:
+			walk(v.Init)
+			walk(v.Source)
+			walk(v.Projection)
+		case *ast.ListComprehension:
+			walk(v.Source)
+			walk(v.Predicate)
+			walk(v.Projection)
+		case *ast.PatternComprehension:
+			walk(v.Predicate)
+			walk(v.Projection)
+		}
+	}
+	walk(e)
+	return found
 }
 
 // scalarColSnapshot copies the scalar-column set (UNWIND element variables,

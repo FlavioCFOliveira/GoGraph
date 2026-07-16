@@ -138,6 +138,14 @@ type mergePatternHop struct {
 	// properties — without it a row-driven inline property is silently dropped
 	// (stored as null on the created edge).
 	relPropsEvalFn PropsEvalFn
+	// relPropsRefsPatternNode is true when this hop's inline property map
+	// references an earlier same-pattern node variable (e.g.
+	// `(a)-[:R {k: a.id}]->(b)`). Such a hop cannot use the once-per-driving-row
+	// property precomputation (which is evaluated before any position is bound);
+	// it is re-evaluated per binding against a row widened with the bound nodes,
+	// on both the search and create paths (#2024). Left false for the common
+	// case, which keeps the precompute fast path intact.
+	relPropsRefsPatternNode bool
 
 	undirected bool
 	reversed   bool // true for `<-`: the edge runs position i+1 → position i
@@ -276,6 +284,17 @@ func (op *MergePattern) WithHopPropsEvalFn(fn PropsEvalFn) *MergePattern {
 		return op
 	}
 	op.hops[len(op.hops)-1].relPropsEvalFn = fn
+	return op
+}
+
+// MarkHopRefsPatternNode flags the most-recently-added hop as having an inline
+// relationship property map that references an earlier same-pattern node, so
+// its properties are evaluated per binding rather than via the once-per-row
+// precomputation (#2024). Returns op for chaining.
+func (op *MergePattern) MarkHopRefsPatternNode() *MergePattern {
+	if len(op.hops) > 0 {
+		op.hops[len(op.hops)-1].relPropsRefsPatternNode = true
+	}
 	return op
 }
 
@@ -499,6 +518,14 @@ func (op *MergePattern) runForRow(childRow Row) error {
 		op.hopPropsForRow = op.hopPropsForRow[:len(op.hops)]
 	}
 	for i := range op.hops {
+		if op.hops[i].relPropsRefsPatternNode {
+			// This hop's inline properties reference a fresh same-pattern node,
+			// which is not bound until search/create binds it; evaluating here
+			// (before any binding) would read null. It is evaluated per binding
+			// on the search and create paths instead (#2024).
+			op.hopPropsForRow[i] = nil
+			continue
+		}
 		props, hpErr := op.effectiveHopProps(&op.hops[i], childRow)
 		if hpErr != nil {
 			return hpErr
@@ -634,7 +661,21 @@ func (op *MergePattern) search(childRow Row) ([]binding, error) {
 			if !ok {
 				continue
 			}
-			cands, err := op.expandCandidates(fromKey, hop, target, childRow, op.hopPropsForRow[hopIdx])
+			// Widen the row with the nodes bound so far so the target's inline
+			// properties can reference an earlier same-pattern node (#2024).
+			evalRow := op.bindingEvalRow(childRow, b, len(b))
+			hopProps := op.hopPropsForRow[hopIdx]
+			if op.hops[hopIdx].relPropsRefsPatternNode {
+				// The hop's inline properties reference an earlier same-pattern
+				// node; evaluate them against this binding rather than the
+				// once-per-row precomputation (which cannot see the binding).
+				hp, hpErr := op.effectiveHopProps(&op.hops[hopIdx], evalRow)
+				if hpErr != nil {
+					return nil, hpErr
+				}
+				hopProps = hp
+			}
+			cands, err := op.expandCandidates(fromKey, hop, target, evalRow, hopProps)
 			if err != nil {
 				return nil, err
 			}
@@ -811,7 +852,10 @@ func (op *MergePattern) createChain(childRow Row) (binding, error) {
 				return nil, fmt.Errorf("SetNodeLabel %q: %w", n.varName, err)
 			}
 		}
-		props, epErr := op.effectiveNodeProps(n, childRow)
+		// Widen the row with the nodes created to this position's left so this
+		// fresh node's inline properties can reference an earlier same-pattern
+		// node (#2024), matching CREATE's left-to-right resolution.
+		props, epErr := op.effectiveNodeProps(n, op.bindingEvalRow(childRow, b, i))
 		if epErr != nil {
 			return nil, epErr
 		}
@@ -853,7 +897,18 @@ func (op *MergePattern) createChain(childRow Row) (binding, error) {
 		// `{kind: row.pk}`) — the SAME set the search predicate matched on,
 		// computed once per driving row by runForRow (op.hopPropsForRow), so a
 		// non-deterministic value is stored identically to how it was searched.
-		for _, p := range op.hopPropsForRow[i] {
+		hopProps := op.hopPropsForRow[i]
+		if hop.relPropsRefsPatternNode {
+			// The hop's inline properties reference an earlier same-pattern node
+			// (e.g. `(a)-[:R {k: a.id}]->(b)`); evaluate them against the created
+			// binding so the stored value matches the search predicate (#2024).
+			hp, hpErr := op.effectiveHopProps(hop, op.bindingEvalRow(childRow, b, len(op.nodes)))
+			if hpErr != nil {
+				return nil, hpErr
+			}
+			hopProps = hp
+		}
+		for _, p := range hopProps {
 			if err := op.mutator.SetEdgeProperty(srcKey, dstKey, p.key, p.value); err != nil {
 				return nil, fmt.Errorf("SetEdgeProperty %s: %w", p.key, err)
 			}
@@ -927,6 +982,32 @@ func (op *MergePattern) emitRow(childRow Row, b binding) (Row, error) {
 		}
 	}
 	return row, nil
+}
+
+// bindingEvalRow builds the row a fresh position's inline property map is
+// evaluated against so it can reference an EARLIER same-pattern node bound to
+// its left (e.g. `(a {id:1})-[:R]->(b {k: a.id})` — b.k reads a). It widens
+// childRow to the full pattern width and sets the first nBound fresh node
+// positions to their NodeID at their output column; positions not yet bound
+// stay null, matching CREATE's left-to-right resolution. A bound position's
+// value already rides along in childRow (copied through). #2024.
+func (op *MergePattern) bindingEvalRow(childRow Row, b binding, nBound int) Row {
+	width := len(childRow)
+	for i := range op.nodes {
+		if op.nodes[i].outCol >= width {
+			width = op.nodes[i].outCol + 1
+		}
+	}
+	row := make(Row, width)
+	copy(row, childRow)
+	for i := 0; i < nBound && i < len(op.nodes) && i < len(b); i++ {
+		n := &op.nodes[i]
+		if n.bound || n.outCol < 0 || n.outCol >= width {
+			continue
+		}
+		row[n.outCol] = expr.IntegerValue(int64(b[i]))
+	}
+	return row
 }
 
 // applyActions applies each pre-parsed ON CREATE / ON MATCH action to
