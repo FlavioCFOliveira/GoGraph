@@ -418,6 +418,17 @@ Constraint names must be unique across the database: creating a constraint whose
 name is already in use by a different constraint is rejected, as is re-declaring
 an already-existing constraint without `IF NOT EXISTS`.
 
+> **Cost note.** `CREATE CONSTRAINT` validates and back-fills a bound index over
+> every node carrying the label, so its cost is **O(N)** in the number of such
+> nodes (`CREATE INDEX` is likewise O(N); `DROP` of either is cheap). A repeated
+> `CREATE`/`DROP` cycle on a heavily-populated label therefore consumes CPU
+> proportional to the labelled dataset on each iteration. This work is bounded by
+> the graph size and requires an authenticated client holding write (DDL) access,
+> and it is proportional to data that client can already scan — so it is an
+> operational cost characteristic, not a privilege-escalation vector. If DDL is
+> ever exposed to lower-trust clients, add a rate or size consideration around
+> schema mutation.
+
 The following forms are **not supported** and are rejected with a specific
 error: relationship constraints (`FOR ()-[r:T]-() REQUIRE …`), composite
 (multi-property) constraints, `NODE KEY` / relationship key, and property type
