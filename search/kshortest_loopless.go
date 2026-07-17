@@ -32,6 +32,16 @@ type KShortestPathsLooplessOpts struct {
 // k-shortest path. The loopless guard excludes any expansion whose
 // neighbour is already present in the popped path.
 //
+// # Multigraph semantics
+//
+// KShortestPathsLoopless enumerates EDGE-DISTINCT paths: parallel relationships
+// between the same ordered node pair are distinct routes, so two returned paths
+// may share the same node sequence with different total costs. On a multigraph
+// it therefore returns MORE paths than [YenKShortest], which collapses parallel
+// edges to their minimum-weight edge and enumerates NODE-SIMPLE paths. A caller
+// that dedups results by node sequence should use YenKShortest instead
+// (rmp #1967).
+//
 // USE THE RIGHT ENTRY POINT. This bare function is UNBOUNDED and its worst
 // case is exponential in V (see "Complexity and resource budget" below), so it
 // is appropriate ONLY for small, trusted graphs where every k-th path is

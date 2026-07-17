@@ -22,6 +22,17 @@ type YenPath[W Weight] struct {
 // dst on c using Yen's algorithm (1971). Returns paths sorted by
 // total cost ascending; an empty slice when src cannot reach dst.
 //
+// # Multigraph semantics
+//
+// YenKShortest enumerates NODE-SIMPLE paths: parallel relationships between the
+// same ordered node pair collapse to their minimum-weight edge, so a path is
+// identified by its node sequence. On a multigraph it therefore returns FEWER
+// paths than [KShortestPathsLoopless], which enumerates EDGE-DISTINCT paths
+// (one per parallel relationship, so two results may share a node sequence with
+// different costs). Choose YenKShortest when you want k distinct node
+// sequences; choose KShortestPathsLoopless when parallel edges are themselves
+// distinct routes (rmp #1967).
+//
 // For floating-point Weight types it validates that no edge weight
 // is NaN or +/-Inf and returns nil through the simple entry (and
 // [ErrInvalidInput] through the Ctx variant) otherwise; integer
