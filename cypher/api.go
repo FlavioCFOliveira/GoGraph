@@ -1015,6 +1015,18 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 			"will fail because openCypher requires multigraph semantics",
 			slog.String("hint", "construct the graph with adjlist.Config{Multigraph: true}"))
 	}
+	// openCypher relationships are directed: MATCH/CREATE/MERGE and functions
+	// like type()/startNode()/endNode() assume a stored direction. A
+	// non-directed (undirected) backend stores each edge symmetrically, so
+	// directed pattern matching and traversal silently produce incorrect edge
+	// results. Warn once at construction so the misconfiguration surfaces before
+	// the first query rather than as silently wrong output (#1892).
+	if !g.AdjList().Directed() {
+		slog.Default().Warn("cypher: engine constructed over a non-directed (undirected) graph; "+
+			"openCypher requires directed relationships, so directed pattern matching and "+
+			"traversal will produce incorrect edge results",
+			slog.String("hint", "construct the graph with adjlist.Config{Directed: true}"))
+	}
 	reg := opts.Registry
 	if reg == nil {
 		reg = funcs.DefaultRegistry
