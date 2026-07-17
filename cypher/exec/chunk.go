@@ -343,6 +343,52 @@ func (c *Chunk) AppendValue(j int, v expr.Value) {
 	}
 }
 
+// AppendRowFrom appends the whole logical row srcRow of src to c, one cell per
+// column, WITHOUT boxing a scalar: each source cell is copied into c's matching
+// column through the typed append primitives, and a NULL source cell appends a
+// NULL. It is the row-compaction primitive [ColumnarFilter] uses to copy a
+// passing row from its source batch into its output batch. c and src MUST have
+// the same column count and matching per-column storage (the filter's output
+// chunk is built from the source producer's schema), otherwise the typed append
+// panics on a kind mismatch. It panics on an out-of-range srcRow.
+func (c *Chunk) AppendRowFrom(src *Chunk, srcRow int) {
+	if len(c.cols) != len(src.cols) {
+		panic(fmt.Sprintf("exec: Chunk.AppendRowFrom: column count mismatch: dst %d, src %d",
+			len(c.cols), len(src.cols)))
+	}
+	for j := range src.cols {
+		sc := &src.cols[j]
+		src.checkRow(sc, srcRow)
+		if !isValid(sc, srcRow) {
+			c.AppendNull(j)
+			continue
+		}
+		switch sc.store {
+		case stI64:
+			c.AppendInt64(j, sc.i64[srcRow])
+		case stF64:
+			c.AppendFloat64(j, sc.f64[srcRow])
+		case stStr:
+			c.AppendString(j, sc.str[srcRow])
+		case stBool:
+			c.AppendBool(j, sc.b[srcRow])
+		case stBoxed:
+			c.AppendValue(j, sc.boxed[srcRow])
+		case stDynamic:
+			// A valid cell always has a committed backing; an uncommitted dynamic
+			// column holds no rows, so this arm is unreachable for a valid row.
+		}
+	}
+}
+
+// IsInt64Column reports whether column j's live backing is an unboxed int64
+// slice — the storage the scan emits for a raw NodeID column. The columnar
+// projection's chunk-input fast path uses it to confirm a source column really
+// holds raw NodeIDs before reading them via [Chunk.Int64], falling back to the
+// boxed row path otherwise so a non-int64 column never triggers a kind-mismatch
+// panic on the read path.
+func (c *Chunk) IsInt64Column(j int) bool { return c.cols[j].store == stI64 }
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Builders — dynamic Put API (type-decided, promoting), for NewDynamicChunk
 // ─────────────────────────────────────────────────────────────────────────────

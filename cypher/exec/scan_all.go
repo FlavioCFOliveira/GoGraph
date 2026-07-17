@@ -115,3 +115,41 @@ func (op *AllNodesScan) Close() error {
 func (op *AllNodesScan) rowCountHint() (int, bool) {
 	return len(op.nodeIDs), true
 }
+
+// NewOutputChunk returns a [Chunk] with a single static integer column that
+// AllNodesScan fills with unboxed NodeIDs. It implements [ChunkProducer] (#1704
+// P3): a columnar-aware parent drains the scan column-major, avoiding the
+// per-row [expr.Value] box [AllNodesScan.Next] pays.
+func (op *AllNodesScan) NewOutputChunk(capacity int) *Chunk {
+	return NewChunk(capacity, expr.KindInteger)
+}
+
+// FillChunk appends up to maxRows more NodeIDs, as unboxed int64, into column 0
+// of dst and returns the number appended (0 at end-of-stream). It is the
+// column-major counterpart of [AllNodesScan.Next]: the SAME nodeIDs in the SAME
+// order (advancing the shared op.pos cursor), but written to a typed column with
+// no per-row heap box. Only one of Next/FillChunk drives a given query — the
+// result sink picks the columnar drain or the row drain once — so sharing op.pos
+// between them is sound. It honours context cancellation. It implements
+// [ChunkProducer].
+func (op *AllNodesScan) FillChunk(dst *Chunk, maxRows int) (int, error) {
+	if err := op.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n := 0
+	for n < maxRows && op.pos < len(op.nodeIDs) {
+		if n&4095 == 0 && n > 0 {
+			if err := op.ctx.Err(); err != nil {
+				return n, err
+			}
+		}
+		dst.AppendInt64(0, int64(op.nodeIDs[op.pos]))
+		op.pos++
+		n++
+	}
+	return n, nil
+}
+
+// nodeIDColumnProducer marks AllNodesScan as a [NodeIDColumnProducer]: column 0
+// of its output chunk carries the raw int64 NodeID of the scanned node variable.
+func (op *AllNodesScan) nodeIDColumnProducer() {}

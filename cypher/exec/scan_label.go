@@ -129,3 +129,40 @@ func (op *NodeByLabelScan) rowCountHint() (int, bool) {
 	}
 	return op.cardHint, true
 }
+
+// NewOutputChunk returns a [Chunk] with a single static integer column that
+// NodeByLabelScan fills with unboxed NodeIDs. It implements [ChunkProducer]
+// (#1704 P3): a columnar-aware parent drains the scan column-major, avoiding the
+// per-row [expr.Value] box [NodeByLabelScan.Next] pays.
+func (op *NodeByLabelScan) NewOutputChunk(capacity int) *Chunk {
+	return NewChunk(capacity, expr.KindInteger)
+}
+
+// FillChunk appends up to maxRows more matching NodeIDs, as unboxed int64, into
+// column 0 of dst and returns the number appended (0 at end-of-stream). It is the
+// column-major counterpart of [NodeByLabelScan.Next]: the SAME bitmap iterator in
+// the SAME order, but written to a typed column with no per-row heap box. Only
+// one of Next/FillChunk drives a given query, so sharing op.iter/op.count between
+// them is sound. It honours context cancellation. It implements [ChunkProducer].
+func (op *NodeByLabelScan) FillChunk(dst *Chunk, maxRows int) (int, error) {
+	if err := op.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n := 0
+	for n < maxRows && op.iter.HasNext() {
+		if op.count&4095 == 0 && op.count > 0 {
+			if err := op.ctx.Err(); err != nil {
+				return n, err
+			}
+		}
+		dst.AppendInt64(0, int64(op.iter.Next()))
+		op.count++
+		n++
+	}
+	return n, nil
+}
+
+// nodeIDColumnProducer marks NodeByLabelScan as a [NodeIDColumnProducer]: column
+// 0 of its output chunk carries the raw int64 NodeID of the scanned node
+// variable.
+func (op *NodeByLabelScan) nodeIDColumnProducer() {}

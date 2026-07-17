@@ -105,6 +105,21 @@ type ChunkProducer interface {
 	FillChunk(dst *Chunk, maxRows int) (int, error)
 }
 
+// NodeIDColumnProducer is a [ChunkProducer] whose output chunk carries, at every
+// column that corresponds to a bound node variable, that node's raw int64 NodeID
+// (unboxed) — the "scan row shape". The columnar projection's chunk-input fast
+// path (#1704 P3) reads NodeIDs directly from such a producer via [Chunk.Int64].
+// AllNodesScan, NodeByLabelScan, and [ColumnarFilter] (a passthrough over a scan)
+// implement it; [ColumnarProject] deliberately does NOT — it emits projected
+// values, not raw NodeIDs, so a projection over a projection takes the boxed row
+// path. The marker method is unexported, so the interface is sealed to this
+// package: a consumer in another package can assert against it but cannot forge a
+// non-scan-shaped producer into it.
+type NodeIDColumnProducer interface {
+	ChunkProducer
+	nodeIDColumnProducer()
+}
+
 // ColumnarProducer reports whether this ResultSet's plan can produce its output
 // column-major, returning the [ChunkProducer] when it can. A columnar-aware sink
 // prefers the columnar drain when this returns true; otherwise it drains

@@ -700,3 +700,78 @@ func boxedIs(got, want expr.Value) bool {
 	}
 	return expr.IsTruthy(got.Equal(want))
 }
+
+// TestAppendRowFrom copies rows (including NULLs, across all scalar kinds and a
+// boxed column) from a source chunk into a same-schema destination and asserts the
+// destination cells box back byte-identically — the compaction primitive the
+// columnar filter relies on (#1704 P3).
+func TestAppendRowFrom(t *testing.T) {
+	kinds := []expr.Kind{expr.KindInteger, expr.KindFloat, expr.KindString, expr.KindBool, expr.KindList}
+	src := NewChunk(8, kinds...)
+	// Row 0: all present.
+	src.AppendInt64(0, 256)
+	src.AppendFloat64(1, 1.5)
+	src.AppendString(2, "hi")
+	src.AppendBool(3, true)
+	src.AppendValue(4, expr.ListValue{expr.IntegerValue(1)})
+	// Row 1: all NULL.
+	for j := range kinds {
+		src.AppendNull(j)
+	}
+	// Row 2: mixed present/null.
+	src.AppendInt64(0, -7)
+	src.AppendNull(1)
+	src.AppendString(2, "")
+	src.AppendNull(3)
+	src.AppendValue(4, expr.ListValue{})
+
+	dst := NewChunk(8, kinds...)
+	for row := 0; row < 3; row++ {
+		dst.AppendRowFrom(src, row)
+	}
+	if dst.Len() != 3 {
+		t.Fatalf("dst.Len()=%d, want 3", dst.Len())
+	}
+	for row := 0; row < 3; row++ {
+		for j := range kinds {
+			got, want := dst.BoxCell(j, row), src.BoxCell(j, row)
+			gN, wN := expr.IsNull(got), expr.IsNull(want)
+			if gN != wN {
+				t.Fatalf("cell (%d,%d): null mismatch got=%v want=%v", j, row, gN, wN)
+			}
+			if !wN && !expr.IsTruthy(got.Equal(want)) {
+				t.Fatalf("cell (%d,%d): got=%#v want=%#v", j, row, got, want)
+			}
+		}
+	}
+}
+
+// TestAppendRowFromColumnCountMismatch asserts AppendRowFrom rejects a schema
+// mismatch loudly (programmer error), never producing a ragged chunk.
+func TestAppendRowFromColumnCountMismatch(t *testing.T) {
+	src := NewChunk(4, expr.KindInteger, expr.KindInteger)
+	src.AppendInt64(0, 1)
+	src.AppendInt64(1, 2)
+	dst := NewChunk(4, expr.KindInteger)
+	mustPanic(t, "AppendRowFrom column mismatch", func() { dst.AppendRowFrom(src, 0) })
+}
+
+// TestIsInt64Column reports the storage of static and dynamic columns so the
+// columnar projection's chunk-input fast path can confirm a raw NodeID column.
+func TestIsInt64Column(t *testing.T) {
+	c := NewChunk(4, expr.KindInteger, expr.KindFloat)
+	if !c.IsInt64Column(0) {
+		t.Errorf("static integer column: IsInt64Column=false, want true")
+	}
+	if c.IsInt64Column(1) {
+		t.Errorf("float column: IsInt64Column=true, want false")
+	}
+	d := NewDynamicChunk(4, 1)
+	if d.IsInt64Column(0) {
+		t.Errorf("uncommitted dynamic column: IsInt64Column=true, want false")
+	}
+	d.PutInt64(0, 5)
+	if !d.IsInt64Column(0) {
+		t.Errorf("dynamic column committed to int64: IsInt64Column=false, want true")
+	}
+}
