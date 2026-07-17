@@ -429,6 +429,14 @@ func (v *visitor) VisitStandaloneCall(ctx *gen.StandaloneCallContext) interface{
 				return err
 			}
 			c.Yield = yield
+			// A WHERE predicate on the YIELD sub-clause filters the yielded
+			// rows (openCypher). The grammar attaches it to the YieldItems rule;
+			// without capturing it here the predicate was silently dropped (#1966).
+			where, werr := v.visitWhere(yi.Where())
+			if werr != nil {
+				return &SemaError{Rule: "call yield where", Pos: positionOf(ctx), Message: werr.Error()}
+			}
+			c.Where = where
 		}
 	}
 
@@ -532,6 +540,12 @@ func (v *visitor) VisitQueryCallSt(ctx *gen.QueryCallStContext) interface{} {
 			return err
 		}
 		c.Yield = yield
+		// WHERE on the YIELD sub-clause filters the yielded rows (#1966).
+		where, werr := v.visitWhere(yi.Where())
+		if werr != nil {
+			return &SemaError{Rule: "call yield where", Pos: positionOf(ctx), Message: werr.Error()}
+		}
+		c.Where = where
 	}
 	return c
 }

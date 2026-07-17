@@ -346,6 +346,13 @@ func (t *translator) callClause(c *ast.Call, child LogicalPlan) (LogicalPlan, er
 	}
 	pc := NewProcedureCall(c.Namespace, c.Procedure, args, yieldVars, child)
 	pc.YieldSourceNames = sourceNames
+	// A WHERE predicate on the YIELD sub-clause (CALL proc() YIELD x WHERE …)
+	// filters the yielded rows, exactly like WITH … WHERE. Lift it as a
+	// Selection over the ProcedureCall; without this the predicate was silently
+	// dropped and every yielded row survived (#1966).
+	if c.Where != nil && c.Where.Predicate != nil {
+		return NewSelectionExpr(c.Where.Predicate.String(), c.Where.Predicate, pc), nil
+	}
 	return pc, nil
 }
 
