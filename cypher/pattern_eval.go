@@ -259,18 +259,28 @@ func (pe *patternEvaluator) enumerateSteps(ctx context.Context, srcID graph.Node
 }
 
 // candidateHop describes one (rel, dst) traversal candidate found by
-// enumerateSteps.
+// enumerateSteps. handle is the stable per-edge handle stamped on the specific
+// adjacency slot this candidate came from (0 when the graph carries no handles,
+// e.g. a simple-graph or pre-handle storage). It lets [relValueFromHop] report
+// the type of THIS parallel instance rather than the whole pair's deterministic
+// pick, so an untyped `[r]` over a multi-type parallel pair enumerates each
+// instance's own type(r) (rmp #2017).
 type candidateHop struct {
 	srcID, dstID   graph.NodeID
 	srcKey, dstKey string
+	handle         uint64
 	forward        bool
 }
 
 func (pe *patternEvaluator) collectOutgoingCandidates(srcID graph.NodeID, srcKey string, s step) []candidateHop {
 	mapper := pe.g.AdjList().Mapper()
-	nbs, _ := pe.g.AdjList().LoadEntry(srcID)
+	// LoadEntryH exposes the per-slot handle column parallel to neighbours, so a
+	// multigraph's parallel slots each carry their own edge identity. handles is
+	// nil (or shorter) when the graph stores no handles; a missing handle degrades
+	// to 0, which relValueFromHop resolves via the per-pair fallback.
+	nbs, _, handles := pe.g.AdjList().LoadEntryH(srcID)
 	out := make([]candidateHop, 0, len(nbs))
-	for _, dstID := range nbs {
+	for i, dstID := range nbs {
 		dstKey, ok := mapper.Resolve(dstID)
 		if !ok {
 			continue
@@ -278,7 +288,11 @@ func (pe *patternEvaluator) collectOutgoingCandidates(srcID graph.NodeID, srcKey
 		if !pe.edgeMatchesRel(srcKey, dstKey, s.rel) {
 			continue
 		}
-		out = append(out, candidateHop{srcID: srcID, dstID: dstID, srcKey: srcKey, dstKey: dstKey, forward: true})
+		var handle uint64
+		if i < len(handles) {
+			handle = handles[i]
+		}
+		out = append(out, candidateHop{srcID: srcID, dstID: dstID, srcKey: srcKey, dstKey: dstKey, handle: handle, forward: true})
 	}
 	return out
 }
@@ -290,16 +304,23 @@ func (pe *patternEvaluator) collectIncomingCandidates(dstID graph.NodeID, dstKey
 		if candidateID == dstID {
 			return true
 		}
-		nbs, _ := pe.g.AdjList().LoadEntry(candidateID)
-		for _, nb := range nbs {
+		// Emit one candidate PER parallel slot pointing at dstID (not just the
+		// first), each carrying its own handle, so an untyped `[r]` incoming hop
+		// over a multi-type parallel pair enumerates every instance — mirroring
+		// the outgoing path and the primary Expand path (rmp #2017).
+		nbs, _, handles := pe.g.AdjList().LoadEntryH(candidateID)
+		for i, nb := range nbs {
 			if nb != dstID {
 				continue
 			}
 			if !pe.edgeMatchesRel(candidateKey, dstKey, s.rel) {
 				continue
 			}
-			out = append(out, candidateHop{srcID: candidateID, dstID: dstID, srcKey: candidateKey, dstKey: dstKey, forward: false})
-			break
+			var handle uint64
+			if i < len(handles) {
+				handle = handles[i]
+			}
+			out = append(out, candidateHop{srcID: candidateID, dstID: dstID, srcKey: candidateKey, dstKey: dstKey, handle: handle, forward: false})
 		}
 		return true
 	})
@@ -352,18 +373,30 @@ func relValueFromHop(g *lpg.Graph[string, float64], hop candidateHop, rel *ast.R
 	if rel != nil {
 		relTypes = rel.Types
 	}
-	// Reuse the engine's canonical multi-label resolver: prefer a label that
-	// the pattern's type filter accepts, else the deterministic
-	// alphabetically-smallest label. [Graph.EdgeLabels] returns the UNION of
-	// the types over all parallel edges between the pair, in unspecified order,
-	// so a `[r:SECOND]` hop over a multi-type parallel pair such as
-	// (a)-[:FIRST]->(b) / (a)-[:SECOND]->(b) must report SECOND rather than
-	// whichever type EdgeLabels happened to list first (rmp #2016, sibling of
-	// the edgeMatchesRel fix). An untyped `[r]` hop over such a pair remains
-	// inherently ambiguous for this key-based enumerator (it cannot tell which
-	// parallel instance produced the hop); the RollUpApply lowering — the
-	// primary comprehension path — resolves that case per instance.
-	typeName := pickEdgeType(g.EdgeLabels(srcKey, dstKey), relTypes)
+	// Resolve the type of THIS parallel instance by its stable handle when one
+	// is available: [Graph.EdgeLabelsByHandleID] returns only the labels
+	// recorded for hop.handle on the stored (srcID → dstID) pair, so each
+	// parallel slot reports its own type. This makes an untyped `[r]` hop over a
+	// multi-type parallel pair such as (a)-[:FIRST]->(b) / (a)-[:SECOND]->(b)
+	// enumerate FIRST for one instance and SECOND for the other, rather than the
+	// single deterministic per-pair pick both instances used to collapse onto
+	// (rmp #2017). The handle store is keyed by the STORED edge direction
+	// (hop.srcID → hop.dstID) regardless of traversal direction, so it is looked
+	// up before the forward/reverse orientation swap above.
+	//
+	// The per-pair union is the fallback for a handle-less slot (handle 0 —
+	// simple-graph / pre-handle storage) or a handle that carries no per-instance
+	// label: [Graph.EdgeLabels] returns the UNION of the types over all parallel
+	// edges between the pair, and pickEdgeType prefers a label the pattern's type
+	// filter accepts, else the deterministic alphabetically-smallest label. A
+	// typed `[r:SECOND]` hop still reports SECOND via that pick even without a
+	// handle (rmp #2016).
+	var typeName string
+	if instanceLabels := g.EdgeLabelsByHandleID(hop.srcID, hop.dstID, hop.handle); len(instanceLabels) > 0 {
+		typeName = pickEdgeType(instanceLabels, relTypes)
+	} else {
+		typeName = pickEdgeType(g.EdgeLabels(srcKey, dstKey), relTypes)
+	}
 	// Stream the coalesced properties straight into the expr map (M2 / #1662),
 	// dropping the transient lpg map the prior two-step build allocated per hop.
 	props := edgePropsToExprMap(g, srcKey, dstKey)
