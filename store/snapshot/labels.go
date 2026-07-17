@@ -124,9 +124,20 @@ const maxRegistryCaptureRetries = 8
 // nothing written or truncated — the identical fail-safe posture
 // [Checkpointer.truncatePrefixLocked] uses for a schema DDL racing phase 2,
 // #1774), never a Consistency violation.
+func WriteLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int64, crc uint32, err error) {
+	return writeLabels(w, g, snapshotRegistry)
+}
+
+// writeLabels is the seam-injected body of [WriteLabels]. snapReg captures the
+// label-name table at the top of every self-heal attempt; production passes the
+// real [snapshotRegistry] and the retry-loop wiring tests substitute a per-call
+// closure that interns a fresh, node-attached label to force a re-capture
+// deterministically (#1890). snapReg is an ordinary per-call parameter — there
+// is no package-level mutable state, so writeLabels stays exactly as re-entrant
+// and safe for concurrent independent calls as the code it replaced.
 //
 //nolint:gocyclo // labels write: header + string table + node records + edge records, each guarded
-func WriteLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int64, crc uint32, err error) {
+func writeLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], snapReg func(*lpg.LabelRegistry) []string) (size int64, crc uint32, err error) {
 	defer metrics.Time("store.snapshot.WriteLabels").Stop()
 
 	bw := bufio.NewWriterSize(w, 1<<20)
@@ -160,7 +171,7 @@ func WriteLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int
 	var nodeRecs []NodeLabelEntry
 	var edgeRecs []EdgeLabelEntry
 	for attempt := 0; ; attempt++ {
-		names = snapshotRegistry(reg)
+		names = snapReg(reg)
 		var cerr error
 		nodeRecs, cerr = collectNodeLabelRecords(g, names)
 		if cerr == nil {

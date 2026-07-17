@@ -179,9 +179,31 @@ const propertiesCapHintMax = 1 << 20
 // sustained churn falls back to the prior fail-stop — a clean abort of
 // this checkpoint attempt with nothing written or truncated — never a
 // silently inconsistent record.
+func WriteProperties[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int64, crc uint32, err error) {
+	return writeProperties(w, g, snapshotPropertyKeys, newPropValueArena)
+}
+
+// newPropValueArena is the production value-arena factory: it hands writeProperties
+// a fresh, empty [propValueArena] for each self-heal attempt.
+func newPropValueArena() *propValueArena { return &propValueArena{} }
+
+// writeProperties is the seam-injected body of [WriteProperties]. snapKeys
+// captures the property-key table and newArena allocates the per-attempt value
+// arena at the top of every self-heal attempt; production passes the real
+// [snapshotPropertyKeys] and [newPropValueArena], and the retry-loop wiring tests
+// substitute per-call closures — one that interns a fresh key to force a
+// re-capture, and one that records every arena handed out so the "fresh arena per
+// attempt" invariant can be asserted (#1890). Both are ordinary per-call
+// parameters — there is no package-level mutable state, so writeProperties stays
+// exactly as re-entrant and safe for concurrent independent calls as before.
 //
 //nolint:gocyclo // properties write: header + key table + node records + edge records, each guarded
-func WriteProperties[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int64, crc uint32, err error) {
+func writeProperties[N comparable, W any](
+	w io.Writer,
+	g *lpg.Graph[N, W],
+	snapKeys func(*lpg.PropertyKeyRegistry) []string,
+	newArena func() *propValueArena,
+) (size int64, crc uint32, err error) {
 	defer metrics.Time("store.snapshot.WriteProperties").Stop()
 
 	bw := bufio.NewWriterSize(w, 1<<20)
@@ -214,10 +236,10 @@ func WriteProperties[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size
 	var nodeRecs []NodePropertyEntry
 	var edgeRecs []EdgePropertyEntry
 	for attempt := 0; ; attempt++ {
-		keys = snapshotPropertyKeys(g.PropertyKeys())
+		keys = snapKeys(g.PropertyKeys())
 		// A fresh arena per attempt; the surviving records' ValueBytes are
 		// sub-slices into it and keep its backing arrays alive via the GC.
-		arena := &propValueArena{}
+		arena := newArena()
 		var cerr error
 		nodeRecs, cerr = collectNodePropertyRecords(g, keys, arena)
 		if cerr == nil {
