@@ -1327,6 +1327,18 @@ deferred precisely to avoid the Isolation violation). Not pushed. Per-symbol
 `Function`/`Test` fidelity for the new files trails the code layer (the new
 `Type`s and provenance layer are recorded).
 
+Addendum — sprint 296 (2026-07-17, +2 commits, exhausting the developable
+backlog): `55d58dc` SHOW CONSTRAINTS/INDEXES `YIELD`/`WHERE`/`RETURN` projection
+(#2044, token-neutral: the SHOW tail is re-parsed as a synthetic `CALL __g.s()`
+clause to reuse the ANTLR expression grammar; `cypher/ir`+`cypher`); `a5a1772`
+columnar scalar-column passthrough for WITH-projection (#2045 Part A —
+`Chunk.CopyCellTo`, no sink-time live read, so free of the P4/P5 blocker;
+WithFilterPassthrough 5324→118 allocs/op; `cypher`+`cypher/exec`). Part B
+(EagerAggregation unboxed grouping-key hashing) split to #2049 — it must
+replicate openCypher float64-domain group equivalence, a correctness-critical
+TCK-covered path. After this sprint every remaining backlog `Task` is either
+ACID/snapshot-foundation-blocked or deferred by an explicit user decision.
+
 ## Known limitations (faithful, by design)
 
 - **Build-tag duplicates.** The extractor parses every `.go` file regardless of build
