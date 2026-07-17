@@ -208,42 +208,43 @@ func TestCanonicalKeyHash_IntFloatAgree(t *testing.T) {
 	}
 }
 
-// TestCanonicalKeyHash_LargeIntFloatAgree is the regression gate for rmp
-// #1865/#1868: an independent, opposite-direction cross-type fold
-// (float→integer, converting an integral float to an int64 and hashing
-// THAT) disagreed with expr.EquivalentHash's integer→float direction for any
-// pair where float64 rounding makes an out-of-int64-mantissa-range integer
-// and a float collapse to the same float64 value — exactly the pair
-// expr.Value.Equal itself treats as equal (it compares via
-// float64(a)==float64(b)). Before the fix this silently dropped a matching
-// row from the join output instead of erroring.
-func TestCanonicalKeyHash_LargeIntFloatAgree(t *testing.T) {
-	// 2^53+1 is not exactly representable in float64; it rounds to 2^53, the
-	// same value float64(2^53) already has — so Equal treats the pair as
-	// equal, and canonicalKeyHash must agree.
+// TestCanonicalKeyHash_LargeIntFloatBenignCollision documents the post-#2050
+// invariant at the large boundary: int 2^53+1 and float 2^53.0 are NOT equal
+// (exact cross-type comparison, CIP2016-06-14 — 2^53+1 is not representable as
+// float64) yet they share a canonicalKeyHash bucket because both fold through
+// 2^53.0's float64 bits. This is a BENIGN collision: HashJoin verifies every
+// bucket hit with expr.Value.Equal (see advanceProbe), so the pair is
+// correctly separated and never over-matched. The #1865 hash-consistency
+// property that motivated this hash — EQUAL values never hash apart — is pinned
+// separately by TestCanonicalKeyHash_IntFloatAgree (int 5 vs float 5.0), the
+// case whose divergent Value.Hash implementations actually triggered #1865.
+func TestCanonicalKeyHash_LargeIntFloatBenignCollision(t *testing.T) {
+	// 2^53+1 is not exactly representable in float64; it rounds to 2^53.0, which
+	// is a DIFFERENT number — so Equal treats the pair as UNEQUAL, while the
+	// bucketing hash still collapses them (collision resolved by the Equal check).
 	const big = int64(1) << 53
 	huge := expr.IntegerValue(big + 1)
 	rounded := expr.FloatValue(float64(big))
-	if !toBoolValue(t, huge.Equal(rounded)) {
-		t.Fatalf("precondition failed: Equal(%v, %v) = false, want true (float64 rounding collapses both to %g)", huge, rounded, float64(big))
+	if toBoolValue(t, huge.Equal(rounded)) {
+		t.Fatalf("Equal(%v, %v) = true, want false — 2^53+1 is a distinct number from 2^53.0", huge, rounded)
 	}
 	if canonicalKeyHash(huge) != canonicalKeyHash(rounded) {
-		t.Fatalf("canonicalKeyHash(%v)=%d != canonicalKeyHash(%v)=%d, but Equal says they match — a HashJoin would silently drop this row",
-			huge, canonicalKeyHash(huge), rounded, canonicalKeyHash(rounded))
+		t.Fatalf("expected the same (benign) hash bucket for %v and %v", huge, rounded)
 	}
 }
 
-// TestHashJoin_LargeIntFloatMatches drives the same scenario through the
-// real HashJoin operator end-to-end, proving the fix closes the actual
-// silently-wrong-result bug, not just the unit-level hash disagreement.
-func TestHashJoin_LargeIntFloatMatches(t *testing.T) {
+// TestHashJoin_LargeIntFloatNoMatch drives the corrected exact semantics
+// (rmp #2050) through the real HashJoin operator end-to-end: int 2^53+1 and
+// float 2^53.0 are distinct numbers, so despite sharing a hash bucket the join
+// must NOT match them — the per-bucket Equal check separates them.
+func TestHashJoin_LargeIntFloatNoMatch(t *testing.T) {
 	const big = int64(1) << 53
 	probe := &sliceSource{rows: []Row{{expr.IntegerValue(big + 1)}}}
 	build := &sliceSource{rows: []Row{{expr.FloatValue(float64(big))}}}
 	hj := NewHashJoin(build, probe, keyCol(0), keyCol(0), false)
 	got := drainJoin(t, hj)
-	if len(got) != 1 {
-		t.Fatalf("HashJoin(2^53+1, float64(2^53)) produced %d rows, want 1 — Equal treats them as equal (both round to the same float64), so the join must not silently drop this match", len(got))
+	if len(got) != 0 {
+		t.Fatalf("HashJoin(2^53+1, float64(2^53)) produced %d rows, want 0 — they are distinct numbers", len(got))
 	}
 }
 

@@ -86,46 +86,53 @@ func Equivalent(a, b Value) bool {
 }
 
 // hashFloatBits returns the equivalence-consistent hash for the canonical
-// (non-NaN) float64 representation f. Shared by the FloatValue, IntegerValue,
-// NodeValue, RelationshipValue, and *LazyNodeValue branches of
-// [EquivalentHash]: [Value.Equal] compares a cross-type Integer/Float pair
-// (and, symmetrically, an Integer against a node/relationship's raw ID) via
-// float64(a) == float64(b), so every one of these types must hash through
-// this exact same float64 domain to stay consistent — whatever precision the
-// comparison tolerates, the hash must tolerate identically.
+// (non-NaN) float64 representation f. It is the shared bucketing hash for the
+// FloatValue, IntegerValue, NodeValue, RelationshipValue, and *LazyNodeValue
+// branches of [EquivalentHash]: each of those routes its numeric or identity
+// payload through this one float64 domain so that every pair the comparator
+// treats as EQUAL lands in the same bucket.
 //
-// # Hash-quality trade-off above 2^53 is unavoidable, not a shortcut
+// # Why the shared float64 domain stays consistent with the exact comparator
+//
+// [Value.Equal]'s cross-type Integer/Float comparison is EXACT (see
+// [IntegerValue.Equal] / [intEqualsFloat]): an integer k equals a float f only
+// when f is a whole number in int64 range with int64(f) == k — and for every
+// such pair float64(k) == f holds exactly (k is f's exact integer value, which
+// f already represents as a float64), so hashFloatBits(float64(k)) ==
+// hashFloatBits(f). Integer-vs-integer equality, and node/relationship-identity
+// against an Integer carrying the raw ID, are likewise exact int64 comparisons
+// whose operands hash through the same float64 image. The [EquivalentHash]
+// invariant this file exists to satisfy — a Equivalent b ⟹ same hash —
+// therefore holds.
+//
+// # Benign collisions above 2^53 are bucket sharing, not equality
 //
 // float64 has a 53-bit mantissa, so two distinct int64/uint64 values beyond
-// 2^53 can round to the identical float64 bit pattern (e.g. 2^53+1 and 2^53
-// both round to 2^53) — and [Value.Equal] itself, via the float64(a)==
-// float64(b) comparison above, ALREADY treats such a pair as equal. Any hash
-// function kept consistent with that comparison (the [EquivalentHash]
-// contract this whole file exists to satisfy) MUST therefore also collapse
-// that pair to the same hash — there is no lossless-above-2^53 hash domain
-// that stays consistent with a comparison that is itself lossy there. The
-// alternative (routing IntegerValue/NodeValue/etc. through their own
-// lossless raw-bit hash instead) was tried independently in
-// cypher/exec/hash_join.go's canonicalKeyHash and produced exactly the
-// opposite defect: a hash that DISAGREED with Equal for such a pair, so a
-// HashJoin silently dropped a matching row instead of erroring (rmp #1865,
-// fixed by making canonicalKeyHash delegate to EquivalentHash instead of
-// reimplementing this fold independently).
+// 2^53 can round to the identical float64 bit pattern (e.g. 2^53 and 2^53+1
+// both round to 2^53.0). Such values share a hash bucket here, but the exact
+// comparator ([Equivalent] / [Value.Equal]) keeps them DISTINCT: a collision
+// only costs a longer collision chain, never a wrong equality result. This is
+// exactly the benign collision integer-vs-integer keys ≥ 2^53 already incur
+// (IntegerValue.Equal has always compared int64 bits directly), now shared
+// uniformly by the integer-vs-float case too. The alternative — giving
+// IntegerValue/NodeValue/etc. their own lossless raw-bit hash — was tried
+// independently in cypher/exec/hash_join.go's canonicalKeyHash and produced the
+// opposite defect: a hash that DISAGREED with Equal for an EQUAL pair (1 vs
+// 1.0, whose Value.Hash implementations diverge), so a HashJoin silently
+// dropped a matching row (rmp #1865, fixed by making canonicalKeyHash delegate
+// to EquivalentHash rather than reimplement this fold).
 //
-// The measurable consequence is bounded, not unbounded: DISTINCT/GROUP BY
-// over adjacent integers beyond 2^53 degrades to a longer collision chain
-// (measured 7.7-10.9x slower for that specific access pattern, chain length
-// bounded by the number of distinct float64 bit patterns reachable in the
-// probed range — roughly 1024-2048 for adjacent-integer inputs, 2026-07-02
-// production-readiness audit round 2) rather than the correctness this
-// function exists to preserve. The package-cypher aggregate-DISTINCT value
-// cap and [exec.DefaultMaxDistinct]/[exec.DefaultMaxGroups] independently
-// bound the absolute amount of work any single query can force regardless
-// of this collision behaviour, so the trade-off is a measured, cited,
-// structurally bounded performance characteristic — not a data-safety or
-// DoS concern —
-// and changing it would reopen the exact inconsistency this file's own
-// [Equivalent]/[EquivalentHash] split exists to close.
+// The measurable consequence is bounded, not unbounded: DISTINCT/GROUP BY over
+// adjacent integers beyond 2^53 degrades to a longer collision chain (measured
+// 7.7-10.9x slower for that specific access pattern, chain length bounded by
+// the number of distinct float64 bit patterns reachable in the probed range —
+// roughly 1024-2048 for adjacent-integer inputs, 2026-07-02 production-readiness
+// audit round 2) rather than any correctness loss. The package-cypher
+// aggregate-DISTINCT value cap and [exec.DefaultMaxDistinct] /
+// [exec.DefaultMaxGroups] independently bound the absolute amount of work any
+// single query can force regardless of this collision behaviour, so the
+// trade-off is a measured, cited, structurally bounded performance
+// characteristic — not a data-safety or DoS concern.
 func hashFloatBits(f float64) uint64 {
 	// Canonicalise -0.0 → +0.0 so both map to the same hash.
 	// (IEEE 754: -0.0 == +0.0, so they must be equivalent.)

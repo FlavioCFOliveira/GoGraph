@@ -175,9 +175,12 @@ func (v IntegerValue) Hash() uint64 {
 func (v IntegerValue) String() string { return fmt.Sprintf("%d", int64(v)) }
 
 // Equal returns Null if other is Null, BoolValue(true) when both sides
-// hold the same numeric value (cross-type Int/Float comparison treats
-// 1 == 1.0 as true, per openCypher numeric equality), BoolValue(false)
-// otherwise.
+// hold the same numeric value, BoolValue(false) otherwise. A cross-type
+// Int/Float comparison is EXACT per CIP2016-06-14 (unlimited-precision
+// numeric equality via [intEqualsFloat]): 1 == 1.0 and 2^53 == 2^53.0 are
+// true, but a large integer that no float64 can represent — e.g. 2^53+1 —
+// is NOT equal to the nearest float (2^53.0), and no float with a fractional
+// part, NaN or ±Inf equals any integer.
 func (v IntegerValue) Equal(other Value) Value {
 	if IsNull(other) {
 		return Null
@@ -186,7 +189,7 @@ func (v IntegerValue) Equal(other Value) Value {
 	case IntegerValue:
 		return BoolValue(v == o)
 	case FloatValue:
-		return BoolValue(float64(v) == float64(o))
+		return BoolValue(intEqualsFloat(int64(v), float64(o)))
 	case NodeValue:
 		// Symmetric with NodeValue.Equal — accept a raw NodeID as equal
 		// to the projected NodeValue when the underlying IDs match.
@@ -219,8 +222,11 @@ func (v FloatValue) Hash() uint64 {
 func (v FloatValue) String() string { return fmt.Sprintf("%g", float64(v)) }
 
 // Equal returns Null if other is Null, BoolValue per IEEE-754 equality
-// otherwise (NaN != NaN). Cross-type Int/Float comparison treats
-// 1.0 == 1 as true, per openCypher numeric equality.
+// otherwise (NaN != NaN). A cross-type Float/Int comparison is EXACT per
+// CIP2016-06-14 (unlimited-precision numeric equality via [intEqualsFloat]):
+// 1.0 == 1 and 2^53.0 == 2^53 are true, but float 2^53.0 does NOT equal the
+// distinct integer 2^53+1 (which no float64 can represent), and a float with
+// a fractional part, NaN or ±Inf never equals any integer.
 func (v FloatValue) Equal(other Value) Value {
 	if IsNull(other) {
 		return Null
@@ -229,7 +235,7 @@ func (v FloatValue) Equal(other Value) Value {
 	case FloatValue:
 		return BoolValue(float64(v) == float64(o))
 	case IntegerValue:
-		return BoolValue(float64(v) == float64(o))
+		return BoolValue(intEqualsFloat(int64(o), float64(v)))
 	}
 	return BoolValue(false)
 }
@@ -1032,6 +1038,26 @@ func cmpInt64Float64(i int64, f float64) int {
 		return -1
 	}
 	return 0
+}
+
+// intEqualsFloat reports whether the integer i and the float f denote the exact
+// same number, per the CIP2016-06-14 unlimited-precision numeric equality that
+// openCypher mandates for cross-type INTEGER↔FLOAT comparison. A float with a
+// fractional part, a NaN, an ±Inf, or a whole value outside int64 range is never
+// equal to any integer; a whole float within int64 range equals the integer
+// with that exact value.
+//
+// It is the single source of truth for cross-type numeric equality: the `=`
+// operator ([IntegerValue.Equal] / [FloatValue.Equal]), list/map element
+// equality, DISTINCT/grouping equivalence ([Equivalent]), and HashJoin key
+// matching all inherit their exactness from here. It shares [cmpInt64Float64]
+// with [Compare], so value equality and ORDER BY agree exactly on the Number
+// tier: intEqualsFloat is true iff cmpInt64Float64 reports the two as
+// ordering-equal. The pre-2^53 lossy `float64(i) == f` path this replaced
+// wrongly equated e.g. int 2^53+1 (not representable as float64) with float
+// 2^53.0.
+func intEqualsFloat(i int64, f float64) bool {
+	return cmpInt64Float64(i, f) == 0
 }
 
 // cmpUint64 returns -1, 0, or +1 for two uint64 values.

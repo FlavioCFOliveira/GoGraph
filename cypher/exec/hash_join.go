@@ -324,15 +324,17 @@ func isUnjoinableKey(v expr.Value) bool {
 //
 // Delegates to [expr.EquivalentHash] rather than reimplementing the
 // cross-type fold independently: an earlier, independent version of this
-// function converted an integral float to an int64 and hashed THAT (the
-// opposite direction from EquivalentHash's fix, which routes an integer
-// through the float64 domain) — the two hash domains disagreed for any pair
-// where the int64-vs-float64 rounding differs, e.g. an integer beyond 2^53
-// and its float64-truncated neighbour, which [expr.Value.Equal] itself
-// compares via float64(a)==float64(b) and therefore treats as equal. That
-// mismatch silently dropped a matching row from the join output — a bucket
-// miss is indistinguishable from "no match" to a caller, so the failure was
-// never an error, just a wrong (too-small) result (rmp #1865).
+// function converted an integral float to an int64 and hashed THAT (folding
+// int64 bits), the opposite direction from EquivalentHash, which routes an
+// integer through the float64 domain — so the two hash domains disagreed for
+// an EQUAL cross-type pair whose Value.Hash implementations diverge, e.g.
+// integer 1 and float 1.0. That mismatch silently dropped a matching row from
+// the join output — a bucket miss is indistinguishable from "no match" to a
+// caller, so the failure was never an error, just a wrong (too-small) result
+// (rmp #1865). Note that expr.Value.Equal's cross-type numeric comparison is
+// EXACT: values ≥ 2^53 that share a float64 image but are unequal (e.g. int
+// 2^53+1 vs float 2^53.0) simply share a bucket here and are correctly
+// separated by the per-bucket Equal check (line ~224), never over-matched.
 //
 // EquivalentHash's contract — Equivalent(a,b) ⟹ same hash — is safe to reuse
 // here even though HashJoin's own equality semantics are Equal (`=`), not
