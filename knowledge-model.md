@@ -1296,6 +1296,37 @@ gated through `make ci`. #1827 DEFERRED (depends-on #1712, async checkpoint;
 current synchronous publish is crash-atomic). Full graph-store re-sync and the
 rmp Task/Sprint layer back-fill still trail the code layer.
 
+Incrementally synced at commits `1c9b079`..`8d66dfa` (2026-07-17,
+production-readiness cycle, sprints 292–295, 12 commits): `Sprint` nodes 292–295
+and a `Commit` node per commit (with `sprintId`, `TOUCHES`→`Package`,
+`CLOSES`→`Sprint`, `TOUCHES`→new `Type`s), provenance stamped `2026-07-17`.
+Sprint 292 (actionable backlog): Bolt reassembly buffer charged vs the aggregate
+`InboundBudget` (#1891, `bolt/proto`+`bolt/packstream`+`bolt/server`); snapshot
+self-heal retry-loop test-depth (#1890, `store/snapshot`); `buildEdgeTypeFilter`
+fallback via `ForEachEdgeLabelByID`, −44% allocs (#1877, `cypher`); new `Type`
+`LabelCountScan` in `cypher/exec` — O(1) count over a bare label scan, 199,813→30
+allocs (#2004); SHOW CONSTRAINTS/INDEXES via the hand-written DDL parser (no
+ANTLR) with new `Type`s `ShowConstraints`/`ShowIndexes` (`cypher/ir`) and
+`StaticRows` (`cypher/exec`) (#1922); typed zero-box streaming Bolt RECORD encode
+(#1838, `bolt/server`); O(N) CREATE CONSTRAINT/INDEX cost doc (#1923). Sprint 293:
+deprecate the unbounded `search.KShortestPathsLoopless` foot-gun (#1997/#2006,
+`search`). Sprint 294 (**#1704 columnar value-model EPIC, core delivered**): new
+`Type`s `Chunk` (P1 #1822), `ColumnarProject` (P2 #1823), `ColumnarFilter` (P3
+#1824) in `cypher/exec` — read-path scalar boxing eliminated, `EngReadProject`
+5309→89 allocs/op (−98.3%), −61% time, TCK 3897 held incl. temporal; P4 #1825
+(entity lazy-columns) and P5 #1826 (bounded-morsel Bolt streaming) DEFERRED —
+both require the immutable pinned-snapshot foundation not yet implemented
+(`isolation-design.md`; #1525 spike), materialise-at-sink of an id-only entity
+column would read the graph outside the `visMu` visibility barrier (ACID
+Isolation violation). Sprint 295 (grooming): #2036 keep the deliberate lenient
+null-whole-map-param behaviour (documented in `create_node.go`); #2005 closed as
+split → new backlog `Task`s #2046 (CALL{}), #2047 (COLLECT{}), #2048 (POINT),
+plus #2044 (SHOW YIELD) and #2045 (WITH/aggregation columnar consumption). Both
+compliance mandates hold: TCK 3897 green throughout; ACID preserved (P4/P5
+deferred precisely to avoid the Isolation violation). Not pushed. Per-symbol
+`Function`/`Test` fidelity for the new files trails the code layer (the new
+`Type`s and provenance layer are recorded).
+
 ## Known limitations (faithful, by design)
 
 - **Build-tag duplicates.** The extractor parses every `.go` file regardless of build
