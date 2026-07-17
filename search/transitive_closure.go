@@ -24,12 +24,12 @@ import (
 // compaction map, so the public contract is unchanged for live nodes.
 //
 // Behaviour for non-live slots: a NodeID with no incident edge (a ghost
-// padding slot, or a present but isolated node) is not in the live set,
-// so [TC.Reachable] reports it unreachable from anything and unreachable
-// to anything — including from itself. This matches [APSP.At]
-// (Floyd-Warshall), which already excludes non-live slots, and fixes a
-// prior over-report where the uncompacted matrix seeded a reflexive
-// diagonal bit for every ghost padding slot in [0, MaxNodeID()).
+// padding slot, or a present but isolated node) is not in the live set, so
+// [TC.Reachable] reports it unreachable from and to any OTHER node. Every
+// NodeID within [0, MaxNodeID()) is nonetheless reachable from ITSELF via the
+// empty walk, matching [APSP.At] (Floyd-Warshall), which returns (0, true) for
+// i == j regardless of liveness (#2040). The compaction still bounds the
+// matrix at O(live^2) instead of O(MaxNodeID()^2).
 //
 // TC is safe for concurrent reads.
 type TC struct {
@@ -40,14 +40,23 @@ type TC struct {
 	bits    []uint64
 }
 
-// Reachable reports whether dst is reachable from src in the
-// original graph. Reachable returns false when either NodeID lies
-// outside the universe captured by the closure — out of NodeID range,
-// or a non-live (ghost / isolated) slot (a defensive check at the API
-// boundary, not a correctness contract for trusted callers).
+// Reachable reports whether dst is reachable from src in the original graph.
+// A NodeID within the captured universe ([0, MaxNodeID())) always reaches
+// ITSELF (the empty walk). Reachable returns false when either NodeID lies
+// outside that universe, and for a distinct (src, dst) whose src is a non-live
+// (ghost / isolated) slot.
 func (t *TC) Reachable(src, dst graph.NodeID) bool {
 	if int(src) >= t.maxID || int(dst) >= t.maxID {
 		return false
+	}
+	// Reflexive self-reachability: every NodeID within the universe reaches
+	// itself via the empty walk, matching [APSP.At] (Floyd-Warshall), which
+	// returns (0, true) for i == j regardless of liveness. Without this an
+	// isolated present node (no incident edge, hence absent from the compacted
+	// live set) was wrongly reported unreachable from itself, diverging from
+	// FloydWarshall/Johnson/Dijkstra/BellmanFord (#2040).
+	if src == dst {
+		return true
 	}
 	si := t.compact[int(src)]
 	di := t.compact[int(dst)]

@@ -78,9 +78,15 @@ func TestSec_Core_TransitiveClosureSparseNodeSpace(t *testing.T) {
 		}
 	}
 
-	// A ghost padding slot (a NodeID the sharding skips, never interned)
-	// must report unreachable in both directions — including reflexively.
-	// Find one: scan low NodeIDs for a slot no key maps to.
+	// A ghost padding slot (a NodeID the sharding skips, never interned) must be
+	// unreachable TO and FROM every live node — the security invariant: the
+	// sparse padding space never appears connected to the real graph. It IS
+	// reflexively self-reachable, however: self-reachability is the empty walk,
+	// which every in-range NodeID trivially satisfies, and the CSR cannot
+	// distinguish a ghost padding slot from a present-but-isolated node (both
+	// are edgeless, so LiveMask excludes both) — exactly as FloydWarshall,
+	// Johnson, Dijkstra, and BellmanFord all report (0, true) for an in-range
+	// self-query (rmp #2040). Find one: scan low NodeIDs for a slot no key maps to.
 	interned := make(map[graph.NodeID]bool, n)
 	for _, id := range ids {
 		interned[id] = true
@@ -97,10 +103,12 @@ func TestSec_Core_TransitiveClosureSparseNodeSpace(t *testing.T) {
 	if !foundGhost {
 		t.Fatal("expected at least one ghost slot in a sparse NodeID space")
 	}
-	if tc.Reachable(ghost, ghost) {
-		t.Fatalf("Reachable(ghost=%d, ghost) = true; compacted TC must report "+
-			"ghost padding slots unreachable (this also fixes the prior over-report)", ghost)
+	if !tc.Reachable(ghost, ghost) {
+		t.Fatalf("Reachable(ghost=%d, self) = false; an in-range NodeID is "+
+			"reflexively self-reachable via the empty walk, consistent with the "+
+			"distance oracles (rmp #2040)", ghost)
 	}
+	// The security invariant: a ghost slot is isolated from the real graph.
 	if tc.Reachable(ids[0], ghost) || tc.Reachable(ghost, ids[0]) {
 		t.Fatalf("ghost slot %d must be unreachable to/from any live node", ghost)
 	}
