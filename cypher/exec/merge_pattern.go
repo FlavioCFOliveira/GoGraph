@@ -53,24 +53,22 @@ package exec
 // error rather than routing it here — MergePattern assumes its input is
 // already a well-formed chain.
 //
-// # Known limitation: parallel-relationship multiplicity
+// # Parallel-relationship multiplicity
 //
 // [binding] carries one NodeID per chain position — it has no relationship
-// identity. When two or more parallel relationships already satisfy a hop's
+// identity — so when two or more parallel relationships satisfy a hop's
 // type/property predicate between the same resolved node pair,
-// [MergePattern.expandCandidates] reports at most one candidate for that
-// hop instead of fanning out one binding per parallel relationship (the
-// bound-target branch does a boolean [edgeConnects] check; the fresh-target
-// branch dedups candidates by node key). This under-counts relationship
-// multiplicity in a query like `RETURN count(r)` for that specific shape —
-// it does not create a duplicate node or relationship, and it does not
-// affect the match-vs-create decision, so no data is lost or corrupted; it
-// is also strictly better than the pre-fix behaviour, which silently
-// dropped the whole pattern. [MergeRelationship] does not have this gap for
-// its own single, both-bound hop (it fans out via EdgeCreateCount); closing
-// it here for an arbitrary chain would require threading a relationship
-// identity through every hop of the join, tracked as a follow-up rather
-// than blocking this fix (rmp gograph backlog).
+// [MergePattern.expandCandidates] fans out one binding per parallel
+// relationship rather than a single candidate, so MERGE's match multiplicity
+// equals the equivalent MATCH's (rmp #1875). The per-hop multiplicity comes
+// from [MergePattern.hopMultiplicity], which counts the graph's Cypher
+// CREATE-multiplicity for the pair filtered by the hop's type/property
+// predicate — the same parallel-edge population a MATCH enumerates. The bound
+// bindings for a hop are identical NodeID pairs (the join carries no per-edge
+// identity), which is sufficient for the multiplicity-sensitive aggregations
+// (`count(r)`); it does not create a duplicate node or relationship and does
+// not affect the match-vs-create decision. [MergeRelationship] fans out its
+// own single both-bound hop via the same EdgeCreateCount counter.
 //
 // # Concurrency
 //
@@ -164,8 +162,9 @@ func (h *mergePatternHop) storageOrder(i int) (srcIdx, dstIdx int) {
 // directions reports which storage direction(s) satisfy this hop when
 // walking from a chain position's key: forward only for a plain hop,
 // reverse only when reversed, or both when undirected. Shared by
-// [MergePattern.expandCandidates] (neighbour walk) and [edgeConnects]
-// (direct edge check) so the two stay in lockstep.
+// [MergePattern.expandCandidates] (neighbour walk) and
+// [MergePattern.hopMultiplicity] (parallel-edge count) so the two stay in
+// lockstep.
 func (h *mergePatternHop) directions() (checkForward, checkReverse bool) {
 	return h.undirected || !h.reversed, h.undirected || h.reversed
 }
@@ -700,9 +699,12 @@ func (op *MergePattern) expandCandidates(fromKey string, hop *mergePatternHop, t
 	// search matches on the evaluated value exactly as the created edge will
 	// carry it.
 	if target.bound {
-		// Only one candidate is possible: the bound value itself. Skip the
-		// neighbour walk (and the seen-set/closure it needs) and directly
-		// verify the edge exists.
+		// The target node is fixed to its bound value, but the hop may be
+		// satisfied by more than one PARALLEL relationship between the pair.
+		// Fan out one candidate per pre-existing parallel relationship that
+		// satisfies the hop's type/property predicate so MERGE's match
+		// multiplicity equals the equivalent MATCH's (#1875) — instead of the
+		// single boolean edge-exists candidate that under-counted `count(r)`.
 		id, key, ok, err := op.resolveBound(childRow, target)
 		if err != nil {
 			return nil, err
@@ -710,10 +712,15 @@ func (op *MergePattern) expandCandidates(fromKey string, hop *mergePatternHop, t
 		if !ok {
 			return nil, fmt.Errorf("exec: MergePattern: bound variable %q is null", target.varName)
 		}
-		if edgeConnects(op.mutator, fromKey, key, hop, hopProps) {
-			return []graph.NodeID{id}, nil
+		mult := op.hopMultiplicity(fromKey, key, hop, hopProps)
+		if mult == 0 {
+			return nil, nil
 		}
-		return nil, nil
+		out := make([]graph.NodeID, mult)
+		for i := range out {
+			out[i] = id
+		}
+		return out, nil
 	}
 
 	targetProps, tpErr := op.effectiveNodeProps(target, childRow)
@@ -745,7 +752,14 @@ func (op *MergePattern) expandCandidates(fromKey string, hop *mergePatternHop, t
 			return
 		}
 		seen[candKey] = struct{}{}
-		out = append(out, id)
+		// Fan out one candidate per pre-existing parallel relationship to this
+		// neighbour that satisfies the hop, matching MATCH multiplicity (#1875).
+		// hopMultiplicity returns 1 for a single edge, so a non-parallel graph
+		// is unaffected.
+		mult := op.hopMultiplicity(fromKey, candKey, hop, hopProps)
+		for i := 0; i < mult; i++ {
+			out = append(out, id)
+		}
 	}
 
 	checkForward, checkReverse := hop.directions()
@@ -760,23 +774,6 @@ func (op *MergePattern) expandCandidates(fromKey string, hop *mergePatternHop, t
 		}
 	}
 	return out, nil
-}
-
-// edgeConnects reports whether an edge satisfying hop's type predicate and the
-// per-row property predicate hopProps connects fromKey to toKey: forward only
-// (fromKey→toKey) for a plain hop, reverse only (toKey→fromKey) when
-// hop.reversed, or either direction when hop.undirected. hopProps is the hop's
-// effective inline relationship property set for the current driving row (see
-// [MergePattern.effectiveHopProps]).
-func edgeConnects(mutator GraphMutator, fromKey, toKey string, hop *mergePatternHop, hopProps []propLiteral) bool {
-	checkForward, checkReverse := hop.directions()
-	if checkForward && edgeSatisfiesHop(mutator, fromKey, toKey, hop, hopProps) {
-		return true
-	}
-	if checkReverse && edgeSatisfiesHop(mutator, toKey, fromKey, hop, hopProps) {
-		return true
-	}
-	return false
 }
 
 // edgeSatisfiesHop reports whether the directed edge (src, dst) satisfies
@@ -799,6 +796,95 @@ func edgeSatisfiesHop(mutator GraphMutator, src, dst string, hop *mergePatternHo
 func edgeHasLabel(mutator GraphMutator, src, dst, label string) bool {
 	for _, l := range mutator.EdgeLabels(src, dst) {
 		if l == label {
+			return true
+		}
+	}
+	return false
+}
+
+// hopMultiplicity reports how many pre-existing parallel relationships between
+// the resolved (fromKey, toKey) node pair satisfy hop's type and property
+// predicate, in the hop's permitted direction(s). It is the per-hop analogue of
+// the parallel-edge fan-out a MATCH of the same pattern produces (#1875): a
+// bound MERGE hop over two parallel :T edges must contribute two joint bindings
+// so `RETURN count(r)` equals the MATCH count. Returns 0 when the pair is not
+// connected by any matching edge (the caller then treats the hop as unmatched).
+func (op *MergePattern) hopMultiplicity(fromKey, toKey string, hop *mergePatternHop, hopProps []propLiteral) int {
+	checkForward, checkReverse := hop.directions()
+	var n int
+	if checkForward {
+		n += op.countMatchingInstances(fromKey, toKey, hop, hopProps)
+	}
+	if checkReverse {
+		n += op.countMatchingInstances(toKey, fromKey, hop, hopProps)
+	}
+	return n
+}
+
+// countMatchingInstances counts the parallel relationship instances stored in
+// the directed (src → dst) slot that satisfy hop's type and property predicate.
+// The count is the graph's Cypher CREATE-multiplicity for the pair
+// (EdgeCreateCount) filtered by the per-instance type/property metadata the
+// write path records (SetEdgeLabelAt / SetEdgePropertyAt), so it equals the
+// number of parallel edges a MATCH would enumerate. When the pair carries no
+// CREATE-multiplicity metadata (an edge added directly through the Go API,
+// bypassing IncEdgeCreateCount) it falls back to the boolean edgeSatisfiesHop
+// result — one instance — preserving the pre-fix behaviour for that path.
+func (op *MergePattern) countMatchingInstances(src, dst string, hop *mergePatternHop, hopProps []propLiteral) int {
+	if !edgeSatisfiesHop(op.mutator, src, dst, hop, hopProps) {
+		return 0
+	}
+	mult := op.mutator.EdgeCreateCount(src, dst)
+	if mult <= 0 {
+		return 1
+	}
+	var n int
+	for idx := int64(1); idx <= mult; idx++ {
+		if op.instanceMatchesHop(src, dst, idx, hop, hopProps) {
+			n++
+		}
+	}
+	if n == 0 {
+		// edgeSatisfiesHop already proved a matching edge exists between the
+		// pair, but no per-instance record matched (a storage path that records
+		// the type only on the per-pair union): contribute one so the matching
+		// pair is never dropped.
+		return 1
+	}
+	return n
+}
+
+// instanceMatchesHop reports whether CREATE instance idx of the directed
+// (src → dst) pair carries hop's type and satisfies its property predicate,
+// using the per-instance metadata (EdgeLabelsAt / EdgePropertiesAt). An
+// instance that recorded no per-instance labels is treated as type-agnostic
+// (deferred to the per-pair check the caller already performed) so a storage
+// path recording the type only on the per-pair union is not wrongly excluded;
+// an instance that DID record labels but not hop.relType is excluded, which is
+// what filters a mixed-type parallel pair down to the matching subset.
+func (op *MergePattern) instanceMatchesHop(src, dst string, idx int64, hop *mergePatternHop, hopProps []propLiteral) bool {
+	if hop.relType != "" {
+		labels := op.mutator.EdgeLabelsAt(src, dst, idx)
+		if len(labels) > 0 && !containsLabel(labels, hop.relType) {
+			return false
+		}
+	}
+	if len(hopProps) > 0 {
+		props := op.mutator.EdgePropertiesAt(src, dst, idx)
+		if props == nil {
+			props = op.mutator.EdgeProperties(src, dst)
+		}
+		if !nodeMatchesAllProperties(hopProps, props) {
+			return false
+		}
+	}
+	return true
+}
+
+// containsLabel reports whether labels contains want.
+func containsLabel(labels []string, want string) bool {
+	for _, l := range labels {
+		if l == want {
 			return true
 		}
 	}

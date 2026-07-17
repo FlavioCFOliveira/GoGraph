@@ -463,20 +463,14 @@ func TestMergePattern_EnforcesUniqueConstraintOnCreate(t *testing.T) {
 	assertCount(ctx, t, eng, `MATCH (n:UCPerson) RETURN count(n) AS n`, 2)
 }
 
-// TestMergePattern_KnownLimitation_ParallelRelationshipMultiplicity pins the
-// documented, TCK-invisible multiplicity gap described on MergePattern's
-// package doc ("Known limitation: parallel-relationship multiplicity"):
-// when a both-bound hop's endpoints already have TWO OR MORE parallel
-// qualifying relationships, MergePattern currently reports only one binding
-// instead of fanning out one row per relationship (a plain MATCH of the
-// identical pattern correctly reports both). This does not create a
-// duplicate or lose data — it under-counts an already-existing multiplicity
-// — and is strictly better than the pre-fix silent whole-pattern drop. This
-// test exists to catch a future REGRESSION (this count becoming wrong in a
-// new way) rather than to assert this is the desired end state; a follow-up
-// ticket tracks closing the gap by threading relationship identity through
-// the join.
-func TestMergePattern_KnownLimitation_ParallelRelationshipMultiplicity(t *testing.T) {
+// TestMergePattern_ParallelRelationshipMultiplicity verifies MergePattern fans
+// out one binding per pre-existing parallel relationship for a both-bound hop
+// (rmp #1875): when the endpoints already have TWO parallel qualifying
+// relationships, a both-bound MERGE reports the same multiplicity as the
+// equivalent MATCH (two rows), rather than the single row the pre-fix
+// under-counting produced. The MERGE still matches (does not create a
+// duplicate) and does not create a duplicate node.
+func TestMergePattern_ParallelRelationshipMultiplicity(t *testing.T) {
 	t.Parallel()
 	eng := newMergePatternEngine(t)
 	ctx := context.Background()
@@ -490,8 +484,8 @@ func TestMergePattern_KnownLimitation_ParallelRelationshipMultiplicity(t *testin
 
 	// A both-bound MERGE with a node-targeted ON CREATE action routes
 	// through MergePattern (not the MergeRelationship fast path, which
-	// requires actions confined to the relationship variable) and currently
-	// under-counts to 1.
+	// requires actions confined to the relationship variable). Post-#1875 it
+	// reports the SAME multiplicity as the MATCH above.
 	res, err := eng.RunInTx(ctx, `MATCH (a:Hub3 {id: 1}), (b:Leaf3 {tag: 'x'}) MERGE (a)-[r:LINK]->(b) ON CREATE SET a.touched = true RETURN count(r) AS n`, nil)
 	if err != nil {
 		t.Fatalf("RunInTx: %v", err)
@@ -500,7 +494,7 @@ func TestMergePattern_KnownLimitation_ParallelRelationshipMultiplicity(t *testin
 	if len(rows) != 1 {
 		t.Fatalf("got %d rows, want 1", len(rows))
 	}
-	mustInt(t, "count(r)", rows[0]["n"], 1) // documented current value; see limitation doc
+	mustInt(t, "count(r)", rows[0]["n"], 2) // #1875: MERGE multiplicity == MATCH multiplicity
 
 	// No duplicate relationship or node was created by the MERGE itself.
 	assertCount(ctx, t, eng, `MATCH (:Hub3 {id: 1})-[:LINK]->(:Leaf3 {tag: 'x'}) RETURN count(*) AS n`, 2)
