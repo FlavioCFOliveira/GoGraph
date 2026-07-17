@@ -24,6 +24,16 @@ func (w *staticNodeWalker) WalkNodeIDs(fn func(graph.NodeID) bool) {
 	}
 }
 
+// buildWalker returns a staticNodeWalker over NodeIDs [0, n). Shared by the
+// parallel-scan-project tests (formerly defined in the removed parallel_test.go).
+func buildWalker(n int) *staticNodeWalker {
+	ids := make([]graph.NodeID, n)
+	for i := range ids {
+		ids[i] = graph.NodeID(i)
+	}
+	return &staticNodeWalker{ids: ids}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. AllNodesScan — basic iteration
 // ─────────────────────────────────────────────────────────────────────────────
