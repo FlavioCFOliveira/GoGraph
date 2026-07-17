@@ -1336,8 +1336,22 @@ columnar scalar-column passthrough for WITH-projection (#2045 Part A —
 WithFilterPassthrough 5324→118 allocs/op; `cypher`+`cypher/exec`). Part B
 (EagerAggregation unboxed grouping-key hashing) split to #2049 — it must
 replicate openCypher float64-domain group equivalence, a correctness-critical
-TCK-covered path. After this sprint every remaining backlog `Task` is either
-ACID/snapshot-foundation-blocked or deferred by an explicit user decision.
+TCK-covered path.
+
+Sprint 297 (2026-07-17, +1 commit): `9c7f211` #2049 unboxed columnar
+grouping-key hashing in `EagerAggregation` — `hashCellEquivalent`/
+`cellEqualToStored` read typed backings unboxed but delegate to the SAME
+`expr.EquivalentHash`/`expr.Equivalent` as the boxed path (box only on new-group
+creation), so float64-domain group equivalence is byte-identical (1≡1.0, NaN≡NaN,
+−0.0≡+0.0, NULL grouped; int ≥2^53 same-bits stay SEPARATE). AggGroupScalar
+15,598→1,889 allocs/op (−87.9%). Surfaced a PRE-EXISTING, not-TCK-covered
+conformance gap in the shared `expr.Equivalent` cross-type int/float path (lossy
+float64 promotion vs CIP2016-06-14 exactness) → filed as #2050 (sign-off-gated
+module-wide behaviour change). After sprints 292–297 every remaining backlog
+`Task` is un-developable without violating the ACID mandate, reversing an
+explicit user decision, or obtaining user sign-off (#2050): ACID/snapshot-blocked
+(#1704 P4/P5, #1825, #1826, #1712, #1827), user-deferred (#1714, #1718, portability
+#2046/#2047/#2048), design-gated (#1879), or sign-off-gated (#2050).
 
 ## Known limitations (faithful, by design)
 
