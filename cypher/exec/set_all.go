@@ -416,8 +416,50 @@ func (op *SetAllProperties) Next(out *Row) (bool, error) {
 		}
 	}
 
+	op.refreshRowEntity(childRow, target)
 	*out = childRow
 	return true, nil
+}
+
+// refreshRowEntity rewrites the row's entity slot after a whole-entity SET so a
+// downstream projection observes read-your-own-writes. When an upstream
+// projection (for example across a WITH boundary) materialised the target as a
+// NodeValue / RelationshipValue, that value carries the property snapshot taken
+// before this SET; without refreshing it a subsequent `RETURN n.<key>` would
+// read the stale snapshot even though the write is durably applied. The
+// refreshed Properties map is rebuilt from the authoritative post-write graph
+// state.
+//
+// It is a no-op when the slot holds a raw IntegerValue node id (the projection
+// re-reads the graph live) or is out of range — mirroring the node-only refresh
+// in [SetProperty.refreshNodeRowProperties] and extending it to relationships.
+func (op *SetAllProperties) refreshRowEntity(row Row, target entityBinding) {
+	colIdx, ok := op.schema[op.entityVar]
+	if !ok || colIdx >= len(row) {
+		return
+	}
+	switch v := row[colIdx].(type) {
+	case expr.NodeValue:
+		v.Properties = lpgPropsToMapValue(op.mutator.NodeProperties(target.nodeKey))
+		row[colIdx] = v
+	case expr.RelationshipValue:
+		v.Properties = lpgPropsToMapValue(op.mutator.EdgeProperties(target.relSrcKey, target.relDstKey))
+		row[colIdx] = v
+	}
+}
+
+// lpgPropsToMapValue converts a raw lpg property map (as returned by the
+// mutator's NodeProperties/EdgeProperties) into an expr.MapValue, skipping any
+// value that cannot be represented as an expr binding. It always returns a
+// non-nil map so property lookups on a fully-cleared entity yield null.
+func lpgPropsToMapValue(props map[string]lpg.PropertyValue) expr.MapValue {
+	out := make(expr.MapValue, len(props))
+	for k, pv := range props {
+		if v, ok := lpgPropToExprBinding(pv); ok {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // applyExprValue applies a whole map-valued RHS expression (evaluated by

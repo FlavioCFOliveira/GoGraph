@@ -679,11 +679,28 @@ func (v *visitor) VisitSetSt(ctx *gen.SetStContext) interface{} {
 func (v *visitor) VisitSetItem(ctx *gen.SetItemContext) interface{} {
 	item := &ast.SetItem{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
 
-	// Form 1: property = expr  (propertyExpression ASSIGN expression)
-	if pe := ctx.PropertyExpression(); pe != nil {
-		tgt, err := v.visitPropertyExpression(pe)
-		if err != nil {
+	// Form 1: property = expr  (atom (DOT name)+ ASSIGN expression)
+	//
+	// The grammar requires at least one `.name` accessor in this alternative so
+	// that a bare `symbol` cannot match it; that keeps the setItem decision
+	// unambiguous (a bare variable is always the whole-entity form handled
+	// below) and avoids the ANTLR full-context prediction that otherwise
+	// panics on `WITH … SET var = …`. The property target is reconstructed
+	// from the atom base and the trailing `.name` chain, mirroring
+	// visitPropertyExpression. A SET left-hand side base is always a variable,
+	// so the numeric-literal special cases in visitPropertyExpression cannot
+	// arise and are intentionally omitted here.
+	if at := ctx.Atom(); at != nil {
+		r := v.visit(at)
+		if err := firstError(r); err != nil {
 			return err
+		}
+		tgt, err := asExpr(r)
+		if err != nil {
+			return &SemaError{Rule: "setItem", Pos: positionOf(ctx), Message: err.Error()}
+		}
+		for _, n := range ctx.AllName() {
+			tgt = &ast.Property{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Receiver: tgt, Key: nameText(n)}
 		}
 		expr, err := asExpr(v.visit(ctx.Expression()))
 		if err != nil {

@@ -167,7 +167,7 @@ setSt
     ;
 
 setItem
-    : propertyExpression ASSIGN expression
+    : atom (DOT name)+ ASSIGN expression
     | symbol (ASSIGN | ADD_ASSIGN) expression
     | symbol nodeLabels
     ;
