@@ -8638,10 +8638,44 @@ func indexedPropKind(idxMgr *index.Manager, label, property string) (expr.Kind, 
 	return 0, false
 }
 
+// distinctValueCounter is satisfied by hash.Index[V]; DistinctValues() reports
+// how many distinct keys the index currently holds. Used by [hashIndexKind] to
+// defer a string index's key-type determination until it actually holds data.
+type distinctValueCounter interface {
+	DistinctValues() uint64
+}
+
 // hashIndexKind maps a hash index Subscriber to the expr.Kind of its key, by
 // the same type assertions tryNewHashSeek uses to bind the seek operator.
+//
+// A Cypher CREATE INDEX always builds a STRING-keyed hash index regardless of
+// the indexed property's actual value type (hash indexes are string-keyed; see
+// newBoundNodeHashIndex / projectStringPropValue). So an EMPTY string hash
+// index is not an authoritative "this property is String" type signal: it may
+// have been created over an empty graph, or over a property that only ever
+// holds non-string (e.g. integer) values, which projectStringPropValue never
+// indexes. Reporting KindString for such an index wrongly pins a parameter
+// compared against that property to String — e.g. an integer property seeded
+// after CREATE INDEX on an empty graph then rejects an integer parameter with a
+// spurious ParamTypeError (rmp #1983).
+//
+// The key type is therefore deferred to the first value indexed: a string hash
+// index is an authoritative String signal only once it holds at least one
+// entry (DistinctValues() > 0), which proves the property actually stores
+// string data. An empty string index yields no signal (0, false), so the
+// parameter is accepted and the query falls back to scan+filter, returning the
+// spec-faithful rows. A populated string index still proves String, so the
+// deliberate type-mismatch rejection (TestRun_ParamTypeMismatch_Error) holds.
+//
+// An int64 hash index is a Go-API-only construct whose key type the caller
+// declared explicitly by parameterising hash.Index[int64]; that declaration is
+// authoritative independent of the index's current population, so it is not
+// gated on emptiness.
 func hashIndexKind(sub index.Subscriber) (expr.Kind, bool) {
 	if _, ok := sub.(hashStringLookup); ok {
+		if dc, ok := sub.(distinctValueCounter); ok && dc.DistinctValues() == 0 {
+			return 0, false
+		}
 		return expr.KindString, true
 	}
 	if _, ok := sub.(hashInt64Lookup); ok {
