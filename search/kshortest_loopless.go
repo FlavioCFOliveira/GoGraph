@@ -83,6 +83,17 @@ type KShortestPathsLooplessOpts struct {
 //
 // Safe for concurrent use against an immutable CSR; the call holds no
 // shared state across invocations.
+//
+// Deprecated: this bare entry is unbounded and worst-case exponential in V (see
+// "Complexity and resource budget" above) and it cannot signal truncation, so on
+// arbitrary, untrusted, large, or spatial-grid inputs it is a
+// super-polynomial-blowup foot-gun. For those inputs use the bounded, cancellable
+// [KShortestPathsLooplessCtxWithOpts] (a MaxPops / MaxQueueBytes budget that
+// surfaces [ErrResourceBudgetExceeded]), or the polynomial [YenKShortest]
+// (O(K·V·(E+V log V)); YenKShortest is node-simple and collapses parallel edges,
+// so it returns fewer, node-distinct paths than the edge-distinct enumeration
+// here). This function is retained for backwards compatibility and remains
+// appropriate only for small, trusted graphs.
 func KShortestPathsLoopless[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k int) []YenPath[W] {
 	defer metrics.Time("search.KShortestPathsLoopless").Stop()
 	out, _ := KShortestPathsLooplessCtx(context.Background(), c, src, dst, k)

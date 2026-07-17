@@ -29,9 +29,12 @@ package search
 // is intentional and mirrors the pattern in kshortest_loopless_test.go.
 
 import (
+	"context"
+	"errors"
 	"sort"
 	"testing"
 
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/internal/shapegen"
 )
@@ -90,5 +93,82 @@ func TestEppsteinVsYen_LayeredDAG(t *testing.T) {
 		if eppCosts[i] != yenCosts[i] {
 			t.Fatalf("sorted cost[%d]: Eppstein=%v, Yen=%v", i, eppCosts[i], yenCosts[i])
 		}
+	}
+}
+
+// buildGridCSR builds an n-by-n 4-directional grid with unit edge weights as a
+// directed CSR (each undirected grid edge is emitted in both directions). Node
+// id(r,c) = r*n + c; src is the (0,0) corner and dst the (n-1,n-1) corner. Every
+// corner-to-corner shortest path costs 2*(n-1), so a cost-ordered best-first
+// enumerator must pop every cheaper prefix — a super-polynomially large set of
+// self-avoiding walks — before it can return even the first complete path.
+func buildGridCSR(tb testing.TB, n int) (*csr.CSR[int64], graph.NodeID, graph.NodeID) {
+	tb.Helper()
+	id := func(r, c int) int { return r*n + c }
+	var edges []weightedEdge
+	for r := 0; r < n; r++ {
+		for c := 0; c < n; c++ {
+			u := id(r, c)
+			if c+1 < n {
+				right := id(r, c+1)
+				edges = append(edges, weightedEdge{u, right, 1}, weightedEdge{right, u, 1})
+			}
+			if r+1 < n {
+				down := id(r+1, c)
+				edges = append(edges, weightedEdge{u, down, 1}, weightedEdge{down, u, 1})
+			}
+		}
+	}
+	c, a := buildWeightedCSR(tb, edges)
+	src, ok := a.Mapper().Lookup(id(0, 0))
+	if !ok {
+		tb.Fatal("grid src key not found")
+	}
+	dst, ok := a.Mapper().Lookup(id(n-1, n-1))
+	if !ok {
+		tb.Fatal("grid dst key not found")
+	}
+	return c, src, dst
+}
+
+// TestKShortestPathsLoopless_GridBlowup_vs_Yen pins the #1997/#2006 contrast: on
+// an n-by-n grid the best-first loopless enumerator's pop count grows
+// super-polynomially (measured ~3,218 pops at 6x6 rising to ~5,750,066 at 10x10),
+// while YenKShortest answers the same k-shortest query in polynomial time
+// (~150µs, essentially flat across those sizes). The blowup is OBSERVED SAFELY
+// through the bounded entry KShortestPathsLooplessCtxWithOpts with a MaxPops cap:
+// the enumerator hits ErrResourceBudgetExceeded long before it can enumerate even
+// one complete path, so the test never actually runs the exponential loop —
+// whereas Yen returns k valid paths on the same graph at a tiny fraction of that
+// work. A regression that made Yen exponential (or the loopless entry falsely
+// finish within the budget) would flip one of these assertions.
+func TestKShortestPathsLoopless_GridBlowup_vs_Yen(t *testing.T) {
+	t.Parallel()
+	const (
+		n       = 12    // 12x12 grid: cheapest corner-to-corner cost is 2*(n-1)=22
+		k       = 4     // request 4 shortest paths from both algorithms
+		maxPops = 50000 // budget far below the millions of pops the loopless entry needs
+	)
+	c, src, dst := buildGridCSR(t, n)
+
+	// Polynomial side: Yen returns k valid loopless paths cheaply.
+	yen := YenKShortest(c, src, dst, k)
+	if len(yen) != k {
+		t.Fatalf("YenKShortest returned %d paths, want %d", len(yen), k)
+	}
+	for i, p := range yen {
+		if len(p.Nodes) < 2 || p.Nodes[0] != src || p.Nodes[len(p.Nodes)-1] != dst {
+			t.Fatalf("Yen path %d has bad endpoints: %v", i, p.Nodes)
+		}
+	}
+
+	// Exponential side: the loopless enumerator cannot reach k paths within
+	// maxPops pops on this grid, so the bounded entry surfaces the blowup as
+	// ErrResourceBudgetExceeded instead of running the exponential loop.
+	if _, err := KShortestPathsLooplessCtxWithOpts(
+		context.Background(), c, src, dst, k,
+		KShortestPathsLooplessOpts{MaxPops: maxPops},
+	); !errors.Is(err, ErrResourceBudgetExceeded) {
+		t.Fatalf("expected ErrResourceBudgetExceeded from the loopless enumerator on a %dx%d grid within %d pops, got %v", n, n, maxPops, err)
 	}
 }

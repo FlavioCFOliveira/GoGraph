@@ -28,7 +28,7 @@ func BenchmarkKShortestPathsLoopless(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		_ = KShortestPathsLoopless(c, src, dst, 20)
+		_ = KShortestPathsLoopless(c, src, dst, 20) //nolint:staticcheck // deliberately benchmarks the deprecated bare entry to track its alloc profile
 	}
 }
 
