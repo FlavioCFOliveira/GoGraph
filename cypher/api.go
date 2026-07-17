@@ -3274,6 +3274,19 @@ type Result struct {
 	matIdx     int
 	matOn      bool
 
+	// matChunk holds the materialised rows column-major and UNBOXED when the plan
+	// exposes a columnar producer (a terminal [exec.ColumnarProject] over a
+	// scalar-property projection, #1704 P2). Its typed columns are boxed to
+	// [expr.Value] lazily at the API boundary ([Result.RowAt]/[Result.Record]/
+	// [Result.ValueAt]) — never during the drain — so a query that discards its
+	// result (or drains it positionally) never pays the per-cell box that the
+	// row-oriented matRows path does. It is nil for the row-oriented drain, which
+	// remains the fallback for every non-columnar shape. matChunk and matRows are
+	// mutually exclusive; matRecords/matRowLen/matIdx describe both. rowScratch is
+	// the reused row buffer [Result.RowAt] boxes a whole chunk row into.
+	matChunk   *exec.Chunk
+	rowScratch []expr.Value
+
 	// bufHandled is set once the secondary-index buffer has been committed (or
 	// rolled back) inside the write query's ApplyAtomically window (F3.4), so
 	// closeLocked does not act on it again. Committing the index buffer under
@@ -3337,6 +3350,12 @@ type Result struct {
 	maxRows  int64
 	rowCount int64 // incremented by Next(); never reset
 	rowsErr  error // ErrResultRowsExceeded or ErrResultBytesExceeded when a cap trips
+	// matErr holds a child-pipeline error captured during the columnar drain
+	// ([Result.materializeColumnar]). Unlike rowsErr it does not make Next refuse
+	// rows — the rows drained before the error are still served — but it is
+	// surfaced by [Result.Err] after the drained prefix, mirroring how the row
+	// drain surfaces a mid-drain pipeline error via the underlying ResultSet.
+	matErr error
 
 	// maxBytes, when positive, caps the cumulative estimated encoded size of the
 	// materialised rows (EngineOptions.MaxResultBytes). It complements maxRows:
@@ -3448,6 +3467,15 @@ func (r *Result) RowAt(i int) []expr.Value {
 // is the allocation-free positional accessor used by hot consumers (the Bolt
 // PULL path) that read every column by index and discard the row.
 func (r *Result) ValueAt(col int) expr.Value {
+	if r.matChunk != nil {
+		// Columnar drain: box just the requested cell at the sink — the Bolt PULL
+		// path reads every column by index, so a whole-row box would be wasteful.
+		// The boxed value is identical to what the row drain stored in matRows.
+		if col < 0 || col >= r.matRowLen {
+			return nil
+		}
+		return r.matChunk.BoxCell(col, r.matIdx-1)
+	}
 	row := r.rowSlice(r.matIdx - 1)
 	if col < 0 || col >= len(row) {
 		return nil
@@ -3455,8 +3483,24 @@ func (r *Result) ValueAt(col int) expr.Value {
 	return row[col]
 }
 
-// rowSlice returns the backing sub-slice for materialised row i.
+// rowSlice returns the values of materialised row i. For the row-oriented drain
+// it is a zero-copy sub-slice of the flat matRows backing. For the columnar drain
+// it boxes the chunk's row i into the reused rowScratch buffer at the sink (the
+// only place a columnar cell is boxed); the returned slice therefore aliases
+// rowScratch and is overwritten on the next rowSlice call, so a caller that
+// retains it across calls must copy — consistent with the "must not be retained"
+// contract of [Result.RowAt].
 func (r *Result) rowSlice(i int) []expr.Value {
+	if r.matChunk != nil {
+		if cap(r.rowScratch) < r.matRowLen {
+			r.rowScratch = make([]expr.Value, r.matRowLen)
+		}
+		r.rowScratch = r.rowScratch[:r.matRowLen]
+		for j := 0; j < r.matRowLen; j++ {
+			r.rowScratch[j] = r.matChunk.BoxCell(j, i)
+		}
+		return r.rowScratch
+	}
 	start := i * r.matRowLen
 	return r.matRows[start : start+r.matRowLen : start+r.matRowLen]
 }
@@ -3476,6 +3520,23 @@ func (r *Result) rowSlice(i int) []expr.Value {
 // Result.Err(); Close still commits/rolls back.
 func (r *Result) materialize() {
 	r.matRowLen = len(r.cols)
+
+	// Columnar late-materialisation fast path (#1704 P2): when the plan produces
+	// its output column-major (a terminal [exec.ColumnarProject]), drain into a
+	// typed Chunk and box only at the API boundary. materializeColumnar enforces
+	// the same row-count / byte / engine-wide caps as the row drain below, using an
+	// allocation-free typed estimate, so every bounded-resource guard still holds.
+	// The typed scalars copied into the chunk are value copies (int64/float64/bool
+	// and immutable string headers) or freshly built boxed temporals, so they alias
+	// no graph-internal state and the whole drain still runs under the visibility
+	// barrier exactly as the row drain does.
+	if r.matRowLen > 0 {
+		if cp, ok := r.rs.ColumnarProducer(); ok {
+			r.materializeColumnar(cp)
+			r.matOn = true
+			return
+		}
+	}
 	// recScratch (the reused map backing Record()) is allocated lazily on the
 	// first Record() call, not here: a result drained positionally (RowAt/
 	// ValueAt — the Bolt PULL path) or never read at all must not pay for a map
@@ -3578,6 +3639,110 @@ func (r *Result) materialize() {
 		}
 	}
 	r.matOn = true
+}
+
+// estimateExprValueSize adapts [estimateValueSize] to a func(expr.Value) int64 so
+// it can be threaded into [exec.Chunk.RowByteEstimate] as a plain top-level
+// function value (no per-call closure allocation) for the columnar drain's byte
+// accounting. It boxes nothing beyond what the value already carries.
+func estimateExprValueSize(v expr.Value) int64 { return estimateValueSize(v) }
+
+// materializeColumnar drains the columnar producer cp into r.matChunk, filling
+// the typed Chunk in batches. It is the column-major counterpart of the row drain
+// in [Result.materialize]: no value is boxed here — box-at-sink happens lazily in
+// [Result.RowAt]/[Result.Record]/[Result.ValueAt], so a query that discards its
+// result never pays the per-cell box the row drain does.
+//
+// It enforces the same bounded-resource guards as the row drain, using the
+// allocation-free [exec.Chunk.RowByteEstimate] (which matches [estimateRowSize]
+// applied to the boxed row) so a cap trips at the identical point: the row-count
+// cap (#1292), the per-result byte budget (#1328), and the engine-wide ceiling
+// charged in ~1 MiB chunks (#1842). A cap trip sets rowsErr and refuses the whole
+// result, exactly as the row drain does. A child-pipeline error keeps the rows
+// already drained and is surfaced via [Result.Err] (recorded in matErr, not
+// rowsErr, so the drained prefix is still served), matching the row drain's
+// partial-prefix-then-error behaviour.
+func (r *Result) materializeColumnar(cp exec.ChunkProducer) {
+	// Presize the chunk from the plan's row-count hint (#1720), clamped to the row
+	// cap so a capped query over a huge scan does not over-reserve.
+	capHint := 0
+	if hint, ok := r.rs.RowCountHint(); ok && hint > 0 {
+		capHint = hint
+		if r.maxRows > 0 && int64(capHint) > r.maxRows {
+			capHint = int(r.maxRows) + 1
+		}
+	}
+	r.matChunk = cp.NewOutputChunk(capHint)
+
+	var byteCount int64
+	// pendingGlobal mirrors the row drain: this result's estimated bytes not yet
+	// flushed to the shared engine-wide counter, charged in ~1 MiB chunks.
+	var pendingGlobal int64
+	const batch = exec.DefaultChunkCapacity
+	for {
+		want := batch
+		if r.maxRows > 0 {
+			// Fill at most one row past the cap so a capped query over a huge scan
+			// stops within a batch of the limit rather than materialising it whole.
+			remaining := r.maxRows + 1 - int64(r.matRecords)
+			if remaining <= 0 {
+				break
+			}
+			if remaining < int64(want) {
+				want = int(remaining)
+			}
+		}
+		before := r.matRecords
+		n, err := cp.FillChunk(r.matChunk, want)
+		if err != nil {
+			r.matRecords += n
+			r.matErr = err
+			return
+		}
+		// Apply the caps per newly-added row, mirroring the row drain exactly so a
+		// cap trips at the same row and the globalMem charge stays balanced.
+		for i := before; i < before+n; i++ {
+			r.matRecords++
+			if r.maxRows > 0 && int64(r.matRecords) > r.maxRows {
+				r.rowsErr = ErrResultRowsExceeded
+				return
+			}
+			if r.maxBytes <= 0 && r.globalMem == nil {
+				continue
+			}
+			sz := r.matChunk.RowByteEstimate(i, perValueOverhead, estimateExprValueSize)
+			if r.maxBytes > 0 {
+				byteCount += sz
+				if byteCount > r.maxBytes {
+					r.rowsErr = ErrResultBytesExceeded
+					return
+				}
+			}
+			if r.globalMem != nil {
+				pendingGlobal += sz
+				if pendingGlobal >= globalMemChargeChunk {
+					r.globalCharged += pendingGlobal
+					over := r.globalMem.charge(pendingGlobal)
+					pendingGlobal = 0
+					if over {
+						r.rowsErr = ErrGlobalMemoryExceeded
+						return
+					}
+				}
+			}
+		}
+		if n < want {
+			break // child exhausted
+		}
+	}
+	// Flush the final sub-chunk of this result's global charge (only on a clean
+	// drain; a cap trip above already returned with its pending chunk booked).
+	if r.globalMem != nil && pendingGlobal > 0 && r.rowsErr == nil {
+		r.globalCharged += pendingGlobal
+		if r.globalMem.charge(pendingGlobal) {
+			r.rowsErr = ErrGlobalMemoryExceeded
+		}
+	}
 }
 
 // perValueOverhead is the flat byte charge attributed to every value regardless
@@ -3941,6 +4106,12 @@ func (r *Result) Err() error {
 		return r.walErr
 	}
 	pipeErr := r.rs.Err()
+	if pipeErr == nil {
+		// A columnar drain bypasses rs.Next, so a child-pipeline error it hit is on
+		// matErr, not the ResultSet. Surface it with the same precedence a row
+		// drain's rs.Err() would have.
+		pipeErr = r.matErr
+	}
 	if r.undoErr != nil {
 		return wrapUndoFailure(pipeErr)
 	}
@@ -5907,6 +6078,19 @@ func BuildPlan(
 	return proj, cols, nil
 }
 
+// isIdentityPassthrough reports whether the final column passthrough over cols is
+// a strict identity — every output column i reads input column i (schema[cols[i]]
+// == i) — so wrapping the child in it is a no-op that can be elided. A missing or
+// reordered column makes it false.
+func isIdentityPassthrough(cols []string, schema map[string]int) bool {
+	for i, col := range cols {
+		if idx, ok := schema[col]; !ok || idx != i {
+			return false
+		}
+	}
+	return true
+}
+
 // buildPlanEngine is the Engine-internal variant of BuildPlan that threads the
 // index manager and procedure registry through so that NodeByIndexSeek and
 // ProcedureCall IR nodes can be resolved at build time. idxMgr and procReg
@@ -5995,6 +6179,19 @@ func buildPlanEngine(
 // ProduceResults handling for both the serial and the morsel-parallel (#1682)
 // build paths.
 func wrapWithColumnPassthrough(child exec.Operator, cols []string, schema map[string]int) (exec.Operator, []string, error) {
+	// Elide the final passthrough when it would be a strict identity over a
+	// columnar producer (#1704 P2): the child (a terminal [exec.ColumnarProject])
+	// already emits exactly cols in order, so wrapping it in another Project would
+	// only pull its output row-at-a-time and re-box every cell, defeating the
+	// late materialisation. Returning the child as the plan root lets the result
+	// drain pull its typed columns and box only at the sink. The reported column
+	// names come from cols (threaded into the ResultSet separately), so eliding the
+	// projection does not change the result schema. Non-columnar children, or any
+	// non-identity mapping (reordering, a dropped/absent column), keep the explicit
+	// projection below.
+	if _, columnar := child.(exec.ChunkProducer); columnar && isIdentityPassthrough(cols, schema) {
+		return child, cols, nil
+	}
 	items := make([]exec.ProjectionItem, len(cols))
 	for i, col := range cols {
 		if colIdx, exists := schema[col]; exists {
@@ -10802,7 +10999,7 @@ func buildIRProjection(
 	params map[string]expr.Value,
 	reg expr.FunctionRegistry,
 	bopts *buildOpts,
-) (*exec.Project, error) {
+) (exec.Operator, error) {
 	projItems := make([]exec.ProjectionItem, len(items))
 	// Snapshot the INPUT schema before the loop mutates it. Each projection
 	// item's evalFn runs against the INPUT row from the child operator, so
@@ -11550,11 +11747,210 @@ func buildIRProjection(
 	for k, v := range keep {
 		schema[k] = v
 	}
+	// Late-materialisation columnar projection (#1704 P2, #1823): when EVERY item
+	// is a plain scalar-property access on a bound node, build a [exec.ColumnarProject]
+	// that fills a typed Chunk and boxes only at the sink. Each filler carries the
+	// item's own general-eval closure ([exec.ProjectionItem.Eval]) as a
+	// byte-identical fallback for any row whose cell is not a resolvable bare
+	// NodeID. Otherwise fall back to the row-at-a-time [exec.Project].
+	//
+	// The columnar drain ([Result.materializeColumnar]) enforces the per-result
+	// byte budget itself, so — unlike the general Project's per-row guard
+	// ([applyProjectionRowBudget], #1852, which only guards the range()-style
+	// multi-column function-call blow-up that this property-access-only path never
+	// takes) — a configured budget does not disable this path.
+	if columnarProj, ok, cErr := tryBuildColumnarProjection(items, projItems, child, inputSchema, g, bopts); cErr != nil {
+		return nil, cErr
+	} else if ok {
+		return columnarProj, nil
+	}
 	p, err := exec.NewProject(child, projItems)
 	if err != nil {
 		return nil, err
 	}
 	return applyProjectionRowBudget(p, bopts), nil
+}
+
+// tryBuildColumnarProjection builds a [exec.ColumnarProject] for a projection all
+// of whose items are plain scalar-property accesses on a bound node (#1704 P2).
+// It returns (op, true, nil) when the shape qualifies, (nil, false, nil) to fall
+// back to the row-at-a-time [exec.Project], or (nil, false, err) on a build error.
+//
+// projItems are the already-built row-at-a-time items; each item's Eval is reused
+// as the columnar filler's byte-identical fallback. inputSchema is the pre-loop
+// input-column layout the fillers resolve receiver variables against.
+func tryBuildColumnarProjection(
+	items []ir.ProjectionItem,
+	projItems []exec.ProjectionItem,
+	child exec.Operator,
+	inputSchema map[string]int,
+	g *lpg.Graph[string, float64],
+	bopts *buildOpts,
+) (exec.Operator, bool, error) {
+	if g == nil || bopts == nil || len(items) == 0 {
+		return nil, false, nil
+	}
+	fillers := make([]exec.ColumnFiller, len(items))
+	for i := range items {
+		nodeCol, propName, ok := columnarPropertyItem(items[i], inputSchema, bopts)
+		if !ok {
+			return nil, false, nil
+		}
+		fillers[i] = buildScalarPropertyFiller(nodeCol, propName, g, projItems[i].Eval)
+	}
+	cp, err := exec.NewColumnarProject(child, projItems, fillers)
+	if err != nil {
+		return nil, false, err
+	}
+	return cp, true, nil
+}
+
+// columnarPropertyItem reports whether item is a plain scalar-property access
+// `var.key` on a bound NODE variable — the shape the columnar projection path
+// unboxes (#1704 P2) — and, when so, returns the input-schema column of the
+// receiver and the property key.
+//
+// The gate is deliberately conservative so the item's built evalFn is guaranteed
+// to be the general property-eval path (whose value the columnar fast path
+// reproduces byte-for-byte):
+//
+//   - Expr is an *ast.Property with a non-empty static Key and an *ast.Variable
+//     receiver.
+//   - The receiver is a NODE: present in the input schema and NOT tracked as a
+//     relationship (edgeVarMeta/vleRelMeta), a path (pathVarMeta/pathVarChain),
+//     or a non-node scalar (scalarCols/projAliasScalarCols/aggKeyScalarCols).
+//   - Neither the alias (item.Name) nor the expression string (item.Expression)
+//     names an existing input-schema column, so no colliding-alias or
+//     precomputed-column fast path shadows the property evaluation.
+func columnarPropertyItem(item ir.ProjectionItem, inputSchema map[string]int, bopts *buildOpts) (nodeCol int, propName string, ok bool) {
+	prop, isProp := item.Expr.(*ast.Property)
+	if !isProp || prop.Key == "" {
+		return 0, "", false
+	}
+	recv, isVar := prop.Receiver.(*ast.Variable)
+	if !isVar {
+		return 0, "", false
+	}
+	col, inSchema := inputSchema[recv.Name]
+	if !inSchema || isNonNodeVar(recv.Name, bopts) {
+		return 0, "", false
+	}
+	if _, aliasShadows := inputSchema[item.Name]; aliasShadows {
+		return 0, "", false
+	}
+	if _, exprShadows := inputSchema[item.Expression]; exprShadows && item.Expression != "" {
+		return 0, "", false
+	}
+	return col, prop.Key, true
+}
+
+// isNonNodeVar reports whether the variable named name is known NOT to hold a
+// bare node reference — a bound relationship, a VLE/path variable, or a scalar/
+// aggregate column. The columnar projection reads node properties directly by
+// NodeID, so it must only fire for genuine node variables.
+func isNonNodeVar(name string, bopts *buildOpts) bool {
+	if bopts == nil {
+		return false
+	}
+	if _, ok := bopts.edgeVarMeta[name]; ok {
+		return true
+	}
+	if _, ok := bopts.vleRelMeta[name]; ok {
+		return true
+	}
+	if _, ok := bopts.pathVarMeta[name]; ok {
+		return true
+	}
+	if _, ok := bopts.pathVarChain[name]; ok {
+		return true
+	}
+	if _, ok := bopts.scalarCols[name]; ok {
+		return true
+	}
+	if _, ok := bopts.projAliasScalarCols[name]; ok {
+		return true
+	}
+	if _, ok := bopts.aggKeyScalarCols[name]; ok {
+		return true
+	}
+	return false
+}
+
+// buildScalarPropertyFiller returns the columnar [exec.ColumnFiller] for a
+// scalar-property projection `var.propName` whose receiver occupies input-row
+// column nodeCol (#1704 P2). For a row whose cell is a resolvable bare NodeID it
+// reads the raw property and routes it: a plain int64/float64/bool/non-temporal
+// string goes into the Chunk's typed column UNBOXED; everything else (temporals,
+// lists, PropTime/PropBytes, an absent property) is classified by the SAME
+// converter the row path uses so the boxed result is byte-identical.
+//
+// The classification mirrors [lpgPropToExpr] exactly and reuses
+// [decodeTemporalString] as the single temporal classifier: a SOH-tagged
+// temporal string is boxed to its native temporal value, a plain string stays a
+// String, and any value [lpgPropToExpr] would map to [expr.Null] (an absent
+// property, PropTime, PropBytes, a failed typed read) maps to NULL. Any row whose
+// cell is not a resolvable bare NodeID (a LazyNodeValue, an eager/deleted
+// NodeValue, a non-node integer, a NULL) falls back to the item's row-at-a-time
+// eval, which is byte-identical to the pre-change path.
+func buildScalarPropertyFiller(nodeCol int, propName string, g *lpg.Graph[string, float64], fallback func(exec.Row) (expr.Value, error)) exec.ColumnFiller {
+	return func(row exec.Row, dst *exec.Chunk, col int) error {
+		if nodeCol < len(row) {
+			if iv, isInt := row[nodeCol].(expr.IntegerValue); isInt {
+				id := graph.NodeID(iv)
+				if _, resolved := g.AdjList().Mapper().Resolve(id); resolved {
+					fillScalarProperty(dst, col, g, id, propName)
+					return nil
+				}
+			}
+		}
+		// Not a resolvable bare NodeID: use the row-at-a-time eval (byte-identical).
+		v, err := fallback(row)
+		if err != nil {
+			return err
+		}
+		dst.PutValue(col, v)
+		return nil
+	}
+}
+
+// fillScalarProperty reads propName from the resolvable node id and appends it to
+// dst column col, unboxing a plain scalar and boxing everything else via the
+// canonical [lpgPropToExpr] converter (see [buildScalarPropertyFiller]).
+func fillScalarProperty(dst *exec.Chunk, col int, g *lpg.Graph[string, float64], id graph.NodeID, propName string) {
+	pv, present := g.NodePropertyByID(id, propName)
+	if !present {
+		dst.PutNull(col) // absent property → NULL (matches lpgPropToExpr's miss → expr.Null)
+		return
+	}
+	switch pv.Kind() {
+	case lpg.PropInt64:
+		if v, ok := pv.Int64(); ok {
+			dst.PutInt64(col, v)
+			return
+		}
+	case lpg.PropFloat64:
+		if v, ok := pv.Float64(); ok {
+			dst.PutFloat64(col, v)
+			return
+		}
+	case lpg.PropBool:
+		if v, ok := pv.Bool(); ok {
+			dst.PutBool(col, v)
+			return
+		}
+	case lpg.PropString:
+		if s, ok := pv.String(); ok {
+			if tv, decoded := decodeTemporalString(s); decoded {
+				dst.PutValue(col, tv) // temporal → boxed native value
+			} else {
+				dst.PutString(col, s) // plain string → unboxed
+			}
+			return
+		}
+	}
+	// PropTime / PropBytes / PropList / a failed typed read: box via the canonical
+	// converter so the sink value is byte-identical to lpgPropToExpr.
+	dst.PutValue(col, lpgPropToExpr(pv))
 }
 
 // execLabelAdapter bridges labelResolverIface to the exec.labelResolver

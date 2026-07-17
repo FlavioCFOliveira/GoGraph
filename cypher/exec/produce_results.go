@@ -90,6 +90,30 @@ type ResultSet struct {
 	closed  bool
 }
 
+// ChunkProducer is implemented by a terminal operator that can emit its output
+// column-major into a [Chunk], letting a columnar-aware sink box values only at
+// the API boundary rather than once per cell during the drain (rmp #1704). It is
+// an optional capability discovered by type assertion; an operator that does not
+// implement it is drained row-at-a-time via [Operator.Next] exactly as before.
+type ChunkProducer interface {
+	Operator
+	// NewOutputChunk returns a Chunk sized for this operator's output columns.
+	NewOutputChunk(capacity int) *Chunk
+	// FillChunk appends up to maxRows more output rows into dst (column-major) and
+	// returns the number of complete rows appended (0 at end-of-stream). dst must
+	// have been obtained from NewOutputChunk on the same operator.
+	FillChunk(dst *Chunk, maxRows int) (int, error)
+}
+
+// ColumnarProducer reports whether this ResultSet's plan can produce its output
+// column-major, returning the [ChunkProducer] when it can. A columnar-aware sink
+// prefers the columnar drain when this returns true; otherwise it drains
+// row-at-a-time via [ResultSet.Next].
+func (rs *ResultSet) ColumnarProducer() (ChunkProducer, bool) {
+	cp, ok := rs.plan.(ChunkProducer)
+	return cp, ok
+}
+
 // Run initialises plan, stores the column names, and returns a [ResultSet]
 // ready for iteration. The caller drives iteration via [ResultSet.Next] and
 // must call [ResultSet.Close] when done.

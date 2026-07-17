@@ -78,20 +78,22 @@ type Chunk struct {
 type storageTag uint8
 
 const (
-	stBoxed storageTag = iota // []expr.Value backing (non-scalar or heterogeneous)
-	stI64                     // []int64 backing
-	stF64                     // []float64 backing
-	stStr                     // []string backing
-	stBool                    // []bool backing
+	stBoxed   storageTag = iota // []expr.Value backing (non-scalar or heterogeneous)
+	stI64                       // []int64 backing
+	stF64                       // []float64 backing
+	stStr                       // []string backing
+	stBool                      // []bool backing
+	stDynamic                   // undecided: no backing until the first Put commits one
 )
 
 // column is a single column of a [Chunk]: a discriminated union of typed
 // backings plus a validity bitmap. Exactly one backing (selected by store) is
 // allocated and live; the others are nil.
 type column struct {
-	kind  expr.Kind  // logical Cypher type of this column
-	store storageTag // which backing below is live
-	n     int        // number of rows filled in this column
+	kind    expr.Kind  // logical Cypher type of this column
+	store   storageTag // which backing below is live
+	dynamic bool       // true iff constructed as a dynamic (Put-decided) column
+	n       int        // number of rows filled in this column
 
 	i64   []int64      // live iff store == stI64
 	f64   []float64    // live iff store == stF64
@@ -162,6 +164,39 @@ func NewChunk(capacity int, kinds ...expr.Kind) *Chunk {
 	return c
 }
 
+// NewDynamicChunk creates an empty Chunk with ncols dynamic columns, each
+// pre-sized to capacity rows. A capacity < 1 defaults to [DefaultChunkCapacity].
+//
+// A dynamic column has no declared kind and no backing at construction: the
+// first [Chunk.PutInt64]/[Chunk.PutFloat64]/[Chunk.PutString]/[Chunk.PutBool]
+// COMMITS it to the matching typed backing, and a later value of a conflicting
+// scalar kind — or any non-scalar value via [Chunk.PutValue] — PROMOTES it to a
+// boxed []expr.Value backing (re-boxing the values already stored). This is the
+// dynamic type promotion the [Chunk] type documentation defers for statically
+// constructed columns; it is what the Cypher late-materialisation projection
+// needs, because a property column's kind is not known until the values are read
+// (openCypher permits a property to carry different types across nodes). A column
+// whose first appended value is NULL commits to boxed (a null-first column stays
+// boxed — a correct, minor missed optimisation). Box-at-sink ([Chunk.BoxCell])
+// is unaffected: a typed cell boxes to the identical [expr.Value] a boxed cell
+// would, and a NULL boxes to [expr.Null].
+func NewDynamicChunk(capacity, ncols int) *Chunk {
+	if capacity < 1 {
+		capacity = DefaultChunkCapacity
+	}
+	c := &Chunk{
+		capacity: capacity,
+		cols:     make([]column, ncols),
+	}
+	for j := range c.cols {
+		col := &c.cols[j]
+		col.store = stDynamic
+		col.dynamic = true
+		col.allValid = true
+	}
+	return c
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Introspection
 // ─────────────────────────────────────────────────────────────────────────────
@@ -191,40 +226,56 @@ func (c *Chunk) ColKind(j int) expr.Kind { return c.cols[j].kind }
 
 // AppendInt64 appends v to integer column j, marking it non-null. It panics if
 // column j is not an integer column.
-func (c *Chunk) AppendInt64(j int, v int64) {
-	col := c.typedCol(j, stI64)
+func (c *Chunk) AppendInt64(j int, v int64) { c.pushI64(c.typedCol(j, stI64), v) }
+
+// AppendFloat64 appends v to float column j, marking it non-null. It panics if
+// column j is not a float column.
+func (c *Chunk) AppendFloat64(j int, v float64) { c.pushF64(c.typedCol(j, stF64), v) }
+
+// AppendString appends v to string column j, marking it non-null. It panics if
+// column j is not a string column.
+func (c *Chunk) AppendString(j int, v string) { c.pushStr(c.typedCol(j, stStr), v) }
+
+// AppendBool appends v to bool column j, marking it non-null. It panics if column
+// j is not a bool column.
+func (c *Chunk) AppendBool(j int, v bool) { c.pushBool(c.typedCol(j, stBool), v) }
+
+// pushI64/pushF64/pushStr/pushBool/pushBoxed append one already-typed value to
+// col's live backing, advance the row count, and mark the cell non-null. They
+// are the shared primitives behind the strict Append* API (statically typed
+// columns) and the dynamic Put* API (Put-decided columns); the caller has
+// already selected/committed col.store to the matching backing.
+func (c *Chunk) pushI64(col *column, v int64) {
 	row := col.n
 	col.i64 = append(col.i64, v)
 	col.n++
 	c.recordValid(col, row)
 }
 
-// AppendFloat64 appends v to float column j, marking it non-null. It panics if
-// column j is not a float column.
-func (c *Chunk) AppendFloat64(j int, v float64) {
-	col := c.typedCol(j, stF64)
+func (c *Chunk) pushF64(col *column, v float64) {
 	row := col.n
 	col.f64 = append(col.f64, v)
 	col.n++
 	c.recordValid(col, row)
 }
 
-// AppendString appends v to string column j, marking it non-null. It panics if
-// column j is not a string column.
-func (c *Chunk) AppendString(j int, v string) {
-	col := c.typedCol(j, stStr)
+func (c *Chunk) pushStr(col *column, v string) {
 	row := col.n
 	col.str = append(col.str, v)
 	col.n++
 	c.recordValid(col, row)
 }
 
-// AppendBool appends v to bool column j, marking it non-null. It panics if column
-// j is not a bool column.
-func (c *Chunk) AppendBool(j int, v bool) {
-	col := c.typedCol(j, stBool)
+func (c *Chunk) pushBool(col *column, v bool) {
 	row := col.n
 	col.b = append(col.b, v)
+	col.n++
+	c.recordValid(col, row)
+}
+
+func (c *Chunk) pushBoxed(col *column, v expr.Value) {
+	row := col.n
+	col.boxed = append(col.boxed, v)
 	col.n++
 	c.recordValid(col, row)
 }
@@ -288,11 +339,172 @@ func (c *Chunk) AppendValue(j int, v expr.Value) {
 		}
 		c.AppendBool(j, bool(bv))
 	case stBoxed:
-		row := col.n
-		col.boxed = append(col.boxed, v)
-		col.n++
-		c.recordValid(col, row)
+		c.pushBoxed(col, v)
 	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Builders — dynamic Put API (type-decided, promoting), for NewDynamicChunk
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// These target a column constructed by [NewDynamicChunk] whose kind is not known
+// until the values arrive. The first Put of a given scalar kind COMMITS the
+// column to the matching typed backing; a later value of a different scalar kind,
+// or any non-scalar via [Chunk.PutValue], PROMOTES the column to a boxed backing
+// (re-boxing the values already stored). Once boxed a column stays boxed. Unlike
+// the strict Append* API they never panic on a kind change — promotion is the
+// designed response to a heterogeneous column. They also work on a statically
+// typed (non-dynamic) column, where a matching-kind Put is an ordinary append and
+// a mismatching-kind Put promotes to boxed rather than panicking.
+
+// PutInt64 appends v as an integer to column j, committing or promoting its
+// backing as described in [NewDynamicChunk].
+func (c *Chunk) PutInt64(j int, v int64) {
+	col := &c.cols[j]
+	switch col.store {
+	case stI64:
+		c.pushI64(col, v)
+	case stDynamic:
+		col.store = stI64
+		c.pushI64(col, v)
+	case stBoxed:
+		c.pushBoxed(col, expr.IntegerValue(v))
+	default: // stF64 / stStr / stBool — scalar-kind conflict
+		c.promoteToBoxed(col)
+		c.pushBoxed(col, expr.IntegerValue(v))
+	}
+}
+
+// PutFloat64 appends v as a float to column j, committing or promoting its
+// backing as described in [NewDynamicChunk].
+func (c *Chunk) PutFloat64(j int, v float64) {
+	col := &c.cols[j]
+	switch col.store {
+	case stF64:
+		c.pushF64(col, v)
+	case stDynamic:
+		col.store = stF64
+		c.pushF64(col, v)
+	case stBoxed:
+		c.pushBoxed(col, expr.FloatValue(v))
+	default:
+		c.promoteToBoxed(col)
+		c.pushBoxed(col, expr.FloatValue(v))
+	}
+}
+
+// PutString appends v as a string to column j, committing or promoting its
+// backing as described in [NewDynamicChunk].
+func (c *Chunk) PutString(j int, v string) {
+	col := &c.cols[j]
+	switch col.store {
+	case stStr:
+		c.pushStr(col, v)
+	case stDynamic:
+		col.store = stStr
+		c.pushStr(col, v)
+	case stBoxed:
+		c.pushBoxed(col, expr.StringValue(v))
+	default:
+		c.promoteToBoxed(col)
+		c.pushBoxed(col, expr.StringValue(v))
+	}
+}
+
+// PutBool appends v as a bool to column j, committing or promoting its backing as
+// described in [NewDynamicChunk].
+func (c *Chunk) PutBool(j int, v bool) {
+	col := &c.cols[j]
+	switch col.store {
+	case stBool:
+		c.pushBool(col, v)
+	case stDynamic:
+		col.store = stBool
+		c.pushBool(col, v)
+	case stBoxed:
+		c.pushBoxed(col, expr.BoolValue(v))
+	default:
+		c.promoteToBoxed(col)
+		c.pushBoxed(col, expr.BoolValue(v))
+	}
+}
+
+// PutNull appends a NULL to column j. On a dynamic column the first value being
+// NULL commits the column to a boxed backing (a null-first column stays boxed);
+// on an already-committed column it records a NULL in the live backing exactly
+// like [Chunk.AppendNull]. The validity bitmap — never the placeholder — is what
+// box-at-sink honours.
+func (c *Chunk) PutNull(j int) {
+	col := &c.cols[j]
+	if col.store == stDynamic {
+		col.store = stBoxed
+	}
+	c.AppendNull(j)
+}
+
+// PutValue appends a boxed [expr.Value] to column j, routing a plain scalar
+// (Integer/Float/String/Bool) to the typed fast paths — so a fallback that
+// produces an already-boxed scalar keeps the column typed — and boxing every
+// other kind (temporal / point / list / map / node / …) into the boxed backing,
+// promoting the column if necessary. A nil interface or [expr.Null] appends a
+// NULL. This is the sink-boundary entry point the columnar projection uses for
+// values it must keep boxed for byte-identity with the row-at-a-time path.
+func (c *Chunk) PutValue(j int, v expr.Value) {
+	switch cv := v.(type) {
+	case nil:
+		c.PutNull(j)
+	case expr.IntegerValue:
+		c.PutInt64(j, int64(cv))
+	case expr.FloatValue:
+		c.PutFloat64(j, float64(cv))
+	case expr.StringValue:
+		c.PutString(j, string(cv))
+	case expr.BoolValue:
+		c.PutBool(j, bool(cv))
+	default:
+		if expr.IsNull(v) {
+			c.PutNull(j)
+			return
+		}
+		col := &c.cols[j]
+		switch col.store {
+		case stBoxed:
+			// already boxed
+		case stDynamic:
+			col.store = stBoxed
+		default:
+			c.promoteToBoxed(col)
+		}
+		c.pushBoxed(&c.cols[j], v)
+	}
+}
+
+// promoteToBoxed converts col's committed typed backing to a boxed
+// []expr.Value backing, re-boxing every value already stored (a NULL cell boxes
+// to nil so box-at-sink yields [expr.Null]). It is the one-time O(n) cost paid
+// when a dynamic column first sees a value of a conflicting kind; heterogeneous
+// columns are rare, so this is amortised negligible. col.store must be a typed
+// scalar backing on entry; it is stBoxed on return.
+func (c *Chunk) promoteToBoxed(col *column) {
+	boxed := make([]expr.Value, col.n)
+	for row := 0; row < col.n; row++ {
+		if !isValid(col, row) {
+			continue // leave nil → boxes to expr.Null
+		}
+		switch col.store {
+		case stI64:
+			boxed[row] = expr.IntegerValue(col.i64[row])
+		case stF64:
+			boxed[row] = expr.FloatValue(col.f64[row])
+		case stStr:
+			boxed[row] = expr.StringValue(col.str[row])
+		case stBool:
+			boxed[row] = expr.BoolValue(col.b[row])
+		}
+	}
+	col.boxed = boxed
+	col.i64, col.f64, col.str, col.b = nil, nil, nil, nil
+	col.store = stBoxed
 }
 
 // SetInt64 overwrites row of integer column j with v, marking it non-null. row
@@ -469,6 +681,10 @@ func (c *Chunk) BoxCell(j, row int) expr.Value {
 			return expr.Null
 		}
 		return col.boxed[row]
+	case stDynamic:
+		// An uncommitted dynamic column holds no rows; a boxable cell always has a
+		// committed backing. Reached only defensively.
+		return expr.Null
 	}
 	return expr.Null
 }
@@ -494,6 +710,36 @@ func (c *Chunk) BoxRow(row int, dst Row) Row {
 	return dst
 }
 
+// RowByteEstimate returns a coarse, allocation-free byte estimate for the whole
+// logical row at index row, for a columnar sink's byte-budget accounting: per
+// column it charges overhead for a NULL cell or a fixed-width scalar
+// (int64/float64/bool), overhead plus the byte length for a string cell, and
+// estimateBoxed applied to the stored [expr.Value] for a boxed cell. It boxes
+// nothing. Summed this way it equals what a per-value estimator (overhead-based,
+// string-length-aware) summed over the row's boxed values would yield, so a
+// columnar drain's byte budget trips at the same point the row-oriented drain
+// does. It panics on an out-of-range row.
+func (c *Chunk) RowByteEstimate(row int, overhead int64, estimateBoxed func(expr.Value) int64) int64 {
+	var total int64
+	for j := range c.cols {
+		col := &c.cols[j]
+		c.checkRow(col, row)
+		if !isValid(col, row) {
+			total += overhead
+			continue
+		}
+		switch col.store {
+		case stStr:
+			total += overhead + int64(len(col.str[row]))
+		case stBoxed:
+			total += estimateBoxed(col.boxed[row])
+		default: // stI64 / stF64 / stBool
+			total += overhead
+		}
+	}
+	return total
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Reset
 // ─────────────────────────────────────────────────────────────────────────────
@@ -508,23 +754,32 @@ func (c *Chunk) BoxRow(row int, dst Row) Row {
 func (c *Chunk) Reset() {
 	for j := range c.cols {
 		col := &c.cols[j]
-		switch col.store {
-		case stI64:
-			col.i64 = col.i64[:0]
-		case stF64:
-			col.f64 = col.f64[:0]
-		case stStr:
+		// Reset every backing's length, retaining its array for pool reuse. A
+		// static column has exactly one live backing; a dynamic column may have a
+		// committed typed backing (and, after a promotion, also a boxed one). The
+		// pointer-bearing backings (string headers, boxed values) are nilled so the
+		// batch does not pin memory past its logical end; the fixed-width backings
+		// hold no pointers and stale values are invisible past length 0.
+		col.i64 = col.i64[:0]
+		col.f64 = col.f64[:0]
+		if len(col.str) > 0 {
 			for i := range col.str {
 				col.str[i] = ""
 			}
 			col.str = col.str[:0]
-		case stBool:
-			col.b = col.b[:0]
-		case stBoxed:
+		}
+		col.b = col.b[:0]
+		if len(col.boxed) > 0 {
 			for i := range col.boxed {
 				col.boxed[i] = nil
 			}
 			col.boxed = col.boxed[:0]
+		}
+		if col.dynamic {
+			// Restore the undecided state so a pooled dynamic chunk re-discovers
+			// each column's kind on its next fill; the retained backings above are
+			// reused when the next commit picks the same kind.
+			col.store = stDynamic
 		}
 		if len(col.valid) > 0 {
 			clear(col.valid)
