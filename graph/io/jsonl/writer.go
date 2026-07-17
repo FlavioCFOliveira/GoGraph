@@ -77,7 +77,7 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 		if !live[id] {
 			continue
 		}
-		if err := enc.Encode(Record{Type: "node", ID: names[id]}); err != nil {
+		if err := enc.Encode(Record{Type: "node", ID: &names[id]}); err != nil {
 			metrics.IncCounter("graph.io.jsonl.WriteCtx.errors", 1)
 			return written, err
 		}
@@ -87,7 +87,9 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 		if !live[id] {
 			continue
 		}
-		src := names[id]
+		// srcPtr points into the names slice so the edge record carries a
+		// non-nil "src" even when the id is empty (rmp #2043); no allocation.
+		srcPtr := &names[id]
 		nb, ws := a.LoadEntry(graph.NodeID(id))
 		for i, n := range nb {
 			if written&0xFFF == 0 {
@@ -106,7 +108,7 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 			if ws != nil {
 				weight = ws[i]
 			}
-			if err := enc.Encode(Record{Type: "edge", Src: src, Dst: names[uint64(n)], Weight: weight}); err != nil {
+			if err := enc.Encode(Record{Type: "edge", Src: srcPtr, Dst: &names[uint64(n)], Weight: weight}); err != nil {
 				metrics.IncCounter("graph.io.jsonl.WriteCtx.errors", 1)
 				return written, err
 			}
@@ -182,7 +184,7 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 		if len(labels) == 0 {
 			labels = nil
 		}
-		if err := enc.Encode(Record{Type: "node", ID: names[id], Labels: labels}); err != nil {
+		if err := enc.Encode(Record{Type: "node", ID: &names[id], Labels: labels}); err != nil {
 			metrics.IncCounter("graph.io.jsonl.WriteWithPropsCtx.errors", 1)
 			return written, err
 		}
@@ -194,7 +196,9 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 		if !live[id] {
 			continue
 		}
-		src := names[id]
+		// srcPtr points into the names slice so the edge record carries a
+		// non-nil "src" even when the id is empty (rmp #2043); no allocation.
+		srcPtr := &names[id]
 		nb, ws := a.LoadEntry(graph.NodeID(id))
 		for i, n := range nb {
 			if written&0xFFF == 0 {
@@ -213,7 +217,7 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 			if ws != nil {
 				weight = ws[i]
 			}
-			if err := enc.Encode(Record{Type: "edge", Src: src, Dst: names[uint64(n)], Weight: weight}); err != nil {
+			if err := enc.Encode(Record{Type: "edge", Src: srcPtr, Dst: &names[uint64(n)], Weight: weight}); err != nil {
 				metrics.IncCounter("graph.io.jsonl.WriteWithPropsCtx.errors", 1)
 				return written, err
 			}
@@ -244,8 +248,8 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 			}
 			if err := enc.Encode(Record{
 				Type:  "property",
-				ID:    nodeKey,
-				Key:   propName,
+				ID:    &nodeKey,
+				Key:   &propName,
 				Value: valStr,
 				Kind:  kindStr,
 			}); err != nil {

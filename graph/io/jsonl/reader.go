@@ -79,15 +79,23 @@ func translateScanErr(err error) error {
 }
 
 // Record is the wire shape of a JSON-Lines event.
+//
+// ID, Src, Dst, and Key are pointers so the reader can tell an ABSENT field
+// (nil) from one that is PRESENT but empty (non-nil, ""). The engine accepts
+// an empty-string node id, edge endpoint, and property key, so those must
+// round-trip; a genuinely missing field is a malformed record and is still
+// rejected (rmp #2043). A plain string with omitempty conflated the two: the
+// empty value was dropped on write and re-read as absent, and the record was
+// wrongly rejected on re-import.
 type Record struct {
-	Type   string `json:"type"`
-	ID     string `json:"id,omitempty"`     // node key — used by "node" and "property" records
-	Src    string `json:"src,omitempty"`    // edge source
-	Dst    string `json:"dst,omitempty"`    // edge destination
-	Weight int64  `json:"weight,omitempty"` // edge weight (defaults to 0)
-	Key    string `json:"key,omitempty"`    // property key — used by "property" records
-	Value  string `json:"value,omitempty"`  // property value serialised as a string
-	Kind   string `json:"kind,omitempty"`   // property kind: "string","int64","float64","bool","time","bytes"
+	Type   string  `json:"type"`
+	ID     *string `json:"id,omitempty"`     // node key — used by "node" and "property" records
+	Src    *string `json:"src,omitempty"`    // edge source
+	Dst    *string `json:"dst,omitempty"`    // edge destination
+	Weight int64   `json:"weight,omitempty"` // edge weight (defaults to 0)
+	Key    *string `json:"key,omitempty"`    // property key — used by "property" records
+	Value  string  `json:"value,omitempty"`  // property value serialised as a string
+	Kind   string  `json:"kind,omitempty"`   // property kind: "string","int64","float64","bool","time","bytes"
 
 	// Labels carries the node's labels on "node" records (#1793). Omitted
 	// when empty so label-less files stay byte-identical and older files
@@ -162,20 +170,22 @@ func ReadIntoCappedCtx(ctx context.Context, r io.Reader, cfg adjlist.Config, max
 		}
 		switch rec.Type {
 		case "node":
-			if rec.ID == "" {
+			// A nil ID is an absent field (malformed); a non-nil pointer to ""
+			// is a present empty id, which the engine accepts (rmp #2043).
+			if rec.ID == nil {
 				metrics.IncCounter("graph.io.jsonl.ReadIntoCtx.errors", 1)
 				return nil, rows, fmt.Errorf("jsonl row %d: node missing id", rows)
 			}
-			if err := a.AddNode(rec.ID); err != nil {
+			if err := a.AddNode(*rec.ID); err != nil {
 				metrics.IncCounter("graph.io.jsonl.ReadIntoCtx.errors", 1)
 				return nil, rows, fmt.Errorf("jsonl row %d: AddNode: %w", rows, err)
 			}
 		case "edge":
-			if rec.Src == "" || rec.Dst == "" {
+			if rec.Src == nil || rec.Dst == nil {
 				metrics.IncCounter("graph.io.jsonl.ReadIntoCtx.errors", 1)
 				return nil, rows, fmt.Errorf("jsonl row %d: edge missing src/dst", rows)
 			}
-			if err := a.AddEdge(rec.Src, rec.Dst, rec.Weight); err != nil {
+			if err := a.AddEdge(*rec.Src, *rec.Dst, rec.Weight); err != nil {
 				metrics.IncCounter("graph.io.jsonl.ReadIntoCtx.errors", 1)
 				return nil, rows, fmt.Errorf("jsonl row %d: AddEdge: %w", rows, err)
 			}
@@ -261,41 +271,45 @@ func ReadWithPropsCappedCtx(ctx context.Context, r io.Reader, cfg adjlist.Config
 		}
 		switch rec.Type {
 		case "node":
-			if rec.ID == "" {
+			// A nil ID is an absent field (malformed); a non-nil pointer to ""
+			// is a present empty id, which the engine accepts (rmp #2043).
+			if rec.ID == nil {
 				metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
 				return nil, rows, fmt.Errorf("jsonl row %d: node missing id", rows)
 			}
-			if err := g.AddNode(rec.ID); err != nil {
+			if err := g.AddNode(*rec.ID); err != nil {
 				metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
 				return nil, rows, fmt.Errorf("jsonl row %d: AddNode: %w", rows, err)
 			}
 			// Restore node labels (#1793). Absent on label-less / older files.
 			for _, lbl := range rec.Labels {
-				if err := g.SetNodeLabel(rec.ID, lbl); err != nil {
+				if err := g.SetNodeLabel(*rec.ID, lbl); err != nil {
 					metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
 					return nil, rows, fmt.Errorf("jsonl row %d: SetNodeLabel(%q): %w", rows, lbl, err)
 				}
 			}
 		case "edge":
-			if rec.Src == "" || rec.Dst == "" {
+			if rec.Src == nil || rec.Dst == nil {
 				metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
 				return nil, rows, fmt.Errorf("jsonl row %d: edge missing src/dst", rows)
 			}
-			if err := g.AddEdge(rec.Src, rec.Dst, rec.Weight); err != nil {
+			if err := g.AddEdge(*rec.Src, *rec.Dst, rec.Weight); err != nil {
 				metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
 				return nil, rows, fmt.Errorf("jsonl row %d: AddEdge: %w", rows, err)
 			}
 		case "property":
-			if rec.ID == "" || rec.Key == "" {
+			// nil id or key is an absent field (malformed); a present empty id
+			// or key is accepted and round-trips (rmp #2043).
+			if rec.ID == nil || rec.Key == nil {
 				metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
 				return nil, rows, fmt.Errorf("jsonl row %d: property missing id/key", rows)
 			}
 			pv, err := decodePropertyValue(rec.Kind, rec.Value)
 			if err != nil {
 				metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
-				return nil, rows, fmt.Errorf("jsonl row %d: property %q: %w", rows, rec.Key, err)
+				return nil, rows, fmt.Errorf("jsonl row %d: property %q: %w", rows, *rec.Key, err)
 			}
-			if err := g.SetNodeProperty(rec.ID, rec.Key, pv); err != nil {
+			if err := g.SetNodeProperty(*rec.ID, *rec.Key, pv); err != nil {
 				metrics.IncCounter("graph.io.jsonl.ReadWithPropsCtx.errors", 1)
 				return nil, rows, fmt.Errorf("jsonl row %d: SetNodeProperty: %w", rows, err)
 			}
