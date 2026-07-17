@@ -1126,7 +1126,14 @@ func sendResponse(cw *proto.ChunkedWriter, msg any) error {
 			respBufPool.Put(rb)
 		}
 	}()
-	if err := proto.EncodeResponse(rb.enc, msg); err != nil {
+	if rec, ok := msg.(*proto.Record); ok {
+		// RECORD rows take the typed-scalar fast path, which skips the per-cell
+		// any-box on an all-scalar row and is byte-identical to EncodeResponse
+		// otherwise (#1838). Every other message type uses the generic encoder.
+		if err := encodeRecordFast(rb.enc, rec.Data); err != nil {
+			return fmt.Errorf("bolt: encode response %T: %w", msg, err)
+		}
+	} else if err := proto.EncodeResponse(rb.enc, msg); err != nil {
 		return fmt.Errorf("bolt: encode response %T: %w", msg, err)
 	}
 	// Encoder uses an internal bufio.Writer; flush to buf before reading bytes.

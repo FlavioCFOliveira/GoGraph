@@ -994,8 +994,15 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 		// directly and never builds the per-row map that Record() would. row is
 		// the reused streaming buffer or a fresh slice (#1520, see newRow).
 		row := newRow()
-		for i := range s.columns {
-			row[i] = exprToPackstream(s.result.ValueAt(i), s.boltVersion.Major)
+		if streaming {
+			// The sink consumes each row synchronously and retains nothing, so
+			// an all-scalar row is stored raw and encoded via the typed writers,
+			// skipping the per-cell any re-box (#1838; see fillRowRawScalar).
+			fillRowRawScalar(row, s.result, s.boltVersion.Major)
+		} else {
+			for i := range s.columns {
+				row[i] = exprToPackstream(s.result.ValueAt(i), s.boltVersion.Major)
+			}
 		}
 		if err := emit(row); err != nil {
 			return s.abortStream(err)
@@ -1568,6 +1575,99 @@ func notificationsToValues(ns []cypher.Notification) []packstream.Value {
 		}
 	}
 	return out
+}
+
+// isFastScalar reports whether v is one of the four scalar Cypher value kinds
+// that [encodeRecordFast] can write directly through the packstream Encoder's
+// typed writers, without the intermediate any-box that [exprToPackstream] mints
+// for a non-tiny int64/float64 (#1838).
+func isFastScalar(v any) bool {
+	switch v.(type) {
+	case expr.IntegerValue, expr.FloatValue, expr.StringValue, expr.BoolValue:
+		return true
+	default:
+		return false
+	}
+}
+
+// fillRowRawScalar fills dst with the current materialised result row for the
+// streaming RECORD path (#1838). When every column is a scalar (see
+// [isFastScalar]) the cells are stored raw — a plain interface copy of the
+// boxed value the result already holds, incurring no fresh allocation — and
+// [encodeRecordFast] writes them through the Encoder's typed scalar writers,
+// skipping the per-cell any re-box that [exprToPackstream] would mint. If any
+// column is a composite, temporal, or Null value the whole row is converted to
+// self-contained packstream values, so [encodeRecordFast] takes its
+// byte-identical baseline path. dst must have len equal to the column count.
+//
+// Storing cells raw is sound only because the streaming [recordSink] consumes
+// each row synchronously and retains no reference to it past encoding: a raw
+// cell aliases the value owned by the materialised result, which is immutable
+// for the result's lifetime. The buffered and peeked paths, which retain rows,
+// keep calling [exprToPackstream] and never use this helper.
+func fillRowRawScalar(dst []packstream.Value, r *cypher.Result, boltMajor uint8) {
+	for i := range dst {
+		if !isFastScalar(r.ValueAt(i)) {
+			for j := range dst {
+				dst[j] = exprToPackstream(r.ValueAt(j), boltMajor)
+			}
+			return
+		}
+	}
+	for i := range dst {
+		dst[i] = r.ValueAt(i)
+	}
+}
+
+// encodeRecordFast encodes a RECORD message into enc. When every cell is a raw
+// scalar expr value it writes the row through the Encoder's typed scalar writers
+// (WriteInt/WriteFloat/WriteString/WriteBool), avoiding the per-cell any-box the
+// generic [packstream.Encoder.WriteValue] path incurs for a []packstream.Value
+// of boxed scalars, plus the []Value→any box that [proto.EncodeResponse] adds
+// (#1838). For any other cell shape — a composite/temporal value, a Null, or an
+// already-converted packstream value — it falls back to the exact encoding
+// [proto.EncodeResponse] uses for a Record, so the wire bytes and the WriteValue
+// nesting-depth budget are byte-for-byte identical in every case.
+//
+// Invariant: a row that reaches the typed branch contains only raw expr scalars.
+// [fillRowRawScalar] guarantees this — it converts the whole row whenever any
+// cell is non-scalar — so the baseline branch never receives a raw expr value
+// (which packstream.WriteValue cannot encode). An empty row takes the typed
+// branch and emits the same bytes the baseline branch would.
+func encodeRecordFast(enc *packstream.Encoder, data []packstream.Value) error {
+	for _, cell := range data {
+		if !isFastScalar(cell) {
+			// Baseline: identical to proto.encodeRecord (struct header + the
+			// whole []Value written via WriteValue at the same nesting depth).
+			if err := enc.WriteStructHeader(proto.TagRecord, 1); err != nil {
+				return err
+			}
+			return enc.WriteValue(packstream.Value(data))
+		}
+	}
+	if err := enc.WriteStructHeader(proto.TagRecord, 1); err != nil {
+		return err
+	}
+	if err := enc.WriteListHeader(len(data)); err != nil {
+		return err
+	}
+	for _, cell := range data {
+		var err error
+		switch x := cell.(type) {
+		case expr.IntegerValue:
+			err = enc.WriteInt(int64(x))
+		case expr.FloatValue:
+			err = enc.WriteFloat(float64(x))
+		case expr.StringValue:
+			err = enc.WriteString(string(x))
+		case expr.BoolValue:
+			err = enc.WriteBool(bool(x))
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // exprToPackstream converts an expr.Value (or any interface{} from exec.Record)
