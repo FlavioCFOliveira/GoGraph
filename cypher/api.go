@@ -4161,6 +4161,22 @@ func (s *lpgLabelResolver) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 	return s.g.NodeIndex().Intersect(uint32(lid))
 }
 
+// ResolveLabelCount reports the number of live nodes that carry name, read
+// directly from the label index's cardinality without materialising a bitmap. It
+// backs the zero-alloc [exec.LabelCountScan] fast path (#2004). ok is always
+// true for the live LPG resolver: an unknown label yields (0, true), matching
+// the empty bitmap [lpgLabelResolver.ResolveLabelBitmap] would return. The
+// label index strips deleted nodes at delete time, so the cardinality counts
+// only live nodes — the exact number of rows a [exec.NodeByLabelScan] over the
+// same label would emit.
+func (s *lpgLabelResolver) ResolveLabelCount(name string) (int64, bool) {
+	lid, ok := s.g.Registry().Lookup(name)
+	if !ok {
+		return 0, true
+	}
+	return int64(s.g.NodeIndex().Count(uint32(lid))), true
+}
+
 // parallelCountScanBuildCount counts how many times the planner has emitted the
 // parallel-reduce count scan in place of the serial EagerAggregation pipeline
 // (#1672). It is a diagnostic seam read only by the in-package differential test
@@ -6541,9 +6557,20 @@ func buildOperator(
 		// is bit-identical to the serial EagerAggregation (int64 count addition is
 		// associative and partition-invariant). Any other shape — a second
 		// aggregate, sum/avg/min/max/collect, a grouping key, a DISTINCT, a
-		// non-trivial count argument, a NodeByLabelScan child, or a graph at or
-		// below the threshold — falls through to the serial build below.
+		// non-trivial count argument, or a graph at or below the threshold — falls
+		// through to the label-scan pushdown and then to the serial build below. A
+		// count over a bare NodeByLabelScan is served by tryBuildLabelCountScan.
 		if op, ok := tryBuildParallelCountScan(p, walker, schema, bopts); ok {
+			return op, nil
+		}
+		// Label-scan count pushdown (#2004): a group-by-less count(*) /
+		// count(<scan-var>) over a bare single-label scan is served by a
+		// LabelCountScan that reads the label's live-node count directly (O(1) from
+		// the label index) instead of iterating one row per node. Bit-identical to
+		// the serial EagerAggregation because the label scan emits exactly one row
+		// per labelled node. Declines (falls through to the serial build) for every
+		// other shape.
+		if op, ok := tryBuildLabelCountScan(p, walker, labelSrc, schema, bopts); ok {
 			return op, nil
 		}
 		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
@@ -7327,28 +7354,103 @@ func tryBuildParallelCountScan(
 		return nil, false
 	}
 
-	// Install the post-aggregation schema: a single column at index 0 holding the
-	// count output. Mirror buildEagerAggregation: clear the pre-aggregation
-	// bindings (the scan variable is consumed by the aggregate and is no longer in
-	// scope) and tag the output column scalar so buildIRProjection's Variable
-	// fast-path does not mis-upgrade the integer count into a NodeValue when it
-	// coincides with a real NodeID.
-	for k := range schema {
-		delete(schema, k)
-	}
-	schema[agg.OutputName] = 0
-	if bopts != nil {
-		if bopts.scalarCols == nil {
-			bopts.scalarCols = make(map[string]struct{})
-		}
-		bopts.scalarCols[agg.OutputName] = struct{}{}
-	}
+	installCountAggSchema(schema, agg.OutputName, bopts)
 	var gov *exec.ParallelGovernor
 	if bopts != nil {
 		gov = bopts.parallelGov
 	}
 	parallelCountScanBuildCount.Add(1)
 	return exec.NewParallelCountScan(walker, 0, gov), true
+}
+
+// installCountAggSchema mutates schema to the single-column post-aggregation
+// layout that buildEagerAggregation installs for a group-by-less count (#1672,
+// #2004). outName is the aggregate's output column name. It clears the
+// pre-aggregation bindings (the scan variable is consumed by the aggregate and is
+// no longer in scope), registers outName at index 0, and tags that column scalar
+// in bopts so buildIRProjection's Variable fast-path does not mis-upgrade the
+// integer count into a NodeValue when it coincides with a real NodeID. It is
+// shared by every count-pushdown builder so they install an identical downstream
+// schema.
+func installCountAggSchema(schema map[string]int, outName string, bopts *buildOpts) {
+	for k := range schema {
+		delete(schema, k)
+	}
+	schema[outName] = 0
+	if bopts != nil {
+		if bopts.scalarCols == nil {
+			bopts.scalarCols = make(map[string]struct{})
+		}
+		bopts.scalarCols[outName] = struct{}{}
+	}
+}
+
+// labelCountScanBuildCount counts how many times the planner has emitted the
+// direct label-count scan in place of the serial EagerAggregation pipeline
+// (#2004). Like [parallelCountScanBuildCount] it is a process-global, monotonic
+// diagnostic seam read only by the in-package differential tests to assert the
+// label-count fast path fired (or, under a guard, did not).
+var labelCountScanBuildCount atomic.Uint64
+
+// tryBuildLabelCountScan returns a [exec.LabelCountScan] and true when p is a
+// group-by-less count over a BARE single-label node scan whose result is provably
+// the label's live-node count, and false otherwise (the caller then builds the
+// serial pipeline). It is the label-scan counterpart of [tryBuildParallelCountScan]
+// (#2004). The recognised shape is:
+//
+//   - no grouping keys (a global aggregate) and exactly one aggregate;
+//   - function count, non-DISTINCT, whose argument is either empty (count(*)) or
+//     the bare variable bound by the child scan (count(p)) — both equal the number
+//     of rows the label scan emits, because a bare label scan binds a non-null
+//     node in every row;
+//   - the child is a bare [ir.NodeByLabelScan]. The IR translator emits that node
+//     only for a pure single-label pattern with no inline property filter and no
+//     WHERE: extra labels, property maps, and WHERE each wrap the scan in a
+//     Selection, so any of them makes the child a Selection (not a bare scan) and
+//     this fast path declines. A Selection between the scan and the aggregate
+//     would change which rows are counted, so excluding it is required for
+//     correctness;
+//   - the parallel count path is enabled and the live node count exceeds the
+//     threshold (delegated to useParallelScan, shared with the full-scan path so
+//     one knob governs every count pushdown).
+//
+// Because [exec.NodeByLabelScan] emits exactly one row per NodeID in the label
+// bitmap with no liveness re-filter, and the count of those rows equals the
+// bitmap's cardinality, the emitted count is bit-identical to the serial
+// EagerAggregation result. When it fires it installs the same post-aggregation
+// schema as [tryBuildParallelCountScan] via [installCountAggSchema]; every
+// declined shape leaves schema untouched.
+func tryBuildLabelCountScan(
+	p *ir.EagerAggregation,
+	walker nodeWalkerIface,
+	labelSrc labelResolverIface,
+	schema map[string]int,
+	bopts *buildOpts,
+) (exec.Operator, bool) {
+	if len(p.GroupBy) != 0 || len(p.Aggregates) != 1 {
+		return nil, false
+	}
+	agg := p.Aggregates[0]
+	if agg.Function != "count" || agg.Distinct {
+		return nil, false
+	}
+	scan, ok := p.Child.(*ir.NodeByLabelScan)
+	if !ok {
+		return nil, false
+	}
+	// count(*) (empty argument) or count(<scan-var>): both equal the number of
+	// rows the bare label scan emits. count(p.prop) counts non-null p.prop,
+	// count(<other-var>) / count(expr) carry their own semantics; all decline.
+	if agg.Argument != "" && agg.Argument != scan.NodeVar {
+		return nil, false
+	}
+	if !useParallelScan(walker, bopts) {
+		return nil, false
+	}
+
+	installCountAggSchema(schema, agg.OutputName, bopts)
+	labelCountScanBuildCount.Add(1)
+	return exec.NewLabelCountScan(scan.Label, &execLabelAdapter{labelSrc: labelSrc}), true
 }
 
 // buildEagerAggregation builds the physical EagerAggregation operator from the
@@ -11459,6 +11561,19 @@ type execLabelAdapter struct {
 // ResolveLabelBitmap implements exec.labelResolver.
 func (a *execLabelAdapter) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 	return a.labelSrc.ResolveLabelBitmap(name)
+}
+
+// ResolveLabelCount satisfies exec's optional labelCounter fast path, delegating
+// the zero-alloc label-count read to the underlying resolver when it supports
+// one; otherwise it reports (0, false) so [exec.LabelCountScan] falls back to the
+// bitmap-cardinality path (#2004).
+func (a *execLabelAdapter) ResolveLabelCount(name string) (int64, bool) {
+	if lc, ok := a.labelSrc.(interface {
+		ResolveLabelCount(string) (int64, bool)
+	}); ok {
+		return lc.ResolveLabelCount(name)
+	}
+	return 0, false
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
