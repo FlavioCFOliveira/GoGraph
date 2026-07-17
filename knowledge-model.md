@@ -1353,6 +1353,20 @@ explicit user decision, or obtaining user sign-off (#2050): ACID/snapshot-blocke
 (#1704 P4/P5, #1825, #1826, #1712, #1827), user-deferred (#1714, #1718, portability
 #2046/#2047/#2048), design-gated (#1879), or sign-off-gated (#2050).
 
+Sprint 298 (2026-07-17, +1 commit, user sign-off): `7e16d8e` #2050 exact
+cross-type int/float equivalence per CIP2016-06-14. `IntegerValue.Equal`/
+`FloatValue.Equal` cross-type now route through a shared `intEqualsFloat` that
+reuses the pre-existing exact ORDER-BY comparator `cmpInt64Float64` (so `=` agrees
+with `ORDER BY`); `Equivalent` inherits it, making every consumer exact — WHERE
+`=`/`<>`/`IN`, HashJoin per-bucket equality, DISTINCT, EagerAggregation grouping,
+and List/Map element equality. `int(2^53+1)` no longer compares/groups/joins equal
+to `float(2^53)`; `1 = 1.0` and `2^53 = 2^53.0` stay true. The float64-domain
+grouping/join hash is unchanged (now-unequal large pairs share a bucket resolved
+by the exact comparator; the `a≡b ⇒ EquivalentHash(a)==EquivalentHash(b)`
+invariant is pinned). TCK 3897 held. After sprint 298 every remaining backlog task
+is ACID/snapshot-blocked or deferred by an explicit user decision (the user
+accepted those deferrals); nothing developable remains.
+
 ## Known limitations (faithful, by design)
 
 - **Build-tag duplicates.** The extractor parses every `.go` file regardless of build
