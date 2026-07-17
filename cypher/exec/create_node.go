@@ -748,6 +748,16 @@ func parseWholeMapParam(s string, params map[string]expr.Value) ([]propLiteral, 
 		return nil, fmt.Errorf("unbound parameter $%s", name)
 	}
 	if v == nil || expr.IsNull(v) {
+		// A null whole-property-map parameter is treated leniently: it yields no
+		// properties, so CREATE (n:L $m) with $m=null creates an empty labelled
+		// node rather than raising an error. This mirrors the null-literal-map
+		// no-op and GoGraph's uniform "assigning null is a no-op" rule (see the
+		// per-entry handling below). It is a deliberate, documented divergence
+		// from Neo4j, which raises a TypeError for a null whole-map parameter;
+		// kept intentionally (rmp #2036, user decision 2026-07-17) because it is
+		// internally consistent, TCK-neutral, and changing it would break callers
+		// relying on the lenient behaviour. Do not "fix" this to error without
+		// re-confirming the decision.
 		return nil, nil
 	}
 	mv, isMap := v.(expr.MapValue)
