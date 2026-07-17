@@ -37,9 +37,10 @@
 package lpg
 
 import (
-	"sort"
 	"sync"
 	"sync/atomic"
+
+	"github.com/RoaringBitmap/roaring/v2/roaring64"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
@@ -351,12 +352,29 @@ type Graph[N comparable, W any] struct {
 	// TombstonedIDs consumer) must filter tombstoned ids. A tombstone is
 	// cleared by revive (re-materialising the node), so the set holds
 	// exactly the currently-removed ids.
-	tombstoneMu sync.RWMutex
-	tombstones  map[graph.NodeID]struct{}
-	// tombstoneActive mirrors len(tombstones) as a lock-free gate. AddNode
-	// is a hot path; on the overwhelmingly common case of a graph that has
-	// never deleted a node this lets AddNode skip the tombstone lock and the
-	// mapper lookup entirely. It is mutated only under tombstoneMu.
+	//
+	// The set is published through an atomic.Pointer to an IMMUTABLE
+	// roaring64.Bitmap so readers are fully lock-free: IsTombstoned,
+	// LiveOrder, TombstonedIDs and every introspection consumer load the
+	// pointer once (a nil pointer means no tombstone) and do read-only
+	// Contains/iteration with no synchronisation — a per-node MATCH (n)
+	// scan no longer bounces a shared reader-count cache line across cores
+	// (rmp #2039). Mutators (RemoveNode, revive, RestoreTombstones) hold
+	// tombstoneMu, CLONE the current bitmap, mutate the private clone, and
+	// atomic.Store the new pointer — copy-on-write. The clone cost is
+	// O(tombstones) and paid only on the rare delete/revive, never on a
+	// read. A concurrent lpg.Graph.View reader therefore observes either
+	// the pre- or the post-mutation set, never a torn state; the clone
+	// deep-copies (copyOnWrite is never enabled), so mutating it cannot
+	// race a reader still holding the previously published bitmap.
+	tombstoneMu sync.Mutex
+	tombstones  atomic.Pointer[roaring64.Bitmap]
+	// tombstoneActive mirrors the tombstone-set cardinality as a lock-free
+	// gate. AddNode is a hot path; on the overwhelmingly common case of a
+	// graph that has never deleted a node this lets AddNode (and every read
+	// path) skip the pointer load and the mapper lookup entirely. It is
+	// mutated only under tombstoneMu, in lock-step with the published
+	// bitmap, so it always equals the bitmap's cardinality.
 	tombstoneActive atomic.Int64
 
 	// constraintActive mirrors the cypher engine's schema-constraint count as a
@@ -889,15 +907,16 @@ func (g *Graph[N, W]) AddNode(n N) error {
 
 // revive clears any tombstone on id, marking the node live again. It is
 // the inverse of [Graph.RemoveNode] and is invoked by [Graph.AddNode] when
-// a removed node is re-created. The clear is taken under tombstoneMu so it
-// is atomic against IsTombstoned / LiveOrder / TombstonedIDs readers.
+// a removed node is re-created. The clear publishes a fresh copy-on-write
+// bitmap under tombstoneMu, so it becomes visible atomically to the
+// lock-free IsTombstoned / LiveOrder / TombstonedIDs readers.
 func (g *Graph[N, W]) revive(id graph.NodeID) {
 	g.tombstoneMu.Lock()
-	if g.tombstones != nil {
-		if _, ok := g.tombstones[id]; ok {
-			delete(g.tombstones, id)
-			g.tombstoneActive.Add(-1)
-		}
+	if cur := g.tombstones.Load(); cur != nil && cur.Contains(uint64(id)) {
+		next := cur.Clone()
+		next.Remove(uint64(id))
+		g.tombstones.Store(next)
+		g.tombstoneActive.Add(-1)
 	}
 	g.tombstoneMu.Unlock()
 	// Re-add id to all label bitmaps for labels that survived in the
@@ -1465,11 +1484,16 @@ func (g *Graph[N, W]) RemoveNode(n N) {
 		return
 	}
 	g.tombstoneMu.Lock()
-	if g.tombstones == nil {
-		g.tombstones = make(map[graph.NodeID]struct{})
-	}
-	if _, dup := g.tombstones[id]; !dup {
-		g.tombstones[id] = struct{}{}
+	cur := g.tombstones.Load()
+	if cur == nil || !cur.Contains(uint64(id)) {
+		var next *roaring64.Bitmap
+		if cur == nil {
+			next = roaring64.New()
+		} else {
+			next = cur.Clone()
+		}
+		next.Add(uint64(id))
+		g.tombstones.Store(next)
 		g.tombstoneActive.Add(1)
 	}
 	g.tombstoneMu.Unlock()
@@ -1525,15 +1549,20 @@ func (g *Graph[N, W]) restoreLabelBitmaps(id graph.NodeID) {
 // Used by the snapshot writer to persist the tombstone set durably so node
 // deletions survive a store reopen.
 //
-// TombstonedIDs is safe for concurrent use.
+// TombstonedIDs is safe for concurrent use: it loads the immutable
+// published bitmap once and reads it without any lock.
 func (g *Graph[N, W]) TombstonedIDs() []graph.NodeID {
-	g.tombstoneMu.RLock()
-	out := make([]graph.NodeID, 0, len(g.tombstones))
-	for id := range g.tombstones {
-		out = append(out, id)
+	bm := g.tombstones.Load()
+	if bm == nil {
+		return []graph.NodeID{}
 	}
-	g.tombstoneMu.RUnlock()
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	// roaring64 stores ids in ascending order, so ToArray already yields the
+	// ascending sequence the snapshot writer expects — no explicit sort.
+	arr := bm.ToArray()
+	out := make([]graph.NodeID, len(arr))
+	for i, v := range arr {
+		out[i] = graph.NodeID(v)
+	}
 	return out
 }
 
@@ -1780,14 +1809,22 @@ func (g *Graph[N, W]) RestoreTombstones(ids []graph.NodeID) {
 		return
 	}
 	g.tombstoneMu.Lock()
-	if g.tombstones == nil {
-		g.tombstones = make(map[graph.NodeID]struct{}, len(ids))
+	cur := g.tombstones.Load()
+	var next *roaring64.Bitmap
+	if cur == nil {
+		next = roaring64.New()
+	} else {
+		next = cur.Clone()
 	}
+	var added int64
 	for _, id := range ids {
-		if _, dup := g.tombstones[id]; !dup {
-			g.tombstones[id] = struct{}{}
-			g.tombstoneActive.Add(1)
+		if next.CheckedAdd(uint64(id)) {
+			added++
 		}
+	}
+	if added > 0 {
+		g.tombstones.Store(next)
+		g.tombstoneActive.Add(added)
 	}
 	g.tombstoneMu.Unlock()
 }
@@ -1798,20 +1835,28 @@ func (g *Graph[N, W]) RestoreTombstones(ids []graph.NodeID) {
 // the graph treats as deleted).
 func (g *Graph[N, W]) IsTombstoned(id graph.NodeID) bool {
 	// Lock-free fast path: on a graph that has never tombstoned a node the
-	// answer is always false, so skip tombstoneMu entirely (mirroring the same
-	// gate in AddNode). This matters under concurrent reads — AllNodesScan
-	// calls IsTombstoned per node, and taking tombstoneMu.RLock per call bounces
-	// the RWMutex reader-count cache line across cores, capping read scaling.
-	// tombstoneActive is mutated only under tombstoneMu, so a 0 observed here
-	// means no tombstone is committed; once any tombstone exists the call falls
-	// through to the locked map lookup, preserving exact behaviour.
+	// answer is always false, so skip even the pointer load (mirroring the
+	// same gate in AddNode). This matters under concurrent reads —
+	// AllNodesScan calls IsTombstoned per node, and the previous per-call
+	// tombstoneMu.RLock bounced the RWMutex reader-count cache line across
+	// cores, capping read scaling (rmp #2039). tombstoneActive is mutated
+	// only under tombstoneMu, so a 0 observed here means no tombstone is
+	// committed.
 	if g.tombstoneActive.Load() == 0 {
 		return false
 	}
-	g.tombstoneMu.RLock()
-	defer g.tombstoneMu.RUnlock()
-	_, ok := g.tombstones[id]
-	return ok
+	// Once any tombstone exists, load the immutable published bitmap once and
+	// do a read-only membership test — no lock. The bitmap is never mutated
+	// after publication (writers clone-mutate-store), so this is race-free
+	// against a concurrent RemoveNode/revive; the reader sees either the pre-
+	// or the post-mutation set. The nil check is defensive: tombstoneActive
+	// and the pointer move together under tombstoneMu, so a non-zero count
+	// implies a published bitmap.
+	bm := g.tombstones.Load()
+	if bm == nil {
+		return false
+	}
+	return bm.Contains(uint64(id))
 }
 
 // LiveNodeFilter returns a predicate reporting whether a NodeID is live (not
@@ -1832,11 +1877,13 @@ func (g *Graph[N, W]) LiveNodeFilter() func(graph.NodeID) bool {
 }
 
 // LiveOrder returns the number of non-tombstoned interned nodes.
+//
+// LiveOrder is safe for concurrent use and takes no lock: tombstoneActive
+// mirrors the published bitmap's cardinality exactly (both move together
+// under tombstoneMu), so the dead count is a single atomic load.
 func (g *Graph[N, W]) LiveOrder() uint64 {
 	total := g.adj.Order()
-	g.tombstoneMu.RLock()
-	dead := uint64(len(g.tombstones))
-	g.tombstoneMu.RUnlock()
+	dead := uint64(g.tombstoneActive.Load())
 	if dead > total {
 		return 0
 	}
