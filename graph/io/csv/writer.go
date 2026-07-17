@@ -1,10 +1,12 @@
 package csv
 
 import (
+	"bufio"
 	"context"
 	"encoding/csv"
 	"io"
 	"strconv"
+	"unicode/utf8"
 	"unsafe"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
@@ -31,7 +33,18 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 	if opts.Delimiter == 0 {
 		opts.Delimiter = ','
 	}
-	cw := csv.NewWriter(w)
+	// Default the comment rune to match [ReadIntoCtx], which treats a zero
+	// Comment as '#'. The edge loop force-quotes any cell whose first rune is
+	// this rune, so a leading such cell is never re-read as a comment line and
+	// silently dropped (rmp #2042).
+	if opts.Comment == 0 {
+		opts.Comment = '#'
+	}
+	// csv.Writer wraps its sink in a private bufio.Writer; wrapping w here lets
+	// the rare force-quoted record (built manually below) share that same
+	// buffered sink, so a comment-prefixed row never forces a per-row syscall.
+	bw := bufio.NewWriter(w)
+	cw := csv.NewWriter(bw)
 	cw.Comma = opts.Delimiter
 
 	written := 0
@@ -63,6 +76,10 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 	// neither the record nor its strings, so weightScratch is only ever
 	// overwritten after Write has returned (rmp #1523).
 	var weightScratch []byte
+	// quoteScratch backs the manually built force-quoted record used for a row
+	// whose cell begins with the comment rune; reused across rows so the
+	// pathological path allocates at most once.
+	var quoteScratch []byte
 	for id := uint64(0); id < maxID; id++ {
 		if !live[id] {
 			continue
@@ -76,6 +93,9 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 			if written&0xFFF == 0 {
 				if cerr := ctx.Err(); cerr != nil {
 					cw.Flush()
+					// Best-effort: persist the rows already emitted before
+					// reporting the cancellation; the ctx error is the result.
+					_ = bw.Flush()
 					metrics.IncCounter("graph.io.csv.WriteCtx.errors", 1)
 					return written, cerr
 				}
@@ -99,10 +119,33 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 				dstCell = sanitizeFormulaCell(dstCell)
 				weightCell = sanitizeFormulaCell(weightCell)
 			}
-			row[0], row[1], row[2] = srcCell, dstCell, weightCell
-			if err := cw.Write(row); err != nil {
-				metrics.IncCounter("graph.io.csv.WriteCtx.errors", 1)
-				return written, err
+			if startsWithRune(srcCell, opts.Comment) ||
+				startsWithRune(dstCell, opts.Comment) ||
+				startsWithRune(weightCell, opts.Comment) {
+				// encoding/csv.Writer quotes a field only on a delimiter, quote,
+				// CR/LF, or leading space — never on a leading comment rune — so
+				// a cell that merely begins with it would be written bare. On
+				// read a bare leading such cell makes encoding/csv treat the
+				// whole line as a comment and silently drop the edge (rmp #2042).
+				// Emit the record with every field explicitly quoted; the reader
+				// recovers it verbatim. Flush any csv-buffered rows first so the
+				// manual record keeps its place in the stream.
+				cw.Flush()
+				if err := cw.Error(); err != nil {
+					metrics.IncCounter("graph.io.csv.WriteCtx.errors", 1)
+					return written, err
+				}
+				quoteScratch = appendForceQuotedRecord(quoteScratch[:0], opts.Delimiter, srcCell, dstCell, weightCell)
+				if _, err := bw.Write(quoteScratch); err != nil {
+					metrics.IncCounter("graph.io.csv.WriteCtx.errors", 1)
+					return written, err
+				}
+			} else {
+				row[0], row[1], row[2] = srcCell, dstCell, weightCell
+				if err := cw.Write(row); err != nil {
+					metrics.IncCounter("graph.io.csv.WriteCtx.errors", 1)
+					return written, err
+				}
 			}
 			written++
 		}
@@ -112,7 +155,50 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 		metrics.IncCounter("graph.io.csv.WriteCtx.errors", 1)
 		return written, err
 	}
+	if err := bw.Flush(); err != nil {
+		metrics.IncCounter("graph.io.csv.WriteCtx.errors", 1)
+		return written, err
+	}
 	return written, nil
+}
+
+// startsWithRune reports whether s begins with the rune r: a cheap first-byte
+// test for an ASCII r (the common case) and a full rune decode otherwise. An
+// empty s or a zero r never matches.
+func startsWithRune(s string, r rune) bool {
+	if s == "" || r == 0 {
+		return false
+	}
+	if r < utf8.RuneSelf {
+		return s[0] == byte(r)
+	}
+	fr, _ := utf8.DecodeRuneInString(s)
+	return fr == r
+}
+
+// appendForceQuotedRecord appends to dst a CSV record whose every field is
+// explicitly double-quoted per RFC 4180 (wrapped in quotes, embedded quotes
+// doubled), fields separated by delim and the record terminated by '\n'. The
+// delimiter and terminator mirror encoding/csv.Writer's defaults (Comma, no
+// UseCRLF), and encoding/csv reads the quoted record back verbatim, so it is
+// used for the rare row whose bare leading cell would otherwise be dropped as
+// a comment line on read (rmp #2042).
+func appendForceQuotedRecord(dst []byte, delim rune, cells ...string) []byte {
+	for i, c := range cells {
+		if i > 0 {
+			dst = utf8.AppendRune(dst, delim)
+		}
+		dst = append(dst, '"')
+		for j := 0; j < len(c); j++ {
+			b := c[j]
+			dst = append(dst, b)
+			if b == '"' {
+				dst = append(dst, '"')
+			}
+		}
+		dst = append(dst, '"')
+	}
+	return append(dst, '\n')
 }
 
 // sanitizeFormulaCell neutralises a spreadsheet formula-injection payload
