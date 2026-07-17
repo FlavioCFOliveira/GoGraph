@@ -13023,6 +13023,31 @@ func buildEdgeTypeFilter(g *lpg.Graph[string, float64], fwdCSR *csr.CSR[float64]
 	}
 
 	filter := make(map[uint64]string)
+
+	// fallbackVisit resolves the per-pair edge-label membership test for the
+	// streamed fallback below without allocating a []string per edge (rmp
+	// #1877). It is declared ONCE and reused for every edge — capturing the
+	// loop-invariant accept set plus the reused matched/found cells — so the
+	// closure value itself is allocated once, not per call (the same
+	// single-visit-closure pattern the snapshot writer uses,
+	// store/snapshot/labels.go). found short-circuits every visit after the
+	// membership answer is known, giving the same early-exit as the break in
+	// the materialised any-label loop below.
+	var matched string
+	var found bool
+	fallbackVisit := func(name string) {
+		if found {
+			return
+		}
+		if acceptAll {
+			matched, found = name, true
+			return
+		}
+		if _, ok := accept[name]; ok {
+			matched, found = name, true
+		}
+	}
+
 	// Bound the loop on the SNAPSHOT CSR, not the live graph. fwdCSR was
 	// built from a point-in-time copy of adj above; verts has a fixed length
 	// of fwdCSR.MaxNodeID()+1, so verts[srcID+1] is in-range by construction
@@ -13082,9 +13107,23 @@ func buildEdgeTypeFilter(g *lpg.Graph[string, float64], fwdCSR *csr.CSR[float64]
 				}
 			}
 			if len(labels) == 0 {
-				labels = g.EdgeLabels(srcStr, dstStr)
-			}
-			if len(labels) == 0 {
+				// Fallback (handle/instance stores empty — the hot path for
+				// Go-API AddEdge+SetEdgeLabel graphs): consult the per-pair
+				// edge-label store via ForEachEdgeLabelByID rather than
+				// EdgeLabels so the membership test never materialises a
+				// []string it would immediately discard, the cold-path
+				// allocation hot spot the profile attributed to EdgeLabelsByID
+				// (rmp #1877). We already hold both endpoint NodeIDs, so this
+				// also skips the two Mapper lookups EdgeLabels would repeat.
+				// ForEachEdgeLabelByID visits exactly the names EdgeLabelsByID
+				// would return, in the same order, so fallbackVisit's
+				// accept-all / first-accepted decision is identical to ranging
+				// the EdgeLabels slice with the same break.
+				matched, found = "", false
+				g.ForEachEdgeLabelByID(graph.NodeID(srcID), dst, fallbackVisit)
+				if found {
+					filter[pos] = matched
+				}
 				continue
 			}
 			if acceptAll {
