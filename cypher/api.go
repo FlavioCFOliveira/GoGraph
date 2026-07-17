@@ -11756,6 +11756,20 @@ func buildIRProjection(
 	} else if ok {
 		return columnarProj, nil
 	}
+	// Late-materialisation columnar SCALAR-COLUMN passthrough (#2045): when EVERY
+	// item is a plain variable naming a scalar column the columnar child already
+	// materialised (a WITH-projection over a columnar chain, e.g.
+	// `... WITH n.v AS v RETURN v`), build a [exec.ColumnarProject] whose chunk
+	// fillers COPY those materialised cells from the child's chunk unboxed instead
+	// of pulling the child row-at-a-time and re-boxing every cell at the operator
+	// boundary. This consumes only already-materialised values — no sink-time graph
+	// read — so it does not touch the box-at-sink isolation contract. Otherwise fall
+	// back to the row-at-a-time [exec.Project].
+	if passthrough, ok, pErr := tryBuildColumnarScalarPassthrough(items, projItems, child, inputSchema, bopts); pErr != nil {
+		return nil, pErr
+	} else if ok {
+		return passthrough, nil
+	}
 	p, err := exec.NewProject(child, projItems)
 	if err != nil {
 		return nil, err
@@ -11914,6 +11928,140 @@ func tryBuildColumnarProjection(
 		}
 	}
 	return cp, true, nil
+}
+
+// tryBuildColumnarScalarPassthrough builds a [exec.ColumnarProject] for a
+// projection all of whose items are a plain variable naming an already-materialised
+// SCALAR column of a columnar child (#2045). It returns (op, true, nil) when the
+// shape qualifies, (nil, false, nil) to fall back to the row-at-a-time
+// [exec.Project], or (nil, false, err) on a build error.
+//
+// The child MUST be a [exec.ChunkProducer] (so its columns can be read
+// column-major) and EVERY item MUST be a bare [ast.Variable] naming a scalar
+// column — one tracked in bopts as an aggregate output, a computed projection
+// alias, or a computed grouping key (see [isScalarColumn]). That membership is the
+// soundness gate: it guarantees the child's chunk cell is a value materialised at
+// query time, never a bare node/relationship id whose late resolution would need a
+// sink-time graph read (the rmp #1704 P4/P5 isolation blocker). Each chunk filler
+// copies the source cell unboxed via [exec.Chunk.CopyCellTo]; the row-at-a-time
+// fallback reuses the item's own eval, so the two paths are byte-identical.
+func tryBuildColumnarScalarPassthrough(
+	items []ir.ProjectionItem,
+	projItems []exec.ProjectionItem,
+	child exec.Operator,
+	inputSchema map[string]int,
+	bopts *buildOpts,
+) (exec.Operator, bool, error) {
+	if bopts == nil || len(items) == 0 {
+		return nil, false, nil
+	}
+	if _, isChunk := child.(exec.ChunkProducer); !isChunk {
+		return nil, false, nil
+	}
+	srcCols := make([]int, len(items))
+	fillers := make([]exec.ColumnFiller, len(items))
+	for i := range items {
+		srcCol, ok := scalarPassthroughItem(items[i], inputSchema, bopts)
+		if !ok {
+			return nil, false, nil
+		}
+		srcCols[i] = srcCol
+		fillers[i] = evalPutColumnFiller(projItems[i].Eval)
+	}
+	cp, err := exec.NewColumnarProject(child, projItems, fillers)
+	if err != nil {
+		return nil, false, err
+	}
+	chunkFillers := make([]exec.ChunkColumnFiller, len(items))
+	for i := range items {
+		chunkFillers[i] = buildScalarPassthroughChunkFiller(srcCols[i])
+	}
+	if werr := cp.WithScalarChunkInput(chunkFillers); werr != nil {
+		// Preconditions are already checked above; on the (unreachable) error keep
+		// the byte-identical row-input path rather than failing the query.
+		return cp, true, nil
+	}
+	return cp, true, nil
+}
+
+// scalarPassthroughItem reports whether item is a bare variable naming a scalar
+// column present in inputSchema, returning that column's index. It is the gate for
+// the columnar scalar-column passthrough (#2045): the variable must be a KNOWN
+// scalar column ([isScalarColumn]) so the child chunk cell is guaranteed to be an
+// already-materialised value, and neither the alias nor the expression string may
+// shadow a different input column (mirroring [columnarPropertyItem]'s guards).
+func scalarPassthroughItem(item ir.ProjectionItem, inputSchema map[string]int, bopts *buildOpts) (srcCol int, ok bool) {
+	v, isVar := item.Expr.(*ast.Variable)
+	if !isVar {
+		return 0, false
+	}
+	col, inSchema := inputSchema[v.Name]
+	if !inSchema {
+		return 0, false
+	}
+	if !isScalarColumn(v.Name, bopts) {
+		return 0, false
+	}
+	// The alias may name the same variable (an identity `RETURN v`), but must not
+	// shadow a DIFFERENT input column — that would be a colliding-alias fast path
+	// the row build resolves differently.
+	if idx, aliasShadows := inputSchema[item.Name]; aliasShadows && idx != col {
+		return 0, false
+	}
+	if idx, exprShadows := inputSchema[item.Expression]; exprShadows && item.Expression != "" && idx != col {
+		return 0, false
+	}
+	return col, true
+}
+
+// isScalarColumn reports whether the variable named name is a known SCALAR column
+// — an aggregate output, a computed projection alias, or a computed grouping key.
+// Membership guarantees the value carried in that column was materialised at query
+// time (never a bare node/relationship id), which is what makes copying it from a
+// columnar child's chunk sound (#2045).
+func isScalarColumn(name string, bopts *buildOpts) bool {
+	if bopts == nil {
+		return false
+	}
+	if _, ok := bopts.scalarCols[name]; ok {
+		return true
+	}
+	if _, ok := bopts.projAliasScalarCols[name]; ok {
+		return true
+	}
+	if _, ok := bopts.aggKeyScalarCols[name]; ok {
+		return true
+	}
+	return false
+}
+
+// evalPutColumnFiller adapts a row-at-a-time projection eval into the row-input
+// [exec.ColumnFiller] fallback for the scalar-column passthrough (#2045): it
+// evaluates the item against the boxed input row and appends the result via
+// [exec.Chunk.PutValue], so a ColumnarProject driven through Next (a non-columnar
+// parent) stays byte-identical to the row-at-a-time path.
+func evalPutColumnFiller(eval func(exec.Row) (expr.Value, error)) exec.ColumnFiller {
+	return func(row exec.Row, dst *exec.Chunk, col int) error {
+		v, err := eval(row)
+		if err != nil {
+			return err
+		}
+		dst.PutValue(col, v)
+		return nil
+	}
+}
+
+// buildScalarPassthroughChunkFiller returns the columnar-input
+// [exec.ChunkColumnFiller] for a scalar-column passthrough: it copies the source
+// batch's cell at column srcCol UNBOXED into the output column via
+// [exec.Chunk.CopyCellTo], performing no graph access (#2045). The value copied was
+// materialised at query time by the columnar child, so the sink value is
+// byte-identical to what the row-at-a-time path would carry.
+func buildScalarPassthroughChunkFiller(srcCol int) exec.ChunkColumnFiller {
+	return func(src *exec.Chunk, srcRow int, dst *exec.Chunk, dstCol int) error {
+		src.CopyCellTo(srcCol, srcRow, dst, dstCol)
+		return nil
+	}
 }
 
 // buildScalarPropertyChunkFiller returns the columnar-input [exec.ChunkColumnFiller]

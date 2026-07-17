@@ -63,11 +63,13 @@ type ColumnarProject struct {
 	*Project
 	fillers []ColumnFiller
 
-	// chunk-input path (#1704 P3): populated by WithChunkInput when the child is a
-	// [NodeIDColumnProducer]. FillChunk then pulls the child column-major and runs
-	// chunkFillers, which read the raw int64 NodeID column unboxed, instead of
-	// pulling the child row-at-a-time via Next and boxing every node id. nil
-	// chunkFillers keeps the row-input path (P2), byte-identical.
+	// chunk-input path: populated by WithChunkInput when the child is a
+	// [NodeIDColumnProducer] (#1704 P3, reads raw int64 NodeID columns unboxed) or
+	// by WithScalarChunkInput when the child is any [ChunkProducer] emitting
+	// already-materialised scalar columns (#2045, copies cells unboxed). FillChunk
+	// then pulls the child column-major and runs chunkFillers, instead of pulling
+	// the child row-at-a-time via Next and boxing every cell. nil chunkFillers keeps
+	// the row-input path (P2), byte-identical.
 	chunkChild   ChunkProducer
 	chunkFillers []ChunkColumnFiller
 	scratch      *Chunk // reused source-batch buffer for the chunk-input path
@@ -102,6 +104,32 @@ func (op *ColumnarProject) WithChunkInput(chunkFillers []ChunkColumnFiller) erro
 	}
 	if len(chunkFillers) != len(op.fillers) {
 		return fmt.Errorf("exec: ColumnarProject.WithChunkInput: %d chunk fillers for %d items", len(chunkFillers), len(op.fillers))
+	}
+	op.chunkChild = cp
+	op.chunkFillers = chunkFillers
+	return nil
+}
+
+// WithScalarChunkInput switches this ColumnarProject to consume its child
+// column-major over ALREADY-MATERIALISED scalar columns (#2045): the child must be
+// a [ChunkProducer], and each chunk filler copies a source-chunk cell into the
+// output WITHOUT any graph read — the value is already materialised in the child's
+// chunk (a prior columnar projection produced it under the query's visibility
+// barrier). len(chunkFillers) must equal the number of projection items. It
+// returns an error otherwise, leaving the operator on the row-input path.
+//
+// Unlike [ColumnarProject.WithChunkInput] it does NOT require a
+// [NodeIDColumnProducer]: the scalar-passthrough fillers never read the live graph
+// by NodeID, so the box-at-sink isolation contract that forbids a deferred
+// entity-by-id read (rmp #1704 P4/P5) does not apply — every value copied here was
+// captured at query time. Call before Init.
+func (op *ColumnarProject) WithScalarChunkInput(chunkFillers []ChunkColumnFiller) error {
+	cp, ok := op.child.(ChunkProducer)
+	if !ok {
+		return fmt.Errorf("exec: ColumnarProject.WithScalarChunkInput: child %T is not a ChunkProducer", op.child)
+	}
+	if len(chunkFillers) != len(op.fillers) {
+		return fmt.Errorf("exec: ColumnarProject.WithScalarChunkInput: %d chunk fillers for %d items", len(chunkFillers), len(op.fillers))
 	}
 	op.chunkChild = cp
 	op.chunkFillers = chunkFillers
@@ -152,15 +180,17 @@ func (op *ColumnarProject) FillChunk(dst *Chunk, maxRows int) (int, error) {
 	return n, nil
 }
 
-// fillChunkFromChunk is the chunk-input path (#1704 P3): it pulls up to maxRows
-// source rows from the [NodeIDColumnProducer] child column-major and projects each
-// through the [ChunkColumnFiller] extractors, which read the raw int64 NodeID
-// column unboxed. Projection is 1:1 (never drops a row), so one child pull per call
-// suffices and no cross-call cursor is needed: a short child return (n < maxRows)
-// is end-of-stream, which the drain relies on. The source batch buffer (op.scratch)
-// is reused across calls and Reset before each pull. On a filler error the
-// partially-appended row is not counted in the returned n, mirroring the row-input
-// path so the ragged tail is never observed.
+// fillChunkFromChunk is the chunk-input path (#1704 P3, #2045): it pulls up to
+// maxRows source rows from the [ChunkProducer] child column-major and projects each
+// through the [ChunkColumnFiller] extractors — which read the raw int64 NodeID
+// column unboxed (WithChunkInput) or copy an already-materialised scalar cell
+// unboxed (WithScalarChunkInput). Projection is 1:1 (never drops a row — it may
+// select/reorder columns but emits one output row per source row), so one child
+// pull per call suffices and no cross-call cursor is needed: a short child return
+// (n < maxRows) is end-of-stream, which the drain relies on. The source batch
+// buffer (op.scratch) is reused across calls and Reset before each pull. On a
+// filler error the partially-appended row is not counted in the returned n,
+// mirroring the row-input path so the ragged tail is never observed.
 func (op *ColumnarProject) fillChunkFromChunk(dst *Chunk, maxRows int) (int, error) {
 	if maxRows <= 0 {
 		return 0, nil

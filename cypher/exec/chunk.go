@@ -389,6 +389,45 @@ func (c *Chunk) AppendRowFrom(src *Chunk, srcRow int) {
 // panic on the read path.
 func (c *Chunk) IsInt64Column(j int) bool { return c.cols[j].store == stI64 }
 
+// CopyCellTo copies cell (srcCol, srcRow) of c into column dstCol of dst WITHOUT
+// boxing a plain scalar: a typed cell is appended through dst's matching dynamic
+// [Chunk.PutInt64]/[Chunk.PutFloat64]/[Chunk.PutString]/[Chunk.PutBool], a boxed
+// cell through [Chunk.PutValue] (which re-routes a plain scalar back to a typed
+// backing and keeps every other kind boxed), and a NULL cell through
+// [Chunk.PutNull]. It reads nothing but the already-materialised value the source
+// chunk holds — no graph access — so it is the scalar-column passthrough primitive
+// (rmp #2045): a projection over an already-columnar child copies a materialised
+// value from the child's chunk instead of re-boxing it row-at-a-time or re-reading
+// the graph by NodeID (which the box-at-sink isolation contract forbids). dst
+// columns must be dynamic or match the source kind — the [Chunk.PutValue]/Put*
+// family promotes a dynamic column on a kind conflict rather than panicking, so a
+// heterogeneous passthrough column stays byte-identical to the row-at-a-time path.
+// It panics on an out-of-range srcRow.
+func (c *Chunk) CopyCellTo(srcCol, srcRow int, dst *Chunk, dstCol int) {
+	col := &c.cols[srcCol]
+	c.checkRow(col, srcRow)
+	if !isValid(col, srcRow) {
+		dst.PutNull(dstCol)
+		return
+	}
+	switch col.store {
+	case stI64:
+		dst.PutInt64(dstCol, col.i64[srcRow])
+	case stF64:
+		dst.PutFloat64(dstCol, col.f64[srcRow])
+	case stStr:
+		dst.PutString(dstCol, col.str[srcRow])
+	case stBool:
+		dst.PutBool(dstCol, col.b[srcRow])
+	case stBoxed:
+		dst.PutValue(dstCol, col.boxed[srcRow])
+	case stDynamic:
+		// An uncommitted dynamic column holds no rows; a valid cell always has a
+		// committed backing. Reached only defensively.
+		dst.PutNull(dstCol)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Builders — dynamic Put API (type-decided, promoting), for NewDynamicChunk
 // ─────────────────────────────────────────────────────────────────────────────
