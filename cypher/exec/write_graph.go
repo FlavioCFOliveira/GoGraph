@@ -49,7 +49,20 @@ type GraphMutator interface {
 	AddEdgeH(src, dst string, w float64) (srcID, dstID graph.NodeID, handle uint64, err error)
 
 	// RemoveEdge removes the directed edge from src to dst (no-op if absent).
+	// In a multigraph it removes the FIRST src→dst adjacency slot regardless of
+	// which parallel instance is intended; callers that hold a bound instance's
+	// stable handle must use RemoveEdgeByHandle for instance precision.
 	RemoveEdge(src, dst string)
+
+	// RemoveEdgeByHandle removes the single parallel edge instance identified by
+	// the stable handle on the (src, dst) pair — its adjacency slot AND its
+	// per-handle label/property metadata — leaving sibling instances intact.
+	// Used by DELETE of a specifically-bound relationship so a parallel edge of
+	// a distinct type/property is retired EXACTLY, not by first-match (rmp
+	// #2018). handle must be non-zero; a caller with no resolvable handle (simple
+	// graph, or a post-projection binding that lost the edge position) uses
+	// RemoveEdge instead. No-op when no slot carries handle.
+	RemoveEdgeByHandle(src, dst string, handle uint64)
 
 	// SetNodeLabel attaches label to n (inserting n if absent). Returns
 	// any error from the underlying [adjlist.AdjList.AddNode] (see

@@ -933,6 +933,47 @@ func (a *AdjList[N, W]) RemoveEdge(src, dst N) {
 	}
 }
 
+// RemoveEdgeByHandle removes the single directed-edge slot from src to dst
+// whose stable handle equals handle, leaving every sibling parallel slot (and
+// its handle) in place. It returns true when a matching slot was removed and
+// false when no src→dst slot carries handle (already removed, wrong handle, or
+// unknown endpoint) — the caller uses the result to gate side effects (edge
+// counters, transaction-undo records) so a no-op removal records nothing.
+//
+// This is the instance-precise counterpart of [AdjList.RemoveEdge], which
+// removes the FIRST src→dst slot regardless of identity: a Cypher DELETE of a
+// specifically-bound parallel-edge instance must retire the EXACT slot the
+// instance was bound to, not the lowest-indexed occurrence (rmp #2018). For an
+// undirected multigraph the mirror (dst→src) slot carrying the same handle is
+// removed too, so both directions of the one logical edge are retired even
+// after concurrent parallel adds reshuffled slot positions. The edge counter
+// is decremented once for the logical edge.
+//
+// RemoveEdgeByHandle is safe for concurrent use.
+func (a *AdjList[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) bool {
+	srcID, ok := a.mapper.Lookup(src)
+	if !ok {
+		return false
+	}
+	dstID, ok := a.mapper.Lookup(dst)
+	if !ok {
+		return false
+	}
+	if !a.removeOneEdgeByHandle(srcID, dstID, handle) {
+		return false
+	}
+	a.size.Add(^uint64(0))
+
+	if a.cfg.Directed || srcID == dstID {
+		return true
+	}
+	// Undirected: retire the mirror slot carrying the same handle. A false
+	// return here is benign (the mirror may already be gone); the logical edge
+	// counter was decremented once above.
+	a.removeOneEdgeByHandle(dstID, srcID, handle)
+	return true
+}
+
 // RemoveAllEdgesFrom removes all edges incident from src in O(d) time for a
 // degree-d hub, instead of the O(d²) cost of d sequential [AdjList.RemoveEdge]
 // calls.

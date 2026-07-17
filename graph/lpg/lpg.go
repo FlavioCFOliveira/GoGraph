@@ -1144,6 +1144,88 @@ func (g *Graph[N, W]) RemoveEdge(src, dst N) {
 	}
 }
 
+// RemoveEdgeByHandle removes the single parallel edge instance identified by
+// the stable handle on the (src, dst) pair — its adjacency slot (via
+// [adjlist.AdjList.RemoveEdgeByHandle]) AND its per-handle label/property
+// metadata (via [Graph.RemoveEdgeInstanceByHandle]) — leaving every sibling
+// instance's slot, handle, and metadata intact. It returns true when a slot
+// carrying handle was removed and false when none matched (already removed,
+// wrong handle, or unknown endpoint).
+//
+// It is the instance-precise analogue of [Graph.RemoveEdge] (which removes the
+// FIRST src→dst slot regardless of identity): a Cypher DELETE of a
+// specifically-bound parallel-edge instance must retire the EXACT instance,
+// not the lowest-indexed one (rmp #2018). Like RemoveEdge it applies edge
+// tombstone hygiene on the per-pair coalesced surfaces: the shared per-pair
+// labels and properties are captured before the adjacency removal and
+// re-asserted onto the survivors when a sibling remains, and cleared when the
+// removal leaves the pair fully disconnected (so a later re-add between the
+// same endpoints does not resurrect stale labels/properties).
+//
+// A handle of 0 has no stable identity, so it falls back to [Graph.RemoveEdge]
+// (first-match) and returns whether an edge was present — a caller that lost
+// the handle still removes one edge rather than silently no-opping.
+//
+// RemoveEdgeByHandle is the by-handle edge-deletion entry point used by the
+// Cypher executor and WAL replay, so the in-memory state and the recovered
+// state agree.
+func (g *Graph[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) bool {
+	if handle == 0 {
+		had := g.adj.HasEdge(src, dst)
+		g.RemoveEdge(src, dst)
+		return had
+	}
+
+	srcID, srcOK := g.adj.Mapper().Lookup(src)
+	dstID, dstOK := g.adj.Mapper().Lookup(dst)
+
+	// Capture the per-pair label set and property maps BEFORE the adjacency
+	// removal, exactly as [Graph.RemoveEdge] does: the removed slot may be the
+	// very one a shared label/property was fanned out to, so re-asserting the
+	// captured surfaces onto the survivors preserves the per-pair coalesced-union
+	// contract. Reverse-direction captures cover the undirected case below.
+	var fwdLabels, revLabels []LabelID
+	var fwdProps, revProps map[string]PropertyValue
+	if srcOK && dstOK {
+		fwdLabels = g.pairLabelIDs(srcID, dstID)
+		fwdProps = g.EdgeProperties(src, dst)
+		if !g.adj.Directed() {
+			revLabels = g.pairLabelIDs(dstID, srcID)
+			revProps = g.EdgeProperties(dst, src)
+		}
+	}
+
+	if !g.adj.RemoveEdgeByHandle(src, dst, handle) {
+		return false
+	}
+	// Drop the removed instance's per-handle labels and properties. Sibling
+	// handles are untouched.
+	g.RemoveEdgeInstanceByHandle(src, dst, handle)
+
+	if g.adj.HasEdge(src, dst) {
+		// Parallel sibling(s) remain: keep the shared per-pair surfaces alive by
+		// re-asserting the captured labels/properties in case the removed slot was
+		// the one holding them.
+		if srcOK && dstOK {
+			g.reassertPairLabels(srcID, dstID, fwdLabels)
+			g.reassertPairProps(src, dst, fwdProps)
+			if !g.adj.Directed() {
+				g.reassertPairLabels(dstID, srcID, revLabels)
+				g.reassertPairProps(dst, src, revProps)
+			}
+		}
+		return true
+	}
+	if !srcOK || !dstOK {
+		return true
+	}
+	g.clearEdgePairState(edgeKey{src: srcID, dst: dstID})
+	if !g.adj.Directed() {
+		g.clearEdgePairState(edgeKey{src: dstID, dst: srcID})
+	}
+	return true
+}
+
 // pairLabelIDs returns the deduplicated label-id set of the directed pair
 // (srcID, dstID) — the union of inline slot labels and overflow — under the
 // pair's edge-label shard RLock. Used to snapshot a pair's labels before an

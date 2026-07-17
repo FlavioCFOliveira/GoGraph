@@ -254,10 +254,13 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 				*out = op.markRowDeletedRel(childRow, relVal, snapProps)
 				return true, nil
 			}
-			// IntegerValue (raw edge id) + bound relationship-variable
-			// metadata: dispatch via relEndpointsFn so we never treat
-			// the edge id as a node id. Closes Delete4 [1] and the
-			// "DELETE r" planner gap.
+			// IntegerValue (raw forward-CSR edge position) + bound
+			// relationship-variable metadata: dispatch via relEndpointsFn so we
+			// never treat the edge id as a node id. Closes Delete4 [1] and the
+			// "DELETE r" planner gap. The IntegerValue at this column IS the
+			// bound instance's forward-CSR edge position, so it resolves that
+			// instance's stable handle for an instance-precise removal in a
+			// multigraph (rmp #2018).
 			if intVal, isInt := childRow[colIdx].(expr.IntegerValue); isInt && op.relEndpointsFn != nil {
 				srcID, dstID, okEnds := op.relEndpointsFn(childRow)
 				snapRel := expr.RelationshipValue{ID: uint64(intVal)}
@@ -267,18 +270,31 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 					if srcOK && dstOK {
 						snapRel.StartID = uint64(srcID)
 						snapRel.EndID = uint64(dstID)
-						if labels := op.mutator.EdgeLabels(srcKey, dstKey); len(labels) > 0 {
-							snapRel.Type = labels[0]
+						// Resolve the bound parallel instance's stable handle from
+						// its forward-CSR edge position (the IntegerValue in this
+						// column). A non-zero handle removes the EXACT slot plus its
+						// per-handle metadata and snapshots the deleted-row view by
+						// handle; a zero handle (simple graph, or a position that no
+						// longer resolves) falls back to the first-match endpoint
+						// removal — unchanged behaviour.
+						var handle uint64
+						if intVal >= 0 {
+							handle = op.mutator.EdgeHandleAtPosition(srcKey, dstKey, uint64(intVal))
 						}
-						if raw := op.mutator.EdgeProperties(srcKey, dstKey); len(raw) > 0 {
-							snapRel.Properties = make(expr.MapValue, len(raw))
-							for k, pv := range raw {
-								if v, ok := lpgPropToExprBinding(pv); ok {
-									snapRel.Properties[k] = v
-								}
+						if handle != 0 {
+							if labels := op.mutator.EdgeLabelsByHandle(srcKey, dstKey, handle); len(labels) > 0 {
+								snapRel.Type = labels[0]
 							}
+							snapRel.Properties = exprMapFromLPGProps(op.mutator.EdgePropertiesByHandle(srcKey, dstKey, handle))
+							op.mutator.RemoveEdgeByHandle(srcKey, dstKey, handle)
+							op.mutator.DecEdgeCreateCount(srcKey, dstKey)
+						} else {
+							if labels := op.mutator.EdgeLabels(srcKey, dstKey); len(labels) > 0 {
+								snapRel.Type = labels[0]
+							}
+							snapRel.Properties = exprMapFromLPGProps(op.mutator.EdgeProperties(srcKey, dstKey))
+							removeEdgeEitherDirection(op.mutator, srcKey, dstKey)
 						}
-						removeEdgeEitherDirection(op.mutator, srcKey, dstKey)
 					}
 				}
 				*out = op.markRowDeletedRel(childRow, snapRel, snapRel.Properties)
@@ -428,6 +444,7 @@ type DeleteRelationship struct {
 	schema  map[string]int
 	child   Operator
 	mutator GraphMutator
+	relCols *RelCols        // non-nil enables instance-precise by-handle removal
 	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
 }
 
@@ -444,6 +461,17 @@ func NewDeleteRelationship(
 		child:   child,
 		mutator: mutator,
 	}
+}
+
+// WithRelCols records the row columns that hold the bound relationship's
+// endpoint NodeIDs and its forward-CSR edge position, so Next resolves the
+// bound parallel instance's stable handle and removes the EXACT instance in a
+// multigraph (rmp #2018) rather than the first-match endpoint slot. When unset
+// (or when the position resolves no handle), Next falls back to the endpoint
+// removal. Must be called before the first Next. Returns op for chaining.
+func (op *DeleteRelationship) WithRelCols(rc RelCols) *DeleteRelationship {
+	op.relCols = &rc
+	return op
 }
 
 // Init initialises the operator and its child.
@@ -488,23 +516,33 @@ func (op *DeleteRelationship) Next(out *Row) (bool, error) {
 		return true, nil
 	}
 
+	// Resolve the bound parallel instance's stable handle from its forward-CSR
+	// edge position (when the endpoint/edge-position columns were wired via
+	// WithRelCols). A non-zero handle removes the EXACT instance plus its
+	// per-handle metadata and snapshots the deleted-row view by handle; a zero
+	// handle (no RelCols, simple graph, or a post-projection binding whose edge
+	// position is gone) falls back to the first-match endpoint removal —
+	// unchanged behaviour (rmp #2018).
+	var handle uint64
+	if op.relCols != nil {
+		handle = resolveRelHandle(op.relCols, childRow, srcKey, dstKey, op.mutator)
+	}
+
 	// Snapshot the property map BEFORE removing the edge so the row's
 	// deleted-rel marker carries the pre-removal view, letting
 	// `RETURN type(r)` keep returning the type while `RETURN r.foo`
 	// raises EntityNotFound on the Deleted flag (Return2 [17]).
 	var deletedProps expr.MapValue
-	if raw := op.mutator.EdgeProperties(srcKey, dstKey); len(raw) > 0 {
-		deletedProps = make(expr.MapValue, len(raw))
-		for k, pv := range raw {
-			if v, ok := lpgPropToExprBinding(pv); ok {
-				deletedProps[k] = v
-			}
-		}
+	if handle != 0 {
+		deletedProps = exprMapFromLPGProps(op.mutator.EdgePropertiesByHandle(srcKey, dstKey, handle))
+		op.mutator.RemoveEdgeByHandle(srcKey, dstKey, handle)
+	} else {
+		deletedProps = exprMapFromLPGProps(op.mutator.EdgeProperties(srcKey, dstKey))
+		// Remove edge labels and properties before removing the edge itself.
+		// (lpg.Graph's RemoveEdge removes the adjacency entry; label/property
+		// cleanup prevents orphaned metadata.)
+		op.mutator.RemoveEdge(srcKey, dstKey)
 	}
-	// Remove edge labels and properties before removing the edge itself.
-	// (lpg.Graph's RemoveEdge removes the adjacency entry; label/property
-	// cleanup prevents orphaned metadata.)
-	op.mutator.RemoveEdge(srcKey, dstKey)
 	op.mutator.DecEdgeCreateCount(srcKey, dstKey)
 
 	*out = op.markRowDeleted(childRow, rel, deletedProps)

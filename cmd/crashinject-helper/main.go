@@ -128,6 +128,8 @@ func run() int {
 	case "edgehandle.setprop.post-wal-sync",
 		"edgehandle.delprop.post-wal-sync":
 		runEdgeHandlePropCrash(dir, scenario)
+	case "edgehandle.delete.post-wal-sync":
+		runEdgeHandleDeleteCrash(dir)
 	default:
 		fmt.Fprintf(os.Stderr, "crashinject-helper: unknown scenario %q\n", scenario)
 		return 1
@@ -640,4 +642,71 @@ func runEdgeHandlePropCrash(dir, scenario string) {
 		log.Fatalf("wal.Close: %v", cerr)
 	}
 	fmt.Printf("runEdgeHandlePropCrash: completed without crash (GOGRAPH_CRASH_AT != %s)\n", scenario)
+}
+
+// runEdgeHandleDeleteCrash exercises the crash-durability of an instance-precise
+// parallel-edge DELETE (rmp #2018). It commits, through the typed Store/Tx API,
+// two parallel edges between the same ordered (src, dst) pair — each carrying
+// its own stable handle and a distinct per-instance `w` property — then commits
+// a durable OpRemoveEdgeByHandle that retires the SECOND handle (h2) only,
+// fsyncs, and crashes.
+//
+// Recovery over the resulting WAL must land on exactly ONE parallel edge — the
+// FIRST handle (h1) with its own w=1 intact — and the removed instance (h2)
+// gone, proving the durable removal targeted the EXACT bound instance (not the
+// first-match slot) and survives kill -9. The artefacts are left in
+// GOGRAPH_CRASH_DIR for the parent to recover from.
+func runEdgeHandleDeleteCrash(dir string) {
+	walPath := filepath.Join(dir, "wal")
+	w, err := wal.Open(walPath)
+	if err != nil {
+		log.Fatalf("wal.Open: %v", err)
+	}
+
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	store := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewFloat64WeightCodec(),
+	})
+
+	// Tx 1 — build the two parallel edges, each with its own handle and a
+	// distinct per-instance `w`.
+	tx := store.Begin()
+	if e := tx.AddEdgeWithHandle(edgeHandleSrcKey, edgeHandleDstKey, 1, edgeHandleH1); e != nil {
+		log.Fatalf("AddEdgeWithHandle h1: %v", e)
+	}
+	if e := tx.SetEdgePropertyByHandle(edgeHandleSrcKey, edgeHandleDstKey, edgeHandleH1, "w", lpg.Int64Value(1)); e != nil {
+		log.Fatalf("SetEdgePropertyByHandle h1 w: %v", e)
+	}
+	if e := tx.AddEdgeWithHandle(edgeHandleSrcKey, edgeHandleDstKey, 1, edgeHandleH2); e != nil {
+		log.Fatalf("AddEdgeWithHandle h2: %v", e)
+	}
+	if e := tx.SetEdgePropertyByHandle(edgeHandleSrcKey, edgeHandleDstKey, edgeHandleH2, "w", lpg.Int64Value(2)); e != nil {
+		log.Fatalf("SetEdgePropertyByHandle h2 w: %v", e)
+	}
+	if e := tx.Commit(); e != nil {
+		log.Fatalf("Commit(build): %v", e)
+	}
+
+	// Tx 2 — the durable instance-precise removal under test: retire h2 only.
+	tx2 := store.Begin()
+	if e := tx2.RemoveEdgeByHandle(edgeHandleSrcKey, edgeHandleDstKey, edgeHandleH2); e != nil {
+		log.Fatalf("RemoveEdgeByHandle h2: %v", e)
+	}
+	if e := tx2.Commit(); e != nil {
+		log.Fatalf("Commit(delete): %v", e)
+	}
+	if e := w.Sync(); e != nil {
+		log.Fatalf("Sync: %v", e)
+	}
+
+	// Crash here — the removal frame is durable. SIGKILL delivered immediately
+	// under the crash harness.
+	crashinject.Breakpoint("edgehandle.delete.post-wal-sync")
+
+	// Reached only on the non-crash self-test path.
+	if cerr := w.Close(); cerr != nil {
+		log.Fatalf("wal.Close: %v", cerr)
+	}
+	fmt.Println("runEdgeHandleDeleteCrash: completed without crash (GOGRAPH_CRASH_AT != edgehandle.delete.post-wal-sync)")
 }

@@ -132,6 +132,25 @@ func (s *stubMutator) RemoveEdge(src, dst string) {
 	}
 }
 
+// RemoveEdgeByHandle models lpg.Graph.RemoveEdgeByHandle: it drops the
+// identified parallel instance's by-handle property store and, when no sibling
+// instance remains for the pair, the edge presence too. Sibling instances
+// (other handles on the same pair) are left untouched (rmp #2018).
+func (s *stubMutator) RemoveEdgeByHandle(src, dst string, handle uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.byHandleProps, byHandleKey(src, dst, handle))
+	prefix := src + "|" + dst + "|"
+	for k := range s.byHandleProps {
+		if len(k) >= len(prefix) && k[:len(prefix)] == prefix {
+			return // a sibling instance remains for this pair
+		}
+	}
+	if m, ok := s.edges[src]; ok {
+		delete(m, dst)
+	}
+}
+
 func (s *stubMutator) SetNodeLabel(n, label string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

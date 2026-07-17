@@ -1601,6 +1601,9 @@ func applyOpCodec[N comparable, W any](
 	case txn.OpRemoveEdgeInstanceByHandle:
 		return applyRemoveEdgeInstanceByHandle(g, src, dst, rest)
 
+	case txn.OpRemoveEdgeByHandle:
+		return applyRemoveEdgeByHandle(g, src, dst, rest)
+
 	case txn.OpSetNodeProperty, txn.OpDelNodeProperty,
 		txn.OpSetEdgeProperty, txn.OpDelEdgeProperty:
 		// uint16 key length + key bytes [+ property value for Set ops]
@@ -1823,6 +1826,37 @@ func applyRemoveEdgeInstanceByHandle[N comparable, W any](g *lpg.Graph[N, W], sr
 		return false
 	}
 	g.RemoveEdgeInstanceByHandle(src, dst, handle)
+	g.SeedEdgeHandle(handle + 1)
+	return true
+}
+
+// applyRemoveEdgeByHandle applies an [txn.OpRemoveEdgeByHandle] frame. rest is
+// the body after the two decoded endpoints: a uint16 label length (always 0)
+// followed by the 8-byte stable handle, byte-identical to
+// [applyRemoveEdgeInstanceByHandle]. It retires the single parallel edge
+// instance carrying the handle — its adjacency slot AND its per-handle
+// metadata — leaving sibling instances intact, so a recovered graph reflects
+// the exact instance the DELETE removed rather than the first-match slot
+// (rmp #2018).
+//
+// The handle high-water counter is re-seeded so a post-recovery edge creation
+// never re-mints a handle this frame named (invariant I5), matching every
+// other by-handle apply helper.
+func applyRemoveEdgeByHandle[N comparable, W any](g *lpg.Graph[N, W], src, dst N, rest []byte) bool {
+	if len(rest) < 2 {
+		return false
+	}
+	n := binary.LittleEndian.Uint16(rest)
+	rest = rest[2:]
+	if uint64(len(rest)) < uint64(n) {
+		return false
+	}
+	rest = rest[n:]
+	handle, ok := trailingHandle(rest)
+	if !ok {
+		return false
+	}
+	g.RemoveEdgeByHandle(src, dst, handle)
 	g.SeedEdgeHandle(handle + 1)
 	return true
 }

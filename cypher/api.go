@@ -4641,7 +4641,18 @@ func buildOperatorWrite(
 			return nil, err
 		}
 		schemaCopy := copySchema(schema)
-		return exec.NewDeleteRelationship(p.RelVar, schemaCopy, child, mutator), nil
+		dr := exec.NewDeleteRelationship(p.RelVar, schemaCopy, child, mutator)
+		// Wire the bound relationship's endpoint/edge-position columns so DELETE
+		// removes the EXACT bound parallel-edge instance by handle in a
+		// multigraph, not the first-match slot (rmp #2018). Mirrors the SET/
+		// REMOVE RelCols wiring. (The IR translator currently lowers every DELETE
+		// target to DeleteNode, so this case is not on the live path today; the
+		// wiring keeps DeleteRelationship correct-by-construction if it is ever
+		// emitted.)
+		if info, isRel := bopts.edgeVarMeta[p.RelVar]; isRel {
+			dr.WithRelCols(exec.RelCols{SrcCol: info.srcCol, DstCol: info.dstCol, EdgeCol: info.edgeCol})
+		}
+		return dr, nil
 
 	case *ir.DetachDelete:
 		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
@@ -11819,6 +11830,26 @@ func (a *lpgMutatorAdapter) RemoveEdge(src, dst string) {
 	r.recordRemoveEdge(&pre, present)
 }
 
+// RemoveEdgeByHandle retires the single parallel edge instance identified by
+// the stable handle on the (src, dst) pair (its adjacency slot plus per-handle
+// metadata), leaving siblings intact. The undo pre-image captures the SPECIFIC
+// instance (weight, handle, its own labels and properties) so a rolled-back
+// statement re-adds exactly that instance, not the first slot. The edges-removed
+// counter and undo record are gated on the actual removal result, so a no-op
+// removal (handle already gone / wrong handle) records nothing (rmp #2018).
+func (a *lpgMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
+	r := a.rec()
+	var pre removedEdgePreimage
+	if r.active() {
+		pre = r.captureRemovedEdgeByHandle(src, dst, handle)
+	}
+	removed := a.g.RemoveEdgeByHandle(src, dst, handle)
+	if removed {
+		a.g.IncrEdgesRemoved()
+	}
+	r.recordRemoveEdge(&pre, removed)
+}
+
 // SetNodeLabel attaches label to n.
 func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) error {
 	r := a.rec()
@@ -12364,6 +12395,28 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 	a.g.RemoveEdge(src, dst)
 	_ = a.tx.RemoveEdge(src, dst) //nolint:errcheck // ErrTxFinished impossible here
 	r.recordRemoveEdge(&pre, present)
+}
+
+// RemoveEdgeByHandle retires the single parallel edge instance identified by
+// the stable handle on the (src, dst) pair (its adjacency slot plus per-handle
+// metadata), leaving siblings intact, and buffers the durable
+// [txn.OpRemoveEdgeByHandle] frame so the exact instance is gone after recovery.
+// The undo pre-image captures the SPECIFIC instance (weight, handle, its own
+// labels and properties) so a rolled-back statement re-adds exactly that
+// instance. The edges-removed counter and undo record are gated on the actual
+// removal result (rmp #2018).
+func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
+	r := a.rec()
+	var pre removedEdgePreimage
+	if r.active() {
+		pre = r.captureRemovedEdgeByHandle(src, dst, handle)
+	}
+	removed := a.g.RemoveEdgeByHandle(src, dst, handle)
+	if removed {
+		a.g.IncrEdgesRemoved()
+	}
+	_ = a.tx.RemoveEdgeByHandle(src, dst, handle) //nolint:errcheck // ErrTxFinished impossible here
+	r.recordRemoveEdge(&pre, removed)
 }
 
 // SetNodeLabel attaches label to n.

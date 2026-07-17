@@ -269,6 +269,22 @@ const (
 	// write path (walMutatorAdapter) for REMOVE r.x / SET r.x = null on a bound
 	// parallel relationship, so the per-instance removal survives recovery.
 	OpDelEdgePropertyByHandle
+
+	// OpRemoveEdgeByHandle buffers a RemoveEdgeByHandle(src, dst, handle)
+	// mutation: it retires the single parallel edge instance identified by the
+	// stable handle on the (src, dst) pair — its adjacency slot AND its
+	// per-handle metadata — leaving sibling instances intact. It is the
+	// instance-precise counterpart of [OpRemoveEdge] (which removes the FIRST
+	// src→dst slot regardless of identity) and the adjacency-bearing companion
+	// of [OpRemoveEdgeInstanceByHandle] (which drops only the per-handle
+	// metadata): DELETE of a specifically-bound parallel relationship emits this
+	// so the exact instance is gone after recovery, not the lowest-indexed one
+	// (rmp #2018). The body is the edge-no-tail body ([Src, Dst, uint16=0])
+	// followed by the 8-byte little-endian handle, byte-identical to
+	// [OpRemoveEdgeInstanceByHandle] apart from the kind byte. It is appended
+	// after every pre-existing OpKind so a WAL written by an older binary never
+	// carries it, and a reader that predates it surfaces it as an unknown kind.
+	OpRemoveEdgeByHandle
 )
 
 // ConstraintKind is the wire tag distinguishing UNIQUE from NOT NULL in an
@@ -994,6 +1010,20 @@ func (t *Tx[N, W]) RemoveEdgeInstanceByHandle(src, dst N, handle uint64) error {
 	return nil
 }
 
+// RemoveEdgeByHandle buffers an [OpRemoveEdgeByHandle] operation, retiring the
+// single parallel edge instance identified by the stable handle on the (src,
+// dst) pair — its adjacency slot and its per-handle metadata — while leaving
+// sibling instances untouched. It is the instance-precise counterpart of
+// [Tx.RemoveEdge]; emitted for DELETE of a specifically-bound parallel
+// relationship so the exact instance is gone after recovery (rmp #2018).
+func (t *Tx[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) error {
+	if t.finished {
+		return ErrTxFinished
+	}
+	t.ops = append(t.ops, Op[N, W]{Kind: OpRemoveEdgeByHandle, Src: src, Dst: dst, Handle: handle})
+	return nil
+}
+
 // CreateConstraint buffers an [OpCreateConstraint] schema change recording that
 // a constraint of the given kind, named name, is declared on (label).property.
 // The op carries no node endpoints and mutates no graph state on
@@ -1540,8 +1570,10 @@ func appendOpBodyTyped[N comparable, W any](buf []byte, op Op[N, W], codec Codec
 			return nil, err
 		}
 		return binary.LittleEndian.AppendUint64(buf, op.Handle), nil
-	case OpRemoveEdgeInstanceByHandle:
-		// Edge-no-tail body followed by the 8-byte stable handle.
+	case OpRemoveEdgeInstanceByHandle, OpRemoveEdgeByHandle:
+		// Edge-no-tail body ([Src, Dst, uint16=0]) followed by the 8-byte stable
+		// handle. OpRemoveEdgeByHandle is byte-identical to
+		// OpRemoveEdgeInstanceByHandle apart from the kind byte.
 		var err error
 		if buf, err = encodeOpEdgeNoTail(buf, op, codec); err != nil {
 			return nil, err
@@ -2093,6 +2125,12 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
 	case OpRemoveEdgeInstanceByHandle:
 		g.RemoveEdgeInstanceByHandle(op.Src, op.Dst, op.Handle)
 		g.BumpTopoGeneration() // rmp #1871; unconditional, see OpAddEdge above
+	case OpRemoveEdgeByHandle:
+		// Instance-precise removal: retire the exact parallel slot carrying the
+		// handle plus its per-handle metadata (rmp #2018). Unconditional
+		// generation bump mirrors OpRemoveEdge.
+		g.RemoveEdgeByHandle(op.Src, op.Dst, op.Handle)
+		g.BumpTopoGeneration()
 	case OpSetNodeLabel:
 		return g.SetNodeLabel(op.Src, op.Label)
 	case OpSetEdgeLabel:

@@ -79,9 +79,10 @@ func (m *seedStubMutator) AddEdge(string, string, float64) (graph.NodeID, graph.
 func (m *seedStubMutator) AddEdgeH(string, string, float64) (graph.NodeID, graph.NodeID, uint64, error) {
 	panic("unused")
 }
-func (m *seedStubMutator) RemoveEdge(string, string)         { panic("unused") }
-func (m *seedStubMutator) SetNodeLabel(string, string) error { panic("unused") }
-func (m *seedStubMutator) RemoveNodeLabel(string, string)    { panic("unused") }
+func (m *seedStubMutator) RemoveEdge(string, string)                 { panic("unused") }
+func (m *seedStubMutator) RemoveEdgeByHandle(string, string, uint64) { panic("unused") }
+func (m *seedStubMutator) SetNodeLabel(string, string) error         { panic("unused") }
+func (m *seedStubMutator) RemoveNodeLabel(string, string)            { panic("unused") }
 func (m *seedStubMutator) SetNodeProperty(string, string, lpg.PropertyValue) error {
 	panic("unused")
 }

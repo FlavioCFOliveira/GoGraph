@@ -317,6 +317,25 @@ func lpgPropToExprBinding(pv lpg.PropertyValue) (expr.Value, bool) {
 	return nil, false
 }
 
+// exprMapFromLPGProps converts an [lpg.PropertyValue] map (as returned by the
+// mutator's EdgeProperties / EdgePropertiesByHandle) into an [expr.MapValue]
+// suitable for a deleted-row RelationshipValue snapshot, skipping any value
+// that does not convert. It returns nil for an empty input so the row marker
+// carries no Properties map. Shared by the DELETE operators to build the
+// pre-removal property view of a bound relationship instance.
+func exprMapFromLPGProps(raw map[string]lpg.PropertyValue) expr.MapValue {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(expr.MapValue, len(raw))
+	for k, pv := range raw {
+		if v, ok := lpgPropToExprBinding(pv); ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 // decodeTemporalBinding mirrors cypher/api.go's decodeTemporalString:
 // recognises the SOH-range tag introduced by
 // cypher/exec/temporal_literal.go and returns the matching temporal

@@ -345,6 +345,42 @@ type removedEdgePreimage struct {
 // slot's stable handle and that handle's per-instance label/property pre-images,
 // so a removed parallel edge can be re-added with its original identity (#1327).
 func (m mutationUndo) captureRemovedEdge(src, dst string) removedEdgePreimage {
+	// The FIRST src→dst slot is the one [Graph.RemoveEdge] drops; capture its
+	// handle so the by-handle capture path below records the exact instance.
+	var handle uint64
+	if h, ok := m.g.FirstEdgeHandle(src, dst); ok {
+		handle = h
+	}
+	return m.captureRemovedEdgeH(src, dst, handle)
+}
+
+// captureRemovedEdgeByHandle snapshots the state of the parallel edge instance
+// identified by handle on (src, dst) before a [Graph.RemoveEdgeByHandle], so
+// the instance-precise removal is invertible. It is the by-handle analogue of
+// [mutationUndo.captureRemovedEdge]: where captureRemovedEdge resolves the
+// handle of the first slot RemoveEdge would drop, this captures the SPECIFIC
+// bound instance's handle so the inverse re-adds exactly that instance — its
+// weight, its stable handle, and its own per-handle labels and properties —
+// not the first slot's (rmp #2018). The shared inverse [recordRemoveEdge]
+// re-adds via [Graph.AddEdgeHIfAbsent] and restores both the per-pair union
+// and the per-handle instance surfaces, so a rolled-back instance-precise
+// DELETE restores the pair byte-for-byte.
+func (m mutationUndo) captureRemovedEdgeByHandle(src, dst string, handle uint64) removedEdgePreimage {
+	return m.captureRemovedEdgeH(src, dst, handle)
+}
+
+// captureRemovedEdgeH is the shared body of [mutationUndo.captureRemovedEdge]
+// and [mutationUndo.captureRemovedEdgeByHandle]: it snapshots the per-pair
+// union (weight, labels, properties, CREATE-multiplicity counter) plus, when
+// handle is non-zero, that handle's per-instance labels and properties, so the
+// inverse re-adds the edge with its original identity. It is called only when
+// undo is active, on the cold DELETE path, so its O(out-degree) weight scan and
+// metadata copies never touch the read hot path.
+//
+// The per-pair weight is read from [Graph.EdgeWeight] (the first slot's
+// weight); every Cypher relationship is created with the zero weight, so the
+// re-added instance's weight is exact for the engine's only caller.
+func (m mutationUndo) captureRemovedEdgeH(src, dst string, handle uint64) removedEdgePreimage {
 	pre := removedEdgePreimage{src: src, dst: dst}
 	if !m.g.AdjList().HasEdge(src, dst) {
 		return pre
@@ -356,15 +392,13 @@ func (m mutationUndo) captureRemovedEdge(src, dst string) removedEdgePreimage {
 	pre.labels = m.g.EdgeLabels(src, dst)
 	pre.props = m.g.EdgeProperties(src, dst)
 	pre.createCount = m.g.EdgeCreateCount(src, dst)
-	// Capture the per-handle identity of the exact slot RemoveEdge will drop
-	// (the first src→dst slot). When the edge carries a handle, snapshot that
-	// handle's per-instance labels and properties too, so the inverse re-adds
-	// the instance with its own metadata even if a future removal path clears
-	// the handle store.
-	if h, ok := m.g.FirstEdgeHandle(src, dst); ok {
-		pre.handle = h
-		pre.handleLabels = m.g.EdgeLabelsByHandle(src, dst, h)
-		pre.handleProps = m.g.EdgePropertiesByHandle(src, dst, h)
+	// When the removed instance carries a stable handle, snapshot that handle's
+	// per-instance labels and properties so the inverse re-adds the instance
+	// with its own metadata even if the removal cleared the handle store.
+	if handle != 0 {
+		pre.handle = handle
+		pre.handleLabels = m.g.EdgeLabelsByHandle(src, dst, handle)
+		pre.handleProps = m.g.EdgePropertiesByHandle(src, dst, handle)
 	}
 	return pre
 }
