@@ -332,14 +332,14 @@ The module is organised around three concerns:
 |---|---|
 | `graph/` | Core types: `Graph`, `Node`, `Edge`, `Weight`. Directed and undirected variants. |
 | `search/` | Traversal and path-finding algorithms: BFS, DFS, Dijkstra, A\*, Bellman-Ford. |
-| `store/` | Persistence adapters (in-memory, file, optional external backends). |
+| `store/` | Durable, WAL-backed persistence: `store.DB` composed with a write-ahead log, checkpointer, snapshot writer, and crash-recovery replayer (`store/{wal,checkpoint,snapshot,recovery,txn}`). The in-memory engine is `graph/lpg`; `store.DB` adds durability on top of it. |
 
 ### Key design rules
 
 - **Interfaces over concrete types** — callers depend on `graph.Graph`, not on an adjacency-list struct, so backends and algorithms remain swappable.
 - **Zero-allocation hot paths** — search algorithms must avoid heap allocations in their inner loops; use pre-allocated slices and `sync.Pool` where needed.
 - **No global state** — every `Graph` instance is self-contained; concurrent read access must be safe without external locking.
-- **Persistence is pluggable** — `store.Store` is an interface; the default implementation is in-memory. File/DB adapters live in subdirectories (`store/file/`, `store/postgres/`, etc.) and are compiled in only when imported.
+- **Persistence is WAL-backed and crash-safe** — the durable database is `store.DB` (`store/db.go`), a composition of a write-ahead log (`store/wal`), a checkpointer (`store/checkpoint`), a snapshot writer (`store/snapshot`), a crash-recovery replayer (`store/recovery`), and the transaction layer (`store/txn`). There is no single `store.Store` interface and no `store/file` or `store/postgres` adapter: persistence is this fixed composition, not a pluggable backend registry. The in-memory engine (`graph/lpg`) runs without any of it; `store.DB` layers durability on top.
 
 ### Algorithm conventions
 
