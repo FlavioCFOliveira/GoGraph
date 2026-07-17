@@ -195,7 +195,8 @@ func TestShowIndexes_ListsCreated(t *testing.T) {
 }
 
 // TestShow_MalformedRejected confirms unsupported SHOW forms are rejected with a
-// non-nil error rather than silently returning a result.
+// non-nil error rather than silently returning a result. (YIELD / WHERE are now
+// supported — see TestShow_Yield*.)
 func TestShow_MalformedRejected(t *testing.T) {
 	t.Parallel()
 	eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
@@ -205,11 +206,186 @@ func TestShow_MalformedRejected(t *testing.T) {
 		`SHOW FOO`,
 		`SHOW CONSTRAINTS BRIEF`,
 		`SHOW INDEXES VERBOSE`,
-		`SHOW INDEXES YIELD name, type`,
-		`SHOW CONSTRAINTS WHERE type = 'UNIQUE'`,
+		`SHOW CONSTRAINTS YIELD bogus`, // unknown column
+		`SHOW CONSTRAINTS YIELD name WHERE type = 'UNIQUE'`, // scope barrier
+		`SHOW CONSTRAINTS RETURN name`,                      // RETURN without YIELD
+		`SHOW CONSTRAINTS YIELD name, type RETURN count(*)`, // aggregation
+		`SHOW CONSTRAINTS YIELD name ORDER BY name`,         // YIELD-level ORDER BY
+		`SHOW CONSTRAINTS YIELD toUpper(name)`,              // expression in YIELD
 	} {
 		if _, err := eng.Run(ctx, q, nil); err == nil {
 			t.Errorf("Run(%q) = nil error, want a rejection", q)
+		}
+	}
+}
+
+// TestShow_YieldProjection verifies YIELD selects and orders the named columns
+// (the scope barrier), for both an explicit list and YIELD *.
+func TestShow_YieldProjection(t *testing.T) {
+	t.Parallel()
+	eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
+	ctx := context.Background()
+	if _, err := eng.Run(ctx, `CREATE CONSTRAINT c1 FOR (n:Person) REQUIRE n.email IS UNIQUE`, nil); err != nil {
+		t.Fatalf("CREATE CONSTRAINT: %v", err)
+	}
+
+	// Explicit two-column YIELD: only those columns, in that order.
+	cols, rows := mustShow(t, eng, `SHOW CONSTRAINTS YIELD name, type`)
+	if want := []string{"name", "type"}; !reflect.DeepEqual(cols, want) {
+		t.Errorf("columns = %v, want %v", cols, want)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d: %v", len(rows), rows)
+	}
+	assertScalar(t, rows[0], "name", "c1")
+	assertScalar(t, rows[0], "type", "UNIQUE")
+
+	// YIELD * is the driver-default projection: every default column, in order.
+	starCols, starRows := mustShow(t, eng, `SHOW CONSTRAINTS YIELD *`)
+	plainCols, plainRows := mustShow(t, eng, `SHOW CONSTRAINTS`)
+	if !reflect.DeepEqual(starCols, plainCols) {
+		t.Errorf("YIELD * columns %v != plain columns %v", starCols, plainCols)
+	}
+	if !reflect.DeepEqual(starRows, plainRows) {
+		t.Errorf("YIELD * rows %v != plain rows %v", starRows, plainRows)
+	}
+}
+
+// TestShow_YieldAlias verifies AS aliases rename the output columns while reading
+// the underlying SHOW column.
+func TestShow_YieldAlias(t *testing.T) {
+	t.Parallel()
+	eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
+	ctx := context.Background()
+	if _, err := eng.Run(ctx, `CREATE INDEX i1 FOR (n:Person) ON (n.email)`, nil); err != nil {
+		t.Fatalf("CREATE INDEX: %v", err)
+	}
+
+	cols, rows := mustShow(t, eng, `SHOW INDEXES YIELD name AS idx, type AS kind`)
+	if want := []string{"idx", "kind"}; !reflect.DeepEqual(cols, want) {
+		t.Errorf("columns = %v, want %v", cols, want)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d: %v", len(rows), rows)
+	}
+	assertScalar(t, rows[0], "idx", "i1")
+	assertScalar(t, rows[0], "kind", "hash")
+}
+
+// TestShow_YieldWhere verifies the WHERE predicate filters the projected rows,
+// both after an explicit YIELD (scope = yielded columns) and standalone
+// (scope = all default columns).
+func TestShow_YieldWhere(t *testing.T) {
+	t.Parallel()
+	eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
+	ctx := context.Background()
+	for _, s := range []string{
+		`CREATE CONSTRAINT uq FOR (n:Person) REQUIRE n.email IS UNIQUE`,
+		`CREATE CONSTRAINT nn FOR (n:Person) REQUIRE n.name IS NOT NULL`,
+	} {
+		if _, err := eng.Run(ctx, s, nil); err != nil {
+			t.Fatalf("%s: %v", s, err)
+		}
+	}
+
+	// YIELD then WHERE over a yielded column.
+	_, rows := mustShow(t, eng, `SHOW CONSTRAINTS YIELD name, type WHERE type = 'UNIQUE'`)
+	if len(rows) != 1 || rows[0].scalars["name"] != "uq" {
+		t.Fatalf("YIELD…WHERE = %v, want only uq", rows)
+	}
+
+	// WHERE without YIELD: scope is every default column, output is every column.
+	cols, allRows := mustShow(t, eng, `SHOW CONSTRAINTS WHERE type = 'NOT_NULL'`)
+	if want := []string{"name", "type", "entityType", "labelsOrTypes", "properties"}; !reflect.DeepEqual(cols, want) {
+		t.Errorf("columns = %v, want the full default set %v", cols, want)
+	}
+	if len(allRows) != 1 || allRows[0].scalars["name"] != "nn" {
+		t.Fatalf("WHERE-only = %v, want only nn", allRows)
+	}
+	assertList(t, allRows[0], "labelsOrTypes", []string{"Person"})
+
+	// A predicate over a list column (labelsOrTypes) with IN.
+	_, listRows := mustShow(t, eng, `SHOW CONSTRAINTS YIELD name, labelsOrTypes WHERE 'Person' IN labelsOrTypes`)
+	if len(listRows) != 2 {
+		t.Fatalf("IN-list predicate matched %d rows, want 2: %v", len(listRows), listRows)
+	}
+}
+
+// TestShow_YieldWhereParam verifies a WHERE predicate can reference a query
+// parameter.
+func TestShow_YieldWhereParam(t *testing.T) {
+	t.Parallel()
+	eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
+	ctx := context.Background()
+	for _, s := range []string{
+		`CREATE INDEX ih FOR (n:Person) ON (n.email)`,
+		`CREATE INDEX ib FOR (n:Person) ON (n.age) OPTIONS {indexType: 'btree'}`,
+	} {
+		if _, err := eng.Run(ctx, s, nil); err != nil {
+			t.Fatalf("%s: %v", s, err)
+		}
+	}
+
+	res, err := eng.Run(ctx, `SHOW INDEXES YIELD name, type WHERE type = $kind`,
+		map[string]expr.Value{"kind": expr.StringValue("btree")})
+	if err != nil {
+		t.Fatalf("Run with param: %v", err)
+	}
+	_, rows := collectShow(t, res)
+	if len(rows) != 1 || rows[0].scalars["name"] != "ib" {
+		t.Fatalf("param WHERE = %v, want only ib", rows)
+	}
+}
+
+// TestShow_YieldReturn verifies a RETURN projection over the yielded scope,
+// including aliasing and RETURN *.
+func TestShow_YieldReturn(t *testing.T) {
+	t.Parallel()
+	eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
+	ctx := context.Background()
+	if _, err := eng.Run(ctx, `CREATE CONSTRAINT c1 FOR (n:Person) REQUIRE n.email IS UNIQUE`, nil); err != nil {
+		t.Fatalf("CREATE CONSTRAINT: %v", err)
+	}
+
+	// RETURN with a subset and an alias.
+	cols, rows := mustShow(t, eng, `SHOW CONSTRAINTS YIELD name, type RETURN name AS cname`)
+	if want := []string{"cname"}; !reflect.DeepEqual(cols, want) {
+		t.Errorf("columns = %v, want %v", cols, want)
+	}
+	if len(rows) != 1 || rows[0].scalars["cname"] != "c1" {
+		t.Fatalf("RETURN alias = %v, want cname=c1", rows)
+	}
+
+	// RETURN * returns the yielded columns.
+	starCols, starRows := mustShow(t, eng, `SHOW CONSTRAINTS YIELD name, type RETURN *`)
+	if want := []string{"name", "type"}; !reflect.DeepEqual(starCols, want) {
+		t.Errorf("RETURN * columns = %v, want %v", starCols, want)
+	}
+	if len(starRows) != 1 || starRows[0].scalars["name"] != "c1" || starRows[0].scalars["type"] != "UNIQUE" {
+		t.Fatalf("RETURN * = %v, want name=c1 type=UNIQUE", starRows)
+	}
+}
+
+// TestShow_YieldDeterministicOrder confirms a projected/filtered result preserves
+// the deterministic name ordering of the underlying SHOW output.
+func TestShow_YieldDeterministicOrder(t *testing.T) {
+	t.Parallel()
+	eng := cypher.NewEngine(lpg.New[string, float64](adjlist.Config{}))
+	ctx := context.Background()
+	for _, name := range []string{"zeta", "alpha", "mike"} {
+		if _, err := eng.Run(ctx, `CREATE INDEX `+name+` FOR (n:L) ON (n.p_`+name+`)`, nil); err != nil {
+			t.Fatalf("CREATE INDEX %s: %v", name, err)
+		}
+	}
+	want := []string{"alpha", "mike", "zeta"}
+	for run := 0; run < 3; run++ {
+		_, rows := mustShow(t, eng, `SHOW INDEXES YIELD name`)
+		got := make([]string, len(rows))
+		for i, r := range rows {
+			got[i] = r.scalars["name"]
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("run %d: order = %v, want %v", run, got, want)
 		}
 	}
 }

@@ -18,7 +18,11 @@ package ir
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
+
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/parser"
 )
 
 // reservedNumericCompanionSuffix is the lowercase name suffix reserved for the
@@ -134,44 +138,345 @@ func ParseDDL(query string) (LogicalPlan, error) {
 // SHOW CONSTRAINTS / SHOW INDEXES parser (#1922)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// showPrefixRe matches the SHOW CONSTRAINT(S) / SHOW INDEX(ES) command prefix
+// and captures (1) the target keyword and (2) the remaining tail. INDEXES is
+// listed before INDEX so the longer plural wins; the trailing \b rejects a
+// near-miss such as "CONSTRAINTX". (?is): case-insensitive and "." spans
+// newlines so a multi-line YIELD/WHERE/RETURN tail is captured whole.
+var showPrefixRe = regexp.MustCompile(`(?is)^\s*SHOW\s+(CONSTRAINTS?|INDEXES|INDEX)\b(.*)$`)
+
 // parseShow parses the read-only schema-introspection statements:
 //
 //	SHOW CONSTRAINTS   (and the singular SHOW CONSTRAINT)
 //	SHOW INDEXES       (and the singular SHOW INDEX)
 //
-// A single optional trailing ";" is tolerated. Any other trailing tokens —
-// the Neo4j BRIEF / VERBOSE / YIELD / WHERE suffixes — are rejected with a
-// specific error rather than silently ignored, so an unsupported form fails
-// loudly instead of returning a misleading result set. The parser is
-// case-insensitive on keywords, matching the rest of the DDL parser.
+// optionally followed by a YIELD / WHERE / RETURN projection (#2044):
+//
+//	SHOW CONSTRAINTS YIELD name, type AS t [WHERE <pred>] [RETURN <items>]
+//	SHOW INDEXES     YIELD *
+//	SHOW CONSTRAINTS WHERE <pred>            (no YIELD: scope is every column)
+//
+// A single optional trailing ";" is tolerated. The legacy Neo4j BRIEF / VERBOSE
+// suffixes — and any other unrecognised trailing clause — are rejected with a
+// specific error rather than silently ignored. The parser is case-insensitive on
+// keywords, matching the rest of the DDL parser.
 func parseShow(query string) (LogicalPlan, error) {
-	r := newTokenReader(query)
-	if err := r.expectU("SHOW"); err != nil {
+	m := showPrefixRe.FindStringSubmatch(query)
+	if m == nil {
+		// isShowUpper already gated the "SHOW CONSTRAINT" / "SHOW INDEX" prefix,
+		// so reaching here means a near-miss target (e.g. "SHOW CONSTRAINTX").
+		got := ""
+		if toks := tokenise(query); len(toks) >= 2 {
+			got = toks[1]
+		}
+		return nil, fmt.Errorf("ir: SHOW: expected CONSTRAINT(S) or INDEX(ES), got %q", got)
+	}
+
+	isConstraints := strings.HasPrefix(strings.ToUpper(m[1]), "CONSTRAINT")
+	columns := ShowIndexColumns
+	if isConstraints {
+		columns = ShowConstraintColumns
+	}
+
+	tail := strings.TrimSpace(m[2])
+	// Tolerate a single trailing statement terminator.
+	if strings.HasSuffix(tail, ";") {
+		tail = strings.TrimSpace(tail[:len(tail)-1])
+	}
+
+	var proj *ShowProjection
+	if tail != "" {
+		var err error
+		if proj, err = parseShowProjection(tail, columns); err != nil {
+			return nil, err
+		}
+	}
+
+	if isConstraints {
+		return &ShowConstraints{Projection: proj}, nil
+	}
+	return &ShowIndexes{Projection: proj}, nil
+}
+
+// parseShowProjection parses the YIELD / WHERE / RETURN tail of a SHOW command
+// (#2044) into a [ShowProjection], validating it against columns (the SHOW
+// command's default output columns).
+//
+// The tail is re-parsed with the existing ANTLR expression grammar WITHOUT
+// modifying that grammar: it is spliced onto a synthetic "CALL __g.s() …" clause
+// — whose "CALL proc() YIELD items [WHERE pred] [RETURN …]" shape the grammar
+// already accepts — and parsed with [parser.Parse]. The unknown procedure name
+// never fails at parse time (procedure resolution is a later engine step this
+// path does not reach), so the parse yields exactly the YIELD items, the WHERE
+// predicate, and the RETURN projection. The WHERE-without-YIELD form is
+// normalised by injecting an explicit YIELD of every default column, so its
+// scope is the full column set and the shared extraction path handles it too.
+func parseShowProjection(tail string, columns []string) (*ShowProjection, error) {
+	upper := strings.ToUpper(tail)
+	var synthetic string
+	explicitYield := false
+	switch {
+	case hasKeywordPrefix(upper, "YIELD"):
+		synthetic = "CALL __g.s() " + tail
+		explicitYield = true
+	case hasKeywordPrefix(upper, "WHERE"):
+		// WHERE with no YIELD: scope is every default column. Inject an explicit
+		// YIELD of all columns so the shared extraction path below handles it.
+		synthetic = "CALL __g.s() YIELD " + strings.Join(columns, ", ") + " " + tail
+	default:
+		return nil, fmt.Errorf("ir: SHOW: unsupported clause %q; supported forms are the "+
+			"plain SHOW …, SHOW … YIELD …, and SHOW … WHERE … "+
+			"(BRIEF and VERBOSE are not supported)", firstToken(tail))
+	}
+
+	q, perr := parser.Parse(synthetic)
+	if perr != nil {
+		return nil, fmt.Errorf("ir: SHOW: unsupported YIELD form: %w", perr)
+	}
+	return buildShowProjection(q, columns, explicitYield)
+}
+
+// buildShowProjection extracts the YIELD projection, WHERE predicate, and RETURN
+// clause from the re-parsed synthetic CALL query and validates the SHOW-command
+// constraints (known columns, the YIELD scope barrier, RETURN⇒YIELD, and the
+// rejected RETURN sub-clauses).
+func buildShowProjection(q ast.Query, columns []string, explicitYield bool) (*ShowProjection, error) {
+	sq, ok := q.(*ast.SingleQuery)
+	if !ok {
+		return nil, fmt.Errorf("ir: SHOW: unsupported projection")
+	}
+	// The synthetic query is exactly one CALL reading clause plus an optional
+	// RETURN. Anything else (an injected MATCH/WITH/UNWIND/CREATE) is out of
+	// scope for SHOW and rejected.
+	if len(sq.ReadingClauses) != 1 || len(sq.UpdatingClauses) != 0 || len(sq.With) != 0 {
+		return nil, fmt.Errorf("ir: SHOW: only YIELD, WHERE and RETURN are supported after SHOW")
+	}
+	call, ok := sq.ReadingClauses[0].(*ast.Call)
+	if !ok {
+		return nil, fmt.Errorf("ir: SHOW: unsupported projection")
+	}
+
+	if sq.Return != nil && !explicitYield {
+		return nil, fmt.Errorf("ir: SHOW: RETURN requires an explicit YIELD clause")
+	}
+
+	project, err := resolveShowYield(call.Yield, columns, sq.Return != nil)
+	if err != nil {
 		return nil, err
 	}
-	var plan LogicalPlan
-	switch kw := r.peekUpper(); kw {
-	case "CONSTRAINT", "CONSTRAINTS":
-		r.consume()
-		plan = NewShowConstraints()
-	case "INDEX", "INDEXES":
-		r.consume()
-		plan = NewShowIndexes()
+
+	inScope := make(map[string]bool, len(project))
+	for _, p := range project {
+		inScope[p.Output] = true
+	}
+
+	proj := &ShowProjection{Project: project}
+	if call.Where != nil {
+		if err := checkShowScope(call.Where.Predicate, inScope); err != nil {
+			return nil, err
+		}
+		proj.Where = call.Where.Predicate
+	}
+	if sq.Return != nil {
+		if err := checkShowReturn(sq.Return.Projection, inScope); err != nil {
+			return nil, err
+		}
+		proj.Return = sq.Return.Projection
+		if !sq.Return.Projection.All {
+			cols := make([]string, len(sq.Return.Projection.Items))
+			for i, item := range sq.Return.Projection.Items {
+				cols[i] = projectionColumnName(item)
+			}
+			proj.ReturnColumns = cols
+		}
+	}
+	return proj, nil
+}
+
+// resolveShowYield turns the parsed YIELD items into the ordered [ShowYield]
+// projection, validating each named column against the SHOW command's columns.
+// A nil yield is unreachable (the caller only re-parses a YIELD/WHERE tail); an
+// empty yield is YIELD *, which expands to every column and is forbidden when a
+// RETURN follows (Neo4j: YIELD * cannot be combined with RETURN).
+func resolveShowYield(yield []*ast.YieldItem, columns []string, hasReturn bool) ([]ShowYield, error) {
+	if len(yield) == 0 {
+		if hasReturn {
+			return nil, fmt.Errorf("ir: SHOW: YIELD * cannot be combined with RETURN; " +
+				"list the yielded columns explicitly")
+		}
+		project := make([]ShowYield, len(columns))
+		for i, c := range columns {
+			project[i] = ShowYield{Source: c, Output: c}
+		}
+		return project, nil
+	}
+	project := make([]ShowYield, 0, len(yield))
+	for _, yi := range yield {
+		if !containsString(columns, yi.Name) {
+			return nil, fmt.Errorf("ir: SHOW: YIELD refers to unknown column %q (available: %s)",
+				yi.Name, strings.Join(columns, ", "))
+		}
+		out := yi.Name
+		if yi.Alias != nil {
+			out = *yi.Alias
+		}
+		project = append(project, ShowYield{Source: yi.Name, Output: out})
+	}
+	return project, nil
+}
+
+// checkShowReturn validates a RETURN projection on a SHOW command: it rejects the
+// pipeline sub-clauses the executor does not implement (DISTINCT, ORDER BY, SKIP,
+// LIMIT, aggregation) and enforces the YIELD scope barrier on every returned
+// expression. RETURN * (Projection.All) returns the yielded columns and needs no
+// per-item checking.
+func checkShowReturn(p *ast.Projection, inScope map[string]bool) error {
+	if p.Distinct {
+		return fmt.Errorf("ir: SHOW: RETURN DISTINCT is not supported")
+	}
+	if len(p.OrderBy) != 0 || p.Skip != nil || p.Limit != nil {
+		return fmt.Errorf("ir: SHOW: ORDER BY / SKIP / LIMIT are not supported")
+	}
+	if p.All {
+		return nil
+	}
+	for _, item := range p.Items {
+		if containsAggregate(item.Expr) {
+			return fmt.Errorf("ir: SHOW: aggregation in RETURN is not supported")
+		}
+		if err := checkShowScope(item.Expr, inScope); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkShowScope walks e and returns an error if it references a variable that is
+// not in scope (the YIELD scope barrier) or uses an expression construct that is
+// not meaningful over SHOW rows (a subquery or graph pattern). List
+// comprehensions and reduce introduce their own bound variable, which is added to
+// the scope for the descent into their sub-expressions.
+func checkShowScope(e ast.Expression, inScope map[string]bool) error { //nolint:gocyclo // per-AST-node dispatch; each branch is a simple recursion
+	switch n := e.(type) {
+	case nil:
+		return nil
+	case *ast.Variable:
+		if !inScope[n.Name] {
+			return fmt.Errorf("ir: SHOW: variable %q is not defined; only yielded columns are in scope", n.Name)
+		}
+	case *ast.Parameter, *ast.NullLiteral, *ast.BoolLiteral, *ast.IntLiteral,
+		*ast.FloatLiteral, *ast.StringLiteral, *ast.StarLiteral:
+		// Leaves that reference no variable.
+	case *ast.Property:
+		return checkShowScope(n.Receiver, inScope)
+	case *ast.BinaryOp:
+		if err := checkShowScope(n.Left, inScope); err != nil {
+			return err
+		}
+		return checkShowScope(n.Right, inScope)
+	case *ast.UnaryOp:
+		return checkShowScope(n.Operand, inScope)
+	case *ast.SubscriptExpr:
+		if err := checkShowScope(n.Expr, inScope); err != nil {
+			return err
+		}
+		return checkShowScope(n.Index, inScope)
+	case *ast.SliceExpr:
+		return checkShowScopeAll(inScope, n.Expr, n.From, n.To)
+	case *ast.ListLiteral:
+		return checkShowScopeAll(inScope, n.Elements...)
+	case *ast.MapLiteral:
+		return checkShowScopeAll(inScope, n.Values...)
+	case *ast.FunctionInvocation:
+		return checkShowScopeAll(inScope, n.Args...)
+	case *ast.CaseExpression:
+		if err := checkShowScopeAll(inScope, n.Subject, n.ElseExpr); err != nil {
+			return err
+		}
+		for _, alt := range n.Alternatives {
+			if err := checkShowScopeAll(inScope, alt.Condition, alt.Consequent); err != nil {
+				return err
+			}
+		}
+	case *ast.ListComprehension:
+		return checkShowComprehension(n.Variable, inScope, n.Source, n.Predicate, n.Projection)
+	case *ast.ReduceExpr:
+		if err := checkShowScope(n.Init, inScope); err != nil {
+			return err
+		}
+		// Both the accumulator and the per-element variable are in scope inside
+		// the reduce projection.
+		return checkShowComprehension(n.ElemVar, addScope(inScope, n.AccVar), n.Source, n.Projection)
 	default:
-		return nil, fmt.Errorf("ir: SHOW: expected CONSTRAINT(S) or INDEX(ES), got %q", kw)
+		return fmt.Errorf("ir: SHOW: unsupported expression %T in WHERE/RETURN", e)
 	}
-	// Tolerate a single trailing statement terminator; reject anything else so
-	// the unsupported BRIEF/VERBOSE/YIELD/WHERE forms fail with a clear error
-	// instead of being silently dropped.
-	if r.peek() == ";" {
-		r.consume()
+	return nil
+}
+
+// checkShowScopeAll runs [checkShowScope] over every non-nil expression in exprs.
+func checkShowScopeAll(inScope map[string]bool, exprs ...ast.Expression) error {
+	for _, e := range exprs {
+		if e == nil {
+			continue
+		}
+		if err := checkShowScope(e, inScope); err != nil {
+			return err
+		}
 	}
-	if extra := r.peek(); extra != "" {
-		return nil, fmt.Errorf("ir: SHOW: unsupported clause %q; only the plain "+
-			"SHOW CONSTRAINTS / SHOW INDEXES forms are supported "+
-			"(BRIEF, VERBOSE, YIELD and WHERE are not)", extra)
+	return nil
+}
+
+// checkShowComprehension checks the sub-expressions of a comprehension/reduce
+// with bound (the comprehension's element variable) added to the in-scope set
+// for the descent. The Source expression sits in the outer scope; the
+// predicate/projection run with the bound variable visible.
+func checkShowComprehension(bound string, inScope map[string]bool, source ast.Expression, inner ...ast.Expression) error {
+	if err := checkShowScope(source, inScope); err != nil {
+		return err
 	}
-	return plan, nil
+	return checkShowScopeAll(addScope(inScope, bound), inner...)
+}
+
+// addScope returns a copy of inScope with name added, leaving the original
+// untouched so a comprehension's bound variable does not leak into a sibling
+// sub-expression.
+func addScope(inScope map[string]bool, name string) map[string]bool {
+	out := make(map[string]bool, len(inScope)+1)
+	for k := range inScope {
+		out[k] = true
+	}
+	out[name] = true
+	return out
+}
+
+// hasKeywordPrefix reports whether upper (an already upper-cased string) begins
+// with keyword kw followed by a word boundary (whitespace or end of string), so
+// "YIELDED" does not match the "YIELD" keyword.
+func hasKeywordPrefix(upper, kw string) bool {
+	if !strings.HasPrefix(upper, kw) {
+		return false
+	}
+	rest := upper[len(kw):]
+	return rest == "" || rest[0] == ' ' || rest[0] == '\t' || rest[0] == '\n' || rest[0] == '\r'
+}
+
+// firstToken returns the first whitespace-delimited token of s, for an error
+// message that names the unsupported clause.
+func firstToken(s string) string {
+	if f := strings.Fields(s); len(f) > 0 {
+		return f[0]
+	}
+	return s
+}
+
+// containsString reports whether s is an element of list.
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

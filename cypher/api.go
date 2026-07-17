@@ -1652,7 +1652,7 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	}
 	// ── 1. DDL fast-path ─────────────────────────────────────────────────────
 	if ir.IsDDL(query) {
-		return e.runDDL(ctx, query)
+		return e.runDDL(ctx, query, params)
 	}
 
 	// ── 1. Parse, analyse, and retrieve from plan cache ──────────────────────
@@ -1895,7 +1895,7 @@ func guardDDLLength(query string) error {
 // writer serialisation, and a registration whose WAL append fails is unwound,
 // so the in-memory registry never diverges from the durable state (task
 // #1341: registered ⇔ durable).
-func (e *Engine) runDDL(ctx context.Context, query string) (*Result, error) {
+func (e *Engine) runDDL(ctx context.Context, query string, params map[string]expr.Value) (*Result, error) {
 	// Apply the same byte-length guard the DML parse path enforces: DDL routes
 	// through ir.ParseDDL, which predates the parser's pre-parse guard, so an
 	// oversize DDL query would otherwise bypass the cap (audit gap H7).
@@ -1927,9 +1927,10 @@ func (e *Engine) runDDL(ctx context.Context, query string) (*Result, error) {
 	case *ir.ShowConstraints:
 		// SHOW is a pure read: it emits a result set and mutates nothing, so it
 		// does not take the writer serialisation the CREATE/DROP paths above do.
-		return e.runShowConstraints(ctx)
+		// params supplies any parameters an optional YIELD … WHERE/RETURN references.
+		return e.runShowConstraints(ctx, p.Projection, params)
 	case *ir.ShowIndexes:
-		return e.runShowIndexes(ctx)
+		return e.runShowIndexes(ctx, p.Projection, params)
 	default:
 		return nil, fmt.Errorf("cypher: unsupported DDL plan %T", ddlPlan)
 	}
@@ -12412,7 +12413,7 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	}
 	// DDL queries don't require a write transaction.
 	if ir.IsDDL(query) {
-		return e.runDDL(ctx, query)
+		return e.runDDL(ctx, query, params)
 	}
 
 	// Freeze a per-query "now" so all temporal constructors (date(), time(),

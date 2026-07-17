@@ -460,7 +460,9 @@ SHOW INDEXES
 ```
 
 The singular aliases `SHOW CONSTRAINT` and `SHOW INDEX` are accepted and behave
-identically. A single trailing `;` is tolerated.
+identically. A single trailing `;` is tolerated. A trailing `YIELD` / `WHERE` /
+`RETURN` projection is also supported — see [Projecting and filtering
+(YIELD / WHERE / RETURN)](#projecting-and-filtering-yield--where--return).
 
 **Rows are drawn from the same enumeration as `db.constraints()` /
 `db.indexes()`**, so the two views can never disagree on which constraints or
@@ -511,13 +513,74 @@ Columns that Neo4j reports for data GoGraph does not track — `id`,
 `lastRead`, `readCount`, `propertyType` — are **omitted** rather than filled with
 fabricated values.
 
-**Unsupported forms.** The legacy `BRIEF` / `VERBOSE` suffixes (removed in Neo4j
-5.0) and the `YIELD` / `WHERE` sub-clauses are **not** supported and are rejected
-with a specific error rather than silently ignored:
+#### Projecting and filtering (YIELD / WHERE / RETURN)
+
+Modern clients issue the SHOW commands with a trailing `YIELD` / `WHERE` /
+`RETURN` clause. The supported grammar is:
+
+```
+SHOW CONSTRAINTS | SHOW INDEXES
+  [ YIELD { * | column [AS alias] [, …] } ]
+  [ WHERE <predicate> ]
+  [ RETURN { * | item [AS alias] [, …] } ]
+```
+
+- **`YIELD *`** projects every default column, in the default order — the form a
+  modern client (Browser `:schema`, driver tooling) emits by default. It is
+  equivalent to the plain form.
+
+  ```cypher
+  SHOW CONSTRAINTS YIELD *
+  ```
+
+- **`YIELD column [AS alias] [, …]`** selects and optionally renames columns, and
+  is a scope barrier: only the yielded (aliased) names are visible to the
+  following `WHERE` and `RETURN`. Referencing a non-yielded column afterwards is a
+  compile-time error.
+
+  ```cypher
+  SHOW INDEXES YIELD name AS index, type
+  ```
+
+- **`WHERE <predicate>`** filters rows. It may follow a `YIELD` (scope: the
+  yielded columns) or stand alone without a `YIELD` (scope: every default
+  column). The predicate is an ordinary Cypher expression evaluated per row with
+  three-valued logic — `NULL` and `false` both drop the row — and may reference
+  query parameters and list columns.
+
+  ```cypher
+  SHOW CONSTRAINTS WHERE type = 'UNIQUE'
+  SHOW INDEXES YIELD name, type WHERE type = $kind
+  SHOW CONSTRAINTS YIELD name, labelsOrTypes WHERE 'Person' IN labelsOrTypes
+  ```
+
+- **`RETURN item [AS alias] [, …]`** (or `RETURN *`) is a final scalar projection
+  over the yielded scope. `RETURN` requires an explicit `YIELD` (Neo4j: the
+  `YIELD` clause is mandatory before `RETURN`, and `YIELD *` may not be combined
+  with `RETURN`).
+
+  ```cypher
+  SHOW CONSTRAINTS YIELD name, type WHERE type = 'UNIQUE' RETURN name AS cname
+  ```
+
+Output order is preserved: rows stay sorted deterministically by `name`.
+
+**Unsupported forms.** The following are rejected with a specific error rather
+than silently ignored:
+
+- The legacy `BRIEF` / `VERBOSE` suffixes (removed in Neo4j 5.0).
+- `ORDER BY`, `SKIP`, and `LIMIT` (on either `YIELD` or `RETURN`), `RETURN
+  DISTINCT`, and aggregations in `RETURN` — the SHOW result set is small and
+  already ordered by `name`.
+- Expressions inside `YIELD` (a `YIELD` item is a column name with an optional
+  `AS` alias; put any computation in `RETURN`).
+- Combining SHOW with arbitrary general clauses (`SHOW … MATCH …`, `… WITH …`).
 
 ```cypher
-SHOW INDEXES YIELD name, type   -- error: unsupported clause
-SHOW CONSTRAINTS VERBOSE        -- error: unsupported clause
+SHOW CONSTRAINTS VERBOSE                       -- error: BRIEF/VERBOSE not supported
+SHOW INDEXES YIELD name ORDER BY name          -- error: ORDER BY not supported
+SHOW CONSTRAINTS YIELD name, type RETURN count(*)  -- error: aggregation not supported
+SHOW CONSTRAINTS YIELD toUpper(name)           -- error: expressions not allowed in YIELD
 ```
 
 ---

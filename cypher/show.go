@@ -1,6 +1,7 @@
 package cypher
 
-// show.go — SHOW CONSTRAINTS / SHOW INDEXES execution (#1922).
+// show.go — SHOW CONSTRAINTS / SHOW INDEXES execution (#1922; YIELD/WHERE/RETURN
+// projection added by #2044).
 //
 // SHOW CONSTRAINTS and SHOW INDEXES are modern schema-introspection statements
 // (the deprecated-and-removed db.constraints() / db.indexes() procedures are the
@@ -45,12 +46,25 @@ package cypher
 // indexProvider, owningConstraint, ownedIndex, lastRead, readCount,
 // propertyType) are omitted rather than filled with fabricated values.
 // See docs/cypher.md for the full contract.
+//
+// # YIELD / WHERE / RETURN (#2044)
+//
+// A modern client (Browser :schema, the official drivers' tooling) issues the
+// SHOW commands with a trailing YIELD / WHERE / RETURN projection. The parser
+// (ir.parseShow) resolves it into an ir.ShowProjection; the executor materialises
+// the full row set exactly as the plain form does, then applies the projection
+// in Go — the yielded columns are selected/aliased into a per-row scope, the
+// WHERE predicate filters that scope with expr.Eval (three-valued logic: NULL and
+// false both drop the row), and the RETURN items are a final scalar projection.
+// The materialised rows are already ordered deterministically by name, and
+// projection/filter preserve that order.
 
 import (
 	"context"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/procs"
 )
 
@@ -63,17 +77,13 @@ const showEntityTypeNode = "NODE"
 // index is always fully populated (never POPULATING/FAILED).
 const showIndexStateOnline = "ONLINE"
 
-// showConstraintsColumns is the ordered SHOW CONSTRAINTS output schema.
-var showConstraintsColumns = []string{"name", "type", "entityType", "labelsOrTypes", "properties"}
-
-// showIndexesColumns is the ordered SHOW INDEXES output schema.
-var showIndexesColumns = []string{"name", "state", "type", "entityType", "labelsOrTypes", "properties"}
-
 // runShowConstraints executes SHOW CONSTRAINTS. It projects the shared
 // db.constraints() enumeration ([name, type, label, property], already sorted
 // deterministically by ListConstraintRows) into the Neo4j-aligned column shape
-// [name, type, entityType, labelsOrTypes, properties].
-func (e *Engine) runShowConstraints(ctx context.Context) (*Result, error) {
+// [name, type, entityType, labelsOrTypes, properties], then applies the optional
+// YIELD/WHERE/RETURN projection (#2044). params supplies any query parameters the
+// WHERE/RETURN expressions reference.
+func (e *Engine) runShowConstraints(ctx context.Context, proj *ir.ShowProjection, params map[string]expr.Value) (*Result, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -94,15 +104,17 @@ func (e *Engine) runShowConstraints(ctx context.Context) (*Result, error) {
 			expr.ListValue{r[3]}, // properties
 		})
 	}
-	return e.newShowResult(ctx, showConstraintsColumns, rows), nil
+	return e.newShowResult(ctx, ir.ShowConstraintColumns, rows, proj, params)
 }
 
 // runShowIndexes executes SHOW INDEXES. It projects the shared db.indexes()
 // enumeration ([name, type], already sorted by name via CollectIndexRows) into
 // the Neo4j-aligned column shape [name, state, type, entityType, labelsOrTypes,
 // properties], enriching labelsOrTypes/properties from the engine's
-// index-definition registry.
-func (e *Engine) runShowIndexes(ctx context.Context) (*Result, error) {
+// index-definition registry, then applies the optional YIELD/WHERE/RETURN
+// projection (#2044). params supplies any query parameters the WHERE/RETURN
+// expressions reference.
+func (e *Engine) runShowIndexes(ctx context.Context, proj *ir.ShowProjection, params map[string]expr.Value) (*Result, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -133,14 +145,107 @@ func (e *Engine) runShowIndexes(ctx context.Context) (*Result, error) {
 			props,
 		})
 	}
-	return e.newShowResult(ctx, showIndexesColumns, rows), nil
+	return e.newShowResult(ctx, ir.ShowIndexColumns, rows, proj, params)
 }
 
-// newShowResult wraps a materialised SHOW row set in a streaming Result with the
-// given columns. The rows are snapshotted from the registries before iteration,
-// so the Result needs no index buffer, index manager, or transaction (SHOW has
-// no write side effects to flush). ctx governs iteration cancellation.
-func (e *Engine) newShowResult(ctx context.Context, cols []string, rows []exec.Row) *Result {
+// newShowResult wraps a materialised SHOW row set in a streaming Result. When
+// proj is nil (the plain form) the rows and columns are emitted as-is. When proj
+// is non-nil the YIELD/WHERE/RETURN projection is applied first (#2044). The rows
+// are snapshotted from the registries before iteration, so the Result needs no
+// index buffer, index manager, or transaction (SHOW has no write side effects to
+// flush). ctx governs iteration cancellation.
+func (e *Engine) newShowResult(ctx context.Context, cols []string, rows []exec.Row, proj *ir.ShowProjection, params map[string]expr.Value) (*Result, error) {
+	if proj != nil {
+		var err error
+		if cols, rows, err = e.applyShowProjection(cols, rows, proj, params); err != nil {
+			return nil, err
+		}
+	}
 	rs := exec.Run(ctx, exec.NewStaticRows(rows), cols)
-	return newResult(rs, cols, nil, nil, nil)
+	return newResult(rs, cols, nil, nil, nil), nil
+}
+
+// applyShowProjection applies a parsed YIELD/WHERE/RETURN projection to the
+// materialised SHOW rows and returns the projected columns and rows. The parser
+// has already validated the projection (known columns, the YIELD scope barrier,
+// and the rejected RETURN sub-clauses), so this evaluates the WHERE predicate and
+// the RETURN items per row against the yielded scope and never has to re-check
+// scoping. Output order follows the (name-sorted) input order.
+func (e *Engine) applyShowProjection(cols []string, rows []exec.Row, proj *ir.ShowProjection, params map[string]expr.Value) ([]string, []exec.Row, error) {
+	colIdx := make(map[string]int, len(cols))
+	for i, c := range cols {
+		colIdx[c] = i
+	}
+	// Pre-resolve each yielded item's source column index; the parser validated
+	// every Source against cols, so the lookup always succeeds.
+	srcIdx := make([]int, len(proj.Project))
+	for i, p := range proj.Project {
+		srcIdx[i] = colIdx[p.Source]
+	}
+
+	outCols := showOutputColumns(proj)
+	out := make([]exec.Row, 0, len(rows))
+	// A per-row scope map reused across rows: it is fully overwritten each
+	// iteration and only read (never retained) by expr.Eval.
+	scope := make(expr.RowContext, len(proj.Project))
+	for _, row := range rows {
+		for i, p := range proj.Project {
+			scope[p.Output] = row[srcIdx[i]]
+		}
+		if proj.Where != nil {
+			v, err := expr.Eval(proj.Where, scope, params, e.reg)
+			if err != nil {
+				return nil, nil, err
+			}
+			if !expr.IsTruthy(v) {
+				continue
+			}
+		}
+		outRow, err := e.showOutputRow(proj, scope, srcIdx, row, params)
+		if err != nil {
+			return nil, nil, err
+		}
+		out = append(out, outRow)
+	}
+	return outCols, out, nil
+}
+
+// showOutputColumns returns the output column names for a SHOW projection: the
+// RETURN item names (precomputed by the parser) when an explicit RETURN clause is
+// present, otherwise the yielded (aliased) column names — which is also the
+// RETURN * case, since RETURN * returns the yielded columns.
+func showOutputColumns(proj *ir.ShowProjection) []string {
+	if proj.Return != nil && !proj.Return.All {
+		return proj.ReturnColumns
+	}
+	yielded := make([]string, len(proj.Project))
+	for i, p := range proj.Project {
+		yielded[i] = p.Output
+	}
+	return yielded
+}
+
+// showOutputRow builds one output row from the yielded scope: the RETURN items
+// evaluated per row when a RETURN is present (yielded values in order for
+// RETURN *), otherwise the yielded values themselves.
+func (e *Engine) showOutputRow(proj *ir.ShowProjection, scope expr.RowContext, srcIdx []int, row exec.Row, params map[string]expr.Value) (exec.Row, error) {
+	yielded := func() exec.Row {
+		vals := make(exec.Row, len(proj.Project))
+		for i := range proj.Project {
+			vals[i] = row[srcIdx[i]]
+		}
+		return vals
+	}
+	if proj.Return == nil || proj.Return.All {
+		return yielded(), nil
+	}
+	vals := make(exec.Row, len(proj.Return.Items))
+	for i, item := range proj.Return.Items {
+		v, err := expr.Eval(item.Expr, scope, params, e.reg)
+		if err != nil {
+			return nil, err
+		}
+		vals[i] = v
+	}
+	return vals, nil
 }
