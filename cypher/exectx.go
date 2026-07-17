@@ -375,7 +375,13 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 		if err := checkContext(tx.ctx); err != nil {
 			return nil, err
 		}
-		if queryHasWritingClause(query) || ir.IsDDL(query) {
+		// SHOW CONSTRAINTS / SHOW INDEXES are classified as DDL for dispatch but
+		// are pure reads (schema introspection): permit them on a read-only
+		// transaction. Every schema-WRITING DDL statement (CREATE/DROP
+		// INDEX|CONSTRAINT) stays rejected, since it would run with no writer
+		// lock, no barrier, and no WAL. SHOW then routes through Run, which
+		// dispatches it to the read-only runShow* handler.
+		if queryHasWritingClause(query) || (ir.IsDDL(query) && !ir.IsShow(query)) {
 			return nil, ErrWriteInReadOnlyTx
 		}
 		return tx.eng.Run(tx.ctx, query, params)
@@ -391,8 +397,17 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 	if err := checkContext(tx.ctx); err != nil {
 		return nil, err
 	}
-	// DDL is not transactional: reject it inside an explicit transaction rather
-	// than silently autocommitting a schema change in the middle of a tx.
+	// SHOW CONSTRAINTS / SHOW INDEXES are pure reads (schema introspection), so
+	// they are permitted inside an explicit transaction. They read the current
+	// committed schema — schema-writing DDL cannot run inside a transaction, so
+	// the committed schema is exactly what this transaction observes — via the
+	// engine's concurrent read path (its own snapshot); they touch neither this
+	// transaction's writer lock, WAL, nor undo log.
+	if ir.IsShow(query) {
+		return tx.eng.Run(tx.ctx, query, params)
+	}
+	// Other DDL is not transactional: reject it inside an explicit transaction
+	// rather than silently autocommitting a schema change in the middle of a tx.
 	if ir.IsDDL(query) {
 		return nil, fmt.Errorf("cypher: DDL statement %q is not allowed inside an explicit transaction", query)
 	}

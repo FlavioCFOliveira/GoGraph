@@ -589,6 +589,22 @@ func (r *indexDefRegistry) count() int {
 	return n
 }
 
+// labelProp returns the (label, property) recorded for the user index named
+// name, and ok=true when name is a user index. It returns ("", "", false) for
+// any name the registry does not hold — a UNIQUE-constraint backing index or a
+// numeric companion, neither of which ever enters this registry. It is the
+// enrichment source SHOW INDEXES uses to populate its labelsOrTypes/properties
+// columns for user indexes (#1922).
+func (r *indexDefRegistry) labelProp(name string) (label, property string, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, found := r.byName[name]
+	if !found {
+		return "", "", false
+	}
+	return e.label, e.property, true
+}
+
 // specs returns the registered definitions as snapshot index-def specs in
 // deterministic order (by name), for IndexSpecsForSnapshot. nil when empty.
 func (r *indexDefRegistry) specs() []snapshot.IndexDefSpec {

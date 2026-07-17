@@ -74,13 +74,40 @@ func checkSchemaIdentifier(kind, what, id string) error {
 }
 
 // IsDDL returns true when query (trimmed, case-insensitive) begins with a
-// known DDL keyword that the lightweight DDL parser handles.
+// known DDL keyword that the lightweight DDL parser handles. This includes the
+// SHOW CONSTRAINTS / SHOW INDEXES read-only schema-introspection statements
+// ([IsShow]) so they route through [ParseDDL] and bypass the ANTLR grammar
+// exactly as the CREATE/DROP DDL statements do (#1922). SHOW is DDL for
+// dispatch purposes but is a pure read, not a schema write; callers that must
+// distinguish the two (for example, to permit SHOW on a read-only transaction)
+// use [IsShow].
 func IsDDL(query string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(query))
 	return strings.HasPrefix(upper, "CREATE INDEX") ||
 		strings.HasPrefix(upper, "DROP INDEX") ||
 		strings.HasPrefix(upper, "CREATE CONSTRAINT") ||
-		strings.HasPrefix(upper, "DROP CONSTRAINT")
+		strings.HasPrefix(upper, "DROP CONSTRAINT") ||
+		isShowUpper(upper)
+}
+
+// IsShow returns true when query (trimmed, case-insensitive) is a SHOW
+// CONSTRAINTS / SHOW INDEXES schema-introspection statement (or its singular
+// SHOW CONSTRAINT / SHOW INDEX form). SHOW is classified as DDL by [IsDDL] for
+// dispatch, but unlike CREATE/DROP it is a pure read that emits a result set and
+// mutates nothing, so it is permitted on a read-only transaction where the
+// schema-writing DDL statements are rejected (#1922).
+func IsShow(query string) bool {
+	return isShowUpper(strings.ToUpper(strings.TrimSpace(query)))
+}
+
+// isShowUpper reports whether upper (an already trimmed, upper-cased query)
+// begins with a supported SHOW schema-introspection keyword. The prefix
+// "SHOW CONSTRAINT" matches both CONSTRAINT and CONSTRAINTS, and "SHOW INDEX"
+// matches both INDEX and INDEXES; the exact singular/plural token is validated
+// by [parseShow]. Sharing this helper keeps [IsDDL] and [IsShow] in lockstep.
+func isShowUpper(upper string) bool {
+	return strings.HasPrefix(upper, "SHOW CONSTRAINT") ||
+		strings.HasPrefix(upper, "SHOW INDEX")
 }
 
 // ParseDDL parses a DDL query string and returns a LogicalPlan (one of
@@ -97,8 +124,54 @@ func ParseDDL(query string) (LogicalPlan, error) {
 		return parseCreateConstraint(strings.TrimSpace(query))
 	case strings.HasPrefix(upper, "DROP CONSTRAINT"):
 		return parseDropConstraint(strings.TrimSpace(query))
+	case isShowUpper(upper):
+		return parseShow(strings.TrimSpace(query))
 	}
 	return nil, fmt.Errorf("ir: unrecognised DDL statement: %q", query)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SHOW CONSTRAINTS / SHOW INDEXES parser (#1922)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// parseShow parses the read-only schema-introspection statements:
+//
+//	SHOW CONSTRAINTS   (and the singular SHOW CONSTRAINT)
+//	SHOW INDEXES       (and the singular SHOW INDEX)
+//
+// A single optional trailing ";" is tolerated. Any other trailing tokens —
+// the Neo4j BRIEF / VERBOSE / YIELD / WHERE suffixes — are rejected with a
+// specific error rather than silently ignored, so an unsupported form fails
+// loudly instead of returning a misleading result set. The parser is
+// case-insensitive on keywords, matching the rest of the DDL parser.
+func parseShow(query string) (LogicalPlan, error) {
+	r := newTokenReader(query)
+	if err := r.expectU("SHOW"); err != nil {
+		return nil, err
+	}
+	var plan LogicalPlan
+	switch kw := r.peekUpper(); kw {
+	case "CONSTRAINT", "CONSTRAINTS":
+		r.consume()
+		plan = NewShowConstraints()
+	case "INDEX", "INDEXES":
+		r.consume()
+		plan = NewShowIndexes()
+	default:
+		return nil, fmt.Errorf("ir: SHOW: expected CONSTRAINT(S) or INDEX(ES), got %q", kw)
+	}
+	// Tolerate a single trailing statement terminator; reject anything else so
+	// the unsupported BRIEF/VERBOSE/YIELD/WHERE forms fail with a clear error
+	// instead of being silently dropped.
+	if r.peek() == ";" {
+		r.consume()
+	}
+	if extra := r.peek(); extra != "" {
+		return nil, fmt.Errorf("ir: SHOW: unsupported clause %q; only the plain "+
+			"SHOW CONSTRAINTS / SHOW INDEXES forms are supported "+
+			"(BRIEF, VERBOSE, YIELD and WHERE are not)", extra)
+	}
+	return plan, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

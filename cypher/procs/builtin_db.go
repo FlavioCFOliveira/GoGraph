@@ -17,6 +17,7 @@ package procs
 
 import (
 	"context"
+	"sort"
 	"strings"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
@@ -100,33 +101,52 @@ func dbIndexes(mgr *index.Manager) ProcEntry {
 			},
 		},
 		Impl: func(_ context.Context, _ []expr.Value) ([][]expr.Value, error) {
-			if mgr == nil {
-				return nil, nil
-			}
-			names := mgr.ListIndexes()
-			rows := make([][]expr.Value, 0, len(names))
-			for _, name := range names {
-				// Hide the internal numeric-companion btree (#1652): a btree
-				// CREATE INDEX registers a "<label>_<prop>_btree_num" companion
-				// alongside the user-named string btree so a numeric range seek
-				// can find it, but the user must see exactly the one index they
-				// created. The suffix is reserved (a user index name carries no
-				// such suffix from the DDL parser).
-				if strings.HasSuffix(name, numericCompanionSuffix) {
-					continue
-				}
-				sub, err := mgr.GetIndex(name)
-				if err != nil {
-					continue
-				}
-				rows = append(rows, []expr.Value{
-					expr.StringValue(name),
-					expr.StringValue(sub.Kind()),
-				})
-			}
-			return rows, nil
+			return CollectIndexRows(mgr), nil
 		},
 	}
+}
+
+// CollectIndexRows enumerates every user-visible index registered on mgr as a
+// [][]expr.Value where each inner slice is [name, type]: the index name and its
+// kind ("hash" or "btree"). Names are returned in deterministic (ascending)
+// order so the row set is stable across calls.
+//
+// It is the single source of index enumeration shared by db.indexes() and the
+// SHOW INDEXES statement (#1922) — both project from the identical row set, so
+// the two views can never diverge on which indexes exist or on their reported
+// type. The internal numeric-companion btree (a "<label>_<prop>_btree_num"
+// index a btree CREATE INDEX registers alongside the user-named string btree,
+// #1652) is filtered out here, so neither view exposes it. A nil mgr yields nil.
+//
+// CollectIndexRows is safe for concurrent use (it only issues concurrent-safe
+// reads on mgr).
+func CollectIndexRows(mgr *index.Manager) [][]expr.Value {
+	if mgr == nil {
+		return nil
+	}
+	names := mgr.ListIndexes()
+	sort.Strings(names)
+	rows := make([][]expr.Value, 0, len(names))
+	for _, name := range names {
+		// Hide the internal numeric-companion btree (#1652): a btree CREATE
+		// INDEX registers a "<label>_<prop>_btree_num" companion alongside the
+		// user-named string btree so a numeric range seek can find it, but the
+		// user must see exactly the one index they created. The suffix is
+		// reserved (a user index name carries no such suffix from the DDL
+		// parser).
+		if strings.HasSuffix(name, numericCompanionSuffix) {
+			continue
+		}
+		sub, err := mgr.GetIndex(name)
+		if err != nil {
+			continue
+		}
+		rows = append(rows, []expr.Value{
+			expr.StringValue(name),
+			expr.StringValue(sub.Kind()),
+		})
+	}
+	return rows
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

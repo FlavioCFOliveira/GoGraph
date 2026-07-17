@@ -434,6 +434,81 @@ DROP CONSTRAINT person_email_unique
 DROP CONSTRAINT person_email_unique IF EXISTS
 ```
 
+### SHOW CONSTRAINTS / SHOW INDEXES
+
+`SHOW CONSTRAINTS` and `SHOW INDEXES` list the registered schema. They are the
+modern replacements for the `db.constraints()` / `db.indexes()` procedures
+(deprecated in Neo4j 4.3, removed in 5.0) and are what a modern Neo4j client
+issues to introspect the schema. Both are **pure reads**: they emit a result
+set (named columns and rows), mutate nothing, and may be run standalone, on a
+read-only transaction (`BeginReadTx`), or inside an explicit write transaction.
+
+```cypher
+SHOW CONSTRAINTS
+SHOW INDEXES
+```
+
+The singular aliases `SHOW CONSTRAINT` and `SHOW INDEX` are accepted and behave
+identically. A single trailing `;` is tolerated.
+
+**Rows are drawn from the same enumeration as `db.constraints()` /
+`db.indexes()`**, so the two views can never disagree on which constraints or
+indexes exist. Output is ordered deterministically by `name`.
+
+`SHOW CONSTRAINTS` yields, in order:
+
+| Column | Type | Value |
+|---|---|---|
+| `name` | `STRING` | the declared (or auto-generated) constraint name — the name `DROP CONSTRAINT` takes |
+| `type` | `STRING` | `UNIQUE` or `NOT_NULL` |
+| `entityType` | `STRING` | always `NODE` |
+| `labelsOrTypes` | `LIST<STRING>` | the single label, e.g. `["Person"]` |
+| `properties` | `LIST<STRING>` | the single property, e.g. `["email"]` |
+
+`SHOW INDEXES` yields, in order:
+
+| Column | Type | Value |
+|---|---|---|
+| `name` | `STRING` | the index name |
+| `state` | `STRING` | always `ONLINE` (indexes are built synchronously) |
+| `type` | `STRING` | `hash` or `btree` |
+| `entityType` | `STRING` | always `NODE` |
+| `labelsOrTypes` | `LIST<STRING>` | the single label |
+| `properties` | `LIST<STRING>` | the single property |
+
+The backing index of a `UNIQUE` constraint (named `__uniq__<Label>.<prop>`) is
+listed by `SHOW INDEXES`, matching `db.indexes()`; because it is not a
+user-declared index its `labelsOrTypes` and `properties` are reported as empty
+lists.
+
+**Dialect alignment and deviations.** The *column names* follow modern Neo4j
+(`entityType`, `labelsOrTypes`, `properties`), but the *column values* stay in
+GoGraph's own vocabulary rather than being remapped to Neo4j's — this is both
+faithful to what GoGraph is and consistent with `db.constraints()` /
+`db.indexes()`:
+
+- Constraint `type` is `UNIQUE` / `NOT_NULL`, not Neo4j's `UNIQUENESS` /
+  `NODE_PROPERTY_EXISTENCE`.
+- Index `type` is `hash` / `btree` (GoGraph's real index kinds), not Neo4j's
+  `RANGE` — a hash index is equality-only and reporting it as `RANGE` would be
+  incorrect.
+- `state` is always `ONLINE` and `entityType` always `NODE`, because GoGraph
+  builds every index synchronously and supports node-scoped schema only.
+
+Columns that Neo4j reports for data GoGraph does not track — `id`,
+`populationPercent`, `indexProvider`, `owningConstraint`, `ownedIndex`,
+`lastRead`, `readCount`, `propertyType` — are **omitted** rather than filled with
+fabricated values.
+
+**Unsupported forms.** The legacy `BRIEF` / `VERBOSE` suffixes (removed in Neo4j
+5.0) and the `YIELD` / `WHERE` sub-clauses are **not** supported and are rejected
+with a specific error rather than silently ignored:
+
+```cypher
+SHOW INDEXES YIELD name, type   -- error: unsupported clause
+SHOW CONSTRAINTS VERBOSE        -- error: unsupported clause
+```
+
 ---
 
 ## Built-in procedures (CALL)
@@ -462,9 +537,10 @@ Yields: `name STRING`, `type STRING`, `label STRING`, `property STRING`. The
 `name` column is the constraint's declared (or auto-generated) name — the same
 name `DROP CONSTRAINT` takes. `type` is `UNIQUE` or `NOT_NULL`.
 
-> Note: GoGraph exposes the schema through the `db.constraints()` / `db.indexes()`
-> procedures. The Neo4j 5 `SHOW CONSTRAINTS` / `SHOW INDEXES` statements are not
-> yet supported.
+> Note: `db.constraints()` / `db.indexes()` are the legacy schema-introspection
+> procedures. The modern [`SHOW CONSTRAINTS` / `SHOW INDEXES`](#show-constraints--show-indexes)
+> statements list the same schema and are preferred for new code; the two views
+> share a single enumeration, so they never diverge.
 
 ### db.labels()
 

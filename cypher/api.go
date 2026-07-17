@@ -1924,6 +1924,12 @@ func (e *Engine) runDDL(ctx context.Context, query string) (*Result, error) {
 		return e.runCreateConstraint(ctx, p, idxMgr)
 	case *ir.DropConstraint:
 		return e.runDropConstraint(ctx, p, idxMgr)
+	case *ir.ShowConstraints:
+		// SHOW is a pure read: it emits a result set and mutates nothing, so it
+		// does not take the writer serialisation the CREATE/DROP paths above do.
+		return e.runShowConstraints(ctx)
+	case *ir.ShowIndexes:
+		return e.runShowIndexes(ctx)
 	default:
 		return nil, fmt.Errorf("cypher: unsupported DDL plan %T", ddlPlan)
 	}
