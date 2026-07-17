@@ -389,6 +389,21 @@ func (c *Chunk) AppendRowFrom(src *Chunk, srcRow int) {
 // panic on the read path.
 func (c *Chunk) IsInt64Column(j int) bool { return c.cols[j].store == stI64 }
 
+// IsFloat64Column reports whether column j's live backing is an unboxed
+// []float64. Together with [Chunk.IsInt64Column]/[Chunk.IsStringColumn]/
+// [Chunk.IsBoolColumn] it lets a consumer (e.g. the columnar EagerAggregation
+// grouping-key path, #2049) read a scalar cell unboxed via the typed accessor
+// for that kind and fall back to [Chunk.BoxCell] for a boxed or promoted column.
+func (c *Chunk) IsFloat64Column(j int) bool { return c.cols[j].store == stF64 }
+
+// IsStringColumn reports whether column j's live backing is an unboxed []string.
+// See [Chunk.IsFloat64Column].
+func (c *Chunk) IsStringColumn(j int) bool { return c.cols[j].store == stStr }
+
+// IsBoolColumn reports whether column j's live backing is an unboxed []bool. See
+// [Chunk.IsFloat64Column].
+func (c *Chunk) IsBoolColumn(j int) bool { return c.cols[j].store == stBool }
+
 // CopyCellTo copies cell (srcCol, srcRow) of c into column dstCol of dst WITHOUT
 // boxing a plain scalar: a typed cell is appended through dst's matching dynamic
 // [Chunk.PutInt64]/[Chunk.PutFloat64]/[Chunk.PutString]/[Chunk.PutBool], a boxed

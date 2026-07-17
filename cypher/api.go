@@ -7832,12 +7832,25 @@ func buildEagerAggregation(
 		})
 	}
 
-	// Wrap child with the pre-projection.
-	preProj, err := exec.NewProject(child, items)
-	if err != nil {
-		return nil, fmt.Errorf("cypher: EagerAggregation pre-projection: %w", err)
+	// Wrap child with the pre-projection. When the grouping keys are scalar-property
+	// accesses on a bound node and the child emits raw NodeID columns (a scan),
+	// build a columnar pre-projection so EagerAggregation can hash the grouping keys
+	// UNBOXED, boxing a key only on new-group creation (#2049). Otherwise use the
+	// row-at-a-time pre-projection with its per-row byte guard, byte-identically.
+	var preProj exec.Operator
+	columnarPre, colOK, colErr := tryBuildColumnarAggInput(p, items, child, schemaSnap, capturedG, capturedBopts)
+	if colErr != nil {
+		return nil, colErr
 	}
-	preProj = applyProjectionRowBudget(preProj, bopts)
+	if colOK {
+		preProj = columnarPre
+	} else {
+		rowPre, err := exec.NewProject(child, items)
+		if err != nil {
+			return nil, fmt.Errorf("cypher: EagerAggregation pre-projection: %w", err)
+		}
+		preProj = applyProjectionRowBudget(rowPre, bopts)
+	}
 
 	op, err := exec.NewEagerAggregation(preProj, keyCols, aggFactories, 0)
 	if err != nil {
@@ -7845,6 +7858,12 @@ func buildEagerAggregation(
 	}
 	aggMB, aggEst := resultByteBudget(bopts)
 	op = op.WithByteBudget(aggMB, aggEst)
+	if colOK {
+		// Consume the columnar pre-projection column-major. On the (unreachable)
+		// error — ColumnarProject is always a ChunkProducer — the operator keeps
+		// consuming it row-at-a-time via Next, which is byte-identical.
+		_ = op.WithChunkInput()
+	}
 
 	// When there are no group-by keys, openCypher semantics require a single
 	// output row even when the input is empty — e.g.
@@ -11982,6 +12001,140 @@ func tryBuildColumnarScalarPassthrough(
 		return cp, true, nil
 	}
 	return cp, true, nil
+}
+
+// tryBuildColumnarAggInput builds a [exec.ColumnarProject] pre-projection for an
+// [ir.EagerAggregation] so its grouping keys can be hashed UNBOXED (#2049). It
+// returns (op, true, nil) when the aggregation shape qualifies, (nil, false, nil) to
+// keep the row-at-a-time pre-projection, or (nil, false, err) on a build error.
+//
+// It qualifies only when:
+//   - there is at least one grouping key (a group-key-free aggregate never hashes a
+//     key, so it stays on the row path — no [exec.EagerAggregation.WithChunkInput]);
+//   - the child emits raw int64 NodeID columns (a [exec.NodeIDColumnProducer]: a
+//     scan / columnar-filter), so the scalar-property key filler reads the property
+//     UNBOXED rather than boxing it;
+//   - every grouping key is a scalar-property access on a bound node or a bare node
+//     variable (see [aggKeyPropertyItem]); and
+//   - every aggregate argument is budget-safe — count(*), a bare variable, or a
+//     property access — so no pre-projection item can construct a large value
+//     (range()/comprehension), which is what lets this path skip the row-at-a-time
+//     per-row byte guard exactly as [tryBuildColumnarProjection] does for the
+//     property-access-only RETURN projection.
+//
+// The fillers reuse each item's own row-at-a-time [exec.ProjectionItem.Eval] as a
+// byte-identical fallback, so the columnar and row pre-projections produce identical
+// values; [exec.EagerAggregation] then groups them identically (its unboxed key hash
+// and equivalence delegate to the same [expr.EquivalentHash]/[expr.Equivalent] the
+// boxed path uses). The group-key byte budget (#1841) and maxGroups cap are enforced
+// unchanged inside [exec.EagerAggregation].
+func tryBuildColumnarAggInput(
+	p *ir.EagerAggregation,
+	items []exec.ProjectionItem,
+	child exec.Operator,
+	schemaSnap map[string]int,
+	g *lpg.Graph[string, float64],
+	bopts *buildOpts,
+) (*exec.ColumnarProject, bool, error) {
+	if g == nil || bopts == nil || len(p.GroupBy) == 0 {
+		return nil, false, nil
+	}
+	if len(items) != len(p.GroupBy)+len(p.Aggregates) {
+		return nil, false, nil
+	}
+	// The child must emit raw int64 NodeID columns so the scalar-property key filler
+	// reads the property unboxed; any other child keeps the row path.
+	if _, isNodeIDProducer := child.(exec.NodeIDColumnProducer); !isNodeIDProducer {
+		return nil, false, nil
+	}
+
+	fillers := make([]exec.ColumnFiller, len(items))
+
+	// Grouping-key items occupy positions 0..len(GroupBy)-1.
+	for i := range p.GroupBy {
+		var keyExpr ast.Expression
+		if i < len(p.GroupByExprs) {
+			keyExpr = p.GroupByExprs[i]
+		}
+		if nodeCol, propName, ok := aggKeyPropertyItem(keyExpr, schemaSnap, bopts); ok {
+			fillers[i] = buildScalarPropertyFiller(nodeCol, propName, g, items[i].Eval)
+			continue
+		}
+		if aggKeyBareVar(keyExpr, schemaSnap) {
+			fillers[i] = evalPutColumnFiller(items[i].Eval)
+			continue
+		}
+		return nil, false, nil // non-eligible grouping-key shape → row path
+	}
+
+	// Aggregate-argument items occupy positions len(GroupBy)..end.
+	for j := range p.Aggregates {
+		if !aggArgBudgetSafe(&p.Aggregates[j]) {
+			return nil, false, nil
+		}
+		fillers[len(p.GroupBy)+j] = evalPutColumnFiller(items[len(p.GroupBy)+j].Eval)
+	}
+
+	cp, err := exec.NewColumnarProject(child, items, fillers)
+	if err != nil {
+		return nil, false, err
+	}
+	return cp, true, nil
+}
+
+// aggKeyPropertyItem reports whether a grouping-key expression is a scalar-property
+// access `var.key` on a bound NODE variable present in schemaSnap, returning the
+// receiver's column and the property key. It mirrors [columnarPropertyItem]'s node
+// guard so the property filler only fires for a genuine node whose property can be
+// read directly by NodeID.
+func aggKeyPropertyItem(keyExpr ast.Expression, schemaSnap map[string]int, bopts *buildOpts) (nodeCol int, propName string, ok bool) {
+	prop, isProp := keyExpr.(*ast.Property)
+	if !isProp || prop.Key == "" {
+		return 0, "", false
+	}
+	recv, isVar := prop.Receiver.(*ast.Variable)
+	if !isVar {
+		return 0, "", false
+	}
+	col, inSchema := schemaSnap[recv.Name]
+	if !inSchema || isNonNodeVar(recv.Name, bopts) {
+		return 0, "", false
+	}
+	return col, prop.Key, true
+}
+
+// aggKeyBareVar reports whether a grouping-key expression is a bare variable naming a
+// column present in schemaSnap. Its filler reuses the item's row eval (byte-identical);
+// [exec.EagerAggregation] reads the resulting column unboxed when it is a scalar
+// backing and via box-at-sink otherwise.
+func aggKeyBareVar(keyExpr ast.Expression, schemaSnap map[string]int) bool {
+	v, isVar := keyExpr.(*ast.Variable)
+	if !isVar {
+		return false
+	}
+	_, inSchema := schemaSnap[v.Name]
+	return inSchema
+}
+
+// aggArgBudgetSafe reports whether an aggregate's argument cannot construct a large
+// value in the pre-projection — count(*) (no argument), a bare variable, or a
+// property access. This is the gate that lets the columnar aggregation pre-projection
+// skip the row-at-a-time per-row byte guard, exactly as the property-access-only
+// columnar RETURN projection does (#1852 guards range()/comprehension blow-up, which
+// none of these shapes take). A more complex argument keeps the row pre-projection.
+func aggArgBudgetSafe(aggExpr *ir.AggregateExpr) bool {
+	if aggExpr.Argument == "" { // count(*)
+		return true
+	}
+	switch arg := aggExpr.ArgumentExpr.(type) {
+	case *ast.Variable:
+		return true
+	case *ast.Property:
+		_, recvIsVar := arg.Receiver.(*ast.Variable)
+		return recvIsVar && arg.Key != ""
+	default:
+		return false
+	}
 }
 
 // scalarPassthroughItem reports whether item is a bare variable naming a scalar

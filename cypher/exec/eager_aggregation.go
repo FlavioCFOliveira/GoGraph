@@ -73,12 +73,22 @@ type EagerAggregation struct {
 	maxGroups    int                       // memory cap on distinct group count
 	budget       byteBudget                // estimated-byte cap on retained group keys (#1841)
 
+	// chunkChild, when non-nil (set by WithChunkInput), makes the blocking consume
+	// phase pull the child column-major via [ChunkProducer.FillChunk] and hash the
+	// scalar grouping keys UNBOXED, boxing a key only when it opens a new group
+	// (#2049). It is the columnar-input counterpart of the row-at-a-time consume;
+	// the two are equivalent by construction because the unboxed key hash and
+	// equivalence both delegate to the SAME [expr.EquivalentHash]/[expr.Equivalent]
+	// the boxed path uses. nil keeps the row-input path, byte-identical.
+	chunkChild ChunkProducer
+
 	// Runtime state — valid between Init and Close.
 	ctx     context.Context          //nolint:containedctx // stored for per-Next ctx check
 	built   bool                     // true after the blocking consume phase
 	groups  map[uint64][]*groupEntry // hash → bucket (collision chain)
 	order   []*groupEntry            // insertion-order for deterministic output
 	emitIdx int                      // cursor into order during emit phase
+	scratch *Chunk                   // reused source-batch buffer for the chunk-input path
 }
 
 // NewEagerAggregation creates an EagerAggregation operator.
@@ -119,6 +129,27 @@ func (op *EagerAggregation) WithByteBudget(maxBytes int64, estimateRow func(Row)
 	return op
 }
 
+// WithChunkInput switches the consume phase to pull the child column-major so the
+// scalar grouping keys are hashed and compared UNBOXED, boxing a key only on
+// new-group creation (#2049). The child must be a [ChunkProducer]; the grouping
+// keys must occupy chunk columns 0..len(keyCols)-1 and the aggregate arguments the
+// columns after them (the layout the aggregation pre-projection installs), which is
+// the same layout the row-input consume assumes. It returns an error otherwise,
+// leaving the operator on the byte-identical row-input path. Call before Init.
+//
+// The path is reversible and self-checking per batch: a grouping-key column that is
+// not an unboxed scalar backing (a promoted/boxed or non-scalar column) is read via
+// [Chunk.BoxCell] and hashed/compared through the same boxed equivalence as the
+// row path, so a heterogeneous or non-scalar key stays byte-identical.
+func (op *EagerAggregation) WithChunkInput() error {
+	cp, ok := op.child.(ChunkProducer)
+	if !ok {
+		return fmt.Errorf("exec: EagerAggregation.WithChunkInput: child %T is not a ChunkProducer", op.child)
+	}
+	op.chunkChild = cp
+	return nil
+}
+
 // Init initialises the operator. The blocking consume phase is deferred to the
 // first Next call.
 func (op *EagerAggregation) Init(ctx context.Context) error {
@@ -127,6 +158,7 @@ func (op *EagerAggregation) Init(ctx context.Context) error {
 	op.groups = nil
 	op.order = nil
 	op.emitIdx = 0
+	op.scratch = nil
 	op.budget.reset()
 	return op.child.Init(ctx)
 }
@@ -168,6 +200,7 @@ func (op *EagerAggregation) Next(out *Row) (bool, error) {
 func (op *EagerAggregation) Close() error {
 	op.groups = nil
 	op.order = nil
+	op.scratch = nil
 	return op.child.Close()
 }
 
@@ -177,6 +210,9 @@ func (op *EagerAggregation) Close() error {
 
 // consume pulls every row from the child and populates the group table.
 func (op *EagerAggregation) consume() error {
+	if op.chunkChild != nil {
+		return op.consumeChunk()
+	}
 	op.groups = make(map[uint64][]*groupEntry)
 	op.order = make([]*groupEntry, 0, 64)
 
@@ -279,6 +315,248 @@ func (op *EagerAggregation) getOrCreate(row Row) (*groupEntry, error) {
 	op.groups[h] = append(bucket, entry)
 	op.order = append(op.order, entry)
 	return entry, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// consumeChunk — columnar-input blocking phase (#2049)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// nullEquivHash is the equivalence-consistent hash of a NULL key cell, computed
+// once. The unboxed key hash uses it for a NULL cell so it matches exactly what
+// [expr.HashRowEquivalent] over a boxed keyVals slice (in which a NULL cell is
+// [expr.Null]) would fold in, keeping the columnar and boxed group hashes equal.
+var nullEquivHash = expr.EquivalentHash(expr.Null)
+
+// consumeChunk is the columnar-input counterpart of [EagerAggregation.consume]: it
+// pulls the child column-major in batches via [ChunkProducer.FillChunk] and hashes
+// the scalar grouping keys UNBOXED, boxing a key only when it opens a new group
+// (#2049). It is equivalent to the row-input path by construction — the unboxed key
+// hash and equivalence both delegate to the same [expr.EquivalentHash]/
+// [expr.Equivalent] the boxed path uses (see [hashCellEquivalent]/[cellEqualToStored]),
+// so two rows land in the same group iff [rowsEqual] over their boxed keys would say
+// so, and the group hash equals [expr.HashRowEquivalent] over those boxed keys.
+//
+// Aggregate arguments are read via [Chunk.BoxCell] (they must be boxed for
+// [funcs.Aggregator.Step] regardless), so aggregate semantics are unchanged.
+func (op *EagerAggregation) consumeChunk() error {
+	op.groups = make(map[uint64][]*groupEntry)
+	op.order = make([]*groupEntry, 0, 64)
+	if op.scratch == nil {
+		op.scratch = op.chunkChild.NewOutputChunk(DefaultChunkCapacity)
+	}
+
+	iter := 0
+	for {
+		if err := op.ctx.Err(); err != nil {
+			return err
+		}
+		op.scratch.Reset()
+		n, ferr := op.chunkChild.FillChunk(op.scratch, DefaultChunkCapacity)
+		for row := 0; row < n; row++ {
+			if iter%4096 == 0 {
+				if err := op.ctx.Err(); err != nil {
+					return err
+				}
+			}
+			iter++
+
+			entry, err := op.getOrCreateChunk(op.scratch, row)
+			if err != nil {
+				return err
+			}
+
+			// Feed each aggregate from the columns after the grouping keys (the
+			// layout the aggregation pre-projection installs), boxing the cell — the
+			// value must be boxed for Step regardless of the key path.
+			for i, agg := range entry.aggs {
+				col := len(op.keyCols) + i
+				v := expr.Value(expr.Null)
+				if col < op.scratch.NumCols() {
+					v = op.scratch.BoxCell(col, row)
+				}
+				if err := agg.Step(v); err != nil {
+					return err
+				}
+			}
+		}
+		if ferr != nil {
+			return ferr
+		}
+		if n < DefaultChunkCapacity {
+			break // child exhausted (short fill), mirroring materializeColumnar
+		}
+	}
+
+	// Mirror the row path: a pure aggregation (no grouping keys) over an empty
+	// input still emits one row of neutral aggregator states. The chunk path is
+	// wired only for grouped aggregation (len(keyCols) > 0), so this is normally a
+	// no-op; it is kept for parity should the path ever be enabled group-key-free.
+	if len(op.order) == 0 && len(op.keyCols) == 0 {
+		aggs := make([]funcs.Aggregator, len(op.aggFactories))
+		for i, factory := range op.aggFactories {
+			aggs[i] = factory()
+		}
+		op.order = append(op.order, &groupEntry{keyVals: nil, aggs: aggs})
+	}
+	return nil
+}
+
+// getOrCreateChunk is the columnar-input counterpart of [EagerAggregation.getOrCreate]:
+// it hashes and compares the grouping key of source row row UNBOXED, and boxes the
+// key (via [Chunk.BoxCell]) only when opening a new group. The maxGroups and
+// group-key byte-budget checks fire in the same order as the row path.
+func (op *EagerAggregation) getOrCreateChunk(src *Chunk, row int) (*groupEntry, error) {
+	h := op.hashKeyColsChunk(src, row)
+	bucket := op.groups[h]
+	for _, e := range bucket {
+		if op.keyColsEqualChunk(src, row, e.keyVals) {
+			return e, nil
+		}
+	}
+
+	// New group: now — and only now — box the key values for retention and output.
+	if len(op.order) >= op.maxGroups {
+		return nil, ErrAggMemoryExceeded
+	}
+	keyVals := make([]expr.Value, len(op.keyCols))
+	for i, col := range op.keyCols {
+		if col < src.NumCols() {
+			keyVals[i] = src.BoxCell(col, row)
+		} else {
+			keyVals[i] = expr.Null
+		}
+	}
+	if op.budget.charge(keyVals) {
+		return nil, ErrAggMemoryExceeded
+	}
+
+	aggs := make([]funcs.Aggregator, len(op.aggFactories))
+	for i, factory := range op.aggFactories {
+		aggs[i] = factory()
+	}
+	entry := &groupEntry{keyVals: keyVals, aggs: aggs}
+	op.groups[h] = append(bucket, entry)
+	op.order = append(op.order, entry)
+	return entry, nil
+}
+
+// hashKeyColsChunk computes the equivalence-consistent group hash of source row row
+// from the grouping-key columns read UNBOXED. It folds each cell's
+// [hashCellEquivalent] with the exact FNV constants and step [expr.HashRowEquivalent]
+// uses, so it equals HashRowEquivalent over the boxed key row (a key column out of
+// range folds the NULL hash, matching the row path's keyVals[i] == expr.Null).
+func (op *EagerAggregation) hashKeyColsChunk(src *Chunk, row int) uint64 {
+	const (
+		offset uint64 = 14695981039346656037
+		prime  uint64 = 1099511628211
+	)
+	h := offset
+	ncols := src.NumCols()
+	for _, col := range op.keyCols {
+		var ch uint64
+		if col < ncols {
+			ch = hashCellEquivalent(src, col, row)
+		} else {
+			ch = nullEquivHash
+		}
+		h = h*prime ^ ch
+	}
+	return h
+}
+
+// keyColsEqualChunk reports whether the grouping key of source row row is equivalent
+// (openCypher grouping/DISTINCT, CIP2016-06-14) to the boxed key stored in a candidate
+// group, reading the source cells UNBOXED. It is the columnar counterpart of
+// [rowsEqual]: each column is compared through [cellEqualToStored], which delegates to
+// [expr.Equivalent], so the result matches the boxed comparison byte-for-byte.
+func (op *EagerAggregation) keyColsEqualChunk(src *Chunk, row int, stored []expr.Value) bool {
+	ncols := src.NumCols()
+	for i, col := range op.keyCols {
+		s := expr.Null
+		if i < len(stored) {
+			s = stored[i]
+		}
+		if col < ncols {
+			if !cellEqualToStored(src, col, row, s) {
+				return false
+			}
+		} else if !expr.IsNull(s) { // out-of-range key column reads as NULL
+			return false
+		}
+	}
+	return true
+}
+
+// hashCellEquivalent returns [expr.EquivalentHash] of cell (col, row) of src,
+// reading a scalar backing UNBOXED and boxing only for a promoted/boxed column. The
+// inline scalar box (e.g. expr.IntegerValue(v)) does not escape [expr.EquivalentHash]
+// (which only reads it), so no heap allocation occurs on the scalar fast paths; the
+// boxed-column fallback uses [Chunk.BoxCell] and is byte-identical to the row path.
+// Routing through expr.EquivalentHash — rather than reimplementing the float64-domain
+// fold — is deliberate: it is the single source of truth the boxed path also uses, so
+// the two cannot drift (the hazard recorded in cypher/expr/equiv.go for #1865).
+func hashCellEquivalent(src *Chunk, col, row int) uint64 {
+	switch {
+	case src.IsInt64Column(col):
+		if v, ok := src.Int64(col, row); ok {
+			return expr.EquivalentHash(expr.IntegerValue(v))
+		}
+		return nullEquivHash
+	case src.IsFloat64Column(col):
+		if v, ok := src.Float64(col, row); ok {
+			return expr.EquivalentHash(expr.FloatValue(v))
+		}
+		return nullEquivHash
+	case src.IsStringColumn(col):
+		if v, ok := src.String(col, row); ok {
+			return expr.EquivalentHash(expr.StringValue(v))
+		}
+		return nullEquivHash
+	case src.IsBoolColumn(col):
+		if v, ok := src.Bool(col, row); ok {
+			return expr.EquivalentHash(expr.BoolValue(v))
+		}
+		return nullEquivHash
+	default: // boxed or dynamic column, or a non-scalar kind
+		return expr.EquivalentHash(src.BoxCell(col, row))
+	}
+}
+
+// cellEqualToStored reports whether cell (col, row) of src is equivalent to the
+// boxed value stored (openCypher grouping equivalence), reading a scalar backing
+// UNBOXED. It delegates to [expr.Equivalent] with the current cell as the first
+// operand and the stored group key as the second, exactly as the row path's
+// [rowsEqual] compares expr.Equivalent(current, stored) — so an integer/float
+// cross-type key (1 ≡ 1.0), a NaN ≡ NaN key, a -0.0 ≡ +0.0 key, and two distinct
+// integers ≥ 2^53 that share a float64 bit-pattern (equivalent-FALSE: separate
+// groups, same hash bucket) all resolve identically to the boxed path. The inline
+// scalar box does not escape expr.Equivalent, so the scalar fast paths do not
+// allocate; the boxed-column fallback uses [Chunk.BoxCell].
+func cellEqualToStored(src *Chunk, col, row int, stored expr.Value) bool {
+	switch {
+	case src.IsInt64Column(col):
+		if v, ok := src.Int64(col, row); ok {
+			return expr.Equivalent(expr.IntegerValue(v), stored)
+		}
+		return expr.IsNull(stored)
+	case src.IsFloat64Column(col):
+		if v, ok := src.Float64(col, row); ok {
+			return expr.Equivalent(expr.FloatValue(v), stored)
+		}
+		return expr.IsNull(stored)
+	case src.IsStringColumn(col):
+		if v, ok := src.String(col, row); ok {
+			return expr.Equivalent(expr.StringValue(v), stored)
+		}
+		return expr.IsNull(stored)
+	case src.IsBoolColumn(col):
+		if v, ok := src.Bool(col, row); ok {
+			return expr.Equivalent(expr.BoolValue(v), stored)
+		}
+		return expr.IsNull(stored)
+	default: // boxed or dynamic column, or a non-scalar kind
+		return expr.Equivalent(src.BoxCell(col, row), stored)
+	}
 }
 
 // rowsEqual returns true iff a and b have the same length and each element pair
