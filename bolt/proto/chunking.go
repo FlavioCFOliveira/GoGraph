@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
 )
 
 // maxChunkSize is the maximum number of payload bytes per Bolt chunk.
@@ -46,10 +48,28 @@ var ErrMessageTooLarge = errors.New("bolt chunk: cumulative message size exceeds
 // vector where a single client streams non-zero chunks until the
 // server OOMs.
 //
-// ChunkedReader is NOT safe for concurrent use.
+// Aggregate bound: maxMessageBytes caps ONE connection's reassembly
+// buffer, but the sum across all connections is only implicitly bounded
+// by MaxConnections × maxMessageBytes. A ChunkedReader with an
+// [packstream.InboundBudget] attached via [ChunkedReader.SetInboundBudget]
+// charges the transient reassembly buffer's bytes against that shared,
+// engine-wide ceiling as the buffer grows and releases them symmetrically
+// once the message is assembled — so the total reassembly memory in flight
+// across every connection is centrally bounded, sharing one pool with the
+// decoder's inbound-decode accounting. A nil/disabled budget leaves the
+// reader bounded only by maxMessageBytes.
+//
+// ChunkedReader is NOT safe for concurrent use. The attached
+// [packstream.InboundBudget], however, IS safe for concurrent use: one
+// budget is shared by every connection's reader (and decoder) at once.
 type ChunkedReader struct {
 	r               *bufio.Reader
 	maxMessageBytes int
+	// budget is the engine-wide inbound-memory ceiling the reassembly buffer
+	// is charged against, or nil when no (enabled) budget is attached, in
+	// which case reassembly is bounded only by maxMessageBytes. Set via
+	// SetInboundBudget. See ChunkedReader's type doc.
+	budget *packstream.InboundBudget
 }
 
 // NewChunkedReader returns a ChunkedReader that reads from r with the
@@ -72,6 +92,28 @@ func NewChunkedReaderWithLimit(r io.Reader, maxMessageBytes int) *ChunkedReader 
 		maxMessageBytes = DefaultMaxMessageBytes
 	}
 	return &ChunkedReader{r: bufio.NewReader(r), maxMessageBytes: maxMessageBytes}
+}
+
+// SetInboundBudget attaches the engine-wide inbound-memory ceiling that this
+// reader charges its transient message-reassembly buffer against, so aggregate
+// reassembly memory across all connections shares one pool with the decoder's
+// inbound-decode accounting (a per-Server DoS bound, CWE-770). Pass the Server's
+// shared [packstream.InboundBudget]; a nil or disabled budget detaches the
+// accounting, leaving the reader bounded only by its maxMessageBytes cap.
+//
+// It is the reassembly-side counterpart of
+// [github.com/FlavioCFOliveira/GoGraph/bolt/packstream.Decoder.SetInboundBudget].
+// Call it once, immediately after construction and before the first
+// [ChunkedReader.ReadMessage]; the reader draws on the budget for the lifetime
+// of every subsequent reassembly and releases symmetrically. A disabled budget
+// is stored as nil so ReadMessage pays no per-chunk accounting cost when the
+// operator has not opted into an inbound-memory ceiling.
+func (cr *ChunkedReader) SetInboundBudget(b *packstream.InboundBudget) {
+	if b.Enabled() {
+		cr.budget = b
+	} else {
+		cr.budget = nil
+	}
 }
 
 // ReadMessage reads and reassembles one complete Bolt message.
@@ -107,6 +149,20 @@ func NewChunkedReaderWithLimit(r io.Reader, maxMessageBytes int) *ChunkedReader 
 func (cr *ChunkedReader) ReadMessage() ([]byte, error) {
 	var header [2]byte
 	var msg []byte
+
+	// charged tracks the bytes this call has reserved from the shared inbound
+	// budget for the growing reassembly buffer. The buffer is transient — it
+	// belongs to the reassembly phase — so the reservation is released
+	// symmetrically once the message is assembled (or the read aborts), on every
+	// return path, via this deferred release. cr.budget is nil unless an enabled
+	// budget was attached (SetInboundBudget), so an unbudgeted reader charges,
+	// releases, and pays nothing.
+	var charged int64
+	defer func() {
+		if charged > 0 {
+			cr.budget.Release(charged)
+		}
+	}()
 
 	for {
 		// Read the 2-byte chunk length.
@@ -150,6 +206,27 @@ func (cr *ChunkedReader) ReadMessage() ([]byte, error) {
 				return nil, fmt.Errorf("%w: drain offending chunk: %w", ErrMessageTooLarge, derr)
 			}
 			return nil, fmt.Errorf("%w: cap=%d, attempted=%d", ErrMessageTooLarge, cr.maxMessageBytes, len(msg)+chunkLen)
+		}
+
+		// Charge the incoming chunk's bytes against the engine-wide inbound
+		// budget BEFORE growing the buffer, so aggregate reassembly memory in
+		// flight across every connection is centrally bounded rather than merely
+		// capped at MaxConnections × maxMessageBytes. A nil (absent/disabled)
+		// budget makes this a no-op. When the shared pool cannot satisfy the
+		// charge the server is under aggregate inbound-memory pressure: drain the
+		// offending chunk (best effort, mirroring the too-large path so the
+		// caller can close the connection without a half-consumed chunk lingering
+		// in the kernel buffer) and reject with [packstream.ErrInboundBudgetExceeded]
+		// BEFORE the would-be allocation. The partial charge already taken for
+		// this message is returned by the deferred release above.
+		if cr.budget != nil {
+			if !cr.budget.TryReserve(int64(chunkLen)) {
+				if _, derr := io.CopyN(io.Discard, cr.r, int64(chunkLen)); derr != nil {
+					return nil, fmt.Errorf("%w: drain offending chunk: %w", packstream.ErrInboundBudgetExceeded, derr)
+				}
+				return nil, fmt.Errorf("%w: reassembly buffer (cap=%d, in-flight=%d, chunk=%d)", packstream.ErrInboundBudgetExceeded, cr.maxMessageBytes, len(msg), chunkLen)
+			}
+			charged += int64(chunkLen)
 		}
 
 		// Grow the message buffer and read exactly chunkLen bytes.

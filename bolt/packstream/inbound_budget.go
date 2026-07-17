@@ -80,3 +80,37 @@ func (b *InboundBudget) release(n int64) {
 	}
 	b.remaining.Add(n)
 }
+
+// Enabled reports whether the budget imposes a ceiling. A nil *InboundBudget, or
+// one constructed with limit <= 0, is disabled and reports false.
+//
+// It is the exported form of the internal enabled check, so a framing-layer
+// charger outside this package (the Bolt message-reassembly reader,
+// [github.com/FlavioCFOliveira/GoGraph/bolt/proto.ChunkedReader]) can skip all
+// accounting — and its per-charge atomic — when the operator has not opted into
+// an inbound-memory ceiling. The default configuration therefore pays nothing.
+//
+// Safe for concurrent use.
+func (b *InboundBudget) Enabled() bool { return b.enabled() }
+
+// TryReserve atomically removes n bytes from the shared pool, returning true on
+// success and false when the pool cannot satisfy the charge (fail-fast
+// backpressure, no side effect on failure). It never blocks.
+//
+// It is the exported entry point through which the Bolt message-reassembly
+// buffer charges its transient bytes against the SAME engine-wide ceiling as the
+// decoder, so aggregate inbound memory (reassembly + decode) is bounded
+// centrally rather than only implicitly by MaxConnections × MaxMessageBytes.
+// Pair every successful reservation with a matching [InboundBudget.Release]. A
+// disabled budget always succeeds without touching state.
+//
+// Safe for concurrent use.
+func (b *InboundBudget) TryReserve(n int64) bool { return b.tryReserve(n) }
+
+// Release returns n bytes previously taken with [InboundBudget.TryReserve] to
+// the shared pool. It is the symmetric counterpart of TryReserve: a
+// reassembly-buffer charger releases exactly what it reserved once the message
+// is assembled (or its read aborts). A disabled budget is a no-op.
+//
+// Safe for concurrent use.
+func (b *InboundBudget) Release(n int64) { b.release(n) }

@@ -155,3 +155,41 @@ func TestInboundBudget_tryReserveRelease(t *testing.T) {
 		t.Fatal("disabled budget tryReserve = false, want true (no-op)")
 	}
 }
+
+// TestInboundBudget_ExportedReserveRelease confirms the exported TryReserve /
+// Release / Enabled surface (used by the Bolt message-reassembly reader in the
+// proto package to charge the SAME shared pool) mirrors the internal primitives
+// exactly and is nil-safe: a nil *InboundBudget must be a safe no-op so an
+// unbudgeted reader never panics.
+func TestInboundBudget_ExportedReserveRelease(t *testing.T) {
+	t.Parallel()
+
+	b := NewInboundBudget(1000)
+	if !b.Enabled() {
+		t.Fatal("Enabled() = false for a positive-limit budget, want true")
+	}
+	if !b.TryReserve(700) {
+		t.Fatal("TryReserve(700) of 1000 = false, want true")
+	}
+	if b.TryReserve(400) {
+		t.Fatal("TryReserve(400) with 300 left = true, want false (fail-fast)")
+	}
+	if got := b.remaining.Load(); got != 300 {
+		t.Fatalf("failed TryReserve consumed budget: remaining = %d, want 300", got)
+	}
+	b.Release(700)
+	if got := b.remaining.Load(); got != 1000 {
+		t.Fatalf("Release did not restore: remaining = %d, want 1000", got)
+	}
+
+	// Disabled and nil budgets: every exported method is an inert no-op.
+	for _, d := range []*InboundBudget{nil, NewInboundBudget(0), NewInboundBudget(-1)} {
+		if d.Enabled() {
+			t.Fatalf("Enabled() = true for disabled/nil budget %v, want false", d)
+		}
+		if !d.TryReserve(1 << 40) {
+			t.Fatalf("disabled/nil budget TryReserve = false, want true (no-op) for %v", d)
+		}
+		d.Release(1 << 40) // must not panic
+	}
+}

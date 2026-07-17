@@ -723,6 +723,12 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 
 	// ── 2. Set up framing and session ────────────────────────────────────
 	cr := proto.NewChunkedReaderWithLimit(conn, s.opts.MaxMessageBytes)
+	// Charge the per-connection message-reassembly buffer against the same
+	// engine-wide inbound-memory budget the decoder draws on, so aggregate
+	// pre-auth reassembly memory across ALL connections is centrally bounded
+	// (not only implicitly by MaxConnections × MaxMessageBytes). A nil/disabled
+	// budget (the default when no GOMEMLIMIT is set) detaches the accounting.
+	cr.SetInboundBudget(s.inbound)
 	cw := proto.NewChunkedWriter(conn)
 	// Pass the listener address so ROUTE responses can populate the routing table.
 	localAddr := ""
