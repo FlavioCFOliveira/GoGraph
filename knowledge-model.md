@@ -1250,6 +1250,52 @@ exactly in sync after broad changes.
 
 ---
 
+Incrementally synced at commit `baf4444` (2026-07-16, sprints 284/285/286 —
+CREATE/MERGE+SET non-literal gaps + FOREACH): +23 nodes — 9 `Commit`
+(`cb6cfbd`,`a0cd733`,`c6c0867`,`86d8ea2`,`c8ea848`,`75e70a3`,`81a929d`,`ba14888`,
+`baf4444`); 1 `Feature` `FOREACH clause`; 5 `Type` (`Foreach` in
+`cypher/exec`|`cypher/ast`|`cypher/ir`, `MergeSetAllAction` in `cypher/exec`,
+`MergeSetAll` in `cypher/ir`); 8 `Test` (one per new regression file under
+`cypher/`). +edges: 5 `CONTAINS` (package→new Type), 8 `CONTAINS` (`cypher`
+package→new Test), 4 `IMPLEMENTS` (`parser`/`ast`/`ir`/`exec` → `FOREACH clause`),
+6 `FIXES` + 3 `IMPROVES` (session commits → `Cypher Engine`). `Package`
+provenance bumped on `cypher`/`exec`/`ir`/`ast`/`parser`/`parser/gen`. All work
+preserves openCypher TCK 100% (3897) and `go test -race`. Per the "No `TESTS`
+edges" rule below, the new tests link via `CONTAINS` only (no Test→Feature edge).
+The rmp Task/Sprint layer for these (tasks #2023–#2031, sprints 284–286) was
+NOT back-filled — that layer trails the code layer (last full task sync
+2026-06-11).
+
+Incrementally synced at commits `c3b4617`..`HEAD` (2026-07-16/17,
+production-readiness cycle, sprints 287–291): a 7-specialist audit (security,
+ACID/storage, openCypher/TCK, graph algorithms, performance, concurrency,
+Go-idiom) drove 20 fixes across four axes. `Commit` nodes for each; provenance
+bumped on the affected `Package`s (`cypher`, `cypher/exec`, `cypher/ir`,
+`cypher/ast`, `cypher/parser`, `cypher/parser/gen`, `search`, `graph/lpg`,
+`graph/adjlist`, `graph/index/btree`, `graph/io/csv`, `graph/io/jsonl`,
+`store/txn`, `store/recovery`). Correctness/ACID fixes: whole-entity `SET`
+UNIQUE-skip rollback (`set_all.go`, task #2032/A1), string-literal backslash
+round-trip (`ast/literals.go`+`create_node.go`, #2033/S1), leading-`FOREACH`
+nil-guard (`ir/plan.go`, #2034/CY1), MERGE `$param`-null MergeReadOwnWrites
+(#2035/CY2), B+tree height≥4 `contains` recursion + `removeChild` re-root
+(`btree/bplus.go`, #2037/D1), NaN/Inf validation for defined float weight types
+(`search/weight_validation.go`, #2038/D2), instance-precise multigraph `DELETE r`
+by handle with a NEW WAL op `Type` `OpRemoveEdgeByHandle`=23 + `adjlist`/`lpg`
+`RemoveEdgeByHandle` + recovery replay + undo `captureRemovedEdgeByHandle`
+(#2018, storage-engine-auditor CERTIFIED all ACID pillars), CALL…YIELD…WHERE
+filter (#1966), NewEngine undirected-backend warning (#1892), empty-graph index
+key-type (#1983), MergePattern parallel-edge multiplicity (#1875),
+EvalPatternComp untyped `[r]` per-instance (#2017), `WITH…SET var={…}` ANTLR
+disambiguation via grammar regen (#2010), TransitiveClosure reflexive-self
+(#2040/G1), CSV comment-prefix + JSONL empty-identifier round-trip (#2042/#2043).
+Perf: `IsTombstoned` lock-free via `atomic.Pointer[roaring64.Bitmap]` COW
+(`lpg.go`, #2039/C1 — read scaling negative→positive). Cleanup: removed the dead
+`ParallelScan` `Type` (#2019); doc reconciliations (#1967, #2041 `store.DB`).
+All preserve openCypher TCK 100% (3897/3897) and `go test -race`; every fix
+gated through `make ci`. #1827 DEFERRED (depends-on #1712, async checkpoint;
+current synchronous publish is crash-atomic). Full graph-store re-sync and the
+rmp Task/Sprint layer back-fill still trail the code layer.
+
 ## Known limitations (faithful, by design)
 
 - **Build-tag duplicates.** The extractor parses every `.go` file regardless of build
