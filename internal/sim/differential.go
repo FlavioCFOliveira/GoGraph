@@ -75,12 +75,6 @@ func ParallelScanVariantPair() (EngineVariant, EngineVariant) {
 // agreed, and on a divergence the first op index, the op, and the two
 // (canonicalised) observable signatures that differed.
 type DiffResult struct {
-	// Agreed reports whether the two variants produced identical observable
-	// output for every op and an identical end-state.
-	Agreed bool
-	// DivergedAt is the 0-based op index of the first divergence (-1 when the
-	// variants agreed).
-	DivergedAt int
 	// DivergedOp is the op at the first divergence (zero value when agreed).
 	DivergedOp Op
 	// SignatureA / SignatureB are the diverging observable signatures of variant
@@ -93,6 +87,12 @@ type DiffResult struct {
 	// Reason is a human-readable description of the divergence (empty when
 	// agreed): an end-state mismatch or a per-op result mismatch.
 	Reason string
+	// DivergedAt is the 0-based op index of the first divergence (-1 when the
+	// variants agreed).
+	DivergedAt int
+	// Agreed reports whether the two variants produced identical observable
+	// output for every op and an identical end-state.
+	Agreed bool
 }
 
 // String renders a differential result. On a divergence it names the variants,
@@ -116,8 +116,8 @@ func (r DiffResult) String() string {
 // signature. It mirrors the scripted executor but exposes a per-op result
 // signature for comparison.
 type diffEngine struct {
-	name   string
 	engine *EngineAdapter
+	name   string
 }
 
 // DifferentialTrace replays the SAME recorded [Trace] against two engine

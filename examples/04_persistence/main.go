@@ -250,6 +250,8 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 // the wall-clock cost, the on-disk footprint, and a sample package coord
 // used to anchor the recovered-property assertions.
 type commitStats struct {
+	samplePub   time.Time
+	sampleCoord string // coord of release[0], anchors the recovered-value facts
 	packages    int
 	releases    int
 	publishedE  int
@@ -258,9 +260,7 @@ type commitStats struct {
 	elapsed     time.Duration
 	walBytes    uint64
 	snapBytes   uint64
-	sampleCoord string // coord of release[0], anchors the recovered-value facts
-	sampleDls   int64  // package[0].downloads, asserted after recovery
-	samplePub   time.Time
+	sampleDls   int64 // package[0].downloads, asserted after recovery
 }
 
 // rollbackStats captures the atomicity demonstration: the committed survivor,
@@ -270,6 +270,9 @@ type commitStats struct {
 // the survivor commit and before the phantom transaction, so it is the durable
 // state as of the last commit — exactly what the recovered graph must equal.
 type rollbackStats struct {
+	survivorDep string // the DEPENDS_ON target of the committed survivor
+	phantomDep  string // the (self-referential) DEPENDS_ON target of the phantom
+
 	opsAttempted  int // mutations buffered by the aborted phantom transaction (K)
 	walMarkers    int // OpCommit markers in the WAL (genesis commits + survivor)
 	phantomFrames int // WAL frames whose payload contains the phantom name (must be 0)
@@ -278,9 +281,6 @@ type rollbackStats struct {
 	preEdges     uint64 // in-memory edge count at the pre-tx baseline
 	preLabels    int    // distinct node labels in use at the pre-tx baseline
 	preNodeProps int    // total node properties at the pre-tx baseline
-
-	survivorDep string // the DEPENDS_ON target of the committed survivor
-	phantomDep  string // the (self-referential) DEPENDS_ON target of the phantom
 }
 
 // commit builds the seeded supply-chain graph entirely through WAL

@@ -26,9 +26,9 @@ import (
 // [time.Ticker]'s drop-on-backlog behaviour), so Advance never blocks on a
 // slow consumer.
 type Fake struct {
-	mu      sync.Mutex
 	now     time.Time
 	waiters []*fakeWaiter
+	mu      sync.Mutex
 }
 
 // fakeWaiter is a pending timer or ticker registered against a [Fake].

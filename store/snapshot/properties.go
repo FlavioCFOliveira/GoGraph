@@ -91,10 +91,10 @@ var ErrPropertiesCorrupted = errors.New("snapshot: properties.bin corrupted")
 // the kind tag, and the encoded value bytes for one property attached
 // to that node. A node carrying P properties yields P entries.
 type NodePropertyEntry struct {
+	ValueBytes []byte
 	NodeID     uint64
 	KeyIdx     uint32
 	Kind       lpg.PropertyKind
-	ValueBytes []byte
 }
 
 // EdgePropertyEntry pairs an (src, dst) NodeID couple with the key
@@ -104,11 +104,11 @@ type NodePropertyEntry struct {
 // endpoints fold into the same edgeKey on disk just as they do in
 // [lpg.Graph]'s in-memory shards.
 type EdgePropertyEntry struct {
+	ValueBytes []byte
 	Src        uint64
 	Dst        uint64
 	KeyIdx     uint32
 	Kind       lpg.PropertyKind
-	ValueBytes []byte
 }
 
 // PropertiesReadback is the structural parse of a properties.bin

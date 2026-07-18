@@ -22,6 +22,9 @@ type ShrinkConfig struct {
 // ShrinkResult is the outcome of shrinking: the minimal trace found, the
 // violation it still reproduces, and the work the shrinker did.
 type ShrinkResult struct {
+	// Violation is a representative violation the minimal trace reproduces (the
+	// first one found on the final replay), for the report.
+	Violation Violation
 	// Minimal is the reduced trace that still reproduces the target violation.
 	Minimal Trace
 	// OriginalLen / MinimalLen are the op counts before and after shrinking.
@@ -29,9 +32,6 @@ type ShrinkResult struct {
 	MinimalLen  int
 	// Iterations is the number of scripted-replay attempts performed.
 	Iterations int
-	// Violation is a representative violation the minimal trace reproduces (the
-	// first one found on the final replay), for the report.
-	Violation Violation
 }
 
 // Ratio returns the reduction factor (original / minimal); 1 means no reduction.
@@ -119,9 +119,9 @@ func ShrinkTrace(ctx context.Context, trace Trace, cfg ShrinkConfig) (ShrinkResu
 type shrinker struct {
 	ctx        context.Context
 	target     violationSignature
+	lastViol   Violation
 	maxIter    int
 	iterations int
-	lastViol   Violation
 }
 
 // reproduces reports whether the candidate op slice still reproduces the target

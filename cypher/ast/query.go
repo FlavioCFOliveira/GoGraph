@@ -16,11 +16,9 @@ type Query interface {
 // SingleQuery is a sequence of reading and updating clauses, terminated by an
 // optional RETURN.
 type SingleQuery struct {
-	Pos             Position
-	EndPos          Position
+	Return          *Return // nil when the query has no RETURN
 	ReadingClauses  []ReadingClause
 	UpdatingClauses []UpdatingClause
-	Return          *Return // nil when the query has no RETURN
 	With            []*With // WITH clauses that appear before RETURN
 	// LeadingClauseCount records how many ReadingClauses precede the first
 	// With clause in the original query text.  Only meaningful when
@@ -33,6 +31,8 @@ type SingleQuery struct {
 	// ASTs), the translator falls back to the legacy order: all ReadingClauses
 	// first, then all With clauses.
 	LeadingClauseCount int
+	Pos                Position
+	EndPos             Position
 	// LeadingCountSet is true when the parser has explicitly populated
 	// LeadingClauseCount.  False for SinglePartQ queries and for AST nodes
 	// constructed directly in tests without going through the parser.
@@ -69,9 +69,9 @@ func (q *SingleQuery) String() string {
 
 // MultiQuery is a UNION of SingleQuery nodes.
 type MultiQuery struct {
+	Parts  []*SingleQuery
 	Pos    Position
 	EndPos Position
-	Parts  []*SingleQuery
 	All    bool // true for UNION ALL; false for UNION (deduplicating)
 }
 
@@ -97,10 +97,10 @@ func (m *MultiQuery) String() string {
 // Union is a standalone UNION clause (used as an intermediate representation
 // for some parsing strategies).  MultiQuery is preferred for the final AST.
 type Union struct {
+	Query  *SingleQuery
 	Pos    Position
 	EndPos Position
 	All    bool
-	Query  *SingleQuery
 }
 
 func (*Union) astNode()       {}
@@ -117,9 +117,9 @@ func (u *Union) String() string {
 
 // Return is a RETURN clause.
 type Return struct {
+	Projection *Projection
 	Pos        Position
 	EndPos     Position
-	Projection *Projection
 }
 
 func (*Return) astNode()       {}
@@ -131,10 +131,10 @@ func (r *Return) String() string { return "RETURN " + r.Projection.String() }
 
 // With is a WITH clause, used for intermediate projections and filtering.
 type With struct {
-	Pos        Position
-	EndPos     Position
 	Projection *Projection
 	Where      *Where // nil when no WHERE predicate
+	Pos        Position
+	EndPos     Position
 }
 
 func (*With) astNode()       {}
@@ -152,10 +152,10 @@ func (w *With) String() string {
 
 // Unwind is an UNWIND clause: UNWIND expr AS variable.
 type Unwind struct {
-	Pos      Position
-	EndPos   Position
 	Expr     Expression
 	Variable string
+	Pos      Position
+	EndPos   Position
 }
 
 func (*Unwind) astNode()       {}

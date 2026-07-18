@@ -105,8 +105,8 @@ type btreeRanger[V comparable] interface {
 // when a covering btree index exists the engine serves it with a single
 // Range seek, otherwise it falls back to the per-node comparison below.
 type withRange[N comparable, W any] struct {
-	key    string
 	lo, hi lpg.PropertyValue
+	key    string
 }
 
 // Match implements the per-node fallback for a range predicate: it keeps a node

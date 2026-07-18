@@ -92,9 +92,9 @@ type boundStringRange interface {
 // the bounds and their inclusivity. An absent bound (nil) is unbounded on that
 // side.
 type stringRangePred struct {
-	propKey string
 	lo      *exec.RangeBound // nil = unbounded below
 	hi      *exec.RangeBound // nil = unbounded above
+	propKey string
 }
 
 // boundNumericRange is satisfied by a bound UNIFIED numeric btree companion
@@ -116,9 +116,9 @@ type boundNumericRange interface {
 // operand is preserved in loVal/hiVal so the executed NodeByIndexRangeScan
 // receives an inclusive superset bound (see [tryNumericRangeSeek]).
 type numericRangePred struct {
-	propKey string
 	lo      *numericBound // nil = unbounded below
 	hi      *numericBound // nil = unbounded above
+	propKey string
 }
 
 // numericBound is one endpoint of a numeric range: the float64 value and

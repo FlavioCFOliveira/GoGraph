@@ -81,12 +81,20 @@ func hasManifest(dir string) bool {
 // granting the hold, so a request that arrives after Close is cleanly
 // rejected rather than admitted onto a WAL that is being released.
 type dataStore struct {
-	dir      string
 	wal      *wal.Writer
 	txnStore *txn.Store[string, float64]
 	engine   *cypher.Engine
 	graph    *lpg.Graph[string, float64]
-	res      recovery.Result[string, float64]
+
+	// beforeEngine, when non-nil, is invoked while the acquire hold is held
+	// but before the handler runs its engine call. It is a test-only seam
+	// for forcing a write to park mid-statement so a racing Close can be
+	// observed to wait for it; production code never sets it.
+	beforeEngine func()
+
+	dir string
+
+	res recovery.Result[string, float64]
 
 	// metrics accumulates volatile per-process telemetry (request counts,
 	// latencies, heap) reported by GET /stats. It is lock-free (sync/atomic),
@@ -97,12 +105,6 @@ type dataStore struct {
 	// are exclusive) and guards closed. It is the outermost lock.
 	mu     sync.RWMutex
 	closed bool
-
-	// beforeEngine, when non-nil, is invoked while the acquire hold is held
-	// but before the handler runs its engine call. It is a test-only seam
-	// for forcing a write to park mid-statement so a racing Close can be
-	// observed to wait for it; production code never sets it.
-	beforeEngine func()
 }
 
 // acquire takes the serialisation hold for one engine access: an exclusive

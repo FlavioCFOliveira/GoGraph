@@ -56,8 +56,8 @@ const shardZeroKeyCachePath = "testdata/shapegen/mapper_shard0_keys.txt"
 // slice is grown monotonically on the longest n requested so far;
 // every shorter request is served by reslicing the prefix.
 var shardZeroKeyCache struct {
-	mu   sync.Mutex
 	keys []string
+	mu   sync.Mutex
 }
 
 // GenerateShardZeroKeys returns n distinct strings, every one of

@@ -73,6 +73,13 @@ func Breakpoint(name string) { crashpoint.Breakpoint(name) }
 // Out captures the observable outcome of a helper child process
 // spawned by [Run].
 type Out struct {
+	// Signal is the signal that terminated the child, or nil.
+	Signal os.Signal
+
+	// Dir is the crash artefact directory used by the child. Callers
+	// inspect artefacts left there after Run returns.
+	Dir string
+
 	// Stdout and Stderr hold the child's captured output streams.
 	Stdout []byte
 	Stderr []byte
@@ -80,9 +87,6 @@ type Out struct {
 	// ExitCode is the numeric exit status. Meaningful only when
 	// Killed is false and the child exited voluntarily.
 	ExitCode int
-
-	// Signal is the signal that terminated the child, or nil.
-	Signal os.Signal
 
 	// Killed reports whether the child was terminated by SIGKILL at a
 	// [Breakpoint] (i.e. a genuine crash-injection self-kill).
@@ -95,10 +99,6 @@ type Out struct {
 	// ultimately terminated by SIGKILL (the kill was issued by
 	// exec.CommandContext, not by a crashpoint self-kill).
 	TimedOut bool
-
-	// Dir is the crash artefact directory used by the child. Callers
-	// inspect artefacts left there after Run returns.
-	Dir string
 }
 
 // Opts configures a [Run] invocation.
@@ -108,12 +108,12 @@ type Opts struct {
 	// and the caller finds artefacts there after Run returns.
 	Dir string
 
-	// Timeout caps the child execution. Zero defaults to 30 s.
-	Timeout time.Duration
-
 	// Env holds additional KEY=VALUE pairs appended to the child
 	// environment (after GOGRAPH_CRASH_AT and GOGRAPH_CRASH_DIR).
 	Env []string
+
+	// Timeout caps the child execution. Zero defaults to 30 s.
+	Timeout time.Duration
 }
 
 // helperBin caches the result of compiling cmd/crashinject-helper so

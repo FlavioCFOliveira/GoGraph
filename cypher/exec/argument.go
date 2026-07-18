@@ -28,9 +28,9 @@ import "context"
 //
 // Argument is NOT safe for concurrent use.
 type Argument struct {
+	ctx      context.Context //nolint:containedctx // stored for per-Next ctx check
 	outerRow Row             // current outer row set by the Apply driver
 	emitted  bool            // true after the row has been emitted in the current cycle
-	ctx      context.Context //nolint:containedctx // stored for per-Next ctx check
 }
 
 // NewArgument creates an Argument operator with no initial row. The Apply

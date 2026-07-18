@@ -292,11 +292,11 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 // NodeID. Resolving a NodeID back to its id (via the Mapper) and looking it
 // up here is the correct, sharding-agnostic path.
 type buildStats struct {
-	users       int
-	friendEdges int
 	idComm      map[string]int // user id -> planted community in [0,K)
 	seedUser    string         // the fixed user the FoF recommendation anchors on
-	seedComm    int            // the seed user's community (community of node 0)
+	users       int
+	friendEdges int
+	seedComm    int // the seed user's community (community of node 0)
 	elapsed     time.Duration
 }
 

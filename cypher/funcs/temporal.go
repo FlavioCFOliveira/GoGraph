@@ -64,14 +64,14 @@ func registerTemporal(r *Registry) {
 	// three aliases dispatch to the same 0-arg constructor which uses
 	// StatementNow().
 	for _, kind := range []struct {
-		base string
 		fn   func([]expr.Value) (expr.Value, error)
+		base string
 	}{
-		{"date", fnDate},
-		{"localtime", fnLocalTime},
-		{"time", fnTime},
-		{"localdatetime", fnLocalDateTime},
-		{"datetime", fnDateTime},
+		{base: "date", fn: fnDate},
+		{base: "localtime", fn: fnLocalTime},
+		{base: "time", fn: fnTime},
+		{base: "localdatetime", fn: fnLocalDateTime},
+		{base: "datetime", fn: fnDateTime},
 	} {
 		fn := kind.fn
 		for _, suffix := range []string{"transaction", "statement", "realtime"} {

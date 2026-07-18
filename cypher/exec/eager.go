@@ -42,14 +42,16 @@ var ErrEagerMemoryExceeded = errors.New("exec: eager memory cap exceeded")
 // cursor state mutated across Init/Next/Close, so a single goroutine must
 // drive one operator tree, like every other [Operator].
 type Eager struct {
-	child   Operator
-	maxRows int
-	budget  byteBudget // estimated-byte cap on the buffered rows (#1841)
+	child Operator
 
 	// Runtime state.
+	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
+
+	budget byteBudget // estimated-byte cap on the buffered rows (#1841)
+
 	rows    []Row
+	maxRows int
 	emitIdx int
-	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
 }
 
 // WithByteBudget bounds the estimated retained size of the buffered rows by

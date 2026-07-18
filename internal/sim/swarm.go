@@ -23,25 +23,6 @@ const swarmSeedMix uint64 = 0xd1b54a32d192ed03
 // run, the worker cap, and the budget (by run count, wall-clock duration, or
 // both — whichever bound is hit first ends the swarm).
 type SwarmConfig struct {
-	// MasterSeed seeds the deterministic derivation of every per-run seed, so
-	// the whole swarm reproduces from this one value. Two swarm runs with the
-	// same MasterSeed, Scenario, and Runs execute the identical set of seeds.
-	MasterSeed uint64
-	// Scenario is the name of the catalogue scenario each run executes. It must
-	// resolve in the registry the swarm was built with.
-	Scenario string
-	// Workers is the worker-pool cap. Values <= 0 are normalised to
-	// min(GOMAXPROCS, max(1, Runs)). The pool never spawns more than this many
-	// run goroutines at once.
-	Workers int
-	// Runs is the seed-count budget: the swarm executes exactly this many runs
-	// (each a distinct derived seed) unless Duration elapses first. When Runs <=
-	// 0 the swarm is duration-bounded only and MUST carry a positive Duration.
-	Runs int
-	// Duration is the wall-clock budget. When > 0 the swarm stops scheduling new
-	// runs once it elapses (in-flight runs finish). Zero means no time bound, in
-	// which case Runs MUST be positive.
-	Duration time.Duration
 	// Clock is the time source the duration budget reads. When nil, the real
 	// clock is used. The per-run simulations remain seed-driven and never read
 	// this clock — it bounds only the across-run scheduling, which is concurrent
@@ -57,6 +38,25 @@ type SwarmConfig struct {
 	// and must not block; it is an observation hook for coverage feeding and
 	// live reporting.
 	Observe func(SwarmRun)
+	// Scenario is the name of the catalogue scenario each run executes. It must
+	// resolve in the registry the swarm was built with.
+	Scenario string
+	// MasterSeed seeds the deterministic derivation of every per-run seed, so
+	// the whole swarm reproduces from this one value. Two swarm runs with the
+	// same MasterSeed, Scenario, and Runs execute the identical set of seeds.
+	MasterSeed uint64
+	// Workers is the worker-pool cap. Values <= 0 are normalised to
+	// min(GOMAXPROCS, max(1, Runs)). The pool never spawns more than this many
+	// run goroutines at once.
+	Workers int
+	// Runs is the seed-count budget: the swarm executes exactly this many runs
+	// (each a distinct derived seed) unless Duration elapses first. When Runs <=
+	// 0 the swarm is duration-bounded only and MUST carry a positive Duration.
+	Runs int
+	// Duration is the wall-clock budget. When > 0 the swarm stops scheduling new
+	// runs once it elapses (in-flight runs finish). Zero means no time bound, in
+	// which case Runs MUST be positive.
+	Duration time.Duration
 }
 
 // ScenarioSelector chooses the scenario name a given swarm run should execute.
@@ -73,18 +73,18 @@ type ScenarioSelector interface {
 // name, whether it failed, the failure report (nil on pass), and any harness
 // error (a transport/setup failure that is not itself an invariant violation).
 type SwarmRun struct {
+	// Err is a harness error (setup/transport failure), else nil. A run with a
+	// non-nil Err counts as a failure distinct from an invariant violation.
+	Err error
+	// Report is the failure report when the run found an invariant violation,
+	// else nil.
+	Report *SimReport
+	// Scenario is the scenario name this run executed.
+	Scenario string
 	// Index is the run's position in the deterministic schedule (0-based).
 	Index int
 	// Seed is the derived per-run seed.
 	Seed uint64
-	// Scenario is the scenario name this run executed.
-	Scenario string
-	// Report is the failure report when the run found an invariant violation,
-	// else nil.
-	Report *SimReport
-	// Err is a harness error (setup/transport failure), else nil. A run with a
-	// non-nil Err counts as a failure distinct from an invariant violation.
-	Err error
 }
 
 // Failed reports whether the run failed for any reason (an invariant violation
@@ -101,6 +101,9 @@ func (r SwarmRun) ReproduceLine() string {
 // and every failing run with its reproduce line. It is the value the CLI and
 // the integration tests assert on.
 type SwarmResult struct {
+	// Failures lists every failing run in ascending run-index order, so a report
+	// is deterministic regardless of worker completion order.
+	Failures []SwarmRun
 	// MasterSeed is the seed the schedule was derived from (for reproducing the
 	// whole swarm).
 	MasterSeed uint64
@@ -109,9 +112,6 @@ type SwarmResult struct {
 	Runs int
 	// Passes is the number of runs that found no violation and no harness error.
 	Passes int
-	// Failures lists every failing run in ascending run-index order, so a report
-	// is deterministic regardless of worker completion order.
-	Failures []SwarmRun
 	// Elapsed is the wall-clock time the swarm took.
 	Elapsed time.Duration
 	// Workers is the worker cap the swarm actually ran with.

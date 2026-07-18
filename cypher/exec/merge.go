@@ -48,40 +48,43 @@ type MergeSearchFn func(ctx context.Context) ([]Row, error)
 //
 // Merge is NOT safe for concurrent use.
 type Merge struct {
-	nodeVar         string
-	labels          []string
-	propsRaw        string
-	props           []propLiteral
-	onCreateActions []mergeAction
-	onMatchActions  []mergeAction
-	searchFn        MergeSearchFn
-	schema          map[string]int
-	child           Operator
-	mutator         GraphMutator
-	reg             *ConstraintRegistry // nil means no enforcement
-	mgr             *index.Manager      // nil when reg is nil
-	propsEvalFn     PropsEvalFn         // nil when all props are literals
+	child       Operator
+	mutator     GraphMutator
+	ctx         context.Context //nolint:containedctx // stored for per-Next ctx check
+	searchFn    MergeSearchFn
+	schema      map[string]int
+	reg         *ConstraintRegistry // nil means no enforcement
+	mgr         *index.Manager      // nil when reg is nil
+	propsEvalFn PropsEvalFn         // nil when all props are literals
 	// onCreateEvals / onMatchEvals map an action's target (via
 	// [MergeActionEvalKey]) to a per-row RHS evaluator for a non-literal
 	// ON CREATE / ON MATCH SET expression (e.g. `SET n.num = n.num + 1`).
 	// nil when every action's RHS is a literal. See [Merge.applyActions].
 	onCreateEvals map[string]ValueEvalFn
 	onMatchEvals  map[string]ValueEvalFn
+
+	nodeVar  string
+	propsRaw string
+
+	labels          []string
+	props           []propLiteral
+	onCreateActions []mergeAction
+	onMatchActions  []mergeAction
 	// onCreateSetAll / onMatchSetAll carry whole-entity ON CREATE / ON MATCH
 	// SET actions (`SET n = <expr>` / `SET n += <expr>`) evaluated per row.
 	// The per-property [parseMergeActions] path drops such keyless actions, so
 	// they are applied separately via [applyWholeEntityValueToNode] (#2031).
 	onCreateSetAll []MergeSetAllAction
 	onMatchSetAll  []MergeSetAllAction
-	ctx            context.Context //nolint:containedctx // stored for per-Next ctx check
-
 	// iteration state, reset on each Init call
 	matched    []Row
-	matchedIdx int
-	created    bool
 	createdRow Row
-	done       bool
-	firedOnce  bool // tracks whether at least one merge cycle has run
+
+	matchedIdx int
+
+	created   bool
+	done      bool
+	firedOnce bool // tracks whether at least one merge cycle has run
 }
 
 // mergeAction is a pre-parsed ON CREATE / ON MATCH SET item. Two shapes

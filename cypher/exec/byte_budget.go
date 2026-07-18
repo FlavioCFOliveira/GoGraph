@@ -25,8 +25,8 @@ package exec
 // budget. It is NOT safe for concurrent use; each breaker owns one and drives it
 // from its single-goroutine collect/drain loop.
 type byteBudget struct {
-	maxBytes    int64
 	estimateRow func(Row) int64
+	maxBytes    int64
 	used        int64
 }
 

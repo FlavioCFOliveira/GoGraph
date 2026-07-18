@@ -53,8 +53,8 @@ const smallBagMax = 8
 
 // kv is one (interned property-key, value) pair held in the small tier.
 type kv struct {
-	key PropertyKeyID
 	val PropertyValue
+	key PropertyKeyID
 }
 
 // propBag is the per-node property bag. The zero value is a valid empty bag.
@@ -62,8 +62,8 @@ type kv struct {
 //   - m != nil           -> map state (promoted; never demotes).
 //   - m == nil           -> small state, the (possibly empty) pairs slice.
 type propBag struct {
-	pairs []kv                            // small state; len in [0, smallBagMax]
 	m     map[PropertyKeyID]PropertyValue // non-nil iff promoted to map (one-way)
+	pairs []kv                            // small state; len in [0, smallBagMax]
 }
 
 // get returns the value stored under key and whether it is present.

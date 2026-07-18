@@ -68,11 +68,11 @@ type RangeBound struct {
 // NodeByIndexRangeScan is NOT safe for concurrent use.
 type NodeByIndexRangeScan struct {
 	idx  rangeLookup
-	lo   RangeBound
-	hi   RangeBound
 	ctx  context.Context //nolint:containedctx // stored for per-Next ctx check
 	iter roaring64.IntPeekable64
 	buf  [1]expr.Value // fixed backing buffer — zero-alloc per Next
+	lo   RangeBound
+	hi   RangeBound
 }
 
 // NewNodeByIndexRangeScan creates a NodeByIndexRangeScan.

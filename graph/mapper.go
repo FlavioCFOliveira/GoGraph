@@ -210,9 +210,9 @@ func (m *Mapper[N]) shardFor(k N) uint64 {
 // mapperShard is one of the independently locked stripes of a Mapper.
 // The forward map answers Intern; the reverse slice answers Resolve.
 type mapperShard[N comparable] struct {
-	mu      sync.RWMutex
 	forward map[N]NodeID
 	reverse []N
+	mu      sync.RWMutex
 }
 
 // NewMapper returns a fresh, empty Mapper ready for concurrent use.

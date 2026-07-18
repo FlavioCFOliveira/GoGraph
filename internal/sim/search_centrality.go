@@ -51,8 +51,8 @@ const (
 // the arcs are already materialised in both directions when so).
 type centralityFixture struct {
 	name     string
-	order    int // number of distinct NodeIDs, 0..order-1
 	arcs     []centralityArc
+	order    int // number of distinct NodeIDs, 0..order-1
 	directed bool
 }
 

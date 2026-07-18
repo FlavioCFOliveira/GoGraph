@@ -50,15 +50,15 @@ func walPathFor(dir string) string {
 // are kept explicit so a future workload can vary the shape without touching the
 // open/reopen plumbing.
 type simStoreConfig struct {
-	graphConfig adjlist.Config
-	maxTxnOps   int
 	// dir, when non-empty, opens the store in FULL-STACK mode: the WAL lives at
 	// dir/wal, a checkpoint publishes a self-sufficient snapshot at dir/snapshot
 	// and truncates the WAL prefix it folded, and recovery reconstructs the graph
 	// through the full snapshot+WAL path ([recovery.OpenFS]). An empty dir keeps
 	// the legacy WAL-only layout (root-level [simWALPath], recovered via
 	// [recovery.ReplayWAL]).
-	dir string
+	dir         string
+	graphConfig adjlist.Config
+	maxTxnOps   int
 }
 
 // defaultSimStoreConfig is a directed multigraph (openCypher's additive-CREATE
@@ -107,11 +107,11 @@ func simulatorStoreConfig() simStoreConfig {
 //nolint:revive // "Sim" prefix is the DST harness naming scheme (see SimDisk).
 type SimStore struct {
 	disk   *SimDisk
-	cfg    simStoreConfig
 	graph  *lpg.Graph[string, float64]
 	store  *txn.Store[string, float64]
 	wlog   *wal.Writer
 	engine *cypher.Engine
+	cfg    simStoreConfig
 	// walOps is the number of WAL ops the most recent recovery replayed back
 	// into the graph on open. It is 0 for a freshly-created store.
 	walOps int

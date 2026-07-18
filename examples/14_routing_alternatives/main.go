@@ -409,8 +409,8 @@ type point struct {
 // coordinate index before measuring distance.
 type network struct {
 	adj            *adjlist.AdjList[int, int64]
-	coords         []point
 	mapper         *graph.Mapper[int]
+	coords         []point
 	scale          float64
 	srcIdx, dstIdx int          // coordinate indices
 	src, dst       graph.NodeID // resolved graph NodeIDs

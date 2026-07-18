@@ -63,8 +63,8 @@ type ProcImpl func(ctx context.Context, args []expr.Value) ([][]expr.Value, erro
 
 // ProcEntry binds a Signature to its implementation.
 type ProcEntry struct {
-	Sig  Signature
 	Impl ProcImpl
+	Sig  Signature
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -88,8 +88,8 @@ var ErrProcNotFound = errors.New("procs: procedure not found")
 //
 // Registry is safe for concurrent use.
 type Registry struct {
-	mu      sync.RWMutex
 	entries map[string]ProcEntry
+	mu      sync.RWMutex
 }
 
 // NewRegistry creates an empty Registry.

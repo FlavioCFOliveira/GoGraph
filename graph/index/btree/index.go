@@ -72,7 +72,6 @@ var ErrNotSorted = errors.New("btree: values must be in ascending order for Bulk
 // Index is an order-preserving property index keyed by V, backed by an
 // in-memory B+ tree (see bplus.go).
 type Index[V cmp.Ordered] struct {
-	mu   sync.RWMutex
 	tree *bplus[V]
 
 	// binding, when non-nil, ties the index to one (label, property) pair of
@@ -81,6 +80,8 @@ type Index[V cmp.Ordered] struct {
 	// the index is shared and never mutated afterwards, so Apply reads it
 	// without synchronisation. See bound.go.
 	binding *Binding[V]
+
+	mu sync.RWMutex
 }
 
 // New returns an empty index.

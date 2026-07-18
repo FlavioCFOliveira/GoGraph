@@ -75,10 +75,6 @@ type Edge struct {
 type Options struct {
 	// OutputPath is the destination csrfile.
 	OutputPath string
-	// Directed selects the adjacency-list configuration.
-	Directed bool
-	// Multigraph allows parallel edges in the loaded graph.
-	Multigraph bool
 	// MaxRows, when > 0, caps the number of edge records the loader
 	// will ingest. Add / AddBatch / Drain return [ErrTooManyRows]
 	// on the row that crosses the cap. Default (0) is unbounded.
@@ -97,6 +93,10 @@ type Options struct {
 	// determinism-neutral capacity hint. Leave it 0 when the node count
 	// is unknown.
 	ExpectNodes int
+	// Directed selects the adjacency-list configuration.
+	Directed bool
+	// Multigraph allows parallel edges in the loaded graph.
+	Multigraph bool
 	// Parallel selects partitioned-parallel ingest for large directed
 	// loads. The default (false) always uses the deterministic
 	// sequential build. When true, the loader buffers edges and builds
@@ -117,14 +117,15 @@ type Options struct {
 // fans out internally during Finalise) or partition the edge stream
 // upstream and call separate Loaders, then merge.
 type Loader struct {
-	opts Options
-	adj  *adjlist.AdjList[string, int64]
-	rows int
+	adj *adjlist.AdjList[string, int64]
 
 	// buffered holds the edge stream when Options.Parallel is set; the
 	// parallel build runs over this slice during Finalise. It is nil in
 	// the sequential (default) mode, where edges go straight into adj.
 	buffered []Edge
+
+	opts Options
+	rows int
 }
 
 // New returns a fresh Loader.

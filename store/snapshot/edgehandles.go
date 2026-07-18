@@ -99,11 +99,11 @@ var ErrEdgeHandlesCorrupted = errors.New("snapshot: edgehandles.bin corrupted")
 // restored before this component is applied), matching csr.bin's NodeID
 // references.
 type EdgeHandleRecord struct {
+	Properties map[string]lpg.PropertyValue
+	Labels     []string
 	Src        uint64
 	Dst        uint64
 	Handle     uint64
-	Labels     []string
-	Properties map[string]lpg.PropertyValue
 }
 
 // EdgeHandlesReadback is the structural parse of an edgehandles.bin file. The
@@ -117,10 +117,10 @@ type EdgeHandlesReadback struct {
 // tables are built. Labels and property keys are kept as names so the two
 // embedded tables can be assembled deterministically.
 type edgeHandleRaw struct {
-	src, dst, handle uint64
 	labels           []string
 	propKeys         []string
 	propVals         []lpg.PropertyValue
+	src, dst, handle uint64
 }
 
 // WriteEdgeHandles serialises every per-handle edge label and property

@@ -37,8 +37,8 @@ const (
 // so callers must not mutate the returned slice (doing so would mutate the
 // otherwise-immutable value and break the concurrency guarantee).
 type PropertyValue struct {
-	kind PropertyKind
 	v    any
+	kind PropertyKind
 }
 
 // Kind returns the underlying type tag.
@@ -206,16 +206,16 @@ type forwardKeyName struct {
 // O(n) copy on intern is a deliberate trade: the property-key vocabulary
 // is append-mostly schema, interned at warm-up and read billions of times.
 type PropertyKeyRegistry struct {
-	// mu serialises Intern (the write path) only; the read paths never take
-	// it. The steady-state property vocabulary is small and stable, so
-	// Intern is contended only while the vocabulary is first built up.
-	mu sync.Mutex
 	// fwd holds the immutable name→id table. Loaded lock-free by Lookup;
 	// swapped under mu by Intern.
 	fwd atomic.Pointer[forwardKeyName]
 	// snap holds the immutable id→name table. Loaded lock-free by
 	// Resolve; swapped under mu by Intern.
 	snap atomic.Pointer[propertyKeyNames]
+	// mu serialises Intern (the write path) only; the read paths never take
+	// it. The steady-state property vocabulary is small and stable, so
+	// Intern is contended only while the vocabulary is first built up.
+	mu sync.Mutex
 }
 
 // NewPropertyKeyRegistry returns an empty registry.

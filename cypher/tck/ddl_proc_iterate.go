@@ -7,11 +7,11 @@ type DDLScenario struct {
 	Name string
 	// Query is the Cypher statement to execute.
 	Query string
-	// WantErr reports whether the scenario expects an error from the engine.
-	WantErr bool
 	// ErrContains is a substring expected in the error message when WantErr is
 	// true. An empty string means any non-nil error satisfies the expectation.
 	ErrContains string
+	// WantErr reports whether the scenario expects an error from the engine.
+	WantErr bool
 }
 
 // DDLScenarios returns the set of DDL/procedure/parameter integration

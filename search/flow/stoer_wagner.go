@@ -8,9 +8,9 @@ import (
 
 // MinCutResult is the output of [StoerWagner].
 type MinCutResult struct {
-	Weight int
 	A      []int // one side of the cut
 	B      []int // the other side
+	Weight int
 }
 
 // StoerWagner computes the global minimum cut on an undirected

@@ -24,8 +24,8 @@ const DefaultPlanCacheCapacity = 1024
 // linked list maintained by [planCache] can walk back from a list
 // element to the map key for eviction.
 type planCacheNode struct {
-	key   string
 	value *planCacheEntry
+	key   string
 }
 
 // planCache is a bounded LRU keyed by query text. The implementation
@@ -52,10 +52,10 @@ type planCacheNode struct {
 // invocation, gating the per-query work that dominates the total
 // runtime by orders of magnitude.
 type planCache struct {
-	mu  sync.Mutex
-	cap int
 	ll  *list.List // *planCacheNode, front = most recently used
 	by  map[string]*list.Element
+	cap int
+	mu  sync.Mutex
 }
 
 // newPlanCache constructs a planCache with the given capacity. A

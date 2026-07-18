@@ -47,15 +47,9 @@ import (
 //
 // MergeRelationship is NOT safe for concurrent use.
 type MergeRelationship struct {
-	child              Operator
-	srcCol             int           // input-row column index holding src NodeID / NodeValue
-	dstCol             int           // input-row column index holding dst NodeID / NodeValue
-	relCol             int           // output-row column index for the bound relationship; -1 when anonymous
-	relType            string        // empty when the pattern declared no type (rejected upstream)
-	relVar             string        // empty when the relationship is anonymous
-	relPropsRaw        string        // inline `{k: v, …}` source string, "" when absent
-	relPropPredsParsed bool          // tracks one-time parse of relPropsRaw
-	relPropPreds       []propLiteral // parsed predicate values (only literals)
+	child   Operator
+	mutator GraphMutator
+	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
 	// relPropsEvalFn evaluates the inline relationship property map against the
 	// current row when it carries a non-literal value (e.g. `{kind: r.pk}`).
 	// nil when every inline property is a literal ($param references are
@@ -65,13 +59,6 @@ type MergeRelationship struct {
 	// [Merge] path — without it a row-driven inline property is silently dropped
 	// (stored as null on the created edge).
 	relPropsEvalFn PropsEvalFn
-	// undirected reports whether the source pattern declared `(a)-[:T]-(b)`
-	// (no arrow head). When true, the match search probes both (src, dst)
-	// and (dst, src); the create path still uses the canonical (src, dst)
-	// direction.
-	undirected      bool
-	onCreateActions []MergeRelAction
-	onMatchActions  []MergeRelAction
 	// onCreateEvals / onMatchEvals map an action's target (via
 	// [MergeActionEvalKey], keyed on the relationship variable and property
 	// key) to a per-row RHS evaluator for a non-literal ON CREATE / ON MATCH
@@ -79,20 +66,35 @@ type MergeRelationship struct {
 	// action's RHS is a literal. See [MergeRelationship.applyRelActions].
 	onCreateEvals map[string]ValueEvalFn
 	onMatchEvals  map[string]ValueEvalFn
-	mutator       GraphMutator
 	// schema lets entity-copy actions (`SET r = a`) resolve the source
 	// variable name to a row column at write time. nil when the upstream
 	// builder did not thread one in.
 	schema map[string]int
 
+	relType     string // empty when the pattern declared no type (rejected upstream)
+	relVar      string // empty when the relationship is anonymous
+	relPropsRaw string // inline `{k: v, …}` source string, "" when absent
+
+	relPropPreds    []propLiteral // parsed predicate values (only literals)
+	onCreateActions []MergeRelAction
+	onMatchActions  []MergeRelAction
 	// Pending state for multi-row emission when an existing edge has
 	// CREATE-multiplicity > 1. The base row is held verbatim and the
 	// remaining count tells Next() how many more times to re-emit before
 	// pulling a fresh row from the child (Merge5 [3]).
-	pendingRow       Row
+	pendingRow Row
+
+	srcCol           int // input-row column index holding src NodeID / NodeValue
+	dstCol           int // input-row column index holding dst NodeID / NodeValue
+	relCol           int // output-row column index for the bound relationship; -1 when anonymous
 	pendingRemaining int64
 
-	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
+	relPropPredsParsed bool // tracks one-time parse of relPropsRaw
+	// undirected reports whether the source pattern declared `(a)-[:T]-(b)`
+	// (no arrow head). When true, the match search probes both (src, dst)
+	// and (dst, src); the create path still uses the canonical (src, dst)
+	// direction.
+	undirected bool
 }
 
 // MergeRelAction is a pre-parsed `SET <relVar>.<key> = <value>` item, or a
@@ -110,8 +112,8 @@ type MergeRelationship struct {
 type MergeRelAction struct {
 	key        string
 	value      string // opaque literal string, parsed via parsePropValue
-	replace    bool   // whole-entity `=` replace (clear absent keys first)
 	retainKeys []string
+	replace    bool // whole-entity `=` replace (clear absent keys first)
 }
 
 // NewMergeRelationship constructs a MergeRelationship operator.

@@ -20,9 +20,9 @@ import (
 type Reader struct {
 	src       io.Reader
 	closer    io.Closer
+	tailErr   error
 	bufr      *bufio.Reader
 	tail      int64
-	tailErr   error
 	totalRead int64
 }
 

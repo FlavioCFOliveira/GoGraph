@@ -115,8 +115,8 @@ var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 
 // Frame is the in-memory representation of one WAL frame.
 type Frame struct {
-	Version uint16
 	Payload []byte
+	Version uint16
 }
 
 // Encode writes f to w as a single binary frame. It returns the

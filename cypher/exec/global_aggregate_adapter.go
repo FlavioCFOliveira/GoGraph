@@ -29,13 +29,14 @@ import (
 //
 // GlobalAggregateAdapter is NOT safe for concurrent use.
 type GlobalAggregateAdapter struct {
-	child        Operator
+	child Operator
+
+	ctx          context.Context //nolint:containedctx // stored for per-Next ctx check
 	aggFactories []funcs.AggregatorFactory
 
-	ctx       context.Context //nolint:containedctx // stored for per-Next ctx check
-	gotRow    bool            // true after the child produced at least one row
-	exhausted bool            // true after the child reported end-of-stream
-	emitted   bool            // true after a synthetic fallback row has been emitted
+	gotRow    bool // true after the child produced at least one row
+	exhausted bool // true after the child reported end-of-stream
+	emitted   bool // true after a synthetic fallback row has been emitted
 }
 
 // NewGlobalAggregateAdapter returns a GlobalAggregateAdapter that wraps child.

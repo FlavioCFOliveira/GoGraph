@@ -15,16 +15,16 @@ import (
 // these, captured during a deterministic run, and is the unit a scripted replay
 // executes and the shrinker reduces.
 type TracedOp struct {
-	// Tick is the simulated tick the op ran at during recording. On replay the
-	// scripted executor re-derives ticks positionally, so this is informational
-	// (it lets a report point at the original tick).
-	Tick int64
 	// Op is the Cypher operation that was issued.
 	Op Op
 	// Fault, when non-empty, is a marker injected for replay/shrinking: the
 	// scripted executor applies the named fault deterministically when it reaches
 	// this op. The empty string means no fault (a normal op). See [TraceFault].
 	Fault TraceFault
+	// Tick is the simulated tick the op ran at during recording. On replay the
+	// scripted executor re-derives ticks positionally, so this is informational
+	// (it lets a report point at the original tick).
+	Tick int64
 }
 
 // TraceFault names a deterministic fault a scripted replay injects at a specific
@@ -56,9 +56,6 @@ const (
 // A Trace is a plain value; callers own their copies and do not share them
 // across goroutines mid-mutation.
 type Trace struct {
-	// Seed is the seed the recording was driven by (informational; a scripted
-	// replay does NOT draw from it — it executes Ops directly).
-	Seed uint64
 	// Ops is the ordered operation stream.
 	Ops []TracedOp
 	// CrashTicks lists the ticks at which a crash+recovery cycle fired during
@@ -67,6 +64,9 @@ type Trace struct {
 	// oracle/engine divergences reproducible without a crash); the list is
 	// retained for the report and for completeness.
 	CrashTicks []int64
+	// Seed is the seed the recording was driven by (informational; a scripted
+	// replay does NOT draw from it — it executes Ops directly).
+	Seed uint64
 }
 
 // Len returns the number of operations in the trace.

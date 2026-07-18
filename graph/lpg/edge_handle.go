@@ -64,8 +64,8 @@ import (
 // #1633), stored by value, so a 1-2-label edge handle pays a small slice
 // instead of a ~300 B Go map.
 type edgeHandleLabelShard struct {
-	mu sync.Mutex
 	m  map[edgeKey]map[uint64]labelBag
+	mu sync.Mutex
 }
 
 // edgeHandlePropShard holds the per-(src, dst, handle) property bags. The
@@ -73,8 +73,8 @@ type edgeHandleLabelShard struct {
 // #1633), stored by value, so a 1-2-property edge handle pays a small slice
 // instead of a ~300 B Go map.
 type edgeHandlePropShard struct {
-	mu sync.Mutex
 	m  map[edgeKey]map[uint64]propBag
+	mu sync.Mutex
 }
 
 // edgeHandleLabelShardFor selects the responsible label shard for k.

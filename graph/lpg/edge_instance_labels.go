@@ -33,11 +33,11 @@ import (
 // #1633), stored by value, so a 1-2-label edge instance pays a small slice
 // instead of a ~300 B Go map.
 type edgeInstanceLabelShard struct {
+	m map[edgeKey]map[int64]labelBag
 	// mu guards m. Writers (SetEdgeLabelAt, RemoveEdgeInstance) take the
 	// write lock; EdgeLabelsAt reads under a read lock so concurrent
 	// per-instance label reads on a shard proceed in parallel.
 	mu sync.RWMutex
-	m  map[edgeKey]map[int64]labelBag
 }
 
 // SetEdgeLabelAt attaches `name` to the directed edge instance

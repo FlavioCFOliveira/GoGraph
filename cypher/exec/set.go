@@ -75,20 +75,20 @@ type ValueEvalFn func(row Row) (value lpg.PropertyValue, isNull bool, hasValue b
 //
 // SetProperty is NOT safe for concurrent use.
 type SetProperty struct {
-	entityVar   string
-	propertyKey string      // empty → whole-entity assignment
-	valueExpr   string      // opaque literal string from IR
-	valueEvalFn ValueEvalFn // non-nil → evaluate the AST per row
-	merge       bool        // true when mode is SET n += {…}
-	schema      map[string]int
-	relCols     *RelCols // non-nil when entityVar is a relationship
 	child       Operator
 	mutator     GraphMutator
+	ctx         context.Context //nolint:containedctx // stored for per-Next ctx check
+	valueEvalFn ValueEvalFn     // non-nil → evaluate the AST per row
+	schema      map[string]int
+	relCols     *RelCols              // non-nil when entityVar is a relationship
 	params      map[string]expr.Value // query parameters for $name substitution
 	reg         *ConstraintRegistry   // nil means no enforcement
 	mgr         *index.Manager        // nil when reg is nil
-	parsedMap   []propLiteral         // cached parse of valueExpr when it is a literal map
-	ctx         context.Context       //nolint:containedctx // stored for per-Next ctx check
+	entityVar   string
+	propertyKey string        // empty → whole-entity assignment
+	valueExpr   string        // opaque literal string from IR
+	parsedMap   []propLiteral // cached parse of valueExpr when it is a literal map
+	merge       bool          // true when mode is SET n += {…}
 }
 
 // NewSetProperty creates a SetProperty operator.
@@ -218,7 +218,6 @@ func (op *SetProperty) Next(out *Row) (bool, error) {
 // Exactly one of nodeKey or (relSrcKey, relDstKey) is valid, determined by
 // isRel. This avoids separate resolver calls in Next.
 type entityBinding struct {
-	isRel     bool
 	nodeKey   string // valid when !isRel
 	relSrcKey string // valid when isRel
 	relDstKey string // valid when isRel
@@ -230,6 +229,7 @@ type entityBinding struct {
 	// position did not resolve — in which case the per-instance by-handle store
 	// is left untouched and only the per-pair store is written (#1686).
 	relHandle uint64
+	isRel     bool
 }
 
 // resolveEntity extracts the node or relationship identity from the column at
@@ -651,12 +651,12 @@ func (op *SetProperty) refreshNodeRowProperties(row Row, pv any) {
 //
 // SetLabels is NOT safe for concurrent use.
 type SetLabels struct {
-	nodeVar string
-	labels  []string
-	schema  map[string]int
 	child   Operator
 	mutator GraphMutator
 	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
+	schema  map[string]int
+	nodeVar string
+	labels  []string
 }
 
 // NewSetLabels creates a SetLabels operator.

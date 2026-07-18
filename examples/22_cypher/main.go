@@ -237,10 +237,10 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 // the wall-clock cost and an anchor user whose name is unique within the
 // dataset so a relationship-pattern sample is deterministic.
 type buildStats struct {
-	users      int
-	knowsEdges int
 	anchorName string // name of userIDs[0]; unique, used to anchor a sample read
 	anchorID   string // id of userIDs[0]; unique, anchors the shortestPath source
+	users      int
+	knowsEdges int
 	elapsed    time.Duration
 }
 

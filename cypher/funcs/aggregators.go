@@ -553,8 +553,8 @@ func (a *StdDevPAgg) Result() expr.Value {
 //
 // PercentileContAgg is NOT safe for concurrent use.
 type PercentileContAgg struct {
-	p      float64
 	values []float64
+	p      float64
 	budget maxItems
 }
 
@@ -635,11 +635,11 @@ func (a *PercentileContAgg) Result() expr.Value {
 //
 // PercentileDiscAgg is NOT safe for concurrent use.
 type PercentileDiscAgg struct {
-	p         float64
 	values    []float64
+	p         float64
+	budget    maxItems
 	allInt    bool
 	hasValues bool
-	budget    maxItems
 }
 
 // NewPercentileDiscAgg returns an AggregatorFactory for PercentileDiscAgg with

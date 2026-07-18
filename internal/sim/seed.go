@@ -44,8 +44,8 @@ const seedMix uint64 = 0xdeadbeefcafebabe
 // simulation loop and its draw order is load-bearing for reproducibility;
 // concurrent draws would interleave non-deterministically and break replay.
 type Seed struct {
-	val uint64
 	rng *rand.Rand
+	val uint64
 }
 
 // NewSeed returns a Seed whose generator is initialised deterministically from

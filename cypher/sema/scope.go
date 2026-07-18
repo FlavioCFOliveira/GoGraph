@@ -6,12 +6,12 @@ import "github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 type Symbol struct {
 	// Name is the variable name exactly as written in the query.
 	Name string
-	// Pos is the source position where the variable was first introduced.
-	Pos ast.Position
 	// Type is a coarse type hint populated by later analysis passes (e.g.
 	// "node", "relationship", "path", "any"). The scope pass uses the empty
 	// string as a catch-all; callers must not depend on this value being set.
 	Type string
+	// Pos is the source position where the variable was first introduced.
+	Pos ast.Position
 }
 
 // Scope is a single layer of the variable-scope stack.

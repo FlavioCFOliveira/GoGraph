@@ -41,10 +41,10 @@ type Value = any
 
 // Struct represents a PackStream Structure with its tag byte and ordered fields.
 type Struct struct {
-	// Tag is the single-byte structure signature.
-	Tag byte
 	// Fields contains the structure's fields in declaration order.
 	Fields []Value
+	// Tag is the single-byte structure signature.
+	Tag byte
 }
 
 // WriteValue encodes v into the stream using the Encoder.

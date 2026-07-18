@@ -286,9 +286,9 @@ type edgeKey struct {
 // so the dataset is fixed by the seed, then written in two passes (the WAL
 // commit, then the post-commit property attach).
 type edgeSpec struct {
+	class  string
 	dst    int64
 	weight float64
-	class  string
 	lanes  int64
 	toll   bool
 }
@@ -299,12 +299,12 @@ type edgeSpec struct {
 // bit-exact verification oracle), and a sample node/edge to anchor the
 // property report.
 type genResult struct {
+	expectedWeights map[edgeKey]float64 // weight committed for each edge, the verify oracle
 	nodes           int
 	edges           int
 	hubs            int
-	expectedWeights map[edgeKey]float64 // weight committed for each edge, the verify oracle
-	sampleNode      int64               // a fixed node whose typed properties are reported
-	sampleSrc       int64               // a fixed edge's endpoints, for the edge-property sample
+	sampleNode      int64 // a fixed node whose typed properties are reported
+	sampleSrc       int64 // a fixed edge's endpoints, for the edge-property sample
 	sampleDst       int64
 	buildElapsed    time.Duration
 	snapElapsed     time.Duration

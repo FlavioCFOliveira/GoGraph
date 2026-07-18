@@ -16,6 +16,9 @@ import (
 // connection count and per-connection work are both explicit upper bounds (the
 // reliability mandate's bounded-resources rule).
 type ConcurrentConfig struct {
+	// Mix selects the per-connection actor behaviour. When nil, an honest
+	// read/write mix is used.
+	Mix *ConcurrentMix
 	// Seed controls WHAT each connection sends and WHEN its faults fire. Goroutine
 	// interleaving is NOT seed-controlled (see the package note on the hybrid
 	// determinism model): this mode is robustness/liveness/leak-checked, not
@@ -27,9 +30,6 @@ type ConcurrentConfig struct {
 	// OpsPerConn is the number of operations each connection performs before it
 	// closes. Values <= 0 are normalised to 1.
 	OpsPerConn int
-	// Mix selects the per-connection actor behaviour. When nil, an honest
-	// read/write mix is used.
-	Mix *ConcurrentMix
 }
 
 // ConcurrentMix is the per-connection actor selection for a concurrent run. Each
@@ -56,16 +56,6 @@ func defaultConcurrentMix() *ConcurrentMix {
 // equal the engine's live node count once every goroutine has drained (no
 // committed write lost, no phantom write gained).
 type ConcurrentResult struct {
-	Seed             uint64
-	Connections      int
-	AckedCreates     int64 // nodes connections committed (eventual oracle)
-	EngineNodeCount  int64 // engine's live node count at quiescence
-	Panics           int64 // recovered panics across all connection goroutines (must be 0)
-	TransportErrors  int64 // unexpected transport errors (must be 0 on a healthy run)
-	BoundedRejects   int64 // typed bound errors (overload caps) — acceptable, not a fault
-	BaselineRoutines int   // goroutine count captured before the run
-	FinalRoutines    int   // goroutine count after teardown
-
 	// AckedNames is the UNION, across every writer connection, of the unique
 	// node names whose create was acknowledged (a SUCCESS-terminated PULL). It is
 	// the durability oracle at the NAME granularity the durable-commit crash
@@ -87,6 +77,16 @@ type ConcurrentResult struct {
 	// Bolt FAILED state) is deliberately NOT recorded here — its outcome is
 	// ambiguous, so it is left as merely issued, never asserted-absent.
 	FailedNames []string
+
+	Seed             uint64
+	Connections      int
+	AckedCreates     int64 // nodes connections committed (eventual oracle)
+	EngineNodeCount  int64 // engine's live node count at quiescence
+	Panics           int64 // recovered panics across all connection goroutines (must be 0)
+	TransportErrors  int64 // unexpected transport errors (must be 0 on a healthy run)
+	BoundedRejects   int64 // typed bound errors (overload caps) — acceptable, not a fault
+	BaselineRoutines int   // goroutine count captured before the run
+	FinalRoutines    int   // goroutine count after teardown
 }
 
 // Consistent reports whether the eventual-consistency oracle holds: the engine's

@@ -29,15 +29,15 @@ const DefaultEdgeTypeFilterCacheCapacity = 256
 // purely-monotonic counter is the correct — not merely convenient —
 // invalidation signal for a CSR-position-keyed map like this one).
 type edgeTypeFilterEntry struct {
-	epoch  uint64
 	filter map[uint64]string
+	epoch  uint64
 }
 
 // edgeTypeFilterCacheNode pairs a cache key with its entry, mirroring
 // [planCacheNode]'s role for the doubly-linked LRU list.
 type edgeTypeFilterCacheNode struct {
-	key   string
 	value *edgeTypeFilterEntry
+	key   string
 }
 
 // edgeTypeFilterCache is a bounded LRU keyed by a canonicalised
@@ -65,10 +65,10 @@ type edgeTypeFilterCacheNode struct {
 // edgeTypeFilterCache is safe for concurrent use by any number of
 // goroutines.
 type edgeTypeFilterCache struct {
-	mu  sync.Mutex
-	cap int
 	ll  *list.List // *edgeTypeFilterCacheNode, front = most recently used
 	by  map[string]*list.Element
+	cap int
+	mu  sync.Mutex
 }
 
 // newEdgeTypeFilterCache constructs an edgeTypeFilterCache with the given

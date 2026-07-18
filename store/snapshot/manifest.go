@@ -151,13 +151,13 @@ type GraphConfig struct {
 // Multigraph: true}); see [store/recovery.Open]. Only NEW snapshots
 // produced by the full writer carry the real config.
 type Manifest struct {
-	Version     int              `json:"version"`
 	CreatedAt   time.Time        `json:"created_at"`
-	Order       uint64           `json:"order"`
-	Size        uint64           `json:"size"`
+	GraphConfig *GraphConfig     `json:"graph_config,omitempty"`
 	Files       []FileEntry      `json:"files"`
 	Indexes     []IndexFileEntry `json:"indexes,omitempty"`
-	GraphConfig *GraphConfig     `json:"graph_config,omitempty"`
+	Version     int              `json:"version"`
+	Order       uint64           `json:"order"`
+	Size        uint64           `json:"size"`
 }
 
 // WriteManifest writes m to w in canonical (pretty-printed) JSON.

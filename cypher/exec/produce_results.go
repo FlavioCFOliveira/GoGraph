@@ -82,11 +82,11 @@ type Result interface {
 // ResultSet is NOT safe for concurrent use.
 type ResultSet struct {
 	plan    Operator
-	cols    []string
 	ctx     context.Context //nolint:containedctx // stored for streaming lifecycle
-	current Record
-	curRow  Row // positional view of the current row, set by Next alongside current
 	err     error
+	current Record
+	cols    []string
+	curRow  Row // positional view of the current row, set by Next alongside current
 	closed  bool
 }
 

@@ -24,13 +24,13 @@ import (
 // prop is a single typed property assignment, used to keep the fixture
 // declarations compact.
 type prop struct {
-	k string
 	v lpg.PropertyValue
+	k string
 }
 
-func ps(k, v string) prop       { return prop{k, lpg.StringValue(v)} }
-func pi(k string, v int64) prop { return prop{k, lpg.Int64Value(v)} }
-func pb(k string, v bool) prop  { return prop{k, lpg.BoolValue(v)} }
+func ps(k, v string) prop       { return prop{k: k, v: lpg.StringValue(v)} }
+func pi(k string, v int64) prop { return prop{k: k, v: lpg.Int64Value(v)} }
+func pb(k string, v bool) prop  { return prop{k: k, v: lpg.BoolValue(v)} }
 
 // seeder issues AddNode/SetNodeLabel/SetNodeProperty and
 // AddEdge/SetEdgeLabel/SetEdgeProperty calls against a transaction,
@@ -393,23 +393,23 @@ func applyFixture(tx *txn.Tx[string, float64]) error {
 	// and the change timestamp (drives ownership, bus-factor, history).
 	type touch struct {
 		task, comp, change string
-		churn              int64
 		at                 string
+		churn              int64
 	}
 	touches := []touch{
-		{"task:WS-1", "comp:platform/config.go", "add", 120, "2026-01-08T16:00:00Z"},
-		{"task:WS-2", "comp:platform/db.go", "add", 340, "2026-01-15T16:00:00Z"},
-		{"task:WS-2", "comp:platform/config.go", "modify", 25, "2026-01-15T16:30:00Z"},
-		{"task:WS-3", "comp:platform/logging.go", "add", 180, "2026-01-20T16:00:00Z"},
-		{"task:WS-4", "comp:catalog/service.go", "add", 420, "2026-02-03T16:00:00Z"},
-		{"task:WS-4", "comp:catalog/repository.go", "add", 260, "2026-02-03T16:30:00Z"},
-		{"task:WS-5", "comp:platform/auth.go", "add", 210, "2026-02-10T16:00:00Z"},
-		{"task:WS-6", "comp:orders/service.go", "add", 380, "2026-02-24T16:00:00Z"},
-		{"task:WS-6", "comp:orders/repository.go", "add", 240, "2026-02-24T16:30:00Z"},
-		{"task:WS-7", "comp:payments/gateway.go", "add", 300, "2026-03-09T16:00:00Z"},
-		{"task:WS-7", "comp:payments/service.go", "add", 190, "2026-03-09T16:30:00Z"},
-		{"task:WS-8", "comp:api/router.go", "add", 150, "2026-03-23T16:00:00Z"},
-		{"task:WS-8", "comp:api/handlers.go", "add", 330, "2026-03-23T16:30:00Z"},
+		{task: "task:WS-1", comp: "comp:platform/config.go", change: "add", churn: 120, at: "2026-01-08T16:00:00Z"},
+		{task: "task:WS-2", comp: "comp:platform/db.go", change: "add", churn: 340, at: "2026-01-15T16:00:00Z"},
+		{task: "task:WS-2", comp: "comp:platform/config.go", change: "modify", churn: 25, at: "2026-01-15T16:30:00Z"},
+		{task: "task:WS-3", comp: "comp:platform/logging.go", change: "add", churn: 180, at: "2026-01-20T16:00:00Z"},
+		{task: "task:WS-4", comp: "comp:catalog/service.go", change: "add", churn: 420, at: "2026-02-03T16:00:00Z"},
+		{task: "task:WS-4", comp: "comp:catalog/repository.go", change: "add", churn: 260, at: "2026-02-03T16:30:00Z"},
+		{task: "task:WS-5", comp: "comp:platform/auth.go", change: "add", churn: 210, at: "2026-02-10T16:00:00Z"},
+		{task: "task:WS-6", comp: "comp:orders/service.go", change: "add", churn: 380, at: "2026-02-24T16:00:00Z"},
+		{task: "task:WS-6", comp: "comp:orders/repository.go", change: "add", churn: 240, at: "2026-02-24T16:30:00Z"},
+		{task: "task:WS-7", comp: "comp:payments/gateway.go", change: "add", churn: 300, at: "2026-03-09T16:00:00Z"},
+		{task: "task:WS-7", comp: "comp:payments/service.go", change: "add", churn: 190, at: "2026-03-09T16:30:00Z"},
+		{task: "task:WS-8", comp: "comp:api/router.go", change: "add", churn: 150, at: "2026-03-23T16:00:00Z"},
+		{task: "task:WS-8", comp: "comp:api/handlers.go", change: "add", churn: 330, at: "2026-03-23T16:30:00Z"},
 	}
 	for _, t := range touches {
 		s.edge(t.task, t.comp, relTouches, ps("change_type", t.change), pi("churn", t.churn), ps("at", t.at))

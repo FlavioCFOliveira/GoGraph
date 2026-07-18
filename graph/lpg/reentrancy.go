@@ -66,6 +66,14 @@ import (
 // legitimate concurrent (different-goroutine) View readers and an
 // ApplyAtomically writer.
 type barrierGuard struct {
+	// readers maps an in-View goroutine id to its current View nesting depth.
+	// Depth is always 1 in correct code (the guard panics before it can reach
+	// 2); the counter exists purely so the entry check can recognise "this
+	// goroutine is already a reader" without the entry itself being mistaken
+	// for a fresh reader. Pre-created in New so common-path inserts do not grow
+	// a nil/empty map into existence.
+	readers map[int64]int
+
 	// writerGID is the goroutine id of the goroutine currently HOLDING visMu
 	// in write mode, or 0 when no writer holds it. It is stamped by
 	// [barrierGuard.stampWriter] only after visMu.Lock succeeds and cleared by
@@ -79,13 +87,6 @@ type barrierGuard struct {
 	// readerMu guards readers. It is independent of visMu and is held only for
 	// the O(1) map mutation at the View entry/exit boundary.
 	readerMu sync.Mutex
-	// readers maps an in-View goroutine id to its current View nesting depth.
-	// Depth is always 1 in correct code (the guard panics before it can reach
-	// 2); the counter exists purely so the entry check can recognise "this
-	// goroutine is already a reader" without the entry itself being mistaken
-	// for a fresh reader. Pre-created in New so common-path inserts do not grow
-	// a nil/empty map into existence.
-	readers map[int64]int
 }
 
 // initBarrierGuard pre-creates the reader map so the common path never

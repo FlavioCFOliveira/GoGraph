@@ -49,14 +49,15 @@ import (
 type CorrelatedApply struct {
 	outer Operator
 	inner Operator
-	arg   *Argument
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 
+	arg *Argument
+
 	// current state
-	outerRow Row  // current outer row; nil when no outer row has been fetched
-	outerEOS bool // true after outer plan is exhausted
+	outerRow Row // current outer row; nil when no outer row has been fetched
 	outBuf   []expr.Value
+	outerEOS bool // true after outer plan is exhausted
 }
 
 // NewCorrelatedApply creates a CorrelatedApply operator.
@@ -168,20 +169,20 @@ func (op *CorrelatedApply) Close() error {
 //
 // OptionalApply is NOT safe for concurrent use.
 type OptionalApply struct {
-	outer       Operator
-	inner       Operator
-	arg         *Argument
-	paddedWidth int // total output width = outerWidth + innerExtraCols
+	outer Operator
+	inner Operator
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 
+	arg *Argument
+
 	// per-outer-row state
-	outerRow     Row  // stable snapshot of the current outer row
+	outerRow     Row // stable snapshot of the current outer row
+	outBuf       []expr.Value
+	paddedWidth  int  // total output width = outerWidth + innerExtraCols
 	pendingInner bool // true when inner is initialised for outerRow but not drained
 	emittedAny   bool // true when ≥1 inner row was emitted for this outer
 	outerEOS     bool // true when outer plan is exhausted
-
-	outBuf []expr.Value
 }
 
 // NewOptionalApply creates an OptionalApply operator.

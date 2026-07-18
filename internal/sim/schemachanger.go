@@ -58,10 +58,10 @@ func (f SchemaChangeFamily) String() string {
 // acceptable. A panic, leak, or torn index/lost constraint is a violation,
 // checked structurally after the run rather than per-attempt.
 type SchemaChangeOutcome struct {
+	FailureMsg string
 	Family     SchemaChangeFamily
 	Succeeded  bool
 	Failed     bool
-	FailureMsg string
 }
 
 // Acceptable reports whether the DDL completed cleanly (success or typed

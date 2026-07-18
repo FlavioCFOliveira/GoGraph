@@ -68,10 +68,8 @@ var _ walFile = (*SimFileHandle)(nil)
 //
 //nolint:revive // intentional SimXxx naming scheme (see comment above).
 type SimDisk struct {
-	mu        sync.Mutex
-	files     map[string]*simFile
-	faultRate float64
-	seed      *Seed
+	files map[string]*simFile
+	seed  *Seed
 	// dirs tracks the dirent durability of DIRECTORIES that were published by
 	// a directory rename (the snapshot publish renames a whole staging
 	// directory onto the live name). The value is whether the directory's own
@@ -79,7 +77,8 @@ type SimDisk struct {
 	// implicitly durable (it was created in place via MkdirAll, never via a
 	// publish rename). A [SimDisk.Crash] drops every directory whose dirent is
 	// not yet durable, taking its entire subtree with it.
-	dirs map[string]bool
+	dirs                   map[string]bool
+	parentDirSyncFaultPath string
 	// capacityBytes, when > 0, bounds the total number of bytes the in-memory
 	// filesystem may hold across all files. It models a finite disk so the DST
 	// can drive the engine through a disk-full (ENOSPC) condition. Zero (the
@@ -93,7 +92,10 @@ type SimDisk struct {
 	// ([SimDisk.ArmSyncFaultAt]) and is exposed via [SimDisk.SyncCount] so a
 	// concurrent scenario can gate an action (e.g. a teardown) on durable
 	// progress rather than on wall-clock time. It is mutated only under d.mu.
-	syncCount int64
+	syncCount   int64
+	syncFaultAt int64
+	faultRate   float64
+	mu          sync.Mutex
 	// syncFaultArmed / syncFaultAt implement a ONE-SHOT deterministic Sync
 	// fault: when armed, the syncFaultAt-th Sync call returns [ErrSimFault]
 	// exactly once (then disarms). Unlike the probabilistic faultRate path it
@@ -106,7 +108,6 @@ type SimDisk struct {
 	// the syncFaultAt-th is non-deterministic under concurrency (interleaving),
 	// but that a fault fires at that ordinal is deterministic (the hybrid model).
 	syncFaultArmed bool
-	syncFaultAt    int64
 	// enospcOnSync selects WHERE the out-of-space condition surfaces:
 	//
 	//   - false (eager mode, the default): a Write / Truncate / TruncatePath
@@ -134,7 +135,6 @@ type SimDisk struct {
 	// poison the writer (store/wal/writer.go poisonAfterRename) yet leave the
 	// on-disk suffix-only WAL intact and recoverable.
 	parentDirSyncFaultArmed bool
-	parentDirSyncFaultPath  string
 }
 
 // simFile is the in-memory backing store for one path. data holds the file
@@ -152,8 +152,8 @@ type SimDisk struct {
 // separately by the per-Sync fault and the torn-write sector bitmap; this flag
 // is only about the name's link surviving a crash.
 type simFile struct {
-	data          []byte
 	faulted       map[int]bool
+	data          []byte
 	direntDurable bool
 }
 

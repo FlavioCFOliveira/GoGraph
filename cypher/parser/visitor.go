@@ -105,14 +105,14 @@ func unsupported(ctx antlr.ParserRuleContext, rule, msg string) *SemaError {
 // Using a package-level type ensures that the type assertion in visitProjectionBody
 // resolves correctly regardless of the call site.
 type projItems struct {
-	all   bool
 	items []*ast.ProjectionItem
+	all   bool
 }
 
 // mergeAction is the package-level transfer type returned by VisitMergeAction.
 type mergeAction struct {
-	onCreate bool
 	items    []*ast.SetItem
+	onCreate bool
 }
 
 // -------------------------------------------------------------------------
@@ -1219,10 +1219,10 @@ func (v *visitor) VisitRelationshipPattern(ctx *gen.RelationshipPatternContext) 
 
 // relDetail is an internal transfer object for VisitRelationDetail.
 type relDetail struct {
-	variable   *string
-	types      []string
-	rangeQ     *ast.RangeQuantifier
 	properties ast.Expression
+	variable   *string
+	rangeQ     *ast.RangeQuantifier
+	types      []string
 }
 
 // VisitRelationDetail parses [variable? :types? range? properties?].
@@ -1723,10 +1723,10 @@ type listInExpr struct{ list ast.Expression }
 
 // subscriptOrSlice is an internal transfer type.
 type subscriptOrSlice struct {
-	isSlice bool
 	from    ast.Expression
 	to      ast.Expression
 	index   ast.Expression
+	isSlice bool
 }
 
 // VisitStringExpression returns a partial *BinaryOp with nil Left (filled by parent).
@@ -2296,9 +2296,9 @@ func (v *visitor) VisitFilterExpression(ctx *gen.FilterExpressionContext) interf
 	}
 	// FilterExpression itself is only used by callers; return a struct.
 	type filterExprResult struct {
-		varName string
 		src     ast.Expression
 		pred    ast.Expression
+		varName string
 	}
 	return &filterExprResult{varName: varName, src: src, pred: pred}
 }
@@ -2639,8 +2639,8 @@ func (v *visitor) VisitMapLit(ctx *gen.MapLitContext) interface{} {
 
 // mapPair is an internal transfer type.
 type mapPair struct {
-	key   string
 	value ast.Expression
+	key   string
 }
 
 // VisitMapPair handles name: expr.

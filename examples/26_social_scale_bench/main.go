@@ -274,12 +274,12 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 // plus the wall-clock cost and a sample user to anchor traversal
 // queries.
 type buildStats struct {
+	sampleUser  string   // id of an arbitrary, fixed user for FoF queries
+	sampleIDs   []string // first unwindBatch user ids, for the UNWIND batch read
 	users       int
 	articles    int
 	friendEdges int
 	likeEdges   int
-	sampleUser  string   // id of an arbitrary, fixed user for FoF queries
-	sampleIDs   []string // first unwindBatch user ids, for the UNWIND batch read
 	elapsed     time.Duration
 }
 

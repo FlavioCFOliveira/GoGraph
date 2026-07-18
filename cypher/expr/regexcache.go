@@ -81,16 +81,15 @@ type regexEntry struct {
 // to their compile outcome. The zero value is not usable; construct with
 // newRegexCache.
 type regexCache struct {
-	mu      sync.Mutex
 	entries map[string]regexEntry
+	// compileFn compiles a pattern. It is a field so tests can count
+	// compilations; production code always uses regexp.Compile.
+	compileFn func(string) (*regexp.Regexp, error)
 	// order records insertion order of the keys currently held in entries,
 	// used to pick the eviction victim (oldest first).
 	order    []string
 	capacity int
-
-	// compileFn compiles a pattern. It is a field so tests can count
-	// compilations; production code always uses regexp.Compile.
-	compileFn func(string) (*regexp.Regexp, error)
+	mu       sync.Mutex
 }
 
 // newRegexCache builds a bounded FIFO regex cache with the given capacity.

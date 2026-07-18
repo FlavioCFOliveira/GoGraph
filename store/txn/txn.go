@@ -406,25 +406,23 @@ type Options[N comparable, W any] struct {
 // acquire blocks (or fails with ctx) until the holder releases, so the
 // single-writer contract is identical to the previous mutex.
 type Store[N comparable, W any] struct {
+	codec  codecHolder[N]
+	wcodec WeightCodec[W]
+
+	// applyCond signals committers when appliedSeq advances.
+	applyCond *sync.Cond
+
+	g   *lpg.Graph[N, W]
+	wal *wal.Writer
+
+	inflightCond *sync.Cond
+
 	// sem is the single-writer semaphore: a buffered channel of capacity
 	// one. A send acquires the writer (Begin / BeginCtx / RunUnderCommitLock);
 	// a receive releases it (Tx.release / RunUnderCommitLock's defer). It is
 	// allocated once at construction ([newStore]); a zero-value Store is not
 	// usable. See [Store.acquire] / [Store.release].
-	sem    chan struct{}
-	g      *lpg.Graph[N, W]
-	wal    *wal.Writer
-	codec  codecHolder[N]
-	wcodec WeightCodec[W]
-
-	// txnSeq is the last assigned transaction sequence number. A
-	// Commit/CommitWALOnly increments it once and stamps the
-	// value into every v3 op frame and the trailing [OpCommit] marker, so
-	// recovery can group a transaction's frames and apply them atomically.
-	// It is incremented only while the single-writer semaphore is held (the
-	// lock acquired in Begin), so the atomic type is for safe publication
-	// rather than contended access.
-	txnSeq atomic.Uint64
+	sem chan struct{}
 
 	// maxTxnOps is the per-transaction op cap enforced in the commit/append
 	// path: a transaction buffering more than this many ops is rejected with
@@ -437,6 +435,26 @@ type Store[N comparable, W any] struct {
 	// <= the recovery cap guarantees every durably-committed transaction
 	// replays within recovery's buffer (audit gap: bounded resources).
 	maxTxnOps int
+
+	// appliedSeq is the highest transaction sequence whose post-durability
+	// in-memory apply step has completed (or been skipped, for a durable txn
+	// whose apply failed or whose path performs no apply). A committer holding
+	// sequence seq waits until appliedSeq == seq-1 before applying, then sets
+	// appliedSeq = seq. It is advanced for EVERY consumed sequence — including a
+	// transaction whose fsync failed or whose apply errored — so a failed
+	// transaction never wedges the apply chain behind it.
+	appliedSeq uint64
+
+	// txnSeq is the last assigned transaction sequence number. A
+	// Commit/CommitWALOnly increments it once and stamps the
+	// value into every v3 op frame and the trailing [OpCommit] marker, so
+	// recovery can group a transaction's frames and apply them atomically.
+	// It is incremented only while the single-writer semaphore is held (the
+	// lock acquired in Begin), so the atomic type is for safe publication
+	// rather than contended access.
+	txnSeq atomic.Uint64
+
+	inflight int
 
 	// --- group-commit apply gate (#1507) ---
 	//
@@ -456,16 +474,6 @@ type Store[N comparable, W any] struct {
 	//
 	// applyMu guards appliedSeq and is the locker of applyCond.
 	applyMu sync.Mutex
-	// applyCond signals committers when appliedSeq advances.
-	applyCond *sync.Cond
-	// appliedSeq is the highest transaction sequence whose post-durability
-	// in-memory apply step has completed (or been skipped, for a durable txn
-	// whose apply failed or whose path performs no apply). A committer holding
-	// sequence seq waits until appliedSeq == seq-1 before applying, then sets
-	// appliedSeq = seq. It is advanced for EVERY consumed sequence — including a
-	// transaction whose fsync failed or whose apply errored — so a failed
-	// transaction never wedges the apply chain behind it.
-	appliedSeq uint64
 
 	// --- in-flight commit tracker (#1507 quiesce boundary) ---
 	//
@@ -488,9 +496,7 @@ type Store[N comparable, W any] struct {
 	// broadcasts when reaching zero) only after its entire commit finishes
 	// (doneInflight). The increment MUST happen-before the release; reversing
 	// them reopens the race.
-	inflightMu   sync.Mutex
-	inflightCond *sync.Cond
-	inflight     int
+	inflightMu sync.Mutex
 }
 
 // resolveMaxTxnOps normalises the maxTxnOps constructor argument to the
@@ -773,27 +779,27 @@ func (s *Store[N, W]) BeginCtx(ctx context.Context) (*Tx[N, W], error) {
 // (Weight), a string Label used by label ops, and Key / Value used by
 // property ops. Fields are zero-valued for op kinds that do not require them.
 type Op[N comparable, W any] struct {
-	Kind     OpKind
+	// Value is the typed property value for SetNodeProperty and SetEdgeProperty
+	// ops. It is the zero PropertyValue for all other op kinds.
+	Value    lpg.PropertyValue
 	Src, Dst N
 	Weight   W
 	Label    string
 	// Key is the property key for SetNodeProperty, DelNodeProperty,
 	// SetEdgeProperty, and DelEdgeProperty ops.
 	Key string
-	// Value is the typed property value for SetNodeProperty and SetEdgeProperty
-	// ops. It is the zero PropertyValue for all other op kinds.
-	Value lpg.PropertyValue
-	// Handle is the stable per-edge handle carried by the Stage-2
-	// handle-bearing op kinds ([OpAddEdgeH], [OpSetEdgeLabelByHandle],
-	// [OpSetEdgePropertyByHandle], [OpRemoveEdgeInstanceByHandle]). It is 0
-	// for every other op kind.
-	Handle uint64
 	// ConstraintName is the user-defined constraint name carried by the
 	// schema-DDL op kinds ([OpCreateConstraint], [OpDropConstraint]). For
 	// those kinds Label holds the constrained node label and Key holds the
 	// constrained property; ConstraintKind selects UNIQUE vs NOT NULL. It is
 	// the empty string for every other op kind.
 	ConstraintName string
+	// Handle is the stable per-edge handle carried by the Stage-2
+	// handle-bearing op kinds ([OpAddEdgeH], [OpSetEdgeLabelByHandle],
+	// [OpSetEdgePropertyByHandle], [OpRemoveEdgeInstanceByHandle]). It is 0
+	// for every other op kind.
+	Handle uint64
+	Kind   OpKind
 	// ConstraintKind selects UNIQUE vs NOT NULL for the schema-DDL op kinds.
 	// It is the zero value ([ConstraintUnique]) and ignored for every other
 	// op kind.

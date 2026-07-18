@@ -63,14 +63,14 @@ type RelEndpointFn func(row Row) (uint64, uint64, bool)
 //
 // DeleteNode is NOT safe for concurrent use.
 type DeleteNode struct {
-	nodeVar        string
-	schema         map[string]int
 	child          Operator
 	mutator        GraphMutator
+	ctx            context.Context //nolint:containedctx // stored for per-Next ctx check
+	schema         map[string]int
 	targetEvalFn   TargetEvalFn
 	relEndpointsFn RelEndpointFn
 	reg            *ConstraintRegistry // nil means no registry maintenance
-	ctx            context.Context     //nolint:containedctx // stored for per-Next ctx check
+	nodeVar        string
 }
 
 // NewDeleteNode creates a DeleteNode operator.
@@ -440,12 +440,12 @@ func removeEdgeEitherDirection(mutator GraphMutator, src, dst string) {
 //
 // DeleteRelationship is NOT safe for concurrent use.
 type DeleteRelationship struct {
-	relVar  string
-	schema  map[string]int
 	child   Operator
 	mutator GraphMutator
-	relCols *RelCols        // non-nil enables instance-precise by-handle removal
 	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
+	schema  map[string]int
+	relCols *RelCols // non-nil enables instance-precise by-handle removal
+	relVar  string
 }
 
 // NewDeleteRelationship creates a DeleteRelationship operator.

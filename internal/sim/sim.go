@@ -39,48 +39,19 @@ const (
 
 // Config parameterises a simulation run.
 type Config struct {
-	// Seed is the master seed; the entire run is a pure function of it.
-	Seed uint64
-	// MaxTicks is the number of ticks (operations) the safety phase runs.
-	MaxTicks int
 	// Workload is the actor mix. When nil, [DefaultWorkload] is used.
 	Workload *Workload
-	// CheckEvery is the invariant-check cadence in ticks. Values <= 0 are
-	// normalised to 1 (check every tick).
-	CheckEvery int
 	// OnOp, when non-nil, is called synchronously with each tick and the
 	// operation about to run, before it is executed. It is an observation hook
 	// (e.g. for verbose tracing); it must not mutate state or draw from any
 	// randomness, or it would break reproducibility. It runs on the simulation
 	// goroutine.
 	OnOp func(tick int64, op Op)
-	// Crash configures deterministic crash/recovery injection. The zero value
-	// disables it (Enabled == false), which is the safe default: a run that does
-	// not opt in drives a plain in-memory engine exactly as before, byte for
-	// byte. When enabled, the simulator instead drives a real SimDisk-backed
-	// persistence stack (WAL append+sync + recovery replay) so a scheduled crash
-	// drops the live engine and the store is reopened from the durable image.
-	Crash CrashConfig
 	// OnCrash, when non-nil, is called synchronously after each crash+recovery
 	// cycle with the crash tick and how many WAL ops recovery replayed. Like
 	// OnOp it is an observation hook and must not mutate state or draw
 	// randomness.
 	OnCrash func(tick int64, replayedWALOps int)
-	// Disk, when its CapacityBytes > 0, bounds the SimDisk-backed durable store
-	// to a finite size so the run drives the engine through a disk-full (ENOSPC)
-	// condition on the real WAL append+sync path. A non-zero capacity implies the
-	// durable store even when Crash is disabled; the zero value leaves the disk
-	// unbounded (the prior behaviour). See [DiskConfig].
-	Disk DiskConfig
-	// EngineOpts configures the in-memory engine the deterministic loop drives
-	// (the non-crash, non-disk path). The zero value is byte-identical to
-	// [cypher.NewEngine], so a scenario that does not set it is unaffected. The
-	// mem-pressure scenario clamps the logical-resource budgets here
-	// (MaxResultRows / MaxResultBytes / MaxCollectItems) so over-budget ops are
-	// refused with a typed error, exercising graceful degradation deterministically.
-	// It is applied only on the in-memory path; the durable (crash/disk) path uses
-	// the recovery-config engine.
-	EngineOpts cypher.EngineOptions
 	// Checkpoint configures deterministic, in-loop checkpointing of the
 	// SimDisk-backed store. The zero value disables it (Enabled == false), so a
 	// run that does not opt in is byte-identical to before. When enabled, the
@@ -91,23 +62,52 @@ type Config struct {
 	// SimDisk-backed stack even when [Config.Crash] is disabled. See
 	// [CheckpointConfig].
 	Checkpoint CheckpointConfig
+	// EngineOpts configures the in-memory engine the deterministic loop drives
+	// (the non-crash, non-disk path). The zero value is byte-identical to
+	// [cypher.NewEngine], so a scenario that does not set it is unaffected. The
+	// mem-pressure scenario clamps the logical-resource budgets here
+	// (MaxResultRows / MaxResultBytes / MaxCollectItems) so over-budget ops are
+	// refused with a typed error, exercising graceful degradation deterministically.
+	// It is applied only on the in-memory path; the durable (crash/disk) path uses
+	// the recovery-config engine.
+	EngineOpts cypher.EngineOptions
+	// Crash configures deterministic crash/recovery injection. The zero value
+	// disables it (Enabled == false), which is the safe default: a run that does
+	// not opt in drives a plain in-memory engine exactly as before, byte for
+	// byte. When enabled, the simulator instead drives a real SimDisk-backed
+	// persistence stack (WAL append+sync + recovery replay) so a scheduled crash
+	// drops the live engine and the store is reopened from the durable image.
+	Crash CrashConfig
+	// Disk, when its CapacityBytes > 0, bounds the SimDisk-backed durable store
+	// to a finite size so the run drives the engine through a disk-full (ENOSPC)
+	// condition on the real WAL append+sync path. A non-zero capacity implies the
+	// durable store even when Crash is disabled; the zero value leaves the disk
+	// unbounded (the prior behaviour). See [DiskConfig].
+	Disk DiskConfig
+	// Seed is the master seed; the entire run is a pure function of it.
+	Seed uint64
+	// MaxTicks is the number of ticks (operations) the safety phase runs.
+	MaxTicks int
+	// CheckEvery is the invariant-check cadence in ticks. Values <= 0 are
+	// normalised to 1 (check every tick).
+	CheckEvery int
 }
 
 // CheckpointConfig parameterises deterministic in-loop checkpointing. The zero
 // value disables it (Enabled == false), the safe default: a run that does not
 // opt in never checkpoints and keeps the legacy WAL-only durable layout.
 type CheckpointConfig struct {
-	// Enabled turns in-loop checkpointing on. When true the durable store is
-	// opened in full-stack mode and the loop checkpoints on the cadence below.
-	Enabled bool
-	// Every is the tick cadence between checkpoints. A non-positive value falls
-	// back to [defaultCheckpointEvery]. The first checkpoint fires at the first
-	// tick that is a positive multiple of Every.
-	Every int
 	// Dir is the SimDisk directory the snapshot and WAL live under. A non-empty
 	// dir places the WAL at dir/wal and the snapshot at dir/snapshot. When empty
 	// it falls back to [defaultCheckpointDir].
 	Dir string
+	// Every is the tick cadence between checkpoints. A non-positive value falls
+	// back to [defaultCheckpointEvery]. The first checkpoint fires at the first
+	// tick that is a positive multiple of Every.
+	Every int
+	// Enabled turns in-loop checkpointing on. When true the durable store is
+	// opened in full-stack mode and the loop checkpoints on the cadence below.
+	Enabled bool
 }
 
 // DiskConfig bounds the simulated disk so the harness can drive the engine
@@ -143,14 +143,6 @@ type DiskConfig struct {
 // determinism guarantee depends on a single, totally-ordered stream of draws
 // from one [Seed]; [Simulator.Run] must be called from one goroutine.
 type Simulator struct {
-	cfg      Config
-	seed     *Seed
-	clock    *VirtualClock
-	disk     *SimDisk
-	oracle   *GraphOracle
-	checker  *InvariantChecker
-	workload *Workload
-	engine   *EngineAdapter
 	// crash is the deterministic crash scheduler. It is always non-nil but is
 	// inert (never fires, never draws) when Config.Crash.Enabled is false.
 	crash *CrashSchedule
@@ -158,7 +150,15 @@ type Simulator struct {
 	// crash mode; nil when crashes are disabled (the engine is then a plain
 	// in-memory engine with no durable layer). On a crash it is reopened from the
 	// durable SimDisk image via real recovery.
-	store *SimStore
+	store    *SimStore
+	clock    *VirtualClock
+	disk     *SimDisk
+	oracle   *GraphOracle
+	checker  *InvariantChecker
+	workload *Workload
+	engine   *EngineAdapter
+	seed     *Seed
+	cfg      Config
 	// crashCount and replayedOps accumulate run statistics for reports and tests.
 	crashCount  int
 	replayedOps int

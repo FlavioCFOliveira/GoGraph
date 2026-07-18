@@ -141,10 +141,10 @@ const (
 type ScopeError struct {
 	// Kind classifies the violation; one of the Kind* constants.
 	Kind ErrorKind
-	// Pos is the source position of the offending token or node.
-	Pos ast.Position
 	// Message is a human-readable description.
 	Message string
+	// Pos is the source position of the offending token or node.
+	Pos ast.Position
 }
 
 // Error implements the error interface.

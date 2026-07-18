@@ -33,8 +33,8 @@ func isWriteQuery(q string) bool { return writeKeywordRE.MatchString(q) }
 
 // queryRequest is the POST /query request body. Params is optional.
 type queryRequest struct {
-	Query  string         `json:"query"`
 	Params map[string]any `json:"params"`
+	Query  string         `json:"query"`
 }
 
 // queryResponse is the POST /query success body: the output column names
@@ -463,8 +463,8 @@ func cellString(v any) string {
 
 // explainRequest is the POST /explain request body. Params is optional.
 type explainRequest struct {
-	Query  string         `json:"query"`
 	Params map[string]any `json:"params"`
+	Query  string         `json:"query"`
 }
 
 // explainResponse is the POST /explain success body: the rendered physical

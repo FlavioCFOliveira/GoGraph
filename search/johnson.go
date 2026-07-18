@@ -218,10 +218,10 @@ func JohnsonAPSPCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], err
 type johnsonPlan[W Weight] struct {
 	out        *APSP[W]
 	compact    []int
-	live       int
-	maxID      int
 	h          []W // Johnson potential h(v)
 	reweighted []W // w'(u,v) = w(u,v) + h(u) - h(v), parallel to c.EdgesSlice()
+	live       int
+	maxID      int
 }
 
 // johnsonPrepare runs the source-independent prologue of Johnson's

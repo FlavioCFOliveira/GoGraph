@@ -479,9 +479,9 @@ func (v MapValue) Equal(other Value) Value {
 // produced by an operator. Under that contract concurrent reads are safe
 // without external locking.
 type NodeValue struct {
-	ID         uint64
-	Labels     []string
 	Properties MapValue
+	Labels     []string
+	ID         uint64
 	// Deleted reports whether the entity has been removed by an earlier
 	// DELETE / DETACH DELETE clause in the same statement. Property and
 	// label accessors raise EntityNotFound: DeletedEntityAccess when
@@ -592,8 +592,8 @@ type NodeResolver interface {
 // in which it is read. Callers outside that pooled lifecycle must treat
 // instances as immutable and must not call [LazyNodeValue.Reset].
 type LazyNodeValue struct {
-	id  uint64
 	res NodeResolver
+	id  uint64
 }
 
 // NewLazyNodeValue constructs a [LazyNodeValue] for node id backed by res.
@@ -679,11 +679,11 @@ func (v *LazyNodeValue) Equal(other Value) Value {
 // produced by an operator. Under that contract concurrent reads are safe
 // without external locking.
 type RelationshipValue struct {
+	Properties MapValue
+	Type       string
 	ID         uint64
 	StartID    uint64
 	EndID      uint64
-	Type       string
-	Properties MapValue
 	// Deleted — see [NodeValue.Deleted].
 	Deleted bool
 }

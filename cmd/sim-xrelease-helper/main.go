@@ -61,16 +61,16 @@ import (
 // depends on no internal package (internal/* is import-restricted and would not
 // be importable from a prior tag's tree anyway).
 type wireOp struct {
+	Params map[string]any `json:"params"`
 	Kind   string         `json:"kind"`
 	Cypher string         `json:"cypher"`
-	Params map[string]any `json:"params"`
 }
 
 // wireResult is the per-op output line.
 type wireResult struct {
+	Rows      string `json:"rows"`
 	Index     int    `json:"i"`
 	Committed bool   `json:"committed"`
-	Rows      string `json:"rows"`
 }
 
 // wireDone is the final summary line.

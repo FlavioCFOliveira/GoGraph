@@ -77,8 +77,8 @@ type KeyFn func(row Row) (expr.Value, error)
 // buildBucketRow pairs a materialised build-side row with its already-evaluated
 // join key, so the probe phase verifies equality without re-evaluating the key.
 type buildBucketRow struct {
-	row Row
 	key expr.Value
+	row Row
 }
 
 // HashJoin is a Volcano pipeline operator that performs an order-insensitive
@@ -88,31 +88,32 @@ type buildBucketRow struct {
 //
 // HashJoin is NOT safe for concurrent use.
 type HashJoin struct {
-	build   Operator
-	probe   Operator
-	buildFn KeyFn
-	probeFn KeyFn
+	build    Operator
+	probe    Operator
+	ctx      context.Context //nolint:containedctx // stored for per-Next ctx check
+	probeKey expr.Value      // current probe key
+	buildFn  KeyFn
+	probeFn  KeyFn
+
+	// hash table: canonical key hash → slice of build rows in that bucket.
+	table map[uint64][]buildBucketRow
+
+	budget byteBudget // estimated-byte cap on the build table (#1841)
+
+	// probe-iteration state
+	probeRow Row              // current probe row; nil when none active
+	bucket   []buildBucketRow // current bucket being scanned
+	outBuf   []expr.Value
+
+	bucketIdx int // next index into bucket to test
 
 	// buildOnLeft controls the output column order. When true the output is
 	// buildRow || probeRow; when false it is probeRow || buildRow. The planner
 	// sets this so the output layout matches the Apply (outer || inner) being
 	// replaced regardless of which side became the build side.
 	buildOnLeft bool
-	budget      byteBudget // estimated-byte cap on the build table (#1841)
-
-	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
-
-	// hash table: canonical key hash → slice of build rows in that bucket.
-	table map[uint64][]buildBucketRow
-	built bool
-
-	// probe-iteration state
-	probeRow  Row              // current probe row; nil when none active
-	probeKey  expr.Value       // current probe key
-	bucket    []buildBucketRow // current bucket being scanned
-	bucketIdx int              // next index into bucket to test
-	probeEOS  bool
-	outBuf    []expr.Value
+	built       bool
+	probeEOS    bool
 }
 
 // NewHashJoin creates a HashJoin.

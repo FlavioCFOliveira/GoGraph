@@ -266,8 +266,8 @@ func (pe *patternEvaluator) enumerateSteps(ctx context.Context, srcID graph.Node
 // pick, so an untyped `[r]` over a multi-type parallel pair enumerates each
 // instance's own type(r) (rmp #2017).
 type candidateHop struct {
-	srcID, dstID   graph.NodeID
 	srcKey, dstKey string
+	srcID, dstID   graph.NodeID
 	handle         uint64
 	forward        bool
 }

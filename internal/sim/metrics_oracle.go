@@ -46,10 +46,10 @@ const (
 // recordingBackend is safe for concurrent use (the metrics surface is global
 // and may be hit from any goroutine); every method takes the mutex.
 type recordingBackend struct {
-	mu        sync.Mutex
 	counters  map[string]uint64
 	latencyN  map[string]uint64 // per-name observation count
 	latencSum map[string]time.Duration
+	mu        sync.Mutex
 }
 
 // newRecordingBackend builds an empty recording backend.
@@ -111,6 +111,9 @@ type MetricsSnapshot struct {
 // MetricsOracleResult is the verdict of a metrics-oracle check: the before/after
 // snapshots, the accounting the oracle expected, and any discrepancy.
 type MetricsOracleResult struct {
+	// Discrepancies lists every mismatch found (empty when the metrics are
+	// consistent with the oracle and the reliability bounds hold).
+	Discrepancies []string
 	// Before / After are the snapshots bracketing the run.
 	Before MetricsSnapshot
 	After  MetricsSnapshot
@@ -118,9 +121,6 @@ type MetricsOracleResult struct {
 	// many write statements ran and how many the engine should have rejected.
 	ExpectedWrites      uint64
 	ExpectedWriteErrors uint64
-	// Discrepancies lists every mismatch found (empty when the metrics are
-	// consistent with the oracle and the reliability bounds hold).
-	Discrepancies []string
 }
 
 // Consistent reports whether the metrics matched the oracle and the reliability

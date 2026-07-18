@@ -54,9 +54,9 @@ type communityEdge struct {
 // exactly (up to relabelling).
 type communityFixture struct {
 	name  string
-	order int // number of distinct NodeIDs, 0..order-1, all live
 	edges []communityEdge
 	block []int // planted community id per NodeID, length order
+	order int   // number of distinct NodeIDs, 0..order-1, all live
 }
 
 // communityViolations runs the COMMUNITY-DETECTION correctness battery for one

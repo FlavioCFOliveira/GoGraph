@@ -128,30 +128,13 @@ type hop struct {
 //
 // ShortestPath is NOT safe for concurrent use.
 type ShortestPath struct {
-	input  Operator
-	fwd    csrAdjacency
-	rev    csrAdjacency
-	dir    Direction
-	srcCol int
-	dstCol int
+	input Operator
+	fwd   csrAdjacency
+	rev   csrAdjacency
 
-	// edgeType is the "a type filter was requested" gate; edgeTypeFilter is the
-	// presence-set of forward edge positions whose edge carries an accepted
-	// type (membership, not equality). Both nil/"" means no type filter.
-	edgeType       string
+	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
+
 	edgeTypeFilter map[uint64]string
-
-	// minHops / maxHops bound the accepted path length. maxHops ==
-	// [shortestNoMaxHops] means unbounded.
-	minHops int
-	maxHops int
-
-	// optional controls the no-path behaviour: when true (OPTIONAL MATCH) a
-	// pair with no path emits one row with a Null path; when false (MATCH) the
-	// row is dropped (no output for that input row). See the openCypher
-	// MATCH/OPTIONAL MATCH contract.
-	optional bool
-
 	// pathPred, when non-nil, is a whole-path predicate that references the path
 	// variable (#1786). The operator then runs an EXHAUSTIVE search returning the
 	// shortest path that SATISFIES the predicate, rather than the unconstrained
@@ -159,7 +142,10 @@ type ShortestPath struct {
 	// row followed by the candidate path-list column).
 	pathPred func(Row) (bool, error)
 
-	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
+	// edgeType is the "a type filter was requested" gate; edgeTypeFilter is the
+	// presence-set of forward edge positions whose edge carries an accepted
+	// type (membership, not equality). Both nil/"" means no type filter.
+	edgeType string
 
 	// CSR snapshots.
 	fwdVerts   []uint64
@@ -169,7 +155,14 @@ type ShortestPath struct {
 	revEdges   []graph.NodeID
 	revHandles []uint64
 	revToFwd   []uint64
+	outBuf     []expr.Value
 
+	srcCol int
+	dstCol int
+	// minHops / maxHops bound the accepted path length. maxHops ==
+	// [shortestNoMaxHops] means unbounded.
+	minHops int
+	maxHops int
 	// totalEdgesTraversed is the aggregate per-query edge-traversal count of the
 	// exhaustive path-predicate search, NOT reset per input row, so it bounds the
 	// M × (per-row cost) multiplication an attacker could drive by inflating
@@ -182,7 +175,12 @@ type ShortestPath struct {
 	maxEdgesTraversed      int
 	maxTotalEdgesTraversed int
 
-	outBuf []expr.Value
+	dir Direction
+	// optional controls the no-path behaviour: when true (OPTIONAL MATCH) a
+	// pair with no path emits one row with a Null path; when false (MATCH) the
+	// row is dropped (no output for that input row). See the openCypher
+	// MATCH/OPTIONAL MATCH contract.
+	optional bool
 }
 
 // NewShortestPath creates a ShortestPath operator.
@@ -466,9 +464,9 @@ func (op *ShortestPath) exhaustiveShortestPath(src, dst uint64, inputRow Row) (e
 	}
 
 	type partial struct {
-		node    uint64
 		hops    []hop
 		handles []uint64
+		node    uint64
 	}
 	frontier := []partial{{node: src}}
 
@@ -1147,26 +1145,20 @@ func (op *ShortestPath) Close() error {
 //
 // AllShortestPaths is NOT safe for concurrent use.
 type AllShortestPaths struct {
-	input  Operator
-	fwd    csrAdjacency
-	rev    csrAdjacency
-	dir    Direction
-	srcCol int
-	dstCol int
+	input Operator
+	fwd   csrAdjacency
+	rev   csrAdjacency
 
-	edgeType       string
+	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
+
 	edgeTypeFilter map[uint64]string
-	minHops        int
-	maxHops        int
-	optional       bool
-
 	// pathPred, when non-nil, is a whole-path predicate referencing the path
 	// variable (#1786). The operator then runs an EXHAUSTIVE search returning ALL
 	// shortest paths that SATISFY the predicate (the minimum satisfying length),
 	// rather than all unconstrained shortest paths.
 	pathPred func(Row) (bool, error)
 
-	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
+	edgeType string
 
 	// CSR snapshots.
 	fwdVerts   []uint64
@@ -1176,14 +1168,16 @@ type AllShortestPaths struct {
 	revEdges   []graph.NodeID
 	revHandles []uint64
 	revToFwd   []uint64
-
 	// per-input-row state
-	inputRow    Row
-	inputEOS    bool
-	pending     []expr.ListValue // collected paths from last BFS
-	pendingIdx  int
-	pendingNull bool // emit one Null-path row (OPTIONAL MATCH, no path found)
+	inputRow Row
+	pending  []expr.ListValue // collected paths from last BFS
+	outBuf   []expr.Value
 
+	srcCol     int
+	dstCol     int
+	minHops    int
+	maxHops    int
+	pendingIdx int
 	// totalEdgesTraversed is the aggregate per-query edge-traversal count of the
 	// exhaustive path-predicate search, NOT reset per input row (see the same
 	// field on [ShortestPath]) (#1840).
@@ -1194,7 +1188,10 @@ type AllShortestPaths struct {
 	maxEdgesTraversed      int
 	maxTotalEdgesTraversed int
 
-	outBuf []expr.Value
+	dir         Direction
+	optional    bool
+	inputEOS    bool
+	pendingNull bool // emit one Null-path row (OPTIONAL MATCH, no path found)
 }
 
 // NewAllShortestPaths creates an AllShortestPaths operator. Like
@@ -1481,9 +1478,9 @@ func (op *AllShortestPaths) exhaustiveAllShortest(src, dst uint64, inputRow Row)
 	}
 
 	type partial struct {
-		node    uint64
 		hops    []hop
 		handles []uint64
+		node    uint64
 	}
 	frontier := []partial{{node: src}}
 	foundLen := -1
@@ -1600,8 +1597,8 @@ func (op *AllShortestPaths) aspExpand(node uint64, dist map[uint64]int, preds ma
 // or cancellation must still interrupt the enumeration (#1780).
 func (op *AllShortestPaths) reconstructAll(preds map[uint64][]aspPredEntry, src, dst uint64) ([]expr.ListValue, error) {
 	type frame struct {
-		node    uint64
 		partial []hop // hops collected so far, in reverse order (dst→src)
+		node    uint64
 	}
 
 	var paths []expr.ListValue
@@ -1743,9 +1740,9 @@ func (op *AllShortestPaths) bfsAllShortestCycle(src uint64) ([]expr.ListValue, e
 // op.ctx periodically like [reconstructAll] (#1780).
 func (op *AllShortestPaths) reconstructAllCycles(preds map[uint64][]aspPredEntry, src uint64, closings []aspPredEntry) ([]expr.ListValue, error) {
 	type frame struct {
-		node    uint64
 		partial []hop    // hops collected so far, in reverse order (src-side end → closing-side)
 		usedRel []uint64 // relationship ids already on this partial (edge-simplicity)
+		node    uint64
 	}
 
 	var paths []expr.ListValue
@@ -2082,9 +2079,9 @@ func (op *AllShortestPaths) bfsAllShortestCycleBranch(src uint64) ([]expr.ListVa
 // arm is one shortest src->endpoint path as an ordered node+handle sequence
 // (src-forward order), plus the sets used to test cycle disjointness.
 type arm struct {
-	steps   []cycleStep         // src -> … -> endpoint
 	nodes   map[uint64]struct{} // intermediate + endpoint nodes (src excluded)
 	handles map[uint64]struct{} // edge handles on the arm
+	steps   []cycleStep         // src -> … -> endpoint
 }
 
 // enumerateArms returns every shortest src->target path through the
@@ -2094,8 +2091,8 @@ func (op *AllShortestPaths) enumerateArms(apreds map[uint64][]branchPred, src, t
 		return []arm{{nodes: map[uint64]struct{}{}, handles: map[uint64]struct{}{}}}
 	}
 	type frame struct {
-		node  uint64
 		steps []cycleStep // collected child->parent order (reversed on completion)
+		node  uint64
 	}
 	var arms []arm
 	stack := []frame{{node: target}}

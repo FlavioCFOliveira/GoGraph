@@ -219,15 +219,15 @@ func csrWeightSize[W any]() uint8 {
 type CSRReadback struct {
 	Vertices    []uint64
 	Edges       []graph.NodeID
-	HasWeights  bool
-	WeightSize  uint8
 	WeightBytes []byte
 	// Handles is the optional per-slot stable-edge-handle column, aligned
 	// slot-for-slot with Edges (handles[i] is the stable handle of the edge
 	// at edges[i]). It is nil when the snapshot predates the column or its
 	// source graph carried no handles; when non-nil it has the same length
 	// as Edges. See the trailing-block note on [WriteCSR].
-	Handles []uint64
+	Handles    []uint64
+	HasWeights bool
+	WeightSize uint8
 }
 
 // ReadCSR parses a CSR previously written by [WriteCSR] from r.

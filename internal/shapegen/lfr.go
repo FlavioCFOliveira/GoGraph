@@ -125,8 +125,8 @@ var ErrLFRAssignmentFailed = errors.New("shapegen: LFR node-to-community assignm
 // (Name, Knobs, Build) carry the exact same semantics across families.
 type lfrBase struct {
 	name  string
-	knobs []Knob
 	build func(adjlist.Config) (*lpg.Graph[int, int64], error)
+	knobs []Knob
 }
 
 // Name returns the catalogue identifier.

@@ -362,9 +362,9 @@ func topKOverlap(a, b []scored, n int) int {
 // the page ids in creation order, used to resolve ranks back through the
 // mapper.
 type buildStats struct {
+	pageIDs []string // page ids in creation order; index i is page i
 	pages   int
 	links   int
-	pageIDs []string // page ids in creation order; index i is page i
 	elapsed time.Duration
 }
 

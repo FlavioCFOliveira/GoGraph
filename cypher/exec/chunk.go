@@ -90,11 +90,6 @@ const (
 // backings plus a validity bitmap. Exactly one backing (selected by store) is
 // allocated and live; the others are nil.
 type column struct {
-	kind    expr.Kind  // logical Cypher type of this column
-	store   storageTag // which backing below is live
-	dynamic bool       // true iff constructed as a dynamic (Put-decided) column
-	n       int        // number of rows filled in this column
-
 	i64   []int64      // live iff store == stI64
 	f64   []float64    // live iff store == stF64
 	str   []string     // live iff store == stStr
@@ -104,8 +99,14 @@ type column struct {
 	// valid is the packed validity bitmap (bit set = non-null, LSB-first). It is
 	// nil while allValid is true; it is materialized lazily on the first NULL and,
 	// once allocated, its backing is retained across Reset for pool reuse.
-	valid    []uint64
-	allValid bool // true while no NULL has been recorded; valid may be unallocated
+	valid []uint64
+
+	n int // number of rows filled in this column
+
+	kind     expr.Kind  // logical Cypher type of this column
+	store    storageTag // which backing below is live
+	dynamic  bool       // true iff constructed as a dynamic (Put-decided) column
+	allValid bool       // true while no NULL has been recorded; valid may be unallocated
 }
 
 // DefaultChunkCapacity is the default per-column row capacity of a [Chunk]. It

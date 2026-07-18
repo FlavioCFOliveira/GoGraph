@@ -53,10 +53,10 @@ type NodeByIndexSeek struct {
 	idx   hashLookup
 	seek  expr.Value
 	ctx   context.Context //nolint:containedctx // stored for per-Next ctx check
-	ids   []uint64        // matching NodeIDs, drained once at Init
-	pos   int             // cursor into ids
-	idbuf [8]uint64       // inline backing for ids — singleton/small seeks stay zero-alloc
 	buf   [1]expr.Value   // fixed backing buffer — zero-alloc per Next
+	ids   []uint64        // matching NodeIDs, drained once at Init
+	idbuf [8]uint64       // inline backing for ids — singleton/small seeks stay zero-alloc
+	pos   int             // cursor into ids
 }
 
 // NewNodeByIndexSeek creates a NodeByIndexSeek that looks up seekValue in idx.

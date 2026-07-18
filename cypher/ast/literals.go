@@ -50,9 +50,9 @@ func (n *FloatLiteral) String() string {
 
 // StringLiteral is a single-quoted or double-quoted string literal.
 type StringLiteral struct {
+	Value  string
 	Pos    Position
 	EndPos Position
-	Value  string
 }
 
 func (*StringLiteral) astNode()  {}
@@ -94,10 +94,10 @@ func (n *BoolLiteral) String() string {
 // (e.g. NNN.0 lexed as NNN + . + 0), visitPropertyExpression promotes it to
 // a FloatLiteral instead.
 type OverflowIntLit struct {
+	// Text holds the raw decimal digits including any leading sign character.
+	Text   string
 	Pos    Position
 	EndPos Position
-	// Text holds the raw decimal digits including any leading sign character.
-	Text string
 }
 
 func (*OverflowIntLit) astNode()  {}
@@ -120,9 +120,9 @@ func (n *NullLiteral) String() string { return "null" }
 
 // ListLiteral is a bracketed list of expressions: [e1, e2, …].
 type ListLiteral struct {
+	Elements []Expression
 	Pos      Position
 	EndPos   Position
-	Elements []Expression
 }
 
 func (*ListLiteral) astNode()  {}
@@ -153,10 +153,10 @@ func (*StarLiteral) String() string { return "*" }
 
 // MapLiteral is a map expression: {key1: expr1, key2: expr2, …}.
 type MapLiteral struct {
-	Pos    Position
-	EndPos Position
 	Keys   []string
 	Values []Expression
+	Pos    Position
+	EndPos Position
 }
 
 func (*MapLiteral) astNode()  {}

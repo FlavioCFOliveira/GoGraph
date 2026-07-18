@@ -46,28 +46,15 @@ import (
 //
 // SetAllProperties is NOT safe for concurrent use.
 type SetAllProperties struct {
-	entityVar  string
-	isReplace  bool   // true for `SET n = …`, false for `SET n += …`
-	sourceVar  string // bound entity copy source; empty when not used
-	mapLiteral string // literal map text; empty when not used
-	paramName  string // parameter name (without `$`); empty when not used
-
-	schema     map[string]int
-	relCols    *RelCols // non-nil when entityVar is a relationship
-	srcRelCols *RelCols // non-nil when sourceVar is a relationship
 	child      Operator
 	mutator    GraphMutator
+	ctx        context.Context //nolint:containedctx // stored for per-Next ctx check
+	schema     map[string]int
+	relCols    *RelCols              // non-nil when entityVar is a relationship
+	srcRelCols *RelCols              // non-nil when sourceVar is a relationship
 	params     map[string]expr.Value // query parameters for $name substitution
 	reg        *ConstraintRegistry   // nil means no enforcement
 	mgr        *index.Manager        // nil when reg is nil
-
-	// parsedMap caches the parse of mapLiteral or the param resolution at
-	// construction / WithParams.
-	parsedMap []propLiteral
-	// nullKeys lists the keys whose value is null in the literal/parameter
-	// source map. Such keys must be removed from the target (openCypher
-	// semantics for explicit null assignment via SET map).
-	nullKeys []string
 	// mapEvalFn evaluates the source map against the current row when it holds
 	// a non-literal value (a variable reference, property access, or arithmetic
 	// — e.g. `SET n += {x: row.y}` or `SET n = {x: n.id + 1}`). nil when every
@@ -77,7 +64,6 @@ type SetAllProperties struct {
 	// is silently dropped (the target keeps null / stale data), a fail-silent
 	// Consistency defect matching the literal-only CREATE/MERGE class.
 	mapEvalFn MapEvalFn
-
 	// exprEvalFn evaluates a whole map-valued RHS expression against the current
 	// row for the `SET n = <expr>` / `SET n += <expr>` forms whose right-hand
 	// side is neither a `{…}` literal, a bound entity variable, nor a `$param`
@@ -90,7 +76,20 @@ type SetAllProperties struct {
 	// stringified expression), leaving the openCypher-valid form unsupported.
 	exprEvalFn ExprValueEvalFn
 
-	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
+	entityVar  string
+	sourceVar  string // bound entity copy source; empty when not used
+	mapLiteral string // literal map text; empty when not used
+	paramName  string // parameter name (without `$`); empty when not used
+
+	// parsedMap caches the parse of mapLiteral or the param resolution at
+	// construction / WithParams.
+	parsedMap []propLiteral
+	// nullKeys lists the keys whose value is null in the literal/parameter
+	// source map. Such keys must be removed from the target (openCypher
+	// semantics for explicit null assignment via SET map).
+	nullKeys []string
+
+	isReplace bool // true for `SET n = …`, false for `SET n += …`
 }
 
 // ExprValueEvalFn is a per-row evaluator for a whole map-valued RHS expression

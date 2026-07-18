@@ -252,9 +252,9 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 // many queries ran, how many were feasible (target reachable from
 // source), the per-query latencies, and the total wall-clock time.
 type probeResult struct {
+	latencies []time.Duration
 	count     int
 	feasible  int
-	latencies []time.Duration
 	elapsed   time.Duration
 }
 

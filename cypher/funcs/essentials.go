@@ -42,12 +42,12 @@ import (
 type TypeError struct {
 	// Function is the name of the function that encountered the type error.
 	Function string
+	// Want is a human-readable description of the expected type.
+	Want string
 	// ArgIndex is the 0-based index of the offending argument.
 	ArgIndex int
 	// Got is the kind of the offending argument.
 	Got expr.Kind
-	// Want is a human-readable description of the expected type.
-	Want string
 }
 
 // Error implements the error interface.
@@ -60,10 +60,10 @@ func (e *TypeError) Error() string {
 type ArityError struct {
 	// Function is the name of the function.
 	Function string
-	// Got is the number of arguments received.
-	Got int
 	// Want is a human-readable description of the expected argument count.
 	Want string
+	// Got is the number of arguments received.
+	Got int
 }
 
 // Error implements the error interface.

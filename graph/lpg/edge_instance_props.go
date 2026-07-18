@@ -18,11 +18,11 @@ import (
 // #1633), stored by value, so a 1-2-property edge instance pays a small slice
 // instead of a ~300 B Go map.
 type edgeInstancePropShard struct {
+	m map[edgeKey]map[int64]propBag
 	// mu guards m. Writers (SetEdgePropertyAt, RemoveEdgeInstance) take the
 	// write lock; EdgePropertiesAt reads under a read lock so concurrent
 	// per-instance property reads on a shard proceed in parallel.
 	mu sync.RWMutex
-	m  map[edgeKey]map[int64]propBag
 }
 
 // SetEdgePropertyAt records the property `key`=`value` for the directed

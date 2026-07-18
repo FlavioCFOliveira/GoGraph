@@ -128,6 +128,53 @@ func init() { handshakeTimeout.Store(int64(DefaultHandshakeTimeout)) }
 // TLSConfig, Auth, Logger, and Closer carry their own concurrency
 // contracts.
 type Options struct {
+	// Auth is the authentication handler invoked during HELLO/LOGON. It is
+	// the security boundary of the server: every client must satisfy it
+	// before any Cypher statement executes.
+	//
+	// Auth must be set; leave it nil and [NewServer] returns
+	// [ErrNoAuthHandler]. The server is secure-by-default: a nil Auth is NOT
+	// silently replaced with an open, accept-everyone handler, so a careless
+	// embedder writing Options{} cannot accidentally expose an
+	// unauthenticated server. To enforce credentials, set Auth to a real
+	// [AuthHandler] such as [BasicAuthHandler]. To run without authentication
+	// (development or testing only) set Auth: [NoAuthHandler]{} explicitly:
+	// the explicit NoAuthHandler value is itself the opt-in, it is
+	// self-documenting at the call site, and it is impossible to set by
+	// accident. In that case [NewServer] still emits a loud warning.
+	Auth AuthHandler
+
+	// Closer, when non-nil, is the store-level teardown owner for the
+	// durability stack backing this server's engine — typically a
+	// *[github.com/FlavioCFOliveira/GoGraph/store.DB] bundling the WAL writer
+	// and the background checkpointer. The server closes it AFTER it has
+	// drained every active connection, so it runs the one crash-safe teardown
+	// order (stop the checkpoint goroutine, then close the WAL) only once no
+	// in-flight transaction can still be writing. Both documented stop
+	// mechanisms reach that teardown: [Server.Shutdown] closes it on its
+	// drain-success branch, and [Server.Serve] closes it on its own exit path
+	// once its connection drain completes (e.g. when the Serve context is
+	// cancelled). The close is guarded by a [sync.Once] inside the server, so
+	// the closer's Close runs exactly once regardless of which path wins or
+	// whether both run; it need not be idempotent itself. Leave it nil for a
+	// store-less engine or when the embedder tears the durability stack down
+	// itself; the server then closes nothing beyond its connections.
+	Closer io.Closer
+
+	// TLSConfig, when non-nil, wraps accepted connections with TLS using
+	// the given configuration verbatim. nil means plain TCP (no TLS).
+	//
+	// The server applies no MinVersion or cipher policy of its own: whatever
+	// config is supplied here is used as-is. To start from a hardened baseline
+	// (TLS 1.2 floor, modern AEAD/ECDHE cipher list), begin with
+	// [DefaultTLSConfig] and add your own Certificates or GetCertificate before
+	// assigning it here.
+	TLSConfig *tls.Config
+
+	// Logger is the structured logger for server events. When nil, the
+	// default slog handler is used.
+	Logger *slog.Logger
+
 	// MaxConnections is the upper bound on concurrent accepted connections.
 	// Zero or negative values default to 1024.
 	MaxConnections int
@@ -224,53 +271,6 @@ type Options struct {
 	// takes precedence; MaxStatementTimeout, when set, additionally clamps the
 	// effective value. Set a larger value for long-running analytical statements.
 	DefaultStatementTimeout time.Duration
-
-	// TLSConfig, when non-nil, wraps accepted connections with TLS using
-	// the given configuration verbatim. nil means plain TCP (no TLS).
-	//
-	// The server applies no MinVersion or cipher policy of its own: whatever
-	// config is supplied here is used as-is. To start from a hardened baseline
-	// (TLS 1.2 floor, modern AEAD/ECDHE cipher list), begin with
-	// [DefaultTLSConfig] and add your own Certificates or GetCertificate before
-	// assigning it here.
-	TLSConfig *tls.Config
-
-	// Auth is the authentication handler invoked during HELLO/LOGON. It is
-	// the security boundary of the server: every client must satisfy it
-	// before any Cypher statement executes.
-	//
-	// Auth must be set; leave it nil and [NewServer] returns
-	// [ErrNoAuthHandler]. The server is secure-by-default: a nil Auth is NOT
-	// silently replaced with an open, accept-everyone handler, so a careless
-	// embedder writing Options{} cannot accidentally expose an
-	// unauthenticated server. To enforce credentials, set Auth to a real
-	// [AuthHandler] such as [BasicAuthHandler]. To run without authentication
-	// (development or testing only) set Auth: [NoAuthHandler]{} explicitly:
-	// the explicit NoAuthHandler value is itself the opt-in, it is
-	// self-documenting at the call site, and it is impossible to set by
-	// accident. In that case [NewServer] still emits a loud warning.
-	Auth AuthHandler
-
-	// Logger is the structured logger for server events. When nil, the
-	// default slog handler is used.
-	Logger *slog.Logger
-
-	// Closer, when non-nil, is the store-level teardown owner for the
-	// durability stack backing this server's engine — typically a
-	// *[github.com/FlavioCFOliveira/GoGraph/store.DB] bundling the WAL writer
-	// and the background checkpointer. The server closes it AFTER it has
-	// drained every active connection, so it runs the one crash-safe teardown
-	// order (stop the checkpoint goroutine, then close the WAL) only once no
-	// in-flight transaction can still be writing. Both documented stop
-	// mechanisms reach that teardown: [Server.Shutdown] closes it on its
-	// drain-success branch, and [Server.Serve] closes it on its own exit path
-	// once its connection drain completes (e.g. when the Serve context is
-	// cancelled). The close is guarded by a [sync.Once] inside the server, so
-	// the closer's Close runs exactly once regardless of which path wins or
-	// whether both run; it need not be idempotent itself. Leave it nil for a
-	// store-less engine or when the embedder tears the durability stack down
-	// itself; the server then closes nothing beyond its connections.
-	Closer io.Closer
 }
 
 // ErrNoAuthHandler is returned by [NewServer] when Options.Auth is nil. The
@@ -313,14 +313,6 @@ func resolveMaxInboundDecodeBytes(opt int64) int64 {
 //
 // Server is safe for concurrent use by multiple goroutines.
 type Server struct {
-	eng  *cypher.Engine
-	opts Options
-	sem  chan struct{} // capacity == MaxConnections
-	log  *slog.Logger
-	// inbound is the engine-wide inbound-decode memory ceiling shared by every
-	// connection's pooled decoder (nil-safe; disabled when the resolved limit is
-	// <= 0). It bounds aggregate pre-auth decode memory across connections.
-	inbound *packstream.InboundBudget
 	// clk is the wall-clock source for the explicit-transaction timeout reaper
 	// (the per-session timeout logic). It defaults to [clock.Real] in
 	// [NewServer] so production behaviour is unchanged; a test (notably the DST
@@ -329,8 +321,20 @@ type Server struct {
 	// the tx-reaper deadline computation/timer: the net.Conn read/write/handshake
 	// deadlines remain real OS-socket deadlines (connection liveness, enforced by
 	// the kernel against wall time, not session logic).
-	clk    clock.Clock
-	closer io.Closer // optional store-level teardown owner; closed after drain by Serve's exit path or Shutdown
+	clk      clock.Clock
+	closer   io.Closer // optional store-level teardown owner; closed after drain by Serve's exit path or Shutdown
+	closeErr error
+	ln       net.Listener // guarded by mu; non-nil while Serve is running
+	eng      *cypher.Engine
+	sem      chan struct{} // capacity == MaxConnections
+	log      *slog.Logger
+	// inbound is the engine-wide inbound-decode memory ceiling shared by every
+	// connection's pooled decoder (nil-safe; disabled when the resolved limit is
+	// <= 0). It bounds aggregate pre-auth decode memory across connections.
+	inbound *packstream.InboundBudget
+	cancel  context.CancelFunc // guarded by mu; stops the accept loop
+	opts    Options
+	wg      sync.WaitGroup
 	// closeOnce guards the one-and-only Close of closer: Serve's drained-exit
 	// path and Shutdown's drain-success branch may both reach closeOwned (ctx
 	// cancellation plus an explicit Shutdown, or a double Shutdown), and the
@@ -338,11 +342,7 @@ type Server struct {
 	// result so every caller observes the same outcome; sync.Once's
 	// happens-before guarantee makes the cached read race-free.
 	closeOnce sync.Once
-	closeErr  error
 	mu        sync.Mutex
-	ln        net.Listener // guarded by mu; non-nil while Serve is running
-	wg        sync.WaitGroup
-	cancel    context.CancelFunc // guarded by mu; stops the accept loop
 }
 
 // NewServer creates a Server backed by eng. Zero-value Options fields are
@@ -1025,8 +1025,8 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 // readResultT is one outcome of a reader-goroutine read handed to the message
 // loop: a framed message (raw, err == nil) or the terminal read error (err).
 type readResultT struct {
-	raw []byte
 	err error
+	raw []byte
 }
 
 // sendRead delivers a read result to the message loop, or returns false if the
@@ -1089,8 +1089,8 @@ func decodeRequestBudgeted(src *bytes.Reader, budget *packstream.InboundBudget) 
 // sendResponse, so under a streaming PULL or a busy connection that is one
 // allocation set per row (#1518).
 type respBuf struct {
-	buf bytes.Buffer
 	enc *packstream.Encoder
+	buf bytes.Buffer
 }
 
 // maxPooledRespBufCap bounds the backing array a pooled respBuf may retain: a

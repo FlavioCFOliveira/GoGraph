@@ -77,9 +77,9 @@ func CountTrianglesParallelCtx[W any](ctx context.Context, c *csr.CSR[W], numWor
 	defer cancel()
 
 	type result struct {
-		total   int64
-		perNode []int64
 		err     error
+		perNode []int64
+		total   int64
 	}
 	results := make([]result, numWorkers)
 	var wg sync.WaitGroup

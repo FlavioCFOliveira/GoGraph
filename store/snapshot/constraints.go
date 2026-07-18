@@ -60,14 +60,14 @@ var ErrConstraintsCorrupted = errors.New("snapshot: constraints.bin corrupted")
 // snapshot layer keeps its own constraint type so it does not import the txn
 // or recovery packages.
 type ConstraintSpec struct {
-	// Kind is the constraint-kind tag: 0 = UNIQUE, 1 = NOT NULL.
-	Kind uint8
 	// Label is the constrained node label.
 	Label string
 	// Property is the constrained property key.
 	Property string
 	// Name is the user-defined constraint name.
 	Name string
+	// Kind is the constraint-kind tag: 0 = UNIQUE, 1 = NOT NULL.
+	Kind uint8
 }
 
 // ConstraintsReadback is the structural parse of a constraints.bin file: the

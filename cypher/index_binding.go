@@ -161,8 +161,8 @@ func (e *Engine) backfillNodeHashIndex(ctx context.Context, idx *indexhash.Index
 	mapper := e.g.AdjList().Mapper()
 
 	type nodeRef struct {
-		id  graph.NodeID
 		key string
+		id  graph.NodeID
 	}
 	refs := make([]nodeRef, 0, mapper.Len())
 	mapper.Walk(func(id graph.NodeID, key string) bool {
@@ -353,8 +353,8 @@ func (e *Engine) backfillNodeBTreeIndexNumeric(ctx context.Context, idx *indexbt
 	mapper := e.g.AdjList().Mapper()
 
 	type nodeRef struct {
-		id  graph.NodeID
 		key string
+		id  graph.NodeID
 	}
 	refs := make([]nodeRef, 0, mapper.Len())
 	mapper.Walk(func(id graph.NodeID, key string) bool {
@@ -453,8 +453,8 @@ func (e *Engine) backfillNodeBTreeIndex(ctx context.Context, idx *indexbtree.Ind
 	mapper := e.g.AdjList().Mapper()
 
 	type nodeRef struct {
-		id  graph.NodeID
 		key string
+		id  graph.NodeID
 	}
 	refs := make([]nodeRef, 0, mapper.Len())
 	mapper.Walk(func(id graph.NodeID, key string) bool {
@@ -537,9 +537,9 @@ func enqueueNodeRemovalChanges(g *lpg.Graph[string, float64], buf *exec.IndexBuf
 // [indexDefRegistry]. It carries exactly the durable fields a checkpoint must
 // persist (and recovery rebuild from): kind, name, label, property.
 type indexDefEntry struct {
-	hash     bool // true: hash index; false: btree index
 	label    string
 	property string
+	hash     bool // true: hash index; false: btree index
 }
 
 // indexDefRegistry is the engine's live registry of USER secondary-index
@@ -555,8 +555,8 @@ type indexDefEntry struct {
 // exactly the user-named indexes a plain CREATE INDEX declares — no name-suffix
 // filtering is needed on read.
 type indexDefRegistry struct {
-	mu     sync.Mutex
 	byName map[string]indexDefEntry
+	mu     sync.Mutex
 }
 
 // newIndexDefRegistry returns an empty registry.

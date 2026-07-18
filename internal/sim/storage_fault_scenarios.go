@@ -641,10 +641,10 @@ func ioRoundTripFaultScenario() Scenario {
 // ioFormat abstracts one graph/io edge-list format so the round-trip logic is
 // written once and driven for both CSV and JSONL.
 type ioFormat struct {
-	name   string
-	path   string
 	export func(w io.Writer, a *adjlist.AdjList[string, int64]) (int, error)
 	imp    func(r io.Reader) (*adjlist.AdjList[string, int64], error)
+	name   string
+	path   string
 }
 
 // ioRoundTripFormats returns the edge-list formats ST8 exercises. The config is

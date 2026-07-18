@@ -286,10 +286,10 @@ func installSchema(g *lpg.Graph[string, int64]) error {
 // buildStats reports the realised shape of a build plus its wall-clock cost and
 // a sample person to anchor the property read-back.
 type buildStats struct {
+	samplePerson string // key of a fixed person for the read-back
 	persons      int
 	orgs         int
 	worksAt      int
-	samplePerson string // key of a fixed person for the read-back
 	elapsed      time.Duration
 }
 

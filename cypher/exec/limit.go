@@ -26,9 +26,9 @@ import (
 // Limit is NOT safe for concurrent use.
 type Limit struct {
 	child   Operator
+	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
 	n       int64           // maximum rows to emit
 	emitted int64           // rows emitted so far
-	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
 }
 
 // NewLimit creates a Limit operator that passes at most n rows from child.
@@ -82,9 +82,9 @@ func (op *Limit) Close() error {
 // Skip is NOT safe for concurrent use.
 type Skip struct {
 	child   Operator
+	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
 	n       int64           // number of rows to skip
 	skipped int64           // rows discarded so far
-	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
 }
 
 // NewSkip creates a Skip operator that discards the first n rows from child.

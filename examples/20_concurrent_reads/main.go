@@ -377,9 +377,9 @@ func safeDivDur(num, den time.Duration) float64 {
 // them depends on goroutine scheduling — they are pure functions of the
 // immutable snapshot.
 type readResult struct {
+	pagerankTopK []graph.NodeID // top-k nodes by PageRank, deterministic order
 	dijkstraDist int64          // shortest-path distance src -> dst
 	bfsReached   int            // nodes BFS reaches from src
-	pagerankTopK []graph.NodeID // top-k nodes by PageRank, deterministic order
 }
 
 // readOnce performs one full mixed read over c: a Dijkstra src->dst

@@ -48,15 +48,14 @@ import (
 type RollUpApply struct {
 	outer    Operator
 	inner    Operator
+	ctx      context.Context //nolint:containedctx // stored for per-Next ctx check
 	arg      *Argument
 	listEval func(Row) (expr.Value, error) // optional: extract one value from each inner row
+	outBuf   []expr.Value
 	// maxItems bounds the collected list per outer row. It is the resolved
 	// ceiling: a positive value is an active limit and zero disables the cap
 	// (the explicit opt-out). See [resolveRollUpItems].
 	maxItems int
-
-	ctx    context.Context //nolint:containedctx // stored for per-Next ctx check
-	outBuf []expr.Value
 }
 
 // NewRollUpApply creates a RollUpApply operator with the default per-list

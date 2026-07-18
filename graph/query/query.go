@@ -85,8 +85,8 @@ func WithLabel[N comparable, W any](name string) Predicate[N, W] {
 // withProperty matches nodes whose given property equals an expected
 // PropertyValue under the graph's PropertyValue comparison rules.
 type withProperty[N comparable, W any] struct {
-	key      string
 	expected lpg.PropertyValue
+	key      string
 }
 
 func (p withProperty[N, W]) Match(g *lpg.Graph[N, W], id graph.NodeID) bool {

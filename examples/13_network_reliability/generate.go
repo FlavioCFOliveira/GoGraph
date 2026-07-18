@@ -26,11 +26,11 @@ type link struct {
 // mapper that resolves a site index back to its name, and the source/sink
 // indices the flow analysis runs between.
 type network struct {
-	sites   int    // number of site indices, [0, sites)
-	links   []link // every undirected link, in build order
 	adj     *adjlist.AdjList[string, int64]
 	mapper  *graph.Mapper[string] // site name -> NodeID, for SPOF resolution
+	links   []link                // every undirected link, in build order
 	idOf    []graph.NodeID        // site index -> NodeID, for cut resolution
+	sites   int                   // number of site indices, [0, sites)
 	source  int                   // an interior site of cluster 0
 	sink    int                   // an interior site of cluster K-1
 	elapsed time.Duration

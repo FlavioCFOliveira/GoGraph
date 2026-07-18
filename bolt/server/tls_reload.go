@@ -27,12 +27,12 @@ import (
 // CertReloader is safe for concurrent use; the hot path is a
 // single atomic.Pointer.Load.
 type CertReloader struct {
-	certPath, keyPath string
-	current           atomic.Pointer[tls.Certificate]
-	mu                sync.Mutex // serialises reload work; does NOT block readers
 	lastCertModTime   time.Time
 	lastKeyModTime    time.Time
+	current           atomic.Pointer[tls.Certificate]
 	onError           func(error)
+	certPath, keyPath string
+	mu                sync.Mutex // serialises reload work; does NOT block readers
 }
 
 // NewCertReloader loads the certificate + key from disk and returns

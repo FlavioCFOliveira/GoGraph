@@ -11,9 +11,9 @@ package main
 // so memory is O(V + E) rather than the O(V^2) of a dense capacity matrix.
 // This keeps the example usable at the scales its flags reach.
 type residual struct {
-	n    int
 	head [][]int // head[u] = indices into arcs of the arcs leaving u
 	arcs []arc
+	n    int
 }
 
 // arc is one directed residual arc. to is the destination node, cap the

@@ -34,29 +34,29 @@ const (
 
 // Spec describes a benchmark run.
 type Spec struct {
+	OutDir      string
+	BulkOutFile string
 	Scale       Scale
 	Queries     int  // number of interactive queries to issue per run
 	Synthetic   bool // when true, ingest a deterministic synthetic graph
-	OutDir      string
-	BulkOutFile string
 }
 
 // QueryStats reports the percentile latencies of a single benchmark
 // query type. Latencies stores the per-query sample for histogram
 // reconstruction; P50/P95/P99 are pre-computed snapshots.
 type QueryStats struct {
+	Latencies []time.Duration
 	P50       time.Duration
 	P95       time.Duration
 	P99       time.Duration
 	Count     int
-	Latencies []time.Duration
 }
 
 // Report is the top-level run summary.
 type Report struct {
+	Stats      map[string]QueryStats
 	Spec       Spec
 	IngestTime time.Duration
-	Stats      map[string]QueryStats
 }
 
 // Run executes the benchmark. The v1 implementation builds a

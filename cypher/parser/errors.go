@@ -16,10 +16,10 @@ import (
 type SemaError struct {
 	// Rule is the grammar rule name that triggered the error (e.g. "foreach").
 	Rule string
-	// Pos is the source position of the offending node.
-	Pos ast.Position
 	// Message is a human-readable description of the problem.
 	Message string
+	// Pos is the source position of the offending node.
+	Pos ast.Position
 }
 
 // Error implements the error interface.
@@ -29,18 +29,18 @@ func (e *SemaError) Error() string {
 
 // ParseError wraps ANTLR syntax errors reported during lexing or parsing.
 type ParseError struct {
-	// Line and Column of the first problematic token (1-based line, 0-based column).
-	Line   int
-	Column int
 	// OffendingToken is the text of the token that triggered the error.
 	// It is empty for lexer errors where no token was formed.
 	OffendingToken string
+	// Message is the raw ANTLR error message, included as a fallback.
+	Message string
 	// Expected is the human-readable list of token names that were valid at
 	// the error position. It is nil when the expected set cannot be determined
 	// (e.g. lexer errors).
 	Expected []string
-	// Message is the raw ANTLR error message, included as a fallback.
-	Message string
+	// Line and Column of the first problematic token (1-based line, 0-based column).
+	Line   int
+	Column int
 }
 
 // Error returns a human-readable description of the syntax error.

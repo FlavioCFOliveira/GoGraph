@@ -54,11 +54,11 @@ func (f OverloadFamily) String() string {
 // caught by the caller's deadline; the others by goleak/no-panic and the
 // durability re-read).
 type OverloadOutcome struct {
-	Family       OverloadFamily
-	Succeeded    bool   // the op completed and drained cleanly
-	BoundedError bool   // the engine refused it with a typed FAILURE (a declared bound)
-	Rows         int    // rows actually streamed back (always bounded)
 	FailureMsg   string // populated when BoundedError
+	Family       OverloadFamily
+	Rows         int  // rows actually streamed back (always bounded)
+	Succeeded    bool // the op completed and drained cleanly
+	BoundedError bool // the engine refused it with a typed FAILURE (a declared bound)
 }
 
 // Acceptable reports whether the outcome honours the graceful-degradation

@@ -303,15 +303,15 @@ func validatePageRankOptions(opts PageRankOptions) (PageRankOptions, error) {
 // [PageRanker] reuses one state across repeated runs to amortise the
 // allocations and the reverse-CSR transpose.
 type pageRankState[W any] struct {
-	n        int
-	live     int
 	isLive   []bool
 	outdeg   []uint32
 	cur      []float64
 	next     []float64
-	revInit  bool     // whether revVerts/revEdges have been built
 	revVerts []uint64 // reverse-CSR offsets (lazy, cached on a PageRanker)
 	revEdges []graph.NodeID
+	n        int
+	live     int
+	revInit  bool // whether revVerts/revEdges have been built
 }
 
 // newPageRankState builds the CSR-derived topology (isLive, outdeg, live
@@ -637,19 +637,20 @@ func pageRankBuildReverseStructure(verts []uint64, edges []graph.NodeID, n int) 
 // Complexity: O(V + E) work per iterate call, O(workers) extra space.
 type pageRankEngine struct {
 	ctx      context.Context
-	workers  int
+	done     chan int // fan-in: each worker reports its index on completion
+	quit     chan struct{}
 	revVerts []uint64
 	revEdges []graph.NodeID
 	bounds   []int           // edge-balanced chunk boundaries, len workers+1
 	deltas   []float64       // per-worker partial L1 delta
 	start    []chan struct{} // fan-out: one private signal channel per worker
-	done     chan int        // fan-in: each worker reports its index on completion
-	quit     chan struct{}
 
 	// Per-iteration shared inputs, set by iterate before releasing workers.
 	next, cur []float64
 	isLive    []bool
 	outdeg    []uint32
+
+	workers   int
 	baseShare float64
 	damping   float64
 }

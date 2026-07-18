@@ -34,13 +34,13 @@ import (
 //
 // DetachDelete is NOT safe for concurrent use.
 type DetachDelete struct {
-	nodeVar      string
-	schema       map[string]int
 	child        Operator
 	mutator      GraphMutator
+	ctx          context.Context //nolint:containedctx // stored for per-Next ctx check
+	schema       map[string]int
 	targetEvalFn TargetEvalFn
 	reg          *ConstraintRegistry // nil means no registry maintenance
-	ctx          context.Context     //nolint:containedctx // stored for per-Next ctx check
+	nodeVar      string
 }
 
 // NewDetachDelete creates a DetachDelete operator.

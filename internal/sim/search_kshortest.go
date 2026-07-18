@@ -244,8 +244,8 @@ type kshortestEdge struct {
 // iteration is never map-ordered). It is the single ground-truth structure both
 // the CSR builder and the brute-force reference read.
 type kshortestGraph struct {
-	n   int
 	adj [][]kshortestEdge
+	n   int
 }
 
 // kshortestGenGraph builds a deterministic weighted digraph on n nodes that is

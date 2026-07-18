@@ -42,19 +42,19 @@ func (a pipeAddr) String() string  { return a.name }
 // coordinate through a single sync.Cond, so a SimConn may be driven by one
 // goroutine per end — the concurrent-mode contract Phase 3 requires.
 type halfPipe struct {
-	mu     sync.Mutex
-	cond   *sync.Cond
-	buf    []byte
-	closed bool
-	// rwErr, when non-nil after close, is the error returned to a blocked or
-	// subsequent reader/writer (CloseWithError lets the harness model an abrupt
-	// reset distinctly from an orderly close).
-	rwErr error
-	clk   clock.Clock
 	// readDeadline / writeDeadline are absolute instants on clk; the zero Time
 	// means no deadline. They are read under mu.
 	readDeadline  time.Time
 	writeDeadline time.Time
+	// rwErr, when non-nil after close, is the error returned to a blocked or
+	// subsequent reader/writer (CloseWithError lets the harness model an abrupt
+	// reset distinctly from an orderly close).
+	rwErr  error
+	clk    clock.Clock
+	cond   *sync.Cond
+	buf    []byte
+	mu     sync.Mutex
+	closed bool
 }
 
 func newHalfPipe(clk clock.Clock) *halfPipe {

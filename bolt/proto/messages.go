@@ -68,9 +68,9 @@ type Reset struct{}
 // Run submits a Cypher query for execution.
 // Fields: [query string, parameters map, extra map].
 type Run struct {
-	Query      string
 	Parameters map[string]packstream.Value
 	Extra      map[string]packstream.Value
+	Query      string
 }
 
 // Pull requests records from the server.
@@ -105,9 +105,9 @@ type Rollback struct{}
 // Route requests routing table information.
 // Fields: [routing map, bookmarks list, db string|null].
 type Route struct {
+	DB        packstream.Value // string or nil
 	Routing   map[string]packstream.Value
 	Bookmarks []packstream.Value
-	DB        packstream.Value // string or nil
 }
 
 // ---------------------------------------------------------------------------

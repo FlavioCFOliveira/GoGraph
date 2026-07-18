@@ -36,11 +36,11 @@ func (d RelDirection) String() string {
 
 // NodePattern represents a node within a path pattern: (n:Label {prop: val}).
 type NodePattern struct {
-	Pos        Position
-	EndPos     Position
+	Properties Expression // nil or a MapLiteral / Parameter
 	Variable   *string    // nil when anonymous
 	Labels     []string   // zero or more labels
-	Properties Expression // nil or a MapLiteral / Parameter
+	Pos        Position
+	EndPos     Position
 }
 
 func (*NodePattern) astNode() {}
@@ -63,10 +63,10 @@ func (n *NodePattern) String() string {
 
 // RangeQuantifier represents a variable-length range on a relationship: *1..3.
 type RangeQuantifier struct {
-	Pos    Position
-	EndPos Position
 	Min    *int64 // nil means no lower bound specified
 	Max    *int64 // nil means no upper bound specified
+	Pos    Position
+	EndPos Position
 }
 
 // String returns the Cypher range quantifier.
@@ -94,13 +94,13 @@ func intStr(v int64) string {
 //
 //	-[r:REL_TYPE {prop: val}]->
 type RelationshipPattern struct {
+	Properties Expression       // nil or MapLiteral / Parameter
+	Variable   *string          // nil when anonymous
+	Range      *RangeQuantifier // nil for fixed-length
+	Types      []string         // zero or more relationship types (OR semantics)
 	Pos        Position
 	EndPos     Position
-	Variable   *string    // nil when anonymous
-	Types      []string   // zero or more relationship types (OR semantics)
-	Properties Expression // nil or MapLiteral / Parameter
 	Direction  RelDirection
-	Range      *RangeQuantifier // nil for fixed-length
 }
 
 func (*RelationshipPattern) astNode() {}
@@ -165,10 +165,10 @@ const (
 // PathPattern represents a single path within a pattern:
 // (a)-[r]->(b)-[s]->(c).
 type PathPattern struct {
-	Pos      Position
-	EndPos   Position
 	Variable *string      // path variable, nil when absent
 	Head     *PathElement // linked list of alternating node/rel steps
+	Pos      Position
+	EndPos   Position
 	// Shortest classifies a shortestPath()/allShortestPaths() wrapper around
 	// this path (ShortestNone for an ordinary path). Set by the parser's
 	// post-AST shortest-path pass (rmp #1690).
@@ -210,9 +210,9 @@ func (p *PathPattern) String() string {
 // Pattern represents the comma-separated list of path patterns in a MATCH
 // or CREATE clause.
 type Pattern struct {
+	Paths  []*PathPattern
 	Pos    Position
 	EndPos Position
-	Paths  []*PathPattern
 }
 
 func (*Pattern) astNode() {}

@@ -934,8 +934,8 @@ func (d *dirtyObs) get() (int64, bool) {
 // errObs records the first error observed across goroutines, safe for
 // concurrent use.
 type errObs struct {
-	mu  sync.Mutex
 	err error
+	mu  sync.Mutex
 }
 
 func (e *errObs) set(err error) {

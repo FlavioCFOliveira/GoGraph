@@ -64,8 +64,8 @@ const (
 
 // config captures the scale and shape knobs.
 type config struct {
-	persons  int    // number of :Person nodes seeded
 	password string // the Bolt credential the server requires
+	persons  int    // number of :Person nodes seeded
 	seed     int64  // reserved for uniformity; the seed graph is deterministic
 }
 

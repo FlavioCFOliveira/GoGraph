@@ -112,9 +112,6 @@ type edgePropPayload struct {
 // A column is immutable once it is part of a published block; the mutation
 // helpers return a fresh column.
 type edgePropColumn struct {
-	key  PropertyKeyID
-	kind PropertyKind
-
 	// De-boxed scalar backings. Exactly one is used per column, by kind:
 	//   PropInt64   -> i64
 	//   PropFloat64 -> f64
@@ -152,9 +149,30 @@ type edgePropColumn struct {
 	// column is rebuilt on change rather than mutated in place.
 	packed []uint64
 
+	// valid is the Arrow-style validity bitmap used in the DENSE representation:
+	// bit i set ⇔ slot i carries a value. nil ⇔ the dense column is fully present
+	// (zero validity overhead). Always nil in the SPARSE representation, where
+	// presence is membership in idx.
+	valid []uint64
+
+	// idx holds the present slot indices of the SPARSE representation, strictly
+	// ascending and each in [0, length). len(idx) == the present count P, and the
+	// k-th typed backing element is the value of slot idx[k]. nil ⇔ DENSE.
+	idx []int32
+
+	// length is the number of slots this column spans; it equals the adjacency
+	// entry's neighbour count at every observable point. It is an explicit stored
+	// scalar (NOT derivable from idx): a grow-without-set leaves absent trailing
+	// slots, so length can exceed max(idx)+1.
+	length int
+
+	key PropertyKeyID
+
 	// forMin is the frame-of-reference minimum (the reference value subtracted
 	// from every date before bit-packing). Meaningful only when packedDate is set.
 	forMin int32
+
+	kind PropertyKind
 
 	// forWidth is the number of bits each packed residual occupies. 0 ⇔ the
 	// constant column (every present slot equals forMin, packed == nil).
@@ -170,26 +188,9 @@ type edgePropColumn struct {
 	// nil packed slice is never mistaken for "not packed".
 	packedDate bool
 
-	// valid is the Arrow-style validity bitmap used in the DENSE representation:
-	// bit i set ⇔ slot i carries a value. nil ⇔ the dense column is fully present
-	// (zero validity overhead). Always nil in the SPARSE representation, where
-	// presence is membership in idx.
-	valid []uint64
-
-	// idx holds the present slot indices of the SPARSE representation, strictly
-	// ascending and each in [0, length). len(idx) == the present count P, and the
-	// k-th typed backing element is the value of slot idx[k]. nil ⇔ DENSE.
-	idx []int32
-
 	// sparse selects the physical representation: true ⇔ COO (idx + compacted
 	// backing), false ⇔ dense (slot-indexed backing + optional validity bitmap).
 	sparse bool
-
-	// length is the number of slots this column spans; it equals the adjacency
-	// entry's neighbour count at every observable point. It is an explicit stored
-	// scalar (NOT derivable from idx): a grow-without-set leaves absent trailing
-	// slots, so length can exceed max(idx)+1.
-	length int
 }
 
 // dateKind is the internal PropertyKind sentinel for the int32 epoch-day date

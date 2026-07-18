@@ -71,10 +71,10 @@ type UpdatingClause interface {
 // ProjectionItem represents a single item in a RETURN or WITH projection,
 // optionally aliased.
 type ProjectionItem struct {
-	Pos    Position
-	EndPos Position
 	Expr   Expression
 	Alias  *string // nil when no AS alias is present
+	Pos    Position
+	EndPos Position
 }
 
 // String returns the Cypher representation of a projection item.
@@ -87,9 +87,9 @@ func (p *ProjectionItem) String() string {
 
 // SortItem represents a single ORDER BY term.
 type SortItem struct {
+	Expr       Expression
 	Pos        Position
 	EndPos     Position
-	Expr       Expression
 	Descending bool
 }
 
@@ -103,14 +103,14 @@ func (s *SortItem) String() string {
 
 // Projection carries the column list shared by RETURN and WITH.
 type Projection struct {
+	Skip     Expression // nil if absent
+	Limit    Expression // nil if absent
+	Items    []*ProjectionItem
+	OrderBy  []*SortItem
 	Pos      Position
 	EndPos   Position
 	Distinct bool
 	All      bool // SELECT *
-	Items    []*ProjectionItem
-	OrderBy  []*SortItem
-	Skip     Expression // nil if absent
-	Limit    Expression // nil if absent
 }
 
 // String returns the Cypher representation of the projection body (without the
@@ -150,12 +150,12 @@ func (p *Projection) String() string {
 // SetItem represents one assignment in a SET clause: variable.property = expr
 // or label assignment patterns.
 type SetItem struct {
-	Pos      Position
-	EndPos   Position
 	Target   Expression // Property or Variable
 	Value    Expression // right-hand side; nil for label-set forms
 	Operator string     // "=", "+=", or "" for label operations
 	Labels   []string   // populated for SET n:Label1:Label2 form
+	Pos      Position
+	EndPos   Position
 }
 
 // String returns the Cypher representation of a SET assignment.
@@ -172,10 +172,10 @@ func (s *SetItem) String() string {
 
 // RemoveItem represents one item in a REMOVE clause.
 type RemoveItem struct {
-	Pos    Position
-	EndPos Position
 	Target Expression // Property or Variable
 	Labels []string   // populated for REMOVE n:Label form
+	Pos    Position
+	EndPos Position
 }
 
 // String returns the Cypher representation of a REMOVE item.

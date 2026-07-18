@@ -29,19 +29,6 @@ import (
 // to the graph — the callbacks observe the transaction's FINAL state, which is
 // exactly the state the index must converge to.
 type Binding[V cmp.Ordered] struct {
-	// PropertyID is the interned property-key identifier this index covers.
-	// Property changes whose Change.Property differs are ignored.
-	PropertyID uint32
-
-	// LabelID is the interned label identifier this index is scoped to.
-	// Label changes whose Change.Label differs are ignored.
-	LabelID uint32
-
-	// Label and Property are the source names behind PropertyID and LabelID.
-	// They let a query planner match the index against a (label, property)
-	// predicate without access to the registries.
-	Label, Property string
-
 	// Project converts a Change.OldValue / Change.NewValue payload to the
 	// index key type. ok is false when the payload is absent or not indexable
 	// (wrong kind), in which case the event is skipped for that direction.
@@ -57,6 +44,19 @@ type Binding[V cmp.Ordered] struct {
 	// the property, or the value is not indexable. It is consulted on label
 	// add/remove events, which carry no property payload.
 	CurrentValue func(node graph.NodeID) (V, bool)
+
+	// Label and Property are the source names behind PropertyID and LabelID.
+	// They let a query planner match the index against a (label, property)
+	// predicate without access to the registries.
+	Label, Property string
+
+	// PropertyID is the interned property-key identifier this index covers.
+	// Property changes whose Change.Property differs are ignored.
+	PropertyID uint32
+
+	// LabelID is the interned label identifier this index is scoped to.
+	// Label changes whose Change.Label differs are ignored.
+	LabelID uint32
 }
 
 // errBindingIncomplete is returned by [NewBound] when a required Binding

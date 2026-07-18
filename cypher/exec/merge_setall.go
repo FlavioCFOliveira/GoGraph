@@ -35,9 +35,9 @@ import (
 // vs `+=` (false, merge) semantics; Eval evaluates the right-hand side against
 // the merged/created row.
 type MergeSetAllAction struct {
+	Eval      ExprValueEvalFn
 	TargetVar string
 	IsReplace bool
-	Eval      ExprValueEvalFn
 }
 
 // applyWholeEntityValueToNode applies a whole-entity SET value v to the node

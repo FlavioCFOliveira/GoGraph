@@ -39,14 +39,14 @@ var seed = maphash.MakeSeed()
 // Index maps property values of type V to the NodeIDs that carry
 // them.
 type Index[V comparable] struct {
-	shards [shardCount]hashShard[V]
-
 	// binding, when non-nil, ties the index to one (label, property)
 	// pair of a live node graph so [Index.Apply] can translate
 	// [index.Change] events into typed Insert / Delete calls. It is set
 	// once by [NewBound] before the index is shared and never mutated
 	// afterwards, so Apply reads it without synchronisation.
 	binding *Binding[V]
+
+	shards [shardCount]hashShard[V]
 }
 
 // Binding ties an [Index] to a single (label, property) pair of a live
@@ -64,22 +64,6 @@ type Index[V comparable] struct {
 // the transaction's FINAL state, which is exactly the state the index
 // must converge to.
 type Binding[V comparable] struct {
-	// PropertyID is the interned property-key identifier this index
-	// covers. Property changes whose Change.Property differs are
-	// ignored.
-	PropertyID uint32
-
-	// LabelID is the interned label identifier this index is scoped
-	// to. Label changes whose Change.Label differs are ignored. Note
-	// that interned IDs start at zero, so this field alone cannot mark
-	// an unscoped binding; bindings are always label-scoped.
-	LabelID uint32
-
-	// Label and Property are the source names behind PropertyID and
-	// LabelID. They let a query planner match the index against a
-	// (label, property) predicate without access to the registries.
-	Label, Property string
-
 	// Project converts a Change.OldValue / Change.NewValue payload to
 	// the index key type. ok is false when the payload is absent or
 	// not indexable (wrong kind), in which case the event is skipped
@@ -97,6 +81,22 @@ type Binding[V comparable] struct {
 	// It is consulted on label add/remove events, which carry no
 	// property payload.
 	CurrentValue func(node graph.NodeID) (V, bool)
+
+	// Label and Property are the source names behind PropertyID and
+	// LabelID. They let a query planner match the index against a
+	// (label, property) predicate without access to the registries.
+	Label, Property string
+
+	// PropertyID is the interned property-key identifier this index
+	// covers. Property changes whose Change.Property differs are
+	// ignored.
+	PropertyID uint32
+
+	// LabelID is the interned label identifier this index is scoped
+	// to. Label changes whose Change.Label differs are ignored. Note
+	// that interned IDs start at zero, so this field alone cannot mark
+	// an unscoped binding; bindings are always label-scoped.
+	LabelID uint32
 }
 
 // errBindingIncomplete is returned by [NewBound] when a required
@@ -131,8 +131,8 @@ func (i *Index[V]) BoundNode() (label, property string, ok bool) {
 }
 
 type hashShard[V comparable] struct {
-	mu      sync.RWMutex
 	entries map[V]index.NodeSet
+	mu      sync.RWMutex
 }
 
 // New returns an empty hash index.

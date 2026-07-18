@@ -98,9 +98,9 @@ func keyLess[V cmp.Ordered](a, b V) bool { return cmp.Less(a, b) }
 // is stored BY VALUE (see [index.NodeSet]) so a leaf of singleton-keyed
 // entries carries no per-key heap object.
 type leaf[V cmp.Ordered] struct {
+	next *leaf[V]
 	keys []V
 	sets []index.NodeSet
-	next *leaf[V]
 }
 
 // inode is an internal node: separator keys and child pointers. For m keys

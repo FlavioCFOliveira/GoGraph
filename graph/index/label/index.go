@@ -55,8 +55,8 @@ const (
 // optimality intact. Promotion to the bitmap tier is one-way, so a dense
 // label can never be mis-tiered as a small set (sprint 206, #1585).
 type Index struct {
-	mu    sync.RWMutex
 	bits  map[uint32]index.NodeSet
+	mu    sync.RWMutex
 	scope Scope
 }
 

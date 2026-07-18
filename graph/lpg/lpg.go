@@ -85,16 +85,16 @@ type forwardLabelName struct {
 // publication) tables at least as new as the ones Intern published. Lookup
 // and Resolve therefore never miss a live id.
 type LabelRegistry struct {
-	// mu serialises Intern (the write path) only; the read paths never take
-	// it. The steady-state label vocabulary is small and stable, so Intern
-	// is contended only while the vocabulary is first built up.
-	mu sync.Mutex
 	// fwd holds the immutable name→id table. Loaded lock-free by Lookup;
 	// swapped under mu by Intern.
 	fwd atomic.Pointer[forwardLabelName]
 	// snap holds the immutable id→name table. Loaded lock-free by
 	// Resolve; swapped under mu by Intern.
 	snap atomic.Pointer[labelNames]
+	// mu serialises Intern (the write path) only; the read paths never take
+	// it. The steady-state label vocabulary is small and stable, so Intern
+	// is contended only while the vocabulary is first built up.
+	mu sync.Mutex
 }
 
 // NewLabelRegistry returns an empty registry.
@@ -189,8 +189,8 @@ const propMapShards = 64
 // single small slice backing instead of ~300 B of map overhead. The bag is
 // guarded by mu exactly as the nested map was.
 type nodePropShard struct {
-	mu sync.RWMutex
 	m  map[graph.NodeID]propBag
+	mu sync.RWMutex
 }
 
 // nodeLabelShard is one stripe of the node-label bag. The mutex
@@ -199,8 +199,8 @@ type nodePropShard struct {
 // removes the global nodeMu contention point that previously
 // serialised every Set/Remove/Has across all NodeIDs in the graph.
 type nodeLabelShard struct {
-	mu sync.RWMutex
 	m  map[graph.NodeID]labelBag
+	mu sync.RWMutex
 }
 
 // edgeLabelShard is the OVERFLOW half of the edge-label store, the edge
@@ -232,10 +232,10 @@ type nodeLabelShard struct {
 // adjacency slot and overflow[k]. The overflow map is allocated lazily, so an
 // all-single-label graph never pays for sixteen empty spill maps.
 type edgeLabelShard struct {
-	mu sync.RWMutex
 	// overflow holds the extra (beyond the slot) labels of a pair, deduplicated.
 	// nil until the first label spills here.
 	overflow map[edgeKey][]LabelID
+	mu       sync.RWMutex
 }
 
 // addOverflow appends lid to k's overflow list if not already present. The
@@ -1596,9 +1596,9 @@ func (g *Graph[N, W]) HasConstraints() bool {
 // property) under a different name updates the one slot rather than adding a
 // second — matching the recovery accumulator's dedup identity.
 type storeConstraintKey struct {
-	kind     uint8
 	label    string
 	property string
+	kind     uint8
 }
 
 // AddStoreConstraint records that a schema constraint of the given kind on
@@ -1648,13 +1648,13 @@ func (g *Graph[N, W]) RemoveStoreConstraint(kind uint8, labelName, property stri
 // carries the constraint's enforcement identity — kind, label, property — but
 // not its user-defined name, which the store-direct path does not retain.
 type StoreConstraint struct {
-	// Kind is the constraint kind (0 = UNIQUE, 1 = NOT NULL), matching the
-	// txn package's ConstraintKind ordinals.
-	Kind uint8
 	// Label is the constrained node label.
 	Label string
 	// Property is the constrained property key.
 	Property string
+	// Kind is the constraint kind (0 = UNIQUE, 1 = NOT NULL), matching the
+	// txn package's ConstraintKind ordinals.
+	Kind uint8
 }
 
 // StoreConstraints returns a snapshot of the store-direct schema constraints

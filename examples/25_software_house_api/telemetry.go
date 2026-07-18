@@ -70,9 +70,9 @@ func (m *metrics) recordSeed(d time.Duration) {
 // here, mirroring the "# " telemetry convention of the non-server examples.
 // Every field varies per run and per machine.
 type telemetryBody struct {
+	HeapAllocHuman string `json:"heap_alloc_human"`
 	// Live Go heap after a forced GC, in bytes and human form.
 	HeapAllocBytes uint64 `json:"heap_alloc_bytes"`
-	HeapAllocHuman string `json:"heap_alloc_human"`
 	HeapSysBytes   uint64 `json:"heap_sys_bytes"`
 	NumGC          uint32 `json:"num_gc"`
 

@@ -16,8 +16,16 @@ import (
 // that does not round-trip in its own release (a pre-existing prior defect) is
 // surfaced as [PriorWALFidelityGap] rather than blamed on the current code.
 type CrossReleaseUpgradeResult struct {
+	// DataCompatError is set when the current code FAILED-STOP opening the prior
+	// image (refused to recover it). This is the explicit, non-silent
+	// data-compatibility signal: a clear error rather than a silent mis-recovery.
+	DataCompatError error
 	// Tag is the prior release that wrote the image.
 	Tag string
+	// CountMismatch is set when the current code OPENED the image but recovered
+	// different node/edge counts than the prior release's own recovery — a genuine
+	// current-code data-compatibility regression.
+	CountMismatch string
 	// PriorLiveNodes / PriorLiveEdges are the prior release's LIVE engine counts
 	// after the write phase (before any reopen).
 	PriorLiveNodes int64
@@ -32,14 +40,6 @@ type CrossReleaseUpgradeResult struct {
 	RecoveredEdges int64
 	// ReplayedWALOps is how many WAL ops the current recovery replayed.
 	ReplayedWALOps int
-	// DataCompatError is set when the current code FAILED-STOP opening the prior
-	// image (refused to recover it). This is the explicit, non-silent
-	// data-compatibility signal: a clear error rather than a silent mis-recovery.
-	DataCompatError error
-	// CountMismatch is set when the current code OPENED the image but recovered
-	// different node/edge counts than the prior release's own recovery — a genuine
-	// current-code data-compatibility regression.
-	CountMismatch string
 	// PriorWALFidelityGap is true when the prior release's OWN recovery already
 	// diverges from its live counts (its WAL does not round-trip in its own
 	// release). This is a PRIOR-release defect, recorded but NOT charged to the
@@ -155,17 +155,17 @@ func RunCrossReleaseUpgrade(ctx context.Context, repoRoot, tag string, seed uint
 // plan-dependent, or a deliberately-fixed-bug behaviour) are recorded as
 // classified, NOT flagged as failures; an unexpected difference is a regression.
 type CrossReleaseDivergence struct {
-	// Index is the op index that diverged.
-	Index int
 	// Op is the diverging op.
 	Op Op
 	// PriorRows / CurrentRows are the two canonical row signatures.
 	PriorRows   string
 	CurrentRows string
-	// Benign reports whether the divergence is an expected/benign class.
-	Benign bool
 	// Reason explains the classification.
 	Reason string
+	// Index is the op index that diverged.
+	Index int
+	// Benign reports whether the divergence is an expected/benign class.
+	Benign bool
 }
 
 // CrossReleaseDiffResult is the outcome of a cross-release DIFFERENTIAL run:
@@ -174,19 +174,19 @@ type CrossReleaseDivergence struct {
 type CrossReleaseDiffResult struct {
 	// Tag is the prior release compared against.
 	Tag string
-	// Agreed reports whether no UNEXPECTED (non-benign) divergence occurred.
-	Agreed bool
 	// Divergences lists every op-level difference, each classified. A run can
 	// agree overall while still carrying benign divergences here.
 	Divergences []CrossReleaseDivergence
-	// FinalCountsMatch reports whether the prior and current end-state counts
-	// matched.
-	FinalCountsMatch bool
 	// PriorNodes/PriorEdges/CurrentNodes/CurrentEdges are the end-state counts.
 	PriorNodes   int64
 	PriorEdges   int64
 	CurrentNodes int64
 	CurrentEdges int64
+	// Agreed reports whether no UNEXPECTED (non-benign) divergence occurred.
+	Agreed bool
+	// FinalCountsMatch reports whether the prior and current end-state counts
+	// matched.
+	FinalCountsMatch bool
 }
 
 // String renders the differential result.

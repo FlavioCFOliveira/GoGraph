@@ -115,24 +115,24 @@ var globalNodeCounterSeededOnce sync.Once
 //
 // CreateNode is NOT safe for concurrent use.
 type CreateNode struct {
-	nodeVar     string
-	labels      []string
-	propsRaw    string        // original properties string, retained for re-parse with params
-	props       []propLiteral // parsed once from the properties string
-	propsExprFn PropsEvalFn   // nil when all properties are literals; evaluated per row otherwise
 	child       Operator
 	mutator     GraphMutator
+	ctx         context.Context       //nolint:containedctx // stored for per-Next ctx check
+	propsExprFn PropsEvalFn           // nil when all properties are literals; evaluated per row otherwise
 	params      map[string]expr.Value // query parameters for $name substitution
 	reg         *ConstraintRegistry   // nil means no enforcement
 	mgr         *index.Manager        // nil when reg is nil
-	ctx         context.Context       //nolint:containedctx // stored for per-Next ctx check
+	nodeVar     string
+	propsRaw    string // original properties string, retained for re-parse with params
+	labels      []string
+	props       []propLiteral // parsed once from the properties string
 }
 
 // propLiteral is a pre-parsed key/value pair from a literal property map
 // expression like {name: "Alice", age: 30}.
 type propLiteral struct {
-	key   string
 	value lpg.PropertyValue
+	key   string
 }
 
 // PropEntry is an exported key/value pair for use by external plan builders
@@ -140,8 +140,8 @@ type propLiteral struct {
 // but carries exported fields so the physical builder can return values from
 // a PropsEvalFn without requiring propLiteral to be exported.
 type PropEntry struct {
-	Key   string
 	Value lpg.PropertyValue
+	Key   string
 }
 
 // PropsEvalFn is a per-row property evaluator closure. It receives the current

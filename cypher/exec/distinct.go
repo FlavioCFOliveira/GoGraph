@@ -40,14 +40,16 @@ var ErrDistinctMemoryExceeded = errors.New("exec: distinct memory cap exceeded")
 //
 // Distinct is NOT safe for concurrent use.
 type Distinct struct {
-	child       Operator
-	maxDistinct int
-	budget      byteBudget // estimated-byte cap on the retained distinct rows (#1841)
+	child Operator
 
 	// Runtime state.
-	ctx           context.Context  //nolint:containedctx // stored for per-Next ctx check
-	seen          map[uint64][]Row // hash → list of rows (collision chain)
-	distinctCount int              // number of distinct rows STORED across all buckets
+	ctx  context.Context  //nolint:containedctx // stored for per-Next ctx check
+	seen map[uint64][]Row // hash → list of rows (collision chain)
+
+	budget byteBudget // estimated-byte cap on the retained distinct rows (#1841)
+
+	maxDistinct   int
+	distinctCount int // number of distinct rows STORED across all buckets
 }
 
 // WithByteBudget bounds the estimated retained size of the stored distinct rows

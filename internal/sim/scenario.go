@@ -67,15 +67,15 @@ func (m ExecMode) Reproducible() bool { return m == ModeDeterministic }
 // the always-on per-tick parity check ([InvariantChecker.Check]). The zero
 // value runs none of the extras.
 type CheckSelection struct {
+	// IndexSpecs are the (Label, Property) indexes the consistency check walks.
+	// They are declared by the scenario because the engine's index manager
+	// exposes only opaque names, not (label, property) pairs.
+	IndexSpecs []IndexSpec
 	// IndexConsistency runs the full index-vs-base-data consistency check
 	// ([CheckIndexConsistency]) at the end of the run (and, for the schema-chaos
 	// scenario, after DDL churn). It is meaningful only for modes that exercise
 	// indexes. The set of indexes to cross-check is [CheckSelection.IndexSpecs].
 	IndexConsistency bool
-	// IndexSpecs are the (Label, Property) indexes the consistency check walks.
-	// They are declared by the scenario because the engine's index manager
-	// exposes only opaque names, not (label, property) pairs.
-	IndexSpecs []IndexSpec
 	// Search runs the search-algorithm battery ([CheckSearch]) — structural
 	// parity between the engine graph and the oracle model, plus per-algorithm
 	// correctness against independent naive references — once at the end of the
@@ -97,65 +97,62 @@ type CheckSelection struct {
 // goroutines. [Scenario.Run] itself drives a single run; the concurrent modes
 // it dispatches to spawn and join their own goroutines internally.
 type Scenario struct {
-	// Name is the stable catalogue key (kebab-case).
-	Name string
-	// Description is a one-line human summary of what the scenario stresses,
-	// printed by the catalogue listing.
-	Description string
-	// Mode selects the harness (see [ExecMode]).
-	Mode ExecMode
-	// DefaultSeed is the seed used when a caller does not supply one.
-	DefaultSeed uint64
-
-	// MaxTicks bounds the deterministic safety loop (ModeDeterministic).
-	MaxTicks int
-	// CheckEvery is the invariant-check cadence in ticks (ModeDeterministic). A
-	// value <= 0 checks every tick. A long run sets it higher so the per-tick
-	// full-graph parity probes do not dominate a millions-of-ops workload (the
-	// scenario's value there is heap/goroutine stability, not per-tick parity).
-	CheckEvery int
-	// SearchEvery is the in-loop cadence (in ticks) for the search battery
-	// (ModeDeterministic): [runDeterministic] sets it on the simulator. 0 disables
-	// periodic search checks; the terminal search check still runs when
-	// Checks.Search is set. See [Simulator.searchEvery] and [CheckSearch].
-	SearchEvery int
+	// run, when non-nil, fully overrides the default dispatch for a custom
+	// scenario (e.g. bulk-vs-online). It receives the resolved seed and returns a
+	// report (nil == passed) or an error for a harness failure. The standard
+	// modes leave it nil and are dispatched by [Scenario.Run].
+	run func(ctx context.Context, seed uint64) (*SimReport, error)
+	// Mix is the per-connection role mix for the concurrent/liveness modes. When
+	// nil, the harness default is used.
+	Mix *ConcurrentMix
 	// Workload is the deterministic-mode actor mix factory. When nil,
 	// [DefaultWorkload] is used. It is a factory (not a built Workload) so each
 	// run gets a fresh, seed-parameterised mix.
 	Workload func(*Seed) *Workload
-	// Crash configures deterministic crash/recovery injection (ModeDeterministic).
-	Crash CrashConfig
 	// Checkpoint configures deterministic in-loop checkpointing (ModeDeterministic):
 	// the store is opened in full-stack mode (WAL + snapshot) and the loop
 	// publishes a real snapshot + truncates the WAL prefix on the configured
 	// cadence, so a subsequent crash recovers via the full snapshot+WAL path. The
 	// zero value disables it. See [CheckpointConfig].
 	Checkpoint CheckpointConfig
-	// Disk, when its CapacityBytes > 0, bounds the SimDisk-backed store to a
-	// finite size so the run drives the engine through a disk-full (ENOSPC)
-	// condition (ModeDeterministic). See [DiskConfig].
-	Disk DiskConfig
+	// Name is the stable catalogue key (kebab-case).
+	Name string
+	// Description is a one-line human summary of what the scenario stresses,
+	// printed by the catalogue listing.
+	Description string
+	// Checks selects the extra invariant checks.
+	Checks CheckSelection
 	// EngineOpts configures the in-memory engine the deterministic loop drives.
 	// The mem-pressure scenario clamps the logical-resource budgets here; every
 	// other scenario leaves it zero (byte-identical to the default engine).
 	EngineOpts cypher.EngineOptions
-	// Checks selects the extra invariant checks.
-	Checks CheckSelection
-
+	// Crash configures deterministic crash/recovery injection (ModeDeterministic).
+	Crash CrashConfig
+	// Disk, when its CapacityBytes > 0, bounds the SimDisk-backed store to a
+	// finite size so the run drives the engine through a disk-full (ENOSPC)
+	// condition (ModeDeterministic). See [DiskConfig].
+	Disk DiskConfig
+	// SearchEvery is the in-loop cadence (in ticks) for the search battery
+	// (ModeDeterministic): [runDeterministic] sets it on the simulator. 0 disables
+	// periodic search checks; the terminal search check still runs when
+	// Checks.Search is set. See [Simulator.searchEvery] and [CheckSearch].
+	SearchEvery int
+	// CheckEvery is the invariant-check cadence in ticks (ModeDeterministic). A
+	// value <= 0 checks every tick. A long run sets it higher so the per-tick
+	// full-graph parity probes do not dominate a millions-of-ops workload (the
+	// scenario's value there is heap/goroutine stability, not per-tick parity).
+	CheckEvery int
+	// MaxTicks bounds the deterministic safety loop (ModeDeterministic).
+	MaxTicks int
 	// Connections / OpsPerConn bound the concurrent and liveness modes.
 	Connections int
 	OpsPerConn  int
-	// Mix is the per-connection role mix for the concurrent/liveness modes. When
-	// nil, the harness default is used.
-	Mix *ConcurrentMix
+	// DefaultSeed is the seed used when a caller does not supply one.
+	DefaultSeed uint64
 	// ConvergeBudget bounds the liveness convergence phase (ModeLiveness).
 	ConvergeBudget time.Duration
-
-	// run, when non-nil, fully overrides the default dispatch for a custom
-	// scenario (e.g. bulk-vs-online). It receives the resolved seed and returns a
-	// report (nil == passed) or an error for a harness failure. The standard
-	// modes leave it nil and are dispatched by [Scenario.Run].
-	run func(ctx context.Context, seed uint64) (*SimReport, error)
+	// Mode selects the harness (see [ExecMode]).
+	Mode ExecMode
 }
 
 // resolveSeed returns the seed to run with: the supplied override when non-zero

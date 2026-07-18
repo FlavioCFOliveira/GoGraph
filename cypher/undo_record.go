@@ -320,22 +320,22 @@ func (m mutationUndo) recordDecEdgeCreateCount(src, dst string, had bool) {
 // — where this exotic interleaving lives — the per-handle store is the
 // authoritative per-instance surface (see graph/lpg/edge_handle.go).
 type removedEdgePreimage struct {
-	src, dst    string
-	weight      float64
-	hadEdge     bool
-	labels      []string
-	props       map[string]lpg.PropertyValue
-	createCount int64
-	// handle is the stable handle of the FIRST src→dst adjacency slot — the
-	// one RemoveEdge will remove — or 0 when the edge carries no handle
-	// (simple-graph or pre-Stage-2 storage). On undo the edge is re-added with
-	// this handle so a removed parallel instance keeps its identity.
-	handle uint64
+	props    map[string]lpg.PropertyValue
+	src, dst string
 	// handleLabels / handleProps are the removed instance's per-handle label
 	// and property pre-images, captured under handle. Restored on undo so the
 	// re-added instance resolves to its own metadata. Empty when handle is 0.
 	handleLabels []string
 	handleProps  map[string]lpg.PropertyValue
+	labels       []string
+	weight       float64
+	createCount  int64
+	// handle is the stable handle of the FIRST src→dst adjacency slot — the
+	// one RemoveEdge will remove — or 0 when the edge carries no handle
+	// (simple-graph or pre-Stage-2 storage). On undo the edge is re-added with
+	// this handle so a removed parallel instance keeps its identity.
+	handle  uint64
+	hadEdge bool
 }
 
 // captureRemovedEdge snapshots the state of edge (src, dst) before a

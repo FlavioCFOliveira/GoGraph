@@ -54,7 +54,6 @@ func TranslateSubquery(q *ast.SingleQuery, outerVars []string, argTag uint32) (L
 // construction. It carries an anonCounter for generating unique internal variable
 // names for anonymous nodes in CREATE patterns (e.g. CREATE ()-[:R]->()).
 type translator struct {
-	anonCounter int // monotonic counter for synthetic anonymous-node vars
 	// outerBoundRels carries the relationship-variable names already in
 	// scope at the entry of the current matchPattern call. The
 	// VarLengthExpand construction inside matchExpandStepBoundWithFrom
@@ -87,6 +86,7 @@ type translator struct {
 	// predicate used for the cross-pattern no-repeat-relationship filter
 	// cannot address a list, so VLE clause rels are skipped by that filter.
 	clauseVLERels map[string]struct{}
+	anonCounter   int // monotonic counter for synthetic anonymous-node vars
 }
 
 // freshAnonVar returns a unique internal variable name for an anonymous node
@@ -258,10 +258,10 @@ func positionFromNode(n ast.Node) ast.Position {
 // orderedClause is a (reading or updating) clause paired with its source
 // position so the singleQuery loop can interleave them by document order.
 type orderedClause struct {
-	pos  ast.Position
-	kind int // 0=reading, 1=updating
 	rc   ast.ReadingClause
 	uc   ast.UpdatingClause
+	kind int // 0=reading, 1=updating
+	pos  ast.Position
 }
 
 // sortByPos sorts the orderedClause slice by source-position offset using

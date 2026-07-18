@@ -44,16 +44,16 @@ var ErrSortMemoryExceeded = errors.New("exec: sort memory cap exceeded")
 
 // SortKey describes a single ORDER BY column.
 type SortKey struct {
-	// ColIdx is the zero-based index of the column within each Row.
-	// Ignored when Eval is non-nil.
-	ColIdx int
-	// Ascending controls the sort direction. true = ASC, false = DESC.
-	Ascending bool
 	// Eval is an optional expression evaluator. When non-nil the sort key
 	// value is obtained by calling Eval(row) rather than reading row[ColIdx].
 	// This supports ORDER BY expressions that are not direct projection
 	// output columns (e.g. ORDER BY n.age after RETURN n).
 	Eval func(Row) (expr.Value, error)
+	// ColIdx is the zero-based index of the column within each Row.
+	// Ignored when Eval is non-nil.
+	ColIdx int
+	// Ascending controls the sort direction. true = ASC, false = DESC.
+	Ascending bool
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -65,16 +65,18 @@ type SortKey struct {
 //
 // Sort is NOT safe for concurrent use.
 type Sort struct {
-	child   Operator
-	keys    []SortKey
-	maxRows int
-	budget  byteBudget // estimated-byte cap on the buffered rows (#1841)
+	child Operator
 
 	// Runtime state.
-	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
-	rows    []Row
-	sorted  bool
+	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
+
+	keys   []SortKey
+	budget byteBudget // estimated-byte cap on the buffered rows (#1841)
+	rows   []Row
+
+	maxRows int
 	emitIdx int
+	sorted  bool
 }
 
 // WithByteBudget bounds the estimated retained size of the buffered rows by

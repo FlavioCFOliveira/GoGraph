@@ -60,9 +60,6 @@ type ChunkColumnFiller func(src *Chunk, srcRow int, dst *Chunk, dstCol int) erro
 //
 // ColumnarProject is NOT safe for concurrent use.
 type ColumnarProject struct {
-	*Project
-	fillers []ColumnFiller
-
 	// chunk-input path: populated by WithChunkInput when the child is a
 	// [NodeIDColumnProducer] (#1704 P3, reads raw int64 NodeID columns unboxed) or
 	// by WithScalarChunkInput when the child is any [ChunkProducer] emitting
@@ -70,9 +67,11 @@ type ColumnarProject struct {
 	// then pulls the child column-major and runs chunkFillers, instead of pulling
 	// the child row-at-a-time via Next and boxing every cell. nil chunkFillers keeps
 	// the row-input path (P2), byte-identical.
-	chunkChild   ChunkProducer
-	chunkFillers []ChunkColumnFiller
+	chunkChild ChunkProducer
+	*Project
 	scratch      *Chunk // reused source-batch buffer for the chunk-input path
+	fillers      []ColumnFiller
+	chunkFillers []ChunkColumnFiller
 }
 
 // NewColumnarProject creates a ColumnarProject. items are the row-at-a-time

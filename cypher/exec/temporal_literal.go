@@ -479,16 +479,16 @@ type durationComponents struct {
 func readDurationComponents(fields map[string]string) (durationComponents, error) {
 	var c durationComponents
 	for _, spec := range []struct {
-		key string
 		out *int
+		key string
 	}{
-		{"years", &c.years},
-		{"months", &c.months},
-		{"days", &c.days},
-		{"hours", &c.hours},
-		{"minutes", &c.minutes},
-		{"seconds", &c.seconds},
-		{"nanoseconds", &c.nanoseconds},
+		{key: "years", out: &c.years},
+		{key: "months", out: &c.months},
+		{key: "days", out: &c.days},
+		{key: "hours", out: &c.hours},
+		{key: "minutes", out: &c.minutes},
+		{key: "seconds", out: &c.seconds},
+		{key: "nanoseconds", out: &c.nanoseconds},
 	} {
 		v, err := readIntField(fields, spec.key, 0)
 		if err != nil {

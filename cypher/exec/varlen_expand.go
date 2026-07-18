@@ -172,10 +172,10 @@ type edgeStep struct {
 
 // pathState is the state of one BFS path being explored.
 type pathState struct {
-	hops    int        // number of hops taken so far
-	srcNode uint64     // source node of the most recent hop (=current node)
 	path    []edgeStep // edges taken so far (length == hops)
 	visited []uint64   // bitset of edge positions used in this path
+	hops    int        // number of hops taken so far
+	srcNode uint64     // source node of the most recent hop (=current node)
 }
 
 // VarLengthExpand is a Volcano pipeline operator that performs bounded BFS
@@ -183,22 +183,18 @@ type pathState struct {
 //
 // VarLengthExpand is NOT safe for concurrent use.
 type VarLengthExpand struct {
-	input    Operator
-	fwd      csrAdjacency
-	rev      csrAdjacency
-	dir      Direction
-	edgeType string
-	// edgeTypeFilter maps absolute forward edge positions to type labels.
-	edgeTypeFilter         map[uint64]string
-	inputCol               int
-	minHops                int
-	maxHops                int
-	maxEdgesTraversed      int // per-input-row cap
-	maxTotalEdgesTraversed int // aggregate per-query cap (NOT reset per row)
-	excludedRelCols        []int
+	input Operator
+	fwd   csrAdjacency
+	rev   csrAdjacency
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 
+	// edgeTypeFilter maps absolute forward edge positions to type labels.
+	edgeTypeFilter map[uint64]string
+
+	edgeType string
+
+	excludedRelCols []int
 	// CSR snapshots (valid after Init).
 	fwdVerts   []uint64
 	fwdEdges   []graph.NodeID
@@ -236,29 +232,44 @@ type VarLengthExpand struct {
 	// `nextQueue`. After each level the two are swapped. This avoids the
 	// slice-aliasing hazard that arises if the same backing array is both read
 	// and written in the same call.
-	queue             []pathState // current BFS frontier (read)
-	nextQueue         []pathState // next BFS frontier (write target during expansion)
-	inputRow          Row         // current outer input row (stable copy)
-	inputEOS          bool        // true after input plan exhausted
-	edgesVisited      int         // traversal counter for the per-row safety cap (reset per input row)
-	totalEdgesVisited int         // traversal counter for the aggregate per-query cap (reset once per Init)
+	queue     []pathState // current BFS frontier (read)
+	nextQueue []pathState // next BFS frontier (write target during expansion)
+	inputRow  Row         // current outer input row (stable copy)
 
 	// pending result rows: paths whose hop count is in [minHops..maxHops]
 	// that have been collected during BFS but not yet emitted.
-	results   []pathState
-	resultIdx int
+	results []pathState
 
 	outBuf []expr.Value
+
+	inputCol               int
+	minHops                int
+	maxHops                int
+	maxEdgesTraversed      int // per-input-row cap
+	maxTotalEdgesTraversed int // aggregate per-query cap (NOT reset per row)
+	edgesVisited           int // traversal counter for the per-row safety cap (reset per input row)
+	totalEdgesVisited      int // traversal counter for the aggregate per-query cap (reset once per Init)
+	resultIdx              int
+
+	dir      Direction
+	inputEOS bool // true after input plan exhausted
 }
 
 // VarLengthConfig carries configuration for [NewVarLengthExpand].
 type VarLengthConfig struct {
-	// Direction to follow. Defaults to DirOut when zero.
-	Direction Direction
-	// EdgeType, when non-empty, restricts expansion to edges of this type.
-	EdgeType string
 	// EdgeTypeFilter maps absolute edge positions to type labels.
 	EdgeTypeFilter map[uint64]string
+	// EdgeType, when non-empty, restricts expansion to edges of this type.
+	EdgeType string
+	// ExcludedRelCols lists column indices in the input row holding edge
+	// identifiers (IntegerValue or RelationshipValue) that must not be
+	// traversed inside this VLE step. Implements the openCypher
+	// no-repeated-relationships rule across distinct rel patterns within
+	// the same MATCH (e.g. `MATCH ()-[r:EDGE]-() MATCH (n)-[*0..1]-()-[r]
+	// -()-[*0..1]-(m)` — the two variable-length steps must not reuse the
+	// edge bound to `r`). The visited bitset is pre-populated with each
+	// listed column's edge position at BFS seed time.
+	ExcludedRelCols []int
 	// InputCol is the column index in each input row that holds the source
 	// NodeID. Defaults to 0.
 	InputCol int
@@ -276,15 +287,8 @@ type VarLengthConfig struct {
 	// cannot (#1478). Defaults to [defaultMaxTotalEdgesTraversed] (100,000,000)
 	// when 0.
 	MaxTotalEdgesTraversed int
-	// ExcludedRelCols lists column indices in the input row holding edge
-	// identifiers (IntegerValue or RelationshipValue) that must not be
-	// traversed inside this VLE step. Implements the openCypher
-	// no-repeated-relationships rule across distinct rel patterns within
-	// the same MATCH (e.g. `MATCH ()-[r:EDGE]-() MATCH (n)-[*0..1]-()-[r]
-	// -()-[*0..1]-(m)` — the two variable-length steps must not reuse the
-	// edge bound to `r`). The visited bitset is pre-populated with each
-	// listed column's edge position at BFS seed time.
-	ExcludedRelCols []int
+	// Direction to follow. Defaults to DirOut when zero.
+	Direction Direction
 }
 
 // NewVarLengthExpand creates a VarLengthExpand operator. cfg is read-only and

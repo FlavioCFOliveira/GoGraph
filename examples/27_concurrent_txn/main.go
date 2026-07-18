@@ -390,12 +390,12 @@ type transfer struct {
 // pure function of the config, so a fixed seed fixes every fact.
 type plan struct {
 	accounts       []account
-	initialTotal   int64
 	byWriter       [][]transfer // transfers assigned to each writer
 	expected       []int64      // expected final balance per account id
-	total          int          // total transfers across all writers
-	multiStatement int          // transfers executed via BeginTx
-	readers        int          // reader goroutines to run against this plan
+	initialTotal   int64
+	total          int // total transfers across all writers
+	multiStatement int // transfers executed via BeginTx
+	readers        int // reader goroutines to run against this plan
 }
 
 // generatePlan builds the deterministic plan from a seeded RNG: cfg.accounts

@@ -18,8 +18,8 @@ var ErrCorrupted = errors.New("snapshot: directory corrupted")
 // LoadedCSR is the result of [LoadCSR] / [Open]: the parsed CSR
 // arrays plus the manifest entry that produced them.
 type LoadedCSR struct {
-	Manifest Manifest
 	CSR      CSRReadback
+	Manifest Manifest
 }
 
 // Open verifies and loads the snapshot rooted at dir. It reads the

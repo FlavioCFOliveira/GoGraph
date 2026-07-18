@@ -27,31 +27,29 @@ const serverAgent = "GoGraph/1.0"
 // Session is NOT safe for concurrent use. Each accepted TCP connection owns
 // exactly one Session, and the message loop is single-threaded per connection.
 type Session struct {
-	// id is a random hex string used in log messages to identify the connection.
-	id string
-
-	// identity is populated after a successful HELLO/LOGON.
-	identity Identity
-
-	// authenticated reports whether this connection has completed a successful
-	// HELLO or LOGON and has not since been de-authorized by LOGOFF. It is the
-	// authoritative authentication gate, set true only on a successful
-	// Authenticate and cleared on LOGOFF; query-bearing handlers (RUN, BEGIN,
-	// ROUTE) and RESET consult it so that no credential-less connection can
-	// reach a query-executing state. It is tracked as an explicit flag rather
-	// than inferred from identity, because a NoAuthHandler legitimately yields a
-	// zero-value Identity for a client that sent no principal — which must still
-	// count as authenticated. (task #1345)
-	authenticated bool
-
-	// eng is the Cypher engine that executes queries.
-	eng *cypher.Engine
+	// txDeadline is the absolute wall-clock deadline of the open explicit
+	// transaction, set by [Session.handleBegin] from the effective transaction
+	// timeout (zero when no finite timeout applies, or when no transaction is
+	// open). The serve loop arms a reaper that closes the connection at this
+	// instant so an idle-but-open transaction cannot hold the engine's global
+	// writer lock indefinitely while the client keeps the connection alive with
+	// no-op messages (task #1346). It is read only by the serve loop after
+	// [Session.HandleMessage] returns, on the same goroutine, so it needs no
+	// synchronisation.
+	txDeadline time.Time
 
 	// auth is the auth handler used during HELLO/LOGON.
 	auth AuthHandler
 
-	// state is the current Bolt protocol state machine state.
-	state State
+	// clk is the wall-clock source for computing the explicit-transaction
+	// deadline (txDeadline). It defaults to [clock.Real] in [newSession] and is
+	// set by the server to the same clock its serve-loop reaper uses, so the
+	// deadline and the reaper's countdown are coherent. A test may inject a
+	// [clock.Fake] so a session timeout is driven by virtual time.
+	clk clock.Clock
+
+	// eng is the Cypher engine that executes queries.
+	eng *cypher.Engine
 
 	// result is the open streaming cursor, non-nil only in STREAMING or
 	// TX_STREAMING states.
@@ -67,10 +65,6 @@ type Session struct {
 	// is installed (an explicit-transaction statement, whose deadline is the
 	// tx-level reaper's, or a statement with no effective bound).
 	resultCancel context.CancelFunc
-
-	// columns holds the ordered column names of the current result, matching
-	// result.Columns() at the time RUN was processed.
-	columns []string
 
 	// peeked, when non-nil, holds a pre-fetched row from the cursor that has
 	// been read ahead to determine has_more. It must be emitted before the next
@@ -99,42 +93,17 @@ type Session struct {
 	// goroutine, so it needs no synchronisation.
 	records recordSink
 
-	// txActive indicates that an explicit transaction is open (BEGIN called).
-	txActive bool
-
-	// txDeadline is the absolute wall-clock deadline of the open explicit
-	// transaction, set by [Session.handleBegin] from the effective transaction
-	// timeout (zero when no finite timeout applies, or when no transaction is
-	// open). The serve loop arms a reaper that closes the connection at this
-	// instant so an idle-but-open transaction cannot hold the engine's global
-	// writer lock indefinitely while the client keeps the connection alive with
-	// no-op messages (task #1346). It is read only by the serve loop after
-	// [Session.HandleMessage] returns, on the same goroutine, so it needs no
-	// synchronisation.
-	txDeadline time.Time
-
 	// tx is the active explicit transaction, non-nil when txActive is true.
 	tx *Tx
 
-	// txAccounted records whether the currently-open explicit transaction has
-	// been counted by [metricTxOpened] but not yet counted closed by
-	// [metricTxClosed]. It guards the open-transaction gauge derivation
-	// (opened − closed) so that exactly one tx.closed is emitted per tx.opened,
-	// regardless of which of the several teardown paths (COMMIT, ROLLBACK,
-	// RESET, GOODBYE, FAILED-reclaim, connection teardown) ends the transaction.
-	// It is set by [Session.txOpened] and cleared by the first [Session.txClosed]
-	// for that transaction; a second close on the same transaction (e.g. the
-	// idempotent teardown rollback after a prior COMMIT) finds it already false
-	// and is a no-op. The Session is single-threaded per connection, so the flag
-	// needs no synchronisation.
-	txAccounted bool
+	// log is the session-scoped structured logger.
+	log *slog.Logger
 
-	// stmtTimeout is extracted from RUN extra metadata ("timeout" key, ms).
-	stmtTimeout time.Duration
+	// id is a random hex string used in log messages to identify the connection.
+	id string
 
-	// maxStmtTimeout is the server-side cap applied to client-supplied timeouts.
-	// Zero means no cap.
-	maxStmtTimeout time.Duration
+	// identity is populated after a successful HELLO/LOGON.
+	identity Identity
 
 	// bookmark holds the last committed transaction bookmark (server-generated
 	// placeholder for this sprint).
@@ -144,8 +113,16 @@ type Session struct {
 	// connection; used to populate the routing table in ROUTE responses.
 	localAddr string
 
-	// log is the session-scoped structured logger.
-	log *slog.Logger
+	// columns holds the ordered column names of the current result, matching
+	// result.Columns() at the time RUN was processed.
+	columns []string
+
+	// stmtTimeout is extracted from RUN extra metadata ("timeout" key, ms).
+	stmtTimeout time.Duration
+
+	// maxStmtTimeout is the server-side cap applied to client-supplied timeouts.
+	// Zero means no cap.
+	maxStmtTimeout time.Duration
 
 	// maxInFlight bounds the total number of Result cursors that may be
 	// registered against an explicit transaction before it must be
@@ -187,12 +164,35 @@ type Session struct {
 	// 0x49 for v5.0+).
 	boltVersion proto.Version
 
-	// clk is the wall-clock source for computing the explicit-transaction
-	// deadline (txDeadline). It defaults to [clock.Real] in [newSession] and is
-	// set by the server to the same clock its serve-loop reaper uses, so the
-	// deadline and the reaper's countdown are coherent. A test may inject a
-	// [clock.Fake] so a session timeout is driven by virtual time.
-	clk clock.Clock
+	// authenticated reports whether this connection has completed a successful
+	// HELLO or LOGON and has not since been de-authorized by LOGOFF. It is the
+	// authoritative authentication gate, set true only on a successful
+	// Authenticate and cleared on LOGOFF; query-bearing handlers (RUN, BEGIN,
+	// ROUTE) and RESET consult it so that no credential-less connection can
+	// reach a query-executing state. It is tracked as an explicit flag rather
+	// than inferred from identity, because a NoAuthHandler legitimately yields a
+	// zero-value Identity for a client that sent no principal — which must still
+	// count as authenticated. (task #1345)
+	authenticated bool
+
+	// state is the current Bolt protocol state machine state.
+	state State
+
+	// txActive indicates that an explicit transaction is open (BEGIN called).
+	txActive bool
+
+	// txAccounted records whether the currently-open explicit transaction has
+	// been counted by [metricTxOpened] but not yet counted closed by
+	// [metricTxClosed]. It guards the open-transaction gauge derivation
+	// (opened − closed) so that exactly one tx.closed is emitted per tx.opened,
+	// regardless of which of the several teardown paths (COMMIT, ROLLBACK,
+	// RESET, GOODBYE, FAILED-reclaim, connection teardown) ends the transaction.
+	// It is set by [Session.txOpened] and cleared by the first [Session.txClosed]
+	// for that transaction; a second close on the same transaction (e.g. the
+	// idempotent teardown rollback after a prior COMMIT) finds it already false
+	// and is a no-op. The Session is single-threaded per connection, so the flag
+	// needs no synchronisation.
+	txAccounted bool
 }
 
 // newSession constructs an idle Session backed by eng, starting in

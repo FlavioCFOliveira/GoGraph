@@ -35,8 +35,6 @@ import (
 // from LPG" rather than as a fatal error; the corruption was already
 // metered by [LoadIndexes] under `store.snapshot.indexes.corrupted`.
 type LoadedSnapshot struct {
-	Manifest   Manifest
-	CSR        CSRReadback
 	Labels     LabelsReadback
 	Properties PropertiesReadback
 	Mapper     MapperReadback
@@ -66,6 +64,8 @@ type LoadedSnapshot struct {
 	// optional per-index byte payloads; the definition set is what recovery
 	// rebuilds each index from (#1755).
 	IndexDefs IndexDefsReadback
+	CSR       CSRReadback
+	Manifest  Manifest
 }
 
 // WriteSnapshotFull is the v2/v3 high-level helper: it lays out a

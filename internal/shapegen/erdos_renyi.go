@@ -72,8 +72,8 @@ var ErrEdgeCountTooHigh = errors.New("shapegen: edge count exceeds C(n, 2)")
 // families.
 type erdosRenyiBase struct {
 	name  string
-	knobs []Knob
 	build func(adjlist.Config) (*lpg.Graph[int, int64], error)
+	knobs []Knob
 }
 
 // Name returns the catalogue identifier.

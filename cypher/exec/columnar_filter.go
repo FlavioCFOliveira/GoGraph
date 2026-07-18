@@ -66,10 +66,10 @@ type ColumnarFilter struct {
 	pred      ChunkPredicate // unboxed fast-path predicate; nil means always fall back
 
 	scratch    *Chunk // current source batch (owned, lazily allocated; reused across FillChunk)
+	boxScratch Row    // reused boxed-row buffer for the fallback predicate
 	scratchPos int    // cursor into scratch: index of the next row to examine
 	scratchLen int    // number of rows currently held in scratch
 	scanDone   bool   // true once the child returned a short batch (end-of-stream)
-	boxScratch Row    // reused boxed-row buffer for the fallback predicate
 }
 
 // NewColumnarFilter creates a ColumnarFilter over a [ChunkProducer] child. predFn

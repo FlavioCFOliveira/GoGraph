@@ -108,8 +108,8 @@ func ObserveLatency(name string, d time.Duration) {
 // no per-call heap allocation: the value lives in the caller's frame and the
 // deferred value-receiver call is open-coded.
 type Stopwatch struct {
-	name  string
 	start time.Time
+	name  string
 }
 
 // Time starts a [Stopwatch] for the named operation. Usage:

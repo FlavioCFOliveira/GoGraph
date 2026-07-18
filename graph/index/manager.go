@@ -107,17 +107,16 @@ const (
 // surfaced as uint32 so this package does not import the lpg
 // package and create a cycle.
 type Change struct {
-	Op       ChangeOp
-	Node     graph.NodeID
-	Dst      graph.NodeID // edge changes only
-	Property uint32       // 0 when not a property change
-	Label    uint32       // 0 when not a label change
-
 	// OldValue and NewValue are present only for property changes.
 	// They are typed as any so this package stays generic across
 	// every PropertyValue kind without importing the lpg package.
 	OldValue any
 	NewValue any
+	Node     graph.NodeID
+	Dst      graph.NodeID // edge changes only
+	Property uint32       // 0 when not a property change
+	Label    uint32       // 0 when not a label change
+	Op       ChangeOp
 }
 
 // IsEdgeChange reports whether the change concerns an edge.
@@ -134,8 +133,8 @@ func (c Change) IsEdgeChange() bool {
 //
 // Manager is safe for concurrent use.
 type Manager struct {
-	mu      sync.RWMutex
 	indexes map[string]Subscriber
+	mu      sync.RWMutex
 }
 
 // NewManager returns an empty Manager.

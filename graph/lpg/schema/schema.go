@@ -48,13 +48,13 @@ var ErrMissingRequired = errors.New("schema: missing required property")
 // Schema is the registry of declared labels and property kinds. It
 // is safe for concurrent use.
 type Schema struct {
-	mu         sync.RWMutex
 	labelReg   *lpg.LabelRegistry
 	propReg    *lpg.PropertyKeyRegistry
 	labels     map[string]lpg.LabelID
 	properties map[string]propertyDecl
 	// required maps label name → set of property names that must be present.
 	required map[string]map[string]struct{}
+	mu       sync.RWMutex
 }
 
 type propertyDecl struct {

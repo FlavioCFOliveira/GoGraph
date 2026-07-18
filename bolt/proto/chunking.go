@@ -63,13 +63,13 @@ var ErrMessageTooLarge = errors.New("bolt chunk: cumulative message size exceeds
 // [packstream.InboundBudget], however, IS safe for concurrent use: one
 // budget is shared by every connection's reader (and decoder) at once.
 type ChunkedReader struct {
-	r               *bufio.Reader
-	maxMessageBytes int
+	r *bufio.Reader
 	// budget is the engine-wide inbound-memory ceiling the reassembly buffer
 	// is charged against, or nil when no (enabled) budget is attached, in
 	// which case reassembly is bounded only by maxMessageBytes. Set via
 	// SetInboundBudget. See ChunkedReader's type doc.
-	budget *packstream.InboundBudget
+	budget          *packstream.InboundBudget
+	maxMessageBytes int
 }
 
 // NewChunkedReader returns a ChunkedReader that reads from r with the

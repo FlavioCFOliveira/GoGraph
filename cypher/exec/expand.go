@@ -81,23 +81,20 @@ type csrAdjacency interface {
 //
 // Expand is NOT safe for concurrent use.
 type Expand struct {
-	input    Operator
-	fwd      csrAdjacency // forward CSR (always required)
-	rev      csrAdjacency // reverse CSR; required for DirIn / DirBoth
-	dir      Direction
-	edgeType string // optional edge-type filter; empty = no filter
-	// edgeTypeFilter maps absolute edge positions (in fwd.EdgesSlice) to type
-	// labels.  nil = no type filtering.
-	edgeTypeFilter map[uint64]string
-
-	inputCol     int                             // column in the input row that carries the source NodeID
-	relCols      []int                           // input-row columns holding existing edge IDs; nil = no check
-	multiplicity func(srcID, dstID uint64) int64 // per-edge CREATE multiplicity; nil = single-row emit
+	input Operator
+	fwd   csrAdjacency // forward CSR (always required)
+	rev   csrAdjacency // reverse CSR; required for DirIn / DirBoth
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 
-	// current expansion state
-	srcID      int64          // current source NodeID
+	// edgeTypeFilter maps absolute edge positions (in fwd.EdgesSlice) to type
+	// labels.  nil = no type filtering.
+	edgeTypeFilter map[uint64]string
+	multiplicity   func(srcID, dstID uint64) int64 // per-edge CREATE multiplicity; nil = single-row emit
+
+	edgeType string // optional edge-type filter; empty = no filter
+
+	relCols    []int          // input-row columns holding existing edge IDs; nil = no check
 	fwdVerts   []uint64       // snapshot of fwd.VerticesSlice()
 	fwdEdges   []graph.NodeID // snapshot of fwd.EdgesSlice()
 	fwdHandles []uint64       // snapshot of fwd.HandlesSlice() (nil unless multigraph)
@@ -105,41 +102,31 @@ type Expand struct {
 	revEdges   []graph.NodeID // snapshot of rev.EdgesSlice() (nil for DirOut)
 	revHandles []uint64       // snapshot of rev.HandlesSlice() (nil for DirOut / non-multigraph)
 	inputRow   Row            // current input row (borrowed reference)
-	// expansion cursors
-	fwdStart, fwdEnd uint64
-	revStart, revEnd uint64
-	fwdDone          bool // true after all forward edges for current src are exhausted
-	emitCount        int  // total rows emitted; drives ctx check cadence
-
 	// Pending state for emitting an edge N times when its
 	// CREATE-multiplicity is greater than 1 (Merge5 [21]). The full row
 	// is cached and re-emitted; pendingRemaining counts the extra
 	// emissions left after the first one.
-	pendingRow       Row
+	pendingRow Row
+	outBuf     []expr.Value // reusable output row backing slice
+
+	inputCol int // column in the input row that carries the source NodeID
+	// current expansion state
+	srcID int64 // current source NodeID
+	// expansion cursors
+	fwdStart, fwdEnd uint64
+	revStart, revEnd uint64
+	emitCount        int // total rows emitted; drives ctx check cadence
 	pendingRemaining int64
 
-	outBuf []expr.Value // reusable output row backing slice
+	dir     Direction
+	fwdDone bool // true after all forward edges for current src are exhausted
 }
 
 // ExpandConfig carries the optional configuration for [NewExpand].
 type ExpandConfig struct {
-	// Direction to follow. Defaults to DirOut when zero.
-	Direction Direction
-	// EdgeType, when non-empty, restricts emitted edges to those whose
-	// positional index is present in EdgeTypeFilter with this type label.
-	EdgeType string
 	// EdgeTypeFilter maps absolute edge positions to type labels.  Required
 	// when EdgeType is non-empty.
 	EdgeTypeFilter map[uint64]string
-	// InputCol is the column index in each input row that holds the source
-	// NodeID (as expr.IntegerValue).  Defaults to 0.
-	InputCol int
-	// RelCols lists the input-row columns holding edge IDs already traversed
-	// by sibling Expand operators in the same MATCH pattern. Each emitted
-	// edge must NOT match any of these columns (openCypher 9 §3.2.2
-	// relationship-isomorphism / cyphermorphism). Empty disables the
-	// check.
-	RelCols []int
 	// MultiplicityFn returns the Cypher CREATE-call multiplicity recorded
 	// for the directed edge (srcID, dstID). When the returned count is N >
 	// 1, the operator emits the corresponding output row N times in a row,
@@ -149,6 +136,20 @@ type ExpandConfig struct {
 	// returning 0 / 1) disables the multiplicity emit and behaves like a
 	// plain single-row Expand.
 	MultiplicityFn func(srcID, dstID uint64) int64
+	// EdgeType, when non-empty, restricts emitted edges to those whose
+	// positional index is present in EdgeTypeFilter with this type label.
+	EdgeType string
+	// RelCols lists the input-row columns holding edge IDs already traversed
+	// by sibling Expand operators in the same MATCH pattern. Each emitted
+	// edge must NOT match any of these columns (openCypher 9 §3.2.2
+	// relationship-isomorphism / cyphermorphism). Empty disables the
+	// check.
+	RelCols []int
+	// InputCol is the column index in each input row that holds the source
+	// NodeID (as expr.IntegerValue).  Defaults to 0.
+	InputCol int
+	// Direction to follow. Defaults to DirOut when zero.
+	Direction Direction
 }
 
 // NewExpand creates an Expand operator.

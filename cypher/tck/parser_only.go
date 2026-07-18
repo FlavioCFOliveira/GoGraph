@@ -22,8 +22,6 @@ type Scenario struct {
 	Feature string
 	// Name is the Scenario: text, including its [N] index prefix where present.
 	Name string
-	// Tags are the @tag annotations on the Scenario block.
-	Tags []string
 	// Query is the Cypher string from the "When executing query:" step.
 	Query string
 	// SyntaxErrorType is non-empty when the scenario expects a SyntaxError,
@@ -32,6 +30,8 @@ type Scenario struct {
 	// SkipReason is non-empty when the scenario is excluded from the pass-rate
 	// gate. It records the grammar-gap category that caused the exclusion.
 	SkipReason SkipReason
+	// Tags are the @tag annotations on the Scenario block.
+	Tags []string
 }
 
 // WantParseError reports whether the scenario expects [parser.Parse] to return

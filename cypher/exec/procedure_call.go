@@ -40,18 +40,20 @@ import (
 //
 // ProcedureCallOp is NOT safe for concurrent use.
 type ProcedureCallOp struct {
-	namespace []string
+	child Operator        // nil for standalone CALL
+	ctx   context.Context //nolint:containedctx // stored for per-Next ctx check
+	reg   *procs.Registry
+
 	name      string
+	namespace []string
 	argExprs  []func(Row) (expr.Value, error)
 	yieldVars []string
-	child     Operator // nil for standalone CALL
-	reg       *procs.Registry
+	rows      [][]expr.Value
 
-	ctx              context.Context //nolint:containedctx // stored for per-Next ctx check
-	rows             [][]expr.Value
-	rowIdx           int
-	currentDriverRow Row  // driver row whose result is currently buffered
-	doneChild        bool // true once the child (or synthetic single row) is exhausted
+	currentDriverRow Row // driver row whose result is currently buffered
+
+	rowIdx    int
+	doneChild bool // true once the child (or synthetic single row) is exhausted
 }
 
 // NewProcedureCallOp creates a ProcedureCallOp.

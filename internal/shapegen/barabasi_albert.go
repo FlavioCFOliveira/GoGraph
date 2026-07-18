@@ -63,8 +63,8 @@ import (
 // across families.
 type barabasiAlbertBase struct {
 	name  string
-	knobs []Knob
 	build func(adjlist.Config) (*lpg.Graph[int, int64], error)
+	knobs []Knob
 }
 
 // Name returns the catalogue identifier.

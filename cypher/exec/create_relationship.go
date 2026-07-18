@@ -33,17 +33,17 @@ import (
 //
 // CreateRelationship is NOT safe for concurrent use.
 type CreateRelationship struct {
+	child       Operator
+	mutator     GraphMutator
+	ctx         context.Context //nolint:containedctx // stored for per-Next ctx check
+	propsExprFn PropsEvalFn     // nil when all properties are literals
+	schema      map[string]int  // variable name → column index
 	startVar    string
 	endVar      string
 	relVar      string
 	relType     string
 	propsRaw    string
 	props       []propLiteral
-	propsExprFn PropsEvalFn    // nil when all properties are literals
-	schema      map[string]int // variable name → column index
-	child       Operator
-	mutator     GraphMutator
-	ctx         context.Context //nolint:containedctx // stored for per-Next ctx check
 }
 
 // NewCreateRelationship creates a CreateRelationship operator.

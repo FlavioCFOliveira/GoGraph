@@ -68,8 +68,8 @@ func BetweennessParallelCtx[W any](ctx context.Context, c *csr.CSR[W], numWorker
 	defer cancel()
 
 	type result struct {
-		cb  []float64
 		err error
+		cb  []float64
 	}
 	results := make([]result, numWorkers)
 	var wg sync.WaitGroup

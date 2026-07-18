@@ -48,17 +48,17 @@ var typedPropKeys = []string{"id", "s", "i", "f", "b", "lst", "ts", "absent"}
 // labels, and properties. It mirrors what the engine must hold, not how the
 // engine stores it.
 type NodeState struct {
-	ID         uint64
-	Labels     []string
 	Properties map[string]any
+	Labels     []string
+	ID         uint64
 }
 
 // EdgeState is the oracle's record of a single directed edge between two
 // oracle node ids, carrying its relationship label and properties.
 type EdgeState struct {
-	SrcID, DstID uint64
-	Label        string
 	Properties   map[string]any
+	Label        string
+	SrcID, DstID uint64
 }
 
 // OracleResult is the oracle's prediction for one operation: whether it commits,
@@ -66,10 +66,10 @@ type EdgeState struct {
 // reason. The simulator records it for comparison with the engine outcome and
 // for replay/shrinking.
 type OracleResult struct {
-	Committed    bool
+	ErrorMsg     string
 	NodesCreated int
 	EdgesCreated int
-	ErrorMsg     string
+	Committed    bool
 }
 
 // OracleOp is one entry in the oracle's operation history: the tick at which it
@@ -77,10 +77,10 @@ type OracleResult struct {
 // is retained so a future phase can shrink a failing trace to a minimal
 // reproducer.
 type OracleOp struct {
-	Tick     int64
-	Cypher   string
 	Params   map[string]any
+	Cypher   string
 	Expected OracleResult
+	Tick     int64
 }
 
 // nameKey indexes a Person node by its (unique) name property so MATCH/MERGE by
@@ -99,16 +99,16 @@ type nameKey = string
 // GraphOracle is NOT safe for concurrent use; it is mutated and read from the
 // single simulation goroutine.
 type GraphOracle struct {
-	nodes      map[uint64]*NodeState
-	byName     map[nameKey]uint64
-	edges      map[edgeKey]*EdgeState
-	nextNodeID uint64
-	ops        []OracleOp
+	nodes  map[uint64]*NodeState
+	byName map[nameKey]uint64
+	edges  map[edgeKey]*EdgeState
 	// typed models [tmplCreateTyped] nodes keyed by their unique integer id,
 	// storing the full property map (string/int/float/bool/list/temporal-string)
 	// so the type-coverage checker can read each back from the engine and confirm
 	// it round-trips and survives recovery. Empty for every other scenario.
-	typed map[int64]map[string]any
+	typed      map[int64]map[string]any
+	ops        []OracleOp
+	nextNodeID uint64
 	// uniqueOnName, when true, models an active UNIQUE constraint on
 	// (Person, name): a CREATE of a name that already exists must be REJECTED
 	// by the engine (a typed constraint-violation error, no state change), which
@@ -131,8 +131,8 @@ type GraphOracle struct {
 // edgeKey identifies an edge by source, destination, and label, matching the
 // (src,dst,label) identity the checker probes.
 type edgeKey struct {
-	src, dst uint64
 	label    string
+	src, dst uint64
 }
 
 // NewGraphOracle returns an empty oracle. Node ids start at 1 so zero can mean
@@ -379,8 +379,8 @@ func (o *GraphOracle) KnowsEdgesByName() []EdgeByName {
 // EdgeByName is a KNOWS edge identified by its endpoint Person names plus its
 // modelled properties, the form the edge-property checker probes the engine with.
 type EdgeByName struct {
-	Src, Dst string
 	Props    map[string]any
+	Src, Dst string
 }
 
 // ApplyMatch models read-only and SET templates. Pure reads ([RETURN]/aggregate

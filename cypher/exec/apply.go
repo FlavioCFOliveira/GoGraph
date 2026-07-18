@@ -43,14 +43,15 @@ import (
 type Apply struct {
 	outer Operator
 	inner Operator
-	arg   *Argument
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 
+	arg *Argument
+
 	// current state
-	outerRow Row  // current outer row; nil when no outer row has been fetched
-	outerEOS bool // true after outer plan is exhausted
+	outerRow Row // current outer row; nil when no outer row has been fetched
 	outBuf   []expr.Value
+	outerEOS bool // true after outer plan is exhausted
 }
 
 // NewApply creates an Apply operator.

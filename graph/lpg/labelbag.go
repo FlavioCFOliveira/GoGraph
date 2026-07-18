@@ -52,8 +52,8 @@ const smallLabelMax = 8
 //   - m == nil, ids == nil, count == 1 -> singleton state (single).
 //   - m == nil, ids == nil, count == 0 -> empty.
 type labelBag struct {
-	ids    []LabelID            // small state; len in [2, smallLabelMax]
 	m      map[LabelID]struct{} // non-nil iff promoted to map (one-way)
+	ids    []LabelID            // small state; len in [2, smallLabelMax]
 	single LabelID              // the lone label in singleton state
 	count  uint8                // 0 empty, 1 singleton, else len(ids); ignored once m != nil
 }

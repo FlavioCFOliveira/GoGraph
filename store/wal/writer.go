@@ -68,24 +68,13 @@ type Stats struct {
 // [Writer.Close]; the owner must discard it and re-open the WAL,
 // which re-validates the tail.
 type Writer struct {
-	mu     sync.Mutex
-	f      WALFile
-	bw     *bufio.Writer
-	closed atomic.Bool
+	f WALFile
 
-	// path is the filesystem path of the WAL file, recorded by [Open] so
-	// [Writer.TruncatePrefix] can perform its crash-safe atomic-rename
-	// (write the surviving suffix to a sibling temp file, then rename it
-	// over path). It is empty for Writers built via [OpenWith] (synthetic
-	// test files have no real path); TruncatePrefix returns
-	// [ErrPrefixTruncateUnsupported] for a path-less Writer.
-	path string
-
-	// dirFsync is the parent-directory fsync used by [Writer.TruncatePrefix]
-	// after the atomic rename. It defaults to parentDirFsync; tests override it
-	// to inject a post-rename failure and assert the Writer fail-stops. Never
-	// nil after a constructor runs.
-	dirFsync func(string) error
+	// syncErr is the sticky poison error: set under mu by the first
+	// flush/fsync failure in SyncCtx and never cleared. While non-nil
+	// every AppendCtx/SyncCtx call returns it without touching the
+	// file.
+	syncErr error
 
 	// fsys is the path-based filesystem backend [Writer.TruncatePrefix] uses
 	// for its temp-write / rename / remove during crash-safe prefix truncation.
@@ -102,22 +91,7 @@ type Writer struct {
 	// Released by Close via releaseLock.
 	lockFile *os.File
 
-	// syncErr is the sticky poison error: set under mu by the first
-	// flush/fsync failure in SyncCtx and never cleared. While non-nil
-	// every AppendCtx/SyncCtx call returns it without touching the
-	// file.
-	syncErr error
-	// durableSize is the file size, in bytes, covered by the last
-	// successful fsync (or the size observed at open). Guarded by mu.
-	// It is the truncation target when a sync failure must discard
-	// the un-synced suffix.
-	durableSize int64
-	// appendedSize is durableSize plus every frame byte accepted by
-	// AppendCtx since the last successful fsync — the logical file
-	// size once the buffer is flushed. Guarded by mu. Tracking it
-	// incrementally keeps the commit hot path free of size-probing
-	// seek syscalls.
-	appendedSize int64
+	bw *bufio.Writer
 
 	// --- group-commit coordination (Writer-owned, all under mu) ---
 	//
@@ -134,16 +108,46 @@ type Writer struct {
 	// groupCond signals waiters when a sync round completes (durableSize
 	// advanced) or the writer is poisoned. Its locker is &mu.
 	groupCond *sync.Cond
-	// leaderActive is true while one committer is performing the group
-	// flush+fsync. While set, no other committer starts a competing fsync;
-	// arriving committers wait on groupCond. It guarantees a single leader
-	// per round so two goroutines never flush the same Writer concurrently.
-	leaderActive bool
+
+	// dirFsync is the parent-directory fsync used by [Writer.TruncatePrefix]
+	// after the atomic rename. It defaults to parentDirFsync; tests override it
+	// to inject a post-rename failure and assert the Writer fail-stops. Never
+	// nil after a constructor runs.
+	dirFsync func(string) error
+
+	// path is the filesystem path of the WAL file, recorded by [Open] so
+	// [Writer.TruncatePrefix] can perform its crash-safe atomic-rename
+	// (write the surviving suffix to a sibling temp file, then rename it
+	// over path). It is empty for Writers built via [OpenWith] (synthetic
+	// test files have no real path); TruncatePrefix returns
+	// [ErrPrefixTruncateUnsupported] for a path-less Writer.
+	path string
+
+	// durableSize is the file size, in bytes, covered by the last
+	// successful fsync (or the size observed at open). Guarded by mu.
+	// It is the truncation target when a sync failure must discard
+	// the un-synced suffix.
+	durableSize int64
+	// appendedSize is durableSize plus every frame byte accepted by
+	// AppendCtx since the last successful fsync — the logical file
+	// size once the buffer is flushed. Guarded by mu. Tracking it
+	// incrementally keeps the commit hot path free of size-probing
+	// seek syscalls.
+	appendedSize int64
 
 	frames     atomic.Uint64
 	bytes      atomic.Uint64
 	syncs      atomic.Uint64
 	syncFailed atomic.Uint64
+
+	mu     sync.Mutex
+	closed atomic.Bool
+
+	// leaderActive is true while one committer is performing the group
+	// flush+fsync. While set, no other committer starts a competing fsync;
+	// arriving committers wait on groupCond. It guarantees a single leader
+	// per round so two goroutines never flush the same Writer concurrently.
+	leaderActive bool
 }
 
 // Open opens or creates the WAL file at path for append-only

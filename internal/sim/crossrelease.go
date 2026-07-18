@@ -134,8 +134,8 @@ func (h *PriorReleaseHelper) Close() error {
 // HelperOpResult is the prior release's observable outcome for one op: whether
 // it committed and a canonical, order-independent signature of its result rows.
 type HelperOpResult struct {
-	Committed bool
 	Rows      string
+	Committed bool
 }
 
 // HelperRunResult is the full outcome of driving an op stream through the prior
@@ -206,18 +206,18 @@ func (h *PriorReleaseHelper) SelfRecoverCounts(ctx context.Context, dir string) 
 // restated here (rather than imported) because the helper lives under cmd/ and
 // is built from a different source tree; the JSON contract is the only coupling.
 type wireOp struct {
+	Params map[string]any `json:"params"`
 	Kind   string         `json:"kind"`
 	Cypher string         `json:"cypher"`
-	Params map[string]any `json:"params"`
 }
 
 type wireResultLine struct {
-	Index     int    `json:"i"`
-	Committed bool   `json:"committed"`
 	Rows      string `json:"rows"`
-	Done      bool   `json:"done"`
+	Index     int    `json:"i"`
 	Nodes     int64  `json:"nodes"`
 	Edges     int64  `json:"edges"`
+	Committed bool   `json:"committed"`
+	Done      bool   `json:"done"`
 }
 
 // parseHelperOutput decodes the helper's line protocol: nOps result lines
@@ -316,9 +316,9 @@ func normaliseOpThroughJSON(op Op) (Op, error) {
 // metadata the upgrade check inspects.
 type recoveredImage struct {
 	engine  *EngineAdapter
+	tailErr error
 	walOps  int
 	clean   bool
-	tailErr error
 }
 
 // recoverImageGraph reopens a prior-release-written store image at dir with the

@@ -65,13 +65,13 @@ func (s *LPGLabelSource) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 //
 // NodeByLabelScan is NOT safe for concurrent use.
 type NodeByLabelScan struct {
-	label    string
 	src      labelResolver
 	ctx      context.Context //nolint:containedctx // stored for per-Next ctx check
 	iter     roaring64.IntPeekable64
-	cardHint int           // bitmap cardinality captured in Init; -1 before Init
-	count    int           // iteration counter for ctx check cadence
 	buf      [1]expr.Value // fixed backing buffer — zero-alloc per Next
+	label    string
+	cardHint int // bitmap cardinality captured in Init; -1 before Init
+	count    int // iteration counter for ctx check cadence
 }
 
 // NewNodeByLabelScan creates a NodeByLabelScan for the given label.

@@ -36,9 +36,9 @@ func Default() Spec {
 
 // Report is the result of a benchmark run.
 type Report struct {
+	Latencies  []time.Duration
 	IngestTime time.Duration
 	BuildTime  time.Duration
-	Latencies  []time.Duration
 }
 
 // Run executes the benchmark and returns a Report. Errors surfaced

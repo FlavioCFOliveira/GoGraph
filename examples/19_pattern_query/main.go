@@ -350,15 +350,15 @@ func addPackage(g *lpg.Graph[string, int64], id string, rng *rand.Rand, deprecat
 		}
 	}
 	props := []struct {
-		key string
 		val lpg.PropertyValue
+		key string
 	}{
-		{propID, lpg.StringValue(id)},
-		{propName, lpg.StringValue(realisticName(rng))},
-		{propEcosystem, lpg.StringValue(ecosystems[rng.Intn(len(ecosystems))])},
-		{propLicense, lpg.StringValue(licenses[rng.Intn(len(licenses))])},
+		{key: propID, val: lpg.StringValue(id)},
+		{key: propName, val: lpg.StringValue(realisticName(rng))},
+		{key: propEcosystem, val: lpg.StringValue(ecosystems[rng.Intn(len(ecosystems))])},
+		{key: propLicense, val: lpg.StringValue(licenses[rng.Intn(len(licenses))])},
 		// Downloads: a heavy-tailed popularity proxy in [0, ~10M).
-		{propDownloads, lpg.Int64Value(int64(rng.Intn(10_000_000)))},
+		{key: propDownloads, val: lpg.Int64Value(int64(rng.Intn(10_000_000)))},
 	}
 	for _, p := range props {
 		if err := g.SetNodeProperty(id, p.key, p.val); err != nil {
@@ -402,26 +402,26 @@ func realisticName(rng *rand.Rand) string {
 func runQueries(ctx context.Context, eng *query.Engine[string, int64], g *lpg.Graph[string, int64], w io.Writer) error {
 	// Label-only patterns: a single label scan, and two labels intersected.
 	counts := []struct {
-		name    string
 		pattern func() *query.Pattern[string, int64]
+		name    string
 	}{
-		{"all_packages", func() *query.Pattern[string, int64] {
+		{name: "all_packages", pattern: func() *query.Pattern[string, int64] {
 			return eng.Match().Vertex(query.WithLabel[string, int64](labelPackage))
 		}},
-		{"deprecated", func() *query.Pattern[string, int64] {
+		{name: "deprecated", pattern: func() *query.Pattern[string, int64] {
 			return eng.Match().Vertex(
 				query.WithLabel[string, int64](labelPackage),
 				query.WithLabel[string, int64](labelDeprecated),
 			)
 		}},
 		// Label + property-equality predicate: an ecosystem, then a license.
-		{"ecosystem_go", func() *query.Pattern[string, int64] {
+		{name: "ecosystem_go", pattern: func() *query.Pattern[string, int64] {
 			return eng.Match().Vertex(
 				query.WithLabel[string, int64](labelPackage),
 				query.WithProperty[string, int64](propEcosystem, lpg.StringValue(matchEcosystem)),
 			)
 		}},
-		{"license_mit", func() *query.Pattern[string, int64] {
+		{name: "license_mit", pattern: func() *query.Pattern[string, int64] {
 			return eng.Match().Vertex(
 				query.WithLabel[string, int64](labelPackage),
 				query.WithProperty[string, int64](propLicense, lpg.StringValue(matchLicense)),
@@ -473,8 +473,8 @@ func readBack(eng *query.Engine[string, int64], g *lpg.Graph[string, int64], w i
 
 	type row struct {
 		id        string
-		downloads int64
 		license   string
+		downloads int64
 	}
 	rows := make([]row, 0, len(matched))
 	for _, key := range matched {

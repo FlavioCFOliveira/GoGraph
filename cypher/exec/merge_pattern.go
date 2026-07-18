@@ -100,17 +100,15 @@ import (
 
 // mergePatternNode describes one node position in the chain.
 type mergePatternNode struct {
-	varName string
-	bound   bool
-	col     int // valid when bound: input-row column holding the NodeID
-
-	labels      []string
-	propsRaw    string
-	props       []propLiteral // static (literal) props, parsed once from propsRaw
-	parsed      bool
 	propsEvalFn PropsEvalFn // nil when every property is a literal
-
-	outCol int // output-row column for this position's binding; -1 if none
+	varName     string
+	propsRaw    string
+	labels      []string
+	props       []propLiteral // static (literal) props, parsed once from propsRaw
+	col         int           // valid when bound: input-row column holding the NodeID
+	outCol      int           // output-row column for this position's binding; -1 if none
+	bound       bool
+	parsed      bool
 }
 
 // mergePatternHop describes one relationship hop connecting chain positions
@@ -120,13 +118,6 @@ type mergePatternNode struct {
 // the chain positions themselves; swapping would break a later hop's
 // reference to "the node just mentioned".
 type mergePatternHop struct {
-	relVar  string
-	relCol  int // -1 if anonymous
-	relType string
-
-	relPropsRaw string
-	relProps    []propLiteral
-	parsed      bool
 	// relPropsEvalFn evaluates this hop's inline relationship property map
 	// against the driving row when it carries a non-literal value (e.g.
 	// `(a)-[:R {kind: row.pk}]->(b)`). nil when every value is a literal
@@ -136,6 +127,12 @@ type mergePatternHop struct {
 	// properties — without it a row-driven inline property is silently dropped
 	// (stored as null on the created edge).
 	relPropsEvalFn PropsEvalFn
+	relVar         string
+	relType        string
+	relPropsRaw    string
+	relProps       []propLiteral
+	relCol         int // -1 if anonymous
+	parsed         bool
 	// relPropsRefsPatternNode is true when this hop's inline property map
 	// references an earlier same-pattern node variable (e.g.
 	// `(a)-[:R {k: a.id}]->(b)`). Such a hop cannot use the once-per-driving-row
@@ -144,9 +141,8 @@ type mergePatternHop struct {
 	// on both the search and create paths (#2024). Left false for the common
 	// case, which keeps the precompute fast path intact.
 	relPropsRefsPatternNode bool
-
-	undirected bool
-	reversed   bool // true for `<-`: the edge runs position i+1 → position i
+	undirected              bool
+	reversed                bool // true for `<-`: the edge runs position i+1 → position i
 }
 
 // storageOrder returns the (src, dst) chain-position indices in EDGE-STORAGE
@@ -173,13 +169,10 @@ func (h *mergePatternHop) directions() (checkForward, checkReverse bool) {
 // in which at least one node is not already bound. See the package doc
 // above for the full algorithm.
 type MergePattern struct {
-	child Operator
+	child   Operator
+	mutator GraphMutator
+	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
 
-	nodes []mergePatternNode
-	hops  []mergePatternHop // len(hops) == len(nodes)-1
-
-	onCreateActions []mergeAction
-	onMatchActions  []mergeAction
 	// onCreateEvals / onMatchEvals map an action's target (via
 	// [MergeActionEvalKey]) to a per-row RHS evaluator for a non-literal
 	// ON CREATE / ON MATCH SET expression targeting any chain node or hop
@@ -187,25 +180,22 @@ type MergePattern struct {
 	// when every action's RHS is a literal. See [MergePattern.applyActions].
 	onCreateEvals map[string]ValueEvalFn
 	onMatchEvals  map[string]ValueEvalFn
+
+	reg *ConstraintRegistry // nil means no enforcement
+	mgr *index.Manager      // nil when reg is nil
+
+	nodes           []mergePatternNode
+	hops            []mergePatternHop // len(hops) == len(nodes)-1
+	onCreateActions []mergeAction
+	onMatchActions  []mergeAction
 	// onCreateSetAll / onMatchSetAll carry whole-entity ON CREATE / ON MATCH
 	// SET actions (`SET n = <expr>` / `SET n += <expr>`) on a chain node,
 	// which the per-property [parseMergeActions] path drops (#2031).
 	onCreateSetAll []MergeSetAllAction
 	onMatchSetAll  []MergeSetAllAction
-
-	mutator GraphMutator
-	reg     *ConstraintRegistry // nil means no enforcement
-	mgr     *index.Manager      // nil when reg is nil
-
-	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
-
 	// iteration state, reset per child row
 	matched    []Row
-	matchedIdx int
-	created    bool
 	createdRow Row
-	done       bool
-	firedOnce  bool
 	// hopPropsForRow holds each hop's effective inline relationship property set
 	// (literals merged with any non-literal per-row values) computed ONCE per
 	// driving row in [MergePattern.runForRow]. Both the search predicate
@@ -216,6 +206,12 @@ type MergePattern struct {
 	// not re-evaluated once per frontier binding. Indexed by hop position; len
 	// == len(hops) after runForRow computes it.
 	hopPropsForRow [][]propLiteral
+
+	matchedIdx int
+
+	created   bool
+	done      bool
+	firedOnce bool
 }
 
 // NewMergePattern creates an empty MergePattern; call AddBoundNode/

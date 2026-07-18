@@ -103,13 +103,13 @@ type Checkpointer interface {
 // any number of times; the underlying work runs once and every caller observes
 // the same result.
 type DB struct {
-	wal            *wal.Writer
-	cp             Checkpointer             // nil when the DB owns no checkpointer
-	quiesce        func(func() error) error // nil when the embedder quiesces writers itself
-	finalCheckpt   bool
-	closeOnce      sync.Once
+	cp             Checkpointer // nil when the DB owns no checkpointer
 	closeErr       error
+	wal            *wal.Writer
+	quiesce        func(func() error) error // nil when the embedder quiesces writers itself
+	closeOnce      sync.Once
 	closeErrSetter sync.Mutex // guards closeErr publication for the racing-caller path
+	finalCheckpt   bool
 }
 
 // Option customises a [DB] at construction. Options are applied in order by

@@ -34,14 +34,14 @@ import (
 //
 // RemoveProperty is NOT safe for concurrent use.
 type RemoveProperty struct {
-	entityVar   string
-	propertyKey string
-	schema      map[string]int
-	relCols     *RelCols // non-nil when entityVar is a relationship
 	child       Operator
 	mutator     GraphMutator
+	ctx         context.Context //nolint:containedctx // stored for per-Next ctx check
+	schema      map[string]int
+	relCols     *RelCols            // non-nil when entityVar is a relationship
 	reg         *ConstraintRegistry // nil means no registry maintenance
-	ctx         context.Context     //nolint:containedctx // stored for per-Next ctx check
+	entityVar   string
+	propertyKey string
 }
 
 // NewRemoveProperty creates a RemoveProperty operator.
@@ -152,12 +152,12 @@ func (op *RemoveProperty) Close() error {
 //
 // RemoveLabels is NOT safe for concurrent use.
 type RemoveLabels struct {
-	nodeVar string
-	labels  []string
-	schema  map[string]int
 	child   Operator
 	mutator GraphMutator
 	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
+	schema  map[string]int
+	nodeVar string
+	labels  []string
 }
 
 // NewRemoveLabels creates a RemoveLabels operator.
@@ -238,7 +238,6 @@ func (op *RemoveLabels) Close() error {
 // Exactly one of nodeKey or (relSrcKey, relDstKey) is populated, selected by
 // isRel.
 type resolvedEntity struct {
-	isRel     bool
 	nodeKey   string // valid when !isRel
 	relSrcKey string // valid when isRel
 	relDstKey string // valid when isRel
@@ -247,6 +246,7 @@ type resolvedEntity struct {
 	// resolvable. A REMOVE r.x mirrors its per-pair removal to the per-instance
 	// by-handle store only when relHandle is non-zero (#1686).
 	relHandle uint64
+	isRel     bool
 }
 
 // resolveEntityFromRow extracts the node or relationship identity from the

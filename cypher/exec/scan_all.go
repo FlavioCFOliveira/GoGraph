@@ -47,9 +47,9 @@ type nodeWalker interface {
 type AllNodesScan struct {
 	g       nodeWalker
 	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
+	buf     [1]expr.Value   // fixed backing buffer — zero-alloc per Next
 	nodeIDs []graph.NodeID  // collected during Init; owned by this operator
 	pos     int             // current iteration cursor
-	buf     [1]expr.Value   // fixed backing buffer — zero-alloc per Next
 }
 
 // NewAllNodesScan creates an AllNodesScan over g.

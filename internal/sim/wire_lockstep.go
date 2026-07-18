@@ -21,8 +21,8 @@ type WireExchange struct {
 // Two transcripts produced from the same seed must be equal — the determinism
 // guarantee of the single-connection lock-step Bolt-wire path.
 type WireTranscript struct {
-	Seed      uint64
 	Exchanges []WireExchange
+	Seed      uint64
 }
 
 // Equal reports whether two transcripts are byte-identical (same length, same

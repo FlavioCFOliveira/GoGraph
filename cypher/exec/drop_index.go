@@ -17,11 +17,11 @@ import (
 //
 // DropIndexOp is NOT safe for concurrent use.
 type DropIndexOp struct {
-	name           string
-	ifExists       bool
+	ctx            context.Context //nolint:containedctx // stored for per-Next ctx check
 	mgr            *index.Manager
 	onSchemaChange func()
-	ctx            context.Context //nolint:containedctx // stored for per-Next ctx check
+	name           string
+	ifExists       bool
 	done           bool
 }
 

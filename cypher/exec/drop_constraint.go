@@ -32,15 +32,15 @@ import (
 //
 // DropConstraintOp is NOT safe for concurrent use.
 type DropConstraintOp struct {
+	ctx            context.Context //nolint:containedctx // stored for per-Next ctx check
+	mgr            *index.Manager
+	reg            *ConstraintRegistry
+	onSchemaChange func()
 	name           string
 	label          string
 	prop           string
 	kind           ConstraintKind
 	ifExists       bool
-	mgr            *index.Manager
-	reg            *ConstraintRegistry
-	onSchemaChange func()
-	ctx            context.Context //nolint:containedctx // stored for per-Next ctx check
 	done           bool
 }
 

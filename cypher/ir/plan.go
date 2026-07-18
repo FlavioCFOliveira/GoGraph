@@ -64,15 +64,15 @@ const (
 
 // ProjectionItem is a named expression in a Projection operator.
 type ProjectionItem struct {
+	// Expr is the parsed AST for the expression, when available. Nil for
+	// legacy or string-only callers. When non-nil, the executor evaluates it
+	// via expr.Eval rather than falling back to a schema-key lookup.
+	Expr ast.Expression
 	// Name is the output variable name (the AS alias, or the expression's
 	// canonical string representation when no alias is given).
 	Name string
 	// Expression is an opaque string representation of the expression.
 	Expression string
-	// Expr is the parsed AST for the expression, when available. Nil for
-	// legacy or string-only callers. When non-nil, the executor evaluates it
-	// via expr.Eval rather than falling back to a schema-key lookup.
-	Expr ast.Expression
 	// Hidden marks a synthetic passthrough item added only so a downstream
 	// Sort can resolve an ORDER BY reference to a pre-projection variable. It
 	// is emitted into the row stream but MUST be excluded from the final
@@ -82,13 +82,6 @@ type ProjectionItem struct {
 
 // AggregateExpr is a named aggregate function in an EagerAggregation operator.
 type AggregateExpr struct {
-	// OutputName is the variable name assigned to the aggregate result.
-	OutputName string
-	// Function is the aggregate function name (e.g. "count", "sum", "avg").
-	Function string
-	// Argument is the expression argument to the aggregate function. An empty
-	// string corresponds to count(*).
-	Argument string
 	// ArgumentExpr is the parsed AST for the aggregate argument, when available.
 	// Non-nil when the argument is a non-trivial expression (property access,
 	// function call, …); when nil, callers fall back to schema lookup keyed on
@@ -100,6 +93,13 @@ type AggregateExpr struct {
 	// is evaluated once at physical-build time, typically from a parameter
 	// or a literal.
 	SecondArgExpr ast.Expression
+	// OutputName is the variable name assigned to the aggregate result.
+	OutputName string
+	// Function is the aggregate function name (e.g. "count", "sum", "avg").
+	Function string
+	// Argument is the expression argument to the aggregate function. An empty
+	// string corresponds to count(*).
+	Argument string
 	// Distinct indicates whether the DISTINCT qualifier is applied inside the
 	// aggregate (e.g. count(DISTINCT n)).
 	Distinct bool
@@ -116,8 +116,6 @@ type Bound struct {
 
 // SortItem is a single ORDER BY term in a Sort or Top operator.
 type SortItem struct {
-	// Expression is an opaque string representation of the sort key expression.
-	Expression string
 	// Expr is the original AST expression for the sort key. It is carried
 	// alongside Expression so the physical builder can compile an expression
 	// evaluator for keys that are not directly present in the output schema
@@ -125,6 +123,8 @@ type SortItem struct {
 	// but it can be derived by evaluating the expression against the row).
 	// May be nil for sort items constructed without access to the AST.
 	Expr ast.Expression
+	// Expression is an opaque string representation of the sort key expression.
+	Expression string
 	// Descending indicates DESC ordering; false means ASC.
 	Descending bool
 }
@@ -246,16 +246,16 @@ func (n *NodeByIndexSeek) Vars() []string { return []string{n.NodeVar} }
 // binds each matching node to NodeVar. Either Min or Max (or both) must be
 // non-nil; a nil bound means the range is open on that end.
 type NodeByIndexRangeScan struct {
+	// Min is the lower bound (inclusive/exclusive) or nil for an open lower end.
+	Min *Bound
+	// Max is the upper bound (inclusive/exclusive) or nil for an open upper end.
+	Max *Bound
 	// NodeVar is the variable name bound to each matching node.
 	NodeVar string
 	// Label is the indexed node label.
 	Label string
 	// Property is the indexed property key.
 	Property string
-	// Min is the lower bound (inclusive/exclusive) or nil for an open lower end.
-	Min *Bound
-	// Max is the upper bound (inclusive/exclusive) or nil for an open upper end.
-	Max *Bound
 }
 
 // NewNodeByIndexRangeScan creates a NodeByIndexRangeScan operator.
@@ -282,24 +282,14 @@ func (n *NodeByIndexRangeScan) Vars() []string { return []string{n.NodeVar} }
 // Expand performs a single-hop relationship expansion from an already-bound
 // FromVar and introduces a RelVar (relationship) and ToVar (destination node).
 type Expand struct {
+	// Child is the subplan that produces FromVar.
+	Child LogicalPlan
 	// FromVar is the already-bound source node variable.
 	FromVar string
 	// RelVar is the variable name bound to the traversed relationship.
 	RelVar string
-	// RelTypes is the list of allowed relationship types. An empty slice means
-	// any type is accepted.
-	RelTypes []string
-	// Direction is the traversal direction relative to FromVar.
-	Direction Direction
 	// ToVar is the variable name bound to the destination node.
 	ToVar string
-	// SiblingRelVars carries the names of relationship variables already bound
-	// by earlier hops in the SAME MATCH pattern. The physical builder
-	// translates each name to its schema column and passes the column set as
-	// the Expand operator's relationship-isomorphism (cyphermorphism) guard,
-	// so every anonymous or named relationship in one pattern maps to a
-	// distinct edge per openCypher 9 §3.2.2.
-	SiblingRelVars []string
 	// PathVar, when non-empty, is the named-path variable this Expand
 	// step participates in. Set by applyPathVar for mixed paths
 	// (Expand + VLE) so the physical builder can record this hop's
@@ -307,8 +297,18 @@ type Expand struct {
 	// pathVarMeta entry the downstream VLE updates — closing the
 	// "missing leading hop" path-reconstruction gap (Match6 [14]).
 	PathVar string
-	// Child is the subplan that produces FromVar.
-	Child LogicalPlan
+	// RelTypes is the list of allowed relationship types. An empty slice means
+	// any type is accepted.
+	RelTypes []string
+	// SiblingRelVars carries the names of relationship variables already bound
+	// by earlier hops in the SAME MATCH pattern. The physical builder
+	// translates each name to its schema column and passes the column set as
+	// the Expand operator's relationship-isomorphism (cyphermorphism) guard,
+	// so every anonymous or named relationship in one pattern maps to a
+	// distinct edge per openCypher 9 §3.2.2.
+	SiblingRelVars []string
+	// Direction is the traversal direction relative to FromVar.
+	Direction Direction
 }
 
 // NewExpand creates an Expand operator.
@@ -336,19 +336,19 @@ func (e *Expand) Vars() []string { return []string{e.RelVar, e.ToVar} }
 // OptionalExpand performs a left-outer-join relationship expansion. When no
 // relationship is found the row is kept with RelVar and ToVar bound to null.
 type OptionalExpand struct {
+	// Child is the subplan that produces FromVar.
+	Child LogicalPlan
 	// FromVar is the already-bound source node variable.
 	FromVar string
 	// RelVar is the variable name bound to the traversed relationship (or null).
 	RelVar string
+	// ToVar is the variable name bound to the destination node (or null).
+	ToVar string
 	// RelTypes is the list of allowed relationship types. An empty slice means
 	// any type is accepted.
 	RelTypes []string
 	// Direction is the traversal direction relative to FromVar.
 	Direction Direction
-	// ToVar is the variable name bound to the destination node (or null).
-	ToVar string
-	// Child is the subplan that produces FromVar.
-	Child LogicalPlan
 }
 
 // NewOptionalExpand creates an OptionalExpand operator.
@@ -376,25 +376,21 @@ func (o *OptionalExpand) Vars() []string { return []string{o.RelVar, o.ToVar} }
 // VarLengthExpand performs a variable-length path expansion between MinDepth and
 // MaxDepth hops. A MaxDepth of zero means unbounded.
 type VarLengthExpand struct {
+	// Child is the subplan that produces FromVar.
+	Child LogicalPlan
 	// FromVar is the already-bound source node variable.
 	FromVar string
 	// RelVar is the variable name bound to the collected path relationships.
 	RelVar string
-	// RelTypes is the list of allowed relationship types. An empty slice means
-	// any type is accepted.
-	RelTypes []string
-	// Direction is the traversal direction relative to FromVar.
-	Direction Direction
 	// ToVar is the variable name bound to the destination node.
 	ToVar string
-	// MinDepth is the minimum number of hops (inclusive, ≥1).
-	MinDepth int
-	// MaxDepth is the maximum number of hops (inclusive). Zero means unbounded.
-	MaxDepth int
 	// PathVar, when non-empty, is the named path variable (`p` in
 	// `MATCH p=(a)-[*1..3]->(b)`). The physical builder allocates a schema slot
 	// for it and emits a PathValue in that column.
 	PathVar string
+	// RelTypes is the list of allowed relationship types. An empty slice means
+	// any type is accepted.
+	RelTypes []string
 	// ExcludedRelVars lists relationship-variable names already in scope
 	// at the time this VLE step is reached whose bound edge must not be
 	// traversed. Implements the openCypher no-repeated-relationships rule
@@ -404,8 +400,12 @@ type VarLengthExpand struct {
 	// against the current schema; unresolved names are silently dropped
 	// (the variable is not yet bound).
 	ExcludedRelVars []string
-	// Child is the subplan that produces FromVar.
-	Child LogicalPlan
+	// MinDepth is the minimum number of hops (inclusive, ≥1).
+	MinDepth int
+	// MaxDepth is the maximum number of hops (inclusive). Zero means unbounded.
+	MaxDepth int
+	// Direction is the traversal direction relative to FromVar.
+	Direction Direction
 }
 
 // NewVarLengthExpand creates a VarLengthExpand operator.
@@ -447,13 +447,8 @@ func (v *VarLengthExpand) Vars() []string { return []string{v.RelVar, v.ToVar} }
 // which emits the flat alternating path list the path variable's metadata
 // hydrates into a per-instance-typed PathValue.
 type ShortestPath struct {
-	// All selects allShortestPaths (every minimum-length path) over
-	// shortestPath (a single arbitrary minimum-length path).
-	All bool
-	// Optional reports whether the binding sits under OPTIONAL MATCH. When a
-	// pair has no path: a non-optional binding eliminates the row; an optional
-	// one keeps the row with the path variable bound to null.
-	Optional bool
+	// Child is the subplan that produces FromVar and ToVar.
+	Child LogicalPlan
 	// FromVar / ToVar are the endpoint node variables, both produced by Child.
 	FromVar string
 	ToVar   string
@@ -466,15 +461,20 @@ type ShortestPath struct {
 	// RelTypes is the inner relationship's accepted type set (OR semantics). An
 	// empty slice means any type.
 	RelTypes []string
-	// Direction is the inner relationship's traversal direction relative to
-	// FromVar.
-	Direction Direction
 	// MinDepth / MaxDepth bound the path length. MinDepth is 0 or 1 (enforced by
 	// sema). MaxDepth uses math.MaxInt for "unbounded".
 	MinDepth int
 	MaxDepth int
-	// Child is the subplan that produces FromVar and ToVar.
-	Child LogicalPlan
+	// All selects allShortestPaths (every minimum-length path) over
+	// shortestPath (a single arbitrary minimum-length path).
+	All bool
+	// Optional reports whether the binding sits under OPTIONAL MATCH. When a
+	// pair has no path: a non-optional binding eliminates the row; an optional
+	// one keeps the row with the path variable bound to null.
+	Optional bool
+	// Direction is the inner relationship's traversal direction relative to
+	// FromVar.
+	Direction Direction
 }
 
 // NewShortestPath creates a ShortestPath IR node.
@@ -513,6 +513,8 @@ func (s *ShortestPath) Vars() []string {
 // ProjectEndpoints projects the start and/or end nodes of a relationship
 // variable that is already in scope.
 type ProjectEndpoints struct {
+	// Child is the subplan that produces RelVar.
+	Child LogicalPlan
 	// RelVar is the already-bound relationship variable.
 	RelVar string
 	// StartVar is the variable name bound to the start node (may be empty if
@@ -521,8 +523,6 @@ type ProjectEndpoints struct {
 	// EndVar is the variable name bound to the end node (may be empty if not
 	// needed).
 	EndVar string
-	// Child is the subplan that produces RelVar.
-	Child LogicalPlan
 }
 
 // NewProjectEndpoints creates a ProjectEndpoints operator.
@@ -591,13 +591,13 @@ type PathChainElement struct {
 //
 // Concurrency: immutable after construction; safe for concurrent reads.
 type NamedPath struct {
+	// Child is the subplan that produces the chain's variables.
+	Child LogicalPlan
 	// PathName is the user-visible path variable name (e.g. "p").
 	PathName string
 	// Chain is the alternating node/rel description of the pattern, in
 	// document order. The first entry has IsLeading=true.
 	Chain []PathChainElement
-	// Child is the subplan that produces the chain's variables.
-	Child LogicalPlan
 }
 
 // NewNamedPath constructs a NamedPath operator wrapping child. The chain is
@@ -623,14 +623,14 @@ func (n *NamedPath) Vars() []string { return []string{n.PathName} }
 // Selection filters rows from its child using Predicate. It corresponds to a
 // WHERE clause in the logical plan.
 type Selection struct {
-	// Predicate is the opaque string representation of the filter expression.
-	Predicate string
 	// PredicateExpr is the parsed AST for the predicate, when available. Nil
 	// for legacy or string-only callers. When non-nil, the executor evaluates
 	// it via expr.Eval rather than the pass-through stub.
 	PredicateExpr ast.Expression
 	// Child is the subplan whose rows are filtered.
 	Child LogicalPlan
+	// Predicate is the opaque string representation of the filter expression.
+	Predicate string
 }
 
 // NewSelection creates a Selection operator with a string-only predicate.
@@ -667,10 +667,10 @@ func (s *Selection) Vars() []string {
 // Projection computes a set of named expressions (RETURN / WITH items) from its
 // child's rows. Only the columns declared in Items are propagated downstream.
 type Projection struct {
-	// Items is the ordered list of output columns.
-	Items []ProjectionItem
 	// Child is the subplan whose rows are projected.
 	Child LogicalPlan
+	// Items is the ordered list of output columns.
+	Items []ProjectionItem
 }
 
 // NewProjection creates a Projection operator.
@@ -697,6 +697,8 @@ func (p *Projection) Vars() []string {
 // EagerAggregation groups rows from its child by GroupBy keys and computes
 // aggregate functions over each group.
 type EagerAggregation struct {
+	// Child is the subplan whose rows are aggregated.
+	Child LogicalPlan
 	// GroupBy is the ordered list of grouping key variable names.
 	GroupBy []string
 	// GroupByExprs holds the parsed AST expression for each grouping key, in
@@ -706,8 +708,6 @@ type EagerAggregation struct {
 	GroupByExprs []ast.Expression
 	// Aggregates is the list of aggregate expressions computed per group.
 	Aggregates []AggregateExpr
-	// Child is the subplan whose rows are aggregated.
-	Child LogicalPlan
 }
 
 // NewEagerAggregation creates an EagerAggregation operator.
@@ -756,10 +756,10 @@ func (e *EagerAggregation) Vars() []string {
 
 // Sort orders rows from its child according to SortItems.
 type Sort struct {
-	// SortItems is the ordered list of sort keys.
-	SortItems []SortItem
 	// Child is the subplan whose rows are sorted.
 	Child LogicalPlan
+	// SortItems is the ordered list of sort keys.
+	SortItems []SortItem
 }
 
 // NewSort creates a Sort operator.
@@ -780,12 +780,12 @@ func (s *Sort) Vars() []string { return s.Child.Vars() }
 // Top is a fused ORDER BY … LIMIT operator that sorts and truncates in a single
 // pass, avoiding the need to materialise the full sorted result.
 type Top struct {
+	// Child is the subplan whose rows are sorted and truncated.
+	Child LogicalPlan
 	// SortItems is the ordered list of sort keys.
 	SortItems []SortItem
 	// Limit is the maximum number of rows to produce.
 	Limit int64
-	// Child is the subplan whose rows are sorted and truncated.
-	Child LogicalPlan
 }
 
 // NewTop creates a Top operator.
@@ -809,15 +809,15 @@ func (t *Top) Vars() []string { return t.Child.Vars() }
 // parameter resolution so the same cached plan works across calls with
 // different parameter values.
 type Limit struct {
-	// Count is the maximum number of rows to pass through. Ignored when
-	// CountExpr is non-nil.
-	Count int64
 	// CountExpr is the parsed AST for the LIMIT expression when it is
 	// not a literal integer (typically a parameter reference like
 	// $limit). Nil when Count is the authoritative value.
 	CountExpr ast.Expression
 	// Child is the subplan whose output is truncated.
 	Child LogicalPlan
+	// Count is the maximum number of rows to pass through. Ignored when
+	// CountExpr is non-nil.
+	Count int64
 }
 
 // NewLimit creates a Limit operator with a literal count.
@@ -844,14 +844,14 @@ func (l *Limit) Vars() []string { return l.Child.Vars() }
 // Skip discards the first Count rows from its child's output. See [Limit]
 // for the CountExpr deferred-resolution contract.
 type Skip struct {
-	// Count is the number of leading rows to skip. Ignored when
-	// CountExpr is non-nil.
-	Count int64
 	// CountExpr is the parsed AST for the SKIP expression when it is
 	// not a literal integer. Nil when Count is the authoritative value.
 	CountExpr ast.Expression
 	// Child is the subplan whose leading rows are discarded.
 	Child LogicalPlan
+	// Count is the number of leading rows to skip. Ignored when
+	// CountExpr is non-nil.
+	Count int64
 }
 
 // NewSkip creates a Skip operator with a literal count.
@@ -1374,17 +1374,17 @@ func (e *Eager) Vars() []string { return e.Child.Vars() }
 // Unwind expands a list-valued expression into one row per element, binding
 // each element to ElementVar. It corresponds to the UNWIND clause.
 type Unwind struct {
-	// ListExpression is the opaque string representation of the list expression.
-	ListExpression string
 	// ListExpr is the parsed AST for the list expression, when available. Nil
 	// means the expression could not be parsed; callers must fall back to a
 	// static empty list. The executor uses ListExpr when non-nil.
 	ListExpr ast.Expression
-	// ElementVar is the variable name bound to each list element.
-	ElementVar string
 	// Child is the subplan that provides the context rows. May be nil when
 	// UNWIND appears at the start of a query.
 	Child LogicalPlan
+	// ListExpression is the opaque string representation of the list expression.
+	ListExpression string
+	// ElementVar is the variable name bound to each list element.
+	ElementVar string
 }
 
 // NewUnwind creates an Unwind operator with a string-only list expression.
@@ -1415,10 +1415,10 @@ func (u *Unwind) Vars() []string { return []string{u.ElementVar} }
 // ProduceResults is the root operator of every logical plan tree. It names the
 // final output columns that are returned to the query caller.
 type ProduceResults struct {
-	// Columns is the ordered list of output column names.
-	Columns []string
 	// Child is the subplan that produces the result rows.
 	Child LogicalPlan
+	// Columns is the ordered list of output column names.
+	Columns []string
 }
 
 // NewProduceResults creates a ProduceResults operator.
@@ -1441,13 +1441,6 @@ func (p *ProduceResults) Vars() []string { return p.Columns }
 // CreateNode creates a new graph node with the given labels and properties,
 // binding it to NodeVar.
 type CreateNode struct {
-	// NodeVar is the variable name bound to the newly created node.
-	NodeVar string
-	// Labels is the list of labels assigned to the new node.
-	Labels []string
-	// Properties is the opaque string representation of the property map
-	// expression (e.g. "{name: 'Alice'}").
-	Properties string
 	// PropertiesExpr is the parsed AST for the property map, when available.
 	// Non-nil when the property map contains non-literal expressions (variable
 	// references, property accesses, arithmetic) that must be evaluated at
@@ -1457,6 +1450,13 @@ type CreateNode struct {
 	PropertiesExpr ast.Expression
 	// Child is the driving subplan.
 	Child LogicalPlan
+	// NodeVar is the variable name bound to the newly created node.
+	NodeVar string
+	// Properties is the opaque string representation of the property map
+	// expression (e.g. "{name: 'Alice'}").
+	Properties string
+	// Labels is the list of labels assigned to the new node.
+	Labels []string
 }
 
 // NewCreateNode creates a CreateNode operator.
@@ -1486,6 +1486,12 @@ func (c *CreateNode) Vars() []string { return []string{c.NodeVar} }
 // CreateRelationship creates a new graph relationship between two already-bound
 // nodes, binding the new relationship to RelVar.
 type CreateRelationship struct {
+	// PropertiesExpr is the parsed AST for the property map, when available.
+	// Non-nil when the property map contains non-literal expressions that must
+	// be evaluated at runtime against the current row. See CreateNode.PropertiesExpr.
+	PropertiesExpr ast.Expression
+	// Child is the driving subplan.
+	Child LogicalPlan
 	// StartVar is the already-bound source node variable.
 	StartVar string
 	// EndVar is the already-bound destination node variable.
@@ -1497,12 +1503,6 @@ type CreateRelationship struct {
 	// Properties is the opaque string representation of the property map
 	// expression.
 	Properties string
-	// PropertiesExpr is the parsed AST for the property map, when available.
-	// Non-nil when the property map contains non-literal expressions that must
-	// be evaluated at runtime against the current row. See CreateNode.PropertiesExpr.
-	PropertiesExpr ast.Expression
-	// Child is the driving subplan.
-	Child LogicalPlan
 }
 
 // NewCreateRelationship creates a CreateRelationship operator.
@@ -1541,12 +1541,6 @@ func (c *CreateRelationship) Vars() []string { return []string{c.RelVar} }
 
 // SetProperty sets or updates a single property on a node or relationship.
 type SetProperty struct {
-	// EntityVar is the already-bound node or relationship variable.
-	EntityVar string
-	// PropertyKey is the property key to set.
-	PropertyKey string
-	// Value is the opaque string representation of the new value expression.
-	Value string
 	// ValueExpr is the parsed AST for the value expression when available.
 	// The physical builder uses it to construct a per-row evaluator so that
 	// non-literal RHS expressions (variable references, arithmetic, property
@@ -1555,6 +1549,12 @@ type SetProperty struct {
 	ValueExpr ast.Expression
 	// Child is the driving subplan.
 	Child LogicalPlan
+	// EntityVar is the already-bound node or relationship variable.
+	EntityVar string
+	// PropertyKey is the property key to set.
+	PropertyKey string
+	// Value is the opaque string representation of the new value expression.
+	Value string
 }
 
 // NewSetProperty creates a SetProperty operator.
@@ -1607,17 +1607,6 @@ func (s *SetProperty) Vars() []string { return []string{s.EntityVar} }
 // In both modes, null values in the source map remove the matching property
 // from the target.
 type SetAllProperties struct {
-	// EntityVar is the already-bound node or relationship variable.
-	EntityVar string
-	// IsReplace selects `=` (true, replace) vs `+=` (false, merge) semantics.
-	IsReplace bool
-	// SourceVar names a bound node/relationship whose properties are copied.
-	// Empty when the source is a literal map or a parameter reference.
-	SourceVar string
-	// MapLiteral holds the opaque literal-map string (e.g. `{a: 1, b: "x"}`)
-	// produced by the AST printer. Empty when the source is a SourceVar or a
-	// parameter reference.
-	MapLiteral string
 	// MapAST carries the source map-literal AST when it contains a non-literal
 	// value (a variable reference, property access, or arithmetic — e.g.
 	// `SET n += {x: row.y}`). The physical builder installs a per-row map
@@ -1626,9 +1615,6 @@ type SetAllProperties struct {
 	// (or a $param, resolved at build time via the opaque MapLiteral string).
 	// Without it a row-driven map value silently degrades to null on the target.
 	MapAST ast.Expression
-	// ParamName holds the `$name` reference text (without the dollar sign)
-	// when the source is a parameter. Empty otherwise.
-	ParamName string
 	// ExprAST carries a whole map-valued RHS expression for the
 	// `SET n = <expr>` / `SET n += <expr>` forms whose right-hand side is
 	// neither a `{…}` literal, a bound entity variable, nor a `$param` — e.g.
@@ -1641,6 +1627,20 @@ type SetAllProperties struct {
 	ExprAST ast.Expression
 	// Child is the driving subplan.
 	Child LogicalPlan
+	// EntityVar is the already-bound node or relationship variable.
+	EntityVar string
+	// SourceVar names a bound node/relationship whose properties are copied.
+	// Empty when the source is a literal map or a parameter reference.
+	SourceVar string
+	// MapLiteral holds the opaque literal-map string (e.g. `{a: 1, b: "x"}`)
+	// produced by the AST printer. Empty when the source is a SourceVar or a
+	// parameter reference.
+	MapLiteral string
+	// ParamName holds the `$name` reference text (without the dollar sign)
+	// when the source is a parameter. Empty otherwise.
+	ParamName string
+	// IsReplace selects `=` (true, replace) vs `+=` (false, merge) semantics.
+	IsReplace bool
 }
 
 // NewSetAllPropertiesFromEntity creates a SetAllProperties operator copying
@@ -1708,12 +1708,12 @@ func (s *SetAllProperties) Vars() []string {
 
 // SetLabels adds one or more labels to an already-bound node.
 type SetLabels struct {
+	// Child is the driving subplan.
+	Child LogicalPlan
 	// NodeVar is the already-bound node variable.
 	NodeVar string
 	// Labels is the list of labels to add.
 	Labels []string
-	// Child is the driving subplan.
-	Child LogicalPlan
 }
 
 // NewSetLabels creates a SetLabels operator.
@@ -1733,12 +1733,12 @@ func (s *SetLabels) Vars() []string { return []string{s.NodeVar} }
 
 // RemoveProperty removes a single property from a node or relationship.
 type RemoveProperty struct {
+	// Child is the driving subplan.
+	Child LogicalPlan
 	// EntityVar is the already-bound node or relationship variable.
 	EntityVar string
 	// PropertyKey is the property key to remove.
 	PropertyKey string
-	// Child is the driving subplan.
-	Child LogicalPlan
 }
 
 // NewRemoveProperty creates a RemoveProperty operator.
@@ -1756,12 +1756,12 @@ func (r *RemoveProperty) Vars() []string { return []string{r.EntityVar} }
 
 // RemoveLabels removes one or more labels from an already-bound node.
 type RemoveLabels struct {
+	// Child is the driving subplan.
+	Child LogicalPlan
 	// NodeVar is the already-bound node variable.
 	NodeVar string
 	// Labels is the list of labels to remove.
 	Labels []string
-	// Child is the driving subplan.
-	Child LogicalPlan
 }
 
 // NewRemoveLabels creates a RemoveLabels operator.
@@ -1783,8 +1783,6 @@ func (r *RemoveLabels) Vars() []string { return []string{r.NodeVar} }
 // no relationships; use DetachDelete to delete a node together with its
 // relationships.
 type DeleteNode struct {
-	// NodeVar is the already-bound node variable to delete.
-	NodeVar string
 	// TargetExpr is the parsed AST for the delete target when the target
 	// is not a bare variable (e.g. `DELETE friends[$i]`, `DELETE map.key`,
 	// `DELETE coll[0]`). When non-nil the exec builder uses it to evaluate
@@ -1793,6 +1791,8 @@ type DeleteNode struct {
 	TargetExpr ast.Expression
 	// Child is the driving subplan.
 	Child LogicalPlan
+	// NodeVar is the already-bound node variable to delete.
+	NodeVar string
 }
 
 // NewDeleteNodeExpr creates a DeleteNode operator carrying the parsed AST
@@ -1818,10 +1818,10 @@ func (d *DeleteNode) Vars() []string { return []string{d.NodeVar} }
 
 // DeleteRelationship deletes an already-bound relationship from the graph.
 type DeleteRelationship struct {
-	// RelVar is the already-bound relationship variable to delete.
-	RelVar string
 	// Child is the driving subplan.
 	Child LogicalPlan
+	// RelVar is the already-bound relationship variable to delete.
+	RelVar string
 }
 
 // NewDeleteRelationship creates a DeleteRelationship operator.
@@ -1839,14 +1839,14 @@ func (d *DeleteRelationship) Vars() []string { return []string{d.RelVar} }
 
 // DetachDelete deletes an already-bound node and all its incident relationships.
 type DetachDelete struct {
-	// NodeVar is the already-bound node variable to delete.
-	NodeVar string
 	// TargetExpr is the parsed AST for the delete target when the target
 	// is not a bare variable (e.g. `DETACH DELETE friends[$i]`,
 	// `DETACH DELETE map.key`). Same role as DeleteNode.TargetExpr.
 	TargetExpr ast.Expression
 	// Child is the driving subplan.
 	Child LogicalPlan
+	// NodeVar is the already-bound node variable to delete.
+	NodeVar string
 }
 
 // NewDetachDelete creates a DetachDelete operator.
@@ -1872,6 +1872,16 @@ func (d *DetachDelete) Vars() []string { return []string{d.NodeVar} }
 // if absent. OnCreate and OnMatch hold the update expressions applied under each
 // branch (opaque strings; a dedicated expression IR is introduced later).
 type Merge struct {
+	// NodePropsAST carries the property-map AST of the first node pattern in
+	// the MERGE pattern, when present. The physical builder consults it to
+	// decide whether the property map contains row-driven expressions (e.g.
+	// `MERGE (p:Person {login: prop.login})` after an UNWIND) and, if so,
+	// installs a per-row PropsEvalFn on the [exec.Merge] operator.
+	// nil when no inline property map is present or when MERGE is shaped as
+	// a relationship MERGE (handled by [MergeRelationship]).
+	NodePropsAST ast.Expression
+	// Child is the driving subplan.
+	Child LogicalPlan
 	// Pattern is the opaque string representation of the MERGE pattern.
 	Pattern string
 	// OnCreate is the list of update expression strings applied when the pattern
@@ -1883,14 +1893,6 @@ type Merge struct {
 	// BoundVars lists the variable names that are bound by the MERGE pattern and
 	// made available downstream.
 	BoundVars []string
-	// NodePropsAST carries the property-map AST of the first node pattern in
-	// the MERGE pattern, when present. The physical builder consults it to
-	// decide whether the property map contains row-driven expressions (e.g.
-	// `MERGE (p:Person {login: prop.login})` after an UNWIND) and, if so,
-	// installs a per-row PropsEvalFn on the [exec.Merge] operator.
-	// nil when no inline property map is present or when MERGE is shaped as
-	// a relationship MERGE (handled by [MergeRelationship]).
-	NodePropsAST ast.Expression
 	// OnCreateExprs / OnMatchExprs carry the parsed value-expression ASTs of
 	// the ON CREATE / ON MATCH property-set items whose right-hand side is a
 	// non-literal expression (e.g. `ON MATCH SET n.num = n.num + 1`). The
@@ -1908,8 +1910,6 @@ type Merge struct {
 	// (#2031).
 	OnCreateSetAll []MergeSetAll
 	OnMatchSetAll  []MergeSetAll
-	// Child is the driving subplan.
-	Child LogicalPlan
 }
 
 // MergeSetAll carries a whole-entity ON CREATE / ON MATCH SET item
@@ -1918,9 +1918,9 @@ type Merge struct {
 // dispatches on the evaluated value's runtime kind (map / node / relationship /
 // null / other). IsReplace selects `=` (true) vs `+=` (false).
 type MergeSetAll struct {
+	Value     ast.Expression
 	TargetVar string
 	IsReplace bool
-	Value     ast.Expression
 }
 
 // MergeSetExpr carries the parsed value-expression AST for a MERGE
@@ -1933,9 +1933,9 @@ type MergeSetAll struct {
 // pattern node, bound endpoint, or relationship variable); Value is the
 // right-hand-side expression evaluated per row.
 type MergeSetExpr struct {
+	Value     ast.Expression
 	TargetVar string
 	Key       string
-	Value     ast.Expression
 }
 
 // MergeRelationship is the relationship-pattern variant of [Merge]. It
@@ -1951,6 +1951,19 @@ type MergeSetExpr struct {
 // properties, ON-actions on a different variable, re-asserted endpoint
 // predicates) keep using the node-only [Merge] path.
 type MergeRelationship struct {
+	// RelPropsAST carries the inline relationship property-map AST when it
+	// contains a non-literal value (a variable reference, property access,
+	// or arithmetic expression — e.g. `{kind: r.pk}`). The physical builder
+	// installs a per-row property evaluator from it so the map drives both
+	// the match-search predicate and the created edge's properties. nil when
+	// the map is absent or every value is a literal (or a $param, resolved at
+	// build time via the opaque RelProps string). Without it a row-driven
+	// inline property silently degrades to null on the created edge, since
+	// the literal-only parser drops the non-literal entry (fail-silent
+	// Consistency defect).
+	RelPropsAST ast.Expression
+	// Child is the driving subplan that binds SrcVar and DstVar.
+	Child LogicalPlan
 	// SrcVar is the variable name of the source endpoint.
 	SrcVar string
 	// DstVar is the variable name of the destination endpoint.
@@ -1966,22 +1979,6 @@ type MergeRelationship struct {
 	// relationship. When non-empty the exec operator filters the
 	// search by these properties and writes them on creation.
 	RelProps string
-	// RelPropsAST carries the inline relationship property-map AST when it
-	// contains a non-literal value (a variable reference, property access,
-	// or arithmetic expression — e.g. `{kind: r.pk}`). The physical builder
-	// installs a per-row property evaluator from it so the map drives both
-	// the match-search predicate and the created edge's properties. nil when
-	// the map is absent or every value is a literal (or a $param, resolved at
-	// build time via the opaque RelProps string). Without it a row-driven
-	// inline property silently degrades to null on the created edge, since
-	// the literal-only parser drops the non-literal entry (fail-silent
-	// Consistency defect).
-	RelPropsAST ast.Expression
-	// Undirected reports whether the MERGE relationship pattern declares
-	// an undirected hop (`MERGE (a)-[r:T]-(b)`). When true the exec
-	// operator searches for an existing edge in either direction before
-	// creating one (closes Merge5 [13]).
-	Undirected bool
 	// OnCreate is the list of (key, value) pairs to set on the
 	// relationship when a new edge is created.
 	OnCreate []KVAction
@@ -1995,8 +1992,11 @@ type MergeRelationship struct {
 	// [KVAction] opaque-string fast path).
 	OnCreateExprs []MergeSetExpr
 	OnMatchExprs  []MergeSetExpr
-	// Child is the driving subplan that binds SrcVar and DstVar.
-	Child LogicalPlan
+	// Undirected reports whether the MERGE relationship pattern declares
+	// an undirected hop (`MERGE (a)-[r:T]-(b)`). When true the exec
+	// operator searches for an existing edge in either direction before
+	// creating one (closes Merge5 [13]).
+	Undirected bool
 }
 
 // KVAction is a (key, value) pair captured by the IR for MERGE
@@ -2014,17 +2014,17 @@ type MergeRelationship struct {
 type KVAction struct {
 	Key   string
 	Value string // opaque literal string (parsed at physical-build time)
+	// RetainKeys lists the RHS property keys of a Replace map sentinel — the
+	// keys that must NOT be cleared. Nil for an entity-copy Replace sentinel
+	// (the retained set is the source entity's live keys, resolved at write
+	// time) and for non-Replace actions.
+	RetainKeys []string
 	// Replace marks the leading sentinel of a whole-entity `=` replace group.
 	// When true the exec layer clears the relationship's existing properties
 	// that are absent from the RHS before applying the subsequent write
 	// actions. Always false for the additive `+=` form and for
 	// single-property `SET <relVar>.<key> = <value>` items.
 	Replace bool
-	// RetainKeys lists the RHS property keys of a Replace map sentinel — the
-	// keys that must NOT be cleared. Nil for an entity-copy Replace sentinel
-	// (the retained set is the source entity's live keys, resolved at write
-	// time) and for non-Replace actions.
-	RetainKeys []string
 }
 
 // NewMergeRelationship creates a MergeRelationship operator without
@@ -2094,15 +2094,15 @@ func (m *Merge) Vars() []string { return m.BoundVars }
 // to search for a satisfying node and, when the whole pattern's search
 // fails, to create one.
 type MergePatternEndpoint struct {
-	Var      string
-	Bound    bool
-	Labels   []string
-	PropsRaw string // opaque inline `{k: v, ...}` source string, "" when absent
 	// PropsAST carries the property-map AST when it contains non-literal
 	// expressions (variable references, property accesses, parameters).
 	// nil when the map is absent or fully literal, in which case PropsRaw
 	// alone drives both the search predicate and the create-time write.
 	PropsAST ast.Expression
+	Var      string
+	PropsRaw string // opaque inline `{k: v, ...}` source string, "" when absent
+	Labels   []string
+	Bound    bool
 }
 
 // MergePatternHop describes one relationship connecting two consecutive
@@ -2115,12 +2115,12 @@ type MergePatternEndpoint struct {
 // InvalidParameterUse) — so RelPropsRaw/RelPropsAST only ever need to
 // represent a `{k: v, ...}` map literal, exactly like [MergePatternEndpoint].
 type MergePatternHop struct {
-	RelVar      string // "" for an anonymous relationship
-	RelType     string
-	RelPropsRaw string // opaque inline `{k: v, ...}` source string, "" when absent
 	// RelPropsAST carries the property-map AST when it contains non-literal
 	// expressions; nil when the map is absent or fully literal.
 	RelPropsAST ast.Expression
+	RelVar      string // "" for an anonymous relationship
+	RelType     string
+	RelPropsRaw string // opaque inline `{k: v, ...}` source string, "" when absent
 	Undirected  bool
 	// Reversed is true for an incoming `<-` pattern: chain positions stay in
 	// pattern-declaration order, but the edge is stored/searched from the
@@ -2145,6 +2145,7 @@ type MergePatternHop struct {
 // shape, falling back to MergePattern for everything MergeRelationship's
 // narrow fast path does not cover.
 type MergePattern struct {
+	Child LogicalPlan
 	// Nodes holds one entry per chain position; len(Nodes) == len(Hops)+1.
 	Nodes []MergePatternEndpoint
 	// Hops holds one entry per relationship; Hops[i] connects Nodes[i] to
@@ -2167,7 +2168,6 @@ type MergePattern struct {
 	// path drops. See [MergeSetAll] (#2031).
 	OnCreateSetAll []MergeSetAll
 	OnMatchSetAll  []MergeSetAll
-	Child          LogicalPlan
 }
 
 // NewMergePattern creates a MergePattern operator for the chain described by
@@ -2216,11 +2216,14 @@ func (m *MergePattern) Vars() []string {
 // ProcedureCall invokes a stored procedure and binds its yield columns. It
 // corresponds to CALL procedure(…) YIELD col1, col2 in Cypher.
 type ProcedureCall struct {
+	// Child is the driving subplan. May be nil when CALL appears at the start
+	// of a query.
+	Child LogicalPlan
+	// Name is the bare procedure name.
+	Name string
 	// Namespace is the optional namespace path of the procedure
 	// (e.g. ["apoc", "algo"] for apoc.algo.dijkstra).
 	Namespace []string
-	// Name is the bare procedure name.
-	Name string
 	// Arguments is the list of opaque string representations of the call
 	// argument expressions.
 	Arguments []string
@@ -2235,9 +2238,6 @@ type ProcedureCall struct {
 	// outputs in order a, b) reads each column from the correct slot.
 	// Empty slice means defaulted to YieldVars (no AS rename).
 	YieldSourceNames []string
-	// Child is the driving subplan. May be nil when CALL appears at the start
-	// of a query.
-	Child LogicalPlan
 }
 
 // NewProcedureCall creates a ProcedureCall operator.

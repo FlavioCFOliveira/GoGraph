@@ -75,8 +75,8 @@ const mapperCapHintMax = 1 << 20
 // major order — the same order [graph.Mapper.Walk] produces, which is
 // the order the writer serialised.
 type MapperPair struct {
-	ID  graph.NodeID
 	Key string
+	ID  graph.NodeID
 }
 
 // MapperRawPair is one (NodeID, raw key bytes) record as parsed from a
@@ -86,8 +86,8 @@ type MapperPair struct {
 // codec. The slice exposed by [MapperReadback.RawPairs] is enumerated
 // in the same Walk order the writer serialised.
 type MapperRawPair struct {
-	ID  graph.NodeID
 	Key []byte
+	ID  graph.NodeID
 }
 
 // MapperReadback is the structural parse of a mapper.bin file. The

@@ -90,8 +90,8 @@ func WeightedBetweennessParallelCtx(ctx context.Context, c *csr.CSR[float64], nu
 	defer cancel()
 
 	type result struct {
-		cb  []float64
 		err error
+		cb  []float64
 	}
 	// Shared, read-only in-degree array: each worker's predecessor arena reads
 	// it to size its per-vertex regions, so computing it once here avoids an

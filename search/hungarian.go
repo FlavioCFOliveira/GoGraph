@@ -22,8 +22,8 @@ var ErrInvalidInput = errors.New("search: input contains NaN or Inf")
 // Concurrency: Assignment is a value type returned freshly per call
 // and is safe for concurrent reads.
 type Assignment struct {
-	TotalCost float64
 	RowToCol  []int
+	TotalCost float64
 }
 
 // Hungarian solves the rectangular assignment problem on the n*m

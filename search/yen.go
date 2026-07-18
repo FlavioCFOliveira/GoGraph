@@ -14,8 +14,8 @@ import (
 // Concurrency: YenPath values are freshly allocated per call and
 // safe for concurrent reads.
 type YenPath[W Weight] struct {
-	Nodes []graph.NodeID
 	Cost  W
+	Nodes []graph.NodeID
 }
 
 // YenKShortest computes up to k loopless shortest paths from src to
@@ -116,8 +116,8 @@ func YenKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst grap
 	seen.add(first)
 
 	type candRef struct {
-		start, end int
 		cost       W
+		start, end int
 	}
 	// candArena holds every candidate path's nodes concatenated; each
 	// candidate is identified by a (start, end) range into the arena.

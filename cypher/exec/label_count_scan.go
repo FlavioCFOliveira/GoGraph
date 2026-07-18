@@ -75,11 +75,11 @@ type labelCounter interface {
 // LabelCountScan is NOT safe for concurrent use.
 type LabelCountScan struct {
 	src     labelResolver
-	label   string
 	ctx     context.Context //nolint:containedctx // stored for the per-Next ctx check
+	buf     [1]expr.Value   // fixed backing buffer — zero-alloc per Next
+	label   string
 	count   int64
 	emitted bool
-	buf     [1]expr.Value // fixed backing buffer — zero-alloc per Next
 }
 
 // NewLabelCountScan creates a LabelCountScan that counts the nodes carrying

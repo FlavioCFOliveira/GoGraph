@@ -71,15 +71,22 @@ type File interface {
 // The zero value disables all fault injection (the wrapper is a
 // transparent pass-through).
 type Faults struct {
+	// CorruptOnRead, when non-nil, is called with the current file
+	// offset and the number of bytes about to be read. Returning true
+	// inverts ALL bits of the first byte of the result buffer
+	// (p[0] ^= 0xFF) to simulate a bit-flip or CRC-corrupting storage
+	// error. Fidelity note: the corruption always lands on the head of
+	// each Read call's buffer (p[0]); it does not model a flip at an
+	// arbitrary in-buffer byte or a fixed file offset. The (offset, n)
+	// arguments let a caller decide WHETHER to corrupt a given read, not
+	// WHERE within the buffer.
+	CorruptOnRead func(offset, n int64) bool
+
 	// FailWritesAfterBytes causes Write to fail once the cumulative
 	// bytes written to the file reaches this value. The partial write
 	// up to the threshold is permitted; subsequent writes return
 	// [ErrPartialWrite]. Zero disables this mode.
 	FailWritesAfterBytes int64
-
-	// ReturnENOSPC causes every Write call to return [syscall.ENOSPC]
-	// regardless of the current write budget.
-	ReturnENOSPC bool
 
 	// FsyncDelay inserts a sleep of this duration before each Sync
 	// call. Zero disables the delay.
@@ -98,21 +105,14 @@ type Faults struct {
 	// [Faults.ReturnEIOOnSync] to fail every call.
 	FailSyncAfter int
 
+	// ReturnENOSPC causes every Write call to return [syscall.ENOSPC]
+	// regardless of the current write budget.
+	ReturnENOSPC bool
+
 	// ReturnEIOOnSync causes every Sync call to return
 	// [ErrSyncFailed] immediately, with the same
 	// discard-unsynced-suffix semantics as [Faults.FailSyncAfter].
 	ReturnEIOOnSync bool
-
-	// CorruptOnRead, when non-nil, is called with the current file
-	// offset and the number of bytes about to be read. Returning true
-	// inverts ALL bits of the first byte of the result buffer
-	// (p[0] ^= 0xFF) to simulate a bit-flip or CRC-corrupting storage
-	// error. Fidelity note: the corruption always lands on the head of
-	// each Read call's buffer (p[0]); it does not model a flip at an
-	// arbitrary in-buffer byte or a fixed file offset. The (offset, n)
-	// arguments let a caller decide WHETHER to corrupt a given read, not
-	// WHERE within the buffer.
-	CorruptOnRead func(offset, n int64) bool
 }
 
 // ErrPartialWrite is returned by Write once [Faults.FailWritesAfterBytes]
@@ -132,9 +132,12 @@ var ErrSyncFailed = fmt.Errorf("testfs: sync fault injected: %w", syscall.EIO)
 // FaultFile is safe for concurrent use; all operations are
 // serialised on an internal mutex.
 type FaultFile struct {
-	mu     sync.Mutex
-	f      *os.File
-	faults Faults
+	// syncBaseErr records a Stat failure at construction via Wrap;
+	// surfaced when a sync fault fires and the durable prefix is
+	// therefore unknown.
+	syncBaseErr error
+	f           *os.File
+	faults      Faults
 	// written is the cumulative bytes committed to the underlying
 	// file (including partial writes up to the budget limit).
 	written int64
@@ -145,10 +148,7 @@ type FaultFile struct {
 	// syncedSize is the file size covered by the last successful Sync
 	// (or the size at open); a firing sync fault truncates back to it.
 	syncedSize int64
-	// syncBaseErr records a Stat failure at construction via Wrap;
-	// surfaced when a sync fault fires and the durable prefix is
-	// therefore unknown.
-	syncBaseErr error
+	mu         sync.Mutex
 }
 
 // New opens or creates the file at path (flags: O_RDWR|O_CREATE)

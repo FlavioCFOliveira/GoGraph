@@ -40,8 +40,8 @@ const (
 type Violation struct {
 	Kind    ViolationKind
 	Message string
-	Tick    int64
 	Op      string
+	Tick    int64
 }
 
 // String renders a Violation for a report.

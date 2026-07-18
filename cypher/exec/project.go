@@ -41,11 +41,11 @@ var ErrProjectionRowTooLarge = errors.New("exec: projection row memory cap excee
 // ProjectionItem describes a single column in a projection.  Eval is evaluated
 // against the input row; Alias names the resulting output column.
 type ProjectionItem struct {
-	// Alias is the output column name (e.g. "n", "count(n)", "x").
-	Alias string
 	// Eval evaluates the item expression against the current input row and
 	// returns the projected value.
 	Eval func(Row) (expr.Value, error)
+	// Alias is the output column name (e.g. "n", "count(n)", "x").
+	Alias string
 }
 
 // Project is a Volcano pipeline operator that applies a list of [ProjectionItem]
@@ -54,15 +54,17 @@ type ProjectionItem struct {
 //
 // Project is NOT safe for concurrent use.
 type Project struct {
-	child    Operator
+	child         Operator
+	ctx           context.Context //nolint:containedctx // stored for per-Next ctx check
+	estimateValue func(expr.Value) int64
+
 	items    []ProjectionItem
-	ctx      context.Context //nolint:containedctx // stored for per-Next ctx check
-	outBuf   Row             // reusable output backing slice; len = len(items)
-	inputRow Row             // reusable scratch header for the child's row (see Next)
+	outBuf   Row // reusable output backing slice; len = len(items)
+	inputRow Row // reusable scratch header for the child's row (see Next)
+
 	// maxRowBytes and estimateValue bound the estimated size of a single
 	// assembled output row (0 = disabled). See WithRowByteBudget.
-	maxRowBytes   int64
-	estimateValue func(expr.Value) int64
+	maxRowBytes int64
 }
 
 // WithRowByteBudget bounds the estimated size of a single assembled output row

@@ -16,8 +16,8 @@ const diameterSalt uint64 = 0xd1a3_e7c2_5f80_ab19
 // form cannot bias the check.
 type diameterFixture struct {
 	name  string
-	order int
 	edges [][2]int
+	order int
 }
 
 // diameterViolations cross-checks [search.Diameter]'s (lo, hi, exact) bounds

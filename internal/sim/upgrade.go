@@ -11,12 +11,6 @@ import (
 // boundary, and the workload factory. The write phase is fully deterministic
 // from Seed so a failure reproduces exactly.
 type UpgradeConfig struct {
-	// Seed drives the deterministic write workload and the SimDisk sub-seed.
-	Seed uint64
-	// Ops is the number of write operations applied before the upgrade boundary.
-	// Values <= 0 default to 400 — enough to populate nodes, edges, and a few
-	// deletes so the parity check is meaningful.
-	Ops int
 	// Workload is the actor mix used for the write phase. When nil,
 	// [WriteHeavyWorkload] is used so the durable image carries real structure.
 	Workload func(*Seed) *Workload
@@ -24,12 +18,21 @@ type UpgradeConfig struct {
 	// cross-checked for consistency after reopen, so the upgrade also guards
 	// index durability across the boundary.
 	IndexSpecs []IndexSpec
+	// Seed drives the deterministic write workload and the SimDisk sub-seed.
+	Seed uint64
+	// Ops is the number of write operations applied before the upgrade boundary.
+	// Values <= 0 default to 400 — enough to populate nodes, edges, and a few
+	// deletes so the parity check is meaningful.
+	Ops int
 }
 
 // UpgradeResult summarises an upgrade simulation: the durable counts written,
 // the counts recovered after the reopen, and how many WAL ops the reopen's
 // recovery replayed. A nil [UpgradeResult.Report] means full parity held.
 type UpgradeResult struct {
+	// Report is non-nil when the post-reopen parity/durability/index check found
+	// a violation (data loss, ghost state, or index drift).
+	Report *SimReport
 	// WrittenNodes / WrittenEdges are the oracle-modelled counts at close.
 	WrittenNodes int
 	WrittenEdges int
@@ -38,9 +41,6 @@ type UpgradeResult struct {
 	RecoveredEdges int64
 	// ReplayedWALOps is how many committed WAL ops recovery replayed on reopen.
 	ReplayedWALOps int
-	// Report is non-nil when the post-reopen parity/durability/index check found
-	// a violation (data loss, ghost state, or index drift).
-	Report *SimReport
 }
 
 // Parity reports whether the upgrade reopened to full parity (no violation).

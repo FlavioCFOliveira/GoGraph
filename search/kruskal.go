@@ -14,9 +14,9 @@ import (
 // From and To are the endpoints in CSR NodeID space; Weight is the
 // edge's weight.
 type MSTEdge[W Weight] struct {
+	Weight W
 	From   graph.NodeID
 	To     graph.NodeID
-	Weight W
 }
 
 // KruskalMST computes a minimum spanning forest of c using Kruskal's

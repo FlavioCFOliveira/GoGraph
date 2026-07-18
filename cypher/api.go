@@ -119,9 +119,6 @@ func init() {
 // buildIRProjection to reconstruct a RelationshipValue from the raw
 // IntegerValue columns in the executor row.
 type edgeVarInfo struct {
-	srcCol        int
-	edgeCol       int
-	dstCol        int
 	edgeType      string   // first element of RelTypes, or empty
 	acceptedTypes []string // full RelTypes list; used to disambiguate when
 	// the stored edge carries multiple labels (e.g. (a)-[:HATES]->(c) and
@@ -130,6 +127,9 @@ type edgeVarInfo struct {
 	// [KNOWS, HATES] here, and the projection's RelationshipValue
 	// reconstruction prefers a matching label from acceptedTypes over the
 	// non-deterministic map-iteration first label. Closes Match2 [6] flake.
+	srcCol  int
+	edgeCol int
+	dstCol  int
 }
 
 // pathVarInfo records the schema column that holds the flat alternating path
@@ -151,7 +151,6 @@ type edgeVarInfo struct {
 // has length 1 — equivalent to the legacy (listCol, edgeType)
 // shape — and the projection reads it identically.
 type pathVarInfo struct {
-	listCol  int              // first segment's listCol (legacy shape)
 	edgeType string           // first segment's edgeType (legacy shape)
 	segments []pathVarSegment // chained-VLE segments in plan-build order
 	// leadingSteps captures fixed-length Expand hops that precede the
@@ -162,6 +161,7 @@ type pathVarInfo struct {
 	// iterating the VLE list). Recorded in plan-build order with the
 	// leading-most hop at index 0.
 	leadingSteps []pathChainStep
+	listCol      int // first segment's listCol (legacy shape)
 }
 
 // pathVarSegment captures one VarLengthExpand's contribution to a
@@ -172,9 +172,9 @@ type pathVarInfo struct {
 // which stored label to surface when an edge carries more than one accepted
 // type (rmp #1685, mirrors [edgeVarInfo.acceptedTypes]).
 type pathVarSegment struct {
-	listCol       int
 	edgeType      string
 	acceptedTypes []string
+	listCol       int
 }
 
 // pathChainStep describes one (relationship, destination-node) hop of a
@@ -183,10 +183,10 @@ type pathVarSegment struct {
 // declared in the AST and acts as a fallback when the live-graph lookup
 // cannot resolve one.
 type pathChainStep struct {
+	edgeType string
 	srcCol   int
 	edgeCol  int
 	dstCol   int
-	edgeType string
 }
 
 // pathChainInfo describes a named path bound by a zero- or fixed-length
@@ -195,8 +195,8 @@ type pathChainStep struct {
 // one relationship and one destination node, in document order.
 // buildIRProjection consumes this to reconstruct an [expr.PathValue].
 type pathChainInfo struct {
-	leadingCol int
 	steps      []pathChainStep
+	leadingCol int
 }
 
 // vleRelInfo describes the schema column and edge-type filter for a
@@ -209,9 +209,9 @@ type pathChainInfo struct {
 // declared RelTypes list, used to surface the correct per-instance type when
 // a parallel edge carries one of several accepted types (rmp #1685).
 type vleRelInfo struct {
-	listCol       int
 	edgeType      string
 	acceptedTypes []string
+	listCol       int
 }
 
 type buildOpts struct {
@@ -256,13 +256,6 @@ type buildOpts struct {
 	// chain. Used by buildIRProjection to reconstruct an expr.PathValue
 	// without the flat ListValue encoding used by VarLengthExpand.
 	pathVarChain map[string]pathChainInfo
-	// expandTripletSeq is the ordered list of (srcCol, edgeCol, dstCol)
-	// triplets registered by each [exec.Expand] operator as its physical
-	// builder runs. A [*ir.NamedPath] wrapper above an Expand subtree
-	// captures the slice length before recursing into its child, then
-	// consumes the triplets appended during the child build to associate
-	// IR chain elements with row slots.
-	expandTripletSeq []pathChainStep
 	// vleRelMeta maps a VarLengthExpand relationship variable name (e.g. "r"
 	// from `MATCH (a)-[r*]->(b)`) to the flat-list column it occupies plus
 	// the optional edge-type filter. Used by buildIRProjection to render the
@@ -324,6 +317,53 @@ type buildOpts struct {
 	// general eval which interprets `n` as the original NodeValue rather
 	// than the pre-projected n.num.
 	preprojectedCols map[string]struct{}
+	// parallelGov is the engine-shared adaptive worker-budget governor (#1705),
+	// set from the Engine field on the read-path build and handed to every
+	// morsel-parallel leaf constructed for this query. nil on every other build
+	// path (write path, public BuildPlanWithMutator, tests), which means the leaf
+	// gets the full unbounded GOMAXPROCS budget — the prior behaviour.
+	parallelGov *exec.ParallelGovernor
+	// fwdCSR caches the forward CSR snapshot used by the per-row relationship
+	// reconstruction helpers (edgeHandleAtFwdPos / edgeInstanceIdxFor) to read
+	// the stable per-edge handle and the per-CREATE instance index at a forward
+	// CSR position. It is built lazily, at most once per query, by [ensureFwdCSR]
+	// the first time a relationship is reconstructed (mirroring edgeIDResolver):
+	// before #1574 each helper rebuilt the whole forward CSR (O(V+E)) PER result
+	// row, making `RETURN r` O(R·(V+E)) and dominating heap allocations.
+	//
+	// The whole query's reads run inside one [lpg.Graph.View] RLock, so the
+	// adjacency is stable for the snapshot's lifetime: a single snapshot reused
+	// across all rows is consistent with the Expand-time CSR that minted the
+	// positions (invariant I-POS: identical per-source out-degree counts and
+	// neighbour insertion order ⇒ identical edge positions, BuildFromAdjList
+	// being a deterministic pure function of the adjacency list). fwdCSRReady
+	// disambiguates "not yet built" from a nil snapshot. Forward-only by design:
+	// the helpers never read reverse state, so the reverse CSR is not cached.
+	//
+	// Concurrency: assigned without synchronisation, exactly like edgeIDResolver,
+	// under the single-goroutine-per-query build/exec contract (the projection
+	// operator's Next drives reconstruction on one goroutine; ParallelScan
+	// workers never touch bopts).
+	fwdCSR *csr.CSR[float64]
+	// pendingPathPred maps a named path variable to a whole-path predicate that a
+	// WHERE Selection above a shortestPath()/allShortestPaths() binding wants
+	// fused INTO the operator (#1786). The Selection registers the predicate
+	// keyed on the path variable before building its child; the ShortestPath
+	// physical builder consumes a matching entry (deleting it) and runs an
+	// exhaustive search returning the shortest SATISFYING path. consumedPathPred
+	// records which keys were consumed so the Selection can drop its now-redundant
+	// post-filter. This indirection is needed because the path-binding operator is
+	// not the Selection's direct child: an outer MATCH (a),(c) binds the endpoints,
+	// so the ShortestPath sits inside a CorrelatedApply below the WHERE Selection.
+	pendingPathPred  map[string]ast.Expression
+	consumedPathPred map[string]struct{}
+	// expandTripletSeq is the ordered list of (srcCol, edgeCol, dstCol)
+	// triplets registered by each [exec.Expand] operator as its physical
+	// builder runs. A [*ir.NamedPath] wrapper above an Expand subtree
+	// captures the slice length before recursing into its child, then
+	// consumes the triplets appended during the child build to associate
+	// IR chain elements with row slots.
+	expandTripletSeq []pathChainStep
 	// maxCollectItems carries the Engine's per-group element budget for
 	// buffering aggregators (collect / percentileCont / percentileDisc) into
 	// buildEagerAggregation. The encoding mirrors EngineOptions.MaxCollectItems:
@@ -332,6 +372,24 @@ type buildOpts struct {
 	// the Engine-internal build paths set it; the public BuildPlanWithMutator
 	// path leaves it zero and so inherits the finite default.
 	maxCollectItems int
+	// parallelScanThreshold is the live-node-count gate (strict >) for the
+	// parallel count fast path (#1672). The read-path build sets it from the
+	// Engine field; it is compared against the live node count of the graph
+	// backing the build's nodeWalker. Zero leaves the parallel count path
+	// disabled even when parallelScanEnabled is true, since no live count exceeds
+	// zero only when the graph is empty — so the resolved Engine value is always
+	// positive.
+	parallelScanThreshold int
+	// maxResultRows / maxResultBytes mirror the Engine's per-query result-memory
+	// budget (e.maxResultRows / e.maxResultBytes; 0 = unbounded). They are set on
+	// the read-path build and threaded into a morsel-parallel scan leaf via
+	// [exec.ParallelScanProject.WithResultBudget] so its workers stop accumulating
+	// once the fleet-wide total exceeds the budget. Without this the parallel path
+	// materialises the whole result set before the Result drain's incremental caps
+	// can bound peak memory (#1830). Zero on other build paths leaves the leaf
+	// unbounded — the prior behaviour.
+	maxResultRows  int64
+	maxResultBytes int64
 	// hashJoinEnabled gates the disconnected-equi-join hash-join physical
 	// optimisation (#1506). The read-path build (buildPlanEngine) sets it from
 	// the Engine field; it is consulted in buildOperator's *ir.Selection case
@@ -357,65 +415,7 @@ type buildOpts struct {
 	// false by every other build path (write path, public BuildPlanWithMutator),
 	// which therefore always build the serial EagerAggregation pipeline.
 	parallelScanEnabled bool
-	// parallelScanThreshold is the live-node-count gate (strict >) for the
-	// parallel count fast path (#1672). The read-path build sets it from the
-	// Engine field; it is compared against the live node count of the graph
-	// backing the build's nodeWalker. Zero leaves the parallel count path
-	// disabled even when parallelScanEnabled is true, since no live count exceeds
-	// zero only when the graph is empty — so the resolved Engine value is always
-	// positive.
-	parallelScanThreshold int
-	// parallelGov is the engine-shared adaptive worker-budget governor (#1705),
-	// set from the Engine field on the read-path build and handed to every
-	// morsel-parallel leaf constructed for this query. nil on every other build
-	// path (write path, public BuildPlanWithMutator, tests), which means the leaf
-	// gets the full unbounded GOMAXPROCS budget — the prior behaviour.
-	parallelGov *exec.ParallelGovernor
-	// maxResultRows / maxResultBytes mirror the Engine's per-query result-memory
-	// budget (e.maxResultRows / e.maxResultBytes; 0 = unbounded). They are set on
-	// the read-path build and threaded into a morsel-parallel scan leaf via
-	// [exec.ParallelScanProject.WithResultBudget] so its workers stop accumulating
-	// once the fleet-wide total exceeds the budget. Without this the parallel path
-	// materialises the whole result set before the Result drain's incremental caps
-	// can bound peak memory (#1830). Zero on other build paths leaves the leaf
-	// unbounded — the prior behaviour.
-	maxResultRows  int64
-	maxResultBytes int64
-	// fwdCSR caches the forward CSR snapshot used by the per-row relationship
-	// reconstruction helpers (edgeHandleAtFwdPos / edgeInstanceIdxFor) to read
-	// the stable per-edge handle and the per-CREATE instance index at a forward
-	// CSR position. It is built lazily, at most once per query, by [ensureFwdCSR]
-	// the first time a relationship is reconstructed (mirroring edgeIDResolver):
-	// before #1574 each helper rebuilt the whole forward CSR (O(V+E)) PER result
-	// row, making `RETURN r` O(R·(V+E)) and dominating heap allocations.
-	//
-	// The whole query's reads run inside one [lpg.Graph.View] RLock, so the
-	// adjacency is stable for the snapshot's lifetime: a single snapshot reused
-	// across all rows is consistent with the Expand-time CSR that minted the
-	// positions (invariant I-POS: identical per-source out-degree counts and
-	// neighbour insertion order ⇒ identical edge positions, BuildFromAdjList
-	// being a deterministic pure function of the adjacency list). fwdCSRReady
-	// disambiguates "not yet built" from a nil snapshot. Forward-only by design:
-	// the helpers never read reverse state, so the reverse CSR is not cached.
-	//
-	// Concurrency: assigned without synchronisation, exactly like edgeIDResolver,
-	// under the single-goroutine-per-query build/exec contract (the projection
-	// operator's Next drives reconstruction on one goroutine; ParallelScan
-	// workers never touch bopts).
-	fwdCSR      *csr.CSR[float64]
-	fwdCSRReady bool
-	// pendingPathPred maps a named path variable to a whole-path predicate that a
-	// WHERE Selection above a shortestPath()/allShortestPaths() binding wants
-	// fused INTO the operator (#1786). The Selection registers the predicate
-	// keyed on the path variable before building its child; the ShortestPath
-	// physical builder consumes a matching entry (deleting it) and runs an
-	// exhaustive search returning the shortest SATISFYING path. consumedPathPred
-	// records which keys were consumed so the Selection can drop its now-redundant
-	// post-filter. This indirection is needed because the path-binding operator is
-	// not the Selection's direct child: an outer MATCH (a),(c) binds the endpoints,
-	// so the ShortestPath sits inside a CorrelatedApply below the WHERE Selection.
-	pendingPathPred  map[string]ast.Expression
-	consumedPathPred map[string]struct{}
+	fwdCSRReady         bool
 }
 
 // evalRow is the canonical bridge from a per-row closure to [expr.Eval] /
@@ -472,6 +472,28 @@ type EngineOptions struct {
 	// is then ignored. Run queries through [Engine.RunInTx] for
 	// atomicity and WAL durability.
 	Store *txn.Store[string, float64]
+
+	// RecoveredConstraints, when non-empty, are the durable schema constraints
+	// recovered from disk (the [store/recovery.Result.Constraints] of the open
+	// that produced Store/Graph). The constructor re-registers each one in the
+	// engine's constraint registry and re-seeds every UNIQUE value-set by
+	// scanning the recovered graph, so a constraint declared before a crash is
+	// enforced again after recovery — without this, the registry is rebuilt
+	// empty on every open and duplicates are silently accepted (audit gap H1).
+	// A caller recovering a WAL-backed store from disk MUST pass these (or use
+	// [NewEngineWithStoreAndConstraints]); a store-less in-memory engine leaves
+	// the field nil.
+	RecoveredConstraints []ConstraintDef
+	// RecoveredIndexes, when non-empty, are the durable index definitions
+	// recovered from the WAL (the [store/recovery.Result.Indexes] of the open
+	// that produced Store/Graph). The constructor re-registers and re-backfills
+	// each one in the index.Manager so a user-created index survives a crash and
+	// a restart — without this, every CREATE INDEX is silently absent after
+	// recovery and the planner would serve 0-row results for indexed queries
+	// (audit gap: CREATE INDEX not durable). A caller recovering a WAL-backed
+	// store from disk MUST pass these (or use [NewEngineWithStoreAndSchema]);
+	// a store-less in-memory engine leaves the field nil.
+	RecoveredIndexes []IndexDef
 
 	// PlanCacheCapacity bounds the number of cached plans. Zero
 	// selects [DefaultPlanCacheCapacity]; positive values override
@@ -574,27 +596,14 @@ type EngineOptions struct {
 	// barrier, so the cap trips before the whole list is built).
 	MaxCollectItems int
 
-	// RecoveredConstraints, when non-empty, are the durable schema constraints
-	// recovered from disk (the [store/recovery.Result.Constraints] of the open
-	// that produced Store/Graph). The constructor re-registers each one in the
-	// engine's constraint registry and re-seeds every UNIQUE value-set by
-	// scanning the recovered graph, so a constraint declared before a crash is
-	// enforced again after recovery — without this, the registry is rebuilt
-	// empty on every open and duplicates are silently accepted (audit gap H1).
-	// A caller recovering a WAL-backed store from disk MUST pass these (or use
-	// [NewEngineWithStoreAndConstraints]); a store-less in-memory engine leaves
-	// the field nil.
-	RecoveredConstraints []ConstraintDef
-	// RecoveredIndexes, when non-empty, are the durable index definitions
-	// recovered from the WAL (the [store/recovery.Result.Indexes] of the open
-	// that produced Store/Graph). The constructor re-registers and re-backfills
-	// each one in the index.Manager so a user-created index survives a crash and
-	// a restart — without this, every CREATE INDEX is silently absent after
-	// recovery and the planner would serve 0-row results for indexed queries
-	// (audit gap: CREATE INDEX not durable). A caller recovering a WAL-backed
-	// store from disk MUST pass these (or use [NewEngineWithStoreAndSchema]);
-	// a store-less in-memory engine leaves the field nil.
-	RecoveredIndexes []IndexDef
+	// ParallelScanThreshold is the minimum live node count above which the
+	// planner prefers the morsel-parallel count reduce over the serial
+	// EagerAggregation pipeline (#1672). Zero (the default) selects
+	// [DefaultParallelScanThreshold]. The gate is strict (>): a graph whose live
+	// node count is at or below the threshold always uses the serial path, so
+	// spawning workers only happens when there is enough work to amortise it.
+	// Ignored when [DisableParallelScan] is true.
+	ParallelScanThreshold int
 
 	// DisableHashJoin turns OFF the disconnected-equi-join hash-join physical
 	// optimisation (#1506). When false (the default) the planner may replace a
@@ -633,15 +642,6 @@ type EngineOptions struct {
 	// wired into the planner.
 	DisableParallelScan bool
 
-	// ParallelScanThreshold is the minimum live node count above which the
-	// planner prefers the morsel-parallel count reduce over the serial
-	// EagerAggregation pipeline (#1672). Zero (the default) selects
-	// [DefaultParallelScanThreshold]. The gate is strict (>): a graph whose live
-	// node count is at or below the threshold always uses the serial path, so
-	// spawning workers only happens when there is enough work to amortise it.
-	// Ignored when [DisableParallelScan] is true.
-	ParallelScanThreshold int
-
 	// DisableParallelBackfill turns OFF the morsel-parallel phase-2 of a
 	// CREATE INDEX backfill ([Engine.backfillNodeHashIndex]). When false (the
 	// default) a backfill over at least backfillParallelMinNodes nodes is
@@ -669,14 +669,14 @@ const DefaultParallelScanThreshold = 50_000
 // [store/recovery.IndexRecord] without coupling callers to the recovery
 // package's wire types; [IndexDefsFromRecovery] converts a recovery result.
 type IndexDef struct {
-	// Hash is true for a hash index, false for a btree index.
-	Hash bool
 	// Name is the user-defined index name.
 	Name string
 	// Label is the indexed node label.
 	Label string
 	// Property is the indexed property key.
 	Property string
+	// Hash is true for a hash index, false for a btree index.
+	Hash bool
 }
 
 // ConstraintDef is a durable constraint definition handed to the engine on
@@ -685,14 +685,14 @@ type IndexDef struct {
 // package's wire types; [ConstraintDefsFromRecovery] converts a recovery
 // result into this form.
 type ConstraintDef struct {
-	// Unique is true for a UNIQUE constraint, false for a NOT NULL constraint.
-	Unique bool
 	// Label is the constrained node label.
 	Label string
 	// Property is the constrained property key.
 	Property string
 	// Name is the user-defined constraint name.
 	Name string
+	// Unique is true for a UNIQUE constraint, false for a NOT NULL constraint.
+	Unique bool
 }
 
 // Engine is the public query engine. It binds a graph, a function registry,
@@ -759,25 +759,56 @@ type Engine struct {
 	// filter results, only edge topology does, which TopoGeneration
 	// already tracks precisely.
 	edgeTypeFilterCache *edgeTypeFilterCache
-	maxResultRows       int64 // zero means no limit; from EngineOptions.MaxResultRows
-	// maxResultBytes is the aggregate-byte budget for a single result, threaded
-	// to the Result drain alongside maxResultRows. Zero means no budget (the
-	// convention the drain checks with maxBytes > 0); the public
-	// EngineOptions.MaxResultBytes field is mapped onto it by resolveMaxResultBytes
-	// (0 → DefaultMaxResultBytes, MaxResultBytesUnlimited → 0, positive verbatim).
-	maxResultBytes int64
 	// globalMem is the engine-wide ceiling on the aggregate estimated size of all
 	// concurrently-materialised results (EngineOptions.GlobalMaxResultBytes,
 	// #1842). A single instance is shared by every Result the engine produces, so
 	// it bounds memory across all connections of a Bolt server sharing this
 	// engine. nil when the ceiling is unlimited (the resolved limit is <= 0).
 	globalMem *globalMemBudget
+
+	// parallelGov is the engine-shared adaptive worker-budget governor (#1705)
+	// passed to every morsel-parallel leaf (ParallelCountScan, ParallelScanProject)
+	// this engine builds. It divides the GOMAXPROCS worker pool across the parallel
+	// queries currently in flight so concurrent scans do not oversubscribe the
+	// cores. Created once per Engine; safe for concurrent use.
+	parallelGov   *exec.ParallelGovernor
+	maxResultRows int64 // zero means no limit; from EngineOptions.MaxResultRows
+	// maxResultBytes is the aggregate-byte budget for a single result, threaded
+	// to the Result drain alongside maxResultRows. Zero means no budget (the
+	// convention the drain checks with maxBytes > 0); the public
+	// EngineOptions.MaxResultBytes field is mapped onto it by resolveMaxResultBytes
+	// (0 → DefaultMaxResultBytes, MaxResultBytesUnlimited → 0, positive verbatim).
+	maxResultBytes int64
 	// maxCollectItems is the per-group element budget for buffering aggregators,
 	// threaded into every plan build via buildOpts. The encoding mirrors the
 	// public EngineOptions.MaxCollectItems field (0 → default, <0 → no cap,
 	// >0 → active) rather than the resolved internal form, because
 	// buildEagerAggregation performs the final resolution at the build boundary.
 	maxCollectItems int
+
+	// parallelScanThreshold is the minimum live node count (strict >) above which
+	// the planner prefers the parallel count reduce over the serial
+	// EagerAggregation pipeline (#1672). Resolved from
+	// EngineOptions.ParallelScanThreshold (0 → DefaultParallelScanThreshold) by
+	// the constructor.
+	parallelScanThreshold int
+
+	// writeMu is the engine-level single-writer serialisation used ONLY when
+	// the engine is store-less (store == nil). A WAL-backed engine instead
+	// serialises every write on the store's own single-writer mutex (taken in
+	// [txn.Store.Begin] and released by Commit/Rollback), so this mutex is left
+	// untouched in that wiring to avoid a redundant second lock.
+	//
+	// It provides write-write isolation for the store-less engine in two
+	// places: (a) every autocommit [Engine.RunInTx] statement holds it for the
+	// statement's duration; (b) an explicit transaction ([Engine.BeginTx])
+	// holds it from BEGIN until COMMIT or ROLLBACK, so a concurrent writer
+	// blocks until the transaction finishes — the same isolation the store
+	// mutex gives the WAL-backed wiring. The lock order is writeMu (outermost)
+	// → visMu (inside [lpg.Graph.ApplyAtomically]), matching the WAL-backed
+	// store-mutex → visMu order, so the two wirings share one deadlock-free
+	// ordering. readers ([Engine.Run] / [lpg.Graph.View]) never take it.
+	writeMu sync.Mutex
 
 	// hashJoinEnabled gates the disconnected-equi-join hash-join optimisation
 	// (#1506). True by default; set false by EngineOptions.DisableHashJoin. When
@@ -799,37 +830,6 @@ type Engine struct {
 	// When false the backfill always runs serially. Both paths produce identical
 	// index contents.
 	parallelBackfillEnabled bool
-
-	// parallelScanThreshold is the minimum live node count (strict >) above which
-	// the planner prefers the parallel count reduce over the serial
-	// EagerAggregation pipeline (#1672). Resolved from
-	// EngineOptions.ParallelScanThreshold (0 → DefaultParallelScanThreshold) by
-	// the constructor.
-	parallelScanThreshold int
-
-	// parallelGov is the engine-shared adaptive worker-budget governor (#1705)
-	// passed to every morsel-parallel leaf (ParallelCountScan, ParallelScanProject)
-	// this engine builds. It divides the GOMAXPROCS worker pool across the parallel
-	// queries currently in flight so concurrent scans do not oversubscribe the
-	// cores. Created once per Engine; safe for concurrent use.
-	parallelGov *exec.ParallelGovernor
-
-	// writeMu is the engine-level single-writer serialisation used ONLY when
-	// the engine is store-less (store == nil). A WAL-backed engine instead
-	// serialises every write on the store's own single-writer mutex (taken in
-	// [txn.Store.Begin] and released by Commit/Rollback), so this mutex is left
-	// untouched in that wiring to avoid a redundant second lock.
-	//
-	// It provides write-write isolation for the store-less engine in two
-	// places: (a) every autocommit [Engine.RunInTx] statement holds it for the
-	// statement's duration; (b) an explicit transaction ([Engine.BeginTx])
-	// holds it from BEGIN until COMMIT or ROLLBACK, so a concurrent writer
-	// blocks until the transaction finishes — the same isolation the store
-	// mutex gives the WAL-backed wiring. The lock order is writeMu (outermost)
-	// → visMu (inside [lpg.Graph.ApplyAtomically]), matching the WAL-backed
-	// store-mutex → visMu order, so the two wirings share one deadlock-free
-	// ordering. readers ([Engine.Run] / [lpg.Graph.View]) never take it.
-	writeMu sync.Mutex
 }
 
 // lockWriter acquires the engine's write serialisation appropriate to its
@@ -2697,8 +2697,8 @@ func (e *Engine) scanLabelProperty(ctx context.Context, label, prop string) (val
 	mapper := e.g.AdjList().Mapper()
 
 	type nodeRef struct {
-		id  graph.NodeID
 		key string
+		id  graph.NodeID
 	}
 	e.g.View(func() {
 		// Phase 1 — snapshot the interned nodes. The callback must not touch
@@ -3099,9 +3099,16 @@ func bindNumeric(v any) (expr.Value, bool) {
 // is non-nil so that [Engine.Explain] can render the plan tree for
 // diagnostic purposes without re-parsing.
 type planCacheEntry struct {
-	plan      ir.LogicalPlan
-	semaErr   *sema.SemanticError
-	paramRefs []string // parameter names referenced by the query, collected at parse time
+	plan    ir.LogicalPlan
+	semaErr *sema.SemanticError
+	// paramTypes memoises sema.InferParamTypesWithResolver(plan, …) — the
+	// per-parameter type inference. It depends on the plan AND the index schema,
+	// so it is valid only while this entry lives; every schema mutation
+	// (CREATE/DROP INDEX|CONSTRAINT) calls [Engine.ClearPlanCache], dropping the
+	// entry and forcing a recompute on the next miss. nil for parameter-less
+	// queries (len(paramRefs) == 0), where the inference is the empty map anyway.
+	paramTypes map[string]expr.Kind
+	paramRefs  []string // parameter names referenced by the query, collected at parse time
 	// notifications are out-of-band advisories computed once at parse time and
 	// attached to every Result for this query (e.g. a Cartesian-product warning,
 	// #1483). nil when the query produces none.
@@ -3110,13 +3117,6 @@ type planCacheEntry struct {
 	// that is a pure function of the (cached, immutable) plan, so it is computed
 	// once at entry creation rather than on every Run (#1719).
 	hashJoinSafe bool
-	// paramTypes memoises sema.InferParamTypesWithResolver(plan, …) — the
-	// per-parameter type inference. It depends on the plan AND the index schema,
-	// so it is valid only while this entry lives; every schema mutation
-	// (CREATE/DROP INDEX|CONSTRAINT) calls [Engine.ClearPlanCache], dropping the
-	// entry and forcing a recompute on the next miss. nil for parameter-less
-	// queries (len(paramRefs) == 0), where the inference is the empty map anyway.
-	paramTypes map[string]expr.Kind
 }
 
 // planFor returns the cached logical plan for query, or parses, translates,
@@ -4048,8 +4048,8 @@ func reseedConstraintsInsideBarrier(reg *exec.ConstraintRegistry, g *lpg.Graph[s
 	// Snapshot (id, key) pairs first to avoid deadlocking the shard read lock
 	// with a nested Lookup inside the Walk callback.
 	type nodeRef struct {
-		id  graph.NodeID
 		key string
+		id  graph.NodeID
 	}
 	refs := make([]nodeRef, 0, mapper.Len())
 	mapper.Walk(func(id graph.NodeID, key string) bool {
@@ -7997,19 +7997,19 @@ var ErrAggregateDistinctMemoryExceeded = errors.New("cypher: aggregate DISTINCT 
 //
 // distinctAggregator is NOT safe for concurrent use.
 type distinctAggregator struct {
-	inner funcs.Aggregator
-	seen  map[uint64][]expr.Value
-	count int
-
-	maxValues int
+	inner       funcs.Aggregator
+	seen        map[uint64][]expr.Value
+	estimateVal func(expr.Value) int64
 	// maxBytes/estimateVal mirror byteBudget's shape at the single-value
 	// granularity distinctAggregator operates at (funcs.Aggregator.Step
 	// receives one value, not a whole exec.Row). maxBytes<=0 or a nil
 	// estimateVal disables the byte dimension, matching byteBudget's own
 	// disabled-by-default convention.
-	maxBytes    int64
-	usedBytes   int64
-	estimateVal func(expr.Value) int64
+	maxBytes  int64
+	usedBytes int64
+	count     int
+
+	maxValues int
 }
 
 // newDistinctAggregator wraps inner with DISTINCT dedup bookkeeping.

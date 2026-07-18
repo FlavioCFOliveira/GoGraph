@@ -27,8 +27,8 @@ var ErrMapperEntryCorrupted = errors.New("graph: Mapper.LoadFrom entries corrupt
 // were interned in NodeID-ascending order. The snapshot writer
 // guarantees both invariants by enumerating pairs via [Mapper.Walk].
 type MapperEntry[N comparable] struct {
-	ID  NodeID
 	Key N
+	ID  NodeID
 }
 
 // LoadFrom rebuilds m's internal state from a snapshot's entries. It
@@ -74,8 +74,8 @@ func (m *Mapper[N]) LoadFrom(entries []MapperEntry[N]) error {
 	// here to keep LoadFrom robust against callers that hand us entries
 	// in an arbitrary order.
 	type indexedEntry struct {
-		intra uint64
 		key   N
+		intra uint64
 	}
 	buckets := make([][]indexedEntry, mapperShardCount)
 	for _, e := range entries {

@@ -20,11 +20,11 @@ import (
 //
 // APSP is safe for concurrent reads.
 type APSP[W Weight] struct {
-	live    int    // number of live NodeIDs (compact matrix dimension)
-	maxID   int    // CSR.MaxNodeID(); preserved for NodeID-space callers
 	compact []int  // length maxID; compact[id] is the index in [0, live) or -1
 	dist    []W    // length live*live; row-major in compact space
 	found   []bool // parallel reachability bitmap; obviates an in-band Inf sentinel
+	live    int    // number of live NodeIDs (compact matrix dimension)
+	maxID   int    // CSR.MaxNodeID(); preserved for NodeID-space callers
 }
 
 // At returns the shortest-path distance from i to j and a bool

@@ -37,15 +37,17 @@ import (
 // Top is NOT safe for concurrent use.
 type Top struct {
 	child Operator
-	keys  []SortKey
-	n     int
 
 	// Runtime state.
-	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
-	h       *topHeap
-	result  []Row // sorted result after heap drain
-	built   bool
+	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
+	h   *topHeap
+
+	keys   []SortKey
+	result []Row // sorted result after heap drain
+
+	n       int
 	emitIdx int
+	built   bool
 }
 
 // NewTop creates a Top operator.

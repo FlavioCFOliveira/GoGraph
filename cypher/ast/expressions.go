@@ -11,9 +11,9 @@ import (
 
 // Variable is a named reference: n, r, x.
 type Variable struct {
+	Name   string
 	Pos    Position
 	EndPos Position
-	Name   string
 }
 
 func (*Variable) astNode()  {}
@@ -24,9 +24,9 @@ func (v *Variable) String() string { return v.Name }
 
 // Parameter is a query parameter: $name or $0.
 type Parameter struct {
+	Name   string // the name/index without the leading '$'
 	Pos    Position
 	EndPos Position
-	Name   string // the name/index without the leading '$'
 }
 
 func (*Parameter) astNode()  {}
@@ -37,10 +37,10 @@ func (p *Parameter) String() string { return "$" + p.Name }
 
 // Property is a property access: expr.key.
 type Property struct {
-	Pos      Position
-	EndPos   Position
 	Receiver Expression
 	Key      string
+	Pos      Position
+	EndPos   Position
 }
 
 func (*Property) astNode()  {}
@@ -51,16 +51,16 @@ func (p *Property) String() string { return p.Receiver.String() + "." + p.Key }
 
 // FunctionInvocation is a function call: func(args…) or func(DISTINCT args…).
 type FunctionInvocation struct {
+	Name      string
+	Namespace []string // e.g. ["apoc", "path"] for apoc.path.expand
+	Args      []Expression
 	Pos       Position
 	EndPos    Position
-	Namespace []string // e.g. ["apoc", "path"] for apoc.path.expand
-	Name      string
 	Distinct  bool
 	// CountStar is true when this is COUNT(*). String() renders it as
 	// "count(*)" and downstream aggregation detects it without needing
 	// a wildcard argument expression.
 	CountStar bool
-	Args      []Expression
 }
 
 func (*FunctionInvocation) astNode()  {}
@@ -91,11 +91,11 @@ func (f *FunctionInvocation) String() string {
 
 // BinaryOp is a binary operator expression: left OP right.
 type BinaryOp struct {
+	Left     Expression
+	Right    Expression
+	Operator string // e.g. "+", "-", "=", "<>", "AND", "OR", "IN", "CONTAINS"
 	Pos      Position
 	EndPos   Position
-	Left     Expression
-	Operator string // e.g. "+", "-", "=", "<>", "AND", "OR", "IN", "CONTAINS"
-	Right    Expression
 	// Parenthesized records that this BinaryOp was explicitly parenthesized in
 	// the source. The precedence-rebalancing pass in cypher/parser uses this
 	// flag to suppress lifting list/string-predicate operators (IN, CONTAINS,
@@ -117,10 +117,10 @@ func (b *BinaryOp) String() string {
 
 // UnaryOp is a unary operator expression: OP expr.
 type UnaryOp struct {
+	Operand  Expression
+	Operator string // e.g. "-", "NOT", "IS NULL", "IS NOT NULL"
 	Pos      Position
 	EndPos   Position
-	Operator string // e.g. "-", "NOT", "IS NULL", "IS NOT NULL"
-	Operand  Expression
 }
 
 func (*UnaryOp) astNode()  {}
@@ -142,10 +142,10 @@ func (u *UnaryOp) String() string {
 // stand-alone projection (`RETURN (n:Foo)`). Receiver may be any
 // expression; at evaluation time non-Node values yield NULL.
 type LabelPredicate struct {
-	Pos      Position
-	EndPos   Position
 	Receiver Expression
 	Labels   []string
+	Pos      Position
+	EndPos   Position
 }
 
 func (*LabelPredicate) astNode()  {}
@@ -169,10 +169,10 @@ func (l *LabelPredicate) String() string {
 
 // CaseAlternative is a single WHEN … THEN … arm in a CASE expression.
 type CaseAlternative struct {
-	Pos        Position
-	EndPos     Position
 	Condition  Expression
 	Consequent Expression
+	Pos        Position
+	EndPos     Position
 }
 
 // String returns the WHEN…THEN arm.
@@ -184,11 +184,11 @@ func (c *CaseAlternative) String() string {
 //
 //	CASE [subject] WHEN … THEN … [ELSE …] END
 type CaseExpression struct {
+	Subject      Expression // nil for generic CASE
+	ElseExpr     Expression // nil when no ELSE clause
+	Alternatives []*CaseAlternative
 	Pos          Position
 	EndPos       Position
-	Subject      Expression // nil for generic CASE
-	Alternatives []*CaseAlternative
-	ElseExpr     Expression // nil when no ELSE clause
 }
 
 func (*CaseExpression) astNode()  {}
@@ -212,12 +212,12 @@ func (c *CaseExpression) String() string {
 
 // ListComprehension is a list comprehension: [var IN list WHERE pred | expr].
 type ListComprehension struct {
-	Pos        Position
-	EndPos     Position
-	Variable   string
 	Source     Expression
 	Predicate  Expression // nil when no WHERE clause
 	Projection Expression // nil when no projection expression
+	Variable   string
+	Pos        Position
+	EndPos     Position
 }
 
 func (*ListComprehension) astNode()  {}
@@ -239,12 +239,12 @@ func (l *ListComprehension) String() string {
 // PatternComprehension is a pattern comprehension:
 // [(a)-[r]->(b) WHERE pred | expr].
 type PatternComprehension struct {
-	Pos        Position
-	EndPos     Position
-	Variable   *string // optional path variable
-	Pattern    *PathPattern
 	Predicate  Expression // nil when no WHERE clause
 	Projection Expression
+	Variable   *string // optional path variable
+	Pattern    *PathPattern
+	Pos        Position
+	EndPos     Position
 }
 
 func (*PatternComprehension) astNode()  {}
@@ -266,11 +266,11 @@ func (p *PatternComprehension) String() string {
 
 // MapProjectionItem represents one item in a map projection.
 type MapProjectionItem struct {
+	Value  Expression // nil for the property-selector shorthand (`.key`)
+	Key    string     // explicit key when present; otherwise empty
 	Pos    Position
 	EndPos Position
-	Key    string     // explicit key when present; otherwise empty
-	Value  Expression // nil for the property-selector shorthand (`.key`)
-	IsAll  bool       // true for the .*  selector
+	IsAll  bool // true for the .*  selector
 }
 
 // String returns the item representation.
@@ -300,10 +300,10 @@ func (m *MapProjectionItem) String() string {
 // openCypher extension (CIP2014-12-12); it is NOT part of the openCypher TCK,
 // so it does not affect TCK conformance.
 type MapProjection struct {
-	Pos     Position
-	EndPos  Position
 	Subject Expression
 	Items   []*MapProjectionItem
+	Pos     Position
+	EndPos  Position
 }
 
 func (*MapProjection) astNode()  {}
@@ -320,11 +320,11 @@ func (m *MapProjection) String() string {
 
 // ExistsSubquery is an EXISTS { … } subquery expression.
 type ExistsSubquery struct {
-	Pos     Position
-	EndPos  Position
 	Pattern *Pattern     // pattern form: EXISTS { (a)-[r]->(b) }
 	Where   *Where       // optional inline WHERE clause for the pattern form
 	Query   *SingleQuery // full subquery form: EXISTS { MATCH … RETURN … }
+	Pos     Position
+	EndPos  Position
 }
 
 func (*ExistsSubquery) astNode()  {}
@@ -344,10 +344,10 @@ func (e *ExistsSubquery) String() string {
 
 // CountSubquery is a COUNT { … } subquery expression.
 type CountSubquery struct {
-	Pos     Position
-	EndPos  Position
 	Pattern *Pattern     // pattern form
 	Query   *SingleQuery // full subquery form
+	Pos     Position
+	EndPos  Position
 }
 
 func (*CountSubquery) astNode()  {}
@@ -363,10 +363,10 @@ func (c *CountSubquery) String() string {
 
 // SubscriptExpr is a subscript access: expr[index].
 type SubscriptExpr struct {
-	Pos    Position
-	EndPos Position
 	Expr   Expression
 	Index  Expression
+	Pos    Position
+	EndPos Position
 }
 
 func (*SubscriptExpr) astNode()  {}
@@ -379,11 +379,11 @@ func (s *SubscriptExpr) String() string {
 
 // SliceExpr is a slice expression: expr[from..to].
 type SliceExpr struct {
-	Pos    Position
-	EndPos Position
 	Expr   Expression
 	From   Expression // nil when absent
 	To     Expression // nil when absent
+	Pos    Position
+	EndPos Position
 }
 
 func (*SliceExpr) astNode()  {}
@@ -408,13 +408,13 @@ func (s *SliceExpr) String() string {
 // ElemVar is the loop variable name, Source is the list expression, and
 // Projection is the accumulation expression evaluated on each iteration.
 type ReduceExpr struct {
-	Pos        Position
-	EndPos     Position
-	AccVar     string
 	Init       Expression
-	ElemVar    string
 	Source     Expression
 	Projection Expression
+	AccVar     string
+	ElemVar    string
+	Pos        Position
+	EndPos     Position
 }
 
 func (*ReduceExpr) astNode()  {}

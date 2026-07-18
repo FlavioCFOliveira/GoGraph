@@ -43,8 +43,8 @@ type eulerEdge struct {
 // fixtures (expected to yield search.ErrNoEulerian) leave it false.
 type eulerFixture struct {
 	name    string
-	order   int // number of distinct NodeIDs, 0..order-1
 	edges   []eulerEdge
+	order   int // number of distinct NodeIDs, 0..order-1
 	circuit bool
 }
 
@@ -358,8 +358,8 @@ const (
 // the degree-parity oracle).
 type eulerUndirectedFixture struct {
 	name  string
-	order int
 	edges [][2]int
+	order int
 	kind  eulerUndirectedKind
 }
 

@@ -31,9 +31,9 @@ var ErrSimListenerClosed = errors.New("sim: SimListener is closed")
 type SimListener struct {
 	dialClock clock.Clock
 	accept    chan *SimConn
+	done      chan struct{}
 	mu        sync.Mutex
 	closed    bool
-	done      chan struct{}
 }
 
 // NewSimListener returns an in-memory listener whose connections route deadlines

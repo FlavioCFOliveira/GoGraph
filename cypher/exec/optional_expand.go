@@ -42,28 +42,27 @@ import (
 //
 // OptionalExpand is NOT safe for concurrent use.
 type OptionalExpand struct {
-	child     Operator   // the wrapped Expand operator
-	singleArg *singleRow // injects one row at a time into child
-	input     Operator   // original input operator (upstream of OptionalExpand)
-	inputCol  int        // column holding the source NodeID in each input row
-
-	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
+	child     Operator        // the wrapped Expand operator
+	input     Operator        // original input operator (upstream of OptionalExpand)
+	ctx       context.Context //nolint:containedctx // stored for per-Next ctx check
+	singleArg *singleRow      // injects one row at a time into child
 
 	// per-outer-row state
-	inputRow     Row  // current input row
+	inputRow Row // current input row
+	outBuf   []expr.Value
+
+	inputCol     int  // column holding the source NodeID in each input row
 	pendingInput bool // true when inputRow is loaded but child has not been drained
 	emittedAny   bool // true when at least one row has been emitted from child for this input
 	childEOS     bool // true when outer input is exhausted
-
-	outBuf []expr.Value
 }
 
 // singleRow is a minimal operator that emits exactly one pre-loaded row.
 // It is used to feed individual input rows into the child Expand one at a time.
 type singleRow struct {
+	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
 	row     Row
 	emitted bool
-	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
 }
 
 func (s *singleRow) Init(ctx context.Context) error {

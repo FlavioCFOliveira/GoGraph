@@ -19,12 +19,6 @@ import (
 // Tx is NOT safe for concurrent use; it is owned by a single Session whose
 // message loop is single-threaded per connection.
 type Tx struct {
-	// results holds the Result cursors opened within this transaction so they can
-	// be drained and closed on teardown. Closing a cursor releases only its own
-	// iterator state — the engine transaction is committed or rolled back through
-	// engTx, never through these cursors.
-	results []*cypher.Result
-
 	// engTx is the open engine transaction. All statements run against it; it is
 	// committed by Commit and rolled back by Rollback. It holds the engine's
 	// writer serialisation (the store single-writer mutex when WAL-backed, the
@@ -56,6 +50,12 @@ type Tx struct {
 	// The read-only/writing state itself lives in the engine transaction
 	// (cypher.ExplicitTx); this field records the requested mode for the session.
 	mode string
+
+	// results holds the Result cursors opened within this transaction so they can
+	// be drained and closed on teardown. Closing a cursor releases only its own
+	// iterator state — the engine transaction is committed or rolled back through
+	// engTx, never through these cursors.
+	results []*cypher.Result
 }
 
 // newTx opens a new explicit transaction backed by eng, rooted at ctx (the

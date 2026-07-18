@@ -65,9 +65,9 @@ type Row []expr.Value
 // [expr.Value] reference is retained past the batch boundary (preventing GC
 // nepotism between batches).
 type RowSlab struct {
+	rows      []Row // pre-allocated backing slice: len = cap, each element pre-allocated
 	width     int   // number of columns per row (0 = variable; use explicit width in Alloc)
 	cap       int   // maximum number of rows
-	rows      []Row // pre-allocated backing slice: len = cap, each element pre-allocated
 	allocated int   // number of rows handed out so far
 }
 

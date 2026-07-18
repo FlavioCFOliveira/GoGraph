@@ -176,8 +176,14 @@ const (
 // budget is rejected with the corresponding typed error before the offending
 // allocation is made. [Decoder.Reset] restores both budgets in full.
 type Decoder struct {
-	r   *bufio.Reader
-	buf [8]byte // scratch buffer; avoids per-call heap allocation
+	r *bufio.Reader
+	// shared is the optional engine-wide inbound-decode ceiling (nil = no
+	// aggregate bound). Set per decode via SetInboundBudget; the decoder draws
+	// poolHeld bytes from it in inboundReserveChunk steps and returns them via
+	// ReleaseInboundBudget/Reset. It bounds total decode memory ACROSS
+	// connections, complementing the per-message decodedRemaining. See
+	// [InboundBudget] and ErrInboundBudgetExceeded.
+	shared *InboundBudget
 	// remaining is a conservative upper bound on the number of payload bytes
 	// still consumable from the current message. It starts at the message
 	// size when that size is known (a *bytes.Reader, *bytes.Buffer, or
@@ -203,19 +209,13 @@ type Decoder struct {
 	// bytes — cumulatively across the whole message, including every level of
 	// nesting. See ErrDecodedMemoryExceeded.
 	decodedRemaining int
-	// shared is the optional engine-wide inbound-decode ceiling (nil = no
-	// aggregate bound). Set per decode via SetInboundBudget; the decoder draws
-	// poolHeld bytes from it in inboundReserveChunk steps and returns them via
-	// ReleaseInboundBudget/Reset. It bounds total decode memory ACROSS
-	// connections, complementing the per-message decodedRemaining. See
-	// [InboundBudget] and ErrInboundBudgetExceeded.
-	shared *InboundBudget
 	// poolHeld is the number of bytes currently reserved from shared (released
 	// in full when the decode completes). poolAvail is the reserved-but-not-yet-
 	// charged slack, so charges consume from a local counter and touch the
 	// shared atomic only once per reserved chunk.
 	poolHeld  int64
 	poolAvail int64
+	buf       [8]byte // scratch buffer; avoids per-call heap allocation
 }
 
 // defaultMaxMessageBytes mirrors proto.DefaultMaxMessageBytes (16 MiB). It is

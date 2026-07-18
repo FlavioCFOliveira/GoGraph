@@ -73,8 +73,8 @@ func canonicalNode(i int) int { return i }
 // helpers like Knobs delegate to a per-generator slice.
 type trivialBase struct {
 	name  string
-	knobs []Knob
 	build func(adjlist.Config) (*lpg.Graph[int, int64], error)
+	knobs []Knob
 }
 
 // Name returns the catalogue identifier.

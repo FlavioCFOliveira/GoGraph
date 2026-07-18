@@ -8,10 +8,10 @@ package main
 // graph answers questions that span code, work and people.
 
 type maintenanceQuery struct {
+	Example  map[string]any // sample parameters for /query (nil if none)
 	Name     string         // short id, e.g. "Q1"
 	Question string         // the human question it answers
 	Cypher   string         // the Cypher statement (uses $params)
-	Example  map[string]any // sample parameters for /query (nil if none)
 }
 
 var maintenanceCatalogue = []maintenanceQuery{

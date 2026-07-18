@@ -78,10 +78,10 @@ type Config struct {
 // shared mutable state, so a Stats value is immutable in effect and safe
 // for concurrent reads by multiple goroutines.
 type Stats struct {
+	LastError      string
 	Checkpoints    uint64
 	WALTruncBytes  uint64
 	LastDurationNS uint64
-	LastError      string
 }
 
 // Checkpointer holds the goroutine state.
@@ -91,29 +91,38 @@ type Stats struct {
 // number of times serially or concurrently). [RunCheckpoint] is the one
 // exception — see its own doc for the narrower contract it requires.
 type Checkpointer[N comparable, W any] struct {
-	cfg     Config
-	g       *lpg.Graph[N, W]
-	wlog    *wal.Writer
-	storeMu *sync.Mutex
-	// serialise, when non-nil, runs the whole snapshot+truncate critical
-	// section under the store's real commit serialisation
-	// ([txn.Store.RunUnderCommitLock]) instead of the raw storeMu. It is
-	// the correct seam for an engine-driven store, whose commit mutex is
-	// private and therefore never the same object as storeMu: holding it
-	// excludes the engine's eager write+WAL-commit window so the snapshot
-	// can never capture a partially-applied transaction and the WAL
-	// truncation can never drop a frame committed after the snapshot
-	// (see WithCommitSerialiser and docs/acid-audit.md F3.5). When nil the
-	// checkpointer falls back to locking storeMu directly (the historical
-	// behaviour, correct only when storeMu IS the commit mutex, e.g. a
-	// caller that serialises its own writes under storeMu).
-	serialise func(func() error) error
 	// codec, when non-nil, serialises the NodeID->key mapper into a
 	// self-sufficient snapshot for ANY key type N (see WithMapperCodec).
 	// When nil the checkpointer falls back to the string-only mapper:
 	// non-string snapshots are then not self-sufficient and the WAL is
 	// retained rather than truncated.
 	codec txn.Codec[N]
+
+	// snap is the snapshot-publish/probe backend. It defaults to
+	// [osSnapshotBackend] in [New] (byte-identical production path); the
+	// deterministic simulation harness injects an in-memory backend via
+	// [WithSnapshotFS] so it can crash mid-snapshot and before the WAL
+	// prefix-truncate. The checkpointer performs no direct filesystem call
+	// of its own — only this backend and the injected WAL writer do.
+	snap snapshotBackend[N, W]
+
+	// clk is the wall-clock source for the cadence loop (ticker, MaxAge
+	// elapsed comparison, duration measurement). It defaults to
+	// [clock.Real] in [New] so production behaviour is unchanged; a test
+	// (notably the deterministic simulation harness) may inject a fake via
+	// [WithClock] to drive checkpoints by virtual time.
+	clk clock.Clock
+
+	// afterCaptureHook, when non-nil, is invoked at the START of phase 2 —
+	// immediately after the phase-1 commit lock is released and BEFORE the
+	// lock-free snapshot write. It is a test-only seam (set by white-box tests
+	// in this package) used to prove the commit lock is NOT held during the
+	// snapshot I/O: a test sets it to block and asserts a concurrent committer
+	// proceeds meanwhile. It is nil in production.
+	afterCaptureHook func()
+
+	triggerCh chan chan error
+	storeMu   *sync.Mutex
 	// constraintsFn, when non-nil, is called once per checkpoint run to
 	// collect the current constraint set for persistence in
 	// constraints.bin (see WithConstraintSpecs). When nil no
@@ -131,32 +140,9 @@ type Checkpointer[N comparable, W any] struct {
 	// constraintsFn).
 	indexDefsFn func() []snapshot.IndexDefSpec
 
-	// clk is the wall-clock source for the cadence loop (ticker, MaxAge
-	// elapsed comparison, duration measurement). It defaults to
-	// [clock.Real] in [New] so production behaviour is unchanged; a test
-	// (notably the deterministic simulation harness) may inject a fake via
-	// [WithClock] to drive checkpoints by virtual time.
-	clk clock.Clock
+	wlog *wal.Writer
+	g    *lpg.Graph[N, W]
 
-	// snap is the snapshot-publish/probe backend. It defaults to
-	// [osSnapshotBackend] in [New] (byte-identical production path); the
-	// deterministic simulation harness injects an in-memory backend via
-	// [WithSnapshotFS] so it can crash mid-snapshot and before the WAL
-	// prefix-truncate. The checkpointer performs no direct filesystem call
-	// of its own — only this backend and the injected WAL writer do.
-	snap snapshotBackend[N, W]
-
-	// afterCaptureHook, when non-nil, is invoked at the START of phase 2 —
-	// immediately after the phase-1 commit lock is released and BEFORE the
-	// lock-free snapshot write. It is a test-only seam (set by white-box tests
-	// in this package) used to prove the commit lock is NOT held during the
-	// snapshot I/O: a test sets it to block and asserts a concurrent committer
-	// proceeds meanwhile. It is nil in production.
-	afterCaptureHook func()
-
-	stopCh    chan struct{}
-	triggerCh chan chan error
-	doneCh    chan struct{}
 	// stoppedCh is closed by the loop's deferred teardown once the loop
 	// has stopped reading triggerCh, regardless of why it exited (Stop
 	// closing stopCh, or the Start context being cancelled). It is the
@@ -165,7 +151,23 @@ type Checkpointer[N comparable, W any] struct {
 	// the departed loop will never deliver. stopCh alone is insufficient
 	// because the context-cancellation exit path leaves stopCh open.
 	stoppedCh chan struct{}
-	stopOnce  sync.Once
+	stopCh    chan struct{}
+	// serialise, when non-nil, runs the whole snapshot+truncate critical
+	// section under the store's real commit serialisation
+	// ([txn.Store.RunUnderCommitLock]) instead of the raw storeMu. It is
+	// the correct seam for an engine-driven store, whose commit mutex is
+	// private and therefore never the same object as storeMu: holding it
+	// excludes the engine's eager write+WAL-commit window so the snapshot
+	// can never capture a partially-applied transaction and the WAL
+	// truncation can never drop a frame committed after the snapshot
+	// (see WithCommitSerialiser and docs/acid-audit.md F3.5). When nil the
+	// checkpointer falls back to locking storeMu directly (the historical
+	// behaviour, correct only when storeMu IS the commit mutex, e.g. a
+	// caller that serialises its own writes under storeMu).
+	serialise func(func() error) error
+	doneCh    chan struct{}
+	lastErr   string
+	cfg       Config
 
 	checkpoints  atomic.Uint64
 	walTrunc     atomic.Uint64
@@ -183,9 +185,9 @@ type Checkpointer[N comparable, W any] struct {
 	// updates as one atomic unit under the mutex; a reader must never
 	// observe a seq/error pair assembled from two different attempts.
 	errSeq     atomic.Uint64
-	lastErrMu  sync.Mutex
 	lastErrSeq uint64
-	lastErr    string
+	stopOnce   sync.Once
+	lastErrMu  sync.Mutex
 }
 
 // Option customises a [Checkpointer] at construction. Options are

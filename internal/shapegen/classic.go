@@ -73,8 +73,8 @@ var ErrCycleTooSmall = errors.New("shapegen: cycle requires n >= 3 (undirected) 
 // Build) carry the exact same semantics.
 type classicBase struct {
 	name  string
-	knobs []Knob
 	build func(adjlist.Config) (*lpg.Graph[int, int64], error)
+	knobs []Knob
 }
 
 // Name returns the catalogue identifier.

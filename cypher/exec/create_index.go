@@ -44,12 +44,12 @@ const (
 //
 // CreateIndexOp is NOT safe for concurrent use.
 type CreateIndexOp struct {
+	ctx            context.Context //nolint:containedctx // stored for per-Next ctx check
+	mgr            *index.Manager
+	onSchemaChange func()
 	name           string
 	idxType        IndexKindExec
 	ifNotExists    bool
-	mgr            *index.Manager
-	onSchemaChange func()
-	ctx            context.Context //nolint:containedctx // stored for per-Next ctx check
 	done           bool
 }
 

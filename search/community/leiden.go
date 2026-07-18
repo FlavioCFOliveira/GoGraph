@@ -279,7 +279,6 @@ func splitDisconnectedPartition(comm []int, mask []bool, verts []uint64, edges [
 // smaller one whose nodes are refined communities.
 
 type aggGraph struct {
-	n     int   // number of nodes
 	verts []int // length n+1, CSR-style offsets
 	edges []int // adjacency (compact node IDs)
 	// weights is parallel to edges. A nil weights means every edge has the
@@ -290,7 +289,6 @@ type aggGraph struct {
 	weights []float64
 	deg     []float64 // node degree (sum of incident weights, including self-loop *2)
 	loop    []float64 // self-loop weight per node (carries internal mass after aggregation)
-	m2      float64   // 2 * total edge weight (sum of deg)
 	// lifted maps level-0 compact node ID -> current node ID at this aggregation level.
 	// It is rewritten on each aggregate() call so that, at the end, lifted[origLevel0]
 	// returns the index into comm[] for the original node.
@@ -301,6 +299,8 @@ type aggGraph struct {
 	// pair, re-zeroed with growZero at each use, replaces their per-call
 	// make([]float64, …) allocations.
 	sigA, sigB floatBuf
+	n          int     // number of nodes
+	m2         float64 // 2 * total edge weight (sum of deg)
 }
 
 // aggGraphFromCSR builds the initial aggGraph from c (using only live

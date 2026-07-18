@@ -33,11 +33,11 @@ import (
 //
 // TC is safe for concurrent reads.
 type TC struct {
-	live    int   // compact matrix dimension (count of live NodeIDs)
-	maxID   int   // CSR.MaxNodeID(); the NodeID-space bound for queries
-	words   int   // (live + 63) / 64
 	compact []int // length maxID; compact[id] is the index in [0, live) or -1
 	bits    []uint64
+	live    int // compact matrix dimension (count of live NodeIDs)
+	maxID   int // CSR.MaxNodeID(); the NodeID-space bound for queries
+	words   int // (live + 63) / 64
 }
 
 // Reachable reports whether dst is reachable from src in the original graph.

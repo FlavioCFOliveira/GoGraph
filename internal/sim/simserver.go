@@ -36,14 +36,13 @@ import (
 //
 //nolint:revive // "Sim" prefix is the DST harness naming scheme (see SimDisk).
 type SimServer struct {
-	srv      *server.Server
-	ln       *SimListener
-	cancel   context.CancelFunc
-	serveErr chan error
-	clk      clock.Clock
-
-	closeOnce sync.Once
+	clk       clock.Clock
 	closeErr  error
+	srv       *server.Server
+	ln        *SimListener
+	cancel    context.CancelFunc
+	serveErr  chan error
+	closeOnce sync.Once
 }
 
 // defaultSimResultRowCap bounds the rows a single query result materialises in

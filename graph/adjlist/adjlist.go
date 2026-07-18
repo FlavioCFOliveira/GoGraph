@@ -71,6 +71,15 @@ const (
 // undirected graph, which is rarely what users want; prefer
 // constructing a Config explicitly.
 type Config struct {
+	// MaxShardCapacity, when > 0, caps the number of node-slots that
+	// any individual shard may grow to. AddNode (or AddEdge that
+	// would create a new node or store an outgoing entry in the
+	// responsible shard) returns [ErrShardFull] when growth past the
+	// cap would otherwise occur; the AdjList state is left unchanged.
+	// The default (0) places no upper bound — a shard doubles its
+	// slot slice indefinitely.
+	MaxShardCapacity int
+
 	// Directed, when true, treats AddEdge as a directed insertion. When
 	// false, AddEdge also inserts the reverse edge (mirrored insertion).
 	Directed bool
@@ -81,15 +90,6 @@ type Config struct {
 	// idempotent — the existing edge stays and the new weight is
 	// ignored.
 	Multigraph bool
-
-	// MaxShardCapacity, when > 0, caps the number of node-slots that
-	// any individual shard may grow to. AddNode (or AddEdge that
-	// would create a new node or store an outgoing entry in the
-	// responsible shard) returns [ErrShardFull] when growth past the
-	// cap would otherwise occur; the AdjList state is left unchanged.
-	// The default (0) places no upper bound — a shard doubles its
-	// slot slice indefinitely.
-	MaxShardCapacity int
 
 	// Weightless, when true, builds a graph that carries NO per-edge weight
 	// payload: the [adjEntry.weights] column is never allocated and stays nil
@@ -145,12 +145,9 @@ type Config struct {
 // NodeIDs (e.g., an external CSR snapshot) may rely on them remaining
 // stable as long as the originating AdjList is live.
 type AdjList[N comparable, W any] struct {
-	mapper *graph.Mapper[N]
-	cfg    Config
-
 	shards [shardCount]adjShard[W]
 
-	size atomic.Uint64
+	mapper *graph.Mapper[N]
 
 	// auxFactory constructs the higher layer's opaque [AuxColumn] for the FIRST
 	// edge of a node when a fused property-carrying append (the auxPayload path
@@ -167,6 +164,15 @@ type AdjList[N comparable, W any] struct {
 	// needs no synchronisation.
 	auxFactory func(length int, payload any) AuxColumn
 
+	// dirtyShards lists the shards whose private builder must be frozen at the
+	// end of the current commit window. Appended on the first touch of a shard
+	// within the window; drained and cleared at EndCommit.
+	dirtyShards []*adjShard[W]
+
+	cfg Config
+
+	size atomic.Uint64
+
 	// commitDepth tracks the open commit-window nesting for the single writer
 	// (see [AdjList.BeginCommit]). 0 means no window is open and every write is
 	// its own 1-op window (clone-and-publish once). > 0 means a window is open
@@ -176,11 +182,6 @@ type AdjList[N comparable, W any] struct {
 	// its exclusive visibility barrier (so there is a single writer); it is not
 	// an atomic because the window protocol is single-writer by construction.
 	commitDepth int
-
-	// dirtyShards lists the shards whose private builder must be frozen at the
-	// end of the current commit window. Appended on the first touch of a shard
-	// within the window; drained and cleared at EndCommit.
-	dirtyShards []*adjShard[W]
 }
 
 // SetAuxFactory registers the constructor the fused property-carrying append
@@ -204,7 +205,6 @@ func (a *AdjList[N, W]) SetAuxFactory(fn func(length int, payload any) AuxColumn
 // snapshots via [sync/atomic.StorePointer]; readers atomically load
 // the slot without taking mu.
 type adjShard[W any] struct {
-	mu       sync.Mutex
 	slotsRef atomic.Pointer[shardSlots]
 
 	// building is the PRIVATE, not-yet-published [shardSlots] clone the shard
@@ -223,6 +223,8 @@ type adjShard[W any] struct {
 	// reader can observe building before it is published — see the F3.5 unwind
 	// note on [AdjList.BeginCommit].
 	building *shardSlots
+
+	mu sync.Mutex
 }
 
 // shardSlots holds the slot-pointer slice for a shard. It is replaced
@@ -274,11 +276,11 @@ type shardSlots struct {
 // lockstep across growth (upsertEdgeLocked), compaction (compactEntry), and
 // trimming (trimEntry, verbatim — the block has no slack notion).
 type adjEntry[W any] struct {
+	aux        AuxColumn // nil unless UpdateEntryAux set one; opaque, kept length-aligned by GrowSlot/CompactSlot
 	neighbours []graph.NodeID
 	weights    []W
-	handles    []uint64  // nil unless AddEdgeH supplied a handle; parallel to neighbours when set
-	labels     []uint32  // nil unless SetEdgeLabelSlot set one; parallel to neighbours when set; 0 == no label
-	aux        AuxColumn // nil unless UpdateEntryAux set one; opaque, kept length-aligned by GrowSlot/CompactSlot
+	handles    []uint64 // nil unless AddEdgeH supplied a handle; parallel to neighbours when set
+	labels     []uint32 // nil unless SetEdgeLabelSlot set one; parallel to neighbours when set; 0 == no label
 }
 
 // AuxColumn is an opaque, immutable per-entry side column the higher layer

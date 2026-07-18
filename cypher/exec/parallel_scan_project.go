@@ -115,23 +115,21 @@ type SubplanFactory func(morsel []graph.NodeID) (Operator, error)
 //
 // ParallelScanProject is NOT safe for concurrent use.
 type ParallelScanProject struct {
-	g          nodeWalker
-	morselSize int
-	factory    SubplanFactory
-	gov        *ParallelGovernor // adaptive worker-budget governor (nil = unbounded)
+	g           nodeWalker
+	ctx         context.Context //nolint:containedctx // stored for per-Next ctx check
+	initErr     error           // error captured during Init (e.g. cancellation, factory build)
+	factory     SubplanFactory
+	gov         *ParallelGovernor  // adaptive worker-budget governor (nil = unbounded)
+	cancel      context.CancelFunc // cancels the worker context
+	workErr     chan error
+	estimateRow func(Row) int64
 
-	ctx     context.Context    //nolint:containedctx // stored for per-Next ctx check
-	cancel  context.CancelFunc // cancels the worker context
-	wg      sync.WaitGroup
 	results [][]Row // one private result buffer per worker; read only after wg.Wait
-	workErr chan error
-	initErr error // error captured during Init (e.g. cancellation, factory build)
-	entered bool  // true once gov.Enter ran, so Close calls gov.Leave exactly once
+	combo   []Row   // concatenated worker results, streamed by Next
 
-	joined bool  // true once the workers have been joined
-	combo  []Row // concatenated worker results, streamed by Next
-	pos    int   // cursor into combo
-
+	wg         sync.WaitGroup
+	morselSize int
+	pos        int // cursor into combo
 	// Result-memory budget (#1830). maxRows/maxBytes mirror the engine's
 	// per-query MaxResultRows / MaxResultBytes (0 = unbounded). Without them the
 	// morsel workers would materialise the ENTIRE projected result set before
@@ -146,9 +144,11 @@ type ParallelScanProject struct {
 	// accounting matches the drain's exactly.
 	maxRows     int64
 	maxBytes    int64
-	estimateRow func(Row) int64
 	sharedRows  atomic.Int64
 	sharedBytes atomic.Int64
+
+	entered bool // true once gov.Enter ran, so Close calls gov.Leave exactly once
+	joined  bool // true once the workers have been joined
 }
 
 // WithResultBudget threads the engine's per-query result-memory budget into the

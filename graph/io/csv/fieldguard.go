@@ -50,12 +50,12 @@ var ErrTooManyFields = errors.New("csv: record exceeds maximum field count")
 // created per import.
 type fieldGuardReader struct {
 	r            io.Reader
-	delim        byte
-	fields       int   // fields seen in the current record; a record has ≥1
-	inQuotes     bool  // inside a quoted field
-	atFieldStart bool  // at the first byte of a field (where a '"' opens a quote)
-	pendingQuote bool  // inside quotes, saw a '"' awaiting the disambiguating byte
 	err          error // sticky: once tripped, every subsequent Read returns it
+	fields       int   // fields seen in the current record; a record has ≥1
+	delim        byte
+	inQuotes     bool // inside a quoted field
+	atFieldStart bool // at the first byte of a field (where a '"' opens a quote)
+	pendingQuote bool // inside quotes, saw a '"' awaiting the disambiguating byte
 }
 
 // newFieldGuardReader wraps r, counting records delimited by single-byte delim.

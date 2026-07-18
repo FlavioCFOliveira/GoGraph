@@ -126,11 +126,11 @@ func MakeKnobValues(g *rapid.T, knobs []Knob) []int {
 // shapegen. It is guarded by mu and exposes only the Register /
 // Lookup / Unregister surface defined below.
 var registry struct {
-	mu sync.RWMutex
 	// shapes maps a (typeKey, name) pair to the boxed Shape value.
 	// typeKey is produced by typeKeyFor[N, W] so distinct generic
 	// specialisations occupy disjoint key spaces.
 	shapes map[registryKey]any
+	mu     sync.RWMutex
 }
 
 // registryKey pairs a generic-type discriminator with a Shape name.

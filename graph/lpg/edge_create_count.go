@@ -29,8 +29,8 @@ import (
 // (by src NodeID, modulo propMapShards) so concurrent writers from
 // different source nodes contend on separate locks.
 type edgeCreateCountShard struct {
-	mu sync.Mutex
 	m  map[edgeKey]int64
+	mu sync.Mutex
 }
 
 // IncEdgeCreateCount bumps the CREATE multiplicity counter for the

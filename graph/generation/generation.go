@@ -31,12 +31,12 @@ var ErrClosed = errors.New("generation: publisher closed")
 // Generation is safe for concurrent use; Acquire/Release on the
 // same generation can run from any number of goroutines.
 type Generation[W any] struct {
-	csr      *csr.CSR[W]
-	refcount atomic.Int64
+	csr *csr.CSR[W]
 	// drainCond signals on the refcount-reaches-zero edge so that
 	// PublishWithDrain can sleep instead of busy-polling.
-	drainMu   sync.Mutex
 	drainCond *sync.Cond
+	refcount  atomic.Int64
+	drainMu   sync.Mutex
 }
 
 // CSR returns the underlying snapshot. The pointer is valid only
@@ -57,17 +57,19 @@ func (g *Generation[W]) Refcount() int64 { return g.refcount.Load() }
 // The read path (Acquire/Release/Current/CSR) never takes publishMu
 // and stays fully lock-free.
 type Publisher[W any] struct {
-	// publishMu serialises publishers so the prev/next swap is atomic
-	// with respect to other publishers. It is never taken on the read
-	// path. Off the read hot path, this costs readers nothing.
-	publishMu sync.Mutex
-	current   atomic.Pointer[Generation[W]]
-	closed    atomic.Bool
+	current atomic.Pointer[Generation[W]]
+
 	// onDrain, when non-nil, is invoked with the predecessor each
 	// PublishWithDrain captured, immediately after that predecessor's
 	// drain completes. It is a white-box test seam for verifying the
 	// single-publisher contract and is nil (zero cost) in production.
 	onDrain func(prev *Generation[W])
+
+	// publishMu serialises publishers so the prev/next swap is atomic
+	// with respect to other publishers. It is never taken on the read
+	// path. Off the read hot path, this costs readers nothing.
+	publishMu sync.Mutex
+	closed    atomic.Bool
 }
 
 // newGeneration constructs a Generation with its sync.Cond wired up.

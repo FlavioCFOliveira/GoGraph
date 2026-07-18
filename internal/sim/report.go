@@ -26,16 +26,16 @@ type OracleSnapshot struct {
 //
 //nolint:revive // intentional SimXxx naming scheme (see comment above).
 type SimReport struct {
-	Seed        uint64
-	FailedTick  int64
-	FailedOp    Op
-	Violations  []Violation
-	OracleState OracleSnapshot
 	// Shrunk, when non-nil, carries the minimal failing reproducer the shrinker
 	// produced for this failure ([ShrinkTrace]). It is attached by the CLI replay
 	// path after a deterministic failure is shrunk; a report from a live run
 	// leaves it nil.
-	Shrunk *ShrinkResult
+	Shrunk      *ShrinkResult
+	FailedOp    Op
+	Violations  []Violation
+	OracleState OracleSnapshot
+	Seed        uint64
+	FailedTick  int64
 }
 
 // String renders a human-readable failure report. It always includes a

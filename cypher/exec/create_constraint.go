@@ -47,16 +47,16 @@ func NewUniqueBackingIndex() index.Subscriber { return indexhash.New[string]() }
 //
 // CreateConstraintOp is NOT safe for concurrent use.
 type CreateConstraintOp struct {
+	backingIndex   index.Subscriber // optional pre-built bound subscriber for UNIQUE
+	ctx            context.Context  //nolint:containedctx // stored for per-Next ctx check
+	mgr            *index.Manager
+	reg            *ConstraintRegistry
+	onSchemaChange func()
 	name           string
 	label          string
 	prop           string
 	kind           ConstraintKind
 	ifNotExists    bool
-	mgr            *index.Manager
-	reg            *ConstraintRegistry
-	backingIndex   index.Subscriber // optional pre-built bound subscriber for UNIQUE
-	onSchemaChange func()
-	ctx            context.Context //nolint:containedctx // stored for per-Next ctx check
 	done           bool
 }
 

@@ -10,9 +10,9 @@ import "strings"
 // It is modelled as a standalone node rather than a field because it can carry
 // its own position and is shared between reading and filtering clauses.
 type Where struct {
+	Predicate Expression
 	Pos       Position
 	EndPos    Position
-	Predicate Expression
 }
 
 func (*Where) astNode()       {}
@@ -24,10 +24,10 @@ func (w *Where) String() string { return "WHERE " + w.Predicate.String() }
 
 // Match is a MATCH clause.
 type Match struct {
-	Pos     Position
-	EndPos  Position
 	Pattern *Pattern
 	Where   *Where // nil when no WHERE predicate
+	Pos     Position
+	EndPos  Position
 }
 
 func (*Match) astNode()       {}
@@ -45,10 +45,10 @@ func (m *Match) String() string {
 
 // OptionalMatch is an OPTIONAL MATCH clause.
 type OptionalMatch struct {
-	Pos     Position
-	EndPos  Position
 	Pattern *Pattern
 	Where   *Where // nil when no WHERE predicate
+	Pos     Position
+	EndPos  Position
 }
 
 func (*OptionalMatch) astNode()       {}
@@ -66,9 +66,9 @@ func (o *OptionalMatch) String() string {
 
 // Create is a CREATE clause.
 type Create struct {
+	Pattern *Pattern
 	Pos     Position
 	EndPos  Position
-	Pattern *Pattern
 }
 
 func (*Create) astNode()        {}
@@ -80,11 +80,11 @@ func (c *Create) String() string { return "CREATE " + c.Pattern.String() }
 
 // Merge is a MERGE clause, with optional ON CREATE and ON MATCH actions.
 type Merge struct {
-	Pos      Position
-	EndPos   Position
 	Pattern  *PathPattern
 	OnCreate []*SetItem // actions on ON CREATE SET
 	OnMatch  []*SetItem // actions on ON MATCH SET
+	Pos      Position
+	EndPos   Position
 }
 
 func (*Merge) astNode()        {}
@@ -113,9 +113,9 @@ func (m *Merge) String() string {
 
 // Set is a SET clause.
 type Set struct {
+	Items  []*SetItem
 	Pos    Position
 	EndPos Position
-	Items  []*SetItem
 }
 
 func (*Set) astNode()        {}
@@ -133,9 +133,9 @@ func (s *Set) String() string {
 
 // Remove is a REMOVE clause.
 type Remove struct {
+	Items  []*RemoveItem
 	Pos    Position
 	EndPos Position
-	Items  []*RemoveItem
 }
 
 func (*Remove) astNode()        {}
@@ -153,9 +153,9 @@ func (r *Remove) String() string {
 
 // Delete is a DELETE clause.
 type Delete struct {
+	Expressions []Expression
 	Pos         Position
 	EndPos      Position
-	Expressions []Expression
 }
 
 func (*Delete) astNode()        {}
@@ -176,11 +176,11 @@ func (d *Delete) String() string {
 // bound to that element and every clause in Body is executed as a side-effect;
 // FOREACH does not change the surrounding query's row cardinality.
 type Foreach struct {
+	Expr   Expression       // the list the loop iterates over
+	Var    string           // the loop variable, scoped to Body
+	Body   []UpdatingClause // updating clauses run per element
 	Pos    Position
 	EndPos Position
-	Var    string           // the loop variable, scoped to Body
-	Expr   Expression       // the list the loop iterates over
-	Body   []UpdatingClause // updating clauses run per element
 }
 
 func (*Foreach) astNode()        {}
@@ -198,9 +198,9 @@ func (f *Foreach) String() string {
 
 // DetachDelete is a DETACH DELETE clause.
 type DetachDelete struct {
+	Expressions []Expression
 	Pos         Position
 	EndPos      Position
-	Expressions []Expression
 }
 
 func (*DetachDelete) astNode()        {}
@@ -218,10 +218,10 @@ func (d *DetachDelete) String() string {
 
 // YieldItem represents a single item in a YIELD clause.
 type YieldItem struct {
+	Alias  *string // nil when no AS alias
+	Name   string
 	Pos    Position
 	EndPos Position
-	Name   string
-	Alias  *string // nil when no AS alias
 }
 
 // String returns the YIELD item.
@@ -236,13 +236,13 @@ func (y *YieldItem) String() string {
 //
 //	CALL namespace.procedure(args) YIELD items WHERE predicate
 type Call struct {
-	Pos       Position
-	EndPos    Position
-	Namespace []string
+	Where     *Where // nil when no WHERE predicate on YIELD
 	Procedure string
+	Namespace []string
 	Args      []Expression // nil or empty means no argument list
 	Yield     []*YieldItem // nil means no YIELD clause; empty slice means YIELD *
-	Where     *Where       // nil when no WHERE predicate on YIELD
+	Pos       Position
+	EndPos    Position
 }
 
 func (*Call) astNode()        {}

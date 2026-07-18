@@ -78,10 +78,10 @@ func (f AbuseFamily) String() string {
 // the checker flags. The Family and the seed that chose it are retained so a
 // finding is reproducible.
 type AbuseOutcome struct {
-	Family     AbuseFamily
-	GotFailure bool   // server replied with a typed FAILURE
-	GotClose   bool   // server closed the connection cleanly (or it became unreadable)
 	FailureMsg string // populated when GotFailure
+	Family     AbuseFamily
+	GotFailure bool // server replied with a typed FAILURE
+	GotClose   bool // server closed the connection cleanly (or it became unreadable)
 }
 
 // Acceptable reports whether the outcome is one the robustness contract allows:

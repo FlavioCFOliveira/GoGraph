@@ -72,14 +72,14 @@ var ErrIndexDefsCorrupted = errors.New("snapshot: indexdefs.bin corrupted")
 // label, and the indexed property key. The snapshot layer keeps its own index
 // type so it does not import the txn or recovery packages.
 type IndexDefSpec struct {
-	// Kind is the index-kind tag: 0 = hash, 1 = btree.
-	Kind uint8
 	// Name is the user-defined index name.
 	Name string
 	// Label is the indexed node label.
 	Label string
 	// Property is the indexed property key.
 	Property string
+	// Kind is the index-kind tag: 0 = hash, 1 = btree.
+	Kind uint8
 }
 
 // IndexDefsReadback is the structural parse of an indexdefs.bin file: the

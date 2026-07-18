@@ -67,11 +67,7 @@ type groupEntry struct {
 //
 // EagerAggregation is NOT safe for concurrent use.
 type EagerAggregation struct {
-	child        Operator
-	keyCols      []int                     // column indices that form the group key
-	aggFactories []funcs.AggregatorFactory // one factory per aggregate expression
-	maxGroups    int                       // memory cap on distinct group count
-	budget       byteBudget                // estimated-byte cap on retained group keys (#1841)
+	child Operator
 
 	// chunkChild, when non-nil (set by WithChunkInput), makes the blocking consume
 	// phase pull the child column-major via [ChunkProducer.FillChunk] and hash the
@@ -84,11 +80,17 @@ type EagerAggregation struct {
 
 	// Runtime state — valid between Init and Close.
 	ctx     context.Context          //nolint:containedctx // stored for per-Next ctx check
-	built   bool                     // true after the blocking consume phase
 	groups  map[uint64][]*groupEntry // hash → bucket (collision chain)
-	order   []*groupEntry            // insertion-order for deterministic output
-	emitIdx int                      // cursor into order during emit phase
 	scratch *Chunk                   // reused source-batch buffer for the chunk-input path
+
+	keyCols      []int                     // column indices that form the group key
+	aggFactories []funcs.AggregatorFactory // one factory per aggregate expression
+	budget       byteBudget                // estimated-byte cap on retained group keys (#1841)
+	order        []*groupEntry             // insertion-order for deterministic output
+
+	maxGroups int  // memory cap on distinct group count
+	emitIdx   int  // cursor into order during emit phase
+	built     bool // true after the blocking consume phase
 }
 
 // NewEagerAggregation creates an EagerAggregation operator.

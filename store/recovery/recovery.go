@@ -48,8 +48,46 @@ import (
 // reads without external locking; its embedded [Result.Graph] follows the
 // separate [lpg.Graph] concurrency contract.
 type Result[N comparable, W any] struct {
-	Graph       *lpg.Graph[N, W]
-	SnapshotHit bool
+	// TailErr reports why WAL replay stopped before the end of the file,
+	// or nil when every frame was consumed at a clean EOF. Two outcomes
+	// are possible:
+	//
+	//   - A benign torn tail ([wal.ErrTornFrame]) — the normal
+	//     crash-after-the-last-fsync case, or a CRC-valid but unparseable
+	//     trailing frame from an interrupted write. The committed prefix is
+	//     fully recovered and [Open]/[OpenCtx] return a nil function error;
+	//     [Result.IsClean] reports true.
+	//   - Genuine corruption inside an already-durable frame
+	//     ([wal.ErrCRCMismatch], [wal.ErrBadMagic],
+	//     [wal.ErrUnsupportedVersion], [wal.ErrFrameTooLarge],
+	//     [wal.ErrTornFrameMasksData], [ErrUnsupportedRecordVersion], or
+	//     [ErrTransactionTooLarge]). The committed prefix up to the bad frame
+	//     is still placed in Graph for diagnostics, but the same error is
+	//     returned as the function error and [Result.IsClean] reports false, so
+	//     a caller cannot accidentally append to a corrupt WAL.
+	//     [wal.ErrTornFrameMasksData] is the case where a corrupt length field
+	//     over-declared past EOF and swallowed the durable frames that followed
+	//     it: it looks like a torn tail but is treated as corruption so those
+	//     frames are never silently dropped.
+	TailErr error
+	Graph   *lpg.Graph[N, W]
+	// Constraints reports the durable schema constraints recovered for the
+	// graph: the set declared in the snapshot's constraints.bin component
+	// (the checkpoint-survival path) reconciled with the CREATE/DROP
+	// CONSTRAINT ops replayed from the WAL tail (the post-snapshot path), so
+	// the result is the constraint set as of the last durable commit. The
+	// engine re-registers these on open and re-seeds each UNIQUE value-set by
+	// scanning [Result.Graph]; constraint definitions are engine schema, not
+	// graph topology, so they are surfaced here rather than applied to Graph.
+	// The slice is deterministically ordered (kind, label, property, name).
+	Constraints []ConstraintRecord
+	// Indexes reports the durable index definitions recovered from the WAL
+	// ([txn.OpCreateIndex] / [txn.OpDropIndex] ops). The engine re-registers
+	// and re-backfills these on open so a user-created index survives a crash
+	// and a restart (Durability). Index definitions are engine schema, not
+	// graph topology, so they are surfaced here rather than applied to Graph.
+	// The slice is deterministically ordered (by name).
+	Indexes []IndexRecord
 	// SnapshotSchemaVersion is the on-disk manifest version of the
 	// snapshot that was loaded — 1 for legacy CSR-only directories
 	// produced by [snapshot.WriteSnapshotCSR], 2 for directories
@@ -80,46 +118,7 @@ type Result[N comparable, W any] struct {
 	// that never removed a node) and for the non-self-sufficient (v2) path,
 	// where tombstones are reconstructed by replaying OpRemoveNode instead.
 	SnapshotTombstones int
-	// Constraints reports the durable schema constraints recovered for the
-	// graph: the set declared in the snapshot's constraints.bin component
-	// (the checkpoint-survival path) reconciled with the CREATE/DROP
-	// CONSTRAINT ops replayed from the WAL tail (the post-snapshot path), so
-	// the result is the constraint set as of the last durable commit. The
-	// engine re-registers these on open and re-seeds each UNIQUE value-set by
-	// scanning [Result.Graph]; constraint definitions are engine schema, not
-	// graph topology, so they are surfaced here rather than applied to Graph.
-	// The slice is deterministically ordered (kind, label, property, name).
-	Constraints []ConstraintRecord
-	// Indexes reports the durable index definitions recovered from the WAL
-	// ([txn.OpCreateIndex] / [txn.OpDropIndex] ops). The engine re-registers
-	// and re-backfills these on open so a user-created index survives a crash
-	// and a restart (Durability). Index definitions are engine schema, not
-	// graph topology, so they are surfaced here rather than applied to Graph.
-	// The slice is deterministically ordered (by name).
-	Indexes []IndexRecord
-	WALOps  int
-	// TailErr reports why WAL replay stopped before the end of the file,
-	// or nil when every frame was consumed at a clean EOF. Two outcomes
-	// are possible:
-	//
-	//   - A benign torn tail ([wal.ErrTornFrame]) — the normal
-	//     crash-after-the-last-fsync case, or a CRC-valid but unparseable
-	//     trailing frame from an interrupted write. The committed prefix is
-	//     fully recovered and [Open]/[OpenCtx] return a nil function error;
-	//     [Result.IsClean] reports true.
-	//   - Genuine corruption inside an already-durable frame
-	//     ([wal.ErrCRCMismatch], [wal.ErrBadMagic],
-	//     [wal.ErrUnsupportedVersion], [wal.ErrFrameTooLarge],
-	//     [wal.ErrTornFrameMasksData], [ErrUnsupportedRecordVersion], or
-	//     [ErrTransactionTooLarge]). The committed prefix up to the bad frame
-	//     is still placed in Graph for diagnostics, but the same error is
-	//     returned as the function error and [Result.IsClean] reports false, so
-	//     a caller cannot accidentally append to a corrupt WAL.
-	//     [wal.ErrTornFrameMasksData] is the case where a corrupt length field
-	//     over-declared past EOF and swallowed the durable frames that followed
-	//     it: it looks like a torn tail but is treated as corruption so those
-	//     frames are never silently dropped.
-	TailErr error
+	WALOps             int
 	// WALTailOffset is the byte offset of the last durable frame boundary
 	// in the WAL. It equals the WAL file size when every frame was
 	// consumed cleanly, and the boundary of the last fully-consumed frame
@@ -131,6 +130,7 @@ type Result[N comparable, W any] struct {
 	// stop at ([wal.Open] performs that truncation itself for benign torn
 	// tails).
 	WALTailOffset int64
+	SnapshotHit   bool
 }
 
 // IsClean reports whether recovery completed without encountering genuine
@@ -313,14 +313,14 @@ func applySnapshotIndexes(m *index.Manager, rb []snapshot.IndexReadback) int {
 //
 // [Op.Kind] and [Op.Label] are populated for both decodable versions.
 type Op struct {
-	Kind    txn.OpKind
-	Label   string
-	Version uint8
-	Body    []byte
+	Label string
+	Body  []byte
 	// TxnSeq is the transaction sequence carried by a v3
 	// ([txn.OpRecordV3]) frame, grouping the frames of one atomically-
 	// committed transaction. It is 0 for v2 frames.
-	TxnSeq uint64
+	TxnSeq  uint64
+	Kind    txn.OpKind
+	Version uint8
 }
 
 // ErrUnsupportedRecordVersion is returned by [Decode] for a WAL record
@@ -447,14 +447,14 @@ func decodeV2(payload []byte) (Op, error) {
 // graph-mutation payload. The engine maps it back to its own constraint
 // registry on open.
 type ConstraintRecord struct {
-	// Kind selects UNIQUE vs NOT NULL.
-	Kind txn.ConstraintKind
 	// Label is the constrained node label.
 	Label string
 	// Property is the constrained property key.
 	Property string
 	// Name is the user-defined constraint name.
 	Name string
+	// Kind selects UNIQUE vs NOT NULL.
+	Kind txn.ConstraintKind
 }
 
 // decodeConstraintBody parses the body of an [txn.OpCreateConstraint] /
@@ -521,9 +521,9 @@ type constraintSet struct {
 // excluded: re-declaring a constraint on the same (kind, label, property) with
 // a different name replaces the prior record rather than adding a second.
 type constraintSetKey struct {
-	kind     txn.ConstraintKind
 	label    string
 	property string
+	kind     txn.ConstraintKind
 }
 
 func newConstraintSet() *constraintSet {
@@ -532,12 +532,12 @@ func newConstraintSet() *constraintSet {
 
 // applyCreate records a CREATE CONSTRAINT.
 func (s *constraintSet) applyCreate(rec ConstraintRecord) {
-	s.byKey[constraintSetKey{rec.Kind, rec.Label, rec.Property}] = rec
+	s.byKey[constraintSetKey{label: rec.Label, property: rec.Property, kind: rec.Kind}] = rec
 }
 
 // applyDrop removes a constraint by its (kind, label, property) key.
 func (s *constraintSet) applyDrop(rec ConstraintRecord) {
-	delete(s.byKey, constraintSetKey{rec.Kind, rec.Label, rec.Property})
+	delete(s.byKey, constraintSetKey{label: rec.Label, property: rec.Property, kind: rec.Kind})
 }
 
 // snapshot returns the accumulated constraints in deterministic order
@@ -598,14 +598,14 @@ func accumulateConstraintOp(cs *constraintSet, op *Op) (isConstraint, ok bool) {
 // graph-mutation payload. The engine re-registers and re-backfills these on
 // open so user-created indexes survive a crash and restart.
 type IndexRecord struct {
-	// Kind selects hash vs btree.
-	Kind txn.IndexKind
 	// Name is the user-defined index name.
 	Name string
 	// Label is the indexed node label.
 	Label string
 	// Property is the indexed property key.
 	Property string
+	// Kind selects hash vs btree.
+	Kind txn.IndexKind
 }
 
 // decodeIndexBody parses the body of an [txn.OpCreateIndex] /
@@ -1240,11 +1240,11 @@ func openCodec[N comparable, W any](
 // They are surfaced rather than applied to the graph because a constraint or
 // index definition is engine schema, not graph topology.
 type ReplayResult struct {
-	WALOps        int
 	TailErr       error
-	WALTailOffset int64
 	Constraints   []ConstraintRecord
 	Indexes       []IndexRecord
+	WALOps        int
+	WALTailOffset int64
 }
 
 // IsClean reports whether replay stopped at a state from which it is safe to

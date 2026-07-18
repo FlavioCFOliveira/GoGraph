@@ -61,16 +61,6 @@ var ErrInputTooLarge = errors.New("csv: input exceeds maximum size")
 
 // Options controls Reader / Writer behaviour.
 type Options struct {
-	// Delimiter is the column separator; defaults to ','.
-	Delimiter rune
-	// Comment is the comment character; defaults to '#'.
-	Comment rune
-	// HasHeader skips the first line when true.
-	HasHeader bool
-	// Directed selects the underlying adjacency-list config.
-	Directed bool
-	// Multigraph allows parallel edges.
-	Multigraph bool
 	// MaxBytes caps the number of bytes read from the input before the
 	// reader fails with [ErrInputTooLarge]. [DefaultOptions] sets it to
 	// [DefaultMaxBytes].
@@ -84,6 +74,16 @@ type Options struct {
 	// explicit positive MaxBytes. Leave the cap disabled only for input you
 	// fully trust.
 	MaxBytes int64
+	// Delimiter is the column separator; defaults to ','.
+	Delimiter rune
+	// Comment is the comment character; defaults to '#'.
+	Comment rune
+	// HasHeader skips the first line when true.
+	HasHeader bool
+	// Directed selects the underlying adjacency-list config.
+	Directed bool
+	// Multigraph allows parallel edges.
+	Multigraph bool
 
 	// SanitizeFormulae, when true, neutralises spreadsheet formula
 	// injection (OWASP CSV injection, CWE-1236) on the write path. A cell

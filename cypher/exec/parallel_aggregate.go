@@ -81,20 +81,21 @@ import (
 //
 // ParallelCountScan is NOT safe for concurrent use.
 type ParallelCountScan struct {
-	g          nodeWalker
-	morselSize int
-	gov        *ParallelGovernor // adaptive worker-budget governor (nil = unbounded)
+	g       nodeWalker
+	ctx     context.Context    //nolint:containedctx // stored for per-Next ctx check
+	initErr error              // error captured during Init (e.g. cancellation)
+	gov     *ParallelGovernor  // adaptive worker-budget governor (nil = unbounded)
+	cancel  context.CancelFunc // cancels the worker context
 
-	ctx      context.Context    //nolint:containedctx // stored for per-Next ctx check
-	cancel   context.CancelFunc // cancels the worker context
-	wg       sync.WaitGroup
 	partials []int64 // one private counter per worker; read only after wg.Wait
-	initErr  error   // error captured during Init (e.g. cancellation)
-	entered  bool    // true once gov.Enter ran, so Close calls gov.Leave exactly once
 
-	joined bool // true once the workers have been joined and the total combined
-	total  int64
-	done   bool // true after the single result row has been emitted
+	wg         sync.WaitGroup
+	morselSize int
+	total      int64
+
+	entered bool // true once gov.Enter ran, so Close calls gov.Leave exactly once
+	joined  bool // true once the workers have been joined and the total combined
+	done    bool // true after the single result row has been emitted
 }
 
 // NewParallelCountScan creates a ParallelCountScan over g. morselSize controls

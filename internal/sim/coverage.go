@@ -55,7 +55,6 @@ const (
 // CoverageTracker is safe for concurrent use: every method takes the internal
 // mutex. Swarm workers feed and query it from many goroutines.
 type CoverageTracker struct {
-	mu sync.Mutex
 	// counts maps dimension -> bucket key -> hit count. Both levels are bounded
 	// by the fixed vocabularies above.
 	counts map[coverageDim]map[string]int
@@ -66,6 +65,7 @@ type CoverageTracker struct {
 	// deterministically (round-robin among equally-least-covered scenarios) so
 	// the bias does not starve a tied bucket.
 	selectCalls int
+	mu          sync.Mutex
 }
 
 // NewCoverageTracker builds a tracker that biases selection over the given

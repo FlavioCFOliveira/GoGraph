@@ -20,9 +20,9 @@ import "context"
 //
 // StaticRows is NOT safe for concurrent use.
 type StaticRows struct {
+	ctx  context.Context //nolint:containedctx // stored for per-Next ctx check
 	rows []Row
 	pos  int
-	ctx  context.Context //nolint:containedctx // stored for per-Next ctx check
 }
 
 // NewStaticRows creates a StaticRows operator over rows. The slice is retained

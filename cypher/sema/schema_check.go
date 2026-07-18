@@ -14,15 +14,15 @@ import (
 type SchemaError struct {
 	// PropertyName is the property key that triggered the mismatch.
 	PropertyName string
+	// Hint is a human-readable suggestion to help the caller fix the query.
+	Hint string
+	// Pos is the source position of the BinaryOp that holds the mismatch.
+	Pos ast.Position
 	// DeclaredKind is the kind registered in the schema.
 	DeclaredKind lpg.PropertyKind
 	// UsedAs is the CypherType of the literal on the other side of the
 	// comparison.
 	UsedAs CypherType
-	// Pos is the source position of the BinaryOp that holds the mismatch.
-	Pos ast.Position
-	// Hint is a human-readable suggestion to help the caller fix the query.
-	Hint string
 }
 
 // Error implements the error interface.

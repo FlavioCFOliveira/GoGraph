@@ -114,7 +114,6 @@ func (e *ConstraintViolationError) Unwrap() error { return ErrConstraintViolatio
 //
 // ConstraintRegistry is safe for concurrent use.
 type ConstraintRegistry struct {
-	mu        sync.RWMutex
 	unique    map[ckey]string              // (label, prop) → index name
 	notNull   map[ckey]bool                // (label, prop) → true
 	valueSets map[ckey]map[string]struct{} // (label, prop) → set of string values in use
@@ -135,6 +134,8 @@ type ConstraintRegistry struct {
 	// allocation and a reader that already holds one is never affected by a
 	// concurrent modification.
 	notNullByLabel map[string][]string
+
+	mu sync.RWMutex
 }
 
 // NewConstraintRegistry creates an empty ConstraintRegistry.
@@ -153,8 +154,6 @@ func NewConstraintRegistry() *ConstraintRegistry {
 // used to persist the constraint set durably and to re-register it on
 // recovery. KindUnique distinguishes UNIQUE (true) from NOT NULL (false).
 type ConstraintInfo struct {
-	// KindUnique is true for a UNIQUE constraint, false for NOT NULL.
-	KindUnique bool
 	// Label is the constrained node label.
 	Label string
 	// Property is the constrained property key.
@@ -162,6 +161,8 @@ type ConstraintInfo struct {
 	// Name is the user-defined constraint name (may be empty for a constraint
 	// registered without one).
 	Name string
+	// KindUnique is true for a UNIQUE constraint, false for NOT NULL.
+	KindUnique bool
 }
 
 // ckey is the registry map key: the (label, property) pair kept as distinct
