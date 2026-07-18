@@ -68,10 +68,6 @@ type subqueryEvaluator struct {
 	// the unique AST pointer; the value carries the seedable Argument and the
 	// schema layout used to materialise the per-row Row.
 	compiled map[ast.Expression]*compiledSubquery
-
-	// closed tracks AST roots whose compiled pipeline has been closed by an
-	// error path so subsequent drives can re-init cleanly.
-	_ struct{}
 }
 
 // compiledSubquery bundles the runtime state of a single compiled subquery:

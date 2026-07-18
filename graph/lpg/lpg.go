@@ -195,7 +195,7 @@ type nodePropShard struct {
 
 // nodeLabelShard is one stripe of the node-label bag. The mutex
 // serialises mutations on this shard only; readers hold an RLock
-// for HasNodeLabel / NodeLabels. Splitting the bag into 16 shards
+// for HasNodeLabel / NodeLabels. Splitting the bag into 64 shards
 // removes the global nodeMu contention point that previously
 // serialised every Set/Remove/Has across all NodeIDs in the graph.
 type nodeLabelShard struct {
