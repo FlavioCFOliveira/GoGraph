@@ -4,6 +4,199 @@ All notable changes to GoGraph are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] — 2026-07-19
+
+The twelfth published release of **GoGraph**, a Go module for graph
+persistence, manipulation, and fast search. This is a pre-1.0 **MINOR**
+release. Its headline is a **columnar Cypher read path** and two net-new,
+backward-compatible Cypher clauses — the **`FOREACH`** updating clause and
+**`SHOW CONSTRAINTS` / `SHOW INDEXES`** schema introspection with
+`YIELD` / `WHERE` / `RETURN` projection — landed alongside a broad Cypher
+correctness pass and a two-cycle whole-module production-readiness review.
+The 57 commits since `v0.8.1` (`git log --no-merges v0.8.1..HEAD`, a linear
+history with no merge commits) were surveyed for the bump: net-new Cypher
+surface and additive `cypher/exec` types make this a **MINOR**, and **no
+breaking change to the documented public-API surface** (`graph/*`,
+`search/*`, `store/*`, `ds`, `bench/*` — see [docs/semver.md](docs/semver.md))
+was found. One dead, never-wired exported operator in `cypher/exec`
+(`ParallelScan`) was removed; pre-1.0 the minor digit absorbs such a
+change, and it is called out under **Removed** below.
+
+Both compliance invariants continue to hold without regression: the module
+is **100 % openCypher TCK-compliant at the execution level**
+(3 897 / 3 897 scenarios, 16 006 / 16 006 steps, 0 failed / 0 undefined) and
+**100 % ACID-compliant**. The new Cypher clauses are TCK-neutral —
+`FOREACH` and the `SHOW` DDL-introspection commands are not covered by a TCK
+scenario — so `tckExecutionBaseline = 3897` in `cypher/tck/runner_test.go`
+is unchanged. The Go toolchain remains **go1.26.5** (unchanged), and
+`govulncheck ./...` stays clean.
+
+Install with:
+
+```bash
+go get github.com/FlavioCFOliveira/GoGraph@v0.9.0
+```
+
+### Added
+
+- **`FOREACH` updating clause.** `FOREACH (x IN list | <updating clauses>)`
+  binds `x` to each element of a list and runs the body clauses as
+  side-effects, preserving the surrounding query's row cardinality. It
+  supports `CREATE` / `MERGE` / `SET` / `REMOVE` / `DELETE` and nested
+  `FOREACH`, over a literal list, a bound list variable, or a list-valued
+  expression. Lowered to a correlated body sub-plan
+  (`Argument → Unwind(list) → updating clauses`) driven once per outer row.
+  `FOREACH` is not TCK-covered, so the 3 897 baseline is unaffected. (#2029)
+- **`SHOW CONSTRAINTS` / `SHOW INDEXES` schema introspection**, with the
+  singular `SHOW CONSTRAINT` / `SHOW INDEX` aliases, listing the registered
+  schema in the openCypher column order. A trailing **`YIELD` / `WHERE` /
+  `RETURN`** projection is accepted so modern clients can select, filter,
+  and rename the yielded columns. (#2044)
+- **Column-major `Chunk` execution model and columnar operators** in
+  `cypher/exec` — a new additive exported surface (`Chunk`, `ChunkPool`,
+  `ColumnarFilter`, `ColumnarProject`, `LabelCountScan`, the
+  `ChunkProducer` / `NodeIDColumnProducer` interfaces, and supporting
+  filler/predicate function types) that underpins the read-path performance
+  work below. (#1704 P1)
+
+### Changed
+
+- **Exact cross-type integer/float equality per openCypher CIP2016-06-14.**
+  Equality, grouping, `DISTINCT`, hash joins, and list/map element
+  comparison now compare an integer and a float **exactly** rather than by
+  lossy `float64` promotion: `1 = 1.0` and they group together, `NaN`
+  groups with `NaN`, `-0.0` with `+0.0`, and `NULL` grouping keys collapse
+  to one group — while two distinct integers `≥ 2^53` that share a
+  `float64` bit-pattern now stay **distinct** (they previously conflated).
+  (#2050)
+- **`AND` / `OR` / `XOR` / `NOT` reject a non-boolean runtime operand** with
+  a typed `TypeError` instead of silently coercing it, matching openCypher
+  three-valued-logic semantics (`NULL` operands are still handled by 3VL).
+  (#2059)
+- **Query planner prefers the columnar chain over the morsel-parallel scan**
+  for `MATCH (n) WHERE <simple predicate> RETURN <scalar properties>`. The
+  boxed parallel operator ran serial-but-boxed under the concurrency
+  governor; the de-boxed columnar chain is now tried first for the eligible
+  shape. `ParallelScanProject` still handles the shapes the columnar chain
+  declines (no filter, compound predicates, non-property scalar items).
+  (#2065)
+- **Bolt streams all-scalar `RECORD` rows through a typed encoder** with no
+  per-cell boxing to `expr.Value`.
+
+### Deprecated
+
+- **`search.KShortestPathsLoopless` (the unbounded bare entry).** Its
+  worst case is super-polynomial in the number of vertices and it cannot
+  signal truncation, so it is a foot-gun on arbitrary or untrusted input.
+  It is marked `// Deprecated:` — no default bound is imposed, preserving
+  behaviour — steering callers to the bounded, cancellable
+  `KShortestPathsLooplessCtxWithOpts`
+  (`MaxPops` / `MaxQueueBytes → ErrResourceBudgetExceeded`) or the
+  polynomial `YenKShortest`. (#1997, #2006)
+
+### Removed
+
+- **The dead `cypher/exec.ParallelScan` operator** (its `NewParallelScan`
+  constructor and `Init` / `Next` / `Close` methods). It had no planner
+  call site — the live parallel leaves are `ParallelScanProject` and
+  `ParallelCountScan` — and it sized workers directly from `GOMAXPROCS`,
+  bypassing the `ParallelGovernor`. Removing it is a change to an exported
+  identifier outside `internal/`; pre-1.0 the minor digit absorbs it, and
+  the documented public-API surface in [docs/semver.md](docs/semver.md) is
+  unaffected. No production behaviour changed. (#2019)
+
+### Fixed
+
+- **`MERGE` and pattern matching over parallel relationships.** `MERGE`
+  fans its bindings out per pre-existing parallel relationship (#2033);
+  `DELETE r` removes the exact bound parallel-edge instance (#2034); an
+  untyped `[r]` is enumerated per parallel instance in `EvalPatternComp`
+  (#2035); and a fresh same-pattern node reference is resolved in `MERGE`
+  inline properties (#2032).
+- **Whole-entity `SET` correctness.** Non-literal values in whole-entity
+  `SET n = {…}` maps and in `MERGE` inline relationship properties are now
+  evaluated (#2031, #2030); a whole-entity `SET` map is written from a bound
+  map variable (#2030); whole-entity `SET` is applied in `MERGE ON CREATE` /
+  `ON MATCH` (#2027); a `SET n = <map-returning expression>` is honoured;
+  and a whole-entity `SET` that violates a `UNIQUE` constraint is rolled
+  back instead of silently skipped (#2026).
+- **`setItem` disambiguation.** `WITH … SET var = <map/param>` no longer
+  panics; the parser distinguishes a property-set from a whole-entity map
+  assignment. (#2036)
+- **String-literal round-trip corruption.** Backslashes in a string literal
+  are escaped on the round-trip, stopping silent property corruption.
+  (#2025)
+- **`MERGE` read-own-writes on a null property.** A `MERGE` whose property
+  resolves to a runtime `NULL` (including from a null parameter) now raises
+  `MergeReadOwnWrites` instead of proceeding. (#2024, #2023)
+- **`CALL … YIELD … WHERE` applies its `WHERE` predicate** to the yielded
+  rows. (#1966)
+- **A leading `FOREACH` no longer panics** — `Foreach.Vars` guards a nil
+  outer scope. (#2029)
+- **Inline property validation.** A node/relationship-valued inline property
+  is rejected, and a parameter may be supplied as a whole property map on
+  `CREATE`. (#2022, #2021)
+- **`CREATE INDEX` on an empty graph** no longer pins the index key type to
+  `String`. (#2020)
+- **B-tree correctness.** `contains` recurses and `removeChild` escalation
+  re-roots correctly, stopping a height ≥ 4 corruption. (a0a5be6)
+- **Search correctness.** `TransitiveClosure.Reachable` is reflexive for
+  in-range `NodeID`s (db4b3ed); `NaN` / `Inf` is validated for defined
+  float weight types via the reflect kind (b14fc89).
+- **I/O round-trips.** A CSV cell that begins with the comment rune is
+  force-quoted so it round-trips (bab1b19); JSONL distinguishes an absent
+  field from an empty one so an empty-string identifier round-trips
+  (ea15576).
+- **A `cypher.Engine` constructed over an undirected backend now warns**,
+  surfacing a previously silent misconfiguration. (baef19e)
+
+### Security
+
+- **Bolt inbound-budget accounting.** The message-reassembly buffer is now
+  charged against the aggregate inbound budget, closing a memory-amplification
+  gap in the chunked-message reader. (1c9b079)
+- **Two-cycle whole-module production-readiness review.** The 2026-07-16/17
+  and 2026-07-19 multi-specialist audits (recorded in
+  [docs/audit-production-readiness-2026-07-19.md](docs/audit-production-readiness-2026-07-19.md))
+  found no critical or high-severity defect and certified both compliance
+  mandates; the two highest-value findings (the `AND`/`OR` non-boolean
+  coercion above and the columnar-first planner reorder) were remediated in
+  this release. `go test -race ./...`, the crash-injection battery, and
+  `govulncheck ./...` are clean.
+
+### Performance
+
+- **Columnar read path (`#1704` P1–P3).** A `RETURN n.key` projection over a
+  filtered node scan is now driven column-major, boxing to `expr.Value` only
+  at the sink. `BenchmarkEngReadProject` drops from **5 309 to 89
+  allocs/op** end-to-end (benchstat n=6: P2 −32.8 %, P3 a further −97.5 %),
+  and query time from **≈ 234 µs to ≈ 53.8 µs**. Correctness is
+  byte-identical by construction (the column filler classifies each value
+  with the same functions the row path uses). (#1822, #1823, #1824)
+- **Columnar `WITH`-projection passthrough.** `BenchmarkWithFilterPassthrough`
+  drops from **5 324 to 118 allocs/op** (−97.8 %, −76 % time) and
+  `WithNoFilterPassthrough` from 3 553 to 100 (−97.2 %, −71 % time). (#2045)
+- **Unboxed columnar grouping-key hashing in `EagerAggregation`.**
+  `BenchmarkAggGroupScalar` drops from **15 598 to 1 889 allocs/op**
+  (−87.9 %, −78 % time) while preserving openCypher grouping equivalence.
+  (#2049)
+- **Planner columnar-first reorder.** For the filtered scalar-projection
+  shape, the same query drops from **182 559 to 118 allocs/op** and
+  **6.08 ms to 1.94 ms** under concurrency (≈ 1 550× fewer allocations,
+  2–3× faster), with no single-query regression. (#2065)
+- **`count(*)` over a bare label scan is pushed down to an O(1) index read.**
+  (8134796)
+- **Lock-free tombstone read path** in `graph/lpg` restores read scaling
+  under concurrency. (95da80d)
+- **Struct field re-alignment.** Fields of non-test structs are reordered to
+  the size-optimal layout, removing compiler padding across 33 struct types
+  and trimming ≈ 7.5 KB of operator allocation size and garbage-collector
+  mark work. (a5d0fe7)
+- **`buildEdgeTypeFilter` streams its fallback label check** instead of
+  allocating a per-edge slice. (4273033)
+
+[0.9.0]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.9.0
+
 ## [0.8.1] — 2026-07-14
 
 The eleventh published release of **GoGraph**, a Go module for graph

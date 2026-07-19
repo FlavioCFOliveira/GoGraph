@@ -5,20 +5,21 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 
 ## Status
 
-**Current release: `v0.8.1`.** This is the project's **eleventh
+**Current release: `v0.9.0`.** This is the project's **twelfth
 release**, published at a pre-1.0 baseline: under Semantic Versioning a
 `0.y.z` version signals that the public API is **not yet stable** and may
 change without a major bump while the module matures toward `1.0.0`.
-`v0.8.1` is a pre-1.0 **PATCH** release: a correctness-only fix to Cypher
-**pattern-predicate** and **pattern-comprehension** relationship-type
-matching over **parallel edges**, so a query such as
-`WHERE NOT (a)-[:TYPE]->()` now inspects every relationship type between
-an ordered node pair instead of only the first-stored one. It carries
-**no new public API** and **no breaking change**, and is additive over
-`v0.8.0`; the preceding `v0.8.0` release remains the substantive feature
-and hardening milestone (the modern openCypher `FOR ... REQUIRE`
-constraint syntax, schema-DDL durability and atomicity fixes, a
-denial-of-service hardening pass, and the `go1.26.5` toolchain bump). The five major subsystems below are
+`v0.9.0` is a pre-1.0 **MINOR** release whose headline is a **columnar
+Cypher read path** together with two net-new, backward-compatible Cypher
+clauses — the **`FOREACH`** updating clause and **`SHOW CONSTRAINTS` /
+`SHOW INDEXES`** schema introspection with `YIELD` / `WHERE` / `RETURN`
+projection — landed alongside a broad Cypher correctness pass and a
+two-cycle whole-module production-readiness review. The columnar read path
+drives a filtered scalar projection column-major, cutting
+`BenchmarkEngReadProject` from **5 309 to 89 allocations per operation**.
+One dead, never-wired exported operator (`cypher/exec.ParallelScan`) was
+removed; pre-1.0 the minor digit absorbs that change and the documented
+public-API surface is unaffected. The five major subsystems below are
 functional and tested under race, lint, and soak gates.
 The two compliance invariants are already in force at this version: the
 module is **100 % openCypher TCK-compliant at the execution level**
@@ -28,9 +29,9 @@ vet, race, lint, `govulncheck`, TCK conformance, and the deterministic
 crash-injection battery), run via `make ci`/`make release-preflight` before
 it lands. The module uses
 the conventional Go path `github.com/FlavioCFOliveira/GoGraph` and is
-fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.8.1`. See
+fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.9.0`. See
 [CHANGELOG.md](CHANGELOG.md) and
-[release-notes/v0.8.1.md](release-notes/v0.8.1.md) for the full release
+[release-notes/v0.9.0.md](release-notes/v0.9.0.md) for the full release
 narrative.
 
 ### Core graph (`graph/`)

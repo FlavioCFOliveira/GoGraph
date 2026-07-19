@@ -312,6 +312,36 @@ MATCH (n:Person {name: 'Alice'})
 DETACH DELETE n
 ```
 
+### FOREACH
+
+`FOREACH (x IN list | <updating clauses>)` binds `x` to each element of a
+list in turn and runs the body's updating clauses as side-effects. It does
+**not** change the surrounding query's row cardinality: the outer row is
+forwarded unchanged after the body has run once per list element.
+
+The body accepts the updating clauses `CREATE`, `MERGE`, `SET`, `REMOVE`,
+`DELETE`, and a nested `FOREACH`. The list may be a literal, a bound list
+variable, or any list-valued expression.
+
+```cypher
+-- create a chain of nodes from a literal list
+FOREACH (name IN ['Alice', 'Bob', 'Carol'] |
+  CREATE (:Person {name: name})
+)
+```
+
+```cypher
+-- update every node bound along a matched path
+MATCH p = (start:Person {name: 'Alice'})-[:KNOWS*]->(end:Person)
+FOREACH (n IN nodes(p) |
+  SET n.visited = true
+)
+```
+
+The variable `x` is scoped to the `FOREACH` body and is not visible after
+the clause. A `FOREACH` may appear on its own or after a `WITH`, where it
+keeps its document order among the surrounding clauses.
+
 ---
 
 ## Bulk operations
@@ -911,7 +941,6 @@ The following constructs are not yet supported:
 
 | Feature | Status |
 |---|---|
-| `FOREACH` | Not parsed; rejected at parse time |
 | `CALL { … }` standalone subquery clause | Not parsed; rejected at parse time |
 | `CALL { … } IN TRANSACTIONS` | Not supported |
 
@@ -999,4 +1028,4 @@ consults the reference first.
 
 ---
 
-*Last reviewed: 2026-07-14 against commit `a38bf91`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-07-19 against commit `345b2a5`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
