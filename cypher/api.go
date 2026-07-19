@@ -6345,27 +6345,38 @@ func buildOperator(
 		}), nil
 
 	case *ir.Projection:
-		// Morsel-parallel fused scan (#1682): when this Projection sits directly
-		// over an optional Selection over a bare AllNodesScan, its items are scalar,
-		// and the live node count exceeds the threshold, replace the serial
-		// scan→filter→project subtree with a ParallelScanProject that runs an
-		// independent copy of the subtree per worker. It populates schema exactly as
-		// the serial buildIRProjection would, so any operator above (Sort, Limit, the
-		// final column passthrough) consumes its rows unchanged. Falls through to the
-		// serial build for every non-eligible shape.
-		if op, ok, perr := tryBuildParallelScanProject(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, bopts); perr != nil {
-			return nil, perr
-		} else if ok {
-			return op, nil
-		}
 		// Serial columnar read chain (#1704 P3): a scalar-property projection over a
 		// filter over a single-node scan is built as scan → ColumnarFilter →
 		// chunk-input ColumnarProject, unboxing the scan and filter per-row boxes.
 		// Only fires when the projection will consume the filter column-major, so a
-		// filter feeding an aggregation keeps the plain boxed Filter. Falls through
-		// to the serial build below for every non-matching shape (byte-identical).
+		// filter feeding an aggregation keeps the plain boxed Filter.
+		//
+		// Tried BEFORE the morsel-parallel fused scan (#2065): the columnar chain is
+		// a ChunkProducer at the plan root, so the engine drains it column-major
+		// (materializeColumnar) with no per-row boxing — measured at 118 allocs/op at
+		// 60k nodes versus ~179k for the boxed ParallelScanProject. Under the
+		// high-concurrency regime the parallel path targets, the ParallelGovernor
+		// grants each concurrent query a single worker, so the parallel path degrades
+		// to serial-but-boxed and the columnar chain strictly dominates it there. The
+		// parallel build below still claims the broader scalar shapes the columnar
+		// chain declines (e.g. items that are not plain property access). Falls
+		// through to the serial build for every non-matching shape (byte-identical).
 		if op, ok, cerr := tryBuildColumnarFilterChain(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, bopts); cerr != nil {
 			return nil, cerr
+		} else if ok {
+			return op, nil
+		}
+		// Morsel-parallel fused scan (#1682): for a scalar projection over an
+		// optional Selection over a bare AllNodesScan whose live node count exceeds
+		// the threshold and which the columnar chain above did NOT take, replace the
+		// serial scan→filter→project subtree with a ParallelScanProject that runs an
+		// independent copy of the subtree per worker across up to GOMAXPROCS
+		// goroutines. It populates schema exactly as the serial buildIRProjection
+		// would, so any operator above (Sort, Limit, the final column passthrough)
+		// consumes its rows unchanged. Falls through to the serial build for every
+		// non-eligible shape.
+		if op, ok, perr := tryBuildParallelScanProject(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, bopts); perr != nil {
+			return nil, perr
 		} else if ok {
 			return op, nil
 		}

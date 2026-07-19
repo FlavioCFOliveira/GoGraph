@@ -40,8 +40,11 @@ func runParallelCappedQuery(t *testing.T, opts *EngineOptions, q string) error {
 }
 
 func TestParallelScanProject_ResultRowCapEnforced(t *testing.T) {
-	// MaxResultRows=10 over 200 matching rows on the parallel path.
-	err := runParallelCappedQuery(t, &EngineOptions{MaxResultRows: 10}, `MATCH (n) WHERE n.v >= 0 RETURN n.v AS v`)
+	// MaxResultRows=10 over 200 matching rows on the parallel path. The projection
+	// uses a non-property scalar item (n.v + 0) so it stays on ParallelScanProject:
+	// a pure-property projection over a simple predicate now routes to the columnar
+	// chain (#2065), whose cap enforcement is exercised via columnar_filter_test.go.
+	err := runParallelCappedQuery(t, &EngineOptions{MaxResultRows: 10}, `MATCH (n) WHERE n.v >= 0 RETURN n.v + 0 AS v`)
 	if !errors.Is(err, ErrResultRowsExceeded) {
 		t.Fatalf("parallel-path drain error = %v; want ErrResultRowsExceeded", err)
 	}
@@ -49,8 +52,9 @@ func TestParallelScanProject_ResultRowCapEnforced(t *testing.T) {
 
 func TestParallelScanProject_ResultByteCapEnforced(t *testing.T) {
 	// A tiny byte budget over 200 matching rows on the parallel path: the fused
-	// workers stop accumulating and the drain trips the byte cap.
-	err := runParallelCappedQuery(t, &EngineOptions{MaxResultBytes: 200}, `MATCH (n) WHERE n.v >= 0 RETURN n.v AS v`)
+	// workers stop accumulating and the drain trips the byte cap. The non-property
+	// scalar item (n.v + 0) keeps the shape on ParallelScanProject (#2065).
+	err := runParallelCappedQuery(t, &EngineOptions{MaxResultBytes: 200}, `MATCH (n) WHERE n.v >= 0 RETURN n.v + 0 AS v`)
 	if !errors.Is(err, ErrResultBytesExceeded) {
 		t.Fatalf("parallel-path drain error = %v; want ErrResultBytesExceeded", err)
 	}

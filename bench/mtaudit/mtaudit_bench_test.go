@@ -76,8 +76,29 @@ func BenchmarkEngReadFilterCountLarge(b *testing.B) {
 }
 
 // ParallelScanProject path (#1682): pushed-down filter + projection, parallel reduce.
+// Concurrent (RunParallel): the ParallelGovernor grants each query one worker, the
+// regime where the columnar-first planner order (#2065) de-boxes this scan.
 func BenchmarkEngReadProjectLarge(b *testing.B) {
 	runRead(b, 60000, "MATCH (n) WHERE n.v >= 0 RETURN n.v")
+}
+
+// Single-query variant of BenchmarkEngReadProjectLarge (#2065): one query at a
+// time over the 60k graph, so the ParallelGovernor grants the full worker pool.
+// Confirms the columnar-first planner order does not regress single-query
+// wall-clock versus the former parallel path — the scalar projection is
+// allocation-bound, so the de-boxed columnar chain stays competitive single-core.
+func BenchmarkEngReadProjectLargeSerial(b *testing.B) {
+	g := seed(60000)
+	eng := cypher.NewEngine(g)
+	ctx := context.Background()
+	q := "MATCH (n) WHERE n.v >= 0 RETURN n.v"
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := eng.Run(ctx, q, nil); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
 
 // --- Write path ---

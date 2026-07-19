@@ -42,11 +42,17 @@ func TestParallelScanProject_Differential(t *testing.T) {
 		{"return-id", `MATCH (n) RETURN id(n) AS i`},
 		{"return-labels", `MATCH (n) RETURN labels(n) AS ls`},
 		{"return-arith", `MATCH (n) RETURN n.v * 2 + 1 AS x`},
-		{"filter-eq", `MATCH (n) WHERE n.g = 1 RETURN n.v AS v`},
-		{"filter-range", `MATCH (n) WHERE n.v > 100 RETURN n.v AS v`},
+		// A simple predicate over a pure-property projection now routes to the
+		// columnar filter chain (#2065; its filter differential is covered by
+		// columnar_filter_test.go), so these filter cases add a non-property scalar
+		// item (n.v + 0) to keep the filter-pushdown differential ON the parallel
+		// path. filter-and keeps a pure projection because a compound predicate
+		// already declines the columnar chain, so it still engages the parallel path.
+		{"filter-eq", `MATCH (n) WHERE n.g = 1 RETURN n.v + 0 AS v`},
+		{"filter-range", `MATCH (n) WHERE n.v > 100 RETURN n.v + 0 AS v`},
 		{"filter-and", `MATCH (n) WHERE n.v >= 50 AND n.v < 150 RETURN n.v AS v`},
-		{"filter-null-drop", `MATCH (n) WHERE n.missing > 0 RETURN n.v AS v`}, // NULL drops every row
-		{"filter-multi-col", `MATCH (n) WHERE n.g = 2 RETURN n.v AS v, n.g AS grp`},
+		{"filter-null-drop", `MATCH (n) WHERE n.missing > 0 RETURN n.v + 0 AS v`}, // NULL drops every row
+		{"filter-multi-col", `MATCH (n) WHERE n.g = 2 RETURN n.v + 0 AS v, n.g AS grp`},
 		{"case-expr", `MATCH (n) RETURN CASE WHEN n.g = 0 THEN 'a' ELSE 'b' END AS c`},
 		{"filter-return-node", `MATCH (n) WHERE n.v < 30 RETURN n AS node`},
 		// Argument-bearing temporal constructor is PURE (deterministic): it must
@@ -262,7 +268,10 @@ func TestParallelScanProject_RaceLazyPredicate(t *testing.T) {
 	on := NewEngineWithOptions(g, EngineOptions{ParallelScanThreshold: psTestThreshold})
 	off := NewEngineWithOptions(g, EngineOptions{DisableParallelScan: true})
 
-	const q = `MATCH (n) WHERE n.v >= 30000 RETURN n.v AS v`
+	// Non-property scalar item (n.v + 0) keeps this large-graph race case on the
+	// parallel path; a pure-property + simple-predicate shape now routes to the
+	// columnar chain (#2065).
+	const q = `MATCH (n) WHERE n.v >= 30000 RETURN n.v + 0 AS v`
 	before := parallelScanProjectBuildCount.Load()
 	gotOn := drainSortedPS(t, on, q)
 	if parallelScanProjectBuildCount.Load() == before {
