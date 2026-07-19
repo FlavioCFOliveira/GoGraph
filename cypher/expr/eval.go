@@ -927,15 +927,42 @@ func evalBinaryOp(n *ast.BinaryOp, row RowContext, params map[string]Value, reg 
 	}
 }
 
+// logicalOperandError reports the InvalidArgumentType error to raise when v is
+// used as the operand of a logical operator (AND/OR/XOR/NOT) but is not a legal
+// three-valued-logic operand. openCypher treats NULL as a legal logical operand
+// (it drives the Kleene truth tables), so only a non-null, non-Boolean value is
+// an error. It returns nil when v is legal (Boolean or NULL).
+//
+// The compile-time guard in cypher/sema (invalidBooleanOperandError) rejects
+// non-boolean literal operands before evaluation; this covers the runtime
+// values it cannot see — parameters, properties, and variables. The message
+// carries the "InvalidArgumentType:" prefix used by every other runtime type
+// error in this package (property access, subscripting), so it maps to the same
+// InvalidArgumentType taxonomy (#2059).
+func logicalOperandError(op string, v Value) error {
+	if IsNull(v) {
+		return nil
+	}
+	if _, ok := v.(BoolValue); ok {
+		return nil
+	}
+	return &EvalError{Msg: fmt.Sprintf("InvalidArgumentType: operator %q expects Boolean operands, got %s", op, v.Kind())}
+}
+
 // eval3VLAND evaluates AND with Kleene 3VL short-circuit.
 func eval3VLAND(n *ast.BinaryOp, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
 	left, err := evalExpr(n.Left, row, params, reg)
 	if err != nil {
 		return nil, err
 	}
-	// false AND _ = false (short-circuit, even over NULL)
+	// false AND _ = false (short-circuit, even over NULL): the right operand is
+	// left unevaluated, so a non-boolean right is never type-checked here.
 	if b, ok := left.(BoolValue); ok && !bool(b) {
 		return BoolValue(false), nil
+	}
+	// left was evaluated and did not short-circuit: it must be Boolean or NULL.
+	if err := logicalOperandError(n.Operator, left); err != nil {
+		return nil, err
 	}
 	right, err := evalExpr(n.Right, row, params, reg)
 	if err != nil {
@@ -945,6 +972,10 @@ func eval3VLAND(n *ast.BinaryOp, row RowContext, params map[string]Value, reg Fu
 	if b, ok := right.(BoolValue); ok && !bool(b) {
 		return BoolValue(false), nil
 	}
+	if err := logicalOperandError(n.Operator, right); err != nil {
+		return nil, err
+	}
+	// left and right are each Boolean(true) or NULL at this point.
 	// NULL AND NULL = NULL; NULL AND true = NULL
 	if IsNull(left) || IsNull(right) {
 		return Null, nil
@@ -958,9 +989,14 @@ func eval3VLOR(n *ast.BinaryOp, row RowContext, params map[string]Value, reg Fun
 	if err != nil {
 		return nil, err
 	}
-	// true OR _ = true (short-circuit, even over NULL)
+	// true OR _ = true (short-circuit, even over NULL): the right operand is
+	// left unevaluated, so a non-boolean right is never type-checked here.
 	if IsTruthy(left) {
 		return BoolValue(true), nil
+	}
+	// left was evaluated and did not short-circuit: it must be Boolean or NULL.
+	if err := logicalOperandError(n.Operator, left); err != nil {
+		return nil, err
 	}
 	right, err := evalExpr(n.Right, row, params, reg)
 	if err != nil {
@@ -970,6 +1006,10 @@ func eval3VLOR(n *ast.BinaryOp, row RowContext, params map[string]Value, reg Fun
 	if IsTruthy(right) {
 		return BoolValue(true), nil
 	}
+	if err := logicalOperandError(n.Operator, right); err != nil {
+		return nil, err
+	}
+	// left and right are each Boolean(false) or NULL at this point.
 	// NULL OR false = NULL; NULL OR NULL = NULL
 	if IsNull(left) || IsNull(right) {
 		return Null, nil
@@ -977,17 +1017,21 @@ func eval3VLOR(n *ast.BinaryOp, row RowContext, params map[string]Value, reg Fun
 	return BoolValue(false), nil
 }
 
-// eval3VLXOR evaluates XOR with 3VL: NULL XOR _ = NULL.
+// eval3VLXOR evaluates XOR with 3VL: NULL XOR _ = NULL. XOR does not
+// short-circuit, so both operands are always evaluated; a non-null, non-Boolean
+// operand is a type error rather than being coerced to NULL (#2059).
 func eval3VLXOR(left, right Value) (Value, error) {
+	if err := logicalOperandError("XOR", left); err != nil {
+		return nil, err
+	}
+	if err := logicalOperandError("XOR", right); err != nil {
+		return nil, err
+	}
 	if IsNull(left) || IsNull(right) {
 		return Null, nil
 	}
-	lb, lok := left.(BoolValue)
-	rb, rok := right.(BoolValue)
-	if !lok || !rok {
-		return Null, nil
-	}
-	return BoolValue(bool(lb) != bool(rb)), nil
+	// Both operands are non-null and (per the guard above) Boolean.
+	return BoolValue(bool(left.(BoolValue)) != bool(right.(BoolValue))), nil
 }
 
 // evalOrdering handles <, <=, >, >= with 3VL: NULL operand → NULL.
@@ -1533,11 +1577,12 @@ func evalUnaryOp(n *ast.UnaryOp, row RowContext, params map[string]Value, reg Fu
 		if IsNull(operand) {
 			return Null, nil
 		}
-		b, ok := operand.(BoolValue)
-		if !ok {
-			return Null, nil
+		// A non-null operand must be Boolean; a non-boolean runtime value
+		// (parameter, property, variable) is a type error, not NULL (#2059).
+		if err := logicalOperandError(n.Operator, operand); err != nil {
+			return nil, err
 		}
-		return BoolValue(!bool(b)), nil
+		return BoolValue(!bool(operand.(BoolValue))), nil
 
 	case "-":
 		operand, err := evalExpr(n.Operand, row, params, reg)
