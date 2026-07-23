@@ -223,23 +223,28 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 // is connected by construction, so this equals the node count) and the
 // eccentricity of the source — the depth of the farthest reachable node.
 func reportBFS(ctx context.Context, w io.Writer, c *csr.CSR[int64], src graph.NodeID) error {
-	start := time.Now()
+	// readMem forces a GC, so both snapshots are taken OUTSIDE the timed span
+	// (before the clock starts and after the algorithm returns); elapsed is
+	// captured the instant the algorithm returns, so it never includes a GC.
 	mem := readMem()
 	reachable := 0
 	maxDepth := 0
-	if err := search.BFSCtx(ctx, c, src, func(_ graph.NodeID, depth int) bool {
+	start := time.Now()
+	err := search.BFSCtx(ctx, c, src, func(_ graph.NodeID, depth int) bool {
 		reachable++
 		if depth > maxDepth {
 			maxDepth = depth
 		}
 		return true
-	}); err != nil {
+	})
+	elapsed := time.Since(start)
+	if err != nil {
 		return fmt.Errorf("bfs: %w", err)
 	}
 	after := readMem()
 	fmt.Fprintf(w, "bfs.reachable=%d\n", reachable)
 	fmt.Fprintf(w, "bfs.eccentricity=%d\n", maxDepth)
-	fmt.Fprintf(w, "# bfs.elapsed=%s\n", time.Since(start).Round(time.Microsecond))
+	fmt.Fprintf(w, "# bfs.elapsed=%s\n", elapsed.Round(time.Microsecond))
 	fmt.Fprintf(w, "# bfs.mallocs=%d\n", after.Mallocs-mem.Mallocs)
 	return nil
 }
@@ -251,9 +256,10 @@ func reportBFS(ctx context.Context, w io.Writer, c *csr.CSR[int64], src graph.No
 // counts because the edge weights have spread, which Dijkstra consumes and
 // BFS ignores.
 func reportDijkstra(ctx context.Context, w io.Writer, c *csr.CSR[int64], gen genResult, src, farthest graph.NodeID) error {
-	start := time.Now()
 	mem := readMem()
+	start := time.Now()
 	d, err := search.DijkstraCtx(ctx, c, src)
+	elapsed := time.Since(start)
 	if err != nil {
 		return fmt.Errorf("dijkstra: %w", err)
 	}
@@ -265,7 +271,7 @@ func reportDijkstra(ctx context.Context, w io.Writer, c *csr.CSR[int64], gen gen
 	}
 	fmt.Fprintf(w, "dijkstra.dist_to_farthest=%d\n", distFar)
 	fmt.Fprintf(w, "dijkstra.hops_to_farthest=%d\n", len(d.Path(farthest))-1)
-	fmt.Fprintf(w, "# dijkstra.elapsed=%s\n", time.Since(start).Round(time.Microsecond))
+	fmt.Fprintf(w, "# dijkstra.elapsed=%s\n", elapsed.Round(time.Microsecond))
 	fmt.Fprintf(w, "# dijkstra.mallocs=%d\n", after.Mallocs-mem.Mallocs)
 	return nil
 }
@@ -275,9 +281,10 @@ func reportDijkstra(ctx context.Context, w io.Writer, c *csr.CSR[int64], gen gen
 // nodes are cut vertices, so they occupy the very top of the ranking. Ties
 // are broken by ascending node value, so the reported ids are deterministic.
 func reportBetweenness(ctx context.Context, w io.Writer, c *csr.CSR[int64], mapper *graph.Mapper[int], k int) error {
-	start := time.Now()
 	mem := readMem()
+	start := time.Now()
 	scores, err := centrality.BetweennessCtx(ctx, c)
+	elapsed := time.Since(start)
 	if err != nil {
 		return fmt.Errorf("betweenness: %w", err)
 	}
@@ -290,7 +297,7 @@ func reportBetweenness(ctx context.Context, w io.Writer, c *csr.CSR[int64], mapp
 	for rank, n := range top {
 		fmt.Fprintf(w, "betweenness.top%d=%d\n", rank+1, n)
 	}
-	fmt.Fprintf(w, "# betweenness.elapsed=%s\n", time.Since(start).Round(time.Microsecond))
+	fmt.Fprintf(w, "# betweenness.elapsed=%s\n", elapsed.Round(time.Microsecond))
 	fmt.Fprintf(w, "# betweenness.mallocs=%d\n", after.Mallocs-mem.Mallocs)
 	return nil
 }
@@ -301,9 +308,10 @@ func reportBetweenness(ctx context.Context, w io.Writer, c *csr.CSR[int64], mapp
 // the bridge nodes, being low-degree by design, sit low — high betweenness,
 // low PageRank. Ties are broken by ascending node value for determinism.
 func reportPageRank(ctx context.Context, w io.Writer, c *csr.CSR[int64], mapper *graph.Mapper[int], k int) error {
-	start := time.Now()
 	mem := readMem()
+	start := time.Now()
 	scores, iters, err := centrality.PageRankCtx(ctx, c, centrality.DefaultPageRankOptions())
+	elapsed := time.Since(start)
 	if err != nil {
 		return fmt.Errorf("pagerank: %w", err)
 	}
@@ -317,7 +325,7 @@ func reportPageRank(ctx context.Context, w io.Writer, c *csr.CSR[int64], mapper 
 	for rank, n := range top {
 		fmt.Fprintf(w, "pagerank.top%d=%d\n", rank+1, n)
 	}
-	fmt.Fprintf(w, "# pagerank.elapsed=%s\n", time.Since(start).Round(time.Microsecond))
+	fmt.Fprintf(w, "# pagerank.elapsed=%s\n", elapsed.Round(time.Microsecond))
 	fmt.Fprintf(w, "# pagerank.mallocs=%d\n", after.Mallocs-mem.Mallocs)
 	return nil
 }

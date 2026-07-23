@@ -194,18 +194,24 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	fmt.Fprintf(w, "graph.component_count=%d\n", k)
 
 	// ── Kruskal: whole-graph minimum spanning forest ────────────────────────
-	kStart := time.Now()
+	// readMem forces a GC, so it is taken OUTSIDE the timed span (before the
+	// clock starts and after the algorithm returns); the elapsed is captured
+	// the instant the algorithm returns, so it measures only Kruskal — never
+	// the GCs, the Prim run, or the cross-check that follow.
 	kMem := readMem()
+	kStart := time.Now()
 	kruskalEdges, kruskalTotal, err := search.KruskalMSTCtx(ctx, c)
+	kElapsed := time.Since(kStart)
 	if err != nil {
 		return fmt.Errorf("kruskal: %w", err)
 	}
 	kAfter := readMem()
 
 	// ── Prim: one tree per connected component, summed ──────────────────────
-	pStart := time.Now()
 	pMem := readMem()
+	pStart := time.Now()
 	primEdges, primWeights, primTotal, err := primForest(ctx, c, component, k, live)
+	pElapsed := time.Since(pStart)
 	if err != nil {
 		return fmt.Errorf("prim: %w", err)
 	}
@@ -230,9 +236,9 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	fmt.Fprintf(w, "mst.min_link_cost=%d\n", minCost)
 	fmt.Fprintf(w, "mst.max_link_cost=%d\n", maxCost)
 
-	fmt.Fprintf(w, "# kruskal.elapsed=%s\n", time.Since(kStart).Round(time.Microsecond))
+	fmt.Fprintf(w, "# kruskal.elapsed=%s\n", kElapsed.Round(time.Microsecond))
 	fmt.Fprintf(w, "# kruskal.mallocs=%d\n", kAfter.Mallocs-kMem.Mallocs)
-	fmt.Fprintf(w, "# prim.elapsed=%s\n", time.Since(pStart).Round(time.Microsecond))
+	fmt.Fprintf(w, "# prim.elapsed=%s\n", pElapsed.Round(time.Microsecond))
 	fmt.Fprintf(w, "# prim.mallocs=%d\n", pAfter.Mallocs-pMem.Mallocs)
 	// The backbone's cost saving over naively building every surveyed link.
 	if gen.allLinksCost > 0 {

@@ -220,9 +220,13 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 // occupy the very top. Ties are broken by ascending node value, so the
 // reported ids are deterministic for a fixed seed.
 func reportBetweenness(ctx context.Context, w io.Writer, c *csr.CSR[struct{}], mapper *graph.Mapper[int], k int) error {
-	start := time.Now()
+	// readMem forces a GC, so both snapshots sit OUTSIDE the timed span; elapsed
+	// is captured the instant the algorithm returns, so it never includes a GC
+	// or the top-k work that follows.
 	mem := readMem()
+	start := time.Now()
 	scores, err := centrality.BetweennessCtx(ctx, c)
+	elapsed := time.Since(start)
 	if err != nil {
 		return fmt.Errorf("betweenness: %w", err)
 	}
@@ -235,7 +239,7 @@ func reportBetweenness(ctx context.Context, w io.Writer, c *csr.CSR[struct{}], m
 	for rank, n := range top {
 		fmt.Fprintf(w, "betweenness.top%d=%d\n", rank+1, n)
 	}
-	fmt.Fprintf(w, "# betweenness.elapsed=%s\n", time.Since(start).Round(time.Microsecond))
+	fmt.Fprintf(w, "# betweenness.elapsed=%s\n", elapsed.Round(time.Microsecond))
 	fmt.Fprintf(w, "# betweenness.mallocs=%d\n", after.Mallocs-mem.Mallocs)
 	return nil
 }
@@ -249,9 +253,10 @@ func reportBetweenness(ctx context.Context, w io.Writer, c *csr.CSR[struct{}], m
 // distribution — rather than per-node labels, whose numeric ids are an
 // internal artefact — keeps the fact deterministic and meaningful.
 func reportCommunities(ctx context.Context, w io.Writer, c *csr.CSR[struct{}]) error {
-	start := time.Now()
 	mem := readMem()
+	start := time.Now()
 	p, err := community.LabelPropagationCtx(ctx, c, community.DefaultLabelPropagationOptions())
+	elapsed := time.Since(start)
 	if err != nil {
 		return fmt.Errorf("label propagation: %w", err)
 	}
@@ -274,7 +279,7 @@ func reportCommunities(ctx context.Context, w io.Writer, c *csr.CSR[struct{}]) e
 
 	fmt.Fprintf(w, "communities.count=%d\n", p.NumCommunities)
 	fmt.Fprintf(w, "communities.sizes=%v\n", dist)
-	fmt.Fprintf(w, "# communities.elapsed=%s\n", time.Since(start).Round(time.Microsecond))
+	fmt.Fprintf(w, "# communities.elapsed=%s\n", elapsed.Round(time.Microsecond))
 	fmt.Fprintf(w, "# communities.mallocs=%d\n", after.Mallocs-mem.Mallocs)
 	return nil
 }
