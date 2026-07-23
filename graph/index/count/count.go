@@ -389,6 +389,26 @@ func (s *Store) Snapshot() Snapshot {
 	return snap
 }
 
+// Cells reports the number of distinct live count cells currently held — the
+// sum over every shard of the E, D(out), D(in) and T map sizes. Because a cell
+// is deleted the moment its counter returns to zero ([Store.add]), every map
+// entry is a live combination, so this is an exact, allocation-free size
+// indicator for observability: it is bounded by the number of currently-observed
+// schema combinations (design §2.3), never by |V| or |E|. It is a read taken
+// under the shard read locks and is safe to call concurrently with the
+// barrier-serialised writers. The metrics [Backend] exposes no gauge, so this is
+// the accessor an observer reads to surface the store's footprint (task #2087).
+func (s *Store) Cells() int {
+	n := 0
+	for i := range s.shards {
+		sh := &s.shards[i]
+		sh.mu.RLock()
+		n += len(sh.e) + len(sh.dOut) + len(sh.dIn) + len(sh.t)
+		sh.mu.RUnlock()
+	}
+	return n
+}
+
 // keysOf returns the keys of a label set as a slice (order unspecified).
 func keysOf(m map[uint32]struct{}) []uint32 {
 	if len(m) == 0 {

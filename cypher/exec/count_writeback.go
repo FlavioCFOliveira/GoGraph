@@ -58,3 +58,10 @@ func (b *CountBuffer) Rollback() {
 
 // Len returns the number of deltas plus dirty markings currently buffered.
 func (b *CountBuffer) Len() int { return len(b.deltas) + len(b.dirty) }
+
+// NumDeltas returns the number of buffered cell increments (excluding dirty
+// markings). The commit fan-out reads it before [CountBuffer.Commit] resets the
+// buffer, to attribute a "deltas applied" observability count to the commit
+// (task #2087). It is zero for a transaction that touched no count cell, so the
+// bare-CREATE write path emits nothing.
+func (b *CountBuffer) NumDeltas() int { return len(b.deltas) }

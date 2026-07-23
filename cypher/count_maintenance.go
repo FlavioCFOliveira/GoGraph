@@ -35,6 +35,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index/count"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // countMutator is implemented by the write mutator adapters that maintain the
@@ -238,6 +239,11 @@ func countRelabel(g *lpg.Graph[string, float64], cs *count.Store, cbuf *exec.Cou
 	// so mark the minimal X-scoped IN cells dirty — never a wrong exact.
 	cbuf.MarkDirty(count.DirtyMark{Label: xID, Scope: count.DirtyDIn})
 	cbuf.MarkDirty(count.DirtyMark{Label: xID, Scope: count.DirtyTB})
+	// Observability (#2087): a relabel that reaches here always marks the IN
+	// X-scoped cells dirty, so count it as one relabel-that-dirtied. An
+	// additional OUT-side dirtying below (over-budget) is part of the same
+	// relabel and is not double-counted.
+	cmetrics.IncCounter(countMetricRelabelDirtied, 1)
 
 	// OUT side: enumerate n's out-edges. Over the out-degree budget, dirty the
 	// OUT X-scoped cells instead of recounting — bounded per-relabel work.
@@ -296,6 +302,9 @@ func (e *Engine) recomputeCountStore() {
 	if cs == nil {
 		return
 	}
+	// Observability (#2087): time the O(V+E) recompute. The histogram's sample
+	// count is the number of reopen recomputes; its sum, their total duration.
+	defer cmetrics.Time(countMetricRecompute).Stop()
 	g := e.g
 	// Reset first: a reopen restores full exactness by recomputing from the
 	// crash-consistent graph, so any cell the prior session left dirty heals.

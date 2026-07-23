@@ -27,7 +27,10 @@ package cypher
 // so the count is snapshot-consistent with the graph the query sees (§7.4); the
 // resolver is consulted on the read-path build, which already holds visMu.RLock.
 
-import "github.com/FlavioCFOliveira/GoGraph/graph/index/count"
+import (
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/count"
+	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
+)
 
 // countSource is the capability the count-estimate provider needs from a
 // resolver: stable name→id resolution against the shared label/relationship-type
@@ -54,6 +57,7 @@ func relCardinalityEstimate(src countSource, relType string) estimate {
 	if cs == nil {
 		return estimate{rows: 0, source: estFallback}
 	}
+	cmetrics.IncCounter(countMetricLookup, 1) // observability (#2087)
 	rt, ok := src.ResolveLabelID(relType)
 	if !ok {
 		return estimate{rows: 0, source: estExact}
@@ -75,12 +79,14 @@ func degreeCardinalityEstimate(src countSource, label, relType string, dir count
 	if cs == nil {
 		return estimate{rows: 0, source: estFallback}
 	}
+	cmetrics.IncCounter(countMetricLookup, 1) // observability (#2087)
 	lid, okL := src.ResolveLabelID(label)
 	rt, okR := src.ResolveLabelID(relType)
 	if !okL || !okR {
 		return estimate{rows: 0, source: estExact}
 	}
 	if cs.DDirty(lid, dir) {
+		cmetrics.IncCounter(countMetricLookupVeto, 1) // observability (#2087)
 		return estimate{rows: 0, source: estFallback}
 	}
 	return estimate{rows: float64(cs.CountD(lid, rt, dir)), source: estExact}
@@ -98,6 +104,7 @@ func tripleCardinalityEstimate(src countSource, labelA, relType, labelB string) 
 	if cs == nil {
 		return estimate{rows: 0, source: estFallback}
 	}
+	cmetrics.IncCounter(countMetricLookup, 1) // observability (#2087)
 	a, okA := src.ResolveLabelID(labelA)
 	rt, okR := src.ResolveLabelID(relType)
 	b, okB := src.ResolveLabelID(labelB)
@@ -105,6 +112,7 @@ func tripleCardinalityEstimate(src countSource, labelA, relType, labelB string) 
 		return estimate{rows: 0, source: estExact}
 	}
 	if cs.TDirty(a, b) {
+		cmetrics.IncCounter(countMetricLookupVeto, 1) // observability (#2087)
 		return estimate{rows: 0, source: estFallback}
 	}
 	return estimate{rows: float64(cs.CountT(a, rt, b)), source: estExact}

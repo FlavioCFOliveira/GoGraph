@@ -4116,6 +4116,7 @@ func (r *Result) commitUnderBarrier() {
 	// graph writes sees the matching counts. cbuf is nil for a write that touched
 	// no count cell (bare CREATE (:N)); Commit is a no-op on a nil store.
 	if r.cbuf != nil {
+		recordCountCommit(r.cs, r.cbuf) // observability (#2087): count deltas applied
 		r.cbuf.Commit(r.cs)
 	}
 	r.bufHandled = true

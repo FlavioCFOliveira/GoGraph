@@ -93,6 +93,29 @@ veto (#2076) keeps the plan default whenever a count is not trustworthy.
 Full record: [benchmarks/history/LEDGER.md](benchmarks/history/LEDGER.md)
 row 0020. TCK held at 3897/3897, -race clean.
 
+## Sprint 306 — exact relationship count-store (F5a, 2026-07-23)
+
+The planner gains an exact relationship statistic — the enabler for the
+count-store-gated join reordering in P3. A derived, non-durable count-store
+keeps exact `E(relType)`, `D(label,relType,dir)` and `T(labelA,relType,labelB)`
+counts (reusing the label index for `N(label)`), updated O(delta) on the
+commit fan-out via a `CountBuffer` under the `visMu` barrier, and recomputed
+O(V+E) at reopen (no WAL op, no checkpoint component). Node relabel keeps the
+OUT side exact within a per-commit budget and marks the un-enumerable IN side
+stale, self-healing at reopen; a stale cell yields an `EstFallback` veto,
+never a wrong exact.
+
+| Change | Task | Fixture | Result |
+|--------|------|---------|--------|
+| Exact relationship count-store | #2082 | `BenchmarkEngWriteAutocommit` (n=10) | allocs/op 34 → 34 (all samples equal); B/op +2.36% fixed; sec/op +0.51% noise |
+
+The count-store is inert until P3 wires the join reorder. Write-path
+neutrality (the #2051 failure mode) is proven by the identical allocs/op —
+LEDGER row 0021. Observable via `internal/metrics` counters
+`cypher.countstore.{delta.applied,lookup,lookup.veto,relabel.dirtied}`, the
+`cypher.countstore.recompute` latency, and `Engine.CountStoreCells()`. TCK
+held at 3897/3897, -race clean; reopen-parity exact.
+
 ## Workflow
 
 Every future optimisation appends a row to the table above with

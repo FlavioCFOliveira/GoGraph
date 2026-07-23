@@ -560,6 +560,7 @@ func (tx *ExplicitTx) Commit() (err error) {
 		// deltas after the WAL fsync, alongside the index buffer, so counts flip
 		// atomically with the graph writes they describe.
 		if tx.cbuf != nil {
+			recordCountCommit(tx.eng.countStore, tx.cbuf) // observability (#2087)
 			tx.cbuf.Commit(tx.eng.countStore)
 		}
 		// Drop the undo log: the transaction is keeping its writes.
