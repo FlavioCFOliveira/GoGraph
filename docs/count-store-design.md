@@ -236,6 +236,51 @@ regression on the dominant CREATE/DELETE path is preserved by construction, and
 that the reverted #2051 regressed 5.4× (see §7 acceptance gate) — the
 measure-to-decide mandate forbids claiming it from intuition.
 
+### 3.3.1 Correction — GoGraph stores only OUT-adjacency (P2 implementation)
+
+The verdict above tacitly assumed a node's incident edges are enumerable in
+O(deg(node)) in **both** directions. That is true only for the OUT direction.
+GoGraph's directed graph stores adjacency **out-of-node only** (`adjlist`
+forward slots); there is **no reverse in-edge index**, and the sole way to
+enumerate a node's in-edges is a full `Mapper().Walk` — **O(V+E)** (confirmed:
+`lpgMutatorAdapter.InNeighbours`, `cypher/api.go:13495`). Exact incremental
+`D(*,*,IN)` / `T(*,rt,X)` maintenance on a relabel of node `X` therefore is
+**not** achievable in O(delta): even *checking* the budget would cost O(V+E).
+
+Building a reverse in-edge index is rejected here — it is a module-scale
+adjacency restructuring (the deferred EPIC **#1879**), out of scope for the
+count-store and colliding with that epic. The P2 resolution, faithful to the
+dirty-and-heal spirit above and corrected for the OUT-only storage, is
+**OUT-exact + IN-dirty-and-heal, X-scoped**:
+
+- **OUT side — exact and cheap.** On `SET`/`REMOVE n:X`, enumerate `n`'s
+  out-edges (`LoadEntryH`, per-instance type via the authoritative per-handle
+  store — the per-*slot* label column is unreliable for parallel edges of
+  differing type), budget-gated by `maxLabelRecountEdges`, and update the
+  OUT-scoped cells `D(X,rt,OUT)` and `T(X,rt,Lb)` **exactly**. Over the
+  out-degree budget → mark those OUT X-scoped cells dirty instead.
+- **IN side — dirty, minimally X-scoped.** The in-edges cannot be enumerated in
+  O(delta), so mark the **minimal** X-scoped IN cells dirty — `D(X,*,IN)` and
+  `T(*,*,X)` (the b-position) — without walking in-edges. Family-level dirtying
+  is the fallback only if X-scoping is impractical.
+- **Cheap skip guard.** A relabel is a full no-op when the graph holds no edges
+  at the eager mutation point (`AdjList.Size() == 0`): with zero edges there are
+  no `D`/`T` cells to touch, so `CREATE (:N)` — labels are always assigned
+  *before* any edge in a CREATE — pays nothing and never dirties. **No per-node
+  in-degree counter is introduced** (it would cost O(V) memory and break the
+  "bounded, data-size-independent" property of §2.3).
+
+`E(relType)` and `N(label)` remain **never dirty**. Correctness is preserved
+exactly as before: an X-scoped-dirty `D`/`T` cell yields `estFallback` →
+`planStaysDefault` (§7), never a wrong exact, and self-heals at the §6 reopen
+recompute. The consequence versus the idealised §3.3 verdict is only that the
+dirty window is **more frequent** than "the rare hub relabel": *any* relabel of a
+node in an edge-bearing graph dirties the X-scoped IN cells (and possibly the OUT
+ones, over budget). Because label mutations are rare relative to edge CRUD and
+dirty self-heals, this is an acceptable, correctness-safe reduction. A future
+optional reverse in-edge index (EPIC #1879) would upgrade the IN-relabel path to
+exact **with the `estExact` provider contract of §7 unchanged**.
+
 ---
 
 ## 4. Question 4 — Snapshot / isolation consistency

@@ -90,6 +90,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/count"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
@@ -671,6 +672,47 @@ type EngineOptions struct {
 	// never changes durability or the registered index — only the backfill's
 	// internal concurrency.
 	DisableParallelBackfill bool
+
+	// MaxLabelRecountEdges bounds the per-relabel OUT-side fan-out the
+	// relationship count-store (#2082) recounts exactly when a node gains or
+	// loses a label (SET / REMOVE n:X). A relabel of a node with more than this
+	// many out-edges marks the affected OUT X-scoped D/T cells dirty (a veto to
+	// today's default plan, never a wrong exact) instead of recounting them,
+	// keeping per-commit work bounded on a hub relabel (design §3.3/§3.3.1). The
+	// IN side is always dirty-and-heal because GoGraph stores no reverse
+	// adjacency. E(relType) and N(label) are never dirty.
+	//
+	//   - Zero (the default) selects [DefaultMaxLabelRecountEdges].
+	//   - A positive value overrides it.
+	//   - [MaxLabelRecountEdgesUnlimited] (-1) disables the ceiling, so the OUT
+	//     side is always recounted exactly regardless of degree.
+	MaxLabelRecountEdges int
+}
+
+// DefaultMaxLabelRecountEdges is the default per-relabel OUT-side recount ceiling
+// for the relationship count-store (design §3.3). A relabel of a node with more
+// out-edges than this dirties the OUT X-scoped cells rather than recounting them.
+const DefaultMaxLabelRecountEdges = 4096
+
+// MaxLabelRecountEdgesUnlimited disables the per-relabel OUT-side recount ceiling
+// when passed as [EngineOptions.MaxLabelRecountEdges]: the OUT side is always
+// recounted exactly, whatever the node's out-degree.
+const MaxLabelRecountEdgesUnlimited = -1
+
+// resolveMaxLabelRecountEdges maps the public EngineOptions field onto the count
+// store's internal budget: 0 → the finite default, the unlimited sentinel → 0
+// (the store treats 0/negative as no ceiling), and any other value verbatim.
+func resolveMaxLabelRecountEdges(v int) int {
+	switch {
+	case v == 0:
+		return DefaultMaxLabelRecountEdges
+	case v == MaxLabelRecountEdgesUnlimited:
+		return 0
+	case v < 0:
+		return DefaultMaxLabelRecountEdges
+	default:
+		return v
+	}
 }
 
 // DefaultParallelScanThreshold is the default minimum live node count above
@@ -853,6 +895,17 @@ type Engine struct {
 	// When false the backfill always runs serially. Both paths produce identical
 	// index contents.
 	parallelBackfillEnabled bool
+
+	// countStore is the derived, non-durable relationship count-store (task
+	// #2082, docs/count-store-design.md). It maintains exact E(relType) /
+	// D(label,relType,dir) / T(labelA,relType,labelB) statistics from the write
+	// path (via the mutator adapters' CountBuffer, flushed in commitUnderBarrier
+	// after the WAL fsync) and feeds estExact estimates to the planner via the
+	// count-estimate provider (task #2083). It is always non-nil. As of P2 the
+	// provider is inert — nothing on the query path consumes its estimates yet
+	// (P3 wires the join-order reorder) — so the store is maintained but its
+	// reads change no plan.
+	countStore *count.Store
 }
 
 // lockWriter acquires the engine's write serialisation appropriate to its
@@ -1081,6 +1134,7 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		parallelBackfillEnabled: !opts.DisableParallelBackfill,
 		parallelScanThreshold:   resolveParallelScanThreshold(opts.ParallelScanThreshold),
 		parallelGov:             &exec.ParallelGovernor{},
+		countStore:              count.New(resolveMaxLabelRecountEdges(opts.MaxLabelRecountEdges)),
 	}
 	procs.RegisterBuiltins(e.procReg, g.IndexManager(), procs.BuiltinSources{
 		ListConstraints:   func() [][]expr.Value { return e.constraintReg.ListConstraintRows() },
@@ -1742,7 +1796,7 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	queryReg := newNowAwareRegistry(e.reg, time.Now())
 	e.g.View(func() {
 		walker := &lpgNodeWalker{g: e.g}
-		labelSrc := &lpgLabelResolver{g: e.g}
+		labelSrc := &lpgLabelResolver{g: e.g, cs: e.countStore}
 		// Allocate a per-run subquery evaluator so EXISTS { … } / COUNT { … }
 		// expressions encountered inside Filter/Project closures can drive their
 		// inner pipelines against the current outer row (task-396).
@@ -3302,6 +3356,14 @@ type Result struct {
 	buf    *exec.IndexBuffer        // non-nil only for RunInTx results
 	idxMgr *index.Manager           // non-nil only when buf != nil
 	tx     *txn.Tx[string, float64] // non-nil only for WAL-backed RunInTx results
+	// cbuf / cs carry this autocommit write's relationship count-store deltas
+	// (#2082). commitUnderBarrier flushes cbuf into cs after the WAL fsync (the
+	// same durable-then-visible seam as buf); rollbackUnderBarrier discards it.
+	// Both are nil for read queries and for explicit-transaction statements (whose
+	// count buffer is owned and flushed by the ExplicitTx handle). cbuf may be nil
+	// even for a write that touched no count cell (the buffer is lazily allocated).
+	cbuf *exec.CountBuffer
+	cs   *count.Store
 
 	// matRows holds the rows drained under the transaction-visibility barrier
 	// (Graph.View for reads, Graph.ApplyAtomically for writes) at creation, so
@@ -4039,6 +4101,14 @@ func (r *Result) commitUnderBarrier() {
 	if r.buf != nil {
 		r.buf.Commit(r.idxMgr)
 	}
+	// Relationship count-store (#2082): apply this transaction's count deltas and
+	// dirty markings AFTER the WAL fsync and alongside the index buffer, on the
+	// same durable-then-visible side of the barrier. A View reader that sees the
+	// graph writes sees the matching counts. cbuf is nil for a write that touched
+	// no count cell (bare CREATE (:N)); Commit is a no-op on a nil store.
+	if r.cbuf != nil {
+		r.cbuf.Commit(r.cs)
+	}
 	r.bufHandled = true
 	// Mark the WAL handled even when tx == nil (a store-less engine has no WAL to
 	// commit) so the idempotency guard above trips on a second call.
@@ -4077,6 +4147,11 @@ func (r *Result) rollbackUnderBarrier() {
 	}
 	if r.buf != nil {
 		r.buf.Rollback()
+	}
+	// Discard the count-store deltas: nothing was applied, so this is free (no undo
+	// log needed — the store is a pure function of graph state, #2082).
+	if r.cbuf != nil {
+		r.cbuf.Rollback()
 	}
 	if r.tx != nil {
 		_ = r.tx.Rollback() // release store mutex; in-memory state already restored
@@ -4383,7 +4458,17 @@ func (w *lpgNodeWalker) WalkNodeIDs(fn func(graph.NodeID) bool) {
 // interface expected by [exec.NodeByLabelScan].
 type lpgLabelResolver struct {
 	g *lpg.Graph[string, float64]
+	// cs is the engine's relationship count-store (#2082), threaded so the
+	// count-estimate provider (relCardinalityEstimate / degreeCardinalityEstimate /
+	// tripleCardinalityEstimate) can read exact E/D/T counts under the query's
+	// View. It is nil for resolver instances built without an engine count store
+	// (some tests); the provider then falls back to estFallback. As of P2 nothing
+	// on the query path consumes these estimates (the provider is inert).
+	cs *count.Store
 }
+
+// Counts returns the relationship count-store this resolver reads, or nil.
+func (s *lpgLabelResolver) Counts() *count.Store { return s.cs }
 
 // ResolveLabelBitmap implements exec.labelResolver.
 func (s *lpgLabelResolver) ResolveLabelBitmap(name string) *roaring64.Bitmap {
@@ -6931,13 +7016,13 @@ func buildOperator(
 		if err != nil {
 			return nil, err
 		}
-		count := p.Count
+		limitN := p.Count
 		if p.CountExpr != nil {
 			n, rerr := resolveCountExpr(p.CountExpr, params, reg, "LIMIT")
 			if rerr != nil {
 				return nil, rerr
 			}
-			count = n
+			limitN = n
 		}
 		// LIMIT over a write subtree: drain the child via an Eager
 		// barrier so the write operators below run to completion
@@ -6952,24 +7037,24 @@ func buildOperator(
 		// SKIP/LIMIT-truncated CREATE scenarios.
 		if ir.ContainsWrite(p.Child) {
 			limitEagerMB, limitEagerEst := resultByteBudget(bopts)
-			return exec.NewLimit(exec.NewEager(child, 0).WithByteBudget(limitEagerMB, limitEagerEst), count)
+			return exec.NewLimit(exec.NewEager(child, 0).WithByteBudget(limitEagerMB, limitEagerEst), limitN)
 		}
-		return exec.NewLimit(child, count)
+		return exec.NewLimit(child, limitN)
 
 	case *ir.Skip:
 		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
-		count := p.Count
+		skipN := p.Count
 		if p.CountExpr != nil {
 			n, rerr := resolveCountExpr(p.CountExpr, params, reg, "SKIP")
 			if rerr != nil {
 				return nil, rerr
 			}
-			count = n
+			skipN = n
 		}
-		return exec.NewSkip(child, count)
+		return exec.NewSkip(child, skipN)
 
 	case *ir.Unwind:
 		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
@@ -12883,9 +12968,11 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 		if err != nil {
 			return nil, err
 		}
-		mutator = &walMutatorAdapter{g: e.g, tx: walTx, buf: buf, undo: undo, touched: touched}
+		// cbuf is left nil: it is allocated lazily on the first count delta, so a
+		// bare CREATE (:N) over an edgeless graph allocates none (#2082).
+		mutator = &walMutatorAdapter{g: e.g, tx: walTx, buf: buf, undo: undo, touched: touched, cs: e.countStore}
 	} else {
-		mutator = &lpgMutatorAdapter{g: e.g, buf: buf, undo: undo, touched: touched}
+		mutator = &lpgMutatorAdapter{g: e.g, buf: buf, undo: undo, touched: touched, cs: e.countStore}
 	}
 
 	r, buildErr := e.execUnderBarrier(ctx, plan, queryReg, params, mutator, buf, undo, walTx, true, e.g.ApplyAtomically, touched)
@@ -12975,6 +13062,9 @@ func (e *Engine) execUnderBarrier(
 		// while visMu is still held.
 		defer replayUndoOnPanic(undo)
 		walker := &lpgNodeWalker{g: e.g}
+		// The count-estimate provider (#2083) is consulted only on the read path
+		// (Engine.Run, where labelSrc carries cs); the write-path plan build never
+		// reads it, so cs is left nil here to keep the write path's resolver lean.
 		labelSrc := &lpgLabelResolver{g: e.g}
 		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager(), e.maxCollectItems, e.edgeTypeFilterCache)
 		if berr != nil {
@@ -12990,6 +13080,12 @@ func (e *Engine) execUnderBarrier(
 			r.globalMem = e.globalMem
 			r.undo = undo
 			r.touched = touched
+			// Relationship count-store (#2082): take ownership of the transaction's
+			// (possibly-nil, lazily allocated) count buffer and store so
+			// commitUnderBarrier flushes them after the WAL fsync.
+			if cm, ok := mutator.(countMutator); ok {
+				r.cbuf, r.cs = cm.countState()
+			}
 			r.materialize()
 			r.commitUnderBarrier()
 			return nil
@@ -13036,6 +13132,73 @@ type lpgMutatorAdapter struct {
 	// edge position, reusing the exact read-path mechanism ([edgeHandleAtFwdPos]).
 	// It may be nil (resolution then falls back to a fresh CSR build).
 	bopts *buildOpts
+	// cs is the engine's relationship count-store (#2082); nil when the adapter
+	// is not maintaining counts (read-only test stubs). cbuf accumulates this
+	// transaction's count deltas. For an autocommit write cbuf starts nil and is
+	// allocated lazily on the first count delta (see [lpgMutatorAdapter.countBuf]),
+	// so a bare CREATE (:N) — which touches no edge cell — allocates none; the
+	// autocommit Result then flushes it in commitUnderBarrier. For an explicit
+	// transaction cbuf is pre-set to the handle's shared buffer, so deltas from
+	// every statement accumulate together and the handle flushes once at commit.
+	cs   *count.Store
+	cbuf *exec.CountBuffer
+	// fresh is the per-statement set of node keys created by this adapter that
+	// have not yet gained an incident edge (#2082). A SetNodeLabel on a fresh node
+	// is INITIAL labelling — the node's contribution is captured by the later
+	// edge-typing +delta — so it must NOT be treated as a relabel (which would
+	// spuriously dirty the label's IN cells: a brand-new node has no in-edges).
+	// Populated by AddNode only when the graph already holds edges (an edgeless
+	// graph is handled by the cheaper Size()==0 fast path); an endpoint is removed
+	// when it gains an edge. Lazily allocated, so a pure node-create workload over
+	// an edgeless graph (the write benchmark) never allocates it.
+	fresh map[string]struct{}
+}
+
+// countBuf returns the adapter's count buffer, allocating it on first use. For an
+// explicit transaction cbuf is pre-set to the shared handle buffer and is
+// returned as-is; for an autocommit write it is created here on the first count
+// delta so an edgeless CREATE that never reaches this call allocates nothing.
+func (a *lpgMutatorAdapter) countBuf() *exec.CountBuffer {
+	if a.cbuf == nil {
+		a.cbuf = &exec.CountBuffer{}
+	}
+	return a.cbuf
+}
+
+// countState returns this adapter's count buffer and store so the autocommit
+// Result can flush them under the commit barrier. It implements countMutator.
+func (a *lpgMutatorAdapter) countState() (*exec.CountBuffer, *count.Store) {
+	return a.cbuf, a.cs
+}
+
+// countMarkFresh records a newly created, still-edgeless node so its initial
+// labelling is not mistaken for a relabel (#2082). It is a no-op for an existing
+// node, an edgeless graph (Size()==0 fast path), or when no count store is active.
+func (a *lpgMutatorAdapter) countMarkFresh(n string, existed bool) {
+	if a.cs == nil || existed || a.g.AdjList().Size() == 0 {
+		return
+	}
+	if a.fresh == nil {
+		a.fresh = make(map[string]struct{})
+	}
+	a.fresh[n] = struct{}{}
+}
+
+// countClearFresh removes edge endpoints from the fresh set: once a node gains an
+// incident edge, a later label change on it is a genuine relabel.
+func (a *lpgMutatorAdapter) countClearFresh(keys ...string) {
+	if a.fresh == nil {
+		return
+	}
+	for _, k := range keys {
+		delete(a.fresh, k)
+	}
+}
+
+// countIsFresh reports whether n is a freshly created, still-edgeless node.
+func (a *lpgMutatorAdapter) countIsFresh(n string) bool {
+	_, ok := a.fresh[n]
+	return ok
 }
 
 // rec returns the inverse-recording helper bound to this adapter's graph and
@@ -13072,6 +13235,7 @@ func (a *lpgMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 		a.g.IncrNodesAdded()
 	}
 	a.rec().recordAddNode(n, !existed)
+	a.countMarkFresh(n, existed) // count-store (#2082): initial-label vs relabel
 	return id, nil
 }
 
@@ -13112,6 +13276,7 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 		a.g.IncrEdgesAdded()
 		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
 	}
+	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	return srcID, dstID, nil
 }
 
@@ -13144,6 +13309,7 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 		a.g.IncrEdgesAdded()
 		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
 	}
+	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	return srcID, dstID, handle, nil
 }
 
@@ -13160,6 +13326,11 @@ func (a *lpgMutatorAdapter) RemoveEdge(src, dst string) {
 	}
 	if present {
 		a.g.IncrEdgesRemoved()
+		// Count-store (#2082): capture the removed first-slot instance's type and
+		// endpoint labels before the adjacency removal.
+		if a.cs != nil {
+			countEdgeRemovedFirstSlot(a.g, a.cs, a.countBuf(), src, dst)
+		}
 	}
 	a.g.RemoveEdge(src, dst)
 	r.recordRemoveEdge(&pre, present)
@@ -13178,6 +13349,18 @@ func (a *lpgMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 	if r.active() {
 		pre = r.captureRemovedEdgeByHandle(src, dst, handle)
 	}
+	// Count-store (#2082): capture the removed instance's type and endpoint
+	// labels before the removal. A non-zero handle addresses the exact instance
+	// (the helper self-guards on the handle being present and typed, so a no-op
+	// removal enqueues nothing); a zero handle falls back to the first slot,
+	// exactly as lpg.RemoveEdgeByHandle degrades to RemoveEdge.
+	if a.cs != nil {
+		if handle != 0 {
+			countEdgeRemovedByHandle(a.g, a.cs, a.countBuf(), src, dst, handle)
+		} else if a.g.AdjList().HasEdge(src, dst) {
+			countEdgeRemovedFirstSlot(a.g, a.cs, a.countBuf(), src, dst)
+		}
+	}
 	removed := a.g.RemoveEdgeByHandle(src, dst, handle)
 	if removed {
 		a.g.IncrEdgesRemoved()
@@ -13189,6 +13372,13 @@ func (a *lpgMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) error {
 	r := a.rec()
 	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
+	// Count-store (#2082): the relabel affects D/T only when the label is newly
+	// added on a node that ALREADY participates in counted edges. The
+	// AdjList.Size()==0 check is the cheap CREATE (:N) fast path — evaluated first
+	// (an atomic load) so a bare labelled-node create short-circuits before any
+	// probe or buffer allocation; countIsFresh excludes a freshly created node
+	// whose initial labelling the edge-typing +delta already covers.
+	countNew := a.cs != nil && a.g.AdjList().Size() > 0 && !a.countIsFresh(n) && !a.g.HasNodeLabel(n, label)
 	if err := a.g.SetNodeLabel(n, label); err != nil {
 		return err
 	}
@@ -13200,6 +13390,9 @@ func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) error {
 			Label: uint32(a.g.Registry().Intern(label)),
 		})
 	}
+	if countNew {
+		countRelabel(a.g, a.cs, a.countBuf(), n, label, +1)
+	}
 	return nil
 }
 
@@ -13207,6 +13400,13 @@ func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) error {
 func (a *lpgMutatorAdapter) RemoveNodeLabel(n, label string) {
 	r := a.rec()
 	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
+	// Count-store (#2082): decrement the OUT-scoped D/T cells before the removal
+	// (so a self-loop endpoint still carries the label), and dirty the IN X-scoped
+	// cells. Only when the label was actually present on a node in a non-edgeless
+	// graph; the Size()==0 fast path short-circuits first.
+	if a.cs != nil && a.g.AdjList().Size() > 0 && a.g.HasNodeLabel(n, label) {
+		countRelabel(a.g, a.cs, a.countBuf(), n, label, -1)
+	}
 	a.g.RemoveNodeLabel(n, label)
 	r.recordRemoveNodeLabel(n, label, hadLabel)
 	if a.buf != nil {
@@ -13429,6 +13629,14 @@ func (a *lpgMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
 // so these buffer no transaction op; their durability is the in-memory graph.
 func (a *lpgMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) {
 	a.g.SetEdgeLabelByHandle(src, dst, handle, label)
+	// Count-store (#2082): SetEdgeLabelByHandle is the single authoritative
+	// once-per-edge typing hook (create_relationship.go also fires SetEdgeLabel and
+	// SetEdgeLabelAt for the same edge; only the by-handle form is counted, so the
+	// +1 create-delta fires exactly once). AddEdge cannot carry it — the type is
+	// unknown until here.
+	if a.cs != nil {
+		countEdgeTyped(a.g, a.cs, a.countBuf(), src, dst, label)
+	}
 }
 func (a *lpgMutatorAdapter) EdgeLabelsByHandle(src, dst string, handle uint64) []string {
 	return a.g.EdgeLabelsByHandle(src, dst, handle)
@@ -13532,6 +13740,12 @@ func (a *lpgMutatorAdapter) RemoveAllEdgesFrom(n string) {
 		}
 		r.recordRemoveEdge(&pre, present)
 	}
+	// Count-store (#2082): decrement every out-edge slot's E/D/T before the bulk
+	// removal (per-slot type + endpoint labels). The node's in-edges are counted
+	// by the detach_delete caller's InNeighbours RemoveEdge loop.
+	if a.cs != nil {
+		countAllOutEdgesRemoved(a.g, a.cs, a.countBuf(), n)
+	}
 	// Snapshot incoming neighbours for directed graphs: outgoing-only bulk
 	// removal won't remove edges pointing at n; those are handled by the
 	// detach_delete caller's InNeighbours loop via individual RemoveEdge calls.
@@ -13601,6 +13815,57 @@ type walMutatorAdapter struct {
 	// edge position, reusing the exact read-path mechanism ([edgeHandleAtFwdPos]).
 	// It may be nil (resolution then falls back to a fresh CSR build).
 	bopts *buildOpts
+	// cs / cbuf carry the relationship count-store maintenance for this write
+	// transaction, mirroring [lpgMutatorAdapter]. cbuf starts nil for an
+	// autocommit write and is allocated lazily on the first count delta; for an
+	// explicit transaction it is pre-set to the handle's shared buffer.
+	cs   *count.Store
+	cbuf *exec.CountBuffer
+	// fresh is the per-statement set of newly created, still-edgeless node keys
+	// (#2082), so initial CREATE labelling is not mistaken for a relabel; see the
+	// lpgMutatorAdapter twin.
+	fresh map[string]struct{}
+}
+
+// countBuf returns the adapter's count buffer, allocating it lazily (autocommit)
+// or returning the pre-set shared handle buffer (explicit transaction).
+func (a *walMutatorAdapter) countBuf() *exec.CountBuffer {
+	if a.cbuf == nil {
+		a.cbuf = &exec.CountBuffer{}
+	}
+	return a.cbuf
+}
+
+// countState returns this adapter's count buffer and store so the autocommit
+// Result can flush them under the commit barrier. It implements countMutator.
+func (a *walMutatorAdapter) countState() (*exec.CountBuffer, *count.Store) {
+	return a.cbuf, a.cs
+}
+
+// countMarkFresh / countClearFresh / countIsFresh mirror the lpgMutatorAdapter
+// fresh-node tracking so initial CREATE labelling is not counted as a relabel.
+func (a *walMutatorAdapter) countMarkFresh(n string, existed bool) {
+	if a.cs == nil || existed || a.g.AdjList().Size() == 0 {
+		return
+	}
+	if a.fresh == nil {
+		a.fresh = make(map[string]struct{})
+	}
+	a.fresh[n] = struct{}{}
+}
+
+func (a *walMutatorAdapter) countClearFresh(keys ...string) {
+	if a.fresh == nil {
+		return
+	}
+	for _, k := range keys {
+		delete(a.fresh, k)
+	}
+}
+
+func (a *walMutatorAdapter) countIsFresh(n string) bool {
+	_, ok := a.fresh[n]
+	return ok
 }
 
 // rec returns the inverse-recording helper bound to this adapter's graph and
@@ -13636,6 +13901,7 @@ func (a *walMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 		a.g.IncrNodesAdded()
 	}
 	a.rec().recordAddNode(n, !existed)
+	a.countMarkFresh(n, existed) // count-store (#2082): initial-label vs relabel
 	return id, nil
 }
 
@@ -13671,6 +13937,7 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 		a.g.IncrEdgesAdded()
 		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
 	}
+	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	return srcID, dstID, nil
 }
 
@@ -13710,6 +13977,7 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 		a.g.IncrEdgesAdded()
 		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
 	}
+	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	return srcID, dstID, handle, nil
 }
 
@@ -13726,6 +13994,9 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 	}
 	if present {
 		a.g.IncrEdgesRemoved()
+		if a.cs != nil { // count-store (#2082): capture before the removal
+			countEdgeRemovedFirstSlot(a.g, a.cs, a.countBuf(), src, dst)
+		}
 	}
 	a.g.RemoveEdge(src, dst)
 	_ = a.tx.RemoveEdge(src, dst) //nolint:errcheck // ErrTxFinished impossible here
@@ -13746,6 +14017,15 @@ func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 	if r.active() {
 		pre = r.captureRemovedEdgeByHandle(src, dst, handle)
 	}
+	// Count-store (#2082): capture the removed instance's type and endpoint
+	// labels before the removal (see the lpgMutatorAdapter twin for the rationale).
+	if a.cs != nil {
+		if handle != 0 {
+			countEdgeRemovedByHandle(a.g, a.cs, a.countBuf(), src, dst, handle)
+		} else if a.g.AdjList().HasEdge(src, dst) {
+			countEdgeRemovedFirstSlot(a.g, a.cs, a.countBuf(), src, dst)
+		}
+	}
 	removed := a.g.RemoveEdgeByHandle(src, dst, handle)
 	if removed {
 		a.g.IncrEdgesRemoved()
@@ -13758,6 +14038,10 @@ func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 	r := a.rec()
 	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
+	// Count-store (#2082): see the lpgMutatorAdapter twin; Size()==0 short-circuits
+	// the CREATE (:N) fast path and countIsFresh excludes a freshly created node's
+	// initial labelling (covered by the edge-typing +delta).
+	countNew := a.cs != nil && a.g.AdjList().Size() > 0 && !a.countIsFresh(n) && !a.g.HasNodeLabel(n, label)
 	if err := a.g.SetNodeLabel(n, label); err != nil {
 		return err
 	}
@@ -13770,6 +14054,9 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 			Label: uint32(a.g.Registry().Intern(label)),
 		})
 	}
+	if countNew {
+		countRelabel(a.g, a.cs, a.countBuf(), n, label, +1)
+	}
 	return nil
 }
 
@@ -13777,6 +14064,11 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) {
 	r := a.rec()
 	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
+	// Count-store (#2082): decrement OUT-scoped cells before the removal, dirty
+	// the IN X-scoped cells; see the lpgMutatorAdapter twin.
+	if a.cs != nil && a.g.AdjList().Size() > 0 && a.g.HasNodeLabel(n, label) {
+		countRelabel(a.g, a.cs, a.countBuf(), n, label, -1)
+	}
 	a.g.RemoveNodeLabel(n, label)
 	r.recordRemoveNodeLabel(n, label, hadLabel)
 	_ = a.tx.RemoveNodeLabel(n, label) //nolint:errcheck // ErrTxFinished impossible here
@@ -14026,6 +14318,10 @@ func (a *walMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
 func (a *walMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) {
 	a.g.SetEdgeLabelByHandle(src, dst, handle, label)
 	_ = a.tx.SetEdgeLabelByHandle(src, dst, handle, label) //nolint:errcheck // ErrTxFinished impossible here
+	// Count-store (#2082): the single authoritative once-per-edge typing hook.
+	if a.cs != nil {
+		countEdgeTyped(a.g, a.cs, a.countBuf(), src, dst, label)
+	}
 }
 func (a *walMutatorAdapter) EdgeLabelsByHandle(src, dst string, handle uint64) []string {
 	return a.g.EdgeLabelsByHandle(src, dst, handle)
@@ -14132,6 +14428,10 @@ func (a *walMutatorAdapter) RemoveAllEdgesFrom(n string) {
 		}
 		_ = a.tx.RemoveEdge(n, dst) //nolint:errcheck // ErrTxFinished impossible here
 		r.recordRemoveEdge(&pre, present)
+	}
+	// Count-store (#2082): decrement every out-edge slot before the bulk removal.
+	if a.cs != nil {
+		countAllOutEdgesRemoved(a.g, a.cs, a.countBuf(), n)
 	}
 	// Bulk-remove from the in-memory graph (O(d) instead of O(d²)).
 	a.g.RemoveAllEdgesFrom(n)

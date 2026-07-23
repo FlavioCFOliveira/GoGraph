@@ -170,6 +170,13 @@ type ExplicitTx struct {
 	// once on Commit, discarded on Rollback. Shared by all statement mutators.
 	buf *exec.IndexBuffer
 
+	// cbuf accumulates the relationship count-store deltas and dirty markings of
+	// every statement (#2082); applied to the engine's count store once on Commit
+	// (after the WAL fsync), discarded on Rollback. Shared by all statement
+	// mutators exactly like buf, so counts flip atomically with the graph. nil on
+	// a read-only handle.
+	cbuf *exec.CountBuffer
+
 	// undo accumulates the inverse of every in-memory mutation across all
 	// statements (the cross-statement accumulation hook in undo.go). Replayed in
 	// reverse on Rollback; discarded on Commit. Shared by all statement mutators.
@@ -261,6 +268,7 @@ func (e *Engine) BeginTx(ctx context.Context) (*ExplicitTx, error) {
 		eng:          e,
 		ctx:          ctx,
 		buf:          &exec.IndexBuffer{},
+		cbuf:         &exec.CountBuffer{},
 		undo:         &undoLog{},
 		unlockWriter: unlockWriter,
 	}
@@ -433,10 +441,13 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 	// mutations accumulate into the transaction. The adapter only captures
 	// references; no graph reads happen until execUnderBarrier runs it under visMu.
 	var mutator exec.GraphMutator
+	// Pre-set cs and cbuf to the engine's count store and the handle's SHARED count
+	// buffer so every statement's count deltas accumulate together and the handle
+	// flushes them once at Commit (#2082), mirroring the shared index buffer.
 	if tx.walTx != nil {
-		mutator = &walMutatorAdapter{g: tx.eng.g, tx: tx.walTx, buf: tx.buf, undo: tx.undo, touched: tx.touched}
+		mutator = &walMutatorAdapter{g: tx.eng.g, tx: tx.walTx, buf: tx.buf, undo: tx.undo, touched: tx.touched, cs: tx.eng.countStore, cbuf: tx.cbuf}
 	} else {
-		mutator = &lpgMutatorAdapter{g: tx.eng.g, buf: tx.buf, undo: tx.undo, touched: tx.touched}
+		mutator = &lpgMutatorAdapter{g: tx.eng.g, buf: tx.buf, undo: tx.undo, touched: tx.touched, cs: tx.eng.countStore, cbuf: tx.cbuf}
 	}
 
 	// Route through ApplyInsideLocked when the barrier is held for the whole tx
@@ -545,6 +556,12 @@ func (tx *ExplicitTx) Commit() (err error) {
 		if tx.buf != nil {
 			tx.buf.Commit(tx.eng.g.IndexManager())
 		}
+		// Relationship count-store (#2082): apply the whole transaction's count
+		// deltas after the WAL fsync, alongside the index buffer, so counts flip
+		// atomically with the graph writes they describe.
+		if tx.cbuf != nil {
+			tx.cbuf.Commit(tx.eng.countStore)
+		}
 		// Drop the undo log: the transaction is keeping its writes.
 		tx.undo = nil
 		return nil
@@ -631,6 +648,10 @@ func (tx *ExplicitTx) rollbackInBarrierLocked() (undoOK bool) {
 	}
 	if tx.buf != nil {
 		tx.buf.Rollback()
+	}
+	// Discard the count-store deltas: nothing was applied (no undo needed, #2082).
+	if tx.cbuf != nil {
+		tx.cbuf.Rollback()
 	}
 	if tx.walTx != nil {
 		_ = tx.walTx.Rollback() // release store single-writer mutex; in-memory state already restored
