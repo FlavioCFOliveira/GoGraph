@@ -1,0 +1,19 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/mtaudit
+cpu: Apple M4
+# Write-path A/B for the exact relationship count-store (sprint 306 #2082-#2084).
+# base = 10a3540 (pre-count-store); new = 36a8bff (count-store present). n=10, benchstat.
+# The critical signal is allocs/op: identical (all samples equal) => O(delta) maintenance,
+# categorically unlike #2051 (which was 43x B/op from O(shard) COW copies).
+
+                      │     base 10a3540     │            new 36a8bff             │
+                      │        sec/op        │   sec/op        vs base            │
+EngWriteAutocommit-10        5.729µ ± 0%        5.759µ ± 1%   +0.51% (p=0.023 n=10)
+
+                      │         B/op         │    B/op          vs base           │
+EngWriteAutocommit-10       2.343Ki ± 0%       2.398Ki ± 0%   +2.36% (p=0.000 n=10)   # +57 B fixed struct fields, O(1)/query
+
+                      │       allocs/op      │  allocs/op       vs base           │
+EngWriteAutocommit-10        34.00 ± 0%         34.00 ± 0%    ~ (p=1.000 n=10)  ¹
+¹ all samples are equal
