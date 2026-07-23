@@ -86,4 +86,11 @@ RETURN dev.key AS developer, t.key AS task,
        r.change_type AS change, r.churn AS churn, r.at AS at
 ORDER BY at DESC`,
 	},
+	{
+		Name: "Q9",
+		Question: "Layer roots: which repositories anchor the code layer? " +
+			"(a multi-label pattern the planner re-anchors onto the rare :Repository " +
+			"type instead of scanning the whole :Code layer — GoGraph #2077)",
+		Cypher: minLabelDemoQuery,
+	},
 }

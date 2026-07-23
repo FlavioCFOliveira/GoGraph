@@ -348,7 +348,7 @@ adds no lock of its own.
 ## 9. Maintenance-question Cypher catalogue
 
 Each query is posted to `POST /query`. `$param` placeholders are supplied via the
-request's `params`. These eight queries are the didactic core of the example.
+request's `params`. These nine queries are the didactic core of the example.
 
 **Q1 — Change-impact / blast-radius.** *If component `$k` changes, which
 components are affected, and which tasks and developers must be told?*
@@ -430,10 +430,22 @@ RETURN dev.key AS developer, t.key AS task,
 ORDER BY at DESC
 ```
 
+**Q9 — Layer roots (multi-label anchor selection).** *Which repositories anchor
+the code layer?*
+
+```cypher
+MATCH (r:Code:Repository)
+RETURN r.key AS repository, r.name AS name
+ORDER BY repository
+```
+
 Queries Q1, Q5 and Q7 rely on variable-length paths (`DEPENDS_ON*` / `BLOCKS*`).
 Q3 uses `count(DISTINCT dev)` — counting *people*, not assignment roles. Q1 uses
 `OPTIONAL MATCH` so an affected-but-unowned component is reported rather than
-silently dropped.
+silently dropped. Q9 lists a node's broad layer label (`Code`) before its narrow
+type label (`Repository`); because a label conjunction is commutative, the
+planner re-anchors the scan on the smaller-cardinality `Repository` label — an
+identical result multiset scanning far fewer candidate rows (GoGraph #2077).
 
 ---
 

@@ -193,7 +193,7 @@ JSON
 
 ## The maintenance-query catalogue
 
-These eight queries are the point of the example: each is a real software-
+These nine queries are the point of the example: each is a real software-
 maintenance question answered over the multi-layer graph. Outputs below are the
 actual responses against the seeded fixture.
 
@@ -326,6 +326,24 @@ ORDER BY at DESC
   {"developer":"dev:erin","task":"task:WS-1","change":"add","churn":120,"at":"2026-01-08T16:00:00Z"}]}
 ```
 
+### Q9 — Layer roots (multi-label anchor selection)
+
+*Which repositories anchor the code layer?*
+
+```cypher
+MATCH (r:Code:Repository)
+RETURN r.key AS repository, r.name AS name
+ORDER BY repository
+```
+
+Every node carries both a layer label (`Code`) and a type label
+(`Repository`), so this is a genuine multi-label pattern. The layer is written
+first but is far broader than the type: the `Code` layer is dominated by
+`:Component` files, while `:Repository` is the handful of roots. GoGraph's
+planner re-anchors the scan onto the smaller label — see
+[Multi-label anchor selection](#multi-label-anchor-selection-min-cardinality-scan)
+below for the measured effect.
+
 ---
 
 ## Schema, constraints and query plans
@@ -409,6 +427,51 @@ An equality on an **un-indexed** property falls back to a full label scan
 evidence: the difference between the two plans is the difference between an O(1)
 seek and an O(N) scan.
 
+### Multi-label anchor selection (min-cardinality scan)
+
+Every node carries two labels — a layer (`Code` / `Work` / `People`) and a type
+(`Repository`, `Component`, `Developer`, …) — so a layer is a superset of each
+of its types. A multi-label pattern that lists the broad layer label first, such
+as catalogue query **Q9** `MATCH (r:Code:Repository) …`, is anchored by the IR
+translator on the first label (`Code`) with `Repository` re-checked as a filter
+— a full scan of the whole code layer. Because a label conjunction is
+commutative, GoGraph's build-time planner re-anchors the scan on the
+**smallest-cardinality** label, `Repository`, and re-checks `Code` as the
+residual filter: an identical result multiset, far fewer candidate rows scanned.
+
+After a scaled seed (`-scale-components=N`) the server prints the evidence on
+stderr — the physical plan (scan re-anchored on the smaller label), the two
+candidate cardinalities (the rows each plan's scan visits — the db-hit skew),
+and a wall-clock and allocation contrast between the default engine and one
+built with `DisableMinLabelScan`:
+
+```
+$ 25_software_house_api -d ./data -scale-components=50000
+minlabelscan.anchor=Repository
+minlabelscan.anchored_on_smaller_label=true
+minlabelscan.layer_label=Code
+minlabelscan.layer_scan_rows=52270          # rows the first-label plan would scan
+minlabelscan.type_label=Repository
+minlabelscan.type_scan_rows=252             # rows the re-anchored plan scans
+minlabelscan.result_rows=252
+# minlabelscan.plan| ProduceResults
+# minlabelscan.plan| └─ Sort
+# minlabelscan.plan|    └─ Projection
+# minlabelscan.plan|       └─ Selection
+# minlabelscan.plan|          └─ NodeByLabelScan [r:Repository]
+# minlabelscan.on_query=214µs               # optimisation ON  (default)
+# minlabelscan.off_query=9.263ms            # optimisation OFF (DisableMinLabelScan)
+# minlabelscan.on_alloc=56.70 KiB
+# minlabelscan.off_alloc=469.84 KiB
+# minlabelscan.time_speedup=43.3x           # telemetry — varies per run and machine
+# minlabelscan.alloc_reduction=8.3x
+```
+
+The `minlabelscan.*` bare lines are deterministic **facts** (the chosen scan
+label and the two cardinalities); the `# ` lines are volatile **telemetry**
+(plan text and the ON/OFF timing and allocation contrast). Scanning 252 rows
+instead of 52 270 — the same result multiset — is the whole win.
+
 ---
 
 ## Persistence — survives a crash
@@ -485,6 +548,11 @@ matter for a persistent Cypher service over a graph structure:
   counters (`query_count`, `write_count`, `stats_count`).
 - **Seed/build cost** — `telemetry.seed_ms` and the startup `# seed.elapsed` /
   `# seed.node_rate` telemetry lines.
+- **Planner anchor selection** — after a scaled seed the startup
+  `minlabelscan.*` lines report the multi-label scan's chosen label and its
+  candidate cardinalities, plus a wall-clock and allocation contrast with the
+  optimisation disabled (see
+  [Multi-label anchor selection](#multi-label-anchor-selection-min-cardinality-scan)).
 
 When you scale the graph up (`-scale-*`), watch `bytes_per_element` settle
 (~460 B per element at the per-edge-property scale this example uses) and the
@@ -507,7 +575,9 @@ path including the scaled `POST /seed` and the `GET /stats` telemetry block
 (`server_test.go`, `synth_test.go`); the schema surface — the `GET /schema`
 label/relationship/index/constraint facts, the `409` constraint-violation path
 with atomic rollback, `POST /explain` index-seek vs label-scan, and in-process
-schema durability across reopen (`schema_test.go`); concurrent readers/writers
+schema durability across reopen (`schema_test.go`); the multi-label
+anchor-selection evidence — the scan re-anchored onto the smaller label, the
+cardinality skew, and ON/OFF result identity (`min_label_scan_test.go`); concurrent readers/writers
 (`server_concurrency_test.go`); the Close quiesce-and-reject contract against a
 concurrent write (`close_quiesce_test.go`); in-process reopen
 (`lifecycle_test.go`); and a real process restart under both SIGTERM and

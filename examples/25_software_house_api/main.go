@@ -134,6 +134,7 @@ func seedAtStartup(ctx context.Context, ds *dataStore, scale synthScale) int {
 	fmt.Fprintf(os.Stderr, "# mem.heap_alloc=%s\n", humanBytes(mem.HeapAlloc))
 	fmt.Fprintf(os.Stderr, "# mem.num_gc=%d\n", mem.NumGC)
 	reportSchemaPlan(ds)
+	reportMinLabelScan(ds)
 	return 0
 }
 
