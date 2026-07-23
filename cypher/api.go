@@ -1184,6 +1184,15 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 	// also create an index entry; registerRecoveredIndexes silently absorbs
 	// ErrIndexExists for any name already claimed by the constraint path.
 	e.registerRecoveredIndexes(opts.RecoveredIndexes)
+	// Recompute the derived, non-durable relationship count-store from the now
+	// fully-materialised graph (task #2084, design §6). The store carries no
+	// on-disk format and starts empty on every open, so without this a database
+	// reopened over pre-existing relationships would report an exact 0 for them.
+	// The O(V+E) pass runs from the same recovered graph the index/constraint
+	// backfills use, adds no WAL op / checkpoint component / fsync, and cannot
+	// diverge because the counts are a pure function of the graph. It is a no-op
+	// on a store-less engine over an empty graph (the write-path benchmark).
+	e.recomputeCountStore()
 	if gl := resolveGlobalMaxResultBytes(opts.GlobalMaxResultBytes); gl > 0 {
 		e.globalMem = &globalMemBudget{limit: gl}
 	}

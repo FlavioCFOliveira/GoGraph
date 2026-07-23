@@ -263,3 +263,71 @@ func countRelabel(g *lpg.Graph[string, float64], cs *count.Store, cbuf *exec.Cou
 		})
 	}
 }
+
+// recomputeCountStore rebuilds the derived, non-durable relationship count-store
+// from scratch by an O(V+E) pass over the recovered graph's live nodes and edges
+// (task #2084, design docs/count-store-design.md §6). The store starts EMPTY on
+// every open, so without this a database reopened over pre-existing relationships
+// would report an exact 0 for them.
+//
+// It first resets the store — clearing every cell AND every X-scoped dirty flag —
+// then replays the +1 create-deltas of every live edge, exactly as the
+// maintenance path enqueues them on a live CREATE ([enqueueEdgeDeltas]). The
+// reopen is therefore the natural self-heal point for any in-session dirty
+// degradation (design §4.3, §6.2): the recomputed store equals a ground-truth
+// recount of the recovered graph on every cell — E, D and T exact, zero dirty.
+//
+// Invoked once at construction from [NewEngineWithOptions], after
+// registerRecoveredConstraints / registerRecoveredIndexes, from the same fully-
+// materialised graph — mirroring registerRecoveredIndexes' backfill-from-
+// recovered-graph discipline ([Engine.backfillNodeHashIndex]). Because the counts
+// are a pure function of the persisted graph, no WAL op, no checkpoint component
+// and no fsync participate, and the store provably cannot diverge from the graph
+// regardless of where a crash fell (the crashed process's in-memory store is
+// simply discarded and recomputed from the crash-consistent graph on restart).
+//
+// The walk runs at construction with no concurrent reader or writer — matching
+// the recovered-index backfill, which likewise walks the mapper without a
+// visibility barrier — so it needs no visMu round; the store's own shard locks
+// keep it -race clean. A nil count store or an empty graph makes it a no-op, so
+// the store-less write-path benchmark pays nothing.
+func (e *Engine) recomputeCountStore() {
+	cs := e.countStore
+	if cs == nil {
+		return
+	}
+	g := e.g
+	// Reset first: a reopen restores full exactness by recomputing from the
+	// crash-consistent graph, so any cell the prior session left dirty heals.
+	cs.RecomputeReset()
+	adj := g.AdjList()
+	var buf exec.CountBuffer
+	var sb [countLabelScratch]uint32
+	adj.Mapper().Walk(func(srcID graph.NodeID, _ string) bool {
+		if g.IsTombstoned(srcID) {
+			return true
+		}
+		nbs, _, handles := adj.LoadEntryH(srcID)
+		if len(nbs) == 0 {
+			return true
+		}
+		labs := adj.LoadEntryLabels(srcID)
+		sl := appendNodeLabelIDs(g, srcID, sb[:0])
+		for i, dstID := range nbs {
+			// Skip edges to a tombstoned destination: they are not live edges, so
+			// the ground-truth recount excludes them and the store must too.
+			if g.IsTombstoned(dstID) {
+				continue
+			}
+			var db [countLabelScratch]uint32
+			dl := appendNodeLabelIDs(g, dstID, db[:0])
+			forEachSlotRelType(g, srcID, dstID, handles, labs, i, func(rt uint32) {
+				enqueueEdgeDeltas(&buf, rt, sl, dl, +1)
+			})
+		}
+		// Apply this source node's edge deltas and reset the buffer, bounding the
+		// transient buffer to one node's out-fan-out rather than to the whole graph.
+		buf.Commit(cs)
+		return true
+	})
+}
