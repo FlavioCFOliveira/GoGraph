@@ -1,0 +1,27 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_ldbc
+cpu: Apple M4
+# Isolating benchmark for the min-cardinality multi-label anchor scan (sprint 305 #2077/#2079).
+# Fixture: nodes carry a large :Common label and a small :Rare label on the SAME nodes;
+# query is a multi-label MATCH (n:Common:Rare). _MinLabel = feature ON (NewEngine, default);
+# _FirstLabel = feature OFF (EngineOptions{DisableMinLabelScan:true}). n=6.
+
+BenchmarkMinLabelScanSelective_MinLabel-10        4947    223614 ns/op    37777 B/op    818 allocs/op
+BenchmarkMinLabelScanSelective_MinLabel-10        5500    223884 ns/op    37778 B/op    818 allocs/op
+BenchmarkMinLabelScanSelective_MinLabel-10        5278    225088 ns/op    37776 B/op    818 allocs/op
+BenchmarkMinLabelScanSelective_MinLabel-10        5414    223559 ns/op    37776 B/op    818 allocs/op
+BenchmarkMinLabelScanSelective_MinLabel-10        5322    222468 ns/op    37776 B/op    818 allocs/op
+BenchmarkMinLabelScanSelective_MinLabel-10        5536    223081 ns/op    37776 B/op    818 allocs/op
+BenchmarkMinLabelScanSelective_FirstLabel-10        64  18586404 ns/op   836264 B/op  99821 allocs/op
+BenchmarkMinLabelScanSelective_FirstLabel-10        61  18366179 ns/op   836252 B/op  99821 allocs/op
+BenchmarkMinLabelScanSelective_FirstLabel-10        62  18364489 ns/op   836264 B/op  99821 allocs/op
+BenchmarkMinLabelScanSelective_FirstLabel-10        56  18489697 ns/op   836319 B/op  99821 allocs/op
+BenchmarkMinLabelScanSelective_FirstLabel-10        64  18227089 ns/op   836214 B/op  99821 allocs/op
+BenchmarkMinLabelScanSelective_FirstLabel-10        60  18084415 ns/op   836251 B/op  99821 allocs/op
+PASS
+
+# Summary (median): MinLabel 223.6us / 37.8KB / 818 allocs vs FirstLabel 18.4ms / 836KB / 99821 allocs
+#   => approx 82x faster, approx 22x less memory, approx 122x fewer allocs on the skewed multi-label shape.
+# Inert on non-multi-label queries (peephole shape absent); differential ON/OFF byte-identical (#2078);
+# TCK 3897/3897; -race clean.
