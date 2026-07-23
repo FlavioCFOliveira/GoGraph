@@ -305,15 +305,21 @@ func reportThroughput(ctx context.Context, w io.Writer, net *network) (int, erro
 		res.addUndirected(l.a, l.b, l.cap)
 	}
 
-	start := time.Now()
+	// Time the example's own in-line residual solver (the one that exposes the
+	// residual graph so the min-cut can be derived). The network build above is
+	// deliberately outside the timed span.
+	residualStart := time.Now()
 	flowValue := res.maxFlow(net.source, net.sink)
-	elapsed := time.Since(start)
+	residualElapsed := time.Since(residualStart)
 
 	// Cross-check against the library's Dinic max-flow built from the
 	// identical link list: the example's residual solver and search/flow
-	// must agree on the answer.
+	// must agree on the answer. Time the library call itself (not the network
+	// build) so the module's own max-flow has an attributable wall-clock.
 	g := buildFlowNetwork(net)
+	dinicStart := time.Now()
 	libValue, err := flow.MaxFlowCtx(ctx, g, net.source, net.sink)
+	dinicElapsed := time.Since(dinicStart)
 	if err != nil {
 		return 0, fmt.Errorf("MaxFlow: %w", err)
 	}
@@ -334,7 +340,8 @@ func reportThroughput(ctx context.Context, w io.Writer, net *network) (int, erro
 	fmt.Fprintf(w, "flow.min_cut_size=%d\n", len(cut))
 	fmt.Fprintf(w, "flow.min_cut_capacity=%d\n", cutCap)
 	fmt.Fprintf(w, "flow.maxflow_eq_mincut=%t\n", cutCap == flowValue)
-	fmt.Fprintf(w, "# flow.elapsed=%s\n", elapsed.Round(time.Microsecond))
+	fmt.Fprintf(w, "# maxflow.dinic_elapsed=%s\n", dinicElapsed.Round(time.Microsecond))
+	fmt.Fprintf(w, "# flow.residual_solver_elapsed=%s\n", residualElapsed.Round(time.Microsecond))
 	for _, l := range cut {
 		ua, okA := net.mapper.Resolve(net.idOf[l.a])
 		ub, okB := net.mapper.Resolve(net.idOf[l.b])

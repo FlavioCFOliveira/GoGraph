@@ -125,7 +125,8 @@ per run and per machine, for example:
 # spof.bridge=c0s4--stub4
 # wcc.serial_elapsed=8µs
 # wcc.parallel_elapsed=10µs
-# flow.elapsed=8µs
+# maxflow.dinic_elapsed=6µs
+# flow.residual_solver_elapsed=8µs
 # flow.saturated_link=c2s1--c3s1 (10 Gb/s)
 # maxflow.edmondskarp_elapsed=25µs
 # maxflow.pushrelabel_elapsed=48µs
@@ -147,9 +148,13 @@ A regression test pins the fact lines and ignores every `# ` line.
 - **Connectivity wall-clock** (`# wcc.serial_elapsed`,
   `# wcc.parallel_elapsed`) — serial versus parallel weakly-connected
   components over the severed snapshot.
-- **Per-algorithm max-flow wall-clock** (`# flow.elapsed`,
-  `# maxflow.edmondskarp_elapsed`, `# maxflow.pushrelabel_elapsed`) — the
-  three max-flow algorithms settling the same throughput, side by side.
+- **Per-algorithm max-flow wall-clock** (`# maxflow.dinic_elapsed` — the
+  library's `flow.MaxFlowCtx` (Dinic); `# maxflow.edmondskarp_elapsed`,
+  `# maxflow.pushrelabel_elapsed`) — the three library max-flow algorithms
+  settling the same throughput, side by side. The separate
+  `# flow.residual_solver_elapsed` times the example's own in-line residual
+  solver (the one that exposes the residual graph so the min-cut can be
+  derived), so it is labelled distinctly from the library timings.
 - **Global min-cut wall-clock** (`# stoerwagner.elapsed`) — the O(V³)
   Stoer-Wagner cut over the whole backbone.
 - **Live heap** (`# mem.heap_alloc`, `# mem.heap_growth`) — the resident
