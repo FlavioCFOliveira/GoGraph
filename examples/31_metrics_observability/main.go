@@ -28,7 +28,12 @@
 //     CSR built from the call graph;
 //     - graph/io/csv        — a WriteCtx + ReadIntoCtx round-trip;
 //     - bolt/packstream     — an encoder acquired from and returned to the
-//     pooled EncodePool.
+//     pooled EncodePool;
+//     - relationship count-store — a CREATE / DELETE / SET-label /
+//     REMOVE-label write burst that lights the count-store observability
+//     counters (delta.applied, relabel.dirtied) and the reopen recompute
+//     histogram, and samples write throughput with the store active so its
+//     neutrality to the write path is observable.
 //  4. Serves reg.Handler() over a local httptest server and GETs /metrics,
 //     exactly as an operator's Prometheus scrape would.
 //  5. Parses the exposition and reports, as deterministic FACT lines,
@@ -426,6 +431,81 @@ func driveWorkload(
 	if err = boltEncode(); err != nil {
 		return fmt.Errorf("bolt encode: %w", err)
 	}
+
+	// 7. Relationship count-store — drive a write workload that CREATEs and
+	//    DELETEs CALLS edges and SETs/REMOVEs a DEGRADED label, so the
+	//    count-store observability counters (delta.applied, relabel.dirtied)
+	//    light up alongside the reopen recompute histogram, and sample write
+	//    throughput with the store active so its neutrality is observable.
+	if err = driveCountStore(ctx, w, eng); err != nil {
+		return fmt.Errorf("count-store workload: %w", err)
+	}
+	return nil
+}
+
+// countWriteBatch is the number of CALLS-edge CREATEs the count-store throughput
+// sample drives. It is a realistic mini-burst — one service repeatedly calling
+// another — sized to keep the short-layer example instant while still yielding a
+// meaningful ops/sec figure that shows the count-store maintenance is neutral to
+// write throughput.
+const countWriteBatch = 200
+
+// driveCountStore exercises the relationship count-store's maintenance paths over
+// the seeded call graph and samples the write throughput with the store active.
+// It writes one deterministic fact — that the store holds live cells after the
+// workload — and emits the volatile cell counts and throughput as "# " telemetry.
+// The count-store observability metrics themselves surface through the installed
+// Prometheus backend and are reported by reportMetrics, exactly like every other
+// instrumented series.
+func driveCountStore(ctx context.Context, w io.Writer, eng *cypher.Engine) error {
+	cellsBefore := eng.CountStoreCells()
+
+	// A relabel that marks the count-store's IN X-scoped cells dirty, then its
+	// inverse — one increment each of the relabel.dirtied counter.
+	if err := cypherWrite(ctx, eng,
+		"MATCH (n:SERVICE)-[:CALLS]->() WITH n LIMIT 1 SET n:DEGRADED", nil); err != nil {
+		return fmt.Errorf("mark degraded: %w", err)
+	}
+	if err := cypherWrite(ctx, eng,
+		"MATCH (n:DEGRADED) WITH n LIMIT 1 REMOVE n:DEGRADED", nil); err != nil {
+		return fmt.Errorf("clear degraded: %w", err)
+	}
+
+	// Retire a handful of monitored calls — DELETE decrements the E/D/T cells.
+	for i := 0; i < 8; i++ {
+		if err := cypherWrite(ctx, eng,
+			"MATCH (a:SERVICE)-[r:CALLS]->(b:SERVICE) WITH r LIMIT 1 DELETE r", nil); err != nil {
+			return fmt.Errorf("retire call: %w", err)
+		}
+	}
+
+	// Throughput sample: a burst of new monitored calls, each an autocommit write
+	// that fans its count deltas onto the store. Timing only the write loop keeps
+	// the figure attributable to the write path.
+	const createCall = "MATCH (a:SERVICE)-[:CALLS]->(b:SERVICE) WITH a,b LIMIT 1 " +
+		"CREATE (a)-[:CALLS {latency_ms:1.0}]->(b)"
+	start := time.Now()
+	for i := 0; i < countWriteBatch; i++ {
+		if err := cypherWrite(ctx, eng, createCall, nil); err != nil {
+			return fmt.Errorf("record call %d: %w", i, err)
+		}
+	}
+	elapsed := time.Since(start)
+
+	cellsAfter := eng.CountStoreCells()
+	var opsPerSec float64
+	if s := elapsed.Seconds(); s > 0 {
+		opsPerSec = float64(countWriteBatch) / s
+	}
+
+	// Deterministic fact: the store holds live cells after the workload.
+	fmt.Fprintf(w, "countstore.cells_positive=%d\n", boolFact(cellsAfter > 0))
+	// Volatile telemetry: exact cell counts and the write throughput.
+	fmt.Fprintf(w, "# countstore.cells_before=%d\n", cellsBefore)
+	fmt.Fprintf(w, "# countstore.cells_after=%d\n", cellsAfter)
+	fmt.Fprintf(w, "# countstore.write_batch=%d\n", countWriteBatch)
+	fmt.Fprintf(w, "# countstore.write_elapsed=%s\n", elapsed.Round(time.Microsecond))
+	fmt.Fprintf(w, "# countstore.write_throughput_ops_per_sec=%.0f\n", opsPerSec)
 	return nil
 }
 
@@ -597,6 +677,9 @@ var expectedMetrics = []expectedMetric{
 	{"graph.io.csv.ReadInto", "histogram", "csv.ReadIntoCtx"},
 	{"bolt.pool.encoder.get", "counter", "packstream.EncodePool.Get"},
 	{"bolt.pool.encoder.put", "counter", "packstream.EncodePool.Put"},
+	{"cypher.countstore.recompute", "histogram", "Engine reopen recompute (#2087)"},
+	{"cypher.countstore.delta.applied", "counter", "count-store commit fan-out (#2087)"},
+	{"cypher.countstore.relabel.dirtied", "counter", "count-store relabel (#2087)"},
 }
 
 // reportMetrics parses the exposition and writes, for every expected

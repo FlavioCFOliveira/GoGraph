@@ -10,6 +10,13 @@ utilisation counters over an HTTP `/metrics` endpoint in Prometheus
 text-exposition format. It is the one example that exercises the
 observability axis.
 
+It also surfaces the **relationship count-store**'s bounded observability
+metrics — the exact-cardinality statistics the planner maintains on the
+write path — alongside the rest: a write burst drives the `delta.applied`
+and `relabel.dirtied` counters and the reopen `recompute` histogram, and the
+same burst samples write throughput with the store active so its neutrality
+to the write path is directly observable.
+
 ## Domain / scenario
 
 A **service-mesh call graph**: nodes are microservices (`:SERVICE`), edges
@@ -20,7 +27,10 @@ deterministic fact below — is reproducible for a fixed `-seed`. The call
 graph is materialised into three representations that feed instrumented
 APIs: a labelled property graph for Cypher, an int64-weighted adjacency
 list (latency in microseconds) for the CSV round-trip, and a CSR (built
-from that adjacency list) for Dijkstra.
+from that adjacency list) for Dijkstra. Over the property graph a small
+write burst then adds and retires monitored `CALLS` relationships and marks
+one service `:DEGRADED` and back, exercising the count-store maintenance
+paths so their observability metrics appear in the scrape.
 
 ## How to run
 
@@ -56,6 +66,7 @@ cypher.services_after=201
 cypher.write_delta=1
 dijkstra.src_reached=196
 csv.roundtrip.edges_match=1
+countstore.cells_positive=1
 metric.present.cypher.Run=true
 metric.present.cypher.RunInTx=true
 metric.present.cypher.plan_cache.misses=true
@@ -68,8 +79,11 @@ metric.present.graph.io.csv.Write=true
 metric.present.graph.io.csv.ReadInto=true
 metric.present.bolt.pool.encoder.get=true
 metric.present.bolt.pool.encoder.put=true
-metric.present.count=12
-metric.expected.count=12
+metric.present.cypher.countstore.recompute=true
+metric.present.cypher.countstore.delta.applied=true
+metric.present.cypher.countstore.relabel.dirtied=true
+metric.present.count=15
+metric.expected.count=15
 ```
 
 Followed by `# `-prefixed telemetry that varies per run and per machine,
@@ -78,11 +92,17 @@ for example:
 ```
 # observed.search_Dijkstra=1 (search.Dijkstra)
 # observed.cypher_plan_cache_hits=2 (Engine.Run (repeat query))
-# scrape.series.total=12
+# observed.cypher_countstore_delta_applied=844 (count-store commit fan-out (#2087))
+# observed.cypher_countstore_relabel_dirtied=2 (count-store relabel (#2087))
+# observed.cypher_countstore_recompute=1 (Engine reopen recompute (#2087))
+# countstore.cells_after=4
+# countstore.write_batch=200
+# countstore.write_throughput_ops_per_sec=5682
+# scrape.series.total=15
 # scrape.series.extra=0
-# workload.elapsed=10.7ms
+# workload.elapsed=45ms
 # mem.heap_alloc=1.11 MiB
-# scrape.bytes=3365
+# scrape.bytes=4100
 ```
 
 The `metric.present.<name>=true` lines are the point of the example: each
@@ -95,12 +115,19 @@ and pinned by the test; the observed values behind them are telemetry.
 ## Evidence it collects
 
 - **Which instrumented APIs surface which metrics** — a presence fact per
-  expected metric, split across five subsystems: `cypher` (`Run`, `RunInTx`,
-  the `plan_cache` hit/miss counters), `search` (`Dijkstra`/`DijkstraCtx`
-  latency plus the `search.pool.dijkstra` get/put utilisation counters),
-  `graph.io.csv` (`Write`, `ReadInto`), and `bolt` (the `EncodePool` get/put
-  counters). Scaling up thickens the latency histograms so bucket
-  distributions become meaningful.
+  expected metric, split across subsystems: `cypher` (`Run`, `RunInTx`, the
+  `plan_cache` hit/miss counters, and the `countstore` `delta.applied` /
+  `relabel.dirtied` counters plus the `recompute` histogram), `search`
+  (`Dijkstra`/`DijkstraCtx` latency plus the `search.pool.dijkstra` get/put
+  utilisation counters), `graph.io.csv` (`Write`, `ReadInto`), and `bolt`
+  (the `EncodePool` get/put counters). Scaling up thickens the latency
+  histograms so bucket distributions become meaningful.
+- **The count-store's footprint and write-neutrality** — `countstore.cells_*`
+  telemetry shows the store's live-cell count stays bounded by schema
+  cardinality (four cells for the single `(:SERVICE)-[:CALLS]->(:SERVICE)`
+  combination) rather than by `|E|`, and `countstore.write_throughput_ops_per_sec`
+  samples the autocommit write rate with the store active, so its neutrality
+  to the write path is observable.
 - **The exposition itself** — total series count, extra series discovered
   beyond the pinned set, and total scrape byte size, so a reader sees the
   real shape of a `/metrics` scrape.
@@ -117,6 +144,9 @@ and pinned by the test; the observed values behind them are telemetry.
   text exposition on `/metrics`.
 - `cypher.Engine.Run` / `cypher.Engine.RunInTx` — instrumented read and
   write query entry points.
+- `cypher.Engine.CountStoreCells` — the count-store size indicator the
+  metrics backend cannot express as a gauge; read directly for the
+  `countstore.cells_*` telemetry.
 - `search.Dijkstra` — instrumented single-source shortest-path over a CSR.
 - `csv.WriteCtx` / `csv.ReadIntoCtx` — instrumented edge-list interchange.
 - `packstream.EncodePool` — the pooled Bolt encoder whose `Get`/`Put` emit
