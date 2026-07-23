@@ -2,6 +2,7 @@ package cypher
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"testing"
 
@@ -98,27 +99,32 @@ func setOf(ids []uint32) map[uint32]bool {
 	return m
 }
 
-// assertCountsMatch verifies the store equals the oracle on every cell, skipping
-// only the cells the store has flagged dirty (E is compared unconditionally — it
-// is never dirty). The comparison is bidirectional: it catches both under-counts
-// (a missing/low store cell) and over-counts or leaks (a stray store cell the
-// recount does not produce).
-func assertCountsMatch(t *testing.T, cs *count.Store, g *lpg.Graph[string, float64]) {
-	t.Helper()
+// diffCounts compares the store against a fresh O(V+E) recount and returns one
+// message per mismatch (an empty slice means they agree). It skips only the cells
+// the store has flagged dirty (E is compared unconditionally — it is never
+// dirty). The comparison is bidirectional: it catches both under-counts (a
+// missing/low store cell) and over-counts or leaks (a stray store cell the
+// recount does not produce). Returning messages rather than calling t.Errorf lets
+// both the *testing.T assertion wrapper and the rapid property test (whose T has
+// no Helper) reuse the exact comparison and report through their own failers.
+func diffCounts(cs *count.Store, g *lpg.Graph[string, float64]) []string {
 	exp := recount(g)
 	got := cs.Snapshot()
 	dOut, dIn := setOf(got.DirtyDOut), setOf(got.DirtyDIn)
 	tA, tB := setOf(got.DirtyTA), setOf(got.DirtyTB)
 
+	var diffs []string
+	add := func(format string, args ...any) { diffs = append(diffs, fmt.Sprintf(format, args...)) }
+
 	// E: exact both ways, always.
 	for rt, v := range exp.E {
 		if got.E[rt] != v {
-			t.Errorf("E(%d) store=%d oracle=%d", rt, got.E[rt], v)
+			add("E(%d) store=%d oracle=%d", rt, got.E[rt], v)
 		}
 	}
 	for rt, v := range got.E {
 		if exp.E[rt] != v {
-			t.Errorf("E(%d) store=%d (leak) oracle=%d", rt, v, exp.E[rt])
+			add("E(%d) store=%d (leak) oracle=%d", rt, v, exp.E[rt])
 		}
 	}
 
@@ -128,7 +134,7 @@ func assertCountsMatch(t *testing.T, cs *count.Store, g *lpg.Graph[string, float
 				continue
 			}
 			if gotM[k] != v {
-				t.Errorf("%s[label=%d,rt=%d] store=%d oracle=%d", name, uint32(k>>32), uint32(k), gotM[k], v)
+				add("%s[label=%d,rt=%d] store=%d oracle=%d", name, uint32(k>>32), uint32(k), gotM[k], v)
 			}
 		}
 		for k, v := range gotM {
@@ -136,7 +142,7 @@ func assertCountsMatch(t *testing.T, cs *count.Store, g *lpg.Graph[string, float
 				continue
 			}
 			if expM[k] != v {
-				t.Errorf("%s[label=%d,rt=%d] store=%d (leak) oracle=%d", name, uint32(k>>32), uint32(k), v, expM[k])
+				add("%s[label=%d,rt=%d] store=%d (leak) oracle=%d", name, uint32(k>>32), uint32(k), v, expM[k])
 			}
 		}
 	}
@@ -149,7 +155,7 @@ func assertCountsMatch(t *testing.T, cs *count.Store, g *lpg.Graph[string, float
 			continue
 		}
 		if got.T[k] != v {
-			t.Errorf("T%v store=%d oracle=%d", k, got.T[k], v)
+			add("T%v store=%d oracle=%d", k, got.T[k], v)
 		}
 	}
 	for k, v := range got.T {
@@ -157,8 +163,19 @@ func assertCountsMatch(t *testing.T, cs *count.Store, g *lpg.Graph[string, float
 			continue
 		}
 		if exp.T[k] != v {
-			t.Errorf("T%v store=%d (leak) oracle=%d", k, v, exp.T[k])
+			add("T%v store=%d (leak) oracle=%d", k, v, exp.T[k])
 		}
+	}
+	return diffs
+}
+
+// assertCountsMatch verifies the store equals the oracle on every non-dirty cell,
+// failing t with one error per mismatch. It is the *testing.T wrapper over
+// [diffCounts].
+func assertCountsMatch(t *testing.T, cs *count.Store, g *lpg.Graph[string, float64]) {
+	t.Helper()
+	for _, d := range diffCounts(cs, g) {
+		t.Errorf("%s", d)
 	}
 }
 
