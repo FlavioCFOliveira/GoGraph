@@ -69,6 +69,30 @@ row 0006); the curated search guard band (Dijkstra / BFS / Brandes) stayed
 flat, TCK held at 3897/3897, and ACID was preserved (the group-commit
 write path was storage-engine-auditor-certified).
 
+## Sprint 305 — min-cardinality multi-label anchor scan (F1b, 2026-07-23)
+
+When a node pattern carries several labels (`MATCH (n:A:B:C)`), the
+planner now scans the label with the smallest **exact** bitmap
+cardinality and keeps the remaining labels as a residual `Filter`,
+instead of always anchoring on the first syntactic label. It is a
+build-time peephole (the same layer as the index-seek rewrite), so the
+logical plan and the result multiset are unchanged: a label conjunction
+is a commutative AND and `min|Lᵢ| ≤ |L0|`, so the plan never does more
+work than the default. `EXPLAIN`/`PROFILE` render the chosen label on
+the `NodeByLabelScan`. Gated by `EngineOptions.DisableMinLabelScan`
+(feature enabled by default).
+
+| Change | Task | Fixture | Result |
+|--------|------|---------|--------|
+| Min-cardinality multi-label anchor scan | #2077 | `BenchmarkMinLabelScanSelective` (large `:Common` + small `:Rare`) | ≈82× faster, ≈22× less memory, ≈122× fewer allocs (223.6µs vs 18.4ms) |
+
+Inert on non-multi-label queries (the peephole shape is absent), so the
+curated suite is unaffected; the differential harness (#2078) proves the
+ON/OFF result multisets are byte-identical, and the estimate-provenance
+veto (#2076) keeps the plan default whenever a count is not trustworthy.
+Full record: [benchmarks/history/LEDGER.md](benchmarks/history/LEDGER.md)
+row 0020. TCK held at 3897/3897, -race clean.
+
 ## Workflow
 
 Every future optimisation appends a row to the table above with
