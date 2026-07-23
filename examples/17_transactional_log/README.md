@@ -37,12 +37,17 @@ directed transfers. The ledger is a **simple directed graph**: at most one
 transfer per ordered `(src, dst)` pair and no self-loops. That keeps the
 per-amount verification unambiguous — `EdgeWeight` returns the weight of the
 first edge for a pair, so one edge per pair means `EdgeWeight(src, dst)` is
-exactly that transfer's amount — and it makes the **conservation identity**
-exact: every transfer contributes its amount once to the source's debit total
-and once to the destination's credit total, so the global debit and credit
-totals are equal by construction and both equal the sum of all committed
-amounts. No redundant `amount` property is stored; the edge weight is the
-single source of truth.
+exactly that transfer's amount. After recovery the example runs a
+**double-entry reconciliation**: it reconstructs each account's net position
+(inflows minus outflows) by walking the *recovered* graph's own edges and
+checks it against the net position obtained by replaying the plan. Because the
+reconstruction reads the recovered edge set and weights directly — not the
+plan's — it would fail if a recovered edge were spurious, duplicated, missing,
+or attributed to the wrong endpoint. `ledger.debit_sum` (outflows per source)
+and `ledger.credit_sum` (inflows per destination) are reported from that same
+walk; for a balanced ledger both equal the sum of all committed amounts. No
+redundant `amount` property is stored; the edge weight is the single source of
+truth.
 
 Each transfer is committed as its own WAL transaction. While the transactions
 commit, a background checkpointer fires on a timer, snapshotting the live graph
@@ -146,6 +151,7 @@ recovered.transfers=600
 recovered.amount_sum=288773518
 ledger.debit_sum=288773518
 ledger.credit_sum=288773518
+ledger.accounts_reconciled=1
 ledger.conserved=true
 # commit.elapsed=3.5s             # telemetry — varies, never pinned
 # commit.tx_rate=169 tx/s         # telemetry — varies, never pinned
@@ -159,12 +165,16 @@ ledger.conserved=true
 
 The **deterministic invariants** the regression test pins are the recovered
 counts (`recovered.accounts`, `recovered.transfers`), the bit-exact recovered
-amount sum (`recovered.amount_sum == ledger.amount_sum`), and the conservation
-identity (`ledger.debit_sum == ledger.credit_sum == ledger.amount_sum`, surfaced
-as `ledger.conserved=true`). `run` additionally verifies every individual
-transfer with `EdgeWeight(src, dst)` before reporting these, so a single
-corrupted amount fails the run. The checkpoint stats, the recovered WAL-op
-count, and the temp path are volatile and are not asserted.
+amount sum (`recovered.amount_sum == ledger.amount_sum`), the double-entry
+reconciliation (`ledger.accounts_reconciled=1` — each account's net position
+reconstructed from the recovered graph equals the plan replay), and the
+amount-conservation identity (`ledger.amount_sum` preserved, surfaced as
+`ledger.conserved=true`). `ledger.debit_sum` and `ledger.credit_sum` are the
+per-source and per-destination totals from that same graph walk. `run`
+additionally verifies every individual transfer with `EdgeWeight(src, dst)`
+before reporting these, so a single corrupted amount fails the run. The
+checkpoint stats, the recovered WAL-op count, and the temp path are volatile
+and are not asserted.
 
 ### Real cross-process crash (`-real-crash`)
 

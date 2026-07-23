@@ -118,7 +118,7 @@ func runRealCrashDemo(ctx context.Context, w io.Writer, cfg config, crashCommitt
 	}
 
 	plannedSum := sumAmounts(plan.transfers[:crashCommitted])
-	conserved := rec.debitSum == rec.creditSum && rec.amountSum == plannedSum
+	conserved := rec.accountsReconciled && rec.amountSum == plannedSum
 	// TailErr is non-nil exactly when recovery observed the torn frame the child
 	// left behind; IsClean already guaranteed it was the benign torn-tail kind.
 	tornDetected := res.TailErr != nil
@@ -263,8 +263,6 @@ func verifyRecoveredLedger(g *lpg.Graph[string, int64], plan ledgerPlan, cfg con
 		}
 		rec.transfers++
 		rec.amountSum += got
-		rec.debitSum += got
-		rec.creditSum += got
 	}
 
 	// The interrupted (never-committed) transfer must NOT have survived — not as
@@ -280,6 +278,10 @@ func verifyRecoveredLedger(g *lpg.Graph[string, int64], plan ledgerPlan, cfg con
 		return recoveryStats{}, fmt.Errorf("DURABILITY: recovered edge count = %d, want %d — a torn-tail frame was accepted as data (repro: -real-crash -seed %d -accounts %d -crash-committed %d)",
 			size, crashCommitted, cfg.seed, cfg.accounts, crashCommitted)
 	}
+
+	// Double-entry reconciliation over exactly the transfers committed before
+	// the kill, read from the recovered graph itself (see reconcileNetPositions).
+	rec.debitSum, rec.creditSum, rec.accountsReconciled = reconcileNetPositions(g, plan.accountIDs, plan.transfers[:crashCommitted])
 	return rec, nil
 }
 

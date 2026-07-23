@@ -25,6 +25,9 @@ import (
 	"testing"
 
 	"go.uber.org/goleak"
+
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // TestMain runs every test in this package under go.uber.org/goleak so the
@@ -77,11 +80,16 @@ func TestRun(t *testing.T) {
 		{"recovered.accounts", int64(cfg.accounts)},
 		{"recovered.transfers", int64(cfg.transfers)},
 		{"recovered.amount_sum", committed},
-		// Double-entry conservation: every transfer debits its source and
-		// credits its destination by the same amount, so both totals equal the
-		// committed sum.
+		// Double-entry totals, reconstructed by walking the recovered graph:
+		// debit_sum aggregates outflows per source, credit_sum inflows per
+		// destination. For a balanced ledger both equal the committed sum, but
+		// they are now genuinely distinct aggregations (see reconcileNetPositions),
+		// not one accumulator counted twice.
 		{"ledger.debit_sum", committed},
 		{"ledger.credit_sum", committed},
+		// The per-account reconciliation (net position from the recovered graph
+		// == the plan replay) must hold.
+		{"ledger.accounts_reconciled", 1},
 	}
 	for _, c := range recovered {
 		if got := facts[c.col]; got != c.want {
@@ -92,6 +100,71 @@ func TestRun(t *testing.T) {
 	// The conservation invariant must report true.
 	if !strings.Contains(out, "ledger.conserved=true") {
 		t.Errorf("missing ledger.conserved=true, got:\n%s", out)
+	}
+}
+
+// TestReconcileNetPositionsHasTeeth proves the double-entry reconciliation is a
+// genuine check, not a tautology: it reconciles a faithful ledger and rejects a
+// wrong endpoint, a wrong amount, and a transfer count that exceeds the
+// recovered edges. This guards against a regression back to the earlier code,
+// where debit and credit were the same accumulator and the check could never
+// fail.
+func TestReconcileNetPositionsHasTeeth(t *testing.T) {
+	accountIDs := []string{"a", "b", "c"}
+	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	for _, id := range accountIDs {
+		if err := g.AddNode(id); err != nil {
+			t.Fatalf("AddNode %s: %v", id, err)
+		}
+	}
+	if err := g.AddEdge("a", "b", 10); err != nil {
+		t.Fatalf("AddEdge a->b: %v", err)
+	}
+	if err := g.AddEdge("b", "c", 5); err != nil {
+		t.Fatalf("AddEdge b->c: %v", err)
+	}
+
+	faithful := []transfer{{src: 0, dst: 1, amount: 10}, {src: 1, dst: 2, amount: 5}}
+	if _, _, ok := reconcileNetPositions(g, accountIDs, faithful); !ok {
+		t.Error("faithful ledger did not reconcile; want reconciled")
+	}
+
+	cases := []struct {
+		name string
+		want []transfer
+	}{
+		{"wrong endpoint", []transfer{{src: 0, dst: 2, amount: 10}, {src: 1, dst: 2, amount: 5}}},
+		{"wrong amount", []transfer{{src: 0, dst: 1, amount: 11}, {src: 1, dst: 2, amount: 5}}},
+		// The graph has fewer edges than the plan expects (a lost transfer).
+		{"missing edge", []transfer{{src: 0, dst: 1, amount: 10}, {src: 1, dst: 2, amount: 5}, {src: 2, dst: 0, amount: 1}}},
+		// The graph has more edges than the plan expects (a spurious transfer).
+		{"spurious edge", []transfer{{src: 0, dst: 1, amount: 10}}},
+	}
+	for _, c := range cases {
+		if _, _, ok := reconcileNetPositions(g, accountIDs, c.want); ok {
+			t.Errorf("%s: reconciliation passed a corrupted ledger; want rejected", c.name)
+		}
+	}
+
+	// Anomaly path: a recovered node whose key is not a known account must not
+	// reconcile, even when the recognised account edges match the plan.
+	gAnomaly := lpg.New[string, int64](adjlist.Config{Directed: true})
+	for _, id := range accountIDs {
+		if err := gAnomaly.AddNode(id); err != nil {
+			t.Fatalf("AddNode %s: %v", id, err)
+		}
+	}
+	if err := gAnomaly.AddNode("zz-unknown"); err != nil {
+		t.Fatalf("AddNode zz-unknown: %v", err)
+	}
+	if err := gAnomaly.AddEdge("a", "b", 10); err != nil {
+		t.Fatalf("AddEdge a->b: %v", err)
+	}
+	if err := gAnomaly.AddEdge("zz-unknown", "a", 3); err != nil {
+		t.Fatalf("AddEdge zz-unknown->a: %v", err)
+	}
+	if _, _, ok := reconcileNetPositions(gAnomaly, accountIDs, []transfer{{src: 0, dst: 1, amount: 10}}); ok {
+		t.Error("reconciliation passed a recovered node with an unknown account id; want rejected")
 	}
 }
 

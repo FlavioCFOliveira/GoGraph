@@ -28,10 +28,18 @@
 // (src, dst) pair and no self-loops. That keeps the per-amount verification
 // unambiguous — EdgeWeight returns the weight of the first edge for a pair, so
 // one edge per pair means EdgeWeight(src, dst) is exactly that transfer's
-// amount — and it makes the conservation identity exact: every transfer
-// contributes its amount once to the source's debit total and once to the
-// destination's credit total, so the global debit and credit totals are equal
-// by construction and both equal the sum of all committed amounts.
+// amount.
+//
+// After recovery the example runs a double-entry reconciliation
+// (reconcileNetPositions) that reconstructs each account's net position —
+// inflows minus outflows — by walking the RECOVERED graph's own edges, and
+// checks it against the net position obtained by replaying the plan. Because
+// the reconstruction reads the graph's edge set and weights directly, not the
+// plan's, it is a genuine invariant that would fail if a recovered edge were
+// spurious, duplicated, missing, or attributed to the wrong endpoint — it is
+// not the same accumulator counted twice. debit_sum (outflows per source) and
+// credit_sum (inflows per destination) are reported from that same walk; for a
+// balanced ledger they are equal and both equal the sum of committed amounts.
 //
 // # ACID coordination
 //
@@ -89,6 +97,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/store/checkpoint"
@@ -271,7 +280,8 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	fmt.Fprintf(w, "recovered.amount_sum=%d\n", rec.amountSum)
 	fmt.Fprintf(w, "ledger.debit_sum=%d\n", rec.debitSum)
 	fmt.Fprintf(w, "ledger.credit_sum=%d\n", rec.creditSum)
-	fmt.Fprintf(w, "ledger.conserved=%t\n", rec.creditSum == rec.debitSum && rec.amountSum == plan.totalAmount)
+	fmt.Fprintf(w, "ledger.accounts_reconciled=%d\n", boolToInt(rec.accountsReconciled))
+	fmt.Fprintf(w, "ledger.conserved=%t\n", rec.amountSum == plan.totalAmount)
 
 	return nil
 }
@@ -485,18 +495,85 @@ type recoveryStats struct {
 	accounts  int
 	transfers int
 	amountSum int64 // sum of every recovered transfer's edge weight
-	debitSum  int64 // sum of amounts leaving an account (per src)
-	creditSum int64 // sum of amounts entering an account (per dst)
+	debitSum  int64 // sum of amounts leaving an account (per src), from the graph walk
+	creditSum int64 // sum of amounts entering an account (per dst), from the graph walk
+	// accountsReconciled is true when each account's net position (inflows
+	// minus outflows), reconstructed by walking the recovered graph's own
+	// edges, equals the net position obtained by replaying the plan, AND the
+	// recovered edge count matches the plan. It is the genuine double-entry
+	// invariant (see reconcileNetPositions), independent of the per-transfer
+	// probe above.
+	accountsReconciled bool
+}
+
+// reconcileNetPositions performs a double-entry reconciliation of the recovered
+// ledger, read directly from the graph's own adjacency rather than from the
+// plan. It walks every recovered node and its out-edges, attributing each edge
+// weight as a debit to its source account and a credit to its destination
+// account, then compares each account's net position (credit minus debit) to
+// the net position obtained by replaying want (the transfers a sound recovery
+// must reproduce). It returns the per-source debit total, the per-destination
+// credit total (genuinely distinct aggregations, unlike a single accumulator
+// counted twice), and whether every account reconciled AND the observed edge
+// count matched len(want). It therefore fails if a recovered edge is spurious,
+// duplicated, missing, or attributed to the wrong endpoint — corruption the
+// per-transfer point probe cannot see.
+func reconcileNetPositions(g *lpg.Graph[string, int64], accountIDs []string, want []transfer) (debitSum, creditSum int64, reconciled bool) {
+	idxOf := make(map[string]int, len(accountIDs))
+	for i, id := range accountIDs {
+		idxOf[id] = i
+	}
+	debit := make([]int64, len(accountIDs))
+	credit := make([]int64, len(accountIDs))
+	edges := 0
+	anomaly := false // a recovered node/edge referencing an unknown account id
+	adj := g.AdjList()
+	adj.Mapper().Walk(func(_ graph.NodeID, srcKey string) bool {
+		si, ok := idxOf[srcKey]
+		if !ok {
+			anomaly = true
+			return true
+		}
+		for dstKey, wgt := range adj.Neighbours(srcKey) {
+			di, ok := idxOf[dstKey]
+			if !ok {
+				anomaly = true
+				continue
+			}
+			debit[si] += wgt
+			credit[di] += wgt
+			edges++
+		}
+		return true
+	})
+	for i := range accountIDs {
+		debitSum += debit[i]
+		creditSum += credit[i]
+	}
+	expectedNet := make([]int64, len(accountIDs))
+	for _, t := range want {
+		expectedNet[t.src] -= t.amount
+		expectedNet[t.dst] += t.amount
+	}
+	reconciled = !anomaly && edges == len(want)
+	for a := range expectedNet {
+		if credit[a]-debit[a] != expectedNet[a] {
+			reconciled = false
+		}
+	}
+	return debitSum, creditSum, reconciled
 }
 
 // recoverLedger reopens the store from disk alone (snapshot + any WAL tail),
 // then verifies every committed transfer survived with its exact amount. It
 // checks, per transfer, that the recovered edge exists and that
 // EdgeWeight(src, dst) equals the committed amount — a bit-exact verification
-// of the durable weight-codec path — and accumulates the debit and credit
-// totals for the conservation invariant. A corrupt WAL is fail-stop: recovery
-// returns a non-nil error and IsClean reports false, and the run refuses to
-// proceed onto a damaged prefix.
+// of the durable weight-codec path. It then runs a separate, graph-driven
+// double-entry reconciliation (reconcileNetPositions) that reconstructs each
+// account's net position from the recovered graph's own edges and checks it
+// against the plan replay. A corrupt WAL is fail-stop: recovery returns a
+// non-nil error and IsClean reports false, and the run refuses to proceed
+// onto a damaged prefix.
 func recoverLedger(ctx context.Context, dir string, plan ledgerPlan, w io.Writer) (recoveryStats, error) {
 	start := time.Now()
 	res, err := recovery.OpenCtx[string, int64](ctx, dir, recovery.Options[string, int64]{
@@ -531,9 +608,14 @@ func recoverLedger(ctx context.Context, dir string, plan ledgerPlan, w io.Writer
 		}
 		rec.transfers++
 		rec.amountSum += got
-		rec.debitSum += got
-		rec.creditSum += got
 	}
+
+	// Double-entry reconciliation, computed independently of the per-transfer
+	// probe above by walking the recovered graph's own edges. debitSum (per
+	// source) and creditSum (per destination) are genuinely distinct sums here,
+	// and accountsReconciled verifies each account's net position matches the
+	// plan replay — a check that fails on a misattributed or spurious edge.
+	rec.debitSum, rec.creditSum, rec.accountsReconciled = reconcileNetPositions(g, plan.accountIDs, plan.transfers)
 
 	// Account count is reported by the live graph after recovery rather than
 	// re-derived from the plan, so a lost or spurious node surfaces as a
