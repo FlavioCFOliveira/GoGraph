@@ -409,6 +409,12 @@ type buildOpts struct {
 	// buildOperator's *ir.Selection case. Left false by every other build path,
 	// which therefore always builds the legacy NodeByLabelScan+Filter plan.
 	rangeSeekEnabled bool
+	// minLabelScanEnabled gates the min-cardinality multi-label anchor scan
+	// (#2077). The read-path build sets it from the Engine field; it is consulted
+	// in buildOperator's *ir.Selection case (buildMinLabelScanIfEnabled). Left
+	// false by every other build path, which therefore always anchors a
+	// multi-label node scan on Labels[0] as today.
+	minLabelScanEnabled bool
 	// parallelScanEnabled gates the morsel-parallel count fast path (#1672). The
 	// read-path build sets it from the Engine field; it is consulted in
 	// buildEagerAggregation's count fast path (tryBuildParallelCountScan). Left
@@ -626,6 +632,18 @@ type EngineOptions struct {
 	// operational escape hatch.
 	DisableRangeIndexSeek bool
 
+	// DisableMinLabelScan turns OFF the min-cardinality multi-label anchor scan
+	// (#2077). When false (the default) the planner anchors a multi-label node
+	// pattern (`MATCH (n:A:B) …`) on the smallest exact-cardinality label and
+	// re-checks the rest as a residual LabelPredicate Filter, instead of always
+	// anchoring on the first syntactic label. A label conjunction is commutative,
+	// so the substitution is result-identical and never scans more rows than the
+	// Labels[0] plan (min_i|Lᵢ| ≤ |Labels[0]|), with no statistics dependency —
+	// see min_label_scan_plan.go. Setting it true forces the legacy Labels[0]
+	// plan; it exists for the differential test that proves both plans return an
+	// identical result multiset, and as an operational escape hatch.
+	DisableMinLabelScan bool
+
 	// DisableParallelScan turns OFF the morsel-parallel count fast path (#1672).
 	// When false (the default) the planner serves a group-by-less count(*) /
 	// count(<scan-var>) over a bare full-node scan with a parallel reduce —
@@ -819,6 +837,11 @@ type Engine struct {
 	// by default; set false by EngineOptions.DisableRangeIndexSeek. When false
 	// the planner always builds the legacy NodeByLabelScan+Filter plan.
 	rangeSeekEnabled bool
+
+	// minLabelScanEnabled gates the min-cardinality multi-label anchor scan
+	// (#2077). True by default; set false by EngineOptions.DisableMinLabelScan.
+	// When false the planner always anchors a multi-label node scan on Labels[0].
+	minLabelScanEnabled bool
 
 	// parallelScanEnabled gates the morsel-parallel count fast path (#1672). True
 	// by default; set false by EngineOptions.DisableParallelScan. When false the
@@ -1052,6 +1075,7 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		maxCollectItems:     opts.MaxCollectItems,
 		hashJoinEnabled:     !opts.DisableHashJoin,
 		rangeSeekEnabled:    !opts.DisableRangeIndexSeek,
+		minLabelScanEnabled: !opts.DisableMinLabelScan,
 
 		parallelScanEnabled:     !opts.DisableParallelScan,
 		parallelBackfillEnabled: !opts.DisableParallelBackfill,
@@ -1742,6 +1766,12 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		bopts.hashJoinEnabled = e.hashJoinEnabled
 		bopts.hashJoinOrderSafe = entry.hashJoinSafe
 		bopts.rangeSeekEnabled = e.rangeSeekEnabled
+		// Min-label scan gating (#2077): enable the smallest-cardinality
+		// multi-label anchor substitution when the Engine permits it. The
+		// substitution is result-identical (a label conjunction is commutative)
+		// and never scans more rows than the Labels[0] plan, so it needs no
+		// order-safety companion.
+		bopts.minLabelScanEnabled = e.minLabelScanEnabled
 		// Parallel-count gating (#1672): the parallel count reduce replaces the
 		// serial EagerAggregation pipeline only when the Engine permits it AND the
 		// live node count exceeds the threshold (checked at the build site against
@@ -1842,6 +1872,19 @@ func explainWithIndexesNode(
 		}
 	}
 
+	// Min-cardinality multi-label anchor scan (#2077): when a bare LabelPredicate
+	// Selection over a NodeByLabelScan would be re-anchored on a smaller label,
+	// the Selection keeps its residual Filter on top but its scan child is
+	// rebuilt over the chosen (smaller) label. Show the chosen label so EXPLAIN
+	// reflects the physical target — analogous to the range-seek child above.
+	minLabelVar, minLabel := "", ""
+	minLabelFired := false
+	if sel, ok := plan.(*ir.Selection); ok && explainGraph != nil && opName != "NodeByIndexSeek" && !rangeSeek {
+		if nv, chosen, _, ok := pickMinLabel(sel, &lpgLabelResolver{g: explainGraph}); ok {
+			minLabelVar, minLabel, minLabelFired = nv, chosen, true
+		}
+	}
+
 	b.WriteString(prefix)
 	b.WriteString(connector)
 	b.WriteString(opName)
@@ -1860,6 +1903,18 @@ func explainWithIndexesNode(
 	if rangeSeek {
 		b.WriteString(nextPrefix)
 		b.WriteString("└─ NodeByIndexRangeScan\n")
+		return
+	}
+
+	// When the min-label scan fires, the Selection keeps its residual Filter on
+	// top but its NodeByLabelScan child is re-anchored on the smaller label.
+	if minLabelFired {
+		b.WriteString(nextPrefix)
+		b.WriteString("└─ NodeByLabelScan [")
+		b.WriteString(minLabelVar)
+		b.WriteByte(':')
+		b.WriteString(minLabel)
+		b.WriteString("]\n")
 		return
 	}
 
@@ -4355,6 +4410,20 @@ func (s *lpgLabelResolver) ResolveLabelCount(name string) (int64, bool) {
 	return int64(s.g.NodeIndex().Count(uint32(lid))), true
 }
 
+// ResolveLabelID reports the stable interned id of name, used only to break
+// ties between equal-cardinality labels deterministically (#2077). ok is false
+// for a label that was never interned (which necessarily has zero live nodes),
+// in which case the min-label planner treats it as id-less and falls back to its
+// syntactic-index tie-break. The lookup is non-mutating (it never interns a new
+// id), so it is safe on the read path.
+func (s *lpgLabelResolver) ResolveLabelID(name string) (uint32, bool) {
+	lid, ok := s.g.Registry().Lookup(name)
+	if !ok {
+		return 0, false
+	}
+	return uint32(lid), true
+}
+
 // parallelCountScanBuildCount counts how many times the planner has emitted the
 // parallel-reduce count scan in place of the serial EagerAggregation pipeline
 // (#1672). It is a diagnostic seam read only by the in-package differential test
@@ -6305,6 +6374,20 @@ func buildOperator(
 			} else if ok {
 				return op, nil
 			}
+		}
+		// Min-cardinality multi-label anchor scan (#2077): when this Selection is
+		// a bare LabelPredicate over a NodeByLabelScan of the same node — the shape
+		// the IR translator emits for a multi-label pattern `(n:A:B)` — re-anchor
+		// the scan on the smallest exact-cardinality label and re-check the rest as
+		// the residual Filter. Tried AFTER the equality index seek so a seek always
+		// wins; the substitution is result-identical (a label conjunction is
+		// commutative) and never scans more rows than the Labels[0] plan. Falls
+		// through to the default Labels[0] build when disabled or not eligible (see
+		// min_label_scan_plan.go).
+		if op, ok, err := buildMinLabelScanIfEnabled(p, walker, labelSrc, reg, params, schema, bopts); err != nil {
+			return nil, err
+		} else if ok {
+			return op, nil
 		}
 		// Opportunistic range-index seek (#1505): when the predicate is a range
 		// (n.prop > x, >=, <, <=, or a two-sided AND) on a property backed by a
