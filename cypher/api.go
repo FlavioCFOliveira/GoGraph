@@ -416,6 +416,15 @@ type buildOpts struct {
 	// false by every other build path, which therefore always anchors a
 	// multi-label node scan on Labels[0] as today.
 	minLabelScanEnabled bool
+	// reorderSwap is the set of plain Apply nodes whose arms the disjoint-
+	// component ordering peephole (#2091) has decided to swap for THIS query,
+	// keyed by the exact *ir.Apply pointer buildOperator will visit. The read-path
+	// build populates it (computeReorderSwaps) after the count gate; every other
+	// build path leaves it nil, so buildOperator's *ir.Apply case reads it as an
+	// always-false lookup and builds the written order. A swapped Apply drives its
+	// smaller component and re-runs the larger inner side fewer times, with an
+	// identical result multiset.
+	reorderSwap map[*ir.Apply]bool
 	// parallelScanEnabled gates the morsel-parallel count fast path (#1672). The
 	// read-path build sets it from the Engine field; it is consulted in
 	// buildEagerAggregation's count fast path (tryBuildParallelCountScan). Left
@@ -644,6 +653,20 @@ type EngineOptions struct {
 	// plan; it exists for the differential test that proves both plans return an
 	// identical result multiset, and as an operational escape hatch.
 	DisableMinLabelScan bool
+
+	// DisableJoinReorder turns OFF the count-store-gated disjoint-component
+	// ordering peephole (#2091). When false (the default) the planner may reorder
+	// a plain uncorrelated Apply that joins two disjoint single-scan components
+	// (`MATCH (a:A),(b:B) …`, a nested-loop Cartesian with no equi-join predicate)
+	// so the component with the smaller EXACT base cardinality drives, cutting the
+	// re-executions of the larger inner side. The swap changes only the emission
+	// order (a bag) and the internal column layout, never the multiset — see
+	// join_reorder_plan.go — and is admitted only when every base count is exact
+	// and the reorder is order-safe (SuppressReorder). Setting it true forces the
+	// written-order plan; it exists for the differential test that proves both
+	// plans return an identical result multiset, and as an operational escape
+	// hatch.
+	DisableJoinReorder bool
 
 	// DisableParallelScan turns OFF the morsel-parallel count fast path (#1672).
 	// When false (the default) the planner serves a group-by-less count(*) /
@@ -884,6 +907,11 @@ type Engine struct {
 	// (#2077). True by default; set false by EngineOptions.DisableMinLabelScan.
 	// When false the planner always anchors a multi-label node scan on Labels[0].
 	minLabelScanEnabled bool
+
+	// joinReorderEnabled gates the count-store-gated disjoint-component ordering
+	// peephole (#2091). True by default; set false by EngineOptions.DisableJoinReorder.
+	// When false the planner always builds the written-order Cartesian.
+	joinReorderEnabled bool
 
 	// parallelScanEnabled gates the morsel-parallel count fast path (#1672). True
 	// by default; set false by EngineOptions.DisableParallelScan. When false the
@@ -1129,6 +1157,7 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		hashJoinEnabled:     !opts.DisableHashJoin,
 		rangeSeekEnabled:    !opts.DisableRangeIndexSeek,
 		minLabelScanEnabled: !opts.DisableMinLabelScan,
+		joinReorderEnabled:  !opts.DisableJoinReorder,
 
 		parallelScanEnabled:     !opts.DisableParallelScan,
 		parallelBackfillEnabled: !opts.DisableParallelBackfill,
@@ -1835,6 +1864,17 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		// and never scans more rows than the Labels[0] plan, so it needs no
 		// order-safety companion.
 		bopts.minLabelScanEnabled = e.minLabelScanEnabled
+		// Disjoint-component reorder gating (#2091): when the Engine permits it and
+		// the plan has memoised order-safe candidates, apply the live cardinality
+		// gate against this query's snapshot. The live node total (for AllNodesScan
+		// components) and every label count are read under View's visibility
+		// barrier, so all cost inputs come from one consistent snapshot. The swap
+		// changes only emission order and internal column layout, never the
+		// multiset; SuppressReorder (baked into the candidate set) guarantees no
+		// downstream operator observes the change.
+		if e.joinReorderEnabled && len(entry.reorderCandidates) > 0 {
+			bopts.reorderSwap = computeReorderSwaps(entry.reorderCandidates, labelSrc, int64(e.g.LiveOrder()))
+		}
 		// Parallel-count gating (#1672): the parallel count reduce replaces the
 		// serial EagerAggregation pipeline only when the Engine permits it AND the
 		// live node count exceeds the threshold (checked at the build site against
@@ -3235,6 +3275,13 @@ type planCacheEntry struct {
 	// that is a pure function of the (cached, immutable) plan, so it is computed
 	// once at entry creation rather than on every Run (#1719).
 	hashJoinSafe bool
+	// reorderCandidates memoises the structurally-qualifying, ORDER-SAFE
+	// disjoint-component reorder points (#2091) — a pure function of the immutable
+	// plan, computed once at entry creation. The per-query read-path build applies
+	// the live cardinality gate (computeReorderSwaps) to just these candidates,
+	// so a query with no disjoint Cartesian pays nothing at build time. nil when
+	// the query has no candidate.
+	reorderCandidates []*ir.Apply
 }
 
 // planFor returns the cached logical plan for query, or parses, translates,
@@ -3288,9 +3335,14 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
 	// invalidated with the entry by ClearPlanCache on any schema-changing DDL.
 	// Skipped for semantically-invalid entries, which never reach execution.
 	hashJoinSafe := false
+	var reorderCandidates []*ir.Apply
 	var paramTypes map[string]expr.Kind
 	if semaErr == nil {
 		hashJoinSafe = hashJoinOrderSafe(plan)
+		// Disjoint-component reorder candidates (#2091): the structurally-
+		// qualifying, order-safe reorder points. Pure function of the plan, so
+		// memoised here; the live cardinality gate runs per query at build time.
+		reorderCandidates = collectReorderCandidates(plan)
 		if len(paramRefs) > 0 {
 			idxMgr := e.g.IndexManager()
 			resolve := func(label, property string) (expr.Kind, bool) {
@@ -3301,7 +3353,7 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
 	}
 	entry := &planCacheEntry{
 		plan: plan, semaErr: semaErr, paramRefs: paramRefs, notifications: notifications,
-		hashJoinSafe: hashJoinSafe, paramTypes: paramTypes,
+		hashJoinSafe: hashJoinSafe, reorderCandidates: reorderCandidates, paramTypes: paramTypes,
 	}
 	actual, _ := e.cache.loadOrStore(query, entry)
 	return actual, nil
@@ -6687,8 +6739,20 @@ func buildOperator(
 		return exec.NewExpand(child, fwd, rev, cfg), nil
 
 	case *ir.Apply:
+		// Disjoint-component reorder (#2091): when this exact Apply was chosen for
+		// a swap (order-safe + smaller inner + exact counts, decided in
+		// computeReorderSwaps), drive the SMALLER component. Exchanging the two
+		// arms of a plain uncorrelated Apply produces the same Cartesian multiset
+		// (only emission order and internal column layout change; downstream reads
+		// by name), and re-runs the larger inner side fewer times. reorderSwap is
+		// nil on every non-read build path, so this lookup is false there.
+		outerNode, innerNode := p.Outer, p.Inner
+		if bopts != nil && bopts.reorderSwap[p] {
+			outerNode, innerNode = p.Inner, p.Outer
+			joinReorderBuildCount.Add(1)
+		}
 		// Build the outer plan first so its vars enter the schema.
-		outer, err := buildOperator(p.Outer, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
+		outer, err := buildOperator(outerNode, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
@@ -6721,7 +6785,7 @@ func buildOperator(
 			preTripletLen = len(bopts.expandTripletSeq)
 		}
 		arg := exec.NewArgument()
-		inner, err := buildOperator(p.Inner, walker, labelSrc, reg, params, innerSchema, idxMgr, procReg, argByTag, bopts)
+		inner, err := buildOperator(innerNode, walker, labelSrc, reg, params, innerSchema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
