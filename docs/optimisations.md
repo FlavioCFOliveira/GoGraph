@@ -145,6 +145,37 @@ renders the chosen scan label and expand direction so the reorder is visible.
 TCK held at 3897/3897, -race clean; LEDGER row 0022. Design:
 [reordering-design.md](reordering-design.md).
 
+## Sprint 308 — planner statistics + cardinality estimates (P4/F5b, 2026-07-24)
+
+Off-write-path, best-effort statistics that make the planner observable without
+regressing writes:
+
+- **HyperLogLog NDV** (m=4096, ~1.6% error), **equi-depth histograms** (B=256,
+  ≤1/B error, MCV-spike isolation), and **exact top-k MCV** — built by an
+  explicit `RefreshStatistics` scan, generation-stamped and staleness-gated. NDV
+  is never sampled (provably impossible to bound — Charikar et al. PODS'00).
+- **Consumed by EXPLAIN/PROFILE:** each operator is annotated with an estimated
+  row count and its provenance (exact / stats / heuristic), drawn from the exact
+  count-store (`N`, `E`, `D`) and the new statistics. Display-only — no execution
+  or plan-choice change (a differential test proves results identical with/without
+  statistics populated).
+- **The range-index seek stays exact-count-gated** (already optimal). estStats was
+  proven *not* to widen it — the index yields an exact in-range count whenever a
+  seek is possible — so the statistics' role is observability plus a documented
+  foundation for a future margin-gated (non-absolute) mode.
+
+| Change | Task | Fixture | Result |
+|--------|------|---------|--------|
+| Statistics maintenance (lazy collector) | #2101 | `BenchmarkEngWriteAutocommit` | write path flat vs pre-stats (B/op p=0.18, allocs 34→34); LEDGER row 0023 |
+
+Zero write-regression: the collector is **lazy** (nil until `RefreshStatistics`),
+so unused-statistics writes are byte-identical to pre-statistics; with statistics
+active the maintenance is an O(1) atomic Δ per tracked property, zero-alloc.
+Honest limit: single-column range selectivity promotes to estStats; equality
+stays exact-MCV-or-heuristic (uniformity error is unbounded under skew); multi-join
+independence is never promoted. TCK 3897/3897 throughout. Design:
+[statistics-design.md](statistics-design.md).
+
 ## Workflow
 
 Every future optimisation appends a row to the table above with
