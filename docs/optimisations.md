@@ -116,6 +116,35 @@ LEDGER row 0021. Observable via `internal/metrics` counters
 `cypher.countstore.recompute` latency, and `Engine.CountStoreCells()`. TCK
 held at 3897/3897, -race clean; reopen-parity exact.
 
+## Sprint 307 — count-store-gated reordering (P3, 2026-07-24)
+
+Two build-time reordering peepholes, each gated by the exact count-store and the
+order-safety predicate so they deviate from the written order only when provably
+result-identical and never slower:
+
+- **Disjoint-component ordering** — for a nested-loop join of disjoint
+  single-scan components (no equi-join), build the smaller exact node count as
+  the outer side.
+- **Single-edge anchor-swap** — for `(a:A)-[:R]->(b:B)`, anchor on the endpoint
+  that minimises examined edges via the count-store degree `D(label,relType,dir)`;
+  cost `c_s·N + c_e·D`. OUT-only: it flips a written `DirIn` expand to `DirOut`;
+  reverse-introducing swaps are vetoed because a `DirIn` traversal costs work
+  proportional to the source out-degree (a forward-range scan), invisible to
+  aggregate `D`.
+
+| Change | Task | Fixture | Result |
+|--------|------|---------|--------|
+| Single-edge anchor-swap (OUT-only) | #2090 | `BenchmarkAnchorSwapHub` | −92% time (12.7×), −99.5% allocs |
+| Disjoint-component ordering | #2091 | `BenchmarkJoinReorderDisjoint` | −67% time (3.1×), −83% B/op |
+
+Both are gated by two-sided trustworthiness (candidate and baseline exact and
+non-dirty, sampled from one snapshot) and the `SuppressReorder` order-safety
+predicate; a relabel-dirtied count vetoes back to the written order; the curated
+suite is byte-identical (the peepholes never fire there). The query plan now
+renders the chosen scan label and expand direction so the reorder is visible.
+TCK held at 3897/3897, -race clean; LEDGER row 0022. Design:
+[reordering-design.md](reordering-design.md).
+
 ## Workflow
 
 Every future optimisation appends a row to the table above with
