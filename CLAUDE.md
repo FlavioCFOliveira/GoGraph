@@ -351,7 +351,7 @@ The module is organised around three concerns:
 
 ## Examples
 
-Examples are **not an integral part of the GoGraph module** — the module neither imports nor depends on them. They are **instruments**: their sole role is to exercise GoGraph's features, both individually and in combination, under realistic conditions so that the module's behaviour — both its **correctness** (the assertiveness of its results) and its **performance** (its efficiency in the use of CPU, RAM, and storage) — can be observed and measured.
+Examples are **not an integral part of the GoGraph module** — the module neither imports nor depends on them. They are **instruments** — **exercise harnesses** and **usage simulators**: their sole role is to exercise GoGraph's features, both individually and in combination, under realistic conditions so that the module's behaviour — both its **correctness** (the assertiveness of its results) and its **performance** (its efficiency in the use of CPU, RAM, and storage) — can be observed and measured. Exercising an example must allow **measurements or observations** to be extracted for **every relevant indicator**, so that the module's **performance, behaviour, and efficiency** can be analysed **completely and objectively**.
 
 ### Organisation
 
@@ -371,11 +371,13 @@ Every example serves **three equally important objectives**:
 
 ### Evidence and tooling
 
-Assess performance empirically, never by intuition: every claim about CPU, RAM, or storage must rest on collected data — the [Measure to decide](#measure-to-decide) principle applied to examples. Use the tools best suited to the Go technology stack to observe each behaviour in detail and to draw conclusions strictly from that data:
+Assess performance empirically, never by intuition: every claim about CPU, RAM, or storage must rest on collected data — the [Measure to decide](#measure-to-decide) principle applied to examples. Exercising an example must yield **measurements or observations** for **every relevant indicator** so that the module's **performance, behaviour, and efficiency** can be analysed **completely and objectively**. Use the tools best suited to the Go technology stack — and any other tool that yields pertinent information — to observe each behaviour in detail and to draw conclusions strictly from that data:
 
-- **CPU and heap profiling** — capture `pprof` profiles (`runtime/pprof`, `net/http/pprof`) to attribute CPU time and allocations to specific call sites.
+- **CPU and heap profiling** — capture `pprof` profiles (`runtime/pprof`, `net/http/pprof`) to attribute CPU time and allocations to specific call sites, and render them as **flame graphs** (`go tool pprof -http=:0`, or an exported SVG) to read the hot call stacks at a glance.
+- **Execution tracing** — capture a `runtime/trace` profile and inspect it with `go tool trace` to observe scheduling, goroutine blocking, GC pauses, and syscall latency over the workload's timeline.
 - **Allocations and latency** — drive the exercised paths under `go test -bench=. -benchmem` and compare runs with `benchstat`.
 - **Live memory and GC** — sample `runtime.MemStats`, and run under `GODEBUG=gctrace=1` where GC behaviour is relevant, to track resident heap and its growth.
+- **Code coverage** — measure which GoGraph code paths an example actually drives: build it with `go build -cover` and collect counters via `GOCOVERDIR`, then report with `go tool covdata percent`/`textfmt` (or `go test -coverprofile` for test-driven paths) and inspect with `go tool cover -html`/`-func`. Coverage reveals what the example does and does not exercise, guiding it towards the untested surface.
 - **Storage footprint** — measure the on-disk size of the store directory and how it grows across the workload.
 
 Each example surfaces its measurements as explicit telemetry so the evidence can be inspected and compared run to run.
