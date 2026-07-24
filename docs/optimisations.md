@@ -200,6 +200,33 @@ scan-heavy). TCK 3897/3897 throughout. LEDGER row 0024. Design:
 [columnar-deepening-design.md](columnar-deepening-design.md). Extends the columnar
 value-model epic #1704.
 
+## Sprint 310 — automatic intra-query parallelism broadening (P6/F4, 2026-07-24)
+
+Extends the automatic (no-licence, no opt-in) morsel-parallelism from scan/count
+to min/max aggregation, and pushes the all-node count to O(1). Unlike Neo4j's and
+Memgraph's parallel runtimes (Enterprise + opt-in + read-only), these engage
+automatically above `parallelScanThreshold` and are governed (`ParallelGovernor`
+bounds total workers near GOMAXPROCS across concurrent queries).
+
+| Change | Task | Fixture | Result |
+|--------|------|---------|--------|
+| Parallel min/max aggregation (position-carrying combine) | #2111 | `BenchmarkParallelAggregate` (single-query, large graph) | ~2.83× (conc=1); conc=64 (saturated) parity |
+| Serial O(1) count-pushdown | #2113 | `BenchmarkCountPushdown` | −99.99% (O(1) vs O(N), ≈9700×; 399.6k→30 allocs) |
+
+Determinism: min/max use a position-carrying combine byte-identical to serial for
+every tie representation (int/float, ±0, NaN); float `sum`/`avg`, int `sum`,
+`collect`/`percentile`/`stdev` stay serial (no byte-identical combine under the
+multiset + value-representation determinism obligation). Workers reuse
+`ParallelGovernor`, are goleak-clean, context-cancellable and byte-budget-bounded;
+a `budget==1` inline-serial short-circuit (#2115) keeps the saturated regime
+no-regression (conc=64 parity). Intra-query parallelism is idle-core-bound (the
+win is at low concurrency; the governor throttles under load). **Parallel Expand
+(#2112) was benched and DEFERRED** — single-query 4–5× but idle-core-bound, so no
+win under GoGraph's high-concurrency production regime (0.88× at conc=8). Load-test
+at conc 1/8/64: LEDGER row 0025. A pre-existing `ParallelGovernor` transition-zone
+over-subscription residual is tracked (#2125); per-operator engagement counters
+are tracked (#2123). TCK 3897/3897 throughout.
+
 ## Workflow
 
 Every future optimisation appends a row to the table above with
