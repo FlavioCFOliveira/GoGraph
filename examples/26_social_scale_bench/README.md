@@ -35,6 +35,14 @@ groups:
   equi-join — measured against a result-identical row-at-a-time baseline so the
   **de-boxing allocation win** each delivers is observable. See
   [Columnar execution exercise](#columnar-execution-exercise-2121).
+- **Automatic intra-query parallelism** — over a user population large enough to
+  cross the parallel-scan threshold, a whole-graph `min` / `max` aggregate is run
+  on a parallel-configured engine and on a serial one, reporting the **speedup**
+  after verifying the two results are bit-identical; and a `count(*)` over every
+  node is served by the **`O(1)` count pushdown**, contrasted against the `O(N)`
+  scan it replaces. The parallel win is idle-core-bound and reported as
+  single-tenant telemetry. See
+  [Intra-query parallelism exercise](#intra-query-parallelism-exercise-2122).
 
 ## Domain / scenario
 
@@ -252,6 +260,23 @@ q.friend_by_year.2025=1599
 # columnar.hashjoin.col_bytes=5631192
 # columnar.hashjoin.nested_bytes=146680528
 # columnar.hashjoin.malloc_ratio=117.73
+# --- intra-query parallelism exercise (#2122) ---
+# parallel.scale.nodes=60000
+# parallel.scale.threshold=1024
+# parallel.gomaxprocs=10
+# parallel.min.value=0
+# parallel.min.parallel_elapsed=8.383ms
+# parallel.min.serial_elapsed=28.767ms
+# parallel.min.speedup=3.43
+# parallel.max.value=99997
+# parallel.max.parallel_elapsed=9.385ms
+# parallel.max.serial_elapsed=29.236ms
+# parallel.max.speedup=3.12
+# parallel.count.nodes=60000
+# parallel.count.value=60000
+# parallel.count.o1_elapsed=6.458µs
+# parallel.count.scan_elapsed=12.4ms
+# parallel.count.speedup=1920.1
 ```
 
 The `edges.*` totals depend on the seed; `q.count_friend` and `q.count_like`
@@ -303,12 +328,23 @@ deterministic invariants:
   `columnar.filter.row_batches == 0` is the direct engagement proof: the engine
   drove its columnar-filter path for the columnar query and not for the
   `coalesce()` baseline.
+- **Intra-query parallelism (`#2122`).** The `parallel.*` block is telemetry (every
+  line is `# `-prefixed). `parallel.scale.nodes` is the fixed working set the
+  exercise builds and `parallel.scale.threshold` the lowered
+  `ParallelScanThreshold` above which the parallel path engages. `parallel.min` /
+  `parallel.max` report the aggregate `value` — identical between the parallel and
+  serial engine, or the exercise fails the run — with the parallel and serial
+  wall-clocks and their `speedup`. `parallel.count.value` is the `O(1)` count
+  pushdown result, equal to the population and to the `O(N)` scan it is contrasted
+  with; `o1_elapsed` versus `scan_elapsed` makes the `O(1)` nature visible.
 
-The `# `-prefixed figures (including all latencies and the whole `stats.*` and
-`columnar.*` blocks) are environment-dependent and are **not** pinned by the
-test — except the statistics and columnar tests read the deterministic values by
-name to assert the provenance tags, the tracked-pair count, the estimate-vs-actual
-accuracy, the columnar engagement, and the **direction** of each allocation win.
+The `# `-prefixed figures (including all latencies and the whole `stats.*`,
+`columnar.*`, and `parallel.*` blocks) are environment-dependent and are **not**
+pinned by the test — except the statistics, columnar, and parallelism tests read the
+deterministic values by name to assert the provenance tags, the tracked-pair count,
+the estimate-vs-actual accuracy, the columnar engagement, the **direction** of each
+allocation win, and — for the parallelism exercise — the result identity and the exact
+population count (never a timing or the speedup, which are idle-core-bound).
 
 ## Columnar execution exercise (#2121)
 
@@ -406,6 +442,99 @@ engagement counter), never a pinned value.
 `internal/metrics` backend hook (`metrics.SetBackend`) to read the columnar-filter
 batch counter. The exercise adds **no** module code: the columnar operators engage
 automatically on the qualifying query shapes.
+
+## Intra-query parallelism exercise (#2122)
+
+The engine parallelises some whole-graph aggregates **automatically**, and answers
+others in constant time, once the graph is large enough to make it worthwhile. This
+exercise drives both paths and produces evidence they engaged and are correct:
+
+- the morsel-parallel **`min` / `max` aggregate** (`#2111`) — a group-by-less
+  `min` / `max` over a bare full-node scan whose per-node property read and `Compare`
+  are split across up to `GOMAXPROCS` workers;
+- the **`O(1)` `count(*)` pushdown** (`#2113`) — a group-by-less `count(*)` over a
+  bare full-node scan that reads the maintained live-node counter directly, without
+  walking a single node.
+
+**Scenario.** Network-wide analytics over a large **user population**, each account
+carrying a numeric `reputation` score: *what are the lowest and highest reputation in
+the whole network*, and *how many accounts are there in total*. These are whole-graph
+node aggregates — they never traverse an edge — so the exercise's working set is a
+pure account population (edge traversal is exercised by the main battery and the
+columnar exercise).
+
+**Objective.** Show, empirically, that the parallel `min` / `max` returns a result
+**bit-identical** to the serial path while completing faster on an idle box, and that
+the `count(*)` pushdown returns the exact population in `O(1)` — a wall-clock that does
+not scale with the node count.
+
+**Purpose.** Give the parallel aggregate and the count pushdown a measurable,
+reproducible harness so a regression that diverges the parallel result, or that turns
+the `O(1)` count back into an `O(N)` scan, is caught.
+
+### The two contrasts
+
+| Query | Cypher | Engaged path | Contrasted against |
+|---|---|---|---|
+| Whole-graph `min` / `max` | `MATCH (n) RETURN min(n.reputation)` | morsel-parallel aggregate (`ParallelScanThreshold` lowered so it engages) | the **same query** on an `EngineOptions{DisableParallelScan: true}` serial engine |
+| Whole-graph `count(*)` | `MATCH (n) RETURN count(*)` | `O(1)` `AllNodesCountScan` (serial engine) | `MATCH (n) WHERE n.reputation >= 0 RETURN count(*)`, whose trivially-true `WHERE` keeps the scan non-bare and forces the `O(N)` full-scan count |
+
+The `min` / `max` pattern is deliberately **bare** (`MATCH (n)`, no label): a label
+turns the scan into a `NodeByLabelScan`, a different operator. The count baseline's
+`WHERE n.reputation >= 0` is always true (reputation is drawn from `[0, 100000)`), so
+it counts the identical population while denying the pushdown its bare-scan shape.
+
+### How the win is measured
+
+The parallel and serial engines share the **same immutable population**, so the scan
+order is identical and the parallel reduce — which carries each partial extremum with
+the scan position that breaks a `Compare`-tie — is **bit-identical** to the serial
+first-seen result, not merely value-equal. Each query is warmed (excluding one-off plan
+compilation) and then timed as the best of a few repetitions, which damps scheduler
+noise without pinning a machine-specific number. Every `Result` is fully drained and
+closed, so the parallel worker pool joins before the exercise returns (the package's
+`goleak` `TestMain` enforces it). The two aggregate values are asserted **identical**,
+and the `O(1)` count, the `O(N)` scan, and the known population are asserted to agree,
+**before** any timing is reported — a divergence fails the run loudly.
+
+### Observed figures (idle box, `parScaleUsers = 60000`, `GOMAXPROCS = 10`)
+
+| Contrast | Serial / `O(N)` | Parallel / `O(1)` | Speedup |
+|---|---:|---:|---:|
+| `min(n.reputation)` | ~28.8 ms | ~8.4 ms | **~3.4×** |
+| `max(n.reputation)` | ~29.2 ms | ~9.4 ms | **~3.1×** |
+| `count(*)` (`O(N)` scan → `O(1)` read) | ~12.4 ms | ~6.5 µs | **~1900×** |
+
+**Honest telemetry — the win is idle-core-bound.** Intra-query parallelism is a
+**latency** win that pays only by consuming otherwise-idle cores: speedup ≈
+`min(workers, idle cores) × efficiency`. The figures above are the **single-tenant**
+case (one query at a time on an idle box), which is exactly this example's run. Under
+concurrent multi-client load the engine's shared worker governor correctly throttles
+each query toward the serial path (a `budget == 1` short-circuit runs the reduce
+inline), so the win narrows toward **parity** — no regression, but no speedup either.
+This exercise does not model that regime and does not claim the speedup holds under
+saturation. Accordingly the regression test asserts the deterministic invariants
+(result identity, the exact count) but **never** that the parallel arm was faster.
+
+### Bounded working set
+
+The parallel path engages only above `ParallelScanThreshold` live nodes, so the
+exercise builds a population large enough to cross a lowered threshold and to give the
+reduce several morsels of work — a **fixed** `parScaleUsers`, not the `-users` scale,
+because intra-query parallelism only matters at scale. The population is small enough
+that the whole exercise (build plus timed queries) stays a few seconds under the race
+detector in the short test layer, and its figures are identical at any `-users`.
+
+### Exercised GoGraph APIs
+
+`cypher.NewEngineWithOptions` with `EngineOptions{ParallelScanThreshold: …}` (parallel)
+and `EngineOptions{DisableParallelScan: true}` (serial) — `ParallelScanThreshold` is an
+engine **configuration** knob, not a module change; the shipped default is
+`cypher.DefaultParallelScanThreshold` (50,000). Also `Engine.Run`, `Result.Next` /
+`Result.Record` / `Result.Err` / `Result.Close`, and the `graph/lpg` builders
+(`AddNode`, `SetNodeLabel`, `SetNodeProperty` with `lpg.Int64Value` / `lpg.StringValue`,
+`AdjList().Compact`). The exercise adds **no** module code: the parallel aggregate and
+the count pushdown engage automatically on the qualifying query shapes and scale.
 
 ## Memory profile and optimizations
 

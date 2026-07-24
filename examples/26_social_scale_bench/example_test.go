@@ -365,6 +365,73 @@ func TestStatisticsExercise(t *testing.T) {
 	}
 }
 
+// TestParallelismExercise pins the intra-query parallelism observability section
+// (#2122). Its lines are telemetry (prefixed "# "), so they are absent from the
+// deterministic fact-line set; this test reads them by name and asserts the
+// DETERMINISTIC invariants the exercise verified internally — the parallel and serial
+// aggregate values are identical (the exercise fails the run otherwise) and the count
+// pushdown, the full scan, and the population all agree — plus the presence of the
+// volatile timing/speedup lines. It deliberately does NOT assert the parallel arm won:
+// intra-query parallelism is idle-core-bound, so a loaded or single-core box may show
+// no speedup, and gating on it would be a flaky, dishonest assertion.
+func TestParallelismExercise(t *testing.T) {
+	var buf bytes.Buffer
+	if err := parallelismExercise(context.Background(), testConfig(), &buf); err != nil {
+		t.Fatalf("parallelismExercise: %v", err)
+	}
+	out := buf.String()
+
+	// The working set is a fixed constant, independent of -users, and the threshold
+	// must sit below it or the parallel path could never engage.
+	if got := telemetryInt(t, out, "parallel.scale.nodes"); got != parScaleUsers {
+		t.Errorf("parallel.scale.nodes = %d, want %d", got, parScaleUsers)
+	}
+	if thr := telemetryInt(t, out, "parallel.scale.threshold"); thr >= parScaleUsers {
+		t.Errorf("parallel.scale.threshold = %d, want < scale %d (else the parallel path cannot engage)", thr, parScaleUsers)
+	}
+
+	// count(*): the O(1) pushdown, the O(N) scan, and the known population all agree
+	// (the exercise fails the run otherwise); this re-checks the exact count here.
+	if got := telemetryInt(t, out, "parallel.count.value"); got != parScaleUsers {
+		t.Errorf("parallel.count.value = %d, want %d (every node counted once)", got, parScaleUsers)
+	}
+	if got := telemetryInt(t, out, "parallel.count.nodes"); got != parScaleUsers {
+		t.Errorf("parallel.count.nodes = %d, want %d", got, parScaleUsers)
+	}
+
+	// min/max: the parallel and serial engines returned an identical value (verified
+	// inside the exercise), and the extrema bracket the reputation domain.
+	minV := telemetryInt(t, out, "parallel.min.value")
+	maxV := telemetryInt(t, out, "parallel.max.value")
+	if minV < 0 || minV > maxV || maxV >= reputationRange {
+		t.Errorf("reputation extrema out of range: min=%d max=%d, want 0 <= min <= max < %d", minV, maxV, reputationRange)
+	}
+
+	// The speedup and elapsed lines are volatile telemetry: assert only that both arms
+	// ran (the lines are present), never that the parallel arm was faster.
+	for _, key := range []string{
+		"parallel.min.parallel_elapsed", "parallel.min.serial_elapsed", "parallel.min.speedup",
+		"parallel.max.parallel_elapsed", "parallel.max.serial_elapsed", "parallel.max.speedup",
+		"parallel.count.o1_elapsed", "parallel.count.scan_elapsed", "parallel.count.speedup",
+	} {
+		if !hasTelemetry(out, key) {
+			t.Errorf("missing telemetry line %q", key)
+		}
+	}
+}
+
+// hasTelemetry reports whether out carries a "# <key>=…" telemetry line, without
+// constraining the value's type (used for the volatile duration/speedup lines).
+func hasTelemetry(out, key string) bool {
+	prefix := "# " + key + "="
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // telemetryInt returns the integer value of the "# <key>=<int>" telemetry line,
 // failing the test when the line is absent or its value is not an integer.
 func telemetryInt(t *testing.T, out, key string) int64 {

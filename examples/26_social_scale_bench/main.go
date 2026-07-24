@@ -34,7 +34,7 @@
 // exact label scan and the approximate range. These estimates are display-only:
 // they annotate EXPLAIN but never change which plan runs.
 //
-// Finally main runs the columnar-execution exercise (task #2121): three analytic
+// Next main runs the columnar-execution exercise (task #2121): three analytic
 // queries — a GROUP BY aggregation, a filter-over-traversal, and a disconnected
 // equi-join — that each engage one of the engine's columnar (chunk-at-a-time)
 // physical operators, measured against a result-identical row-mode baseline so the
@@ -42,6 +42,15 @@
 // working set (never the full -users scale), so it is driven from main after run
 // rather than inside run: it must stay cheap and identical however large -users is.
 // See [columnarExercise].
+//
+// Finally main runs the intra-query parallelism exercise (task #2122): over a
+// bounded user population large enough to cross the parallel-scan threshold, it runs
+// a whole-graph min/max aggregate on a parallel-configured engine and on a serial one
+// and reports the speedup (verifying the two results are bit-identical), then contrasts
+// an O(1) count(*) pushdown against the O(N) scan it replaces. Like the columnar
+// exercise it runs on its own fixed-scale working set and is driven from main. The
+// parallel win is idle-core-bound and reported as single-tenant telemetry, never
+// claimed to hold under concurrent load. See [parallelismExercise].
 //
 // # Model
 //
@@ -238,6 +247,12 @@ func main() {
 	// main battery rather than from run: it must stay cheap and identical however
 	// large -users is, and the regression test drives it directly.
 	if err := columnarExercise(ctx, cfg, os.Stdout); err != nil {
+		log.Fatal(err)
+	}
+	// The parallelism exercise likewise runs on its own fixed-scale working set
+	// (never the -users scale — see parallelismExercise), large enough to cross the
+	// parallel-scan threshold, so it too is driven from main rather than from run.
+	if err := parallelismExercise(ctx, cfg, os.Stdout); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -1693,6 +1708,228 @@ func humanBytes(n uint64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.2f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Intra-query parallelism exercise (rmp #2122)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Parallelism working-set bounds. The parallel min/max aggregate (#2111) engages
+// only above [cypher.EngineOptions.ParallelScanThreshold] live nodes, so this
+// exercise builds a user population large enough to cross it and to give the
+// morsel-parallel reduce several [exec.DefaultMorselSize] morsels of work to spread
+// across cores — but small enough that the whole exercise (build + timed queries)
+// stays a few seconds under -race in the short test layer. Unlike run's -users
+// scale it is a CONSTANT: intra-query parallelism only matters at scale, so the
+// exercise pins its own working set rather than tracking -users (mirroring
+// columnarExercise, which likewise runs on a fixed bounded sub-graph).
+const (
+	parScaleUsers = 60_000
+
+	// parScanThreshold is the ParallelScanThreshold the exercise lowers its parallel
+	// engine to. The morsel-parallel path engages strictly above it (#1672), so a
+	// value far below parScaleUsers guarantees engagement at this scale. The example
+	// lowers it through EngineOptions — an engine CONFIG knob, not a module change —
+	// because the shipped default ([cypher.DefaultParallelScanThreshold] = 50000)
+	// sits just below this working set; a production engine keeps the default.
+	parScanThreshold = 1024
+
+	// reputationRange bounds the synthetic per-user reputation score to
+	// [0, reputationRange). It is the numeric property the whole-graph min/max scans.
+	reputationRange = 100_000
+
+	// propReputation is the numeric per-user score the parallel min/max aggregate
+	// runs over.
+	propReputation = "reputation"
+
+	// parReps is the number of timed repetitions per query; the best (smallest)
+	// wall-clock is reported, which damps scheduler noise without pinning a
+	// machine-specific number. Kept small so the exercise's contribution to the
+	// short-layer package budget stays a few seconds under -race.
+	parReps = 3
+)
+
+// parallelismExercise builds a bounded user population and exercises the engine's
+// automatic intra-query parallelism over whole-graph node aggregates (rmp #2122):
+//
+//   - a bare-scan min/max over a numeric property (MATCH (n) RETURN min/max(n.reputation))
+//     engages the morsel-parallel aggregate (#2111) above ParallelScanThreshold: the
+//     per-node property read and Compare are split across up to GOMAXPROCS workers,
+//     each carrying its partial extremum with the scan position that breaks a tie, so
+//     the parallel reduce is BIT-IDENTICAL to the serial first-seen result. The
+//     exercise runs the SAME query on a parallel-configured engine and on a
+//     DisableParallelScan serial engine, verifies the two values are identical
+//     (failing loud otherwise), and reports both wall-clocks and the speedup.
+//   - a count(*) over every node engages the O(1) count pushdown (#2113): the serial
+//     AllNodesCountScan reads the maintained live-node counter directly instead of
+//     walking the graph. The exercise contrasts its wall-clock against an O(N) full
+//     scan count (a trivially-true WHERE keeps the scan non-bare, so the pushdown
+//     declines and the whole population is walked) over the same node count, making
+//     the O(1) nature visible, and verifies both counts equal the population.
+//
+// Honest telemetry: intra-query parallelism is a LATENCY win that pays only by
+// consuming otherwise-idle cores — speedup ≈ min(workers, idle cores) × efficiency.
+// The figures here are the single-tenant, idle-box case (one query at a time). Under
+// concurrent multi-client load the shared worker governor correctly throttles each
+// query toward the serial path (the budget==1 short-circuit runs the reduce inline),
+// so the win narrows toward parity. This exercise does not model that regime and does
+// not claim the speedup holds under saturation.
+//
+// Every line is volatile telemetry (prefixed "# "): the wall-clocks and speedups vary
+// per run and machine, so the regression test reads them by name and asserts the
+// deterministic invariants — result identity and the exact population count — rather
+// than pinning a timing or gating on the win.
+func parallelismExercise(ctx context.Context, cfg config, w io.Writer) error {
+	g, err := buildPopulation(ctx, cfg.seed, parScaleUsers)
+	if err != nil {
+		return fmt.Errorf("population build: %w", err)
+	}
+
+	// Two engines over the SAME immutable population: the parallel path engages above
+	// parScanThreshold, the serial path is forced off. Sharing g keeps the scan order
+	// identical, so the parallel and serial extrema are bit-identical, not merely
+	// value-equal on a tie.
+	engPar := cypher.NewEngineWithOptions(g, cypher.EngineOptions{ParallelScanThreshold: parScanThreshold})
+	engSer := cypher.NewEngineWithOptions(g, cypher.EngineOptions{DisableParallelScan: true})
+
+	fmt.Fprintln(w, "# --- intra-query parallelism exercise (#2122) ---")
+	fmt.Fprintf(w, "# parallel.scale.nodes=%d\n", parScaleUsers)
+	fmt.Fprintf(w, "# parallel.scale.threshold=%d\n", parScanThreshold)
+	fmt.Fprintf(w, "# parallel.gomaxprocs=%d\n", runtime.GOMAXPROCS(0))
+
+	if err := parallelAggExercise(ctx, engPar, engSer, "min", w); err != nil {
+		return err
+	}
+	if err := parallelAggExercise(ctx, engPar, engSer, "max", w); err != nil {
+		return err
+	}
+	return parallelCountExercise(ctx, engSer, parScaleUsers, w)
+}
+
+// buildPopulation materialises n users into a fresh weightless graph, each carrying a
+// realistic name and a numeric reputation score in [0, reputationRange), drawn from a
+// seed-derived RNG so the population — and therefore the min/max extrema and the count
+// — is reproducible for a given seed. It builds NO edges: the parallel aggregate and
+// the count pushdown operate over the whole-graph NODE scan and never traverse
+// relationships, so a pure account population is the faithful working set for this
+// exercise (edge traversal is exercised by the main battery and columnarExercise).
+func buildPopulation(ctx context.Context, seed int64, n int) (*lpg.Graph[string, float64], error) {
+	//nolint:gosec // G404: a seeded math/rand fixes the reputation distribution for a
+	// given -seed; crypto/rand would defeat the reproducibility this benchmark needs.
+	rng := rand.New(rand.NewSource(seed))
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Weightless: true})
+	for i := 0; i < n; i++ {
+		if i%checkEvery == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		k := "u" + strconv.Itoa(i)
+		if err := g.AddNode(k); err != nil {
+			return nil, fmt.Errorf("AddNode %s: %w", k, err)
+		}
+		if err := g.SetNodeLabel(k, labelUser); err != nil {
+			return nil, fmt.Errorf("SetNodeLabel %s: %w", k, err)
+		}
+		if err := g.SetNodeProperty(k, "name", lpg.StringValue(realisticName(rng))); err != nil {
+			return nil, fmt.Errorf("SetNodeProperty name %s: %w", k, err)
+		}
+		if err := g.SetNodeProperty(k, propReputation, lpg.Int64Value(int64(rng.Intn(reputationRange)))); err != nil {
+			return nil, fmt.Errorf("SetNodeProperty reputation %s: %w", k, err)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// Right-size the node backing arrays before the read-only query phase, mirroring
+	// run (this is a build-then-query workload).
+	g.AdjList().Compact(ctx)
+	return g, nil
+}
+
+// parallelAggExercise runs a bare-scan aggregate (agg is "min" or "max") over the
+// reputation property on both the parallel and the serial engine, verifies the two
+// results are identical before reporting (the parallel reduce must be bit-identical to
+// serial), and emits both wall-clocks and the speedup as telemetry.
+func parallelAggExercise(ctx context.Context, engPar, engSer *cypher.Engine, agg string, w io.Writer) error {
+	q := fmt.Sprintf("MATCH (n) RETURN %s(n.%s) AS c", agg, propReputation)
+
+	parVal, parDur, err := bestScalar(ctx, engPar, q)
+	if err != nil {
+		return fmt.Errorf("%s parallel: %w", agg, err)
+	}
+	serVal, serDur, err := bestScalar(ctx, engSer, q)
+	if err != nil {
+		return fmt.Errorf("%s serial: %w", agg, err)
+	}
+	if parVal != serVal {
+		return fmt.Errorf("%s parallel/serial results differ: %d vs %d (the parallel reduce must be bit-identical to serial)", agg, parVal, serVal)
+	}
+
+	fmt.Fprintf(w, "# parallel.%s.value=%d\n", agg, parVal)
+	fmt.Fprintf(w, "# parallel.%s.parallel_elapsed=%s\n", agg, parDur.Round(time.Microsecond))
+	fmt.Fprintf(w, "# parallel.%s.serial_elapsed=%s\n", agg, serDur.Round(time.Microsecond))
+	fmt.Fprintf(w, "# parallel.%s.speedup=%.2f\n", agg, safeDiv(float64(serDur), float64(parDur)))
+	return nil
+}
+
+// parallelCountExercise contrasts the O(1) count pushdown against the O(N) full scan
+// it replaces, both on the serial (DisableParallelScan) engine so the O(1) path is the
+// AllNodesCountScan. It verifies the O(1) count, the O(N) scan count, and the known
+// population all agree before reporting, making the O(1) nature visible as a wall-clock
+// that does not scale with the node count.
+func parallelCountExercise(ctx context.Context, engSer *cypher.Engine, nodes int, w io.Writer) error {
+	const (
+		o1Q = "MATCH (n) RETURN count(*) AS c"
+		// A trivially-true predicate over every node (reputation is always >= 0) keeps
+		// the scan non-bare, so the O(1) pushdown declines and the whole population is
+		// walked — the O(N) baseline the direct read replaces.
+		scanQ = "MATCH (n) WHERE n.reputation >= 0 RETURN count(*) AS c"
+	)
+	o1Val, o1Dur, err := bestScalar(ctx, engSer, o1Q)
+	if err != nil {
+		return fmt.Errorf("count O(1): %w", err)
+	}
+	scanVal, scanDur, err := bestScalar(ctx, engSer, scanQ)
+	if err != nil {
+		return fmt.Errorf("count O(N) scan: %w", err)
+	}
+	if o1Val != scanVal || o1Val != int64(nodes) {
+		return fmt.Errorf("count mismatch: o1=%d scan=%d population=%d (all three must agree)", o1Val, scanVal, nodes)
+	}
+
+	fmt.Fprintf(w, "# parallel.count.nodes=%d\n", nodes)
+	fmt.Fprintf(w, "# parallel.count.value=%d\n", o1Val)
+	fmt.Fprintf(w, "# parallel.count.o1_elapsed=%s\n", o1Dur)
+	fmt.Fprintf(w, "# parallel.count.scan_elapsed=%s\n", scanDur.Round(time.Microsecond))
+	fmt.Fprintf(w, "# parallel.count.speedup=%.1f\n", safeDiv(float64(scanDur), float64(o1Dur)))
+	return nil
+}
+
+// bestScalar warms query on eng (populating the plan cache so the timed runs exclude
+// one-off compilation) then runs it parReps times, returning the single-row integer
+// value and the best (smallest) wall-clock. Best-of damps scheduler noise without
+// pinning a machine-specific number. Every result is fully drained and closed, so the
+// parallel worker pool joins before return (the package's goleak TestMain enforces it).
+func bestScalar(ctx context.Context, eng *cypher.Engine, query string) (int64, time.Duration, error) {
+	if _, _, err := scalarCount(ctx, eng, query, nil); err != nil { // warm the plan cache
+		return 0, 0, err
+	}
+	var (
+		best time.Duration
+		val  int64
+	)
+	for i := 0; i < parReps; i++ {
+		v, d, err := scalarCount(ctx, eng, query, nil)
+		if err != nil {
+			return 0, 0, err
+		}
+		val = v
+		if i == 0 || d < best {
+			best = d
+		}
+	}
+	return val, best, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
