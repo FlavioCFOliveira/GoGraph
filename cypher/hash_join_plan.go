@@ -207,9 +207,22 @@ func tryBuildHashJoin(
 
 	// The Apply emits outer||inner. Here outer is the probe, inner is the build.
 	// Keep that exact column order: probe||build, i.e. buildOnLeft=false.
+	//
+	// When both arms build to a ChunkProducer (a bare scan on each side — the
+	// common disconnected-equi-join shape), prefer the columnar hash join
+	// (exec.ColumnarHashJoin, #2105): it drains both children column-major and
+	// retains build-side row-ids into a column-major buffer instead of a
+	// per-row make(Row)+copy snapshot, a result-identical allocation win. Any
+	// non-ChunkProducer arm (an Expand/Filter subtree) keeps the row-mode
+	// exec.HashJoin, so existing plans are unchanged (design §6.2).
 	hjMB, hjEst := resultByteBudget(bopts)
-	var op exec.Operator = exec.NewHashJoin(innerOp, outerOp, buildFn, probeFn, false).
-		WithByteBudget(hjMB, hjEst)
+	var op exec.Operator
+	if chj, colOK := exec.NewColumnarHashJoin(innerOp, outerOp, buildFn, probeFn, false); colOK {
+		op = chj.WithByteBudget(hjMB, hjEst)
+	} else {
+		op = exec.NewHashJoin(innerOp, outerOp, buildFn, probeFn, false).
+			WithByteBudget(hjMB, hjEst)
+	}
 
 	// Re-apply every residual conjunct (all but the chosen key) as a Filter on
 	// the combined row, preserving Selection(fullPredicate, …) semantics.
