@@ -2003,7 +2003,7 @@ func (e *Engine) Explain(query string, params map[string]expr.Value) (s string, 
 			anchorSwaps = computeAnchorSwaps(sites, labelSrc)
 		}
 	}
-	return explainWithIndexes(plan, e.g.IndexManager(), params, e.g, reorderSwaps, anchorSwaps), nil
+	return explainWithIndexes(plan, e.g.IndexManager(), params, e.g, labelSrc, reorderSwaps, anchorSwaps), nil
 }
 
 // explainWithIndexes walks plan and renders operator names, substituting
@@ -2014,9 +2014,13 @@ func (e *Engine) Explain(query string, params map[string]expr.Value) (s string, 
 // anchorSwaps carry the count-store-gated reordering decisions (#2091 / #2090) so
 // the rendered tree matches the physically-built plan; both are nil when the
 // respective peephole is disabled or fires nowhere.
-func explainWithIndexes(plan ir.LogicalPlan, idxMgr *index.Manager, params map[string]expr.Value, g *lpg.Graph[string, float64], reorderSwaps map[*ir.Apply]bool, anchorSwaps map[*ir.Expand]bool) string {
+//
+// labelSrc is the engine's resolver (count store + statistics collector), used to
+// annotate each operator with a cardinality estimate and its provenance (task
+// #2099). It is DISPLAY-ONLY — see [explainWithIndexesNode] and explain_estimate.go.
+func explainWithIndexes(plan ir.LogicalPlan, idxMgr *index.Manager, params map[string]expr.Value, g *lpg.Graph[string, float64], labelSrc *lpgLabelResolver, reorderSwaps map[*ir.Apply]bool, anchorSwaps map[*ir.Expand]bool) string {
 	var b strings.Builder
-	explainWithIndexesNode(&b, plan, idxMgr, params, g, reorderSwaps, anchorSwaps, "", true, true)
+	explainWithIndexesNode(&b, plan, idxMgr, params, g, labelSrc, reorderSwaps, anchorSwaps, "", true, true)
 	return b.String()
 }
 
@@ -2042,12 +2046,18 @@ func physicalExpandLabel(e *ir.Expand) string {
 	return "(" + e.FromVar + ")" + left + rel + right + "(" + e.ToVar + ")"
 }
 
+// labelSrc carries the count store and statistics collector so each operator line
+// is annotated with a cardinality estimate and its provenance tag (task #2099).
+// The annotation is DISPLAY-ONLY: it is appended to a line that would be printed
+// regardless, reads the estimate providers live (see explain_estimate.go), and
+// never changes the rendered plan shape, the executed plan, or any result.
 func explainWithIndexesNode(
 	b *strings.Builder,
 	plan ir.LogicalPlan,
 	idxMgr *index.Manager,
 	params map[string]expr.Value,
 	explainGraph *lpg.Graph[string, float64],
+	labelSrc *lpgLabelResolver,
 	reorderSwaps map[*ir.Apply]bool,
 	anchorSwaps map[*ir.Expand]bool,
 	prefix string,
@@ -2064,7 +2074,7 @@ func explainWithIndexesNode(
 	if sel, ok := plan.(*ir.Selection); ok && len(anchorSwaps) > 0 {
 		if site, ok := matchAnchorSite(sel); ok && anchorSwaps[site.exp] {
 			explainWithIndexesNode(b, mirrorAnchorSite(&site), idxMgr, params, explainGraph,
-				reorderSwaps, anchorSwaps, prefix, isRoot, isLast)
+				labelSrc, reorderSwaps, anchorSwaps, prefix, isRoot, isLast)
 			return
 		}
 	}
@@ -2108,6 +2118,33 @@ func explainWithIndexesNode(
 		}
 	}
 
+	// Cardinality-estimate annotation for this operator's own line (task #2099).
+	// DISPLAY-ONLY: computed from the estimate providers via labelSrc, appended
+	// after the operator detail, never affecting the rendered shape. The rewritten
+	// range-scan / min-label LEAF lines carry their own annotations below.
+	var annot string
+	switch opName {
+	case "NodeByIndexSeek", "Selection":
+		// A Selection — whether left as a Selection, subsumed into a hash index
+		// seek, or topping a range/min-label rewrite — is estimated from its
+		// predicate over the scanned label (equality: MCV-exact / 1-over-NDV;
+		// single range: equi-depth histogram + certified error). A bare label
+		// predicate or any other shape yields no annotation.
+		if sel, ok := plan.(*ir.Selection); ok {
+			annot = selectionEstimateAnnotation(sel, labelSrc, params)
+		}
+	case "NodeByLabelScan":
+		if scan, ok := plan.(*ir.NodeByLabelScan); ok {
+			annot = labelScanAnnotation(labelSrc, scan.Label)
+		}
+	case "AllNodesScan":
+		annot = scanEstimateAnnotation(plan, labelSrc, explainGraph)
+	case "Expand":
+		if exp, ok := plan.(*ir.Expand); ok {
+			annot = expandEstimateAnnotation(exp, labelSrc)
+		}
+	}
+
 	b.WriteString(prefix)
 	b.WriteString(connector)
 	b.WriteString(opName)
@@ -2129,6 +2166,7 @@ func explainWithIndexesNode(
 		b.WriteByte(' ')
 		b.WriteString(physicalExpandLabel(exp))
 	}
+	b.WriteString(annot)
 	b.WriteByte('\n')
 
 	// When a Selection was rewritten to an index seek, skip its scan child
@@ -2143,7 +2181,13 @@ func explainWithIndexesNode(
 	// NodeByLabelScan child is replaced by a NodeByIndexRangeScan leaf.
 	if rangeSeek {
 		b.WriteString(nextPrefix)
-		b.WriteString("└─ NodeByIndexRangeScan\n")
+		b.WriteString("└─ NodeByIndexRangeScan")
+		// The range scan produces exactly the in-range index rows (an exact
+		// count the seek already established is selective) — an estExact estimate.
+		if sel, ok := plan.(*ir.Selection); ok {
+			b.WriteString(rangeSeekLeafAnnotation(sel, idxMgr, explainGraph, params))
+		}
+		b.WriteByte('\n')
 		return
 	}
 
@@ -2155,7 +2199,10 @@ func explainWithIndexesNode(
 		b.WriteString(minLabelVar)
 		b.WriteByte(':')
 		b.WriteString(minLabel)
-		b.WriteString("]\n")
+		b.WriteString("]")
+		// The re-anchored scan produces the exact live count of the chosen label.
+		b.WriteString(labelScanAnnotation(labelSrc, minLabel))
+		b.WriteByte('\n')
 		return
 	}
 
@@ -2167,7 +2214,7 @@ func explainWithIndexesNode(
 		children = []ir.LogicalPlan{children[1], children[0]}
 	}
 	for i, child := range children {
-		explainWithIndexesNode(b, child, idxMgr, params, explainGraph, reorderSwaps, anchorSwaps, nextPrefix, false, i == len(children)-1)
+		explainWithIndexesNode(b, child, idxMgr, params, explainGraph, labelSrc, reorderSwaps, anchorSwaps, nextPrefix, false, i == len(children)-1)
 	}
 }
 

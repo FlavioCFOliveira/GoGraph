@@ -134,8 +134,10 @@ func ExampleEngine_RunAny() {
 	// owner: "bob"
 }
 
-// ExampleEngine_Explain returns the logical plan for a query as text without
-// executing it or touching the graph.
+// ExampleEngine_Explain returns the physical plan for a query as text without
+// executing it or touching the graph. Each row-producing operator is annotated
+// with a cardinality estimate and its provenance tag (exact / stats / heuristic);
+// the label scan over an empty graph is an exact count of zero (#2099).
 func ExampleEngine_Explain() {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
@@ -149,7 +151,7 @@ func ExampleEngine_Explain() {
 	// Output:
 	// ProduceResults
 	// └─ Projection
-	//    └─ NodeByLabelScan [n:Person]
+	//    └─ NodeByLabelScan [n:Person] (est. rows=0, exact)
 }
 
 // ExampleBindParams converts a map of Go values into the engine's internal
