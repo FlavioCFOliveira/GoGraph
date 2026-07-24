@@ -278,6 +278,56 @@ func TestExplainEstimate_DisplayOnly(t *testing.T) {
 	}
 }
 
+// TestExplainEstimate_LazyCollectorNilUntilRefresh pins the task #2101 contract:
+// an engine that never enables statistics holds a NIL collector (no allocation,
+// so the write path pays only a nil check), and EXPLAIN still renders — the
+// property-predicate Selection falls back to no annotation rather than panicking
+// on the absent collector. The first RefreshStatistics then lazily installs the
+// collector, after which the same EXPLAIN gains its stats annotation.
+func TestExplainEstimate_LazyCollectorNilUntilRefresh(t *testing.T) {
+	const n = 300
+	e, _, _ := seedPersonGraph(t, n, 0.30) // deliberately NO RefreshStatistics yet
+
+	// The default (stats-free) engine never allocates a collector.
+	if c := e.statsCollector.Load(); c != nil {
+		t.Fatalf("fresh engine collector = %p, want nil (lazy: unallocated until first RefreshStatistics)", c)
+	}
+	// The write-path resolver reports absence, and lookupStats tolerates it.
+	if got := statsTestSource(e).Statistics(); got != nil {
+		t.Errorf("resolver Statistics() over a stats-free engine = %p, want nil", got)
+	}
+
+	// EXPLAIN must render (never panic on the nil collector) and omit the
+	// range annotation, exactly as the absent-statistic fallback requires.
+	q := "MATCH (p:Person) WHERE p.age < 30 RETURN p"
+	before, err := e.Explain(q, nil)
+	if err != nil {
+		t.Fatalf("Explain over stats-free engine: %v", err)
+	}
+	if strings.Contains(planLineContaining(t, before, "Selection"), ", stats") {
+		t.Errorf("stats-free engine must not stats-annotate the range Selection; plan:\n%s", before)
+	}
+	// The genuinely-exact label scan count is unaffected by the absent collector.
+	if want := fmt.Sprintf("(est. rows=%d, exact)", n); !strings.Contains(planLineContaining(t, before, "NodeByLabelScan"), want) {
+		t.Errorf("label scan must still show %q; plan:\n%s", want, before)
+	}
+
+	// First RefreshStatistics lazily installs the collector.
+	if err := e.RefreshStatistics(context.Background()); err != nil {
+		t.Fatalf("RefreshStatistics: %v", err)
+	}
+	if e.statsCollector.Load() == nil {
+		t.Fatal("collector still nil after RefreshStatistics — lazy install did not engage")
+	}
+	after, err := e.Explain(q, nil)
+	if err != nil {
+		t.Fatalf("Explain after refresh: %v", err)
+	}
+	if !strings.Contains(planLineContaining(t, after, "Selection"), ", stats") {
+		t.Errorf("range Selection should be stats-tagged after RefreshStatistics; plan:\n%s", after)
+	}
+}
+
 // TestExplainEstimate_AbsentStatFallback asserts that with no statistics
 // populated, a property-predicate Selection carries NO annotation (an absent
 // statistic is estFallback → omitted), while the label scan below it still shows

@@ -1,0 +1,96 @@
+# Lazy statistics collector — zero write-path regression when statistics are
+# unused (sprint 308 #2101). The planner statistics landed on main @52e317e/
+# @bf8472d and left a small UNCONDITIONAL write regression on the autocommit
+# write path even though a stats-free workload never populates a collector.
+#
+# Root cause (measured, NOT the Tracking() atomic — CREATE (:N) writes no
+# property so that hook is never reached): the `stats *statsCollector` FIELD
+# pushed two per-statement heap structs across a malloc size class:
+#   lpgMutatorAdapter  64 B -> 72 B  (size class 64 -> 80)  = +16 B/op
+#   lpgLabelResolver   16 B -> 24 B  (size class 16 -> 24)  = +8  B/op
+# A lazy collector alone does NOT recover this (the field remains). The fix
+# folds the two engine-derived pointers (cs + stats) into ONE `eng *Engine`
+# back-pointer on both mutator adapters and the label resolver, restoring the
+# pre-statistics 8-field/64-B and 2-field/16-B layouts, AND makes the collector
+# lazy (atomic.Pointer, allocated only on the first RefreshStatistics).
+#
+# Measurement: BenchmarkEngWriteAutocommit (bench/mtaudit), Apple M4, go1.26.5,
+# -benchmem -count=10. Baseline = 17eb8dc (pre-statistics). Regressed = bf8472d
+# (statistics as shipped). Fix = bf8472d + #2101 (this dirty tree).
+
+## baseline 17eb8dc (pre-statistics)
+goos: darwin
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/mtaudit
+cpu: Apple M4
+BenchmarkEngWriteAutocommit-10    	  209344	      5734 ns/op	    2489 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  209716	      5843 ns/op	    2489 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  210688	      5759 ns/op	    2488 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  213492	      5783 ns/op	    2484 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  205774	      5839 ns/op	    2493 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  206006	      5802 ns/op	    2493 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  214323	      5740 ns/op	    2485 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  211438	      5719 ns/op	    2487 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  213176	      5774 ns/op	    2485 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  210538	      5766 ns/op	    2488 B/op	      34 allocs/op
+PASS
+
+## regressed bf8472d (statistics as shipped)
+goos: darwin
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/mtaudit
+cpu: Apple M4
+BenchmarkEngWriteAutocommit-10    	  193953	      5694 ns/op	    2533 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  215702	      5728 ns/op	    2506 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  213121	      5792 ns/op	    2509 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  207319	      5792 ns/op	    2516 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  208634	      5716 ns/op	    2514 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  214304	      5746 ns/op	    2508 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  210300	      5787 ns/op	    2512 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  207536	      5807 ns/op	    2515 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  213244	      5731 ns/op	    2509 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  215149	      5749 ns/op	    2506 B/op	      34 allocs/op
+PASS
+
+## fix bf8472d + #2101 (lazy collector + eng-merge)
+goos: darwin
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/mtaudit
+cpu: Apple M4
+BenchmarkEngWriteAutocommit-10    	  187375	      5754 ns/op	    2519 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  207070	      5871 ns/op	    2492 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  203220	      5841 ns/op	    2497 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  211930	      5805 ns/op	    2486 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  212228	      5726 ns/op	    2486 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  203931	      5805 ns/op	    2496 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  209554	      5810 ns/op	    2489 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  215132	      5744 ns/op	    2482 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  208570	      5837 ns/op	    2490 B/op	      34 allocs/op
+BenchmarkEngWriteAutocommit-10    	  206457	      5844 ns/op	    2493 B/op	      34 allocs/op
+PASS
+
+## opt-in cost: property-write workload, statistics DISABLED vs ENABLED (after RefreshStatistics)
+## (isolating throwaway bench; MATCH (:Person{age:0}) SET p.age=1, autocommit, n=10)
+BenchmarkEngWritePropertyStatsOff-10    	   16351	     73535 ns/op	    7033 B/op	     303 allocs/op
+BenchmarkEngWritePropertyStatsOff-10    	   16431	     73357 ns/op	    7033 B/op	     303 allocs/op
+BenchmarkEngWritePropertyStatsOff-10    	   16390	     73096 ns/op	    7033 B/op	     303 allocs/op
+BenchmarkEngWritePropertyStatsOff-10    	   16352	     73086 ns/op	    7033 B/op	     303 allocs/op
+BenchmarkEngWritePropertyStatsOff-10    	   16347	     72995 ns/op	    7033 B/op	     303 allocs/op
+BenchmarkEngWritePropertyStatsOff-10    	   16345	     73024 ns/op	    7033 B/op	     303 allocs/op
+BenchmarkEngWritePropertyStatsOff-10    	   16160	     72797 ns/op	    7034 B/op	     303 allocs/op
+BenchmarkEngWritePropertyStatsOff-10    	   16370	     72679 ns/op	    7033 B/op	     303 allocs/op
+BenchmarkEngWritePropertyStatsOff-10    	   16369	     73796 ns/op	    7034 B/op	     303 allocs/op
+BenchmarkEngWritePropertyStatsOff-10    	   16375	     72994 ns/op	    7034 B/op	     303 allocs/op
+BenchmarkEngWritePropertyStatsOn-10     	   16386	     72571 ns/op	    7033 B/op	     303 allocs/op
+BenchmarkEngWritePropertyStatsOn-10     	   16243	     73202 ns/op	    7034 B/op	     303 allocs/op
+BenchmarkEngWritePropertyStatsOn-10     	   16470	     72651 ns/op	    7033 B/op	     303 allocs/op
+BenchmarkEngWritePropertyStatsOn-10     	   16492	     73212 ns/op	    7033 B/op	     303 allocs/op
+BenchmarkEngWritePropertyStatsOn-10     	   16302	     72673 ns/op	    7034 B/op	     303 allocs/op
+BenchmarkEngWritePropertyStatsOn-10     	   16443	     73268 ns/op	    7033 B/op	     303 allocs/op
+BenchmarkEngWritePropertyStatsOn-10     	   16468	     73922 ns/op	    7033 B/op	     303 allocs/op
+BenchmarkEngWritePropertyStatsOn-10     	   16380	     72978 ns/op	    7034 B/op	     303 allocs/op
+BenchmarkEngWritePropertyStatsOn-10     	   16498	     73077 ns/op	    7033 B/op	     303 allocs/op
+BenchmarkEngWritePropertyStatsOn-10     	   16176	     73884 ns/op	    7033 B/op	     303 allocs/op

@@ -1,0 +1,44 @@
+# benchstat — BenchmarkEngWriteAutocommit (bench/mtaudit), Apple M4, go1.26.5,
+# -benchmem -count=10. Three-way: baseline (pre-statistics) | regressed (stats as
+# shipped, bf8472d) | fix (#2101). The regression is B/op +0.90% (p=0.000) at
+# bf8472d; #2101 returns it to noise (p=0.182). sec/op is noise throughout; the
+# alloc COUNT never moved (34).
+
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/mtaudit
+cpu: Apple M4
+                      │ baseline.txt │          current.txt          │          branch.txt           │
+                      │    sec/op    │   sec/op     vs base          │   sec/op     vs base          │
+EngWriteAutocommit-10    5.770µ ± 1%   5.748µ ± 1%  ~ (p=0.342 n=10)   5.808µ ± 1%  ~ (p=0.183 n=10)
+
+                      │ baseline.txt │             current.txt             │           branch.txt           │
+                      │     B/op     │     B/op      vs base               │     B/op      vs base          │
+EngWriteAutocommit-10   2.430Ki ± 0%   2.452Ki ± 0%  +0.90% (p=0.000 n=10)   2.433Ki ± 0%  ~ (p=0.182 n=10)
+
+                      │ baseline.txt │          current.txt           │           branch.txt           │
+                      │  allocs/op   │ allocs/op   vs base            │ allocs/op   vs base            │
+EngWriteAutocommit-10     34.00 ± 0%   34.00 ± 0%  ~ (p=1.000 n=10) ¹   34.00 ± 0%  ~ (p=1.000 n=10) ¹
+¹ all samples are equal
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Opt-in maintenance cost: the statistics staleness hook is paid ONLY after
+# RefreshStatistics. Same property-write workload with statistics DISABLED
+# (off2) vs ENABLED (on2) — allocs/op and B/op byte-identical, so the enabled
+# Δ hook is O(1) atomic per tracked (label,property) with ZERO allocation.
+goos: darwin
+goarch: arm64
+pkg: x
+cpu: Apple M4
+                                 │  off2.txt   │            on2.txt            │
+                                 │   sec/op    │   sec/op     vs base          │
+EngWritePropertyPropertyWrite-10   73.06µ ± 1%   73.14µ ± 1%  ~ (p=0.912 n=10)
+
+                                 │   off2.txt   │            on2.txt             │
+                                 │     B/op     │     B/op      vs base          │
+EngWritePropertyPropertyWrite-10   6.868Ki ± 0%   6.868Ki ± 0%  ~ (p=1.000 n=10)
+
+                                 │  off2.txt  │            on2.txt             │
+                                 │ allocs/op  │ allocs/op   vs base            │
+EngWritePropertyPropertyWrite-10   303.0 ± 0%   303.0 ± 0%  ~ (p=1.000 n=10) ¹
+¹ all samples are equal

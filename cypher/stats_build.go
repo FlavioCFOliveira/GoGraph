@@ -42,7 +42,11 @@ func (e *Engine) RefreshStatistics(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	e.statsCollector.Publish(snap)
+	// Lazily allocate the collector on this first successful rebuild (task #2101):
+	// a stats-free engine never reaches here, so it never constructs a collector.
+	// A cancelled or failed build returns above without publishing, leaving the
+	// collector nil.
+	e.statsCollectorOrInit().Publish(snap)
 	return nil
 }
 

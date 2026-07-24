@@ -9,7 +9,7 @@ import (
 // resolverFor builds the production count-estimate source over an engine's graph
 // and count store, exactly as the read-path build threads it (api.go:1799).
 func resolverFor(eng *Engine) *lpgLabelResolver {
-	return &lpgLabelResolver{g: eng.g, cs: eng.countStore}
+	return &lpgLabelResolver{g: eng.g, eng: eng}
 }
 
 // TestCountEstimate_ExactCounts confirms the provider returns the exact E / D / T
@@ -109,9 +109,9 @@ func TestCountEstimate_DirtyVetoes(t *testing.T) {
 }
 
 // TestCountEstimate_NilStoreFallsBack confirms a resolver with no count store
-// falls back (so the trustworthiness veto keeps the default plan).
+// (no engine) falls back (so the trustworthiness veto keeps the default plan).
 func TestCountEstimate_NilStoreFallsBack(t *testing.T) {
-	src := &lpgLabelResolver{g: nil, cs: nil}
+	src := &lpgLabelResolver{g: nil, eng: nil}
 	if e := relCardinalityEstimate(src, "R"); e.source != estFallback {
 		t.Errorf("E with nil store = %+v, want fallback", e)
 	}

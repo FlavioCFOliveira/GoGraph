@@ -15,7 +15,7 @@ import (
 // statsTestSource wires a resolver over the engine's graph exactly as the
 // read-path build does, so the (inert) providers can be exercised.
 func statsTestSource(e *Engine) *lpgLabelResolver {
-	return &lpgLabelResolver{g: e.g, cs: e.countStore, stats: e.statsCollector}
+	return &lpgLabelResolver{g: e.g, eng: e}
 }
 
 // seedPersonGraph builds a directed multigraph of n :Person nodes. age is skewed:
@@ -325,7 +325,9 @@ func TestStats_RefreshCancellation(t *testing.T) {
 	if err := e.RefreshStatistics(ctx); err == nil {
 		t.Error("cancelled RefreshStatistics returned nil, want ctx.Err()")
 	}
-	if e.statsCollector.Tracking() {
+	// A cancelled rebuild publishes nothing: with the lazy collector (task #2101)
+	// it never even allocates one, so the pointer stays nil.
+	if c := e.statsCollector.Load(); c != nil && c.Tracking() {
 		t.Error("cancelled rebuild published a snapshot")
 	}
 }

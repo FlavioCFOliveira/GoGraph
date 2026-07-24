@@ -968,14 +968,36 @@ type Engine struct {
 
 	// statsCollector holds the best-effort approximate planner statistics (NDV /
 	// MCV / equi-depth histograms per (label, property), tasks #2097/#2098,
-	// docs/statistics-design.md). It is always non-nil but starts empty: statistics
-	// exist only after [Engine.RefreshStatistics] runs its off-write-path rebuild
-	// scan and publishes a snapshot. The only write-path interaction is an O(1)
-	// atomic per-(label, property) dirty-counter bump when the collector is tracking
-	// (SetNodeProperty / DelNodeProperty). As of #2097/#2098 the statistics ship
-	// INERT — no query-path consumer reads them yet (#2099 is the intended
-	// consumer) — so a rebuild changes no plan.
-	statsCollector *statsCollector
+	// docs/statistics-design.md). It is LAZY: the pointer starts nil and no
+	// collector is allocated until [Engine.RefreshStatistics] first runs its
+	// off-write-path rebuild scan (via [Engine.statsCollectorOrInit]), so a
+	// stats-free engine — the default — pays nothing, neither the one-off
+	// allocation nor any write-path bookkeeping (a nil load short-circuits the
+	// SetNodeProperty / DelNodeProperty guard before any [statsCollector.Tracking]
+	// atomic, task #2101). It is an [atomic.Pointer] because the install
+	// ([RefreshStatistics]) races the lock-free reads on the write path (adapter
+	// construction) and the read path (resolver construction). As of #2097/#2098
+	// the statistics ship INERT — #2099 renders them display-only in EXPLAIN, no
+	// plan consumes them — so absence is harmless (a consumer falls back to its
+	// exact-count plan).
+	statsCollector atomic.Pointer[statsCollector]
+}
+
+// statsCollectorOrInit returns the engine's approximate-statistics collector,
+// allocating it on first use. It is the SOLE allocation trigger for the
+// collector: a stats-free engine (the default) never constructs one, so its
+// write path pays only a nil pointer load. The install is a single
+// compare-and-swap, so concurrent first [Engine.RefreshStatistics] calls agree
+// on one collector.
+func (e *Engine) statsCollectorOrInit() *statsCollector {
+	if c := e.statsCollector.Load(); c != nil {
+		return c
+	}
+	nc := stats.NewCollector[expr.Value]()
+	if e.statsCollector.CompareAndSwap(nil, nc) {
+		return nc
+	}
+	return e.statsCollector.Load()
 }
 
 // lockWriter acquires the engine's write serialisation appropriate to its
@@ -1207,7 +1229,6 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		parallelScanThreshold:   resolveParallelScanThreshold(opts.ParallelScanThreshold),
 		parallelGov:             &exec.ParallelGovernor{},
 		countStore:              count.New(resolveMaxLabelRecountEdges(opts.MaxLabelRecountEdges)),
-		statsCollector:          stats.NewCollector[expr.Value](),
 	}
 	procs.RegisterBuiltins(e.procReg, g.IndexManager(), procs.BuiltinSources{
 		ListConstraints:   func() [][]expr.Value { return e.constraintReg.ListConstraintRows() },
@@ -1878,7 +1899,7 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	queryReg := newNowAwareRegistry(e.reg, time.Now())
 	e.g.View(func() {
 		walker := &lpgNodeWalker{g: e.g}
-		labelSrc := &lpgLabelResolver{g: e.g, cs: e.countStore, stats: e.statsCollector}
+		labelSrc := &lpgLabelResolver{g: e.g, eng: e}
 		// Allocate a per-run subquery evaluator so EXISTS { … } / COUNT { … }
 		// expressions encountered inside Filter/Project closures can drive their
 		// inner pipelines against the current outer row (task-396).
@@ -1990,7 +2011,7 @@ func (e *Engine) Explain(query string, params map[string]expr.Value) (s string, 
 	// (task #2119) and the EXPLAIN requirement of task #2095. The counts are read
 	// live (no View barrier), matching the min-label EXPLAIN path: EXPLAIN is a
 	// diagnostic, so a consistent snapshot is not required for its rendering.
-	labelSrc := &lpgLabelResolver{g: e.g, cs: e.countStore, stats: e.statsCollector}
+	labelSrc := &lpgLabelResolver{g: e.g, eng: e}
 	var reorderSwaps map[*ir.Apply]bool
 	var anchorSwaps map[*ir.Expand]bool
 	if e.joinReorderEnabled {
@@ -4724,28 +4745,38 @@ func (w *lpgNodeWalker) WalkNodeIDs(fn func(graph.NodeID) bool) {
 // interface expected by [exec.NodeByLabelScan].
 type lpgLabelResolver struct {
 	g *lpg.Graph[string, float64]
-	// cs is the engine's relationship count-store (#2082), threaded so the
-	// count-estimate provider (relCardinalityEstimate / degreeCardinalityEstimate /
-	// tripleCardinalityEstimate) can read exact E/D/T counts under the query's
-	// View. It is nil for resolver instances built without an engine count store
-	// (some tests); the provider then falls back to estFallback. As of P2 nothing
-	// on the query path consumes these estimates (the provider is inert).
-	cs *count.Store
-	// stats is the engine's approximate-statistics collector (#2097/#2098),
-	// threaded so the statistics providers (statsEqualityEstimate /
-	// statsRangeEstimate) can read NDV / MCV / histogram estimates. It is nil for
-	// resolver instances built without an engine (some tests); the providers then
-	// fall back. As of #2097/#2098 nothing on the query path consumes these
-	// estimates (they are inert).
-	stats *statsCollector
+	// eng is the owning engine, threaded so the resolver can reach the exact
+	// relationship count-store (#2082) and the lazily-installed approximate
+	// statistics collector (#2097/#2098) WITHOUT carrying a separate pointer for
+	// each: folding both into this single back-pointer keeps the per-query
+	// resolver at its pre-statistics two-word footprint (task #2101). It is nil
+	// for resolver instances built without an engine (the write-path build at
+	// execUnderBarrier, and some tests), in which case both Counts and Statistics
+	// report absence and every estimate provider falls back to estFallback. As of
+	// #2097/#2098/#2099 nothing on the query path GATES on these estimates (they
+	// are inert / display-only), so absence is harmless.
+	eng *Engine
 }
 
-// Counts returns the relationship count-store this resolver reads, or nil.
-func (s *lpgLabelResolver) Counts() *count.Store { return s.cs }
+// Counts returns the relationship count-store this resolver reads, or nil when
+// the resolver was built without an engine.
+func (s *lpgLabelResolver) Counts() *count.Store {
+	if s.eng == nil {
+		return nil
+	}
+	return s.eng.countStore
+}
 
-// Statistics returns the approximate-statistics collector this resolver reads, or
-// nil. It implements the statsSource capability the statistics providers consume.
-func (s *lpgLabelResolver) Statistics() *statsCollector { return s.stats }
+// Statistics returns the approximate-statistics collector this resolver reads,
+// or nil when the resolver has no engine or the engine never enabled statistics
+// (the lazy collector is unallocated). It implements the statsSource capability
+// the statistics providers consume; a nil result makes them fall back.
+func (s *lpgLabelResolver) Statistics() *statsCollector {
+	if s.eng == nil {
+		return nil
+	}
+	return s.eng.statsCollector.Load()
+}
 
 // ResolvePropertyID reports the stable interned id of a property-key name, used by
 // the statistics providers to key into the collector. The lookup is non-mutating
@@ -13284,9 +13315,9 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 		}
 		// cbuf is left nil: it is allocated lazily on the first count delta, so a
 		// bare CREATE (:N) over an edgeless graph allocates none (#2082).
-		mutator = &walMutatorAdapter{g: e.g, tx: walTx, buf: buf, undo: undo, touched: touched, cs: e.countStore, stats: e.statsCollector}
+		mutator = &walMutatorAdapter{g: e.g, tx: walTx, buf: buf, undo: undo, touched: touched, eng: e}
 	} else {
-		mutator = &lpgMutatorAdapter{g: e.g, buf: buf, undo: undo, touched: touched, cs: e.countStore, stats: e.statsCollector}
+		mutator = &lpgMutatorAdapter{g: e.g, buf: buf, undo: undo, touched: touched, eng: e}
 	}
 
 	r, buildErr := e.execUnderBarrier(ctx, plan, queryReg, params, mutator, buf, undo, walTx, true, e.g.ApplyAtomically, touched)
@@ -13446,23 +13477,23 @@ type lpgMutatorAdapter struct {
 	// edge position, reusing the exact read-path mechanism ([edgeHandleAtFwdPos]).
 	// It may be nil (resolution then falls back to a fresh CSR build).
 	bopts *buildOpts
-	// cs is the engine's relationship count-store (#2082); nil when the adapter
-	// is not maintaining counts (read-only test stubs). cbuf accumulates this
-	// transaction's count deltas. For an autocommit write cbuf starts nil and is
-	// allocated lazily on the first count delta (see [lpgMutatorAdapter.countBuf]),
-	// so a bare CREATE (:N) — which touches no edge cell — allocates none; the
-	// autocommit Result then flushes it in commitUnderBarrier. For an explicit
-	// transaction cbuf is pre-set to the handle's shared buffer, so deltas from
-	// every statement accumulate together and the handle flushes once at commit.
-	cs   *count.Store
+	// eng is the owning engine, threaded so the adapter can reach the engine's
+	// relationship count-store (#2082, via [lpgMutatorAdapter.cs]) and the lazily-
+	// installed approximate statistics collector (#2097/#2098, via
+	// [lpgMutatorAdapter.statsColl]) through a SINGLE back-pointer. Folding both
+	// into eng keeps the per-statement adapter at its pre-statistics footprint (8
+	// words, one malloc size class), so carrying the statistics hook adds no
+	// write-path allocation (task #2101). It is nil on read-only test stubs, in
+	// which case cs reports no store (counts are not maintained) and statsColl
+	// reports no collector. cbuf accumulates this transaction's count deltas; for
+	// an autocommit write it starts nil and is allocated lazily on the first count
+	// delta (see [lpgMutatorAdapter.countBuf]), so a bare CREATE (:N) — which
+	// touches no edge cell — allocates none, and the autocommit Result flushes it
+	// in commitUnderBarrier; for an explicit transaction it is pre-set to the
+	// handle's shared buffer so deltas accumulate and the handle flushes once at
+	// commit.
+	eng  *Engine
 	cbuf *exec.CountBuffer
-	// stats is the engine's approximate-statistics collector (#2097/#2098); nil
-	// on read-only test stubs. When it is tracking statistics, a node property
-	// write bumps the O(1) atomic per-(label, property) staleness counter via
-	// [recordStatsNodePropertyWrite] — the single write-path cost the statistics
-	// design permits. It stays a no-op until [Engine.RefreshStatistics] publishes
-	// a snapshot, so a stats-free workload (the write benchmark) pays nothing.
-	stats *statsCollector
 	// fresh is the per-statement set of node keys created by this adapter that
 	// have not yet gained an incident edge (#2082). A SetNodeLabel on a fresh node
 	// is INITIAL labelling — the node's contribution is captured by the later
@@ -13473,6 +13504,29 @@ type lpgMutatorAdapter struct {
 	// when it gains an edge. Lazily allocated, so a pure node-create workload over
 	// an edgeless graph (the write benchmark) never allocates it.
 	fresh map[string]struct{}
+}
+
+// cs returns the engine's relationship count-store, or nil when the adapter has
+// no engine (a read-only test stub). It derives the store from the engine
+// back-pointer rather than caching it in a field (task #2101); the store is set
+// once at engine construction and never reassigned, so this is byte-identical to
+// the former cached field while saving one adapter word.
+func (a *lpgMutatorAdapter) cs() *count.Store {
+	if a.eng == nil {
+		return nil
+	}
+	return a.eng.countStore
+}
+
+// statsColl returns the engine's lazily-installed approximate statistics
+// collector, or nil when the adapter has no engine or statistics were never
+// enabled. A nil result short-circuits the write-path staleness hook before any
+// atomic (task #2101).
+func (a *lpgMutatorAdapter) statsColl() *statsCollector {
+	if a.eng == nil {
+		return nil
+	}
+	return a.eng.statsCollector.Load()
 }
 
 // countBuf returns the adapter's count buffer, allocating it on first use. For an
@@ -13489,14 +13543,14 @@ func (a *lpgMutatorAdapter) countBuf() *exec.CountBuffer {
 // countState returns this adapter's count buffer and store so the autocommit
 // Result can flush them under the commit barrier. It implements countMutator.
 func (a *lpgMutatorAdapter) countState() (*exec.CountBuffer, *count.Store) {
-	return a.cbuf, a.cs
+	return a.cbuf, a.cs()
 }
 
 // countMarkFresh records a newly created, still-edgeless node so its initial
 // labelling is not mistaken for a relabel (#2082). It is a no-op for an existing
 // node, an edgeless graph (Size()==0 fast path), or when no count store is active.
 func (a *lpgMutatorAdapter) countMarkFresh(n string, existed bool) {
-	if a.cs == nil || existed || a.g.AdjList().Size() == 0 {
+	if a.cs() == nil || existed || a.g.AdjList().Size() == 0 {
 		return
 	}
 	if a.fresh == nil {
@@ -13649,8 +13703,8 @@ func (a *lpgMutatorAdapter) RemoveEdge(src, dst string) {
 		a.g.IncrEdgesRemoved()
 		// Count-store (#2082): capture the removed first-slot instance's type and
 		// endpoint labels before the adjacency removal.
-		if a.cs != nil {
-			countEdgeRemovedFirstSlot(a.g, a.cs, a.countBuf(), src, dst)
+		if a.cs() != nil {
+			countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
 		}
 	}
 	a.g.RemoveEdge(src, dst)
@@ -13675,11 +13729,11 @@ func (a *lpgMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 	// (the helper self-guards on the handle being present and typed, so a no-op
 	// removal enqueues nothing); a zero handle falls back to the first slot,
 	// exactly as lpg.RemoveEdgeByHandle degrades to RemoveEdge.
-	if a.cs != nil {
+	if a.cs() != nil {
 		if handle != 0 {
-			countEdgeRemovedByHandle(a.g, a.cs, a.countBuf(), src, dst, handle)
+			countEdgeRemovedByHandle(a.g, a.cs(), a.countBuf(), src, dst, handle)
 		} else if a.g.AdjList().HasEdge(src, dst) {
-			countEdgeRemovedFirstSlot(a.g, a.cs, a.countBuf(), src, dst)
+			countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
 		}
 	}
 	removed := a.g.RemoveEdgeByHandle(src, dst, handle)
@@ -13699,7 +13753,7 @@ func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) error {
 	// (an atomic load) so a bare labelled-node create short-circuits before any
 	// probe or buffer allocation; countIsFresh excludes a freshly created node
 	// whose initial labelling the edge-typing +delta already covers.
-	countNew := a.cs != nil && a.g.AdjList().Size() > 0 && !a.countIsFresh(n) && !a.g.HasNodeLabel(n, label)
+	countNew := a.cs() != nil && a.g.AdjList().Size() > 0 && !a.countIsFresh(n) && !a.g.HasNodeLabel(n, label)
 	if err := a.g.SetNodeLabel(n, label); err != nil {
 		return err
 	}
@@ -13712,7 +13766,7 @@ func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) error {
 		})
 	}
 	if countNew {
-		countRelabel(a.g, a.cs, a.countBuf(), n, label, +1)
+		countRelabel(a.g, a.cs(), a.countBuf(), n, label, +1)
 	}
 	return nil
 }
@@ -13725,8 +13779,8 @@ func (a *lpgMutatorAdapter) RemoveNodeLabel(n, label string) {
 	// (so a self-loop endpoint still carries the label), and dirty the IN X-scoped
 	// cells. Only when the label was actually present on a node in a non-edgeless
 	// graph; the Size()==0 fast path short-circuits first.
-	if a.cs != nil && a.g.AdjList().Size() > 0 && a.g.HasNodeLabel(n, label) {
-		countRelabel(a.g, a.cs, a.countBuf(), n, label, -1)
+	if a.cs() != nil && a.g.AdjList().Size() > 0 && a.g.HasNodeLabel(n, label) {
+		countRelabel(a.g, a.cs(), a.countBuf(), n, label, -1)
 	}
 	a.g.RemoveNodeLabel(n, label)
 	r.recordRemoveNodeLabel(n, label, hadLabel)
@@ -13768,7 +13822,11 @@ func (a *lpgMutatorAdapter) IsTombstoned(id graph.NodeID) bool {
 func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyValue) error {
 	r := a.rec()
 	fanout := indexFanoutActive(a.g, a.buf)
-	statsActive := a.stats != nil && a.stats.Tracking()
+	// sc is loaded once (a single lock-free pointer load; nil on a stats-free
+	// engine, task #2101). Only a non-nil, tracking collector arms the staleness
+	// hook, so a stats-free write pays just the nil check.
+	sc := a.statsColl()
+	statsActive := sc != nil && sc.Tracking()
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() || fanout || statsActive {
@@ -13794,7 +13852,7 @@ func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 		// The single write-path statistics cost: an O(1) atomic Δ bump per tracked
 		// (label, property) the node carries (design docs/statistics-design.md §2).
 		// had marks a value replacement, the direction that makes NDV over-estimate.
-		recordStatsNodePropertyWrite(a.stats, a.g.NodeIndex(), a.resolveID(n),
+		recordStatsNodePropertyWrite(sc, a.g.NodeIndex(), a.resolveID(n),
 			uint32(a.g.PropertyKeys().Intern(key)), had)
 	}
 	return nil
@@ -13804,7 +13862,8 @@ func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) {
 	r := a.rec()
 	fanout := indexFanoutActive(a.g, a.buf)
-	statsActive := a.stats != nil && a.stats.Tracking()
+	sc := a.statsColl()
+	statsActive := sc != nil && sc.Tracking()
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() || fanout || statsActive {
@@ -13826,7 +13885,7 @@ func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) {
 	if statsActive && had {
 		// A removed value: bump Δ and the delete counter for every tracked
 		// (label, property) the node carries (design docs/statistics-design.md §2).
-		recordStatsNodePropertyWrite(a.stats, a.g.NodeIndex(), a.resolveID(n),
+		recordStatsNodePropertyWrite(sc, a.g.NodeIndex(), a.resolveID(n),
 			uint32(a.g.PropertyKeys().Intern(key)), true)
 	}
 }
@@ -13970,8 +14029,8 @@ func (a *lpgMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64,
 	// SetEdgeLabelAt for the same edge; only the by-handle form is counted, so the
 	// +1 create-delta fires exactly once). AddEdge cannot carry it — the type is
 	// unknown until here.
-	if a.cs != nil {
-		countEdgeTyped(a.g, a.cs, a.countBuf(), src, dst, label)
+	if a.cs() != nil {
+		countEdgeTyped(a.g, a.cs(), a.countBuf(), src, dst, label)
 	}
 }
 func (a *lpgMutatorAdapter) EdgeLabelsByHandle(src, dst string, handle uint64) []string {
@@ -14079,8 +14138,8 @@ func (a *lpgMutatorAdapter) RemoveAllEdgesFrom(n string) {
 	// Count-store (#2082): decrement every out-edge slot's E/D/T before the bulk
 	// removal (per-slot type + endpoint labels). The node's in-edges are counted
 	// by the detach_delete caller's InNeighbours RemoveEdge loop.
-	if a.cs != nil {
-		countAllOutEdgesRemoved(a.g, a.cs, a.countBuf(), n)
+	if a.cs() != nil {
+		countAllOutEdgesRemoved(a.g, a.cs(), a.countBuf(), n)
 	}
 	// Snapshot incoming neighbours for directed graphs: outgoing-only bulk
 	// removal won't remove edges pointing at n; those are handled by the
@@ -14151,19 +14210,37 @@ type walMutatorAdapter struct {
 	// edge position, reusing the exact read-path mechanism ([edgeHandleAtFwdPos]).
 	// It may be nil (resolution then falls back to a fresh CSR build).
 	bopts *buildOpts
-	// cs / cbuf carry the relationship count-store maintenance for this write
-	// transaction, mirroring [lpgMutatorAdapter]. cbuf starts nil for an
+	// eng is the owning engine, threaded so the adapter reaches the relationship
+	// count-store (#2082, via [walMutatorAdapter.cs]) and the lazily-installed
+	// statistics collector (#2097/#2098, via [walMutatorAdapter.statsColl])
+	// through a SINGLE back-pointer, keeping the adapter at its pre-statistics
+	// footprint (task #2101), mirroring [lpgMutatorAdapter]. cbuf starts nil for an
 	// autocommit write and is allocated lazily on the first count delta; for an
 	// explicit transaction it is pre-set to the handle's shared buffer.
-	cs   *count.Store
+	eng  *Engine
 	cbuf *exec.CountBuffer
-	// stats mirrors [lpgMutatorAdapter.stats]: the approximate-statistics collector
-	// (#2097/#2098), so a WAL-backed write bumps the same O(1) staleness counter.
-	stats *statsCollector
 	// fresh is the per-statement set of newly created, still-edgeless node keys
 	// (#2082), so initial CREATE labelling is not mistaken for a relabel; see the
 	// lpgMutatorAdapter twin.
 	fresh map[string]struct{}
+}
+
+// cs returns the engine's relationship count-store, or nil when the adapter has
+// no engine (a read-only test stub); mirrors [lpgMutatorAdapter.cs].
+func (a *walMutatorAdapter) cs() *count.Store {
+	if a.eng == nil {
+		return nil
+	}
+	return a.eng.countStore
+}
+
+// statsColl returns the engine's lazily-installed statistics collector, or nil
+// when absent; mirrors [lpgMutatorAdapter.statsColl].
+func (a *walMutatorAdapter) statsColl() *statsCollector {
+	if a.eng == nil {
+		return nil
+	}
+	return a.eng.statsCollector.Load()
 }
 
 // countBuf returns the adapter's count buffer, allocating it lazily (autocommit)
@@ -14178,13 +14255,13 @@ func (a *walMutatorAdapter) countBuf() *exec.CountBuffer {
 // countState returns this adapter's count buffer and store so the autocommit
 // Result can flush them under the commit barrier. It implements countMutator.
 func (a *walMutatorAdapter) countState() (*exec.CountBuffer, *count.Store) {
-	return a.cbuf, a.cs
+	return a.cbuf, a.cs()
 }
 
 // countMarkFresh / countClearFresh / countIsFresh mirror the lpgMutatorAdapter
 // fresh-node tracking so initial CREATE labelling is not counted as a relabel.
 func (a *walMutatorAdapter) countMarkFresh(n string, existed bool) {
-	if a.cs == nil || existed || a.g.AdjList().Size() == 0 {
+	if a.cs() == nil || existed || a.g.AdjList().Size() == 0 {
 		return
 	}
 	if a.fresh == nil {
@@ -14333,8 +14410,8 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 	}
 	if present {
 		a.g.IncrEdgesRemoved()
-		if a.cs != nil { // count-store (#2082): capture before the removal
-			countEdgeRemovedFirstSlot(a.g, a.cs, a.countBuf(), src, dst)
+		if a.cs() != nil { // count-store (#2082): capture before the removal
+			countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
 		}
 	}
 	a.g.RemoveEdge(src, dst)
@@ -14358,11 +14435,11 @@ func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 	}
 	// Count-store (#2082): capture the removed instance's type and endpoint
 	// labels before the removal (see the lpgMutatorAdapter twin for the rationale).
-	if a.cs != nil {
+	if a.cs() != nil {
 		if handle != 0 {
-			countEdgeRemovedByHandle(a.g, a.cs, a.countBuf(), src, dst, handle)
+			countEdgeRemovedByHandle(a.g, a.cs(), a.countBuf(), src, dst, handle)
 		} else if a.g.AdjList().HasEdge(src, dst) {
-			countEdgeRemovedFirstSlot(a.g, a.cs, a.countBuf(), src, dst)
+			countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
 		}
 	}
 	removed := a.g.RemoveEdgeByHandle(src, dst, handle)
@@ -14380,7 +14457,7 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 	// Count-store (#2082): see the lpgMutatorAdapter twin; Size()==0 short-circuits
 	// the CREATE (:N) fast path and countIsFresh excludes a freshly created node's
 	// initial labelling (covered by the edge-typing +delta).
-	countNew := a.cs != nil && a.g.AdjList().Size() > 0 && !a.countIsFresh(n) && !a.g.HasNodeLabel(n, label)
+	countNew := a.cs() != nil && a.g.AdjList().Size() > 0 && !a.countIsFresh(n) && !a.g.HasNodeLabel(n, label)
 	if err := a.g.SetNodeLabel(n, label); err != nil {
 		return err
 	}
@@ -14394,7 +14471,7 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 		})
 	}
 	if countNew {
-		countRelabel(a.g, a.cs, a.countBuf(), n, label, +1)
+		countRelabel(a.g, a.cs(), a.countBuf(), n, label, +1)
 	}
 	return nil
 }
@@ -14405,8 +14482,8 @@ func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) {
 	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
 	// Count-store (#2082): decrement OUT-scoped cells before the removal, dirty
 	// the IN X-scoped cells; see the lpgMutatorAdapter twin.
-	if a.cs != nil && a.g.AdjList().Size() > 0 && a.g.HasNodeLabel(n, label) {
-		countRelabel(a.g, a.cs, a.countBuf(), n, label, -1)
+	if a.cs() != nil && a.g.AdjList().Size() > 0 && a.g.HasNodeLabel(n, label) {
+		countRelabel(a.g, a.cs(), a.countBuf(), n, label, -1)
 	}
 	a.g.RemoveNodeLabel(n, label)
 	r.recordRemoveNodeLabel(n, label, hadLabel)
@@ -14450,7 +14527,8 @@ func (a *walMutatorAdapter) IsTombstoned(id graph.NodeID) bool {
 func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyValue) error {
 	r := a.rec()
 	fanout := indexFanoutActive(a.g, a.buf)
-	statsActive := a.stats != nil && a.stats.Tracking()
+	sc := a.statsColl()
+	statsActive := sc != nil && sc.Tracking()
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() || fanout || statsActive {
@@ -14474,7 +14552,7 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 		a.buf.Enqueue(ch)
 	}
 	if statsActive {
-		recordStatsNodePropertyWrite(a.stats, a.g.NodeIndex(), a.resolveID(n),
+		recordStatsNodePropertyWrite(sc, a.g.NodeIndex(), a.resolveID(n),
 			uint32(a.g.PropertyKeys().Intern(key)), had)
 	}
 	return nil
@@ -14484,7 +14562,8 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 func (a *walMutatorAdapter) DelNodeProperty(n, key string) {
 	r := a.rec()
 	fanout := indexFanoutActive(a.g, a.buf)
-	statsActive := a.stats != nil && a.stats.Tracking()
+	sc := a.statsColl()
+	statsActive := sc != nil && sc.Tracking()
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() || fanout || statsActive {
@@ -14505,7 +14584,7 @@ func (a *walMutatorAdapter) DelNodeProperty(n, key string) {
 		a.buf.Enqueue(ch)
 	}
 	if statsActive && had {
-		recordStatsNodePropertyWrite(a.stats, a.g.NodeIndex(), a.resolveID(n),
+		recordStatsNodePropertyWrite(sc, a.g.NodeIndex(), a.resolveID(n),
 			uint32(a.g.PropertyKeys().Intern(key)), true)
 	}
 }
@@ -14668,8 +14747,8 @@ func (a *walMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64,
 	a.g.SetEdgeLabelByHandle(src, dst, handle, label)
 	_ = a.tx.SetEdgeLabelByHandle(src, dst, handle, label) //nolint:errcheck // ErrTxFinished impossible here
 	// Count-store (#2082): the single authoritative once-per-edge typing hook.
-	if a.cs != nil {
-		countEdgeTyped(a.g, a.cs, a.countBuf(), src, dst, label)
+	if a.cs() != nil {
+		countEdgeTyped(a.g, a.cs(), a.countBuf(), src, dst, label)
 	}
 }
 func (a *walMutatorAdapter) EdgeLabelsByHandle(src, dst string, handle uint64) []string {
@@ -14779,8 +14858,8 @@ func (a *walMutatorAdapter) RemoveAllEdgesFrom(n string) {
 		r.recordRemoveEdge(&pre, present)
 	}
 	// Count-store (#2082): decrement every out-edge slot before the bulk removal.
-	if a.cs != nil {
-		countAllOutEdgesRemoved(a.g, a.cs, a.countBuf(), n)
+	if a.cs() != nil {
+		countAllOutEdgesRemoved(a.g, a.cs(), a.countBuf(), n)
 	}
 	// Bulk-remove from the in-memory graph (O(d) instead of O(d²)).
 	a.g.RemoveAllEdgesFrom(n)
