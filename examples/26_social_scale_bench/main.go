@@ -34,9 +34,18 @@
 // exact label scan and the approximate range. These estimates are display-only:
 // they annotate EXPLAIN but never change which plan runs.
 //
+// Finally main runs the columnar-execution exercise (task #2121): three analytic
+// queries — a GROUP BY aggregation, a filter-over-traversal, and a disconnected
+// equi-join — that each engage one of the engine's columnar (chunk-at-a-time)
+// physical operators, measured against a result-identical row-mode baseline so the
+// de-boxing allocation win each delivers is observable. It runs on its own bounded
+// working set (never the full -users scale), so it is driven from main after run
+// rather than inside run: it must stay cheap and identical however large -users is.
+// See [columnarExercise].
+//
 // # Model
 //
-//	(:USER    {id, name})                       // id is a 24-char hex string
+//	(:USER    {id, name, country})              // id is a 24-char hex string
 //	(:ARTICLE {id, title})                      // id is a 24-char hex string
 //	(:USER)-[:FRIEND {since}]->(:USER)          // friendsMin..friendsMax per user
 //	(:USER)-[:LIKE   {when}]->(:ARTICLE)        // 0..likesMax per user
@@ -44,7 +53,10 @@
 // FRIEND is modelled as a directed out-edge: every user is given a
 // random out-degree in [friendsMin, friendsMax] to distinct other
 // users (no self-loops, no duplicate targets). LIKE is a directed
-// out-edge to between zero and likesMax distinct articles.
+// out-edge to between zero and likesMax distinct articles. Each user also
+// carries a low-cardinality categorical country, derived deterministically
+// from the user index (never from the RNG), as the group-by key of the
+// columnar-aggregation exercise.
 //
 // Every relationship carries exactly one mandatory date property: a
 // FRIEND records when the friendship was created in since and a LIKE
@@ -112,12 +124,14 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // Node labels and relationship types. Centralised so the model is
@@ -136,6 +150,12 @@ const (
 	// (see edgeDate), folded into the compact int32 epoch-day column.
 	propFriendSince = "since"
 	propLikeWhen    = "when"
+
+	// propUserCountry is a low-cardinality categorical dimension every user
+	// carries: the group-by key of the columnar-aggregation exercise (see
+	// columnarExercise). It is derived deterministically from the user index,
+	// never from the RNG, so it leaves every seed-pinned fact untouched.
+	propUserCountry = "country"
 )
 
 // config captures every scale and shape knob of the benchmark. The
@@ -209,7 +229,15 @@ func main() {
 		"store explicit FRIEND/LIKE relationship types (false: infer type from endpoint labels, no per-edge label stored)")
 	flag.Parse()
 
-	if err := run(context.Background(), os.Stdout, cfg); err != nil {
+	ctx := context.Background()
+	if err := run(ctx, os.Stdout, cfg); err != nil {
+		log.Fatal(err)
+	}
+	// The columnar exercise runs on its own bounded working set (never the full
+	// -users scale — see columnarExercise), so it is driven separately from the
+	// main battery rather than from run: it must stay cheap and identical however
+	// large -users is, and the regression test drives it directly.
+	if err := columnarExercise(ctx, cfg, os.Stdout); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -312,7 +340,11 @@ func build(ctx context.Context, g *lpg.Graph[string, float64], cfg config, _ io.
 	articleIDs := make([]string, cfg.articles)
 	seen := make(map[string]struct{}, cfg.users+cfg.articles)
 
-	// Users.
+	// Users. Each user also carries a low-cardinality categorical country,
+	// derived deterministically from the user index (never from rng), so it adds
+	// a realistic group-by key for the columnar-aggregation exercise WITHOUT
+	// perturbing the seeded RNG stream — every other seed-pinned fact (friend
+	// degrees, likes, dates) is unchanged. See columnarExercise.
 	for i := 0; i < cfg.users; i++ {
 		if i%checkEvery == 0 {
 			if err := ctx.Err(); err != nil {
@@ -323,6 +355,9 @@ func build(ctx context.Context, g *lpg.Graph[string, float64], cfg config, _ io.
 		userIDs[i] = id
 		if err := addNode(g, id, labelUser, "name", realisticName(rng)); err != nil {
 			return buildStats{}, err
+		}
+		if err := g.SetNodeProperty(id, propUserCountry, lpg.StringValue(countries[i%len(countries)])); err != nil {
+			return buildStats{}, fmt.Errorf("SetNodeProperty country %s: %w", id, err)
 		}
 	}
 
@@ -1031,6 +1066,332 @@ func absInt64(n int64) int64 {
 	return n
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Columnar execution exercise (rmp #2121)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Columnar working-set bounds. The columnar exercise deliberately runs each
+// columnar query alongside a byte-identical row-mode twin whose allocation cost
+// grows with the rows it touches. Those twins are heavy on purpose (they are the
+// baseline the columnar path beats), so the exercise caps its working set to a
+// bounded sub-graph — never the full -users scale — keeping the A/B fast and its
+// allocation figures reproducible at any -users. The columnar operators are the
+// SAME ones the main battery drives at full scale; only their allocation
+// behaviour is measured here, where a controlled row-mode baseline is affordable.
+const (
+	colScaleUsers    = 1500
+	colScaleArticles = 200
+)
+
+// colProfile is one measured query execution: the allocation count and bytes it
+// charged, the number of result rows it produced, and how many columnar-filter
+// batches it drove (0 unless the columnar Expand+Filter chain engaged).
+type colProfile struct {
+	mallocs uint64
+	bytes   uint64
+	rows    int
+	batches uint64
+}
+
+// colBackend is the metrics sink the columnar exercise installs for the duration
+// of its measurements. It records only the columnar-filter batch counter the exec
+// package increments once per columnar FillChunk batch, so the exercise can prove
+// the columnar Expand+Filter chain actually engaged (batch counter > 0) rather
+// than silently falling back to the boxed row path. The name mirrors the exec
+// package's unexported constant; a rename there would make this read zero, which
+// the "engaged" assertion in the regression test would catch.
+type colBackend struct{ filterBatches atomic.Uint64 }
+
+func (c *colBackend) IncCounter(name string, delta uint64) {
+	if name == "cypher.exec.columnar_filter.batch" {
+		c.filterBatches.Add(delta)
+	}
+}
+func (c *colBackend) ObserveLatency(string, time.Duration) {}
+
+// columnarExercise builds a bounded social sub-graph and drives three
+// representative analytic queries that each engage one of the engine's columnar
+// (chunk-at-a-time) physical operators, measuring the allocation win each delivers
+// over the byte-identical row-at-a-time baseline (rmp #2121):
+//
+//   - a GROUP BY aggregation (RETURN u.country, count(*)) — engages the columnar
+//     aggregation (cypher/exec/agg_column_kernel.go), which hashes the grouping key
+//     UNBOXED and boxes it only once per distinct group (#2049/#2104);
+//   - a filter-over-traversal (MATCH (u)-[r]->(p) WHERE p.id >= k RETURN p.id) —
+//     engages the columnar Expand + ColumnarFilter chain (#2106), which reads the
+//     far node's id and evaluates the predicate over the traversal output unboxed;
+//   - a disconnected equi-join (MATCH (a:USER),(b:USER) WHERE a.name = b.name …) —
+//     engages the columnar hash join (#2105), whose build side retains rows into a
+//     column-major buffer instead of a per-row snapshot.
+//
+// For each it emits the allocation profile of the columnar execution and of a
+// baseline that is result-identical but forced onto the row path: the aggregation
+// and filter baselines wrap the property in coalesce() (value-equivalent, but it
+// disqualifies the columnar pre-projection / predicate), and the join baseline runs
+// the same query on an engine with the hash join disabled (the O(V²) nested-loop
+// plan). Each pair is asserted to return the identical result before its allocation
+// delta is reported, so a divergence fails loudly rather than flattering the win.
+//
+// Every line is volatile telemetry (prefixed "# "): the allocation figures vary per
+// run and machine, so the regression test reads them by name and asserts the
+// direction of the win (and, for the filter, the batch-counter engagement proof),
+// never a pinned value.
+func columnarExercise(ctx context.Context, cfg config, w io.Writer) error {
+	// Bounded working set (see colScaleUsers). Degrees are kept modest and clamped
+	// so the sub-graph is always valid however small -users/-articles are; the seed
+	// and relationship-encoding mode follow the run so the sub-graph is deterministic.
+	ccfg := config{
+		users:    min(cfg.users, colScaleUsers),
+		articles: min(cfg.articles, colScaleArticles),
+		seed:     cfg.seed,
+		relTypes: cfg.relTypes,
+	}
+	ccfg.friendsMax = min(8, ccfg.users-1)
+	ccfg.friendsMin = min(5, ccfg.friendsMax)
+	ccfg.likesMax = min(10, ccfg.articles)
+	if err := ccfg.validate(); err != nil {
+		return fmt.Errorf("working-set config: %w", err)
+	}
+
+	cg := lpg.New[string, float64](adjlist.Config{Directed: true, Weightless: true})
+	if _, err := build(ctx, cg, ccfg, io.Discard); err != nil {
+		return fmt.Errorf("working-set build: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	cg.AdjList().Compact(ctx)
+
+	eng := cypher.NewEngine(cg)
+	engNL := cypher.NewEngineWithOptions(cg, cypher.EngineOptions{DisableHashJoin: true})
+
+	be := &colBackend{}
+	metrics.SetBackend(be)
+	defer metrics.SetBackend(nil)
+
+	fmt.Fprintln(w, "# --- columnar execution exercise (#2121) ---")
+	fmt.Fprintf(w, "# columnar.scale.users=%d\n", ccfg.users)
+	fmt.Fprintf(w, "# columnar.scale.articles=%d\n", ccfg.articles)
+
+	if err := columnarAggExercise(ctx, eng, be, w); err != nil {
+		return err
+	}
+	if err := columnarFilterExercise(ctx, eng, be, w); err != nil {
+		return err
+	}
+	return columnarJoinExercise(ctx, eng, engNL, be, w)
+}
+
+// columnarAggExercise drives the GROUP BY aggregation and its coalesce() row-mode
+// baseline, verifying they group identically before reporting the allocation delta.
+func columnarAggExercise(ctx context.Context, eng *cypher.Engine, be *colBackend, w io.Writer) error {
+	const (
+		colQ = "MATCH (u:USER) RETURN u.country AS country, count(*) AS members ORDER BY country"
+		rowQ = "MATCH (u:USER) RETURN coalesce(u.country) AS country, count(*) AS members ORDER BY country"
+	)
+	colGroups, _, err := groupCounts(ctx, eng, colQ, "country", "members", nil)
+	if err != nil {
+		return fmt.Errorf("agg columnar: %w", err)
+	}
+	rowGroups, _, err := groupCounts(ctx, eng, rowQ, "country", "members", nil)
+	if err != nil {
+		return fmt.Errorf("agg row: %w", err)
+	}
+	if !sameGroups(colGroups, rowGroups) {
+		return fmt.Errorf("agg columnar/row results differ: %v vs %v", colGroups, rowGroups)
+	}
+	var total int64
+	for _, g := range colGroups {
+		total += g.count
+	}
+
+	colP, err := colMeasure(ctx, eng, be, colQ, nil)
+	if err != nil {
+		return fmt.Errorf("agg columnar measure: %w", err)
+	}
+	rowP, err := colMeasure(ctx, eng, be, rowQ, nil)
+	if err != nil {
+		return fmt.Errorf("agg row measure: %w", err)
+	}
+
+	fmt.Fprintf(w, "# columnar.agg.groups=%d\n", len(colGroups))
+	fmt.Fprintf(w, "# columnar.agg.members_total=%d\n", total)
+	fmt.Fprintf(w, "# columnar.agg.col_mallocs=%d\n", colP.mallocs)
+	fmt.Fprintf(w, "# columnar.agg.row_mallocs=%d\n", rowP.mallocs)
+	fmt.Fprintf(w, "# columnar.agg.col_bytes=%d\n", colP.bytes)
+	fmt.Fprintf(w, "# columnar.agg.row_bytes=%d\n", rowP.bytes)
+	fmt.Fprintf(w, "# columnar.agg.malloc_ratio=%.2f\n", safeDiv(float64(rowP.mallocs), float64(colP.mallocs)))
+	return nil
+}
+
+// columnarFilterExercise drives the bare-pattern filter-over-traversal and its
+// coalesce() row-mode baseline. The bare pattern (no labels/types) is required: a
+// label or type on either endpoint inserts a Selection that breaks the
+// scan→Expand→ColumnarFilter chain, so the columnar path would silently not engage.
+func columnarFilterExercise(ctx context.Context, eng *cypher.Engine, be *colBackend, w io.Writer) error {
+	const (
+		colQ = "MATCH (u)-[r]->(p) WHERE p.id >= '8' RETURN p.id AS id"
+		rowQ = "MATCH (u)-[r]->(p) WHERE coalesce(p.id) >= '8' RETURN coalesce(p.id) AS id"
+	)
+	colRows, err := colDrainCount(ctx, eng, colQ, nil)
+	if err != nil {
+		return fmt.Errorf("filter columnar: %w", err)
+	}
+	rowRows, err := colDrainCount(ctx, eng, rowQ, nil)
+	if err != nil {
+		return fmt.Errorf("filter row: %w", err)
+	}
+	if colRows != rowRows {
+		return fmt.Errorf("filter columnar/row row counts differ: %d vs %d", colRows, rowRows)
+	}
+
+	colP, err := colMeasure(ctx, eng, be, colQ, nil)
+	if err != nil {
+		return fmt.Errorf("filter columnar measure: %w", err)
+	}
+	rowP, err := colMeasure(ctx, eng, be, rowQ, nil)
+	if err != nil {
+		return fmt.Errorf("filter row measure: %w", err)
+	}
+
+	fmt.Fprintf(w, "# columnar.filter.rows=%d\n", colP.rows)
+	fmt.Fprintf(w, "# columnar.filter.col_batches=%d\n", colP.batches)
+	fmt.Fprintf(w, "# columnar.filter.row_batches=%d\n", rowP.batches)
+	fmt.Fprintf(w, "# columnar.filter.col_mallocs=%d\n", colP.mallocs)
+	fmt.Fprintf(w, "# columnar.filter.row_mallocs=%d\n", rowP.mallocs)
+	fmt.Fprintf(w, "# columnar.filter.col_bytes=%d\n", colP.bytes)
+	fmt.Fprintf(w, "# columnar.filter.row_bytes=%d\n", rowP.bytes)
+	fmt.Fprintf(w, "# columnar.filter.malloc_ratio=%.2f\n", safeDiv(float64(rowP.mallocs), float64(colP.mallocs)))
+	return nil
+}
+
+// columnarJoinExercise drives the disconnected equi-join under the default engine
+// (columnar hash join) and under a hash-join-disabled engine (the O(V²) nested-loop
+// baseline), verifying both count the same pairs before reporting the delta.
+//
+// The nested-loop baseline is O(V²), so it is executed EXACTLY ONCE — via
+// [colCountMeasure] with no warm-up, which reads the single count value and the
+// allocation profile from the same run — keeping the bounded-working-set exercise
+// affordable under the race detector. The columnar side is O(V), so it is warmed
+// (excluding its one-off plan compilation) before its clean measurement.
+func columnarJoinExercise(ctx context.Context, eng, engNL *cypher.Engine, be *colBackend, w io.Writer) error {
+	const q = "MATCH (a:USER),(b:USER) WHERE a.name = b.name AND a.id < b.id RETURN count(*) AS c"
+
+	colPairs, colP, err := colCountMeasure(ctx, eng, be, q, true)
+	if err != nil {
+		return fmt.Errorf("join columnar: %w", err)
+	}
+	nlPairs, nlP, err := colCountMeasure(ctx, engNL, be, q, false)
+	if err != nil {
+		return fmt.Errorf("join nested-loop: %w", err)
+	}
+	if colPairs != nlPairs {
+		return fmt.Errorf("join columnar/nested-loop pair counts differ: %d vs %d", colPairs, nlPairs)
+	}
+
+	fmt.Fprintf(w, "# columnar.hashjoin.pairs=%d\n", colPairs)
+	fmt.Fprintf(w, "# columnar.hashjoin.col_mallocs=%d\n", colP.mallocs)
+	fmt.Fprintf(w, "# columnar.hashjoin.nested_mallocs=%d\n", nlP.mallocs)
+	fmt.Fprintf(w, "# columnar.hashjoin.col_bytes=%d\n", colP.bytes)
+	fmt.Fprintf(w, "# columnar.hashjoin.nested_bytes=%d\n", nlP.bytes)
+	fmt.Fprintf(w, "# columnar.hashjoin.malloc_ratio=%.2f\n", safeDiv(float64(nlP.mallocs), float64(colP.mallocs)))
+	return nil
+}
+
+// colCountMeasure runs a single-row count query and returns the count value plus a
+// one-execution allocation profile. When warm is true it first runs the query once
+// to populate the plan cache (so the measured run excludes plan compilation); when
+// false it measures the very first run — used for the O(V²) nested-loop baseline,
+// whose execution cost dwarfs its one-off compilation, so it need never run twice.
+func colCountMeasure(ctx context.Context, eng *cypher.Engine, be *colBackend, query string, warm bool) (int64, colProfile, error) {
+	if warm {
+		if _, _, err := scalarCount(ctx, eng, query, nil); err != nil {
+			return 0, colProfile{}, err
+		}
+	}
+	be.filterBatches.Store(0)
+	var m0, m1 runtime.MemStats
+	runtime.ReadMemStats(&m0)
+	val, _, err := scalarCount(ctx, eng, query, nil)
+	runtime.ReadMemStats(&m1)
+	if err != nil {
+		return 0, colProfile{}, err
+	}
+	return val, colProfile{
+		mallocs: m1.Mallocs - m0.Mallocs,
+		bytes:   m1.TotalAlloc - m0.TotalAlloc,
+		rows:    1,
+		batches: be.filterBatches.Load(),
+	}, nil
+}
+
+// colMeasure warms query on eng (populating the plan cache so the measured run
+// excludes one-off parse/plan allocations), then measures a single clean execution:
+// the allocation count and bytes it charges (via monotonic, GC-independent
+// [runtime.MemStats] counters), the rows it drains, and the columnar-filter batches
+// it drove. The result is drained through Next alone — never Record — so the figure
+// reflects the OPERATOR's execution allocations (where the columnar de-box lives),
+// not the per-row map materialisation a caller would add identically to both paths.
+func colMeasure(ctx context.Context, eng *cypher.Engine, be *colBackend, query string, params map[string]expr.Value) (colProfile, error) {
+	if _, err := colDrainCount(ctx, eng, query, params); err != nil { // warm the plan cache
+		return colProfile{}, err
+	}
+	be.filterBatches.Store(0)
+	var m0, m1 runtime.MemStats
+	runtime.ReadMemStats(&m0)
+	rows, err := colDrainCount(ctx, eng, query, params)
+	runtime.ReadMemStats(&m1)
+	if err != nil {
+		return colProfile{}, err
+	}
+	return colProfile{
+		mallocs: m1.Mallocs - m0.Mallocs,
+		bytes:   m1.TotalAlloc - m0.TotalAlloc,
+		rows:    rows,
+		batches: be.filterBatches.Load(),
+	}, nil
+}
+
+// colDrainCount runs query and drains it to completion via Next, returning the row
+// count. It reads no cell (no Record/ValueAt), so the only allocations charged are
+// the engine's own execution allocations — the surface the columnar operators cut.
+func colDrainCount(ctx context.Context, eng *cypher.Engine, query string, params map[string]expr.Value) (int, error) {
+	res, err := eng.Run(ctx, query, params)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = res.Close() }()
+	rows := 0
+	for res.Next() {
+		rows++
+	}
+	if err := res.Err(); err != nil {
+		return 0, err
+	}
+	return rows, nil
+}
+
+// sameGroups reports whether two grouped-count result sets are the identical
+// multiset of (key, count) rows, order-independent.
+func sameGroups(a, b []labeledCount) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	m := make(map[string]int64, len(a))
+	for _, r := range a {
+		m[r.key] += r.count
+	}
+	for _, r := range b {
+		m[r.key] -= r.count
+	}
+	for _, v := range m {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // scalarCount runs a query whose single row has a single integer column
 // and returns that integer plus the wall-clock time the query took.
 func scalarCount(ctx context.Context, eng *cypher.Engine, query string, params map[string]expr.Value) (int64, time.Duration, error) {
@@ -1337,6 +1698,16 @@ func humanBytes(n uint64) string {
 // ─────────────────────────────────────────────────────────────────────────────
 // Realistic-data word lists. Fixed so the dataset is reproducible.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// countries is the small fixed set the per-user country dimension cycles
+// through (see build). Its low cardinality is deliberate: it makes each group
+// hold many users, so the columnar aggregation's win — hashing the grouping key
+// UNBOXED and boxing it only once per distinct group (#2049) — is visible in the
+// allocation profile the columnar exercise reports. Kept immutable after init.
+var countries = []string{
+	"Portugal", "Spain", "France", "Germany", "Italy", "Netherlands",
+	"Ireland", "Poland", "Sweden", "Norway", "Denmark", "Finland",
+}
 
 var firstNames = []string{
 	"Olivia", "Liam", "Emma", "Noah", "Ava", "Oliver", "Sophia", "Elijah",

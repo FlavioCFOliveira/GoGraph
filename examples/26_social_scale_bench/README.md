@@ -29,13 +29,19 @@ groups:
   closes with the statistics-health telemetry: the tracked-`(label, property)`-
   pair count, the refresh latency, and the **estimate-vs-actual** accuracy of
   both an exact label scan and the approximate range.
+- **Columnar execution and its allocation win** — three analytic queries that
+  each engage one of the engine's columnar (chunk-at-a-time) physical operators
+  — a `GROUP BY` aggregation, a filter-over-traversal, and a disconnected
+  equi-join — measured against a result-identical row-at-a-time baseline so the
+  **de-boxing allocation win** each delivers is observable. See
+  [Columnar execution exercise](#columnar-execution-exercise-2121).
 
 ## Domain / scenario
 
 A social network of `USER` and `ARTICLE` nodes:
 
 ```
-(:USER    {id, name})                  // id is a 24-char hex string, name is realistic
+(:USER    {id, name, country})         // id is a 24-char hex string, name is realistic
 (:ARTICLE {id, title})                 // id is a 24-char hex string, title is realistic
 (:USER)-[:FRIEND {since}]->(:USER)     // friends-min .. friends-max per user
 (:USER)-[:LIKE   {when}]->(:ARTICLE)   // 0 .. likes-max per user
@@ -47,6 +53,13 @@ duplicate targets). `LIKE` is a directed out-edge to between zero and
 `likes-max` distinct articles. The dataset is generated from a seeded RNG,
 so its shape is reproducible for a fixed `-seed`; only the telemetry varies
 between runs.
+
+Each user also carries a low-cardinality categorical `country` — the group-by
+key of the [columnar execution exercise](#columnar-execution-exercise-2121). It
+is derived **deterministically from the user index**, never from the RNG, so it
+adds a realistic analytics dimension without perturbing the seeded stream: every
+degree, like, and date fact is byte-for-byte what it was before the dimension
+existed.
 
 Every relationship carries exactly one **mandatory date** property:
 `FRIEND.since` records when the friendship was created and `LIKE.when`
@@ -194,7 +207,7 @@ q.friend_by_year.2024=583561
 q.friend_by_year.2025=1599
 # q.friend_by_year.latency=7.309185s
 # --- planner statistics & cardinality estimates (#2120) ---
-# stats.tracked_pairs=4
+# stats.tracked_pairs=5
 # stats.refresh.latency=41.2ms
 # stats.explain.label_scan:
 #   ProduceResults
@@ -215,6 +228,30 @@ q.friend_by_year.2025=1599
 # stats.range.est_rows=13648
 # stats.range.actual_rows=13672
 # stats.range.abs_row_error=24
+# --- columnar execution exercise (#2121) ---
+# columnar.scale.users=1500
+# columnar.scale.articles=200
+# columnar.agg.groups=12
+# columnar.agg.members_total=1500
+# columnar.agg.col_mallocs=4406
+# columnar.agg.row_mallocs=17899
+# columnar.agg.col_bytes=149104
+# columnar.agg.row_bytes=1246480
+# columnar.agg.malloc_ratio=4.06
+# columnar.filter.rows=9010
+# columnar.filter.col_batches=3
+# columnar.filter.row_batches=0
+# columnar.filter.col_mallocs=123
+# columnar.filter.row_mallocs=120882
+# columnar.filter.col_bytes=1516592
+# columnar.filter.row_bytes=2709008
+# columnar.filter.malloc_ratio=982.78
+# columnar.hashjoin.pairs=457
+# columnar.hashjoin.col_mallocs=73448
+# columnar.hashjoin.nested_mallocs=8646912
+# columnar.hashjoin.col_bytes=5631192
+# columnar.hashjoin.nested_bytes=146680528
+# columnar.hashjoin.malloc_ratio=117.73
 ```
 
 The `edges.*` totals depend on the seed; `q.count_friend` and `q.count_like`
@@ -243,9 +280,9 @@ deterministic invariants:
   `edges.friend`.
 - **Planner statistics (`#2120`).** The `stats.*` block is telemetry (every
   line is `# `-prefixed), because it renders the planner's internal estimate
-  model rather than a data-shape fact. `stats.tracked_pairs=4` is the schema's
-  four `(label, property)` pairs — `(USER,id)`, `(USER,name)`, `(ARTICLE,id)`,
-  `(ARTICLE,title)`. The three `stats.explain.*` blocks show one estimate per
+  model rather than a data-shape fact. `stats.tracked_pairs=5` is the schema's
+  five `(label, property)` pairs — `(USER,id)`, `(USER,name)`, `(USER,country)`,
+  `(ARTICLE,id)`, `(ARTICLE,title)`. The three `stats.explain.*` blocks show one estimate per
   provenance class: the label scan is `exact` (from the label index); the
   equality on the high-cardinality `name`, against a value the generator never
   produces, is the `1/NDV` `heuristic`; and the `name < 'M'` range is the
@@ -256,11 +293,119 @@ deterministic invariants:
   while the range estimate lands within the histogram's guarantee of the true
   count (`stats.range.abs_row_error` well under `users/B`). The estimates are
   **display-only** — they annotate `EXPLAIN` but never change which plan runs.
+- **Columnar execution (`#2121`).** The `columnar.*` block reports, for each of
+  the three columnar operators, the allocation profile of the columnar execution
+  and of a result-identical row-mode baseline; `*.malloc_ratio` is
+  `baseline / columnar`. `columnar.scale.*` is the bounded working set the
+  exercise builds (never the full `-users` scale — see
+  [Columnar execution exercise](#columnar-execution-exercise-2121)), so these
+  figures are the same at any `-users`. `columnar.filter.col_batches > 0` with
+  `columnar.filter.row_batches == 0` is the direct engagement proof: the engine
+  drove its columnar-filter path for the columnar query and not for the
+  `coalesce()` baseline.
 
-The `# `-prefixed figures (including all latencies and the whole `stats.*`
-block) are environment-dependent and are **not** pinned by the test — except
-the statistics test reads the deterministic `stats.*` values by name to assert
-the provenance tags, the tracked-pair count, and the estimate-vs-actual accuracy.
+The `# `-prefixed figures (including all latencies and the whole `stats.*` and
+`columnar.*` blocks) are environment-dependent and are **not** pinned by the
+test — except the statistics and columnar tests read the deterministic values by
+name to assert the provenance tags, the tracked-pair count, the estimate-vs-actual
+accuracy, the columnar engagement, and the **direction** of each allocation win.
+
+## Columnar execution exercise (#2121)
+
+The engine executes qualifying query shapes with **columnar (chunk-at-a-time)**
+physical operators that carry values in typed, column-major chunks and evaluate
+over them **unboxed**, instead of boxing every value into an `interface`-typed
+row cell. This exercise drives three analytic queries that each engage one such
+operator and measures the **allocation win** the de-boxing delivers, so the
+example does not merely *use* the columnar path but produces evidence that it
+engaged and that it allocates less.
+
+**Scenario.** Realistic social-graph analytics: *how many members per country*,
+*which relationships point at a destination in a given id range*, and *which
+users share a display name* (a duplicate-account / homonym check).
+
+**Objective.** Show, empirically, that each columnar operator returns a result
+**identical** to the row-at-a-time path while allocating materially less — and
+prove the columnar path actually engaged, rather than assuming it.
+
+**Purpose.** Give the columnar operators a measurable, reproducible harness so a
+regression that silently drops back to the boxed row path (or erodes the win)
+is caught.
+
+### The three queries
+
+| Query | Cypher | Columnar operator engaged |
+|---|---|---|
+| Aggregation | `MATCH (u:USER) RETURN u.country, count(*) …` | columnar aggregation — hashes the grouping key **unboxed**, boxing it only once per distinct group (`#2049`/`#2104`) |
+| Filter-over-traversal | `MATCH (u)-[r]->(p) WHERE p.id >= '8' RETURN p.id` | columnar `Expand` + `ColumnarFilter` — reads the far node's id and evaluates the predicate over the traversal output **unboxed** (`#2106`) |
+| Disconnected equi-join | `MATCH (a:USER),(b:USER) WHERE a.name = b.name AND a.id < b.id RETURN count(*)` | columnar hash join — retains build-side rows in a **column-major** buffer instead of a per-row snapshot (`#2105`) |
+
+The filter query's pattern is deliberately **bare** (no labels or relationship
+types): a label or type on either endpoint inserts a `Selection` that breaks the
+`scan → Expand → ColumnarFilter` chain, so the columnar path would not engage. A
+label on the far node would still return the right answer via the boxed path —
+which is exactly why the exercise verifies engagement rather than trusting it.
+
+### How the win is measured
+
+Each columnar query is paired with a **result-identical row-mode baseline** and
+both allocation profiles are reported:
+
+- the aggregation and filter baselines wrap the property in `coalesce(…)`, which
+  is value-equivalent (the property is always present) but disqualifies the
+  columnar pre-projection / predicate, forcing the boxed row path;
+- the join baseline runs the identical query on an engine constructed with
+  `EngineOptions{DisableHashJoin: true}`, i.e. the `O(V²)` nested-loop plan.
+
+Each pair is asserted to return the **identical** result before its allocation
+delta is reported, so a divergence fails loudly rather than flattering the win.
+Allocations are read from monotonic, GC-independent `runtime.MemStats` counters
+(`Mallocs`, `TotalAlloc`) around a **warmed** execution (the one-off plan
+compilation is excluded), and the query is drained through `Result.Next` alone —
+never `Record` — so the figure reflects the **operator's** execution allocations
+(where the de-box lives), not the per-row map a caller would add identically to
+both paths.
+
+The columnar `Expand` + `ColumnarFilter` engagement is confirmed directly: the
+exec package increments a counter once per columnar-filter batch, and the
+exercise reads it back (`columnar.filter.col_batches`) to prove the columnar
+query drove that path and the `coalesce()` baseline did not.
+
+### Bounded working set
+
+The row-mode baselines allocate in proportion to the rows they touch, and the
+nested-loop join is `O(V²)`, so running them at the full `-users` scale would be
+ruinous. The exercise therefore builds its **own bounded sub-graph** — capped at
+`colScaleUsers` users / `colScaleArticles` articles — rather than reusing the
+main dataset. The columnar operators it drives are the same ones the main battery
+uses at full scale; only their allocation behaviour is measured here, where a
+controlled row-mode baseline is affordable. The bounded scale makes the
+`columnar.*` figures identical at any `-users`, and keeps the whole exercise (and
+its race-detector run) fast.
+
+### Observed win (bounded working set, `colScaleUsers = 1500`)
+
+| Operator | Row-mode allocs | Columnar allocs | Ratio |
+|---|---:|---:|---:|
+| Aggregation (`count(*)` per country) | ~17,900 | ~4,400 | **~4×** |
+| Filter-over-traversal (~9,000 rows) | ~120,900 | ~120 | **~980×** |
+| Disconnected equi-join (nested-loop baseline) | ~8,650,000 | ~73,400 | **~118×** |
+
+The filter is the most striking: the columnar `Expand` + filter path is
+effectively **zero-allocation per row** (a fixed ~120 allocations regardless of
+the ~9,000 rows it streams), whereas the boxed baseline allocates roughly one
+boxed value per surviving row. Exact figures are environment-dependent; the
+regression test asserts only the **direction** of each win (and the filter
+engagement counter), never a pinned value.
+
+### Exercised GoGraph APIs
+
+`cypher.NewEngine` / `cypher.NewEngineWithOptions` (with
+`EngineOptions{DisableHashJoin: true}` for the baseline), `Engine.Run`,
+`Result.Next` / `Result.Record` / `Result.Err` / `Result.Close`, and the
+`internal/metrics` backend hook (`metrics.SetBackend`) to read the columnar-filter
+batch counter. The exercise adds **no** module code: the columnar operators engage
+automatically on the qualifying query shapes.
 
 ## Memory profile and optimizations
 

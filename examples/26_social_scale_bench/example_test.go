@@ -318,10 +318,11 @@ func TestStatisticsExercise(t *testing.T) {
 	}
 	out := buf.String()
 
-	// Four (label, property) pairs are tracked: (USER,id), (USER,name),
-	// (ARTICLE,id), (ARTICLE,title).
-	if got := telemetryInt(t, out, "stats.tracked_pairs"); got != 4 {
-		t.Errorf("stats.tracked_pairs = %d, want 4", got)
+	// Five (label, property) pairs are tracked: (USER,id), (USER,name),
+	// (USER,country), (ARTICLE,id), (ARTICLE,title). USER gained the country
+	// dimension the columnar-aggregation exercise groups on (#2121).
+	if got := telemetryInt(t, out, "stats.tracked_pairs"); got != 5 {
+		t.Errorf("stats.tracked_pairs = %d, want 5", got)
 	}
 
 	// The three representative provenance tags must each appear in the EXPLAIN
