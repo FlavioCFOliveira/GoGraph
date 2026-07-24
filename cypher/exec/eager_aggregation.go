@@ -72,24 +72,38 @@ type EagerAggregation struct {
 	// chunkChild, when non-nil (set by WithChunkInput), makes the blocking consume
 	// phase pull the child column-major via [ChunkProducer.FillChunk] and hash the
 	// scalar grouping keys UNBOXED, boxing a key only when it opens a new group
-	// (#2049). It is the columnar-input counterpart of the row-at-a-time consume;
-	// the two are equivalent by construction because the unboxed key hash and
-	// equivalence both delegate to the SAME [expr.EquivalentHash]/[expr.Equivalent]
-	// the boxed path uses. nil keeps the row-input path, byte-identical.
+	// (#2049), AND accumulate each aggregate argument column UNBOXED into group-id-
+	// indexed SoA state via a per-slot [aggKernel] (#2104) — removing the O(input)
+	// per-argument [Chunk.BoxCell] the row path required. It is the columnar-input
+	// counterpart of the row-at-a-time consume; the two are equivalent by
+	// construction because the unboxed key hash and equivalence delegate to the SAME
+	// [expr.EquivalentHash]/[expr.Equivalent] the boxed path uses, and each kernel
+	// either mirrors its [funcs.Aggregator]'s accumulation exactly on the unboxed
+	// column or delegates the cells it cannot take unboxed to the same boxed
+	// [funcs.Aggregator.Step]. nil keeps the row-input path, byte-identical.
 	chunkChild ChunkProducer
 
 	// Runtime state — valid between Init and Close.
 	ctx     context.Context          //nolint:containedctx // stored for per-Next ctx check
-	groups  map[uint64][]*groupEntry // hash → bucket (collision chain)
+	groups  map[uint64][]*groupEntry // hash → bucket (collision chain) — row-input path
 	scratch *Chunk                   // reused source-batch buffer for the chunk-input path
+
+	// Chunk-input SoA group state (built by consumeChunk, read by emitChunk).
+	// chunkKeyVals[gid] is the boxed group key (for output and collision resolution);
+	// chunkBuckets maps a group hash to the dense group ids sharing that bucket; kernels
+	// holds one columnar accumulator per aggregate slot (the #2104 SoA de-box). These
+	// stay nil on the row-input path.
+	chunkBuckets map[uint64][]int
+	chunkKeyVals [][]expr.Value
+	kernels      []aggKernel
 
 	keyCols      []int                     // column indices that form the group key
 	aggFactories []funcs.AggregatorFactory // one factory per aggregate expression
 	budget       byteBudget                // estimated-byte cap on retained group keys (#1841)
-	order        []*groupEntry             // insertion-order for deterministic output
+	order        []*groupEntry             // insertion-order for deterministic output — row path
 
 	maxGroups int  // memory cap on distinct group count
-	emitIdx   int  // cursor into order during emit phase
+	emitIdx   int  // cursor into order/chunkKeyVals during emit phase
 	built     bool // true after the blocking consume phase
 }
 
@@ -159,6 +173,9 @@ func (op *EagerAggregation) Init(ctx context.Context) error {
 	op.built = false
 	op.groups = nil
 	op.order = nil
+	op.chunkBuckets = nil
+	op.chunkKeyVals = nil
+	op.kernels = nil
 	op.emitIdx = 0
 	op.scratch = nil
 	op.budget.reset()
@@ -180,6 +197,11 @@ func (op *EagerAggregation) Next(out *Row) (bool, error) {
 		op.built = true
 	}
 
+	// The chunk-input path emits from the SoA kernels; the row path from op.order.
+	if op.chunkChild != nil {
+		return op.emitChunk(out)
+	}
+
 	if op.emitIdx >= len(op.order) {
 		return false, nil
 	}
@@ -198,10 +220,34 @@ func (op *EagerAggregation) Next(out *Row) (bool, error) {
 	return true, nil
 }
 
+// emitChunk emits one output row per group from the chunk-input SoA state: the
+// boxed group key followed by each kernel's per-group result. Groups are emitted
+// in creation order (the dense group id), matching the row path's insertion-order
+// output. It is the chunk-input counterpart of the op.order emit in [Next].
+func (op *EagerAggregation) emitChunk(out *Row) (bool, error) {
+	if op.emitIdx >= len(op.chunkKeyVals) {
+		return false, nil
+	}
+	gid := op.emitIdx
+	op.emitIdx++
+
+	keyVals := op.chunkKeyVals[gid]
+	row := make(Row, len(keyVals)+len(op.kernels))
+	copy(row, keyVals)
+	for i, k := range op.kernels {
+		row[len(keyVals)+i] = k.result(gid)
+	}
+	*out = row
+	return true, nil
+}
+
 // Close closes the child operator and releases internal state.
 func (op *EagerAggregation) Close() error {
 	op.groups = nil
 	op.order = nil
+	op.chunkBuckets = nil
+	op.chunkKeyVals = nil
+	op.kernels = nil
 	op.scratch = nil
 	return op.child.Close()
 }
@@ -330,23 +376,33 @@ func (op *EagerAggregation) getOrCreate(row Row) (*groupEntry, error) {
 var nullEquivHash = expr.EquivalentHash(expr.Null)
 
 // consumeChunk is the columnar-input counterpart of [EagerAggregation.consume]: it
-// pulls the child column-major in batches via [ChunkProducer.FillChunk] and hashes
-// the scalar grouping keys UNBOXED, boxing a key only when it opens a new group
-// (#2049). It is equivalent to the row-input path by construction — the unboxed key
-// hash and equivalence both delegate to the same [expr.EquivalentHash]/
-// [expr.Equivalent] the boxed path uses (see [hashCellEquivalent]/[cellEqualToStored]),
-// so two rows land in the same group iff [rowsEqual] over their boxed keys would say
-// so, and the group hash equals [expr.HashRowEquivalent] over those boxed keys.
+// pulls the child column-major in batches via [ChunkProducer.FillChunk], hashes the
+// scalar grouping keys UNBOXED (#2049), and accumulates each aggregate ARGUMENT column
+// UNBOXED into group-id-indexed SoA state through a per-slot [aggKernel] (#2104) —
+// removing the O(input) per-argument [Chunk.BoxCell] the row path required.
 //
-// Aggregate arguments are read via [Chunk.BoxCell] (they must be boxed for
-// [funcs.Aggregator.Step] regardless), so aggregate semantics are unchanged.
+// Each batch is processed in two phases so the accumulation is a tight per-column
+// scatter loop (MonetDB/X100 hash-aggregation): phase 1 assigns every source row its
+// dense group id (opening a new group — and boxing its key — only on first sight, via
+// [EagerAggregation.groupIDChunk]); phase 2 scatter-accumulates each argument column
+// into its kernel keyed by those group ids. Within a group the cells are visited in
+// input-row order across the whole run, matching the row path exactly, so the
+// order-sensitive float64 sum/avg results are bit-identical.
+//
+// It is equivalent to the row-input path by construction: the unboxed key hash and
+// equivalence delegate to the same [expr.EquivalentHash]/[expr.Equivalent] the boxed
+// path uses (see [hashCellEquivalent]/[cellEqualToStored]), and each kernel either
+// mirrors its [funcs.Aggregator]'s accumulation on the unboxed column or delegates the
+// cells it cannot take unboxed to the same boxed [funcs.Aggregator.Step].
 func (op *EagerAggregation) consumeChunk() error {
-	op.groups = make(map[uint64][]*groupEntry)
-	op.order = make([]*groupEntry, 0, 64)
+	op.chunkBuckets = make(map[uint64][]int)
+	op.chunkKeyVals = make([][]expr.Value, 0, 64)
+	op.kernels = buildAggKernels(op.aggFactories)
 	if op.scratch == nil {
 		op.scratch = op.chunkChild.NewOutputChunk(DefaultChunkCapacity)
 	}
 
+	var gids []int // per-batch dense group ids, reused across batches
 	iter := 0
 	for {
 		if err := op.ctx.Err(); err != nil {
@@ -354,29 +410,36 @@ func (op *EagerAggregation) consumeChunk() error {
 		}
 		op.scratch.Reset()
 		n, ferr := op.chunkChild.FillChunk(op.scratch, DefaultChunkCapacity)
-		for row := 0; row < n; row++ {
-			if iter%4096 == 0 {
-				if err := op.ctx.Err(); err != nil {
+		if n > 0 {
+			if cap(gids) < n {
+				gids = make([]int, n)
+			} else {
+				gids = gids[:n]
+			}
+			// Phase 1: assign group ids (opens new groups, boxing keys once each).
+			for row := 0; row < n; row++ {
+				if iter%4096 == 0 {
+					if err := op.ctx.Err(); err != nil {
+						return err
+					}
+				}
+				iter++
+
+				gid, err := op.groupIDChunk(op.scratch, row)
+				if err != nil {
 					return err
 				}
+				gids[row] = gid
 			}
-			iter++
-
-			entry, err := op.getOrCreateChunk(op.scratch, row)
-			if err != nil {
-				return err
+			// Grow every kernel to the current group count, then scatter-accumulate
+			// each argument column. The argument for aggregate slot i occupies chunk
+			// column len(keyCols)+i (the layout the pre-projection installs).
+			ngroups := len(op.chunkKeyVals)
+			for _, k := range op.kernels {
+				k.grow(ngroups)
 			}
-
-			// Feed each aggregate from the columns after the grouping keys (the
-			// layout the aggregation pre-projection installs), boxing the cell — the
-			// value must be boxed for Step regardless of the key path.
-			for i, agg := range entry.aggs {
-				col := len(op.keyCols) + i
-				v := expr.Value(expr.Null)
-				if col < op.scratch.NumCols() {
-					v = op.scratch.BoxCell(col, row)
-				}
-				if err := agg.Step(v); err != nil {
+			for slot, k := range op.kernels {
+				if err := k.stepColumn(op.scratch, len(op.keyCols)+slot, gids); err != nil {
 					return err
 				}
 			}
@@ -388,37 +451,36 @@ func (op *EagerAggregation) consumeChunk() error {
 			break // child exhausted (short fill), mirroring materializeColumnar
 		}
 	}
-
-	// Mirror the row path: a pure aggregation (no grouping keys) over an empty
-	// input still emits one row of neutral aggregator states. The chunk path is
-	// wired only for grouped aggregation (len(keyCols) > 0), so this is normally a
-	// no-op; it is kept for parity should the path ever be enabled group-key-free.
-	if len(op.order) == 0 && len(op.keyCols) == 0 {
-		aggs := make([]funcs.Aggregator, len(op.aggFactories))
-		for i, factory := range op.aggFactories {
-			aggs[i] = factory()
+	// A group-key-free aggregate over an empty input must still emit one neutral row
+	// (openCypher 9 §3.6). The chunk path is wired only for grouped aggregation
+	// (len(keyCols) > 0), so this synthesises nothing in practice; it is kept for
+	// parity should the path ever be enabled group-key-free.
+	if len(op.chunkKeyVals) == 0 && len(op.keyCols) == 0 {
+		for _, k := range op.kernels {
+			k.grow(1)
 		}
-		op.order = append(op.order, &groupEntry{keyVals: nil, aggs: aggs})
+		op.chunkKeyVals = append(op.chunkKeyVals, nil)
 	}
 	return nil
 }
 
-// getOrCreateChunk is the columnar-input counterpart of [EagerAggregation.getOrCreate]:
-// it hashes and compares the grouping key of source row row UNBOXED, and boxes the
-// key (via [Chunk.BoxCell]) only when opening a new group. The maxGroups and
+// groupIDChunk hashes and compares the grouping key of source row row UNBOXED and
+// returns its dense group id, opening a new group — and boxing its key values (via
+// [Chunk.BoxCell]) only then, never per row — when the key is first seen. It is the
+// dense-id counterpart of [EagerAggregation.getOrCreate]; the maxGroups and
 // group-key byte-budget checks fire in the same order as the row path.
-func (op *EagerAggregation) getOrCreateChunk(src *Chunk, row int) (*groupEntry, error) {
+func (op *EagerAggregation) groupIDChunk(src *Chunk, row int) (int, error) {
 	h := op.hashKeyColsChunk(src, row)
-	bucket := op.groups[h]
-	for _, e := range bucket {
-		if op.keyColsEqualChunk(src, row, e.keyVals) {
-			return e, nil
+	bucket := op.chunkBuckets[h]
+	for _, gid := range bucket {
+		if op.keyColsEqualChunk(src, row, op.chunkKeyVals[gid]) {
+			return gid, nil
 		}
 	}
 
 	// New group: now — and only now — box the key values for retention and output.
-	if len(op.order) >= op.maxGroups {
-		return nil, ErrAggMemoryExceeded
+	if len(op.chunkKeyVals) >= op.maxGroups {
+		return 0, ErrAggMemoryExceeded
 	}
 	keyVals := make([]expr.Value, len(op.keyCols))
 	for i, col := range op.keyCols {
@@ -429,17 +491,13 @@ func (op *EagerAggregation) getOrCreateChunk(src *Chunk, row int) (*groupEntry, 
 		}
 	}
 	if op.budget.charge(keyVals) {
-		return nil, ErrAggMemoryExceeded
+		return 0, ErrAggMemoryExceeded
 	}
 
-	aggs := make([]funcs.Aggregator, len(op.aggFactories))
-	for i, factory := range op.aggFactories {
-		aggs[i] = factory()
-	}
-	entry := &groupEntry{keyVals: keyVals, aggs: aggs}
-	op.groups[h] = append(bucket, entry)
-	op.order = append(op.order, entry)
-	return entry, nil
+	gid := len(op.chunkKeyVals)
+	op.chunkKeyVals = append(op.chunkKeyVals, keyVals)
+	op.chunkBuckets[h] = append(bucket, gid)
+	return gid, nil
 }
 
 // hashKeyColsChunk computes the equivalence-consistent group hash of source row row
