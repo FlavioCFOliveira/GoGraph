@@ -303,6 +303,93 @@ func TestDeterministic(t *testing.T) {
 	}
 }
 
+// TestStatisticsExercise pins the planner-statistics observability section
+// (#2120). Its lines are telemetry (prefixed "# "), so they are absent from the
+// deterministic fact-line set; this test reads them by name instead. It asserts
+// the three provenance tags EXPLAIN surfaces (exact / heuristic / stats+error),
+// the tracked-pair count for this schema, and the estimate-vs-actual accuracy —
+// exact for the label scan, and within the equi-depth histogram's certified error
+// for the range.
+func TestStatisticsExercise(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := testConfig()
+	if err := run(context.Background(), &buf, cfg); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	out := buf.String()
+
+	// Four (label, property) pairs are tracked: (USER,id), (USER,name),
+	// (ARTICLE,id), (ARTICLE,title).
+	if got := telemetryInt(t, out, "stats.tracked_pairs"); got != 4 {
+		t.Errorf("stats.tracked_pairs = %d, want 4", got)
+	}
+
+	// The three representative provenance tags must each appear in the EXPLAIN
+	// blocks: the label scan is exact, the absent-value equality is the 1/NDV
+	// heuristic, and the range is a histogram estimate carrying its certified error.
+	for _, want := range []string{
+		"NodeByLabelScan [u:USER] (est. rows=2000, exact)",
+		", heuristic)",
+		", stats, err=",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("statistics EXPLAIN output missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+
+	// The label scan is estExact: its annotated estimate must equal the real count,
+	// which is exactly the number of USER nodes.
+	labelEst := telemetryInt(t, out, "stats.label.est_rows")
+	labelActual := telemetryInt(t, out, "stats.label.actual_rows")
+	if labelEst != int64(cfg.users) || labelActual != int64(cfg.users) {
+		t.Errorf("label est/actual = %d/%d, want %d/%d (exact)", labelEst, labelActual, cfg.users, cfg.users)
+	}
+
+	// The range is estStats: an approximate estimate whose absolute row error the
+	// equi-depth guarantee bounds (δ = 1/B over the summarised rows ≈ users/256).
+	// Assert both are populated and the gap sits inside a generous multiple of that
+	// bound, so the test guards the accuracy without pinning an internal estimator
+	// value.
+	rangeEst := telemetryInt(t, out, "stats.range.est_rows")
+	rangeActual := telemetryInt(t, out, "stats.range.actual_rows")
+	if rangeEst <= 0 || rangeActual <= 0 {
+		t.Errorf("range est/actual = %d/%d, want both > 0", rangeEst, rangeActual)
+	}
+	absErr := telemetryInt(t, out, "stats.range.abs_row_error")
+	if got := abs64(rangeEst - rangeActual); got != absErr {
+		t.Errorf("stats.range.abs_row_error = %d, but |est-actual| = %d", absErr, got)
+	}
+	if bound := int64(cfg.users)/256 + 64; absErr > bound {
+		t.Errorf("range abs_row_error = %d, want <= %d (certified 1/B bound + slack)", absErr, bound)
+	}
+}
+
+// telemetryInt returns the integer value of the "# <key>=<int>" telemetry line,
+// failing the test when the line is absent or its value is not an integer.
+func telemetryInt(t *testing.T, out, key string) int64 {
+	t.Helper()
+	prefix := "# " + key + "="
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			n, err := strconv.ParseInt(strings.TrimPrefix(line, prefix), 10, 64)
+			if err != nil {
+				t.Fatalf("telemetry %q value is not an integer: %q", key, line)
+			}
+			return n
+		}
+	}
+	t.Fatalf("telemetry line %q not found in output", key)
+	return 0
+}
+
+// abs64 returns the absolute value of n.
+func abs64(n int64) int64 {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
 // parseFacts extracts the deterministic "key=int" lines (everything not
 // prefixed with "# ") whose value parses as an integer, returning them
 // as a map. Lines whose value is not an integer (e.g. the config range

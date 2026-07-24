@@ -25,6 +25,15 @@
 //     component access, Date − Duration arithmetic, and date.truncate — all
 //     anchored to the fixed reference date so the results stay deterministic.
 //
+// After the battery it exercises the planner statistics (tasks #2097–#2102):
+// it calls Engine.RefreshStatistics once and prints the EXPLAIN plan of a label
+// scan, a property equality, and a property range, each operator annotated with
+// its estimated row count and provenance (exact / heuristic / stats-with-error),
+// then reports the stats-health telemetry — the tracked-(label, property)-pair
+// count, the refresh latency, and the estimate-vs-actual accuracy of both an
+// exact label scan and the approximate range. These estimates are display-only:
+// they annotate EXPLAIN but never change which plan runs.
+//
 // # Model
 //
 //	(:USER    {id, name})                       // id is a 24-char hex string
@@ -102,6 +111,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
@@ -265,6 +275,9 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	eng := cypher.NewEngine(g)
 	if err := runQueries(ctx, eng, cfg, &stats, w); err != nil {
 		return fmt.Errorf("queries: %w", err)
+	}
+	if err := statisticsExercise(ctx, eng, cfg, w); err != nil {
+		return fmt.Errorf("statistics: %w", err)
 	}
 	return nil
 }
@@ -840,6 +853,182 @@ func temporalQueries(ctx context.Context, eng *cypher.Engine, friendRelPat strin
 	}
 
 	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Planner statistics & cardinality estimates (rmp #2120)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// statisticsExercise builds the planner statistics over the assembled graph and
+// then exercises the display-only cardinality estimates the engine surfaces in
+// EXPLAIN (tasks #2097–#2102). It is the observability half of the statistics
+// feature: it calls [cypher.Engine.RefreshStatistics] once — the single,
+// caller-driven rebuild — then prints, for three representative predicate shapes,
+// the EXPLAIN plan annotated with each operator's estimated row count and its
+// provenance:
+//
+//   - a label scan          → the EXACT live count (estExact, from the label index);
+//   - an equality predicate → the 1/NDV heuristic over a high-NDV column
+//     (estHeuristic), or an MCV-exact count when the literal is a tracked heavy hitter;
+//   - a range predicate     → the equi-depth histogram estimate (estStats) with its
+//     certified absolute selectivity error δ = 1/B + Δ/N.
+//
+// It closes with the stats-health telemetry the feature is meant to expose: the
+// tracked-(label, property)-pair count, the refresh latency, and — for both the
+// exact label scan and the approximate range — the estimate-vs-actual accuracy,
+// comparing each annotated estimate to the query's real result count.
+//
+// Every line is volatile telemetry (prefixed "# "): the EXPLAIN rendering and the
+// estimate numbers are diagnostic observations of the planner's internal model,
+// not deterministic data-shape facts, so the regression test reads them by name
+// rather than pinning them into the fact-line set. The queries are over node
+// labels and node properties only, so the plans and estimates are identical in
+// both relationship-encoding modes.
+func statisticsExercise(ctx context.Context, eng *cypher.Engine, _ config, w io.Writer) error {
+	// Build the statistics off the (already-assembled, read-only) graph. This is
+	// the sole explicit rebuild: one consistent scan over every (label, property).
+	start := time.Now()
+	if err := eng.RefreshStatistics(ctx); err != nil {
+		return fmt.Errorf("refresh: %w", err)
+	}
+	refreshLatency := time.Since(start)
+
+	fmt.Fprintln(w, "# --- planner statistics & cardinality estimates (#2120) ---")
+	fmt.Fprintf(w, "# stats.tracked_pairs=%d\n", eng.StatsTrackedPairs())
+	fmt.Fprintf(w, "# stats.refresh.latency=%s\n", refreshLatency.Round(time.Microsecond))
+
+	// Representative queries, all with inline literals so their annotated plans
+	// match the proven estimate path. A name that the word lists never produce
+	// makes the equality estimate the honest 1/NDV distribution-average heuristic;
+	// the mid-alphabet range bound "M" matches every user whose name sorts before it.
+	const (
+		labelScanQ  = "MATCH (u:USER) RETURN u"
+		labelCountQ = "MATCH (u:USER) RETURN count(u) AS c"
+		equalityQ   = "MATCH (u:USER) WHERE u.name = '~~~ no such user' RETURN u"
+		rangeQ      = "MATCH (u:USER) WHERE u.name < 'M' RETURN u"
+		rangeCountQ = "MATCH (u:USER) WHERE u.name < 'M' RETURN count(*) AS c"
+	)
+
+	// Print each annotated EXPLAIN plan (every line prefixed "# ").
+	if err := explainAnnotated(w, eng, "label_scan", labelScanQ); err != nil {
+		return err
+	}
+	if err := explainAnnotated(w, eng, "equality_1_over_ndv", equalityQ); err != nil {
+		return err
+	}
+	if err := explainAnnotated(w, eng, "range_histogram", rangeQ); err != nil {
+		return err
+	}
+
+	// Estimate-vs-actual accuracy.
+	// (a) The label scan is estExact: its estimate must equal the real count.
+	labelEst, err := estRowsFor(eng, labelScanQ, "NodeByLabelScan")
+	if err != nil {
+		return err
+	}
+	labelActual, _, err := scalarCount(ctx, eng, labelCountQ, nil)
+	if err != nil {
+		return fmt.Errorf("label actual: %w", err)
+	}
+	fmt.Fprintf(w, "# stats.label.est_rows=%d\n", labelEst)
+	fmt.Fprintf(w, "# stats.label.actual_rows=%d\n", labelActual)
+
+	// (b) The range is estStats: an approximate histogram estimate whose absolute
+	// row error the equi-depth guarantee bounds. Report both and their gap.
+	rangeEst, err := estRowsFor(eng, rangeQ, "Selection")
+	if err != nil {
+		return err
+	}
+	rangeActual, _, err := scalarCount(ctx, eng, rangeCountQ, nil)
+	if err != nil {
+		return fmt.Errorf("range actual: %w", err)
+	}
+	fmt.Fprintf(w, "# stats.range.est_rows=%d\n", rangeEst)
+	fmt.Fprintf(w, "# stats.range.actual_rows=%d\n", rangeActual)
+	fmt.Fprintf(w, "# stats.range.abs_row_error=%d\n", absInt64(rangeEst-rangeActual))
+	return nil
+}
+
+// explainAnnotated runs EXPLAIN for query and prints its annotated physical plan,
+// one "# "-prefixed line per plan line, under a named header. Every emitted line
+// is telemetry, so it never enters the deterministic fact-line set the tests pin.
+func explainAnnotated(w io.Writer, eng *cypher.Engine, name, query string) error {
+	plan, err := eng.Explain(query, nil)
+	if err != nil {
+		return fmt.Errorf("explain %s: %w", name, err)
+	}
+	fmt.Fprintf(w, "# stats.explain.%s:\n", name)
+	for _, line := range strings.Split(strings.TrimRight(plan, "\n"), "\n") {
+		fmt.Fprintf(w, "#   %s\n", line)
+	}
+	return nil
+}
+
+// estRowsFor runs EXPLAIN for query and returns the estimated row count annotated
+// on the first plan operator line containing op (e.g. "NodeByLabelScan" or
+// "Selection"). It errors when the operator line is absent or carries no estimate
+// annotation (an estFallback line is rendered without one).
+func estRowsFor(eng *cypher.Engine, query, op string) (int64, error) {
+	plan, err := eng.Explain(query, nil)
+	if err != nil {
+		return 0, fmt.Errorf("explain %s: %w", op, err)
+	}
+	line := planLineContaining(plan, op)
+	if line == "" {
+		return 0, fmt.Errorf("EXPLAIN has no %q operator line:\n%s", op, plan)
+	}
+	n, ok := parseEstRows(line)
+	if !ok {
+		return 0, fmt.Errorf("%q line carries no estimate annotation: %q", op, line)
+	}
+	return n, nil
+}
+
+// planLineContaining returns the first line of plan that contains substr, or "".
+func planLineContaining(plan, substr string) string {
+	for _, line := range strings.Split(plan, "\n") {
+		if strings.Contains(line, substr) {
+			return line
+		}
+	}
+	return ""
+}
+
+// parseEstRows extracts the integer row estimate from an EXPLAIN annotation of the
+// form "(est. rows=N, …)" (exact) or "(est. rows~N, …)" (approximate). ok is false
+// when the line carries no such annotation (for example an estFallback operator,
+// which is deliberately rendered without one).
+func parseEstRows(line string) (int64, bool) {
+	const marker = "est. rows"
+	i := strings.Index(line, marker)
+	if i < 0 {
+		return 0, false
+	}
+	rest := line[i+len(marker):]
+	if rest == "" {
+		return 0, false
+	}
+	rest = rest[1:] // skip the '=' (exact) or '~' (approximate) separator
+	j := 0
+	for j < len(rest) && rest[j] >= '0' && rest[j] <= '9' {
+		j++
+	}
+	if j == 0 {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(rest[:j], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// absInt64 returns the absolute value of n.
+func absInt64(n int64) int64 {
+	if n < 0 {
+		return -n
+	}
+	return n
 }
 
 // scalarCount runs a query whose single row has a single integer column

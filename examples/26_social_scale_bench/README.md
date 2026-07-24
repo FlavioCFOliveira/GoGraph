@@ -20,6 +20,15 @@ groups:
   `duration.between` family (`duration.inDays` / `inSeconds`) with duration
   component access, `Date − Duration` arithmetic, and `date.truncate` — all
   anchored to a **fixed reference date** so the results stay deterministic.
+- **Planner statistics and cardinality estimates** — after building the graph
+  it calls `Engine.RefreshStatistics` (the single, caller-driven statistics
+  rebuild) and then prints the `EXPLAIN` plan of three representative queries,
+  each operator annotated with its estimated row count and **provenance** —
+  `exact` (a maintained count), `heuristic` (the `1/NDV` distribution average),
+  or `stats` (an equi-depth histogram estimate with its certified error). It
+  closes with the statistics-health telemetry: the tracked-`(label, property)`-
+  pair count, the refresh latency, and the **estimate-vs-actual** accuracy of
+  both an exact label scan and the approximate range.
 
 ## Domain / scenario
 
@@ -184,6 +193,28 @@ q.friend_by_year.2023=583308
 q.friend_by_year.2024=583561
 q.friend_by_year.2025=1599
 # q.friend_by_year.latency=7.309185s
+# --- planner statistics & cardinality estimates (#2120) ---
+# stats.tracked_pairs=4
+# stats.refresh.latency=41.2ms
+# stats.explain.label_scan:
+#   ProduceResults
+#   └─ Projection
+#      └─ NodeByLabelScan [u:USER] (est. rows=20000, exact)
+# stats.explain.equality_1_over_ndv:
+#   ProduceResults
+#   └─ Projection
+#      └─ Selection (est. rows~1, heuristic)
+#         └─ NodeByLabelScan [u:USER] (est. rows=20000, exact)
+# stats.explain.range_histogram:
+#   ProduceResults
+#   └─ Projection
+#      └─ Selection (est. rows~13648, stats, err=0.0039)
+#         └─ NodeByLabelScan [u:USER] (est. rows=20000, exact)
+# stats.label.est_rows=20000
+# stats.label.actual_rows=20000
+# stats.range.est_rows=13648
+# stats.range.actual_rows=13672
+# stats.range.abs_row_error=24
 ```
 
 The `edges.*` totals depend on the seed; `q.count_friend` and `q.count_like`
@@ -210,9 +241,26 @@ deterministic invariants:
   of the fixed reference date (`Date − Duration` arithmetic); and the
   `q.friend_by_year.*` buckets (`date.truncate('year', …)`) sum to
   `edges.friend`.
+- **Planner statistics (`#2120`).** The `stats.*` block is telemetry (every
+  line is `# `-prefixed), because it renders the planner's internal estimate
+  model rather than a data-shape fact. `stats.tracked_pairs=4` is the schema's
+  four `(label, property)` pairs — `(USER,id)`, `(USER,name)`, `(ARTICLE,id)`,
+  `(ARTICLE,title)`. The three `stats.explain.*` blocks show one estimate per
+  provenance class: the label scan is `exact` (from the label index); the
+  equality on the high-cardinality `name`, against a value the generator never
+  produces, is the `1/NDV` `heuristic`; and the `name < 'M'` range is the
+  equi-depth histogram estimate tagged `stats` with the certified absolute
+  selectivity error `err=1/B ≈ 0.0039` (`B = 256` buckets, and Δ = 0 right after
+  a rebuild). The accuracy pair confirms the tags: the label scan's estimate
+  equals the real count exactly (`stats.label.est_rows` = `stats.label.actual_rows`),
+  while the range estimate lands within the histogram's guarantee of the true
+  count (`stats.range.abs_row_error` well under `users/B`). The estimates are
+  **display-only** — they annotate `EXPLAIN` but never change which plan runs.
 
-The `# `-prefixed figures (including all latencies) are environment-dependent
-and are **not** pinned by the test.
+The `# `-prefixed figures (including all latencies and the whole `stats.*`
+block) are environment-dependent and are **not** pinned by the test — except
+the statistics test reads the deterministic `stats.*` values by name to assert
+the provenance tags, the tracked-pair count, and the estimate-vs-actual accuracy.
 
 ## Memory profile and optimizations
 
@@ -422,6 +470,9 @@ would suit edge-centric workloads — tracked in the backlog.
 - `graph/lpg.StringValue` — wrap string property values (node `id` / `name`, article `title`).
 - `graph/adjlist.Config{Weightless: true}` (passed through `lpg.New`) — build a graph with no per-edge weight column, for a workload queried only by relationship/property; `AddEdge`'s weight argument is ignored and reads return the zero weight. Persisted in the snapshot manifest so a recovered graph stays weightless (`#1650`).
 - `cypher.NewEngine` / `Engine.Run` — query the in-memory graph.
+- `cypher.Engine.RefreshStatistics` — build the planner statistics (HyperLogLog NDV, exact MCV, equi-depth histograms) off the write path in one consistent scan; the single, explicit, caller-driven rebuild.
+- `cypher.Engine.Explain` — render the physical plan, each operator annotated with its estimated row count and provenance (`exact` / `heuristic` / `stats` + certified error); the estimates are display-only and never change the executed plan.
+- `cypher.Engine.StatsTrackedPairs` — the statistics footprint: the number of `(label, property)` pairs currently tracked (the size indicator the metrics backend cannot express as a gauge).
 - `cypher.Result.Next` / `Result.Record` / `Result.Err` / `Result.Close` — iterate result rows and read columns.
 - `cypher/expr.StringValue` / `expr.IntegerValue` / `expr.FloatValue` / `expr.ListValue` — typed query parameters and result cells (the list is the `$ids` parameter of the `UNWIND` batch read).
 - `runtime.ReadMemStats` — capture the Go heap footprint of the build.
@@ -435,6 +486,7 @@ would suit edge-centric workloads — tracked in the backlog.
 - **Parameters and list unrolling** — `UNWIND $ids AS id MATCH (u:USER {id:id}) …` batch point-read driven by an `expr.ListValue` parameter.
 - **Entity identity** — `id()` (Integer) and `elementId()` (String) on a matched node.
 - **Temporal functions** — `date($s)` / `datetime($s)` constructors; `duration('P30D')` and `Date − Duration` arithmetic; `duration.inDays(t1, t2)` / `duration.inSeconds(t1, t2)` projections and the `.days` / `.seconds` duration component accessors; and `date.truncate('year', …)` with the `.year` accessor.
+- **Planner statistics** — `EXPLAIN` over a label scan, a property equality, and a property range, reading each operator's cardinality estimate and provenance tag from the annotated plan (`RefreshStatistics` + `Explain` + `StatsTrackedPairs`).
 
 ## Further reading
 
