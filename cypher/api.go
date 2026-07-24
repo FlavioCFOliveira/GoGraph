@@ -6867,6 +6867,17 @@ func buildOperator(
 		} else if ok {
 			return op, nil
 		}
+		// Columnar read chain over a single-hop traversal (#2106): a scalar-property
+		// projection over a post-traversal WHERE (`MATCH (n)-[r]->(p) WHERE p.x > k
+		// RETURN p.y`) is built as scan → columnar Expand → ColumnarFilter →
+		// chunk-input ColumnarProject, unboxing the far-node property read for every
+		// emitted edge. Keeps the Expand in the chunk chain (the enabler). Falls
+		// through to the serial build (byte-identical) for every non-matching shape.
+		if op, ok, cerr := tryBuildColumnarExpandFilterChain(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, bopts); cerr != nil {
+			return nil, cerr
+		} else if ok {
+			return op, nil
+		}
 		// Morsel-parallel fused scan (#1682): for a scalar projection over an
 		// optional Selection over a bare AllNodesScan whose live node count exceeds
 		// the threshold and which the columnar chain above did NOT take, replace the
@@ -12419,6 +12430,104 @@ func tryBuildColumnarFilterChain(
 	return projOp, true, nil
 }
 
+// tryBuildColumnarExpandFilterChain recognises `Projection(scalar node props) →
+// Selection(node.prop CMP const) → Expand → single-node scan` — a single-hop
+// traversal with a post-traversal WHERE on a bound node — and builds the fully
+// columnar chain scan → columnar [exec.Expand] → [exec.ColumnarFilter] →
+// chunk-input [exec.ColumnarProject] (rmp #2106). The Expand ChunkProducer keeps the
+// chunk chain unbroken across the traversal, so the filter reads the far node's raw
+// NodeID from the Expand output's dstID column and evaluates the predicate WITHOUT
+// boxing, and the projection reads its scalar properties column-major.
+//
+// It returns (op, true, nil) on a match, (nil, false, nil) to fall through to the
+// byte-identical serial build, or (nil, false, err) on a build error. Like
+// [tryBuildColumnarFilterChain] it pre-checks against a hypothetical schema BEFORE
+// building, so a non-match never half-mutates the real schema; once committed, the
+// chain is built through the SAME buildOperator/buildIRProjection the serial path
+// uses, and the ColumnarFilter's predicate (and the projection's fillers) fall back
+// to their boxed row forms for any cell the unboxed fast path cannot decide, so the
+// result is byte-identical to the row path either way.
+func tryBuildColumnarExpandFilterChain(
+	proj *ir.Projection,
+	walker nodeWalkerIface,
+	labelSrc labelResolverIface,
+	reg expr.FunctionRegistry,
+	params map[string]expr.Value,
+	schema map[string]int,
+	idxMgr *index.Manager,
+	procReg *procs.Registry,
+	bopts *buildOpts,
+) (exec.Operator, bool, error) {
+	if bopts == nil || len(schema) != 0 {
+		// A non-empty schema means the scan would not bind at column 0, breaking the
+		// chunk-column ⇔ row-column alignment the chain relies on; fall back.
+		return nil, false, nil
+	}
+	lw, ok := walker.(*lpgNodeWalker)
+	if !ok || lw.g == nil || lw.morsel != nil {
+		return nil, false, nil
+	}
+	g := lw.g
+	sel, isSel := proj.Child.(*ir.Selection)
+	if !isSel || sel.PredicateExpr == nil {
+		return nil, false, nil
+	}
+	exp, isExp := sel.Child.(*ir.Expand)
+	if !isExp {
+		return nil, false, nil
+	}
+	scanVar, isScan := columnarScanVar(exp.Child)
+	if !isScan {
+		return nil, false, nil
+	}
+	// Pre-check against a hypothetical post-Expand schema that binds ONLY the two
+	// NODE variables — the scan source at column 0 and the far endpoint at column 3
+	// (Expand emits scanVar || __dup || rel || to). Omitting the relationship
+	// variable makes the pre-check reject a relationship-property predicate/projection
+	// naturally (its receiver is absent from the map), so we only commit when every
+	// referenced receiver is a bound node. The __dup/rel slots (1 and 2) are never
+	// referenced by a node-scalar predicate or projection.
+	tmpSchema := map[string]int{scanVar: 0}
+	if exp.ToVar != "" {
+		tmpSchema[exp.ToVar] = 3
+	}
+	if _, matched := buildColumnarExpandPredicate(sel.PredicateExpr, tmpSchema, g, params, reg, bopts); !matched {
+		return nil, false, nil
+	}
+	for i := range proj.Items {
+		_, _, itemOK := columnarPropertyItem(proj.Items[i], tmpSchema, bopts)
+		if !itemOK {
+			return nil, false, nil
+		}
+	}
+	// Committed: build scan → Expand through the normal builder (populating schema,
+	// edgeVarMeta, path metadata identically to the serial path), then present the
+	// Expand column-major. The Expand build over a single-node scan always yields a
+	// *exec.Expand whose child is the scan (a NodeIDColumnProducer), so
+	// NewColumnarExpand succeeds; a defensive fall-through keeps correctness if either
+	// invariant does not hold.
+	expandOp, err := buildOperator(sel.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, nil, bopts)
+	if err != nil {
+		return nil, false, err
+	}
+	expandExec, isExpandExec := expandOp.(*exec.Expand)
+	if !isExpandExec {
+		return nil, false, nil
+	}
+	colExp, wrapped := exec.NewColumnarExpand(expandExec)
+	if !wrapped {
+		return nil, false, nil
+	}
+	predFn := newRowPredicate(sel.PredicateExpr, schema, g, params, reg, bopts)
+	cpred, _ := buildColumnarExpandPredicate(sel.PredicateExpr, schema, g, params, reg, bopts)
+	filter := exec.NewColumnarFilter(colExp, predFn, cpred)
+	projOp, err := buildIRProjection(proj.Items, filter, schema, g, params, reg, bopts)
+	if err != nil {
+		return nil, false, err
+	}
+	return projOp, true, nil
+}
+
 // projItems are the already-built row-at-a-time items; each item's Eval is reused
 // as the columnar filler's byte-identical fallback. inputSchema is the pre-loop
 // input-column layout the fillers resolve receiver variables against.
@@ -12435,7 +12544,7 @@ func tryBuildColumnarProjection(
 	}
 	fillers := make([]exec.ColumnFiller, len(items))
 	propNames := make([]string, len(items))
-	allNodeCol0 := true
+	nodeCols := make([]int, len(items))
 	for i := range items {
 		nodeCol, propName, ok := columnarPropertyItem(items[i], inputSchema, bopts)
 		if !ok {
@@ -12443,26 +12552,27 @@ func tryBuildColumnarProjection(
 		}
 		fillers[i] = buildScalarPropertyFiller(nodeCol, propName, g, projItems[i].Eval)
 		propNames[i] = propName
-		if nodeCol != 0 {
-			allNodeCol0 = false
-		}
+		nodeCols[i] = nodeCol
 	}
 	cp, err := exec.NewColumnarProject(child, projItems, fillers)
 	if err != nil {
 		return nil, false, err
 	}
-	// Chunk-input fast path (#1704 P3): when the child produces its output
-	// column-major with node variables as raw int64 NodeID columns (a scan, or a
-	// [exec.ColumnarFilter] passthrough over a scan) AND every receiver node sits
-	// at chunk column 0 (a single-node scan row shape, so the chunk column and the
-	// row-schema column coincide), consume the child column-major. This unboxes the
-	// upstream scan/filter NodeID that the row-input path (P2) would re-box when it
-	// pulls the child row-at-a-time. Any other child, or a multi-column row shape,
-	// keeps the row-input path — byte-identical. See [exec.ColumnarProject].
-	if _, isChunk := child.(exec.NodeIDColumnProducer); isChunk && allNodeCol0 {
+	// Chunk-input fast path (#1704 P3, generalised to arbitrary receiver columns for
+	// #2106): when the child produces its output column-major with node variables as
+	// raw int64 NodeID columns (a scan, a [exec.ColumnarFilter] passthrough, or a
+	// columnar [exec.Expand]), consume it column-major. Each receiver's CHUNK column
+	// equals its ROW-SCHEMA column, because every [exec.NodeIDColumnProducer]'s chunk
+	// layout mirrors the schema — a single-node scan binds one node at column 0; a
+	// columnar Expand emits (passthrough || srcID, edgeID, dstID), the same layout the
+	// row schema records — so a receiver at schema column c is at chunk column c. This
+	// unboxes the upstream NodeID the row-input path (P2) would re-box when it pulls
+	// the child row-at-a-time. Any non-[exec.NodeIDColumnProducer] child keeps the
+	// row-input path — byte-identical. See [exec.ColumnarProject].
+	if _, isChunk := child.(exec.NodeIDColumnProducer); isChunk {
 		chunkFillers := make([]exec.ChunkColumnFiller, len(items))
 		for i := range items {
-			chunkFillers[i] = buildScalarPropertyChunkFiller(0, propNames[i], g, projItems[i].Eval)
+			chunkFillers[i] = buildScalarPropertyChunkFiller(nodeCols[i], propNames[i], g, projItems[i].Eval)
 		}
 		if werr := cp.WithChunkInput(chunkFillers); werr != nil {
 			// Preconditions are already checked above; on the (unreachable) error
@@ -12887,15 +12997,70 @@ func buildColumnarPredicate(predExpr ast.Expression, schema map[string]int, g *l
 	}
 	if propName, isProp := nodePropAtCol0(bo.Left, schema, bopts); isProp {
 		if cv, isConst := columnarConstValue(bo.Right, params, reg); isConst {
-			return makeColumnarComparePredicate(bo.Operator, propName, cv, g), true
+			return makeColumnarComparePredicate(bo.Operator, propName, cv, 0, g), true
 		}
 	}
 	if propName, isProp := nodePropAtCol0(bo.Right, schema, bopts); isProp {
 		if cv, isConst := columnarConstValue(bo.Left, params, reg); isConst {
-			return makeColumnarComparePredicate(flipComparisonOp(bo.Operator), propName, cv, g), true
+			return makeColumnarComparePredicate(flipComparisonOp(bo.Operator), propName, cv, 0, g), true
 		}
 	}
 	return nil, false
+}
+
+// buildColumnarExpandPredicate is the #2106 generalisation of
+// [buildColumnarPredicate] for the post-traversal filter over an [exec.Expand]
+// ChunkProducer: it matches `node.prop CMP const` where node is a bound NODE
+// variable at ANY schema column (not only column 0), typically the far endpoint of
+// the traversal whose raw NodeID sits in the Expand output's dstID column. It
+// returns the matching [exec.ChunkPredicate] (reading the node's raw NodeID from
+// that chunk column) or (nil, false) to keep the boxed row predicate. The unboxed
+// fast-path and undecided-fallback rules are exactly those of [buildColumnarPredicate].
+func buildColumnarExpandPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.Graph[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, bopts *buildOpts) (exec.ChunkPredicate, bool) {
+	bo, ok := predExpr.(*ast.BinaryOp)
+	if !ok {
+		return nil, false
+	}
+	switch bo.Operator {
+	case "<", "<=", ">", ">=", "=", "<>":
+	default:
+		return nil, false
+	}
+	if propName, nodeCol, isProp := nodePropAtAnyCol(bo.Left, schema, bopts); isProp {
+		if cv, isConst := columnarConstValue(bo.Right, params, reg); isConst {
+			return makeColumnarComparePredicate(bo.Operator, propName, cv, nodeCol, g), true
+		}
+	}
+	if propName, nodeCol, isProp := nodePropAtAnyCol(bo.Right, schema, bopts); isProp {
+		if cv, isConst := columnarConstValue(bo.Left, params, reg); isConst {
+			return makeColumnarComparePredicate(flipComparisonOp(bo.Operator), propName, cv, nodeCol, g), true
+		}
+	}
+	return nil, false
+}
+
+// nodePropAtAnyCol reports whether e is `node.prop` on a bound NODE variable and,
+// when so, returns the property key and the variable's row-schema column — which,
+// under the columnar chain's chunk-column⇔row-column alignment, is also its chunk
+// column. Unlike [nodePropAtCol0] it accepts any column, for the multi-column row
+// shape a traversal produces.
+func nodePropAtAnyCol(e ast.Expression, schema map[string]int, bopts *buildOpts) (propName string, nodeCol int, ok bool) {
+	prop, isProp := e.(*ast.Property)
+	if !isProp || prop.Key == "" {
+		return "", 0, false
+	}
+	recv, isVar := prop.Receiver.(*ast.Variable)
+	if !isVar {
+		return "", 0, false
+	}
+	col, inSchema := schema[recv.Name]
+	if !inSchema {
+		return "", 0, false
+	}
+	if isNonNodeVar(recv.Name, bopts) {
+		return "", 0, false
+	}
+	return prop.Key, col, true
 }
 
 // nodePropAtCol0 reports whether e is `node.prop` on a bound NODE variable whose
@@ -12944,16 +13109,17 @@ func columnarConstValue(e ast.Expression, params map[string]expr.Value, reg expr
 }
 
 // makeColumnarComparePredicate builds the per-row [exec.ChunkPredicate] for
-// `node.prop op const`. It reads the raw NodeID from chunk column 0, reads the
+// `node.prop op const`. It reads the raw NodeID from chunk column nodeCol (0 for a
+// single-node scan; the dstID/srcID column for a traversal, #2106), reads the
 // stored property, and compares it to the pre-evaluated constant only when both
 // share the same primitive kind — otherwise it reports undecided (the filter falls
 // back to the boxed predicate). See [buildColumnarPredicate] for the semantics.
-func makeColumnarComparePredicate(op, propName string, cv expr.Value, g *lpg.Graph[string, float64]) exec.ChunkPredicate {
+func makeColumnarComparePredicate(op, propName string, cv expr.Value, nodeCol int, g *lpg.Graph[string, float64]) exec.ChunkPredicate {
 	return func(src *exec.Chunk, row int) (keep, decided bool) {
-		if !src.IsInt64Column(0) {
+		if nodeCol < 0 || nodeCol >= src.NumCols() || !src.IsInt64Column(nodeCol) {
 			return false, false
 		}
-		id64, valid := src.Int64(0, row)
+		id64, valid := src.Int64(nodeCol, row)
 		if !valid {
 			return false, false
 		}

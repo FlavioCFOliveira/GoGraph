@@ -109,6 +109,12 @@ type Expand struct {
 	pendingRow Row
 	outBuf     []expr.Value // reusable output row backing slice
 
+	// Columnar (ChunkProducer) state — used only on the FillChunk path, driven
+	// through the [columnarExpand] wrapper. Zero in row mode, so the row-mode
+	// Next path pays for none of it. See [Expand.fillChunk].
+	chunkChild ChunkProducer // child presented column-major (nil in row mode)
+	cScratch   *Chunk        // current child batch (owned, reused across FillChunk)
+
 	inputCol int // column in the input row that carries the source NodeID
 	// current expansion state
 	srcID int64 // current source NodeID
@@ -118,8 +124,18 @@ type Expand struct {
 	emitCount        int // total rows emitted; drives ctx check cadence
 	pendingRemaining int64
 
-	dir     Direction
-	fwdDone bool // true after all forward edges for current src are exhausted
+	// Columnar fan-out cursor and multiplicity re-emit state (FillChunk path).
+	cScratchLen    int   // rows currently held in cScratch
+	cRow           int   // index of the current input row within cScratch (outer cursor)
+	cPendSrc       int64 // cached (src,edge,dst) triplet re-emitted for CREATE multiplicity
+	cPendEdge      int64
+	cPendDst       int64
+	cPendRemaining int64 // extra chunk re-emissions of the cached triplet still owed
+
+	dir       Direction
+	fwdDone   bool // true after all forward edges for current src are exhausted
+	chunkMode bool // true while the FillChunk (columnar) path drives the operator
+	cScanDone bool // true once the child ChunkProducer is exhausted (a 0-row pull)
 }
 
 // ExpandConfig carries the optional configuration for [NewExpand].
@@ -187,6 +203,17 @@ func (op *Expand) Init(ctx context.Context) error {
 	op.srcID = -1
 	op.fwdDone = true
 	op.emitCount = 0
+	// Reset the columnar fan-out cursor so a re-Init (pooled/re-run operator)
+	// re-pulls from the start. cRow = -1 makes the first advanceInputChunk step
+	// to row 0 (or trigger the first child batch pull). These are inert on the
+	// row-mode Next path.
+	op.cRow = -1
+	op.cScratchLen = 0
+	op.cScanDone = false
+	op.cPendRemaining = 0
+	if op.cScratch != nil {
+		op.cScratch.Reset()
+	}
 	return op.input.Init(ctx)
 }
 
@@ -265,30 +292,35 @@ func (op *Expand) maybeQueueMultiplicity(emitted Row) {
 	op.pendingRemaining = mult - 1
 }
 
+// edgeStatus is the outcome of advancing the forward or reverse edge cursor by
+// one step. It is the mode-agnostic result the row-mode ([Expand.tryFwdEdge]/
+// [Expand.tryRevEdge]) and columnar ([Expand.fillOneChunkRow]) emit paths share,
+// so the direction/filter/morphism/multigraph decision has exactly ONE
+// implementation.
+type edgeStatus uint8
+
+const (
+	edgeNone edgeStatus = iota // no edge available in this direction; move on
+	edgeSkip                   // an edge was consumed but filtered/morphism-rejected; retry
+	edgeEmit                   // an edge is ready to emit; the returned triplet is valid
+)
+
 // tryFwdEdge attempts to emit one forward edge for the current source node.
 // Returns (true, true) when a row was written, (false, true) when the forward
 // cursor needs to skip a filtered edge (caller retries), (_, false) when no
 // forward edge is available and the caller should check reverse edges.
 func (op *Expand) tryFwdEdge(out *Row) (emitted, handled bool) {
-	if op.dir == DirIn || op.fwdDone {
+	src, edge, dst, st := op.advanceFwdEdge()
+	switch st {
+	case edgeNone:
 		return false, false
+	case edgeSkip:
+		return false, true
+	default: // edgeEmit
+		op.buildRow(out, src, edge, dst)
+		op.incEmitCount()
+		return true, true
 	}
-	if op.fwdStart >= op.fwdEnd {
-		op.fwdDone = true
-		return false, false
-	}
-	pos := op.fwdStart
-	dst := op.fwdEdges[pos]
-	op.fwdStart++
-	if !op.passesFilter(pos) {
-		return false, true // filtered out; caller retries
-	}
-	if !op.passesRelMorphism(int64(pos)) {
-		return false, true // cyphermorphism: duplicate edge; caller retries
-	}
-	op.buildRow(out, op.srcID, int64(pos), int64(dst))
-	op.incEmitCount()
-	return true, true
 }
 
 // tryRevEdge attempts to emit one reverse edge for the current source node.
@@ -296,14 +328,61 @@ func (op *Expand) tryFwdEdge(out *Row) (emitted, handled bool) {
 // cursor needs to skip a filtered edge, (_, false) when no reverse edge is
 // available and the caller should pull a new input row.
 func (op *Expand) tryRevEdge(out *Row) (emitted, handled bool) {
-	if op.dir == DirOut || op.revVerts == nil {
+	src, edge, dst, st := op.advanceRevEdge()
+	switch st {
+	case edgeNone:
 		return false, false
+	case edgeSkip:
+		return false, true
+	default: // edgeEmit
+		op.buildRow(out, src, edge, dst)
+		op.incEmitCount()
+		return true, true
+	}
+}
+
+// advanceFwdEdge consumes at most one forward edge from the current source's
+// cursor and decides its fate WITHOUT emitting. It returns the (srcID, edgeID,
+// dstID) triplet and a status: edgeEmit (triplet valid), edgeSkip (an edge was
+// consumed but filtered/morphism-rejected — caller retries), or edgeNone (no
+// forward edge remains). It is the single source of truth for forward-edge
+// semantics shared by [Expand.tryFwdEdge] (row mode) and the columnar path.
+func (op *Expand) advanceFwdEdge() (src, edge, dst int64, st edgeStatus) {
+	if op.dir == DirIn || op.fwdDone {
+		return 0, 0, 0, edgeNone
+	}
+	if op.fwdStart >= op.fwdEnd {
+		op.fwdDone = true
+		return 0, 0, 0, edgeNone
+	}
+	pos := op.fwdStart
+	d := op.fwdEdges[pos]
+	op.fwdStart++
+	if !op.passesFilter(pos) {
+		return 0, 0, 0, edgeSkip // filtered out; caller retries
+	}
+	if !op.passesRelMorphism(int64(pos)) {
+		return 0, 0, 0, edgeSkip // cyphermorphism: duplicate edge; caller retries
+	}
+	return op.srcID, int64(pos), int64(d), edgeEmit
+}
+
+// advanceRevEdge consumes at most one reverse edge from the current source's
+// cursor and decides its fate WITHOUT emitting, following the same three-status
+// convention as [Expand.advanceFwdEdge]. It is the single source of truth for
+// reverse-edge semantics — undirected self-loop dedup, the reverse edge-type
+// filter, the multigraph per-instance forward-position recovery, and the
+// canonical edge ID for cyphermorphism — shared by [Expand.tryRevEdge] (row
+// mode) and the columnar path.
+func (op *Expand) advanceRevEdge() (src, edge, dst int64, st edgeStatus) {
+	if op.dir == DirOut || op.revVerts == nil {
+		return 0, 0, 0, edgeNone
 	}
 	if op.revStart >= op.revEnd {
-		return false, false
+		return 0, 0, 0, edgeNone
 	}
 	pos := op.revStart
-	dst := op.revEdges[pos]
+	d := op.revEdges[pos]
 	op.revStart++
 	// Undirected self-loop deduplication: when the pattern is undirected
 	// (DirBoth) and the reverse edge being considered is a self-loop on
@@ -313,8 +392,8 @@ func (op *Expand) tryRevEdge(out *Row) (emitted, handled bool) {
 	// relationship pattern. The skip is restricted to DirBoth because a
 	// pure DirIn traversal does not perform the forward pass and therefore
 	// must still emit reverse self-loops.
-	if op.dir == DirBoth && int64(dst) == op.srcID {
-		return false, true // self-loop already emitted by forward pass
+	if op.dir == DirBoth && int64(d) == op.srcID {
+		return 0, 0, 0, edgeSkip // self-loop already emitted by forward pass
 	}
 	// Edge-type filter: locate the corresponding forward-edge position so
 	// the existing fwd-position-keyed filter map applies. The reverse edge
@@ -323,8 +402,8 @@ func (op *Expand) tryRevEdge(out *Row) (emitted, handled bool) {
 	// CSR. The scan is O(deg(dst)) per reverse edge; acceptable for typical
 	// graphs where in-degree and out-degree are bounded.
 	if op.edgeType != "" {
-		if !op.reverseEdgePassesFilter(uint64(dst), uint64(op.srcID)) {
-			return false, true // filtered out; caller retries
+		if !op.reverseEdgePassesFilter(uint64(d), uint64(op.srcID)) {
+			return 0, 0, 0, edgeSkip // filtered out; caller retries
 		}
 	}
 	// Canonical edge ID: prefer the forward-edge position when the
@@ -342,9 +421,9 @@ func (op *Expand) tryRevEdge(out *Row) (emitted, handled bool) {
 		// both directions). Without this, parallel edges (dst -> src)
 		// would all collapse onto the first forward position and report a
 		// single merged relationship type on the reverse hop (rmp #1634).
-		fwdPos, hasFwd = op.lookupFwdEdgePosByHandle(uint64(dst), uint64(op.srcID), op.revHandles[pos])
+		fwdPos, hasFwd = op.lookupFwdEdgePosByHandle(uint64(d), uint64(op.srcID), op.revHandles[pos])
 	} else {
-		fwdPos, hasFwd = op.lookupFwdEdgePos(uint64(dst), uint64(op.srcID))
+		fwdPos, hasFwd = op.lookupFwdEdgePos(uint64(d), uint64(op.srcID))
 	}
 	var edgeID int64
 	if hasFwd {
@@ -353,11 +432,9 @@ func (op *Expand) tryRevEdge(out *Row) (emitted, handled bool) {
 		edgeID = int64(uint64(len(op.fwdEdges)) + pos)
 	}
 	if !op.passesRelMorphism(edgeID) {
-		return false, true // cyphermorphism: duplicate edge; caller retries
+		return 0, 0, 0, edgeSkip // cyphermorphism: duplicate edge; caller retries
 	}
-	op.buildRow(out, op.srcID, edgeID, int64(dst))
-	op.incEmitCount()
-	return true, true
+	return op.srcID, edgeID, int64(d), edgeEmit
 }
 
 // lookupFwdEdgePos returns the forward-CSR position of the edge
@@ -489,6 +566,9 @@ func (op *Expand) passesRelMorphism(edgeID int64) bool {
 	if len(op.relCols) == 0 {
 		return true
 	}
+	if op.chunkMode {
+		return op.passesRelMorphismChunk(edgeID)
+	}
 	for _, col := range op.relCols {
 		if col < 0 || col >= len(op.inputRow) {
 			continue
@@ -550,5 +630,278 @@ func (op *Expand) Close() error {
 	op.revVerts = nil
 	op.revEdges = nil
 	op.outBuf = nil
+	op.cScratch = nil
 	return op.input.Close()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Columnar (ChunkProducer) path
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// columnarExpand presents an [Expand] as a [ChunkProducer]/[NodeIDColumnProducer]
+// so a columnar-aware parent (a [ColumnarFilter] over the far-node property, or a
+// columnar aggregation over the traversal output) drains it column-major, keeping
+// the chunk chain unbroken across the traversal (design docs/columnar-deepening-
+// design.md §4). The traversal itself is NOT vectorized — a single-hop pointer
+// chase is not scan-heavy — so this removes nothing on the expansion; it is output
+// plumbing that lets the O(edges) rows Expand emits flow into an unboxed filter /
+// aggregation above.
+//
+// The output chunk is the input passthrough columns (whatever the child emitted,
+// copied cell-for-cell) followed by three int64 columns srcID, edgeID, dstID. The
+// dstID/srcID columns are raw NodeIDs, so a columnar predicate can read the far
+// node's NodeID unboxed to fetch a property — hence [NodeIDColumnProducer].
+//
+// Only the planner builds it, and ONLY when the child is itself a [ChunkProducer]
+// (design §6.2): a plain [Expand] over a row-mode child stays row-mode (its Next is
+// the byte-identical fallback). This is why the [ChunkProducer] methods live on
+// this distinct wrapper rather than on [Expand] — a plain Expand must NOT advertise
+// [ChunkProducer], or a generic columnar sink would drain it with no unbroken chain
+// below and no win.
+//
+// columnarExpand is NOT safe for concurrent use.
+type columnarExpand struct {
+	*Expand
+}
+
+// NewColumnarExpand presents exp as a [ChunkProducer] when exp's child is itself a
+// [ChunkProducer] (so [Expand.fillChunk] can pull it column-major and the chunk
+// chain stays unbroken). It returns (wrapper, true) on success or (nil, false) when
+// the child is row-mode, in which case the caller keeps the plain row-mode exp. The
+// returned wrapper also implements [NodeIDColumnProducer].
+func NewColumnarExpand(exp *Expand) (ChunkProducer, bool) {
+	cp, ok := exp.input.(ChunkProducer)
+	if !ok {
+		return nil, false
+	}
+	exp.chunkChild = cp
+	return columnarExpand{exp}, true
+}
+
+// NewOutputChunk returns a [Chunk] whose columns mirror the child's output columns
+// (the passthrough) followed by three int64 columns srcID, edgeID, dstID. It
+// implements [ChunkProducer].
+func (c columnarExpand) NewOutputChunk(capacity int) *Chunk { return c.columnarOutputChunk(capacity) }
+
+// FillChunk appends up to maxRows more (passthrough || srcID, edgeID, dstID) rows
+// into dst column-major and returns the number appended (0 at end-of-stream). It
+// implements [ChunkProducer].
+func (c columnarExpand) FillChunk(dst *Chunk, maxRows int) (int, error) {
+	return c.fillChunk(dst, maxRows)
+}
+
+// nodeIDColumnProducer marks columnarExpand as a [NodeIDColumnProducer]: the
+// passthrough node columns and the srcID/dstID columns carry raw int64 NodeIDs.
+func (c columnarExpand) nodeIDColumnProducer() {}
+
+// columnarOutputChunk builds the output chunk schema: the child's per-column kinds
+// (the passthrough), then three int64 columns for srcID, edgeID, dstID. The
+// passthrough kinds are read from a fresh child template so a scalar column stays
+// unboxed; a non-scalar (boxed) child column stays boxed, byte-identically.
+func (op *Expand) columnarOutputChunk(capacity int) *Chunk {
+	template := op.chunkChild.NewOutputChunk(capacity)
+	p := template.NumCols()
+	kinds := make([]expr.Kind, p+3)
+	for j := 0; j < p; j++ {
+		kinds[j] = template.ColKind(j)
+	}
+	kinds[p] = expr.KindInteger   // srcID
+	kinds[p+1] = expr.KindInteger // edgeID
+	kinds[p+2] = expr.KindInteger // dstID
+	return NewChunk(capacity, kinds...)
+}
+
+// fillChunk is the column-major counterpart of [Expand.Next]: it appends up to
+// maxRows output rows into dst and returns the number appended (0 at
+// end-of-stream). It preserves EXACTLY what Next guarantees — DirOut/DirIn/DirBoth,
+// the edge-type filter, edge multiplicity, cyphermorphism, and multigraph
+// per-instance relationship typing on reverse hops — by reusing the same
+// [Expand.advanceFwdEdge]/[Expand.advanceRevEdge] decision helpers Next uses.
+//
+// The two-level fan-out cursor (current input-row index cRow within the child
+// batch, plus the per-source edge cursors) PERSISTS across calls: filling stops
+// mid-input-row when dst reaches maxRows and resumes on the next call (the DuckDB
+// partially-consumed-input pattern, one level deeper than [ColumnarFilter]'s
+// scratchPos). A short return (n < maxRows) therefore means the CHILD is exhausted,
+// which the drain relies on for end-of-stream.
+func (op *Expand) fillChunk(dst *Chunk, maxRows int) (int, error) {
+	op.chunkMode = true
+	n := 0
+	for n < maxRows {
+		if n&4095 == 0 {
+			if err := op.ctx.Err(); err != nil {
+				return n, err
+			}
+		}
+		appended, done, err := op.fillOneChunkRow(dst)
+		if err != nil {
+			return n, err
+		}
+		if done {
+			return n, nil
+		}
+		if appended {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// fillOneChunkRow advances the columnar state machine until it writes exactly one
+// output row into dst (appended=true) or reaches end-of-stream (done=true). It
+// mirrors the body of the [Expand.Next] outer loop, appending column-major instead
+// of building a boxed [Row]: it drains pending CREATE-multiplicity re-emissions
+// first, then a forward edge, then a reverse edge, and advances to the next input
+// row when the current source's edges are exhausted.
+func (op *Expand) fillOneChunkRow(dst *Chunk) (appended, done bool, err error) {
+	for {
+		if op.cPendRemaining > 0 {
+			op.appendChunkRow(dst, op.cRow, op.cPendSrc, op.cPendEdge, op.cPendDst)
+			op.cPendRemaining--
+			return true, false, nil
+		}
+		if src, edge, d, st := op.advanceFwdEdge(); st != edgeNone {
+			if st == edgeEmit {
+				op.appendChunkRow(dst, op.cRow, src, edge, d)
+				op.maybeQueueMultiplicityChunk(src, edge, d)
+				return true, false, nil
+			}
+			continue // skipped (filtered / morphism-rejected)
+		}
+		if src, edge, d, st := op.advanceRevEdge(); st != edgeNone {
+			if st == edgeEmit {
+				op.appendChunkRow(dst, op.cRow, src, edge, d)
+				op.maybeQueueMultiplicityChunk(src, edge, d)
+				return true, false, nil
+			}
+			continue // skipped reverse edge
+		}
+		eos, aerr := op.advanceInputChunk()
+		if aerr != nil {
+			return false, false, aerr
+		}
+		if eos {
+			return false, true, nil
+		}
+	}
+}
+
+// advanceInputChunk moves the fan-out cursor to the next usable input row,
+// pulling a fresh child batch when the current one is drained, and loads that
+// row's adjacency ranges. It returns eos=true at end-of-stream. Narrow rows and
+// rows whose source column is not a node id are skipped, mirroring the row-mode
+// [Expand.advanceInput] "skip silently" behaviour.
+func (op *Expand) advanceInputChunk() (eos bool, err error) {
+	for {
+		op.cRow++
+		if op.cRow >= op.cScratchLen {
+			if op.cScanDone {
+				return true, nil
+			}
+			if err := op.ctx.Err(); err != nil {
+				return false, err
+			}
+			if op.cScratch == nil {
+				op.cScratch = op.chunkChild.NewOutputChunk(DefaultChunkCapacity)
+			} else {
+				op.cScratch.Reset()
+			}
+			nrows, ferr := op.chunkChild.FillChunk(op.cScratch, op.cScratch.Cap())
+			if ferr != nil {
+				return false, ferr
+			}
+			op.cScratchLen = nrows
+			op.cRow = 0
+			if nrows == 0 {
+				op.cScanDone = true
+				return true, nil
+			}
+		}
+		sid, ok := op.chunkSrcID(op.cRow)
+		if !ok {
+			continue // narrow / non-node / null source: skip this row
+		}
+		op.srcID = sid
+		op.loadAdjacency(uint64(sid))
+		return false, nil
+	}
+}
+
+// chunkSrcID reads the source NodeID from the input column of cScratch row r,
+// mirroring [Expand.advanceInput]'s acceptance of either a raw NodeID or a
+// [expr.NodeValue] produced by a projection alias. A NULL, a narrow row, or a
+// non-node value returns ok=false so the caller skips the row.
+func (op *Expand) chunkSrcID(r int) (int64, bool) {
+	if op.inputCol < 0 || op.inputCol >= op.cScratch.NumCols() {
+		return 0, false
+	}
+	if op.cScratch.IsInt64Column(op.inputCol) {
+		v, valid := op.cScratch.Int64(op.inputCol, r)
+		if !valid {
+			return 0, false
+		}
+		return v, true
+	}
+	switch v := op.cScratch.BoxCell(op.inputCol, r).(type) {
+	case expr.IntegerValue:
+		return int64(v), true
+	case expr.NodeValue:
+		return int64(v.ID), true
+	default:
+		return 0, false
+	}
+}
+
+// appendChunkRow appends one output row into dst: the passthrough columns copied
+// cell-for-cell (unboxed for a scalar) from cScratch row srcRow, then the three
+// int64 columns srcID, edgeID, dstID. All p+3 columns advance by one, keeping dst
+// rectangular.
+func (op *Expand) appendChunkRow(dst *Chunk, srcRow int, src, edge, dstID int64) {
+	p := op.cScratch.NumCols()
+	for j := 0; j < p; j++ {
+		op.cScratch.CopyCellTo(j, srcRow, dst, j)
+	}
+	dst.AppendInt64(p, src)
+	dst.AppendInt64(p+1, edge)
+	dst.AppendInt64(p+2, dstID)
+}
+
+// maybeQueueMultiplicityChunk mirrors [Expand.maybeQueueMultiplicity] for the
+// columnar path: when the CREATE-multiplicity recorded for (src, dst) is greater
+// than one, it caches the triplet and stages the remaining copies for re-emission
+// (the passthrough is re-read from the still-current cScratch row cRow, which does
+// not advance while re-emissions are owed).
+func (op *Expand) maybeQueueMultiplicityChunk(src, edge, dst int64) {
+	if op.multiplicity == nil {
+		return
+	}
+	mult := op.multiplicity(uint64(src), uint64(dst))
+	if mult <= 1 {
+		return
+	}
+	op.cPendSrc, op.cPendEdge, op.cPendDst = src, edge, dst
+	op.cPendRemaining = mult - 1
+}
+
+// passesRelMorphismChunk is the columnar counterpart of the row-mode
+// cyphermorphism check in [Expand.passesRelMorphism]: it rejects edgeID when it
+// already appears in any sibling relationship column of the current cScratch input
+// row cRow. A sibling edge column is an int64 column (a prior Expand's edgeID); a
+// non-int64 column is boxed once and inspected, byte-identically to the row path.
+func (op *Expand) passesRelMorphismChunk(edgeID int64) bool {
+	for _, col := range op.relCols {
+		if col < 0 || col >= op.cScratch.NumCols() {
+			continue
+		}
+		if op.cScratch.IsInt64Column(col) {
+			if v, valid := op.cScratch.Int64(col, op.cRow); valid && v == edgeID {
+				return false
+			}
+			continue
+		}
+		if iv, ok := op.cScratch.BoxCell(col, op.cRow).(expr.IntegerValue); ok && int64(iv) == edgeID {
+			return false
+		}
+	}
+	return true
 }
