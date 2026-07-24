@@ -5,22 +5,26 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 
 ## Status
 
-**Current release: `v0.9.0`.** This is the project's **twelfth
+**Current release: `v0.10.0`.** This is the project's **thirteenth
 release**, published at a pre-1.0 baseline: under Semantic Versioning a
 `0.y.z` version signals that the public API is **not yet stable** and may
 change without a major bump while the module matures toward `1.0.0`.
-`v0.9.0` is a pre-1.0 **MINOR** release whose headline is a **columnar
-Cypher read path** together with two net-new, backward-compatible Cypher
-clauses — the **`FOREACH`** updating clause and **`SHOW CONSTRAINTS` /
-`SHOW INDEXES`** schema introspection with `YIELD` / `WHERE` / `RETURN`
-projection — landed alongside a broad Cypher correctness pass and a
-two-cycle whole-module production-readiness review. The columnar read path
-drives a filtered scalar projection column-major, cutting
-`BenchmarkEngReadProject` from **5 309 to 89 allocations per operation**.
-One dead, never-wired exported operator (`cypher/exec.ParallelScan`) was
-removed; pre-1.0 the minor digit absorbs that change and the documented
-public-API surface is unaffected. The five major subsystems below are
-functional and tested under race, lint, and soak gates.
+`v0.10.0` is a pre-1.0 **MINOR** release, and an entirely **Cypher
+query-planner and execution-engine** cycle. Its headline is a new **planner
+statistics and cardinality-estimation foundation** — an exact relationship
+**count-store** maintained in `O(delta)` on the commit fan-out and recomputed
+at reopen, plus off-write-path statistics (HyperLogLog NDV, exact MCV,
+equi-depth histograms) that now drive **statistics-backed cardinality
+estimates in `EXPLAIN` / `PROFILE`**. On top of the exact count-store sit
+result-identical, cost-gated **reordering peepholes** (min-cardinality
+multi-label anchor scan, single-edge anchor-swap, disjoint-component reorder),
+a **deepening of the columnar / vectorised read path** (columnar aggregation,
+`Expand` as a chunk producer, columnar hash-join with late materialisation),
+and a broadening of **automatic intra-query parallelism** to
+`min` / `max` / `count` aggregation with a byte-identical-to-serial combine.
+The release is **purely additive** — it removes no exported identifier and no
+behaviour — so the documented public-API surface is unaffected. The five major
+subsystems below are functional and tested under race, lint, and soak gates.
 The two compliance invariants are already in force at this version: the
 module is **100 % openCypher TCK-compliant at the execution level**
 (**3 897/3 897 scenarios, 16 006/16 006 steps**) and **100 % ACID-compliant**;
@@ -29,9 +33,9 @@ vet, race, lint, `govulncheck`, TCK conformance, and the deterministic
 crash-injection battery), run via `make ci`/`make release-preflight` before
 it lands. The module uses
 the conventional Go path `github.com/FlavioCFOliveira/GoGraph` and is
-fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.9.0`. See
+fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.10.0`. See
 [CHANGELOG.md](CHANGELOG.md) and
-[release-notes/v0.9.0.md](release-notes/v0.9.0.md) for the full release
+[release-notes/v0.10.0.md](release-notes/v0.10.0.md) for the full release
 narrative.
 
 ### Core graph (`graph/`)

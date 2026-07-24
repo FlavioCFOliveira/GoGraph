@@ -4,6 +4,163 @@ All notable changes to GoGraph are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] — 2026-07-25
+
+The thirteenth published release of **GoGraph**, a Go module for graph
+persistence, manipulation, and fast search. This is a pre-1.0 **MINOR**
+release, and it is entirely a **Cypher query-planner and execution-engine**
+cycle. Its headline is a new **planner statistics and cardinality-estimation
+foundation** — an exact relationship **count-store** (`E(relType)`,
+`D(label, relType, dir)`, `T(labelA, relType, labelB)`) maintained in
+`O(delta)` on the commit fan-out and recomputed at reopen, plus off-write-path
+best-effort statistics (HyperLogLog NDV, exact top-k MCV, equi-depth
+histograms) — which now drive **statistics-backed cardinality estimates in
+`EXPLAIN` / `PROFILE`**. On top of the exact count-store sit two families of
+result-identical, cost-gated optimisations: **count-store-gated reordering
+peepholes** (a min-cardinality multi-label anchor scan, a single-edge
+OUT-only anchor-swap, and a disjoint-scan-component reorder, all guarded by an
+order-safety predicate) and a **deepening of the columnar / vectorised read
+path** (columnar aggregation over typed chunk columns, `Expand` as a
+`ChunkProducer`, and a columnar hash-join with late materialisation).
+Finally, **automatic intra-query parallelism** is broadened from scan/count to
+**parallel `min` / `max` / `count` aggregation** with a combine that is
+byte-identical to the serial fold, plus an `O(1)` count-pushdown.
+
+The **45 commits** landed since `v0.9.0` (`git log --no-merges v0.9.0..HEAD`,
+a linear history with no merge commits) were surveyed for the bump. The
+release is **purely additive**: two net-new packages (`graph/index/count`,
+`graph/index/stats`), net-new `cypher` / `cypher/exec` planner and columnar
+operators, and net-new `EXPLAIN` / `PROFILE` observability. **No exported
+identifier was removed or renamed anywhere**, and there is **no breaking
+change to the documented public-API surface** (`graph/*`, `search/*`,
+`store/*`, `ds`, `bench/*` — see [docs/semver.md](docs/semver.md)); this is a
+clean **MINOR**.
+
+Both compliance invariants continue to hold without regression: the module is
+**100 % openCypher TCK-compliant at the execution level** (3 897 / 3 897
+scenarios, 16 006 / 16 006 steps, 0 failed / 0 undefined) and **100 %
+ACID-compliant**. Every new optimisation is either result-identical by
+construction (the columnar operators, the count-pushdown), gated so it fires
+only when provably result-identical and never slower (the reordering
+peepholes), display-only (the cardinality estimates), or a byte-identical-to-
+serial parallel combine — so `tckExecutionBaseline = 3897` in
+`cypher/tck/runner_test.go` is unchanged, and the whole TCK was additionally
+forced through the parallel path (threshold = 1) with 3 897 / 3 897 still
+passing. The count-store and statistics carry **no on-disk format, no WAL op,
+and no checkpoint component** — they are pure functions of the recovered
+graph — so no durability contract changes. The Go toolchain remains
+**go1.26.5** (unchanged), and `govulncheck ./...` stays clean.
+
+Install with:
+
+```bash
+go get github.com/FlavioCFOliveira/GoGraph@v0.10.0
+```
+
+### Added
+
+- **Exact relationship count-store.** A derived, non-durable, engine-owned
+  count-store maintains `E(relType)`, `D(label, relType, dir)` and
+  `T(labelA, relType, labelB)` **exactly** (reusing the label index for
+  `N(label)`), updated `O(delta)` on the commit fan-out via a `CountBuffer`
+  flushed under the `visMu` barrier after the WAL fsync, and recomputed
+  `O(V + E)` from the recovered graph at reopen — so it has no on-disk format,
+  no WAL op and no checkpoint component. A node relabel on a high-degree node
+  keeps the enumerable OUT side exact within a bounded per-commit budget and
+  marks the un-enumerable IN side stale (self-healing at reopen); a stale cell
+  yields an estimate veto, never a wrong exact. Observable via
+  `internal/metrics` counters
+  (`cypher.countstore.{delta.applied,lookup,lookup.veto,relabel.dirtied}`),
+  the `cypher.countstore.recompute` latency, and `Engine.CountStoreCells()`.
+  (#2082, #2083, #2084, #2087)
+- **Planner statistics foundation.** Off-write-path, best-effort statistics
+  built by an explicit `RefreshStatistics` scan (`graph/index/stats`):
+  **HyperLogLog NDV** (`m = 4096`, ≈ 1.6 % relative error), **exact top-k
+  MCV**, and **equi-depth histograms** (`B = 256`, distribution-free
+  ≤ `1/B` selectivity error, with MCV heavy-value spikes isolated). NDV is
+  never sampled (provably impossible to bound — Charikar et al. PODS'00). The
+  collector is lazy — nil until `RefreshStatistics` — so a statistics-free
+  engine constructs nothing and the write path is byte-identical to
+  pre-statistics; with statistics active, maintenance is an `O(1)` atomic
+  delta per tracked property. (#2097, #2098, #2101)
+- **Statistics-backed cardinality estimates in `EXPLAIN` / `PROFILE`.** Each
+  operator is annotated with an estimated row count and its **provenance**
+  (`exact` / `stats` / `heuristic`), drawn from the exact count-store
+  (`N`, `E`, `D`) and the new statistics. This is **display-only** — a
+  differential test proves query results are identical with and without
+  statistics populated — and is exposed alongside planner statistics
+  observability metrics. (#2099, #2102)
+- **Count-store-gated reordering peepholes.** Result-identical, build-time
+  plan rewrites, each gated by the exact count-store and an order-safety
+  predicate (`SuppressReorder`) so they deviate from the written order only
+  when provably result-identical and never slower:
+  - **Min-cardinality multi-label anchor scan** — a `MATCH (n:A:B:C)` scans
+    the label with the smallest **exact** bitmap cardinality and keeps the
+    rest as a residual `Filter` (a label conjunction is a commutative `AND`
+    and `min|Lᵢ| ≤ |L0|`, so the plan never does more work). (#2077)
+  - **Single-edge anchor-swap (OUT-only)** — for `(a:A)-[:R]->(b:B)`, anchor
+    on the endpoint that minimises examined edges via the count-store degree
+    `D(label, relType, dir)`; reverse-introducing swaps are vetoed. (#2089,
+    #2090)
+  - **Disjoint scan-component reorder** — for a nested-loop join of disjoint
+    single-scan components, build the smaller exact node count as the outer
+    side. (#2091)
+  - **Order-safety predicate** — a shared `SuppressReorder` guard vetoes any
+    reorder that a bare `LIMIT` / `SKIP`, arrival-order aggregation, or
+    `collect()` would make observable. (#2092)
+  `EXPLAIN` / `PROFILE` now render the chosen scan label and expand direction
+  so the reorder is visible; every peephole is gated by an
+  `EngineOptions.Disable*` flag and proven byte-identical ON vs OFF by a
+  differential harness. (#2076, #2079, #2091, #2094)
+- **Columnar / vectorised execution deepening.** The column-major `Chunk`
+  runtime (introduced in v0.9.0) is extended from projection to the operators
+  that dominate analytic Cypher, each a drop-in with a row-mode fallback,
+  wired only for its qualifying shape, and differential-tested byte-identical
+  columnar-ON vs row-OFF: **columnar aggregation** over typed chunk columns
+  (SoA scatter-add), **`Expand` as a `ChunkProducer`** with a columnar filter
+  over the traversal output, and a **columnar hash-join with late
+  materialisation**. The chunk pipeline now stays unboxed end-to-end through
+  scan → expand → filter → aggregation. (#2104, #2105, #2106)
+- **Automatic parallel `min` / `max` / `count` aggregation and `O(1)`
+  count-pushdown.** Automatic (no-licence, no opt-in) morsel-parallelism is
+  broadened from scan/count to `min` / `max` aggregation with a
+  **position-carrying combine byte-identical to the serial left-fold** for
+  every tie representation (int/float, ±0, `NaN`), engaging above
+  `parallelScanThreshold` and bounded by the `ParallelGovernor`. A
+  `budget == 1` inline-serial short-circuit keeps the saturated regime
+  regression-free, and a bare group-by-less `count(*)` / `count(v)` over a
+  full scan is pushed down to an `O(1)` maintained-count read. (#2111, #2113,
+  #2115)
+
+### Changed
+
+- **`EXPLAIN` / `PROFILE` output is richer.** Operators now display an
+  estimated row count with its provenance, the chosen scan label for a
+  reordered multi-label or disjoint pattern, and the chosen expand direction
+  for an anchor-swap. This is additive observability; the executed plan for a
+  query the optimiser declines is unchanged.
+- **The example harnesses exercise the new engine surface.** Example
+  `25_software_house_api` exercises the min-label anchor scan;
+  `31_metrics_observability` observes the count-store; and
+  `26_social_scale_bench` gains cardinality-estimate, columnar-operator and
+  intra-query-parallelism observations, plus a `plandiff` subcommand that
+  surfaces reordering via `EXPLAIN` plan-diff. The `examples/` tree is not
+  part of the module and imposes no new dependency on it. (#2117, #2118,
+  #2119, #2120, #2121, #2122)
+
+### Fixed
+
+- **Example measurement fidelity.** Per-algorithm wall-clocks in the example
+  harnesses now time only the algorithm, not GC or print time (#2071, #2072,
+  #2073); `13_network_reliability` times GoGraph's own library max-flow rather
+  than a bespoke solver (#2074); and the `17_transactional_log` double-entry
+  check is now a real reconciliation invariant rather than a tautology
+  (#2075). These are example-only fixes; the module itself is unchanged.
+
+### Removed
+
+- Nothing. This release removes no exported identifier and no behaviour.
+
 ## [0.9.0] — 2026-07-19
 
 The twelfth published release of **GoGraph**, a Go module for graph
