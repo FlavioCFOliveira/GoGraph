@@ -61,6 +61,25 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// curatedEngine builds the engine used by the curated benchmarks. By default it
+// returns a plain cypher.NewEngine (every optimisation enabled, the shipped
+// behaviour). When GOGRAPH_DISABLE_REORDER=1 is set it instead disables the two
+// count-store-gated reordering peepholes (anchor swap #2090 and disjoint reorder
+// #2091). Toggling that env var and comparing the two runs with benchstat is the
+// inertness check for the curated suite (#2094): if the peepholes never fire on
+// these queries — as intended — the enabled and disabled runs are byte-identical
+// in allocs/op and B/op, and within noise on sec/op. The var defaults unset, so
+// the normal `make ci` / release-preflight runs are unaffected.
+func curatedEngine(g *lpg.Graph[string, float64]) *cypher.Engine {
+	if os.Getenv("GOGRAPH_DISABLE_REORDER") == "1" {
+		return cypher.NewEngineWithOptions(g, cypher.EngineOptions{
+			DisableAnchorSwap:  true,
+			DisableJoinReorder: true,
+		})
+	}
+	return cypher.NewEngine(g)
+}
+
 // isWriteQuery reports whether q contains a CREATE or MERGE keyword at the
 // top level, using a case-insensitive prefix scan. This simple heuristic is
 // sufficient for the well-formed IC query set.
@@ -92,7 +111,7 @@ func benchmarkQuery(b *testing.B, queryFile string) {
 	} else {
 		g = benchGraph
 	}
-	engine := cypher.NewEngine(g)
+	engine := curatedEngine(g)
 	ctx := context.Background()
 
 	b.ReportAllocs()
@@ -224,7 +243,7 @@ func BenchmarkWithProjection(b *testing.B) {
 // benchGraph for b.N iterations, draining and closing the result each time.
 func benchmarkInlineRead(b *testing.B, query string) {
 	b.Helper()
-	engine := cypher.NewEngine(benchGraph)
+	engine := curatedEngine(benchGraph)
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()

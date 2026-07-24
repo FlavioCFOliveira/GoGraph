@@ -1,0 +1,101 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_ldbc
+cpu: Apple M4
+# Benchstat delta for the count-store-gated reordering peepholes (sprint 307 #2094).
+# n=10. base column = peephole OFF (disabled); new column = peephole ON (enabled).
+# A negative 'vs base' is the ON-vs-OFF win. Result multiset is byte-identical ON vs OFF.
+
+## Isolating benchmarks (OFF -> ON, same binary, single flag toggled)
+
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_ldbc
+cpu: Apple M4
+                       │ OFF-disabled │ ON-enabled │
+                       │                                                       sec/op                                                        │                                           sec/op                                            vs base                │
+AnchorSwapHub-10                                                                                                                5967.7µ ± 1%                                                                                  468.8µ ± 6%  -92.14% (p=0.000 n=10)
+JoinReorderDisjoint-10                                                                                                          23.889m ± 3%                                                                                  7.777m ± 0%  -67.45% (p=0.000 n=10)
+geomean                                                                                                                          11.94m                                                                                       1.909m       -84.01%
+
+                       │ OFF-disabled │ ON-enabled │
+                       │                                                        B/op                                                         │                                            B/op                                             vs base                │
+AnchorSwapHub-10                                                                                                                1.662Mi ± 0%                                                                                 1.354Mi ± 0%  -18.51% (p=0.000 n=10)
+JoinReorderDisjoint-10                                                                                                         32.970Mi ± 0%                                                                                 5.517Mi ± 0%  -83.27% (p=0.000 n=10)
+geomean                                                                                                                         7.402Mi                                                                                      2.733Mi       -63.07%
+
+                       │ OFF-disabled │ ON-enabled │
+                       │                                                      allocs/op                                                      │                                         allocs/op                                           vs base                │
+AnchorSwapHub-10                                                                                                                39685.0 ± 0%                                                                                   212.0 ± 0%  -99.47% (p=0.000 n=10)
+JoinReorderDisjoint-10                                                                                                          1259.8k ± 0%                                                                                  359.4k ± 0%  -71.48% (p=0.000 n=10)
+geomean                                                                                                                          223.6k                                                                                       8.728k       -96.10%
+
+## Curated-suite inertness (bench/cypher_ldbc IC1-IC14 + WithProjection), n=8
+## base = ENABLED (default); new = DISABLED (GOGRAPH_DISABLE_REORDER=1).
+## allocs/op AND B/op are byte-identical on every query => no peephole fires on
+## the curated set (the plan is unchanged); sec/op deltas are thermal noise of
+## byte-identical work. cypher_alloc is exec-layer only (no planner) => inert by
+## construction, geomean 7.413us / 12.19Ki / 516 allocs (reference).
+
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_ldbc
+cpu: Apple M4
+                  │ ENABLED │ DISABLED │
+                  │                                                              sec/op                                                              │                                                   sec/op                                                     vs base              │
+IC1-10                                                                                                                                   107.2µ ± 1%                                                                                                  106.8µ ±  0%       ~ (p=0.234 n=8)
+IC2-10                                                                                                                                   38.60µ ± 1%                                                                                                  38.75µ ±  0%  +0.40% (p=0.038 n=8)
+IC3-10                                                                                                                                   38.58µ ± 0%                                                                                                  38.72µ ±  0%  +0.36% (p=0.028 n=8)
+IC4-10                                                                                                                                   52.67µ ± 1%                                                                                                  52.75µ ±  1%       ~ (p=0.645 n=8)
+IC5-10                                                                                                                                   5.609µ ± 1%                                                                                                  5.620µ ±  1%       ~ (p=0.442 n=8)
+IC6-10                                                                                                                                   5.865µ ± 0%                                                                                                  5.880µ ±  1%       ~ (p=0.153 n=8)
+IC7-10                                                                                                                                   39.36µ ± 0%                                                                                                  39.34µ ±  0%       ~ (p=0.328 n=8)
+IC8-10                                                                                                                                   5.612µ ± 0%                                                                                                  5.679µ ±  1%  +1.18% (p=0.015 n=8)
+IC9-10                                                                                                                                   52.75µ ± 0%                                                                                                  55.00µ ±  6%  +4.26% (p=0.000 n=8)
+IC10-10                                                                                                                                  20.43µ ± 1%                                                                                                  20.80µ ±  2%  +1.81% (p=0.000 n=8)
+IC11-10                                                                                                                                  150.8µ ± 0%                                                                                                  158.0µ ± 10%  +4.75% (p=0.010 n=8)
+IC12-10                                                                                                                                  6.273µ ± 1%                                                                                                  6.328µ ±  2%       ~ (p=0.065 n=8)
+IC13-10                                                                                                                                  6.377µ ± 1%                                                                                                  6.399µ ±  1%       ~ (p=0.168 n=8)
+IC14-10                                                                                                                                  39.86µ ± 1%                                                                                                  39.83µ ±  1%       ~ (p=0.878 n=8)
+WithProjection-10                                                                                                                        58.30µ ± 1%                                                                                                  59.30µ ±  2%  +1.72% (p=0.000 n=8)
+geomean                                                                                                                                  24.99µ                                                                                                       25.25µ        +1.04%
+
+                  │ ENABLED │ DISABLED │
+                  │                                                               B/op                                                               │                                                   B/op                                                     vs base                │
+IC1-10                                                                                                                                  110.8Ki ± 0%                                                                                                110.8Ki ± 0%       ~ (p=0.569 n=8)
+IC2-10                                                                                                                                  31.16Ki ± 0%                                                                                                31.16Ki ± 0%       ~ (p=1.000 n=8) ¹
+IC3-10                                                                                                                                  31.16Ki ± 0%                                                                                                31.16Ki ± 0%       ~ (p=1.000 n=8) ¹
+IC4-10                                                                                                                                  6.023Ki ± 0%                                                                                                6.023Ki ± 0%       ~ (p=1.000 n=8)
+IC5-10                                                                                                                                  2.450Ki ± 0%                                                                                                2.449Ki ± 0%       ~ (p=0.454 n=8)
+IC6-10                                                                                                                                  2.711Ki ± 0%                                                                                                2.711Ki ± 0%       ~ (p=1.000 n=8) ¹
+IC7-10                                                                                                                                  31.04Ki ± 0%                                                                                                31.04Ki ± 0%       ~ (p=1.000 n=8) ¹
+IC8-10                                                                                                                                  2.449Ki ± 0%                                                                                                2.449Ki ± 0%       ~ (p=0.657 n=8)
+IC9-10                                                                                                                                  6.024Ki ± 0%                                                                                                6.024Ki ± 0%       ~ (p=1.000 n=8) ¹
+IC10-10                                                                                                                                 55.13Ki ± 0%                                                                                                55.12Ki ± 0%  -0.00% (p=0.026 n=8)
+IC11-10                                                                                                                                 33.44Ki ± 0%                                                                                                33.44Ki ± 0%       ~ (p=0.101 n=8)
+IC12-10                                                                                                                                 3.017Ki ± 0%                                                                                                3.017Ki ± 0%       ~ (p=0.523 n=8)
+IC13-10                                                                                                                                 3.289Ki ± 0%                                                                                                3.289Ki ± 0%       ~ (p=1.000 n=8) ¹
+IC14-10                                                                                                                                 31.05Ki ± 0%                                                                                                31.05Ki ± 0%       ~ (p=1.000 n=8) ¹
+WithProjection-10                                                                                                                       131.8Ki ± 0%                                                                                                131.8Ki ± 0%       ~ (p=1.000 n=8)
+geomean                                                                                                                                 13.95Ki                                                                                                     13.95Ki       -0.00%
+¹ all samples are equal
+
+                  │ ENABLED │ DISABLED │
+                  │                                                            allocs/op                                                             │                                                 allocs/op                                                  vs base                │
+IC1-10                                                                                                                                   2.785k ± 0%                                                                                                 2.785k ± 0%       ~ (p=1.000 n=8) ¹
+IC2-10                                                                                                                                    961.0 ± 0%                                                                                                  961.0 ± 0%       ~ (p=1.000 n=8) ¹
+IC3-10                                                                                                                                    961.0 ± 0%                                                                                                  961.0 ± 0%       ~ (p=1.000 n=8) ¹
+IC4-10                                                                                                                                    302.0 ± 0%                                                                                                  302.0 ± 0%       ~ (p=1.000 n=8) ¹
+IC5-10                                                                                                                                    35.00 ± 0%                                                                                                  35.00 ± 0%       ~ (p=1.000 n=8) ¹
+IC6-10                                                                                                                                    38.00 ± 0%                                                                                                  38.00 ± 0%       ~ (p=1.000 n=8) ¹
+IC7-10                                                                                                                                    953.0 ± 0%                                                                                                  953.0 ± 0%       ~ (p=1.000 n=8) ¹
+IC8-10                                                                                                                                    35.00 ± 0%                                                                                                  35.00 ± 0%       ~ (p=1.000 n=8) ¹
+IC9-10                                                                                                                                    302.0 ± 0%                                                                                                  302.0 ± 0%       ~ (p=1.000 n=8) ¹
+IC10-10                                                                                                                                   71.00 ± 0%                                                                                                  71.00 ± 0%       ~ (p=1.000 n=8) ¹
+IC11-10                                                                                                                                   796.0 ± 0%                                                                                                  796.0 ± 0%       ~ (p=1.000 n=8) ¹
+IC12-10                                                                                                                                   44.00 ± 0%                                                                                                  44.00 ± 0%       ~ (p=1.000 n=8) ¹
+IC13-10                                                                                                                                   47.00 ± 0%                                                                                                  47.00 ± 0%       ~ (p=1.000 n=8) ¹
+IC14-10                                                                                                                                   953.0 ± 0%                                                                                                  953.0 ± 0%       ~ (p=1.000 n=8) ¹
+WithProjection-10                                                                                                                         124.0 ± 0%                                                                                                  124.0 ± 0%       ~ (p=1.000 n=8) ¹
+geomean                                                                                                                                   220.7                                                                                                       220.7       +0.00%
+¹ all samples are equal

@@ -1,0 +1,72 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_ldbc
+cpu: Apple M4
+# Isolating benchmarks for the count-store-gated reordering peepholes (sprint 307
+# #2094): the single-edge anchor swap (#2090) and the disjoint-component ordering
+# (#2091). Both toggle a single EngineOptions flag on the SAME binary so the delta
+# is attributable to the peephole alone.
+#
+#  * AnchorSwapHub: MATCH (a:Hub)<-[:R]-(b:Leaf) over a hub with a large R
+#    in-degree (20000 in-edges) and 50 leaves, one with a single R out-edge.
+#    _Swapped  = peephole ON  (NewEngine default) — re-rooted onto :Leaf, DirOut.
+#    _Written  = peephole OFF (EngineOptions{DisableAnchorSwap:true}) — hub-anchored
+#                DirIn expand walking the whole R in-degree.
+#  * JoinReorderDisjoint: MATCH (a:Big),(b:Small) RETURN count(*) with Big=60000,
+#    Small=3. _Reordered = peephole ON — small side drives (|Small| inner re-inits).
+#    _Written  = peephole OFF (EngineOptions{DisableJoinReorder:true}) — large side
+#                drives (|Big| inner re-inits).
+#
+# The result multiset is identical ON vs OFF (proven byte-identical by the
+# differential tests cypher/anchor_swap_diff_test.go and cypher/join_reorder_diff_test.go,
+# and guarded here by TestAnchorSwapBench_ResultsMatch / TestJoinReorderBench_ResultsMatch).
+# n=10, -benchmem. Benchstat delta in the matching .delta.txt.
+
+BenchmarkAnchorSwapHub_Swapped-10            	    2305	    458997 ns/op	 1419868 B/op	     213 allocs/op
+BenchmarkAnchorSwapHub_Swapped-10            	    2326	    470020 ns/op	 1419861 B/op	     213 allocs/op
+BenchmarkAnchorSwapHub_Swapped-10            	    2392	    439354 ns/op	 1419828 B/op	     212 allocs/op
+BenchmarkAnchorSwapHub_Swapped-10            	    2456	    469469 ns/op	 1419818 B/op	     212 allocs/op
+BenchmarkAnchorSwapHub_Swapped-10            	    2383	    471739 ns/op	 1419843 B/op	     212 allocs/op
+BenchmarkAnchorSwapHub_Swapped-10            	    2432	    473597 ns/op	 1419822 B/op	     212 allocs/op
+BenchmarkAnchorSwapHub_Swapped-10            	    2376	    430726 ns/op	 1419833 B/op	     212 allocs/op
+BenchmarkAnchorSwapHub_Swapped-10            	    2444	    471251 ns/op	 1419822 B/op	     212 allocs/op
+BenchmarkAnchorSwapHub_Swapped-10            	    2334	    450386 ns/op	 1419858 B/op	     213 allocs/op
+BenchmarkAnchorSwapHub_Swapped-10            	    2367	    468177 ns/op	 1419849 B/op	     212 allocs/op
+BenchmarkAnchorSwapHub_Written-10            	     200	   5976010 ns/op	 1742305 B/op	   39685 allocs/op
+BenchmarkAnchorSwapHub_Written-10            	     199	   5966680 ns/op	 1742348 B/op	   39685 allocs/op
+BenchmarkAnchorSwapHub_Written-10            	     200	   5931547 ns/op	 1742295 B/op	   39685 allocs/op
+BenchmarkAnchorSwapHub_Written-10            	     200	   5919304 ns/op	 1742278 B/op	   39685 allocs/op
+BenchmarkAnchorSwapHub_Written-10            	     196	   5968746 ns/op	 1742502 B/op	   39687 allocs/op
+BenchmarkAnchorSwapHub_Written-10            	     199	   5935374 ns/op	 1742344 B/op	   39685 allocs/op
+BenchmarkAnchorSwapHub_Written-10            	     201	   5985789 ns/op	 1742247 B/op	   39684 allocs/op
+BenchmarkAnchorSwapHub_Written-10            	     198	   5977049 ns/op	 1742374 B/op	   39686 allocs/op
+BenchmarkAnchorSwapHub_Written-10            	     199	   5995911 ns/op	 1742338 B/op	   39685 allocs/op
+BenchmarkAnchorSwapHub_Written-10            	     200	   5965137 ns/op	 1742323 B/op	   39685 allocs/op
+BenchmarkJoinReorderDisjoint_Reordered-10    	     154	   7743157 ns/op	 5785314 B/op	  359355 allocs/op
+BenchmarkJoinReorderDisjoint_Reordered-10    	     153	   7738283 ns/op	 5785315 B/op	  359355 allocs/op
+BenchmarkJoinReorderDisjoint_Reordered-10    	     153	   7782255 ns/op	 5785316 B/op	  359355 allocs/op
+BenchmarkJoinReorderDisjoint_Reordered-10    	     153	   7756201 ns/op	 5785315 B/op	  359355 allocs/op
+BenchmarkJoinReorderDisjoint_Reordered-10    	     154	   7800682 ns/op	 5785314 B/op	  359355 allocs/op
+BenchmarkJoinReorderDisjoint_Reordered-10    	     153	   7746926 ns/op	 5785315 B/op	  359355 allocs/op
+BenchmarkJoinReorderDisjoint_Reordered-10    	     153	   7808225 ns/op	 5785315 B/op	  359355 allocs/op
+BenchmarkJoinReorderDisjoint_Reordered-10    	     152	   7827435 ns/op	 5785315 B/op	  359355 allocs/op
+BenchmarkJoinReorderDisjoint_Reordered-10    	     154	   7771090 ns/op	 5785314 B/op	  359355 allocs/op
+BenchmarkJoinReorderDisjoint_Reordered-10    	     154	   7785758 ns/op	 5785313 B/op	  359355 allocs/op
+BenchmarkJoinReorderDisjoint_Written-10      	      46	  31550899 ns/op	34571426 B/op	 1259821 allocs/op
+BenchmarkJoinReorderDisjoint_Written-10      	      46	  24551143 ns/op	34571433 B/op	 1259821 allocs/op
+BenchmarkJoinReorderDisjoint_Written-10      	      46	  23548087 ns/op	34571422 B/op	 1259821 allocs/op
+BenchmarkJoinReorderDisjoint_Written-10      	      48	  24132980 ns/op	34571409 B/op	 1259821 allocs/op
+BenchmarkJoinReorderDisjoint_Written-10      	      46	  23897206 ns/op	34571419 B/op	 1259821 allocs/op
+BenchmarkJoinReorderDisjoint_Written-10      	      48	  23627490 ns/op	34571408 B/op	 1259821 allocs/op
+BenchmarkJoinReorderDisjoint_Written-10      	      48	  23690503 ns/op	34571403 B/op	 1259821 allocs/op
+BenchmarkJoinReorderDisjoint_Written-10      	      48	  24002991 ns/op	34571416 B/op	 1259821 allocs/op
+BenchmarkJoinReorderDisjoint_Written-10      	      45	  23880757 ns/op	34571430 B/op	 1259821 allocs/op
+BenchmarkJoinReorderDisjoint_Written-10      	      48	  23604972 ns/op	34571405 B/op	 1259821 allocs/op
+PASS
+
+# Summary (benchstat, OFF -> ON):
+#   AnchorSwapHub        sec/op -92.14% (5967.7us -> 468.8us, ~12.7x)  allocs/op -99.47% (39685 -> 212)  B/op -18.51%
+#   JoinReorderDisjoint  sec/op -67.45% (23.889ms -> 7.777ms, ~3.1x)   B/op -83.27% (32.97Mi -> 5.52Mi)  allocs/op -71.48% (1259.8k -> 359.4k)
+# Curated suite INERT (byte-identical allocs/op AND B/op enabled vs disabled on all
+# IC1-IC14 + WithProjection; cypher_alloc exercises the exec layer, no planner).
+# TCK 3897/3897; -race clean. See the matching .delta.txt for full benchstat tables.
