@@ -176,6 +176,30 @@ stays exact-MCV-or-heuristic (uniformity error is unbounded under skew); multi-j
 independence is never promoted. TCK 3897/3897 throughout. Design:
 [statistics-design.md](statistics-design.md).
 
+## Sprint 309 — columnar/vectorized execution deepening (P5/F3, 2026-07-24)
+
+Extends the columnar late-materialization runtime (the differentiator neither
+Neo4j nor Memgraph has — Neo4j's morsel is a row batch, Memgraph is row-at-a-time)
+from projection to the operators that dominate analytic Cypher. Governing
+principle (the chunk-pipeline rule): boxing is removed only on the contiguous
+`ChunkProducer` suffix measured from the sink, so each columnar operator is a
+drop-in with a row-mode fallback, wired only for its qualifying shape, and
+differential-tested byte-identical columnar-ON vs row-OFF.
+
+| Change | Task | Fixture | Result |
+|--------|------|---------|--------|
+| Columnar aggregation (SoA scatter-add) | #2104 | `BenchmarkColumnarAgg` (1M-row group-by) | allocs −99.97% (3.15M→803), −43% time |
+| Expand→ChunkProducer + filter-over-traversal | #2106 | `BenchmarkExpandFilter` (~64k edges) | allocs ≈7200× fewer (181k→25), B/op ~4.1× lower |
+| Columnar hash-join (late materialization) | #2105 | `BenchmarkHashJoinDisconnectedEquiJoin` | allocs −22.4%, B/op −0.84%, sec/op −5.7% |
+
+The chunk pipeline now stays unboxed end-to-end through scan → expand → filter →
+aggregation. Exact int/float semantics preserved (CIP2016-06-14: exact int64
+`SUM`, `int 1 ≡ float 1.0` grouping/join, `int 2^53+1 ≠ float 2^53`). Reduced
+scope: traversal itself and entity/`Path` columns stay boxed (pointer-rich, not
+scan-heavy). TCK 3897/3897 throughout. LEDGER row 0024. Design:
+[columnar-deepening-design.md](columnar-deepening-design.md). Extends the columnar
+value-model epic #1704.
+
 ## Workflow
 
 Every future optimisation appends a row to the table above with
