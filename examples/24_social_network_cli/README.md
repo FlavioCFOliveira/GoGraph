@@ -54,6 +54,7 @@ rename surfaces compilation errors in one place.
 | `query    -d <dir> [cypher]` | Runs a Cypher query (read or single-node write) and emits each record as one JSONL line. The query is taken from the positional argument or, if absent, from the entire stdin stream. | one JSON object per row |
 | `snapshot -d <dir>` | Builds a CSR view of the current in-memory graph and writes a full snapshot (manifest + csr.bin + labels.bin + properties.bin + mapper.bin) alongside the WAL. The v3 manifest is self-sufficient: recovery can rebuild the graph from the snapshot alone, even when the WAL is empty or truncated. | `{"snapshot_dir":"<abs>","status":"ok"}` |
 | `stats    -d <dir> [-evidence]` | Runs the eight `MATCH count(*)` queries and returns one alphabetically-keyed JSON object. | `{"authored":N,"comments":N,…,"users":N}` (+ `# ` telemetry with `-evidence`) |
+| `plandiff -d <dir> [-scale N]` | Seeds a skewed synthetic content layer once, then runs two read scenarios on a reordering-ENABLED vs -DISABLED engine and prints the EXPLAIN plan-diff, an exact count-store work contrast, and the wall-clock for each. | `# ` telemetry + EXPLAIN plan-diff report |
 
 Exit codes:
 
@@ -170,6 +171,80 @@ When you scale up, watch `mem.heap_alloc` and `# bytes`-shaped figures for
 the resident footprint, and the `# q.*.latency` lines for which count
 queries (label scans vs relationship scans) dominate at size.
 
+## Query planning: the `plandiff` subcommand
+
+**Scenario.** Real social graphs are skewed: most posts get no comments,
+and the user population dwarfs any single content slice. Under that skew a
+naively-written read can start from the wrong side and do far more work
+than necessary. GoGraph's planner corrects two such cases automatically
+with count-store-gated peepholes, and `plandiff` makes their effect
+observable end to end.
+
+**Objective.** Exercise both peepholes on a graph carrying the skew, and
+surface — as explicit, comparable evidence — the difference between the
+plan the engine *would* run naively and the plan it *does* run:
+
+- **Anchor swap (#2090)** — `MATCH (p:Post)<-[:ON]-(c:Comment)` ("list
+  every commented post with its comment"). Written anchored on `:Post`, the
+  engine scans **every** post and walks its incoming `ON` edges. Because
+  `ON` points `Comment → Post` and comments are far fewer than posts, the
+  peephole re-roots the pattern onto `:Comment` — a forward `DirOut` expand
+  — scanning `|Comment|` starting rows instead of `|Post|`.
+- **Disjoint reorder (#2091)** — `MATCH (u:User), (c:Comment) RETURN
+  count(*)` (sizing a user × comment moderation candidate space). The
+  Cartesian re-initialises its inner plan once per outer row; the peephole
+  drives the smaller `:Comment` side, re-initialising the inner plan
+  `|Comment|` times instead of `|User|`.
+
+**Purpose.** Provide auditable evidence that the optimisation fired and was
+worthwhile. For each scenario `plandiff` prints the **EXPLAIN plan-diff**
+(the chosen operator order / expand direction differs between the
+reordering-ENABLED and -DISABLED engines), an **exact work contrast** read
+from the count-store (scanned start rows for the anchor swap; inner
+re-initialisations for the disjoint reorder — the db-hits-style figure the
+cost model itself compares), and the **median wall-clock** ENABLED vs
+DISABLED. On first run it seeds a deterministic synthetic content layer
+(2000 `:User`, 1500 `:Post`, 100 `:Comment` each `:ON` a distinct post;
+`-scale N` multiplies these) so the graph carries the skew; re-running
+skips re-seeding.
+
+```bash
+go run ./examples/24_social_network_cli init -d "$DATA_DIR"
+go run ./examples/24_social_network_cli seed -d "$DATA_DIR"
+go run ./examples/24_social_network_cli plandiff -d "$DATA_DIR"
+```
+
+A representative anchor-swap plan-diff (the scan label and expand direction
+both change; the `# ` lines report the exact and volatile evidence):
+
+```
+## scenario: anchor-swap
+query: MATCH (p:Post)<-[:ON]-(c:Comment) RETURN c.id AS comment, p.id AS post
+--- EXPLAIN (reordering DISABLED) ---
+ProduceResults
+└─ Projection
+   └─ Selection
+      └─ Expand (p)<-[:ON]-(c)
+         └─ NodeByLabelScan [p:Post]
+--- EXPLAIN (reordering ENABLED) ---
+ProduceResults
+└─ Projection
+   └─ Selection
+      └─ Expand (c)-[:ON]->(p)
+         └─ NodeByLabelScan [c:Comment]
+# anchor-swap.reordered=true
+# anchor-swap.scanned_start_rows.disabled=1503
+# anchor-swap.scanned_start_rows.enabled=105
+# anchor-swap.scanned_start_rows.ratio=14.3x
+# anchor-swap.elapsed.disabled=...     # volatile
+# anchor-swap.elapsed.enabled=...
+# anchor-swap.speedup=...x
+```
+
+The disjoint-reorder scenario prints the analogous diff — the
+`CartesianProduct` children swap order (`[c:Comment]` drives before
+`[u:User]`) — with `inner_reinitialisations` as its exact work figure.
+
 ## Architecture
 
 ```
@@ -178,11 +253,11 @@ queries (label scans vs relationship scans) dominate at size.
         └──────┬───────┘
                │
                v
-        ┌──────────────┐        ┌─────────────────────┐
-        │  dispatch    │  ───►  │  cmdInit / cmdSeed  │
-        │  main.go     │        │  cmdQuery /          │
-        │              │        │  cmdSnapshot / cmdStats │
-        └──────┬───────┘        └─────────┬───────────┘
+        ┌──────────────┐        ┌─────────────────────────┐
+        │  dispatch    │  ───►  │  cmdInit / cmdSeed /     │
+        │  main.go     │        │  cmdQuery / cmdSnapshot /│
+        │              │        │  cmdStats / cmdPlandiff  │
+        └──────┬───────┘        └─────────┬───────────────┘
                │                          │
                │     openedStore.Close    │ openStore(ctx, dir)
                │       fsyncs the WAL     │

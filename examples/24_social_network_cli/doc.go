@@ -2,7 +2,7 @@
 // that demonstrates how to build, persist and query a labelled property
 // graph for a social-network domain using GoGraph.
 //
-// The example exercises four pillars of the module in a single deliverable:
+// The example exercises five pillars of the module in a single deliverable:
 //
 //  1. Graph initialisation with a labelled property graph (LPG) backend.
 //  2. Crash-safe ACID persistence via a write-ahead log plus snapshots
@@ -11,6 +11,10 @@
 //     (cypher.NewEngineWithStore and Engine.RunInTx).
 //  4. A small CLI surface that accepts ad-hoc Cypher queries from
 //     positional arguments or stdin and streams results as JSON Lines.
+//  5. Count-store-gated query optimisation: the `plandiff` subcommand
+//     exercises the single-edge anchor swap (#2090) and the disjoint-
+//     component reorder (#2091), surfacing the EXPLAIN plan-diff and the
+//     exact work contrast the cost model compares.
 //
 // # Schema
 //
@@ -121,6 +125,35 @@
 //	    list, the live Go heap, and the per-query wall-clock latency of
 //	    each of the eight count queries. The counts stay the
 //	    deterministic facts; only the telemetry varies per run.
+//
+//	plandiff -d <dir> [-scale N]
+//	    Exercise GoGraph's two count-store-gated query-reordering
+//	    peepholes and print the before/after evidence. On first run it
+//	    seeds, in one durable transaction, a deterministic synthetic
+//	    content layer on top of the fixture (2000 extra :User, 1500 extra
+//	    :Post, 100 extra :Comment each :ON a distinct post; -scale N
+//	    multiplies these). The layer gives the graph a long-tail
+//	    engagement skew (|Post| ≫ |Comment|, |User| ≫ |Comment|) the
+//	    peepholes exploit; re-running skips re-seeding (the dp_post_0
+//	    sentinel node is present). It then runs two read scenarios on a
+//	    reordering-ENABLED engine and a -DISABLED engine over the same
+//	    recovered graph:
+//	        anchor-swap        MATCH (p:Post)<-[:ON]-(c:Comment) …
+//	            The single-edge anchor swap (#2090) re-roots the pattern
+//	            from a full :Post scan onto the far smaller :Comment side,
+//	            flipping the reverse DirIn expand to a forward DirOut one.
+//	        disjoint-reorder   MATCH (u:User), (c:Comment) RETURN count(*)
+//	            The disjoint-component ordering (#2091) drives the smaller
+//	            :Comment side of the Cartesian, so the inner plan is
+//	            re-initialised |Comment| times instead of |User|.
+//	    For each scenario it prints the EXPLAIN plan-diff (the chosen
+//	    operator order / expand direction differs ENABLED vs DISABLED), an
+//	    exact "work" contrast read from the count-store (scanned start rows
+//	    for the anchor swap; inner re-initialisations for the disjoint
+//	    reorder — the db-hits-style figure the cost model compares), and
+//	    the median wall-clock ENABLED vs DISABLED. All of it is emitted as
+//	    "# "-prefixed telemetry and bare report lines; the wall-clock is
+//	    volatile, the plan-diff and work contrast are deterministic.
 //
 // # Output Format (JSON Lines)
 //

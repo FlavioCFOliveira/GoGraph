@@ -33,6 +33,7 @@ Subcommands:
   query      Run a Cypher query and emit each record as a JSON Lines record.
   snapshot   Force a manual snapshot of the current in-memory graph.
   stats      Print node and edge counts as a single JSON object.
+  plandiff   Exercise the query-reordering peepholes and print the plan-diff.
 
 Common flags:
   -d <dir>   Data directory (required for every subcommand).
@@ -77,6 +78,8 @@ func dispatch(args []string) error {
 		return cmdSnapshot(rest)
 	case "stats":
 		return cmdStats(rest)
+	case "plandiff":
+		return cmdPlandiff(rest)
 	case "-h", "--help", "help":
 		usage(os.Stdout)
 		return nil

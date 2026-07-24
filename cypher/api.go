@@ -1965,18 +1965,68 @@ func (e *Engine) Explain(query string, params map[string]expr.Value) (s string, 
 	if err != nil {
 		return "", err
 	}
-	return explainWithIndexes(plan, e.g.IndexManager(), params, e.g), nil
+	// Reflect the count-store-gated reordering peepholes in the rendered plan so
+	// EXPLAIN shows the physically-built shape, not just the written logical order:
+	// the disjoint-component reorder (#2091) reverses a CartesianProduct's drive
+	// order, and the single-edge anchor swap (#2090) re-roots a pattern onto its
+	// other endpoint (flipping the expand direction and the scanned label). Both
+	// swap sets are computed here EXACTLY as the read path computes them — the same
+	// candidate collectors and the same live count-store cost gate, gated by the
+	// same Engine flags — so an anchor-swap/reorder-ENABLED engine and a -DISABLED
+	// engine render different trees. That is the plan-diff example 24 surfaces
+	// (task #2119) and the EXPLAIN requirement of task #2095. The counts are read
+	// live (no View barrier), matching the min-label EXPLAIN path: EXPLAIN is a
+	// diagnostic, so a consistent snapshot is not required for its rendering.
+	labelSrc := &lpgLabelResolver{g: e.g, cs: e.countStore}
+	var reorderSwaps map[*ir.Apply]bool
+	var anchorSwaps map[*ir.Expand]bool
+	if e.joinReorderEnabled {
+		if cands := collectReorderCandidates(plan); len(cands) > 0 {
+			reorderSwaps = computeReorderSwaps(cands, labelSrc, int64(e.g.LiveOrder()))
+		}
+	}
+	if e.anchorSwapEnabled {
+		if sites := collectAnchorSwapCandidates(plan); len(sites) > 0 {
+			anchorSwaps = computeAnchorSwaps(sites, labelSrc)
+		}
+	}
+	return explainWithIndexes(plan, e.g.IndexManager(), params, e.g, reorderSwaps, anchorSwaps), nil
 }
 
 // explainWithIndexes walks plan and renders operator names, substituting
 // Selection→{AllNodesScan|NodeByLabelScan} pairs with "NodeByIndexSeek" when
 // tryBuildIndexSeekFromSelection would succeed given idxMgr and params, and
 // rendering a "NodeByIndexRangeScan" leaf in place of the scan child when the
-// range seek (#1505) would fire given the live graph statistics.
-func explainWithIndexes(plan ir.LogicalPlan, idxMgr *index.Manager, params map[string]expr.Value, g *lpg.Graph[string, float64]) string {
+// range seek (#1505) would fire given the live graph statistics. reorderSwaps and
+// anchorSwaps carry the count-store-gated reordering decisions (#2091 / #2090) so
+// the rendered tree matches the physically-built plan; both are nil when the
+// respective peephole is disabled or fires nowhere.
+func explainWithIndexes(plan ir.LogicalPlan, idxMgr *index.Manager, params map[string]expr.Value, g *lpg.Graph[string, float64], reorderSwaps map[*ir.Apply]bool, anchorSwaps map[*ir.Expand]bool) string {
 	var b strings.Builder
-	explainWithIndexesNode(&b, plan, idxMgr, params, g, "", true, true)
+	explainWithIndexesNode(&b, plan, idxMgr, params, g, reorderSwaps, anchorSwaps, "", true, true)
 	return b.String()
+}
+
+// physicalExpandLabel renders an Expand's traversed pattern with its direction in
+// Cypher relationship-arrow syntax — "(from)-[:R]->(to)" outgoing, "(from)<-[:R]-(to)"
+// incoming, "(from)-[:R]-(to)" undirected — so EXPLAIN surfaces the expand
+// DIRECTION, the signal the single-edge anchor swap (#2090) flips when it re-roots
+// a pattern. An empty relationship-type list renders as a bare "[]".
+func physicalExpandLabel(e *ir.Expand) string {
+	rel := "[" + strings.Join(e.RelTypes, "|") + "]"
+	if len(e.RelTypes) > 0 {
+		rel = "[:" + strings.Join(e.RelTypes, "|") + "]"
+	}
+	var left, right string
+	switch e.Direction {
+	case ir.DirectionOutgoing:
+		left, right = "-", "->"
+	case ir.DirectionIncoming:
+		left, right = "<-", "-"
+	default:
+		left, right = "-", "-"
+	}
+	return "(" + e.FromVar + ")" + left + rel + right + "(" + e.ToVar + ")"
 }
 
 func explainWithIndexesNode(
@@ -1985,11 +2035,25 @@ func explainWithIndexesNode(
 	idxMgr *index.Manager,
 	params map[string]expr.Value,
 	explainGraph *lpg.Graph[string, float64],
+	reorderSwaps map[*ir.Apply]bool,
+	anchorSwaps map[*ir.Expand]bool,
 	prefix string,
 	isRoot, isLast bool,
 ) {
 	if plan == nil {
 		return
+	}
+	// Single-edge anchor swap (#2090): when this Selection tops a matched single-
+	// edge site whose Expand was chosen for a swap, render the re-rooted MIRROR
+	// plan (scan the other endpoint, expand the same relationship in the flipped
+	// direction) — the physical shape the read path builds. The mirror allocates a
+	// fresh Expand not present in anchorSwaps, so the recursion never re-fires.
+	if sel, ok := plan.(*ir.Selection); ok && len(anchorSwaps) > 0 {
+		if site, ok := matchAnchorSite(sel); ok && anchorSwaps[site.exp] {
+			explainWithIndexesNode(b, mirrorAnchorSite(&site), idxMgr, params, explainGraph,
+				reorderSwaps, anchorSwaps, prefix, isRoot, isLast)
+			return
+		}
 	}
 	var connector, childCont string
 	if isRoot {
@@ -2034,6 +2098,24 @@ func explainWithIndexesNode(
 	b.WriteString(prefix)
 	b.WriteString(connector)
 	b.WriteString(opName)
+	// Surface the scanned label and the expand direction so a re-rooted single-edge
+	// pattern (#2090 — different scanned label AND flipped direction) and a swapped
+	// CartesianProduct drive order (#2091 — the anchored-label order changes) are
+	// legible in the plan-diff. Only the general (non-rewritten) scan reaches here;
+	// the index/range/min-label rewrites below render their own leaf line.
+	if opName == "NodeByLabelScan" {
+		if scan, ok := plan.(*ir.NodeByLabelScan); ok {
+			b.WriteString(" [")
+			b.WriteString(scan.NodeVar)
+			b.WriteByte(':')
+			b.WriteString(scan.Label)
+			b.WriteByte(']')
+		}
+	}
+	if exp, ok := plan.(*ir.Expand); ok {
+		b.WriteByte(' ')
+		b.WriteString(physicalExpandLabel(exp))
+	}
 	b.WriteByte('\n')
 
 	// When a Selection was rewritten to an index seek, skip its scan child
@@ -2065,8 +2147,14 @@ func explainWithIndexesNode(
 	}
 
 	children := plan.Children()
+	// Disjoint-component reorder (#2091): when this plain Apply (CartesianProduct)
+	// was chosen for a swap, render its two children in SWAPPED order (the smaller
+	// inner arm drives first), so EXPLAIN reflects the physically-built drive order.
+	if ap, ok := plan.(*ir.Apply); ok && reorderSwaps[ap] && len(children) == 2 {
+		children = []ir.LogicalPlan{children[1], children[0]}
+	}
 	for i, child := range children {
-		explainWithIndexesNode(b, child, idxMgr, params, explainGraph, nextPrefix, false, i == len(children)-1)
+		explainWithIndexesNode(b, child, idxMgr, params, explainGraph, reorderSwaps, anchorSwaps, nextPrefix, false, i == len(children)-1)
 	}
 }
 

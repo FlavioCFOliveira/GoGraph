@@ -149,7 +149,7 @@ func ExampleEngine_Explain() {
 	// Output:
 	// ProduceResults
 	// └─ Projection
-	//    └─ NodeByLabelScan
+	//    └─ NodeByLabelScan [n:Person]
 }
 
 // ExampleBindParams converts a map of Go values into the engine's internal
