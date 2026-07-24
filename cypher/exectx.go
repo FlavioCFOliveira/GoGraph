@@ -445,9 +445,9 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 	// buffer so every statement's count deltas accumulate together and the handle
 	// flushes them once at Commit (#2082), mirroring the shared index buffer.
 	if tx.walTx != nil {
-		mutator = &walMutatorAdapter{g: tx.eng.g, tx: tx.walTx, buf: tx.buf, undo: tx.undo, touched: tx.touched, cs: tx.eng.countStore, cbuf: tx.cbuf}
+		mutator = &walMutatorAdapter{g: tx.eng.g, tx: tx.walTx, buf: tx.buf, undo: tx.undo, touched: tx.touched, cs: tx.eng.countStore, cbuf: tx.cbuf, stats: tx.eng.statsCollector}
 	} else {
-		mutator = &lpgMutatorAdapter{g: tx.eng.g, buf: tx.buf, undo: tx.undo, touched: tx.touched, cs: tx.eng.countStore, cbuf: tx.cbuf}
+		mutator = &lpgMutatorAdapter{g: tx.eng.g, buf: tx.buf, undo: tx.undo, touched: tx.touched, cs: tx.eng.countStore, cbuf: tx.cbuf, stats: tx.eng.statsCollector}
 	}
 
 	// Route through ApplyInsideLocked when the barrier is held for the whole tx

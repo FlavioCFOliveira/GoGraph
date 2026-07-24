@@ -91,6 +91,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index/count"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/stats"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
@@ -964,6 +965,17 @@ type Engine struct {
 	// (P3 wires the join-order reorder) — so the store is maintained but its
 	// reads change no plan.
 	countStore *count.Store
+
+	// statsCollector holds the best-effort approximate planner statistics (NDV /
+	// MCV / equi-depth histograms per (label, property), tasks #2097/#2098,
+	// docs/statistics-design.md). It is always non-nil but starts empty: statistics
+	// exist only after [Engine.RefreshStatistics] runs its off-write-path rebuild
+	// scan and publishes a snapshot. The only write-path interaction is an O(1)
+	// atomic per-(label, property) dirty-counter bump when the collector is tracking
+	// (SetNodeProperty / DelNodeProperty). As of #2097/#2098 the statistics ship
+	// INERT — no query-path consumer reads them yet (#2099 is the intended
+	// consumer) — so a rebuild changes no plan.
+	statsCollector *statsCollector
 }
 
 // lockWriter acquires the engine's write serialisation appropriate to its
@@ -1195,6 +1207,7 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		parallelScanThreshold:   resolveParallelScanThreshold(opts.ParallelScanThreshold),
 		parallelGov:             &exec.ParallelGovernor{},
 		countStore:              count.New(resolveMaxLabelRecountEdges(opts.MaxLabelRecountEdges)),
+		statsCollector:          stats.NewCollector[expr.Value](),
 	}
 	procs.RegisterBuiltins(e.procReg, g.IndexManager(), procs.BuiltinSources{
 		ListConstraints:   func() [][]expr.Value { return e.constraintReg.ListConstraintRows() },
@@ -1865,7 +1878,7 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	queryReg := newNowAwareRegistry(e.reg, time.Now())
 	e.g.View(func() {
 		walker := &lpgNodeWalker{g: e.g}
-		labelSrc := &lpgLabelResolver{g: e.g, cs: e.countStore}
+		labelSrc := &lpgLabelResolver{g: e.g, cs: e.countStore, stats: e.statsCollector}
 		// Allocate a per-run subquery evaluator so EXISTS { … } / COUNT { … }
 		// expressions encountered inside Filter/Project closures can drive their
 		// inner pipelines against the current outer row (task-396).
@@ -1977,7 +1990,7 @@ func (e *Engine) Explain(query string, params map[string]expr.Value) (s string, 
 	// (task #2119) and the EXPLAIN requirement of task #2095. The counts are read
 	// live (no View barrier), matching the min-label EXPLAIN path: EXPLAIN is a
 	// diagnostic, so a consistent snapshot is not required for its rendering.
-	labelSrc := &lpgLabelResolver{g: e.g, cs: e.countStore}
+	labelSrc := &lpgLabelResolver{g: e.g, cs: e.countStore, stats: e.statsCollector}
 	var reorderSwaps map[*ir.Apply]bool
 	var anchorSwaps map[*ir.Expand]bool
 	if e.joinReorderEnabled {
@@ -4671,10 +4684,33 @@ type lpgLabelResolver struct {
 	// (some tests); the provider then falls back to estFallback. As of P2 nothing
 	// on the query path consumes these estimates (the provider is inert).
 	cs *count.Store
+	// stats is the engine's approximate-statistics collector (#2097/#2098),
+	// threaded so the statistics providers (statsEqualityEstimate /
+	// statsRangeEstimate) can read NDV / MCV / histogram estimates. It is nil for
+	// resolver instances built without an engine (some tests); the providers then
+	// fall back. As of #2097/#2098 nothing on the query path consumes these
+	// estimates (they are inert).
+	stats *statsCollector
 }
 
 // Counts returns the relationship count-store this resolver reads, or nil.
 func (s *lpgLabelResolver) Counts() *count.Store { return s.cs }
+
+// Statistics returns the approximate-statistics collector this resolver reads, or
+// nil. It implements the statsSource capability the statistics providers consume.
+func (s *lpgLabelResolver) Statistics() *statsCollector { return s.stats }
+
+// ResolvePropertyID reports the stable interned id of a property-key name, used by
+// the statistics providers to key into the collector. The lookup is non-mutating
+// (it never interns a new id), so it is safe on the read path; ok is false for a
+// property key that was never interned (which necessarily has no statistics).
+func (s *lpgLabelResolver) ResolvePropertyID(name string) (uint32, bool) {
+	pid, ok := s.g.PropertyKeys().Lookup(name)
+	if !ok {
+		return 0, false
+	}
+	return uint32(pid), true
+}
 
 // ResolveLabelBitmap implements exec.labelResolver.
 func (s *lpgLabelResolver) ResolveLabelBitmap(name string) *roaring64.Bitmap {
@@ -13201,9 +13237,9 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 		}
 		// cbuf is left nil: it is allocated lazily on the first count delta, so a
 		// bare CREATE (:N) over an edgeless graph allocates none (#2082).
-		mutator = &walMutatorAdapter{g: e.g, tx: walTx, buf: buf, undo: undo, touched: touched, cs: e.countStore}
+		mutator = &walMutatorAdapter{g: e.g, tx: walTx, buf: buf, undo: undo, touched: touched, cs: e.countStore, stats: e.statsCollector}
 	} else {
-		mutator = &lpgMutatorAdapter{g: e.g, buf: buf, undo: undo, touched: touched, cs: e.countStore}
+		mutator = &lpgMutatorAdapter{g: e.g, buf: buf, undo: undo, touched: touched, cs: e.countStore, stats: e.statsCollector}
 	}
 
 	r, buildErr := e.execUnderBarrier(ctx, plan, queryReg, params, mutator, buf, undo, walTx, true, e.g.ApplyAtomically, touched)
@@ -13373,6 +13409,13 @@ type lpgMutatorAdapter struct {
 	// every statement accumulate together and the handle flushes once at commit.
 	cs   *count.Store
 	cbuf *exec.CountBuffer
+	// stats is the engine's approximate-statistics collector (#2097/#2098); nil
+	// on read-only test stubs. When it is tracking statistics, a node property
+	// write bumps the O(1) atomic per-(label, property) staleness counter via
+	// [recordStatsNodePropertyWrite] — the single write-path cost the statistics
+	// design permits. It stays a no-op until [Engine.RefreshStatistics] publishes
+	// a snapshot, so a stats-free workload (the write benchmark) pays nothing.
+	stats *statsCollector
 	// fresh is the per-statement set of node keys created by this adapter that
 	// have not yet gained an incident edge (#2082). A SetNodeLabel on a fresh node
 	// is INITIAL labelling — the node's contribution is captured by the later
@@ -13678,9 +13721,10 @@ func (a *lpgMutatorAdapter) IsTombstoned(id graph.NodeID) bool {
 func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyValue) error {
 	r := a.rec()
 	fanout := indexFanoutActive(a.g, a.buf)
+	statsActive := a.stats != nil && a.stats.Tracking()
 	var prev lpg.PropertyValue
 	var had bool
-	if r.active() || fanout {
+	if r.active() || fanout || statsActive {
 		prev, had = a.g.GetNodeProperty(n, key)
 	}
 	if err := a.g.SetNodeProperty(n, key, value); err != nil {
@@ -13699,6 +13743,13 @@ func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 		}
 		a.buf.Enqueue(ch)
 	}
+	if statsActive {
+		// The single write-path statistics cost: an O(1) atomic Δ bump per tracked
+		// (label, property) the node carries (design docs/statistics-design.md §2).
+		// had marks a value replacement, the direction that makes NDV over-estimate.
+		recordStatsNodePropertyWrite(a.stats, a.g.NodeIndex(), a.resolveID(n),
+			uint32(a.g.PropertyKeys().Intern(key)), had)
+	}
 	return nil
 }
 
@@ -13706,9 +13757,10 @@ func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) {
 	r := a.rec()
 	fanout := indexFanoutActive(a.g, a.buf)
+	statsActive := a.stats != nil && a.stats.Tracking()
 	var prev lpg.PropertyValue
 	var had bool
-	if r.active() || fanout {
+	if r.active() || fanout || statsActive {
 		prev, had = a.g.GetNodeProperty(n, key)
 	}
 	a.g.DelNodeProperty(n, key)
@@ -13723,6 +13775,12 @@ func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) {
 			ch.OldValue = prev // lets a bound index drop the stale entry (task #1340)
 		}
 		a.buf.Enqueue(ch)
+	}
+	if statsActive && had {
+		// A removed value: bump Δ and the delete counter for every tracked
+		// (label, property) the node carries (design docs/statistics-design.md §2).
+		recordStatsNodePropertyWrite(a.stats, a.g.NodeIndex(), a.resolveID(n),
+			uint32(a.g.PropertyKeys().Intern(key)), true)
 	}
 }
 
@@ -14052,6 +14110,9 @@ type walMutatorAdapter struct {
 	// explicit transaction it is pre-set to the handle's shared buffer.
 	cs   *count.Store
 	cbuf *exec.CountBuffer
+	// stats mirrors [lpgMutatorAdapter.stats]: the approximate-statistics collector
+	// (#2097/#2098), so a WAL-backed write bumps the same O(1) staleness counter.
+	stats *statsCollector
 	// fresh is the per-statement set of newly created, still-edgeless node keys
 	// (#2082), so initial CREATE labelling is not mistaken for a relabel; see the
 	// lpgMutatorAdapter twin.
@@ -14342,9 +14403,10 @@ func (a *walMutatorAdapter) IsTombstoned(id graph.NodeID) bool {
 func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyValue) error {
 	r := a.rec()
 	fanout := indexFanoutActive(a.g, a.buf)
+	statsActive := a.stats != nil && a.stats.Tracking()
 	var prev lpg.PropertyValue
 	var had bool
-	if r.active() || fanout {
+	if r.active() || fanout || statsActive {
 		prev, had = a.g.GetNodeProperty(n, key)
 	}
 	if err := a.g.SetNodeProperty(n, key, value); err != nil {
@@ -14364,6 +14426,10 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 		}
 		a.buf.Enqueue(ch)
 	}
+	if statsActive {
+		recordStatsNodePropertyWrite(a.stats, a.g.NodeIndex(), a.resolveID(n),
+			uint32(a.g.PropertyKeys().Intern(key)), had)
+	}
 	return nil
 }
 
@@ -14371,9 +14437,10 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 func (a *walMutatorAdapter) DelNodeProperty(n, key string) {
 	r := a.rec()
 	fanout := indexFanoutActive(a.g, a.buf)
+	statsActive := a.stats != nil && a.stats.Tracking()
 	var prev lpg.PropertyValue
 	var had bool
-	if r.active() || fanout {
+	if r.active() || fanout || statsActive {
 		prev, had = a.g.GetNodeProperty(n, key)
 	}
 	a.g.DelNodeProperty(n, key)
@@ -14389,6 +14456,10 @@ func (a *walMutatorAdapter) DelNodeProperty(n, key string) {
 			ch.OldValue = prev // lets a bound index drop the stale entry (task #1340)
 		}
 		a.buf.Enqueue(ch)
+	}
+	if statsActive && had {
+		recordStatsNodePropertyWrite(a.stats, a.g.NodeIndex(), a.resolveID(n),
+			uint32(a.g.PropertyKeys().Intern(key)), true)
 	}
 }
 
