@@ -71,6 +71,73 @@ func ParallelScanVariantPair() (EngineVariant, EngineVariant) {
 		EngineVariant{Name: "serial-scan", Options: cypher.EngineOptions{DisableParallelScan: true}}
 }
 
+// ParallelAggregateVariantPair returns the PARALLEL-AGGREGATION differential pair:
+// the morsel-parallel aggregate scan (#2111 — min / max / count and their GROUP BY
+// forms) versus the serial EagerAggregation pipeline, proving they produce a
+// BIT-IDENTICAL observable result over the [ParallelAggregateTrace]. Variant A
+// lowers ParallelScanThreshold to 1 so the parallel aggregate reduce engages on the
+// small trace graph; variant B forces the serial path with DisableParallelScan.
+//
+// Scope of what this pair proves. The differential builds a SEPARATE graph per
+// variant, and the LPG mapper's WalkNodeIDs order is NOT stable across independent
+// builds (it is unspecified by openCypher — two builds from the same CREATE stream
+// legitimately scan in different orders). min/max over a Compare-TIE (e.g. int 2^53
+// vs float 2^53) keeps the first-seen member, so its retained REPRESENTATION is
+// scan-order-dependent and therefore differs between two separately-built graphs
+// even on the SERIAL path alone. The two-graph differential thus cannot compare a
+// tie representative — which is precisely why [ParallelScanVariantPair] tests only
+// the order-independent count. Accordingly [ParallelAggregateTrace] uses UNIQUE
+// extrema (no ties), so min/max/count and their grouped forms are order-independent
+// and the two variants must agree exactly. The adversarial TIE-representative
+// determinism (mixed int/float, ±0.0, NaN) is proven where it can be — on ONE graph
+// with a controlled scan order — by the exec-level
+// TestParallelAggregateScan_TieRepresentative and the same-graph engine-level
+// TestParallelAggregate_ScalarTie_Differential / _GroupBy_Differential.
+func ParallelAggregateVariantPair() (EngineVariant, EngineVariant) {
+	return EngineVariant{Name: "parallel-aggregate", Options: cypher.EngineOptions{ParallelScanThreshold: 1}},
+		EngineVariant{Name: "serial-aggregate", Options: cypher.EngineOptions{DisableParallelScan: true}}
+}
+
+// ParallelAggregateTrace builds a deterministic, self-contained trace that seeds a
+// graph with UNIQUE-valued (tie-free) numeric properties across three groups, then
+// issues the min / max / count aggregations — scalar and grouped — that exercise
+// the parallel aggregate scan (#2111). With unique extrema the result is
+// order-independent, so the parallel (variant A) and serial (variant B) engines —
+// which build separate graphs whose scan order is not stable across builds (see
+// [ParallelAggregateVariantPair]) — must still agree on every op. The values mix
+// int and float across groups so the Number-tier ordering is exercised, but no two
+// values are Compare-equal, so the retained min/max representation is unambiguous.
+func ParallelAggregateTrace() Trace {
+	create := func(cy string) TracedOp {
+		return TracedOp{Op: Op{Kind: OpCreate, Cypher: cy}}
+	}
+	read := func(cy string) TracedOp {
+		return TracedOp{Op: Op{Kind: OpMatch, Cypher: cy}}
+	}
+	ops := []TracedOp{
+		// Group "x": unique min 10 (int), max 30 (int); a float in between.
+		create(`CREATE (:Item {v: 10, g: 'x'})`),
+		create(`CREATE (:Item {v: 20.5, g: 'x'})`),
+		create(`CREATE (:Item {v: 30, g: 'x'})`),
+		// Group "y": unique min 5.5 (float), max 25 (int).
+		create(`CREATE (:Item {v: 15, g: 'y'})`),
+		create(`CREATE (:Item {v: 5.5, g: 'y'})`),
+		create(`CREATE (:Item {v: 25, g: 'y'})`),
+		// Group "z": unique min 1 (int), max 99.9 (float).
+		create(`CREATE (:Item {v: 42, g: 'z'})`),
+		create(`CREATE (:Item {v: 1, g: 'z'})`),
+		create(`CREATE (:Item {v: 99.9, g: 'z'})`),
+		// Bare-scan aggregations — the shape the parallel aggregate scan serves —
+		// route to it on variant A and to the serial EagerAggregation on variant B.
+		read(`MATCH (n) RETURN min(n.v) AS m`),
+		read(`MATCH (n) RETURN max(n.v) AS m`),
+		read(`MATCH (n) RETURN count(*) AS c`),
+		read(`MATCH (n) RETURN count(n.v) AS c`),
+		read(`MATCH (n) RETURN n.g AS grp, min(n.v) AS lo, max(n.v) AS hi, count(*) AS c`),
+	}
+	return Trace{Ops: ops, Seed: 0x2111}
+}
+
 // DiffResult is the outcome of a differential run: whether the two variants
 // agreed, and on a divergence the first op index, the op, and the two
 // (canonicalised) observable signatures that differed.

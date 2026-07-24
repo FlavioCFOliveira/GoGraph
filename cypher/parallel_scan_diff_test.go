@@ -136,12 +136,16 @@ func TestParallelScan_Differential(t *testing.T) {
 	})
 }
 
-// TestParallelScan_DeclinesOutsideScope proves the parallel count reduce (the
-// morsel-parallel WORKER path over a full-node scan) does NOT engage for shapes
-// outside its locked scope (sum/avg, grouped count, count of a property, a label
-// scan), while results stay correct. A count over a label scan is served by the
-// separate LabelCountScan pushdown (#2004), covered in
-// label_count_scan_diff_test.go; here it must simply not trigger the WORKER path.
+// TestParallelScan_DeclinesOutsideScope proves the parallel COUNT REDUCE
+// (ParallelCountScan, the group-by-less single-count fast path) does NOT engage
+// for shapes outside ITS locked scope — sum/avg, grouped count, count of a
+// property, a distinct count, a label scan — while results stay correct against
+// the serial path. Note that since #2111 several of these shapes (min, grouped
+// count, count of a property) are served by the SEPARATE ParallelAggregateScan
+// worker path (parallelAggregateScanBuildCount), not the count reduce; this test
+// asserts only that the count-reduce seam (parallelCountScanBuildCount) stays put,
+// and that every result matches serial. A count over a label scan is served by the
+// separate LabelCountScan pushdown (#2004), covered in label_count_scan_diff_test.go.
 func TestParallelScan_DeclinesOutsideScope(t *testing.T) {
 	g := buildPSTestGraph(t, 200)
 	on, off := engines(g)

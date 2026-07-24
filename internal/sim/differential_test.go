@@ -59,6 +59,28 @@ func TestDifferential_ParallelScanAgreesShort(t *testing.T) {
 	}
 }
 
+// TestDifferential_ParallelAggregateAgrees is the short-layer parallel-aggregation
+// differential (#2111): the morsel-parallel aggregate scan (min/max/count and their
+// GROUP BY forms, threshold lowered to 1) must produce byte-identical observable
+// output to the forced-serial path over [ParallelAggregateTrace]. The trace uses
+// UNIQUE extrema so the min/max results are order-independent and therefore
+// comparable across the two separately-built graphs the differential uses (the
+// mapper walk order is not stable across builds — see ParallelAggregateVariantPair).
+// This brings the parallel aggregate multiset/value/count correctness under the DST;
+// the order-dependent TIE representative is proven on a single controlled graph by
+// the exec- and engine-level tie tests.
+func TestDifferential_ParallelAggregateAgrees(t *testing.T) {
+	trace := ParallelAggregateTrace()
+	a, b := ParallelAggregateVariantPair()
+	res, err := DifferentialTrace(context.Background(), trace, &a, &b)
+	if err != nil {
+		t.Fatalf("DifferentialTrace: %v", err)
+	}
+	if !res.Agreed {
+		t.Fatalf("parallel-aggregate and serial-aggregate diverged (a parallel-combine regression):\n%s", res.String())
+	}
+}
+
 // TestDifferential_IdenticalVariantsAgree is the PRIMARY positive case: the
 // engine's default plan and the same engine with the hash-join (and,
 // separately, the range-seek) optimisation disabled MUST produce byte-identical

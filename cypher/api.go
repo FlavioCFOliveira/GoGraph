@@ -4715,6 +4715,20 @@ func (w *lpgNodeWalker) LiveOrderHint() int {
 	return int(w.g.LiveOrder())
 }
 
+// LiveNodeCount returns the exact number of live (tombstone-excluded) nodes a
+// whole-graph WalkNodeIDs would yield, for the O(1) count pushdown (#2113 /
+// #2066). ok is false for a morsel-restricted walker (whose figure is the morsel
+// length, not a whole-graph count), so the count pushdown declines to the serial
+// scan there. It reads [lpg.Graph.LiveOrder], which the build already observes
+// under the visibility-barrier RLock, so it is stable for the query's lifetime and
+// bit-identical to the number of rows a bare AllNodesScan emits.
+func (w *lpgNodeWalker) LiveNodeCount() (int64, bool) {
+	if w.morsel != nil {
+		return 0, false
+	}
+	return int64(w.g.LiveOrder()), true
+}
+
 // WalkNodeIDs implements nodeWalkerIface. Tombstoned node IDs (those
 // removed via the GraphMutator's RemoveNode) are skipped so
 // AllNodesScan, count(*), and downstream scans treat deleted nodes
@@ -7293,6 +7307,18 @@ func buildOperator(
 		if op, ok := tryBuildParallelCountScan(p, walker, schema, bopts); ok {
 			return op, nil
 		}
+		// Parallel aggregate fast path (#2111): min / max, multi-aggregate,
+		// count(<expr>), and every GROUP BY form over a bare full-node scan — above
+		// the threshold — are served by a ParallelAggregateScan whose per-worker
+		// partials combine deterministically and byte-identically to serial (min/max
+		// position-carrying; count int64 add; group-by merge under the exact grouping
+		// comparator). Only count / min / max are admitted; every other aggregate
+		// stays serial by construction.
+		if op, ok, perr := tryBuildParallelAggregateScan(p, walker, reg, params, schema, bopts); perr != nil {
+			return nil, perr
+		} else if ok {
+			return op, nil
+		}
 		// Label-scan count pushdown (#2004): a group-by-less count(*) /
 		// count(<scan-var>) over a bare single-label scan is served by a
 		// LabelCountScan that reads the label's live-node count directly (O(1) from
@@ -7301,6 +7327,15 @@ func buildOperator(
 		// per labelled node. Declines (falls through to the serial build) for every
 		// other shape.
 		if op, ok := tryBuildLabelCountScan(p, walker, labelSrc, schema, bopts); ok {
+			return op, nil
+		}
+		// Serial full-node count pushdown (#2113 / #2066): a group-by-less count(*) /
+		// count(<scan-var>) over a bare full-node scan BELOW the parallel threshold
+		// (or with the parallel path disabled) reads the maintained live-node count
+		// in O(1) via an AllNodesCountScan instead of a full O(N) scan. Bit-identical
+		// because WalkNodeIDs skips tombstones, so a bare scan emits exactly
+		// LiveOrder() rows.
+		if op, ok := tryBuildAllNodesCountScan(p, walker, schema, bopts); ok {
 			return op, nil
 		}
 		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
@@ -8115,6 +8150,185 @@ func installCountAggSchema(schema map[string]int, outName string, bopts *buildOp
 	}
 }
 
+// parallelAggregateScanBuildCount counts how many times the planner emitted the
+// morsel-parallel aggregate scan (#2111) in place of the serial EagerAggregation
+// pipeline. Like [parallelCountScanBuildCount] it is a process-global, monotonic
+// diagnostic seam read only by the in-package/differential tests to assert the
+// parallel aggregate path fired (or, under a guard, did not).
+var parallelAggregateScanBuildCount atomic.Uint64
+
+// allNodesCountScanBuildCount counts how many times the planner emitted the O(1)
+// serial full-node count pushdown (#2113 / #2066) in place of a full scan. It is a
+// process-global, monotonic diagnostic seam read only by the in-package tests.
+var allNodesCountScanBuildCount atomic.Uint64
+
+// tryBuildParallelAggregateScan returns a [exec.ParallelAggregateScan] and true
+// when p is an aggregation whose every aggregate admits a deterministic,
+// byte-identical-to-serial parallel combine — count(*), count(v), min, max — over a
+// bare full-node scan, and false otherwise (the caller then builds the serial
+// pipeline). It serves both the global (group-by-less) and GROUP BY forms; the
+// pure single global count(*) / count(v) shape is served earlier by
+// [tryBuildParallelCountScan], so this handles min/max, multi-aggregate, count over
+// an arbitrary argument, and every grouped form. The recognised shape is:
+//
+//   - the parallel scan is enabled and the live node count exceeds the threshold
+//     (delegated to [useParallelScan]) on the live whole-graph LPG walker;
+//   - the child is a bare [ir.AllNodesScan] (no Selection/Expand between the
+//     aggregate and the scan — a filtered count is served by the ParallelScanProject
+//     path, not here);
+//   - at least one aggregate, and EVERY aggregate is a non-DISTINCT count / min /
+//     max. A DISTINCT, a float sum/avg, an int sum, collect, percentile, or stdev
+//     makes the whole aggregation decline — those have no byte-identical combine and
+//     stay serial by construction.
+//
+// When it fires it builds the pre-projection items and the post-aggregation schema
+// through the SAME shared helpers the serial [buildEagerAggregation] uses, so the
+// per-node key/argument values and the downstream projection are byte-identical;
+// the per-worker sub-plan factory rebuilds the pre-projection over a per-worker
+// walker and a per-worker buildOpts copy so two workers never race. Every declined
+// shape leaves schema untouched and returns (nil, false, nil).
+//
+//nolint:gocyclo // structural shape match — one guard per rejected IR shape
+func tryBuildParallelAggregateScan(
+	p *ir.EagerAggregation,
+	walker nodeWalkerIface,
+	reg expr.FunctionRegistry,
+	params map[string]expr.Value,
+	schema map[string]int,
+	bopts *buildOpts,
+) (exec.Operator, bool, error) {
+	if !useParallelScan(walker, bopts) {
+		return nil, false, nil
+	}
+	lw, ok := walker.(*lpgNodeWalker)
+	if !ok || lw.morsel != nil {
+		return nil, false, nil
+	}
+	scan, isScan := p.Child.(*ir.AllNodesScan)
+	if !isScan {
+		return nil, false, nil
+	}
+	if len(p.Aggregates) == 0 {
+		return nil, false, nil
+	}
+
+	// Every aggregate must have an admitted, byte-identical parallel combine.
+	reducers := make([]exec.AggReducerKind, len(p.Aggregates))
+	for i, agg := range p.Aggregates {
+		if agg.Distinct {
+			return nil, false, nil
+		}
+		switch strings.ToLower(agg.Function) {
+		case "count":
+			if agg.Argument == "" {
+				reducers[i] = exec.ReduceCountStar
+			} else {
+				reducers[i] = exec.ReduceCount
+			}
+		case "min":
+			reducers[i] = exec.ReduceMin
+		case "max":
+			reducers[i] = exec.ReduceMax
+		default:
+			return nil, false, nil // sum/avg/collect/percentile/stdev stay serial
+		}
+	}
+
+	// The PRE-aggregation schema for a bare full-node scan: the child AllNodesScan
+	// binds its NodeVar at column 0 (schema[NodeVar] = schemaWidth(∅) = 0). This
+	// recognizer runs BEFORE the child is built, so the caller's schema is not yet
+	// populated — reconstruct the snapshot the per-worker pre-projection evals need
+	// to resolve the scan variable, exactly what the serial child build installs.
+	schemaSnap := map[string]int{scan.NodeVar: 0}
+	g := lw.g
+	nKeys := len(p.GroupBy)
+
+	// Per-worker sub-plan factory: AllNodesScan(morsel) → Project(pre-projection
+	// items), rebuilt per morsel over a per-worker walker restricted to the morsel
+	// and a per-worker buildOpts copy whose lazily-written fields are zeroed, so no
+	// two workers race on bopts.nodeResolver or a build-written map. The rebuilt
+	// items come from the SAME buildAggPreProjItems the serial path uses, so each
+	// worker's per-node key/argument values are byte-identical to serial.
+	factory := func(ids []graph.NodeID) (exec.Operator, error) {
+		wWalker := &lpgNodeWalker{g: g, morsel: ids}
+		scan := exec.NewAllNodesScan(wWalker)
+		wItems, _ := buildAggPreProjItems(p, schemaSnap, g, params, reg, bopts.forWorker())
+		return exec.NewProject(scan, wItems)
+	}
+
+	// Validate the pre-projection builds cleanly before launching workers (surfaces
+	// a genuine build error on the caller's goroutine, mirroring
+	// tryBuildParallelScanProject's probe).
+	if _, perr := exec.NewProject(exec.NewAllNodesScan(&lpgNodeWalker{g: g, morsel: []graph.NodeID{}}),
+		func() []exec.ProjectionItem {
+			items, _ := buildAggPreProjItems(p, schemaSnap, g, params, reg, bopts.forWorker())
+			return items
+		}()); perr != nil {
+		return nil, false, perr
+	}
+
+	installAggOutputSchema(p, schemaSnap, schema, bopts)
+
+	var gov *exec.ParallelGovernor
+	if bopts != nil {
+		gov = bopts.parallelGov
+	}
+	aggMB, aggEst := resultByteBudget(bopts)
+	op := exec.NewParallelAggregateScan(lw, factory, nKeys, reducers, 0, gov).
+		WithByteBudget(aggMB, aggEst)
+	parallelAggregateScanBuildCount.Add(1)
+	return op, true, nil
+}
+
+// tryBuildAllNodesCountScan returns a [exec.AllNodesCountScan] and true when p is a
+// group-by-less count(*) / count(<scan-var>) over a bare full-node scan on the live
+// whole-graph LPG walker, and false otherwise. It is the full-node-scan counterpart
+// of [tryBuildLabelCountScan] (#2113 / #2066): it reads the maintained live-node
+// count in O(1) instead of walking every node. Unlike [tryBuildParallelCountScan]
+// it is NOT gated on the parallel threshold — it is the SERIAL count pushdown that
+// serves the bare shape below the threshold (and whenever the parallel path is
+// disabled), where the parallel reduce declines. It is bit-identical to the serial
+// scan because WalkNodeIDs skips tombstones, so a bare AllNodesScan emits exactly
+// LiveOrder() rows.
+//
+// When it fires it installs the same single-column post-aggregation schema as
+// [tryBuildParallelCountScan] via [installCountAggSchema]. Every declined shape
+// leaves schema untouched.
+func tryBuildAllNodesCountScan(
+	p *ir.EagerAggregation,
+	walker nodeWalkerIface,
+	schema map[string]int,
+	bopts *buildOpts,
+) (exec.Operator, bool) {
+	if len(p.GroupBy) != 0 || len(p.Aggregates) != 1 {
+		return nil, false
+	}
+	agg := p.Aggregates[0]
+	if agg.Function != "count" || agg.Distinct {
+		return nil, false
+	}
+	scan, ok := p.Child.(*ir.AllNodesScan)
+	if !ok {
+		return nil, false
+	}
+	// count(*) (empty argument) or count(<scan-var>): both equal the live-node
+	// count. count(n.prop) / count(<other-var>) / count(expr) carry their own null
+	// semantics and cannot be read as LiveOrder(), so they decline.
+	if agg.Argument != "" && agg.Argument != scan.NodeVar {
+		return nil, false
+	}
+	// Only the live whole-graph walker exposes an exact O(1) live count; a morsel
+	// walker or a foreign source declines to the serial scan.
+	lw, ok := walker.(*lpgNodeWalker)
+	if !ok || lw.morsel != nil {
+		return nil, false
+	}
+
+	installCountAggSchema(schema, agg.OutputName, bopts)
+	allNodesCountScanBuildCount.Add(1)
+	return exec.NewAllNodesCountScan(lw), true
+}
+
 // labelCountScanBuildCount counts how many times the planner has emitted the
 // direct label-count scan in place of the serial EagerAggregation pipeline
 // (#2004). Like [parallelCountScanBuildCount] it is a process-global, monotonic
@@ -8239,27 +8453,11 @@ func buildEagerAggregation(
 		}
 	}
 
-	// Build pre-projection items:
-	//   positions 0..len(GroupBy)-1  → group-by key columns
-	//   positions len(GroupBy)..end  → aggregate argument columns
-	items := make([]exec.ProjectionItem, 0, len(p.GroupBy)+len(p.Aggregates))
-
-	// Group-by key projections.
-	keyCols := make([]int, len(p.GroupBy))
-	for i, varName := range p.GroupBy {
-		keyCols[i] = i // after pre-projection, key i is at position i
-
-		var astExpr ast.Expression
-		if i < len(p.GroupByExprs) {
-			astExpr = p.GroupByExprs[i]
-		}
-		items = append(items, exec.ProjectionItem{
-			Alias: varName,
-			Eval:  newAggregationEval(astExpr, varName, schemaSnap, capturedG, capturedParams, capturedReg, capturedBopts),
-		})
-	}
-
-	// Aggregate argument projections.
+	// Aggregate factories (one per aggregate expression, in the order of
+	// p.Aggregates). The DISTINCT wrap and the percentile row-dependency check are
+	// serial-path concerns and live here; the parallel aggregate scan (#2111)
+	// admits neither, so it needs none of this — it reuses only the pre-projection
+	// items below.
 	aggFactories := make([]funcs.AggregatorFactory, 0, len(p.Aggregates))
 	for _, aggExpr := range p.Aggregates {
 		// Two-arg aggregates (percentileCont, percentileDisc) carry the
@@ -8312,60 +8510,16 @@ func buildEagerAggregation(
 			}
 		}
 		aggFactories = append(aggFactories, factory)
-
-		// count(*) — argument is irrelevant; emit a constant non-null sentinel so
-		// the aggregator's Step always increments. exec.NewCountStarAgg treats any
-		// non-null value as a tick.
-		if aggExpr.Argument == "" {
-			items = append(items, exec.ProjectionItem{
-				Alias: aggExpr.OutputName,
-				Eval:  func(_ exec.Row) (expr.Value, error) { return expr.BoolValue(true), nil },
-			})
-			continue
-		}
-
-		// count(<bare variable>), non-DISTINCT: CountAgg only null-checks its
-		// input (Step → !IsNull), so upgrading the argument to a full
-		// NodeValue/RelationshipValue per row is pure waste (audit M2 / #1654).
-		// Pass the raw row cell straight through — an IntegerValue(NodeID) or a
-		// relationship reference when the variable is bound, Null when it is not
-		// (e.g. an unmatched OPTIONAL MATCH). IsNull behaves identically on the
-		// raw cell and the value is consumed only by agg.Step then discarded, so
-		// the aggregate result is unchanged. Scoped deliberately:
-		//   - count only (sum/avg/min/max/collect read the value, not its presence);
-		//   - not count(*) (handled above), and not DISTINCT (distinctness dedups
-		//     by value identity; a relationship's raw-cell identity is out of scope
-		//     for this fix, so DISTINCT declines to the full path below);
-		//   - a BARE *ast.Variable argument only — count(n.prop)/count(expr) must
-		//     evaluate the expression with its own null semantics, so they decline;
-		//   - the variable must resolve to an input column.
-		// Verified TCK-safe against Aggregation1/7/8 and Return6 (#1654). Any other
-		// shape falls through to the full newAggregationEval path below.
-		if aggExpr.Function == "count" && !aggExpr.Distinct {
-			if v, isVar := aggExpr.ArgumentExpr.(*ast.Variable); isVar {
-				if col, found := schemaSnap[v.Name]; found {
-					items = append(items, exec.ProjectionItem{
-						Alias: aggExpr.OutputName,
-						Eval: func(row exec.Row) (expr.Value, error) {
-							if col < len(row) {
-								return row[col], nil
-							}
-							return expr.Null, nil
-						},
-					})
-					continue
-				}
-			}
-		}
-
-		items = append(items, exec.ProjectionItem{
-			Alias: aggExpr.OutputName,
-			Eval: newAggregationEval(
-				aggExpr.ArgumentExpr, aggExpr.Argument,
-				schemaSnap, capturedG, capturedParams, capturedReg, capturedBopts,
-			),
-		})
 	}
+
+	// Pre-projection items (group-by keys then aggregate arguments) and the
+	// group-key column indices, laid out as:
+	//   positions 0..len(GroupBy)-1  → group-by key columns
+	//   positions len(GroupBy)..end  → aggregate argument columns
+	// Built by the shared helper so the serial EagerAggregation and the parallel
+	// aggregate scan (#2111) evaluate every key and argument through the SAME
+	// closures, byte-identically.
+	items, keyCols := buildAggPreProjItems(p, schemaSnap, capturedG, capturedParams, capturedReg, capturedBopts)
 
 	// Wrap child with the pre-projection. When the grouping keys are scalar-property
 	// accesses on a bound node and the child emits raw NodeID columns (a scan),
@@ -8413,9 +8567,117 @@ func buildEagerAggregation(
 		topOp = exec.NewGlobalAggregateAdapter(op, aggFactories)
 	}
 
-	// Replace schema with EagerAggregation output schema:
-	//   positions 0..len(GroupBy)-1            → group-by variable names
-	//   positions len(GroupBy)..len(Aggs)-1    → aggregate output names
+	// Install the post-aggregation output schema and the downstream column tags,
+	// shared with the parallel aggregate scan (#2111) so the projection reads the
+	// grouping keys and aggregate outputs identically on both paths.
+	installAggOutputSchema(p, schemaSnap, schema, bopts)
+
+	return topOp, nil
+}
+
+// buildAggPreProjItems builds the EagerAggregation pre-projection items — the
+// group-by key columns (positions 0..len(GroupBy)-1) followed by the aggregate
+// argument columns (positions len(GroupBy)..end) — and the key column indices. It
+// is the single source of the per-row key/argument evaluation, shared by the
+// serial [buildEagerAggregation] and the parallel aggregate scan
+// ([tryBuildParallelAggregateScan], #2111) so both evaluate every value through
+// the SAME closures, byte-identically. The item Eval closures capture bopts, so a
+// parallel caller MUST pass a per-worker buildOpts copy (via forWorker) to each
+// rebuild.
+func buildAggPreProjItems(
+	p *ir.EagerAggregation,
+	schemaSnap map[string]int,
+	g *lpg.Graph[string, float64],
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
+	bopts *buildOpts,
+) ([]exec.ProjectionItem, []int) {
+	items := make([]exec.ProjectionItem, 0, len(p.GroupBy)+len(p.Aggregates))
+
+	// Group-by key projections.
+	keyCols := make([]int, len(p.GroupBy))
+	for i, varName := range p.GroupBy {
+		keyCols[i] = i // after pre-projection, key i is at position i
+
+		var astExpr ast.Expression
+		if i < len(p.GroupByExprs) {
+			astExpr = p.GroupByExprs[i]
+		}
+		items = append(items, exec.ProjectionItem{
+			Alias: varName,
+			Eval:  newAggregationEval(astExpr, varName, schemaSnap, g, params, reg, bopts),
+		})
+	}
+
+	// Aggregate argument projections.
+	for i := range p.Aggregates {
+		items = append(items, aggArgItem(&p.Aggregates[i], schemaSnap, g, params, reg, bopts))
+	}
+	return items, keyCols
+}
+
+// aggArgItem builds the pre-projection item that supplies the per-row argument
+// value for one aggregate. It is the single source of the aggregate-argument
+// evaluation shared by the serial and parallel aggregation paths, preserving the
+// two fast paths audited TCK-safe:
+//
+//   - count(*) (empty argument): a constant non-null sentinel so the counter
+//     always ticks;
+//   - count(<bare variable>), non-DISTINCT: the raw row cell straight through
+//     (CountAgg only null-checks its input, so upgrading to a full NodeValue per
+//     row is pure waste — audit M2 / #1654);
+//   - every other argument: the full [newAggregationEval] path with its own null
+//     semantics.
+func aggArgItem(
+	aggExpr *ir.AggregateExpr,
+	schemaSnap map[string]int,
+	g *lpg.Graph[string, float64],
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
+	bopts *buildOpts,
+) exec.ProjectionItem {
+	// count(*) — argument is irrelevant; emit a constant non-null sentinel so the
+	// aggregator's Step always increments. exec.NewCountStarAgg treats any non-null
+	// value as a tick.
+	if aggExpr.Argument == "" {
+		return exec.ProjectionItem{
+			Alias: aggExpr.OutputName,
+			Eval:  func(_ exec.Row) (expr.Value, error) { return expr.BoolValue(true), nil },
+		}
+	}
+
+	// count(<bare variable>), non-DISTINCT: pass the raw row cell straight through.
+	// Verified TCK-safe against Aggregation1/7/8 and Return6 (#1654).
+	if aggExpr.Function == "count" && !aggExpr.Distinct {
+		if v, isVar := aggExpr.ArgumentExpr.(*ast.Variable); isVar {
+			if col, found := schemaSnap[v.Name]; found {
+				return exec.ProjectionItem{
+					Alias: aggExpr.OutputName,
+					Eval: func(row exec.Row) (expr.Value, error) {
+						if col < len(row) {
+							return row[col], nil
+						}
+						return expr.Null, nil
+					},
+				}
+			}
+		}
+	}
+
+	return exec.ProjectionItem{
+		Alias: aggExpr.OutputName,
+		Eval:  newAggregationEval(aggExpr.ArgumentExpr, aggExpr.Argument, schemaSnap, g, params, reg, bopts),
+	}
+}
+
+// installAggOutputSchema replaces schema with the post-aggregation output layout
+// (group-by variable names at positions 0..len(GroupBy)-1, then aggregate output
+// names) and tags the downstream columns on bopts, exactly as the serial
+// EagerAggregation build requires. It is shared by the serial path and the
+// parallel aggregate scan (#2111) so the projection above either operator reads
+// the same columns identically. schemaSnap is the PRE-aggregation snapshot (used
+// for the alias-shadow guard).
+func installAggOutputSchema(p *ir.EagerAggregation, schemaSnap, schema map[string]int, bopts *buildOpts) {
 	for k := range schema {
 		delete(schema, k)
 	}
@@ -8490,8 +8752,6 @@ func buildEagerAggregation(
 			bopts.aggKeyScalarCols[varName] = struct{}{}
 		}
 	}
-
-	return topOp, nil
 }
 
 // DefaultMaxAggregateDistinctValues is the default upper bound on the number
