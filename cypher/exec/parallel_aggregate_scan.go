@@ -59,6 +59,23 @@ package exec
 // the serial path accepts, so the caps bound peak memory without changing the
 // result for any accepted input.
 //
+// # Inline-serial short-circuit (budget == 1)
+//
+// The worker count is [ParallelGovernor.Enter]'s budget, and under high
+// concurrency the governor throttles every in-flight query toward budget 1. At
+// budget 1 the multi-worker machinery — a goroutine, a work channel, a cancellable
+// context, and a pprof.Do frame — would only ever run ONE worker over every
+// morsel, so it is pure overhead and, under saturation, a measurable regression.
+// When Enter returns 1 the operator therefore runs that single worker SYNCHRONOUSLY
+// on the calling goroutine (no goroutine, no channel, no context.WithCancel, no
+// pprof.Do): a lone worker dequeues every morsel, so iterating the morsel slice in
+// order is identical to draining the pre-filled work channel, and the accumulated
+// state — hence the result rows and the position-carrying tie representative — is
+// byte-identical to the multi-worker path evaluated at one worker. combine() still
+// folds the single state on the Next goroutine, and an inline error surfaces
+// through Next exactly like a worker error, so nothing downstream can tell the two
+// paths apart.
+//
 // # Lifecycle / cancellation / concurrency contract
 //
 // The join (wg.Wait) and the single-goroutine combine run on the goroutine that
@@ -152,6 +169,7 @@ type ParallelAggregateScan struct {
 	g           nodeWalker
 	ctx         context.Context //nolint:containedctx // stored for per-Next ctx check
 	initErr     error
+	inlineErr   error // set by the budget==1 inline path; surfaced by Next like a worker error
 	factory     AggInputFactory
 	gov         *ParallelGovernor
 	cancel      context.CancelFunc
@@ -169,10 +187,11 @@ type ParallelAggregateScan struct {
 	maxBytes   int64
 	pos        int // cursor into out
 
-	entered  bool // gov.Enter ran → Close calls gov.Leave exactly once
-	joined   bool // workers joined and result combined
-	emptyIn  bool // Init found zero live nodes (no workers spawned)
-	globalIn bool // nKeys == 0 (a single global aggregate)
+	entered   bool // gov.Enter ran → Close calls gov.Leave exactly once
+	joined    bool // workers joined and result combined
+	emptyIn   bool // Init found zero live nodes (no workers spawned)
+	globalIn  bool // nKeys == 0 (a single global aggregate)
+	ranInline bool // diagnostic seam: Init took the budget==1 inline-serial path
 }
 
 // NewParallelAggregateScan creates a ParallelAggregateScan over g. nKeys is the
@@ -227,6 +246,8 @@ func (op *ParallelAggregateScan) Init(ctx context.Context) error {
 	op.ctx = ctx
 	op.joined = false
 	op.emptyIn = false
+	op.ranInline = false
+	op.inlineErr = nil
 	op.pos = 0
 	op.out = nil
 	op.cancel = func() {}
@@ -265,6 +286,24 @@ func (op *ParallelAggregateScan) Init(ctx context.Context) error {
 
 	nWorkers := op.gov.Enter(len(morsels))
 	op.entered = true
+
+	// Budget==1 inline-serial short-circuit (#2115): run the lone governed worker
+	// synchronously on the calling goroutine — no goroutine, no work channel, no
+	// context.WithCancel, no pprof.Do. One worker over every morsel is byte-identical
+	// to the multi-worker path at nWorkers==1 (see the type doc). An inline error is
+	// stashed and surfaced by Next like a worker error, so Init returns nil and Drain
+	// wraps it identically ("operator next:"); Close still runs gov.Leave via
+	// op.entered. combine() folds the single state on the Next goroutine, unchanged.
+	if nWorkers == 1 {
+		op.ranInline = true
+		st, err := op.runMorselsInline(ctx, morsels)
+		if err != nil {
+			op.inlineErr = err
+			return nil
+		}
+		op.states = []*workerState{st}
+		return nil
+	}
 
 	workCh := make(chan aggMorsel, len(morsels))
 	for _, m := range morsels {
@@ -330,12 +369,7 @@ func splitMorselsWithBase(ids []graph.NodeID, size int) []aggMorsel {
 // accumulated state or the first error (sub-plan build/exec, a memory cap, or ctx
 // cancellation).
 func (op *ParallelAggregateScan) runWorker(ctx context.Context, workCh <-chan aggMorsel) (*workerState, error) {
-	st := &workerState{}
-	if op.globalIn {
-		st.global = make([]reducerAcc, len(op.reducers))
-	} else {
-		st.table = make(map[uint64][]*aggGroup)
-	}
+	st := op.newWorkerState()
 	var byteB byteBudget
 	byteB.set(op.maxBytes, op.estimateRow)
 
@@ -348,6 +382,41 @@ func (op *ParallelAggregateScan) runWorker(ctx context.Context, workCh <-chan ag
 		}
 	}
 	return st, nil
+}
+
+// runMorselsInline runs the single governed worker synchronously over every morsel,
+// in scan order, on the calling goroutine — the budget==1 short-circuit (#2115). It
+// is the channel-free, goroutine-free twin of [runWorker]: because a lone worker
+// dequeues every morsel, iterating the morsel slice is identical to draining the
+// pre-filled work channel, so the accumulated state is byte-identical to the
+// multi-worker path evaluated at one worker. It shares [runMorsel] and the same
+// per-morsel ctx check, so cancellation and the memory caps behave identically.
+func (op *ParallelAggregateScan) runMorselsInline(ctx context.Context, morsels []aggMorsel) (*workerState, error) {
+	st := op.newWorkerState()
+	var byteB byteBudget
+	byteB.set(op.maxBytes, op.estimateRow)
+
+	for _, m := range morsels {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := op.runMorsel(ctx, st, &byteB, m); err != nil {
+			return nil, err
+		}
+	}
+	return st, nil
+}
+
+// newWorkerState allocates a fresh per-worker partial: the global accumulator slice
+// for a group-by-less aggregate, or an empty group table for a GROUP BY aggregate.
+func (op *ParallelAggregateScan) newWorkerState() *workerState {
+	st := &workerState{}
+	if op.globalIn {
+		st.global = make([]reducerAcc, len(op.reducers))
+	} else {
+		st.table = make(map[uint64][]*aggGroup)
+	}
+	return st
 }
 
 // runMorsel builds and drains one pre-aggregation sub-plan over m.ids, folding each
@@ -524,6 +593,9 @@ func (op *ParallelAggregateScan) Next(out *Row) (bool, error) {
 	if !op.joined {
 		op.wg.Wait() // happens-before: every worker has written its state
 		op.joined = true
+		if op.inlineErr != nil { // budget==1 inline path failed; surface as a worker error
+			return false, op.inlineErr
+		}
 		select {
 		case err := <-op.workErr:
 			return false, err

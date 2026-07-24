@@ -26,8 +26,11 @@ package cypher_test
 // Layer: short.
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
@@ -104,4 +107,103 @@ func BenchmarkCountPushdown_O1(b *testing.B) {
 func BenchmarkCountPushdown_FullScan(b *testing.B) {
 	silenceBenchLogs(b)
 	benchParallelProp(b, benchBigN, false, "MATCH (n) WHERE n.v >= 0 RETURN count(*) AS c")
+}
+
+// ── #2115 concurrent load-test: parallel vs serial under the REAL governor ──
+//
+// This is the no-regression-under-saturation evidence for the budget==1 inline
+// short-circuit. It fires `conc` parallel min queries concurrently on ONE shared
+// Engine, so they contend for the SAME [exec.ParallelGovernor] exactly as
+// concurrent client queries would. One op = one batch of `conc` queries, so the
+// parallel and serial arms do identical work at each conc level and their ratio is
+// the pure path effect.
+//
+//   - conc=1: a single query in flight gets the full GOMAXPROCS budget → the
+//     intra-query parallel win (idle-core-bound).
+//   - conc=8/64: the governor throttles every query toward budget 1, where the
+//     short-circuit runs the reduce inline (no goroutine/channel/context/pprof).
+//     The parallel arm must be at least as fast as the serial arm — no regression.
+//
+// Read the ratio per conc level, not the geomean (the per-op work scales with
+// conc). Compare the two impl columns with:
+//
+//	go test -run=^$ -bench='BenchmarkParallelAggregate_Concurrent' -benchmem -count=10 ./cypher/ > new.txt
+//	benchstat -col /impl new.txt
+//
+// Layer: short.
+
+func BenchmarkParallelAggregate_Concurrent(b *testing.B) {
+	silenceBenchLogs(b)
+	const q = "MATCH (n) RETURN min(n.v) AS m"
+
+	// One property graph, seeded once and shared read-only by both arms (concurrent
+	// reads are safe under the visibility barrier), so the fixture cost is untimed
+	// and identical across arms.
+	g := seedGraphWithProp(b, benchBigN)
+	parEng := cypher.NewEngineWithOptions(g, cypher.EngineOptions{ParallelScanThreshold: 1}) // engage the parallel path
+	serEng := cypher.NewEngineWithOptions(g, cypher.EngineOptions{DisableParallelScan: true})
+
+	for _, conc := range []int{1, 8, 64} {
+		b.Run(fmt.Sprintf("conc=%d/impl=parallel", conc), func(b *testing.B) {
+			benchConcurrentAgg(b, parEng, conc, q)
+		})
+		b.Run(fmt.Sprintf("conc=%d/impl=serial", conc), func(b *testing.B) {
+			benchConcurrentAgg(b, serEng, conc, q)
+		})
+	}
+}
+
+// benchConcurrentAgg times b.N batches of `conc` concurrent drains of q on eng. A
+// warm-up drain runs on the benchmark goroutine first, so any query error surfaces
+// via b.Fatal legally (b.Fatal off the benchmark goroutine is forbidden); the timed
+// goroutines only record the first error, reported after the loop.
+func benchConcurrentAgg(b *testing.B, eng *cypher.Engine, conc int, q string) {
+	b.Helper()
+	if err := drainConcurrentQuery(eng, q); err != nil {
+		b.Fatalf("warm-up query: %v", err)
+	}
+
+	var (
+		mu       sync.Mutex
+		firstErr error
+	)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var wg sync.WaitGroup
+		wg.Add(conc)
+		for w := 0; w < conc; w++ {
+			go func() {
+				defer wg.Done()
+				if err := drainConcurrentQuery(eng, q); err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					mu.Unlock()
+				}
+			}()
+		}
+		wg.Wait()
+	}
+	b.StopTimer()
+	if firstErr != nil {
+		b.Fatalf("concurrent query failed: %v", firstErr)
+	}
+}
+
+// drainConcurrentQuery runs q to completion once and returns the first error, if
+// any. Unlike runDrain it never calls b.Fatal, so it is safe to invoke from a
+// spawned goroutine.
+func drainConcurrentQuery(eng *cypher.Engine, q string) error {
+	res, err := eng.Run(context.Background(), q, nil)
+	if err != nil {
+		return err
+	}
+	for res.Next() { //nolint:revive // intentional full drain
+	}
+	if err := res.Err(); err != nil {
+		_ = res.Close()
+		return err
+	}
+	return res.Close()
 }
