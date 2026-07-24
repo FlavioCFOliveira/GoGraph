@@ -29,6 +29,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	labelidx "github.com/FlavioCFOliveira/GoGraph/graph/index/label"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index/stats"
+	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // Statistics parameters (design docs/statistics-design.md §1).
@@ -115,7 +116,23 @@ func isNaNValue(v expr.Value) bool {
 // true frequency can be arbitrarily far from N/NDV under skew, so 1/NDV can never
 // certify a no-regression equality decision (design §4). A missing statistic, or
 // a NaN literal (=(NaN) matches nothing), yields the safe estimate.
+//
+// It wraps the pure estimator with the observability surface (#2102): a lookup
+// against a present collector is counted, and an estFallback verdict increments
+// the fallback counter. A stats-free engine (no collector) emits nothing.
 func statsEqualityEstimate(src statsSource, label, prop string, literal expr.Value) estimate {
+	if !statsCollectorPresent(src) {
+		return estimate{rows: 0, source: estFallback}
+	}
+	cmetrics.IncCounter(statsMetricLookup, 1) // observability (#2102)
+	return recordStatsFallback(statsEqualityEstimateInner(src, label, prop, literal))
+}
+
+// statsEqualityEstimateInner is the pure equality estimator; [statsEqualityEstimate]
+// wraps it with observability. It is called only after the caller has confirmed a
+// present collector, so a missing statistic here means the (label, property) pair
+// is untracked rather than the engine being stats-free.
+func statsEqualityEstimateInner(src statsSource, label, prop string, literal expr.Value) estimate {
 	st, ok := lookupStats(src, label, prop)
 	if !ok {
 		return estimate{rows: 0, source: estFallback}
@@ -151,7 +168,25 @@ func statsEqualityEstimate(src statsSource, label, prop string, literal expr.Val
 // exists for the bound's domain. Nothing consumes the verdict yet (#2099 will);
 // this proves the estimate and its error are correct. The returned rows are
 // clamped to [0, N] and (Ŝ + δ) is implicitly clamped to [0,1] by the histogram.
+//
+// It wraps the pure estimator with the observability surface (#2102): a lookup
+// against a present collector is counted, and an estFallback verdict (absent or
+// staleness-demoted) increments the fallback counter. A stats-free engine (no
+// collector) emits nothing.
 func statsRangeEstimate(src statsSource, label, prop string, op stats.Op, bound expr.Value) (estimate, float64) {
+	invB := 1.0 / float64(statsHistogramBuckets)
+	if !statsCollectorPresent(src) {
+		return estimate{rows: 0, source: estFallback}, invB
+	}
+	cmetrics.IncCounter(statsMetricLookup, 1) // observability (#2102)
+	e, absErr := statsRangeEstimateInner(src, label, prop, op, bound)
+	return recordStatsFallback(e), absErr
+}
+
+// statsRangeEstimateInner is the pure range estimator; [statsRangeEstimate] wraps
+// it with observability. It is called only after the caller has confirmed a
+// present collector.
+func statsRangeEstimateInner(src statsSource, label, prop string, op stats.Op, bound expr.Value) (estimate, float64) {
 	invB := 1.0 / float64(statsHistogramBuckets)
 	st, ok := lookupStats(src, label, prop)
 	if !ok {
@@ -196,6 +231,26 @@ func statsRangeEstimate(src statsSource, label, prop string, op stats.Op, bound 
 		source = estFallback
 	}
 	return estimate{rows: rows, source: source}, absErr
+}
+
+// statsCollectorPresent reports whether the source exposes a live statistics
+// collector. It is the gate that keeps the observability surface zero-cost on a
+// stats-free engine: when no collector exists the providers return estFallback
+// without emitting any lookup metric, mirroring the count-store provider, which
+// counts a lookup only when a store is present (count_estimate.go).
+func statsCollectorPresent(src statsSource) bool {
+	return src != nil && src.Statistics() != nil
+}
+
+// recordStatsFallback emits the lookup.fallback counter when e is an estFallback
+// verdict (an absent or staleness-demoted statistic), returning e unchanged so a
+// provider can `return recordStatsFallback(e)`. It is called only after a lookup
+// against a present collector has already been counted (#2102).
+func recordStatsFallback(e estimate) estimate {
+	if e.source == estFallback {
+		cmetrics.IncCounter(statsMetricLookupFallback, 1) // observability (#2102)
+	}
+	return e
 }
 
 // lookupStats resolves (label, prop) to its statistics bundle, or false when the

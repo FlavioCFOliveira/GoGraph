@@ -13,10 +13,12 @@ package cypher
 import (
 	"context"
 	"sort"
+	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index/stats"
+	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // statsScanPollMask sets the cancellation-check granularity of the rebuild scan:
@@ -38,6 +40,7 @@ func (e *Engine) RefreshStatistics(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	start := time.Now()
 	snap, err := e.buildStatsSnapshot(ctx)
 	if err != nil {
 		return err
@@ -47,6 +50,12 @@ func (e *Engine) RefreshStatistics(ctx context.Context) error {
 	// A cancelled or failed build returns above without publishing, leaving the
 	// collector nil.
 	e.statsCollectorOrInit().Publish(snap)
+	// Observability (#2102): count the successful rebuild and observe its latency.
+	// A cancelled or failed build returned above without publishing and is not
+	// counted. RefreshStatistics is caller-driven and off the write path, so this
+	// emission never perturbs a write (BenchmarkEngWriteAutocommit stays flat).
+	cmetrics.IncCounter(statsMetricRefresh, 1)
+	cmetrics.ObserveLatency(statsMetricRefreshLatency, time.Since(start))
 	return nil
 }
 
