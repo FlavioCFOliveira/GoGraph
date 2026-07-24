@@ -136,6 +136,62 @@ measures the actual `Expand DirIn` cost empirically. Outcomes:
   toward the **OUT** traversal direction only (never introduce a reverse expand);
   or veto the swap. This is the mandate-preserving reduced scope.
 
+### 5.1 Measurement verdict (#2089a) — OUT-only swap
+
+Measured on Apple M4 (go1.26.5) via `cypher/exec/expand_reverse_cost_bench_test.go`
+(`go test -run=^$ -bench='BenchmarkExpand|BenchmarkBuildReverse' -benchmem
+./cypher/exec/`). Three findings decide the policy:
+
+1. **The reverse-CSR BUILD cost is NOT the hazard — it cancels.** `csrPairFromGraph`
+   (api.go) builds BOTH the forward and the reverse CSR unconditionally on every
+   `Expand`, for a `DirOut` plan exactly as for a `DirIn` plan
+   (`fwd = BuildFromAdjListLive(...); rev = fwd.BuildReverse()`). `BuildReverse` is
+   `O(V+E)` (`BenchmarkBuildReverse_vs_E`: 58 µs / 0.50 ms / 4.6 ms at E =
+   10k / 100k / 1M, linear). Because it is paid identically by anchor-A and
+   anchor-B, it cancels in the P-anchor comparison — the design's omission of it
+   from §2 is faithful.
+
+2. **A bare IN traversal IS `Θ(indegree)`** — but the per-in-edge cost is *not*
+   `Θ(1)`. For each in-edge `(src → cur)` the operator recovers a canonical edge
+   id by scanning `src`'s WHOLE forward out-range (`Expand.lookupFwdEdgePos`,
+   `O(out-degree(src))`), and, when a relationship-type filter is set — which a
+   directed `(a:A)-[:R]->(b:B)` anchored at `b` always sets — a SECOND
+   `O(out-degree(src))` scan (`Expand.reverseEdgePassesFilter`). Sweeping a single
+   in-edge whose source has out-degree `K` (`BenchmarkExpandIn_PerEdge_vs_SourceOutdegree`):
+
+   | K (source out-degree) | 16 | 256 | 4096 | 65536 |
+   |---|---|---|---|---|
+   | untyped IN, 1 in-edge | 181 ns | 293 ns | 1.81 µs | 26.2 µs |
+   | typed IN, 1 in-edge   | 194 ns | 410 ns | 3.47 µs | 52.4 µs |
+
+   Examining ONE in-edge into a hub source costs **~26–52 µs** versus **~19 ns**
+   for one OUT edge (`BenchmarkExpandOut_PerEdge_SingleSource`: β_out ≈ 19 ns/edge;
+   scan α ≈ 1.8 ns/node from `BenchmarkScan_PerNode`). The per-in-edge cost is
+   `Θ(out-degree of the edge's source)` — a quantity the count-store's aggregate
+   `D(label, relType, dir)` cannot express.
+
+3. **Consequence:** a reverse-INTRODUCING swap (anchor-B with `DirIn`) can be
+   constructibly slower than the written order even when the modeled edge counts
+   favor it — a single in-edge into a mega-hub source dominates. `c_e^IN` cannot be
+   a faithful constant, and no cost model over count-store aggregates can bound the
+   overhead.
+
+**Policy (matches §5's second bullet).** #2090 ships **OUT-ward swaps only**: the
+anchor swap fires only when it moves the anchor so the resulting expand is `DirOut`
+(it flips a written `DirIn` expand to `DirOut`), never when it would introduce a
+`DirIn` expand. An OUT-ward swap REMOVES the reverse per-edge overhead; the
+candidate (OUT) side is then faithfully modeled (`O(1)` per edge, no hidden scan)
+while the baseline (written IN) side's true cost only exceeds its model (the
+omitted reverse overhead is `≥ 0`). So `modeledCost(P) ≤ modeledCost(W) ⇒
+trueCost(P) ≤ trueCost(W)` — no regression — for the cost model of §2 with `c_s :
+c_e ≈ 1 : 8` (calibrated from α, β_out above; the ratio, not the absolute values,
+is load-bearing) and a margin of 2 to absorb cross-machine ratio drift.
+Reverse-introducing swaps and undirected (`DirBoth`) patterns are vetoed. A
+forward-written `(a:A)-[:R]->(b:B)` whose cheaper anchor is `b` is therefore left
+in written order (a missed optimization, never a regression); the beneficial,
+shippable case is a written `DirIn` pattern (`(a:A)<-[:R]-(b:B)`) re-rooted onto
+`b` as a `DirOut` expand.
+
 ## 6. Expand reversal invariants (#2089)
 
 Re-rooting a single-edge pattern onto the other endpoint (traversing the

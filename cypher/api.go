@@ -425,6 +425,14 @@ type buildOpts struct {
 	// smaller component and re-runs the larger inner side fewer times, with an
 	// identical result multiset.
 	reorderSwap map[*ir.Apply]bool
+	// anchorSwap is the set of single-edge Expand nodes the anchor-swap peephole
+	// (#2090) has decided to re-root for THIS query, keyed by the exact *ir.Expand
+	// pointer. The read-path build populates it (computeAnchorSwaps) after the
+	// count-store cost gate; every other build path leaves it nil, so
+	// tryBuildAnchorSwap is an always-false lookup there and the written order is
+	// built. A swapped pattern is re-rooted onto its other endpoint with an
+	// identical result multiset — see anchor_swap_plan.go.
+	anchorSwap map[*ir.Expand]bool
 	// parallelScanEnabled gates the morsel-parallel count fast path (#1672). The
 	// read-path build sets it from the Engine field; it is consulted in
 	// buildEagerAggregation's count fast path (tryBuildParallelCountScan). Left
@@ -667,6 +675,23 @@ type EngineOptions struct {
 	// plans return an identical result multiset, and as an operational escape
 	// hatch.
 	DisableJoinReorder bool
+
+	// DisableAnchorSwap turns OFF the count-store-gated single-edge anchor-swap
+	// peephole (#2090). When false (the default) the planner may re-root a
+	// single-edge pattern onto its other endpoint — flipping a written DirIn
+	// expand into a DirOut expand — when the count-store's exact D(label,relType,
+	// dir) degree statistics say that examines fewer edges (`MATCH (a:A)<-[:R]-(b:B)`
+	// re-rooted onto b). The swap is result-identical (it is the plan for the
+	// openCypher-mirror pattern; only emission order changes, proven unobserved by
+	// SuppressReorder) and, per the #2089a reverse-expand measurement, fires ONLY
+	// in the OUT-ward direction so it never introduces a reverse expand whose
+	// per-edge cost the aggregate counts cannot see — see anchor_swap_plan.go and
+	// docs/reordering-design.md §5.1. It is admitted only when every count is exact
+	// and non-dirty (a relabel-dirtied D cell vetoes) and the reorder is order-safe.
+	// Setting it true forces the written-order plan; it exists for the differential
+	// test that proves both plans return an identical result multiset, and as an
+	// operational escape hatch.
+	DisableAnchorSwap bool
 
 	// DisableParallelScan turns OFF the morsel-parallel count fast path (#1672).
 	// When false (the default) the planner serves a group-by-less count(*) /
@@ -913,6 +938,11 @@ type Engine struct {
 	// When false the planner always builds the written-order Cartesian.
 	joinReorderEnabled bool
 
+	// anchorSwapEnabled gates the count-store-gated single-edge anchor-swap
+	// peephole (#2090). True by default; set false by EngineOptions.DisableAnchorSwap.
+	// When false the planner always builds the written-order single-edge plan.
+	anchorSwapEnabled bool
+
 	// parallelScanEnabled gates the morsel-parallel count fast path (#1672). True
 	// by default; set false by EngineOptions.DisableParallelScan. When false the
 	// planner always builds the serial EagerAggregation pipeline.
@@ -1158,6 +1188,7 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		rangeSeekEnabled:    !opts.DisableRangeIndexSeek,
 		minLabelScanEnabled: !opts.DisableMinLabelScan,
 		joinReorderEnabled:  !opts.DisableJoinReorder,
+		anchorSwapEnabled:   !opts.DisableAnchorSwap,
 
 		parallelScanEnabled:     !opts.DisableParallelScan,
 		parallelBackfillEnabled: !opts.DisableParallelBackfill,
@@ -1874,6 +1905,18 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		// downstream operator observes the change.
 		if e.joinReorderEnabled && len(entry.reorderCandidates) > 0 {
 			bopts.reorderSwap = computeReorderSwaps(entry.reorderCandidates, labelSrc, int64(e.g.LiveOrder()))
+		}
+		// Single-edge anchor-swap gating (#2090): when the Engine permits it and
+		// the plan has memoised order-safe single-edge sites, apply the live
+		// count-store cost gate against this query's snapshot. N(label) and every
+		// D(label,relType,dir) cell (and its dirty flag) are read under View's
+		// visibility barrier — exclusive against a committing writer — so all cost
+		// inputs come from one consistent snapshot. The swap re-roots the pattern
+		// onto its other endpoint (OUT-ward only) with an identical multiset;
+		// SuppressReorder (baked into the candidate set) guarantees no downstream
+		// operator observes the emission-order change.
+		if e.anchorSwapEnabled && len(entry.anchorSwapCandidates) > 0 {
+			bopts.anchorSwap = computeAnchorSwaps(entry.anchorSwapCandidates, labelSrc)
 		}
 		// Parallel-count gating (#1672): the parallel count reduce replaces the
 		// serial EagerAggregation pipeline only when the Engine permits it AND the
@@ -3282,6 +3325,13 @@ type planCacheEntry struct {
 	// so a query with no disjoint Cartesian pays nothing at build time. nil when
 	// the query has no candidate.
 	reorderCandidates []*ir.Apply
+	// anchorSwapCandidates memoises the structurally-qualifying, ORDER-SAFE
+	// single-edge anchor sites (#2090) — a pure function of the immutable plan,
+	// computed once at entry creation. The per-query read-path build applies the
+	// live count-store cost gate (computeAnchorSwaps) to just these sites, so a
+	// query with no single-edge pattern pays nothing at build time. nil when the
+	// query has no candidate.
+	anchorSwapCandidates []anchorSite
 }
 
 // planFor returns the cached logical plan for query, or parses, translates,
@@ -3336,6 +3386,7 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
 	// Skipped for semantically-invalid entries, which never reach execution.
 	hashJoinSafe := false
 	var reorderCandidates []*ir.Apply
+	var anchorSwapCandidates []anchorSite
 	var paramTypes map[string]expr.Kind
 	if semaErr == nil {
 		hashJoinSafe = hashJoinOrderSafe(plan)
@@ -3343,6 +3394,10 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
 		// qualifying, order-safe reorder points. Pure function of the plan, so
 		// memoised here; the live cardinality gate runs per query at build time.
 		reorderCandidates = collectReorderCandidates(plan)
+		// Single-edge anchor-swap candidates (#2090): the structurally-qualifying,
+		// order-safe single-edge sites. Pure function of the plan, so memoised
+		// here; the live count-store cost gate runs per query at build time.
+		anchorSwapCandidates = collectAnchorSwapCandidates(plan)
 		if len(paramRefs) > 0 {
 			idxMgr := e.g.IndexManager()
 			resolve := func(label, property string) (expr.Kind, bool) {
@@ -3353,7 +3408,8 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
 	}
 	entry := &planCacheEntry{
 		plan: plan, semaErr: semaErr, paramRefs: paramRefs, notifications: notifications,
-		hashJoinSafe: hashJoinSafe, reorderCandidates: reorderCandidates, paramTypes: paramTypes,
+		hashJoinSafe: hashJoinSafe, reorderCandidates: reorderCandidates,
+		anchorSwapCandidates: anchorSwapCandidates, paramTypes: paramTypes,
 	}
 	actual, _ := e.cache.loadOrStore(query, entry)
 	return actual, nil
@@ -6487,6 +6543,19 @@ func buildOperator(
 		return buildIndexSeekOperator(p, params, schema, idxMgr)
 
 	case *ir.Selection:
+		// Single-edge anchor swap (#2090): when this Selection is the top of a
+		// matched single-edge site (Selection[(to:L)] → Expand → NodeByLabelScan)
+		// whose Expand was chosen for an OUT-ward re-root by the count-store cost
+		// gate (computeAnchorSwaps), build the mirror plan — the same edge rooted
+		// at the other endpoint, an identical multiset. The swap map is keyed on
+		// the original Expand pointer and the mirror allocates a fresh one, so the
+		// recursive build never re-fires. Tried first because it fully rewrites the
+		// subtree; inert (map nil) on every non-read build path.
+		if op, ok, err := tryBuildAnchorSwap(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts); err != nil {
+			return nil, err
+		} else if ok {
+			return op, nil
+		}
 		// Whole-path predicate fused onto shortestPath/allShortestPaths (#1786):
 		// when this Selection sits directly above a ShortestPath node and its
 		// predicate references the path variable, the unconstrained shortest path
