@@ -1367,6 +1367,21 @@ invariant is pinned). TCK 3897 held. After sprint 298 every remaining backlog ta
 is ACID/snapshot-blocked or deferred by an explicit user decision (the user
 accepted those deferrals); nothing developable remains.
 
+Incrementally synced at commit `6aec9cc` (2026-07-25, round-2 planner evaluation
+vs Neo4j/Memgraph): +7 nodes — 1 `Audit` (`planner-eval-round2-2026-07-25`, baseline
+v0.10.0/`0007214`, report `docs/audit-planner-vs-neo4j-memgraph-2026-07-25.md`, 5 findings,
+sprints 311–315, backlog #2162–#2166), 5 `Finding`, 1 `Commit` (`6aec9cc`); +10 edges —
+5 `FROM_AUDIT`(`Finding`→`Audit`), 4 `CONCERNS`(`Audit`→`Feature` `Cypher Engine` and
+→`Package` `cypher`/`adjlist`/`csr`), 1 `PRODUCED`(`Commit`→`Audit`). All nodes and all
+edges provenance-stamped `2026-07-25`. **Two new edge PAIRINGS** (the edge types already
+existed, the endpoint combinations did not): `(Audit)-[:CONCERNS]->(Package)` — previously
+`CONCERNS` only reached `Feature` — and `(Commit)-[:PRODUCED]->(Audit)` — previously
+`PRODUCED` only ran `(Audit)->(Fix)`. The findings are recorded as evidence summaries only;
+the committed report is the authority and the `Finding.evidence` property points at it.
+Sprint nodes for 311–315 were deliberately NOT created: those sprints are `PENDING` with no
+commits, and `rmp` remains the source of truth for planning until they execute — the same
+convention applied to sprints 305–310 while pending.
+
 ## Known limitations (faithful, by design)
 
 - **Build-tag duplicates.** The extractor parses every `.go` file regardless of build
