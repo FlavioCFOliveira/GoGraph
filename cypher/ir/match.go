@@ -1727,6 +1727,15 @@ func (t *translator) matchExpandStepBoundWithFrom(rp *ast.RelationshipPattern, t
 	if destRebinding {
 		expandTo = syntheticTo
 	}
+	// intoVar records the ALREADY-BOUND destination this hop must land on, so the
+	// physical builder can recognise the expand-into case from a field instead of by
+	// parsing the `__anon_N_to_<var>` naming convention (#2206). The convention stays
+	// (lastSyntheticToFor threads it as the next hop's fromVar), but a planner
+	// decision should not hinge on a string suffix.
+	intoVar := ""
+	if destRebinding {
+		intoVar = toVar
+	}
 	expandRel := relVar
 	if relRebinding {
 		expandRel = syntheticRel
@@ -1813,7 +1822,9 @@ func (t *translator) matchExpandStepBoundWithFrom(rp *ast.RelationshipPattern, t
 	if optional {
 		plan = NewOptionalExpand(fromVar, expandRel, relTypes, dir, expandTo, child)
 	} else {
-		plan = NewExpand(fromVar, expandRel, relTypes, dir, expandTo, child)
+		exp := NewExpand(fromVar, expandRel, relTypes, dir, expandTo, child)
+		exp.IntoVar = intoVar
+		plan = exp
 	}
 
 	plan = t.matchApplyRelFilter(rp, expandRel, plan)

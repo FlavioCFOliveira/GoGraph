@@ -309,6 +309,18 @@ type Expand struct {
 	SiblingRelVars []string
 	// Direction is the traversal direction relative to FromVar.
 	Direction Direction
+	// IntoVar names an ALREADY-BOUND destination variable this hop must land on —
+	// the openCypher "expand into" case, which arises whenever a pattern closes a
+	// cycle (`MATCH (a)-[:K]->(b)-[:K]->(a)`) or re-uses a bound endpoint.
+	//
+	// When set, ToVar carries the synthetic `__anon_N_to_<IntoVar>` name the
+	// translator generates and an equality Selection sits above this node. IntoVar
+	// records the same fact as a FIELD so the physical builder can act on it without
+	// parsing that naming convention (#2206); the convention itself stays, because
+	// lastSyntheticToFor threads the synthetic as the next hop's FromVar.
+	//
+	// Empty for every hop whose destination is fresh, which is the common case.
+	IntoVar string
 }
 
 // NewExpand creates an Expand operator.

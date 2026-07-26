@@ -7246,7 +7246,24 @@ func buildOperator(
 				cfg.RelCols = append(cfg.RelCols, col)
 			}
 		}
-		return exec.NewExpand(child, fwd, rev, cfg), nil
+		exp := exec.NewExpand(child, fwd, rev, cfg)
+		// Expand-into (#2206): when this hop's destination is a variable the row
+		// already carries, filter to edges landing on it INSIDE the operator instead
+		// of emitting one row per neighbour for the equality Selection above to
+		// discard. The translator records the bound variable on the IR node, so the
+		// decision needs no string parsing.
+		//
+		// The Selection above is deliberately left in place. It is now almost always
+		// redundant, but the filter admits any edge whose destination cell it cannot
+		// compare unboxed, so the operator's output stays a SUPERSET of the correct
+		// result and the Selection remains the source of truth — the same
+		// seek-superset-plus-residual-refilter discipline the range seek uses.
+		if p.IntoVar != "" {
+			if intoCol, bound := schema[p.IntoVar]; bound {
+				exp = exp.WithExpandInto(intoCol)
+			}
+		}
+		return exp, nil
 
 	case *ir.Apply:
 		// Disjoint-component reorder (#2091): when this exact Apply was chosen for

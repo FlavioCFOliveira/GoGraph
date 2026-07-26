@@ -94,7 +94,29 @@ type Expand struct {
 
 	edgeType string // optional edge-type filter; empty = no filter
 
-	relCols    []int          // input-row columns holding existing edge IDs; nil = no check
+	relCols []int // input-row columns holding existing edge IDs; nil = no check
+	// intoCol, when >= 0, is the input-row column holding an ALREADY-BOUND
+	// destination NodeID that this hop must land on — the openCypher
+	// "expand into" case, which arises whenever a pattern closes a cycle
+	// (`MATCH (a)-[:K]->(b)-[:K]->(a)`) or re-uses a bound endpoint (#2206).
+	//
+	// The IR translator already detects this: matchExpandStepBoundWithFrom sets
+	// destRebinding and expands into a synthetic `__anon_N_to_<var>`, with an
+	// equality Selection above. Without intoCol the operator therefore emits one
+	// row per NEIGHBOUR of the source — building and boxing a (srcID, edgeID,
+	// dstID) triplet for each — and the Selection above discards all but the one
+	// that landed on the bound node. On a triangle query that is the whole
+	// adjacency materialised and thrown away per input row.
+	//
+	// Filtering here instead costs one integer comparison per edge and emits only
+	// the matches. It deliberately reuses the existing emit gate rather than
+	// adding an operator, so cyphermorphism, the multiplicity queue, direction
+	// handling, the edge-type filter and tombstone skipping all keep behaving
+	// exactly as they do without it.
+	//
+	// -1 disables the filter, which is the default and the behaviour of every
+	// hop whose destination is not already bound.
+	intoCol    int
 	fwdVerts   []uint64       // snapshot of fwd.VerticesSlice()
 	fwdEdges   []graph.NodeID // snapshot of fwd.EdgesSlice()
 	fwdHandles []uint64       // snapshot of fwd.HandlesSlice() (nil unless multigraph)
@@ -186,6 +208,8 @@ func NewExpand(input Operator, fwd, rev csrAdjacency, cfg ExpandConfig) *Expand 
 		inputCol:       cfg.InputCol,
 		relCols:        cfg.RelCols,
 		multiplicity:   cfg.MultiplicityFn,
+		// Expand-into is off unless the planner opts in via WithExpandInto (#2206).
+		intoCol: -1,
 	}
 }
 
@@ -317,6 +341,9 @@ func (op *Expand) tryFwdEdge(out *Row) (emitted, handled bool) {
 	case edgeSkip:
 		return false, true
 	default: // edgeEmit
+		if !op.dstMatchesInto(dst) {
+			return false, true // expand-into: not the bound destination — skip
+		}
 		op.buildRow(out, src, edge, dst)
 		op.incEmitCount()
 		return true, true
@@ -335,10 +362,40 @@ func (op *Expand) tryRevEdge(out *Row) (emitted, handled bool) {
 	case edgeSkip:
 		return false, true
 	default: // edgeEmit
+		if !op.dstMatchesInto(dst) {
+			return false, true // expand-into: not the bound destination — skip
+		}
 		op.buildRow(out, src, edge, dst)
 		op.incEmitCount()
 		return true, true
 	}
+}
+
+// dstMatchesInto reports whether dst is the already-bound destination this hop must
+// land on, or true when no destination is bound (intoCol < 0), which is the common case.
+//
+// A row whose intoCol cell is not a resolvable bare NodeID — a NULL, or a boxed
+// entity a projection put there — cannot be compared unboxed, so the filter admits the
+// edge and lets the equality Selection above decide. That keeps the operator's result a
+// SUPERSET of the correct one in every case it cannot decide, which is what makes the
+// filter safe to apply before the Selection rather than instead of it (#2206).
+func (op *Expand) dstMatchesInto(dst int64) bool {
+	if op.intoCol < 0 || op.intoCol >= len(op.inputRow) {
+		return true
+	}
+	want, ok := op.inputRow[op.intoCol].(expr.IntegerValue)
+	if !ok {
+		return true // not a bare NodeID: defer to the boxed predicate above
+	}
+	return int64(want) == dst
+}
+
+// WithExpandInto binds this hop's destination to an already-bound input column, so the
+// operator emits only edges landing on that node instead of one row per neighbour
+// (#2206). col < 0 disables it. Returns op for chaining; call before Init.
+func (op *Expand) WithExpandInto(col int) *Expand {
+	op.intoCol = col
+	return op
 }
 
 // advanceFwdEdge consumes at most one forward edge from the current source's
