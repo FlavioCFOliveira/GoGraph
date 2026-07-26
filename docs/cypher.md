@@ -389,12 +389,30 @@ clause:
 CREATE INDEX person_age FOR (n:Person) ON (n.age) OPTIONS {indexType: 'btree'}
 ```
 
-A BTree index accelerates range predicates (`<`, `>`, `<=`, `>=`); a hash
-index accelerates equality lookups (`=`). Both are transparent optimisations:
-a query using an index returns exactly the same rows as the same query with no
-index (a residual filter refines any over-returned superset). An index never
-changes ordering — it is not used to satisfy `ORDER BY`, which is always
-evaluated by a separate sort operator.
+Which predicates each kind accelerates depends on the **type** of the property
+value, because the two kinds are keyed differently:
+
+| Predicate | String value | Numeric value (integer or float) |
+|---|---|---|
+| `=` | `hash` | `btree` |
+| `<` `>` `<=` `>=` | `btree` | `btree` |
+
+A hash index is keyed on strings, so it accelerates equality on string-valued
+properties only. A BTree index carries an internal numeric companion, which
+serves both numeric ranges and numeric equality — the latter as the degenerate
+closed range `[v, v]`. Numeric equality is matched across the integer/float
+boundary as openCypher requires (`5` matches a stored `5.0`), and remains exact
+above 2<sup>53</sup>, where distinct integers share a floating-point image.
+
+Index use is a cost decision, not a guarantee: the engine seeks only when the
+label holds at least 1024 nodes and the predicate matches at most 10 % of them,
+and it scans otherwise. Use `Engine.Explain` to see which access path a query
+gets.
+
+All of this is a transparent optimisation: a query using an index returns
+exactly the same rows as the same query with no index (a residual filter refines
+any over-returned superset). An index never changes ordering — it is not used to
+satisfy `ORDER BY`, which is always evaluated by a separate sort operator.
 
 **Dialect and scope.** GoGraph's index kinds are `hash` (equality) and `btree`
 (range), selected via `OPTIONS {indexType: …}`; this differs from Neo4j, whose

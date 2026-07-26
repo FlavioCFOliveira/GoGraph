@@ -589,15 +589,41 @@ func extractNumericRangePred(e ast.Expression, nodeVar string, params map[string
 }
 
 // extractSingleNumericCmp extracts one comparison "nodeVar.prop <op> numeric"
-// (or its mirror "numeric <op> nodeVar.prop") with op ∈ {>,>=,<,<=}. The
-// returned numericRangePred has exactly one of lo/hi set.
+// (or its mirror "numeric <op> nodeVar.prop") with op ∈ {=,>,>=,<,<=}. For a
+// range operator the returned numericRangePred has exactly one of lo/hi set; for
+// "=" it has BOTH, set to the same value — the degenerate closed range [v, v].
+//
+// # Why equality is served here rather than by a numeric hash index
+//
+// A Cypher hash index is string-only (projectStringPropValue rejects every
+// non-string payload), so before rmp #2169 a numeric equality — including the
+// inline form MATCH (a:P {id: 250}), which desugars to this same predicate —
+// full-scanned the label even when the property carried a btree index whose
+// numeric companion could answer it. Only equality degenerated: the identical
+// predicate written as "a.id >= 250 AND a.id <= 250" already seeked.
+//
+// The source comment at cypher/api.go proposed a float64 hash index. That would
+// be WRONG for openCypher, whose numeric equality is cross-type: 5 = 5.0 is
+// TRUE, so an int64-keyed hash would silently miss float-valued matches and a
+// float64-keyed one would have to bucket ints by their float image, which is
+// lossy above 2^53. The unified float64 btree companion already ships and
+// already indexes integer- and float-valued nodes under ONE numeric order, so
+// the closed range [v, v] over it is a SUPERSET of every value equal to v under
+// Cypher semantics, for both int and float properties and across the two.
+//
+// Above 2^53 distinct int64 values share a float64 image, so the range returns
+// extra candidates. That is safe by construction and not by luck: the range
+// seek's residual Selection Filter is ALWAYS retained (see
+// [tryBuildRangeSeekChild]) and applies the exact int/float comparator, so
+// 2^53+1 = 2^53.0 still evaluates FALSE despite the shared bucket. The seek can
+// only ever narrow what the filter examines, never change what it admits.
 func extractSingleNumericCmp(e ast.Expression, nodeVar string, params map[string]expr.Value) (numericRangePred, bool) {
 	bo, ok := e.(*ast.BinaryOp)
 	if !ok {
 		return numericRangePred{}, false
 	}
 	op := bo.Operator
-	if op != ">" && op != ">=" && op != "<" && op != "<=" {
+	if op != "=" && op != ">" && op != ">=" && op != "<" && op != "<=" {
 		return numericRangePred{}, false
 	}
 	// Property on the left: n.prop <op> numeric.
@@ -617,10 +643,18 @@ func extractSingleNumericCmp(e ast.Expression, nodeVar string, params map[string
 	return numericRangePred{}, false
 }
 
-// numericBoundFor builds a one-sided numericRangePred for "prop op value",
-// flipping the operator's side when the property was on the right of the
-// comparison (mirrored == true).
+// numericBoundFor builds a numericRangePred for "prop op value", flipping the
+// operator's side when the property was on the right of the comparison
+// (mirrored == true). A range operator yields one bound; "=" yields the
+// degenerate closed range [value, value] (see [extractSingleNumericCmp]).
 func numericBoundFor(propKey, op string, value float64, mirrored bool) numericRangePred {
+	if op == "=" {
+		// Equality is symmetric, so mirroring is a no-op. Both bounds are
+		// inclusive and distinct values so neither aliases the other.
+		lo := numericBound{value: value, include: true}
+		hi := numericBound{value: value, include: true}
+		return numericRangePred{propKey: propKey, lo: &lo, hi: &hi}
+	}
 	if mirrored {
 		switch op {
 		case ">":
