@@ -212,6 +212,10 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 			op.reg.ReleasePropertyValue(nodeLabels, k, pv)
 		}
 	}
+	// Stripping the node's labels and properties is internal teardown, not a
+	// user-visible side effect: openCypher declares DELETE as -nodes only
+	// (#2212). Suppress effect counting for the span.
+	resumeCounting := suppressEffectCounting(op.mutator)
 	for _, lbl := range nodeLabels {
 		op.mutator.RemoveNodeLabel(nodeKey, lbl)
 	}
@@ -219,6 +223,7 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 	for k := range op.mutator.NodeProperties(nodeKey) {
 		op.mutator.DelNodeProperty(nodeKey, k)
 	}
+	resumeCounting()
 	// Tombstone the node so subsequent scans treat it as absent.
 	op.mutator.RemoveNode(nodeKey)
 
@@ -274,12 +279,17 @@ func (op *DetachDelete) detachDeletePath(p expr.PathValue) error {
 				op.reg.ReleasePropertyValue(pathLabels, k, pv)
 			}
 		}
+		// Stripping the node's labels and properties is internal teardown, not a
+		// user-visible side effect: openCypher declares DELETE as -nodes only
+		// (#2212). Suppress effect counting for the span.
+		resumeCounting := suppressEffectCounting(op.mutator)
 		for _, lbl := range pathLabels {
 			op.mutator.RemoveNodeLabel(nodeKey, lbl)
 		}
 		for k := range op.mutator.NodeProperties(nodeKey) {
 			op.mutator.DelNodeProperty(nodeKey, k)
 		}
+		resumeCounting()
 		op.mutator.RemoveNode(nodeKey)
 	}
 	return nil

@@ -3831,6 +3831,11 @@ type Result struct {
 	// [Result.Notifications] and never affect the rows iterated.
 	notifications []Notification
 
+	// counters holds this statement's openCypher write effects (#2212), exposed via
+	// [Result.Counters]. nil for a read-only statement, which is what lets a caller
+	// distinguish "no writes attempted" from "writes attempted that changed nothing".
+	counters *exec.QueryCounters
+
 	closed atomic.Bool // tripped by Close; checked by the finalizer
 }
 
@@ -3841,6 +3846,24 @@ type Result struct {
 // SUCCESS "notifications" metadata) may surface them to warn the user. The
 // returned slice is nil when the query produced no notifications.
 func (r *Result) Notifications() []Notification { return r.notifications }
+
+// Counters returns the write effects this statement actually applied — nodes and
+// relationships created and deleted, properties set and removed, labels added and
+// removed, and index and constraint DDL (#2212).
+//
+// It returns nil for a read-only statement. That is a meaningful distinction, not an
+// absence: nil means the statement had no write surface at all, whereas a non-nil
+// all-zero result means writes were attempted and changed nothing — the difference
+// between a MATCH and a MERGE that matched.
+//
+// The counts reflect what was APPLIED, so a re-intern of an existing node is not a
+// creation, removing an absent property counts nothing, and a statement that failed or
+// rolled back never produces a Result to report from. The nodes and relationships
+// counters are incremented at the same call sites as the graph-scoped side-effect
+// counters the openCypher TCK comparator verifies, so the two cannot drift.
+//
+// The returned pointer is owned by the Result; treat it as read-only.
+func (r *Result) Counters() *exec.QueryCounters { return r.counters }
 
 // Next advances to the next result row. Returns true when a row is available.
 // If [EngineOptions.MaxResultRows] is set and the limit is reached, Next sets
@@ -14380,9 +14403,15 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 		}
 		// cbuf is left nil: it is allocated lazily on the first count delta, so a
 		// bare CREATE (:N) over an edgeless graph allocates none (#2082).
-		mutator = &walMutatorAdapter{g: e.g, tx: walTx, buf: buf, undo: undo, touched: touched, eng: e}
+		wa := &walMutatorAdapter{g: e.g, tx: walTx, buf: buf, undo: undo, touched: touched, eng: e}
+		// Aim the counters at the adapter's own inline store (#2212): this statement's
+		// write effects are recorded with no allocation beyond the adapter itself.
+		wa.counters = &wa.countersStore
+		mutator = wa
 	} else {
-		mutator = &lpgMutatorAdapter{g: e.g, buf: buf, undo: undo, touched: touched, eng: e}
+		la := &lpgMutatorAdapter{g: e.g, buf: buf, undo: undo, touched: touched, eng: e}
+		la.counters = &la.countersStore // see the walMutatorAdapter branch above
+		mutator = la
 	}
 
 	r, buildErr := e.execUnderBarrier(ctx, plan, queryReg, params, mutator, buf, undo, walTx, true, e.g.ApplyAtomically, touched)
@@ -14487,6 +14516,7 @@ func (e *Engine) execUnderBarrier(
 			// Use newWriteResult so that rollbackUnderBarrier can reseed the
 			// constraint registry's UNIQUE value-sets after an undo replay (#1342).
 			r = newWriteResult(rs, cols, buf, e.g.IndexManager(), walTx, e.maxResultRows, e.maxResultBytes, e.constraintReg, e.g)
+			r.counters = mutatorCounters(mutator)
 			r.globalMem = e.globalMem
 			r.undo = undo
 			r.touched = touched
@@ -14508,10 +14538,27 @@ func (e *Engine) execUnderBarrier(
 		// eager writes flip visible atomically with the rest of the open tx.
 		r = newResultWithLimit(rs, cols, nil, nil, nil, e.maxResultRows, e.maxResultBytes)
 		r.globalMem = e.globalMem
+		r.counters = mutatorCounters(mutator)
 		r.materialize()
 		return nil
 	})
 	return r, buildErr
+}
+
+// mutatorCounters returns the write-effect counters carried by a write adapter, or nil
+// for any other mutator (#2212). Reading them off the mutator the caller already passed
+// keeps [Engine.execUnderBarrier]'s signature unchanged, and returning nil for an
+// unrecognised mutator is what makes a read-only statement report no counters at all
+// rather than an all-zero set.
+func mutatorCounters(m exec.GraphMutator) *exec.QueryCounters {
+	switch a := m.(type) {
+	case *lpgMutatorAdapter:
+		return a.counters
+	case *walMutatorAdapter:
+		return a.counters
+	default:
+		return nil
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -14559,6 +14606,23 @@ type lpgMutatorAdapter struct {
 	// commit.
 	eng  *Engine
 	cbuf *exec.CountBuffer
+	// counters accumulates this statement's openCypher write effects (#2212) so the
+	// engine can report what the statement ACTUALLY applied — which is what Bolt's
+	// stats metadata and the driver's ContainsUpdates need. It is allocated by the
+	// engine when it builds a write adapter and is nil on a read-only adapter, so
+	// every count site is guarded and a read path pays nothing. Plain integers, no
+	// atomics: the write path is single-writer and each operator tree owns one
+	// adapter (see [exec.QueryCounters]).
+	counters *exec.QueryCounters
+	// countersStore is the inline backing store [Engine] points counters at on the
+	// write path, so per-statement counting costs NO extra allocation: the adapter is
+	// already one heap object, and the counters ride inside it. A read-only adapter
+	// leaves counters nil and never touches this field, which is what preserves the
+	// nil-means-no-write-surface contract on [Result.Counters].
+	countersStore exec.QueryCounters
+	// countingOff pauses effect counting for a span of internal teardown; see
+	// [exec.EffectCountingSuppressor].
+	countingOff bool
 	// fresh is the per-statement set of node keys created by this adapter that
 	// have not yet gained an incident edge (#2082). A SetNodeLabel on a fresh node
 	// is INITIAL labelling — the node's contribution is captured by the later
@@ -14581,6 +14645,89 @@ func (a *lpgMutatorAdapter) cs() *count.Store {
 		return nil
 	}
 	return a.eng.countStore
+}
+
+// countNodeCreated / countNodeDeleted / countRelCreated / countRelDeleted record one
+// write effect against BOTH the graph's side-effect counters — the graph-scoped totals
+// the openCypher TCK comparator reads ([lpg.Graph.SideEffectCounters]) — and this
+// statement's [exec.QueryCounters] (#2212).
+//
+// Binding the two together is the point: every existing call site already sat behind the
+// audited "was this a real change" discriminator (a re-intern is not a creation, but
+// re-creating a tombstoned key is; a non-multigraph duplicate edge is not an addition).
+// Routing both counter families through one helper per effect means the per-statement
+// counts cannot drift from the counts the TCK already verifies, and no site can be
+// missed by omission.
+//
+// a.counters is nil on a read-only adapter, so a read path pays one nil check.
+// countPropertySet records one property WRITE (#2212). openCypher counts a property
+// assignment as the +properties side effect, and Bolt reports it as properties-set.
+// Called only after the underlying set succeeded, so a schema-rejected write counts
+// nothing.
+// SuppressEffectCounting implements [exec.EffectCountingSuppressor]: it pauses
+// write-effect counting so a DELETE's internal label/property teardown is not reported
+// as user-visible -labels / -properties. The node and relationship counters are
+// deliberately NOT gated on it — a delete's -nodes and -relationships ARE the effects
+// openCypher declares.
+func (a *lpgMutatorAdapter) SuppressEffectCounting(on bool) { a.countingOff = on }
+
+func (a *lpgMutatorAdapter) countPropertySet() {
+	if a.counters != nil && !a.countingOff {
+		a.counters.PropertiesSet++
+	}
+}
+
+// countPropertyRemoved records one property REMOVAL — openCypher's -properties, a
+// distinct side effect there (`REMOVE n.num` declares `-properties 1` in
+// cypher/tck/features/clauses/remove/Remove1.feature). Callers must invoke it only when
+// the property was actually PRESENT, because removing an absent property is a no-op that
+// counts nothing.
+func (a *lpgMutatorAdapter) countPropertyRemoved() {
+	if a.counters != nil && !a.countingOff {
+		a.counters.PropertiesRemoved++
+	}
+}
+
+// countLabelAdded / countLabelRemoved record openCypher's +labels / -labels. As with
+// properties, the caller must have established that the label genuinely changed.
+func (a *lpgMutatorAdapter) countLabelAdded() {
+	if a.counters != nil && !a.countingOff {
+		a.counters.LabelsAdded++
+	}
+}
+
+func (a *lpgMutatorAdapter) countLabelRemoved() {
+	if a.counters != nil && !a.countingOff {
+		a.counters.LabelsRemoved++
+	}
+}
+
+func (a *lpgMutatorAdapter) countNodeCreated() {
+	a.g.IncrNodesAdded()
+	if a.counters != nil {
+		a.counters.NodesCreated++
+	}
+}
+
+func (a *lpgMutatorAdapter) countNodeDeleted() {
+	a.g.IncrNodesRemoved()
+	if a.counters != nil {
+		a.counters.NodesDeleted++
+	}
+}
+
+func (a *lpgMutatorAdapter) countRelCreated() {
+	a.g.IncrEdgesAdded()
+	if a.counters != nil {
+		a.counters.RelationshipsCreated++
+	}
+}
+
+func (a *lpgMutatorAdapter) countRelDeleted() {
+	a.g.IncrEdgesRemoved()
+	if a.counters != nil {
+		a.counters.RelationshipsDeleted++
+	}
 }
 
 // statsColl returns the engine's lazily-installed approximate statistics
@@ -14672,7 +14819,7 @@ func (a *lpgMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 	}
 	id, _ := a.g.AdjList().Mapper().Lookup(n)
 	if !existed {
-		a.g.IncrNodesAdded()
+		a.countNodeCreated()
 	}
 	a.rec().recordAddNode(n, !existed)
 	a.countMarkFresh(n, existed) // count-store (#2082): initial-label vs relabel
@@ -14703,17 +14850,17 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
 	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
 	if !srcExisted {
-		a.g.IncrNodesAdded()
+		a.countNodeCreated()
 	}
 	if !dstExisted && src != dst {
-		a.g.IncrNodesAdded()
+		a.countNodeCreated()
 	}
 	// edgeAdded is always true here: the non-multigraph duplicate-pair case that
 	// used to be a silent no-op is now rejected above, before any mutation, so
 	// this branch is never skipped. Kept explicit for symmetry with
 	// [walMutatorAdapter.AddEdge].
 	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
-		a.g.IncrEdgesAdded()
+		a.countRelCreated()
 		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
 	}
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
@@ -14736,17 +14883,17 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
 	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
 	if !srcExisted {
-		a.g.IncrNodesAdded()
+		a.countNodeCreated()
 	}
 	if !dstExisted && src != dst {
-		a.g.IncrNodesAdded()
+		a.countNodeCreated()
 	}
 	// edgeAdded is always true here: the non-multigraph duplicate-pair case that
 	// used to be a silent no-op is now rejected above, before any mutation, so
 	// this branch is never skipped. Kept explicit for symmetry with
 	// [walMutatorAdapter.AddEdge].
 	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
-		a.g.IncrEdgesAdded()
+		a.countRelCreated()
 		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
 	}
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
@@ -14765,7 +14912,7 @@ func (a *lpgMutatorAdapter) RemoveEdge(src, dst string) {
 		pre = r.captureRemovedEdge(src, dst)
 	}
 	if present {
-		a.g.IncrEdgesRemoved()
+		a.countRelDeleted()
 		// Count-store (#2082): capture the removed first-slot instance's type and
 		// endpoint labels before the adjacency removal.
 		if a.cs() != nil {
@@ -14803,7 +14950,7 @@ func (a *lpgMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 	}
 	removed := a.g.RemoveEdgeByHandle(src, dst, handle)
 	if removed {
-		a.g.IncrEdgesRemoved()
+		a.countRelDeleted()
 	}
 	r.recordRemoveEdge(&pre, removed)
 }
@@ -14819,8 +14966,14 @@ func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) error {
 	// probe or buffer allocation; countIsFresh excludes a freshly created node
 	// whose initial labelling the edge-typing +delta already covers.
 	countNew := a.cs() != nil && a.g.AdjList().Size() > 0 && !a.countIsFresh(n) && !a.g.HasNodeLabel(n, label)
+	// #2212: a label already present is a no-op and counts nothing. Probed
+	// independently of hadLabel, which is gated on the undo recorder being active.
+	labelIsNew := a.counters != nil && !a.g.HasNodeLabel(n, label)
 	if err := a.g.SetNodeLabel(n, label); err != nil {
 		return err
+	}
+	if labelIsNew {
+		a.countLabelAdded()
 	}
 	r.recordSetNodeLabel(n, label, hadLabel)
 	if a.buf != nil {
@@ -14847,7 +15000,12 @@ func (a *lpgMutatorAdapter) RemoveNodeLabel(n, label string) {
 	if a.cs() != nil && a.g.AdjList().Size() > 0 && a.g.HasNodeLabel(n, label) {
 		countRelabel(a.g, a.cs(), a.countBuf(), n, label, -1)
 	}
+	// #2212: removing an absent label counts nothing.
+	labelWasPresent := a.counters != nil && a.g.HasNodeLabel(n, label)
 	a.g.RemoveNodeLabel(n, label)
+	if labelWasPresent {
+		a.countLabelRemoved()
+	}
 	r.recordRemoveNodeLabel(n, label, hadLabel)
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
@@ -14872,7 +15030,7 @@ func (a *lpgMutatorAdapter) RemoveNode(n string) {
 		enqueueNodeRemovalChanges(a.g, a.buf, n, id)
 	}
 	if wasLive {
-		a.g.IncrNodesRemoved()
+		a.countNodeDeleted()
 	}
 	a.g.RemoveNode(n)
 	a.rec().recordRemoveNode(n, wasLive)
@@ -14900,6 +15058,7 @@ func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	if err := a.g.SetNodeProperty(n, key, value); err != nil {
 		return err
 	}
+	a.countPropertySet()
 	r.recordSetNodeProperty(n, key, prev, had)
 	if a.buf != nil {
 		ch := index.Change{
@@ -14933,6 +15092,12 @@ func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) {
 	var had bool
 	if r.active() || fanout || statsActive {
 		prev, had = a.g.GetNodeProperty(n, key)
+	}
+	// #2212: removing an absent property is a no-op and counts nothing.
+	if a.counters != nil {
+		if _, present := a.g.GetNodeProperty(n, key); present {
+			a.countPropertyRemoved()
+		}
 	}
 	a.g.DelNodeProperty(n, key)
 	r.recordDelNodeProperty(n, key, prev, had)
@@ -14997,6 +15162,7 @@ func (a *lpgMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 	if err := a.g.SetEdgeProperty(src, dst, key, value); err != nil {
 		return err
 	}
+	a.countPropertySet()
 	r.recordSetEdgeProperty(src, dst, key, prev, had)
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
@@ -15017,6 +15183,12 @@ func (a *lpgMutatorAdapter) DelEdgeProperty(src, dst, key string) {
 	var had bool
 	if r.active() {
 		prev, had = a.g.GetEdgeProperty(src, dst, key)
+	}
+	// #2212: removing an absent property is a no-op and counts nothing.
+	if a.counters != nil {
+		if _, present := a.g.GetEdgeProperty(src, dst, key); present {
+			a.countPropertyRemoved()
+		}
 	}
 	a.g.DelEdgeProperty(src, dst, key)
 	r.recordDelEdgeProperty(src, dst, key, prev, had)
@@ -15196,7 +15368,7 @@ func (a *lpgMutatorAdapter) RemoveAllEdgesFrom(n string) {
 			pre = r.captureRemovedEdge(n, dst)
 		}
 		if present {
-			a.g.IncrEdgesRemoved()
+			a.countRelDeleted()
 		}
 		r.recordRemoveEdge(&pre, present)
 	}
@@ -15261,10 +15433,21 @@ func (a *lpgMutatorAdapter) WalkNodeIDs(fn func(graph.NodeID) bool) {
 // index buffer, which roll back through their own mechanisms; the undo log
 // closes only the in-memory-vs-durable divergence.
 type walMutatorAdapter struct {
-	g    *lpg.Graph[string, float64]
-	tx   *txn.Tx[string, float64]
-	buf  *exec.IndexBuffer // nil for read-only (never reached via RunInTx)
-	undo *undoLog          // nil for read-only (never reached via RunInTx)
+	// counters accumulates this statement's openCypher write effects (#2212), exactly
+	// as on [lpgMutatorAdapter]. Both adapters carry it because both are reachable
+	// write paths — this one is the durable (WAL-backed) path — and a client must get
+	// the same statistics either way. nil on a read-only adapter.
+	counters *exec.QueryCounters
+	// countersStore is the inline backing store, as on [lpgMutatorAdapter]: pointing
+	// counters into the adapter keeps per-statement counting allocation-free.
+	countersStore exec.QueryCounters
+	// countingOff pauses effect counting for a span of internal teardown; see
+	// [exec.EffectCountingSuppressor].
+	countingOff bool
+	g           *lpg.Graph[string, float64]
+	tx          *txn.Tx[string, float64]
+	buf         *exec.IndexBuffer // nil for read-only (never reached via RunInTx)
+	undo        *undoLog          // nil for read-only (never reached via RunInTx)
 	// touched is the per-transaction set of node keys to re-check against NOT
 	// NULL constraints at commit (#1754). It is nil unless the engine has at
 	// least one existence constraint active, so the common path records nothing.
@@ -15301,6 +15484,80 @@ func (a *walMutatorAdapter) cs() *count.Store {
 
 // statsColl returns the engine's lazily-installed statistics collector, or nil
 // when absent; mirrors [lpgMutatorAdapter.statsColl].
+// countNodeCreated / countNodeDeleted / countRelCreated / countRelDeleted are the
+// [walMutatorAdapter] counterparts of the [lpgMutatorAdapter] helpers: they record one
+// write effect against both the graph's TCK side-effect counters and this statement's
+// [exec.QueryCounters] (#2212), at the same already-audited call sites.
+// countPropertySet records one property WRITE (#2212). openCypher counts a property
+// assignment as the +properties side effect, and Bolt reports it as properties-set.
+// Called only after the underlying set succeeded, so a schema-rejected write counts
+// nothing.
+// SuppressEffectCounting implements [exec.EffectCountingSuppressor]: it pauses
+// write-effect counting so a DELETE's internal label/property teardown is not reported
+// as user-visible -labels / -properties. The node and relationship counters are
+// deliberately NOT gated on it — a delete's -nodes and -relationships ARE the effects
+// openCypher declares.
+func (a *walMutatorAdapter) SuppressEffectCounting(on bool) { a.countingOff = on }
+
+func (a *walMutatorAdapter) countPropertySet() {
+	if a.counters != nil && !a.countingOff {
+		a.counters.PropertiesSet++
+	}
+}
+
+// countPropertyRemoved records one property REMOVAL — openCypher's -properties, a
+// distinct side effect there (`REMOVE n.num` declares `-properties 1` in
+// cypher/tck/features/clauses/remove/Remove1.feature). Callers must invoke it only when
+// the property was actually PRESENT, because removing an absent property is a no-op that
+// counts nothing.
+func (a *walMutatorAdapter) countPropertyRemoved() {
+	if a.counters != nil && !a.countingOff {
+		a.counters.PropertiesRemoved++
+	}
+}
+
+// countLabelAdded / countLabelRemoved record openCypher's +labels / -labels. As with
+// properties, the caller must have established that the label genuinely changed.
+func (a *walMutatorAdapter) countLabelAdded() {
+	if a.counters != nil && !a.countingOff {
+		a.counters.LabelsAdded++
+	}
+}
+
+func (a *walMutatorAdapter) countLabelRemoved() {
+	if a.counters != nil && !a.countingOff {
+		a.counters.LabelsRemoved++
+	}
+}
+
+func (a *walMutatorAdapter) countNodeCreated() {
+	a.g.IncrNodesAdded()
+	if a.counters != nil {
+		a.counters.NodesCreated++
+	}
+}
+
+func (a *walMutatorAdapter) countNodeDeleted() {
+	a.g.IncrNodesRemoved()
+	if a.counters != nil {
+		a.counters.NodesDeleted++
+	}
+}
+
+func (a *walMutatorAdapter) countRelCreated() {
+	a.g.IncrEdgesAdded()
+	if a.counters != nil {
+		a.counters.RelationshipsCreated++
+	}
+}
+
+func (a *walMutatorAdapter) countRelDeleted() {
+	a.g.IncrEdgesRemoved()
+	if a.counters != nil {
+		a.counters.RelationshipsDeleted++
+	}
+}
+
 func (a *walMutatorAdapter) statsColl() *statsCollector {
 	if a.eng == nil {
 		return nil
@@ -15379,7 +15636,7 @@ func (a *walMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 	_ = a.tx.AddNode(n) //nolint:errcheck // tx is non-nil; only ErrTxFinished possible, which cannot occur here
 	id, _ := a.g.AdjList().Mapper().Lookup(n)
 	if !existed {
-		a.g.IncrNodesAdded()
+		a.countNodeCreated()
 	}
 	a.rec().recordAddNode(n, !existed)
 	a.countMarkFresh(n, existed) // count-store (#2082): initial-label vs relabel
@@ -15401,10 +15658,10 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
 	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
 	if !srcExisted {
-		a.g.IncrNodesAdded()
+		a.countNodeCreated()
 	}
 	if !dstExisted && src != dst {
-		a.g.IncrNodesAdded()
+		a.countNodeCreated()
 	}
 	// A duplicate (src,dst) AddEdge on a non-multigraph graph used to be treated
 	// as a storage no-op; counting it and recording a RemoveEdge undo inverse
@@ -15415,7 +15672,7 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	// every AddEdge adds a parallel edge, and on a simple graph reaching this
 	// line already implies !edgeExisted.
 	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
-		a.g.IncrEdgesAdded()
+		a.countRelCreated()
 		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
 	}
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
@@ -15445,17 +15702,17 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
 	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
 	if !srcExisted {
-		a.g.IncrNodesAdded()
+		a.countNodeCreated()
 	}
 	if !dstExisted && src != dst {
-		a.g.IncrNodesAdded()
+		a.countNodeCreated()
 	}
 	// edgeAdded is always true here: the non-multigraph duplicate-pair case that
 	// used to be a silent no-op is now rejected above, before any mutation, so
 	// this branch is never skipped. Kept explicit for symmetry with
 	// [lpgMutatorAdapter.AddEdge].
 	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
-		a.g.IncrEdgesAdded()
+		a.countRelCreated()
 		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
 	}
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
@@ -15474,7 +15731,7 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 		pre = r.captureRemovedEdge(src, dst)
 	}
 	if present {
-		a.g.IncrEdgesRemoved()
+		a.countRelDeleted()
 		if a.cs() != nil { // count-store (#2082): capture before the removal
 			countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
 		}
@@ -15509,7 +15766,7 @@ func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 	}
 	removed := a.g.RemoveEdgeByHandle(src, dst, handle)
 	if removed {
-		a.g.IncrEdgesRemoved()
+		a.countRelDeleted()
 	}
 	_ = a.tx.RemoveEdgeByHandle(src, dst, handle) //nolint:errcheck // ErrTxFinished impossible here
 	r.recordRemoveEdge(&pre, removed)
@@ -15523,8 +15780,14 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 	// the CREATE (:N) fast path and countIsFresh excludes a freshly created node's
 	// initial labelling (covered by the edge-typing +delta).
 	countNew := a.cs() != nil && a.g.AdjList().Size() > 0 && !a.countIsFresh(n) && !a.g.HasNodeLabel(n, label)
+	// #2212: a label already present is a no-op and counts nothing. Probed
+	// independently of hadLabel, which is gated on the undo recorder being active.
+	labelIsNew := a.counters != nil && !a.g.HasNodeLabel(n, label)
 	if err := a.g.SetNodeLabel(n, label); err != nil {
 		return err
+	}
+	if labelIsNew {
+		a.countLabelAdded()
 	}
 	r.recordSetNodeLabel(n, label, hadLabel)
 	_ = a.tx.SetNodeLabel(n, label) //nolint:errcheck // ErrTxFinished impossible here
@@ -15550,7 +15813,12 @@ func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) {
 	if a.cs() != nil && a.g.AdjList().Size() > 0 && a.g.HasNodeLabel(n, label) {
 		countRelabel(a.g, a.cs(), a.countBuf(), n, label, -1)
 	}
+	// #2212: removing an absent label counts nothing.
+	labelWasPresent := a.counters != nil && a.g.HasNodeLabel(n, label)
 	a.g.RemoveNodeLabel(n, label)
+	if labelWasPresent {
+		a.countLabelRemoved()
+	}
 	r.recordRemoveNodeLabel(n, label, hadLabel)
 	_ = a.tx.RemoveNodeLabel(n, label) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
@@ -15576,7 +15844,7 @@ func (a *walMutatorAdapter) RemoveNode(n string) {
 		enqueueNodeRemovalChanges(a.g, a.buf, n, id)
 	}
 	if wasLive {
-		a.g.IncrNodesRemoved()
+		a.countNodeDeleted()
 	}
 	a.g.RemoveNode(n)
 	a.rec().recordRemoveNode(n, wasLive)
@@ -15602,6 +15870,7 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	if err := a.g.SetNodeProperty(n, key, value); err != nil {
 		return err
 	}
+	a.countPropertySet()
 	r.recordSetNodeProperty(n, key, prev, had)
 	_ = a.tx.SetNodeProperty(n, key, value) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
@@ -15633,6 +15902,12 @@ func (a *walMutatorAdapter) DelNodeProperty(n, key string) {
 	var had bool
 	if r.active() || fanout || statsActive {
 		prev, had = a.g.GetNodeProperty(n, key)
+	}
+	// #2212: removing an absent property is a no-op and counts nothing.
+	if a.counters != nil {
+		if _, present := a.g.GetNodeProperty(n, key); present {
+			a.countPropertyRemoved()
+		}
 	}
 	a.g.DelNodeProperty(n, key)
 	r.recordDelNodeProperty(n, key, prev, had)
@@ -15697,6 +15972,7 @@ func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 	if err := a.g.SetEdgeProperty(src, dst, key, value); err != nil {
 		return err
 	}
+	a.countPropertySet()
 	r.recordSetEdgeProperty(src, dst, key, prev, had)
 	_ = a.tx.SetEdgeProperty(src, dst, key, value) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
@@ -15718,6 +15994,12 @@ func (a *walMutatorAdapter) DelEdgeProperty(src, dst, key string) {
 	var had bool
 	if r.active() {
 		prev, had = a.g.GetEdgeProperty(src, dst, key)
+	}
+	// #2212: removing an absent property is a no-op and counts nothing.
+	if a.counters != nil {
+		if _, present := a.g.GetEdgeProperty(src, dst, key); present {
+			a.countPropertyRemoved()
+		}
 	}
 	a.g.DelEdgeProperty(src, dst, key)
 	r.recordDelEdgeProperty(src, dst, key, prev, had)
@@ -15917,7 +16199,7 @@ func (a *walMutatorAdapter) RemoveAllEdgesFrom(n string) {
 			pre = r.captureRemovedEdge(n, dst)
 		}
 		if present {
-			a.g.IncrEdgesRemoved()
+			a.countRelDeleted()
 		}
 		_ = a.tx.RemoveEdge(n, dst) //nolint:errcheck // ErrTxFinished impossible here
 		r.recordRemoveEdge(&pre, present)

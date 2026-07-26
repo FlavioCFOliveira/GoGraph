@@ -1308,8 +1308,13 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 	// #1483) before draining the cursor; they are reported in the terminal PULL
 	// SUCCESS metadata, as Neo4j does.
 	var notifications []packstream.Value
+	var stats map[string]packstream.Value
 	if !hasMore && s.result != nil {
 		notifications = notificationsToValues(s.result.Notifications())
+		// Capture the write statistics BEFORE drainResult nils the cursor (#2190).
+		// This is the SUCCESS the driver turns into the ResultSummary, so it is the
+		// only place the counters can reach the client.
+		stats = resultStats(s.result.Counters())
 	}
 
 	// Transition state based on has_more.
@@ -1334,6 +1339,12 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 		meta["db"] = s.databaseName()
 		if len(notifications) > 0 {
 			meta["notifications"] = notifications
+		}
+		// Omit stats entirely when the statement changed nothing, as Neo4j does: the
+		// driver's successStats returns nil for an empty map, so a read-only query's
+		// SUCCESS is unchanged by #2190.
+		if len(stats) > 0 {
+			meta["stats"] = stats
 		}
 	}
 	responses = append(responses, &proto.Success{Metadata: meta})
@@ -1409,6 +1420,13 @@ func (s *Session) handleDiscard(m *proto.Discard) ([]any, error) {
 	if transErr != nil {
 		return s.failTransition(m)
 	}
+	// Capture the write statistics BEFORE drainResult nils the cursor (#2190). A
+	// DISCARD still applied the statement's writes — it only discards the ROWS — so its
+	// terminal SUCCESS must report them, exactly as a PULL's does.
+	var stats map[string]packstream.Value
+	if !hasMore && s.result != nil {
+		stats = resultStats(s.result.Counters())
+	}
 	if !hasMore {
 		s.drainResult()
 		s.peeked = nil
@@ -1421,6 +1439,9 @@ func (s *Session) handleDiscard(m *proto.Discard) ([]any, error) {
 		// A DISCARD terminates the stream just as a PULL does, and the driver
 		// builds its ResultSummary from whichever SUCCESS ends it (rmp #2172).
 		meta["db"] = s.databaseName()
+		if len(stats) > 0 {
+			meta["stats"] = stats
+		}
 	}
 	return []any{&proto.Success{Metadata: meta}}, nil
 }

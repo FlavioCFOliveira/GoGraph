@@ -205,6 +205,10 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 				for _, src := range op.mutator.InNeighbours(nodeKey) {
 					op.mutator.RemoveEdge(src, nodeKey)
 				}
+				// Stripping the node's labels and properties is internal teardown, not a
+				// user-visible side effect: openCypher declares DELETE as -nodes only
+				// (#2212). Suppress effect counting for the span.
+				resumeCounting := suppressEffectCounting(op.mutator)
 				pathNodeLabels := op.mutator.NodeLabels(nodeKey)
 				op.releaseNodeConstraintValues(nodeKey, pathNodeLabels)
 				for _, lbl := range pathNodeLabels {
@@ -213,6 +217,7 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 				for k := range op.mutator.NodeProperties(nodeKey) {
 					op.mutator.DelNodeProperty(nodeKey, k)
 				}
+				resumeCounting()
 				op.mutator.RemoveNode(nodeKey)
 			}
 			*out = childRow
@@ -346,6 +351,10 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 		// treated as "in use" after the node is gone.
 		op.releaseNodeConstraintValues(nodeKey, deletedLabels)
 	}
+	// Stripping the node's labels and properties is internal teardown, not a
+	// user-visible side effect: openCypher declares DELETE as -nodes only
+	// (#2212). Suppress effect counting for the span.
+	resumeCounting := suppressEffectCounting(op.mutator)
 	// Remove all labels.
 	for _, lbl := range op.mutator.NodeLabels(nodeKey) {
 		op.mutator.RemoveNodeLabel(nodeKey, lbl)
@@ -354,6 +363,7 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 	for k := range op.mutator.NodeProperties(nodeKey) {
 		op.mutator.DelNodeProperty(nodeKey, k)
 	}
+	resumeCounting()
 	// Tombstone the node entity so AllNodesScan, count(*), and the
 	// Order accessor no longer see it (Merge1 [14] / Merge5 [20]).
 	op.mutator.RemoveNode(nodeKey)
