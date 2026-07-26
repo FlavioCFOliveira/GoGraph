@@ -218,3 +218,77 @@ func TestStatsRefreshProc_DoesNotNestTheBarrier(t *testing.T) {
 		t.Fatalf("returned %d rows, want 1", rows)
 	}
 }
+
+// TestStatsRefreshProc_ResultsUnchangedByRefresh is the correctness-relevant claim about
+// the statistics being inert (the other half of the audit's finding, still gated on the
+// margin-gating decision).
+//
+// Statistics are a planner INPUT. Refreshing them may change which plan is chosen, but it
+// must never change what a query RETURNS. This pins that: the same query set is run
+// before and after a rebuild and must produce identical results. It is what makes the
+// consumer half safe to add later — the gate already exists.
+func TestStatsRefreshProc_ResultsUnchangedByRefresh(t *testing.T) {
+	t.Parallel()
+	eng := statsProcEngine(t)
+
+	queries := []string{
+		`MATCH (n:Stat) RETURN count(n) AS c`,
+		`MATCH (n:Stat) WHERE n.v > 100 RETURN count(n) AS c`,
+		`MATCH (n:Stat) WHERE n.v = 42 RETURN n.v AS v`,
+		`MATCH (n:Stat) RETURN min(n.v) AS lo, max(n.v) AS hi`,
+		`MATCH (n:Stat) WHERE n.v >= 0 AND n.v < 50 RETURN count(n) AS c`,
+	}
+	drain := func(q string) []string {
+		res, err := eng.Run(context.Background(), q, nil)
+		if err != nil {
+			t.Fatalf("Run(%q): %v", q, err)
+		}
+		var out []string
+		for res.Next() {
+			row := ""
+			for i := range res.Columns() {
+				row += res.ValueAt(i).String() + "|"
+			}
+			out = append(out, row)
+		}
+		if err := res.Err(); err != nil {
+			t.Fatalf("Err(%q): %v", q, err)
+		}
+		if err := res.Close(); err != nil {
+			t.Fatalf("Close(%q): %v", q, err)
+		}
+		return out
+	}
+
+	before := make([][]string, len(queries))
+	for i, q := range queries {
+		before[i] = drain(q)
+	}
+
+	res, err := eng.Run(context.Background(), `CALL db.stats.refresh()`, nil)
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	for res.Next() { //nolint:revive // drain
+	}
+	if err := res.Err(); err != nil {
+		t.Fatalf("refresh Err: %v", err)
+	}
+	if err := res.Close(); err != nil {
+		t.Fatalf("refresh Close: %v", err)
+	}
+
+	for i, q := range queries {
+		after := drain(q)
+		if len(after) != len(before[i]) {
+			t.Fatalf("%q: %d rows before the refresh, %d after", q, len(before[i]), len(after))
+		}
+		for j := range after {
+			if after[j] != before[i][j] {
+				t.Fatalf("%q row %d changed across a statistics refresh: %q -> %q — "+
+					"statistics are a planner input and must never change a RESULT",
+					q, j, before[i][j], after[j])
+			}
+		}
+	}
+}
