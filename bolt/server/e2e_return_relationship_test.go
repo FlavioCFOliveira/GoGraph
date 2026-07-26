@@ -40,41 +40,38 @@ func TestE2E_ReturnRelationshipShape(t *testing.T) {
 		t.Fatalf("MATCH returned %d rows, want 1", len(rows))
 	}
 
-	relMap, ok := rows[0]["r"].(map[string]any)
+	rel, ok := rows[0]["r"].(neo4j.Relationship)
 	if !ok {
-		t.Fatalf("expected rel map (map[string]any), got %T: %v", rows[0]["r"], rows[0]["r"])
+		t.Fatalf("expected the driver to materialise a neo4j.Relationship, got %T: %v — the "+
+			"server is not sending the Bolt Relationship structure (#2189)", rows[0]["r"], rows[0]["r"])
 	}
 
 	// AC#1: Type equals seeded type string.
-	relType, ok := relMap["type"].(string)
-	if !ok {
-		t.Fatalf("rel 'type': expected string, got %T", relMap["type"])
-	}
-	if relType != "KNOWS" {
-		t.Errorf("rel type: got %q, want %q", relType, "KNOWS")
+	if rel.Type != "KNOWS" {
+		t.Errorf("rel type: got %q, want %q", rel.Type, "KNOWS")
 	}
 
-	// AC#2: StartElementId / EndElementId — server emits numeric "start" and
-	// "end" int64 values. String element IDs are not yet emitted.
-	// KNOWN GAP: string element IDs not available; numeric IDs verified instead.
-	startID, ok := relMap["start"].(int64)
-	if !ok {
-		t.Fatalf("rel 'start': expected int64, got %T", relMap["start"])
+	// AC#2: StartElementId / EndElementId. Since #2189 the server sends all three
+	// element ids, so these are real strings rather than the numeric-only fallback the
+	// map form left the driver to synthesise.
+	if rel.ElementId == "" {
+		t.Error("rel ElementId is empty: the server must send element_id")
 	}
-	endID, ok := relMap["end"].(int64)
-	if !ok {
-		t.Fatalf("rel 'end': expected int64, got %T", relMap["end"])
+	if rel.StartElementId == "" || rel.EndElementId == "" {
+		t.Errorf("rel StartElementId=%q EndElementId=%q: both must be sent",
+			rel.StartElementId, rel.EndElementId)
 	}
-	if startID == endID {
-		t.Errorf("rel start (%d) and end (%d) should differ", startID, endID)
+	if rel.StartElementId == rel.EndElementId {
+		t.Errorf("rel start (%s) and end (%s) element ids should differ",
+			rel.StartElementId, rel.EndElementId)
+	}
+	//nolint:staticcheck // StartId/EndId are supported until driver 6.0
+	if rel.StartId == rel.EndId {
+		t.Errorf("rel start (%d) and end (%d) should differ", rel.StartId, rel.EndId)
 	}
 
 	// AC#3: Properties map round-trips.
-	props, ok := relMap["properties"].(map[string]any)
-	if !ok {
-		t.Fatalf("rel 'properties': expected map[string]any, got %T", relMap["properties"])
-	}
-	if got, ok := props["since"].(int64); !ok || got != 2020 {
-		t.Errorf("property since: got %v (%T), want 2020 (int64)", props["since"], props["since"])
+	if got, ok := rel.Props["since"].(int64); !ok || got != 2020 {
+		t.Errorf("property since: got %v (%T), want 2020 (int64)", rel.Props["since"], rel.Props["since"])
 	}
 }

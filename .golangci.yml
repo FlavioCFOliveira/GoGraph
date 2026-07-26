@@ -143,6 +143,15 @@ linters:
       - linters: [gosec]
         path: "bolt/server/session\\.go"
         text: "G115"
+      # gosec G115 in bolt/server/entity_struct.go: the Bolt protocol types an
+      # entity id as a signed INTEGER, so encoding a graph.NodeID (uint64) onto
+      # the wire is necessarily a uint64 → int64 conversion. Node and
+      # relationship ids are assigned monotonically from 0, so the sign bit is
+      # never set for any reachable id. These are the same casts the map-shaped
+      # encoder in session.go made before #2189 moved them into this file.
+      - linters: [gosec]
+        path: "bolt/server/entity_struct\\.go"
+        text: "G115"
       # gosec G115 in ds/: int → int32 casts in union-find are bounded by the
       # caller-supplied n (node count); int32 represents up to ~2.1 billion nodes.
       - linters: [gosec]

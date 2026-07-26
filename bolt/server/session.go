@@ -2027,44 +2027,11 @@ func exprValueToPackstream(v expr.Value, boltMajor uint8) packstream.Value {
 	case expr.StringValue:
 		return string(x)
 	case expr.NodeValue:
-		props := make(map[string]packstream.Value, len(x.Properties))
-		for k, pv := range x.Properties {
-			props[k] = exprValueToPackstream(pv, boltMajor)
-		}
-		labels := make([]packstream.Value, len(x.Labels))
-		for i, l := range x.Labels {
-			labels[i] = l
-		}
-		return map[string]packstream.Value{
-			"id":         int64(x.ID),
-			"labels":     labels,
-			"properties": props,
-		}
+		return nodeToStruct(x, boltMajor)
 	case expr.RelationshipValue:
-		props := make(map[string]packstream.Value, len(x.Properties))
-		for k, pv := range x.Properties {
-			props[k] = exprValueToPackstream(pv, boltMajor)
-		}
-		return map[string]packstream.Value{
-			"id":         int64(x.ID),
-			"start":      int64(x.StartID),
-			"end":        int64(x.EndID),
-			"type":       x.Type,
-			"properties": props,
-		}
+		return relationshipToStruct(x, boltMajor)
 	case expr.PathValue:
-		nodes := make([]packstream.Value, len(x.Nodes))
-		for i, n := range x.Nodes {
-			nodes[i] = exprValueToPackstream(n, boltMajor)
-		}
-		rels := make([]packstream.Value, len(x.Relationships))
-		for i, r := range x.Relationships {
-			rels[i] = exprValueToPackstream(r, boltMajor)
-		}
-		return map[string]packstream.Value{
-			"nodes":         nodes,
-			"relationships": rels,
-		}
+		return pathToStruct(x, boltMajor)
 	case expr.MapValue:
 		m := make(map[string]packstream.Value, len(x))
 		for k, mv := range x {

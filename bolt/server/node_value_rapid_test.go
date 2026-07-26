@@ -18,7 +18,7 @@ package server
 
 import (
 	"fmt"
-	"reflect"
+	"strconv"
 	"testing"
 
 	"pgregory.net/rapid"
@@ -52,36 +52,42 @@ func genNodeValue() *rapid.Generator[expr.NodeValue] {
 	})
 }
 
-// TestNodeValueRapid_RoundTrip verifies that exprValueToPackstream produces a
-// correct map representation of NodeValue over 200 rapid iterations.
+// TestNodeValueRapid_RoundTrip verifies that exprValueToPackstream produces a correct
+// Bolt NODE STRUCTURE for a NodeValue over 200 rapid iterations.
 //
-// The encoded map must have:
-//   - "id"         → int64(nv.ID)
-//   - "labels"     → []packstream.Value with label strings in source order
-//   - "properties" → map[string]packstream.Value with string values
+// Since #2189 a node goes on the wire as the 'N' (0x4E) structure the Bolt protocol
+// specifies, not as a PackStream map, so the driver can materialise it as a
+// dbtype.Node. At Bolt 5 the field order is [id, labels, properties, element_id]; the
+// driver asserts that exact count, so the arity check below is not incidental.
 func TestNodeValueRapid_RoundTrip(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		nv := genNodeValue().Draw(rt, "nv")
 
 		got := exprValueToPackstream(nv, 5)
-		m, ok := got.(map[string]packstream.Value)
+		st, ok := got.(packstream.Struct)
 		if !ok {
-			rt.Fatalf("expected map[string]packstream.Value, got %T", got)
+			rt.Fatalf("expected packstream.Struct, got %T", got)
+		}
+		if st.Tag != tagNode {
+			rt.Fatalf("tag: want %#x (Node), got %#x", tagNode, st.Tag)
+		}
+		if len(st.Fields) != 4 {
+			rt.Fatalf("Bolt 5 Node must carry 4 fields (the driver asserts the count), got %d", len(st.Fields))
 		}
 
-		// id field.
-		id, ok := m["id"].(int64)
+		// Field 0: id.
+		id, ok := st.Fields[0].(int64)
 		if !ok {
-			rt.Fatalf("id field: expected int64, got %T (%v)", m["id"], m["id"])
+			rt.Fatalf("id field: expected int64, got %T (%v)", st.Fields[0], st.Fields[0])
 		}
 		if uint64(id) != nv.ID {
 			rt.Fatalf("id: want %d, got %d", nv.ID, id)
 		}
 
-		// labels field: order must match source order.
-		labels, ok := m["labels"].([]packstream.Value)
+		// Field 1: labels, in source order.
+		labels, ok := st.Fields[1].([]packstream.Value)
 		if !ok {
-			rt.Fatalf("labels field: expected []packstream.Value, got %T", m["labels"])
+			rt.Fatalf("labels field: expected []packstream.Value, got %T", st.Fields[1])
 		}
 		if len(labels) != len(nv.Labels) {
 			rt.Fatalf("labels length: want %d, got %d", len(nv.Labels), len(labels))
@@ -96,10 +102,10 @@ func TestNodeValueRapid_RoundTrip(t *testing.T) {
 			}
 		}
 
-		// properties field.
-		props, ok := m["properties"].(map[string]packstream.Value)
+		// Field 2: properties.
+		props, ok := st.Fields[2].(map[string]packstream.Value)
 		if !ok {
-			rt.Fatalf("properties field: expected map[string]packstream.Value, got %T", m["properties"])
+			rt.Fatalf("properties field: expected map[string]packstream.Value, got %T", st.Fields[2])
 		}
 		if len(props) != len(nv.Properties) {
 			rt.Fatalf("properties length: want %d, got %d", len(nv.Properties), len(props))
@@ -115,11 +121,33 @@ func TestNodeValueRapid_RoundTrip(t *testing.T) {
 			}
 		}
 
-		// Verify there are no unexpected fields beyond id/labels/properties.
-		if len(m) != 3 {
-			rt.Fatalf("map has unexpected fields: %v", reflect.ValueOf(m).MapKeys())
+		// Field 3: element_id — the durable id in decimal, identical to what the
+		// Cypher elementId() function returns for the same entity.
+		eid, ok := st.Fields[3].(string)
+		if !ok {
+			rt.Fatalf("element_id field: expected string, got %T", st.Fields[3])
+		}
+		if want := strconv.FormatUint(nv.ID, 10); eid != want {
+			rt.Fatalf("element_id: want %q, got %q", want, eid)
 		}
 	})
+}
+
+// TestNodeValueRapid_Bolt4OmitsElementID pins the version split: element_id was added in
+// Bolt 5, and a Bolt 4 client asserts a THREE-field Node, so sending four would be a
+// protocol error on that connection.
+func TestNodeValueRapid_Bolt4OmitsElementID(t *testing.T) {
+	nv := expr.NodeValue{ID: 7, Labels: []string{"A"}, Properties: expr.MapValue{}}
+	st, ok := exprValueToPackstream(nv, 4).(packstream.Struct)
+	if !ok {
+		t.Fatalf("expected packstream.Struct")
+	}
+	if st.Tag != tagNode {
+		t.Fatalf("tag: want %#x, got %#x", tagNode, st.Tag)
+	}
+	if len(st.Fields) != 3 {
+		t.Fatalf("Bolt 4 Node must carry 3 fields (no element_id), got %d", len(st.Fields))
+	}
 }
 
 // TestNodeValueRapid_LabelOrderPreserved verifies label order preservation
@@ -132,8 +160,8 @@ func TestNodeValueRapid_LabelOrderPreserved(t *testing.T) {
 		Properties: expr.MapValue{},
 	}
 	got := exprValueToPackstream(nv, 5)
-	m := got.(map[string]packstream.Value)     //nolint:forcetypeassert // known type
-	labels := m["labels"].([]packstream.Value) //nolint:forcetypeassert // known type
+	st := got.(packstream.Struct)               //nolint:forcetypeassert // known type
+	labels := st.Fields[1].([]packstream.Value) //nolint:forcetypeassert // known type
 	want := []string{"Z", "A", "M", "B"}
 	for i, wl := range want {
 		if labels[i].(string) != wl { //nolint:forcetypeassert // known type

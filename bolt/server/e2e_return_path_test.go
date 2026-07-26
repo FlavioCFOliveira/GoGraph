@@ -44,59 +44,60 @@ func TestE2E_ReturnPathShape(t *testing.T) {
 		t.Fatalf("MATCH returned %d paths, want 1", len(rows))
 	}
 
-	// AC#1–3: path map must carry "nodes" and "relationships".
-	// KNOWN GAP: driver decodes the server's map[string]any path, not neo4j.Path.
-	// Numeric node IDs and relationship types are verified; string ElementIds
-	// are not emitted by the server.
+	// Since #2189 the server sends the Bolt 'P' structure, so the driver materialises a
+	// real neo4j.Path — nodes as neo4j.Node and relationships REBUILT from the path's
+	// index pairs, which means this also checks that the indices this server emits are
+	// the ones the driver's buildPath expects. A wrong index would surface as a wrong
+	// relationship count or as endpoints that do not chain.
 	pathVal := rows[0]["p"]
-	pathMap, ok := pathVal.(map[string]any)
+	path, ok := pathVal.(neo4j.Path)
 	if !ok {
-		t.Fatalf("path value: expected map[string]any, got %T: %v", pathVal, pathVal)
-	}
-
-	nodes, ok := pathMap["nodes"].([]any)
-	if !ok {
-		t.Fatalf("path 'nodes': expected []any, got %T", pathMap["nodes"])
-	}
-
-	rels, ok := pathMap["relationships"].([]any)
-	if !ok {
-		t.Fatalf("path 'relationships': expected []any, got %T", pathMap["relationships"])
+		t.Fatalf("path value: expected the driver to materialise a neo4j.Path, got %T: %v — "+
+			"the server is not sending the Bolt Path structure (#2189)", pathVal, pathVal)
 	}
 
 	// AC#1: Path length matches seeded walk: 3 nodes, 2 relationships.
-	if len(nodes) != 3 {
-		t.Errorf("path nodes: got %d, want 3", len(nodes))
+	if len(path.Nodes) != 3 {
+		t.Errorf("path nodes: got %d, want 3", len(path.Nodes))
 	}
-	if len(rels) != 2 {
-		t.Errorf("path relationships: got %d, want 2", len(rels))
+	if len(path.Relationships) != 2 {
+		t.Errorf("path relationships: got %d, want 2", len(path.Relationships))
 	}
 
-	// AC#2: Node IDs are present and distinct.
-	nodeIDs := make(map[int64]struct{}, len(nodes))
-	for i, n := range nodes {
-		nm := asNodeMap(t, n)
-		id := nodeID(t, nm)
+	// AC#2: Node ids and element ids are present and distinct.
+	nodeIDs := make(map[int64]struct{}, len(path.Nodes))
+	for i, n := range path.Nodes {
+		id := nodeID(t, n)
 		if _, dup := nodeIDs[id]; dup {
 			t.Errorf("node[%d]: duplicate id %d in path nodes", i, id)
 		}
 		nodeIDs[id] = struct{}{}
+		if n.ElementId == "" {
+			t.Errorf("node[%d]: empty ElementId", i)
+		}
 	}
 
-	// AC#3: Relationship IDs are present and distinct.
-	relIDs := make(map[int64]struct{}, len(rels))
-	for i, r := range rels {
-		rm, ok := r.(map[string]any)
-		if !ok {
-			t.Fatalf("path rel[%d]: expected map[string]any, got %T", i, r)
-		}
-		rid, ok := rm["id"].(int64)
-		if !ok {
-			t.Fatalf("path rel[%d] 'id': expected int64, got %T", i, rm["id"])
-		}
+	// AC#3: Relationship ids are present and distinct, and the rebuilt relationships
+	// CHAIN — each hop's start is the previous hop's end. That is the property the index
+	// pairs exist to carry, so it fails if the relationship index sign or the node index
+	// is wrong.
+	relIDs := make(map[int64]struct{}, len(path.Relationships))
+	for i, r := range path.Relationships {
+		rid := r.Id //nolint:staticcheck // Id is supported until driver 6.0
 		if _, dup := relIDs[rid]; dup {
 			t.Errorf("path rel[%d]: duplicate id %d", i, rid)
 		}
 		relIDs[rid] = struct{}{}
+		if r.ElementId == "" {
+			t.Errorf("path rel[%d]: empty ElementId", i)
+		}
+		// Hop i must join node i to node i+1, in one direction or the other.
+		from := nodeID(t, path.Nodes[i])
+		to := nodeID(t, path.Nodes[i+1])
+		//nolint:staticcheck // StartId/EndId are supported until driver 6.0
+		if !(r.StartId == from && r.EndId == to) && !(r.StartId == to && r.EndId == from) {
+			t.Errorf("path rel[%d] joins (%d, %d) but hop %d is between nodes %d and %d: "+
+				"the path index pair is wrong", i, r.StartId, r.EndId, i, from, to)
+		}
 	}
 }

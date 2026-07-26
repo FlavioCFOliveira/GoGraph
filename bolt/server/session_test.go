@@ -776,17 +776,18 @@ func TestExprValueToPackstream_NodeValue(t *testing.T) {
 			"name": expr.StringValue("Alice"),
 		},
 	}
-	got := exprValueToPackstream(nv, 5)
-	m, ok := got.(map[string]packstream.Value)
-	if !ok {
-		t.Fatalf("expected map, got %T", got)
+	n := decodeNode(t, exprValueToPackstream(nv, 5))
+	if n.ID != 42 {
+		t.Errorf("id: got %v, want 42", n.ID)
 	}
-	if m["id"] != int64(42) {
-		t.Errorf("id: got %v", m["id"])
+	if len(n.Labels) != 1 || n.Labels[0] != "Person" {
+		t.Errorf("labels: got %v, want [Person]", n.Labels)
 	}
-	labels, ok := m["labels"].([]packstream.Value)
-	if !ok || len(labels) != 1 {
-		t.Errorf("labels: got %v", m["labels"])
+	if n.Props["name"] != "Alice" {
+		t.Errorf("properties[name]: got %v, want Alice", n.Props["name"])
+	}
+	if n.ElementID != "42" {
+		t.Errorf("element_id: got %q, want \"42\" (the durable id in decimal, as elementId() returns)", n.ElementID)
 	}
 }
 
@@ -800,16 +801,22 @@ func TestExprValueToPackstream_RelationshipValue(t *testing.T) {
 			"since": expr.IntegerValue(2020),
 		},
 	}
-	got := exprValueToPackstream(rv, 5)
-	m, ok := got.(map[string]packstream.Value)
-	if !ok {
-		t.Fatalf("expected map, got %T", got)
+	r := decodeRel(t, exprValueToPackstream(rv, 5))
+	if r.ID != 10 {
+		t.Errorf("id: got %v, want 10", r.ID)
 	}
-	if m["id"] != int64(10) {
-		t.Errorf("id: got %v", m["id"])
+	if r.Type != "KNOWS" {
+		t.Errorf("type: got %v, want KNOWS", r.Type)
 	}
-	if m["type"] != "KNOWS" {
-		t.Errorf("type: got %v", m["type"])
+	if r.StartID != 1 || r.EndID != 2 {
+		t.Errorf("endpoints: got (%d, %d), want (1, 2)", r.StartID, r.EndID)
+	}
+	if r.Props["since"] != int64(2020) {
+		t.Errorf("properties[since]: got %v, want 2020", r.Props["since"])
+	}
+	if r.ElementID != "10" || r.StartEID != "1" || r.EndEID != "2" {
+		t.Errorf("element ids: got (%q, %q, %q), want (\"10\", \"1\", \"2\")",
+			r.ElementID, r.StartEID, r.EndEID)
 	}
 }
 
@@ -821,18 +828,69 @@ func TestExprValueToPackstream_PathValue(t *testing.T) {
 		Nodes:         []expr.NodeValue{n1, n2},
 		Relationships: []expr.RelationshipValue{r1},
 	}
-	got := exprValueToPackstream(pv, 5)
-	m, ok := got.(map[string]packstream.Value)
-	if !ok {
-		t.Fatalf("expected map, got %T", got)
+	p := decodePath(t, exprValueToPackstream(pv, 5))
+	if len(p.Nodes) != 2 {
+		t.Fatalf("nodes: got %d, want 2", len(p.Nodes))
 	}
-	nodes, ok := m["nodes"].([]packstream.Value)
-	if !ok || len(nodes) != 2 {
-		t.Errorf("nodes: got %v", m["nodes"])
+	if len(p.Rels) != 1 {
+		t.Fatalf("relationships: got %d, want 1", len(p.Rels))
 	}
-	rels, ok := m["relationships"].([]packstream.Value)
-	if !ok || len(rels) != 1 {
-		t.Errorf("relationships: got %v", m["relationships"])
+	// A path carries UNBOUND relationships: the endpoints come from the indices.
+	id, typ, _, eid := decodeUnboundRel(t, p.Rels[0])
+	if id != 5 || typ != "REL" || eid != "5" {
+		t.Errorf("unbound relationship: got (%d, %q, %q), want (5, \"REL\", \"5\")", id, typ, eid)
+	}
+	// One hop, traversed forward (r1 starts at n1), so the pair is (+1, 1).
+	if len(p.Indices) != 2 {
+		t.Fatalf("indices: got %v, want one (relationship, node) pair", p.Indices)
+	}
+	if p.Indices[0] != int64(1) {
+		t.Errorf("relationship index: got %v, want +1 (one-based, forward)", p.Indices[0])
+	}
+	if p.Indices[1] != int64(1) {
+		t.Errorf("node index: got %v, want 1 (zero-based, the hop's end node)", p.Indices[1])
+	}
+}
+
+// TestExprValueToPackstream_PathValue_ReverseHop pins the sign rule that makes a
+// reverse-traversed hop round-trip with its endpoints the right way round: the
+// relationship index is NEGATIVE when the relationship does not start at the hop's
+// source node, and the driver then resolves it as relNodes[(-index)-1].
+func TestExprValueToPackstream_PathValue_ReverseHop(t *testing.T) {
+	n1 := expr.NodeValue{ID: 1, Labels: []string{"A"}, Properties: expr.MapValue{}}
+	n2 := expr.NodeValue{ID: 2, Labels: []string{"B"}, Properties: expr.MapValue{}}
+	// The relationship runs 2 -> 1, but the path walks n1 -> n2, so the hop is REVERSE.
+	rev := expr.RelationshipValue{ID: 5, StartID: 2, EndID: 1, Type: "REL", Properties: expr.MapValue{}}
+	pv := expr.PathValue{Nodes: []expr.NodeValue{n1, n2}, Relationships: []expr.RelationshipValue{rev}}
+
+	p := decodePath(t, exprValueToPackstream(pv, 5))
+	if len(p.Indices) != 2 {
+		t.Fatalf("indices: got %v, want one pair", p.Indices)
+	}
+	if p.Indices[0] != int64(-1) {
+		t.Errorf("relationship index: got %v, want -1 (reverse traversal)", p.Indices[0])
+	}
+	if p.Indices[1] != int64(1) {
+		t.Errorf("node index: got %v, want 1", p.Indices[1])
+	}
+}
+
+// TestExprValueToPackstream_PathValue_SingleNode pins the zero-length path: openCypher
+// produces a single disconnected node, and the driver's buildPath treats an EMPTY index
+// list as exactly that rather than as malformed.
+func TestExprValueToPackstream_PathValue_SingleNode(t *testing.T) {
+	only := expr.NodeValue{ID: 7, Labels: []string{"A"}, Properties: expr.MapValue{}}
+	pv := expr.PathValue{Nodes: []expr.NodeValue{only}}
+
+	p := decodePath(t, exprValueToPackstream(pv, 5))
+	if len(p.Nodes) != 1 {
+		t.Fatalf("nodes: got %d, want 1", len(p.Nodes))
+	}
+	if len(p.Rels) != 0 {
+		t.Fatalf("relationships: got %d, want 0", len(p.Rels))
+	}
+	if len(p.Indices) != 0 {
+		t.Fatalf("indices: got %v, want empty", p.Indices)
 	}
 }
 

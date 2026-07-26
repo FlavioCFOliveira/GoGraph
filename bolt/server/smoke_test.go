@@ -2,8 +2,11 @@ package server_test
 
 import (
 	"crypto/tls"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
 
 	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
 	"github.com/FlavioCFOliveira/GoGraph/bolt/server"
@@ -48,25 +51,13 @@ func TestBoltSmokeTest_CreateMatchReturn(t *testing.T) {
 	if len(records) != 2 {
 		t.Fatalf("expected 2 rows from MATCH :Person, got %d", len(records))
 	}
-	// Each row must contain exactly one value: the node payload as a map with
-	// the documented id / labels / properties keys.
+	// Each row must contain exactly one value: the node as the Bolt 'N' STRUCTURE
+	// (#2189), not a PackStream map.
 	for i, row := range records {
 		if len(row) != 1 {
 			t.Fatalf("row %d: expected 1 field, got %d", i, len(row))
 		}
-		m, ok := row[0].(map[string]any)
-		if !ok {
-			t.Fatalf("row %d: expected node map, got %T (%v)", i, row[0], row[0])
-		}
-		if _, ok := m["id"].(int64); !ok {
-			t.Errorf("row %d: node[\"id\"] = %T, want int64", i, m["id"])
-		}
-		if _, ok := m["labels"]; !ok {
-			t.Errorf("row %d: node missing \"labels\"", i)
-		}
-		if _, ok := m["properties"].(map[string]any); !ok {
-			t.Errorf("row %d: node[\"properties\"] = %T, want map[string]any", i, m["properties"])
-		}
+		assertWireNode(t, i, row[0])
 	}
 
 	c.goodbye(t)
@@ -107,16 +98,7 @@ func TestBoltSmokeTest_ExplicitTx(t *testing.T) {
 	if len(records[0]) != 1 {
 		t.Fatalf("expected 1 field per row, got %d", len(records[0]))
 	}
-	m, ok := records[0][0].(map[string]any)
-	if !ok {
-		t.Fatalf("expected node map, got %T (%v)", records[0][0], records[0][0])
-	}
-	if _, ok := m["id"].(int64); !ok {
-		t.Errorf("node[\"id\"] = %T, want int64", m["id"])
-	}
-	if _, ok := m["properties"].(map[string]any); !ok {
-		t.Errorf("node[\"properties\"] = %T, want map[string]any", m["properties"])
-	}
+	assertWireNode(t, 0, records[0][0])
 
 	c.goodbye(t)
 }
@@ -244,4 +226,47 @@ func TestBoltSmokeTest_Routing(t *testing.T) {
 	}
 
 	c.goodbye(t)
+}
+
+// assertWireNode asserts that a value decoded straight off the wire is the Bolt Node
+// STRUCTURE: tag 0x4E ('N') with the Bolt 5 field order
+// [id, labels, properties, element_id]. Before #2189 the server sent a PackStream map
+// here, which is why the official driver could not materialise a neo4j.Node at all.
+//
+// It reads the raw decode rather than a driver type because these smoke tests speak the
+// protocol themselves — that is the point of them, and it is what makes this the
+// wire-capture evidence for the change.
+func assertWireNode(t *testing.T, row int, v any) {
+	t.Helper()
+	st, ok := v.(packstream.Struct)
+	if !ok {
+		t.Fatalf("row %d: expected the Bolt Node structure, got %T (%v)", row, v, v)
+	}
+	if st.Tag != 0x4E {
+		t.Fatalf("row %d: node tag = %#x, want 0x4E ('N')", row, st.Tag)
+	}
+	if len(st.Fields) != 4 {
+		t.Fatalf("row %d: node has %d fields, want 4 [id, labels, properties, element_id]",
+			row, len(st.Fields))
+	}
+	id, ok := st.Fields[0].(int64)
+	if !ok {
+		t.Errorf("row %d: node id = %T, want int64", row, st.Fields[0])
+	}
+	if _, ok := st.Fields[1].([]any); !ok {
+		if _, ok2 := st.Fields[1].([]packstream.Value); !ok2 {
+			t.Errorf("row %d: node labels = %T, want a list", row, st.Fields[1])
+		}
+	}
+	if _, ok := st.Fields[2].(map[string]any); !ok {
+		t.Errorf("row %d: node properties = %T, want a map", row, st.Fields[2])
+	}
+	eid, ok := st.Fields[3].(string)
+	if !ok {
+		t.Fatalf("row %d: node element_id = %T, want string", row, st.Fields[3])
+	}
+	// element_id is the durable id in decimal, the same string elementId() returns.
+	if want := strconv.FormatInt(id, 10); eid != want {
+		t.Errorf("row %d: node element_id = %q, want %q", row, eid, want)
+	}
 }

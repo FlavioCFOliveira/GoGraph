@@ -20,12 +20,12 @@ package server
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
 	"pgregory.net/rapid"
 
-	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
@@ -53,57 +53,38 @@ func genRelationshipValue() *rapid.Generator[expr.RelationshipValue] {
 	})
 }
 
-// TestRelValueRapid_RoundTrip verifies that exprValueToPackstream produces a
-// correct map representation of RelationshipValue over 200 rapid iterations.
+// TestRelValueRapid_RoundTrip verifies that exprValueToPackstream produces a correct
+// Bolt RELATIONSHIP STRUCTURE for a RelationshipValue over 200 rapid iterations.
 //
-// The encoded map must have:
-//   - "id"         → int64(rv.ID)
-//   - "start"      → int64(rv.StartID)
-//   - "end"        → int64(rv.EndID)
-//   - "type"       → rv.Type (string)
-//   - "properties" → map[string]packstream.Value
+// Since #2189 a relationship goes on the wire as the 'R' (0x52) structure the Bolt
+// protocol specifies. At Bolt 5 the field order is [id, start_id, end_id, type,
+// properties, element_id, start_element_id, end_element_id] and the driver asserts that
+// exact count of eight, so the arity check below is not incidental.
 func TestRelValueRapid_RoundTrip(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		rv := genRelationshipValue().Draw(rt, "rv")
 
-		got := exprValueToPackstream(rv, 5)
-		m, ok := got.(map[string]packstream.Value)
-		if !ok {
-			rt.Fatalf("expected map[string]packstream.Value, got %T", got)
-		}
+		r := decodeRel(rt, exprValueToPackstream(rv, 5))
 
-		checkInt64Field := func(field string, want uint64) {
+		checkInt64Field := func(field string, got int64, want uint64) {
 			rt.Helper()
-			v, ok := m[field].(int64)
-			if !ok {
-				rt.Fatalf("%s field: expected int64, got %T (%v)", field, m[field], m[field])
-			}
-			if uint64(v) != want {
-				rt.Fatalf("%s: want %d, got %d", field, want, v)
+			if uint64(got) != want {
+				rt.Fatalf("%s: want %d, got %d", field, want, got)
 			}
 		}
+		checkInt64Field("id", r.ID, rv.ID)
+		checkInt64Field("start_id", r.StartID, rv.StartID)
+		checkInt64Field("end_id", r.EndID, rv.EndID)
 
-		checkInt64Field("id", rv.ID)
-		checkInt64Field("start", rv.StartID)
-		checkInt64Field("end", rv.EndID)
-
-		typeName, ok := m["type"].(string)
-		if !ok {
-			rt.Fatalf("type field: expected string, got %T", m["type"])
-		}
-		if typeName != rv.Type {
-			rt.Fatalf("type: want %q, got %q", rv.Type, typeName)
+		if r.Type != rv.Type {
+			rt.Fatalf("type: want %q, got %q", rv.Type, r.Type)
 		}
 
-		props, ok := m["properties"].(map[string]packstream.Value)
-		if !ok {
-			rt.Fatalf("properties field: expected map, got %T", m["properties"])
-		}
-		if len(props) != len(rv.Properties) {
-			rt.Fatalf("properties length: want %d, got %d", len(rv.Properties), len(props))
+		if len(r.Props) != len(rv.Properties) {
+			rt.Fatalf("properties length: want %d, got %d", len(rv.Properties), len(r.Props))
 		}
 		for k, wantVal := range rv.Properties {
-			gotVal, exists := props[k]
+			gotVal, exists := r.Props[k]
 			if !exists {
 				rt.Fatalf("properties: key %q missing", k)
 			}
@@ -113,9 +94,16 @@ func TestRelValueRapid_RoundTrip(t *testing.T) {
 			}
 		}
 
-		// No unexpected fields.
-		if len(m) != 5 {
-			rt.Fatalf("map has unexpected number of fields: %d (expected 5)", len(m))
+		// The three element ids are the corresponding durable ids in decimal, the same
+		// strings the Cypher elementId() function returns.
+		if want := strconv.FormatUint(rv.ID, 10); r.ElementID != want {
+			rt.Fatalf("element_id: want %q, got %q", want, r.ElementID)
+		}
+		if want := strconv.FormatUint(rv.StartID, 10); r.StartEID != want {
+			rt.Fatalf("start_element_id: want %q, got %q", want, r.StartEID)
+		}
+		if want := strconv.FormatUint(rv.EndID, 10); r.EndEID != want {
+			rt.Fatalf("end_element_id: want %q, got %q", want, r.EndEID)
 		}
 	})
 }
@@ -142,17 +130,9 @@ func TestRelValueTypeName_Boundaries(t *testing.T) {
 				Type:       typeName,
 				Properties: expr.MapValue{},
 			}
-			got := exprValueToPackstream(rv, 5)
-			m, ok := got.(map[string]packstream.Value)
-			if !ok {
-				t.Fatalf("expected map, got %T", got)
-			}
-			gotType, ok := m["type"].(string)
-			if !ok {
-				t.Fatalf("type field: expected string, got %T", m["type"])
-			}
-			if len(gotType) != tc.length {
-				t.Errorf("type length: want %d, got %d", tc.length, len(gotType))
+			r := decodeRel(t, exprValueToPackstream(rv, 5))
+			if len(r.Type) != tc.length {
+				t.Errorf("type length: want %d, got %d", tc.length, len(r.Type))
 			}
 		})
 	}

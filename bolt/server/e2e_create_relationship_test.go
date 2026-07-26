@@ -49,15 +49,11 @@ func TestE2E_CreateRelationshipWithProperties(t *testing.T) {
 		t.Fatalf("MATCH returned %d rows, want 1", len(rows))
 	}
 
-	relMap, ok := rows[0]["r"].(map[string]any)
+	rel, ok := rows[0]["r"].(neo4j.Relationship)
 	if !ok {
-		t.Fatalf("rel value: expected map[string]any, got %T", rows[0]["r"])
+		t.Fatalf("rel value: expected neo4j.Relationship, got %T", rows[0]["r"])
 	}
-
-	props, ok := relMap["properties"].(map[string]any)
-	if !ok {
-		t.Fatalf("rel 'properties': expected map[string]any, got %T", relMap["properties"])
-	}
+	props := rel.Props
 
 	if got, ok := props["weight"].(float64); !ok || got != 1.5 {
 		t.Errorf("property weight: got %v (%T), want 1.5 (float64)", props["weight"], props["weight"])

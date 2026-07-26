@@ -24,7 +24,6 @@ package server_test
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -63,52 +62,47 @@ func newDriverForTest(t *testing.T) (neo4j.DriverWithContext, string) {
 	return driver, addr
 }
 
-// asNodeMap asserts that v is a node map (map[string]any) and returns it.
-// Node maps carry keys "id" (int64), "labels" ([]any), "properties" (map[string]any).
-func asNodeMap(t *testing.T, v any) map[string]any {
+// asNodeMap asserts that v is a node the official driver materialised as a
+// dbtype.Node and returns it.
+//
+// Before #2189 the server sent nodes as plain PackStream maps, so the driver could only
+// hand back a map[string]any and these helpers read its "id"/"labels"/"properties" keys.
+// The server now sends the Bolt 'N' structure, so the driver materialises a real
+// dbtype.Node — which is the whole point of that task, and is why this asserts the
+// driver's own type rather than a map. The name is kept so the call sites read unchanged.
+func asNodeMap(t *testing.T, v any) neo4j.Node {
 	t.Helper()
-	m, ok := v.(map[string]any)
+	n, ok := v.(neo4j.Node)
 	if !ok {
-		t.Fatalf("expected node map (map[string]any), got %T: %v", v, v)
+		t.Fatalf("expected the driver to materialise a neo4j.Node, got %T: %v — the server "+
+			"is not sending the Bolt Node structure (#2189)", v, v)
 	}
-	return m
+	return n
 }
 
-// nodeProps extracts the "properties" sub-map from a node map.
-func nodeProps(t *testing.T, nodeMap map[string]any) map[string]any {
+// nodeProps returns the node's properties.
+func nodeProps(t *testing.T, n neo4j.Node) map[string]any {
 	t.Helper()
-	props, ok := nodeMap["properties"].(map[string]any)
-	if !ok {
-		t.Fatalf("node 'properties': expected map[string]any, got %T", nodeMap["properties"])
-	}
-	return props
+	return n.Props
 }
 
-// nodeLabels extracts the "labels" slice from a node map.
-func nodeLabels(t *testing.T, nodeMap map[string]any) []any {
+// nodeLabels returns the node's labels.
+func nodeLabels(t *testing.T, n neo4j.Node) []string {
 	t.Helper()
-	labels, ok := nodeMap["labels"].([]any)
-	if !ok {
-		t.Fatalf("node 'labels': expected []any, got %T", nodeMap["labels"])
-	}
-	return labels
+	return n.Labels
 }
 
-// nodeID extracts the "id" int64 from a node map.
-func nodeID(t *testing.T, nodeMap map[string]any) int64 {
+// nodeID returns the node's numeric id.
+func nodeID(t *testing.T, n neo4j.Node) int64 {
 	t.Helper()
-	id, ok := nodeMap["id"].(int64)
-	if !ok {
-		t.Fatalf("node 'id': expected int64, got %T", nodeMap["id"])
-	}
-	return id
+	return n.Id //nolint:staticcheck // Id is supported until driver 6.0; ElementId is asserted separately
 }
 
-// labelSet converts []any labels into an order-independent set of strings.
-func labelSet(labels []any) map[string]struct{} {
+// labelSet converts labels into an order-independent set.
+func labelSet(labels []string) map[string]struct{} {
 	out := make(map[string]struct{}, len(labels))
 	for _, l := range labels {
-		out[fmt.Sprintf("%v", l)] = struct{}{}
+		out[l] = struct{}{}
 	}
 	return out
 }

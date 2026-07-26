@@ -18,7 +18,6 @@ import (
 
 	"pgregory.net/rapid"
 
-	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
@@ -50,73 +49,68 @@ func genPathValue() *rapid.Generator[expr.PathValue] {
 	})
 }
 
-// TestPathValueRapid_RoundTrip verifies that exprValueToPackstream produces a
-// correct map representation of PathValue over 200 rapid iterations.
+// TestPathValueRapid_RoundTrip verifies that exprValueToPackstream produces a correct
+// Bolt PATH STRUCTURE for a PathValue over 200 rapid iterations.
 //
-// The encoded map must have:
-//   - "nodes"         → []packstream.Value (each is a node map)
-//   - "relationships" → []packstream.Value (each is a rel map)
-//
-// Node and relationship order must match source order.
+// Since #2189 a path goes on the wire as the 'P' (0x50) structure the Bolt protocol
+// specifies: [nodes, unbound_relationships, indices]. Nodes are 'N' structures and the
+// relationships are UNBOUND ('r') — a path's relationships carry no endpoints, because
+// the indices supply them. This encoder emits both lists in path order, so hop i uses
+// node index i+1 and relationship index ±(i+1).
 func TestPathValueRapid_RoundTrip(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		pv := genPathValue().Draw(rt, "pv")
 
-		got := exprValueToPackstream(pv, 5)
-		m, ok := got.(map[string]packstream.Value)
-		if !ok {
-			rt.Fatalf("expected map[string]packstream.Value, got %T", got)
+		p := decodePath(rt, exprValueToPackstream(pv, 5))
+		if len(p.Nodes) != len(pv.Nodes) {
+			rt.Fatalf("nodes length: want %d, got %d", len(pv.Nodes), len(p.Nodes))
+		}
+		if len(p.Rels) != len(pv.Relationships) {
+			rt.Fatalf("relationships length: want %d, got %d", len(pv.Relationships), len(p.Rels))
 		}
 
-		nodes, ok := m["nodes"].([]packstream.Value)
-		if !ok {
-			rt.Fatalf("nodes field: expected []packstream.Value, got %T", m["nodes"])
-		}
-		if len(nodes) != len(pv.Nodes) {
-			rt.Fatalf("nodes length: want %d, got %d", len(pv.Nodes), len(nodes))
-		}
-
-		rels, ok := m["relationships"].([]packstream.Value)
-		if !ok {
-			rt.Fatalf("relationships field: expected []packstream.Value, got %T", m["relationships"])
-		}
-		if len(rels) != len(pv.Relationships) {
-			rt.Fatalf("relationships length: want %d, got %d", len(pv.Relationships), len(rels))
-		}
-
-		// Verify each node's ID preserves source order.
+		// Each node is an 'N' structure and preserves source order.
 		for i, wantNode := range pv.Nodes {
-			nm, ok := nodes[i].(map[string]packstream.Value)
-			if !ok {
-				rt.Fatalf("nodes[%d]: expected map, got %T", i, nodes[i])
-			}
-			gotID, ok := nm["id"].(int64)
-			if !ok {
-				rt.Fatalf("nodes[%d].id: expected int64, got %T", i, nm["id"])
-			}
-			if uint64(gotID) != wantNode.ID {
-				rt.Fatalf("nodes[%d].id: want %d, got %d", i, wantNode.ID, gotID)
+			gotNode := decodeNode(rt, p.Nodes[i])
+			if uint64(gotNode.ID) != wantNode.ID {
+				rt.Fatalf("nodes[%d].id: want %d, got %d", i, wantNode.ID, gotNode.ID)
 			}
 		}
 
-		// Verify each relationship's ID preserves source order.
+		// Each relationship is an UNBOUND 'r' structure and preserves source order.
 		for i, wantRel := range pv.Relationships {
-			rm, ok := rels[i].(map[string]packstream.Value)
-			if !ok {
-				rt.Fatalf("rels[%d]: expected map, got %T", i, rels[i])
-			}
-			gotID, ok := rm["id"].(int64)
-			if !ok {
-				rt.Fatalf("rels[%d].id: expected int64, got %T", i, rm["id"])
-			}
+			gotID, gotType, _, _ := decodeUnboundRel(rt, p.Rels[i])
 			if uint64(gotID) != wantRel.ID {
 				rt.Fatalf("rels[%d].id: want %d, got %d", i, wantRel.ID, gotID)
 			}
+			if gotType != wantRel.Type {
+				rt.Fatalf("rels[%d].type: want %q, got %q", i, wantRel.Type, gotType)
+			}
 		}
 
-		// Map must have exactly two keys.
-		if len(m) != 2 {
-			rt.Fatalf("map has unexpected fields: got %d keys, want 2", len(m))
+		// One (relationship, node) pair per hop, and the relationship index's SIGN
+		// must record whether the hop traverses the relationship forwards.
+		hops := len(pv.Relationships)
+		if hops > len(pv.Nodes)-1 {
+			hops = len(pv.Nodes) - 1 // a malformed draw emits only the supportable pairs
+		}
+		if hops < 0 {
+			hops = 0
+		}
+		if len(p.Indices) != 2*hops {
+			rt.Fatalf("indices: want %d entries for %d hops, got %d", 2*hops, hops, len(p.Indices))
+		}
+		for i := 0; i < hops; i++ {
+			wantRelIdx := int64(i + 1)
+			if pv.Relationships[i].StartID != pv.Nodes[i].ID {
+				wantRelIdx = -wantRelIdx
+			}
+			if p.Indices[2*i] != wantRelIdx {
+				rt.Fatalf("hop %d relationship index: want %d, got %v", i, wantRelIdx, p.Indices[2*i])
+			}
+			if p.Indices[2*i+1] != int64(i+1) {
+				rt.Fatalf("hop %d node index: want %d, got %v", i, i+1, p.Indices[2*i+1])
+			}
 		}
 	})
 }
@@ -138,18 +132,25 @@ func TestPathValueShape_Pn(t *testing.T) {
 			}
 			pv := expr.PathValue{Nodes: nodes, Relationships: rels}
 
-			got := exprValueToPackstream(pv, 5)
-			m, ok := got.(map[string]packstream.Value)
-			if !ok {
-				t.Fatalf("expected map, got %T", got)
+			p := decodePath(t, exprValueToPackstream(pv, 5))
+			if len(p.Nodes) != n {
+				t.Errorf("P%d: nodes: want %d, got %d", n, n, len(p.Nodes))
 			}
-			gotNodes := m["nodes"].([]packstream.Value)        //nolint:forcetypeassert // known type
-			gotRels := m["relationships"].([]packstream.Value) //nolint:forcetypeassert // known type
-			if len(gotNodes) != n {
-				t.Errorf("P%d: nodes: want %d, got %d", n, n, len(gotNodes))
+			if len(p.Rels) != n-1 {
+				t.Errorf("P%d: rels: want %d, got %d", n, n-1, len(p.Rels))
 			}
-			if len(gotRels) != n-1 {
-				t.Errorf("P%d: rels: want %d, got %d", n, n-1, len(gotRels))
+			// Every hop runs forwards along the chain, so every relationship index is
+			// positive and one-based.
+			if len(p.Indices) != 2*(n-1) {
+				t.Fatalf("P%d: indices: want %d, got %d", n, 2*(n-1), len(p.Indices))
+			}
+			for i := 0; i < n-1; i++ {
+				if p.Indices[2*i] != int64(i+1) {
+					t.Errorf("P%d hop %d: relationship index = %v, want %d", n, i, p.Indices[2*i], i+1)
+				}
+				if p.Indices[2*i+1] != int64(i+1) {
+					t.Errorf("P%d hop %d: node index = %v, want %d", n, i, p.Indices[2*i+1], i+1)
+				}
 			}
 		})
 	}
@@ -181,18 +182,26 @@ func TestPathValueShape_Cn(t *testing.T) {
 			}
 			pv := expr.PathValue{Nodes: nodes, Relationships: rels}
 
-			got := exprValueToPackstream(pv, 5)
-			m, ok := got.(map[string]packstream.Value)
-			if !ok {
-				t.Fatalf("expected map, got %T", got)
+			p := decodePath(t, exprValueToPackstream(pv, 5))
+			if len(p.Nodes) != n+1 {
+				t.Errorf("C%d: nodes: want %d, got %d", n, n+1, len(p.Nodes))
 			}
-			gotNodes := m["nodes"].([]packstream.Value)        //nolint:forcetypeassert // known type
-			gotRels := m["relationships"].([]packstream.Value) //nolint:forcetypeassert // known type
-			if len(gotNodes) != n+1 {
-				t.Errorf("C%d: nodes: want %d, got %d", n, n+1, len(gotNodes))
+			if len(p.Rels) != n {
+				t.Errorf("C%d: rels: want %d, got %d", n, n, len(p.Rels))
 			}
-			if len(gotRels) != n {
-				t.Errorf("C%d: rels: want %d, got %d", n, n, len(gotRels))
+			// A cycle closes by repeating the start node at the end, so the node list is
+			// deliberately NOT deduplicated and the last hop's node index points at that
+			// repeated entry. Every hop still runs forwards.
+			if len(p.Indices) != 2*n {
+				t.Fatalf("C%d: indices: want %d, got %d", n, 2*n, len(p.Indices))
+			}
+			for i := 0; i < n; i++ {
+				if p.Indices[2*i] != int64(i+1) {
+					t.Errorf("C%d hop %d: relationship index = %v, want %d", n, i, p.Indices[2*i], i+1)
+				}
+				if p.Indices[2*i+1] != int64(i+1) {
+					t.Errorf("C%d hop %d: node index = %v, want %d", n, i, p.Indices[2*i+1], i+1)
+				}
 			}
 		})
 	}
