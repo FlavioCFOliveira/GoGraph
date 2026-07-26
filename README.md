@@ -92,7 +92,16 @@ narrative.
   writer, reader, `Reinterpret` zero-copy helper, deterministic
   fixture generator.
 - `github.com/FlavioCFOliveira/GoGraph/store/bulk` — high-throughput bulk loader bypassing
-  the WAL.
+  the WAL. Adjacency only: no labels, no properties, and its output is a Tier 2
+  csrfile rather than a store.
+- `github.com/FlavioCFOliveira/GoGraph/store/bulkimport` — offline bulk **import**: builds a
+  labelled property graph and publishes it as a store snapshot, so
+  `recovery.Open` reads it back with no WAL. Loads 20 000 nodes and 200 000 edges
+  in 0.28 s through the `gograph-import` command, against 35 m 33 s for the same
+  data through the Cypher write path — see
+  [docs/benchmarks/bulk-import-2026-07-26.md](docs/benchmarks/bulk-import-2026-07-26.md)
+  and [docs/design-bulk-import.md](docs/design-bulk-import.md). The whole import is
+  atomic; it is not a transaction, and it requires an empty target directory.
 
 ### Cypher engine (`cypher/`)
 
@@ -291,9 +300,12 @@ store/txn                 — single-writer transactions (Begin/Commit/Rollback)
 store/checkpoint          — background WAL → snapshot folder goroutine
 store/recovery            — snapshot + WAL replay on open
 store/csrfile             — mmap'd Tier 2 CSR file format (versioned, 64-byte aligned)
-store/bulk                — high-throughput bulk ingestion bypassing the WAL
+store/bulk                — high-throughput bulk ingestion bypassing the WAL (adjacency only)
+store/bulkimport          — offline import: labelled property graph → published store snapshot
 
 ds/                       — supporting data structures (Union-Find, ...)
+
+cmd/gograph-import        — offline CSV → store importer (see store/bulkimport)
 
 bench/ldbc                — LDBC SNB SF1 / SF10 benchmark harness
 bench/dimacs9             — DIMACS 9 USA-road SSSP benchmark
