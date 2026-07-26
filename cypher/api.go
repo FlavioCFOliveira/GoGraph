@@ -10978,7 +10978,27 @@ type pooledRowCtx struct {
 // nil otherwise). Those bailed-out kinds are exactly the ones whose evaluator
 // could retain the RowContext (or a lazy node) beyond the call, so the gate
 // guarantees no evaluator keeps a reference to anything we are about to recycle.
-var rowCtxPool = sync.Pool{New: func() any { return &pooledRowCtx{ctx: make(expr.RowContext, 8)} }}
+// The pooled map is sized to [rowCtxPoolCap], NOT to [rowCtxPoolMaxSchema]. That
+// distinction matters and has already misled one audit: Go sizes a map's backing for
+// the requested hint, and a hint of 8 or below occupies a single group, so a
+// one-variable query and an eight-variable query clear exactly the same physical
+// capacity. The round-3 audit read the unreachable fallback in [acquireRowCtx] as the
+// live path, concluded the pool handed out cap-16 maps, and predicted ~28 ns/row of
+// recoverable over-clearing (docs/audit-2026-07-26-streams/s05-runtime.md F3, Tier A).
+// Measured per-width in an isolated process, bucketing this pool by schema width
+// changed nothing (+0.35 % geomean, every width inside noise) — because the live
+// capacity was already the single-group size. See
+// docs/benchmarks/rowctx-pool-2026-07-26.md and task #2188.
+//
+// The remaining per-row binding cost is the map machinery itself, which only
+// plan-time positional binding removes (task #2210).
+var rowCtxPool = sync.Pool{New: func() any { return &pooledRowCtx{ctx: make(expr.RowContext, rowCtxPoolCap)} }}
+
+// rowCtxPoolCap is the capacity hint for a pooled binding map: the largest hint Go
+// still serves from a single map group, so clearing it costs the same as clearing a
+// one-entry map. Widening it would make every narrow query pay to clear the extra
+// groups on every row.
+const rowCtxPoolCap = 8
 
 // rowCtxPoolMaxSchema bounds which schemas use the pool: a very wide row would
 // retain an oversized map in the pool forever. Schemas wider than this allocate
@@ -10995,7 +11015,11 @@ func acquireRowCtx(schemaLen int) *pooledRowCtx {
 	}
 	p, _ := rowCtxPool.Get().(*pooledRowCtx)
 	if p == nil {
-		p = &pooledRowCtx{ctx: make(expr.RowContext, rowCtxPoolMaxSchema)}
+		// Unreachable while rowCtxPool.New is set — sync.Pool.Get never returns nil
+		// then — but kept so the function stays correct if New is ever removed. Note
+		// it deliberately mirrors rowCtxPoolCap, not rowCtxPoolMaxSchema: reading this
+		// branch as the live path is exactly the misreading recorded on rowCtxPool.
+		p = &pooledRowCtx{ctx: make(expr.RowContext, rowCtxPoolCap)}
 	}
 	clear(p.ctx)
 	p.used = 0
