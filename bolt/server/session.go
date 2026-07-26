@@ -199,6 +199,34 @@ type Session struct {
 	// [DefaultDatabaseName] by [NewServer].
 	serverDatabase string
 
+	// txIdleDeadline is the absolute wall-clock instant at which the OPEN explicit
+	// transaction is reaped for having gone silent. It is recomputed from
+	// maxTxIdle on every inbound message while a transaction is open, so a busy
+	// transaction never reaches it and only an ABANDONED one does. Zero when no
+	// transaction is open or when maxTxIdle is not positive.
+	//
+	// This is deliberately separate from txDeadline, which bounds total life: the
+	// audit's outage was one client sending BEGIN and going quiet, which the total
+	// bound can only shorten, never distinguish from legitimate long work
+	// (rmp #2175).
+	txIdleDeadline time.Time
+
+	// maxTxIdle is the idle bound copied from Options.MaxTxIdleTime.
+	maxTxIdle time.Duration
+
+	// txQuota caps concurrently-open transactions per principal, shared with
+	// every other session on the server. nil in a session built directly (unit
+	// tests), in which case no cap is enforced.
+	txQuota *txQuota
+
+	// txQuotaHeld records that this session holds one slot in txQuota for
+	// txQuotaPrincipal, so the release happens exactly once however many teardown
+	// paths run for one transaction. The principal is captured at BEGIN rather
+	// than read at release time, because a LOGOFF between the two would otherwise
+	// release a slot under the wrong name.
+	txQuotaHeld      bool
+	txQuotaPrincipal string
+
 	// clientDatabase is the database name the client selected in the `db` extra
 	// of the current RUN (autocommit) or BEGIN (explicit transaction), or empty
 	// when it named none. GoGraph serves one graph per server, so this selects
@@ -538,6 +566,66 @@ func (s *Session) txOpened() {
 	incCounter(metricTxOpened)
 }
 
+// setMaxTxIdle sets the idle bound applied to an open explicit transaction.
+// Non-positive values are ignored, leaving [DefaultMaxTxIdleTime] in place — the
+// bound cannot be disabled, because an unbounded idle transaction is the outage
+// rmp #2175 exists to close. Intended for the server bootstrap.
+func (s *Session) setMaxTxIdle(d time.Duration) {
+	if d > 0 {
+		s.maxTxIdle = d
+	}
+}
+
+// setTxQuota installs the server-wide per-principal open-transaction cap. A nil
+// quota leaves the session uncapped, which is the case for a session constructed
+// directly in a unit test.
+func (s *Session) setTxQuota(q *txQuota) { s.txQuota = q }
+
+// touchTx pushes the idle deadline of an open explicit transaction forward by
+// maxTxIdle. It is called once per inbound message, BEFORE dispatch, so that any
+// message at all — not only one that succeeds — counts as the client still being
+// present. A session with no open transaction clears the deadline instead.
+func (s *Session) touchTx() {
+	if !s.txActive || s.maxTxIdle <= 0 {
+		s.txIdleDeadline = time.Time{}
+		return
+	}
+	s.txIdleDeadline = s.clk.Now().Add(s.maxTxIdle)
+}
+
+// acquireTxQuota reserves this session's per-principal open-transaction slot,
+// returning an error when the principal is already at its cap. The slot is
+// released by [Session.releaseTxQuota], which every transaction-teardown path
+// reaches.
+func (s *Session) acquireTxQuota() error {
+	if s.txQuota == nil {
+		return nil
+	}
+	principal := s.identity.Principal
+	if err := s.txQuota.acquire(principal); err != nil {
+		return err
+	}
+	s.txQuotaHeld = true
+	s.txQuotaPrincipal = principal
+	return nil
+}
+
+// releaseTxQuota returns the slot acquired by [Session.acquireTxQuota]. It is
+// idempotent, because one transaction may be torn down by several paths (a
+// handler closing it followed by the connection-teardown rollback), and it
+// releases under the principal captured at BEGIN so a LOGOFF in between cannot
+// decrement the wrong name.
+func (s *Session) releaseTxQuota() {
+	if !s.txQuotaHeld {
+		return
+	}
+	s.txQuotaHeld = false
+	if s.txQuota != nil {
+		s.txQuota.release(s.txQuotaPrincipal)
+	}
+	s.txQuotaPrincipal = ""
+}
+
 // txClosed records that the currently-open explicit transaction has ended,
 // incrementing the [metricTxClosed] counter (the closed side of the
 // open-transaction gauge derivation) exactly once per [Session.txOpened]. It is
@@ -548,6 +636,11 @@ func (s *Session) txOpened() {
 // transaction: COMMIT, ROLLBACK, RESET, GOODBYE, the FAILED-reclaim
 // ([Session.abortTx]), and the connection teardown ([Session.Close]).
 func (s *Session) txClosed() {
+	// The quota slot and the idle deadline are released unconditionally, not
+	// under the txAccounted guard: they must be freed even on a path where the
+	// metric was already counted, and both release operations are idempotent.
+	s.releaseTxQuota()
+	s.txIdleDeadline = time.Time{}
 	if !s.txAccounted {
 		return
 	}
@@ -1296,11 +1389,30 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 		}}, nil
 	}
 
+	// Reserve this principal's open-transaction slot now that the transaction is
+	// genuinely OPEN. The order matters: reserving BEFORE newTx would count BEGINs
+	// merely QUEUED on the writer serialisation, which is a different quantity
+	// from the one Options.MaxOpenTxPerPrincipal documents and would reject a
+	// legitimate burst of concurrent BEGINs from one principal (rmp #2175). The
+	// slot is released by txClosed, which every teardown path reaches.
+	if qerr := s.acquireTxQuota(); qerr != nil {
+		_ = tx.Rollback() //nolint:errcheck // best-effort cleanup; error not actionable
+		incCounter(metricTxQuotaRejected)
+		s.log.Warn("bolt: BEGIN refused; principal is at its open-transaction cap",
+			slog.String("session", s.id), slog.String("err", qerr.Error()))
+		return []any{&proto.Failure{
+			Code:    "Neo.ClientError.General.LimitExceeded",
+			Message: qerr.Error(),
+		}}, nil
+	}
+
 	next, transErr := Transition(s.state, m, true)
 	if transErr != nil {
 		// Roll back the just-opened transaction so the writer serialisation is not
-		// leaked on the (unreachable in practice) illegal-transition path.
+		// leaked on the (unreachable in practice) illegal-transition path, and give
+		// back the quota slot with it.
 		_ = tx.Rollback() //nolint:errcheck // best-effort cleanup; error not actionable
+		s.releaseTxQuota()
 		return s.failTransition(m)
 	}
 	s.state = next
@@ -1316,6 +1428,10 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 	} else {
 		s.txDeadline = time.Time{}
 	}
+	// Start the idle clock. BEGIN itself counts as activity, so an abandoned
+	// transaction is reaped maxTxIdle after the BEGIN rather than immediately
+	// (rmp #2175).
+	s.touchTx()
 	// Count the transaction opened (the opened side of the open-transaction gauge
 	// derivation opened − closed). The matching txClosed runs on whichever path
 	// ends it, keeping the derived gauge balanced.

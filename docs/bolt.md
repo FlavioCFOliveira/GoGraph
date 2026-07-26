@@ -77,6 +77,37 @@ fall back to a default when left at the zero value:
 | `MaxInFlightPerConnection` | `DefaultMaxInFlightPerConnection` (1024) | Caps the number of `RUN` statements issued inside a single explicit transaction before `COMMIT`/`ROLLBACK`. Exceeding it returns a `Neo.ClientError.General.LimitExceeded` failure. Auto-commit cursors are not counted. |
 | `ConnTimeout` | 0 (disabled) | Per-connection idle read deadline, reset before each message read. |
 | `DatabaseName` | `DefaultDatabaseName` (`neo4j`) | The name reported in result metadata for a client that selects no database. A client that names one has its own name echoed back. See the `db` note under [Protocol conformance notes](#protocol-conformance-notes). |
+| `MaxTxIdleTime` | `DefaultMaxTxIdleTime` (5 s) | How long an **open** explicit transaction may go without the client sending a message, after which it is rolled back. Distinct from `DefaultTxTimeout`, which caps total lifetime however busy the transaction is. Cannot be disabled. |
+| `MaxOpenTxPerPrincipal` | `DefaultMaxOpenTxPerPrincipal` (16) | How many explicit transactions one authenticated principal may hold **open** at once, across all its connections. Exceeding it fails the `BEGIN` with `Neo.ClientError.General.LimitExceeded`. A negative value disables it. |
+
+### Abandoned transactions
+
+An open explicit **write** transaction holds the engine's global visibility
+barrier, so while one is open every reader on every other connection waits. A
+client that sends `BEGIN` and then stops talking therefore stalls the whole
+server for as long as the transaction lives.
+
+`DefaultTxTimeout` alone cannot separate that from legitimate long work: lowering
+it shortens the outage and kills slow-but-healthy transactions at the same time.
+`MaxTxIdleTime` distinguishes the two, because a working client sends messages and
+an abandoned one does not — every inbound message pushes the idle deadline
+forward, while the total-lifetime deadline is untouched.
+
+Measured with one client abandoning a `BEGIN` and another reading, both bounds at
+their defaults except a 20 s total timeout: before the idle bound existed the
+reader received no response at all within 10 s; with it, the reader is served
+after 5.0 s, the idle bound.
+
+`MaxOpenTxPerPrincipal` bounds the other dimension. Note where it binds: a write
+transaction holds the writer serialisation, so the engine already caps those at
+one server-wide, and this limit is therefore about **read** transactions
+(`BEGIN` with `mode: "r"`), which acquire nothing and can genuinely be
+concurrent. It counts open transactions, not `BEGIN`s queued on the writer —
+concurrent `BEGIN`s are bounded by `MaxConnections`.
+
+Both events are separately observable: `bolt.server.tx.idlereaped` counts
+transactions reaped for silence, `bolt.server.tx.timedout` those that exceeded
+their total lifetime, and `bolt.server.tx.quotarejected` the refused `BEGIN`s.
 
 ## Message support
 
@@ -308,6 +339,9 @@ leak:
 | `bolt.server.tx.opened` | Explicit transactions opened by a `BEGIN` that acquired the engine writer serialisation. |
 | `bolt.server.tx.closed` | Explicit transactions that ended — committed, rolled back, discarded by `RESET`/`GOODBYE`, or rolled back on connection teardown. |
 | `bolt.server.tx.abandoned` | Explicit transactions still open at an abnormal disconnect (the client dropped the connection, hit the idle timeout, or the handler recovered a panic) without sending `COMMIT`, `ROLLBACK`, or `RESET`. A strict subset of `tx.closed`. |
+| `bolt.server.tx.timedout` | Explicit transactions reaped for exceeding their **total** wall-clock deadline (`DefaultTxTimeout` or a client `tx_timeout`) while the connection stayed alive. A strict subset of `tx.closed`. |
+| `bolt.server.tx.idlereaped` | Explicit transactions reaped for **silence** — no inbound message for `MaxTxIdleTime`. Separated from `tx.timedout` so an abandoned `BEGIN` is distinguishable from a legitimately long transaction. A strict subset of `tx.closed`. |
+| `bolt.server.tx.quotarejected` | `BEGIN`s refused because the authenticated principal already held `MaxOpenTxPerPrincipal` open transactions. A rising count means one principal is monopolising transactions. |
 | `bolt.server.conn.panics` | Recovered panics in a connection handler goroutine (defence-in-depth boundary). |
 
 Two of these quantities are conceptually gauges — the number of live
@@ -434,4 +468,4 @@ Drivers that negotiate Bolt 3.x or earlier are not supported.
 
 ---
 
-*Last reviewed: 2026-07-26 against commit `b54b284`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-07-26 against commit `01f5bea`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*

@@ -70,6 +70,55 @@ const (
 	// MaxStatementTimeout, when set, additionally clamps it.
 	DefaultTxTimeout = 30 * time.Second
 
+	// DefaultMaxTxIdleTime is the value applied to Options.MaxTxIdleTime when the
+	// caller leaves it at zero. It bounds how long an OPEN explicit transaction
+	// may go without the client sending a message, which is a different and much
+	// tighter bound than DefaultTxTimeout: that one caps a transaction's total
+	// life, however busy, while this one reclaims one that has been ABANDONED.
+	//
+	// A finite default is mandatory, and 5 s rather than 30 s because of what the
+	// round-3 audit demonstrated: one authenticated client sends BEGIN and stops
+	// talking, and because an open transaction holds the global visibility
+	// barrier, a 4.7 ms read on every other connection becomes 30.001 s —
+	// the full DefaultTxTimeout — followed by a hard TransactionTimedOut, and it
+	// is repeatable indefinitely (rmp #2175). The total-lifetime bound cannot fix
+	// that on its own: lowering it shortens the outage but also kills legitimate
+	// long transactions, whereas an idle bound distinguishes the two cases, since
+	// a working client sends messages.
+	//
+	// 5 s is far longer than any client needs between the messages of one
+	// transaction — a driver pipelines them — and short enough that an abandoned
+	// transaction is reclaimed before it is felt as an outage. Operators driving
+	// transactions from an interactive prompt may raise it.
+	DefaultMaxTxIdleTime = 5 * time.Second
+
+	// DefaultMaxOpenTxPerPrincipal is the value applied to
+	// Options.MaxOpenTxPerPrincipal when the caller leaves it at zero. It caps
+	// how many explicit transactions one authenticated principal may hold open at
+	// once, across all of its connections.
+	//
+	// Where it actually binds, stated plainly rather than oversold: a WRITE
+	// transaction holds the engine's writer serialisation for its whole life, so
+	// the engine already caps concurrently-open write transactions at ONE
+	// server-wide and this bound can never be the binding constraint for them —
+	// the idle reaper above is what closes that exposure. A READ transaction
+	// (BEGIN with mode "r") acquires no serialisation and no barrier, so those ARE
+	// concurrent and were previously unbounded per principal; that is what this
+	// caps, along with the session and cursor state each one holds.
+	//
+	// The count is of OPEN transactions, not of BEGINs queued on the writer
+	// serialisation: a burst of concurrent BEGINs from one principal is bounded by
+	// MaxConnections, not by this. Counting queued BEGINs here would reject
+	// legitimate concurrent traffic.
+	//
+	// The default of 16 is generous for a connection pool — one connection holds
+	// at most one open transaction — while still bounding the resource, as the
+	// bounded-resources mandate requires.
+	//
+	// Set a negative value to disable enforcement — which is a deliberate,
+	// visible choice at the call site, not something reachable by accident.
+	DefaultMaxOpenTxPerPrincipal = 16
+
 	// DefaultDatabaseName is the value applied to Options.DatabaseName when the
 	// caller leaves it empty, and the name reported in the `db` field of result
 	// metadata for a client that selected no database.
@@ -210,6 +259,24 @@ type Options struct {
 	// summary.Database().Name() panics with a nil dereference inside the driver
 	// (rmp #2172).
 	DatabaseName string
+
+	// MaxTxIdleTime bounds how long an OPEN explicit transaction may go without
+	// the client sending a message, after which it is rolled back and the writer
+	// serialisation and visibility barrier are released. Zero or negative defaults
+	// to [DefaultMaxTxIdleTime]; there is no way to disable it, because an
+	// unbounded idle transaction is the outage the round-3 audit demonstrated.
+	//
+	// This is NOT DefaultTxTimeout. That bounds a transaction's total life however
+	// active it is; this reclaims one that has stopped talking. A busy transaction
+	// resets it on every message and is limited only by the total bound.
+	MaxTxIdleTime time.Duration
+
+	// MaxOpenTxPerPrincipal caps how many explicit transactions one authenticated
+	// principal may hold open at once across all of its connections. Exceeding it
+	// fails the BEGIN with Neo.ClientError.General.LimitExceeded rather than
+	// queueing. Zero defaults to [DefaultMaxOpenTxPerPrincipal]; a NEGATIVE value
+	// disables enforcement, which is deliberate and visible at the call site.
+	MaxOpenTxPerPrincipal int
 
 	// MaxConnections is the upper bound on concurrent accepted connections.
 	// Zero or negative values default to 1024.
@@ -364,6 +431,12 @@ type Server struct {
 	eng      *cypher.Engine
 	sem      chan struct{} // capacity == MaxConnections
 	log      *slog.Logger
+	// txQuota caps concurrently-open explicit transactions per authenticated
+	// principal. It is shared by every connection — the cap is per principal, not
+	// per session — and is created in [NewServer] from
+	// Options.MaxOpenTxPerPrincipal.
+	txQuota *txQuota
+
 	// inbound is the engine-wide inbound-decode memory ceiling shared by every
 	// connection's pooled decoder (nil-safe; disabled when the resolved limit is
 	// <= 0). It bounds aggregate pre-auth decode memory across connections.
@@ -412,6 +485,12 @@ func NewServer(eng *cypher.Engine, opts Options) (*Server, error) {
 	if opts.DatabaseName == "" {
 		opts.DatabaseName = DefaultDatabaseName
 	}
+	if opts.MaxTxIdleTime <= 0 {
+		opts.MaxTxIdleTime = DefaultMaxTxIdleTime
+	}
+	if opts.MaxOpenTxPerPrincipal == 0 {
+		opts.MaxOpenTxPerPrincipal = DefaultMaxOpenTxPerPrincipal
+	}
 	if opts.DefaultStatementTimeout <= 0 {
 		opts.DefaultStatementTimeout = DefaultStatementTimeout
 	}
@@ -453,6 +532,7 @@ func NewServer(eng *cypher.Engine, opts Options) (*Server, error) {
 		log:     log,
 		clk:     clock.Real(),
 		closer:  opts.Closer,
+		txQuota: newTxQuota(opts.MaxOpenTxPerPrincipal),
 		inbound: packstream.NewInboundBudget(resolveMaxInboundDecodeBytes(opts.MaxInboundDecodeBytes)),
 	}, nil
 }
@@ -784,6 +864,8 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	sess.setDefaultStmtTimeout(s.opts.DefaultStatementTimeout)
 	sess.setClock(s.clk)
 	sess.setDatabaseName(s.opts.DatabaseName)
+	sess.setMaxTxIdle(s.opts.MaxTxIdleTime)
+	sess.setTxQuota(s.txQuota)
 
 	// Stream RECORD messages incrementally: handlePull hands each record to
 	// this sink, which encodes and writes it to the connection immediately
@@ -912,21 +994,50 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	// bufio) nor a bytes.Reader per message (#1517). It is owned by this single
 	// message-loop goroutine, so no synchronisation is needed on it.
 	var reqReader bytes.Reader
-	syncTxTimer := func() {
+	// txTimerAt is the instant txTimer is currently armed for, so the timer is
+	// only rebuilt when the effective deadline actually moves. The IDLE deadline
+	// moves on every message, so unlike the total-lifetime deadline it cannot be
+	// armed once and left alone (rmp #2175).
+	var txTimerAt time.Time
+	// effectiveTxDeadline returns the earlier of the two bounds on an open
+	// transaction: its total lifetime (txDeadline) and its silence
+	// (txIdleDeadline). Either may be zero, meaning that bound is not in force;
+	// the zero Time is returned when neither is.
+	effectiveTxDeadline := func() time.Time {
+		total, idle := sess.txDeadline, sess.txIdleDeadline
 		switch {
-		case sess.txActive && !sess.txDeadline.IsZero():
-			if txTimer == nil {
-				d := s.clk.Until(sess.txDeadline)
-				if d < 0 {
-					d = 0
-				}
-				txTimer = s.clk.NewTimer(d)
-				txTimerC = txTimer.C()
+		case total.IsZero():
+			return idle
+		case idle.IsZero():
+			return total
+		case idle.Before(total):
+			return idle
+		default:
+			return total
+		}
+	}
+	syncTxTimer := func() {
+		at := effectiveTxDeadline()
+		switch {
+		case sess.txActive && !at.IsZero():
+			if txTimer != nil && at.Equal(txTimerAt) {
+				return // already armed for exactly this instant
 			}
+			if txTimer != nil {
+				txTimer.Stop()
+			}
+			d := s.clk.Until(at)
+			if d < 0 {
+				d = 0
+			}
+			txTimer = s.clk.NewTimer(d)
+			txTimerC = txTimer.C()
+			txTimerAt = at
 		case txTimer != nil:
 			txTimer.Stop()
 			txTimer = nil
 			txTimerC = nil
+			txTimerAt = time.Time{}
 		}
 	}
 
@@ -937,12 +1048,26 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			// same cancellation and exits; the deferred cleanup joins it.
 			return
 		case <-txTimerC:
-			// The open transaction reached its wall-clock deadline.
+			// The open transaction reached whichever bound came first.
 			txTimer = nil
 			txTimerC = nil
+			txTimerAt = time.Time{}
 			if sess.txActive {
-				s.log.Warn("bolt: explicit transaction timed out; rolled back to release the writer lock",
-					slog.String("remote", remote))
+				// Which bound fired decides the log line and the metric: a SILENT
+				// transaction and a merely long one are different operational
+				// events, and conflating them hides the abandoned-BEGIN outage the
+				// audit demonstrated (rmp #2175).
+				idle := !sess.txIdleDeadline.IsZero() &&
+					(sess.txDeadline.IsZero() || sess.txIdleDeadline.Before(sess.txDeadline))
+				if idle {
+					s.log.Warn("bolt: explicit transaction idle too long; rolled back to release the writer lock",
+						slog.String("remote", remote),
+						slog.Duration("max_idle", s.opts.MaxTxIdleTime))
+					incCounter(metricTxIdleReaped)
+				} else {
+					s.log.Warn("bolt: explicit transaction timed out; rolled back to release the writer lock",
+						slog.String("remote", remote))
+				}
 				sess.reapTimedOutTx()
 			}
 			continue
@@ -1006,6 +1131,14 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 				}
 				continue
 			}
+
+			// The client is demonstrably present, so push the open transaction's
+			// idle deadline forward. This runs BEFORE dispatch and for EVERY
+			// message, so any traffic counts — a message that goes on to fail still
+			// proves the client has not abandoned the transaction (rmp #2175). It
+			// deliberately does NOT extend the total-lifetime deadline, which is
+			// what still bounds a transaction that keeps talking forever.
+			sess.touchTx()
 
 			// Dispatch to session. HandleMessage's error return is reserved for
 			// internal-only failures (currently none: handlers surface

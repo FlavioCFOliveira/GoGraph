@@ -116,11 +116,44 @@ func (c *boltTestClient) pullAll(t *testing.T) (records [][]packstream.Value, _ 
 	}
 }
 
+// helloAs is [boltTestClient.hello] with an explicit principal, so a test can
+// drive two distinct identities against a per-principal limit (rmp #2175).
+func (c *boltTestClient) helloAs(t *testing.T, principal string) *proto.Success {
+	t.Helper()
+	c.sendRequest(t, &proto.Hello{
+		Extra: map[string]interface{}{
+			"scheme":      "none",
+			"principal":   principal,
+			"credentials": "",
+			"agent":       "test/1.0",
+		},
+	})
+	return c.recvSuccess(t)
+}
+
 // begin sends BEGIN and reads the SUCCESS.
 func (c *boltTestClient) begin(t *testing.T) *proto.Success {
 	t.Helper()
 	c.sendRequest(t, &proto.Begin{Extra: map[string]interface{}{}})
 	return c.recvSuccess(t)
+}
+
+// beginRead sends BEGIN with mode "r" and reads the SUCCESS. A read transaction
+// acquires no writer serialisation and no visibility barrier, so several may be
+// genuinely open at once — which is what makes a per-principal cap on OPEN
+// transactions observable (rmp #2175).
+func (c *boltTestClient) beginRead(t *testing.T) *proto.Success {
+	t.Helper()
+	c.sendRequest(t, &proto.Begin{Extra: map[string]interface{}{"mode": "r"}})
+	return c.recvSuccess(t)
+}
+
+// beginReadExpectFailure sends a read-mode BEGIN and requires a FAILURE, which
+// it returns for the caller to assert on.
+func (c *boltTestClient) beginReadExpectFailure(t *testing.T) *proto.Failure {
+	t.Helper()
+	c.sendRequest(t, &proto.Begin{Extra: map[string]interface{}{"mode": "r"}})
+	return c.recvFailure(t)
 }
 
 // commit sends COMMIT and reads the SUCCESS.

@@ -82,6 +82,21 @@ const (
 	// FAILED (task #1346). It is a strict subset of metricTxClosed: a timed-out
 	// transaction is also counted closed by the rollback path.
 	metricTxTimedOut = "bolt.server.tx.timedout"
+
+	// metricTxIdleReaped counts explicit transactions reaped for going SILENT —
+	// no inbound message for Options.MaxTxIdleTime — as distinct from
+	// metricTxTimedOut, which counts those that exceeded their total lifetime
+	// however busy they were. Separating the two is what makes the audit's
+	// scenario visible in metrics: one client sending BEGIN and going quiet shows
+	// up here, whereas a legitimately long transaction shows up there
+	// (rmp #2175). It is a strict subset of metricTxClosed.
+	metricTxIdleReaped = "bolt.server.tx.idlereaped"
+
+	// metricTxQuotaRejected counts BEGINs refused because the authenticated
+	// principal already held Options.MaxOpenTxPerPrincipal open transactions. A
+	// rising count is the signal that one principal is monopolising the
+	// serialised writer, which is the exposure the idle bound alone cannot close.
+	metricTxQuotaRejected = "bolt.server.tx.quotarejected"
 )
 
 // incCounter forwards to the shared metrics backend. It exists as a single
