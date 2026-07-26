@@ -421,14 +421,44 @@ func (c *edgePropCols) Compact() auxColumn {
 			ensureOut()
 			out.cols[i] = c.cols[i].compactBacking()
 		}
-		// Date packing reads the (already slack-trimmed, if applicable) column.
-		// maybePackDate returns the column unchanged when it is not a packable
-		// dense date column or the byte gate rejects the range, so a non-date or
-		// wide-range column is a no-op here.
 		src := &c.cols[i]
 		if out != nil {
 			src = &out.cols[i]
 		}
+		// Representation choice, before packing is attempted (rmp #2171).
+		//
+		// maybePackDate requires a DENSE column, and the fused append path
+		// (used when an edge is created with its properties in one call) leaves
+		// even a fully-populated column in the SPARSE COO form, because nothing
+		// on that path ever reshapes it. Packing therefore never fired there at
+		// all: measured 30.5% waste at degree 324 and 24.3% at degree 64 —
+		// 22.43 against 15.60 B/edge for byte-identical content — while the
+		// set-after path, which does reshape as it mutates, packed normally.
+		//
+		// reshaped() picks the representation the current fill ratio dictates,
+		// which is the same decision the mutation path makes, so this aligns the
+		// two paths rather than inventing a third rule. An ALREADY-PACKED column
+		// is skipped: reshaped would unpack it first, and a repeated freeze must
+		// be idempotent. The sparse flag is the only thing reshaped can change
+		// here, so comparing it detects the change without a second pass.
+		//
+		// The cost is a one-off reshape at freeze: measured +5.5% at degree 64
+		// and +4.25% at degree 324 on the fused path, buying a resident column
+		// 4.9x and 5.2x smaller (8.000 B/edge to 1.625 and 1.531). The freeze
+		// runs once per entry trim while the column is retained for the graph's
+		// lifetime, so the trade is not close. The set-after path is unaffected,
+		// measured (p=0.699 and p=0.240).
+		if !src.packedDate {
+			if r := src.reshaped(); r.sparse != src.sparse {
+				ensureOut()
+				out.cols[i] = r
+				src = &out.cols[i]
+			}
+		}
+		// Date packing reads the (already slack-trimmed and reshaped, if
+		// applicable) column. maybePackDate returns the column unchanged when it
+		// is not a packable dense date column or the byte gate rejects the
+		// range, so a non-date or wide-range column is a no-op here.
 		if packed, changed := src.maybePackDate(); changed {
 			ensureOut()
 			out.cols[i] = packed
@@ -781,10 +811,12 @@ func demoteThreshold(kind PropertyKind) float64 {
 func (col *edgePropColumn) reshaped() edgePropColumn {
 	if col.packedDate {
 		// Defensive: the dense<->sparse reshape operates on the plain []int32
-		// backing, so unpack the FOR form first. Unreachable through the normal flow
-		// — Compact (the only producer of a packed column) never calls reshaped, and
-		// every mutation unpacks via cloneCol before reshaping — but kept correct so
-		// the packed form can never leak into toSparse's days[] read.
+		// backing, so unpack the FOR form first. Still not reached through the
+		// normal flow — every mutation unpacks via cloneCol before reshaping, and
+		// [edgePropCols.Compact] (the only producer of a packed column) skips
+		// reshaping a column that is already packed, precisely so a repeated
+		// freeze cannot unpack it — but kept correct so the packed form can never
+		// leak into toSparse's days[] read.
 		u := col.unpackedDate()
 		return u.reshaped()
 	}
