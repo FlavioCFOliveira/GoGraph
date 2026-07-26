@@ -81,3 +81,40 @@ inherent to the lock-free read model).
   relationship path needs a presence-only/lazy read path.
 - **Global dense edge-record** — gated on a universal edge id; suits
   edge-centric workloads.
+
+## 2026-07-26 — the validity bitmap on a fully-populated column (#2205)
+
+A dense edge-property column built slot-by-slot allocated a validity bitmap
+unconditionally, while `toDense` omitted it whenever every slot was present. So
+the two build paths produced **different footprints for identical, fully-populated
+content**, the whole difference being `words(length)` bitmap words carrying no
+information — a column with no absent slot needs no presence plane.
+
+`reshaped()` now drops the bitmap at freeze time when every slot is present, which
+normalises the set-after path onto the fused one. `maybePackDate` carries the nil
+forward (`cloneU64(nil)` is nil), so the column stays bitmap-free through packing.
+
+Measured with `BenchmarkFusedPack`:
+
+| Degree | fused | set-after, before | set-after, after |
+|---|---|---|---|
+| 64 | 1.625 B/edge | 1.750 B/edge | **1.625 B/edge** |
+| 324 | 1.531 B/edge | 1.679 B/edge | **1.531 B/edge** |
+
+That is **−7.1 %** at degree 64 and **−8.8 %** at degree 324, and the two paths are
+now byte-for-byte identical — so `TestFusedPack_FusedMatchesSetAfter` asserts
+**equality** where it previously asserted only "fused no worse", and additionally
+requires that neither column carries a bitmap at all.
+
+The allocation at build time is *not* removed and should not be: a multi-slot dense
+column created for one live slot genuinely starts mostly absent, so the bitmap is
+correct there and only becomes redundant once every slot has been filled. Freeze is
+the right place to normalise.
+
+Dropping the bitmap is sound only because `clearSlot` **materialises it all-ones**
+before clearing when it finds nil. If that regressed, a column losing a slot after
+freezing would report the cleared slot as still present — a correctness fault, not
+a footprint one. `TestFusedPack_SlotLostAfterFreezeReadsCorrectPresence` drives the
+whole sequence (fill → freeze → clear → re-freeze) at both degrees and pins it;
+mutation-testing the normalisation away fails both that test and the equality
+assertion.

@@ -826,13 +826,36 @@ func (col *edgePropColumn) reshaped() edgePropColumn {
 		}
 		return *col
 	}
-	fill := float64(col.popcountValid()) / float64(col.length)
+	present := col.popcountValid()
+	fill := float64(present) / float64(col.length)
 	switch {
 	case col.sparse && fill >= promoteThreshold(col.kind):
 		return col.toDense()
 	case !col.sparse && fill <= demoteThreshold(col.kind):
 		return col.toSparse()
 	default:
+		// A DENSE column with no absent slot needs no presence plane: nil already
+		// means all-present throughout the dense path ([edgePropColumn.slotValid]),
+		// and [edgePropColumn.toDense] omits the bitmap for exactly this case.
+		//
+		// Dropping it here normalises the OTHER build path (#2205). A dense column
+		// built slot-by-slot allocates the bitmap up front, because a multi-slot
+		// column created for one live slot really does start mostly absent — so the
+		// allocation is right at build time and only becomes redundant once every
+		// slot has been filled. The two paths therefore produced different
+		// footprints for identical, fully-populated content: measured at 1.750
+		// against 1.625 B/edge at degree 64 and 1.679 against 1.531 at degree 324,
+		// the whole difference being words(length) bitmap words carrying no
+		// information — about 8 % of the frozen column at degree 324.
+		//
+		// Safe because clearSlot MATERIALISES the bitmap all-ones before clearing a
+		// slot when it finds nil, so a column that later loses a slot still reads
+		// correct presence.
+		if !col.sparse && col.valid != nil && present == col.length {
+			out := *col
+			out.valid = nil
+			return out
+		}
 		return *col
 	}
 }
@@ -2141,10 +2164,13 @@ func (col *edgePropColumn) maybePackDate() (edgePropColumn, bool) {
 		return *col, false
 	}
 	out := edgePropColumn{
-		key:        col.key,
-		kind:       dateKind,
-		length:     col.length,
-		valid:      cloneU64(col.valid), // presence is preserved verbatim
+		key:    col.key,
+		kind:   dateKind,
+		length: col.length,
+		// Presence is preserved verbatim, INCLUDING the nil that means all-present:
+		// cloneU64(nil) is nil, so a fully-dense column stays bitmap-free through
+		// packing (#2205).
+		valid:      cloneU64(col.valid),
 		forMin:     mn,
 		forWidth:   width,
 		packedDate: true,

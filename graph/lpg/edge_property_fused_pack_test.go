@@ -24,6 +24,7 @@ package lpg
 // Layer: short.
 
 import (
+	"fmt"
 	"math"
 	"testing"
 )
@@ -120,22 +121,30 @@ func TestFusedPack_FusedMatchesSetAfter(t *testing.T) {
 			if fc.forMin != sc.forMin {
 				t.Fatalf("forMin: fused %d, set-after %d", fc.forMin, sc.forMin)
 			}
-			// The fused path must no longer cost MORE than the set-after path.
-			// It now costs slightly LESS, and deliberately so rather than by
-			// accident: toDense drops the validity bitmap when every slot is
-			// present (full == true), whereas the dense build path allocates one
-			// regardless, so the set-after column carries words(length) unneeded
-			// bytes — 8 at degree 64, 48 at degree 324. That residue is a
-			// separate, much smaller inefficiency in the set-after path and is
-			// tracked on its own; asserting equality here would wrongly demand
-			// that the fused path reproduce it.
+			// The two paths must now cost EXACTLY the same, not merely "fused no
+			// worse". This used to be an inequality: the set-after path allocated a
+			// validity bitmap unconditionally while toDense omitted it when every
+			// slot was present, so the same fully-populated content cost
+			// words(length) extra bytes one way — 8 at degree 64, 48 at degree 324.
+			// #2205 normalises that at freeze time, so identical content now has an
+			// identical footprint and the assertion can be exact.
 			fb, sb := colPhysicalBytes(fc), colPhysicalBytes(sc)
-			if fb > sb {
-				t.Fatalf("physical bytes: fused %d > set-after %d (%.2f vs %.2f B/edge)",
+			if fb != sb {
+				t.Fatalf("physical bytes: fused %d, set-after %d (%.3f vs %.3f B/edge) — "+
+					"identical content must have an identical footprint (#2205)",
 					fb, sb, float64(fb)/float64(degree), float64(sb)/float64(degree))
 			}
-			// Guard the claim above: the whole difference must be the bitmap, so
-			// the value planes themselves must be byte-identical.
+			// A fully-populated column needs no presence plane at all: nil means
+			// all-present throughout the dense path.
+			if fc.valid != nil {
+				t.Errorf("fused column carries a %d-word validity bitmap for a fully "+
+					"populated column", len(fc.valid))
+			}
+			if sc.valid != nil {
+				t.Errorf("set-after column carries a %d-word validity bitmap for a fully "+
+					"populated column (#2205)", len(sc.valid))
+			}
+			// The value planes must be byte-identical too.
 			if fc.forWidth == sc.forWidth {
 				if got, want := cap(fc.packed)*8, cap(sc.packed)*8; got != want {
 					t.Fatalf("packed value plane differs: fused %d bytes, set-after %d", got, want)
@@ -257,5 +266,74 @@ func TestFusedPack_WideRangeStaysUnpacked(t *testing.T) {
 	// TestFusedPack_FusedMatchesSetAfter.
 	if got, want := cap(fc.days)*4, degree*4; got != want {
 		t.Fatalf("fused value plane = %d bytes, want %d (one int32 per slot)", got, want)
+	}
+}
+
+// TestFusedPack_SlotLostAfterFreezeReadsCorrectPresence is the safety half of #2205.
+//
+// Dropping the validity bitmap from a fully-populated column is only sound because
+// clearSlot MATERIALISES it all-ones before clearing when it finds nil. If that ever
+// regressed, a column that lost a slot after freezing would report the cleared slot as
+// still PRESENT — silently returning a stale value instead of null, which is a
+// correctness fault, not a footprint one.
+//
+// So this drives the whole sequence: fill every slot, freeze (which now drops the
+// bitmap), clear one slot, and require that exactly that slot reads absent and every
+// other still reads its own value.
+func TestFusedPack_SlotLostAfterFreezeReadsCorrectPresence(t *testing.T) {
+	for _, degree := range []int{64, 324} {
+		t.Run(fmt.Sprintf("degree%d", degree), func(t *testing.T) {
+			col := edgePropColumn{key: 1, kind: dateKind, length: degree}
+			allocDenseBacking(&col, dateKind, degree)
+			col.valid = make([]uint64, words(degree))
+			for i := 0; i < degree; i++ {
+				col.days[i] = int32(1000 + i)
+				col.valid[i>>6] |= 1 << (uint(i) & 63)
+			}
+
+			// Freeze: every slot is present, so the presence plane must be dropped.
+			frozen := col.reshaped()
+			if frozen.valid != nil {
+				t.Fatalf("a fully-populated dense column kept a %d-word validity bitmap "+
+					"after reshaped(); #2205 must drop it", len(frozen.valid))
+			}
+			for i := 0; i < degree; i++ {
+				if !frozen.slotValid(i) {
+					t.Fatalf("slot %d reads absent from a bitmap-free full column", i)
+				}
+			}
+
+			// Lose a slot. clearSlot must materialise the bitmap all-ones first.
+			const cleared = 7
+			frozen.clearSlot(cleared)
+			if frozen.valid == nil {
+				t.Fatal("clearSlot left the bitmap nil, so the cleared slot still reads " +
+					"PRESENT — a bitmap-free column must materialise on first clear")
+			}
+			if frozen.slotValid(cleared) {
+				t.Fatalf("slot %d reads PRESENT after clearSlot", cleared)
+			}
+			for i := 0; i < degree; i++ {
+				if i == cleared {
+					continue
+				}
+				if !frozen.slotValid(i) {
+					t.Fatalf("slot %d lost presence when slot %d was cleared", i, cleared)
+				}
+				if got, want := frozen.days[i], int32(1000+i); got != want {
+					t.Fatalf("slot %d value = %d, want %d", i, got, want)
+				}
+			}
+
+			// Re-freezing a column that is no longer full must KEEP the bitmap.
+			refrozen := frozen.reshaped()
+			if !refrozen.sparse && refrozen.valid == nil {
+				t.Fatal("re-freezing a column with an absent slot dropped the bitmap, so " +
+					"the cleared slot would read present again")
+			}
+			if !refrozen.sparse && refrozen.slotValid(cleared) {
+				t.Fatalf("slot %d reads PRESENT after re-freeze", cleared)
+			}
+		})
 	}
 }
