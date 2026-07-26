@@ -37,6 +37,7 @@
 package lpg
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 
@@ -46,6 +47,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index/label"
+	"github.com/FlavioCFOliveira/GoGraph/internal/ctxlock"
 )
 
 // LabelID is the compact internal identifier produced by the
@@ -579,16 +581,47 @@ func (g *Graph[N, W]) ApplyAtomically(fn func() error) error {
 // (ApplyAtomically or a previous LockBarrier). Under -race or
 // -tags gograph_debug it panics instead of deadlocking; a released build
 // deadlocks.
+// LockBarrier waits for the barrier however long it takes. Prefer
+// [Graph.LockBarrierCtx], which bounds the wait by a context.
 func (g *Graph[N, W]) LockBarrier() {
+	// context.Background() never finishes, so Acquire reduces to the blocking
+	// acquire this method has always performed and cannot return an error.
+	_ = g.LockBarrierCtx(context.Background())
+}
+
+// LockBarrierCtx is [Graph.LockBarrier] with the acquisition bounded by ctx. It
+// returns nil once the barrier is held, or ctx's error — wrapping
+// [context.Canceled] or [context.DeadlineExceeded] — if ctx finishes first.
+//
+// On error NOTHING is held and [Graph.UnlockBarrier] must NOT be called; on nil
+// the caller owns the barrier and must release it exactly once, as with
+// LockBarrier.
+//
+// The wait exists because [Graph.View] readers hold the barrier's read side for
+// the duration of their query, so a writer arriving mid-read queues behind it.
+// Before rmp #2174 that wait was unbounded from the caller's point of view: the
+// round-3 audit measured Engine.BeginTx with a 50 ms deadline returning after
+// 601 ms, and after 11.60 s under load, in both cases with a live transaction
+// and err=nil. See internal/ctxlock for how the wait is bounded and why a
+// queued acquire cannot simply be abandoned.
+func (g *Graph[N, W]) LockBarrierCtx(ctx context.Context) error {
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
-	g.visMu.Lock()
+	if err := ctxlock.Acquire(ctx, g.visMu.TryLock, g.visMu.Lock, g.visMu.Unlock); err != nil {
+		return err
+	}
+	// The stamp records the CALLING goroutine, which is the logical holder even
+	// when ctxlock performed the acquire on a helper goroutine: the guard exists
+	// to detect same-goroutine nesting, and only the caller runs user code under
+	// the barrier.
 	g.barrier.stampWriter(gid)
 	// Open the adjacency commit window for the whole explicit-transaction
 	// lifetime; UnlockBarrier closes it. This makes the window span every
 	// statement applied via ApplyInsideLocked under this barrier, so the
 	// transaction's adjacency writes share the per-shard clone-once dedup
-	// (task #1526).
+	// (task #1526). It is opened only on the success path, so a cancelled
+	// acquisition leaves no window to close.
 	g.adj.BeginCommit()
+	return nil
 }
 
 // UnlockBarrier releases the transaction-visibility write lock acquired via

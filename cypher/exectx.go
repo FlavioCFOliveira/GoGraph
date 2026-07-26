@@ -246,10 +246,26 @@ type ExplicitTx struct {
 // connection, a server shutdown, or an elapsed timeout interrupts an in-flight
 // statement and guarantees the writer serialisation cannot be held forever.
 //
+// ctx also bounds the ACQUISITION, not only the statements that follow. BeginTx
+// takes three things in order — the writer serialisation, the WAL transaction,
+// and the visibility barrier — and every one of them honours ctx, so a caller
+// whose deadline elapses while queued behind another writer or behind an
+// in-flight reader gets the context error rather than a transaction it is no
+// longer entitled to. When that happens NOTHING is left held and no handle is
+// returned. Before rmp #2174 two of the three acquisitions ignored ctx entirely:
+// the round-3 audit measured a 50 ms deadline returning after 601 ms, and after
+// 11.60 s under load, both times with err=nil and a live transaction, which also
+// made the Bolt tx_timeout inert at BEGIN.
+//
 // If ctx is already cancelled or its deadline has elapsed, BeginTx returns
 // promptly without acquiring any lock, with an error wrapping the context error
 // (matchable via [errors.Is] against [context.Canceled] /
 // [context.DeadlineExceeded]).
+//
+// The error is returned within the deadline plus a small, bounded margin: the
+// margin is one scheduling hop, not the holder's remaining tenure. See
+// internal/ctxlock for why a queued lock acquisition cannot simply be abandoned
+// and what is done instead.
 //
 // See exectx.go for the full transaction and concurrency contract, including the
 // read-committed isolation scope: concurrent readers block while this transaction
@@ -262,7 +278,14 @@ func (e *Engine) BeginTx(ctx context.Context) (*ExplicitTx, error) {
 	}
 	// Acquire the engine writer serialisation FIRST (store-less only; no-op when
 	// WAL-backed). It is the outermost lock; visMu nests inside it in every Exec.
-	unlockWriter := e.lockWriter()
+	// The acquire honours ctx: a caller whose deadline elapses while queued behind
+	// another writer gets the context error rather than a transaction it is no
+	// longer entitled to (rmp #2174).
+	unlockWriter, werr := e.lockWriterCtx(ctx)
+	if werr != nil {
+		cmetrics.IncCounter("cypher.BeginTx.errors", 1)
+		return nil, werr
+	}
 
 	tx := &ExplicitTx{
 		eng:          e,
@@ -301,7 +324,20 @@ func (e *Engine) BeginTx(ctx context.Context) (*ExplicitTx, error) {
 	// visMu is inner) to preserve the established lock ordering. On the error paths
 	// above, unlockWriter() is called before returning — no barrier has been
 	// acquired yet, so there is nothing to release on those paths.
-	tx.eng.g.LockBarrier()
+	// The acquire honours ctx (rmp #2174). A Graph.View reader holds the barrier's
+	// read side for its whole query, so a writer arriving mid-read queues behind
+	// it; before this change that wait ignored the caller's deadline entirely and
+	// the audit measured a 232x overrun that still returned err=nil. On the error
+	// path the WAL transaction and the writer serialisation acquired above must
+	// both be released, or the engine would be left with an orphaned writer.
+	if berr := tx.eng.g.LockBarrierCtx(ctx); berr != nil {
+		if tx.walTx != nil {
+			_ = tx.walTx.Rollback() // nothing was written; discard the empty txn
+		}
+		unlockWriter()
+		cmetrics.IncCounter("cypher.BeginTx.errors", 1)
+		return nil, berr
+	}
 	tx.barrierHeld = true
 	cmetrics.IncCounter("cypher.BeginTx.opened", 1)
 	return tx, nil

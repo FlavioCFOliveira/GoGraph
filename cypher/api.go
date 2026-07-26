@@ -93,6 +93,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/index/count"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index/stats"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/ctxlock"
 	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
@@ -1012,6 +1013,25 @@ func (e *Engine) lockWriter() func() {
 	}
 	e.writeMu.Lock()
 	return e.writeMu.Unlock
+}
+
+// lockWriterCtx is [Engine.lockWriter] with the acquisition bounded by ctx. It
+// returns the unlock closure and nil once the serialisation is held, or a nil
+// closure and ctx's error if ctx finishes first — in which case NOTHING is held.
+//
+// On a WAL-backed engine this is the same no-op as lockWriter, because the
+// store's single-writer lock is taken by [txn.Store.BeginCtx], which has been
+// context-aware since task #1301. The store-less writer mutex was the half that
+// was not: the round-3 audit measured Engine.BeginTx overrunning a 50 ms
+// deadline and still returning err=nil (rmp #2174). See internal/ctxlock.
+func (e *Engine) lockWriterCtx(ctx context.Context) (func(), error) {
+	if e.store != nil {
+		return func() {}, nil
+	}
+	if err := ctxlock.Acquire(ctx, e.writeMu.TryLock, e.writeMu.Lock, e.writeMu.Unlock); err != nil {
+		return nil, err
+	}
+	return e.writeMu.Unlock, nil
 }
 
 // NewEngine creates an Engine backed by g. The default built-in function
