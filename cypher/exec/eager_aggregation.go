@@ -147,11 +147,18 @@ func (op *EagerAggregation) WithByteBudget(maxBytes int64, estimateRow func(Row)
 
 // WithChunkInput switches the consume phase to pull the child column-major so the
 // scalar grouping keys are hashed and compared UNBOXED, boxing a key only on
-// new-group creation (#2049). The child must be a [ChunkProducer]; the grouping
-// keys must occupy chunk columns 0..len(keyCols)-1 and the aggregate arguments the
-// columns after them (the layout the aggregation pre-projection installs), which is
-// the same layout the row-input consume assumes. It returns an error otherwise,
-// leaving the operator on the byte-identical row-input path. Call before Init.
+// new-group creation (#2049), and each aggregate argument column is
+// scatter-accumulated UNBOXED by its kernel. The child must be a [ChunkProducer];
+// the grouping keys must occupy chunk columns 0..len(keyCols)-1 and the aggregate
+// arguments the columns after them (the layout the aggregation pre-projection
+// installs), which is the same layout the row-input consume assumes. It returns an
+// error otherwise, leaving the operator on the byte-identical row-input path. Call
+// before Init.
+//
+// len(keyCols) == 0 is supported: a group-key-free (global) aggregate forms exactly
+// one group, because a zero-column key hashes to the same constant and compares
+// equal for every row, and the empty-input neutral row is synthesised by the consume
+// phase itself (#2185).
 //
 // The path is reversible and self-checking per batch: a grouping-key column that is
 // not an unboxed scalar backing (a promoted/boxed or non-scalar column) is read via
@@ -452,9 +459,13 @@ func (op *EagerAggregation) consumeChunk() error {
 		}
 	}
 	// A group-key-free aggregate over an empty input must still emit one neutral row
-	// (openCypher 9 §3.6). The chunk path is wired only for grouped aggregation
-	// (len(keyCols) > 0), so this synthesises nothing in practice; it is kept for
-	// parity should the path ever be enabled group-key-free.
+	// (openCypher 9 §3.6). The chunk path serves group-key-free aggregation too
+	// (#2185), where no input row ever opens the single group, so synthesise it here:
+	// each kernel grown to one group reports exactly the neutral result its
+	// [funcs.Aggregator] counterpart would (count 0, sum integer 0, min/max/avg NULL,
+	// and the boxed kernel by construction), so the emitted row is byte-identical to
+	// the row path's — and to the one [GlobalAggregateAdapter] would synthesise, which
+	// therefore stays a transparent pass-through.
 	if len(op.chunkKeyVals) == 0 && len(op.keyCols) == 0 {
 		for _, k := range op.kernels {
 			k.grow(1)
