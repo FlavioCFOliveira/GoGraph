@@ -1258,6 +1258,13 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		Labels:            g.NodeLabelsInUse,
 		RelationshipTypes: g.RelationshipTypesInUse,
 		PropertyKeys:      g.PropertyKeysInUse,
+		// db.stats.refresh() (#2196): the statistics maintenance entry point has
+		// existed since #2098 but was reachable only from Go, so a Bolt client could
+		// not refresh them at all. The procedure is rate-limited (see
+		// procs.statsRefreshMinInterval) because the rebuild is a full scan and the
+		// call is reachable by any client; the Go entry point below is not, because an
+		// embedded caller is already inside the trust boundary.
+		RefreshStatistics: func(ctx context.Context) error { return e.RefreshStatistics(ctx) },
 	})
 	// Recovered-constraint safety net (#1918, #1981): recovery seeds the graph's
 	// store-direct constraint set, so Graph.HasConstraints reports true when the

@@ -43,6 +43,24 @@ var secCypherReadOnlyProcs = map[string]bool{
 	"db.relationshipTypes":    true,
 	"db.propertyKeys":         true,
 	"db.schema.visualization": true,
+	// db.stats.refresh is the ONE entry that is not pure introspection: it rebuilds
+	// the planner statistics and publishes a new snapshot (#2196). It is allow-listed
+	// deliberately, on two grounds recorded here because this list is the review
+	// record.
+	//
+	// First, it touches no graph data and changes no query RESULT — statistics are
+	// planner metadata, and a rebuild alters at most which plan is chosen, never what
+	// that plan returns.
+	//
+	// Second, and the reason the unbounded form was refused: the rebuild is an
+	// O(nodes x properties) scan reachable by any client, which without a bound is an
+	// amplification vector. It is RATE-LIMITED to one rebuild per
+	// procs.statsRefreshMinInterval, and a call inside that window is refused as a
+	// no-op rather than queued. That is what makes the capability safe to expose.
+	//
+	// It remains the only side-effecting procedure here. Anything else claiming an
+	// exception needs its own justification in this comment, not just a map entry.
+	"db.stats.refresh": true,
 }
 
 // secCypherFQN renders a procs.Signature's fully-qualified name ("ns.sub.name").

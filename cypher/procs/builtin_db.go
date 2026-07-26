@@ -17,8 +17,11 @@ package procs
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
@@ -53,6 +56,13 @@ type BuiltinSources struct {
 	// PropertyKeys is invoked by db.propertyKeys() to obtain the distinct
 	// property keys in use, one per returned name.
 	PropertyKeys func() []string
+	// RefreshStatistics rebuilds the planner statistics and publishes a fresh
+	// snapshot, backing db.stats.refresh(). It is the engine's own
+	// Engine.RefreshStatistics, threaded here so the maintenance entry point is
+	// reachable from Cypher — and therefore from Bolt — instead of only from Go
+	// (#2196). May be nil, in which case the procedure reports that statistics are
+	// unavailable rather than silently succeeding.
+	RefreshStatistics func(context.Context) error
 }
 
 // RegisterBuiltins registers all built-in db.* procedures into reg.
@@ -72,6 +82,106 @@ func RegisterBuiltins(reg *Registry, mgr *index.Manager, src BuiltinSources) {
 	mustRegister(reg, dbRelationshipTypes(src.RelationshipTypes))
 	mustRegister(reg, dbPropertyKeys(src.PropertyKeys))
 	mustRegister(reg, dbSchemaVisualization())
+	mustRegister(reg, dbStatsRefresh(src.RefreshStatistics, &statsRefreshLimiter{}))
+}
+
+// statsRefreshMinInterval bounds how often db.stats.refresh() will actually rebuild.
+//
+// The rebuild is an O(nodes x properties) scan, and the procedure is reachable by any
+// Bolt client. Unbounded, that is an amplification vector: a caller could drive repeated
+// full scans on an otherwise idle server. The interval turns the capability into one that
+// cannot be used to burn CPU — a refresh inside the window is REFUSED as a no-op with the
+// remaining wait reported, rather than queued (queueing would just move the amplification
+// into memory).
+//
+// Chosen at 30 seconds because statistics are explicitly best-effort and advisory: a plan
+// built from statistics up to 30 s stale is the normal case anyway, since nothing refreshes
+// them automatically. A caller that genuinely needs a rebuild sooner has the Go entry
+// point, Engine.RefreshStatistics, which is not rate-limited because an embedded caller is
+// already inside the trust boundary.
+const statsRefreshMinInterval = 30 * time.Second
+
+// statsRefreshLimiter bounds the rate at which a Cypher caller may drive a statistics
+// rebuild. It is safe for concurrent use: the whole check-and-stamp is one critical
+// section, so two simultaneous callers cannot both pass.
+type statsRefreshLimiter struct {
+	mu   sync.Mutex
+	last time.Time
+	now  func() time.Time // injectable for tests; nil means time.Now
+}
+
+// allow reports whether a rebuild may proceed now, and when it may not, how long remains.
+// A permitted call stamps the clock immediately, so a concurrent second caller is refused
+// even if the rebuild it permitted has not finished.
+func (l *statsRefreshLimiter) allow() (bool, time.Duration) {
+	nowFn := l.now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := nowFn()
+	if !l.last.IsZero() {
+		if elapsed := now.Sub(l.last); elapsed < statsRefreshMinInterval {
+			return false, statsRefreshMinInterval - elapsed
+		}
+	}
+	l.last = now
+	return true, 0
+}
+
+// dbStatsRefresh backs `CALL db.stats.refresh()`, the maintenance entry point that
+// rebuilds the planner statistics and publishes a fresh snapshot (#2196).
+//
+// Statistics are deliberately never maintained by a background goroutine — they are
+// best-effort and caller-driven — so something has to drive the rebuild.
+// Engine.RefreshStatistics has existed since #2098 but was reachable only from Go, which
+// left every Bolt client unable to refresh them at all.
+//
+// It is RATE-LIMITED (see [statsRefreshMinInterval]). Exposing an O(nodes x properties)
+// scan to untrusted CALL without a bound would be an amplification vector, which is why
+// the read-only procedure fence refused the unbounded form; the limit is what makes the
+// capability safe to expose rather than merely useful.
+//
+// It returns one row reporting the outcome rather than an empty result, so a client can
+// tell a completed rebuild from a refusal: `ok` is false, with a reason, when the engine
+// has no statistics support or when the call arrived inside the rate-limit window. A
+// rebuild that FAILS returns the error, because a caller that asked for a refresh and did
+// not get one must be told — fail-stop, not a silent partial.
+//
+// The rebuild honours the caller's context: cancelling the query cancels the scan, which
+// returns without publishing a partial snapshot.
+func dbStatsRefresh(refresh func(context.Context) error, limiter *statsRefreshLimiter) ProcEntry {
+	return ProcEntry{
+		Sig: Signature{
+			Namespace: []string{"db", "stats"},
+			Name:      "refresh",
+			Inputs:    nil,
+			Outputs: []NamedType{
+				{Name: "ok", Kind: expr.KindBool},
+				{Name: "detail", Kind: expr.KindString},
+			},
+		},
+		Impl: func(ctx context.Context, _ []expr.Value) ([][]expr.Value, error) {
+			row := func(ok bool, detail string) [][]expr.Value {
+				return [][]expr.Value{{expr.BoolValue(ok), expr.StringValue(detail)}}
+			}
+			if refresh == nil {
+				return row(false, "planner statistics are not available on this engine"), nil
+			}
+			if limiter != nil {
+				if allowed, wait := limiter.allow(); !allowed {
+					return row(false, fmt.Sprintf(
+						"refused: a statistics rebuild is rate-limited to one per %s; retry in %s",
+						statsRefreshMinInterval, wait.Round(time.Second))), nil
+				}
+			}
+			if err := refresh(ctx); err != nil {
+				return nil, err
+			}
+			return row(true, "planner statistics rebuilt"), nil
+		},
+	}
 }
 
 // mustRegister panics when Register returns an error. It is only called for
