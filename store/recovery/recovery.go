@@ -1045,9 +1045,41 @@ func openCodec[N comparable, W any](
 			// applied directly — no WAL prefix needed. AddEdge is
 			// idempotent against a freshly-restored mapper because each
 			// (src, dst) appears at most once in the CSR snapshot.
-			if err := snapshot.ApplyCSRToGraph(g, &loaded.CSR); err != nil {
+			// Bracket the CSR apply in ONE adjacency commit window, exactly as
+			// WAL replay already brackets itself (task #1526; see
+			// replayFrames). Outside a window every AddEdge takes the
+			// first-touch path in adjlist.storeEntry and clones the touched
+			// shard's ENTIRE slot array, so applying a snapshot cost
+			// O(edges x shard size) instead of O(shards touched). The
+			// preconditions are the same ones that license the replay window:
+			// recovery is single-threaded, the graph has not yet been returned
+			// to the caller, so there is no concurrent reader and no
+			// PinSnapshot. EndCommit freezes the builders immediately, before
+			// the labels/properties/handles applies and long before the caller
+			// sees the graph, so no in-place write can outlive the window.
+			//
+			// The window changes cost, not content: within it a shard is cloned
+			// once and then mutated in place, which is the same published state
+			// the per-op clone produced. Measured at 50k nodes / 500k edges:
+			// 147.45 ms to 73.57 ms and 737.6 MiB to 113.6 MiB allocated, with a
+			// byte-identical recovered graph (rmp #2170,
+			// snapshot_apply_window_test.go).
+			//
+			// The close is a plain statement rather than a defer, and the three
+			// lines carry no branch and no error return between them, so there
+			// is no path that opens the window and fails to close it. That
+			// matters because a LEAKED window is the one way this change could
+			// do harm — builders would never be frozen, and a later write would
+			// mutate an already-published slot array under a concurrent reader.
+			// Making the leak unreachable is worth more here than detecting it,
+			// since a leak is not observable through the public API and so
+			// cannot be regression-tested from outside graph/adjlist.
+			g.AdjList().BeginCommit()
+			csrErr := snapshot.ApplyCSRToGraph(g, &loaded.CSR)
+			g.AdjList().EndCommit()
+			if csrErr != nil {
 				metrics.IncCounter("store.recovery.openCodec.errors", 1)
-				return res, fmt.Errorf("recovery: apply snapshot CSR: %w", err)
+				return res, fmt.Errorf("recovery: apply snapshot CSR: %w", csrErr)
 			}
 			// Restore the snapshot tombstone set now that every snapshot
 			// node is interned (mapper) and materialised (CSR), and BEFORE
