@@ -149,10 +149,16 @@ func BenchmarkNumericEqualitySeek_EntityScan(b *testing.B) {
 	benchNumericEquality(b, true, "p")
 }
 
-// BenchmarkNumericEqualitySeek_ScalarSeek measures the scalar-projection shape
-// with the seek enabled. It is expected to match _ScalarScan: the columnar
-// scan+filter path claims this shape and never consults the index, so the
-// rewrite is inert here. Kept as standing evidence for that gap.
+// BenchmarkNumericEqualitySeek_ScalarSeek measures the scalar-projection shape with the
+// seek enabled. Since #2204 it matches _EntitySeek, not _ScalarScan: the columnar
+// recogniser now DECLINES when a covering seek would fire, so the index access path is
+// reached whatever the RETURN shape.
+//
+// It used to match _ScalarScan — 553 us at N=4000 and 2.24 ms at N=16000, identical with
+// the seek disabled — because the columnar chain claimed the shape at the Projection
+// level before buildOperator could reach the Selection-level rewrite. An index made the
+// query SLOWER than not having one, purely as a function of what was projected.
+// Measured after the fix: 5.1 us and 4.9 us, i.e. 110x and 463x.
 func BenchmarkNumericEqualitySeek_ScalarSeek(b *testing.B) {
 	benchNumericEquality(b, false, "p.age")
 }

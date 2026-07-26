@@ -12930,6 +12930,66 @@ func columnarScanVar(plan ir.LogicalPlan) (string, bool) {
 // once committed, the scan and projection are built through the SAME buildOperator /
 // buildIRProjection the serial path uses, so the schema layout every operator above
 // sees is identical.
+// indexSeekWouldFire reports whether buildOperator would replace sel's scan with an
+// index access path — a hash seek on an equality, a key-set seek on a disjunction of
+// equalities, or a range seek — had the columnar recognisers not claimed the shape first
+// (#2204).
+//
+// It is READ-ONLY with respect to the caller's state: every underlying rewrite mutates
+// the schema map it is given, so this probes against a COPY, exactly as the columnar
+// recognisers probe their own shape against a hypothetical schema. The operators the
+// probe builds are discarded; that costs one throwaway build per query BUILD, never per
+// row, which is the same order as the recogniser's own pre-check.
+//
+// Being defined in terms of the real rewrites, rather than re-deriving their conditions,
+// is deliberate: a probe that guessed would drift from what buildOperator actually does,
+// and the failure mode of drift here is silently losing an index again.
+func indexSeekWouldFire(
+	sel *ir.Selection,
+	walker nodeWalkerIface,
+	params map[string]expr.Value,
+	schema map[string]int,
+	idxMgr *index.Manager,
+	bopts *buildOpts,
+) bool {
+	// Cheapest possible gate first: with no index registered no seek can fire, so a
+	// workload that defines none never pays for the probe at all. This matters because
+	// the probe below builds throwaway operators — about seven allocations per query
+	// BUILD — and an unindexed workload would otherwise carry that cost for an answer
+	// that is always "no". Manager.Count is one RLock over a map length.
+	if idxMgr == nil || sel == nil || idxMgr.Count() == 0 {
+		return false
+	}
+	var g *lpg.Graph[string, float64]
+	if lw, ok := walker.(*lpgNodeWalker); ok {
+		g = lw.g
+	}
+
+	// Hash seek on `n.prop = <const>`.
+	if op, ok, err := tryBuildIndexSeekFromSelection(sel, params, copySchema(schema), idxMgr); err == nil && ok {
+		closeProbe(op)
+		return true
+	}
+	// Key-set seek: a disjunction of equalities on one property (#2183).
+	if op, ok := tryBuildIndexSeekSetFromSelection(sel, params, copySchema(schema), idxMgr, g); ok {
+		closeProbe(op)
+		return true
+	}
+	// Range seek on a bound btree (#1505), including the numeric companion #2169 opens.
+	if op, ok := buildRangeSeekIfEnabled(bopts, sel, copySchema(schema), idxMgr, g, params); ok {
+		closeProbe(op)
+		return true
+	}
+	return false
+}
+
+// closeProbe releases an operator built only to answer a planning question.
+func closeProbe(op exec.Operator) {
+	if op != nil {
+		_ = op.Close()
+	}
+}
+
 func tryBuildColumnarFilterChain(
 	proj *ir.Projection,
 	walker nodeWalkerIface,
@@ -12957,6 +13017,24 @@ func tryBuildColumnarFilterChain(
 	}
 	scanVar, isScan := columnarScanVar(sel.Child)
 	if !isScan {
+		return nil, false, nil
+	}
+	// An INDEX ACCESS PATH outranks columnar execution, and by a different order of
+	// magnitude: a seek is sublinear in the label population where the columnar chain is
+	// linear in it. The round-3 audit measured the consequence of getting this wrong —
+	// `MATCH (p:Person {age: v}) RETURN p.age` on an indexed property took 553 us at
+	// N=4000 and 9.67 ms at N=64000, IDENTICAL to the same query with the seek disabled,
+	// because this recogniser claimed the shape at the Projection level before
+	// buildOperator could reach the Selection-level seek rewrites. The entity-projecting
+	// form of the SAME predicate was flat at ~4.2 us. So an index made the query slower
+	// than not having one, purely as a function of the RETURN shape (#2204).
+	//
+	// Decline when a covering seek would fire. The probe is read-only — see
+	// [indexSeekWouldFire] — and the declined query then takes the row-mode seek path,
+	// which is flat in the label population. Composing the two (seek to narrow the
+	// stream, columnar to avoid boxing what survives) is the better end state and is
+	// tracked separately; yielding is the part that is unconditionally correct.
+	if indexSeekWouldFire(sel, walker, params, schema, idxMgr, bopts) {
 		return nil, false, nil
 	}
 	// The min-cardinality label re-anchor (#2077) replaces the scanned label with the
