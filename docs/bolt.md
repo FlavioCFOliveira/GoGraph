@@ -18,8 +18,23 @@ import (
 // existing node pair).
 g := lpg.New[string, float64](adjlist.Config{Multigraph: true})
 eng := cypher.NewEngine(g)
-srv := server.NewServer(eng, server.Options{MaxConnections: 1024})
-go srv.ListenAndServe(context.Background(), ":7687")
+
+// NewServer returns an error and is secure-by-default: it refuses a nil Auth
+// with ErrNoAuthHandler rather than silently accepting every client. Use the
+// explicit NoAuthHandler{} value to opt out, for development only — it logs a
+// warning. See Authentication below for a real handler.
+srv, err := server.NewServer(eng, server.Options{
+    MaxConnections: 1024,
+    Auth:           server.NoAuthHandler{},
+})
+if err != nil {
+    log.Fatalf("bolt: %v", err)
+}
+go func() {
+    if err := srv.ListenAndServe(context.Background(), ":7687"); err != nil {
+        log.Printf("bolt: %v", err)
+    }
+}()
 ```
 
 ## Supported Bolt versions
@@ -194,7 +209,18 @@ func main() {
     // always adds a relationship, including a parallel edge between a pair).
     g   := lpg.New[string, float64](adjlist.Config{Multigraph: true})
     eng := cypher.NewEngine(g)
-    srv := server.NewServer(eng, server.Options{MaxConnections: 1024})
+    srv, err := server.NewServer(eng, server.Options{
+        MaxConnections: 1024,
+        Auth: server.BasicAuthHandler{Validate: func(user, pass string) error {
+            if user != os.Getenv("GOGRAPH_USER") || pass != os.Getenv("GOGRAPH_PASSWORD") {
+                return server.ErrAuthFailed
+            }
+            return nil
+        }},
+    })
+    if err != nil {
+        log.Fatalf("bolt: %v", err)
+    }
 
     ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
     defer stop()
@@ -408,4 +434,4 @@ Drivers that negotiate Bolt 3.x or earlier are not supported.
 
 ---
 
-*Last reviewed: 2026-07-03 against commit `f1fa1a2`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-07-26 against commit `b54b284`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*

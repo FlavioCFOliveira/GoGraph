@@ -961,10 +961,20 @@ The following constructs are not yet supported:
 |---|---|
 | `CALL { … }` standalone subquery clause | Not parsed; rejected at parse time |
 | `CALL { … } IN TRANSACTIONS` | Not supported |
+| `COLLECT { … }` subquery expression | Not parsed; rejected at parse time |
 
-`EXISTS { … }`, `COUNT { … }`, and `COLLECT { … }` subquery *expressions* are
-supported (see [WHERE](#where) and [Aggregation](#aggregation)); only the
-standalone `CALL { … }` subquery *clause* is unsupported.
+`EXISTS { … }` and `COUNT { … }` subquery *expressions* are supported (see
+[WHERE](#where) and [Aggregation](#aggregation)). `COLLECT { … }` is **not**:
+`COLLECT` has no subquery token, so the parser reads it as a variable followed by
+a map literal and the query is rejected — `RETURN COLLECT { MATCH (n) RETURN n }`
+fails with a syntax error, and `RETURN COLLECT { k: 1 }` with an
+undefined-variable error. To build a list, use the `collect()` aggregate or a
+pattern comprehension:
+
+```cypher
+MATCH (a:Person) RETURN collect(a.name) AS names
+MATCH (a:Person) RETURN [(a)-[:KNOWS]->(b) | b.name] AS friends
+```
 
 The openCypher TCK execution suite is fully green: all 3897 scenarios pass
 (100%), enforced by `tckExecutionBaseline` in `cypher/tck/runner_test.go`. For
@@ -1074,4 +1084,4 @@ consults the reference first.
 
 ---
 
-*Last reviewed: 2026-07-19 against commit `345b2a5`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-07-26 against commit `b54b284`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*

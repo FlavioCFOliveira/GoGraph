@@ -8,11 +8,9 @@ package ldbc
 // exercises the query pipeline via the same driver.
 //
 // Seeding is done over Bolt (ExecuteWrite) rather than via eng.RunInTx. Both
-// approaches go through the full Cypher pipeline. The MATCH+CREATE queries
-// for KNOWS relationships use the WHERE-clause form (WHERE a.id=X AND b.id=Y)
-// because inline integer property filters in a comma-joined MATCH pattern
-// (MATCH (a:P {id:1}),(b:P {id:2})) are silently no-op in the current engine
-// when both patterns carry integer filters.
+// approaches go through the full Cypher pipeline. See socialGraphSeedQueries
+// for the note on inline property filters, whose supposed defect this file used
+// to document and which does not exist.
 
 import (
 	"context"
@@ -47,10 +45,12 @@ import (
 //
 //	1→2, 1→4, 2→3, 2→5, 4→5
 //
-// NOTE: KNOWS edges use the WHERE-clause form (MATCH (a:P),(b:P) WHERE a.id=X
-// AND b.id=Y) rather than inline property filters ({id:X}). Inline integer
-// property filters in a comma-joined MATCH pattern are silently ignored by the
-// current engine — the WHERE form is the supported workaround.
+// KNOWS edges are seeded with inline property filters ({id:X}). An earlier
+// comment here claimed that inline integer filters in a comma-joined MATCH were
+// silently ignored and that the WHERE-clause form was a required workaround;
+// that defect does not exist (verified at 6f31f61 across all four
+// combinations — both inline, both in WHERE, and each mixture — and the seeds
+// below are themselves the standing check, rmp #2173).
 var socialGraphSeedQueries = []string{
 	`CREATE (n:Person {id: 1, firstName: 'Alice', lastName: 'Smith'})`,
 	`CREATE (n:Person {id: 2, firstName: 'Bob',   lastName: 'Jones'})`,
@@ -62,11 +62,11 @@ var socialGraphSeedQueries = []string{
 	// since 51feab7 (cypher/exec/expand.go reverseEdgePassesFilter), so the
 	// earlier two-direction workaround is no longer needed and would emit
 	// duplicate bindings under undirected single-relationship patterns.
-	`MATCH (a:Person),(b:Person) WHERE a.id = 1 AND b.id = 2 CREATE (a)-[:KNOWS]->(b)`,
-	`MATCH (a:Person),(b:Person) WHERE a.id = 1 AND b.id = 4 CREATE (a)-[:KNOWS]->(b)`,
-	`MATCH (a:Person),(b:Person) WHERE a.id = 2 AND b.id = 3 CREATE (a)-[:KNOWS]->(b)`,
-	`MATCH (a:Person),(b:Person) WHERE a.id = 2 AND b.id = 5 CREATE (a)-[:KNOWS]->(b)`,
-	`MATCH (a:Person),(b:Person) WHERE a.id = 4 AND b.id = 5 CREATE (a)-[:KNOWS]->(b)`,
+	`MATCH (a:Person {id: 1}),(b:Person {id: 2}) CREATE (a)-[:KNOWS]->(b)`,
+	`MATCH (a:Person {id: 1}),(b:Person {id: 4}) CREATE (a)-[:KNOWS]->(b)`,
+	`MATCH (a:Person {id: 2}),(b:Person {id: 3}) CREATE (a)-[:KNOWS]->(b)`,
+	`MATCH (a:Person {id: 2}),(b:Person {id: 5}) CREATE (a)-[:KNOWS]->(b)`,
+	`MATCH (a:Person {id: 4}),(b:Person {id: 5}) CREATE (a)-[:KNOWS]->(b)`,
 }
 
 // startICServer starts a fresh empty Bolt server on a random loopback port
