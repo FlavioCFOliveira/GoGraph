@@ -46,11 +46,20 @@ func TestParallelScanProject_Differential(t *testing.T) {
 		// columnar filter chain (#2065; its filter differential is covered by
 		// columnar_filter_test.go), so these filter cases add a non-property scalar
 		// item (n.v + 0) to keep the filter-pushdown differential ON the parallel
-		// path. filter-and keeps a pure projection because a compound predicate
-		// already declines the columnar chain, so it still engages the parallel path.
+		// path.
+		//
+		// filter-and used to keep a pure projection, on the grounds that a compound
+		// predicate declined the columnar chain. Since #2186 it does not: the columnar
+		// predicate combines a conjunction, so the pure-projection form of this query
+		// now routes to the columnar chain — which is the documented preference (see
+		// the Projection case in api.go) and is measured at 5.83 ms / 79 354 allocs on
+		// the parallel path against 2.11 ms / 148 allocs on the columnar chain
+		// (docs/benchmarks/columnar-shape-coverage-2026-07-26.md). So filter-and now
+		// carries the same n.v + 0 item as its siblings, for the same reason: to keep
+		// THIS test measuring the parallel path's filter pushdown.
 		{"filter-eq", `MATCH (n) WHERE n.g = 1 RETURN n.v + 0 AS v`},
 		{"filter-range", `MATCH (n) WHERE n.v > 100 RETURN n.v + 0 AS v`},
-		{"filter-and", `MATCH (n) WHERE n.v >= 50 AND n.v < 150 RETURN n.v AS v`},
+		{"filter-and", `MATCH (n) WHERE n.v >= 50 AND n.v < 150 RETURN n.v + 0 AS v`},
 		{"filter-null-drop", `MATCH (n) WHERE n.missing > 0 RETURN n.v + 0 AS v`}, // NULL drops every row
 		{"filter-multi-col", `MATCH (n) WHERE n.g = 2 RETURN n.v + 0 AS v, n.g AS grp`},
 		{"case-expr", `MATCH (n) RETURN CASE WHEN n.g = 0 THEN 'a' ELSE 'b' END AS c`},

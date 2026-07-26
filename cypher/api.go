@@ -7499,7 +7499,21 @@ func buildOperator(
 			limitEagerMB, limitEagerEst := resultByteBudget(bopts)
 			return exec.NewLimit(exec.NewEager(child, 0).WithByteBudget(limitEagerMB, limitEagerEst), limitN)
 		}
-		return exec.NewLimit(child, limitN)
+		lim, lerr := exec.NewLimit(child, limitN)
+		if lerr != nil {
+			return nil, lerr
+		}
+		// Keep the chunk chain unbroken through the LIMIT when the child is a
+		// ChunkProducer (#2186): plain Limit is not one, so a LIMIT at the plan root
+		// forced the whole columnar suffix below it into row mode — measured at 4.3x
+		// the time and 2414x the allocations for a semantically inert LIMIT. The
+		// columnar form only clamps the child's FillChunk row budget; its Next path is
+		// the SAME promoted Limit.Next, over the same counter, so a row-at-a-time
+		// parent sees byte-identical behaviour.
+		if colLim, wrapped := exec.NewColumnarLimit(lim); wrapped {
+			return colLim, nil
+		}
+		return lim, nil
 
 	case *ir.Skip:
 		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
@@ -12738,6 +12752,19 @@ func tryBuildColumnarFilterChain(
 	if !isScan {
 		return nil, false, nil
 	}
+	// The min-cardinality label re-anchor (#2077) replaces the scanned label with the
+	// smallest one in the conjunction, which reduces the number of rows SCANNED.
+	// Columnar execution only removes a constant factor from each scanned row, so it
+	// must never pre-empt the re-anchor — and since #2186 taught
+	// [buildColumnarPredicate] to accept a LabelPredicate, this recogniser would
+	// otherwise claim exactly the `(n:A:B)` shape the re-anchor exists for.
+	// [buildMinLabelScanIfEnabled] is what buildOperator would reach; these are its
+	// preconditions, evaluated read-only.
+	if bopts.minLabelScanEnabled {
+		if _, _, _, wouldReanchor := pickMinLabel(sel, labelSrc); wouldReanchor {
+			return nil, false, nil
+		}
+	}
 	// Pre-check against a hypothetical schema (scanVar at column 0) so a non-match
 	// never mutates the real schema. The predicate must be columnar-evaluable and
 	// every projection item a scalar property on the scanned node at column 0.
@@ -12814,7 +12841,51 @@ func tryBuildColumnarExpandFilterChain(
 	if !isSel || sel.PredicateExpr == nil {
 		return nil, false, nil
 	}
-	exp, isExp := sel.Child.(*ir.Expand)
+	// Peel any STACKED Selections between this one and the Expand, and treat them as
+	// one fused conjunction (#2186). The IR translator emits a separate Selection per
+	// pattern predicate, so `MATCH (a:P)-[:K]->(m:P) WHERE m.v > 10` arrives as
+	// Projection → Selection(m.v>10) → Selection(m:P) → Expand → scan. Matching only
+	// a single Selection made the far-endpoint label — a label every node already
+	// carried — collapse the whole chunk chain to row mode, measured at 4.4x the time
+	// and 1640x the allocations of the identical unlabelled query.
+	//
+	// Fusing is exactly equivalent here because a Selection whose child is an
+	// *ir.Expand has no rewrite available to it: every Selection-level rewrite in
+	// buildOperator (hash join, hash/range/key-set index seek, min-label re-anchor)
+	// requires the child to be a scan or an *ir.Apply, so the build would produce
+	// nothing but exec.NewFilter over the Expand — which is precisely what the fused
+	// ColumnarFilter replaces. predsInner holds the peeled predicates in the order
+	// the stacked Filters would evaluate them: innermost first.
+	var predsInner []ast.Expression
+	var base ir.LogicalPlan = sel
+	for {
+		cur, isSelection := base.(*ir.Selection)
+		if !isSelection {
+			break
+		}
+		// A predicate-less Selection is a pass-through the chain cannot represent, and
+		// a seek-hinted one is meant to be DROPPED by buildOperator rather than
+		// evaluated (#2183); decline both rather than change what they mean.
+		if cur.PredicateExpr == nil || bopts.seekHint[cur] {
+			return nil, false, nil
+		}
+		// The anchor swap re-roots the traversal on the cheaper endpoint, which reduces
+		// CARDINALITY. Columnar execution only removes a constant factor, so it must
+		// never pre-empt the swap (see [tryBuildAnchorSwap], which buildOperator would
+		// reach first were this recogniser not sitting above it).
+		if len(bopts.anchorSwap) > 0 {
+			if site, isSite := matchAnchorSite(cur); isSite && bopts.anchorSwap[site.exp] {
+				return nil, false, nil
+			}
+		}
+		predsInner = append(predsInner, cur.PredicateExpr)
+		base = cur.Child
+	}
+	// Reverse into evaluation order (innermost Selection runs first).
+	for i, j := 0, len(predsInner)-1; i < j; i, j = i+1, j-1 {
+		predsInner[i], predsInner[j] = predsInner[j], predsInner[i]
+	}
+	exp, isExp := base.(*ir.Expand)
 	if !isExp {
 		return nil, false, nil
 	}
@@ -12833,8 +12904,10 @@ func tryBuildColumnarExpandFilterChain(
 	if exp.ToVar != "" {
 		tmpSchema[exp.ToVar] = 3
 	}
-	if _, matched := buildColumnarExpandPredicate(sel.PredicateExpr, tmpSchema, g, params, reg, bopts); !matched {
-		return nil, false, nil
+	for _, pe := range predsInner {
+		if _, matched := buildColumnarExpandPredicate(pe, tmpSchema, g, params, reg, bopts); !matched {
+			return nil, false, nil
+		}
 	}
 	for i := range proj.Items {
 		_, _, itemOK := columnarPropertyItem(proj.Items[i], tmpSchema, bopts)
@@ -12848,7 +12921,7 @@ func tryBuildColumnarExpandFilterChain(
 	// *exec.Expand whose child is the scan (a NodeIDColumnProducer), so
 	// NewColumnarExpand succeeds; a defensive fall-through keeps correctness if either
 	// invariant does not hold.
-	expandOp, err := buildOperator(sel.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, nil, bopts)
+	expandOp, err := buildOperator(base, walker, labelSrc, reg, params, schema, idxMgr, procReg, nil, bopts)
 	if err != nil {
 		return nil, false, err
 	}
@@ -12860,9 +12933,13 @@ func tryBuildColumnarExpandFilterChain(
 	if !wrapped {
 		return nil, false, nil
 	}
-	predFn := newRowPredicate(sel.PredicateExpr, schema, g, params, reg, bopts)
-	cpred, _ := buildColumnarExpandPredicate(sel.PredicateExpr, schema, g, params, reg, bopts)
-	filter := exec.NewColumnarFilter(colExp, predFn, cpred)
+	rowPreds := make([]func(exec.Row) (expr.Value, error), len(predsInner))
+	cpreds := make([]exec.ChunkPredicate, len(predsInner))
+	for i, pe := range predsInner {
+		rowPreds[i] = newRowPredicate(pe, schema, g, params, reg, bopts)
+		cpreds[i], _ = buildColumnarExpandPredicate(pe, schema, g, params, reg, bopts)
+	}
+	filter := exec.NewColumnarFilter(colExp, chainRowPredicates(rowPreds), makeColumnarConjunctionPredicate(cpreds))
 	projOp, err := buildIRProjection(proj.Items, filter, schema, g, params, reg, bopts)
 	if err != nil {
 		return nil, false, err
@@ -13344,27 +13421,174 @@ func newRowPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.Grap
 // predicate, which is byte-identical by construction. The certification of these
 // rules is recorded on task #1824 (cypher-expert-consultant, grounded in
 // CIP2016-06-14 and the openCypher TCK).
+// Beyond the bare comparison it also accepts a CONJUNCTION of accepted shapes, a
+// LABEL test and an IN over a scalar literal list — see
+// [buildColumnarConjunction], [makeColumnarLabelPredicate] and
+// [makeColumnarInPredicate] (#2186). Each of those recurses through this function
+// (via the col0 resolver) so the accepted-shape set stays a single definition.
 func buildColumnarPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.Graph[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, bopts *buildOpts) (exec.ChunkPredicate, bool) {
-	bo, ok := predExpr.(*ast.BinaryOp)
-	if !ok {
-		return nil, false
-	}
-	switch bo.Operator {
-	case "<", "<=", ">", ">=", "=", "<>":
-	default:
-		return nil, false
-	}
-	if propName, isProp := nodePropAtCol0(bo.Left, schema, bopts); isProp {
-		if cv, isConst := columnarConstValue(bo.Right, params, reg); isConst {
-			return makeColumnarComparePredicate(bo.Operator, propName, cv, 0, g), true
+	return buildColumnarPredicateAt(predExpr, schema, g, params, reg, bopts, false)
+}
+
+// buildColumnarPredicateAt is the shared implementation of [buildColumnarPredicate]
+// (anyCol=false: the receiver must be the bound node at chunk column 0, the
+// single-node scan row shape) and [buildColumnarExpandPredicate] (anyCol=true: the
+// receiver may be a bound node at ANY chunk column, the row shape a traversal
+// produces). Keeping one implementation is what guarantees the two entry points
+// accept exactly the same predicate grammar — the round-3 audit found them drifting.
+func buildColumnarPredicateAt(
+	predExpr ast.Expression,
+	schema map[string]int,
+	g *lpg.Graph[string, float64],
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
+	bopts *buildOpts,
+	anyCol bool,
+) (exec.ChunkPredicate, bool) {
+	// resolve reports whether e is `node.prop` on an eligible bound NODE variable and
+	// returns the property key and the variable's chunk column.
+	resolve := func(e ast.Expression) (propName string, nodeCol int, ok bool) {
+		if anyCol {
+			return nodePropAtAnyCol(e, schema, bopts)
 		}
+		p, isProp := nodePropAtCol0(e, schema, bopts)
+		return p, 0, isProp
 	}
-	if propName, isProp := nodePropAtCol0(bo.Right, schema, bopts); isProp {
-		if cv, isConst := columnarConstValue(bo.Left, params, reg); isConst {
-			return makeColumnarComparePredicate(flipComparisonOp(bo.Operator), propName, cv, 0, g), true
+	// resolveNodeCol reports whether e is a bare bound NODE variable and returns its
+	// chunk column — the receiver shape a label test needs.
+	resolveNodeCol := func(e ast.Expression) (nodeCol int, ok bool) {
+		v, isVar := e.(*ast.Variable)
+		if !isVar {
+			return 0, false
+		}
+		col, inSchema := schema[v.Name]
+		if !inSchema || isNonNodeVar(v.Name, bopts) {
+			return 0, false
+		}
+		if !anyCol && col != 0 {
+			return 0, false
+		}
+		return col, true
+	}
+
+	switch e := predExpr.(type) {
+	case *ast.LabelPredicate:
+		// `n:A:B` — a conjunctive label test, decided by a per-label roaring-bitmap
+		// membership check on the raw NodeID. Cheaper unboxed than boxed, and it is
+		// what an added pattern label becomes once the stacked Selections are fused.
+		nodeCol, ok := resolveNodeCol(e.Receiver)
+		if !ok || len(e.Labels) == 0 {
+			return nil, false
+		}
+		return makeColumnarLabelPredicate(e.Labels, nodeCol, g), true
+
+	case *ast.BinaryOp:
+		switch e.Operator {
+		case "AND":
+			return buildColumnarConjunction(e, schema, g, params, reg, bopts, anyCol)
+		case "IN":
+			propName, nodeCol, isProp := resolve(e.Left)
+			if !isProp {
+				return nil, false
+			}
+			vals, isConstList := columnarConstList(e.Right, params, reg)
+			if !isConstList {
+				return nil, false
+			}
+			return makeColumnarInPredicate(propName, vals, nodeCol, g), true
+		case "<", "<=", ">", ">=", "=", "<>":
+			if propName, nodeCol, isProp := resolve(e.Left); isProp {
+				if cv, isConst := columnarConstValue(e.Right, params, reg); isConst {
+					return makeColumnarComparePredicate(e.Operator, propName, cv, nodeCol, g), true
+				}
+			}
+			if propName, nodeCol, isProp := resolve(e.Right); isProp {
+				if cv, isConst := columnarConstValue(e.Left, params, reg); isConst {
+					return makeColumnarComparePredicate(flipComparisonOp(e.Operator), propName, cv, nodeCol, g), true
+				}
+			}
+			return nil, false
+		default:
+			return nil, false
 		}
 	}
 	return nil, false
+}
+
+// buildColumnarConjunction combines the two operands of an `AND` into a single
+// [exec.ChunkPredicate] (#2186).
+//
+// The combination rule follows directly from openCypher three-valued logic under a
+// WHERE: a row survives iff the conjunction evaluates to TRUE, which requires EVERY
+// conjunct to be TRUE. A child's (keep=false, decided=true) therefore means "this
+// conjunct is not TRUE" — FALSE or NULL, it does not matter which — and the whole
+// conjunction is decided FALSE-or-NULL, so the row is decidedly dropped. Only when
+// no child decides a drop AND some child cannot decide at all is the conjunction
+// undecided, and the [exec.ColumnarFilter] falls back to the boxed row predicate for
+// that row, which is byte-identical by construction.
+//
+// EVERY conjunct must be a shape this builder recognises; one it does not decays the
+// whole conjunction to (nil, false), keeping the plain boxed predicate. That
+// restriction is what makes the identity argument complete rather than merely
+// plausible. Every recognised leaf is error-free by construction — a property read
+// plus a same-kind scalar comparison, a roaring-bitmap label membership test, or a
+// membership test over scalar constants; none of them can raise — so returning a
+// decided drop from one leaf while a SIBLING is undecided cannot skip an error the
+// boxed path would have raised. Admitting an arbitrary unrecognised conjunct as an
+// always-undecided leaf would forfeit that: the sibling's decided drop could
+// short-circuit past a conjunct whose boxed evaluation raises.
+func buildColumnarConjunction(
+	bo *ast.BinaryOp,
+	schema map[string]int,
+	g *lpg.Graph[string, float64],
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
+	bopts *buildOpts,
+	anyCol bool,
+) (exec.ChunkPredicate, bool) {
+	// Flatten the conjunction so an n-way AND costs one predicate slice, not a tree
+	// of closures.
+	var leaves []exec.ChunkPredicate
+	var flatten func(e ast.Expression) bool
+	flatten = func(e ast.Expression) bool {
+		if inner, isBO := e.(*ast.BinaryOp); isBO && inner.Operator == "AND" {
+			return flatten(inner.Left) && flatten(inner.Right)
+		}
+		cp, ok := buildColumnarPredicateAt(e, schema, g, params, reg, bopts, anyCol)
+		if !ok {
+			return false
+		}
+		leaves = append(leaves, cp)
+		return true
+	}
+	if !flatten(bo.Left) || !flatten(bo.Right) {
+		return nil, false
+	}
+	return makeColumnarConjunctionPredicate(leaves), true
+}
+
+// makeColumnarConjunctionPredicate folds leaves into the single [exec.ChunkPredicate]
+// described on [buildColumnarConjunction]: a decided drop from any leaf decides the
+// conjunction FALSE-or-NULL; all leaves decided TRUE decides it TRUE; anything else
+// is undecided and defers to the boxed predicate.
+func makeColumnarConjunctionPredicate(leaves []exec.ChunkPredicate) exec.ChunkPredicate {
+	return func(src *exec.Chunk, row int) (keep, decided bool) {
+		allDecided := true
+		for _, leaf := range leaves {
+			k, d := leaf(src, row)
+			if !d {
+				allDecided = false
+				continue
+			}
+			if !k {
+				return false, true // this conjunct is not TRUE → the AND is not TRUE
+			}
+		}
+		if !allDecided {
+			return false, false // no decided drop, but not every conjunct is known
+		}
+		return true, true // every conjunct decided TRUE
+	}
 }
 
 // buildColumnarExpandPredicate is the #2106 generalisation of
@@ -13373,29 +13597,140 @@ func buildColumnarPredicate(predExpr ast.Expression, schema map[string]int, g *l
 // variable at ANY schema column (not only column 0), typically the far endpoint of
 // the traversal whose raw NodeID sits in the Expand output's dstID column. It
 // returns the matching [exec.ChunkPredicate] (reading the node's raw NodeID from
-// that chunk column) or (nil, false) to keep the boxed row predicate. The unboxed
-// fast-path and undecided-fallback rules are exactly those of [buildColumnarPredicate].
+// that chunk column) or (nil, false) to keep the boxed row predicate. The accepted
+// predicate grammar, the unboxed fast-path rules and the undecided-fallback rules are
+// exactly those of [buildColumnarPredicate] — both delegate to the same
+// [buildColumnarPredicateAt], which is what keeps them from drifting apart.
 func buildColumnarExpandPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.Graph[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, bopts *buildOpts) (exec.ChunkPredicate, bool) {
-	bo, ok := predExpr.(*ast.BinaryOp)
-	if !ok {
+	return buildColumnarPredicateAt(predExpr, schema, g, params, reg, bopts, true)
+}
+
+// chainRowPredicates returns the BOXED row predicate for a fused stack of
+// Selections (#2186). preds must be in the order the stacked [exec.Filter]s would
+// evaluate them — innermost first — and the returned predicate reproduces that chain
+// exactly: it evaluates each in turn and returns the first value that is not truthy,
+// so evaluation order, short-circuiting and the returned value are identical to the
+// operator chain it replaces.
+//
+// Returning the first non-truthy value rather than a synthesised FALSE is what makes
+// it byte-identical: [exec.Filter] keeps a row iff [expr.IsTruthy] holds, so FALSE
+// and NULL both drop it, and a downstream reader of the value sees what the original
+// chain produced.
+//
+// The order and the short-circuit are defence in depth rather than an observable
+// requirement today: the caller only fuses predicates every one of which
+// [buildColumnarPredicateAt] recognised, and every recognised shape is a property read
+// plus a same-kind scalar comparison, a label membership test, or a membership test
+// over scalar constants — none of which can error or has a side effect, so no ordering
+// is distinguishable. Preserving the order anyway means the property survives if the
+// recognised set ever widens to a shape that can error.
+func chainRowPredicates(preds []func(exec.Row) (expr.Value, error)) func(exec.Row) (expr.Value, error) {
+	if len(preds) == 1 {
+		return preds[0]
+	}
+	return func(row exec.Row) (expr.Value, error) {
+		var last expr.Value = expr.BoolValue(true)
+		for _, p := range preds {
+			v, err := p(row)
+			if err != nil {
+				return nil, err
+			}
+			if !expr.IsTruthy(v) {
+				return v, nil // this Filter would have dropped the row here
+			}
+			last = v
+		}
+		return last, nil
+	}
+}
+
+// makeColumnarLabelPredicate returns the [exec.ChunkPredicate] for a conjunctive
+// label test `node:A:B` whose receiver's raw NodeID sits in chunk column nodeCol
+// (#2186). Each label is a roaring-bitmap membership test on the raw NodeID
+// ([lpg.Graph.HasNodeLabelByID]), which allocates nothing and never materialises the
+// node's label slice.
+//
+// It is decided for every row whose cell is a valid int64 NodeID: a node either
+// carries every named label or it does not, and a label never interned is a definite
+// absent. A cell that is not a valid int64 NodeID is reported undecided, so the
+// boxed path — where the receiver may be a non-node value that openCypher maps to
+// NULL — decides it byte-identically.
+func makeColumnarLabelPredicate(labels []string, nodeCol int, g *lpg.Graph[string, float64]) exec.ChunkPredicate {
+	// Copy so a later mutation of the AST slice cannot change the built predicate.
+	want := make([]string, len(labels))
+	copy(want, labels)
+	return func(src *exec.Chunk, row int) (keep, decided bool) {
+		if nodeCol < 0 || nodeCol >= src.NumCols() || !src.IsInt64Column(nodeCol) {
+			return false, false
+		}
+		id64, valid := src.Int64(nodeCol, row)
+		if !valid {
+			return false, false
+		}
+		id := graph.NodeID(id64)
+		for _, name := range want {
+			if !g.HasNodeLabelByID(id, name) {
+				return false, true
+			}
+		}
+		return true, true
+	}
+}
+
+// makeColumnarInPredicate returns the [exec.ChunkPredicate] for `node.prop IN [..]`
+// over a list of scalar literal constants whose receiver's raw NodeID sits in chunk
+// column nodeCol (#2186).
+//
+// It is built from the SAME per-element comparison the `=` fast path uses
+// ([makeColumnarComparePredicate] with "="), so membership is decided exactly as a
+// chain of equalities would be. That matters for the three-valued rule openCypher
+// gives IN: TRUE if any element compares equal; otherwise NULL if any element
+// comparison is NULL; otherwise FALSE. Under a WHERE, NULL and FALSE both drop the
+// row, so "no element decided equal, and every element comparison was decided" is a
+// decided drop — and if any element comparison was UNDECIDED (a kind mismatch the
+// unboxed path will not resolve), the whole test is undecided and the boxed predicate
+// decides the row.
+func makeColumnarInPredicate(propName string, vals []expr.Value, nodeCol int, g *lpg.Graph[string, float64]) exec.ChunkPredicate {
+	eqs := make([]exec.ChunkPredicate, len(vals))
+	for i, v := range vals {
+		eqs[i] = makeColumnarComparePredicate("=", propName, v, nodeCol, g)
+	}
+	return func(src *exec.Chunk, row int) (keep, decided bool) {
+		allDecided := true
+		for _, eq := range eqs {
+			k, d := eq(src, row)
+			if !d {
+				allDecided = false
+				continue
+			}
+			if k {
+				return true, true // some element compares equal → IN is TRUE
+			}
+		}
+		if !allDecided {
+			return false, false
+		}
+		return false, true // every element decided not-equal → FALSE or NULL → drop
+	}
+}
+
+// columnarConstList reports whether e is a list literal every element of which is a
+// plain scalar constant [columnarConstValue] accepts, returning those values. An
+// empty list is rejected: `x IN []` is always FALSE and is not worth a predicate.
+func columnarConstList(e ast.Expression, params map[string]expr.Value, reg expr.FunctionRegistry) ([]expr.Value, bool) {
+	lit, isList := e.(*ast.ListLiteral)
+	if !isList || len(lit.Elements) == 0 {
 		return nil, false
 	}
-	switch bo.Operator {
-	case "<", "<=", ">", ">=", "=", "<>":
-	default:
-		return nil, false
-	}
-	if propName, nodeCol, isProp := nodePropAtAnyCol(bo.Left, schema, bopts); isProp {
-		if cv, isConst := columnarConstValue(bo.Right, params, reg); isConst {
-			return makeColumnarComparePredicate(bo.Operator, propName, cv, nodeCol, g), true
+	vals := make([]expr.Value, len(lit.Elements))
+	for i, el := range lit.Elements {
+		cv, isConst := columnarConstValue(el, params, reg)
+		if !isConst {
+			return nil, false
 		}
+		vals[i] = cv
 	}
-	if propName, nodeCol, isProp := nodePropAtAnyCol(bo.Right, schema, bopts); isProp {
-		if cv, isConst := columnarConstValue(bo.Left, params, reg); isConst {
-			return makeColumnarComparePredicate(flipComparisonOp(bo.Operator), propName, cv, nodeCol, g), true
-		}
-	}
-	return nil, false
+	return vals, true
 }
 
 // nodePropAtAnyCol reports whether e is `node.prop` on a bound NODE variable and,

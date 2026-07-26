@@ -45,7 +45,10 @@ lies inside an unbroken chunk chain.** Today that holds sink →
 Keep eager compaction (the current `AppendRowFrom` model); do **not** adopt
 selection vectors as a cross-cutting accessor change. GoGraph's carrier is narrow
 (NodeID + a few scalar props), predicates arrive pre-combined into one
-`ChunkPredicate`, and the downstream (agg hash, property fetch) wants dense
+`ChunkPredicate` — since #2186 that is literally true for a conjunction and for a
+stack of adjacent `Selection`s, which `buildColumnarConjunction` folds into a single
+predicate; `OR` and `NOT` are not yet combined and keep the boxed predicate
+entirely — and the downstream (agg hash, property fetch) wants dense
 random access — the regime where compaction wins over selection vectors (Abadi
 et al. FnT 2012 §4.4; DuckDB uses selection vectors precisely because its
 downstream is a long columnar scan, which GoGraph is not). A selection vector
