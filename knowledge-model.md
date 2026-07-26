@@ -1382,6 +1382,42 @@ Sprint nodes for 311–315 were deliberately NOT created: those sprints are `PEN
 commits, and `rmp` remains the source of truth for planning until they execute — the same
 convention applied to sprints 305–310 while pending.
 
+Incrementally synced at commit `7b68feb` (2026-07-26, round-3 exhaustive comparative audit
+vs Neo4j 5.26 Community and Memgraph 2.22.0): **+27 nodes** — 1 `Audit`
+(`vs-neo4j-memgraph-2026-07-26-r3`, baseline v0.10.0/`6f31f61`, report
+`docs/audit-vs-neo4j-memgraph-2026-07-26.md`, 14 findings, sprints 316–321, backlog
+#2192–#2202), 14 `Finding`, 9 `Decision`, 2 `Spec`
+(`docs/audit-vs-neo4j-memgraph-2026-07-26.md`, `docs/benchmarks/threeway-2026-07-26.md`),
+1 `Benchmark` (`TestThreeWay`), 1 `Commit` (`7b68feb`); **+37 edges** — 14 `FROM_AUDIT`
+(`Finding`→`Audit`), 9 `MADE_DECISION` (`Audit`→`Decision`), 10 `CONCERNS`
+(`Audit`→`Package` ×8 and →`Feature` ×3, de-duplicated), 3 `TOUCHES` (`Commit`→the two
+`Spec`s and the `Benchmark`), 1 `PRODUCED` (`Commit`→`Audit`). All provenance-stamped
+`2026-07-26`.
+
+This is the first audit round backed by **measurement against the running incumbents**
+rather than by reasoning from source and documentation. The `Benchmark` node records the
+four-target harness (`bench/comparison/threeway_test.go`, build tag `threeway`) that made
+that possible; `Benchmark` had not previously been used for a cross-product comparison.
+
+**New `Decision.kind = 'correction'`** distinguishes a finding about the *project* from a
+correction to a *previous audit round*: seven of the nine record round-1 conclusions that
+did not survive measurement (frozen-TCK, LOAD-CSV-is-TCK-covered, GDS-has-no-max-flow,
+macOS-fsync, best-read-path, #1671/#2051-was-reverted, segmented-WAL-rejection-reversed)
+and two record mandate-level rejections (concurrent disjoint writers; vector/ANN and
+delta-stepping). Recording overturned conclusions as first-class nodes is deliberate — the
+graph must not silently retain a superseded verdict, and a reader arriving at a round-1
+claim needs the correction to be reachable from it.
+
+Sprint nodes for 316–321 were deliberately NOT created, and an initial set was deleted
+after review to restore the convention: those sprints are `PENDING` with no commits, so
+`rmp` remains the source of truth for planning until they execute — the same convention
+applied to sprints 305–315 while pending. The sprint range is carried as the
+`Audit.sprints` property instead.
+
+The findings are recorded as evidence summaries only; the committed report and the eleven
+per-stream reports under `docs/audit-2026-07-26-streams/` are the authority, and
+`Finding.evidence` carries the measurement that grounds each one.
+
 ## Known limitations (faithful, by design)
 
 - **Build-tag duplicates.** The extractor parses every `.go` file regardless of build
