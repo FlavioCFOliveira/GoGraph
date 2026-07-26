@@ -419,17 +419,36 @@ MATCH (a:Person {email: $email})          RETURN a
 WITH $email AS k MATCH (a:Person {email: k}) RETURN a
 ```
 
+A key **set** written as a list literal also seeks, with one probe per distinct
+key merged into a single result:
+
+```cypher
+UNWIND ['a@example.com', 'b@example.com'] AS k MATCH (a:Person {email: k}) RETURN a
+```
+
+Duplicate keys in the list cost nothing extra — they are deduplicated before
+probing — and a `null` or type-incompatible element simply contributes no rows
+rather than disabling the seek.
+
 A key bound to something that varies per row does **not** seek, and scans
-instead — currently that is a key drawn from the graph (`MATCH (q:Q) WITH q.email
-AS k …`) or from `UNWIND`. The distinction is row-invariance, not syntax: a
-`WITH`-bound literal or parameter is constant across rows and can be resolved
-once, whereas a data-derived key needs one index probe per distinct value, which
-the engine does not yet perform.
+instead: a key drawn from the graph (`MATCH (q:Q) WITH q.email AS k …`), or a key
+list supplied at runtime (`UNWIND $keys AS k …`), whose elements cannot be
+enumerated when the plan is built. The distinction is row-invariance, not syntax:
+a `WITH`-bound literal or parameter, and the elements of a literal list, are all
+known before the first row, whereas a data-derived key would need the engine to
+drain its input before probing.
 
 The seek is chosen for the same reasons in all cases, so it can also decline: a
 key whose type the index cannot serve (an integer against a string-keyed hash
 index) falls back to a scan with the original predicate as the filter, and
-returns the rows openCypher requires either way.
+returns the rows openCypher requires either way. A key **set** is additionally
+cost-gated on its exact merged posting count — a set covering more than 10 % of
+the label is answered by a scan, because probing that many keys costs more than
+the scan it would replace.
+
+A multi-label pattern combined with a property equality — `MATCH (a:A:B {p: v})` —
+does **not** currently reach the index at all, for any key form. It is answered by
+scanning the smaller label and re-checking the rest as a filter.
 
 All of this is a transparent optimisation: a query using an index returns
 exactly the same rows as the same query with no index (a residual filter refines

@@ -427,6 +427,9 @@ type buildOpts struct {
 	// smaller component and re-runs the larger inner side fewer times, with an
 	// identical result multiset.
 	reorderSwap map[*ir.Apply]bool
+	// seekHint is entry.pushedSeekHints, carried into the build so a hint no seek
+	// claimed can be dropped rather than evaluated. See pushedSeekHints.
+	seekHint map[*ir.Selection]bool
 	// anchorSwap is the set of single-edge Expand nodes the anchor-swap peephole
 	// (#2090) has decided to re-root for THIS query, keyed by the exact *ir.Expand
 	// pointer. The read-path build populates it (computeAnchorSwaps) after the
@@ -1960,6 +1963,7 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		if e.joinReorderEnabled && len(entry.reorderCandidates) > 0 {
 			bopts.reorderSwap = computeReorderSwaps(entry.reorderCandidates, labelSrc, int64(e.g.LiveOrder()))
 		}
+		bopts.seekHint = entry.pushedSeekHints
 		// Single-edge anchor-swap gating (#2090): when the Engine permits it and
 		// the plan has memoised order-safe single-edge sites, apply the live
 		// count-store cost gate against this query's snapshot. N(label) and every
@@ -2015,10 +2019,11 @@ func (e *Engine) Explain(query string, params map[string]expr.Value) (s string, 
 	if ir.IsDDL(query) {
 		return "(DDL — no query plan)", nil
 	}
-	plan, err := e.planFor(query)
+	entry, err := e.parseAndAnalyse(query)
 	if err != nil {
 		return "", err
 	}
+	plan := entry.plan
 	// Reflect the count-store-gated reordering peepholes in the rendered plan so
 	// EXPLAIN shows the physically-built shape, not just the written logical order:
 	// the disjoint-component reorder (#2091) reverses a CartesianProduct's drive
@@ -2044,7 +2049,7 @@ func (e *Engine) Explain(query string, params map[string]expr.Value) (s string, 
 			anchorSwaps = computeAnchorSwaps(sites, labelSrc)
 		}
 	}
-	return explainWithIndexes(plan, e.g.IndexManager(), params, e.g, labelSrc, reorderSwaps, anchorSwaps), nil
+	return explainWithIndexes(plan, e.g.IndexManager(), params, e.g, labelSrc, reorderSwaps, anchorSwaps, entry.pushedSeekHints), nil
 }
 
 // explainWithIndexes walks plan and renders operator names, substituting
@@ -2059,9 +2064,10 @@ func (e *Engine) Explain(query string, params map[string]expr.Value) (s string, 
 // labelSrc is the engine's resolver (count store + statistics collector), used to
 // annotate each operator with a cardinality estimate and its provenance (task
 // #2099). It is DISPLAY-ONLY — see [explainWithIndexesNode] and explain_estimate.go.
-func explainWithIndexes(plan ir.LogicalPlan, idxMgr *index.Manager, params map[string]expr.Value, g *lpg.Graph[string, float64], labelSrc *lpgLabelResolver, reorderSwaps map[*ir.Apply]bool, anchorSwaps map[*ir.Expand]bool) string {
+func explainWithIndexes(plan ir.LogicalPlan, idxMgr *index.Manager, params map[string]expr.Value, g *lpg.Graph[string, float64], labelSrc *lpgLabelResolver, reorderSwaps map[*ir.Apply]bool, anchorSwaps map[*ir.Expand]bool, seekHints map[*ir.Selection]bool) string {
 	var b strings.Builder
-	explainWithIndexesNode(&b, plan, idxMgr, params, g, labelSrc, reorderSwaps, anchorSwaps, "", true, true)
+	explainWithIndexesNode(&b, plan, idxMgr, params, g, labelSrc, reorderSwaps, anchorSwaps,
+		seekHints, "", true, true)
 	return b.String()
 }
 
@@ -2101,10 +2107,20 @@ func explainWithIndexesNode(
 	labelSrc *lpgLabelResolver,
 	reorderSwaps map[*ir.Apply]bool,
 	anchorSwaps map[*ir.Expand]bool,
+	seekHints map[*ir.Selection]bool,
 	prefix string,
 	isRoot, isLast bool,
 ) {
 	if plan == nil {
+		return
+	}
+	// An unclaimed seek hint is dropped by the build (#2183), so EXPLAIN must not
+	// render it: this file's contract is that the rendered tree is the physically-
+	// built shape. Render the hint's child in its place. A hint a seek DOES claim
+	// is left to the seek-name substitution below, which renders it as the seek.
+	if sel, ok := plan.(*ir.Selection); ok && seekHints[sel] && !seekClaimsHint(sel, params, idxMgr, explainGraph) {
+		explainWithIndexesNode(b, sel.Child, idxMgr, params, explainGraph,
+			labelSrc, reorderSwaps, anchorSwaps, seekHints, prefix, isRoot, isLast)
 		return
 	}
 	// Single-edge anchor swap (#2090): when this Selection tops a matched single-
@@ -2115,7 +2131,7 @@ func explainWithIndexesNode(
 	if sel, ok := plan.(*ir.Selection); ok && len(anchorSwaps) > 0 {
 		if site, ok := matchAnchorSite(sel); ok && anchorSwaps[site.exp] {
 			explainWithIndexesNode(b, mirrorAnchorSite(&site), idxMgr, params, explainGraph,
-				labelSrc, reorderSwaps, anchorSwaps, prefix, isRoot, isLast)
+				labelSrc, reorderSwaps, anchorSwaps, seekHints, prefix, isRoot, isLast)
 			return
 		}
 	}
@@ -2138,6 +2154,11 @@ func explainWithIndexesNode(
 		schema := make(map[string]int)
 		if op, fired, err := tryBuildIndexSeekFromSelection(sel, params, schema, idxMgr); err == nil && fired && op != nil {
 			opName = "NodeByIndexSeek"
+		} else if _, fired := tryBuildIndexSeekSetFromSelection(sel, params, make(map[string]int), idxMgr, explainGraph); fired {
+			// A key-set seek SUBSUMES the pushed Selection exactly as the single-key
+			// seek does — both replace the Selection and its scan child — so it
+			// renders in the Selection's place (#2183).
+			opName = "NodeByIndexSeekSet"
 		} else if _, fired := tryBuildRangeSeekChild(sel, make(map[string]int), idxMgr, explainGraph, params); fired {
 			// A range seek REPLACES the scan child but the original Selection
 			// Filter is retained on top, so the node renders as Selection over
@@ -2153,7 +2174,8 @@ func explainWithIndexesNode(
 	// reflects the physical target — analogous to the range-seek child above.
 	minLabelVar, minLabel := "", ""
 	minLabelFired := false
-	if sel, ok := plan.(*ir.Selection); ok && explainGraph != nil && opName != "NodeByIndexSeek" && !rangeSeek {
+	if sel, ok := plan.(*ir.Selection); ok && explainGraph != nil &&
+		opName != "NodeByIndexSeek" && opName != "NodeByIndexSeekSet" && !rangeSeek {
 		if nv, chosen, _, ok := pickMinLabel(sel, &lpgLabelResolver{g: explainGraph}); ok {
 			minLabelVar, minLabel, minLabelFired = nv, chosen, true
 		}
@@ -2165,7 +2187,7 @@ func explainWithIndexesNode(
 	// range-scan / min-label LEAF lines carry their own annotations below.
 	var annot string
 	switch opName {
-	case "NodeByIndexSeek", "Selection":
+	case "NodeByIndexSeek", "NodeByIndexSeekSet", "Selection":
 		// A Selection — whether left as a Selection, subsumed into a hash index
 		// seek, or topping a range/min-label rewrite — is estimated from its
 		// predicate over the scanned label (equality: MCV-exact / 1-over-NDV;
@@ -2211,8 +2233,9 @@ func explainWithIndexesNode(
 	b.WriteByte('\n')
 
 	// When a Selection was rewritten to an index seek, skip its scan child
-	// (the child would be NodeByLabelScan which is subsumed by the seek).
-	if opName == "NodeByIndexSeek" {
+	// (the child would be NodeByLabelScan which is subsumed by the seek). A
+	// key-set seek (#2183) subsumes it identically.
+	if opName == "NodeByIndexSeek" || opName == "NodeByIndexSeekSet" {
 		return
 	}
 
@@ -2255,7 +2278,7 @@ func explainWithIndexesNode(
 		children = []ir.LogicalPlan{children[1], children[0]}
 	}
 	for i, child := range children {
-		explainWithIndexesNode(b, child, idxMgr, params, explainGraph, labelSrc, reorderSwaps, anchorSwaps, nextPrefix, false, i == len(children)-1)
+		explainWithIndexesNode(b, child, idxMgr, params, explainGraph, labelSrc, reorderSwaps, anchorSwaps, seekHints, nextPrefix, false, i == len(children)-1)
 	}
 }
 
@@ -3480,7 +3503,7 @@ func bindNumeric(v any) (expr.Value, bool) {
 
 // planCacheEntry is the value stored in [Engine.cache] for a successfully
 // parsed query. It bundles the translated logical plan with the semantic
-// analyser's verdict so that both lookups (planFor, semaCheckCached) hit a
+// analyser's verdict so that both lookups (the plan, semaCheckCached) hit a
 // single cache slot.
 //
 // The semaErr field is non-nil when [sema.Analyse] reported violations;
@@ -3514,6 +3537,14 @@ type planCacheEntry struct {
 	// so a query with no disjoint Cartesian pays nothing at build time. nil when
 	// the query has no candidate.
 	reorderCandidates []*ir.Apply
+	// pushedSeekHints is the set of Selections that foldBoundSeekKeys ADDED to the
+	// inner arm of an Apply as a seek hint (#2182/#2183). Each one is strictly
+	// IMPLIED by the Selection retained above the Apply, so when no seek claims it
+	// the build drops it instead of evaluating it: for a key SET the hint is a
+	// k-term disjunction, and leaving it behind would cost Θ(k·N) predicate
+	// evaluations for no change in the result. Pure function of the plan, so
+	// memoised here; whether a seek claims it is decided per query at build time.
+	pushedSeekHints map[*ir.Selection]bool
 	// anchorSwapCandidates memoises the structurally-qualifying, ORDER-SAFE
 	// single-edge anchor sites (#2090) — a pure function of the immutable plan,
 	// computed once at entry creation. The per-query read-path build applies the
@@ -3521,19 +3552,6 @@ type planCacheEntry struct {
 	// query with no single-edge pattern pays nothing at build time. nil when the
 	// query has no candidate.
 	anchorSwapCandidates []anchorSite
-}
-
-// planFor returns the cached logical plan for query, or parses, translates,
-// and caches it. Semantic-analysis failures are NOT surfaced from planFor:
-// callers should invoke [Engine.semaCheckCached] separately so they can
-// decide whether to fast-fail before plan execution (Run/RunInTx) or to
-// still render an Explain tree.
-func (e *Engine) planFor(query string) (ir.LogicalPlan, error) {
-	entry, err := e.parseAndAnalyse(query)
-	if err != nil {
-		return nil, err
-	}
-	return entry.plan, nil
 }
 
 // parseAndAnalyse parses, runs the scope analyser, and translates query into
@@ -3564,7 +3582,7 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
 	// and params-independent by construction: the pass moves the *ast.Parameter
 	// node rather than its value, so one cached plan stays correct for every
 	// invocation's parameters. See correlated_seek_plan.go.
-	foldBoundSeekKeys(plan)
+	pushedSeekHints := foldBoundSeekKeys(plan)
 	// Plan-time advisories: a disconnected Cartesian product is surfaced as a
 	// notification so an embedder or Bolt driver can warn the user that the
 	// query may stream Nᵏ intermediate tuples (#1483). Notifications are out of
@@ -3606,6 +3624,7 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
 		plan: plan, semaErr: semaErr, paramRefs: paramRefs, notifications: notifications,
 		hashJoinSafe: hashJoinSafe, reorderCandidates: reorderCandidates,
 		anchorSwapCandidates: anchorSwapCandidates, paramTypes: paramTypes,
+		pushedSeekHints: pushedSeekHints,
 	}
 	actual, _ := e.cache.loadOrStore(query, entry)
 	return actual, nil
@@ -6833,6 +6852,29 @@ func buildOperator(
 			} else if ok {
 				return op, nil
 			}
+			// Key-SET seek (#2183): the predicate is a disjunction of equalities on
+			// one property — what an UNWIND-bound key becomes once
+			// correlated_seek_plan.go has pushed it into the inner arm. Tried after
+			// the single-key seek, which is cheaper for the one-key case, and gated
+			// on the EXACT merged posting count so a wide key set keeps the scan.
+			var seekSetG *lpg.Graph[string, float64]
+			if lw, ok := walker.(*lpgNodeWalker); ok {
+				seekSetG = lw.g
+			}
+			if op, ok := tryBuildIndexSeekSetFromSelection(p, params, schema, idxMgr, seekSetG); ok {
+				return op, nil
+			}
+		}
+		// An unclaimed seek hint is DROPPED rather than evaluated (#2183). The hint
+		// was added by foldBoundSeekKeys purely so an access path could recognise
+		// it, and it is strictly implied by the Selection retained above the
+		// enclosing Apply, so dropping it cannot change the result. Evaluating it
+		// would: a key-set hint is a k-term disjunction, costing Θ(k·N) predicate
+		// evaluations to re-establish what the retained Selection already
+		// establishes — measured at 2 952 ms for k=2001, N=20 000, against ~12 ms
+		// for the original hint-free plan.
+		if bopts != nil && bopts.seekHint[p] {
+			return buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		}
 		// Min-cardinality multi-label anchor scan (#2077): when this Selection is
 		// a bare LabelPredicate over a NodeByLabelScan of the same node — the shape
@@ -9699,6 +9741,18 @@ func resolveSeekValue(value string, params map[string]expr.Value) (expr.Value, e
 // hashStringLookup is satisfied by hash.Index[string].
 type hashStringLookup interface {
 	LookupAppend(value string, dst []uint64) []uint64
+}
+
+// hashStringCardinality is satisfied by hash.Index[string] and exposes the EXACT
+// posting count for one key without materialising its ids.
+//
+// It is separate from [hashStringLookup] so a key-set seek can be cost-gated
+// before any posting list is built: the counts of distinct keys on ONE property
+// are disjoint — a property holds a single value, so a node matches at most one
+// key — which makes their sum the exact cardinality of the merged result. See
+// seek_set_plan.go.
+type hashStringCardinality interface {
+	Cardinality(value string) uint64
 }
 
 // hashInt64Lookup is satisfied by hash.Index[int64].

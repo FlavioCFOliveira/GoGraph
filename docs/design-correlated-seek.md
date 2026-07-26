@@ -299,3 +299,95 @@ what it always genuinely was: the **key set**. `UNWIND [...] AS k` still scans,
 deliberately and with a test asserting it, because a set needs one probe per
 distinct key OR-ed into a single posting bitmap (§3.2) plus the cost gate of §3.3.
 Nothing in §3.2 or §3.3 is superseded by the above; §3.1 is complete.
+
+---
+
+## 8. What #2183 shipped, and the two things measurement changed
+
+Implemented in `cypher/seek_set_plan.go` and `cypher/exec/scan_index_hash_set.go`.
+§3.2's set-at-a-time choice was adopted; §3.3's gate was adopted and turned out to
+be even cheaper than designed; §3.4's composition could not be built, for a reason
+worth recording.
+
+**Representation: a sorted id run, not a bitmap.** §3.2 argued for OR-ing roaring
+bitmaps. The implementation merges sorted `[]uint64` runs instead, because
+`hash.Index.LookupAppend` already returns ids without materialising a bitmap —
+its own contract states that as the point of the method. The set-at-a-time
+*decision* is unaffected, and every reason §3.2 gave for it holds: one probe per
+distinct key, duplicate keys free, cost bounded by distinct-key count. Only §3.4's
+bitmap-composition argument depended on the representation, and §3.4 turned out to
+be unbuildable for an unrelated reason (below).
+
+**The gate needs no probing at all.** §3.3 assumed the exact count would only be
+known once the probes ran, so the budget check would have to live in `Init`. It
+does not: the distinct keys are on ONE property, so a node matches at most one of
+them, which makes the per-key cardinalities **disjoint** and their sum the exact
+merged count. `hash.Index.Cardinality` gives each one without touching a posting
+list, so the whole decision — population floor and selectivity ceiling — is made
+at plan time, before anything is built. The operator keeps its own budget check as
+defence in depth for a Go-API caller that constructs it directly.
+
+**A defect this task introduced, measured, and fixed.** The rewrite pushes the key
+set into the Apply's inner arm as a disjunction so the seek can recognise it. When
+the gate declines, that disjunction is redundant — the retained Selection implies
+it — but not free: evaluating k terms over every node of the label costs Θ(k·N).
+
+| N=20 000, 2 001 keys | ns/op | allocs/op |
+|---|---|---|
+| unclaimed hint left in place | **2 952 ms** | 76 109 847 |
+| unclaimed hint dropped | **19.4 ms** | 269 540 |
+
+A gate that "declines" into a plan 152× slower than the one it was meant to
+preserve is not a gate. The build now drops an unclaimed hint
+(`planCacheEntry.pushedSeekHints`), and EXPLAIN renders the dropped shape, so a
+declined plan is **structurally identical** to the pre-rewrite plan — which makes
+the gate non-regressing in fact, not only in principle. Pinned by
+`TestSeekSet_DeclinedHintIsDroppedNotEvaluated`, which counts Selections rather
+than timing anything.
+
+This also refines §2.2's own correction. The spike concluded Θ(N + rows) from key
+counts up to 300 and inferred the gain vanishes gracefully. Measured up to 2 001
+keys, the scan path is **not** flat in the key count — the join genuinely does more
+work as rows grow — so §2.2's figure describes the small-key regime, not the whole
+curve. The practical consequence is unchanged: the gate must turn the rewrite off
+before the gain inverts, which it does.
+
+**Measured gains** (Apple M4, entity projection, N=20 000; the "before" column is
+§2.2's measurement of the same shape):
+
+| Keys | Before | After | Path | Gain |
+|---|---|---|---|---|
+| 1 | 11.79 ms | 8.26 µs | single-key seek (#2182) | 1 427× |
+| 2 | ~11.8 ms | 10.7 µs | key-set seek | ~1 100× |
+| 30 | 12.59 ms | 60.6 µs | key-set seek | 208× |
+| 300 | 12.25 ms | 607 µs | key-set seek | 20× |
+| 2 000 | — | 7.91 ms | key-set seek (at the budget) | ~1.5× |
+| 2 001 | ~19 ms | 19.4 ms | scan, gate declined | 1× by design |
+
+The curve is exactly the shape §5 predicted: large at one key, shrinking with key
+count, and switched off by the gate one key before it would invert.
+
+**§3.4 could not be built, because its premise does not hold.** AC (4) asked that
+`MATCH (a:A:B {k: nm})` plan one intersection rather than a seek feeding a filter.
+The planner has **no multi-label bitmap-intersection access path** to compose with:
+`label.Index.Intersect` is variadic but the Cypher layer calls it with a single
+label (`lpgLabelResolver.ResolveLabelBitmap`), and the implemented multi-label
+strategy is #2077's min-cardinality anchor scan — scan the smallest label, re-check
+the rest as a filter.
+
+The consequence is broader than the key set: for a multi-label pattern **neither**
+the key-set seek **nor** the ordinary single-key literal seek fires, because the
+Selection's child is the second label's predicate Selection rather than a scan
+leaf. Verified at a 4 000-node label. So there was nothing for a key-set seek to
+compose with, and the composition cannot exist until the intersection path does.
+Filed as **#2207**, and pinned meanwhile by
+`TestSeekSet_MultiLabelPatternIsNotServed` so closing the gap is a deliberate
+change to that test rather than a silent drift.
+
+**Not served: a runtime key set.** `UNWIND $batch AS k` — the idiom a batched bulk
+load uses — cannot have its elements enumerated at plan time, so it still scans,
+with a test asserting it. Serving it needs an operator that drains its input before
+probing, which is a barrier over the input rather than a leaf, with a different
+cost profile and a different cancellation story. The bulk-load deficit that
+motivated this line of work is addressed instead by `gograph-import` (#2180), which
+loads in 0.28 s what the Cypher write path took 35 m 33 s to load.

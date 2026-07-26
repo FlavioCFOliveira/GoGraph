@@ -94,12 +94,23 @@ import (
 
 // foldBoundSeekKeys pushes a constant-bound key equality into the inner arm of
 // every Apply that carries one, so the existing index-seek rewrite can claim it.
-// It mutates plan in place and returns the number of sites rewritten.
+// It mutates plan in place and returns the Selections it added.
+//
+// The returned set matters as much as the mutation. Each added Selection is a
+// HINT: it exists so an access path can recognise it, and it is strictly implied
+// by the Selection retained above the Apply, so it changes no result whether it is
+// evaluated or not. When no seek claims it, the build DROPS it — see
+// planCacheEntry.pushedSeekHints. For a key set the hint is a k-term disjunction,
+// and evaluating an unclaimed one would cost Θ(k·N) predicate evaluations to
+// re-establish what the retained Selection already establishes. Measured at
+// N=20 000 with 2 001 keys: 2 952 ms with the unclaimed hint evaluated against
+// 8.2 ms when a seek claims it, and ~12 ms for the original plan that had no hint
+// at all. A hint whose fallback cost grows with its size must be droppable.
 //
 // Running it more than once on the same plan is harmless: a rewritten site's
 // inner arm is a Selection rather than a scan leaf, so it no longer matches.
-func foldBoundSeekKeys(plan ir.LogicalPlan) int {
-	n := 0
+func foldBoundSeekKeys(plan ir.LogicalPlan) map[*ir.Selection]bool {
+	var hints map[*ir.Selection]bool
 	for _, sel := range collectBoundKeySelections(plan) {
 		apply, ok := sel.Child.(*ir.Apply)
 		if !ok {
@@ -113,10 +124,14 @@ func foldBoundSeekKeys(plan ir.LogicalPlan) int {
 		if !ok {
 			continue
 		}
-		apply.Inner = ir.NewSelectionExpr(pushed.String(), pushed, apply.Inner)
-		n++
+		hint := ir.NewSelectionExpr(pushed.String(), pushed, apply.Inner)
+		apply.Inner = hint
+		if hints == nil {
+			hints = make(map[*ir.Selection]bool, 1)
+		}
+		hints[hint] = true
 	}
-	return n
+	return hints
 }
 
 // collectBoundKeySelections returns every Selection in plan whose child is an
@@ -159,18 +174,45 @@ func pushableKeyEquality(pred ast.Expression, nodeVar string, outer ir.LogicalPl
 			continue
 		}
 		// Both operand orders: n.prop = v and v = n.prop.
-		if prop, keyVar, ok := propertyAndVariable(binOp.Left, binOp.Right, nodeVar); ok {
+		for _, cand := range [2]struct{ propSide, keySide ast.Expression }{
+			{binOp.Left, binOp.Right},
+			{binOp.Right, binOp.Left},
+		} {
+			prop, keyVar, ok := propertyAndVariable(cand.propSide, cand.keySide, nodeVar)
+			if !ok {
+				continue
+			}
 			if bound, ok := foldableBinding(outer, keyVar); ok {
 				return &ast.BinaryOp{Operator: "=", Left: prop, Right: bound}, true
 			}
-		}
-		if prop, keyVar, ok := propertyAndVariable(binOp.Right, binOp.Left, nodeVar); ok {
-			if bound, ok := foldableBinding(outer, keyVar); ok {
-				return &ast.BinaryOp{Operator: "=", Left: prop, Right: bound}, true
+			if keys, ok := unwoundKeySet(outer, keyVar); ok {
+				return equalityDisjunction(prop, keys), true
 			}
 		}
 	}
 	return nil, false
+}
+
+// equalityDisjunction builds `prop = keys[0] OR prop = keys[1] OR …`, right-nested.
+//
+// A disjunction is used rather than a dedicated IR node because it needs neither:
+// the shape is already expressible, the retained outer Selection still guarantees
+// the result, and a disjunction of equalities on ONE property is exactly what a
+// key-set seek serves — see tryBuildIndexSeekSetFromSelection, which recognises it
+// again on the way to the physical plan. Should the seek decline, what is left
+// behind is an ordinary, correct filter rather than an operator with no
+// implementation.
+//
+// keys must be non-empty; unwoundKeySet guarantees it.
+func equalityDisjunction(prop *ast.Property, keys []ast.Expression) ast.Expression {
+	eq := func(k ast.Expression) ast.Expression {
+		return &ast.BinaryOp{Operator: "=", Left: prop, Right: k}
+	}
+	out := eq(keys[len(keys)-1])
+	for i := len(keys) - 2; i >= 0; i-- {
+		out = &ast.BinaryOp{Operator: "OR", Left: eq(keys[i]), Right: out}
+	}
+	return out
 }
 
 // propertyAndVariable matches propSide as a property access on nodeVar and
@@ -203,13 +245,23 @@ func andConjuncts(e ast.Expression) []ast.Expression {
 	return append(andConjuncts(binOp.Left), andConjuncts(binOp.Right)...)
 }
 
-// foldableBinding returns the expression outer binds to name, when outer is a
-// Projection carrying that name and the expression is row-invariant.
+// foldableBinding returns an expression equivalent to what outer binds to name,
+// when that binding is row-invariant.
 //
-// Only the outer arm's own top-level Projection is consulted. Chasing the binding
+// Two outer shapes are served, and they differ in what they yield:
+//
+//   - A Projection binding name to a literal or parameter — `WITH 'x' AS k` — is a
+//     single value, so the binding itself is returned and the caller builds one
+//     equality.
+//   - An Unwind of a LIST LITERAL of such elements — `UNWIND ['a','b'] AS k` — is a
+//     key SET. There is no single expression equal to it, so nothing is returned
+//     here; see [unwoundKeySet], which the caller uses instead to build a
+//     disjunction of equalities.
+//
+// Only the outer arm's own top-level operator is consulted. Chasing a binding
 // through further operators would have to prove that each one preserves the
-// column unchanged — a Selection does, an aggregation does not — and the shape
-// this task targets does not need it.
+// column unchanged — a Selection does, an aggregation does not — and the shapes
+// this task targets do not need it.
 func foldableBinding(outer ir.LogicalPlan, name string) (ast.Expression, bool) {
 	proj, ok := outer.(*ir.Projection)
 	if !ok {
@@ -225,6 +277,54 @@ func foldableBinding(outer ir.LogicalPlan, name string) (ast.Expression, bool) {
 		return nil, false
 	}
 	return nil, false
+}
+
+// unwoundKeySet returns the elements of the list an Unwind binds to name, when
+// outer is such an Unwind over a LIST LITERAL whose every element is row-invariant.
+//
+// The whole-list requirement is not fastidiousness. A list of mixed forms — say
+// `['a', someVar]` — would need the seek to serve the literal elements and a scan
+// to serve the rest, which is two access paths for one predicate and no longer
+// obviously cheaper than the one scan it replaces. Declining the whole list keeps
+// the rewrite's cost argument intact.
+//
+// A list that is only known at runtime — `UNWIND $batch AS k`, the idiom a batched
+// bulk load uses — is NOT served: its elements cannot be enumerated at plan time,
+// so serving it needs an operator that drains the input before probing. That is a
+// different access path with a different cost profile, and pretending otherwise
+// here would silently leave the bulk-load case on the scan while appearing to
+// cover it.
+func unwoundKeySet(outer ir.LogicalPlan, name string) ([]ast.Expression, bool) {
+	unw, ok := outer.(*ir.Unwind)
+	if !ok || unw.ElementVar != name || unw.ListExpr == nil {
+		return nil, false
+	}
+	list, ok := unw.ListExpr.(*ast.ListLiteral)
+	if !ok || len(list.Elements) == 0 {
+		return nil, false
+	}
+	for _, e := range list.Elements {
+		if !foldableSetElementExpr(e) {
+			return nil, false
+		}
+	}
+	return list.Elements, true
+}
+
+// foldableSetElementExpr reports whether e may appear as an element of a pushable
+// key set.
+//
+// It differs from [foldableKeyExpr] in one case, deliberately: a null literal IS
+// accepted here. For a single binding a NULL key can never produce a seek, so
+// pushing it buys nothing; within a SET the other keys produce the seek and the
+// null simply contributes no postings — which the seek operator and the cost
+// gate both handle by skipping it. Rejecting the whole set over one null element
+// would send an otherwise-selective query back to a full scan.
+func foldableSetElementExpr(e ast.Expression) bool {
+	if _, isNull := e.(*ast.NullLiteral); isNull {
+		return true
+	}
+	return foldableKeyExpr(e)
 }
 
 // foldableKeyExpr reports whether e evaluates to the same value on every row.
