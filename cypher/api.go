@@ -4801,6 +4801,80 @@ func (w *lpgNodeWalker) WalkNodeIDs(fn func(graph.NodeID) bool) {
 	})
 }
 
+// lpgLabelWalker is the partitioned-label-scan source (#2187). It yields exactly the
+// NodeIDs a serial [exec.NodeByLabelScan] would emit for one label — the members of
+// that label's roaring bitmap, in the same ascending order — so a morsel-parallel leaf
+// anchored on it splits the same row set the serial scan would produce.
+//
+// Every intra-query parallel leaf used to require the IR leaf to be a bare, unlabelled
+// [ir.AllNodesScan], and real Cypher almost always carries a label, so parallelism
+// never engaged in practice: the round-3 audit measured adding a label that every node
+// already carried at 2.0x-3.7x, with causality confirmed by toggling
+// DisableParallelScan. Both incumbents partition the label scan (Neo4j's
+// PartitionedNodeByLabelScan, Memgraph's ScanParallelByLabel).
+//
+// No tombstone filter is applied, and none is needed: the label index strips deleted
+// nodes at delete time (see [lpgLabelResolver.ResolveLabelCount]), so the bitmap is
+// already live-only, and the whole build observes one stable snapshot under the
+// visibility barrier. This is what makes the row set bit-identical to the serial scan
+// rather than merely equivalent.
+type lpgLabelWalker struct {
+	bm   *roaring64.Bitmap
+	card int
+}
+
+// WalkNodeIDs calls fn with every NodeID carrying the label, in ascending order,
+// stopping early when fn returns false. It implements [nodeWalkerIface].
+func (w *lpgLabelWalker) WalkNodeIDs(fn func(graph.NodeID) bool) {
+	if w.bm == nil {
+		return
+	}
+	it := w.bm.Iterator()
+	for it.HasNext() {
+		if !fn(graph.NodeID(it.Next())) {
+			return
+		}
+	}
+}
+
+// LiveOrderHint returns the label's exact cardinality, which is both the row count and
+// the pre-sizing hint for the collecting slice.
+func (w *lpgLabelWalker) LiveOrderHint() int { return w.card }
+
+// newLabelWalker resolves labelName through labelSrc and returns the walker plus the
+// label's exact cardinality. A labelSrc that cannot resolve bitmaps yields ok=false, so
+// the caller keeps the serial build.
+func newLabelWalker(labelName string, labelSrc labelResolverIface) (*lpgLabelWalker, uint64, bool) {
+	if labelSrc == nil || labelName == "" {
+		return nil, 0, false
+	}
+	bm := labelSrc.ResolveLabelBitmap(labelName)
+	if bm == nil {
+		return nil, 0, false
+	}
+	card := bm.GetCardinality()
+	return &lpgLabelWalker{bm: bm, card: int(card)}, card, true
+}
+
+// parallelScanLeaf reports whether plan is a leaf a morsel-parallel builder can anchor
+// on, returning the bound node variable and — for a label scan — the label name (empty
+// for a bare all-nodes scan). It is the single definition of "parallelisable leaf",
+// shared by [tryBuildParallelScanProject] and [tryBuildParallelAggregateScan] so the
+// two cannot admit different shapes.
+func parallelScanLeaf(plan ir.LogicalPlan) (nodeVar, labelName string, ok bool) {
+	switch s := plan.(type) {
+	case *ir.AllNodesScan:
+		return s.NodeVar, "", true
+	case *ir.NodeByLabelScan:
+		if s.Label == "" {
+			return "", "", false
+		}
+		return s.NodeVar, s.Label, true
+	default:
+		return "", "", false
+	}
+}
+
 // lpgLabelResolver adapts *lpg.Graph[string, float64] to the exec.labelResolver
 // interface expected by [exec.NodeByLabelScan].
 type lpgLabelResolver struct {
@@ -4917,7 +4991,20 @@ func useParallelScan(walker nodeWalkerIface, bopts *buildOpts) bool {
 	if !ok {
 		return false
 	}
-	return lw.g.LiveOrder() > uint64(bopts.parallelScanThreshold)
+	return useParallelScanForRows(lw.g.LiveOrder(), bopts)
+}
+
+// useParallelScanForRows is [useParallelScan] against an EXPLICIT row count, for a leaf
+// whose row count is not the graph's live order — a partitioned label scan, whose row
+// count is the label's cardinality (#2187). Gating a labelled scan on the graph order
+// would spawn workers for a ten-node label in a million-node graph; gating it on the
+// label's own cardinality applies the same "several morsels of work must exist"
+// reasoning the whole-graph threshold encodes.
+func useParallelScanForRows(rows uint64, bopts *buildOpts) bool {
+	if bopts == nil || !bopts.parallelScanEnabled {
+		return false
+	}
+	return rows > uint64(bopts.parallelScanThreshold)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -7376,6 +7463,21 @@ func buildOperator(
 		if op, ok := tryBuildParallelCountScan(p, walker, schema, bopts); ok {
 			return op, nil
 		}
+		// Label-scan count pushdown (#2004): a group-by-less count(*) /
+		// count(<scan-var>) over a bare single-label scan is served by a
+		// LabelCountScan that reads the label's live-node count directly (O(1) from
+		// the label index) instead of iterating one row per node. Bit-identical to
+		// the serial EagerAggregation because the label scan emits exactly one row
+		// per labelled node. Declines (falls through to the serial build) for every
+		// other shape.
+		//
+		// Tried BEFORE the parallel aggregate scan: since #2187 that path accepts a
+		// labelled leaf, and count is one of its admitted reducers, so it would
+		// otherwise claim this shape and replace an O(1) index read with an O(n)
+		// parallel walk. A cardinality-free answer beats any number of workers.
+		if op, ok := tryBuildLabelCountScan(p, walker, labelSrc, schema, bopts); ok {
+			return op, nil
+		}
 		// Parallel aggregate fast path (#2111): min / max, multi-aggregate,
 		// count(<expr>), and every GROUP BY form over a bare full-node scan — above
 		// the threshold — are served by a ParallelAggregateScan whose per-worker
@@ -7386,16 +7488,6 @@ func buildOperator(
 		if op, ok, perr := tryBuildParallelAggregateScan(p, walker, reg, params, schema, bopts); perr != nil {
 			return nil, perr
 		} else if ok {
-			return op, nil
-		}
-		// Label-scan count pushdown (#2004): a group-by-less count(*) /
-		// count(<scan-var>) over a bare single-label scan is served by a
-		// LabelCountScan that reads the label's live-node count directly (O(1) from
-		// the label index) instead of iterating one row per node. Bit-identical to
-		// the serial EagerAggregation because the label scan emits exactly one row
-		// per labelled node. Declines (falls through to the serial build) for every
-		// other shape.
-		if op, ok := tryBuildLabelCountScan(p, walker, labelSrc, schema, bopts); ok {
 			return op, nil
 		}
 		// Serial full-node count pushdown (#2113 / #2066): a group-by-less count(*) /
@@ -7892,8 +7984,7 @@ func tryBuildParallelScanProject(
 	procReg *procs.Registry,
 	bopts *buildOpts,
 ) (exec.Operator, bool, error) {
-	// Gate: parallel scan enabled AND live count over threshold AND live walker.
-	if !useParallelScan(walker, bopts) {
+	if bopts == nil || !bopts.parallelScanEnabled {
 		return nil, false, nil
 	}
 	lw, ok := walker.(*lpgNodeWalker)
@@ -7903,7 +7994,7 @@ func tryBuildParallelScanProject(
 		return nil, false, nil
 	}
 
-	// Shape: Projection(scalar) → [Selection] → AllNodesScan.
+	// Shape: Projection(scalar) → [Selection] → AllNodesScan | NodeByLabelScan.
 	if !projectionItemsAreScalar(proj.Items) {
 		return nil, false, nil
 	}
@@ -7913,7 +8004,25 @@ func tryBuildParallelScanProject(
 		sel = s
 		scanPlan = s.Child
 	}
-	if _, isScan := scanPlan.(*ir.AllNodesScan); !isScan {
+	leafVar, leafLabel, isLeaf := parallelScanLeaf(scanPlan)
+	if !isLeaf {
+		return nil, false, nil
+	}
+	// Row source and threshold. A bare all-nodes scan walks the whole graph and is
+	// gated on its live order; a labelled scan walks the label's bitmap and is gated
+	// on that label's own cardinality (#2187), so a small label inside a large graph
+	// stays serial.
+	var srcWalker nodeWalkerIface = lw
+	if leafLabel != "" {
+		lblWalker, card, resolved := newLabelWalker(leafLabel, labelSrc)
+		if !resolved {
+			return nil, false, nil
+		}
+		if !useParallelScanForRows(card, bopts) {
+			return nil, false, nil
+		}
+		srcWalker = lblWalker
+	} else if !useParallelScan(walker, bopts) {
 		return nil, false, nil
 	}
 
@@ -7928,7 +8037,11 @@ func tryBuildParallelScanProject(
 	// single-threaded probe below.
 	g := lw.g
 	captSel := sel
-	scanVar := scanVarOf(scanPlan)
+	scanVar := leafVar
+	// The per-worker subtree scans its MORSEL, which for a labelled leaf already
+	// contains only that label's members — so the sub-plan is an AllNodesScan over the
+	// morsel in both cases, and re-checking the label per worker would be redundant
+	// work over an already-filtered set (#2187).
 	buildSubtree := func(morsel []graph.NodeID, sc map[string]int, bo *buildOpts) (exec.Operator, error) {
 		wWalker := &lpgNodeWalker{g: g, morsel: morsel}
 		var subChild ir.LogicalPlan = ir.NewAllNodesScan(scanVar)
@@ -7961,18 +8074,9 @@ func tryBuildParallelScanProject(
 	// exceeds the cap, bounding peak memory on the parallel path; the drain layer
 	// then produces the canonical ErrResultRowsExceeded / ErrResultBytesExceeded
 	// from the bounded prefix, exactly as on the serial path (#1830).
-	op := exec.NewParallelScanProject(lw, factory, 0, bopts.parallelGov).
+	op := exec.NewParallelScanProject(srcWalker, factory, 0, bopts.parallelGov).
 		WithResultBudget(bopts.maxResultRows, bopts.maxResultBytes, func(r exec.Row) int64 { return estimateRowSize(r) })
 	return op, true, nil
-}
-
-// scanVarOf returns the bound variable of an AllNodesScan IR node, or "" when
-// plan is not an AllNodesScan (the recognizer has already asserted it is).
-func scanVarOf(plan ir.LogicalPlan) string {
-	if s, ok := plan.(*ir.AllNodesScan); ok {
-		return s.NodeVar
-	}
-	return ""
 }
 
 // projectionItemsAreScalar reports whether every projection item is a per-row
@@ -8280,17 +8384,38 @@ func tryBuildParallelAggregateScan(
 	schema map[string]int,
 	bopts *buildOpts,
 ) (exec.Operator, bool, error) {
-	if !useParallelScan(walker, bopts) {
+	if bopts == nil || !bopts.parallelScanEnabled {
 		return nil, false, nil
 	}
 	lw, ok := walker.(*lpgNodeWalker)
 	if !ok || lw.morsel != nil {
 		return nil, false, nil
 	}
-	scan, isScan := p.Child.(*ir.AllNodesScan)
-	if !isScan {
+	leafVar, leafLabel, isLeaf := parallelScanLeaf(p.Child)
+	if !isLeaf {
 		return nil, false, nil
 	}
+	// A LABELLED leaf is deliberately NOT admitted here, unlike in
+	// [tryBuildParallelScanProject]. #2187 measured both and they disagree: the
+	// partitioned label scan is a 2.1x win for the projection leaf but a 1.6x LOSS for
+	// the aggregate leaf, because #2185 gave the SERIAL aggregate an unboxed columnar
+	// pre-projection while this path's per-worker factory still builds the boxed
+	// row-at-a-time exec.NewProject. At 200 000 rows and 10 cores, `MATCH (n:P) RETURN
+	// min(n.v)` costs 21.3 ms / 199 868 allocations serial against 33.9 ms / 1 603 900
+	// parallel (docs/benchmarks/parallel-label-scan-2026-07-26.md). Admitting the label
+	// here would move real queries onto the slower path.
+	//
+	// The same measurement shows the ALREADY-admitted unlabelled shape has become a
+	// pessimisation too — 26.4 ms serial against 33.1 ms parallel — which is tracked
+	// separately: the fix is to give the workers the unboxed pre-projection, not to
+	// widen the leaf.
+	if leafLabel != "" {
+		return nil, false, nil
+	}
+	if !useParallelScan(walker, bopts) {
+		return nil, false, nil
+	}
+	var srcWalker nodeWalkerIface = lw
 	if len(p.Aggregates) == 0 {
 		return nil, false, nil
 	}
@@ -8322,7 +8447,7 @@ func tryBuildParallelAggregateScan(
 	// recognizer runs BEFORE the child is built, so the caller's schema is not yet
 	// populated — reconstruct the snapshot the per-worker pre-projection evals need
 	// to resolve the scan variable, exactly what the serial child build installs.
-	schemaSnap := map[string]int{scan.NodeVar: 0}
+	schemaSnap := map[string]int{leafVar: 0}
 	g := lw.g
 	nKeys := len(p.GroupBy)
 
@@ -8357,7 +8482,7 @@ func tryBuildParallelAggregateScan(
 		gov = bopts.parallelGov
 	}
 	aggMB, aggEst := resultByteBudget(bopts)
-	op := exec.NewParallelAggregateScan(lw, factory, nKeys, reducers, 0, gov).
+	op := exec.NewParallelAggregateScan(srcWalker, factory, nKeys, reducers, 0, gov).
 		WithByteBudget(aggMB, aggEst)
 	parallelAggregateScanBuildCount.Add(1)
 	return op, true, nil

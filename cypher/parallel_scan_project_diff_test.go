@@ -67,6 +67,17 @@ func TestParallelScanProject_Differential(t *testing.T) {
 		// Argument-bearing temporal constructor is PURE (deterministic): it must
 		// still fuse, unlike its zero-argument clock form (see DeclinesOutsideScope).
 		{"temporal-arg-pure", `MATCH (n) RETURN date('2020-01-01') AS d`},
+		// Since #2187 a NodeByLabelScan is a parallelisable leaf too: the leaf walks
+		// the label's roaring bitmap instead of the whole graph, and the existing
+		// morsel splitter partitions THOSE ids. Every node in the fixture carries
+		// Item, so these return the same multiset as their unlabelled twins above
+		// while exercising the label-partitioned leaf. Gated on the LABEL's own
+		// cardinality, so a small label in a large graph still stays serial —
+		// TestParallelLabelScan_BelowLabelThresholdStaysSerial pins that.
+		{"label-return-prop", `MATCH (n:Item) RETURN n.v AS v`},
+		{"label-filter-eq", `MATCH (n:Item) WHERE n.g = 1 RETURN n.v + 0 AS v`},
+		{"label-filter-range", `MATCH (n:Item) WHERE n.v > 100 RETURN n.v + 0 AS v`},
+		{"label-multi-col", `MATCH (n:Item) WHERE n.g = 2 RETURN n.v + 0 AS v, n.g AS grp`},
 	}
 
 	for _, tc := range cases {
@@ -183,7 +194,6 @@ func TestParallelScanProject_DeclinesOutsideScope(t *testing.T) {
 	for _, q := range []string{
 		`MATCH (n) RETURN count(*) AS c`,                       // global aggregate (count reduce owns this)
 		`MATCH (n) RETURN n.g AS g, count(*) AS c`,             // grouped aggregate
-		`MATCH (n:Item) RETURN n.v AS v`,                       // NodeByLabelScan, not AllNodesScan
 		`MATCH (n) UNWIND [1,2] AS x RETURN n.v AS v, x`,       // Unwind between
 		`MATCH (n) RETURN sum(n.v) AS s`,                       // aggregate item
 		`MATCH (n) RETURN size([x IN [1,2,3] WHERE x>1]) AS s`, // list comprehension item
