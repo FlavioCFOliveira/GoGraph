@@ -308,6 +308,34 @@ func (s *Session) selectDatabaseFrom(extra map[string]packstream.Value) {
 	s.clientDatabase, _ = extractString(extra, "db")
 }
 
+// impersonationRequested reports whether a RUN or BEGIN carries a non-empty `imp_user`,
+// the Bolt field by which a client asks the server to execute as another user.
+//
+// GoGraph does not implement impersonation. It used to IGNORE the field, which is the
+// dangerous failure mode: a client that believes it is running as a restricted user gets
+// full authority instead, and nothing tells it otherwise. The round-3 audit flagged this
+// as security-relevant precisely because it is silent (docs/audit-2026-07-26-streams/
+// s09-protocol.md). Neo4j either honours impersonation or rejects the request; ignoring
+// it is not one of the options.
+//
+// So the request now FAILS CLOSED — see [Session.failUnsupportedImpersonation] — which
+// upholds the module's fail-stop, never-fail-silent contract: a capability the server
+// cannot provide is refused, never faked.
+func impersonationRequested(extra map[string]packstream.Value) bool {
+	impUser, _ := extractString(extra, "imp_user")
+	return impUser != ""
+}
+
+// failUnsupportedImpersonation returns the FAILURE for a request asking for
+// impersonation, which this server does not support. The code is the one Neo4j uses for a
+// request the server cannot satisfy, so a driver surfaces it as a Neo4jError rather than
+// a transport fault.
+func (s *Session) failUnsupportedImpersonation() []any {
+	return s.failWith("Neo.ClientError.Request.Invalid",
+		"user impersonation (imp_user) is not supported by this server; "+
+			"the request was refused rather than executed with the connection's own identity")
+}
+
 // setClock overrides the session's wall-clock source for the
 // explicit-transaction deadline computation. A nil clock is ignored, leaving
 // the default real clock in place. Intended for the server bootstrap (so the
@@ -1076,6 +1104,12 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 	// explicit transaction BEGIN already recorded it and RUN carries no `db`
 	// extra, so only an autocommit RUN sets it here (rmp #2172).
 	if !s.txActive {
+		if impersonationRequested(m.Extra) {
+			return s.failUnsupportedImpersonation(), nil
+		}
+		if impersonationRequested(m.Extra) {
+			return s.failUnsupportedImpersonation(), nil
+		}
 		s.selectDatabaseFrom(m.Extra)
 	}
 

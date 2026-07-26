@@ -16,6 +16,28 @@ There is no way to run a deeper layer alone, by design — a regression
 in the short layer must surface before the longer suites are even
 considered.
 
+### The `drivercompat` suite
+
+One suite sits outside those three layers because it is not a duration
+tier but a *capability* gate: the standing driver-compatibility suite
+(`bolt/server/driver_compat_test.go`, task #2191). It drives the official
+`neo4j-go-driver` against the in-process Bolt server and asserts 37
+checks, reporting a pass/fail/degraded tally and **ratcheting** the
+passing count — a check that regresses from pass to fail breaks the
+build, exactly as the TCK execution baseline does for query results.
+
+Run it explicitly:
+
+```bash
+go test -tags=drivercompat -run TestDriverCompatibility -v ./bolt/server/
+```
+
+It is tag-gated rather than layered because it stands up a server and a
+real driver connection per check. It is excluded from the default run so
+`make ci` keeps its short-layer budget; the current floor and the reason
+each remaining check fails are recorded in the file's own header, which
+is the authoritative list.
+
 ### Enforcing the short-layer budget
 
 The `< 60 s per package` budget is enforced, not merely documented. The

@@ -2355,6 +2355,20 @@ func (e *Engine) runDDL(ctx context.Context, query string, params map[string]exp
 // interruptible work; see [emptyDDLResult] for why the returned confirmation
 // Result deliberately does not inherit it.
 func (e *Engine) runDDLOp(ctx context.Context, op exec.Operator) (*Result, error) {
+	return e.runDDLOpCounted(ctx, op, nil)
+}
+
+// runDDLOpCounted is [Engine.runDDLOp] with the schema effect this statement applied
+// (#2212). record, when non-nil, is invoked on the returned Result's counters after the
+// DDL has succeeded, so Bolt can report indexes-added / constraints-added and the
+// driver's ContainsUpdates is true for a schema write.
+//
+// The effect is recorded only on success: a DDL that errors returns before this point,
+// and an IF NOT EXISTS / IF EXISTS statement that resolved to a no-op is counted by its
+// operator reporting nothing to count. openCypher's side-effect vocabulary does not name
+// schema effects at all, so unlike the data counters these have no TCK table to match —
+// they exist because Bolt reports them.
+func (e *Engine) runDDLOpCounted(ctx context.Context, op exec.Operator, record func(*exec.QueryCounters)) (*Result, error) {
 	if err := op.Init(ctx); err != nil {
 		return nil, fmt.Errorf("cypher: DDL init: %w", err)
 	}
@@ -2366,7 +2380,26 @@ func (e *Engine) runDDLOp(ctx context.Context, op exec.Operator) (*Result, error
 	if err := op.Close(); err != nil {
 		return nil, fmt.Errorf("cypher: DDL close: %w", err)
 	}
-	return emptyDDLResult(), nil
+	r := emptyDDLResult()
+	if record != nil {
+		r.counters = &exec.QueryCounters{}
+		record(r.counters)
+	}
+	return r, nil
+}
+
+// countedDDLResult is [emptyDDLResult] carrying the schema effect the statement applied
+// (#2212), so Bolt reports indexes-added / indexes-removed / constraints-added /
+// constraints-removed and a driver's ContainsUpdates is true for a schema write.
+//
+// It is used only on the SUCCESS paths that actually changed the schema. An
+// IF NOT EXISTS / IF EXISTS statement that resolved to a no-op keeps [emptyDDLResult],
+// which reports nothing — the same applied-not-attempted rule the data counters follow.
+func countedDDLResult(record func(*exec.QueryCounters)) *Result {
+	r := emptyDDLResult()
+	r.counters = &exec.QueryCounters{}
+	record(r.counters)
+	return r
 }
 
 // emptyDDLResult returns the canonical zero-row Result that every DDL
@@ -2555,7 +2588,7 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 			return nil, err
 		}
 	}
-	return emptyDDLResult(), nil
+	return countedDDLResult(func(c *exec.QueryCounters) { c.IndexesAdded++ }), nil
 }
 
 // runDropIndex executes DROP INDEX via the generic DDL operator, then (on a
@@ -2577,7 +2610,8 @@ func (e *Engine) runDropIndex(ctx context.Context, p *ir.DropIndex, idxMgr *inde
 		// internal numeric companion (#1652) can be cleaned up alongside it; see
 		// dropNumericCompanionIfOrphaned.
 		lbl, prop, hadCoverage := indexCoverage(idxMgr, p.Name)
-		res, err := e.runDDLOp(ctx, exec.NewDropIndexOp(p.Name, p.IfExists, idxMgr, e.ClearPlanCache))
+		res, err := e.runDDLOpCounted(ctx, exec.NewDropIndexOp(p.Name, p.IfExists, idxMgr, e.ClearPlanCache),
+			func(c *exec.QueryCounters) { c.IndexesRemoved++ })
 		if err != nil {
 			return nil, err
 		}
@@ -2604,7 +2638,8 @@ func (e *Engine) runDropIndex(ctx context.Context, p *ir.DropIndex, idxMgr *inde
 		// be cleaned up once the user index is gone.
 		lbl, prop, hadCoverage := indexCoverage(idxMgr, p.Name)
 
-		res, err := e.runDDLOp(ctx, exec.NewDropIndexOp(p.Name, p.IfExists, idxMgr, e.ClearPlanCache))
+		res, err := e.runDDLOpCounted(ctx, exec.NewDropIndexOp(p.Name, p.IfExists, idxMgr, e.ClearPlanCache),
+			func(c *exec.QueryCounters) { c.IndexesRemoved++ })
 		if err != nil {
 			return nil, err
 		}
@@ -2856,7 +2891,7 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 			return nil, e.unwindConstraintRegistration(err, p.Name, p.Label, p.Property, kind, idxMgr)
 		}
 	}
-	return emptyDDLResult(), nil
+	return countedDDLResult(func(c *exec.QueryCounters) { c.ConstraintsAdded++ }), nil
 }
 
 // unwindConstraintRegistration deregisters a just-registered constraint after
@@ -2953,7 +2988,7 @@ func (e *Engine) dropConstraintLocked(ctx context.Context, p *ir.DropConstraint,
 			return nil, e.rewindConstraintDrop(err, p.Name, label, prop, kind, idxMgr)
 		}
 	}
-	return emptyDDLResult(), nil
+	return countedDDLResult(func(c *exec.QueryCounters) { c.ConstraintsRemoved++ }), nil
 }
 
 // rewindConstraintDrop re-establishes a just-removed constraint after a failure

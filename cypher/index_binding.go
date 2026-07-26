@@ -849,5 +849,7 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 			return nil, err
 		}
 	}
-	return emptyDDLResult(), nil
+	// The index is registered and durable: report the schema effect (#2212). The two
+	// earlier returns in this function are IF NOT EXISTS no-ops and stay uncounted.
+	return countedDDLResult(func(c *exec.QueryCounters) { c.IndexesAdded++ }), nil
 }
