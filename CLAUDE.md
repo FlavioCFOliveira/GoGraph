@@ -142,9 +142,9 @@ Task execution is the natural continuation of planning. For each unit of work, f
 8. Update the **Knowledge Graph** to reflect the change (see [Knowledge Graph](#knowledge-graph)), stamping the affected nodes and edges with the commit hash and date.
 
 **Sequencing rules:**
-- Sprints are always executed **sequentially**.
-- Tasks within a sprint may run in **parallel** only when there is clear justification (no shared state, no dependency between them).
-- **Evaluations and audits** may run in parallel, but any such parallel execution **always requires the user's explicit prior authorisation** (see [Sub-Agents (Specialists)](#sub-agents-specialists)).
+- **Task and sprint execution is strictly sequential.** Sprints run one at a time, and within a sprint tasks run one at a time. There is no justified exception: do not overlap two tasks, however independent they appear.
+- **Evaluations and audits** are the sole exception. They may run in parallel, but any such parallel execution **always requires the user's explicit prior authorisation** (see [Sub-Agents (Specialists)](#sub-agents-specialists)).
+- **Never run more than two (2) evaluations or audits at once**, even once authorised. Plan the full set up front, then execute them at most two at a time, starting the next only as one finishes, so the limit of two concurrent is never exceeded.
 
 **Model and effort.** Wherever possible, match the model and its reasoning-effort level to the demands of each individual operation within a task.
 
@@ -276,7 +276,7 @@ Your working team comprises **all available sub-agents** — global, user, and p
 - **`graph-theory-expert` must be consulted** before finalising the representation of any graph type and before selecting any search or traversal algorithm.
 - **`go-developer` must validate** all Go code for idiom conformance before a task is closed.
 - Specialists may be **consulted in parallel** — to inform in-flight implementation — when their inputs are independent (e.g., consulting `graph-theory-expert` on algorithm choice while `go-developer` drafts an adjacent module).
-- **Evaluations and audits run in parallel only with the user's explicit prior authorisation.** Parallel *consultation* that informs implementation is always allowed when inputs are independent; running standalone *evaluations or audits* concurrently is not — it must be authorised by the user beforehand.
+- **Evaluations and audits run in parallel only with the user's explicit prior authorisation, and never more than two at a time.** Parallel *consultation* that informs implementation is always allowed when inputs are independent; running standalone *evaluations or audits* concurrently is not — it must be authorised by the user beforehand, and the concurrency cap of **two** applies even after authorisation. Plan every evaluation or audit the work needs, then run them two at a time, starting the next only as one finishes.
 - Findings from specialists must be summarised in the task description or in a code comment when they influence a non-obvious design decision.
 
 ---
