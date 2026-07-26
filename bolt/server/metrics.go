@@ -97,6 +97,13 @@ const (
 	// rising count is the signal that one principal is monopolising the
 	// serialised writer, which is the exposure the idle bound alone cannot close.
 	metricTxQuotaRejected = "bolt.server.tx.quotarejected"
+
+	// metricTxTerminated counts explicit transactions rolled back because an
+	// operator called [Server.TerminateTransaction]. It is deliberately distinct
+	// from the two automatic reaps: a deliberate intervention and an expired bound
+	// are different operational events, and only one of them means a human had to
+	// step in. A strict subset of metricTxClosed.
+	metricTxTerminated = "bolt.server.tx.terminated"
 )
 
 // incCounter forwards to the shared metrics backend. It exists as a single

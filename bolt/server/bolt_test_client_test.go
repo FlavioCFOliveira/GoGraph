@@ -269,6 +269,17 @@ func (c *boltTestClient) recvSuccess(t *testing.T) *proto.Success {
 //nolint:gocritic // hugeParam: test helper takes Options by value to mirror the public NewServer signature; not a hot path.
 func startTestServer(t *testing.T, opts server.Options) string {
 	t.Helper()
+	_, addr := startTestServerHandle(t, opts)
+	return addr
+}
+
+// startTestServerHandle is [startTestServer] returning the *Server as well, for
+// tests that drive its operator API — Server.Transactions and
+// Server.TerminateTransaction (rmp #2176).
+//
+//nolint:gocritic // hugeParam: test helper takes Options by value to mirror the public NewServer signature; not a hot path.
+func startTestServerHandle(t *testing.T, opts server.Options) (*server.Server, string) {
+	t.Helper()
 	eng := newEngine(t)
 	if opts.ConnTimeout == 0 {
 		opts.ConnTimeout = 5 * time.Second
@@ -308,5 +319,5 @@ func startTestServer(t *testing.T, opts server.Options) string {
 
 	// Give the server a brief moment to start accepting.
 	time.Sleep(10 * time.Millisecond)
-	return addr
+	return srv, addr
 }

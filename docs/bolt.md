@@ -109,6 +109,45 @@ Both events are separately observable: `bolt.server.tx.idlereaped` counts
 transactions reaped for silence, `bolt.server.tx.timedout` those that exceeded
 their total lifetime, and `bolt.server.tx.quotarejected` the refused `BEGIN`s.
 
+### Inspecting and terminating transactions
+
+The automatic bounds above reclaim an abandoned transaction eventually. When an
+operator needs to act sooner — or simply to find out *which* client is holding
+the barrier — the server exposes the two primitives directly:
+
+```go
+for _, tx := range srv.Transactions() { // oldest first
+    log.Printf("%s principal=%s mode=%s state=%s elapsed=%v query=%q",
+        tx.ID, tx.Principal, tx.Mode, tx.State, tx.Elapsed, tx.Query)
+}
+
+if err := srv.TerminateTransaction(id); err != nil {
+    // errors.Is(err, server.ErrNoSuchTransaction) when it already ended
+}
+```
+
+`Transactions` returns a point-in-time snapshot of every open explicit
+transaction, oldest first, so the one most likely to be blocking others comes
+first. `TerminateTransaction` rolls one back atomically — every statement of it,
+exactly as a client `ROLLBACK` would — releasing the writer serialisation and the
+visibility barrier.
+
+Termination is delivered rather than performed inline: a `Session` is
+single-threaded by contract, so the rollback runs on the owning connection's own
+goroutine. The transaction's context is cancelled synchronously, so a statement
+already executing is interrupted immediately. Call `Transactions` again to confirm
+it has gone. Both calls are safe from any goroutine while the server is serving.
+
+Measured: with both automatic bounds set to 5 minutes, a reader blocked behind an
+abandoned `BEGIN` was served 203 ms after the `BEGIN` — released by the
+termination, since nothing else could have.
+
+Neo4j offers the equivalent as `SHOW TRANSACTIONS` and `TERMINATE TRANSACTIONS`
+in Community, and Memgraph offers both; the Go API is the embeddable form of the
+same capability. Terminations are counted by `bolt.server.tx.terminated`, kept
+separate from the automatic reaps because a deliberate intervention and an
+expired bound are different operational events.
+
 ## Message support
 
 | Message    | Direction       | Notes                                   |
@@ -342,6 +381,7 @@ leak:
 | `bolt.server.tx.timedout` | Explicit transactions reaped for exceeding their **total** wall-clock deadline (`DefaultTxTimeout` or a client `tx_timeout`) while the connection stayed alive. A strict subset of `tx.closed`. |
 | `bolt.server.tx.idlereaped` | Explicit transactions reaped for **silence** — no inbound message for `MaxTxIdleTime`. Separated from `tx.timedout` so an abandoned `BEGIN` is distinguishable from a legitimately long transaction. A strict subset of `tx.closed`. |
 | `bolt.server.tx.quotarejected` | `BEGIN`s refused because the authenticated principal already held `MaxOpenTxPerPrincipal` open transactions. A rising count means one principal is monopolising transactions. |
+| `bolt.server.tx.terminated` | Explicit transactions rolled back because an operator called `Server.TerminateTransaction`. Kept separate from the automatic reaps: only this one means a human had to intervene. A strict subset of `tx.closed`. |
 | `bolt.server.conn.panics` | Recovered panics in a connection handler goroutine (defence-in-depth boundary). |
 
 Two of these quantities are conceptually gauges — the number of live

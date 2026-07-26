@@ -431,6 +431,12 @@ type Server struct {
 	eng      *cypher.Engine
 	sem      chan struct{} // capacity == MaxConnections
 	log      *slog.Logger
+	// txReg tracks the explicit transactions currently open across every
+	// connection, backing [Server.Transactions] and
+	// [Server.TerminateTransaction]. Shared by every session; safe for concurrent
+	// use.
+	txReg *txRegistry
+
 	// txQuota caps concurrently-open explicit transactions per authenticated
 	// principal. It is shared by every connection — the cap is per principal, not
 	// per session — and is created in [NewServer] from
@@ -533,6 +539,7 @@ func NewServer(eng *cypher.Engine, opts Options) (*Server, error) {
 		clk:     clock.Real(),
 		closer:  opts.Closer,
 		txQuota: newTxQuota(opts.MaxOpenTxPerPrincipal),
+		txReg:   newTxRegistry(clock.Real()),
 		inbound: packstream.NewInboundBudget(resolveMaxInboundDecodeBytes(opts.MaxInboundDecodeBytes)),
 	}, nil
 }
@@ -545,6 +552,10 @@ func NewServer(eng *cypher.Engine, opts Options) (*Server, error) {
 func (s *Server) setClock(clk clock.Clock) {
 	if clk != nil {
 		s.clk = clk
+		// The transaction registry reports start and elapsed times, so it must read
+		// the SAME clock the reaper does or a test driving virtual time would see
+		// elapsed values from the wall clock.
+		s.txReg = newTxRegistry(clk)
 	}
 }
 
@@ -866,6 +877,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	sess.setDatabaseName(s.opts.DatabaseName)
 	sess.setMaxTxIdle(s.opts.MaxTxIdleTime)
 	sess.setTxQuota(s.txQuota)
+	sess.setTxRegistry(s.txReg, remote)
 
 	// Stream RECORD messages incrementally: handlePull hands each record to
 	// this sink, which encodes and writes it to the connection immediately
@@ -1047,6 +1059,20 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			// Server shutdown or teardown: stop serving. The reader observes the
 			// same cancellation and exits; the deferred cleanup joins it.
 			return
+		case <-sess.terminateSignal():
+			// An operator called Server.TerminateTransaction for this session's
+			// transaction. The rollback runs HERE, on the session's own goroutine,
+			// because a Session is not safe to mutate from the caller's; the caller
+			// has already cancelled the transaction's context, so any statement that
+			// was executing has been interrupted (rmp #2176).
+			if sess.txActive {
+				s.log.Warn("bolt: explicit transaction terminated by operator request",
+					slog.String("remote", remote))
+				incCounter(metricTxTerminated)
+				sess.reapTimedOutTx()
+				syncTxTimer()
+			}
+			continue
 		case <-txTimerC:
 			// The open transaction reached whichever bound came first.
 			txTimer = nil
@@ -1185,6 +1211,14 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 
 			// Re-arm or stop the transaction-timeout reaper to match the new state.
 			syncTxTimer()
+
+			// Refresh what a transaction listing shows: the session's new state and,
+			// for a RUN, the statement now executing (rmp #2176).
+			if run, isRun := msg.(*proto.Run); isRun {
+				sess.reportTx(run.Query)
+			} else {
+				sess.reportTx("")
+			}
 
 			// Exit the loop when the session transitions to DEFUNCT.
 			if sess.state == StateDefunct {

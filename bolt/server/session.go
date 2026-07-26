@@ -214,6 +214,25 @@ type Session struct {
 	// maxTxIdle is the idle bound copied from Options.MaxTxIdleTime.
 	maxTxIdle time.Duration
 
+	// txReg is the server-wide open-transaction registry backing
+	// Server.Transactions and Server.TerminateTransaction. nil in a session built
+	// directly (unit tests), in which case nothing is registered.
+	txReg *txRegistry
+
+	// txID is the registry id of the currently-open transaction, empty when none
+	// is open. It is minted at BEGIN and cleared by unregisterTx.
+	txID string
+
+	// remote is the client address reported in a transaction listing.
+	remote string
+
+	// terminate carries an operator's request to roll the open transaction back.
+	// It is written by requestTerminate on the OPERATOR's goroutine and read by
+	// the session's own message loop, which is where the rollback happens — a
+	// Session is not safe to mutate from another goroutine. Buffered with one
+	// slot: a second request while one is pending is redundant.
+	terminate chan struct{}
+
 	// txQuota caps concurrently-open transactions per principal, shared with
 	// every other session on the server. nil in a session built directly (unit
 	// tests), in which case no cap is enforced.
@@ -581,6 +600,101 @@ func (s *Session) setMaxTxIdle(d time.Duration) {
 // directly in a unit test.
 func (s *Session) setTxQuota(q *txQuota) { s.txQuota = q }
 
+// setTxRegistry installs the server-wide open-transaction registry and records
+// the client address to report in it. A nil registry leaves the session
+// unregistered, which is the case for a session constructed directly in a unit
+// test.
+func (s *Session) setTxRegistry(r *txRegistry, remote string) {
+	s.txReg = r
+	s.remote = remote
+}
+
+// terminateSignal returns the channel the message loop selects on to learn that
+// an operator has asked for the open transaction to be rolled back
+// ([Server.TerminateTransaction]). It is created lazily so a session that is
+// never registered allocates nothing.
+func (s *Session) terminateSignal() <-chan struct{} {
+	if s.terminate == nil {
+		s.terminate = make(chan struct{}, 1)
+	}
+	return s.terminate
+}
+
+// requestTerminate is the callback the registry invokes for this session's
+// transaction. It runs on the CALLER's goroutine — whichever one called
+// Server.TerminateTransaction — and must therefore touch nothing a Session owns.
+//
+// It does exactly two things, both safe from another goroutine:
+//
+//   - cancels the transaction's context, which interrupts a statement already
+//     executing rather than waiting for it to finish; and
+//   - delivers a non-blocking signal that the session's own message loop selects
+//     on, which is where the rollback actually happens.
+//
+// The split exists because a Session is single-threaded by contract: rolling
+// back from the operator's goroutine would race the message loop. cancel is
+// captured at BEGIN, so it is nil-safe here only if the transaction has already
+// gone, in which case the signal is harmless.
+func (s *Session) requestTerminate(cancel func()) {
+	if cancel != nil {
+		cancel()
+	}
+	select {
+	case s.terminate <- struct{}{}:
+	default: // a request is already pending; one rollback settles it
+	}
+}
+
+// registerTx records the freshly-opened transaction in the server-wide registry
+// and returns its id, or "" when no registry is installed. The id is stored on
+// the session so every path that ends the transaction can unregister it.
+func (s *Session) registerTx(mode string, cancel func()) {
+	if s.txReg == nil {
+		return
+	}
+	// Ensure the signal channel exists before the entry becomes reachable, so a
+	// terminate arriving immediately cannot find a nil channel.
+	_ = s.terminateSignal()
+	id := s.txReg.nextID(s.id)
+	s.txID = id
+	s.txReg.register(&txEntry{
+		id:        id,
+		principal: s.identity.Principal,
+		remote:    s.remote,
+		mode:      mode,
+		state:     s.state.String(),
+		terminate: func() { s.requestTerminate(cancel) },
+	})
+}
+
+// reportTx refreshes the registry's view of the open transaction: its state and,
+// when query is non-empty, the statement it is running. Called after each
+// message so a listing shows what the transaction is actually doing.
+func (s *Session) reportTx(query string) {
+	if s.txReg == nil || s.txID == "" {
+		return
+	}
+	s.txReg.update(s.txID, s.state.String(), query)
+}
+
+// unregisterTx removes the transaction from the registry. Idempotent, because
+// several teardown paths may run for one transaction.
+func (s *Session) unregisterTx() {
+	if s.txReg == nil || s.txID == "" {
+		return
+	}
+	s.txReg.unregister(s.txID)
+	s.txID = ""
+	// Drain any terminate request that arrived for the transaction just ended, so
+	// it cannot be observed against the NEXT one.
+	if s.terminate != nil {
+		select {
+		case <-s.terminate:
+		default:
+		}
+	}
+}
+
 // touchTx pushes the idle deadline of an open explicit transaction forward by
 // maxTxIdle. It is called once per inbound message, BEFORE dispatch, so that any
 // message at all — not only one that succeeds — counts as the client still being
@@ -636,10 +750,12 @@ func (s *Session) releaseTxQuota() {
 // transaction: COMMIT, ROLLBACK, RESET, GOODBYE, the FAILED-reclaim
 // ([Session.abortTx]), and the connection teardown ([Session.Close]).
 func (s *Session) txClosed() {
-	// The quota slot and the idle deadline are released unconditionally, not
-	// under the txAccounted guard: they must be freed even on a path where the
-	// metric was already counted, and both release operations are idempotent.
+	// The quota slot, the registry entry and the idle deadline are released
+	// unconditionally, not under the txAccounted guard: they must be freed even on
+	// a path where the metric was already counted, and all three release
+	// operations are idempotent.
 	s.releaseTxQuota()
+	s.unregisterTx()
 	s.txIdleDeadline = time.Time{}
 	if !s.txAccounted {
 		return
@@ -1432,6 +1548,11 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 	// transaction is reaped maxTxIdle after the BEGIN rather than immediately
 	// (rmp #2175).
 	s.touchTx()
+	// Publish the transaction so an operator can see and end it (rmp #2176). The
+	// registered terminate callback cancels tx's context and signals this
+	// session's message loop; the rollback itself runs there, never on the
+	// operator's goroutine.
+	s.registerTx(mode, tx.cancel)
 	// Count the transaction opened (the opened side of the open-transaction gauge
 	// derivation opened − closed). The matching txClosed runs on whichever path
 	// ends it, keeping the derived gauge balanced.
