@@ -1,3 +1,5 @@
+//go:build race || gograph_debug
+
 package lpg
 
 import (

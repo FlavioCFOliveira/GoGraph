@@ -1,3 +1,5 @@
+//go:build race || gograph_debug
+
 package lpg
 
 import (
@@ -8,6 +10,29 @@ import (
 
 // barrierGuard enforces that no single goroutine re-enters the
 // transaction-visibility barrier ([Graph.View] / [Graph.ApplyAtomically]).
+//
+// # When this implementation is compiled
+//
+// This is the ENFORCING form, compiled only under `-race` or
+// `-tags gograph_debug`. Released binaries link the no-op in
+// reentrancy_disabled.go. The split exists because the guard's only way to
+// answer "is the CURRENT goroutine already inside the barrier?" is a goroutine
+// id, and the only supported way to obtain one is [goID], which calls
+// runtime.Stack and takes the Go runtime's process-global debuglock once per
+// stack frame. Measured by two independent streams of the round-3 comparative
+// audit: that call was 97-99% of the cost of every Graph.View — 1.65 us serial
+// and 3.29 us at 10 cores with a 64 B allocation, against 3.6 ns for the bare
+// RWMutex pair it guards — and it made aggregate read throughput HALVE from 1
+// to 10 cores, because every reader serialised on the runtime's debuglock. The
+// guard makes no isolation decision, so paying that on every production read
+// bought nothing.
+//
+// The local gate runs `go test -race ./...`, so the guard is enforced on every
+// change; `-tags gograph_debug` turns it on for any other build. The cost of
+// the split is that in a released binary a nested acquisition deadlocks
+// silently instead of panicking — see the [Graph.View] and
+// [Graph.ApplyAtomically] godoc, which state the contract, and
+// reentrancy_disabled.go, which documents the trade-off in full.
 //
 // # Why a guard is needed
 //
@@ -93,6 +118,17 @@ type barrierGuard struct {
 // allocates the map into existence under the boundary mutex.
 func (bg *barrierGuard) init() {
 	bg.readers = make(map[int64]int)
+}
+
+// currentGID returns the calling goroutine's id for callers that need to pair a
+// stamp with a clear without having gone through [barrierGuard.checkWriter] —
+// specifically [Graph.UnlockBarrier], which clears the stamp taken by
+// [Graph.LockBarrier] on the same goroutine. It exists so that no call site
+// outside this file references [goID], which is compiled only in the enforcing
+// build; the no-op form returns 0, and every method that consumes a gid treats
+// 0 as "nothing recorded".
+func (bg *barrierGuard) currentGID() int64 {
+	return goID()
 }
 
 // reentrancyMessage builds the panic message for a detected nested acquisition.

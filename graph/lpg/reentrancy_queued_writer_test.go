@@ -1,3 +1,5 @@
+//go:build race || gograph_debug
+
 package lpg
 
 // reentrancy_queued_writer_test.go — task #1355 (reliability audit 2026-06-10)
@@ -27,8 +29,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
 // waitUntilQueuedOnWriteLock blocks until the goroutine with id gid is inside
@@ -133,27 +133,8 @@ func TestReentrancyGuard_NotDefeatedByQueuedWriter(t *testing.T) {
 	g.View(func() { _ = g.LiveOrder() })
 }
 
-// BenchmarkBarrier_View measures the read-path cost of the visibility barrier
-// (guard check + RLock/RUnlock bookkeeping) with an empty body — the hot path
-// that #1355 must not regress: the guard's read-side check stays one atomic
-// load.
-func BenchmarkBarrier_View(b *testing.B) {
-	g := New[string, int64](adjlist.Config{Directed: true})
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		g.View(func() {})
-	}
-}
-
-// BenchmarkBarrier_ApplyAtomically measures the write-path cost of the
-// visibility barrier (guard bookkeeping + Lock/Unlock) with an empty
-// transaction.
-func BenchmarkBarrier_ApplyAtomically(b *testing.B) {
-	g := New[string, int64](adjlist.Config{Directed: true})
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = g.ApplyAtomically(func() error { return nil })
-	}
-}
+// BenchmarkBarrier_View and BenchmarkBarrier_ApplyAtomically moved to
+// barrier_bench_test.go with rmp #2168, which build-tags this file out of
+// released binaries. The benchmarks must run in BOTH builds — comparing them is
+// the evidence that the guard is gone from the production path — so they cannot
+// live behind the same tag as the guard's own tests.

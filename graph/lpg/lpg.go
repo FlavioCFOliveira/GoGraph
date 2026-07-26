@@ -494,7 +494,12 @@ type Graph[N comparable, W any] struct {
 	// [Graph.View] / [Graph.ApplyAtomically]. visMu is not re-entrant, so a
 	// nested acquisition from a goroutine already inside the barrier would
 	// deadlock the engine; the guard converts that silent hang into an immediate
-	// panic. See reentrancy.go for the mechanism and cost.
+	// panic.
+	//
+	// It is enforcing only under -race or -tags gograph_debug
+	// (reentrancy_enabled.go); a released binary links the zero-sized no-op in
+	// reentrancy_disabled.go, which documents the mechanism, the measured cost
+	// that motivated the split, and the diagnosability it trades away.
 	barrier barrierGuard
 }
 
@@ -508,10 +513,18 @@ type Graph[N comparable, W any] struct {
 //
 // ApplyAtomically must not be called re-entrantly, and the mutations inside fn
 // must not call [Graph.View] or [Graph.ApplyAtomically] (the RWMutex is not
-// re-entrant, so a nested acquisition from this goroutine would deadlock). That
-// invariant is enforced: a nested call from a goroutine already inside the
-// barrier panics with a clear message instead of deadlocking. The panic
-// indicates a programmer error and is not recovered by this package. The graph's
+// re-entrant, so a nested acquisition from this goroutine would deadlock).
+//
+// The invariant is CHECKED in builds made with -race or -tags gograph_debug: a
+// nested call from a goroutine already inside the barrier panics with a clear
+// message instead of deadlocking. The panic indicates a programmer error and is
+// not recovered by this package. A released build omits the check, because
+// identifying the calling goroutine costs a runtime.Stack call that measured
+// 97-99% of this method and did not scale with cores; there, violating the
+// invariant deadlocks silently. Build with -tags gograph_debug to diagnose a
+// suspected freeze. See graph/lpg/reentrancy_disabled.go for the full rationale.
+//
+// The graph's
 // per-shard write methods that fn calls take their own shard locks beneath
 // visMu, which is safe because visMu is acquired only here and in View.
 //
@@ -558,10 +571,14 @@ func (g *Graph[N, W]) ApplyAtomically(fn func() error) error {
 // under the same lock (e.g. [Engine.execUnderBarrier] called from an in-flight
 // Exec) MUST use [Graph.ApplyInsideLocked] instead of [Graph.ApplyAtomically];
 // calling ApplyAtomically from the goroutine that holds the barrier via
-// LockBarrier panics (re-entrancy guard).
+// LockBarrier panics (re-entrancy guard) — in a build made with -race or
+// -tags gograph_debug; a released build deadlocks instead, see
+// [Graph.ApplyAtomically].
 //
 // LockBarrier must not be called from a goroutine already inside the barrier
-// (ApplyAtomically or a previous LockBarrier); it panics instead of deadlocking.
+// (ApplyAtomically or a previous LockBarrier). Under -race or
+// -tags gograph_debug it panics instead of deadlocking; a released build
+// deadlocks.
 func (g *Graph[N, W]) LockBarrier() {
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
 	g.visMu.Lock()
@@ -580,7 +597,7 @@ func (g *Graph[N, W]) LockBarrier() {
 // concurrent [Graph.View] readers may proceed and [Graph.ApplyAtomically] may be
 // called again from any goroutine.
 func (g *Graph[N, W]) UnlockBarrier() {
-	gid := goID()
+	gid := g.barrier.currentGID()
 	// Close the adjacency commit window while visMu is still held (freezes the
 	// per-shard builders), matching the BeginCommit in LockBarrier, before
 	// releasing the barrier.
@@ -619,10 +636,15 @@ func (g *Graph[N, W]) ApplyInsideLocked(fn func() error) error {
 // fn must not perform writes and must not call [Graph.ApplyAtomically] or
 // [Graph.View] (the RWMutex is not re-entrant). A nested [Graph.View] would
 // deadlock the instant any writer queues behind the outer read lock, and a
-// nested [Graph.ApplyAtomically] always deadlocks; both are enforced — a nested
+// nested [Graph.ApplyAtomically] always deadlocks.
+//
+// Both are CHECKED in builds made with -race or -tags gograph_debug: a nested
 // call from a goroutine already inside the barrier panics with a clear message
 // instead of deadlocking. The panic indicates a programmer error and is not
-// recovered by this package.
+// recovered by this package. A released build omits the check — identifying the
+// calling goroutine cost a runtime.Stack call measured at 97-99% of this method,
+// with a 64 B allocation and no scaling across cores — so there a violation
+// deadlocks silently. See graph/lpg/reentrancy_disabled.go.
 //
 // Concurrent View readers from DIFFERENT goroutines do not block one another and
 // never trip the guard; only a same-goroutine nested acquisition does.

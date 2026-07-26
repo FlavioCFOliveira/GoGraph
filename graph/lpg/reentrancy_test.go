@@ -1,3 +1,5 @@
+//go:build race || gograph_debug
+
 package lpg
 
 // reentrancy_test.go — task #1286
@@ -6,7 +8,7 @@ package lpg
 // backed by a NON-re-entrant sync.RWMutex. A goroutine that already holds the
 // barrier and nests another acquisition deadlocks the whole engine. Production
 // never nests today, but the invariant was unenforced. The guard added in
-// reentrancy.go converts that silent hang into an immediate, clear panic.
+// reentrancy_enabled.go converts that silent hang into an immediate, clear panic.
 //
 // These tests prove:
 //  1. each of the four deadlock-prone nestings (reader→reader, reader→writer,

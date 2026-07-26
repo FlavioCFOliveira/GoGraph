@@ -119,6 +119,39 @@ near-instant; the cost is the `t.Skip` call itself.
 existing scripts and developer aliases continue to work.
 `GOGRAPH_NIGHTLY` is new; it pairs with the new `nightly` build tag.
 
+### Diagnostic tags — not layers
+
+Two further tags select *assertion* builds rather than test layers. They
+do not admit or exclude tests by workload cost; they compile extra
+run-time checks into the library itself, and the tests that pin those
+checks are tagged to match.
+
+| Tag | Effect |
+|---|---|
+| `-tags=gograph_debug` | compiles the development-only assertions into the library |
+| `-race` | implies the barrier re-entrancy guard, in addition to the Go race detector |
+
+Two assertions are currently gated this way:
+
+- The **integer-distance overflow assertion** in `search/`
+  (`overflow_assert_enabled.go` / `_disabled.go`), which panics when a
+  Bellman-Ford or Johnson relaxation wraps around. Gated on
+  `gograph_debug` alone.
+- The **barrier re-entrancy guard** in `graph/lpg/`
+  (`reentrancy_enabled.go` / `reentrancy_disabled.go`), which turns a
+  same-goroutine nested `Graph.View` / `Graph.ApplyAtomically` — an
+  engine-wide deadlock — into an immediate panic. Gated on
+  `race || gograph_debug`, so the local gate (`go test -race ./...`,
+  run by `make ci`) enforces it on every change. It is excluded from
+  released binaries because identifying the calling goroutine needs a
+  `runtime.Stack` call that measured **97–99 % of every `Graph.View`**
+  (2088 ns against 4.0 ns for the RWMutex pair it guards, plus a 64 B
+  allocation per call) and serialised readers on the Go runtime's
+  process-global `debuglock`.
+
+Reach for `-tags=gograph_debug` when diagnosing a suspected engine
+freeze or a wrapped path distance in a build where `-race` is too slow.
+
 The two mechanisms are independent: build tags gate compilation, env
 vars gate runtime behaviour of helpers. A test guarded by
 `//go:build soak` is invisible to `SOAK_FULL=1 go test ./...` because
