@@ -3558,6 +3558,13 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cypher: translate: %w", err)
 	}
+	// Push a constant-bound key equality into the inner arm of an Apply so a key
+	// written as a bound variable — WITH 'x' AS k MATCH (n:L {p: k}) — reaches the
+	// index instead of a full label scan (#2182). Done here, once per cached plan,
+	// and params-independent by construction: the pass moves the *ast.Parameter
+	// node rather than its value, so one cached plan stays correct for every
+	// invocation's parameters. See correlated_seek_plan.go.
+	foldBoundSeekKeys(plan)
 	// Plan-time advisories: a disconnected Cartesian product is surfaced as a
 	// notification so an embedder or Bolt driver can warn the user that the
 	// query may stream Nᵏ intermediate tuples (#1483). Notifications are out of

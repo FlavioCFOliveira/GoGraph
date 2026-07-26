@@ -244,3 +244,58 @@ Two corrections this spike makes to its own brief, both from measurement:
   framing because the Θ(rows·N) figure implied it was unnecessary.
 - **#2184** (benchmark) must use an entity projection and must vary the key count,
   not only N, since the gain depends on the ratio.
+
+---
+
+## 7. What #2182 shipped, and what it measured
+
+Implemented in `cypher/correlated_seek_plan.go`. The design of §3.1 was followed
+in substance but arrived at a smaller mechanism than anticipated, which is worth
+recording because it changes what #2183 has left to build.
+
+**The mechanism.** No new IR field and no new operator. The pass pushes a *copy*
+of the key equality into the `Apply`'s inner arm with the bound variable replaced
+by the expression the binding holds, so the inner arm becomes
+`Selection → NodeByLabelScan` — precisely the shape the existing seek rewrite
+already claims. The retained outer `Selection` is what makes this safe: the pushed
+predicate can only narrow what that filter examines.
+
+`ir.NodeByIndexSeek.Value` was therefore **not** changed to carry an AST
+expression, and `resolveSeekValue` was neither extended nor called on a variable.
+§3.1's requirement — stop parsing source text to find the key — is met by not
+needing to parse anything: the AST node moves, intact, from the binding to the
+pushed predicate.
+
+**Why the substituted expression must be row-invariant.** Only a literal or a
+parameter reference is substituted. Property 1 of §4 (the pushed predicate is
+implied by the retained one) holds only if the binding evaluates identically on
+every row the outer arm produces; a data-derived key such as
+`MATCH (q:Q) WITH q.want AS k` does not, and pushing it would drop rows. This is
+the correctness boundary of the task, and it is asserted directly.
+
+**Parameters are moved as AST, never as values.** The logical plan is cached by
+query text. Folding a parameter's *value* would bake the first invocation's key
+into the plan and serve it to every later one — a wrong-results defect invisible
+to any single-invocation test, since the first run is always right. Moving the
+`*ast.Parameter` node leaves resolution to the physical build. A test runs one
+query with three different keys, the third repeating the first, to close this.
+
+**Measured** (Apple M4, entity projection per §2.1, 200 iterations):
+
+| N | `WITH`-bound, before | `WITH`-bound, after | inline literal (control) |
+|---|---|---|---|
+| 5 000 | 2.72 ms | 8.36 µs | 3.70 µs |
+| 10 000 | 5.54 ms | 7.70 µs | 3.70 µs |
+| 20 000 | **13.37 ms** | **8.26 µs** | 3.64 µs |
+
+The bound-key form is now **flat in N**, as the inline form already was. At
+N=20 000 that is **1 619×**, against the ~3 000× projected in §5; the shortfall is
+the residual 2.3× between the bound and inline forms (8.26 µs vs 3.64 µs), which
+is the `Apply` and `Projection` layers plus the retained filter — inherent to the
+shape, not a defect in the access path.
+
+**What this leaves for #2183.** The single-key case is served, so #2183 narrows to
+what it always genuinely was: the **key set**. `UNWIND [...] AS k` still scans,
+deliberately and with a test asserting it, because a set needs one probe per
+distinct key OR-ed into a single posting bitmap (§3.2) plus the cost gate of §3.3.
+Nothing in §3.2 or §3.3 is superseded by the above; §3.1 is complete.

@@ -409,6 +409,28 @@ label holds at least 1024 nodes and the predicate matches at most 10 % of them,
 and it scans otherwise. Use `Engine.Explain` to see which access path a query
 gets.
 
+**Which key forms reach the index.** The key may be written inline or bound by a
+preceding `WITH`, provided its value is the same on every row:
+
+```cypher
+-- all three seek
+MATCH (a:Person {email: 'a@example.com'}) RETURN a
+MATCH (a:Person {email: $email})          RETURN a
+WITH $email AS k MATCH (a:Person {email: k}) RETURN a
+```
+
+A key bound to something that varies per row does **not** seek, and scans
+instead — currently that is a key drawn from the graph (`MATCH (q:Q) WITH q.email
+AS k …`) or from `UNWIND`. The distinction is row-invariance, not syntax: a
+`WITH`-bound literal or parameter is constant across rows and can be resolved
+once, whereas a data-derived key needs one index probe per distinct value, which
+the engine does not yet perform.
+
+The seek is chosen for the same reasons in all cases, so it can also decline: a
+key whose type the index cannot serve (an integer against a string-keyed hash
+index) falls back to a scan with the original predicate as the filter, and
+returns the rows openCypher requires either way.
+
 All of this is a transparent optimisation: a query using an index returns
 exactly the same rows as the same query with no index (a residual filter refines
 any over-returned superset). An index never changes ordering — it is not used to
