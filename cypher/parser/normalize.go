@@ -2067,8 +2067,22 @@ func normalizeSingleQuotes(q string) string {
 
 		case '\'':
 			// Single-quoted string: rewrite as double-quoted.
+			//
+			// The rewrite is only valid for a *terminated* literal. When the
+			// closing quote is missing, the original text is emitted verbatim so
+			// that the stray ' reaches the lexer and is reported as a syntax
+			// error. Fabricating the closing quote here invented a literal the
+			// caller never wrote and swallowed the rest of the query into it, so
+			// `RETURN 'abc` silently returned the string "abc" and
+			// `RETURN 'abc AS s` silently returned "abc AS s" — no error in
+			// either case (round-3 audit, rmp #2167). The double-quote and
+			// backtick branches above already copy an unterminated literal
+			// verbatim; this branch was the only one that closed it.
+			openQuote := i
+			rewritten := len(buf)
 			buf = append(buf, '"')
 			i++ // consume opening '
+			closed := false
 			for i < n {
 				c := q[i]
 				if c == '\\' && i+1 < n {
@@ -2088,6 +2102,7 @@ func normalizeSingleQuotes(q string) string {
 				} else if c == '\'' {
 					// Closing single quote.
 					i++
+					closed = true
 					break
 				} else if c == '"' {
 					// Bare double-quote inside single-quoted string: must escape.
@@ -2097,6 +2112,12 @@ func normalizeSingleQuotes(q string) string {
 					buf = append(buf, c)
 					i++
 				}
+			}
+			if !closed {
+				// Discard the partial rewrite and copy the remainder unchanged.
+				buf = append(buf[:rewritten], q[openQuote:]...)
+				i = n
+				break
 			}
 			buf = append(buf, '"')
 

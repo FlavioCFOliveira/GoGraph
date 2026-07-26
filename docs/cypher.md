@@ -952,6 +952,34 @@ The openCypher TCK execution suite is fully green: all 3897 scenarios pass
 (100%), enforced by `tckExecutionBaseline` in `cypher/tck/runner_test.go`. For
 the full divergence taxonomy, see [docs/tck/DIVERGENCES.md](tck/DIVERGENCES.md).
 
+### Unrecognised characters are rejected
+
+Any character outside the openCypher grammar is a syntax error. This matters
+most for two spellings that a Neo4j user may reach for, because both used to be
+accepted and answered *incorrectly*:
+
+| Written | Result | Use instead |
+|---|---|---|
+| `WHERE n.v != 2` | Syntax error | `WHERE n.v <> 2` |
+| `MATCH (n:!A)` | Syntax error | `MATCH (n) WHERE NOT n:A` |
+
+`!=` is not an openCypher operator (`<>` is), and the label-negation syntax
+`:!A` is a Neo4j 5 extension. Until GoGraph v0.10.0 the lexer discarded the `!`
+and executed the remainder, so `!= 2` silently evaluated as `= 2` and `:!A`
+silently matched exactly the `:A` nodes — the precise opposite of the intent, in
+both cases with no error. The same applies to `#`, `&`, `?`, `@`, `~` and `\`
+outside a string literal, and to an unterminated string literal.
+
+An unrecognised character inside a string literal, a backtick-quoted identifier
+or a comment is ordinary content and is unaffected:
+
+```cypher
+RETURN "a != b" AS s             // fine — inside a literal
+MATCH (`we!rd`) RETURN 1         // fine — inside a quoted identifier
+MATCH (n) RETURN n // uses != !  // fine — inside a comment
+RETURN 'abc' =~ '[a-z]+'         // fine — =~ is openCypher
+```
+
 ### String + number concatenation
 
 The `+` operator concatenates only when **both** operands are strings. A mixed

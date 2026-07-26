@@ -154,6 +154,13 @@ FLOAT : (Digits '.' Digits | '.' Digits) ExponentPart? [fd]? | Digits (ExponentP
 WS           : [ \t\r\n\u000C]+ -> channel(HIDDEN);
 COMMENT      : '/*' .*? '*/'    -> channel(COMMENTS);
 LINE_COMMENT : '//' ~[\r\n]*    -> channel(COMMENTS);
+// ERRCHAR matches any character no rule above accepts. It is NOT a licence to
+// ignore such input: collectErrCharErrors in cypher/parser/parse.go reports every
+// ERRCHAR token as a syntax error, because hiding them silently deleted the
+// character and answered a different query (rmp #2167). The single exemption is
+// the `~` of the regex operator `=~`, which has no token of its own; see
+// isRegexCombiner in the same file. Do not rely on this rule to absorb anything
+// else.
 ERRCHAR      : .                -> channel(HIDDEN);
 
 fragment EscapeSequence:

@@ -151,6 +151,90 @@ func applyNormalizers(query string) string {
 	return query
 }
 
+// collectErrCharErrors appends a [ParseError] to l for every ERRCHAR token in
+// stream, honouring the same [maxParseErrors] cap the ANTLR listener applies.
+// stream must already be filled.
+//
+// ERRCHAR is the lexer's catch-all rule (`ERRCHAR : . -> channel(HIDDEN)` at
+// CypherLexer.g4:157). It matches any single character no other lexer rule
+// accepts and routes it to the hidden channel, where the parser never sees it.
+// Left alone, the character is therefore silently deleted and the rest of the
+// query parses as though it had never been typed, so the engine answers a
+// question the caller did not ask:
+//
+//   - `MATCH (n) WHERE n.v != 2` becomes `... n.v = 2` — the exact negation of
+//     the requested predicate.
+//   - `MATCH (n:!A)` becomes `MATCH (n:A)` — the exact complement of the
+//     requested label set. `:!A` is valid Neo4j 5 syntax, so a ported query
+//     inverts silently.
+//   - `WHERE n.name = "unterminated` drops the opening quote, leaving the
+//     literal's content to lex as bare identifiers.
+//
+// None of those raised an error before this check existed, and none is visible
+// to the openCypher TCK, which only executes syntactically valid queries.
+//
+// The character is promoted to a syntax error here rather than by deleting the
+// grammar rule, because deleting it would renumber the token vocabulary and
+// force a full ATN regeneration, re-applying the hand patches CypherLexer.g4
+// documents. Reporting from the token stream is behaviourally equivalent for
+// every input — ERRCHAR matches exactly the characters the grammar does not
+// know — at no cost to the accepting path.
+//
+// The single exception is the `~` of the openCypher regex-match operator `=~`,
+// which the grammar has no token for and which [comparisonOp] recovers by
+// peeking past the ASSIGN token. That `~` is a legitimate part of a valid
+// query, so it is exempted here. See [isRegexCombiner].
+func collectErrCharErrors(l *errorListener, stream *antlr.CommonTokenStream) {
+	toks := stream.GetAllTokens()
+	for i, tok := range toks {
+		if tok.GetTokenType() != gen.CypherLexerERRCHAR {
+			continue
+		}
+		if isRegexCombiner(toks, i) {
+			continue
+		}
+		if len(l.errs) >= maxParseErrors {
+			return
+		}
+		text := tok.GetText()
+		msg := "unrecognised character"
+		// A lone quote reaches ERRCHAR only when its literal is never closed,
+		// which is a materially different diagnosis worth reporting as such.
+		if text == `"` || text == `'` {
+			msg = "unterminated string literal"
+		}
+		l.errs = append(l.errs, &ParseError{
+			OffendingToken: text,
+			Message:        msg,
+			Line:           tok.GetLine(),
+			Column:         tok.GetColumn(),
+		})
+	}
+}
+
+// isRegexCombiner reports whether toks[i] is the `~` that completes the
+// openCypher regex-match operator `=~`, i.e. an ERRCHAR `~` immediately
+// preceded, with no intervening character, by an ASSIGN token.
+//
+// The vendored grammar has no REGMATCH token, so `=~` lexes as ASSIGN followed
+// by a hidden ERRCHAR `~`, and [comparisonOp] reconstructs the operator by
+// peeking the character after the `=`. This predicate is the exact mirror of
+// that peek, applied from the token side: it exempts precisely the `~` that
+// [isRegexMatchAssign] will go on to claim, so a valid `=~` query is accepted
+// while a stray `~` anywhere else is reported. Adjacency is checked on
+// character offsets, so `= ~` — which is not the operator — is still an error.
+//
+// Replacing both halves with a real REGMATCH lexer rule remains the clean fix
+// and is gated on regenerating the ANTLR ATN.
+func isRegexCombiner(toks []antlr.Token, i int) bool {
+	if toks[i].GetText() != "~" || i == 0 {
+		return false
+	}
+	prev := toks[i-1]
+	return prev.GetTokenType() == gen.CypherLexerASSIGN &&
+		prev.GetStop()+1 == toks[i].GetStart()
+}
+
 // recoverParseScript calls p.Script() and converts any runtime panic into a
 // *ParseError. Incomplete WITH clauses and certain pipe-in-arg expressions
 // drive ANTLR's DefaultErrorStrategy into an unchecked type assertion in
@@ -206,6 +290,19 @@ func Parse(query string) (ast.Query, error) {
 	// Parse.
 	parseErrListener := &errorListener{}
 	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+
+	// Lex the whole input before parsing so that the catch-all ERRCHAR rule can
+	// be promoted to a syntax error instead of silently deleting a character.
+	// See [collectErrCharErrors]. `script` is anchored at EOF, so an accepted
+	// query consumes every token regardless: this fetches them eagerly rather
+	// than adding work. Fill leaves the read index on the first
+	// default-channel token, which is exactly where the parser expects it.
+	stream.Fill()
+	collectErrCharErrors(lexErrListener, stream)
+	if len(lexErrListener.errs) > 0 {
+		return nil, lexErrListener.errs[0]
+	}
+
 	p := gen.NewCypherParser(stream)
 	p.RemoveErrorListeners()
 	p.AddErrorListener(parseErrListener)
@@ -283,6 +380,13 @@ func ParseStrict(query string) (ast.Query, []error) {
 	// Parse.
 	parseErrListener := &errorListener{}
 	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+
+	// See [Parse] for why the stream is filled before parsing. ParseStrict
+	// reports the full error set, so parsing continues after an ERRCHAR has
+	// been recorded rather than short-circuiting on the first one.
+	stream.Fill()
+	collectErrCharErrors(lexErrListener, stream)
+
 	p := gen.NewCypherParser(stream)
 	p.RemoveErrorListeners()
 	p.AddErrorListener(parseErrListener)
@@ -293,13 +397,25 @@ func ParseStrict(query string) (ast.Query, []error) {
 		return nil, []error{panicErr}
 	}
 
-	// Collect all errors: lex errors first, then parse errors.
+	// Collect all errors: lex errors first, then parse errors. Each listener
+	// caps its own slice at maxParseErrors, so the concatenation is capped
+	// again here — the documented contract is a maximum per parse, not per
+	// phase, and a query can now produce errors in both phases.
 	if n := len(lexErrListener.errs) + len(parseErrListener.errs); n > 0 {
+		if n > maxParseErrors {
+			n = maxParseErrors
+		}
 		errs := make([]error, 0, n)
 		for _, e := range lexErrListener.errs {
+			if len(errs) == n {
+				break
+			}
 			errs = append(errs, e)
 		}
 		for _, e := range parseErrListener.errs {
+			if len(errs) == n {
+				break
+			}
 			errs = append(errs, e)
 		}
 		return nil, errs

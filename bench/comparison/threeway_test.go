@@ -212,10 +212,12 @@ var (
 		},
 	}
 	gographDialect = dialect{
-		Name:        "gograph",
-		CreateIndex: func(l, p string) string { return fmt.Sprintf("CREATE INDEX idx_%s_%s FOR (n:%s) ON (n.%s)", l, p, l, p) },
-		Skip:        map[string]string{},
-		Override:    map[string]string{},
+		Name: "gograph",
+		CreateIndex: func(l, p string) string {
+			return fmt.Sprintf("CREATE INDEX idx_%s_%s FOR (n:%s) ON (n.%s)", l, p, l, p)
+		},
+		Skip:     map[string]string{},
+		Override: map[string]string{},
 	}
 )
 

@@ -2917,20 +2917,22 @@ func relationshipTypes(ctx gen.IRelationshipTypesContext) []string {
 // proper REGMATCH token requires the ANTLR tool (a JDK + the ANTLR jar), which
 // is not available in this environment, so we cannot edit cypher/parser/gen.
 //
-// In practice the lexer error-recovery silently consumes the trailing `~`, so
-// `'abc' =~ '[a-z]+'` parses with no error and surfaces as an ASSIGN sign
-// sitting between the two operands. We disambiguate `=~` from a plain `=` here
-// by peeking the source character immediately after the `=` token: when it is
-// a contiguous `~` we emit the dedicated "=~" operator (handled downstream in
+// In practice the lexer routes the trailing `~` to the catch-all ERRCHAR rule
+// on the hidden channel, so `'abc' =~ '[a-z]+'` reaches the parser as an ASSIGN
+// sign sitting between the two operands. We disambiguate `=~` from a plain `=`
+// here by peeking the source character immediately after the `=` token: when it
+// is a contiguous `~` we emit the dedicated "=~" operator (handled downstream in
 // cypher/ir/translator.go, cypher/sema/types.go, and cypher/expr/eval.go);
 // otherwise it is an ordinary equality. A plain `=` is always followed by
 // whitespace or the right operand, never by `~`, so this peek never
 // misclassifies it.
 //
-// Residual: the lexer still recovers internally from the stray `~` token; the
-// production Run path already tolerates that recovery, and this peek does not
-// change it — it only recovers the operator's identity. The clean fix (a real
-// REGMATCH lexer rule) is a future enhancement gated on grammar regeneration.
+// Residual: an ERRCHAR token is a syntax error since rmp #2167 — it was
+// silently discarding unrecognised characters and returning wrong answers — so
+// this `~` is exempted explicitly. [isRegexCombiner] in cypher/parser/parse.go
+// is the exact mirror of the peek below and must stay in step with it. The clean
+// fix (a real REGMATCH lexer rule) is a future enhancement gated on grammar
+// regeneration.
 func comparisonOp(ctx gen.IComparisonSignsContext) string {
 	if ctx.ASSIGN() != nil {
 		if isRegexMatchAssign(ctx.ASSIGN()) {
