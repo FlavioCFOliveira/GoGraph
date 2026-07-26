@@ -391,3 +391,54 @@ probing, which is a barrier over the input rather than a leaf, with a different
 cost profile and a different cancellation story. The bulk-load deficit that
 motivated this line of work is addressed instead by `gograph-import` (#2180), which
 loads in 0.28 s what the Cypher write path took 35 m 33 s to load.
+
+---
+
+## 9. What #2184 measured, and the second fallback regression it caught
+
+Full record in `docs/benchmarks/bound-key-seek-2026-07-26.md`; the permanent
+benchmark is `bench/cypher_boundkey/`. Two results changed what shipped.
+
+**A second regression on the declined path.** §8 recorded one — an unclaimed hint
+being evaluated, 2 952 ms → 19.4 ms. Measuring the declined case against the
+pre-#2183 commit in a detached worktree, with the identical benchmark file, exposed
+another: 20.2 ms after against **15.7 ms** before, and 6 021 surplus allocations at
+2 001 keys — almost exactly 3 per key. The cause was extraction order.
+`extractKeySetFromAST` boxes one `expr.Value` per disjunct and builds a
+deduplication map over them, and it runs on every *build*, which is once per
+execution. The set was being materialised and only then rejected.
+
+The fix is §3.3's own third condition, which the implementation had skipped:
+"decline when the key set exceeds a bound, which is the same condition seen from the
+input side." A size gate now runs before extraction, making the plan-time cost of a
+rejected set O(1). After it: **15.05 ms and 263 522 allocations against 15 749 961 ns
+and 263 519 allocations before** — allocations identical to within three.
+
+The size gate is a genuine approximation, unlike the posting-count gate: k distinct
+keys can exceed the budget while matching few nodes, so a set of mostly-absent keys
+that would have passed the exact gate is now declined. That set is answered by the
+scan, which is correct, and for a set that wide the seek would not have won by much
+anyway. It is the one place in this design where an inexact test was preferred, and
+the reason is that the exact test cannot be reached without paying O(k) first.
+
+Both regressions were on the **fallback** path. That is worth stating plainly,
+because it is where a cost gate's correctness actually lives and where neither the
+design nor the spike thought to look: a gate is only as good as the plan it declines
+into.
+
+**The audit's attribution does not survive measurement.** The load query the audit
+timed is
+`UNWIND $rows AS r MATCH (a:Person {sid: r.ss}), (b:Person {sid: r.ts}) CREATE …`
+(`bench/comparison/threeway_test.go:430`). Its key is a **property access on the
+unwound row**, not a bare bound variable, and its list is a **runtime parameter**,
+not a literal. Verified through `Engine.Explain`: it still plans a full label scan
+per endpoint — two scans and a nested `CartesianProduct`. So the 35 m 33 s load
+figure is **unchanged** by #2182 and #2183. The audit was right that a bound key
+never reached the index; it was wrong that this was the load's mechanism.
+
+One corroboration worth keeping: the never-served runtime-list path costs 12.59 ms
+at 30 keys today, and the spike measured the *pre-change* bound-key path at 30 keys
+at 12.59 ms. Different code paths, measured weeks apart, agreeing to three
+significant figures — because both are "scan the label once and join the keys
+against it". That independently validates the before-column of every table in §8
+and in the benchmark record.

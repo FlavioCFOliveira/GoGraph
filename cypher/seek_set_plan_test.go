@@ -214,6 +214,48 @@ func TestSeekSet_DeclinedHintIsDroppedNotEvaluated(t *testing.T) {
 	}
 }
 
+// TestSeekSet_SizeGateDeclinesBeforeExtracting is the second regression test for
+// the declined path, and covers the second way it was measured to regress.
+//
+// Extraction boxes one expr.Value per disjunct and builds a deduplication map over
+// them, and it runs on every build — once per query execution. Rejecting a set
+// only AFTER paying that cost left 20.2 ms and 6 021 surplus allocations at 2 001
+// keys, against 15.7 ms and none for the same query before the rewrite existed. A
+// size gate now declines first.
+//
+// The observable consequence asserted here is that a set far past the budget is
+// declined just as a set one key past it is — the size gate must not be a
+// different verdict from the posting-count gate, only a cheaper route to the same
+// one — and that a set AT the budget still seeks, so the size gate has not
+// swallowed the servable range.
+func TestSeekSet_SizeGateDeclinesBeforeExtracting(t *testing.T) {
+	eng := seekSetFixture(t)
+
+	cases := []struct {
+		keys     int
+		wantSeek bool
+	}{
+		{keys: seekSetBudget, wantSeek: true},      // at the budget: still served
+		{keys: seekSetBudget + 1, wantSeek: false}, // one past: declined
+		{keys: seekSetBudget * 8, wantSeek: false}, // far past: declined by size
+	}
+	for _, tc := range cases {
+		q := `UNWIND ` + keyList(tc.keys) + ` AS k MATCH (a:P {name: k}) RETURN a`
+		plan, err := eng.Explain(q, nil)
+		if err != nil {
+			t.Fatalf("%d keys: Explain: %v", tc.keys, err)
+		}
+		if got := strings.Contains(plan, "NodeByIndexSeekSet"); got != tc.wantSeek {
+			t.Errorf("%d keys: seek = %v, want %v", tc.keys, got, tc.wantSeek)
+		}
+		// Whichever path is chosen, the rows must be the whole key set.
+		rows := namesOf(t, eng, `UNWIND `+keyList(tc.keys)+` AS k MATCH (a:P {name: k}) RETURN a.name AS nm`, nil)
+		if len(rows) != tc.keys {
+			t.Errorf("%d keys: got %d rows, want %d", tc.keys, len(rows), tc.keys)
+		}
+	}
+}
+
 // TestSeekSet_PopulationFloor asserts the other half of the gate: below the
 // population floor no seek is attempted, because a scan of a few hundred nodes is
 // a few microseconds and an index descent cannot win.

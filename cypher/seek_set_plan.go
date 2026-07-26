@@ -97,21 +97,63 @@ func tryBuildIndexSeekSetFromSelection(
 	if !ok || label == "" {
 		return nil, false
 	}
-	propKey, keys, ok := extractKeySetFromAST(sel.PredicateExpr, nodeVar, params)
+	budget, ok := seekSetBudget(g, label)
 	if !ok {
 		return nil, false
 	}
+	// Size-gate BEFORE extracting the keys. Extraction boxes one expr.Value per
+	// disjunct and builds a deduplication map over them, and this runs on EVERY
+	// build — that is, once per query execution. Paying O(k) allocation only to
+	// reject the set is a measurable regression on the declined path: at N=20 000
+	// with 2 001 keys it cost 20.2 ms against 15.7 ms for the same query before this
+	// rewrite existed, and 6 021 extra allocations, almost exactly 3 per key.
+	//
+	// This is §3.3's third condition in docs/design-correlated-seek.md — "decline
+	// when the key set exceeds a bound, which is the same condition seen from the
+	// input side" — and it makes the plan-time cost of a rejected set O(1).
+	//
+	// It is a genuine approximation, unlike the posting-count gate: k distinct keys
+	// can exceed the budget while matching few nodes, so a set of mostly-absent keys
+	// that WOULD have passed the exact gate is declined here. That set is answered
+	// by the scan, which is correct and, for a set that large, close to what the
+	// seek would have cost anyway.
+	n, ok := countOrDisjuncts(sel.PredicateExpr)
 	// A single key is the ordinary seek's business; routing it here would add the
 	// set operator's merge for no gain.
-	if len(keys) < 2 {
+	if !ok || n < 2 || uint64(n) > budget {
 		return nil, false
 	}
-	budget, ok := seekSetBudget(g, label)
+	propKey, keys, ok := extractKeySetFromAST(sel.PredicateExpr, nodeVar, params)
 	if !ok {
 		return nil, false
 	}
 	return buildSeekSetOperator(idxMgr, label, propKey, keys, budget, nodeVar, schema)
 }
+
+// countOrDisjuncts counts the operands of a chain of OR without allocating.
+//
+// ok is false once the count passes maxSeekSetDisjuncts, so a pathologically wide
+// disjunction cannot make the counter itself the cost. The bound is far above any
+// budget the selectivity ceiling can produce for a graph that fits in memory, so it
+// never rejects a set the gate would have accepted.
+func countOrDisjuncts(e ast.Expression) (int, bool) {
+	binOp, isOr := e.(*ast.BinaryOp)
+	if !isOr || (binOp.Operator != "OR" && binOp.Operator != "or") {
+		return 1, true
+	}
+	l, ok := countOrDisjuncts(binOp.Left)
+	if !ok {
+		return 0, false
+	}
+	r, ok := countOrDisjuncts(binOp.Right)
+	if !ok || l+r > maxSeekSetDisjuncts {
+		return 0, false
+	}
+	return l + r, true
+}
+
+// maxSeekSetDisjuncts caps the disjunction width countOrDisjuncts will count.
+const maxSeekSetDisjuncts = 1 << 20
 
 // seekSetBudget returns the maximum merged posting count a key-set seek may
 // produce for label, and false when the label is too small for any seek to win.
