@@ -149,3 +149,72 @@ func TestStatsRefreshProc_HonoursCancellation(t *testing.T) {
 			"honour cancellation rather than run to completion")
 	}
 }
+
+// TestStatsRefreshProc_DoesNotNestTheBarrier is the regression gate for a defect that
+// would have DEADLOCKED a production binary (#2196).
+//
+// Engine.RefreshStatistics wraps its scan in Graph.View. A procedure, however, runs inside
+// query execution, which is already inside Graph.View — and visMu is a non-re-entrant
+// sync.RWMutex, so acquiring it again from the same goroutine hangs. The engine's
+// re-entrancy guard converts that into a panic, but the guard is compiled out of ordinary
+// builds (#2168 removed it from the production read path), so a plain binary would simply
+// stop. The first version of this procedure had exactly that bug, and only the race-enabled
+// gate caught it.
+//
+// The test asserts the fix behaviourally: the call completes. A nested acquisition either
+// panics (debug/race build, surfaced as a query error) or hangs (ordinary build, caught by
+// the test timeout), so a regression cannot pass either way.
+//
+// It also drives the call under CONCURRENT readers, because the barrier the procedure runs
+// beneath is shared: a rebuild must not exclude readers, and readers must not starve it.
+func TestStatsRefreshProc_DoesNotNestTheBarrier(t *testing.T) {
+	t.Parallel()
+	eng := statsProcEngine(t)
+
+	// Concurrent readers hold the read barrier for the duration.
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			res, err := eng.Run(context.Background(), `MATCH (n:Stat) RETURN count(n)`, nil)
+			if err != nil {
+				return
+			}
+			for res.Next() { //nolint:revive // drain
+			}
+			_ = res.Close()
+		}
+	}()
+
+	res, err := eng.Run(context.Background(), `CALL db.stats.refresh()`, nil)
+	if err != nil {
+		close(stop)
+		<-done
+		t.Fatalf("db.stats.refresh() inside query execution failed: %v — a nested "+
+			"Graph.View acquisition would deadlock a production binary", err)
+	}
+	rows := 0
+	for res.Next() {
+		rows++
+	}
+	if err := res.Err(); err != nil {
+		close(stop)
+		<-done
+		t.Fatalf("Err: %v", err)
+	}
+	if err := res.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	close(stop)
+	<-done
+
+	if rows != 1 {
+		t.Fatalf("returned %d rows, want 1", rows)
+	}
+}

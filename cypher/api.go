@@ -1262,9 +1262,14 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		// existed since #2098 but was reachable only from Go, so a Bolt client could
 		// not refresh them at all. The procedure is rate-limited (see
 		// procs.statsRefreshMinInterval) because the rebuild is a full scan and the
-		// call is reachable by any client; the Go entry point below is not, because an
+		// call is reachable by any client; Engine.RefreshStatistics is not, because an
 		// embedded caller is already inside the trust boundary.
-		RefreshStatistics: func(ctx context.Context) error { return e.RefreshStatistics(ctx) },
+		//
+		// It binds the LOCKED variant: a procedure runs inside query execution, which is
+		// already inside Graph.View, and visMu is non-re-entrant — taking it again from
+		// the same goroutine would DEADLOCK a production binary (the re-entrancy guard
+		// only turns that into a panic in a debug or race build).
+		RefreshStatistics: func(ctx context.Context) error { return e.RefreshStatisticsLocked(ctx) },
 	})
 	// Recovered-constraint safety net (#1918, #1981): recovery seeds the graph's
 	// store-direct constraint set, so Graph.HasConstraints reports true when the

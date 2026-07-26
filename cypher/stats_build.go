@@ -25,6 +25,33 @@ import (
 // ctx is polled every 4096 nodes, matching the CREATE INDEX backfill loops.
 const statsScanPollMask = 0xFFF
 
+// RefreshStatisticsLocked is [Engine.RefreshStatistics] for a caller that ALREADY holds
+// the visibility barrier — specifically db.stats.refresh(), which runs inside query
+// execution (#2196).
+//
+// It exists because visMu is a non-re-entrant sync.RWMutex: taking it again from a
+// goroutine already inside Graph.View would DEADLOCK the engine. The re-entrancy guard
+// turns that into a panic, but only in a debug or race build — a production binary would
+// hang. So the barrier-taking and barrier-free entry points must be distinct, and the
+// caller has to pick correctly.
+//
+// Correctness is unchanged: the scan only reads, and the caller's read barrier already
+// pins the consistent snapshot it needs.
+func (e *Engine) RefreshStatisticsLocked(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	start := time.Now()
+	byKey, labelN, generation, scanErr := e.scanStatsLocked(ctx)
+	if scanErr != nil {
+		return scanErr
+	}
+	e.statsCollectorOrInit().Publish(finishStatsSnapshot(byKey, labelN, generation))
+	cmetrics.IncCounter(statsMetricRefresh, 1)
+	cmetrics.ObserveLatency(statsMetricRefreshLatency, time.Since(start))
+	return nil
+}
+
 // RefreshStatistics rebuilds the planner statistics for every (label, property)
 // pair currently present on a live node, publishing a fresh snapshot atomically.
 // It is the explicit maintenance entry point: statistics are best-effort and never
@@ -179,69 +206,102 @@ func (e *Engine) buildStatsSnapshot(ctx context.Context) (map[stats.Key]*stats.S
 	var scanErr error
 
 	g.View(func() {
-		generation = g.TopoGeneration()
-		mapper := g.AdjList().Mapper()
-		reg := g.Registry()
-		pk := g.PropertyKeys()
-		nodeIdx := g.NodeIndex()
-
-		i := 0
-		mapper.Walk(func(id graph.NodeID, key string) bool {
-			if i&statsScanPollMask == 0 {
-				if err := ctx.Err(); err != nil {
-					scanErr = err
-					return false
-				}
-			}
-			i++
-			if g.IsTombstoned(id) {
-				return true
-			}
-			labels := g.NodeLabels(key)
-			if len(labels) == 0 {
-				return true
-			}
-			props := g.NodeProperties(key)
-			if len(props) == 0 {
-				return true
-			}
-			for _, lname := range labels {
-				lid, ok := reg.Lookup(lname)
-				if !ok {
-					continue
-				}
-				lidU := uint32(lid)
-				if _, seen := labelN[lidU]; !seen {
-					labelN[lidU] = int64(nodeIdx.Count(lidU))
-				}
-				for pname, pv := range props {
-					pid, ok := pk.Lookup(pname)
-					if !ok {
-						continue
-					}
-					v := lpgPropToExpr(pv)
-					if expr.IsNull(v) {
-						continue
-					}
-					k := stats.Key{Label: lidU, Prop: uint32(pid)}
-					acc := byKey[k]
-					if acc == nil {
-						acc = newStatsAccum()
-						byKey[k] = acc
-					}
-					acc.feed(v)
-				}
-			}
-			return true
-		})
+		byKey, labelN, generation, scanErr = e.scanStatsLocked(ctx)
 	})
 	if scanErr != nil {
 		return nil, scanErr
 	}
 
+	return finishStatsSnapshot(byKey, labelN, generation), nil
+}
+
+// finishStatsSnapshot converts the scan's accumulators into the published snapshot. It is
+// shared by the barrier-taking and barrier-free refresh paths so both produce an identical
+// snapshot from identical input (#2196).
+func finishStatsSnapshot(
+	byKey map[stats.Key]*statsAccum, labelN map[uint32]int64, generation uint64,
+) map[stats.Key]*stats.Stats[expr.Value] {
 	out := make(map[stats.Key]*stats.Stats[expr.Value], len(byKey))
 	for k, acc := range byKey {
 		out[k] = acc.finalize(generation, labelN[k.Label])
 	}
-	return out, nil
+	return out
+}
+
+// scanStatsLocked is the body of the statistics scan, WITHOUT acquiring the visibility
+// barrier: the caller must already hold it (#2196).
+//
+// The split exists because the scan has two callers with opposite needs.
+// [Engine.RefreshStatistics] is invoked from outside any barrier and must take one, so it
+// wraps this in Graph.View. But db.stats.refresh() runs INSIDE query execution, which is
+// already inside Graph.View — and visMu is a non-re-entrant sync.RWMutex, so acquiring it
+// again from the same goroutine would DEADLOCK the engine. The re-entrancy guard catches
+// that as a panic, but only in a debug/race build; a production binary would simply hang.
+//
+// Running under the caller's barrier is not a weakening: the scan only READS graph state,
+// and the caller's read barrier already pins exactly the consistent snapshot the scan
+// needs. Publishing the result is an atomic pointer swap on engine state, not graph state,
+// so it is safe under a read barrier too.
+func (e *Engine) scanStatsLocked(ctx context.Context) (
+	byKey map[stats.Key]*statsAccum, labelN map[uint32]int64, generation uint64, scanErr error,
+) {
+	g := e.g
+	byKey = make(map[stats.Key]*statsAccum)
+	labelN = make(map[uint32]int64)
+	generation = g.TopoGeneration()
+	mapper := g.AdjList().Mapper()
+	reg := g.Registry()
+	pk := g.PropertyKeys()
+	nodeIdx := g.NodeIndex()
+
+	i := 0
+	mapper.Walk(func(id graph.NodeID, key string) bool {
+		if i&statsScanPollMask == 0 {
+			if err := ctx.Err(); err != nil {
+				scanErr = err
+				return false
+			}
+		}
+		i++
+		if g.IsTombstoned(id) {
+			return true
+		}
+		labels := g.NodeLabels(key)
+		if len(labels) == 0 {
+			return true
+		}
+		props := g.NodeProperties(key)
+		if len(props) == 0 {
+			return true
+		}
+		for _, lname := range labels {
+			lid, ok := reg.Lookup(lname)
+			if !ok {
+				continue
+			}
+			lidU := uint32(lid)
+			if _, seen := labelN[lidU]; !seen {
+				labelN[lidU] = int64(nodeIdx.Count(lidU))
+			}
+			for pname, pv := range props {
+				pid, ok := pk.Lookup(pname)
+				if !ok {
+					continue
+				}
+				v := lpgPropToExpr(pv)
+				if expr.IsNull(v) {
+					continue
+				}
+				k := stats.Key{Label: lidU, Prop: uint32(pid)}
+				acc := byKey[k]
+				if acc == nil {
+					acc = newStatsAccum()
+					byKey[k] = acc
+				}
+				acc.feed(v)
+			}
+		}
+		return true
+	})
+	return byKey, labelN, generation, scanErr
 }
