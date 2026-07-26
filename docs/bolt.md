@@ -61,6 +61,7 @@ fall back to a default when left at the zero value:
 | `MaxMessageBytes` | `proto.DefaultMaxMessageBytes` (16 MiB) | Caps the cumulative payload of one Bolt message reassembled across chunks, closing the Slowloris-style vector of an unbounded chunk stream. |
 | `MaxInFlightPerConnection` | `DefaultMaxInFlightPerConnection` (1024) | Caps the number of `RUN` statements issued inside a single explicit transaction before `COMMIT`/`ROLLBACK`. Exceeding it returns a `Neo.ClientError.General.LimitExceeded` failure. Auto-commit cursors are not counted. |
 | `ConnTimeout` | 0 (disabled) | Per-connection idle read deadline, reset before each message read. |
+| `DatabaseName` | `DefaultDatabaseName` (`neo4j`) | The name reported in result metadata for a client that selects no database. A client that names one has its own name echoed back. See the `db` note under [Protocol conformance notes](#protocol-conformance-notes). |
 
 ## Message support
 
@@ -98,6 +99,16 @@ already streaming), which bounds the following intentional limitations:
   default, "current stream") is served normally.
 - **`tx_metadata`** — accepted in `BEGIN`/`RUN` extras and silently ignored; the
   server stores and echoes no transaction metadata.
+- **`db`** — reported in the `RUN` and terminal `PULL`/`DISCARD` `SUCCESS`
+  metadata, so `ResultSummary.Database().Name()` is populated. GoGraph serves one
+  graph per server, so the name is a label and not a selector: a client that
+  names a database has that name echoed back, and one that names none is told
+  `Options.DatabaseName` (default `neo4j`). An unknown name is echoed rather than
+  refused, where Neo4j would answer
+  `Neo.ClientError.Database.DatabaseNotFound`.
+- **`stats`** — not sent. Write counters on the driver's `ResultSummary`
+  therefore read zero and `ContainsUpdates()` is false even after a successful
+  write. Verify write effects with a follow-up `MATCH`.
 
 ## Auto-commit and explicit transactions
 

@@ -16,9 +16,11 @@ package server_test
 // ('N'=0x4E, 'R'=0x52, 'P'=0x50). Because the server sends plain maps,
 // the driver delivers map[string]any to callers.
 //
-// Summary counters note: the PULL SUCCESS carries only "has_more" and
-// "bookmark" — no "stats" key. All Counters() fields therefore return 0.
-// Tests verify write effects via subsequent MATCH queries.
+// Summary counters note: the terminal PULL SUCCESS carries "has_more",
+// "bookmark" and "db" (rmp #2172) — but no "stats" key. All Counters() fields
+// therefore return 0, and tests verify write effects via subsequent MATCH
+// queries. summary.Database().Name() is covered by driver_compat_db_test.go;
+// the missing "stats" is tracked separately in sprint 321.
 
 import (
 	"context"

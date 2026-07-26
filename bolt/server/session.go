@@ -193,6 +193,19 @@ type Session struct {
 	// and is a no-op. The Session is single-threaded per connection, so the flag
 	// needs no synchronisation.
 	txAccounted bool
+
+	// serverDatabase is the database name this server reports when the client
+	// selects none. It comes from Options.DatabaseName, defaulted to
+	// [DefaultDatabaseName] by [NewServer].
+	serverDatabase string
+
+	// clientDatabase is the database name the client selected in the `db` extra
+	// of the current RUN (autocommit) or BEGIN (explicit transaction), or empty
+	// when it named none. GoGraph serves one graph per server, so this selects
+	// nothing; it is retained only so the name is echoed back in result metadata
+	// and the client's own bookkeeping stays consistent. The Session is
+	// single-threaded per connection, so it needs no synchronisation.
+	clientDatabase string
 }
 
 // newSession constructs an idle Session backed by eng, starting in
@@ -212,7 +225,40 @@ func newSession(eng *cypher.Engine, auth AuthHandler, localAddr string) *Session
 		defaultTxTimeout:   DefaultTxTimeout,
 		defaultStmtTimeout: DefaultStatementTimeout,
 		clk:                clock.Real(),
+		serverDatabase:     DefaultDatabaseName,
 	}
+}
+
+// setDatabaseName sets the database name this session reports when the client
+// selects none. An empty name is ignored, leaving [DefaultDatabaseName] in
+// place. Intended for the server bootstrap, which threads Options.DatabaseName
+// through; a session constructed directly (unit tests) reports the default.
+func (s *Session) setDatabaseName(name string) {
+	if name != "" {
+		s.serverDatabase = name
+	}
+}
+
+// databaseName returns the name to report in result metadata: the database the
+// client selected for the statement or transaction in flight, falling back to
+// the server's own name. It never returns the empty string, because the official
+// driver treats an absent or empty `db` as "no database info" and hands back a
+// nil DatabaseInfo, so summary.Database().Name() panics on it (rmp #2172).
+func (s *Session) databaseName() string {
+	if s.clientDatabase != "" {
+		return s.clientDatabase
+	}
+	if s.serverDatabase != "" {
+		return s.serverDatabase
+	}
+	return DefaultDatabaseName
+}
+
+// selectDatabaseFrom records the `db` extra of a RUN or BEGIN as the client's
+// database selection for the work that follows. A missing, non-string or empty
+// value clears the selection, so the server's own name is reported instead.
+func (s *Session) selectDatabaseFrom(extra map[string]packstream.Value) {
+	s.clientDatabase, _ = extractString(extra, "db")
 }
 
 // setClock overrides the session's wall-clock source for the
@@ -817,6 +863,13 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 	// installed at BEGIN and ignores runCtx).
 	effective := resolveStmtTimeout(s.stmtTimeout, s.defaultStmtTimeout, s.maxStmtTimeout)
 
+	// Record the client's database selection for this statement. Inside an
+	// explicit transaction BEGIN already recorded it and RUN carries no `db`
+	// extra, so only an autocommit RUN sets it here (rmp #2172).
+	if !s.txActive {
+		s.selectDatabaseFrom(m.Extra)
+	}
+
 	// Build execution context with optional deadline. The cancel is NOT deferred
 	// here: the deadline must remain armed through the subsequent PULL/DISCARD
 	// drain (an autocommit write or DDL commits during the drain, not on RUN), so
@@ -897,6 +950,10 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 		Metadata: map[string]packstream.Value{
 			"fields": stringsToValues(s.columns),
 			"qid":    int64(-1),
+			// The driver reads `db` from the RUN SUCCESS to pin the connection's
+			// home database, and from the terminal PULL/DISCARD SUCCESS to build
+			// ResultSummary.Database(). Both are sent (rmp #2172).
+			"db": s.databaseName(),
 		},
 	}}, nil
 }
@@ -1062,6 +1119,10 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 	}
 	if !hasMore {
 		meta["bookmark"] = s.bookmark
+		// This is the SUCCESS the driver turns into the ResultSummary, so `db`
+		// must be here or ResultSummary.Database() hands back a nil
+		// DatabaseInfo and summary.Database().Name() panics (rmp #2172).
+		meta["db"] = s.databaseName()
 		if len(notifications) > 0 {
 			meta["notifications"] = notifications
 		}
@@ -1148,6 +1209,9 @@ func (s *Session) handleDiscard(m *proto.Discard) ([]any, error) {
 	meta := map[string]packstream.Value{"has_more": hasMore}
 	if !hasMore {
 		meta["bookmark"] = s.bookmark
+		// A DISCARD terminates the stream just as a PULL does, and the driver
+		// builds its ResultSummary from whichever SUCCESS ends it (rmp #2172).
+		meta["db"] = s.databaseName()
 	}
 	return []any{&proto.Success{Metadata: meta}}, nil
 }
@@ -1208,6 +1272,11 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 			mode = "r"
 		}
 	}
+
+	// Record the client's database selection for the whole transaction: inside an
+	// explicit transaction the driver sends `db` on BEGIN only, never on the
+	// subsequent RUNs (rmp #2172).
+	s.selectDatabaseFrom(m.Extra)
 
 	// Open the engine transaction rooted at the CONNECTION context (so a dropped
 	// connection or a server shutdown cancels an in-flight statement) bounded by

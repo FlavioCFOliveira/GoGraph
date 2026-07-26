@@ -70,6 +70,25 @@ const (
 	// MaxStatementTimeout, when set, additionally clamps it.
 	DefaultTxTimeout = 30 * time.Second
 
+	// DefaultDatabaseName is the value applied to Options.DatabaseName when the
+	// caller leaves it empty, and the name reported in the `db` field of result
+	// metadata for a client that selected no database.
+	//
+	// It is "neo4j" because that is the database name every Bolt client assumes
+	// when it is given none — the driver's own default, and what cypher-shell and
+	// the Neo4j Browser display. Reporting it is a compatibility choice about a
+	// label, not a claim about the product: the server identifies itself as
+	// GoGraph in the `server` and `bolt_agent` fields of the HELLO response.
+	// Operators serving a differently named graph may override it.
+	//
+	// GoGraph serves one graph per server, so the name selects nothing. An
+	// unknown name from a client is echoed rather than rejected: Neo4j answers a
+	// missing database with Neo.ClientError.Database.DatabaseNotFound, which
+	// would be the stricter behaviour, but rejecting a name the server has always
+	// accepted would break existing embedders and is a separate decision from
+	// reporting the field at all.
+	DefaultDatabaseName = "neo4j"
+
 	// DefaultStatementTimeout is the default value applied to
 	// Options.DefaultStatementTimeout when the caller leaves it at zero. It
 	// bounds an AUTOCOMMIT statement (a bare RUN outside an explicit
@@ -174,6 +193,23 @@ type Options struct {
 	// Logger is the structured logger for server events. When nil, the
 	// default slog handler is used.
 	Logger *slog.Logger
+
+	// DatabaseName is the name this server reports as the database serving a
+	// result, in the `db` field of the RUN and terminal PULL/DISCARD SUCCESS
+	// metadata. Empty defaults to [DefaultDatabaseName].
+	//
+	// GoGraph serves exactly one graph per server, so this is a label rather
+	// than a selector: a client that names a database in its session config has
+	// that name echoed back (so its own bookkeeping stays consistent), and a
+	// client that names none is told this value. The name is not validated and
+	// an unknown name is not rejected — see [DefaultDatabaseName].
+	//
+	// Sending it at all matters because the field is not optional in practice:
+	// the official neo4j-go-driver returns a nil DatabaseInfo from
+	// ResultSummary.Database() when `db` is absent, so the idiomatic
+	// summary.Database().Name() panics with a nil dereference inside the driver
+	// (rmp #2172).
+	DatabaseName string
 
 	// MaxConnections is the upper bound on concurrent accepted connections.
 	// Zero or negative values default to 1024.
@@ -372,6 +408,9 @@ func NewServer(eng *cypher.Engine, opts Options) (*Server, error) {
 	}
 	if opts.DefaultTxTimeout <= 0 {
 		opts.DefaultTxTimeout = DefaultTxTimeout
+	}
+	if opts.DatabaseName == "" {
+		opts.DatabaseName = DefaultDatabaseName
 	}
 	if opts.DefaultStatementTimeout <= 0 {
 		opts.DefaultStatementTimeout = DefaultStatementTimeout
@@ -744,6 +783,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	sess.setDefaultTxTimeout(s.opts.DefaultTxTimeout)
 	sess.setDefaultStmtTimeout(s.opts.DefaultStatementTimeout)
 	sess.setClock(s.clk)
+	sess.setDatabaseName(s.opts.DatabaseName)
 
 	// Stream RECORD messages incrementally: handlePull hands each record to
 	// this sink, which encodes and writes it to the connection immediately
