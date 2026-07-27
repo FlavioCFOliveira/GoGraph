@@ -184,6 +184,10 @@ type MergePattern struct {
 	reg *ConstraintRegistry // nil means no enforcement
 	mgr *index.Manager      // nil when reg is nil
 
+	// labelSrc narrows the anchor-node search to a label posting list instead
+	// of every interned node (#2217). nil falls back to the full walk.
+	labelSrc MergeLabelSource
+
 	nodes           []mergePatternNode
 	hops            []mergePatternHop // len(hops) == len(nodes)-1
 	onCreateActions []mergeAction
@@ -234,6 +238,15 @@ func (op *MergePattern) AddBoundNode(varName string, col int) *MergePattern {
 // referenced downstream (still searched/created, just not projected).
 func (op *MergePattern) AddFreshNode(varName string, labels []string, propsRaw string, outCol int) *MergePattern {
 	op.nodes = append(op.nodes, mergePatternNode{varName: varName, bound: false, labels: labels, propsRaw: propsRaw, outCol: outCol})
+	return op
+}
+
+// WithLabelSource attaches the label posting-list source that narrows the
+// anchor-node search to the nodes carrying a pattern label, instead of every
+// interned node (#2217). src may be nil, which keeps the full walk. Returns op
+// for chaining.
+func (op *MergePattern) WithLabelSource(src MergeLabelSource) *MergePattern {
+	op.labelSrc = src
 	return op
 }
 
@@ -629,7 +642,7 @@ func (op *MergePattern) search(childRow Row) ([]binding, error) {
 		if epErr != nil {
 			return nil, epErr
 		}
-		rows, err := searchMergeNodes(op.ctx, op.mutator, first.labels, firstProps)
+		rows, err := searchMergeNodes(op.ctx, op.mutator, op.labelSrc, first.labels, firstProps)
 		if err != nil {
 			return nil, err
 		}

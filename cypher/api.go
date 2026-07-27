@@ -5235,6 +5235,25 @@ type labelResolverIface interface {
 	ResolveLabelBitmap(name string) *roaring64.Bitmap
 }
 
+// mergeLabelSource adapts the build-time label resolver to the
+// [exec.MergeLabelSource] the MERGE search consumes, so a MERGE narrows its
+// candidate set to a label posting list instead of walking every interned node
+// (#2217).
+//
+// It returns an untyped nil when src is nil, rather than an interface value
+// holding a nil pointer: the search tests its argument against nil to decide
+// whether to fall back to the full walk, and a non-nil interface wrapping nil
+// would pass that test and then panic on first use.
+//
+// The concrete [lpgLabelResolver] also implements ResolveLabelCount, which the
+// search picks up by assertion to drive from the smallest of several labels.
+func mergeLabelSource(src labelResolverIface) exec.MergeLabelSource {
+	if src == nil {
+		return nil
+	}
+	return src
+}
+
 // BuildPlanWithMutator converts an IR [ir.LogicalPlan] tree into a physical
 // [exec.Operator] tree, supporting both read and write IR operators. The
 // mutator provides the write surface for CREATE, SET, REMOVE, DELETE, and
@@ -5899,7 +5918,7 @@ func buildOperatorWrite(
 		// includes the pattern node columns assigned to its left and can
 		// reference a fresh same-pattern node (#2024). The operator widens the
 		// row with those bindings at runtime (bindingEvalRow).
-		mp := exec.NewMergePattern(child, mutator)
+		mp := exec.NewMergePattern(child, mutator).WithLabelSource(mergeLabelSource(labelSrc))
 		nodeCols := make([]int, len(p.Nodes))
 		for i, n := range p.Nodes {
 			if exec.PropMapContainsNullLiteral(n.PropsRaw) {
@@ -6038,7 +6057,7 @@ func buildOperatorWrite(
 		// MATCH branch fires; only zero matches drives the ON CREATE branch.
 		// Single-writer serialisation in the engine keeps concurrent MERGE
 		// callers from racing to a phantom zero-match result.
-		searchFn, sfErr := exec.NewMergeSearchFnFromPattern(labels, props, params, mutator)
+		searchFn, sfErr := exec.NewMergeSearchFnFromPattern(labels, props, params, mutator, mergeLabelSource(labelSrc))
 		if sfErr != nil {
 			return nil, sfErr
 		}
@@ -6063,6 +6082,9 @@ func buildOperatorWrite(
 		if constraintReg != nil {
 			m.WithConstraints(constraintReg, idxMgr)
 		}
+		// Label posting list for the row-aware search, so a per-row MERGE key
+		// examines the label's population instead of the whole graph (#2217).
+		m.WithLabelSource(mergeLabelSource(labelSrc))
 		// Row-aware property map: when the IR carried a *ast.MapLiteral whose
 		// values include non-literal expressions (variable references,
 		// property accesses, parameter forms outside `$name`), install a

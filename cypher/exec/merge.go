@@ -56,6 +56,11 @@ type Merge struct {
 	reg         *ConstraintRegistry // nil means no enforcement
 	mgr         *index.Manager      // nil when reg is nil
 	propsEvalFn PropsEvalFn         // nil when all props are literals
+	// labelSrc narrows the row-aware merge search to a label posting list
+	// instead of every interned node (#2217). nil falls back to the full walk.
+	// It is consulted only by the propsEvalFn path; the literal-props path
+	// carries its own source inside searchFn.
+	labelSrc MergeLabelSource
 	// onCreateEvals / onMatchEvals map an action's target (via
 	// [MergeActionEvalKey]) to a per-row RHS evaluator for a non-literal
 	// ON CREATE / ON MATCH SET expression (e.g. `SET n.num = n.num + 1`).
@@ -245,6 +250,19 @@ func (op *Merge) WithPropsEvalFn(fn PropsEvalFn) *Merge {
 	return op
 }
 
+// WithLabelSource attaches the label posting-list source that narrows the
+// row-aware merge search to the nodes carrying a pattern label, instead of
+// every interned node (#2217). It is the access path that makes the
+// UNWIND-MERGE bulk-ingest idiom scale with the label's population rather than
+// with the size of the whole graph.
+//
+// src may be nil, in which case the search keeps the full walk. Returns op for
+// chaining.
+func (op *Merge) WithLabelSource(src MergeLabelSource) *Merge {
+	op.labelSrc = src
+	return op
+}
+
 // Init initialises the operator: executes the search plan, then dispatches
 // to the ON MATCH or ON CREATE branch depending on whether the search
 // returned any rows.
@@ -298,7 +316,7 @@ func (op *Merge) runMergeForChild(childRow Row) error {
 	var rows []Row
 	var err error
 	if op.propsEvalFn != nil {
-		rows, err = searchMergeNodes(op.ctx, op.mutator, op.labels, propsForRow)
+		rows, err = searchMergeNodes(op.ctx, op.mutator, op.labelSrc, op.labels, propsForRow)
 	} else {
 		rows, err = op.searchFn(op.ctx)
 	}

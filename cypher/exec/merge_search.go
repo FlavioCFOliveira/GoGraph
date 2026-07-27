@@ -31,6 +31,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/RoaringBitmap/roaring/v2/roaring64"
+
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
@@ -46,18 +48,21 @@ import (
 // params binds `$name` references in propertiesRaw to query parameters; when
 // empty the parser ignores parameter substitution.
 //
-// The function returned by [NewMergeSearchFnFromPattern] walks every
-// interned node id, resolves the label and property bag, and admits the
-// node iff every label and every property matches. Match scaling is O(N)
-// where N is the number of interned nodes; the cost is acceptable for the
-// typical MERGE workload (small N or label-restricted pattern). A future
-// revision may use [labelResolver]'s bitmap intersection to short-circuit
-// label scans.
+// The function returned by [NewMergeSearchFnFromPattern] enumerates candidate
+// nodes, resolves the label and property bag, and admits the node iff every
+// label and every property matches. When the pattern carries at least one label
+// and labelSrc is non-nil the candidates come from the smallest matching
+// label's posting list, so cost tracks that label's population rather than the
+// whole graph; otherwise every interned node is examined. See
+// [walkMergeCandidates].
+//
+// labelSrc may be nil, in which case the search falls back to the full walk.
 func NewMergeSearchFnFromPattern(
 	labels []string,
 	propertiesRaw string,
 	params map[string]expr.Value,
 	mutator GraphMutator,
+	labelSrc MergeLabelSource,
 ) (MergeSearchFn, error) {
 	var props []propLiteral
 	var err error
@@ -79,7 +84,7 @@ func NewMergeSearchFnFromPattern(
 		}
 		var matches []Row
 		var walkErr error
-		mutator.WalkNodeIDs(func(id graph.NodeID) bool {
+		walkMergeCandidates(mutator, labelSrc, wantLabels, func(id graph.NodeID) bool {
 			if cerr := ctx.Err(); cerr != nil {
 				walkErr = cerr
 				return false
@@ -104,19 +109,99 @@ func NewMergeSearchFnFromPattern(
 	}, nil
 }
 
+// MergeLabelSource narrows the MERGE match phase to the nodes that carry a
+// pattern label. lpg's label index satisfies it, and its bitmap reflects
+// uncommitted writes made by the enclosing transaction — verified for a
+// same-transaction CREATE and for a label added by SET — so driving from it
+// cannot miss a node the caller has just written and thereby create a duplicate.
+type MergeLabelSource interface {
+	// ResolveLabelBitmap returns the NodeIDs carrying name, or an empty bitmap
+	// when the label is unknown. An empty bitmap is authoritative: no node can
+	// carry a label that was never interned, so the MERGE correctly finds no
+	// match and fires ON CREATE.
+	ResolveLabelBitmap(name string) *roaring64.Bitmap
+}
+
+// mergeLabelCounter is an optional refinement of [MergeLabelSource]: a source
+// that can report a label's cardinality without materialising its bitmap lets
+// the search pick the smallest label to drive from, which is the same
+// min-cardinality choice the label-scan planner makes.
+type mergeLabelCounter interface {
+	ResolveLabelCount(name string) (int64, bool)
+}
+
+// walkMergeCandidates calls fn for every node that could match a MERGE pattern
+// carrying labels.
+//
+// With at least one label and a non-nil src it drives from a label posting
+// list; otherwise it falls back to every interned node. The candidate set is a
+// SUPERSET of the matches — it constrains only WHICH nodes are examined, never
+// how many are admitted — so fn must still verify every label and every
+// property. That is the same discipline the range-seek and expand-into work
+// use, and it is what preserves MERGE's requirement to bind EVERY match: no
+// candidate is skipped and no enumeration is cut short.
+//
+// fn returns false to stop early (used for context cancellation only).
+func walkMergeCandidates(mutator GraphMutator, src MergeLabelSource, labels []string, fn func(graph.NodeID) bool) {
+	if src == nil || len(labels) == 0 {
+		mutator.WalkNodeIDs(fn)
+		return
+	}
+	bm := src.ResolveLabelBitmap(mergeDrivingLabel(src, labels))
+	if bm == nil {
+		// A source that cannot answer is treated as absent rather than as an
+		// empty result, so a missing capability can never turn a match into a
+		// spurious create.
+		mutator.WalkNodeIDs(fn)
+		return
+	}
+	it := bm.Iterator()
+	for it.HasNext() {
+		if !fn(graph.NodeID(it.Next())) {
+			return
+		}
+	}
+}
+
+// mergeDrivingLabel picks the pattern label whose posting list should drive the
+// candidate enumeration: the one with the fewest nodes when the source can
+// report cardinality cheaply, else the first label. Every label is re-verified
+// per candidate regardless, so this choice is a cost decision only.
+func mergeDrivingLabel(src MergeLabelSource, labels []string) string {
+	counter, ok := src.(mergeLabelCounter)
+	if !ok || len(labels) == 1 {
+		return labels[0]
+	}
+	best, bestCount := labels[0], int64(-1)
+	for _, l := range labels {
+		n, known := counter.ResolveLabelCount(l)
+		if !known {
+			continue
+		}
+		if bestCount < 0 || n < bestCount {
+			best, bestCount = l, n
+		}
+	}
+	return best
+}
+
 // searchMergeNodes runs the same scan as the closure returned by
 // [NewMergeSearchFnFromPattern] but with explicit (labels, props) inputs.
 // Used by row-aware MERGE: the property map's expressions are evaluated
 // against the driving child row and the resulting propLiterals drive the
 // search predicate. Returns one Row per matching node carrying the node id
 // as a single IntegerValue, identical in shape to the closure-returned rows.
-func searchMergeNodes(ctx context.Context, mutator GraphMutator, labels []string, props []propLiteral) ([]Row, error) {
+//
+// labelSrc narrows the candidate enumeration exactly as in the closure and may
+// be nil. This is the path the UNWIND-MERGE bulk-ingest idiom drives, so it is
+// the one where the whole-graph walk cost B×N.
+func searchMergeNodes(ctx context.Context, mutator GraphMutator, labelSrc MergeLabelSource, labels []string, props []propLiteral) ([]Row, error) {
 	if cerr := ctx.Err(); cerr != nil {
 		return nil, cerr
 	}
 	var matches []Row
 	var walkErr error
-	mutator.WalkNodeIDs(func(id graph.NodeID) bool {
+	walkMergeCandidates(mutator, labelSrc, labels, func(id graph.NodeID) bool {
 		if cerr := ctx.Err(); cerr != nil {
 			walkErr = cerr
 			return false
