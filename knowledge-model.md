@@ -1468,6 +1468,23 @@ BACKLOG), 1 `Spec` (`docs/benchmarks/degree-rewrite-2026-07-27.md`), 2 `Function
 →`recogniseDegreePattern`), 1 `CONTAINS` (`Package cypher`→`recogniseDegreePattern`). No
 new label or edge type. All stamped `2026-07-27`.
 
+Incrementally synced at commit `44bc252` (2026-07-27, task #2220, sprint 326 — two-sided
+BFS for the single-path `shortestPath()`): **+7 nodes** — 1 `Commit`, 2 `Task` (`2220`
+COMPLETED, `2236` BACKLOG), 1 `Spec`
+(`docs/benchmarks/shortest-path-bidir-2026-07-27.md`), 3 `Method` on `exec.ShortestPath`
+(`biBFSShortestPath`, `canBidirectional`, `bfsShortestPathForward` — the last is the
+retained forward-only walk, now both the fallback and the differential reference).
+**+12 edges** — 1 `CONTAINS`, 1 `IMPLEMENTED_IN`, 1 `IMPROVES` (→`Feature`
+`Search & Path-finding`, id 10375), 1 `FOLLOWED_BY` (`2220`→`2236`), 8 `TOUCHES`. All
+stamped `2026-07-27`. No new label or edge type.
+
+`canBidirectional.admissionGate` carries the substance: the search is admitted for
+**DirOut, untyped, shape-checked reverse CSR only**, and every exclusion is a measurement
+rather than a preference — the `revToFwd` table was a 26 % end-to-end regression while the
+search itself was 17.9× faster, per-slot type resolution admitted edges the filter excludes,
+and DirIn/DirBoth are blocked on a finding that implicates the FORWARD-ONLY reference's own
+reverse-slot type check. Follow-up `Task 2236`.
+
 Two properties carry the substance. `recogniseDegreePattern.eligibility` records the port of
 Neo4j's `QuerySolvableByGetDegree` + `isEligible` and, decisively, that **`Selections.empty`
 makes a labelled far node ineligible for a degree rewrite in Neo4j too** — so
