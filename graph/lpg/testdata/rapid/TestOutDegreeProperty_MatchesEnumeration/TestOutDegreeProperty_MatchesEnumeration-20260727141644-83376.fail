@@ -1,0 +1,45 @@
+# 2026/07/27 14:16:44.978700 [TestOutDegreeProperty_MatchesEnumeration] [rapid] draw directed: false
+# 2026/07/27 14:16:44.978712 [TestOutDegreeProperty_MatchesEnumeration] [rapid] draw multigraph: true
+# 2026/07/27 14:16:44.978713 [TestOutDegreeProperty_MatchesEnumeration] [rapid] draw nodeCount: 1
+# 2026/07/27 14:16:44.978713 [TestOutDegreeProperty_MatchesEnumeration] [rapid] draw edgeCount: 2
+# 2026/07/27 14:16:44.978714 [TestOutDegreeProperty_MatchesEnumeration] [rapid] draw typeCount: 1
+# 2026/07/27 14:16:44.978722 [TestOutDegreeProperty_MatchesEnumeration] [rapid] draw src0: 0
+# 2026/07/27 14:16:44.978723 [TestOutDegreeProperty_MatchesEnumeration] [rapid] draw dst0: 0
+# 2026/07/27 14:16:44.978723 [TestOutDegreeProperty_MatchesEnumeration] [rapid] draw typed0: true
+# 2026/07/27 14:16:44.978723 [TestOutDegreeProperty_MatchesEnumeration] [rapid] draw rel0: 0
+# 2026/07/27 14:16:44.978724 [TestOutDegreeProperty_MatchesEnumeration] [rapid] draw src1: 0
+# 2026/07/27 14:16:44.978725 [TestOutDegreeProperty_MatchesEnumeration] [rapid] draw dst1: 0
+# 2026/07/27 14:16:44.978725 [TestOutDegreeProperty_MatchesEnumeration] [rapid] draw typed1: false
+# 2026/07/27 14:16:44.978725 [TestOutDegreeProperty_MatchesEnumeration] [rapid] draw tombstone_n0: false
+# 2026/07/27 14:16:44.978726 [TestOutDegreeProperty_MatchesEnumeration] n0/T0: OutDegreeByType = 1, enumeration = 2
+# 
+v0.4.8#600052934216098916
+0x0
+0x1
+0x0
+0x0
+0x0
+0x0
+0x38e38e38e38e4
+0x2
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x1
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
