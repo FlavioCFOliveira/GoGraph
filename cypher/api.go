@@ -67,6 +67,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"reflect"
 	"regexp"
 	"runtime"
 	"runtime/debug"
@@ -3476,7 +3477,17 @@ func BindParams(params map[string]any) (map[string]expr.Value, error) {
 
 // bindAny converts a single Go value to an expr.Value.
 // Numeric types (int*, uint*, float*) are handled by bindNumeric.
-func bindAny(v any) (expr.Value, error) {
+func bindAny(v any) (expr.Value, error) { return bindAnyDepth(v, 0) }
+
+// bindAnyDepth is [bindAny] carrying the nesting depth. Every recursion in the
+// parameter binder passes through here so the bound applies to the concrete
+// []any / map[string]any paths as well as to the reflected ones — a parameter is
+// external input, and only one of the two paths being bounded would leave the
+// class open through the other.
+func bindAnyDepth(v any, depth int) (expr.Value, error) {
+	if depth > maxParamBindDepth {
+		return nil, fmt.Errorf("cypher: parameter nested deeper than %d levels", maxParamBindDepth)
+	}
 	if v == nil {
 		return expr.Null, nil
 	}
@@ -3490,7 +3501,7 @@ func bindAny(v any) (expr.Value, error) {
 	case []any:
 		list := make(expr.ListValue, len(t))
 		for i, elem := range t {
-			converted, err := bindAny(elem)
+			converted, err := bindAnyDepth(elem, depth+1)
 			if err != nil {
 				return nil, fmt.Errorf("list[%d]: %w", i, err)
 			}
@@ -3500,7 +3511,7 @@ func bindAny(v any) (expr.Value, error) {
 	case map[string]any:
 		m := make(expr.MapValue, len(t))
 		for k, elem := range t {
-			converted, err := bindAny(elem)
+			converted, err := bindAnyDepth(elem, depth+1)
 			if err != nil {
 				return nil, fmt.Errorf("map[%q]: %w", k, err)
 			}
@@ -3511,8 +3522,116 @@ func bindAny(v any) (expr.Value, error) {
 		if num, ok := bindNumeric(v); ok {
 			return num, nil
 		}
+		return bindReflect(v, depth)
+	}
+}
+
+// maxParamBindDepth bounds the nesting bindReflect will follow. A parameter is
+// external input, and this module has already had to fix one stack overflow
+// reached through deeply nested values, so the recursion is bounded and reports
+// a typed error rather than growing the stack until the runtime kills the
+// process. The limit is far above any realistic parameter: the deepest shape in
+// common use is a list of maps of lists, at depth 3.
+const maxParamBindDepth = 32
+
+// bindReflect is [bindAny]'s fallback for the container types the type switch
+// cannot enumerate (rmp #2219). Before it, BindParams accepted []any and
+// map[string]any but rejected every TYPED slice and map — so []string, []int and
+// []map[string]any were all "unsupported parameter type", which is a sharp edge
+// for a Go library: those are the shapes a Go caller naturally holds, and
+// `UNWIND $rows AS r` — the idiom every driver's documentation teaches for bulk
+// work — needs []map[string]any specifically. Callers had to hand-box into
+// []any first.
+//
+// Slices become [expr.ListValue] and string-keyed maps become [expr.MapValue],
+// recursively, so arbitrary typed nestings bind. depth bounds that recursion.
+//
+// # Why []byte is still rejected
+//
+// Bolt has a distinct Bytes wire type, and expr has no value kind for it.
+// Binding []byte as a list of integers would bind SOMETHING, but it would not
+// round-trip: a driver that sent Bytes would read back a list. Accepting it on
+// those terms is worse than rejecting it, because the failure would move from a
+// clear error at bind time to a silent type change at the far end. Giving
+// GoGraph a real bytes value is a type-system change and is tracked separately.
+func bindReflect(v any, depth int) (expr.Value, error) {
+	if depth > maxParamBindDepth {
+		return nil, fmt.Errorf("cypher: parameter nested deeper than %d levels", maxParamBindDepth)
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Slice, reflect.Array:
+		// []byte is deliberately NOT bound; see the note above.
+		if rv.Type().Elem().Kind() == reflect.Uint8 {
+			return nil, fmt.Errorf("%w %T (Bolt Bytes has no expr value kind; pass a []any of integers if a list is what you mean)", ErrUnsupportedParamType, v)
+		}
+		list := make(expr.ListValue, rv.Len())
+		for i := 0; i < rv.Len(); i++ {
+			elem, err := bindReflectElem(rv.Index(i), depth+1)
+			if err != nil {
+				return nil, fmt.Errorf("list[%d]: %w", i, err)
+			}
+			list[i] = elem
+		}
+		return list, nil
+	case reflect.Map:
+		if rv.Type().Key().Kind() != reflect.String {
+			return nil, fmt.Errorf("%w %T (a Cypher map needs string keys)", ErrUnsupportedParamType, v)
+		}
+		m := make(expr.MapValue, rv.Len())
+		iter := rv.MapRange()
+		for iter.Next() {
+			elem, err := bindReflectElem(iter.Value(), depth+1)
+			if err != nil {
+				return nil, fmt.Errorf("map[%q]: %w", iter.Key().String(), err)
+			}
+			m[iter.Key().String()] = elem
+		}
+		return m, nil
+	case reflect.Pointer:
+		if rv.IsNil() {
+			return expr.Null, nil
+		}
+		return bindReflectElem(rv.Elem(), depth+1)
+	default:
 		return nil, fmt.Errorf("%w %T", ErrUnsupportedParamType, v)
 	}
+}
+
+// bindReflectElem binds one reflected element, routing back through [bindAny] so
+// the fast concrete-type switch still serves every element it can and only
+// genuinely unknown containers pay for reflection.
+func bindReflectElem(rv reflect.Value, depth int) (expr.Value, error) {
+	if depth > maxParamBindDepth {
+		return nil, fmt.Errorf("cypher: parameter nested deeper than %d levels", maxParamBindDepth)
+	}
+	if !rv.IsValid() {
+		return expr.Null, nil
+	}
+	// An interface element (the []any / map[string]any case) must be unwrapped
+	// before Interface(), or every element looks like the interface type.
+	if rv.Kind() == reflect.Interface {
+		if rv.IsNil() {
+			return expr.Null, nil
+		}
+		rv = rv.Elem()
+	}
+	iv := rv.Interface()
+	if iv == nil {
+		return expr.Null, nil
+	}
+	switch t := iv.(type) {
+	case expr.Value:
+		return t, nil
+	case bool:
+		return expr.BoolValue(t), nil
+	case string:
+		return expr.StringValue(t), nil
+	}
+	if num, ok := bindNumeric(iv); ok {
+		return num, nil
+	}
+	return bindAnyDepth(iv, depth)
 }
 
 // bindNumeric converts Go numeric primitives to expr.Value.

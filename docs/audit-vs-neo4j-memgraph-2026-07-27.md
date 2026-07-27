@@ -687,9 +687,27 @@ GoGraph is slow, and it misinforms them.
 
 For a Go library this is a sharp ergonomic edge: `[]string` and `[]int` are what a Go caller
 naturally holds, and the `UNWIND $rows AS r` bulk-load idiom needs `[]map[string]any` — the
-single most common shape in every driver's documentation. `[]byte` is additionally a Bolt
-wire type (round 3 s09-F5), so rejecting it is a protocol gap as well. Reflection over
-slice kinds in `BindParams` closes all four. **Effort: S.**
+single most common shape in every driver's documentation.
+
+**FIXED** (`#2219`), except `[]byte`, deliberately. A reflection fallback in the `default` arm
+binds any slice and any string-keyed map, recursively, so arbitrary typed nestings now work;
+the concrete type switch still serves everything it served before, so **allocs/op and B/op are
+identical on every previously-supported shape** (benchstat, six runs each side; sec/op +0.41 %
+geomean, the only significant case being +2.7 ns on the shallowest scalar path — the cost of
+the depth counter, reported rather than hidden).
+
+Two things the fix did *not* do, both on purpose:
+
+- **`[]byte` still fails, loudly and with a reason.** Bolt has a distinct Bytes wire type and
+  `expr` has no value kind for it. Binding `[]byte` as a list of integers would bind
+  *something*, but it would not round-trip: a driver that sent Bytes would read back a list.
+  That moves the failure from a clear error at bind time to a silent type change at the far
+  end, which is worse. Giving GoGraph a real bytes value is a type-system change and belongs
+  in its own task.
+- The work uncovered that the **pre-existing `[]any` / `map[string]any` recursion was itself
+  unbounded** — the depth guard was written for the new reflected path and the old path had
+  none. The bound now covers the whole binder, since a parameter is external input and
+  guarding one of two paths leaves the class open through the other.
 
 ---
 
