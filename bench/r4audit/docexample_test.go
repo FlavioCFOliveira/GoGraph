@@ -8,10 +8,14 @@ import (
 	"testing"
 )
 
-// TestDocumentedExistsExampleIsRejected runs the EXACT example docs/cypher.md:132
-// publishes for `EXISTS { MATCH … }`, so the finding rests on the documented
-// query verbatim rather than on a paraphrase of it.
-func TestDocumentedExistsExampleIsRejected(t *testing.T) {
+// TestDocumentedExistsExample runs the EXACT example docs/cypher.md publishes
+// for `EXISTS { MATCH … }`, so the finding rests on the documented query
+// verbatim rather than on a paraphrase of it.
+//
+// The rejection this probe originally recorded was fixed in task #2216; the
+// permanent assertion is TestSubqueryBlockForm_DocumentedExampleRuns in
+// cypher/subquery_block_form_test.go, which runs in the default short layer.
+func TestDocumentedExistsExample(t *testing.T) {
 	eng := newEng(t, 20)
 	// docs/cypher.md:132 — | `EXISTS { MATCH … }` | `WHERE EXISTS { MATCH (n)-[:KNOWS]->(m) }` |
 	const documented = `MATCH (n) WHERE EXISTS { MATCH (n)-[:KNOWS]->(m) } RETURN count(n)`

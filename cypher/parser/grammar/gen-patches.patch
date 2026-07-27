@@ -1,5 +1,5 @@
 diff --git a/cypher/parser/gen/cypher_parser.go b/cypher/parser/gen/cypher_parser.go
-index 128ed29..1e9e7e5 100644
+index 745a60df..885e92de 100644
 --- a/cypher/parser/gen/cypher_parser.go
 +++ b/cypher/parser/gen/cypher_parser.go
 @@ -4,6 +4,7 @@ package gen // CypherParser
@@ -26,7 +26,7 @@ index 128ed29..1e9e7e5 100644
  	}
  	staticData.PredictionContextCache = antlr.NewPredictionContextCache()
  	staticData.serializedATN = []int32{
-@@ -721,6 +724,7 @@ const (
+@@ -727,6 +730,7 @@ const (
  	CypherParserRULE_symbol                    = 90
  	CypherParserRULE_reservedWord              = 91
  	CypherParserRULE_foreachSt                 = 92
@@ -34,7 +34,7 @@ index 128ed29..1e9e7e5 100644
  )
  
  // IScriptContext is an interface to support dynamic dispatch.
-@@ -3567,85 +3571,131 @@ func (s *MultiPartQContext) Accept(visitor antlr.ParseTreeVisitor) interface{} {
+@@ -3573,85 +3577,131 @@ func (s *MultiPartQContext) Accept(visitor antlr.ParseTreeVisitor) interface{} {
  	}
  }
  
@@ -219,7 +219,7 @@ index 128ed29..1e9e7e5 100644
  errorExit:
  	if p.HasError() {
  		v := p.GetError()
-@@ -11214,6 +11264,7 @@ type IAtomContext interface {
+@@ -11220,6 +11270,7 @@ type IAtomContext interface {
  	ListComprehension() IListComprehensionContext
  	PatternComprehension() IPatternComprehensionContext
  	FilterWith() IFilterWithContext
@@ -227,7 +227,7 @@ index 128ed29..1e9e7e5 100644
  	RelationshipsChainPattern() IRelationshipsChainPatternContext
  	ParenthesizedExpression() IParenthesizedExpressionContext
  	FunctionInvocation() IFunctionInvocationContext
-@@ -11370,6 +11421,22 @@ func (s *AtomContext) FilterWith() IFilterWithContext {
+@@ -11376,6 +11427,22 @@ func (s *AtomContext) FilterWith() IFilterWithContext {
  	return t.(IFilterWithContext)
  }
  
@@ -250,7 +250,7 @@ index 128ed29..1e9e7e5 100644
  func (s *AtomContext) RelationshipsChainPattern() IRelationshipsChainPatternContext {
  	var t antlr.RuleContext
  	for _, ctx := range s.GetChildren() {
-@@ -11517,11 +11584,30 @@ func (p *CypherParser) Atom() (localctx IAtomContext) {
+@@ -11523,11 +11590,30 @@ func (p *CypherParser) Atom() (localctx IAtomContext) {
  	p.EnterRule(localctx, 116, CypherParserRULE_atom)
  	p.SetState(627)
  	p.GetErrorHandler().Sync(p)
@@ -283,7 +283,7 @@ index 128ed29..1e9e7e5 100644
  	case 1:
  		p.EnterOuterAlt(localctx, 1)
  		{
-@@ -11620,6 +11706,13 @@ func (p *CypherParser) Atom() (localctx IAtomContext) {
+@@ -11626,6 +11712,13 @@ func (p *CypherParser) Atom() (localctx IAtomContext) {
  			p.MapProjection()
  		}
  
@@ -297,7 +297,7 @@ index 128ed29..1e9e7e5 100644
  	case antlr.ATNInvalidAltNumber:
  		goto errorExit
  	}
-@@ -14147,6 +14240,276 @@ errorExit:
+@@ -14285,6 +14378,276 @@ errorExit:
  	return localctx
  }
  
@@ -574,10 +574,10 @@ index 128ed29..1e9e7e5 100644
  // IPatternComprehensionContext is an interface to support dynamic dispatch.
  type IPatternComprehensionContext interface {
  	antlr.ParserRuleContext
-@@ -15868,9 +16231,16 @@ func (p *CypherParser) Literal() (localctx ILiteralContext) {
+@@ -16006,9 +16369,16 @@ func (p *CypherParser) Literal() (localctx ILiteralContext) {
  	localctx = NewLiteralContext(p, p.GetParserRuleContext(), p.GetState())
  	p.EnterRule(localctx, 160, CypherParserRULE_literal)
- 	p.SetState(828)
+ 	p.SetState(838)
 -	p.GetErrorHandler().Sync(p)
 -	if p.HasError() {
 -		goto errorExit
@@ -594,7 +594,7 @@ index 128ed29..1e9e7e5 100644
  	}
  
  	switch p.GetTokenStream().LA(1) {
-@@ -15888,6 +16258,21 @@ func (p *CypherParser) Literal() (localctx ILiteralContext) {
+@@ -16026,6 +16396,21 @@ func (p *CypherParser) Literal() (localctx ILiteralContext) {
  			p.NumLit()
  		}
  
@@ -605,7 +605,7 @@ index 128ed29..1e9e7e5 100644
 +		if isNumericIDToken(p.GetTokenStream().LT(1)) {
 +			p.EnterOuterAlt(localctx, 2)
 +			{
-+				p.SetState(822)
++				p.SetState(832)
 +				p.NumLit()
 +			}
 +		} else {
@@ -616,7 +616,7 @@ index 128ed29..1e9e7e5 100644
  	case CypherParserNULL_W:
  		p.EnterOuterAlt(localctx, 3)
  		{
-@@ -16075,7 +16460,6 @@ func (s *RangeLitContext) Accept(visitor antlr.ParseTreeVisitor) interface{} {
+@@ -16213,7 +16598,6 @@ func (s *RangeLitContext) Accept(visitor antlr.ParseTreeVisitor) interface{} {
  func (p *CypherParser) RangeLit() (localctx IRangeLitContext) {
  	localctx = NewRangeLitContext(p, p.GetParserRuleContext(), p.GetState())
  	p.EnterRule(localctx, 162, CypherParserRULE_rangeLit)
@@ -624,11 +624,11 @@ index 128ed29..1e9e7e5 100644
  
  	p.EnterOuterAlt(localctx, 1)
  	{
-@@ -16086,28 +16470,19 @@ func (p *CypherParser) RangeLit() (localctx IRangeLitContext) {
+@@ -16224,28 +16608,19 @@ func (p *CypherParser) RangeLit() (localctx IRangeLitContext) {
  			goto errorExit
  		}
  	}
--	p.SetState(832)
+-	p.SetState(842)
 -	p.GetErrorHandler().Sync(p)
 -	if p.HasError() {
 -		goto errorExit
@@ -637,7 +637,7 @@ index 128ed29..1e9e7e5 100644
 -
 -	if _la == CypherParserDIGIT {
 -		{
--			p.SetState(831)
+-			p.SetState(841)
 -			p.NumLit()
 -		}
 -
@@ -648,7 +648,7 @@ index 128ed29..1e9e7e5 100644
 +	// visitor extracts the bounds via ctx.GetText(), so consuming the token
 +	// here is sufficient.
 +	p.rangeNumBound()
- 	p.SetState(838)
+ 	p.SetState(848)
  	p.GetErrorHandler().Sync(p)
  	if p.HasError() {
  		goto errorExit
@@ -658,15 +658,15 @@ index 128ed29..1e9e7e5 100644
 -	if _la == CypherParserRANGE {
 +	if p.GetTokenStream().LA(1) == CypherParserRANGE {
  		{
- 			p.SetState(834)
+ 			p.SetState(844)
  			p.Match(CypherParserRANGE)
-@@ -16116,20 +16491,13 @@ func (p *CypherParser) RangeLit() (localctx IRangeLitContext) {
+@@ -16254,20 +16629,13 @@ func (p *CypherParser) RangeLit() (localctx IRangeLitContext) {
  				goto errorExit
  			}
  		}
 +		// Consume an optional upper bound with the same ID-aware helper.
 +		p.rangeNumBound()
- 		p.SetState(836)
+ 		p.SetState(846)
  		p.GetErrorHandler().Sync(p)
  		if p.HasError() {
  			goto errorExit
@@ -675,7 +675,7 @@ index 128ed29..1e9e7e5 100644
 -
 -		if _la == CypherParserDIGIT {
 -			{
--				p.SetState(835)
+-				p.SetState(845)
 -				p.NumLit()
 -			}
 -
@@ -683,7 +683,7 @@ index 128ed29..1e9e7e5 100644
  
  	}
  
-@@ -16343,7 +16711,18 @@ func (p *CypherParser) NumLit() (localctx INumLitContext) {
+@@ -16481,7 +16849,18 @@ func (p *CypherParser) NumLit() (localctx INumLitContext) {
  	localctx = NewNumLitContext(p, p.GetParserRuleContext(), p.GetState())
  	p.EnterRule(localctx, 166, CypherParserRULE_numLit)
  	p.EnterOuterAlt(localctx, 1)
@@ -700,10 +700,10 @@ index 128ed29..1e9e7e5 100644
 +		p.GetTokenStream().Consume()
 +		localctx.AddTokenNode(tok) //nolint:staticcheck // generated-parser pattern
 +	} else {
- 		p.SetState(842)
+ 		p.SetState(852)
  		p.Match(CypherParserDIGIT)
  		if p.HasError() {
-@@ -17750,6 +18129,70 @@ func (p *CypherParser) ReservedWord() (localctx IReservedWordContext) {
+@@ -17888,6 +18267,70 @@ func (p *CypherParser) ReservedWord() (localctx IReservedWordContext) {
  	return localctx
  }
  
@@ -775,7 +775,7 @@ index 128ed29..1e9e7e5 100644
  type IForeachStContext interface {
  	antlr.ParserRuleContext
 diff --git a/cypher/parser/gen/cypherparser_base_listener.go b/cypher/parser/gen/cypherparser_base_listener.go
-index f662f58..bc76d34 100644
+index f662f585..bc76d347 100644
 --- a/cypher/parser/gen/cypherparser_base_listener.go
 +++ b/cypher/parser/gen/cypherparser_base_listener.go
 @@ -455,6 +455,12 @@ func (s *BaseCypherParserListener) EnterFilterWith(ctx *FilterWithContext) {}
@@ -792,7 +792,7 @@ index f662f58..bc76d34 100644
  func (s *BaseCypherParserListener) EnterPatternComprehension(ctx *PatternComprehensionContext) {}
  
 diff --git a/cypher/parser/gen/cypherparser_base_visitor.go b/cypher/parser/gen/cypherparser_base_visitor.go
-index 1579db6..ae3565f 100644
+index 1579db6f..ae3565f6 100644
 --- a/cypher/parser/gen/cypherparser_base_visitor.go
 +++ b/cypher/parser/gen/cypherparser_base_visitor.go
 @@ -295,6 +295,10 @@ func (v *BaseCypherParserVisitor) VisitFilterWith(ctx *FilterWithContext) interf
@@ -807,7 +807,7 @@ index 1579db6..ae3565f 100644
  	return v.VisitChildren(ctx)
  }
 diff --git a/cypher/parser/gen/cypherparser_listener.go b/cypher/parser/gen/cypherparser_listener.go
-index de13ed0..f4acf0a 100644
+index de13ed0e..f4acf0a2 100644
 --- a/cypher/parser/gen/cypherparser_listener.go
 +++ b/cypher/parser/gen/cypherparser_listener.go
 @@ -223,6 +223,9 @@ type CypherParserListener interface {
@@ -831,7 +831,7 @@ index de13ed0..f4acf0a 100644
  	ExitPatternComprehension(c *PatternComprehensionContext)
  
 diff --git a/cypher/parser/gen/cypherparser_visitor.go b/cypher/parser/gen/cypherparser_visitor.go
-index 4ad0f68..033ac6f 100644
+index 4ad0f680..033ac6fa 100644
 --- a/cypher/parser/gen/cypherparser_visitor.go
 +++ b/cypher/parser/gen/cypherparser_visitor.go
 @@ -223,6 +223,9 @@ type CypherParserVisitor interface {

@@ -10,6 +10,11 @@ import (
 
 // TestSubqueryForms maps exactly which EXISTS/COUNT/COLLECT subquery forms the
 // parser accepts, against what openCypher 2024.3 and Neo4j 5 accept.
+//
+// This is a diagnostic probe: it prints a matrix and asserts nothing. The
+// RETURN-less block forms it originally surfaced as rejections were fixed in
+// task #2216; the permanent assertions now live in
+// cypher/subquery_block_form_test.go, which runs in the default short layer.
 func TestSubqueryForms(t *testing.T) {
 	eng := newEng(t, 50)
 	forms := []struct{ name, q string }{

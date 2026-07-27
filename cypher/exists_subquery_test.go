@@ -18,18 +18,20 @@ package cypher_test
 //     — do not propagate the outer binding and always return false.  Tests use
 //     the outer variable on the left-hand side only.
 //
-//   - The pattern-form WHERE clause — EXISTS { (a)-[:R]->(b) WHERE b.prop > x }
-//     — does not apply the WHERE predicate to b's properties; it only evaluates
-//     the structural pattern.  Property predicates in the inner subquery must be
-//     expressed via the full-subquery form:
-//     EXISTS { MATCH (a)-[:R]->(b) WHERE b.prop > x RETURN b }.
-//
 // Supported forms (verified):
 //   - Pattern only:      EXISTS { (a)-[:R]->(b) }
 //   - Pattern + label:   EXISTS { (a)-[:R]->(b:Label) }
+//   - Pattern + WHERE:   EXISTS { (a)-[:R]->(b) WHERE b.x > 0 }
+//   - Reading clauses:   EXISTS { MATCH (a)-[:R]->(b) }            (task #2216)
+//   - Reading + WHERE:   EXISTS { MATCH (a)-[:R]->(b) WHERE b.x > 0 }  (#2216)
 //   - Full subquery:     EXISTS { MATCH (a)-[:R]->(b) RETURN b }
 //   - Full + WHERE:      EXISTS { MATCH (a)-[:R]->(b) WHERE b.x > 0 RETURN b }
 //   - RETURN expression: RETURN EXISTS { (n)-[]->(m) } AS hasOut
+//
+// The RETURN-less forms are covered in subquery_block_form_test.go. The
+// pattern-form WHERE does evaluate property predicates: that was once a
+// documented limitation, but it no longer holds, and both spellings now agree
+// with Neo4j 5.26.28.
 
 import (
 	"context"
@@ -102,8 +104,8 @@ func TestExists_ComplexInnerPattern(t *testing.T) {
 }
 
 // TestExists_WithInnerWhere verifies EXISTS with a property predicate in the
-// inner WHERE clause. The full-subquery form is required because the
-// pattern-form WHERE does not evaluate property predicates (see file comment).
+// inner WHERE clause, using the full-subquery form. The other two body forms
+// are equivalent here and are covered in subquery_block_form_test.go.
 //
 // Query: EXISTS { MATCH (a)-[:LIKES]->(b:Person) WHERE b.age > 30 RETURN b }
 // alice LIKES dave (age=35 > 30) — alice is included.

@@ -356,12 +356,19 @@ unionSt
     : UNION ALL? singleQuery
     ;
 
+// The three body forms are those the openCypher 2024.3 BNF derives for
+// `subquery expression argument`. `readingStatement+` covers the RETURN-less
+// statement block (a lone MATCH, for example): openCypher makes the trailing
+// `primitive result statement` optional, so `EXISTS { MATCH (a)-->(b) }` is
+// well formed. It is a separate alternative rather than a relaxation of
+// `regularQuery` because `singlePartQ` must keep requiring a RETURN or an
+// updating clause at statement level.
 subqueryExist
-    : EXISTS LBRACE (regularQuery | patternWhere) RBRACE
+    : EXISTS LBRACE (regularQuery | patternWhere | readingStatement+) RBRACE
     ;
 
 subqueryCount
-    : COUNT LBRACE (regularQuery | patternWhere) RBRACE
+    : COUNT LBRACE (regularQuery | patternWhere | readingStatement+) RBRACE
     ;
 
 invocationName

@@ -2141,7 +2141,42 @@ func (v *visitor) VisitSubqueryExist(ctx *gen.SubqueryExistContext) interface{} 
 			Where:   pat.Where,
 		}
 	}
+	if rss := ctx.AllReadingStatement(); len(rss) > 0 {
+		q, serr := v.visitSubqueryReadingBlock(ctx, rss)
+		if serr != nil {
+			return serr
+		}
+		if err := existsSubqueryHasUpdateClause(q); err != nil {
+			return &SemaError{Rule: "subqueryExist", Pos: positionOf(ctx), Message: err.Error()}
+		}
+		return &ast.ExistsSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: q}
+	}
 	return unsupported(ctx, "subqueryExist", "unrecognised EXISTS form")
+}
+
+// visitSubqueryReadingBlock builds the [ast.SingleQuery] for the RETURN-less
+// statement-block body of EXISTS { … } / COUNT { … } — for example
+// `EXISTS { MATCH (a)-[:KNOWS]->(b) }`. The openCypher 2024.3 BNF makes the
+// trailing result statement optional (`linear statement ::= primitive
+// statement... [ primitive result statement ]`), so a body consisting only of
+// reading clauses is well formed.
+//
+// The clauses are assembled exactly as [visitor.VisitSinglePartQ] does. The
+// resulting RETURN-less SingleQuery is the same shape that existsToSingleQuery
+// and countToSingleQuery already synthesise for the bare-pattern form, so the
+// downstream evaluator needs no change.
+func (v *visitor) visitSubqueryReadingBlock(ctx antlr.ParserRuleContext, rss []gen.IReadingStatementContext) (*ast.SingleQuery, *SemaError) {
+	q := &ast.SingleQuery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx)}
+	for _, rs := range rss {
+		r := v.visit(rs)
+		if err := firstError(r); err != nil {
+			return nil, err
+		}
+		if c, ok := r.(ast.ReadingClause); ok {
+			q.ReadingClauses = append(q.ReadingClauses, c)
+		}
+	}
+	return q, nil
 }
 
 // existsSubqueryHasUpdateClause reports whether sq contains an updating
@@ -2162,10 +2197,10 @@ func existsSubqueryHasUpdateClause(sq *ast.SingleQuery) error {
 }
 
 // VisitSubqueryCount handles COUNT { … }. The shape mirrors EXISTS { … }
-// exactly — both subquery forms accept either a regularQuery or a
-// patternWhere body — but the resulting AST node is [ast.CountSubquery]
-// instead of [ast.ExistsSubquery] so the IR/executor can dispatch the
-// row-count semantics rather than the existence-check semantics.
+// exactly — both subquery forms accept a regularQuery, a patternWhere, or a
+// RETURN-less block of reading clauses — but the resulting AST node is
+// [ast.CountSubquery] instead of [ast.ExistsSubquery] so the IR/executor can
+// dispatch the row-count semantics rather than the existence-check semantics.
 func (v *visitor) VisitSubqueryCount(ctx *gen.SubqueryCountContext) interface{} {
 	if rq := ctx.RegularQuery(); rq != nil {
 		qr := v.visit(rq)
@@ -2191,6 +2226,13 @@ func (v *visitor) VisitSubqueryCount(ctx *gen.SubqueryCountContext) interface{} 
 			EndPos:  endPositionOf(ctx),
 			Pattern: pat.Pattern,
 		}
+	}
+	if rss := ctx.AllReadingStatement(); len(rss) > 0 {
+		q, serr := v.visitSubqueryReadingBlock(ctx, rss)
+		if serr != nil {
+			return serr
+		}
+		return &ast.CountSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: q}
 	}
 	return unsupported(ctx, "subqueryCount", "unrecognised COUNT form")
 }

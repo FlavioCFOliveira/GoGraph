@@ -135,6 +135,29 @@ The engine pushes predicates through the plan tree; filters on labelled
 properties that have an index are converted to `IndexScan` operators
 automatically.
 
+#### Subquery expression bodies
+
+`EXISTS { … }` and `COUNT { … }` accept three body forms:
+
+| Body | Example |
+|---|---|
+| A bare pattern | `EXISTS { (n)-[:KNOWS]->(m) }` |
+| Reading clauses without a `RETURN` | `EXISTS { MATCH (n)-[:KNOWS]->(m) }` |
+| A full query with a `RETURN` | `EXISTS { MATCH (n)-[:KNOWS]->(m) RETURN m }` |
+
+The `RETURN` is optional because the openCypher grammar makes the trailing
+result statement optional. A body may chain several reading clauses
+(`MATCH`, `UNWIND`, `CALL`), and an inner `WHERE` is applied in every form:
+
+```cypher
+MATCH (n:Person)
+WHERE EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE m.age > 30 }
+RETURN n.name
+```
+
+`EXISTS { … }` is a read-only existence check: an updating clause in the body
+is rejected at compile time with `InvalidClauseComposition`.
+
 ### RETURN
 
 Projects columns from the current row set.

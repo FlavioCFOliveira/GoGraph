@@ -77,6 +77,30 @@ re-applied after any upstream refresh:
    git diff cypher/parser/gen/ > cypher/parser/grammar/gen-patches.patch
    ```
 
+   **A clean `git apply` is not proof the patch is still correct.** Several
+   hunks pin *absolute ATN state numbers* (`p.SetState(N)`). Adding a rule
+   alternative inserts states, so every state in a rule defined *after* the
+   edited one shifts, and a hunk can still match on line context while
+   pointing at the wrong state. Task #2216 hit this: one added alternative in
+   `subqueryExist`/`subqueryCount` shifted every later state by **+10**, and
+   four hunks in `Literal`, `RangeLit`, and `NumLit` had to be corrected by
+   hand even though the build and `go vet` were clean.
+
+   Two practices contain this:
+
+   - **Prefer adding an *alternative* to an existing rule over adding a new
+     rule.** A new rule shifts every rule index, which invalidates the
+     `CypherParserRULE_*` constants — including `reduceExpression`, which the
+     patch appends by hand — and regenerates the listener and visitor files.
+     An added alternative leaves rule indices and those files untouched.
+   - **Run `TestGenPatchBehaviours`** (`cypher/genpatch_behaviour_test.go`)
+     after every regeneration. It pins each patched behaviour to a concrete
+     result, which a compile check cannot do.
+
+   To find the shift, compare state numbers between the pre-change generated
+   file and the new one for a rule the patch touches; the delta is uniform for
+   every rule after the edit.
+
 5. Run the full test suite:
 
    ```bash
