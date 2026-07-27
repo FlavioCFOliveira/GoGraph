@@ -382,10 +382,13 @@ func checkExample(eng *cypher.Engine, params map[string]any, ex *docExample) err
 //
 // RunAny is deliberate: it is the dispatch helper the reference tells readers
 // to use, so the gate exercises a documented example the way a reader would.
-// It also matters for correctness — a read-only statement routed through the
-// write path cannot resolve a `CALL db.*` procedure, because the write-path
-// plan builder does not thread the procedure registry (see the comment at the
-// default branch of buildOperatorWrite in cypher/api.go).
+//
+// It used to matter for correctness as well — a statement routed through the
+// write path could not resolve a `CALL db.*` procedure, because the write-path
+// plan builder did not thread the procedure registry. That was rmp #2229, found
+// by this gate and fixed; both paths now resolve every registered procedure
+// identically (cypher/proc_write_path_test.go). RunAny is kept purely because it
+// is what the documentation tells readers to call.
 func execute(eng *cypher.Engine, params map[string]any, query string) error {
 	res, err := eng.RunAny(context.Background(), query, params)
 	if err != nil {

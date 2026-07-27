@@ -75,9 +75,11 @@ func writeGateFixture(t *testing.T, n int) *Engine {
 		}
 	}
 	eng := NewEngine(g)
-	if _, err := eng.RunAny(context.Background(), `CREATE INDEX p_sid FOR (x:P) ON (x.sid)`, nil); err != nil {
-		t.Fatalf("CREATE INDEX: %v", err)
-	}
+	// drain() rather than a bare RunAny: an abandoned Result is collected by a
+	// later forced GC and counted by TestResult_Close_DisarmsFinalizer, which
+	// samples the process-global leak counter across its own GC. Discarding the
+	// Result here fails that test from a different file.
+	drain(t, eng, `CREATE INDEX p_sid FOR (x:P) ON (x.sid)`)
 	return eng
 }
 

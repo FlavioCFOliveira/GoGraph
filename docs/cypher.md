@@ -730,6 +730,12 @@ SHOW CONSTRAINTS YIELD toUpper(name)
 
 Procedures are invoked with `CALL proc()` and yield one or more columns.
 
+A procedure resolves identically on every entry point — `Run`, `RunAny`,
+`RunInTx` and `RunInTxAny` — so a statement that mixes a write clause with a
+`CALL db.*`, such as `CALL db.labels() YIELD label CREATE (:Marker {l: label})`,
+is planned and executed like any other. This also means the routing decision
+`RunAny` makes on your behalf can never change whether a procedure is found.
+
 ### db.indexes()
 
 Returns all registered indexes.

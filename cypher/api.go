@@ -310,6 +310,26 @@ type buildOpts struct {
 	// which case edgeTypeFilterFor falls back to an uncached
 	// [buildEdgeTypeFilter] call — correct, just unamortised.
 	edgeTypeFilterCache *edgeTypeFilterCache
+	// procReg is the Engine's procedure registry, carried here rather than as a
+	// parameter because the WRITE-path builder ([buildOperatorWrite]) needs it
+	// only to hand back to [buildOperator] at its fall-through branch, and
+	// threading a twelfth parameter through that function's eighteen recursive
+	// call sites would oblige every write operator to route something none of
+	// them use (rmp #2229).
+	//
+	// Before #2229 that fall-through passed a literal nil, so a `CALL db.*` in
+	// any statement the classifier deemed a write failed to PLAN: Run/RunAny
+	// resolved db.labels() and RunInTx/RunInTxAny did not. Because
+	// [QueryHasWritingClause] matches writing keywords inside comments and string
+	// literals too (rmp #2230), that also broke read-only statements — adding the
+	// comment `// CREATE nothing here` above a working `CALL db.labels()` was
+	// enough to make it fail.
+	//
+	// nil on the public BuildPlanWithMutator path (no Engine behind the build),
+	// which therefore resolves no procedures — the behaviour that path has always
+	// had. [procs.Registry] is internally RWMutex-guarded, so sharing the
+	// Engine's instance across concurrent builds needs no per-query snapshot.
+	procReg *procs.Registry
 	// preprojectedCols is the set of schema variable names whose row column
 	// already holds the projection-equivalent value (e.g. an EagerAggregation
 	// grouping-key column carries the pre-evaluated grouping expression, not
@@ -2365,15 +2385,6 @@ func (e *Engine) runDDL(ctx context.Context, query string, params map[string]exp
 	}
 }
 
-// runDDLOp executes a single eager DDL operator (emitting zero rows) and
-// returns an empty Result. Errors surface at Run time rather than lazily
-// during Result.Next. ctx governs op's own Init/Next only — the DDL's real,
-// interruptible work; see [emptyDDLResult] for why the returned confirmation
-// Result deliberately does not inherit it.
-func (e *Engine) runDDLOp(ctx context.Context, op exec.Operator) (*Result, error) {
-	return e.runDDLOpCounted(ctx, op, nil)
-}
-
 // runDDLOpCounted is [Engine.runDDLOp] with the schema effect this statement applied
 // (#2212). record, when non-nil, is invoked on the returned Result's counters after the
 // DDL has succeeded, so Bolt can report indexes-added / constraints-added and the
@@ -2385,16 +2396,8 @@ func (e *Engine) runDDLOp(ctx context.Context, op exec.Operator) (*Result, error
 // schema effects at all, so unlike the data counters these have no TCK table to match —
 // they exist because Bolt reports them.
 func (e *Engine) runDDLOpCounted(ctx context.Context, op exec.Operator, record func(*exec.QueryCounters)) (*Result, error) {
-	if err := op.Init(ctx); err != nil {
-		return nil, fmt.Errorf("cypher: DDL init: %w", err)
-	}
-	var dummy exec.Row
-	if _, err := op.Next(&dummy); err != nil {
-		_ = op.Close()
+	if err := applyDDLOp(ctx, op); err != nil {
 		return nil, err
-	}
-	if err := op.Close(); err != nil {
-		return nil, fmt.Errorf("cypher: DDL close: %w", err)
 	}
 	r := emptyDDLResult()
 	if record != nil {
@@ -2402,6 +2405,34 @@ func (e *Engine) runDDLOpCounted(ctx context.Context, op exec.Operator, record f
 		record(r.counters)
 	}
 	return r, nil
+}
+
+// applyDDLOp drives a DDL operator for its side effect alone and returns only
+// the error. It is what a caller that is INSIDE a larger DDL sequence wants:
+// the sequence builds the statement's single [Result] itself, at the end.
+//
+// It exists because [Engine.runDDLOpCounted] returns a fresh [Result], and four
+// intra-sequence callers used to discard it with `_`. A Result arms a
+// runtime.SetFinalizer that increments the `cypher.result.leaked` counter when
+// it is collected unclosed, so every CREATE CONSTRAINT, DROP CONSTRAINT and
+// constraint unwind reported a leak against the library's own metric — and, in
+// the test binary, tripped TestResult_Close_DisarmsFinalizer from whichever
+// test happened to force the next GC. Closing the unwanted Result would also
+// have worked; not building it is better, since none of these callers ever
+// wanted one. Found while fixing rmp #2229.
+func applyDDLOp(ctx context.Context, op exec.Operator) error {
+	if err := op.Init(ctx); err != nil {
+		return fmt.Errorf("cypher: DDL init: %w", err)
+	}
+	var dummy exec.Row
+	if _, err := op.Next(&dummy); err != nil {
+		_ = op.Close()
+		return err
+	}
+	if err := op.Close(); err != nil {
+		return fmt.Errorf("cypher: DDL close: %w", err)
+	}
+	return nil
 }
 
 // countedDDLResult is [emptyDDLResult] carrying the schema effect the statement applied
@@ -2879,7 +2910,7 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 			// index as a safe fallback. The value-set (seeded below) remains
 			// the primary enforcement source; the secondary check is cosmetic.
 		}
-		if _, err := e.runDDLOp(ctx, op); err != nil {
+		if err := applyDDLOp(ctx, op); err != nil {
 			return err
 		}
 		if kind == exec.ConstraintUnique {
@@ -2931,7 +2962,7 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 // leave a phantom constraint enforced in memory with no durable record.
 func (e *Engine) unwindConstraintRegistration(cause error, name, label, prop string, kind exec.ConstraintKind, idxMgr *index.Manager) error {
 	op := exec.NewDropConstraintOp(name, label, prop, kind, false, idxMgr, e.constraintReg, e.ClearPlanCache)
-	if _, uerr := e.runDDLOp(context.Background(), op); uerr != nil {
+	if uerr := applyDDLOp(context.Background(), op); uerr != nil {
 		return errors.Join(cause, fmt.Errorf("cypher: unwind constraint registration: %w", uerr))
 	}
 	return cause
@@ -3004,7 +3035,7 @@ func (e *Engine) dropConstraintLocked(ctx context.Context, p *ir.DropConstraint,
 	// unconditionally; pass ifExists=false so any unexpected internal mismatch
 	// surfaces rather than being absorbed.
 	op := exec.NewDropConstraintOp(p.Name, label, prop, kind, false, idxMgr, e.constraintReg, e.ClearPlanCache)
-	if _, err := e.runDDLOp(ctx, op); err != nil {
+	if err := applyDDLOp(ctx, op); err != nil {
 		return nil, err
 	}
 	if tx != nil {
@@ -3035,7 +3066,7 @@ func (e *Engine) rewindConstraintDrop(cause error, name, label, prop string, kin
 			op.WithBackingIndex(boundIdx)
 		}
 	}
-	if _, rerr := e.runDDLOp(context.Background(), op); rerr != nil {
+	if rerr := applyDDLOp(context.Background(), op); rerr != nil {
 		return errors.Join(cause, fmt.Errorf("cypher: rewind constraint drop: %w", rerr))
 	}
 	if kind == exec.ConstraintUnique {
@@ -5289,7 +5320,7 @@ func BuildPlanWithMutator(
 	// It also passes the zero [planGates], so the public entry point keeps the
 	// unoptimised access paths it has always had. Only the Engine, which owns
 	// the EngineOptions that gate each substitution, enables them.
-	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0, nil, planGates{})
+	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0, nil, nil, planGates{})
 }
 
 // planGates carries the ORDER-NEUTRAL planner substitutions the write-path build
@@ -5354,6 +5385,7 @@ func buildPlanWithMutatorFull(
 	idxMgr *index.Manager,
 	maxCollectItems int,
 	edgeTypeFilterCache *edgeTypeFilterCache,
+	procReg *procs.Registry,
 	gates planGates,
 ) (op exec.Operator, cols []string, err error) {
 	schema := make(map[string]int)
@@ -5366,7 +5398,7 @@ func buildPlanWithMutatorFull(
 	// of `CREATE (n) RETURN n.x` — ProduceResults → Projection → CreateNode
 	// — falls through to [buildOperator]'s default branch and errors with
 	// "unsupported IR node *ir.CreateNode".
-	bopts := &buildOpts{maxCollectItems: maxCollectItems, edgeTypeFilterCache: edgeTypeFilterCache}
+	bopts := &buildOpts{maxCollectItems: maxCollectItems, edgeTypeFilterCache: edgeTypeFilterCache, procReg: procReg}
 	// Order-neutral planner substitutions (#2225). Before this, the write path
 	// left every gate at its zero value, so a statement carrying any write clause
 	// was planned without the seek, without the min-label re-anchor and without
@@ -6173,10 +6205,11 @@ func buildOperatorWrite(
 		return exec.NewForeach(outer, inner, arg), nil
 
 	default:
-		// Fall through to the read-operator builder.
-		// procReg is nil here because buildOperatorWrite is only called from the
-		// write path (buildPlanWithMutatorFull) which does not thread procReg.
-		return buildOperator(plan, walker, labelSrc, reg, params, schema, idxMgr, nil, argByTag, bopts)
+		// Fall through to the read-operator builder, handing it the procedure
+		// registry the write path now carries on bopts (rmp #2229). Passing nil
+		// here made a `CALL db.*` unresolvable in any statement the classifier
+		// deemed a write, including a read-only one misclassified by a comment.
+		return buildOperator(plan, walker, labelSrc, reg, params, schema, idxMgr, bopts.procReg, argByTag, bopts)
 	}
 }
 
@@ -14883,6 +14916,10 @@ func (e *Engine) execUnderBarrier(
 		// reads it, so cs is left nil here to keep the write path's resolver lean.
 		labelSrc := &lpgLabelResolver{g: e.g}
 		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager(), e.maxCollectItems, e.edgeTypeFilterCache,
+			// #2229: the write path resolves `CALL db.*` from the same registry the
+			// read path uses. Shared, not snapshotted — procs.Registry is
+			// RWMutex-guarded internally.
+			e.procReg,
 			// #2225: give the write path the Engine's ORDER-NEUTRAL substitutions.
 			// Without these it planned every writing statement — including the
 			// `UNWIND … MATCH … CREATE` bulk-load idiom — with a bare label scan
