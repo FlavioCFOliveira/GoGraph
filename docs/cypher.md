@@ -61,11 +61,15 @@ same textual heuristic `RunAny`/`RunInTxAny` use to dispatch.
 Finds nodes (and, with an expand pattern, relationships) that satisfy a pattern.
 
 ```cypher
-MATCH (n)
-MATCH (n:Label)
-MATCH (n:Label {prop: val})
-MATCH (a)-[:REL]->(b)
-MATCH (a)-[r:REL]->(b)
+MATCH (n) RETURN n
+
+MATCH (n:Person) RETURN n
+
+MATCH (n:Person {name: 'Alice'}) RETURN n
+
+MATCH (a)-[:KNOWS]->(b) RETURN a, b
+
+MATCH (a)-[r:KNOWS]->(b) RETURN r
 ```
 
 `MATCH` without a relationship pattern performs a node scan. With a
@@ -268,13 +272,13 @@ Bolt transaction when using the server). Writes inside `Run` return an error.
 Creates one or more nodes or relationships.
 
 ```cypher
--- bare node
+// bare node
 CREATE (n:Person)
 
--- node with properties
+// node with properties
 CREATE (n:Person {name: 'Alice', age: 30})
 
--- relationship between already-matched nodes
+// relationship between already-matched nodes
 MATCH  (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
 CREATE (a)-[:KNOWS]->(b)
 ```
@@ -297,11 +301,11 @@ MERGE (n:Person {email: 'alice@example.com'})
 Sets node properties or adds a label.
 
 ```cypher
--- set a property
+// set a property
 MATCH (n:Person {name: 'Alice'})
 SET   n.age = 31
 
--- add a label
+// add a label
 MATCH (n {name: 'Alice'})
 SET   n:Employee
 ```
@@ -311,11 +315,11 @@ SET   n:Employee
 Removes a property or a label from a node.
 
 ```cypher
--- remove a property
+// remove a property
 MATCH (n:Person {name: 'Alice'})
 REMOVE n.age
 
--- remove a label
+// remove a label
 MATCH (n:Employee {name: 'Alice'})
 REMOVE n:Employee
 ```
@@ -326,11 +330,11 @@ REMOVE n:Employee
 cannot be deleted unless `DETACH DELETE` is used.
 
 ```cypher
--- delete a relationship
+// delete a relationship
 MATCH (a)-[r:KNOWS]->(b)
 DELETE r
 
--- delete a node and all its relationships
+// delete a node and all its relationships
 MATCH (n:Person {name: 'Alice'})
 DETACH DELETE n
 ```
@@ -347,15 +351,15 @@ The body accepts the updating clauses `CREATE`, `MERGE`, `SET`, `REMOVE`,
 variable, or any list-valued expression.
 
 ```cypher
--- create a chain of nodes from a literal list
+// create a chain of nodes from a literal list
 FOREACH (name IN ['Alice', 'Bob', 'Carol'] |
   CREATE (:Person {name: name})
 )
 ```
 
 ```cypher
--- update every node bound along a matched path
-MATCH p = (start:Person {name: 'Alice'})-[:KNOWS*]->(end:Person)
+// update every node bound along a matched path
+MATCH p = (start:Person {name: 'Alice'})-[:KNOWS*]->(dest:Person)
 FOREACH (n IN nodes(p) |
   SET n.visited = true
 )
@@ -381,8 +385,8 @@ CREATE (:Person {name: name})
 
 ```cypher
 UNWIND $items AS item
-MERGE  (:Product {sku: item.sku})
-SET    item.price = item.price
+MERGE  (p:Product {sku: item.sku})
+SET    p.price = item.price
 ```
 
 ---
@@ -395,13 +399,13 @@ Creates a property index on a label. The index name is optional; when omitted
 it is derived as `<label>_<property>_<type>`.
 
 ```cypher
--- named
+// named
 CREATE INDEX person_email FOR (n:Person) ON (n.email)
 
--- unnamed (name derived automatically)
+// unnamed (name derived automatically)
 CREATE INDEX FOR (n:Person) ON (n.email)
 
--- idempotent
+// idempotent
 CREATE INDEX IF NOT EXISTS person_email FOR (n:Person) ON (n.email)
 ```
 
@@ -436,9 +440,11 @@ gets.
 preceding `WITH`, provided its value is the same on every row:
 
 ```cypher
--- all three seek
+// all three seek
 MATCH (a:Person {email: 'a@example.com'}) RETURN a
+
 MATCH (a:Person {email: $email})          RETURN a
+
 WITH $email AS k MATCH (a:Person {email: k}) RETURN a
 ```
 
@@ -491,8 +497,9 @@ If the index already exists, the engine returns
 
 ### DROP INDEX
 
-```cypher
+```cypher gate:fixture=schema
 DROP INDEX person_email
+
 DROP INDEX person_email IF EXISTS
 ```
 
@@ -508,15 +515,19 @@ The modern `FOR … REQUIRE` grammar is the primary form; the legacy
 `ON … ASSERT` grammar (removed in Neo4j 5) is accepted as an alias.
 
 ```cypher
--- uniqueness constraint (modern form)
+// uniqueness constraint (modern form)
 CREATE CONSTRAINT person_email_unique
     FOR (n:Person) REQUIRE n.email IS UNIQUE
 
--- not-null constraint, idempotent create
+// not-null constraint, idempotent create
 CREATE CONSTRAINT person_name_notnull IF NOT EXISTS
     FOR (n:Person) REQUIRE n.name IS NOT NULL
+```
 
--- legacy alias (equivalent to the first statement)
+The legacy spelling declares exactly the same constraint as the first statement
+above:
+
+```cypher gate:fixture=empty
 CREATE CONSTRAINT person_email_unique
     ON (n:Person) ASSERT n.email IS UNIQUE
 ```
@@ -552,8 +563,9 @@ constraints (`IS :: <TYPE>`).
 `db.constraints()`). `IF EXISTS` suppresses the error when no such constraint
 exists.
 
-```cypher
+```cypher gate:fixture=schema
 DROP CONSTRAINT person_email_unique
+
 DROP CONSTRAINT person_email_unique IF EXISTS
 ```
 
@@ -568,6 +580,7 @@ read-only transaction (`BeginReadTx`), or inside an explicit write transaction.
 
 ```cypher
 SHOW CONSTRAINTS
+
 SHOW INDEXES
 ```
 
@@ -689,10 +702,17 @@ than silently ignored:
 - Combining SHOW with arbitrary general clauses (`SHOW … MATCH …`, `… WITH …`).
 
 ```cypher
-SHOW CONSTRAINTS VERBOSE                       -- error: BRIEF/VERBOSE not supported
-SHOW INDEXES YIELD name ORDER BY name          -- error: ORDER BY not supported
-SHOW CONSTRAINTS YIELD name, type RETURN count(*)  -- error: aggregation not supported
-SHOW CONSTRAINTS YIELD toUpper(name)           -- error: expressions not allowed in YIELD
+SHOW CONSTRAINTS VERBOSE
+// BRIEF/VERBOSE not supported    gate:error=unsupported clause "VERBOSE"
+
+SHOW INDEXES YIELD name ORDER BY name
+// ORDER BY not supported         gate:error=unsupported YIELD form
+
+SHOW CONSTRAINTS YIELD name, type RETURN count(*)
+// aggregation not supported      gate:error=aggregation in RETURN is not supported
+
+SHOW CONSTRAINTS YIELD toUpper(name)
+// expressions not allowed in YIELD  gate:error=unsupported YIELD form
 ```
 
 ---
@@ -1037,6 +1057,7 @@ pattern comprehension:
 
 ```cypher
 MATCH (a:Person) RETURN collect(a.name) AS names
+
 MATCH (a:Person) RETURN [(a)-[:KNOWS]->(b) | b.name] AS friends
 ```
 
@@ -1067,8 +1088,11 @@ or a comment is ordinary content and is unaffected:
 
 ```cypher
 RETURN "a != b" AS s             // fine — inside a literal
+
 MATCH (`we!rd`) RETURN 1         // fine — inside a quoted identifier
+
 MATCH (n) RETURN n // uses != !  // fine — inside a comment
+
 RETURN 'abc' =~ '[a-z]+'         // fine — =~ is openCypher
 ```
 
@@ -1080,8 +1104,11 @@ number to text:
 
 ```cypher
 RETURN 'a' + 1                   // → null
+
 RETURN 'count: ' + 5             // → null
+
 RETURN 1 + '2'                   // → null
+
 RETURN 'count: ' + toString(5)   // → 'count: 5'
 ```
 
@@ -1144,6 +1171,29 @@ undocumented:
 Pay particular attention to changes that alter *observed behaviour* — new APIs,
 new default limits, and new typed errors — since a user who hits such a change
 consults the reference first.
+
+### Every Cypher example here is executed
+
+The ` ```cypher ` blocks in this document are **executable documentation**.
+`internal/cypherdocgate` extracts every statement and runs it against a seeded
+engine on each `make ci`, so a published example that stops working fails the
+build. When editing this file, keep to these rules:
+
+- **Statements are separated by a blank line.** Two statements on consecutive
+  lines are read as one, which will not parse.
+- **Comments use `//`.** `--` is not a Cypher comment; a line starting with it
+  is a parse error, and a separate check rejects it.
+- **Declare a fixture when the default does not fit.** The default seeds a
+  small `:Person`/`:City` graph. Use ` ```cypher gate:fixture=schema ` for an
+  example that needs pre-existing indexes or constraints, and
+  ` ```cypher gate:fixture=empty ` for one that must start from nothing. The
+  fixtures are defined in `internal/cypherdocgate/examples_test.go`.
+- **Mark an example that is meant to be rejected.** Add
+  `// gate:error=<substring of the expected error>` to it, as the unsupported
+  `SHOW` forms above do. The gate then requires it to fail, and to fail for
+  that reason.
+- **Use `gate:skip=<reason>` only for a block that is genuinely not runnable**,
+  and say why. There are currently none.
 
 
 ---
