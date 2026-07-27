@@ -1557,6 +1557,34 @@ Rendering the truth immediately produced a new defect the old surface could not 
 `RETURN` builds **two stacked `Project` operators**, so every row is projected twice on the
 engine's hottest path (`Task 2239`).
 
+Incrementally synced at commit `ddae299` (2026-07-27, task #2223, sprint 326 — the durability axis
+restored to the three-way harness): **+7 nodes** — 1 `Commit`, 1 `Task` (`2223` COMPLETED),
+2 `Spec` (`docs/benchmarks/threeway-durability-2026-07-27.md` and its raw report), 2 `Function`
+(`newEmbeddedDurableTarget`, `durabilityPosture`) and 1 `Method`
+(`embeddedTarget.loadEdges`). **+8 edges** — 1 `CONTAINS`, 1 `IMPLEMENTED_IN`, 3 `TOUCHES`,
+3 `Package CONTAINS`. All stamped `2026-07-27`. No new label or edge type.
+
+The substance is that **round 3's write win was a measurement artefact and inverts**. The harness
+compared a GoGraph with no durability at all — a bare `lpg.Graph`, no WAL, no fsync — against
+Neo4j forcing its log every commit, which overstated GoGraph's writes and *understated* its
+traversal losses. With a fourth target over a real `store.DB`: single-node write **5 µs in-memory
+against 3.994 ms durable**, versus Neo4j's **2.039 ms** at the same posture, so GoGraph is **~2×
+slower, not the 83× faster round 4 recorded**. The 3.994 ms is one fsync and agrees with the
+~3.8 ms measured independently in #2221. Bulk load is the opposite case and survives: durability
+costs it only **+25 %** (2.056 s → 2.564 s) because 5 000-row batches amortise the fsync, so
+GoGraph still loads faster than Neo4j (2.564 s vs 4.054 s) at equal posture. Memgraph's default
+`storage_wal_file_flush_every_n_tx=100000` means it fsyncs once every 100 000 transactions out of
+the box — a comparison that does not state each posture is not a comparison.
+
+Two further premises were **measured rather than corrected as stated**. The harness's string-key
+join premise was stale, but the obvious fix is also wrong: an *inline* numeric key does reach an
+index (#2169), yet this query binds its key from an `UNWIND` row, and in that shape **neither** key
+reaches a per-row index — both lower to `NodeByLabelScan` feeding a `HashJoin`, with
+`hashJoinBuildCount` firing exactly 2 for each, so the keys are at parity (2.064 s vs 2.056 s)
+because #2228's hash join subsumes the per-row lookup for a bulk load. And row counts were **never
+actually cross-checked**, only tabulated; the harness now fails on any disagreement before a single
+timing is compared.
+
 Two properties carry the substance. `recogniseDegreePattern.eligibility` records the port of
 Neo4j's `QuerySolvableByGetDegree` + `isEligible` and, decisively, that **`Selections.empty`
 makes a labelled far node ineligible for a degree rewrite in Neo4j too** — so
