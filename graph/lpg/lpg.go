@@ -1628,6 +1628,81 @@ func (g *Graph[N, W]) TombstonedIDs() []graph.NodeID {
 // TombstoneCount is safe for concurrent use.
 func (g *Graph[N, W]) TombstoneCount() int { return int(g.tombstoneActive.Load()) }
 
+// OutDegree returns the number of out-neighbours of src that a traversal would
+// visit, without enumerating them. ok is false when src is not interned; a node
+// with no outgoing edges reports (0, true).
+//
+// It exists so a degree-answerable question — "does this node have any outgoing
+// :KNOWS edge?", "how many does it have?" — costs a counter read rather than an
+// expansion. The audit that motivated it measured `COUNT { (a)-[:K]->(:P) } > 0`
+// at 88× a bare label scan per outer row, because the count was reached by
+// enumerating every neighbour in order to compare against zero.
+//
+// # Live-node semantics
+//
+// Unlike [github.com/FlavioCFOliveira/GoGraph/graph/adjlist.AdjList.OutDegree],
+// which counts adjacency slots, this method excludes edges whose far endpoint has
+// been tombstoned. That is the difference that makes it substitutable for a
+// traversal: [Graph.RemoveNode] tombstones a node and strips it from the label
+// bitmaps but does NOT remove the incident edges other nodes hold, so a raw slot
+// count would include an edge to a node the query layer treats as absent.
+//
+// For an UNDIRECTED graph the result is the node's full degree, because the
+// adjacency mirrors insertion. For a DIRECTED graph it is the out-degree only:
+// in-degree is not an adjacency-local quantity and is served by the reverse CSR.
+//
+// # Cost
+//
+// O(1) when the graph holds no tombstones, which is the common case — the
+// tombstone set is consulted through one lock-free counter, and on zero the
+// adjacency column length is returned directly. O(d) in the node's degree once
+// anything has been deleted, since each far endpoint must then be checked.
+//
+// # Concurrency
+//
+// Safe for concurrent use with readers and writers, and lock-free.
+func (g *Graph[N, W]) OutDegree(src N) (int, bool) {
+	if g.tombstoneActive.Load() == 0 {
+		return g.adj.OutDegree(src)
+	}
+	return g.outDegreeFiltered(src, false, 0)
+}
+
+// OutDegreeByType is [Graph.OutDegree] restricted to edges whose relationship
+// type is relType. ok is false when src is not interned.
+//
+// # Cost
+//
+// O(d) in the node's degree: the relationship-type column must be read to decide
+// which edges match. No allocation, and no access beyond src's own columns.
+func (g *Graph[N, W]) OutDegreeByType(src N, relType LabelID) (int, bool) {
+	// The adjacency stores the ENCODED slot label ([encodeSlotLabel]: id+1, so 0
+	// is the "no label" sentinel), never the raw LabelID. Comparing a raw id
+	// against the column silently matches the wrong relationship type — the
+	// differential test against the traversal is what catches it.
+	if g.tombstoneActive.Load() == 0 {
+		return g.adj.OutDegreeByType(src, encodeSlotLabel(relType))
+	}
+	return g.outDegreeFiltered(src, true, relType)
+}
+
+// outDegreeFiltered counts src's out-edges excluding tombstoned endpoints, and
+// when byType is set also restricting to relType. It is the slow path taken only
+// once the graph holds at least one tombstone.
+//
+// It counts by iterating src's neighbours through the adjacency's own iterator,
+// so the population it walks is exactly the one [Graph.Neighbours] exposes and
+// the two cannot drift apart.
+func (g *Graph[N, W]) outDegreeFiltered(src N, byType bool, relType LabelID) (int, bool) {
+	want := encodeSlotLabel(relType) // see OutDegreeByType on the encoding
+	return g.adj.OutDegreeFunc(src, func(dst graph.NodeID, lbl uint32) bool {
+		if byType && lbl != want {
+			return false
+		}
+		return !g.IsTombstoned(dst)
+	})
+}
+
 // HasConstraints reports whether the cypher engine currently has any schema
 // constraint registered on this graph. It reads a lock-free counter maintained
 // by the engine (SetActiveConstraintCount), so it is cheap enough for the

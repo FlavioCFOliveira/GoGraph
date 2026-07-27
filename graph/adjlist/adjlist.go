@@ -1256,6 +1256,146 @@ func (a *AdjList[N, W]) Neighbours(src N) iter.Seq2[N, W] {
 	}
 }
 
+// OutDegree returns the number of live out-neighbours of src — exactly the
+// number of pairs [AdjList.Neighbours] would yield for it — without
+// materialising or iterating them beyond the count. ok is false when src is not
+// interned; a node with no adjacency entry reports (0, true).
+//
+// # What it counts
+//
+// The count is the length of src's adjacency column, and that is exactly what
+// Neighbours yields: the mapper is append-only (its Resolve fails only for an
+// id that was never interned), so the resolve check Neighbours performs per slot
+// can never reject an id the adjacency holds. Should the mapper ever gain
+// removal, this method and Neighbours must change together — the invariant they
+// share is that a degree equals the number of rows the equivalent expansion
+// produces.
+//
+// In a multigraph each parallel edge counts once, because each occupies its own
+// adjacency slot. A self-loop counts once.
+//
+// TOMBSTONES ARE NOT FILTERED HERE, because Neighbours does not filter them
+// either: tombstoning is an lpg-layer concept and the adjacency knows nothing of
+// it. A caller that needs live-node semantics uses the lpg wrapper
+// (lpg.Graph.OutDegree), which applies the same tombstone gate lpg's own
+// traversal applies.
+//
+// For an UNDIRECTED graph this is the node's full degree: [AdjList.AddEdge]
+// mirrors the insertion, so a node's adjacency already holds every incident
+// edge. For a DIRECTED graph it is the out-degree only — the adjacency appends
+// forward edges alone, so in-degree is not an adjacency-local quantity. In-edge
+// enumeration is served by the reverse CSR ([github.com/FlavioCFOliveira/GoGraph/graph/csr.CSR.BuildReverse]),
+// which is built on demand by the query layer; asking this method for it would
+// mean scanning the whole graph, so it does not offer to.
+//
+// # Cost
+//
+// O(1) in the graph size and in the node's degree: the count is the length of
+// one contiguous column, reached by a single atomic load, with no allocation and
+// no neighbour resolution. That is why this exists — a degree-answerable
+// predicate should not pay for enumeration.
+//
+// # Concurrency
+//
+// Safe for concurrent use with readers and writers, and lock-free: it reads the
+// same atomically-published immutable entry Neighbours reads. The result is a
+// consistent snapshot of src's adjacency at the moment of the load; a concurrent
+// mutation of src is either fully included or fully absent, never partially
+// observed.
+func (a *AdjList[N, W]) OutDegree(src N) (int, bool) {
+	srcID, ok := a.mapper.Lookup(src)
+	if !ok {
+		return 0, false
+	}
+	e := loadEntry[W](&a.shards[srcID&shardMask], uint64(srcID)>>shardBits)
+	if e == nil {
+		return 0, true
+	}
+	return len(e.neighbours), true
+}
+
+// OutDegreeByType returns the number of live out-neighbours of src reached by an
+// edge whose stored relationship-type label equals relType, and is otherwise
+// [AdjList.OutDegree]. ok is false when src is not interned.
+//
+// relType IS THE RAW STORED SLOT VALUE, not a higher layer's label id. The
+// adjacency is label-agnostic: it stores whatever uint32 the caller passed to
+// [AdjList.AddEdgeLabeled] and compares it verbatim. The lpg layer encodes its
+// LabelID with an offset so that 0 can mean "no label", so an lpg caller must
+// pass the ENCODED value — passing a raw LabelID silently counts a different
+// relationship type. See lpg.Graph.OutDegreeByType, which is the method an
+// application should normally use.
+//
+// An entry with no labels column carries no typed edges, so the count is 0: a
+// graph built without labelled edges has no edge of any type.
+//
+// # Cost
+//
+// O(d) in the node's degree, not O(1): the labels column has to be read to
+// decide which slots match. It is still free of allocation and of neighbour
+// resolution, and it never touches the graph beyond one node's columns.
+func (a *AdjList[N, W]) OutDegreeByType(src N, relType uint32) (int, bool) {
+	srcID, ok := a.mapper.Lookup(src)
+	if !ok {
+		return 0, false
+	}
+	e := loadEntry[W](&a.shards[srcID&shardMask], uint64(srcID)>>shardBits)
+	if e == nil || e.labels == nil {
+		return 0, true
+	}
+	n := 0
+	for _, lbl := range e.labels {
+		if lbl == relType {
+			n++
+		}
+	}
+	return n, true
+}
+
+// OutDegreeFunc returns the number of src's out-edges for which keep reports
+// true, without materialising the neighbour set. keep receives each edge's
+// destination NodeID and its relationship-type label (0 when the entry carries
+// no labels column). ok is false when src is not interned.
+//
+// It exists so a caller that must apply its own liveness or type predicate — the
+// lpg layer's tombstone gate, for instance — still walks src's columns exactly
+// once, with no allocation and no neighbour resolution, instead of iterating
+// [AdjList.Neighbours] and resolving every node key it does not need.
+//
+// The slots walked are precisely those Neighbours yields, so a predicate that
+// always returns true gives the same answer as [AdjList.OutDegree].
+//
+// # Cost
+//
+// O(d) in the node's degree, plus the cost of keep. Use [AdjList.OutDegree] when
+// no predicate is needed; that path is O(1).
+//
+// # Concurrency
+//
+// Safe for concurrent use with readers and writers, and lock-free: it reads one
+// atomically-published immutable entry, so keep observes a consistent snapshot.
+func (a *AdjList[N, W]) OutDegreeFunc(src N, keep func(dst graph.NodeID, relType uint32) bool) (int, bool) {
+	srcID, ok := a.mapper.Lookup(src)
+	if !ok {
+		return 0, false
+	}
+	e := loadEntry[W](&a.shards[srcID&shardMask], uint64(srcID)>>shardBits)
+	if e == nil {
+		return 0, true
+	}
+	n := 0
+	for i, dst := range e.neighbours {
+		var lbl uint32
+		if e.labels != nil {
+			lbl = e.labels[i]
+		}
+		if keep(dst, lbl) {
+			n++
+		}
+	}
+	return n, true
+}
+
 // Compact right-sizes every adjacency entry's backing arrays to their
 // exact live length, reclaiming the slack left by geometric (×2) append
 // growth. After a bulk build a degree-d hub typically over-allocates its

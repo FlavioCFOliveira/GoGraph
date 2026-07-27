@@ -86,7 +86,7 @@ func checkSchemaIdentifier(kind, what, id string) error {
 // distinguish the two (for example, to permit SHOW on a read-only transaction)
 // use [IsShow].
 func IsDDL(query string) bool {
-	upper := strings.ToUpper(strings.TrimSpace(query))
+	upper := strings.ToUpper(trimLeadingComments(query))
 	return strings.HasPrefix(upper, "CREATE INDEX") ||
 		strings.HasPrefix(upper, "DROP INDEX") ||
 		strings.HasPrefix(upper, "CREATE CONSTRAINT") ||
@@ -101,7 +101,44 @@ func IsDDL(query string) bool {
 // mutates nothing, so it is permitted on a read-only transaction where the
 // schema-writing DDL statements are rejected (#1922).
 func IsShow(query string) bool {
-	return isShowUpper(strings.ToUpper(strings.TrimSpace(query)))
+	return isShowUpper(strings.ToUpper(trimLeadingComments(query)))
+}
+
+// trimLeadingComments removes leading whitespace and any run of leading
+// comments — `//` line comments and `/* … */` block comments — returning the
+// remainder of query.
+//
+// DDL dispatch is a prefix test on the raw query text rather than on a token
+// stream, so without this a statement that opens with a comment is not
+// recognised as DDL and is routed to the ANTLR grammar, which rejects it. The
+// lexer sends both comment forms to a hidden channel (CypherLexer.g4: COMMENT,
+// LINE_COMMENT), so the DML path has always accepted a comment before the first
+// keyword; this makes the DDL path agree.
+//
+// Only LEADING comments are removed, so a `//` or `/*` occurring inside a
+// string literal later in the statement is never touched. An unterminated
+// comment yields the empty string, so the caller classifies the query as
+// non-DDL and the grammar reports the syntax error.
+func trimLeadingComments(query string) string {
+	s := strings.TrimSpace(query)
+	for {
+		switch {
+		case strings.HasPrefix(s, "//"):
+			i := strings.IndexAny(s, "\r\n")
+			if i < 0 {
+				return "" // comment runs to end of input
+			}
+			s = strings.TrimSpace(s[i+1:])
+		case strings.HasPrefix(s, "/*"):
+			i := strings.Index(s[2:], "*/")
+			if i < 0 {
+				return "" // unterminated block comment
+			}
+			s = strings.TrimSpace(s[2+i+2:])
+		default:
+			return s
+		}
+	}
 }
 
 // isShowUpper reports whether upper (an already trimmed, upper-cased query)
@@ -117,19 +154,23 @@ func isShowUpper(upper string) bool {
 // ParseDDL parses a DDL query string and returns a LogicalPlan (one of
 // *CreateIndex, *DropIndex, *CreateConstraint, *DropConstraint). Returns an
 // error for unrecognised DDL.
+//
+// A leading comment is stripped before dispatch, so the sub-parsers see the
+// statement itself — see [trimLeadingComments].
 func ParseDDL(query string) (LogicalPlan, error) {
-	upper := strings.ToUpper(strings.TrimSpace(query))
+	stmt := trimLeadingComments(query)
+	upper := strings.ToUpper(stmt)
 	switch {
 	case strings.HasPrefix(upper, "CREATE INDEX"):
-		return parseCreateIndex(strings.TrimSpace(query))
+		return parseCreateIndex(stmt)
 	case strings.HasPrefix(upper, "DROP INDEX"):
-		return parseDropIndex(strings.TrimSpace(query))
+		return parseDropIndex(stmt)
 	case strings.HasPrefix(upper, "CREATE CONSTRAINT"):
-		return parseCreateConstraint(strings.TrimSpace(query))
+		return parseCreateConstraint(stmt)
 	case strings.HasPrefix(upper, "DROP CONSTRAINT"):
-		return parseDropConstraint(strings.TrimSpace(query))
+		return parseDropConstraint(stmt)
 	case isShowUpper(upper):
-		return parseShow(strings.TrimSpace(query))
+		return parseShow(stmt)
 	}
 	return nil, fmt.Errorf("ir: unrecognised DDL statement: %q", query)
 }

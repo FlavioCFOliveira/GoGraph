@@ -80,6 +80,7 @@ Base every action **exclusively on verified knowledge**; never guess the intende
 
 - When the project **Knowledge Graph** holds the answer, consult it first (see [Knowledge Graph](#knowledge-graph)).
 - When your knowledge is insufficient, research the answer in **official or authoritative sources** — specifications, peer-reviewed papers, books, or recognised authorities in the field — before deciding.
+- When an open-source project already implements or solves the same problem, **read its source code** — the code, not its documentation, is what actually runs. See [Reference Projects (Open-Source Prior Art)](#reference-projects-open-source-prior-art).
 - This generalises the openCypher conformance rule: never claim behaviour from memory.
 
 ### Measure to decide
@@ -174,13 +175,54 @@ Create whatever node and edge types best serve the project and your work; use th
 
 ---
 
+## Reference Projects (Open-Source Prior Art)
+
+GoGraph is not built in a vacuum. For every feature the module implements, **use as reference and inspiration every open-source project that implements or solves the same — or a similar — problem**. Those projects are the empirical record of what the open-source community has learned about the technical and architectural problems GoGraph faces, and they must inform its decisions.
+
+**The source code is the ultimate source of truth.** Documentation, blog posts, and papers state intent; the code is what actually runs. Whenever it matters — and it usually does — read the reference project's source to verify how the approach is really implemented, what the real data structures and code paths are, and what the trade-offs actually cost. Then assess what adopting that approach would mean for GoGraph.
+
+### Primary references
+
+| Project | Reference for |
+|---|---|
+| **Neo4j** | The canonical LPG graph database: Cypher planner and semantics, store record format, transaction and lock management, index and constraint machinery, Bolt protocol. |
+| **Memgraph** | In-memory-first LPG graph database: in-memory graph representation, MVCC deltas, query execution, snapshots and WAL. |
+| **ClickHouse** | Columnar storage and execution: vectorised block-at-a-time processing, compression and encoding schemes, late materialisation, aggregation. |
+| **DuckDB** | Embedded columnar analytics engine: vectorised push-based execution, morsel-driven parallelism, columnar storage, optimiser design. Closest to GoGraph in embedding model — a library, not a server. |
+| **PostgreSQL** | The reference relational engine: WAL design and crash recovery, MVCC and visibility rules, buffer management, cost-based planner and statistics, B-tree implementation, isolation levels. |
+| **MariaDB** | Widely deployed relational engine: storage-engine abstraction, redo/undo logging, group commit, durability settings. |
+
+**Neo4j and Memgraph carry particular weight.** They implement the same solution as GoGraph — a Label-Property-Graph database — in both architecture and purpose, so on any question of graph-database behaviour, architecture, or performance, look there first. **ClickHouse and DuckDB** are the references for the columnar component, and **PostgreSQL and MariaDB** for the mechanics of databases proven at scale by a very large community.
+
+This does not displace the [Compliance Mandates](#compliance-mandates): openCypher conformance is governed by the specification and the TCK, never by how one implementation happens to behave. Where a reference implementation diverges from the specification, the specification wins.
+
+### Beyond the primary list
+
+The table above is a floor, not a ceiling. **Research and use any other open-source project** that solves a technical problem GoGraph also has, subject to two conditions:
+
+1. It implements or solves a feature that actually exists in GoGraph.
+2. It is open source, so its implementation details can be read and **verified empirically in the code** — never taken on faith from documentation.
+
+Reach for whatever fits the problem at hand: for example RocksDB, LevelDB, or SQLite for durable storage and recovery mechanics; Apache Arrow, Parquet, or Velox for columnar layout and encoding; Kùzu, FalkorDB, or Apache AGE for alternative graph-engine designs; the Go standard library and well-regarded Go libraries for idiom and allocation behaviour. Choose by problem, not by fame.
+
+### How prior art feeds decisions
+
+- **It serves four quality axes.** Every insight harvested must make GoGraph a more exemplary implementation in **Performance**, **Efficiency**, **Correctness**, and **Security**. An insight that serves none of these is noise.
+- **It makes decisions objective and assertive.** A design choice backed by how two or three mature engines actually solved the same problem is a settled question; an unbacked preference is not. Use prior art to close decisions, not to widen them.
+- **It is evidence, not authority.** The [Decision framework — correct → secure → fast](#decision-framework--correct--secure--fast) still ranks the trade-offs, and [Measure to decide](#measure-to-decide) still requires that any claimed win be measured **in GoGraph itself**: a technique that is fast in C++ or on the JVM may lose in Go. Benchmark before adopting, and record the result.
+- **Extract the insight, not the code.** Take the structural idea — the algorithm, the memory layout, the ordering of operations — and re-implement it idiomatically in Go. Never copy source from a reference project into GoGraph: several are copyleft or source-available (Neo4j is GPLv3, MariaDB GPLv2, Memgraph BSL 1.1), and none of their licences is GoGraph's to redistribute.
+- **Cite what you consulted.** When a reference project influences a non-obvious decision, record which project, which version or commit, and which file or component you read — in the task description, a code comment, or the audit document — exactly as [Sub-Agents (Specialists)](#sub-agents-specialists) requires of specialist findings.
+- **Store what outlives the task.** Comparisons and insights of lasting value belong in the [Knowledge Graph](#knowledge-graph), so the project's understanding of the prior art compounds instead of being re-derived each cycle.
+
+---
+
 ## Performance-First Engineering
 
 ### Research methodology before any implementation
 
 Before writing a single line of code for any non-trivial component, conduct a **cross-language, cross-paradigm survey** of every known approach. This means:
 
-1. **Survey the academic and engineering literature** — consider how the problem is solved in C, C++, Rust, Java (JVM JIT tricks), Python (CPython/PyPy), and specialised graph databases (Neo4j, DGraph, JanusGraph, TigerGraph). Extract the structural insight, not the syntax.
+1. **Survey the academic and engineering literature, and the open-source prior art** — consider how the problem is solved in C, C++, Rust, Java (JVM JIT tricks), Python (CPython/PyPy), and specialised graph databases (Neo4j, DGraph, JanusGraph, TigerGraph). Read the source of the projects listed in [Reference Projects (Open-Source Prior Art)](#reference-projects-open-source-prior-art) that solve the same problem. Extract the structural insight, not the syntax.
 2. **Identify the performance ceiling** — determine what the theoretically optimal time and space complexity is for the problem, and whether any real-world implementation reaches it.
 3. **Evaluate data structure alternatives** — for every hot-path structure, explicitly compare at least two candidates (e.g., adjacency matrix vs. CSR vs. adjacency list; binary heap vs. Fibonacci heap vs. pairing heap for priority queues) with measured or cited trade-offs.
 4. **Translate to idiomatic Go** — implement the winning approach using Go idioms: no `interface{}` in hot paths, avoid unnecessary heap allocations, favour value semantics for small structs, use `unsafe` only when justified and documented.

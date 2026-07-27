@@ -67,6 +67,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"reflect"
 	"regexp"
 	"runtime"
 	"runtime/debug"
@@ -2691,13 +2692,21 @@ func (e *Engine) runDropIndex(ctx context.Context, p *ir.DropIndex, idxMgr *inde
 	return res, rerr
 }
 
-// indexCoverage returns the (label, property) a bound btree index named name
-// covers, with ok reporting whether name resolves to a bound btree at all.
-// Used by DROP INDEX to locate the numeric companion (#1652). A hash index, an
-// unbound btree, or a missing name reports ok == false (no companion to clean).
+// indexCoverage returns the (label, property) a bound index named name covers,
+// with ok reporting whether name resolves to a bound index at all. Used by DROP
+// INDEX to decide whether a numeric companion is still needed (#1652). An
+// unbound index or a missing name reports ok == false.
+//
+// BOTH kinds count. A hash index owns a numeric companion too (#2226), so a
+// btree-only view of coverage would let DROP INDEX on one of two indexes over
+// the same (label, property) strip a companion the surviving one still relies
+// on — silently turning its numeric point lookups back into full scans.
 func indexCoverage(idxMgr *index.Manager, name string) (label, property string, ok bool) {
 	sub, err := idxMgr.GetIndex(name)
-	if err != nil || sub.Kind() != "btree" {
+	if err != nil {
+		return "", "", false
+	}
+	if k := sub.Kind(); k != "btree" && k != "hash" {
 		return "", "", false
 	}
 	br, ok := sub.(interface {
@@ -3476,7 +3485,17 @@ func BindParams(params map[string]any) (map[string]expr.Value, error) {
 
 // bindAny converts a single Go value to an expr.Value.
 // Numeric types (int*, uint*, float*) are handled by bindNumeric.
-func bindAny(v any) (expr.Value, error) {
+func bindAny(v any) (expr.Value, error) { return bindAnyDepth(v, 0) }
+
+// bindAnyDepth is [bindAny] carrying the nesting depth. Every recursion in the
+// parameter binder passes through here so the bound applies to the concrete
+// []any / map[string]any paths as well as to the reflected ones — a parameter is
+// external input, and only one of the two paths being bounded would leave the
+// class open through the other.
+func bindAnyDepth(v any, depth int) (expr.Value, error) {
+	if depth > maxParamBindDepth {
+		return nil, fmt.Errorf("cypher: parameter nested deeper than %d levels", maxParamBindDepth)
+	}
 	if v == nil {
 		return expr.Null, nil
 	}
@@ -3490,7 +3509,7 @@ func bindAny(v any) (expr.Value, error) {
 	case []any:
 		list := make(expr.ListValue, len(t))
 		for i, elem := range t {
-			converted, err := bindAny(elem)
+			converted, err := bindAnyDepth(elem, depth+1)
 			if err != nil {
 				return nil, fmt.Errorf("list[%d]: %w", i, err)
 			}
@@ -3500,7 +3519,7 @@ func bindAny(v any) (expr.Value, error) {
 	case map[string]any:
 		m := make(expr.MapValue, len(t))
 		for k, elem := range t {
-			converted, err := bindAny(elem)
+			converted, err := bindAnyDepth(elem, depth+1)
 			if err != nil {
 				return nil, fmt.Errorf("map[%q]: %w", k, err)
 			}
@@ -3511,8 +3530,116 @@ func bindAny(v any) (expr.Value, error) {
 		if num, ok := bindNumeric(v); ok {
 			return num, nil
 		}
+		return bindReflect(v, depth)
+	}
+}
+
+// maxParamBindDepth bounds the nesting bindReflect will follow. A parameter is
+// external input, and this module has already had to fix one stack overflow
+// reached through deeply nested values, so the recursion is bounded and reports
+// a typed error rather than growing the stack until the runtime kills the
+// process. The limit is far above any realistic parameter: the deepest shape in
+// common use is a list of maps of lists, at depth 3.
+const maxParamBindDepth = 32
+
+// bindReflect is [bindAny]'s fallback for the container types the type switch
+// cannot enumerate (rmp #2219). Before it, BindParams accepted []any and
+// map[string]any but rejected every TYPED slice and map — so []string, []int and
+// []map[string]any were all "unsupported parameter type", which is a sharp edge
+// for a Go library: those are the shapes a Go caller naturally holds, and
+// `UNWIND $rows AS r` — the idiom every driver's documentation teaches for bulk
+// work — needs []map[string]any specifically. Callers had to hand-box into
+// []any first.
+//
+// Slices become [expr.ListValue] and string-keyed maps become [expr.MapValue],
+// recursively, so arbitrary typed nestings bind. depth bounds that recursion.
+//
+// # Why []byte is still rejected
+//
+// Bolt has a distinct Bytes wire type, and expr has no value kind for it.
+// Binding []byte as a list of integers would bind SOMETHING, but it would not
+// round-trip: a driver that sent Bytes would read back a list. Accepting it on
+// those terms is worse than rejecting it, because the failure would move from a
+// clear error at bind time to a silent type change at the far end. Giving
+// GoGraph a real bytes value is a type-system change and is tracked separately.
+func bindReflect(v any, depth int) (expr.Value, error) {
+	if depth > maxParamBindDepth {
+		return nil, fmt.Errorf("cypher: parameter nested deeper than %d levels", maxParamBindDepth)
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Slice, reflect.Array:
+		// []byte is deliberately NOT bound; see the note above.
+		if rv.Type().Elem().Kind() == reflect.Uint8 {
+			return nil, fmt.Errorf("%w %T (Bolt Bytes has no expr value kind; pass a []any of integers if a list is what you mean)", ErrUnsupportedParamType, v)
+		}
+		list := make(expr.ListValue, rv.Len())
+		for i := 0; i < rv.Len(); i++ {
+			elem, err := bindReflectElem(rv.Index(i), depth+1)
+			if err != nil {
+				return nil, fmt.Errorf("list[%d]: %w", i, err)
+			}
+			list[i] = elem
+		}
+		return list, nil
+	case reflect.Map:
+		if rv.Type().Key().Kind() != reflect.String {
+			return nil, fmt.Errorf("%w %T (a Cypher map needs string keys)", ErrUnsupportedParamType, v)
+		}
+		m := make(expr.MapValue, rv.Len())
+		iter := rv.MapRange()
+		for iter.Next() {
+			elem, err := bindReflectElem(iter.Value(), depth+1)
+			if err != nil {
+				return nil, fmt.Errorf("map[%q]: %w", iter.Key().String(), err)
+			}
+			m[iter.Key().String()] = elem
+		}
+		return m, nil
+	case reflect.Pointer:
+		if rv.IsNil() {
+			return expr.Null, nil
+		}
+		return bindReflectElem(rv.Elem(), depth+1)
+	default:
 		return nil, fmt.Errorf("%w %T", ErrUnsupportedParamType, v)
 	}
+}
+
+// bindReflectElem binds one reflected element, routing back through [bindAny] so
+// the fast concrete-type switch still serves every element it can and only
+// genuinely unknown containers pay for reflection.
+func bindReflectElem(rv reflect.Value, depth int) (expr.Value, error) {
+	if depth > maxParamBindDepth {
+		return nil, fmt.Errorf("cypher: parameter nested deeper than %d levels", maxParamBindDepth)
+	}
+	if !rv.IsValid() {
+		return expr.Null, nil
+	}
+	// An interface element (the []any / map[string]any case) must be unwrapped
+	// before Interface(), or every element looks like the interface type.
+	if rv.Kind() == reflect.Interface {
+		if rv.IsNil() {
+			return expr.Null, nil
+		}
+		rv = rv.Elem()
+	}
+	iv := rv.Interface()
+	if iv == nil {
+		return expr.Null, nil
+	}
+	switch t := iv.(type) {
+	case expr.Value:
+		return t, nil
+	case bool:
+		return expr.BoolValue(t), nil
+	case string:
+		return expr.StringValue(t), nil
+	}
+	if num, ok := bindNumeric(iv); ok {
+		return num, nil
+	}
+	return bindAnyDepth(iv, depth)
 }
 
 // bindNumeric converts Go numeric primitives to expr.Value.
@@ -3982,11 +4109,35 @@ func (r *Result) RowAt(i int) []expr.Value {
 	return r.rowSlice(i)
 }
 
-// ValueAt returns the value at column index col of the current materialised row.
-// It must only be called after a successful [Next] on a materialised result and
-// is the allocation-free positional accessor used by hot consumers (the Bolt
-// PULL path) that read every column by index and discard the row.
+// ValueAt returns the value at column index col of the current row. It must
+// only be called after a successful [Next], and is the allocation-free
+// positional accessor used by hot consumers (the Bolt PULL path) that read every
+// column by index and discard the row. Out-of-range indices return nil.
+//
+// It serves BOTH a materialised result and a streaming one. That distinction
+// used to matter and silently produced wrong answers (#2215): SHOW INDEXES and
+// SHOW CONSTRAINTS build a streaming result over static rows
+// ([Engine.newShowResult]), while this accessor read only the materialised
+// backing store — whose matRowLen is zero for a streaming result, so every
+// column came back as a bare nil. bolt/server reads each column with ValueAt on
+// the premise that an engine result is always materialised, so `SHOW INDEXES`
+// over Bolt answered with a well-formed row of nulls and no error: fail-silent,
+// which the failure-handling rule forbids outright. Record() was unaffected,
+// which is why the in-tree tests missed it.
+//
+// The streaming branch is served from the ResultSet's positional row, so it
+// costs no allocation and no map lookup, and it fixes the whole class rather
+// than the one instance — any future non-materialised plan is now safe here.
 func (r *Result) ValueAt(col int) expr.Value {
+	if !r.matOn {
+		// Streaming result: read the positional view the ResultSet already holds
+		// for the current row. Next() has advanced it; Row() does not re-project.
+		row := r.rs.Row()
+		if col < 0 || col >= len(row) {
+			return nil
+		}
+		return row[col]
+	}
 	if r.matChunk != nil {
 		// Columnar drain: box just the requested cell at the sink — the Bolt PULL
 		// path reads every column by index, so a whole-row box would be wasteful.
@@ -5092,6 +5243,25 @@ type labelResolverIface interface {
 	ResolveLabelBitmap(name string) *roaring64.Bitmap
 }
 
+// mergeLabelSource adapts the build-time label resolver to the
+// [exec.MergeLabelSource] the MERGE search consumes, so a MERGE narrows its
+// candidate set to a label posting list instead of walking every interned node
+// (#2217).
+//
+// It returns an untyped nil when src is nil, rather than an interface value
+// holding a nil pointer: the search tests its argument against nil to decide
+// whether to fall back to the full walk, and a non-nil interface wrapping nil
+// would pass that test and then panic on first use.
+//
+// The concrete [lpgLabelResolver] also implements ResolveLabelCount, which the
+// search picks up by assertion to drive from the smallest of several labels.
+func mergeLabelSource(src labelResolverIface) exec.MergeLabelSource {
+	if src == nil {
+		return nil
+	}
+	return src
+}
+
 // BuildPlanWithMutator converts an IR [ir.LogicalPlan] tree into a physical
 // [exec.Operator] tree, supporting both read and write IR operators. The
 // mutator provides the write surface for CREATE, SET, REMOVE, DELETE, and
@@ -5112,7 +5282,41 @@ func BuildPlanWithMutator(
 	// a collect on this path is never unbounded either. It has no Engine-owned
 	// edge-type-filter cache to share, so a relationship-type-filtered pattern
 	// on this path always rebuilds — correct, just unamortised.
-	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0, nil)
+	//
+	// It also passes the zero [planGates], so the public entry point keeps the
+	// unoptimised access paths it has always had. Only the Engine, which owns
+	// the EngineOptions that gate each substitution, enables them.
+	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0, nil, planGates{})
+}
+
+// planGates carries the ORDER-NEUTRAL planner substitutions the write-path build
+// is allowed to make (rmp #2225). It exists because [buildPlanWithMutatorFull]
+// previously constructed its [buildOpts] with none of the Engine's optimisation
+// gates set, so every statement containing a write clause was planned by the
+// unoptimised planner — measured at 178× the cost of the identical MATCH with a
+// scalar RETURN, and the reason a 20 000-node bulk load takes 35 minutes.
+//
+// # Why only these two
+//
+// Both substitutions are result-identical AND leave the emitted row order alone,
+// so no consumer — read or write — can observe that they happened:
+//
+//   - rangeSeek replaces a label scan plus residual filter with an index seek
+//     over the same rows; the residual predicate is re-applied above it, so the
+//     seek only ever narrows the candidate set (see [tryBuildRangeSeekChild]).
+//   - minLabelScan re-anchors a multi-label pattern on the smallest label. A
+//     label conjunction is commutative and the substitution never scans more
+//     rows than the Labels[0] plan, so it needs no order-safety companion — the
+//     same reasoning the read path records at its own gate.
+//
+// The hash join is deliberately NOT here. It may build on either arm, so it can
+// reorder rows, and a write is not always order-insensitive: `SET` is
+// last-write-wins, so two rows targeting the same node with different values
+// depend on arrival order. Admitting it needs the probe side pinned to the
+// order-defining arm first; that is part B of #2225 and must not be done blind.
+type planGates struct {
+	rangeSeek    bool
+	minLabelScan bool
 }
 
 // buildPlanWithMutatorFull is the engine-internal variant of
@@ -5139,6 +5343,7 @@ func buildPlanWithMutatorFull(
 	idxMgr *index.Manager,
 	maxCollectItems int,
 	edgeTypeFilterCache *edgeTypeFilterCache,
+	gates planGates,
 ) (op exec.Operator, cols []string, err error) {
 	schema := make(map[string]int)
 	argByTag := make(map[uint32]*exec.Argument)
@@ -5151,6 +5356,13 @@ func buildPlanWithMutatorFull(
 	// — falls through to [buildOperator]'s default branch and errors with
 	// "unsupported IR node *ir.CreateNode".
 	bopts := &buildOpts{maxCollectItems: maxCollectItems, edgeTypeFilterCache: edgeTypeFilterCache}
+	// Order-neutral planner substitutions (#2225). Before this, the write path
+	// left every gate at its zero value, so a statement carrying any write clause
+	// was planned without the seek and without the min-label re-anchor that the
+	// identical read statement gets. See [planGates] for why exactly these two
+	// are safe here and why the hash join is not.
+	bopts.rangeSeekEnabled = gates.rangeSeek
+	bopts.minLabelScanEnabled = gates.minLabelScan
 	bopts.writeFallback = func(child ir.LogicalPlan) (exec.Operator, error) {
 		return buildOperatorWrite(child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 	}
@@ -5714,7 +5926,7 @@ func buildOperatorWrite(
 		// includes the pattern node columns assigned to its left and can
 		// reference a fresh same-pattern node (#2024). The operator widens the
 		// row with those bindings at runtime (bindingEvalRow).
-		mp := exec.NewMergePattern(child, mutator)
+		mp := exec.NewMergePattern(child, mutator).WithLabelSource(mergeLabelSource(labelSrc))
 		nodeCols := make([]int, len(p.Nodes))
 		for i, n := range p.Nodes {
 			if exec.PropMapContainsNullLiteral(n.PropsRaw) {
@@ -5853,7 +6065,7 @@ func buildOperatorWrite(
 		// MATCH branch fires; only zero matches drives the ON CREATE branch.
 		// Single-writer serialisation in the engine keeps concurrent MERGE
 		// callers from racing to a phantom zero-match result.
-		searchFn, sfErr := exec.NewMergeSearchFnFromPattern(labels, props, params, mutator)
+		searchFn, sfErr := exec.NewMergeSearchFnFromPattern(labels, props, params, mutator, mergeLabelSource(labelSrc))
 		if sfErr != nil {
 			return nil, sfErr
 		}
@@ -5878,6 +6090,9 @@ func buildOperatorWrite(
 		if constraintReg != nil {
 			m.WithConstraints(constraintReg, idxMgr)
 		}
+		// Label posting list for the row-aware search, so a per-row MERGE key
+		// examines the label's population instead of the whole graph (#2217).
+		m.WithLabelSource(mergeLabelSource(labelSrc))
 		// Row-aware property map: when the IR carried a *ast.MapLiteral whose
 		// values include non-literal expressions (variable references,
 		// property accesses, parameter forms outside `$name`), install a
@@ -14647,7 +14862,11 @@ func (e *Engine) execUnderBarrier(
 		// (Engine.Run, where labelSrc carries cs); the write-path plan build never
 		// reads it, so cs is left nil here to keep the write path's resolver lean.
 		labelSrc := &lpgLabelResolver{g: e.g}
-		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager(), e.maxCollectItems, e.edgeTypeFilterCache)
+		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager(), e.maxCollectItems, e.edgeTypeFilterCache,
+			// #2225: give the write path the Engine's ORDER-NEUTRAL substitutions.
+			// Without these it planned every writing statement — including the
+			// `UNWIND … MATCH … CREATE` bulk-load idiom — with a bare label scan.
+			planGates{rangeSeek: e.rangeSeekEnabled, minLabelScan: e.minLabelScanEnabled})
 		if berr != nil {
 			buildErr = berr
 			return nil

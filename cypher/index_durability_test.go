@@ -29,6 +29,7 @@ package cypher_test
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
@@ -369,8 +370,25 @@ func TestIndexDurability_StorelessListIndexes(t *testing.T) {
 		t.Fatalf("Close: %v", cerr)
 	}
 
+	// ListIndexes is the low-level introspection method: it reports EVERY
+	// registered index, including the internal numeric companion, which is what
+	// the companion-lifecycle tests in range_seek_numeric_test.go rely on. The
+	// user-facing surfaces (SHOW INDEXES, db.indexes()) filter the suffix.
+	//
+	// A hash index carries a companion too since #2226 — before that only a
+	// btree did, which is why this assertion used to see exactly one name. The
+	// user index must be present, and nothing beyond it and its companion.
 	names = eng.ListIndexes()
-	if len(names) != 1 || names[0] != "x" {
-		t.Fatalf("expected [x], got %v", names)
+	var user []string
+	for _, n := range names {
+		if !strings.HasSuffix(n, "_btree_num") {
+			user = append(user, n)
+		}
+	}
+	if len(user) != 1 || user[0] != "x" {
+		t.Fatalf("expected the user index [x], got %v (full list %v)", user, names)
+	}
+	if len(names) != 2 {
+		t.Fatalf("expected the user index plus its numeric companion, got %v", names)
 	}
 }

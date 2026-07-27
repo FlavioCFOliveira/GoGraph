@@ -202,7 +202,7 @@ Each auto-commit `RUN` is executed as its own atomic transaction through the
 write-aware planner, so `CREATE`, `MERGE`, `SET`, and `DELETE` are durable
 without an enclosing `BEGIN`/`COMMIT`:
 
-```cypher
+```text
 RUN  CREATE (n:Person {name: "Alice"})
 PULL
 ```
@@ -210,7 +210,7 @@ PULL
 Use an explicit transaction to group several statements so they commit or roll
 back together:
 
-```cypher
+```text
 BEGIN
 RUN  CREATE (n:Person {name: "Alice"})
 PULL
