@@ -298,6 +298,12 @@ var historicalDocs = map[string]bool{
 	// demonstrate nothing, since the statement was always valid — it was the
 	// resulting index that was empty.
 	filepath.Join("docs", "benchmarks", "index-key-type-2026-07-27.md"): true,
+	// Quotes the bulk-load statement whose plan was measured, to name the shape
+	// under discussion. Running it would prove nothing about the record: the
+	// figures are timings of that statement against a specific fixture at a
+	// specific commit, which the harnesses in bench/r4audit and bench/comparison
+	// reproduce, not this gate.
+	filepath.Join("docs", "benchmarks", "write-path-hash-join-2026-07-27.md"): true,
 }
 
 // TestDocumentedCypherExamplesRun executes every Cypher example the gated

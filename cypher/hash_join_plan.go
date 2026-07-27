@@ -58,6 +58,15 @@ import (
 // do not interfere.
 var hashJoinBuildCount atomic.Uint64
 
+// hashJoinColumnarBuildCount counts the subset of those substitutions that chose
+// the COLUMNAR operator ([exec.ColumnarHashJoin]) over the row-mode one. Like
+// [hashJoinBuildCount] it is a diagnostic seam, incremented once per plan build
+// (never per row), read only by the in-package differential tests so they can
+// prove a case exercises the operator they mean to exercise — the order-preservation
+// proof (#2225 part B) has to hold for BOTH operators, and without this the
+// row-mode path could silently stop being covered.
+var hashJoinColumnarBuildCount atomic.Uint64
+
 // hashJoinSizeFloor is the build-side row-count below which the hash join is not
 // worth its build overhead and the nested loop is kept. The asymptotic win
 // (O(n+m) vs O(n·m)) is unconditional for an equi-join, but for very small
@@ -208,6 +217,12 @@ func tryBuildHashJoin(
 	// The Apply emits outer||inner. Here outer is the probe, inner is the build.
 	// Keep that exact column order: probe||build, i.e. buildOnLeft=false.
 	//
+	// THIS ASSIGNMENT IS THE ORDER-PRESERVATION GUARANTEE (#2225 part B) — see
+	// [hashJoinBuildOnLeft]. It is not a performance heuristic and must not become
+	// one: pinning build to the INNER arm, never self-selecting the smaller side at
+	// runtime, is what makes the emitted sequence row-for-row identical to the
+	// nested loop and lets the write path admit the substitution at all.
+	//
 	// When both arms build to a ChunkProducer (a bare scan on each side — the
 	// common disconnected-equi-join shape), prefer the columnar hash join
 	// (exec.ColumnarHashJoin, #2105): it drains both children column-major and
@@ -217,10 +232,11 @@ func tryBuildHashJoin(
 	// exec.HashJoin, so existing plans are unchanged (design §6.2).
 	hjMB, hjEst := resultByteBudget(bopts)
 	var op exec.Operator
-	if chj, colOK := exec.NewColumnarHashJoin(innerOp, outerOp, buildFn, probeFn, false); colOK {
+	if chj, colOK := exec.NewColumnarHashJoin(innerOp, outerOp, buildFn, probeFn, hashJoinBuildOnLeft); colOK {
 		op = chj.WithByteBudget(hjMB, hjEst)
+		hashJoinColumnarBuildCount.Add(1)
 	} else {
-		op = exec.NewHashJoin(innerOp, outerOp, buildFn, probeFn, false).
+		op = exec.NewHashJoin(innerOp, outerOp, buildFn, probeFn, hashJoinBuildOnLeft).
 			WithByteBudget(hjMB, hjEst)
 	}
 
@@ -453,6 +469,57 @@ func shiftApplyMetaColumns(
 		bopts.expandTripletSeq[i].dstCol += outerWidth
 	}
 }
+
+// hashJoinBuildOnLeft is the buildOnLeft argument both join operators are
+// constructed with, and the invariant that lets a WRITING statement admit the
+// hash join without any order guard (rmp #2225 part B).
+//
+// It is false: the output is probe||build, which is outer||inner, which is the
+// column order the Apply being replaced emits. It is a named constant rather
+// than a bare `false` at the call site because it is not an incidental argument
+// — it is half of the order-preservation guarantee, and the other half (that
+// build is ALWAYS apply.Inner) is enforced at the same call site.
+//
+// # The claim
+//
+// The hash join's output is row-for-row IDENTICAL to the nested loop it replaces
+// — not merely multiset-identical, which is all [HashJoin]'s own doc comment
+// claims and all the read path's order-safety scan assumes.
+//
+// # Why it holds
+//
+//  1. THE BUILD SIDE IS PINNED BY THE PLANNER, NOT SELECTED AT RUNTIME.
+//     [tryBuildHashJoin] is the only construction site for either join operator,
+//     and it always passes apply.Inner as build and apply.Outer as probe. Neither
+//     [exec.HashJoin] nor [exec.ColumnarHashJoin] contains any code that swaps
+//     them; both take the assignment from their constructor and keep it.
+//  2. THE PROBE DRIVES THE OUTPUT, IN OUTER ORDER. Both operators emit
+//     probe-major: they pull one probe row, drain its bucket to exhaustion, then
+//     pull the next. So the outer arm's own emission order is the output's major
+//     order — exactly the Apply's.
+//  3. WITHIN A PROBE ROW, MATCHES COME OUT IN INNER-SCAN ORDER. Equal keys hash
+//     equal, so every row that matches a given probe key lives in ONE bucket, and
+//     a bucket is append-only over the build drain — its contents are in inner-scan
+//     order. The scan walks the bucket front-to-back, skipping hash collisions with
+//     an exact [expr.Value.Equal] check, so the surviving matches are emitted in
+//     inner-scan order: the minor order the Apply produces.
+//  4. THE DISCARDED ROWS ARE EXACTLY THE NON-MATCHES. Only NULL/NaN keys are
+//     dropped before bucketing ([isUnjoinableKey]), and those can never satisfy the
+//     equi-join the Selection applies, so the nested loop drops them too.
+//
+// (1)+(2)+(3)+(4) give the same rows in the same positions. The residual
+// predicate is then re-applied above the join, preserving Selection semantics.
+//
+// # What would break it
+//
+// Making the operator choose its build side by measured cardinality — the classic
+// optimisation, and what the round-4 audit assumed was already happening. Doing
+// that would make the substitution order-CHANGING, would reintroduce the need for
+// an order guard on the read path, and would make it unusable for a writing
+// statement, where `SET` is last-write-wins. If that optimisation is ever wanted,
+// the swap must be gated on the write path being absent AND on the read path's
+// order-safety scan.
+const hashJoinBuildOnLeft = false
 
 // hashJoinOrderSafe reports whether the whole-query IR plan contains no operator
 // that would observe the row order a hash join changes. It returns false (the

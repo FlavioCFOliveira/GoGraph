@@ -396,17 +396,20 @@ type buildOpts struct {
 	maxResultBytes int64
 	// hashJoinEnabled gates the disconnected-equi-join hash-join physical
 	// optimisation (#1506). The read-path build (buildPlanEngine) sets it from
-	// the Engine field; it is consulted in buildOperator's *ir.Selection case
-	// together with the order-safety and size-floor guards. Left false by every
-	// other build path (write path, public BuildPlanWithMutator), so those paths
-	// always build the legacy nested-loop plan.
+	// the Engine field, and the write-path build from [planGates.hashJoin]
+	// (#2225 part B); it is consulted in buildOperator's *ir.Selection case
+	// together with the order-safety and size-floor guards. Left false by the
+	// public BuildPlanWithMutator, which therefore always builds the legacy
+	// nested-loop plan.
 	hashJoinEnabled bool
-	// hashJoinOrderSafe records whether the order-safety scan of the whole query
-	// IR (performed once at the top of the read-path build) found no operator
-	// above the join that would observe the changed row order — a bare
-	// LIMIT/SKIP without ORDER BY, or a collect()/arrival-order aggregation. When
-	// false the hash join is disabled for the whole query even where the
-	// structural equi-join trigger matches.
+	// hashJoinOrderSafe records whether an operator above the join could observe
+	// the row order. The READ path computes it with a whole-query IR scan
+	// ([hashJoinOrderSafe]) that rejects a bare LIMIT/SKIP without ORDER BY and a
+	// collect()/arrival-order aggregation; when false the hash join is disabled
+	// for the whole query even where the structural equi-join trigger matches.
+	// The WRITE path sets it from the same gate as hashJoinEnabled, because the
+	// substitution is order-PRESERVING by construction — see
+	// [hashJoinBuildOnLeft].
 	hashJoinOrderSafe bool
 	// rangeSeekEnabled gates the range-predicate btree index seek (#1505). The
 	// read-path build sets it from the Engine field; it is consulted in
@@ -5294,12 +5297,12 @@ func BuildPlanWithMutator(
 // previously constructed its [buildOpts] with none of the Engine's optimisation
 // gates set, so every statement containing a write clause was planned by the
 // unoptimised planner — measured at 178× the cost of the identical MATCH with a
-// scalar RETURN, and the reason a 20 000-node bulk load takes 35 minutes.
+// scalar RETURN, and the reason a 20 000-node bulk load took 35 minutes.
 //
-// # Why only these two
+// # Why each gate is admissible here
 //
-// Both substitutions are result-identical AND leave the emitted row order alone,
-// so no consumer — read or write — can observe that they happened:
+// Every substitution below is result-identical AND leaves the emitted row order
+// alone, so no consumer — read or write — can observe that it happened:
 //
 //   - rangeSeek replaces a label scan plus residual filter with an index seek
 //     over the same rows; the residual predicate is re-applied above it, so the
@@ -5308,15 +5311,23 @@ func BuildPlanWithMutator(
 //     label conjunction is commutative and the substitution never scans more
 //     rows than the Labels[0] plan, so it needs no order-safety companion — the
 //     same reasoning the read path records at its own gate.
-//
-// The hash join is deliberately NOT here. It may build on either arm, so it can
-// reorder rows, and a write is not always order-insensitive: `SET` is
-// last-write-wins, so two rows targeting the same node with different values
-// depend on arrival order. Admitting it needs the probe side pinned to the
-// order-defining arm first; that is part B of #2225 and must not be done blind.
+//   - hashJoin replaces the nested-loop Cartesian product under an equi-join
+//     Selection with a hash join (#2225 part B). This one needed a proof, because
+//     a hash join that self-selected its build side at runtime WOULD reorder rows,
+//     and a write is not always order-insensitive: `SET` is last-write-wins, so
+//     two rows targeting the same node with different values depend on arrival
+//     order. The proof is that GoGraph's hash join never self-selects — the
+//     PLANNER pins build=inner, probe=outer at the single construction site
+//     (hash_join_plan.go), the probe streams the outer arm in its own order, and
+//     within a bucket the build rows stay in build-insertion (inner-scan) order.
+//     The emitted sequence is therefore row-for-row identical to the nested loop,
+//     not merely multiset-identical — pinned by [TestHashJoinOrder_SequenceMatchesNestedLoop]
+//     and, for the write case specifically, by [TestWritePathGates_HashJoinPreservesOrder].
+//     See also [hashJoinBuildOnLeft] for why no order guard accompanies it.
 type planGates struct {
 	rangeSeek    bool
 	minLabelScan bool
+	hashJoin     bool
 }
 
 // buildPlanWithMutatorFull is the engine-internal variant of
@@ -5358,11 +5369,20 @@ func buildPlanWithMutatorFull(
 	bopts := &buildOpts{maxCollectItems: maxCollectItems, edgeTypeFilterCache: edgeTypeFilterCache}
 	// Order-neutral planner substitutions (#2225). Before this, the write path
 	// left every gate at its zero value, so a statement carrying any write clause
-	// was planned without the seek and without the min-label re-anchor that the
-	// identical read statement gets. See [planGates] for why exactly these two
-	// are safe here and why the hash join is not.
+	// was planned without the seek, without the min-label re-anchor and without
+	// the hash join that the identical read statement gets. See [planGates] for
+	// why each one is admissible on a path that writes.
 	bopts.rangeSeekEnabled = gates.rangeSeek
 	bopts.minLabelScanEnabled = gates.minLabelScan
+	// #2225 part B. hashJoinOrderSafe is set from the SAME gate rather than from a
+	// per-query IR scan because the substitution is order-PRESERVING, not merely
+	// order-insensitive: the build side is pinned by the planner, so nothing above
+	// the join can observe it. The read path still runs its own scan
+	// ([hashJoinOrderSafe]) — retiring that is deliberately left as its own
+	// change, since it widens the substitution's reach on the read path and must
+	// carry its own evidence.
+	bopts.hashJoinEnabled = gates.hashJoin
+	bopts.hashJoinOrderSafe = gates.hashJoin
 	bopts.writeFallback = func(child ir.LogicalPlan) (exec.Operator, error) {
 		return buildOperatorWrite(child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 	}
@@ -14865,8 +14885,9 @@ func (e *Engine) execUnderBarrier(
 		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager(), e.maxCollectItems, e.edgeTypeFilterCache,
 			// #2225: give the write path the Engine's ORDER-NEUTRAL substitutions.
 			// Without these it planned every writing statement — including the
-			// `UNWIND … MATCH … CREATE` bulk-load idiom — with a bare label scan.
-			planGates{rangeSeek: e.rangeSeekEnabled, minLabelScan: e.minLabelScanEnabled})
+			// `UNWIND … MATCH … CREATE` bulk-load idiom — with a bare label scan
+			// (part A) driving a nested-loop Cartesian product (part B).
+			planGates{rangeSeek: e.rangeSeekEnabled, minLabelScan: e.minLabelScanEnabled, hashJoin: e.hashJoinEnabled})
 		if berr != nil {
 			buildErr = berr
 			return nil
