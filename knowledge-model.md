@@ -1485,6 +1485,40 @@ search itself was 17.9× faster, per-slot type resolution admitted edges the fil
 and DirIn/DirBoth are blocked on a finding that implicates the FORWARD-ONLY reference's own
 reverse-slot type check. Follow-up `Task 2236`.
 
+Incrementally synced at commit `11112c6` (2026-07-27, task #2221, sprint 326 — the
+sequence-ordered apply gate wakes exactly its successor): **+13 nodes** — 1 `Commit`,
+1 `Task` (`2221` COMPLETED), 1 `Spec`
+(`docs/benchmarks/apply-gate-wake-2026-07-27.md`), 3 `Method` (`Tx.waitApplyTurn`,
+`Tx.advanceApply` — both previously unmodelled — and `Store.ApplyWaiterCountForTest`,
+the test-only seam in `export_test.go`), 2 `Function` (`acquireApplySlot`,
+`releaseApplySlot`), 2 `Test` (`TestApplyGate_*`), and 4 `Benchmark` — of which
+**2 are an audit repair**: `BenchmarkCommit` and `BenchmarkCommitConcurrent` in
+`store/txn/bench_test.go` had never been modelled, a divergence found by comparing the
+package's `func Benchmark` declarations against the graph during this sync. **+20 edges**
+— 1 `CONTAINS` (`Sprint 326`→`Commit`), 1 `IMPLEMENTED_IN`, 1 `IMPROVES` (→`Feature`
+`ACID Transactions`), 5 `TOUCHES`, 12 `Package CONTAINS`/`HAS_METHOD`. All stamped
+`2026-07-27`. No new label or edge type.
+
+The substance is what the measurement overturned. GoGraph's group commit **already worked**:
+`Tx.Commit` releases the single-writer semaphore after the append and coalesces in
+`wal.Writer.SyncGroup`, reaching 31 300 commits/s at 256 writers before this change. The
+"flat at 261 op/s from 1 to 1024 writers" that rounds 3 and 4 both recorded belongs
+**exclusively to the Cypher path**, which fsyncs while holding `lpg`'s `visMu` in write mode
+(`commitUnderBarrier`→`CommitWALOnly`), so `SyncGroup` never has a second caller — that
+remains `Task 2193` and needs two-phase visibility. The real O(N) wake was in neither place:
+`advanceApply` broadcast the apply gate, waking every parked committer per commit, and a CPU
+profile put **77 % of all samples in `sync.(*Cond).Wait`, 100 % of it beneath
+`waitApplyTurn`**. Waking only the holder of `seq+1` took 1024 writers from 7 425 to
+111 897 commits/s (+1407 %, mean group 26.8→424) and saturated the disk at 264 fsync/s.
+
+The round-4 audit's **headline lever was implemented faithfully and rejected on evidence**:
+Neo4j's `TransactionLogQueue` one-waiter wake chain, ported to `wal.Writer` as an intrusive
+queue whose head propagates the unpark, **regressed throughput 3–5 %** and was backed out.
+Java pays an explicit `LockSupport.unpark` loop that the chain exists to avoid; Go's
+`Cond.Broadcast` is a `notifyListNotifyAll` splice the runtime spreads across all Ps, so N
+sequential channel sends are strictly worse. The prior-art insight survives only where
+GoGraph's O(N) wake actually was, and where the successor is uniquely determined.
+
 Two properties carry the substance. `recogniseDegreePattern.eligibility` records the port of
 Neo4j's `QuerySolvableByGetDegree` + `isEligible` and, decisively, that **`Selections.empty`
 makes a labelled far node ineligible for a degree rewrite in Neo4j too** — so
