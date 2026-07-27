@@ -1418,6 +1418,44 @@ The findings are recorded as evidence summaries only; the committed report and t
 per-stream reports under `docs/audit-2026-07-26-streams/` are the authority, and
 `Finding.evidence` carries the measurement that grounds each one.
 
+Incrementally synced at commit `b22e4dd` (2026-07-27, task #2228, sprint 326 — admit the
+hash join for writing statements, #2225 part B): **+16 nodes** — 1 `Commit` (`b22e4dd`),
+1 `Sprint` (`326`, OPEN — the first sprint node created for the 322–326 range, because
+unlike 316–321 it now has a commit), 3 `Task` (`2228` COMPLETED, `2233` and `2234`
+BACKLOG), 1 `Package` (`bench/r4audit`, kind `bench` — the round-4 audit harness package
+was missing), 2 `Spec` (`docs/benchmarks/write-path-hash-join-2026-07-27.md` and
+`docs/benchmarks/threeway-2026-07-27.md`, the latter also previously missing), 8 `Test`
+(`TestHashJoinOrder_SequenceMatchesNestedLoop`; the four `TestWritePathGates_*`, of which
+`MinLabelReAnchorsInsideAWrite` and `ResultIdentity` date from part A and had never been
+synced; `TestW1PartB_BoundKeyWriteFlatInN` and `TestW1PartB_HashJoinIsWhatChanged`).
+**+25 edges** — 1 `CONTAINS` (`Sprint 326`→`Commit`), 1 `IMPLEMENTED_IN` (`Task 2228`→
+`Commit`), 1 `IMPROVES` (`Commit`→`Feature` `Cypher Engine`, id 12659), 9 `TOUCHES`
+(`Commit`→`Package` `cypher`/`r4audit`/`cypherdocgate`, →`Function` `tryBuildHashJoin`/
+`buildPlanWithMutatorFull`/`hashJoinOrderSafe`, →the two `Spec`s), 8 `CONTAINS`
+(`Package`→each new `Test`), 3 `TESTS` (the three hash-join tests→`tryBuildHashJoin`),
+2 `FOLLOWED_BY` (`Task 2228`→`2233` and →`2234`). All stamped `2026-07-27`.
+
+No new label or edge type. Two new **properties** were added to existing `Function` nodes
+rather than introducing a `Const` label for a single declaration:
+`tryBuildHashJoin.invariant` and `.diagnosticCounters`, and
+`buildPlanWithMutatorFull.writePathGates`. The invariant is the substance of this task:
+`hashJoinBuildOnLeft = false` (a named constant now used at the call site instead of a
+bare `false`) records that the PLANNER pins build=`apply.Inner` and probe=`apply.Outer` at
+the only construction site for either join operator, so the substitution is
+**order-PRESERVING** — row-for-row identical to the nested loop, not merely
+multiset-identical. That refuted the round-4 premise that a hash join self-selects the
+smaller build side, and is why a writing statement needs no order guard. Measured: the
+three-way load at 20 000 nodes went **35m10.173s → 2.206s (957×)** — GoGraph-embedded now
+loads that dataset faster than Neo4j (4.252s) — and the bound-key write at N=16000 went
+**1.860s → 9.669ms (192×)**, within 1.08× of its own read control.
+
+**Known drift (pre-existing, not remediated here):** sprints 319–325 and their tasks are
+absent from the graph, and part A's tests (`#2225`, commit range up to `003e1652`) were
+never synced — the eight `Test` nodes above include two that belong to part A. The
+`Package` node for `bench/r4audit` and the `Spec` node for the round-4 threeway record
+were likewise missing and are created here. A full reconciliation of the 319–325 range is
+a separate hygiene task.
+
 ## Known limitations (faithful, by design)
 
 - **Build-tag duplicates.** The extractor parses every `.go` file regardless of build
