@@ -711,26 +711,27 @@ func (e *Engine) registerRecoveredIndexes(defs []IndexDef) {
 				sub := indexbtree.New[string]()
 				_ = idxMgr.CreateIndex(d.Name, sub) // absorb ErrIndexExists
 			}
-			// Rebuild the UNIFIED numeric companion from the SAME recovered def
-			// (#1652): the durable record carries only the one btree def
-			// (format-neutral — no new persisted IndexKind), so recovery is
-			// self-sufficient by re-deriving the companion here, exactly as
-			// createBTreeIndexLocked builds it on a live CREATE INDEX. Without
-			// this a numeric range seek on the re-opened engine would find no
-			// companion and fall back to a scan+filter (correct, but the
-			// optimisation would be lost across a restart). The err-guard is
-			// defensive: newBoundNodeBTreeIndexNumeric supplies every Binding
-			// field, so it does not fail here; if it ever did, the seek would
-			// simply fall back to a scan+filter. When two user defs cover the
-			// same (label, property) the second CreateIndex(numName, …) returns
-			// ErrIndexExists and is absorbed (idempotent rebuild).
-			numName := numericBTreeName(d.Label, d.Property)
-			if numIdx, nerr := newBoundNodeBTreeIndexNumeric(e.g, d.Label, d.Property); nerr == nil {
-				// Recovery must complete: a background context never cancels, so
-				// the backfill never returns an error here.
-				_ = e.backfillNodeBTreeIndexNumeric(context.Background(), numIdx, d.Label, d.Property)
-				_ = idxMgr.CreateIndex(numName, numIdx) // absorb ErrIndexExists
-			}
+		}
+		// Rebuild the UNIFIED numeric companion from the SAME recovered def, for
+		// BOTH index kinds (#1652 for btree, #2226 for hash): the durable record
+		// carries only the one user def (format-neutral — no new persisted
+		// IndexKind), so recovery is self-sufficient by re-deriving the companion
+		// here, exactly as createBTreeIndexLocked and createHashIndexLocked build
+		// it on a live CREATE INDEX. Without this a numeric seek on the re-opened
+		// engine would find no companion and fall back to a scan+filter — correct,
+		// but the optimisation would be silently lost across a restart, which is
+		// the same class of defect as an index that reports ONLINE while holding
+		// no entries. The err-guard is defensive: newBoundNodeBTreeIndexNumeric
+		// supplies every Binding field, so it does not fail here; if it ever did,
+		// the seek would simply fall back to a scan+filter. When two user defs
+		// cover the same (label, property) the second CreateIndex(numName, …)
+		// returns ErrIndexExists and is absorbed (idempotent rebuild).
+		numName := numericBTreeName(d.Label, d.Property)
+		if numIdx, nerr := newBoundNodeBTreeIndexNumeric(e.g, d.Label, d.Property); nerr == nil {
+			// Recovery must complete: a background context never cancels, so the
+			// backfill never returns an error here.
+			_ = e.backfillNodeBTreeIndexNumeric(context.Background(), numIdx, d.Label, d.Property)
+			_ = idxMgr.CreateIndex(numName, numIdx) // absorb ErrIndexExists
 		}
 	}
 	// Mirror the recovered index set onto the graph's lock-free gate so a
@@ -808,11 +809,50 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 		return nil, berr
 	}
 
+	// Build the UNIFIED numeric companion alongside the hash index (#2226),
+	// exactly as createBTreeIndexLocked does for a btree (#1652). Without it a
+	// point lookup on a NUMERIC property gets no index at all: the hash index
+	// stores only string keys (projectStringPropValue rejects every non-PropString
+	// kind), so `CREATE INDEX … ON (n.age)` on an integer property builds an index
+	// that can never hold an entry, SHOW INDEXES still reports it ONLINE, and
+	// `MATCH (n:L {age: 30})` silently falls back to a full label scan. Since
+	// hash is the DEFAULT index type, that was what a plain CREATE INDEX gave a
+	// user with a numeric key — measured at 3.90 ms against 6.25 µs with a btree
+	// (docs/benchmarks/index-key-type-2026-07-27.md).
+	//
+	// The companion is keyed by its own deterministic internal name, so the
+	// equality rewrite (#2169) finds it through findBoundNumericBTree without a
+	// user-named btree existing at all. As on the btree path this adds NO
+	// storage-format change: only the hash def is persisted, and
+	// registerRecoveredIndexes re-derives the companion from it.
+	//
+	// The two registrations are NOT wrapped in one visibility barrier, and do not
+	// need to be: the companion is internal and purely an optimisation, so a
+	// reader that observes only one of the pair is still correct. Seeing only the
+	// hash index makes a numeric seek decline and fall back to scan+filter; seeing
+	// only the backfilled companion makes the seek return the right rows. Neither
+	// order can produce a wrong answer.
+	numName := numericBTreeName(p.Label, p.Property)
+	numIdx, _ := newBoundNodeBTreeIndexNumeric(e.g, p.Label, p.Property)
+	if numIdx != nil {
+		if berr := e.backfillNodeBTreeIndexNumeric(ctx, numIdx, p.Label, p.Property); berr != nil {
+			return nil, berr
+		}
+	}
+
 	if cerr := idxMgr.CreateIndex(p.Name, idx); cerr != nil {
 		if p.IfNotExists && errors.Is(cerr, index.ErrIndexExists) {
 			return emptyDDLResult(), nil
 		}
 		return nil, fmt.Errorf("exec: CreateIndex %q: %w", p.Name, cerr)
+	}
+	// Absorb ErrIndexExists: two CREATE INDEX statements on the same
+	// (label, property) share one companion, whichever index kind they are.
+	numRegistered := false
+	if numIdx != nil {
+		if nerr := idxMgr.CreateIndex(numName, numIdx); nerr == nil {
+			numRegistered = true
+		}
 	}
 	// Real schema mutation: invalidate cached plans built before the index
 	// existed (mirrors CreateIndexOp's onSchemaChange contract).
@@ -843,7 +883,17 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 			// Best-effort unwind: forget the def and drop the just-registered
 			// index. Errors are joined but the original cause is always returned.
 			e.forgetIndexDef(p.Name)
-			if derr := idxMgr.DropIndex(p.Name); derr != nil {
+			derr := idxMgr.DropIndex(p.Name)
+			// The companion this statement registered is unwound with it, but
+			// only when no OTHER surviving index still covers the pair — two
+			// indexes on the same (label, property) share one companion, so an
+			// unconditional drop would strip one the other relies on. This runs
+			// AFTER dropping p.Name: the orphan check inspects the surviving
+			// indexes, and p.Name would otherwise still count as covering.
+			if numRegistered {
+				dropNumericCompanionIfOrphaned(idxMgr, p.Label, p.Property)
+			}
+			if derr != nil {
 				return nil, errors.Join(err, fmt.Errorf("cypher: unwind CREATE INDEX registration: %w", derr))
 			}
 			return nil, err

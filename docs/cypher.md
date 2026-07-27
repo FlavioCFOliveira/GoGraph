@@ -421,15 +421,24 @@ value, because the two kinds are keyed differently:
 
 | Predicate | String value | Numeric value (integer or float) |
 |---|---|---|
-| `=` | `hash` | `btree` |
-| `<` `>` `<=` `>=` | `btree` | `btree` |
+| `=` | `hash` | either kind |
+| `<` `>` `<=` `>=` | `btree` | either kind |
 
-A hash index is keyed on strings, so it accelerates equality on string-valued
-properties only. A BTree index carries an internal numeric companion, which
-serves both numeric ranges and numeric equality — the latter as the degenerate
-closed range `[v, v]`. Numeric equality is matched across the integer/float
-boundary as openCypher requires (`5` matches a stored `5.0`), and remains exact
-above 2<sup>53</sup>, where distinct integers share a floating-point image.
+A hash index is keyed on strings, so of the string predicates it accelerates
+equality only; a string range needs a BTree index.
+
+**Numeric properties are served by either kind.** Every index — hash or BTree —
+carries an internal numeric companion keyed on a unified `float64` order, so a
+numeric equality and a numeric range both reach an index whichever kind you
+created. Equality is served as the degenerate closed range `[v, v]`. It is
+matched across the integer/float boundary as openCypher requires (`5` matches a
+stored `5.0`), and remains exact above 2<sup>53</sup>, where distinct integers
+share a floating-point image.
+
+That means the default `CREATE INDEX` is the right choice for a numeric
+property; `OPTIONS {indexType: 'btree'}` is needed only for a **string** range.
+Before this was so, a default index on a numeric property could hold no entries
+at all while still reporting `state: "ONLINE"`, and the query silently scanned.
 
 Index use is a cost decision, not a guarantee: the engine seeks only when the
 label holds at least 1024 nodes and the predicate matches at most 10 % of them,

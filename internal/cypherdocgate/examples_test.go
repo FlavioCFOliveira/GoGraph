@@ -293,6 +293,11 @@ var gatedDocs = []string{
 var historicalDocs = map[string]bool{
 	filepath.Join("docs", "audit-production-readiness-2026-07-02-round2.md"): true,
 	filepath.Join("docs", "benchmarks", "bound-key-seek-2026-07-26.md"):      true,
+	// Quotes the CREATE INDEX that used to build an index holding no entries,
+	// to show what the defect looked like. Running it would succeed and
+	// demonstrate nothing, since the statement was always valid — it was the
+	// resulting index that was empty.
+	filepath.Join("docs", "benchmarks", "index-key-type-2026-07-27.md"): true,
 }
 
 // TestDocumentedCypherExamplesRun executes every Cypher example the gated

@@ -2692,13 +2692,21 @@ func (e *Engine) runDropIndex(ctx context.Context, p *ir.DropIndex, idxMgr *inde
 	return res, rerr
 }
 
-// indexCoverage returns the (label, property) a bound btree index named name
-// covers, with ok reporting whether name resolves to a bound btree at all.
-// Used by DROP INDEX to locate the numeric companion (#1652). A hash index, an
-// unbound btree, or a missing name reports ok == false (no companion to clean).
+// indexCoverage returns the (label, property) a bound index named name covers,
+// with ok reporting whether name resolves to a bound index at all. Used by DROP
+// INDEX to decide whether a numeric companion is still needed (#1652). An
+// unbound index or a missing name reports ok == false.
+//
+// BOTH kinds count. A hash index owns a numeric companion too (#2226), so a
+// btree-only view of coverage would let DROP INDEX on one of two indexes over
+// the same (label, property) strip a companion the surviving one still relies
+// on — silently turning its numeric point lookups back into full scans.
 func indexCoverage(idxMgr *index.Manager, name string) (label, property string, ok bool) {
 	sub, err := idxMgr.GetIndex(name)
-	if err != nil || sub.Kind() != "btree" {
+	if err != nil {
+		return "", "", false
+	}
+	if k := sub.Kind(); k != "btree" && k != "hash" {
 		return "", "", false
 	}
 	br, ok := sub.(interface {
