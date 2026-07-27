@@ -2,8 +2,12 @@ package cypher_test
 
 // profile_dbhits_test.go — T910: PROFILE returns plan with dbhits per operator.
 //
-// Since the engine has no Profile() method yet, this test exercises the
-// explain package's instrumentation infrastructure directly:
+// [cypher.Engine.Profile] now exposes per-operator rows and time (rmp #2222), but
+// it is wired to exec.Profiler rather than to this package: a transparent wrapper
+// must re-implement exec's UNEXPORTED NodeIDColumnProducer marker, which only a
+// wrapper declared inside exec can do. This test therefore still covers the
+// explain package's own instrumentation — the DbHits counter it contributes, which
+// exec.Profiler does not yet collect (rmp #2238):
 //
 //  1. An InstrumentedScan wrapped around a ProfiledOperator over a node-count
 //     source yields OperatorStats with Rows > 0 and DbHits > 0.

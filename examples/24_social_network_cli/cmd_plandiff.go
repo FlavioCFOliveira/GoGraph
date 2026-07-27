@@ -222,12 +222,20 @@ const plandiffTimingRuns = 5
 
 // runPlandiffScenario renders the EXPLAIN plan-diff (enabled vs disabled), the
 // exact work contrast, and the median wall-clock for one scenario.
+//
+// It reads ExplainLogical rather than Explain because this scenario demonstrates
+// two PLANNER peepholes — the single-edge anchor swap and the disjoint-component
+// reorder — and the diff turns on the logical rendering's pattern annotations
+// ("(c)-[:ON]->(p)") and variable-qualified labels ("[c:Comment]"). A built
+// Expand carries neither: it holds the direction it will walk, not the pattern
+// text that named it. Engine.Explain is the surface for what physically executes;
+// this one is for what the planner decided.
 func runPlandiffScenario(ctx context.Context, out io.Writer, s *plandiffScenario) error {
-	onPlan, err := s.onEng.Explain(s.query, nil)
+	onPlan, err := s.onEng.ExplainLogical(s.query, nil)
 	if err != nil {
 		return fmt.Errorf("explain (enabled): %w", err)
 	}
-	offPlan, err := s.offEng.Explain(s.query, nil)
+	offPlan, err := s.offEng.ExplainLogical(s.query, nil)
 	if err != nil {
 		return fmt.Errorf("explain (disabled): %w", err)
 	}

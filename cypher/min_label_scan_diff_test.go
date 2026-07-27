@@ -200,11 +200,11 @@ func TestMinLabelScan_Differential_CardinalityTie(t *testing.T) {
 		t.Fatalf("expected empty result for a disjoint-label conjunction, got on=%d off=%d", len(gotOn), len(gotOff))
 	}
 	// Plan stability: the EXPLAIN of a tie must be reproducible across runs.
-	e1, err := on.Explain(q, nil)
+	e1, err := on.ExplainLogical(q, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	e2, err := on.Explain(q, nil)
+	e2, err := on.ExplainLogical(q, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestMinLabelScan_IndexSeekStillWins(t *testing.T) {
 	}
 	q := "MATCH (p:Person {email: 'user42@x'}) RETURN p.k AS k"
 
-	plan, err := e.Explain(q, nil)
+	plan, err := e.ExplainLogical(q, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +306,7 @@ func TestMinLabelScan_Explain_TargetsSmallerLabel(t *testing.T) {
 	// EXPLAIN must show the NodeByLabelScan anchored on the smaller label.
 	g := nestedLabelGraph(t, []string{"Big", "Small"}, []int{100, 5})
 	e := NewEngine(g)
-	plan, err := e.Explain("MATCH (n:Big:Small) RETURN n.k AS k", nil)
+	plan, err := e.ExplainLogical("MATCH (n:Big:Small) RETURN n.k AS k", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

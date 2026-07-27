@@ -54,7 +54,7 @@ func TestVarlenPlan_PnExplainContainsVarLengthExpand(t *testing.T) {
 
 	eng := buildLongPath(t, 1000)
 
-	plan, err := eng.Explain("MATCH (a)-[*1..5]->(b) RETURN a, b", nil)
+	plan, err := eng.ExplainLogical("MATCH (a)-[*1..5]->(b) RETURN a, b", nil)
 	if err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestVarlenPlan_PnExplainNoExecution(t *testing.T) {
 	before := g.AdjList().Order()
 	eng := cypher.NewEngine(g)
 
-	if _, err := eng.Explain("MATCH (a)-[*1..3]->(b) RETURN a, b", nil); err != nil {
+	if _, err := eng.ExplainLogical("MATCH (a)-[*1..3]->(b) RETURN a, b", nil); err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
 
@@ -163,7 +163,7 @@ func TestVarlenPlan_PnRaceClean(t *testing.T) {
 	for range workers {
 		go func() {
 			defer func() { done <- struct{}{} }()
-			if _, err := eng.Explain("MATCH (a)-[*1..3]->(b) RETURN a, b", nil); err != nil {
+			if _, err := eng.ExplainLogical("MATCH (a)-[*1..3]->(b) RETURN a, b", nil); err != nil {
 				errs <- fmt.Errorf("Explain: %w", err)
 				return
 			}

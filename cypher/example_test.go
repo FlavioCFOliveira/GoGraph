@@ -134,15 +134,39 @@ func ExampleEngine_RunAny() {
 	// owner: "bob"
 }
 
-// ExampleEngine_Explain returns the physical plan for a query as text without
-// executing it or touching the graph. Each row-producing operator is annotated
-// with a cardinality estimate and its provenance tag (exact / stats / heuristic);
-// the label scan over an empty graph is an exact count of zero (#2099).
+// ExampleEngine_Explain returns the PHYSICAL plan for a query as text without
+// executing it or touching the graph: the operator tree the builder actually
+// produced, each node named after its concrete operator type. Because the name
+// comes from the operator itself, the rendering cannot disagree with what runs —
+// an index seek appears as NodeByIndexSeek only when a NodeByIndexSeek is what
+// was built.
 func ExampleEngine_Explain() {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 
 	plan, err := eng.Explain("MATCH (n:Person) RETURN n", nil)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	fmt.Print(plan)
+	// Output:
+	// Project
+	// └─ Project
+	//    └─ NodeByLabelScan [Person]
+}
+
+// ExampleEngine_ExplainLogical returns the LOGICAL plan, which is where the
+// planner's cardinality ESTIMATES live: each row-producing operator carries an
+// estimate and its provenance tag (exact / stats / heuristic), and the label scan
+// over an empty graph is an exact count of zero (#2099). Those estimates have no
+// counterpart on a built operator, so they are visible only here — use this to
+// understand why a plan was chosen, and [cypher.Engine.Explain] to see what runs.
+func ExampleEngine_ExplainLogical() {
+	g := lpg.New[string, float64](adjlist.Config{})
+	eng := cypher.NewEngine(g)
+
+	plan, err := eng.ExplainLogical("MATCH (n:Person) RETURN n", nil)
 	if err != nil {
 		fmt.Println("error:", err)
 		return

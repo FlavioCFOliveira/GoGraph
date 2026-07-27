@@ -219,6 +219,17 @@ type vleRelInfo struct {
 }
 
 type buildOpts struct {
+	// profiler, when non-nil, instruments every operator the builder returns so a
+	// PROFILE run can report per-operator rows and time. It is nil for every
+	// ordinary query, and nil is the only state the normal path ever sees: no
+	// wrapper is built and no operator executes any instrumentation, so profiling
+	// costs nothing when it is off (rmp #2222 AC 3).
+	//
+	// Wrapping happens in exactly one place — [buildOperator], which every node
+	// passes through on its way out of the recursion — so a node cannot be missed
+	// and cannot be wrapped twice.
+	profiler *exec.Profiler
+
 	// nodeResolver backs [expr.LazyNodeValue] for the lazy node-materialisation
 	// fast path. It is created once per build (it depends only on the graph) and
 	// shared across every row and every node column, so the lazy path costs no
@@ -1957,7 +1968,7 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	// never race on it.
 	queryReg := newNowAwareRegistry(e.reg, time.Now())
 	e.g.View(func() {
-		op, cols, err := e.buildReadPhysical(ctx, entry, plan, params, queryReg)
+		op, cols, err := e.buildReadPhysical(ctx, entry, plan, params, queryReg, nil)
 		if err != nil {
 			buildErr = err
 			return
@@ -1993,12 +2004,18 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 // The caller must already hold the graph's read barrier ([lpg.Graph.View]): the
 // cost gates read live label counts, the node total, and count-store cells, and
 // they must all come from one consistent snapshot.
+//
+// prof is nil for an ordinary execution and non-nil only for [Engine.Profile];
+// it is threaded onto the build options so the single wrapping point in
+// [buildOperator] instruments every node. Passing nil is what makes profiling
+// free when it is off.
 func (e *Engine) buildReadPhysical(
 	ctx context.Context,
 	entry *planCacheEntry,
 	plan ir.LogicalPlan,
 	params map[string]expr.Value,
 	queryReg expr.FunctionRegistry,
+	prof *exec.Profiler,
 ) (exec.Operator, []string, error) {
 	walker := &lpgNodeWalker{g: e.g}
 	labelSrc := &lpgLabelResolver{g: e.g, eng: e}
@@ -2013,6 +2030,7 @@ func (e *Engine) buildReadPhysical(
 	// result list — the same bound collect() enforces (#1294, #1298).
 	patEval := newPatternEvaluator(e.g, e.maxCollectItems)
 	bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx, maxCollectItems: e.maxCollectItems}
+	bopts.profiler = prof
 	// Edge-type-filter cache sharing (#1871): the SAME cache instance
 	// serves every concurrent Run call, so a relationship-type-filtered
 	// pattern amortises its O(V+E) build across the whole Engine's query
@@ -2071,14 +2089,30 @@ func (e *Engine) buildReadPhysical(
 	return buildPlanEngine(plan, walker, labelSrc, queryReg, params, e.g.IndexManager(), e.procReg, bopts)
 }
 
-// Explain returns a textual representation of the physical plan that would be
-// chosen to execute query with the given params. The plan reflects current index
-// availability: a hash index on the relevant (label, property) pair causes the
-// relevant Selection+LabelScan subtree to appear as NodeByIndexSeek. No rows
-// are produced; the graph is not modified.
+// Explain returns a textual representation of the plan that executes query with
+// the given params. No rows are produced and the graph is not modified.
 //
-// The format mirrors [ir.Explain] but annotates Selection→LabelScan pairs that
-// would be rewritten to index seeks at execution time.
+// For a READING statement the rendering is the PHYSICAL plan: the operator tree
+// the builder actually produced, walked node by node, with each node named after
+// its concrete operator type. Hash-join substitution, columnar and parallel tier
+// engagement and the chosen access path are therefore visible, and cannot
+// disagree with what runs — a HashJoin is named HashJoin because it IS one.
+//
+// Before rmp #2222 this rendered the logical IR instead, and was wrong in BOTH
+// directions: it reported NodeByIndexSeek where a label scan ran, and printed
+// CartesianProduct for
+//
+//	MATCH (a:P), (b:P) WHERE a.age = b.age RETURN count(*)
+//
+// which the runtime counter proves executes as a HashJoin — showing a reader
+// O(n·m) where O(n+m) runs.
+//
+// For a WRITING statement it renders the logical plan and says so on the first
+// line. A write's physical tree cannot be built without a live mutator (the
+// operators bind to an open transaction), so there is nothing faithful to walk
+// outside one; the honest label is preferable to silently returning a different
+// kind of plan. Use [Engine.Profile] on a read to inspect a physical tree with
+// measurements.
 func (e *Engine) Explain(query string, params map[string]expr.Value) (s string, err error) {
 	defer recoverQueryPanic(&err, "cypher.Explain", "cypher.Explain.panics")
 	if ir.IsDDL(query) {
@@ -2088,6 +2122,147 @@ func (e *Engine) Explain(query string, params map[string]expr.Value) (s string, 
 	if err != nil {
 		return "", err
 	}
+	if !queryHasWritingClause(query) {
+		return e.explainPhysical(entry, params)
+	}
+	return "(logical plan — a writing statement has no physical tree outside a transaction)\n" +
+		e.explainLogical(entry, params), nil
+}
+
+// explainPhysical builds the physical operator tree exactly as the read path
+// builds it ([Engine.buildReadPhysical]) and renders it.
+//
+// The tree is thrown away without Init or Close: no operator has acquired
+// anything at construction time, and Init — which is what starts goroutines and
+// allocates working buffers — is never called, so there is nothing to release.
+func (e *Engine) explainPhysical(entry *planCacheEntry, params map[string]expr.Value) (string, error) {
+	var (
+		out      string
+		buildErr error
+	)
+	queryReg := newNowAwareRegistry(e.reg, time.Now())
+	e.g.View(func() {
+		op, _, err := e.buildReadPhysical(context.Background(), entry, entry.plan, params, queryReg, nil)
+		if err != nil {
+			buildErr = err
+			return
+		}
+		out = exec.RenderPlan(op)
+	})
+	if buildErr != nil {
+		return "", fmt.Errorf("cypher: build plan: %w", buildErr)
+	}
+	return out, nil
+}
+
+// Profile executes query with the given params and returns the PHYSICAL plan
+// annotated with each operator's emitted row count and the wall-clock time
+// attributed to it — GoGraph's equivalent of the PROFILE both incumbents expose
+// (Neo4j adds db-hits, Memgraph relative time).
+//
+// The query really runs: rows are produced and discarded, so Profile is for a
+// reading statement only and returns an error for a writing one rather than
+// performing its writes as a side effect of a diagnostic.
+//
+// Times are INCLUSIVE of an operator's children, because a pipelined operator's
+// Next pulls from them. Subtract a node's children to obtain its exclusive cost —
+// the same arithmetic a reader of Neo4j's PROFILE performs.
+//
+// Profiling is off unless this method is called: the instrumentation is a wrapper
+// installed by the builder, so an ordinary [Engine.Run] executes code identical to
+// a build in which profiling does not exist (rmp #2222 AC 3).
+func (e *Engine) Profile(ctx context.Context, query string, params map[string]expr.Value) (s string, err error) {
+	defer recoverQueryPanic(&err, "cypher.Profile", "cypher.Profile.panics")
+	if ir.IsDDL(query) {
+		return "", fmt.Errorf("cypher: Profile: DDL has no query plan")
+	}
+	entry, err := e.parseAndAnalyse(query)
+	if err != nil {
+		return "", err
+	}
+	if entry.semaErr != nil {
+		return "", entry.semaErr
+	}
+	if queryHasWritingClause(query) {
+		return "", fmt.Errorf("cypher: Profile: refusing to execute a writing statement; " +
+			"use Explain for its plan, or RunInTx to execute it")
+	}
+	if err := checkParamPresence(entry.paramRefs, params); err != nil {
+		return "", err
+	}
+
+	var (
+		tree     exec.PlanNode
+		buildErr error
+		drainErr error
+	)
+	queryReg := newNowAwareRegistry(e.reg, time.Now())
+	e.g.View(func() {
+		prof := exec.NewProfiler()
+		op, cols, berr := e.buildReadPhysical(ctx, entry, entry.plan, params, queryReg, prof)
+		if berr != nil {
+			buildErr = berr
+			return
+		}
+		rs := exec.Run(ctx, op, cols)
+		r := newResultWithLimit(rs, cols, nil, nil, nil, e.maxResultRows, e.maxResultBytes)
+		r.globalMem = e.globalMem
+		r.materialize()
+		for r.Next() {
+			// Drain: the measurements are the product, the rows are not.
+		}
+		drainErr = r.Err()
+		// Capture the tree BEFORE Close, while the wrappers still hold their
+		// counters, so the rendering survives teardown.
+		tree = exec.PlanTree(op)
+		if cerr := r.Close(); cerr != nil && drainErr == nil {
+			drainErr = cerr
+		}
+	})
+	if buildErr != nil {
+		return "", fmt.Errorf("cypher: build plan: %w", buildErr)
+	}
+	if drainErr != nil {
+		return "", drainErr
+	}
+	return exec.RenderPlanNode(&tree), nil
+}
+
+// ExplainLogical returns the LOGICAL plan for query, annotated with the index
+// seeks and the count-store-gated reorderings the read path would apply, and with
+// each operator's estimated row count.
+//
+// It is the companion to [Engine.Explain], not a lesser version of it, and the two
+// answer different questions:
+//
+//   - Explain answers "what runs?" — the physical operator tree, named after the
+//     operators themselves, so it cannot misreport the access path, the join, or
+//     the tier.
+//   - ExplainLogical answers "what did the planner think?" — the logical shape
+//     plus the CARDINALITY ESTIMATES that drove the physical choices. Those
+//     estimates belong to the logical nodes and have no counterpart on a built
+//     operator, so they are only visible here.
+//
+// Reach for this one when an estimate looks wrong (a plan chosen on a bad guess);
+// reach for Explain when you need to know what actually executes.
+func (e *Engine) ExplainLogical(query string, params map[string]expr.Value) (s string, err error) {
+	defer recoverQueryPanic(&err, "cypher.ExplainLogical", "cypher.ExplainLogical.panics")
+	if ir.IsDDL(query) {
+		return "(DDL — no query plan)", nil
+	}
+	entry, perr := e.parseAndAnalyse(query)
+	if perr != nil {
+		return "", perr
+	}
+	return e.explainLogical(entry, params), nil
+}
+
+// explainLogical renders the logical IR, annotated with the index seeks, the
+// count-store-gated reorderings the read path would apply, and the cardinality
+// estimates. It backs [Engine.ExplainLogical] and is what [Engine.Explain] falls
+// back to for a writing statement, whose physical tree is unreachable outside a
+// transaction.
+func (e *Engine) explainLogical(entry *planCacheEntry, params map[string]expr.Value) string {
 	plan := entry.plan
 	// Reflect the count-store-gated reordering peepholes in the rendered plan so
 	// EXPLAIN shows the physically-built shape, not just the written logical order:
@@ -2114,7 +2289,7 @@ func (e *Engine) Explain(query string, params map[string]expr.Value) (s string, 
 			anchorSwaps = computeAnchorSwaps(sites, labelSrc)
 		}
 	}
-	return explainWithIndexes(plan, e.g.IndexManager(), params, e.g, labelSrc, reorderSwaps, anchorSwaps, entry.pushedSeekHints), nil
+	return explainWithIndexes(plan, e.g.IndexManager(), params, e.g, labelSrc, reorderSwaps, anchorSwaps, entry.pushedSeekHints)
 }
 
 // explainWithIndexes walks plan and renders operator names, substituting
@@ -7217,8 +7392,43 @@ func wrapWithColumnPassthrough(child exec.Operator, cols []string, schema map[st
 // OptionalApply). It may be nil when no Apply is in scope; missing tags fall
 // back to a fresh exec.Argument so isolated Argument nodes still work.
 //
-//nolint:gocyclo // large switch — one case per read IR node type; no hidden branches
+// buildOperator builds the physical operator for plan and, when a PROFILE run
+// installed a profiler on bopts, instruments it.
+//
+// It is the ONE place instrumentation is applied. Every node of the physical tree
+// is produced by this function — buildOperatorRec recurses through it, not around
+// it — so wrapping the single return value here covers the whole tree exactly
+// once, with no per-operator edits and no cost at all when bopts.profiler is nil.
+//
+// The wrapper is applied on the way OUT of the recursion, so a parent is
+// constructed with its child already wrapped and runs its capability
+// type-assertions against the wrapper. [exec.Profiler.Wrap] therefore preserves
+// whatever the child exposes; see its documentation for why that is load-bearing.
 func buildOperator(
+	plan ir.LogicalPlan,
+	walker nodeWalkerIface,
+	labelSrc labelResolverIface,
+	reg expr.FunctionRegistry,
+	params map[string]expr.Value,
+	schema map[string]int,
+	idxMgr *index.Manager,
+	procReg *procs.Registry,
+	argByTag map[uint32]*exec.Argument,
+	bopts *buildOpts,
+) (exec.Operator, error) {
+	op, err := buildOperatorRec(plan, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
+	if err != nil || bopts == nil || bopts.profiler == nil {
+		return op, err
+	}
+	return bopts.profiler.Wrap(op), nil
+}
+
+// buildOperatorRec is the recursive read-plan lowering: one case per read IR node
+// type. Instrumentation is applied by [buildOperator], which every node passes
+// through on its way out, so this function is unaware of profiling.
+//
+//nolint:gocyclo // large switch — one case per read IR node type; no hidden branches
+func buildOperatorRec(
 	plan ir.LogicalPlan,
 	walker nodeWalkerIface,
 	labelSrc labelResolverIface,

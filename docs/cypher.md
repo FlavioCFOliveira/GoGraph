@@ -1052,6 +1052,84 @@ during materialisation, before the surplus reaches the caller.
 
 ---
 
+## Inspecting a query plan
+
+Three surfaces, answering three different questions. All are Go APIs; none is
+reachable as a Cypher `EXPLAIN` / `PROFILE` prefix.
+
+### `Engine.Explain` — what runs
+
+Returns the **physical** plan: the operator tree the builder actually produced,
+each node named after its concrete operator type. Nothing is executed and the
+graph is not touched.
+
+```
+Project
+└─ Project
+   └─ GlobalAggregateAdapter
+      └─ EagerAggregation
+         └─ ColumnarProject
+            └─ ColumnarHashJoin [build=right]
+               ├─ NodeByLabelScan [P]
+               └─ NodeByLabelScan [P]
+```
+
+Because each name is read from the operator itself, the rendering cannot
+disagree with what executes: a `HashJoin` appears only when a hash join was
+built, and the columnar and parallel tiers are visible as distinct operator
+types (`ColumnarHashJoin`, `ParallelScanProject`, …) rather than being hidden
+behind their row-mode equivalents. This is the surface to reach for when a query
+is slow.
+
+A **writing** statement renders the logical plan and says so on its first line: a
+write's operators bind to an open transaction, so there is no physical tree to
+walk outside one.
+
+### `Engine.ExplainLogical` — what the planner thought
+
+Returns the **logical** plan with each operator's cardinality **estimate** and its
+provenance (`exact` / `stats` / `heuristic`):
+
+```
+ProduceResults
+└─ Projection
+   └─ NodeByLabelScan [n:Person] (est. rows=0, exact)
+```
+
+Estimates belong to logical nodes and have no counterpart on a built operator, so
+they are visible only here. Reach for this when a plan looks wrong and you suspect
+the estimate that drove it.
+
+### `Engine.Profile` — what it cost
+
+Executes the query and returns the physical plan annotated with each operator's
+emitted rows and the time attributed to it:
+
+```
+ColumnarHashJoin (rows=3200, time=699µs)
+├─ NodeByLabelScan (rows=400, time=3µs)
+└─ NodeByLabelScan (rows=400, time=3µs)
+```
+
+Times are **inclusive** of an operator's children, because a pipelined operator's
+`Next` pulls from them — subtract a node's children for its exclusive cost, as
+with Neo4j's `PROFILE`.
+
+Two caveats, both explicit in the output or the API:
+
+- `Profile` refuses a writing statement rather than performing its writes as the
+  side effect of a diagnostic.
+- A node shown as `(not measured)` was not instrumented, and did **not** cost
+  nothing. Instrumentation is applied where the builder returns an operator, and
+  one logical node can lower to several physical operators, of which only the
+  outermost passes that point.
+
+Profiling is off unless `Profile` is called: the instrumentation is a wrapper the
+builder installs only when asked, so an ordinary `Run` executes the same code as a
+build in which profiling does not exist.
+
+---
+
 ## Known limitations
 
 The following constructs are not yet supported:

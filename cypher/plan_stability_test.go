@@ -74,8 +74,12 @@ func TestPlanStability_IdenticalTwice(t *testing.T) {
 			if plan1 == "" {
 				t.Fatal("Explain returned empty plan")
 			}
-			if !strings.Contains(plan1, "ProduceResults") {
-				t.Errorf("plan missing ProduceResults:\n%s", plan1)
+			// The physical rendering has no synthetic root: its top node is the
+			// outermost operator the builder produced. Stability plus a non-empty
+			// rendering is what this test is for, so assert the plan really is a
+			// tree rather than looking for a particular root name.
+			if !strings.Contains(plan1, "Scan") && !strings.Contains(plan1, "Expand") {
+				t.Errorf("plan does not look like an operator tree:\n%s", plan1)
 			}
 		})
 	}
