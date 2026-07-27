@@ -309,6 +309,11 @@ var historicalDocs = map[string]bool{
 	// deliberately INELIGIBLE. Executing them would assert nothing about the
 	// record; bench/r4audit/degree_test.go reproduces the figures.
 	filepath.Join("docs", "benchmarks", "degree-rewrite-2026-07-27.md"): true,
+	// Quotes the shortestPath shapes whose plans were measured, including ones
+	// that deliberately fall back to the forward-only walk. Executing them would
+	// assert nothing about the record; bench/r4audit/shortestpath_test.go
+	// reproduces the figures.
+	filepath.Join("docs", "benchmarks", "shortest-path-bidir-2026-07-27.md"): true,
 }
 
 // TestDocumentedCypherExamplesRun executes every Cypher example the gated

@@ -268,10 +268,34 @@ func (op *ShortestPath) Init(ctx context.Context) error {
 	op.fwdVerts = op.fwd.VerticesSlice()
 	op.fwdEdges = op.fwd.EdgesSlice()
 	op.fwdHandles = op.fwd.HandlesSlice()
-	if op.dir != DirOut && op.rev != nil {
+	// The reverse CSR is required by a DirIn / DirBoth traversal, and — since
+	// rmp #2220 — also by the DirOut two-sided search, whose backward half walks
+	// dst's incoming edges. Populating the slices is O(1): they are the snapshot's
+	// own arrays.
+	if op.rev != nil {
 		op.revVerts = op.rev.VerticesSlice()
 		op.revEdges = op.rev.EdgesSlice()
 		op.revHandles = op.rev.HandlesSlice()
+	}
+	// buildRevToFwd is NOT O(1) — it is O(E·d), scanning the forward slots of
+	// every reverse edge's source. Building it for a DirOut operator, which never
+	// needed it before #2220, cost more than the two-sided search saved: measured
+	// end to end at N=20000, the bounded 6-hop shape went 277.7 ms → 351.7 ms even
+	// though the search itself got 17.9× faster.
+	//
+	// It is therefore built only where it earns its cost:
+	//
+	//   - a DirIn / DirBoth traversal reads reverse positions all over the
+	//     ordinary path, exactly as before this change.
+	//
+	// A DirOut search needs no table. Its two reverse-position consumers both know
+	// the edge's endpoints and resolve a single slot against the forward CSR in
+	// O(deg): path reconstruction for the path's own ≤ d hops
+	// (resolveBackwardHop), and the type filter for each scanned edge
+	// (biTypeFilterOK). The table costs O(E·d) — two million slot comparisons on
+	// the measured fixture — while the two-sided search scans only a few thousand
+	// edges in total.
+	if op.rev != nil && op.dir != DirOut {
 		op.revToFwd = buildRevToFwd(
 			op.fwdVerts, op.fwdEdges, op.fwdHandles,
 			op.revVerts, op.revEdges, op.revHandles,
@@ -346,6 +370,21 @@ func (op *ShortestPath) bfsShortestPath(src, dst uint64) (expr.Value, bool, erro
 		return op.bfsShortestCycle(src)
 	}
 
+	// Two-sided search when the configuration allows it (rmp #2220). It explores
+	// Θ(b^⌈d/2⌉) against the forward-only walk's Θ(b^d) and falls back to the walk
+	// below whenever it cannot answer — see shortest_path_bidir.go.
+	if op.canBidirectional() {
+		return op.biBFSShortestPath(src, dst)
+	}
+	return op.bfsShortestPathForward(src, dst)
+}
+
+// bfsShortestPathForward is the single-direction BFS. It remains the reference
+// implementation the two-sided search is differentially tested against, and the
+// fallback taken when no reverse CSR is available (rmp #2220).
+//
+// src != dst is a precondition; the caller handles the cycle case.
+func (op *ShortestPath) bfsShortestPathForward(src, dst uint64) (expr.Value, bool, error) {
 	// pred[nodeID] = the single predecessor entry that first discovered nodeID.
 	// The sentinel for src has parent == src.
 	pred := make(map[uint64]spPredEntry)
