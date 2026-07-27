@@ -3982,11 +3982,35 @@ func (r *Result) RowAt(i int) []expr.Value {
 	return r.rowSlice(i)
 }
 
-// ValueAt returns the value at column index col of the current materialised row.
-// It must only be called after a successful [Next] on a materialised result and
-// is the allocation-free positional accessor used by hot consumers (the Bolt
-// PULL path) that read every column by index and discard the row.
+// ValueAt returns the value at column index col of the current row. It must
+// only be called after a successful [Next], and is the allocation-free
+// positional accessor used by hot consumers (the Bolt PULL path) that read every
+// column by index and discard the row. Out-of-range indices return nil.
+//
+// It serves BOTH a materialised result and a streaming one. That distinction
+// used to matter and silently produced wrong answers (#2215): SHOW INDEXES and
+// SHOW CONSTRAINTS build a streaming result over static rows
+// ([Engine.newShowResult]), while this accessor read only the materialised
+// backing store — whose matRowLen is zero for a streaming result, so every
+// column came back as a bare nil. bolt/server reads each column with ValueAt on
+// the premise that an engine result is always materialised, so `SHOW INDEXES`
+// over Bolt answered with a well-formed row of nulls and no error: fail-silent,
+// which the failure-handling rule forbids outright. Record() was unaffected,
+// which is why the in-tree tests missed it.
+//
+// The streaming branch is served from the ResultSet's positional row, so it
+// costs no allocation and no map lookup, and it fixes the whole class rather
+// than the one instance — any future non-materialised plan is now safe here.
 func (r *Result) ValueAt(col int) expr.Value {
+	if !r.matOn {
+		// Streaming result: read the positional view the ResultSet already holds
+		// for the current row. Next() has advanced it; Row() does not re-project.
+		row := r.rs.Row()
+		if col < 0 || col >= len(row) {
+			return nil
+		}
+		return row[col]
+	}
 	if r.matChunk != nil {
 		// Columnar drain: box just the requested cell at the sink — the Bolt PULL
 		// path reads every column by index, so a whole-row box would be wasteful.

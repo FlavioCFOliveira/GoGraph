@@ -23,6 +23,7 @@
 // | TestSeekReachesWriteStatements, TestIsTheWriteClauseRelevant | W1 §2.1 steps 3-4 — the two refuted hypotheses |
 // | TestUnwindSeekPlans | W1 — the CartesianProduct(Unwind, LabelScan) shape |
 // | TestW1PartA_PlanShapes, TestW1PartA_GatesEngage, TestW1PartA_MinLabelWriteWin | W1 part A — the 145x min-label write win |
+// | TestMergeBindsAllMatches | P0 — WITHDREW this report's own early-exit recommendation |
 //
 // The permanent regression gate for part A is NOT here — it is
 // `cypher/write_path_gates_test.go`, in-package because it reads the planner's

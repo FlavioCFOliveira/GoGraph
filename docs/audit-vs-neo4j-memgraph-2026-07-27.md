@@ -385,10 +385,14 @@ well-formed row of nulls and no error — fail-silent, which the CLAUDE.md failu
 rule forbids outright. The Go API is affected identically for any caller using `ValueAt`;
 `Record()` is unaffected, which is why the in-tree tests missed it.
 
-**Effort: S.** Either materialise the `SHOW` result, or make `ValueAt` fall back to the
-streamed row. The second fixes the whole class — any future streaming result is exposed to
-the same silent nil — but it touches the Bolt hot path, so it needs a benchmark. This is a
-repair-strategy choice, not a scope change.
+**FIXED** (`#2215`). `ValueAt` now serves a streaming result from the `ResultSet`'s positional
+row, which fixes the whole class rather than the one instance — any future non-materialised
+plan is safe here. `SHOW INDEXES` over Bolt returns six populated columns where it returned
+six nulls; the Go API agrees. Two regression gates: `bolt/server/show_values_e2e_test.go`
+proves the contract through the official driver, and `cypher/show_valueat_test.go` pins the
+invariant the defect broke — `ValueAt` and `Record` must describe the same row, which is
+exactly the comparison that would have caught it. No hot-path cost: benchstat over the Bolt
+encode benchmarks reports **−0.49 % geomean sec/op with B/op and allocs/op unchanged**.
 
 #### C3. String ordering diverges from Neo4j for supplementary-plane characters
 
@@ -517,9 +521,13 @@ call `mutator.WalkNodeIDs`. Three separate defects compound:
 2. **The label bitmap is never consulted either** — the walk is over *every interned node
    id*, not over the label's posting list, and label matching is done per node afterwards
    (`nodeMatchesAllLabels`). The source comment concedes this.
-3. **There is no early exit.** Both callbacks `return true` after appending a match
-   (`:97`, `:134`), so the walk continues over the whole graph collecting *every* match,
-   when MERGE's semantics need only to know whether one exists.
+3. ~~There is no early exit.~~ **Withdrawn — this was wrong, and measurement caught it.**
+   Both callbacks `return true` after appending a match (`:97`, `:134`), and the first draft
+   of this report called stopping at the first match "one line, an unconditional win". It is
+   not: `MERGE` binds **every** matching node, exactly as `MATCH` does. Measured on three
+   `:X {v: 1}` nodes, `MERGE (n:X {v: 1}) RETURN n.v` yields **3 rows**. An early exit would
+   silently drop rows and break openCypher semantics. The full walk is *correct*; only its
+   access path is wrong.
 
 **Consequence.** `UNWIND $rows AS r MERGE (p:Person {id: r.id})` over B rows against N nodes
 is **Θ(B·N)**, and it is the idiom every driver's documentation teaches for idempotent bulk
@@ -537,9 +545,10 @@ than W1. Both are unremediated by sprints 316–319, which fixed `MATCH` on the 
 `MATCH` gets, so an indexed merge key yields a `NodeUniqueIndexSeek`/`NodeIndexSeek`; Memgraph
 likewise routes MERGE's match through its label-property index.
 
-**Recommendation, in cost order:** (a) early-exit on first match — one line, unconditional
-win; (b) restrict the walk to the label posting list, which the code already identifies as
-the fix; (c) route the merge key through the existing seek machinery. **Severity: HIGH.**
+**Recommendation, in cost order:** (a) restrict the enumeration to the label posting list,
+which the code already identifies as the fix; (b) route the merge key through the existing
+seek machinery. Both narrow *which* candidates are examined while still enumerating all of
+them, so both preserve the multi-match binding. **Severity: HIGH.**
 
 *Checked and cleared:* `cypher/exec/create_node.go:363` also calls `WalkNodeIDs`, but it is
 `seedGlobalNodeCounter`, guarded by `globalNodeCounterSeededOnce` — once per process,
@@ -836,9 +845,8 @@ library should not unilaterally own the host's memory policy, and (a) is a prere
 4. **Doc gate** — make it execute the examples in `docs/cypher.md` rather than grep for
    tokens (§C1). Ranked here because it retires a whole class rather than one instance, and
    because it is what would have caught C1's documentation half without an auditor.
-5. **P0** `MERGE`'s full-graph walk, in its own cost order: early exit (one line) → label
-   posting list → index seek. The early exit alone is an unconditional win and should not
-   wait for the other two.
+5. **P0** `MERGE`'s full-graph walk: label posting list → index seek. Both must keep
+   enumerating every match, because `MERGE` binds all of them.
 6. **M2-spike** why an indexed numeric point lookup is 127× an indexed string one (§5). It is
    a spike, not a fix, and it gates any claim that round 3's Q2 is closed on performance.
 7. **Q1** decision, then the Windows work it selects.
@@ -887,11 +895,11 @@ the fsync/planning/tx-setup decomposition of the Cypher-ingest figure (s09), and
 ## 10. Where this landed
 
 - Report: this file. Data: [`benchmarks/threeway-2026-07-27.md`](benchmarks/threeway-2026-07-27.md).
-- Evidence harness: `bench/r4audit/` and `bolt/server/r4audit_show_test.go`, both behind the
-  **`r4audit`** build tag — the `SHOW` test asserts the defect and therefore **fails on
-  purpose**, which is why it must stay out of `make ci` until C2 is fixed. The dialect matrix
-  is `bench/comparison/dialect_test.go`, behind `threeway`.
-- Plan: **rmp sprint 326** (PENDING), 13 tasks — `#2225`, `#2215`, `#2216`, `#2227`, `#2217`,
+- Evidence harness: `bench/r4audit/`, behind the **`r4audit`** build tag; the dialect matrix is
+  `bench/comparison/dialect_test.go`, behind `threeway`. The `SHOW` proof started as a
+  deliberately-failing tagged test and, now that C2 is fixed, has become the permanent
+  regression gate `bolt/server/show_values_e2e_test.go` in the short layer.
+- Plan: **rmp sprint 326** (OPEN), 14 tasks — `#2225`, `#2215`, `#2216`, `#2227`, `#2217`,
   `#2226`, `#2218`, `#2219`, `#2220`, `#2221`, `#2222`, `#2223`, `#2224` — ordered as §8.
 - Three decisions are **not** pre-empted and carry no task: Q1 Windows durability, Q2
   collation, Q3 memory-pressure policy (§7).
