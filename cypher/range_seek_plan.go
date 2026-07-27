@@ -129,9 +129,11 @@ type numericBound struct {
 }
 
 // buildRangeSeekIfEnabled is the gated entry point: it returns no range seek
-// when the optimisation is disabled (EngineOptions.DisableRangeIndexSeek, or
-// any build path that does not set bopts.rangeSeekEnabled, such as the write
-// path or the public BuildPlanWithMutator). When enabled it delegates to
+// when the optimisation is disabled (EngineOptions.DisableRangeIndexSeek, or any
+// build path that does not set bopts.rangeSeekEnabled, such as the public
+// BuildPlanWithMutator). The Engine's WRITE path DOES set it as of #2225 — it
+// previously did not, which planned every statement carrying a write clause with
+// a bare label scan; see [planGates]. When enabled this delegates to
 // [tryBuildRangeSeekChild].
 func buildRangeSeekIfEnabled(
 	bopts *buildOpts,

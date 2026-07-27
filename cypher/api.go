@@ -5112,7 +5112,41 @@ func BuildPlanWithMutator(
 	// a collect on this path is never unbounded either. It has no Engine-owned
 	// edge-type-filter cache to share, so a relationship-type-filtered pattern
 	// on this path always rebuilds — correct, just unamortised.
-	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0, nil)
+	//
+	// It also passes the zero [planGates], so the public entry point keeps the
+	// unoptimised access paths it has always had. Only the Engine, which owns
+	// the EngineOptions that gate each substitution, enables them.
+	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0, nil, planGates{})
+}
+
+// planGates carries the ORDER-NEUTRAL planner substitutions the write-path build
+// is allowed to make (rmp #2225). It exists because [buildPlanWithMutatorFull]
+// previously constructed its [buildOpts] with none of the Engine's optimisation
+// gates set, so every statement containing a write clause was planned by the
+// unoptimised planner — measured at 178× the cost of the identical MATCH with a
+// scalar RETURN, and the reason a 20 000-node bulk load takes 35 minutes.
+//
+// # Why only these two
+//
+// Both substitutions are result-identical AND leave the emitted row order alone,
+// so no consumer — read or write — can observe that they happened:
+//
+//   - rangeSeek replaces a label scan plus residual filter with an index seek
+//     over the same rows; the residual predicate is re-applied above it, so the
+//     seek only ever narrows the candidate set (see [tryBuildRangeSeekChild]).
+//   - minLabelScan re-anchors a multi-label pattern on the smallest label. A
+//     label conjunction is commutative and the substitution never scans more
+//     rows than the Labels[0] plan, so it needs no order-safety companion — the
+//     same reasoning the read path records at its own gate.
+//
+// The hash join is deliberately NOT here. It may build on either arm, so it can
+// reorder rows, and a write is not always order-insensitive: `SET` is
+// last-write-wins, so two rows targeting the same node with different values
+// depend on arrival order. Admitting it needs the probe side pinned to the
+// order-defining arm first; that is part B of #2225 and must not be done blind.
+type planGates struct {
+	rangeSeek    bool
+	minLabelScan bool
 }
 
 // buildPlanWithMutatorFull is the engine-internal variant of
@@ -5139,6 +5173,7 @@ func buildPlanWithMutatorFull(
 	idxMgr *index.Manager,
 	maxCollectItems int,
 	edgeTypeFilterCache *edgeTypeFilterCache,
+	gates planGates,
 ) (op exec.Operator, cols []string, err error) {
 	schema := make(map[string]int)
 	argByTag := make(map[uint32]*exec.Argument)
@@ -5151,6 +5186,13 @@ func buildPlanWithMutatorFull(
 	// — falls through to [buildOperator]'s default branch and errors with
 	// "unsupported IR node *ir.CreateNode".
 	bopts := &buildOpts{maxCollectItems: maxCollectItems, edgeTypeFilterCache: edgeTypeFilterCache}
+	// Order-neutral planner substitutions (#2225). Before this, the write path
+	// left every gate at its zero value, so a statement carrying any write clause
+	// was planned without the seek and without the min-label re-anchor that the
+	// identical read statement gets. See [planGates] for why exactly these two
+	// are safe here and why the hash join is not.
+	bopts.rangeSeekEnabled = gates.rangeSeek
+	bopts.minLabelScanEnabled = gates.minLabelScan
 	bopts.writeFallback = func(child ir.LogicalPlan) (exec.Operator, error) {
 		return buildOperatorWrite(child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 	}
@@ -14647,7 +14689,11 @@ func (e *Engine) execUnderBarrier(
 		// (Engine.Run, where labelSrc carries cs); the write-path plan build never
 		// reads it, so cs is left nil here to keep the write path's resolver lean.
 		labelSrc := &lpgLabelResolver{g: e.g}
-		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager(), e.maxCollectItems, e.edgeTypeFilterCache)
+		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager(), e.maxCollectItems, e.edgeTypeFilterCache,
+			// #2225: give the write path the Engine's ORDER-NEUTRAL substitutions.
+			// Without these it planned every writing statement — including the
+			// `UNWIND … MATCH … CREATE` bulk-load idiom — with a bare label scan.
+			planGates{rangeSeek: e.rangeSeekEnabled, minLabelScan: e.minLabelScanEnabled})
 		if berr != nil {
 			buildErr = berr
 			return nil
