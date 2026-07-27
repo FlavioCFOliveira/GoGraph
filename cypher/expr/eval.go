@@ -65,6 +65,48 @@ type SubqueryEvaluator interface {
 	EvalCount(ctx context.Context, sub *ast.CountSubquery, row RowContext, params map[string]Value) (Value, error)
 }
 
+// BoundedCountEvaluator is an OPTIONAL capability a [SubqueryEvaluator] may
+// also implement. When it does, a COUNT { … } compared against an integer
+// literal is evaluated with a ceiling instead of exactly, so an implementation
+// able to stop counting early can do so (rmp #2232, mirroring Neo4j's
+// short-circuiting HasDegree family over its plain GetDegree).
+//
+// # Why a cap of literal+1 decides every comparison
+//
+// Let T be the true count, k the literal and C = min(T, k+1) the capped count.
+// For each of the six comparison operators, `T op k` and `C op k` agree:
+//
+//   - T > k:  T ≤ k ⟹ C = T, same verdict; T ≥ k+1 ⟹ C = k+1 > k, both true.
+//   - T ≥ k:  T ≤ k ⟹ C = T; T > k ⟹ C = k+1 ≥ k, both true.
+//   - T < k:  T ≤ k ⟹ C = T; T > k ⟹ C = k+1 ≮ k, both false.
+//   - T ≤ k:  T ≤ k ⟹ C = T; T > k ⟹ C = k+1 > k, both false.
+//   - T = k:  T ≤ k ⟹ C = T; T > k ⟹ C = k+1 ≠ k, both false.
+//   - T ≠ k:  the negation of the previous line.
+//
+// A negative k is covered too, since T ≥ 0 always and the cap clamps to 0.
+//
+// An implementation that cannot exploit the cap must still return the EXACT
+// count; the cap is permission to stop early, never a licence to under-report
+// below it.
+type BoundedCountEvaluator interface {
+	// EvalCountBounded is [SubqueryEvaluator.EvalCount] returning
+	// min(trueCount, limit) when limit >= 0, and the exact count when limit < 0.
+	EvalCountBounded(ctx context.Context, sub *ast.CountSubquery, row RowContext, params map[string]Value, limit int64) (Value, error)
+}
+
+// PatternCountEvaluator is an OPTIONAL capability a [PatternEvaluator] may also
+// implement, letting `size([ (a)-[:R]->(b) | … ])` be answered without building
+// the list. Neo4j's getDegreeRewriter treats Size(ListIRExpression) as
+// count-like for exactly this reason: the projection cannot change how MANY
+// matches there are, so a degree answers it (rmp #2232).
+//
+// ok is false when the pattern is not answerable this way, in which case the
+// caller builds the list and takes its length as before.
+type PatternCountEvaluator interface {
+	// CountPatternComp returns the number of matches of pc's pattern for row.
+	CountPatternComp(ctx context.Context, pc *ast.PatternComprehension, row RowContext) (Value, bool, error)
+}
+
 // PatternEvaluator evaluates [ast.PathPattern] expressions used as existential
 // predicates inside WHERE clauses (e.g. WHERE (a)-[:T]->(b)). The evaluator
 // receives the current row context so that bound variables are visible and can
@@ -866,13 +908,24 @@ func evalBinaryOp(n *ast.BinaryOp, row RowContext, params map[string]Value, reg 
 		return eval3VLOR(n, row, params, reg)
 	}
 
-	left, err := evalExpr(n.Left, row, params, reg)
+	// A COUNT { … } compared against an integer literal never needs the exact
+	// count — only enough of it to decide the comparison. When the wired
+	// SubqueryEvaluator can stop early, give it the ceiling (#2232). See
+	// [BoundedCountEvaluator] for why literal+1 is sufficient for all six
+	// operators.
+	left, right, done, err := evalBoundedCountComparison(n, row, params, reg)
 	if err != nil {
 		return nil, err
 	}
-	right, err := evalExpr(n.Right, row, params, reg)
-	if err != nil {
-		return nil, err
+	if !done {
+		left, err = evalExpr(n.Left, row, params, reg)
+		if err != nil {
+			return nil, err
+		}
+		right, err = evalExpr(n.Right, row, params, reg)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	switch n.Operator {
@@ -1619,6 +1672,81 @@ func evalUnaryOp(n *ast.UnaryOp, row RowContext, params map[string]Value, reg Fu
 // Function invocation
 // ─────────────────────────────────────────────────────────────────────────────
 
+// evalBoundedCountComparison recognises `COUNT { … } <cmp> <integer literal>`
+// in either operand order and evaluates the COUNT with a ceiling, so an
+// evaluator able to stop counting early does. done is false when the shape does
+// not apply or no [BoundedCountEvaluator] is wired, in which case the caller
+// evaluates both operands normally.
+//
+// The returned operands keep the ORIGINAL left/right positions, so the operator
+// switch that follows is unchanged and no comparison is reversed.
+func evalBoundedCountComparison(n *ast.BinaryOp, row RowContext, params map[string]Value, _ FunctionRegistry) (left, right Value, done bool, err error) {
+	switch n.Operator {
+	case "=", "<>", "<", "<=", ">", ">=":
+	default:
+		return nil, nil, false, nil
+	}
+	// NOTE the naming: these report which SIDE carries the COUNT, not which side
+	// carries the literal. Getting that backwards swaps the operands and inverts
+	// every comparison — it did, and the differential suite missed it because
+	// both arms of the comparison went through this same code. The identity
+	// suite now also asserts absolute expected values for exactly that reason.
+	countOnLeft, isCountLeft := n.Left.(*ast.CountSubquery)
+	countOnRight, isCountRight := n.Right.(*ast.CountSubquery)
+	// Exactly one side must be the COUNT; `COUNT{…} = COUNT{…}` has no literal
+	// to bound against.
+	if isCountLeft == isCountRight {
+		return nil, nil, false, nil
+	}
+	sub, other := countOnLeft, n.Right
+	if isCountRight {
+		sub, other = countOnRight, n.Left
+	}
+	k, ok := integerLiteralValue(other)
+	if !ok {
+		return nil, nil, false, nil
+	}
+	ctx, subEval := extractSubqueryContext(row)
+	if subEval == nil {
+		return nil, nil, false, nil
+	}
+	bounded, capable := subEval.(BoundedCountEvaluator)
+	if !capable {
+		return nil, nil, false, nil
+	}
+	limit := k + 1
+	if limit < 0 {
+		limit = 0
+	}
+	counted, cerr := bounded.EvalCountBounded(ctx, sub, row, params, limit)
+	if cerr != nil {
+		return nil, nil, false, cerr
+	}
+	// Put each operand back in its ORIGINAL position so the operator switch that
+	// follows compares them the way the query wrote them.
+	lit := IntegerValue(k)
+	if isCountRight {
+		return lit, counted, true, nil
+	}
+	return counted, lit, true, nil
+}
+
+// integerLiteralValue extracts a signed integer literal, including one behind a
+// unary minus, and reports false for anything else.
+func integerLiteralValue(e ast.Expression) (int64, bool) {
+	switch v := e.(type) {
+	case *ast.IntLiteral:
+		return v.Value, true
+	case *ast.UnaryOp:
+		if v.Operator == "-" {
+			if inner, ok := integerLiteralValue(v.Operand); ok {
+				return -inner, true
+			}
+		}
+	}
+	return 0, false
+}
+
 func evalFunction(n *ast.FunctionInvocation, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
 	if reg == nil {
 		return nil, &EvalError{Msg: fmt.Sprintf("no function registry; cannot call %s()", n.Name)}
@@ -1640,6 +1768,27 @@ func evalFunction(n *ast.FunctionInvocation, row RowContext, params map[string]V
 	// parser: all(x IN list WHERE pred). Evaluate the source list and the
 	// predicate mask directly instead of folding to a filtered list, so that we
 	// preserve the original element count.
+	// ── size([ (a)-[:R]->(b) | … ]) ────────────────────────────────────────────
+	// A pattern comprehension's length is a COUNT of matches; the projection
+	// cannot change it. When the wired PatternEvaluator can answer that from a
+	// degree it does, and the list is never built (#2232). Falls through to the
+	// ordinary path — build the list, take its length — whenever it cannot.
+	if name == "size" && len(n.Args) == 1 {
+		if pc, ok := n.Args[0].(*ast.PatternComprehension); ok {
+			if ctx, patEval := extractPatternEvaluator(row); patEval != nil {
+				if pce, capable := patEval.(PatternCountEvaluator); capable {
+					v, answered, err := pce.CountPatternComp(ctx, pc, row)
+					if err != nil {
+						return nil, err
+					}
+					if answered {
+						return v, nil
+					}
+				}
+			}
+		}
+	}
+
 	switch name {
 	case "all", "any", "none", "single":
 		if len(n.Args) == 1 {

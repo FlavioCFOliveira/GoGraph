@@ -68,6 +68,13 @@ type subqueryEvaluator struct {
 	// the unique AST pointer; the value carries the seedable Argument and the
 	// schema layout used to materialise the per-row Row.
 	compiled map[ast.Expression]*compiledSubquery
+
+	// degree caches the per-AST degree-rewrite verdict (rmp #2232). A present
+	// non-nil value is a recognised degree-answerable pattern that answers from
+	// the adjacency instead of driving an inner plan; a present nil value is a
+	// pattern already examined and rejected, so the recogniser runs at most once
+	// per subquery occurrence rather than once per outer row.
+	degree map[ast.Expression]*degreeShape
 }
 
 // compiledSubquery bundles the runtime state of a single compiled subquery:
@@ -91,6 +98,7 @@ func newSubqueryEvaluator(walker nodeWalkerIface, labels labelResolverIface, reg
 		reg:      reg,
 		g:        g,
 		compiled: make(map[ast.Expression]*compiledSubquery),
+		degree:   make(map[ast.Expression]*degreeShape),
 	}
 }
 
@@ -98,6 +106,15 @@ func newSubqueryEvaluator(walker nodeWalkerIface, labels labelResolverIface, reg
 // inner plan against the seeded outer row and reports whether any row was
 // produced. The inner plan is closed early once a row is observed.
 func (e *subqueryEvaluator) EvalExists(ctx context.Context, sub *ast.ExistsSubquery, row expr.RowContext, _ map[string]expr.Value) (expr.Value, error) {
+	// Degree rewrite (#2232): EXISTS over a degree-answerable pattern is
+	// "degree > 0", which the adjacency answers without an inner plan. Capped at
+	// 1 — the existence question never needs to know the true degree.
+	if sh := e.degreeShapeFor(sub, sub.Pattern, sub.Where, row); sh != nil {
+		if n, ok := sh.count(e.g, row, 1); ok {
+			degreeRewriteCount.Add(1)
+			return expr.BoolValue(n > 0), nil
+		}
+	}
 	cs, err := e.compileExists(sub, row)
 	if err != nil {
 		return nil, err
@@ -113,6 +130,15 @@ func (e *subqueryEvaluator) EvalExists(ctx context.Context, sub *ast.ExistsSubqu
 // plan to completion and counts the rows it emitted. The count is reported as
 // an [expr.IntegerValue]; zero rows yield IntegerValue(0).
 func (e *subqueryEvaluator) EvalCount(ctx context.Context, sub *ast.CountSubquery, row expr.RowContext, _ map[string]expr.Value) (expr.Value, error) {
+	// Degree rewrite (#2232). Uncapped: this entry point owes the caller the
+	// true count. A comparison against a literal reaches the bounded form
+	// through EvalCountBounded instead, which is where short-circuiting lives.
+	if sh := e.degreeShapeFor(sub, sub.Pattern, nil, row); sh != nil {
+		if n, ok := sh.count(e.g, row, -1); ok {
+			degreeRewriteCount.Add(1)
+			return expr.IntegerValue(n), nil
+		}
+	}
 	cs, err := e.compileCount(sub, row)
 	if err != nil {
 		return nil, err

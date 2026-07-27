@@ -1703,6 +1703,80 @@ func (g *Graph[N, W]) outDegreeFiltered(src N, byType bool, relType LabelID) (in
 	})
 }
 
+// OutDegreeByID is [Graph.OutDegree] keyed by an already-resolved
+// [graph.NodeID]. Tombstoned far endpoints are excluded exactly as
+// [Graph.OutDegree] excludes them, through the same predicate.
+//
+// It exists for the query layer, which holds ids and would otherwise pay an
+// id → node-value → id round-trip (an array read plus a string hash) on every
+// call; see [github.com/FlavioCFOliveira/GoGraph/graph/adjlist.AdjList.OutDegreeByID]
+// for the measurement that motivated it.
+//
+// # Cost
+//
+// O(1) when the graph holds no tombstones; O(d) once anything has been deleted.
+//
+// # Concurrency
+//
+// Safe for concurrent use with readers and writers, and lock-free.
+func (g *Graph[N, W]) OutDegreeByID(srcID graph.NodeID) (int, bool) {
+	if g.tombstoneActive.Load() == 0 {
+		return g.adj.OutDegreeByID(srcID)
+	}
+	return g.adj.OutDegreeFuncBoundedByID(srcID, maxInt, func(dst graph.NodeID, _ uint32) bool {
+		return !g.IsTombstoned(dst)
+	})
+}
+
+// OutDegreeByTypeBoundedByID is [Graph.OutDegreeByTypeBounded] keyed by an
+// already-resolved [graph.NodeID]. See [Graph.OutDegreeByID].
+func (g *Graph[N, W]) OutDegreeByTypeBoundedByID(srcID graph.NodeID, relType LabelID, limit int) (int, bool) {
+	want := encodeSlotLabel(relType) // see OutDegreeByType on the encoding
+	live := g.tombstoneActive.Load() != 0
+	return g.adj.OutDegreeFuncBoundedByID(srcID, limit, func(dst graph.NodeID, lbl uint32) bool {
+		if lbl != want {
+			return false
+		}
+		return !live || !g.IsTombstoned(dst)
+	})
+}
+
+// maxInt is the effectively-unbounded limit for the bounded degree walkers, used
+// where the caller wants every matching edge counted but still needs the
+// id-keyed, predicate-carrying walk.
+const maxInt = int(^uint(0) >> 1)
+
+// OutDegreeByTypeBounded is [Graph.OutDegreeByType] capped at limit: it stops as
+// soon as limit matching edges have been counted and returns
+// min(trueDegree, limit). ok is false when src is not interned.
+//
+// It answers a comparison of a typed degree against a small literal without
+// walking a high-degree node to the end. The untyped degree has no bounded
+// companion because it is already O(1) — there is nothing to stop early.
+//
+// Tombstoned far endpoints are excluded exactly as [Graph.OutDegreeByType]
+// excludes them, through the same predicate, so a bounded and an unbounded count
+// can never disagree about WHICH edges count — only about when they stop
+// counting.
+//
+// # Cost
+//
+// O(min(d, limit)) in the node's degree. No allocation.
+//
+// # Concurrency
+//
+// Safe for concurrent use with readers and writers, and lock-free.
+func (g *Graph[N, W]) OutDegreeByTypeBounded(src N, relType LabelID, limit int) (int, bool) {
+	want := encodeSlotLabel(relType) // see OutDegreeByType on the encoding
+	live := g.tombstoneActive.Load() != 0
+	return g.adj.OutDegreeFuncBounded(src, limit, func(dst graph.NodeID, lbl uint32) bool {
+		if lbl != want {
+			return false
+		}
+		return !live || !g.IsTombstoned(dst)
+	})
+}
+
 // HasConstraints reports whether the cypher engine currently has any schema
 // constraint registered on this graph. It reads a lock-free counter maintained
 // by the engine (SetActiveConstraintCount), so it is cheap enough for the

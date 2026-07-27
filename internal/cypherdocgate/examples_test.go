@@ -304,6 +304,11 @@ var historicalDocs = map[string]bool{
 	// specific commit, which the harnesses in bench/r4audit and bench/comparison
 	// reproduce, not this gate.
 	filepath.Join("docs", "benchmarks", "write-path-hash-join-2026-07-27.md"): true,
+	// Quotes the COUNT/EXISTS/size shapes whose plans were measured, to name the
+	// eligibility boundary under discussion — including shapes that are
+	// deliberately INELIGIBLE. Executing them would assert nothing about the
+	// record; bench/r4audit/degree_test.go reproduces the figures.
+	filepath.Join("docs", "benchmarks", "degree-rewrite-2026-07-27.md"): true,
 }
 
 // TestDocumentedCypherExamplesRun executes every Cypher example the gated
