@@ -1957,75 +1957,7 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	// never race on it.
 	queryReg := newNowAwareRegistry(e.reg, time.Now())
 	e.g.View(func() {
-		walker := &lpgNodeWalker{g: e.g}
-		labelSrc := &lpgLabelResolver{g: e.g, eng: e}
-		// Allocate a per-run subquery evaluator so EXISTS { … } / COUNT { … }
-		// expressions encountered inside Filter/Project closures can drive their
-		// inner pipelines against the current outer row (task-396).
-		subEval := newSubqueryEvaluator(walker, labelSrc, queryReg, e.g)
-		// Allocate a per-run pattern evaluator so WHERE (a)-[:T]->(b) existential
-		// predicates can be evaluated against the live graph (task-961). It
-		// receives the Engine's per-query element budget so a pattern
-		// comprehension over a supernode anchor cannot build an unbounded
-		// result list — the same bound collect() enforces (#1294, #1298).
-		patEval := newPatternEvaluator(e.g, e.maxCollectItems)
-		bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx, maxCollectItems: e.maxCollectItems}
-		// Edge-type-filter cache sharing (#1871): the SAME cache instance
-		// serves every concurrent Run call, so a relationship-type-filtered
-		// pattern amortises its O(V+E) build across the whole Engine's query
-		// stream, not just within one call.
-		bopts.edgeTypeFilterCache = e.edgeTypeFilterCache
-		// Hash-join optimisation gating (#1506): enable only when the Engine
-		// permits it AND the whole-query order-safety scan finds no operator that
-		// would observe the changed row order. Both must hold; otherwise the
-		// planner falls back to the legacy nested-loop Cartesian plan.
-		bopts.hashJoinEnabled = e.hashJoinEnabled
-		bopts.hashJoinOrderSafe = entry.hashJoinSafe
-		bopts.rangeSeekEnabled = e.rangeSeekEnabled
-		// Min-label scan gating (#2077): enable the smallest-cardinality
-		// multi-label anchor substitution when the Engine permits it. The
-		// substitution is result-identical (a label conjunction is commutative)
-		// and never scans more rows than the Labels[0] plan, so it needs no
-		// order-safety companion.
-		bopts.minLabelScanEnabled = e.minLabelScanEnabled
-		// Disjoint-component reorder gating (#2091): when the Engine permits it and
-		// the plan has memoised order-safe candidates, apply the live cardinality
-		// gate against this query's snapshot. The live node total (for AllNodesScan
-		// components) and every label count are read under View's visibility
-		// barrier, so all cost inputs come from one consistent snapshot. The swap
-		// changes only emission order and internal column layout, never the
-		// multiset; SuppressReorder (baked into the candidate set) guarantees no
-		// downstream operator observes the change.
-		if e.joinReorderEnabled && len(entry.reorderCandidates) > 0 {
-			bopts.reorderSwap = computeReorderSwaps(entry.reorderCandidates, labelSrc, int64(e.g.LiveOrder()))
-		}
-		bopts.seekHint = entry.pushedSeekHints
-		// Single-edge anchor-swap gating (#2090): when the Engine permits it and
-		// the plan has memoised order-safe single-edge sites, apply the live
-		// count-store cost gate against this query's snapshot. N(label) and every
-		// D(label,relType,dir) cell (and its dirty flag) are read under View's
-		// visibility barrier — exclusive against a committing writer — so all cost
-		// inputs come from one consistent snapshot. The swap re-roots the pattern
-		// onto its other endpoint (OUT-ward only) with an identical multiset;
-		// SuppressReorder (baked into the candidate set) guarantees no downstream
-		// operator observes the emission-order change.
-		if e.anchorSwapEnabled && len(entry.anchorSwapCandidates) > 0 {
-			bopts.anchorSwap = computeAnchorSwaps(entry.anchorSwapCandidates, labelSrc)
-		}
-		// Parallel-count gating (#1672): the parallel count reduce replaces the
-		// serial EagerAggregation pipeline only when the Engine permits it AND the
-		// live node count exceeds the threshold (checked at the build site against
-		// the live graph). Both must hold; otherwise the planner builds the serial
-		// pipeline.
-		bopts.parallelScanEnabled = e.parallelScanEnabled
-		bopts.parallelScanThreshold = e.parallelScanThreshold
-		bopts.parallelGov = e.parallelGov
-		// Thread the same result-memory budget the Result drain enforces so the
-		// morsel-parallel scan leaf bounds peak memory instead of materialising
-		// the whole result set (#1830).
-		bopts.maxResultRows = e.maxResultRows
-		bopts.maxResultBytes = e.maxResultBytes
-		op, cols, err := buildPlanEngine(plan, walker, labelSrc, queryReg, params, e.g.IndexManager(), e.procReg, bopts)
+		op, cols, err := e.buildReadPhysical(ctx, entry, plan, params, queryReg)
 		if err != nil {
 			buildErr = err
 			return
@@ -2040,6 +1972,103 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		return nil, fmt.Errorf("cypher: build plan: %w", buildErr)
 	}
 	return r, nil
+}
+
+// buildReadPhysical assembles the PHYSICAL operator tree for a read plan, with
+// every optimisation gate resolved exactly as the execution path resolves it:
+// hash-join substitution and its order-safety companion, range seeks, the
+// min-label scan, the disjoint-component reorder, the single-edge anchor swap,
+// the parallel tier, and the result-memory budget.
+//
+// It is the SINGLE build path for reads. [Engine.Run] calls it to execute, and
+// the plan-rendering surfaces ([Engine.ExplainPhysical], [Engine.Profile]) call
+// it to render, so a rendered plan cannot diverge from the plan that runs. That
+// divergence was a real defect in both directions (rmp #2222): the old
+// IR-based rendering reported NodeByIndexSeek where a label scan ran, and
+// printed CartesianProduct for a query the runtime counter proves executes as a
+// HashJoin — O(n·m) shown where O(n+m) runs. Deriving both from one builder is
+// what makes that class of defect unrepresentable, so DO NOT reintroduce a
+// second gate-resolution site for rendering.
+//
+// The caller must already hold the graph's read barrier ([lpg.Graph.View]): the
+// cost gates read live label counts, the node total, and count-store cells, and
+// they must all come from one consistent snapshot.
+func (e *Engine) buildReadPhysical(
+	ctx context.Context,
+	entry *planCacheEntry,
+	plan ir.LogicalPlan,
+	params map[string]expr.Value,
+	queryReg expr.FunctionRegistry,
+) (exec.Operator, []string, error) {
+	walker := &lpgNodeWalker{g: e.g}
+	labelSrc := &lpgLabelResolver{g: e.g, eng: e}
+	// Allocate a per-run subquery evaluator so EXISTS { … } / COUNT { … }
+	// expressions encountered inside Filter/Project closures can drive their
+	// inner pipelines against the current outer row (task-396).
+	subEval := newSubqueryEvaluator(walker, labelSrc, queryReg, e.g)
+	// Allocate a per-run pattern evaluator so WHERE (a)-[:T]->(b) existential
+	// predicates can be evaluated against the live graph (task-961). It
+	// receives the Engine's per-query element budget so a pattern
+	// comprehension over a supernode anchor cannot build an unbounded
+	// result list — the same bound collect() enforces (#1294, #1298).
+	patEval := newPatternEvaluator(e.g, e.maxCollectItems)
+	bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx, maxCollectItems: e.maxCollectItems}
+	// Edge-type-filter cache sharing (#1871): the SAME cache instance
+	// serves every concurrent Run call, so a relationship-type-filtered
+	// pattern amortises its O(V+E) build across the whole Engine's query
+	// stream, not just within one call.
+	bopts.edgeTypeFilterCache = e.edgeTypeFilterCache
+	// Hash-join optimisation gating (#1506): enable only when the Engine
+	// permits it AND the whole-query order-safety scan finds no operator that
+	// would observe the changed row order. Both must hold; otherwise the
+	// planner falls back to the legacy nested-loop Cartesian plan.
+	bopts.hashJoinEnabled = e.hashJoinEnabled
+	bopts.hashJoinOrderSafe = entry.hashJoinSafe
+	bopts.rangeSeekEnabled = e.rangeSeekEnabled
+	// Min-label scan gating (#2077): enable the smallest-cardinality
+	// multi-label anchor substitution when the Engine permits it. The
+	// substitution is result-identical (a label conjunction is commutative)
+	// and never scans more rows than the Labels[0] plan, so it needs no
+	// order-safety companion.
+	bopts.minLabelScanEnabled = e.minLabelScanEnabled
+	// Disjoint-component reorder gating (#2091): when the Engine permits it and
+	// the plan has memoised order-safe candidates, apply the live cardinality
+	// gate against this query's snapshot. The live node total (for AllNodesScan
+	// components) and every label count are read under View's visibility
+	// barrier, so all cost inputs come from one consistent snapshot. The swap
+	// changes only emission order and internal column layout, never the
+	// multiset; SuppressReorder (baked into the candidate set) guarantees no
+	// downstream operator observes the change.
+	if e.joinReorderEnabled && len(entry.reorderCandidates) > 0 {
+		bopts.reorderSwap = computeReorderSwaps(entry.reorderCandidates, labelSrc, int64(e.g.LiveOrder()))
+	}
+	bopts.seekHint = entry.pushedSeekHints
+	// Single-edge anchor-swap gating (#2090): when the Engine permits it and
+	// the plan has memoised order-safe single-edge sites, apply the live
+	// count-store cost gate against this query's snapshot. N(label) and every
+	// D(label,relType,dir) cell (and its dirty flag) are read under View's
+	// visibility barrier — exclusive against a committing writer — so all cost
+	// inputs come from one consistent snapshot. The swap re-roots the pattern
+	// onto its other endpoint (OUT-ward only) with an identical multiset;
+	// SuppressReorder (baked into the candidate set) guarantees no downstream
+	// operator observes the emission-order change.
+	if e.anchorSwapEnabled && len(entry.anchorSwapCandidates) > 0 {
+		bopts.anchorSwap = computeAnchorSwaps(entry.anchorSwapCandidates, labelSrc)
+	}
+	// Parallel-count gating (#1672): the parallel count reduce replaces the
+	// serial EagerAggregation pipeline only when the Engine permits it AND the
+	// live node count exceeds the threshold (checked at the build site against
+	// the live graph). Both must hold; otherwise the planner builds the serial
+	// pipeline.
+	bopts.parallelScanEnabled = e.parallelScanEnabled
+	bopts.parallelScanThreshold = e.parallelScanThreshold
+	bopts.parallelGov = e.parallelGov
+	// Thread the same result-memory budget the Result drain enforces so the
+	// morsel-parallel scan leaf bounds peak memory instead of materialising
+	// the whole result set (#1830).
+	bopts.maxResultRows = e.maxResultRows
+	bopts.maxResultBytes = e.maxResultBytes
+	return buildPlanEngine(plan, walker, labelSrc, queryReg, params, e.g.IndexManager(), e.procReg, bopts)
 }
 
 // Explain returns a textual representation of the physical plan that would be
