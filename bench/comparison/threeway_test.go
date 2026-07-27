@@ -33,6 +33,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -46,6 +47,9 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/store"
+	"github.com/FlavioCFOliveira/GoGraph/store/txn"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // ── dataset ──────────────────────────────────────────────────────────────────
@@ -415,11 +419,12 @@ func (b *boltTarget) Load(ctx context.Context, ds *dataset) (time.Duration, erro
 		return 0, fmt.Errorf("%s: label Manager: %w", b.name, err)
 	}
 	// Index before edge loading, or the MATCH per row is a full scan.
-	// Both keys are indexed; edges join on the STRING key (sid) because
-	// GoGraph's Cypher CREATE INDEX can only build string-keyed indexes
-	// (see cypher/index_binding.go projectStringPropValue), so an integer
-	// join key would force a full label scan per row on GoGraph alone and
-	// make the load comparison measure that defect rather than the write path.
+	//
+	// Both keys are indexed; the Bolt targets join on the STRING key (sid) so the
+	// cross-target load figure stays comparable with prior rounds. The numeric key
+	// is exercised by a dedicated in-process GoGraph target (see
+	// embeddedTarget.loadEdges), which is where the old "GoGraph can only index
+	// string keys" premise lived and where it was measured to be stale.
 	for _, ddl := range []string{b.dia.CreateIndex("Person", "id"), b.dia.CreateIndex("Person", "sid")} {
 		if err := b.execIdempotentDDL(ctx, ddl); err != nil {
 			return 0, fmt.Errorf("%s: pre-index: %w", b.name, err)
@@ -465,15 +470,71 @@ func (b *boltTarget) Close(ctx context.Context) {
 // embeddedTarget drives GoGraph in-process, with no serialisation at all.
 type embeddedTarget struct {
 	eng *cypher.Engine
+	// db is non-nil only for the DURABLE variant, which owns a WAL and fsyncs
+	// every commit. nil is the in-memory variant.
+	db   *store.DB
+	name string
+	// edgeKey is the Person property the edge load joins on: "sid" (string) or
+	// "id" (integer). Both variants of the key are measured because the harness
+	// used to assume they were not comparable; see newEmbeddedTarget.
+	edgeKey string
 }
 
-func newEmbeddedTarget() *embeddedTarget {
+// newEmbeddedTarget drives GoGraph in-process with NO durability: a bare
+// lpg.Graph, no WAL, no fsync.
+//
+// That is a real mode GoGraph supports, but on its own it is not a fair
+// comparison, because both rivals write a log:
+//
+//   - Neo4j forces its transaction log on every commit.
+//   - Memgraph's default storage_wal_file_flush_every_n_tx is 100000
+//     (memgraph/memgraph, tests/e2e/configuration/default_config.py), so out of
+//     the box it fsyncs once every 100 000 transactions; per-commit durability is
+//     opt-in.
+//
+// So this target's write numbers measure an in-memory mutation against two
+// engines paying a log, and its read numbers are measured while carrying no
+// durability cost at all — overstating GoGraph's writes and understating its
+// traversal losses. newEmbeddedDurableTarget is the paired variant that puts the
+// durability axis back, exactly as gograph-embedded versus gograph-bolt separates
+// transport cost. Report both or neither (rmp #2223).
+func newEmbeddedTarget(edgeKey string) *embeddedTarget {
 	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
 	g.SetIndexManager(index.NewManager())
-	return &embeddedTarget{eng: cypher.NewEngine(g)}
+	return &embeddedTarget{eng: cypher.NewEngine(g), name: "gograph-embedded", edgeKey: edgeKey}
 }
 
-func (e *embeddedTarget) Name() string { return "gograph-embedded" }
+// newEmbeddedDurableTarget drives GoGraph in-process over a real store.DB: a
+// WAL-backed txn.Store whose every commit is made durable before it becomes
+// visible. It is the target that makes the write comparison honest.
+func newEmbeddedDurableTarget(dir, edgeKey string) (*embeddedTarget, error) {
+	w, err := wal.Open(filepath.Join(dir, "wal"))
+	if err != nil {
+		return nil, fmt.Errorf("wal.Open: %w", err)
+	}
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g.SetIndexManager(index.NewManager())
+	st := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewFloat64WeightCodec(),
+	})
+	// WithQuiesce closes the WAL under the store's commit lock, so Close cannot
+	// race an in-flight commit's fsync.
+	db := store.New(w, store.WithQuiesce(st.RunUnderCommitLock))
+	return &embeddedTarget{
+		eng:     cypher.NewEngineWithStore(st),
+		db:      db,
+		name:    "gograph-embedded-durable",
+		edgeKey: edgeKey,
+	}, nil
+}
+
+func (e *embeddedTarget) Name() string {
+	if e.edgeKey != "" && e.edgeKey != "sid" {
+		return e.name + "[" + e.edgeKey + "]"
+	}
+	return e.name
+}
 
 func (e *embeddedTarget) exec(ctx context.Context, cy string, params map[string]any) (int, error) {
 	res, err := e.eng.RunInTxAny(ctx, cy, params)
@@ -527,14 +588,52 @@ func (e *embeddedTarget) Load(ctx context.Context, ds *dataset) (time.Duration, 
 			return 0, fmt.Errorf("embedded: pre-index: %w", err)
 		}
 	}
-	for _, rows := range ds.edgeBatches() {
-		if _, err := e.exec(ctx,
-			`UNWIND $rows AS r MATCH (a:Person {sid: r.ss}), (b:Person {sid: r.ts}) CREATE (a)-[:KNOWS]->(b)`,
-			map[string]any{"rows": rows}); err != nil {
-			return 0, fmt.Errorf("embedded: load edges: %w", err)
-		}
+	if err := e.loadEdges(ctx, ds); err != nil {
+		return 0, err
 	}
 	return time.Since(start), nil
+}
+
+// loadEdges bulk-loads the edge set, joining each row to its endpoints on
+// e.edgeKey.
+//
+// The harness used to join on the STRING key unconditionally, on the premise that
+// "GoGraph's Cypher CREATE INDEX can only build string-keyed indexes, so an
+// integer join key would force a full label scan per row on GoGraph alone". That
+// premise is stale, and measurement shows it was stale in a way worth stating
+// precisely, because the obvious correction is also wrong:
+//
+//   - An INLINE numeric key does now reach an index: MATCH (a:Person {id: 250})
+//     lowers to NodeByIndexRangeScan over the degenerate closed range [250,250]
+//     (#2169).
+//   - But this query's key is bound from an UNWIND row, not a literal, and in
+//     that shape NEITHER key reaches a per-row index. Both lower to a
+//     NodeByLabelScan feeding a HashJoin — verified with Engine.Explain, and on
+//     the write path with hashJoinBuildCount, which fires exactly 2 for both the
+//     numeric and the string key while loading the same edges.
+//
+// So the two keys are at PARITY here, and for a better reason than an index: the
+// hash join (#2228) subsumes the per-row lookup entirely for a bulk UNWIND load,
+// turning n lookups into one scan per side. Both variants are measured rather
+// than assumed comparable.
+func (e *embeddedTarget) loadEdges(ctx context.Context, ds *dataset) error {
+	// Every edge row already carries both keys — "ss"/"ts" (string) and "s"/"t"
+	// (integer) — so the two variants differ only in which fields are read. The
+	// dataset, the batch size and the row count are untouched, keeping prior
+	// rounds comparable.
+	src, dst := "ss", "ts"
+	if e.edgeKey == "id" {
+		src, dst = "s", "t"
+	}
+	cy := fmt.Sprintf(
+		`UNWIND $rows AS r MATCH (a:Person {%s: r.%s}), (b:Person {%s: r.%s}) CREATE (a)-[:KNOWS]->(b)`,
+		e.edgeKey, src, e.edgeKey, dst)
+	for _, rows := range ds.edgeBatches() {
+		if _, err := e.exec(ctx, cy, map[string]any{"rows": rows}); err != nil {
+			return fmt.Errorf("%s: load edges: %w", e.Name(), err)
+		}
+	}
+	return nil
 }
 
 func (e *embeddedTarget) CreateIndexes(ctx context.Context) error {
@@ -556,7 +655,13 @@ func (e *embeddedTarget) Run(ctx context.Context, q query) (int, error) {
 	return e.execRead(ctx, q.Cypher, q.Params)
 }
 
-func (e *embeddedTarget) Close(context.Context) {}
+// Close tears down the WAL for the durable variant (final checkpoint, then a
+// crash-safe close). The in-memory variant owns nothing.
+func (e *embeddedTarget) Close(context.Context) {
+	if e.db != nil {
+		_ = e.db.Close()
+	}
+}
 
 // newGoGraphBoltTarget starts an in-process Bolt server over a fresh engine so
 // the same driver path used for Neo4j and Memgraph also measures GoGraph.
@@ -661,6 +766,27 @@ func measure(ctx context.Context, tg target, q query) sample {
 	return s
 }
 
+// durabilityPosture states what a target actually guarantees at the
+// configuration this harness runs it in. Every claim is sourced, because an
+// unsourced durability claim is what made the round-3 comparison unfair.
+func durabilityPosture(target string) string {
+	switch {
+	case strings.HasPrefix(target, "gograph-embedded-durable"):
+		return "**per commit** — WAL append + fsync before the write is visible (store.DB)"
+	case strings.HasPrefix(target, "gograph-embedded"):
+		return "**none** — in-memory lpg.Graph, no WAL, no fsync"
+	case strings.HasPrefix(target, "gograph-bolt"):
+		return "**none** — the Bolt server here is wired to an in-memory engine; only transport differs from gograph-embedded"
+	case strings.HasPrefix(target, "neo4j"):
+		return "**per commit** — the transaction log is forced on every commit (default)"
+	case strings.HasPrefix(target, "memgraph"):
+		return "**every 100 000 tx** — default storage_wal_file_flush_every_n_tx=100000 " +
+			"(memgraph/memgraph, tests/e2e/configuration/default_config.py); per-commit durability is opt-in"
+	default:
+		return "unknown — state it before comparing"
+	}
+}
+
 func TestThreeWay(t *testing.T) {
 	ctx := context.Background()
 	dsData := buildDataset()
@@ -674,7 +800,7 @@ func TestThreeWay(t *testing.T) {
 	var targets []built
 
 	if targetEnabled("gograph-embedded") {
-		emb := newEmbeddedTarget()
+		emb := newEmbeddedTarget("sid")
 		lt, err := emb.Load(ctx, dsData)
 		if err != nil {
 			t.Fatalf("embedded load: %v", err)
@@ -684,6 +810,46 @@ func TestThreeWay(t *testing.T) {
 		}
 		targets = append(targets, built{emb, lt})
 		t.Logf("gograph-embedded loaded in %v", lt)
+	}
+
+	// The DURABLE in-process target: same engine, but every commit goes through a
+	// WAL and is fsynced before it is visible. Paired with gograph-embedded above,
+	// the two isolate the cost of durability itself — without it the write
+	// comparison pits an in-memory mutation against two engines writing a log
+	// (rmp #2223).
+	if targetEnabled("gograph-embedded-durable") {
+		dir := t.TempDir()
+		dur, err := newEmbeddedDurableTarget(dir, "sid")
+		if err != nil {
+			t.Fatalf("embedded-durable: %v", err)
+		}
+		defer dur.Close(ctx)
+		lt, err := dur.Load(ctx, dsData)
+		if err != nil {
+			t.Fatalf("embedded-durable load: %v", err)
+		}
+		if err := dur.CreateIndexes(ctx); err != nil {
+			t.Fatalf("embedded-durable indexes: %v", err)
+		}
+		targets = append(targets, built{dur, lt})
+		t.Logf("gograph-embedded-durable loaded in %v (WAL at %s)", lt, dir)
+	}
+
+	// The NUMERIC-key load variant. The harness used to join edges on the string
+	// key on the premise that GoGraph could only index strings; measurement shows
+	// both keys take the same plan for a bulk UNWIND load, so this target proves
+	// the parity instead of the comment asserting it.
+	if targetEnabled("gograph-embedded-numkey") {
+		num := newEmbeddedTarget("id")
+		lt, err := num.Load(ctx, dsData)
+		if err != nil {
+			t.Fatalf("embedded numeric-key load: %v", err)
+		}
+		if err := num.CreateIndexes(ctx); err != nil {
+			t.Fatalf("embedded numeric-key indexes: %v", err)
+		}
+		targets = append(targets, built{num, lt})
+		t.Logf("gograph-embedded[id] loaded in %v", lt)
 	}
 
 	if !targetEnabled("gograph-bolt") {
@@ -722,7 +888,9 @@ func TestThreeWay(t *testing.T) {
 			t.Logf("SKIP %s: %v", r.name, err)
 			continue
 		}
-		defer bt.Close(ctx)
+		// t.Cleanup, not defer: this is inside a loop, so a defer would stack one
+		// close per rival until the whole test function returns.
+		t.Cleanup(func() { bt.Close(ctx) })
 		lt, err := bt.Load(ctx, dsData)
 		if err != nil {
 			t.Logf("SKIP %s: load: %v", r.name, err)
@@ -740,11 +908,24 @@ func TestThreeWay(t *testing.T) {
 	}
 
 	var out strings.Builder
+
+	// State every target's durability posture before any timing. A load or write
+	// figure is meaningless without it: an engine that does not fsync is not
+	// competing with one that does, and round 3 compared a GoGraph carrying no
+	// durability at all against two engines writing a log without saying so
+	// (rmp #2223).
+	fmt.Fprintf(&out, "\n## Durability posture at the configuration measured\n\n")
+	fmt.Fprintf(&out, "| Target | Durability |\n|---|---|\n")
+	for _, b := range targets {
+		fmt.Fprintf(&out, "| %s | %s |\n", b.tg.Name(), durabilityPosture(b.tg.Name()))
+	}
+
 	fmt.Fprintf(&out, "\n## Load time (%d nodes, %d edges, UNWIND batches of %d)\n\n",
 		len(dsData.People), len(dsData.Edges), twBatch)
-	fmt.Fprintf(&out, "| Target | Load |\n|---|---|\n")
+	fmt.Fprintf(&out, "| Target | Load | Durability |\n|---|---|---|\n")
 	for _, b := range targets {
-		fmt.Fprintf(&out, "| %s | %v |\n", b.tg.Name(), b.loadTime.Round(time.Millisecond))
+		fmt.Fprintf(&out, "| %s | %v | %s |\n",
+			b.tg.Name(), b.loadTime.Round(time.Millisecond), durabilityPosture(b.tg.Name()))
 	}
 
 	results := map[string]map[string]sample{}
@@ -757,6 +938,30 @@ func TestThreeWay(t *testing.T) {
 				t.Logf("%-16s %-20s ERROR %s", b.tg.Name(), q.Key, truncate(s.Err, 140))
 			} else {
 				t.Logf("%-16s %-20s median=%-12v rows=%d", b.tg.Name(), q.Key, s.Median, s.Rows)
+			}
+		}
+	}
+
+	// Cross-check SEMANTICS before comparing any timing. Two engines that return
+	// different row counts for the same query are not running the same query, and
+	// a latency table over them compares nothing — a faster engine may simply be
+	// doing less work. The harness previously tabulated the counts and left the
+	// reader to notice; this fails the run instead (rmp #2223 AC 3).
+	for _, q := range queries() {
+		want, wantFrom := -1, ""
+		for _, b := range targets {
+			s := results[q.Key][b.tg.Name()]
+			if s.Err != "" {
+				continue // errors are reported separately; they are not a disagreement
+			}
+			if want < 0 {
+				want, wantFrom = s.Rows, b.tg.Name()
+				continue
+			}
+			if s.Rows != want {
+				t.Errorf("semantic divergence on %q: %s returned %d rows, %s returned %d — "+
+					"the timings below are not comparable until this is resolved",
+					q.Key, wantFrom, want, b.tg.Name(), s.Rows)
 			}
 		}
 	}
