@@ -1456,6 +1456,27 @@ never synced — the eight `Test` nodes above include two that belong to part A.
 were likewise missing and are created here. A full reconciliation of the 319–325 range is
 a separate hygiene task.
 
+Incrementally synced at commits `afc6fbf`..`aa8f139` (2026-07-27, tasks #2229 and #2232,
+sprint 326): **+11 nodes** — 2 `Commit`, 3 `Task` (`2229` and `2232` COMPLETED, `2235`
+BACKLOG), 1 `Spec` (`docs/benchmarks/degree-rewrite-2026-07-27.md`), 2 `Function`
+(`recogniseDegreePattern`, `applyDDLOp`), 4 `Method` (`lpg.Graph.OutDegreeByID` /
+`.OutDegreeByTypeBoundedByID`, `adjlist.AdjList.OutDegreeFuncBounded` /
+`.OutDegreeFuncBoundedByID`). **+18 edges** — 2 `CONTAINS` (`Sprint 326`→each `Commit`),
+2 `IMPLEMENTED_IN`, 1 `FIXES` and 1 `IMPROVES` (both →`Feature` `Cypher Engine`, id 12659),
+1 `FOLLOWED_BY` (`Task 2232`→`2235`), 8 `TOUCHES` (→`Package` `cypher`, `cypher/expr`,
+`graph/lpg`, `graph/adjlist`, `bench/r4audit`, `internal/cypherdocgate`, →the new `Spec`,
+→`recogniseDegreePattern`), 1 `CONTAINS` (`Package cypher`→`recogniseDegreePattern`). No
+new label or edge type. All stamped `2026-07-27`.
+
+Two properties carry the substance. `recogniseDegreePattern.eligibility` records the port of
+Neo4j's `QuerySolvableByGetDegree` + `isEligible` and, decisively, that **`Selections.empty`
+makes a labelled far node ineligible for a degree rewrite in Neo4j too** — so
+`COUNT { (a)-[:K]->(:P) }`, the round-4 audit's own 88× shape, is served by a different
+mechanism (`Task 2235`), never by widening this recogniser. `applyDDLOp.why` records the
+`Result`-leak defect found while fixing #2229: four intra-sequence callers discarded the
+`Result` the DDL runner returns, and its armed finalizer counted a leak against
+`cypher.result.leaked` on every `CREATE CONSTRAINT`, `DROP CONSTRAINT` and constraint unwind.
+
 ## Known limitations (faithful, by design)
 
 - **Build-tag duplicates.** The extractor parses every `.go` file regardless of build
