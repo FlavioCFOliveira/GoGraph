@@ -1519,6 +1519,44 @@ Java pays an explicit `LockSupport.unpark` loop that the chain exists to avoid; 
 sequential channel sends are strictly worse. The prior-art insight survives only where
 GoGraph's O(N) wake actually was, and where the successor is uniquely determined.
 
+Incrementally synced at commit `f69530a` (2026-07-27, task #2222, sprint 326 — a faithful
+physical plan and PROFILE): **+18 nodes** — 1 `Commit`, 4 `Task` (`2222` COMPLETED, plus
+`2237`/`2238`/`2239` BACKLOG, all three filed from this work), 1 `Spec`
+(`docs/benchmarks/physical-plan-surface-2026-07-27.md`), 4 `Method` on `cypher.Engine`
+(`buildReadPhysical`, `explainPhysical`, `ExplainLogical`, `Profile`), 4 `Type` in
+`cypher/exec` (`PlanNode`, `Profiler`, and the two optional interfaces `PlanChildren` and
+`PlanDetail`), 3 `Function` (`PlanTree`, `RenderPlan`, `RenderPlanNode`) and 3 `Test`.
+**+20 edges** — 1 `CONTAINS` (`Sprint 326`→`Commit`), 1 `IMPLEMENTED_IN`, 3 `FOLLOWED_BY`
+(`2222`→`2237`/`2238`/`2239`), 3 `TOUCHES`, 12 `Package CONTAINS`/`HAS_METHOD`. All stamped
+`2026-07-27`. No new label or edge type.
+
+The substance is HOW the defect was made unrepresentable rather than merely fixed.
+`Engine.Explain` had rendered the logical IR and re-derived the planner's physical decisions a
+second time against it, which was wrong in both directions — `NodeByIndexSeek` reported where a
+label scan ran (round 3) and `CartesianProduct` printed for an equi-join `hashJoinBuildCount`
+proves executes as a hash join (round 4). Three mechanisms replace that reconstruction:
+`buildReadPhysical` is the single build path shared by `Run` and both rendering surfaces; node
+names are read from the operator's **concrete type**, so a `HashJoin` is named `HashJoin` because
+it *is* one; and `TestPlanChildren_EveryOperatorWithInputsImplementsIt` parses the package to
+derive the obligation, because an operator's inputs live in **unexported fields that reflection
+cannot read** — a missing `PlanChildren` would silently TRUNCATE the plan. The gate found **46**
+such operators, four of them columnar ones a field-type regex had missed.
+
+Two constraints are worth recording because they are structural, not stylistic. The profiling
+wrapper **must** live in `cypher/exec`: transparency requires re-implementing
+`NodeIDColumnProducer`, whose marker method is unexported there, so the pre-existing
+`cypher/explain.ProfiledOperator` could not be the wiring — wrapping from outside would strip the
+marker and silently downgrade a columnar plan to row mode. And the builder wraps on the way **out**
+of its recursion, so a parent runs its capability type-assertions against the wrapper; a
+shape-equality test over five shapes is the gate. Cardinality **estimates** belong to logical
+nodes and have no counterpart on a built operator, which is why `Engine.ExplainLogical` exists
+rather than the estimates being lost — examples 24, 25 and 26 were retargeted to it because each
+demonstrates a planner decision or a statistic, not what physically runs.
+
+Rendering the truth immediately produced a new defect the old surface could not show: a single
+`RETURN` builds **two stacked `Project` operators**, so every row is projected twice on the
+engine's hottest path (`Task 2239`).
+
 Two properties carry the substance. `recogniseDegreePattern.eligibility` records the port of
 Neo4j's `QuerySolvableByGetDegree` + `isEligible` and, decisively, that **`Selections.empty`
 makes a labelled far node ineligible for a degree rewrite in Neo4j too** — so
