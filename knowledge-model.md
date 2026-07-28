@@ -1614,6 +1614,35 @@ And `exec.RangeBound.Include` is **metadata only**: `NodeByIndexRangeScan` alway
 inclusive `[lo, hi]` superset and the residual filter enforces open/closed semantics, so flipping
 inclusivity is a no-op and a fault injection has to shift the range off the key to bite.
 
+Incrementally synced at commit `c8e5a0c` (2026-07-28, task #2230, sprint 326 — the write-clause
+classifier stops reading comments and strings): **+12 nodes** — 1 `Commit`, 2 `Task` (`2230`
+COMPLETED, `2240` BACKLOG), 1 `Spec`
+(`docs/benchmarks/write-clause-classifier-2026-07-28.md`), 4 `Function` (`maskNonClauseRegions`
+and its three region scanners), 3 `Test` and 1 `Benchmark`. **+12 edges** — 1 `CONTAINS`,
+1 `IMPLEMENTED_IN`, 1 `FOLLOWED_BY` (`2230`→`2240`), 6 `TOUCHES`, 3 `Package CONTAINS`. All
+stamped `2026-07-28`. No new label or edge type.
+
+`writingKeywordRE` ran against the **raw** query text, so a keyword inside a comment or a quoted
+string routed a READ onto the write path — where it serialises on the store's single writer and
+silently throttles the concurrent read throughput the engine exists to provide. The heuristic was
+never the problem; inspecting regions that cannot hold a clause was. The mask takes its four region
+forms **from the lexer grammar** (`CypherLexer.g4`) rather than from memory, and three details are
+load-bearing: the block comment is **non-greedy**, both string literals carry backslash
+`EscapeSequence` so an escaped delimiter does not close them, and `ESC_LITERAL` (backtick) has **no
+escape sequence at all**, so a backslash inside one is an ordinary byte. Masked bytes become
+**spaces**, not deletions, so word boundaries and offsets survive; an unterminated region masks to
+end of input, which is conservative *for this caller* because the worst outcome is a clean failure
+on the read path rather than taking the writer lock to fail.
+
+Fast-path allocations are **exactly unchanged** (1, all samples equal) and the time cost is +0.67 %
+/ +1.83 % — precisely the single `ContainsAny` guard, ~20 ns against a 2.8 µs regexp match.
+
+The measurement produced a finding worth more than the delta: **classification costs 1.4–2.8 µs on
+every `RunAny`/`RunInTxAny` dispatch**, against ~5 µs for an entire indexed point lookup, so
+classifying a fast query can be a third of its cost. The expense is the case-insensitive regexp,
+and the new mask is the natural place to delete it — one walk could blank the regions *and* test the
+words, fusing two passes into one (`Task 2240`).
+
 Two properties carry the substance. `recogniseDegreePattern.eligibility` records the port of
 Neo4j's `QuerySolvableByGetDegree` + `isEligible` and, decisively, that **`Selections.empty`
 makes a labelled far node ineligible for a degree rewrite in Neo4j too** — so
