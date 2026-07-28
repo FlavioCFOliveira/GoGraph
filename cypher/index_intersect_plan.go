@@ -91,24 +91,69 @@ func tryIndexIntersectionSeek(
 	params map[string]expr.Value,
 	prefixSeek bool,
 ) (exec.Operator, bool) {
-	conjuncts := flattenAndSpine(sel.PredicateExpr)
-	if len(conjuncts) < 2 {
+	// Cheapest possible gate, and it must come FIRST: only a top-level AND can hold
+	// two conjuncts, so anything else is declined before a single allocation.
+	//
+	// This ordering is not cosmetic. The first cut called flattenAndSpine
+	// unconditionally, and that allocates a one-element slice for every predicate it
+	// is handed — including the overwhelming majority that are not conjunctions at
+	// all. It showed up as a real, deterministic regression on the curated suite:
+	// IC4 and IC9 went 311 → 315 allocs/op (p=0.002, ±0%), with matching B/op bumps
+	// on IC2/IC3/IC7/IC11/IC14. A planner probe that runs on every Selection has to
+	// be free when it does not apply.
+	bo, isBinary := sel.PredicateExpr.(*ast.BinaryOp)
+	if !isBinary || !equalFoldAnd(bo.Operator) {
 		return nil, false
 	}
-
 	// One entry per DISTINCT property, first-recognised-bounds-win. Keeping only
 	// the first conjunct per property is sound because every bound retained is a
 	// necessary condition of the conjunction, so the probe stays a superset; any
 	// further conjunct on the same property is simply left to the residual Filter.
-	seen := make(map[string]bool, len(conjuncts))
-	parts := make([]indexRangeConjunct, 0, len(conjuncts))
-	for _, c := range conjuncts {
-		part, ok := recogniseIndexedConjunct(c, nodeVar, lblScan.Label, idxMgr, g, params, prefixSeek)
-		if !ok || seen[part.propKey] {
+	//
+	// The spine is walked ITERATIVELY over stack-resident arrays, with no closure and
+	// no slice handed to another function. That shape is deliberate and was arrived at
+	// by measurement, in three steps: materialising the spine into a slice cost one
+	// allocation per predicate inspected; hoisting that behind an AND pre-check still
+	// left three, because a visitor CLOSURE capturing a growable accumulator forces
+	// both to the heap; only a closure-free walk over fixed local arrays is actually
+	// free. The curated suite measured each step — IC4/IC9 at 315, then 314, against a
+	// 311 baseline — because this probe runs on every Selection the planner sees, so
+	// "free when it does not apply" has to be literal.
+	//
+	// The bounds are generous for real predicates and are treated as limits, not
+	// assumptions: a spine or property list deeper than these simply composes the
+	// parts found so far and leaves the rest to the residual Filter, which is always
+	// sound because every retained bound is a necessary condition.
+	var stack [8]ast.Expression
+	var partBuf [4]indexRangeConjunct
+	parts := partBuf[:0]
+	stack[0] = sel.PredicateExpr
+	top := 1
+	for top > 0 {
+		top--
+		e := stack[top]
+		if inner, isOp := e.(*ast.BinaryOp); isOp && equalFoldAnd(inner.Operator) {
+			if top+2 <= len(stack) {
+				stack[top] = inner.Left
+				stack[top+1] = inner.Right
+				top += 2
+			}
 			continue
 		}
-		seen[part.propKey] = true
-		parts = append(parts, part)
+		part, recognised := recogniseIndexedConjunct(e, nodeVar, lblScan.Label, idxMgr, g, params, prefixSeek)
+		if !recognised || len(parts) == len(partBuf) {
+			continue
+		}
+		duplicate := false
+		for i := range parts {
+			if parts[i].propKey == part.propKey {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			parts = append(parts, part)
+		}
 	}
 	if len(parts) < 2 {
 		return nil, false
@@ -231,23 +276,4 @@ func boundsOf(lo, hi *exec.RangeBound) (exec.RangeBound, exec.RangeBound) {
 		hiB = *hi
 	}
 	return loB, hiB
-}
-
-// flattenAndSpine returns the conjuncts of an arbitrarily nested AND spine.
-//
-// It descends ONLY through AND. Anything else — a NOT, an OR, a comparison — is
-// returned as a single opaque conjunct, so a negated or disjunctive predicate can
-// never be mistaken for a conjunction whose parts may be intersected
-// independently. That refusal-by-default is the same discipline the label
-// intersection and the range seek rely on, and it is what keeps every retained
-// bound a necessary condition of the whole predicate.
-func flattenAndSpine(e ast.Expression) []ast.Expression {
-	bo, ok := e.(*ast.BinaryOp)
-	if !ok || !equalFoldAnd(bo.Operator) {
-		if e == nil {
-			return nil
-		}
-		return []ast.Expression{e}
-	}
-	return append(flattenAndSpine(bo.Left), flattenAndSpine(bo.Right)...)
 }

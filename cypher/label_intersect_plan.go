@@ -65,7 +65,6 @@ package cypher
 // DisableMinLabelScan so the differential can vary exactly one thing.
 
 import (
-	"sort"
 	"sync/atomic"
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
@@ -123,6 +122,22 @@ type labelCandidate struct {
 	ordered bool // set once the candidate has been placed, for readability in tests
 }
 
+// labelCandidateLess is the total order the AND is built in: ascending exact
+// cardinality, then label id, then written position. Being a plain function rather
+// than a closure is what keeps the sort allocation-free.
+func labelCandidateLess(a, b labelCandidate) bool {
+	if a.count != b.count {
+		return a.count < b.count
+	}
+	if a.hasID != b.hasID {
+		return a.hasID
+	}
+	if a.id != b.id {
+		return a.id < b.id
+	}
+	return a.synIdx < b.synIdx
+}
+
 // pickLabelIntersection is the pure planner decision: it recognises the same
 // bare-multi-label-LabelPredicate Selection shape pickMinLabel does, and returns
 // the participating labels ordered SMALLEST-FIRST when the intersection should be
@@ -135,7 +150,7 @@ type labelCandidate struct {
 func pickLabelIntersection(
 	sel *ir.Selection,
 	labelSrc labelResolverIface,
-	bmSrc exec.LabelIntersectResolver,
+	bmSrc labelCardinalitySource,
 ) (nodeVar string, ordered []string, ok bool) {
 	// Reuse the min-label recogniser so the two peepholes can never disagree
 	// about what shape they are looking at.
@@ -143,7 +158,23 @@ func pickLabelIntersection(
 	if !shapeOK {
 		return "", nil, false
 	}
-	names := make([]string, 0, len(extra)+1)
+	// Stack-resident working set. Sized generously for real patterns and treated as a
+	// LIMIT, not an assumption: a pattern with more labels than this simply keeps
+	// today's plan, which is always sound.
+	//
+	// The arrays matter. The first cut allocated three slices — names, estimates and
+	// candidates — before any veto ran, and since this probe is invoked on every
+	// Selection (twice, counting the columnar guard) that showed up on the curated
+	// suite as IC4/IC9 at 314 allocs/op against a 311 baseline, on queries that never
+	// compose anything. pickMinLabel already pays for its own copies; duplicating
+	// them for a probe that usually declines is not a cost the rest of the engine
+	// should carry.
+	const maxLabels = 8
+	if len(extra)+1 > maxLabels {
+		return "", nil, false
+	}
+	var nameBuf [maxLabels]string
+	names := nameBuf[:0]
 	names = append(names, scanLabel)
 	names = append(names, extra...)
 	if len(names) < 2 {
@@ -152,7 +183,8 @@ func pickLabelIntersection(
 	}
 
 	// Trustworthiness veto: every candidate's cardinality must be exact (#2076).
-	ests := make([]estimate, len(names))
+	var estBuf [maxLabels]estimate
+	ests := estBuf[:len(names)]
 	for i, n := range names {
 		ests[i] = labelCardinalityEstimate(labelSrc, n)
 	}
@@ -161,7 +193,8 @@ func pickLabelIntersection(
 	}
 
 	idSrc, _ := labelSrc.(labelIDResolver)
-	cands := make([]labelCandidate, len(names))
+	var candBuf [maxLabels]labelCandidate
+	cands := candBuf[:len(names)]
 	for i, n := range names {
 		c := labelCandidate{name: n, count: int64(ests[i].rows), synIdx: i}
 		if idSrc != nil {
@@ -175,30 +208,35 @@ func pickLabelIntersection(
 	// SMALLEST-FIRST, with a total order so plans are stable run to run: exact
 	// count, then label id, then written position. The count ordering is what
 	// makes Intersect clone the cheapest bitmap (§4).
-	sort.SliceStable(cands, func(a, b int) bool {
-		if cands[a].count != cands[b].count {
-			return cands[a].count < cands[b].count
+	//
+	// A stable INSERTION sort, not sort.SliceStable: the latter takes the slice as an
+	// interface, which forces the backing array to the heap and costs an allocation
+	// on every probe (escape analysis: "moved to heap: candBuf"). At n ≤ maxLabels an
+	// insertion sort is also simply the faster algorithm, and it is stable, so the
+	// tie-break order is preserved.
+	for i := 1; i < len(cands); i++ {
+		for j := i; j > 0 && labelCandidateLess(cands[j], cands[j-1]); j-- {
+			cands[j], cands[j-1] = cands[j-1], cands[j]
 		}
-		if cands[a].hasID != cands[b].hasID {
-			return cands[a].hasID
-		}
-		if cands[a].id != cands[b].id {
-			return cands[a].id < cands[b].id
-		}
-		return cands[a].synIdx < cands[b].synIdx
-	})
+	}
 
-	ordered = make([]string, len(cands))
-	for i := range cands {
-		cands[i].ordered = true
-		ordered[i] = cands[i].name
+	// `ordered` is built only once the path is COMMITTED. Building it up front cost
+	// an allocation on every probe that went on to decline, which is the majority of
+	// them — the same lesson as the working arrays above.
+	commit := func() []string {
+		out := make([]string, len(cands))
+		for i := range cands {
+			cands[i].ordered = true
+			out[i] = cands[i].name
+		}
+		return out
 	}
 
 	// An empty label makes the conjunction provably empty: fire immediately, so
 	// the plan is an empty bitmap scan rather than a full scan of a populated
 	// label followed by an all-dropping filter.
 	if cands[0].count == 0 {
-		return nodeVar, ordered, true
+		return nodeVar, commit(), true
 	}
 
 	// THE GATE: a STRICT reduction in rows scanned.
@@ -230,37 +268,49 @@ func pickLabelIntersection(
 	if bmSrc == nil {
 		return "", nil, false
 	}
-	inter, gateOK := exactIntersectionCardinality(bmSrc, ordered)
+	// Reuse the name buffer for the two smallest labels the gate asks about, so the
+	// question itself allocates nothing.
+	nameBuf[0], nameBuf[1] = cands[0].name, cands[1].name
+	inter, gateOK := exactIntersectionCardinality(bmSrc, nameBuf[:2])
 	if !gateOK {
 		return "", nil, false
 	}
 	if inter >= uint64(cands[0].count) {
 		return "", nil, false
 	}
-	return nodeVar, ordered, true
+	return nodeVar, commit(), true
 }
 
-// exactIntersectionCardinality returns the EXACT size of the labels'
-// intersection, computed without materialising the result where possible.
+// labelCardinalitySource reports an intersection's exact size WITHOUT
+// materialising it. Kept as its own narrow interface so the planner cannot
+// accidentally reach for the bitmap-producing path when it only needs a count.
+type labelCardinalitySource interface {
+	ResolveLabelsCardinality(names []string) (uint64, bool)
+}
+
+// exactIntersectionCardinality returns the EXACT size of the labels' intersection,
+// computed without materialising the result and without allocating.
 //
-// For two labels that is one roaring64.AndCardinality — zero allocations. For
-// three or more there is no k-way cardinality primitive, so the bound is taken
-// over the two SMALLEST labels, which is sound because it is an UPPER bound:
-// |L₁ ∩ … ∩ L_k| ≤ |L₁ ∩ L₂|, so a conjunction admitted on that bound can only
+// The first cut of this obtained the two per-label bitmaps and called
+// AndCardinality on them. That was allocation-free only in the sense that
+// AndCardinality itself allocates nothing — OBTAINING each bitmap clones the
+// label's live set, and measurement caught it: +85.8% B/op on a break-even query
+// the gate went on to DECLINE. A gate must cost less than the decision it informs,
+// so the count now comes from label.Index.IntersectCardinality, which runs against
+// the live bitmaps under one read-lock.
+//
+// For three or more labels there is no k-way cardinality primitive, so the pairwise
+// count over the two SMALLEST labels is used. That is sound because it is an UPPER
+// bound — |L₁ ∩ … ∩ L_k| ≤ |L₁ ∩ L₂| — so a conjunction admitted on it can only
 // shrink as the remaining labels are ANDed in (design §3.1).
 //
-// ok is false when the resolver cannot produce the per-label bitmaps, in which
-// case the caller keeps today's plan.
-func exactIntersectionCardinality(bmSrc exec.LabelIntersectResolver, ordered []string) (uint64, bool) {
+// ok is false when the resolver cannot answer, in which case the caller keeps
+// today's plan rather than guessing.
+func exactIntersectionCardinality(bmSrc labelCardinalitySource, ordered []string) (uint64, bool) {
 	if len(ordered) < 2 {
 		return 0, false
 	}
-	a := bmSrc.ResolveLabelsBitmap(ordered[:1])
-	b := bmSrc.ResolveLabelsBitmap(ordered[1:2])
-	if a == nil || b == nil {
-		return 0, false
-	}
-	return a.AndCardinality(b), true
+	return bmSrc.ResolveLabelsCardinality(ordered[:2])
 }
 
 // buildLabelIntersectionIfEnabled is the gated entry point, invoked from the
@@ -282,11 +332,20 @@ func buildLabelIntersectionIfEnabled(
 	if bopts == nil || !bopts.bitmapIntersectEnabled {
 		return nil, false, nil
 	}
-	adapter := &execLabelAdapter{labelSrc: labelSrc}
-	nodeVar, ordered, ok := pickLabelIntersection(sel, labelSrc, adapter)
+	// The gate needs only a cardinality source, and the live resolver already is
+	// one; allocating an execLabelAdapter to reach it cost one allocation on every
+	// probe, declined or not (escape analysis: "&execLabelAdapter{...} escapes to
+	// heap"). The adapter is built only once the path is COMMITTED, where the
+	// operator genuinely needs it.
+	counter, canCount := labelSrc.(labelCardinalitySource)
+	if !canCount {
+		return nil, false, nil
+	}
+	nodeVar, ordered, ok := pickLabelIntersection(sel, labelSrc, counter)
 	if !ok {
 		return nil, false, nil
 	}
+	adapter := &execLabelAdapter{labelSrc: labelSrc}
 	// Bind the node at the next free schema slot — identical to what the default
 	// NodeByLabelScan build leaves, so anything above reads the same column.
 	schema[nodeVar] = schemaWidth(schema)
@@ -329,7 +388,11 @@ func parallelIntersectionSource(
 	if bopts == nil || !bopts.bitmapIntersectEnabled || sel == nil {
 		return nil, 0, false
 	}
-	nodeVar, ordered, picked := pickLabelIntersection(sel, labelSrc, &execLabelAdapter{labelSrc: labelSrc})
+	counter, canCount := labelSrc.(labelCardinalitySource)
+	if !canCount {
+		return nil, 0, false
+	}
+	nodeVar, ordered, picked := pickLabelIntersection(sel, labelSrc, counter)
 	if !picked || nodeVar != leafVar {
 		return nil, 0, false
 	}

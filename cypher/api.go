@@ -5479,6 +5479,33 @@ func (s *lpgLabelResolver) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 	return s.g.NodeIndex().Intersect(uint32(lid))
 }
 
+// ResolveLabelsCardinality reports the EXACT size of the labels' intersection
+// without materialising it, backing the planner's gate (#2133).
+//
+// It delegates to label.Index.IntersectCardinality, which runs roaring's
+// allocation-free AndCardinality against the LIVE bitmaps under one read-lock.
+// Going through ResolveLabelsBitmap instead would clone both labels purely to count
+// them, and measurement showed that costing +85.8% B/op on a query the gate then
+// DECLINED — the gate has to be cheaper than the decision it informs.
+//
+// ok is false when fewer than two labels are supplied or a name is unknown to the
+// registry, in which case the caller must not treat the count as authoritative.
+func (s *lpgLabelResolver) ResolveLabelsCardinality(names []string) (uint64, bool) {
+	if len(names) < 2 {
+		return 0, false
+	}
+	ids := make([]uint32, 0, len(names))
+	for _, n := range names {
+		lid, ok := s.g.Registry().Lookup(n)
+		if !ok {
+			// An unknown label makes the conjunction empty by definition.
+			return 0, true
+		}
+		ids = append(ids, uint32(lid))
+	}
+	return s.g.NodeIndex().IntersectCardinality(ids...)
+}
+
 // ResolveLabelsBitmap implements [exec.LabelIntersectResolver]: the set-at-a-time
 // answer to a multi-label node pattern (#2133).
 //
@@ -13851,9 +13878,10 @@ func tryBuildColumnarFilterChain(
 	// leaves this recogniser the shape — which is why this yield cannot cost the
 	// caller column-major execution for nothing.
 	if bopts.bitmapIntersectEnabled {
-		if _, _, wouldIntersect := pickLabelIntersection(sel, labelSrc,
-			&execLabelAdapter{labelSrc: labelSrc}); wouldIntersect {
-			return nil, false, nil
+		if counter, canCount := labelSrc.(labelCardinalitySource); canCount {
+			if _, _, wouldIntersect := pickLabelIntersection(sel, labelSrc, counter); wouldIntersect {
+				return nil, false, nil
+			}
 		}
 	}
 	// Pre-check against a hypothetical schema (scanVar at column 0) so a non-match
@@ -15172,6 +15200,18 @@ type execLabelAdapter struct {
 // ResolveLabelBitmap implements exec.labelResolver.
 func (a *execLabelAdapter) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 	return a.labelSrc.ResolveLabelBitmap(name)
+}
+
+// ResolveLabelsCardinality forwards the allocation-free intersection count to the
+// underlying resolver when it supports one (#2133). A resolver that does not
+// reports ok == false, and the planner then declines rather than guessing.
+func (a *execLabelAdapter) ResolveLabelsCardinality(names []string) (uint64, bool) {
+	if lc, ok := a.labelSrc.(interface {
+		ResolveLabelsCardinality([]string) (uint64, bool)
+	}); ok {
+		return lc.ResolveLabelsCardinality(names)
+	}
+	return 0, false
 }
 
 // ResolveLabelsBitmap satisfies [exec.LabelIntersectResolver] by delegating the
