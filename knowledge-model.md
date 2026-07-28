@@ -1643,6 +1643,31 @@ classifying a fast query can be a third of its cost. The expense is the case-ins
 and the new mask is the natural place to delete it — one walk could blank the regions *and* test the
 words, fusing two passes into one (`Task 2240`).
 
+Incrementally synced at commit `45ef885` (2026-07-28, task #2224, sprint 326 — the string-collation
+divergence declared): **+6 nodes** — 1 `Commit`, 1 `Task` (`2224` COMPLETED), 2 `Spec`
+(`docs/cypher.md`, `docs/tck/DIVERGENCES.md`) and 2 `Test`. **+7 edges** — 1 `CONTAINS`,
+1 `IMPLEMENTED_IN`, 3 `TOUCHES`, 2 `Package CONTAINS`. All stamped `2026-07-28`. **This closes
+sprint 326 at 18/18.**
+
+GoGraph orders strings by **Unicode code point**; Neo4j by **UTF-16 code unit** (Java's
+`String.compareTo`). Verified before documenting: `ORDER BY` is strictly ascending by rune, and the
+mechanism is Go's native comparison on `string` — bytewise UTF-8, which UTF-8 guarantees equals
+code-point order. The user **ruled to keep** code-point order, so the divergence is declared rather
+than changed. Three reasons are recorded: openCypher 2024.3 specifies **no collation**, so neither
+order is non-conformant and no TCK scenario discriminates them; UTF-16 unit order is an artefact of
+Java's internal representation, placing some supplementary characters *before* numerically lower BMP
+ones; and code-point order is **load-bearing** for #2231's degenerate-range equality proof, since no
+two distinct strings compare equal under it — collation reaches the index layer, not just `ORDER BY`.
+
+The divergence condition is exact and worth keeping: a supplementary-plane character (U+10000+,
+stored in UTF-16 as a surrogate pair whose leading unit is U+D800–U+DBFF) compared against a BMP
+character in **U+E000–U+FFFF**. Below U+E000 the rules agree, because no surrogate value is
+reachable. Hence GoGraph sorts `U+1F600` **after** `U+FB01`; Neo4j before.
+
+`docs/tck/DIVERGENCES.md` gained a new section for **behaviour the specification leaves
+unspecified**, distinct from Category 4 (non-conformances) and from the closing extensions section:
+a reader auditing conformance who noticed an `ORDER BY` difference would otherwise suspect a gap.
+
 Two properties carry the substance. `recogniseDegreePattern.eligibility` records the port of
 Neo4j's `QuerySolvableByGetDegree` + `isEligible` and, decisively, that **`Selections.empty`
 makes a labelled far node ineligible for a degree rewrite in Neo4j too** — so
