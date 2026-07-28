@@ -7261,6 +7261,8 @@ func BuildPlan(
 	if err != nil {
 		return nil, nil, fmt.Errorf("cypher: build final projection: %w", err)
 	}
+	// Not instrumented: BuildPlan is the public plan-building entry point and never
+	// carries a profiler (PROFILE goes through buildPlanEngine).
 	return proj, cols, nil
 }
 
@@ -7356,7 +7358,7 @@ func buildPlanEngine(
 	if err != nil {
 		return nil, nil, err
 	}
-	return wrapWithColumnPassthrough(child, cols, schema)
+	return wrapWithColumnPassthrough(child, cols, schema, bopts)
 }
 
 // wrapWithColumnPassthrough builds the final result projection that selects the
@@ -7364,7 +7366,11 @@ func buildPlanEngine(
 // absent from schema projects Null. It is the shared tail of [buildPlanEngine]'s
 // ProduceResults handling for both the serial and the morsel-parallel (#1682)
 // build paths.
-func wrapWithColumnPassthrough(child exec.Operator, cols []string, schema map[string]int) (exec.Operator, []string, error) {
+// bopts carries the PROFILE profiler: the projection this function builds sits
+// ABOVE buildOperator's recursion, so it is the one operator the single wrap point
+// structurally cannot reach, and it rendered "(not measured)" as the plan ROOT
+// until rmp #2237 threaded bopts here.
+func wrapWithColumnPassthrough(child exec.Operator, cols []string, schema map[string]int, bopts *buildOpts) (exec.Operator, []string, error) {
 	// Elide the final passthrough when the child's own projection already emits
 	// exactly cols, in order (rmp #2239). The physical build used to layer this
 	// projection on top of the one it had just built for the ir.Project node, so
@@ -7427,7 +7433,7 @@ func wrapWithColumnPassthrough(child exec.Operator, cols []string, schema map[st
 	if err != nil {
 		return nil, nil, fmt.Errorf("cypher: build final projection: %w", err)
 	}
-	return proj, cols, nil
+	return profileIntermediate(bopts, proj), cols, nil
 }
 
 // buildOperator recursively converts an IR plan node to a physical operator.
@@ -7468,6 +7474,39 @@ func buildOperator(
 		return op, err
 	}
 	return bopts.profiler.Wrap(op), nil
+}
+
+// profileIntermediate instruments an operator that [buildOperator]'s single wrap
+// point cannot reach: an INTERMEDIATE built inside a composite lowering, where one
+// logical node becomes several physical operators and only the outermost is
+// returned (rmp #2237).
+//
+// Five such operators rendered "(not measured)" before this existed — the
+// EagerAggregation beneath a GlobalAggregateAdapter, the columnar and row-mode
+// aggregation pre-projections, a ColumnarFilter beneath a ColumnarProject, and the
+// final result projection, which is built outside buildOperator entirely. A
+// profile that silently omits operators is worse than no profile: it invites the
+// reader to attribute their cost to whichever ancestor did get measured.
+//
+// Three properties make this safe to sprinkle at composite sites:
+//
+//   - COST WHEN OFF IS ZERO. With no profiler installed it returns op untouched,
+//     so no wrapper is allocated and no operator executes instrumentation.
+//   - DOUBLE-WRAPPING IS SAFE. [exec.Profiler.Wrap] is idempotent, so a site that
+//     both wraps an intermediate and later returns it through buildOperator cannot
+//     double-count.
+//   - CAPABILITIES SURVIVE. Wrap re-implements ChunkProducer and
+//     NodeIDColumnProducer, so a parent constructed over the wrapper still sees
+//     what it needs. That is load-bearing HERE in a way it is not at the single
+//     wrap point: an intermediate is wrapped BEFORE its parent is constructed, so
+//     the parent's capability type-assertions run against the wrapper. Wrapping the
+//     columnar aggregation pre-projection is exactly that case —
+//     EagerAggregation.WithChunkInput must still recognise it.
+func profileIntermediate(bopts *buildOpts, op exec.Operator) exec.Operator {
+	if bopts == nil || bopts.profiler == nil || op == nil {
+		return op
+	}
+	return bopts.profiler.Wrap(op)
 }
 
 // buildOperatorRec is the recursive read-plan lowering: one case per read IR node
@@ -9401,6 +9440,11 @@ func buildEagerAggregation(
 		}
 		preProj = applyProjectionRowBudget(rowPre, bopts)
 	}
+	// The pre-projection is an intermediate: EagerAggregation consumes it, so it
+	// never reaches buildOperator's wrap point. Wrapped BEFORE the aggregation is
+	// constructed, so WithChunkInput below asserts against the wrapper — which
+	// preserves ChunkProducer, keeping the columnar path columnar.
+	preProj = profileIntermediate(bopts, preProj)
 
 	op, err := exec.NewEagerAggregation(preProj, keyCols, aggFactories, 0)
 	if err != nil {
@@ -9425,7 +9469,10 @@ func buildEagerAggregation(
 	// neutral results" row.
 	var topOp exec.Operator = op
 	if len(p.GroupBy) == 0 {
-		topOp = exec.NewGlobalAggregateAdapter(op, aggFactories)
+		// The adapter becomes the outermost operator, so the aggregation underneath
+		// it is an intermediate and needs its own measurement — without this the
+		// whole grouping cost was attributed to the adapter.
+		topOp = exec.NewGlobalAggregateAdapter(profileIntermediate(bopts, op), aggFactories)
 	}
 
 	// Install the post-aggregation output schema and the downstream column tags,
@@ -13671,7 +13718,7 @@ func tryBuildColumnarFilterChain(
 	predFn := newRowPredicate(sel.PredicateExpr, schema, g, params, reg, bopts)
 	cpred, _ := buildColumnarPredicate(sel.PredicateExpr, schema, g, params, reg, bopts)
 	filter := exec.NewColumnarFilter(scanCP, predFn, cpred)
-	projOp, err := buildIRProjection(proj.Items, filter, schema, g, params, reg, bopts)
+	projOp, err := buildIRProjection(proj.Items, profileIntermediate(bopts, filter), schema, g, params, reg, bopts)
 	if err != nil {
 		return nil, false, err
 	}
@@ -13819,7 +13866,7 @@ func tryBuildColumnarExpandFilterChain(
 		cpreds[i], _ = buildColumnarExpandPredicate(pe, schema, g, params, reg, bopts)
 	}
 	filter := exec.NewColumnarFilter(colExp, chainRowPredicates(rowPreds), makeColumnarConjunctionPredicate(cpreds))
-	projOp, err := buildIRProjection(proj.Items, filter, schema, g, params, reg, bopts)
+	projOp, err := buildIRProjection(proj.Items, profileIntermediate(bopts, filter), schema, g, params, reg, bopts)
 	if err != nil {
 		return nil, false, err
 	}

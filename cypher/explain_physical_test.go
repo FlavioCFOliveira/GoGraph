@@ -137,6 +137,24 @@ func TestExplainPhysical_WritingStatementSaysSo(t *testing.T) {
 	}
 }
 
+// profileShapes are the plan shapes both profiling gates run over: a columnar
+// hash join under a global aggregation, a bare columnar projection, a columnar
+// filter, an aggregation over a scan, and a sort-with-limit. Between them they
+// cover every composite lowering that builds an intermediate operator, which is
+// what TestProfile_EveryOperatorIsMeasured needs and what
+// TestProfile_PlanShapeIsIdenticalProfiledOrNot needs to see unchanged.
+//
+// Shared deliberately: the two properties — every node measured, and the shape
+// unchanged by measuring it — must hold over the SAME shapes, or one gate could
+// drift onto plans the other never checks.
+var profileShapes = []string{
+	"MATCH (a:P), (b:P) WHERE a.age = b.age RETURN count(*)",
+	"MATCH (n:P) RETURN n.age",
+	"MATCH (n:P) WHERE n.age > 10 RETURN n.name",
+	"MATCH (n:P) RETURN count(n)",
+	"MATCH (n:P) RETURN n.age ORDER BY n.age LIMIT 5",
+}
+
 // TestProfile_PlanShapeIsIdenticalProfiledOrNot is the transparency gate on the
 // profiling wrapper.
 //
@@ -152,13 +170,7 @@ func TestExplainPhysical_WritingStatementSaysSo(t *testing.T) {
 func TestProfile_PlanShapeIsIdenticalProfiledOrNot(t *testing.T) {
 	t.Parallel()
 
-	for _, q := range []string{
-		"MATCH (a:P), (b:P) WHERE a.age = b.age RETURN count(*)",
-		"MATCH (n:P) RETURN n.age",
-		"MATCH (n:P) WHERE n.age > 10 RETURN n.name",
-		"MATCH (n:P) RETURN count(n)",
-		"MATCH (n:P) RETURN n.age ORDER BY n.age LIMIT 5",
-	} {
+	for _, q := range profileShapes {
 		t.Run(q, func(t *testing.T) {
 			t.Parallel()
 			eng := seedPeople(t, 300, 40)
@@ -173,6 +185,50 @@ func TestProfile_PlanShapeIsIdenticalProfiledOrNot(t *testing.T) {
 					"A wrapper that hides a capability makes the parent build a different "+
 					"operator, so the measurements would describe a plan that never runs.",
 					explained, got)
+			}
+		})
+	}
+}
+
+// TestProfile_EveryOperatorIsMeasured is the completeness gate on a profile.
+//
+// buildOperator applies the profiler at ONE point, the value its recursion
+// returns, which covers the whole tree exactly once — as long as one logical node
+// becomes one physical operator. Where a lowering is COMPOSITE it does not: only
+// the outermost operator passes through the wrap point, and the intermediates
+// underneath rendered "(not measured)".
+//
+// Five did, on these same five shapes (rmp #2237): the EagerAggregation beneath a
+// GlobalAggregateAdapter, both aggregation pre-projections, a ColumnarFilter
+// beneath a ColumnarProject, and the final result projection — which is built
+// above buildOperator's recursion entirely and so appeared unmeasured as the plan
+// ROOT.
+//
+// An unmeasured node is worse than a missing one. It is rendered, so a reader
+// counts it as part of the plan, and its cost lands in whichever ancestor WAS
+// measured — inviting exactly the wrong conclusion about where time goes.
+func TestProfile_EveryOperatorIsMeasured(t *testing.T) {
+	t.Parallel()
+
+	for _, q := range profileShapes {
+		t.Run(q, func(t *testing.T) {
+			t.Parallel()
+			eng := seedPeople(t, 300, 40)
+
+			out, err := eng.Profile(context.Background(), q, nil)
+			if err != nil {
+				t.Fatalf("Profile(%q): %v", q, err)
+			}
+			if strings.Contains(out, "(not measured)") {
+				t.Errorf("a profiled plan contains an unmeasured operator:\n%s\n"+
+					"Every operator must report rows and time. A composite lowering that "+
+					"builds an intermediate has to pass it through profileIntermediate — "+
+					"buildOperator's single wrap point only reaches the value it returns.", out)
+			}
+			// The rendering must also be a plan, not an error string: a shape that
+			// silently stopped producing a tree would pass the check above vacuously.
+			if !strings.Contains(out, "rows=") || !strings.Contains(out, "time=") {
+				t.Errorf("profile reports no measurements at all:\n%s", out)
 			}
 		})
 	}
