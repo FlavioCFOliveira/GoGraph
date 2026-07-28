@@ -3,6 +3,7 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -302,4 +303,87 @@ func stripAnnotations(plan string) string {
 		lines[i] = ln
 	}
 	return strings.Join(lines, "\n")
+}
+
+// TestProfile_DbHitsDistinguishSeekFromScan is the acceptance gate for rmp #2238.
+//
+// Rows alone cannot tell a selective plan from a wasteful one: an indexed point
+// lookup and a label scan followed by a filter can emit a comparable handful of
+// rows while touching wildly different amounts of storage. Db-hits are the measure
+// that separates them, and this asserts the separation on ONE graph with ONE
+// indexed property, so the two plans differ in nothing but their access path.
+func TestProfile_DbHitsDistinguishSeekFromScan(t *testing.T) {
+	t.Parallel()
+	const n = 300
+	eng := seedPeople(t, n, 40)
+	if _, err := eng.RunAny(context.Background(), `CREATE INDEX p_name FOR (x:P) ON (x.name)`, nil); err != nil {
+		t.Fatalf("CREATE INDEX: %v", err)
+	}
+
+	// The seek: `name` is indexed, so this is a point lookup.
+	seek, err := eng.Profile(context.Background(), "MATCH (n:P) WHERE n.name = 'n7' RETURN n.age", nil)
+	if err != nil {
+		t.Fatalf("Profile(seek): %v", err)
+	}
+	// The scan: `age` has no index, so the same predicate shape becomes a label
+	// scan with a filter above it.
+	scan, err := eng.Profile(context.Background(), "MATCH (n:P) WHERE n.age = 7 RETURN n.age", nil)
+	if err != nil {
+		t.Fatalf("Profile(scan): %v", err)
+	}
+
+	seekHits := totalDbHits(t, seek)
+	scanHits := totalDbHits(t, scan)
+
+	if seekHits == 0 {
+		t.Fatalf("the seek plan reports no db-hits at all, so the comparison below is "+
+			"vacuous — a storage-reading operator must report them:\n%s", seek)
+	}
+	if scanHits < int64(n) {
+		t.Errorf("the scan plan reports %d db-hits over %d nodes; a label scan reads one "+
+			"record per node, so it must report at least %d:\n%s", scanHits, n, n, scan)
+	}
+	if seekHits >= scanHits {
+		t.Errorf("db-hits do not distinguish the access paths: seek=%d, scan=%d. That is the "+
+			"whole point of the measure — both plans return a similar row count, and only "+
+			"db-hits show that one read the entire label.\n--- seek ---\n%s\n--- scan ---\n%s",
+			seekHits, scanHits, seek, scan)
+	}
+
+	// A pure row transformer touches no storage, so its own figure must be zero
+	// rather than inheriting its child's.
+	if !strings.Contains(seek, "dbhits=0") {
+		t.Errorf("no operator reports zero db-hits; a projection reads no storage and must "+
+			"not be charged for its child's reads:\n%s", seek)
+	}
+}
+
+// totalDbHits sums the dbhits= figures in a rendered profile. It parses the
+// rendering rather than reading the tree, so it also proves the numbers are
+// actually SURFACED to a user and not merely computed.
+func totalDbHits(t *testing.T, profile string) int64 {
+	t.Helper()
+	var total int64
+	found := false
+	for _, line := range strings.Split(profile, "\n") {
+		i := strings.Index(line, "dbhits=")
+		if i < 0 {
+			continue
+		}
+		rest := line[i+len("dbhits="):]
+		end := strings.IndexAny(rest, ",)")
+		if end < 0 {
+			t.Fatalf("malformed dbhits field in %q", line)
+		}
+		v, err := strconv.ParseInt(rest[:end], 10, 64)
+		if err != nil {
+			t.Fatalf("unparsable dbhits in %q: %v", line, err)
+		}
+		total += v
+		found = true
+	}
+	if !found {
+		t.Fatalf("a profiled plan reports no db-hits at all:\n%s", profile)
+	}
+	return total
 }

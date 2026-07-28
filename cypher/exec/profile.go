@@ -101,8 +101,9 @@ type profiledNode interface {
 	// planUnwrap returns the measured operator, so a node is named after the
 	// operator that ran rather than after the wrapper.
 	planUnwrap() Operator
-	// planStats returns the rows emitted and the time attributed to the operator.
-	planStats() (int64, time.Duration)
+	// planStats returns the rows emitted, the time attributed to the operator, and
+	// the logical storage accesses attributed to it.
+	planStats() (int64, time.Duration, int64)
 }
 
 // profiledOp measures one operator: the rows it emits and the wall-clock time
@@ -160,8 +161,33 @@ func (p *profiledOp) rowCountHint() (int, bool) {
 	return 0, false
 }
 
-func (p *profiledOp) planUnwrap() Operator              { return p.inner }
-func (p *profiledOp) planStats() (int64, time.Duration) { return p.rows, p.elapsed }
+func (p *profiledOp) planUnwrap() Operator { return p.inner }
+
+// planStats reports the measured rows and time, plus the db-hits DERIVED from
+// them.
+//
+// Db-hits are not accumulated in the hot path, and that is the whole design. The
+// task's own framing was that a wrapper cannot count them because the accesses
+// happen inside an operator rather than at its boundary — true in general, and
+// false for the operators where the count is actually defined. An operator that
+// reads records from storage reads exactly one per row it emits ([StorageRecordScan]
+// documents why), so the boundary row count IS the access count; an operator that
+// only transforms its children's rows touches no storage and its count is zero.
+//
+// Deriving rather than threading is what keeps the cost-when-off property absolute:
+// no counter is passed through any storage accessor, so a non-PROFILE Run executes
+// not just no counting but no counting CODE — there is no branch to skip.
+func (p *profiledOp) planStats() (int64, time.Duration, int64) {
+	return p.rows, p.elapsed, p.dbHits()
+}
+
+// dbHits returns the storage accesses attributable to the wrapped operator.
+func (p *profiledOp) dbHits() int64 {
+	if _, ok := p.inner.(StorageRecordScan); ok {
+		return p.rows
+	}
+	return 0
+}
 
 // profiledChunkOp is the wrapper for an operator that also produces chunks. It
 // preserves [ChunkProducer] so a columnar parent still recognises its child as
@@ -202,3 +228,61 @@ var (
 	_ NodeIDColumnProducer = (*profiledNodeIDOp)(nil)
 	_ rowCountHinter       = (*profiledOp)(nil)
 )
+
+// ─────────────────────────────────────────────────────────────────────────────
+// StorageRecordScan — which operators have db-hits at all
+// ─────────────────────────────────────────────────────────────────────────────
+
+// StorageRecordScan marks an operator that READS RECORDS FROM STORAGE, one record
+// per row it emits, so its logical storage-access count (its db-hits) equals its
+// emitted row count (rmp #2238).
+//
+// # Why a marker rather than a counter
+//
+// Db-hits exist to distinguish a selective seek from a scan that filtered
+// afterwards: both can emit the same handful of rows while touching wildly
+// different amounts of storage. That distinction lives entirely in the LEAVES —
+// which records were read — and every operator above them consumes rows its
+// children already produced, touching no storage of its own.
+//
+// For a leaf, "records read" and "rows emitted" are the same number by
+// construction:
+//
+//   - a label or all-nodes scan yields one node record per emitted row;
+//   - an index seek, seek-set or range scan yields one node record per posting-list
+//     entry it emits;
+//   - an expand yields one relationship record per emitted neighbour.
+//
+// So the count is available at the operator boundary, where the profiling wrapper
+// already sits, and needs no counter threaded through any accessor. That is not a
+// shortcut but the point: with nothing threaded, a non-PROFILE Run executes no
+// counting CODE AT ALL — there is not even a nil check to skip on the hot path.
+//
+// # What this deliberately does not count
+//
+// PROPERTY READS. Neo4j charges a db-hit per property access, so its numbers for a
+// filter-heavy plan are larger than GoGraph's. Counting them here would mean
+// threading a counter into the property accessors — precisely the hot path the
+// paragraph above protects — and would make every ordinary query pay for a
+// diagnostic. The divergence is documented in docs/cypher.md rather than papered
+// over with an estimate, because a db-hits figure that silently blends measured
+// leaf reads with guessed property reads would be less useful than one whose
+// meaning is exact.
+//
+// An operator that does not implement this interface reports 0 db-hits, which is
+// the honest answer for a pure row transformer.
+type StorageRecordScan interface {
+	// storageRecordPerRow is a marker. It is unexported so only operators in this
+	// package can claim to read storage, which keeps the guarantee auditable: the
+	// set of db-hit sources is the set of implementations in this file.
+	storageRecordPerRow()
+}
+
+func (*AllNodesScan) storageRecordPerRow()         {}
+func (*NodeByLabelScan) storageRecordPerRow()      {}
+func (*NodeByIndexSeek) storageRecordPerRow()      {}
+func (*NodeByIndexSeekSet) storageRecordPerRow()   {}
+func (*NodeByIndexRangeScan) storageRecordPerRow() {}
+func (*Expand) storageRecordPerRow()               {}
+func (*OptionalExpand) storageRecordPerRow()       {}
+func (*VarLengthExpand) storageRecordPerRow()      {}

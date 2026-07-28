@@ -1110,13 +1110,21 @@ the estimate that drove it.
 ### `Engine.Profile` — what it cost
 
 Executes the query and returns the physical plan annotated with each operator's
-emitted rows and the time attributed to it:
+emitted rows, its logical storage accesses (`dbhits`), and the time attributed to
+it:
 
 ```
-ColumnarHashJoin (rows=3200, time=699µs)
-├─ NodeByLabelScan (rows=400, time=3µs)
-└─ NodeByLabelScan (rows=400, time=3µs)
+ColumnarProject (rows=1, dbhits=0, time=17µs)
+└─ NodeByIndexSeek [seek="n7"] (rows=1, dbhits=1, time=0s)
+
+ColumnarProject (rows=8, dbhits=0, time=25µs)
+└─ ColumnarFilter (rows=8, dbhits=0, time=24µs)
+   └─ NodeByLabelScan [P] (rows=300, dbhits=300, time=2µs)
 ```
+
+Those two plans are the reason `dbhits` is reported. They return a comparable
+handful of rows over the same 300-node graph, and only the access counts show that
+the second read every record in the label.
 
 Times are **inclusive** of an operator's children, because a pipelined operator's
 `Next` pulls from them — subtract a node's children for its exclusive cost, as
@@ -1127,13 +1135,28 @@ Two caveats, both explicit in the output or the API:
 - `Profile` refuses a writing statement rather than performing its writes as the
   side effect of a diagnostic.
 - A node shown as `(not measured)` was not instrumented, and did **not** cost
-  nothing. Instrumentation is applied where the builder returns an operator, and
-  one logical node can lower to several physical operators, of which only the
-  outermost passes that point.
+  nothing. Every operator is instrumented today; the label remains because a future
+  composite lowering could reopen the gap.
 
 Profiling is off unless `Profile` is called: the instrumentation is a wrapper the
 builder installs only when asked, so an ordinary `Run` executes the same code as a
 build in which profiling does not exist.
+
+> **Divergence from Neo4j.** `dbhits` counts **records read from storage**, one per
+> row an access-path operator emits: a node record per row of a scan or index seek,
+> a relationship record per row of an expand. An operator that only transforms rows
+> its children produced reports `0`, because it read no storage.
+>
+> Neo4j additionally charges a db-hit per **property read**, so its figures for a
+> filter-heavy or projection-heavy plan are larger than GoGraph's, and the two are
+> not comparable in absolute terms. The ratio between two GoGraph plans is the
+> intended use.
+>
+> The reason is the cost of the alternative. Counting property reads means threading
+> a counter into the property accessors — the hottest path in the engine — so every
+> ordinary query would carry a branch that exists only for a diagnostic. Counting at
+> the access-path boundary instead needs no threading at all, which is why an
+> ordinary `Run` executes no counting code rather than merely skipping it.
 
 ---
 

@@ -58,6 +58,19 @@ type PlanNode struct {
 	Rows     int64
 	Time     time.Duration
 	Profiled bool
+
+	// DbHits is the number of logical storage record accesses attributed to this
+	// operator — the measure that distinguishes a selective seek from a scan that
+	// filtered afterwards, since both can emit the same few rows while touching
+	// wildly different amounts of storage (rmp #2238).
+	//
+	// It is counted only where it can be counted EXACTLY: at the operators that
+	// read records from storage, one hit per record read (see [StorageRecordScan]).
+	// An operator that only transforms rows its children produced reports 0,
+	// because it accessed no storage. That convention is the one the in-tree
+	// db-hits work established (T910/T913) and it is a documented DIVERGENCE from
+	// Neo4j, which additionally charges a hit per property read; see docs/cypher.md.
+	DbHits int64
 }
 
 // PlanTree builds the physical plan tree rooted at op.
@@ -76,7 +89,7 @@ func PlanTree(op Operator) PlanNode {
 		// Attribute the measurements to the operator that did the work, and name
 		// the node after it rather than after the wrapper.
 		inner = p.planUnwrap()
-		n.Rows, n.Time = p.planStats()
+		n.Rows, n.Time, n.DbHits = p.planStats()
 		n.Profiled = true
 	}
 
@@ -132,12 +145,13 @@ func RenderPlan(op Operator) string {
 // bearing: a bare node in a profiled plan would read as an operator that cost
 // nothing, when in fact it was never instrumented.
 //
-// Such nodes exist because instrumentation is applied at ONE point — the value
-// the recursive builder returns — and a composite lowering emits several
-// operators for a single logical node, of which only the outermost passes through
-// it. Naming them honestly is preferred to either hiding them or inventing
-// zeroes; closing the gap means wrapping at each composite lowering site
-// (rmp #2237).
+// Such nodes USED to exist: instrumentation is applied at one point, the value the
+// recursive builder returns, and a composite lowering emits several operators for a
+// single logical node, of which only the outermost passed through it. rmp #2237
+// closed that by instrumenting each composite site, and
+// TestProfile_EveryOperatorIsMeasured holds it closed. The label is kept because
+// naming an unmeasured node honestly is still preferable to hiding it or inventing
+// a zero, and a future composite lowering could reopen the gap.
 func RenderPlanNode(n *PlanNode) string {
 	var b strings.Builder
 	writePlanNode(&b, n, "", "", anyProfiled(n))
@@ -169,7 +183,7 @@ func writePlanNode(b *strings.Builder, n *PlanNode, prefix, childPrefix string, 
 	}
 	switch {
 	case n.Profiled:
-		fmt.Fprintf(b, " (rows=%d, time=%s)", n.Rows, n.Time.Round(time.Microsecond))
+		fmt.Fprintf(b, " (rows=%d, dbhits=%d, time=%s)", n.Rows, n.DbHits, n.Time.Round(time.Microsecond))
 	case anyMeasured:
 		b.WriteString(" (not measured)")
 	}
