@@ -1585,6 +1585,35 @@ because #2228's hash join subsumes the per-row lookup for a bulk load. And row c
 actually cross-checked**, only tabulated; the harness now fails on any disagreement before a single
 timing is compared.
 
+Incrementally synced at commit `81afd56` (2026-07-28, task #2231, sprint 326 — string equality
+seeks the btree): **+8 nodes** — 1 `Commit`, 1 `Task` (`2231` COMPLETED), 1 `Spec`
+(`docs/benchmarks/btree-string-eq-2026-07-28.md`), 2 `Function` (`extractSingleStringCmp`,
+`boundFor`) and 3 `Test` (`TestBTreeStringEq_*`). **+11 edges** — 1 `CONTAINS`,
+1 `IMPLEMENTED_IN`, 1 `FIXES` (→`Feature` `bound-seek-key-resolution`), 4 `TOUCHES`,
+5 `Package CONTAINS`. All stamped `2026-07-28`. No new label or edge type.
+
+`extractSingleStringCmp` rejected `=` while its numeric counterpart degenerated it into `[v, v]`
+over the companion btree (#2169), so a **btree on a string property full-scanned an equality** even
+though `findBoundStringBTree` could already locate the index — and the identical predicate written
+as two inequalities already seeked. Accepting `=` and sharing the numeric path's selectivity gate
+and residual filter: **4 393.8 µs → 5.177 µs at n = 20 000 (849×)**, with allocations **flat in the
+node population** (819 525 and 219 364 B/op become 13 351 and 13 361) — which is the property that
+proves the label is no longer walked, and the same signature #2226 used. The range is exact for
+equality because strings order by **code point**, so no two distinct strings compare equal and no
+collation question arises; only `=` was added, leaving the collation ruling to #2224.
+
+The temporal hazard was **already closed**, and knowing why matters: the string btree uses the very
+same `projectStringPropValue` gate as the hash index, which refuses the SOH-tagged encodings, so a
+btree key is never created for a temporal. The rewrite inherits the exclusion rather than restating
+it.
+
+Two evidence-discipline facts worth keeping. A differential whose scan arm comes from
+parameterising the key is **degenerate below the selectivity gate's floor**, because the literal
+form scans there too — it must seed above the floor and assert the two arms take different plans.
+And `exec.RangeBound.Include` is **metadata only**: `NodeByIndexRangeScan` always emits the
+inclusive `[lo, hi]` superset and the residual filter enforces open/closed semantics, so flipping
+inclusivity is a no-op and a fault injection has to shift the range off the key to bite.
+
 Two properties carry the substance. `recogniseDegreePattern.eligibility` records the port of
 Neo4j's `QuerySolvableByGetDegree` + `isEligible` and, decisively, that **`Selections.empty`
 makes a labelled far node ineligible for a degree rewrite in Neo4j too** — so
