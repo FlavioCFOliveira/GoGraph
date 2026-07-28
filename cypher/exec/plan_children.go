@@ -151,6 +151,19 @@ func (op *SemiApply) PlanChildren() []Operator { return []Operator{op.outer, op.
 // the order that explains the join's cost.
 func (op *HashJoin) PlanChildren() []Operator { return []Operator{op.build, op.probe} }
 
+// PlanChildren reports the outer input that drives the seek, then the inner arm.
+//
+// The order is the OPPOSITE of the hash joins' above, and for the same reason
+// theirs is build-first: it is the order that explains the cost. This join
+// materialises nothing — the outer arm drives it and each outer row is answered by
+// an index seek, so the outer side is what the row count multiplies.
+//
+// The inner arm is reported even though most queries never execute it: it serves
+// only the fallback path (an integer key too large for float64 to represent
+// exactly), and rendering it is what makes that path visible in a plan rather than
+// a surprise in a profile.
+func (op *IndexNestedLoopJoin) PlanChildren() []Operator { return []Operator{op.outer, op.inner} }
+
 // PlanChildren reports the build side first, then the probe side, as
 // [HashJoin.PlanChildren] does.
 //

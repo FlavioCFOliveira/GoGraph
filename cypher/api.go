@@ -432,6 +432,20 @@ type buildOpts struct {
 	// public BuildPlanWithMutator, which therefore always builds the legacy
 	// nested-loop plan.
 	hashJoinEnabled bool
+	// disableIndexNestedLoopForTest suppresses the #2233 index nested-loop join
+	// substitution only, leaving the hash join in place. It is a TEST SEAM, not an
+	// option: the two plans are mutually exclusive by cost, so the differential
+	// suite cannot otherwise observe both answers for one query. No public setter
+	// exists and production never sets it — which is exactly why the linter cannot
+	// see it being written, since the only writer is the differential test.
+	disableIndexNestedLoopForTest bool //nolint:unused // written only by the in-package differential test; see index_nested_loop_plan_test.go
+	// indexNestedLoopEnabled gates the index nested-loop join (#2233), the
+	// Θ(B·log N) plan for the same disconnected-equi-join shape the hash join
+	// serves at Θ(N+B). Both paths set it from the same source as
+	// hashJoinEnabled: the two plans are alternatives chosen by a cost gate
+	// (indexNestedLoopWins), not independently switchable optimisations, and the
+	// substitution is order-PRESERVING so it needs no order guard either.
+	indexNestedLoopEnabled bool
 	// rangeSeekEnabled gates the range-predicate btree index seek (#1505). The
 	// read-path build sets it from the Engine field; it is consulted in
 	// buildOperator's *ir.Selection case. Left false by every other build path,
@@ -952,6 +966,12 @@ type Engine struct {
 	// (#1506). True by default; set false by EngineOptions.DisableHashJoin. When
 	// false the planner always builds the legacy nested-loop Cartesian plan.
 	hashJoinEnabled bool
+	// disableIndexNestedLoopForTest suppresses the #2233 index nested-loop join
+	// substitution only, leaving the hash join in place. It is a TEST SEAM, not an
+	// option: the two plans are mutually exclusive by cost, so the differential
+	// suite cannot otherwise observe both answers for one query. No public setter
+	// exists and production never sets it.
+	disableIndexNestedLoopForTest bool
 
 	// rangeSeekEnabled gates the range-predicate btree index seek (#1505). True
 	// by default; set false by EngineOptions.DisableRangeIndexSeek. When false
@@ -2033,6 +2053,13 @@ func (e *Engine) buildReadPhysical(
 	// in rmp #2234 once that was proved; see [hashJoinBuildOnLeft] for the argument
 	// and TestHashJoinOrder_SequenceMatchesNestedLoop for its empirical half.
 	bopts.hashJoinEnabled = e.hashJoinEnabled
+	// The index nested-loop join is the same optimisation under a different cost
+	// regime, so it rides the same Engine flag rather than adding a second knob a
+	// caller could set inconsistently. The test-only suppression exists so the
+	// differential suite can obtain the HASH-JOIN answer for a shape the cost gate
+	// awards to the seek — the two plans are exclusive, so there is no other way to
+	// see both for one query.
+	bopts.indexNestedLoopEnabled = e.hashJoinEnabled && !e.disableIndexNestedLoopForTest
 	bopts.rangeSeekEnabled = e.rangeSeekEnabled
 	// Min-label scan gating (#2077): enable the smallest-cardinality
 	// multi-label anchor substitution when the Engine permits it. The
@@ -5613,6 +5640,7 @@ func buildPlanWithMutatorFull(
 	// The read path has since been brought to the same footing (rmp #2234), so both
 	// paths now gate on this one flag and neither runs a per-query order scan.
 	bopts.hashJoinEnabled = gates.hashJoin
+	bopts.indexNestedLoopEnabled = gates.hashJoin
 	bopts.writeFallback = func(child ir.LogicalPlan) (exec.Operator, error) {
 		return buildOperatorWrite(child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 	}
@@ -7515,12 +7543,23 @@ func buildOperatorRec(
 		} else if ok {
 			return op, nil
 		}
+		// Index nested-loop join (#2233): the SAME structural shape as the hash join
+		// below, at Θ(B·log N) instead of Θ(N+B). Tried first because it is admitted
+		// only in the regime where it is the cheaper of the two (see
+		// indexNestedLoopWins), so the hash join is the right fallback for everything
+		// it declines — including every shape with no covering numeric index, which is
+		// the majority.
+		if op, ok, err := tryBuildIndexNestedLoopJoin(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts); err != nil {
+			return nil, err
+		} else if ok {
+			return op, nil
+		}
 		// Disconnected-equi-join hash join (#1506): when this Selection sits
 		// directly above a plain Apply and carries an equi-join predicate
 		// straddling the two arms, replace the nested-loop Cartesian product with
-		// an order-insensitive hash join under the structural + order-safety +
-		// size-floor guards (see hash_join_plan.go). Falls through to the normal
-		// Selection build when the pattern is not eligible.
+		// an order-insensitive hash join under the structural + size-floor guards
+		// (see hash_join_plan.go). Falls through to the normal Selection build when
+		// the pattern is not eligible.
 		if op, ok, err := tryBuildHashJoin(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts); err != nil {
 			return nil, err
 		} else if ok {
