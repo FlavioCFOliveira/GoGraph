@@ -510,8 +510,47 @@ the label is answered by a scan, because probing that many keys costs more than
 the scan it would replace.
 
 A multi-label pattern combined with a property equality — `MATCH (a:A:B {p: v})` —
-does **not** currently reach the index at all, for any key form. It is answered by
-scanning the smaller label and re-checking the rest as a filter.
+does not reach the **property** index, for any key form. The labels are still
+served set-at-a-time (see below) and the property equality remains a filter over
+the rows the label conjunction admits.
+
+**Conjunctions of indexed properties compose.** `WHERE n.a > 1 AND n.b < 9` uses
+**both** indexes: each conjunct's index yields a bitmap and the planner intersects
+them, so only the rows satisfying both are materialised. This is what other engines
+need a dedicated *composite index* type for; GoGraph composes **any two ordinary
+single-property indexes** — including across kinds, a numeric index with a string
+one — so nothing has to be declared in advance for a particular pair of properties.
+
+Each conjunct must independently clear the same cost gate a lone range predicate
+does, so a conjunct matching most of the label is left as a filter rather than
+probed; and because a range index yields a *superset*, the original predicate is
+still applied to every surviving row. A conjunct on an unindexed property, a
+disjunction, and a negation are never composed.
+
+**Multi-label patterns are answered as set intersections.**
+`MATCH (n:A:B)` is a set intersection, and GoGraph answers it as one. Labels are
+stored as Roaring bitmaps, so the conjunction is a single k-way AND of those
+bitmaps rather than a scan of one label with the rest re-checked on every row.
+
+The plan renders as a `NodeByLabelScan` whose detail names the intersected labels
+in the order they are ANDed — `[Small∩Big]` — which is ascending cardinality,
+because the smallest bitmap is the cheapest to copy.
+
+Two consequences worth knowing:
+
+- **No residual label filter.** The intersected bitmap already encodes the
+  conjunction, and the label index is maintained on delete and on relabel, so the
+  rows it yields are exactly the matching live nodes. Any *other* predicate in the
+  pattern (a property, a `WHERE`) is of course still applied.
+- **The conjunction is decided atomically.** The AND runs under a single read-lock
+  over the label index, so the whole conjunction reflects one consistent image
+  rather than each label being checked at a different moment.
+
+It is a cost decision like every other access path. The intersection is used when
+it scans **strictly fewer** rows than the smallest single label would; when one
+label is entirely contained in the others there are no rows left to remove, so the
+engine keeps the ordinary plan. A label with no members short-circuits the whole
+conjunction to an empty scan. Use `Engine.Explain` to see which applies.
 
 All of this is a transparent optimisation: a query using an index returns
 exactly the same rows as the same query with no index (a residual filter refines
@@ -523,7 +562,18 @@ satisfy `ORDER BY`, which is always evaluated by a separate sort operator.
 index types are `RANGE`/`TEXT`/`POINT`/`LOOKUP`/`FULLTEXT`/`VECTOR`. Indexes
 cover a single **node** property (`FOR (n:Label) ON (n.prop)`); composite
 (multi-property) and relationship-property indexes are not supported and are
-rejected with an error. These are deliberate scope boundaries: the openCypher
+rejected with an error.
+
+**Composite indexes are deliberately absent, not missing.** A conjunction over two
+indexed properties is answered by intersecting the two single-property indexes'
+bitmaps (above), which covers what a composite index is normally declared for —
+without asking the user to predict which pairs of properties will be queried
+together, and without a second index type to build, maintain and recover. The
+trade is that a composite index can also serve an ordered prefix scan over the
+combined key, which an intersection cannot; GoGraph does not use indexes to satisfy
+`ORDER BY` at all, so that capability would have nothing to attach to today.
+
+These are deliberate scope boundaries: the openCypher
 TCK does not cover index DDL, so the dialect does not affect conformance.
 
 If the index already exists, the engine returns

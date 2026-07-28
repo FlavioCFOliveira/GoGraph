@@ -283,6 +283,66 @@ predicate with a third conjunct gives up the seek entirely (92×, #2245),
 and `STARTS WITH` is not `ColumnarFilter`-eligible, so a gate-vetoed
 prefix still pays row-mode filtering (~3.3×, #2246).
 
+## Sprint 312 — set-at-a-time bitmap intersection (R2-P2, 2026-07-28)
+
+`MATCH (n:A:B)` is a set intersection, and it is now answered as one. Labels
+were already stored as Roaring bitmaps and `label.Index.Intersect` — a
+container-wise AND with an early empty-exit — was already implemented and
+tested; the planner just called it with a single label. The conjunction is now
+one k-way AND, and the residual label `Filter` is **dropped**, because the
+intersected bitmap already encodes the conjunction.
+
+Dropping that filter is the win, and it is sound because the label index was
+**measured** to be maintained on both delete and relabel, so the bitmap is
+authoritative for membership *and* liveness. It also adds no exposure: a plain
+single-label `MATCH (n:L)` already iterates a bitmap materialised at `Init`
+with no residual filter at all.
+
+The AND is ordered **smallest-first**, because `Intersect` clones its first
+argument — worth 6.0× in time and 7.5× in memory on a skewed pair, using the
+exact counts the min-label peephole (#2077) already computes.
+
+| Change | Task | Fixture | Result |
+|--------|------|---------|--------|
+| Multi-label conjunction → Roaring AND | #2133 | `BenchmarkLabelIntersect`, `\|LabA\|=\|LabB\|=100 000`, `\|∩\|=100`, end-to-end, `-count=10` | `RETURN count(n)` **2 909× faster** (22 312.42 µs → 7.669 µs), **988× fewer allocs** (99 822 → 101); `RETURN n.k` **267× faster** |
+| Conjunctive indexed properties → bitmap AND | #2134 | 20 000 `:Doc` nodes, three btree indexes | composes two single-property indexes, and across index kinds (numeric + string) |
+
+**The gate is a strict reduction in rows scanned**, `|L₁ ∩ … ∩ L_k| < min|Lᵢ|`,
+decided on an exact count that allocates nothing
+(`label.Index.IntersectCardinality`). It is not a tuned ratio: a ratio was tried
+first and declined cases the cost model says must be served. When the
+intersection equals the smallest label there are no rows left to remove, so the
+shape is left to the columnar filter chain — symmetric with the rule that
+recogniser already applies to the min-label re-anchor, that a rewrite may
+pre-empt another only when it removes **rows** rather than a constant factor per
+row. Every veto falls through to the shipped min-label plan, never to something
+worse. An empty label short-circuits the whole conjunction.
+
+For **properties** the discipline differs and the design said so before the code
+was written: a label bitmap is *exact*, so its filter is dropped; a range bitmap
+is a *superset* by construction (#F-EXEC1), so intersection is still sound —
+supersets are closed under intersection — but the residual `Filter` is
+**mandatory** there. That is what lets any two ordinary single-property indexes
+answer `WHERE n.a > 1 AND n.b < 9`, which other engines need a dedicated
+composite index type for, with no new index type and no new statistic.
+
+Neither Neo4j nor Memgraph does set-at-a-time label intersection: Neo4j's
+`LOOKUP` index gives a token scan then filters, and Memgraph's `ScanAllByLabel`
+then filters.
+
+Inert where the shape is absent: allocations are **flat (geomean +0.00%)** on
+both `cypher_ldbc` and `cypher_alloc` across the A/B commit boundary — after
+three rounds of fixing a probe that ran on every `Selection` and was not free
+when it declined, two of whose causes were visible only under
+`go build -gcflags=-m`. Correctness is gated by a differential, an absolute Go
+oracle over label memberships, plan-difference assertions, a `rapid` property
+that fails if the path never fires, and a race-free concurrent-relabelling
+invariant; the harness was validated by mutation. Design and proofs:
+[design-bitmap-intersection.md](design-bitmap-intersection.md). Full record:
+[benchmarks/bitmap-intersection-2026-07-28.md](benchmarks/bitmap-intersection-2026-07-28.md)
+and [benchmarks/history/LEDGER.md](benchmarks/history/LEDGER.md) rows 0028–0029.
+TCK held at 3897/3897, -race clean.
+
 ## Workflow
 
 Every future optimisation appends a row to the table above with
