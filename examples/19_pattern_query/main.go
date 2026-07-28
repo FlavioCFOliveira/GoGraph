@@ -225,7 +225,17 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	eng := query.New(g, c)
 	fmt.Fprintf(w, "# csr.freeze=%s\n", freeze.Round(time.Microsecond))
 
-	return runQueries(ctx, eng, g, w)
+	if err := runQueries(ctx, eng, g, w); err != nil {
+		return err
+	}
+
+	// The registry name-search phase: the one query a package registry always
+	// needs and the fluent pattern API cannot express — search by name prefix —
+	// driven through Cypher over a B-tree-indexed view of the same packages, with
+	// its plan and its CPU/allocation cost measured against the scan it replaces
+	// and against the two string predicates no index can serve. See
+	// registry_search.go.
+	return runRegistrySearch(ctx, g, w)
 }
 
 // buildStats reports the realised shape of a build (the random out-degrees
