@@ -3511,7 +3511,11 @@ func QueryHasWritingClause(query string) bool {
 	if ir.IsDDL(query) {
 		return false
 	}
-	return writingKeywordRE.MatchString(query)
+	// Mask the regions that cannot hold a clause before matching, so a keyword
+	// inside a comment or a quoted string does not route a READ onto the write
+	// path — where it would serialise on the store's single writer (rmp #2230).
+	// The mask is allocation-free for a query containing no comment or quote.
+	return writingKeywordRE.MatchString(maskNonClauseRegions(query))
 }
 
 // queryHasWritingClause is the internal alias for [QueryHasWritingClause],
