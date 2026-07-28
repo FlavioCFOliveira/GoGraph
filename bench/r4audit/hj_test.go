@@ -8,9 +8,18 @@ import (
 )
 
 // TestHashJoinTrigger isolates which projections let the #1506 hash join fire.
-// The order-safety guard disables it when an "arrival-order" aggregation is
-// anywhere in the plan; this checks whether order-INSENSITIVE aggregations
-// (count/sum/min/max) are caught by the same net.
+//
+// It was written when a whole-query order-safety scan disabled the substitution
+// for any plan containing an arrival-order aggregation or a bare LIMIT/SKIP, to
+// check whether order-INSENSITIVE aggregations (count/sum/min/max) were caught by
+// the same net. They were not; equijoin-collect and equijoin-limit were, and this
+// table is where that showed.
+//
+// rmp #2234 retired that scan — the substitution emits the nested loop's row
+// sequence position for position, so there was nothing to protect — and both rows
+// flipped from CartesianProduct to HashJoin. All ten shapes now fire, so the table
+// no longer discriminates; it is kept as the gate that would catch the
+// substitution silently narrowing again.
 func TestHashJoinTrigger(t *testing.T) {
 	eng := newEng(t, 200)
 	shapes := []struct{ name, q string }{

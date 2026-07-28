@@ -37,11 +37,15 @@ package cypher
 // a RESET enabler is treated as an observer (fail safe): "when in doubt keep the
 // deterministic plan — never wrong, only slower."
 //
-// This predicate is intentionally a SUPERSET of the shipped hash-join order
-// check [hashJoinOrderSafe] (which inspects only Limit/Skip and EagerAggregation
-// over the whole plan): it suppresses in strictly more cases, so it cannot admit
-// a reorder the hash-join check would have rejected. The shipped hash join is
-// left untouched.
+// This predicate is NOT shared with the hash join, and the difference is not one
+// of strictness. The hash join once carried its own order check over the whole
+// plan; that check was retired (rmp #2234) because the substitution emits the
+// nested loop's row sequence position for position, so nothing above it can
+// observe a difference and there was nothing to check. A REORDER is a different
+// proposition: swapping the arms of a disjoint Cartesian genuinely changes the
+// emitted order, so an observer above it really would see it, and this predicate
+// really is needed. Do not read the hash join's retirement as licence to relax
+// this one.
 
 import (
 	"strings"

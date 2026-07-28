@@ -19,12 +19,8 @@ package cypher
 // b`) admits no hash key and keeps the nested-loop plan — a hash join cannot
 // help it.
 //
-// Three guards must all hold (see the design spike §2.3, §4):
+// Two guards must hold (see the design spike §2.3, §4):
 //
-//   - ORDER SAFETY: no operator above the join may observe the changed row
-//     order. Verified once per query by [hashJoinOrderSafe]; a bare LIMIT/SKIP
-//     without ORDER BY, or a collect()/arrival-order aggregation anywhere in the
-//     plan, disables the optimisation for the whole query.
 //   - SIZE FLOOR: only worth the hash-build overhead when the build side is
 //     non-trivial. The floor is structural-eligibility only here (the operator
 //     itself self-selects the smaller side at runtime); the asymptotic win is
@@ -33,6 +29,17 @@ package cypher
 //   - RESULT IDENTITY: the hash join produces exactly the multiset the
 //     nested-loop product + equi-join filter would, with identical
 //     null/type-coercion/NaN semantics for the join key (see exec.HashJoin).
+//
+// There was a third — ORDER SAFETY, a whole-query IR scan that disabled the
+// substitution for the entire query whenever a bare LIMIT/SKIP without ORDER BY
+// or an arrival-order aggregation appeared anywhere in the plan. It is gone (rmp
+// #2234). The substitution does not merely preserve the multiset, it emits the
+// nested loop's row SEQUENCE position for position, so there was nothing for the
+// scan to protect: it was rejecting queries over a reordering that cannot happen,
+// and those queries silently got the O(n·m) nested loop. The argument is at
+// [hashJoinBuildOnLeft] and its empirical half is
+// TestHashJoinOrder_SequenceMatchesNestedLoop, which compares full row sequences
+// for exactly the shapes the scan used to exclude.
 //
 // The residual predicate (every conjunct other than the chosen equi-join key)
 // is re-applied as an ordinary Filter above the hash join, so the result is
@@ -114,7 +121,7 @@ func tryBuildHashJoin(
 	argByTag map[uint32]*exec.Argument,
 	bopts *buildOpts,
 ) (exec.Operator, bool, error) {
-	if bopts == nil || !bopts.hashJoinEnabled || !bopts.hashJoinOrderSafe {
+	if bopts == nil || !bopts.hashJoinEnabled {
 		return nil, false, nil
 	}
 	// Need the parsed predicate AST and a plain Apply child.
@@ -520,79 +527,6 @@ func shiftApplyMetaColumns(
 // the swap must be gated on the write path being absent AND on the read path's
 // order-safety scan.
 const hashJoinBuildOnLeft = false
-
-// hashJoinOrderSafe reports whether the whole-query IR plan contains no operator
-// that would observe the row order a hash join changes. It returns false (the
-// optimisation is disabled for the query) when the plan contains:
-//
-//   - a Limit or Skip operator NOT dominated by an order-establishing Sort/Top
-//     above it (a bare LIMIT/SKIP without ORDER BY — the specific rows returned
-//     are then observable, openCypher 9 §8.4), or
-//   - an EagerAggregation whose aggregation captures arrival order
-//     (collect / collect(DISTINCT) — the list value is order-dependent).
-//
-// This is deliberately conservative: any uncertainty disables the optimisation.
-// It is computed once per query and threaded into [buildOpts.hashJoinOrderSafe].
-func hashJoinOrderSafe(plan ir.LogicalPlan) bool {
-	safe := true
-	// sortedAbove tracks whether an order-establishing operator (Sort/Top) sits
-	// above the current node on the path from the root. A LIMIT/SKIP under such
-	// an operator observes a defined order, so the hash join's reordering below
-	// it is masked by the sort.
-	var walk func(p ir.LogicalPlan, sortedAbove bool)
-	walk = func(p ir.LogicalPlan, sortedAbove bool) {
-		if p == nil || !safe {
-			return
-		}
-		switch p.(type) {
-		case *ir.Sort, *ir.Top:
-			sortedAbove = true
-		case *ir.Limit, *ir.Skip:
-			if !sortedAbove {
-				safe = false
-				return
-			}
-		case *ir.EagerAggregation:
-			if aggregationObservesOrder(p) {
-				safe = false
-				return
-			}
-		}
-		for _, c := range p.Children() {
-			walk(c, sortedAbove)
-		}
-	}
-	walk(plan, false)
-	return safe
-}
-
-// aggregationObservesOrder reports whether an EagerAggregation contains an
-// aggregate whose result depends on the arrival order of its input rows — i.e.
-// a hash join's row reordering below it would change the observable result.
-//
-// The cypher-expert taxonomy (openCypher aggregation semantics): collect (and
-// collect(DISTINCT), whose list reflects first-occurrence order) materialises
-// rows in arrival order, so the list value is order-dependent. count / sum /
-// avg / min / max / stDev are commutative/associative or use orderability, not
-// arrival order, and are therefore order-safe. Any unrecognised aggregate is
-// treated conservatively as order-observing.
-func aggregationObservesOrder(p ir.LogicalPlan) bool {
-	agg, ok := p.(*ir.EagerAggregation)
-	if !ok {
-		return false
-	}
-	for _, a := range agg.Aggregates {
-		switch normaliseAggName(a.Function) {
-		case "count", "sum", "avg", "min", "max", "stdev", "stdevp":
-			// Order-insensitive.
-		default:
-			// collect, percentileCont/Disc-with-observable-list, and any
-			// unknown aggregate: assume order-observing.
-			return true
-		}
-	}
-	return false
-}
 
 // normaliseAggName lowercases and trims an aggregate function name for
 // case-insensitive comparison.

@@ -432,15 +432,6 @@ type buildOpts struct {
 	// public BuildPlanWithMutator, which therefore always builds the legacy
 	// nested-loop plan.
 	hashJoinEnabled bool
-	// hashJoinOrderSafe records whether an operator above the join could observe
-	// the row order. The READ path computes it with a whole-query IR scan
-	// ([hashJoinOrderSafe]) that rejects a bare LIMIT/SKIP without ORDER BY and a
-	// collect()/arrival-order aggregation; when false the hash join is disabled
-	// for the whole query even where the structural equi-join trigger matches.
-	// The WRITE path sets it from the same gate as hashJoinEnabled, because the
-	// substitution is order-PRESERVING by construction — see
-	// [hashJoinBuildOnLeft].
-	hashJoinOrderSafe bool
 	// rangeSeekEnabled gates the range-predicate btree index seek (#1505). The
 	// read-path build sets it from the Engine field; it is consulted in
 	// buildOperator's *ir.Selection case. Left false by every other build path,
@@ -2035,12 +2026,13 @@ func (e *Engine) buildReadPhysical(
 	// pattern amortises its O(V+E) build across the whole Engine's query
 	// stream, not just within one call.
 	bopts.edgeTypeFilterCache = e.edgeTypeFilterCache
-	// Hash-join optimisation gating (#1506): enable only when the Engine
-	// permits it AND the whole-query order-safety scan finds no operator that
-	// would observe the changed row order. Both must hold; otherwise the
-	// planner falls back to the legacy nested-loop Cartesian plan.
+	// Hash-join optimisation gating (#1506): the Engine flag alone. There is no
+	// order-safety companion — the substitution emits the nested loop's row
+	// SEQUENCE, not merely its multiset, so no operator above the join can observe
+	// a difference. The whole-query IR scan that used to qualify this was retired
+	// in rmp #2234 once that was proved; see [hashJoinBuildOnLeft] for the argument
+	// and TestHashJoinOrder_SequenceMatchesNestedLoop for its empirical half.
 	bopts.hashJoinEnabled = e.hashJoinEnabled
-	bopts.hashJoinOrderSafe = entry.hashJoinSafe
 	bopts.rangeSeekEnabled = e.rangeSeekEnabled
 	// Min-label scan gating (#2077): enable the smallest-cardinality
 	// multi-label anchor substitution when the Engine permits it. The
@@ -3943,10 +3935,6 @@ type planCacheEntry struct {
 	// attached to every Result for this query (e.g. a Cartesian-product warning,
 	// #1483). nil when the query produces none.
 	notifications []Notification
-	// hashJoinSafe memoises hashJoinOrderSafe(plan) — a full whole-query IR walk
-	// that is a pure function of the (cached, immutable) plan, so it is computed
-	// once at entry creation rather than on every Run (#1719).
-	hashJoinSafe bool
 	// reorderCandidates memoises the structurally-qualifying, ORDER-SAFE
 	// disjoint-component reorder points (#2091) — a pure function of the immutable
 	// plan, computed once at entry creation. The per-query read-path build applies
@@ -4008,19 +3996,22 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
 	if note := analyseCartesianProductQuery(astNode); note != nil {
 		notifications = []Notification{*note}
 	}
-	// Memoise the two computations the execution path otherwise repeats on every
-	// Run: hashJoinOrderSafe (a whole-query IR walk run on every Run) and, for
-	// parameterised queries, InferParamTypes. Both are pure functions of the plan
-	// (paramTypes additionally of the index schema). The entry is immutable after
-	// loadOrStore, so this is safe for concurrent cache readers; paramTypes is
-	// invalidated with the entry by ClearPlanCache on any schema-changing DDL.
-	// Skipped for semantically-invalid entries, which never reach execution.
-	hashJoinSafe := false
+	// Memoise the computations the execution path otherwise repeats on every Run:
+	// the reorder/anchor-swap candidate sets and, for parameterised queries,
+	// InferParamTypes. All are pure functions of the plan (paramTypes additionally
+	// of the index schema). The entry is immutable after loadOrStore, so this is
+	// safe for concurrent cache readers; paramTypes is invalidated with the entry
+	// by ClearPlanCache on any schema-changing DDL. Skipped for
+	// semantically-invalid entries, which never reach execution.
+	//
+	// The hash join's order-safety walk used to be memoised here too. It is gone
+	// rather than cached: rmp #2234 proved the substitution order-preserving, so
+	// there was nothing left for the walk to decide (#1719 had made it cheap; #2234
+	// made it unnecessary).
 	var reorderCandidates []*ir.Apply
 	var anchorSwapCandidates []anchorSite
 	var paramTypes map[string]expr.Kind
 	if semaErr == nil {
-		hashJoinSafe = hashJoinOrderSafe(plan)
 		// Disjoint-component reorder candidates (#2091): the structurally-
 		// qualifying, order-safe reorder points. Pure function of the plan, so
 		// memoised here; the live cardinality gate runs per query at build time.
@@ -4039,7 +4030,7 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
 	}
 	entry := &planCacheEntry{
 		plan: plan, semaErr: semaErr, paramRefs: paramRefs, notifications: notifications,
-		hashJoinSafe: hashJoinSafe, reorderCandidates: reorderCandidates,
+		reorderCandidates:    reorderCandidates,
 		anchorSwapCandidates: anchorSwapCandidates, paramTypes: paramTypes,
 		pushedSeekHints: pushedSeekHints,
 	}
@@ -5615,15 +5606,13 @@ func buildPlanWithMutatorFull(
 	// why each one is admissible on a path that writes.
 	bopts.rangeSeekEnabled = gates.rangeSeek
 	bopts.minLabelScanEnabled = gates.minLabelScan
-	// #2225 part B. hashJoinOrderSafe is set from the SAME gate rather than from a
-	// per-query IR scan because the substitution is order-PRESERVING, not merely
-	// order-insensitive: the build side is pinned by the planner, so nothing above
-	// the join can observe it. The read path still runs its own scan
-	// ([hashJoinOrderSafe]) — retiring that is deliberately left as its own
-	// change, since it widens the substitution's reach on the read path and must
-	// carry its own evidence.
+	// #2225 part B admitted the hash join here with no order-safety companion,
+	// because the substitution is order-PRESERVING, not merely order-insensitive:
+	// the build side is pinned by the planner, so nothing above the join can
+	// observe it — which a writing statement needs, `SET` being last-write-wins.
+	// The read path has since been brought to the same footing (rmp #2234), so both
+	// paths now gate on this one flag and neither runs a per-query order scan.
 	bopts.hashJoinEnabled = gates.hashJoin
-	bopts.hashJoinOrderSafe = gates.hashJoin
 	bopts.writeFallback = func(child ir.LogicalPlan) (exec.Operator, error) {
 		return buildOperatorWrite(child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 	}

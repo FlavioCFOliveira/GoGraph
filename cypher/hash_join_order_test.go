@@ -159,6 +159,66 @@ func TestHashJoinOrder_SequenceMatchesNestedLoop(t *testing.T) {
 			params:   map[string]any{"rows": unwindRows},
 			columnar: false,
 		},
+
+		// ── The shapes the read path's order-safety scan used to exclude (rmp #2236's
+		// sibling, #2234). Each one is an operator that can OBSERVE row order, so
+		// order identity here is the whole justification for retiring that scan. A
+		// bare LIMIT is the sharpest case in the set: openCypher 9 §8.4 leaves WHICH
+		// rows come back unspecified, so a divergence would be legal — and still a
+		// visible behaviour change. It is the one shape where the order argument has
+		// to be exactly right rather than merely plausible.
+		{
+			name:     "bare LIMIT without ORDER BY (order is observable, spec leaves it free)",
+			q:        `MATCH (a:P), (b:P) WHERE a.age = b.age RETURN a.id, b.id LIMIT 25`,
+			columnar: true,
+		},
+		{
+			name:     "bare SKIP without ORDER BY",
+			q:        `MATCH (a:P), (b:P) WHERE a.age = b.age RETURN a.id, b.id SKIP 40`,
+			columnar: true,
+		},
+		{
+			name:     "bare SKIP and LIMIT together",
+			q:        `MATCH (a:P), (b:P) WHERE a.age = b.age RETURN a.id, b.id SKIP 40 LIMIT 25`,
+			columnar: true,
+		},
+		{
+			name:     "collect() materialises rows in arrival order",
+			q:        `MATCH (a:P), (b:P) WHERE a.age = b.age RETURN a.id, collect(b.id)`,
+			columnar: true,
+		},
+		{
+			name:     "collect(DISTINCT) keeps first-occurrence order",
+			q:        `MATCH (a:P), (b:P) WHERE a.age = b.age RETURN a.id, collect(DISTINCT b.id)`,
+			columnar: true,
+		},
+		{
+			name:     "collect() over the whole result, one row, maximal order exposure",
+			q:        `MATCH (a:P), (b:P) WHERE a.age = b.age RETURN collect(a.id), collect(b.id)`,
+			columnar: true,
+		},
+		{
+			name: "bare LIMIT with an Expand on an arm (row-mode operator)",
+			q: `MATCH (a:P)-[:K]->(x:P), (b:P) WHERE a.age = b.age ` +
+				`RETURN a.id, x.id, b.id LIMIT 25`,
+			columnar: false,
+		},
+		{
+			name: "collect() with an Expand on an arm (row-mode operator)",
+			q: `MATCH (a:P)-[:K]->(x:P), (b:P) WHERE a.age = b.age ` +
+				`RETURN a.id, collect(b.id)`,
+			columnar: false,
+		},
+		{
+			// The CONTROL for the group above: the scan already permitted a LIMIT
+			// dominated by an ORDER BY, so this shape fired before and after. It keeps
+			// the group honest — if every case above started failing because the join
+			// stopped firing at all, this one would too, distinguishing "the guard was
+			// retired" from "the substitution broke".
+			name:     "LIMIT under ORDER BY (permitted before the scan was retired)",
+			q:        `MATCH (a:P), (b:P) WHERE a.age = b.age RETURN a.id, b.id ORDER BY a.id, b.id LIMIT 25`,
+			columnar: true,
+		},
 	}
 
 	for _, tc := range cases {
@@ -196,8 +256,9 @@ func TestHashJoinOrder_SequenceMatchesNestedLoop(t *testing.T) {
 				if gotOn[i] != gotOff[i] {
 					t.Fatalf("ORDER DIVERGED at row %d of %d:\n  hash join  %q\n  nested loop %q\n"+
 						"The hash join is no longer emitting the nested loop's sequence — see "+
-						"hashJoinBuildOnLeft. If a build-side self-selection was just added, "+
-						"it must be gated on the write path being absent AND on hashJoinOrderSafe.",
+						"hashJoinBuildOnLeft. If a build-side self-selection was just added, it "+
+						"makes the substitution order-CHANGING: it must then be gated on the write "+
+						"path being absent AND on a reinstated read-path order scan.",
 						i, len(gotOn), gotOn[i], gotOff[i])
 				}
 			}
