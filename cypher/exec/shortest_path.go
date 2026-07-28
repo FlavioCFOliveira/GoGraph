@@ -1134,13 +1134,22 @@ func (op *ShortestPath) passesTypeFilter(pos uint64, isFwd bool) bool {
 	}
 	fwdPos := pos
 	if !isFwd {
-		fwdPos = op.resolvedFwdPosOrSelf(pos)
-		// When the reverse slot has no resolvable forward counterpart we cannot
-		// type-check it; keep it permissive (mirrors VLE's fwdAbsPos==absPos
-		// fallback for the rare out-of-range case).
-		if fwdPos == pos {
+		// The resolution must report whether it SUCCEEDED, not signal failure by
+		// returning the input. resolvedFwdPosOrSelf returns revPos both when the
+		// mapping is unknown and when it legitimately resolves to the same index —
+		// and the second case is not exotic: with a single edge 0→1 both CSRs hold
+		// one slot at index 0, so revToFwd[0] == 0. Reading `fwdPos == pos` as
+		// "unresolvable, stay permissive" therefore skipped the filter on a
+		// perfectly known slot and admitted an edge the filter excludes, which is
+		// what made a DirIn search return a path over an excluded hop (rmp #2236).
+		resolved, known := op.resolveFwdPosKnown(pos)
+		if !known {
+			// Genuinely unresolvable: there is nothing to test against, so stay
+			// permissive (mirrors VLE's fwdAbsPos==absPos fallback for the rare
+			// out-of-range case).
 			return true
 		}
+		fwdPos = resolved
 	}
 	_, ok := op.edgeTypeFilter[fwdPos]
 	return ok
@@ -1156,15 +1165,31 @@ func (op *ShortestPath) resolveFwdPos(e spPredEntry) (fwdPos uint64, reversed bo
 	return op.resolvedFwdPosOrSelf(e.rawPos), true
 }
 
-// resolvedFwdPosOrSelf maps a reverse-CSR position to its forward counterpart,
-// falling back to the reverse position itself when unresolved.
-func (op *ShortestPath) resolvedFwdPosOrSelf(revPos uint64) uint64 {
+// resolveFwdPosKnown maps a reverse-CSR position to its forward counterpart and
+// reports whether that mapping is KNOWN.
+//
+// The boolean exists because the position alone cannot carry the answer: a
+// resolved mapping may equal revPos, so no sentinel value drawn from the position
+// space can distinguish "resolved to the same index" from "not resolved". Any
+// caller whose decision differs between those two cases — the type filter does —
+// must use this form rather than [ShortestPath.resolvedFwdPosOrSelf].
+func (op *ShortestPath) resolveFwdPosKnown(revPos uint64) (uint64, bool) {
 	if op.revToFwd != nil && revPos < uint64(len(op.revToFwd)) {
 		if mapped := op.revToFwd[revPos]; mapped != unresolvedFwdPos {
-			return mapped
+			return mapped, true
 		}
 	}
-	return revPos
+	return revPos, false
+}
+
+// resolvedFwdPosOrSelf maps a reverse-CSR position to its forward counterpart,
+// falling back to the reverse position itself when unresolved. It is for callers
+// that want a usable position either way — path hydration, where the reverse
+// position is a serviceable stand-in — and NOT for a caller that must know
+// whether the mapping succeeded; see [ShortestPath.resolveFwdPosKnown].
+func (op *ShortestPath) resolvedFwdPosOrSelf(revPos uint64) uint64 {
+	pos, _ := op.resolveFwdPosKnown(revPos)
+	return pos
 }
 
 // Close closes the input operator.
@@ -2257,17 +2282,20 @@ func containsRel(rs []uint64, r uint64) bool {
 	return false
 }
 
-// passesTypeFilter mirrors [ShortestPath.passesTypeFilter].
+// passesTypeFilter mirrors [ShortestPath.passesTypeFilter], including the
+// resolution-status distinction that fixed rmp #2236 — this operator carried the
+// same ambiguous sentinel and therefore the same wrong answer.
 func (op *AllShortestPaths) passesTypeFilter(pos uint64, isFwd bool) bool {
 	if op.edgeType == "" {
 		return true
 	}
 	fwdPos := pos
 	if !isFwd {
-		fwdPos = op.resolvedFwdPosOrSelf(pos)
-		if fwdPos == pos {
+		resolved, known := op.resolveFwdPosKnown(pos)
+		if !known {
 			return true
 		}
+		fwdPos = resolved
 	}
 	_, ok := op.edgeTypeFilter[fwdPos]
 	return ok
@@ -2283,12 +2311,20 @@ func (op *AllShortestPaths) resolveFwdPos(e aspPredEntry) (fwdPos uint64, revers
 
 // resolvedFwdPosOrSelf mirrors [ShortestPath.resolvedFwdPosOrSelf].
 func (op *AllShortestPaths) resolvedFwdPosOrSelf(revPos uint64) uint64 {
+	pos, _ := op.resolveFwdPosKnown(revPos)
+	return pos
+}
+
+// resolveFwdPosKnown mirrors [ShortestPath.resolveFwdPosKnown], and exists for
+// the same reason: no sentinel drawn from the position space can distinguish a
+// mapping that resolved to the same index from one that did not resolve.
+func (op *AllShortestPaths) resolveFwdPosKnown(revPos uint64) (uint64, bool) {
 	if op.revToFwd != nil && revPos < uint64(len(op.revToFwd)) {
 		if mapped := op.revToFwd[revPos]; mapped != unresolvedFwdPos {
-			return mapped
+			return mapped, true
 		}
 	}
-	return revPos
+	return revPos, false
 }
 
 // Close closes the input operator.
