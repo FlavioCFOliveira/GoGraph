@@ -155,13 +155,47 @@ func TestDFS_DepthOrderOnTree(t *testing.T) {
 	if order[0] != 0 {
 		t.Fatalf("DFS first node = %d, want 0", order[0])
 	}
-	// The CSR sorts neighbours by source; within a source, the order
-	// of neighbours is insertion-order. For our fixture, node 0's
-	// neighbours are inserted 1 then 2, so DFS visits 0 -> 1 -> 2 -> 3.
-	want := []int{0, 1, 2, 3}
+	// [DFS] guarantees only that visitation order is deterministic and
+	// "follows the order in which out-neighbours appear in the underlying
+	// edges array". Since rmp #2141 that array is ordered by destination
+	// NodeID within each source rather than by insertion order, so the
+	// sibling order is no longer the order the edges were added.
+	//
+	// Hard-coding the resulting permutation would pin an accident: NodeID is
+	// (intraIdx<<8)|shard, so it is sparse and NOT monotonic in the user key
+	// — for this fixture node 2's NodeID sorts before node 1's. Instead the
+	// expectation is derived from the CSR itself by an INDEPENDENT recursive
+	// pre-order walk, which is a genuine oracle for the library's iterative
+	// stack implementation rather than a restatement of it.
+	want := recursivePreOrder(t, c, a, srcID)
 	if !equalInts(order, want) {
-		t.Fatalf("DFS order = %v, want %v", order, want)
+		t.Fatalf("DFS order = %v, want %v (CSR neighbour order)", order, want)
 	}
+}
+
+// recursivePreOrder computes the pre-order depth-first visit sequence of c from
+// src by simple recursion over the CSR's neighbour ranges, resolving each NodeID
+// back to its user key. It is the independent oracle for [DFS], whose contract
+// is to follow the edges array's order; a divergence means DFS no longer honours
+// that contract, not merely that the fixture changed.
+func recursivePreOrder(tb testing.TB, c *csr.CSR[struct{}], a *adjlist.AdjList[int, struct{}], src graph.NodeID) []int {
+	tb.Helper()
+	seen := map[graph.NodeID]bool{}
+	var out []int
+	var walk func(graph.NodeID)
+	walk = func(n graph.NodeID) {
+		if seen[n] {
+			return
+		}
+		seen[n] = true
+		v, _ := a.Mapper().Resolve(n)
+		out = append(out, v)
+		for dst := range c.NeighboursByID(n) {
+			walk(dst)
+		}
+	}
+	walk(src)
+	return out
 }
 
 func TestDFS_VisitsEachOnce(t *testing.T) {

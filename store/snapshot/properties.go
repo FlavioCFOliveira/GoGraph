@@ -56,6 +56,7 @@ import (
 	"hash/crc32"
 	"io"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -488,6 +489,8 @@ func collectEdgePropertyRecords[N comparable, W any](
 	// is safe against a concurrent intern (#1648 — see [collectInternedNodeIDs]).
 	seen := make(map[graph.NodeID]struct{}, 16)
 	coalesce := make(map[uint32]lpg.PropertyValue, 4)
+	var dsts []graph.NodeID
+	var keyOrder []uint32
 	var visitErr error
 	// The visit closure is defined ONCE and reused for every pair (it captures
 	// the stable idx and the reused coalesce map), so ForEachEdgePropertyByID does
@@ -511,19 +514,26 @@ func collectEdgePropertyRecords[N comparable, W any](
 			continue
 		}
 		src := uint64(srcID)
-		clear(seen)
-		for _, dstID := range neighbours {
-			if _, dup := seen[dstID]; dup {
-				continue
-			}
-			seen[dstID] = struct{}{}
+		dsts = distinctDestinationsSorted(neighbours, seen, dsts)
+		for _, dstID := range dsts {
 			clear(coalesce)
 			g.ForEachEdgePropertyByID(srcID, dstID, visit)
 			if visitErr != nil {
 				return nil, visitErr
 			}
 			dst := uint64(dstID)
-			for ki, val := range coalesce {
+			// Emit in ascending KeyIdx order. Ranging over coalesce directly
+			// would inherit Go's randomised map iteration order, so two
+			// snapshots of the IDENTICAL graph would disagree byte-for-byte
+			// whenever an edge carries two or more properties — the durable
+			// artefact must be a deterministic function of the graph's content.
+			keyOrder = keyOrder[:0]
+			for ki := range coalesce {
+				keyOrder = append(keyOrder, ki)
+			}
+			slices.Sort(keyOrder)
+			for _, ki := range keyOrder {
+				val := coalesce[ki]
 				vb, encErr := encodePropertyValueInto(arena, val)
 				if encErr != nil {
 					return nil, encErr

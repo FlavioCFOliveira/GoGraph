@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"slices"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
@@ -298,6 +299,43 @@ func collectInternedNodeIDs[N comparable, W any](g *lpg.Graph[N, W]) []graph.Nod
 	return ids
 }
 
+// distinctDestinationsSorted returns one source's DISTINCT out-neighbours in
+// ascending NodeID order, reusing seen for the dedup and buf for the result so
+// the per-source cost stays allocation-free after the first grow.
+//
+// The ascending order is what makes the emitted records CANONICAL — a pure
+// function of the graph's content rather than of the order its edges were
+// inserted. That matters for byte stability across a snapshot round-trip:
+// [ApplyCSRToGraph] replays edges in csr.bin order, which since rmp #2141 is
+// destination-ordered rather than insertion-ordered, so a recovered graph's
+// adjacency insertion order legitimately differs from the original's. Walking
+// the adjacency directly would then emit the same records in a permuted order
+// and drift the component bytes, which
+// TestRecovery_V3Snapshot_RoundTripByteStable asserts must not happen. Sorting
+// here removes the dependence on mutation history entirely, so the property
+// holds for any future change to insertion or replay order too.
+//
+// Parallel edges collapse to one entry per (src, dst): both v1 edge labels and
+// edge properties are keyed by endpoints only.
+func distinctDestinationsSorted(
+	neighbours []graph.NodeID,
+	seen map[graph.NodeID]struct{},
+	buf []graph.NodeID,
+) []graph.NodeID {
+	clear(seen)
+	buf = buf[:0]
+	for _, dstID := range neighbours {
+		if _, dup := seen[dstID]; dup {
+			continue
+		}
+		seen[dstID] = struct{}{}
+		buf = append(buf, dstID)
+	}
+	// Values are distinct after the dedup above, so an unstable sort is total.
+	slices.Sort(buf)
+	return buf
+}
+
 // collectNodeLabelRecords emits one [NodeLabelEntry] per (node, label) pair.
 // names is the registry snapshot taken by [snapshotRegistry]; we re-intern each
 // label name to translate the LPG's runtime LabelID back into the snapshot's
@@ -365,6 +403,7 @@ func collectEdgeLabelRecords[N comparable, W any](
 	// labels via ForEachEdgeLabelByID (no per-pair []string) and is defined once,
 	// capturing the stable idx/out plus the per-pair curSrc/curDst.
 	seen := make(map[graph.NodeID]struct{}, 16)
+	var dsts []graph.NodeID
 	var visitErr error
 	var curSrc, curDst uint64
 	visit := func(name string) {
@@ -384,12 +423,8 @@ func collectEdgeLabelRecords[N comparable, W any](
 			continue
 		}
 		curSrc = uint64(srcID)
-		clear(seen)
-		for _, dstID := range neighbours {
-			if _, dup := seen[dstID]; dup {
-				continue
-			}
-			seen[dstID] = struct{}{}
+		dsts = distinctDestinationsSorted(neighbours, seen, dsts)
+		for _, dstID := range dsts {
 			curDst = uint64(dstID)
 			g.ForEachEdgeLabelByID(srcID, dstID, visit)
 			if visitErr != nil {

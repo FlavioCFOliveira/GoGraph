@@ -134,6 +134,14 @@ func BuildFromAdjListLive[N comparable, W any](adj *adjlist.AdjList[N, W], live 
 		}
 	}
 
+	// Pass 3: order each surviving source's run by (destination, handle). The
+	// liveness filter above is per-arc, and a permutation commutes with a
+	// per-arc predicate, so ordering after filtering yields exactly the same
+	// arcs as ordering before it would — and the raw and live paths therefore
+	// agree, which TestBuildLive_NilFilterMatchesRaw_1790 checks WITHOUT
+	// sorting and so would catch if only one path ordered.
+	OrderRuns(vertices, edges, weights, handles)
+
 	return &CSR[W]{
 		vertices: vertices,
 		edges:    edges,
@@ -214,6 +222,11 @@ func buildFromAdjListRaw[N comparable, W any](adj *adjlist.AdjList[N, W]) *CSR[W
 		}
 	}
 
+	// Pass 3: order each source's run by the total key (destination, handle),
+	// permuting the parallel columns identically. See order.go for why this is
+	// unconditional and why the sort must be stable.
+	OrderRuns(vertices, edges, weights, handles)
+
 	return &CSR[W]{
 		vertices: vertices,
 		edges:    edges,
@@ -239,8 +252,15 @@ func buildFromAdjListRaw[N comparable, W any](adj *adjlist.AdjList[N, W]) *CSR[W
 //     of node id's out-neighbours and vertices[len-1] is the total edge
 //     count. For an empty graph it is exactly []uint64{0}.
 //   - edges is the flat out-neighbour array, length vertices[len-1],
-//     grouped by source in ascending NodeID order; within a source the
-//     order is the caller's (the bulk loader preserves input order).
+//     grouped by source in ascending NodeID order. Within a source the order is
+//     the caller's: FromArrays does NOT order the runs, because it is the
+//     zero-copy path and carries no O(E) pass. A caller that needs the snapshot
+//     to satisfy this package's within-source ordering invariant — which every
+//     CSR from [BuildFromAdjList], [BuildFromAdjListLive] and [CSR.BuildReverse]
+//     does satisfy, and which the query executor's O(log d) probes rely on —
+//     must call [OrderRuns] on its arrays first. store/bulk's counting-sort
+//     build does exactly that, and its byte-identity contract with
+//     BuildFromAdjList depends on it.
 //   - weights is parallel to edges, or nil for an unweighted/weightless
 //     snapshot (rendered as the zero W by [CSR.NeighboursByID]).
 //   - order is the number of distinct nodes; size is the number of edges
@@ -279,6 +299,12 @@ var ErrMalformedCSR = errors.New("csr: malformed snapshot")
 // boundary check for callers of [FromArrays] that pass untrusted arrays;
 // snapshots produced by [BuildFromAdjList] / [BuildReverse] are always
 // well-formed and need not be validated.
+//
+// Validate deliberately does NOT check the within-source ordering invariant.
+// [FromArrays] legitimately admits unordered runs (see its contract), so a
+// failure here would reject well-formed input; and the invariant is a property
+// of a run's order rather than of the arrays' structural consistency, which is
+// what "malformed" means. Use [CSR.RunsOrdered] to assert ordering.
 //
 // Validate is O(order + size). It does not allocate and never panics.
 func (c *CSR[W]) Validate() error {
