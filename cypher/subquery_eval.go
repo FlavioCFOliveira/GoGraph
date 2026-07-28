@@ -148,14 +148,17 @@ func (e *subqueryEvaluator) EvalCount(ctx context.Context, sub *ast.CountSubquer
 	// Degree rewrite (#2232). Uncapped: this entry point owes the caller the
 	// true count. A comparison against a literal reaches the bounded form
 	// through EvalCountBounded instead, which is where short-circuiting lives.
-	if sh := e.degreeShapeFor(sub, sub.Pattern, nil, row); sh != nil {
+	// sub.Where is threaded, not nil: an inline WHERE is a Selection neither
+	// recogniser can evaluate, and both must refuse the pattern rather than
+	// answer it without the predicate (rmp #2242).
+	if sh := e.degreeShapeFor(sub, sub.Pattern, sub.Where, row); sh != nil {
 		if n, ok := sh.count(e.g, row, -1); ok {
 			degreeRewriteCount.Add(1)
 			return expr.IntegerValue(n), nil
 		}
 	}
 	// Labelled single hop (#2235), likewise uncapped here.
-	if n, ok := e.countLabelledHop(sub, sub.Pattern, nil, row, -1); ok {
+	if n, ok := e.countLabelledHop(sub, sub.Pattern, sub.Where, row, -1); ok {
 		return expr.IntegerValue(n), nil
 	}
 	cs, err := e.compileCount(sub, row)
@@ -364,18 +367,15 @@ func existsToSingleQuery(sub *ast.ExistsSubquery) *ast.SingleQuery {
 	}
 }
 
-// countToSingleQuery is the COUNT counterpart of [existsToSingleQuery].
-//
-// It has no Where to thread: [ast.CountSubquery] carries no such field, so the
-// parser discards the inline WHERE of a COUNT pattern subquery before it ever
-// reaches here. That is the other half of rmp #2242 and is fixed with the field.
+// countToSingleQuery is the COUNT counterpart of [existsToSingleQuery], and
+// threads Where for the same load-bearing reason (rmp #2242).
 func countToSingleQuery(sub *ast.CountSubquery) *ast.SingleQuery {
 	if sub.Query != nil {
 		return sub.Query
 	}
 	return &ast.SingleQuery{
 		ReadingClauses: []ast.ReadingClause{
-			&ast.Match{Pattern: sub.Pattern},
+			&ast.Match{Pattern: sub.Pattern, Where: sub.Where},
 		},
 	}
 }

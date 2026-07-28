@@ -159,6 +159,14 @@ WHERE EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE m.age > 30 }
 RETURN n.name
 ```
 
+That includes the **bare-pattern** body, where the `WHERE` follows the pattern
+directly, and it applies to `COUNT { … }` on the same terms as `EXISTS { … }`:
+
+```cypher
+MATCH (n:Person)
+RETURN n.name, COUNT { (n)-[:KNOWS]->(m) WHERE m.age > 30 } AS olderFriends
+```
+
 `EXISTS { … }` is a read-only existence check: an updating clause in the body
 is rejected at compile time with `InvalidClauseComposition`.
 

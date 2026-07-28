@@ -101,8 +101,11 @@ type degreeShape struct {
 // subquery is degree-answerable for an outer row shaped like row, and returns
 // the shape when it is.
 //
-// where is the subquery's inline WHERE (always nil for COUNT, which has no such
-// field); a non-nil WHERE is a Selection and disqualifies the pattern.
+// where is the subquery's inline WHERE; a non-nil WHERE is a Selection and
+// disqualifies the pattern. It is threaded for COUNT as well as EXISTS: until
+// rmp #2242 gave [ast.CountSubquery] a Where field, callers passed nil here
+// because there was nothing to pass, so a COUNT carrying an inline WHERE was
+// answered from the degree WITHOUT its predicate.
 //
 // Every rejection below mirrors a clause of Neo4j's QuerySolvableByGetDegree or
 // isEligible; see the file comment for the correspondence.
@@ -282,7 +285,9 @@ func (e *subqueryEvaluator) degreeShapeFor(key ast.Expression, pat *ast.Pattern,
 // pattern is not degree-answerable this falls back to the full inner drive and
 // the exact count, so the cap changes nothing observable.
 func (e *subqueryEvaluator) EvalCountBounded(ctx context.Context, sub *ast.CountSubquery, row expr.RowContext, params map[string]expr.Value, limit int64) (expr.Value, error) {
-	if sh := e.degreeShapeFor(sub, sub.Pattern, nil, row); sh != nil {
+	// sub.Where is threaded so both recognisers refuse a pattern carrying an
+	// inline WHERE, which neither can evaluate (rmp #2242).
+	if sh := e.degreeShapeFor(sub, sub.Pattern, sub.Where, row); sh != nil {
 		if n, ok := sh.count(e.g, row, limit); ok {
 			degreeRewriteCount.Add(1)
 			return expr.IntegerValue(n), nil
@@ -291,7 +296,7 @@ func (e *subqueryEvaluator) EvalCountBounded(ctx context.Context, sub *ast.Count
 	// Labelled single hop (#2235): a separate path for the shape the degree
 	// recogniser must refuse. It honours the same cap — the walk stops as soon as
 	// limit matching neighbours have been seen.
-	if n, ok := e.countLabelledHop(sub, sub.Pattern, nil, row, limit); ok {
+	if n, ok := e.countLabelledHop(sub, sub.Pattern, sub.Where, row, limit); ok {
 		return expr.IntegerValue(n), nil
 	}
 	return e.EvalCount(ctx, sub, row, params)

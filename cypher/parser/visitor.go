@@ -2221,10 +2221,14 @@ func (v *visitor) VisitSubqueryCount(ctx *gen.SubqueryCountContext) interface{} 
 		if err != nil {
 			return err
 		}
+		// Where is preserved for the same reason the EXISTS sibling above
+		// preserves it: dropping it makes `COUNT { … WHERE p }` return the
+		// UNFILTERED count, silently. It was dropped here until rmp #2242.
 		return &ast.CountSubquery{
 			Pos:     positionOf(ctx),
 			EndPos:  endPositionOf(ctx),
 			Pattern: pat.Pattern,
+			Where:   pat.Where,
 		}
 	}
 	if rss := ctx.AllReadingStatement(); len(rss) > 0 {
