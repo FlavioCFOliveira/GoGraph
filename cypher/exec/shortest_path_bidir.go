@@ -111,49 +111,73 @@ type biMeet struct {
 // break every DirIn and DirBoth traversal today, so it is part of the caller
 // contract rather than something this search newly depends on.
 //
-// # Why DirOut only
+// # Every direction, and why the two halves need no direction-specific code
 //
-// The two-sided search is admitted for DirOut and no other mode. That is a
-// deliberate narrowing, not an oversight, and it is what the measurement
-// supports: DirOut is the shape the round-3 head-to-head measured and the one
-// this change is benchmarked on.
+// #2220 admitted DirOut alone; rmp #2236 widened the gate to DirIn and DirBoth
+// as well. No search code changed to do it, because [ShortestPath.biExpand] was
+// always written from the duality above rather than from the DirOut case: it
+// scans forward-traversed path edges unless dir is DirIn and reverse-traversed
+// ones unless dir is DirOut, and each search picks its CSR by the `forward` flag.
+// For DirIn that means the forward search reads the reverse CSR from src and the
+// backward search reads the forward CSR from dst — the exact dual — and for
+// DirBoth both searches read both. Hop resolution is likewise keyed off the
+// recorded entry's own CSR (spPredEntry.fwd), not off op.dir.
 //
-// Extending it to DirIn / DirBoth is blocked on a question this task surfaced
-// and did not answer. Adding a relationship-type filter to the differential
-// suite showed the two searches disagreeing under DirIn and DirBoth — and, more
-// importantly, showed the FORWARD-ONLY reference returning a path whose hops use
-// an edge the filter excludes. Both algorithms agreeing on a path that the
-// filter should have rejected points at the shared reverse-slot type check, not
-// at the new code. Widening the search before that is understood would be
-// building on an unexamined foundation. Filed for investigation with the
-// reproduction in TestBiBFS_TypeFilterKeepsTheForwardOnlyWalk.
+// What blocked the widening was a correctness question, not the algorithm.
+// #2220's differential suite, once given a type filter, showed the FORWARD-ONLY
+// reference returning a path whose hops use an excluded edge — both algorithms
+// agreeing on a path the filter should reject, which implicated the shared
+// reverse-slot type check rather than the new code. It was a defect in that
+// shared check: the resolution signalled failure by returning its own input, so a
+// slot whose mapping legitimately equalled its reverse position skipped the
+// filter entirely. Fixed first and separately (see
+// [ShortestPath.resolveFwdPosKnown] and
+// docs/benchmarks/shortest-path-type-filter-2026-07-28.md), which is what made
+// this widening safe to build on.
 //
-// # Why an untyped search only
+// # A typed search, and why the gate is exactness rather than cost
 //
-// A relationship-type filter is keyed by FORWARD edge position, so the backward
-// half — which scans reverse slots — must map each slot it tests to its forward
-// counterpart. Two ways to do that, and measurement rejected both:
+// A relationship-type filter is keyed by FORWARD edge position, so the half that
+// scans reverse slots must decide admission for a reverse slot. #2220 measured two
+// ways and rejected both: the prebuilt revToFwd table, which cost more than the
+// search saved (277.7 ms → 351.1 ms end to end at N=20000, a 26% regression,
+// while the search itself got 17.9× faster), and resolving each scanned slot
+// against the forward CSR, which left an unresolvable case that had to be answered
+// permissively.
 //
-//   - the prebuilt revToFwd table costs O(E·d), and building it for DirOut,
-//     which never needed it before, cost more than the whole search saved:
-//     277.7 ms → 351.1 ms end to end at N=20000, a 26% REGRESSION, even though
-//     the search itself got 17.9× faster;
-//   - resolving each scanned slot against the forward CSR is cheap enough, but
-//     it has an unresolvable case, and being permissive there admits an edge the
-//     filter excludes. The differential suite caught exactly that: the two-sided
-//     search found paths the forward-only walk correctly rejected.
+// Only ONE of those two objections survived measurement. The table was not
+// expensive — it was being rebuilt once per outer ROW (see
+// [ShortestPath.revPrepared]); built once it costs under a millisecond at
+// E=200k. The permissiveness was the real obstacle, and it is not a cost problem
+// at all: an admission answer that may be wrong cannot be traded against speed.
 //
-// Rather than ship a filter check that is either slower than no change at all or
-// occasionally wrong, a typed search keeps the forward-only walk. The untyped
-// case — measured at 190.3 ms → 17.9 ms, 10.7× — is delivered here; the typed
-// case is filed with its evidence and needs a reverse type check that is both
-// exact and cheaper than the table.
+// So the gate is exactness. [revTypeAdmitSet] builds a filter keyed by REVERSE
+// position directly, by replaying the counting-sort transpose that produced the
+// reverse CSR — a pairing that validates every slot or declines outright, with no
+// unresolvable case to answer permissively — and marks the admitted slots in a
+// bitset. The per-slot test is one word read and shift. op.revAdmit != nil is
+// precisely "that structure was built and validated", so it is the gate for a
+// typed search.
+//
+// # Why the shape check is still needed
+//
+// [revTypeAdmitSet] validates the reverse CSR, but only for a TYPED search. An
+// untyped one never builds it, so the O(1) shape check below remains the guard
+// that turns a placeholder reverse CSR into a fallback rather than a silent
+// "no path".
 func (op *ShortestPath) canBidirectional() bool {
-	return op.dir == DirOut &&
-		op.edgeType == "" &&
-		op.revVerts != nil &&
-		len(op.revVerts) == len(op.fwdVerts) &&
-		len(op.revEdges) == len(op.fwdEdges)
+	if op.revVerts == nil ||
+		len(op.revVerts) != len(op.fwdVerts) ||
+		len(op.revEdges) != len(op.fwdEdges) {
+		return false
+	}
+	// A type filter is admitted only with the exact reverse-position bitset. The
+	// revToFwd table would also answer, but it answers permissively where a
+	// mapping is unknown, and the two searches scan different slots — so the
+	// two-sided half could admit an edge the forward-only walk never reaches and
+	// return a path the filter excludes. That is the #2220 symptom; do not
+	// reintroduce it for a fallback that is no faster.
+	return op.edgeType == "" || op.revAdmit != nil
 }
 
 // biBFSShortestPath finds a shortest src→dst path with two-sided BFS. It

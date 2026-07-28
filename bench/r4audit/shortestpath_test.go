@@ -72,6 +72,12 @@ func TestShortestPathBounded(t *testing.T) {
 		{"shortestPath bounded 6", `MATCH (b:P {id: 4321}) WITH b MATCH (a:P) WHERE a.id < 200 MATCH p = shortestPath((a)-[:K*..6]->(b)) RETURN count(p)`},
 		{"shortestPath unbounded", `MATCH (b:P {id: 4321}) WITH b MATCH (a:P) WHERE a.id < 200 MATCH p = shortestPath((a)-[:K*]->(b)) RETURN count(p)`},
 		{"shortestPath untyped", `MATCH (b:P {id: 4321}) WITH b MATCH (a:P) WHERE a.id < 200 MATCH p = shortestPath((a)-[*..6]->(b)) RETURN count(p)`},
+		// The reverse and undirected shapes rmp #2236 widened the two-sided search
+		// to. #2220 delivered DirOut only, so these three kept the forward-only walk
+		// however the pattern was written.
+		{"shortestPath DirIn typed", `MATCH (b:P {id: 4321}) WITH b MATCH (a:P) WHERE a.id < 200 MATCH p = shortestPath((a)<-[:K*..6]-(b)) RETURN count(p)`},
+		{"shortestPath DirIn untyped", `MATCH (b:P {id: 4321}) WITH b MATCH (a:P) WHERE a.id < 200 MATCH p = shortestPath((a)<-[*..6]-(b)) RETURN count(p)`},
+		{"shortestPath DirBoth typed", `MATCH (b:P {id: 4321}) WITH b MATCH (a:P) WHERE a.id < 200 MATCH p = shortestPath((a)-[:K*..6]-(b)) RETURN count(p)`},
 		{"allShortestPaths (control, untouched)", `MATCH (b:P {id: 4321}) WITH b MATCH (a:P) WHERE a.id < 200 MATCH p = allShortestPaths((a)-[:K*..6]->(b)) RETURN count(p)`},
 		{"single pair (setup-dominated, kept as a caution)", `MATCH (a:P {id: 0}), (b:P {id: 4321}) MATCH p = shortestPath((a)-[:K*..6]->(b)) RETURN length(p)`},
 	}

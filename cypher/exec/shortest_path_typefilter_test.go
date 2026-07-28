@@ -22,6 +22,11 @@ import (
 // The sentinel conflated "I could not resolve this" with "I resolved it to the
 // same index", and the second case is not rare: it is guaranteed whenever a
 // reverse slot's forward twin lands on the same position.
+//
+// Since rmp #2236 widened canBidirectional these cases also cover the TWO-SIDED
+// search: they drive bfsShortestPath, the dispatcher, so a typed search now
+// reaches the two-sided algorithm and its own reverse-side admission test. The
+// gate therefore guards both implementations against the same defect.
 
 // typeFilterOperator builds a ShortestPath over g with a filter that admits only
 // the forward positions listed in admit.
@@ -38,6 +43,21 @@ func typeFilterOperator(t *testing.T, g biTestGraph, dir Direction, admit ...uin
 		t.Fatalf("Init: %v", err)
 	}
 	return op
+}
+
+// admitsOnly reports membership in a set of forward positions. In both fixtures
+// below every node has at most one outgoing edge, so a forward position and the
+// edge's index in the original list coincide — which is what lets the same set
+// serve as validatePath's admitted-edge predicate.
+func admitsOnly(admit ...uint64) func(int) bool {
+	set := make(map[int]struct{}, len(admit))
+	for _, p := range admit {
+		set[int(p)] = struct{}{}
+	}
+	return func(i int) bool {
+		_, ok := set[i]
+		return ok
+	}
 }
 
 // TestShortestPath_TypeFilterRejectsAnExcludedReverseSlot is the reproduction and
@@ -140,9 +160,10 @@ func TestShortestPath_TypeFilterPartialAdmissionAcrossDirections(t *testing.T) {
 			if l := pathLen(got); l != 3 {
 				t.Errorf("path length %d, want 3 (dir %s)", l, dir.name)
 			}
-			if dir.dir == DirOut {
-				validatePath(t, fwd, got, dir.src, dir.dst)
-			}
+			// Validated in EVERY direction, not only DirOut: hop resolution is keyed
+			// off each predecessor entry's own CSR rather than off op.dir, so the
+			// emitted orientation must be right for a reverse-read search too.
+			validatePath(t, fwd, got, dir.src, dir.dst, admitsOnly(0, 1, 2))
 		})
 	}
 }

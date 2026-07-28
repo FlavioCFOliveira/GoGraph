@@ -155,7 +155,14 @@ type ShortestPath struct {
 	revEdges   []graph.NodeID
 	revHandles []uint64
 	revToFwd   []uint64
-	outBuf     []expr.Value
+	// revAdmit is a bitset over REVERSE-CSR positions marking the slots the
+	// type filter admits, built by [revTypeAdmitSet] when a filter is in force
+	// and the reverse CSR is the canonical transpose. It makes the reverse-side
+	// type test exact and O(1) — no position resolution, no permissive fallback
+	// — which is what admits a TYPED two-sided search (rmp #2236). nil when
+	// there is no filter, or when the transpose replay does not apply.
+	revAdmit []uint64
+	outBuf   []expr.Value
 
 	srcCol int
 	dstCol int
@@ -181,6 +188,16 @@ type ShortestPath struct {
 	// row is dropped (no output for that input row). See the openCypher
 	// MATCH/OPTIONAL MATCH contract.
 	optional bool
+	// revPrepared marks revToFwd / revAdmit as built for this operator's CSR
+	// snapshots. Init is NOT called once per query: a shortestPath whose endpoints
+	// come from an outer pattern sits under a CorrelatedApply, which re-Inits its
+	// inner plan for EVERY outer row (profile: CorrelatedApply.Next →
+	// ShortestPath.Init). Both tables are derived purely from the fwd/rev
+	// snapshots, which are fixed at construction, so rebuilding them per row
+	// recomputes an identical answer — 200 times over on the #2236 benchmark,
+	// which is enough to turn a large win into a 75% regression. This flag makes
+	// the build once-per-operator; everything else in Init stays per-Init.
+	revPrepared bool
 }
 
 // NewShortestPath creates a ShortestPath operator.
@@ -229,9 +246,16 @@ func (op *ShortestPath) WithWorkBudget(maxPerRow, maxTotal int) *ShortestPath {
 // WithTypeFilter restricts traversal to edges whose forward position is present
 // in filter. edgeType is the non-empty "a filter was requested" gate (typically
 // the pattern's first declared relationship type). It returns op for chaining.
+//
+// Callers configure the operator before Init, as the planner does. Changing the
+// filter afterwards nonetheless invalidates the reverse-position admit bitset
+// derived from it, so this clears the once-only build flag rather than leaving a
+// bitset that describes a filter no longer in force.
 func (op *ShortestPath) WithTypeFilter(edgeType string, filter map[uint64]string) *ShortestPath {
 	op.edgeType = edgeType
 	op.edgeTypeFilter = filter
+	op.revAdmit = nil
+	op.revPrepared = false
 	return op
 }
 
@@ -277,29 +301,47 @@ func (op *ShortestPath) Init(ctx context.Context) error {
 		op.revEdges = op.rev.EdgesSlice()
 		op.revHandles = op.rev.HandlesSlice()
 	}
-	// buildRevToFwd is NOT O(1) — it is O(E·d), scanning the forward slots of
-	// every reverse edge's source. Building it for a DirOut operator, which never
-	// needed it before #2220, cost more than the two-sided search saved: measured
-	// end to end at N=20000, the bounded 6-hop shape went 277.7 ms → 351.7 ms even
-	// though the search itself got 17.9× faster.
-	//
-	// It is therefore built only where it earns its cost:
-	//
-	//   - a DirIn / DirBoth traversal reads reverse positions all over the
-	//     ordinary path, exactly as before this change.
-	//
-	// A DirOut search needs no table. Its two reverse-position consumers both know
-	// the edge's endpoints and resolve a single slot against the forward CSR in
-	// O(deg): path reconstruction for the path's own ≤ d hops
-	// (resolveBackwardHop), and the type filter for each scanned edge
-	// (biTypeFilterOK). The table costs O(E·d) — two million slot comparisons on
-	// the measured fixture — while the two-sided search scans only a few thousand
-	// edges in total.
-	if op.rev != nil && op.dir != DirOut {
-		op.revToFwd = buildRevToFwd(
-			op.fwdVerts, op.fwdEdges, op.fwdHandles,
-			op.revVerts, op.revEdges, op.revHandles,
-		)
+	// Everything below is derived from the CSR snapshots alone and is therefore
+	// invariant across re-Inits — see [ShortestPath.revPrepared] for why Init runs
+	// per outer row rather than per query.
+	if !op.revPrepared {
+		op.revPrepared = true
+		// The reverse→forward POSITION table is built only where the ordinary path
+		// reads reverse positions all over — a DirIn / DirBoth traversal. A DirOut
+		// search does not need it: its one reverse-position consumer, path
+		// reconstruction, knows the edge's endpoints and resolves a single slot
+		// against the forward CSR in O(deg) for each of the path's ≤ d hops
+		// (resolveBackwardHop).
+		//
+		// rmp #2220 measured building this for DirOut as a 26% end-to-end regression
+		// and concluded the O(E·d) cost was to blame. The real cause was that this
+		// whole block ran once per outer ROW; the table's own cost is ~0.7 ms at
+		// E=200k (BenchmarkRevToFwd). The DirOut policy is unchanged anyway: a table
+		// this operator never reads is pure cost however cheap it is.
+		if op.rev != nil && op.dir != DirOut {
+			op.revToFwd = buildRevToFwd(
+				op.fwdVerts, op.fwdEdges, op.fwdHandles,
+				op.revVerts, op.revEdges, op.revHandles,
+			)
+		}
+		// The reverse-side TYPE test is a different problem from position resolution,
+		// and gets its own structure. A filter is keyed by forward position, so any
+		// search that scans reverse slots must decide admission for a reverse slot;
+		// doing that by resolving the position first is either slow (O(deg) per slot)
+		// or, where the mapping is unknown, permissive — and permissive is how a typed
+		// shortestPath came to route over an excluded edge (#2236, obstacle 2).
+		//
+		// revAdmit answers it directly and exactly, at O(V+E) to build and one word
+		// read per slot. It is what admits a TYPED two-sided search, so build it for
+		// every direction that can scan reverse slots: DirIn / DirBoth always do, and
+		// a DirOut two-sided search's backward half does.
+		if op.rev != nil && op.edgeType != "" {
+			op.revAdmit, _ = revTypeAdmitSet(
+				op.fwdVerts, op.fwdEdges, op.fwdHandles,
+				op.revVerts, op.revEdges, op.revHandles,
+				op.edgeTypeFilter,
+			)
+		}
 	}
 	return op.input.Init(ctx)
 }
@@ -1134,6 +1176,11 @@ func (op *ShortestPath) passesTypeFilter(pos uint64, isFwd bool) bool {
 	}
 	fwdPos := pos
 	if !isFwd {
+		// Prefer the reverse-position bitset: it is keyed by the very position
+		// being tested, so it needs no resolution step and has no unknown case.
+		if op.revAdmit != nil {
+			return bitsetContains(op.revAdmit, pos)
+		}
 		// The resolution must report whether it SUCCEEDED, not signal failure by
 		// returning the input. resolvedFwdPosOrSelf returns revPos both when the
 		// mapping is unknown and when it legitimately resolves to the same index —
