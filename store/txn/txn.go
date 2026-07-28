@@ -409,8 +409,27 @@ type Store[N comparable, W any] struct {
 	codec  codecHolder[N]
 	wcodec WeightCodec[W]
 
-	// applyCond signals committers when appliedSeq advances.
-	applyCond *sync.Cond
+	// applyWaiters maps a transaction sequence to the parking slot of the one
+	// committer waiting to apply it. Guarded by applyMu.
+	//
+	// The apply gate is a strictly sequential chain — the committer holding
+	// sequence seq waits for appliedSeq == seq-1 — so a completing transaction
+	// has exactly ONE possible successor, seq+1. Waking that successor directly
+	// makes [Tx.advanceApply] O(1).
+	//
+	// It replaces a sync.Cond whose Broadcast woke EVERY parked committer on
+	// every single commit; all but one immediately re-checked appliedSeq and
+	// parked again, so the gate cost O(N) wakeups per commit and O(N^2) over a
+	// concurrent batch. A CPU profile of 60 000 commits across 1024 concurrent
+	// writers attributed 77% of all samples to sync.(*Cond).Wait beneath
+	// waitApplyTurn, and throughput collapsed 3.9x from its peak at 256 writers
+	// (28 400 -> 7 275 commits/s) because the woken-and-re-parked herd starved
+	// the append path that fills the next group-commit batch.
+	//
+	// The entry count is bounded by the number of in-flight committers, which the
+	// single-writer semaphore and the in-flight counter already bound; each entry
+	// is removed by the successor's wake or consumed by its own fast path.
+	applyWaiters map[uint64]chan struct{}
 
 	g   *lpg.Graph[N, W]
 	wal *wal.Writer
@@ -472,7 +491,7 @@ type Store[N comparable, W any] struct {
 	// fsync: a committer waits until appliedSeq == its seq-1, applies, then
 	// advances appliedSeq and wakes the next committer.
 	//
-	// applyMu guards appliedSeq and is the locker of applyCond.
+	// applyMu guards appliedSeq and applyWaiters.
 	applyMu sync.Mutex
 
 	// --- in-flight commit tracker (#1507 quiesce boundary) ---
@@ -554,7 +573,7 @@ func NewStoreWithCodecCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.
 		codec:     codec,
 		maxTxnOps: resolveMaxTxnOps(maxTxnOps),
 	}
-	s.applyCond = sync.NewCond(&s.applyMu)
+	s.applyWaiters = make(map[uint64]chan struct{}, 64)
 	s.inflightCond = sync.NewCond(&s.inflightMu)
 	return s
 }
@@ -601,7 +620,7 @@ func NewStoreWithOptionsCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wa
 		wcodec:    opts.WeightCodec,
 		maxTxnOps: resolveMaxTxnOps(maxTxnOps),
 	}
-	s.applyCond = sync.NewCond(&s.applyMu)
+	s.applyWaiters = make(map[uint64]chan struct{}, 64)
 	s.inflightCond = sync.NewCond(&s.inflightMu)
 	return s
 }
@@ -1247,10 +1266,24 @@ func (t *Tx[N, W]) CommitWALOnly() error {
 func (t *Tx[N, W]) waitApplyTurn(seq uint64) {
 	s := t.store
 	s.applyMu.Lock()
-	for s.appliedSeq != seq-1 {
-		s.applyCond.Wait()
+	if s.appliedSeq == seq-1 {
+		// Our predecessor has already applied: take the turn without parking.
+		// This is the whole path at low concurrency (a single writer never
+		// parks), so the gate adds no channel and no allocation there.
+		s.applyMu.Unlock()
+		return
 	}
+	// Register our own parking slot under seq, then park. Registering under
+	// applyMu after the check above is what rules out a lost wakeup: a
+	// predecessor that advances to seq-1 before we register cannot have missed
+	// us, because it would have to hold applyMu to do so, and once it has we
+	// observe appliedSeq == seq-1 on the fast path instead of parking.
+	ch := acquireApplySlot()
+	s.applyWaiters[seq] = ch
 	s.applyMu.Unlock()
+
+	<-ch
+	releaseApplySlot(ch)
 }
 
 // advanceApply marks seq's apply step complete and wakes the committer waiting
@@ -1258,13 +1291,38 @@ func (t *Tx[N, W]) waitApplyTurn(seq uint64) {
 // taken via [Tx.waitApplyTurn], in every outcome (success, apply error, or
 // fsync failure) — otherwise a failed transaction would wedge the apply chain
 // behind it.
+//
+// It wakes EXACTLY ONE committer — the holder of seq+1, the only sequence this
+// advance can unblock — so its cost is constant in the number of parked
+// committers rather than linear in it. See [Store.applyWaiters].
 func (t *Tx[N, W]) advanceApply(seq uint64) {
 	s := t.store
 	s.applyMu.Lock()
 	s.appliedSeq = seq
-	s.applyCond.Broadcast()
+	successor, parked := s.applyWaiters[seq+1]
+	if parked {
+		delete(s.applyWaiters, seq+1)
+	}
 	s.applyMu.Unlock()
+	if parked {
+		// Buffered with capacity one and sent to exactly once (the slot was
+		// removed from the map above, so no other advance can reach it), so this
+		// never blocks.
+		successor <- struct{}{}
+	}
 }
+
+// applySlotPool recycles apply-gate parking slots so a parked committer
+// allocates no channel per transaction. A slot is returned to the pool only
+// after its single value has been received, so a pooled channel is always
+// empty.
+var applySlotPool = sync.Pool{
+	New: func() any { return make(chan struct{}, 1) },
+}
+
+func acquireApplySlot() chan struct{} { return applySlotPool.Get().(chan struct{}) }
+
+func releaseApplySlot(ch chan struct{}) { applySlotPool.Put(ch) }
 
 // appendOnly performs group-commit phase 1: it encodes and appends every
 // buffered op to the WAL (without fsyncing) and then RELEASES the single-writer

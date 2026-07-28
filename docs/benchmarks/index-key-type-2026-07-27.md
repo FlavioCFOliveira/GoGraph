@@ -115,17 +115,23 @@ The companion's WAL-failure unwind drops it only when no other surviving index
 covers the pair, and runs after the user index is dropped so the orphan check
 does not count the index being unwound as a reason to keep it.
 
-## 5. Still open: the mirror-image cell
+## 5. The mirror-image cell — RESOLVED in #2231 (2026-07-28)
 
-`string` + `btree` remains a full scan — 4.27 ms at n = 20 000, unchanged by this
-work and unchanged before it. A string equality does not use a string btree, so
-the degenerate-range rewrite that #2169 built for numeric equality has no string
-counterpart.
+At the time of writing, `string` + `btree` remained a full scan — 4.27 ms at
+n = 20 000, unchanged by this work and unchanged before it — because the
+degenerate-range rewrite #2169 built for numeric equality had no string
+counterpart. It was filed separately rather than left implicit, because the matrix
+above makes it visible.
 
-It is out of scope here: this task was about the numeric lookup, and a user with
-a string key gets the fast path from the default index already. It is filed
-separately rather than left implicit, because the matrix above makes it visible
-and a reader of this document would otherwise wonder.
+**It has since been fixed.** `extractSingleStringCmp` now accepts `=` and builds
+the same degenerate closed range over the bound string btree, sharing the numeric
+path's selectivity gate and residual filter: **4 393.8 µs → 5.177 µs at
+n = 20 000 (849×)**, with allocations flat in the node population instead of
+tracking it. The matrix above is therefore superseded in that one cell; see
+[`btree-string-eq-2026-07-28.md`](btree-string-eq-2026-07-28.md) for the current
+figures and for two evidence-discipline notes (a differential that had to be
+proved non-degenerate, and a fault injection that turned out to be a no-op
+because `RangeBound.Include` is metadata only).
 
 ## 6. Reproducing
 

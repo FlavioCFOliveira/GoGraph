@@ -19,12 +19,8 @@ package cypher
 // b`) admits no hash key and keeps the nested-loop plan — a hash join cannot
 // help it.
 //
-// Three guards must all hold (see the design spike §2.3, §4):
+// Two guards must hold (see the design spike §2.3, §4):
 //
-//   - ORDER SAFETY: no operator above the join may observe the changed row
-//     order. Verified once per query by [hashJoinOrderSafe]; a bare LIMIT/SKIP
-//     without ORDER BY, or a collect()/arrival-order aggregation anywhere in the
-//     plan, disables the optimisation for the whole query.
 //   - SIZE FLOOR: only worth the hash-build overhead when the build side is
 //     non-trivial. The floor is structural-eligibility only here (the operator
 //     itself self-selects the smaller side at runtime); the asymptotic win is
@@ -33,6 +29,17 @@ package cypher
 //   - RESULT IDENTITY: the hash join produces exactly the multiset the
 //     nested-loop product + equi-join filter would, with identical
 //     null/type-coercion/NaN semantics for the join key (see exec.HashJoin).
+//
+// There was a third — ORDER SAFETY, a whole-query IR scan that disabled the
+// substitution for the entire query whenever a bare LIMIT/SKIP without ORDER BY
+// or an arrival-order aggregation appeared anywhere in the plan. It is gone (rmp
+// #2234). The substitution does not merely preserve the multiset, it emits the
+// nested loop's row SEQUENCE position for position, so there was nothing for the
+// scan to protect: it was rejecting queries over a reordering that cannot happen,
+// and those queries silently got the O(n·m) nested loop. The argument is at
+// [hashJoinBuildOnLeft] and its empirical half is
+// TestHashJoinOrder_SequenceMatchesNestedLoop, which compares full row sequences
+// for exactly the shapes the scan used to exclude.
 //
 // The residual predicate (every conjunct other than the chosen equi-join key)
 // is re-applied as an ordinary Filter above the hash join, so the result is
@@ -57,6 +64,15 @@ import (
 // snapshot it before/after a query rather than resetting it, so concurrent tests
 // do not interfere.
 var hashJoinBuildCount atomic.Uint64
+
+// hashJoinColumnarBuildCount counts the subset of those substitutions that chose
+// the COLUMNAR operator ([exec.ColumnarHashJoin]) over the row-mode one. Like
+// [hashJoinBuildCount] it is a diagnostic seam, incremented once per plan build
+// (never per row), read only by the in-package differential tests so they can
+// prove a case exercises the operator they mean to exercise — the order-preservation
+// proof (#2225 part B) has to hold for BOTH operators, and without this the
+// row-mode path could silently stop being covered.
+var hashJoinColumnarBuildCount atomic.Uint64
 
 // hashJoinSizeFloor is the build-side row-count below which the hash join is not
 // worth its build overhead and the nested loop is kept. The asymptotic win
@@ -105,7 +121,7 @@ func tryBuildHashJoin(
 	argByTag map[uint32]*exec.Argument,
 	bopts *buildOpts,
 ) (exec.Operator, bool, error) {
-	if bopts == nil || !bopts.hashJoinEnabled || !bopts.hashJoinOrderSafe {
+	if bopts == nil || !bopts.hashJoinEnabled {
 		return nil, false, nil
 	}
 	// Need the parsed predicate AST and a plain Apply child.
@@ -208,6 +224,12 @@ func tryBuildHashJoin(
 	// The Apply emits outer||inner. Here outer is the probe, inner is the build.
 	// Keep that exact column order: probe||build, i.e. buildOnLeft=false.
 	//
+	// THIS ASSIGNMENT IS THE ORDER-PRESERVATION GUARANTEE (#2225 part B) — see
+	// [hashJoinBuildOnLeft]. It is not a performance heuristic and must not become
+	// one: pinning build to the INNER arm, never self-selecting the smaller side at
+	// runtime, is what makes the emitted sequence row-for-row identical to the
+	// nested loop and lets the write path admit the substitution at all.
+	//
 	// When both arms build to a ChunkProducer (a bare scan on each side — the
 	// common disconnected-equi-join shape), prefer the columnar hash join
 	// (exec.ColumnarHashJoin, #2105): it drains both children column-major and
@@ -217,10 +239,11 @@ func tryBuildHashJoin(
 	// exec.HashJoin, so existing plans are unchanged (design §6.2).
 	hjMB, hjEst := resultByteBudget(bopts)
 	var op exec.Operator
-	if chj, colOK := exec.NewColumnarHashJoin(innerOp, outerOp, buildFn, probeFn, false); colOK {
+	if chj, colOK := exec.NewColumnarHashJoin(innerOp, outerOp, buildFn, probeFn, hashJoinBuildOnLeft); colOK {
 		op = chj.WithByteBudget(hjMB, hjEst)
+		hashJoinColumnarBuildCount.Add(1)
 	} else {
-		op = exec.NewHashJoin(innerOp, outerOp, buildFn, probeFn, false).
+		op = exec.NewHashJoin(innerOp, outerOp, buildFn, probeFn, hashJoinBuildOnLeft).
 			WithByteBudget(hjMB, hjEst)
 	}
 
@@ -454,78 +477,56 @@ func shiftApplyMetaColumns(
 	}
 }
 
-// hashJoinOrderSafe reports whether the whole-query IR plan contains no operator
-// that would observe the row order a hash join changes. It returns false (the
-// optimisation is disabled for the query) when the plan contains:
+// hashJoinBuildOnLeft is the buildOnLeft argument both join operators are
+// constructed with, and the invariant that lets a WRITING statement admit the
+// hash join without any order guard (rmp #2225 part B).
 //
-//   - a Limit or Skip operator NOT dominated by an order-establishing Sort/Top
-//     above it (a bare LIMIT/SKIP without ORDER BY — the specific rows returned
-//     are then observable, openCypher 9 §8.4), or
-//   - an EagerAggregation whose aggregation captures arrival order
-//     (collect / collect(DISTINCT) — the list value is order-dependent).
+// It is false: the output is probe||build, which is outer||inner, which is the
+// column order the Apply being replaced emits. It is a named constant rather
+// than a bare `false` at the call site because it is not an incidental argument
+// — it is half of the order-preservation guarantee, and the other half (that
+// build is ALWAYS apply.Inner) is enforced at the same call site.
 //
-// This is deliberately conservative: any uncertainty disables the optimisation.
-// It is computed once per query and threaded into [buildOpts.hashJoinOrderSafe].
-func hashJoinOrderSafe(plan ir.LogicalPlan) bool {
-	safe := true
-	// sortedAbove tracks whether an order-establishing operator (Sort/Top) sits
-	// above the current node on the path from the root. A LIMIT/SKIP under such
-	// an operator observes a defined order, so the hash join's reordering below
-	// it is masked by the sort.
-	var walk func(p ir.LogicalPlan, sortedAbove bool)
-	walk = func(p ir.LogicalPlan, sortedAbove bool) {
-		if p == nil || !safe {
-			return
-		}
-		switch p.(type) {
-		case *ir.Sort, *ir.Top:
-			sortedAbove = true
-		case *ir.Limit, *ir.Skip:
-			if !sortedAbove {
-				safe = false
-				return
-			}
-		case *ir.EagerAggregation:
-			if aggregationObservesOrder(p) {
-				safe = false
-				return
-			}
-		}
-		for _, c := range p.Children() {
-			walk(c, sortedAbove)
-		}
-	}
-	walk(plan, false)
-	return safe
-}
-
-// aggregationObservesOrder reports whether an EagerAggregation contains an
-// aggregate whose result depends on the arrival order of its input rows — i.e.
-// a hash join's row reordering below it would change the observable result.
+// # The claim
 //
-// The cypher-expert taxonomy (openCypher aggregation semantics): collect (and
-// collect(DISTINCT), whose list reflects first-occurrence order) materialises
-// rows in arrival order, so the list value is order-dependent. count / sum /
-// avg / min / max / stDev are commutative/associative or use orderability, not
-// arrival order, and are therefore order-safe. Any unrecognised aggregate is
-// treated conservatively as order-observing.
-func aggregationObservesOrder(p ir.LogicalPlan) bool {
-	agg, ok := p.(*ir.EagerAggregation)
-	if !ok {
-		return false
-	}
-	for _, a := range agg.Aggregates {
-		switch normaliseAggName(a.Function) {
-		case "count", "sum", "avg", "min", "max", "stdev", "stdevp":
-			// Order-insensitive.
-		default:
-			// collect, percentileCont/Disc-with-observable-list, and any
-			// unknown aggregate: assume order-observing.
-			return true
-		}
-	}
-	return false
-}
+// The hash join's output is row-for-row IDENTICAL to the nested loop it replaces
+// — not merely multiset-identical, which is all [HashJoin]'s own doc comment
+// claims and all the read path's order-safety scan assumes.
+//
+// # Why it holds
+//
+//  1. THE BUILD SIDE IS PINNED BY THE PLANNER, NOT SELECTED AT RUNTIME.
+//     [tryBuildHashJoin] is the only construction site for either join operator,
+//     and it always passes apply.Inner as build and apply.Outer as probe. Neither
+//     [exec.HashJoin] nor [exec.ColumnarHashJoin] contains any code that swaps
+//     them; both take the assignment from their constructor and keep it.
+//  2. THE PROBE DRIVES THE OUTPUT, IN OUTER ORDER. Both operators emit
+//     probe-major: they pull one probe row, drain its bucket to exhaustion, then
+//     pull the next. So the outer arm's own emission order is the output's major
+//     order — exactly the Apply's.
+//  3. WITHIN A PROBE ROW, MATCHES COME OUT IN INNER-SCAN ORDER. Equal keys hash
+//     equal, so every row that matches a given probe key lives in ONE bucket, and
+//     a bucket is append-only over the build drain — its contents are in inner-scan
+//     order. The scan walks the bucket front-to-back, skipping hash collisions with
+//     an exact [expr.Value.Equal] check, so the surviving matches are emitted in
+//     inner-scan order: the minor order the Apply produces.
+//  4. THE DISCARDED ROWS ARE EXACTLY THE NON-MATCHES. Only NULL/NaN keys are
+//     dropped before bucketing ([isUnjoinableKey]), and those can never satisfy the
+//     equi-join the Selection applies, so the nested loop drops them too.
+//
+// (1)+(2)+(3)+(4) give the same rows in the same positions. The residual
+// predicate is then re-applied above the join, preserving Selection semantics.
+//
+// # What would break it
+//
+// Making the operator choose its build side by measured cardinality — the classic
+// optimisation, and what the round-4 audit assumed was already happening. Doing
+// that would make the substitution order-CHANGING, would reintroduce the need for
+// an order guard on the read path, and would make it unusable for a writing
+// statement, where `SET` is last-write-wins. If that optimisation is ever wanted,
+// the swap must be gated on the write path being absent AND on the read path's
+// order-safety scan.
+const hashJoinBuildOnLeft = false
 
 // normaliseAggName lowercases and trims an aggregate function name for
 // case-insensitive comparison.

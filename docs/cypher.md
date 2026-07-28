@@ -159,6 +159,14 @@ WHERE EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE m.age > 30 }
 RETURN n.name
 ```
 
+That includes the **bare-pattern** body, where the `WHERE` follows the pattern
+directly, and it applies to `COUNT { … }` on the same terms as `EXISTS { … }`:
+
+```cypher
+MATCH (n:Person)
+RETURN n.name, COUNT { (n)-[:KNOWS]->(m) WHERE m.age > 30 } AS olderFriends
+```
+
 `EXISTS { … }` is a read-only existence check: an updating clause in the body
 is rejected at compile time with `InvalidClauseComposition`.
 
@@ -730,6 +738,12 @@ SHOW CONSTRAINTS YIELD toUpper(name)
 
 Procedures are invoked with `CALL proc()` and yield one or more columns.
 
+A procedure resolves identically on every entry point — `Run`, `RunAny`,
+`RunInTx` and `RunInTxAny` — so a statement that mixes a write clause with a
+`CALL db.*`, such as `CALL db.labels() YIELD label CREATE (:Marker {l: label})`,
+is planned and executed like any other. This also means the routing decision
+`RunAny` makes on your behalf can never change whether a procedure is found.
+
 ### db.indexes()
 
 Returns all registered indexes.
@@ -1043,6 +1057,169 @@ bound memory by another means (for example, streaming and closing the `Result`
 promptly), because an unbounded `MATCH` otherwise materialises every row under
 the graph's visibility barrier. All three caps trip **inside** the barrier
 during materialisation, before the surplus reaches the caller.
+
+---
+
+## Inspecting a query plan
+
+Three surfaces, answering three different questions. All are Go APIs; none is
+reachable as a Cypher `EXPLAIN` / `PROFILE` prefix.
+
+### `Engine.Explain` — what runs
+
+Returns the **physical** plan: the operator tree the builder actually produced,
+each node named after its concrete operator type. Nothing is executed and the
+graph is not touched.
+
+```
+Project
+└─ GlobalAggregateAdapter
+   └─ EagerAggregation
+      └─ ColumnarProject
+         └─ ColumnarHashJoin [build=right]
+            ├─ NodeByLabelScan [P]
+            └─ NodeByLabelScan [P]
+```
+
+Because each name is read from the operator itself, the rendering cannot
+disagree with what executes: a `HashJoin` appears only when a hash join was
+built, and the columnar and parallel tiers are visible as distinct operator
+types (`ColumnarHashJoin`, `ParallelScanProject`, …) rather than being hidden
+behind their row-mode equivalents. This is the surface to reach for when a query
+is slow.
+
+A **writing** statement renders the logical plan and says so on its first line: a
+write's operators bind to an open transaction, so there is no physical tree to
+walk outside one.
+
+### `Engine.ExplainLogical` — what the planner thought
+
+Returns the **logical** plan with each operator's cardinality **estimate** and its
+provenance (`exact` / `stats` / `heuristic`):
+
+```
+ProduceResults
+└─ Projection
+   └─ NodeByLabelScan [n:Person] (est. rows=0, exact)
+```
+
+Estimates belong to logical nodes and have no counterpart on a built operator, so
+they are visible only here. Reach for this when a plan looks wrong and you suspect
+the estimate that drove it.
+
+### `Engine.Profile` — what it cost
+
+Executes the query and returns the physical plan annotated with each operator's
+emitted rows, its logical storage accesses (`dbhits`), and the time attributed to
+it:
+
+```
+ColumnarProject (rows=1, dbhits=0, time=17µs)
+└─ NodeByIndexSeek [seek="n7"] (rows=1, dbhits=1, time=0s)
+
+ColumnarProject (rows=8, dbhits=0, time=25µs)
+└─ ColumnarFilter (rows=8, dbhits=0, time=24µs)
+   └─ NodeByLabelScan [P] (rows=300, dbhits=300, time=2µs)
+```
+
+Those two plans are the reason `dbhits` is reported. They return a comparable
+handful of rows over the same 300-node graph, and only the access counts show that
+the second read every record in the label.
+
+Times are **inclusive** of an operator's children, because a pipelined operator's
+`Next` pulls from them — subtract a node's children for its exclusive cost, as
+with Neo4j's `PROFILE`.
+
+Two caveats, both explicit in the output or the API:
+
+- `Profile` refuses a writing statement rather than performing its writes as the
+  side effect of a diagnostic.
+- A node shown as `(not measured)` was not instrumented, and did **not** cost
+  nothing. Every operator is instrumented today; the label remains because a future
+  composite lowering could reopen the gap.
+
+Profiling is off unless `Profile` is called: the instrumentation is a wrapper the
+builder installs only when asked, so an ordinary `Run` executes the same code as a
+build in which profiling does not exist.
+
+> **Divergence from Neo4j.** `dbhits` counts **records read from storage**, one per
+> row an access-path operator emits: a node record per row of a scan or index seek,
+> a relationship record per row of an expand. An operator that only transforms rows
+> its children produced reports `0`, because it read no storage.
+>
+> Neo4j additionally charges a db-hit per **property read**, so its figures for a
+> filter-heavy or projection-heavy plan are larger than GoGraph's, and the two are
+> not comparable in absolute terms. The ratio between two GoGraph plans is the
+> intended use.
+>
+> The reason is the cost of the alternative. Counting property reads means threading
+> a counter into the property accessors — the hottest path in the engine — so every
+> ordinary query would carry a branch that exists only for a diagnostic. Counting at
+> the access-path boundary instead needs no threading at all, which is why an
+> ordinary `Run` executes no counting code rather than merely skipping it.
+
+---
+
+## Declared divergence: string ordering is by code point
+
+`ORDER BY` on a string, and every string comparison with `<`, `<=`, `>`, `>=`,
+orders by **Unicode code point**. This is deliberate, and it differs from Neo4j.
+It is recorded here because nothing in the query result reveals it.
+
+**The rule you can apply without reading the source.** Compare two strings
+character by character; at the first position where they differ, the string whose
+character has the smaller Unicode code-point value sorts first. If one string is a
+prefix of the other, the shorter sorts first. (The implementation compares the
+UTF-8 bytes, which is the same thing: UTF-8 is designed so that byte order equals
+code-point order.)
+
+**Where it differs from Neo4j.** Neo4j compares UTF-16 **code units**, because
+that is what Java's `String.compareTo` does. The two rules agree for all of ASCII,
+all of Latin-1, and in fact everything in the Basic Multilingual Plane below
+U+E000. They disagree in exactly one situation:
+
+> a **supplementary-plane** character (U+10000 and above) compared against a BMP
+> character in the range **U+E000–U+FFFF**.
+
+A supplementary character is stored in UTF-16 as a *surrogate pair* whose leading
+unit lies in U+D800–U+DBFF. Because D800–DBFF is numerically **below** E000–FFFF,
+Neo4j sorts every supplementary character before that BMP range, while GoGraph —
+comparing the actual code points — sorts it after.
+
+**Worked example.** Ordering `Z`, `a`, `e`, `z`, `é` (U+00E9), `ﬁ` (U+FB01, the
+Latin small ligature fi), and `😀` (U+1F600, the grinning face):
+
+| | result |
+|---|---|
+| **GoGraph** | `Z`, `a`, `e`, `z`, `é`, `ﬁ`, `😀` |
+| **Neo4j** | `Z`, `a`, `e`, `z`, `é`, `😀`, `ﬁ` |
+
+The single difference is the last two: GoGraph puts `😀` (U+1F600) after `ﬁ`
+(U+FB01) because 1F600 > FB01, while Neo4j puts it first because its leading
+surrogate U+D83D is below U+FB01. So **any `ORDER BY` over user text containing
+emoji or other supplementary characters will differ between the two engines** —
+and no query over ASCII or Latin-1 text ever will.
+
+**Why it is deliberate, not an oversight.**
+
+- The openCypher 2024.3 grammar **specifies no collation**, so neither order is
+  non-conformant, and the TCK contains no scenario that discriminates them.
+- UTF-16 code-unit order is an artefact of Java's internal string
+  representation rather than a principled ordering: it places some
+  supplementary characters *before* BMP characters that are numerically lower.
+- Code-point order is load-bearing elsewhere in the engine. The string B-tree
+  index is ordered by the same rule, which is what makes an equality on a
+  string btree index answerable as the degenerate closed range `[v, v]` —
+  no two distinct strings compare equal under a code-point order, so the range
+  is exact. Changing the collation would reach into the index layer, not just
+  `ORDER BY`.
+
+If your application needs locale-aware ordering (dictionary order, case-insensitive
+order, language-specific rules), neither engine provides it: sort in the
+application, or store a pre-computed sort key alongside the text and order by that.
+
+The ordering is pinned by `TestStringOrdering_IsCodePointOrder`, including the
+supplementary-plane boundary case, so it cannot change silently.
 
 ---
 

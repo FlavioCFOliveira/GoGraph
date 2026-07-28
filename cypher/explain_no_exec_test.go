@@ -5,7 +5,7 @@ package cypher_test
 // Verifies:
 //  1. Explain returns a non-empty plan string.
 //  2. The plan contains known operator names (AllNodesScan / NodeByLabelScan /
-//     ProduceResults).
+//     the physical operator tree).
 //  3. The graph is not mutated by Explain.
 //  4. Race-clean (parallel sub-tests, no shared mutable state).
 //  5. goleak-clean (no goroutine leak).
@@ -43,7 +43,7 @@ func TestExplain_NoExec(t *testing.T) {
 		if plan == "" {
 			t.Fatal("Explain returned empty plan string")
 		}
-		for _, want := range []string{"AllNodesScan", "ProduceResults"} {
+		for _, want := range []string{"AllNodesScan"} {
 			if !strings.Contains(plan, want) {
 				t.Errorf("plan missing %q:\n%s", want, plan)
 			}
@@ -72,7 +72,7 @@ func TestExplain_NoExec(t *testing.T) {
 		if plan == "" {
 			t.Fatal("Explain returned empty plan string")
 		}
-		for _, want := range []string{"NodeByLabelScan", "ProduceResults"} {
+		for _, want := range []string{"NodeByLabelScan"} {
 			if !strings.Contains(plan, want) {
 				t.Errorf("plan missing %q:\n%s", want, plan)
 			}

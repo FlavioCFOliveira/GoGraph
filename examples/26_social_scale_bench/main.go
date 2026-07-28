@@ -999,11 +999,16 @@ func statisticsExercise(ctx context.Context, eng *cypher.Engine, _ config, w io.
 	return nil
 }
 
-// explainAnnotated runs EXPLAIN for query and prints its annotated physical plan,
-// one "# "-prefixed line per plan line, under a named header. Every emitted line
-// is telemetry, so it never enters the deterministic fact-line set the tests pin.
+// explainAnnotated prints the LOGICAL plan for query, one "# "-prefixed line per
+// plan line, under a named header. Every emitted line is telemetry, so it never
+// enters the deterministic fact-line set the tests pin.
+//
+// It uses ExplainLogical rather than Explain because this exercise is about the
+// planner's CARDINALITY ESTIMATES: those annotations belong to logical nodes and
+// have no counterpart on a built operator, so the physical rendering does not
+// carry them. Engine.Explain is the surface for what actually executes.
 func explainAnnotated(w io.Writer, eng *cypher.Engine, name, query string) error {
-	plan, err := eng.Explain(query, nil)
+	plan, err := eng.ExplainLogical(query, nil)
 	if err != nil {
 		return fmt.Errorf("explain %s: %w", name, err)
 	}
@@ -1014,12 +1019,15 @@ func explainAnnotated(w io.Writer, eng *cypher.Engine, name, query string) error
 	return nil
 }
 
-// estRowsFor runs EXPLAIN for query and returns the estimated row count annotated
-// on the first plan operator line containing op (e.g. "NodeByLabelScan" or
-// "Selection"). It errors when the operator line is absent or carries no estimate
-// annotation (an estFallback line is rendered without one).
+// estRowsFor returns the estimated row count annotated on the first plan operator
+// line containing op (e.g. "NodeByLabelScan" or "Selection"). It errors when the
+// operator line is absent or carries no estimate annotation (an estFallback line
+// is rendered without one).
+//
+// The estimates live on the LOGICAL plan, so this reads ExplainLogical; see
+// explainAnnotated.
 func estRowsFor(eng *cypher.Engine, query, op string) (int64, error) {
-	plan, err := eng.Explain(query, nil)
+	plan, err := eng.ExplainLogical(query, nil)
 	if err != nil {
 		return 0, fmt.Errorf("explain %s: %w", op, err)
 	}

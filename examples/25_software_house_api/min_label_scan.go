@@ -82,7 +82,11 @@ func collectMinLabelScanDemo(g *lpg.Graph[string, float64]) (mlsScanDemo, error)
 	ctx := context.Background()
 	eng := cypher.NewEngine(g) // min-label anchor scan ON (the default)
 
-	plan, err := eng.Explain(minLabelDemoQuery, nil)
+	// ExplainLogical, not Explain: this demo is about the PLANNER's anchor choice
+	// and parses the variable-qualified "[var:label]" form the logical rendering
+	// uses. The physical plan names the operator that runs but not the variable it
+	// was bound to, because a built NodeByLabelScan holds only its label.
+	plan, err := eng.ExplainLogical(minLabelDemoQuery, nil)
 	if err != nil {
 		return mlsScanDemo{}, fmt.Errorf("explain: %w", err)
 	}

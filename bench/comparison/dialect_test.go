@@ -122,7 +122,7 @@ func TestDialectMatrix(t *testing.T) {
 	}
 	var engines []engine
 
-	emb := newEmbeddedTarget()
+	emb := newEmbeddedTarget("sid")
 	engines = append(engines, engine{"gograph", func(ctx context.Context, cy string) error {
 		_, err := emb.execRead(ctx, cy, nil)
 		return err

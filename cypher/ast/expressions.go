@@ -344,8 +344,9 @@ func (e *ExistsSubquery) String() string {
 
 // CountSubquery is a COUNT { … } subquery expression.
 type CountSubquery struct {
-	Pattern *Pattern     // pattern form
-	Query   *SingleQuery // full subquery form
+	Pattern *Pattern     // pattern form: COUNT { (a)-[r]->(b) }
+	Where   *Where       // optional inline WHERE clause for the pattern form
+	Query   *SingleQuery // full subquery form: COUNT { MATCH … RETURN … }
 	Pos     Position
 	EndPos  Position
 }
@@ -356,7 +357,11 @@ func (*CountSubquery) exprNode() {}
 // String returns the Cypher COUNT subquery.
 func (c *CountSubquery) String() string {
 	if c.Pattern != nil {
-		return "COUNT { " + c.Pattern.String() + " }"
+		out := "COUNT { " + c.Pattern.String()
+		if c.Where != nil {
+			out += " " + c.Where.String()
+		}
+		return out + " }"
 	}
 	return "COUNT { " + c.Query.String() + " }"
 }

@@ -155,7 +155,14 @@ type ShortestPath struct {
 	revEdges   []graph.NodeID
 	revHandles []uint64
 	revToFwd   []uint64
-	outBuf     []expr.Value
+	// revAdmit is a bitset over REVERSE-CSR positions marking the slots the
+	// type filter admits, built by [revTypeAdmitSet] when a filter is in force
+	// and the reverse CSR is the canonical transpose. It makes the reverse-side
+	// type test exact and O(1) — no position resolution, no permissive fallback
+	// — which is what admits a TYPED two-sided search (rmp #2236). nil when
+	// there is no filter, or when the transpose replay does not apply.
+	revAdmit []uint64
+	outBuf   []expr.Value
 
 	srcCol int
 	dstCol int
@@ -181,6 +188,16 @@ type ShortestPath struct {
 	// row is dropped (no output for that input row). See the openCypher
 	// MATCH/OPTIONAL MATCH contract.
 	optional bool
+	// revPrepared marks revToFwd / revAdmit as built for this operator's CSR
+	// snapshots. Init is NOT called once per query: a shortestPath whose endpoints
+	// come from an outer pattern sits under a CorrelatedApply, which re-Inits its
+	// inner plan for EVERY outer row (profile: CorrelatedApply.Next →
+	// ShortestPath.Init). Both tables are derived purely from the fwd/rev
+	// snapshots, which are fixed at construction, so rebuilding them per row
+	// recomputes an identical answer — 200 times over on the #2236 benchmark,
+	// which is enough to turn a large win into a 75% regression. This flag makes
+	// the build once-per-operator; everything else in Init stays per-Init.
+	revPrepared bool
 }
 
 // NewShortestPath creates a ShortestPath operator.
@@ -229,9 +246,16 @@ func (op *ShortestPath) WithWorkBudget(maxPerRow, maxTotal int) *ShortestPath {
 // WithTypeFilter restricts traversal to edges whose forward position is present
 // in filter. edgeType is the non-empty "a filter was requested" gate (typically
 // the pattern's first declared relationship type). It returns op for chaining.
+//
+// Callers configure the operator before Init, as the planner does. Changing the
+// filter afterwards nonetheless invalidates the reverse-position admit bitset
+// derived from it, so this clears the once-only build flag rather than leaving a
+// bitset that describes a filter no longer in force.
 func (op *ShortestPath) WithTypeFilter(edgeType string, filter map[uint64]string) *ShortestPath {
 	op.edgeType = edgeType
 	op.edgeTypeFilter = filter
+	op.revAdmit = nil
+	op.revPrepared = false
 	return op
 }
 
@@ -268,14 +292,56 @@ func (op *ShortestPath) Init(ctx context.Context) error {
 	op.fwdVerts = op.fwd.VerticesSlice()
 	op.fwdEdges = op.fwd.EdgesSlice()
 	op.fwdHandles = op.fwd.HandlesSlice()
-	if op.dir != DirOut && op.rev != nil {
+	// The reverse CSR is required by a DirIn / DirBoth traversal, and — since
+	// rmp #2220 — also by the DirOut two-sided search, whose backward half walks
+	// dst's incoming edges. Populating the slices is O(1): they are the snapshot's
+	// own arrays.
+	if op.rev != nil {
 		op.revVerts = op.rev.VerticesSlice()
 		op.revEdges = op.rev.EdgesSlice()
 		op.revHandles = op.rev.HandlesSlice()
-		op.revToFwd = buildRevToFwd(
-			op.fwdVerts, op.fwdEdges, op.fwdHandles,
-			op.revVerts, op.revEdges, op.revHandles,
-		)
+	}
+	// Everything below is derived from the CSR snapshots alone and is therefore
+	// invariant across re-Inits — see [ShortestPath.revPrepared] for why Init runs
+	// per outer row rather than per query.
+	if !op.revPrepared {
+		op.revPrepared = true
+		// The reverse→forward POSITION table is built only where the ordinary path
+		// reads reverse positions all over — a DirIn / DirBoth traversal. A DirOut
+		// search does not need it: its one reverse-position consumer, path
+		// reconstruction, knows the edge's endpoints and resolves a single slot
+		// against the forward CSR in O(deg) for each of the path's ≤ d hops
+		// (resolveBackwardHop).
+		//
+		// rmp #2220 measured building this for DirOut as a 26% end-to-end regression
+		// and concluded the O(E·d) cost was to blame. The real cause was that this
+		// whole block ran once per outer ROW; the table's own cost is ~0.7 ms at
+		// E=200k (BenchmarkRevToFwd). The DirOut policy is unchanged anyway: a table
+		// this operator never reads is pure cost however cheap it is.
+		if op.rev != nil && op.dir != DirOut {
+			op.revToFwd = buildRevToFwd(
+				op.fwdVerts, op.fwdEdges, op.fwdHandles,
+				op.revVerts, op.revEdges, op.revHandles,
+			)
+		}
+		// The reverse-side TYPE test is a different problem from position resolution,
+		// and gets its own structure. A filter is keyed by forward position, so any
+		// search that scans reverse slots must decide admission for a reverse slot;
+		// doing that by resolving the position first is either slow (O(deg) per slot)
+		// or, where the mapping is unknown, permissive — and permissive is how a typed
+		// shortestPath came to route over an excluded edge (#2236, obstacle 2).
+		//
+		// revAdmit answers it directly and exactly, at O(V+E) to build and one word
+		// read per slot. It is what admits a TYPED two-sided search, so build it for
+		// every direction that can scan reverse slots: DirIn / DirBoth always do, and
+		// a DirOut two-sided search's backward half does.
+		if op.rev != nil && op.edgeType != "" {
+			op.revAdmit, _ = revTypeAdmitSet(
+				op.fwdVerts, op.fwdEdges, op.fwdHandles,
+				op.revVerts, op.revEdges, op.revHandles,
+				op.edgeTypeFilter,
+			)
+		}
 	}
 	return op.input.Init(ctx)
 }
@@ -346,6 +412,21 @@ func (op *ShortestPath) bfsShortestPath(src, dst uint64) (expr.Value, bool, erro
 		return op.bfsShortestCycle(src)
 	}
 
+	// Two-sided search when the configuration allows it (rmp #2220). It explores
+	// Θ(b^⌈d/2⌉) against the forward-only walk's Θ(b^d) and falls back to the walk
+	// below whenever it cannot answer — see shortest_path_bidir.go.
+	if op.canBidirectional() {
+		return op.biBFSShortestPath(src, dst)
+	}
+	return op.bfsShortestPathForward(src, dst)
+}
+
+// bfsShortestPathForward is the single-direction BFS. It remains the reference
+// implementation the two-sided search is differentially tested against, and the
+// fallback taken when no reverse CSR is available (rmp #2220).
+//
+// src != dst is a precondition; the caller handles the cycle case.
+func (op *ShortestPath) bfsShortestPathForward(src, dst uint64) (expr.Value, bool, error) {
 	// pred[nodeID] = the single predecessor entry that first discovered nodeID.
 	// The sentinel for src has parent == src.
 	pred := make(map[uint64]spPredEntry)
@@ -1095,13 +1176,27 @@ func (op *ShortestPath) passesTypeFilter(pos uint64, isFwd bool) bool {
 	}
 	fwdPos := pos
 	if !isFwd {
-		fwdPos = op.resolvedFwdPosOrSelf(pos)
-		// When the reverse slot has no resolvable forward counterpart we cannot
-		// type-check it; keep it permissive (mirrors VLE's fwdAbsPos==absPos
-		// fallback for the rare out-of-range case).
-		if fwdPos == pos {
+		// Prefer the reverse-position bitset: it is keyed by the very position
+		// being tested, so it needs no resolution step and has no unknown case.
+		if op.revAdmit != nil {
+			return bitsetContains(op.revAdmit, pos)
+		}
+		// The resolution must report whether it SUCCEEDED, not signal failure by
+		// returning the input. resolvedFwdPosOrSelf returns revPos both when the
+		// mapping is unknown and when it legitimately resolves to the same index —
+		// and the second case is not exotic: with a single edge 0→1 both CSRs hold
+		// one slot at index 0, so revToFwd[0] == 0. Reading `fwdPos == pos` as
+		// "unresolvable, stay permissive" therefore skipped the filter on a
+		// perfectly known slot and admitted an edge the filter excludes, which is
+		// what made a DirIn search return a path over an excluded hop (rmp #2236).
+		resolved, known := op.resolveFwdPosKnown(pos)
+		if !known {
+			// Genuinely unresolvable: there is nothing to test against, so stay
+			// permissive (mirrors VLE's fwdAbsPos==absPos fallback for the rare
+			// out-of-range case).
 			return true
 		}
+		fwdPos = resolved
 	}
 	_, ok := op.edgeTypeFilter[fwdPos]
 	return ok
@@ -1117,15 +1212,31 @@ func (op *ShortestPath) resolveFwdPos(e spPredEntry) (fwdPos uint64, reversed bo
 	return op.resolvedFwdPosOrSelf(e.rawPos), true
 }
 
-// resolvedFwdPosOrSelf maps a reverse-CSR position to its forward counterpart,
-// falling back to the reverse position itself when unresolved.
-func (op *ShortestPath) resolvedFwdPosOrSelf(revPos uint64) uint64 {
+// resolveFwdPosKnown maps a reverse-CSR position to its forward counterpart and
+// reports whether that mapping is KNOWN.
+//
+// The boolean exists because the position alone cannot carry the answer: a
+// resolved mapping may equal revPos, so no sentinel value drawn from the position
+// space can distinguish "resolved to the same index" from "not resolved". Any
+// caller whose decision differs between those two cases — the type filter does —
+// must use this form rather than [ShortestPath.resolvedFwdPosOrSelf].
+func (op *ShortestPath) resolveFwdPosKnown(revPos uint64) (uint64, bool) {
 	if op.revToFwd != nil && revPos < uint64(len(op.revToFwd)) {
 		if mapped := op.revToFwd[revPos]; mapped != unresolvedFwdPos {
-			return mapped
+			return mapped, true
 		}
 	}
-	return revPos
+	return revPos, false
+}
+
+// resolvedFwdPosOrSelf maps a reverse-CSR position to its forward counterpart,
+// falling back to the reverse position itself when unresolved. It is for callers
+// that want a usable position either way — path hydration, where the reverse
+// position is a serviceable stand-in — and NOT for a caller that must know
+// whether the mapping succeeded; see [ShortestPath.resolveFwdPosKnown].
+func (op *ShortestPath) resolvedFwdPosOrSelf(revPos uint64) uint64 {
+	pos, _ := op.resolveFwdPosKnown(revPos)
+	return pos
 }
 
 // Close closes the input operator.
@@ -2218,17 +2329,20 @@ func containsRel(rs []uint64, r uint64) bool {
 	return false
 }
 
-// passesTypeFilter mirrors [ShortestPath.passesTypeFilter].
+// passesTypeFilter mirrors [ShortestPath.passesTypeFilter], including the
+// resolution-status distinction that fixed rmp #2236 — this operator carried the
+// same ambiguous sentinel and therefore the same wrong answer.
 func (op *AllShortestPaths) passesTypeFilter(pos uint64, isFwd bool) bool {
 	if op.edgeType == "" {
 		return true
 	}
 	fwdPos := pos
 	if !isFwd {
-		fwdPos = op.resolvedFwdPosOrSelf(pos)
-		if fwdPos == pos {
+		resolved, known := op.resolveFwdPosKnown(pos)
+		if !known {
 			return true
 		}
+		fwdPos = resolved
 	}
 	_, ok := op.edgeTypeFilter[fwdPos]
 	return ok
@@ -2244,12 +2358,20 @@ func (op *AllShortestPaths) resolveFwdPos(e aspPredEntry) (fwdPos uint64, revers
 
 // resolvedFwdPosOrSelf mirrors [ShortestPath.resolvedFwdPosOrSelf].
 func (op *AllShortestPaths) resolvedFwdPosOrSelf(revPos uint64) uint64 {
+	pos, _ := op.resolveFwdPosKnown(revPos)
+	return pos
+}
+
+// resolveFwdPosKnown mirrors [ShortestPath.resolveFwdPosKnown], and exists for
+// the same reason: no sentinel drawn from the position space can distinguish a
+// mapping that resolved to the same index from one that did not resolve.
+func (op *AllShortestPaths) resolveFwdPosKnown(revPos uint64) (uint64, bool) {
 	if op.revToFwd != nil && revPos < uint64(len(op.revToFwd)) {
 		if mapped := op.revToFwd[revPos]; mapped != unresolvedFwdPos {
-			return mapped
+			return mapped, true
 		}
 	}
-	return revPos
+	return revPos, false
 }
 
 // Close closes the input operator.

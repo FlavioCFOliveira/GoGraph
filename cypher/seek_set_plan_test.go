@@ -116,7 +116,7 @@ func TestSeekSet_AccessPath(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			plan, err := eng.Explain(tc.query, nil)
+			plan, err := eng.ExplainLogical(tc.query, nil)
 			if err != nil {
 				t.Fatalf("Explain: %v", err)
 			}
@@ -155,7 +155,7 @@ func TestSeekSet_CostGate(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			q := `UNWIND ` + keyList(tc.keys) + ` AS k MATCH (a:P {name: k}) RETURN a`
-			plan, err := eng.Explain(q, nil)
+			plan, err := eng.ExplainLogical(q, nil)
 			if err != nil {
 				t.Fatalf("Explain: %v", err)
 			}
@@ -190,7 +190,7 @@ func TestSeekSet_DeclinedHintIsDroppedNotEvaluated(t *testing.T) {
 	eng := seekSetFixture(t)
 
 	declined := `UNWIND ` + keyList(seekSetBudget+1) + ` AS k MATCH (a:P {name: k}) RETURN a`
-	plan, err := eng.Explain(declined, nil)
+	plan, err := eng.ExplainLogical(declined, nil)
 	if err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestSeekSet_DeclinedHintIsDroppedNotEvaluated(t *testing.T) {
 	// The same query with a claimable key set keeps its retained Selection too, so
 	// the count above is not merely counting the hint's absence everywhere.
 	claimed := `UNWIND ['name-1','name-2'] AS k MATCH (a:P {name: k}) RETURN a`
-	plan, err = eng.Explain(claimed, nil)
+	plan, err = eng.ExplainLogical(claimed, nil)
 	if err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestSeekSet_SizeGateDeclinesBeforeExtracting(t *testing.T) {
 	}
 	for _, tc := range cases {
 		q := `UNWIND ` + keyList(tc.keys) + ` AS k MATCH (a:P {name: k}) RETURN a`
-		plan, err := eng.Explain(q, nil)
+		plan, err := eng.ExplainLogical(q, nil)
 		if err != nil {
 			t.Fatalf("%d keys: Explain: %v", tc.keys, err)
 		}
@@ -276,7 +276,7 @@ func TestSeekSet_PopulationFloor(t *testing.T) {
 		_ = res.Close()
 	}
 
-	plan, err := eng.Explain(`UNWIND ['n-1','n-2'] AS k MATCH (a:S {name: k}) RETURN a`, nil)
+	plan, err := eng.ExplainLogical(`UNWIND ['n-1','n-2'] AS k MATCH (a:S {name: k}) RETURN a`, nil)
 	if err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
@@ -459,7 +459,7 @@ func TestSeekSet_MultiLabelPatternIsNotServed(t *testing.T) {
 		{"single literal key", `MATCH (a:A:B {name: 'ab-7'}) RETURN a`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			plan, err := eng.Explain(tc.query, nil)
+			plan, err := eng.ExplainLogical(tc.query, nil)
 			if err != nil {
 				t.Fatalf("Explain: %v", err)
 			}

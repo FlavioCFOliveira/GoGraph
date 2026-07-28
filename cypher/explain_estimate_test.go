@@ -68,7 +68,7 @@ func TestExplainEstimate_LabelScanExact(t *testing.T) {
 	const n = 25
 	e, _, _ := seedPersonGraph(t, n, 0.0)
 
-	plan, err := e.Explain("MATCH (p:Person) RETURN p", nil)
+	plan, err := e.ExplainLogical("MATCH (p:Person) RETURN p", nil)
 	if err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestExplainEstimate_AllNodesScanExact(t *testing.T) {
 	const n = 17
 	e, _, _ := seedPersonGraph(t, n, 0.0)
 
-	plan, err := e.Explain("MATCH (n) RETURN n", nil)
+	plan, err := e.ExplainLogical("MATCH (n) RETURN n", nil)
 	if err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestExplainEstimate_EqualityHeavyHitterVsNonHitter(t *testing.T) {
 	}
 
 	// Heavy hitter: age = 30 is the skew value → MCV-exact with its true count.
-	plan, err := e.Explain("MATCH (p:Person) WHERE p.age = 30 RETURN p", nil)
+	plan, err := e.ExplainLogical("MATCH (p:Person) WHERE p.age = 30 RETURN p", nil)
 	if err != nil {
 		t.Fatalf("Explain heavy: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestExplainEstimate_EqualityHeavyHitterVsNonHitter(t *testing.T) {
 
 	// Non-hitter: name is distinct-per-node, so an absent name is never an MCV hit
 	// → the 1/NDV heuristic (a non-gating hint).
-	plan2, err := e.Explain(`MATCH (p:Person) WHERE p.name = 'does-not-exist' RETURN p`, nil)
+	plan2, err := e.ExplainLogical(`MATCH (p:Person) WHERE p.name = 'does-not-exist' RETURN p`, nil)
 	if err != nil {
 		t.Fatalf("Explain non-hitter: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestExplainEstimate_RangeStatsWithError(t *testing.T) {
 		t.Fatalf("RefreshStatistics: %v", err)
 	}
 
-	plan, err := e.Explain("MATCH (p:Person) WHERE p.age < 30 RETURN p", nil)
+	plan, err := e.ExplainLogical("MATCH (p:Person) WHERE p.age < 30 RETURN p", nil)
 	if err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestExplainEstimate_ExpandDegreeExact(t *testing.T) {
 		t.Fatalf("CREATE: %v", err)
 	}
 
-	plan, err := e.Explain(`MATCH (n:Person)-[r:KNOWS]->(m:Person) RETURN n, r, m`, nil)
+	plan, err := e.ExplainLogical(`MATCH (n:Person)-[r:KNOWS]->(m:Person) RETURN n, r, m`, nil)
 	if err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestExplainEstimate_RangeSeekLeafExact(t *testing.T) {
 
 	// code <= "code0049" matches exactly code0000..code0049 = 50 rows, an inclusive
 	// index range the seek serves. 50/1100 ≈ 4.5% ≤ 10%, population ≥ 1024 → fires.
-	plan, err := e.Explain(`MATCH (n:Item) WHERE n.code <= 'code0049' RETURN n`, nil)
+	plan, err := e.ExplainLogical(`MATCH (n:Item) WHERE n.code <= 'code0049' RETURN n`, nil)
 	if err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestExplainEstimate_DisplayOnly(t *testing.T) {
 	beforePlan := make(map[string]string, len(queries))
 	for _, q := range queries {
 		beforeRows[q] = sortedBag(drainRows(t, e, q))
-		p, err := e.Explain(q, nil)
+		p, err := e.ExplainLogical(q, nil)
 		if err != nil {
 			t.Fatalf("Explain (before) %q: %v", q, err)
 		}
@@ -258,7 +258,7 @@ func TestExplainEstimate_DisplayOnly(t *testing.T) {
 		if !equalStringSlices(beforeRows[q], afterRows) {
 			t.Errorf("statistics changed the RESULT of %q:\nbefore %v\nafter  %v", q, beforeRows[q], afterRows)
 		}
-		p, err := e.Explain(q, nil)
+		p, err := e.ExplainLogical(q, nil)
 		if err != nil {
 			t.Fatalf("Explain (after) %q: %v", q, err)
 		}
@@ -269,7 +269,7 @@ func TestExplainEstimate_DisplayOnly(t *testing.T) {
 
 	// Prove the annotations genuinely surfaced after the refresh (a stats-tagged
 	// range estimate that was absent before).
-	p, err := e.Explain("MATCH (p:Person) WHERE p.age < 30 RETURN p", nil)
+	p, err := e.ExplainLogical("MATCH (p:Person) WHERE p.age < 30 RETURN p", nil)
 	if err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
@@ -300,7 +300,7 @@ func TestExplainEstimate_LazyCollectorNilUntilRefresh(t *testing.T) {
 	// EXPLAIN must render (never panic on the nil collector) and omit the
 	// range annotation, exactly as the absent-statistic fallback requires.
 	q := "MATCH (p:Person) WHERE p.age < 30 RETURN p"
-	before, err := e.Explain(q, nil)
+	before, err := e.ExplainLogical(q, nil)
 	if err != nil {
 		t.Fatalf("Explain over stats-free engine: %v", err)
 	}
@@ -319,7 +319,7 @@ func TestExplainEstimate_LazyCollectorNilUntilRefresh(t *testing.T) {
 	if e.statsCollector.Load() == nil {
 		t.Fatal("collector still nil after RefreshStatistics — lazy install did not engage")
 	}
-	after, err := e.Explain(q, nil)
+	after, err := e.ExplainLogical(q, nil)
 	if err != nil {
 		t.Fatalf("Explain after refresh: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestExplainEstimate_AbsentStatFallback(t *testing.T) {
 	const n = 200
 	e, _, _ := seedPersonGraph(t, n, 0.30) // deliberately NO RefreshStatistics
 
-	plan, err := e.Explain("MATCH (p:Person) WHERE p.age = 30 RETURN p", nil)
+	plan, err := e.ExplainLogical("MATCH (p:Person) WHERE p.age = 30 RETURN p", nil)
 	if err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestExplainEstimate_StaleStatFallback(t *testing.T) {
 	}
 
 	// Fresh: the range Selection is stats-tagged.
-	fresh, err := e.Explain("MATCH (p:Person) WHERE p.age < 30 RETURN p", nil)
+	fresh, err := e.ExplainLogical("MATCH (p:Person) WHERE p.age < 30 RETURN p", nil)
 	if err != nil {
 		t.Fatalf("Explain (fresh): %v", err)
 	}
@@ -382,7 +382,7 @@ func TestExplainEstimate_StaleStatFallback(t *testing.T) {
 		}
 	}
 
-	stale, err := e.Explain("MATCH (p:Person) WHERE p.age < 30 RETURN p", nil)
+	stale, err := e.ExplainLogical("MATCH (p:Person) WHERE p.age < 30 RETURN p", nil)
 	if err != nil {
 		t.Fatalf("Explain (stale): %v", err)
 	}

@@ -298,6 +298,22 @@ var historicalDocs = map[string]bool{
 	// demonstrate nothing, since the statement was always valid — it was the
 	// resulting index that was empty.
 	filepath.Join("docs", "benchmarks", "index-key-type-2026-07-27.md"): true,
+	// Quotes the bulk-load statement whose plan was measured, to name the shape
+	// under discussion. Running it would prove nothing about the record: the
+	// figures are timings of that statement against a specific fixture at a
+	// specific commit, which the harnesses in bench/r4audit and bench/comparison
+	// reproduce, not this gate.
+	filepath.Join("docs", "benchmarks", "write-path-hash-join-2026-07-27.md"): true,
+	// Quotes the COUNT/EXISTS/size shapes whose plans were measured, to name the
+	// eligibility boundary under discussion — including shapes that are
+	// deliberately INELIGIBLE. Executing them would assert nothing about the
+	// record; bench/r4audit/degree_test.go reproduces the figures.
+	filepath.Join("docs", "benchmarks", "degree-rewrite-2026-07-27.md"): true,
+	// Quotes the shortestPath shapes whose plans were measured, including ones
+	// that deliberately fall back to the forward-only walk. Executing them would
+	// assert nothing about the record; bench/r4audit/shortestpath_test.go
+	// reproduces the figures.
+	filepath.Join("docs", "benchmarks", "shortest-path-bidir-2026-07-27.md"): true,
 }
 
 // TestDocumentedCypherExamplesRun executes every Cypher example the gated
@@ -376,10 +392,13 @@ func checkExample(eng *cypher.Engine, params map[string]any, ex *docExample) err
 //
 // RunAny is deliberate: it is the dispatch helper the reference tells readers
 // to use, so the gate exercises a documented example the way a reader would.
-// It also matters for correctness — a read-only statement routed through the
-// write path cannot resolve a `CALL db.*` procedure, because the write-path
-// plan builder does not thread the procedure registry (see the comment at the
-// default branch of buildOperatorWrite in cypher/api.go).
+//
+// It used to matter for correctness as well — a statement routed through the
+// write path could not resolve a `CALL db.*` procedure, because the write-path
+// plan builder did not thread the procedure registry. That was rmp #2229, found
+// by this gate and fixed; both paths now resolve every registered procedure
+// identically (cypher/proc_write_path_test.go). RunAny is kept purely because it
+// is what the documentation tells readers to call.
 func execute(eng *cypher.Engine, params map[string]any, query string) error {
 	res, err := eng.RunAny(context.Background(), query, params)
 	if err != nil {

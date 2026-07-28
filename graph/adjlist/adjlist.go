@@ -1307,6 +1307,31 @@ func (a *AdjList[N, W]) OutDegree(src N) (int, bool) {
 	if !ok {
 		return 0, false
 	}
+	return a.OutDegreeByID(srcID)
+}
+
+// OutDegreeByID is [AdjList.OutDegree] keyed by an already-resolved
+// [graph.NodeID] instead of by the node value. ok is false only when srcID has
+// no adjacency shard slot, which for an id obtained from this graph's mapper
+// cannot happen; a node with no outgoing edges reports (0, true).
+//
+// It exists because the query layer already holds ids. Going through the
+// value-keyed form would force it to Resolve the id back to a node value and
+// then Lookup that value again — an array read plus a string hash, per call.
+// Measured on the degree-rewrite path (rmp #2232), that round-trip was the
+// dominant remaining cost once the inner plan was gone: 0.426 µs per outer row
+// above the bare-predicate floor, against 0.079 µs for a plain property
+// predicate.
+//
+// # Cost
+//
+// O(1): one atomic load and a slice length. No allocation, no mapper access.
+//
+// # Concurrency
+//
+// Safe for concurrent use with readers and writers, and lock-free, on the same
+// terms as [AdjList.OutDegree].
+func (a *AdjList[N, W]) OutDegreeByID(srcID graph.NodeID) (int, bool) {
 	e := loadEntry[W](&a.shards[srcID&shardMask], uint64(srcID)>>shardBits)
 	if e == nil {
 		return 0, true
@@ -1391,6 +1416,63 @@ func (a *AdjList[N, W]) OutDegreeFunc(src N, keep func(dst graph.NodeID, relType
 		}
 		if keep(dst, lbl) {
 			n++
+		}
+	}
+	return n, true
+}
+
+// OutDegreeFuncBounded is [AdjList.OutDegreeFunc] with an early exit: it stops
+// walking as soon as limit edges have been kept, and returns
+// min(trueKeptCount, limit). ok is false when src is not interned.
+//
+// It exists so a caller comparing a degree against a small literal — "does this
+// node have more than two :KNOWS edges?" — does not walk a supernode to the end
+// to answer it. That is the short-circuit Neo4j's HasDegree family provides over
+// its plain GetDegree (rmp #2232); the untyped degree needs none, being O(1)
+// already, so this is used only where a per-edge predicate forces a walk.
+//
+// A non-positive limit returns 0 without invoking keep at all, which is the
+// correct answer for "at most zero": the caller has already decided the
+// comparison cannot need more.
+//
+// # Cost
+//
+// O(min(d, limit)) in the node's degree, plus the cost of keep. No allocation.
+//
+// # Concurrency
+//
+// Safe for concurrent use with readers and writers, and lock-free, on the same
+// terms as [AdjList.OutDegreeFunc].
+func (a *AdjList[N, W]) OutDegreeFuncBounded(src N, limit int, keep func(dst graph.NodeID, relType uint32) bool) (int, bool) {
+	srcID, ok := a.mapper.Lookup(src)
+	if !ok {
+		return 0, false
+	}
+	return a.OutDegreeFuncBoundedByID(srcID, limit, keep)
+}
+
+// OutDegreeFuncBoundedByID is [AdjList.OutDegreeFuncBounded] keyed by an
+// already-resolved [graph.NodeID]. See [AdjList.OutDegreeByID] for why the
+// id-keyed form exists.
+func (a *AdjList[N, W]) OutDegreeFuncBoundedByID(srcID graph.NodeID, limit int, keep func(dst graph.NodeID, relType uint32) bool) (int, bool) {
+	if limit <= 0 {
+		return 0, true
+	}
+	e := loadEntry[W](&a.shards[srcID&shardMask], uint64(srcID)>>shardBits)
+	if e == nil {
+		return 0, true
+	}
+	n := 0
+	for i, dst := range e.neighbours {
+		var lbl uint32
+		if e.labels != nil {
+			lbl = e.labels[i]
+		}
+		if keep(dst, lbl) {
+			n++
+			if n >= limit {
+				return n, true
+			}
 		}
 	}
 	return n, true

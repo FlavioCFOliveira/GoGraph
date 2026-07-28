@@ -1418,6 +1418,265 @@ The findings are recorded as evidence summaries only; the committed report and t
 per-stream reports under `docs/audit-2026-07-26-streams/` are the authority, and
 `Finding.evidence` carries the measurement that grounds each one.
 
+Incrementally synced at commit `b22e4dd` (2026-07-27, task #2228, sprint 326 — admit the
+hash join for writing statements, #2225 part B): **+16 nodes** — 1 `Commit` (`b22e4dd`),
+1 `Sprint` (`326`, OPEN — the first sprint node created for the 322–326 range, because
+unlike 316–321 it now has a commit), 3 `Task` (`2228` COMPLETED, `2233` and `2234`
+BACKLOG), 1 `Package` (`bench/r4audit`, kind `bench` — the round-4 audit harness package
+was missing), 2 `Spec` (`docs/benchmarks/write-path-hash-join-2026-07-27.md` and
+`docs/benchmarks/threeway-2026-07-27.md`, the latter also previously missing), 8 `Test`
+(`TestHashJoinOrder_SequenceMatchesNestedLoop`; the four `TestWritePathGates_*`, of which
+`MinLabelReAnchorsInsideAWrite` and `ResultIdentity` date from part A and had never been
+synced; `TestW1PartB_BoundKeyWriteFlatInN` and `TestW1PartB_HashJoinIsWhatChanged`).
+**+25 edges** — 1 `CONTAINS` (`Sprint 326`→`Commit`), 1 `IMPLEMENTED_IN` (`Task 2228`→
+`Commit`), 1 `IMPROVES` (`Commit`→`Feature` `Cypher Engine`, id 12659), 9 `TOUCHES`
+(`Commit`→`Package` `cypher`/`r4audit`/`cypherdocgate`, →`Function` `tryBuildHashJoin`/
+`buildPlanWithMutatorFull`/`hashJoinOrderSafe`, →the two `Spec`s), 8 `CONTAINS`
+(`Package`→each new `Test`), 3 `TESTS` (the three hash-join tests→`tryBuildHashJoin`),
+2 `FOLLOWED_BY` (`Task 2228`→`2233` and →`2234`). All stamped `2026-07-27`.
+
+No new label or edge type. Two new **properties** were added to existing `Function` nodes
+rather than introducing a `Const` label for a single declaration:
+`tryBuildHashJoin.invariant` and `.diagnosticCounters`, and
+`buildPlanWithMutatorFull.writePathGates`. The invariant is the substance of this task:
+`hashJoinBuildOnLeft = false` (a named constant now used at the call site instead of a
+bare `false`) records that the PLANNER pins build=`apply.Inner` and probe=`apply.Outer` at
+the only construction site for either join operator, so the substitution is
+**order-PRESERVING** — row-for-row identical to the nested loop, not merely
+multiset-identical. That refuted the round-4 premise that a hash join self-selects the
+smaller build side, and is why a writing statement needs no order guard. Measured: the
+three-way load at 20 000 nodes went **35m10.173s → 2.206s (957×)** — GoGraph-embedded now
+loads that dataset faster than Neo4j (4.252s) — and the bound-key write at N=16000 went
+**1.860s → 9.669ms (192×)**, within 1.08× of its own read control.
+
+**Known drift (pre-existing, not remediated here):** sprints 319–325 and their tasks are
+absent from the graph, and part A's tests (`#2225`, commit range up to `003e1652`) were
+never synced — the eight `Test` nodes above include two that belong to part A. The
+`Package` node for `bench/r4audit` and the `Spec` node for the round-4 threeway record
+were likewise missing and are created here. A full reconciliation of the 319–325 range is
+a separate hygiene task.
+
+Incrementally synced at commits `afc6fbf`..`aa8f139` (2026-07-27, tasks #2229 and #2232,
+sprint 326): **+11 nodes** — 2 `Commit`, 3 `Task` (`2229` and `2232` COMPLETED, `2235`
+BACKLOG), 1 `Spec` (`docs/benchmarks/degree-rewrite-2026-07-27.md`), 2 `Function`
+(`recogniseDegreePattern`, `applyDDLOp`), 4 `Method` (`lpg.Graph.OutDegreeByID` /
+`.OutDegreeByTypeBoundedByID`, `adjlist.AdjList.OutDegreeFuncBounded` /
+`.OutDegreeFuncBoundedByID`). **+18 edges** — 2 `CONTAINS` (`Sprint 326`→each `Commit`),
+2 `IMPLEMENTED_IN`, 1 `FIXES` and 1 `IMPROVES` (both →`Feature` `Cypher Engine`, id 12659),
+1 `FOLLOWED_BY` (`Task 2232`→`2235`), 8 `TOUCHES` (→`Package` `cypher`, `cypher/expr`,
+`graph/lpg`, `graph/adjlist`, `bench/r4audit`, `internal/cypherdocgate`, →the new `Spec`,
+→`recogniseDegreePattern`), 1 `CONTAINS` (`Package cypher`→`recogniseDegreePattern`). No
+new label or edge type. All stamped `2026-07-27`.
+
+Incrementally synced at commit `44bc252` (2026-07-27, task #2220, sprint 326 — two-sided
+BFS for the single-path `shortestPath()`): **+7 nodes** — 1 `Commit`, 2 `Task` (`2220`
+COMPLETED, `2236` BACKLOG), 1 `Spec`
+(`docs/benchmarks/shortest-path-bidir-2026-07-27.md`), 3 `Method` on `exec.ShortestPath`
+(`biBFSShortestPath`, `canBidirectional`, `bfsShortestPathForward` — the last is the
+retained forward-only walk, now both the fallback and the differential reference).
+**+12 edges** — 1 `CONTAINS`, 1 `IMPLEMENTED_IN`, 1 `IMPROVES` (→`Feature`
+`Search & Path-finding`, id 10375), 1 `FOLLOWED_BY` (`2220`→`2236`), 8 `TOUCHES`. All
+stamped `2026-07-27`. No new label or edge type.
+
+`canBidirectional.admissionGate` carries the substance: the search is admitted for
+**DirOut, untyped, shape-checked reverse CSR only**, and every exclusion is a measurement
+rather than a preference — the `revToFwd` table was a 26 % end-to-end regression while the
+search itself was 17.9× faster, per-slot type resolution admitted edges the filter excludes,
+and DirIn/DirBoth are blocked on a finding that implicates the FORWARD-ONLY reference's own
+reverse-slot type check. Follow-up `Task 2236`.
+
+Incrementally synced at commit `11112c6` (2026-07-27, task #2221, sprint 326 — the
+sequence-ordered apply gate wakes exactly its successor): **+13 nodes** — 1 `Commit`,
+1 `Task` (`2221` COMPLETED), 1 `Spec`
+(`docs/benchmarks/apply-gate-wake-2026-07-27.md`), 3 `Method` (`Tx.waitApplyTurn`,
+`Tx.advanceApply` — both previously unmodelled — and `Store.ApplyWaiterCountForTest`,
+the test-only seam in `export_test.go`), 2 `Function` (`acquireApplySlot`,
+`releaseApplySlot`), 2 `Test` (`TestApplyGate_*`), and 4 `Benchmark` — of which
+**2 are an audit repair**: `BenchmarkCommit` and `BenchmarkCommitConcurrent` in
+`store/txn/bench_test.go` had never been modelled, a divergence found by comparing the
+package's `func Benchmark` declarations against the graph during this sync. **+20 edges**
+— 1 `CONTAINS` (`Sprint 326`→`Commit`), 1 `IMPLEMENTED_IN`, 1 `IMPROVES` (→`Feature`
+`ACID Transactions`), 5 `TOUCHES`, 12 `Package CONTAINS`/`HAS_METHOD`. All stamped
+`2026-07-27`. No new label or edge type.
+
+The substance is what the measurement overturned. GoGraph's group commit **already worked**:
+`Tx.Commit` releases the single-writer semaphore after the append and coalesces in
+`wal.Writer.SyncGroup`, reaching 31 300 commits/s at 256 writers before this change. The
+"flat at 261 op/s from 1 to 1024 writers" that rounds 3 and 4 both recorded belongs
+**exclusively to the Cypher path**, which fsyncs while holding `lpg`'s `visMu` in write mode
+(`commitUnderBarrier`→`CommitWALOnly`), so `SyncGroup` never has a second caller — that
+remains `Task 2193` and needs two-phase visibility. The real O(N) wake was in neither place:
+`advanceApply` broadcast the apply gate, waking every parked committer per commit, and a CPU
+profile put **77 % of all samples in `sync.(*Cond).Wait`, 100 % of it beneath
+`waitApplyTurn`**. Waking only the holder of `seq+1` took 1024 writers from 7 425 to
+111 897 commits/s (+1407 %, mean group 26.8→424) and saturated the disk at 264 fsync/s.
+
+The round-4 audit's **headline lever was implemented faithfully and rejected on evidence**:
+Neo4j's `TransactionLogQueue` one-waiter wake chain, ported to `wal.Writer` as an intrusive
+queue whose head propagates the unpark, **regressed throughput 3–5 %** and was backed out.
+Java pays an explicit `LockSupport.unpark` loop that the chain exists to avoid; Go's
+`Cond.Broadcast` is a `notifyListNotifyAll` splice the runtime spreads across all Ps, so N
+sequential channel sends are strictly worse. The prior-art insight survives only where
+GoGraph's O(N) wake actually was, and where the successor is uniquely determined.
+
+Incrementally synced at commit `f69530a` (2026-07-27, task #2222, sprint 326 — a faithful
+physical plan and PROFILE): **+18 nodes** — 1 `Commit`, 4 `Task` (`2222` COMPLETED, plus
+`2237`/`2238`/`2239` BACKLOG, all three filed from this work), 1 `Spec`
+(`docs/benchmarks/physical-plan-surface-2026-07-27.md`), 4 `Method` on `cypher.Engine`
+(`buildReadPhysical`, `explainPhysical`, `ExplainLogical`, `Profile`), 4 `Type` in
+`cypher/exec` (`PlanNode`, `Profiler`, and the two optional interfaces `PlanChildren` and
+`PlanDetail`), 3 `Function` (`PlanTree`, `RenderPlan`, `RenderPlanNode`) and 3 `Test`.
+**+20 edges** — 1 `CONTAINS` (`Sprint 326`→`Commit`), 1 `IMPLEMENTED_IN`, 3 `FOLLOWED_BY`
+(`2222`→`2237`/`2238`/`2239`), 3 `TOUCHES`, 12 `Package CONTAINS`/`HAS_METHOD`. All stamped
+`2026-07-27`. No new label or edge type.
+
+The substance is HOW the defect was made unrepresentable rather than merely fixed.
+`Engine.Explain` had rendered the logical IR and re-derived the planner's physical decisions a
+second time against it, which was wrong in both directions — `NodeByIndexSeek` reported where a
+label scan ran (round 3) and `CartesianProduct` printed for an equi-join `hashJoinBuildCount`
+proves executes as a hash join (round 4). Three mechanisms replace that reconstruction:
+`buildReadPhysical` is the single build path shared by `Run` and both rendering surfaces; node
+names are read from the operator's **concrete type**, so a `HashJoin` is named `HashJoin` because
+it *is* one; and `TestPlanChildren_EveryOperatorWithInputsImplementsIt` parses the package to
+derive the obligation, because an operator's inputs live in **unexported fields that reflection
+cannot read** — a missing `PlanChildren` would silently TRUNCATE the plan. The gate found **46**
+such operators, four of them columnar ones a field-type regex had missed.
+
+Two constraints are worth recording because they are structural, not stylistic. The profiling
+wrapper **must** live in `cypher/exec`: transparency requires re-implementing
+`NodeIDColumnProducer`, whose marker method is unexported there, so the pre-existing
+`cypher/explain.ProfiledOperator` could not be the wiring — wrapping from outside would strip the
+marker and silently downgrade a columnar plan to row mode. And the builder wraps on the way **out**
+of its recursion, so a parent runs its capability type-assertions against the wrapper; a
+shape-equality test over five shapes is the gate. Cardinality **estimates** belong to logical
+nodes and have no counterpart on a built operator, which is why `Engine.ExplainLogical` exists
+rather than the estimates being lost — examples 24, 25 and 26 were retargeted to it because each
+demonstrates a planner decision or a statistic, not what physically runs.
+
+Rendering the truth immediately produced a new defect the old surface could not show: a single
+`RETURN` builds **two stacked `Project` operators**, so every row is projected twice on the
+engine's hottest path (`Task 2239`).
+
+Incrementally synced at commit `ddae299` (2026-07-27, task #2223, sprint 326 — the durability axis
+restored to the three-way harness): **+7 nodes** — 1 `Commit`, 1 `Task` (`2223` COMPLETED),
+2 `Spec` (`docs/benchmarks/threeway-durability-2026-07-27.md` and its raw report), 2 `Function`
+(`newEmbeddedDurableTarget`, `durabilityPosture`) and 1 `Method`
+(`embeddedTarget.loadEdges`). **+8 edges** — 1 `CONTAINS`, 1 `IMPLEMENTED_IN`, 3 `TOUCHES`,
+3 `Package CONTAINS`. All stamped `2026-07-27`. No new label or edge type.
+
+The substance is that **round 3's write win was a measurement artefact and inverts**. The harness
+compared a GoGraph with no durability at all — a bare `lpg.Graph`, no WAL, no fsync — against
+Neo4j forcing its log every commit, which overstated GoGraph's writes and *understated* its
+traversal losses. With a fourth target over a real `store.DB`: single-node write **5 µs in-memory
+against 3.994 ms durable**, versus Neo4j's **2.039 ms** at the same posture, so GoGraph is **~2×
+slower, not the 83× faster round 4 recorded**. The 3.994 ms is one fsync and agrees with the
+~3.8 ms measured independently in #2221. Bulk load is the opposite case and survives: durability
+costs it only **+25 %** (2.056 s → 2.564 s) because 5 000-row batches amortise the fsync, so
+GoGraph still loads faster than Neo4j (2.564 s vs 4.054 s) at equal posture. Memgraph's default
+`storage_wal_file_flush_every_n_tx=100000` means it fsyncs once every 100 000 transactions out of
+the box — a comparison that does not state each posture is not a comparison.
+
+Two further premises were **measured rather than corrected as stated**. The harness's string-key
+join premise was stale, but the obvious fix is also wrong: an *inline* numeric key does reach an
+index (#2169), yet this query binds its key from an `UNWIND` row, and in that shape **neither** key
+reaches a per-row index — both lower to `NodeByLabelScan` feeding a `HashJoin`, with
+`hashJoinBuildCount` firing exactly 2 for each, so the keys are at parity (2.064 s vs 2.056 s)
+because #2228's hash join subsumes the per-row lookup for a bulk load. And row counts were **never
+actually cross-checked**, only tabulated; the harness now fails on any disagreement before a single
+timing is compared.
+
+Incrementally synced at commit `81afd56` (2026-07-28, task #2231, sprint 326 — string equality
+seeks the btree): **+8 nodes** — 1 `Commit`, 1 `Task` (`2231` COMPLETED), 1 `Spec`
+(`docs/benchmarks/btree-string-eq-2026-07-28.md`), 2 `Function` (`extractSingleStringCmp`,
+`boundFor`) and 3 `Test` (`TestBTreeStringEq_*`). **+11 edges** — 1 `CONTAINS`,
+1 `IMPLEMENTED_IN`, 1 `FIXES` (→`Feature` `bound-seek-key-resolution`), 4 `TOUCHES`,
+5 `Package CONTAINS`. All stamped `2026-07-28`. No new label or edge type.
+
+`extractSingleStringCmp` rejected `=` while its numeric counterpart degenerated it into `[v, v]`
+over the companion btree (#2169), so a **btree on a string property full-scanned an equality** even
+though `findBoundStringBTree` could already locate the index — and the identical predicate written
+as two inequalities already seeked. Accepting `=` and sharing the numeric path's selectivity gate
+and residual filter: **4 393.8 µs → 5.177 µs at n = 20 000 (849×)**, with allocations **flat in the
+node population** (819 525 and 219 364 B/op become 13 351 and 13 361) — which is the property that
+proves the label is no longer walked, and the same signature #2226 used. The range is exact for
+equality because strings order by **code point**, so no two distinct strings compare equal and no
+collation question arises; only `=` was added, leaving the collation ruling to #2224.
+
+The temporal hazard was **already closed**, and knowing why matters: the string btree uses the very
+same `projectStringPropValue` gate as the hash index, which refuses the SOH-tagged encodings, so a
+btree key is never created for a temporal. The rewrite inherits the exclusion rather than restating
+it.
+
+Two evidence-discipline facts worth keeping. A differential whose scan arm comes from
+parameterising the key is **degenerate below the selectivity gate's floor**, because the literal
+form scans there too — it must seed above the floor and assert the two arms take different plans.
+And `exec.RangeBound.Include` is **metadata only**: `NodeByIndexRangeScan` always emits the
+inclusive `[lo, hi]` superset and the residual filter enforces open/closed semantics, so flipping
+inclusivity is a no-op and a fault injection has to shift the range off the key to bite.
+
+Incrementally synced at commit `c8e5a0c` (2026-07-28, task #2230, sprint 326 — the write-clause
+classifier stops reading comments and strings): **+12 nodes** — 1 `Commit`, 2 `Task` (`2230`
+COMPLETED, `2240` BACKLOG), 1 `Spec`
+(`docs/benchmarks/write-clause-classifier-2026-07-28.md`), 4 `Function` (`maskNonClauseRegions`
+and its three region scanners), 3 `Test` and 1 `Benchmark`. **+12 edges** — 1 `CONTAINS`,
+1 `IMPLEMENTED_IN`, 1 `FOLLOWED_BY` (`2230`→`2240`), 6 `TOUCHES`, 3 `Package CONTAINS`. All
+stamped `2026-07-28`. No new label or edge type.
+
+`writingKeywordRE` ran against the **raw** query text, so a keyword inside a comment or a quoted
+string routed a READ onto the write path — where it serialises on the store's single writer and
+silently throttles the concurrent read throughput the engine exists to provide. The heuristic was
+never the problem; inspecting regions that cannot hold a clause was. The mask takes its four region
+forms **from the lexer grammar** (`CypherLexer.g4`) rather than from memory, and three details are
+load-bearing: the block comment is **non-greedy**, both string literals carry backslash
+`EscapeSequence` so an escaped delimiter does not close them, and `ESC_LITERAL` (backtick) has **no
+escape sequence at all**, so a backslash inside one is an ordinary byte. Masked bytes become
+**spaces**, not deletions, so word boundaries and offsets survive; an unterminated region masks to
+end of input, which is conservative *for this caller* because the worst outcome is a clean failure
+on the read path rather than taking the writer lock to fail.
+
+Fast-path allocations are **exactly unchanged** (1, all samples equal) and the time cost is +0.67 %
+/ +1.83 % — precisely the single `ContainsAny` guard, ~20 ns against a 2.8 µs regexp match.
+
+The measurement produced a finding worth more than the delta: **classification costs 1.4–2.8 µs on
+every `RunAny`/`RunInTxAny` dispatch**, against ~5 µs for an entire indexed point lookup, so
+classifying a fast query can be a third of its cost. The expense is the case-insensitive regexp,
+and the new mask is the natural place to delete it — one walk could blank the regions *and* test the
+words, fusing two passes into one (`Task 2240`).
+
+Incrementally synced at commit `45ef885` (2026-07-28, task #2224, sprint 326 — the string-collation
+divergence declared): **+6 nodes** — 1 `Commit`, 1 `Task` (`2224` COMPLETED), 2 `Spec`
+(`docs/cypher.md`, `docs/tck/DIVERGENCES.md`) and 2 `Test`. **+7 edges** — 1 `CONTAINS`,
+1 `IMPLEMENTED_IN`, 3 `TOUCHES`, 2 `Package CONTAINS`. All stamped `2026-07-28`. **This closes
+sprint 326 at 18/18.**
+
+GoGraph orders strings by **Unicode code point**; Neo4j by **UTF-16 code unit** (Java's
+`String.compareTo`). Verified before documenting: `ORDER BY` is strictly ascending by rune, and the
+mechanism is Go's native comparison on `string` — bytewise UTF-8, which UTF-8 guarantees equals
+code-point order. The user **ruled to keep** code-point order, so the divergence is declared rather
+than changed. Three reasons are recorded: openCypher 2024.3 specifies **no collation**, so neither
+order is non-conformant and no TCK scenario discriminates them; UTF-16 unit order is an artefact of
+Java's internal representation, placing some supplementary characters *before* numerically lower BMP
+ones; and code-point order is **load-bearing** for #2231's degenerate-range equality proof, since no
+two distinct strings compare equal under it — collation reaches the index layer, not just `ORDER BY`.
+
+The divergence condition is exact and worth keeping: a supplementary-plane character (U+10000+,
+stored in UTF-16 as a surrogate pair whose leading unit is U+D800–U+DBFF) compared against a BMP
+character in **U+E000–U+FFFF**. Below U+E000 the rules agree, because no surrogate value is
+reachable. Hence GoGraph sorts `U+1F600` **after** `U+FB01`; Neo4j before.
+
+`docs/tck/DIVERGENCES.md` gained a new section for **behaviour the specification leaves
+unspecified**, distinct from Category 4 (non-conformances) and from the closing extensions section:
+a reader auditing conformance who noticed an `ORDER BY` difference would otherwise suspect a gap.
+
+Two properties carry the substance. `recogniseDegreePattern.eligibility` records the port of
+Neo4j's `QuerySolvableByGetDegree` + `isEligible` and, decisively, that **`Selections.empty`
+makes a labelled far node ineligible for a degree rewrite in Neo4j too** — so
+`COUNT { (a)-[:K]->(:P) }`, the round-4 audit's own 88× shape, is served by a different
+mechanism (`Task 2235`), never by widening this recogniser. `applyDDLOp.why` records the
+`Result`-leak defect found while fixing #2229: four intra-sequence callers discarded the
+`Result` the DDL runner returns, and its armed finalizer counted a leak against
+`cypher.result.leaked` on every `CREATE CONSTRAINT`, `DROP CONSTRAINT` and constraint unwind.
+
 ## Known limitations (faithful, by design)
 
 - **Build-tag duplicates.** The extractor parses every `.go` file regardless of build

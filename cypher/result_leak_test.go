@@ -186,3 +186,75 @@ func TestResult_Finalizer_BoundedUnderAbruptCancel(t *testing.T) {
 			got, N, N/2)
 	}
 }
+
+// TestDDLSequences_DoNotLeakAnInternalResult is the regression gate for a defect
+// found while fixing rmp #2229: four intra-sequence callers of the DDL operator
+// runner discarded the *Result it returned with `_`, so the finalizer armed on
+// that Result fired on the next GC and counted a leak against the library's own
+// `cypher.result.leaked` metric.
+//
+// It was invisible in normal use — the statement still succeeded and the caller
+// still got exactly one Result to close — and invisible in the test suite except
+// as a mysterious non-zero delta in TestResult_Close_DisarmsFinalizer, which
+// forces a GC and therefore collects whatever any earlier test left pending.
+// That is the failure mode this test replaces with a direct assertion.
+//
+// CREATE CONSTRAINT was the original reproduction (one leak per statement);
+// DROP CONSTRAINT went through the same runner. CREATE INDEX did not, and is
+// kept here as the control that already passed.
+func TestDDLSequences_DoNotLeakAnInternalResult(t *testing.T) {
+	cases := []struct {
+		name  string
+		stmts []string
+	}{
+		{"CREATE INDEX (control: never leaked)", []string{
+			`CREATE INDEX t_p FOR (n:T) ON (n.p)`,
+		}},
+		{"CREATE CONSTRAINT UNIQUE", []string{
+			`CREATE CONSTRAINT t_p_uniq FOR (n:T) REQUIRE n.p IS UNIQUE`,
+		}},
+		{"CREATE CONSTRAINT NOT NULL", []string{
+			`CREATE CONSTRAINT t_p_nn FOR (n:T) REQUIRE n.p IS NOT NULL`,
+		}},
+		{"CREATE then DROP CONSTRAINT", []string{
+			`CREATE CONSTRAINT t_p_uniq FOR (n:T) REQUIRE n.p IS UNIQUE`,
+			`DROP CONSTRAINT t_p_uniq`,
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Not parallel: the leak counter is a process-global metric backend.
+			eng := newTinyEngine(t)
+			p := withLeakProbe(t, func() {})
+
+			before := p.leaked.Load()
+			for _, stmt := range tc.stmts {
+				res, err := eng.RunAny(context.Background(), stmt, nil)
+				if err != nil {
+					t.Fatalf("%s: %v", stmt, err)
+				}
+				for res.Next() {
+				}
+				if err := res.Err(); err != nil {
+					t.Fatalf("%s: %v", stmt, err)
+				}
+				if err := res.Close(); err != nil {
+					t.Fatalf("%s: close: %v", stmt, err)
+				}
+			}
+			// Force the finalizer of anything the statement abandoned.
+			runtime.GC()
+			runtime.GC()
+			time.Sleep(20 * time.Millisecond)
+			runtime.GC()
+			time.Sleep(20 * time.Millisecond)
+
+			if delta := p.leaked.Load() - before; delta != 0 {
+				t.Fatalf("leak counter delta = %d after %d correctly-closed statement(s); want 0. "+
+					"A DDL sequence is building an internal Result it never closes — use applyDDLOp, "+
+					"which runs the operator for its effect without constructing one", delta, len(tc.stmts))
+			}
+		})
+	}
+}

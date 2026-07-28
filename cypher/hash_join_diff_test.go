@@ -254,32 +254,54 @@ func TestHashJoin_Differential_IdEquiJoin(t *testing.T) {
 	assertIdenticalMultiset(t, g, q, true)
 }
 
-func TestHashJoin_Guard_BareLimitKeepsNestedLoop(t *testing.T) {
-	// A bare LIMIT without ORDER BY makes the SPECIFIC rows observable, so the
-	// optimisation must be DISABLED for the whole query (nested loop kept).
-	// Both plans must still return the same number of rows (the count is
-	// well-defined even when which rows is not). We assert the trigger did NOT
-	// fire and the counts match.
+// TestHashJoin_BareLimitTakesTheHashJoin replaces
+// TestHashJoin_Guard_BareLimitKeepsNestedLoop, which asserted the opposite: that
+// a bare LIMIT without ORDER BY disabled the substitution for the whole query.
+//
+// rmp #2234 retired that guard. The reasoning it rested on was that a bare LIMIT
+// makes the SPECIFIC rows observable — true — and that the hash join changes which
+// rows those are — false. The substitution emits the nested loop's row sequence
+// position for position ([hashJoinBuildOnLeft]), so the same LIMIT selects the
+// same prefix. This test asserts exactly that: the join fires, AND the five rows
+// are the nested loop's five rows in the nested loop's order.
+//
+// A bare LIMIT is the sharpest shape in the change. openCypher 9 §8.4 leaves which
+// rows come back unspecified absent ORDER BY, so a divergence would be conformant
+// and would still be a visible behaviour change — which is why this compares the
+// prefix rather than settling for the row count.
+func TestHashJoin_BareLimitTakesTheHashJoin(t *testing.T) {
+	const q = "MATCH (a:A),(b:B) WHERE a.x = b.y RETURN a.x AS ax, b.y AS bv LIMIT 5"
 	g := makeRange(t, 100, 100, 10)
 	on := NewEngine(g)
+	off := NewEngineWithOptions(g, EngineOptions{DisableHashJoin: true})
+
 	before := hashJoinBuildCount.Load()
-	res, err := on.Run(context.Background(), "MATCH (a:A),(b:B) WHERE a.x = b.y RETURN a.x AS ax LIMIT 5", nil)
-	if err != nil {
-		t.Fatal(err)
+	gotOn := drainOrdered(t, on, q)
+	if hashJoinBuildCount.Load() == before {
+		t.Fatal("the hash join did NOT fire under a bare LIMIT; rmp #2234 retired the guard " +
+			"that used to prevent it, so either the retirement regressed or another guard " +
+			"(size floor, structural trigger) is now rejecting this shape")
 	}
-	n := 0
-	for res.Next() {
-		n++
-	}
-	if err := res.Err(); err != nil {
-		t.Fatal(err)
-	}
-	res.Close()
+
+	before = hashJoinBuildCount.Load()
+	gotOff := drainOrdered(t, off, q)
 	if hashJoinBuildCount.Load() != before {
-		t.Fatalf("hash join must NOT be substituted under a bare LIMIT, but it was")
+		t.Fatal("the hash join fired on the OFF arm; DisableHashJoin is not taking effect")
 	}
-	if n != 5 {
-		t.Fatalf("expected 5 rows under LIMIT 5, got %d", n)
+
+	if len(gotOn) != 5 {
+		t.Fatalf("expected 5 rows under LIMIT 5, got %d", len(gotOn))
+	}
+	if len(gotOff) != 5 {
+		t.Fatalf("the nested-loop reference returned %d rows under LIMIT 5, not 5", len(gotOff))
+	}
+	for i := range gotOn {
+		if gotOn[i] != gotOff[i] {
+			t.Fatalf("the LIMIT prefix DIVERGED at row %d:\n  hash join   %s\n  nested loop %s\n"+
+				"A bare LIMIT selects a prefix of the emitted sequence, so this means the hash "+
+				"join is no longer emitting the nested loop's sequence — see hashJoinBuildOnLeft.",
+				i, gotOn[i], gotOff[i])
+		}
 	}
 }
 
@@ -308,24 +330,62 @@ func TestHashJoin_Guard_OrderByIsSafe(t *testing.T) {
 	}
 }
 
-func TestHashJoin_Guard_CollectKeepsNestedLoop(t *testing.T) {
-	// collect() captures arrival order, so a hash join below it would change the
-	// list value — the optimisation must be disabled.
+// TestHashJoin_CollectTakesTheHashJoin replaces
+// TestHashJoin_Guard_CollectKeepsNestedLoop, which asserted the opposite. The old
+// reasoning: collect() materialises rows in arrival order, so a hash join below it
+// would change the list value. The first half is right and the second does not
+// follow — the substitution preserves arrival order exactly, so the list is
+// unchanged (rmp #2234).
+//
+// collect() is the strongest available witness for that claim: it exposes the
+// ENTIRE emitted sequence as one comparable value, rather than a prefix or an
+// order-blind aggregate.
+//
+// Checked three ways, the third independent of both plans: the join fires; the
+// list matches the nested loop's element for element; and its length matches a
+// hand-computed match count. makeRange(100, 100, 10) gives 100 A nodes with
+// x = i%10 and 100 B nodes with y = i%10, so each of the 10 keys pairs 10 A rows
+// with 10 B rows — 10 × 10 × 10 = 1000 matches. Without that third check a defect
+// affecting both arms equally would pass unnoticed, which is how two earlier
+// audits in this project lost a real defect.
+func TestHashJoin_CollectTakesTheHashJoin(t *testing.T) {
+	const (
+		q             = "MATCH (a:A),(b:B) WHERE a.x = b.y RETURN collect(a.x) AS xs"
+		wantMatches   = 1000 // 10 keys × 10 A rows × 10 B rows
+		collectAsRows = "MATCH (a:A),(b:B) WHERE a.x = b.y RETURN a.x AS ax"
+	)
 	g := makeRange(t, 100, 100, 10)
 	on := NewEngine(g)
+	off := NewEngineWithOptions(g, EngineOptions{DisableHashJoin: true})
+
 	before := hashJoinBuildCount.Load()
-	res, err := on.Run(context.Background(), "MATCH (a:A),(b:B) WHERE a.x = b.y RETURN collect(a.x) AS xs", nil)
-	if err != nil {
-		t.Fatal(err)
+	gotOn := drainOrdered(t, on, q)
+	if hashJoinBuildCount.Load() == before {
+		t.Fatal("the hash join did NOT fire above a collect(); rmp #2234 retired the guard " +
+			"that used to prevent it")
 	}
-	for res.Next() {
-	}
-	if err := res.Err(); err != nil {
-		t.Fatal(err)
-	}
-	res.Close()
+
+	before = hashJoinBuildCount.Load()
+	gotOff := drainOrdered(t, off, q)
 	if hashJoinBuildCount.Load() != before {
-		t.Fatalf("hash join must NOT be substituted above a collect(), but it was")
+		t.Fatal("the hash join fired on the OFF arm; DisableHashJoin is not taking effect")
+	}
+
+	// One row, holding the whole collected list.
+	if len(gotOn) != 1 || len(gotOff) != 1 {
+		t.Fatalf("expected exactly one row from an aggregating query, got %d / %d",
+			len(gotOn), len(gotOff))
+	}
+	if gotOn[0] != gotOff[0] {
+		t.Fatalf("the COLLECTED LIST differs between plans, so the substitution changed the "+
+			"arrival order collect() captures:\n  hash join   %s\n  nested loop %s",
+			gotOn[0], gotOff[0])
+	}
+	// The absolute oracle: the list length, which neither plan gets to define.
+	if n := len(drainOrdered(t, on, collectAsRows)); n != wantMatches {
+		t.Fatalf("the join produced %d rows, but the fixture admits exactly %d matches "+
+			"(10 keys × 10 A × 10 B) — the collected list above is the wrong length, and the "+
+			"two plans agreeing on it means BOTH are wrong", n, wantMatches)
 	}
 }
 

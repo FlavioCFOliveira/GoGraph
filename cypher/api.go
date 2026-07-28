@@ -68,7 +68,6 @@ import (
 	"log/slog"
 	"math"
 	"reflect"
-	"regexp"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -219,6 +218,17 @@ type vleRelInfo struct {
 }
 
 type buildOpts struct {
+	// profiler, when non-nil, instruments every operator the builder returns so a
+	// PROFILE run can report per-operator rows and time. It is nil for every
+	// ordinary query, and nil is the only state the normal path ever sees: no
+	// wrapper is built and no operator executes any instrumentation, so profiling
+	// costs nothing when it is off (rmp #2222 AC 3).
+	//
+	// Wrapping happens in exactly one place — [buildOperator], which every node
+	// passes through on its way out of the recursion — so a node cannot be missed
+	// and cannot be wrapped twice.
+	profiler *exec.Profiler
+
 	// nodeResolver backs [expr.LazyNodeValue] for the lazy node-materialisation
 	// fast path. It is created once per build (it depends only on the graph) and
 	// shared across every row and every node column, so the lazy path costs no
@@ -310,6 +320,26 @@ type buildOpts struct {
 	// which case edgeTypeFilterFor falls back to an uncached
 	// [buildEdgeTypeFilter] call — correct, just unamortised.
 	edgeTypeFilterCache *edgeTypeFilterCache
+	// procReg is the Engine's procedure registry, carried here rather than as a
+	// parameter because the WRITE-path builder ([buildOperatorWrite]) needs it
+	// only to hand back to [buildOperator] at its fall-through branch, and
+	// threading a twelfth parameter through that function's eighteen recursive
+	// call sites would oblige every write operator to route something none of
+	// them use (rmp #2229).
+	//
+	// Before #2229 that fall-through passed a literal nil, so a `CALL db.*` in
+	// any statement the classifier deemed a write failed to PLAN: Run/RunAny
+	// resolved db.labels() and RunInTx/RunInTxAny did not. Because
+	// [QueryHasWritingClause] matches writing keywords inside comments and string
+	// literals too (rmp #2230), that also broke read-only statements — adding the
+	// comment `// CREATE nothing here` above a working `CALL db.labels()` was
+	// enough to make it fail.
+	//
+	// nil on the public BuildPlanWithMutator path (no Engine behind the build),
+	// which therefore resolves no procedures — the behaviour that path has always
+	// had. [procs.Registry] is internally RWMutex-guarded, so sharing the
+	// Engine's instance across concurrent builds needs no per-query snapshot.
+	procReg *procs.Registry
 	// preprojectedCols is the set of schema variable names whose row column
 	// already holds the projection-equivalent value (e.g. an EagerAggregation
 	// grouping-key column carries the pre-evaluated grouping expression, not
@@ -396,18 +426,26 @@ type buildOpts struct {
 	maxResultBytes int64
 	// hashJoinEnabled gates the disconnected-equi-join hash-join physical
 	// optimisation (#1506). The read-path build (buildPlanEngine) sets it from
-	// the Engine field; it is consulted in buildOperator's *ir.Selection case
-	// together with the order-safety and size-floor guards. Left false by every
-	// other build path (write path, public BuildPlanWithMutator), so those paths
-	// always build the legacy nested-loop plan.
+	// the Engine field, and the write-path build from [planGates.hashJoin]
+	// (#2225 part B); it is consulted in buildOperator's *ir.Selection case
+	// together with the order-safety and size-floor guards. Left false by the
+	// public BuildPlanWithMutator, which therefore always builds the legacy
+	// nested-loop plan.
 	hashJoinEnabled bool
-	// hashJoinOrderSafe records whether the order-safety scan of the whole query
-	// IR (performed once at the top of the read-path build) found no operator
-	// above the join that would observe the changed row order — a bare
-	// LIMIT/SKIP without ORDER BY, or a collect()/arrival-order aggregation. When
-	// false the hash join is disabled for the whole query even where the
-	// structural equi-join trigger matches.
-	hashJoinOrderSafe bool
+	// disableIndexNestedLoopForTest suppresses the #2233 index nested-loop join
+	// substitution only, leaving the hash join in place. It is a TEST SEAM, not an
+	// option: the two plans are mutually exclusive by cost, so the differential
+	// suite cannot otherwise observe both answers for one query. No public setter
+	// exists and production never sets it — which is exactly why the linter cannot
+	// see it being written, since the only writer is the differential test.
+	disableIndexNestedLoopForTest bool //nolint:unused // written only by the in-package differential test; see index_nested_loop_plan_test.go
+	// indexNestedLoopEnabled gates the index nested-loop join (#2233), the
+	// Θ(B·log N) plan for the same disconnected-equi-join shape the hash join
+	// serves at Θ(N+B). Both paths set it from the same source as
+	// hashJoinEnabled: the two plans are alternatives chosen by a cost gate
+	// (indexNestedLoopWins), not independently switchable optimisations, and the
+	// substitution is order-PRESERVING so it needs no order guard either.
+	indexNestedLoopEnabled bool
 	// rangeSeekEnabled gates the range-predicate btree index seek (#1505). The
 	// read-path build sets it from the Engine field; it is consulted in
 	// buildOperator's *ir.Selection case. Left false by every other build path,
@@ -928,6 +966,12 @@ type Engine struct {
 	// (#1506). True by default; set false by EngineOptions.DisableHashJoin. When
 	// false the planner always builds the legacy nested-loop Cartesian plan.
 	hashJoinEnabled bool
+	// disableIndexNestedLoopForTest suppresses the #2233 index nested-loop join
+	// substitution only, leaving the hash join in place. It is a TEST SEAM, not an
+	// option: the two plans are mutually exclusive by cost, so the differential
+	// suite cannot otherwise observe both answers for one query. No public setter
+	// exists and production never sets it.
+	disableIndexNestedLoopForTest bool
 
 	// rangeSeekEnabled gates the range-predicate btree index seek (#1505). True
 	// by default; set false by EngineOptions.DisableRangeIndexSeek. When false
@@ -1934,75 +1978,7 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	// never race on it.
 	queryReg := newNowAwareRegistry(e.reg, time.Now())
 	e.g.View(func() {
-		walker := &lpgNodeWalker{g: e.g}
-		labelSrc := &lpgLabelResolver{g: e.g, eng: e}
-		// Allocate a per-run subquery evaluator so EXISTS { … } / COUNT { … }
-		// expressions encountered inside Filter/Project closures can drive their
-		// inner pipelines against the current outer row (task-396).
-		subEval := newSubqueryEvaluator(walker, labelSrc, queryReg, e.g)
-		// Allocate a per-run pattern evaluator so WHERE (a)-[:T]->(b) existential
-		// predicates can be evaluated against the live graph (task-961). It
-		// receives the Engine's per-query element budget so a pattern
-		// comprehension over a supernode anchor cannot build an unbounded
-		// result list — the same bound collect() enforces (#1294, #1298).
-		patEval := newPatternEvaluator(e.g, e.maxCollectItems)
-		bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx, maxCollectItems: e.maxCollectItems}
-		// Edge-type-filter cache sharing (#1871): the SAME cache instance
-		// serves every concurrent Run call, so a relationship-type-filtered
-		// pattern amortises its O(V+E) build across the whole Engine's query
-		// stream, not just within one call.
-		bopts.edgeTypeFilterCache = e.edgeTypeFilterCache
-		// Hash-join optimisation gating (#1506): enable only when the Engine
-		// permits it AND the whole-query order-safety scan finds no operator that
-		// would observe the changed row order. Both must hold; otherwise the
-		// planner falls back to the legacy nested-loop Cartesian plan.
-		bopts.hashJoinEnabled = e.hashJoinEnabled
-		bopts.hashJoinOrderSafe = entry.hashJoinSafe
-		bopts.rangeSeekEnabled = e.rangeSeekEnabled
-		// Min-label scan gating (#2077): enable the smallest-cardinality
-		// multi-label anchor substitution when the Engine permits it. The
-		// substitution is result-identical (a label conjunction is commutative)
-		// and never scans more rows than the Labels[0] plan, so it needs no
-		// order-safety companion.
-		bopts.minLabelScanEnabled = e.minLabelScanEnabled
-		// Disjoint-component reorder gating (#2091): when the Engine permits it and
-		// the plan has memoised order-safe candidates, apply the live cardinality
-		// gate against this query's snapshot. The live node total (for AllNodesScan
-		// components) and every label count are read under View's visibility
-		// barrier, so all cost inputs come from one consistent snapshot. The swap
-		// changes only emission order and internal column layout, never the
-		// multiset; SuppressReorder (baked into the candidate set) guarantees no
-		// downstream operator observes the change.
-		if e.joinReorderEnabled && len(entry.reorderCandidates) > 0 {
-			bopts.reorderSwap = computeReorderSwaps(entry.reorderCandidates, labelSrc, int64(e.g.LiveOrder()))
-		}
-		bopts.seekHint = entry.pushedSeekHints
-		// Single-edge anchor-swap gating (#2090): when the Engine permits it and
-		// the plan has memoised order-safe single-edge sites, apply the live
-		// count-store cost gate against this query's snapshot. N(label) and every
-		// D(label,relType,dir) cell (and its dirty flag) are read under View's
-		// visibility barrier — exclusive against a committing writer — so all cost
-		// inputs come from one consistent snapshot. The swap re-roots the pattern
-		// onto its other endpoint (OUT-ward only) with an identical multiset;
-		// SuppressReorder (baked into the candidate set) guarantees no downstream
-		// operator observes the emission-order change.
-		if e.anchorSwapEnabled && len(entry.anchorSwapCandidates) > 0 {
-			bopts.anchorSwap = computeAnchorSwaps(entry.anchorSwapCandidates, labelSrc)
-		}
-		// Parallel-count gating (#1672): the parallel count reduce replaces the
-		// serial EagerAggregation pipeline only when the Engine permits it AND the
-		// live node count exceeds the threshold (checked at the build site against
-		// the live graph). Both must hold; otherwise the planner builds the serial
-		// pipeline.
-		bopts.parallelScanEnabled = e.parallelScanEnabled
-		bopts.parallelScanThreshold = e.parallelScanThreshold
-		bopts.parallelGov = e.parallelGov
-		// Thread the same result-memory budget the Result drain enforces so the
-		// morsel-parallel scan leaf bounds peak memory instead of materialising
-		// the whole result set (#1830).
-		bopts.maxResultRows = e.maxResultRows
-		bopts.maxResultBytes = e.maxResultBytes
-		op, cols, err := buildPlanEngine(plan, walker, labelSrc, queryReg, params, e.g.IndexManager(), e.procReg, bopts)
+		op, cols, err := e.buildReadPhysical(ctx, entry, plan, params, queryReg, nil)
 		if err != nil {
 			buildErr = err
 			return
@@ -2019,14 +1995,142 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	return r, nil
 }
 
-// Explain returns a textual representation of the physical plan that would be
-// chosen to execute query with the given params. The plan reflects current index
-// availability: a hash index on the relevant (label, property) pair causes the
-// relevant Selection+LabelScan subtree to appear as NodeByIndexSeek. No rows
-// are produced; the graph is not modified.
+// buildReadPhysical assembles the PHYSICAL operator tree for a read plan, with
+// every optimisation gate resolved exactly as the execution path resolves it:
+// hash-join substitution and its order-safety companion, range seeks, the
+// min-label scan, the disjoint-component reorder, the single-edge anchor swap,
+// the parallel tier, and the result-memory budget.
 //
-// The format mirrors [ir.Explain] but annotates Selection→LabelScan pairs that
-// would be rewritten to index seeks at execution time.
+// It is the SINGLE build path for reads. [Engine.Run] calls it to execute, and
+// the plan-rendering surfaces ([Engine.ExplainPhysical], [Engine.Profile]) call
+// it to render, so a rendered plan cannot diverge from the plan that runs. That
+// divergence was a real defect in both directions (rmp #2222): the old
+// IR-based rendering reported NodeByIndexSeek where a label scan ran, and
+// printed CartesianProduct for a query the runtime counter proves executes as a
+// HashJoin — O(n·m) shown where O(n+m) runs. Deriving both from one builder is
+// what makes that class of defect unrepresentable, so DO NOT reintroduce a
+// second gate-resolution site for rendering.
+//
+// The caller must already hold the graph's read barrier ([lpg.Graph.View]): the
+// cost gates read live label counts, the node total, and count-store cells, and
+// they must all come from one consistent snapshot.
+//
+// prof is nil for an ordinary execution and non-nil only for [Engine.Profile];
+// it is threaded onto the build options so the single wrapping point in
+// [buildOperator] instruments every node. Passing nil is what makes profiling
+// free when it is off.
+func (e *Engine) buildReadPhysical(
+	ctx context.Context,
+	entry *planCacheEntry,
+	plan ir.LogicalPlan,
+	params map[string]expr.Value,
+	queryReg expr.FunctionRegistry,
+	prof *exec.Profiler,
+) (exec.Operator, []string, error) {
+	walker := &lpgNodeWalker{g: e.g}
+	labelSrc := &lpgLabelResolver{g: e.g, eng: e}
+	// Allocate a per-run subquery evaluator so EXISTS { … } / COUNT { … }
+	// expressions encountered inside Filter/Project closures can drive their
+	// inner pipelines against the current outer row (task-396).
+	subEval := newSubqueryEvaluator(walker, labelSrc, queryReg, e.g)
+	// Allocate a per-run pattern evaluator so WHERE (a)-[:T]->(b) existential
+	// predicates can be evaluated against the live graph (task-961). It
+	// receives the Engine's per-query element budget so a pattern
+	// comprehension over a supernode anchor cannot build an unbounded
+	// result list — the same bound collect() enforces (#1294, #1298).
+	patEval := newPatternEvaluator(e.g, e.maxCollectItems)
+	bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx, maxCollectItems: e.maxCollectItems}
+	bopts.profiler = prof
+	// Edge-type-filter cache sharing (#1871): the SAME cache instance
+	// serves every concurrent Run call, so a relationship-type-filtered
+	// pattern amortises its O(V+E) build across the whole Engine's query
+	// stream, not just within one call.
+	bopts.edgeTypeFilterCache = e.edgeTypeFilterCache
+	// Hash-join optimisation gating (#1506): the Engine flag alone. There is no
+	// order-safety companion — the substitution emits the nested loop's row
+	// SEQUENCE, not merely its multiset, so no operator above the join can observe
+	// a difference. The whole-query IR scan that used to qualify this was retired
+	// in rmp #2234 once that was proved; see [hashJoinBuildOnLeft] for the argument
+	// and TestHashJoinOrder_SequenceMatchesNestedLoop for its empirical half.
+	bopts.hashJoinEnabled = e.hashJoinEnabled
+	// The index nested-loop join is the same optimisation under a different cost
+	// regime, so it rides the same Engine flag rather than adding a second knob a
+	// caller could set inconsistently. The test-only suppression exists so the
+	// differential suite can obtain the HASH-JOIN answer for a shape the cost gate
+	// awards to the seek — the two plans are exclusive, so there is no other way to
+	// see both for one query.
+	bopts.indexNestedLoopEnabled = e.hashJoinEnabled && !e.disableIndexNestedLoopForTest
+	bopts.rangeSeekEnabled = e.rangeSeekEnabled
+	// Min-label scan gating (#2077): enable the smallest-cardinality
+	// multi-label anchor substitution when the Engine permits it. The
+	// substitution is result-identical (a label conjunction is commutative)
+	// and never scans more rows than the Labels[0] plan, so it needs no
+	// order-safety companion.
+	bopts.minLabelScanEnabled = e.minLabelScanEnabled
+	// Disjoint-component reorder gating (#2091): when the Engine permits it and
+	// the plan has memoised order-safe candidates, apply the live cardinality
+	// gate against this query's snapshot. The live node total (for AllNodesScan
+	// components) and every label count are read under View's visibility
+	// barrier, so all cost inputs come from one consistent snapshot. The swap
+	// changes only emission order and internal column layout, never the
+	// multiset; SuppressReorder (baked into the candidate set) guarantees no
+	// downstream operator observes the change.
+	if e.joinReorderEnabled && len(entry.reorderCandidates) > 0 {
+		bopts.reorderSwap = computeReorderSwaps(entry.reorderCandidates, labelSrc, int64(e.g.LiveOrder()))
+	}
+	bopts.seekHint = entry.pushedSeekHints
+	// Single-edge anchor-swap gating (#2090): when the Engine permits it and
+	// the plan has memoised order-safe single-edge sites, apply the live
+	// count-store cost gate against this query's snapshot. N(label) and every
+	// D(label,relType,dir) cell (and its dirty flag) are read under View's
+	// visibility barrier — exclusive against a committing writer — so all cost
+	// inputs come from one consistent snapshot. The swap re-roots the pattern
+	// onto its other endpoint (OUT-ward only) with an identical multiset;
+	// SuppressReorder (baked into the candidate set) guarantees no downstream
+	// operator observes the emission-order change.
+	if e.anchorSwapEnabled && len(entry.anchorSwapCandidates) > 0 {
+		bopts.anchorSwap = computeAnchorSwaps(entry.anchorSwapCandidates, labelSrc)
+	}
+	// Parallel-count gating (#1672): the parallel count reduce replaces the
+	// serial EagerAggregation pipeline only when the Engine permits it AND the
+	// live node count exceeds the threshold (checked at the build site against
+	// the live graph). Both must hold; otherwise the planner builds the serial
+	// pipeline.
+	bopts.parallelScanEnabled = e.parallelScanEnabled
+	bopts.parallelScanThreshold = e.parallelScanThreshold
+	bopts.parallelGov = e.parallelGov
+	// Thread the same result-memory budget the Result drain enforces so the
+	// morsel-parallel scan leaf bounds peak memory instead of materialising
+	// the whole result set (#1830).
+	bopts.maxResultRows = e.maxResultRows
+	bopts.maxResultBytes = e.maxResultBytes
+	return buildPlanEngine(plan, walker, labelSrc, queryReg, params, e.g.IndexManager(), e.procReg, bopts)
+}
+
+// Explain returns a textual representation of the plan that executes query with
+// the given params. No rows are produced and the graph is not modified.
+//
+// For a READING statement the rendering is the PHYSICAL plan: the operator tree
+// the builder actually produced, walked node by node, with each node named after
+// its concrete operator type. Hash-join substitution, columnar and parallel tier
+// engagement and the chosen access path are therefore visible, and cannot
+// disagree with what runs — a HashJoin is named HashJoin because it IS one.
+//
+// Before rmp #2222 this rendered the logical IR instead, and was wrong in BOTH
+// directions: it reported NodeByIndexSeek where a label scan ran, and printed
+// CartesianProduct for
+//
+//	MATCH (a:P), (b:P) WHERE a.age = b.age RETURN count(*)
+//
+// which the runtime counter proves executes as a HashJoin — showing a reader
+// O(n·m) where O(n+m) runs.
+//
+// For a WRITING statement it renders the logical plan and says so on the first
+// line. A write's physical tree cannot be built without a live mutator (the
+// operators bind to an open transaction), so there is nothing faithful to walk
+// outside one; the honest label is preferable to silently returning a different
+// kind of plan. Use [Engine.Profile] on a read to inspect a physical tree with
+// measurements.
 func (e *Engine) Explain(query string, params map[string]expr.Value) (s string, err error) {
 	defer recoverQueryPanic(&err, "cypher.Explain", "cypher.Explain.panics")
 	if ir.IsDDL(query) {
@@ -2036,6 +2140,147 @@ func (e *Engine) Explain(query string, params map[string]expr.Value) (s string, 
 	if err != nil {
 		return "", err
 	}
+	if !queryHasWritingClause(query) {
+		return e.explainPhysical(entry, params)
+	}
+	return "(logical plan — a writing statement has no physical tree outside a transaction)\n" +
+		e.explainLogical(entry, params), nil
+}
+
+// explainPhysical builds the physical operator tree exactly as the read path
+// builds it ([Engine.buildReadPhysical]) and renders it.
+//
+// The tree is thrown away without Init or Close: no operator has acquired
+// anything at construction time, and Init — which is what starts goroutines and
+// allocates working buffers — is never called, so there is nothing to release.
+func (e *Engine) explainPhysical(entry *planCacheEntry, params map[string]expr.Value) (string, error) {
+	var (
+		out      string
+		buildErr error
+	)
+	queryReg := newNowAwareRegistry(e.reg, time.Now())
+	e.g.View(func() {
+		op, _, err := e.buildReadPhysical(context.Background(), entry, entry.plan, params, queryReg, nil)
+		if err != nil {
+			buildErr = err
+			return
+		}
+		out = exec.RenderPlan(op)
+	})
+	if buildErr != nil {
+		return "", fmt.Errorf("cypher: build plan: %w", buildErr)
+	}
+	return out, nil
+}
+
+// Profile executes query with the given params and returns the PHYSICAL plan
+// annotated with each operator's emitted row count and the wall-clock time
+// attributed to it — GoGraph's equivalent of the PROFILE both incumbents expose
+// (Neo4j adds db-hits, Memgraph relative time).
+//
+// The query really runs: rows are produced and discarded, so Profile is for a
+// reading statement only and returns an error for a writing one rather than
+// performing its writes as a side effect of a diagnostic.
+//
+// Times are INCLUSIVE of an operator's children, because a pipelined operator's
+// Next pulls from them. Subtract a node's children to obtain its exclusive cost —
+// the same arithmetic a reader of Neo4j's PROFILE performs.
+//
+// Profiling is off unless this method is called: the instrumentation is a wrapper
+// installed by the builder, so an ordinary [Engine.Run] executes code identical to
+// a build in which profiling does not exist (rmp #2222 AC 3).
+func (e *Engine) Profile(ctx context.Context, query string, params map[string]expr.Value) (s string, err error) {
+	defer recoverQueryPanic(&err, "cypher.Profile", "cypher.Profile.panics")
+	if ir.IsDDL(query) {
+		return "", fmt.Errorf("cypher: Profile: DDL has no query plan")
+	}
+	entry, err := e.parseAndAnalyse(query)
+	if err != nil {
+		return "", err
+	}
+	if entry.semaErr != nil {
+		return "", entry.semaErr
+	}
+	if queryHasWritingClause(query) {
+		return "", fmt.Errorf("cypher: Profile: refusing to execute a writing statement; " +
+			"use Explain for its plan, or RunInTx to execute it")
+	}
+	if err := checkParamPresence(entry.paramRefs, params); err != nil {
+		return "", err
+	}
+
+	var (
+		tree     exec.PlanNode
+		buildErr error
+		drainErr error
+	)
+	queryReg := newNowAwareRegistry(e.reg, time.Now())
+	e.g.View(func() {
+		prof := exec.NewProfiler()
+		op, cols, berr := e.buildReadPhysical(ctx, entry, entry.plan, params, queryReg, prof)
+		if berr != nil {
+			buildErr = berr
+			return
+		}
+		rs := exec.Run(ctx, op, cols)
+		r := newResultWithLimit(rs, cols, nil, nil, nil, e.maxResultRows, e.maxResultBytes)
+		r.globalMem = e.globalMem
+		r.materialize()
+		for r.Next() {
+			// Drain: the measurements are the product, the rows are not.
+		}
+		drainErr = r.Err()
+		// Capture the tree BEFORE Close, while the wrappers still hold their
+		// counters, so the rendering survives teardown.
+		tree = exec.PlanTree(op)
+		if cerr := r.Close(); cerr != nil && drainErr == nil {
+			drainErr = cerr
+		}
+	})
+	if buildErr != nil {
+		return "", fmt.Errorf("cypher: build plan: %w", buildErr)
+	}
+	if drainErr != nil {
+		return "", drainErr
+	}
+	return exec.RenderPlanNode(&tree), nil
+}
+
+// ExplainLogical returns the LOGICAL plan for query, annotated with the index
+// seeks and the count-store-gated reorderings the read path would apply, and with
+// each operator's estimated row count.
+//
+// It is the companion to [Engine.Explain], not a lesser version of it, and the two
+// answer different questions:
+//
+//   - Explain answers "what runs?" — the physical operator tree, named after the
+//     operators themselves, so it cannot misreport the access path, the join, or
+//     the tier.
+//   - ExplainLogical answers "what did the planner think?" — the logical shape
+//     plus the CARDINALITY ESTIMATES that drove the physical choices. Those
+//     estimates belong to the logical nodes and have no counterpart on a built
+//     operator, so they are only visible here.
+//
+// Reach for this one when an estimate looks wrong (a plan chosen on a bad guess);
+// reach for Explain when you need to know what actually executes.
+func (e *Engine) ExplainLogical(query string, params map[string]expr.Value) (s string, err error) {
+	defer recoverQueryPanic(&err, "cypher.ExplainLogical", "cypher.ExplainLogical.panics")
+	if ir.IsDDL(query) {
+		return "(DDL — no query plan)", nil
+	}
+	entry, perr := e.parseAndAnalyse(query)
+	if perr != nil {
+		return "", perr
+	}
+	return e.explainLogical(entry, params), nil
+}
+
+// explainLogical renders the logical IR, annotated with the index seeks, the
+// count-store-gated reorderings the read path would apply, and the cardinality
+// estimates. It backs [Engine.ExplainLogical] and is what [Engine.Explain] falls
+// back to for a writing statement, whose physical tree is unreachable outside a
+// transaction.
+func (e *Engine) explainLogical(entry *planCacheEntry, params map[string]expr.Value) string {
 	plan := entry.plan
 	// Reflect the count-store-gated reordering peepholes in the rendered plan so
 	// EXPLAIN shows the physically-built shape, not just the written logical order:
@@ -2062,7 +2307,7 @@ func (e *Engine) Explain(query string, params map[string]expr.Value) (s string, 
 			anchorSwaps = computeAnchorSwaps(sites, labelSrc)
 		}
 	}
-	return explainWithIndexes(plan, e.g.IndexManager(), params, e.g, labelSrc, reorderSwaps, anchorSwaps, entry.pushedSeekHints), nil
+	return explainWithIndexes(plan, e.g.IndexManager(), params, e.g, labelSrc, reorderSwaps, anchorSwaps, entry.pushedSeekHints)
 }
 
 // explainWithIndexes walks plan and renders operator names, substituting
@@ -2362,15 +2607,6 @@ func (e *Engine) runDDL(ctx context.Context, query string, params map[string]exp
 	}
 }
 
-// runDDLOp executes a single eager DDL operator (emitting zero rows) and
-// returns an empty Result. Errors surface at Run time rather than lazily
-// during Result.Next. ctx governs op's own Init/Next only — the DDL's real,
-// interruptible work; see [emptyDDLResult] for why the returned confirmation
-// Result deliberately does not inherit it.
-func (e *Engine) runDDLOp(ctx context.Context, op exec.Operator) (*Result, error) {
-	return e.runDDLOpCounted(ctx, op, nil)
-}
-
 // runDDLOpCounted is [Engine.runDDLOp] with the schema effect this statement applied
 // (#2212). record, when non-nil, is invoked on the returned Result's counters after the
 // DDL has succeeded, so Bolt can report indexes-added / constraints-added and the
@@ -2382,16 +2618,8 @@ func (e *Engine) runDDLOp(ctx context.Context, op exec.Operator) (*Result, error
 // schema effects at all, so unlike the data counters these have no TCK table to match —
 // they exist because Bolt reports them.
 func (e *Engine) runDDLOpCounted(ctx context.Context, op exec.Operator, record func(*exec.QueryCounters)) (*Result, error) {
-	if err := op.Init(ctx); err != nil {
-		return nil, fmt.Errorf("cypher: DDL init: %w", err)
-	}
-	var dummy exec.Row
-	if _, err := op.Next(&dummy); err != nil {
-		_ = op.Close()
+	if err := applyDDLOp(ctx, op); err != nil {
 		return nil, err
-	}
-	if err := op.Close(); err != nil {
-		return nil, fmt.Errorf("cypher: DDL close: %w", err)
 	}
 	r := emptyDDLResult()
 	if record != nil {
@@ -2399,6 +2627,34 @@ func (e *Engine) runDDLOpCounted(ctx context.Context, op exec.Operator, record f
 		record(r.counters)
 	}
 	return r, nil
+}
+
+// applyDDLOp drives a DDL operator for its side effect alone and returns only
+// the error. It is what a caller that is INSIDE a larger DDL sequence wants:
+// the sequence builds the statement's single [Result] itself, at the end.
+//
+// It exists because [Engine.runDDLOpCounted] returns a fresh [Result], and four
+// intra-sequence callers used to discard it with `_`. A Result arms a
+// runtime.SetFinalizer that increments the `cypher.result.leaked` counter when
+// it is collected unclosed, so every CREATE CONSTRAINT, DROP CONSTRAINT and
+// constraint unwind reported a leak against the library's own metric — and, in
+// the test binary, tripped TestResult_Close_DisarmsFinalizer from whichever
+// test happened to force the next GC. Closing the unwanted Result would also
+// have worked; not building it is better, since none of these callers ever
+// wanted one. Found while fixing rmp #2229.
+func applyDDLOp(ctx context.Context, op exec.Operator) error {
+	if err := op.Init(ctx); err != nil {
+		return fmt.Errorf("cypher: DDL init: %w", err)
+	}
+	var dummy exec.Row
+	if _, err := op.Next(&dummy); err != nil {
+		_ = op.Close()
+		return err
+	}
+	if err := op.Close(); err != nil {
+		return fmt.Errorf("cypher: DDL close: %w", err)
+	}
+	return nil
 }
 
 // countedDDLResult is [emptyDDLResult] carrying the schema effect the statement applied
@@ -2876,7 +3132,7 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 			// index as a safe fallback. The value-set (seeded below) remains
 			// the primary enforcement source; the secondary check is cosmetic.
 		}
-		if _, err := e.runDDLOp(ctx, op); err != nil {
+		if err := applyDDLOp(ctx, op); err != nil {
 			return err
 		}
 		if kind == exec.ConstraintUnique {
@@ -2928,7 +3184,7 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 // leave a phantom constraint enforced in memory with no durable record.
 func (e *Engine) unwindConstraintRegistration(cause error, name, label, prop string, kind exec.ConstraintKind, idxMgr *index.Manager) error {
 	op := exec.NewDropConstraintOp(name, label, prop, kind, false, idxMgr, e.constraintReg, e.ClearPlanCache)
-	if _, uerr := e.runDDLOp(context.Background(), op); uerr != nil {
+	if uerr := applyDDLOp(context.Background(), op); uerr != nil {
 		return errors.Join(cause, fmt.Errorf("cypher: unwind constraint registration: %w", uerr))
 	}
 	return cause
@@ -3001,7 +3257,7 @@ func (e *Engine) dropConstraintLocked(ctx context.Context, p *ir.DropConstraint,
 	// unconditionally; pass ifExists=false so any unexpected internal mismatch
 	// surfaces rather than being absorbed.
 	op := exec.NewDropConstraintOp(p.Name, label, prop, kind, false, idxMgr, e.constraintReg, e.ClearPlanCache)
-	if _, err := e.runDDLOp(ctx, op); err != nil {
+	if err := applyDDLOp(ctx, op); err != nil {
 		return nil, err
 	}
 	if tx != nil {
@@ -3032,7 +3288,7 @@ func (e *Engine) rewindConstraintDrop(cause error, name, label, prop string, kin
 			op.WithBackingIndex(boundIdx)
 		}
 	}
-	if _, rerr := e.runDDLOp(context.Background(), op); rerr != nil {
+	if rerr := applyDDLOp(context.Background(), op); rerr != nil {
 		return errors.Join(cause, fmt.Errorf("cypher: rewind constraint drop: %w", rerr))
 	}
 	if kind == exec.ConstraintUnique {
@@ -3273,7 +3529,20 @@ func QueryHasWritingClause(query string) bool {
 	if ir.IsDDL(query) {
 		return false
 	}
-	return writingKeywordRE.MatchString(query)
+	// Mask the regions that cannot hold a clause before matching, so a keyword
+	// inside a comment or a quoted string does not route a READ onto the write
+	// path — where it would serialise on the store's single writer (rmp #2230).
+	// The mask is allocation-free for a query containing no comment or quote.
+	//
+	// The keyword test is a plain word scan rather than a regexp (rmp #2240): the
+	// regexp cost 2.69-2.73 us and one allocation per dispatch, against roughly
+	// 5 us for the indexed point lookup it was gating. Composing the scan over
+	// the mask — rather than fusing them into one walk — keeps a SINGLE
+	// definition of where the unmaskable regions are, so the classifier and the
+	// mask cannot drift apart; on the common path the mask returns query
+	// unchanged, so both walks are over the original string and neither
+	// allocates.
+	return containsWritingKeyword(maskNonClauseRegions(query))
 }
 
 // queryHasWritingClause is the internal alias for [QueryHasWritingClause],
@@ -3424,13 +3693,6 @@ func resolveGlobalMaxResultBytes(opt int64) int64 {
 // means, because an unbounded `collect(n)` over a whole-graph scan then
 // materialises every value into one list under the graph's visibility barrier.
 const MaxCollectItemsUnlimited = -1
-
-// writingKeywordRE matches any writing-clause keyword as a standalone word.
-// The pattern uses a case-insensitive flag and a word boundary anchor so
-// fragments like "PRESET" or "NOMERGE" are not falsely classified.
-//
-//nolint:gochecknoglobals // singleton regex compiled once at init
-var writingKeywordRE = regexp.MustCompile(`(?i)\b(CREATE|MERGE|SET|REMOVE|DELETE|DETACH)\b`)
 
 // RunInTxAny executes a write query with params expressed as map[string]any,
 // automatically converting Go native types to [expr.Value]. See [BindParams].
@@ -3700,10 +3962,6 @@ type planCacheEntry struct {
 	// attached to every Result for this query (e.g. a Cartesian-product warning,
 	// #1483). nil when the query produces none.
 	notifications []Notification
-	// hashJoinSafe memoises hashJoinOrderSafe(plan) — a full whole-query IR walk
-	// that is a pure function of the (cached, immutable) plan, so it is computed
-	// once at entry creation rather than on every Run (#1719).
-	hashJoinSafe bool
 	// reorderCandidates memoises the structurally-qualifying, ORDER-SAFE
 	// disjoint-component reorder points (#2091) — a pure function of the immutable
 	// plan, computed once at entry creation. The per-query read-path build applies
@@ -3765,19 +4023,22 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
 	if note := analyseCartesianProductQuery(astNode); note != nil {
 		notifications = []Notification{*note}
 	}
-	// Memoise the two computations the execution path otherwise repeats on every
-	// Run: hashJoinOrderSafe (a whole-query IR walk run on every Run) and, for
-	// parameterised queries, InferParamTypes. Both are pure functions of the plan
-	// (paramTypes additionally of the index schema). The entry is immutable after
-	// loadOrStore, so this is safe for concurrent cache readers; paramTypes is
-	// invalidated with the entry by ClearPlanCache on any schema-changing DDL.
-	// Skipped for semantically-invalid entries, which never reach execution.
-	hashJoinSafe := false
+	// Memoise the computations the execution path otherwise repeats on every Run:
+	// the reorder/anchor-swap candidate sets and, for parameterised queries,
+	// InferParamTypes. All are pure functions of the plan (paramTypes additionally
+	// of the index schema). The entry is immutable after loadOrStore, so this is
+	// safe for concurrent cache readers; paramTypes is invalidated with the entry
+	// by ClearPlanCache on any schema-changing DDL. Skipped for
+	// semantically-invalid entries, which never reach execution.
+	//
+	// The hash join's order-safety walk used to be memoised here too. It is gone
+	// rather than cached: rmp #2234 proved the substitution order-preserving, so
+	// there was nothing left for the walk to decide (#1719 had made it cheap; #2234
+	// made it unnecessary).
 	var reorderCandidates []*ir.Apply
 	var anchorSwapCandidates []anchorSite
 	var paramTypes map[string]expr.Kind
 	if semaErr == nil {
-		hashJoinSafe = hashJoinOrderSafe(plan)
 		// Disjoint-component reorder candidates (#2091): the structurally-
 		// qualifying, order-safe reorder points. Pure function of the plan, so
 		// memoised here; the live cardinality gate runs per query at build time.
@@ -3796,7 +4057,7 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
 	}
 	entry := &planCacheEntry{
 		plan: plan, semaErr: semaErr, paramRefs: paramRefs, notifications: notifications,
-		hashJoinSafe: hashJoinSafe, reorderCandidates: reorderCandidates,
+		reorderCandidates:    reorderCandidates,
 		anchorSwapCandidates: anchorSwapCandidates, paramTypes: paramTypes,
 		pushedSeekHints: pushedSeekHints,
 	}
@@ -5286,7 +5547,7 @@ func BuildPlanWithMutator(
 	// It also passes the zero [planGates], so the public entry point keeps the
 	// unoptimised access paths it has always had. Only the Engine, which owns
 	// the EngineOptions that gate each substitution, enables them.
-	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0, nil, planGates{})
+	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0, nil, nil, planGates{})
 }
 
 // planGates carries the ORDER-NEUTRAL planner substitutions the write-path build
@@ -5294,12 +5555,12 @@ func BuildPlanWithMutator(
 // previously constructed its [buildOpts] with none of the Engine's optimisation
 // gates set, so every statement containing a write clause was planned by the
 // unoptimised planner — measured at 178× the cost of the identical MATCH with a
-// scalar RETURN, and the reason a 20 000-node bulk load takes 35 minutes.
+// scalar RETURN, and the reason a 20 000-node bulk load took 35 minutes.
 //
-// # Why only these two
+// # Why each gate is admissible here
 //
-// Both substitutions are result-identical AND leave the emitted row order alone,
-// so no consumer — read or write — can observe that they happened:
+// Every substitution below is result-identical AND leaves the emitted row order
+// alone, so no consumer — read or write — can observe that it happened:
 //
 //   - rangeSeek replaces a label scan plus residual filter with an index seek
 //     over the same rows; the residual predicate is re-applied above it, so the
@@ -5308,15 +5569,23 @@ func BuildPlanWithMutator(
 //     label conjunction is commutative and the substitution never scans more
 //     rows than the Labels[0] plan, so it needs no order-safety companion — the
 //     same reasoning the read path records at its own gate.
-//
-// The hash join is deliberately NOT here. It may build on either arm, so it can
-// reorder rows, and a write is not always order-insensitive: `SET` is
-// last-write-wins, so two rows targeting the same node with different values
-// depend on arrival order. Admitting it needs the probe side pinned to the
-// order-defining arm first; that is part B of #2225 and must not be done blind.
+//   - hashJoin replaces the nested-loop Cartesian product under an equi-join
+//     Selection with a hash join (#2225 part B). This one needed a proof, because
+//     a hash join that self-selected its build side at runtime WOULD reorder rows,
+//     and a write is not always order-insensitive: `SET` is last-write-wins, so
+//     two rows targeting the same node with different values depend on arrival
+//     order. The proof is that GoGraph's hash join never self-selects — the
+//     PLANNER pins build=inner, probe=outer at the single construction site
+//     (hash_join_plan.go), the probe streams the outer arm in its own order, and
+//     within a bucket the build rows stay in build-insertion (inner-scan) order.
+//     The emitted sequence is therefore row-for-row identical to the nested loop,
+//     not merely multiset-identical — pinned by [TestHashJoinOrder_SequenceMatchesNestedLoop]
+//     and, for the write case specifically, by [TestWritePathGates_HashJoinPreservesOrder].
+//     See also [hashJoinBuildOnLeft] for why no order guard accompanies it.
 type planGates struct {
 	rangeSeek    bool
 	minLabelScan bool
+	hashJoin     bool
 }
 
 // buildPlanWithMutatorFull is the engine-internal variant of
@@ -5343,6 +5612,7 @@ func buildPlanWithMutatorFull(
 	idxMgr *index.Manager,
 	maxCollectItems int,
 	edgeTypeFilterCache *edgeTypeFilterCache,
+	procReg *procs.Registry,
 	gates planGates,
 ) (op exec.Operator, cols []string, err error) {
 	schema := make(map[string]int)
@@ -5355,14 +5625,22 @@ func buildPlanWithMutatorFull(
 	// of `CREATE (n) RETURN n.x` — ProduceResults → Projection → CreateNode
 	// — falls through to [buildOperator]'s default branch and errors with
 	// "unsupported IR node *ir.CreateNode".
-	bopts := &buildOpts{maxCollectItems: maxCollectItems, edgeTypeFilterCache: edgeTypeFilterCache}
+	bopts := &buildOpts{maxCollectItems: maxCollectItems, edgeTypeFilterCache: edgeTypeFilterCache, procReg: procReg}
 	// Order-neutral planner substitutions (#2225). Before this, the write path
 	// left every gate at its zero value, so a statement carrying any write clause
-	// was planned without the seek and without the min-label re-anchor that the
-	// identical read statement gets. See [planGates] for why exactly these two
-	// are safe here and why the hash join is not.
+	// was planned without the seek, without the min-label re-anchor and without
+	// the hash join that the identical read statement gets. See [planGates] for
+	// why each one is admissible on a path that writes.
 	bopts.rangeSeekEnabled = gates.rangeSeek
 	bopts.minLabelScanEnabled = gates.minLabelScan
+	// #2225 part B admitted the hash join here with no order-safety companion,
+	// because the substitution is order-PRESERVING, not merely order-insensitive:
+	// the build side is pinned by the planner, so nothing above the join can
+	// observe it — which a writing statement needs, `SET` being last-write-wins.
+	// The read path has since been brought to the same footing (rmp #2234), so both
+	// paths now gate on this one flag and neither runs a per-query order scan.
+	bopts.hashJoinEnabled = gates.hashJoin
+	bopts.indexNestedLoopEnabled = gates.hashJoin
 	bopts.writeFallback = func(child ir.LogicalPlan) (exec.Operator, error) {
 		return buildOperatorWrite(child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 	}
@@ -6153,10 +6431,11 @@ func buildOperatorWrite(
 		return exec.NewForeach(outer, inner, arg), nil
 
 	default:
-		// Fall through to the read-operator builder.
-		// procReg is nil here because buildOperatorWrite is only called from the
-		// write path (buildPlanWithMutatorFull) which does not thread procReg.
-		return buildOperator(plan, walker, labelSrc, reg, params, schema, idxMgr, nil, argByTag, bopts)
+		// Fall through to the read-operator builder, handing it the procedure
+		// registry the write path now carries on bopts (rmp #2229). Passing nil
+		// here made a `CALL db.*` unresolvable in any statement the classifier
+		// deemed a write, including a read-only one misclassified by a comment.
+		return buildOperator(plan, walker, labelSrc, reg, params, schema, idxMgr, bopts.procReg, argByTag, bopts)
 	}
 }
 
@@ -6982,6 +7261,8 @@ func BuildPlan(
 	if err != nil {
 		return nil, nil, fmt.Errorf("cypher: build final projection: %w", err)
 	}
+	// Not instrumented: BuildPlan is the public plan-building entry point and never
+	// carries a profiler (PROFILE goes through buildPlanEngine).
 	return proj, cols, nil
 }
 
@@ -7077,7 +7358,7 @@ func buildPlanEngine(
 	if err != nil {
 		return nil, nil, err
 	}
-	return wrapWithColumnPassthrough(child, cols, schema)
+	return wrapWithColumnPassthrough(child, cols, schema, bopts)
 }
 
 // wrapWithColumnPassthrough builds the final result projection that selects the
@@ -7085,7 +7366,36 @@ func buildPlanEngine(
 // absent from schema projects Null. It is the shared tail of [buildPlanEngine]'s
 // ProduceResults handling for both the serial and the morsel-parallel (#1682)
 // build paths.
-func wrapWithColumnPassthrough(child exec.Operator, cols []string, schema map[string]int) (exec.Operator, []string, error) {
+// bopts carries the PROFILE profiler: the projection this function builds sits
+// ABOVE buildOperator's recursion, so it is the one operator the single wrap point
+// structurally cannot reach, and it rendered "(not measured)" as the plan ROOT
+// until rmp #2237 threaded bopts here.
+func wrapWithColumnPassthrough(child exec.Operator, cols []string, schema map[string]int, bopts *buildOpts) (exec.Operator, []string, error) {
+	// Elide the final passthrough when the child's own projection already emits
+	// exactly cols, in order (rmp #2239). The physical build used to layer this
+	// projection on top of the one it had just built for the ir.Project node, so
+	// a plain `MATCH (n:P) RETURN n` rendered — and ran — two stacked Project
+	// operators for one RETURN.
+	//
+	// The win is in plan CONSTRUCTION, not per row: the elided operator was an
+	// identity projection reusing its outBuf, so a second pass over an
+	// already-materialised row is lost in the noise of value boxing. Measured at
+	// -12.9% allocs on a single-row query and indistinguishable from zero on
+	// large result sets — docs/benchmarks/project-elision-2026-07-28.md records
+	// the numbers and corrects the finding's stronger claim. What the fix buys
+	// unconditionally is a truthful plan surface: EXPLAIN and PROFILE no longer
+	// report an operator that does no work.
+	//
+	// Asking the child what it emits — rather than inferring it from schema — is
+	// what makes the elision safe, and [exec.EmitsExactly] documents why: schema
+	// records where a column SITS, not how WIDE the row is.
+	//
+	// The outer projection carries no per-row byte budget — applyProjectionRowBudget
+	// is threaded only into the expression-evaluating sites (#1852) — so dropping
+	// it removes no guard.
+	if exec.EmitsExactly(child, cols) {
+		return child, cols, nil
+	}
 	// Elide the final passthrough when it would be a strict identity over a
 	// columnar producer (#1704 P2): the child (a terminal [exec.ColumnarProject])
 	// already emits exactly cols in order, so wrapping it in another Project would
@@ -7123,7 +7433,7 @@ func wrapWithColumnPassthrough(child exec.Operator, cols []string, schema map[st
 	if err != nil {
 		return nil, nil, fmt.Errorf("cypher: build final projection: %w", err)
 	}
-	return proj, cols, nil
+	return profileIntermediate(bopts, proj), cols, nil
 }
 
 // buildOperator recursively converts an IR plan node to a physical operator.
@@ -7135,8 +7445,76 @@ func wrapWithColumnPassthrough(child exec.Operator, cols []string, schema map[st
 // OptionalApply). It may be nil when no Apply is in scope; missing tags fall
 // back to a fresh exec.Argument so isolated Argument nodes still work.
 //
-//nolint:gocyclo // large switch — one case per read IR node type; no hidden branches
+// buildOperator builds the physical operator for plan and, when a PROFILE run
+// installed a profiler on bopts, instruments it.
+//
+// It is the ONE place instrumentation is applied. Every node of the physical tree
+// is produced by this function — buildOperatorRec recurses through it, not around
+// it — so wrapping the single return value here covers the whole tree exactly
+// once, with no per-operator edits and no cost at all when bopts.profiler is nil.
+//
+// The wrapper is applied on the way OUT of the recursion, so a parent is
+// constructed with its child already wrapped and runs its capability
+// type-assertions against the wrapper. [exec.Profiler.Wrap] therefore preserves
+// whatever the child exposes; see its documentation for why that is load-bearing.
 func buildOperator(
+	plan ir.LogicalPlan,
+	walker nodeWalkerIface,
+	labelSrc labelResolverIface,
+	reg expr.FunctionRegistry,
+	params map[string]expr.Value,
+	schema map[string]int,
+	idxMgr *index.Manager,
+	procReg *procs.Registry,
+	argByTag map[uint32]*exec.Argument,
+	bopts *buildOpts,
+) (exec.Operator, error) {
+	op, err := buildOperatorRec(plan, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
+	if err != nil || bopts == nil || bopts.profiler == nil {
+		return op, err
+	}
+	return bopts.profiler.Wrap(op), nil
+}
+
+// profileIntermediate instruments an operator that [buildOperator]'s single wrap
+// point cannot reach: an INTERMEDIATE built inside a composite lowering, where one
+// logical node becomes several physical operators and only the outermost is
+// returned (rmp #2237).
+//
+// Five such operators rendered "(not measured)" before this existed — the
+// EagerAggregation beneath a GlobalAggregateAdapter, the columnar and row-mode
+// aggregation pre-projections, a ColumnarFilter beneath a ColumnarProject, and the
+// final result projection, which is built outside buildOperator entirely. A
+// profile that silently omits operators is worse than no profile: it invites the
+// reader to attribute their cost to whichever ancestor did get measured.
+//
+// Three properties make this safe to sprinkle at composite sites:
+//
+//   - COST WHEN OFF IS ZERO. With no profiler installed it returns op untouched,
+//     so no wrapper is allocated and no operator executes instrumentation.
+//   - DOUBLE-WRAPPING IS SAFE. [exec.Profiler.Wrap] is idempotent, so a site that
+//     both wraps an intermediate and later returns it through buildOperator cannot
+//     double-count.
+//   - CAPABILITIES SURVIVE. Wrap re-implements ChunkProducer and
+//     NodeIDColumnProducer, so a parent constructed over the wrapper still sees
+//     what it needs. That is load-bearing HERE in a way it is not at the single
+//     wrap point: an intermediate is wrapped BEFORE its parent is constructed, so
+//     the parent's capability type-assertions run against the wrapper. Wrapping the
+//     columnar aggregation pre-projection is exactly that case —
+//     EagerAggregation.WithChunkInput must still recognise it.
+func profileIntermediate(bopts *buildOpts, op exec.Operator) exec.Operator {
+	if bopts == nil || bopts.profiler == nil || op == nil {
+		return op
+	}
+	return bopts.profiler.Wrap(op)
+}
+
+// buildOperatorRec is the recursive read-plan lowering: one case per read IR node
+// type. Instrumentation is applied by [buildOperator], which every node passes
+// through on its way out, so this function is unaware of profiling.
+//
+//nolint:gocyclo // large switch — one case per read IR node type; no hidden branches
+func buildOperatorRec(
 	plan ir.LogicalPlan,
 	walker nodeWalkerIface,
 	labelSrc labelResolverIface,
@@ -7204,12 +7582,23 @@ func buildOperator(
 		} else if ok {
 			return op, nil
 		}
+		// Index nested-loop join (#2233): the SAME structural shape as the hash join
+		// below, at Θ(B·log N) instead of Θ(N+B). Tried first because it is admitted
+		// only in the regime where it is the cheaper of the two (see
+		// indexNestedLoopWins), so the hash join is the right fallback for everything
+		// it declines — including every shape with no covering numeric index, which is
+		// the majority.
+		if op, ok, err := tryBuildIndexNestedLoopJoin(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts); err != nil {
+			return nil, err
+		} else if ok {
+			return op, nil
+		}
 		// Disconnected-equi-join hash join (#1506): when this Selection sits
 		// directly above a plain Apply and carries an equi-join predicate
 		// straddling the two arms, replace the nested-loop Cartesian product with
-		// an order-insensitive hash join under the structural + order-safety +
-		// size-floor guards (see hash_join_plan.go). Falls through to the normal
-		// Selection build when the pattern is not eligible.
+		// an order-insensitive hash join under the structural + size-floor guards
+		// (see hash_join_plan.go). Falls through to the normal Selection build when
+		// the pattern is not eligible.
 		if op, ok, err := tryBuildHashJoin(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts); err != nil {
 			return nil, err
 		} else if ok {
@@ -9051,6 +9440,11 @@ func buildEagerAggregation(
 		}
 		preProj = applyProjectionRowBudget(rowPre, bopts)
 	}
+	// The pre-projection is an intermediate: EagerAggregation consumes it, so it
+	// never reaches buildOperator's wrap point. Wrapped BEFORE the aggregation is
+	// constructed, so WithChunkInput below asserts against the wrapper — which
+	// preserves ChunkProducer, keeping the columnar path columnar.
+	preProj = profileIntermediate(bopts, preProj)
 
 	op, err := exec.NewEagerAggregation(preProj, keyCols, aggFactories, 0)
 	if err != nil {
@@ -9075,7 +9469,10 @@ func buildEagerAggregation(
 	// neutral results" row.
 	var topOp exec.Operator = op
 	if len(p.GroupBy) == 0 {
-		topOp = exec.NewGlobalAggregateAdapter(op, aggFactories)
+		// The adapter becomes the outermost operator, so the aggregation underneath
+		// it is an intermediate and needs its own measurement — without this the
+		// whole grouping cost was attributed to the adapter.
+		topOp = exec.NewGlobalAggregateAdapter(profileIntermediate(bopts, op), aggFactories)
 	}
 
 	// Install the post-aggregation output schema and the downstream column tags,
@@ -13321,7 +13718,7 @@ func tryBuildColumnarFilterChain(
 	predFn := newRowPredicate(sel.PredicateExpr, schema, g, params, reg, bopts)
 	cpred, _ := buildColumnarPredicate(sel.PredicateExpr, schema, g, params, reg, bopts)
 	filter := exec.NewColumnarFilter(scanCP, predFn, cpred)
-	projOp, err := buildIRProjection(proj.Items, filter, schema, g, params, reg, bopts)
+	projOp, err := buildIRProjection(proj.Items, profileIntermediate(bopts, filter), schema, g, params, reg, bopts)
 	if err != nil {
 		return nil, false, err
 	}
@@ -13469,7 +13866,7 @@ func tryBuildColumnarExpandFilterChain(
 		cpreds[i], _ = buildColumnarExpandPredicate(pe, schema, g, params, reg, bopts)
 	}
 	filter := exec.NewColumnarFilter(colExp, chainRowPredicates(rowPreds), makeColumnarConjunctionPredicate(cpreds))
-	projOp, err := buildIRProjection(proj.Items, filter, schema, g, params, reg, bopts)
+	projOp, err := buildIRProjection(proj.Items, profileIntermediate(bopts, filter), schema, g, params, reg, bopts)
 	if err != nil {
 		return nil, false, err
 	}
@@ -14863,10 +15260,15 @@ func (e *Engine) execUnderBarrier(
 		// reads it, so cs is left nil here to keep the write path's resolver lean.
 		labelSrc := &lpgLabelResolver{g: e.g}
 		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager(), e.maxCollectItems, e.edgeTypeFilterCache,
+			// #2229: the write path resolves `CALL db.*` from the same registry the
+			// read path uses. Shared, not snapshotted — procs.Registry is
+			// RWMutex-guarded internally.
+			e.procReg,
 			// #2225: give the write path the Engine's ORDER-NEUTRAL substitutions.
 			// Without these it planned every writing statement — including the
-			// `UNWIND … MATCH … CREATE` bulk-load idiom — with a bare label scan.
-			planGates{rangeSeek: e.rangeSeekEnabled, minLabelScan: e.minLabelScanEnabled})
+			// `UNWIND … MATCH … CREATE` bulk-load idiom — with a bare label scan
+			// (part A) driving a nested-loop Cartesian product (part B).
+			planGates{rangeSeek: e.rangeSeekEnabled, minLabelScan: e.minLabelScanEnabled, hashJoin: e.hashJoinEnabled})
 		if berr != nil {
 			buildErr = berr
 			return nil
