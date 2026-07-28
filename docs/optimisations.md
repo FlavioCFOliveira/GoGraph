@@ -227,6 +227,62 @@ at conc 1/8/64: LEDGER row 0025. A pre-existing `ParallelGovernor` transition-zo
 over-subscription residual is tracked (#2125); per-operator engagement counters
 are tracked (#2123). TCK 3897/3897 throughout.
 
+## Sprint 311 — index-backed string prefix predicate (R2-P1, 2026-07-28)
+
+`n.p STARTS WITH 'x'` now reaches the sorted string B-tree instead of
+scanning the label and refiltering every row. A prefix **is** a range:
+the matching keys are exactly the half-open interval `[x, succ(x))` of the
+byte-lexicographic order the B-tree is laid out in, so the predicate is
+served by the shipped range-seek peephole with its **exact-count gate
+reused verbatim** — no new statistic, no new gate, no relaxation of the
+no-regression mandate. The original predicate is always retained as the
+residual `Filter`, so the seek can only narrow what the filter examines.
+
+`succ(x)` is the **byte** successor (the last byte below `0xFF`,
+incremented), not a code-point increment: the index orders keys by
+`cmp.Compare` and `STARTS WITH` is `strings.HasPrefix`, so both sides
+already share one byte basis. It also always exists for a non-empty
+prefix that is not all-`0xFF` — a code-point increment has none at
+U+10FFFF — and is tighter. Where no finite successor exists (the empty
+prefix, an all-`0xFF` prefix) the upper bound is left unbounded and the
+scan runs open-ended. Gated by `EngineOptions.DisablePrefixIndexSeek`
+(feature enabled by default), a **separate** knob from
+`DisableRangeIndexSeek` so the differential can vary one thing.
+
+| Change | Task | Fixture | Result |
+|--------|------|---------|--------|
+| `STARTS WITH` → prefix range seek | #2127 | `BenchmarkPrefixSeek` (50 000 nodes, btree on `name`, 100-row result, `-count=10`) | **385.2× faster** (11812.61 µs → 30.67 µs), **90.7× less memory** (1977.16 KiB → 21.79 KiB), **407.1× fewer allocs** (149 829 → 368) |
+
+Scope is prefix-only, and the boundary is a correctness boundary rather
+than a performance one: `NOT … STARTS WITH …` selects the *complement* of
+the interval, so rewriting it would be a non-superset. `ENDS WITH` and
+`CONTAINS` are excluded by proof — their match set is not an interval of
+the byte order (`"ax" < "b" < "bx"`), so the narrowest sound interval is
+the whole index: not unsound, but useless. Negation, disjunction, the
+mirrored `'lit' STARTS WITH n.p`, a parameterised prefix, an unindexed
+property, and every gate veto (empty prefix, broad prefix, zero-match
+prefix) all keep the label scan, each pinned by a regression test.
+
+Inert where the shape is absent: allocations and bytes are
+**byte-identical on all 23 curated benchmarks** across the A/B commit
+boundary — the column that moved in the row-0023 malloc-size-class
+regression this change could have repeated by adding a field to
+`Engine`. Correctness is gated by a differential (rewrite ON vs OFF)
+**plus an absolute Go oracle** computed from the fixture with
+`strings.HasPrefix`, **plus** plan-difference assertions, **plus** a
+`rapid` property that fails if the seek never fires; the harness itself
+was validated by injecting three mutations and confirming each fails.
+Design and proofs:
+[design-prefix-range-seek.md](design-prefix-range-seek.md). Full record:
+[benchmarks/prefix-range-seek-2026-07-28.md](benchmarks/prefix-range-seek-2026-07-28.md)
+and [benchmarks/history/LEDGER.md](benchmarks/history/LEDGER.md) rows
+0026–0027. TCK held at 3897/3897, -race clean.
+
+Two follow-ups were measured and **filed rather than fixed**: a range
+predicate with a third conjunct gives up the seek entirely (92×, #2245),
+and `STARTS WITH` is not `ColumnarFilter`-eligible, so a gate-vetoed
+prefix still pays row-mode filtering (~3.3×, #2246).
+
 ## Workflow
 
 Every future optimisation appends a row to the table above with

@@ -1090,16 +1090,19 @@ All edges carry `gitCommit` and `gitDate`.
 | `ABOUT` | `(Memory)-[:ABOUT]->(Feature\|Sprint)` | A memory concerns a feature area or sprint. |
 | `CONSULTED_BY` | `(Memory)-[:CONSULTED_BY]->(Agent\|Skill)` | A memory exists primarily for that agent's/skill's use. |
 | `SPECIALISES_IN` | `(Agent)-[:SPECIALISES_IN]->(Feature)` | A sub-agent's mandated speciality area (curated from `CLAUDE.md`). |
+| `PART_OF` | `(Feature)-[:PART_OF]->(Feature)` | A sprint-scale capability belongs to a broader feature area (e.g. a planner peephole → `Cypher Engine`). Documented 2026-07-28 (sprint 311). |
+| `DELIVERS` | `(Sprint)-[:DELIVERS]->(Feature)` | The sprint that delivered a capability. Documented 2026-07-28 (sprint 311). |
+| `VERIFIES` | `(Test\|Benchmark)-[:VERIFIES]->(Feature)` | A test or benchmark that gates a feature's correctness or its measured performance. Documented 2026-07-28 (sprint 311). |
 
-**Data-quality note (observed 2026-07-02, not remediated here):** the live graph has
+**Data-quality note (observed 2026-07-02, partially remediated):** the live graph has
 accumulated several more edge types across incremental syncs than this table documents in
-full (`BELONGS_TO`, `PART_OF`, `CLOSES`, `FROM_AUDIT`, `REMEDIATED_BY`, `CONCERNS`,
-`DELIVERS`, `FOUND`, `TESTS`, `LIVES_IN`, `RELEASES`, `IMPLEMENTED_BY`, `DOCUMENTED_BY`,
-`DELIVERED_BY`, `HARDENED_IN`, `MODIFIES` — 29 distinct types total per a live `MATCH ()
--[r]->() RETURN type(r), count(r)` query, vs. the ~11 documented above). This table was
-extended just enough to cover the edge types touched by this sync (`IMPLEMENTED_IN`,
-`TOUCHES`, `DEPENDS_ON`, `FOLLOWED_BY`, `IMPROVES`); a full reconciliation of the remaining
-~16 types is a separate hygiene task, not part of this commit's sync.
+full (`BELONGS_TO`, `CLOSES`, `FROM_AUDIT`, `REMEDIATED_BY`, `CONCERNS`, `FOUND`, `TESTS`,
+`LIVES_IN`, `RELEASES`, `IMPLEMENTED_BY`, `DOCUMENTED_BY`, `DELIVERED_BY`, `HARDENED_IN`,
+`MODIFIES` — 29 distinct types total per a live `MATCH ()-[r]->() RETURN type(r), count(r)`
+query, vs. the ~14 documented above). This table was extended just enough to cover the edge
+types touched by each sync: `IMPLEMENTED_IN`, `TOUCHES`, `DEPENDS_ON`, `FOLLOWED_BY`,
+`IMPROVES` (2026-07-02), then `PART_OF`, `DELIVERS`, `VERIFIES` (2026-07-28, sprint 311). A
+full reconciliation of the remaining ~14 types is a separate hygiene task.
 
 ### Counts by edge type (commit `567253c` + worktree, 2026-06-11)
 
