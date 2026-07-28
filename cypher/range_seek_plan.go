@@ -347,15 +347,40 @@ func extractStringRangePred(e ast.Expression, nodeVar string) (stringRangePred, 
 }
 
 // extractSingleStringCmp extracts one comparison "nodeVar.prop <op> stringLit"
-// (or its mirror "stringLit <op> nodeVar.prop") with op ∈ {>,>=,<,<=}. The
-// returned stringRangePred has exactly one of lo/hi set.
+// (or its mirror "stringLit <op> nodeVar.prop") with op ∈ {=,>,>=,<,<=}. For a
+// range operator the returned stringRangePred has exactly one of lo/hi set; for
+// "=" it has BOTH, set to the same value — the degenerate closed range [v, v].
+//
+// # Why equality is served here as well as by a string hash index
+//
+// A string equality normally reaches the hash index, so this looks redundant. It
+// is not: a user who asks for a BTREE on a string property — a reasonable thing
+// to do when the same property also serves range predicates — used to get a FULL
+// LABEL SCAN for an equality on it, because only the numeric extractor
+// degenerated "=" into [v, v] (rmp #2169) and this one rejected the operator
+// outright. Measured at 20 000 nodes: 4.27 ms and 59 831 allocs/op, the
+// allocation count tracking the node population, against 3.2 µs and 63 allocs
+// for the same equality on a hash index (rmp #2231).
+//
+// The degenerate range is exact for EQUALITY specifically. GoGraph orders strings
+// by code point (UTF-8 byte order), so [v, v] selects precisely the keys whose
+// bytes equal v's — no collation question arises, because no two distinct strings
+// compare equal under a byte order. That reasoning does NOT extend to inequality
+// over a collation-sensitive alphabet, which is why only "=" is added here and
+// the range operators keep their existing one-sided treatment (round-4 finding
+// C3 leaves the collation ruling open).
+//
+// As on the numeric path, the seek's result is treated as a SUPERSET: the range
+// seek's residual Selection Filter is always retained
+// (see [tryBuildRangeSeekChild]) and re-applies the exact property predicate, so
+// the seek can only narrow what the filter examines, never change what it admits.
 func extractSingleStringCmp(e ast.Expression, nodeVar string) (stringRangePred, bool) {
 	bo, ok := e.(*ast.BinaryOp)
 	if !ok {
 		return stringRangePred{}, false
 	}
 	op := bo.Operator
-	if op != ">" && op != ">=" && op != "<" && op != "<=" {
+	if op != "=" && op != ">" && op != ">=" && op != "<" && op != "<=" {
 		return stringRangePred{}, false
 	}
 	// Property on the left: n.prop <op> lit.
@@ -375,10 +400,20 @@ func extractSingleStringCmp(e ast.Expression, nodeVar string) (stringRangePred, 
 	return stringRangePred{}, false
 }
 
-// boundFor builds a one-sided stringRangePred for "prop op value", flipping the
-// operator's side when the property was on the right of the comparison
-// (mirrored == true: "value op prop" ≡ "prop op' value" with op' the reverse).
+// boundFor builds a stringRangePred for "prop op value", flipping the operator's
+// side when the property was on the right of the comparison (mirrored == true:
+// "value op prop" ≡ "prop op' value" with op' the reverse). A range operator
+// yields one bound; "=" yields the degenerate closed range [value, value] (see
+// [extractSingleStringCmp]).
 func boundFor(propKey, op string, value expr.StringValue, mirrored bool) stringRangePred {
+	if op == "=" {
+		// Equality is symmetric, so the mirror needs no flip. Two SEPARATE bounds
+		// are built rather than one shared pointer: mergeRangeBounds and the
+		// consumers treat lo and hi as independently owned.
+		lo := exec.RangeBound{Value: value, Include: true}
+		hi := exec.RangeBound{Value: value, Include: true}
+		return stringRangePred{propKey: propKey, lo: &lo, hi: &hi}
+	}
 	if mirrored {
 		switch op {
 		case ">":
