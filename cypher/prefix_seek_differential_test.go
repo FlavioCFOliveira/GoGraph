@@ -430,6 +430,99 @@ func TestPrefixSeekDifferentialNegatives(t *testing.T) {
 	}
 }
 
+// TestPrefixSeekConjunctions covers a prefix conjoined with another bound. A
+// prefix yields BOTH a lower and an upper bound, so mergeRangeBounds keeps one
+// bound from each side of the AND and DISCARDS the other two. That is sound only
+// because every bound it retains is a necessary condition of its own conjunct,
+// and therefore of the conjunction — which also means a merged interval with
+// lo > hi can only arise when the true match set is empty, since a witness would
+// have to satisfy both retained bounds. These cases pin that reasoning against
+// the absolute oracle, including the nested and the disjoint prefix pairs where
+// the merged interval is deliberately looser than optimal.
+func TestPrefixSeekConjunctions(t *testing.T) {
+	t.Parallel()
+
+	engOn, truth := newPrefixDiffEngine(t, false)
+	engOff, _ := newPrefixDiffEngine(t, true)
+
+	// twoPredOracle is the intersection of two arbitrary predicates over the
+	// string-valued names.
+	twoPredOracle := func(keep func(string) bool) []string {
+		out := make([]string, 0, 16)
+		for _, val := range truth {
+			if keep(val) {
+				out = append(out, val)
+			}
+		}
+		sort.Strings(out)
+		return out
+	}
+
+	cases := []struct {
+		name  string
+		query string
+		want  []string
+	}{{
+		// Nested prefixes: the merged interval is ["name00", "name001") — a proper
+		// SUPERSET of the true ["name000", "name001"), which the Filter narrows.
+		name:  "nested_prefixes",
+		query: `MATCH (p:` + pfxDiffLabel + `) WHERE p.name STARTS WITH "name00" AND p.name STARTS WITH "name000" RETURN p.name`,
+		want: twoPredOracle(func(v string) bool {
+			return strings.HasPrefix(v, "name00") && strings.HasPrefix(v, "name000")
+		}),
+	}, {
+		// Disjoint prefixes, low-then-high: mergeRangeBounds keeps the LEFT
+		// conjunct's lower bound and the RIGHT one's upper bound, so this order
+		// yields the very wide ["name000", "zz{"] — sound but unselective, which
+		// the gate then declines.
+		name:  "disjoint_prefixes_widening",
+		query: `MATCH (p:` + pfxDiffLabel + `) WHERE p.name STARTS WITH "name000" AND p.name STARTS WITH "zzz" RETURN p.name`,
+		want:  []string{},
+	}, {
+		// The SAME predicate with the conjuncts swapped merges to an INVERTED
+		// interval (lo "zzz" > hi "name001"). That can only ever happen when the
+		// true match set is empty — a witness would have to satisfy both retained
+		// bounds — so an empty seek result is correct here rather than a miss.
+		name:  "disjoint_prefixes_inverted",
+		query: `MATCH (p:` + pfxDiffLabel + `) WHERE p.name STARTS WITH "zzz" AND p.name STARTS WITH "name000" RETURN p.name`,
+		want:  []string{},
+	}, {
+		name:  "prefix_and_lower_bound",
+		query: `MATCH (p:` + pfxDiffLabel + `) WHERE p.name STARTS WITH "name000" AND p.name >= "name00050" RETURN p.name`,
+		want: twoPredOracle(func(v string) bool {
+			return strings.HasPrefix(v, "name000") && v >= "name00050"
+		}),
+	}, {
+		name:  "prefix_and_upper_bound",
+		query: `MATCH (p:` + pfxDiffLabel + `) WHERE p.name STARTS WITH "name000" AND p.name < "name00050" RETURN p.name`,
+		want: twoPredOracle(func(v string) bool {
+			return strings.HasPrefix(v, "name000") && v < "name00050"
+		}),
+	}, {
+		// An extra conjunct beyond the range: the residual Filter must still apply it.
+		name:  "prefix_and_inequality",
+		query: `MATCH (p:` + pfxDiffLabel + `) WHERE p.name STARTS WITH "name000" AND p.name <> "name00005" RETURN p.name`,
+		want: twoPredOracle(func(v string) bool {
+			return strings.HasPrefix(v, "name000") && v != "name00005"
+		}),
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotOn := runPrefixRows(t, engOn, tc.query, nil)
+			gotOff := runPrefixRows(t, engOff, tc.query, nil)
+			if len(tc.want) == 0 {
+				if len(gotOn) != 0 || len(gotOff) != 0 {
+					t.Fatalf("expected no rows, got ON=%q OFF=%q", gotOn, gotOff)
+				}
+				return
+			}
+			assertSameStrings(t, "enabled vs Go oracle", gotOn, tc.want)
+			assertSameStrings(t, "disabled vs Go oracle", gotOff, tc.want)
+		})
+	}
+}
+
 // TestPrefixSeekParameterised proves a parameterised prefix is declined (the
 // string extractor admits literals only, as it does for >= / <) and still
 // returns the right answer.
