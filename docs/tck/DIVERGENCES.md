@@ -350,6 +350,31 @@ the full closure record.
 
 ---
 
+## Behaviour the specification leaves unspecified
+
+These are **not** non-conformances. The openCypher specification defines no
+behaviour here, so no scenario in the TCK discriminates the choices, and the
+3 897/3 897 baseline is unaffected whichever choice an engine makes. They are
+listed because a reader comparing GoGraph against Neo4j will see a difference and
+would otherwise reasonably suspect a conformance gap.
+
+- **String collation — ordering is by Unicode code point.** `ORDER BY` on a
+  string, and the `<` `<=` `>` `>=` operators, order by code point (the
+  implementation compares UTF-8 bytes, which UTF-8 guarantees is the same
+  ordering). Neo4j orders by UTF-16 **code unit**, because that is what Java's
+  `String.compareTo` does. The two rules agree across the whole of ASCII, Latin-1
+  and everything below U+E000, and disagree in exactly one situation: a
+  supplementary-plane character (U+10000 and above, stored in UTF-16 as a
+  surrogate pair whose leading unit is in U+D800–U+DBFF) compared against a BMP
+  character in U+E000–U+FFFF. GoGraph therefore sorts `😀` (U+1F600) **after**
+  `ﬁ` (U+FB01); Neo4j sorts it before. The divergence is deliberate — see the
+  full statement, rationale and worked example under "Declared divergence: string
+  ordering is by code point" in [`docs/cypher.md`](../cypher.md), and the pinning
+  tests `TestStringOrdering_IsCodePointOrder` and
+  `TestStringOrdering_SupplementaryPlaneBoundary` (rmp #2224).
+
+---
+
 ## openCypher extensions outside the TCK
 
 These features are part of the broader openCypher language but have **no

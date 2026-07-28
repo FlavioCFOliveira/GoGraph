@@ -1130,6 +1130,69 @@ build in which profiling does not exist.
 
 ---
 
+## Declared divergence: string ordering is by code point
+
+`ORDER BY` on a string, and every string comparison with `<`, `<=`, `>`, `>=`,
+orders by **Unicode code point**. This is deliberate, and it differs from Neo4j.
+It is recorded here because nothing in the query result reveals it.
+
+**The rule you can apply without reading the source.** Compare two strings
+character by character; at the first position where they differ, the string whose
+character has the smaller Unicode code-point value sorts first. If one string is a
+prefix of the other, the shorter sorts first. (The implementation compares the
+UTF-8 bytes, which is the same thing: UTF-8 is designed so that byte order equals
+code-point order.)
+
+**Where it differs from Neo4j.** Neo4j compares UTF-16 **code units**, because
+that is what Java's `String.compareTo` does. The two rules agree for all of ASCII,
+all of Latin-1, and in fact everything in the Basic Multilingual Plane below
+U+E000. They disagree in exactly one situation:
+
+> a **supplementary-plane** character (U+10000 and above) compared against a BMP
+> character in the range **U+E000–U+FFFF**.
+
+A supplementary character is stored in UTF-16 as a *surrogate pair* whose leading
+unit lies in U+D800–U+DBFF. Because D800–DBFF is numerically **below** E000–FFFF,
+Neo4j sorts every supplementary character before that BMP range, while GoGraph —
+comparing the actual code points — sorts it after.
+
+**Worked example.** Ordering `Z`, `a`, `e`, `z`, `é` (U+00E9), `ﬁ` (U+FB01, the
+Latin small ligature fi), and `😀` (U+1F600, the grinning face):
+
+| | result |
+|---|---|
+| **GoGraph** | `Z`, `a`, `e`, `z`, `é`, `ﬁ`, `😀` |
+| **Neo4j** | `Z`, `a`, `e`, `z`, `é`, `😀`, `ﬁ` |
+
+The single difference is the last two: GoGraph puts `😀` (U+1F600) after `ﬁ`
+(U+FB01) because 1F600 > FB01, while Neo4j puts it first because its leading
+surrogate U+D83D is below U+FB01. So **any `ORDER BY` over user text containing
+emoji or other supplementary characters will differ between the two engines** —
+and no query over ASCII or Latin-1 text ever will.
+
+**Why it is deliberate, not an oversight.**
+
+- The openCypher 2024.3 grammar **specifies no collation**, so neither order is
+  non-conformant, and the TCK contains no scenario that discriminates them.
+- UTF-16 code-unit order is an artefact of Java's internal string
+  representation rather than a principled ordering: it places some
+  supplementary characters *before* BMP characters that are numerically lower.
+- Code-point order is load-bearing elsewhere in the engine. The string B-tree
+  index is ordered by the same rule, which is what makes an equality on a
+  string btree index answerable as the degenerate closed range `[v, v]` —
+  no two distinct strings compare equal under a code-point order, so the range
+  is exact. Changing the collation would reach into the index layer, not just
+  `ORDER BY`.
+
+If your application needs locale-aware ordering (dictionary order, case-insensitive
+order, language-specific rules), neither engine provides it: sort in the
+application, or store a pre-computed sort key alongside the text and order by that.
+
+The ordering is pinned by `TestStringOrdering_IsCodePointOrder`, including the
+supplementary-plane boundary case, so it cannot change silently.
+
+---
+
 ## Known limitations
 
 The following constructs are not yet supported:
