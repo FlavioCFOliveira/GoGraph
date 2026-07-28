@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/parser"
@@ -86,12 +87,62 @@ func checkSchemaIdentifier(kind, what, id string) error {
 // distinguish the two (for example, to permit SHOW on a read-only transaction)
 // use [IsShow].
 func IsDDL(query string) bool {
-	upper := strings.ToUpper(trimLeadingComments(query))
-	return strings.HasPrefix(upper, "CREATE INDEX") ||
-		strings.HasPrefix(upper, "DROP INDEX") ||
-		strings.HasPrefix(upper, "CREATE CONSTRAINT") ||
-		strings.HasPrefix(upper, "DROP CONSTRAINT") ||
-		isShowUpper(upper)
+	stmt := trimLeadingComments(query)
+	return hasPrefixFold(stmt, "CREATE INDEX") ||
+		hasPrefixFold(stmt, "DROP INDEX") ||
+		hasPrefixFold(stmt, "CREATE CONSTRAINT") ||
+		hasPrefixFold(stmt, "DROP CONSTRAINT") ||
+		isShowPrefix(stmt)
+}
+
+// hasPrefixFold reports whether s begins with upper — an ASCII UPPERCASE
+// literal — ignoring case, WITHOUT allocating.
+//
+// It replaces `strings.HasPrefix(strings.ToUpper(s), upper)`, which uppercased
+// the WHOLE query to compare at most seventeen leading bytes. [IsDDL] runs on
+// every RunAny / RunInTxAny dispatch, so that copy was one heap allocation per
+// query executed — 80 bytes for a 70-character read (rmp #2240).
+//
+// Behaviour is identical, not merely similar. Unicode uppercasing is not a
+// per-byte operation: it can map a non-ASCII rune onto an ASCII one ('ı' to 'I',
+// 'ſ' to 'S') and can change a string's LENGTH ('ß' to "SS"), either of which
+// would break a byte-wise ASCII fold. So the moment a non-ASCII byte appears
+// inside the prefix window, this defers to the exact expression it replaced.
+// The fast path therefore covers every query whose leading keyword is ASCII —
+// which is every query the grammar accepts — and the slow path is reached only
+// by input that is already destined for a syntax error.
+func hasPrefixFold(s, upper string) bool {
+	if len(s) < len(upper) {
+		// A shorter string can still uppercase to a longer one ('ß' to "SS"), so
+		// only an all-ASCII s can be rejected on length alone.
+		if isASCII(s) {
+			return false
+		}
+		return strings.HasPrefix(strings.ToUpper(s), upper)
+	}
+	for i := 0; i < len(upper); i++ {
+		c := s[i]
+		if c >= utf8.RuneSelf {
+			return strings.HasPrefix(strings.ToUpper(s), upper)
+		}
+		if c >= 'a' && c <= 'z' {
+			c -= 'a' - 'A'
+		}
+		if c != upper[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// isASCII reports whether s contains no byte outside the ASCII range.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
 }
 
 // IsShow returns true when query (trimmed, case-insensitive) is a SHOW
@@ -101,7 +152,7 @@ func IsDDL(query string) bool {
 // mutates nothing, so it is permitted on a read-only transaction where the
 // schema-writing DDL statements are rejected (#1922).
 func IsShow(query string) bool {
-	return isShowUpper(strings.ToUpper(trimLeadingComments(query)))
+	return isShowPrefix(trimLeadingComments(query))
 }
 
 // trimLeadingComments removes leading whitespace and any run of leading
@@ -141,14 +192,14 @@ func trimLeadingComments(query string) string {
 	}
 }
 
-// isShowUpper reports whether upper (an already trimmed, upper-cased query)
-// begins with a supported SHOW schema-introspection keyword. The prefix
+// isShowPrefix reports whether stmt (an already trimmed query) begins with a
+// supported SHOW schema-introspection keyword, ignoring case. The prefix
 // "SHOW CONSTRAINT" matches both CONSTRAINT and CONSTRAINTS, and "SHOW INDEX"
 // matches both INDEX and INDEXES; the exact singular/plural token is validated
 // by [parseShow]. Sharing this helper keeps [IsDDL] and [IsShow] in lockstep.
-func isShowUpper(upper string) bool {
-	return strings.HasPrefix(upper, "SHOW CONSTRAINT") ||
-		strings.HasPrefix(upper, "SHOW INDEX")
+func isShowPrefix(stmt string) bool {
+	return hasPrefixFold(stmt, "SHOW CONSTRAINT") ||
+		hasPrefixFold(stmt, "SHOW INDEX")
 }
 
 // ParseDDL parses a DDL query string and returns a LogicalPlan (one of
@@ -169,7 +220,7 @@ func ParseDDL(query string) (LogicalPlan, error) {
 		return parseCreateConstraint(stmt)
 	case strings.HasPrefix(upper, "DROP CONSTRAINT"):
 		return parseDropConstraint(stmt)
-	case isShowUpper(upper):
+	case isShowPrefix(stmt):
 		return parseShow(stmt)
 	}
 	return nil, fmt.Errorf("ir: unrecognised DDL statement: %q", query)
@@ -204,7 +255,7 @@ var showPrefixRe = regexp.MustCompile(`(?is)^\s*SHOW\s+(CONSTRAINTS?|INDEXES|IND
 func parseShow(query string) (LogicalPlan, error) {
 	m := showPrefixRe.FindStringSubmatch(query)
 	if m == nil {
-		// isShowUpper already gated the "SHOW CONSTRAINT" / "SHOW INDEX" prefix,
+		// isShowPrefix already gated the "SHOW CONSTRAINT" / "SHOW INDEX" prefix,
 		// so reaching here means a near-miss target (e.g. "SHOW CONSTRAINTX").
 		got := ""
 		if toks := tokenise(query); len(toks) >= 2 {

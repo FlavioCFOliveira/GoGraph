@@ -82,6 +82,110 @@ func maskNonClauseRegions(query string) string {
 // maskLineComment blanks `//` and the rest of the line, and returns the index of
 // the newline (or len(q) when the comment runs to the end of the input). The
 // newline itself is left for the main loop to copy, so line structure survives.
+// writingKeywords are the six clause keywords [QueryHasWritingClause] routes on,
+// grouped by length so the comparison starts from a length test that rejects
+// almost every word in a query outright.
+//
+// They are the exact set the regexp this replaced encoded, and they carry the
+// same meaning: a standalone word, matched without regard to case.
+const (
+	kwSET    = "SET"
+	kwMERGE  = "MERGE"
+	kwCREATE = "CREATE"
+	kwREMOVE = "REMOVE"
+	kwDELETE = "DELETE"
+	kwDETACH = "DETACH"
+)
+
+// containsWritingKeyword reports whether any standalone word in text is a
+// writing-clause keyword, comparing without regard to case and WITHOUT
+// allocating (rmp #2240).
+//
+// # Why this is not a regexp
+//
+// It replaces `(?i)\b(CREATE|MERGE|SET|REMOVE|DELETE|DETACH)\b`, which cost
+// 2.69-2.73 us and one 80-byte allocation on every RunAny / RunInTxAny dispatch —
+// measured against an indexed point lookup of roughly 5 us end to end, so
+// classifying a query could cost a third of running it. The expense was the
+// regexp engine, not the mask: the mask's own fast path allocates nothing.
+//
+// # Word boundaries
+//
+// A word is a maximal run of ASCII letters, digits and underscore, which is
+// exactly the class Go's regexp `\b` anchors on. That equivalence is what keeps
+// "PRESET" and "NOMERGE" classified as reads, and it is pinned by the
+// pre-existing table-driven cases rather than assumed.
+//
+// # Case folding
+//
+// The comparison folds ASCII only. That is not a narrowing: Go's `(?i)` did not
+// fold beyond ASCII for this pattern either — verified before the change, with
+// the regexp rejecting "ſet" (U+017F) exactly as this does.
+func containsWritingKeyword(text string) bool {
+	for i := 0; i < len(text); {
+		if !isWordByte(text[i]) {
+			i++
+			continue
+		}
+		start := i
+		for i < len(text) && isWordByte(text[i]) {
+			i++
+		}
+		if isWritingKeyword(text[start:i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// isWordByte reports whether c belongs to the ASCII word class [0-9A-Za-z_] that
+// delimits a keyword, matching the class Go's regexp `\b` uses.
+func isWordByte(c byte) bool {
+	return c >= 'a' && c <= 'z' ||
+		c >= 'A' && c <= 'Z' ||
+		c >= '0' && c <= '9' ||
+		c == '_'
+}
+
+// isWritingKeyword reports whether word is one of the six keywords, ignoring
+// ASCII case. The length switch runs first because it rejects the great majority
+// of words in a query — MATCH, WHERE, RETURN, every variable and every property
+// name — without inspecting a single byte.
+func isWritingKeyword(word string) bool {
+	switch len(word) {
+	case 3:
+		return equalFoldASCII(word, kwSET)
+	case 5:
+		return equalFoldASCII(word, kwMERGE)
+	case 6:
+		return equalFoldASCII(word, kwCREATE) ||
+			equalFoldASCII(word, kwREMOVE) ||
+			equalFoldASCII(word, kwDELETE) ||
+			equalFoldASCII(word, kwDETACH)
+	default:
+		return false
+	}
+}
+
+// equalFoldASCII reports whether s equals upper, an ASCII UPPERCASE literal,
+// ignoring case. The caller has already established len(s) == len(upper).
+//
+// It is not [strings.EqualFold], which decodes runes and applies Unicode simple
+// folding: that costs more and would admit characters the regexp this replaces
+// did not.
+func equalFoldASCII(s, upper string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'a' && c <= 'z' {
+			c -= 'a' - 'A'
+		}
+		if c != upper[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func maskLineComment(b *strings.Builder, q string, i int) int {
 	for ; i < len(q) && q[i] != '\n' && q[i] != '\r'; i++ {
 		b.WriteByte(' ')

@@ -68,7 +68,6 @@ import (
 	"log/slog"
 	"math"
 	"reflect"
-	"regexp"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -3515,7 +3514,16 @@ func QueryHasWritingClause(query string) bool {
 	// inside a comment or a quoted string does not route a READ onto the write
 	// path — where it would serialise on the store's single writer (rmp #2230).
 	// The mask is allocation-free for a query containing no comment or quote.
-	return writingKeywordRE.MatchString(maskNonClauseRegions(query))
+	//
+	// The keyword test is a plain word scan rather than a regexp (rmp #2240): the
+	// regexp cost 2.69-2.73 us and one allocation per dispatch, against roughly
+	// 5 us for the indexed point lookup it was gating. Composing the scan over
+	// the mask — rather than fusing them into one walk — keeps a SINGLE
+	// definition of where the unmaskable regions are, so the classifier and the
+	// mask cannot drift apart; on the common path the mask returns query
+	// unchanged, so both walks are over the original string and neither
+	// allocates.
+	return containsWritingKeyword(maskNonClauseRegions(query))
 }
 
 // queryHasWritingClause is the internal alias for [QueryHasWritingClause],
@@ -3666,13 +3674,6 @@ func resolveGlobalMaxResultBytes(opt int64) int64 {
 // means, because an unbounded `collect(n)` over a whole-graph scan then
 // materialises every value into one list under the graph's visibility barrier.
 const MaxCollectItemsUnlimited = -1
-
-// writingKeywordRE matches any writing-clause keyword as a standalone word.
-// The pattern uses a case-insensitive flag and a word boundary anchor so
-// fragments like "PRESET" or "NOMERGE" are not falsely classified.
-//
-//nolint:gochecknoglobals // singleton regex compiled once at init
-var writingKeywordRE = regexp.MustCompile(`(?i)\b(CREATE|MERGE|SET|REMOVE|DELETE|DETACH)\b`)
 
 // RunInTxAny executes a write query with params expressed as map[string]any,
 // automatically converting Go native types to [expr.Value]. See [BindParams].
