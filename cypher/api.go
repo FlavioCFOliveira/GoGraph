@@ -7347,6 +7347,31 @@ func buildPlanEngine(
 // ProduceResults handling for both the serial and the morsel-parallel (#1682)
 // build paths.
 func wrapWithColumnPassthrough(child exec.Operator, cols []string, schema map[string]int) (exec.Operator, []string, error) {
+	// Elide the final passthrough when the child's own projection already emits
+	// exactly cols, in order (rmp #2239). The physical build used to layer this
+	// projection on top of the one it had just built for the ir.Project node, so
+	// a plain `MATCH (n:P) RETURN n` rendered — and ran — two stacked Project
+	// operators for one RETURN.
+	//
+	// The win is in plan CONSTRUCTION, not per row: the elided operator was an
+	// identity projection reusing its outBuf, so a second pass over an
+	// already-materialised row is lost in the noise of value boxing. Measured at
+	// -12.9% allocs on a single-row query and indistinguishable from zero on
+	// large result sets — docs/benchmarks/project-elision-2026-07-28.md records
+	// the numbers and corrects the finding's stronger claim. What the fix buys
+	// unconditionally is a truthful plan surface: EXPLAIN and PROFILE no longer
+	// report an operator that does no work.
+	//
+	// Asking the child what it emits — rather than inferring it from schema — is
+	// what makes the elision safe, and [exec.EmitsExactly] documents why: schema
+	// records where a column SITS, not how WIDE the row is.
+	//
+	// The outer projection carries no per-row byte budget — applyProjectionRowBudget
+	// is threaded only into the expression-evaluating sites (#1852) — so dropping
+	// it removes no guard.
+	if exec.EmitsExactly(child, cols) {
+		return child, cols, nil
+	}
 	// Elide the final passthrough when it would be a strict identity over a
 	// columnar producer (#1704 P2): the child (a terminal [exec.ColumnarProject])
 	// already emits exactly cols in order, so wrapping it in another Project would

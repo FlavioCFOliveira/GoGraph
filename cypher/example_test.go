@@ -152,8 +152,7 @@ func ExampleEngine_Explain() {
 	fmt.Print(plan)
 	// Output:
 	// Project
-	// └─ Project
-	//    └─ NodeByLabelScan [Person]
+	// └─ NodeByLabelScan [Person]
 }
 
 // ExampleEngine_ExplainLogical returns the LOGICAL plan, which is where the

@@ -162,6 +162,25 @@ func BenchmarkFilterProject(b *testing.B) {
 	runQuery(b, `MATCH (p:Person) WHERE p.age > 47 RETURN p.firstName, p.age`)
 }
 
+// BenchmarkReturnWholeNode returns the bound node itself rather than any of its
+// properties. It is the shape that carries the final result projection with no
+// columnar path to absorb it, so it measures what the projection layer costs per
+// row on the plainest read a user can write — the shape rmp #2239 found running
+// through TWO stacked Project operators, each copying the other's output cell
+// for cell.
+func BenchmarkReturnWholeNode(b *testing.B) {
+	runQuery(b, `MATCH (p:Person) RETURN p`)
+}
+
+// BenchmarkReturnWholeNodeLimited pairs with BenchmarkReturnWholeNode to cover
+// the elision walking PAST a row-shape-preserving operator: Limit re-emits its
+// input row untouched, so the projection beneath it already produces the result
+// columns. Keeping both shapes measured stops a future change from restoring the
+// stacked pair on only one of them.
+func BenchmarkReturnWholeNodeLimited(b *testing.B) {
+	runQuery(b, `MATCH (p:Person) RETURN p LIMIT 1000`)
+}
+
 // BenchmarkExpand1Hop is a 1-hop relationship-type-filtered expand: the
 // heaviest read shape (finding P2 — re-materialised edge-label slices per
 // candidate edge for the :KNOWS type filter, on top of per-row boxing).

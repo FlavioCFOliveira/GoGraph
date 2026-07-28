@@ -1065,13 +1065,12 @@ graph is not touched.
 
 ```
 Project
-└─ Project
-   └─ GlobalAggregateAdapter
-      └─ EagerAggregation
-         └─ ColumnarProject
-            └─ ColumnarHashJoin [build=right]
-               ├─ NodeByLabelScan [P]
-               └─ NodeByLabelScan [P]
+└─ GlobalAggregateAdapter
+   └─ EagerAggregation
+      └─ ColumnarProject
+         └─ ColumnarHashJoin [build=right]
+            ├─ NodeByLabelScan [P]
+            └─ NodeByLabelScan [P]
 ```
 
 Because each name is read from the operator itself, the rendering cannot
