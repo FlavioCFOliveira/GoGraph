@@ -2481,7 +2481,7 @@ func explainWithIndexesNode(
 			// seek does — both replace the Selection and its scan child — so it
 			// renders in the Selection's place (#2183).
 			opName = "NodeByIndexSeekSet"
-		} else if _, fired := tryBuildRangeSeekChild(sel, make(map[string]int), idxMgr, explainGraph, params, prefixSeek); fired {
+		} else if _, fired := tryBuildRangeSeekChild(sel, make(map[string]int), idxMgr, explainGraph, params, prefixSeek, true); fired {
 			// A range seek REPLACES the scan child but the original Selection
 			// Filter is retained on top, so the node renders as Selection over
 			// NodeByIndexRangeScan (not subsumed like the equality seek).
