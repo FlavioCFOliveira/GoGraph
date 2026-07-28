@@ -1692,3 +1692,43 @@ mechanism (`Task 2235`), never by widening this recogniser. `applyDDLOp.why` rec
 - **Curated layers.** `Feature` nodes and the `IMPLEMENTS`/`SPECIFIED_IN` edges are a
   human-reviewed interpretation, not a mechanical extraction; revise the mapping tables
   above when the architecture changes.
+
+Incrementally synced at commits `cba27fba` and `406a0b48` (2026-07-28, sprint 313,
+tasks #2139 and #2141 — destination-ordered CSR neighbour runs).
+
++22 nodes: `Sprint` 313; `Commit` `cba27fba` and `406a0b48`; `Task` 2139
+(COMPLETED), 2140 (**SUPERSEDED**) and 2141 (COMPLETED); `Spec`
+`docs/design-degree-adaptive-adjacency.md`; `Function`s `OrderRuns` (exported),
+`runOrdered`, `insertionSortRun`, `mergeSortRun`, `mergeRun` in
+`graph/csr/order.go` and `distinctDestinationsSorted` in
+`store/snapshot/labels.go`; `Method` `CSR.RunsOrdered`; 12 `Test`s across
+`graph/csr/order_test.go` (9) and `store/snapshot/determinism_order_test.go` (3).
+
++edges: `Sprint 313 -[CONTAINS]->` both Commits; `Task 2139/2141
+-[IMPLEMENTED_IN]->` their Commits; `Commit cba27fba -[TOUCHES]->` the new Spec;
+`Commit 406a0b48 -[TOUCHES]->` Packages `graph/csr` (241), `store/snapshot`
+(147), `store/bulk` (2) and `search` (131); `CONTAINS` for every new Function,
+Method and Test; `CSR -[HAS_METHOD]-> RunsOrdered`; `VERIFIES` from the new
+Tests to `OrderRuns` and `distinctDestinationsSorted`; `Commit 406a0b48
+-[IMPROVES]-> Feature` `openCypher TCK Compliance` (14016). Provenance bumped on
+Packages `graph/csr`/`store/snapshot`/`store/bulk` and the `CSR` Type.
+
+**NEW EDGE SHAPE:** `DEPENDS_ON (Feature)->(Function)`, recording that the
+`Min-cardinality multi-label anchor scan` (13305) and `Composed single-property
+index intersection` (14732) Features depend on `csr.OrderRuns`. `DEPENDS_ON` was
+previously only `(Task)->(Task)`; this widens it to express a
+feature-depends-on-implementation relation.
+
+**DECISION recorded on `Task` 2140, status SUPERSEDED — do not re-propose.** The
+adjacency neighbour representation is deliberately NOT ordered. Three blockers,
+two structural: `AuxColumn` exposes no permutation primitive and its contract
+blesses a strictly-ascending index array that `graph/lpg/edge_property_column.go`
+implements; "allocs/op unchanged" is unattainable by construction, because an
+ordered insert writes below `oldLen` and forfeits the zero-allocation in-place
+append (O(d^2) hub build, irreducible Omega(sqrt d) per append); and a
+history-dependent representation breaks recovery determinism, since
+`ApplyCSRToGraph` replays in bulk `csr.bin` order on a different degree
+trajectory. The `Spec` node also records that
+`docs/audit-planner-vs-neo4j-memgraph-2026-07-25.md` section 2.4 is **REFUTED**
+(crossover degree ~16 not ~64; 6.0x/10.9x at degree 4096 not 30.9x; its implied
+0.040 ns/element is 4.1x below the measured 0.164 ns/element branch-free floor).
