@@ -153,7 +153,8 @@ func buildRangeSeekIfEnabled(
 	if bopts == nil || !bopts.rangeSeekEnabled {
 		return nil, false
 	}
-	return tryBuildRangeSeekChild(sel, schema, idxMgr, g, params, bopts.prefixSeekEnabled)
+	return tryBuildRangeSeekChild(sel, schema, idxMgr, g, params,
+		bopts.prefixSeekEnabled, bopts.bitmapIntersectEnabled)
 }
 
 // tryBuildRangeSeekChild attempts to build a NodeByIndexRangeScan to replace
@@ -169,7 +170,11 @@ func buildRangeSeekIfEnabled(
 // stacks on top reads the node from the same column.
 // prefixSeek admits the STARTS WITH prefix rewrite (#2127); when false the
 // predicate is not recognised at all and the plan is byte-identical to the one
-// built before that change.
+// built before that change. intersectSeek admits composing several indexed
+// conjuncts into one intersected probe (#2134); it rides the same
+// EngineOptions.DisableBitmapIntersection knob as the label intersection, since
+// both are the same lever — a set operation over Roaring bitmaps — and a caller
+// disabling one means to disable the other.
 func tryBuildRangeSeekChild(
 	sel *ir.Selection,
 	schema map[string]int,
@@ -177,6 +182,7 @@ func tryBuildRangeSeekChild(
 	g *lpg.Graph[string, float64],
 	params map[string]expr.Value,
 	prefixSeek bool,
+	intersectSeek bool,
 ) (exec.Operator, bool) {
 	if idxMgr == nil || g == nil || sel.PredicateExpr == nil {
 		// No index, or no AST predicate to build the residual Filter from:
@@ -192,6 +198,19 @@ func tryBuildRangeSeekChild(
 	}
 	nodeVar := lblScan.NodeVar
 
+	// Conjunctive indexed properties FIRST (#2134): when two or more conjuncts
+	// constrain DIFFERENT indexed properties of this node, compose their bitmaps by
+	// intersection rather than using one index and filtering the rest per row. It is
+	// tried before the single-property seeks because those recognise only one
+	// property and would claim the shape with just one of the available indexes,
+	// leaving the other conjunct to the row filter. Every part passes the same
+	// shipped gate, and the residual Filter is retained as always, so a declined
+	// composition falls straight through to the single-property paths below.
+	if intersectSeek {
+		if op, ok := tryIndexIntersectionSeek(sel, schema, idxMgr, g, lblScan, nodeVar, params, prefixSeek); ok {
+			return op, true
+		}
+	}
 	// Try the string-btree path first (a string range over a string-typed
 	// index). When the predicate is not a string range — typically a numeric
 	// range n.age > 30 — fall through to the unified numeric companion.

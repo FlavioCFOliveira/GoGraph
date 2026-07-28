@@ -101,6 +101,38 @@ func labelID(idSrc labelIDResolver, label string) uint32 {
 	return math.MaxUint32
 }
 
+// pickMinLabelShape is the STRUCTURAL half of the recogniser: it accepts exactly
+// a Selection whose predicate is a bare LabelPredicate over the same node its
+// child NodeByLabelScan binds, and reports the scan variable, the scanned label
+// and the extra labels the predicate re-checks — with no cardinality lookup and
+// no cost decision.
+//
+// It is shared with the bitmap-intersection peephole (#2133) so the two cannot
+// disagree about what a "bare multi-label LabelPredicate Selection" is; a shape
+// they read differently would let one fire where the other declines and make the
+// precedence order meaningless.
+func pickMinLabelShape(sel *ir.Selection) (nodeVar, scanLabel string, extraLabels []string, ok bool) {
+	lp, isLP := sel.PredicateExpr.(*ast.LabelPredicate)
+	if !isLP || len(lp.Labels) == 0 {
+		return "", "", nil, false
+	}
+	recv, isVar := lp.Receiver.(*ast.Variable)
+	if !isVar {
+		return "", "", nil, false
+	}
+	lblScan, isScan := sel.Child.(*ir.NodeByLabelScan)
+	if !isScan || lblScan.Label == "" {
+		return "", "", nil, false
+	}
+	if recv.Name != lblScan.NodeVar {
+		// The LabelPredicate re-checks a DIFFERENT variable (e.g. a bound endpoint
+		// via matchApplyNodeLabels) — not the freshly scanned node — so neither the
+		// min-label rewrite nor the intersection applies.
+		return "", "", nil, false
+	}
+	return lblScan.NodeVar, lblScan.Label, lp.Labels, true
+}
+
 // pickMinLabel is the pure planner decision shared by the build path and the
 // EXPLAIN renderer. It recognises a Selection whose predicate is a bare
 // LabelPredicate over the SAME node the child NodeByLabelScan binds, then picks
@@ -116,31 +148,18 @@ func labelID(idSrc labelIDResolver, label string) uint32 {
 // residual labels the Filter must re-check — exactly the candidate set minus the
 // chosen label, in original syntactic order.
 func pickMinLabel(sel *ir.Selection, labelSrc labelResolverIface) (nodeVar, chosen string, residual []string, ok bool) {
-	lp, isLP := sel.PredicateExpr.(*ast.LabelPredicate)
-	if !isLP || len(lp.Labels) == 0 {
+	scanVar, scanLabel, extra, shapeOK := pickMinLabelShape(sel)
+	if !shapeOK {
 		return "", "", nil, false
 	}
-	recv, isVar := lp.Receiver.(*ast.Variable)
-	if !isVar {
-		return "", "", nil, false
-	}
-	lblScan, isScan := sel.Child.(*ir.NodeByLabelScan)
-	if !isScan || lblScan.Label == "" {
-		return "", "", nil, false
-	}
-	if recv.Name != lblScan.NodeVar {
-		// The LabelPredicate re-checks a DIFFERENT variable (e.g. a bound endpoint
-		// via matchApplyNodeLabels) — not the freshly scanned node — so the
-		// min-label rewrite does not apply.
-		return "", "", nil, false
-	}
+	lblScan := &ir.NodeByLabelScan{NodeVar: scanVar, Label: scanLabel}
 
 	// Candidate set in syntactic order: [L0, extra0, extra1, ...] — exactly the
 	// node pattern's Labels, so the syntactic-index tie-break matches the written
 	// order.
-	candidates := make([]string, 0, len(lp.Labels)+1)
-	candidates = append(candidates, lblScan.Label)
-	candidates = append(candidates, lp.Labels...)
+	candidates := make([]string, 0, len(extra)+1)
+	candidates = append(candidates, scanLabel)
+	candidates = append(candidates, extra...)
 
 	// Trustworthiness veto (#2076, design §2.1): gather an estExact cardinality
 	// for every candidate; if ANY estimate is untrustworthy, keep the default

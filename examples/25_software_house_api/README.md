@@ -472,6 +472,71 @@ label and the two cardinalities); the `# ` lines are volatile **telemetry**
 (plan text and the ON/OFF timing and allocation contrast). Scanning 252 rows
 instead of 52 270 — the same result multiset — is the whole win.
 
+### Multi-label conjunction as a set intersection
+
+The next step on the same shape. Rather than scanning the smallest label and
+re-checking the rest on every row, GoGraph intersects the labels' Roaring
+bitmaps — one k-way AND — and drops the residual label filter entirely, because
+the intersected bitmap already encodes the conjunction.
+
+It is a **cost decision**, and the example is built to show it deciding rather
+than merely winning. It reports **both regimes**:
+
+| Regime | Pattern | Why | Outcome |
+|---|---|---|---|
+| **fire** | `(n:Component:NeedsReview)` | neither label contains the other, so the intersection is strictly smaller than both | intersected |
+| **veto** | `(n:Code:Repository)` | every `Repository` is `Code`, so the intersection **is** the smaller label — no rows left to remove | declines to the min-label plan above |
+
+The layer/type hierarchy is all nesting, which is exactly the regime where an
+intersection has nothing to win. A real software house also tracks work that cuts
+**across** it — an items-awaiting-review backlog spanning a component pending code
+review, a task pending sign-off and a developer pending onboarding — so the demo
+derives a cross-cutting `:NeedsReview` marker. It derives it over a **copy** of the
+served graph: the API surface and every seeded fact stay exactly as they are, and a
+regression test pins that the served graph is never mutated.
+
+```
+$ 25_software_house_api -d ./data -scale-components=2000
+bitmapintersect.fire.intersected=true
+bitmapintersect.fire.left=Component:2012
+bitmapintersect.fire.right=NeedsReview:306
+bitmapintersect.fire.result_rows=289
+bitmapintersect.fire.strictly_fewer_rows=true        # the gate's own condition
+# bitmapintersect.fire.plan|  └─ NodeByLabelScan [NeedsReview∩Component]
+# bitmapintersect.fire.plan|  └─ NodeByLabelScan [n:NeedsReview] (est. rows=306, exact)
+bitmapintersect.veto.intersected=false
+bitmapintersect.veto.left=Code:2110
+bitmapintersect.veto.right=Repository:12
+bitmapintersect.veto.result_rows=12
+bitmapintersect.veto.strictly_fewer_rows=false       # nothing to remove → declines
+# bitmapintersect.veto.plan|  └─ Filter
+# bitmapintersect.veto.plan|     └─ NodeByLabelScan [Repository]
+# bitmapintersect.fire.time_ratio_off_over_on=4.35x  # telemetry — per run and machine
+# bitmapintersect.fire.alloc_ratio_off_over_on=0.43x
+# bitmapintersect.veto.time_ratio_off_over_on=1.01x
+# bitmapintersect.veto.alloc_ratio_off_over_on=0.98x
+```
+
+Three things are worth reading closely.
+
+The **plan detail names the intersected labels in the order they are ANDed** —
+`[NeedsReview∩Component]`, smallest first — because the intersection copies its
+first bitmap, so starting from the cheaper one matters.
+
+The **veto arm shows no difference at all** (1.01× and 0.98×). That is the
+intended result, not a disappointing one: the gate declined, so both engines
+planned the same thing. An optimisation whose "off" switch changes nothing on the
+shapes it refuses is an optimisation that is not quietly taxing them.
+
+The **fire arm trades memory for time**: 4.35× faster, but the allocation ratio is
+**0.43×**, meaning the intersection used about 2.3× MORE bytes. It materialises a
+bitmap where the scan walks one in place, and on a fixture whose scanned label is
+only ~2 000 rows that copy is not yet amortised. The metric is named
+`alloc_ratio_off_over_on` rather than "reduction" precisely so it can report a
+number below 1 without implying a saving. At the scale the planner benchmark
+measures — 100 000-node labels — the same trade runs the other way, at 988× fewer
+allocations.
+
 ---
 
 ## Persistence — survives a crash

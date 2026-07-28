@@ -71,8 +71,19 @@ type NodeByIndexRangeScan struct {
 	ctx  context.Context //nolint:containedctx // stored for per-Next ctx check
 	iter roaring64.IntPeekable64
 	buf  [1]expr.Value // fixed backing buffer — zero-alloc per Next
-	lo   RangeBound
-	hi   RangeBound
+	// extra holds the ADDITIONAL indexed conjuncts of a composed intersection
+	// (#2134). Empty for the ordinary single-index range scan.
+	extra []IndexRangePart
+	lo    RangeBound
+	hi    RangeBound
+}
+
+// IndexRangePart is one indexed conjunct's contribution to a composed
+// intersection: the index to probe and the bounds to probe it over (#2134).
+type IndexRangePart struct {
+	Index rangeLookup
+	Lo    RangeBound
+	Hi    RangeBound
 }
 
 // NewNodeByIndexRangeScan creates a NodeByIndexRangeScan.
@@ -80,10 +91,46 @@ func NewNodeByIndexRangeScan(idx rangeLookup, lo, hi RangeBound) *NodeByIndexRan
 	return &NodeByIndexRangeScan{idx: idx, lo: lo, hi: hi}
 }
 
-// Init performs the range lookup and initialises the bitmap iterator.
+// NewNodeByIndexIntersectionScan composes SEVERAL single-property indexes into one
+// access path by intersecting their range bitmaps (#2134).
+//
+// This is what lets `WHERE n.a > 1 AND n.b < 9` be answered from two ordinary
+// single-property indexes — the answer Memgraph needs a dedicated COMPOSITE index
+// type for. No new index type and no new statistic are involved: RangeBitmap
+// already returns a Roaring bitmap, so the conjunction is a set operation.
+//
+// # Superset discipline (design §8)
+//
+// Unlike the label intersection, each part is only a SUPERSET of its conjunct's
+// true matches — the operator emits the inclusive [lo, hi] interval and cannot
+// enforce an open bound (see the type doc, #F-EXEC1). Intersection PRESERVES that:
+// if Bᵃ ⊇ Aᵃ and Bᵇ ⊇ Aᵇ then Bᵃ ∩ Bᵇ ⊇ Aᵃ ∩ Aᵇ. So the composed scan is a sound
+// superset — and the caller's residual Filter remains MANDATORY, exactly as it is
+// for a single range scan.
+//
+// parts must hold at least one entry beyond the primary; the primary's own bounds
+// are given by lo/hi. Parts are ANDed in the order supplied, which the planner
+// orders by ascending exact cardinality so the cheapest bitmap is materialised
+// first.
+func NewNodeByIndexIntersectionScan(idx rangeLookup, lo, hi RangeBound, parts []IndexRangePart) *NodeByIndexRangeScan {
+	return &NodeByIndexRangeScan{idx: idx, lo: lo, hi: hi, extra: parts}
+}
+
+// Init performs the range lookup — intersecting the additional indexed conjuncts
+// when this is a composed scan (#2134) — and initialises the bitmap iterator.
 func (op *NodeByIndexRangeScan) Init(ctx context.Context) error {
 	op.ctx = ctx
 	bm := op.idx.RangeBitmap(op.lo.Value, op.hi.Value)
+	for i := range op.extra {
+		if bm.IsEmpty() {
+			// Early exit: an empty intermediate cannot grow, so the remaining
+			// probes are pure waste. The same short-circuit label.Index.Intersect
+			// applies to the label AND.
+			break
+		}
+		other := op.extra[i].Index.RangeBitmap(op.extra[i].Lo.Value, op.extra[i].Hi.Value)
+		bm.And(other)
+	}
 	op.iter = bm.Iterator()
 	return nil
 }

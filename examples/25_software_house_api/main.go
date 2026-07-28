@@ -135,6 +135,10 @@ func seedAtStartup(ctx context.Context, ds *dataStore, scale synthScale) int {
 	fmt.Fprintf(os.Stderr, "# mem.num_gc=%d\n", mem.NumGC)
 	reportSchemaPlan(ds)
 	reportMinLabelScan(ds)
+	// R2-P2 evidence: the same multi-label shape the P1 harness above measures,
+	// now answered set-at-a-time — reported for BOTH the regime where the planner
+	// intersects and the one where its gate declines. See bitmap_intersect.go.
+	reportBitmapIntersect(ds)
 	return 0
 }
 

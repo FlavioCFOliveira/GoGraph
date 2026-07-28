@@ -13,8 +13,18 @@ package exec
 // no operator is obliged to implement it and none is misrepresented by the
 // absence.
 
-// PlanDetail reports the label this scan iterates.
-func (op *NodeByLabelScan) PlanDetail() string { return op.label }
+import "strings"
+
+// PlanDetail reports the label this scan iterates, or — for the multi-label
+// conjunction form (#2133) — the intersected labels in the order they are ANDed,
+// which is the order the planner chose by ascending cardinality and is therefore
+// part of the physical decision a reader needs to see.
+func (op *NodeByLabelScan) PlanDetail() string {
+	if op.labels != nil {
+		return strings.Join(op.labels, "∩")
+	}
+	return op.label
+}
 
 // PlanDetail reports the value this seek looks up, which is the whole point of
 // the access path: an index seek is only as selective as its key.
@@ -29,7 +39,14 @@ func (op *NodeByIndexSeek) PlanDetail() string {
 // see whether the seek is a point lookup, a half-open range, or effectively a
 // full index walk.
 func (op *NodeByIndexRangeScan) PlanDetail() string {
-	return "range=" + boundText(op.lo, "-inf") + ".." + boundText(op.hi, "+inf")
+	d := "range=" + boundText(op.lo, "-inf") + ".." + boundText(op.hi, "+inf")
+	// A composed intersection (#2134) probes several indexes and ANDs them, so the
+	// primary range alone would misrepresent the access path: the reader needs to
+	// see that more than one index contributed and over which intervals.
+	for i := range op.extra {
+		d += " ∩ range=" + boundText(op.extra[i].Lo, "-inf") + ".." + boundText(op.extra[i].Hi, "+inf")
+	}
+	return d
 }
 
 // boundText renders one range bound, using unbounded for a nil value.
