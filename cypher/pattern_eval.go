@@ -53,6 +53,11 @@ type patternEvaluator struct {
 	// positive number is an active ceiling and zero disables the cap (the
 	// explicit opt-out). See [resolvePatternCompBudget].
 	maxCollectItems int
+
+	// labelledHop caches the labelled single-hop verdict per pattern occurrence
+	// (rmp #2235), so the recogniser runs once per pattern rather than once per
+	// outer row. Lazily created: most patterns never reach the recogniser.
+	labelledHop map[*ast.PathPattern]*labelledHopShape
 }
 
 // newPatternEvaluator constructs the evaluator for one query run. The
@@ -86,6 +91,12 @@ func resolvePatternCompBudget(maxCollectItems int) int {
 func (pe *patternEvaluator) EvalPattern(ctx context.Context, pp *ast.PathPattern, row expr.RowContext, _ map[string]expr.Value) (expr.Value, error) {
 	if pe.g == nil || pp == nil || pp.Head == nil {
 		return expr.BoolValue(false), nil
+	}
+	// Labelled single hop (#2235): `WHERE (a)-[:K]->(:P)` asks only whether ONE
+	// qualifying neighbour exists, which is one adjacency walk that stops at the
+	// first match — not an enumeration of every candidate hop.
+	if found, ok := pe.matchLabelledHop(pp, row); ok {
+		return expr.BoolValue(found), nil
 	}
 	found, err := pe.matchPattern(ctx, pp, row)
 	if err != nil {

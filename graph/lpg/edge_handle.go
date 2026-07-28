@@ -57,6 +57,8 @@ package lpg
 
 import (
 	"sync"
+
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 // edgeHandleLabelShard holds the per-(src, dst, handle) label sets. The
@@ -85,6 +87,39 @@ func (g *Graph[N, W]) edgeHandleLabelShardFor(k edgeKey) *edgeHandleLabelShard {
 // edgeHandlePropShardFor selects the responsible property shard for k.
 func (g *Graph[N, W]) edgeHandlePropShardFor(k edgeKey) *edgeHandlePropShard {
 	return &g.edgeHandlePropShards[uint64(k.src)&(propMapShards-1)]
+}
+
+// edgeHandleHasLabel reports whether the edge identified by handle on the
+// directed (srcID, dstID) pair carries lid, and whether a handle-keyed label
+// record exists for it at all.
+//
+// known is false when handle is the 0 sentinel or no label was ever recorded
+// against it — the caller must then fall back to another source of the
+// relationship type rather than read the absence as "does not carry lid".
+//
+// It is the allocation-free, LabelID-level counterpart of
+// [Graph.EdgeLabelsByHandleID], which resolves every id back to a name and
+// builds a slice. A per-slot walk over a hub's adjacency cannot pay either
+// (rmp #2241).
+//
+// edgeHandleHasLabel is safe for concurrent use.
+func (g *Graph[N, W]) edgeHandleHasLabel(srcID, dstID graph.NodeID, handle uint64, lid LabelID) (has, known bool) {
+	if handle == 0 {
+		return false, false
+	}
+	k := edgeKey{src: srcID, dst: dstID}
+	sh := g.edgeHandleLabelShardFor(k)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	byHandle, ok := sh.m[k]
+	if !ok {
+		return false, false
+	}
+	bag, ok := byHandle[handle]
+	if !ok {
+		return false, false
+	}
+	return bag.has(lid), true
 }
 
 // SetEdgeLabelByHandle attaches name to the directed edge identified by

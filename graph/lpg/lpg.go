@@ -1694,13 +1694,15 @@ func (g *Graph[N, W]) OutDegreeByType(src N, relType LabelID) (int, bool) {
 // so the population it walks is exactly the one [Graph.Neighbours] exposes and
 // the two cannot drift apart.
 func (g *Graph[N, W]) outDegreeFiltered(src N, byType bool, relType LabelID) (int, bool) {
-	want := encodeSlotLabel(relType) // see OutDegreeByType on the encoding
-	return g.adj.OutDegreeFunc(src, func(dst graph.NodeID, lbl uint32) bool {
-		if byType && lbl != want {
-			return false
-		}
-		return !g.IsTombstoned(dst)
-	})
+	srcID, ok := g.adj.Mapper().Lookup(src)
+	if !ok {
+		return 0, false
+	}
+	// Routed through the same body as the bounded walkers so a typed count is
+	// resolved by HANDLE here too — otherwise the unbounded and bounded forms
+	// would disagree about parallel edges, which is exactly the drift their
+	// shared-predicate contract rules out (rmp #2241).
+	return g.outDegreeMatchingByID(srcID, relType, byType, maxInt, nil)
 }
 
 // OutDegreeByID is [Graph.OutDegree] keyed by an already-resolved
@@ -1731,14 +1733,131 @@ func (g *Graph[N, W]) OutDegreeByID(srcID graph.NodeID) (int, bool) {
 // OutDegreeByTypeBoundedByID is [Graph.OutDegreeByTypeBounded] keyed by an
 // already-resolved [graph.NodeID]. See [Graph.OutDegreeByID].
 func (g *Graph[N, W]) OutDegreeByTypeBoundedByID(srcID graph.NodeID, relType LabelID, limit int) (int, bool) {
+	return g.outDegreeMatchingByID(srcID, relType, true, limit, nil)
+}
+
+// slotCarriesType reports whether the adjacency slot at index i — whose
+// neighbour is dst and whose label column entry is lbl — carries relType.
+//
+// The handle is consulted FIRST and is authoritative when it has a record.
+// This is what makes a typed count correct over PARALLEL EDGES (rmp #2241): the
+// adjacency label column holds at most ONE label per (src, dst) pair, because
+// [AdjList.SetEdgeLabelSlot] scans for the first dst-matching slot and stops
+// there, so three parallel :K edges leave one slot labelled and the rest at the
+// 0 sentinel. Reading the column alone therefore counted 1 where 3 was correct.
+//
+// The per-handle store has no such collision: CreateRelationship stamps a
+// distinct handle on each CREATE's slot ([AdjList.AddEdgeH]) and records the
+// type against it, precisely because a positional index does not survive the
+// deletion of a parallel sibling.
+//
+// The column remains the fallback, and it is not vestigial: simple-graph storage
+// collapses a duplicate (src, dst) and stores no handle, and an edge added
+// through the Go API ([Graph.AddEdgeLabeled]) carries a slot label with no
+// handle record. In both cases the column is the only source there is, and in
+// both cases a pair has at most one edge, so the collision cannot arise.
+func (g *Graph[N, W]) slotCarriesType(srcID, dst graph.NodeID, handle uint64, lbl, want uint32, relType LabelID) bool {
+	if has, known := g.edgeHandleHasLabel(srcID, dst, handle, relType); known {
+		return has
+	}
+	return lbl == want
+}
+
+// outDegreeMatchingByID is the shared walk behind [Graph.OutDegreeByTypeBoundedByID]
+// and [Graph.OutDegreeMatchingBoundedByID]: it counts srcID's out-edges that
+// pass the type gate, the liveness gate and, when farOK is non-nil, the caller's
+// far-node predicate, stopping once limit have been counted.
+//
+// It walks the handle-carrying entry ([AdjList.LoadEntryH]) rather than going
+// through [AdjList.OutDegreeFuncBoundedByID], because resolving a slot's type
+// correctly requires the slot's HANDLE and that walk does not expose one.
+func (g *Graph[N, W]) outDegreeMatchingByID(
+	srcID graph.NodeID,
+	relType LabelID,
+	typed bool,
+	limit int,
+	farOK func(dst graph.NodeID) bool,
+) (int, bool) {
+	if limit <= 0 {
+		return 0, true
+	}
+	if _, interned := g.adj.Mapper().Resolve(srcID); !interned {
+		return 0, false
+	}
+	nbs, _, handles := g.adj.LoadEntryH(srcID)
+	labs := g.adj.LoadEntryLabels(srcID)
 	want := encodeSlotLabel(relType) // see OutDegreeByType on the encoding
 	live := g.tombstoneActive.Load() != 0
-	return g.adj.OutDegreeFuncBoundedByID(srcID, limit, func(dst graph.NodeID, lbl uint32) bool {
-		if lbl != want {
-			return false
+
+	n := 0
+	for i, dst := range nbs {
+		if typed {
+			var lbl uint32
+			if labs != nil && i < len(labs) {
+				lbl = labs[i]
+			}
+			var handle uint64
+			if handles != nil && i < len(handles) {
+				handle = handles[i]
+			}
+			if !g.slotCarriesType(srcID, dst, handle, lbl, want, relType) {
+				continue
+			}
 		}
-		return !live || !g.IsTombstoned(dst)
-	})
+		if live && g.IsTombstoned(dst) {
+			continue
+		}
+		if farOK != nil && !farOK(dst) {
+			continue
+		}
+		n++
+		if n >= limit {
+			break
+		}
+	}
+	return n, true
+}
+
+// OutDegreeMatchingBoundedByID counts srcID's out-edges whose far endpoint
+// satisfies farOK, optionally restricted to one relationship type, capped at
+// limit. It returns min(trueMatchingCount, limit); ok is false when srcID is not
+// interned.
+//
+// When typed is false relType is ignored and every out-edge is offered to farOK.
+//
+// It exists for a caller that must qualify the FAR NODE — the cypher engine
+// counting `(a)-[:K]->(:P)` without materialising a neighbour (rmp #2235). A
+// plain degree cannot answer that: a degree counts every out-edge and has no
+// way to ask anything about where the edge lands. Pushing the predicate in here
+// rather than exposing the raw adjacency walk keeps the TOMBSTONE GATE in one
+// place — a caller that assembled this from [AdjList.OutDegreeFuncBoundedByID]
+// would have to re-derive the liveness rule and could drift from
+// [Graph.OutDegreeByType], which is precisely the disagreement about WHICH edges
+// count that the bounded/unbounded pair is documented to rule out.
+//
+// farOK is called at most once per out-edge, in adjacency order, and only for
+// edges that already passed the type and liveness gates — so it never sees a
+// tombstoned endpoint and need not re-check one.
+//
+// # Cost
+//
+// O(min(d, limit)) in the node's degree, plus the cost of farOK. No allocation.
+//
+// # Concurrency
+//
+// Safe for concurrent use with readers and writers, and lock-free, on the same
+// terms as [Graph.OutDegreeByTypeBoundedByID].
+func (g *Graph[N, W]) OutDegreeMatchingBoundedByID(
+	srcID graph.NodeID,
+	relType LabelID,
+	typed bool,
+	limit int,
+	farOK func(dst graph.NodeID) bool,
+) (int, bool) {
+	if farOK == nil {
+		return 0, false
+	}
+	return g.outDegreeMatchingByID(srcID, relType, typed, limit, farOK)
 }
 
 // maxInt is the effectively-unbounded limit for the bounded degree walkers, used
@@ -1767,14 +1886,11 @@ const maxInt = int(^uint(0) >> 1)
 //
 // Safe for concurrent use with readers and writers, and lock-free.
 func (g *Graph[N, W]) OutDegreeByTypeBounded(src N, relType LabelID, limit int) (int, bool) {
-	want := encodeSlotLabel(relType) // see OutDegreeByType on the encoding
-	live := g.tombstoneActive.Load() != 0
-	return g.adj.OutDegreeFuncBounded(src, limit, func(dst graph.NodeID, lbl uint32) bool {
-		if lbl != want {
-			return false
-		}
-		return !live || !g.IsTombstoned(dst)
-	})
+	srcID, ok := g.adj.Mapper().Lookup(src)
+	if !ok {
+		return 0, false
+	}
+	return g.outDegreeMatchingByID(srcID, relType, true, limit, nil)
 }
 
 // HasConstraints reports whether the cypher engine currently has any schema

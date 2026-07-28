@@ -75,6 +75,12 @@ type subqueryEvaluator struct {
 	// pattern already examined and rejected, so the recogniser runs at most once
 	// per subquery occurrence rather than once per outer row.
 	degree map[ast.Expression]*degreeShape
+
+	// labelledHop caches the per-AST verdict for the labelled single-hop count
+	// (rmp #2235). It is a SEPARATE map from degree because it is a separate
+	// recogniser: a pattern rejected by one may be accepted by the other, and
+	// sharing a cache would conflate the two verdicts.
+	labelledHop map[ast.Expression]*labelledHopShape
 }
 
 // compiledSubquery bundles the runtime state of a single compiled subquery:
@@ -99,6 +105,8 @@ func newSubqueryEvaluator(walker nodeWalkerIface, labels labelResolverIface, reg
 		g:        g,
 		compiled: make(map[ast.Expression]*compiledSubquery),
 		degree:   make(map[ast.Expression]*degreeShape),
+
+		labelledHop: make(map[ast.Expression]*labelledHopShape),
 	}
 }
 
@@ -114,6 +122,13 @@ func (e *subqueryEvaluator) EvalExists(ctx context.Context, sub *ast.ExistsSubqu
 			degreeRewriteCount.Add(1)
 			return expr.BoolValue(n > 0), nil
 		}
+	}
+	// Labelled single hop (#2235): a label on the far node makes the pattern
+	// ineligible for the degree rewrite above — in Neo4j too — but it is still
+	// one adjacency walk rather than an inner plan. Capped at 1 for the same
+	// reason.
+	if n, ok := e.countLabelledHop(sub, sub.Pattern, sub.Where, row, 1); ok {
+		return expr.BoolValue(n > 0), nil
 	}
 	cs, err := e.compileExists(sub, row)
 	if err != nil {
@@ -138,6 +153,10 @@ func (e *subqueryEvaluator) EvalCount(ctx context.Context, sub *ast.CountSubquer
 			degreeRewriteCount.Add(1)
 			return expr.IntegerValue(n), nil
 		}
+	}
+	// Labelled single hop (#2235), likewise uncapped here.
+	if n, ok := e.countLabelledHop(sub, sub.Pattern, nil, row, -1); ok {
+		return expr.IntegerValue(n), nil
 	}
 	cs, err := e.compileCount(sub, row)
 	if err != nil {
@@ -331,14 +350,25 @@ func existsToSingleQuery(sub *ast.ExistsSubquery) *ast.SingleQuery {
 	if sub.Query != nil {
 		return sub.Query
 	}
+	// Where is load-bearing. Without it the inline predicate of a pattern-form
+	// EXISTS was DISCARDED on the expression-evaluated path, so
+	// `EXISTS { (a)-[:K]->(b) WHERE b.id = 999 }` returned true whenever the bare
+	// pattern matched — a predicate that can never hold, answered true. The
+	// WHERE-POSITION spelling was unaffected because the planner lowers it to a
+	// SemiApply with its own Selection; only this expression path built the inner
+	// MATCH by hand and forgot the clause (rmp #2242).
 	return &ast.SingleQuery{
 		ReadingClauses: []ast.ReadingClause{
-			&ast.Match{Pattern: sub.Pattern},
+			&ast.Match{Pattern: sub.Pattern, Where: sub.Where},
 		},
 	}
 }
 
 // countToSingleQuery is the COUNT counterpart of [existsToSingleQuery].
+//
+// It has no Where to thread: [ast.CountSubquery] carries no such field, so the
+// parser discards the inline WHERE of a COUNT pattern subquery before it ever
+// reaches here. That is the other half of rmp #2242 and is fixed with the field.
 func countToSingleQuery(sub *ast.CountSubquery) *ast.SingleQuery {
 	if sub.Query != nil {
 		return sub.Query

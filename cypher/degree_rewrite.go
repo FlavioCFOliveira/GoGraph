@@ -288,6 +288,12 @@ func (e *subqueryEvaluator) EvalCountBounded(ctx context.Context, sub *ast.Count
 			return expr.IntegerValue(n), nil
 		}
 	}
+	// Labelled single hop (#2235): a separate path for the shape the degree
+	// recogniser must refuse. It honours the same cap — the walk stops as soon as
+	// limit matching neighbours have been seen.
+	if n, ok := e.countLabelledHop(sub, sub.Pattern, nil, row, limit); ok {
+		return expr.IntegerValue(n), nil
+	}
 	return e.EvalCount(ctx, sub, row, params)
 }
 
