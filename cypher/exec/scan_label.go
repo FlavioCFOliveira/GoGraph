@@ -35,6 +35,20 @@ type labelResolver interface {
 	ResolveLabelBitmap(name string) *roaring64.Bitmap
 }
 
+// LabelIntersectResolver resolves a CONJUNCTION of label names to the bitmap of
+// NodeIDs carrying EVERY one of them — the set-at-a-time answer to a multi-label
+// node pattern (#2133).
+//
+// The names arrive in the order the caller wants them intersected, which is
+// load-bearing rather than cosmetic: label.Index.Intersect clones the FIRST
+// label's bitmap, so passing the smallest label first is measured 6.0× faster and
+// 7.5× lighter than passing the largest (docs/design-bitmap-intersection.md §4).
+// The planner sorts by exact ascending cardinality; this interface preserves that
+// order rather than re-deriving it.
+type LabelIntersectResolver interface {
+	ResolveLabelsBitmap(names []string) *roaring64.Bitmap
+}
+
 // LPGLabelSource is a concrete [labelResolver] built from an lpg label
 // registry and a label index.  It is the standard adapter for tests and
 // production use.
@@ -65,10 +79,14 @@ func (s *LPGLabelSource) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 //
 // NodeByLabelScan is NOT safe for concurrent use.
 type NodeByLabelScan struct {
-	src      labelResolver
-	ctx      context.Context //nolint:containedctx // stored for per-Next ctx check
-	iter     roaring64.IntPeekable64
-	buf      [1]expr.Value // fixed backing buffer — zero-alloc per Next
+	src  labelResolver
+	isrc LabelIntersectResolver
+	ctx  context.Context //nolint:containedctx // stored for per-Next ctx check
+	iter roaring64.IntPeekable64
+	buf  [1]expr.Value // fixed backing buffer — zero-alloc per Next
+	// labels is non-nil only for the multi-label CONJUNCTION form (#2133), in
+	// which case isrc supplies the intersected bitmap and label is unused.
+	labels   []string
 	label    string
 	cardHint int // bitmap cardinality captured in Init; -1 before Init
 	count    int // iteration counter for ctx check cadence
@@ -79,11 +97,36 @@ func NewNodeByLabelScan(labelName string, src labelResolver) *NodeByLabelScan {
 	return &NodeByLabelScan{label: labelName, src: src, cardHint: -1}
 }
 
-// Init resolves the label to a bitmap and initialises the iterator.
+// NewNodeByLabelIntersectionScan creates a scan over the INTERSECTION of labels —
+// the set-at-a-time answer to `MATCH (n:A:B)` (#2133).
+//
+// Only the bitmap Init resolves differs from the single-label form: Next, the
+// columnar FillChunk path, the exact rowCountHint and Close all operate on
+// whatever bitmap the scan holds, so the conjunction inherits the zero-alloc
+// contract and the columnar fast path unchanged.
+//
+// labels must be ordered as the caller wants them intersected (smallest first —
+// see [LabelIntersectResolver]) and must contain at least two entries; a
+// single-label conjunction is the plain scan and should use
+// [NewNodeByLabelScan].
+func NewNodeByLabelIntersectionScan(labels []string, src LabelIntersectResolver) *NodeByLabelScan {
+	return &NodeByLabelScan{labels: labels, isrc: src, cardHint: -1}
+}
+
+// Init resolves the label (or, for the conjunction form, the intersection of the
+// labels) to a bitmap and initialises the iterator.
 func (op *NodeByLabelScan) Init(ctx context.Context) error {
 	op.ctx = ctx
 	op.count = 0
-	bm := op.src.ResolveLabelBitmap(op.label)
+	var bm *roaring64.Bitmap
+	if op.labels != nil {
+		// Set-at-a-time conjunction: one k-way AND under a single index RLock, so
+		// the whole conjunction is decided against ONE consistent image of the
+		// label index rather than re-checked live per row (#2133).
+		bm = op.isrc.ResolveLabelsBitmap(op.labels)
+	} else {
+		bm = op.src.ResolveLabelBitmap(op.label)
+	}
 	// GetCardinality is the bitmap's element count — the exact number of rows
 	// this scan will emit. Capture it now (the bitmap is consumed by the
 	// iterator below) so rowCountHint can report it after Init (#1720).

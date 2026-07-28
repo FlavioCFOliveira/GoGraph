@@ -74,7 +74,13 @@ func writeGateFixture(t *testing.T, n int) *Engine {
 			t.Fatalf("SetNodeProperty: %v", err)
 		}
 	}
-	eng := NewEngine(g)
+	// The set-at-a-time bitmap intersection (#2133) is disabled here on purpose: it
+	// recognises the SAME (a:P:Rare) shape as the min-label re-anchor and is tried
+	// FIRST, so leaving it on would make this fixture's re-anchor assertions fail
+	// because something BETTER fired — which would stop them testing #2225 part A.
+	// The write path's intersection gate has its own assertion in
+	// TestWritePathGates_BitmapIntersectionInsideAWrite below.
+	eng := NewEngineWithOptions(g, EngineOptions{DisableBitmapIntersection: true})
 	// drain() rather than a bare RunAny: an abandoned Result is collected by a
 	// later forced GC and counted by TestResult_Close_DisarmsFinalizer, which
 	// samples the process-global leak counter across its own GC. Discarding the
@@ -97,6 +103,63 @@ func drain(t *testing.T, eng *Engine, stmt string) {
 	}
 	if err := res.Close(); err != nil {
 		t.Fatalf("close %q: %v", stmt, err)
+	}
+}
+
+// TestWritePathGates_BitmapIntersectionInsideAWrite extends the #2225 guarantee to
+// the set-at-a-time multi-label conjunction (#2133): a statement carrying a write
+// clause must receive that gate too, not just the read path. It is admissible on a
+// writing path for the same reason the re-anchor is — a label conjunction is
+// commutative, the intersected bitmap yields the same node set, and the scan emits
+// in the bitmap's ascending NodeID order either way.
+func TestWritePathGates_BitmapIntersectionInsideAWrite(t *testing.T) {
+	fixture := func(t *testing.T, n int) *Engine {
+		t.Helper()
+		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		g.SetIndexManager(index.NewManager())
+		for i := 0; i < n; i++ {
+			key := fmt.Sprintf("w%d", i)
+			if err := g.AddNode(key); err != nil {
+				t.Fatalf("AddNode: %v", err)
+			}
+			if err := g.SetNodeLabel(key, "P"); err != nil {
+				t.Fatalf("SetNodeLabel: %v", err)
+			}
+			if i%1000 == 0 {
+				if err := g.SetNodeLabel(key, "Rare"); err != nil {
+					t.Fatalf("SetNodeLabel(Rare): %v", err)
+				}
+			}
+		}
+		// A :Rare-only tail with no :P. Without it :Rare would be a SUBSET of :P, so
+		// |P ∩ Rare| == |Rare| and the intersection's strict-row-reduction gate would
+		// correctly decline — the test would then be asserting the write path lacks a
+		// gate it actually has.
+		for i := 0; i < 8; i++ {
+			key := fmt.Sprintf("r%d", i)
+			if err := g.AddNode(key); err != nil {
+				t.Fatalf("AddNode rare-only: %v", err)
+			}
+			if err := g.SetNodeLabel(key, "Rare"); err != nil {
+				t.Fatalf("SetNodeLabel(Rare-only): %v", err)
+			}
+		}
+		return NewEngine(g)
+	}
+	for _, tc := range []struct{ name, stmt string }{
+		{"read (control)", `MATCH (a:P:Rare) RETURN count(a)`},
+		{"write SET", `MATCH (a:P:Rare) SET a.t = true`},
+		{"write REMOVE", `MATCH (a:P:Rare) REMOVE a.sid`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eng := fixture(t, 5000)
+			before := labelIntersectBuildCount.Load()
+			drain(t, eng, tc.stmt)
+			if labelIntersectBuildCount.Load() == before {
+				t.Errorf("bitmap intersection did NOT fire for %q; the write path is planning "+
+					"without the #2133 gate", tc.stmt)
+			}
+		})
 	}
 }
 
@@ -158,7 +221,9 @@ func TestWritePathGates_ResultIdentity(t *testing.T) {
 	// comparison isolates the access path and nothing else.
 	on := writeGateFixture(t, 5000)
 	offEng := writeGateFixture(t, 5000)
-	offEng = NewEngineWithOptions(offEng.g, EngineOptions{DisableMinLabelScan: true})
+	offEng = NewEngineWithOptions(offEng.g, EngineOptions{
+		DisableMinLabelScan: true, DisableBitmapIntersection: true,
+	})
 
 	before := minLabelScanBuildCount.Load()
 	drain(t, on, stmt)

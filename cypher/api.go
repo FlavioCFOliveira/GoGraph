@@ -451,6 +451,11 @@ type buildOpts struct {
 	// buildOperator's *ir.Selection case. Left false by every other build path,
 	// which therefore always builds the legacy NodeByLabelScan+Filter plan.
 	rangeSeekEnabled bool
+	// bitmapIntersectEnabled gates the set-at-a-time multi-label conjunction
+	// (#2133). The read and write build paths set it from the Engine field; left
+	// false elsewhere, which keeps a multi-label pattern on the scan-and-filter
+	// plan.
+	bitmapIntersectEnabled bool
 	// prefixSeekEnabled gates the STARTS WITH prefix rewrite (#2127) inside the
 	// range seek. Set from the Engine field by the read and write build paths
 	// alongside rangeSeekEnabled; left false elsewhere, which keeps a prefix
@@ -713,6 +718,21 @@ type EngineOptions struct {
 	// Setting it true forces the legacy scan+filter plan for a prefix predicate; it
 	// also serves as an operational escape hatch.
 	DisablePrefixIndexSeek bool
+
+	// DisableBitmapIntersection turns OFF the set-at-a-time multi-label
+	// conjunction (#2133). When false (the default) the planner answers
+	// `MATCH (n:A:B)` by intersecting the labels' Roaring bitmaps — one k-way AND
+	// under a single index read-lock — and drops the residual label Filter, which
+	// the intersected bitmap subsumes. Gated on the EXACT intersection cardinality
+	// (roaring64.AndCardinality, which allocates nothing), so the decision needs no
+	// new statistic; when it vetoes, control falls through to the min-label anchor
+	// scan below, never to something worse.
+	//
+	// It is a SEPARATE knob from DisableMinLabelScan so the differential test can
+	// toggle the intersection alone and keep the shipped min-label plan active in
+	// both arms — two arms differing in exactly one variable. Setting it true forces
+	// the scan-and-filter plan; it is also an operational escape hatch.
+	DisableBitmapIntersection bool
 
 	// DisableMinLabelScan turns OFF the min-cardinality multi-label anchor scan
 	// (#2077). When false (the default) the planner anchors a multi-label node
@@ -1010,6 +1030,12 @@ type Engine struct {
 	// When false the planner always anchors a multi-label node scan on Labels[0].
 	minLabelScanEnabled bool
 
+	// bitmapIntersectEnabled gates the set-at-a-time multi-label conjunction
+	// (#2133). True by default; set false by
+	// EngineOptions.DisableBitmapIntersection. When false a multi-label pattern
+	// falls through to the min-label anchor scan and its residual label Filter.
+	bitmapIntersectEnabled bool
+
 	// joinReorderEnabled gates the count-store-gated disjoint-component ordering
 	// peephole (#2091). True by default; set false by EngineOptions.DisableJoinReorder.
 	// When false the planner always builds the written-order Cartesian.
@@ -1302,23 +1328,24 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 	// function-produced values.
 	reg = newGraphAwareRegistry(reg, g)
 	e := &Engine{
-		g:                   g,
-		store:               opts.Store,
-		reg:                 reg,
-		constraintReg:       exec.NewConstraintRegistry(),
-		indexDefReg:         newIndexDefRegistry(),
-		procReg:             procs.NewRegistry(),
-		cache:               newPlanCache(opts.PlanCacheCapacity),
-		edgeTypeFilterCache: newEdgeTypeFilterCache(opts.EdgeTypeFilterCacheCapacity),
-		maxResultRows:       resolveMaxResultRows(opts.MaxResultRows),
-		maxResultBytes:      resolveMaxResultBytes(opts.MaxResultBytes),
-		maxCollectItems:     opts.MaxCollectItems,
-		hashJoinEnabled:     !opts.DisableHashJoin,
-		rangeSeekEnabled:    !opts.DisableRangeIndexSeek,
-		prefixSeekEnabled:   !opts.DisablePrefixIndexSeek,
-		minLabelScanEnabled: !opts.DisableMinLabelScan,
-		joinReorderEnabled:  !opts.DisableJoinReorder,
-		anchorSwapEnabled:   !opts.DisableAnchorSwap,
+		g:                      g,
+		store:                  opts.Store,
+		reg:                    reg,
+		constraintReg:          exec.NewConstraintRegistry(),
+		indexDefReg:            newIndexDefRegistry(),
+		procReg:                procs.NewRegistry(),
+		cache:                  newPlanCache(opts.PlanCacheCapacity),
+		edgeTypeFilterCache:    newEdgeTypeFilterCache(opts.EdgeTypeFilterCacheCapacity),
+		maxResultRows:          resolveMaxResultRows(opts.MaxResultRows),
+		maxResultBytes:         resolveMaxResultBytes(opts.MaxResultBytes),
+		maxCollectItems:        opts.MaxCollectItems,
+		hashJoinEnabled:        !opts.DisableHashJoin,
+		rangeSeekEnabled:       !opts.DisableRangeIndexSeek,
+		prefixSeekEnabled:      !opts.DisablePrefixIndexSeek,
+		bitmapIntersectEnabled: !opts.DisableBitmapIntersection,
+		minLabelScanEnabled:    !opts.DisableMinLabelScan,
+		joinReorderEnabled:     !opts.DisableJoinReorder,
+		anchorSwapEnabled:      !opts.DisableAnchorSwap,
 
 		parallelScanEnabled:     !opts.DisableParallelScan,
 		parallelBackfillEnabled: !opts.DisableParallelBackfill,
@@ -2096,6 +2123,10 @@ func (e *Engine) buildReadPhysical(
 	// and never scans more rows than the Labels[0] plan, so it needs no
 	// order-safety companion.
 	bopts.minLabelScanEnabled = e.minLabelScanEnabled
+	// Set-at-a-time multi-label conjunction (#2133): strictly dominates the
+	// min-label re-anchor when its exact gate admits, and falls through to it when
+	// it vetoes, so enabling both is the intended configuration.
+	bopts.bitmapIntersectEnabled = e.bitmapIntersectEnabled
 	// Disjoint-component reorder gating (#2091): when the Engine permits it and
 	// the plan has memoised order-safe candidates, apply the live cardinality
 	// gate against this query's snapshot. The live node total (for AllNodesScan
@@ -5448,6 +5479,36 @@ func (s *lpgLabelResolver) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 	return s.g.NodeIndex().Intersect(uint32(lid))
 }
 
+// ResolveLabelsBitmap implements [exec.LabelIntersectResolver]: the set-at-a-time
+// answer to a multi-label node pattern (#2133).
+//
+// It resolves every name to its label id and hands the whole list to
+// label.Index.Intersect, which performs the k-way AND under ONE index read-lock —
+// so the conjunction is decided against a single consistent image of the label
+// index, not k independently sampled bitmaps
+// (docs/design-bitmap-intersection.md §6).
+//
+// names is intersected in the order given. That order is the planner's, chosen by
+// ascending exact cardinality, because Intersect clones the FIRST label's bitmap:
+// smallest-first is measured 6.0× faster and 7.5× lighter than largest-first (§4).
+//
+// An unknown label makes the conjunction empty by definition, so it short-circuits
+// to an empty bitmap without touching the index.
+func (s *lpgLabelResolver) ResolveLabelsBitmap(names []string) *roaring64.Bitmap {
+	if len(names) == 0 {
+		return roaring64.New()
+	}
+	ids := make([]uint32, 0, len(names))
+	for _, n := range names {
+		lid, ok := s.g.Registry().Lookup(n)
+		if !ok {
+			return roaring64.New()
+		}
+		ids = append(ids, uint32(lid))
+	}
+	return s.g.NodeIndex().Intersect(ids...)
+}
+
 // ResolveLabelCount reports the number of live nodes that carry name, read
 // directly from the label index's cardinality without materialising a bitmap. It
 // backs the zero-alloc [exec.LabelCountScan] fast path (#2004). ok is always
@@ -5616,10 +5677,11 @@ func BuildPlanWithMutator(
 //     and, for the write case specifically, by [TestWritePathGates_HashJoinPreservesOrder].
 //     See also [hashJoinBuildOnLeft] for why no order guard accompanies it.
 type planGates struct {
-	rangeSeek    bool
-	prefixSeek   bool
-	minLabelScan bool
-	hashJoin     bool
+	rangeSeek       bool
+	prefixSeek      bool
+	minLabelScan    bool
+	bitmapIntersect bool
+	hashJoin        bool
 }
 
 // buildPlanWithMutatorFull is the engine-internal variant of
@@ -5672,6 +5734,11 @@ func buildPlanWithMutatorFull(
 	// order the btree already guarantees.
 	bopts.prefixSeekEnabled = gates.prefixSeek
 	bopts.minLabelScanEnabled = gates.minLabelScan
+	// Admissible on a writing path for the same reason the min-label re-anchor is:
+	// a label conjunction is commutative, the intersected bitmap yields the same
+	// node set, and the scan's emission order is the bitmap's ascending NodeID
+	// order either way.
+	bopts.bitmapIntersectEnabled = gates.bitmapIntersect
 	// #2225 part B admitted the hash join here with no order-safety companion,
 	// because the substitution is order-PRESERVING, not merely order-insensitive:
 	// the build side is pinned by the planner, so nothing above the join can
@@ -7676,6 +7743,21 @@ func buildOperatorRec(
 		if bopts != nil && bopts.seekHint[p] {
 			return buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 		}
+		// Set-at-a-time multi-label conjunction (#2133): the SAME shape the
+		// min-label re-anchor below recognises, answered by intersecting the labels'
+		// Roaring bitmaps instead of scanning one label and re-checking the rest per
+		// row. It is tried FIRST of the two because it strictly dominates the
+		// re-anchor when its exact gate admits — same rows, and the residual label
+		// Filter is dropped because the intersected bitmap subsumes it — and because
+		// when the gate vetoes, control falls straight through to the re-anchor, so
+		// the worst case is exactly today's plan. Still AFTER the equality and
+		// key-set seeks, which subsume the Selection outright and are more selective
+		// (see label_intersect_plan.go).
+		if op, ok, err := buildLabelIntersectionIfEnabled(p, labelSrc, schema, bopts); err != nil {
+			return nil, err
+		} else if ok {
+			return op, nil
+		}
 		// Min-cardinality multi-label anchor scan (#2077): when this Selection is
 		// a bare LabelPredicate over a NodeByLabelScan of the same node — the shape
 		// the IR translator emits for a multi-label pattern `(n:A:B)` — re-anchor
@@ -8743,17 +8825,43 @@ func tryBuildParallelScanProject(
 	// on that label's own cardinality (#2187), so a small label inside a large graph
 	// stays serial.
 	var srcWalker nodeWalkerIface = lw
+	// Set-at-a-time multi-label conjunction (#2133) FIRST: when the optional
+	// Selection is exactly the bare multi-label LabelPredicate the intersection
+	// peephole recognises, and its exact gate admits, the row source becomes the
+	// INTERSECTED bitmap and the Selection is dropped — the bitmap subsumes it.
+	// Without this the parallel path would anchor on one label and re-check the rest
+	// per row in every worker, i.e. parallelise the waste this sprint removes.
+	intersected := false
 	if leafLabel != "" {
-		lblWalker, card, resolved := newLabelWalker(leafLabel, labelSrc)
-		if !resolved {
+		if iw, icard, iok := parallelIntersectionSource(sel, leafVar, labelSrc, bopts); iok {
+			// The threshold is judged on the INTERSECTION's own cardinality: a
+			// conjunction selecting a handful of rows out of two huge labels should
+			// stay serial, exactly as a small label inside a large graph does (#2187).
+			if !useParallelScanForRows(icard, bopts) {
+				return nil, false, nil
+			}
+			srcWalker = iw
+			sel = nil
+			intersected = true
+		}
+	}
+	if !intersected {
+		// Row source and threshold. A bare all-nodes scan walks the whole graph and is
+		// gated on its live order; a labelled scan walks the label's bitmap and is gated
+		// on that label's own cardinality (#2187), so a small label inside a large graph
+		// stays serial.
+		if leafLabel != "" {
+			lblWalker, card, resolved := newLabelWalker(leafLabel, labelSrc)
+			if !resolved {
+				return nil, false, nil
+			}
+			if !useParallelScanForRows(card, bopts) {
+				return nil, false, nil
+			}
+			srcWalker = lblWalker
+		} else if !useParallelScan(walker, bopts) {
 			return nil, false, nil
 		}
-		if !useParallelScanForRows(card, bopts) {
-			return nil, false, nil
-		}
-		srcWalker = lblWalker
-	} else if !useParallelScan(walker, bopts) {
-		return nil, false, nil
 	}
 
 	// Per-worker subplan factory. Each call rebuilds the SAME subtree over a
@@ -13730,6 +13838,24 @@ func tryBuildColumnarFilterChain(
 			return nil, false, nil
 		}
 	}
+	// The set-at-a-time multi-label conjunction (#2133) is the same argument taken
+	// one step further: it reduces the rows scanned to the exact answer, so it must
+	// not be pre-empted either. It is checked SEPARATELY from the re-anchor above
+	// because the two fire on different conditions — when the smallest label is
+	// written first the re-anchor has nothing to do, yet the intersection may still
+	// remove rows, and without this guard that reduction was measurably lost to the
+	// columnar chain.
+	//
+	// The reverse case needs no guard here: the intersection's own gate fires only
+	// on a STRICT row reduction, so when it would remove no rows it declines and
+	// leaves this recogniser the shape — which is why this yield cannot cost the
+	// caller column-major execution for nothing.
+	if bopts.bitmapIntersectEnabled {
+		if _, _, wouldIntersect := pickLabelIntersection(sel, labelSrc,
+			&execLabelAdapter{labelSrc: labelSrc}); wouldIntersect {
+			return nil, false, nil
+		}
+	}
 	// Pre-check against a hypothetical schema (scanVar at column 0) so a non-match
 	// never mutates the real schema. The predicate must be columnar-evaluable and
 	// every projection item a scalar property on the scanned node at column 0.
@@ -15048,6 +15174,18 @@ func (a *execLabelAdapter) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 	return a.labelSrc.ResolveLabelBitmap(name)
 }
 
+// ResolveLabelsBitmap satisfies [exec.LabelIntersectResolver] by delegating the
+// k-way label AND to the underlying resolver when it supports one (#2133). A
+// resolver that does not — a stub in a unit test — yields an empty bitmap, and
+// the planner never selects the intersection path for it because
+// [labelIntersectResolverFor] declines first.
+func (a *execLabelAdapter) ResolveLabelsBitmap(names []string) *roaring64.Bitmap {
+	if isect, ok := a.labelSrc.(exec.LabelIntersectResolver); ok {
+		return isect.ResolveLabelsBitmap(names)
+	}
+	return roaring64.New()
+}
+
 // ResolveLabelCount satisfies exec's optional labelCounter fast path, delegating
 // the zero-alloc label-count read to the underlying resolver when it supports
 // one; otherwise it reports (0, false) so [exec.LabelCountScan] falls back to the
@@ -15308,7 +15446,8 @@ func (e *Engine) execUnderBarrier(
 			// `UNWIND … MATCH … CREATE` bulk-load idiom — with a bare label scan
 			// (part A) driving a nested-loop Cartesian product (part B).
 			planGates{rangeSeek: e.rangeSeekEnabled, prefixSeek: e.prefixSeekEnabled,
-				minLabelScan: e.minLabelScanEnabled, hashJoin: e.hashJoinEnabled})
+				minLabelScan: e.minLabelScanEnabled, bitmapIntersect: e.bitmapIntersectEnabled,
+				hashJoin: e.hashJoinEnabled})
 		if berr != nil {
 			buildErr = berr
 			return nil

@@ -118,8 +118,15 @@ func drainSortedMinLabel(t *testing.T, e *Engine, q string) []string {
 // wantTrigger asserts whether the enabled run actually re-anchored the scan.
 func assertMinLabelIdentical(t *testing.T, g *lpg.Graph[string, float64], q string, wantTrigger bool) {
 	t.Helper()
-	on := NewEngine(g)
-	off := NewEngineWithOptions(g, EngineOptions{DisableMinLabelScan: true})
+	// Both arms disable the set-at-a-time bitmap intersection (#2133). It
+	// recognises the SAME shape as the min-label re-anchor and is tried FIRST, so
+	// with it enabled this suite's `wantTrigger` assertions would fail for the
+	// right reason — something better fired — and stop testing the re-anchor at
+	// all. Disabling it here keeps this suite pointed at the peephole it is named
+	// for, which is now the FALLBACK the intersection vetoes to; the intersection
+	// has its own differential in label_intersect_diff_test.go.
+	on := NewEngineWithOptions(g, EngineOptions{DisableBitmapIntersection: true})
+	off := NewEngineWithOptions(g, EngineOptions{DisableMinLabelScan: true, DisableBitmapIntersection: true})
 
 	before := minLabelScanBuildCount.Load()
 	gotOn := drainSortedMinLabel(t, on, q)
@@ -192,8 +199,8 @@ func TestMinLabelScan_Differential_CardinalityTie(t *testing.T) {
 	g := buildMinLabelGraph(t, nodes)
 	q := "MATCH (n:Left:Right) RETURN n.k AS k"
 	// Identity holds regardless of which equal-cardinality label anchors the scan.
-	on := NewEngine(g)
-	off := NewEngineWithOptions(g, EngineOptions{DisableMinLabelScan: true})
+	on := NewEngineWithOptions(g, EngineOptions{DisableBitmapIntersection: true})
+	off := NewEngineWithOptions(g, EngineOptions{DisableMinLabelScan: true, DisableBitmapIntersection: true})
 	gotOn := drainSortedMinLabel(t, on, q)
 	gotOff := drainSortedMinLabel(t, off, q)
 	if len(gotOn) != 0 || len(gotOff) != 0 {
