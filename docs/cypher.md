@@ -431,9 +431,26 @@ value, because the two kinds are keyed differently:
 |---|---|---|
 | `=` | `hash` | either kind |
 | `<` `>` `<=` `>=` | `btree` | either kind |
+| `STARTS WITH` | `btree` | — |
+| `ENDS WITH`, `CONTAINS` | never indexed | — |
 
 A hash index is keyed on strings, so of the string predicates it accelerates
 equality only; a string range needs a BTree index.
+
+**A prefix is a range.** `n.p STARTS WITH 'abc'` selects exactly the keys in the
+half-open interval `['abc', 'abd')`, so on a BTree index it is served by the same
+range seek as `>=` / `<`, under the same cost gate. Only the prefix form
+qualifies: `ENDS WITH` and `CONTAINS` do not describe an interval of the key
+order — with `"ax" < "b" < "bx"` the outer two match a suffix the middle one does
+not — so the narrowest sound interval for them is the whole index, which carries
+no selectivity and is never worth seeking. Serving those would need a different
+structure (a suffix or n-gram index), which GoGraph does not have.
+
+The rewrite applies to `n.p STARTS WITH <literal>` only. A negated prefix
+(`NOT n.p STARTS WITH 'abc'`) selects the *complement* of the interval and is
+answered by a scan, as is a disjunction of prefixes, a prefix operand supplied as
+a parameter, and the mirrored form `'abc' STARTS WITH n.p` — which asks a
+different question, whether the literal begins with the property's value.
 
 **Numeric properties are served by either kind.** Every index — hash or BTree —
 carries an internal numeric companion keyed on a unified `float64` order, so a
@@ -1211,8 +1228,10 @@ and no query over ASCII or Latin-1 text ever will.
   index is ordered by the same rule, which is what makes an equality on a
   string btree index answerable as the degenerate closed range `[v, v]` —
   no two distinct strings compare equal under a code-point order, so the range
-  is exact. Changing the collation would reach into the index layer, not just
-  `ORDER BY`.
+  is exact. The same rule is what lets `STARTS WITH` be served as an interval:
+  `STARTS WITH` is a code-point (UTF-8 byte) prefix test, and the index is laid
+  out in that very order, so the matching keys are contiguous. Changing the
+  collation would reach into the index layer, not just `ORDER BY`.
 
 If your application needs locale-aware ordering (dictionary order, case-insensitive
 order, language-specific rules), neither engine provides it: sort in the

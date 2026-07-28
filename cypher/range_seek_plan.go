@@ -135,6 +135,13 @@ type numericBound struct {
 // previously did not, which planned every statement carrying a write clause with
 // a bare label scan; see [planGates]. When enabled this delegates to
 // [tryBuildRangeSeekChild].
+//
+// The STARTS WITH prefix rewrite (#2127) carries its OWN gate
+// (bopts.prefixSeekEnabled, from EngineOptions.DisablePrefixIndexSeek) rather
+// than riding this one, so the differential harness can toggle the prefix
+// rewrite alone and leave the `>=`/`<` seek active in BOTH arms — two arms that
+// differ in exactly one variable. A prefix seek still requires the range seek to
+// be enabled at all, since it is built by the same peephole.
 func buildRangeSeekIfEnabled(
 	bopts *buildOpts,
 	sel *ir.Selection,
@@ -146,7 +153,7 @@ func buildRangeSeekIfEnabled(
 	if bopts == nil || !bopts.rangeSeekEnabled {
 		return nil, false
 	}
-	return tryBuildRangeSeekChild(sel, schema, idxMgr, g, params)
+	return tryBuildRangeSeekChild(sel, schema, idxMgr, g, params, bopts.prefixSeekEnabled)
 }
 
 // tryBuildRangeSeekChild attempts to build a NodeByIndexRangeScan to replace
@@ -160,12 +167,16 @@ func buildRangeSeekIfEnabled(
 // scan's node variable at the next free schema slot — identical to what
 // NodeByLabelScan would bind — so the original predicate Filter the caller
 // stacks on top reads the node from the same column.
+// prefixSeek admits the STARTS WITH prefix rewrite (#2127); when false the
+// predicate is not recognised at all and the plan is byte-identical to the one
+// built before that change.
 func tryBuildRangeSeekChild(
 	sel *ir.Selection,
 	schema map[string]int,
 	idxMgr *index.Manager,
 	g *lpg.Graph[string, float64],
 	params map[string]expr.Value,
+	prefixSeek bool,
 ) (exec.Operator, bool) {
 	if idxMgr == nil || g == nil || sel.PredicateExpr == nil {
 		// No index, or no AST predicate to build the residual Filter from:
@@ -184,7 +195,7 @@ func tryBuildRangeSeekChild(
 	// Try the string-btree path first (a string range over a string-typed
 	// index). When the predicate is not a string range — typically a numeric
 	// range n.age > 30 — fall through to the unified numeric companion.
-	if op, ok := tryStringRangeSeek(sel, schema, idxMgr, g, lblScan, nodeVar); ok {
+	if op, ok := tryStringRangeSeek(sel, schema, idxMgr, g, lblScan, nodeVar, prefixSeek); ok {
 		return op, true
 	}
 	return tryNumericRangeSeek(sel, schema, idxMgr, g, lblScan, nodeVar, params)
@@ -201,8 +212,9 @@ func tryStringRangeSeek(
 	g *lpg.Graph[string, float64],
 	lblScan *ir.NodeByLabelScan,
 	nodeVar string,
+	prefixSeek bool,
 ) (exec.Operator, bool) {
-	pred, ok := extractStringRangePred(sel.PredicateExpr, nodeVar)
+	pred, ok := extractStringRangePred(sel.PredicateExpr, nodeVar, prefixSeek)
 	if !ok {
 		return nil, false
 	}
@@ -334,16 +346,77 @@ func asBoundStringRange(sub index.Subscriber, label, propKey string) (boundStrin
 // AND of two comparisons on the SAME property. Returns ok == false for any
 // other shape, a non-string literal, a mixed-property AND, or a bound operand
 // that is not a plain string literal.
-func extractStringRangePred(e ast.Expression, nodeVar string) (stringRangePred, bool) {
+// The descent structure is load-bearing for SOUNDNESS, not just for tidiness:
+// the ONLY shapes reachable are a direct comparison and a top-level AND of two
+// direct comparisons. That is what excludes a NEGATED predicate, which selects
+// the COMPLEMENT of the range and would make the seek a non-superset:
+// `NOT (n.p STARTS WITH 'ab')` presents an *ast.UnaryOp, which
+// [extractSingleStringCmp] declines, and `NOT x AND y` declines for the same
+// reason on its left arm. An OR arrives as a *ast.BinaryOp whose operator is not
+// in the accepted set and is declined too. Widening this descent — pushing
+// through NOT, or accepting OR — would break the superset invariant that every
+// caller of this file relies on. See docs/design-prefix-range-seek.md §5.1.
+func extractStringRangePred(e ast.Expression, nodeVar string, prefixSeek bool) (stringRangePred, bool) {
 	if bo, ok := e.(*ast.BinaryOp); ok && strings.EqualFold(bo.Operator, "AND") {
-		left, lok := extractSingleStringCmp(bo.Left, nodeVar)
-		right, rok := extractSingleStringCmp(bo.Right, nodeVar)
+		left, lok := extractSingleStringCmp(bo.Left, nodeVar, prefixSeek)
+		right, rok := extractSingleStringCmp(bo.Right, nodeVar, prefixSeek)
 		if lok && rok && left.propKey == right.propKey {
 			return mergeRangeBounds(left, right)
 		}
 		return stringRangePred{}, false
 	}
-	return extractSingleStringCmp(e, nodeVar)
+	return extractSingleStringCmp(e, nodeVar, prefixSeek)
+}
+
+// startsWithOp is the AST operator string the parser emits for a prefix
+// predicate (cypher/parser/visitor.go).
+const startsWithOp = "STARTS WITH"
+
+// prefixSuccessor returns the least string strictly greater than EVERY string
+// having p as a prefix — the exclusive upper bound of the prefix range
+// [p, succ(p)). ok is false when no finite successor exists (p is empty, or
+// every byte of p is 0xFF), in which case the caller must leave the upper bound
+// UNBOUNDED so the scan runs open-ended (see [boundFor]).
+//
+// # Why the BYTE successor and not a code-point increment
+//
+// The btree's total order for a string key is cmp.Compare on the Go string —
+// byte-wise lexicographic, no collation, no normalisation (graph/index/btree/
+// bplus.go) — and openCypher's STARTS WITH is strings.HasPrefix, a byte test
+// (cypher/expr/eval.go). Both sides of the rewrite therefore already share ONE
+// byte basis, so incrementing a byte matches both without a translation step.
+// It also strictly dominates a code-point increment: it exists for every
+// non-empty prefix that is not all-0xFF (a code-point increment has no
+// successor when the last code point is U+10FFFF, forcing a much weaker
+// unbounded scan), and it is tighter — for a prefix ending in U+00FF (C3 BF) it
+// yields C3 C0 where the code-point form yields C4 80. succ is a comparison key
+// only: it is never stored, never returned, and never decoded, so it does not
+// matter that it may not be valid UTF-8.
+//
+// # Proof that [p, succ] is a superset, and how tight it is
+//
+// Let i be the last index with p[i] < 0xFF, so succ = p[:i] ++ (p[i]+1). For any
+// s with HasPrefix(s, p): p ≤ s because a prefix never exceeds the string it
+// prefixes; and s < succ because bytes 0..i-1 agree while succ[i] = p[i]+1 >
+// p[i] = s[i], so the first differing byte settles it.
+//
+// The converse very nearly holds, which is what keeps the seek tight: any key k
+// with p ≤ k < succ must have p as a prefix (bytes 0..i must equal p's, and
+// bytes i+1.. of p are all 0xFF by the choice of i, so k ≥ p forces those to
+// match as well). Hence the CLOSED interval the operator actually walks —
+// NodeByIndexRangeScan emits the inclusive superset and ignores Include, see
+// #F-EXEC1 — over-returns at most the single key equal to succ, which the
+// residual Filter removes. See docs/design-prefix-range-seek.md §3.
+func prefixSuccessor(p string) (string, bool) {
+	for i := len(p) - 1; i >= 0; i-- {
+		if p[i] == 0xFF {
+			continue
+		}
+		b := []byte(p[:i+1])
+		b[i]++
+		return string(b), true
+	}
+	return "", false
 }
 
 // extractSingleStringCmp extracts one comparison "nodeVar.prop <op> stringLit"
@@ -374,13 +447,33 @@ func extractStringRangePred(e ast.Expression, nodeVar string) (stringRangePred, 
 // seek's residual Selection Filter is always retained
 // (see [tryBuildRangeSeekChild]) and re-applies the exact property predicate, so
 // the seek can only narrow what the filter examines, never change what it admits.
-func extractSingleStringCmp(e ast.Expression, nodeVar string) (stringRangePred, bool) {
+// # Why the prefix predicate is served here too (#2127)
+//
+// `n.prop STARTS WITH 'p'` IS a range predicate: the prefix set is exactly the
+// half-open interval [p, succ(p)) of the byte order the btree is laid out in
+// (see [prefixSuccessor] for the construction and its proof). Before this it
+// full-scanned the label and refiltered every row: measured at 50 000 nodes,
+// 11.28 ms and 149 829 allocs/op — the allocation count tracking the label
+// population, the signature of a scan — against 38.23 µs and 566 allocs for the
+// identical predicate written as `>= 'p' AND < 'succ'`, a 295× / 265× gap on the
+// same 100-row answer (rmp #2126).
+//
+// Two boundaries are deliberate. Only `n.prop STARTS WITH lit` is admitted: the
+// operator is NOT symmetric, so the mirrored `lit STARTS WITH n.prop` tests a
+// literal against a property-valued PREFIX and describes no range over n.prop.
+// And ENDS WITH / CONTAINS are excluded by proof, not by omission — their match
+// set is not an interval of the byte order ("ax" < "b" < "bx" with the outer two
+// matching and the middle one not), so the tightest sound interval degenerates
+// to the whole index: not unsound, but useless, and vetoed by the selectivity
+// gate anyway (docs/design-prefix-range-seek.md §5.3).
+func extractSingleStringCmp(e ast.Expression, nodeVar string, prefixSeek bool) (stringRangePred, bool) {
 	bo, ok := e.(*ast.BinaryOp)
 	if !ok {
 		return stringRangePred{}, false
 	}
 	op := bo.Operator
-	if op != "=" && op != ">" && op != ">=" && op != "<" && op != "<=" {
+	isPrefix := prefixSeek && op == startsWithOp
+	if !isPrefix && op != "=" && op != ">" && op != ">=" && op != "<" && op != "<=" {
 		return stringRangePred{}, false
 	}
 	// Property on the left: n.prop <op> lit.
@@ -390,8 +483,12 @@ func extractSingleStringCmp(e ast.Expression, nodeVar string) (stringRangePred, 
 		}
 		return stringRangePred{}, false
 	}
-	// Property on the right: lit <op> n.prop — flip the operator.
+	// Property on the right: lit <op> n.prop — flip the operator. STARTS WITH has
+	// no meaningful flip (see the doc comment), so the mirrored form is declined.
 	if propKey, isProp := nodePropKey(bo.Right, nodeVar); isProp {
+		if isPrefix {
+			return stringRangePred{}, false
+		}
 		if sv, isStr := stringLiteral(bo.Left); isStr {
 			return boundFor(propKey, op, sv, true), true
 		}
@@ -403,9 +500,31 @@ func extractSingleStringCmp(e ast.Expression, nodeVar string) (stringRangePred, 
 // boundFor builds a stringRangePred for "prop op value", flipping the operator's
 // side when the property was on the right of the comparison (mirrored == true:
 // "value op prop" ≡ "prop op' value" with op' the reverse). A range operator
-// yields one bound; "=" yields the degenerate closed range [value, value] (see
-// [extractSingleStringCmp]).
+// yields one bound; "=" yields the degenerate closed range [value, value], and
+// STARTS WITH yields [value, succ(value)) (see [extractSingleStringCmp]).
 func boundFor(propKey, op string, value expr.StringValue, mirrored bool) stringRangePred {
+	if op == startsWithOp {
+		// A prefix is a range: lower bound the prefix itself, upper bound its
+		// exclusive successor. When no finite successor exists — the empty prefix,
+		// or an all-0xFF prefix — hi stays nil, which routes the executed scan to
+		// the index's OPEN-ENDED RangeFrom and the gate to RangeCountFrom (#F-CY1),
+		// so the counted and the walked key space stay the same. The empty prefix
+		// then spans every indexed key and the selectivity gate declines it, which
+		// is right: `s STARTS WITH ''` is true of every string, so there is nothing
+		// for a seek to narrow.
+		//
+		// Include on the upper bound is metadata only — NodeByIndexRangeScan emits
+		// the inclusive [lo, hi] superset and the residual Filter enforces exactness
+		// (#F-EXEC1) — so the closed walk over [value, succ] admits at most the one
+		// extra key equal to succ, which the Filter then rejects.
+		lo := exec.RangeBound{Value: value, Include: true}
+		succ, ok := prefixSuccessor(string(value))
+		if !ok {
+			return stringRangePred{propKey: propKey, lo: &lo}
+		}
+		hi := exec.RangeBound{Value: expr.StringValue(succ), Include: false}
+		return stringRangePred{propKey: propKey, lo: &lo, hi: &hi}
+	}
 	if op == "=" {
 		// Equality is symmetric, so the mirror needs no flip. Two SEPARATE bounds
 		// are built rather than one shared pointer: mergeRangeBounds and the

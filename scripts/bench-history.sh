@@ -70,6 +70,13 @@ if ! git -C "$REPO_ROOT" diff --quiet 2>/dev/null || ! git -C "$REPO_ROOT" diff 
 fi
 
 # Next zero-padded sequence number.
+#
+# Derived from the raw files on disk AND from the LEDGER, taking the maximum of
+# the two. The LEDGER is consulted because a run's raw .txt is not always
+# committed — several are not — and deriving the sequence from files alone then
+# silently REUSES a number the ledger has already spent. That happened on
+# 2026-07-28: rows 0024 and 0025 existed (sprints 309 and 310) with no raw files,
+# so a new run claimed 0025 a second time and appended a duplicate row.
 SEQ=1
 shopt -s nullglob
 for f in "$HIST_DIR"/[0-9][0-9][0-9][0-9]__*.txt; do
@@ -79,6 +86,13 @@ for f in "$HIST_DIR"/[0-9][0-9][0-9][0-9]__*.txt; do
   if (( n >= SEQ )); then SEQ=$((n + 1)); fi
 done
 shopt -u nullglob
+if [[ -f "$LEDGER" ]]; then
+  while read -r n; do
+    [[ -z "$n" ]] && continue
+    n=$((10#$n))
+    if (( n >= SEQ )); then SEQ=$((n + 1)); fi
+  done < <(grep -oE '^\| [0-9]{4}' "$LEDGER" | awk '{print $2}')
+fi
 SEQ_PAD="$(printf '%04d' "$SEQ")"
 
 # Most recent prior raw run (for benchstat comparison).
@@ -98,6 +112,46 @@ fi
 
 OUT="${HIST_DIR}/${SEQ_PAD}__${LABEL}__${COMMIT}${DIRTY}.txt"
 
+# strip_log_noise repairs `go test -bench` output that a library log line has
+# interleaved with.
+#
+# `go test` forwards the test binary's STDERR into its own STDOUT, so anything the
+# code under benchmark logs lands in the middle of the benchmark stream. The
+# damaging case is not the extra lines — benchstat ignores what it cannot parse —
+# but that a log line arriving between go test's two writes SPLITS a benchmark's
+# name from its result:
+#
+#   BenchmarkIC10-10   2026/07/28 13:17:52 WARN cypher: engine constructed over …
+#   2026/07/28 13:17:52 WARN cypher: …
+#      69986     17682 ns/op   57600 B/op   84 allocs/op
+#
+# benchstat needs `name  iters  value unit …` on ONE line, so every split sample
+# is silently dropped — and a benchstat that silently sees fewer benchmarks reads
+# exactly like "no regression". A curated run measured on 2026-07-28 had 90 of its
+# 92 result lines split this way, which would have made the history file worthless
+# while looking clean (runs 0001–0022 predate the log line and are unaffected).
+#
+# This filter deletes any `YYYY/MM/DD HH:MM:SS …` text to end of line, drops lines
+# that become blank, and re-joins a bare benchmark-name line with the result line
+# that follows. It touches only how output is RECORDED — never a measurement — and
+# it is deliberately generic, so any future logging on a benchmarked path is
+# handled without another repair.
+strip_log_noise() {
+  awk '
+    {
+      line = $0
+      # Any timestamped log record, wherever it starts on the line.
+      sub(/[0-9]+\/[0-9]+\/[0-9]+ [0-9]+:[0-9]+:[0-9]+ .*$/, "", line)
+      sub(/[ \t]+$/, "", line)
+      if (line == "") next
+      if (line ~ /^Benchmark[^ \t]*$/) { pending = line; next }
+      if (pending != "") { print pending "\t" line; pending = ""; next }
+      print line
+    }
+    END { if (pending != "") print pending }
+  '
+}
+
 echo "── bench-history run ${SEQ_PAD} (${LABEL}) @ ${COMMIT}${DIRTY} ──"
 echo "count=${COUNT} benchtime=${BENCHTIME}"
 echo
@@ -108,7 +162,7 @@ for entry in "${SUITE[@]}"; do
   regex="${entry##* :: }"
   echo ">>> ${pkg}  ${regex}"
   ( cd "$REPO_ROOT" && go test -run='^$' -bench="$regex" -benchmem \
-      -count="$COUNT" -benchtime="$BENCHTIME" "$pkg" ) | tee -a "$OUT"
+      -count="$COUNT" -benchtime="$BENCHTIME" "$pkg" ) | strip_log_noise | tee -a "$OUT"
   echo
 done
 

@@ -451,6 +451,11 @@ type buildOpts struct {
 	// buildOperator's *ir.Selection case. Left false by every other build path,
 	// which therefore always builds the legacy NodeByLabelScan+Filter plan.
 	rangeSeekEnabled bool
+	// prefixSeekEnabled gates the STARTS WITH prefix rewrite (#2127) inside the
+	// range seek. Set from the Engine field by the read and write build paths
+	// alongside rangeSeekEnabled; left false elsewhere, which keeps a prefix
+	// predicate on the legacy scan+filter plan.
+	prefixSeekEnabled bool
 	// minLabelScanEnabled gates the min-cardinality multi-label anchor scan
 	// (#2077). The read-path build sets it from the Engine field; it is consulted
 	// in buildOperator's *ir.Selection case (buildMinLabelScanIfEnabled). Left
@@ -693,6 +698,21 @@ type EngineOptions struct {
 	// that proves both plans return an identical result multiset, and as an
 	// operational escape hatch.
 	DisableRangeIndexSeek bool
+
+	// DisablePrefixIndexSeek turns OFF the STARTS WITH prefix range seek (#2127)
+	// while leaving the rest of the range seek in place. When false (the default)
+	// the planner rewrites `n.p STARTS WITH 'x'` on a property backed by a bound
+	// string btree index into a NodeByIndexRangeScan over [x, succ(x)) — a prefix
+	// IS a range under the byte-lexicographic order the btree is laid out in — with
+	// the original predicate retained as the residual Filter, under the same
+	// exact-count selectivity gate the other range predicates use.
+	//
+	// It is a SEPARATE knob from DisableRangeIndexSeek, not a reuse of it, so the
+	// differential test can toggle the prefix rewrite ALONE and keep the `>=`/`<`
+	// seek active in both arms — two arms that differ in exactly one variable.
+	// Setting it true forces the legacy scan+filter plan for a prefix predicate; it
+	// also serves as an operational escape hatch.
+	DisablePrefixIndexSeek bool
 
 	// DisableMinLabelScan turns OFF the min-cardinality multi-label anchor scan
 	// (#2077). When false (the default) the planner anchors a multi-label node
@@ -977,6 +997,13 @@ type Engine struct {
 	// by default; set false by EngineOptions.DisableRangeIndexSeek. When false
 	// the planner always builds the legacy NodeByLabelScan+Filter plan.
 	rangeSeekEnabled bool
+
+	// prefixSeekEnabled gates the STARTS WITH prefix rewrite (#2127) within the
+	// range seek. True by default; set false by
+	// EngineOptions.DisablePrefixIndexSeek. When false a prefix predicate is not
+	// recognised as a range at all and keeps the legacy scan+filter plan, while
+	// the other range predicates continue to seek.
+	prefixSeekEnabled bool
 
 	// minLabelScanEnabled gates the min-cardinality multi-label anchor scan
 	// (#2077). True by default; set false by EngineOptions.DisableMinLabelScan.
@@ -1288,6 +1315,7 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		maxCollectItems:     opts.MaxCollectItems,
 		hashJoinEnabled:     !opts.DisableHashJoin,
 		rangeSeekEnabled:    !opts.DisableRangeIndexSeek,
+		prefixSeekEnabled:   !opts.DisablePrefixIndexSeek,
 		minLabelScanEnabled: !opts.DisableMinLabelScan,
 		joinReorderEnabled:  !opts.DisableJoinReorder,
 		anchorSwapEnabled:   !opts.DisableAnchorSwap,
@@ -2061,6 +2089,7 @@ func (e *Engine) buildReadPhysical(
 	// see both for one query.
 	bopts.indexNestedLoopEnabled = e.hashJoinEnabled && !e.disableIndexNestedLoopForTest
 	bopts.rangeSeekEnabled = e.rangeSeekEnabled
+	bopts.prefixSeekEnabled = e.prefixSeekEnabled
 	// Min-label scan gating (#2077): enable the smallest-cardinality
 	// multi-label anchor substitution when the Engine permits it. The
 	// substitution is result-identical (a label conjunction is commutative)
@@ -2307,7 +2336,7 @@ func (e *Engine) explainLogical(entry *planCacheEntry, params map[string]expr.Va
 			anchorSwaps = computeAnchorSwaps(sites, labelSrc)
 		}
 	}
-	return explainWithIndexes(plan, e.g.IndexManager(), params, e.g, labelSrc, reorderSwaps, anchorSwaps, entry.pushedSeekHints)
+	return explainWithIndexes(plan, e.g.IndexManager(), params, e.g, labelSrc, reorderSwaps, anchorSwaps, entry.pushedSeekHints, e.prefixSeekEnabled)
 }
 
 // explainWithIndexes walks plan and renders operator names, substituting
@@ -2322,10 +2351,13 @@ func (e *Engine) explainLogical(entry *planCacheEntry, params map[string]expr.Va
 // labelSrc is the engine's resolver (count store + statistics collector), used to
 // annotate each operator with a cardinality estimate and its provenance (task
 // #2099). It is DISPLAY-ONLY — see [explainWithIndexesNode] and explain_estimate.go.
-func explainWithIndexes(plan ir.LogicalPlan, idxMgr *index.Manager, params map[string]expr.Value, g *lpg.Graph[string, float64], labelSrc *lpgLabelResolver, reorderSwaps map[*ir.Apply]bool, anchorSwaps map[*ir.Expand]bool, seekHints map[*ir.Selection]bool) string {
+// prefixSeek carries the Engine's STARTS WITH prefix-rewrite gate (#2127) so a
+// prefix-DISABLED engine does not render a range seek its physical plan would
+// not build.
+func explainWithIndexes(plan ir.LogicalPlan, idxMgr *index.Manager, params map[string]expr.Value, g *lpg.Graph[string, float64], labelSrc *lpgLabelResolver, reorderSwaps map[*ir.Apply]bool, anchorSwaps map[*ir.Expand]bool, seekHints map[*ir.Selection]bool, prefixSeek bool) string {
 	var b strings.Builder
 	explainWithIndexesNode(&b, plan, idxMgr, params, g, labelSrc, reorderSwaps, anchorSwaps,
-		seekHints, "", true, true)
+		seekHints, prefixSeek, "", true, true)
 	return b.String()
 }
 
@@ -2366,6 +2398,7 @@ func explainWithIndexesNode(
 	reorderSwaps map[*ir.Apply]bool,
 	anchorSwaps map[*ir.Expand]bool,
 	seekHints map[*ir.Selection]bool,
+	prefixSeek bool,
 	prefix string,
 	isRoot, isLast bool,
 ) {
@@ -2378,7 +2411,7 @@ func explainWithIndexesNode(
 	// is left to the seek-name substitution below, which renders it as the seek.
 	if sel, ok := plan.(*ir.Selection); ok && seekHints[sel] && !seekClaimsHint(sel, params, idxMgr, explainGraph) {
 		explainWithIndexesNode(b, sel.Child, idxMgr, params, explainGraph,
-			labelSrc, reorderSwaps, anchorSwaps, seekHints, prefix, isRoot, isLast)
+			labelSrc, reorderSwaps, anchorSwaps, seekHints, prefixSeek, prefix, isRoot, isLast)
 		return
 	}
 	// Single-edge anchor swap (#2090): when this Selection tops a matched single-
@@ -2389,7 +2422,7 @@ func explainWithIndexesNode(
 	if sel, ok := plan.(*ir.Selection); ok && len(anchorSwaps) > 0 {
 		if site, ok := matchAnchorSite(sel); ok && anchorSwaps[site.exp] {
 			explainWithIndexesNode(b, mirrorAnchorSite(&site), idxMgr, params, explainGraph,
-				labelSrc, reorderSwaps, anchorSwaps, seekHints, prefix, isRoot, isLast)
+				labelSrc, reorderSwaps, anchorSwaps, seekHints, prefixSeek, prefix, isRoot, isLast)
 			return
 		}
 	}
@@ -2417,7 +2450,7 @@ func explainWithIndexesNode(
 			// seek does — both replace the Selection and its scan child — so it
 			// renders in the Selection's place (#2183).
 			opName = "NodeByIndexSeekSet"
-		} else if _, fired := tryBuildRangeSeekChild(sel, make(map[string]int), idxMgr, explainGraph, params); fired {
+		} else if _, fired := tryBuildRangeSeekChild(sel, make(map[string]int), idxMgr, explainGraph, params, prefixSeek); fired {
 			// A range seek REPLACES the scan child but the original Selection
 			// Filter is retained on top, so the node renders as Selection over
 			// NodeByIndexRangeScan (not subsumed like the equality seek).
@@ -2507,7 +2540,7 @@ func explainWithIndexesNode(
 		// The range scan produces exactly the in-range index rows (an exact
 		// count the seek already established is selective) — an estExact estimate.
 		if sel, ok := plan.(*ir.Selection); ok {
-			b.WriteString(rangeSeekLeafAnnotation(sel, idxMgr, explainGraph, params))
+			b.WriteString(rangeSeekLeafAnnotation(sel, idxMgr, explainGraph, params, prefixSeek))
 		}
 		b.WriteByte('\n')
 		return
@@ -2536,7 +2569,7 @@ func explainWithIndexesNode(
 		children = []ir.LogicalPlan{children[1], children[0]}
 	}
 	for i, child := range children {
-		explainWithIndexesNode(b, child, idxMgr, params, explainGraph, labelSrc, reorderSwaps, anchorSwaps, seekHints, nextPrefix, false, i == len(children)-1)
+		explainWithIndexesNode(b, child, idxMgr, params, explainGraph, labelSrc, reorderSwaps, anchorSwaps, seekHints, prefixSeek, nextPrefix, false, i == len(children)-1)
 	}
 }
 
@@ -5584,6 +5617,7 @@ func BuildPlanWithMutator(
 //     See also [hashJoinBuildOnLeft] for why no order guard accompanies it.
 type planGates struct {
 	rangeSeek    bool
+	prefixSeek   bool
 	minLabelScan bool
 	hashJoin     bool
 }
@@ -5632,6 +5666,11 @@ func buildPlanWithMutatorFull(
 	// the hash join that the identical read statement gets. See [planGates] for
 	// why each one is admissible on a path that writes.
 	bopts.rangeSeekEnabled = gates.rangeSeek
+	// The prefix rewrite (#2127) is admissible on a writing path for exactly the
+	// reason the rest of the range seek is: it substitutes the scan child, keeps
+	// the original predicate as the residual Filter, and preserves the emitted
+	// order the btree already guarantees.
+	bopts.prefixSeekEnabled = gates.prefixSeek
 	bopts.minLabelScanEnabled = gates.minLabelScan
 	// #2225 part B admitted the hash join here with no order-safety companion,
 	// because the substitution is order-PRESERVING, not merely order-insensitive:
@@ -15268,7 +15307,8 @@ func (e *Engine) execUnderBarrier(
 			// Without these it planned every writing statement — including the
 			// `UNWIND … MATCH … CREATE` bulk-load idiom — with a bare label scan
 			// (part A) driving a nested-loop Cartesian product (part B).
-			planGates{rangeSeek: e.rangeSeekEnabled, minLabelScan: e.minLabelScanEnabled, hashJoin: e.hashJoinEnabled})
+			planGates{rangeSeek: e.rangeSeekEnabled, prefixSeek: e.prefixSeekEnabled,
+				minLabelScan: e.minLabelScanEnabled, hashJoin: e.hashJoinEnabled})
 		if berr != nil {
 			buildErr = berr
 			return nil

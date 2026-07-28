@@ -10,6 +10,13 @@ nodes' typed properties back out. It is the same three capabilities the
 original toy showed, now driven through a seeded, scale-parametrised
 dataset so per-query latency and live-heap footprint are observable.
 
+A final phase then leaves the fluent API for [`cypher`](../../cypher) to
+demonstrate the one query a package registry cannot do without and the
+fluent API cannot express — **search by name prefix** — showing that
+`STARTS WITH` is served from a sorted B-tree index as a range seek, and
+measuring that access path against both the label scan it replaces and the
+two string predicates no index can serve.
+
 ## Domain / scenario
 
 A software package dependency network. Each node is labelled `Package` and
@@ -42,6 +49,35 @@ The queries exercise each capability:
 The read-back phase then re-reads the `downloads` and `license` of the
 top-by-downloads matched packages (ordered `downloads DESC, id ASC`, a total
 order), so the reported values are byte-stable for a fixed seed.
+
+### Registry name search — the index-backed prefix predicate
+
+A package registry always needs one query the fluent pattern API cannot
+express: **search by name prefix** — the "type `core-` and see what exists"
+box. That is Cypher's `STARTS WITH`, and it is served from a sorted B-tree
+index as a range seek over `[p, succ(p))` rather than by scanning the label
+and refiltering every row.
+
+The final phase drives that access path over a `RegistryPackage` view of
+**the same packages** (the names are read back out of the graph built above,
+not regenerated), with a B-tree index on `name`. The Cypher engine is defined
+over `lpg.Graph[string, float64]` while this example's dependency graph
+carries `int64` edge weights, which is the only reason the registry is a
+separate graph — it is not separate data.
+
+The phase reports three plans and three costs side by side:
+
+| Predicate | Access path | Why |
+|---|---|---|
+| `name STARTS WITH 'core-'` | `NodeByIndexRangeScan` over `["core-", "core.")` | A prefix **is** a range. `succ("core-")` is `"core."` because `.` is the byte after `-`. |
+| the same, rewrite disabled | `NodeByLabelScan` + `Filter` | The A/B control: the plan the seek replaces. |
+| `CONTAINS` / `ENDS WITH 'core'` | `NodeByLabelScan` + `Filter`, always | Neither describes an interval of the key order, so no range can serve them — the narrowest sound interval is the whole index. |
+
+Correctness is not assumed: every arm's rows are compared against an
+independent Go oracle computed with `strings.HasPrefix` / `Contains` /
+`HasSuffix` over the same names, and the two prefix arms are compared with
+each other. A mismatch makes the example **fail**, so a faster wrong answer
+can never be reported as a win.
 
 ## How to run
 
@@ -85,7 +121,23 @@ readback.rows=3
 readback.0=id:9cdcc59578021851 downloads:9992954 license:MPL-2.0
 readback.1=id:7c03af57c90ef764 downloads:9954932 license:MIT
 readback.2=id:6ad65415ff4597f3 downloads:9952486 license:GPL-3.0
+search.prefix=core-
+search.population=2000
+search.rows=63
+search.plan.physical.4=         └─ NodeByIndexRangeScan [range="core-".."core."(excl)]
+search.plan.logical.4=         └─ NodeByIndexRangeScan (est. rows=63, exact)
+search.plan.no_seek.4=         └─ NodeByLabelScan [RegistryPackage]
+search.match.0=core-auth
+search.contains.rows=141
+search.contains.indexed=false
+search.ends_with.rows=80
+search.ends_with.indexed=false
 ```
+
+(The three plan trees are printed in full, one numbered fact line per level;
+only the leaf line of each — the access path — is reproduced above. `name`
+values repeat by design: the unique key is the hex `id`, so `core-auth` can
+appear more than once among the matches.)
 
 Interleaved with the facts are volatile telemetry lines, prefixed with
 `# `, that **vary per run and per machine** and are never pinned by the
@@ -96,6 +148,18 @@ test, for example:
 # mem.heap_alloc=1.89 MiB
 # csr.freeze=69µs
 # q.ecosystem_go.latency=175µs
+# search.seek.latency=59µs
+# search.no_seek.latency=507µs
+# search.speedup=8.6x
+# search.seek.allocs=738
+# search.no_seek.allocs=6282
+# search.alloc_ratio=8.5x
+# search.seek.bytes=46.37 KiB
+# search.no_seek.bytes=123.86 KiB
+# search.contains.latency=571µs
+# search.contains.allocs=6830
+# search.ends_with.latency=497µs
+# search.ends_with.allocs=6404
 ```
 
 ## Evidence it collects
@@ -111,6 +175,33 @@ markedly slower, demonstrating the difference between a label-seeded plan
 and a property filter in the v1 fluent API. The matched-row counts are the
 deterministic facts; the latencies are the evidence.
 
+The registry-search phase adds the **access-path** dimension, on all four
+vectors the standard asks for:
+
+- **the plan** — printed twice, because the two renderings answer different
+  questions. `Explain` gives the physical tree and the seek's *actual
+  interval*; `ExplainLogical` gives the *exact row estimate* the seek's
+  own in-range count produced (`est. rows=63, exact` — the same 63 the
+  oracle verified, so the estimate is not a guess).
+- **CPU** — per-query wall time for the seek and for the label scan it
+  replaces, plus the ratio. At the default 2 000-node scale the seek runs
+  ≈8.6× faster (≈59 µs vs ≈507 µs); the gap widens with `-nodes`, because
+  the seek's cost tracks the *matched* rows while the scan's tracks the
+  population.
+- **memory** — allocations and allocated bytes per query from
+  `runtime.MemStats` deltas across repetitions. ≈738 vs ≈6 282 allocations
+  (≈8.5×) is the sharper signal: the scan's allocation count tracks the
+  label population, which is precisely what an index removes.
+- **the boundary** — `CONTAINS` and `ENDS WITH` on the same data, reported
+  with `indexed=false` and a latency at the scan's level. This is what makes
+  "prefix-only" observable rather than a claim: the example shows the two
+  predicates that *cannot* be indexed costing what the un-indexed prefix
+  cost, right next to the one that can.
+
+Because the phase compares every arm against a Go oracle before reporting a
+single number, the evidence is trustworthy by construction — the example
+cannot report a speed-up over a wrong answer.
+
 ## Key APIs
 
 - `graph/lpg.New` — build the mutable labelled property graph.
@@ -120,6 +211,10 @@ deterministic facts; the latencies are the evidence.
 - `graph/csr.BuildFromAdjList` — freeze the builder into the immutable CSR snapshot the query engine traverses.
 - `graph/query.New` / `Engine.Match` / `Pattern.Vertex` / `Pattern.Out` / `Pattern.Cardinality` / `Pattern.Collect` — express and run the pattern queries.
 - `graph/query.WithLabel` / `WithProperty` — the label and property predicates that seed each pattern.
+- `cypher.NewEngineWithOptions` — the Cypher engine for the registry search, with `EngineOptions.DisablePrefixIndexSeek` as the A/B control that turns the prefix rewrite off.
+- `cypher.Engine.Run` with `CREATE INDEX … OPTIONS {indexType:'btree'}` — the only way to obtain a bound, backfilled, self-maintaining B-tree index; the default hash index serves equality only.
+- `cypher.Engine.Explain` / `ExplainLogical` — the physical tree (operator and seek interval) and the annotated logical tree (exact cardinality estimate).
+- `cypher.Result.Next` / `ValueAt` / `Err` / `Close` — drain a result set and surface any evaluation error.
 
 ## Further reading
 
@@ -127,6 +222,9 @@ deterministic facts; the latencies are the evidence.
 - [`graph/lpg`](../../graph/lpg) — the labelled property graph and its property model
 - [`graph/lpg/schema`](../../graph/lpg/schema) — schema declaration for labels and property keys
 - [`graph/csr`](../../graph/csr) — the immutable CSR snapshot used as the query surface
+- [`cypher`](../../cypher) — the Cypher engine that serves the registry prefix search
+- [docs/cypher.md](../../docs/cypher.md) — which predicates reach which index kind, and why `ENDS WITH`/`CONTAINS` never do
+- [docs/design-prefix-range-seek.md](../../docs/design-prefix-range-seek.md) — the prefix rewrite's design, its superset proof and its scope boundary
 - [Example 02 — property graph](../02_property_graph) — introduces the labelled property graph model
 - [Example 26 — social scale bench](../26_social_scale_bench) — the reference end state for the examples standard
 - [docs/examples-standard.md](../../docs/examples-standard.md) — the standard every example follows
