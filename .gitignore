@@ -63,3 +63,11 @@ soak-artefacts/
 # Anchor at the repo root so the pattern matches only the compiled
 # binary, not the cmd/crashinject-helper/ directory containing main.go.
 /crashinject-helper
+
+# pgregory.net/rapid writes a reproduction file under testdata/rapid/<Test>/ when a
+# property FAILS. Those are transient debugging artefacts of a failing run — twice
+# now one has been committed after a deliberate mutation test, recording a
+# reproduction for a defect that does not exist. Rapid replays any failfile it finds,
+# so a stale one is noise at best. Genuine regressions belong in an explicit test
+# case, not in a replay file.
+testdata/rapid/
