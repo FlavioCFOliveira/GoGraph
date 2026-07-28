@@ -275,7 +275,9 @@ func expandFromLabel(exp *ir.Expand) (string, bool) {
 // selective (≤ rangeSeekMaxSelectivity of the label) and the count is cheap. ok
 // is false only if the shape is not recoverable, in which case the leaf renders
 // without an annotation.
-func rangeSeekInRangeCount(sel *ir.Selection, idxMgr *index.Manager, g *lpg.Graph[string, float64], params map[string]expr.Value) (int64, bool) {
+// prefixSeek must carry the same STARTS WITH gate the build used, so the shape
+// recovered here is the shape that actually fired (#2127).
+func rangeSeekInRangeCount(sel *ir.Selection, idxMgr *index.Manager, g *lpg.Graph[string, float64], params map[string]expr.Value, prefixSeek bool) (int64, bool) {
 	if idxMgr == nil || g == nil || sel.PredicateExpr == nil {
 		return 0, false
 	}
@@ -286,7 +288,7 @@ func rangeSeekInRangeCount(sel *ir.Selection, idxMgr *index.Manager, g *lpg.Grap
 	const fullBudget = ^uint64(0) // never early-exit: count the whole (selective) range.
 
 	// String range over a bound string btree.
-	if pred, okPred := extractStringRangePred(sel.PredicateExpr, lblScan.NodeVar); okPred {
+	if pred, okPred := extractStringRangePred(sel.PredicateExpr, lblScan.NodeVar, prefixSeek); okPred {
 		if sub, okSub := findBoundStringBTree(idxMgr, lblScan.Label, pred.propKey); okSub {
 			lo := ""
 			if pred.lo != nil {
@@ -323,8 +325,8 @@ func rangeSeekInRangeCount(sel *ir.Selection, idxMgr *index.Manager, g *lpg.Grap
 // rangeSeekLeafAnnotation renders the exact in-range count for a rewritten
 // NodeByIndexRangeScan leaf as an estExact estimate, or the empty string when the
 // count cannot be recovered.
-func rangeSeekLeafAnnotation(sel *ir.Selection, idxMgr *index.Manager, g *lpg.Graph[string, float64], params map[string]expr.Value) string {
-	if cnt, ok := rangeSeekInRangeCount(sel, idxMgr, g, params); ok {
+func rangeSeekLeafAnnotation(sel *ir.Selection, idxMgr *index.Manager, g *lpg.Graph[string, float64], params map[string]expr.Value, prefixSeek bool) string {
+	if cnt, ok := rangeSeekInRangeCount(sel, idxMgr, g, params, prefixSeek); ok {
 		return estimateAnnotation(estimate{rows: float64(cnt), source: estExact})
 	}
 	return ""
