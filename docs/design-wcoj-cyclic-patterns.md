@@ -27,9 +27,24 @@
 > optimisation that can be slower than the existing plan when no gate excludes the
 > case, so the mandate forbids this operator **as scoped**.
 >
-> **This is a deferral on evidence, not an abandonment.** §7 identifies the
-> specific prerequisite that would reverse the verdict, and it is a larger,
-> gateless win in its own right.
+> **The verdict has two parts, and only one of them is permanent.**
+>
+> - **Unconditional NO-GO on the operator as scoped.** A general
+>   worst-case-optimal join is not warranted *at all*, for a structural reason
+>   (§2): every simple cycle admits exactly **one** intersection, at the vertex
+>   the sprint-314 `ExpandInto` seek already occupies, so Leapfrog Triejoin and
+>   Generic Join both degenerate on a binary relation and genuine multi-way
+>   intersection needs `K4` or denser. This should not be re-proposed.
+> - **Conditional GO on the closing-leg intersection, strictly sequenced after one
+>   prerequisite.** §7.1 *measures* rather than assumes it: give both plans a
+>   slot-aligned `[]uint32` relationship-type column and the same clique fixture
+>   inverts from a **0.62×–0.71× regression to a 4.54×–6.29× win that widens with
+>   scale**. The blocker is not merely the cause — removing it is **sufficient**.
+>
+> So this is a **sequencing** finding, not an abandonment. The prerequisite is a
+> larger and gateless win in its own right, and it is an architecture change
+> beyond this sprint's objective, so it is raised as `rmp` #2251 carrying the
+> measurement rather than absorbed here.
 
 ## Contents
 
@@ -371,11 +386,51 @@ place before being quoted — but the direction is not in doubt, because the map
 probe is per-slot on **every typed expand** in the engine, gateless and with no
 cost model.
 
-That work is therefore both **larger than this operator** and its **prerequisite**:
-with an `O(1)` typed reverse advance, §3's 8×–10× untyped result would be the
-typed result too, and §4's regression would not exist. The correct sequence is:
-type column first, then re-open the closing-leg intersection scoped to triangles
-and gated per-row on `O(1)` CSR offsets.
+### 7.1 The prerequisite is measured SUFFICIENT, not merely necessary
+
+It would have been easy to leave §7 as an assertion that removing the blocker
+"should" restore the win. It was measured instead, because the whole point of this
+SPIKE is that an unmeasured "should" is what produced the sprint's original
+premise.
+
+The counterfactual gives **both** arms the same slot-aligned `[]uint32` type
+column — so the type check is one indexed load on each side and the only remaining
+difference is enumerate-and-probe against merge — on the same adversarial clique
+fixture as §4:
+
+| clique `m` | typed via map + seek (§4) | **typed via column** | counts agree |
+|---:|---:|---:|:--:|
+| 9 900 | 0.71× — a regression | **4.54× faster** | yes |
+| 22 350 | 0.66× | **4.93×** | yes |
+| 39 800 | 0.68× | **5.40×** | yes |
+| 89 700 | 0.62× | **6.29×** | yes |
+
+**The verdict inverts on this one representation change**, from a 29%–38%
+regression to a 4.5×–6.3× win that widens with scale — and it does so on the
+fixture built specifically to strip the intersection of every other advantage
+(equal degrees, so the work terms tie exactly; every 2-path closing, so there is
+no materialisation saving). The residual is entirely the memory-access difference
+of §3, restored once the type check stops being a search.
+
+So the NO-GO of this document is **conditional and sequenced, not permanent**:
+
+- **NO-GO as scoped** — a general worst-case-optimal join operator is not
+  warranted at all, for the structural reason in §2 (one intersection per simple
+  cycle, at the vertex `ExpandInto` already occupies; multi-way needs `K4`+). That
+  part of the verdict is unconditional and should not be re-proposed.
+- **The closing-leg intersection is warranted, strictly AFTER the type column**,
+  scoped to triangles, gated per-row on `O(1)` CSR offsets, never on `D`.
+
+The correct sequence is therefore: **type column first, then re-open the
+closing-leg intersection.** The type column is not a competitor to this work; it
+is a larger, gateless win that happens to be its precondition.
+
+> **Scope note.** Adding a type column changes the CSR's in-memory representation
+> and the engine's hottest read path, which is an architecture decision beyond the
+> mandate of this SPIKE and beyond sprint 315's objective. It is therefore raised
+> as its own item (`rmp` #2251) carrying this measurement, rather than absorbed
+> here. The measurement is recorded now so that item starts from evidence instead
+> of re-deriving it.
 
 ---
 
@@ -394,7 +449,10 @@ Findings worth keeping regardless of the verdict:
    is why the question should not be re-proposed in this form.**
 3. The intersection's win is a `log d` factor (8×–10× measured at clique degrees)
    plus a 17×–27× reduction in materialised intermediates — **both cancelled by
-   the reverse-leg type check on any typed pattern (0.61×–0.81×).**
+   the reverse-leg type check on any typed pattern (0.61×–0.81×), and both
+   RESTORED (4.54×–6.29×) the moment that check becomes a slot-aligned column
+   lookup (§7.1).** The blocker is a missing representation, not a property of
+   intersection joins.
 4. The semantics are fully recoverable; §5 records the exact formulation, the
    `k(k−1)(k−2)` self-loop term, and the clause-wide handle-publication
    requirement.
@@ -408,3 +466,13 @@ NO-GO branch (this document plus Knowledge Graph provenance). #2156, #2157,
 evidence-based deferral precedent of the parallel-Expand task #2112. The
 prerequisite in §7 and the two defects found while tracing §5 are raised as
 separate backlog items rather than absorbed here.
+
+**The one open decision this SPIKE deliberately does not take.** §7.1 establishes
+that the closing-leg intersection *is* worth having and that exactly one
+representation change unlocks it. Making that change — a slot-aligned type column
+in both CSR directions, replacing the per-slot `map[uint64]string` on the engine's
+hottest read path — is an **architecture** decision, and it benefits every typed
+expand rather than only cyclic patterns. It is therefore out of scope for a SPIKE
+whose remit was the cyclic-pattern operator, and it is not absorbed here on the
+author's own authority. #2251 carries the full measurement so that decision can be
+taken on evidence.
