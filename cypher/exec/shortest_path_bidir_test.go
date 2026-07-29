@@ -27,6 +27,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
 // biCSR is a minimal [csrAdjacency] for these tests. The shared test helpers
@@ -85,9 +86,17 @@ func (g biTestGraph) csrPair() (fwd, rev *biCSR) {
 // different sources in a different relative order than source-ascending: for
 // edges [{1,5},{0,5}] the canonical reverse bucket of 5 is [0,1] and this one is
 // [1,0].
+// Since rmp #2141 the FORWARD CSR must be destination-ordered — every production
+// producer guarantees it and the O(log d) probes in csrprobe.go rely on it — but
+// the REVERSE may be in any order: nothing binary-searches it. buildRevToFwd walks
+// the reverse linearly and searches the FORWARD. So the reverse is built here
+// WITHOUT ordering, which is what keeps this fixture genuinely non-canonical and
+// the fallback path covered. Ordering it too would make it identical to the
+// canonical transpose — both would be ordered by (source, handle) — and silently
+// leave the fallback untested.
 func (g biTestGraph) csrPairNonCanonical() (fwd, rev *biCSR) {
 	fwd = buildCSRWithHandles(g.n, g.edges)
-	rev = buildCSRWithHandles(g.n, flipEdges(g.edges))
+	rev = buildCSRWithHandlesUnordered(g.n, flipEdges(g.edges))
 	return fwd, rev
 }
 
@@ -132,6 +141,22 @@ func transposeCSR(maxNode int, fwd *biCSR) *biCSR {
 // same handle in the forward and reverse CSRs — the invariant buildRevToFwd
 // relies on to pair a reverse slot with its forward counterpart.
 func buildCSRWithHandles(maxNode int, edgeList [][2]int) *biCSR {
+	c := buildCSRWithHandlesUnordered(maxNode, edgeList)
+	// Order each source's run exactly as the production builders do (rmp #2141).
+	// This fixture is hand-assembled rather than produced by csr.BuildFromAdjList,
+	// so without this it would carry input-order runs — a shape no FORWARD CSR
+	// reaching the executor can have any more, since every producer either orders
+	// (BuildFromAdjList, BuildFromAdjListLive, BuildReverse) or calls OrderRuns
+	// itself (store/bulk). Calling the real function rather than re-implementing
+	// the order keeps the fixture faithful by construction.
+	csr.OrderRuns[struct{}](c.vertices, c.edges, nil, c.handles)
+	return c
+}
+
+// buildCSRWithHandlesUnordered is [buildCSRWithHandles] without the ordering pass,
+// leaving each source's run in ORIGINAL EDGE-LIST order. It exists for the
+// deliberately non-canonical reverse CSR: see [biTestGraph.csrPairNonCanonical].
+func buildCSRWithHandlesUnordered(maxNode int, edgeList [][2]int) *biCSR {
 	type he struct {
 		e [2]int
 		h uint64

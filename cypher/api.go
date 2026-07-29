@@ -320,6 +320,12 @@ type buildOpts struct {
 	// which case edgeTypeFilterFor falls back to an uncached
 	// [buildEdgeTypeFilter] call — correct, just unamortised.
 	edgeTypeFilterCache *edgeTypeFilterCache
+	// csrPairCache, when non-nil, is the Engine's shared [csrPairCache], consulted
+	// by [csrPairCachedFor] so a query needing a CSR pair reuses a prior query's
+	// O(V+E) build while lpg.Graph.TopoGeneration has not advanced (rmp #2143).
+	// nil on the public BuildPlanWithMutator path, which then builds uncached —
+	// correct, just unamortised, exactly as edgeTypeFilterCache behaves.
+	csrPairCache *csrPairCache
 	// procReg is the Engine's procedure registry, carried here rather than as a
 	// parameter because the WRITE-path builder ([buildOperatorWrite]) needs it
 	// only to hand back to [buildOperator] at its fall-through branch, and
@@ -586,6 +592,19 @@ type EngineOptions struct {
 	// A negative value is clamped to the default, mirroring
 	// PlanCacheCapacity.
 	EdgeTypeFilterCacheCapacity int
+
+	// DisableCSRPairCache turns off the Engine's cross-query forward/reverse CSR
+	// pair reuse (rmp #2143). The cache is ON by default because it removes an
+	// O(V+E) rebuild from every query that traverses — measured 52% faster and 96%
+	// less allocated memory on a warm, selective one-hop over 960k edges.
+	//
+	// Disable it when an Engine is long-lived over a large graph and retention
+	// matters more than latency: the cache keeps one CSR pair reachable for the
+	// Engine's lifetime, roughly (V+1)*8 + E*24 bytes per direction, which no
+	// result-memory ceiling bounds. A write-heavy workload also gets little from it,
+	// since every topology change invalidates the entry — watch
+	// cypher.csr_pair_cache.replacements against .hits to tell.
+	DisableCSRPairCache bool
 
 	// MaxResultRows limits the number of rows a single [Engine.Run] or
 	// [Engine.RunInTx] call may materialise. If a query produces more rows than
@@ -951,6 +970,11 @@ type Engine struct {
 	// filter results, only edge topology does, which TopoGeneration
 	// already tracks precisely.
 	edgeTypeFilterCache *edgeTypeFilterCache
+	// csrPairCache amortises csrPairFromGraph's O(V+E) forward+reverse build
+	// across queries against an unchanged graph, invalidated by
+	// lpg.Graph.TopoGeneration exactly as edgeTypeFilterCache is (rmp #2143).
+	// It holds at most one pair, replaced wholesale when the epoch advances.
+	csrPairCache *csrPairCache
 	// globalMem is the engine-wide ceiling on the aggregate estimated size of all
 	// concurrently-materialised results (EngineOptions.GlobalMaxResultBytes,
 	// #1842). A single instance is shared by every Result the engine produces, so
@@ -1336,6 +1360,7 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		procReg:                procs.NewRegistry(),
 		cache:                  newPlanCache(opts.PlanCacheCapacity),
 		edgeTypeFilterCache:    newEdgeTypeFilterCache(opts.EdgeTypeFilterCacheCapacity),
+		csrPairCache:           newCSRPairCacheIfEnabled(opts.DisableCSRPairCache),
 		maxResultRows:          resolveMaxResultRows(opts.MaxResultRows),
 		maxResultBytes:         resolveMaxResultBytes(opts.MaxResultBytes),
 		maxCollectItems:        opts.MaxCollectItems,
@@ -2101,6 +2126,7 @@ func (e *Engine) buildReadPhysical(
 	// pattern amortises its O(V+E) build across the whole Engine's query
 	// stream, not just within one call.
 	bopts.edgeTypeFilterCache = e.edgeTypeFilterCache
+	bopts.csrPairCache = e.csrPairCache
 	// Hash-join optimisation gating (#1506): the Engine flag alone. There is no
 	// order-safety companion — the substitution emits the nested loop's row
 	// SEQUENCE, not merely its multiset, so no operator above the join can observe
@@ -7988,7 +8014,7 @@ func buildOperatorRec(
 			return child, nil
 		}
 
-		fwd, rev := csrPairFromGraph(g)
+		fwd, rev := csrPairCachedFor(bopts, g)
 		dir := irDirToExec(p.Direction)
 
 		cfg := exec.ExpandConfig{
@@ -8546,7 +8572,7 @@ func buildOperatorRec(
 			return child, nil
 		}
 
-		fwd, rev := csrPairFromGraph(g)
+		fwd, rev := csrPairCachedFor(bopts, g)
 		dir := irDirToExec(p.Direction)
 
 		cfg := exec.ExpandConfig{
@@ -8639,7 +8665,7 @@ func buildOperatorRec(
 			return child, nil
 		}
 
-		fwd, rev := csrPairFromGraph(g)
+		fwd, rev := csrPairCachedFor(bopts, g)
 		dir := irDirToExec(p.Direction)
 		minHops := p.MinDepth
 		maxHops := p.MaxDepth
@@ -17262,7 +17288,7 @@ func ensureEdgeIDResolver(bopts *buildOpts, g *lpg.Graph[string, float64]) func(
 	if bopts.edgeIDResolver != nil {
 		return bopts.edgeIDResolver
 	}
-	fwd, _ := csrPairFromGraph(g)
+	fwd, _ := csrPairCachedFor(bopts, g)
 	verts := fwd.VerticesSlice()
 	edges := fwd.EdgesSlice()
 	nEdges := uint64(len(edges))
@@ -17798,7 +17824,7 @@ func buildShortestPathWithPred(
 		}
 	}
 
-	fwd, rev := csrPairFromGraph(g)
+	fwd, rev := csrPairCachedFor(bopts, g)
 	dir := irDirToExec(p.Direction)
 
 	edgeType := ""

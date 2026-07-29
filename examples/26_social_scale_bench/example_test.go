@@ -98,6 +98,67 @@ func TestRun(t *testing.T) {
 
 	assertAnalytical(t, out, facts, cfg, friend)
 	assertTemporal(t, out, facts, friend)
+	assertCSROrdering(t, out, facts, cfg)
+}
+
+// assertCSROrdering pins the CSR neighbour-ordering section (#2147).
+//
+// The load-bearing assertions are the ORDERING INVARIANT and the SHAPE
+// DISCLOSURE. The example's purpose in sprint 313 is to show the ordered path
+// engaging on a realistically-sized graph while being honest that its data shape
+// cannot demonstrate a hub win, so a silent loss of either the invariant or the
+// disclosure is exactly the regression worth gating.
+func assertCSROrdering(t *testing.T, out string, facts map[string]int64, cfg config) {
+	t.Helper()
+
+	// The #2141 invariant: every CSR this module builds has ordered runs. The
+	// example fails hard if this is false, so reaching here already implies it —
+	// asserting the printed line as well guards against the report silently
+	// dropping the check.
+	mustContain(t, out, "csr.runs_ordered=true")
+
+	// The shape must be disclosed, and disclosed CORRECTLY. A CSR run carries
+	// FRIEND and LIKE arcs together, so the degree reported is the combined
+	// out-degree, not the FRIEND degree the config names. Getting this wrong
+	// (as the first draft of this section did) misstates the fixture by 1.67x
+	// and invites a reader to mistake it for a hub-heavy shape.
+	mustContain(t, out, "degree.measured=FRIEND+LIKE combined (a CSR run carries both types)")
+	mustContain(t, out, "degree.distribution=BOUNDED, LIGHT-TAILED (not power-law)")
+
+	// The combined degree must lie inside the range the generator can produce:
+	// FRIEND from [friendsMin, friendsMax] plus LIKE from [0, likesMax].
+	loBound := int64(cfg.friendsMin)
+	hiBound := int64(cfg.friendsMax + cfg.likesMax)
+	if got := facts["degree.min"]; got < loBound {
+		t.Errorf("degree.min = %d, want >= %d", got, loBound)
+	}
+	if got := facts["degree.max"]; got > hiBound {
+		t.Errorf("degree.max = %d, want <= %d", got, hiBound)
+	}
+	if got := facts["degree.sources"]; got != int64(cfg.users) {
+		t.Errorf("degree.sources = %d, want %d (every user has FRIEND arcs)", got, int64(cfg.users))
+	}
+
+	// The threshold is the CALIBRATED crossover of 16, not the refuted 64. If
+	// this ever reads 64 again, the example is reporting leverage against a
+	// model that was shown to be physically unattainable.
+	if got := facts["degree.threshold"]; got != 16 {
+		t.Errorf("degree.threshold = %d, want 16 (the calibrated crossover; 64 is refuted)", got)
+	}
+
+	// The reverse expand must find rows — a zero would mean the pattern stopped
+	// matching and the section is timing nothing. The count is label-constrained
+	// to USER on both ends, so it is identical whether or not the FRIEND type is
+	// named, which is what keeps it comparable across the -rel-types modes that
+	// TestRunCompact diffs.
+	if rows := facts["hub.reverse_expand_rows"]; rows <= 0 {
+		t.Errorf("hub.reverse_expand_rows = %d, want > 0", rows)
+	}
+
+	// The snapshot footprint must be per-arc sane: three uint64 arrays over
+	// Size() arcs plus Order()+1 offsets, so 8 B/arc is the floor and the
+	// offsets push it a little above.
+	mustContain(t, out, "csr.has_handles=false") // plain AddEdge mints no handles
 }
 
 // assertAnalytical pins the analytical-aggregation and subquery facts (#1971):

@@ -229,8 +229,20 @@ func eulerThreeImbalancedVertices(name string) eulerFixture {
 // eulerBuildCSR materialises f as an immutable directed CSR[float64].
 //
 // It computes the length-(order+1) offsets array (vertices) and the
-// source-grouped flat edge array exactly as csr.BuildFromAdjList would, via a
-// counting pass over the out-degrees followed by a scatter. Building the offsets
+// source-grouped flat edge array the way csr.BuildFromAdjList computes ITS
+// offsets — via a counting pass over the out-degrees followed by a scatter — but
+// NOT its within-source order: since rmp #2141 that build orders each source's
+// run by (destination, handle), and csr.FromArrays below deliberately does not
+// order, so a run here stays in fixture-edge order.
+//
+// That is immaterial here, and for a sharper reason than in the other sim
+// oracles. Neighbour order DOES change which Eulerian trail Hierholzer returns,
+// but the checker never compares against a canonical trail — it validates the
+// trail's invariants independently (length E+1, consecutive pairs are real
+// edges, every directed edge used exactly once as a multiset, first == last for
+// a circuit), precisely because the trail is not unique. So any order yields a
+// different but equally valid answer, and the check holds either way.
+// Building the offsets
 // programmatically — rather than hand-writing them per fixture — eliminates the
 // off-by-one class of bug that an Eulerian fixture is especially prone to: every
 // destination, including a sink that has no out-edges, must own an offset slot,

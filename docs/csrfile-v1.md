@@ -44,6 +44,36 @@ zero.
 
 `weightSize` is 0 for `weightKind=0`, 4 for u32/f32, 8 for u64/f64.
 
+### Within-source order is DERIVED, never trusted from disk
+
+The `edges` section is grouped by source: source `i` owns the half-open range
+`vertices[i] .. vertices[i+1]`. **The order of entries WITHIN one source's range
+is derived at build time from the adjacency by `csr.BuildFromAdjList`; it is
+never read from, nor trusted from, disk.**
+
+Since rmp #2141 that build orders each source's run by the total key
+`(destination, handle)` (`csr.OrderRuns`). A reader must not depend on it:
+`store/snapshot.ApplyCSRToGraph` replays the file in whatever order it finds,
+and the next build re-derives the order from the rebuilt adjacency.
+
+Two consequences matter for this format:
+
+- **A change to the ordering rule needs no version bump.** A file written before
+  #2141 carries insertion-ordered runs and reopens correctly under the current
+  reader, because the reader never assumes an order. This is asserted by a
+  recovery test that reopens a deliberately UNORDERED snapshot (built via
+  `csr.FromArrays`, which by contract does not order) and requires an identical
+  recovered graph.
+- **Byte-identity holds only between builds that apply the same rule.** Two
+  snapshots of the same logical graph are byte-identical only if both were
+  produced by a build that orders. `csr.FromArrays` deliberately does **not**
+  order — it is the zero-copy path and carries no O(E) pass — so a caller that
+  assembles arrays itself and wants byte-identity with `BuildFromAdjList` must
+  call `csr.OrderRuns` on them first, as `store/bulk` does.
+
+The same rule is stated for the snapshot as a whole in
+[`persistence.md`](persistence.md).
+
 ## Trailer
 
 The last 4 bytes of the file are a uint32 LE CRC32C (Castagnoli)

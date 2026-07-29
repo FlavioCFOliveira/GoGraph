@@ -321,7 +321,12 @@ func (l *Loader) csrDirectEligible() bool {
 //     is a no-op that keeps the first occurrence (and its weight) and
 //     drops the later one, while a multigraph keeps every parallel edge.
 //     A stable scatter (a per-source running cursor over the SAME
-//     post-dedup stream pass 1 counted) reproduces both exactly.
+//     post-dedup stream pass 1 counted) reproduces both exactly. Both
+//     builds then apply csr.OrderRuns to the identical pre-order arrays,
+//     so the final within-row order matches as well (rmp #2141). This
+//     step is what keeps the contract true now that BuildFromAdjList
+//     orders its runs; csr.FromArrays does not order on the caller's
+//     behalf.
 func (l *Loader) buildCSRDirect() *csr.CSR[int64] {
 	edges := l.buffered
 	mapper := l.adj.Mapper()
@@ -410,6 +415,15 @@ func (l *Loader) buildCSRDirect() *csr.CSR[int64] {
 		weights[pos] = edges[k].Weight
 		cursor[s]++
 	}
+
+	// Order each source's run exactly as csr.BuildFromAdjList's own pass 3 does.
+	// FromArrays is the zero-copy path and deliberately does not order, so the
+	// byte-identity contract documented above requires applying the SAME
+	// function here — a divergent ordering (or none) would break it. The stable
+	// scatter above leaves parallel edges in input order and this graph carries
+	// no handle column, so the stable order by destination reproduces
+	// BuildFromAdjList's result exactly.
+	csr.OrderRuns(vertices, flat, weights, nil)
 
 	return csr.FromArrays(vertices, flat, weights, uint64(mapper.Len()), total)
 }

@@ -212,10 +212,15 @@ func communityRandomCliqueChain(seed *Seed) communityFixture {
 // so LiveMask is all-true and the partition carries no ghost (-1) slots.
 //
 // The offsets array is built programmatically via a counting pass over the
-// symmetrised out-degrees followed by a scatter, exactly as csr.BuildFromAdjList
-// would, which sidesteps the off-by-one offset bugs that hand-written CSR arrays
-// invite. order must be strictly greater than every NodeID that appears in any
-// edge.
+// symmetrised out-degrees followed by a scatter, the way csr.BuildFromAdjList
+// computes ITS offsets, which sidesteps the off-by-one offset bugs that
+// hand-written CSR arrays invite. It does NOT reproduce that build's
+// within-source order: since rmp #2141 BuildFromAdjList orders each run by
+// (destination, handle), and csr.FromArrays below deliberately does not order,
+// so a run here stays in fixture-edge order. Sound for this oracle — the
+// community algorithms treat a source's neighbours as a set — but not for any
+// consumer that binary-searches a run or reads a slot's within-run ordinal.
+// order must be strictly greater than every NodeID that appears in any edge.
 func communityBuildCSR(f communityFixture) *csr.CSR[float64] {
 	order := f.order
 	// Symmetrise: one undirected edge contributes one out-edge to each endpoint.

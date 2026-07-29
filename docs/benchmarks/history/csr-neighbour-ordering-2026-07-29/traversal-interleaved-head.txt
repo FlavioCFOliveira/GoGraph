@@ -1,0 +1,170 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/csrorder
+cpu: Apple M4
+BenchmarkTraversalReverse/degree=8-10         	       5	 244088742 ns/op	14677475 B/op	 1701459 allocs/op
+BenchmarkTraversalReverse/degree=8-10         	       5	 236722700 ns/op	14677494 B/op	 1701460 allocs/op
+BenchmarkTraversalReverse/degree=16-10        	       5	 216687150 ns/op	14677473 B/op	 1701462 allocs/op
+BenchmarkTraversalReverse/degree=16-10        	       5	 226025717 ns/op	14677668 B/op	 1701464 allocs/op
+BenchmarkTraversalReverse/degree=32-10        	       5	 212567392 ns/op	14677609 B/op	 1701466 allocs/op
+BenchmarkTraversalReverse/degree=32-10        	       5	 207468125 ns/op	14676857 B/op	 1701464 allocs/op
+BenchmarkTraversalReverse/degree=64-10        	       5	 212630625 ns/op	14677017 B/op	 1701449 allocs/op
+BenchmarkTraversalReverse/degree=64-10        	       5	 211622300 ns/op	14676979 B/op	 1701448 allocs/op
+BenchmarkTraversalReverse/degree=512-10       	       5	 200518158 ns/op	14676736 B/op	 1701449 allocs/op
+BenchmarkTraversalReverse/degree=512-10       	       5	 207848042 ns/op	14677404 B/op	 1701450 allocs/op
+BenchmarkTraversalReverse/degree=4096-10      	       5	 204100125 ns/op	14677323 B/op	 1701446 allocs/op
+BenchmarkTraversalReverse/degree=4096-10      	       6	 202478340 ns/op	14677274 B/op	 1701446 allocs/op
+BenchmarkTraversalUndirected/degree=8-10      	       5	 242616608 ns/op	14677526 B/op	 1701460 allocs/op
+BenchmarkTraversalUndirected/degree=8-10      	       5	 235039458 ns/op	14677592 B/op	 1701461 allocs/op
+BenchmarkTraversalUndirected/degree=16-10     	       5	 221059250 ns/op	14677715 B/op	 1701465 allocs/op
+BenchmarkTraversalUndirected/degree=16-10     	       5	 226419342 ns/op	14677473 B/op	 1701462 allocs/op
+BenchmarkTraversalUndirected/degree=32-10     	       5	 210411292 ns/op	14677721 B/op	 1701467 allocs/op
+BenchmarkTraversalUndirected/degree=32-10     	       5	 216420592 ns/op	14677640 B/op	 1701467 allocs/op
+BenchmarkTraversalUndirected/degree=64-10     	       5	 209897008 ns/op	14677577 B/op	 1701450 allocs/op
+BenchmarkTraversalUndirected/degree=64-10     	       5	 210869883 ns/op	14677480 B/op	 1701448 allocs/op
+BenchmarkTraversalUndirected/degree=512-10    	       5	 207426308 ns/op	14677472 B/op	 1701451 allocs/op
+BenchmarkTraversalUndirected/degree=512-10    	       5	 208176275 ns/op	14677404 B/op	 1701450 allocs/op
+BenchmarkTraversalUndirected/degree=4096-10   	       6	 201221882 ns/op	14677272 B/op	 1701446 allocs/op
+BenchmarkTraversalUndirected/degree=4096-10   	       6	 200117333 ns/op	14677385 B/op	 1701447 allocs/op
+BenchmarkTraversalPowerLaw-10                 	       9	 112845782 ns/op	 7798673 B/op	  933046 allocs/op
+BenchmarkTraversalPowerLaw-10                 	       9	 112767676 ns/op	 7798600 B/op	  933046 allocs/op
+BenchmarkTraversalRMAT-10                     	       3	 421866764 ns/op	23463554 B/op	 2799833 allocs/op
+BenchmarkTraversalRMAT-10                     	       3	 418322819 ns/op	23464394 B/op	 2799833 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/bench/csrorder	107.229s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/csrorder
+cpu: Apple M4
+BenchmarkTraversalReverse/degree=8-10         	       5	 235419325 ns/op	14676899 B/op	 1701459 allocs/op
+BenchmarkTraversalReverse/degree=8-10         	       5	 240565508 ns/op	14677659 B/op	 1701461 allocs/op
+BenchmarkTraversalReverse/degree=16-10        	       5	 224250258 ns/op	14677416 B/op	 1701462 allocs/op
+BenchmarkTraversalReverse/degree=16-10        	       5	 221314008 ns/op	14677614 B/op	 1701464 allocs/op
+BenchmarkTraversalReverse/degree=32-10        	       5	 212034617 ns/op	14677542 B/op	 1701466 allocs/op
+BenchmarkTraversalReverse/degree=32-10        	       5	 212989292 ns/op	14676896 B/op	 1701464 allocs/op
+BenchmarkTraversalReverse/degree=64-10        	       5	 211237475 ns/op	14676827 B/op	 1701447 allocs/op
+BenchmarkTraversalReverse/degree=64-10        	       5	 206800058 ns/op	14676830 B/op	 1701447 allocs/op
+BenchmarkTraversalReverse/degree=512-10       	       6	 204658618 ns/op	14676849 B/op	 1701450 allocs/op
+BenchmarkTraversalReverse/degree=512-10       	       6	 201425132 ns/op	14677228 B/op	 1701449 allocs/op
+BenchmarkTraversalReverse/degree=4096-10      	       6	 200397715 ns/op	14677437 B/op	 1701448 allocs/op
+BenchmarkTraversalReverse/degree=4096-10      	       5	 200844708 ns/op	14677369 B/op	 1701446 allocs/op
+BenchmarkTraversalUndirected/degree=8-10      	       5	 237638717 ns/op	14677513 B/op	 1701460 allocs/op
+BenchmarkTraversalUndirected/degree=8-10      	       5	 245563692 ns/op	14676809 B/op	 1701458 allocs/op
+BenchmarkTraversalUndirected/degree=16-10     	       5	 223231700 ns/op	14677665 B/op	 1701464 allocs/op
+BenchmarkTraversalUndirected/degree=16-10     	       5	 215041733 ns/op	14677513 B/op	 1701463 allocs/op
+BenchmarkTraversalUndirected/degree=32-10     	       5	 216139933 ns/op	14677656 B/op	 1701467 allocs/op
+BenchmarkTraversalUndirected/degree=32-10     	       5	 214220275 ns/op	14677460 B/op	 1701465 allocs/op
+BenchmarkTraversalUndirected/degree=64-10     	       5	 209304858 ns/op	14677281 B/op	 1701446 allocs/op
+BenchmarkTraversalUndirected/degree=64-10     	       5	 215187917 ns/op	14677446 B/op	 1701448 allocs/op
+BenchmarkTraversalUndirected/degree=512-10    	       6	 201846910 ns/op	14677388 B/op	 1701451 allocs/op
+BenchmarkTraversalUndirected/degree=512-10    	       5	 201707558 ns/op	14677404 B/op	 1701450 allocs/op
+BenchmarkTraversalUndirected/degree=4096-10   	       6	 202152681 ns/op	14677258 B/op	 1701446 allocs/op
+BenchmarkTraversalUndirected/degree=4096-10   	       6	 198396743 ns/op	14677369 B/op	 1701447 allocs/op
+BenchmarkTraversalPowerLaw-10                 	       9	 112092995 ns/op	 7798679 B/op	  933046 allocs/op
+BenchmarkTraversalPowerLaw-10                 	      10	 109418950 ns/op	 7798709 B/op	  933047 allocs/op
+BenchmarkTraversalRMAT-10                     	       3	 419065625 ns/op	23463392 B/op	 2799831 allocs/op
+BenchmarkTraversalRMAT-10                     	       3	 421846264 ns/op	23464264 B/op	 2799832 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/bench/csrorder	104.927s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/csrorder
+cpu: Apple M4
+BenchmarkTraversalReverse/degree=8-10         	       5	 233521875 ns/op	14677641 B/op	 1701461 allocs/op
+BenchmarkTraversalReverse/degree=8-10         	       5	 235068033 ns/op	14676945 B/op	 1701459 allocs/op
+BenchmarkTraversalReverse/degree=16-10        	       5	 217508583 ns/op	14677731 B/op	 1701465 allocs/op
+BenchmarkTraversalReverse/degree=16-10        	       5	 220497517 ns/op	14677652 B/op	 1701464 allocs/op
+BenchmarkTraversalReverse/degree=32-10        	       5	 217983400 ns/op	14677628 B/op	 1701467 allocs/op
+BenchmarkTraversalReverse/degree=32-10        	       5	 209109442 ns/op	14676857 B/op	 1701464 allocs/op
+BenchmarkTraversalReverse/degree=64-10        	       5	 210452433 ns/op	14676729 B/op	 1701446 allocs/op
+BenchmarkTraversalReverse/degree=64-10        	       5	 208838000 ns/op	14676713 B/op	 1701446 allocs/op
+BenchmarkTraversalReverse/degree=512-10       	       6	 200802708 ns/op	14676736 B/op	 1701449 allocs/op
+BenchmarkTraversalReverse/degree=512-10       	       5	 204123658 ns/op	14677323 B/op	 1701450 allocs/op
+BenchmarkTraversalReverse/degree=4096-10      	       6	 201070514 ns/op	14677261 B/op	 1701446 allocs/op
+BenchmarkTraversalReverse/degree=4096-10      	       6	 202787132 ns/op	14677288 B/op	 1701446 allocs/op
+BenchmarkTraversalUndirected/degree=8-10      	       5	 238485392 ns/op	14677716 B/op	 1701462 allocs/op
+BenchmarkTraversalUndirected/degree=8-10      	       5	 241682825 ns/op	14676931 B/op	 1701459 allocs/op
+BenchmarkTraversalUndirected/degree=16-10     	       5	 223079025 ns/op	14677769 B/op	 1701465 allocs/op
+BenchmarkTraversalUndirected/degree=16-10     	       5	 217335442 ns/op	14677660 B/op	 1701464 allocs/op
+BenchmarkTraversalUndirected/degree=32-10     	       5	 214657558 ns/op	14677444 B/op	 1701465 allocs/op
+BenchmarkTraversalUndirected/degree=32-10     	       5	 215263250 ns/op	14677577 B/op	 1701466 allocs/op
+BenchmarkTraversalUndirected/degree=64-10     	       5	 209544342 ns/op	14677604 B/op	 1701450 allocs/op
+BenchmarkTraversalUndirected/degree=64-10     	       5	 215576458 ns/op	14677395 B/op	 1701448 allocs/op
+BenchmarkTraversalUndirected/degree=512-10    	       5	 206893192 ns/op	14677404 B/op	 1701450 allocs/op
+BenchmarkTraversalUndirected/degree=512-10    	       5	 204782142 ns/op	14677420 B/op	 1701451 allocs/op
+BenchmarkTraversalUndirected/degree=4096-10   	       6	 203098979 ns/op	14677358 B/op	 1701447 allocs/op
+BenchmarkTraversalUndirected/degree=4096-10   	       6	 200627743 ns/op	14677440 B/op	 1701448 allocs/op
+BenchmarkTraversalPowerLaw-10                 	       9	 112786009 ns/op	 7798666 B/op	  933046 allocs/op
+BenchmarkTraversalPowerLaw-10                 	      10	 110105696 ns/op	 7798601 B/op	  933046 allocs/op
+BenchmarkTraversalRMAT-10                     	       3	 426558931 ns/op	23463464 B/op	 2799832 allocs/op
+BenchmarkTraversalRMAT-10                     	       3	 432147181 ns/op	23464722 B/op	 2799836 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/bench/csrorder	109.643s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/csrorder
+cpu: Apple M4
+BenchmarkTraversalReverse/degree=8-10         	       4	 253262542 ns/op	14677664 B/op	 1701460 allocs/op
+BenchmarkTraversalReverse/degree=8-10         	       5	 246997108 ns/op	14677451 B/op	 1701459 allocs/op
+BenchmarkTraversalReverse/degree=16-10        	       5	 222061733 ns/op	14677668 B/op	 1701464 allocs/op
+BenchmarkTraversalReverse/degree=16-10        	       5	 222386725 ns/op	14677419 B/op	 1701462 allocs/op
+BenchmarkTraversalReverse/degree=32-10        	       5	 211748225 ns/op	14676857 B/op	 1701464 allocs/op
+BenchmarkTraversalReverse/degree=32-10        	       5	 217259742 ns/op	14676857 B/op	 1701464 allocs/op
+BenchmarkTraversalReverse/degree=64-10        	       5	 210490533 ns/op	14676713 B/op	 1701446 allocs/op
+BenchmarkTraversalReverse/degree=64-10        	       5	 205007733 ns/op	14676811 B/op	 1701447 allocs/op
+BenchmarkTraversalReverse/degree=512-10       	       5	 201089725 ns/op	14676755 B/op	 1701449 allocs/op
+BenchmarkTraversalReverse/degree=512-10       	       5	 205500308 ns/op	14677323 B/op	 1701450 allocs/op
+BenchmarkTraversalReverse/degree=4096-10      	       6	 204119208 ns/op	14677277 B/op	 1701446 allocs/op
+BenchmarkTraversalReverse/degree=4096-10      	       6	 198034188 ns/op	14677450 B/op	 1701448 allocs/op
+BenchmarkTraversalUndirected/degree=8-10      	       5	 242327875 ns/op	14677712 B/op	 1701462 allocs/op
+BenchmarkTraversalUndirected/degree=8-10      	       5	 232583092 ns/op	14676860 B/op	 1701458 allocs/op
+BenchmarkTraversalUndirected/degree=16-10     	       5	 220943925 ns/op	14677520 B/op	 1701463 allocs/op
+BenchmarkTraversalUndirected/degree=16-10     	       5	 220844333 ns/op	14677832 B/op	 1701466 allocs/op
+BenchmarkTraversalUndirected/degree=32-10     	       5	 211188500 ns/op	14677441 B/op	 1701465 allocs/op
+BenchmarkTraversalUndirected/degree=32-10     	       5	 217661983 ns/op	14677444 B/op	 1701465 allocs/op
+BenchmarkTraversalUndirected/degree=64-10     	       5	 208131992 ns/op	14677496 B/op	 1701449 allocs/op
+BenchmarkTraversalUndirected/degree=64-10     	       5	 207401142 ns/op	14677496 B/op	 1701449 allocs/op
+BenchmarkTraversalUndirected/degree=512-10    	       5	 210606125 ns/op	14677436 B/op	 1701451 allocs/op
+BenchmarkTraversalUndirected/degree=512-10    	       5	 203559117 ns/op	14677502 B/op	 1701451 allocs/op
+BenchmarkTraversalUndirected/degree=4096-10   	       6	 202153104 ns/op	14677193 B/op	 1701445 allocs/op
+BenchmarkTraversalUndirected/degree=4096-10   	       6	 200736083 ns/op	14677304 B/op	 1701447 allocs/op
+BenchmarkTraversalPowerLaw-10                 	      10	 112505679 ns/op	 7798600 B/op	  933046 allocs/op
+BenchmarkTraversalPowerLaw-10                 	      10	 108303504 ns/op	 7798600 B/op	  933046 allocs/op
+BenchmarkTraversalRMAT-10                     	       3	 423182653 ns/op	23463274 B/op	 2799830 allocs/op
+BenchmarkTraversalRMAT-10                     	       3	 425376695 ns/op	23464837 B/op	 2799837 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/bench/csrorder	107.716s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/csrorder
+cpu: Apple M4
+BenchmarkTraversalReverse/degree=8-10         	       5	 235944425 ns/op	14677475 B/op	 1701459 allocs/op
+BenchmarkTraversalReverse/degree=8-10         	       5	 240238067 ns/op	14677532 B/op	 1701460 allocs/op
+BenchmarkTraversalReverse/degree=16-10        	       5	 222485942 ns/op	14677574 B/op	 1701463 allocs/op
+BenchmarkTraversalReverse/degree=16-10        	       5	 213630325 ns/op	14677614 B/op	 1701464 allocs/op
+BenchmarkTraversalReverse/degree=32-10        	       5	 209554775 ns/op	14677542 B/op	 1701466 allocs/op
+BenchmarkTraversalReverse/degree=32-10        	       5	 219693650 ns/op	14676857 B/op	 1701464 allocs/op
+BenchmarkTraversalReverse/degree=64-10        	       5	 204605467 ns/op	14676811 B/op	 1701447 allocs/op
+BenchmarkTraversalReverse/degree=64-10        	       5	 206887350 ns/op	14676912 B/op	 1701448 allocs/op
+BenchmarkTraversalReverse/degree=512-10       	       5	 203264492 ns/op	14676736 B/op	 1701449 allocs/op
+BenchmarkTraversalReverse/degree=512-10       	       5	 206078942 ns/op	14677502 B/op	 1701451 allocs/op
+BenchmarkTraversalReverse/degree=4096-10      	       5	 200449550 ns/op	14677291 B/op	 1701446 allocs/op
+BenchmarkTraversalReverse/degree=4096-10      	       6	 200988861 ns/op	14677177 B/op	 1701445 allocs/op
+BenchmarkTraversalUndirected/degree=8-10      	       5	 245733183 ns/op	14677412 B/op	 1701459 allocs/op
+BenchmarkTraversalUndirected/degree=8-10      	       5	 241168192 ns/op	14676880 B/op	 1701458 allocs/op
+BenchmarkTraversalUndirected/degree=16-10     	       5	 215567517 ns/op	14677672 B/op	 1701464 allocs/op
+BenchmarkTraversalUndirected/degree=16-10     	       5	 220726250 ns/op	14677598 B/op	 1701463 allocs/op
+BenchmarkTraversalUndirected/degree=32-10     	       5	 213751708 ns/op	14677444 B/op	 1701465 allocs/op
+BenchmarkTraversalUndirected/degree=32-10     	       5	 209976317 ns/op	14677571 B/op	 1701466 allocs/op
+BenchmarkTraversalUndirected/degree=64-10     	       5	 212469233 ns/op	14677484 B/op	 1701449 allocs/op
+BenchmarkTraversalUndirected/degree=64-10     	       5	 207423975 ns/op	14677515 B/op	 1701449 allocs/op
+BenchmarkTraversalUndirected/degree=512-10    	       5	 203683308 ns/op	14677440 B/op	 1701451 allocs/op
+BenchmarkTraversalUndirected/degree=512-10    	       5	 207862433 ns/op	14677420 B/op	 1701451 allocs/op
+BenchmarkTraversalUndirected/degree=4096-10   	       6	 202541820 ns/op	14677342 B/op	 1701447 allocs/op
+BenchmarkTraversalUndirected/degree=4096-10   	       6	 200128562 ns/op	14677437 B/op	 1701448 allocs/op
+BenchmarkTraversalPowerLaw-10                 	      10	 109588521 ns/op	 7798600 B/op	  933046 allocs/op
+BenchmarkTraversalPowerLaw-10                 	      10	 112526112 ns/op	 7798609 B/op	  933046 allocs/op
+BenchmarkTraversalRMAT-10                     	       3	 428983597 ns/op	23463613 B/op	 2799833 allocs/op
+BenchmarkTraversalRMAT-10                     	       3	 429817014 ns/op	23463360 B/op	 2799831 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/bench/csrorder	101.583s

@@ -502,14 +502,10 @@ func (op *Expand) lookupFwdEdgePos(src, dst uint64) (uint64, bool) {
 	if src+1 >= uint64(len(op.fwdVerts)) {
 		return 0, false
 	}
-	start := op.fwdVerts[src]
-	end := op.fwdVerts[src+1]
-	for pos := start; pos < end; pos++ {
-		if uint64(op.fwdEdges[pos]) == dst {
-			return pos, true
-		}
-	}
-	return 0, false
+	// O(log d) since rmp #2141/#2142: the run is destination-ordered, and the
+	// lower bound returns the FIRST slot with this destination — the same slot
+	// the prior linear scan returned for parallel edges.
+	return firstDstPos(op.fwdEdges, op.fwdVerts[src], op.fwdVerts[src+1], dst)
 }
 
 // lookupFwdEdgePosByHandle returns the forward-CSR position of the edge
@@ -523,10 +519,13 @@ func (op *Expand) lookupFwdEdgePosByHandle(src, dst, handle uint64) (uint64, boo
 	if src+1 >= uint64(len(op.fwdVerts)) {
 		return 0, false
 	}
-	start := op.fwdVerts[src]
-	end := op.fwdVerts[src+1]
-	for pos := start; pos < end; pos++ {
-		if uint64(op.fwdEdges[pos]) == dst && op.fwdHandles[pos] == handle {
+	// O(log d + r), r = the parallel-edge multiplicity of this (src, dst) pair:
+	// binary-search to the destination run, then walk only that short run to
+	// disambiguate by handle. Never worse than the O(d) scan it replaces, since
+	// r <= d.
+	lo, hi := dstRun(op.fwdEdges, op.fwdVerts[src], op.fwdVerts[src+1], dst)
+	for pos := lo; pos < hi; pos++ {
+		if op.fwdHandles[pos] == handle {
 			return pos, true
 		}
 	}
@@ -546,19 +545,17 @@ func (op *Expand) reverseEdgePassesFilter(dst, src uint64) bool {
 	if dst+1 >= uint64(len(op.fwdVerts)) {
 		return false
 	}
-	start := op.fwdVerts[dst]
-	end := op.fwdVerts[dst+1]
-	for fwdPos := start; fwdPos < end; fwdPos++ {
-		if uint64(op.fwdEdges[fwdPos]) == src {
-			// Membership in the filter map is sufficient — the map only
-			// contains edges of accepted types (multi-type [r:A|B] support).
-			if _, ok := op.edgeTypeFilter[fwdPos]; ok {
-				return true
-			}
-			return false
-		}
+	// O(log d) since rmp #2142. The prior linear scan consulted the filter for
+	// the FIRST matching slot only and returned immediately, so the lower bound
+	// reproduces its decision exactly, including for parallel edges.
+	fwdPos, ok := firstDstPos(op.fwdEdges, op.fwdVerts[dst], op.fwdVerts[dst+1], src)
+	if !ok {
+		return false
 	}
-	return false
+	// Membership in the filter map is sufficient — the map only
+	// contains edges of accepted types (multi-type [r:A|B] support).
+	_, admitted := op.edgeTypeFilter[fwdPos]
+	return admitted
 }
 
 // advanceInput pulls the next row from the child operator and loads the

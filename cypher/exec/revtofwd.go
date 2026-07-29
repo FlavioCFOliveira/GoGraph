@@ -135,9 +135,13 @@ func buildRevToFwd(
 // matchFwdByHandle returns the forward position in [fStart,fEnd) whose
 // destination is revUID and whose stable handle equals handle, or
 // [unresolvedFwdPos] when none matches.
+// Since rmp #2141/#2142 the forward run is destination-ordered, so this is
+// O(log d + r) — binary-search to the destination run, then walk only that run to
+// match the handle — rather than O(d).
 func matchFwdByHandle(fwdEdges []graph.NodeID, fwdHandles []uint64, fStart, fEnd, revUID, handle uint64) uint64 {
-	for fp := fStart; fp < fEnd; fp++ {
-		if uint64(fwdEdges[fp]) == revUID && fwdHandles[fp] == handle {
+	lo, hi := dstRun(fwdEdges, fStart, fEnd, revUID)
+	for fp := lo; fp < hi; fp++ {
+		if fwdHandles[fp] == handle {
 			return fp
 		}
 	}
@@ -253,15 +257,16 @@ func revTypeAdmitSet(
 // matchFwdByOrdinal returns the ordinal-th (1-based) forward position in
 // [fStart,fEnd) whose destination is revUID, or [unresolvedFwdPos] when fewer
 // than ordinal such positions exist.
+// Since rmp #2141/#2142 every slot sharing a destination forms one CONTIGUOUS
+// run, so the ordinal-th match is simply the ordinal-th element of that run:
+// O(log d) with no scan at all. ordinal is 1-based, as the caller counts it.
 func matchFwdByOrdinal(fwdEdges []graph.NodeID, fStart, fEnd, revUID, ordinal uint64) uint64 {
-	seen := uint64(0)
-	for fp := fStart; fp < fEnd; fp++ {
-		if uint64(fwdEdges[fp]) == revUID {
-			seen++
-			if seen == ordinal {
-				return fp
-			}
-		}
+	if ordinal == 0 {
+		return unresolvedFwdPos
+	}
+	lo, hi := dstRun(fwdEdges, fStart, fEnd, revUID)
+	if fp := lo + ordinal - 1; fp < hi {
+		return fp
 	}
 	return unresolvedFwdPos
 }

@@ -103,6 +103,8 @@ func (g *Graph[N, W]) AddEdgeHIfAbsent(src, dst N, w W, handle uint64) (inserted
 		if err := g.adj.AddEdge(src, dst, w); err != nil {
 			return false, err
 		}
+		// Invalidate every CSR-position-keyed cache at SOURCE; see [Graph.AddEdge].
+		g.topoGeneration.Add(1)
 		return true, nil
 	}
 	if g.HasEdgeHandle(src, dst, handle) {
@@ -111,6 +113,8 @@ func (g *Graph[N, W]) AddEdgeHIfAbsent(src, dst N, w W, handle uint64) (inserted
 	if err := g.adj.AddEdgeH(src, dst, w, handle); err != nil {
 		return false, err
 	}
+	// Invalidate every CSR-position-keyed cache at SOURCE; see [Graph.AddEdge].
+	g.topoGeneration.Add(1)
 	return true, nil
 }
 

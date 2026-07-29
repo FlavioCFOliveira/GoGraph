@@ -343,6 +343,69 @@ invariant; the harness was validated by mutation. Design and proofs:
 and [benchmarks/history/LEDGER.md](benchmarks/history/LEDGER.md) rows 0028–0029.
 TCK held at 3897/3897, -race clean.
 
+## Sprint 313 — destination-ordered CSR neighbour runs (R2-P3, 2026-07-29)
+
+Every CSR source's neighbour run is now ordered by the total key
+`(destination, handle)`, so the executor's five forward-position membership
+probes binary-search instead of scanning. Those probes fire on the **reverse and
+undirected** expand path: each reverse slot must locate its corresponding
+forward edge, which cost O(deg(dst)) in the destination's forward run.
+
+Measured interleaved against the pre-sprint tree (n=10, every row p=0.000):
+
+| out-degree | time | B/op |
+|---:|---:|---:|
+| 8 | −8.28% | −59.20% |
+| 16 | −5.60% | −58.01% |
+| 32 | −6.83% | −57.26% |
+| 64 | −8.42% | −56.92% |
+| 512 | **−36.75%** | −56.59% |
+| 4096 | **−81.76%** | −56.56% |
+| **Barabási–Albert power law** | **−7.37%** | **−58.47%** |
+| RMAT scale=16 ef=16 | −28.69% | −58.39% |
+| geomean | **−31.77%** | **−57.58%** |
+
+**Quote the power-law row, not the geomean.** The sweep deliberately includes
+out-degrees no real property graph reaches, and RMAT overstates the win by
+**3.9×** — the trap `design-degree-adaptive-adjacency.md` §8 forbids
+benchmarking into. So: a modest win on a realistic graph, a large win on
+hub-heavy shapes, **no regression at any degree**.
+
+The win is *attributable* because the three commits have different signatures.
+The #2143 pair cache is degree-independent — `B/op` falls ~57% everywhere and
+HEAD sits flat at 14.00 MiB where the baseline scaled 32–34 MiB — and is the
+whole story at degrees 8–64. The ordering and the O(log d) probe are the extra
+−28 percentage points at degree 512 and −73 at 4096.
+
+**The write path pays for this, and the number is large.** Ordering makes a CSR
+build **2.5×–34× more expensive** (+152% at degree 8 to +3363% at 4096;
+`OrderRuns` alone 2.7 ms → 22.1 ms) and the checkpoint **+16.52%** geomean,
+peaking at +30.82%. That trade is only favourable because #2143 moved the build
+off the per-query path into an `Engine`-level cache keyed on `TopoGeneration`;
+without it, this cost would be paid on every query. The checkpoint's percentage
+is non-monotonic but its *absolute* delta rises monotonically (+10.9 ms →
++38.9 ms), exactly as O(Σ d log d) predicts.
+
+Ordering is **unconditional**, not degree-adaptive. A per-source "is sorted" flag
+would cost a branch at every probe site, oblige every site to consult it, and
+need a promotion rule incompatible with recovery determinism. The **adjacency is
+deliberately left unordered** on three structural grounds (no `AuxColumn`
+permutation primitive; the zero-allocation tail append cannot survive an ordered
+insert; a history-dependent representation lets a recovered graph diverge) — so
+`HasEdge` remains an O(d) scan and the `MERGE` write-path win was dropped
+(#2140, superseded).
+
+Two evidence notes worth carrying forward. The sprint's motivating audit figure
+was **refuted as physically unattainable** (it implied 0.040 ns/element against a
+measured branch-free floor of 0.164), and the crossover is **≈16, not ≈64**. And
+the first A/B measurement of this change was **invalid**: `bench-history.sh`
+compares back-to-back, which on this hardware manufactured a spurious +2.12%
+`cypher_ldbc` geomean regression that vanished entirely under interleaving — all
+23 curated benchmarks are flat. A byte-identical control caught it. Full record:
+[benchmarks/csr-neighbour-ordering-2026-07-29.md](benchmarks/csr-neighbour-ordering-2026-07-29.md)
+and [benchmarks/history/LEDGER.md](benchmarks/history/LEDGER.md) rows 0030–0031.
+TCK held at 3897/3897, `-race` clean.
+
 ## Workflow
 
 Every future optimisation appends a row to the table above with

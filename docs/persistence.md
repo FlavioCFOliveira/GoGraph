@@ -474,6 +474,21 @@ omit the mapper. `snapshot/csr.bin`, `labels.bin`, and
 | 18      | vertices         | uint64[nVertices]             |
 | ...     | edges            | uint64[nEdges]                |
 | ...     | weights          | raw[weightSize·nEdges] (opt.) |
+| ...     | hasHandles       | uint8 (optional trailing)     |
+| ...     | handles          | uint64[nEdges] (opt.)         |
+
+The trailing `hasHandles` + `handles` block is emitted **only** when the
+source CSR carries a per-slot stable edge-handle column
+(`csr.CSR.HandlesSlice() != nil`). A graph that never used `AddEdgeH`
+produces no trailing block at all, so its `csr.bin` is byte-identical to
+one written before the handle column existed.
+
+Within a source, the order of the `edges` entries is **derived at build
+time** from the adjacency by `csr.BuildFromAdjList`; it is never read
+from, nor trusted from, disk. `store/snapshot.ApplyCSRToGraph` replays
+the file in its stored order and the next build re-derives the order from
+the rebuilt adjacency, so a snapshot stays readable across any change to
+the build's ordering rule without a format version bump.
 
 ### `snapshot/labels.bin` (binary, v2+ only)
 

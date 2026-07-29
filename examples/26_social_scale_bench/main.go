@@ -130,15 +130,20 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"runtime"
+	"runtime/pprof"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
@@ -236,10 +241,22 @@ func main() {
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
 	flag.BoolVar(&cfg.relTypes, "rel-types", cfg.relTypes,
 		"store explicit FRIEND/LIKE relationship types (false: infer type from endpoint labels, no per-edge label stored)")
+	var profileDir string
+	flag.StringVar(&profileDir, "profile-dir", "",
+		"if set, write cpu.pprof and heap.pprof here (attribute CPU and allocations to call sites; "+
+			"inspect with: go tool pprof -http=:0 <file>)")
 	flag.Parse()
+
+	// CPU profiling must be started before any measured work and stopped after
+	// all of it, so it wraps the whole battery rather than one section.
+	stopCPU, err := startCPUProfile(profileDir)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	ctx := context.Background()
 	if err := run(ctx, os.Stdout, cfg); err != nil {
+		stopCPU()
 		log.Fatal(err)
 	}
 	// The columnar exercise runs on its own bounded working set (never the full
@@ -253,8 +270,73 @@ func main() {
 	// (never the -users scale — see parallelismExercise), large enough to cross the
 	// parallel-scan threshold, so it too is driven from main rather than from run.
 	if err := parallelismExercise(ctx, cfg, os.Stdout); err != nil {
+		stopCPU()
 		log.Fatal(err)
 	}
+
+	// Stop the CPU profile before the heap profile so the heap snapshot is not
+	// perturbed by the profiler's own teardown allocations.
+	stopCPU()
+	if err := writeHeapProfile(profileDir, os.Stdout); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// startCPUProfile begins a CPU profile in dir and returns a stop function. When
+// dir is empty it is a no-op returning a no-op stop, so the default run pays
+// nothing and needs no branch at the call site.
+//
+// The returned stop is safe to call more than once: every error path in main
+// calls it before log.Fatal, and log.Fatal exits without running defers, so a
+// deferred stop would silently truncate the profile on exactly the runs where it
+// is most wanted.
+func startCPUProfile(dir string) (func(), error) {
+	if dir == "" {
+		return func() {}, nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("profile dir: %w", err)
+	}
+	f, err := os.Create(filepath.Join(dir, "cpu.pprof"))
+	if err != nil {
+		return nil, fmt.Errorf("create cpu profile: %w", err)
+	}
+	if err := pprof.StartCPUProfile(f); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("start cpu profile: %w", err)
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			pprof.StopCPUProfile()
+			_ = f.Close()
+		})
+	}, nil
+}
+
+// writeHeapProfile writes a heap profile to dir, or does nothing when dir is
+// empty.
+//
+// runtime.GC runs first because a heap profile reports what is LIVE as of the
+// last completed collection; without it the profile can attribute garbage that
+// simply has not been swept yet, which reads as a leak that is not there.
+func writeHeapProfile(dir string, w io.Writer) error {
+	if dir == "" {
+		return nil
+	}
+	runtime.GC()
+	path := filepath.Join(dir, "heap.pprof")
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create heap profile: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := pprof.WriteHeapProfile(f); err != nil {
+		return fmt.Errorf("write heap profile: %w", err)
+	}
+	fmt.Fprintf(w, "# pprof.cpu=%s\n", filepath.Join(dir, "cpu.pprof"))
+	fmt.Fprintf(w, "# pprof.heap=%s\n", path)
+	return nil
 }
 
 // run builds the social network described by cfg, queries it, and
@@ -322,7 +404,316 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	if err := statisticsExercise(ctx, eng, cfg, w); err != nil {
 		return fmt.Errorf("statistics: %w", err)
 	}
+	if err := csrOrderingExercise(ctx, g, eng, cfg, &stats, w); err != nil {
+		return fmt.Errorf("csr ordering: %w", err)
+	}
 	return nil
+}
+
+// orderThreshold is the CALIBRATED linear/binary probe crossover from
+// docs/design-degree-adaptive-adjacency.md §2.2: out-degree 16.
+//
+// It is NOT the 64 the 2026-07-25 planner audit assumed — those figures were
+// refuted as physically unattainable (they implied 0.040 ns/element against a
+// measured branch-free floor of 0.164). Reporting the fractions at 16 rather
+// than 64 is the difference between a fixture that looks entirely below
+// threshold and one that looks entirely above it, so the constant matters to how
+// this section reads.
+const orderThreshold = 16
+
+// csrOrderingExercise reports what this example's data shape means for the
+// destination-ordered CSR neighbour runs delivered in sprint 313 (rmp #2141,
+// probed in #2142, benchmarked in #2145).
+//
+// # What this example can and cannot show
+//
+// It can show the ordered path ENGAGING and NOT REGRESSING. It cannot show a hub
+// win, and the reason is a property of the generator that must be stated rather
+// than glossed: this example generates a UNIFORM out-degree — each user draws a
+// degree from [friendsMin, friendsMax] with equal probability — so every user is
+// statistically the same size and there is no hub tail at all. A real social
+// graph is power-law, where a few vertices carry a disproportionate share of the
+// traversal cost. Demonstrating the hub win is #2145's job, on a
+// Barabási–Albert fixture (bench/csrorder); this section's job is to say plainly
+// what shape the example actually has, so a reader cannot mistake a uniform
+// result for a realistic one.
+//
+// The fractions reported below are the ones that decide leverage:
+//
+//   - vertexFrac — share of users whose out-degree exceeds the threshold;
+//   - edgeFrac — share of FRIEND arcs leaving those users;
+//   - costFrac — share of Σd² contributed by them. Σd² is the linear-scan cost
+//     model, so costFrac is the share of probe cost an ordering can address. On
+//     a uniform fixture all three collapse to 0% or 100% together, which is
+//     itself the evidence that the distribution has no tail: on the
+//     Barabási–Albert fixture in bench/csrorder the same three read 23.57% /
+//     50.09% / 87.22%, and that spread IS the skew.
+func csrOrderingExercise(
+	ctx context.Context,
+	g *lpg.Graph[string, float64],
+	eng *cypher.Engine,
+	cfg config,
+	stats *buildStats,
+	w io.Writer,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	before := readMem()
+
+	// Build the forward CSR exactly as the Cypher engine does (live-filtered),
+	// so the snapshot measured here is the one queries actually traverse.
+	buildStart := time.Now()
+	fwd := csr.BuildFromAdjListLive(g.AdjList(), g.LiveNodeFilter())
+	buildElapsed := time.Since(buildStart)
+
+	fmt.Fprintf(w, "\n# --- CSR neighbour ordering (sprint 313) ---\n")
+	fmt.Fprintf(w, "# csr.build_elapsed=%s\n", buildElapsed.Round(time.Millisecond))
+	fmt.Fprintf(w, "csr.order=%d\n", fwd.Order())
+	fmt.Fprintf(w, "csr.size=%d\n", fwd.Size())
+
+	// The ordering is an INVARIANT of every CSR graph/csr builds, so this must
+	// hold. Asserting it here makes the example a live check of that invariant on
+	// a realistically-sized graph, not merely a reporter of it.
+	ordered := fwd.RunsOrdered()
+	fmt.Fprintf(w, "csr.runs_ordered=%t\n", ordered)
+	if !ordered {
+		return fmt.Errorf("CSR runs are not ordered: the #2141 invariant is broken")
+	}
+
+	// Measured footprint of the snapshot's three arrays. This is the storage
+	// cost the ordering is applied to; the ordering itself adds no bytes, which
+	// the per-arc figure makes checkable.
+	verts, edges, handles := fwd.VerticesSlice(), fwd.EdgesSlice(), fwd.HandlesSlice()
+	csrBytes := uint64(len(verts)*8 + len(edges)*8 + len(handles)*8)
+	fmt.Fprintf(w, "csr.bytes=%s\n", humanBytes(csrBytes))
+	fmt.Fprintf(w, "csr.bytes_per_arc=%.1f\n", safeDiv(float64(csrBytes), float64(fwd.Size())))
+	fmt.Fprintf(w, "csr.has_handles=%t\n", handles != nil)
+
+	// The ACTUAL out-degree distribution, read from the CSR offsets rather than
+	// from cfg, so what is reported is what was generated.
+	prof := profileCSRDegrees(verts, orderThreshold)
+	fmt.Fprintf(w, "degree.threshold=%d\n", orderThreshold)
+	fmt.Fprintf(w, "degree.sources=%d\n", prof.sources)
+	fmt.Fprintf(w, "degree.min=%d\n", prof.minDeg)
+	fmt.Fprintf(w, "degree.max=%d\n", prof.maxDeg)
+	fmt.Fprintf(w, "degree.mean=%.2f\n", prof.mean)
+	fmt.Fprintf(w, "degree.p50=%d\n", prof.p50)
+	fmt.Fprintf(w, "degree.p99=%d\n", prof.p99)
+	fmt.Fprintf(w, "degree.vertex_frac_above=%.2f%%\n", 100*prof.vertexFrac)
+	fmt.Fprintf(w, "degree.edge_frac_above=%.2f%%\n", 100*prof.edgeFrac)
+	fmt.Fprintf(w, "degree.cost_frac_above=%.2f%%\n", 100*prof.costFrac)
+
+	// State the shape explicitly, and state exactly WHICH degree is being
+	// reported, because getting either wrong misleads in a different direction.
+	//
+	// This is the COMBINED out-degree over every relationship type. A CSR's
+	// offsets array carries no type information — a source's run holds its FRIEND
+	// and LIKE arcs together — so this figure is deg_FRIEND + deg_LIKE, drawn from
+	// [friendsMin, friendsMax] and [0, likesMax] respectively. That is also the
+	// degree the O(log d) probe actually searches, so it is the right quantity for
+	// this section even though it is NOT the FRIEND degree the config names.
+	loBound := cfg.friendsMin
+	hiBound := cfg.friendsMax + cfg.likesMax
+	fmt.Fprintf(w, "degree.measured=FRIEND+LIKE combined (a CSR run carries both types)\n")
+	fmt.Fprintf(w, "degree.expected_range=[%d,%d]\n", loBound, hiBound)
+	fmt.Fprintf(w, "degree.distribution=BOUNDED, LIGHT-TAILED (not power-law)\n")
+
+	// Self-check: the measured range must lie inside the range the generator can
+	// produce. A violation means the shape drifted from the config and every
+	// fraction above is being read against the wrong model.
+	if prof.minDeg < loBound || prof.maxDeg > hiBound {
+		return fmt.Errorf("out-degree [%d,%d] escapes the generator's range [%d,%d]",
+			prof.minDeg, prof.maxDeg, loBound, hiBound)
+	}
+
+	fmt.Fprintf(w, "# degree.shape: each user draws its FRIEND out-degree uniformly from\n")
+	fmt.Fprintf(w, "#   [%d,%d] and its LIKE out-degree uniformly from [0,%d]. The SUM of two\n",
+		cfg.friendsMin, cfg.friendsMax, cfg.likesMax)
+	fmt.Fprintf(w, "#   uniforms is triangular, not uniform - but either way it is BOUNDED and\n")
+	fmt.Fprintf(w, "#   symmetric, so there is NO hub tail: max/p50 = %.2fx here, whereas the\n",
+		safeDiv(float64(prof.maxDeg), float64(prof.p50)))
+	fmt.Fprintf(w, "#   power-law fixture in bench/csrorder reaches 65x (max 719 at p50 11).\n")
+	fmt.Fprintf(w, "# degree.caveat: this example shows the ordered path ENGAGING and NOT\n")
+	fmt.Fprintf(w, "#   REGRESSING. It CANNOT show a hub win - that is #2145's power-law\n")
+	fmt.Fprintf(w, "#   fixture. Above the threshold of %d the ordered probe covers %.2f%% of\n",
+		orderThreshold, 100*prof.costFrac)
+	fmt.Fprintf(w, "#   scan cost here, but that 100%% is NOT skew: it means every vertex is\n")
+	fmt.Fprintf(w, "#   the same size and all of them sit above the crossover. On a power law\n")
+	fmt.Fprintf(w, "#   the three fractions SPREAD (23.57%% / 50.09%% / 87.22%%), and that\n")
+	fmt.Fprintf(w, "#   spread is what skew looks like.\n")
+
+	// Hub-heavy traversal: a REVERSE expand is what drives the ordered probe.
+	// A forward expand walks a contiguous run and never probes at all, so
+	// measuring one would report the ordering as pure overhead (see
+	// cypher/exec.Expand.advanceRevEdge).
+	if err := hubTraversalCost(ctx, g, eng, cfg, stats, w); err != nil {
+		return err
+	}
+
+	after := readMem()
+	fmt.Fprintf(w, "# csr.mem.heap_growth=%s\n", humanBytes(deltaU64(after.HeapAlloc, before.HeapAlloc)))
+	fmt.Fprintf(w, "# csr.mem.total_alloc=%s\n", humanBytes(after.TotalAlloc-before.TotalAlloc))
+	fmt.Fprintf(w, "# csr.mem.num_gc=%d\n", after.NumGC-before.NumGC)
+	return nil
+}
+
+// deltaU64 subtracts b from a without underflowing. HeapAlloc can legitimately
+// FALL across a section when a GC runs inside it, and an unsigned subtraction
+// would then report a nonsensical multi-exabyte "growth".
+func deltaU64(a, b uint64) uint64 {
+	if a < b {
+		return 0
+	}
+	return a - b
+}
+
+// csrDegreeProfile is the measured out-degree distribution of a CSR, with the
+// three leverage fractions computed above a threshold.
+type csrDegreeProfile struct {
+	sources        uint64
+	minDeg, maxDeg int
+	p50, p99       int
+	mean           float64
+	vertexFrac     float64
+	edgeFrac       float64
+	costFrac       float64
+}
+
+// profileCSRDegrees derives the out-degree distribution from a CSR's offsets
+// array alone — no edge data is touched, so this is a sequential scan of 8 bytes
+// per source and costs nothing next to the build that produced it.
+func profileCSRDegrees(vertices []uint64, threshold int) csrDegreeProfile {
+	var p csrDegreeProfile
+	if len(vertices) < 2 {
+		return p
+	}
+	degrees := make([]int, 0, len(vertices)-1)
+	var arcs, sumSq, aboveArcs, aboveSumSq, aboveVerts uint64
+	p.minDeg = -1
+	for i := 0; i+1 < len(vertices); i++ {
+		d := int(vertices[i+1] - vertices[i])
+		if d == 0 {
+			continue // a source with no out-arcs is not part of the distribution
+		}
+		degrees = append(degrees, d)
+		d64 := uint64(d)
+		arcs += d64
+		sumSq += d64 * d64
+		if p.minDeg < 0 || d < p.minDeg {
+			p.minDeg = d
+		}
+		if d > p.maxDeg {
+			p.maxDeg = d
+		}
+		if d > threshold {
+			aboveVerts++
+			aboveArcs += d64
+			aboveSumSq += d64 * d64
+		}
+	}
+	if p.minDeg < 0 {
+		p.minDeg = 0
+	}
+	p.sources = uint64(len(degrees))
+	if p.sources == 0 {
+		return p
+	}
+	sort.Ints(degrees)
+	p.mean = float64(arcs) / float64(p.sources)
+	p.p50 = degrees[len(degrees)*50/100]
+	p.p99 = degrees[min(len(degrees)*99/100, len(degrees)-1)]
+	p.vertexFrac = float64(aboveVerts) / float64(p.sources)
+	if arcs > 0 {
+		p.edgeFrac = float64(aboveArcs) / float64(arcs)
+	}
+	if sumSq > 0 {
+		p.costFrac = float64(aboveSumSq) / float64(sumSq)
+	}
+	return p
+}
+
+// hubTraversalCost measures the traversal shape the CSR ordering actually
+// serves: a reverse-direction, relationship-type-filtered expand, where every
+// reverse slot must locate its corresponding forward edge with an O(log d) probe
+// into the source's run.
+//
+// Both a COLD and a WARM measurement are taken. The cold one constructs a fresh
+// Engine so the #2143 CSR-pair cache cannot hit and the full O(V+E) pair build
+// plus the ordering pass is paid inside the measurement; the warm one reuses the
+// engine so the cache absorbs it. The gap between them is this example's view of
+// what that cache is worth, and reporting only one of the two would misstate the
+// cost by the whole build.
+func hubTraversalCost(
+	ctx context.Context,
+	g *lpg.Graph[string, float64],
+	eng *cypher.Engine,
+	cfg config,
+	stats *buildStats,
+	w io.Writer,
+) error {
+	relPat := ":FRIEND"
+	if !cfg.relTypes {
+		relPat = ""
+	}
+	// Reverse expand from one fixed user: who befriended the people this user
+	// befriended. The inner hop is written IN, so it drives advanceRevEdge.
+	query := fmt.Sprintf(
+		"MATCH (u:USER {id: $id})-[%s]->(f:USER)<-[%s]-(other:USER) RETURN count(*) AS n",
+		relPat, relPat)
+	params := map[string]expr.Value{"id": expr.StringValue(stats.sampleUser)}
+
+	warmStart := time.Now()
+	warmRows, err := scalarCountParams(ctx, eng, query, params)
+	if err != nil {
+		return fmt.Errorf("hub reverse expand (warm): %w", err)
+	}
+	warmElapsed := time.Since(warmStart)
+
+	coldEng := cypher.NewEngine(g)
+	coldStart := time.Now()
+	coldRows, err := scalarCountParams(ctx, coldEng, query, params)
+	if err != nil {
+		return fmt.Errorf("hub reverse expand (cold): %w", err)
+	}
+	coldElapsed := time.Since(coldStart)
+
+	if warmRows != coldRows {
+		return fmt.Errorf("hub reverse expand disagreed: warm %d, cold %d", warmRows, coldRows)
+	}
+
+	fmt.Fprintf(w, "hub.reverse_expand_rows=%d\n", warmRows)
+	fmt.Fprintf(w, "# hub.reverse_expand_warm=%s\n", warmElapsed.Round(time.Microsecond))
+	fmt.Fprintf(w, "# hub.reverse_expand_cold=%s\n", coldElapsed.Round(time.Microsecond))
+	fmt.Fprintf(w, "# hub.cache_speedup=%.2fx (cold pays the CSR pair build and the\n",
+		safeDiv(float64(coldElapsed), float64(warmElapsed)))
+	fmt.Fprintf(w, "#   ordering pass; warm hits the #2143 Engine-level pair cache)\n")
+	return nil
+}
+
+// scalarCountParams runs a single-row count query with parameters and returns
+// the count.
+func scalarCountParams(
+	ctx context.Context,
+	eng *cypher.Engine,
+	query string,
+	params map[string]expr.Value,
+) (int64, error) {
+	res, err := eng.Run(ctx, query, params)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = res.Close() }()
+	var n int64
+	for res.Next() {
+		if n, err = cellInt(res.Record(), "n"); err != nil {
+			return 0, err
+		}
+	}
+	if err := res.Err(); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // buildStats reports the realised shape of a build (the random degrees

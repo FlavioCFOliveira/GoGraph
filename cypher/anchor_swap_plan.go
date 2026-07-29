@@ -30,9 +30,9 @@ package cypher
 //
 // The swap fires ONLY when the resulting expand is DirOut — it flips a written
 // DirIn expand to DirOut, never the reverse. #2089a measured that a DirIn expand
-// pays a per-in-edge cost of Θ(out-degree of that edge's SOURCE) — the reverse
-// path scans the source's whole forward out-range to recover the canonical edge
-// id (Expand.lookupFwdEdgePos), plus a second such scan under a type filter
+// pays a per-in-edge cost of Θ(out-degree of that edge's SOURCE): the reverse
+// path had to SCAN the source's whole forward out-range to recover the canonical
+// edge id (Expand.lookupFwdEdgePos), plus a second such scan under a type filter
 // (Expand.reverseEdgePassesFilter). That overhead is invisible to the aggregate
 // D(label,relType,dir), so a reverse-INTRODUCING swap could be slower than the
 // written order and cannot be faithfully costed. An OUT-ward swap instead REMOVES
@@ -41,6 +41,17 @@ package cypher
 // win is a lower bound on the real win — no regression. The reverse-CSR build
 // cost is O(V+E) but paid unconditionally on every expand (csrPairFromGraph
 // builds both directions), so it cancels between the two anchors.
+//
+// SINCE #2142 THE MAGNITUDE HAS SHRUNK, but the verdict stands. Both lookups are
+// now binary searches over a destination-ordered run rather than scans, so the
+// per-in-edge overhead is Θ(log(out-degree of the source)), not Θ(out-degree) —
+// measured 6.04x cheaper at out-degree 4096 (rmp #2141/#2142; see
+// docs/design-degree-adaptive-adjacency.md §2.2). The reasoning above is
+// unaffected in KIND: a logarithmic per-in-edge cost is still real, still absent
+// from D(label,relType,dir), and so still not faithfully costable. The
+// restriction is therefore now CONSERVATIVE rather than forced, and lifting it
+// is a separate, separately-costed decision — it needs a cost model that carries
+// the residual log term, not merely the observation that the term got smaller.
 //
 // # The admissibility gate (design §1, §2)
 //

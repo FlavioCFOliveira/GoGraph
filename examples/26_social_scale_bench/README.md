@@ -129,6 +129,7 @@ users**, **30,000 articles**, **150–200 friends per user**, and **up to
 | `-likes-max` | `300` | maximum `LIKE` out-degree per user |
 | `-seed` | `1` | RNG seed (fixes the deterministic data shape) |
 | `-rel-types` | `true` | store explicit `FRIEND`/`LIKE` types. `false`: infer the type from endpoint labels and store no per-edge label (much less memory; see below) |
+| `-profile-dir` | `""` | if set, write `cpu.pprof` and `heap.pprof` here. Inspect with `go tool pprof -http=:0 <file>` |
 
 ## Expected output
 
@@ -535,6 +536,127 @@ engine **configuration** knob, not a module change; the shipped default is
 (`AddNode`, `SetNodeLabel`, `SetNodeProperty` with `lpg.Int64Value` / `lpg.StringValue`,
 `AdjList().Compact`). The exercise adds **no** module code: the parallel aggregate and
 the count pushdown engage automatically on the qualifying query shapes and scale.
+
+## CSR neighbour-ordering exercise (#2147)
+
+### Scenario
+
+Sprint 313 made every CSR source's neighbour run ordered by the total key
+`(destination, handle)`, so the executor's forward-position membership probes
+binary-search instead of scanning. This section exercises that on a
+realistically-sized social graph and reports what the example's own data shape
+means for it.
+
+### Objective
+
+**To show the ordered path engaging and not regressing — and to be explicit that
+this example cannot demonstrate a hub win.** That honesty is the point of the
+section, not a caveat bolted onto it.
+
+The example generates a **bounded, light-tailed** out-degree: each user draws a
+`FRIEND` degree uniformly from `[friends-min, friends-max]` and a `LIKE` degree
+uniformly from `[0, likes-max]`. Every user is therefore statistically the same
+size and there is **no hub tail at all**. A real social graph is power-law, where
+a few vertices carry a disproportionate share of traversal cost. Demonstrating
+the hub win is [`bench/csrorder`](../../bench/csrorder)'s job, on a
+Barabási–Albert fixture; this section's job is to state plainly what shape the
+example actually has, so a uniform result is never mistaken for a realistic one.
+
+### Run it
+
+Use bounded parameters — the defaults are far too large for this section to be
+useful interactively:
+
+```sh
+go run ./examples/26_social_scale_bench \
+  -users 100000 -articles 5000 -friends-min 20 -friends-max 40 -likes-max 60 \
+  -profile-dir /tmp/ex26prof
+```
+
+> **Timeouts.** A `perl`-style alarm is absorbed by a Go binary. If you need a
+> time bound, use a background watchdog instead:
+>
+> ```sh
+> ./ex26 <flags> & APP=$!
+> ( sleep 1500; kill -TERM $APP ) & WD=$!
+> wait $APP; kill $WD 2>/dev/null
+> ```
+
+### Indicators
+
+| Indicator | Meaning |
+|---|---|
+| `csr.runs_ordered` | the #2141 invariant, asserted live. The run **fails** if false |
+| `csr.order` / `csr.size` | vertices and arcs in the snapshot the queries traverse |
+| `csr.bytes` / `csr.bytes_per_arc` | snapshot footprint. Three `uint64` arrays, so ~8 B/arc is the floor |
+| `csr.has_handles` | whether a handle column exists (`false` for plain `AddEdge`) |
+| `degree.measured` | **which** degree is reported — `FRIEND+LIKE combined`, because a CSR run carries both types and has no type information |
+| `degree.expected_range` | the range the generator can produce; the run **fails** if the measurement escapes it |
+| `degree.min` / `max` / `mean` / `p50` / `p99` | the realised distribution |
+| `degree.threshold` | the **calibrated** crossover, 16 — not the refuted 64 |
+| `degree.vertex_frac_above` | share of sources above the threshold |
+| `degree.edge_frac_above` | share of arcs leaving them |
+| `degree.cost_frac_above` | share of Σd² from them — the linear-scan cost model, and the only one of the three that predicts a speed-up |
+| `hub.reverse_expand_rows` | rows from the reverse expand (label-constrained, so identical in both `-rel-types` modes) |
+| `# hub.reverse_expand_warm` / `_cold` | the same query with the #2143 pair cache hot and cold |
+| `# csr.mem.*` | `runtime.MemStats` deltas across the section |
+| `# pprof.cpu` / `# pprof.heap` | profile paths, when `-profile-dir` is set |
+
+### Reading `cost_frac_above=100%` correctly
+
+This is the section's most misreadable line. **100% does not mean the fixture is
+hub-heavy.** It means every vertex is the same size and all of them happen to sit
+above the crossover. On a power law the three fractions **spread** — `bench/csrorder`
+measures 23.57% / 50.09% / 87.22% — and that spread is what skew looks like.
+
+### Why the traversal expands BACKWARDS
+
+The ordering is consumed by the forward-position probes, and they fire on the
+**reverse** and undirected expand path (`cypher/exec.Expand.advanceRevEdge`):
+each reverse slot must locate its corresponding forward edge, which costs
+O(deg(dst)) in the destination's forward run. A purely outward expand walks a
+contiguous run and never probes, so measuring one would report the ordering as
+pure overhead.
+
+Both a warm and a cold measurement are taken. The cold arm builds a fresh
+`Engine`, so it pays the full O(V+E) pair build **and** the ordering pass inside
+the measurement; the warm arm reuses the engine and hits the #2143 pair cache.
+Measured at the bounded parameters above: **1.78 s cold against 35.8 ms warm, a
+49.6× gap** — this example's own view of what that cache is worth. Reporting only
+one of the two would misstate the cost by the entire build.
+
+### Sample output
+
+```text
+# --- CSR neighbour ordering (sprint 313) ---
+# csr.build_elapsed=103ms
+csr.order=105000
+csr.size=5993585
+csr.runs_ordered=true
+csr.bytes=46.67 MiB
+csr.bytes_per_arc=8.2
+csr.has_handles=false
+degree.threshold=16
+degree.sources=100000
+degree.min=20
+degree.max=100
+degree.mean=59.94
+degree.p50=60
+degree.p99=96
+degree.vertex_frac_above=100.00%
+degree.edge_frac_above=100.00%
+degree.cost_frac_above=100.00%
+degree.measured=FRIEND+LIKE combined (a CSR run carries both types)
+degree.expected_range=[20,100]
+degree.distribution=BOUNDED, LIGHT-TAILED (not power-law)
+hub.reverse_expand_rows=831
+# hub.reverse_expand_warm=35.83ms
+# hub.reverse_expand_cold=1.777848s
+```
+
+Full measurement of the ordering itself, across the degree sweep and against the
+pre-sprint tree, is in
+[`docs/benchmarks/csr-neighbour-ordering-2026-07-29.md`](../../docs/benchmarks/csr-neighbour-ordering-2026-07-29.md).
 
 ## Memory profile and optimizations
 

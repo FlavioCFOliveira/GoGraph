@@ -240,7 +240,43 @@ type shardSlots struct {
 //
 // Adjacency is kept unsorted; HasEdge does a linear scan. For the
 // typical low average degree of property graphs (4-16) the branch-
-// prediction-friendly linear scan beats sorted binary search.
+// prediction-friendly linear scan beats sorted binary search: the
+// crossover was MEASURED at out-degree ≈16, where the two are at
+// parity (1.01x); below it linear is ahead by 1.7x at degree 8 and
+// 2.5x at degree 4 (rmp #2139; see
+// docs/design-degree-adaptive-adjacency.md §2.2). Note that the
+// 2026-07-25 planner audit's §2.4 put that crossover at ≈64 on figures
+// since refuted as physically unattainable — the band stated above is
+// the one that survived measurement, not the one that was corrected.
+//
+// Above the crossover a sorted run genuinely wins (6.0x hit / 10.9x miss
+// at degree 4096), and sprint 313 took it — but in the CSR SNAPSHOT
+// (see [github.com/FlavioCFOliveira/GoGraph/graph/csr.OrderRuns]), NOT
+// here. The adjacency is left unordered DELIBERATELY, for three
+// structural reasons, so the next reader inherits them rather than
+// re-deriving them (§5 of the design document):
+//
+//  1. [AuxColumn] has no permutation primitive. Its whole surface is
+//     GrowSlot / GrowSlotWithValue / CompactSlot / Compact, and
+//     GrowSlotWithValue's contract explicitly blesses appending at the
+//     tail of a strictly-ascending index array "never an ordered
+//     insert" — which edge_property_column.go implements. Permuting a
+//     run would need a breaking interface change plus a sparse-column
+//     remap.
+//
+//  2. The zero-allocation in-place append cannot survive an ordered
+//     insert. upsertEdgeLocked's fast path writes the new neighbour at
+//     position oldLen — the tail — reusing spare capacity in O(1). An
+//     ordered insert writes BELOW oldLen and must shift, forfeiting
+//     that path and making a degree-d hub build O(d²).
+//
+//  3. A history-dependent representation breaks recovery determinism.
+//     store/snapshot.ApplyCSRToGraph replays edges in stored csr.bin
+//     order, which is a different arrival trajectory from the original
+//     interleaved writes. Any rule whose outcome depends on the order
+//     edges arrived (for example "promote this source to sorted once it
+//     exceeds degree T") would therefore let a recovered graph diverge
+//     from the graph it was recovered from.
 //
 // handles is a parallel column carrying a stable per-edge-slot handle
 // (uint64) for each neighbour. It is populated only when a caller

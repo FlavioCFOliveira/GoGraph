@@ -458,11 +458,14 @@ type Graph[N comparable, W any] struct {
 	// unrelated remove, but a net count can: add X, later remove an
 	// unrelated pre-existing Y, and the net count returns to its original
 	// value even though every CSR position from Y's old slot onward has
-	// shifted). Node-only add/remove (no edge touched) does not bump this:
-	// a fresh node's CSR range is appended after every existing range and a
-	// node can only be removed once it is edge-free (DeleteNode) or after
-	// every incident edge is stripped first (DetachDelete), so a node event
-	// alone never shifts an existing edge's CSR position.
+	// shifted).
+	//
+	// Interning a fresh node does NOT bump this: its CSR range is appended after
+	// every existing range, so it shifts no existing edge's position. TOMBSTONING
+	// does bump it (RemoveNode, revive, RestoreTombstones), because
+	// csr.BuildFromAdjListLive omits the arcs incident to a tombstoned node, so the
+	// LIVE topology a cache is derived from has changed even when no edge was
+	// touched (rmp #2143).
 	topoGeneration atomic.Uint64
 
 	// edgeHandleSeq is the source of stable per-edge handles for this
@@ -972,6 +975,12 @@ func (g *Graph[N, W]) revive(id graph.NodeID) {
 		next.Remove(uint64(id))
 		g.tombstones.Store(next)
 		g.tombstoneActive.Add(-1)
+		// Reviving restores the node's arcs to the live topology, so the same
+		// invalidation argument as [Graph.RemoveNode] applies in reverse. Bumping
+		// on BOTH transitions is also what makes the generation a sound cache key:
+		// the tombstone COUNT is not, because removing one node and reviving
+		// another leaves it unchanged while the live set differs.
+		g.topoGeneration.Add(1)
 	}
 	g.tombstoneMu.Unlock()
 	// Re-add id to all label bitmaps for labels that survived in the
@@ -1009,7 +1018,23 @@ func (g *Graph[N, W]) Revive(n N) {
 // patterns via AddNode before linking them, so a live edge is never
 // created onto a logically-removed node. The query executor upholds
 // this (CREATE routes every endpoint through the mutator's AddNode).
-func (g *Graph[N, W]) AddEdge(src, dst N, w W) error { return g.adj.AddEdge(src, dst, w) }
+func (g *Graph[N, W]) AddEdge(src, dst N, w W) error {
+	if err := g.adj.AddEdge(src, dst, w); err != nil {
+		return err
+	}
+	// topoGeneration is bumped HERE, in the graph's own mutator, rather than left to
+	// callers. Every CSR-position-keyed cache is invalidated by that counter, and a
+	// caller that mutates the graph directly through this API -- an embedder holding
+	// the *Graph it handed to cypher.NewEngine -- has no reason to know it must bump
+	// anything. Leaving it to callers made a committed edge invisible to every
+	// subsequent query on that Engine (rmp #2143). The write adapters and store/txn
+	// also bump; a double bump is unobservable because the counter is only ever
+	// compared for equality. This mirrors PostgreSQL, which calls
+	// CacheInvalidateHeapTuple inside heap_insert/heap_delete rather than delegating
+	// it to callers.
+	g.topoGeneration.Add(1)
+	return nil
+}
 
 // AddEdgeLabeled inserts a directed edge (mirrored when the graph is
 // undirected) from src to dst with weight w and tags it with the
@@ -1044,6 +1069,12 @@ func (g *Graph[N, W]) AddEdgeLabeled(src, dst N, w W, relType string) error {
 	if err := g.adj.AddEdgeLabeled(src, dst, w, encodeSlotLabel(lid)); err != nil {
 		return err
 	}
+	// Deferred so BOTH exits bump: this function has an early `return nil` below
+	// when the source id cannot be resolved, and the edge is already inserted by
+	// then. Registering the bump here rather than before each return keeps the
+	// invariant from resting on adjlist interning src before it returns nil — a
+	// detail two layers down.
+	defer g.topoGeneration.Add(1)
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
 		return nil
@@ -1098,6 +1129,12 @@ func (g *Graph[N, W]) AddEdgeLabeledWithProperty(src, dst N, w W, relType, key s
 	if err := g.adj.AddEdgeLabeledWithProp(src, dst, w, encodeSlotLabel(lid), payload); err != nil {
 		return err
 	}
+	// Deferred so BOTH exits bump: this function has an early `return nil` below
+	// when the source id cannot be resolved, and the edge is already inserted by
+	// then. Registering the bump here rather than before each return keeps the
+	// invariant from resting on adjlist interning src before it returns nil — a
+	// detail two layers down.
+	defer g.topoGeneration.Add(1)
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
 		return nil
@@ -1127,6 +1164,8 @@ func (g *Graph[N, W]) AddEdgeH(src, dst N, w W) (handle uint64, err error) {
 	if err := g.adj.AddEdgeH(src, dst, w, h); err != nil {
 		return 0, err
 	}
+	// Invalidate every CSR-position-keyed cache at SOURCE; see [Graph.AddEdge].
+	g.topoGeneration.Add(1)
 	return h, nil
 }
 
@@ -1191,6 +1230,14 @@ func (g *Graph[N, W]) RemoveEdge(src, dst N) {
 	}
 
 	g.adj.RemoveEdge(src, dst)
+	// Deferred, not immediate: the bump must follow the LAST write to any
+	// epoch-keyed state, and the label/property re-assertion below is such a
+	// write. A reader that samples the epoch between an immediate bump and that
+	// re-assertion would cache a filter missing a surviving parallel edge's
+	// re-asserted type, under the FINAL epoch — F1's "committed change invisible
+	// to queries" shape again. Deferring also preserves the error-path skip,
+	// because the defer is registered only after the mutation succeeded.
+	defer g.topoGeneration.Add(1)
 
 	if g.adj.HasEdge(src, dst) {
 		// Parallel edge(s) remain: keep the shared per-pair surfaces. Re-assert
@@ -1272,6 +1319,9 @@ func (g *Graph[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) bool {
 	if !g.adj.RemoveEdgeByHandle(src, dst, handle) {
 		return false
 	}
+	// Deferred so the bump follows the LAST write to epoch-keyed state below; see
+	// [Graph.RemoveEdge].
+	defer g.topoGeneration.Add(1)
 	// Drop the removed instance's per-handle labels and properties. Sibling
 	// handles are untouched.
 	g.RemoveEdgeInstanceByHandle(src, dst, handle)
@@ -1396,6 +1446,9 @@ func (g *Graph[N, W]) RemoveAllEdgesFrom(src N) {
 	// Bulk-remove from the adjacency layer. For undirected graphs this also
 	// removes the mirror entries from each dst's list.
 	g.adj.RemoveAllEdgesFrom(src)
+	// Deferred so the bump follows the LAST write to epoch-keyed state below; see
+	// [Graph.RemoveEdge].
+	defer g.topoGeneration.Add(1)
 
 	// Clear per-pair state for every affected endpoint pair.
 	for _, dstID := range dstIDs {
@@ -1550,6 +1603,17 @@ func (g *Graph[N, W]) RemoveNode(n N) {
 		next.Add(uint64(id))
 		g.tombstones.Store(next)
 		g.tombstoneActive.Add(1)
+		// Tombstoning changes the LIVE edge topology every CSR-position-keyed
+		// cache is derived from: csr.BuildFromAdjListLive omits the arcs incident
+		// to a tombstoned node, so a cache built before this call describes a
+		// graph that no longer exists. Bump the generation for exactly the reason
+		// [Graph.BumpTopoGeneration] documents — a caller reaching RemoveNode
+		// directly through the Go API has no enclosing Cypher statement to
+		// attribute an edge-removal counter to, but the live topology still
+		// changed. Without this a cached CSR (or edge-type filter) would serve
+		// ghost edges for a logically-deleted node, which is the #1790 defect the
+		// live filter exists to prevent.
+		g.topoGeneration.Add(1)
 	}
 	g.tombstoneMu.Unlock()
 	// Strip id from every label bitmap so label-index consumers see the
@@ -2145,6 +2209,12 @@ func (g *Graph[N, W]) RestoreTombstones(ids []graph.NodeID) {
 	if added > 0 {
 		g.tombstones.Store(next)
 		g.tombstoneActive.Add(added)
+		// The THIRD tombstone transition, alongside RemoveNode and revive: it flips
+		// LiveNodeFilter from nil to non-nil, which changes what
+		// csr.BuildFromAdjListLive emits. Recovery calls this before publishing the
+		// graph, so no cache can exist yet — but the method is exported, so it bumps
+		// rather than relying on that precondition holding for every future caller.
+		g.topoGeneration.Add(1)
 	}
 	g.tombstoneMu.Unlock()
 }
@@ -2211,15 +2281,25 @@ func (g *Graph[N, W]) LiveOrder() uint64 {
 }
 
 // TopoGeneration returns the current value of the graph's edge-topology
-// generation counter (rmp #1871): a purely monotonic count of edge
-// additions, removals, and undos of either, since the graph was created.
-// Two reads returning the same value guarantee no edge was added, removed,
-// or had either undone in between, which is exactly the invalidation
-// signal a CSR-position-keyed cache (such as the Cypher engine's
-// edge-type-filter cache) needs. It says nothing about node-only or
-// property-only mutations, which never shift an existing edge's CSR
-// position; see the topoGeneration field doc for why that scope is
-// sufficient and intentional. Safe for concurrent use.
+// generation counter (rmp #1871): a purely monotonic count of every change to
+// the graph's LIVE edge topology since it was created. Two reads returning the
+// same value guarantee that topology did not change in between, which is exactly
+// the invalidation signal a CSR-position-keyed cache needs — the Cypher engine's
+// edge-type-filter cache and its forward/reverse CSR pair cache both key on it.
+//
+// It counts edge additions and removals, undos of either, and — since rmp #2143 —
+// the three TOMBSTONE transitions (RemoveNode, reviving a removed node via
+// AddNode, and RestoreTombstones). Tombstoning touches no edge, but
+// csr.BuildFromAdjListLive omits the arcs incident to a tombstoned node, so the
+// live topology a cache is derived from has changed.
+//
+// It says nothing about interning a fresh node or about property-only mutations,
+// neither of which shifts an existing edge's CSR position; see the topoGeneration
+// field doc for why that scope is sufficient and intentional.
+//
+// Callers do NOT need to bump it themselves: every [Graph] mutator that changes
+// live topology bumps it internally, after publishing the change. Safe for
+// concurrent use.
 func (g *Graph[N, W]) TopoGeneration() uint64 { return g.topoGeneration.Load() }
 
 // BumpTopoGeneration advances the edge-topology generation counter by one.
