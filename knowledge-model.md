@@ -1732,3 +1732,39 @@ trajectory. The `Spec` node also records that
 `docs/audit-planner-vs-neo4j-memgraph-2026-07-25.md` section 2.4 is **REFUTED**
 (crossover degree ~16 not ~64; 6.0x/10.9x at degree 4096 not 30.9x; its implied
 0.040 ns/element is 4.1x below the measured 0.164 ns/element branch-free floor).
+
+Incrementally synced at commits `6b6fb675`, `34469a83` and `f2766f29` (2026-07-29,
+sprint 313, tasks #2142 and #2143 — O(log d) CSR probes, the cross-query CSR pair
+cache, and the audit remediation).
+
++11 nodes: `Commit`s `6b6fb675` / `34469a83` / `f2766f29`; `Task`s 2142 and 2143
+(COMPLETED) and 2250 (BACKLOG, **BUG severity 8**); `Type` `csrPairCache`;
+`Function`s `csrPairCached` (`cypher/csr_pair_cache.go`) and `lowerBoundDst` /
+`firstDstPos` / `dstRun` (`cypher/exec/csrprobe.go`).
+
++edges: `Sprint 313 -[CONTAINS]->` all three Commits; `Task 2142
+-[IMPLEMENTED_IN]-> 6b6fb675`; `Task 2143 -[IMPLEMENTED_IN]->` both `34469a83` and
+`f2766f29`; `CONTAINS` from Packages `cypher` (csr_pair_cache.go) and `cypher/exec`
+(csrprobe.go); `Commit f2766f29 -[FROM_AUDIT]-> Task 2250`.
+
+**Two ACID-relevant facts recorded on the nodes.**
+
+1. `lpg.Graph`'s OWN edge mutators now bump `topoGeneration` — `AddEdge`,
+   `AddEdgeLabeled`, `AddEdgeLabeledWithProperty`, `AddEdgeH`, `AddEdgeHIfAbsent`,
+   `RemoveEdge`, `RemoveEdgeByHandle`, `RemoveAllEdgesFrom` — plus all three
+   tombstone transitions (`RemoveNode`, `revive`, `RestoreTombstones`). Previously
+   the bump lived only in the engine write adapters and `store/txn`, so a direct
+   Go-API mutation left every CSR-position-keyed cache stale. With the CSR pair
+   cache that made a COMMITTED edge invisible to queries (verified: warm engine 1,
+   truth 2). Invalidation is now at source, per PostgreSQL's
+   `CacheInvalidateHeapTuple`-inside-`heap_insert` pattern.
+
+2. **`Task` 2250 is a PRE-EXISTING conformance defect**, reproduced identically on
+   the pre-sprint tree: a reverse-direction type filter over parallel relationships
+   returns wrong counts (first type absorbs all, others return zero), and the
+   forward direction mis-types too when a handle-0 slot is mixed with
+   handle-bearing siblings. The TCK is green at 3897/3897, so no scenario covers
+   the shape. Also recorded: `buildEdgeTypeFilter`'s ordinal fallback is
+   **unreachable from pure Cypher**, because CREATE and MERGE both mint handles via
+   `AddEdgeH` — handle 0 comes only from a raw `lpg`/`adjlist` `AddEdge` or a
+   `store/txn` `OpAddEdge`.
