@@ -309,6 +309,15 @@ func TestCSRPairCache_DirectGraphMutationInvalidates(t *testing.T) {
 		{"AddEdgeLabeled", func() { _ = g.AddEdgeLabeled("a", "d", 1, "T") }, 3},
 		{"AddEdgeH", func() { _, _ = g.AddEdgeH("a", "e", 1) }, 4},
 		{"RemoveEdge", func() { g.RemoveEdge("a", "c") }, 3},
+		// The three the first draft of this test missed. They are precisely the
+		// mutators NOT driven by Cypher — bulk labelled builds, store/txn WAL
+		// replay, by-handle DELETE replay — so a regression in them would also be
+		// invisible to every Cypher-level suite.
+		{"AddEdgeLabeledWithProperty", func() {
+			_ = g.AddEdgeLabeledWithProperty("a", "f", 1, "T", "k", lpg.Int64Value(1))
+		}, 4},
+		{"AddEdgeHIfAbsent/absent", func() { _, _ = g.AddEdgeHIfAbsent("a", "g", 1, 9001) }, 5},
+		{"RemoveEdgeByHandle", func() { g.RemoveEdgeByHandle("a", "g", 9001) }, 4},
 		{"RemoveAllEdgesFrom", func() { g.RemoveAllEdgesFrom("a") }, 0},
 	} {
 		before := g.TopoGeneration()
