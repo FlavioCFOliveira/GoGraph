@@ -70,4 +70,8 @@ soak-artefacts/
 # reproduction for a defect that does not exist. Rapid replays any failfile it finds,
 # so a stale one is noise at best. Genuine regressions belong in an explicit test
 # case, not in a replay file.
-testdata/rapid/
+# The leading **/ is load-bearing: a pattern with a slash anywhere but the end is
+# anchored to THIS file's directory, so a bare `testdata/rapid/` matched only a
+# top-level one and never cypher/testdata/rapid/ — which is why the artefacts kept
+# arriving despite the rule.
+**/testdata/rapid/

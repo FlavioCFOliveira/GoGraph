@@ -406,6 +406,84 @@ compares back-to-back, which on this hardware manufactured a spurious +2.12%
 and [benchmarks/history/LEDGER.md](benchmarks/history/LEDGER.md) rows 0030–0031.
 TCK held at 3897/3897, `-race` clean.
 
+## Sprint 314 — Expand(Into) seek and the symmetric anchor swap (R2-P4, 2026-07-29)
+
+Two consumers of sprint 313's ordered adjacency.
+
+**The bound-destination seek (#2149).** A hop whose destination variable is already
+bound — cycle closing, triangles, mutual-relationship detection — walked the
+source's whole neighbour run and discarded the misses. The run is destination-ordered,
+so the matching slots form one contiguous block a binary search locates. The cursor
+now narrows to that block, turning `Θ(d)` per input row into `O(log d + r)`.
+
+Measured on the motivating audit's own shape, both arms in ONE process
+(`-benchmem -count=6`, every row p=0.002):
+
+| out-degree | filter (disabled) | seek | Δ time |
+|---|---|---|---|
+| 8 | 69.06 ms | 57.13 ms | −17.27% |
+| 32 | 526.3 ms | 260.2 ms | −50.56% |
+| 64 | 2 459.7 ms | 548.6 ms | **−77.69%** |
+
+The gain **grows with degree** — 1.21×, 2.02×, 4.48× — which is the signature of a
+changed growth rate rather than a constant factor. **Fitted growth exponent: 1.249
+→ 0.809.** Bytes and allocations are flat at every degree (p ≥ 0.22): #2206 had
+already removed the per-neighbour row construction, so what remained to win was pure
+CPU, and an allocation claim here would be false.
+
+The profile said where it was, and it was not where the audit's framing suggested.
+Per enumerated slot the cost was the edge-type filter's map lookup (18.6%, of which
+`runtime.mapaccess2_fast64` 17.8%) and the cyphermorphism check (16.7% flat) — not
+the destination comparison, which was 0.98%.
+
+**The symmetric anchor swap (#2150).** The single-edge anchor-swap peephole shipped
+OUT-ward only, because a `DirIn` expand's per-in-edge forward-position recovery cost
+`Θ(out-degree)` and was invisible to the aggregate degree statistic. #2142 made that
+recovery a binary search, which is a change in kind: an unmodelled `Θ(out-degree)`
+term is unbounded relative to the edge cost, a `Θ(log out-degree)` term is bounded by
+64 levels and the 2× margin absorbs it.
+
+| hub out-degree | written (OUT-only) | swapped | Δ time | Δ B/op | Δ allocs/op |
+|---|---|---|---|---|---|
+| 1 601 | 105.51 µs | 6.62 µs | −93.73% | −97.41% | **+75.45%** |
+| 40 000 | 1 924.61 µs | 5.94 µs | **−99.69%** | −97.42% | **+75.45%** |
+
+The swapped plan's cost is flat in the hub's degree — it stops walking the hub at
+all — so the win grows without bound: a best-of sweep measured 12.4× / 331.8× /
+2 303.7× at hub out-degree 1 601 / 40 000 / 200 000.
+
+**The allocation-count regression is accepted deliberately**: 193 allocations against
+110 (+75.45%) while total bytes fall 97.4%. That is 83 extra *small* allocations per
+query, fixed and independent of graph size, bought for a 16×–324× time reduction. It
+does not grow with the hub's degree; everything it buys does.
+
+Three evidence notes worth carrying forward.
+
+**The motivating audit's reference points are not reproducible**, so they were not
+used as a baseline. Re-running its own §2.3 harness at the sprint base gave 71.98 ms
+/ 686 K allocs at out-degree 8 and 2.981 s / 6.54 M at 64, against 625.8 ms / 9.68 M
+and 41.68 s / 577.9 M claimed — 14.0× faster with 88.4× fewer allocations — because
+they predate #2206 and #2142. The exponent was **1.79, not 2.02**: the defect was
+real and did survive, but smaller in magnitude, not in kind.
+
+**The headline is per shape.** A triangle gains (−5.86% / −16.61% / −31.00%) but its
+exponent stays near 2, because its open middle hop materialises `Θ(n·d²)` intermediate
+rows no plan-level seek can remove. The sprint's target of "about 1.1" is also
+arithmetically wrong for the range measured: `d·log d` over 8→64 is
+`log(384/24)/log 8 = 1.333` exactly; 1.1 is its asymptotic limit.
+
+**Widening a planner peephole steals shapes from the columnar chain.** Admitting
+IN-ward swaps exposes `(a:A)-[:K]->(m:B)`, the common written form, and re-rooting it
+breaks the columnar chain — an execution-mode cost the count-based model cannot see.
+Swapping still won by 1.31×–3.12× on those very queries, so the model's choice was
+right, but the blind spot is real.
+
+Full record:
+[benchmarks/expand-into-symmetric-swap-2026-07-29.md](benchmarks/expand-into-symmetric-swap-2026-07-29.md),
+[design-expand-into-symmetric-swap.md](design-expand-into-symmetric-swap.md), and
+[benchmarks/history/LEDGER.md](benchmarks/history/LEDGER.md) row 0032. TCK held at
+3897/3897, `-race` clean.
+
 ## Workflow
 
 Every future optimisation appends a row to the table above with

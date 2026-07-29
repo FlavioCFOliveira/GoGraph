@@ -22,6 +22,23 @@ const (
 	labelUser    = "User"
 	labelPost    = "Post"
 	labelComment = "Comment"
+	// labelVerified and labelFirehose exist only for the `plandiff` subcommand's
+	// symmetric-anchor-swap scenario (#2154). A single :Firehose account with a very
+	// large FOLLOWS out-adjacency, against a small :Verified population of which it
+	// follows exactly one, is the skew that makes the reverse anchor genuinely cheaper
+	// — and it is a shape a real social product has, not a contrivance.
+	labelVerified = "Verified"
+	labelFirehose = "Firehose"
+	// labelCore marks the mutually-following community the `plandiff` triangle
+	// scenario anchors on. A triangle materialises Theta(n*d^2) intermediate rows, so
+	// anchoring on the whole user population costs seconds per run at a realistic
+	// out-degree; :Core keeps the one-shot command fast and asks the more meaningful
+	// question of triangles WITHIN a community.
+	labelCore = "Core"
+	// labelSeed is the small slice of :Core that anchors the triangle scenario. A
+	// triangle's cost is cubic in the out-degree, so its anchor must stay small for the
+	// subcommand to remain a one-shot command.
+	labelSeed = "Seed"
 )
 
 // Relationship types. The polymorphic edges (AUTHORED, LIKED) are

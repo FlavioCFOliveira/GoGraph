@@ -1079,6 +1079,7 @@ All edges carry `gitCommit` and `gitDate`.
 | `CONTAINS` | `(Package)-[:CONTAINS]->(Type\|Function\|Method\|Test\|Benchmark\|FuzzTarget\|Example)` | A package contains a symbol declared in one of its files. |
 | `HAS_METHOD` | `(Type)-[:HAS_METHOD]->(Method)` | A method's receiver type, matched within the same package (`Method.recv == Type.name`). |
 | `IMPLEMENTS` | `(Package)-[:IMPLEMENTS]->(Feature)` | A package realises a curated feature (path-prefix rules below). |
+| `IMPLEMENTS` | `(Method\|Function)-[:IMPLEMENTS]->(Feature)` | A specific symbol realises a curated feature, at finer grain than the package-level edge above. Added 2026-07-29 (sprint 314, task #2153) so a feature whose whole implementation is a handful of symbols inside a large package can be located directly. Note a perf commit uses `IMPROVES`, not this edge. |
 | `SPECIFIED_IN` | `(Feature)-[:SPECIFIED_IN]->(Spec)` | A feature is documented in a specification file. |
 | `CONTAINS` | `(Sprint)-[:CONTAINS]->(Commit)` | A sprint contains a commit that delivered work within it. |
 | `FIXES` | `(Commit)-[:FIXES]->(Feature)` | A commit fixes a bug in (or hardens) a feature area. |
@@ -1721,6 +1722,41 @@ leverage table is confirmed reproducible to within 0.01 points; only its probe-c
 stays refuted).
 
 ---
+
+### Sprint 314 sync — Expand(Into) seek and the symmetric anchor swap (2026-07-29)
+
+Recorded at `b2cb4fe5`. **Both Feature nodes ALREADY EXISTED**, created when the sprint was
+planned: `Expand(Into) for a bound destination` (id 11889) and `Symmetric anchor swap
+(lifting the OUT-only restriction)` (id 17071), each already carrying `PART_OF → Cypher
+Engine` and `DEPENDS_ON → Destination-ordered CSR neighbour runs` / `→ OrderRuns`. They were
+UPDATED, not re-created — checking first is what stopped this sync from duplicating them, and
+prior syncs have over-reported nodes that never existed.
+
+Added: `Sprint 314`; 5 `Commit`s (`d7236ab0`, `b39b83f0`, `1d86e167`, `7c14fd57`,
+`b2cb4fe5`); `Package bench/expandinto` (kind `bench`); 4 `Method`s on `Expand`
+(`seekIntoRuns`, `boundIntoDst`, `WithExpandIntoSeek`, `PlanDetail`); 6 `Function`s
+(`ExpandIntoSeekCount`, `ExpandIntoSeekReverseCount`, `probeDepthEstimate`, `FitExponent`,
+`SeedRing`, `SeedReverseHub`); 14 `Test`s; 4 `Benchmark`s; 2 `Spec`s.
+
+Edges: `Sprint 314 -[CONTAINS]->` each Commit and `-[DELIVERS]->` both Features; `b39b83f0` /
+`1d86e167` `-[IMPROVES]->` their Feature; the implementing symbols `-[IMPLEMENTS]->` their
+Feature (the new finer-grained signature above); `cypher/exec` and `cypher`
+`-[IMPLEMENTS]->` their Feature; both Features `-[SPECIFIED_IN]->` the design Spec; every new
+Test/Benchmark `-[VERIFIES]->` its Feature and `<-[CONTAINS]-` its Package.
+
+**Two of this sync's first-attempt edges did NOT conform and were corrected.**
+`Commit -[IMPLEMENTS]-> Feature` was replaced by the documented `IMPROVES` (a perf commit
+improves a feature area; `IMPLEMENTS` is for packages and now symbols). And
+`Package -[MEASURES]-> Feature` was removed entirely: `MEASURES` targets a *symbol*, whereas
+a Feature-targeting test or benchmark edge is `VERIFIES`. Both were caught by re-reading the
+edge-type table rather than by trusting the shape that seemed natural.
+
+Feature descriptions now carry the MEASURED outcome and the refuted premises, not the plan:
+the seek is −17.27% / −50.56% / −77.69% at out-degree 8 / 32 / 64 with the fitted exponent
+falling 1.249 → 0.809 and allocations FLAT; the swap is −93.73% / −99.69% at hub out-degree
+1601 / 40000 with an accepted +75.45% allocs/op regression against −97.4% B/op. Both record
+that the motivating audit's reference points were **not reproducible** (its exponent 2.02
+measured 1.79 at the sprint base).
 
 ## Known limitations (faithful, by design)
 

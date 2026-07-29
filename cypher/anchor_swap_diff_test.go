@@ -139,13 +139,25 @@ func TestAnchorSwap_Differential_Hub_TotalOrderBy_Safe(t *testing.T) {
 		"MATCH (a:Hub)<-[r:R]-(b:Leaf) RETURN a, b, r ORDER BY id(a), id(b), id(r)", true, true)
 }
 
-func TestAnchorSwap_Differential_ReverseIntroducing_Vetoed(t *testing.T) {
+func TestAnchorSwap_Differential_ReverseIntroducing_Swaps(t *testing.T) {
 	// Written DirOut `(a:Hub)-[:R]->(b:Leaf)` — here the arrow points OUT of the
-	// pattern's first node. Re-rooting onto Leaf would require a DirIn expand,
-	// whose per-in-edge cost is Θ(source out-degree) and invisible to the counts
-	// (docs/reordering-design.md §5.1). Even though Hub's OUT-degree here is small
-	// and Leaf is a plausible cheaper anchor, the swap MUST be vetoed because it is
-	// reverse-introducing. No trigger; result identity regardless.
+	// pattern's first node, so re-rooting onto Leaf requires a DirIn expand.
+	//
+	// THIS CASE USED TO ASSERT A VETO, and #2150 deliberately reverses that
+	// expectation. The veto was the OUT-only restriction of
+	// docs/reordering-design.md §5.1: a DirIn expand's per-in-edge forward-position
+	// recovery cost was Θ(source out-degree) and invisible to the aggregate counts,
+	// so a reverse-introducing swap could not be faithfully costed. Since #2142 that
+	// recovery is a binary search, and #2150 models the residual log term against a
+	// PESSIMISTIC upper bound on the far side's out-degree, so the candidate's cost
+	// is never underestimated and the swap is admissible.
+	//
+	// It is also a large real win, which is why the restriction was worth lifting.
+	// Hub's OUT-degree here is 1601 while the whole Leaf label has ONE incoming
+	// R-edge, so the written plan walks 1601 edges and the mirror walks 1. Measured
+	// on this fixture shape at HEAD, swap ON vs OFF: 12.4x at Hub out-degree 1601
+	// (this test's scale), 331.8x at 40 000, 2303.7x at 200 000 — a win that grows
+	// without bound in the hub's degree.
 	g := buildAnchorGraph(t,
 		"CREATE (:Hub {tag:0})",
 		"MATCH (h:Hub) UNWIND range(1,1600) AS i CREATE (h)-[:R]->(:Other {i:i})",
@@ -153,7 +165,19 @@ func TestAnchorSwap_Differential_ReverseIntroducing_Vetoed(t *testing.T) {
 		"MATCH (h:Hub),(l:Leaf {i:1}) CREATE (h)-[:R]->(l)",
 	)
 	assertAnchorIdentical(t, g,
-		"MATCH (a:Hub)-[:R]->(b:Leaf) RETURN a.tag AS at, b.i AS bi", false, false)
+		"MATCH (a:Hub)-[:R]->(b:Leaf) RETURN a.tag AS at, b.i AS bi", true, false)
+}
+
+func TestAnchorSwap_Differential_Undirected_StillVetoed(t *testing.T) {
+	// An undirected single edge `(a:Hub)-[:R]-(b:Leaf)` stays vetoed after #2150.
+	// reverseSingleEdgeDir maps Both to Both, so the mirror traverses the same
+	// undirected edge and the swap would only move the anchor — while
+	// D(label, relType, BOTH) is not a modelled cell, so there is no exact cost to
+	// decide it with. The direction switch in computeAnchorSwaps therefore declines
+	// it explicitly rather than falling through to a half-costed comparison.
+	g := seedHubGraph(t)
+	assertAnchorIdentical(t, g,
+		"MATCH (a:Hub)-[:R]-(b:Leaf) RETURN a.tag AS at, b.i AS bi", false, false)
 }
 
 func TestAnchorSwap_Differential_ToProperty_Swaps(t *testing.T) {

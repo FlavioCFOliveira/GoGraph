@@ -66,6 +66,30 @@ func boundText(b RangeBound, unbounded string) string {
 // order beats the other, and it is not visible from the operator name.
 func (op *HashJoin) PlanDetail() string { return "build=" + buildSideText(op.buildOnLeft) }
 
+// PlanDetail reports whether this hop's destination is already bound and, when it
+// is, which access path it takes to reach it (#2149). This is exactly the kind of
+// physical decision the type name cannot carry: a bound-destination hop is still
+// an *Expand, but it either SEEKS the destination's contiguous run in the
+// destination-ordered CSR — O(log d + r) — or walks the whole neighbour run and
+// filters, which is Θ(d). The two differ by an asymptotic factor on the shape
+// behind triangles, cycle closing and mutual-relationship detection, so a plan
+// that did not distinguish them would hide the change this operator exists to make.
+//
+// "ExpandInto" is the name openCypher implementations conventionally give this
+// access path; it appears in the DETAIL rather than as the operator name because a
+// rendered name is the concrete Go type and must stay incapable of disagreeing with
+// the operator that runs (rmp #2222). An ordinary hop returns "" and renders as
+// "Expand" alone.
+func (op *Expand) PlanDetail() string {
+	if op.intoCol < 0 {
+		return ""
+	}
+	if op.intoSeek {
+		return "ExpandInto seek"
+	}
+	return "ExpandInto filter"
+}
+
 // PlanDetail reports the build side of the columnar join, as [HashJoin.PlanDetail]
 // does for the row-mode one.
 func (op *ColumnarHashJoin) PlanDetail() string {

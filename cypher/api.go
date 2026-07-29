@@ -493,6 +493,12 @@ type buildOpts struct {
 	// built. A swapped pattern is re-rooted onto its other endpoint with an
 	// identical result multiset — see anchor_swap_plan.go.
 	anchorSwap map[*ir.Expand]bool
+	// expandIntoSeekDisabled turns OFF the bound-destination seek (#2149) for THIS
+	// build. The polarity is deliberately negative so the zero value ENABLES the
+	// seek: a build path that never sets it still gets the optimisation, which is
+	// safe because the seek is result- and order-identical. Only the read path sets
+	// it, from EngineOptions.DisableExpandIntoSeek.
+	expandIntoSeekDisabled bool
 	// parallelScanEnabled gates the morsel-parallel count fast path (#1672). The
 	// read-path build sets it from the Engine field; it is consulted in
 	// buildEagerAggregation's count fast path (tryBuildParallelCountScan). Left
@@ -764,6 +770,22 @@ type EngineOptions struct {
 	// plan; it exists for the differential test that proves both plans return an
 	// identical result multiset, and as an operational escape hatch.
 	DisableMinLabelScan bool
+
+	// DisableExpandIntoSeek turns OFF the O(log d) seek for a hop whose destination
+	// variable is already bound — cycle closing, triangles, mutual-relationship
+	// detection (#2149). When false (the default) such a hop binary-searches the
+	// bound destination's contiguous run in the destination-ordered CSR and walks
+	// only the matching slots; when true it keeps the #2206 expand-into FILTER and
+	// walks the source's whole neighbour run, paying the edge-type filter's map
+	// lookup and the cyphermorphism check on every slot.
+	//
+	// The seek is result-identical AND order-identical — the slots sharing a
+	// destination are contiguous and handle-ordered, so the seeked block is exactly
+	// the subsequence the filter would have emitted, in the same order — so this
+	// knob changes performance only. It exists for the differential test that proves
+	// the two agree row for row, and as an operational escape hatch. See
+	// docs/design-expand-into-symmetric-swap.md §3, §4.
+	DisableExpandIntoSeek bool
 
 	// DisableJoinReorder turns OFF the count-store-gated disjoint-component
 	// ordering peephole (#2091). When false (the default) the planner may reorder
@@ -1053,6 +1075,11 @@ type Engine struct {
 	// (#2077). True by default; set false by EngineOptions.DisableMinLabelScan.
 	// When false the planner always anchors a multi-label node scan on Labels[0].
 	minLabelScanEnabled bool
+
+	// expandIntoSeekEnabled gates the O(log d) bound-destination seek (#2149). True
+	// by default; set false by EngineOptions.DisableExpandIntoSeek, which returns
+	// an expand-into hop to walking the whole neighbour run.
+	expandIntoSeekEnabled bool
 
 	// bitmapIntersectEnabled gates the set-at-a-time multi-label conjunction
 	// (#2133). True by default; set false by
@@ -1369,6 +1396,7 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		prefixSeekEnabled:      !opts.DisablePrefixIndexSeek,
 		bitmapIntersectEnabled: !opts.DisableBitmapIntersection,
 		minLabelScanEnabled:    !opts.DisableMinLabelScan,
+		expandIntoSeekEnabled:  !opts.DisableExpandIntoSeek,
 		joinReorderEnabled:     !opts.DisableJoinReorder,
 		anchorSwapEnabled:      !opts.DisableAnchorSwap,
 
@@ -2149,6 +2177,9 @@ func (e *Engine) buildReadPhysical(
 	// and never scans more rows than the Labels[0] plan, so it needs no
 	// order-safety companion.
 	bopts.minLabelScanEnabled = e.minLabelScanEnabled
+	// Bound-destination seek (#2149): negative polarity, so leaving this unset on
+	// any other build path enables the seek.
+	bopts.expandIntoSeekDisabled = !e.expandIntoSeekEnabled
 	// Set-at-a-time multi-label conjunction (#2133): strictly dominates the
 	// min-label re-anchor when its exact gate admits, and falls through to it when
 	// it vetoes, so enabling both is the intended configuration.
@@ -2550,7 +2581,10 @@ func explainWithIndexesNode(
 		}
 	case "AllNodesScan":
 		annot = scanEstimateAnnotation(plan, labelSrc, explainGraph)
-	case "Expand":
+	case "Expand", "ExpandInto":
+		// Both names denote an *ir.Expand — "ExpandInto" is the display name for one
+		// whose destination is already bound (#2149) — so both get the same
+		// cardinality annotation.
 		if exp, ok := plan.(*ir.Expand); ok {
 			annot = expandEstimateAnnotation(exp, labelSrc)
 		}
@@ -8048,9 +8082,18 @@ func buildOperatorRec(
 		// compare unboxed, so the operator's output stays a SUPERSET of the correct
 		// result and the Selection remains the source of truth — the same
 		// seek-superset-plus-residual-refilter discipline the range seek uses.
+		//
+		// Since #2149 the same binding also drives a SEEK rather than a filter: the
+		// operator narrows its cursor to the bound destination's contiguous run in the
+		// destination-ordered CSR, so the edge-type filter's map lookup and the
+		// cyphermorphism check are paid only on slots that can emit. The filter stays
+		// as the backstop for every cell the seek declines to resolve.
 		if p.IntoVar != "" {
 			if intoCol, bound := schema[p.IntoVar]; bound {
 				exp = exp.WithExpandInto(intoCol)
+				if bopts != nil && bopts.expandIntoSeekDisabled {
+					exp = exp.WithExpandIntoSeek(false)
+				}
 			}
 		}
 		return exp, nil

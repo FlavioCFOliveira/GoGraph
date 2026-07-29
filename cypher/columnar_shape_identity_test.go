@@ -123,9 +123,25 @@ func shapeIdentityGraph(t *testing.T) *lpg.Graph[string, float64] {
 }
 
 // drainShapeValues runs query and returns every projected value, in one flat slice.
+//
+// The anchor swap is disabled for BOTH arms (#2150). These cases are about the
+// columnar path, and their premise is that the columnar arm engages the columnar
+// filter — but the traversal shapes here are single-edge `(a:A)-[:K]->(m:B)`
+// patterns, which since #2150 the anchor-swap peephole may re-root onto the smaller
+// endpoint. Re-rooting breaks the columnar chain, so the columnar arm would engage
+// nothing and every case would fail as vacuous — not because columnar identity is
+// broken but because a different, and genuinely faster, rewrite claimed the shape
+// first (measured on this fixture at 200k nodes: swapping is 1.31x-3.12x faster than
+// the columnar plan, so the cost model's choice is right and it is this test's scope
+// that must narrow).
+//
+// Holding one rewrite still to test another in isolation is the established
+// convention here — see min_label_scan_diff_test.go and write_path_gates_test.go,
+// which pin DisableMinLabelScan / DisableBitmapIntersection for the same reason.
 func drainShapeValues(t *testing.T, g *lpg.Graph[string, float64], query string) []expr.Value {
 	t.Helper()
-	res, err := NewEngine(g).Run(context.Background(), query, nil)
+	eng := NewEngineWithOptions(g, EngineOptions{DisableAnchorSwap: true})
+	res, err := eng.Run(context.Background(), query, nil)
 	if err != nil {
 		t.Fatalf("Run(%q): %v", query, err)
 	}

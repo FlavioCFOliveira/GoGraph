@@ -75,6 +75,33 @@ MATCH (a)-[r:KNOWS]->(b) RETURN r
 `MATCH` without a relationship pattern performs a node scan. With a
 relationship pattern it drives an `Expand` operator from a bound start node.
 
+**Bound destinations use a seek, shown as `ExpandInto`.** When a hop's destination
+variable is *already* bound — a pattern that closes a cycle, a triangle, or detects
+a mutual relationship — the operator does not enumerate the source's neighbours and
+discard the ones that miss. The CSR neighbour run is ordered by destination, so it
+binary-searches the bound destination's contiguous run and walks only the matching
+edges: `O(log d + r)` for multiplicity `r`, instead of `Θ(d)`.
+
+```cypher
+MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(a) RETURN a, b
+```
+
+`EXPLAIN` renders such a hop as `Expand [ExpandInto seek]`, distinguishing it from
+an ordinary `Expand`. The name is what openCypher implementations conventionally
+call this access path; it appears as the operator's *detail* rather than its name
+because a rendered physical name is the concrete operator type and must stay
+incapable of disagreeing with the operator that ran.
+
+The seek emits exactly the rows the enumerate-and-filter path did, **in the same
+order** — the slots sharing a destination are contiguous, so the block it seeks to
+is precisely the subsequence the filter would have emitted. It also preserves
+per-relationship-instance identity across parallel edges: one row per relationship,
+each with its own identity, never one row per neighbour. Where the bound cell cannot
+be resolved to a node — a `NULL` from an `OPTIONAL MATCH`, for instance — the
+operator falls back to the full range, so the result is never narrowed by a seek that
+could not decide. Variable-length expands, `shortestPath` and `allShortestPaths` take
+their own operators and are unaffected.
+
 **Variable-length patterns** (`[:*1..3]`) are supported via the
 `VarLengthExpand` operator:
 
@@ -1453,4 +1480,4 @@ build. When editing this file, keep to these rules:
 
 ---
 
-*Last reviewed: 2026-07-26 against commit `b54b284`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-07-29 against commit `b2cb4fe5`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
