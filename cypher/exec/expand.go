@@ -43,6 +43,7 @@ package exec
 
 import (
 	"context"
+	"sync/atomic"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -116,7 +117,29 @@ type Expand struct {
 	//
 	// -1 disables the filter, which is the default and the behaviour of every
 	// hop whose destination is not already bound.
-	intoCol    int
+	intoCol int
+	// intoSeek turns the expand-into FILTER above into a SEEK (rmp #2149,
+	// docs/design-expand-into-symmetric-swap.md §3). The filter alone still walks
+	// every slot of the source's run and pays, per slot, the edge-type filter's
+	// map lookup ([Expand.passesFilter]) and the cyphermorphism check
+	// ([Expand.passesRelMorphism]) — measured at 18.6% and 16.7% of a degree-64
+	// closing query, against 0.98% for the destination comparison itself. Since
+	// rmp #2141 the run is ordered by the total key (destination, handle), so
+	// [Expand.seekIntoRuns] narrows the CURSOR to the bound destination's
+	// contiguous run in O(log d + r) and those per-slot costs are paid only on
+	// slots that can emit.
+	//
+	// The seek is ORDER-PRESERVING, not merely multiset-preserving: the slots
+	// sharing a destination are contiguous and handle-ordered, so the block
+	// [dstRun] returns is exactly the subsequence enumerate-and-filter would have
+	// emitted, walked in the same ascending position order. Nothing above can
+	// observe a difference, which is why no order-safety predicate applies here
+	// (design §4).
+	//
+	// True by default whenever intoCol >= 0; [Expand.WithExpandIntoSeek] turns it
+	// off so a differential test can compare seek against filter-only, and as an
+	// operational escape hatch.
+	intoSeek   bool
 	fwdVerts   []uint64       // snapshot of fwd.VerticesSlice()
 	fwdEdges   []graph.NodeID // snapshot of fwd.EdgesSlice()
 	fwdHandles []uint64       // snapshot of fwd.HandlesSlice() (nil unless multigraph)
@@ -210,6 +233,9 @@ func NewExpand(input Operator, fwd, rev csrAdjacency, cfg ExpandConfig) *Expand 
 		multiplicity:   cfg.MultiplicityFn,
 		// Expand-into is off unless the planner opts in via WithExpandInto (#2206).
 		intoCol: -1,
+		// The seek is on by default, so opting into expand-into gets the O(log d)
+		// access path unless a caller explicitly asks for filter-only (#2149).
+		intoSeek: true,
 	}
 }
 
@@ -396,6 +422,113 @@ func (op *Expand) dstMatchesInto(dst int64) bool {
 func (op *Expand) WithExpandInto(col int) *Expand {
 	op.intoCol = col
 	return op
+}
+
+// WithExpandIntoSeek enables or disables the O(log d) SEEK for an expand-into hop
+// (#2149). It has no effect unless [Expand.WithExpandInto] has bound a column.
+//
+// Disabling it keeps the expand-into FILTER and returns the operator to walking
+// the whole neighbour run, which is the pre-#2149 behaviour and the "off" arm of
+// the differential test that proves the two agree row for row. Returns op for
+// chaining; call before Init.
+func (op *Expand) WithExpandIntoSeek(enabled bool) *Expand {
+	op.intoSeek = enabled
+	return op
+}
+
+// ExpandIntoSeekCount reports how many times an expand-into hop has narrowed its
+// cursor to a bound destination's run since process start. It is a diagnostic
+// seam for tests that must prove the seek actually FIRED — an EXPLAIN line proves
+// the plan, this proves the access path — and for operational observability.
+// Process-global and monotonic; callers snapshot it before and after a query
+// rather than resetting it.
+func ExpandIntoSeekCount() uint64 { return expandIntoSeekCount.Load() }
+
+// expandIntoSeekCount backs [ExpandIntoSeekCount].
+var expandIntoSeekCount atomic.Uint64
+
+// boundIntoDst returns the already-bound destination NodeID this hop must land on
+// and whether it could be resolved unboxed.
+//
+// It reads the CURRENT input, mode-aware: the borrowed input row in row mode, and
+// the current chunk cell in columnar mode. The mode split matters — inputRow is
+// never populated on the FillChunk path, so before #2149 [Expand.dstMatchesInto]
+// hit its length guard there and the #2206 expand-into filter was silently INERT
+// under columnar execution. Results were unaffected (the equality Selection above
+// still decided) but the optimisation was absent; reading the chunk cell restores
+// it and lets the seek engage on both paths.
+//
+// It resolves ONLY a bare NodeID, exactly the case [Expand.dstMatchesInto] is
+// willing to decide. A NULL, or an entity a projection boxed into the cell, yields
+// ok=false and the caller keeps the full range so the Selection above stays the
+// source of truth. Deliberately NOT resolving a boxed NodeValue keeps the seek's
+// decision boundary IDENTICAL to the shipped filter's, which is what makes the
+// narrower cursor provably result-identical rather than dependent on how the
+// Selection compares a node to an integer.
+func (op *Expand) boundIntoDst() (uint64, bool) {
+	if op.intoCol < 0 {
+		return 0, false
+	}
+	if op.chunkMode {
+		if op.cScratch == nil || op.intoCol >= op.cScratch.NumCols() ||
+			op.cRow < 0 || op.cRow >= op.cScratchLen {
+			return 0, false
+		}
+		if op.cScratch.IsInt64Column(op.intoCol) {
+			v, valid := op.cScratch.Int64(op.intoCol, op.cRow)
+			if !valid || v < 0 {
+				return 0, false
+			}
+			return uint64(v), true
+		}
+		if iv, ok := op.cScratch.BoxCell(op.intoCol, op.cRow).(expr.IntegerValue); ok && iv >= 0 {
+			return uint64(iv), true
+		}
+		return 0, false
+	}
+	if op.intoCol >= len(op.inputRow) {
+		return 0, false
+	}
+	if iv, ok := op.inputRow[op.intoCol].(expr.IntegerValue); ok && iv >= 0 {
+		return uint64(iv), true
+	}
+	return 0, false
+}
+
+// seekIntoRuns narrows the cursors loaded by [Expand.loadAdjacency] from the
+// source's whole neighbour run to just the bound destination's contiguous run,
+// turning a Θ(d) walk into an O(log d + r) seek (#2149, design §3.2).
+//
+// It is a no-op — leaving the full range in place — whenever the seek is disabled,
+// no destination is bound, or the bound cell is not a resolvable bare NodeID. In
+// every such case the operator's output stays a SUPERSET of the correct result and
+// the equality Selection above decides, which is what makes this incapable of
+// being a regression.
+//
+// Both directions are seekable: the forward CSR's run is (destination, handle)-
+// ordered unconditionally since #2141, and the reverse CSR's run is
+// (source, handle)-ordered by construction — csr.BuildReverse scatters with the
+// source ascending over already-handle-ordered forward runs. That reverse
+// invariant is implicit, so graph/csr pins it with a permanent test; a seek here
+// depends on it.
+func (op *Expand) seekIntoRuns() {
+	if !op.intoSeek || op.intoCol < 0 {
+		return
+	}
+	dst, ok := op.boundIntoDst()
+	if !ok {
+		return
+	}
+	if op.dir != DirIn {
+		op.fwdStart, op.fwdEnd = dstRun(op.fwdEdges, op.fwdStart, op.fwdEnd, dst)
+		if op.fwdStart >= op.fwdEnd {
+			op.fwdDone = true
+		}
+	}
+	if op.dir != DirOut && op.revEdges != nil {
+		op.revStart, op.revEnd = dstRun(op.revEdges, op.revStart, op.revEnd, dst)
+	}
+	expandIntoSeekCount.Add(1)
 }
 
 // advanceFwdEdge consumes at most one forward edge from the current source's
@@ -609,6 +742,13 @@ func (op *Expand) loadAdjacency(uid uint64) {
 	} else {
 		op.revStart, op.revEnd = 0, 0
 	}
+	// Expand-into (#2149): narrow the cursors just loaded to the bound
+	// destination's run. This is the ONE place a source's range is set — from
+	// advanceInput in row mode and advanceInputChunk in columnar mode — so the seek
+	// applies to both paths while every downstream behaviour (the edge-type filter,
+	// cyphermorphism, CREATE-multiplicity re-emission, DirBoth ordering and its
+	// self-loop dedup, the cancellation cadence) is inherited unchanged.
+	op.seekIntoRuns()
 }
 
 // passesRelMorphism reports whether edgeID is absent from all cyphermorphism

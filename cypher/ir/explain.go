@@ -69,6 +69,16 @@ func OperatorName(plan LogicalPlan) string { return operatorName(plan) }
 
 // operatorName returns the canonical display name for each logical plan operator.
 func operatorName(plan LogicalPlan) string {
+	// An Expand whose destination is already bound renders distinctly, because it
+	// takes a different physical access path: it SEEKS the bound destination's run
+	// instead of enumerating the whole adjacency (rmp #2149,
+	// docs/design-expand-into-symmetric-swap.md §3). Without a distinct name the
+	// plan difference — the whole point of the change — is invisible in EXPLAIN.
+	// The name matches the operator openCypher implementations conventionally call
+	// Expand(Into).
+	if exp, ok := plan.(*Expand); ok && exp.IntoVar != "" {
+		return "ExpandInto"
+	}
 	switch plan.(type) {
 	// Scan / leaf operators
 	case *Argument:
