@@ -5,6 +5,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // csr_pair_cache.go — cross-query reuse of the forward/reverse CSR pair
@@ -43,13 +44,42 @@ import (
 // Node properties and labels do not affect topology and correctly do not
 // invalidate.
 //
+// # A cached pair can be NARROWER than the live node space
+//
+// Interning a fresh node does not change edge topology, so a bare `CREATE (z:Z)`
+// correctly does not invalidate. The consequence is new and load-bearing: a cache
+// HIT can therefore return a pair whose `vertices` array is shorter than the
+// current node space — measured, 600 node-only creates left a cached pair with 257
+// offsets against a live space of 1793. Before this cache existed the pair was
+// always rebuilt, so it could not lag.
+//
+// This is SAFE only because every consumer bounds-checks the vertex index before
+// indexing the offsets array — Expand's probes and range load, ShortestPath and its
+// bidirectional variant, buildRevToFwd, and buildEdgeTypeFilter (which additionally
+// bounds its loop on fwdCSR.MaxNodeID()). A node with no edges has no arcs to
+// traverse, so treating it as absent from the pair is the correct answer, not an
+// approximation. Any NEW consumer that indexes `vertices` unguarded would be a
+// latent out-of-range panic; TestCSRPairCache_NodeOnlyCreateStaysSafe pins it.
+//
 // # Memory
 //
 // The cache holds at most ONE pair per Engine — replaced wholesale when the epoch
-// advances, so the previous pair becomes garbage immediately. That is a fixed
-// bound of two CSR snapshots, which is the same peak an uncached build already
-// reached transiently while the old pair was still referenced by an in-flight
-// query. No new unbounded resource is introduced.
+// advances, so the previous pair becomes garbage immediately. The bound is fixed,
+// but be precise about what it costs, because two easy claims are both wrong:
+//
+//   - it is a steady-state FLOOR, not a transient. An uncached build's snapshots
+//     became garbage when the query ended; a cached pair stays reachable for the
+//     Engine's lifetime. Measured at 20k edges, a warm Engine retains about
+//     2.4 MB more than a cold one (~121 B/edge, including the pre-existing filter
+//     cache);
+//   - the PEAK is higher than uncached, not equal: on an alternating write/read
+//     workload the retained pair is still reachable while the next pair is being
+//     built, so four snapshots can be live at once against an uncached two.
+//
+// Roughly (V+1)·8 + E·24 bytes per direction. No EngineOptions result-memory
+// ceiling covers it (those bound result and aggregation memory), so
+// [EngineOptions.DisableCSRPairCache] exists for an Engine that is long-lived over
+// a large graph and would rather pay the rebuild than the retention.
 //
 // csrPairCache is safe for concurrent use by any number of goroutines.
 type csrPairCache struct {
@@ -72,8 +102,10 @@ func (c *csrPairCache) get(epoch uint64) (fwd, rev *csr.CSR[float64], ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.valid || c.epoch != epoch {
+		metrics.IncCounter("cypher.csr_pair_cache.misses", 1)
 		return nil, nil, false
 	}
+	metrics.IncCounter("cypher.csr_pair_cache.hits", 1)
 	return c.fwd, c.rev, true
 }
 
@@ -88,7 +120,14 @@ func (c *csrPairCache) put(epoch uint64, fwd, rev *csr.CSR[float64]) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.valid && c.epoch > epoch {
+		metrics.IncCounter("cypher.csr_pair_cache.stale_puts_dropped", 1)
 		return
+	}
+	if c.valid {
+		// Replacing an entry at a superseded epoch: the equivalent of an eviction,
+		// and the signal that tells an operator the graph is being written often
+		// enough that the cache is not paying for itself.
+		metrics.IncCounter("cypher.csr_pair_cache.replacements", 1)
 	}
 	c.fwd, c.rev, c.epoch, c.valid = fwd, rev, epoch, true
 }
@@ -125,4 +164,15 @@ func csrPairCachedFor(bopts *buildOpts, g *lpg.Graph[string, float64]) (fwd, rev
 		return csrPairFromGraph(g)
 	}
 	return csrPairCached(bopts.csrPairCache, g)
+}
+
+// newCSRPairCacheIfEnabled returns a cache unless the Engine opted out via
+// [EngineOptions.DisableCSRPairCache], in which case it returns nil and every
+// lookup falls through to an uncached build — the same behaviour the public
+// BuildPlanWithMutator path already has.
+func newCSRPairCacheIfEnabled(disabled bool) *csrPairCache {
+	if disabled {
+		return nil
+	}
+	return newCSRPairCache()
 }

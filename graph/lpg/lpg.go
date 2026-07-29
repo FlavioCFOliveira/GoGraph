@@ -458,7 +458,7 @@ type Graph[N comparable, W any] struct {
 	// unrelated remove, but a net count can: add X, later remove an
 	// unrelated pre-existing Y, and the net count returns to its original
 	// value even though every CSR position from Y's old slot onward has
-	// shifted). Node-only add/remove (no edge touched) does not bump this:
+	// shifted). A node-only ADD that interns a fresh node does not bump this, but RemoveNode and revive do, because tombstoning changes the LIVE topology csr.BuildFromAdjListLive emits:
 	// a fresh node's CSR range is appended after every existing range and a
 	// node can only be removed once it is edge-free (DeleteNode) or after
 	// every incident edge is stripped first (DetachDelete), so a node event
@@ -1015,7 +1015,23 @@ func (g *Graph[N, W]) Revive(n N) {
 // patterns via AddNode before linking them, so a live edge is never
 // created onto a logically-removed node. The query executor upholds
 // this (CREATE routes every endpoint through the mutator's AddNode).
-func (g *Graph[N, W]) AddEdge(src, dst N, w W) error { return g.adj.AddEdge(src, dst, w) }
+func (g *Graph[N, W]) AddEdge(src, dst N, w W) error {
+	if err := g.adj.AddEdge(src, dst, w); err != nil {
+		return err
+	}
+	// topoGeneration is bumped HERE, in the graph's own mutator, rather than left to
+	// callers. Every CSR-position-keyed cache is invalidated by that counter, and a
+	// caller that mutates the graph directly through this API -- an embedder holding
+	// the *Graph it handed to cypher.NewEngine -- has no reason to know it must bump
+	// anything. Leaving it to callers made a committed edge invisible to every
+	// subsequent query on that Engine (rmp #2143). The write adapters and store/txn
+	// also bump; a double bump is unobservable because the counter is only ever
+	// compared for equality. This mirrors PostgreSQL, which calls
+	// CacheInvalidateHeapTuple inside heap_insert/heap_delete rather than delegating
+	// it to callers.
+	g.topoGeneration.Add(1)
+	return nil
+}
 
 // AddEdgeLabeled inserts a directed edge (mirrored when the graph is
 // undirected) from src to dst with weight w and tags it with the
@@ -1055,6 +1071,8 @@ func (g *Graph[N, W]) AddEdgeLabeled(src, dst N, w W, relType string) error {
 		return nil
 	}
 	g.edgeIdx.Add(uint32(lid), srcID)
+	// Invalidate every CSR-position-keyed cache at SOURCE; see [Graph.AddEdge].
+	g.topoGeneration.Add(1)
 	return nil
 }
 
@@ -1109,6 +1127,8 @@ func (g *Graph[N, W]) AddEdgeLabeledWithProperty(src, dst N, w W, relType, key s
 		return nil
 	}
 	g.edgeIdx.Add(uint32(lid), srcID)
+	// Invalidate every CSR-position-keyed cache at SOURCE; see [Graph.AddEdge].
+	g.topoGeneration.Add(1)
 	return nil
 }
 
@@ -1133,6 +1153,8 @@ func (g *Graph[N, W]) AddEdgeH(src, dst N, w W) (handle uint64, err error) {
 	if err := g.adj.AddEdgeH(src, dst, w, h); err != nil {
 		return 0, err
 	}
+	// Invalidate every CSR-position-keyed cache at SOURCE; see [Graph.AddEdge].
+	g.topoGeneration.Add(1)
 	return h, nil
 }
 
@@ -1197,6 +1219,8 @@ func (g *Graph[N, W]) RemoveEdge(src, dst N) {
 	}
 
 	g.adj.RemoveEdge(src, dst)
+	// Invalidate every CSR-position-keyed cache at SOURCE; see [Graph.AddEdge].
+	g.topoGeneration.Add(1)
 
 	if g.adj.HasEdge(src, dst) {
 		// Parallel edge(s) remain: keep the shared per-pair surfaces. Re-assert
@@ -1278,6 +1302,8 @@ func (g *Graph[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) bool {
 	if !g.adj.RemoveEdgeByHandle(src, dst, handle) {
 		return false
 	}
+	// Invalidate every CSR-position-keyed cache at SOURCE; see [Graph.AddEdge].
+	g.topoGeneration.Add(1)
 	// Drop the removed instance's per-handle labels and properties. Sibling
 	// handles are untouched.
 	g.RemoveEdgeInstanceByHandle(src, dst, handle)
@@ -1402,6 +1428,8 @@ func (g *Graph[N, W]) RemoveAllEdgesFrom(src N) {
 	// Bulk-remove from the adjacency layer. For undirected graphs this also
 	// removes the mirror entries from each dst's list.
 	g.adj.RemoveAllEdgesFrom(src)
+	// Invalidate every CSR-position-keyed cache at SOURCE; see [Graph.AddEdge].
+	g.topoGeneration.Add(1)
 
 	// Clear per-pair state for every affected endpoint pair.
 	for _, dstID := range dstIDs {
@@ -2162,6 +2190,12 @@ func (g *Graph[N, W]) RestoreTombstones(ids []graph.NodeID) {
 	if added > 0 {
 		g.tombstones.Store(next)
 		g.tombstoneActive.Add(added)
+		// The THIRD tombstone transition, alongside RemoveNode and revive: it flips
+		// LiveNodeFilter from nil to non-nil, which changes what
+		// csr.BuildFromAdjListLive emits. Recovery calls this before publishing the
+		// graph, so no cache can exist yet — but the method is exported, so it bumps
+		// rather than relying on that precondition holding for every future caller.
+		g.topoGeneration.Add(1)
 	}
 	g.tombstoneMu.Unlock()
 }

@@ -45,9 +45,10 @@ import "github.com/FlavioCFOliveira/GoGraph/graph"
 //     tiebreaker index column, and that RocksDB/LevelDB use by suffixing the
 //     user key with a sequence number;
 //   - the algorithms below are stable, which is what orders the residual the
-//     key cannot separate: slots carrying handle 0 (the "no handle" sentinel,
-//     which is what a MERGE-created slot carries) have no tiebreaker available,
-//     so they keep their relative input order.
+//     key cannot separate: slots carrying handle 0 (the "no handle" sentinel) have
+//     no tiebreaker available, so they keep their relative input order. Handle 0
+//     comes from a raw adjlist/lpg AddEdge or a store/txn OpAddEdge — NOT from
+//     Cypher, whose CREATE and MERGE both mint a handle via AddEdgeH.
 //
 // The second point is an INVARIANT, not an implementation accident: the handle-0
 // residual of a destination run must stay in its original relative order. Both

@@ -8,13 +8,20 @@ package cypher_test
 // false-greens in this project came from both arms of a differential sharing the
 // broken code. Every expectation below is a count stated by hand from the fixture.
 //
-// What it guards: cypher/api.go's buildEdgeTypeFilter resolves a parallel edge's
-// relationship type from its ORDINAL within the source's CSR run — it counts
-// occurrences per destination in run order and calls EdgeLabelsAt with that
-// ordinal — on the handle-less path, which is the path a MERGE-created slot
-// (handle 0) takes. Ordering the run by (destination, handle) is only safe because
-// the sort is stable and the handle is a tiebreaker; get either wrong and parallel
-// edges are silently assigned each other's types. A count is how that surfaces.
+// What it guards: the HANDLE-EXACT resolution of a parallel edge's relationship
+// type across the reordering. Ordering the run by (destination, handle) permutes
+// which slot sits where, so a mis-permuted handle column silently assigns parallel
+// edges each other's types; a per-destination count is how that surfaces.
+//
+// It does NOT reach buildEdgeTypeFilter's ORDINAL fallback, and an earlier draft of
+// this file wrongly claimed it did on the premise that "a MERGE-created slot
+// carries handle 0". That premise is false: MERGE creates through AddEdgeH
+// (cypher/exec/merge_relationship.go, merge_pattern.go), so it mints a non-zero
+// handle exactly as CREATE does. Measured on this fixture, every slot carries a
+// non-zero handle, so the ordinal branch is never taken. Handle 0 arises only from
+// a raw lpg.Graph.AddEdge or a store/txn OpAddEdge — never from Cypher — which is
+// why TestOrdering_ParallelEdgeTypes_FixtureIsHandleBearing asserts the premise
+// this file actually relies on instead of leaving it stated in a comment.
 //
 // The source's out-degree is deliberately past graph/csr's insertion-sort cutoff
 // so the merge path is exercised, and the destinations are created in DESCENDING
@@ -27,6 +34,7 @@ import (
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
@@ -38,9 +46,9 @@ const nDst = 40
 // by THREE parallel relationships of distinct types. Destinations are created in
 // descending key order so the CSR ordering must permute the run.
 //
-// createdByMerge destinations get their third relationship via MERGE rather than
-// CREATE, so that slot carries handle 0 and the ordinal path — the one this test
-// exists to guard — is genuinely exercised.
+// Half the destinations get their third relationship via MERGE rather than CREATE.
+// Both mint a handle, so this varies the WRITE PATH (merge-vs-create resolution)
+// rather than the handle composition.
 func buildParallelTypeFixture(t *testing.T) (*cypher.Engine, *lpg.Graph[string, float64]) {
 	t.Helper()
 	eng, g := inMemMultigraphEngine(t)
@@ -126,3 +134,29 @@ func TestOrdering_ParallelEdgeTypes_MultiTypeFilter(t *testing.T) {
 // It is filed as its own BUG task with the reproduction; the reverse assertions
 // belong with the fix, not here, because a test that fails for an unrelated reason
 // would mask a regression in this one.
+
+// TestOrdering_ParallelEdgeTypes_FixtureIsHandleBearing asserts the fixture's own
+// premise rather than trusting a comment. If a future change made any Cypher write
+// path leave handle 0, the oracle above would silently start covering a different
+// (ordinal) resolution path, and this test says so.
+func TestOrdering_ParallelEdgeTypes_FixtureIsHandleBearing(t *testing.T) {
+	t.Parallel()
+	_, g := buildParallelTypeFixture(t)
+
+	handles := csr.BuildFromAdjList(g.AdjList()).HandlesSlice()
+	if handles == nil {
+		t.Fatal("fixture CSR carries no handle column at all")
+	}
+	zeros := 0
+	for _, h := range handles {
+		if h == 0 {
+			zeros++
+		}
+	}
+	if zeros != 0 {
+		t.Errorf("fixture has %d handle-0 slots out of %d; every Cypher write path is "+
+			"expected to mint a handle, so the oracle covers handle-EXACT resolution. "+
+			"If this now holds, the oracle's coverage has changed and its header is stale",
+			zeros, len(handles))
+	}
+}

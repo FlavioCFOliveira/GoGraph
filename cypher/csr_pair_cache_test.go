@@ -225,3 +225,100 @@ func TestCSRPairCache_ConcurrentQueriesAgree(t *testing.T) {
 		t.Errorf("final count = %d, want 6", got)
 	}
 }
+
+// TestCSRPairCache_NodeOnlyCreateStaysSafe pins the invariant documented in
+// csr_pair_cache.go: interning nodes does not change edge topology, so it correctly
+// does not invalidate, which means a cache hit can return a pair whose vertices
+// array is NARROWER than the live node space. That is safe only because every
+// consumer bounds-checks the vertex index; an unguarded new consumer would panic.
+//
+// Before the cache existed the pair was rebuilt every query and could not lag, so
+// this shape is new and deserves a guard rather than a comment.
+func TestCSRPairCache_NodeOnlyCreateStaysSafe(t *testing.T) {
+	t.Parallel()
+	eng, g := cacheTestEngine(t)
+
+	if got := countScalar(t, eng, cacheCountQuery); got != 5 {
+		t.Fatalf("initial count = %d, want 5", got)
+	}
+	genBefore := g.TopoGeneration()
+
+	// Many node-only creates: no edge touched, so the epoch must NOT advance and
+	// the cached pair stays narrower than the live node space.
+	for i := 0; i < 200; i++ {
+		mustRunWrite(t, eng, fmt.Sprintf(`CREATE (z:Z {key:'z%d'})`, i))
+	}
+	if g.TopoGeneration() != genBefore {
+		t.Errorf("node-only creates advanced TopoGeneration from %d to %d; they touch no "+
+			"edge, so they should not invalidate the CSR pair cache",
+			genBefore, g.TopoGeneration())
+	}
+
+	// Queries over the narrower cached pair must still answer correctly, and must
+	// not panic on an out-of-range vertex index.
+	if got := countScalar(t, eng, cacheCountQuery); got != 5 {
+		t.Errorf("count over a narrower cached pair = %d, want 5", got)
+	}
+	// A traversal anchored on one of the NEW nodes — whose id is past the cached
+	// pair's vertices array — must return no rows rather than panic.
+	if got := countScalar(t, eng,
+		`MATCH (:Z {key:'z199'})-[r]->() RETURN count(r) AS c`); got != 0 {
+		t.Errorf("traversal from a node absent from the cached pair = %d, want 0", got)
+	}
+	// And a reverse traversal, which indexes the reverse pair's offsets.
+	if got := countScalar(t, eng,
+		`MATCH (:Z {key:'z199'})<-[r]-() RETURN count(r) AS c`); got != 0 {
+		t.Errorf("reverse traversal from a node absent from the cached pair = %d, want 0", got)
+	}
+	// Once an edge touches a new node the epoch advances and the pair widens.
+	mustRunWrite(t, eng, `MATCH (a:N {key:'a'}),(z:Z {key:'z199'}) CREATE (a)-[:R]->(z)`)
+	if got := countScalar(t, eng, cacheCountQuery); got != 6 {
+		t.Errorf("count after connecting a new node = %d, want 6", got)
+	}
+}
+
+// TestCSRPairCache_DirectGraphMutationInvalidates is the F1 blocker's regression
+// guard. An embedder may hold the *lpg.Graph it handed to cypher.NewEngine and
+// mutate it directly; nothing in NewEngine's contract forbids it. The epoch bump
+// used to live only in the engine's write adapters and store/txn, so a direct
+// AddEdge left the cache stale and made a COMMITTED edge invisible to every
+// subsequent query on that Engine.
+//
+// The bump now lives in lpg.Graph's own mutators, so no caller can forget. This
+// test fails on the pre-fix tree: warm returns 1 where the truth is 2.
+func TestCSRPairCache_DirectGraphMutationInvalidates(t *testing.T) {
+	t.Parallel()
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	if err := g.AddEdge("a", "b", 1); err != nil {
+		t.Fatal(err)
+	}
+	eng := cypher.NewEngine(g)
+	const q = `MATCH ()-[r]->() RETURN count(r) AS c`
+
+	if got := countScalar(t, eng, q); got != 1 { // warms the cache
+		t.Fatalf("initial count = %d, want 1", got)
+	}
+
+	// Every direct edge mutator must advance the epoch on its own.
+	for _, tc := range []struct {
+		name string
+		mut  func()
+		want int64
+	}{
+		{"AddEdge", func() { _ = g.AddEdge("a", "c", 1) }, 2},
+		{"AddEdgeLabeled", func() { _ = g.AddEdgeLabeled("a", "d", 1, "T") }, 3},
+		{"AddEdgeH", func() { _, _ = g.AddEdgeH("a", "e", 1) }, 4},
+		{"RemoveEdge", func() { g.RemoveEdge("a", "c") }, 3},
+		{"RemoveAllEdgesFrom", func() { g.RemoveAllEdgesFrom("a") }, 0},
+	} {
+		before := g.TopoGeneration()
+		tc.mut()
+		if g.TopoGeneration() == before {
+			t.Errorf("%s did not advance TopoGeneration, so a cached CSR pair goes stale", tc.name)
+		}
+		if got := countScalar(t, eng, q); got != tc.want {
+			t.Errorf("after %s: warm-cache engine returned %d, want %d — a committed "+
+				"topology change is invisible to queries", tc.name, got, tc.want)
+		}
+	}
+}

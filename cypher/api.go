@@ -593,6 +593,19 @@ type EngineOptions struct {
 	// PlanCacheCapacity.
 	EdgeTypeFilterCacheCapacity int
 
+	// DisableCSRPairCache turns off the Engine's cross-query forward/reverse CSR
+	// pair reuse (rmp #2143). The cache is ON by default because it removes an
+	// O(V+E) rebuild from every query that traverses — measured 52% faster and 96%
+	// less allocated memory on a warm, selective one-hop over 960k edges.
+	//
+	// Disable it when an Engine is long-lived over a large graph and retention
+	// matters more than latency: the cache keeps one CSR pair reachable for the
+	// Engine's lifetime, roughly (V+1)*8 + E*24 bytes per direction, which no
+	// result-memory ceiling bounds. A write-heavy workload also gets little from it,
+	// since every topology change invalidates the entry — watch
+	// cypher.csr_pair_cache.replacements against .hits to tell.
+	DisableCSRPairCache bool
+
 	// MaxResultRows limits the number of rows a single [Engine.Run] or
 	// [Engine.RunInTx] call may materialise. If a query produces more rows than
 	// the limit, the [Result] iterator returns [ErrResultRowsExceeded] from
@@ -1347,7 +1360,7 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		procReg:                procs.NewRegistry(),
 		cache:                  newPlanCache(opts.PlanCacheCapacity),
 		edgeTypeFilterCache:    newEdgeTypeFilterCache(opts.EdgeTypeFilterCacheCapacity),
-		csrPairCache:           newCSRPairCache(),
+		csrPairCache:           newCSRPairCacheIfEnabled(opts.DisableCSRPairCache),
 		maxResultRows:          resolveMaxResultRows(opts.MaxResultRows),
 		maxResultBytes:         resolveMaxResultBytes(opts.MaxResultBytes),
 		maxCollectItems:        opts.MaxCollectItems,
