@@ -160,3 +160,68 @@ func TestOrdering_ParallelEdgeTypes_FixtureIsHandleBearing(t *testing.T) {
 			zeros, len(handles))
 	}
 }
+
+// TestOrdering_QueryResultsMatchAdjacencyOracle is the query-level differential the
+// ordering work owes: emitted results must agree with an oracle read straight from
+// the ADJACENCY, which the ordering never touches.
+//
+// It is written against the adjacency rather than against an "ordering disabled"
+// build because #2141 made the ordering unconditional — there is no unordered CSR
+// to compare with in production. The adjacency is the better reference anyway: it
+// is a genuinely independent source rather than the same builder with a flag
+// flipped, so it cannot go green over a defect both arms share.
+func TestOrdering_QueryResultsMatchAdjacencyOracle(t *testing.T) {
+	t.Parallel()
+	eng, g := inMemMultigraphEngine(t)
+	mustRunWrite(t, eng, `CREATE (a:N {key:'src'})`)
+	// Descending destinations past the insertion-sort cutoff, with parallel edges on
+	// every third destination so runs of length > 1 exist.
+	want := 0
+	for d := 49; d >= 0; d-- {
+		key := fmt.Sprintf("d%02d", d)
+		mustRunWrite(t, eng, fmt.Sprintf(`CREATE (b:N {key:'%s'})`, key))
+		reps := 1
+		if d%3 == 0 {
+			reps = 3
+		}
+		for r := 0; r < reps; r++ {
+			mustRunWrite(t, eng, fmt.Sprintf(
+				`MATCH (a:N {key:'src'}),(b:N {key:'%s'}) CREATE (a)-[:R]->(b)`, key))
+			want++
+		}
+	}
+
+	// Oracle: the adjacency's own out-degree for the source, read without any CSR.
+	srcKey := keyNode(t, g, "src")
+	adjDegree, ok := g.AdjList().OutDegree(srcKey)
+	if !ok {
+		t.Fatal("source absent from the adjacency")
+	}
+	if adjDegree != want {
+		t.Fatalf("fixture broken: adjacency out-degree %d, want %d", adjDegree, want)
+	}
+
+	// The query traverses the ORDERED CSR; the count must match the adjacency.
+	if got := countScalar(t, eng,
+		`MATCH (:N {key:'src'})-[r:R]->() RETURN count(r) AS c`); got != int64(want) {
+		t.Errorf("query over the ordered CSR returned %d relationships, adjacency has %d", got, want)
+	}
+	// Per destination, the emitted count must match that pair's slot count.
+	for d := 0; d < 50; d++ {
+		expected := int64(1)
+		if d%3 == 0 {
+			expected = 3
+		}
+		q := fmt.Sprintf(
+			`MATCH (:N {key:'src'})-[r:R]->(b:N {key:'d%02d'}) RETURN count(r) AS c`, d)
+		if got := countScalar(t, eng, q); got != expected {
+			t.Errorf("d%02d: query returned %d, adjacency has %d slots", d, got, expected)
+		}
+	}
+	// And the reverse direction must agree on the total, which routes through the
+	// reverse CSR and the reverse-to-forward mapping.
+	if got := countScalar(t, eng,
+		`MATCH (b:N)<-[r:R]-(:N {key:'src'}) RETURN count(r) AS c`); got != int64(want) {
+		t.Errorf("reverse traversal returned %d relationships, adjacency has %d", got, want)
+	}
+}
