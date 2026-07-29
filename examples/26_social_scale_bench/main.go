@@ -294,9 +294,11 @@ func startCPUProfile(dir string) (func(), error) {
 	if dir == "" {
 		return func() {}, nil
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("profile dir: %w", err)
 	}
+	// #nosec G304 -- dir is the operator-supplied -profile-dir for this example
+	// binary; the basename is a fixed constant, so the path is not attacker-chosen.
 	f, err := os.Create(filepath.Join(dir, "cpu.pprof"))
 	if err != nil {
 		return nil, fmt.Errorf("create cpu profile: %w", err)
@@ -326,6 +328,7 @@ func writeHeapProfile(dir string, w io.Writer) error {
 	}
 	runtime.GC()
 	path := filepath.Join(dir, "heap.pprof")
+	// #nosec G304 -- as above: operator-supplied directory, fixed basename.
 	f, err := os.Create(path)
 	if err != nil {
 		return fmt.Errorf("create heap profile: %w", err)
