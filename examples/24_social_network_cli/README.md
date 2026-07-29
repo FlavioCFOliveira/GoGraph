@@ -45,6 +45,11 @@ Labels and relationship types are declared as constants in
 `schema.go`; the seed fixture and every helper share those names so a
 rename surfaces compilation errors in one place.
 
+Three further labels — `:Core`, `:Verified` and `:Firehose` — exist only for the
+`plandiff` subcommand's planner scenarios and are absent from the canonical
+fixture. They are described where they are used, under
+[Query planning](#query-planning-the-plandiff-subcommand).
+
 ## Subcommands
 
 | Subcommand | What it does | Reply |
@@ -195,6 +200,23 @@ plan the engine *would* run naively and the plan it *does* run:
   Cartesian re-initialises its inner plan once per outer row; the peephole
   drives the smaller `:Comment` side, re-initialising the inner plan
   `|Comment|` times instead of `|User|`.
+- **Bound-destination seek, `ExpandInto` (#2149)** — `MATCH
+  (a:User)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(a)`, which is how a social
+  product detects **mutual following**, i.e. friendship. The second hop's
+  destination `a` is *already bound*, so instead of walking every account `b`
+  follows and discarding the misses, the operator binary-searches `a` in `b`'s
+  destination-ordered neighbour run: `O(log d + r)` instead of `Θ(d)`. A
+  triangle variant (`a → b → c → a`, anchored on the `:Core` community) is
+  reported separately, because its *middle* hop is open and materialises
+  `Θ(n·d²)` intermediate rows however fast the closing hop becomes — so its
+  win is real but bounded, and folding it into the headline would overstate
+  the change.
+- **Symmetric anchor swap (#2150)** — `MATCH (f:Firehose)-[:FOLLOWS]->(v:Verified)`
+  ("which verified accounts does this high-volume account follow?"). The edge is
+  written in the OUT direction, so the cheaper anchor requires a *reverse*
+  expand — which the peephole refused to introduce until #2150. Anchored as
+  written it walks the firehose account's entire out-adjacency to find one edge;
+  re-rooted onto the small `:Verified` population it walks a single in-edge.
 
 **Purpose.** Provide auditable evidence that the optimisation fired and was
 worthwhile. For each scenario `plandiff` prints the **EXPLAIN plan-diff**
@@ -202,11 +224,48 @@ worthwhile. For each scenario `plandiff` prints the **EXPLAIN plan-diff**
 reordering-ENABLED and -DISABLED engines), an **exact work contrast** read
 from the count-store (scanned start rows for the anchor swap; inner
 re-initialisations for the disjoint reorder — the db-hits-style figure the
-cost model itself compares), and the **median wall-clock** ENABLED vs
-DISABLED. On first run it seeds a deterministic synthetic content layer
-(2000 `:User`, 1500 `:Post`, 100 `:Comment` each `:ON` a distinct post;
-`-scale N` multiplies these) so the graph carries the skew; re-running
-skips re-seeding.
+cost model itself compares), the **median wall-clock** ENABLED vs DISABLED,
+the **rows returned**, and the **allocation cost** of each arm sampled from
+`runtime.MemStats`. It also prints the **FOLLOWS out-degree profile** of the
+traversed vertices, because that is what explains *why* the seek engages and
+bounds how much it can win: a reader given only a speedup cannot tell whether
+it came from the access path or from the fixture.
+
+Allocations are reported for both arms deliberately. A time win paid for with
+allocations is not a win — and for the seek specifically they are expected to be
+**unchanged**, because it removes CPU work rather than row construction, which
+#2206 had already removed. The symmetric swap is the opposite case and shows it
+honestly: it trades ~2× the allocation *count* for ~32× fewer allocated *bytes*.
+
+On first run it seeds a deterministic synthetic layer so the graph carries the
+skew, and re-running skips re-seeding:
+
+- the **content** layer — 2000 `:User`, 1500 `:Post`, 100 `:Comment` each `:ON` a
+  distinct post — for the two reordering peepholes;
+- the **traversal** layer — a ring fan-out giving every synthetic user
+  ~24 followees, mutual back-edges over a `:Core` block so friendship patterns
+  actually match, a small `:Seed` slice of that block to anchor the triangle, and
+  one `:Firehose` account following every user plus exactly one of 50 `:Verified`
+  accounts.
+
+The fan-out is 24 rather than something larger for a measured reason: the seek's
+benefit grows with the traversed degree, so a bigger fan-out would demonstrate
+more — but the acceptance test drives these scenarios in the short test layer,
+which runs under `-race`, and at 48 this package took **548 s** against a 60 s
+per-package budget. At 24 the seek still wins by ~1.7× and the whole subcommand
+runs in about a second. The triangle is anchored on the small `:Seed` slice for
+the same reason, its cost being cubic in the fan-out.
+
+`-scale N` multiplies all of these. The two layers carry **separate** idempotency
+sentinels, so a data directory seeded by an earlier build gains the traversal
+layer rather than silently running the new scenarios against a graph that lacks
+it.
+
+Every user gets a followee list, not just the mutually-following ones. That is
+both more realistic and load-bearing for the measurement: an earlier version
+fanned out only the `:Core` users, which left the far endpoint of each first hop
+at out-degree **zero**, so the closing hop walked an empty range and the scenario
+reported 1.06× while looking perfectly healthy.
 
 ```bash
 go run ./examples/24_social_network_cli init -d "$DATA_DIR"
@@ -244,6 +303,47 @@ ProduceResults
 The disjoint-reorder scenario prints the analogous diff — the
 `CartesianProduct` children swap order (`[c:Comment]` drives before
 `[u:User]`) — with `inner_reinitialisations` as its exact work figure.
+
+The two traversal scenarios render the **physical** plan rather than the logical
+one, because a bound-destination seek is a physical *access path*: the logical
+`Expand` node is identical either way, and what changes is the operator's plan
+detail.
+
+```
+## scenario: expand-into-mutual
+query: MATCH (a:User)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(a) RETURN count(*) AS mutuals
+--- EXPLAIN (ExpandInto seek DISABLED (enumerate + filter)) ---
+...
+            └─ Expand [ExpandInto filter]
+--- EXPLAIN (ExpandInto seek ENABLED) ---
+...
+            └─ Expand [ExpandInto seek]
+# degree.user_follows.max=25
+# degree.user_follows.mean=24
+# expand-into-mutual.rows=...
+# expand-into-mutual.speedup=...x        # ~1.7x on the reference machine
+# expand-into-mutual.allocs.disabled=194372
+# expand-into-mutual.allocs.enabled=194367   # unchanged: the win is pure CPU
+
+## scenario: symmetric-anchor-swap
+query: MATCH (f:Firehose)-[:FOLLOWS]->(v:Verified) RETURN v.id AS verified
+--- EXPLAIN (anchor swap DISABLED) ---
+      └─ Expand (f)-[:FOLLOWS]->(v) (est. rows=2001, exact)
+         └─ NodeByLabelScan [f:Firehose] (est. rows=1, exact)
+--- EXPLAIN (anchor swap ENABLED (symmetric)) ---
+      └─ Expand (v)<-[:FOLLOWS]-(f) (est. rows=1, exact)
+         └─ NodeByLabelScan [v:Verified] (est. rows=50, exact)
+# symmetric-anchor-swap.examined_edges.disabled=2001
+# symmetric-anchor-swap.examined_edges.enabled=50
+# symmetric-anchor-swap.examined_edges.ratio=40.0x
+# symmetric-anchor-swap.speedup=...x     # ~21x on the reference machine
+# symmetric-anchor-swap.bytes.disabled=368696
+# symmetric-anchor-swap.bytes.enabled=11728
+```
+
+The scenario runner **refuses to report a speedup it cannot stand behind**: if the
+two arms disagree on the row count it returns an error instead, because a plan
+change that alters the answer is a defect, not an optimisation.
 
 ## Architecture
 
