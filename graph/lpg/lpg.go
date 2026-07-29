@@ -972,6 +972,12 @@ func (g *Graph[N, W]) revive(id graph.NodeID) {
 		next.Remove(uint64(id))
 		g.tombstones.Store(next)
 		g.tombstoneActive.Add(-1)
+		// Reviving restores the node's arcs to the live topology, so the same
+		// invalidation argument as [Graph.RemoveNode] applies in reverse. Bumping
+		// on BOTH transitions is also what makes the generation a sound cache key:
+		// the tombstone COUNT is not, because removing one node and reviving
+		// another leaves it unchanged while the live set differs.
+		g.topoGeneration.Add(1)
 	}
 	g.tombstoneMu.Unlock()
 	// Re-add id to all label bitmaps for labels that survived in the
@@ -1550,6 +1556,17 @@ func (g *Graph[N, W]) RemoveNode(n N) {
 		next.Add(uint64(id))
 		g.tombstones.Store(next)
 		g.tombstoneActive.Add(1)
+		// Tombstoning changes the LIVE edge topology every CSR-position-keyed
+		// cache is derived from: csr.BuildFromAdjListLive omits the arcs incident
+		// to a tombstoned node, so a cache built before this call describes a
+		// graph that no longer exists. Bump the generation for exactly the reason
+		// [Graph.BumpTopoGeneration] documents — a caller reaching RemoveNode
+		// directly through the Go API has no enclosing Cypher statement to
+		// attribute an edge-removal counter to, but the live topology still
+		// changed. Without this a cached CSR (or edge-type filter) would serve
+		// ghost edges for a logically-deleted node, which is the #1790 defect the
+		// live filter exists to prevent.
+		g.topoGeneration.Add(1)
 	}
 	g.tombstoneMu.Unlock()
 	// Strip id from every label bitmap so label-index consumers see the
