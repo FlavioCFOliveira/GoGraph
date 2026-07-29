@@ -4,57 +4,67 @@
 > patterns"). Base commit `9a08389bba50a90068bd3c8e7751ea1179acd9d8`, 2026-07-29.
 > Consulted: `graph-theory-expert` (mandatory), `cypher-expert-consultant`.
 >
-> ## VERDICT: **NO-GO**
+> ## VERDICT: **GO**, narrowly scoped — after a self-correction
 >
-> **The unmet obligation is (c), the no-regression gate.** On a typed cyclic
-> pattern — `-[:K]->`, which is what essentially every real Cypher query writes —
-> a sorted-set-intersection plan is **measured at 0.61×–0.81× the incumbent's
-> speed, a 19%–39% regression**, on the exact shape the operator exists to
-> improve. The cause is structural, not an implementation detail: the reverse CSR
-> carries **no relationship-type information**, so every reverse-side advance must
-> first recover its forward slot position via an `O(log d)` binary search
-> (`Expand.reverseEdgePassesFilter`, `cypher/exec/expand.go:698`) and then probe a
-> `map[uint64]string`. That is precisely the per-candidate cost the merge exists to
-> eliminate, so the merge's only source of advantage — `O(1)` per advance — is
-> cancelled by the type check it cannot avoid.
+> **This document reached NO-GO in its first two revisions and that verdict was
+> WRONG. The error was mine and it was a measurement error, recorded here in full
+> because the project's evidence mandate makes an uncorrected verdict worse than a
+> late one.**
 >
-> No gate excludes this. The regression is the **default** case rather than an
-> edge case, and no plan-time gate can even see it: for the homogeneous triangle
-> the two candidate legs carry the *identical* count-store signature
-> (`D(P,K,OUT)` and `D(P,K,IN)`, both equal to `E(K)`), and the count store is
-> documented in-source as unable to see degree skew
-> (`cypher/anchor_swap_plan.go:454-457`). The project mandate forbids shipping an
-> optimisation that can be slower than the existing plan when no gate excludes the
-> case, so the mandate forbids this operator **as scoped**.
+> The NO-GO rested on a typed cyclic pattern measuring 0.61×–0.81× the incumbent.
+> **That comparison was not like-for-like**: the binary arm performed *no
+> relationship-type checking at all*, while the intersection arm was charged the
+> full reverse-side type cost. Correcting it — both arms paying their own real
+> costs, and using the `revToFwd` mapping that **already exists** in
+> `cypher/exec/revtofwd.go:101` so a reverse type check is an `O(1)` indexed load
+> plus a map probe rather than an `O(log d)` `firstDstPos` search — inverts the
+> result on the same adversarial clique:
 >
-> **The verdict has two parts, and only one of them is permanent.**
+> | clique `m` | untyped | **typed, FAIR** | typed via type column |
+> |---:|---:|---:|---:|
+> | 9 900 | 7.45× | **1.45×** | 4.40× |
+> | 22 350 | 7.93× | **1.50×** | 5.05× |
+> | 39 800 | 9.01× | **1.56×** | 5.47× |
+> | 89 700 | 10.68× | **1.54×** | 6.04× |
 >
-> - **Unconditional NO-GO on the operator as scoped.** A general
->   worst-case-optimal join is not warranted *at all*, for a structural reason
->   (§2): every simple cycle admits exactly **one** intersection, at the vertex
->   the sprint-314 `ExpandInto` seek already occupies, so Leapfrog Triejoin and
->   Generic Join both degenerate on a binary relation and genuine multi-way
->   intersection needs `K4` or denser. This should not be re-proposed.
-> - **Conditional GO on the closing-leg intersection, strictly sequenced after one
->   prerequisite.** §7.1 *measures* rather than assumes it: give both plans a
->   slot-aligned `[]uint32` relationship-type column and the same clique fixture
->   inverts from a **0.62×–0.71× regression to a 4.54×–6.29× win that widens with
->   scale**. The blocker is not merely the cause — removing it is **sufficient**.
+> Result counts agree in every row and at every size. **There is no regression**,
+> so obligation (c) is *met*: the intersection is 1.45×–1.56× faster with existing
+> machinery, on the fixture built specifically to strip it of every advantage
+> (equal degrees, so §1's work terms tie exactly; every 2-path closing, so the
+> §3.1 materialisation saving is zero). The map probe dominates *both* arms and
+> merely compresses the win; the slot-aligned type column (§7) is an **amplifier
+> to 4.4×–6.0×, not a precondition**.
 >
-> So this is a **sequencing** finding, not an abandonment. The prerequisite is a
-> larger and gateless win in its own right, and it is an architecture change
-> beyond this sprint's objective, so it is raised as `rmp` #2251 carrying the
-> measurement rather than absorbed here.
+> **What remains unconditionally NO-GO** is the operator *as the sprint framed it*
+> — a general worst-case-optimal join. That is structural (§2): every simple cycle
+> admits exactly **one** intersection, at the vertex the sprint-314 `ExpandInto`
+> seek already occupies, so Leapfrog Triejoin and Generic Join both degenerate on a
+> binary relation, and genuine multi-way intersection needs `K4` or denser. The
+> thing worth building is far narrower: a **fusion of the last two `Expand`s of a
+> cycle** into one intersecting expand, scoped to triangles.
+>
+> Gating stays runtime per-row on `O(1)` CSR offsets and **never** on the count
+> store, which is provably blind here — for the homogeneous triangle the two
+> candidate legs carry the *identical* signature (`D(P,K,OUT)` and `D(P,K,IN)`,
+> both equal to `E(K)`), and `cypher/anchor_swap_plan.go:454-457` already records
+> in-source that `D` cannot see degree skew.
+>
+> **Revision history of this verdict**, kept deliberately: r1 NO-GO (premise
+> refuted, §1) → r2 NO-GO with a "conditional GO after a prerequisite" → **r3 GO,
+> narrowly scoped**, once the r1/r2 regression measurement was found to be
+> asymmetric (§4.1). Three of my own conclusions were overturned by re-measuring my
+> own harness. §7 is retained and reframed: the type column is an amplifier and an
+> independent win, not a gate.
 
 ## Contents
 
 - [1. The premise as written is refuted](#1-the-premise-as-written-is-refuted)
 - [2. There is no operator-shaped gap](#2-there-is-no-operator-shaped-gap)
 - [3. What the intersection does win — and where it goes](#3-what-the-intersection-does-win--and-where-it-goes)
-- [4. The obligation that fails: the no-regression gate](#4-the-obligation-that-fails-the-no-regression-gate)
+- [4. The no-regression gate — and the measurement error that faked a failure](#4-the-no-regression-gate--and-the-measurement-error-that-faked-a-failure)
 - [5. Semantics: recoverable, but the surface is larger than assumed](#5-semantics-recoverable-but-the-surface-is-larger-than-assumed)
 - [6. The TCK is blind to this operator](#6-the-tck-is-blind-to-this-operator)
-- [7. What would reverse this verdict](#7-what-would-reverse-this-verdict)
+- [7. The type column: an independent amplifier](#7-the-type-column-an-independent-amplifier)
 - [8. Durable findings and disposition](#8-durable-findings-and-disposition)
 
 ---
@@ -214,10 +224,77 @@ justification.
 
 ---
 
-## 4. The obligation that fails: the no-regression gate
+## 4. The no-regression gate — and the measurement error that faked a failure
 
-The SPIKE was directed to return NO-GO if no gate can exclude regression. This is
-that finding.
+> **RETRACTION.** This section originally reported a 19%–39% regression and was the
+> sole basis for a NO-GO verdict. **The measurement was invalid.** Its binary arm
+> did no relationship-type checking while the intersection arm paid the full
+> reverse-side cost, so it compared an untyped incumbent against a typed
+> challenger. §4.2 gives the corrected, like-for-like result: **no regression, and
+> a 1.45×–1.56× win.** The invalid figures are kept below rather than deleted,
+> because the *shape* of the error is the reusable lesson — an asymmetric cost
+> model is far easier to write than to notice.
+
+### 4.1 What was measured, and why it was wrong
+
+The reverse CSR carries **no relationship-type information**, so a typed pattern
+must, for every reverse slot it advances over, establish that slot's type.
+`Expand.reverseEdgePassesFilter` (`cypher/exec/expand.go:698`) does this by
+recovering the slot's *forward* position with an `O(log d)` `firstDstPos` search
+and then probing `map[uint64]string` (`cypher/api.go:17422` populates that map with
+one entry per accepted slot across the whole graph; `passesFilter`,
+`expand.go:803`, probes it per slot).
+
+Charging the intersection that cost while charging the incumbent nothing produced:
+
+| clique `m` | untyped intersection | intersection + reverse check, incumbent UNCHARGED |
+|---:|---:|---:|
+| 9 900 | 7.45× faster | 0.74× — **invalid** |
+| 89 700 | 10.68× faster | 0.63× — **invalid** |
+
+Two things were wrong. First, the asymmetry above. Second, `firstDstPos` is not the
+only way to type-check a reverse slot: **`buildRevToFwd`
+(`cypher/exec/revtofwd.go:101`) already precomputes a `[]uint64` mapping every
+reverse slot to its forward slot in one `O(V+E)` pass**, making the check an `O(1)`
+indexed load plus a map probe. The engine already owns the machinery the NO-GO
+claimed was missing.
+
+### 4.2 The corrected, like-for-like result
+
+Both arms now pay their own real costs. Today's plan is all-**forward** (scan `a`,
+expand `a→b`, expand `b→c`, then seek `a` in `c`'s forward run), so it pays one map
+probe per forward slot examined and touches no reverse run. The intersection needs
+`N_in(a)`, so it additionally pays a `revToFwd` load plus a map probe per reverse
+slot — a cost the incumbent genuinely avoids, and it is charged here in full.
+
+| clique `m` | binary (fair) | intersection (fair) | **speed-up** | counts |
+|---:|---:|---:|---:|:--:|
+| 9 900 | 14.59 ms | 10.03 ms | **1.45×** | agree |
+| 22 350 | 53.56 ms | 35.68 ms | **1.50×** | agree |
+| 39 800 | 126.73 ms | 81.11 ms | **1.56×** | agree |
+| 89 700 | 476.26 ms | 310.08 ms | **1.54×** | agree |
+
+**Obligation (c) is met.** The intersection is never slower, on the fixture chosen
+to be maximally hostile to it. The whole series is internally consistent: 7.4×–10.7×
+with no type filter (the pure access-pattern win of §3.2), compressed to ~1.5× when
+a per-slot map probe dominates *both* arms, and restored to 4.4×–6.0× when that
+probe becomes a slot-aligned column load (§7). The map is the compressor, not the
+blocker.
+
+Residual risks, recorded rather than dismissed: behaviour at degree 1–2 is
+unmeasured (the `≈16` crossover in
+[`design-degree-adaptive-adjacency.md`](design-degree-adaptive-adjacency.md) §2.2
+is scan-versus-seek and must not be reused for merge-versus-seek); and
+columnar-`ChunkProducer` precedence, where widening a recogniser has twice before
+in this project stolen shapes from the columnar chain.
+
+### 4.3 What the original section got right
+
+The count store genuinely **cannot** gate this, and that conclusion survives: for
+the homogeneous triangle both candidate legs carry the identical signature
+`D(P,K,OUT)` = `D(P,K,IN)` = `E(K)`, so a plan-time gate is asked to distinguish
+two alternatives it returns the same number for. Gating must be **runtime per-row
+on `O(1)` CSR offsets**, never plan-time on `D`.
 
 The intersection's entire advantage is `O(1)` per advance. But the **reverse CSR
 carries no relationship-type information**, so a typed pattern must, for every
@@ -370,11 +447,11 @@ optimisation is invisible to a differential test.
 
 ---
 
-## 7. What would reverse this verdict
+## 7. The type column: an independent amplifier
 
-The blocker in §4 is a *missing representation*, not a property of intersection
-joins: the reverse CSR has no slot-aligned relationship type, so a typed reverse
-advance costs `O(log d)` plus a map probe instead of `O(1)`.
+§4.2 settles that the intersection does not need this to avoid regression. What it
+*does* need it for is to stop a per-slot `map[uint64]string` probe from dominating
+both plans — and removing that probe is a win far beyond cyclic patterns.
 
 **A slot-aligned relationship-type column** — a `[]uint32` parallel to the edges
 array in both directions, replacing the `map[uint64]string` keyed by slot position
@@ -386,7 +463,7 @@ place before being quoted — but the direction is not in doubt, because the map
 probe is per-slot on **every typed expand** in the engine, gateless and with no
 cost model.
 
-### 7.1 The prerequisite is measured SUFFICIENT, not merely necessary
+### 7.1 It is an AMPLIFIER, not a precondition — measured both ways
 
 It would have been easy to leave §7 as an assertion that removing the blocker
 "should" restore the win. It was measured instead, because the whole point of this
@@ -405,32 +482,27 @@ fixture as §4:
 | 39 800 | 0.68× | **5.40×** | yes |
 | 89 700 | 0.62× | **6.29×** | yes |
 
-**The verdict inverts on this one representation change**, from a 29%–38%
-regression to a 4.5×–6.3× win that widens with scale — and it does so on the
-fixture built specifically to strip the intersection of every other advantage
-(equal degrees, so the work terms tie exactly; every 2-path closing, so there is
-no materialisation saving). The residual is entirely the memory-access difference
-of §3, restored once the type check stops being a search.
+Read against §4.2's fair baseline of **1.45×–1.56×**, the column takes the same
+fixture to **4.40×–6.04×**. So it roughly **triples an already-positive result**
+rather than rescuing a negative one. The residual in both cases is the
+memory-access difference of §3.2; the column simply stops the per-slot map probe
+from dominating.
 
-So the NO-GO of this document is **conditional and sequenced, not permanent**:
+That settles the sequencing question the earlier revisions got wrong:
 
-- **NO-GO as scoped** — a general worst-case-optimal join operator is not
-  warranted at all, for the structural reason in §2 (one intersection per simple
-  cycle, at the vertex `ExpandInto` already occupies; multi-way needs `K4`+). That
-  part of the verdict is unconditional and should not be re-proposed.
-- **The closing-leg intersection is warranted, strictly AFTER the type column**,
-  scoped to triangles, gated per-row on `O(1)` CSR offsets, never on `D`.
-
-The correct sequence is therefore: **type column first, then re-open the
-closing-leg intersection.** The type column is not a competitor to this work; it
-is a larger, gateless win that happens to be its precondition.
+- The closing-leg intersection is **worth building now**, on existing machinery,
+  because it does not regress (§4.2) — it does **not** wait on the column.
+- The type column remains a **large, gateless, universal win** in its own right —
+  it applies to every typed expand in the engine, not only cyclic patterns — and
+  it multiplies this operator's benefit when it lands. It is an independent item,
+  not a blocker.
+- A general worst-case-optimal join stays **unconditionally out of scope** for the
+  structural reason in §2.
 
 > **Scope note.** Adding a type column changes the CSR's in-memory representation
 > and the engine's hottest read path, which is an architecture decision beyond the
-> mandate of this SPIKE and beyond sprint 315's objective. It is therefore raised
-> as its own item (`rmp` #2251) carrying this measurement, rather than absorbed
-> here. The measurement is recorded now so that item starts from evidence instead
-> of re-deriving it.
+> mandate of this SPIKE. It stays its own item (`rmp` #2251), carrying this
+> measurement so it starts from evidence instead of re-deriving it.
 
 ---
 
@@ -447,12 +519,18 @@ Findings worth keeping regardless of the verdict:
    `ExpandInto` seek already occupies. Multi-way intersection needs `K4`+.
    **This is the structural reason the sprint has no operator-shaped gap, and it
    is why the question should not be re-proposed in this form.**
-3. The intersection's win is a `log d` factor (8×–10× measured at clique degrees)
-   plus a 17×–27× reduction in materialised intermediates — **both cancelled by
-   the reverse-leg type check on any typed pattern (0.61×–0.81×), and both
-   RESTORED (4.54×–6.29×) the moment that check becomes a slot-aligned column
-   lookup (§7.1).** The blocker is a missing representation, not a property of
-   intersection joins.
+3. The intersection's win is a `log d` factor plus a 17×–27× reduction in
+   materialised intermediates. Measured on the adversarial clique: **7.4×–10.7×
+   untyped, 1.45×–1.56× typed like-for-like (§4.2), 4.4×–6.0× with a slot-aligned
+   type column (§7.1)**. A per-slot map probe compresses the win in BOTH arms; it
+   never inverts it.
+7. **An asymmetric cost model faked a NO-GO through two revisions of this
+   document** (§4.1): the incumbent was charged no type-check cost while the
+   challenger paid it in full. Neither consultation caught it, because both were
+   reasoning about the mechanism rather than auditing my arithmetic. **When a
+   measurement contradicts a structural argument — here, that `Σ min ≤ ½ Σ d²`
+   pointwise, so the work term cannot regress — audit the measurement before
+   accepting the contradiction.**
 4. The semantics are fully recoverable; §5 records the exact formulation, the
    `k(k−1)(k−2)` self-loop term, and the clause-wide handle-publication
    requirement.
@@ -467,12 +545,10 @@ evidence-based deferral precedent of the parallel-Expand task #2112. The
 prerequisite in §7 and the two defects found while tracing §5 are raised as
 separate backlog items rather than absorbed here.
 
-**The one open decision this SPIKE deliberately does not take.** §7.1 establishes
-that the closing-leg intersection *is* worth having and that exactly one
-representation change unlocks it. Making that change — a slot-aligned type column
-in both CSR directions, replacing the per-slot `map[uint64]string` on the engine's
-hottest read path — is an **architecture** decision, and it benefits every typed
-expand rather than only cyclic patterns. It is therefore out of scope for a SPIKE
-whose remit was the cyclic-pattern operator, and it is not absorbed here on the
-author's own authority. #2251 carries the full measurement so that decision can be
-taken on evidence.
+**Disposition, as corrected.** The GO is narrow and its scope is exactly §2's
+finding: build a **fusion of a cycle's last two `Expand`s** into one intersecting
+expand for triangles — not a general worst-case-optimal join, which stays
+unconditionally out of scope. #2156 (the primitive) and #2157 (the fused operator)
+are therefore live work; #2158, #2159 and #2161 follow them. The slot-aligned type
+column (#2251) is an independent, larger, gateless win that multiplies this
+operator's benefit but does **not** gate it.
