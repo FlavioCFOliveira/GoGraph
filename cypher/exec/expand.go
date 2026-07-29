@@ -437,15 +437,28 @@ func (op *Expand) WithExpandIntoSeek(enabled bool) *Expand {
 }
 
 // ExpandIntoSeekCount reports how many times an expand-into hop has narrowed its
-// cursor to a bound destination's run since process start. It is a diagnostic
-// seam for tests that must prove the seek actually FIRED — an EXPLAIN line proves
-// the plan, this proves the access path — and for operational observability.
-// Process-global and monotonic; callers snapshot it before and after a query
-// rather than resetting it.
+// FORWARD cursor to a bound destination's run since process start. It is a
+// diagnostic seam for tests that must prove the seek actually FIRED — an EXPLAIN
+// line proves the plan, this proves the access path — and for operational
+// observability. Process-global and monotonic; callers snapshot it before and
+// after a query rather than resetting it.
 func ExpandIntoSeekCount() uint64 { return expandIntoSeekCount.Load() }
 
-// expandIntoSeekCount backs [ExpandIntoSeekCount].
-var expandIntoSeekCount atomic.Uint64
+// ExpandIntoSeekReverseCount reports the same for the REVERSE cursor, which a
+// DirIn or DirBoth closing hop narrows.
+//
+// It is counted separately because the two are independently defeatable and a
+// result comparison cannot tell them apart: dropping the reverse narrowing makes
+// the operator fall back to walking the whole in-edge range, which is SLOWER but
+// returns exactly the same rows in the same order. Without its own counter that
+// regression is invisible to every differential test — verified by injecting it.
+func ExpandIntoSeekReverseCount() uint64 { return expandIntoSeekRevCount.Load() }
+
+// expandIntoSeekCount and expandIntoSeekRevCount back the two accessors above.
+var (
+	expandIntoSeekCount    atomic.Uint64
+	expandIntoSeekRevCount atomic.Uint64
+)
 
 // boundIntoDst returns the already-bound destination NodeID this hop must land on
 // and whether it could be resolved unboxed.
@@ -524,11 +537,12 @@ func (op *Expand) seekIntoRuns() {
 		if op.fwdStart >= op.fwdEnd {
 			op.fwdDone = true
 		}
+		expandIntoSeekCount.Add(1)
 	}
 	if op.dir != DirOut && op.revEdges != nil {
 		op.revStart, op.revEnd = dstRun(op.revEdges, op.revStart, op.revEnd, dst)
+		expandIntoSeekRevCount.Add(1)
 	}
-	expandIntoSeekCount.Add(1)
 }
 
 // advanceFwdEdge consumes at most one forward edge from the current source's
