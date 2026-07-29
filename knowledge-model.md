@@ -1036,7 +1036,7 @@ tagged crash-injection battery, `golangci-lint` (0 issues) and
 | `Spec` | A documentation/specification file under `docs/` (plus root `README.md`/`CHANGELOG.md`). | `name` (basename), `path` (repo-relative), `title` (first `# ` heading) |
 | `Feature` | A curated major capability of the module. | `name`, `description` |
 | `Sprint` | A planning sprint from the `rmp` roadmap. | `id` (int), `name`, `status` (`OPEN`\|`CLOSED`\|`PENDING`), `objective` |
-| `Commit` | A git commit that delivered one or more tasks. | `hash` (short 7-char), `fullHash` (full 40-char), `message`, `sprintId` (int) |
+| `Commit` | A git commit that delivered one or more tasks. | `hash` (short — **8-char** in the live graph; this table said 7 until 2026-07-29 and the drift silently made 7-char lookups miss), `fullHash` (full 40-char), `message`, `sprintId` (int) |
 | `Agent` | A specialist sub-agent mandated by `CLAUDE.md`. | `name`, `kind` (`subagent`), `description`, `source` |
 | `Skill` | A project-relevant Claude Code skill. | `name`, `kind` (`skill`), `description`, `path` |
 | `Memory` | A persistent assistant memory file (mirror of the harness memory directory). | `name` (frontmatter slug), `file` (basename), `type` (`user`\|`feedback`\|`project`\|`reference`), `description` |
@@ -1093,6 +1093,7 @@ All edges carry `gitCommit` and `gitDate`.
 | `PART_OF` | `(Feature)-[:PART_OF]->(Feature)` | A sprint-scale capability belongs to a broader feature area (e.g. a planner peephole → `Cypher Engine`). Documented 2026-07-28 (sprint 311). |
 | `DELIVERS` | `(Sprint)-[:DELIVERS]->(Feature)` | The sprint that delivered a capability. Documented 2026-07-28 (sprint 311). |
 | `VERIFIES` | `(Test\|Benchmark)-[:VERIFIES]->(Feature)` | A test or benchmark that gates a feature's correctness or its measured performance. Documented 2026-07-28 (sprint 311). |
+| `MEASURES` | `(Benchmark)-[:MEASURES]->(Function\|Method)` | A benchmark whose measurement targets a specific symbol, as distinct from `VERIFIES`, which targets a `Feature`. Documented 2026-07-29 (sprint 313, task #2145). |
 
 **Data-quality note (observed 2026-07-02, partially remediated):** the live graph has
 accumulated several more edge types across incremental syncs than this table documents in
@@ -1679,6 +1680,47 @@ mechanism (`Task 2235`), never by widening this recogniser. `applyDDLOp.why` rec
 `Result`-leak defect found while fixing #2229: four intra-sequence callers discarded the
 `Result` the DDL runner returns, and its armed finalizer counted a leak against
 `cypher.result.leaked` on every `CREATE CONSTRAINT`, `DROP CONSTRAINT` and constraint unwind.
+
+Incrementally synced at commit `59ddd2fb` (2026-07-29, task #2145, sprint 313 —
+benchmarking the destination-ordered CSR): +63 nodes — `Package` `bench/csrorder`
+(kind `bench`, parentless like every other `bench/*` package, so no `PART_OF`/`CONTAINS`
+parent was invented); 4 `Commit` (`fafc50c7`, `1930f1f6`, `9cd5ada7`, `59ddd2fb` — the
+first three were never recorded because they landed after the previous sync `b2d11ab7`);
+`Spec` `docs/benchmarks/csr-neighbour-ordering-2026-07-29.md`; 14 `Benchmark`, 13 `Test`,
+25 `Function`, 5 `Type`, 2 `Method` in the new package; 1 `Perf`
+`csr-neighbour-ordering-2145`; 3 `Finding`. Edges: `CONTAINS` for every symbol,
+`HAS_METHOD`, `Task -[IMPLEMENTED_IN]-> Commit`, `Commit -[TOUCHES]->` 4 packages and 3
+specs, `Commit -[IMPROVES]-> Cypher Engine`, `Benchmark -[MEASURES]->` `OrderRuns` /
+`lowerBoundDst` / `firstDstPos` / `WriteSnapshotFull`, `Benchmark -[VERIFIES]->` `Cypher
+Engine` and `Persistence Backends`, `Task -[FOUND]->` the `Perf` and the 3 `Finding`s,
+and `Task 2145 -[DEPENDS_ON]->` 2141-2144.
+
+**Introduces `MEASURES`** so "which benchmark measures this symbol" is answerable without
+conflating it with `VERIFIES`, which targets a `Feature`.
+
+**Three fidelity gaps left by earlier syncs were repaired, not papered over:**
+
+1. `Sprint 313` was claimed by commit `060367f9`'s message but **never materialised**. It
+   now exists, with `CONTAINS` to all 7 tasks and all 9 sprint commits.
+2. Tasks `2142` and `2143` existed as **property-less stubs** (created only as
+   `DEPENDS_ON` targets) and `2144` was **absent entirely**. All three are now filled from
+   `rmp` with status, type, commit and outcome. The absent endpoint is why
+   `MATCH … MERGE` for `2145 -[DEPENDS_ON]-> 2144` silently no-opped — **a missing endpoint
+   makes an edge MERGE a no-op, not an error**, which is how the gap stayed invisible.
+3. `OrderRuns`, `lowerBoundDst`, `firstDstPos` and `dstRun` had **null `pkg` and `file`**;
+   all four now carry them.
+
+The three `Finding` nodes carry knowledge that outlives the sprint:
+`bench-history-backtoback-drift` (MEDIUM — `scripts/bench-history.sh` compares
+back-to-back and manufactures spurious ±2–4% regressions on the microsecond curated set;
+an interleaved A/B is required for any claim hinging on a few percent, and ledger rows
+0026–0031 all share the weakness), `audit-2.4-avgout-definition` (§2.4's "avg out" is
+arcs/all-nodes, not arcs/arc-bearing-sources — a 1.62× difference on RMAT, invisible on
+the undirected Barabási–Albert rows), and `audit-2.4-leverage-table-confirmed` (§2.4's
+leverage table is confirmed reproducible to within 0.01 points; only its probe-cost column
+stays refuted).
+
+---
 
 ## Known limitations (faithful, by design)
 
