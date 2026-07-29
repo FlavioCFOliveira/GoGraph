@@ -1,0 +1,390 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_ldbc
+cpu: Apple M4
+BenchmarkIC1-10	   12249	     98793 ns/op	  113345 B/op	    2781 allocs/op
+BenchmarkIC1-10	   12100	     98515 ns/op	  113345 B/op	    2781 allocs/op
+BenchmarkIC2-10	   36420	     32987 ns/op	   32920 B/op	     970 allocs/op
+BenchmarkIC2-10	   36254	     33117 ns/op	   32920 B/op	     970 allocs/op
+BenchmarkIC3-10	   36870	     33052 ns/op	   32920 B/op	     970 allocs/op
+BenchmarkIC3-10	   36372	     33047 ns/op	   32920 B/op	     970 allocs/op
+BenchmarkIC4-10	   24274	     49646 ns/op	    7154 B/op	     311 allocs/op
+BenchmarkIC4-10	   24115	     49884 ns/op	    7154 B/op	     311 allocs/op
+BenchmarkIC5-10	  802605	      1567 ns/op	    2586 B/op	      33 allocs/op
+BenchmarkIC5-10	  771604	      1570 ns/op	    2597 B/op	      33 allocs/op
+BenchmarkIC6-10	  748146	      1563 ns/op	    3296 B/op	      47 allocs/op
+BenchmarkIC6-10	  783673	      1569 ns/op	    3296 B/op	      47 allocs/op
+BenchmarkIC7-10	   35276	     33765 ns/op	   32808 B/op	     962 allocs/op
+BenchmarkIC7-10	   35550	     33939 ns/op	   32808 B/op	     962 allocs/op
+BenchmarkIC8-10	  806534	      1549 ns/op	    2585 B/op	      33 allocs/op
+BenchmarkIC8-10	  753574	      1577 ns/op	    2604 B/op	      33 allocs/op
+BenchmarkIC9-10	   24098	     49678 ns/op	    7154 B/op	     311 allocs/op
+BenchmarkIC9-10	   24201	     50322 ns/op	    7154 B/op	     311 allocs/op
+BenchmarkIC10-10	   70400	     17134 ns/op	   57648 B/op	      84 allocs/op
+BenchmarkIC10-10	   68641	     17321 ns/op	   57648 B/op	      84 allocs/op
+BenchmarkIC11-10	    7851	    152739 ns/op	   34113 B/op	     792 allocs/op
+BenchmarkIC11-10	    7833	    153173 ns/op	   34112 B/op	     792 allocs/op
+BenchmarkIC12-10	  586887	      2259 ns/op	    3230 B/op	      42 allocs/op
+BenchmarkIC12-10	  565132	      2260 ns/op	    3250 B/op	      42 allocs/op
+BenchmarkIC13-10	  578296	      2014 ns/op	    3872 B/op	      56 allocs/op
+BenchmarkIC13-10	  605545	      2000 ns/op	    3872 B/op	      56 allocs/op
+BenchmarkIC14-10	   34759	     34375 ns/op	   32808 B/op	     962 allocs/op
+BenchmarkIC14-10	   34808	     34469 ns/op	   32808 B/op	     962 allocs/op
+BenchmarkWithProjection-10	   22017	     54203 ns/op	  134955 B/op	     124 allocs/op
+BenchmarkWithProjection-10	   22269	     54862 ns/op	  134955 B/op	     124 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/bench/cypher_ldbc	45.104s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_alloc
+cpu: Apple M4
+BenchmarkAllNodesScan-10    	  203857	      5819 ns/op	   12352 B/op	     514 allocs/op
+BenchmarkAllNodesScan-10    	  206094	      5863 ns/op	   12352 B/op	     514 allocs/op
+BenchmarkProjectOp-10       	  140286	      8483 ns/op	   12544 B/op	     517 allocs/op
+BenchmarkProjectOp-10       	  140772	      8529 ns/op	   12544 B/op	     517 allocs/op
+BenchmarkResultSet-10       	  126213	      9422 ns/op	   12648 B/op	     518 allocs/op
+BenchmarkResultSet-10       	  127753	      9542 ns/op	   12648 B/op	     518 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/bench/cypher_alloc	8.039s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search
+cpu: Apple M4
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      38	  30749010 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      38	  30124534 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_Large-10              	     144	   8414299 ns/op	 1129408 B/op	       4 allocs/op
+BenchmarkDijkstra_Large-10              	     142	   8561382 ns/op	 1129603 B/op	       4 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     142	   8268612 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     147	   8441738 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search	131.735s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/centrality	0.387s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/community	0.288s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/extern	0.268s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/flow	0.248s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search/centrality
+cpu: Apple M4
+BenchmarkBrandes_RandomGraph-10     	     147	   8144288 ns/op	   62208 B/op	      10 allocs/op
+BenchmarkBrandes_RandomGraph-10     	     146	   8089192 ns/op	   62208 B/op	      10 allocs/op
+BenchmarkPageRank_PowerLaw50K-10    	     151	   7926023 ns/op	 8286708 B/op	      68 allocs/op
+BenchmarkPageRank_PowerLaw50K-10    	     152	   7896987 ns/op	 8286842 B/op	      69 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/centrality	13.050s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_ldbc
+cpu: Apple M4
+BenchmarkIC1-10	   12204	     98685 ns/op	  113345 B/op	    2781 allocs/op
+BenchmarkIC1-10	   12031	     98783 ns/op	  113345 B/op	    2781 allocs/op
+BenchmarkIC2-10	   36021	     33123 ns/op	   32920 B/op	     970 allocs/op
+BenchmarkIC2-10	   35859	     32965 ns/op	   32920 B/op	     970 allocs/op
+BenchmarkIC3-10	   36210	     32979 ns/op	   32920 B/op	     970 allocs/op
+BenchmarkIC3-10	   36483	     33165 ns/op	   32920 B/op	     970 allocs/op
+BenchmarkIC4-10	   24001	     50377 ns/op	    7154 B/op	     311 allocs/op
+BenchmarkIC4-10	   24078	     49798 ns/op	    7154 B/op	     311 allocs/op
+BenchmarkIC5-10	  787244	      1537 ns/op	    2591 B/op	      33 allocs/op
+BenchmarkIC5-10	  798199	      1582 ns/op	    2588 B/op	      33 allocs/op
+BenchmarkIC6-10	  745653	      1553 ns/op	    3296 B/op	      47 allocs/op
+BenchmarkIC6-10	  761143	      1557 ns/op	    3296 B/op	      47 allocs/op
+BenchmarkIC7-10	   35662	     33687 ns/op	   32808 B/op	     962 allocs/op
+BenchmarkIC7-10	   35881	     33420 ns/op	   32808 B/op	     962 allocs/op
+BenchmarkIC8-10	  777512	      1539 ns/op	    2595 B/op	      33 allocs/op
+BenchmarkIC8-10	  784146	      1577 ns/op	    2592 B/op	      33 allocs/op
+BenchmarkIC9-10	   24177	     49377 ns/op	    7154 B/op	     311 allocs/op
+BenchmarkIC9-10	   23745	     50803 ns/op	    7154 B/op	     311 allocs/op
+BenchmarkIC10-10	   71114	     18015 ns/op	   57648 B/op	      84 allocs/op
+BenchmarkIC10-10	   67179	     17418 ns/op	   57648 B/op	      84 allocs/op
+BenchmarkIC11-10	    7938	    151584 ns/op	   34112 B/op	     792 allocs/op
+BenchmarkIC11-10	    7930	    152325 ns/op	   34112 B/op	     792 allocs/op
+BenchmarkIC12-10	  586299	      2259 ns/op	    3231 B/op	      42 allocs/op
+BenchmarkIC12-10	  559548	      2272 ns/op	    3255 B/op	      42 allocs/op
+BenchmarkIC13-10	  574567	      1979 ns/op	    3872 B/op	      56 allocs/op
+BenchmarkIC13-10	  595797	      2006 ns/op	    3872 B/op	      56 allocs/op
+BenchmarkIC14-10	   35164	     34278 ns/op	   32808 B/op	     962 allocs/op
+BenchmarkIC14-10	   35019	     34286 ns/op	   32808 B/op	     962 allocs/op
+BenchmarkWithProjection-10	   21118	     54812 ns/op	  134955 B/op	     124 allocs/op
+BenchmarkWithProjection-10	   21646	     56345 ns/op	  134954 B/op	     124 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/bench/cypher_ldbc	44.846s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_alloc
+cpu: Apple M4
+BenchmarkAllNodesScan-10    	  173734	      5811 ns/op	   12352 B/op	     514 allocs/op
+BenchmarkAllNodesScan-10    	  207286	      5850 ns/op	   12352 B/op	     514 allocs/op
+BenchmarkProjectOp-10       	  138472	      8510 ns/op	   12544 B/op	     517 allocs/op
+BenchmarkProjectOp-10       	  140697	      8542 ns/op	   12544 B/op	     517 allocs/op
+BenchmarkResultSet-10       	  125222	      9463 ns/op	   12648 B/op	     518 allocs/op
+BenchmarkResultSet-10       	  123564	      9563 ns/op	   12648 B/op	     518 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/bench/cypher_alloc	7.789s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search
+cpu: Apple M4
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      38	  30650056 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      36	  30270517 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_Large-10              	     145	   8499740 ns/op	 1129285 B/op	       4 allocs/op
+BenchmarkDijkstra_Large-10              	     138	   8217161 ns/op	 1130059 B/op	       4 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     141	   8266867 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     141	   8176445 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search	135.748s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/centrality	0.368s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/community	0.303s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/extern	0.279s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/flow	0.270s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search/centrality
+cpu: Apple M4
+BenchmarkBrandes_RandomGraph-10     	     147	   8177409 ns/op	   62208 B/op	      10 allocs/op
+BenchmarkBrandes_RandomGraph-10     	     147	   8094926 ns/op	   62208 B/op	      10 allocs/op
+BenchmarkPageRank_PowerLaw50K-10    	     150	   7977255 ns/op	 8287103 B/op	      70 allocs/op
+BenchmarkPageRank_PowerLaw50K-10    	     151	   8178386 ns/op	 8286734 B/op	      68 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/centrality	13.245s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_ldbc
+cpu: Apple M4
+BenchmarkIC1-10	   12339	     98231 ns/op	  113345 B/op	    2781 allocs/op
+BenchmarkIC1-10	   12050	    100040 ns/op	  113345 B/op	    2781 allocs/op
+BenchmarkIC2-10	   36452	     33381 ns/op	   32920 B/op	     970 allocs/op
+BenchmarkIC2-10	   35676	     33300 ns/op	   32920 B/op	     970 allocs/op
+BenchmarkIC3-10	   35973	     32954 ns/op	   32920 B/op	     970 allocs/op
+BenchmarkIC3-10	   36286	     33091 ns/op	   32920 B/op	     970 allocs/op
+BenchmarkIC4-10	   23991	     49664 ns/op	    7154 B/op	     311 allocs/op
+BenchmarkIC4-10	   23870	     50116 ns/op	    7154 B/op	     311 allocs/op
+BenchmarkIC5-10	  745611	      1589 ns/op	    2607 B/op	      33 allocs/op
+BenchmarkIC5-10	  773557	      1597 ns/op	    2596 B/op	      33 allocs/op
+BenchmarkIC6-10	  720489	      1600 ns/op	    3296 B/op	      47 allocs/op
+BenchmarkIC6-10	  756411	      1609 ns/op	    3296 B/op	      47 allocs/op
+BenchmarkIC7-10	   35121	     33792 ns/op	   32808 B/op	     962 allocs/op
+BenchmarkIC7-10	   35812	     33704 ns/op	   32808 B/op	     962 allocs/op
+BenchmarkIC8-10	  757798	      1583 ns/op	    2602 B/op	      33 allocs/op
+BenchmarkIC8-10	  778656	      1563 ns/op	    2594 B/op	      33 allocs/op
+BenchmarkIC9-10	   23961	     49665 ns/op	    7154 B/op	     311 allocs/op
+BenchmarkIC9-10	   23998	     49959 ns/op	    7154 B/op	     311 allocs/op
+BenchmarkIC10-10	   68754	     17229 ns/op	   57648 B/op	      84 allocs/op
+BenchmarkIC10-10	   69642	     17346 ns/op	   57649 B/op	      84 allocs/op
+BenchmarkIC11-10	    7915	    152621 ns/op	   34113 B/op	     792 allocs/op
+BenchmarkIC11-10	    7671	    151548 ns/op	   34113 B/op	     792 allocs/op
+BenchmarkIC12-10	  569478	      2347 ns/op	    3246 B/op	      42 allocs/op
+BenchmarkIC12-10	  584548	      2322 ns/op	    3232 B/op	      42 allocs/op
+BenchmarkIC13-10	  589028	      2039 ns/op	    3872 B/op	      56 allocs/op
+BenchmarkIC13-10	  608420	      2043 ns/op	    3872 B/op	      56 allocs/op
+BenchmarkIC14-10	   35245	     34123 ns/op	   32808 B/op	     962 allocs/op
+BenchmarkIC14-10	   34393	     34455 ns/op	   32808 B/op	     962 allocs/op
+BenchmarkWithProjection-10	   21777	     54759 ns/op	  134955 B/op	     124 allocs/op
+BenchmarkWithProjection-10	   21795	     55923 ns/op	  134954 B/op	     124 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/bench/cypher_ldbc	45.009s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_alloc
+cpu: Apple M4
+BenchmarkAllNodesScan-10    	  206787	      5791 ns/op	   12352 B/op	     514 allocs/op
+BenchmarkAllNodesScan-10    	  207012	      5906 ns/op	   12352 B/op	     514 allocs/op
+BenchmarkProjectOp-10       	  139340	      8500 ns/op	   12544 B/op	     517 allocs/op
+BenchmarkProjectOp-10       	  135945	      8676 ns/op	   12544 B/op	     517 allocs/op
+BenchmarkResultSet-10       	  125697	      9570 ns/op	   12648 B/op	     518 allocs/op
+BenchmarkResultSet-10       	  127174	      9661 ns/op	   12648 B/op	     518 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/bench/cypher_alloc	9.044s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search
+cpu: Apple M4
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      38	  31197536 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      37	  29988416 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_Large-10              	     139	   8616198 ns/op	 1129945 B/op	       4 allocs/op
+BenchmarkDijkstra_Large-10              	     144	   8764865 ns/op	 1129378 B/op	       4 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     144	   8515777 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     142	   8516818 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search	137.949s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/centrality	0.395s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/community	0.299s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/extern	0.280s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/flow	0.256s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search/centrality
+cpu: Apple M4
+BenchmarkBrandes_RandomGraph-10     	     147	   8160344 ns/op	   62208 B/op	      10 allocs/op
+BenchmarkBrandes_RandomGraph-10     	     147	   8105475 ns/op	   62208 B/op	      10 allocs/op
+BenchmarkPageRank_PowerLaw50K-10    	     151	   7916556 ns/op	 8287114 B/op	      70 allocs/op
+BenchmarkPageRank_PowerLaw50K-10    	     150	   8019036 ns/op	 8286721 B/op	      68 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/centrality	13.187s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_ldbc
+cpu: Apple M4
+BenchmarkIC1-10	   12211	    100414 ns/op	  113345 B/op	    2781 allocs/op
+BenchmarkIC1-10	   12138	    100486 ns/op	  113345 B/op	    2781 allocs/op
+BenchmarkIC2-10	   35529	     33406 ns/op	   32920 B/op	     970 allocs/op
+BenchmarkIC2-10	   35980	     34065 ns/op	   32920 B/op	     970 allocs/op
+BenchmarkIC3-10	   35790	     33875 ns/op	   32920 B/op	     970 allocs/op
+BenchmarkIC3-10	   35050	     33578 ns/op	   32920 B/op	     970 allocs/op
+BenchmarkIC4-10	   24049	     50441 ns/op	    7154 B/op	     311 allocs/op
+BenchmarkIC4-10	   24222	     50099 ns/op	    7154 B/op	     311 allocs/op
+BenchmarkIC5-10	  757585	      1558 ns/op	    2602 B/op	      33 allocs/op
+BenchmarkIC5-10	  708670	      1573 ns/op	    2621 B/op	      33 allocs/op
+BenchmarkIC6-10	  719968	      1585 ns/op	    3296 B/op	      47 allocs/op
+BenchmarkIC6-10	  734865	      1628 ns/op	    3296 B/op	      47 allocs/op
+BenchmarkIC7-10	   35044	     33841 ns/op	   32808 B/op	     962 allocs/op
+BenchmarkIC7-10	   35182	     34292 ns/op	   32808 B/op	     962 allocs/op
+BenchmarkIC8-10	  795182	      1574 ns/op	    2589 B/op	      33 allocs/op
+BenchmarkIC8-10	  757465	      1598 ns/op	    2602 B/op	      33 allocs/op
+BenchmarkIC9-10	   23710	     50071 ns/op	    7154 B/op	     311 allocs/op
+BenchmarkIC9-10	   23911	     50340 ns/op	    7154 B/op	     311 allocs/op
+BenchmarkIC10-10	   71365	     17547 ns/op	   57649 B/op	      84 allocs/op
+BenchmarkIC10-10	   68050	     17627 ns/op	   57648 B/op	      84 allocs/op
+BenchmarkIC11-10	    7893	    152885 ns/op	   34112 B/op	     792 allocs/op
+BenchmarkIC11-10	    7741	    153115 ns/op	   34112 B/op	     792 allocs/op
+BenchmarkIC12-10	  589141	      2298 ns/op	    3228 B/op	      42 allocs/op
+BenchmarkIC12-10	  560551	      2354 ns/op	    3254 B/op	      42 allocs/op
+BenchmarkIC13-10	  598880	      1993 ns/op	    3872 B/op	      56 allocs/op
+BenchmarkIC13-10	  588543	      1989 ns/op	    3872 B/op	      56 allocs/op
+BenchmarkIC14-10	   34705	     34600 ns/op	   32808 B/op	     962 allocs/op
+BenchmarkIC14-10	   34328	     34467 ns/op	   32808 B/op	     962 allocs/op
+BenchmarkWithProjection-10	   21537	     57922 ns/op	  134955 B/op	     124 allocs/op
+BenchmarkWithProjection-10	   21414	     55334 ns/op	  134955 B/op	     124 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/bench/cypher_ldbc	45.072s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_alloc
+cpu: Apple M4
+BenchmarkAllNodesScan-10    	  177943	      5799 ns/op	   12352 B/op	     514 allocs/op
+BenchmarkAllNodesScan-10    	  210816	      5704 ns/op	   12352 B/op	     514 allocs/op
+BenchmarkProjectOp-10       	  139110	      8415 ns/op	   12544 B/op	     517 allocs/op
+BenchmarkProjectOp-10       	  143140	      8499 ns/op	   12544 B/op	     517 allocs/op
+BenchmarkResultSet-10       	  125115	      9409 ns/op	   12648 B/op	     518 allocs/op
+BenchmarkResultSet-10       	  127410	      9463 ns/op	   12648 B/op	     518 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/bench/cypher_alloc	7.831s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search
+cpu: Apple M4
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      38	  30777080 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      37	  31281162 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_Large-10              	     142	   8501638 ns/op	 1129612 B/op	       4 allocs/op
+BenchmarkDijkstra_Large-10              	     135	   8443884 ns/op	 1130401 B/op	       4 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     135	   8837970 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     141	   8402376 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search	137.038s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/centrality	0.366s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/community	0.298s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/extern	0.275s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/flow	0.248s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search/centrality
+cpu: Apple M4
+BenchmarkBrandes_RandomGraph-10     	     146	   8075672 ns/op	   62208 B/op	      10 allocs/op
+BenchmarkBrandes_RandomGraph-10     	     147	   8119282 ns/op	   62208 B/op	      10 allocs/op
+BenchmarkPageRank_PowerLaw50K-10    	     148	   7891549 ns/op	 8286954 B/op	      69 allocs/op
+BenchmarkPageRank_PowerLaw50K-10    	     151	   8073828 ns/op	 8286748 B/op	      68 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/centrality	13.187s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_ldbc
+cpu: Apple M4
+BenchmarkIC1-10	   12115	     99048 ns/op	  113345 B/op	    2781 allocs/op
+BenchmarkIC1-10	   12124	     98504 ns/op	  113345 B/op	    2781 allocs/op
+BenchmarkIC2-10	   36378	     33592 ns/op	   32920 B/op	     970 allocs/op
+BenchmarkIC2-10	   34748	     33725 ns/op	   32920 B/op	     970 allocs/op
+BenchmarkIC3-10	   36046	     33442 ns/op	   32920 B/op	     970 allocs/op
+BenchmarkIC3-10	   35988	     33401 ns/op	   32920 B/op	     970 allocs/op
+BenchmarkIC4-10	   24201	     49160 ns/op	    7153 B/op	     311 allocs/op
+BenchmarkIC4-10	   24025	     49758 ns/op	    7153 B/op	     311 allocs/op
+BenchmarkIC5-10	  791215	      1582 ns/op	    2590 B/op	      33 allocs/op
+BenchmarkIC5-10	  776306	      1573 ns/op	    2595 B/op	      33 allocs/op
+BenchmarkIC6-10	  747796	      1553 ns/op	    3296 B/op	      47 allocs/op
+BenchmarkIC6-10	  760514	      1554 ns/op	    3296 B/op	      47 allocs/op
+BenchmarkIC7-10	   35086	     34157 ns/op	   32808 B/op	     962 allocs/op
+BenchmarkIC7-10	   35857	     33690 ns/op	   32808 B/op	     962 allocs/op
+BenchmarkIC8-10	  764769	      1581 ns/op	    2599 B/op	      33 allocs/op
+BenchmarkIC8-10	  714788	      1626 ns/op	    2619 B/op	      33 allocs/op
+BenchmarkIC9-10	   24175	     49763 ns/op	    7154 B/op	     311 allocs/op
+BenchmarkIC9-10	   24218	     49640 ns/op	    7154 B/op	     311 allocs/op
+BenchmarkIC10-10	   66343	     17606 ns/op	   57649 B/op	      84 allocs/op
+BenchmarkIC10-10	   67918	     17929 ns/op	   57649 B/op	      84 allocs/op
+BenchmarkIC11-10	    7915	    151101 ns/op	   34112 B/op	     792 allocs/op
+BenchmarkIC11-10	    7999	    151001 ns/op	   34113 B/op	     792 allocs/op
+BenchmarkIC12-10	  573814	      2265 ns/op	    3242 B/op	      42 allocs/op
+BenchmarkIC12-10	  589160	      2274 ns/op	    3228 B/op	      42 allocs/op
+BenchmarkIC13-10	  558534	      2059 ns/op	    3872 B/op	      56 allocs/op
+BenchmarkIC13-10	  578935	      2033 ns/op	    3872 B/op	      56 allocs/op
+BenchmarkIC14-10	   34725	     34153 ns/op	   32808 B/op	     962 allocs/op
+BenchmarkIC14-10	   34402	     34493 ns/op	   32808 B/op	     962 allocs/op
+BenchmarkWithProjection-10	   21142	     55499 ns/op	  134955 B/op	     124 allocs/op
+BenchmarkWithProjection-10	   21346	     55390 ns/op	  134955 B/op	     124 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/bench/cypher_ldbc	44.724s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cypher_alloc
+cpu: Apple M4
+BenchmarkAllNodesScan-10    	  182182	      5750 ns/op	   12352 B/op	     514 allocs/op
+BenchmarkAllNodesScan-10    	  207396	      5763 ns/op	   12352 B/op	     514 allocs/op
+BenchmarkProjectOp-10       	  141786	      8574 ns/op	   12544 B/op	     517 allocs/op
+BenchmarkProjectOp-10       	  140030	      8587 ns/op	   12544 B/op	     517 allocs/op
+BenchmarkResultSet-10       	  126561	      9733 ns/op	   12648 B/op	     518 allocs/op
+BenchmarkResultSet-10       	  125559	      9471 ns/op	   12648 B/op	     518 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/bench/cypher_alloc	7.908s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search
+cpu: Apple M4
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      38	  30616827 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      38	  30618850 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_Large-10              	     144	   8676500 ns/op	 1129408 B/op	       4 allocs/op
+BenchmarkDijkstra_Large-10              	     144	   8751034 ns/op	 1129388 B/op	       4 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     128	   8473848 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     142	   8512131 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search	137.516s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/centrality	0.366s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/community	0.397s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/extern	0.289s
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/flow	0.251s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search/centrality
+cpu: Apple M4
+BenchmarkBrandes_RandomGraph-10     	     146	   8134861 ns/op	   62208 B/op	      10 allocs/op
+BenchmarkBrandes_RandomGraph-10     	     147	   8127610 ns/op	   62208 B/op	      10 allocs/op
+BenchmarkPageRank_PowerLaw50K-10    	     151	   8074968 ns/op	 8286917 B/op	      69 allocs/op
+BenchmarkPageRank_PowerLaw50K-10    	     148	   7902493 ns/op	 8286806 B/op	      69 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/search/centrality	13.105s

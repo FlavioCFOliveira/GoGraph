@@ -1,0 +1,90 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/csrorder
+cpu: Apple M4
+BenchmarkSnapshotWrite/degree=8-10         	      10	 110326583 ns/op	114807312 B/op	  655657 allocs/op
+BenchmarkSnapshotWrite/degree=8-10         	      10	 110528588 ns/op	114807316 B/op	  655657 allocs/op
+BenchmarkSnapshotWrite/degree=16-10        	      12	  98313413 ns/op	106942685 B/op	  622881 allocs/op
+BenchmarkSnapshotWrite/degree=16-10        	      12	  99518202 ns/op	106942893 B/op	  622883 allocs/op
+BenchmarkSnapshotWrite/degree=32-10        	      10	 102007475 ns/op	100998200 B/op	  606502 allocs/op
+BenchmarkSnapshotWrite/degree=32-10        	      10	 102606104 ns/op	100998846 B/op	  606504 allocs/op
+BenchmarkSnapshotWrite/degree=64-10        	       9	 112029134 ns/op	99242363 B/op	  598313 allocs/op
+BenchmarkSnapshotWrite/degree=64-10        	       9	 113827315 ns/op	99242391 B/op	  598314 allocs/op
+BenchmarkSnapshotWrite/degree=512-10       	       6	 194779695 ns/op	96274729 B/op	  591159 allocs/op
+BenchmarkSnapshotWrite/degree=512-10       	       6	 192005632 ns/op	96274726 B/op	  591159 allocs/op
+BenchmarkSnapshotWrite/degree=4096-10      	       2	 707604354 ns/op	97009860 B/op	  590342 allocs/op
+BenchmarkSnapshotWrite/degree=4096-10      	       2	 701034813 ns/op	97009316 B/op	  590337 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/bench/csrorder	23.108s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/csrorder
+cpu: Apple M4
+BenchmarkSnapshotWrite/degree=8-10         	       9	 112090426 ns/op	114807556 B/op	  655659 allocs/op
+BenchmarkSnapshotWrite/degree=8-10         	       9	 112083903 ns/op	114807350 B/op	  655658 allocs/op
+BenchmarkSnapshotWrite/degree=16-10        	      12	  98578521 ns/op	106942917 B/op	  622883 allocs/op
+BenchmarkSnapshotWrite/degree=16-10        	      12	  99069410 ns/op	106943322 B/op	  622886 allocs/op
+BenchmarkSnapshotWrite/degree=32-10        	      10	 103801854 ns/op	100998192 B/op	  606502 allocs/op
+BenchmarkSnapshotWrite/degree=32-10        	      10	 101766146 ns/op	100998443 B/op	  606502 allocs/op
+BenchmarkSnapshotWrite/degree=64-10        	       9	 112457236 ns/op	99242667 B/op	  598314 allocs/op
+BenchmarkSnapshotWrite/degree=64-10        	       9	 113024014 ns/op	99242389 B/op	  598313 allocs/op
+BenchmarkSnapshotWrite/degree=512-10       	       6	 194792375 ns/op	96275386 B/op	  591162 allocs/op
+BenchmarkSnapshotWrite/degree=512-10       	       6	 194493660 ns/op	96274332 B/op	  591156 allocs/op
+BenchmarkSnapshotWrite/degree=4096-10      	       2	 705402500 ns/op	97009852 B/op	  590342 allocs/op
+BenchmarkSnapshotWrite/degree=4096-10      	       2	 708132063 ns/op	97009916 B/op	  590342 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/bench/csrorder	20.864s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/csrorder
+cpu: Apple M4
+BenchmarkSnapshotWrite/degree=8-10         	       9	 111185560 ns/op	114807428 B/op	  655658 allocs/op
+BenchmarkSnapshotWrite/degree=8-10         	       9	 112934236 ns/op	114807556 B/op	  655659 allocs/op
+BenchmarkSnapshotWrite/degree=16-10        	      10	 100073033 ns/op	106943273 B/op	  622886 allocs/op
+BenchmarkSnapshotWrite/degree=16-10        	      12	  98644705 ns/op	106943321 B/op	  622886 allocs/op
+BenchmarkSnapshotWrite/degree=32-10        	      10	 101002192 ns/op	100998357 B/op	  606501 allocs/op
+BenchmarkSnapshotWrite/degree=32-10        	      10	 102921854 ns/op	100998354 B/op	  606501 allocs/op
+BenchmarkSnapshotWrite/degree=64-10        	       9	 113020310 ns/op	99242968 B/op	  598316 allocs/op
+BenchmarkSnapshotWrite/degree=64-10        	       9	 111749477 ns/op	99242520 B/op	  598314 allocs/op
+BenchmarkSnapshotWrite/degree=512-10       	       6	 196150271 ns/op	96275202 B/op	  591160 allocs/op
+BenchmarkSnapshotWrite/degree=512-10       	       6	 197068146 ns/op	96274529 B/op	  591157 allocs/op
+BenchmarkSnapshotWrite/degree=4096-10      	       2	 705333188 ns/op	97009916 B/op	  590342 allocs/op
+BenchmarkSnapshotWrite/degree=4096-10      	       2	 705760562 ns/op	97009316 B/op	  590337 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/bench/csrorder	19.699s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/csrorder
+cpu: Apple M4
+BenchmarkSnapshotWrite/degree=8-10         	       9	 112759505 ns/op	114807295 B/op	  655657 allocs/op
+BenchmarkSnapshotWrite/degree=8-10         	       9	 112531695 ns/op	114807549 B/op	  655659 allocs/op
+BenchmarkSnapshotWrite/degree=16-10        	      12	  98131614 ns/op	106943226 B/op	  622885 allocs/op
+BenchmarkSnapshotWrite/degree=16-10        	      12	  99969813 ns/op	106943382 B/op	  622887 allocs/op
+BenchmarkSnapshotWrite/degree=32-10        	      10	 101605538 ns/op	100997778 B/op	  606500 allocs/op
+BenchmarkSnapshotWrite/degree=32-10        	      10	 101390742 ns/op	100998236 B/op	  606500 allocs/op
+BenchmarkSnapshotWrite/degree=64-10        	       9	 113559255 ns/op	99242295 B/op	  598313 allocs/op
+BenchmarkSnapshotWrite/degree=64-10        	       9	 113577560 ns/op	99242832 B/op	  598315 allocs/op
+BenchmarkSnapshotWrite/degree=512-10       	       6	 198244264 ns/op	96274513 B/op	  591157 allocs/op
+BenchmarkSnapshotWrite/degree=512-10       	       6	 197316264 ns/op	96274510 B/op	  591157 allocs/op
+BenchmarkSnapshotWrite/degree=4096-10      	       2	 704514978 ns/op	97009916 B/op	  590342 allocs/op
+BenchmarkSnapshotWrite/degree=4096-10      	       2	 711252042 ns/op	97009276 B/op	  590337 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/bench/csrorder	23.501s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/csrorder
+cpu: Apple M4
+BenchmarkSnapshotWrite/degree=8-10         	       9	 113532750 ns/op	114807560 B/op	  655659 allocs/op
+BenchmarkSnapshotWrite/degree=8-10         	       9	 111215819 ns/op	114807565 B/op	  655659 allocs/op
+BenchmarkSnapshotWrite/degree=16-10        	      12	  99318021 ns/op	106943316 B/op	  622886 allocs/op
+BenchmarkSnapshotWrite/degree=16-10        	      12	  99240063 ns/op	106943324 B/op	  622886 allocs/op
+BenchmarkSnapshotWrite/degree=32-10        	      10	 102121279 ns/op	100998190 B/op	  606502 allocs/op
+BenchmarkSnapshotWrite/degree=32-10        	      10	 102794825 ns/op	100998474 B/op	  606502 allocs/op
+BenchmarkSnapshotWrite/degree=64-10        	       9	 114232102 ns/op	99241936 B/op	  598312 allocs/op
+BenchmarkSnapshotWrite/degree=64-10        	       9	 112614514 ns/op	99242335 B/op	  598315 allocs/op
+BenchmarkSnapshotWrite/degree=512-10       	       6	 196685375 ns/op	96275202 B/op	  591160 allocs/op
+BenchmarkSnapshotWrite/degree=512-10       	       6	 199853799 ns/op	96274529 B/op	  591157 allocs/op
+BenchmarkSnapshotWrite/degree=4096-10      	       2	 712525354 ns/op	97009916 B/op	  590342 allocs/op
+BenchmarkSnapshotWrite/degree=4096-10      	       2	 712164563 ns/op	97009876 B/op	  590342 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/bench/csrorder	21.859s
