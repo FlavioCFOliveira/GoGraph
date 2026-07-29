@@ -318,6 +318,10 @@ func TestCSRPairCache_DirectGraphMutationInvalidates(t *testing.T) {
 		}, 4},
 		{"AddEdgeHIfAbsent/absent", func() { _, _ = g.AddEdgeHIfAbsent("a", "g", 1, 9001) }, 5},
 		{"RemoveEdgeByHandle", func() { g.RemoveEdgeByHandle("a", "g", 9001) }, 4},
+		// handle 0 takes AddEdgeHIfAbsent's OTHER branch — the pre-Stage-2 WAL
+		// replay fallback, which delegates to the plain AddEdge. Each branch bumps
+		// separately, so covering only a non-zero handle would leave one unguarded.
+		{"AddEdgeHIfAbsent/handle0", func() { _, _ = g.AddEdgeHIfAbsent("a", "h", 1, 0) }, 5},
 		{"RemoveAllEdgesFrom", func() { g.RemoveAllEdgesFrom("a") }, 0},
 	} {
 		before := g.TopoGeneration()
