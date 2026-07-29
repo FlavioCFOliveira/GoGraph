@@ -138,6 +138,26 @@ measures the actual `Expand DirIn` cost empirically. Outcomes:
 
 ### 5.1 Measurement verdict (#2089a) — OUT-only swap
 
+> **⚠️ SUPERSEDED — 2026-07-29 (rmp #2150, measured under #2152).** The **policy**
+> of this section no longer holds: the anchor swap is **symmetric**, and a
+> reverse-introducing swap is now admitted. What is superseded is the *conclusion*,
+> not the measurements — findings 1 and 2 below were correct when taken, and finding
+> 1 (the reverse-CSR build cancels) still stands unchanged.
+>
+> Finding 2's per-in-edge table describes the **pre-#2142** code, where recovering a
+> canonical edge id SCANNED the source's whole forward out-range. Since #2142 both
+> lookups are binary searches, so the per-in-edge overhead is
+> `Θ(log(out-degree))`, not `Θ(out-degree)` — and that is a change in KIND, which is
+> what made finding 3 obsolete. An unmodelled `Θ(out-degree)` term is unbounded
+> relative to the edge cost, so no constant margin can absorb it; a
+> `Θ(log out-degree)` term is bounded by 64 levels and the margin can.
+>
+> Do not carry finding 2's figures forward as current. The recalibrated constants,
+> the revised cost model and the no-regression argument are in **§5.2**;
+> `cypher/anchor_swap_plan.go` is the implementation of record.
+
+### 5.1.1 The original findings
+
 Measured on Apple M4 (go1.26.5) via `cypher/exec/expand_reverse_cost_bench_test.go`
 (`go test -run=^$ -bench='BenchmarkExpand|BenchmarkBuildReverse' -benchmem
 ./cypher/exec/`). Three findings decide the policy:
@@ -191,6 +211,96 @@ forward-written `(a:A)-[:R]->(b:B)` whose cheaper anchor is `b` is therefore lef
 in written order (a missed optimization, never a regression); the beneficial,
 shippable case is a written `DirIn` pattern (`(a:A)<-[:R]-(b:B)`) re-rooted onto
 `b` as a `DirOut` expand.
+
+### 5.2 Symmetric swap (#2150, measured under #2152)
+
+The restriction above is **lifted**. The swap now fires in both directions;
+undirected (`DirBoth`) patterns remain vetoed, because their mirror is also
+`DirBoth` — the swap would move the anchor without changing the traversal — and
+`D(label, relType, BOTH)` is not a modelled cell.
+
+**What the missed optimisation was costing.** §5.1's own example — a
+forward-written `(a:A)-[:R]->(b:B)` whose cheaper anchor is `b` — was not a small
+loss. On a fixture where the hub's out-degree is 1601 and the whole `:Leaf` label
+has one incoming edge, re-rooting is **12.4× faster; 331.8× at hub out-degree
+40 000 and 2 303.7× at 200 000**. The swapped plan's cost is flat in the hub's
+degree because it stops walking the hub at all, so the forfeited win grew without
+bound.
+
+**Recalibrated constants.** #2089a's `β_out ≈ 19 ns` was not carried forward: it
+predates #2142 and measured the edge walk alone. The fixture is 4 000 `:A` and
+4 000 `:B` nodes with `a_i → b_{(i+j) mod n}` for `j < d`, so out-degree(a) =
+in-degree(b) = d and **both** directions scan n nodes and walk n·d edges — the only
+difference is the reverse path.
+
+| out-degree d | ns/edge OUT | ns/edge IN | ratio |
+|---|---|---|---|
+| 4 | 300.16 | 309.96 | 1.03 |
+| 16 | 291.37 | 321.58 | 1.10 |
+| 64 | 326.11 | 364.72 | 1.12 |
+| 256 | 374.44 | 417.77 | 1.12 |
+| 1 024 | 398.68 | 459.50 | 1.15 |
+
+Fitting the **difference** of the two arms against `log₂(d)` — the difference,
+because per-edge cost grows with d from cache pressure in *both* arms and that
+growth would otherwise be charged to the probe — gives
+
+```
+in-edge penalty = 2.01 ns + 5.76 ns · log₂(d)
+```
+
+against a marginal out-edge of ≈400 ns. So the reverse overhead is 3% at degree 4
+rising to only 15% at degree 1 024. Scaled against `c_e`, that is
+`anchorSwapProbeCost = 12` per level of probe depth plus a base of 4, with the
+constants rescaled `1 : 8 → 100 : 800` so the probe term stays a legible integer.
+Rescaling both terms identically leaves every OUT-ward decision unchanged.
+
+**The revised cost model.** The written OUT side keeps `c_s·N + c_e·D`. The IN-ward
+candidate carries the probe term, charged **twice per in-edge** because a DirIn
+traversal probes the source's forward range in `reverseEdgePassesFilter` and again
+in `lookupFwdEdgePos[ByHandle]` — and a matched site always carries exactly one
+relationship type, so the filter is always present and the factor 2 is never
+avoidable:
+
+```
+cost_in = c_s·N(to) + ( c_e + probeBase + probeCost·⌈log₂(1 + D(from,R,OUT)) ⌉ ) · D(to,R,IN)
+```
+
+**Why no regression, given the model cannot be exact.** The depth term is an
+*estimate*, not a bound, and deliberately so: `D` is an aggregate blind to degree
+skew, **and** the mirror walks in-edges whose sources may carry any label (the
+from-label Selection filters afterwards), so no from-label statistic bounds the
+probed range. The guarantee instead rests on a **structural** bound — a probe depth
+is at most 64 levels, so the per-in-edge penalty is at most `12·64 + 4 = 772 < 800`,
+one modelled edge. A true in-edge therefore costs under *twice* a modelled
+out-edge for any graph, and
+
+```
+true(candidate) ≤ 2·modelled(candidate, no probe term) ≤ modelled(written) = true(written)
+```
+
+because the gate admits only on a 2× modelled win and the written OUT side carries
+no probe term, so its model is exact. That inequality is enforced by a declaration
+in `anchor_swap_plan.go` that **fails to compile** if it stops holding, rather than
+by a test that could be skipped; it was verified to bite by deliberately violating
+it.
+
+**Two extra gate conditions.** The IN-ward direction consumes `D(from,R,OUT)`
+twice — as the written cost *and* as the probe depth — so the trustworthiness veto
+covers it: without an exact, non-dirty from-side out-degree the candidate is not
+costable at all. Note the dirty families are not symmetric (`countRelabel`): a
+relabel **always** dirties `D(label,*,IN)`, because in-edges are not enumerable in
+O(Δ) without a reverse index, but dirties `D(label,*,OUT)` only when the relabelled
+node's out-degree exceeds the recount budget.
+
+**One interaction to know about.** Admitting IN-ward swaps exposes
+`(a:A)-[:K]->(m:B)` — the *common* written single-edge form — and re-rooting it
+breaks the columnar chain, which the count-based model cannot see. Measured at
+200 000 nodes on the columnar-eligible queries, swapping still wins by 1.31×–3.12×,
+so the model's choice is right; but the model remains blind to execution mode, and
+a future change to either side should know it.
+
+Full measurements: [benchmarks/expand-into-symmetric-swap-2026-07-29.md](benchmarks/expand-into-symmetric-swap-2026-07-29.md).
 
 ## 6. Expand reversal invariants (#2089)
 
