@@ -81,6 +81,26 @@ func TestResult_Close_IsIdempotent(t *testing.T) {
 // work and assert delta==0.
 func TestResult_Close_DisarmsFinalizer(t *testing.T) {
 	eng := newTinyEngine(t)
+
+	// Settle the finalizers owed by Results that EARLIER tests in this binary
+	// abandoned, BEFORE the probe is installed, so their increments land on the
+	// outgoing backend instead of this test's counter.
+	//
+	// Not defensive padding — a measured defect. Those Results are already
+	// unreachable but their finalizers have not necessarily run, so the two
+	// forced GCs further down would collect them INSIDE the measurement window
+	// and charge their increments to this test. Observed on a full-suite `make
+	// smoke` run as "leak counter delta = 13 after explicit Close" while the
+	// test passed in isolation and on three consecutive runs of this package
+	// alone — a latent flake, not a regression in Close.
+	//
+	// The test's own note below is right that a *parallel* sibling cannot
+	// interfere (Go defers parallel tests until the sequential ones finish), but
+	// that was never the contamination source; completed earlier tests were.
+	runtime.GC()
+	runtime.GC()
+	time.Sleep(20 * time.Millisecond)
+
 	p := &leakProbe{}
 	cmetrics.SetBackend(p)
 	t.Cleanup(func() { cmetrics.SetBackend(nil) })
