@@ -185,8 +185,40 @@ degree 64 it costs 41.7 seconds and 12.8 GB of allocation on a graph of only
 
 ### 2.4 The enabling constraint: adjacency is not destination-sorted
 
+> **⚠️ SUPERSEDED — 2026-07-29 (rmp #2139, delivered #2141/#2142/#2143,
+> measured #2145).** The probe-cost table in this section is **refuted**. Its
+> linear-scan column is roughly 6.5× too fast and, at degree 4096, describes a
+> rate no Go scan can physically reach. The crossover is **≈16, not ≈64**, and
+> the win at degree 4096 is **6.0× (hit) / 10.9× (miss), not 30.9×**.
+>
+> The corrected calibration is
+> [`design-degree-adaptive-adjacency.md` §2.2](design-degree-adaptive-adjacency.md);
+> the end-to-end result is
+> [`benchmarks/csr-neighbour-ordering-2026-07-29.md`](benchmarks/csr-neighbour-ordering-2026-07-29.md).
+> **Do not carry the figures below forward as current.**
+>
+> This section's *recommendation* is also superseded. It proposed a
+> degree-adaptive adjacency; what shipped is an **unconditional** ordering of the
+> CSR snapshot, with the adjacency left unordered on three structural grounds
+> (`graph/csr/order.go`, and the `adjEntry` comment in `graph/adjlist/adjlist.go`
+> — cited below by symbol rather than by line, because that comment has since been
+> rewritten and the line number in this section no longer points at it).
+>
+> The *leverage* analysis of §2.4 in the design document — the `Σd²` costFrac
+> table — is a **different** table and is **confirmed**: it now reproduces to
+> within 0.01 percentage points under
+> `TestDistribution_Reproduces24Table` (soak layer). Only the probe-cost column
+> here is refuted.
+>
+> **Why this was not caught earlier, and the lesson.** The harness behind the
+> table below was retained outside the repository and so **cannot be re-run**. A
+> load-bearing measurement that cannot be reproduced is not evidence. The
+> replacement measurements are committed as permanent benchmarks in
+> [`bench/csrorder/`](../bench/csrorder) precisely so this cannot recur.
+
 Sections 2.3 and the shipped OUT-only restriction on the anchor-swap peephole
-have one common root, documented at `graph/adjlist/adjlist.go:241`:
+have one common root, documented on `adjEntry` in `graph/adjlist/adjlist.go`
+(at line 241 when this audit was written):
 
 > Adjacency is kept unsorted; HasEdge does a linear scan. For the typical low
 > average degree of property graphs (4-16) the branch-prediction-friendly
@@ -201,31 +233,55 @@ on the **write** path too.
 The documented rationale was tested rather than assumed, over a realistic
 neighbour range, worst-case target slot:
 
-| Out-degree | Linear probe | Binary probe | Winner |
-|---|---|---|---|
-| 8 | **0.659 ns** | 1.865 ns | linear, **2.8×** |
-| 64 | 2.99 ns | 2.98 ns | parity — crossover |
-| 512 | 20.5 ns | **4.11 ns** | binary, **5.0×** |
-| 4096 | 164 ns | **5.31 ns** | binary, **30.9×** |
+**⚠️ REFUTED — every figure in this table is superseded. Retained only as the
+record of what was claimed.**
 
-**The comment is correct, and it is also incomplete.** Linear scanning genuinely
-wins by 2.8× at the stated degree of 4–16, so sorting all adjacency would be a
-regression on the majority of vertices. But the crossover is at degree ≈64, and
-beyond it binary search wins by up to 31×. Property graphs are power-law: the
-few hub vertices past the crossover are exactly where traversal cost
-concentrates — the same reason the P3 design analysis concluded that average
-degree is the wrong statistic under skew.
+| Out-degree | Linear probe | Binary probe | Winner | Corrected (§2.2 of the design doc) |
+|---|---|---|---|---|
+| 8 | ~~0.659 ns~~ | ~~1.865 ns~~ | ~~linear, 2.8×~~ | 6.59 / 11.36 ns → linear 1.7× |
+| 64 | ~~2.99 ns~~ | ~~2.98 ns~~ | ~~parity — crossover~~ | 86.52 / 42.47 ns → **binary 2.04×**; parity is at **degree 16** |
+| 512 | ~~20.5 ns~~ | ~~4.11 ns~~ | ~~binary, 5.0×~~ | 225.99 / 87.83 ns → binary 2.57× |
+| 4096 | ~~164 ns~~ | ~~5.31 ns~~ | ~~binary, 30.9×~~ | 797.27 / 132.07 ns → binary **6.04×** |
 
-So the correct design is **not** "sort the adjacency". It is a **degree-adaptive
-representation**: keep the unsorted linear scan below the measured crossover,
-and maintain a sorted (or hashed) neighbour set only for vertices above it.
-That preserves the documented low-degree win while unlocking, in one change:
+The table was refuted three independent ways: directly (a linear scan measures
+0.268–0.348 ns/element, not the 0.040 implied by 164 ns at degree 4096); by a
+floor argument (a branch-free unrolled accumulate measures 0.164 ns/element, so
+the claim is 4.1× faster than the fastest a Go scan can run); and by its own
+internal inconsistency (its per-element cost *falls* as degree grows, which a
+longer scan cannot do).
 
-- `Expand(Into)` for bound destinations (§2.3);
-- a **symmetric** anchor swap, lifting the shipped OUT-only restriction, since
+~~**The comment is correct, and it is also incomplete.**~~ The comment was
+correct — and its stated band of 4–16 is precisely what survived
+re-measurement, since the crossover is ≈16. What the comment lacked was the
+measured crossover value and the reasons the adjacency stays unordered; both
+have since been written into it.
+
+~~So the correct design is **not** "sort the adjacency". It is a
+**degree-adaptive representation**~~ — **superseded.** A degree-adaptive
+representation was designed under #2139 and **rejected**: a per-source "is
+sorted" flag costs a branch at every probe site, imposes a correctness
+obligation that every site consult it, and needs a promotion rule that is
+incompatible with recovery determinism. What shipped instead is an
+**unconditional** ordering of every CSR the build produces
+(`graph/csr.OrderRuns`), which is possible at zero write-path cost because all
+of the read-path probes traverse the CSR snapshot rather than the adjacency.
+
+Of the four items this section expected to unlock, **three are enabled by the
+CSR ordering and the fourth is deliberately not**:
+
+- ✅ `Expand(Into)` for bound destinations (§2.3);
+- ✅ a **symmetric** anchor swap, lifting the shipped OUT-only restriction, since
   `lookupFwdEdgePos` becomes soundly costable;
-- an O(log d) `HasEdge` for `MERGE` on the write path;
-- sorted-merge intersection — the primitive §4 depends on.
+- ✅ sorted-merge intersection — the primitive §4 depends on;
+- ❌ an O(log d) `HasEdge` for `MERGE` on the write path. **Not delivered, and
+  not planned.** This is the only one of the four that needs the *adjacency*
+  ordered rather than the CSR, and that is the half dropped as #2140
+  (superseded) on the three structural grounds above. `HasEdge` remains an O(d)
+  scan.
+
+The three enabled items are *enabled*, which is not the same as shipped: the
+O(log d) probe they rest on landed as #2142, and each peephole that consumes it
+is its own change.
 
 ---
 

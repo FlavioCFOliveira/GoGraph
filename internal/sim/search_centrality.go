@@ -329,8 +329,15 @@ func centralityRandomBridged(seed *Seed) centralityFixture {
 // carrying the arc weights in the parallel weights slice for the weighted check.
 //
 // It computes the length-(order+1) offsets array and the source-grouped flat
-// edge+weight arrays exactly as csr.BuildFromAdjList would, via a counting pass
-// over the out-degrees followed by a scatter. Building the offsets
+// edge+weight arrays the way csr.BuildFromAdjList computes ITS offsets — via a
+// counting pass over the out-degrees followed by a scatter — but NOT its
+// within-source order: since rmp #2141 that build orders each source's run by
+// (destination, handle), and csr.FromArrays below deliberately does not order.
+// So a run here stays in fixture-arc order. That is sound for this oracle
+// because it is [csr.FromArrays]'s documented contract to admit unordered runs,
+// and because these centrality algorithms read a source's neighbours as a set,
+// not by position. It would NOT be sound for anything that binary-searches a run
+// or reads a slot's within-run ordinal. Building the offsets
 // programmatically — rather than hand-writing them per fixture — eliminates the
 // off-by-one class of bug a sink vertex (no out-edges) is especially prone to:
 // every vertex, including a pure sink, must own an offset slot or the
