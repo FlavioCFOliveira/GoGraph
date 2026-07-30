@@ -414,3 +414,67 @@ func TestExpandIntersect_PlanHooks(t *testing.T) {
 		t.Fatalf("untyped PlanDetail = %q; want %q", d, "mid=* close=*")
 	}
 }
+
+// TestExpandIntersect_ReInitIsRepeatable is the regression gate for a defect this
+// operator shipped with and that only an engine-level OPTIONAL MATCH test exposed:
+// Init snapshotted the CSRs but did NOT reset the cursors, including done.
+//
+// Under a correlated Apply, Init runs once per OUTER ROW rather than once per query.
+// So the first outer row ran the operator to exhaustion, left done=true, and every
+// later outer row silently produced NOTHING — an OPTIONAL MATCH over a cyclic
+// pattern returned a null row for all but at most the first input. It returned WRONG
+// RESULTS without any error, which is the worst failure mode available.
+//
+// exec.Drain calls Init exactly once, so no amount of draining could have caught
+// this; the operator has to be re-initialised explicitly, which is what this does.
+func TestExpandIntersect_ReInitIsRepeatable(t *testing.T) {
+	fwd, rev := orderedPair(4, [][2]int{{0, 1}, {1, 2}, {2, 0}})
+	seeds := []exec.Row{{expr.IntegerValue(0), expr.IntegerValue(1)}}
+	op := exec.NewExpandIntersect(newSliceOperator(seeds...), fwd, rev,
+		&exec.ExpandIntersectConfig{MidCol: 1, EndCol: 0})
+
+	drainOnce := func(pass int) []exec.Row {
+		if err := op.Init(context.Background()); err != nil {
+			t.Fatalf("pass %d Init: %v", pass, err)
+		}
+		var rows []exec.Row
+		for {
+			var r exec.Row
+			ok, err := op.Next(&r)
+			if err != nil {
+				t.Fatalf("pass %d Next: %v", pass, err)
+			}
+			if !ok {
+				return rows
+			}
+			cp := make(exec.Row, len(r))
+			copy(cp, r)
+			rows = append(rows, cp)
+		}
+	}
+
+	first := drainOnce(1)
+	if len(first) == 0 {
+		t.Fatal("the first pass produced no rows, so re-execution proves nothing")
+	}
+	second := drainOnce(2)
+	if len(second) != len(first) {
+		t.Fatalf("re-initialised operator produced %d rows; the first pass produced %d — "+
+			"Init must reset every cursor, because a correlated Apply calls it once per OUTER ROW",
+			len(second), len(first))
+	}
+	for i := range first {
+		if len(second[i]) != len(first[i]) {
+			t.Fatalf("pass 2 row %d width %d, pass 1 width %d", i, len(second[i]), len(first[i]))
+		}
+		for j := range first[i] {
+			if second[i][j] != first[i][j] {
+				t.Fatalf("pass 2 row %d differs at column %d:\n  pass1 %s\n  pass2 %s",
+					i, j, rowText(first[i]), rowText(second[i]))
+			}
+		}
+	}
+	if err := op.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
