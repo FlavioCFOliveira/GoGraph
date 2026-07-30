@@ -66,8 +66,26 @@ package exec
 //
 // An integer key too large for float64 to hold exactly takes the fallback as
 // well: past 2^53 the conversion is lossy, so a seek could land on a DIFFERENT
-// integer. That is [exactFloat64Int] below, and it is the one case where the
+// integer. That is [exactFloat64Key] below, and it is the one case where the
 // fallback is protecting correctness rather than coverage.
+//
+// # The seek's candidates are re-verified (rmp #2263)
+//
+// [exactFloat64Key] makes the seek KEY faithful to the outer value. It says
+// nothing about whether the index ENTRIES that key lands on are faithful to
+// theirs, and the two are independent: the companion files a node under
+// float64(value), so a node whose property is an int64 above 2^53 is filed under
+// the float64 that int64 ROUNDS to. 2^53 and 2^53+1 therefore share one key, and
+// a seek for 2^53 yields both nodes. Emitting both is a phantom row — the join
+// keys are NOT equal under openCypher — that nothing downstream removes.
+//
+// So a seek candidate is re-verified against its own value with the exact
+// comparator, exactly as [ColumnarHashJoin] re-verifies every hit of a bucket its
+// float64-domain hash produced. The comparison is shared with the fallback path
+// ([IndexNestedLoopJoin.innerRowMatches]) so the two cannot drift.
+//
+// The re-verification is SKIPPED when the seek key proves it cannot be needed —
+// see [ambiguousSeekKey], which is what keeps the common seek allocation-free.
 //
 // # Concurrency
 //
@@ -133,11 +151,23 @@ type IndexNestedLoopJoin struct {
 	idbuf [8]uint64 // inline backing — the dominant small posting list stays zero-alloc
 	pos   int
 
+	// seekRow is the one-element inner row a seek hit produces (the node id),
+	// reused across candidates. It is a field rather than a per-candidate literal
+	// because it is handed to innerKeyFn — an opaque func value — on the
+	// re-verifying path, which would otherwise force it to the heap once per
+	// candidate.
+	seekRow [1]expr.Value
+
 	outBuf []expr.Value
 
 	// fallback is true while the current outer row is being served by the inner
 	// arm rather than by a seek.
 	fallback bool
+	// verifySeekHits is true while the current outer row's seek key is one whose
+	// posting list can hold a node that is not actually equal to it — see
+	// [ambiguousSeekKey]. It is decided once per outer row, not once per
+	// candidate.
+	verifySeekHits bool
 	// provenNumericCoverage records that the PLANNER proved every node the inner
 	// scan produces carries a numeric value for the join property (see
 	// numericIndexCoversScan). Under that proof a key of any non-numeric kind
@@ -199,6 +229,7 @@ func (op *IndexNestedLoopJoin) Init(ctx context.Context) error {
 	op.ids = op.idbuf[:0]
 	op.pos = 0
 	op.fallback = false
+	op.verifySeekHits = false
 	op.outerEOS = false
 	op.haveOuter = false
 	return op.outer.Init(ctx)
@@ -258,6 +289,7 @@ func (op *IndexNestedLoopJoin) advanceOuter() error {
 	op.outerKey = key
 	op.pos = 0
 	op.fallback = false
+	op.verifySeekHits = false
 
 	// A NULL or NaN key matches nothing under openCypher `=`, so the nested loop
 	// emits nothing for this row either. Skip both paths.
@@ -290,8 +322,41 @@ func (op *IndexNestedLoopJoin) advanceOuter() error {
 		return nil
 	}
 	op.ids = op.idx.LookupAppend(f, op.idbuf[:0])
+	op.verifySeekHits = ambiguousSeekKey(f)
 	op.haveOuter = true
 	return nil
+}
+
+// ambiguousSeekKey reports whether the posting list under seek key f can hold a
+// node whose value is NOT equal to the outer key that produced f — the condition
+// under which each candidate must be re-verified against its own value.
+//
+// The companion files a node under [projectNumericPropValue]: float64(j) for an
+// int64 j, and g itself for a float64 g. Only the first can lose information, and
+// only above 2^53. So when |f| < 2^53 the key is unambiguous, and the proof is
+// short enough to state in full:
+//
+//   - Rounding is monotone and float64(2^53) is exactly 2^53, so any int64 j with
+//     |j| > 2^53 files under a key of magnitude at least 2^53. Contrapositive:
+//     |f| < 2^53 means every int64 filed under f satisfies |j| <= 2^53, which is
+//     exactly representable, so j equals f as a real number.
+//   - A float64-valued node files under its own value, so it equals f exactly.
+//   - The outer key is either a float64 equal to f, or an int64 that
+//     [exactFloat64Key] already proved converts to f without loss — so it too
+//     equals f as a real number.
+//
+// Every candidate and the outer key are therefore the same real number, and
+// [expr.Value.Equal] — whose numeric branch is exact across the integer/float
+// boundary — is TRUE for all of them. Re-verifying would cost a property read per
+// emitted row to re-derive a result that is already proved.
+//
+// At |f| >= 2^53 that proof fails and the candidates are checked. The comparison
+// is written so a NaN f (which [isUnjoinableKey] and [exactFloat64Key] both
+// already exclude, so this is defence in depth) reads as AMBIGUOUS rather than
+// silently skipping the check.
+func ambiguousSeekKey(f float64) bool {
+	const bound = float64(maxExactFloat64Int) // 2^53, exactly representable
+	return !(f > -bound && f < bound)
 }
 
 // nextInner emits the next inner match for the current outer row, from whichever
@@ -300,19 +365,39 @@ func (op *IndexNestedLoopJoin) nextInner(out *Row) (bool, error) {
 	if op.fallback {
 		return op.nextFallback(out)
 	}
-	if op.pos >= len(op.ids) {
-		return false, nil
+	return op.nextSeekHit(out)
+}
+
+// nextSeekHit emits the next candidate of the current outer row's posting list,
+// skipping any whose actual value is not equal to the outer key.
+//
+// That skip is what makes the seek path faithful to openCypher `=` rather than to
+// the float64 the index is keyed on (rmp #2263). It runs only when
+// [ambiguousSeekKey] says the key can produce a non-equal candidate, so the
+// ordinary seek still emits straight from the posting list with no property read.
+func (op *IndexNestedLoopJoin) nextSeekHit(out *Row) (bool, error) {
+	for op.pos < len(op.ids) {
+		id := op.ids[op.pos]
+		op.pos++
+		op.seekRow[0] = expr.IntegerValue(int64(id))
+		innerRow := op.seekRow[:]
+		if op.verifySeekHits {
+			match, err := op.innerRowMatches(innerRow)
+			if err != nil {
+				return false, err
+			}
+			if !match {
+				continue
+			}
+		}
+		op.emit(out, innerRow)
+		return true, nil
 	}
-	id := op.ids[op.pos]
-	op.pos++
-	op.emit(out, Row{expr.IntegerValue(int64(id))})
-	return true, nil
+	return false, nil
 }
 
 // nextFallback advances the inner arm until a row whose key equals the outer
-// key, applying exactly the equality the join's key semantics define — the same
-// [expr.Value.Equal] test the hash join uses to confirm a bucket candidate, so
-// the two operators agree on every key.
+// key, applying exactly the equality the join's key semantics define.
 func (op *IndexNestedLoopJoin) nextFallback(out *Row) (bool, error) {
 	for {
 		var innerRow Row
@@ -323,19 +408,36 @@ func (op *IndexNestedLoopJoin) nextFallback(out *Row) (bool, error) {
 		if !ok {
 			return false, nil
 		}
-		innerKey, err := op.innerKeyFn(innerRow)
+		match, err := op.innerRowMatches(innerRow)
 		if err != nil {
 			return false, err
 		}
-		if isUnjoinableKey(innerKey) {
-			continue
-		}
-		if !expr.IsTruthy(innerKey.Equal(op.outerKey)) {
+		if !match {
 			continue
 		}
 		op.emit(out, innerRow)
 		return true, nil
 	}
+}
+
+// innerRowMatches reports whether innerRow's join key equals the current outer
+// key under openCypher `=`.
+//
+// It is the SINGLE equality both inner paths apply — the scan fallback and the
+// re-verified seek — which is the point of factoring it: the two would otherwise
+// be free to drift into disagreeing about which rows a given key admits, and the
+// seek path exists precisely to produce the same answer the fallback would.
+// [expr.Value.Equal] is the same exact comparator the hash join uses to confirm a
+// bucket candidate, so all three operators agree on every key.
+func (op *IndexNestedLoopJoin) innerRowMatches(innerRow Row) (bool, error) {
+	innerKey, err := op.innerKeyFn(innerRow)
+	if err != nil {
+		return false, err
+	}
+	if isUnjoinableKey(innerKey) {
+		return false, nil
+	}
+	return expr.IsTruthy(innerKey.Equal(op.outerKey)), nil
 }
 
 // emit writes outer||inner into the reused output buffer.

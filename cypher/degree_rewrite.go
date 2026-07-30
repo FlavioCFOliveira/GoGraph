@@ -206,12 +206,16 @@ func (s *degreeShape) count(g *lpg.Graph[string, float64], row expr.RowContext, 
 	}
 
 	if !s.typed {
-		// O(1) on a graph with no tombstones: one adjacency column length.
-		n, found := g.OutDegreeByID(id)
+		// O(1) on a graph with no tombstones: one adjacency column length. Once
+		// anything anywhere has been deleted the count must exclude edges landing
+		// on a tombstone, which costs a walk — so the cap is handed DOWN and the
+		// walk stops itself, rather than being applied to a count that has already
+		// been paid for in full (rmp #2265).
+		n, found := g.OutDegreeBoundedByID(id, degreeCeiling(limit))
 		if !found {
 			return 0, false
 		}
-		return capCount(int64(n), limit), true
+		return int64(n), true
 	}
 
 	relID, have := s.relTypeID(g)
@@ -221,19 +225,30 @@ func (s *degreeShape) count(g *lpg.Graph[string, float64], row expr.RowContext, 
 		// un-interned name matches nothing by construction.
 		return 0, true
 	}
-	ceiling := maxDegreeLimit
-	if limit >= 0 {
-		ceiling = int(limit)
-	}
-	n, found := g.OutDegreeByTypeBoundedByID(id, relID, ceiling)
+	n, found := g.OutDegreeByTypeBoundedByID(id, relID, degreeCeiling(limit))
 	if !found {
 		return 0, false
 	}
 	return int64(n), true
 }
 
-// maxDegreeLimit is the effectively-unbounded cap for the bounded typed walk,
-// used when the caller asked for the true count.
+// degreeCeiling turns a caller's cap into the limit a bounded degree walk takes:
+// the cap itself when one was asked for, and [maxDegreeLimit] — effectively
+// unbounded — when it was not (limit < 0).
+//
+// It clamps rather than converting blindly so that on a platform whose int is
+// narrower than int64 a cap beyond the int range widens to "no cap" instead of
+// wrapping to a small, or negative, limit — which would silently truncate the
+// count.
+func degreeCeiling(limit int64) int {
+	if limit < 0 || limit > int64(maxDegreeLimit) {
+		return maxDegreeLimit
+	}
+	return int(limit)
+}
+
+// maxDegreeLimit is the effectively-unbounded cap for a bounded degree walk,
+// typed or untyped, used when the caller asked for the true count.
 const maxDegreeLimit = int(^uint(0) >> 1)
 
 // relTypeID resolves and caches the LabelID for the shape's relationship type.
@@ -248,14 +263,6 @@ func (s *degreeShape) relTypeID(g *lpg.Graph[string, float64]) (lpg.LabelID, boo
 	s.resolved = id
 	s.haveResolv = true
 	return id, true
-}
-
-// capCount clamps n to limit when limit is non-negative.
-func capCount(n, limit int64) int64 {
-	if limit >= 0 && n > limit {
-		return limit
-	}
-	return n
 }
 
 // degreeShapeFor returns the memoised degree shape for a subquery occurrence, or
@@ -281,9 +288,25 @@ func (e *subqueryEvaluator) degreeShapeFor(key ast.Expression, pat *ast.Pattern,
 // exactly as the true count would — see [expr.BoundedCountEvaluator] for the
 // proof that a cap of literal+1 is sufficient for all six operators.
 //
-// The cap only has teeth on the degree path, which can stop walking. When the
-// pattern is not degree-answerable this falls back to the full inner drive and
-// the exact count, so the cap changes nothing observable.
+// The cap has teeth on the degree path, in both its forms, and none of it is
+// observable: a count capped at limit decides the comparison exactly as the true
+// count would.
+//
+//   - TYPED. The walk has to resolve each slot's relationship type, and it stops
+//     once limit matching edges have been counted.
+//   - UNTYPED. One adjacency column length, in O(1), while the graph holds no
+//     tombstones. Once anything has been deleted the count must exclude edges
+//     landing on a tombstone, so it becomes a walk — and that walk stops once
+//     limit LIVE edges have been counted.
+//
+// The untyped half of that is what rmp #2265 fixed. The cap used to be applied to
+// the RESULT of an uncapped walk, so a single unrelated DELETE anywhere in the
+// graph turned every untyped degree count into a full traversal of the anchor's
+// adjacency — 1170× at degree 400 000 — to answer a question the cap had already
+// settled. The answers were correct throughout; only the cost was wrong.
+//
+// When the pattern is not degree-answerable this falls back to the full inner
+// drive and the exact count, where the cap is simply not applied.
 func (e *subqueryEvaluator) EvalCountBounded(ctx context.Context, sub *ast.CountSubquery, row expr.RowContext, params map[string]expr.Value, limit int64) (expr.Value, error) {
 	// sub.Where is threaded so both recognisers refuse a pattern carrying an
 	// inline WHERE, which neither can evaluate (rmp #2242).
