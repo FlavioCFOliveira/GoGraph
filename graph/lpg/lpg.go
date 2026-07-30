@@ -1832,15 +1832,62 @@ func (g *Graph[N, W]) outDegreeFiltered(src N, byType bool, relType LabelID) (in
 // # Cost
 //
 // O(1) when the graph holds no tombstones; O(d) once anything has been deleted.
+// A caller that only needs to know whether the degree reaches some bound should
+// use [Graph.OutDegreeBoundedByID], which does not pay the full O(d) walk.
 //
 // # Concurrency
 //
 // Safe for concurrent use with readers and writers, and lock-free.
 func (g *Graph[N, W]) OutDegreeByID(srcID graph.NodeID) (int, bool) {
-	if g.tombstoneActive.Load() == 0 {
-		return g.adj.OutDegreeByID(srcID)
+	return g.OutDegreeBoundedByID(srcID, maxInt)
+}
+
+// OutDegreeBoundedByID is [Graph.OutDegreeByID] with an early exit: it returns
+// min(trueLiveOutDegree, limit) and stops as soon as limit live out-edges have
+// been counted. A non-positive limit returns 0 without inspecting any edge, the
+// correct answer for "at most zero".
+//
+// It is the untyped counterpart of [Graph.OutDegreeByTypeBoundedByID], and it
+// exists because the untyped degree is only O(1) while the graph is free of
+// tombstones. Once ANY node has been deleted — anywhere in the graph, related or
+// not — the count has to exclude edges landing on a tombstone, which means
+// walking the node's adjacency. Without a limit to stop it, that walk runs to the
+// end of a supernode's column to answer a question a bounded caller settled after
+// one edge: rmp #2265 measured `EXISTS { (a)-->() }` at degree 400 000 going from
+// 2 µs to 2.243 ms — 1170×, permanent and graph-wide — after a single unrelated
+// DELETE, purely because the caller's limit was replaced with maxInt here.
+//
+// # The cap counts LIVE edges only
+//
+// The limit is charged per edge that SURVIVES the liveness gate, never per slot
+// inspected. That distinction is the whole correctness of the bound: a node whose
+// first slots all point at tombstoned neighbours must keep walking past them, and
+// a cap that counted slots would stop early and report a degree of zero for a node
+// that has live edges further along its column. The gate and the cap are
+// independent concerns, and [github.com/FlavioCFOliveira/GoGraph/graph/adjlist.AdjList.OutDegreeFuncBoundedByID]
+// keeps them so.
+//
+// # Cost
+//
+// O(1) when the graph holds no tombstones; O(min(d, limit)) once anything has
+// been deleted, where the min is taken over LIVE edges as described above — a
+// column of tombstoned slots is still walked through.
+//
+// # Concurrency
+//
+// Safe for concurrent use with readers and writers, and lock-free.
+func (g *Graph[N, W]) OutDegreeBoundedByID(srcID graph.NodeID, limit int) (int, bool) {
+	if limit <= 0 {
+		return 0, true
 	}
-	return g.adj.OutDegreeFuncBoundedByID(srcID, maxInt, func(dst graph.NodeID, _ uint32) bool {
+	if g.tombstoneActive.Load() == 0 {
+		n, ok := g.adj.OutDegreeByID(srcID)
+		if !ok {
+			return 0, false
+		}
+		return min(n, limit), true
+	}
+	return g.adj.OutDegreeFuncBoundedByID(srcID, limit, func(dst graph.NodeID, _ uint32) bool {
 		return !g.IsTombstoned(dst)
 	})
 }
