@@ -141,6 +141,7 @@ import (
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
@@ -270,6 +271,14 @@ func main() {
 	// (never the -users scale — see parallelismExercise), large enough to cross the
 	// parallel-scan threshold, so it too is driven from main rather than from run.
 	if err := parallelismExercise(ctx, cfg, os.Stdout); err != nil {
+		stopCPU()
+		log.Fatal(err)
+	}
+	// The fused cyclic expand exercise runs on its own fixed-scale ring at TWO sizes
+	// (never the -users scale — see cyclicJoinExercise), because the plan it is
+	// contrasted against enumerates Theta(n*d^2) intermediate rows and would be
+	// unbounded at this example's default population.
+	if err := cyclicJoinExercise(ctx, cfg, os.Stdout); err != nil {
 		stopCPU()
 		log.Fatal(err)
 	}
@@ -2387,4 +2396,217 @@ var titlePhrases = []string{
 	"Ten Ideas That Stuck", "Why It Matters Now", "From Theory to Practice",
 	"A Field Report", "The Quiet Revolution", "How It Really Works",
 	"Beyond the Obvious", "An Honest Account", "The Road Ahead",
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fused cyclic expand exercise (#2161, exercising #2156/#2157)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// cyclicBackend counts fused-cyclic-expand engagements, so the exercise can prove the
+// operator actually RAN rather than inferring it from a timing.
+//
+// That proof is load-bearing here, not decoration. SPIKE #2155 verified the openCypher
+// TCK contains no directed cycle over three or more distinct node variables, so the
+// conformance gate cannot see this operator at all; and a plan-A/B contrast is blind in
+// the same way, because if the recogniser silently declined then BOTH arms would run
+// today's plan and agree perfectly. Only a counter separates "identical because it is
+// correct" from "identical because it never fired".
+type cyclicBackend struct{ engaged atomic.Uint64 }
+
+func (b *cyclicBackend) IncCounter(name string, delta uint64) {
+	if name == exec.MetricExpandIntersectEngaged {
+		b.engaged.Add(delta)
+	}
+}
+
+func (b *cyclicBackend) ObserveLatency(string, time.Duration) {}
+
+const (
+	// cyclicScaleSmall and cyclicScaleLarge are the two user counts the exercise runs,
+	// so the SCALING behaviour is visible in the example's own output rather than only
+	// in a benchmark. They are deliberately small: this example's default is 1 000 000
+	// users (~175 M edges, ~10 GB, unbounded time), and a mutual-friendship triangle
+	// enumerates Θ(n·d²) intermediate rows in the plan being compared against, so the
+	// two-Expand arm is the binding constraint on runtime here, not the fused one.
+	cyclicScaleSmall = 4_000
+	cyclicScaleLarge = 12_000
+	// cyclicFriends fixes the FRIEND out-degree, so m = n·d and the two scales differ
+	// only in n. Holding degree constant is what makes the two rows comparable.
+	cyclicFriends = 12
+)
+
+// cyclicJoinExercise contrasts the fused cyclic expand against the two-Expand plan on a
+// mutual-friendship triangle — the natural closed motif in a social graph — at two
+// scales.
+//
+// # Why the fusing query carries NO node labels
+//
+// This is the exercise's most important didactic point, and it is a real limitation
+// rather than a presentational choice. The recogniser fires only when the cycle's
+// closing hop sits DIRECTLY on its open middle hop. A node-label predicate interposes a
+// Selection between the two hops, so `(a:USER)-[:FRIEND]->(b:USER)-…` correctly
+// DECLINES. On this dataset FRIEND edges only ever join users, so dropping the labels
+// is semantically equivalent AND lets the operator engage — which is why the exercise
+// runs both spellings and reports them side by side. The labelled row is not a
+// throwaway control: it is the honest measure of how much of this win a real
+// label-using query gets today, which is none.
+//
+// Every line is volatile telemetry (prefixed "# ") except the row counts, which are
+// deterministic for a given -seed and are what the regression test pins: the two plans
+// must agree exactly, and the operator must have engaged.
+func cyclicJoinExercise(ctx context.Context, _ config, w io.Writer) error {
+	// The config is accepted for symmetry with the other exercises but deliberately
+	// unused: this exercise runs at its own fixed scales, never the -users scale.
+	be := &cyclicBackend{}
+	metrics.SetBackend(be)
+	defer metrics.SetBackend(nil)
+
+	fmt.Fprintln(w, "# --- fused cyclic expand exercise (#2157) ---")
+	fmt.Fprintf(w, "# cyclic.friends=%d\n", cyclicFriends)
+
+	for _, users := range []int{cyclicScaleSmall, cyclicScaleLarge} {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := cyclicJoinAtScale(ctx, be, users, w); err != nil {
+			return fmt.Errorf("cyclic scale %d: %w", users, err)
+		}
+	}
+	return nil
+}
+
+// cyclicJoinAtScale runs both plans over one population and reports the contrast.
+func cyclicJoinAtScale(ctx context.Context, be *cyclicBackend, users int, w io.Writer) error {
+	g, err := buildRing(ctx, users, cyclicFriends)
+	if err != nil {
+		return fmt.Errorf("ring build: %w", err)
+	}
+	g.AdjList().Compact(ctx)
+
+	// Two engines over the SAME immutable population, so the only difference is the
+	// plan. Sharing g keeps traversal order identical, which is what lets the row
+	// counts be compared for exact equality rather than merely for plausibility.
+	engFused := cypher.NewEngineWithOptions(g, cypher.EngineOptions{EnableCyclicIntersect: true})
+	engTwo := cypher.NewEngine(g)
+
+	// Type-only: the shape the operator can serve.
+	const fusing = "MATCH (a)-[:FRIEND]->(b)-[:FRIEND]->(c)-[:FRIEND]->(a) RETURN count(*) AS c"
+	// Labelled: the same motif a label-using query would write, which DECLINES.
+	const labelled = "MATCH (a:USER)-[:FRIEND]->(b:USER)-[:FRIEND]->(c:USER)-[:FRIEND]->(a) RETURN count(*) AS c"
+
+	prefix := fmt.Sprintf("cyclic.n%d", users)
+	fmt.Fprintf(w, "# %s.users=%d\n", prefix, users)
+
+	fusedRows, fusedDur, fusedAlloc, fusedEngaged, err := cyclicRun(ctx, engFused, be, fusing)
+	if err != nil {
+		return fmt.Errorf("fused arm: %w", err)
+	}
+	twoRows, twoDur, twoAlloc, twoEngaged, err := cyclicRun(ctx, engTwo, be, fusing)
+	if err != nil {
+		return fmt.Errorf("two-expand arm: %w", err)
+	}
+	labRows, labDur, _, labEngaged, err := cyclicRun(ctx, engFused, be, labelled)
+	if err != nil {
+		return fmt.Errorf("labelled arm: %w", err)
+	}
+
+	// Deterministic facts the regression test pins.
+	fmt.Fprintf(w, "%s.triangles=%d\n", prefix, fusedRows)
+	fmt.Fprintf(w, "%s.plans_agree=%t\n", prefix, fusedRows == twoRows)
+	fmt.Fprintf(w, "%s.fused_engaged=%t\n", prefix, fusedEngaged > 0)
+	fmt.Fprintf(w, "%s.twoexpand_engaged=%t\n", prefix, twoEngaged > 0)
+	fmt.Fprintf(w, "%s.labelled_declines=%t\n", prefix, labEngaged == 0)
+	fmt.Fprintf(w, "%s.labelled_agrees=%t\n", prefix, labRows == fusedRows)
+
+	// Volatile telemetry.
+	fmt.Fprintf(w, "# %s.fused.latency=%s\n", prefix, fusedDur.Round(time.Microsecond))
+	fmt.Fprintf(w, "# %s.twoexpand.latency=%s\n", prefix, twoDur.Round(time.Microsecond))
+	fmt.Fprintf(w, "# %s.labelled.latency=%s\n", prefix, labDur.Round(time.Microsecond))
+	fmt.Fprintf(w, "# %s.fused.alloc_bytes=%d\n", prefix, fusedAlloc)
+	fmt.Fprintf(w, "# %s.twoexpand.alloc_bytes=%d\n", prefix, twoAlloc)
+	if fusedDur > 0 {
+		fmt.Fprintf(w, "# %s.speedup=%.2fx\n", prefix, float64(twoDur)/float64(fusedDur))
+	}
+	if fusedAlloc > 0 {
+		fmt.Fprintf(w, "# %s.alloc_ratio=%.2fx\n", prefix, float64(twoAlloc)/float64(fusedAlloc))
+	}
+	return nil
+}
+
+// cyclicRun executes q once and returns the scalar count, the wall time, the bytes
+// allocated during the run and how many times the fused operator engaged.
+//
+// Allocation is read from runtime.MemStats around the query, with a GC first so the
+// delta attributes only this query's work. The counter is sampled as a DELTA for the
+// same reason: the backend is process-wide and other arms increment it too.
+func cyclicRun(ctx context.Context, eng *cypher.Engine, be *cyclicBackend, q string) (int64, time.Duration, uint64, uint64, error) {
+	// Warm the CSR pair cache so the timed run measures the plan rather than the
+	// O(V+E) forward+reverse build, an amortisation artefact this project has
+	// attributed to an access path before.
+	if _, _, err := scalarCount(ctx, eng, q, nil); err != nil {
+		return 0, 0, 0, 0, err
+	}
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	engagedBefore := be.engaged.Load()
+
+	start := time.Now()
+	n, _, err := scalarCount(ctx, eng, q, nil)
+	elapsed := time.Since(start)
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	return n, elapsed, after.TotalAlloc - before.TotalAlloc, be.engaged.Load() - engagedBefore, nil
+}
+
+// buildRing materialises a ring of n users where each has `degree` FRIEND out-edges to
+// the following users plus one back-edge, so every user has the same out-degree and
+// mutual-friendship triangles genuinely exist.
+//
+// A uniform ring rather than the example's skewed population is deliberate: it is the
+// HONEST FLOOR for this operator. SPIKE #2155 proved the two plans' work terms are
+// exactly equal on a regular graph, so whatever the contrast shows here carries no
+// degree-skew advantage at all.
+func buildRing(ctx context.Context, n, degree int) (*lpg.Graph[string, float64], error) {
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	keys := make([]string, n)
+	for i := 0; i < n; i++ {
+		if i%checkEvery == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		keys[i] = "u" + strconv.Itoa(i)
+		if err := g.AddNode(keys[i]); err != nil {
+			return nil, fmt.Errorf("AddNode %s: %w", keys[i], err)
+		}
+		if err := g.SetNodeLabel(keys[i], labelUser); err != nil {
+			return nil, fmt.Errorf("SetNodeLabel %s: %w", keys[i], err)
+		}
+	}
+	link := func(i, j int) error {
+		if err := g.AddEdge(keys[i], keys[j], 1.0); err != nil {
+			return fmt.Errorf("AddEdge %s->%s: %w", keys[i], keys[j], err)
+		}
+		g.SetEdgeLabel(keys[i], keys[j], relFriend)
+		return nil
+	}
+	for i := 0; i < n; i++ {
+		if i%checkEvery == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		for d := 1; d <= degree; d++ {
+			if err := link(i, (i+d)%n); err != nil {
+				return nil, err
+			}
+		}
+		if err := link(i, (i-1+n)%n); err != nil {
+			return nil, err
+		}
+	}
+	return g, nil
 }
