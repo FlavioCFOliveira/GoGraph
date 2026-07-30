@@ -229,18 +229,22 @@ func TestProcWritePath_GenuineWriteMixedWithACall(t *testing.T) {
 	}
 }
 
-// TestProcWritePath_CommentDoesNotBreakACall pins reproduction B. The classifier
-// still reads comments (#2230 tracks that separately), so this statement is
-// still routed to the write path — but routing it there must no longer be fatal.
+// TestProcWritePath_CommentDoesNotBreakACall pins reproduction B: a leading
+// comment that merely MENTIONS a write keyword must not break an otherwise
+// working read-only CALL.
+//
+// It used to skip when the classifier stopped reading comments, with a message
+// saying the case "can be removed". #2230 landed, so the skip became permanent —
+// a test retired by a skip rather than by a decision. That was the wrong shape
+// (rmp #2261): the PREMISE went away, but the ASSERTION did not. Whether the
+// classifier routes this statement to the write path or the read path is an
+// implementation detail; that adding a comment must not change the ANSWER is the
+// property worth pinning, and it is now checked unconditionally.
 func TestProcWritePath_CommentDoesNotBreakACall(t *testing.T) {
 	eng := procParityEngine(t)
 	const plain = `CALL db.labels() YIELD label RETURN label`
 	const commented = "// CREATE nothing here\n" + plain
 
-	if !QueryHasWritingClause(commented) {
-		t.Skip("the classifier no longer reads comments (#2230 landed); this case is subsumed " +
-			"by the parity test and can be removed")
-	}
 	plainRows, plainErr := procParityRun(t, eng, plain, false)
 	if plainErr != "" {
 		t.Fatalf("uncommented control failed: %s", plainErr)

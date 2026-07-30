@@ -2,17 +2,20 @@ package cypher_test
 
 // parallel_operator_test.go — deterministic output for repeated query runs (T747).
 //
-// exec.ParallelScan exists (cypher/exec/parallel.go) but is not yet wired
-// into buildOperator. The current engine uses a sequential AllNodesScan for
-// all MATCH (n) queries.
+// This file verifies that, regardless of the underlying scan strategy, the
+// results of an ORDER BY query are identical across N repeated runs on the same
+// immutable graph. The property must hold for both sequential and parallel
+// execution.
 //
-// This file verifies the stronger property: regardless of the underlying scan
-// strategy, results of an ORDER BY query must be identical across N repeated
-// runs on the same immutable graph. This property must hold for both
-// sequential and parallel execution modes.
-//
-// When ParallelScan is wired into the engine via EngineOptions, add a
-// sub-test here that enables it and re-runs the same determinism check.
+// The header used to say that "exec.ParallelScan exists (cypher/exec/parallel.go)
+// but is not yet wired into buildOperator" and that "the current engine uses a
+// sequential AllNodesScan for all MATCH (n) queries". Both were false and are
+// corrected here (rmp #2261): the standalone ParallelScan leaf was deleted as
+// dead scaffolding in #2019 — cypher/exec/parallel.go records the removal — and
+// the parallel leaves that DO exist, ParallelScanProject and ParallelCountScan,
+// are wired and engage above EngineOptions.ParallelScanThreshold. So the
+// determinism check below already covers the parallel path on a graph large
+// enough to cross that threshold, rather than waiting for a future wiring.
 
 import (
 	"context"
