@@ -8997,6 +8997,30 @@ func tryBuildParallelScanProject(
 		}
 	}
 
+	// The SELECTION's predicate must pass the same scalar screen as the projection
+	// items (rmp #2257). It is screened here, on the FINAL sel, rather than where
+	// sel was bound: the intersection peephole above may have set it to nil, in
+	// which case the bitmap subsumes it and no worker evaluates a predicate at all.
+	//
+	// Omitting this screen was a process-fatal defect, not a semantic nicety.
+	// exprHasNonScalar rejects exactly the expression kinds that need the shared
+	// SubqueryEvaluator and pattern evaluator — CountSubquery, ExistsSubquery,
+	// PatternComprehension, ListComprehension, ReduceExpr — and forWorker copies
+	// both of those BY POINTER. So a `WHERE COUNT { … }` reached N worker
+	// goroutines through one evaluator whose own godoc declares it not safe for
+	// concurrent use, and they raced on its memo maps. Measured on a default
+	// engine over 60 000 nodes: 185 races under -race, and 5 of 5 production runs
+	// (no race detector) died with `fatal error: concurrent map writes` or a nil
+	// dereference. `concurrent map writes` is a runtime throw that recover cannot
+	// catch, so the whole host process went down.
+	//
+	// Declining is the correct remedy rather than building per-worker evaluators:
+	// the query stays correct and merely runs on the serial path, which is what it
+	// did before the fused shape existed.
+	if sel != nil && exprHasNonScalar(sel.PredicateExpr) {
+		return nil, false, nil
+	}
+
 	// Per-worker subplan factory. Each call rebuilds the SAME subtree over a
 	// per-worker walker restricted to the morsel and a per-worker buildOpts copy
 	// whose lazily-written fields are zeroed (so two workers never race writing
@@ -9208,9 +9232,23 @@ func isNonDeterministicCall(fn *ast.FunctionInvocation) bool {
 //     concurrent write from another worker cannot alias the same map. The reset is
 //     sound for the fused shape because the subtree is self-contained: every map
 //     entry the build needs is (re)written from the subtree's own IR, never read
-//     from a pre-existing entry. The query-scope read-only fields (subEval,
-//     patEval, queryCtx, params/reg captured by closures, maxCollectItems, the
-//     enablement flags) are shared by the value copy and never written post-build.
+//     from a pre-existing entry.
+//
+// subEval and patEval are shared by the value copy — i.e. BY POINTER — and this
+// is safe ONLY because the caller has screened them out of reach. Both are
+// documented as not safe for concurrent use (cypher/subquery_eval.go,
+// cypher/pattern_eval.go), and both memoise into plain maps at eval time, so two
+// workers touching one instance is a `fatal error: concurrent map writes` — a
+// runtime throw no recover can contain. The invariant that makes the sharing
+// sound is that [tryBuildParallelScanProject] admits the fused shape only when
+// NEITHER the projection items NOR the Selection predicate contains an
+// expression that needs them (exprHasNonScalar on both). The Selection half of
+// that screen was missing and the result was a process-fatal crash on a default
+// engine (rmp #2257) — so if a future change widens what the fused shape accepts,
+// this pointer sharing is the first thing that must be revisited.
+//
+// The remaining query-scope fields (queryCtx, params/reg captured by closures,
+// maxCollectItems, the enablement flags) are genuinely read-only after the build.
 func (b *buildOpts) forWorker() *buildOpts {
 	cp := *b
 	// Lazily-written-at-eval fields.
