@@ -177,7 +177,17 @@ func NewExpandIntersect(input Operator, fwd, rev csrAdjacency, cfg *ExpandInters
 	}
 }
 
-// Init initialises the child and snapshots both CSR directions.
+// Init initialises the child, snapshots both CSR directions, and RESETS every
+// cursor so the operator can be re-executed.
+//
+// Resetting is not housekeeping — omitting it was a real defect, caught by the
+// OPTIONAL MATCH case in cypher/cyclic_intersect_diff_test.go. Under a correlated
+// Apply, Init runs once per OUTER ROW, not once per query. Without the reset the
+// first outer row ran the operator to exhaustion, left done=true, and every
+// subsequent outer row silently produced nothing — so an OPTIONAL MATCH over a
+// cyclic pattern returned a null row for every input except at most the first. It
+// failed silently and returned WRONG RESULTS rather than an error, which is why the
+// reset is stated here explicitly rather than left implicit.
 func (op *ExpandIntersect) Init(ctx context.Context) error {
 	op.ctx = ctx
 	if err := op.input.Init(ctx); err != nil {
@@ -188,6 +198,10 @@ func (op *ExpandIntersect) Init(ctx context.Context) error {
 	op.fwdEdges = op.fwd.EdgesSlice()
 	op.revVerts = op.rev.VerticesSlice()
 	op.revEdges = op.rev.EdgesSlice()
+	op.done = false
+	op.haveInput, op.haveC, op.haveR2 = false, false, false
+	op.inputRow = nil
+	op.emitCount = 0
 	return nil
 }
 
