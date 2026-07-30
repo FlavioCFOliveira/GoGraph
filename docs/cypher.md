@@ -92,6 +92,40 @@ call this access path; it appears as the operator's *detail* rather than its nam
 because a rendered physical name is the concrete operator type and must stay
 incapable of disagreeing with the operator that ran.
 
+**Cyclic patterns can fuse two hops into one `ExpandIntersect` (opt-in).** A
+directed cycle's last two hops — the open middle expand and the closing seek —
+together compute `N_out(b) ∩ N_in(a)`, but by materialising the left operand in full
+first. `exec.ExpandIntersect` computes the same set directly with a sorted-set
+intersection over the destination-ordered runs, so a candidate that does not close the
+cycle is never built into a row. `EXPLAIN` renders it as
+`ExpandIntersect [mid=<type> close=<type>]`.
+
+```cypher
+// Fuses: the closing hop sits directly on the open middle hop.
+MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(c)-[:KNOWS]->(a) RETURN count(*)
+```
+
+It is **opt-in** via `EngineOptions.EnableCyclicIntersect`, which has *positive*
+polarity — unlike every `Disable*` option — so the zero value leaves it off. Two
+limitations are worth knowing before enabling it:
+
+- **A node-label predicate prevents the fusion.** Labels interpose a `Selection`
+  between the two hops, so `(a:Person)-[:KNOWS]->(b:Person)-…` correctly declines and
+  runs today's plan. Where the relationship type already constrains the endpoints,
+  dropping the labels is often semantically equivalent and lets the operator engage.
+- **Only the last hop of a cycle fuses.** A square or a longer cycle gains the same
+  single intersection as a triangle, not one per hop, because every simple cycle has
+  exactly one vertex with two already-bound neighbours.
+
+Undirected legs, variable-length legs and patterns under `PROFILE` all decline. The
+operator is result- and order-identical when it engages: it yields candidates in
+ascending order and walks each leg's contiguous handle run in position order, so the
+emitted sequence matches the two hops it replaces exactly. Measurements and the
+default-flip recommendation are in
+[`benchmarks/cyclic-join-2026-07-30.md`](benchmarks/cyclic-join-2026-07-30.md);
+the design and its semantic obligations are in
+[`design-wcoj-cyclic-patterns.md`](design-wcoj-cyclic-patterns.md).
+
 The seek emits exactly the rows the enumerate-and-filter path did, **in the same
 order** — the slots sharing a destination are contiguous, so the block it seeks to
 is precisely the subsequence the filter would have emitted. It also preserves

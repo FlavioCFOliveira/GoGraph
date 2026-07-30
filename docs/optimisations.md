@@ -484,6 +484,79 @@ Full record:
 [benchmarks/history/LEDGER.md](benchmarks/history/LEDGER.md) row 0032. TCK held at
 3897/3897, `-race` clean.
 
+## Sprint 315 — the fused cyclic expand (R2-P5, 2026-07-30)
+
+The sprint was opened to build a **worst-case-optimal join**. It did not build one,
+and that is the most important thing to record here: the SPIKE
+([`design-wcoj-cyclic-patterns.md`](design-wcoj-cyclic-patterns.md)) established that
+**every simple cycle admits exactly ONE intersection, at the vertex sprint 314's
+`ExpandInto` seek already occupies**, so Leapfrog Triejoin (Veldhuizen, ICDT'14) and
+Generic Join (Ngo–Porat–Ré–Rudra, PODS'12) both degenerate to the same 2-way leapfrog
+on a binary relation, and genuine multi-way intersection needs `K4` or denser. A
+general WCOJ operator is unconditionally out of scope and should not be re-proposed.
+
+What shipped instead is far narrower: a **fusion of a cycle's open middle hop and its
+closing seek** into one operator, `exec.ExpandIntersect`, driven by a multi-way
+sorted-set intersection over sprint 313's ordered CSR runs.
+
+**The premise it was opened on is refuted.** `Θ(m²) → Θ(m^1.5)` compares two
+*worst-case bounds*, not two plans on a graph. Per graph the work terms are
+`Σ_v d_in(v)·d_out(v)` for the binary-join plan and `Σ_(a,b) min(d_out(b), d_in(a))`
+for the intersection — and those are **exactly equal on any regular graph** (both
+`n·d²`). An exact combinatorial oracle measured 1.000/1.000 on a uniform fixture and
+1.112/1.008 on a power-law one. The AGM bound (Atserias–Grohe–Marx, FOCS'08) is not
+what this operator delivers.
+
+**What it does deliver.** The binary-join plan's cost is proportional to the
+*intermediate* rows it materialises (`Θ(#2-paths)`); the fused operator's is
+proportional to its *output* (`Θ(#results)`). Those have different exponents, so the
+win is asymptotic in the dense regime for a reason unrelated to set-intersection
+theory. Fitted in `m` (fixed `n`, degree 4→32): **two-Expand 1.628, fused 0.852**.
+
+Measured with both arms in ONE process (`-benchmem -count=6`, every qualifying row
+p=0.002; geomean **−54.24% sec/op**, **−70.35% B/op**):
+
+| shape | two-Expand | fused | Δ time | Δ allocs |
+|---|---|---|---|---|
+| triangle, uniform d=4 | 16.59 ms | 10.13 ms | −38.96% | −63.55% |
+| triangle, uniform d=16 | 103.78 ms | 23.97 ms | −76.91% | −91.96% |
+| triangle, uniform d=64 | 1718.7 ms | 145.2 ms | **−91.55%** | **−98.30%** |
+| triangle, power-law | 303.9 ms | 127.9 ms | −57.91% | −79.59% |
+| 2-cycle, d=16 | 10.266 ms | 4.848 ms | −52.77% | −73.69% |
+| square (4-cycle), d=8 | 244.41 ms | 68.90 ms | −71.81% | −86.70% |
+| labelled triangle (declines) | 471.7 ms | 471.2 ms | ~ (p=0.394) | identical |
+| acyclic two-hop (declines) | 66.85 ms | 66.57 ms | ~ (p=0.589) | identical |
+
+**The uniform rows are the FLOOR, not a flattering case** — the work terms are
+provably equal there, so they carry no skew advantage at all. Indeed the power-law row
+(−57.91%) is *smaller* than uniform d=64 (−91.55%), the opposite of an AGM-framed
+prediction.
+
+**No type check inside the merge** is the load-bearing design decision. The SPIKE's
+first measurements type-checked the reverse side while merging — which needs each
+reverse slot's forward position recovered first, because the reverse CSR carries no
+relationship type — and that made a typed pattern look like a *regression*. The
+operator intersects the raw ordered runs and materialises both edge identities with
+**forward** `dstRun` lookups afterwards, so every type check is a plain forward map
+probe on a candidate that already closed.
+
+**Opt-in, deliberately.** `EngineOptions.EnableCyclicIntersect` has *positive*
+polarity, unlike every `Disable*` knob beside it, so the zero value leaves the
+operator off. Labelled patterns still decline (a label predicate interposes a
+`Selection` between the hops), so the recommendation from the measurements is to flip
+the default in the same change that lands the Selection hoist — not before.
+
+**Two defects were found by the sprint's own gates, both worth recording.** The
+differential battery caught a wrong-results bug in the operator the previous task had
+just shipped: `Init` did not reset the cursors, and because a correlated Apply calls
+`Init` once per *outer row*, an `OPTIONAL MATCH` over a cyclic pattern returned a null
+row for every input but at most the first — silently, no error. And a new
+`fixture_test.go` caught that a degree-1 ring contains **exactly zero triangles**, so
+that benchmark row measures the no-output path; the first draft of the report had read
+it as output-producing work.
+
+Full record: [`benchmarks/cyclic-join-2026-07-30.md`](benchmarks/cyclic-join-2026-07-30.md).
+
 ## Workflow
 
 Every future optimisation appends a row to the table above with

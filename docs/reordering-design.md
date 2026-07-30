@@ -73,7 +73,8 @@ cost under the same model — that is the no-regression guarantee.
 
 Veto (keep written order) for: **cyclic patterns** (AGM/worst-case-optimal-join
 boundary — Atserias-Grohe-Marx FOCS'08, Ngo et al PODS'12; binary-join left-deep
-is provably suboptimal, out of scope); any pattern needing a **multi-edge
+is provably suboptimal, out of scope) — **this veto STANDS, and sprint 315 did not
+relax it; see the note below**; any pattern needing a **multi-edge
 intermediate cardinality** (≥2 joins where a downstream intermediate is not a
 single exact count-store entry — correlation-dependent, error compounds,
 Ioannidis-Christodoulakis SIGMOD'91); **variable-length expand**;
@@ -81,6 +82,29 @@ Ioannidis-Christodoulakis SIGMOD'91); **variable-length expand**;
 and (a separate correctness guard, not order) any permutation that would swap the
 outer/inner role across an **OPTIONAL MATCH** boundary (changes the left-join
 multiset).
+
+
+> **Note on the cyclic veto after sprint 315 (#2157).** The veto above is a statement
+> about **binary-join reordering**, and it remains correct and in force: a cyclic
+> pattern's intermediate cardinality is not a single exact count-store entry, so a
+> cost comparison between orderings would compound error. Nothing in sprint 315
+> changed that.
+>
+> What sprint 315 added is a **different mechanism for the same shape**, which is why
+> the two coexist without contradiction. `exec.ExpandIntersect`
+> ([`design-wcoj-cyclic-patterns.md`](design-wcoj-cyclic-patterns.md)) does not
+> *reorder* a cyclic pattern and does not *estimate* anything: it fuses the cycle's
+> open middle hop and its closing seek into one operator driven by a sorted-set
+> intersection, so the choice it makes is per-row and structural rather than
+> cost-based. It consults **no count-store cell at all** — it orders its ranges by CSR
+> run length, which is exact per-vertex and cannot be stale — so it introduces no new
+> dependency on count-store freshness and nothing here needs a dirty-cell veto.
+>
+> The original veto was also the *signpost* that a different operator was required,
+> and the SPIKE recorded why the obvious candidate is not it: every simple cycle
+> admits exactly one intersection, at the vertex the `ExpandInto` seek already
+> occupies, so a general worst-case-optimal join degenerates on a binary relation and
+> is unconditionally out of scope.
 
 ## 4. Order-safety suppression (cypher-expert-consultant)
 
