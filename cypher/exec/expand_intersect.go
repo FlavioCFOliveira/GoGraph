@@ -323,16 +323,48 @@ func (op *ExpandIntersect) loadInput() (bool, error) {
 	}
 }
 
-// nodeAt reads a NodeID from a row column.
+// nodeAt reads a NodeID from a row column, accepting EVERY representation the
+// engine can legitimately place in a node column.
+//
+// # Why both forms have to be accepted (#2267)
+//
+// A node column carries a raw [expr.IntegerValue] — the canonical in-pipeline
+// encoding — when it was produced by a scan or by an Expand, but a full
+// [expr.NodeValue] when the variable last flowed through a PROJECTION. The second
+// form is not exotic: any `WITH` between the anchor and the cycle produces it, so
+//
+//	MATCH (a) WITH a MATCH (a)-[:K]->(b)-[:K]->(c)-[:K]->(a) RETURN count(*)
+//
+// hands this operator a boxed `a`. Asserting only to IntegerValue classified that
+// cell as a malformed column and SKIPPED the input row, and skipping every row is
+// indistinguishable from a graph with no cycles: the query returned 0 where it must
+// return 18. It failed silently, returned WRONG RESULTS rather than an error, and
+// left the engagement counter ticking the whole time — so neither the TCK, nor a
+// flag-on/flag-off differential, nor the counter alone could have caught it.
+//
+// # Why the accepted set is delegated rather than restated
+//
+// The set lives in [nodeIDFromValue], which is what the rest of the engine's row
+// readers use. Restating it here is precisely how the two drifted apart in the
+// first place, and a third representation added later would drift them apart
+// again — silently, because the failure mode is a skipped row and not an error.
+// Delegating makes that impossible by construction, and
+// TestExpandIntersect_NodeCellAcceptanceMatchesExpand pins the remaining half of
+// the invariant: that this operator and [Expand] accept the SAME set, so the fused
+// plan and the two-Expand plan it replaces skip exactly the same rows.
+//
+// ok == false therefore now means one thing only: the column is out of range, or
+// the cell is not node-typed at all (a null from an OPTIONAL MATCH that did not
+// bind). That is the case [Expand.advanceInput] also skips.
 func (op *ExpandIntersect) nodeAt(row Row, col int) (int64, bool) {
 	if col < 0 || col >= len(row) {
 		return 0, false
 	}
-	iv, ok := row[col].(expr.IntegerValue)
+	id, ok := nodeIDFromValue(row[col])
 	if !ok {
 		return 0, false
 	}
-	return int64(iv), true
+	return int64(id), true
 }
 
 // advanceR2 moves to the next admissible middle-leg edge, pulling a new candidate

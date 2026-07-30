@@ -309,15 +309,40 @@ func rangeCountWinsFn(
 	label string,
 	rangeCount func(budget uint64) (uint64, bool),
 ) bool {
-	nLabel := g.NodeIndex().Count(uint32(g.Registry().Intern(label)))
-	if nLabel < rangeSeekMinLabelPopulation {
+	budget, ok := rangeSeekBudget(g, label)
+	if !ok {
 		return false
 	}
-	budget := uint64(float64(nLabel) * rangeSeekMaxSelectivity)
 	count, exact := rangeCount(budget)
-	// Over budget (early-exited), unknown, or empty: keep the scan. (An empty
-	// range is correct but pointless to seek; the scan+filter yields the same
-	// zero rows without an index descent.)
+	return rangeCountWithinBudget(count, exact, budget)
+}
+
+// rangeSeekBudget returns the exact-count budget the shipped gate allows for
+// label, and ok == false when the label population is below
+// rangeSeekMinLabelPopulation — in which case NO count can change the verdict and
+// the caller must not take one.
+//
+// It is factored out of [rangeCountWinsFn] so the conjunctive intersection path
+// can derive the SAME budget once for a whole predicate and hand it to each
+// conjunct's count, instead of counting without a bound and comparing afterwards
+// (#2266). Sharing the derivation is what keeps the two paths from drifting: the
+// population floor and the selectivity ceiling are defined here and nowhere else.
+func rangeSeekBudget(g *lpg.Graph[string, float64], label string) (uint64, bool) {
+	nLabel := g.NodeIndex().Count(uint32(g.Registry().Intern(label)))
+	if nLabel < rangeSeekMinLabelPopulation {
+		return 0, false
+	}
+	return uint64(float64(nLabel) * rangeSeekMaxSelectivity), true
+}
+
+// rangeCountWithinBudget is the selectivity half of the shipped gate, applied to
+// a count already taken against budget: the count must be exact (not
+// early-exited), non-empty, and within budget.
+//
+// Over budget, unknown, or empty: keep the scan. (An empty range is correct but
+// pointless to seek; the scan+filter yields the same zero rows without an index
+// descent.)
+func rangeCountWithinBudget(count uint64, exact bool, budget uint64) bool {
 	return exact && count != 0 && count <= budget
 }
 

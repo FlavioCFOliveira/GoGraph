@@ -18210,6 +18210,40 @@ func tryFuseCyclicIntersect(
 	if !ok {
 		return nil
 	}
+	// Both columns are read from the row the FUSED operator receives, which is the
+	// MIDDLE hop's input row — not the row the two-Expand plan would have reached
+	// this point with. The schema map, by contrast, has already been extended by
+	// BOTH hops' three slots by the time this runs, so a lookup in it can hand back
+	// a column that does not exist yet in the row this operator will actually read.
+	//
+	// The middle hop wrote its destination key at (its own base + 2), so its base —
+	// which is exactly the width of the row it consumes, and therefore of the row
+	// the fusion consumes — is that column minus two. mid.ToVar is guaranteed
+	// non-empty by the feeds-this-hop check above, so the key is the variable's own
+	// name and not a synthetic one.
+	//
+	// A column at or beyond that width is the #2267 defect and it is NOT a
+	// theoretical one. It is reached by a cycle whose closing hop is a SELF-LOOP:
+	//
+	//	MATCH (a)-[r1:K]->(b)-[r2:K]->(b)
+	//
+	// Here IntoVar is `b`, which the middle hop itself binds — so the node the cycle
+	// closes on is not in the input row at all, it is what the fused-away hop was
+	// going to produce. schema[b] resolved to the middle hop's DESTINATION slot,
+	// past the end of the input row; every row was then read as a malformed column
+	// and skipped, and the query returned 0 rows where it must return 5.
+	//
+	// Declining is always safe and costs nothing but the two-Expand plan, so an
+	// unresolvable shape is vetoed here rather than guessed at. This narrows what
+	// the recogniser admits to shapes it can serve correctly; it widens nothing.
+	midToCol, ok := schema[mid.ToVar]
+	if !ok {
+		return nil
+	}
+	inputWidth := midToCol - 2
+	if midCol < 0 || midCol >= inputWidth || endCol < 0 || endCol >= inputWidth {
+		return nil
+	}
 	cfg := &exec.ExpandIntersectConfig{MidCol: midCol, EndCol: endCol}
 	if len(mid.RelTypes) > 0 {
 		cfg.MidEdgeType = mid.RelTypes[0]

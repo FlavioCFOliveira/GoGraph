@@ -39,7 +39,7 @@ type iiRow struct {
 // properties and one indexed string property. `a` cycles fast and `b` cycles slow,
 // so `a < 10 AND b < 30` is satisfied by a small intersection while each conjunct
 // alone covers far more of the label.
-func iiFixture(t *testing.T) (*lpg.Graph[string, float64], []iiRow) {
+func iiFixture(t testing.TB) (*lpg.Graph[string, float64], []iiRow) {
 	t.Helper()
 	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
 	rows := make([]iiRow, 0, iiPop)
@@ -68,7 +68,7 @@ func iiFixture(t *testing.T) (*lpg.Graph[string, float64], []iiRow) {
 
 // iiEngine builds an engine over g with all three btree indexes, with the
 // intersection enabled or disabled.
-func iiEngine(t *testing.T, g *lpg.Graph[string, float64], disable bool) *Engine {
+func iiEngine(t testing.TB, g *lpg.Graph[string, float64], disable bool) *Engine {
 	t.Helper()
 	eng := NewEngineWithOptions(g, EngineOptions{
 		DisableBitmapIntersection: disable,
