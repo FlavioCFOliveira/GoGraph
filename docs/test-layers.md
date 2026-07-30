@@ -190,8 +190,43 @@ discipline is enforced by tooling, not folklore.
 | Target | Layer | Equivalent command |
 |---|---|---|
 | `make test-short` | short | `go test -race -count=1 ./...` |
-| `make test-soak` | soak | `go test -race -count=1 -tags=soak ./...` |
-| `make test-nightly` | nightly | `go test -race -count=1 -tags=nightly ./...` |
+| `make test-soak` | soak | `go test -race -count=1 -timeout=$(SOAK_TIMEOUT) -tags=soak ./...` |
+| `make test-nightly` | nightly | `go test -race -count=1 -timeout=$(NIGHTLY_TIMEOUT) -tags=nightly ./...` |
+
+### Why the deferred layers pass an explicit `-timeout`
+
+`SOAK_TIMEOUT` (default `4h`), `NIGHTLY_TIMEOUT` (default `12h`) and
+`NIGHTLY_CI_TIMEOUT` (default `4h`) exist because Go applies a default of **10
+minutes per package** when no `-timeout` is given, and the soak layer cannot
+satisfy that. All three are overridable on the command line, so a slower or
+faster host needs no edit to the Makefile.
+
+Measured on an Apple M4 (10 cores, `darwin/arm64`, go1.26.5), in an isolated
+worktree so machine contention could not be the explanation:
+
+| Package | Under `-race`, `-tags=soak` | Verdict |
+|---|---|---|
+| `graph/io/csv` | **800.8 s — passes** | 1.33× the 10-minute default: could never finish inside it, on any machine |
+| `cypher` | did not complete at **45 min** | slow, not hung — see below |
+| `internal/shapegen` | did not complete at **45 min** | `TestStructured_Hypercube_Soak` still running at 40m19s |
+| `internal/sim` | did not complete at **45 min** | `TestSimulator_Soak` still running at 30m57s |
+
+**These packages are slow, not deadlocked.** The decisive check:
+`cypher/TestDetachDelete_Hub1M_Soak` builds 1 000 000 nodes and 1 000 000 edges
+and then issues one `DETACH DELETE`. With the race detector **off** it passes in
+**724.2 s**; with it **on** it had not finished after 44m24s. The goroutine dumps
+at timeout show the test bodies executing rather than blocked.
+
+The defaults above are therefore chosen so that the timeout is **not the binding
+constraint** — not to encode a known total runtime, because the three long
+packages have not been measured to completion under `-race`.
+
+> **Open question, deliberately not decided here.** This layer is specified as
+> "minutes-long workloads", yet three packages exceed 45 minutes under `-race`,
+> which is nightly-class by that definition. Either those specific tests belong
+> in the nightly layer, or the soak target should not use `-race`, or the layer
+> definition should change. Moving a test between layers changes what each gate
+> means, so it is recorded here rather than settled unilaterally.
 
 Three composite pipeline targets wrap these:
 

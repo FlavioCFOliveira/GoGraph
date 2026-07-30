@@ -59,13 +59,37 @@ test-short: ## [layer: short]   local default — race detector, no build tags
 test-short-timings: ## [layer: short] Run the short layer (race, -json) and report packages over the 60s/pkg budget (SOFT_BUDGET/HARD_BUDGET overridable)
 	bash -o pipefail -c '$(GO) test $(RACE_FLAGS) -count=1 -json $(PACKAGES) | bash scripts/pkg_time_budget.sh'
 
+# SOAK_TIMEOUT / NIGHTLY_TIMEOUT — the deferred layers need an EXPLICIT
+# per-package timeout (rmp #2259).
+#
+# Without one, Go applies its default of 10 minutes per package, which the soak
+# layer cannot satisfy: measured on an Apple M4 under -race, graph/io/csv alone
+# takes 800.8 s (13.3 min) and passes, so that package could never finish inside
+# the default however quiet the machine. Three further packages — cypher,
+# internal/shapegen and internal/sim — did not complete even at 45 min under
+# -race. They are SLOW, not hung: cypher/TestDetachDelete_Hub1M_Soak builds
+# 1 000 000 nodes and 1 000 000 edges and completes in 724.2 s with the race
+# detector OFF, against >44 min with it on.
+#
+# The values below are therefore chosen so the timeout is NOT the binding
+# constraint, rather than to encode a known total runtime — the three long
+# packages have not been measured to completion under -race. Both are
+# overridable, so a slower or faster host needs no edit here.
+# See docs/test-layers.md for the measurements.
+SOAK_TIMEOUT    ?= 4h
+NIGHTLY_TIMEOUT ?= 12h
+# The CI-safe nightly subset still excludes only ./search/extern/..., so it
+# retains the three long packages above and needs the same headroom; its former
+# 50m was below what the evidence requires.
+NIGHTLY_CI_TIMEOUT ?= 4h
+
 .PHONY: test-soak
-test-soak: ## [layer: soak]    short + soak — race detector, -tags=soak
-	$(GO) test $(RACE_FLAGS) -count=1 -tags=soak $(PACKAGES)
+test-soak: ## [layer: soak]    short + soak — race detector, -tags=soak (SOAK_TIMEOUT overridable)
+	$(GO) test $(RACE_FLAGS) -count=1 -timeout=$(SOAK_TIMEOUT) -tags=soak $(PACKAGES)
 
 .PHONY: test-nightly
-test-nightly: ## [layer: nightly] short + soak + nightly — race detector, -tags=soak,nightly,soakfull (full; includes the multi-hour endurance tests)
-	$(GO) test $(RACE_FLAGS) -count=1 -tags=soak,nightly,soakfull $(PACKAGES)
+test-nightly: ## [layer: nightly] short + soak + nightly — race detector, -tags=soak,nightly,soakfull (full; includes the multi-hour endurance tests; NIGHTLY_TIMEOUT overridable)
+	$(GO) test $(RACE_FLAGS) -count=1 -timeout=$(NIGHTLY_TIMEOUT) -tags=soak,nightly,soakfull $(PACKAGES)
 
 # test-nightly-ci: CI-safe nightly subset for scheduled GitHub Actions runs.
 #
@@ -81,22 +105,29 @@ test-nightly: ## [layer: nightly] short + soak + nightly — race detector, -tag
 # (2,000,000 / 1,000,000 ticks). They are gated behind the `soakfull` tag, which
 # test-nightly passes but this CI subset does not, so they compile out here.
 # Under the race detector they alone exceed the 600 s go-test default timeout on
-# a fast workstation and would blow the 50m timeout / 90m job budget on a GitHub
-# runner. Their scenario run-path is still covered by the short layer (part
-# of `make ci`: TestCatalogue_SmokeSubsetRunsClean) and at a small budget by
+# a fast workstation. Their scenario run-path is still covered by the short layer
+# (part of `make ci`: TestCatalogue_SmokeSubsetRunsClean) and at a small budget by
 # the soak-layer TestCatalogue_EachScenarioRunsClean; the endurance budget is
-# a periodic stability watch, not a release gate (see CLAUDE.md soak-gate policy).
+# a periodic stability watch, not a release gate (see the soak-gate policy in the
+# project instructions).
 #
-# Use test-nightly (no -ci suffix) for a complete local run or on machines
-# with ≥ 16 GB RAM. The manual-heavy.yml workflow (workflow_dispatch only)
-# covers the excluded packages.
+# The "-ci" name is now historical (rmp #2259). All correctness gating is LOCAL:
+# .github/workflows/ contains only release.yml, nothing invokes this target, and
+# the manual-heavy.yml workflow this comment used to point at no longer exists.
+# The former 50m timeout was sized for a GitHub job budget that no longer applies
+# — and was in any case below what the layer needs, since cypher alone did not
+# complete in 45 min under -race. NIGHTLY_CI_TIMEOUT now matches SOAK_TIMEOUT.
+#
+# Use test-nightly (no -ci suffix) for a complete local run, or on machines with
+# ≥ 16 GB RAM; this subset remains useful for skipping the two memory-hungry
+# excluded packages.
 NIGHTLY_CI_PKGS := $(filter-out \
 	github.com/FlavioCFOliveira/GoGraph/search/extern, \
 	$(shell $(GO) list -tags=soak,nightly ./...))
 
 .PHONY: test-nightly-ci
-test-nightly-ci: ## [layer: nightly-ci] CI-safe nightly subset — excludes search/extern (pkg, >7 GB under race) and the soakfull multi-hour sim endurance tests (tag)
-	$(GO) test $(RACE_FLAGS) -count=1 -timeout=50m -tags=soak,nightly $(NIGHTLY_CI_PKGS)
+test-nightly-ci: ## [layer: nightly-ci] CI-safe nightly subset — excludes search/extern (pkg, >7 GB under race) and the soakfull multi-hour sim endurance tests (tag); NIGHTLY_CI_TIMEOUT overridable
+	$(GO) test $(RACE_FLAGS) -count=1 -timeout=$(NIGHTLY_CI_TIMEOUT) -tags=soak,nightly $(NIGHTLY_CI_PKGS)
 
 .PHONY: test-crashinject
 test-crashinject: ## Run crash-injection battery (requires gograph_crashinject build tag; may need elevated process limits)
