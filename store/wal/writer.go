@@ -35,7 +35,13 @@ var ErrPrefixTruncateUnsupported = errors.New("wal: TruncatePrefix requires a pa
 // Stats is a snapshot of a [Writer]'s lifetime counters. Counters
 // are monotonic; subtract two snapshots to compute deltas. Values
 // are read with [sync/atomic.LoadUint64], so they may race slightly
-// behind in-flight operations but never observe a torn value.
+// behind in-flight operations but never observe a torn value. The four
+// counters are loaded one at a time, so a Stats is a per-field snapshot
+// rather than a single atomic view across all four.
+//
+// The value [Writer.Stats] returns is a detached copy of plain integers, so a
+// Stats is safe for concurrent reads and [Writer.Stats] is safe to call
+// concurrently with [Writer.Append] and [Writer.Sync].
 type Stats struct {
 	Frames uint64 // total frames appended
 	Bytes  uint64 // total bytes appended (header + payload)

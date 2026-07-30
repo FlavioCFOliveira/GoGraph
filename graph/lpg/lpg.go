@@ -864,24 +864,6 @@ func (g *Graph[N, W]) clearSlotLabels(srcID, dstID graph.NodeID) {
 	g.adj.ClearEdgeLabelSlots(srcID, dstID)
 }
 
-// firstSlotLabel returns the encoded label currently on the FIRST dst-matching
-// adjacency slot of src and whether such a slot exists. encoded == 0 means the
-// slot exists but carries no label. Reads the lock-free adjacency snapshot.
-func (g *Graph[N, W]) firstSlotLabel(srcID, dstID graph.NodeID) (encoded uint32, slotExists bool) {
-	nbs, _ := g.adj.LoadEntry(srcID)
-	labs := g.adj.LoadEntryLabels(srcID)
-	for i, nb := range nbs {
-		if nb != dstID {
-			continue
-		}
-		if labs != nil && i < len(labs) {
-			return labs[i], true
-		}
-		return 0, true
-	}
-	return 0, false
-}
-
 // propKeys returns the property-key registry.
 func (g *Graph[N, W]) propKeys() *PropertyKeyRegistry { return g.pkeys }
 

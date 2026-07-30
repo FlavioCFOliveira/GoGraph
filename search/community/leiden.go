@@ -20,6 +20,13 @@ import (
 )
 
 // LeidenOptions configures [Leiden].
+//
+// It holds only scalars and is taken by value, so [LeidenCtx] applies its
+// defaults to its own copy and never writes the caller's. Concurrency: one
+// value may configure any number of concurrent runs — which is what lets the
+// reproducibility guarantee documented on [Leiden] hold for parallel callers
+// sharing a single opts — and it carries no synchronisation, so do not mutate
+// it while a call that is copying it is in flight.
 type LeidenOptions struct {
 	// MaxIterations bounds the number of local-moving sweeps per pass.
 	MaxIterations int
@@ -43,6 +50,12 @@ func DefaultLeidenOptions() LeidenOptions {
 // live NodeID it holds a community ID in [0, NumCommunities); for ghost
 // NodeID slots (created by sharded packing on small graphs) it holds
 // the sentinel value -1. NumCommunities counts only live communities.
+//
+// Community is allocated fresh by the run that produced the Partition and
+// aliases nothing in the source CSR, so the receiving caller owns the result
+// outright and may read it concurrently from any number of goroutines. Nothing
+// in this package writes to a Partition once it has been returned; a caller
+// that mutates Community must synchronise those writes itself.
 type Partition struct {
 	Community      []int
 	NumCommunities int

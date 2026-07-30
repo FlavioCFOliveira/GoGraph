@@ -10,6 +10,11 @@ import (
 
 // FixtureSpec parameterises [BuildFixture]. The same seed produces
 // the same graph every time, making the harness deterministic.
+//
+// FixtureSpec holds only scalars and is taken by value; [BuildFixture] seeds a
+// fresh generator per call from Seed and shares no state between calls, so one
+// spec may drive any number of concurrent builds and each independently
+// produces the same graph.
 type FixtureSpec struct {
 	// Vertices is the number of pre-interned vertex IDs.
 	Vertices uint64

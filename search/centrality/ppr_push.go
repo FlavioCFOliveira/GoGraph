@@ -9,6 +9,12 @@ import (
 )
 
 // PPRPushOptions controls [PersonalisedPushPageRank].
+//
+// It holds only scalars and is taken by value, so [PersonalisedPushPageRankCtx]
+// applies its defaults to its own copy and never writes the caller's.
+// Concurrency: one PPRPushOptions may configure any number of concurrent runs;
+// it carries no synchronisation, so do not mutate it while a call that is
+// copying it is in flight.
 type PPRPushOptions struct {
 	// Damping is the random-jump probability (alpha; typical 0.85).
 	Damping float64

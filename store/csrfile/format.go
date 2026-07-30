@@ -27,7 +27,9 @@ const HeaderSize = 64
 // starts at an offset that is a multiple of this value.
 const Alignment = 64
 
-// WeightKind tags the on-disk type of the weights section.
+// WeightKind tags the on-disk type of the weights section. It is an immutable
+// scalar and its only method, [WeightKind.Size], reads nothing but the
+// receiver, so it is safe for concurrent use.
 type WeightKind uint8
 
 // Supported weight kinds.

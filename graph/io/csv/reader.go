@@ -60,6 +60,12 @@ const DefaultMaxBytes int64 = 128 << 20 // 128 MiB
 var ErrInputTooLarge = errors.New("csv: input exceeds maximum size")
 
 // Options controls Reader / Writer behaviour.
+//
+// Options holds only scalars and is copied by value into every [ReadInto],
+// [ReadIntoCtx], [Write], and [WriteCtx] call, so one Options may configure any
+// number of concurrent readers and writers. It carries no synchronisation of
+// its own: mutating a shared Options races the goroutines that are copying it
+// into a call, so populate it before those calls start.
 type Options struct {
 	// MaxBytes caps the number of bytes read from the input before the
 	// reader fails with [ErrInputTooLarge]. [DefaultOptions] sets it to

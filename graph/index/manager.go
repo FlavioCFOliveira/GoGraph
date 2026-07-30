@@ -83,7 +83,8 @@ type Serializer interface {
 	Deserialize(r io.Reader) error
 }
 
-// ChangeOp tags the shape of a [Change].
+// ChangeOp tags the shape of a [Change]. It is an immutable scalar with no
+// methods, so it is safe for concurrent use.
 type ChangeOp uint8
 
 // Mutation kinds the Manager can fan out.
@@ -106,6 +107,15 @@ const (
 // owning graph's registries (lpg.PropertyKeyID / lpg.LabelID),
 // surfaced as uint32 so this package does not import the lpg
 // package and create a cycle.
+//
+// A Change is delivered by value: [Manager.Apply] and [Manager.ApplyBatch] copy
+// it into each [Subscriber.Apply] call and hold only a read lock, so several
+// goroutines can be fanning changes out at the same time, each working on its
+// own copy. Change is therefore safe for concurrent use. The one caveat is
+// OldValue and NewValue: they carry lpg.PropertyValue values, which are
+// immutable after construction except that their bytes and list variants expose
+// slices aliasing the value's backing store, so a subscriber that retains such
+// a slice must not mutate it.
 type Change struct {
 	// OldValue and NewValue are present only for property changes.
 	// They are typed as any so this package stays generic across
