@@ -77,7 +77,21 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
+	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
+
+// MetricExpandIntersectEngaged counts how many times a fused cyclic expand was
+// actually initialised for execution.
+//
+// This is the white-box engagement counter, and it is not optional observability:
+// SPIKE #2155 verified that the openCypher TCK contains NO directed cycle over
+// three or more distinct node variables, so the 3897/3897 gate stays green whether
+// this operator is correct, wrong, or never runs at all. A differential comparing
+// the flag on against the flag off is likewise blind to an operator that silently
+// declined to engage — both arms would simply run today's plan and agree. Only a
+// counter distinguishes "identical because it is correct" from "identical because
+// it never fired".
+const MetricExpandIntersectEngaged = "cypher.expand_intersect.engaged"
 
 // ExpandIntersectConfig configures a fused cyclic expand.
 type ExpandIntersectConfig struct {
@@ -169,6 +183,7 @@ func (op *ExpandIntersect) Init(ctx context.Context) error {
 	if err := op.input.Init(ctx); err != nil {
 		return err
 	}
+	cmetrics.IncCounter(MetricExpandIntersectEngaged, 1)
 	op.fwdVerts = op.fwd.VerticesSlice()
 	op.fwdEdges = op.fwd.EdgesSlice()
 	op.revVerts = op.rev.VerticesSlice()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/cucumber/godog"
@@ -13,6 +14,26 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
+
+// tckEngineOptions returns the EngineOptions every scenario engine is built with.
+//
+// GOGRAPH_TCK_CYCLIC_INTERSECT=1 turns on the fused cyclic expand (#2157) for the
+// WHOLE suite. That switch exists because #2157's acceptance criteria require the
+// TCK green with the operator BOTH enabled and disabled, and the flag defaults off
+// — so without it the suite could only ever exercise the disabled arm.
+//
+// The switch is not cosmetic. SPIKE #2155 verified the TCK holds no directed cycle
+// over three or more distinct node variables, but it DOES hold 2-cycles
+// (Match3 [17], [18]; Match6), and 2-cycles fuse — so the operator genuinely
+// engages under this switch and the enabled run is real coverage rather than a
+// second copy of the disabled one.
+//
+//	GOGRAPH_TCK_CYCLIC_INTERSECT=1 go test ./cypher/tck/ -run TestTCKExecution
+func tckEngineOptions() cypher.EngineOptions {
+	return cypher.EngineOptions{
+		EnableCyclicIntersect: os.Getenv("GOGRAPH_TCK_CYCLIC_INTERSECT") == "1",
+	}
+}
 
 // world holds per-scenario execution state for the godog TCK runner.
 // A fresh world is created for each scenario via [newWorld].
@@ -46,7 +67,7 @@ type world struct {
 // newWorld allocates a fresh world backed by an empty directed graph.
 func newWorld() *world {
 	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
-	return &world{g: g, eng: cypher.NewEngine(g)}
+	return &world{g: g, eng: cypher.NewEngineWithOptions(g, tckEngineOptions())}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -61,7 +82,7 @@ func (w *world) givenAnEmptyGraph(_ context.Context) error {
 	}
 	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
 	w.g = g
-	w.eng = cypher.NewEngine(g)
+	w.eng = cypher.NewEngineWithOptions(g, tckEngineOptions())
 	w.result = nil
 	w.err = nil
 	w.params = nil
