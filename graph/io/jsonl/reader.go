@@ -87,6 +87,14 @@ func translateScanErr(err error) error {
 // rejected (rmp #2043). A plain string with omitempty conflated the two: the
 // empty value was dropped on write and re-read as absent, and the record was
 // wrongly rejected on re-import.
+//
+// A Record decoded by the reader owns its data outright — [encoding/json]
+// allocates a fresh string behind every pointer field and a fresh backing array
+// for Labels — so it is safe to hand to another goroutine and to read
+// concurrently. A Record built by the writer does not: it points ID, Src, and
+// Dst at elements of the writer's per-call node-name slice, so it is valid only
+// while that slice is live and must not be retained past the encode call that
+// consumes it.
 type Record struct {
 	Type   string  `json:"type"`
 	ID     *string `json:"id,omitempty"`     // node key — used by "node" and "property" records

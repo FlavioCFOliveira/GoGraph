@@ -117,6 +117,32 @@ type ColumnarHashJoin struct {
 	probeCurRow int // active probe row (its bucket is being scanned)
 	bucketIdx   int // next index into bucket to test
 
+	// emitted is the CUMULATIVE row count across FillChunk calls, and it drives
+	// the periodic cancellation check (rmp #2261).
+	//
+	// Cumulative is the load-bearing part. The check used to test the PER-CALL
+	// counter n against `n&4095 == 0 && n > 0`, and every caller passes
+	// maxRows <= DefaultChunkCapacity (4096), so n never left [0, 4095]: the
+	// first clause held only at n == 0, which the second excluded. The guard
+	// could NOT FIRE on any input. This mirrors NodeByLabelScan, whose equivalent
+	// check is satisfiable precisely because it counts cumulatively.
+	//
+	// Be precise about what this bounds, because it is less than it looks. With
+	// maxRows capped at the chunk capacity, the FillChunk entry check already
+	// observes cancellation once per chunk, so in production this guard is a
+	// second, redundant observation at the same cadence rather than a new one. It
+	// earns its place by being correct instead of dead, and by covering a caller
+	// that asks for more than one chunk in a single call.
+	//
+	// What NEITHER check bounds: a long stretch of NON-MATCHING probe rows is
+	// consumed inside nextMatch, which advances the probe and bucket cursors
+	// without emitting and takes no ctx argument. A join whose probe side is large
+	// and whose match rate is near zero can therefore run for a long time between
+	// two cancellation observations. Bounding that needs a check inside nextMatch,
+	// which is a change to that function's contract and is recorded rather than
+	// made here.
+	emitted int
+
 	buildOnLeft  bool
 	built        bool
 	activeProbe  bool // a probe row's bucket is loaded and being scanned
@@ -258,6 +284,7 @@ func (op *ColumnarHashJoin) Init(ctx context.Context) error {
 	op.probeRowCur = 0
 	op.probeCurRow = 0
 	op.bucketIdx = 0
+	op.emitted = 0
 	op.outBuf = op.outBuf[:0]
 	op.budget.reset()
 	if err := op.build.Init(ctx); err != nil {
@@ -390,7 +417,7 @@ func (op *ColumnarHashJoin) FillChunk(dst *Chunk, maxRows int) (int, error) {
 	}
 	n := 0
 	for n < maxRows {
-		if n&4095 == 0 && n > 0 {
+		if op.emitted&4095 == 0 && op.emitted > 0 {
 			if err := op.ctx.Err(); err != nil {
 				return n, err
 			}
@@ -404,6 +431,7 @@ func (op *ColumnarHashJoin) FillChunk(dst *Chunk, maxRows int) (int, error) {
 		}
 		op.emitChunk(dst, probeRow, buildID)
 		n++
+		op.emitted++
 	}
 	return n, nil
 }

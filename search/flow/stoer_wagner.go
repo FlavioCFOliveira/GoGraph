@@ -7,6 +7,13 @@ import (
 )
 
 // MinCutResult is the output of [StoerWagner].
+//
+// A and B are allocated fresh by the run that produced them and alias neither
+// each other nor the caller's weight matrix, which [StoerWagnerCtx] copies
+// before it merges vertices, so the receiving caller owns the result outright
+// and may read it concurrently from any number of goroutines. Nothing in this
+// package writes to a MinCutResult once it has been returned; a caller that
+// mutates A or B must synchronise those writes itself.
 type MinCutResult struct {
 	A      []int // one side of the cut
 	B      []int // the other side

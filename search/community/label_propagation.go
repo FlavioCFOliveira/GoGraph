@@ -9,6 +9,12 @@ import (
 )
 
 // LabelPropagationOptions configures [LabelPropagation].
+//
+// It holds only scalars and is taken by value, so [LabelPropagationCtx] applies
+// its default to its own copy and never writes the caller's. Concurrency: one
+// value may configure any number of concurrent runs; it carries no
+// synchronisation, so do not mutate it while a call that is copying it is in
+// flight.
 type LabelPropagationOptions struct {
 	MaxIterations int
 }

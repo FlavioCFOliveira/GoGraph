@@ -122,6 +122,39 @@ func (g *Graph[N, W]) edgeHandleHasLabel(srcID, dstID graph.NodeID, handle uint6
 	return bag.has(lid), true
 }
 
+// HasEdgeHandleLabelRecordByID reports whether the by-handle label store holds a
+// relationship-type record for handle on the directed (srcID, dstID) pair.
+//
+// It is the presence question on its own, without the types: a slot WITHOUT a
+// record is COLUMN-TYPED — its relationship type lives in the adjacency label
+// column and [Graph.ForEachSlotRelTypeByID] is what reads it — while a slot WITH
+// one has the record as its authority. [Graph.slotCarriesType] applies exactly
+// that precedence, so a caller classifying slots must ask the same question or the
+// two will disagree about which source owns a slot.
+//
+// It exists because the alternative probe — calling [Graph.EdgeLabelsByHandle] and
+// testing the result for emptiness — resolves every id to a name and allocates a
+// []string per slot, which a per-slot classification sweep over a whole graph
+// cannot pay. This allocates nothing and takes one map lookup under the pair's
+// shard lock. It also needs no Mapper round-trip, taking NodeIDs directly.
+//
+// HasEdgeHandleLabelRecordByID is safe for concurrent use.
+func (g *Graph[N, W]) HasEdgeHandleLabelRecordByID(srcID, dstID graph.NodeID, handle uint64) bool {
+	if handle == 0 {
+		return false
+	}
+	k := edgeKey{src: srcID, dst: dstID}
+	sh := g.edgeHandleLabelShardFor(k)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	byHandle, ok := sh.m[k]
+	if !ok {
+		return false
+	}
+	_, ok = byHandle[handle]
+	return ok
+}
+
 // SetEdgeLabelByHandle attaches name to the directed edge identified by
 // the stable handle on the (src, dst) pair. No-op when handle is 0 (the
 // no-handle sentinel) or when either endpoint is unknown to the mapper.
@@ -142,6 +175,18 @@ func (g *Graph[N, W]) SetEdgeLabelByHandle(src, dst N, handle uint64, name strin
 	lid := g.reg.Intern(name)
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeHandleLabelShardFor(k)
+	// changed is read by the FIRST-registered defer, which therefore runs LAST —
+	// after sh.mu.Unlock below. That ordering is deliberate: the derived
+	// edge-label set is inside [Graph.TopoGeneration]'s scope (rmp #2255), and
+	// rmp #2151/fafc50c7 established that the epoch must move only once the write
+	// it announces is fully published, so a reader sampling the new epoch cannot
+	// miss it.
+	changed := false
+	defer func() {
+		if changed {
+			g.topoGeneration.Add(1)
+		}
+	}()
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	if sh.m == nil {
@@ -155,8 +200,17 @@ func (g *Graph[N, W]) SetEdgeLabelByHandle(src, dst N, handle uint64, name strin
 	// labelBag is stored by value: mutate a local copy and write it back under
 	// the shard lock (the write-back is load-bearing — add may grow/promote).
 	bag := byHandle[handle]
+	if bag.has(lid) {
+		// Already recorded for this handle. Re-asserting it must NOT bump the
+		// epoch: the MERGE MATCH branch (cypher/exec/merge_relationship.go) calls
+		// through here for every MERGE that binds an existing relationship, and a
+		// spurious bump would invalidate the forward/reverse CSR pair cache and
+		// force an O(V+E) rebuild for a mutation that changed nothing.
+		return
+	}
 	bag.add(lid)
 	byHandle[handle] = bag
+	changed = true
 }
 
 // EdgeLabelsByHandle returns the labels recorded for the edge identified

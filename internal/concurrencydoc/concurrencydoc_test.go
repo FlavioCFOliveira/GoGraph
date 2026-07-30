@@ -13,16 +13,19 @@ import (
 // RATCHET: it was measured immediately after task #1400 documented the 15
 // heavy-hitter types, and it must only ever be lowered.
 //
-// Lowering it: when you document one or more of the remaining undocumented
-// types (run TestConcurrencyDocReport to list them), re-measure and set
-// baselineMax to the new, smaller count in the same change.
+// It is now ZERO: task #2254 documented the last 20 undocumented types, so the
+// CLAUDE.md mandate — "Every exported type carries a godoc clause stating
+// whether it is safe for concurrent use; ambiguity is a defect" — is met in
+// full and the ratchet has reached its floor. A newly exported type that ships
+// without a concurrency clause therefore fails TestConcurrencyDocRatchet
+// immediately, which is the point: the debt cannot be re-accumulated.
 //
 // Raising it is forbidden. A new exported type with no concurrency clause must
 // be documented (state whether it is safe for concurrent use), not waved past
-// by bumping this constant. The CLAUDE.md mandate is explicit: "Every exported
-// type carries a godoc clause stating whether it is safe for concurrent use;
-// ambiguity is a defect."
-const baselineMax = 21
+// by bumping this constant. Derive the clause from the type's fields and its
+// pointer-receiver methods — a pasted template satisfies the scanner and
+// defeats the mandate.
+const baselineMax = 0
 
 // concurrencyAllowlist names exported types that are exempt from the scan:
 // pure-data value types for which a concurrency clause would add no

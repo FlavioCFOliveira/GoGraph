@@ -55,11 +55,17 @@ import (
 //
 // This is SAFE only because every consumer bounds-checks the vertex index before
 // indexing the offsets array — Expand's probes and range load, ShortestPath and its
-// bidirectional variant, buildRevToFwd, and buildEdgeTypeFilter (which additionally
-// bounds its loop on fwdCSR.MaxNodeID()). A node with no edges has no arcs to
-// traverse, so treating it as absent from the pair is the correct answer, not an
+// bidirectional variant, buildRevToFwd, buildEdgeTypeFilter (which additionally
+// bounds its loop on fwdCSR.MaxNodeID()), and ExpandIntersect via its own
+// outRange/inRange guards. A node with no edges has no arcs to traverse, so
+// treating it as absent from the pair is the correct answer, not an
 // approximation. Any NEW consumer that indexes `vertices` unguarded would be a
 // latent out-of-range panic; TestCSRPairCache_NodeOnlyCreateStaysSafe pins it.
+//
+// Keep this list current when a consumer is added — ExpandIntersect was missing
+// from it for a whole sprint (rmp #2261). It guards correctly, so nothing was
+// broken, but the list is what the next reader will trust when deciding whether a
+// new consumer needs a guard.
 //
 // # Memory
 //

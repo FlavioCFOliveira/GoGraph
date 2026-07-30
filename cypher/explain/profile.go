@@ -14,6 +14,14 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 // OperatorStats accumulates execution statistics for one operator.
+//
+// The instance a [ProfiledOperator] embeds is mutated in place by every
+// [ProfiledOperator.Next] call, without synchronisation, so it is NOT safe for
+// concurrent use while its pipeline is draining: reading it from another
+// goroutine — including through [ProfiledOperator.Stats] — races the
+// accumulation. [ProfiledOperator.Stats] returns a copy, so once the pipeline
+// has been drained that snapshot is an ordinary value and may be shared and
+// read freely.
 type OperatorStats struct {
 	// Name is the display name assigned when the operator was wrapped.
 	Name string
@@ -80,6 +88,13 @@ func (p *ProfiledOperator) Stats() OperatorStats {
 
 // ProfileReport is the textual PROFILE output collected after draining a
 // pipeline instrumented with [ProfiledOperator] wrappers.
+//
+// A report is assembled once, after the drain, and nothing here mutates it
+// afterwards — [FormatReport] takes it by value and only reads it — so a
+// finished report is safe for concurrent reads by any number of goroutines. The
+// one caveat is Operators: every copy of the report shares that single backing
+// array, so a caller must not append to it or overwrite its elements while
+// another goroutine reads the report.
 type ProfileReport struct {
 	// Operators holds per-operator statistics in the order they were added.
 	Operators []OperatorStats

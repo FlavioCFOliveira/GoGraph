@@ -65,6 +65,11 @@ const maxParallelism = 16
 var parallelMinEdges = 50_000
 
 // Edge is one record the bulk loader consumes.
+//
+// Every field is an immutable value type, so an Edge is safe for concurrent
+// reads: the partitioned-parallel build ([Options.Parallel]) reads the buffered
+// edge slice from several goroutines at once, each over a disjoint set of
+// indices, without synchronising on the records themselves.
 type Edge struct {
 	Src    string
 	Dst    string
@@ -72,6 +77,11 @@ type Edge struct {
 }
 
 // Options configures the [Loader].
+//
+// Options holds only scalars and [New] copies it into the Loader, so the
+// caller's value is never read again afterwards and one Options may configure
+// any number of concurrent Loaders. It carries no synchronisation of its own;
+// populate it before calling [New].
 type Options struct {
 	// OutputPath is the destination csrfile.
 	OutputPath string

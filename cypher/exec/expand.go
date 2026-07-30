@@ -38,8 +38,19 @@ package exec
 //
 // # Cancellation
 //
-// ctx.Err() is checked at the top of every Next call and every 4096 emitted
-// rows inside the expand inner loop.
+// Row mode: ctx.Err() is checked at the top of EVERY iteration of Next's loop,
+// so cancellation is observed within one neighbour step.
+//
+// Chunk mode: fillChunk checks on entry and then whenever its per-call row
+// counter is a multiple of 4096. Every caller passes maxRows <= the chunk
+// capacity (4096), so in practice that is the entry check, and the latency bound
+// is one chunk.
+//
+// This paragraph used to describe a cadence of "every 4096 emitted rows" driven
+// by an emitCount field. That field was written and reset but NEVER READ, and the
+// helper that incremented it carried a comment claiming it checked cancellation,
+// which it did not. The code was SAFER than documented; the dead state and the
+// false description are both removed (rmp #2261).
 
 import (
 	"context"
@@ -166,7 +177,6 @@ type Expand struct {
 	// expansion cursors
 	fwdStart, fwdEnd uint64
 	revStart, revEnd uint64
-	emitCount        int // total rows emitted; drives ctx check cadence
 	pendingRemaining int64
 
 	// Columnar fan-out cursor and multiplicity re-emit state (FillChunk path).
@@ -252,7 +262,6 @@ func (op *Expand) Init(ctx context.Context) error {
 	}
 	op.srcID = -1
 	op.fwdDone = true
-	op.emitCount = 0
 	// Reset the columnar fan-out cursor so a re-Init (pooled/re-run operator)
 	// re-pulls from the start. cRow = -1 makes the first advanceInputChunk step
 	// to row 0 (or trigger the first child batch pull). These are inert on the
@@ -371,7 +380,6 @@ func (op *Expand) tryFwdEdge(out *Row) (emitted, handled bool) {
 			return false, true // expand-into: not the bound destination — skip
 		}
 		op.buildRow(out, src, edge, dst)
-		op.incEmitCount()
 		return true, true
 	}
 }
@@ -392,7 +400,6 @@ func (op *Expand) tryRevEdge(out *Row) (emitted, handled bool) {
 			return false, true // expand-into: not the bound destination — skip
 		}
 		op.buildRow(out, src, edge, dst)
-		op.incEmitCount()
 		return true, true
 	}
 }
@@ -823,12 +830,6 @@ func (op *Expand) buildRow(out *Row, srcID, edgeID, dstID int64) {
 	op.outBuf[len(op.inputRow)+1] = expr.IntegerValue(edgeID)
 	op.outBuf[len(op.inputRow)+2] = expr.IntegerValue(dstID)
 	*out = op.outBuf
-}
-
-// incEmitCount increments the emission counter and checks cancellation every
-// 4096 emitted rows (checked in the outer loop, so this is a no-op here).
-func (op *Expand) incEmitCount() {
-	op.emitCount++
 }
 
 // Close releases resources and closes the child operator.

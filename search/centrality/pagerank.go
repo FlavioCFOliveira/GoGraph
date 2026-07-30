@@ -60,6 +60,12 @@ func hasInvalidFloat(values ...float64) bool {
 }
 
 // PageRankOptions configures [PageRank].
+//
+// It holds only scalars and is taken by value, so [PageRankCtx] applies its
+// defaults to its own copy and never writes the caller's. Concurrency: one
+// PageRankOptions may configure any number of concurrent runs; it carries no
+// synchronisation, so do not mutate it while a call that is copying it is in
+// flight.
 type PageRankOptions struct {
 	Damping       float64
 	MaxIterations int

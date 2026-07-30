@@ -114,6 +114,15 @@ var (
 var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 
 // Frame is the in-memory representation of one WAL frame.
+//
+// A Frame carries no synchronisation of its own, so its concurrency contract
+// follows the ownership of Payload. A Frame returned by [Decode] owns its
+// Payload outright — the decoder allocates a fresh slice per frame and never
+// aliases the reader's buffer — so it is safe to hand to another goroutine and
+// to read concurrently. A Frame passed to [Encode] merely borrows the caller's
+// Payload for the duration of that call, which is what lets the transaction
+// layer re-use one pooled scratch buffer for every op; such a Frame must not be
+// retained or shared past the call that consumed it.
 type Frame struct {
 	Payload []byte
 	Version uint16

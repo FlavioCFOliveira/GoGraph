@@ -25,6 +25,12 @@ func hasInvalidFloat(values ...float64) bool {
 }
 
 // PageRankOptions configures [PageRank].
+//
+// It holds only scalars and is taken by value, so [PageRankCtx] normalises its
+// own copy and never writes the caller's. Concurrency: one PageRankOptions may
+// configure any number of concurrent runs over a shared [csrfile.Reader]; it
+// carries no synchronisation, so do not mutate it while a call that is copying
+// it is in flight.
 type PageRankOptions struct {
 	// Damping is the random-jump probability (typical 0.85).
 	Damping float64

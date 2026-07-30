@@ -8997,6 +8997,30 @@ func tryBuildParallelScanProject(
 		}
 	}
 
+	// The SELECTION's predicate must pass the same scalar screen as the projection
+	// items (rmp #2257). It is screened here, on the FINAL sel, rather than where
+	// sel was bound: the intersection peephole above may have set it to nil, in
+	// which case the bitmap subsumes it and no worker evaluates a predicate at all.
+	//
+	// Omitting this screen was a process-fatal defect, not a semantic nicety.
+	// exprHasNonScalar rejects exactly the expression kinds that need the shared
+	// SubqueryEvaluator and pattern evaluator — CountSubquery, ExistsSubquery,
+	// PatternComprehension, ListComprehension, ReduceExpr — and forWorker copies
+	// both of those BY POINTER. So a `WHERE COUNT { … }` reached N worker
+	// goroutines through one evaluator whose own godoc declares it not safe for
+	// concurrent use, and they raced on its memo maps. Measured on a default
+	// engine over 60 000 nodes: 185 races under -race, and 5 of 5 production runs
+	// (no race detector) died with `fatal error: concurrent map writes` or a nil
+	// dereference. `concurrent map writes` is a runtime throw that recover cannot
+	// catch, so the whole host process went down.
+	//
+	// Declining is the correct remedy rather than building per-worker evaluators:
+	// the query stays correct and merely runs on the serial path, which is what it
+	// did before the fused shape existed.
+	if sel != nil && exprHasNonScalar(sel.PredicateExpr) {
+		return nil, false, nil
+	}
+
 	// Per-worker subplan factory. Each call rebuilds the SAME subtree over a
 	// per-worker walker restricted to the morsel and a per-worker buildOpts copy
 	// whose lazily-written fields are zeroed (so two workers never race writing
@@ -9208,9 +9232,23 @@ func isNonDeterministicCall(fn *ast.FunctionInvocation) bool {
 //     concurrent write from another worker cannot alias the same map. The reset is
 //     sound for the fused shape because the subtree is self-contained: every map
 //     entry the build needs is (re)written from the subtree's own IR, never read
-//     from a pre-existing entry. The query-scope read-only fields (subEval,
-//     patEval, queryCtx, params/reg captured by closures, maxCollectItems, the
-//     enablement flags) are shared by the value copy and never written post-build.
+//     from a pre-existing entry.
+//
+// subEval and patEval are shared by the value copy — i.e. BY POINTER — and this
+// is safe ONLY because the caller has screened them out of reach. Both are
+// documented as not safe for concurrent use (cypher/subquery_eval.go,
+// cypher/pattern_eval.go), and both memoise into plain maps at eval time, so two
+// workers touching one instance is a `fatal error: concurrent map writes` — a
+// runtime throw no recover can contain. The invariant that makes the sharing
+// sound is that [tryBuildParallelScanProject] admits the fused shape only when
+// NEITHER the projection items NOR the Selection predicate contains an
+// expression that needs them (exprHasNonScalar on both). The Selection half of
+// that screen was missing and the result was a process-fatal crash on a default
+// engine (rmp #2257) — so if a future change widens what the fused shape accepts,
+// this pointer sharing is the first thing that must be revisited.
+//
+// The remaining query-scope fields (queryCtx, params/reg captured by closures,
+// maxCollectItems, the enablement flags) are genuinely read-only after the build.
 func (b *buildOpts) forWorker() *buildOpts {
 	cp := *b
 	// Lazily-written-at-eval fields.
@@ -17476,29 +17514,31 @@ func buildEdgeTypeFilter(g *lpg.Graph[string, float64], fwdCSR *csr.CSR[float64]
 
 	filter := make(map[uint64]string)
 
-	// fallbackVisit resolves the per-pair edge-label membership test for the
-	// streamed fallback below without allocating a []string per edge (rmp
-	// #1877). It is declared ONCE and reused for every edge — capturing the
-	// loop-invariant accept set plus the reused matched/found cells — so the
-	// closure value itself is allocated once, not per call (the same
-	// single-visit-closure pattern the snapshot writer uses,
-	// store/snapshot/labels.go). found short-circuits every visit after the
-	// membership answer is known, giving the same early-exit as the break in
-	// the materialised any-label loop below.
-	var matched string
-	var found bool
-	fallbackVisit := func(name string) {
-		if found {
-			return
-		}
-		if acceptAll {
-			matched, found = name, true
-			return
-		}
-		if _, ok := accept[name]; ok {
-			matched, found = name, true
-		}
-	}
+	// slotTypes collects the relationship types of ONE adjacency slot for the
+	// per-slot resolution below, and appendSlotType is the visitor that fills it.
+	// Both are declared ONCE for the whole sweep — the buffer is truncated per slot
+	// rather than reallocated, and the closure is not rebuilt per CSR position — so
+	// the fallback costs one small buffer instead of a []string and a closure per
+	// edge. That is the cold-path allocation hot spot the profile attributed to
+	// EdgeLabelsByID (rmp #1877), and it applies to a closure declared inside the
+	// loop just as much as to a returned slice.
+	var slotTypes []string
+	appendSlotType := func(name string) { slotTypes = append(slotTypes, name) }
+
+	// slotLabs is the scratch behind that resolution: slotLabs[dst] is the ordered
+	// list of the adjacency label-column entries of that pair's COLUMN-TYPED slots —
+	// the slots whose relationship type is not recorded against a stable per-edge
+	// handle. slotFallbackSeen counts how many of each pair's CSR positions have
+	// already consumed one, so the next resolves against the next slot.
+	//
+	// All three are created on the FIRST source that actually needs them and then
+	// reused for every later source, reset through slotLabsTouched rather than
+	// reallocated or swept. A graph whose every slot resolves by handle — anything
+	// Cypher built — therefore allocates none of them, and a graph that does need
+	// them allocates each once for the whole O(V+E) sweep instead of once per source.
+	var slotLabs map[graph.NodeID][]uint32
+	var slotFallbackSeen map[graph.NodeID]int
+	var slotLabsTouched []graph.NodeID
 
 	// Bound the loop on the SNAPSHOT CSR, not the live graph. fwdCSR was
 	// built from a point-in-time copy of adj above; verts has a fixed length
@@ -17525,6 +17565,10 @@ func buildEdgeTypeFilter(g *lpg.Graph[string, float64], fwdCSR *csr.CSR[float64]
 			dstParallelTotal[edges[pos]]++
 		}
 		dstSeen := make(map[graph.NodeID]int64, len(dstParallelTotal))
+		// slotLabsReady defers the adjacency read until a slot of THIS source
+		// actually needs it: a Cypher-built graph resolves every slot by handle and
+		// must not pay for a resolution it never reaches.
+		slotLabsReady := false
 		for pos := start; pos < end; pos++ {
 			dst := edges[pos]
 			dstStr, ok := mapper.Resolve(dst)
@@ -17533,6 +17577,10 @@ func buildEdgeTypeFilter(g *lpg.Graph[string, float64], fwdCSR *csr.CSR[float64]
 			}
 			dstSeen[dst]++
 			var labels []string
+			// slotResolved records that this position was matched to a real
+			// column-typed adjacency slot below, so its type — including the absence
+			// of one — is settled and the positional inference must not guess.
+			slotResolved := false
 			if pos < uint64(len(handles)) && handles[pos] != 0 {
 				// Stable-handle path: resolve this slot's type by the
 				// explicit per-edge handle read directly from the CSR
@@ -17542,9 +17590,74 @@ func buildEdgeTypeFilter(g *lpg.Graph[string, float64], fwdCSR *csr.CSR[float64]
 				// mis-maps the way the positional idx did (Match2 [6] /
 				// Match7 [29]).
 				labels = g.EdgeLabelsByHandle(srcStr, dstStr, handles[pos])
-			} else {
-				// Fallback (handle column absent, or a MERGE-created slot
-				// with handle 0): keep the prior positional inference.
+			}
+			if len(labels) == 0 {
+				// PER-SLOT resolution, for a slot with no by-handle type record.
+				// This CSR position is the n-th of its pair to reach here, so it
+				// resolves against the n-th COLUMN-TYPED adjacency slot of that pair
+				// and asks lpg only what THAT slot carries — its own inline type plus
+				// the pair's overflow.
+				//
+				// The pair's derived union is deliberately NOT consulted. It reports
+				// every type any parallel slot of the pair carries, so on a pair
+				// holding one :K edge and one untyped edge it matched `[r:K]` twice
+				// where once is correct, and on a 12-slot self-loop with a single
+				// typed slot it matched twelve times where once is correct (rmp
+				// #2258). Resolving per slot is also what makes this agree with the
+				// typed-degree rewrite, which resolves per slot in
+				// [lpg.Graph.slotCarriesType]: the two now answer the same question
+				// from the same state, so a count and its enumeration cannot differ.
+				//
+				// It runs BEFORE the positional inference below, and that order is
+				// load-bearing. The positional index is a per-PAIR ordinal: on a
+				// multigraph pair mixing a Cypher-created slot with a Go-API slot it
+				// handed the Go-API slot the CREATE's per-instance type, so an
+				// untyped edge matched `[r:K]` and an edge typed :K by the Go API
+				// reported the sibling's :M. The column is the authoritative source
+				// for such a slot, so it decides first — and it decides even when the
+				// type it finds is NOT accepted, because "this slot is an :M" is an
+				// answer, not a failure to resolve.
+				//
+				// A position beyond the pair's column-typed slots (possible only
+				// against a snapshot the adjacency has since changed under) resolves
+				// as carrying no inline type, which the overflow half of
+				// ForEachSlotRelTypeByID may still qualify — never as inheriting a
+				// sibling's type.
+				if !slotLabsReady {
+					if slotLabs == nil {
+						slotLabs = make(map[graph.NodeID][]uint32)
+						slotFallbackSeen = make(map[graph.NodeID]int)
+					}
+					slotLabsTouched = fillSlotLabs(
+						g, graph.NodeID(srcID), slotLabs, slotFallbackSeen, slotLabsTouched)
+					slotLabsReady = true
+				}
+				var encoded uint32
+				// The counter is advanced only for a pair that HAS column-typed
+				// slots, which keeps slotFallbackSeen's key set inside
+				// slotLabsTouched and so resettable in O(touched).
+				if ls := slotLabs[dst]; len(ls) > 0 {
+					if k := slotFallbackSeen[dst]; k < len(ls) {
+						encoded = ls[k]
+						slotResolved = true
+					}
+					slotFallbackSeen[dst]++
+				}
+				slotTypes = slotTypes[:0]
+				g.ForEachSlotRelTypeByID(graph.NodeID(srcID), dst, encoded, appendSlotType)
+				labels = slotTypes
+			}
+			if len(labels) == 0 && !slotResolved {
+				// Positional inference, reached only when the position could not be
+				// matched to a column-typed adjacency slot at all — legacy pre-handle
+				// storage, and a CSR snapshot the adjacency has since changed under.
+				//
+				// A position that WAS matched to such a slot never gets here, and that
+				// is the point: the slot's own emptiness means the relationship has no
+				// type, and the per-PAIR ordinal would answer with a sibling CREATE's
+				// type instead. On a multigraph pair mixing a Cypher-created :K slot
+				// with an untyped Go-API slot that made the untyped edge match
+				// `[r:K]`, so a bare MATCH counted two where one was correct.
 				totalCreates := g.EdgeCreateCount(srcStr, dstStr)
 				parallel := dstParallelTotal[dst]
 				if parallel >= totalCreates && totalCreates > 0 {
@@ -17559,23 +17672,8 @@ func buildEdgeTypeFilter(g *lpg.Graph[string, float64], fwdCSR *csr.CSR[float64]
 				}
 			}
 			if len(labels) == 0 {
-				// Fallback (handle/instance stores empty — the hot path for
-				// Go-API AddEdge+SetEdgeLabel graphs): consult the per-pair
-				// edge-label store via ForEachEdgeLabelByID rather than
-				// EdgeLabels so the membership test never materialises a
-				// []string it would immediately discard, the cold-path
-				// allocation hot spot the profile attributed to EdgeLabelsByID
-				// (rmp #1877). We already hold both endpoint NodeIDs, so this
-				// also skips the two Mapper lookups EdgeLabels would repeat.
-				// ForEachEdgeLabelByID visits exactly the names EdgeLabelsByID
-				// would return, in the same order, so fallbackVisit's
-				// accept-all / first-accepted decision is identical to ranging
-				// the EdgeLabels slice with the same break.
-				matched, found = "", false
-				g.ForEachEdgeLabelByID(graph.NodeID(srcID), dst, fallbackVisit)
-				if found {
-					filter[pos] = matched
-				}
+				// The slot carries no relationship type at all, so it matches no
+				// type filter and is absent from the map.
 				continue
 			}
 			if acceptAll {
@@ -17638,6 +17736,67 @@ func canonicalRelTypesKey(relTypes []string) string {
 	slices.Sort(sorted)
 	sorted = slices.Compact(sorted)
 	return strings.Join(sorted, "\x00")
+}
+
+// fillSlotLabs rewrites out so that, for every destination srcID has an edge to,
+// out[dst] is the ordered list of adjacency label-column entries of that pair's
+// COLUMN-TYPED slots: the slots whose relationship type is NOT recorded against a
+// stable per-edge handle, and which therefore carry their type in the column. It
+// also clears seen, the per-pair consumption counter that indexes those lists. It
+// is the per-slot input [buildEdgeTypeFilter]'s resolution uses for a CSR position.
+//
+// It returns the destinations it wrote, which the caller passes back on the next
+// source as touched. That list — not a sweep over out — is what gets reset, and the
+// distinction is the difference between linear and quadratic: out is REUSED across
+// sources so its slices keep their capacity, so its key set accumulates every
+// destination the whole graph has, and resetting by ranging it made the sweep
+// O(V × distinct destinations). On the 960k-edge cypher_scale fixture that turned a
+// planner build into a ten-minute test timeout.
+//
+// The column-typed test is [lpg.Graph.HasEdgeHandleLabelRecordByID], the same
+// presence marker the row-level resolver uses (see buildRelationshipValueFromRow's
+// hasByHandleEntry): a slot stamped with a handle by the public Go API carries no
+// by-handle type, so its type is in the column exactly as a handle-less slot's is.
+// Cypher CREATE and MERGE always record the mandatory relationship type by handle,
+// so their slots are correctly excluded.
+//
+// It reads the LIVE adjacency, not the CSR snapshot the caller is walking. That is
+// the same looseness the per-pair fallback it replaced already had (it called
+// ForEachEdgeLabelByID against the live graph), and it is bounded the same way:
+// a position with no corresponding column-typed slot resolves as carrying no
+// inline type rather than reading out of range.
+func fillSlotLabs(
+	g *lpg.Graph[string, float64],
+	srcID graph.NodeID,
+	out map[graph.NodeID][]uint32,
+	seen map[graph.NodeID]int,
+	touched []graph.NodeID,
+) []graph.NodeID {
+	for _, dst := range touched {
+		out[dst] = out[dst][:0]
+		delete(seen, dst)
+	}
+	touched = touched[:0]
+
+	adj := g.AdjList()
+	nbs, _, hs := adj.LoadEntryH(srcID)
+	labs := adj.LoadEntryLabels(srcID)
+	for i, dst := range nbs {
+		if i < len(hs) && g.HasEdgeHandleLabelRecordByID(srcID, dst, hs[i]) {
+			// The by-handle record is authoritative for this slot, so the column
+			// is not read for it and it must not consume a position's label.
+			continue
+		}
+		var encoded uint32
+		if i < len(labs) {
+			encoded = labs[i]
+		}
+		if len(out[dst]) == 0 {
+			touched = append(touched, dst)
+		}
+		out[dst] = append(out[dst], encoded)
+	}
+	return touched
 }
 
 // collectAllInstanceLabels returns the union of every per-CREATE label

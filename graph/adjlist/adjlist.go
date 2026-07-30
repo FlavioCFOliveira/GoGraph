@@ -1901,6 +1901,138 @@ func (a *AdjList[N, W]) ClearEdgeLabelSlotValue(src, dst graph.NodeID, v uint32)
 	return true
 }
 
+// SetEdgeLabelSlotsAt stores the opaque label value v on every adjacency slot of
+// src whose index appears in idxs AND whose neighbour is (still) dst, publishing
+// a SINGLE new immutable entry snapshot. It returns the number of slots written.
+//
+// It is the per-slot counterpart of the first-match [AdjList.SetEdgeLabelSlot]:
+// the caller has already decided WHICH of a pair's parallel slots are to carry
+// the label and passes their indexes, so a multigraph pair whose parallel slots
+// must all carry the same relationship type is labelled in one copy-on-write
+// publication rather than one per slot. The higher layer needs that choice
+// because the eligibility rule is its own — lpg skips slots whose type is
+// recorded against a per-edge handle — and cannot be expressed here, where the
+// label is opaque.
+//
+// The dst re-check is not redundant. The caller selects the indexes from an
+// adjacency snapshot read WITHOUT this shard's lock, and a concurrent
+// [AdjList.RemoveEdge] compacts the neighbour slice, so an index chosen a moment
+// ago may now address a different neighbour. Verifying the neighbour under the
+// lock makes a stale index a skipped write rather than a label stamped on the
+// wrong edge. Indexes out of range are skipped for the same reason.
+//
+// Cost: O(degree(src)) for the column copy plus O(len(idxs)) for the writes,
+// regardless of how many slots are written — versus the O(d²) of len(idxs)
+// separate [AdjList.SetEdgeLabelSlot] calls, each of which copies the whole
+// column. The column is allocated lazily, so a call that writes no slot neither
+// allocates nor publishes.
+//
+// Concurrency: copy-on-write, identical to [AdjList.SetEdgeLabelSlot]; safe for
+// concurrent use.
+func (a *AdjList[N, W]) SetEdgeLabelSlotsAt(src, dst graph.NodeID, idxs []int, v uint32) int {
+	if len(idxs) == 0 {
+		return 0
+	}
+	s := &a.shards[src&shardMask]
+	intraIdx := uint64(src) >> shardBits
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current := loadEntry[W](s, intraIdx)
+	if current == nil {
+		return 0
+	}
+	var newL []uint32
+	written := 0
+	for _, idx := range idxs {
+		if idx < 0 || idx >= len(current.neighbours) || current.neighbours[idx] != dst {
+			continue
+		}
+		if newL == nil {
+			newL = make([]uint32, len(current.neighbours))
+			copy(newL, current.labels) // no-op when current.labels is nil
+		}
+		newL[idx] = v
+		written++
+	}
+	if newL == nil {
+		return 0
+	}
+	entry := &adjEntry[W]{
+		neighbours: current.neighbours,
+		weights:    current.weights,
+		handles:    current.handles,
+		labels:     newL,
+		// The label-COW shares the immutable aux header unchanged: only the
+		// label column is replaced here.
+		aux: current.aux,
+	}
+	// storeEntry cannot fail here: the slots already exist, so no growth is
+	// required.
+	_ = a.storeEntry(s, intraIdx, entry)
+	return written
+}
+
+// ClearEdgeLabelSlotsValue clears the opaque label of EVERY adjacency slot of src
+// whose neighbour is dst AND whose label equals v, publishing a SINGLE new
+// immutable entry snapshot. It returns the number of slots cleared.
+//
+// It is the all-slots counterpart of the first-match
+// [AdjList.ClearEdgeLabelSlotValue], and the exact inverse of
+// [AdjList.SetEdgeLabelSlotsAt] for a pair whose parallel slots all carry v:
+// detaching a relationship type from a multigraph pair must leave no slot still
+// carrying it, which one first-match clear cannot guarantee. It targets a
+// specific value, so parallel slots carrying OTHER labels are untouched.
+//
+// No-op (and no allocation) when v is 0, src has no label column, or no
+// dst-matching slot carries v.
+//
+// Concurrency: copy-on-write, identical to [AdjList.SetEdgeLabelSlot]; safe for
+// concurrent use.
+func (a *AdjList[N, W]) ClearEdgeLabelSlotsValue(src, dst graph.NodeID, v uint32) int {
+	if v == 0 {
+		return 0
+	}
+	s := &a.shards[src&shardMask]
+	intraIdx := uint64(src) >> shardBits
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current := loadEntry[W](s, intraIdx)
+	if current == nil || current.labels == nil {
+		return 0
+	}
+	var newL []uint32
+	cleared := 0
+	for i, n := range current.neighbours {
+		if n != dst || i >= len(current.labels) || current.labels[i] != v {
+			continue
+		}
+		if newL == nil {
+			newL = make([]uint32, len(current.labels))
+			copy(newL, current.labels)
+		}
+		newL[i] = 0
+		cleared++
+	}
+	if newL == nil {
+		return 0
+	}
+	entry := &adjEntry[W]{
+		neighbours: current.neighbours,
+		weights:    current.weights,
+		handles:    current.handles,
+		labels:     newL,
+		// The label-COW shares the immutable aux header unchanged: only the
+		// label column is replaced here.
+		aux: current.aux,
+	}
+	_ = a.storeEntry(s, intraIdx, entry)
+	return cleared
+}
+
 // ClearEdgeLabelSlots clears the opaque label of EVERY adjacency slot of src
 // whose neighbour is dst (all parallel slots in a multigraph), publishing a
 // single new immutable entry snapshot. It is the bulk inverse used when the

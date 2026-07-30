@@ -240,19 +240,25 @@ type edgeLabelShard struct {
 	mu       sync.RWMutex
 }
 
-// addOverflow appends lid to k's overflow list if not already present. The
-// caller must hold sh.mu for writing.
-func (sh *edgeLabelShard) addOverflow(k edgeKey, lid LabelID) {
+// addOverflow appends lid to k's overflow list if not already present, and
+// reports whether it changed the list. The caller must hold sh.mu for writing.
+//
+// The bool is load-bearing rather than informational: [Graph.SetEdgeLabel] bumps
+// the topology generation only on a genuine change (rmp #2255), so a caller that
+// re-asserts a label already present must be distinguishable from one that adds
+// a new one.
+func (sh *edgeLabelShard) addOverflow(k edgeKey, lid LabelID) bool {
 	ls := sh.overflow[k]
 	for _, x := range ls {
 		if x == lid {
-			return
+			return false
 		}
 	}
 	if sh.overflow == nil {
 		sh.overflow = make(map[edgeKey][]LabelID)
 	}
 	sh.overflow[k] = append(ls, lid)
+	return true
 }
 
 // hasOverflow reports whether k's overflow list carries lid. The caller must
@@ -288,10 +294,13 @@ func (sh *edgeLabelShard) removeOverflow(k edgeKey, lid LabelID) bool {
 	return false
 }
 
-// clearOverflow drops every overflow label on k. The caller must hold sh.mu
-// for writing.
-func (sh *edgeLabelShard) clearOverflow(k edgeKey) {
+// clearOverflow drops every overflow label on k and returns how many were
+// dropped, so the caller can keep [Graph.edgeLabelOverflowActive] exact. The
+// caller must hold sh.mu for writing.
+func (sh *edgeLabelShard) clearOverflow(k edgeKey) int {
+	n := len(sh.overflow[k])
 	delete(sh.overflow, k)
+	return n
 }
 
 // Graph is a labelled property graph generic over the user node type
@@ -378,6 +387,26 @@ type Graph[N comparable, W any] struct {
 	// mutated only under tombstoneMu, in lock-step with the published
 	// bitmap, so it always equals the bitmap's cardinality.
 	tombstoneActive atomic.Int64
+
+	// edgeLabelOverflowActive mirrors the total number of overflow labels held
+	// across every [edgeLabelShard] as a lock-free gate, exactly as
+	// tombstoneActive gates the tombstone set.
+	//
+	// It exists for [Graph.slotCarriesType], which resolves a relationship type
+	// once PER SLOT of a walked adjacency entry. A pair's overflow list is the
+	// one part of its type state that is not per-slot addressable (see
+	// [edgeLabelShard]), so a slot whose own column entry does not carry the
+	// wanted type must still consult it — and doing so unconditionally would take
+	// the pair's shard read lock on every non-matching slot of every typed degree
+	// walk. Overflow is populated only by a [Graph.SetEdgeLabel] that found no
+	// free slot to place the type in, which no Cypher-built graph and no
+	// single-type graph ever reaches, so this counter is 0 for essentially every
+	// graph and one atomic load replaces the lock.
+	//
+	// It is mutated only under the owning shard's write lock, in lock-step with
+	// the overflow map itself. It is therefore exact, and a reader that observes
+	// 0 is observing a state in which no overflow label existed.
+	edgeLabelOverflowActive atomic.Int64
 
 	// constraintActive mirrors the cypher engine's schema-constraint count as a
 	// lock-free gate. The checkpointer reads it (via HasConstraints) to decide
@@ -833,24 +862,6 @@ func (g *Graph[N, W]) slotLabelsForPair(srcID, dstID graph.NodeID, fn func(Label
 // overflow halves transition together.
 func (g *Graph[N, W]) clearSlotLabels(srcID, dstID graph.NodeID) {
 	g.adj.ClearEdgeLabelSlots(srcID, dstID)
-}
-
-// firstSlotLabel returns the encoded label currently on the FIRST dst-matching
-// adjacency slot of src and whether such a slot exists. encoded == 0 means the
-// slot exists but carries no label. Reads the lock-free adjacency snapshot.
-func (g *Graph[N, W]) firstSlotLabel(srcID, dstID graph.NodeID) (encoded uint32, slotExists bool) {
-	nbs, _ := g.adj.LoadEntry(srcID)
-	labs := g.adj.LoadEntryLabels(srcID)
-	for i, nb := range nbs {
-		if nb != dstID {
-			continue
-		}
-		if labs != nil && i < len(labs) {
-			return labs[i], true
-		}
-		return 0, true
-	}
-	return 0, false
 }
 
 // propKeys returns the property-key registry.
@@ -1386,6 +1397,13 @@ func (g *Graph[N, W]) pairLabelIDs(srcID, dstID graph.NodeID) []LabelID {
 // is idempotent: a label already present is a no-op. Called after removing one
 // of several parallel edges, when the removed slot might have carried a label
 // the surviving edges still share.
+// It places each label on ONE free slot, not on every free slot the way
+// [Graph.SetEdgeLabel] does. The two are different operations: SetEdgeLabel NAMES
+// the pair, so it types every one of the pair's column-typed slots; this only
+// REPAIRS a set that the removal may have taken a carrier away from, and the
+// surviving slots keep the types they already had. Typing every free slot here
+// would spread the removed slot's type onto siblings that never carried it and
+// inflate their typed degree.
 func (g *Graph[N, W]) reassertPairLabels(srcID, dstID graph.NodeID, ids []LabelID) {
 	if len(ids) == 0 {
 		return
@@ -1394,9 +1412,30 @@ func (g *Graph[N, W]) reassertPairLabels(srcID, dstID graph.NodeID, ids []LabelI
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.Lock()
 	for _, lid := range ids {
-		g.setEdgeLabelLocked(k, lid)
+		g.repairEdgeLabelLocked(k, lid)
 	}
 	sh.mu.Unlock()
+}
+
+// repairEdgeLabelLocked re-establishes lid as carried by the pair k, placing it
+// on the FIRST free column-typed slot or, when there is none, in overflow. It is
+// the single-carrier counterpart of [Graph.setEdgeLabelLocked] and carries the
+// same lock requirement: the caller must hold k's edge-label shard write lock.
+// A no-op when the pair already carries lid.
+func (g *Graph[N, W]) repairEdgeLabelLocked(k edgeKey, lid LabelID) {
+	enc := encodeSlotLabel(lid)
+	free, present := g.columnTypedSlots(k.src, k.dst, lid, enc)
+	if len(free) > 0 {
+		g.adj.SetEdgeLabelSlotsAt(k.src, k.dst, free[:1], enc)
+		return
+	}
+	if present {
+		return
+	}
+	sh := g.edgeLabelShardFor(k)
+	if sh.addOverflow(k, lid) {
+		g.edgeLabelOverflowActive.Add(1)
+	}
 }
 
 // reassertPairProps re-applies every property in props to the directed pair
@@ -1473,9 +1512,12 @@ func (g *Graph[N, W]) clearEdgePairState(k edgeKey) {
 	// resurrect a removed edge's relationship type.
 	lsh := g.edgeLabelShardFor(k)
 	lsh.mu.Lock()
-	lsh.clearOverflow(k)
+	dropped := lsh.clearOverflow(k)
 	g.clearSlotLabels(k.src, k.dst)
 	lsh.mu.Unlock()
+	if dropped > 0 {
+		g.edgeLabelOverflowActive.Add(int64(-dropped))
+	}
 	// Edge properties need no explicit per-pair clear: they live ONLY on the
 	// adjacency slots, and clearEdgePairState is reached exclusively after the
 	// last edge between the pair has been removed (RemoveEdge / RemoveAllEdgesFrom
@@ -1737,22 +1779,31 @@ func (g *Graph[N, W]) OutDegree(src N) (int, bool) {
 //
 // # Cost
 //
-// O(d) in the node's degree: the relationship-type column must be read to decide
-// which edges match. No allocation, and no access beyond src's own columns.
+// O(d) in the node's degree: the relationship type of each slot must be resolved
+// to decide which edges match. No allocation, and — on a graph with no overflow
+// labels, which is every Cypher-built one — no lock and no access beyond src's own
+// columns and the per-handle records of its typed slots.
+//
+// It routes through the same walk as [Graph.OutDegreeByTypeBoundedByID] rather
+// than reading the adjacency label column directly. The column alone is not the
+// whole per-slot truth — a Cypher-created edge records its type against its
+// stable handle — so the column-only count reported 1 for three Cypher-created
+// parallel :K edges where 3 was correct, and 0 for a type that had spilled to the
+// pair's overflow list. Sharing the walk is what makes the bounded and unbounded
+// forms unable to disagree about WHICH edges count, which is the contract their
+// documentation rests on (rmp #2241/#2258).
 func (g *Graph[N, W]) OutDegreeByType(src N, relType LabelID) (int, bool) {
-	// The adjacency stores the ENCODED slot label ([encodeSlotLabel]: id+1, so 0
-	// is the "no label" sentinel), never the raw LabelID. Comparing a raw id
-	// against the column silently matches the wrong relationship type — the
-	// differential test against the traversal is what catches it.
-	if g.tombstoneActive.Load() == 0 {
-		return g.adj.OutDegreeByType(src, encodeSlotLabel(relType))
-	}
 	return g.outDegreeFiltered(src, true, relType)
 }
 
 // outDegreeFiltered counts src's out-edges excluding tombstoned endpoints, and
-// when byType is set also restricting to relType. It is the slow path taken only
-// once the graph holds at least one tombstone.
+// when byType is set also restricting to relType.
+//
+// For the UNTYPED count it is the slow path, taken only once the graph holds at
+// least one tombstone; [Graph.OutDegree] answers from the column length otherwise.
+// For the TYPED count it is the only path: resolving a slot's relationship type
+// needs the slot's handle as well as its column entry, so there is no O(1)
+// shortcut to fall back from (see [Graph.OutDegreeByType]).
 //
 // It counts by iterating src's neighbours through the adjacency's own iterator,
 // so the population it walks is exactly the one [Graph.Neighbours] exposes and
@@ -1800,31 +1851,66 @@ func (g *Graph[N, W]) OutDegreeByTypeBoundedByID(srcID graph.NodeID, relType Lab
 	return g.outDegreeMatchingByID(srcID, relType, true, limit, nil)
 }
 
-// slotCarriesType reports whether the adjacency slot at index i — whose
-// neighbour is dst and whose label column entry is lbl — carries relType.
+// slotCarriesType reports whether ONE adjacency slot — whose neighbour is dst,
+// whose stable handle is handle and whose label column entry is lbl — carries
+// relType. want is encodeSlotLabel(relType), the form the column stores.
 //
-// The handle is consulted FIRST and is authoritative when it has a record.
-// This is what makes a typed count correct over PARALLEL EDGES (rmp #2241): the
-// adjacency label column holds at most ONE label per (src, dst) pair, because
-// [AdjList.SetEdgeLabelSlot] scans for the first dst-matching slot and stops
-// there, so three parallel :K edges leave one slot labelled and the rest at the
-// 0 sentinel. Reading the column alone therefore counted 1 where 3 was correct.
+// Every source it reads is PER-SLOT. That is the whole contract: a relationship
+// type belongs to the relationship instance, so a pair's parallel slots must be
+// able to disagree about their type, and any reading that resolves the PAIR
+// instead of the slot makes a typed count disagree with the enumeration of the
+// same pattern (rmp #2258).
 //
-// The per-handle store has no such collision: CreateRelationship stamps a
-// distinct handle on each CREATE's slot ([AdjList.AddEdgeH]) and records the
-// type against it, precisely because a positional index does not survive the
-// deletion of a parallel sibling.
+// The handle is consulted FIRST and is authoritative when it has a record. This
+// is what makes a typed count correct over the parallel edges a Cypher CREATE
+// builds (rmp #2241): CreateRelationship stamps a distinct handle on each
+// CREATE's slot ([AdjList.AddEdgeH]) and records the type against it, precisely
+// because a positional index does not survive the deletion of a parallel sibling.
 //
-// The column remains the fallback, and it is not vestigial: simple-graph storage
-// collapses a duplicate (src, dst) and stores no handle, and an edge added
-// through the Go API ([Graph.AddEdgeLabeled]) carries a slot label with no
-// handle record. In both cases the column is the only source there is, and in
-// both cases a pair has at most one edge, so the collision cannot arise.
+// The slot's own label column entry answers for every other slot — the
+// COLUMN-TYPED slots of [Graph.setEdgeLabelLocked]: an edge added through the Go
+// API ([Graph.AddEdge] + [Graph.SetEdgeLabel], or [Graph.AddEdgeLabeled]), and
+// the collapsed duplicate (src, dst) of simple-graph storage. SetEdgeLabel types
+// every free column-typed slot of the pair, so parallel handle-less edges each
+// carry the type in their own entry and are counted individually.
+//
+// The pair's overflow list is consulted last, and only for a column-typed slot:
+// it holds a type SetEdgeLabel could not place per-slot because no slot was free,
+// and naming the pair named every column-typed slot, so every one of them carries
+// it. It is gated on [Graph.edgeLabelOverflowActive] so the overwhelmingly common
+// graph — every Cypher-built one, and every graph that never gave a pair a second
+// relationship type — pays one atomic load instead of a shard lock per slot.
 func (g *Graph[N, W]) slotCarriesType(srcID, dst graph.NodeID, handle uint64, lbl, want uint32, relType LabelID) bool {
 	if has, known := g.edgeHandleHasLabel(srcID, dst, handle, relType); known {
 		return has
 	}
-	return lbl == want
+	if lbl == want {
+		return true
+	}
+	return g.pairOverflowHasType(srcID, dst, relType)
+}
+
+// pairOverflowHasType reports whether the overflow list of the pair
+// (srcID, dstID) carries lid. It is the allocation-free, [LabelID]-level,
+// id-keyed overflow probe [Graph.slotCarriesType] needs per slot.
+//
+// The [Graph.edgeLabelOverflowActive] gate is what makes it affordable there: on
+// a graph with no overflow at all — the case for anything Cypher built and for
+// any graph whose pairs never needed a second type — it costs one atomic load and
+// takes no lock, so a typed degree walk over a hub does not acquire d shard locks
+// to learn that there is nothing to find.
+//
+// pairOverflowHasType is safe for concurrent use.
+func (g *Graph[N, W]) pairOverflowHasType(srcID, dstID graph.NodeID, lid LabelID) bool {
+	if g.edgeLabelOverflowActive.Load() == 0 {
+		return false
+	}
+	k := edgeKey{src: srcID, dst: dstID}
+	sh := g.edgeLabelShardFor(k)
+	sh.mu.RLock()
+	has := sh.hasOverflow(k, lid)
+	sh.mu.RUnlock()
+	return has
 }
 
 // outDegreeMatchingByID is the shared walk behind [Graph.OutDegreeByTypeBoundedByID]
@@ -1835,6 +1921,23 @@ func (g *Graph[N, W]) slotCarriesType(srcID, dst graph.NodeID, handle uint64, lb
 // It walks the handle-carrying entry ([AdjList.LoadEntryH]) rather than going
 // through [AdjList.OutDegreeFuncBoundedByID], because resolving a slot's type
 // correctly requires the slot's HANDLE and that walk does not expose one.
+//
+// # Hoisted type gates
+//
+// [Graph.slotCarriesType] consults three sources per slot, but two of them are
+// properties of the ENTRY (or of the whole graph) rather than of the slot, and are
+// read once here:
+//
+//   - handles == nil means no slot of this entry carries a stable handle, so the
+//     handle store cannot have a record for any of them.
+//   - edgeLabelOverflowActive == 0 means no pair in the graph has an overflow
+//     label, so the overflow half cannot contribute for any of them.
+//
+// When neither can contribute, the per-slot test is provably just `lbl == want`,
+// and inlining it keeps the walk a single comparison per slot. That matters: going
+// through the general resolver unconditionally measured ~11× slower per slot on a
+// 4096-slot labelled hub than the column-only scan it replaced, for a graph on
+// which the general resolver could not possibly return a different answer.
 func (g *Graph[N, W]) outDegreeMatchingByID(
 	srcID graph.NodeID,
 	relType LabelID,
@@ -1852,20 +1955,47 @@ func (g *Graph[N, W]) outDegreeMatchingByID(
 	labs := g.adj.LoadEntryLabels(srcID)
 	want := encodeSlotLabel(relType) // see OutDegreeByType on the encoding
 	live := g.tombstoneActive.Load() != 0
+	// See "Hoisted type gates" above. Read before the loop, never inside it.
+	columnOnly := typed && handles == nil && g.edgeLabelOverflowActive.Load() == 0
+
+	// Specialised scan for the shape a plain typed degree actually asks for: the
+	// column is the whole truth, nothing is tombstoned, there is no far-node
+	// predicate, and the cap cannot bind. It reads ONE 4-byte column sequentially
+	// with no per-slot bound check, cap check or neighbour load, which is what the
+	// column-only count this method replaced did — the general loop below touches
+	// three times the bytes per slot and measured ~4.8× slower on a 4096-slot hub.
+	if columnOnly && !live && farOK == nil {
+		m := min(len(nbs), len(labs))
+		if limit >= m {
+			n := 0
+			for _, lbl := range labs[:m] {
+				if lbl == want {
+					n++
+				}
+			}
+			return n, true
+		}
+	}
 
 	n := 0
 	for i, dst := range nbs {
 		if typed {
 			var lbl uint32
-			if labs != nil && i < len(labs) {
+			if i < len(labs) {
 				lbl = labs[i]
 			}
-			var handle uint64
-			if handles != nil && i < len(handles) {
-				handle = handles[i]
-			}
-			if !g.slotCarriesType(srcID, dst, handle, lbl, want, relType) {
-				continue
+			if columnOnly {
+				if lbl != want {
+					continue
+				}
+			} else {
+				var handle uint64
+				if i < len(handles) {
+					handle = handles[i]
+				}
+				if !g.slotCarriesType(srcID, dst, handle, lbl, want, relType) {
+					continue
+				}
 			}
 		}
 		if live && g.IsTombstoned(dst) {
@@ -2293,9 +2423,27 @@ func (g *Graph[N, W]) LiveOrder() uint64 {
 // csr.BuildFromAdjListLive omits the arcs incident to a tombstoned node, so the
 // live topology a cache is derived from has changed.
 //
+// Since rmp #2255 it ALSO counts every change to an edge's derived LABEL set —
+// [Graph.SetEdgeLabel], [Graph.RemoveEdgeLabel] and
+// [Graph.SetEdgeLabelByHandle]. An edge label moves no CSR position, so this is
+// wider than the counter's name suggests, and the reason is concrete: the Cypher
+// engine's edge-type-filter cache keys on this epoch while resolving relationship
+// TYPE from those labels, so a label change that left the epoch still was served
+// a stale filter. The observable defect was a durably committed relationship-type
+// change staying invisible to a warm Engine indefinitely, and — via the rollback
+// inverse — an aborted one staying visible.
+//
+// A mutation that changes nothing does NOT bump: re-asserting a label already
+// present, removing one that is absent, or targeting an edge that does not exist
+// all leave the epoch alone. That distinction is load-bearing rather than tidy,
+// because the MERGE MATCH branch re-asserts an existing relationship's type on
+// every match, and bumping there would force an O(V+E) CSR-pair rebuild per
+// MERGE on a read-mostly workload.
+//
 // It says nothing about interning a fresh node or about property-only mutations,
-// neither of which shifts an existing edge's CSR position; see the topoGeneration
-// field doc for why that scope is sufficient and intentional.
+// neither of which shifts an existing edge's CSR position or changes a
+// relationship type; see the topoGeneration field doc for why that scope is
+// sufficient and intentional.
 //
 // Callers do NOT need to bump it themselves: every [Graph] mutator that changes
 // live topology bumps it internally, after publishing the change. Safe for
@@ -2546,36 +2694,130 @@ func (g *Graph[N, W]) SetEdgeLabel(src, dst N, name string) {
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.Lock()
-	g.setEdgeLabelLocked(k, lid)
+	changed := g.setEdgeLabelLocked(k, lid)
 	sh.mu.Unlock()
 	g.edgeIdx.Add(uint32(lid), srcID)
+	if changed {
+		// The derived edge-label set is part of what [Graph.TopoGeneration]
+		// covers, because the Cypher engine's edge-type-filter cache is keyed on
+		// it (rmp #2255). Bumping AFTER the shard is released and after the index
+		// add is the ordering rmp #2151/fafc50c7 established: a reader that
+		// samples the new epoch must be unable to miss the write it announces.
+		g.topoGeneration.Add(1)
+	}
 }
 
-// setEdgeLabelLocked adds lid to the derived label set of k. The caller must
-// hold k's edge-label shard write lock AND must already have verified that the
-// edge (k.src, k.dst) exists (the slot to receive an inline label is present).
+// setEdgeLabelLocked adds lid to the label set of every column-typed slot of k.
+// The caller must hold k's edge-label shard write lock AND must already have
+// verified that the edge (k.src, k.dst) exists (the slot to receive an inline
+// label is present).
 //
-// Placement: if the first dst-matching slot carries no label, the label goes
-// there; if that slot already carries the SAME label the call is a no-op (the
-// label is already in the set); otherwise — the slot holds a different label —
-// the label spills to overflow (deduplicated). Membership in the derived union
-// is invariant under which slot or overflow physically holds the id.
-func (g *Graph[N, W]) setEdgeLabelLocked(k edgeKey, lid LabelID) {
+// # Placement is per-SLOT
+//
+// A relationship type belongs to the relationship INSTANCE, not to the endpoint
+// pair, so on a multigraph each of a pair's parallel slots carries its own type.
+// [Graph.SetEdgeLabel] names the PAIR, and therefore names every one of the
+// pair's slots whose type is read from the adjacency label column — the slots
+// [Graph.slotCarriesType] resolves from that column because no per-edge handle
+// records their type. Those are the pair's COLUMN-TYPED slots.
+//
+// The label goes into EVERY column-typed slot that is still free. That is what
+// makes two parallel handle-less edges both report the type, where placing it in
+// the first free slot alone left the second at the 0 sentinel and a typed degree
+// counted 1 where 2 was correct (rmp #2258).
+//
+// When no column-typed slot is free the type has nowhere per-slot to live and
+// spills to the pair's overflow list, which [Graph.slotCarriesType] reads as
+// carried by every column-typed slot of the pair — the only reading consistent
+// with SetEdgeLabel naming the pair. So `AddEdge` ×2 + SetEdgeLabel(K) +
+// SetEdgeLabel(M) gives two relationships that each carry both types, whereas
+// interleaving the calls (`AddEdge`, SetEdgeLabel(K), `AddEdge`,
+// SetEdgeLabel(M)) gives one K relationship and one M relationship: the two
+// construction sequences are distinguishable, which under the former per-pair
+// storage they were not.
+//
+// A slot whose type IS recorded against a handle is deliberately skipped: that
+// record is authoritative for it (see [Graph.slotCarriesType]), so writing the
+// column there could not change what the slot reports and would only make the
+// column disagree with the handle store. This is what keeps a Cypher-created
+// typed edge and a Go-API edge on the same pair counting as two distinct
+// relationships with their own types.
+//
+// It reports whether the label set actually changed, which is what
+// [Graph.SetEdgeLabel] uses to decide whether to bump the topology generation
+// (rmp #2255). Re-asserting a type the pair already carries reports false — the
+// MERGE match branch re-asserts on every idempotent MERGE, and a spurious bump
+// would force an O(V+E) CSR cache rebuild for a mutation that changed nothing.
+func (g *Graph[N, W]) setEdgeLabelLocked(k edgeKey, lid LabelID) bool {
 	enc := encodeSlotLabel(lid)
-	cur, slotExists := g.firstSlotLabel(k.src, k.dst)
-	if slotExists && cur == 0 {
-		// Empty inline slot: store the first label there.
-		g.adj.SetEdgeLabelSlot(k.src, k.dst, enc)
-		return
+	free, present := g.columnTypedSlots(k.src, k.dst, lid, enc)
+	if len(free) > 0 {
+		// At least one column-typed slot is free: place the type on all of them.
+		g.adj.SetEdgeLabelSlotsAt(k.src, k.dst, free, enc)
+		return true
 	}
-	if slotExists && cur == enc {
-		// Already the inline label — nothing to do.
-		return
+	if present {
+		// Already carried, by a column-typed slot or by a handle record.
+		return false
 	}
-	// Either the inline slot holds a different label, or (defensively) there is
-	// no slot; spill to overflow, but skip if it is already the slot label.
+	// No free column-typed slot; spill to overflow, deduplicated.
 	sh := g.edgeLabelShardFor(k)
-	sh.addOverflow(k, lid)
+	if !sh.addOverflow(k, lid) {
+		return false
+	}
+	g.edgeLabelOverflowActive.Add(1)
+	return true
+}
+
+// columnTypedSlots partitions the dst-matching adjacency slots of srcID by
+// whether they can receive lid in the label column. free lists the indexes of the
+// COLUMN-TYPED slots (those with no handle-keyed label record, so
+// [Graph.slotCarriesType] resolves their type from the column) that carry no
+// label yet; present reports whether lid is ALREADY carried, by a column-typed
+// slot's own entry or by a handle record on one of the pair's slots.
+//
+// The free indexes are collected into a caller-supplied-free slice rather than
+// applied one at a time so [Graph.setEdgeLabelLocked] can publish one
+// copy-on-write column for the whole pair ([adjlist.AdjList.SetEdgeLabelSlotsAt])
+// instead of one per slot, which would be O(d²) on a hub.
+//
+// It reads the lock-free adjacency snapshot and the handle-label shards; it does
+// NOT hold the adjacency shard lock, so an index it returns may be stale by the
+// time the write lands. That is why SetEdgeLabelSlotsAt re-checks the neighbour
+// under the lock. Taking the adjacency lock here instead would nest it inside
+// both the edge-label and the handle-label shard locks and invert the module's
+// lock order.
+func (g *Graph[N, W]) columnTypedSlots(srcID, dstID graph.NodeID, lid LabelID, enc uint32) (free []int, present bool) {
+	nbs, _, handles := g.adj.LoadEntryH(srcID)
+	labs := g.adj.LoadEntryLabels(srcID)
+	for i, nb := range nbs {
+		if nb != dstID {
+			continue
+		}
+		var handle uint64
+		if i < len(handles) {
+			handle = handles[i]
+		}
+		if has, known := g.edgeHandleHasLabel(srcID, dstID, handle, lid); known {
+			// The handle store is authoritative for this slot; the column is not
+			// consulted for it, so it is not ours to write.
+			if has {
+				present = true
+			}
+			continue
+		}
+		var cur uint32
+		if i < len(labs) {
+			cur = labs[i]
+		}
+		switch cur {
+		case 0:
+			free = append(free, i)
+		case enc:
+			present = true
+		}
+	}
+	return free, present
 }
 
 // HasEdgeLabel reports whether the directed edge (src, dst) carries
@@ -2640,22 +2882,43 @@ func (g *Graph[N, W]) RemoveEdgeLabel(src, dst N, name string) {
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.Lock()
-	// Prefer dropping the overflow copy; if the label is not in overflow it
-	// must live in an inline slot, so clear the FIRST dst-matching slot whose
-	// label decodes to lid. The whole update is under the shard lock so the
-	// slot and overflow halves of the derived set stay consistent for readers.
-	if !sh.removeOverflow(k, lid) {
-		g.clearFirstSlotLabel(srcID, dstID, lid)
+	// Detach the type from BOTH halves: the pair's overflow copy and EVERY
+	// dst-matching slot whose column entry decodes to lid. Clearing only the first
+	// such slot would leave a parallel sibling still reporting the type, which is
+	// the same per-pair-versus-per-slot mismatch rmp #2258 fixed on the read side —
+	// and this is the exact inverse of [Graph.SetEdgeLabel], which types every free
+	// column-typed slot of the pair. The whole update is under the shard lock so
+	// the slot and overflow halves transition together for readers.
+	changed := sh.removeOverflow(k, lid)
+	if changed {
+		g.edgeLabelOverflowActive.Add(-1)
+	}
+	if g.clearSlotLabelsValue(srcID, dstID, lid) {
+		changed = true
 	}
 	sh.mu.Unlock()
+	if changed {
+		// See [Graph.SetEdgeLabel]: the derived edge-label set is inside
+		// [Graph.TopoGeneration]'s scope (rmp #2255). Removal matters as much as
+		// addition — this is the rollback inverse of a label SET, so without the
+		// bump an ABORTED transaction's relationship type stayed visible to a
+		// warm Engine, which is an Atomicity violation and not merely a stale read.
+		g.topoGeneration.Add(1)
+	}
 }
 
-// clearFirstSlotLabel clears the label of the FIRST dst-matching adjacency
-// slot of src whose label decodes to lid (not merely the first dst-matching
-// slot — a multigraph pair may carry different labels on its parallel slots).
-// The caller must hold the pair's edge-label shard write lock. No-op when no
-// such slot carries lid (e.g. the edge was already removed — the orphan case,
-// where the label lived only in overflow and was handled by the caller).
-func (g *Graph[N, W]) clearFirstSlotLabel(srcID, dstID graph.NodeID, lid LabelID) {
-	g.adj.ClearEdgeLabelSlotValue(srcID, dstID, encodeSlotLabel(lid))
+// clearSlotLabelsValue clears the label of EVERY dst-matching adjacency slot of
+// src whose column entry decodes to lid — not merely the first, because a
+// multigraph pair's parallel slots each carry their own type and
+// [Graph.SetEdgeLabel] types all of the free ones, so detaching the type must
+// clear all of them. Slots carrying a DIFFERENT type are untouched.
+//
+// The caller must hold the pair's edge-label shard write lock. No-op when no slot
+// carries lid (e.g. the edge was already removed — the orphan case, where the
+// label lived only in overflow and was handled by the caller).
+//
+// It reports whether any slot was actually cleared, which [Graph.RemoveEdgeLabel]
+// uses to bump the topology generation only on a genuine change (rmp #2255).
+func (g *Graph[N, W]) clearSlotLabelsValue(srcID, dstID graph.NodeID, lid LabelID) bool {
+	return g.adj.ClearEdgeLabelSlotsValue(srcID, dstID, encodeSlotLabel(lid)) > 0
 }

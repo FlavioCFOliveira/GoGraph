@@ -27,7 +27,9 @@ const HeaderSize = 64
 // starts at an offset that is a multiple of this value.
 const Alignment = 64
 
-// WeightKind tags the on-disk type of the weights section.
+// WeightKind tags the on-disk type of the weights section. It is an immutable
+// scalar and its only method, [WeightKind.Size], reads nothing but the
+// receiver, so it is safe for concurrent use.
 type WeightKind uint8
 
 // Supported weight kinds.
@@ -78,9 +80,27 @@ var (
 
 // Header is the in-memory representation of the 64-byte file
 // preamble.
+//
+// A Header is a plain value, copied by value and immutable once returned by
+// [Reader.Header] or [WriteToFile], so it is safe for concurrent reads by any
+// number of goroutines. It holds no pointers or slices, so there is nothing a
+// reader can alias or mutate.
 type Header struct {
-	Version        uint16
-	Alignment      uint8
+	Version   uint16
+	Alignment uint8
+	// NVertices is the number of uint64 entries in the vertices section — the
+	// CSR offsets array — which under that convention is MaxNodeID+1.
+	//
+	// It is NOT a count of distinct vertices, and the difference is large rather
+	// than off-by-one: measured on a graph with 4 distinct vertices and 4 edges,
+	// NVertices is 257, because [graph.Mapper] spreads keys across 256 shards and
+	// the offsets array spans the whole NodeID space including the gaps.
+	//
+	// A consumer that wants the NodeID space — the length of any per-vertex array
+	// indexed by NodeID, such as the slice [search/extern.PageRank] returns — must
+	// use NVertices-1. Trusting the field name instead is what made
+	// TestPageRank_LDBCSf10_Soak permanently red from Sprint 65 until rmp #2256.
+	// The name is kept because it is published API; the contract is stated here.
 	NVertices      uint64
 	NEdges         uint64
 	Weight         WeightKind

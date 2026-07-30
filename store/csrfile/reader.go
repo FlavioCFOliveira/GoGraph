@@ -14,7 +14,9 @@ import (
 )
 
 // AccessPattern is the advisory hint given to the OS about the
-// expected memory-access pattern of a mapped section.
+// expected memory-access pattern of a mapped section. It is an immutable
+// scalar with no methods, taken by value by [Reader.SetHint], so it is safe for
+// concurrent use.
 type AccessPattern uint8
 
 // Supported access patterns.

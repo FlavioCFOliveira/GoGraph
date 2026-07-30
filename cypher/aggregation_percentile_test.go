@@ -25,8 +25,15 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
-// isPercentileNotImplErr returns true for any error (Run-time or iteration)
-// that indicates the percentile aggregate is not yet wired.
+// isPercentileNotImplErr reports whether err (Run-time or iteration) names a
+// percentile aggregate, which today can only mean the aggregate REGRESSED.
+//
+// It used to gate a t.Skipf. That made this file a fail-silent gate: the
+// aggregates are implemented and covered by the openCypher TCK, so the branch is
+// unreachable — but had percentileCont ever broken, these tests would have
+// SKIPPED instead of FAILED, and a skip is not a regression gate. Every call site
+// now fails (rmp #2261). The detection is kept because it makes the failure
+// message name the cause instead of surfacing a bare aggregation error.
 func isPercentileNotImplErr(err error) bool {
 	if err == nil {
 		return false
@@ -54,7 +61,9 @@ func drainPercentile(t *testing.T, res *cypher.Result) []map[string]any {
 	iterErr := res.Err()
 	_ = res.Close()
 	if isPercentileNotImplErr(iterErr) {
-		t.Skipf("percentile aggregate not yet wired: %v", iterErr)
+		t.Fatalf("the percentile aggregate is implemented and openCypher-TCK-covered, "+
+			"so this error means it REGRESSED; failing rather than skipping is the "+
+			"point of rmp #2261: %v", iterErr)
 	}
 	if iterErr != nil {
 		t.Fatalf("iteration: %v", iterErr)
@@ -82,7 +91,9 @@ func TestPercentileCont_P50(t *testing.T) {
 	res, err := eng.Run(context.Background(),
 		`MATCH (n:Value) RETURN percentileCont(n.v, 0.5) AS p50`, nil)
 	if isPercentileNotImplErr(err) {
-		t.Skipf("percentileCont not yet wired: %v", err)
+		t.Fatalf("percentileCont is implemented and openCypher-TCK-covered, so this "+
+			"error means it REGRESSED; failing rather than skipping is the point of "+
+			"rmp #2261: %v", err)
 	}
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -111,7 +122,9 @@ func TestPercentileDisc_P50(t *testing.T) {
 	res, err := eng.Run(context.Background(),
 		`MATCH (n:Value) RETURN percentileDisc(n.v, 0.5) AS pd50`, nil)
 	if isPercentileNotImplErr(err) {
-		t.Skipf("percentileDisc not yet wired: %v", err)
+		t.Fatalf("percentileDisc is implemented and openCypher-TCK-covered, so this "+
+			"error means it REGRESSED; failing rather than skipping is the point of "+
+			"rmp #2261: %v", err)
 	}
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -135,7 +148,9 @@ func TestPercentileCont_P0_P100(t *testing.T) {
 		RETURN percentileCont(n.v, 0.0) AS p0, percentileCont(n.v, 1.0) AS p100
 	`, nil)
 	if isPercentileNotImplErr(err) {
-		t.Skipf("percentileCont not yet wired: %v", err)
+		t.Fatalf("percentileCont is implemented and openCypher-TCK-covered, so this "+
+			"error means it REGRESSED; failing rather than skipping is the point of "+
+			"rmp #2261: %v", err)
 	}
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -179,7 +194,9 @@ func TestPercentileCont_EmptyInput(t *testing.T) {
 	res, err := eng.Run(context.Background(),
 		`MATCH (n:Value) RETURN percentileCont(n.v, 0.5) AS p50`, nil)
 	if isPercentileNotImplErr(err) {
-		t.Skipf("percentileCont not yet wired: %v", err)
+		t.Fatalf("percentileCont is implemented and openCypher-TCK-covered, so this "+
+			"error means it REGRESSED; failing rather than skipping is the point of "+
+			"rmp #2261: %v", err)
 	}
 	if err != nil {
 		t.Fatalf("Run: %v", err)
