@@ -122,6 +122,39 @@ func (g *Graph[N, W]) edgeHandleHasLabel(srcID, dstID graph.NodeID, handle uint6
 	return bag.has(lid), true
 }
 
+// HasEdgeHandleLabelRecordByID reports whether the by-handle label store holds a
+// relationship-type record for handle on the directed (srcID, dstID) pair.
+//
+// It is the presence question on its own, without the types: a slot WITHOUT a
+// record is COLUMN-TYPED — its relationship type lives in the adjacency label
+// column and [Graph.ForEachSlotRelTypeByID] is what reads it — while a slot WITH
+// one has the record as its authority. [Graph.slotCarriesType] applies exactly
+// that precedence, so a caller classifying slots must ask the same question or the
+// two will disagree about which source owns a slot.
+//
+// It exists because the alternative probe — calling [Graph.EdgeLabelsByHandle] and
+// testing the result for emptiness — resolves every id to a name and allocates a
+// []string per slot, which a per-slot classification sweep over a whole graph
+// cannot pay. This allocates nothing and takes one map lookup under the pair's
+// shard lock. It also needs no Mapper round-trip, taking NodeIDs directly.
+//
+// HasEdgeHandleLabelRecordByID is safe for concurrent use.
+func (g *Graph[N, W]) HasEdgeHandleLabelRecordByID(srcID, dstID graph.NodeID, handle uint64) bool {
+	if handle == 0 {
+		return false
+	}
+	k := edgeKey{src: srcID, dst: dstID}
+	sh := g.edgeHandleLabelShardFor(k)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	byHandle, ok := sh.m[k]
+	if !ok {
+		return false
+	}
+	_, ok = byHandle[handle]
+	return ok
+}
+
 // SetEdgeLabelByHandle attaches name to the directed edge identified by
 // the stable handle on the (src, dst) pair. No-op when handle is 0 (the
 // no-handle sentinel) or when either endpoint is unknown to the mapper.

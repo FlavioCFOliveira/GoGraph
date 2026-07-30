@@ -83,6 +83,62 @@ func (g *Graph[N, W]) EdgeLabelsByID(srcID, dstID graph.NodeID) []string {
 	return out
 }
 
+// ForEachSlotRelTypeByID streams the relationship types carried by ONE
+// column-typed adjacency slot of the directed pair (srcID → dstID) — the slot
+// whose own label column entry is encoded — invoking visit once per resolved type
+// name. encoded is the raw column value: 0 means the slot carries no inline type.
+//
+// It is the per-SLOT counterpart of [Graph.ForEachEdgeLabelByID], which streams
+// the pair's whole derived union. A caller that must decide what ONE parallel edge
+// is typed as cannot use the union: on a multigraph pair holding one :K edge and
+// one untyped edge the union reports :K for both, so a pattern `()-[r:K]->()`
+// matched twice where once was correct (rmp #2258).
+//
+// A column-typed slot carries its own inline type plus every type in the pair's
+// overflow list. Overflow holds a type [Graph.SetEdgeLabel] could not place
+// per-slot because no slot was free; SetEdgeLabel names the PAIR, so such a type
+// belongs to every column-typed slot of it. Nothing else is visited — in
+// particular, no sibling slot's inline type — which is what makes the answer
+// per-slot.
+//
+// This is the accessor for a slot whose type is NOT recorded against a stable
+// per-edge handle. When a handle record exists it is authoritative for that slot
+// and [Graph.EdgeLabelsByHandleID] is the accessor to use; see
+// [Graph.slotCarriesType], which applies the same precedence.
+//
+// Names are resolved and visited after the edge-label shard read lock is
+// released, exactly as ForEachEdgeLabelByID does, so visit may safely read the
+// graph. It allocates nothing when the pair has no overflow, which is the case for
+// every Cypher-built graph.
+//
+// ForEachSlotRelTypeByID is safe for concurrent use.
+func (g *Graph[N, W]) ForEachSlotRelTypeByID(srcID, dstID graph.NodeID, encoded uint32, visit func(name string)) {
+	own, hasOwn := decodeSlotLabel(encoded)
+	var extra []LabelID
+	if g.edgeLabelOverflowActive.Load() != 0 {
+		k := edgeKey{src: srcID, dst: dstID}
+		sh := g.edgeLabelShardFor(k)
+		sh.mu.RLock()
+		for _, lid := range sh.overflow[k] {
+			if hasOwn && lid == own {
+				continue
+			}
+			extra = append(extra, lid)
+		}
+		sh.mu.RUnlock()
+	}
+	if hasOwn {
+		if name, ok := g.reg.Resolve(own); ok {
+			visit(name)
+		}
+	}
+	for _, lid := range extra {
+		if name, ok := g.reg.Resolve(lid); ok {
+			visit(name)
+		}
+	}
+}
+
 // ForEachEdgeLabelByID streams the distinct labels of the directed edge (src,
 // dst), invoking visit once per resolved label name without materialising the
 // []string that [Graph.EdgeLabelsByID] returns. It is the allocation-fusing

@@ -99,8 +99,8 @@ type Header struct {
 	// use NVertices-1. Trusting the field name instead is what made
 	// TestPageRank_LDBCSf10_Soak permanently red from Sprint 65 until rmp #2256.
 	// The name is kept because it is published API; the contract is stated here.
-	NVertices uint64
-	NEdges    uint64
+	NVertices      uint64
+	NEdges         uint64
 	Weight         WeightKind
 	VerticesOffset uint64
 	EdgesOffset    uint64
