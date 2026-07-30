@@ -16,9 +16,10 @@ pair cache.
 ## Verdict: **NOT CERTIFIED at this head.**
 
 Two **CRITICAL** defects were found and fixed, one of which crashed the host process on a
-default engine. Eight defects are fixed and committed. **Nine remain open**, three of them
-requiring a decision that is not mine to make. Certification is blocked on the set in §7,
-not on unknown risk: every open item is enumerated, reproduced and has an owner.
+default engine. **Ten defects are fixed and committed** across two rounds. **Five remain
+open**, three of them requiring a decision that is not mine to make. Certification is
+blocked on the set in §7, not on unknown risk: every open item is enumerated, reproduced
+and has an owner.
 
 This is a stronger position than the entry state, where all four of the worst findings were
 present and invisible to a fully green suite.
@@ -171,10 +172,11 @@ HIGH or MEDIUM issue and no memory-safety bug.
 | rmp | Sev | Summary |
 |---|---|---|
 | #2262 | HIGH | `labels.bin` has no slot ordinal, so a checkpoint round-trip **loses** a committed relationship type in one shape and **invents** one in another, for handle-less parallel edges. Needs a **persisted-format decision**. |
-| #2263 | HIGH | `IndexNestedLoopJoin` keys on a narrowed float64, so two int64 values above 2⁵³ collide and a **phantom row** is emitted. On by default. |
+| ~~#2263~~ | ~~HIGH~~ | **FIXED** in round 2 — phantom row from a lossy float64 index key. The doc misattributed it to the probe key; the index *entries* are independently lossy. |
 | #2264 | HIGH | `CountPatternComp` is unreachable dead code; the projection spelling of a degree count is **983× slower** (2.813 ms vs 2.762 s). Its godoc claims otherwise. |
-| #2265 | HIGH | One unrelated `DELETE` makes every untyped degree count lose O(1) **and** the caller's cap: a permanent, graph-wide **1170×** cliff. Answers stay correct. |
+| ~~#2265~~ | ~~HIGH~~ | **FIXED** in round 2 — **2282.682 µs → 1.883 µs (1212×)**; the tombstoned arm now equals the clean arm, and the cap counts live edges only. |
 | #2266 | HIGH | The index-intersection recogniser runs an **unbudgeted** count during planning: 45×–130× plan time. |
+| #2268 | MEDIUM | **`make ci` itself is not deterministic.** A strict per-point wall-clock inequality in `bench/cyclicjoin` passed in `test-short` and failed at `cover-gate` **within one invocation** (40.31 ms vs 39.13 ms, a 3 % miss) because the coverage step runs the whole repository in parallel. Separately, two concurrent `make ci` runs interleave writes into the shared `cover.out` and the gate dies on a corrupted package name. |
 | #2267 | HIGH | `ExpandIntersect` returns wrong results for a boxed row value and a mis-resolved `endCol`. **Opt-in only** (`EnableCyclicIntersect` defaults off). |
 | — | HIGH | **Fair scheduling** (§5). A structural decision. |
 | — | HIGH | **Write ceiling #2193** (§5). A structural decision. |
