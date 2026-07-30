@@ -499,6 +499,10 @@ type buildOpts struct {
 	// safe because the seek is result- and order-identical. Only the read path sets
 	// it, from EngineOptions.DisableExpandIntoSeek.
 	expandIntoSeekDisabled bool
+	// cyclicIntersectEnabled turns ON the fused cyclic expand (#2157) for THIS
+	// build. Positive polarity, so every build path that never sets it — the write
+	// path, the public BuildPlanWithMutator — keeps today's two-Expand plan.
+	cyclicIntersectEnabled bool
 	// parallelScanEnabled gates the morsel-parallel count fast path (#1672). The
 	// read-path build sets it from the Engine field; it is consulted in
 	// buildEagerAggregation's count fast path (tryBuildParallelCountScan). Left
@@ -786,6 +790,22 @@ type EngineOptions struct {
 	// the two agree row for row, and as an operational escape hatch. See
 	// docs/design-expand-into-symmetric-swap.md §3, §4.
 	DisableExpandIntoSeek bool
+
+	// EnableCyclicIntersect turns ON the fused cyclic expand (#2157): for a pattern
+	// that closes a cycle, the open middle hop and the closing seek are replaced by
+	// one [exec.ExpandIntersect] driven by a sorted-set intersection over ordered CSR
+	// runs, so a candidate that does not close the cycle is never built into a row.
+	//
+	// The polarity is POSITIVE — unlike every Disable* knob here — so the zero value
+	// leaves the operator OFF. That is deliberate and is what SPIKE #2155 required:
+	// the operator is new rather than a peephole, the openCypher TCK contains no
+	// directed cycle over three or more distinct node variables and therefore cannot
+	// gate it at all, and the recogniser changes which operators a plan is built
+	// from. Opting in explicitly keeps every existing plan byte-identical until the
+	// benchmark task has measured each qualifying shape.
+	//
+	// Result- and order-identical when on: see docs/design-wcoj-cyclic-patterns.md.
+	EnableCyclicIntersect bool
 
 	// DisableJoinReorder turns OFF the count-store-gated disjoint-component
 	// ordering peephole (#2091). When false (the default) the planner may reorder
@@ -1080,6 +1100,11 @@ type Engine struct {
 	// by default; set false by EngineOptions.DisableExpandIntoSeek, which returns
 	// an expand-into hop to walking the whole neighbour run.
 	expandIntoSeekEnabled bool
+
+	// cyclicIntersectEnabled gates the fused cyclic expand (#2157). FALSE by
+	// default — positive polarity — and set only by
+	// EngineOptions.EnableCyclicIntersect.
+	cyclicIntersectEnabled bool
 
 	// bitmapIntersectEnabled gates the set-at-a-time multi-label conjunction
 	// (#2133). True by default; set false by
@@ -1397,6 +1422,7 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		bitmapIntersectEnabled: !opts.DisableBitmapIntersection,
 		minLabelScanEnabled:    !opts.DisableMinLabelScan,
 		expandIntoSeekEnabled:  !opts.DisableExpandIntoSeek,
+		cyclicIntersectEnabled: opts.EnableCyclicIntersect,
 		joinReorderEnabled:     !opts.DisableJoinReorder,
 		anchorSwapEnabled:      !opts.DisableAnchorSwap,
 
@@ -2180,6 +2206,8 @@ func (e *Engine) buildReadPhysical(
 	// Bound-destination seek (#2149): negative polarity, so leaving this unset on
 	// any other build path enables the seek.
 	bopts.expandIntoSeekDisabled = !e.expandIntoSeekEnabled
+	// Fused cyclic expand (#2157): positive polarity, off unless opted into.
+	bopts.cyclicIntersectEnabled = e.cyclicIntersectEnabled
 	// Set-at-a-time multi-label conjunction (#2133): strictly dominates the
 	// min-label re-anchor when its exact gate admits, and falls through to it when
 	// it vetoes, so enabling both is the intended configuration.
@@ -8069,6 +8097,15 @@ func buildOperatorRec(
 			if col, ok := schema[name]; ok {
 				cfg.RelCols = append(cfg.RelCols, col)
 			}
+		}
+		// Fused cyclic expand (#2157): when this hop closes a cycle and its child is
+		// the cycle's OPEN middle hop, the two together compute
+		// N_out(mid.From) ∩ N_in(IntoVar) — by materialising the left operand in
+		// full first. One intersecting operator computes the same set directly, so a
+		// candidate that does not close is never built into a row. Declines to nil
+		// for every shape it does not admit, leaving the plan below untouched.
+		if fused := tryFuseCyclicIntersect(p, child, fwd, rev, g, schema, bopts); fused != nil {
+			return fused, nil
 		}
 		exp := exec.NewExpand(child, fwd, rev, cfg)
 		// Expand-into (#2206): when this hop's destination is a variable the row
@@ -17923,3 +17960,110 @@ func irDirToExec(d ir.Direction) exec.Direction {
 var _ nodeWalkerIface = (*lpgNodeWalker)(nil)
 var _ labelResolverIface = (*lpgLabelResolver)(nil)
 var _ exec.GraphMutator = (*walMutatorAdapter)(nil)
+
+// tryFuseCyclicIntersect returns a fused [exec.ExpandIntersect] replacing the
+// cycle-closing hop p together with the OPEN middle hop below it, or nil when the
+// shape is not admitted (rmp #2157, docs/design-wcoj-cyclic-patterns.md).
+//
+// # Why it runs AFTER the child was built rather than intercepting the recursion
+//
+// The obvious implementation intercepts before recursing and builds the fused
+// operator from the middle hop's own child. It was rejected: each *ir.Expand
+// contributes THREE stable schema keys at schemaWidth(schema) — the source
+// duplicate, the relationship and the destination — and downstream operators size
+// their rows from schemaWidth. Skipping a node means replicating that bookkeeping,
+// and the two hops' six keys must land in exactly the order and at exactly the
+// indices the two separate passes would have produced or every downstream column
+// index shifts.
+//
+// Letting both passes run and then discarding the middle Expand OPERATOR keeps the
+// schema, the edge-variable metadata and the path-chain steps exactly as they are
+// today, at the cost of one plan-time struct that is thrown away. The row layout
+// then lines up by construction: the six columns
+// [ExpandIntersect.buildRow] appends — mid-source, r2, c, c, r3, IntoVar — are the
+// two triplets the discarded operators would have appended, in the same order.
+//
+// # Why the equality Selection above is left in place
+//
+// The translator puts an equality Selection above a cycle-closing hop, comparing
+// the synthetic destination against IntoVar. The fused operator emits IntoVar
+// itself in that column, so the predicate is trivially true. Leaving it is the same
+// choice #2206 made for the bound-destination seek, and it keeps this change to
+// operator substitution rather than plan-tree surgery.
+//
+// # What it declines, and why each veto is required
+//
+//   - The flag is off. Positive polarity: the operator is opt-in.
+//   - Either hop carries a PathVar. Path reconstruction consumes the per-hop
+//     (src, edge, dst) triplets, which a fused operator does not register.
+//   - The child is not EXACTLY an *exec.Expand. It is wrapped under PROFILE
+//     (buildOperator wraps when a profiler is attached) and by the columnar chain,
+//     and declining there is what stops this recogniser from stealing shapes the
+//     ChunkProducer chain would otherwise claim — a collision that has twice
+//     regressed this project.
+//   - Either direction is not OUT. An undirected neighbourhood is out ∪ in, which
+//     is not one contiguous ordered run, so the intersection primitive does not
+//     apply to it.
+//   - The middle hop is itself a closing hop, or does not feed this one.
+//
+// RelCols is the MIDDLE hop's sibling set, not the closing hop's. The closing hop's
+// set is the middle's plus the middle's own relationship, and that one pairing is
+// enforced inside the operator as r3 != r2 — so passing the closing set would be
+// redundant, and passing neither would lose the outer siblings.
+func tryFuseCyclicIntersect(
+	p *ir.Expand,
+	child exec.Operator,
+	fwd, rev *csr.CSR[float64],
+	g *lpg.Graph[string, float64],
+	schema map[string]int,
+	bopts *buildOpts,
+) exec.Operator {
+	if bopts == nil || !bopts.cyclicIntersectEnabled {
+		return nil
+	}
+	if p.IntoVar == "" || p.PathVar != "" || p.Direction != ir.DirectionOutgoing {
+		return nil
+	}
+	mid, ok := p.Child.(*ir.Expand)
+	if !ok {
+		return nil
+	}
+	if mid.IntoVar != "" || mid.PathVar != "" || mid.Direction != ir.DirectionOutgoing {
+		return nil
+	}
+	// The middle hop must be the one feeding this hop's source.
+	if mid.ToVar == "" || mid.ToVar != p.FromVar {
+		return nil
+	}
+	midExp, ok := child.(*exec.Expand)
+	if !ok {
+		return nil
+	}
+	kids := midExp.PlanChildren()
+	if len(kids) != 1 || kids[0] == nil {
+		return nil
+	}
+	endCol, ok := schema[p.IntoVar]
+	if !ok {
+		return nil
+	}
+	midCol, ok := schema[mid.FromVar]
+	if !ok {
+		return nil
+	}
+	cfg := &exec.ExpandIntersectConfig{MidCol: midCol, EndCol: endCol}
+	if len(mid.RelTypes) > 0 {
+		cfg.MidEdgeType = mid.RelTypes[0]
+		cfg.MidEdgeTypeFilter = edgeTypeFilterFor(g, fwd, mid.RelTypes, bopts)
+	}
+	if len(p.RelTypes) > 0 {
+		cfg.EndEdgeType = p.RelTypes[0]
+		cfg.EndEdgeTypeFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts)
+	}
+	for _, name := range mid.SiblingRelVars {
+		if col, okCol := schema[name]; okCol {
+			cfg.RelCols = append(cfg.RelCols, col)
+		}
+	}
+	return exec.NewExpandIntersect(kids[0], fwd, rev, cfg)
+}
