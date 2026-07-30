@@ -16,8 +16,22 @@ import (
 
 // TestPageRank_LDBCSf10_Soak verifies that extern.PageRank converges
 // on a synthetic LDBC SF10-scale graph (~500k vertices, ~5M edges):
-// no error, ranks slice length matches NVertices, and total mass
-// sums to 1.0 within 1e-6.
+// no error, the ranks slice covers exactly the NodeID space, and total
+// mass sums to 1.0 within 1e-6.
+//
+// # The NodeID space is NVertices-1, not NVertices (rmp #2256)
+//
+// This assertion was wrong from the day it was written (Sprint 65) and the
+// test was therefore permanently red — undetected because the soak layer is
+// deliberately not a release gate.
+//
+// [csrfile.Header.NVertices] is the number of uint64 entries in the file's
+// vertices section, which under the CSR convention is MaxNodeID+1. It is NOT a
+// count of distinct vertices: measured on a 4-vertex, 4-edge graph it reports
+// 257, because the mapper spreads keys across 256 shards. extern.PageRank is
+// correct — it computes n = len(verts)-1 and returns a slice indexed by NodeID
+// — so len(ranks) == NVertices-1 by construction and comparing against
+// NVertices could never pass.
 func TestPageRank_LDBCSf10_Soak(t *testing.T) {
 	testlayers.RequireSoak(t)
 
@@ -40,8 +54,13 @@ func TestPageRank_LDBCSf10_Soak(t *testing.T) {
 	}
 
 	nv := r.Header().NVertices
-	if uint64(len(ranks)) != nv {
-		t.Fatalf("len(ranks) = %d, want %d (NVertices)", len(ranks), nv)
+	if nv == 0 {
+		t.Fatalf("Header().NVertices = 0; the fixture wrote no vertices section")
+	}
+	// The NodeID space the ranks slice is indexed by.
+	wantRanks := nv - 1
+	if uint64(len(ranks)) != wantRanks {
+		t.Fatalf("len(ranks) = %d, want %d (NVertices-1, the NodeID space)", len(ranks), wantRanks)
 	}
 
 	var total float64
