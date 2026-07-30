@@ -94,7 +94,18 @@ func referenceChain(t *testing.T, fwd, rev *staticCSR, seeds []exec.Row,
 		if len(r) != 8 {
 			t.Fatalf("reference row has %d columns, want 8: %v", len(r), r)
 		}
-		if r[7] == r[0] { // the equality Selection: dst == a
+		// The equality Selection: dst == a, under openCypher NODE IDENTITY rather
+		// than Go interface equality.
+		//
+		// The distinction is invisible while every seed is a canonical
+		// expr.IntegerValue — the two agree exactly — and decisive the moment a seed
+		// arrives BOXED, as it does when the variable came through a projection.
+		// `expr.IntegerValue(0) == expr.NodeValue{ID: 0}` is false in Go because the
+		// dynamic types differ, so a `==` here silently drops every row of a boxed
+		// fixture and makes this reference report zero. The engine's Selection does
+		// not behave that way: [expr.NodeValue.Equal] compares on the underlying ID
+		// precisely so a projected operand and an unprojected one still match.
+		if sameNodeCell(r[7], r[0]) {
 			kept = append(kept, r)
 		}
 	}

@@ -34,13 +34,52 @@ package cypher
 // # Gate: the shipped per-predicate gate, per conjunct
 //
 // Every participating conjunct must independently pass the shipped range-seek gate
-// (rangeCountWinsFn: label population ≥ rangeSeekMinLabelPopulation, exact
-// in-range count ≤ rangeSeekMaxSelectivity of it). That is deliberately
-// conservative and needs no new statistic: a conjunct whose own range covers most
-// of the label would cost more to probe and AND than the rows it removes, so it is
-// left to the residual Filter instead of being intersected. Parts are ANDed in
-// ascending exact-count order so the cheapest bitmap is materialised first, the
-// same ordering rule #2133 established for labels.
+// (label population ≥ rangeSeekMinLabelPopulation, exact in-range count ≤
+// rangeSeekMaxSelectivity of it). That is deliberately conservative and needs no
+// new statistic: a conjunct whose own range covers most of the label would cost
+// more to probe and AND than the rows it removes, so it is left to the residual
+// Filter instead of being intersected. Parts are ANDed in ascending exact-count
+// order so the cheapest bitmap is materialised first, the same ordering rule #2133
+// established for labels.
+//
+// # The gate is BUDGETED, and that is not an optimisation detail (#2266)
+//
+// The first cut took each conjunct's count with an INFINITE budget and compared it
+// to the ceiling afterwards. That inverted the whole point of the ceiling. The
+// btree's RangeCount stops accumulating the moment the running total exceeds the
+// budget it is given, so a bounded count answers "more than the ceiling" in
+// O(budget) probes; an unbounded one walks the entire range to produce a number
+// whose only use is to be found too large. The broader the conjunct — that is, the
+// more certainly it will be REFUSED — the more the refusal cost.
+//
+// That cost lands on the PLANNING path, so it is paid once per query rather than
+// once per row, and it is paid by every shape the recogniser inspects including
+// the ones it declines. It is paid TWICE per build, because indexSeekWouldFire
+// runs this same peephole as a throwaway probe before the real build does. It was
+// measured at 41× the plan time of a shape that composes nothing (122 µs against
+// 3.0 µs) for a predicate whose third conjunct covered 95% of a 20 000-node label.
+//
+// The remedy needs no new constant and no new statistic, because the ceiling that
+// bounds the count is the SAME ceiling the gate already compares against:
+// [rangeSeekBudget] derives it once for the whole predicate, and every conjunct's
+// count is taken against it. Two consequences are load-bearing:
+//
+//   - The population floor is now checked ONCE, up front, before any counting.
+//     Below the floor no count can change the verdict, so taking one is waste by
+//     construction.
+//   - An accepted part's count is still EXACT, because acceptance requires
+//     count ≤ budget and RangeCount early-exits only above it. The ascending-count
+//     ordering of the ANDed parts is therefore byte-identical to what the
+//     unbudgeted version produced. A refused conjunct's count is not exact, but a
+//     refused conjunct never enters the ordering.
+//
+// The relationship count-store (graph/index/count) was considered first, per the
+// task's preference for a maintained O(1) cell. It does not apply: it holds the
+// E/D/T RELATIONSHIP statistics keyed by interned label and type ids, explicitly
+// does not hold the node statistic N(label), and holds nothing at all about a
+// property's value distribution — so no cell of it can answer "how many index
+// entries fall in [lo, hi]". The dirty-cell hazard that would otherwise need
+// handling therefore never arises here.
 
 import (
 	"sort"
@@ -105,6 +144,23 @@ func tryIndexIntersectionSeek(
 	if !isBinary || !equalFoldAnd(bo.Operator) {
 		return nil, false
 	}
+	// The gate's own ceiling, derived ONCE for the whole predicate and then handed
+	// to every conjunct's count so no count can run away (#2266). Two cheap checks
+	// are hoisted ahead of all counting by doing it here:
+	//
+	//   - The population floor. Below it the answer is "decline" whatever the
+	//     counts say, so a sub-floor label now costs one label-population lookup
+	//     instead of a full range count per indexed conjunct.
+	//   - The label population lookup itself, which interns the label string and
+	//     probes the label index. It used to be repeated for every conjunct.
+	//
+	// This is the same budget the single-property range seeks use, from the same
+	// derivation, so a conjunct admitted here is admitted on exactly the terms
+	// [tryStringRangeSeek] and [tryNumericRangeSeek] would admit it on.
+	budget, aboveFloor := rangeSeekBudget(g, lblScan.Label)
+	if !aboveFloor {
+		return nil, false
+	}
 	// One entry per DISTINCT property, first-recognised-bounds-win. Keeping only
 	// the first conjunct per property is sound because every bound retained is a
 	// necessary condition of the conjunction, so the probe stays a superset; any
@@ -140,7 +196,7 @@ func tryIndexIntersectionSeek(
 			}
 			continue
 		}
-		part, recognised := recogniseIndexedConjunct(e, nodeVar, lblScan.Label, idxMgr, g, params, prefixSeek)
+		part, recognised := recogniseIndexedConjunct(e, nodeVar, lblScan.Label, idxMgr, budget, params, prefixSeek)
 		if !recognised || len(parts) == len(partBuf) {
 			continue
 		}
@@ -184,11 +240,17 @@ func tryIndexIntersectionSeek(
 // comparison (string or numeric, including the STARTS WITH prefix form) whose
 // property carries a covering bound index, and whose exact in-range count passes
 // the shipped range-seek gate.
+//
+// budget is the ceiling [rangeSeekBudget] derived for the label, already known to
+// be above the population floor. It is BOTH the value the count is compared
+// against and the early-exit limit the count is taken with, so a conjunct too
+// broad to be admitted is refused after O(budget) cardinality probes instead of
+// after walking its whole range (#2266).
 func recogniseIndexedConjunct(
 	e ast.Expression,
 	nodeVar, label string,
 	idxMgr *index.Manager,
-	g *lpg.Graph[string, float64],
+	budget uint64,
 	params map[string]expr.Value,
 	prefixSeek bool,
 ) (indexRangeConjunct, bool) {
@@ -196,13 +258,8 @@ func recogniseIndexedConjunct(
 	if pred, ok := extractSingleStringCmp(e, nodeVar, prefixSeek); ok {
 		if sub, found := findBoundStringBTree(idxMgr, label, pred.propKey); found {
 			lo, hi := boundsOf(pred.lo, pred.hi)
-			count, exact := exactStringRangeCount(sub, pred)
-			if exact && rangeCountWinsFn(g, label, func(b uint64) (uint64, bool) {
-				if count > b {
-					return b + 1, false
-				}
-				return count, true
-			}) {
+			count, exact := budgetedStringRangeCount(sub, pred, budget)
+			if rangeCountWithinBudget(count, exact, budget) {
 				return indexRangeConjunct{
 					propKey: pred.propKey,
 					count:   count,
@@ -217,13 +274,8 @@ func recogniseIndexedConjunct(
 	if pred, ok := extractSingleNumericCmp(e, nodeVar, params); ok {
 		if sub, found := findBoundNumericBTree(idxMgr, label, pred.propKey); found {
 			lo, hi := rangeBoundFloats(pred)
-			count, exact := sub.RangeCount(lo, hi, ^uint64(0))
-			if exact && rangeCountWinsFn(g, label, func(b uint64) (uint64, bool) {
-				if count > b {
-					return b + 1, false
-				}
-				return count, true
-			}) {
+			count, exact := sub.RangeCount(lo, hi, budget)
+			if rangeCountWithinBudget(count, exact, budget) {
 				loB, hiB := exec.RangeBound{}, exec.RangeBound{}
 				if pred.lo != nil {
 					loB = exec.RangeBound{Value: expr.FloatValue(pred.lo.value), Include: true}
@@ -244,11 +296,16 @@ func recogniseIndexedConjunct(
 	return indexRangeConjunct{}, false
 }
 
-// exactStringRangeCount returns the exact number of index entries the predicate's
-// range covers, using the open-ended count when the upper bound is unbounded so the
-// counted key space matches the space the executed scan walks (#F-CY1).
-func exactStringRangeCount(sub boundStringRange, pred stringRangePred) (uint64, bool) {
-	const fullBudget = ^uint64(0)
+// budgetedStringRangeCount returns the number of index entries the predicate's
+// range covers, EARLY-EXITING at budget: over budget it returns (budget+1, false)
+// and the caller declines, having paid O(budget) cardinality probes rather than
+// walking the whole range (#2266).
+//
+// It uses the open-ended count when the upper bound is unbounded, so the counted
+// key space matches the space the executed scan walks (#F-CY1). That case is the
+// one that most needs the budget: an unbounded-above range over a high-cardinality
+// string index visits every remaining key in the btree.
+func budgetedStringRangeCount(sub boundStringRange, pred stringRangePred, budget uint64) (uint64, bool) {
 	lo := ""
 	if pred.lo != nil {
 		if sv, ok := pred.lo.Value.(expr.StringValue); ok {
@@ -256,13 +313,13 @@ func exactStringRangeCount(sub boundStringRange, pred stringRangePred) (uint64, 
 		}
 	}
 	if pred.hi == nil {
-		return sub.RangeCountFrom(lo, fullBudget)
+		return sub.RangeCountFrom(lo, budget)
 	}
 	hi := ""
 	if sv, ok := pred.hi.Value.(expr.StringValue); ok {
 		hi = string(sv)
 	}
-	return sub.RangeCount(lo, hi, fullBudget)
+	return sub.RangeCount(lo, hi, budget)
 }
 
 // boundsOf converts the extracted optional bounds to the operator's value form; a
