@@ -1,0 +1,49 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bench/cyclicjoin
+cpu: Apple M4
+                                     │ docs/benchmarks/history/cyclic-join-2026-07-30/twoexpand.txt │ docs/benchmarks/history/cyclic-join-2026-07-30/fused.txt │
+                                     │                            sec/op                            │              sec/op                vs base               │
+Cyclic_Triangle_Uniform/d=4-10                                                         16.59m ±  0%                         10.13m ± 1%  -38.96% (p=0.002 n=6)
+Cyclic_Triangle_Uniform/d=16-10                                                       103.78m ±  2%                         23.97m ± 5%  -76.91% (p=0.002 n=6)
+Cyclic_Triangle_Uniform/d=64-10                                                       1718.7m ± 11%                         145.2m ± 1%  -91.55% (p=0.002 n=6)
+Cyclic_Triangle_SmallDegree/d=1-10                                                    1897.9µ ±  1%                         925.0µ ± 0%  -51.26% (p=0.002 n=6)
+Cyclic_Triangle_SmallDegree/d=2-10                                                    10.851m ±  1%                         8.739m ± 1%  -19.47% (p=0.002 n=6)
+Cyclic_Triangle_SmallDegree/d=3-10                                                    13.244m ±  0%                         9.363m ± 0%  -29.31% (p=0.002 n=6)
+Cyclic_Triangle_PowerLaw/powerlaw-10                                                   303.9m ±  1%                         127.9m ± 1%  -57.91% (p=0.002 n=6)
+Cyclic_TwoCycle/d=16-10                                                               10.266m ±  1%                         4.848m ± 1%  -52.77% (p=0.002 n=6)
+Cyclic_Square/d=8-10                                                                  244.41m ±  1%                         68.90m ± 0%  -71.81% (p=0.002 n=6)
+Cyclic_NonQualifying/labelled-10                                                       471.7m ±  1%                         471.2m ± 0%        ~ (p=0.394 n=6)
+Cyclic_NonQualifying/acyclic-10                                                        66.85m ±  1%                         66.57m ± 1%        ~ (p=0.589 n=6)
+geomean                                                                                56.68m                               25.94m       -54.24%
+
+                                     │ docs/benchmarks/history/cyclic-join-2026-07-30/twoexpand.txt │ docs/benchmarks/history/cyclic-join-2026-07-30/fused.txt │
+                                     │                             B/op                             │               B/op                 vs base               │
+Cyclic_Triangle_Uniform/d=4-10                                                         7.347Mi ± 0%                        3.136Mi ± 0%  -57.32% (p=0.002 n=6)
+Cyclic_Triangle_Uniform/d=16-10                                                       56.798Mi ± 0%                        5.288Mi ± 0%  -90.69% (p=0.002 n=6)
+Cyclic_Triangle_Uniform/d=64-10                                                       770.70Mi ± 0%                        13.89Mi ± 0%  -98.20% (p=0.002 n=6)
+Cyclic_Triangle_SmallDegree/d=1-10                                                    1351.5Ki ± 0%                        621.8Ki ± 0%  -53.99% (p=0.002 n=6)
+Cyclic_Triangle_SmallDegree/d=2-10                                                     4.123Mi ± 0%                        2.776Mi ± 0%  -32.67% (p=0.002 n=6)
+Cyclic_Triangle_SmallDegree/d=3-10                                                     5.556Mi ± 0%                        2.956Mi ± 0%  -46.79% (p=0.002 n=6)
+Cyclic_Triangle_PowerLaw/powerlaw-10                                                  115.54Mi ± 0%                        30.03Mi ± 0%  -74.01% (p=0.002 n=6)
+Cyclic_TwoCycle/d=16-10                                                                4.447Mi ± 0%                        1.577Mi ± 0%  -64.54% (p=0.002 n=6)
+Cyclic_Square/d=8-10                                                                  151.17Mi ± 0%                        21.68Mi ± 0%  -85.66% (p=0.002 n=6)
+Cyclic_NonQualifying/labelled-10                                                       56.68Mi ± 0%                        56.68Mi ± 0%        ~ (p=0.937 n=6)
+Cyclic_NonQualifying/acyclic-10                                                        28.59Mi ± 0%                        28.59Mi ± 0%        ~ (p=0.195 n=6)
+geomean                                                                                23.53Mi                             6.978Mi       -70.35%
+
+                                     │ docs/benchmarks/history/cyclic-join-2026-07-30/twoexpand.txt │ docs/benchmarks/history/cyclic-join-2026-07-30/fused.txt │
+                                     │                          allocs/op                           │            allocs/op             vs base                 │
+Cyclic_Triangle_Uniform/d=4-10                                                          553.3k ± 0%                       201.7k ± 0%  -63.55% (p=0.002 n=6)
+Cyclic_Triangle_Uniform/d=16-10                                                        4825.1k ± 0%                       387.7k ± 0%  -91.96% (p=0.002 n=6)
+Cyclic_Triangle_Uniform/d=64-10                                                        66.517M ± 0%                       1.131M ± 0%  -98.30% (p=0.002 n=6)
+Cyclic_Triangle_SmallDegree/d=1-10                                                     100.01k ± 0%                       38.57k ± 0%  -61.43% (p=0.002 n=6)
+Cyclic_Triangle_SmallDegree/d=2-10                                                      274.9k ± 0%                       170.5k ± 0%  -37.98% (p=0.002 n=6)
+Cyclic_Triangle_SmallDegree/d=3-10                                                      398.6k ± 0%                       186.1k ± 0%  -53.31% (p=0.002 n=6)
+Cyclic_Triangle_PowerLaw/powerlaw-10                                                    8.375M ± 0%                       1.709M ± 0%  -79.59% (p=0.002 n=6)
+Cyclic_TwoCycle/d=16-10                                                                325.83k ± 0%                       85.73k ± 0%  -73.69% (p=0.002 n=6)
+Cyclic_Square/d=8-10                                                                   12.858M ± 0%                       1.711M ± 0%  -86.70% (p=0.002 n=6)
+Cyclic_NonQualifying/labelled-10                                                        4.825M ± 0%                       4.825M ± 0%        ~ (p=0.732 n=6)
+Cyclic_NonQualifying/acyclic-10                                                         3.587M ± 0%                       3.587M ± 0%        ~ (p=1.000 n=6) ¹
+geomean                                                                                 1.902M                            498.2k       -73.81%
+¹ all samples are equal
