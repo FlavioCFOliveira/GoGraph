@@ -554,3 +554,102 @@ func factLines(out string) string {
 	}
 	return strings.Join(keep, "\n")
 }
+
+// TestCyclicJoinExercise pins the DETERMINISTIC facts of the fused-cyclic-expand
+// exercise (#2161) and deliberately pins no timing.
+//
+// The load-bearing assertions are the two that a differential alone cannot give:
+//
+//   - `fused_engaged` must be true and `twoexpand_engaged` false. SPIKE #2155 verified
+//     the openCypher TCK contains no directed cycle over three or more distinct node
+//     variables, so TCK 3897/3897 cannot see this operator; and if the recogniser
+//     silently declined, BOTH arms would run today's plan and `plans_agree` would be
+//     trivially true. Only the engagement flags separate "identical because correct"
+//     from "identical because it never fired".
+//   - `labelled_declines` must be true. That is not a defect being tolerated quietly:
+//     a node-label predicate interposes a Selection between the cycle's hops, so the
+//     fusion correctly refuses, and pinning it keeps the limitation visible in the
+//     example's own output rather than buried in a design document.
+func TestCyclicJoinExercise(t *testing.T) {
+	var buf bytes.Buffer
+	if err := cyclicJoinExercise(context.Background(), testConfig(), &buf); err != nil {
+		t.Fatalf("cyclicJoinExercise: %v", err)
+	}
+	out := buf.String()
+
+	// Both scales must appear, so the SCALING behaviour is observable in the example's
+	// own output rather than only in a benchmark.
+	for _, sc := range []struct {
+		users int
+		pref  string
+	}{
+		{cyclicScaleSmall, "cyclic.n" + strconv.Itoa(cyclicScaleSmall)},
+		{cyclicScaleLarge, "cyclic.n" + strconv.Itoa(cyclicScaleLarge)},
+	} {
+		if got := telemetryInt(t, out, sc.pref+".users"); got != int64(sc.users) {
+			t.Errorf("%s.users = %d, want %d", sc.pref, got, sc.users)
+		}
+
+		// A ring of n nodes with this degree closes exactly 3n directed triangles: each
+		// of the n triples {k, k+1, k+2} is enumerated once per starting node, and no
+		// other offset combination sums to 0 mod n within the degree window. Pinning the
+		// exact value rather than ">0" is what makes this a regression gate: a fusion
+		// that dropped or duplicated rows would still satisfy plans_agree if it broke
+		// BOTH arms, but it cannot satisfy this.
+		wantTri := int64(3 * sc.users)
+		if got := factInt(t, out, sc.pref+".triangles"); got != wantTri {
+			t.Errorf("%s.triangles = %d, want %d (3 rotations per ring triple)", sc.pref, got, wantTri)
+		}
+
+		for _, key := range []string{".plans_agree", ".fused_engaged", ".labelled_declines", ".labelled_agrees"} {
+			if !telemetryBoolFact(t, out, sc.pref+key) {
+				t.Errorf("%s%s = false, want true", sc.pref, key)
+			}
+		}
+		// The control: the two-Expand arm must NOT engage the operator, or the contrast
+		// is measuring one plan against itself.
+		if telemetryBoolFact(t, out, sc.pref+".twoexpand_engaged") {
+			t.Errorf("%s.twoexpand_engaged = true; the flag-off arm must never engage the operator", sc.pref)
+		}
+	}
+
+	// The larger scale must report strictly more triangles, or the two rows are not
+	// actually measuring different scales.
+	small := factInt(t, out, "cyclic.n"+strconv.Itoa(cyclicScaleSmall)+".triangles")
+	large := factInt(t, out, "cyclic.n"+strconv.Itoa(cyclicScaleLarge)+".triangles")
+	if large <= small {
+		t.Errorf("triangles did not grow with scale: small=%d large=%d", small, large)
+	}
+}
+
+// factInt reads a deterministic `key=<int>` line — one WITHOUT the "# " prefix that
+// marks volatile telemetry. telemetryInt deliberately requires that prefix, so the two
+// readers cannot be confused: a fact read as telemetry, or vice versa, fails loudly
+// rather than silently matching the wrong line.
+func factInt(t *testing.T, out, key string) int64 {
+	t.Helper()
+	prefix := key + "="
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			n, err := strconv.ParseInt(strings.TrimPrefix(line, prefix), 10, 64)
+			if err != nil {
+				t.Fatalf("fact %q value is not an integer: %q", key, line)
+			}
+			return n
+		}
+	}
+	t.Fatalf("deterministic fact %q not found in output", key)
+	return 0
+}
+
+// telemetryBoolFact reads a `key=true|false` deterministic fact line.
+func telemetryBoolFact(t *testing.T, out, key string) bool {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, key+"=") {
+			return strings.TrimPrefix(line, key+"=") == "true"
+		}
+	}
+	t.Fatalf("telemetry key %q not found in output", key)
+	return false
+}

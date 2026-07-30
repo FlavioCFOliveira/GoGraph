@@ -658,6 +658,80 @@ Full measurement of the ordering itself, across the degree sweep and against the
 pre-sprint tree, is in
 [`docs/benchmarks/csr-neighbour-ordering-2026-07-29.md`](../../docs/benchmarks/csr-neighbour-ordering-2026-07-29.md).
 
+## Fused cyclic expand exercise (#2157)
+
+**Scenario.** Mutual-friendship triangles — the natural closed motif in a social
+graph. "Who are three people who all follow each other?" is the shape behind
+community detection, clique-ish grouping and triadic-closure recommendation.
+
+**Objective.** Contrast the fused cyclic expand against the two-`Expand` plan it
+replaces, at **two scales**, so the scaling behaviour is visible in this example's
+own output rather than only in a benchmark.
+
+A directed triangle plans today as a chain whose last two hops are an *open* expand
+that materialises the whole of `b`'s neighbourhood and a *closing* seek that throws
+away all but the closing candidates. Together they compute `N_out(b) ∩ N_in(a)` — by
+materialising the left operand in full first. `exec.ExpandIntersect` computes the
+same set directly, so a candidate that does not close the cycle is never built into a
+row.
+
+**Why the fusing query carries no node labels, and why that matters.** The recogniser
+fires only when the cycle's closing hop sits *directly* on its open middle hop. A
+node-label predicate interposes a `Selection` between the two, so
+`(a:USER)-[:FRIEND]->(b:USER)-…` correctly **declines**. On this dataset `FRIEND`
+edges only ever join users, so dropping the labels is semantically equivalent *and*
+lets the operator engage. The exercise therefore runs **both** spellings. The
+labelled row is not a throwaway control — it is the honest measure of how much of
+this win a real label-using query gets today, which is **none**, and it is measured
+to be *slower still* because the label predicates are evaluated per intermediate row.
+
+**Fixture.** A uniform ring, deliberately, rather than this example's skewed
+population: it is the **honest floor**. SPIKE #2155 proved the two plans' work terms
+are *exactly equal* on a regular graph, so the contrast carries no degree-skew
+advantage whatsoever.
+
+**Bounded by construction.** This exercise never runs at the `-users` scale. The plan
+it is compared against enumerates `Θ(n·d²)` intermediate rows, so the two-`Expand`
+arm — not the fused one — is the binding constraint on runtime, and at this example's
+default population it would be unbounded.
+
+### Indicators
+
+Deterministic facts (pinned by `TestCyclicJoinExercise`):
+
+| Fact | Meaning |
+|---|---|
+| `cyclic.nN.triangles` | directed triangles found; exactly `3N` for this ring |
+| `cyclic.nN.plans_agree` | the two plans returned the identical count |
+| `cyclic.nN.fused_engaged` | the operator actually RAN (see below) |
+| `cyclic.nN.twoexpand_engaged` | must be false — the control |
+| `cyclic.nN.labelled_declines` | the labelled spelling did not fuse |
+| `cyclic.nN.labelled_agrees` | it still returned the same answer |
+
+Volatile telemetry (`# ` prefixed): per-arm latency, `runtime.MemStats` allocation
+bytes, and the derived `speedup` / `alloc_ratio`.
+
+**Why an engagement counter and not just the contrast.** SPIKE #2155 verified the
+openCypher TCK contains **no directed cycle over three or more distinct node
+variables**, so `TCK 3897/3897` cannot see this operator at all. A plan A/B is blind
+the same way: if the recogniser silently declined, both arms would run today's plan
+and `plans_agree` would be trivially true. Only the counter separates "identical
+because it is correct" from "identical because it never fired".
+
+### Observed (Apple M4, `-users=1500`)
+
+| Scale | fused | two-`Expand` | speed-up | alloc ratio | labelled |
+|---|---:|---:|---:|---:|---:|
+| n=4 000 (12 000 triangles) | 16.8 ms | 64.0 ms | **3.82×** | **7.56×** | 266.9 ms |
+| n=12 000 (36 000 triangles) | 54.6 ms | 204.5 ms | **3.74×** | **7.61×** | 833.1 ms |
+
+Both arms scale near-linearly in `n` at fixed degree, with the fused arm a stable
+~3.8× ahead — and the **labelled** spelling is roughly 4× slower than *either*,
+because it pays label predicates on every intermediate row and cannot fuse. That gap
+is the concrete argument for the Selection-hoist follow-on.
+
+pprof CPU and heap profiles are written to `-profile-dir` when set.
+
 ## Memory profile and optimizations
 
 The resident memory of this workload is dominated by the edges. A heap
