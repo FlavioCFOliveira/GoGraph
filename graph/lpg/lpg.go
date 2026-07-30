@@ -240,19 +240,25 @@ type edgeLabelShard struct {
 	mu       sync.RWMutex
 }
 
-// addOverflow appends lid to k's overflow list if not already present. The
-// caller must hold sh.mu for writing.
-func (sh *edgeLabelShard) addOverflow(k edgeKey, lid LabelID) {
+// addOverflow appends lid to k's overflow list if not already present, and
+// reports whether it changed the list. The caller must hold sh.mu for writing.
+//
+// The bool is load-bearing rather than informational: [Graph.SetEdgeLabel] bumps
+// the topology generation only on a genuine change (rmp #2255), so a caller that
+// re-asserts a label already present must be distinguishable from one that adds
+// a new one.
+func (sh *edgeLabelShard) addOverflow(k edgeKey, lid LabelID) bool {
 	ls := sh.overflow[k]
 	for _, x := range ls {
 		if x == lid {
-			return
+			return false
 		}
 	}
 	if sh.overflow == nil {
 		sh.overflow = make(map[edgeKey][]LabelID)
 	}
 	sh.overflow[k] = append(ls, lid)
+	return true
 }
 
 // hasOverflow reports whether k's overflow list carries lid. The caller must
@@ -2293,9 +2299,27 @@ func (g *Graph[N, W]) LiveOrder() uint64 {
 // csr.BuildFromAdjListLive omits the arcs incident to a tombstoned node, so the
 // live topology a cache is derived from has changed.
 //
+// Since rmp #2255 it ALSO counts every change to an edge's derived LABEL set —
+// [Graph.SetEdgeLabel], [Graph.RemoveEdgeLabel] and
+// [Graph.SetEdgeLabelByHandle]. An edge label moves no CSR position, so this is
+// wider than the counter's name suggests, and the reason is concrete: the Cypher
+// engine's edge-type-filter cache keys on this epoch while resolving relationship
+// TYPE from those labels, so a label change that left the epoch still was served
+// a stale filter. The observable defect was a durably committed relationship-type
+// change staying invisible to a warm Engine indefinitely, and — via the rollback
+// inverse — an aborted one staying visible.
+//
+// A mutation that changes nothing does NOT bump: re-asserting a label already
+// present, removing one that is absent, or targeting an edge that does not exist
+// all leave the epoch alone. That distinction is load-bearing rather than tidy,
+// because the MERGE MATCH branch re-asserts an existing relationship's type on
+// every match, and bumping there would force an O(V+E) CSR-pair rebuild per
+// MERGE on a read-mostly workload.
+//
 // It says nothing about interning a fresh node or about property-only mutations,
-// neither of which shifts an existing edge's CSR position; see the topoGeneration
-// field doc for why that scope is sufficient and intentional.
+// neither of which shifts an existing edge's CSR position or changes a
+// relationship type; see the topoGeneration field doc for why that scope is
+// sufficient and intentional.
 //
 // Callers do NOT need to bump it themselves: every [Graph] mutator that changes
 // live topology bumps it internally, after publishing the change. Safe for
@@ -2546,9 +2570,17 @@ func (g *Graph[N, W]) SetEdgeLabel(src, dst N, name string) {
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.Lock()
-	g.setEdgeLabelLocked(k, lid)
+	changed := g.setEdgeLabelLocked(k, lid)
 	sh.mu.Unlock()
 	g.edgeIdx.Add(uint32(lid), srcID)
+	if changed {
+		// The derived edge-label set is part of what [Graph.TopoGeneration]
+		// covers, because the Cypher engine's edge-type-filter cache is keyed on
+		// it (rmp #2255). Bumping AFTER the shard is released and after the index
+		// add is the ordering rmp #2151/fafc50c7 established: a reader that
+		// samples the new epoch must be unable to miss the write it announces.
+		g.topoGeneration.Add(1)
+	}
 }
 
 // setEdgeLabelLocked adds lid to the derived label set of k. The caller must
@@ -2560,22 +2592,26 @@ func (g *Graph[N, W]) SetEdgeLabel(src, dst N, name string) {
 // label is already in the set); otherwise — the slot holds a different label —
 // the label spills to overflow (deduplicated). Membership in the derived union
 // is invariant under which slot or overflow physically holds the id.
-func (g *Graph[N, W]) setEdgeLabelLocked(k edgeKey, lid LabelID) {
+//
+// It reports whether the derived label set actually changed, which is what
+// [Graph.SetEdgeLabel] uses to decide whether to bump the topology generation
+// (rmp #2255).
+func (g *Graph[N, W]) setEdgeLabelLocked(k edgeKey, lid LabelID) bool {
 	enc := encodeSlotLabel(lid)
 	cur, slotExists := g.firstSlotLabel(k.src, k.dst)
 	if slotExists && cur == 0 {
 		// Empty inline slot: store the first label there.
 		g.adj.SetEdgeLabelSlot(k.src, k.dst, enc)
-		return
+		return true
 	}
 	if slotExists && cur == enc {
 		// Already the inline label — nothing to do.
-		return
+		return false
 	}
 	// Either the inline slot holds a different label, or (defensively) there is
 	// no slot; spill to overflow, but skip if it is already the slot label.
 	sh := g.edgeLabelShardFor(k)
-	sh.addOverflow(k, lid)
+	return sh.addOverflow(k, lid)
 }
 
 // HasEdgeLabel reports whether the directed edge (src, dst) carries
@@ -2644,10 +2680,19 @@ func (g *Graph[N, W]) RemoveEdgeLabel(src, dst N, name string) {
 	// must live in an inline slot, so clear the FIRST dst-matching slot whose
 	// label decodes to lid. The whole update is under the shard lock so the
 	// slot and overflow halves of the derived set stay consistent for readers.
-	if !sh.removeOverflow(k, lid) {
-		g.clearFirstSlotLabel(srcID, dstID, lid)
+	changed := sh.removeOverflow(k, lid)
+	if !changed {
+		changed = g.clearFirstSlotLabel(srcID, dstID, lid)
 	}
 	sh.mu.Unlock()
+	if changed {
+		// See [Graph.SetEdgeLabel]: the derived edge-label set is inside
+		// [Graph.TopoGeneration]'s scope (rmp #2255). Removal matters as much as
+		// addition — this is the rollback inverse of a label SET, so without the
+		// bump an ABORTED transaction's relationship type stayed visible to a
+		// warm Engine, which is an Atomicity violation and not merely a stale read.
+		g.topoGeneration.Add(1)
+	}
 }
 
 // clearFirstSlotLabel clears the label of the FIRST dst-matching adjacency
@@ -2656,6 +2701,9 @@ func (g *Graph[N, W]) RemoveEdgeLabel(src, dst N, name string) {
 // The caller must hold the pair's edge-label shard write lock. No-op when no
 // such slot carries lid (e.g. the edge was already removed — the orphan case,
 // where the label lived only in overflow and was handled by the caller).
-func (g *Graph[N, W]) clearFirstSlotLabel(srcID, dstID graph.NodeID, lid LabelID) {
-	g.adj.ClearEdgeLabelSlotValue(srcID, dstID, encodeSlotLabel(lid))
+//
+// It reports whether a slot was actually cleared, which [Graph.RemoveEdgeLabel]
+// uses to bump the topology generation only on a genuine change (rmp #2255).
+func (g *Graph[N, W]) clearFirstSlotLabel(srcID, dstID graph.NodeID, lid LabelID) bool {
+	return g.adj.ClearEdgeLabelSlotValue(srcID, dstID, encodeSlotLabel(lid))
 }

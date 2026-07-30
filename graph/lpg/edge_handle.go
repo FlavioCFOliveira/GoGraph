@@ -142,6 +142,18 @@ func (g *Graph[N, W]) SetEdgeLabelByHandle(src, dst N, handle uint64, name strin
 	lid := g.reg.Intern(name)
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeHandleLabelShardFor(k)
+	// changed is read by the FIRST-registered defer, which therefore runs LAST —
+	// after sh.mu.Unlock below. That ordering is deliberate: the derived
+	// edge-label set is inside [Graph.TopoGeneration]'s scope (rmp #2255), and
+	// rmp #2151/fafc50c7 established that the epoch must move only once the write
+	// it announces is fully published, so a reader sampling the new epoch cannot
+	// miss it.
+	changed := false
+	defer func() {
+		if changed {
+			g.topoGeneration.Add(1)
+		}
+	}()
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	if sh.m == nil {
@@ -155,8 +167,17 @@ func (g *Graph[N, W]) SetEdgeLabelByHandle(src, dst N, handle uint64, name strin
 	// labelBag is stored by value: mutate a local copy and write it back under
 	// the shard lock (the write-back is load-bearing — add may grow/promote).
 	bag := byHandle[handle]
+	if bag.has(lid) {
+		// Already recorded for this handle. Re-asserting it must NOT bump the
+		// epoch: the MERGE MATCH branch (cypher/exec/merge_relationship.go) calls
+		// through here for every MERGE that binds an existing relationship, and a
+		// spurious bump would invalidate the forward/reverse CSR pair cache and
+		// force an O(V+E) rebuild for a mutation that changed nothing.
+		return
+	}
 	bag.add(lid)
 	byHandle[handle] = bag
+	changed = true
 }
 
 // EdgeLabelsByHandle returns the labels recorded for the edge identified
