@@ -121,13 +121,15 @@ func (a *AdjList[N, W]) linkVersion(next, prev *adjEntry[W], info *mvcc.CommitIn
 	if next == nil {
 		return
 	}
-	if info != nil && prev != nil && prev.ver != nil && prev.ver.info == info {
-		// Same transaction, already recorded for this node: keep prev's chain
-		// and drop the intermediate entry, which no reader can ever need.
-		next.ver = prev.ver
-		return
+	if info != nil && prev != nil {
+		if pv := prev.ver.Load(); pv != nil && pv.info == info {
+			// Same transaction, already recorded for this node: keep prev's
+			// chain and drop the intermediate entry, which no reader can need.
+			next.ver.Store(pv)
+			return
+		}
 	}
-	next.ver = &adjVersion[W]{prev: prev, info: info, ts: ts}
+	next.ver.Store(&adjVersion[W]{prev: prev, info: info, ts: ts})
 	a.versionActive.Add(1)
 }
 
@@ -144,11 +146,15 @@ func (a *AdjList[N, W]) entryAsOf(s *adjShard[W], intraIdx, startTS, txID uint64
 	}
 	// Immutable pointer chasing from here: no synchronisation, and no way to
 	// observe a torn pair, because the chain was fixed when e was published.
-	for e != nil && e.ver != nil {
-		if mvcc.Visible(e.ver.supersededAt(), startTS, txID) {
+	for e != nil {
+		v := e.ver.Load()
+		if v == nil {
+			break
+		}
+		if mvcc.Visible(v.supersededAt(), startTS, txID) {
 			break // the change that produced e is visible: e is this reader's version
 		}
-		e = e.ver.prev
+		e = v.prev
 	}
 	return e
 }
@@ -184,4 +190,94 @@ func (a *AdjList[N, W]) EntryNeighboursAsOf(id graph.NodeID, startTS, txID uint6
 // Not safe for concurrent use.
 func (a *AdjList[N, W]) SetWriteStamp(info *mvcc.CommitInfo, ts uint64) {
 	a.writeInfo, a.writeTS = info, ts
+}
+
+// Reclaim frees every adjacency version that no reader can reach any more, and
+// returns how many records were released.
+//
+// watermark is the oldest start timestamp among active readers, from
+// [mvcc.Horizon.Oldest]. A version superseded at or before it is unreachable:
+// every reader began at or after that instant, so every reader resolves to the
+// current entry rather than stepping back through it. A watermark of zero means
+// "reclaim nothing", which is what the horizon reports while a reader could not
+// be registered.
+//
+// # Why this severs rather than unlinks record by record
+//
+// A chain is ordered newest-first, so the FIRST record reachable from the
+// current entry whose supersede timestamp is at or before the watermark makes
+// every record behind it unreachable too. Storing nil at that point releases
+// the whole tail in one atomic store, and the Go collector frees the records
+// and the old entries they pinned. There is no need to walk to the end, and no
+// window in which a reader sees a chain with a hole in it.
+//
+// # Why it is safe against a concurrent reader
+//
+// The store is atomic, so a reader traversing the chain sees either the record
+// or nil. Both answers are correct: the watermark says no active reader has a
+// start timestamp old enough to need what is behind that point, so a reader
+// that sees nil stops at the current entry, which is the version it should get
+// anyway.
+//
+// Safe for concurrent use with readers. Not safe to run concurrently with
+// itself or with writers on the same AdjList.
+func (a *AdjList[N, W]) Reclaim(watermark uint64) int {
+	if watermark == 0 || a.versionActive.Load() == 0 {
+		return 0
+	}
+	freed := 0
+	for si := range a.shards {
+		s := &a.shards[si]
+		s.mu.Lock()
+		if len(s.versioned) == 0 {
+			s.mu.Unlock()
+			continue
+		}
+		for intraIdx := range s.versioned {
+			e := loadEntry(s, intraIdx)
+			if e == nil {
+				delete(s.versioned, intraIdx)
+				continue
+			}
+			n, stillVersioned := severChain(e, watermark)
+			freed += n
+			if !stillVersioned {
+				delete(s.versioned, intraIdx)
+			}
+		}
+		s.mu.Unlock()
+	}
+	if freed > 0 {
+		a.versionActive.Add(-int64(freed))
+	}
+	return freed
+}
+
+// severChain drops the unreachable tail of e's version chain and reports how
+// many records it released and whether any remain.
+//
+// The chain runs newest-first, so the FIRST record whose supersede timestamp is
+// at or before the watermark makes everything behind it unreachable as well:
+// every active reader began at or after that instant, so none of them steps
+// back past it. Storing nil there releases the whole tail at once.
+func severChain[W any](e *adjEntry[W], watermark uint64) (freed int, remaining bool) {
+	for cur := e; cur != nil; {
+		v := cur.ver.Load()
+		if v == nil {
+			break
+		}
+		if v.supersededAt() <= watermark {
+			cur.ver.Store(nil)
+			for w := v; w != nil; {
+				freed++
+				if w.prev == nil {
+					break
+				}
+				w = w.prev.ver.Load()
+			}
+			break
+		}
+		cur = v.prev
+	}
+	return freed, e.ver.Load() != nil
 }

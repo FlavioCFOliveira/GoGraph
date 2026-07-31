@@ -320,3 +320,103 @@ func TestAdjVersion_TypesAndPropertiesComeForFree(t *testing.T) {
 			"is not being versioned by the entry chain", got)
 	}
 }
+
+// TestAdjVersion_ReclaimFreesOnlyTheUnreachable is the reclamation contract: a
+// version at or before the watermark goes, and one after it stays.
+//
+// The direction that matters is the second. Freeing too little wastes memory;
+// freeing too much makes a live reader unable to find the version it is
+// entitled to, which is silent data loss.
+func TestAdjVersion_ReclaimFreesOnlyTheUnreachable(t *testing.T) {
+	a, clk := versionedList(t)
+	for _, n := range []string{"a", "b", "c", "d"} {
+		if err := a.AddNode(n); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
+	}
+	id := idOf(t, a, "a")
+	ts1 := autoWrite(a, clk, func() {
+		if err := a.AddEdge("a", "b", 1); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
+	})
+	ts2 := autoWrite(a, clk, func() {
+		if err := a.AddEdge("a", "c", 1); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
+	})
+	ts3 := autoWrite(a, clk, func() {
+		if err := a.AddEdge("a", "d", 1); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
+	})
+	if got := a.VersionCount(); got != 3 {
+		t.Fatalf("three writes left %d versions, want 3", got)
+	}
+
+	// A watermark of zero means "reclaim nothing", which is what the horizon
+	// reports while a reader could not be registered.
+	if n := a.Reclaim(0); n != 0 {
+		t.Fatalf("Reclaim(0) freed %d records; zero means reclaim NOTHING", n)
+	}
+
+	// Watermark at ts2: readers all began at or after ts2, so the versions
+	// superseded at ts1 and ts2 are unreachable and the one at ts3 is not.
+	freed := a.Reclaim(ts2)
+	if freed == 0 {
+		t.Fatal("Reclaim freed nothing with a watermark past two versions")
+	}
+	if got := len(a.EntryNeighboursAsOf(id, ts3, 0)); got != 3 {
+		t.Fatalf("the current edge set reads %d after reclamation, want 3", got)
+	}
+	// A reader at ts2 must still see the state at ts2: two edges. That is the
+	// version reclamation was told to preserve.
+	if got := len(a.EntryNeighboursAsOf(id, ts2, 0)); got != 2 {
+		t.Fatalf("a reader at the watermark sees %d neighbours, want 2 — reclamation freed a "+
+			"version a live reader is entitled to", got)
+	}
+	if a.VersionCount() != int64(3-freed) {
+		t.Fatalf("VersionCount is %d after freeing %d of 3", a.VersionCount(), freed)
+	}
+	_ = ts1
+}
+
+// TestAdjVersion_ReclaimIsBoundedByTheHorizon wires the two halves together:
+// a registered reader must hold reclamation back.
+func TestAdjVersion_ReclaimIsBoundedByTheHorizon(t *testing.T) {
+	a, clk := versionedList(t)
+	for _, n := range []string{"a", "b", "c"} {
+		if err := a.AddNode(n); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
+	}
+	id := idOf(t, a, "a")
+	old := clk.ReadTS()
+	autoWrite(a, clk, func() {
+		if err := a.AddEdge("a", "b", 1); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
+	})
+	autoWrite(a, clk, func() {
+		if err := a.AddEdge("a", "c", 1); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
+	})
+
+	var h mvcc.Horizon
+	slot := h.Enter(old) // a long reader, started before either write
+	a.Reclaim(h.Oldest(clk.ReadTS()))
+	if got := len(a.EntryNeighboursAsOf(id, old, 0)); got != 0 {
+		t.Fatalf("the long reader sees %d neighbours after reclamation, want 0: the horizon "+
+			"did not hold reclamation back", got)
+	}
+	h.Leave(slot)
+
+	// With the reader gone the watermark advances and the history goes.
+	if n := a.Reclaim(h.Oldest(clk.ReadTS())); n == 0 {
+		t.Fatal("Reclaim freed nothing once the long reader left")
+	}
+	if a.VersionCount() != 0 {
+		t.Fatalf("%d versions remain with no reader active", a.VersionCount())
+	}
+}

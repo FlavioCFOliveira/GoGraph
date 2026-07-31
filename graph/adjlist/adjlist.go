@@ -219,6 +219,14 @@ func (a *AdjList[N, W]) SetAuxFactory(fn func(length int, payload any) AuxColumn
 type adjShard[W any] struct {
 	slotsRef atomic.Pointer[shardSlots]
 
+	// versioned indexes the slots in this shard that currently carry an MVCC
+	// version chain (rmp #2283). It exists so reclamation costs O(nodes with
+	// versions) rather than O(nodes): without it the reclaimer would have to
+	// scan every slot of every shard to find the few that hold history.
+	// Guarded by mu, like the write path that maintains it; nil until the
+	// shard takes its first version.
+	versioned map[uint64]struct{}
+
 	// building is the PRIVATE, not-yet-published [shardSlots] clone the shard
 	// is accumulating writes into during an open commit window (see
 	// [AdjList.BeginCommit]). It is nil unless this shard has been touched in
@@ -334,7 +342,14 @@ type adjEntry[W any] struct {
 	// version chain that belonged to it. Two independent atomics cannot be read
 	// consistently without a lock, and a lock here would forfeit the lock-free
 	// read contract this type exists to provide. See mvcc_adj.go.
-	ver        *adjVersion[W]
+	//
+	// It is ATOMIC, and that is the one respect in which the entry is not
+	// wholly immutable. Reclamation (rmp #2283) severs a chain whose versions
+	// no reader can reach any more, and it does so on an entry that is already
+	// published and being traversed — a plain field write there is a data race.
+	// An atomic store makes a concurrent reader see either the whole chain or
+	// none of it, and the watermark guarantees both answers are correct.
+	ver        atomic.Pointer[adjVersion[W]]
 	neighbours []graph.NodeID
 	weights    []W
 	handles    []uint64 // nil unless AddEdgeH supplied a handle; parallel to neighbours when set
@@ -2293,6 +2308,11 @@ func (a *AdjList[N, W]) storeEntry(s *adjShard[W], intraIdx uint64, entry *adjEn
 				entry = &adjEntry[W]{}
 			}
 			a.linkVersion(entry, prev, a.writeInfo, a.writeTS)
+			// Index the slot so reclamation need not scan the shard.
+			if s.versioned == nil {
+				s.versioned = make(map[uint64]struct{}, 8)
+			}
+			s.versioned[intraIdx] = struct{}{}
 		}
 	}
 
