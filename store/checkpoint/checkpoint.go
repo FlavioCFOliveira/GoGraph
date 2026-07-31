@@ -5,16 +5,23 @@
 //
 // The checkpoint is NON-BLOCKING: it holds the store's commit serialisation
 // only to capture a transaction-boundary-consistent image — the WAL durable
-// offset (the watermark) and the CSR adjacency built inside [lpg.Graph.View] —
-// then RELEASES the lock and writes the (potentially multi-second) snapshot
-// disk I/O while transactions commit concurrently. It re-acquires the lock
-// only briefly at the end to prefix-truncate the WAL up to the captured
-// watermark, discarding the frames the snapshot folded while preserving every
-// frame committed during the lock-free write. Writers therefore stall only for
-// the watermark+CSR capture, never for the snapshot write (#1508). The pattern
-// mirrors RocksDB flush (seal under a short lock, write without blocking
-// writers) and PostgreSQL CHECKPOINT (write concurrently, then trim the WAL up
-// to the redo point).
+// offset (the watermark) and a [snapshot.Capture] of the WHOLE graph, taken
+// inside one [lpg.Graph.View] — then RELEASES the lock and writes the
+// (potentially multi-second) snapshot disk I/O while transactions commit
+// concurrently. It re-acquires the lock only briefly at the end to
+// prefix-truncate the WAL up to the captured watermark, discarding the frames
+// the snapshot folded while preserving every frame committed during the
+// lock-free write. Writers therefore stall only for the in-memory capture,
+// never for the snapshot write (#1508). The pattern mirrors RocksDB flush (seal
+// under a short lock, write without blocking writers) and PostgreSQL CHECKPOINT
+// (write concurrently, then trim the WAL up to the redo point).
+//
+// The capture covers EVERY graph-derived component — adjacency, mapper, labels,
+// properties, tombstones, edge handles and index payloads — not the adjacency
+// alone. Capturing only the adjacency and letting the lock-free writer walk the
+// live graph for the rest published a PARTIAL TRANSACTION: components observed
+// different instants, so a snapshot could carry a transaction's two new nodes
+// without its edge (rmp #2269). See [snapshot.Capture].
 //
 // Wire it with [WithCommitSerialiser] ([txn.Store.RunUnderCommitLock]) when the
 // store is driven by the Cypher engine, whose commit mutex is private and is
@@ -647,12 +654,13 @@ func (c *Checkpointer[N, W]) runUnderCommitLock(fn func() error) error {
 //	Phase 1 (under the commit lock — the quiesce boundary): capture a
 //	  transaction-boundary-consistent image. The WAL durable offset W is read
 //	  under the quiesce boundary, so it equals the byte length of every frame
-//	  committed so far (on a frame boundary); the CSR adjacency is built inside
-//	  Graph.View so it reflects the same boundary state. Then the lock is
-//	  released.
-//	Phase 2 (lock-free): write and publish the self-sufficient snapshot while
-//	  concurrent transactions commit and append frames PAST W. fsync the WAL so
-//	  the suffix [W,end) is durable.
+//	  committed so far (on a frame boundary); the ENTIRE graph image — adjacency
+//	  plus mapper, labels, properties, tombstones, edge handles and index
+//	  payloads — is captured inside one Graph.View, so every component reflects
+//	  that same boundary state (rmp #2269). Then the lock is released.
+//	Phase 2 (lock-free): write and publish the self-sufficient snapshot from the
+//	  captured bytes — touching no graph — while concurrent transactions commit
+//	  and append frames PAST W. fsync the WAL so the suffix [W,end) is durable.
 //	Phase 3 (under the commit lock again, briefly): re-verify self-sufficiency
 //	  (a constraint DDL may have committed in phase 2) and prefix-truncate the
 //	  WAL up to W — discarding ONLY the frames the snapshot folded and
@@ -668,9 +676,10 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 	// starts so it orders attempts by START time; threaded through every
 	// setErr call this attempt makes, however it exits.
 	seq := c.errSeq.Add(1)
-	// --- Phase 1: capture watermark + CSR under the quiesce boundary. ---
+	// --- Phase 1: capture watermark + the WHOLE graph image under the
+	// quiesce boundary. ---
 	var (
-		cs        *csr.CSR[W]
+		capt      *snapshot.Capture[W]
 		watermark int64
 	)
 	var constraints []snapshot.ConstraintSpec
@@ -711,9 +720,35 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 		// the prefix a self-sufficient snapshot of this state folds, and the only
 		// safe WAL cut point (see wal.Writer.DurableOffset / TruncatePrefix).
 		watermark = c.wlog.DurableOffset()
+		// Capture the ENTIRE graph image — adjacency AND the mapper, labels,
+		// properties, tombstones, edge handles and index payloads — inside ONE
+		// View, so every component reflects the same transaction boundary
+		// (rmp #2269).
+		//
+		// Capturing only the CSR here and handing the LIVE graph to the phase-2
+		// writer is what made a checkpoint publish a PARTIAL TRANSACTION: the
+		// writer walked the mapper while transactions committed concurrently,
+		// so the snapshot carried the endpoints of a `CREATE (a)-[:R]->(b)` that
+		// committed during the write but not its edge, and a snapshot-only
+		// recovery reconstructed Order > 2*Size — a state no serial schedule
+		// could produce. Worse, the engine applies eagerly under visMu and
+		// commits to the WAL afterwards, so a lock-free walk could also capture
+		// the writes of a transaction whose commit had not yet succeeded and
+		// might still be undone.
+		//
+		// The capture is bytes, not a graph, so phase 2 stays lock-free: what
+		// moves under the lock is the in-memory serialisation, never the disk
+		// I/O. The component writers take only their own per-shard read locks
+		// and never re-enter the barrier, so this cannot deadlock or trip
+		// View's re-entrancy guard.
+		var capErr error
 		c.g.View(func() {
-			cs = csr.BuildFromAdjList(c.g.AdjList())
+			cs := csr.BuildFromAdjList(c.g.AdjList())
+			capt, capErr = c.snap.CaptureGraph(cs, c.g, c.codec)
 		})
+		if capErr != nil {
+			return capErr
+		}
 		// Capture the constraint set inside the same locked window so it is
 		// transaction-boundary consistent with the CSR (see WithConstraintSpecs).
 		if c.constraintsFn != nil {
@@ -738,17 +773,20 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 	}
 
 	// --- Phase 2: write + publish the snapshot LOCK-FREE, then prefix-truncate. ---
-	return c.writeAndTruncate(seq, cs, constraints, indexDefs, watermark)
+	return c.writeAndTruncate(seq, capt, constraints, indexDefs, watermark)
 }
 
 // writeAndTruncate is phases 2 and 3 of the non-blocking checkpoint: it writes
 // the self-sufficient snapshot from the captured image (lock-free, so writers
 // commit concurrently), then re-acquires the commit lock to prefix-truncate the
-// WAL up to the captured watermark. cs, constraints, and indexDefs are the
+// WAL up to the captured watermark. capt, constraints, and indexDefs are the
 // phase-1 capture; watermark is the durable WAL offset W those reflect. seq is
 // this attempt's setErr sequence number (rmp #1873), minted once by the
 // calling runNonBlocking and threaded through unchanged.
-func (c *Checkpointer[N, W]) writeAndTruncate(seq uint64, cs *csr.CSR[W], constraints []snapshot.ConstraintSpec, indexDefs []snapshot.IndexDefSpec, watermark int64) error {
+//
+// It writes ONLY captured bytes — it never reads the graph — so nothing it
+// publishes can reflect a later state than the phase-1 boundary (rmp #2269).
+func (c *Checkpointer[N, W]) writeAndTruncate(seq uint64, capt *snapshot.Capture[W], constraints []snapshot.ConstraintSpec, indexDefs []snapshot.IndexDefSpec, watermark int64) error {
 	snapDir := filepath.Join(c.cfg.Dir, "snapshot")
 	// Durability invariant (audit gaps F2/F3): the snapshot MUST be a
 	// self-sufficient image of the committed state — CSR adjacency PLUS
@@ -779,7 +817,7 @@ func (c *Checkpointer[N, W]) writeAndTruncate(seq uint64, cs *csr.CSR[W], constr
 	// concurrently and append frames past the captured watermark, paying no
 	// stall for this (potentially multi-second) write. The snapshot is a
 	// self-sufficient image of the phase-1 boundary state.
-	if err := c.writeSnapshot(snapDir, cs, constraints, indexDefs); err != nil {
+	if err := c.writeSnapshot(snapDir, capt, constraints, indexDefs); err != nil {
 		c.setErr(seq, err)
 		return err
 	}
@@ -868,17 +906,16 @@ func (c *Checkpointer[N, W]) truncatePrefixLocked(seq uint64, snapDir string, wa
 	return nil
 }
 
-// writeSnapshot publishes a self-sufficient snapshot of the current
-// graph state to snapDir. When a mapper codec is configured
-// ([WithMapperCodec]) it threads the codec so mapper.bin is emitted for
-// every key type; otherwise it uses the string-only writer (mapper.bin
-// for string keys, v2 without a mapper for other key types). constraints
-// is the schema constraint set collected via [WithConstraintSpecs] for
-// this run; when non-empty it is persisted as the snapshot's
-// constraints.bin component (nil or empty emits no constraints.bin, and
-// the output is byte-identical to the constraint-unaware writers).
-func (c *Checkpointer[N, W]) writeSnapshot(snapDir string, cs *csr.CSR[W], constraints []snapshot.ConstraintSpec, indexDefs []snapshot.IndexDefSpec) error {
-	return c.snap.WriteSnapshot(snapDir, cs, c.g, c.codec, constraints, indexDefs)
+// writeSnapshot publishes the phase-1 capture to snapDir. Whether mapper.bin
+// is present was decided at capture time by the configured mapper codec
+// ([WithMapperCodec]): with a codec it is emitted for every key type, without
+// one only for string keys (v2 for other key types). constraints is the schema
+// constraint set collected via [WithConstraintSpecs] in the same phase-1 locked
+// window; when non-empty it is persisted as the snapshot's constraints.bin
+// component (nil or empty emits no constraints.bin, and the output is
+// byte-identical to the constraint-unaware writers).
+func (c *Checkpointer[N, W]) writeSnapshot(snapDir string, capt *snapshot.Capture[W], constraints []snapshot.ConstraintSpec, indexDefs []snapshot.IndexDefSpec) error {
+	return c.snap.WriteCapture(snapDir, capt, constraints, indexDefs)
 }
 
 // setErr records err as the outcome of the checkpoint attempt identified by

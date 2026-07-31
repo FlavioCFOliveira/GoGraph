@@ -72,7 +72,7 @@ func assertStagingFsyncBeforeRename(t *testing.T, events []string) {
 // The test installs the publish-trace hook, runs a real
 // [WriteSnapshotFull], and asserts the staging-dir fsync is observed
 // immediately before the rename. Reverting the dirFsync(tmp) call in
-// writeSnapshotFullCore makes the "staging-fsync" event disappear and
+// writeCaptureCore makes the "staging-fsync" event disappear and
 // this test fails — confirming it guards the fix rather than merely the
 // happy path.
 //

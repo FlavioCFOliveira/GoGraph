@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
@@ -146,9 +145,7 @@ func WriteSnapshotFullCtx[N comparable, W any](
 	// No codec: the mapper is persisted only for string-keyed graphs
 	// (the historical v3 behaviour). writeMapperIfStringKeyed performs
 	// the string-only probe.
-	return writeSnapshotFullCore(ctx, osBackend{}, dir, c, g, nil, nil, func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
-		return writeMapperIfStringKeyed(c2, osBackend{}, tmp, g)
-	})
+	return captureAndWrite[N, W](ctx, osBackend{}, dir, c, g, nil, nil, nil)
 }
 
 // WriteSnapshotFullWithMapperCodecCtx is the context-aware variant of
@@ -168,9 +165,7 @@ func WriteSnapshotFullWithMapperCodecCtx[N comparable, W any](
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecCtx.errors", 1)
 		return errors.New("snapshot: nil mapper codec")
 	}
-	return writeSnapshotFullCore(ctx, osBackend{}, dir, c, g, nil, nil, func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
-		return writeMapperWithCodec(c2, osBackend{}, tmp, g, codec)
-	})
+	return captureAndWrite(ctx, osBackend{}, dir, c, g, codec, nil, nil)
 }
 
 // WriteSnapshotFullWithConstraints is [WriteSnapshotFull] plus a durable
@@ -190,10 +185,7 @@ func WriteSnapshotFullWithConstraints[N comparable, W any](
 	constraints []ConstraintSpec,
 ) error {
 	defer metrics.Time("store.snapshot.WriteSnapshotFullWithConstraints").Stop()
-	err := writeSnapshotFullCore(context.Background(), osBackend{}, dir, c, g, constraints, nil,
-		func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
-			return writeMapperIfStringKeyed(c2, osBackend{}, tmp, g)
-		})
+	err := captureAndWrite[N, W](context.Background(), osBackend{}, dir, c, g, nil, constraints, nil)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithConstraints.errors", 1)
 	}
@@ -218,10 +210,7 @@ func WriteSnapshotFullWithConstraintsAndIndexDefs[N comparable, W any](
 	indexDefs []IndexDefSpec,
 ) error {
 	defer metrics.Time("store.snapshot.WriteSnapshotFullWithConstraintsAndIndexDefs").Stop()
-	err := writeSnapshotFullCore(context.Background(), osBackend{}, dir, c, g, constraints, indexDefs,
-		func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
-			return writeMapperIfStringKeyed(c2, osBackend{}, tmp, g)
-		})
+	err := captureAndWrite[N, W](context.Background(), osBackend{}, dir, c, g, nil, constraints, indexDefs)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithConstraintsAndIndexDefs.errors", 1)
 	}
@@ -247,10 +236,7 @@ func WriteSnapshotFullWithMapperCodecAndConstraints[N comparable, W any](
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecAndConstraints.errors", 1)
 		return errors.New("snapshot: nil mapper codec")
 	}
-	err := writeSnapshotFullCore(context.Background(), osBackend{}, dir, c, g, constraints, nil,
-		func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
-			return writeMapperWithCodec(c2, osBackend{}, tmp, g, codec)
-		})
+	err := captureAndWrite(context.Background(), osBackend{}, dir, c, g, codec, constraints, nil)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecAndConstraints.errors", 1)
 	}
@@ -279,10 +265,7 @@ func WriteSnapshotFullWithMapperCodecConstraintsAndIndexDefs[N comparable, W any
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecConstraintsAndIndexDefs.errors", 1)
 		return errors.New("snapshot: nil mapper codec")
 	}
-	err := writeSnapshotFullCore(context.Background(), osBackend{}, dir, c, g, constraints, indexDefs,
-		func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
-			return writeMapperWithCodec(c2, osBackend{}, tmp, g, codec)
-		})
+	err := captureAndWrite(context.Background(), osBackend{}, dir, c, g, codec, constraints, indexDefs)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecConstraintsAndIndexDefs.errors", 1)
 	}
@@ -316,10 +299,7 @@ func WriteSnapshotFullWithMapperCodecAndConstraintsFS[N comparable, W any](
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecAndConstraints.errors", 1)
 		return errors.New("snapshot: nil mapper codec")
 	}
-	err := writeSnapshotFullCore(context.Background(), fsys, dir, c, g, constraints, nil,
-		func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
-			return writeMapperWithCodec(c2, fsys, tmp, g, codec)
-		})
+	err := captureAndWrite(context.Background(), fsys, dir, c, g, codec, constraints, nil)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecAndConstraints.errors", 1)
 	}
@@ -354,35 +334,94 @@ func WriteSnapshotFullWithMapperCodecConstraintsAndIndexDefsFS[N comparable, W a
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecConstraintsAndIndexDefs.errors", 1)
 		return errors.New("snapshot: nil mapper codec")
 	}
-	err := writeSnapshotFullCore(context.Background(), fsys, dir, c, g, constraints, indexDefs,
-		func(c2 context.Context, tmp string) (int64, uint32, bool, error) {
-			return writeMapperWithCodec(c2, fsys, tmp, g, codec)
-		})
+	err := captureAndWrite(context.Background(), fsys, dir, c, g, codec, constraints, indexDefs)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithMapperCodecConstraintsAndIndexDefs.errors", 1)
 	}
 	return err
 }
 
-// writeSnapshotFullCore is the shared implementation behind
-// [WriteSnapshotFullCtx] and [WriteSnapshotFullWithMapperCodecCtx]. The
-// only behaviour that varies between the two is how the mapper.bin
-// component is produced, which the caller supplies as writeMapper:
-// it writes mapper.bin under tmp and returns (size, crc, haveMapper,
-// err). When haveMapper is false the snapshot is stamped v2 (no
-// mapper.bin) exactly as before; when true it is stamped v3.
+// captureAndWrite is the shared implementation behind every
+// WriteSnapshotFull* entry point: it takes an atomic [Capture] of g and then
+// publishes it. Splitting the two makes the published snapshot an image of ONE
+// instant by construction (rmp #2269) — see [Capture].
 //
-//nolint:gocyclo // snapshot publish: dir prep + CSR + labels + properties + mapper + constraints + indexdefs + manifest + atomic rename + ctx ticks
-func writeSnapshotFullCore[N comparable, W any](
+// These entry points capture and publish back to back, with no exclusion of
+// their own, so they remain correct exactly where they always were: an offline
+// or single-goroutine caller. A caller that publishes CONCURRENTLY with writers
+// — the checkpointer — must take the Capture inside its own exclusion window
+// and publish it with [WriteCapture]/[WriteCaptureFS].
+func captureAndWrite[N comparable, W any](
 	ctx context.Context,
 	fsys fileSystem,
 	dir string,
 	c *csr.CSR[W],
 	g *lpg.Graph[N, W],
+	codec keyEncoder[N],
 	constraints []ConstraintSpec,
 	indexDefs []IndexDefSpec,
-	writeMapper func(ctx context.Context, tmp string) (size int64, crc uint32, haveMapper bool, err error),
 ) error {
+	capt, err := CaptureGraph(g, c, codec)
+	if err != nil {
+		return err
+	}
+	return writeCaptureCore(ctx, fsys, dir, capt, constraints, indexDefs)
+}
+
+// WriteCapture publishes a [Capture] taken earlier to dir, emitting
+// constraints.bin from constraints and indexdefs.bin from indexDefs (each
+// omitted when nil or empty). It touches no graph: every graph-derived byte was
+// fixed when the Capture was taken, which is what lets a checkpointer publish
+// LOCK-FREE while still writing a single-instant, transaction-boundary image
+// (rmp #2269).
+//
+// constraints and indexDefs must be captured by the caller in the SAME
+// exclusion window as capt, or the published snapshot mixes two instants again.
+func WriteCapture[W any](dir string, capt *Capture[W], constraints []ConstraintSpec, indexDefs []IndexDefSpec) error {
+	defer metrics.Time("store.snapshot.WriteCapture").Stop()
+	err := writeCaptureCore(context.Background(), osBackend{}, dir, capt, constraints, indexDefs)
+	if err != nil {
+		metrics.IncCounter("store.snapshot.WriteCapture.errors", 1)
+	}
+	return err
+}
+
+// WriteCaptureFS is the filesystem-seam variant of [WriteCapture], routing
+// every filesystem operation through fsys. It is what the
+// deterministic-simulation harness (internal/sim) publishes a capture through
+// so it can crash mid-publish. Passing osBackend{} reproduces [WriteCapture]
+// byte-for-byte.
+//
+// The fsys parameter type ([fileSystem]) is intentionally unexported: an
+// external package cannot name it but can still supply a value satisfying it
+// (mirroring wal.OpenWith).
+func WriteCaptureFS[W any](fsys fileSystem, dir string, capt *Capture[W], constraints []ConstraintSpec, indexDefs []IndexDefSpec) error {
+	defer metrics.Time("store.snapshot.WriteCapture").Stop()
+	err := writeCaptureCore(context.Background(), fsys, dir, capt, constraints, indexDefs)
+	if err != nil {
+		metrics.IncCounter("store.snapshot.WriteCapture.errors", 1)
+	}
+	return err
+}
+
+// writeCaptureCore lays out and atomically publishes a snapshot directory from
+// an already-taken [Capture]. It performs pure I/O: the graph-derived component
+// bytes, their sizes and their CRC32Cs were all fixed at capture time, so the
+// published bytes are identical to those a streaming write of the same instant
+// would have produced, and no component can observe a later state than another.
+//
+//nolint:gocyclo // snapshot publish: dir prep + CSR + labels + properties + mapper + constraints + indexdefs + manifest + atomic rename + ctx ticks
+func writeCaptureCore[W any](
+	ctx context.Context,
+	fsys fileSystem,
+	dir string,
+	capt *Capture[W],
+	constraints []ConstraintSpec,
+	indexDefs []IndexDefSpec,
+) error {
+	if capt == nil {
+		return errors.New("snapshot: nil capture")
+	}
 	if err := ctx.Err(); err != nil {
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
@@ -404,7 +443,7 @@ func writeSnapshotFullCore[N comparable, W any](
 	// csr.bin
 	csrPath := filepath.Join(tmp, CSRFile)
 	csrSize, csrCRC, err := writeAndSync(fsys, csrPath, func(w io.Writer) (int64, uint32, error) {
-		return WriteCSR(w, c)
+		return WriteCSR(w, capt.csr)
 	})
 	if err != nil {
 		_ = fsys.RemoveAll(tmp)
@@ -419,11 +458,8 @@ func writeSnapshotFullCore[N comparable, W any](
 	}
 
 	// labels.bin
-	labelsPath := filepath.Join(tmp, LabelsFile)
-	labelsSize, labelsCRC, err := writeAndSync(fsys, labelsPath, func(w io.Writer) (int64, uint32, error) {
-		return WriteLabels(w, g)
-	})
-	if err != nil {
+	labelsSize, labelsCRC := capt.labels.size, capt.labels.crc
+	if err := writeCapturedComponent(fsys, filepath.Join(tmp, LabelsFile), capt.labels); err != nil {
 		_ = fsys.RemoveAll(tmp)
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
@@ -436,11 +472,8 @@ func writeSnapshotFullCore[N comparable, W any](
 	}
 
 	// properties.bin
-	propertiesPath := filepath.Join(tmp, PropertiesFile)
-	propsSize, propsCRC, err := writeAndSync(fsys, propertiesPath, func(w io.Writer) (int64, uint32, error) {
-		return WriteProperties(w, g)
-	})
-	if err != nil {
+	propsSize, propsCRC := capt.properties.size, capt.properties.crc
+	if err := writeCapturedComponent(fsys, filepath.Join(tmp, PropertiesFile), capt.properties); err != nil {
 		_ = fsys.RemoveAll(tmp)
 		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 		return err
@@ -452,20 +485,18 @@ func writeSnapshotFullCore[N comparable, W any](
 		return err
 	}
 
-	// mapper.bin — durable (NodeID -> natural key) table. The supplied
-	// writeMapper strategy decides whether it is emitted: the no-codec
-	// caller ([WriteSnapshotFullCtx]) writes it only for string-keyed
-	// graphs (the historical v3 behaviour); the codec-aware caller
-	// ([WriteSnapshotFullWithMapperCodecCtx]) writes it for every key
-	// type, making non-string snapshots self-sufficient too. When the
-	// strategy returns haveMapper=false the snapshot stays v2 and
-	// recovery rebuilds the mapper from the WAL — the documented v2
-	// contract.
-	mapperSize, mapperCRC, haveMapper, err := writeMapper(ctx, tmp)
-	if err != nil {
-		_ = fsys.RemoveAll(tmp)
-		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
-		return err
+	// mapper.bin — durable (NodeID -> natural key) table. Whether it is
+	// present was decided at capture time: with a codec it is emitted for
+	// every key type; without one, only for string-keyed graphs (the
+	// historical v3 behaviour). When absent the snapshot stays v2 and
+	// recovery rebuilds the mapper from the WAL — the documented v2 contract.
+	mapperSize, mapperCRC, haveMapper := capt.mapper.size, capt.mapper.crc, capt.mapper.present
+	if haveMapper {
+		if err := writeCapturedComponent(fsys, filepath.Join(tmp, MapperFile), capt.mapper); err != nil {
+			_ = fsys.RemoveAll(tmp)
+			metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
+			return err
+		}
 	}
 
 	if err := ctx.Err(); err != nil {
@@ -482,15 +513,9 @@ func writeSnapshotFullCore[N comparable, W any](
 	// survive WAL truncation: the tombstone lives only in memory, and the
 	// CSR/labels/properties writers treat a removed node as a live,
 	// label-stripped one (the durability defect this fixes).
-	var tombSize int64
-	var tombCRC uint32
-	haveTombstones := g.TombstoneCount() > 0
+	tombSize, tombCRC, haveTombstones := capt.tombstones.size, capt.tombstones.crc, capt.tombstones.present
 	if haveTombstones {
-		tombstonesPath := filepath.Join(tmp, TombstonesFile)
-		tombSize, tombCRC, err = writeAndSync(fsys, tombstonesPath, func(w io.Writer) (int64, uint32, error) {
-			return WriteTombstones(w, g)
-		})
-		if err != nil {
+		if err := writeCapturedComponent(fsys, filepath.Join(tmp, TombstonesFile), capt.tombstones); err != nil {
 			_ = fsys.RemoveAll(tmp)
 			metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
 			return err
@@ -513,15 +538,13 @@ func writeSnapshotFullCore[N comparable, W any](
 	// labels.bin / properties.bin deliberately collapse to a per-pair union.
 	// Without it a self-sufficient snapshot would recover parallel edges with
 	// the right handles but the wrong (unioned) per-edge type.
-	var edgeHandleSize int64
-	var edgeHandleCRC uint32
-	var haveEdgeHandles bool
-	edgeHandlesPath := filepath.Join(tmp, EdgeHandlesFile)
-	edgeHandleSize, edgeHandleCRC, haveEdgeHandles, err = writeEdgeHandlesComponent(fsys, edgeHandlesPath, g)
-	if err != nil {
-		_ = fsys.RemoveAll(tmp)
-		metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
-		return err
+	edgeHandleSize, edgeHandleCRC, haveEdgeHandles := capt.edgeHandles.size, capt.edgeHandles.crc, capt.edgeHandles.present
+	if haveEdgeHandles {
+		if err := writeCapturedComponent(fsys, filepath.Join(tmp, EdgeHandlesFile), capt.edgeHandles); err != nil {
+			_ = fsys.RemoveAll(tmp)
+			metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
+			return err
+		}
 	}
 
 	if err := ctx.Err(); err != nil {
@@ -594,8 +617,8 @@ func writeSnapshotFullCore[N comparable, W any](
 	// implements [index.Serializer]. Subscribers without serializer
 	// support are silently skipped (rebuild-on-restart contract).
 	var idxEntries []IndexFileEntry
-	if mgr := g.IndexManager(); mgr != nil && mgr.Count() > 0 {
-		entries, ierr := writeIndexesWith(fsys, tmp, mgr)
+	if len(capt.indexes) > 0 {
+		entries, ierr := writeCapturedIndexes(fsys, tmp, capt.indexes)
 		if ierr != nil {
 			_ = fsys.RemoveAll(tmp)
 			metrics.IncCounter("store.snapshot.WriteSnapshotFullCtx.errors", 1)
@@ -658,15 +681,15 @@ func writeSnapshotFullCore[N comparable, W any](
 
 	// Persist the originating graph's directed/multigraph shape so
 	// recovery reconstructs the same variant instead of hardcoding one.
-	// The full writer always has the live graph in hand, so every NEW
-	// full snapshot carries this; the legacy CSR-only writer cannot (it
+	// The full writer always has a capture of the live graph in hand, so every
+	// NEW full snapshot carries this; the legacy CSR-only writer cannot (it
 	// has no graph) and omits it, falling back to the recovery default.
-	cfg := g.Config()
+	cfg := capt.config
 	m := Manifest{
 		Version:   manifestVersion,
 		CreatedAt: time.Now().UTC(),
-		Order:     c.Order(),
-		Size:      c.Size(),
+		Order:     capt.csr.Order(),
+		Size:      capt.csr.Size(),
 		Files:     files,
 		Indexes:   idxEntries,
 		GraphConfig: &GraphConfig{
@@ -770,100 +793,61 @@ func writeSnapshotFullCore[N comparable, W any](
 	return nil
 }
 
-// writeMapperIfStringKeyed inspects g's mapper and, when N=string,
-// serialises it to mapper.bin under tmp. Returns (size, crc, true,
-// nil) on success, (0, 0, false, nil) when N is not string (callers
-// fall back to v2), or a non-nil error on a write failure (callers
-// must clean tmp and surface the error).
+// writeCapturedComponent writes one already-serialised component to path and
+// fsyncs it. The bytes, size and CRC32C were fixed when the [Capture] was
+// taken, so this step cannot observe a different graph state than any other
+// component — the property that makes a concurrently-published snapshot an
+// image of a single instant (rmp #2269).
 //
-// The function uses a type-switch on a sentinel pointer so the
-// compiler can prove the conversion is well-typed without resorting
-// to unsafe; it returns false for any N that is not the canonical
-// string type. The fallback to v2 is documented at the writer
-// godoc — non-string graphs keep producing the same on-disk layout as
-// before this change.
-func writeMapperIfStringKeyed[N comparable, W any](
-	ctx context.Context,
-	fsys fileSystem,
-	tmp string,
-	g *lpg.Graph[N, W],
-) (size int64, crc uint32, ok bool, err error) {
-	if err := ctx.Err(); err != nil {
-		return 0, 0, false, err
-	}
-	adj := g.AdjList()
-	mapper := adj.Mapper()
-	// Reflection-free probe: the writer only knows how to serialise
-	// the string-keyed mapper. We tunnel the concrete pointer through
-	// a type assertion on any() to avoid pulling in reflect for a one-
-	// shot dispatch on the hot path.
-	stringMapper, ok := any(mapper).(*graph.Mapper[string])
-	if !ok {
-		return 0, 0, false, nil
-	}
-	mapperPath := filepath.Join(tmp, MapperFile)
-	mSize, mCRC, werr := writeAndSync(fsys, mapperPath, func(w io.Writer) (int64, uint32, error) {
-		return WriteMapperString(w, stringMapper)
-	})
-	if werr != nil {
-		return 0, 0, false, werr
-	}
-	return mSize, mCRC, true, nil
-}
-
-// writeMapperWithCodec serialises g's mapper to mapper.bin under tmp via
-// codec, for ANY comparable key type N. It always emits the component
-// (returning haveMapper=true on success), so the resulting snapshot is
-// self-sufficient regardless of N. Returns a non-nil error on a write
-// or encode failure (callers must clean tmp and surface the error).
-func writeMapperWithCodec[N comparable, W any](
-	ctx context.Context,
-	fsys fileSystem,
-	tmp string,
-	g *lpg.Graph[N, W],
-	codec keyEncoder[N],
-) (size int64, crc uint32, ok bool, err error) {
-	if err := ctx.Err(); err != nil {
-		return 0, 0, false, err
-	}
-	mapper := g.AdjList().Mapper()
-	mapperPath := filepath.Join(tmp, MapperFile)
-	mSize, mCRC, werr := writeAndSync(fsys, mapperPath, func(w io.Writer) (int64, uint32, error) {
-		return WriteMapper(w, mapper, codec)
-	})
-	if werr != nil {
-		return 0, 0, false, werr
-	}
-	return mSize, mCRC, true, nil
-}
-
-// writeEdgeHandlesComponent writes the optional edgehandles.bin component for
-// g to path, returning (size, crc, emitted, err). When g carries no
-// per-handle edge metadata, [WriteEdgeHandles] emits nothing; this helper then
-// removes the (empty) file it created so the staging directory matches a
-// graph that never used handles, and reports emitted=false so the caller omits
-// the manifest entry. The byte-stable, version-tagged, CRC-covered shape
-// mirrors the tombstones.bin component.
-func writeEdgeHandlesComponent[N comparable, W any](fsys fileSystem, path string, g *lpg.Graph[N, W]) (size int64, crc uint32, emitted bool, err error) {
-	var produced bool
-	size, crc, err = writeAndSync(fsys, path, func(w io.Writer) (int64, uint32, error) {
-		s, c, e, werr := WriteEdgeHandles(w, g)
+// It re-declares the capture's own size and CRC to [writeAndSync] rather than
+// recomputing them, so a short write surfaces as an error instead of silently
+// producing a component whose manifest entry disagrees with its bytes.
+func writeCapturedComponent(fsys fileSystem, path string, c component) error {
+	_, _, err := writeAndSync(fsys, path, func(w io.Writer) (int64, uint32, error) {
+		n, werr := w.Write(c.bytes)
 		if werr != nil {
 			return 0, 0, werr
 		}
-		produced = e
-		return s, c, nil
+		if int64(n) != c.size {
+			return 0, 0, fmt.Errorf("snapshot: short write for %s: wrote %d of %d bytes", filepath.Base(path), n, c.size)
+		}
+		return c.size, c.crc, nil
 	})
-	if err != nil {
-		return 0, 0, false, err
+	return err
+}
+
+// writeCapturedIndexes writes the captured indexes/<name>.bin payloads under
+// dir and returns their manifest entries. It mirrors [writeIndexesWith]'s
+// on-disk layout and durability ordering exactly — one fsync per file, then a
+// single fsync of the indexes/ directory so the dirents linking the names to
+// their inodes are durable — differing only in that the payloads were
+// serialised earlier, at capture time.
+func writeCapturedIndexes(fsys fileSystem, dir string, idx []capturedIndex) ([]IndexFileEntry, error) {
+	if len(idx) == 0 {
+		return nil, nil
 	}
-	if !produced {
-		// Nothing to persist: drop the empty file so the snapshot omits the
-		// component entirely (the absent-component backward-compat contract).
-		_ = fsys.Remove(path) // best-effort: empty optional component cleanup
-		return 0, 0, false, nil
+	idxDir := filepath.Join(dir, IndexesDir)
+	if err := fsys.MkdirAll(idxDir, 0o750); err != nil {
+		metrics.IncCounter("store.snapshot.WriteIndexes.errors", 1)
+		return nil, err
 	}
-	return size, crc, true, nil
+	out := make([]IndexFileEntry, 0, len(idx))
+	for _, ci := range idx {
+		filename := filepath.Join(idxDir, ci.name+".bin")
+		if err := writeCapturedComponent(fsys, filename, ci.comp); err != nil {
+			_ = fsys.RemoveAll(idxDir)
+			metrics.IncCounter("store.snapshot.WriteIndexes.errors", 1)
+			return nil, fmt.Errorf("snapshot: index %q: %w", ci.name, err)
+		}
+		out = append(out, IndexFileEntry{Name: ci.name, Size: ci.comp.size, CRC32C: ci.comp.crc})
+	}
+	if err := fsys.DirSync(idxDir); err != nil {
+		_ = fsys.RemoveAll(idxDir)
+		metrics.IncCounter("store.snapshot.WriteIndexes.errors", 1)
+		return nil, fmt.Errorf("snapshot: fsync indexes dir %q: %w", idxDir, err)
+	}
+	metrics.IncCounter("store.snapshot.indexes.loaded", uint64(len(out)))
+	return out, nil
 }
 
 // writeAndSync creates path, hands the file handle to write, fsyncs

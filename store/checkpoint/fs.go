@@ -27,11 +27,18 @@ import (
 // The type parameters mirror the checkpointer's so the writer can take the
 // live typed graph and CSR without boxing.
 type snapshotBackend[N comparable, W any] interface {
-	// WriteSnapshot publishes a self-sufficient snapshot of g to snapDir,
-	// emitting mapper.bin via codec (nil selects the string-only mapper),
+	// CaptureGraph serialises every live-graph-derived snapshot component of g
+	// into an atomic in-memory image, emitting mapper.bin via codec (nil
+	// selects the string-only mapper). The checkpointer calls it in phase 1,
+	// UNDER the commit serialisation and inside [lpg.Graph.View], so the image
+	// is a single transaction-boundary instant.
+	CaptureGraph(cs *csr.CSR[W], g *lpg.Graph[N, W], codec txn.Codec[N]) (*snapshot.Capture[W], error)
+	// WriteCapture publishes a capture taken by CaptureGraph to snapDir, adding
 	// constraints.bin from constraints (nil/empty emits none) and indexdefs.bin
-	// from indexDefs (nil/empty emits none).
-	WriteSnapshot(snapDir string, cs *csr.CSR[W], g *lpg.Graph[N, W], codec txn.Codec[N], constraints []snapshot.ConstraintSpec, indexDefs []snapshot.IndexDefSpec) error
+	// from indexDefs (nil/empty emits none). It touches no graph, so the
+	// checkpointer runs it LOCK-FREE in phase 2 without any component observing
+	// a later state than the capture.
+	WriteCapture(snapDir string, capt *snapshot.Capture[W], constraints []snapshot.ConstraintSpec, indexDefs []snapshot.IndexDefSpec) error
 	// ReadManifest reads the manifest at path (used to verify snapshot
 	// self-sufficiency before truncating the WAL).
 	ReadManifest(path string) (snapshot.Manifest, error)
@@ -42,11 +49,17 @@ type snapshotBackend[N comparable, W any] interface {
 // the manifest read are byte-identical to the pre-seam checkpointer.
 type osSnapshotBackend[N comparable, W any] struct{}
 
-func (osSnapshotBackend[N, W]) WriteSnapshot(snapDir string, cs *csr.CSR[W], g *lpg.Graph[N, W], codec txn.Codec[N], constraints []snapshot.ConstraintSpec, indexDefs []snapshot.IndexDefSpec) error {
+func (osSnapshotBackend[N, W]) CaptureGraph(cs *csr.CSR[W], g *lpg.Graph[N, W], codec txn.Codec[N]) (*snapshot.Capture[W], error) {
 	if codec != nil {
-		return snapshot.WriteSnapshotFullWithMapperCodecConstraintsAndIndexDefs(snapDir, cs, g, codec, constraints, indexDefs)
+		return snapshot.CaptureGraph[N, W](g, cs, codec)
 	}
-	return snapshot.WriteSnapshotFullWithConstraintsAndIndexDefs(snapDir, cs, g, constraints, indexDefs)
+	// No codec: mapper.bin is emitted for string-keyed graphs only, keeping the
+	// historical v2 fallback for every other key type.
+	return snapshot.CaptureGraph[N, W](g, cs, nil)
+}
+
+func (osSnapshotBackend[N, W]) WriteCapture(snapDir string, capt *snapshot.Capture[W], constraints []snapshot.ConstraintSpec, indexDefs []snapshot.IndexDefSpec) error {
+	return snapshot.WriteCapture(snapDir, capt, constraints, indexDefs)
 }
 
 func (osSnapshotBackend[N, W]) ReadManifest(path string) (snapshot.Manifest, error) {

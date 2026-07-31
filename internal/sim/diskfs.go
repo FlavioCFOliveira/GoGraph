@@ -125,16 +125,18 @@ func (s simWALFS) ParentDirSync(childPath string) error { return s.disk.ParentDi
 // (string/float64) to match the checkpointer.
 type simCheckpointBackend struct{ disk *SimDisk }
 
-func (s simCheckpointBackend) WriteSnapshot(snapDir string, cs *csr.CSR[float64], g *lpg.Graph[string, float64], codec txn.Codec[string], constraints []snapshot.ConstraintSpec, indexDefs []snapshot.IndexDefSpec) error {
-	sfs := simSnapshotFS(s)
+func (s simCheckpointBackend) CaptureGraph(cs *csr.CSR[float64], g *lpg.Graph[string, float64], codec txn.Codec[string]) (*snapshot.Capture[float64], error) {
 	if codec != nil {
-		return snapshot.WriteSnapshotFullWithMapperCodecConstraintsAndIndexDefsFS(sfs, snapDir, cs, g, codec, constraints, indexDefs)
+		return snapshot.CaptureGraph[string, float64](g, cs, codec)
 	}
 	// No codec configured: the simulator always supplies the string codec, but
-	// honour the nil case for completeness by falling back to the string-keyed
-	// constraint-aware writer over the same backend. The FS-aware string-only
-	// writer reuses the codec writer with a string codec to stay self-sufficient.
-	return snapshot.WriteSnapshotFullWithMapperCodecConstraintsAndIndexDefsFS(sfs, snapDir, cs, g, txn.NewStringCodec(), constraints, indexDefs)
+	// honour the nil case for completeness by capturing with an explicit string
+	// codec so the snapshot stays self-sufficient.
+	return snapshot.CaptureGraph[string, float64](g, cs, txn.NewStringCodec())
+}
+
+func (s simCheckpointBackend) WriteCapture(snapDir string, capt *snapshot.Capture[float64], constraints []snapshot.ConstraintSpec, indexDefs []snapshot.IndexDefSpec) error {
+	return snapshot.WriteCaptureFS(simSnapshotFS(s), snapDir, capt, constraints, indexDefs)
 }
 
 func (s simCheckpointBackend) ReadManifest(path string) (snapshot.Manifest, error) {

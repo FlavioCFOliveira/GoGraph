@@ -530,7 +530,7 @@ func writeSnapshotCSRCtxWith[W any](ctx context.Context, fsys fileSystem, dir st
 	// survive a crash even on a filesystem that does not flush a renamed
 	// directory's child dirents as part of the rename. Mirrors the
 	// canonical crash-safe ordering documented on the v2/v3 path
-	// ([writeSnapshotFullCore]): write+fsync components -> fsync staging
+	// ([writeCaptureCore]): write+fsync components -> fsync staging
 	// dir -> rename -> fsync parent. No-op on Windows (see [dirFsync]).
 	if err := fsys.DirSync(tmp); err != nil {
 		_ = fsys.RemoveAll(tmp) // best-effort: staging cleanup, fsync err preserved
@@ -538,7 +538,7 @@ func writeSnapshotCSRCtxWith[W any](ctx context.Context, fsys fileSystem, dir st
 		return fmt.Errorf("snapshot: staging dir fsync: %w", err)
 	}
 	notePublishStep("staging-fsync", tmp)
-	// Crash-atomic publish. Mirrors the v2/v3 path (writeSnapshotFullCore):
+	// Crash-atomic publish. Mirrors the v2/v3 path (writeCaptureCore):
 	// the previous RemoveAll(dir) -> Rename(tmp, dir) sequence left NO live
 	// snapshot on disk if a crash hit between the two calls, and — with the
 	// WAL already truncated by an earlier checkpoint — recovery would

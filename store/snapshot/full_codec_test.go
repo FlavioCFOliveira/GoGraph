@@ -1,7 +1,7 @@
 package snapshot
 
 // full_codec_test.go — coverage for WriteSnapshotFullWithMapperCodec,
-// writeMapperWithCodec, and readVerifiedMapperBytes, all of which were at 0%.
+// the codec mapper capture, and readVerifiedMapperBytes, all of which were at 0%.
 
 import (
 	"context"
@@ -55,7 +55,7 @@ func TestWriteSnapshotFullWithMapperCodec_RoundTrip(t *testing.T) {
 }
 
 // TestWriteSnapshotFullWithMapperCodec_NonString exercises the non-string
-// code path (writeMapperWithCodec) by using an int64-keyed graph. The
+// code path (the codec mapper capture) by using an int64-keyed graph. The
 // resulting snapshot must be loadable and must carry a v2 mapper.bin with
 // at least one RawPair.
 func TestWriteSnapshotFullWithMapperCodec_NonString(t *testing.T) {
@@ -108,7 +108,7 @@ func TestWriteSnapshotFullWithMapperCodec_NilCodecErrors(t *testing.T) {
 }
 
 // TestWriteSnapshotFullWithMapperCodec_CancelledCtx exercises the context-
-// cancel path at the earliest checkpoint inside writeSnapshotFullCore.
+// cancel path at the earliest checkpoint inside writeCaptureCore.
 func TestWriteSnapshotFullWithMapperCodec_CancelledCtx(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
