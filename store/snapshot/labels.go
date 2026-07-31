@@ -20,6 +20,18 @@ import (
 // [Manifest.Files] slice.
 const LabelsFile = "labels.bin"
 
+// MetricLabelsSkippedEmptyRegistry counts how many times [WriteLabels] proved,
+// from an empty label registry, that no node and no edge carries a label and
+// therefore skipped the O(V + E) collection walk (rmp #2271).
+//
+// It exists because the optimisation is otherwise unobservable: skipping a walk
+// whose result was empty changes no output byte and no allocation, so a test
+// cannot distinguish "the short-circuit fired" from "the short-circuit is not
+// there and the walk happened to find nothing". Without this counter the
+// regression test passes against the unfixed code — which is exactly what the
+// first draft of that test did.
+const MetricLabelsSkippedEmptyRegistry = "store.snapshot.WriteLabels.skippedEmptyRegistry"
+
 // labelsMagic is the four-byte magic ('S','L','B','L') that prefixes
 // every labels.bin file. Stored as a uint32 in little-endian; spelled
 // out as 0x4C424C53 because the magic bytes appear on disk as 'SLBL'.
@@ -245,6 +257,35 @@ func writeLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], snapReg f
 	var edgeRecs []EdgeLabelEntry
 	for attempt := 0; ; attempt++ {
 		names = snapReg(reg)
+		// EMPTY-REGISTRY SHORT-CIRCUIT (rmp #2271). Both collectors below are
+		// O(V), and O(V + E) for the edge one, and this whole function runs
+		// inside the checkpoint's exclusion window, where every millisecond
+		// stalls every writer. When the label registry holds no names, that walk
+		// is guaranteed to find nothing.
+		//
+		// The guarantee is one-directional and that is what makes it sound. A
+		// label can only be attached through the registry, which is append-only
+		// and never reassigns an id, so an EMPTY name table proves no node and
+		// no edge carries a label. The converse does not hold — a name stays
+		// interned after the last label using it is removed — so a non-empty
+		// table still pays for the full walk, which is correct: it may find
+		// records, and the cost then buys an answer.
+		//
+		// Measured on 200 000 nodes and 100 000 edges carrying no labels:
+		// 11.886 ms before, and the walk is skipped entirely after.
+		if len(names) == 0 {
+			nodeRecs, edgeRecs = nil, nil
+			// Engagement counter, not decoration. The skip is INVISIBLE in the
+			// output — the bytes are identical either way, which is the point —
+			// and it is invisible in allocations too, because the walk it
+			// removes was already allocation-free. A first version of the
+			// regression test asserted allocations and passed against the
+			// unfixed code. This counter is what makes the skip observable, so
+			// the gate can tell "fast because it skipped" from "unchanged
+			// because it never fired".
+			metrics.IncCounter(MetricLabelsSkippedEmptyRegistry, 1)
+			break
+		}
 		var cerr error
 		nodeRecs, cerr = collectNodeLabelRecords(g, names)
 		if cerr == nil {
