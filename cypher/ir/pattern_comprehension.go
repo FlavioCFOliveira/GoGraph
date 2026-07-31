@@ -81,8 +81,17 @@ func (t *translator) translatePatternComprehension(
 	}
 
 	// Apply an optional WHERE predicate inside the comprehension.
+	//
+	// The parsed AST must be threaded through, not just its string form. A
+	// Selection built with only a string leaves PredicateExpr nil, and the
+	// executor's fallback for that is a PASS-THROUGH STUB — the predicate is not
+	// evaluated and every match survives. That made a projected comprehension
+	// return `[1, 1, 1]` where `[1]` was correct, silently and with no error,
+	// for as long as the hoist has existed; the same comprehension in a WHERE
+	// clause was right all along, because that path never goes through the
+	// RollUpApply. Same defect family as rmp #2242 for COUNT { … WHERE … }.
 	if pc.Predicate != nil {
-		inner = NewSelection(pc.Predicate.String(), inner)
+		inner = NewSelectionExpr(pc.Predicate.String(), pc.Predicate, inner)
 	}
 
 	// Project the comprehension's projection expression. The collected
@@ -247,6 +256,28 @@ func (t *translator) extractNestedPatternComprehensions(
 		cp.Receiver = rec
 		return &cp, plan2, nil
 	case *ast.FunctionInvocation:
+		// DEGREE-COUNT PASSTHROUGH (rmp #2264). `size(<pattern comprehension>)`
+		// is a COUNT of matches — the projection is applied once per match and
+		// cannot change how many there are — so when the comprehension is
+		// structurally degree-answerable the runtime can read the answer off the
+		// anchor's adjacency instead of building the list. It only gets that
+		// chance if the comprehension is still HERE at evaluation time, so this
+		// one shape is left unhoisted.
+		//
+		// Narrow by construction, for a reason this project has been bitten by
+		// twice: widening a peephole steals shapes another rewrite needs. The
+		// gate is the shared structural test, so nothing is claimed here that
+		// cypher.recogniseDegreePattern would refuse.
+		//
+		// Declining at runtime is safe, not a cliff into an unsupported path.
+		// evalFunction falls through to ordinary dispatch, which evaluates the
+		// comprehension via PatternEvaluator.EvalPatternComp and takes the
+		// length of the resulting list — the same list, the same answer, and the
+		// same cost as the RollUpApply this skipped.
+		if isDegreeCountableSizeCall(n) {
+			return n, plan, nil
+		}
+
 		newArgs := make([]ast.Expression, len(n.Args))
 		curPlan := plan
 		for i, arg := range n.Args {

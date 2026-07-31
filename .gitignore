@@ -16,6 +16,10 @@ gograph.cdx.json
 *.testlog
 coverage.txt
 coverage.html
+# Per-invocation coverage temporaries (scripts/cover_gate.sh, rmp #2268). The
+# script removes these on exit; the patterns cover a run killed before its trap.
+cover.out.*
+cover.lib.out.*
 
 # pprof profiles
 cpu.pprof

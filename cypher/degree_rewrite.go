@@ -68,6 +68,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
@@ -109,74 +110,34 @@ type degreeShape struct {
 //
 // Every rejection below mirrors a clause of Neo4j's QuerySolvableByGetDegree or
 // isEligible; see the file comment for the correspondence.
+//
+// The STRUCTURAL half of the test lives in [ir.DegreeCountableShape], because
+// the IR translator must make the identical decision one phase earlier and with
+// no row in hand (rmp #2264). Only the two row-dependent clauses remain here.
+// Sharing one definition is what keeps the two call sites from drifting apart.
 func recogniseDegreePattern(pat *ast.Pattern, where *ast.Where, row expr.RowContext) (*degreeShape, bool) {
-	if pat == nil || where != nil {
+	shape, ok := ir.DegreeCountableShape(pat, where)
+	if !ok {
 		return nil, false
 	}
-	// Exactly one path. Two comma-separated paths are a join, not a degree.
-	if len(pat.Paths) != 1 {
+	// ANCHOR must be BOUND: the degree is taken of the node the outer row
+	// supplies. An unbound anchor has no node to take a degree of.
+	if _, bound := row[shape.AnchorVar]; !bound {
 		return nil, false
 	}
-	path := pat.Paths[0]
-	// A path variable makes the matched path itself observable; shortestPath is
-	// a different operator entirely.
-	if path == nil || path.Variable != nil || path.Shortest != ast.ShortestNone {
-		return nil, false
-	}
-	// Exactly node — relationship — node, and nothing after it (SimplePatternLength).
-	head := path.Head
-	if head == nil || head.Node == nil || head.Relationship != nil {
-		return nil, false
-	}
-	second := head.Next
-	if second == nil || second.Relationship == nil || second.Node == nil || second.Next != nil {
-		return nil, false
-	}
-
-	// ANCHOR: a bound variable carrying no predicate of its own. A label or
-	// property here is a Selection that the degree would silently ignore, which
-	// would be a wrong answer rather than a slow one.
-	anchor := head.Node
-	if anchor.Variable == nil || len(anchor.Labels) != 0 || anchor.Properties != nil {
-		return nil, false
-	}
-	if _, bound := row[*anchor.Variable]; !bound {
-		return nil, false
-	}
-
-	// RELATIONSHIP: single hop, unnamed, untyped or exactly one type, no
-	// properties, outgoing. A named relationship variable is a dependency of the
-	// subquery expression in Neo4j's isEligible terms; a range is not
-	// SimplePatternLength; a property is a Selection.
-	rel := second.Relationship
-	if rel.Range != nil || rel.Variable != nil || rel.Properties != nil {
-		return nil, false
-	}
-	if rel.Direction != ast.RelDirectionOutgoing {
-		return nil, false
-	}
-	if len(rel.Types) > 1 {
-		return nil, false
-	}
-
-	// FAR NODE: no label, no property. Its variable may be introduced here — it
-	// is scoped to the subquery — but it must NOT name a variable the outer row
-	// already binds, which would make this an expand-into between two fixed
-	// endpoints rather than a degree.
-	far := second.Node
-	if len(far.Labels) != 0 || far.Properties != nil {
-		return nil, false
-	}
-	if far.Variable != nil {
-		if _, bound := row[*far.Variable]; bound {
+	// FAR NODE must NOT be bound. Its variable may be introduced here — it is
+	// scoped to the subquery — but naming a variable the outer row already binds
+	// makes this an expand-into between two fixed endpoints rather than a degree.
+	if shape.FarVar != "" {
+		if _, bound := row[shape.FarVar]; bound {
 			return nil, false
 		}
 	}
 
-	sh := &degreeShape{anchorVar: *anchor.Variable}
-	if len(rel.Types) == 1 {
+	sh := &degreeShape{anchorVar: shape.AnchorVar}
+	if shape.RelType != "" {
 		sh.typed = true
-		sh.typeName = rel.Types[0]
+		sh.typeName = shape.RelType
 	}
 	return sh, true
 }
@@ -334,6 +295,18 @@ func (e *subqueryEvaluator) EvalCountBounded(ctx context.Context, sub *ast.Count
 // there are. Neo4j's rewriter relies on the same property when it treats
 // Size(ListIRExpression) as count-like. An inner WHERE is a different matter —
 // it filters matches — so a comprehension carrying one is refused.
+//
+// # Where this is reached from
+//
+// Both spellings, since rmp #2264. A comprehension in a WHERE has always
+// reached here. One in a RETURN or WITH item did NOT: the IR translator hoisted
+// every projected comprehension into a RollUpApply and substituted a variable,
+// so no [ast.PatternComprehension] survived to evaluation and this function was
+// unreachable from a projection — while its documentation claimed otherwise.
+// The gap was worth 24.4× on a 100 000-degree anchor (2.159 ms for the
+// COUNT { } spelling against 52.737 ms for the size([ … ]) one). The translator
+// now leaves exactly this shape unhoisted; see [ir.DegreeCountableShape], which
+// is the same structural test used below, shared so the two cannot drift.
 //
 // ok is false whenever the pattern is not answerable this way; the caller then
 // builds the list and takes its length exactly as before.

@@ -62,6 +62,25 @@ echo "==> generating coverage profile: ${COVER_PROFILE}"
 # failure during profile generation is surfaced in CI rather than swallowed
 # (a silent ">/dev/null" previously hid the cause of any failure here).
 COVER_TEST_LOG=${COVER_TEST_LOG:-"${COVER_PROFILE}.testlog"}
+
+# CONCURRENCY SAFETY (rmp #2268). Every path this script writes used to be a
+# fixed name in the repository root, so two `make ci` runs in the same checkout
+# interleaved their writes into one profile; the gate then died parsing a
+# package name spliced from both ("gigithub.com/..."), reporting a corrupt
+# profile as a coverage failure. Each run now writes to paths carrying its own
+# PID and publishes them with an atomic same-directory rename, so a concurrent
+# run can at worst overwrite a COMPLETE profile with another COMPLETE profile,
+# never splice two together. The published names are unchanged, so anything
+# that reads cover.out afterwards still works.
+_cover_tmp_suffix=".tmp.$$"
+_cover_profile_tmp="${COVER_PROFILE}${_cover_tmp_suffix}"
+_cover_testlog_tmp="${COVER_TEST_LOG}${_cover_tmp_suffix}"
+_cover_lib_tmp="${COVER_LIB_PROFILE}${_cover_tmp_suffix}"
+cleanup_cover_tmp() {
+  rm -f "${_cover_profile_tmp}" "${_cover_testlog_tmp}" "${_cover_lib_tmp}" \
+     "${COVER_PROFILE}.pub.$$" "${COVER_LIB_PROFILE}.pub.$$"
+}
+trap cleanup_cover_tmp EXIT
 # -coverpkg=./... attributes coverage of EVERY package to whichever test
 # exercises it, not just that package's own _test.go files. The query engine
 # (cypher/...) is validated overwhelmingly by the openCypher TCK suite and the
@@ -70,19 +89,30 @@ COVER_TEST_LOG=${COVER_TEST_LOG:-"${COVER_PROFILE}.testlog"}
 # Crediting cross-package coverage is the accurate measure of how well the
 # library is tested. The trade-off is a slower instrumented run, hence the
 # generous timeout.
-if ! "${GO}" test -coverpkg=./... -coverprofile="${COVER_PROFILE}" -covermode=atomic -timeout=20m ./... >"${COVER_TEST_LOG}" 2>&1; then
+if ! "${GO}" test -coverpkg=./... -coverprofile="${_cover_profile_tmp}" -covermode=atomic -timeout=20m ./... >"${_cover_testlog_tmp}" 2>&1; then
   echo "cover_gate: 'go test' failed during coverage profile generation; failing output:" >&2
-  grep -E '(^--- FAIL|^FAIL[[:space:]]|panic:|fatal error:|_test\.go:[0-9]+:|signal:|DATA RACE)' "${COVER_TEST_LOG}" | tail -80 >&2 || true
+  grep -E '(^--- FAIL|^FAIL[[:space:]]|panic:|fatal error:|_test\.go:[0-9]+:|signal:|DATA RACE)' "${_cover_testlog_tmp}" | tail -80 >&2 || true
   echo "---- last 40 lines of go test output ----" >&2
-  tail -40 "${COVER_TEST_LOG}" >&2
+  tail -40 "${_cover_testlog_tmp}" >&2
+  mv -f "${_cover_testlog_tmp}" "${COVER_TEST_LOG}" || true
   exit 1
 fi
+mv -f "${_cover_testlog_tmp}" "${COVER_TEST_LOG}"
 
 echo "==> filtering non-library packages: ${COVER_EXCLUDE}"
+# Every gate below reads the run's OWN temporary profiles. The published names
+# are written only once both are complete, so no reader in this script can ever
+# observe a profile a concurrent run is midway through replacing.
 {
-  head -n1 "${COVER_PROFILE}"
-  grep -E -v "${COVER_EXCLUDE}" "${COVER_PROFILE}" | tail -n +2
-} > "${COVER_LIB_PROFILE}"
+  head -n1 "${_cover_profile_tmp}"
+  grep -E -v "${COVER_EXCLUDE}" "${_cover_profile_tmp}" | tail -n +2
+} > "${_cover_lib_tmp}"
+# Publish via copy-then-rename: `cp` alone is not atomic, so a concurrent reader
+# of cover.out could otherwise observe a half-written file.
+cp -f "${_cover_profile_tmp}" "${COVER_PROFILE}.pub.$$" && mv -f "${COVER_PROFILE}.pub.$$" "${COVER_PROFILE}"
+cp -f "${_cover_lib_tmp}" "${COVER_LIB_PROFILE}.pub.$$" && mv -f "${COVER_LIB_PROFILE}.pub.$$" "${COVER_LIB_PROFILE}"
+# From here on the gates read the temporaries, which nothing else can touch.
+COVER_LIB_PROFILE="${_cover_lib_tmp}"
 
 total_pct=$("${GO}" tool cover -func="${COVER_LIB_PROFILE}" | awk '/^total:/ { sub("%", "", $NF); print $NF }')
 if [[ -z "${total_pct}" ]]; then

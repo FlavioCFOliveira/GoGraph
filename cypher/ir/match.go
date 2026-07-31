@@ -19,11 +19,31 @@ import (
 //	{name: 'Alice'}  →  NewSelectionExpr("(n.name = 'Alice')", BinaryOp{…}, child)
 //
 // Multiple keys produce a chain of SelectionExpr nodes, innermost first.
-// Non-MapLiteral expressions fall back to the opaque-string Selection.
+//
+// # The non-MapLiteral fallback, and why it is safe
+//
+// A Selection built with [NewSelection] carries no parsed predicate, and the
+// executor's fallback for that is a PASS-THROUGH STUB: every row survives. That
+// is the exact mechanism behind the silently-dropped inline WHERE in
+// pattern_comprehension.go (rmp #2272), so the same shape here deserves an
+// explicit answer rather than an assumption.
+//
+// It is not reachable with a wrong answer. The only two forms the grammar
+// admits for an inline property map are a map literal, handled below, and a
+// parameter — and semantic analysis rejects a parameter in this position
+// outright ("operator \"node properties\" expects Boolean operands, got
+// parameter as full predicate literal"), so no plan is ever built for it. The
+// remaining case that reaches this line is an EMPTY map literal, `(n {})`,
+// where matching every row is the correct answer rather than a stub's accident.
+//
+// TestBuildPropertySelection_ParameterIsRejectedBySema pins that reasoning: if
+// semantic analysis is ever relaxed to admit a parameter here, it fails, and
+// this fallback must be given a real predicate before that change can land.
 func buildPropertySelection(nodeVar string, props ast.Expression, child LogicalPlan) LogicalPlan {
 	ml, ok := props.(*ast.MapLiteral)
 	if !ok || len(ml.Keys) == 0 {
-		// Unknown expression type — fall back to opaque predicate.
+		// An empty map constrains nothing, so a pass-through Selection is the
+		// correct plan. See the doc comment for why no other shape arrives here.
 		return NewSelection(nodeVar+" "+props.String(), child)
 	}
 
