@@ -201,7 +201,13 @@ type nodePropShard struct {
 // removes the global nodeMu contention point that previously
 // serialised every Set/Remove/Has across all NodeIDs in the graph.
 type nodeLabelShard struct {
-	m  map[graph.NodeID]labelBag
+	m map[graph.NodeID]labelBag
+	// d is the SPARSE per-node label-delta head map of the P0 MVCC spike
+	// (rmp #2275), nil until this shard takes its first delta. It is sparse
+	// rather than a field on labelBag because GoGraph has no per-node struct:
+	// a pointer on the bag would grow the map value for every labelled node,
+	// including in graphs that never write. See mvcc_labels.go.
+	d  map[graph.NodeID]*nodeLabelDelta
 	mu sync.RWMutex
 }
 
@@ -313,6 +319,14 @@ type Graph[N comparable, W any] struct {
 	pkeys   *PropertyKeyRegistry
 	nodeIdx *label.Index
 	edgeIdx *label.Index
+
+	// labelDeltas arms the P0 MVCC spike (rmp #2275); labelDeltaActive mirrors
+	// the number of live label deltas as a lock-free gate, exactly as
+	// tombstoneActive does for the tombstone set. Both are inert unless
+	// [Graph.EnableLabelDeltas] has been called. See mvcc_labels.go.
+	labelDeltas      bool
+	labelDeltaActive atomic.Int64
+	labelDeltaSeq    atomic.Uint64
 
 	nodeLabelShards [propMapShards]nodeLabelShard
 	edgeLabelShards [propMapShards]edgeLabelShard
@@ -1613,6 +1627,15 @@ func (g *Graph[N, W]) SetNodeLabel(n N, name string) error {
 	// shard lock. The write-back is load-bearing — add may grow or promote the
 	// bag's backing storage, so the updated header must be re-stored.
 	bag := sh.m[id]
+	// P0 MVCC spike (rmp #2275), inert unless armed: record the undo BEFORE
+	// mutating, and only when the label is not already present — re-asserting a
+	// label the node already carries changes nothing, so a delta for it would be
+	// a version that never existed. MERGE's MATCH branch re-asserts labels on
+	// every match, so this guard is what keeps a delta per WRITE rather than a
+	// delta per statement.
+	if g.labelDeltasEnabled() && !bag.has(lid) {
+		sh.pushLabelDelta(id, undoRemoveLabel, lid, g.spikeTS(), &g.labelDeltaActive)
+	}
 	bag.add(lid)
 	sh.m[id] = bag
 	sh.mu.Unlock()
@@ -2595,6 +2618,12 @@ func (g *Graph[N, W]) RemoveNodeLabel(n N, name string) {
 	sh := g.nodeLabelShardFor(id)
 	sh.mu.Lock()
 	if bag, ok2 := sh.m[id]; ok2 {
+		// P0 MVCC spike (rmp #2275), inert unless armed. Guarded on the label
+		// actually being present for the same reason as the add path: removing
+		// a label the node does not carry changes nothing.
+		if g.labelDeltasEnabled() && bag.has(lid) {
+			sh.pushLabelDelta(id, undoAddLabel, lid, g.spikeTS(), &g.labelDeltaActive)
+		}
 		if bag.del(lid) {
 			// Bag became empty: drop the entry so a node with no labels costs
 			// no map slot (matches the prior map behaviour).
