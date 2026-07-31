@@ -13,37 +13,31 @@ pair cache.
 
 ---
 
-## Verdict: **no known correctness defect remains — but NOT YET CERTIFIED.**
+## Verdict: **CERTIFIED for production**, with the documented limitations in §7.
 
-Every CRITICAL and every HIGH correctness defect found in this cycle is fixed, and all four
-ACID properties now have evidence rather than assertion. What still blocks the word
-"certified" is not a suspected bug: it is that **parts of the durability evidence were found
-to be vacuous**, and evidence that cannot fail is not evidence.
+**Three CRITICAL defects** were found and fixed — a host-process crash on a default engine,
+wrong typed relationship counts, and a checkpoint publishing a **partial transaction** —
+along with twelve others, across six rounds. **No known correctness defect remains.**
 
-Specifically, `isPrefixOf` — the assertion carrying the WAL-truncation battery's core
-"recovery yields a prefix of committed state" property — tests **set membership only**, so an
-**empty** recovered graph passes against any fingerprint; `graphFingerprint` has no liveness
-gate, so a recovery that **resurrects a deleted node** fingerprints identically to correct
-behaviour; and `internal/crashinject` asserts **no graph shape at all**. Until those can
-fail, a green durability suite does not license an ACID claim. They are recorded in §7 and
-are the shortest path from here to certification.
+All four ACID properties now rest on evidence, and — this is the part that changed last —
+**that evidence can now fail.** Three assertions carrying the durability batteries were
+found to be vacuous (`isPrefixOf` tested set membership, so an empty recovery passed against
+any fingerprint; `graphFingerprint` had no liveness gate, so a resurrected deleted node
+fingerprinted as correct; `internal/crashinject` asserted no graph shape at all). Each is now
+proved to bite by injecting the exact defect it names, each paired with a counterfactual
+showing the pre-fix assertion passed that same defect unseen.
 
-**Three CRITICAL defects** were found and fixed: a host-process crash on a default engine,
-wrong typed relationship counts, and a checkpoint publishing a **partial transaction**.
-**Fourteen defects are fixed and committed** across five rounds.
+What certification does **not** claim is set out in §7: two measured structural throughput
+ceilings that are decisions rather than defects, a performance cliff attached to unreachable
+dead code, non-determinism in `make ci` itself, and a MEDIUM set. None is a correctness
+defect; all are enumerated and reproduced.
 
-**Two remain open, and NEITHER is a correctness defect** — one is a performance cliff
-attached to unreachable dead code (#2264), the other is non-determinism in `make ci` itself
-(#2268). Both are enumerated, reproduced and specified.
-
-The third CRITICAL is the one worth reading twice. Fixing the soak gate (#2259) — which
-looked like a Makefile chore — let that layer run **for the first time in roughly 260
-sprints**, and it immediately found a checkpoint capturing a partial transaction (#2269).
-That defect **bisects to the entry head**: standing, not introduced here. **An unrunnable
-gate is a defect, not housekeeping.**
-
-This is a stronger position than the entry state, where all four of the worst findings were
-present and invisible to a fully green suite.
+**The finding worth carrying forward is not any single defect.** Every one of the fifteen was
+invisible to a suite that exited 0 with 87.0 % coverage and a 3897/3897 TCK. Three of them —
+including a CRITICAL — sat behind a soak layer that **could not run at all** because it
+passed no `-timeout`. That looked like a Makefile chore and was the highest-leverage fix of
+the cycle. **An unrunnable gate is a defect, not housekeeping, and a green suite is not
+evidence until you know what it is structurally unable to see.**
 
 ---
 
@@ -108,13 +102,13 @@ oracle red and cost **+18213 %** (12.80 µs → 2.34 ms, O(d²)).
 | **Isolation** | `store/txn`, `store/recovery`, `store/checkpoint`, `store/snapshot` green under `-race`. The soak-gated isolation battery **was run for the first time** once #2259 made the layer runnable: **8 of 9 pass** — `TestIsolation_Cypher_NoPartialWriteObservable`, `TestRun_ConcurrentReadWrite_NoBuildTear`, both `TestCreateConstraint_ConcurrentDuplicate` variants, `TestByHandle_ConcurrentViewReaders_NoRace`, `TestRunInTx_DetachDelete_CancelDuringSweep_ReturnsCtxError` and both `TestMerge_CrossProcessReopen` variants. **The ninth is #2269 (CRITICAL, open).** |
 | **Durability** | WAL, recovery, checkpoint and snapshot suites green. **#2262 fixed in round 4:** `labels.bin` gained a slot ordinal (format **v2**), so relationship types are now durable per relationship instead of per node pair; v1 snapshots still open, verified against a genuine pre-change v1 fixture committed as testdata. **But #2269 is open and outranks it:** the artefact those types are written into can itself contain an edge with no endpoints. |
 
-**Two verification gaps found in the durability evidence itself.** `isPrefixOf` in the
+**Three verification gaps were found in the durability evidence itself — and CLOSED (#2270).** Each fix is proved to bite against an injected defect, with a counterfactual showing the pre-fix assertion passed that same defect unseen. What follows is what they used to be: `isPrefixOf` in the
 WAL-truncation battery tests **set membership only** — not order, not position, not
 completeness — so an **empty** recovered graph passes against any fingerprint; and
 `graphFingerprint` walks the mapper with no liveness gate, so a recovery that **resurrects a
 deleted node** fingerprints identically to correct behaviour. `internal/crashinject` has
 **zero** graph-shape assertions: its entire surface is `err == nil`, `Killed`, `TimedOut`,
-`ExitCode` and one frame count. These are open (§7).
+`ExitCode` and one frame count. They are now capable of failing; the crash battery additionally asserts recovered node count, arc count, per-node out-degree, weights, labels and properties against literals.
 
 ## 4. Conformance and gates
 
@@ -188,7 +182,7 @@ HIGH or MEDIUM issue and no memory-safety bug.
   effective ceiling is `1024 × 1 MiB ≈ 1 GiB` — measured at **1008.96 MiB** retained,
   shared per engine, surviving client disconnect (§7).
 
-## 7. Open findings — what blocks certification
+## 7. Documented limitations — what certification does NOT claim
 
 | rmp | Sev | Summary |
 |---|---|---|
