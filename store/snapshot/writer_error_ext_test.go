@@ -225,6 +225,11 @@ func TestReadLabels_EdgeStringIdxOutOfRange(t *testing.T) {
 	_ = binary.Write(buf, binary.LittleEndian, uint64(1)) // one edge record
 	_ = binary.Write(buf, binary.LittleEndian, uint64(0)) // Src
 	_ = binary.Write(buf, binary.LittleEndian, uint64(1)) // Dst
+	// The v2 edge record carries a slot ordinal between Dst and StringIdx (rmp
+	// #2262). Writing it is what keeps this test on the branch it names: without
+	// it the reader consumes the StringIdx bytes AS the ordinal, hits EOF, and
+	// returns ErrLabelsCorrupted for truncation instead of for the bounds check.
+	_ = binary.Write(buf, binary.LittleEndian, uint32(0)) // Slot
 	_ = binary.Write(buf, binary.LittleEndian, uint32(9)) // bad StringIdx (≥ 1)
 	if _, err := ReadLabels(buf); !errors.Is(err, ErrLabelsCorrupted) {
 		t.Fatalf("edge StringIdx out-of-range = %v, want ErrLabelsCorrupted", err)
@@ -264,6 +269,24 @@ func TestReadLabels_TruncatedEdgeDst(t *testing.T) {
 	}
 }
 
+// TestReadLabels_TruncatedEdgeSlot exercises the slot-ordinal field the v2 edge
+// record gained (rmp #2262): the stream ends after Dst, before the ordinal.
+func TestReadLabels_TruncatedEdgeSlot(t *testing.T) {
+	t.Parallel()
+	buf := &bytes.Buffer{}
+	_ = binary.Write(buf, binary.LittleEndian, labelsMagic)
+	_ = binary.Write(buf, binary.LittleEndian, labelsFormatVersion)
+	_ = binary.Write(buf, binary.LittleEndian, uint64(0)) // no strings
+	_ = binary.Write(buf, binary.LittleEndian, uint64(0)) // no node records
+	_ = binary.Write(buf, binary.LittleEndian, uint64(1)) // one edge record
+	_ = binary.Write(buf, binary.LittleEndian, uint64(0)) // Src OK
+	_ = binary.Write(buf, binary.LittleEndian, uint64(1)) // Dst OK
+	// Do NOT write Slot — truncated.
+	if _, err := ReadLabels(buf); !errors.Is(err, ErrLabelsCorrupted) {
+		t.Fatalf("truncated edge Slot = %v, want ErrLabelsCorrupted", err)
+	}
+}
+
 // TestReadLabels_TruncatedEdgeStringIdx exercises the final field of the edge
 // record that can be truncated: the StringIdx uint32.
 func TestReadLabels_TruncatedEdgeStringIdx(t *testing.T) {
@@ -276,6 +299,7 @@ func TestReadLabels_TruncatedEdgeStringIdx(t *testing.T) {
 	_ = binary.Write(buf, binary.LittleEndian, uint64(1)) // one edge record
 	_ = binary.Write(buf, binary.LittleEndian, uint64(0)) // Src OK
 	_ = binary.Write(buf, binary.LittleEndian, uint64(1)) // Dst OK
+	_ = binary.Write(buf, binary.LittleEndian, uint32(0)) // Slot OK (v2 field)
 	// Do NOT write StringIdx — truncated.
 	if _, err := ReadLabels(buf); !errors.Is(err, ErrLabelsCorrupted) {
 		t.Fatalf("truncated edge StringIdx = %v, want ErrLabelsCorrupted", err)

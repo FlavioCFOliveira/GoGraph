@@ -25,10 +25,42 @@ const LabelsFile = "labels.bin"
 // out as 0x4C424C53 because the magic bytes appear on disk as 'SLBL'.
 const labelsMagic uint32 = 0x4C424C53
 
-// labelsFormatVersion is the labels.bin internal format version. It
-// is independent of [ManifestVersion]: a future labels.bin layout
-// change bumps this byte without forcing a manifest schema bump.
-const labelsFormatVersion uint32 = 1
+// labelsFormatVersion is the labels.bin internal format version the writer
+// emits. It is independent of [ManifestVersion]: a labels.bin layout change
+// bumps this field without forcing a manifest schema bump.
+//
+// Version 2 (rmp #2262) widened the edge record with a SLOT ORDINAL, so the
+// file can say WHICH parallel slot of a pair carries a relationship type.
+// Version 1 keyed an edge-label record by (src, dst) alone; on a multigraph
+// pair the parallel slots folded into one record and the per-slot truth was
+// not representable. See [labelsFormatVersionPerSlot] for what a v1 file means
+// on load.
+const labelsFormatVersion uint32 = 2
+
+// labelsFormatVersionPerSlot is the first labels.bin version whose edge records
+// carry a slot ordinal. A file at or above it is applied PER SLOT; a file below
+// it is applied with the v1 PER-PAIR semantics it was written with.
+//
+// # Reading an older file: accepted, with its original semantics
+//
+// A labels.bin already on disk cannot be rewritten retroactively, so rejecting
+// v1 outright would turn a Durability fix into a Durability REGRESSION: a store
+// that opened before the upgrade would fail to open after it, and committed data
+// would become unreachable for no gain — the missing per-slot information is not
+// recoverable from the file either way. v1 is therefore read exactly as v1 always
+// meant: each record names the PAIR, and [ApplyLabelsToGraph] replays it through
+// [lpg.Graph.SetEdgeLabel], which types every free column-typed slot of that
+// pair. That reproduces the pre-upgrade load behaviour byte for byte, so
+// upgrading changes nothing about an existing snapshot — including the fact that
+// a v1 file recorded a multigraph pair lossily. The loss is FROZEN, not repaired:
+// the information was never written. The first checkpoint after the upgrade
+// emits v2 and the pair becomes durable from then on.
+//
+// This is the read-the-old-format / write-the-new upgrade path the mature
+// engines use (PostgreSQL's catalog version, RocksDB's format_version, Lucene's
+// read-the-previous-major policy). A FUTURE version is still rejected: a reader
+// cannot invent semantics it does not have.
+const labelsFormatVersionPerSlot uint32 = 2
 
 // ErrLabelsCorrupted is returned by [ReadLabels] when the labels.bin
 // file is structurally malformed (bad magic, truncated record, or a
@@ -54,14 +86,48 @@ type NodeLabelEntry struct {
 	StringIdx uint32
 }
 
-// EdgeLabelEntry pairs an (src, dst) NodeID couple with the
-// string-table index of one label name attached to that edge. An
-// edge carrying N labels yields N entries; parallel edges between
-// the same endpoints fold into the same edgeKey on disk just as they
-// do in [lpg.Graph]'s in-memory edgeBag.
+// EdgeLabelSlotOverflow is the reserved [EdgeLabelEntry.Slot] value marking a
+// record that belongs to the pair's OVERFLOW list rather than to one slot's
+// inline label column. A pair's durable type state is exactly those two halves,
+// so the file needs to distinguish them; every real ordinal is a slot index and
+// so cannot collide with the maximum uint32.
+const EdgeLabelSlotOverflow uint32 = ^uint32(0)
+
+// EdgeLabelEntry names ONE relationship type of the directed pair (Src, Dst):
+// Slot says WHERE on that pair the type lives, and StringIdx indexes the file's
+// string table.
+//
+// Slot is what makes a multigraph pair representable. A relationship type
+// belongs to the relationship INSTANCE, so two parallel edges between the same
+// endpoints may carry different types — or one may carry a type and the other
+// none. Version 1 had no such field and keyed a record by (Src, Dst) alone, so
+// those slots folded together on disk and a checkpoint could silently lose a
+// committed type or invent one that was never attached (rmp #2262).
+//
+// Slot is either:
+//
+//   - a canonical slot ordinal — the slot's position among the pair's slots after
+//     a STABLE sort by stable-edge handle ascending, the order BOTH recovery
+//     paths converge on. The record carries that slot's INLINE adjacency label
+//     column entry. [lpg.Graph.ForEachPairSlotRelTypeByID] produces it on the
+//     write side and [lpg.Graph.SetEdgeRelTypeAtSlotByID] resolves it on the
+//     apply side; or
+//   - [EdgeLabelSlotOverflow], meaning the type is in the pair's overflow list —
+//     a type that could not be placed in any slot's column and that every
+//     column-typed slot of the pair therefore carries.
+//
+// Slot is meaningless in a version-1 readback and is left zero there.
+//
+// A slot's inline entry is recorded whether or not a by-handle type record also
+// covers it. The by-handle store has its own durable component
+// (edgehandles.bin) and stays authoritative for what such a slot IS, but the
+// column is what [lpg.Graph.EdgeLabels] and
+// [lpg.Graph.RelationshipTypesInUse] read, so omitting it here would leave every
+// Cypher-created relationship's type absent from those answers after a restart.
 type EdgeLabelEntry struct {
 	Src       uint64
 	Dst       uint64
+	Slot      uint32
 	StringIdx uint32
 }
 
@@ -72,6 +138,12 @@ type LabelsReadback struct {
 	Strings    []string
 	NodeLabels []NodeLabelEntry
 	EdgeLabels []EdgeLabelEntry
+	// Version is the on-disk labels.bin format version this readback was parsed
+	// from. It selects how [ApplyLabelsToGraph] replays EdgeLabels: at or above
+	// [labelsFormatVersionPerSlot] each record names one SLOT, below it each
+	// record names the PAIR. A hand-constructed readback leaves it zero and is
+	// therefore replayed with the conservative per-pair semantics.
+	Version uint32
 }
 
 // maxRegistryCaptureRetries bounds how many times [WriteLabels] /
@@ -213,12 +285,12 @@ func writeLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], snapReg f
 		metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
 		return 0, 0, err
 	}
-	// scratch is the reusable per-record buffer (20 bytes covers the larger
-	// edge record: Src(8) | Dst(8) | StringIdx(4)). Allocated once, it escapes
-	// the io.Writer chain a single time rather than per record, so each record
-	// is packed with PutUintNN and emitted in one Write with no per-field
+	// scratch is the reusable per-record buffer (24 bytes covers the larger
+	// edge record: Src(8) | Dst(8) | Slot(4) | StringIdx(4)). Allocated once, it
+	// escapes the io.Writer chain a single time rather than per record, so each
+	// record is packed with PutUintNN and emitted in one Write with no per-field
 	// reflection/boxing — byte-identical to the binary.Write it replaces.
-	var scratch [20]byte
+	var scratch [24]byte
 	for i := range nodeRecs {
 		binary.LittleEndian.PutUint64(scratch[0:8], nodeRecs[i].NodeID)
 		binary.LittleEndian.PutUint32(scratch[8:12], nodeRecs[i].StringIdx)
@@ -235,8 +307,9 @@ func writeLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], snapReg f
 	for i := range edgeRecs {
 		binary.LittleEndian.PutUint64(scratch[0:8], edgeRecs[i].Src)
 		binary.LittleEndian.PutUint64(scratch[8:16], edgeRecs[i].Dst)
-		binary.LittleEndian.PutUint32(scratch[16:20], edgeRecs[i].StringIdx)
-		if _, err := tee.Write(scratch[:20]); err != nil {
+		binary.LittleEndian.PutUint32(scratch[16:20], edgeRecs[i].Slot)
+		binary.LittleEndian.PutUint32(scratch[20:24], edgeRecs[i].StringIdx)
+		if _, err := tee.Write(scratch[:24]); err != nil {
 			metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
 			return 0, 0, err
 		}
@@ -250,13 +323,13 @@ func writeLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], snapReg f
 	// Total bytes: 4 (magic) + 4 (formatVersion) + 8 (stringCount) +
 	// for each name: 4 (utf8Len) + utf8Len bytes;
 	// + 8 (nodeCount) + nodeCount * (8 + 4);
-	// + 8 (edgeCount) + edgeCount * (8 + 8 + 4).
+	// + 8 (edgeCount) + edgeCount * (8 + 8 + 4 + 4).
 	total := int64(4 + 4 + 8)
 	for _, name := range names {
 		total += 4 + int64(len(name))
 	}
 	total += 8 + int64(len(nodeRecs))*int64(8+4)
-	total += 8 + int64(len(edgeRecs))*int64(8+8+4)
+	total += 8 + int64(len(edgeRecs))*int64(8+8+4+4)
 	return total, hasher.Sum32(), nil
 }
 
@@ -315,8 +388,12 @@ func collectInternedNodeIDs[N comparable, W any](g *lpg.Graph[N, W]) []graph.Nod
 // here removes the dependence on mutation history entirely, so the property
 // holds for any future change to insertion or replay order too.
 //
-// Parallel edges collapse to one entry per (src, dst): both v1 edge labels and
-// edge properties are keyed by endpoints only.
+// Parallel edges collapse to one entry per (src, dst). Edge PROPERTIES are keyed
+// by endpoints only, so that is all they need. Edge LABELS are per-slot from
+// labels.bin v2 on (rmp #2262), but the extra dimension lives INSIDE the pair:
+// [collectEdgeLabelRecords] visits each pair once here and enumerates that pair's
+// slots by canonical ordinal within the visit, so the destination order this
+// function fixes still determines the record order.
 func distinctDestinationsSorted(
 	neighbours []graph.NodeID,
 	seen map[graph.NodeID]struct{},
@@ -380,16 +457,34 @@ func collectNodeLabelRecords[N comparable, W any](
 	return out, nil
 }
 
-// collectEdgeLabelRecords emits one [EdgeLabelEntry] per (src, dst, label)
-// triple. Each (src, dst) pair is visited once even when the graph is a
-// multigraph: edge labels in v1 are keyed by endpoints only, mirroring the LPG's
-// in-memory edgeBag semantics.
+// collectEdgeLabelRecords emits the durable type state of every distinct
+// (src, dst) pair: one [EdgeLabelEntry] per typed SLOT, carrying that slot's
+// inline adjacency-label-column entry under its canonical ordinal, followed by
+// one entry per type in the pair's OVERFLOW list, marked
+// [EdgeLabelSlotOverflow].
+//
+// Those two halves are the whole of a pair's type state, so recording them
+// verbatim is lossless in both directions. Emitting the pair's derived UNION
+// instead — the v1 behaviour — cannot express a multigraph pair whose parallel
+// slots disagree: replaying it re-typed every slot of the pair, so a checkpoint
+// changed the answer to a typed-degree query (rmp #2262).
+//
+// A slot covered by a by-handle type record still contributes its column entry.
+// edgehandles.bin is authoritative for what that slot IS, but the column is what
+// the pair-level readers consult, and a Cypher CREATE writes both.
+//
+// The destination order stays [distinctDestinationsSorted]'s ascending NodeID
+// order, the slot order is the pair's canonical ordinal order, and the overflow
+// order is the list's own, so the emitted record sequence remains a pure
+// function of the graph's content — the property
+// TestRecovery_V3Snapshot_RoundTripByteStable pins.
 //
 // Source IDs are snapshotted inside Mapper.Walk; the adjacency
-// ([adjlist.AdjList.LoadEntry]) and edge labels ([lpg.Graph.EdgeLabelsByID]) are
-// resolved afterwards. Both are lock-free with respect to the Mapper, so this
-// never re-enters it from within the Walk callback (#1648 — see
-// [collectInternedNodeIDs]).
+// ([adjlist.AdjList.LoadEntry]) and the type state
+// ([lpg.Graph.ForEachPairSlotRelTypeByID] /
+// [lpg.Graph.ForEachPairOverflowRelTypeByID]) are resolved afterwards. All are
+// lock-free with respect to the Mapper, so this never re-enters it from within
+// the Walk callback (#1648 — see [collectInternedNodeIDs]).
 func collectEdgeLabelRecords[N comparable, W any](
 	g *lpg.Graph[N, W],
 	names []string,
@@ -397,16 +492,15 @@ func collectEdgeLabelRecords[N comparable, W any](
 	idx := buildNameIndex(names)
 	out := make([]EdgeLabelEntry, 0, 32)
 	adj := g.AdjList()
-	// seen dedups parallel-edge destinations so each (src,dst) pair is emitted
-	// once (v1 collapses parallel edges into one edgeBag); it is allocated ONCE
-	// and cleared per source. The visit closure streams each pair's distinct
-	// labels via ForEachEdgeLabelByID (no per-pair []string) and is defined once,
-	// capturing the stable idx/out plus the per-pair curSrc/curDst.
+	// seen dedups the destination list so each (src, dst) pair is visited once —
+	// the pair's parallel slots are then enumerated within that single visit. It
+	// is allocated ONCE and cleared per source. The visit closures are defined
+	// once too, capturing the stable idx/out plus the per-pair curSrc/curDst.
 	seen := make(map[graph.NodeID]struct{}, 16)
 	var dsts []graph.NodeID
 	var visitErr error
 	var curSrc, curDst uint64
-	visit := func(name string) {
+	emit := func(slot uint32, name string) {
 		if visitErr != nil {
 			return
 		}
@@ -415,8 +509,27 @@ func collectEdgeLabelRecords[N comparable, W any](
 			visitErr = fmt.Errorf("snapshot: edge label %q not in registry snapshot", name)
 			return
 		}
-		out = append(out, EdgeLabelEntry{Src: curSrc, Dst: curDst, StringIdx: si})
+		out = append(out, EdgeLabelEntry{
+			Src:       curSrc,
+			Dst:       curDst,
+			Slot:      slot,
+			StringIdx: si,
+		})
 	}
+	visitSlot := func(ordinal int, name string) {
+		if visitErr != nil {
+			return
+		}
+		if ordinal < 0 || uint64(ordinal) >= uint64(EdgeLabelSlotOverflow) {
+			// An ordinal at or past the overflow sentinel cannot be encoded. A
+			// pair would need 4 billion parallel edges to reach it, so this is a
+			// fail-stop on the impossible rather than a real branch.
+			visitErr = fmt.Errorf("snapshot: edge label slot ordinal %d out of range", ordinal)
+			return
+		}
+		emit(uint32(ordinal), name)
+	}
+	visitOverflow := func(name string) { emit(EdgeLabelSlotOverflow, name) }
 	for _, srcID := range collectInternedNodeIDs(g) {
 		neighbours, _ := adj.LoadEntry(srcID)
 		if len(neighbours) == 0 {
@@ -426,7 +539,11 @@ func collectEdgeLabelRecords[N comparable, W any](
 		dsts = distinctDestinationsSorted(neighbours, seen, dsts)
 		for _, dstID := range dsts {
 			curDst = uint64(dstID)
-			g.ForEachEdgeLabelByID(srcID, dstID, visit)
+			g.ForEachPairSlotRelTypeByID(srcID, dstID, visitSlot)
+			if visitErr != nil {
+				return nil, visitErr
+			}
+			g.ForEachPairOverflowRelTypeByID(srcID, dstID, visitOverflow)
 			if visitErr != nil {
 				return nil, visitErr
 			}
@@ -473,10 +590,21 @@ func ReadLabels(r io.Reader) (LabelsReadback, error) {
 		metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
 		return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
 	}
-	if version != labelsFormatVersion {
+	// Accept every version this build knows how to interpret, not just the one it
+	// writes: a labels.bin already on disk cannot be rewritten retroactively, so
+	// rejecting the previous version would make committed data unreachable after
+	// an upgrade. A version 1 file is parsed with the narrower edge record and
+	// applied with the PER-PAIR semantics it was written with; see
+	// [labelsFormatVersionPerSlot]. A version this build does not know is still
+	// rejected — a reader cannot invent semantics it does not have.
+	if version == 0 || version > labelsFormatVersion {
 		metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
 		return LabelsReadback{}, fmt.Errorf("%w: unsupported labels format version %d",
 			ErrLabelsCorrupted, version)
+	}
+	perSlot := version >= labelsFormatVersionPerSlot
+	if !perSlot {
+		metrics.IncCounter("store.snapshot.ReadLabels.legacyPerPair", 1)
 	}
 
 	var stringCount uint64
@@ -568,6 +696,15 @@ func ReadLabels(r io.Reader) (LabelsReadback, error) {
 			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
 			return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
 		}
+		// The slot ordinal exists only from version 2 on; a version 1 record goes
+		// straight from Dst to StringIdx and leaves Slot at its zero value, which
+		// the per-pair apply path ignores.
+		if perSlot {
+			if err := binary.Read(br, binary.LittleEndian, &rec.Slot); err != nil {
+				metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
+				return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
+			}
+		}
 		if err := binary.Read(br, binary.LittleEndian, &rec.StringIdx); err != nil {
 			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
 			return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
@@ -577,6 +714,12 @@ func ReadLabels(r io.Reader) (LabelsReadback, error) {
 			return LabelsReadback{}, fmt.Errorf("%w: edge string idx %d >= %d",
 				ErrLabelsCorrupted, rec.StringIdx, stringCount)
 		}
+		// Slot is deliberately NOT range-checked here: the file cannot know how
+		// many slots the pair will have once the adjacency is replayed, and the
+		// number legitimately differs when the snapshot is applied onto a graph a
+		// WAL tail has since changed. ApplyLabelsToGraph resolves it against the
+		// live adjacency and skips (with a metric) what it cannot place, so a
+		// hostile ordinal costs one failed lookup and never an out-of-range index.
 		edges = append(edges, rec)
 	}
 
@@ -584,6 +727,7 @@ func ReadLabels(r io.Reader) (LabelsReadback, error) {
 		Strings:    strings,
 		NodeLabels: nodes,
 		EdgeLabels: edges,
+		Version:    version,
 	}, nil
 }
 
@@ -602,9 +746,49 @@ func ReadLabels(r io.Reader) (LabelsReadback, error) {
 // applied) are likewise skipped and counted under
 // `store.snapshot.ApplyLabels.edgeMissing`; this matches
 // [lpg.Graph.SetEdgeLabel]'s own no-op-on-missing-edge contract.
+//
+// # Per-slot versus per-pair replay
+//
+// From labels.bin version 2 ([labelsFormatVersionPerSlot]) each edge record
+// names ONE place on the pair. A record carrying a canonical ordinal is replayed
+// through [lpg.Graph.SetEdgeRelTypeAtSlotByID], so a multigraph pair's parallel
+// slots keep the types they actually carried; a record marked
+// [EdgeLabelSlotOverflow] is replayed through
+// [lpg.Graph.AddEdgeRelTypeOverflowByID], restoring the pair-wide half of its
+// type state. A record whose ordinal the live adjacency cannot resolve — the
+// pair now holds fewer slots than the snapshot recorded — is skipped and counted
+// under `store.snapshot.ApplyLabels.slotMissing` rather than being retargeted at
+// some other slot, because guessing would be the very failure this format
+// removes.
+//
+// A version-1 readback (and any hand-constructed one, which leaves Version at
+// zero) is replayed through [lpg.Graph.SetEdgeLabel], which names the PAIR. That
+// is exactly what those records meant when they were written; see
+// [labelsFormatVersionPerSlot] for why an older file is read rather than
+// rejected.
+//
+//nolint:gocritic // hugeParam: rb is passed by value intentionally; ApplyLabelsToGraph is exported and the by-value readback is its stable contract. Adding the Version field (rmp #2262) pushed LabelsReadback from 72 to 80 bytes, exactly gocritic's threshold; the struct is three slice headers plus a word, it is copied twice per recovery, and switching the exported signature to a pointer would be an unrelated breaking API change.
 func ApplyLabelsToGraph[N comparable, W any](g *lpg.Graph[N, W], rb LabelsReadback) error {
 	defer metrics.Time("store.snapshot.ApplyLabelsToGraph").Stop()
 	adj := g.AdjList()
+	// Re-intern the WHOLE string table, in table order, before applying any
+	// record. The table is the write-time [lpg.LabelRegistry] snapshot taken in
+	// interning order, so replaying it in order restores the same LabelID for
+	// every name — which is what [WriteLabels] documents and what makes a
+	// snapshot's identity survive the round trip.
+	//
+	// Interning only the names the records happen to reference (the previous
+	// behaviour) made the recovered registry's order depend on which records
+	// exist and in what order they are applied, so a graph whose types are
+	// recorded against handles rather than in the column came back with a
+	// different registry order and re-checkpointed to different bytes. A name the
+	// recovered graph does not attach to anything is inert: every "in use" answer
+	// ([lpg.Graph.RelationshipTypesInUse], [lpg.Graph.NodeLabelsInUse]) is derived
+	// from actual attachments, never from the registry.
+	reg := g.Registry()
+	for _, name := range rb.Strings {
+		reg.Intern(name)
+	}
 	for _, nl := range rb.NodeLabels {
 		if uint64(nl.StringIdx) >= uint64(len(rb.Strings)) {
 			metrics.IncCounter("store.snapshot.ApplyLabels.unresolved", 1)
@@ -620,6 +804,7 @@ func ApplyLabelsToGraph[N comparable, W any](g *lpg.Graph[N, W], rb LabelsReadba
 			return fmt.Errorf("snapshot.ApplyLabelsToGraph: SetNodeLabel: %w", err)
 		}
 	}
+	perSlot := rb.Version >= labelsFormatVersionPerSlot
 	for _, el := range rb.EdgeLabels {
 		if uint64(el.StringIdx) >= uint64(len(rb.Strings)) {
 			metrics.IncCounter("store.snapshot.ApplyLabels.unresolved", 1)
@@ -639,7 +824,21 @@ func ApplyLabelsToGraph[N comparable, W any](g *lpg.Graph[N, W], rb LabelsReadba
 			metrics.IncCounter("store.snapshot.ApplyLabels.edgeMissing", 1)
 			continue
 		}
-		g.SetEdgeLabel(srcN, dstN, rb.Strings[el.StringIdx])
+		if !perSlot {
+			g.SetEdgeLabel(srcN, dstN, rb.Strings[el.StringIdx])
+			continue
+		}
+		if el.Slot == EdgeLabelSlotOverflow {
+			g.AddEdgeRelTypeOverflowByID(
+				graph.NodeID(el.Src), graph.NodeID(el.Dst), rb.Strings[el.StringIdx])
+			continue
+		}
+		if !g.SetEdgeRelTypeAtSlotByID(
+			graph.NodeID(el.Src), graph.NodeID(el.Dst),
+			int(el.Slot), rb.Strings[el.StringIdx],
+		) {
+			metrics.IncCounter("store.snapshot.ApplyLabels.slotMissing", 1)
+		}
 	}
 	return nil
 }

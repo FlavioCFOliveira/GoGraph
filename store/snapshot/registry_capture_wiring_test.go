@@ -375,6 +375,8 @@ func TestWriteProperties_ExhaustionReturnsErrorWritesNothing(t *testing.T) {
 
 // nodeLabelNameSet resolves each node-label record's StringIdx against the
 // embedded string table and returns the set of distinct node-label names.
+//
+//nolint:gocritic // hugeParam: test helper takes the readback by value to mirror the public ApplyLabelsToGraph signature; not a hot path.
 func nodeLabelNameSet(t *testing.T, rb LabelsReadback) map[string]bool {
 	t.Helper()
 	m := make(map[string]bool, len(rb.NodeLabels))
@@ -388,6 +390,8 @@ func nodeLabelNameSet(t *testing.T, rb LabelsReadback) map[string]bool {
 }
 
 // edgeLabelNameSet is the edge-label counterpart of nodeLabelNameSet.
+//
+//nolint:gocritic // hugeParam: test helper takes the readback by value to mirror the public ApplyLabelsToGraph signature; not a hot path.
 func edgeLabelNameSet(t *testing.T, rb LabelsReadback) map[string]bool {
 	t.Helper()
 	m := make(map[string]bool, len(rb.EdgeLabels))

@@ -498,25 +498,77 @@ stored in the manifest entry, including the magic header.
 | Offset  | Field             | Type                                  |
 |---------|-------------------|---------------------------------------|
 | 0       | magic             | uint32 LE = `0x4C424C53` (`'SLBL'`)   |
-| 4       | formatVersion     | uint32 LE (currently 1)               |
+| 4       | formatVersion     | uint32 LE (currently 2)               |
 | 8       | stringTableLen    | uint64 LE                             |
 | ...     | strings           | stringTableLen × (uint32 utf8Len, [utf8Len]byte) |
 | ...     | nodeEntries       | uint64 LE                             |
 | ...     | node records      | nodeEntries × (uint64 NodeID, uint32 labelStringIdx) |
 | ...     | edgeEntries       | uint64 LE                             |
-| ...     | edge records      | edgeEntries × (uint64 src, uint64 dst, uint32 labelStringIdx) |
+| ...     | edge records      | edgeEntries × (uint64 src, uint64 dst, uint32 slot, uint32 labelStringIdx) |
 
 The string table is the deduplicated set of label names, written in
 the order the writer interns them from `lpg.LabelRegistry`. Each
 record's `labelStringIdx` indexes into that table. A reader rebuilds
-the registry by re-interning each string in order; because
+the registry by re-interning every string in table order; because
 `lpg.LabelID` is assigned in interning order, the resulting LabelIDs
 match the IDs that were live when the snapshot was taken, with no
 extra remap step.
 
-`labels.bin` is independent of the manifest version: a future change
-to the labels layout (e.g., parallel-edge labels) bumps the
-`formatVersion` byte without forcing a `manifest.json` schema bump.
+`labels.bin` is independent of the manifest version: a change to the
+labels layout bumps the `formatVersion` field without forcing a
+`manifest.json` schema bump.
+
+#### Edge records are per SLOT (format version 2)
+
+A relationship type belongs to the relationship *instance*, not to the
+node pair, so two parallel edges between the same endpoints may carry
+different types — or one may carry a type and the other none. The
+`slot` field is what lets the file say which is which:
+
+- a value below `0xFFFFFFFF` is a **canonical slot ordinal**: the
+  slot's position among the pair's slots after a *stable* sort by
+  stable-edge handle ascending. The record carries that slot's inline
+  entry in the adjacency label column.
+- `0xFFFFFFFF` marks a record belonging to the pair's **overflow
+  list** — a type that could not be placed in any slot's column, and
+  that every column-typed slot of the pair therefore carries.
+
+Those two halves are the whole of a pair's durable type state, so
+recording them verbatim is lossless in both directions.
+
+The ordinal is defined against the canonical order because that is the
+order *both* recovery paths converge on. The self-sufficient path
+replays `csr.bin`, whose runs are already stably ordered by
+`(destination, handle)`; the WAL-authoritative path replays
+`OpAddEdge`/`OpAddEdgeH` in commit order. A stable sort is idempotent
+and preserves the relative order of the handle-0 residual, so
+canonicalising either sequence yields the same one, and the file never
+has to carry the handle.
+
+A slot's inline entry is recorded whether or not the by-handle type
+store (`edgehandles.bin`) also covers it. That store stays
+authoritative for *what such a slot is*, but the label column is what
+`lpg.Graph.EdgeLabels` and `lpg.Graph.RelationshipTypesInUse` read, so
+omitting it would leave every Cypher-created relationship's type absent
+from those answers after a restart.
+
+#### Reading a version-1 file
+
+Format version 1 had no `slot` field and keyed an edge record by
+`(src, dst)` alone, so a multigraph pair's parallel slots folded into
+one record: a checkpoint could lose a committed relationship type or
+invent one that was never attached.
+
+A version-1 file **is still read**, with the per-pair semantics it was
+written with: each record is replayed through `lpg.Graph.SetEdgeLabel`,
+which types every free column-typed slot of the pair. Rejecting it
+would turn the fix into a regression — a store that opened before the
+upgrade would fail to open after it, and the missing per-slot
+information is not recoverable from the file either way. The loss such
+a file already carries is therefore *frozen*, not repaired; the first
+checkpoint after the upgrade writes version 2 and the pair is durable
+from then on. A version the reader does not know is rejected with
+`ErrLabelsCorrupted`.
 
 #### Recovery semantics
 
