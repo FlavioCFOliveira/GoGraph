@@ -194,3 +194,18 @@ func (t *labelTx[N, W]) removeNodeLabel(n N, name string) {
 func (t *labelTx[N, W]) labelsOf(id graph.NodeID) labelBag {
 	return t.g.labelBagAsOf(id, t.startTS, t.id)
 }
+
+// setNodeProperty writes a property inside this transaction.
+func (t *labelTx[N, W]) setNodeProperty(n N, key string, v PropertyValue) error {
+	return t.g.setNodePropertyInfo(n, key, v, t.info)
+}
+
+// delNodeProperty deletes a property inside this transaction.
+func (t *labelTx[N, W]) delNodeProperty(n N, key string) {
+	t.g.delNodePropertyInfo(n, key, t.info)
+}
+
+// propsOf reads a node's property set as this transaction must see it.
+func (t *labelTx[N, W]) propsOf(id graph.NodeID) propBag {
+	return t.g.propBagAsOf(id, t.startTS, t.id)
+}

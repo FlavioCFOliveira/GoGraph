@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
@@ -147,6 +148,132 @@ func BenchmarkLabelRead(b *testing.B) {
 			// startTS 0 makes the delta unconditionally newer than the reader,
 			// so the chain walk and the bag clone both actually run.
 			bag := g.labelBagAsOf(id, 0, 0)
+			if bag.len() == 0 {
+				b.Fatal("empty bag")
+			}
+		}
+	})
+}
+
+// BenchmarkPropWrite re-measures the cost model for node PROPERTIES, whose undo
+// record carries a value (56 bytes) rather than an identifier (32).
+//
+// P0 confirmed the model for the cheapest structure. The claim under test is
+// again scaling, not the constant: the per-modification cost must not depend on
+// how many nodes the graph holds.
+func BenchmarkPropWrite(b *testing.B) {
+	for _, size := range []int{10000, 1000000} {
+		for _, deltas := range []bool{false, true} {
+			b.Run(fmt.Sprintf("nodes=%d/deltas=%v", size, deltas), func(b *testing.B) {
+				g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+				keys := make([]string, size)
+				for i := 0; i < size; i++ {
+					keys[i] = fmt.Sprintf("n%d", i)
+					if err := g.AddNode(keys[i]); err != nil {
+						b.Fatalf("AddNode: %v", err)
+					}
+					if err := g.SetNodeProperty(keys[i], "base", Int64Value(int64(i))); err != nil {
+						b.Fatalf("SetNodeProperty: %v", err)
+					}
+				}
+				if deltas {
+					g.EnablePropDeltas()
+				}
+				// The WORKING SET is bounded independently of the graph size.
+				// Without this the 1M arm touches a million distinct nodes and
+				// the sparse delta side map grows to a million entries, whose
+				// amortised rehashing lands in B/op and looks like the delta
+				// cost scaling with the graph. Holding the working set fixed
+				// separates the two, which is the whole question.
+				work := len(keys)
+				if work > 1000 {
+					work = 1000
+				}
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					k := keys[i%work]
+					// A real overwrite each time. A first version used
+					// Int64Value(i&1), which revisits each key with the SAME
+					// value once the loop wraps, so the redundant-write guard
+					// suppressed every delta and the armed arm measured as
+					// FASTER than the control with zero allocations — a
+					// benchmark of nothing. The iteration counter always
+					// changes, so every write is a real one.
+					if err := g.SetNodeProperty(k, "hot", Int64Value(int64(i))); err != nil {
+						b.Fatalf("SetNodeProperty: %v", err)
+					}
+				}
+				b.StopTimer()
+				if deltas {
+					b.ReportMetric(float64(g.PropDeltaCount())/float64(b.N), "deltas/op")
+				}
+			})
+		}
+	}
+}
+
+// BenchmarkPropRead measures the property read fast path, the same three arms
+// as BenchmarkLabelRead.
+func BenchmarkPropRead(b *testing.B) {
+	const size = 100000
+	build := func(arm bool) (*Graph[string, float64], graph.NodeID) {
+		g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		for i := 0; i < size; i++ {
+			k := fmt.Sprintf("n%d", i)
+			if err := g.AddNode(k); err != nil {
+				b.Fatalf("AddNode: %v", err)
+			}
+			if err := g.SetNodeProperty(k, "w", Int64Value(int64(i))); err != nil {
+				b.Fatalf("SetNodeProperty: %v", err)
+			}
+		}
+		if arm {
+			g.EnablePropDeltas()
+		}
+		id, ok := g.adj.Mapper().Lookup("n0")
+		if !ok {
+			b.Fatal("n0 not interned")
+		}
+		return g, id
+	}
+	b.Run("deltas=off", func(b *testing.B) {
+		g, id := build(false)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			bag := g.propBagPlain(id)
+			if bag.len() == 0 {
+				b.Fatal("empty bag")
+			}
+		}
+	})
+	b.Run("deltas=on/no-live-delta", func(b *testing.B) {
+		g, id := build(true)
+		if g.PropDeltaCount() != 0 {
+			b.Fatalf("fixture left %d live deltas", g.PropDeltaCount())
+		}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			bag := g.propBagAsOf(id, ^uint64(0)>>1, 0)
+			if bag.len() == 0 {
+				b.Fatal("empty bag")
+			}
+		}
+	})
+	b.Run("deltas=on/one-live-delta", func(b *testing.B) {
+		g, id := build(true)
+		if err := g.SetNodeProperty("n0", "w", Int64Value(999)); err != nil {
+			b.Fatalf("SetNodeProperty: %v", err)
+		}
+		if g.PropDeltaCount() != 1 {
+			b.Fatalf("expected one live delta, got %d", g.PropDeltaCount())
+		}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			bag := g.propBagAsOf(id, 0, 0)
 			if bag.len() == 0 {
 				b.Fatal("empty bag")
 			}

@@ -191,7 +191,13 @@ const propMapShards = 64
 // single small slice backing instead of ~300 B of map overhead. The bag is
 // guarded by mu exactly as the nested map was.
 type nodePropShard struct {
-	m  map[graph.NodeID]propBag
+	m map[graph.NodeID]propBag
+	// d is the SPARSE per-node property-delta head map (rmp #2279), nil until
+	// this shard takes its first delta. Sparse for the same reason the label
+	// one is: GoGraph has no per-node struct, so a field on propBag would be
+	// paid by every node with a property, including in graphs that never write.
+	// See mvcc_props.go.
+	d  map[graph.NodeID]*nodePropDelta
 	mu sync.RWMutex
 }
 
@@ -331,6 +337,11 @@ type Graph[N comparable, W any] struct {
 	// commit record distinguishes in-flight from committed. See mvcc_txn.go.
 	mvccClock atomic.Uint64
 	mvccTxSeq atomic.Uint64
+	// propDeltas / propDeltaActive are the node-property half of the substrate,
+	// kept separate from the label pair so a property write cannot push a label
+	// reader off its fast path. See mvcc_props.go.
+	propDeltas      bool
+	propDeltaActive atomic.Int64
 
 	nodeLabelShards [propMapShards]nodeLabelShard
 	edgeLabelShards [propMapShards]edgeLabelShard

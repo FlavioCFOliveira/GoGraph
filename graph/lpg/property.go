@@ -282,6 +282,12 @@ func (r *PropertyKeyRegistry) Resolve(id PropertyKeyID) (string, bool) {
 // from the underlying [adjlist.AdjList.AddNode] when present, or any
 // error returned by the installed [SchemaValidator].
 func (g *Graph[N, W]) SetNodeProperty(n N, key string, value PropertyValue) error {
+	return g.setNodePropertyInfo(n, key, value, nil)
+}
+
+// setNodePropertyInfo is [Graph.SetNodeProperty] with an explicit commit
+// record; info is nil for an autocommit write. See [Graph.setNodeLabelInfo].
+func (g *Graph[N, W]) setNodePropertyInfo(n N, key string, value PropertyValue, info *commitInfo) error {
 	if v := g.validator.load(); v != nil {
 		if err := v.Validate(key, value); err != nil {
 			return err
@@ -299,6 +305,21 @@ func (g *Graph[N, W]) SetNodeProperty(n N, key string, value PropertyValue) erro
 	// slice, and a first Set on a new node starts from the zero bag; the
 	// write-back makes both visible.
 	bag := s.m[id]
+	// MVCC P2 (rmp #2279), inert unless armed. The undo depends on what was
+	// there before: deleting the key when it was absent, restoring the
+	// pre-image when it was not. A write that changes nothing records nothing,
+	// for the same reason the label path guards on has().
+	if g.propDeltasEnabled() {
+		prev, had := bag.get(keyID)
+		switch {
+		case !had:
+			ci, ts := g.deltaStamp(info)
+			s.pushPropDelta(id, undoDelProp, keyID, PropertyValue{}, ci, ts, &g.propDeltaActive)
+		case !propValuesDefinitelyEqual(prev, value):
+			ci, ts := g.deltaStamp(info)
+			s.pushPropDelta(id, undoSetProp, keyID, prev, ci, ts, &g.propDeltaActive)
+		}
+	}
 	bag.set(keyID, value)
 	s.m[id] = bag
 	s.mu.Unlock()
@@ -328,6 +349,12 @@ func (g *Graph[N, W]) GetNodeProperty(n N, key string) (PropertyValue, bool) {
 
 // DelNodeProperty removes the named property from n. No-op if absent.
 func (g *Graph[N, W]) DelNodeProperty(n N, key string) {
+	g.delNodePropertyInfo(n, key, nil)
+}
+
+// delNodePropertyInfo is [Graph.DelNodeProperty] with an explicit commit
+// record; info is nil for an autocommit write. See [Graph.setNodeLabelInfo].
+func (g *Graph[N, W]) delNodePropertyInfo(n N, key string, info *commitInfo) {
 	id, ok := g.adj.Mapper().Lookup(n)
 	if !ok {
 		return
@@ -339,6 +366,15 @@ func (g *Graph[N, W]) DelNodeProperty(n N, key string) {
 	s := g.nodePropShardFor(id)
 	s.mu.Lock()
 	if bag, ok2 := s.m[id]; ok2 {
+		// MVCC P2 (rmp #2279), inert unless armed. Deleting a key that is not
+		// there changes nothing and records nothing; deleting one that is there
+		// records the pre-image so a reader can restore it.
+		if g.propDeltasEnabled() {
+			if prev, had := bag.get(keyID); had {
+				ci, ts := g.deltaStamp(info)
+				s.pushPropDelta(id, undoSetProp, keyID, prev, ci, ts, &g.propDeltaActive)
+			}
+		}
 		// propBag is stored by value; write the mutated copy back, dropping
 		// the node entry entirely when the last property goes so an empty
 		// bag never lingers (preserving the prior delete-when-empty contract).
