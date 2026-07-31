@@ -47,14 +47,17 @@ func TestLabelDelta_VisibilityRule(t *testing.T) {
 
 func TestLabelDelta_ReconstructsOlderVersion(t *testing.T) {
 	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	// Seed with the substrate DISARMED so "Base" is the committed state with no
+	// delta behind it, then arm. MVCC is on by default from P4a (rmp #2288), so
+	// this now has to be asked for explicitly.
+	g.DisableMVCC()
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
 	if err := g.SetNodeLabel("a", "Base"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
-	// Arm AFTER seeding, so "Base" is the committed state with no delta.
-	g.EnableLabelDeltas()
+	g.EnableMVCC()
 	id, ok := g.adj.Mapper().Lookup("a")
 	if !ok {
 		t.Fatal("node a not interned")
@@ -113,16 +116,38 @@ func TestLabelDelta_NoDeltaForARedundantWrite(t *testing.T) {
 	}
 }
 
-func TestLabelDelta_DisabledByDefault(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
-	if err := g.AddNode("a"); err != nil {
+// TestLabelDelta_ArmedByDefaultAndDisarmable pins BOTH halves of the P4a
+// contract change (rmp #2288): a graph now versions its labels out of the box,
+// and [Graph.DisableMVCC] returns it to recording nothing.
+//
+// It replaces TestLabelDelta_DisabledByDefault, which asserted the opposite and
+// was correct for as long as the substrate was a measurement spike. The
+// direction is reversed deliberately, not by accident, so the test is left
+// here — named for what it now guarantees — rather than deleted.
+func TestLabelDelta_ArmedByDefaultAndDisarmable(t *testing.T) {
+	armed := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	if err := armed.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
-	if err := g.SetNodeLabel("a", "L"); err != nil {
+	if err := armed.SetNodeLabel("a", "L"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
-	g.RemoveNodeLabel("a", "L")
-	if n := g.LabelDeltaCount(); n != 0 {
-		t.Fatalf("the spike recorded %d deltas without being armed; it must ship inert", n)
+	armed.RemoveNodeLabel("a", "L")
+	if n := armed.LabelDeltaCount(); n != 2 {
+		t.Fatalf("a default graph recorded %d label deltas for one add and one remove, want 2: "+
+			"MVCC is armed by default, so a read must be able to reconstruct both older versions", n)
+	}
+
+	inert := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	inert.DisableMVCC()
+	if err := inert.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := inert.SetNodeLabel("a", "L"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	inert.RemoveNodeLabel("a", "L")
+	if n := inert.LabelDeltaCount(); n != 0 {
+		t.Fatalf("a disarmed graph recorded %d label deltas; DisableMVCC must record nothing", n)
 	}
 }

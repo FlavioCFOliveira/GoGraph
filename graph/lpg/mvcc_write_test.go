@@ -1,0 +1,271 @@
+package lpg
+
+// mvcc_write_test.go — MVCC P4a (rmp #2288): the shared commit record, and the
+// reclamation driver that arming it obliges.
+//
+// The property under test is the one the whole substrate exists for: a
+// transaction becomes visible AT ONE INSTANT, across every store it touched. A
+// reader from before it sees none of its labels, none of its properties and
+// none of its topology; a reader from after sees all three. There is no reader
+// that sees some.
+
+import (
+	"testing"
+
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+)
+
+func mvccGraph(t *testing.T) *Graph[string, float64] {
+	t.Helper()
+	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	if !g.MVCCEnabled() {
+		t.Fatal("a new graph must have MVCC armed (rmp #2288)")
+	}
+	return g
+}
+
+func mvccNodeID(t *testing.T, g *Graph[string, float64], k string) graph.NodeID {
+	t.Helper()
+	id, ok := g.adj.Mapper().Lookup(k)
+	if !ok {
+		t.Fatalf("%s not interned", k)
+	}
+	return id
+}
+
+// TestMVCCWrite_MultiOpStatementIsAtomicallyVisible is the reason the shared
+// record exists. Before it, each delta of a multi-op statement took its own
+// commit timestamp from the clock, so `CREATE (a)-[:R]->(b)` stamped the label,
+// the property and the edge at three different instants and a reader could land
+// between them.
+func TestMVCCWrite_MultiOpStatementIsAtomicallyVisible(t *testing.T) {
+	g := mvccGraph(t)
+	// Seed the endpoints in their own transaction so the one under test changes
+	// only labels, properties and topology.
+	if err := g.ApplyAtomically(func() error {
+		if err := g.AddNode("a"); err != nil {
+			return err
+		}
+		return g.AddNode("b")
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	id := mvccNodeID(t, g, "a")
+
+	before := g.readTS()
+	// midTS is sampled BETWEEN two writes of the same statement, and that is the
+	// whole test. Sampling only either side of the transaction proves nothing:
+	// with per-delta timestamps a reader from before it still sees none of the
+	// writes and one from after still sees all of them, so a boundary-only
+	// assertion passes against the very defect it is supposed to catch. This
+	// was verified by reverting the fix and watching the boundary version pass.
+	var midTS uint64
+	if err := g.ApplyAtomically(func() error {
+		if err := g.SetNodeLabel("a", "Person"); err != nil {
+			return err
+		}
+		midTS = g.readTS()
+		if err := g.SetNodeProperty("a", "name", StringValue("ada")); err != nil {
+			return err
+		}
+		return g.AddEdge("a", "b", 1)
+	}); err != nil {
+		t.Fatalf("ApplyAtomically: %v", err)
+	}
+	after := g.readTS()
+
+	if before == after {
+		t.Fatal("the transaction did not advance the clock, so no timestamp separates the two readers")
+	}
+
+	// A reader whose start timestamp falls BETWEEN the statement's own writes
+	// must still see all of them or none of them. Seeing the label without the
+	// edge is the torn state the shared commit record exists to make impossible.
+	midLabels := g.labelBagAsOf(id, midTS, 0)
+	midProps := g.propBagAsOf(id, midTS, 0)
+	sawLabel := midLabels.has(g.reg.Intern("Person"))
+	_, sawProp := midProps.get(g.pkeys.Intern("name"))
+	sawEdge := len(g.adj.EntryNeighboursAsOf(id, midTS, 0)) > 0
+	if sawLabel != sawProp || sawProp != sawEdge {
+		t.Fatalf("a reader that started mid-statement sees label=%v property=%v edge=%v — a TORN "+
+			"transaction. Each modification took its own commit timestamp instead of the "+
+			"statement's shared record (rmp #2288)", sawLabel, sawProp, sawEdge)
+	}
+
+	// A reader from BEFORE must see none of the three.
+	if bag := g.labelBagAsOf(id, before, 0); bag.has(g.reg.Intern("Person")) {
+		t.Error("a reader from before the transaction sees its LABEL")
+	}
+	if bag := g.propBagAsOf(id, before, 0); func() bool { _, ok := bag.get(g.pkeys.Intern("name")); return ok }() {
+		t.Error("a reader from before the transaction sees its PROPERTY")
+	}
+	if n := len(g.adj.EntryNeighboursAsOf(id, before, 0)); n != 0 {
+		t.Errorf("a reader from before the transaction sees %d of its EDGES, want 0", n)
+	}
+
+	// A reader from AFTER must see all three.
+	if bag := g.labelBagAsOf(id, after, 0); !bag.has(g.reg.Intern("Person")) {
+		t.Error("a reader from after the transaction is missing its LABEL")
+	}
+	if bag := g.propBagAsOf(id, after, 0); func() bool { _, ok := bag.get(g.pkeys.Intern("name")); return ok }() == false {
+		t.Error("a reader from after the transaction is missing its PROPERTY")
+	}
+	if n := len(g.adj.EntryNeighboursAsOf(id, after, 0)); n != 1 {
+		t.Errorf("a reader from after the transaction sees %d of its EDGES, want 1", n)
+	}
+}
+
+// TestMVCCWrite_ExplicitTransactionSharesOneRecord pins that every statement
+// applied under one LockBarrier publishes together. Without it a
+// multi-statement transaction would become visible statement by statement,
+// which is the same defect one level up.
+func TestMVCCWrite_ExplicitTransactionSharesOneRecord(t *testing.T) {
+	g := mvccGraph(t)
+	if err := g.ApplyAtomically(func() error {
+		if err := g.AddNode("a"); err != nil {
+			return err
+		}
+		return g.AddNode("b")
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	id := mvccNodeID(t, g, "a")
+	before := g.readTS()
+
+	g.LockBarrier()
+	_ = g.ApplyInsideLocked(func() error { return g.SetNodeLabel("a", "One") })
+	// Mid-transaction: a reader from before must still see nothing, and so must
+	// a reader that starts NOW — the transaction has not published.
+	midTS := g.readTS()
+	if bag := g.labelBagAsOf(id, midTS, 0); bag.has(g.reg.Intern("One")) {
+		g.UnlockBarrier()
+		t.Fatal("a statement inside an open explicit transaction is already visible: the " +
+			"transaction is publishing statement by statement instead of as a whole")
+	}
+	_ = g.ApplyInsideLocked(func() error { return g.AddEdge("a", "b", 1) })
+	g.UnlockBarrier()
+
+	after := g.readTS()
+	if bag := g.labelBagAsOf(id, before, 0); bag.has(g.reg.Intern("One")) {
+		t.Error("a reader from before the transaction sees its label")
+	}
+	if bag := g.labelBagAsOf(id, after, 0); !bag.has(g.reg.Intern("One")) {
+		t.Error("a reader from after the transaction is missing its label")
+	}
+	if n := len(g.adj.EntryNeighboursAsOf(id, after, 0)); n != 1 {
+		t.Errorf("a reader from after the transaction sees %d edges, want 1", n)
+	}
+}
+
+// TestMVCCWrite_DirectMutationTakesItsOwnTimestamp pins that a write made
+// outside any transaction is committed the instant it is made, which is the Go
+// API's documented per-operation contract, and is NOT merged into whatever
+// happened before it.
+func TestMVCCWrite_DirectMutationTakesItsOwnTimestamp(t *testing.T) {
+	g := mvccGraph(t)
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	id := mvccNodeID(t, g, "a")
+
+	before := g.readTS()
+	if err := g.SetNodeLabel("a", "L"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	if bag := g.labelBagAsOf(id, before, 0); bag.has(g.reg.Intern("L")) {
+		t.Error("a reader from before a direct write sees it")
+	}
+	if bag := g.labelBagAsOf(id, g.readTS(), 0); !bag.has(g.reg.Intern("L")) {
+		t.Error("a reader from after a direct write does not see it")
+	}
+}
+
+// TestMVCCReclaim_BoundedUnderChurn is the bounded-resources gate. Arming
+// versioning without a driver would make every modification leak a record until
+// the process exits; this asserts the driver actually runs and that the ceiling
+// is the stated one rather than a hope.
+func TestMVCCReclaim_BoundedUnderChurn(t *testing.T) {
+	g := mvccGraph(t)
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	const churn = reclaimThreshold * 8
+	for i := 0; i < churn; i++ {
+		if err := g.ApplyAtomically(func() error {
+			return g.SetNodeProperty("a", "w", Int64Value(int64(i)))
+		}); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+	// The ceiling is one sweep's worth of debt plus whatever the sweep in
+	// progress had not yet charged. Two thresholds is a generous statement of
+	// that and still an order of magnitude below the unbounded behaviour.
+	if got := g.VersionCount(); got > 2*reclaimThreshold {
+		t.Fatalf("after %d modifications the substrate holds %d versions, want at most %d: "+
+			"reclamation is not being driven and the memory is unbounded",
+			churn, got, 2*reclaimThreshold)
+	}
+	// And it must go to zero when asked, with no reader holding it back.
+	if err := g.ApplyAtomically(func() error { g.ReclaimNow(); return nil }); err != nil {
+		t.Fatalf("ReclaimNow: %v", err)
+	}
+	if got := g.VersionCount(); got != 0 {
+		t.Fatalf("an explicit sweep with no active reader left %d versions, want 0", got)
+	}
+}
+
+// TestMVCCReclaim_HeldBackByAnActiveReader pins the other half of the contract:
+// a registered reader's start timestamp holds versions alive, because it can
+// still reach them. That cost is not a defect — it is the same contract
+// PostgreSQL has with a long transaction and VACUUM — but it must be real, or
+// reclamation would be freeing versions a reader still needs.
+func TestMVCCReclaim_HeldBackByAnActiveReader(t *testing.T) {
+	g := mvccGraph(t)
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := g.ApplyAtomically(func() error {
+		return g.SetNodeProperty("a", "w", Int64Value(0))
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	id := mvccNodeID(t, g, "a")
+
+	// A reader pins the present, then the graph moves on.
+	startTS := g.readTS()
+	slot := g.Horizon().Enter(startTS)
+
+	for i := 1; i <= 16; i++ {
+		if err := g.ApplyAtomically(func() error {
+			return g.SetNodeProperty("a", "w", Int64Value(int64(i)))
+		}); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+	if err := g.ApplyAtomically(func() error { g.ReclaimNow(); return nil }); err != nil {
+		t.Fatalf("ReclaimNow: %v", err)
+	}
+	if got := g.VersionCount(); got == 0 {
+		t.Fatal("reclamation freed every version while a reader was registered at an older " +
+			"start timestamp: that reader can no longer reconstruct its own snapshot")
+	}
+	// And the pinned reader still resolves to what it pinned.
+	bag := g.propBagAsOf(id, startTS, 0)
+	v, ok := bag.get(g.pkeys.Intern("w"))
+	if !ok {
+		t.Fatal("the pinned reader lost the property entirely")
+	}
+	if got, _ := v.Int64(); got != 0 {
+		t.Fatalf("the pinned reader sees w=%d, want 0 — the version it started on", got)
+	}
+
+	// Once it leaves, everything behind it goes.
+	g.Horizon().Leave(slot)
+	if err := g.ApplyAtomically(func() error { g.ReclaimNow(); return nil }); err != nil {
+		t.Fatalf("ReclaimNow: %v", err)
+	}
+	if got := g.VersionCount(); got != 0 {
+		t.Fatalf("after the reader left, %d versions remain, want 0", got)
+	}
+}

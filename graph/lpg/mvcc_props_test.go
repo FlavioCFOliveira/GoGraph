@@ -198,17 +198,33 @@ func TestNodePropDelta_SizeIsPinned(t *testing.T) {
 	}
 }
 
-// TestPropDelta_DisabledByDefault pins that the substrate ships inert.
-func TestPropDelta_DisabledByDefault(t *testing.T) {
-	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
-	if err := g.AddNode("a"); err != nil {
+// TestPropDelta_ArmedByDefaultAndDisarmable pins both halves of the P4a
+// contract change (rmp #2288): property versioning is on out of the box, and
+// [Graph.DisableMVCC] returns it to recording nothing. It replaces
+// TestPropDelta_DisabledByDefault, whose assertion was the deliberate opposite.
+func TestPropDelta_ArmedByDefaultAndDisarmable(t *testing.T) {
+	armed := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	if err := armed.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
-	if err := g.SetNodeProperty("a", "w", Int64Value(1)); err != nil {
+	if err := armed.SetNodeProperty("a", "w", Int64Value(1)); err != nil {
 		t.Fatalf("SetNodeProperty: %v", err)
 	}
-	g.DelNodeProperty("a", "w")
-	if n := g.PropDeltaCount(); n != 0 {
-		t.Fatalf("recorded %d deltas without being armed; the substrate must ship inert", n)
+	armed.DelNodeProperty("a", "w")
+	if n := armed.PropDeltaCount(); n != 2 {
+		t.Fatalf("a default graph recorded %d property deltas for one set and one delete, want 2", n)
+	}
+
+	inert := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	inert.DisableMVCC()
+	if err := inert.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := inert.SetNodeProperty("a", "w", Int64Value(1)); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	inert.DelNodeProperty("a", "w")
+	if n := inert.PropDeltaCount(); n != 0 {
+		t.Fatalf("a disarmed graph recorded %d property deltas; DisableMVCC must record nothing", n)
 	}
 }

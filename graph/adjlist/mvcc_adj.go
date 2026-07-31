@@ -87,6 +87,16 @@ func (v *adjVersion[W]) supersededAt() uint64 {
 // Not safe for concurrent use.
 func (a *AdjList[N, W]) EnableVersioning() { a.versioning = true }
 
+// DisableVersioning disarms adjacency versioning, so writes record no versions
+// and reads take the current entry with no walk.
+//
+// It exists so both arms can be compared in ONE process rather than across two
+// builds. Must be called before any edge is written and never concurrently with
+// another operation.
+//
+// Not safe for concurrent use.
+func (a *AdjList[N, W]) DisableVersioning() { a.versioning = false }
+
 // VersionCount returns the number of live adjacency version records.
 //
 // The lock-free gate a reader consults before considering a walk, and the
@@ -177,19 +187,46 @@ func (a *AdjList[N, W]) EntryNeighboursAsOf(id graph.NodeID, startTS, txID uint6
 	return e.neighbours
 }
 
-// SetWriteStamp declares how the version records of subsequent writes are
-// stamped: info is the transaction's shared commit record, or nil with ts a
-// commit timestamp for an autocommit write.
+// SetWriteStamp supplies the [mvcc.WriteStamp] this AdjList's version records
+// draw from, or nil to draw from none.
 //
-// It is a field rather than a parameter because storeEntry has a dozen callers
-// and the write path is single-writer by the layer above's contract — the same
-// reason commitDepth is a plain field. Set it before the write and clear it
-// after; a nil info with a zero ts means "not versioned", which is what an
-// unarmed AdjList always has.
+// It is SHARED rather than owned: the higher layer passes the same stamp to
+// every versioned store it has, so one transaction's topology, node labels and
+// node properties all take one commit record and become visible together. It is
+// a field rather than a parameter because storeEntry has a dozen callers and
+// every one of them would otherwise have to thread it.
+//
+// # What a concurrent unstamped writer inherits, and why that is sound
+//
+// The public Go-API mutators are documented as per-operation atomic, not
+// transactional, so one may run on another goroutine while a transaction holds
+// the barrier and has the stamp armed. That write then joins the transaction's
+// visibility group: it becomes visible when the transaction publishes rather
+// than the instant it is made. That is not a regression — under the barrier
+// such a write is ALREADY invisible to every barrier reader until the barrier
+// is released, which is the same instant. It cannot be lost, because a
+// transaction's record is published on rollback as well as on commit (the
+// in-memory undo log restores the stored value physically, so the chain nets
+// out; see lpg's endWrite).
+//
+// Must be called before any edge is written and never concurrently with another
+// operation.
 //
 // Not safe for concurrent use.
-func (a *AdjList[N, W]) SetWriteStamp(info *mvcc.CommitInfo, ts uint64) {
-	a.writeInfo, a.writeTS = info, ts
+func (a *AdjList[N, W]) SetWriteStamp(s *mvcc.WriteStamp) { a.stamp = s }
+
+// writeStamp resolves how the version record of the write in progress is
+// timestamped: the open transaction's shared record, or a fresh commit
+// timestamp when there is no open transaction.
+//
+// Called from storeEntry with the shard lock held and only when versioning is
+// armed AND this write actually supersedes something, so its cost is paid per
+// topology change and never on a read.
+func (a *AdjList[N, W]) writeStamp() (*mvcc.CommitInfo, uint64) {
+	if a.stamp == nil {
+		return nil, 0
+	}
+	return a.stamp.Stamp()
 }
 
 // Reclaim frees every adjacency version that no reader can reach any more, and

@@ -263,18 +263,75 @@ start until P0's measurement is on the record.**
   — materially cheaper than the reference design, because the expensive half
   already exists.
 
-  **A prerequisite for P4 with a real cost, stated in `storeEntry`'s own
-  comment:** *"When a future lock-free read path lets a reader pin and read a
-  shard version WITHOUT the barrier, an in-window in-place mutation becomes a
-  torn read… the write path must move to true per-op (or end-of-window) fresh
-  immutable publication and the in-place builder shortcut must be removed. The
-  dedup is a barrier-borrowed optimisation, not an intrinsic property of this
-  layer."* That shortcut is what bounds a multi-op commit's copy-on-write cost
-  to O(distinct shards touched) instead of O(ops), so removing it is not free
-  and its cost must be measured before P4 relies on it.
-- **P4 — retire the read barrier** from `Engine.Run`, and flip
+  **The prerequisite that turned out not to be one — REFUTED in P4a
+  (rmp #2288).** `storeEntry`'s comment said the in-window in-place builder
+  mutation was a barrier-borrowed shortcut that a lock-free read path would turn
+  into a torn read, so P4 would have to remove it and pay O(ops) per commit
+  instead of O(distinct shards touched). It does not. The mutation replaces one
+  slot POINTER with an atomic store and never touches an `adjEntry`, which stays
+  immutable; with versioning armed the new entry carries a record of the one it
+  replaced, so a reader from before the write steps back to exactly what it
+  should see. Seeing the newer entry is not a torn read — it is the ordinary
+  MVCC case. The one unsound direction, a reader MISSING a write it should see
+  by holding a slot array published before it, cannot happen: a reader reads its
+  start timestamp from the clock before it loads `slotsRef`, and the writer
+  stores `slotsRef` before it publishes its commit timestamp into the clock, and
+  Go's `sync/atomic` operations are sequentially consistent. Pinned by
+  `TestStoreEntry_InPlaceWindowMutationIsSoundUnderVersioning` and its
+  concurrent companion, which assert BOTH that the shortcut is still taken (by
+  slot-array pointer identity, so the test cannot silently stop exercising it)
+  and that the read is correct across it.
+- **P3c — the three remaining per-edge side stores (rmp #2291).** Reading the
+  code for P4 found three structures a read touches that P3 did not version, all
+  the same shape — a sparse map behind a shard lock: the edge-label OVERFLOW
+  (a pair's second and later relationship types, and the orphan tier), and the
+  per-handle label and property stores that give a parallel edge instance its
+  own type and properties. `EdgeLabelsByHandle`'s own godoc already admitted it:
+  *"only per-operation atomic … NOT cross-store consistent … outside a
+  transaction barrier"*. That barrier is the one P4c removes.
+- **P4a — DONE (rmp #2288).** Versioning armed by default, and every engine
+  write — explicit transaction or autocommit statement — carries ONE
+  `mvcc.CommitInfo` shared by every version it creates in every store, published
+  with a single atomic store on the brackets that already delimit a transaction.
+  Before it, `deltaStamp` minted a fresh timestamp per modification, so
+  `CREATE (a)-[:R]->(b)` stamped the label, the property and the edge at three
+  different instants and a reader could land between them. The gate that catches
+  that samples a start timestamp INSIDE the statement; a boundary-only version
+  passed against the unfixed code and was corrected.
+
+  Measured, interleaved against a clean worktree at the parent commit so
+  thermal drift hits both arms: serial `Graph.View` **unchanged** (4.054 →
+  4.062 ns, p=0.129); `BenchmarkEngWriteAutocommit` **+9.64 %** (1.992 →
+  2.184 µs), **+5.01 % B/op**, **+2 allocs/op** — one version record for the
+  statement's one modification, which is the cost model P0 authorised, plus one
+  shared commit record per transaction. The empty-bracket
+  `BenchmarkBarrier_ApplyAtomically` is +35.85 % (9.444 → 12.830 ns) and still
+  allocates nothing: the record is allocated lazily by the first version that
+  needs one, so a bracket that versions nothing allocates nothing, which is what
+  keeps `TestBarrierGuard_ApplyAtomicallyAllocatesNothing` green. A first
+  reading of the read path as +3.3 % was the measurement drifting, not the code:
+  re-measured at the parent commit in a clean worktree, the "before" reproduced
+  as the "after".
+
+  Arming versioning obliged the reclamation DRIVER to land with it, because the
+  bounded-resources mandate does not admit an unbounded structure with a
+  follow-up ticket attached. It runs on the writer that just committed, while
+  the barrier is still held — it needs writer exclusion, and a background ticker
+  would wake to do nothing on a graph nobody is writing.
+- **P4b — the read snapshot**, threaded through the physical build, with the
+  barrier still held. Holding it makes the whole refactor a provable identity:
+  no writer is concurrent, so every as-of read must return exactly what the
+  plain read returns.
+- **P4c — retire the read barrier** from `Engine.Run`, and flip
   `bench/mtaudit/fairness_soak_test.go` from red to green. This is the phase
-  that closes #2274.
+  that closes #2274. It also needs the CANDIDATE-SET discipline: the versioned
+  stores answer what an object contains, not which objects a scan should
+  consider, and the structures that answer that — the label bitmap index, the
+  property indexes, the tombstone set, the node mapper, the count store — are
+  not versioned. A superset is harmless because the reader re-checks the
+  versioned object; a MISSING entry is silent data loss, so removals from them
+  must be deferred until the watermark has passed, which is what PostgreSQL
+  defers to VACUUM and Memgraph to its index GC.
 - **P5 — move the fsync outside the commit serialisation** so `SyncGroup`
   coalesces, closing #2193. Acceptance is the write-scaling table in §3 rising
   with writer count instead of staying flat.

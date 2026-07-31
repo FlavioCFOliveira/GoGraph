@@ -147,15 +147,25 @@ func (t *labelTx[N, W]) abort() {
 	t.info.Abort()
 }
 
-// deltaStamp resolves how a new delta records its visibility.
+// deltaStamp resolves how a new delta records its visibility, in three cases
+// that are deliberately ordered cheapest-first.
 //
-// A transaction supplies its shared record and the inline timestamp is unused;
-// an autocommit write supplies none, and gets a fresh commit timestamp inline
-// with no record allocated. See [nodeLabelDelta.info] for why the two forms
-// exist.
+// An explicit caller's record wins: [labelTx] threads its own, and that is the
+// substrate's own transaction type. Otherwise the write inherits the record of
+// whatever transaction currently holds the barrier, which is what makes a
+// multi-op statement atomically visible — without it `CREATE (a)-[:R]->(b)`
+// would stamp the node, the edge and each property at different instants and a
+// reader could observe the node without the edge (rmp #2288). Only a write with
+// neither — a direct Go-API mutation outside any transaction — takes a fresh
+// commit timestamp inline, which is right: it is committed the instant it is
+// made and needs no shared mutable record. See [nodeLabelDelta.info] for why
+// the inline form exists at all.
 func (g *Graph[N, W]) deltaStamp(info *commitInfo) (*commitInfo, uint64) {
 	if info != nil {
 		return info, 0
+	}
+	if wi := g.writeStampInfo(); wi != nil {
+		return wi, 0
 	}
 	return nil, g.nextCommitTS()
 }

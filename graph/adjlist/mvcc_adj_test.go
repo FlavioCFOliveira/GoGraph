@@ -23,17 +23,35 @@ func versionedList(t *testing.T) (*AdjList[string, float64], *mvcc.Clock) {
 	t.Helper()
 	a := New[string, float64](Config{Directed: true, Multigraph: true})
 	a.EnableVersioning()
-	return a, &mvcc.Clock{}
+	clk := &mvcc.Clock{}
+	ws := &mvcc.WriteStamp{}
+	ws.SetClock(clk)
+	a.SetWriteStamp(ws)
+	return a, clk
 }
 
 // autoWrite performs fn as a single-statement write committed at a fresh
-// timestamp, which is the autocommit shape.
+// timestamp, which is the autocommit shape. With the stamp DISARMED each
+// version takes its own commit timestamp inline, which is what a direct write
+// outside any transaction does.
 func autoWrite(a *AdjList[string, float64], clk *mvcc.Clock, fn func()) uint64 {
-	ts := clk.NextCommitTS()
-	a.SetWriteStamp(nil, ts)
 	fn()
-	a.SetWriteStamp(nil, 0)
-	return ts
+	return clk.ReadTS()
+}
+
+// txWrite performs fn as ONE transaction: every version it creates shares one
+// commit record, published at a single timestamp on return.
+func txWrite(a *AdjList[string, float64], clk *mvcc.Clock, fn func()) (*mvcc.CommitInfo, uint64) {
+	ws := a.WriteStampForTest()
+	ws.Begin()
+	fn()
+	info, _ := ws.End()
+	if info == nil {
+		return nil, clk.ReadTS()
+	}
+	ts := clk.NextCommitTS()
+	info.Commit(ts)
+	return info, ts
 }
 
 func idOf(t *testing.T, a *AdjList[string, float64], k string) graph.NodeID {
@@ -117,15 +135,13 @@ func TestAdjVersion_OneRecordPerNodePerTransaction(t *testing.T) {
 			t.Fatalf("AddNode: %v", err)
 		}
 	}
-	info := mvcc.NewCommitInfo(clk.NextTxID())
-	a.SetWriteStamp(info, 0)
-	for i := 0; i < 8; i++ {
-		if err := a.AddEdge("a", string(rune('b'+i)), 1); err != nil {
-			t.Fatalf("AddEdge: %v", err)
+	txWrite(a, clk, func() {
+		for i := 0; i < 8; i++ {
+			if err := a.AddEdge("a", string(rune('b'+i)), 1); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
 		}
-	}
-	a.SetWriteStamp(nil, 0)
-	info.Commit(clk.NextCommitTS())
+	})
 
 	if n := a.VersionCount(); n != 1 {
 		t.Fatalf("one transaction writing 8 edges to one node left %d version records, want 1: "+
@@ -145,15 +161,15 @@ func TestAdjVersion_UncommittedIsInvisible(t *testing.T) {
 	id := idOf(t, a, "a")
 	observer := clk.ReadTS()
 
-	info := mvcc.NewCommitInfo(clk.NextTxID())
-	a.SetWriteStamp(info, 0)
+	ws := a.WriteStampForTest()
+	ws.Begin()
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
 	if err := a.AddEdge("a", "c", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	a.SetWriteStamp(nil, 0)
+	info, _ := ws.End()
 
 	if got := len(a.EntryNeighboursAsOf(id, observer, 0)); got != 0 {
 		t.Fatalf("an observer sees %d neighbours of an UNCOMMITTED transaction, want 0", got)
@@ -198,8 +214,12 @@ func BenchmarkAdjVersionWrite(b *testing.B) {
 			name := "nodes=" + itoaBench(size) + "/versioned=" + boolStr(versioned)
 			b.Run(name, func(b *testing.B) {
 				a := New[string, float64](Config{Directed: true, Multigraph: true})
+				clk := &mvcc.Clock{}
 				if versioned {
 					a.EnableVersioning()
+					ws := &mvcc.WriteStamp{}
+					ws.SetClock(clk)
+					a.SetWriteStamp(ws)
 				}
 				keys := make([]string, size)
 				for i := 0; i < size; i++ {
@@ -208,7 +228,6 @@ func BenchmarkAdjVersionWrite(b *testing.B) {
 						b.Fatalf("AddNode: %v", err)
 					}
 				}
-				clk := &mvcc.Clock{}
 				// A bounded working set, so the measurement is of the version
 				// record and not of a structure growing with the loop.
 				work := size
@@ -218,15 +237,11 @@ func BenchmarkAdjVersionWrite(b *testing.B) {
 				b.ReportAllocs()
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
-					if versioned {
-						a.SetWriteStamp(nil, clk.NextCommitTS())
-					}
 					if err := a.AddEdge(keys[i%work], keys[(i*7+1)%work], 1); err != nil {
 						b.Fatalf("AddEdge: %v", err)
 					}
 				}
 				b.StopTimer()
-				a.SetWriteStamp(nil, 0)
 			})
 		}
 	}

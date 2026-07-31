@@ -170,11 +170,15 @@ type AdjList[N comparable, W any] struct {
 	// [AdjList.EnableVersioning] is called. See mvcc_adj.go.
 	versioning    bool
 	versionActive atomic.Int64
-	// writeInfo / writeTS stamp the version records the current write creates.
-	// Plain fields, like commitDepth beside them, because the write path is
-	// single-writer by the layer above's contract; a reader never touches them.
-	writeInfo *mvcc.CommitInfo
-	writeTS   uint64
+	// stamp resolves how the version records this AdjList creates are
+	// timestamped. It is SHARED with the higher layer's other versioned stores
+	// — set by [AdjList.SetWriteStamp] — so one transaction's topology, labels
+	// and properties all point at one commit record and publish together.
+	//
+	// Nil until the higher layer supplies one, in which case versions are
+	// stamped zero and are visible to every reader: the correct reading of "no
+	// transaction clock, therefore no isolation to offer".
+	stamp *mvcc.WriteStamp
 
 	// dirtyShards lists the shards whose private builder must be frozen at the
 	// end of the current commit window. Appended on the first touch of a shard
@@ -2256,17 +2260,32 @@ func loadEntry[W any](s *adjShard[W], intraIdx uint64) *adjEntry[W] {
 // after which it is immutable forever. Outside any window every write is its
 // own 1-op window: clone-and-publish once (correct, just no dedup).
 //
-// # F3.5 / #1671 UNWIND ITEM (do not let this silently survive)
+// # F3.5 / #1671 UNWIND ITEM — RESOLVED BY VERSIONING, NOT BY REMOVAL
 //
-// The in-place mutation of the window's private builder is correct ONLY while
-// reads consume the adjacency UNDER the visibility barrier (visMu). When a
-// future lock-free read path (task #1671) lets a reader pin and read a shard
-// version WITHOUT the barrier, an in-window in-place mutation becomes a torn
-// read: the writer would mutate a version a lock-free reader has pinned. At
-// that point the write path must move to true per-op (or end-of-window) fresh
-// immutable publication and the in-place builder shortcut must be removed. The
-// dedup is a barrier-borrowed optimisation, not an intrinsic property of this
-// layer.
+// This comment used to say that the in-place builder mutation was a barrier-
+// borrowed shortcut which a lock-free read path would turn into a torn read, so
+// that MVCC P4 (rmp #2285) would have to remove it and pay O(ops) per commit
+// instead of O(distinct shards touched). **That is not what happens, and the
+// difference is worth stating precisely because the cost is real.**
+//
+// The mutation replaces one SLOT POINTER with an atomic store; it never mutates
+// an [adjEntry], which stays immutable. So a lock-free reader sees a complete
+// old-or-new entry, and — this is the part that changes the conclusion — with
+// versioning armed the NEW entry carries a version record pointing at the one it
+// replaced. A reader whose start timestamp precedes the write finds the write
+// invisible and steps back to exactly the entry it would have read had the slot
+// never been touched. Seeing the newer entry is not a torn read; it is the
+// ordinary MVCC case.
+//
+// The one direction that WOULD be unsound is a reader missing a write it should
+// see, by holding a slot array published before it. That cannot happen: a
+// reader's start timestamp is read from the clock BEFORE it loads slotsRef, and
+// the writer stores slotsRef before it publishes its commit timestamp into the
+// clock. Go's sync/atomic operations are sequentially consistent, so a reader
+// that observes the commit timestamp observes the slot array too.
+//
+// Pinned by TestStoreEntry_InPlaceWindowMutationIsSoundUnderVersioning and its
+// concurrent companion, which fail if either property is lost.
 func (a *AdjList[N, W]) storeEntry(s *adjShard[W], intraIdx uint64, entry *adjEntry[W]) error {
 	maxCap := a.cfg.MaxShardCapacity
 	inWindow := a.commitDepth > 0
@@ -2307,7 +2326,8 @@ func (a *AdjList[N, W]) storeEntry(s *adjShard[W], intraIdx uint64, entry *adjEn
 				// for anyone before it.
 				entry = &adjEntry[W]{}
 			}
-			a.linkVersion(entry, prev, a.writeInfo, a.writeTS)
+			info, ts := a.writeStamp()
+			a.linkVersion(entry, prev, info, ts)
 			// Index the slot so reclamation need not scan the shard.
 			if s.versioned == nil {
 				s.versioned = make(map[uint64]struct{}, 8)
@@ -2403,13 +2423,14 @@ func (a *AdjList[N, W]) markDirtyAndBuild(s *adjShard[W], next *shardSlots) {
 // applied inside an explicit transaction that already opened the window) just
 // adjusts the depth; only the outermost EndCommit freezes the builders.
 //
-// # F3.5 / #1671 UNWIND ITEM
+// # F3.5 / #1671 — the dedup SURVIVES the lock-free read path
 //
-// The in-place builder mutation that makes this dedup work is correct ONLY
-// while reads consume the adjacency under the visibility barrier. See the unwind
-// note on [AdjList.storeEntry]: when reads go lock-free (task #1671) this
-// shortcut must be removed in favour of true per-op/end-of-window immutable
-// publication.
+// The in-place builder mutation that makes this dedup work was expected to be a
+// barrier-borrowed shortcut that MVCC would have to give up. It is not: with
+// versioning armed the replaced entry stays reachable through the new entry's
+// version chain, so a lock-free reader steps back to it rather than tearing.
+// See the unwind note on [AdjList.storeEntry] for the full argument and the
+// tests that pin it.
 //
 // BeginCommit is safe to call only as described above; misuse (concurrent
 // callers, or reads not excluded) is undefined.

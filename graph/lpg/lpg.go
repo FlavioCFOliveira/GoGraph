@@ -565,6 +565,37 @@ type Graph[N comparable, W any] struct {
 	// reentrancy_disabled.go, which documents the mechanism, the measured cost
 	// that motivated the split, and the diagnosability it trades away.
 	barrier barrierGuard
+
+	// ── MVCC write-side state (rmp #2288) ───────────────────────────────────
+	//
+	// Placed LAST on purpose. These fields are touched only by the write path,
+	// and inserting them in the middle of the struct moved visMu and barrier
+	// away from the fields the read path touches beside them — measured as
+	// +3 % on BenchmarkBarrier_View, paid by a read that never reads any of
+	// this.
+
+	// mvccArmed is the single arm for the whole versioning substrate — the node
+	// label and property delta chains plus the adjacency's entry chains. Set
+	// once at construction, so it stays a plain field. See mvcc_write.go.
+	mvccArmed bool
+	// stamp holds the commit record of the write currently under the barrier,
+	// SHARED with the adjacency so one transaction's labels, properties,
+	// topology, relationship types and edge properties all publish with one
+	// atomic store. It allocates the record lazily, so a bracket that versions
+	// nothing allocates nothing. See mvcc_write.go and [mvcc.WriteStamp].
+	stamp mvcc.WriteStamp
+	// horizon tracks the start timestamps of active readers so reclamation
+	// knows which versions no reader can reach. Readers register with it from
+	// MVCC P4c onward; until then it is empty and the watermark is the clock,
+	// which reclaims everything a completed write superseded.
+	//
+	// A POINTER, not a value: the horizon is 64 slots padded to a cache line
+	// each, so embedding it would put 8 KiB inside every Graph.
+	horizon *mvcc.Horizon
+	// reclaimDebt counts versions created since the last reclamation pass, so
+	// the pass runs on a bounded amount of churn rather than on every commit.
+	// See [Graph.reclaimIfDue].
+	reclaimDebt atomic.Int64
 }
 
 // ApplyAtomically runs fn while holding the graph's transaction-visibility
@@ -612,10 +643,37 @@ func (g *Graph[N, W]) ApplyAtomically(fn func() error) error {
 	// visMu is still held — it freezes the per-shard builders — so it is
 	// deferred AFTER Unlock to run BEFORE it on the LIFO unwind.
 	g.adj.BeginCommit()
+	// Allocate the commit record that stamps every version this apply creates,
+	// on the same bracket as the adjacency window and for the same reason: this
+	// region IS one write transaction. endWrite publishes it, and is deferred
+	// LAST so the LIFO unwind runs it FIRST — while the barrier is still held,
+	// so the instant a transaction becomes visible does not move. See
+	// mvcc_write.go, including why a rolled-back apply publishes too.
+	g.beginWrite()
+	// ONE deferred call for the whole unwind rather than three. Each open-coded
+	// defer costs about a nanosecond of bookkeeping, and adding a fourth for
+	// endWrite took this bracket from 9.6 ns to 14.3 ns on an EMPTY apply —
+	// most of it the defer, not the atomics. Folding the three into
+	// finishWrite gets it back; see that method for the ordering the fold must
+	// preserve.
 	defer g.visMu.Unlock()
-	defer g.barrier.clearWriter(gid)
-	defer g.adj.EndCommit()
+	defer g.finishWrite(gid)
 	return fn()
+}
+
+// finishWrite is the unwind of a barrier-held write, in the one order that is
+// correct: publish the transaction's versions, freeze the adjacency's per-shard
+// builders, then release the re-entrancy stamp — all with visMu still held,
+// because the caller defers Unlock FIRST so it runs LAST.
+//
+// Publishing before the builders freeze keeps the commit record live for the
+// whole window it stamped. Clearing the stamp under the lock keeps it removable
+// only by its owner, which is what stops a queued writer clobbering it (#1286,
+// #1355).
+func (g *Graph[N, W]) finishWrite(gid int64) {
+	g.endWrite()
+	g.adj.EndCommit()
+	g.barrier.clearWriter(gid)
 }
 
 // LockBarrier acquires the graph's transaction-visibility write lock and stamps
@@ -683,6 +741,10 @@ func (g *Graph[N, W]) LockBarrierCtx(ctx context.Context) error {
 	// (task #1526). It is opened only on the success path, so a cancelled
 	// acquisition leaves no window to close.
 	g.adj.BeginCommit()
+	// One commit record for the WHOLE explicit transaction, so every statement
+	// applied under this barrier via ApplyInsideLocked stamps its versions with
+	// it and the transaction publishes atomically. UnlockBarrier closes it.
+	g.beginWrite()
 	return nil
 }
 
@@ -693,6 +755,10 @@ func (g *Graph[N, W]) LockBarrierCtx(ctx context.Context) error {
 // called again from any goroutine.
 func (g *Graph[N, W]) UnlockBarrier() {
 	gid := g.barrier.currentGID()
+	// Publish the transaction's versions while the barrier is still held, so
+	// its commit instant is exactly where it has always been. Before EndCommit
+	// so the record is live for the whole window it stamped.
+	g.endWrite()
 	// Close the adjacency commit window while visMu is still held (freezes the
 	// per-shard builders), matching the BeginCommit in LockBarrier, before
 	// releasing the barrier.
@@ -909,6 +975,7 @@ func New[N comparable, W any](cfg adjlist.Config) *Graph[N, W] {
 		pkeys:   NewPropertyKeyRegistry(),
 		nodeIdx: label.NewIndex(),
 		edgeIdx: label.NewIndex(),
+		horizon: &mvcc.Horizon{},
 	}
 	for i := range g.nodeLabelShards {
 		g.nodeLabelShards[i].m = make(map[graph.NodeID]labelBag)
@@ -932,6 +999,11 @@ func New[N comparable, W any](cfg adjlist.Config) *Graph[N, W] {
 	// (newEdgePropColsWithValue) and edge_property.go (AddEdgeLabeledWithProperty).
 	g.adj.SetAuxFactory(newEdgePropColsAux)
 	g.barrier.init()
+	// MVCC is ARMED by default (rmp #2288). Every store a read touches carries
+	// version chains, every write allocates one shared commit record for them,
+	// and the reclamation driver keeps the memory bounded. Turn it off with
+	// [Graph.DisableMVCC] to measure the alternative in the same process.
+	g.EnableMVCC()
 	return g
 }
 
