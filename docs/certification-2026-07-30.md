@@ -16,10 +16,14 @@ pair cache.
 ## Verdict: **NOT CERTIFIED at this head.**
 
 Two **CRITICAL** defects were found and fixed, one of which crashed the host process on a
-default engine. **Ten defects are fixed and committed** across two rounds. **Five remain
-open**, three of them requiring a decision that is not mine to make. Certification is
-blocked on the set in §7, not on unknown risk: every open item is enumerated, reproduced
-and has an owner.
+default engine. **Thirteen defects are fixed and committed** across four rounds. **Three
+remain open** — and one of those is a **newly exposed CRITICAL**: fixing the soak gate
+(#2259) let that layer run for the first time, and it immediately found a checkpoint
+capturing a **partial transaction** (#2269). That defect **bisects to the entry head**, so
+it is standing, not introduced here.
+
+Certification is blocked on the set in §7, not on unknown risk: every open item is
+enumerated, reproduced, and has an owner.
 
 This is a stronger position than the entry state, where all four of the worst findings were
 present and invisible to a fully green suite.
@@ -171,21 +175,22 @@ HIGH or MEDIUM issue and no memory-safety bug.
 
 | rmp | Sev | Summary |
 |---|---|---|
-| #2262 | HIGH | `labels.bin` has no slot ordinal, so a checkpoint round-trip **loses** a committed relationship type in one shape and **invents** one in another, for handle-less parallel edges. Needs a **persisted-format decision**. |
+| **#2269** | **CRITICAL** | **A checkpoint can capture a PARTIAL TRANSACTION** — an edge snapshotted without both its endpoints (`Order != 2*Size`). The artefact records a state no serial schedule could produce, and a crash recovery replays it. **Bisects to the entry head `43348a70`: standing, not introduced here.** It was invisible because the test is soak-gated and the soak layer could not run at all until #2259; this is the first defect that fix exposed. |
+| ~~#2262~~ | ~~HIGH~~ | **FIXED** in round 4 — `labels.bin` **v2** carries a slot ordinal; v1 snapshots still open with v1 semantics, proven against a genuine pre-change v1 fixture. The work corrected this entry: the shape said to *lose* a type in fact **invents both**. |
 | ~~#2263~~ | ~~HIGH~~ | **FIXED** in round 2 — phantom row from a lossy float64 index key. The doc misattributed it to the probe key; the index *entries* are independently lossy. |
 | #2264 | HIGH | `CountPatternComp` is unreachable dead code; the projection spelling of a degree count is **983× slower** (2.813 ms vs 2.762 s). Its godoc claims otherwise. |
 | ~~#2265~~ | ~~HIGH~~ | **FIXED** in round 2 — **2282.682 µs → 1.883 µs (1212×)**; the tombstoned arm now equals the clean arm, and the cap counts live edges only. |
-| #2266 | HIGH | The index-intersection recogniser runs an **unbudgeted** count during planning: 45×–130× plan time. |
+| ~~#2266~~ | ~~HIGH~~ | **FIXED** in round 3 — the ceiling is now the early-exit budget. Declining shapes, which paid for a decision they never benefited from, improve **56–83 %**; the widest accepting shape **−86 %**. |
 | #2268 | MEDIUM | **`make ci` itself is not deterministic.** A strict per-point wall-clock inequality in `bench/cyclicjoin` passed in `test-short` and failed at `cover-gate` **within one invocation** (40.31 ms vs 39.13 ms, a 3 % miss) because the coverage step runs the whole repository in parallel. Separately, two concurrent `make ci` runs interleave writes into the shared `cover.out` and the gate dies on a corrupted package name. |
-| #2267 | HIGH | `ExpandIntersect` returns wrong results for a boxed row value and a mis-resolved `endCol`. **Opt-in only** (`EnableCyclicIntersect` defaults off). |
+| ~~#2267~~ | ~~HIGH~~ | **FIXED** in round 3 — a boxed node cell made the operator silently skip its input row (18 rows → 0); a cycle whose closing hop is a self-loop is now **vetoed** rather than guessed. |
 | — | HIGH | **Fair scheduling** (§5). A structural decision. |
 | — | HIGH | **Write ceiling #2193** (§5). A structural decision. |
 | — | MEDIUM | Snapshot node-path **non-determinism**; the WAL-battery **verification gaps**; read-path allocation; the global label-index mutex; plan-cache byte bound; `db.schema.visualization()` returning an empty result set rather than an error; a soak test that **appends 28 000 lines to a tracked testdata file**, breaking `make release`'s clean-tree precondition. |
 
-**Three decisions are the user's, not mine:** the `labels.bin` format change (#2262),
-whether to narrow the visibility barrier (the single structural lever behind the write
-ceiling, the read starvation and part of the read-allocation cost), and what
-`db.schema.visualization()` should do.
+**Two decisions remain the maintainer's, not mine:** whether to narrow the visibility
+barrier — the single structural lever behind the write ceiling, the read starvation and
+part of the read-allocation cost — and what `db.schema.visualization()` should do. The
+`labels.bin` format decision was taken and implemented in round 4.
 
 ## 8. The examples, as instruments
 
