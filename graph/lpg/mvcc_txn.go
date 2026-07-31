@@ -22,18 +22,18 @@ package lpg
 //
 // # The timestamp space
 //
-// One uint64, split at [txIDBase], carries three states, which is what makes
-// the visibility test a single comparison rather than a lookup:
+// One uint64, split at [mvcc.TxIDBase], carries three states, which is what
+// makes the visibility test a single comparison rather than a lookup:
 //
-//	ts <  txIDBase            committed, and ts is the commit timestamp
-//	ts == txIDBase + n        in flight, and ts is the transaction id
-//	ts == txAbortedTS         aborted
+//	ts <  mvcc.TxIDBase        committed, and ts is the commit timestamp
+//	ts >= mvcc.TxIDBase        in flight, and ts is the transaction id
+//	ts == mvcc.AbortedTS       aborted
 //
 // Commit timestamps and transaction ids are both monotonic and neither is ever
 // reused, so a reader never has to ask a registry whether a writer is still
 // alive.
 //
-// [txAbortedTS] is deliberately chosen ABOVE txIDBase and equal to no possible
+// [mvcc.AbortedTS] is deliberately chosen ABOVE mvcc.TxIDBase and equal to no possible
 // transaction id, so the ordinary visibility rule already handles it — an
 // aborted change reads as "another transaction's uncommitted work" and is
 // undone by everyone, forever, with no extra branch on the read path. The
@@ -66,31 +66,16 @@ package lpg
 // Pinned by TestLabelTx_ComposesWithPhysicalUndo.
 
 import (
-	"sync/atomic"
-
 	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
 
-// txAbortedTS marks a transaction whose changes must never become visible.
-//
-// It sits above [txIDBase] and equals no transaction id the clock can mint, so
-// [nodeLabelDelta.mustUndo] classifies it as another transaction's uncommitted
-// work and undoes it, for every reader, forever — without a dedicated branch on
-// the read path.
-const txAbortedTS = ^uint64(0)
-
-// commitInfo is the commit record shared by every delta one transaction writes.
-//
-// Publishing the transaction is a single atomic store into ts, so all of its
-// deltas change visibility at one instant however many there are. That is the
-// whole reason the indirection exists; see the file comment.
-//
-// Safe for concurrent use.
-type commitInfo struct {
-	// ts is the transaction id while in flight, the commit timestamp once
-	// committed, and [txAbortedTS] once aborted.
-	ts atomic.Uint64
-}
+// commitInfo is [mvcc.CommitInfo], aliased so this package's call sites read
+// unchanged. It MOVED to a shared package in P3 because the adjacency lives in
+// [adjlist], which lpg imports, and both stores must answer the same question
+// about the same transaction — so one transaction's labels, properties AND
+// topology all become visible at the same instant, from one store.
+type commitInfo = mvcc.CommitInfo
 
 // labelTx is a transaction over the node-label delta chains.
 //
@@ -108,18 +93,18 @@ type labelTx[N comparable, W any] struct {
 }
 
 // nextCommitTS allocates the next commit timestamp. Monotonic and never reused.
-func (g *Graph[N, W]) nextCommitTS() uint64 { return g.mvccClock.Add(1) }
+func (g *Graph[N, W]) nextCommitTS() uint64 { return g.mvccClock.NextCommitTS() }
 
 // readTS returns the timestamp a reader starting now must use.
 //
 // It is the current value of the clock rather than the next one: a transaction
 // that commits at T is visible to a reader whose start timestamp is T or later,
 // so a reader starting after that commit must observe at least T.
-func (g *Graph[N, W]) readTS() uint64 { return g.mvccClock.Load() }
+func (g *Graph[N, W]) readTS() uint64 { return g.mvccClock.ReadTS() }
 
-// nextTxID allocates a transaction id, drawn from the range above [txIDBase] so
+// nextTxID allocates a transaction id, drawn from the range above [mvcc.TxIDBase] so
 // it can never be mistaken for a commit timestamp.
-func (g *Graph[N, W]) nextTxID() uint64 { return txIDBase + g.mvccTxSeq.Add(1) }
+func (g *Graph[N, W]) nextTxID() uint64 { return g.mvccClock.NextTxID() }
 
 // beginLabelTx starts a transaction over the label chains, capturing the start
 // timestamp that decides what it can see.
@@ -129,9 +114,7 @@ func (g *Graph[N, W]) nextTxID() uint64 { return txIDBase + g.mvccTxSeq.Add(1) }
 func (g *Graph[N, W]) beginLabelTx() *labelTx[N, W] {
 	startTS := g.readTS()
 	id := g.nextTxID()
-	info := &commitInfo{}
-	info.ts.Store(id)
-	return &labelTx[N, W]{g: g, info: info, id: id, startTS: startTS}
+	return &labelTx[N, W]{g: g, info: mvcc.NewCommitInfo(id), id: id, startTS: startTS}
 }
 
 // commit publishes every delta this transaction wrote, atomically.
@@ -147,7 +130,7 @@ func (t *labelTx[N, W]) commit() uint64 {
 	}
 	t.done = true
 	ts := t.g.nextCommitTS()
-	t.info.ts.Store(ts)
+	t.info.Commit(ts)
 	return ts
 }
 
@@ -161,7 +144,7 @@ func (t *labelTx[N, W]) abort() {
 		panic("lpg: labelTx committed or aborted twice")
 	}
 	t.done = true
-	t.info.ts.Store(txAbortedTS)
+	t.info.Abort()
 }
 
 // deltaStamp resolves how a new delta records its visibility.

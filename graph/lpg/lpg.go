@@ -47,6 +47,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index/label"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 	"github.com/FlavioCFOliveira/GoGraph/internal/ctxlock"
 )
 
@@ -332,11 +333,11 @@ type Graph[N comparable, W any] struct {
 	// [Graph.EnableLabelDeltas] has been called. See mvcc_labels.go.
 	labelDeltas      bool
 	labelDeltaActive atomic.Int64
-	// mvccClock mints commit timestamps and mvccTxSeq transaction ids; the two
-	// ranges are disjoint either side of txIDBase so one uint64 on a delta's
-	// commit record distinguishes in-flight from committed. See mvcc_txn.go.
-	mvccClock atomic.Uint64
-	mvccTxSeq atomic.Uint64
+	// mvccClock mints commit timestamps and transaction ids from the two
+	// disjoint ranges either side of mvcc.TxIDBase, so one uint64 on a
+	// version's commit record distinguishes in-flight from committed. Shared
+	// with the adjacency's versioning, which is why it lives in graph/mvcc.
+	mvccClock mvcc.Clock
 	// propDeltas / propDeltaActive are the node-property half of the substrate,
 	// kept separate from the label pair so a property write cannot push a label
 	// reader off its fast path. See mvcc_props.go.

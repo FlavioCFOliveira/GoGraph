@@ -246,7 +246,32 @@ start until P0's measurement is on the record.**
   compose rather than double-undo. Proved by
   `TestLabelTx_ComposesWithPhysicalUndo`. The cost is twice the deltas on an
   aborted transaction, reclaimed by P6.
-- **P3 — edges, edge types per slot, and edge properties**, the same way.
+- **P3 — edges, edge types per slot, and edge properties.** Two findings from
+  reading `graph/adjlist` change this phase's shape and are recorded here so the
+  next reader inherits them.
+
+  **The adjacency is ALREADY an immutable, atomically-published, lock-free
+  snapshot per node.** `adjEntry` is documented as *"an immutable snapshot of a
+  node's outgoing adjacency. Once an entry is published to a shard slot via
+  atomic.StorePointer its slices are never mutated; mutations produce a new
+  entry."* The shard's slot array is cloned only on GROW, not per write —
+  measured at 143 ns / 3 allocs at 10 000 nodes against 163 ns / 3 allocs at
+  1 000 000, i.e. flat. So GoGraph already produces the older version as a
+  by-product of every topology change, where Memgraph mutates its edge lists in
+  place and needs a delta to reconstruct. P3's adjacency work is therefore to
+  RETAIN and INDEX those entries by commit timestamp, not to build undo records
+  — materially cheaper than the reference design, because the expensive half
+  already exists.
+
+  **A prerequisite for P4 with a real cost, stated in `storeEntry`'s own
+  comment:** *"When a future lock-free read path lets a reader pin and read a
+  shard version WITHOUT the barrier, an in-window in-place mutation becomes a
+  torn read… the write path must move to true per-op (or end-of-window) fresh
+  immutable publication and the in-place builder shortcut must be removed. The
+  dedup is a barrier-borrowed optimisation, not an intrinsic property of this
+  layer."* That shortcut is what bounds a multi-op commit's copy-on-write cost
+  to O(distinct shards touched) instead of O(ops), so removing it is not free
+  and its cost must be measured before P4 relies on it.
 - **P4 — retire the read barrier** from `Engine.Run`, and flip
   `bench/mtaudit/fairness_soak_test.go` from red to green. This is the phase
   that closes #2274.

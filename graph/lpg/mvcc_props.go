@@ -33,6 +33,7 @@ import (
 	"sync/atomic"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
 
 // Property-delta actions. As with labels, a delta records the UNDO of the
@@ -68,16 +69,9 @@ type nodePropDelta struct {
 func (d *nodePropDelta) mustUndo(startTS, txID uint64) bool {
 	ts := d.ts
 	if d.info != nil {
-		ts = d.info.ts.Load()
+		ts = d.info.TS()
 	}
-	switch {
-	case ts == txID:
-		return false
-	case ts < txIDBase:
-		return ts > startTS
-	default:
-		return true
-	}
+	return !mvcc.Visible(ts, startTS, txID)
 }
 
 // EnablePropDeltas arms the node-property half of the MVCC substrate.

@@ -39,8 +39,10 @@ package lpg
 // that makes the visibility test a single comparison: a delta's timestamp holds
 // the WRITER'S TRANSACTION ID while uncommitted and its COMMIT TIMESTAMP once
 // committed, with the two drawn from disjoint ranges either side of
-// [txIDBase]. One uint64 then distinguishes "mine, uncommitted", "committed,
-// compare against my start timestamp" and "someone else's, uncommitted".
+// [mvcc.TxIDBase]. One uint64 then distinguishes "mine, uncommitted",
+// "committed, compare against my start timestamp" and "someone else's,
+// uncommitted". The primitives moved to graph/mvcc in P3 so the adjacency,
+// which lives in a package lpg imports, shares one commit record with them.
 //
 // # Where this DIVERGES from Memgraph, and why
 //
@@ -64,14 +66,8 @@ import (
 	"sync/atomic"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
-
-// txIDBase separates commit timestamps from transaction ids. Every commit
-// timestamp is below it and every transaction id at or above it, so the single
-// comparison `ts < txIDBase` answers "is this delta committed?".
-//
-// Taken from Memgraph's kTransactionInitialId, which serves the same purpose.
-const txIDBase uint64 = 1 << 63
 
 // Label-delta actions. A delta records the UNDO of the change that created it,
 // so replaying the chain backwards reconstructs the older version.
@@ -128,16 +124,9 @@ type nodeLabelDelta struct {
 func (d *nodeLabelDelta) mustUndo(startTS, txID uint64) bool {
 	ts := d.ts
 	if d.info != nil {
-		ts = d.info.ts.Load()
+		ts = d.info.TS()
 	}
-	switch {
-	case ts == txID:
-		return false // my own change: visible to me
-	case ts < txIDBase:
-		return ts > startTS // committed: undo only if it happened after I started
-	default:
-		return true // another transaction, uncommitted: never visible
-	}
+	return !mvcc.Visible(ts, startTS, txID)
 }
 
 // labelDeltasEnabled reports whether the spike is armed. It is a plain field

@@ -15,11 +15,12 @@ import (
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
 
 func TestLabelDelta_VisibilityRule(t *testing.T) {
-	const myTx = txIDBase + 7
-	const otherTx = txIDBase + 9
+	const myTx = mvcc.TxIDBase + 7
+	const otherTx = mvcc.TxIDBase + 9
 	cases := []struct {
 		name    string
 		deltaTS uint64
@@ -35,9 +36,7 @@ func TestLabelDelta_VisibilityRule(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			info := &commitInfo{}
-			info.ts.Store(c.deltaTS)
-			d := &nodeLabelDelta{info: info}
+			d := &nodeLabelDelta{info: mvcc.NewCommittedInfo(c.deltaTS)}
 			if got := d.mustUndo(c.startTS, c.txID); got != c.want {
 				t.Fatalf("mustUndo(startTS=%d, txID=%d) with delta ts=%d = %v, want %v",
 					c.startTS, c.txID, c.deltaTS, got, c.want)
