@@ -11,7 +11,12 @@ package recovery
 //   - every store/recovery crash test funnels through graphFingerprint, which
 //     SORTS edges by destination and reports edge labels per (src,dst) pair, so
 //     it is blind both to within-source order and to which parallel slot carries
-//     which label.
+//     which label. (Task #2270 has since given graphFingerprint per-slot
+//     resolution — it orders slots by the total key (destination, handle) and
+//     emits each slot's handle plus its per-handle labels and properties — so it
+//     is no longer blind to slot ASSIGNMENT. It remains deliberately blind to
+//     within-source PHYSICAL order, which is what orderedFingerprint below
+//     pins.)
 //   - every byte-equality test (snapshot, csrfile, csr cross-process) is a SELF
 //     comparison — build twice, or parent vs child — which a deterministic
 //     reorder passes unchanged.
@@ -30,6 +35,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -81,6 +87,19 @@ func orderedFingerprint(t *testing.T, g *lpg.Graph[string, int64]) string {
 	}
 	return sb.String()
 }
+
+// stripEdgeHandles rewrites every per-slot handle in a [graphFingerprint] to a
+// placeholder, so two fingerprints can be compared on node / label / property /
+// edge / weight identity alone. It exists for exactly one caller — the legacy
+// pre-#2141 snapshot fixture, whose csr.bin carries no handle block — and must
+// not be used to paper over a handle divergence in a format that does carry one.
+func stripEdgeHandles(fingerprint string) string {
+	return edgeHandleField.ReplaceAllString(fingerprint, "h=* ")
+}
+
+// edgeHandleField matches the handle field of a fingerprint slot line
+// ("  S h=<handle> w=<weight>").
+var edgeHandleField = regexp.MustCompile(`h=\d+ `)
 
 // buildHighDegreeGraph writes a graph with a source whose out-degree is well past
 // the ordering path's insertion-sort cutoff, plus parallel edges, inserting each
@@ -275,9 +294,29 @@ func TestRecovery_UnorderedLegacySnapshot_ReopensIdentically(t *testing.T) {
 
 	// Observationally identical: the order-INSENSITIVE fingerprint must match, so
 	// every node, label, property, edge and weight survived.
-	if want, got := graphFingerprint(t, g), graphFingerprint(t, res.Graph); want != got {
+	//
+	// Edge HANDLES are excluded from this comparison, and only here: the legacy
+	// fixture is built by csr.FromArrays, which by construction carries no handle
+	// block, so there is nothing on disk for the reader to restore and every
+	// recovered slot is handle 0. That is the contract of a pre-#2141 snapshot,
+	// not a loss — it is asserted positively immediately below. A MODERN v3
+	// snapshot does round-trip handles, and there graphFingerprint is compared
+	// unnormalised.
+	if want, got := stripEdgeHandles(graphFingerprint(t, g)), stripEdgeHandles(graphFingerprint(t, res.Graph)); want != got {
 		t.Errorf("legacy unordered snapshot did not recover to an identical graph\nwant:\n%s\ngot:\n%s", want, got)
 	}
+	// Pin the handle contract of the legacy format explicitly rather than
+	// letting the normalisation above hide it.
+	res.Graph.AdjList().Mapper().Walk(func(id graph.NodeID, key string) bool {
+		_, _, handles := res.Graph.AdjList().LoadEntryH(id)
+		for i, h := range handles {
+			if h != 0 {
+				t.Errorf("node %s slot %d recovered handle %d from a legacy snapshot that carries no handle block; want 0", key, i, h)
+				return false
+			}
+		}
+		return true
+	})
 	// And the rebuilt CSR is ordered again, re-derived from the recovered
 	// adjacency rather than inherited from the file.
 	if !csr.BuildFromAdjList(res.Graph.AdjList()).RunsOrdered() {

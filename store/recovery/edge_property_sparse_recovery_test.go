@@ -114,9 +114,18 @@ func assertHubColumnSparse(t *testing.T, dir string) {
 // TestCrashInjection_SparseEdgeProperty_TruncateEveryFrameBoundary is the sparse
 // analogue of TestCrashInjection_TruncateEveryFrameBoundary: it writes the
 // sparse-forcing typed-mix workload, then for every WAL frame boundary truncates
-// and recovers, asserting (a) the full-WAL recovery reproduces the in-memory
-// fingerprint exactly (typed-value identity, sparse column reconstructed) and (b)
-// every intermediate cut yields a strict prefix.
+// and recovers.
+//
+// The workload is ONE transaction, so recovery is atomic and there are exactly
+// TWO legal recovered states: the empty graph for any cut that drops the commit
+// marker, and the full in-memory fingerprint for the cut that keeps it. The
+// assertion is exact equality against whichever of the two the cut selects —
+// hand-computable, and non-vacuous in both directions (an empty recovery of a
+// committed transaction fails, and any surfaced state before the commit fails).
+//
+// It deliberately does NOT reuse the prefix helper: a prefix check on a
+// single-transaction workload is satisfied by the empty graph at every
+// intermediate cut, which is precisely the vacuity task #2270 removed.
 func TestCrashInjection_SparseEdgeProperty_TruncateEveryFrameBoundary(t *testing.T) {
 	t.Parallel()
 	refDir := t.TempDir()
@@ -147,14 +156,13 @@ func TestCrashInjection_SparseEdgeProperty_TruncateEveryFrameBoundary(t *testing
 			}
 			g := recoverProperties(t, dir)
 			gotFP := graphFingerprint(t, g)
+			wantFP := ""
 			if off == int64(len(origBytes)) {
-				if gotFP != want {
-					t.Fatalf("full-WAL sparse recovery diverged from in-memory state\nwant:\n%s\ngot:\n%s", want, gotFP)
-				}
-				return
+				wantFP = want
 			}
-			if !isPrefixOf(gotFP, want) {
-				t.Fatalf("sparse recovery at boundary %d (off=%d) produced inconsistent state\nfull:\n%s\nrecovered:\n%s", i, off, want, gotFP)
+			if gotFP != wantFP {
+				t.Fatalf("sparse recovery at boundary %d (off=%d) diverged from the only legal state\nwant:\n%s\ngot:\n%s",
+					i, off, wantFP, gotFP)
 			}
 		})
 	}
