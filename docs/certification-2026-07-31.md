@@ -231,14 +231,36 @@ GoGraph is certified for production **within these limits**, each measured, not 
    happens inside the visibility barrier. `wal.Writer.SyncGroup` already implements the
    coalescing and reaches 127 582 op/s outside the barrier. Same root cause as #2274; phase
    P5 of the MVCC programme closes it.
-3. **A single-row query allocates ~93.6 KB** (#2276), ~92 % of it from operator scratch
-   chunks constructed at 4096 rows regardless of cardinality. Analysed but deliberately not
-   fixed this cycle: `FillChunk`'s contract makes `n < maxRows` mean end-of-stream, so
-   shrinking a scratch without shrinking `maxRows` in lock-step **silently truncates
-   aggregations**. That is not a change to rush.
-4. **`db.schema.visualization()` returns an empty result set** rather than an error. Behaviour
+3. **A non-columnar projection demotes the filter beneath it** (#2277, found this cycle and
+   **not** the item carried from 2026-07-30). All five queries below return **one** row, from
+   a 20 000-node label scan:
+
+   | query | plan | allocations |
+   |---|---|---|
+   | `RETURN n.w AS x` | `ColumnarProject → ColumnarFilter → Scan` | **74** |
+   | `RETURN n.w AS x, n.w AS y` | columnar | 87 |
+   | `RETURN n.w + 1 AS y` | `Project → Filter → Scan` | **39 575** |
+   | `RETURN count(*) AS x` | `Project → GlobalAggregateAdapter → … → Filter → Scan` | **39 572** |
+   | `RETURN n` | boxed | 39 568 |
+
+   The trigger is neither cardinality nor the `WHERE`: adding an arithmetic expression, an
+   aggregate, or an entity return to the **projection** demotes the **filter**, so every
+   *scanned* row is boxed — about 2 allocations per scanned node. The control makes it
+   unambiguous: a columnar full scan returning **20 000** rows allocates **89** objects, so a
+   query returning one row allocates **445× more** than one returning twenty thousand. At
+   1 M nodes a single `RETURN count(*)` costs on the order of a million allocations.
+   Architectural: the scan and filter are columnar-eligible in every case, so a chunk-to-row
+   adapter beneath a row-based `Project` may be a bounded fix, but it changes how execution
+   modes compose and needs a decision.
+
+4. **Operator scratch chunks are built at 4096 rows regardless of cardinality** (#2276),
+   ~92 % of the bytes on the columnar path. Analysed but deliberately not fixed this cycle:
+   `FillChunk`'s contract makes `n < maxRows` mean end-of-stream, and `eager_aggregation.go`
+   compares against `DefaultChunkCapacity` literally, so shrinking a scratch without shrinking
+   `maxRows` in lock-step **silently truncates aggregations**. That is not a change to rush.
+5. **`db.schema.visualization()` returns an empty result set** rather than an error. Behaviour
    decision outstanding.
-5. The MEDIUM set carried forward: snapshot node-path non-determinism, the global label-index
+6. The MEDIUM set carried forward: snapshot node-path non-determinism, the global label-index
    mutex, and the plan cache bounded by entry count rather than bytes (~1 GiB effective
    ceiling, measured at 1008.96 MiB retained).
 
