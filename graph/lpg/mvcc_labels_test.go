@@ -35,7 +35,9 @@ func TestLabelDelta_VisibilityRule(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			d := &nodeLabelDelta{ts: c.deltaTS}
+			info := &commitInfo{}
+			info.ts.Store(c.deltaTS)
+			d := &nodeLabelDelta{info: info}
 			if got := d.mustUndo(c.startTS, c.txID); got != c.want {
 				t.Fatalf("mustUndo(startTS=%d, txID=%d) with delta ts=%d = %v, want %v",
 					c.startTS, c.txID, c.deltaTS, got, c.want)
@@ -58,7 +60,7 @@ func TestLabelDelta_ReconstructsOlderVersion(t *testing.T) {
 	if !ok {
 		t.Fatal("node a not interned")
 	}
-	baseline := g.spikeTS() // a reader that started before the change below
+	baseline := g.readTS() // a reader that started before the change below
 
 	if err := g.SetNodeLabel("a", "Hot"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
@@ -76,7 +78,7 @@ func TestLabelDelta_ReconstructsOlderVersion(t *testing.T) {
 		t.Fatal("a reader that started before the change can see it: the delta was not applied")
 	}
 	// A reader that started AFTER must see it.
-	now := g.labelBagAsOf(id, g.spikeTS(), 0)
+	now := g.labelBagAsOf(id, g.readTS(), 0)
 	if !now.has(g.reg.Intern("Hot")) {
 		t.Fatal("a reader that started after the change cannot see it")
 	}

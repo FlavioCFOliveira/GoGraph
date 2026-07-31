@@ -93,8 +93,19 @@ type nodeLabelDelta struct {
 	// next is the older version's delta, or nil when this is the oldest
 	// recorded change. Loaded with acquire semantics by a reader.
 	next *nodeLabelDelta
-	// ts is the writer's transaction id while uncommitted, and its commit
-	// timestamp once committed. See [txIDBase].
+	// info is the commit record SHARED by every delta the same transaction
+	// wrote, so publishing a transaction is one atomic store however many
+	// deltas it created and no reader can observe half of one (rmp #2278).
+	//
+	// It is NIL for an autocommit write, in which case [nodeLabelDelta.ts]
+	// below carries the commit timestamp directly. That case is worth a branch
+	// and eight bytes: an autocommit write is already committed the instant it
+	// is made, so it needs no shared mutable record, and allocating one cost
+	// +16 B and +1 allocation per write — measured, on the commonest path the
+	// Go API has.
+	info *commitInfo
+	// ts is the commit timestamp of an autocommit write, read only when info is
+	// nil. An autocommit delta is immutable once created.
 	ts uint64
 	// lid is the label this record adds back or removes.
 	lid LabelID
@@ -115,7 +126,10 @@ type nodeLabelDelta struct {
 //   - the delta belongs to another transaction that has not committed, so it is
 //     always undone.
 func (d *nodeLabelDelta) mustUndo(startTS, txID uint64) bool {
-	ts := atomic.LoadUint64(&d.ts)
+	ts := d.ts
+	if d.info != nil {
+		ts = d.info.ts.Load()
+	}
 	switch {
 	case ts == txID:
 		return false // my own change: visible to me
@@ -160,7 +174,7 @@ func (g *Graph[N, W]) LabelDeltaCount() int64 { return g.labelDeltaActive.Load()
 // assignment into a sparse side map, and one atomic increment — none of which
 // depends on the number of nodes in the graph or in the shard. That
 // independence is the property the spike measures.
-func (sh *nodeLabelShard) pushLabelDelta(id graph.NodeID, action uint8, lid LabelID, ts uint64, active *atomic.Int64) {
+func (sh *nodeLabelShard) pushLabelDelta(id graph.NodeID, action uint8, lid LabelID, info *commitInfo, ts uint64, active *atomic.Int64) {
 	if sh.d == nil {
 		// Lazily allocated: a shard that is never written keeps no side map, so
 		// a read-only graph pays nothing for the mechanism existing.
@@ -168,6 +182,7 @@ func (sh *nodeLabelShard) pushLabelDelta(id graph.NodeID, action uint8, lid Labe
 	}
 	sh.d[id] = &nodeLabelDelta{
 		next:   sh.d[id],
+		info:   info,
 		ts:     ts,
 		lid:    lid,
 		action: action,
@@ -269,16 +284,6 @@ func cloneLabelBag(b labelBag) labelBag {
 	}
 	return out
 }
-
-// spikeTS mints a commit timestamp for the P0 spike.
-//
-// The real design allocates a start timestamp at Begin and a commit timestamp
-// under the existing commit serialisation (phase P1). The spike has no
-// transaction layer, so it stamps every delta as immediately committed with a
-// monotonic counter. That is enough to measure the cost model — one atomic
-// increment per write, which is what P1 would also pay — and deliberately not
-// enough to be mistaken for working isolation.
-func (g *Graph[N, W]) spikeTS() uint64 { return uint64(g.labelDeltaSeq.Add(1)) }
 
 // labelBagPlain is the non-MVCC read, exposed with the SAME signature shape as
 // [Graph.labelBagAsOf] so the two can be benchmarked against each other fairly.

@@ -326,7 +326,11 @@ type Graph[N comparable, W any] struct {
 	// [Graph.EnableLabelDeltas] has been called. See mvcc_labels.go.
 	labelDeltas      bool
 	labelDeltaActive atomic.Int64
-	labelDeltaSeq    atomic.Uint64
+	// mvccClock mints commit timestamps and mvccTxSeq transaction ids; the two
+	// ranges are disjoint either side of txIDBase so one uint64 on a delta's
+	// commit record distinguishes in-flight from committed. See mvcc_txn.go.
+	mvccClock atomic.Uint64
+	mvccTxSeq atomic.Uint64
 
 	nodeLabelShards [propMapShards]nodeLabelShard
 	edgeLabelShards [propMapShards]edgeLabelShard
@@ -1616,6 +1620,17 @@ func (g *Graph[N, W]) EdgeWeight(src, dst N) (W, bool) {
 // codepaths that do not configure [adjlist.Config.MaxShardCapacity]
 // may safely ignore the return.
 func (g *Graph[N, W]) SetNodeLabel(n N, name string) error {
+	return g.setNodeLabelInfo(n, name, nil)
+}
+
+// setNodeLabelInfo is [Graph.SetNodeLabel] with an explicit commit record.
+//
+// info is the transaction's shared record, or nil for an autocommit write —
+// which is what the exported method passes, matching the single-statement
+// transaction semantics the Go API already documents. It is threaded rather
+// than looked up so a transaction's deltas all point at ONE record and its
+// commit is a single store (rmp #2278).
+func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, info *commitInfo) error {
 	if err := g.adj.AddNode(n); err != nil {
 		return err
 	}
@@ -1634,7 +1649,8 @@ func (g *Graph[N, W]) SetNodeLabel(n N, name string) error {
 	// every match, so this guard is what keeps a delta per WRITE rather than a
 	// delta per statement.
 	if g.labelDeltasEnabled() && !bag.has(lid) {
-		sh.pushLabelDelta(id, undoRemoveLabel, lid, g.spikeTS(), &g.labelDeltaActive)
+		ci, ts := g.deltaStamp(info)
+		sh.pushLabelDelta(id, undoRemoveLabel, lid, ci, ts, &g.labelDeltaActive)
 	}
 	bag.add(lid)
 	sh.m[id] = bag
@@ -2607,6 +2623,12 @@ func (g *Graph[N, W]) DecrEdgesRemoved() {
 
 // RemoveNodeLabel detaches name from n. No-op if absent.
 func (g *Graph[N, W]) RemoveNodeLabel(n N, name string) {
+	g.removeNodeLabelInfo(n, name, nil)
+}
+
+// removeNodeLabelInfo is [Graph.RemoveNodeLabel] with an explicit commit
+// record; see [Graph.setNodeLabelInfo].
+func (g *Graph[N, W]) removeNodeLabelInfo(n N, name string, info *commitInfo) {
 	id, ok := g.adj.Mapper().Lookup(n)
 	if !ok {
 		return
@@ -2622,7 +2644,8 @@ func (g *Graph[N, W]) RemoveNodeLabel(n N, name string) {
 		// actually being present for the same reason as the add path: removing
 		// a label the node does not carry changes nothing.
 		if g.labelDeltasEnabled() && bag.has(lid) {
-			sh.pushLabelDelta(id, undoAddLabel, lid, g.spikeTS(), &g.labelDeltaActive)
+			ci, ts := g.deltaStamp(info)
+			sh.pushLabelDelta(id, undoAddLabel, lid, ci, ts, &g.labelDeltaActive)
 		}
 		if bag.del(lid) {
 			// Bag became empty: drop the entry so a node with no labels costs
