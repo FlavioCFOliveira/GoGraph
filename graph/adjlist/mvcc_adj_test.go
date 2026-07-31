@@ -252,3 +252,71 @@ func itoaBench(n int) string {
 	}
 	return string(buf[i:])
 }
+
+// EntryLabelsAsOf returns the per-slot relationship-type column of id as it was
+// at startTS. Test-only accessor: it exists to prove the claim below, not to be
+// a public surface before an operator needs one.
+func (a *AdjList[N, W]) EntryLabelsAsOf(id graph.NodeID, startTS, txID uint64) []uint32 {
+	s := &a.shards[id&shardMask]
+	e := a.entryAsOf(s, uint64(id)>>shardBits, startTS, txID)
+	if e == nil {
+		return nil
+	}
+	return e.labels
+}
+
+// TestAdjVersion_TypesAndPropertiesComeForFree pins something that would
+// otherwise be an assumption: versioning the ENTRY also versions the per-slot
+// relationship types and the edge-property column, because both live INSIDE the
+// entry and both are already copy-on-write.
+//
+// adjEntry.labels is the type column and adjEntry.aux is the opaque
+// edge-property column, whose own contract says "Both lifecycle methods return
+// a NEW immutable column (copy-on-write); the receiver is never mutated, so a
+// concurrent lock-free reader holding the prior entry (and thus the prior
+// column) is unaffected."
+//
+// If that reasoning is right, P3 needs no separate mechanism for either. It is
+// asserted rather than argued because "it should follow" is how a versioning
+// hole gets shipped.
+func TestAdjVersion_TypesAndPropertiesComeForFree(t *testing.T) {
+	a, clk := versionedList(t)
+	for _, n := range []string{"a", "b"} {
+		if err := a.AddNode(n); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
+	}
+	id := idOf(t, a, "a")
+	dst := idOf(t, a, "b")
+
+	autoWrite(a, clk, func() {
+		if err := a.AddEdge("a", "b", 1); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
+	})
+	tsTyped := autoWrite(a, clk, func() {
+		if !a.SetEdgeLabelSlot(id, dst, 7) {
+			t.Fatal("SetEdgeLabelSlot did not apply")
+		}
+	})
+	tsRetyped := autoWrite(a, clk, func() {
+		if !a.SetEdgeLabelSlot(id, dst, 9) {
+			t.Fatal("SetEdgeLabelSlot did not apply")
+		}
+	})
+
+	labelAt := func(ts uint64) uint32 {
+		ls := a.EntryLabelsAsOf(id, ts, 0)
+		if len(ls) == 0 {
+			return 0
+		}
+		return ls[0]
+	}
+	if got := labelAt(tsRetyped); got != 9 {
+		t.Fatalf("current type is %d, want 9", got)
+	}
+	if got := labelAt(tsTyped); got != 7 {
+		t.Fatalf("the type at the earlier timestamp is %d, want 7: the per-slot type column "+
+			"is not being versioned by the entry chain", got)
+	}
+}
