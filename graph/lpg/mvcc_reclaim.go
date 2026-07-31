@@ -1,0 +1,162 @@
+package lpg
+
+// mvcc_reclaim.go — MVCC P6 (rmp #2284): reclaiming the node-label and
+// node-property version chains.
+//
+// # The rule, and why it is the same one the adjacency uses
+//
+// A delta is an UNDO record: a reader applies it only when the change it
+// records is NOT visible to that reader. A delta stamped t is invisible only to
+// a reader whose start timestamp is older than t. So once every active reader
+// began at or after t — that is, once the watermark reaches t — no reader
+// applies it, and neither it nor anything behind it in the chain can affect any
+// answer.
+//
+// The chain runs newest-first, so the FIRST delta at or before the watermark
+// makes the whole tail behind it unreachable, and one truncation releases all
+// of it. That is the identical argument the adjacency reclaimer makes; the
+// mechanics differ only because these chains hang off a sparse map guarded by
+// the shard's RWMutex rather than off an immutable published entry, so the
+// reclaimer can take the write lock and mutate plainly instead of needing an
+// atomic store.
+//
+// # Cost
+//
+// O(nodes carrying history), not O(nodes): the sparse side maps ARE the index
+// of what has versions, so a shard with no history costs one nil check.
+
+// ReclaimVersions frees every node-label and node-property version that no
+// reader can reach any more, and returns how many records were released.
+//
+// watermark is the oldest start timestamp among active readers, from
+// [mvcc.Horizon.Oldest]. Zero means reclaim nothing, which is what the horizon
+// reports while a reader could not be registered — the sound answer when the
+// oldest reader is unknown.
+//
+// Safe for concurrent use with readers. Not safe to run concurrently with
+// itself.
+func (g *Graph[N, W]) ReclaimVersions(watermark uint64) int {
+	if watermark == 0 {
+		return 0
+	}
+	return g.reclaimLabelVersions(watermark) + g.reclaimPropVersions(watermark)
+}
+
+// reclaimLabelVersions truncates the label chains.
+func (g *Graph[N, W]) reclaimLabelVersions(watermark uint64) int {
+	if g.labelDeltaActive.Load() == 0 {
+		return 0
+	}
+	freed := 0
+	for i := range g.nodeLabelShards {
+		sh := &g.nodeLabelShards[i]
+		sh.mu.Lock()
+		if sh.d == nil {
+			sh.mu.Unlock()
+			continue
+		}
+		for id, head := range sh.d {
+			if head == nil {
+				delete(sh.d, id)
+				continue
+			}
+			// The head itself unreachable means the node keeps no history at
+			// all, so the map entry goes with it and the shard shrinks.
+			if head.stampTS() <= watermark {
+				freed += labelChainLen(head)
+				delete(sh.d, id)
+				continue
+			}
+			for d := head; d.next != nil; d = d.next {
+				if d.next.stampTS() <= watermark {
+					freed += labelChainLen(d.next)
+					d.next = nil
+					break
+				}
+			}
+		}
+		if len(sh.d) == 0 {
+			sh.d = nil // a shard with no history costs one nil check again
+		}
+		sh.mu.Unlock()
+	}
+	if freed > 0 {
+		g.labelDeltaActive.Add(-int64(freed))
+	}
+	return freed
+}
+
+// reclaimPropVersions truncates the property chains, by the identical rule.
+func (g *Graph[N, W]) reclaimPropVersions(watermark uint64) int {
+	if g.propDeltaActive.Load() == 0 {
+		return 0
+	}
+	freed := 0
+	for i := range g.nodePropShards {
+		s := &g.nodePropShards[i]
+		s.mu.Lock()
+		if s.d == nil {
+			s.mu.Unlock()
+			continue
+		}
+		for id, head := range s.d {
+			if head == nil {
+				delete(s.d, id)
+				continue
+			}
+			if head.stampTS() <= watermark {
+				freed += propChainLen(head)
+				delete(s.d, id)
+				continue
+			}
+			for d := head; d.next != nil; d = d.next {
+				if d.next.stampTS() <= watermark {
+					freed += propChainLen(d.next)
+					d.next = nil
+					break
+				}
+			}
+		}
+		if len(s.d) == 0 {
+			s.d = nil
+		}
+		s.mu.Unlock()
+	}
+	if freed > 0 {
+		g.propDeltaActive.Add(-int64(freed))
+	}
+	return freed
+}
+
+// stampTS returns the timestamp a label delta was committed at, from its shared
+// record when it has one and from its inline field otherwise.
+func (d *nodeLabelDelta) stampTS() uint64 {
+	if d.info != nil {
+		return d.info.TS()
+	}
+	return d.ts
+}
+
+// stampTS is the property delta's counterpart.
+func (d *nodePropDelta) stampTS() uint64 {
+	if d.info != nil {
+		return d.info.TS()
+	}
+	return d.ts
+}
+
+func labelChainLen(d *nodeLabelDelta) int {
+	n := 0
+	for ; d != nil; d = d.next {
+		n++
+	}
+	return n
+}
+
+func propChainLen(d *nodePropDelta) int {
+	n := 0
+	for ; d != nil; d = d.next {
+		n++
+	}
+	return n
+}
