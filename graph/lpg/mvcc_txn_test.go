@@ -225,3 +225,78 @@ func TestLabelTx_RemoveIsAlsoAtomic(t *testing.T) {
 		}
 	}
 }
+
+// TestLabelTx_ComposesWithPhysicalUndo settles the question P1 left open: who
+// owns rollback when MVCC and the existing in-memory undo log both exist
+// (rmp #2278 -> P2).
+//
+// GoGraph applies a write query's mutations EAGERLY and, on error, replays an
+// undo log of inverse closures while the visibility barrier is still held
+// (cypher/undo.go, #1282). The worry was that MVCC would double-undo: the
+// physical state is already restored, and then a reader would apply the
+// aborted transaction's deltas on top and land somewhere else entirely.
+//
+// It does not, and the reason is that the undo log's inverses call the SAME
+// lpg mutators, so each inverse records its own delta. The chain ends up
+// holding both the change and its inverse, and walking it backwards returns the
+// original value:
+//
+//	set L      physical: L present   chain: [undoRemove L]
+//	inverse    physical: L absent    chain: [undoAdd L, undoRemove L]
+//	reader     undoAdd -> L present, undoRemove -> L absent   = correct
+//
+// So the two mechanisms COMPOSE, the undo log keeps ownership of physical
+// rollback, and no change to it is required. The cost is that an aborted
+// transaction leaves twice the deltas, which is acceptable — abort is the rare
+// path and P6 reclaims them.
+func TestLabelTx_ComposesWithPhysicalUndo(t *testing.T) {
+	g, ids := txGraph(t, "a")
+	id := ids["a"]
+
+	// Committed starting state: no label.
+	before := g.readTS()
+
+	tx := g.beginLabelTx()
+	if err := tx.setNodeLabel("a", "L"); err != nil {
+		t.Fatalf("setNodeLabel: %v", err)
+	}
+	lid, ok := g.reg.Lookup("L")
+	if !ok {
+		t.Fatal("label L was never interned")
+	}
+	stored := g.labelBagPlain(id)
+	if !stored.has(lid) {
+		t.Fatal("the eager write did not reach the stored value")
+	}
+
+	// The undo log's inverse, which is exactly what cypher/undo.go replays:
+	// the same mutator, inside the same transaction.
+	tx.removeNodeLabel("a", "L")
+	stored = g.labelBagPlain(id)
+	if stored.has(lid) {
+		t.Fatal("the physical inverse did not reach the stored value")
+	}
+
+	tx.abort()
+
+	// Every reader, whenever it started, must see the ORIGINAL state — not the
+	// write, and not a double-undo that resurrects it.
+	for _, ts := range []uint64{before, g.readTS(), g.nextCommitTS()} {
+		if bag := g.labelBagAsOf(id, ts, 0); bag.has(lid) {
+			t.Fatalf("a reader at ts=%d sees a label from a transaction that was rolled back "+
+				"physically AND aborted: the two rollback mechanisms did not compose", ts)
+		}
+	}
+	// Both deltas are on the chain; that is the cost of the composition, and it
+	// is asserted so a future change that silently drops one is caught.
+	sh := g.nodeLabelShardFor(id)
+	sh.mu.RLock()
+	n := 0
+	for d := sh.d[id]; d != nil; d = d.next {
+		n++
+	}
+	sh.mu.RUnlock()
+	if n != 2 {
+		t.Fatalf("expected the change and its inverse to leave 2 deltas, found %d", n)
+	}
+}

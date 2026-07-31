@@ -40,17 +40,30 @@ package lpg
 // sentinel is distinguishable only so that garbage collection can recognise a
 // chain it may reclaim eagerly.
 //
-// # Interaction with the existing undo log — a reconciliation P2 owes
+// # Interaction with the existing undo log — RESOLVED: they compose
 //
-// GoGraph already rolls a failed statement back PHYSICALLY, through the
-// in-memory undo log (#1282), so after an abort the stored value is already
-// correct and an aborted delta would make a reader undo a change that is no
-// longer there. Under MVCC only one of the two mechanisms may own rollback.
-// P1 does not resolve that: it provides the marker and the tests, and
-// [labelTx.abort] is documented as not yet wired to any statement path.
-// Choosing between "MVCC owns rollback" and "the undo log owns it and deltas
-// are discarded on abort" is P2's first decision, and it must be taken with the
-// undo log's semantics in front of it, not guessed here.
+// GoGraph already rolls a failed statement back PHYSICALLY, replaying an undo
+// log of inverse closures while the visibility barrier is held
+// (cypher/undo.go, #1282). The worry was a double-undo: the stored value is
+// already restored, and a reader applying the aborted transaction's deltas on
+// top would land somewhere else entirely.
+//
+// It does not happen, because the undo log's inverses call the SAME lpg
+// mutators, so each inverse records its own delta:
+//
+//	set L      stored: L present   chain: [undoRemove L]
+//	inverse    stored: L absent    chain: [undoAdd L, undoRemove L]
+//	reader     undoAdd -> present, undoRemove -> absent   = the original value
+//
+// So the undo log KEEPS ownership of physical rollback and needs no change,
+// and MVCC needs no special abort path for the stored value.
+// [labelTx.abort] marks the record so garbage collection can recognise a chain
+// it may reclaim eagerly; correctness does not depend on it, since an unmarked
+// aborted transaction keeps its transaction id and is undone by every reader
+// anyway. The cost is that an aborted transaction leaves twice the deltas,
+// which is acceptable: abort is the rare path and P6 reclaims them.
+//
+// Pinned by TestLabelTx_ComposesWithPhysicalUndo.
 
 import (
 	"sync/atomic"

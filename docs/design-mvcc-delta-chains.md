@@ -1,6 +1,8 @@
 # Design: per-object MVCC via delta chains
 
-**Status:** specification, approved for execution (user decision, 2026-07-31). Not implemented.
+**Status:** approved for execution (user decision, 2026-07-31). **P0 and P1 delivered**; see
+§7 for phase state and [`mvcc-p0-measurement.md`](mvcc-p0-measurement.md) for the measurement
+that authorised the rest.
 **Supersedes the conclusion recorded in rmp #2051.** See §4 — that conclusion is a
 property of the design that was tried, not of MVCC.
 **Motivating defect:** rmp #2274. **Also resolves:** rmp #2193, and unblocks #1825/#1826.
@@ -216,7 +218,16 @@ bounded-resources mandate.
 Each phase is a sprint delivering a standalone result. **No phase after P0 may
 start until P0's measurement is on the record.**
 
-- **P0 — refute or confirm the cost model.** Prototype a delta chain on ONE
+- **P0 — DONE (rmp #2275).** The cost model holds: +24 B and +1 allocation per
+  modification, identical at 10 000 and 1 000 000 nodes; idle read 1.02×; no
+  flag-off regression. #2051's conclusion corrected. Full measurement in
+  [`mvcc-p0-measurement.md`](mvcc-p0-measurement.md).
+- **P1 — DONE (rmp #2278).** Shared commit records, a monotonic clock, and
+  atomic publish in one store. Per-modification cost is 32 B (the delta unions
+  the record pointer with an inline timestamp for autocommit writes, which
+  measurement showed was cheaper than allocating a record per write), still flat
+  in graph size and pinned by test. Rollback ownership resolved — see P2.
+- ~~**P0 — refute or confirm the cost model.**~~ Prototype a delta chain on ONE
   structure (node labels), measure `BenchmarkEngWriteAutocommit` and the serial
   `View` cost against today's numbers, and compare against the #2051 figures.
   Deliverable: a measurement that either shows O(1)-per-write behaviour, which
@@ -228,6 +239,13 @@ start until P0's measurement is on the record.**
   the tests that pin it. No read path changes yet.
 - **P2 — node labels and node properties** on delta chains, behind a flag, with
   the differential and absolute-oracle suites green under both settings.
+  **Rollback ownership is settled**: the existing in-memory undo log keeps it,
+  and needs no change. Its inverses call the same `lpg` mutators, so each
+  records its own delta and the chain holds both the change and its inverse;
+  walking it backwards returns the original value, so the two mechanisms
+  compose rather than double-undo. Proved by
+  `TestLabelTx_ComposesWithPhysicalUndo`. The cost is twice the deltas on an
+  aborted transaction, reclaimed by P6.
 - **P3 — edges, edge types per slot, and edge properties**, the same way.
 - **P4 — retire the read barrier** from `Engine.Run`, and flip
   `bench/mtaudit/fairness_soak_test.go` from red to green. This is the phase
