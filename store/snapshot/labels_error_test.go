@@ -121,9 +121,13 @@ func TestReadLabels_StringIdxOutOfRange(t *testing.T) {
 	_, _ = buf.WriteString("Px")
 	_ = binary.Write(buf, binary.LittleEndian, uint64(0)) // no node records
 	_ = binary.Write(buf, binary.LittleEndian, uint64(1)) // 1 edge record
-	_ = binary.Write(buf, binary.LittleEndian, uint64(0))
-	_ = binary.Write(buf, binary.LittleEndian, uint64(1))
-	_ = binary.Write(buf, binary.LittleEndian, uint32(7))
+	_ = binary.Write(buf, binary.LittleEndian, uint64(0)) // Src
+	_ = binary.Write(buf, binary.LittleEndian, uint64(1)) // Dst
+	// Slot ordinal: the v2 edge record's third field (rmp #2262). It must be
+	// written for the reader to reach the StringIdx bounds check this test names;
+	// omitting it would make the record truncate instead.
+	_ = binary.Write(buf, binary.LittleEndian, uint32(0)) // Slot
+	_ = binary.Write(buf, binary.LittleEndian, uint32(7)) // bad StringIdx
 	if _, err := ReadLabels(buf); !errors.Is(err, ErrLabelsCorrupted) {
 		t.Fatalf("edge string idx out-of-range = %v, want ErrLabelsCorrupted", err)
 	}

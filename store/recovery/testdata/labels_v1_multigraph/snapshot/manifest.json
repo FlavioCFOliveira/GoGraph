@@ -1,0 +1,37 @@
+{
+  "created_at": "2026-07-31T00:01:37.661187Z",
+  "graph_config": {
+    "directed": true,
+    "multigraph": true
+  },
+  "files": [
+    {
+      "name": "csr.bin",
+      "size": 2291,
+      "crc32c": 897310412
+    },
+    {
+      "name": "labels.bin",
+      "size": 159,
+      "crc32c": 3235874829
+    },
+    {
+      "name": "properties.bin",
+      "size": 32,
+      "crc32c": 1493055426
+    },
+    {
+      "name": "mapper.bin",
+      "size": 105,
+      "crc32c": 1228156366
+    },
+    {
+      "name": "edgehandles.bin",
+      "size": 145,
+      "crc32c": 2583497387
+    }
+  ],
+  "version": 3,
+  "order": 7,
+  "size": 9
+}
