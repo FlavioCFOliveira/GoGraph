@@ -13,17 +13,34 @@ pair cache.
 
 ---
 
-## Verdict: **NOT CERTIFIED at this head.**
+## Verdict: **no known correctness defect remains — but NOT YET CERTIFIED.**
 
-Two **CRITICAL** defects were found and fixed, one of which crashed the host process on a
-default engine. **Thirteen defects are fixed and committed** across four rounds. **Three
-remain open** — and one of those is a **newly exposed CRITICAL**: fixing the soak gate
-(#2259) let that layer run for the first time, and it immediately found a checkpoint
-capturing a **partial transaction** (#2269). That defect **bisects to the entry head**, so
-it is standing, not introduced here.
+Every CRITICAL and every HIGH correctness defect found in this cycle is fixed, and all four
+ACID properties now have evidence rather than assertion. What still blocks the word
+"certified" is not a suspected bug: it is that **parts of the durability evidence were found
+to be vacuous**, and evidence that cannot fail is not evidence.
 
-Certification is blocked on the set in §7, not on unknown risk: every open item is
-enumerated, reproduced, and has an owner.
+Specifically, `isPrefixOf` — the assertion carrying the WAL-truncation battery's core
+"recovery yields a prefix of committed state" property — tests **set membership only**, so an
+**empty** recovered graph passes against any fingerprint; `graphFingerprint` has no liveness
+gate, so a recovery that **resurrects a deleted node** fingerprints identically to correct
+behaviour; and `internal/crashinject` asserts **no graph shape at all**. Until those can
+fail, a green durability suite does not license an ACID claim. They are recorded in §7 and
+are the shortest path from here to certification.
+
+**Three CRITICAL defects** were found and fixed: a host-process crash on a default engine,
+wrong typed relationship counts, and a checkpoint publishing a **partial transaction**.
+**Fourteen defects are fixed and committed** across five rounds.
+
+**Two remain open, and NEITHER is a correctness defect** — one is a performance cliff
+attached to unreachable dead code (#2264), the other is non-determinism in `make ci` itself
+(#2268). Both are enumerated, reproduced and specified.
+
+The third CRITICAL is the one worth reading twice. Fixing the soak gate (#2259) — which
+looked like a Makefile chore — let that layer run **for the first time in roughly 260
+sprints**, and it immediately found a checkpoint capturing a partial transaction (#2269).
+That defect **bisects to the entry head**: standing, not introduced here. **An unrunnable
+gate is a defect, not housekeeping.**
 
 This is a stronger position than the entry state, where all four of the worst findings were
 present and invisible to a fully green suite.
@@ -175,7 +192,7 @@ HIGH or MEDIUM issue and no memory-safety bug.
 
 | rmp | Sev | Summary |
 |---|---|---|
-| **#2269** | **CRITICAL** | **A checkpoint can capture a PARTIAL TRANSACTION** — an edge snapshotted without both its endpoints (`Order != 2*Size`). The artefact records a state no serial schedule could produce, and a crash recovery replays it. **Bisects to the entry head `43348a70`: standing, not introduced here.** It was invisible because the test is soak-gated and the soak layer could not run at all until #2259; this is the first defect that fix exposed. |
+| ~~#2269~~ | ~~CRITICAL~~ | **FIXED** in round 5 — **a checkpoint could capture a PARTIAL TRANSACTION** — an edge snapshotted without both its endpoints (`Order != 2*Size`). The artefact records a state no serial schedule could produce, and a crash recovery replays it. **Bisects to the entry head `43348a70`: standing, not introduced here.** It was invisible because the test is soak-gated and the soak layer could not run at all until #2259; this is the first defect that fix exposed. |
 | ~~#2262~~ | ~~HIGH~~ | **FIXED** in round 4 — `labels.bin` **v2** carries a slot ordinal; v1 snapshots still open with v1 semantics, proven against a genuine pre-change v1 fixture. The work corrected this entry: the shape said to *lose* a type in fact **invents both**. |
 | ~~#2263~~ | ~~HIGH~~ | **FIXED** in round 2 — phantom row from a lossy float64 index key. The doc misattributed it to the probe key; the index *entries* are independently lossy. |
 | #2264 | HIGH | `CountPatternComp` is unreachable dead code; the projection spelling of a degree count is **983× slower** (2.813 ms vs 2.762 s). Its godoc claims otherwise. |
