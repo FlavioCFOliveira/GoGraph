@@ -41,6 +41,7 @@ import (
 	"unsafe"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
 
 // ErrShardFull is returned by [AdjList.AddNode] and [AdjList.AddEdge]
@@ -163,6 +164,17 @@ type AdjList[N comparable, W any] struct {
 	// path). It is set once at construction and never mutated thereafter, so it
 	// needs no synchronisation.
 	auxFactory func(length int, payload any) AuxColumn
+
+	// versioning arms adjacency MVCC; versionActive mirrors the number of live
+	// version records as a lock-free gate. Both inert unless
+	// [AdjList.EnableVersioning] is called. See mvcc_adj.go.
+	versioning    bool
+	versionActive atomic.Int64
+	// writeInfo / writeTS stamp the version records the current write creates.
+	// Plain fields, like commitDepth beside them, because the write path is
+	// single-writer by the layer above's contract; a reader never touches them.
+	writeInfo *mvcc.CommitInfo
+	writeTS   uint64
 
 	// dirtyShards lists the shards whose private builder must be frozen at the
 	// end of the current commit window. Appended on the first touch of a shard
@@ -312,7 +324,17 @@ type shardSlots struct {
 // lockstep across growth (upsertEdgeLocked), compaction (compactEntry), and
 // trimming (trimEntry, verbatim — the block has no slack notion).
 type adjEntry[W any] struct {
-	aux        AuxColumn // nil unless UpdateEntryAux set one; opaque, kept length-aligned by GrowSlot/CompactSlot
+	aux AuxColumn // nil unless UpdateEntryAux set one; opaque, kept length-aligned by GrowSlot/CompactSlot
+	// ver links this entry to the one it replaced, for MVCC (rmp #2281). Nil
+	// unless versioning is armed AND this entry superseded another.
+	//
+	// It lives HERE, inside the immutable entry, rather than in a side array
+	// beside it, and that placement is load-bearing: the entry is published
+	// with ONE atomic store, so a reader that sees an entry sees exactly the
+	// version chain that belonged to it. Two independent atomics cannot be read
+	// consistently without a lock, and a lock here would forfeit the lock-free
+	// read contract this type exists to provide. See mvcc_adj.go.
+	ver        *adjVersion[W]
 	neighbours []graph.NodeID
 	weights    []W
 	handles    []uint64 // nil unless AddEdgeH supplied a handle; parallel to neighbours when set
@@ -2243,6 +2265,35 @@ func (a *AdjList[N, W]) storeEntry(s *adjShard[W], intraIdx uint64, entry *adjEn
 	if base == nil {
 		base = s.slotsRef.Load()
 		firstTouchInWindow = inWindow // first time this shard is touched this window
+	}
+
+	// MVCC P3 (rmp #2281), inert unless armed: record the entry this write
+	// supersedes, so a reader that must not see the write can step back to it.
+	// Done HERE, before any branch publishes, because entry is not yet
+	// reachable by any reader and its ver field can still be set without
+	// synchronisation. Reads the slot from `base` rather than through
+	// slotsRef so an in-window write sees the builder's current entry.
+	if a.versioning {
+		var prev *adjEntry[W]
+		if base != nil && intraIdx < uint64(len(base.slots)) {
+			if p := atomic.LoadPointer(&base.slots[intraIdx]); p != nil {
+				prev = (*adjEntry[W])(p)
+			}
+		}
+		// prev == nil is the node's FIRST entry, and it still needs a record:
+		// otherwise creation is unversioned and a reader from before the node
+		// had any edge sees the edge anyway. See linkVersion.
+		if prev != entry {
+			if entry == nil {
+				// A delete publishes nil, which would drop the chain and make
+				// the node look as though it never had edges. Publish an EMPTY
+				// entry carrying the version instead: it reads identically to
+				// nil for anyone at or after the delete, and preserves the past
+				// for anyone before it.
+				entry = &adjEntry[W]{}
+			}
+			a.linkVersion(entry, prev, a.writeInfo, a.writeTS)
+		}
 	}
 
 	if base == nil || intraIdx >= uint64(len(base.slots)) {
