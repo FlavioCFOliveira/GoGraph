@@ -63,30 +63,53 @@ func frameBoundaries(t *testing.T, path string) []int64 {
 }
 
 // graphFingerprint produces a deterministic, content-addressable
-// summary of a recovered graph's observable state: every node id (in
-// ascending order), every outgoing edge from each node (sorted by
-// destination), every label per node (sorted), and every typed
-// property per node and per edge (sorted by key). The fingerprint is
-// returned as a single newline-separated string so two calls on
+// summary of a recovered graph's observable LIVE state: every live node
+// key (ascending), every label and typed property on it (sorted), and
+// every outgoing edge slot to a live destination, ordered by the CSR's
+// own total key — destination first, then edge handle. The fingerprint
+// is returned as a single newline-separated string so two calls on
 // equivalent graphs yield byte-identical output; this is the contract
 // the idempotent-replay assertion relies on.
 //
+// Three properties make the fingerprint capable of failing (task #2270):
+//
+//   - Liveness gate. A node tombstoned by [lpg.Graph.RemoveNode]
+//     contributes NOTHING — not its key line, not its labels or
+//     properties, and not its outgoing edges — and no live node emits an
+//     edge INTO a tombstoned destination. This mirrors the live topology
+//     that csr.BuildFromAdjListLive publishes. Without the gate a
+//     recovery that resurrects a deleted node fingerprints identically
+//     to a correct one.
+//
+//   - Total, stable slot order. Slots are ordered by (destination,
+//     handle) — the CSR's own total key — with [sort.SliceStable], so
+//     the output never depends on the physical order the adjacency entry
+//     happens to hold. A destination-only comparator is not total across
+//     parallel edges and leaves the order of equal keys unspecified.
+//
+//   - Slot identity. Each slot emits its handle and weight, and its
+//     per-handle labels and properties, so two parallel edges whose slot
+//     assignment differs produce different fingerprints. The
+//     pair-coalesced labels and properties are still emitted, once per
+//     destination, because the per-pair store is a distinct surface from
+//     the per-handle one and a recovery may populate either.
+//
 // The format is intentionally human-readable for debugging: a diff of
 // two fingerprints points directly at the divergent record.
+//
+//	N <key>                 live node, ascending by key
+//	 L <label>              node label, ascending
+//	 P <key>=<kind:value>   node property, ascending by key
+//	 E -> <dst>             live destination, ascending
+//	  EL <label>            pair-coalesced edge label, ascending
+//	  EP <key>=<value>      pair-coalesced edge property, ascending
+//	  S h=<handle> w=<w>    one edge slot, ascending by handle
+//	   SL <label>           per-handle edge label, ascending
+//	   SP <key>=<value>     per-handle edge property, ascending
 func graphFingerprint(t *testing.T, g *lpg.Graph[string, int64]) string {
 	t.Helper()
 	var sb strings.Builder
-	type node struct {
-		key string
-		id  graph.NodeID
-	}
-	var nodes []node
-	g.AdjList().Mapper().Walk(func(id graph.NodeID, k string) bool {
-		nodes = append(nodes, node{key: k, id: id})
-		return true
-	})
-	sort.Slice(nodes, func(i, j int) bool { return nodes[i].key < nodes[j].key })
-	for _, n := range nodes {
+	for _, n := range liveNodes(g) {
 		fmt.Fprintf(&sb, "N %s\n", n.key)
 		labels := append([]string(nil), g.NodeLabels(n.key)...)
 		sort.Strings(labels)
@@ -94,43 +117,126 @@ func graphFingerprint(t *testing.T, g *lpg.Graph[string, int64]) string {
 			fmt.Fprintf(&sb, " L %s\n", l)
 		}
 		props := g.NodeProperties(n.key)
-		keys := make([]string, 0, len(props))
-		for k := range props {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
+		for _, k := range sortedPropertyKeys(props) {
 			fmt.Fprintf(&sb, " P %s=%s\n", k, formatPropertyValue(props[k]))
 		}
-		// Outgoing edges (with weight).
-		type edge struct {
-			dst string
-			w   int64
+		writeEdgeSlots(&sb, g, n.key, n.id)
+	}
+	return sb.String()
+}
+
+// fingerprintNode pairs a live node's interned key with its NodeID so
+// the fingerprint can sort by key while still reading the adjacency
+// entry by id.
+type fingerprintNode struct {
+	key string
+	id  graph.NodeID
+}
+
+// liveNodes returns every NON-tombstoned interned node, ascending by
+// key. The tombstone filter is the liveness gate: [lpg.Graph.RemoveNode]
+// leaves the Mapper slot in place (NodeID stability is a hard contract),
+// so walking the Mapper without consulting IsTombstoned reports deleted
+// nodes as present.
+func liveNodes(g *lpg.Graph[string, int64]) []fingerprintNode {
+	var nodes []fingerprintNode
+	g.AdjList().Mapper().Walk(func(id graph.NodeID, k string) bool {
+		if g.IsTombstoned(id) {
+			return true
 		}
-		var edges []edge
-		for dst, w := range g.AdjList().Neighbours(n.key) {
-			edges = append(edges, edge{dst: dst, w: w})
+		nodes = append(nodes, fingerprintNode{key: k, id: id})
+		return true
+	})
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].key < nodes[j].key })
+	return nodes
+}
+
+// edgeSlot is one physical adjacency slot of a node, carrying the
+// destination key, the stable edge handle, and the weight.
+type edgeSlot struct {
+	dst    string
+	handle uint64
+	w      int64
+}
+
+// liveEdgeSlots returns every outgoing slot of srcID whose destination
+// is live, ordered by the CSR's total key (destination, handle). The
+// sort is stable so slots that share a key (possible only when no
+// handle was ever assigned, i.e. handle 0) keep a deterministic order
+// instead of an unspecified one.
+func liveEdgeSlots(g *lpg.Graph[string, int64], srcID graph.NodeID) []edgeSlot {
+	neighbours, weights, handles := g.AdjList().LoadEntryH(srcID)
+	slots := make([]edgeSlot, 0, len(neighbours))
+	for i, dstID := range neighbours {
+		if g.IsTombstoned(dstID) {
+			continue
 		}
-		sort.Slice(edges, func(i, j int) bool { return edges[i].dst < edges[j].dst })
-		for _, e := range edges {
-			fmt.Fprintf(&sb, " E -> %s w=%d\n", e.dst, e.w)
-			elabels := append([]string(nil), g.EdgeLabels(n.key, e.dst)...)
-			sort.Strings(elabels)
-			for _, l := range elabels {
-				fmt.Fprintf(&sb, "  EL %s\n", l)
+		dstKey, ok := g.AdjList().Mapper().Resolve(dstID)
+		if !ok {
+			continue
+		}
+		s := edgeSlot{dst: dstKey}
+		if i < len(weights) {
+			s.w = weights[i]
+		}
+		if i < len(handles) {
+			s.handle = handles[i]
+		}
+		slots = append(slots, s)
+	}
+	sort.SliceStable(slots, func(i, j int) bool {
+		if slots[i].dst != slots[j].dst {
+			return slots[i].dst < slots[j].dst
+		}
+		return slots[i].handle < slots[j].handle
+	})
+	return slots
+}
+
+// writeEdgeSlots renders the edge section of one node's fingerprint
+// block: one " E -> dst" header per distinct live destination carrying
+// the pair-coalesced labels and properties, followed by one "  S" line
+// per slot carrying that slot's handle, weight, and per-handle labels
+// and properties.
+func writeEdgeSlots(sb *strings.Builder, g *lpg.Graph[string, int64], srcKey string, srcID graph.NodeID) {
+	slots := liveEdgeSlots(g, srcID)
+	for i := 0; i < len(slots); {
+		dst := slots[i].dst
+		fmt.Fprintf(sb, " E -> %s\n", dst)
+		elabels := append([]string(nil), g.EdgeLabels(srcKey, dst)...)
+		sort.Strings(elabels)
+		for _, l := range elabels {
+			fmt.Fprintf(sb, "  EL %s\n", l)
+		}
+		eprops := g.EdgeProperties(srcKey, dst)
+		for _, k := range sortedPropertyKeys(eprops) {
+			fmt.Fprintf(sb, "  EP %s=%s\n", k, formatPropertyValue(eprops[k]))
+		}
+		for ; i < len(slots) && slots[i].dst == dst; i++ {
+			fmt.Fprintf(sb, "  S h=%d w=%d\n", slots[i].handle, slots[i].w)
+			slabels := append([]string(nil), g.EdgeLabelsByHandle(srcKey, dst, slots[i].handle)...)
+			sort.Strings(slabels)
+			for _, l := range slabels {
+				fmt.Fprintf(sb, "   SL %s\n", l)
 			}
-			eprops := g.EdgeProperties(n.key, e.dst)
-			ekeys := make([]string, 0, len(eprops))
-			for k := range eprops {
-				ekeys = append(ekeys, k)
-			}
-			sort.Strings(ekeys)
-			for _, k := range ekeys {
-				fmt.Fprintf(&sb, "  EP %s=%s\n", k, formatPropertyValue(eprops[k]))
+			sprops := g.EdgePropertiesByHandle(srcKey, dst, slots[i].handle)
+			for _, k := range sortedPropertyKeys(sprops) {
+				fmt.Fprintf(sb, "   SP %s=%s\n", k, formatPropertyValue(sprops[k]))
 			}
 		}
 	}
-	return sb.String()
+}
+
+// sortedPropertyKeys returns the keys of a property map in ascending
+// order so the fingerprint is independent of Go's randomised map
+// iteration.
+func sortedPropertyKeys(props map[string]lpg.PropertyValue) []string {
+	keys := make([]string, 0, len(props))
+	for k := range props {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // formatPropertyValue renders a PropertyValue as a kind-tagged string
@@ -160,20 +266,47 @@ func formatPropertyValue(v lpg.PropertyValue) string {
 	}
 }
 
+// walCheckpoint records the durable state of the monotonic workload
+// immediately after one of its transactions committed: the WAL file
+// size at that instant (so a truncation offset can be mapped back to
+// the transaction it lands after) and the fingerprint of the in-memory
+// graph the commit produced.
+type walCheckpoint struct {
+	// Fingerprint is the graph fingerprint immediately after the commit.
+	Fingerprint string
+	// Offset is the WAL file size immediately after the commit, i.e. the
+	// smallest truncation offset at which this transaction survives.
+	Offset int64
+}
+
 // writeMonotonicWorkload commits a deterministic, additive-only
-// sequence of ops via a typed store: AddNode, AddEdge, SetNodeLabel,
-// SetEdgeLabel, SetNodeProperty (every PropertyKind), SetEdgeProperty.
-// The workload is intentionally free of removes so any WAL prefix
-// produces a graph that is a strict subset of the final state — the
-// invariant required by [TestCrashInjection_TruncateEveryFrameBoundary]
-// and its sibling boundary tests.
+// sequence of ops via a typed store, ONE TRANSACTION PER NODE:
+// AddNode, SetNodeLabel, SetNodeProperty (every PropertyKind on the
+// first node), AddEdge, SetEdgeLabel, SetEdgeProperty.
 //
-// Returns a fingerprint of the in-memory graph immediately after
-// commit; the post-recovery fingerprint of the full WAL must equal
-// this value.
-func writeMonotonicWorkload(t *testing.T, dir string) string {
+// The shape is load-bearing for the prefix property that
+// [TestCrashInjection_TruncateEveryFrameBoundary] asserts. Each
+// transaction creates exactly one new node whose key sorts AFTER every
+// previously created key, populates that node's labels and properties,
+// and adds edges only FROM the new node to already-existing ones.
+// Because [graphFingerprint] emits nodes in ascending key order and a
+// node's own out-edges inside its own block, every committed state's
+// fingerprint is therefore a strict LINE-POSITIONAL PREFIX of the next
+// one — the invariant [isPrefixOf] checks. A single fat transaction (the
+// previous shape) could not exercise that invariant at all: recovery is
+// atomic, so every truncation before the lone commit marker yielded an
+// EMPTY graph, which the old membership-based isPrefixOf waved through
+// against any fingerprint.
+//
+// The returned checkpoints are ordered by increasing WAL offset; the
+// last one is the full committed state. The function fails the test if
+// the prefix invariant it promises does not actually hold, so a future
+// edit to the workload cannot silently make the boundary assertion
+// vacuous again.
+func writeMonotonicWorkload(t *testing.T, dir string) []walCheckpoint {
 	t.Helper()
-	w, err := wal.Open(filepath.Join(dir, "wal"))
+	walPath := filepath.Join(dir, "wal")
+	w, err := wal.Open(walPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,29 +319,109 @@ func writeMonotonicWorkload(t *testing.T, dir string) string {
 
 	knownTime := time.Date(2026, 5, 22, 13, 0, 0, 0, time.UTC)
 
-	tx := s.Begin()
-	_ = tx.AddNode("alice")
-	_ = tx.AddNode("bob")
-	_ = tx.AddEdge("alice", "bob", 42)
-	_ = tx.SetNodeLabel("alice", "Person")
-	_ = tx.SetNodeLabel("bob", "Person")
-	_ = tx.SetEdgeLabel("alice", "bob", "KNOWS")
-	_ = tx.SetNodeProperty("alice", "name", lpg.StringValue("Alice"))
-	_ = tx.SetNodeProperty("alice", "age", lpg.Int64Value(30))
-	_ = tx.SetNodeProperty("alice", "score", lpg.Float64Value(99.5))
-	_ = tx.SetNodeProperty("alice", "active", lpg.BoolValue(true))
-	_ = tx.SetNodeProperty("alice", "joined", lpg.TimeValue(knownTime))
-	_ = tx.SetNodeProperty("alice", "blob", lpg.BytesValue([]byte{1, 2, 3}))
-	_ = tx.SetEdgeProperty("alice", "bob", "since", lpg.StringValue("2026"))
-	_ = tx.SetEdgeProperty("alice", "bob", "weight", lpg.Int64Value(7))
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("Commit: %v", err)
+	// Every step creates node n<k> (keys sort ascending in creation
+	// order) and only ever appends to the END of the fingerprint.
+	steps := []func(tx *txn.Tx[string, int64]){
+		func(tx *txn.Tx[string, int64]) {
+			_ = tx.AddNode("n0")
+			_ = tx.SetNodeLabel("n0", "Person")
+			_ = tx.SetNodeProperty("n0", "name", lpg.StringValue("Alice"))
+			_ = tx.SetNodeProperty("n0", "age", lpg.Int64Value(30))
+			_ = tx.SetNodeProperty("n0", "score", lpg.Float64Value(99.5))
+			_ = tx.SetNodeProperty("n0", "active", lpg.BoolValue(true))
+			_ = tx.SetNodeProperty("n0", "joined", lpg.TimeValue(knownTime))
+			_ = tx.SetNodeProperty("n0", "blob", lpg.BytesValue([]byte{1, 2, 3}))
+		},
+		func(tx *txn.Tx[string, int64]) {
+			_ = tx.AddNode("n1")
+			_ = tx.SetNodeLabel("n1", "Person")
+			_ = tx.SetNodeProperty("n1", "name", lpg.StringValue("Bob"))
+			_ = tx.AddEdge("n1", "n0", 42)
+			_ = tx.SetEdgeLabel("n1", "n0", "KNOWS")
+			_ = tx.SetEdgeProperty("n1", "n0", "since", lpg.StringValue("2026"))
+			_ = tx.SetEdgeProperty("n1", "n0", "weight", lpg.Int64Value(7))
+		},
+		func(tx *txn.Tx[string, int64]) {
+			_ = tx.AddNode("n2")
+			_ = tx.SetNodeLabel("n2", "Robot")
+			_ = tx.SetNodeProperty("n2", "serial", lpg.BytesValue([]byte{0xAB, 0xCD}))
+			_ = tx.AddEdge("n2", "n0", 7)
+			_ = tx.SetEdgeLabel("n2", "n0", "OWNS")
+			_ = tx.AddEdge("n2", "n1", 8)
+			_ = tx.SetEdgeProperty("n2", "n1", "rate", lpg.Float64Value(0.25))
+		},
+		func(tx *txn.Tx[string, int64]) {
+			_ = tx.AddNode("n3")
+			_ = tx.SetNodeLabel("n3", "Person")
+			_ = tx.SetNodeLabel("n3", "Admin")
+			_ = tx.AddEdge("n3", "n2", -1)
+			_ = tx.SetEdgeLabel("n3", "n2", "MANAGES")
+			_ = tx.SetEdgeProperty("n3", "n2", "since", lpg.TimeValue(knownTime))
+		},
+		func(tx *txn.Tx[string, int64]) {
+			_ = tx.AddNode("n4")
+			_ = tx.SetNodeProperty("n4", "flag", lpg.BoolValue(false))
+			_ = tx.AddEdge("n4", "n0", 100)
+			_ = tx.AddEdge("n4", "n3", 200)
+			_ = tx.SetEdgeLabel("n4", "n3", "REPORTS_TO")
+		},
 	}
-	fp := graphFingerprint(t, g)
+
+	checkpoints := make([]walCheckpoint, 0, len(steps))
+	for i, step := range steps {
+		tx := s.Begin()
+		step(tx)
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("Commit(step %d): %v", i, err)
+		}
+		size, err := walFileSize(walPath)
+		if err != nil {
+			t.Fatalf("stat WAL after step %d: %v", i, err)
+		}
+		checkpoints = append(checkpoints, walCheckpoint{
+			Fingerprint: graphFingerprint(t, g),
+			Offset:      size,
+		})
+	}
 	if err := w.Close(); err != nil {
 		t.Fatalf("wal.Close: %v", err)
 	}
-	return fp
+
+	// Self-check: the workload promises that each committed state is a
+	// positional line-prefix of the next, and that each transaction grew
+	// both the WAL and the fingerprint. Verify it here so a future edit
+	// that breaks the shape fails loudly at the source rather than
+	// silently weakening the boundary assertion downstream.
+	for i := 1; i < len(checkpoints); i++ {
+		if checkpoints[i].Offset <= checkpoints[i-1].Offset {
+			t.Fatalf("workload step %d did not grow the WAL: offset %d <= %d",
+				i, checkpoints[i].Offset, checkpoints[i-1].Offset)
+		}
+		if checkpoints[i].Fingerprint == checkpoints[i-1].Fingerprint {
+			t.Fatalf("workload step %d did not change the graph", i)
+		}
+		if !isPrefixOf(checkpoints[i-1].Fingerprint, checkpoints[i].Fingerprint) {
+			t.Fatalf("workload step %d broke the prefix invariant\nprev:\n%s\nnext:\n%s",
+				i, checkpoints[i-1].Fingerprint, checkpoints[i].Fingerprint)
+		}
+	}
+	return checkpoints
+}
+
+// committedAt returns the fingerprint of the last transaction whose
+// commit was durable at or before the truncation offset off, and the
+// empty string when off falls before the first commit. It is the
+// hand-computable expectation the boundary harness compares recovery
+// against: recovery must reproduce EXACTLY the last committed state,
+// never a partial transaction and never a later one.
+func committedAt(checkpoints []walCheckpoint, off int64) string {
+	want := ""
+	for _, cp := range checkpoints {
+		if off >= cp.Offset {
+			want = cp.Fingerprint
+		}
+	}
+	return want
 }
 
 // writeFullWorkload commits the monotonic ops above plus a set of
@@ -254,6 +467,16 @@ func writeFullWorkload(t *testing.T, dir string) string {
 	_ = tx.DelNodeProperty("bob", "drop")
 	_ = tx.SetEdgeProperty("alice", "bob", "drop", lpg.StringValue("x"))
 	_ = tx.DelEdgeProperty("alice", "bob", "drop")
+	// A node that is created, wired up, and then DELETED inside the same
+	// transaction. It exists in the Mapper after replay but must be
+	// tombstoned, so neither the node nor the alice->carol arc appears in
+	// the fingerprint. This is what makes the idempotence assertions able
+	// to observe a recovery that resurrects a deleted node (task #2270).
+	_ = tx.AddNode("carol")
+	_ = tx.SetNodeLabel("carol", "Ghost")
+	_ = tx.SetNodeProperty("carol", "doomed", lpg.BoolValue(true))
+	_ = tx.AddEdge("alice", "carol", 3)
+	_ = tx.RemoveNode("carol")
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
@@ -280,13 +503,26 @@ func recoverProperties(t *testing.T, dir string) *lpg.Graph[string, int64] {
 
 // TestCrashInjection_TruncateEveryFrameBoundary is the headline
 // crash-injection harness. It writes a deterministic property-heavy
-// workload, snapshots the original WAL bytes, then for every record
-// boundary truncates the file at that offset and runs recovery. The
-// assertion is twofold: (a) Open never errors at a clean boundary
-// because each boundary represents a torn-after-fsync state, and (b)
-// the recovered graph is a strict prefix of the original — every node
-// / edge / property present after recovery must also have been present
-// in the in-memory graph at write time.
+// workload as a SEQUENCE of transactions, snapshots the original WAL
+// bytes, then for every record boundary truncates the file at that
+// offset and runs recovery. Three assertions, in order:
+//
+//  1. Open never errors at a clean boundary, because each boundary
+//     represents a torn-after-fsync state.
+//  2. The recovered fingerprint is a positional line-prefix of the full
+//     committed fingerprint ([isPrefixOf]) — recovery never invents
+//     state and never reorders it.
+//  3. The recovered fingerprint EQUALS, byte for byte, the state of the
+//     last transaction whose commit was durable at or before the cut
+//     ([committedAt]). This is the durability contract itself: no
+//     committed transaction lost, no uncommitted transaction surfaced.
+//
+// Assertion 3 is what makes assertion 2 non-vacuous. Before task #2270
+// this harness compared a single fat transaction against a
+// membership-only "prefix" test: every cut before the lone commit
+// marker recovered an EMPTY graph, which the old check accepted against
+// any fingerprint, so the battery could not observe a dropped node, a
+// duplicated edge, or a wholesale empty recovery.
 //
 // The truncation set is exhaustive: with N committed frames there are
 // N+1 boundaries (including offset 0 which yields an empty WAL).
@@ -297,11 +533,12 @@ func recoverProperties(t *testing.T, dir string) *lpg.Graph[string, int64] {
 func TestCrashInjection_TruncateEveryFrameBoundary(t *testing.T) {
 	t.Parallel()
 	// Phase 1: write a monotonic workload (no removes) to a reference
-	// directory. The boundary harness compares each truncated recovery
-	// against the full graph; using only additive ops keeps every WAL
-	// prefix a strict subset of the final state.
+	// directory, capturing the committed state after every transaction.
 	refDir := t.TempDir()
-	want := writeMonotonicWorkload(t, refDir)
+	checkpoints := writeMonotonicWorkload(t, refDir)
+	if len(checkpoints) < 2 {
+		t.Fatalf("expected at least 2 committed transactions, got %d", len(checkpoints))
+	}
 	walPath := filepath.Join(refDir, "wal")
 	origBytes, err := os.ReadFile(walPath) //nolint:gosec // path under t.TempDir
 	if err != nil {
@@ -313,7 +550,7 @@ func TestCrashInjection_TruncateEveryFrameBoundary(t *testing.T) {
 	}
 	// Phase 2: for every boundary, run recovery against a freshly
 	// truncated copy and assert the recovered graph is consistent.
-	fullFingerprint := want
+	fullFingerprint := checkpoints[len(checkpoints)-1].Fingerprint
 	for i, off := range boundaries {
 		i, off := i, off
 		t.Run(fmt.Sprintf("boundary_%d_at_%d", i, off), func(t *testing.T) {
@@ -331,49 +568,357 @@ func TestCrashInjection_TruncateEveryFrameBoundary(t *testing.T) {
 			}
 			g := recoverProperties(t, dir)
 			gotFP := graphFingerprint(t, g)
-			// The full-cut at the final boundary must reproduce the
-			// in-memory state byte-for-byte; intermediate cuts must
-			// produce a strict prefix (no extra state).
-			if off == int64(len(origBytes)) {
-				if gotFP != fullFingerprint {
-					t.Fatalf("full-WAL recovery diverged from in-memory state\nwant:\n%s\ngot:\n%s", fullFingerprint, gotFP)
+			wantFP := committedAt(checkpoints, off)
+			if wantFP == "" {
+				// The cut lands before the first commit marker: recovery
+				// must surface NOTHING. Asserted positively — an empty
+				// graph is only correct here, never a free pass.
+				if gotFP != "" {
+					t.Fatalf("recovery at boundary %d (off=%d) surfaced uncommitted state:\n%s", i, off, gotFP)
 				}
 				return
 			}
-			// Prefix consistency: every line in gotFP must appear in
-			// fullFingerprint at the same position (same prefix
-			// length).
+			// Prefix consistency: gotFP must be a positional line-prefix
+			// of the full committed fingerprint.
 			if !isPrefixOf(gotFP, fullFingerprint) {
-				t.Fatalf("recovery at boundary %d (off=%d) produced inconsistent state\nfull:\n%s\nrecovered:\n%s", i, off, fullFingerprint, gotFP)
+				t.Fatalf("recovery at boundary %d (off=%d) is not a prefix of committed state\nfull:\n%s\nrecovered:\n%s",
+					i, off, fullFingerprint, gotFP)
+			}
+			// Durability: gotFP must be EXACTLY the last committed state.
+			if gotFP != wantFP {
+				t.Fatalf("recovery at boundary %d (off=%d) diverged from the last committed transaction\nwant:\n%s\ngot:\n%s",
+					i, off, wantFP, gotFP)
 			}
 		})
 	}
 }
 
-// isPrefixOf returns true when every line of got appears in want in
-// the same order at the same offset, i.e. got is a textual prefix of
-// want after sort-stable formatting. Used by the prefix-consistency
-// assertion above. The fingerprint is structured so a strict prefix
-// of the WAL produces a strict prefix of the fingerprint (modulo
-// suffix lines that referenced nodes interned only by later frames —
-// those nodes are simply absent from gotFP).
+// isPrefixOf reports whether got is a POSITIONAL LINE-PREFIX of want:
+// got has no more lines than want, and got's line i is byte-identical
+// to want's line i for every i. It is the assertion that carries the
+// crash-injection battery's core property — that recovery yields a
+// prefix of committed state, never an arbitrary subset of it.
+//
+// Two degenerate cases are rejected explicitly, because accepting them
+// is what made the battery vacuous before task #2270:
+//
+//   - An EMPTY got is not a prefix of a non-empty want. The previous
+//     implementation split "" into a single empty line, skipped it, and
+//     returned true — so a recovery that produced NOTHING passed
+//     against ANY fingerprint. Callers that legitimately expect an
+//     empty recovery must assert that positively.
+//
+//   - A got whose lines are a mere SUBSET of want's is not a prefix.
+//     The previous implementation built a set of want's lines and
+//     tested membership, checking neither order nor position nor
+//     completeness — so a recovery that dropped half its nodes passed,
+//     because every surviving line was still a member.
+//
+// The workload in [writeMonotonicWorkload] is shaped so that every
+// committed state genuinely is a positional prefix of the next; that
+// invariant is self-checked there.
 func isPrefixOf(got, want string) bool {
-	// A node visible in `got` must also be visible in `want`. Properties
-	// / labels on shared nodes must be a subset. Same for edges.
-	gotLines := strings.Split(strings.TrimRight(got, "\n"), "\n")
-	wantSet := make(map[string]struct{}, len(want)/16)
-	for _, l := range strings.Split(strings.TrimRight(want, "\n"), "\n") {
-		wantSet[l] = struct{}{}
+	if got == "" {
+		// Only an empty want has an empty prefix; an empty recovery is
+		// never evidence that a committed prefix survived.
+		return want == ""
 	}
-	for _, l := range gotLines {
-		if l == "" {
-			continue
-		}
-		if _, ok := wantSet[l]; !ok {
+	gotLines := strings.Split(strings.TrimRight(got, "\n"), "\n")
+	wantLines := strings.Split(strings.TrimRight(want, "\n"), "\n")
+	if len(gotLines) > len(wantLines) {
+		return false
+	}
+	for i, line := range gotLines {
+		if wantLines[i] != line {
 			return false
 		}
 	}
 	return true
+}
+
+// TestIsPrefixOf_RejectsEmptyAndNonPrefix is the direct proof that the
+// prefix assertion CAN FAIL. It drives [isPrefixOf] with the exact
+// defects the crash-injection battery exists to catch — an empty
+// recovery, a dropped node, a reordered fingerprint, an over-long
+// fingerprint — and requires a false for each, while requiring a true
+// for the genuine prefixes.
+//
+// Before task #2270 every "want false" row below returned TRUE: the
+// implementation tested set membership only, so it checked neither
+// order, nor position, nor completeness.
+func TestIsPrefixOf_RejectsEmptyAndNonPrefix(t *testing.T) {
+	t.Parallel()
+	const full = "N a\n L A\n P k=int64:1\nN b\n L B\nN c\n"
+	cases := []struct {
+		name string
+		got  string
+		want string
+		ok   bool
+	}{
+		{name: "identical", got: full, want: full, ok: true},
+		{name: "genuine prefix, one node", got: "N a\n L A\n", want: full, ok: true},
+		{name: "genuine prefix, two nodes", got: "N a\n L A\n P k=int64:1\nN b\n", want: full, ok: true},
+		{name: "both empty", got: "", want: "", ok: true},
+
+		// The degenerate case: an EMPTY recovered graph. The old
+		// implementation split "" into one empty line, skipped it, and
+		// returned true against ANY fingerprint.
+		{name: "empty recovery against non-empty state", got: "", want: full, ok: false},
+
+		// A dropped node. Every surviving line is still a MEMBER of want,
+		// so the old membership test accepted it.
+		{name: "dropped first node", got: "N b\n L B\nN c\n", want: full, ok: false},
+		{name: "dropped middle node", got: "N a\n L A\n P k=int64:1\nN c\n", want: full, ok: false},
+		{name: "dropped label inside a kept node", got: "N a\n P k=int64:1\nN b\n", want: full, ok: false},
+
+		// Reordering: same multiset of lines, wrong order.
+		{name: "reordered lines", got: " L A\nN a\n", want: full, ok: false},
+
+		// Extra or altered state.
+		{name: "longer than want", got: full + "N d\n", want: full, ok: false},
+		{name: "altered property value", got: "N a\n L A\n P k=int64:2\n", want: full, ok: false},
+		{name: "line absent from want", got: "N a\n L Z\n", want: full, ok: false},
+		{name: "non-empty against empty want", got: "N a\n", want: "", ok: false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isPrefixOf(tc.got, tc.want); got != tc.ok {
+				t.Fatalf("isPrefixOf(%q, %q) = %v, want %v", tc.got, tc.want, got, tc.ok)
+			}
+		})
+	}
+}
+
+// TestGraphFingerprint_LivenessGate is the direct proof that the
+// fingerprint's liveness gate CAN FAIL to match a resurrected node. It
+// builds one graph, fingerprints it, tombstones a node, fingerprints
+// again, then revives the node and fingerprints a third time.
+//
+// The three fingerprints must be: live != tombstoned, and revived ==
+// live. Before task #2270 all three were IDENTICAL, because the
+// fingerprint walked the Mapper with no liveness gate — so a recovery
+// that resurrected a deleted node was indistinguishable from a correct
+// one.
+func TestGraphFingerprint_LivenessGate(t *testing.T) {
+	t.Parallel()
+	g := lpg.New[string, int64](adjlist.Config{Directed: true})
+	if err := g.AddEdge("alice", "bob", 1); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := g.SetNodeLabel("bob", "Person"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
+	if err := g.SetNodeProperty("bob", "name", lpg.StringValue("Bob")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
+	live := graphFingerprint(t, g)
+	if !strings.Contains(live, "N bob\n") {
+		t.Fatalf("live fingerprint must carry bob:\n%s", live)
+	}
+
+	g.RemoveNode("bob")
+	dead := graphFingerprint(t, g)
+	if dead == live {
+		t.Fatalf("fingerprint did not observe the tombstone: a resurrected node "+
+			"is indistinguishable from a correct recovery\n%s", dead)
+	}
+	if strings.Contains(dead, "N bob") {
+		t.Fatalf("tombstoned node still contributes its key line:\n%s", dead)
+	}
+	// The dangling arc alice->bob must go too: RemoveNode tombstones
+	// without stripping incident edges, and the live topology
+	// (csr.BuildFromAdjListLive) omits arcs incident to a dead node.
+	if strings.Contains(dead, "E -> bob") {
+		t.Fatalf("edge into a tombstoned node still contributes:\n%s", dead)
+	}
+
+	// AddNode clears the tombstone; the fingerprint must return to the
+	// live value exactly, so the gate is a filter, not a lossy rewrite.
+	if err := g.AddNode("bob"); err != nil {
+		t.Fatalf("AddNode (revive): %v", err)
+	}
+	if revived := graphFingerprint(t, g); revived != live {
+		t.Fatalf("revived fingerprint diverged from the live one\nlive:\n%s\nrevived:\n%s", live, revived)
+	}
+}
+
+// TestGraphFingerprint_ParallelSlotAssignment is the direct proof that
+// the fingerprint CAN FAIL when two parallel edges swap their slot
+// assignment. Two multigraph edges a->b carry distinct handles; the
+// control graph attaches label X and property "one" to the first handle
+// and Y / "two" to the second, and the swapped graph attaches them the
+// other way round.
+//
+// The fingerprints must differ. Before task #2270 they were IDENTICAL:
+// edge labels and properties were read through the endpoint-pair
+// surface only, and the edge comparator sorted by destination alone, so
+// per-slot identity never reached the output.
+func TestGraphFingerprint_ParallelSlotAssignment(t *testing.T) {
+	t.Parallel()
+	build := func(firstLabel, secondLabel, firstProp, secondProp string) string {
+		g := lpg.New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+		h1, err := g.AddEdgeH("a", "b", 10)
+		if err != nil {
+			t.Fatalf("AddEdgeH: %v", err)
+		}
+		h2, err := g.AddEdgeH("a", "b", 20)
+		if err != nil {
+			t.Fatalf("AddEdgeH: %v", err)
+		}
+		if h1 == h2 {
+			t.Fatalf("parallel edges must get distinct handles, both = %d", h1)
+		}
+		g.SetEdgeLabelByHandle("a", "b", h1, firstLabel)
+		g.SetEdgeLabelByHandle("a", "b", h2, secondLabel)
+		if err := g.SetEdgePropertyByHandle("a", "b", h1, "role", lpg.StringValue(firstProp)); err != nil {
+			t.Fatalf("SetEdgePropertyByHandle: %v", err)
+		}
+		if err := g.SetEdgePropertyByHandle("a", "b", h2, "role", lpg.StringValue(secondProp)); err != nil {
+			t.Fatalf("SetEdgePropertyByHandle: %v", err)
+		}
+		return graphFingerprint(t, g)
+	}
+	control := build("X", "Y", "one", "two")
+	swapped := build("Y", "X", "two", "one")
+	if control == swapped {
+		t.Fatalf("swapping the slot assignment of two parallel edges left the "+
+			"fingerprint unchanged; per-slot identity is invisible\n%s", control)
+	}
+	// The control must be reproducible: the comparator has to be total
+	// and stable, not merely different from the swapped case.
+	if again := build("X", "Y", "one", "two"); again != control {
+		t.Fatalf("fingerprint is not deterministic across identical builds\nfirst:\n%s\nsecond:\n%s", control, again)
+	}
+	// Both slots must be individually visible.
+	for _, want := range []string{"SL X", "SL Y", "SP role=string:one", "SP role=string:two"} {
+		if !strings.Contains(control, want) {
+			t.Fatalf("fingerprint omits %q:\n%s", want, control)
+		}
+	}
+}
+
+// TestCrashInjection_TombstonedNodeNotResurrected is the end-to-end
+// durability proof for node deletion: a transaction creates a node,
+// wires an edge to it, and deletes it; recovery must replay the
+// deletion, not just the creation.
+//
+// The assertion bites only because [graphFingerprint] has a liveness
+// gate: if recovery failed to reconstruct the tombstone the recovered
+// fingerprint would carry "N carol" (and the dangling arc) while the
+// pre-crash one does not.
+func TestCrashInjection_TombstonedNodeNotResurrected(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	want := writeFullWorkload(t, dir)
+	if strings.Contains(want, "N carol") {
+		t.Fatalf("pre-crash fingerprint must not carry the deleted node:\n%s", want)
+	}
+	g := recoverProperties(t, dir)
+	// The Mapper must still hold the slot (NodeID stability is a hard
+	// contract), so the only thing keeping carol out of the fingerprint
+	// is the reconstructed tombstone.
+	id, ok := g.AdjList().Mapper().Lookup("carol")
+	if !ok {
+		t.Fatal("recovery did not intern the deleted node; the test would pass for the wrong reason")
+	}
+	if !g.IsTombstoned(id) {
+		t.Fatal("recovery resurrected a deleted node: the tombstone was not replayed")
+	}
+	if got := graphFingerprint(t, g); got != want {
+		t.Fatalf("recovered state diverged from the pre-crash state\nwant:\n%s\ngot:\n%s", want, got)
+	}
+}
+
+// TestCrashInjection_ParallelEdgeSlotIdentitySurvivesRecovery is the
+// end-to-end durability proof for per-slot identity: a transaction
+// commits two PARALLEL edges a->b with distinct stable handles, each
+// carrying its own label and property, and recovery must restore the
+// same label and property on the same handle.
+//
+// The assertion bites only because [graphFingerprint] reads the
+// per-handle surfaces and orders slots by (destination, handle): a
+// recovery that swapped the two slots' labels would produce an
+// identical fingerprint under the endpoint-pair-keyed formatting this
+// test file used before task #2270.
+func TestCrashInjection_ParallelEdgeSlotIdentitySurvivesRecovery(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	w, err := wal.Open(filepath.Join(dir, "wal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := lpg.New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
+	s := txn.NewStoreWithOptions[string, int64](g, w, txn.Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
+	const (
+		handleX = 11
+		handleY = 22
+	)
+	tx := s.Begin()
+	if err := tx.AddEdgeWithHandle("a", "b", 10, handleX); err != nil {
+		t.Fatalf("AddEdgeWithHandle(X): %v", err)
+	}
+	if err := tx.AddEdgeWithHandle("a", "b", 20, handleY); err != nil {
+		t.Fatalf("AddEdgeWithHandle(Y): %v", err)
+	}
+	if err := tx.SetEdgeLabelByHandle("a", "b", handleX, "X"); err != nil {
+		t.Fatalf("SetEdgeLabelByHandle(X): %v", err)
+	}
+	if err := tx.SetEdgeLabelByHandle("a", "b", handleY, "Y"); err != nil {
+		t.Fatalf("SetEdgeLabelByHandle(Y): %v", err)
+	}
+	if err := tx.SetEdgePropertyByHandle("a", "b", handleX, "role", lpg.StringValue("one")); err != nil {
+		t.Fatalf("SetEdgePropertyByHandle(X): %v", err)
+	}
+	if err := tx.SetEdgePropertyByHandle("a", "b", handleY, "role", lpg.StringValue("two")); err != nil {
+		t.Fatalf("SetEdgePropertyByHandle(Y): %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	want := graphFingerprint(t, g)
+	if err := w.Close(); err != nil {
+		t.Fatalf("wal.Close: %v", err)
+	}
+
+	// Guard: the pre-crash fingerprint must actually carry both slots
+	// distinctly, otherwise the comparison below could pass blind.
+	for _, marker := range []string{"S h=11 w=10", "S h=22 w=20", "SL X", "SL Y", "SP role=string:one", "SP role=string:two"} {
+		if !strings.Contains(want, marker) {
+			t.Fatalf("pre-crash fingerprint omits %q:\n%s", marker, want)
+		}
+	}
+
+	rec := recoverProperties(t, dir)
+	if got := graphFingerprint(t, rec); got != want {
+		t.Fatalf("parallel-edge slot identity did not survive recovery\nwant:\n%s\ngot:\n%s", want, got)
+	}
+	// Assert the per-handle mapping directly too, so the failure message
+	// names the swapped slot rather than a whole fingerprint diff.
+	for _, tc := range []struct {
+		label, role string
+		handle      uint64
+	}{
+		{handle: handleX, label: "X", role: "one"},
+		{handle: handleY, label: "Y", role: "two"},
+	} {
+		if labels := rec.EdgeLabelsByHandle("a", "b", tc.handle); len(labels) != 1 || labels[0] != tc.label {
+			t.Errorf("handle %d recovered labels %v, want [%s]", tc.handle, labels, tc.label)
+		}
+		props := rec.EdgePropertiesByHandle("a", "b", tc.handle)
+		v, ok := props["role"]
+		if !ok {
+			t.Errorf("handle %d lost its role property", tc.handle)
+			continue
+		}
+		if got, _ := v.String(); got != tc.role {
+			t.Errorf("handle %d role = %q, want %q", tc.handle, got, tc.role)
+		}
+	}
 }
 
 // TestCrashInjection_TruncateMidFrameHeader truncates within the
