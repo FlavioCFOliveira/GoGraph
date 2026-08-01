@@ -8,7 +8,7 @@ security, or resource-exhaustion audits of the 2026-07-26 and 2026-07-31 cycles,
 not run the nightly layer. What it certifies is the property those cycles left open: that a
 read observes one instant of the graph, and that no read takes the visibility barrier.
 
-The 35 programs under `examples/` are **instruments**, not subjects. One was added this
+The 36 programs under `examples/` are **instruments**, not subjects. One was added this
 cycle because the existing set could not see the defects below.
 
 ---
