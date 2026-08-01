@@ -63,6 +63,42 @@ func (a *AdjList[N, W]) LoadEntryView(id graph.NodeID) EntryView[W] {
 	return viewOf(loadEntry[W](&a.shards[id&shardMask], uint64(id)>>shardBits))
 }
 
+// At names the instant an entry read resolves at.
+//
+// The zero value means "the current entry", which is what every pre-MVCC caller
+// wants and what a writer inside the visibility barrier requires: it applies
+// eagerly and must see its own not-yet-published work. Versioned is a separate
+// field rather than a StartTS sentinel because zero is a legitimate timestamp
+// for a reader that started before any commit.
+type At struct {
+	Versioned bool
+	StartTS   uint64
+	TxID      uint64
+}
+
+// LoadEntryHAt is [AdjList.LoadEntryH] resolving the entry at the instant at
+// names, rather than always at the current one.
+//
+// It exists so a bulk scan — the CSR build (rmp #2293) — can be written once and
+// select its instant with a loop-invariant branch, instead of paying an extra
+// call frame per node to a wrapper above this layer. That wrapper measured
+// +15.84% on the build; folding the branch in here keeps the call count per node
+// at exactly what LoadEntryH costs.
+//
+// Safe for concurrent use.
+func (a *AdjList[N, W]) LoadEntryHAt(
+	id graph.NodeID, at At,
+) (neighbours []graph.NodeID, weights []W, handles []uint64) {
+	e := loadEntry[W](&a.shards[id&shardMask], uint64(id)>>shardBits)
+	if at.Versioned {
+		e = a.entryAsOfLoaded(e, at.StartTS, at.TxID)
+	}
+	if e == nil {
+		return nil, nil, nil
+	}
+	return e.neighbours, e.weights, e.handles
+}
+
 // EntryViewAsOf returns every column of id's adjacency entry as it was at
 // startTS for a reader running as txID.
 //

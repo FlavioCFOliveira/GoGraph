@@ -31,8 +31,8 @@ func TestEdgeTypeFilterCache_HitOnSameEpoch(t *testing.T) {
 		return map[uint64]string{0: "LIKES"}
 	}
 
-	first := c.getOrBuild("LIKES", 1, build)
-	second := c.getOrBuild("LIKES", 1, build)
+	first := c.getOrBuild("LIKES", atEpoch(1), build)
+	second := c.getOrBuild("LIKES", atEpoch(1), build)
 
 	if calls != 1 {
 		t.Fatalf("build called %d times, want 1 (second call must hit)", calls)
@@ -51,11 +51,11 @@ func TestEdgeTypeFilterCache_MissOnAdvancedEpoch(t *testing.T) {
 	c := newEdgeTypeFilterCache(0)
 	calls := 0
 
-	c.getOrBuild("LIKES", 1, func() map[uint64]string {
+	c.getOrBuild("LIKES", atEpoch(1), func() map[uint64]string {
 		calls++
 		return map[uint64]string{0: "LIKES"}
 	})
-	got := c.getOrBuild("LIKES", 2, func() map[uint64]string {
+	got := c.getOrBuild("LIKES", atEpoch(2), func() map[uint64]string {
 		calls++
 		return map[uint64]string{5: "LIKES"}
 	})
@@ -76,17 +76,17 @@ func TestEdgeTypeFilterCache_DistinctKeysDoNotCollide(t *testing.T) {
 	c := newEdgeTypeFilterCache(0)
 	likesCalls, knowsCalls := 0, 0
 
-	c.getOrBuild("LIKES", 1, func() map[uint64]string {
+	c.getOrBuild("LIKES", atEpoch(1), func() map[uint64]string {
 		likesCalls++
 		return map[uint64]string{0: "LIKES"}
 	})
-	c.getOrBuild("KNOWS", 1, func() map[uint64]string {
+	c.getOrBuild("KNOWS", atEpoch(1), func() map[uint64]string {
 		knowsCalls++
 		return map[uint64]string{1: "KNOWS"}
 	})
 	// Re-fetch LIKES at the same epoch: must still be a hit, unaffected by
 	// the intervening KNOWS build.
-	c.getOrBuild("LIKES", 1, func() map[uint64]string {
+	c.getOrBuild("LIKES", atEpoch(1), func() map[uint64]string {
 		likesCalls++
 		return map[uint64]string{0: "LIKES"}
 	})
@@ -111,12 +111,12 @@ func TestEdgeTypeFilterCache_EvictsLeastRecentlyUsed(t *testing.T) {
 		return func() map[uint64]string { return map[uint64]string{0: v} }
 	}
 
-	c.getOrBuild("A", 1, build("A"))
-	c.getOrBuild("B", 1, build("B"))
+	c.getOrBuild("A", atEpoch(1), build("A"))
+	c.getOrBuild("B", atEpoch(1), build("B"))
 	// Touch A so B becomes the least-recently-used entry.
-	c.getOrBuild("A", 1, build("A"))
+	c.getOrBuild("A", atEpoch(1), build("A"))
 	// Installing a third distinct key at capacity 2 must evict B, not A.
-	c.getOrBuild("C", 1, build("C"))
+	c.getOrBuild("C", atEpoch(1), build("C"))
 
 	if got := c.Len(); got != 2 {
 		t.Fatalf("cache Len() = %d, want 2 (bounded at capacity)", got)
@@ -137,7 +137,7 @@ func TestEdgeTypeFilterCache_EvictsLeastRecentlyUsed(t *testing.T) {
 	// Confirm the eviction is behaviourally real, not just a bookkeeping
 	// artefact: fetching B now must rebuild rather than hit.
 	bCalls := 0
-	c.getOrBuild("B", 1, func() map[uint64]string {
+	c.getOrBuild("B", atEpoch(1), func() map[uint64]string {
 		bCalls++
 		return map[uint64]string{0: "B"}
 	})
@@ -173,7 +173,7 @@ func TestEdgeTypeFilterCache_ConcurrentBuildersOnSameKey(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func() {
 			defer wg.Done()
-			got := c.getOrBuild("LIKES", 1, func() map[uint64]string {
+			got := c.getOrBuild("LIKES", atEpoch(1), func() map[uint64]string {
 				return map[uint64]string{0: "LIKES"}
 			})
 			if got[0] != "LIKES" {

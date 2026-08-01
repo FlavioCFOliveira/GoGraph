@@ -87,27 +87,67 @@ import (
 // [EngineOptions.DisableCSRPairCache] exists for an Engine that is long-lived over
 // a large graph and would rather pay the rebuild than the retention.
 //
+// csrPairKey identifies the graph state a cached pair describes.
+//
+// # Why the epoch alone is not a key under MVCC
+//
+// It was one before MVCC, when the pair was a pure function of the live
+// adjacency and the epoch moved on every change to it. It stopped being one when
+// the pair became a function of the reader's INSTANT as well (rmp #2293): two
+// readers holding different snapshots need different pairs, and an epoch-only
+// key hands each of them the other's — which made a committed edge invisible to
+// a reader whose snapshot postdated the commit, and let an older reader traverse
+// an arc to a node that did not exist at its instant.
+//
+// Adding the epoch to startTS would not be enough on its own either, and adding
+// startTS to the epoch is what actually closes it. Writes apply EAGERLY and
+// publish their commit timestamp afterwards, so the epoch can move before the
+// commit is visible: a reader that starts in that window builds a pair without
+// the arc and files it under the already-moved epoch, and the next reader — for
+// whom the commit has since published — is served it. Two reads with the same
+// startTS, in contrast, see the same set of published commits by construction,
+// because startTS is drawn from the published instant and only moves when a
+// commit publishes.
+//
+// # Both components, and what each one is for
+//
+//   - startTS answers WHICH COMMITS the pair includes. It is the load-bearing
+//     component for a snapshot reader.
+//   - epoch answers which topology the PRESENT-reading build saw, and is the
+//     only component a nil-snapshot reader has. It is also kept for snapshot
+//     readers, where it is redundant but free, so that a pair can never outlive
+//     a topology change that startTS somehow failed to distinguish.
+//
+// versioned keeps a present read from ever colliding with a snapshot read that
+// happens to carry startTS 0 — a legitimate value for a reader that started
+// before any commit.
+type csrPairKey struct {
+	epoch     uint64
+	startTS   uint64
+	versioned bool
+}
+
 // csrPairCache is safe for concurrent use by any number of goroutines.
 type csrPairCache struct {
 	mu    sync.Mutex
 	fwd   *csr.CSR[float64]
 	rev   *csr.CSR[float64]
-	epoch uint64
+	key   csrPairKey
 	valid bool
 }
 
 // newCSRPairCache returns an empty cache.
 func newCSRPairCache() *csrPairCache { return &csrPairCache{} }
 
-// get returns the cached pair when it was built at the graph's current
-// topology epoch, or (nil, nil, false) when the caller must build one.
-func (c *csrPairCache) get(epoch uint64) (fwd, rev *csr.CSR[float64], ok bool) {
+// get returns the cached pair when it describes exactly the state key names, or
+// (nil, nil, false) when the caller must build one.
+func (c *csrPairCache) get(key csrPairKey) (fwd, rev *csr.CSR[float64], ok bool) {
 	if c == nil {
 		return nil, nil, false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.valid || c.epoch != epoch {
+	if !c.valid || c.key != key {
 		metrics.IncCounter("cypher.csr_pair_cache.misses", 1)
 		return nil, nil, false
 	}
@@ -115,27 +155,40 @@ func (c *csrPairCache) get(epoch uint64) (fwd, rev *csr.CSR[float64], ok bool) {
 	return c.fwd, c.rev, true
 }
 
-// put records a pair built at epoch. A concurrent builder may have already
-// stored a NEWER epoch, in which case this call is dropped rather than
-// regressing the entry — both pairs are individually valid, so keeping the
-// newer one is always at least as correct.
-func (c *csrPairCache) put(epoch uint64, fwd, rev *csr.CSR[float64]) {
+// put records a pair describing the state key names.
+//
+// A concurrent builder may have already stored a pair at a LATER instant, in
+// which case this call is dropped rather than regressing the entry — both pairs
+// are individually valid, so keeping the one more readers will ask for is always
+// at least as useful. "Later" compares startTS first and the epoch second,
+// because startTS is what a snapshot reader's key turns on; a present read
+// (versioned false) carries startTS 0 and so is ordered by its epoch alone,
+// which is the only thing that distinguishes two of them.
+func (c *csrPairCache) put(key csrPairKey, fwd, rev *csr.CSR[float64]) {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.valid && c.epoch > epoch {
+	if c.valid && c.key.newerThan(key) {
 		metrics.IncCounter("cypher.csr_pair_cache.stale_puts_dropped", 1)
 		return
 	}
 	if c.valid {
-		// Replacing an entry at a superseded epoch: the equivalent of an eviction,
+		// Replacing an entry at a superseded state: the equivalent of an eviction,
 		// and the signal that tells an operator the graph is being written often
 		// enough that the cache is not paying for itself.
 		metrics.IncCounter("cypher.csr_pair_cache.replacements", 1)
 	}
-	c.fwd, c.rev, c.epoch, c.valid = fwd, rev, epoch, true
+	c.fwd, c.rev, c.key, c.valid = fwd, rev, key, true
+}
+
+// newerThan reports whether k describes a strictly later state than other.
+func (k csrPairKey) newerThan(other csrPairKey) bool {
+	if k.startTS != other.startTS {
+		return k.startTS > other.startTS
+	}
+	return k.epoch > other.epoch
 }
 
 // csrPairCached returns the forward/reverse CSR pair for g, reusing the cached
@@ -145,31 +198,61 @@ func (c *csrPairCache) put(epoch uint64, fwd, rev *csr.CSR[float64]) {
 // build), in which case it falls back to an uncached [csrPairFromGraph] — correct,
 // just unamortised, exactly as [edgeTypeFilterFor] does.
 //
-// The epoch is read BEFORE the build so a topology change racing the build cannot
-// be recorded under the newer epoch: the resulting entry is then stamped with the
-// older epoch and the next caller rebuilds. Reading it after would risk caching a
-// pair that predates the epoch it claims.
+// The key the entry is filed under comes BACK from the build, sampled with it,
+// rather than being read here beforehand: a topology change racing the build
+// would otherwise have the pair recorded under a state it does not describe.
 func csrPairCached(cache *csrPairCache, g *lpg.ReadView[string, float64]) (fwd, rev *csr.CSR[float64]) {
-	if cache == nil || g == nil {
-		return csrPairFromGraph(g)
-	}
-	epoch := g.TopoGeneration()
-	if f, r, ok := cache.get(epoch); ok {
-		return f, r
-	}
-	f, r := csrPairFromGraph(g)
-	cache.put(epoch, f, r)
+	f, r, _ := csrPairCachedAt(cache, g)
 	return f, r
+}
+
+// csrPairCachedAt is [csrPairCached] also returning the key the pair it hands
+// back describes, for a caller that derives a second structure from the pair and
+// must file it under the same state — see [edgeTypeFilterFor].
+func csrPairCachedAt(
+	cache *csrPairCache, g *lpg.ReadView[string, float64],
+) (fwd, rev *csr.CSR[float64], at csrPairKey) {
+	if cache == nil || g == nil {
+		f, r, built := csrPairFromGraphAt(g)
+		return f, r, built
+	}
+	key := csrPairKeyFor(g)
+	if f, r, ok := cache.get(key); ok {
+		return f, r, key
+	}
+	f, r, built := csrPairFromGraphAt(g)
+	cache.put(built, f, r)
+	return f, r, built
+}
+
+// csrPairKeyFor is the key a lookup for g asks about. It must name exactly what
+// [csrPairFromGraphAt] stamps a pair with, so the two are kept adjacent.
+func csrPairKeyFor(g *lpg.ReadView[string, float64]) csrPairKey {
+	key := csrPairKey{epoch: g.TopoGeneration()}
+	if snap := g.Snapshot(); snap != nil {
+		key.startTS, key.versioned = snap.StartTS(), true
+	}
+	return key
 }
 
 // csrPairCachedFor is [csrPairCached] taking the build options, so call sites need
 // no nil dance of their own. A nil bopts (or a bopts with no Engine behind it)
 // builds uncached.
 func csrPairCachedFor(bopts *buildOpts, g *lpg.ReadView[string, float64]) (fwd, rev *csr.CSR[float64]) {
+	f, r, _ := csrPairCachedForAt(bopts, g)
+	return f, r
+}
+
+// csrPairCachedForAt is [csrPairCachedFor] also returning the key the pair
+// describes, for a caller that must file a pair-derived structure under the same
+// state.
+func csrPairCachedForAt(
+	bopts *buildOpts, g *lpg.ReadView[string, float64],
+) (fwd, rev *csr.CSR[float64], at csrPairKey) {
 	if bopts == nil {
-		return csrPairFromGraph(g)
+		return csrPairFromGraphAt(g)
 	}
-	return csrPairCached(bopts.csrPairCache, g)
+	return csrPairCachedAt(bopts.csrPairCache, g)
 }
 
 // newCSRPairCacheIfEnabled returns a cache unless the Engine opted out via

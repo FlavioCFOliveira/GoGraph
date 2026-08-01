@@ -8159,7 +8159,7 @@ func buildOperatorRec(
 			return child, nil
 		}
 
-		fwd, rev := csrPairCachedFor(bopts, g)
+		fwd, rev, pairAt := csrPairCachedForAt(bopts, g)
 		dir := irDirToExec(p.Direction)
 
 		cfg := exec.ExpandConfig{
@@ -8168,7 +8168,7 @@ func buildOperatorRec(
 		}
 		if len(p.RelTypes) > 0 {
 			cfg.EdgeType = p.RelTypes[0]
-			cfg.EdgeTypeFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts)
+			cfg.EdgeTypeFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts, pairAt)
 		}
 		// Cyphermorphism: pass the schema columns of every sibling
 		// relationship variable already bound in this MATCH pattern so
@@ -8187,7 +8187,7 @@ func buildOperatorRec(
 		// full first. One intersecting operator computes the same set directly, so a
 		// candidate that does not close is never built into a row. Declines to nil
 		// for every shape it does not admit, leaving the plan below untouched.
-		if fused := tryFuseCyclicIntersect(p, child, fwd, rev, g, schema, bopts); fused != nil {
+		if fused := tryFuseCyclicIntersect(p, child, fwd, rev, pairAt, g, schema, bopts); fused != nil {
 			return fused, nil
 		}
 		exp := exec.NewExpand(child, fwd, rev, cfg)
@@ -8735,7 +8735,7 @@ func buildOperatorRec(
 			return child, nil
 		}
 
-		fwd, rev := csrPairCachedFor(bopts, g)
+		fwd, rev, pairAt := csrPairCachedForAt(bopts, g)
 		dir := irDirToExec(p.Direction)
 
 		cfg := exec.ExpandConfig{
@@ -8744,7 +8744,7 @@ func buildOperatorRec(
 		}
 		if len(p.RelTypes) > 0 {
 			cfg.EdgeType = p.RelTypes[0]
-			cfg.EdgeTypeFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts)
+			cfg.EdgeTypeFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts, pairAt)
 		}
 		return exec.NewOptionalExpand(child, fwd, rev, cfg), nil
 
@@ -8828,7 +8828,7 @@ func buildOperatorRec(
 			return child, nil
 		}
 
-		fwd, rev := csrPairCachedFor(bopts, g)
+		fwd, rev, pairAt := csrPairCachedForAt(bopts, g)
 		dir := irDirToExec(p.Direction)
 		minHops := p.MinDepth
 		maxHops := p.MaxDepth
@@ -8842,7 +8842,7 @@ func buildOperatorRec(
 		edgeType := ""
 		if len(p.RelTypes) > 0 {
 			edgeType = p.RelTypes[0]
-			etFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts)
+			etFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts, pairAt)
 		}
 
 		// Resolve excluded rel-variable names to row column indices via
@@ -17458,20 +17458,58 @@ func (a *walMutatorAdapter) WalkNodeIDs(fn func(graph.NodeID) bool) {
 // CSR helpers for expand operators
 // ─────────────────────────────────────────────────────────────────────────────
 
-// csrPairFromGraph builds a forward and a reverse CSR snapshot from the LPG
-// adjacency list.  Both snapshots are constructed in O(V+E) time and are safe
-// for lock-free concurrent reads after construction.
+// csrPairFromGraph builds a forward and a reverse CSR snapshot of the topology
+// g observes. Both are constructed in O(V+E) time and are safe for lock-free
+// concurrent reads after construction.
+//
+// # It describes the READER's instant, not the present
+//
+// The pair IS the topology its consumers expand over: [exec.NewExpand] and its
+// siblings receive only the two CSRs, with no snapshot and no read view, so
+// nothing downstream re-checks whether an arc was visible to this read. A pair
+// built from the present would therefore let a query observe an edge committed
+// after its snapshot started — an isolation violation, not a stale-cache
+// annoyance (rmp #2293).
+//
+// So a snapshot reader resolves every adjacency entry as of its own start
+// timestamp. That is also what makes the build REPEATABLE, and is why it needs
+// no lock: the entry visible at a fixed instant is immutable and the
+// reclamation horizon pins it for as long as the reader holds its slot, so the
+// two counting and writing passes cannot disagree. Re-taking the visibility
+// barrier here — which an earlier attempt at the same defect did — would have
+// worked and would also have put a shared acquisition back on the read path,
+// partially undoing what #2274 and P4c exist to remove.
+//
+// A nil snapshot means "the present", which is what a writer inside the barrier
+// requires (it applies eagerly and must see its own not-yet-published work) and
+// what the plan-rendering paths pass.
 func csrPairFromGraph(g *lpg.ReadView[string, float64]) (fwd, rev *csr.CSR[float64]) {
+	f, r, _ := csrPairFromGraphAt(g)
+	return f, r
+}
+
+// csrPairFromGraphAt is [csrPairFromGraph] also returning the cache key the
+// pair may be filed under; see [csrPairKey] for why the key has two components.
+func csrPairFromGraphAt(g *lpg.ReadView[string, float64]) (fwd, rev *csr.CSR[float64], key csrPairKey) {
 	adj := g.AdjList()
-	// Build live: omit arcs incident to tombstoned nodes so search never
-	// traverses a logically-deleted node (#1790). LiveNodeFilter returns nil
-	// on a tombstone-free graph, so this is the zero-overhead fast path in the
-	// common case; when tombstones exist their edges have already been stripped
-	// by the delete path, so filtering removes nothing and edge positions (used
-	// as edge IDs by Expand/edgeIDResolver) are unchanged.
-	fwd = csr.BuildFromAdjListLive(adj, g.LiveNodeFilter())
+	// Build live: omit arcs incident to a node that was not live AT THIS
+	// READER'S INSTANT, so search never traverses a logically-deleted node
+	// (#1790). LiveNodeFilter returns nil on a tombstone-free graph with no
+	// snapshot, which is the zero-overhead fast path.
+	live := g.LiveNodeFilter()
+	// Sample the key with the build rather than before it. Reading the epoch
+	// first lets a pair be filed under a key it does not describe: a writer
+	// landing in between moves the epoch, and the pair is then stored under an
+	// instant it predates.
+	key = csrPairKey{epoch: g.TopoGeneration()}
+	if snap := g.Snapshot(); snap != nil {
+		key.startTS, key.versioned = snap.StartTS(), true
+		fwd = csr.BuildFromAdjListAsOf(adj, live, snap.StartTS(), snap.TxID())
+	} else {
+		fwd = csr.BuildFromAdjListLive(adj, live)
+	}
 	rev = fwd.BuildReverse()
-	return
+	return fwd, rev, key
 }
 
 // ensureEdgeIDResolver makes sure bopts.edgeIDResolver is populated and
@@ -17782,19 +17820,26 @@ func buildEdgeTypeFilter(g *lpg.ReadView[string, float64], fwdCSR *csr.CSR[float
 
 // edgeTypeFilterFor returns the edge-type filter map for relTypes against
 // fwdCSR, the caller's already-built forward CSR (rmp #1871). It transparently
-// reuses a prior query's result from bopts.edgeTypeFilterCache when the
-// graph's [lpg.Graph.TopoGeneration] has not advanced since that result was
-// built, avoiding [buildEdgeTypeFilter]'s O(V+E) rebuild for a read-mostly
-// workload's repeat queries. Falls back to an uncached, correct
-// buildEdgeTypeFilter call when bopts or its cache is nil (the public
-// BuildPlanWithMutator path has no Engine-owned cache to consult).
-func edgeTypeFilterFor(g *lpg.ReadView[string, float64], fwdCSR *csr.CSR[float64], relTypes []string, bopts *buildOpts) map[uint64]string {
+// reuses a prior query's result from bopts.edgeTypeFilterCache when that result
+// describes the same graph state, avoiding [buildEdgeTypeFilter]'s O(V+E)
+// rebuild for a read-mostly workload's repeat queries. Falls back to an
+// uncached, correct buildEdgeTypeFilter call when bopts or its cache is nil (the
+// public BuildPlanWithMutator path has no Engine-owned cache to consult).
+//
+// at MUST be the key fwdCSR itself was stamped with, which is why it is a
+// parameter rather than re-sampled here. The filter is indexed by fwdCSR's ARC
+// POSITIONS, so it is only meaningful against that exact pair; re-sampling would
+// let it be filed under a state the pair does not describe, and a reader holding
+// a differently-sized pair would then be served positions that name other arcs
+// (rmp #2293).
+func edgeTypeFilterFor(
+	g *lpg.ReadView[string, float64], fwdCSR *csr.CSR[float64], relTypes []string,
+	bopts *buildOpts, at csrPairKey,
+) map[uint64]string {
 	if bopts == nil || bopts.edgeTypeFilterCache == nil {
 		return buildEdgeTypeFilter(g, fwdCSR, relTypes)
 	}
-	key := canonicalRelTypesKey(relTypes)
-	epoch := g.TopoGeneration()
-	return bopts.edgeTypeFilterCache.getOrBuild(key, epoch, func() map[uint64]string {
+	return bopts.edgeTypeFilterCache.getOrBuild(canonicalRelTypesKey(relTypes), at, func() map[uint64]string {
 		return buildEdgeTypeFilter(g, fwdCSR, relTypes)
 	})
 }
@@ -18149,14 +18194,14 @@ func buildShortestPathWithPred(
 		}
 	}
 
-	fwd, rev := csrPairCachedFor(bopts, g)
+	fwd, rev, pairAt := csrPairCachedForAt(bopts, g)
 	dir := irDirToExec(p.Direction)
 
 	edgeType := ""
 	var etFilter map[uint64]string
 	if len(p.RelTypes) > 0 {
 		edgeType = p.RelTypes[0]
-		etFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts)
+		etFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts, pairAt)
 	}
 
 	// Translate the IR's "unbounded" sentinel (math.MaxInt) to the operator's
@@ -18259,6 +18304,7 @@ func tryFuseCyclicIntersect(
 	p *ir.Expand,
 	child exec.Operator,
 	fwd, rev *csr.CSR[float64],
+	pairAt csrPairKey,
 	g *lpg.ReadView[string, float64],
 	schema map[string]int,
 	bopts *buildOpts,
@@ -18333,11 +18379,11 @@ func tryFuseCyclicIntersect(
 	cfg := &exec.ExpandIntersectConfig{MidCol: midCol, EndCol: endCol}
 	if len(mid.RelTypes) > 0 {
 		cfg.MidEdgeType = mid.RelTypes[0]
-		cfg.MidEdgeTypeFilter = edgeTypeFilterFor(g, fwd, mid.RelTypes, bopts)
+		cfg.MidEdgeTypeFilter = edgeTypeFilterFor(g, fwd, mid.RelTypes, bopts, pairAt)
 	}
 	if len(p.RelTypes) > 0 {
 		cfg.EndEdgeType = p.RelTypes[0]
-		cfg.EndEdgeTypeFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts)
+		cfg.EndEdgeTypeFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts, pairAt)
 	}
 	for _, name := range mid.SiblingRelVars {
 		if col, okCol := schema[name]; okCol {

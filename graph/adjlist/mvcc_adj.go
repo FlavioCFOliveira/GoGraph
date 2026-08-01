@@ -150,7 +150,16 @@ func (a *AdjList[N, W]) linkVersion(next, prev *adjEntry[W], info *mvcc.CommitIn
 // is what a non-versioned read already costs. When the graph holds no live
 // version — the whole of a read-only workload — nothing else runs.
 func (a *AdjList[N, W]) entryAsOf(s *adjShard[W], intraIdx, startTS, txID uint64) *adjEntry[W] {
-	e := loadEntry(s, intraIdx)
+	return a.entryAsOfLoaded(loadEntry(s, intraIdx), startTS, txID)
+}
+
+// entryAsOfLoaded is [AdjList.entryAsOf] for a caller that has already loaded
+// the current entry, so a bulk scan does not load the slot twice.
+//
+// e must be the CURRENT entry of the slot: the walk starts there and follows the
+// version chain backwards, so starting from an older entry would resolve against
+// a truncated chain and could return a version this reader must not see.
+func (a *AdjList[N, W]) entryAsOfLoaded(e *adjEntry[W], startTS, txID uint64) *adjEntry[W] {
 	if a.versionActive.Load() == 0 || e == nil {
 		return e
 	}

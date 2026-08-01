@@ -30,7 +30,16 @@ const DefaultEdgeTypeFilterCacheCapacity = 256
 // invalidation signal for a CSR-position-keyed map like this one).
 type edgeTypeFilterEntry struct {
 	filter map[uint64]string
-	epoch  uint64
+	// at is the graph state the filter describes. It is a [csrPairKey] and not
+	// a bare epoch because the filter is indexed by CSR ARC POSITION, so it is
+	// only meaningful against the exact pair it was built from — and under MVCC
+	// that pair depends on the reader's instant as well as the epoch. Keying on
+	// the epoch alone served a filter built against a 5-arc pair to a reader
+	// holding a 6-arc one: not merely stale, MISALIGNED, since position i is a
+	// different arc in the two pairs. It undercounted a relationship-typed
+	// expand — TestCSRPairCache_ConcurrentQueriesAgree, 183 runs in 200
+	// (rmp #2293).
+	at csrPairKey
 }
 
 // edgeTypeFilterCacheNode pairs a cache key with its entry, mirroring
@@ -86,13 +95,16 @@ func newEdgeTypeFilterCache(capacity int) *edgeTypeFilterCache {
 	}
 }
 
-// getOrBuild returns the filter cached under key when its stored epoch
-// equals currentEpoch; otherwise it calls build() (with no lock held, so
+// getOrBuild returns the filter cached under key when it describes exactly the
+// graph state at names; otherwise it calls build() (with no lock held, so
 // concurrent lookups against other keys — or the graph's write path — are
 // never blocked on this rebuild), then installs the fresh result and
 // returns it, evicting the least-recently-used entry first if the cache is
 // at capacity.
-func (c *edgeTypeFilterCache) getOrBuild(key string, currentEpoch uint64, build func() map[uint64]string) map[uint64]string {
+//
+// at MUST be the same key the CSR pair passed to build() was stamped with; the
+// filter indexes that pair's arc positions and means nothing against another.
+func (c *edgeTypeFilterCache) getOrBuild(key string, at csrPairKey, build func() map[uint64]string) map[uint64]string {
 	c.mu.Lock()
 	if e, ok := c.by[key]; ok {
 		//nolint:forcetypeassert // cache invariant: list.Element.Value is always *edgeTypeFilterCacheNode
@@ -105,7 +117,7 @@ func (c *edgeTypeFilterCache) getOrBuild(key string, currentEpoch uint64, build 
 		// to exclude every reader, so a hit and an install could not overlap.
 		// An entry is immutable once built, so holding the pointer is enough.
 		v := node.value
-		if v.epoch == currentEpoch {
+		if v.at == at {
 			c.ll.MoveToFront(e)
 			c.mu.Unlock()
 			metrics.IncCounter("cypher.edge_type_filter_cache.hits", 1)
@@ -116,19 +128,18 @@ func (c *edgeTypeFilterCache) getOrBuild(key string, currentEpoch uint64, build 
 	metrics.IncCounter("cypher.edge_type_filter_cache.misses", 1)
 
 	filter := build()
-	fresh := &edgeTypeFilterEntry{epoch: currentEpoch, filter: filter}
+	fresh := &edgeTypeFilterEntry{at: at, filter: filter}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if e, ok := c.by[key]; ok {
 		//nolint:forcetypeassert // cache invariant
 		node := e.Value.(*edgeTypeFilterCacheNode)
-		if node.value.epoch >= currentEpoch {
+		if node.value.at == at || node.value.at.newerThan(at) {
 			// A concurrent racer already installed a result at least as
-			// fresh as ours (generation only ever increases): keep theirs,
-			// discard the one we just built, but still return OUR result to
-			// the caller — it is equally correct for currentEpoch, just not
-			// worth storing twice.
+			// fresh as ours: keep theirs, discard the one we just built, but
+			// still return OUR result to the caller — it is equally correct for
+			// at, just not worth storing twice.
 			c.ll.MoveToFront(e)
 			return filter
 		}

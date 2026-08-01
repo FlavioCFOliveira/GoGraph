@@ -58,6 +58,49 @@ func BuildFromAdjList[N comparable, W any](adj *adjlist.AdjList[N, W]) *CSR[W] {
 	return BuildFromAdjListLive(adj, nil)
 }
 
+// BuildFromAdjListAsOf is [BuildFromAdjListLive] resolving every adjacency entry
+// as it stood at startTS for a reader running as txID, rather than as it stands
+// now.
+//
+// # Why a snapshot build has to exist
+//
+// A CSR is the topology its consumers expand over — nothing downstream of it
+// re-checks an arc's visibility — so under MVCC it must describe the READER's
+// instant. Building from the current adjacency instead lets a read observe an
+// edge committed after its snapshot started, which is an isolation violation
+// and not a stale-cache annoyance (rmp #2293).
+//
+// # It is also REPEATABLE, which the present-reading build is not
+//
+// The entry visible at a fixed startTS is immutable, and the reclamation
+// horizon pins it for as long as the reader holds its slot, so pass one and
+// pass two resolve the SAME entry for every node. A build that reads the
+// current entry twice has no such guarantee: a writer landing between the
+// passes makes pass two find arcs pass one did not count. That is why the
+// present-reading path needs the surplus-arc stop below and this one does not.
+//
+// live is applied exactly as [BuildFromAdjListLive] applies it, and callers
+// pass a predicate resolved at the same instant.
+//
+// Complexity is O(V + E), and on a graph with no live version the per-entry
+// resolution is one atomic load plus one uncontended gate read — what the
+// present-reading build already costs.
+//
+// # What selecting the instant costs
+//
+// Measured, benchstat n=6, Apple M4: the branch selecting the arm costs the
+// isolated build 4.89% geomean against the pre-MVCC build. It does NOT reach
+// query time — the 960k-edge cypher_scale Expand1Hop trio moves +0.62% geomean
+// with every individual result statistically indistinguishable (p=0.55, 0.22,
+// 0.84) — because the build is a small share of a query and the pair cache
+// amortises it across queries. That is the documented price of closing the
+// isolation violation above.
+func BuildFromAdjListAsOf[N comparable, W any](
+	adj *adjlist.AdjList[N, W], live func(graph.NodeID) bool, startTS, txID uint64,
+) *CSR[W] {
+	return buildFromAdjList(adj, live, adjlist.At{Versioned: true, StartTS: startTS, TxID: txID})
+}
+
 // BuildFromAdjListLive is [BuildFromAdjList] with an optional liveness filter:
 // any arc whose source or destination fails live is omitted from the snapshot,
 // so a CSR built from an [lpg.Graph] holding tombstoned-but-not-stripped nodes
@@ -68,10 +111,23 @@ func BuildFromAdjList[N comparable, W any](adj *adjlist.AdjList[N, W]) *CSR[W] {
 // returns nil when the graph carries no tombstones, so a tombstone-free graph
 // never pays the per-arc predicate cost. Complexity is O(V + E) either way.
 //
-//nolint:gocyclo // two-pass build with optional per-arc liveness branch.
+// It reads the CURRENT entry of every node, so the caller must exclude writers
+// for the duration — see [BuildFromAdjListAsOf] for the snapshot build, which
+// needs no such exclusion.
 func BuildFromAdjListLive[N comparable, W any](adj *adjlist.AdjList[N, W], live func(graph.NodeID) bool) *CSR[W] {
+	return buildFromAdjList(adj, live, adjlist.At{})
+}
+
+// buildFromAdjList is the body of [BuildFromAdjListLive] and
+// [BuildFromAdjListAsOf], which differ only in the instant each entry resolves
+// at.
+//
+//nolint:gocyclo // two-pass build with optional per-arc liveness branch.
+func buildFromAdjList[N comparable, W any](
+	adj *adjlist.AdjList[N, W], live func(graph.NodeID) bool, at adjlist.At,
+) *CSR[W] {
 	if live == nil {
-		return buildFromAdjListRaw(adj)
+		return buildFromAdjListRaw(adj, at)
 	}
 	maxID := uint64(adj.MaxNodeID())
 	if maxID == 0 {
@@ -85,7 +141,17 @@ func BuildFromAdjListLive[N comparable, W any](adj *adjlist.AdjList[N, W], live 
 	var total uint64
 	var anyHandles bool
 	for id := uint64(0); id < maxID; id++ {
-		nb, _, h := adj.LoadEntryH(graph.NodeID(id))
+		// The present arm calls LoadEntryH DIRECTLY. Routing both arms through
+		// one accessor that takes the instant reads better but costs the build
+		// 13.94% (measured, benchstat n=6): the common call stops being inlined.
+		var nb []graph.NodeID
+		var h []uint64
+		if at.Versioned {
+			v := adj.EntryViewAsOf(graph.NodeID(id), at.StartTS, at.TxID)
+			nb, h = v.Neighbours, v.Handles
+		} else {
+			nb, _, h = adj.LoadEntryH(graph.NodeID(id))
+		}
 		vertices[id] = total
 		if !live(graph.NodeID(id)) {
 			continue // tombstoned source contributes no arcs
@@ -117,11 +183,46 @@ func BuildFromAdjListLive[N comparable, W any](adj *adjlist.AdjList[N, W], live 
 		if !live(graph.NodeID(id)) {
 			continue
 		}
-		nb, ws, h := adj.LoadEntryH(graph.NodeID(id))
+		var nb []graph.NodeID
+		var ws []W
+		var h []uint64
+		if at.Versioned {
+			v := adj.EntryViewAsOf(graph.NodeID(id), at.StartTS, at.TxID)
+			nb, ws, h = v.Neighbours, v.Weights, v.Handles
+		} else {
+			nb, ws, h = adj.LoadEntryH(graph.NodeID(id))
+		}
 		pos := vertices[id]
 		for j, dst := range nb {
 			if !keepArc(graph.NodeID(id), dst) {
 				continue
+			}
+			if pos >= total {
+				// The adjacency GREW between pass one, which counted the arcs,
+				// and pass two, which writes them.
+				//
+				// Reachable ONLY on a present read (at.Versioned false) without
+				// the visibility barrier, because nothing then excludes a
+				// writer between the passes. It is unreachable for a snapshot
+				// build: the entry visible at a fixed startTS is immutable and
+				// horizon-pinned, so both passes resolve the same entry for
+				// every node. In-tree, the remaining exposure is the plan
+				// RENDERING path, which reads the present and holds nothing.
+				//
+				// Stopping is the only sound response: the surplus arcs belong
+				// to a graph this CSR does not claim to describe, and its
+				// vertices array has no room for them. Writing them would
+				// panic — "index out of range [5] with length 5", intermittent,
+				// in TestCSRPairCache_ConcurrentQueriesAgree (rmp #2290).
+				OrderRuns(vertices, edges, weights, handles)
+				return &CSR[W]{
+					vertices: vertices,
+					edges:    edges,
+					weights:  weights,
+					handles:  handles,
+					order:    uint64(adj.Order()),
+					size:     total,
+				}
 			}
 			edges[pos] = dst
 			if weights != nil {
@@ -152,7 +253,7 @@ func BuildFromAdjListLive[N comparable, W any](adj *adjlist.AdjList[N, W], live 
 	}
 }
 
-func buildFromAdjListRaw[N comparable, W any](adj *adjlist.AdjList[N, W]) *CSR[W] {
+func buildFromAdjListRaw[N comparable, W any](adj *adjlist.AdjList[N, W], at adjlist.At) *CSR[W] {
 	maxID := uint64(adj.MaxNodeID())
 	if maxID == 0 {
 		return &CSR[W]{
@@ -173,7 +274,17 @@ func buildFromAdjListRaw[N comparable, W any](adj *adjlist.AdjList[N, W]) *CSR[W
 	var total uint64
 	var anyHandles bool
 	for id := uint64(0); id < maxID; id++ {
-		nb, _, h := adj.LoadEntryH(graph.NodeID(id))
+		// The present arm calls LoadEntryH DIRECTLY. Routing both arms through
+		// one accessor that takes the instant reads better but costs the build
+		// 13.94% (measured, benchstat n=6): the common call stops being inlined.
+		var nb []graph.NodeID
+		var h []uint64
+		if at.Versioned {
+			v := adj.EntryViewAsOf(graph.NodeID(id), at.StartTS, at.TxID)
+			nb, h = v.Neighbours, v.Handles
+		} else {
+			nb, _, h = adj.LoadEntryH(graph.NodeID(id))
+		}
 		count := uint64(len(nb))
 		vertices[id] = total
 		total += count
@@ -205,7 +316,15 @@ func buildFromAdjListRaw[N comparable, W any](adj *adjlist.AdjList[N, W]) *CSR[W
 	// Pass 2: write out-edges. Two passes avoid the O(V) cost of a
 	// follow-up shift to compute offsets from edge writes.
 	for id := uint64(0); id < maxID; id++ {
-		nb, ws, h := adj.LoadEntryH(graph.NodeID(id))
+		var nb []graph.NodeID
+		var ws []W
+		var h []uint64
+		if at.Versioned {
+			v := adj.EntryViewAsOf(graph.NodeID(id), at.StartTS, at.TxID)
+			nb, ws, h = v.Neighbours, v.Weights, v.Handles
+		} else {
+			nb, ws, h = adj.LoadEntryH(graph.NodeID(id))
+		}
 		if len(nb) == 0 {
 			continue
 		}

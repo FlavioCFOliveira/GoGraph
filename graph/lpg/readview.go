@@ -283,8 +283,23 @@ func (v *ReadView[N, W]) OutDegreeMatchingBoundedByID(
 // separately from everything above, so the gap is a visible property of the
 // type rather than something a reader has to reconstruct.
 
-// AdjList returns the adjacency backend, for the mapper and the configuration
-// flags. Topology reads go through the versioned methods above.
+// AdjList returns the adjacency backend itself, UNBOUND from this view's
+// instant.
+//
+// It is the escape hatch for the mapper, the configuration flags, and a bulk
+// scan that needs the whole structure rather than one node — and every caller
+// that reads TOPOLOGY through it owes the snapshot back by hand, using the
+// adjacency's own as-of accessors ([adjlist.AdjList.EntryViewAsOf] and
+// friends). Reading the current entry instead is not a stale answer, it is an
+// isolation violation, and it is not hypothetical: the CSR pair build did
+// exactly that and let a query observe an edge committed after its snapshot
+// started, while filtering that same pair by liveness resolved AT the snapshot
+// — so the pair belonged to no single instant at all (rmp #2293). It is now
+// built with [csr.BuildFromAdjListAsOf], which resolves every entry at the
+// reader's instant.
+//
+// Prefer the versioned single-node methods above whenever one node is enough;
+// they cannot be got wrong this way.
 func (v *ReadView[N, W]) AdjList() *adjlist.AdjList[N, W] { return v.g.AdjList() }
 
 // IsTombstoned reports whether id was ABSENT at this view's instant.
