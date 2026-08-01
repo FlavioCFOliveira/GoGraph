@@ -192,12 +192,33 @@ Two bounds remain, both measured and both on the **write** side or on an extreme
    transaction-manager change. Still **not a bounded change** — but no longer blocked on the
    reverted whole-graph-snapshot work, and that inference is refuted.
 
-2. **Read cost under a *saturating* writer (#2292).** With a writer committing as fast as it
-   can and no rate limit, the read pays a version-walk cost. At the **realistic** write rate
-   of the fairness harness — 10 writes/s — a concurrent writer costs **2.5 %**. The saturating
-   shape is an extreme, and it is a cost of the version walk under permanent churn, **not of
-   a lock**: with the reclamation sweep disabled the same benchmark is *slower*, because the
-   sweep is what keeps the chains short.
+2. **Read cost under a *saturating* writer (#2292) — premise now known to be unmeasured.**
+   The **quiescent** cost of MVCC on the read path is measured and modest: against
+   `b66b4e25` (the substrate present but reads not yet snapshot-bound), interleaved,
+   benchstat n=6, **+4.55 % geomean** — the plain count scan is unchanged (p = 0.139),
+   a filtered count is +9.77 %, a label scan +3.58 %. At the **realistic** write rate of the
+   fairness harness — 10 writes/s — a concurrent writer costs **2.5 %**.
+
+   The *saturating*-writer figure this task recorded (+39.02 %) **cannot be trusted**, and
+   finding that out was this cycle's last result. `BenchmarkEngReadUnderWriter` has an
+   **uncontrolled independent variable**: its writer's every commit `CREATE`s a node, while
+   its readers run `MATCH (n) RETURN count(n)`, whose cost grows with the node count. So the
+   benchmark's answer depends on how many nodes the writer managed to create — and the MVCC
+   work changed exactly that, by **147×**, because the writer is no longer starved:
+
+   | arm | iters | ns/op | **writes** | B/op |
+   |---|---|---|---|---|
+   | `b66b4e25` | 191 126 | 6 159 | **13 831** | 3 025 |
+   | current head | 102 196 | 3 867 181 | **2 037 672** | 21 994 447 |
+
+   The two arms did not read the same graph, so the apparent 628× is that size difference and
+   **not** a read regression — which the writer-free measurement above independently confirms.
+   #2292 is therefore re-scoped to fix its instrument first (hold the graph size constant, or
+   make the read size-independent) and re-establish the premise before optimising anything.
+
+   The **second-order** result is the useful one: a writer producing 147× more commits in the
+   same wall-clock is direct evidence that #2274's fix helps the **write** side too, which had
+   not previously been measured.
 
 3. **Scope.** This cycle audited MVCC and its read paths. It is **not** a whole-module
    hostile, security, or resource-exhaustion audit, and it did not run the nightly layer.
