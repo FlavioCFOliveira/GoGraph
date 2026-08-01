@@ -12419,7 +12419,11 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.ReadVi
 			// defaulted to forward) and, crucially, lets the property fetch be
 			// skipped (#1630) without losing the direction signal.
 			stKey, enKey := srcKey, dstKey
-			if !g.AdjList().HasEdge(srcKey, dstKey) && g.AdjList().HasEdge(dstKey, srcKey) {
+			// ReadView.HasEdge, not AdjList().HasEdge: the direction must be
+			// resolved AT THIS READ'S INSTANT, or a relationship committed after
+			// the snapshot decides how one visible to it is rendered
+			// (rmp #2294).
+			if !g.HasEdge(srcKey, dstKey) && g.HasEdge(dstKey, srcKey) {
 				storageStart, storageEnd = dstID, srcID
 				stKey, enKey = dstKey, srcKey
 			}
@@ -12634,7 +12638,9 @@ func leadingHopReversed(g *lpg.ReadView[string, float64], prevID, dstID uint64) 
 	if !prevOK || !dstOK {
 		return false
 	}
-	return !g.AdjList().HasEdge(prevKey, dstKey) && g.AdjList().HasEdge(dstKey, prevKey)
+	// Versioned form: see buildRelationshipValueFromRow for why the direction
+	// probe must answer at this read's instant (rmp #2294).
+	return !g.HasEdge(prevKey, dstKey) && g.HasEdge(dstKey, prevKey)
 }
 
 // relPresencePlaceholder is the non-null sentinel stamped under a presence-only

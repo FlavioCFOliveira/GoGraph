@@ -22,12 +22,14 @@ func TestMain(m *testing.M) {
 // "fact" lines are asserted; every "# " telemetry line (latency, throughput,
 // version counts, heap) varies per run and per machine and is ignored.
 //
-// The four zeros are the point of the example. Each was NON-zero on the engine
-// this example was written against, and each names a distinct defect: an
-// acknowledged commit a reader could not see, an edge a reader saw before it was
-// acknowledged, a per-arc structure desynchronised from the topology it indexes,
-// and — the loudest one — an observation query that failed outright because the
-// CSR pair build read a moving adjacency twice.
+// The five zeros are the point of the example. Each was NON-zero on some engine
+// this example was run against, and each names a distinct defect: an acknowledged
+// commit a reader could not see; an edge a reader saw before it was acknowledged;
+// a per-arc structure desynchronised from the topology it indexes; an observation
+// query that failed outright because the CSR pair build read a moving adjacency
+// twice (rmp #2293); and two clauses of ONE query resolving the same arc at two
+// different instants, which the bracket is structurally unable to see and only
+// the self-contradiction query catches (rmp #2294).
 func TestRun(t *testing.T) {
 	var buf bytes.Buffer
 	if err := run(context.Background(), &buf, defaultConfig()); err != nil {
@@ -37,17 +39,21 @@ func TestRun(t *testing.T) {
 	facts := parseFacts(t, buf.String())
 
 	want := map[string]string{
-		"config.spokes":                     "400",
+		"config.spokes":                     "80",
 		"config.readers":                    "4",
 		"config.new_node_every":             "2",
-		"links.committed":                   "400",
-		"links.final":                       "400",
+		"config.churn":                      "60",
+		"config.min_checks":                 "5",
+		"contradiction_checks_met":          "1",
+		"links.committed":                   "80",
+		"links.final":                       "80",
 		"final_read_sees_every_commit":      "1",
 		"final_far_endpoints_align":         "1",
 		"invisible_commits":                 "0",
 		"future_reads":                      "0",
 		"misaligned_far_endpoints":          "0",
 		"read_errors":                       "0",
+		"intra_query_contradictions":        "0",
 		"snapshot_topology_invariant_holds": "1",
 	}
 	for k, wantV := range want {
@@ -74,7 +80,7 @@ func TestRun(t *testing.T) {
 func TestRun_BothEndpointsPreExisting(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.newNodeEvery = 0
-	cfg.spokes = 200
+	cfg.spokes = 50
 
 	var buf bytes.Buffer
 	if err := run(context.Background(), &buf, cfg); err != nil {
@@ -83,6 +89,7 @@ func TestRun_BothEndpointsPreExisting(t *testing.T) {
 	facts := parseFacts(t, buf.String())
 	for _, k := range []string{
 		"invisible_commits", "future_reads", "misaligned_far_endpoints", "read_errors",
+		"intra_query_contradictions",
 	} {
 		if got := facts[k]; got != "0" {
 			t.Errorf("fact %q = %q, want 0 — an edge between two pre-existing nodes "+
@@ -92,8 +99,8 @@ func TestRun_BothEndpointsPreExisting(t *testing.T) {
 	if got := facts["snapshot_topology_invariant_holds"]; got != "1" {
 		t.Errorf("snapshot_topology_invariant_holds = %q, want 1", got)
 	}
-	if got := facts["links.final"]; got != "200" {
-		t.Errorf("links.final = %q, want 200", got)
+	if got := facts["links.final"]; got != "50" {
+		t.Errorf("links.final = %q, want 50", got)
 	}
 }
 
@@ -102,10 +109,12 @@ func TestRun_BothEndpointsPreExisting(t *testing.T) {
 // invariant it never checked.
 func TestRun_RejectsInvalidConfig(t *testing.T) {
 	for name, mutate := range map[string]func(*config){
-		"no spokes":   func(c *config) { c.spokes = 0 },
-		"no readers":  func(c *config) { c.readers = 0 },
-		"no duration": func(c *config) { c.duration = 0 },
-		"negative N":  func(c *config) { c.newNodeEvery = -1 },
+		"no spokes":      func(c *config) { c.spokes = 0 },
+		"no readers":     func(c *config) { c.readers = 0 },
+		"no duration":    func(c *config) { c.duration = 0 },
+		"negative N":     func(c *config) { c.newNodeEvery = -1 },
+		"negative churn": func(c *config) { c.churn = -1 },
+		"no min checks":  func(c *config) { c.minChecks = 0 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := defaultConfig()

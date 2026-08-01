@@ -285,11 +285,14 @@ type candidateHop struct {
 
 func (pe *patternEvaluator) collectOutgoingCandidates(srcID graph.NodeID, srcKey string, s step) []candidateHop {
 	mapper := pe.g.AdjList().Mapper()
-	// LoadEntryH exposes the per-slot handle column parallel to neighbours, so a
-	// multigraph's parallel slots each carry their own edge identity. handles is
-	// nil (or shorter) when the graph stores no handles; a missing handle degrades
-	// to 0, which relValueFromHop resolves via the per-pair fallback.
-	nbs, _, handles := pe.g.AdjList().LoadEntryH(srcID)
+	// EntryView resolves every column of the entry AT THIS VIEW'S INSTANT, and
+	// from one atomically-published entry, so the handle column is both
+	// snapshot-correct and guaranteed the same length as the neighbour column
+	// (rmp #2294). handles is nil when the graph stores no handles; a missing
+	// handle degrades to 0, which relValueFromHop resolves via the per-pair
+	// fallback.
+	view := pe.g.EntryView(srcID)
+	nbs, handles := view.Neighbours, view.Handles
 	out := make([]candidateHop, 0, len(nbs))
 	for i, dstID := range nbs {
 		dstKey, ok := mapper.Resolve(dstID)
@@ -319,7 +322,8 @@ func (pe *patternEvaluator) collectIncomingCandidates(dstID graph.NodeID, dstKey
 		// first), each carrying its own handle, so an untyped `[r]` incoming hop
 		// over a multi-type parallel pair enumerates every instance — mirroring
 		// the outgoing path and the primary Expand path (rmp #2017).
-		nbs, _, handles := pe.g.AdjList().LoadEntryH(candidateID)
+		candView := pe.g.EntryView(candidateID)
+		nbs, handles := candView.Neighbours, candView.Handles
 		for i, nb := range nbs {
 			if nb != dstID {
 				continue
@@ -546,7 +550,7 @@ func (pe *patternEvaluator) matchSingleHop(ctx context.Context, srcID graph.Node
 // each neighbour that passes the edge-type and end-node filters.
 func (pe *patternEvaluator) matchOutgoing(ctx context.Context, srcID graph.NodeID, srcKey string, s step, remaining []step, row expr.RowContext) (bool, error) {
 	mapper := pe.g.AdjList().Mapper()
-	neighbours, _ := pe.g.AdjList().LoadEntry(srcID)
+	neighbours := pe.g.EntryView(srcID).Neighbours
 	for _, dstID := range neighbours {
 		if err := ctx.Err(); err != nil {
 			return false, err
@@ -583,7 +587,7 @@ func (pe *patternEvaluator) matchIncoming(ctx context.Context, dstID graph.NodeI
 		if candidateID == dstID {
 			return true // skip self
 		}
-		nbs, _ := pe.g.AdjList().LoadEntry(candidateID)
+		nbs := pe.g.EntryView(candidateID).Neighbours
 		for _, nb := range nbs {
 			if nb != dstID {
 				continue
@@ -696,7 +700,7 @@ func (pe *patternEvaluator) bfsExpandStep(mapper *graph.Mapper[string], curID gr
 
 // bfsExpandOutgoing appends unvisited forward neighbours of curID to frontier.
 func (pe *patternEvaluator) bfsExpandOutgoing(mapper *graph.Mapper[string], curID graph.NodeID, curKey string, rel *ast.RelationshipPattern, visited map[graph.NodeID]struct{}, frontier *[]patBFSNode, depth int64) {
-	nbs, _ := pe.g.AdjList().LoadEntry(curID)
+	nbs := pe.g.EntryView(curID).Neighbours
 	for _, nbID := range nbs {
 		if _, seen := visited[nbID]; seen {
 			continue
@@ -731,7 +735,7 @@ func (pe *patternEvaluator) bfsExpandIncoming(mapper *graph.Mapper[string], dstI
 		if _, seen := visited[candidateID]; seen {
 			return true
 		}
-		nbs, _ := pe.g.AdjList().LoadEntry(candidateID)
+		nbs := pe.g.EntryView(candidateID).Neighbours
 		for _, nb := range nbs {
 			if nb == dstID {
 				if !pe.edgeMatchesRel(candidateKey, dstKey, rel) {
@@ -751,8 +755,9 @@ func (pe *patternEvaluator) bfsExpandIncoming(mapper *graph.Mapper[string], dstI
 // edges match.
 func (pe *patternEvaluator) edgeMatchesRel(srcKey, dstKey string, rel *ast.RelationshipPattern) bool {
 	if rel == nil || len(rel.Types) == 0 {
-		// No type constraint — any edge matches (but the edge must exist).
-		return pe.g.AdjList().HasEdge(srcKey, dstKey)
+		// No type constraint — any edge matches (but the edge must exist AT THIS
+		// VIEW'S INSTANT; ReadView.HasEdge is the versioned form, rmp #2294).
+		return pe.g.HasEdge(srcKey, dstKey)
 	}
 	labels := pe.g.EdgeLabels(srcKey, dstKey)
 	if len(labels) == 0 {
