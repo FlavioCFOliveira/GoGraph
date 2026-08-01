@@ -15,7 +15,7 @@ import (
 // statsTestSource wires a resolver over the engine's graph exactly as the
 // read-path build does, so the (inert) providers can be exercised.
 func statsTestSource(e *Engine) *lpgLabelResolver {
-	return &lpgLabelResolver{g: e.g, eng: e}
+	return &lpgLabelResolver{g: e.g.ReadAt(nil), eng: e}
 }
 
 // seedPersonGraph builds a directed multigraph of n :Person nodes. age is skewed:

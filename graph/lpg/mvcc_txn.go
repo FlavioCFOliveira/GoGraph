@@ -164,10 +164,17 @@ func (g *Graph[N, W]) deltaStamp(info *commitInfo) (*commitInfo, uint64) {
 	if info != nil {
 		return info, 0
 	}
-	if wi := g.writeStampInfo(); wi != nil {
-		return wi, 0
+	if !g.mvccArmed {
+		return nil, g.nextCommitTS()
 	}
-	return nil, g.nextCommitTS()
+	// Through the SHARED stamp, not straight to the clock. Going straight to
+	// the clock produced the right timestamp and lost the accounting: the
+	// stamp is what counts versions made outside any transaction, and without
+	// that count nothing ever charges the reclamation debt for a direct Go-API
+	// write. Measured before the fix: 20 000 direct writes left 40 000 live
+	// version records and a debt of ZERO, so the sweep could never fire and the
+	// memory was unbounded (rmp #2289).
+	return g.stamp.Stamp()
 }
 
 // setNodeLabel writes a label inside this transaction. The delta it records

@@ -98,7 +98,7 @@ func estRows(rows float64) int64 {
 // AllNodesScan renders the exact total live-node count ([lpg.Graph.LiveOrder]),
 // and NodeByLabelScan the exact live count for its label (labelCardinalityEstimate).
 // Both are estExact. A nil resolver or graph yields no annotation.
-func scanEstimateAnnotation(plan ir.LogicalPlan, labelSrc *lpgLabelResolver, g *lpg.Graph[string, float64]) string {
+func scanEstimateAnnotation(plan ir.LogicalPlan, labelSrc *lpgLabelResolver, g *lpg.ReadView[string, float64]) string {
 	switch p := plan.(type) {
 	case *ir.AllNodesScan:
 		if g == nil {
@@ -277,7 +277,7 @@ func expandFromLabel(exp *ir.Expand) (string, bool) {
 // without an annotation.
 // prefixSeek must carry the same STARTS WITH gate the build used, so the shape
 // recovered here is the shape that actually fired (#2127).
-func rangeSeekInRangeCount(sel *ir.Selection, idxMgr *index.Manager, g *lpg.Graph[string, float64], params map[string]expr.Value, prefixSeek bool) (int64, bool) {
+func rangeSeekInRangeCount(sel *ir.Selection, idxMgr *index.Manager, g *lpg.ReadView[string, float64], params map[string]expr.Value, prefixSeek bool) (int64, bool) {
 	if idxMgr == nil || g == nil || sel.PredicateExpr == nil {
 		return 0, false
 	}
@@ -325,7 +325,7 @@ func rangeSeekInRangeCount(sel *ir.Selection, idxMgr *index.Manager, g *lpg.Grap
 // rangeSeekLeafAnnotation renders the exact in-range count for a rewritten
 // NodeByIndexRangeScan leaf as an estExact estimate, or the empty string when the
 // count cannot be recovered.
-func rangeSeekLeafAnnotation(sel *ir.Selection, idxMgr *index.Manager, g *lpg.Graph[string, float64], params map[string]expr.Value, prefixSeek bool) string {
+func rangeSeekLeafAnnotation(sel *ir.Selection, idxMgr *index.Manager, g *lpg.ReadView[string, float64], params map[string]expr.Value, prefixSeek bool) string {
 	if cnt, ok := rangeSeekInRangeCount(sel, idxMgr, g, params, prefixSeek); ok {
 		return estimateAnnotation(estimate{rows: float64(cnt), source: estExact})
 	}

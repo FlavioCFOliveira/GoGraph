@@ -609,6 +609,15 @@ type Graph[N comparable, W any] struct {
 	// the pass runs on a bounded amount of churn rather than on every commit.
 	// See [Graph.reclaimIfDue].
 	reclaimDebt atomic.Int64
+	// sweeping serialises reclamation against itself. The reclaimers are
+	// mutually excluded from WRITERS by the per-shard locks they and the write
+	// path both take, and safe against readers by the watermark argument — but
+	// two sweeps at once would race on the same chains, so exactly one runs.
+	sweeping atomic.Bool
+	// lastIdleSweep is the version count the previous opportunistic sweep left
+	// behind, so a read does not re-sweep a graph whose residue a long-lived
+	// reader is legitimately holding back. See [Graph.ReclaimIdle].
+	lastIdleSweep atomic.Int64
 }
 
 // ApplyAtomically runs fn while holding the graph's transaction-visibility
@@ -1163,6 +1172,7 @@ func (g *Graph[N, W]) AddEdge(src, dst N, w W) error {
 	if err := g.adj.AddEdge(src, dst, w); err != nil {
 		return err
 	}
+	defer g.reclaimAfterDirectWrite()
 	// topoGeneration is bumped HERE, in the graph's own mutator, rather than left to
 	// callers. Every CSR-position-keyed cache is invalidated by that counter, and a
 	// caller that mutates the graph directly through this API -- an embedder holding
@@ -1342,6 +1352,7 @@ func (g *Graph[N, W]) NextEdgeHandle() uint64 { return g.nextEdgeHandle() }
 // using [adjlist.AdjList.RemoveEdge] directly; that path does not touch
 // labels or properties.
 func (g *Graph[N, W]) RemoveEdge(src, dst N) {
+	defer g.reclaimAfterDirectWrite()
 	srcID, srcOK := g.adj.Mapper().Lookup(src)
 	dstID, dstOK := g.adj.Mapper().Lookup(dst)
 
@@ -1706,6 +1717,14 @@ func (g *Graph[N, W]) clearEdgePairState(k edgeKey) {
 // For a weightless graph (adjlist.Config.Weightless) the adjacency carries no
 // weights column, so a present edge reports the zero value of W with ok=true.
 func (g *Graph[N, W]) EdgeWeight(src, dst N) (W, bool) {
+	return g.EdgeWeightAsOf(src, dst, nil)
+}
+
+// EdgeWeightAsOf is [Graph.EdgeWeight] as the pair stood at snap. A nil
+// snapshot reads the current value; see snapshot_read.go.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) EdgeWeightAsOf(src, dst N, snap *Snapshot) (W, bool) {
 	var zero W
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
@@ -1715,7 +1734,8 @@ func (g *Graph[N, W]) EdgeWeight(src, dst N) (W, bool) {
 	if !ok {
 		return zero, false
 	}
-	nbs, ws := g.adj.LoadEntry(srcID)
+	v := g.EntryViewAsOf(srcID, snap)
+	nbs, ws := v.Neighbours, v.Weights
 	for i, nb := range nbs {
 		if nb == dstID {
 			// A weightless graph (adjlist.Config.Weightless) carries no weights
@@ -1736,7 +1756,9 @@ func (g *Graph[N, W]) EdgeWeight(src, dst N) (W, bool) {
 // codepaths that do not configure [adjlist.Config.MaxShardCapacity]
 // may safely ignore the return.
 func (g *Graph[N, W]) SetNodeLabel(n N, name string) error {
-	return g.setNodeLabelInfo(n, name, nil)
+	err := g.setNodeLabelInfo(n, name, nil)
+	g.reclaimAfterDirectWrite()
+	return err
 }
 
 // setNodeLabelInfo is [Graph.SetNodeLabel] with an explicit commit record.
@@ -1972,7 +1994,7 @@ func (g *Graph[N, W]) outDegreeFiltered(src N, byType bool, relType LabelID) (in
 	// resolved by HANDLE here too — otherwise the unbounded and bounded forms
 	// would disagree about parallel edges, which is exactly the drift their
 	// shared-predicate contract rules out (rmp #2241).
-	return g.outDegreeMatchingByID(srcID, relType, byType, maxInt, nil)
+	return g.outDegreeMatchingByID(srcID, relType, byType, maxInt, nil, nil)
 }
 
 // OutDegreeByID is [Graph.OutDegree] keyed by an already-resolved
@@ -2032,15 +2054,45 @@ func (g *Graph[N, W]) OutDegreeByID(srcID graph.NodeID) (int, bool) {
 //
 // Safe for concurrent use with readers and writers, and lock-free.
 func (g *Graph[N, W]) OutDegreeBoundedByID(srcID graph.NodeID, limit int) (int, bool) {
+	return g.OutDegreeBoundedByIDAsOf(srcID, limit, nil)
+}
+
+// OutDegreeBoundedByIDAsOf is [Graph.OutDegreeBoundedByID] as the node stood at
+// snap. A nil snapshot reads the current value.
+//
+// The tombstone gate is NOT yet versioned: a node deleted after this reader
+// started is still excluded. That is the candidate-set gap P4c (rmp #2290)
+// closes; until then the visibility barrier is what keeps a read from
+// straddling it.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) OutDegreeBoundedByIDAsOf(srcID graph.NodeID, limit int, snap *Snapshot) (int, bool) {
 	if limit <= 0 {
 		return 0, true
 	}
-	if g.tombstoneActive.Load() == 0 {
+	if snap == nil && g.tombstoneActive.Load() == 0 {
 		n, ok := g.adj.OutDegreeByID(srcID)
 		if !ok {
 			return 0, false
 		}
 		return min(n, limit), true
+	}
+	if snap != nil {
+		v := g.EntryViewAsOf(srcID, snap)
+		if _, interned := g.adj.Mapper().Resolve(srcID); !interned {
+			return 0, false
+		}
+		n := 0
+		for _, dst := range v.Neighbours {
+			if g.IsTombstoned(dst) {
+				continue
+			}
+			n++
+			if n >= limit {
+				break
+			}
+		}
+		return n, true
 	}
 	return g.adj.OutDegreeFuncBoundedByID(srcID, limit, func(dst graph.NodeID, _ uint32) bool {
 		return !g.IsTombstoned(dst)
@@ -2050,67 +2102,54 @@ func (g *Graph[N, W]) OutDegreeBoundedByID(srcID graph.NodeID, limit int) (int, 
 // OutDegreeByTypeBoundedByID is [Graph.OutDegreeByTypeBounded] keyed by an
 // already-resolved [graph.NodeID]. See [Graph.OutDegreeByID].
 func (g *Graph[N, W]) OutDegreeByTypeBoundedByID(srcID graph.NodeID, relType LabelID, limit int) (int, bool) {
-	return g.outDegreeMatchingByID(srcID, relType, true, limit, nil)
+	return g.outDegreeMatchingByID(srcID, relType, true, limit, nil, nil)
 }
 
-// slotCarriesType reports whether ONE adjacency slot — whose neighbour is dst,
-// whose stable handle is handle and whose label column entry is lbl — carries
-// relType. want is encodeSlotLabel(relType), the form the column stores.
+// OutDegreeByTypeBoundedByIDAsOf is [Graph.OutDegreeByTypeBoundedByID] as the
+// node stood at snap. A nil snapshot reads the current value.
 //
-// Every source it reads is PER-SLOT. That is the whole contract: a relationship
-// type belongs to the relationship instance, so a pair's parallel slots must be
-// able to disagree about their type, and any reading that resolves the PAIR
-// instead of the slot makes a typed count disagree with the enumeration of the
-// same pattern (rmp #2258).
-//
-// The handle is consulted FIRST and is authoritative when it has a record. This
-// is what makes a typed count correct over the parallel edges a Cypher CREATE
-// builds (rmp #2241): CreateRelationship stamps a distinct handle on each
-// CREATE's slot ([AdjList.AddEdgeH]) and records the type against it, precisely
-// because a positional index does not survive the deletion of a parallel sibling.
-//
-// The slot's own label column entry answers for every other slot — the
-// COLUMN-TYPED slots of [Graph.setEdgeLabelLocked]: an edge added through the Go
-// API ([Graph.AddEdge] + [Graph.SetEdgeLabel], or [Graph.AddEdgeLabeled]), and
-// the collapsed duplicate (src, dst) of simple-graph storage. SetEdgeLabel types
-// every free column-typed slot of the pair, so parallel handle-less edges each
-// carry the type in their own entry and are counted individually.
-//
-// The pair's overflow list is consulted last, and only for a column-typed slot:
-// it holds a type SetEdgeLabel could not place per-slot because no slot was free,
-// and naming the pair named every column-typed slot, so every one of them carries
-// it. It is gated on [Graph.edgeLabelOverflowActive] so the overwhelmingly common
-// graph — every Cypher-built one, and every graph that never gave a pair a second
-// relationship type — pays one atomic load instead of a shard lock per slot.
-func (g *Graph[N, W]) slotCarriesType(srcID, dst graph.NodeID, handle uint64, lbl, want uint32, relType LabelID) bool {
-	if has, known := g.edgeHandleHasLabel(srcID, dst, handle, relType); known {
+// Safe for concurrent use.
+func (g *Graph[N, W]) OutDegreeByTypeBoundedByIDAsOf(srcID graph.NodeID, relType LabelID, limit int, snap *Snapshot) (int, bool) {
+	return g.outDegreeMatchingByID(srcID, relType, true, limit, nil, snap)
+}
+
+// slotCarriesTypeAsOf is [Graph.slotCarriesType] as the slot stood at snap. All
+// three sources it consults are versioned, so the precedence between them —
+// a handle record is authoritative, else the column, else the pair's
+// overflow — is resolved at the reader's own instant rather than at the
+// writer's.
+func (g *Graph[N, W]) slotCarriesTypeAsOf(srcID, dst graph.NodeID, handle uint64, lbl, want uint32, relType LabelID, snap *Snapshot) bool {
+	if has, known := g.edgeHandleHasLabelAsOf(srcID, dst, handle, relType, snap); known {
 		return has
 	}
 	if lbl == want {
 		return true
 	}
-	return g.pairOverflowHasType(srcID, dst, relType)
+	return g.pairOverflowHasTypeAsOf(srcID, dst, relType, snap)
 }
 
-// pairOverflowHasType reports whether the overflow list of the pair
-// (srcID, dstID) carries lid. It is the allocation-free, [LabelID]-level,
-// id-keyed overflow probe [Graph.slotCarriesType] needs per slot.
+// pairOverflowHasTypeAsOf is [Graph.pairOverflowHasType] as the pair stood at
+// snap.
 //
-// The [Graph.edgeLabelOverflowActive] gate is what makes it affordable there: on
-// a graph with no overflow at all — the case for anything Cypher built and for
-// any graph whose pairs never needed a second type — it costs one atomic load and
-// takes no lock, so a typed degree walk over a hub does not acquire d shard locks
-// to learn that there is nothing to find.
-//
-// pairOverflowHasType is safe for concurrent use.
-func (g *Graph[N, W]) pairOverflowHasType(srcID, dstID graph.NodeID, lid LabelID) bool {
-	if g.edgeLabelOverflowActive.Load() == 0 {
+// The gate keeps its two halves for two different reasons: with no snapshot a
+// graph that has never spilled a type takes no lock at all, and with one the
+// version counter must be consulted too, because a type PRESENT for this reader
+// may already have been removed from the live list.
+func (g *Graph[N, W]) pairOverflowHasTypeAsOf(srcID, dstID graph.NodeID, lid LabelID, snap *Snapshot) bool {
+	if g.edgeLabelOverflowActive.Load() == 0 &&
+		(snap == nil || g.edgeLabelVersionActive.Load() == 0) {
 		return false
 	}
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.RLock()
-	has := sh.hasOverflow(k, lid)
+	has := false
+	for _, x := range g.overflowLabelsAsOf(sh, k, snap) {
+		if x == lid {
+			has = true
+			break
+		}
+	}
 	sh.mu.RUnlock()
 	return has
 }
@@ -2146,6 +2185,7 @@ func (g *Graph[N, W]) outDegreeMatchingByID(
 	typed bool,
 	limit int,
 	farOK func(dst graph.NodeID) bool,
+	snap *Snapshot,
 ) (int, bool) {
 	if limit <= 0 {
 		return 0, true
@@ -2153,8 +2193,12 @@ func (g *Graph[N, W]) outDegreeMatchingByID(
 	if _, interned := g.adj.Mapper().Resolve(srcID); !interned {
 		return 0, false
 	}
-	nbs, _, handles := g.adj.LoadEntryH(srcID)
-	labs := g.adj.LoadEntryLabels(srcID)
+	// ONE entry, so the neighbour, handle and label columns are the same
+	// version. The previous form loaded LoadEntryH and LoadEntryLabels
+	// separately, which under a snapshot could pair a handle with a label from
+	// a different instant.
+	v := g.EntryViewAsOf(srcID, snap)
+	nbs, handles, labs := v.Neighbours, v.Handles, v.Labels
 	want := encodeSlotLabel(relType) // see OutDegreeByType on the encoding
 	live := g.tombstoneActive.Load() != 0
 	// See "Hoisted type gates" above. Read before the loop, never inside it.
@@ -2195,7 +2239,7 @@ func (g *Graph[N, W]) outDegreeMatchingByID(
 				if i < len(handles) {
 					handle = handles[i]
 				}
-				if !g.slotCarriesType(srcID, dst, handle, lbl, want, relType) {
+				if !g.slotCarriesTypeAsOf(srcID, dst, handle, lbl, want, relType, snap) {
 					continue
 				}
 			}
@@ -2250,10 +2294,25 @@ func (g *Graph[N, W]) OutDegreeMatchingBoundedByID(
 	limit int,
 	farOK func(dst graph.NodeID) bool,
 ) (int, bool) {
+	return g.OutDegreeMatchingBoundedByIDAsOf(srcID, relType, typed, limit, farOK, nil)
+}
+
+// OutDegreeMatchingBoundedByIDAsOf is [Graph.OutDegreeMatchingBoundedByID] as
+// the node stood at snap. A nil snapshot reads the current value.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) OutDegreeMatchingBoundedByIDAsOf(
+	srcID graph.NodeID,
+	relType LabelID,
+	typed bool,
+	limit int,
+	farOK func(dst graph.NodeID) bool,
+	snap *Snapshot,
+) (int, bool) {
 	if farOK == nil {
 		return 0, false
 	}
-	return g.outDegreeMatchingByID(srcID, relType, typed, limit, farOK)
+	return g.outDegreeMatchingByID(srcID, relType, typed, limit, farOK, snap)
 }
 
 // maxInt is the effectively-unbounded limit for the bounded degree walkers, used
@@ -2286,7 +2345,7 @@ func (g *Graph[N, W]) OutDegreeByTypeBounded(src N, relType LabelID, limit int) 
 	if !ok {
 		return 0, false
 	}
-	return g.outDegreeMatchingByID(srcID, relType, true, limit, nil)
+	return g.outDegreeMatchingByID(srcID, relType, true, limit, nil, nil)
 }
 
 // HasConstraints reports whether the cypher engine currently has any schema
@@ -2740,6 +2799,7 @@ func (g *Graph[N, W]) DecrEdgesRemoved() {
 // RemoveNodeLabel detaches name from n. No-op if absent.
 func (g *Graph[N, W]) RemoveNodeLabel(n N, name string) {
 	g.removeNodeLabelInfo(n, name, nil)
+	g.reclaimAfterDirectWrite()
 }
 
 // removeNodeLabelInfo is [Graph.RemoveNodeLabel] with an explicit commit
@@ -2851,19 +2911,24 @@ func (g *Graph[N, W]) NodeLabelsByID(id graph.NodeID) []string {
 // visit therefore MUST NOT call back into any Graph method that takes a
 // node-label-shard lock (it would deadlock); copying the name string out is safe.
 func (g *Graph[N, W]) ForEachNodeLabelByID(id graph.NodeID, visit func(name string)) {
-	sh := g.nodeLabelShardFor(id)
-	sh.mu.RLock()
-	bag, ok := sh.m[id]
-	if !ok {
-		sh.mu.RUnlock()
-		return
-	}
+	g.ForEachNodeLabelByIDAsOf(id, nil, visit)
+}
+
+// ForEachNodeLabelByIDAsOf is [Graph.ForEachNodeLabelByID] as the node stood at
+// snap. A nil snapshot reads the current value; see snapshot_read.go.
+//
+// The bag is resolved BEFORE visit runs and no shard lock is held across it,
+// which the plain form could not offer: a reconstructed version is a private
+// copy, so there is nothing left to protect.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) ForEachNodeLabelByIDAsOf(id graph.NodeID, snap *Snapshot, visit func(name string)) {
+	bag := g.labelBagFor(id, snap)
 	bag.forEach(func(lid LabelID) {
 		if name, ok := g.reg.Resolve(lid); ok {
 			visit(name)
 		}
 	})
-	sh.mu.RUnlock()
 }
 
 // HasNodeLabelByID is the NodeID-keyed, allocation-free counterpart of

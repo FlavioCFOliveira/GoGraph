@@ -45,7 +45,7 @@ import (
 // graph. All edge traversal is performed via the adjacency-list API so no CSR
 // snapshot is required.
 type patternEvaluator struct {
-	g *lpg.Graph[string, float64]
+	g *lpg.ReadView[string, float64]
 	// maxCollectItems bounds the size of the result list a single
 	// [ast.PatternComprehension] may build, sharing the buffering-aggregator
 	// budget so the cap is consistent and configurable through the same knob
@@ -65,7 +65,7 @@ type patternEvaluator struct {
 // the EngineOptions.MaxCollectItems encoding (0 → DefaultMaxCollectItems, <0 →
 // no cap, >0 → that exact budget); it is resolved once here so the hot append
 // path compares against a single non-negative ceiling.
-func newPatternEvaluator(g *lpg.Graph[string, float64], maxCollectItems int) *patternEvaluator {
+func newPatternEvaluator(g *lpg.ReadView[string, float64], maxCollectItems int) *patternEvaluator {
 	return &patternEvaluator{g: g, maxCollectItems: resolvePatternCompBudget(maxCollectItems)}
 }
 
@@ -351,7 +351,7 @@ func cloneRow(row expr.RowContext) expr.RowContext {
 // nodeValueForID materialises an expr.NodeValue for nodeID using the
 // live graph's labels and properties. Returns a bare NodeValue with
 // only the ID populated when the mapper cannot resolve the id.
-func nodeValueForID(g *lpg.Graph[string, float64], id graph.NodeID) expr.NodeValue {
+func nodeValueForID(g *lpg.ReadView[string, float64], id graph.NodeID) expr.NodeValue {
 	mapper := g.AdjList().Mapper()
 	key, ok := mapper.Resolve(id)
 	if !ok {
@@ -373,7 +373,7 @@ func nodeValueForID(g *lpg.Graph[string, float64], id graph.NodeID) expr.NodeVal
 // (forward ? srcKey→dstKey : dstKey→srcKey) — callers pass forward=true
 // when the traversal followed the storage direction and false for the
 // reverse leg of an undirected / incoming match.
-func relValueFromHop(g *lpg.Graph[string, float64], hop candidateHop, rel *ast.RelationshipPattern) expr.RelationshipValue {
+func relValueFromHop(g *lpg.ReadView[string, float64], hop candidateHop, rel *ast.RelationshipPattern) expr.RelationshipValue {
 	srcKey, dstKey := hop.srcKey, hop.dstKey
 	startID, endID := uint64(hop.srcID), uint64(hop.dstID)
 	if !hop.forward {

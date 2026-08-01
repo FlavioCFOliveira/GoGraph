@@ -69,7 +69,111 @@ func (g *Graph[N, W]) reclaimIfDue() {
 		return
 	}
 	g.reclaimDebt.Store(0)
+	if !g.sweeping.CompareAndSwap(false, true) {
+		return
+	}
+	defer g.sweeping.Store(false)
 	g.ReclaimNow()
+}
+
+// reclaimAfterDirectWrite sweeps when a DIRECT Go-API mutation — one made
+// outside any transaction — has pushed the reclamation debt past the
+// threshold.
+//
+// # Why this exists at all
+//
+// [Graph.endWrite] drives reclamation for a barrier-held transaction, which is
+// every write the Cypher engine and the durable store make. It does NOT cover
+// the public Go-API mutators, which a caller may drive without ever opening a
+// transaction — and that is a supported, documented use of this package.
+// Without this, such a caller leaks ONE version record per modification for the
+// life of the process, and every subsequent read of the affected shard pays a
+// side-map probe it can never stop paying. Measured before the fix: a 60 000
+// node build through the direct API left 120 000 live versions and made
+// BenchmarkEngReadProjectLargeSerial 58 % slower, forever.
+//
+// # Why it can take the barrier here and endWrite cannot
+//
+// The reclaimers need writer exclusion, which the barrier supplies. A direct
+// mutator does not hold it, so this can acquire it — but only when no
+// transaction is open, because inside one the barrier is ALREADY held by this
+// goroutine and re-acquiring it is the re-entrancy violation the guard exists
+// to catch. [mvcc.WriteStamp.Armed] is exactly that question, and it is one
+// atomic load.
+//
+// The caller must NOT hold any shard lock: this takes the barrier and then
+// every shard lock in turn.
+func (g *Graph[N, W]) reclaimAfterDirectWrite() {
+	if !g.mvccArmed {
+		return
+	}
+	if n := g.stamp.TakeUntracked(); n > 0 {
+		g.reclaimDebt.Add(n)
+	} else if g.stamp.Armed() {
+		// Inside a transaction: its endWrite owns the sweep.
+		return
+	}
+	if g.reclaimDebt.Load() < reclaimThreshold {
+		return
+	}
+	g.reclaimDebt.Store(0)
+	_ = g.ApplyAtomically(func() error {
+		g.ReclaimNow()
+		return nil
+	})
+}
+
+// ReclaimIdle sweeps from the READ path, which is what makes the substrate
+// settle back to zero when writing stops.
+//
+// # The residue this exists to remove
+//
+// [Graph.reclaimIfDue] sweeps once the debt passes a threshold, so whatever the
+// last sweep did not reach stays for as long as no further write arrives. On a
+// build-then-read workload that is the whole point of the graph, and the cost
+// is not the memory — it is that EVERY subsequent read of an affected shard
+// pays a side-map probe for history nothing can reach. Measured: a 60 000 node
+// build left 3 136 unreachable versions and made
+// BenchmarkEngReadProjectLargeSerial 42 % slower than the pre-MVCC baseline,
+// permanently. Sweeping them costs one pass and the cost goes away.
+//
+// # Why a READER may do this
+//
+// The reclaimers need three things, and a reader supplies all of them:
+//
+//   - No concurrent WRITER. Each reclaimer takes the same per-shard write lock
+//     the write path takes, so they are mutually excluded shard by shard. This
+//     does not depend on the visibility barrier, which is why it will still
+//     hold once P4c retires it.
+//   - No concurrent SWEEP. [Graph.sweeping] admits exactly one.
+//   - A watermark no active reader is older than. A reader is REGISTERED with
+//     the horizon before it gets here, so the watermark it computes is at or
+//     below its own start timestamp — which makes sweeping from a reader
+//     strictly safer than sweeping from a writer, where the readers are the
+//     ones that have to be accounted for.
+//
+// # Why it does not spin
+//
+// A long-lived reader legitimately holds versions back, and re-sweeping for
+// them on every query would be pure waste. So a sweep that changes nothing
+// records the count it left behind, and the next read skips until a write moves
+// it.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) ReclaimIdle() {
+	if !g.mvccArmed {
+		return
+	}
+	n := g.VersionCount()
+	if n == 0 || n == g.lastIdleSweep.Load() {
+		return
+	}
+	if !g.sweeping.CompareAndSwap(false, true) {
+		return
+	}
+	defer g.sweeping.Store(false)
+	g.ReclaimNow()
+	g.lastIdleSweep.Store(g.VersionCount())
 }
 
 // ReclaimNow frees every version no active reader can reach, and returns how

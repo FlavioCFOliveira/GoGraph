@@ -1402,7 +1402,7 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 	// NodeValue.ID, which makes subsequent property access (`startNode(r).id`)
 	// return null because the per-row schema upgrade does not fire on
 	// function-produced values.
-	reg = newGraphAwareRegistry(reg, g)
+	reg = newGraphAwareRegistry(reg, g.ReadAt(nil))
 	e := &Engine{
 		g:                      g,
 		store:                  opts.Store,
@@ -1535,7 +1535,7 @@ func (e *Engine) registerRecoveredConstraints(defs []ConstraintDef) {
 			// graph is not yet populated). Ignore ErrIndexExists: a previous
 			// constraint or a recovered plain index already claimed the name.
 			var sub index.Subscriber
-			if boundIdx, bidxErr := newBoundNodeHashIndex(e.g, d.Label, d.Property); bidxErr == nil {
+			if boundIdx, bidxErr := newBoundNodeHashIndex(e.g.ReadAt(nil), d.Label, d.Property); bidxErr == nil {
 				// Recovery must complete: a background context never cancels, so
 				// the backfill never returns an error here.
 				_ = e.backfillNodeHashIndex(context.Background(), boundIdx, d.Label, d.Property)
@@ -1757,12 +1757,18 @@ func (e *Engine) ListIndexes() []string {
 // downstream property access works.
 type graphAwareRegistry struct {
 	delegate expr.FunctionRegistry
-	g        *lpg.Graph[string, float64]
+	// g is a view with NO snapshot, because this registry is built once per
+	// ENGINE and outlives every query: there is no one instant it could be
+	// bound to. So startNode()/endNode() hydrate against the current value,
+	// which is exactly what they did before MVCC. Binding them to the calling
+	// query's snapshot would need a per-query registry; it is recorded on
+	// rmp #2290 rather than left implicit here.
+	g *lpg.ReadView[string, float64]
 }
 
 // newGraphAwareRegistry wraps delegate with graph-aware startnode and
 // endnode implementations. Other function lookups pass through unchanged.
-func newGraphAwareRegistry(delegate expr.FunctionRegistry, g *lpg.Graph[string, float64]) expr.FunctionRegistry {
+func newGraphAwareRegistry(delegate expr.FunctionRegistry, g *lpg.ReadView[string, float64]) expr.FunctionRegistry {
 	return &graphAwareRegistry{delegate: delegate, g: g}
 }
 
@@ -2111,8 +2117,40 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	// process-global statementNow in funcs, so concurrent Engine.Run calls
 	// never race on it.
 	queryReg := newNowAwareRegistry(e.reg, time.Now())
+	// ── 1c. Open the read view (rmp #2289, MVCC P4b) ─────────────────────────
+	// One start timestamp for the whole query, registered with the reclamation
+	// horizon so no version this read can still reach is freed while it runs.
+	// EndRead runs from a deferred closure so it also fires on the error and
+	// panic paths — a snapshot that is never released holds the watermark for
+	// the life of the process.
+	//
+	// The visibility barrier is STILL taken. That is deliberate: with it held
+	// no writer is concurrent, so every as-of read must return exactly what the
+	// plain read returns, which makes this phase a provable identity rather
+	// than a semantic change. Retiring the barrier is P4c (rmp #2290).
+	//
+	// THE START TIMESTAMP IS TAKEN INSIDE THE BARRIER, and that is not a
+	// detail. Taken outside, a writer can commit between the timestamp and the
+	// RLock, and the query then runs with a start timestamp older than the
+	// state its CANDIDATE structures show: the node mapper hands the scan a
+	// node the versioned stores correctly report as having no labels and no
+	// properties, and the query emits a row of nulls for a node that did not
+	// exist yet. Two tests caught exactly that
+	// (TestRunInTx_DurableThenVisible_ConcurrentReader and
+	// TestSEC14c_ConcurrentWriteRead_NoRace_NoPartialReads). Inside the
+	// barrier the two agree by construction. Making them agree WITHOUT the
+	// barrier is the candidate-set half of P4c.
+	var snap *lpg.Snapshot
+	defer func() { e.g.EndRead(snap) }()
 	e.g.View(func() {
-		op, cols, err := e.buildReadPhysical(ctx, entry, plan, params, queryReg, nil)
+		snap = e.g.BeginRead()
+		// Sweep unreachable versions before building. It is once per query, not
+		// per row, and it is what stops a build-then-read workload paying a
+		// side-map probe forever for history nothing can reach; see
+		// lpg.Graph.ReclaimIdle for why a reader is entitled to do this and why
+		// it does not spin.
+		e.g.ReclaimIdle()
+		op, cols, err := e.buildReadPhysical(ctx, entry, plan, params, queryReg, nil, snap)
 		if err != nil {
 			buildErr = err
 			return
@@ -2160,19 +2198,24 @@ func (e *Engine) buildReadPhysical(
 	params map[string]expr.Value,
 	queryReg expr.FunctionRegistry,
 	prof *exec.Profiler,
+	snap *lpg.Snapshot,
 ) (exec.Operator, []string, error) {
-	walker := &lpgNodeWalker{g: e.g}
-	labelSrc := &lpgLabelResolver{g: e.g, eng: e}
+	// EVERY read this build binds goes through rv, so the whole query observes
+	// ONE instant (rmp #2289). A nil snapshot yields a view of the current
+	// value, which is what the rendering paths pass and what a writer needs.
+	rv := e.g.ReadAt(snap)
+	walker := &lpgNodeWalker{g: rv}
+	labelSrc := &lpgLabelResolver{g: rv, eng: e}
 	// Allocate a per-run subquery evaluator so EXISTS { … } / COUNT { … }
 	// expressions encountered inside Filter/Project closures can drive their
 	// inner pipelines against the current outer row (task-396).
-	subEval := newSubqueryEvaluator(walker, labelSrc, queryReg, e.g)
+	subEval := newSubqueryEvaluator(walker, labelSrc, queryReg, rv)
 	// Allocate a per-run pattern evaluator so WHERE (a)-[:T]->(b) existential
 	// predicates can be evaluated against the live graph (task-961). It
 	// receives the Engine's per-query element budget so a pattern
 	// comprehension over a supernode anchor cannot build an unbounded
 	// result list — the same bound collect() enforces (#1294, #1298).
-	patEval := newPatternEvaluator(e.g, e.maxCollectItems)
+	patEval := newPatternEvaluator(rv, e.maxCollectItems)
 	bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx, maxCollectItems: e.maxCollectItems}
 	bopts.profiler = prof
 	// Edge-type-filter cache sharing (#1871): the SAME cache instance
@@ -2305,7 +2348,7 @@ func (e *Engine) explainPhysical(entry *planCacheEntry, params map[string]expr.V
 	)
 	queryReg := newNowAwareRegistry(e.reg, time.Now())
 	e.g.View(func() {
-		op, _, err := e.buildReadPhysical(context.Background(), entry, entry.plan, params, queryReg, nil)
+		op, _, err := e.buildReadPhysical(context.Background(), entry, entry.plan, params, queryReg, nil, nil)
 		if err != nil {
 			buildErr = err
 			return
@@ -2360,9 +2403,16 @@ func (e *Engine) Profile(ctx context.Context, query string, params map[string]ex
 		drainErr error
 	)
 	queryReg := newNowAwareRegistry(e.reg, time.Now())
+	// PROFILE executes the query, so it takes a read view exactly as Run does —
+	// including taking the start timestamp INSIDE the barrier. Measuring a
+	// different isolation level from the one Run uses would make the
+	// measurements describe a query nobody runs.
+	var snap *lpg.Snapshot
+	defer func() { e.g.EndRead(snap) }()
 	e.g.View(func() {
+		snap = e.g.BeginRead()
 		prof := exec.NewProfiler()
-		op, cols, berr := e.buildReadPhysical(ctx, entry, entry.plan, params, queryReg, prof)
+		op, cols, berr := e.buildReadPhysical(ctx, entry, entry.plan, params, queryReg, prof, snap)
 		if berr != nil {
 			buildErr = berr
 			return
@@ -2439,7 +2489,7 @@ func (e *Engine) explainLogical(entry *planCacheEntry, params map[string]expr.Va
 	// (task #2119) and the EXPLAIN requirement of task #2095. The counts are read
 	// live (no View barrier), matching the min-label EXPLAIN path: EXPLAIN is a
 	// diagnostic, so a consistent snapshot is not required for its rendering.
-	labelSrc := &lpgLabelResolver{g: e.g, eng: e}
+	labelSrc := &lpgLabelResolver{g: e.g.ReadAt(nil), eng: e}
 	var reorderSwaps map[*ir.Apply]bool
 	var anchorSwaps map[*ir.Expand]bool
 	if e.joinReorderEnabled {
@@ -2452,7 +2502,7 @@ func (e *Engine) explainLogical(entry *planCacheEntry, params map[string]expr.Va
 			anchorSwaps = computeAnchorSwaps(sites, labelSrc)
 		}
 	}
-	return explainWithIndexes(plan, e.g.IndexManager(), params, e.g, labelSrc, reorderSwaps, anchorSwaps, entry.pushedSeekHints, e.prefixSeekEnabled)
+	return explainWithIndexes(plan, e.g.IndexManager(), params, e.g.ReadAt(nil), labelSrc, reorderSwaps, anchorSwaps, entry.pushedSeekHints, e.prefixSeekEnabled)
 }
 
 // explainWithIndexes walks plan and renders operator names, substituting
@@ -2470,7 +2520,7 @@ func (e *Engine) explainLogical(entry *planCacheEntry, params map[string]expr.Va
 // prefixSeek carries the Engine's STARTS WITH prefix-rewrite gate (#2127) so a
 // prefix-DISABLED engine does not render a range seek its physical plan would
 // not build.
-func explainWithIndexes(plan ir.LogicalPlan, idxMgr *index.Manager, params map[string]expr.Value, g *lpg.Graph[string, float64], labelSrc *lpgLabelResolver, reorderSwaps map[*ir.Apply]bool, anchorSwaps map[*ir.Expand]bool, seekHints map[*ir.Selection]bool, prefixSeek bool) string {
+func explainWithIndexes(plan ir.LogicalPlan, idxMgr *index.Manager, params map[string]expr.Value, g *lpg.ReadView[string, float64], labelSrc *lpgLabelResolver, reorderSwaps map[*ir.Apply]bool, anchorSwaps map[*ir.Expand]bool, seekHints map[*ir.Selection]bool, prefixSeek bool) string {
 	var b strings.Builder
 	explainWithIndexesNode(&b, plan, idxMgr, params, g, labelSrc, reorderSwaps, anchorSwaps,
 		seekHints, prefixSeek, "", true, true)
@@ -2509,7 +2559,7 @@ func explainWithIndexesNode(
 	plan ir.LogicalPlan,
 	idxMgr *index.Manager,
 	params map[string]expr.Value,
-	explainGraph *lpg.Graph[string, float64],
+	explainGraph *lpg.ReadView[string, float64],
 	labelSrc *lpgLabelResolver,
 	reorderSwaps map[*ir.Apply]bool,
 	anchorSwaps map[*ir.Expand]bool,
@@ -2897,7 +2947,7 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 			fmt.Errorf("%w: %q", index.ErrIndexExists, p.Name))
 	}
 
-	idx, err := newBoundNodeBTreeIndex(e.g, p.Label, p.Property)
+	idx, err := newBoundNodeBTreeIndex(e.g.ReadAt(nil), p.Label, p.Property)
 	if err != nil {
 		return nil, fmt.Errorf("exec: CreateIndex %q: %w", p.Name, err)
 	}
@@ -2921,7 +2971,7 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 	// leave the user index correct (the seek declines with no covering numeric
 	// btree and falls back to scan+filter).
 	numName := numericBTreeName(p.Label, p.Property)
-	numIdx, _ := newBoundNodeBTreeIndexNumeric(e.g, p.Label, p.Property)
+	numIdx, _ := newBoundNodeBTreeIndexNumeric(e.g.ReadAt(nil), p.Label, p.Property)
 	if numIdx != nil {
 		if err := e.backfillNodeBTreeIndexNumeric(ctx, numIdx, p.Label, p.Property); err != nil {
 			return nil, err
@@ -3271,7 +3321,7 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 		// interacts with index.Manager metadata, also safe.
 		op := exec.NewCreateConstraintOp(p.Name, p.Label, p.Property, kind, p.IfNotExists, idxMgr, e.constraintReg, e.ClearPlanCache)
 		if kind == exec.ConstraintUnique {
-			boundIdx, bidxErr := newBoundNodeHashIndex(e.g, p.Label, p.Property)
+			boundIdx, bidxErr := newBoundNodeHashIndex(e.g.ReadAt(nil), p.Label, p.Property)
 			if bidxErr == nil {
 				// Cancellation before registration aborts the constraint with
 				// nothing registered or made durable (atomicity preserved).
@@ -3433,7 +3483,7 @@ func (e *Engine) dropConstraintLocked(ctx context.Context, p *ir.DropConstraint,
 func (e *Engine) rewindConstraintDrop(cause error, name, label, prop string, kind exec.ConstraintKind, idxMgr *index.Manager) error {
 	op := exec.NewCreateConstraintOp(name, label, prop, kind, false, idxMgr, e.constraintReg, e.ClearPlanCache)
 	if kind == exec.ConstraintUnique {
-		if boundIdx, bidxErr := newBoundNodeHashIndex(e.g, label, prop); bidxErr == nil {
+		if boundIdx, bidxErr := newBoundNodeHashIndex(e.g.ReadAt(nil), label, prop); bidxErr == nil {
 			// The rewind is uncancellable by design (see runDDLOp below): a
 			// background context never cancels, so the backfill cannot error.
 			_ = e.backfillNodeHashIndex(context.Background(), boundIdx, label, prop)
@@ -5364,7 +5414,7 @@ func finalizeResult(r *Result) {
 // Graph adapters
 // ─────────────────────────────────────────────────────────────────────────────
 
-// lpgNodeWalker adapts *lpg.Graph[string, float64] to the exec.nodeWalker
+// lpgNodeWalker adapts *lpg.ReadView[string, float64] to the exec.nodeWalker
 // interface expected by [exec.AllNodesScan].
 //
 // morsel, when non-nil, restricts WalkNodeIDs to that caller-owned slice of
@@ -5378,7 +5428,15 @@ func finalizeResult(r *Result) {
 // passed to [buildOperator] (the subtree rebuild); it is never the recognizer's
 // live walker, so [useParallelScan]'s LiveOrder read never sees a morsel.
 type lpgNodeWalker struct {
-	g      *lpg.Graph[string, float64]
+	// g is the graph BOUND TO THIS QUERY'S READ SNAPSHOT (rmp #2289). Its type
+	// is what makes the snapshot impossible to forget: every read the physical
+	// builder makes through this field is already as-of, and a read with no
+	// versioned form fails to compile rather than quietly observing a later
+	// instant than the rest of its query. A write path builds it with a nil
+	// snapshot, which reads the current value — the only correct answer for a
+	// writer that applies eagerly and must see its own work. Reach the unbound
+	// graph with g.Raw().
+	g      *lpg.ReadView[string, float64]
 	morsel []graph.NodeID // nil = walk the whole graph; non-nil = scan this slice only
 }
 
@@ -5509,10 +5567,10 @@ func parallelScanLeaf(plan ir.LogicalPlan) (nodeVar, labelName string, ok bool) 
 	}
 }
 
-// lpgLabelResolver adapts *lpg.Graph[string, float64] to the exec.labelResolver
+// lpgLabelResolver adapts *lpg.ReadView[string, float64] to the exec.labelResolver
 // interface expected by [exec.NodeByLabelScan].
 type lpgLabelResolver struct {
-	g *lpg.Graph[string, float64]
+	g *lpg.ReadView[string, float64]
 	// eng is the owning engine, threaded so the resolver can reach the exact
 	// relationship count-store (#2082) and the lazily-installed approximate
 	// statistics collector (#2097/#2098) WITHOUT carrying a separate pointer for
@@ -6059,7 +6117,7 @@ func buildOperatorWrite(
 			capturedParams := params
 			capturedReg := reg
 			capturedBopts := bopts
-			var capturedG *lpg.Graph[string, float64]
+			var capturedG *lpg.ReadView[string, float64]
 			if lw, ok := walker.(*lpgNodeWalker); ok {
 				capturedG = lw.g
 			}
@@ -6231,7 +6289,7 @@ func buildOperatorWrite(
 				capturedParams := params
 				capturedReg := reg
 				capturedBopts := bopts
-				var capturedG *lpg.Graph[string, float64]
+				var capturedG *lpg.ReadView[string, float64]
 				if lw, ok := walker.(*lpgNodeWalker); ok {
 					capturedG = lw.g
 				}
@@ -6296,7 +6354,7 @@ func buildOperatorWrite(
 			capturedParams := params
 			capturedReg := reg
 			capturedBopts := bopts
-			var capturedG *lpg.Graph[string, float64]
+			var capturedG *lpg.ReadView[string, float64]
 			if lw, ok := walker.(*lpgNodeWalker); ok {
 				capturedG = lw.g
 			}
@@ -7839,7 +7897,7 @@ func buildOperatorRec(
 			// correlated_seek_plan.go has pushed it into the inner arm. Tried after
 			// the single-key seek, which is cheaper for the one-key case, and gated
 			// on the EXACT merged posting count so a wide key set keeps the scan.
-			var seekSetG *lpg.Graph[string, float64]
+			var seekSetG *lpg.ReadView[string, float64]
 			if lw, ok := walker.(*lpgNodeWalker); ok {
 				seekSetG = lw.g
 			}
@@ -7899,7 +7957,7 @@ func buildOperatorRec(
 		// exactly as the full scan would.
 		var child exec.Operator
 		var err error
-		var rangeG *lpg.Graph[string, float64]
+		var rangeG *lpg.ReadView[string, float64]
 		if lw, ok := walker.(*lpgNodeWalker); ok {
 			rangeG = lw.g
 		}
@@ -7912,7 +7970,7 @@ func buildOperatorRec(
 			}
 		}
 		if p.PredicateExpr != nil {
-			var selG *lpg.Graph[string, float64]
+			var selG *lpg.ReadView[string, float64]
 			if lw, ok := walker.(*lpgNodeWalker); ok {
 				selG = lw.g
 			}
@@ -7976,7 +8034,7 @@ func buildOperatorRec(
 		if err != nil {
 			return nil, err
 		}
-		var projG *lpg.Graph[string, float64]
+		var projG *lpg.ReadView[string, float64]
 		if lw, ok := walker.(*lpgNodeWalker); ok {
 			projG = lw.g
 		}
@@ -8066,7 +8124,7 @@ func buildOperatorRec(
 			bopts.edgeVarMeta[p.RelVar] = info
 		}
 
-		var g *lpg.Graph[string, float64]
+		var g *lpg.ReadView[string, float64]
 		if lw, ok := walker.(*lpgNodeWalker); ok {
 			g = lw.g
 		}
@@ -8448,7 +8506,7 @@ func buildOperatorRec(
 		if err != nil {
 			return nil, err
 		}
-		var aggG *lpg.Graph[string, float64]
+		var aggG *lpg.ReadView[string, float64]
 		if lw, ok := walker.(*lpgNodeWalker); ok {
 			aggG = lw.g
 		}
@@ -8459,7 +8517,7 @@ func buildOperatorRec(
 		if err != nil {
 			return nil, err
 		}
-		var sortG *lpg.Graph[string, float64]
+		var sortG *lpg.ReadView[string, float64]
 		if lw, ok := walker.(*lpgNodeWalker); ok {
 			sortG = lw.g
 		}
@@ -8480,7 +8538,7 @@ func buildOperatorRec(
 		if err != nil {
 			return nil, err
 		}
-		var topG *lpg.Graph[string, float64]
+		var topG *lpg.ReadView[string, float64]
 		if lw, ok := walker.(*lpgNodeWalker); ok {
 			topG = lw.g
 		}
@@ -8644,7 +8702,7 @@ func buildOperatorRec(
 			bopts.expandTripletSeq = append(bopts.expandTripletSeq, step)
 		}
 
-		var g *lpg.Graph[string, float64]
+		var g *lpg.ReadView[string, float64]
 		if lw, ok := walker.(*lpgNodeWalker); ok {
 			g = lw.g
 		}
@@ -8737,7 +8795,7 @@ func buildOperatorRec(
 			bopts.vleRelMeta[p.RelVar] = info
 		}
 
-		var g *lpg.Graph[string, float64]
+		var g *lpg.ReadView[string, float64]
 		if lw, ok := walker.(*lpgNodeWalker); ok {
 			g = lw.g
 		}
@@ -9637,7 +9695,7 @@ func buildEagerAggregation(
 	p *ir.EagerAggregation,
 	child exec.Operator,
 	schema map[string]int,
-	g *lpg.Graph[string, float64],
+	g *lpg.ReadView[string, float64],
 	params map[string]expr.Value,
 	reg expr.FunctionRegistry,
 	bopts *buildOpts,
@@ -9813,7 +9871,7 @@ func buildEagerAggregation(
 func buildAggPreProjItems(
 	p *ir.EagerAggregation,
 	schemaSnap map[string]int,
-	g *lpg.Graph[string, float64],
+	g *lpg.ReadView[string, float64],
 	params map[string]expr.Value,
 	reg expr.FunctionRegistry,
 	bopts *buildOpts,
@@ -9857,7 +9915,7 @@ func buildAggPreProjItems(
 func aggArgItem(
 	aggExpr *ir.AggregateExpr,
 	schemaSnap map[string]int,
-	g *lpg.Graph[string, float64],
+	g *lpg.ReadView[string, float64],
 	params map[string]expr.Value,
 	reg expr.FunctionRegistry,
 	bopts *buildOpts,
@@ -10118,7 +10176,7 @@ func newAggregationEval(
 	astExpr ast.Expression,
 	varName string,
 	schemaSnap map[string]int,
-	g *lpg.Graph[string, float64],
+	g *lpg.ReadView[string, float64],
 	params map[string]expr.Value,
 	reg expr.FunctionRegistry,
 	bopts *buildOpts,
@@ -10287,7 +10345,7 @@ func validPercentileParam(v expr.Value) (float64, error) {
 func irSortKeys(
 	items []ir.SortItem,
 	schema map[string]int,
-	g *lpg.Graph[string, float64],
+	g *lpg.ReadView[string, float64],
 	params map[string]expr.Value,
 	reg expr.FunctionRegistry,
 	bopts *buildOpts,
@@ -11068,7 +11126,7 @@ func hashIndexKind(sub index.Subscriber) (expr.Kind, bool) {
 // under the property shard's read lock, observing the same consistent snapshot
 // the previous two-step path observed; the resulting map is freshly owned by the
 // caller and aliases no graph-internal state.
-func nodePropsToExprMap(g *lpg.Graph[string, float64], id graph.NodeID) expr.MapValue {
+func nodePropsToExprMap(g *lpg.ReadView[string, float64], id graph.NodeID) expr.MapValue {
 	var props expr.MapValue
 	g.NodePropertiesByIDFunc(id, func(name string, pv lpg.PropertyValue) {
 		if props == nil {
@@ -11105,7 +11163,7 @@ func nodePropsToExprMap(g *lpg.Graph[string, float64], id graph.NodeID) expr.Map
 // Isolation: the conversion runs inside the lock-free immutable-read callback; no
 // lock is held, the resulting map is freshly owned by the caller, and it aliases
 // no graph-internal state.
-func edgePropsToExprMap(g *lpg.Graph[string, float64], srcKey, dstKey string) expr.MapValue {
+func edgePropsToExprMap(g *lpg.ReadView[string, float64], srcKey, dstKey string) expr.MapValue {
 	var edgeProps expr.MapValue
 	g.ForEachEdgeProperty(srcKey, dstKey, func(name string, pv lpg.PropertyValue) {
 		if edgeProps == nil {
@@ -11143,7 +11201,7 @@ func edgePropsToExprMap(g *lpg.Graph[string, float64], srcKey, dstKey string) ex
 // it is safe for concurrent use under the same per-shard contract as
 // [lpg.Graph.EdgePropertiesByHandle]. To read a view consistent with the
 // adjacency layer, the caller brackets the correlated reads under [lpg.Graph.View].
-func edgePropsByHandleToExprMap(g *lpg.Graph[string, float64], srcKey, dstKey string, handle uint64) expr.MapValue {
+func edgePropsByHandleToExprMap(g *lpg.ReadView[string, float64], srcKey, dstKey string, handle uint64) expr.MapValue {
 	raw := g.EdgePropertiesByHandle(srcKey, dstKey, handle)
 	if len(raw) == 0 {
 		return nil
@@ -11249,7 +11307,7 @@ func buildUnwindOperator(
 		})
 	}
 
-	var g *lpg.Graph[string, float64]
+	var g *lpg.ReadView[string, float64]
 	if lw, ok := walker.(*lpgNodeWalker); ok {
 		g = lw.g
 	}
@@ -11292,7 +11350,7 @@ func buildUnwindOperator(
 // separate IntegerValue columns (srcID, edgeID, dstID) and the schema carries
 // no per-column kind information, so RelationshipValue construction needs
 // schema-level type metadata that this helper deliberately does not touch.
-func upgradeNodeIDToValue(v expr.Value, g *lpg.Graph[string, float64]) expr.Value {
+func upgradeNodeIDToValue(v expr.Value, g *lpg.ReadView[string, float64]) expr.Value {
 	if g == nil {
 		return v
 	}
@@ -11617,7 +11675,7 @@ func classifyFieldExtractor(v *ast.FunctionInvocation, get func(string) *nodeSca
 // snapshot the eager materialiser would; the returned value aliases no
 // graph-internal mutable state.
 type lazyNodeResolver struct {
-	g *lpg.Graph[string, float64]
+	g *lpg.ReadView[string, float64]
 }
 
 // NodeProperty implements [expr.NodeResolver]. A missing key returns (nil,
@@ -11640,7 +11698,7 @@ func (r lazyNodeResolver) HasNodeLabel(id uint64, label string) bool {
 // caching it on bopts on first use. When bopts is nil (call sites that build a
 // RowContext without a buildOpts) a fresh per-call resolver is returned; this
 // is the cold path and never the per-row hot path, which always carries bopts.
-func lazyResolver(bopts *buildOpts, g *lpg.Graph[string, float64]) expr.NodeResolver {
+func lazyResolver(bopts *buildOpts, g *lpg.ReadView[string, float64]) expr.NodeResolver {
 	if bopts == nil {
 		return lazyNodeResolver{g: g}
 	}
@@ -11675,7 +11733,7 @@ func lazyResolver(bopts *buildOpts, g *lpg.Graph[string, float64]) expr.NodeReso
 // fresh per-row allocation (#1697); the borrowed node is valid only until the
 // arena is released and must not escape the row. arena is nil on every escaping
 // / eager caller, which allocates a fresh struct exactly as before.
-func upgradeNodeIDToValuePartial(v expr.Value, g *lpg.Graph[string, float64], use *nodeScalarUse, bopts *buildOpts, arena *pooledRowCtx) expr.Value {
+func upgradeNodeIDToValuePartial(v expr.Value, g *lpg.ReadView[string, float64], use *nodeScalarUse, bopts *buildOpts, arena *pooledRowCtx) expr.Value {
 	if g == nil || use == nil || use.needsWholeNode {
 		return upgradeNodeIDToValue(v, g)
 	}
@@ -11725,7 +11783,7 @@ var nodeKeyNamesPlaceholder = expr.BoolValue(true)
 // Soundness: the partial NodeValue is read by the extractor function and then
 // discarded with the (possibly pooled) RowContext; the function returns a fresh
 // list / integer / NodeValue-by-id, so the partial node itself never escapes.
-func buildPartialNodeValueForFn(v expr.Value, g *lpg.Graph[string, float64], use *nodeScalarUse) (expr.NodeValue, bool) {
+func buildPartialNodeValueForFn(v expr.Value, g *lpg.ReadView[string, float64], use *nodeScalarUse) (expr.NodeValue, bool) {
 	if g == nil {
 		return expr.NodeValue{}, false
 	}
@@ -11771,7 +11829,7 @@ func buildPartialNodeValueForFn(v expr.Value, g *lpg.Graph[string, float64], use
 // buildNodeValueFromID constructs an expr.NodeValue for a known graph NodeID,
 // loading labels and properties from g. If the ID is not found in the mapper,
 // an empty NodeValue with only the ID set is returned.
-func buildNodeValueFromID(id graph.NodeID, g *lpg.Graph[string, float64]) expr.NodeValue {
+func buildNodeValueFromID(id graph.NodeID, g *lpg.ReadView[string, float64]) expr.NodeValue {
 	if g == nil {
 		return expr.NodeValue{ID: uint64(id)}
 	}
@@ -11791,7 +11849,7 @@ func buildNodeValueFromID(id graph.NodeID, g *lpg.Graph[string, float64]) expr.N
 // bound in the preceding MATCH pattern. Returns (zero, false) when the row
 // does not contain the expected columns or when the leading column does
 // not carry a recognisable node value.
-func buildPathValueFromChainInfo(row exec.Row, cinfo pathChainInfo, g *lpg.Graph[string, float64], bopts *buildOpts) (expr.PathValue, bool) {
+func buildPathValueFromChainInfo(row exec.Row, cinfo pathChainInfo, g *lpg.ReadView[string, float64], bopts *buildOpts) (expr.PathValue, bool) {
 	if cinfo.leadingCol >= len(row) {
 		return expr.PathValue{}, false
 	}
@@ -11839,7 +11897,7 @@ func buildPathValueFromChainInfo(row exec.Row, cinfo pathChainInfo, g *lpg.Graph
 // expression evaluation (e.g. `relationships(p)`, `nodes(p)`,
 // `length(p)` over var-length paths). Returns (zero, false) when the
 // column is missing, not a ListValue, empty, or carries non-integer entries.
-func buildPathValueFromVLEMeta(row exec.Row, pmeta pathVarInfo, g *lpg.Graph[string, float64], bopts *buildOpts) (expr.PathValue, bool) {
+func buildPathValueFromVLEMeta(row exec.Row, pmeta pathVarInfo, g *lpg.ReadView[string, float64], bopts *buildOpts) (expr.PathValue, bool) {
 	segments := pmeta.segments
 	if len(segments) == 0 {
 		segments = []pathVarSegment{{listCol: pmeta.listCol, edgeType: pmeta.edgeType}}
@@ -11931,7 +11989,7 @@ func buildPathValueFromVLEMeta(row exec.Row, pmeta pathVarInfo, g *lpg.Graph[str
 // `r[0].type` operate on the documented openCypher list-of-relationships
 // shape rather than on the raw alternating path encoding emitted by
 // VarLengthExpand.
-func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.Graph[string, float64], bopts *buildOpts) expr.RowContext {
+func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.ReadView[string, float64], bopts *buildOpts) expr.RowContext {
 	return buildRowCtxWithUse(row, schema, g, bopts, nil)
 }
 
@@ -11953,7 +12011,7 @@ func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.Graph[string, float
 // scalarUse therefore MUST NOT be supplied by any caller whose RowContext value
 // can flow into a result row (e.g. the projection general path), because a
 // partially-materialised node would serialise a truncated property map.
-func buildRowCtxWithUse(row exec.Row, schema map[string]int, g *lpg.Graph[string, float64], bopts *buildOpts, scalarUse map[string]*nodeScalarUse) expr.RowContext {
+func buildRowCtxWithUse(row exec.Row, schema map[string]int, g *lpg.ReadView[string, float64], bopts *buildOpts, scalarUse map[string]*nodeScalarUse) expr.RowContext {
 	ctx := make(expr.RowContext, len(schema))
 	// arena nil: this path allocates a fresh map (escaping/eager callers) and so
 	// must allocate fresh lazy nodes too — no reuse, no pooled lifecycle.
@@ -12081,7 +12139,7 @@ func releaseRowCtx(p *pooledRowCtx) {
 // scalarUse is nil it falls back to a freshly allocated RowContext (the
 // historical behaviour), preserving exact semantics. It is the shared body of
 // the non-escaping Filter-predicate and scalar-projection evaluation closures.
-func evalRowPooled(bopts *buildOpts, e ast.Expression, row exec.Row, schema map[string]int, g *lpg.Graph[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, scalarUse map[string]*nodeScalarUse) (expr.Value, error) {
+func evalRowPooled(bopts *buildOpts, e ast.Expression, row exec.Row, schema map[string]int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, scalarUse map[string]*nodeScalarUse) (expr.Value, error) {
 	if scalarUse == nil {
 		return evalRow(bopts, e, buildRowCtxWithUse(row, schema, g, bopts, nil), params, reg)
 	}
@@ -12101,7 +12159,7 @@ func evalRowPooled(bopts *buildOpts, e ast.Expression, row exec.Row, schema map[
 // caller passes nil and gets a freshly allocated lazy node per row, preserving
 // the exact prior behaviour and escape safety. A borrowed lazy node is valid
 // only until the arena's pooledRowCtx is released and must never escape the row.
-func populateRowCtx(ctx expr.RowContext, row exec.Row, schema map[string]int, g *lpg.Graph[string, float64], bopts *buildOpts, scalarUse map[string]*nodeScalarUse, arena *pooledRowCtx) {
+func populateRowCtx(ctx expr.RowContext, row exec.Row, schema map[string]int, g *lpg.ReadView[string, float64], bopts *buildOpts, scalarUse map[string]*nodeScalarUse, arena *pooledRowCtx) {
 	for varName, colIdx := range schema {
 		if colIdx >= len(row) || row[colIdx] == nil {
 			continue
@@ -12231,7 +12289,7 @@ func populateRowCtx(ctx expr.RowContext, row exec.Row, schema map[string]int, g 
 // by VarLengthExpand into the rel-variable column. Returns an empty list
 // for a zero-hop result (the variable evaluates to []) and (nil, false)
 // when the column is absent or not a ListValue.
-func buildVLERelListFromRow(row exec.Row, rmeta vleRelInfo, g *lpg.Graph[string, float64], bopts *buildOpts) (expr.ListValue, bool) {
+func buildVLERelListFromRow(row exec.Row, rmeta vleRelInfo, g *lpg.ReadView[string, float64], bopts *buildOpts) (expr.ListValue, bool) {
 	if rmeta.listCol >= len(row) {
 		return nil, false
 	}
@@ -12256,7 +12314,7 @@ func buildVLERelListFromRow(row exec.Row, rmeta vleRelInfo, g *lpg.Graph[string,
 // accepted are the segment's relationship-type fallback and accepted-type
 // filter. A hop whose triple is not all integers is skipped, matching the prior
 // per-pair behaviour.
-func decodeVLEHops(lv expr.ListValue, g *lpg.Graph[string, float64], bopts *buildOpts, declaredType string, accepted []string) expr.ListValue {
+func decodeVLEHops(lv expr.ListValue, g *lpg.ReadView[string, float64], bopts *buildOpts, declaredType string, accepted []string) expr.ListValue {
 	nHops := (len(lv) - 1) / exec.VLEHopStride
 	rels := make(expr.ListValue, 0, nHops)
 	prevID := uint64(0)
@@ -12297,7 +12355,7 @@ func decodeVLEHops(lv expr.ListValue, g *lpg.Graph[string, float64], bopts *buil
 // row. With relUse nil — or carrying any value key — the property map is built
 // in full from EdgeProperties exactly as before, so non-gated callers are
 // byte-identical (C5).
-func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[string, float64], bopts *buildOpts, relUse *nodeScalarUse) (expr.RelationshipValue, bool) {
+func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.ReadView[string, float64], bopts *buildOpts, relUse *nodeScalarUse) (expr.RelationshipValue, bool) {
 	if meta.edgeCol >= len(row) {
 		return expr.RelationshipValue{}, false
 	}
@@ -12470,7 +12528,7 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.Graph[
 // both endpoints must resolve through the mapper, else the hop is returned with
 // the declared type and no properties (the same degenerate behaviour the prior
 // per-pair materialisers had when resolution failed).
-func resolveHopRel(bopts *buildOpts, g *lpg.Graph[string, float64], prevID, dstID, fwdPos uint64, reversed bool, declaredType string, accepted []string) expr.RelationshipValue {
+func resolveHopRel(bopts *buildOpts, g *lpg.ReadView[string, float64], prevID, dstID, fwdPos uint64, reversed bool, declaredType string, accepted []string) expr.RelationshipValue {
 	rel := expr.RelationshipValue{
 		ID:      fwdPos,
 		StartID: prevID,
@@ -12542,7 +12600,7 @@ func resolveHopRel(bopts *buildOpts, g *lpg.Graph[string, float64], prevID, dstI
 // edge is stored as dstID -> prevID. When the forward edge exists (including
 // parallel-edge and self-loop cases) the hop is treated as forward. g is
 // assumed non-nil and the endpoints resolvable by the caller's contract.
-func leadingHopReversed(g *lpg.Graph[string, float64], prevID, dstID uint64) bool {
+func leadingHopReversed(g *lpg.ReadView[string, float64], prevID, dstID uint64) bool {
 	if g == nil {
 		return false
 	}
@@ -12616,7 +12674,7 @@ var relPresencePlaceholder = expr.BoolValue(true)
 // ABSENT (the same rule [lpg.Graph.EdgeHasProperty]'s kindMapsToNonNullCypher
 // enforces on the per-pair path), keeping keys(r) congruent with
 // r.k IS [NOT] NULL on the bound instance.
-func buildEdgeProps(g *lpg.Graph[string, float64], stKey, enKey string, fwdHandle uint64, hasByHandleEntry bool, relUse *nodeScalarUse) expr.MapValue {
+func buildEdgeProps(g *lpg.ReadView[string, float64], stKey, enKey string, fwdHandle uint64, hasByHandleEntry bool, relUse *nodeScalarUse) expr.MapValue {
 	// useByHandle is the single routing decision shared by all branches so the
 	// whole map, keys(r), and the presence test stay congruent. The property-map
 	// disjunct (a non-empty by-handle bag) is load-bearing for any future writer
@@ -12703,7 +12761,7 @@ func keyNamesFromExprMap(m expr.MapValue) expr.MapValue {
 // is in the map and not expr.Null — so a parallel sibling's value never leaks
 // into the answer (rmp #1684). Otherwise it defers to the per-pair kind-gated
 // fast path [lpg.Graph.EdgeHasProperty], byte-identical to the prior behaviour.
-func relPresentByHandleOrPair(g *lpg.Graph[string, float64], stKey, enKey string, useByHandle bool, byHandle expr.MapValue, k string) bool {
+func relPresentByHandleOrPair(g *lpg.ReadView[string, float64], stKey, enKey string, useByHandle bool, byHandle expr.MapValue, k string) bool {
 	if useByHandle {
 		v, ok := byHandle[k]
 		return ok && !expr.IsNull(v)
@@ -12727,7 +12785,7 @@ func relPresentByHandleOrPair(g *lpg.Graph[string, float64], stKey, enKey string
 // bounds, the edges[edgePos] != dstID guard, and the handle — are made against
 // that snapshot's own VerticesSlice/EdgesSlice/HandlesSlice so they stay
 // internally consistent.
-func edgeHandleAtFwdPos(bopts *buildOpts, g *lpg.Graph[string, float64], srcKey, dstKey string, edgePos uint64) uint64 {
+func edgeHandleAtFwdPos(bopts *buildOpts, g *lpg.ReadView[string, float64], srcKey, dstKey string, edgePos uint64) uint64 {
 	adj := g.AdjList()
 	srcID, ok := adj.Mapper().Lookup(srcKey)
 	if !ok {
@@ -12776,7 +12834,7 @@ func edgeHandleAtFwdPos(bopts *buildOpts, g *lpg.Graph[string, float64], srcKey,
 // CREATE-time instance idx. Simple-graph storage collapses every
 // parallel CREATE onto one slot, so parallelCount stays at 1 and
 // callers fall back to the per-pair union surfaces.
-func edgeInstanceIdxFor(bopts *buildOpts, g *lpg.Graph[string, float64], srcKey, dstKey string, edgePos uint64) (instanceIdx, totalCreates, parallelCount int64) {
+func edgeInstanceIdxFor(bopts *buildOpts, g *lpg.ReadView[string, float64], srcKey, dstKey string, edgePos uint64) (instanceIdx, totalCreates, parallelCount int64) {
 	totalCreates = g.EdgeCreateCount(srcKey, dstKey)
 	if totalCreates == 0 {
 		return 0, 0, 0
@@ -13063,7 +13121,7 @@ func buildIRProjection(
 	items []ir.ProjectionItem,
 	child exec.Operator,
 	schema map[string]int,
-	g *lpg.Graph[string, float64],
+	g *lpg.ReadView[string, float64],
 	params map[string]expr.Value,
 	reg expr.FunctionRegistry,
 	bopts *buildOpts,
@@ -13919,7 +13977,7 @@ func indexSeekWouldFire(
 	if idxMgr == nil || sel == nil || idxMgr.Count() == 0 {
 		return false
 	}
-	var g *lpg.Graph[string, float64]
+	var g *lpg.ReadView[string, float64]
 	if lw, ok := walker.(*lpgNodeWalker); ok {
 		g = lw.g
 	}
@@ -14218,7 +14276,7 @@ func tryBuildColumnarProjection(
 	projItems []exec.ProjectionItem,
 	child exec.Operator,
 	inputSchema map[string]int,
-	g *lpg.Graph[string, float64],
+	g *lpg.ReadView[string, float64],
 	bopts *buildOpts,
 ) (exec.Operator, bool, error) {
 	if g == nil || bopts == nil || len(items) == 0 {
@@ -14361,7 +14419,7 @@ func tryBuildColumnarAggInput(
 	items []exec.ProjectionItem,
 	child exec.Operator,
 	schemaSnap map[string]int,
-	g *lpg.Graph[string, float64],
+	g *lpg.ReadView[string, float64],
 	bopts *buildOpts,
 ) (*exec.ColumnarProject, bool, error) {
 	if g == nil || bopts == nil {
@@ -14615,7 +14673,7 @@ func buildScalarPassthroughChunkFiller(srcCol int) exec.ChunkColumnFiller {
 // source cell that is not a resolvable int64 NodeID (a non-int64 column, an
 // out-of-graph id) it boxes the whole source row and defers to the item's
 // row-at-a-time eval, matching [buildScalarPropertyFiller]'s fallback exactly.
-func buildScalarPropertyChunkFiller(nodeChunkCol int, propName string, g *lpg.Graph[string, float64], fallback func(exec.Row) (expr.Value, error)) exec.ChunkColumnFiller {
+func buildScalarPropertyChunkFiller(nodeChunkCol int, propName string, g *lpg.ReadView[string, float64], fallback func(exec.Row) (expr.Value, error)) exec.ChunkColumnFiller {
 	var boxScratch exec.Row // reused across calls for the rare fallback path
 	return func(src *exec.Chunk, srcRow int, dst *exec.Chunk, dstCol int) error {
 		if src.IsInt64Column(nodeChunkCol) {
@@ -14650,7 +14708,7 @@ func buildScalarPropertyChunkFiller(nodeChunkCol int, propName string, g *lpg.Gr
 // scalar accesses (n.key, n["key"], n:Label) is materialised partially.
 // analyseNodeScalarUse runs once at build time; a bailout (complex expression kind)
 // disables the lazy path and restores full eager materialisation.
-func newRowPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.Graph[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, bopts *buildOpts) exec.FilterFn {
+func newRowPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, bopts *buildOpts) exec.FilterFn {
 	schemaSnap := copySchema(schema)
 	scalarUse, bail := analyseNodeScalarUse(predExpr)
 	if bail {
@@ -14689,7 +14747,7 @@ func newRowPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.Grap
 // [buildColumnarConjunction], [makeColumnarLabelPredicate] and
 // [makeColumnarInPredicate] (#2186). Each of those recurses through this function
 // (via the col0 resolver) so the accepted-shape set stays a single definition.
-func buildColumnarPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.Graph[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, bopts *buildOpts) (exec.ChunkPredicate, bool) {
+func buildColumnarPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, bopts *buildOpts) (exec.ChunkPredicate, bool) {
 	return buildColumnarPredicateAt(predExpr, schema, g, params, reg, bopts, false)
 }
 
@@ -14702,7 +14760,7 @@ func buildColumnarPredicate(predExpr ast.Expression, schema map[string]int, g *l
 func buildColumnarPredicateAt(
 	predExpr ast.Expression,
 	schema map[string]int,
-	g *lpg.Graph[string, float64],
+	g *lpg.ReadView[string, float64],
 	params map[string]expr.Value,
 	reg expr.FunctionRegistry,
 	bopts *buildOpts,
@@ -14803,7 +14861,7 @@ func buildColumnarPredicateAt(
 func buildColumnarConjunction(
 	bo *ast.BinaryOp,
 	schema map[string]int,
-	g *lpg.Graph[string, float64],
+	g *lpg.ReadView[string, float64],
 	params map[string]expr.Value,
 	reg expr.FunctionRegistry,
 	bopts *buildOpts,
@@ -14864,7 +14922,7 @@ func makeColumnarConjunctionPredicate(leaves []exec.ChunkPredicate) exec.ChunkPr
 // predicate grammar, the unboxed fast-path rules and the undecided-fallback rules are
 // exactly those of [buildColumnarPredicate] — both delegate to the same
 // [buildColumnarPredicateAt], which is what keeps them from drifting apart.
-func buildColumnarExpandPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.Graph[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, bopts *buildOpts) (exec.ChunkPredicate, bool) {
+func buildColumnarExpandPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, bopts *buildOpts) (exec.ChunkPredicate, bool) {
 	return buildColumnarPredicateAt(predExpr, schema, g, params, reg, bopts, true)
 }
 
@@ -14918,7 +14976,7 @@ func chainRowPredicates(preds []func(exec.Row) (expr.Value, error)) func(exec.Ro
 // absent. A cell that is not a valid int64 NodeID is reported undecided, so the
 // boxed path — where the receiver may be a non-node value that openCypher maps to
 // NULL — decides it byte-identically.
-func makeColumnarLabelPredicate(labels []string, nodeCol int, g *lpg.Graph[string, float64]) exec.ChunkPredicate {
+func makeColumnarLabelPredicate(labels []string, nodeCol int, g *lpg.ReadView[string, float64]) exec.ChunkPredicate {
 	// Copy so a later mutation of the AST slice cannot change the built predicate.
 	want := make([]string, len(labels))
 	copy(want, labels)
@@ -14953,7 +15011,7 @@ func makeColumnarLabelPredicate(labels []string, nodeCol int, g *lpg.Graph[strin
 // decided drop — and if any element comparison was UNDECIDED (a kind mismatch the
 // unboxed path will not resolve), the whole test is undecided and the boxed predicate
 // decides the row.
-func makeColumnarInPredicate(propName string, vals []expr.Value, nodeCol int, g *lpg.Graph[string, float64]) exec.ChunkPredicate {
+func makeColumnarInPredicate(propName string, vals []expr.Value, nodeCol int, g *lpg.ReadView[string, float64]) exec.ChunkPredicate {
 	eqs := make([]exec.ChunkPredicate, len(vals))
 	for i, v := range vals {
 		eqs[i] = makeColumnarComparePredicate("=", propName, v, nodeCol, g)
@@ -15071,7 +15129,7 @@ func columnarConstValue(e ast.Expression, params map[string]expr.Value, reg expr
 // stored property, and compares it to the pre-evaluated constant only when both
 // share the same primitive kind — otherwise it reports undecided (the filter falls
 // back to the boxed predicate). See [buildColumnarPredicate] for the semantics.
-func makeColumnarComparePredicate(op, propName string, cv expr.Value, nodeCol int, g *lpg.Graph[string, float64]) exec.ChunkPredicate {
+func makeColumnarComparePredicate(op, propName string, cv expr.Value, nodeCol int, g *lpg.ReadView[string, float64]) exec.ChunkPredicate {
 	return func(src *exec.Chunk, row int) (keep, decided bool) {
 		if nodeCol < 0 || nodeCol >= src.NumCols() || !src.IsInt64Column(nodeCol) {
 			return false, false
@@ -15273,7 +15331,7 @@ func isNonNodeVar(name string, bopts *buildOpts) bool {
 // cell is not a resolvable bare NodeID (a LazyNodeValue, an eager/deleted
 // NodeValue, a non-node integer, a NULL) falls back to the item's row-at-a-time
 // eval, which is byte-identical to the pre-change path.
-func buildScalarPropertyFiller(nodeCol int, propName string, g *lpg.Graph[string, float64], fallback func(exec.Row) (expr.Value, error)) exec.ColumnFiller {
+func buildScalarPropertyFiller(nodeCol int, propName string, g *lpg.ReadView[string, float64], fallback func(exec.Row) (expr.Value, error)) exec.ColumnFiller {
 	return func(row exec.Row, dst *exec.Chunk, col int) error {
 		if nodeCol < len(row) {
 			if iv, isInt := row[nodeCol].(expr.IntegerValue); isInt {
@@ -15297,7 +15355,7 @@ func buildScalarPropertyFiller(nodeCol int, propName string, g *lpg.Graph[string
 // fillScalarProperty reads propName from the resolvable node id and appends it to
 // dst column col, unboxing a plain scalar and boxing everything else via the
 // canonical [lpgPropToExpr] converter (see [buildScalarPropertyFiller]).
-func fillScalarProperty(dst *exec.Chunk, col int, g *lpg.Graph[string, float64], id graph.NodeID, propName string) {
+func fillScalarProperty(dst *exec.Chunk, col int, g *lpg.ReadView[string, float64], id graph.NodeID, propName string) {
 	pv, present := g.NodePropertyByID(id, propName)
 	if !present {
 		dst.PutNull(col) // absent property → NULL (matches lpgPropToExpr's miss → expr.Null)
@@ -15615,11 +15673,14 @@ func (e *Engine) execUnderBarrier(
 		// the type-level note above and replayUndoOnPanic for why this must run
 		// while visMu is still held.
 		defer replayUndoOnPanic(undo)
-		walker := &lpgNodeWalker{g: e.g}
+		// A view with NO snapshot: the write path applies eagerly and must see its
+		// own not-yet-published work, so it reads the current value. See
+		// lpg/readview.go.
+		walker := &lpgNodeWalker{g: e.g.ReadAt(nil)}
 		// The count-estimate provider (#2083) is consulted only on the read path
 		// (Engine.Run, where labelSrc carries cs); the write-path plan build never
 		// reads it, so cs is left nil here to keep the write path's resolver lean.
-		labelSrc := &lpgLabelResolver{g: e.g}
+		labelSrc := &lpgLabelResolver{g: e.g.ReadAt(nil)}
 		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager(), e.maxCollectItems, e.edgeTypeFilterCache,
 			// #2229: the write path resolves `CALL db.*` from the same registry the
 			// read path uses. Shared, not snapshotted — procs.Registry is
@@ -15691,7 +15752,7 @@ func mutatorCounters(m exec.GraphMutator) *exec.QueryCounters {
 // lpgMutatorAdapter — exec.graphMutator backed by *lpg.Graph[string,float64]
 // ─────────────────────────────────────────────────────────────────────────────
 
-// lpgMutatorAdapter adapts *lpg.Graph[string, float64] to the
+// lpgMutatorAdapter adapts *lpg.ReadView[string, float64] to the
 // exec.graphMutator interface used by write operators.
 //
 // When buf is non-nil every mutation is also enqueued as an index.Change.
@@ -16434,7 +16495,7 @@ func (a *lpgMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle u
 // write path identifies the exact same parallel instance reads would. Returns 0
 // when no handle is resolvable; the caller then mutates the per-pair store only.
 func (a *lpgMutatorAdapter) EdgeHandleAtPosition(src, dst string, edgePos uint64) uint64 {
-	return edgeHandleAtFwdPos(a.bopts, a.g, src, dst, edgePos)
+	return edgeHandleAtFwdPos(a.bopts, a.g.ReadAt(nil), src, dst, edgePos)
 }
 
 // FirstEdgeHandle resolves the handle on the first src→dst adjacency slot,
@@ -17265,7 +17326,7 @@ func (a *walMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle u
 // write path identifies the exact same parallel instance reads would. Returns 0
 // when no handle is resolvable; the caller then mutates the per-pair store only.
 func (a *walMutatorAdapter) EdgeHandleAtPosition(src, dst string, edgePos uint64) uint64 {
-	return edgeHandleAtFwdPos(a.bopts, a.g, src, dst, edgePos)
+	return edgeHandleAtFwdPos(a.bopts, a.g.ReadAt(nil), src, dst, edgePos)
 }
 
 // FirstEdgeHandle resolves the handle on the first src→dst adjacency slot,
@@ -17375,7 +17436,7 @@ func (a *walMutatorAdapter) WalkNodeIDs(fn func(graph.NodeID) bool) {
 // csrPairFromGraph builds a forward and a reverse CSR snapshot from the LPG
 // adjacency list.  Both snapshots are constructed in O(V+E) time and are safe
 // for lock-free concurrent reads after construction.
-func csrPairFromGraph(g *lpg.Graph[string, float64]) (fwd, rev *csr.CSR[float64]) {
+func csrPairFromGraph(g *lpg.ReadView[string, float64]) (fwd, rev *csr.CSR[float64]) {
 	adj := g.AdjList()
 	// Build live: omit arcs incident to tombstoned nodes so search never
 	// traverses a logically-deleted node (#1790). LiveNodeFilter returns nil
@@ -17399,7 +17460,7 @@ func csrPairFromGraph(g *lpg.Graph[string, float64]) (fwd, rev *csr.CSR[float64]
 // The resolver is built lazily on first use because most queries never
 // reconstruct paths. CSR construction is O(V+E) but happens at most
 // once per query.
-func ensureEdgeIDResolver(bopts *buildOpts, g *lpg.Graph[string, float64]) func(uint64) (uint64, uint64, bool) {
+func ensureEdgeIDResolver(bopts *buildOpts, g *lpg.ReadView[string, float64]) func(uint64) (uint64, uint64, bool) {
 	if bopts == nil || g == nil {
 		return nil
 	}
@@ -17440,7 +17501,7 @@ func ensureEdgeIDResolver(bopts *buildOpts, g *lpg.Graph[string, float64]) func(
 // reached with a non-nil bopts today, but the guard keeps them safe in
 // isolation) it falls back to a one-off build, preserving the previous
 // behaviour exactly. Forward-only: the reverse CSR is never built here.
-func ensureFwdCSR(bopts *buildOpts, g *lpg.Graph[string, float64]) *csr.CSR[float64] {
+func ensureFwdCSR(bopts *buildOpts, g *lpg.ReadView[string, float64]) *csr.CSR[float64] {
 	if g == nil {
 		return nil
 	}
@@ -17494,7 +17555,7 @@ func nodeIDOrNodeValue(v expr.Value) (uint64, bool) {
 // this filter for a live query should go through [edgeTypeFilterFor]
 // rather than calling this directly, so a repeat query against an unchanged
 // graph reuses a cached result instead of re-paying this cost.
-func buildEdgeTypeFilter(g *lpg.Graph[string, float64], fwdCSR *csr.CSR[float64], relTypes []string) map[uint64]string {
+func buildEdgeTypeFilter(g *lpg.ReadView[string, float64], fwdCSR *csr.CSR[float64], relTypes []string) map[uint64]string {
 	adj := g.AdjList()
 	verts := fwdCSR.VerticesSlice()
 	edges := fwdCSR.EdgesSlice()
@@ -17702,7 +17763,7 @@ func buildEdgeTypeFilter(g *lpg.Graph[string, float64], fwdCSR *csr.CSR[float64]
 // workload's repeat queries. Falls back to an uncached, correct
 // buildEdgeTypeFilter call when bopts or its cache is nil (the public
 // BuildPlanWithMutator path has no Engine-owned cache to consult).
-func edgeTypeFilterFor(g *lpg.Graph[string, float64], fwdCSR *csr.CSR[float64], relTypes []string, bopts *buildOpts) map[uint64]string {
+func edgeTypeFilterFor(g *lpg.ReadView[string, float64], fwdCSR *csr.CSR[float64], relTypes []string, bopts *buildOpts) map[uint64]string {
 	if bopts == nil || bopts.edgeTypeFilterCache == nil {
 		return buildEdgeTypeFilter(g, fwdCSR, relTypes)
 	}
@@ -17766,7 +17827,7 @@ func canonicalRelTypesKey(relTypes []string) string {
 // a position with no corresponding column-typed slot resolves as carrying no
 // inline type rather than reading out of range.
 func fillSlotLabs(
-	g *lpg.Graph[string, float64],
+	g *lpg.ReadView[string, float64],
 	srcID graph.NodeID,
 	out map[graph.NodeID][]uint32,
 	seen map[graph.NodeID]int,
@@ -17803,7 +17864,7 @@ func fillSlotLabs(
 // recorded for (srcStr, dstStr) over instance indices 1..totalCreates.
 // Used by simple-graph filter construction, where one CSR slot must
 // service every collapsed CREATE.
-func collectAllInstanceLabels(g *lpg.Graph[string, float64], srcStr, dstStr string, totalCreates int64) []string {
+func collectAllInstanceLabels(g *lpg.ReadView[string, float64], srcStr, dstStr string, totalCreates int64) []string {
 	if totalCreates <= 0 {
 		return nil
 	}
@@ -17853,7 +17914,7 @@ func buildShortestPath(
 	var predExpr ast.Expression
 	if bopts != nil && p.PathVar != "" && bopts.pendingPathPred != nil {
 		if pp, ok := bopts.pendingPathPred[p.PathVar]; ok {
-			var g *lpg.Graph[string, float64]
+			var g *lpg.ReadView[string, float64]
 			if lw, lok := walker.(*lpgNodeWalker); lok {
 				g = lw.g
 			}
@@ -17905,7 +17966,7 @@ func tryBuildShortestPathWithPredicate(
 	if sp == nil {
 		return nil, false, nil
 	}
-	var g *lpg.Graph[string, float64]
+	var g *lpg.ReadView[string, float64]
 	if lw, lok := walker.(*lpgNodeWalker); lok {
 		g = lw.g
 	}
@@ -18037,7 +18098,7 @@ func buildShortestPathWithPred(
 		schema[p.RelVar] = pathCol
 	}
 
-	var g *lpg.Graph[string, float64]
+	var g *lpg.ReadView[string, float64]
 	if lw, ok := walker.(*lpgNodeWalker); ok {
 		g = lw.g
 	}
@@ -18173,7 +18234,7 @@ func tryFuseCyclicIntersect(
 	p *ir.Expand,
 	child exec.Operator,
 	fwd, rev *csr.CSR[float64],
-	g *lpg.Graph[string, float64],
+	g *lpg.ReadView[string, float64],
 	schema map[string]int,
 	bopts *buildOpts,
 ) exec.Operator {

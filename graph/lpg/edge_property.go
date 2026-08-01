@@ -85,6 +85,14 @@ func (g *Graph[N, W]) SetEdgeProperty(src, dst N, key string, value PropertyValu
 // pair the latest-winning value across their slots is returned (the slots carry
 // the identical value by the SetEdgeProperty fan-out, so this is well-defined).
 func (g *Graph[N, W]) GetEdgeProperty(src, dst N, key string) (PropertyValue, bool) {
+	return g.GetEdgePropertyAsOf(src, dst, key, nil)
+}
+
+// GetEdgePropertyAsOf is [Graph.GetEdgeProperty] as the edge stood at snap. A
+// nil snapshot reads the current value; see snapshot_read.go.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) GetEdgePropertyAsOf(src, dst N, key string, snap *Snapshot) (PropertyValue, bool) {
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
 		return PropertyValue{}, false
@@ -97,13 +105,13 @@ func (g *Graph[N, W]) GetEdgeProperty(src, dst N, key string) (PropertyValue, bo
 	if !ok {
 		return PropertyValue{}, false
 	}
-	block := asEdgePropCols(g.adj.LoadEntryAux(srcID))
+	// ONE entry, so the neighbours and the columnar block are the same version.
+	v := g.EntryViewAsOf(srcID, snap)
+	block := asEdgePropCols(v.Aux)
 	if block == nil {
 		return PropertyValue{}, false
 	}
-	nbs, _ := g.adj.LoadEntry(srcID)
-	// Bound the scan by the shorter of the two snapshots: a concurrent writer may
-	// publish a longer neighbours snapshot after the block was loaded.
+	nbs := v.Neighbours
 	n := minInt(len(nbs), block.lenOrZero())
 	var out PropertyValue
 	found := false
@@ -147,6 +155,14 @@ func (g *Graph[N, W]) GetEdgeProperty(src, dst N, key string) (PropertyValue, bo
 // shorter of the block and the neighbours snapshot, so a concurrent copy-on-write
 // writer is observed atomically (old block or new, never half-built).
 func (g *Graph[N, W]) EdgeHasProperty(src, dst N, key string) bool {
+	return g.EdgeHasPropertyAsOf(src, dst, key, nil)
+}
+
+// EdgeHasPropertyAsOf is [Graph.EdgeHasProperty] as the edge stood at snap. A
+// nil snapshot reads the current value; see snapshot_read.go.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) EdgeHasPropertyAsOf(src, dst N, key string, snap *Snapshot) bool {
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
 		return false
@@ -159,11 +175,13 @@ func (g *Graph[N, W]) EdgeHasProperty(src, dst N, key string) bool {
 	if !ok {
 		return false
 	}
-	block := asEdgePropCols(g.adj.LoadEntryAux(srcID))
+	// ONE entry, so the neighbours and the columnar block are the same version.
+	v := g.EntryViewAsOf(srcID, snap)
+	block := asEdgePropCols(v.Aux)
 	if block == nil {
 		return false
 	}
-	nbs, _ := g.adj.LoadEntry(srcID)
+	nbs := v.Neighbours
 	n := minInt(len(nbs), block.lenOrZero())
 	found := false
 	var winning PropertyKind
@@ -224,6 +242,13 @@ func (g *Graph[N, W]) DelEdgeProperty(src, dst N, key string) {
 // attached to the directed edge (src, dst). When several parallel edges connect
 // the pair the result is the latest-wins coalesced union across their slots.
 func (g *Graph[N, W]) EdgeProperties(src, dst N) map[string]PropertyValue {
+	return g.EdgePropertiesAsOf(src, dst, nil)
+}
+
+// EdgePropertiesAsOf is [Graph.EdgeProperties] as the edge stood at snap.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) EdgePropertiesAsOf(src, dst N, snap *Snapshot) map[string]PropertyValue {
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
 		return nil
@@ -232,7 +257,7 @@ func (g *Graph[N, W]) EdgeProperties(src, dst N) map[string]PropertyValue {
 	if !ok {
 		return nil
 	}
-	return g.EdgePropertiesByID(srcID, dstID)
+	return g.EdgePropertiesByIDAsOf(srcID, dstID, snap)
 }
 
 // EdgePropertiesByID is the NodeID-keyed counterpart of [Graph.EdgeProperties]:
@@ -249,8 +274,16 @@ func (g *Graph[N, W]) EdgeProperties(src, dst N) map[string]PropertyValue {
 // (graph/mapper.go:337-345, #1648). The read is served from the lock-free
 // immutable adjacency entry, so EdgePropertiesByID is safe for concurrent use.
 func (g *Graph[N, W]) EdgePropertiesByID(srcID, dstID graph.NodeID) map[string]PropertyValue {
+	return g.EdgePropertiesByIDAsOf(srcID, dstID, nil)
+}
+
+// EdgePropertiesByIDAsOf is [Graph.EdgePropertiesByID] as the edge stood at
+// snap. A nil snapshot reads the current value; see snapshot_read.go.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) EdgePropertiesByIDAsOf(srcID, dstID graph.NodeID, snap *Snapshot) map[string]PropertyValue {
 	var out map[string]PropertyValue
-	g.ForEachEdgePropertyByID(srcID, dstID, func(name string, v PropertyValue) {
+	g.ForEachEdgePropertyByIDAsOf(srcID, dstID, snap, func(name string, v PropertyValue) {
 		if out == nil {
 			out = make(map[string]PropertyValue, 2)
 		}
@@ -274,6 +307,14 @@ func (g *Graph[N, W]) EdgePropertiesByID(srcID, dstID graph.NodeID) map[string]P
 // no properties. See [Graph.ForEachEdgePropertyByID] for the coalescing and
 // concurrency contract.
 func (g *Graph[N, W]) ForEachEdgeProperty(src, dst N, visit func(name string, pv PropertyValue)) {
+	g.ForEachEdgePropertyAsOf(src, dst, nil, visit)
+}
+
+// ForEachEdgePropertyAsOf is [Graph.ForEachEdgeProperty] as the edge stood at
+// snap.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) ForEachEdgePropertyAsOf(src, dst N, snap *Snapshot, visit func(name string, pv PropertyValue)) {
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
 		return
@@ -282,7 +323,7 @@ func (g *Graph[N, W]) ForEachEdgeProperty(src, dst N, visit func(name string, pv
 	if !ok {
 		return
 	}
-	g.ForEachEdgePropertyByID(srcID, dstID, visit)
+	g.ForEachEdgePropertyByIDAsOf(srcID, dstID, snap, visit)
 }
 
 // ForEachEdgePropertyByID is the NodeID-keyed counterpart of
@@ -314,15 +355,28 @@ func (g *Graph[N, W]) ForEachEdgeProperty(src, dst N, visit func(name string, pv
 // independent value from it) is safe; for the boxed Bytes/List kinds the same
 // slice-aliasing caveat as [Graph.GetEdgeProperty] applies.
 func (g *Graph[N, W]) ForEachEdgePropertyByID(srcID, dstID graph.NodeID, visit func(name string, pv PropertyValue)) {
-	block := asEdgePropCols(g.adj.LoadEntryAux(srcID))
+	g.ForEachEdgePropertyByIDAsOf(srcID, dstID, nil, visit)
+}
+
+// ForEachEdgePropertyByIDAsOf is [Graph.ForEachEdgePropertyByID] as the edge
+// stood at snap. A nil snapshot reads the current value; see snapshot_read.go.
+//
+// It resolves the neighbours and the columnar block from ONE entry, so the two
+// are the same version. The previous form loaded them separately and bounded
+// the scan by the shorter length, which kept the index in range but did not
+// make the columns agree — adequate under the barrier, not under a snapshot.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) ForEachEdgePropertyByIDAsOf(srcID, dstID graph.NodeID, snap *Snapshot, visit func(name string, pv PropertyValue)) {
+	v := g.EntryViewAsOf(srcID, snap)
+	block := asEdgePropCols(v.Aux)
 	if block == nil {
 		return
 	}
-	nbs, _ := g.adj.LoadEntry(srcID)
-	// Bound the scan by the shorter of the two snapshots: a concurrent writer may
-	// publish a longer neighbours snapshot after the block was loaded. This guard
-	// must live here so every streaming consumer inherits the concurrent-COW
-	// protection (storage-engine-auditor certification, task #1662).
+	nbs := v.Neighbours
+	// The two columns now come from one entry, so this bound can only be an
+	// equality; it is kept because a column may legitimately be shorter when the
+	// higher layer attached it after some slots already existed.
 	n := minInt(len(nbs), block.lenOrZero())
 	for i := 0; i < n; i++ {
 		if nbs[i] != dstID {

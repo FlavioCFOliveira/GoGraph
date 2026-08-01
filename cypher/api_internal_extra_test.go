@@ -98,7 +98,7 @@ func TestBuildUnwindOperator_NilListExpr(t *testing.T) {
 	if err := g.AddNode("A"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
-	walker := &lpgNodeWalker{g: g}
+	walker := &lpgNodeWalker{g: g.ReadAt(nil)}
 
 	// Build an Unwind IR node with a single-row Argument input and ListExpr=nil.
 	// We use the public ir.NewUnwind constructor with the raw string variant

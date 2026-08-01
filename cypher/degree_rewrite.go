@@ -149,7 +149,7 @@ func recogniseDegreePattern(pat *ast.Pattern, where *ast.Where, row expr.RowCont
 // binding, a deleted entity, or a value that is not a node — in which case the
 // caller must fall back to the inner plan rather than assume zero. Guessing here
 // would turn an unusual binding into a silently wrong answer.
-func (s *degreeShape) count(g *lpg.Graph[string, float64], row expr.RowContext, limit int64) (int64, bool) {
+func (s *degreeShape) count(g *lpg.ReadView[string, float64], row expr.RowContext, limit int64) (int64, bool) {
 	if g == nil {
 		return 0, false
 	}
@@ -213,7 +213,7 @@ func degreeCeiling(limit int64) int {
 const maxDegreeLimit = int(^uint(0) >> 1)
 
 // relTypeID resolves and caches the LabelID for the shape's relationship type.
-func (s *degreeShape) relTypeID(g *lpg.Graph[string, float64]) (lpg.LabelID, bool) {
+func (s *degreeShape) relTypeID(g *lpg.ReadView[string, float64]) (lpg.LabelID, bool) {
 	if s.haveResolv {
 		return s.resolved, true
 	}

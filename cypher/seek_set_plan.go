@@ -88,7 +88,7 @@ func tryBuildIndexSeekSetFromSelection(
 	params map[string]expr.Value,
 	schema map[string]int,
 	idxMgr *index.Manager,
-	g *lpg.Graph[string, float64],
+	g *lpg.ReadView[string, float64],
 ) (exec.Operator, bool) {
 	if sel.PredicateExpr == nil || idxMgr == nil || g == nil {
 		return nil, false
@@ -160,7 +160,7 @@ const maxSeekSetDisjuncts = 1 << 20
 //
 // This is the plan-time half of the gate; [exec.NodeByIndexSeekSet] enforces the
 // budget itself once the exact count is known.
-func seekSetBudget(g *lpg.Graph[string, float64], label string) (uint64, bool) {
+func seekSetBudget(g *lpg.ReadView[string, float64], label string) (uint64, bool) {
 	nLabel := g.NodeIndex().Count(uint32(g.Registry().Intern(label)))
 	if nLabel < rangeSeekMinLabelPopulation {
 		return 0, false
@@ -331,7 +331,7 @@ func seekClaimsHint(
 	sel *ir.Selection,
 	params map[string]expr.Value,
 	idxMgr *index.Manager,
-	g *lpg.Graph[string, float64],
+	g *lpg.ReadView[string, float64],
 ) bool {
 	if op, fired, err := tryBuildIndexSeekFromSelection(sel, params, make(map[string]int), idxMgr); err == nil && fired && op != nil {
 		return true

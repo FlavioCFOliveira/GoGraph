@@ -49,7 +49,7 @@ func TestBackfillNodeHashIndex_ParallelContentsIdentical(t *testing.T) {
 	g, names := seedLabeledNamed(t, n, "Person")
 	e := NewEngine(g)
 
-	idx, err := newBoundNodeHashIndex(e.g, "Person", "name")
+	idx, err := newBoundNodeHashIndex(e.g.ReadAt(nil), "Person", "name")
 	if err != nil {
 		t.Fatalf("newBoundNodeHashIndex: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestBackfillNodeHashIndex_SerialVsParallelIdentical(t *testing.T) {
 		g, names := seedLabeledNamed(t, n, "Person")
 		e := NewEngine(g)
 		e.parallelBackfillEnabled = parallel // white-box toggle of the gate
-		idx, err := newBoundNodeHashIndex(e.g, "Person", "name")
+		idx, err := newBoundNodeHashIndex(e.g.ReadAt(nil), "Person", "name")
 		if err != nil {
 			t.Fatalf("newBoundNodeHashIndex: %v", err)
 		}
@@ -126,7 +126,7 @@ func TestBackfillNodeHashIndex_ContextCancelled(t *testing.T) {
 	g, _ := seedLabeledNamed(t, n, "Person")
 	e := NewEngine(g)
 
-	idx, err := newBoundNodeHashIndex(e.g, "Person", "name")
+	idx, err := newBoundNodeHashIndex(e.g.ReadAt(nil), "Person", "name")
 	if err != nil {
 		t.Fatalf("newBoundNodeHashIndex: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestBackfillNodeHashIndex_SerialSmallGraph(t *testing.T) {
 	g, names := seedLabeledNamed(t, n, "Person")
 	e := NewEngine(g)
 
-	idx, err := newBoundNodeHashIndex(e.g, "Person", "name")
+	idx, err := newBoundNodeHashIndex(e.g.ReadAt(nil), "Person", "name")
 	if err != nil {
 		t.Fatalf("newBoundNodeHashIndex: %v", err)
 	}

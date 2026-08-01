@@ -90,16 +90,6 @@ func (g *Graph[N, W]) endWrite() {
 	g.reclaimIfDue()
 }
 
-// writeStampInfo returns the commit record of the write in progress, allocating
-// it if this is the first version to need one, or nil when no transaction is
-// open.
-func (g *Graph[N, W]) writeStampInfo() *commitInfo {
-	if !g.mvccArmed {
-		return nil
-	}
-	return g.stamp.Info()
-}
-
 // EnableMVCC arms the whole versioning substrate: node labels, node properties
 // and the adjacency — which carries the per-slot relationship types and the
 // columnar edge properties inside the same immutable entry, so versioning the

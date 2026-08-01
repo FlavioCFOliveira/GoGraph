@@ -113,7 +113,7 @@ func TestBackfillNodeBTreeIndex_ContextCancelled(t *testing.T) {
 	g, _ := seedLabeledNamed(t, n, "Person")
 	e := NewEngine(g)
 
-	idx, err := newBoundNodeBTreeIndex(e.g, "Person", "name")
+	idx, err := newBoundNodeBTreeIndex(e.g.ReadAt(nil), "Person", "name")
 	if err != nil {
 		t.Fatalf("newBoundNodeBTreeIndex: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestBackfillNodeBTreeIndexNumeric_ContextCancelled(t *testing.T) {
 	}
 	e := NewEngine(g)
 
-	idx, err := newBoundNodeBTreeIndexNumeric(e.g, "Person", "age")
+	idx, err := newBoundNodeBTreeIndexNumeric(e.g.ReadAt(nil), "Person", "age")
 	if err != nil {
 		t.Fatalf("newBoundNodeBTreeIndexNumeric: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestBackfillNodeBTreeIndex_NotCancelled_StillCompletes(t *testing.T) {
 	g, names := seedLabeledNamed(t, n, "Person")
 	e := NewEngine(g)
 
-	idx, err := newBoundNodeBTreeIndex(e.g, "Person", "name")
+	idx, err := newBoundNodeBTreeIndex(e.g.ReadAt(nil), "Person", "name")
 	if err != nil {
 		t.Fatalf("newBoundNodeBTreeIndex: %v", err)
 	}

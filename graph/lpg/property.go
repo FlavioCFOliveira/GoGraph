@@ -282,7 +282,9 @@ func (r *PropertyKeyRegistry) Resolve(id PropertyKeyID) (string, bool) {
 // from the underlying [adjlist.AdjList.AddNode] when present, or any
 // error returned by the installed [SchemaValidator].
 func (g *Graph[N, W]) SetNodeProperty(n N, key string, value PropertyValue) error {
-	return g.setNodePropertyInfo(n, key, value, nil)
+	err := g.setNodePropertyInfo(n, key, value, nil)
+	g.reclaimAfterDirectWrite()
+	return err
 }
 
 // setNodePropertyInfo is [Graph.SetNodeProperty] with an explicit commit
@@ -350,6 +352,7 @@ func (g *Graph[N, W]) GetNodeProperty(n N, key string) (PropertyValue, bool) {
 // DelNodeProperty removes the named property from n. No-op if absent.
 func (g *Graph[N, W]) DelNodeProperty(n N, key string) {
 	g.delNodePropertyInfo(n, key, nil)
+	g.reclaimAfterDirectWrite()
 }
 
 // delNodePropertyInfo is [Graph.DelNodeProperty] with an explicit commit
@@ -459,19 +462,20 @@ func (g *Graph[N, W]) NodePropertiesByID(id graph.NodeID) map[string]PropertyVal
 // it out (or deriving an independent value from it) is safe and is the intended
 // use.
 func (g *Graph[N, W]) NodePropertiesByIDFunc(id graph.NodeID, visit func(name string, pv PropertyValue)) {
-	s := g.nodePropShardFor(id)
-	s.mu.RLock()
-	bag, ok := s.m[id]
-	if !ok {
-		s.mu.RUnlock()
-		return
-	}
+	g.NodePropertiesByIDFuncAsOf(id, nil, visit)
+}
+
+// NodePropertiesByIDFuncAsOf is [Graph.NodePropertiesByIDFunc] as the node
+// stood at snap. A nil snapshot reads the current value; see snapshot_read.go.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) NodePropertiesByIDFuncAsOf(id graph.NodeID, snap *Snapshot, visit func(name string, pv PropertyValue)) {
+	bag := g.propBagFor(id, snap)
 	bag.forEach(func(k PropertyKeyID, v PropertyValue) {
 		if name, ok := g.propKeys().Resolve(k); ok {
 			visit(name, v)
 		}
 	})
-	s.mu.RUnlock()
 }
 
 // NodePropertyByID returns the single property keyed by name attached to the

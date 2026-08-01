@@ -393,6 +393,14 @@ func (g *Graph[N, W]) EdgePropertiesByHandleAsOf(src, dst N, handle uint64, snap
 // and allocates nothing; it is safe for concurrent use under the same
 // lock-free contract as [Graph.EdgeWeight].
 func (g *Graph[N, W]) FirstEdgeHandle(src, dst N) (uint64, bool) {
+	return g.FirstEdgeHandleAsOf(src, dst, nil)
+}
+
+// FirstEdgeHandleAsOf is [Graph.FirstEdgeHandle] as the pair stood at snap. A
+// nil snapshot reads the current value; see snapshot_read.go.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) FirstEdgeHandleAsOf(src, dst N, snap *Snapshot) (uint64, bool) {
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
 		return 0, false
@@ -401,7 +409,8 @@ func (g *Graph[N, W]) FirstEdgeHandle(src, dst N) (uint64, bool) {
 	if !ok {
 		return 0, false
 	}
-	neighbours, _, handles := g.adj.LoadEntryH(srcID)
+	v := g.EntryViewAsOf(srcID, snap)
+	neighbours, handles := v.Neighbours, v.Handles
 	if handles == nil {
 		return 0, false
 	}

@@ -72,7 +72,7 @@ func projectStringPropValue(v any) (string, bool) {
 // after the transaction's eager mutations — which is the state the index must
 // converge to (see hash.Binding).
 func newBoundNodeHashIndex(
-	g *lpg.Graph[string, float64], label, prop string,
+	g *lpg.ReadView[string, float64], label, prop string,
 ) (*indexhash.Index[string], error) {
 	labelID := uint32(g.Registry().Intern(label))
 	propID := uint32(g.PropertyKeys().Intern(prop))
@@ -305,7 +305,7 @@ func projectNumericPropValue(v any) (float64, bool) {
 // non-numeric, temporal, or NaN value. The companion shares the same Binding
 // shape, so the engine's CREATE INDEX wiring builds it from the same closures.
 func newBoundNodeBTreeIndexNumeric(
-	g *lpg.Graph[string, float64], label, prop string,
+	g *lpg.ReadView[string, float64], label, prop string,
 ) (*indexbtree.Index[float64], error) {
 	labelID := uint32(g.Registry().Intern(label))
 	propID := uint32(g.PropertyKeys().Intern(prop))
@@ -401,7 +401,7 @@ func (e *Engine) backfillNodeBTreeIndexNumeric(ctx context.Context, idx *indexbt
 // string key space and a range scan could return nodes the scan+filter path
 // rejects (#1505, confirmed by storage-engine-auditor).
 func newBoundNodeBTreeIndex(
-	g *lpg.Graph[string, float64], label, prop string,
+	g *lpg.ReadView[string, float64], label, prop string,
 ) (*indexbtree.Index[string], error) {
 	labelID := uint32(g.Registry().Intern(label))
 	propID := uint32(g.PropertyKeys().Intern(prop))
@@ -684,7 +684,7 @@ func (e *Engine) registerRecoveredIndexes(defs []IndexDef) {
 			// index; the index will be correct for future writes but empty for
 			// pre-existing data — the worst outcome is a NodeByIndexSeek miss
 			// that is equivalent to the pre-fix behaviour.
-			if boundIdx, bidxErr := newBoundNodeHashIndex(e.g, d.Label, d.Property); bidxErr == nil {
+			if boundIdx, bidxErr := newBoundNodeHashIndex(e.g.ReadAt(nil), d.Label, d.Property); bidxErr == nil {
 				// Recovery must complete: a background context never cancels, so
 				// the backfill never returns an error here.
 				_ = e.backfillNodeHashIndex(context.Background(), boundIdx, d.Label, d.Property)
@@ -702,7 +702,7 @@ func (e *Engine) registerRecoveredIndexes(defs []IndexDef) {
 			// back to an unbound index, which the planner declines to seek
 			// (BoundNode reports false) — the worst outcome is a scan+filter,
 			// never wrong rows.
-			if boundIdx, bidxErr := newBoundNodeBTreeIndex(e.g, d.Label, d.Property); bidxErr == nil {
+			if boundIdx, bidxErr := newBoundNodeBTreeIndex(e.g.ReadAt(nil), d.Label, d.Property); bidxErr == nil {
 				// Recovery must complete: a background context never cancels, so
 				// the backfill never returns an error here.
 				_ = e.backfillNodeBTreeIndex(context.Background(), boundIdx, d.Label, d.Property)
@@ -727,7 +727,7 @@ func (e *Engine) registerRecoveredIndexes(defs []IndexDef) {
 		// cover the same (label, property) the second CreateIndex(numName, …)
 		// returns ErrIndexExists and is absorbed (idempotent rebuild).
 		numName := numericBTreeName(d.Label, d.Property)
-		if numIdx, nerr := newBoundNodeBTreeIndexNumeric(e.g, d.Label, d.Property); nerr == nil {
+		if numIdx, nerr := newBoundNodeBTreeIndexNumeric(e.g.ReadAt(nil), d.Label, d.Property); nerr == nil {
 			// Recovery must complete: a background context never cancels, so the
 			// backfill never returns an error here.
 			_ = e.backfillNodeBTreeIndexNumeric(context.Background(), numIdx, d.Label, d.Property)
@@ -796,7 +796,7 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 			fmt.Errorf("%w: %q", index.ErrIndexExists, p.Name))
 	}
 
-	idx, err := newBoundNodeHashIndex(e.g, p.Label, p.Property)
+	idx, err := newBoundNodeHashIndex(e.g.ReadAt(nil), p.Label, p.Property)
 	if err != nil {
 		return nil, fmt.Errorf("exec: CreateIndex %q: %w", p.Name, err)
 	}
@@ -833,7 +833,7 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 	// only the backfilled companion makes the seek return the right rows. Neither
 	// order can produce a wrong answer.
 	numName := numericBTreeName(p.Label, p.Property)
-	numIdx, _ := newBoundNodeBTreeIndexNumeric(e.g, p.Label, p.Property)
+	numIdx, _ := newBoundNodeBTreeIndexNumeric(e.g.ReadAt(nil), p.Label, p.Property)
 	if numIdx != nil {
 		if berr := e.backfillNodeBTreeIndexNumeric(ctx, numIdx, p.Label, p.Property); berr != nil {
 			return nil, berr

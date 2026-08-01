@@ -86,7 +86,7 @@ func benchPlanBuild(b *testing.B, fx iiBenchFixture, q string) {
 	// manager's listing, the label registry's interning) is warm in both arms.
 	var warmErr error
 	fx.g.View(func() {
-		_, _, warmErr = fx.eng.buildReadPhysical(ctx, entry, entry.plan, nil, reg, nil)
+		_, _, warmErr = fx.eng.buildReadPhysical(ctx, entry, entry.plan, nil, reg, nil, nil)
 	})
 	if warmErr != nil {
 		b.Fatalf("warm build: %v", warmErr)
@@ -99,7 +99,7 @@ func benchPlanBuild(b *testing.B, fx iiBenchFixture, q string) {
 			buildErr error
 		)
 		fx.g.View(func() {
-			op, _, buildErr = fx.eng.buildReadPhysical(ctx, entry, entry.plan, nil, reg, nil)
+			op, _, buildErr = fx.eng.buildReadPhysical(ctx, entry, entry.plan, nil, reg, nil, nil)
 		})
 		if buildErr != nil {
 			b.Fatalf("build: %v", buildErr)

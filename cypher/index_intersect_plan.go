@@ -124,7 +124,7 @@ func tryIndexIntersectionSeek(
 	sel *ir.Selection,
 	schema map[string]int,
 	idxMgr *index.Manager,
-	g *lpg.Graph[string, float64],
+	g *lpg.ReadView[string, float64],
 	lblScan *ir.NodeByLabelScan,
 	nodeVar string,
 	params map[string]expr.Value,

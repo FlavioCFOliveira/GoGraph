@@ -83,6 +83,12 @@ type WriteStamp struct {
 	// sampling a counter before and after. It is touched only once a record
 	// exists, so info and count are never inconsistent.
 	count atomic.Int64
+	// untracked counts versions stamped with NO transaction open — a direct
+	// Go-API mutation. Those have no End to charge them to a reclamation
+	// budget, and without this they accumulate forever: a caller that never
+	// opens a transaction would leak one record per modification for the life
+	// of the process. See [WriteStamp.TakeUntracked].
+	untracked atomic.Int64
 }
 
 // SetClock attaches the clock that mints transaction ids and commit
@@ -135,6 +141,7 @@ func (w *WriteStamp) Stamp() (*CommitInfo, uint64) {
 		if w.clock == nil {
 			return nil, 0
 		}
+		w.untracked.Add(1)
 		return nil, w.clock.NextCommitTS()
 	}
 	if info == armedPending {
@@ -154,6 +161,17 @@ func (w *WriteStamp) Stamp() (*CommitInfo, uint64) {
 	w.count.Add(1)
 	return info, 0
 }
+
+// Armed reports whether a transaction is currently open on this stamp.
+//
+// The higher layer uses it to tell "I am inside the barrier" from "I am a bare
+// mutator", because the two need different reclamation treatment: the first is
+// swept when the transaction closes, the second has to arrange its own.
+func (w *WriteStamp) Armed() bool { return w.info.Load() != nil }
+
+// TakeUntracked returns how many versions have been stamped outside any
+// transaction since the last call, and resets the counter.
+func (w *WriteStamp) TakeUntracked() int64 { return w.untracked.Swap(0) }
 
 // Info returns the record of the open transaction, allocating it if this is the
 // first caller to need one, or nil when no transaction is open.

@@ -9,7 +9,7 @@ import (
 // resolverFor builds the production count-estimate source over an engine's graph
 // and count store, exactly as the read-path build threads it (api.go:1799).
 func resolverFor(eng *Engine) *lpgLabelResolver {
-	return &lpgLabelResolver{g: eng.g, eng: eng}
+	return &lpgLabelResolver{g: eng.g.ReadAt(nil), eng: eng}
 }
 
 // TestCountEstimate_ExactCounts confirms the provider returns the exact E / D / T

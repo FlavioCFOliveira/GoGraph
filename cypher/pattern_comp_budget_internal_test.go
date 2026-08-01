@@ -141,7 +141,7 @@ func TestNewPatternEvaluator_BudgetWiring(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			pe := newPatternEvaluator(g, tc.in)
+			pe := newPatternEvaluator(g.ReadAt(nil), tc.in)
 			if pe.maxCollectItems != tc.want {
 				t.Fatalf("maxCollectItems = %d, want %d", pe.maxCollectItems, tc.want)
 			}
@@ -161,7 +161,7 @@ func TestPatternEvaluator_EvalPatternComp_BudgetTrips(t *testing.T) {
 		budget = 8
 	)
 	g := starGraph(t, degree)
-	pe := newPatternEvaluator(g, budget)
+	pe := newPatternEvaluator(g.ReadAt(nil), budget)
 
 	pc := singleHopComprehension("a", "b")
 	row := boundAnchorRow(t, g, "a")
@@ -182,7 +182,7 @@ func TestPatternEvaluator_EvalPatternComp_BudgetTrips(t *testing.T) {
 func TestPatternEvaluator_EvalPatternComp_DefaultDoesNotTrip(t *testing.T) {
 	const degree = 6
 	g := starGraph(t, degree)
-	pe := newPatternEvaluator(g, 0) // default budget
+	pe := newPatternEvaluator(g.ReadAt(nil), 0) // default budget
 
 	pc := singleHopComprehension("a", "b")
 	row := boundAnchorRow(t, g, "a")
@@ -210,7 +210,7 @@ func TestPatternEvaluator_EvalPatternComp_DefaultDoesNotTrip(t *testing.T) {
 func TestPatternEvaluator_EvalPatternComp_CancelAborts(t *testing.T) {
 	const degree = 256
 	g := starGraph(t, degree)
-	pe := newPatternEvaluator(g, MaxCollectItemsUnlimited) // no cap: isolate the ctx abort
+	pe := newPatternEvaluator(g.ReadAt(nil), MaxCollectItemsUnlimited) // no cap: isolate the ctx abort
 
 	pc := singleHopComprehension("a", "b")
 	row := boundAnchorRow(t, g, "a")

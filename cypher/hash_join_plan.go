@@ -270,7 +270,7 @@ func buildResidualFilter(
 	child exec.Operator,
 	residual []ast.Expression,
 	schema map[string]int,
-	g *lpg.Graph[string, float64],
+	g *lpg.ReadView[string, float64],
 	params map[string]expr.Value,
 	reg expr.FunctionRegistry,
 	bopts *buildOpts,

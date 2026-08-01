@@ -61,7 +61,7 @@ type subqueryEvaluator struct {
 	walker nodeWalkerIface
 	labels labelResolverIface
 	reg    expr.FunctionRegistry
-	g      *lpg.Graph[string, float64]
+	g      *lpg.ReadView[string, float64]
 
 	// compiled caches the per-AST compiled subquery so the inner plan is
 	// translated and physically built at most once per outer query. The key is
@@ -97,7 +97,7 @@ type compiledSubquery struct {
 
 // newSubqueryEvaluator constructs the evaluator for one query run. The caller
 // supplies every dependency the subquery's compiled pipeline may need.
-func newSubqueryEvaluator(walker nodeWalkerIface, labels labelResolverIface, reg expr.FunctionRegistry, g *lpg.Graph[string, float64]) *subqueryEvaluator {
+func newSubqueryEvaluator(walker nodeWalkerIface, labels labelResolverIface, reg expr.FunctionRegistry, g *lpg.ReadView[string, float64]) *subqueryEvaluator {
 	return &subqueryEvaluator{
 		walker:   walker,
 		labels:   labels,

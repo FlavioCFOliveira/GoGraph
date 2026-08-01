@@ -335,7 +335,7 @@ func countLabelProbes(t *testing.T, g *lpg.Graph[string, float64], sh *labelledH
 	// Reproduce count's walk with a counting predicate. Going through
 	// OutDegreeMatchingBoundedByID directly is what makes this a measurement of
 	// the WALK rather than of the shape's bookkeeping.
-	if !sh.resolveRelType(g) || !sh.resolveFarLabels(g) {
+	if !sh.resolveRelType(g.ReadAt(nil)) || !sh.resolveFarLabels(g.ReadAt(nil)) {
 		t.Fatal("fixture did not intern the type or the label")
 	}
 	id, ok := nodeIDFromValue(row["a"], g.AdjList().Mapper())

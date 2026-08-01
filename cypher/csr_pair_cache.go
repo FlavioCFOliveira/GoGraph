@@ -149,7 +149,7 @@ func (c *csrPairCache) put(epoch uint64, fwd, rev *csr.CSR[float64]) {
 // be recorded under the newer epoch: the resulting entry is then stamped with the
 // older epoch and the next caller rebuilds. Reading it after would risk caching a
 // pair that predates the epoch it claims.
-func csrPairCached(cache *csrPairCache, g *lpg.Graph[string, float64]) (fwd, rev *csr.CSR[float64]) {
+func csrPairCached(cache *csrPairCache, g *lpg.ReadView[string, float64]) (fwd, rev *csr.CSR[float64]) {
 	if cache == nil || g == nil {
 		return csrPairFromGraph(g)
 	}
@@ -165,7 +165,7 @@ func csrPairCached(cache *csrPairCache, g *lpg.Graph[string, float64]) (fwd, rev
 // csrPairCachedFor is [csrPairCached] taking the build options, so call sites need
 // no nil dance of their own. A nil bopts (or a bopts with no Engine behind it)
 // builds uncached.
-func csrPairCachedFor(bopts *buildOpts, g *lpg.Graph[string, float64]) (fwd, rev *csr.CSR[float64]) {
+func csrPairCachedFor(bopts *buildOpts, g *lpg.ReadView[string, float64]) (fwd, rev *csr.CSR[float64]) {
 	if bopts == nil {
 		return csrPairFromGraph(g)
 	}

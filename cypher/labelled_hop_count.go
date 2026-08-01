@@ -168,7 +168,7 @@ func recogniseLabelledHopPattern(pat *ast.Pattern, where *ast.Where, row expr.Ro
 // the caller must fall back to the inner plan. An unresolvable LABEL is not such
 // a case: a label the registry has never interned is carried by no node, so the
 // answer is a real zero.
-func (s *labelledHopShape) count(g *lpg.Graph[string, float64], row expr.RowContext, limit int64) (int64, bool) {
+func (s *labelledHopShape) count(g *lpg.ReadView[string, float64], row expr.RowContext, limit int64) (int64, bool) {
 	if g == nil {
 		return 0, false
 	}
@@ -220,7 +220,7 @@ func (s *labelledHopShape) count(g *lpg.Graph[string, float64], row expr.RowCont
 
 // resolveRelType caches the interned id of the relationship type, reporting
 // false while the registry does not hold it.
-func (s *labelledHopShape) resolveRelType(g *lpg.Graph[string, float64]) bool {
+func (s *labelledHopShape) resolveRelType(g *lpg.ReadView[string, float64]) bool {
 	if s.haveRel {
 		return true
 	}
@@ -235,7 +235,7 @@ func (s *labelledHopShape) resolveRelType(g *lpg.Graph[string, float64]) bool {
 // resolveFarLabels caches the interned ids of every required far-node label,
 // reporting false while any one of them is missing. It is all-or-nothing because
 // a partially resolved conjunction would silently drop a predicate.
-func (s *labelledHopShape) resolveFarLabels(g *lpg.Graph[string, float64]) bool {
+func (s *labelledHopShape) resolveFarLabels(g *lpg.ReadView[string, float64]) bool {
 	if s.farIDs != nil {
 		return true
 	}

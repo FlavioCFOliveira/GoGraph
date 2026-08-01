@@ -41,8 +41,8 @@ func TestBuildPlan_AllNodesScan(t *testing.T) {
 		t.Fatalf("AddNode: %v", err)
 	}
 
-	walker := &lpgNodeWalker{g: g}
-	labelSrc := &lpgLabelResolver{g: g}
+	walker := &lpgNodeWalker{g: g.ReadAt(nil)}
+	labelSrc := &lpgLabelResolver{g: g.ReadAt(nil)}
 
 	scan := ir.NewAllNodesScan("n")
 	plan := ir.NewProduceResults([]string{"n"}, scan)
@@ -81,8 +81,8 @@ func TestBuildPlan_AllNodesScan(t *testing.T) {
 func TestBuildPlan_NonProduceResultsRoot(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, float64](adjlist.Config{})
-	walker := &lpgNodeWalker{g: g}
-	labelSrc := &lpgLabelResolver{g: g}
+	walker := &lpgNodeWalker{g: g.ReadAt(nil)}
+	labelSrc := &lpgLabelResolver{g: g.ReadAt(nil)}
 
 	scan := ir.NewAllNodesScan("n")
 	_, _, err := BuildPlan(scan, walker, labelSrc, funcs.DefaultRegistry, nil)
@@ -102,8 +102,8 @@ func TestBuildPlanWithMutator_AllNodesScan(t *testing.T) {
 		t.Fatalf("AddNode: %v", err)
 	}
 
-	walker := &lpgNodeWalker{g: g}
-	labelSrc := &lpgLabelResolver{g: g}
+	walker := &lpgNodeWalker{g: g.ReadAt(nil)}
+	labelSrc := &lpgLabelResolver{g: g.ReadAt(nil)}
 	mutator := &lpgMutatorAdapter{g: g}
 
 	scan := ir.NewAllNodesScan("n")
@@ -138,8 +138,8 @@ func TestBuildPlanWithMutator_AllNodesScan(t *testing.T) {
 func TestBuildPlanWithMutator_WriteOnlyRoot(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, float64](adjlist.Config{})
-	walker := &lpgNodeWalker{g: g}
-	labelSrc := &lpgLabelResolver{g: g}
+	walker := &lpgNodeWalker{g: g.ReadAt(nil)}
+	labelSrc := &lpgLabelResolver{g: g.ReadAt(nil)}
 	mutator := &lpgMutatorAdapter{g: g}
 
 	// A write-only plan (no ProduceResults wrapper) — exercises the
@@ -712,8 +712,8 @@ func TestBuildOperator_NodeByIndexSeekCase(t *testing.T) {
 		t.Fatalf("CreateIndex: %v", err)
 	}
 
-	walker := &lpgNodeWalker{g: g}
-	labelSrc := &lpgLabelResolver{g: g}
+	walker := &lpgNodeWalker{g: g.ReadAt(nil)}
+	labelSrc := &lpgLabelResolver{g: g.ReadAt(nil)}
 
 	seek := ir.NewNodeByIndexSeek("n", "Person", "name", "'Alice'")
 	schema := make(map[string]int)

@@ -69,7 +69,16 @@ func (g *Graph[N, W]) HasNodeLabelByIDAsOf(id graph.NodeID, name string, s *Snap
 	if !ok {
 		return false
 	}
-	bag := g.labelBagFor(id, s)
+	// Written out for the same reason as [Graph.NodePropertyByIDAsOf]: this is a
+	// per-ROW predicate on every labelled scan.
+	sh := g.nodeLabelShardFor(id)
+	if s == nil || g.labelDeltaActive.Load() == 0 {
+		sh.mu.RLock()
+		bag := sh.m[id]
+		sh.mu.RUnlock()
+		return bag.has(lid)
+	}
+	bag := g.labelBagAsOfSlow(sh, id, s.startTS, s.txID)
 	return bag.has(lid)
 }
 
@@ -139,7 +148,20 @@ func (g *Graph[N, W]) NodePropertyByIDAsOf(id graph.NodeID, key string, s *Snaps
 	if !ok {
 		return PropertyValue{}, false
 	}
-	bag := g.propBagFor(id, s)
+	// The fast path is written out HERE rather than delegated through
+	// propBagFor and propBagAsOf, and that is measured: this is the per-ROW
+	// accessor of a scalar projection, so two extra call frames returning a
+	// 32-byte bag cost 21 ns per row — 23 % of BenchmarkEngReadProjectLargeSerial
+	// over 60 000 rows. The slow path keeps its own function so this one stays
+	// small enough to inline.
+	sh := g.nodePropShardFor(id)
+	if s == nil || g.propDeltaActive.Load() == 0 {
+		sh.mu.RLock()
+		bag := sh.m[id]
+		sh.mu.RUnlock()
+		return bag.get(pid)
+	}
+	bag := g.propBagAsOfSlow(sh, id, s.startTS, s.txID)
 	return bag.get(pid)
 }
 

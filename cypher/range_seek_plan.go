@@ -147,7 +147,7 @@ func buildRangeSeekIfEnabled(
 	sel *ir.Selection,
 	schema map[string]int,
 	idxMgr *index.Manager,
-	g *lpg.Graph[string, float64],
+	g *lpg.ReadView[string, float64],
 	params map[string]expr.Value,
 ) (exec.Operator, bool) {
 	if bopts == nil || !bopts.rangeSeekEnabled {
@@ -179,7 +179,7 @@ func tryBuildRangeSeekChild(
 	sel *ir.Selection,
 	schema map[string]int,
 	idxMgr *index.Manager,
-	g *lpg.Graph[string, float64],
+	g *lpg.ReadView[string, float64],
 	params map[string]expr.Value,
 	prefixSeek bool,
 	intersectSeek bool,
@@ -228,7 +228,7 @@ func tryStringRangeSeek(
 	sel *ir.Selection,
 	schema map[string]int,
 	idxMgr *index.Manager,
-	g *lpg.Graph[string, float64],
+	g *lpg.ReadView[string, float64],
 	lblScan *ir.NodeByLabelScan,
 	nodeVar string,
 	prefixSeek bool,
@@ -291,7 +291,7 @@ func tryStringRangeSeek(
 // exclusive), which only makes the gate marginally more conservative; the
 // residual Selection Filter re-checks every row regardless.
 func rangeCountWins[K any](
-	g *lpg.Graph[string, float64],
+	g *lpg.ReadView[string, float64],
 	label string,
 	rangeCount func(lo, hi K, budget uint64) (uint64, bool),
 	lo, hi K,
@@ -305,7 +305,7 @@ func rangeCountWins[K any](
 // between the bounded [lo,hi] count and the open-ended RangeCountFrom for an
 // unbounded-above range (#F-CY1); the generic [rangeCountWins] delegates here.
 func rangeCountWinsFn(
-	g *lpg.Graph[string, float64],
+	g *lpg.ReadView[string, float64],
 	label string,
 	rangeCount func(budget uint64) (uint64, bool),
 ) bool {
@@ -327,7 +327,7 @@ func rangeCountWinsFn(
 // conjunct's count, instead of counting without a bound and comparing afterwards
 // (#2266). Sharing the derivation is what keeps the two paths from drifting: the
 // population floor and the selectivity ceiling are defined here and nowhere else.
-func rangeSeekBudget(g *lpg.Graph[string, float64], label string) (uint64, bool) {
+func rangeSeekBudget(g *lpg.ReadView[string, float64], label string) (uint64, bool) {
 	nLabel := g.NodeIndex().Count(uint32(g.Registry().Intern(label)))
 	if nLabel < rangeSeekMinLabelPopulation {
 		return 0, false
@@ -675,7 +675,7 @@ func tryNumericRangeSeek(
 	sel *ir.Selection,
 	schema map[string]int,
 	idxMgr *index.Manager,
-	g *lpg.Graph[string, float64],
+	g *lpg.ReadView[string, float64],
 	lblScan *ir.NodeByLabelScan,
 	nodeVar string,
 	params map[string]expr.Value,
