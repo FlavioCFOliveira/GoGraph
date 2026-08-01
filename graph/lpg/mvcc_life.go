@@ -272,6 +272,46 @@ func (g *Graph[N, W]) reclaimNodeLife(watermark uint64) int {
 	return freed
 }
 
+// LiveCountExactAsOf reports whether the CURRENT live node count is also the
+// count this reader should see.
+//
+// It is, when no node was born or removed after the reader started: the present
+// and the reader's instant then contain exactly the same nodes, however many
+// records happen to be retained. That is a very different question from "is any
+// record live at all", which is what the first version asked — and asking the
+// weaker one made `MATCH (n) RETURN count(*)` decline its O(1) answer and walk
+// every node under a per-node lock the moment ANY write had happened, which
+// measured 2.5x on BenchmarkEngReadUnderWriter against a saturating writer.
+//
+// The scan is over the life shards' own maps, which hold only the churn the
+// reclaimer has not caught up with — sixteen uncontended read locks once per
+// QUERY, against one per node.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) LiveCountExactAsOf(s *Snapshot) bool {
+	if s == nil || g.nodeLifeActive.Load() == 0 {
+		return true
+	}
+	for i := range g.nodeLifeShards {
+		sh := &g.nodeLifeShards[i]
+		sh.mu.RLock()
+		for _, st := range sh.born {
+			if !st.visibleTo(s.startTS, s.txID) {
+				sh.mu.RUnlock()
+				return false
+			}
+		}
+		for _, st := range sh.died {
+			if !st.visibleTo(s.startTS, s.txID) {
+				sh.mu.RUnlock()
+				return false
+			}
+		}
+		sh.mu.RUnlock()
+	}
+	return true
+}
+
 // NodeLifeVersionCount returns the number of live birth and death records.
 //
 // Safe for concurrent use.

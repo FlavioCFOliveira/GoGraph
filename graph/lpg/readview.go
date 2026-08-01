@@ -333,7 +333,7 @@ func (v *ReadView[N, W]) LiveOrder() uint64 { return v.g.LiveOrder() }
 // the present while every other clause of the same query answers from the
 // snapshot.
 func (v *ReadView[N, W]) LiveNodeCountExact() (uint64, bool) {
-	if v.snap != nil && v.g.NodeLifeVersionCount() != 0 {
+	if !v.g.LiveCountExactAsOf(v.snap) {
 		return 0, false
 	}
 	return v.g.LiveOrder(), true
