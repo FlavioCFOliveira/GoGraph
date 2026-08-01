@@ -34,6 +34,10 @@ import (
 // instead of a ~300 B Go map.
 type edgeInstanceLabelShard struct {
 	m map[edgeKey]map[int64]labelBag
+	// v indexes the pre-image chains of the instances a writer has touched, so
+	// a reader can reconstruct one instance's type set as of its own start
+	// timestamp (rmp #2291).
+	v sideVersions[edgeInstanceKey, labelBag]
 	// mu guards m. Writers (SetEdgeLabelAt, RemoveEdgeInstance) take the
 	// write lock; EdgeLabelsAt reads under a read lock so concurrent
 	// per-instance label reads on a shard proceed in parallel.
@@ -73,6 +77,10 @@ func (g *Graph[N, W]) SetEdgeLabelAt(src, dst N, idx int64, name string) {
 	// labelBag is stored by value: mutate a local copy and write it back under
 	// the shard lock (the write-back is load-bearing — add may grow/promote).
 	bag := byIdx[idx]
+	if bag.has(lid) {
+		return
+	}
+	g.pushInstanceLabelVersion(sh, k, idx)
 	bag.add(lid)
 	byIdx[idx] = bag
 }
@@ -94,6 +102,14 @@ func (g *Graph[N, W]) SetEdgeLabelAt(src, dst N, idx int64, name string) {
 //
 // EdgeLabelsAt is safe for concurrent use.
 func (g *Graph[N, W]) EdgeLabelsAt(src, dst N, idx int64) []string {
+	return g.EdgeLabelsAtAsOf(src, dst, idx, nil)
+}
+
+// EdgeLabelsAtAsOf is [Graph.EdgeLabelsAt] as the instance stood at snap. A nil
+// snapshot reads the current value; see snapshot_read.go.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) EdgeLabelsAtAsOf(src, dst N, idx int64, snap *Snapshot) []string {
 	if idx <= 0 {
 		return nil
 	}
@@ -109,11 +125,11 @@ func (g *Graph[N, W]) EdgeLabelsAt(src, dst N, idx int64) []string {
 	sh := g.edgeInstanceLabelShardFor(k)
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
-	byIdx, ok := sh.m[k]
-	if !ok {
-		return nil
+	// Inline for the reason given on [Graph.EdgeLabelsByHandleIDAsOf].
+	bag, ok := sh.m[k][idx]
+	if snap != nil && !sh.v.empty() {
+		bag, ok = sh.v.asOf(edgeInstanceKey{pair: k, idx: idx}, bag, ok, snap.startTS, snap.txID)
 	}
-	bag, ok := byIdx[idx]
 	if !ok {
 		return nil
 	}
@@ -147,6 +163,7 @@ func (g *Graph[N, W]) RemoveEdgeInstance(src, dst N, idx int64) {
 		sh := g.edgeInstanceLabelShardFor(k)
 		sh.mu.Lock()
 		if byIdx, ok := sh.m[k]; ok {
+			g.pushInstanceLabelVersion(sh, k, idx)
 			delete(byIdx, idx)
 			if len(byIdx) == 0 {
 				delete(sh.m, k)
@@ -158,6 +175,7 @@ func (g *Graph[N, W]) RemoveEdgeInstance(src, dst N, idx int64) {
 		sh := g.edgeInstancePropShardFor(k)
 		sh.mu.Lock()
 		if byIdx, ok := sh.m[k]; ok {
+			g.pushInstancePropVersion(sh, k, idx)
 			delete(byIdx, idx)
 			if len(byIdx) == 0 {
 				delete(sh.m, k)

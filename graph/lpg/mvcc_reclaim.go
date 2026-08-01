@@ -39,7 +39,9 @@ func (g *Graph[N, W]) ReclaimVersions(watermark uint64) int {
 	if watermark == 0 {
 		return 0
 	}
-	return g.reclaimLabelVersions(watermark) + g.reclaimPropVersions(watermark)
+	return g.reclaimLabelVersions(watermark) +
+		g.reclaimPropVersions(watermark) +
+		g.reclaimEdgeSideVersions(watermark)
 }
 
 // reclaimLabelVersions truncates the label chains.

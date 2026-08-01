@@ -19,6 +19,15 @@ import "github.com/FlavioCFOliveira/GoGraph/graph"
 // Distinct labels are deduplicated across both sources, so a multigraph pair
 // whose parallel slots happen to share a type reports it once.
 func (g *Graph[N, W]) EdgeLabels(src, dst N) []string {
+	return g.EdgeLabelsAsOf(src, dst, nil)
+}
+
+// EdgeLabelsAsOf is [Graph.EdgeLabels] as the edge stood at s. A nil snapshot
+// reads the current value, which is what a writer inside the barrier needs; see
+// snapshot_read.go.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) EdgeLabelsAsOf(src, dst N, s *Snapshot) []string {
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
 		return nil
@@ -27,7 +36,7 @@ func (g *Graph[N, W]) EdgeLabels(src, dst N) []string {
 	if !ok {
 		return nil
 	}
-	return g.EdgeLabelsByID(srcID, dstID)
+	return g.EdgeLabelsByIDAsOf(srcID, dstID, s)
 }
 
 // EdgeLabelsByID is the NodeID-keyed counterpart of [Graph.EdgeLabels]: it
@@ -45,6 +54,13 @@ func (g *Graph[N, W]) EdgeLabels(src, dst N) []string {
 // per-shard edge-label RWMutex and the registry's own lock, so EdgeLabelsByID is
 // safe for concurrent use.
 func (g *Graph[N, W]) EdgeLabelsByID(srcID, dstID graph.NodeID) []string {
+	return g.EdgeLabelsByIDAsOf(srcID, dstID, nil)
+}
+
+// EdgeLabelsByIDAsOf is [Graph.EdgeLabelsByID] as the edge stood at s.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) EdgeLabelsByIDAsOf(srcID, dstID graph.NodeID, snap *Snapshot) []string {
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.RLock()
@@ -60,12 +76,12 @@ func (g *Graph[N, W]) EdgeLabelsByID(srcID, dstID graph.NodeID) []string {
 		}
 		return false
 	}
-	g.slotLabelsForPair(srcID, dstID, func(lid LabelID) {
+	g.slotLabelsForPair(srcID, dstID, snap, func(lid LabelID) {
 		if !seen(lid) {
 			ids = append(ids, lid)
 		}
 	})
-	for _, lid := range sh.overflow[k] {
+	for _, lid := range g.overflowLabelsAsOf(sh, k, snap) {
 		if !seen(lid) {
 			ids = append(ids, lid)
 		}
@@ -113,13 +129,21 @@ func (g *Graph[N, W]) EdgeLabelsByID(srcID, dstID graph.NodeID) []string {
 //
 // ForEachSlotRelTypeByID is safe for concurrent use.
 func (g *Graph[N, W]) ForEachSlotRelTypeByID(srcID, dstID graph.NodeID, encoded uint32, visit func(name string)) {
+	g.ForEachSlotRelTypeByIDAsOf(srcID, dstID, encoded, nil, visit)
+}
+
+// ForEachSlotRelTypeByIDAsOf is [Graph.ForEachSlotRelTypeByID] as the pair's
+// overflow stood at snap.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) ForEachSlotRelTypeByIDAsOf(srcID, dstID graph.NodeID, encoded uint32, snap *Snapshot, visit func(name string)) {
 	own, hasOwn := decodeSlotLabel(encoded)
 	var extra []LabelID
-	if g.edgeLabelOverflowActive.Load() != 0 {
+	if g.edgeLabelOverflowActive.Load() != 0 || (snap != nil && g.edgeLabelVersionActive.Load() != 0) {
 		k := edgeKey{src: srcID, dst: dstID}
 		sh := g.edgeLabelShardFor(k)
 		sh.mu.RLock()
-		for _, lid := range sh.overflow[k] {
+		for _, lid := range g.overflowLabelsAsOf(sh, k, snap) {
 			if hasOwn && lid == own {
 				continue
 			}
@@ -151,6 +175,14 @@ func (g *Graph[N, W]) ForEachSlotRelTypeByID(srcID, dstID graph.NodeID, encoded 
 // graph. The dedup scratch is the same small per-call slice EdgeLabelsByID uses;
 // the saving is the []string result slice the caller would otherwise range over.
 func (g *Graph[N, W]) ForEachEdgeLabelByID(srcID, dstID graph.NodeID, visit func(name string)) {
+	g.ForEachEdgeLabelByIDAsOf(srcID, dstID, nil, visit)
+}
+
+// ForEachEdgeLabelByIDAsOf is [Graph.ForEachEdgeLabelByID] as the edge stood at
+// snap.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) ForEachEdgeLabelByIDAsOf(srcID, dstID graph.NodeID, snap *Snapshot, visit func(name string)) {
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.RLock()
@@ -163,12 +195,12 @@ func (g *Graph[N, W]) ForEachEdgeLabelByID(srcID, dstID graph.NodeID, visit func
 		}
 		return false
 	}
-	g.slotLabelsForPair(srcID, dstID, func(lid LabelID) {
+	g.slotLabelsForPair(srcID, dstID, snap, func(lid LabelID) {
 		if !seen(lid) {
 			ids = append(ids, lid)
 		}
 	})
-	for _, lid := range sh.overflow[k] {
+	for _, lid := range g.overflowLabelsAsOf(sh, k, snap) {
 		if !seen(lid) {
 			ids = append(ids, lid)
 		}

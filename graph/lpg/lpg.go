@@ -250,7 +250,11 @@ type edgeLabelShard struct {
 	// overflow holds the extra (beyond the slot) labels of a pair, deduplicated.
 	// nil until the first label spills here.
 	overflow map[edgeKey][]LabelID
-	mu       sync.RWMutex
+	// v indexes the pre-image chains of the pairs a writer has touched, so a
+	// reader can reconstruct the overflow set as of its own start timestamp
+	// (rmp #2291). Lazily allocated: a shard nothing has written keeps none.
+	v  sideVersions[edgeKey, []LabelID]
+	mu sync.RWMutex
 }
 
 // addOverflow appends lid to k's overflow list if not already present, and
@@ -578,6 +582,15 @@ type Graph[N comparable, W any] struct {
 	// label and property delta chains plus the adjacency's entry chains. Set
 	// once at construction, so it stays a plain field. See mvcc_write.go.
 	mvccArmed bool
+	// The three per-edge side stores each keep their OWN lock-free version
+	// counter (rmp #2291), so a read that touches one of them is not pushed off
+	// its fast path by churn in another — the same separation the node-label
+	// and node-property pairs have, for the same reason. See mvcc_edge_side.go.
+	edgeLabelVersionActive         atomic.Int64
+	edgeHandleLabelVersionActive   atomic.Int64
+	edgeHandlePropVersionActive    atomic.Int64
+	edgeInstanceLabelVersionActive atomic.Int64
+	edgeInstancePropVersionActive  atomic.Int64
 	// stamp holds the commit record of the write currently under the barrier,
 	// SHARED with the adjacency so one transaction's labels, properties,
 	// topology, relationship types and edge properties all publish with one
@@ -929,15 +942,20 @@ func decodeSlotLabel(v uint32) (LabelID, bool) {
 // happen to share a relationship type; callers that enumerate distinct labels
 // must deduplicate. This reads the lock-free adjacency snapshot and takes no
 // lock; it is safe for concurrent use.
-func (g *Graph[N, W]) slotLabelsForPair(srcID, dstID graph.NodeID, fn func(LabelID)) {
-	labs := g.adj.LoadEntryLabels(srcID)
+func (g *Graph[N, W]) slotLabelsForPair(srcID, dstID graph.NodeID, snap *Snapshot, fn func(LabelID)) {
+	// ONE entry, so the neighbour and label columns are the same version. The
+	// previous form loaded them separately and bounded the scan by the shorter
+	// of the two lengths, which kept the index in range but did not make the
+	// columns agree; a snapshot read has to.
+	//
+	// It asks for exactly these two columns rather than the whole
+	// [adjlist.EntryView]: copying the five-field view's discarded slice
+	// headers measured 21.7 ns per call here, over half of the entire
+	// EdgeLabelsByID read.
+	nbs, labs := g.entrySlotLabels(srcID, snap)
 	if labs == nil {
 		return
 	}
-	nbs, _ := g.adj.LoadEntry(srcID)
-	// labs is published in lockstep with neighbours, but a concurrent writer
-	// may publish a longer neighbours snapshot after we loaded labs; bound the
-	// scan by the shorter length so an index is never out of range.
 	n := len(nbs)
 	if len(labs) < n {
 		n = len(labs)
@@ -950,6 +968,16 @@ func (g *Graph[N, W]) slotLabelsForPair(srcID, dstID graph.NodeID, fn func(Label
 			fn(lid)
 		}
 	}
+}
+
+// entrySlotLabels resolves a node's neighbour and per-slot label columns from
+// ONE entry, either as of snap or as they currently stand.
+func (g *Graph[N, W]) entrySlotLabels(id graph.NodeID, snap *Snapshot) ([]graph.NodeID, []uint32) {
+	startTS, txID, walk := snapshotTimes(snap)
+	if !walk {
+		return g.adj.LoadEntrySlotLabels(id)
+	}
+	return g.adj.EntrySlotLabelsAsOf(id, startTS, txID)
 }
 
 // clearSlotLabels drops the relationship-type label from every dst-matching
@@ -1481,7 +1509,7 @@ func (g *Graph[N, W]) pairLabelIDs(srcID, dstID graph.NodeID) []LabelID {
 		}
 		return false
 	}
-	g.slotLabelsForPair(srcID, dstID, func(lid LabelID) {
+	g.slotLabelsForPair(srcID, dstID, nil, func(lid LabelID) {
 		if !seen(lid) {
 			ids = append(ids, lid)
 		}
@@ -1535,7 +1563,7 @@ func (g *Graph[N, W]) repairEdgeLabelLocked(k edgeKey, lid LabelID) {
 		return
 	}
 	sh := g.edgeLabelShardFor(k)
-	if sh.addOverflow(k, lid) {
+	if g.addOverflowVersioned(sh, k, lid) {
 		g.edgeLabelOverflowActive.Add(1)
 	}
 }
@@ -1614,7 +1642,7 @@ func (g *Graph[N, W]) clearEdgePairState(k edgeKey) {
 	// resurrect a removed edge's relationship type.
 	lsh := g.edgeLabelShardFor(k)
 	lsh.mu.Lock()
-	dropped := lsh.clearOverflow(k)
+	dropped := g.clearOverflowVersioned(lsh, k)
 	g.clearSlotLabels(k.src, k.dst)
 	lsh.mu.Unlock()
 	if dropped > 0 {
@@ -1635,10 +1663,12 @@ func (g *Graph[N, W]) clearEdgePairState(k edgeKey) {
 	// removed edge's per-handle type or properties.
 	hlsh := g.edgeHandleLabelShardFor(k)
 	hlsh.mu.Lock()
+	g.pushHandleLabelVersionsForPair(hlsh, k)
 	delete(hlsh.m, k)
 	hlsh.mu.Unlock()
 	hpsh := g.edgeHandlePropShardFor(k)
 	hpsh.mu.Lock()
+	g.pushHandlePropVersionsForPair(hpsh, k)
 	delete(hpsh.m, k)
 	hpsh.mu.Unlock()
 	// Drop the per-CREATE-instance label, property, and multiplicity-counter
@@ -1648,10 +1678,12 @@ func (g *Graph[N, W]) clearEdgePairState(k edgeKey) {
 	// rather than starting fresh at 1.
 	ilsh := g.edgeInstanceLabelShardFor(k)
 	ilsh.mu.Lock()
+	g.pushInstanceLabelVersionsForPair(ilsh, k)
 	delete(ilsh.m, k)
 	ilsh.mu.Unlock()
 	ipsh := g.edgeInstancePropShardFor(k)
 	ipsh.mu.Lock()
+	g.pushInstancePropVersionsForPair(ipsh, k)
 	delete(ipsh.m, k)
 	ipsh.mu.Unlock()
 	ccsh := g.edgeCreateCountShardFor(k)
@@ -2945,7 +2977,7 @@ func (g *Graph[N, W]) setEdgeLabelLocked(k edgeKey, lid LabelID) bool {
 	}
 	// No free column-typed slot; spill to overflow, deduplicated.
 	sh := g.edgeLabelShardFor(k)
-	if !sh.addOverflow(k, lid) {
+	if !g.addOverflowVersioned(sh, k, lid) {
 		return false
 	}
 	g.edgeLabelOverflowActive.Add(1)
@@ -3006,6 +3038,14 @@ func (g *Graph[N, W]) columnTypedSlots(srcID, dstID graph.NodeID, lid LabelID, e
 // HasEdgeLabel reports whether the directed edge (src, dst) carries
 // name as a label.
 func (g *Graph[N, W]) HasEdgeLabel(src, dst N, name string) bool {
+	return g.HasEdgeLabelAsOf(src, dst, name, nil)
+}
+
+// HasEdgeLabelAsOf is [Graph.HasEdgeLabel] as the edge stood at snap. A nil
+// snapshot reads the current value; see snapshot_read.go.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) HasEdgeLabelAsOf(src, dst N, name string, snap *Snapshot) bool {
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
 		return false
@@ -3022,11 +3062,13 @@ func (g *Graph[N, W]) HasEdgeLabel(src, dst N, name string) bool {
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
-	if sh.hasOverflow(k, lid) {
-		return true
+	for _, x := range g.overflowLabelsAsOf(sh, k, snap) {
+		if x == lid {
+			return true
+		}
 	}
 	found := false
-	g.slotLabelsForPair(srcID, dstID, func(slotLid LabelID) {
+	g.slotLabelsForPair(srcID, dstID, snap, func(slotLid LabelID) {
 		if slotLid == lid {
 			found = true
 		}
@@ -3072,7 +3114,7 @@ func (g *Graph[N, W]) RemoveEdgeLabel(src, dst N, name string) {
 	// and this is the exact inverse of [Graph.SetEdgeLabel], which types every free
 	// column-typed slot of the pair. The whole update is under the shard lock so
 	// the slot and overflow halves transition together for readers.
-	changed := sh.removeOverflow(k, lid)
+	changed := g.removeOverflowVersioned(sh, k, lid)
 	if changed {
 		g.edgeLabelOverflowActive.Add(-1)
 	}

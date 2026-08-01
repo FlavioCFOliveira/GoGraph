@@ -96,14 +96,18 @@ func (g *Graph[N, W]) ReclaimNow() int {
 }
 
 // VersionCount returns the total number of live version records across every
-// store: node-label deltas, node-property deltas and adjacency entry versions.
+// store: node-label deltas, node-property deltas, adjacency entry versions, and
+// the five per-edge side stores (rmp #2291).
 //
 // It is the memory the substrate is responsible for, and the quantity the
 // bounded-resources mandate requires be observable rather than merely bounded.
 //
 // Safe for concurrent use.
 func (g *Graph[N, W]) VersionCount() int64 {
-	return g.labelDeltaActive.Load() + g.propDeltaActive.Load() + g.adj.VersionCount()
+	return g.labelDeltaActive.Load() +
+		g.propDeltaActive.Load() +
+		g.adj.VersionCount() +
+		g.EdgeSideVersionCount()
 }
 
 // Horizon returns the reader horizon this graph reclaims against.

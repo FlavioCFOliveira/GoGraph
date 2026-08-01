@@ -66,7 +66,13 @@ import (
 // #1633), stored by value, so a 1-2-label edge handle pays a small slice
 // instead of a ~300 B Go map.
 type edgeHandleLabelShard struct {
-	m  map[edgeKey]map[uint64]labelBag
+	m map[edgeKey]map[uint64]labelBag
+	// v indexes the pre-image chains of the instances a writer has touched, so
+	// a reader can reconstruct one instance's type set as of its own start
+	// timestamp (rmp #2291). Keyed by (pair, handle) rather than by pair, so a
+	// write copies ONE instance's small bag instead of the whole pair's inner
+	// map — O(1) against O(parallel edges) per write.
+	v  sideVersions[edgeHandleKey, labelBag]
 	mu sync.Mutex
 }
 
@@ -75,7 +81,10 @@ type edgeHandleLabelShard struct {
 // #1633), stored by value, so a 1-2-property edge handle pays a small slice
 // instead of a ~300 B Go map.
 type edgeHandlePropShard struct {
-	m  map[edgeKey]map[uint64]propBag
+	m map[edgeKey]map[uint64]propBag
+	// v indexes the pre-image chains of the instances a writer has touched.
+	// See [edgeHandleLabelShard].v for why it is keyed by (pair, handle).
+	v  sideVersions[edgeHandleKey, propBag]
 	mu sync.Mutex
 }
 
@@ -104,6 +113,12 @@ func (g *Graph[N, W]) edgeHandlePropShardFor(k edgeKey) *edgeHandlePropShard {
 //
 // edgeHandleHasLabel is safe for concurrent use.
 func (g *Graph[N, W]) edgeHandleHasLabel(srcID, dstID graph.NodeID, handle uint64, lid LabelID) (has, known bool) {
+	return g.edgeHandleHasLabelAsOf(srcID, dstID, handle, lid, nil)
+}
+
+// edgeHandleHasLabelAsOf is [Graph.edgeHandleHasLabel] as the instance stood at
+// snap.
+func (g *Graph[N, W]) edgeHandleHasLabelAsOf(srcID, dstID graph.NodeID, handle uint64, lid LabelID, snap *Snapshot) (has, known bool) {
 	if handle == 0 {
 		return false, false
 	}
@@ -111,11 +126,7 @@ func (g *Graph[N, W]) edgeHandleHasLabel(srcID, dstID graph.NodeID, handle uint6
 	sh := g.edgeHandleLabelShardFor(k)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
-	byHandle, ok := sh.m[k]
-	if !ok {
-		return false, false
-	}
-	bag, ok := byHandle[handle]
+	bag, ok := g.handleLabelBagAsOf(sh, k, handle, snap)
 	if !ok {
 		return false, false
 	}
@@ -140,6 +151,17 @@ func (g *Graph[N, W]) edgeHandleHasLabel(srcID, dstID graph.NodeID, handle uint6
 //
 // HasEdgeHandleLabelRecordByID is safe for concurrent use.
 func (g *Graph[N, W]) HasEdgeHandleLabelRecordByID(srcID, dstID graph.NodeID, handle uint64) bool {
+	return g.HasEdgeHandleLabelRecordByIDAsOf(srcID, dstID, handle, nil)
+}
+
+// HasEdgeHandleLabelRecordByIDAsOf is [Graph.HasEdgeHandleLabelRecordByID] as
+// the store stood at snap. The precedence it feeds — a slot WITH a record is
+// handle-typed, one WITHOUT is column-typed — must be resolved at the reader's
+// own instant, or a reader from before a CREATE would classify a slot by a
+// record that did not exist for it.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) HasEdgeHandleLabelRecordByIDAsOf(srcID, dstID graph.NodeID, handle uint64, snap *Snapshot) bool {
 	if handle == 0 {
 		return false
 	}
@@ -147,11 +169,7 @@ func (g *Graph[N, W]) HasEdgeHandleLabelRecordByID(srcID, dstID graph.NodeID, ha
 	sh := g.edgeHandleLabelShardFor(k)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
-	byHandle, ok := sh.m[k]
-	if !ok {
-		return false
-	}
-	_, ok = byHandle[handle]
+	_, ok := g.handleLabelBagAsOf(sh, k, handle, snap)
 	return ok
 }
 
@@ -208,6 +226,7 @@ func (g *Graph[N, W]) SetEdgeLabelByHandle(src, dst N, handle uint64, name strin
 		// force an O(V+E) rebuild for a mutation that changed nothing.
 		return
 	}
+	g.pushHandleLabelVersion(sh, k, handle)
 	bag.add(lid)
 	byHandle[handle] = bag
 	changed = true
@@ -239,25 +258,26 @@ func (g *Graph[N, W]) EdgeLabelsByHandle(src, dst N, handle uint64) []string {
 	if !ok {
 		return nil
 	}
-	k := edgeKey{src: srcID, dst: dstID}
-	sh := g.edgeHandleLabelShardFor(k)
-	sh.mu.Lock()
-	defer sh.mu.Unlock()
-	byHandle, ok := sh.m[k]
+	return g.EdgeLabelsByHandleIDAsOf(srcID, dstID, handle, nil)
+}
+
+// EdgeLabelsByHandleAsOf is [Graph.EdgeLabelsByHandle] as the instance stood at
+// snap. A nil snapshot reads the current value; see snapshot_read.go.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) EdgeLabelsByHandleAsOf(src, dst N, handle uint64, snap *Snapshot) []string {
+	if handle == 0 {
+		return nil
+	}
+	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
 		return nil
 	}
-	bag, ok := byHandle[handle]
+	dstID, ok := g.adj.Mapper().Lookup(dst)
 	if !ok {
 		return nil
 	}
-	out := make([]string, 0, bag.len())
-	bag.forEach(func(lid LabelID) {
-		if name, ok := g.reg.Resolve(lid); ok {
-			out = append(out, name)
-		}
-	})
-	return out
+	return g.EdgeLabelsByHandleIDAsOf(srcID, dstID, handle, snap)
 }
 
 // SetEdgePropertyByHandle records key=value for the edge identified by
@@ -300,6 +320,7 @@ func (g *Graph[N, W]) SetEdgePropertyByHandle(src, dst N, handle uint64, key str
 	// propBag is stored by value: mutate a local copy and write it back under
 	// the shard lock (the write-back is load-bearing — set may grow/promote).
 	bag := byHandle[handle]
+	g.pushHandlePropVersion(sh, k, handle)
 	bag.set(pid, value)
 	byHandle[handle] = bag
 	return nil
@@ -330,25 +351,26 @@ func (g *Graph[N, W]) EdgePropertiesByHandle(src, dst N, handle uint64) map[stri
 	if !ok {
 		return nil
 	}
-	k := edgeKey{src: srcID, dst: dstID}
-	sh := g.edgeHandlePropShardFor(k)
-	sh.mu.Lock()
-	defer sh.mu.Unlock()
-	byHandle, ok := sh.m[k]
+	return g.EdgePropertiesByHandleIDAsOf(srcID, dstID, handle, nil)
+}
+
+// EdgePropertiesByHandleAsOf is [Graph.EdgePropertiesByHandle] as the instance
+// stood at snap. A nil snapshot reads the current value; see snapshot_read.go.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) EdgePropertiesByHandleAsOf(src, dst N, handle uint64, snap *Snapshot) map[string]PropertyValue {
+	if handle == 0 {
+		return nil
+	}
+	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
 		return nil
 	}
-	bag, ok := byHandle[handle]
+	dstID, ok := g.adj.Mapper().Lookup(dst)
 	if !ok {
 		return nil
 	}
-	out := make(map[string]PropertyValue, bag.len())
-	bag.forEach(func(pid PropertyKeyID, v PropertyValue) {
-		if name, ok := g.pkeys.Resolve(pid); ok {
-			out[name] = v
-		}
-	})
-	return out
+	return g.EdgePropertiesByHandleIDAsOf(srcID, dstID, handle, snap)
 }
 
 // FirstEdgeHandle returns the stable handle stamped on the FIRST adjacency
@@ -443,6 +465,7 @@ func (g *Graph[N, W]) DelEdgePropertyByHandle(src, dst N, handle uint64, key str
 	}
 	// propBag is stored by value: mutate a local copy and either write it back
 	// or drop the entry when the removal emptied it.
+	g.pushHandlePropVersion(sh, k, handle)
 	if bag.del(pid) {
 		delete(byHandle, handle)
 		if len(byHandle) == 0 {
@@ -477,6 +500,7 @@ func (g *Graph[N, W]) RemoveEdgeInstanceByHandle(src, dst N, handle uint64) {
 		sh := g.edgeHandleLabelShardFor(k)
 		sh.mu.Lock()
 		if byHandle, ok := sh.m[k]; ok {
+			g.pushHandleLabelVersion(sh, k, handle)
 			delete(byHandle, handle)
 			if len(byHandle) == 0 {
 				delete(sh.m, k)
@@ -488,6 +512,7 @@ func (g *Graph[N, W]) RemoveEdgeInstanceByHandle(src, dst N, handle uint64) {
 		sh := g.edgeHandlePropShardFor(k)
 		sh.mu.Lock()
 		if byHandle, ok := sh.m[k]; ok {
+			g.pushHandlePropVersion(sh, k, handle)
 			delete(byHandle, handle)
 			if len(byHandle) == 0 {
 				delete(sh.m, k)

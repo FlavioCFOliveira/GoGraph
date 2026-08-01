@@ -299,7 +299,7 @@ func (g *Graph[N, W]) AddEdgeRelTypeOverflowByID(srcID, dstID graph.NodeID, name
 // edge-label shard write lock.
 func (g *Graph[N, W]) addPairOverflowLocked(k edgeKey, lid LabelID) bool {
 	sh := g.edgeLabelShardFor(k)
-	if !sh.addOverflow(k, lid) {
+	if !g.addOverflowVersioned(sh, k, lid) {
 		return false
 	}
 	g.edgeLabelOverflowActive.Add(1)
