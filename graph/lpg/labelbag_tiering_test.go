@@ -87,7 +87,7 @@ func assertLabelState(t *testing.T, g *Graph[string, float64], key string, id gr
 			t.Fatalf("HasNodeLabel(%s) = false, want true", name)
 		}
 		lid := uint32(g.Registry().Intern(name))
-		if !g.NodeIndex().Has(lid, id) {
+		if !labelIndexHas(g, uint32(lid), id) {
 			t.Fatalf("nodeIdx missing %s for id %d (bag/index out of lockstep)", name, id)
 		}
 	}
@@ -101,7 +101,7 @@ func assertLabelState(t *testing.T, g *Graph[string, float64], key string, id gr
 			t.Fatalf("HasNodeLabel(%s) = true, want false", name)
 		}
 		if lid, ok := g.Registry().Lookup(name); ok {
-			if g.NodeIndex().Has(uint32(lid), id) {
+			if labelIndexHas(g, uint32(uint32(lid)), id) {
 				t.Fatalf("nodeIdx still has %s for id %d after removal (stale index entry)", name, id)
 			}
 		}

@@ -97,11 +97,19 @@ func (c *edgeTypeFilterCache) getOrBuild(key string, currentEpoch uint64, build 
 	if e, ok := c.by[key]; ok {
 		//nolint:forcetypeassert // cache invariant: list.Element.Value is always *edgeTypeFilterCacheNode
 		node := e.Value.(*edgeTypeFilterCacheNode)
-		if node.value.epoch == currentEpoch {
+		// The entry pointer is copied out UNDER THE LOCK. Reading node.value
+		// after the unlock races a concurrent install (node.value = fresh,
+		// below) — `-race` reported exactly that once the read barrier was
+		// retired (rmp #2290). The barrier had been hiding it: the epoch this
+		// compares against only moves when a writer commits, and a writer used
+		// to exclude every reader, so a hit and an install could not overlap.
+		// An entry is immutable once built, so holding the pointer is enough.
+		v := node.value
+		if v.epoch == currentEpoch {
 			c.ll.MoveToFront(e)
 			c.mu.Unlock()
 			metrics.IncCounter("cypher.edge_type_filter_cache.hits", 1)
-			return node.value.filter
+			return v.filter
 		}
 	}
 	c.mu.Unlock()

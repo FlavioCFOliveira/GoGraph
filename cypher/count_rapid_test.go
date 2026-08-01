@@ -133,7 +133,17 @@ func TestCountStore_Rapid(t *testing.T) {
 			// N(label) exact for every label in the alphabet, always.
 			oracleN := recountLabelsByName(g)
 			for _, name := range countLabels {
-				got, _ := src.ResolveLabelCount(name)
+				got, exact := src.ResolveLabelCount(name)
+				if !exact {
+					// MVCC P4c (rmp #2290): the O(1) count declines whenever a
+					// deferred index removal or live label history could make
+					// the raw cardinality disagree with what a scan would emit.
+					// The engine then counts the FILTERED scan, so that is what
+					// the oracle must be compared against here too — comparing
+					// against the declined zero would assert a contract the
+					// engine deliberately no longer offers.
+					got = int64(src.ResolveLabelBitmap(name).GetCardinality())
+				}
 				if want := oracleN[name]; got != want {
 					rt.Fatalf("N(%s)=%d, want %d (label index vs recount) after op %d", name, got, want, i)
 				}

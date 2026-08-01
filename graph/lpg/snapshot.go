@@ -74,8 +74,14 @@ func (g *Graph[N, W]) BeginRead() *Snapshot {
 	if !g.mvccArmed {
 		return nil
 	}
+	// Register BEFORE reading the clock. The reverse order leaves a window in
+	// which a reclaimer computes a watermark newer than this reader's start
+	// timestamp and frees versions it is about to need; see
+	// [mvcc.Horizon.EnterHolding].
+	slot := g.horizon.EnterHolding()
 	startTS := g.mvccClock.ReadTS()
-	return &Snapshot{startTS: startTS, slot: g.horizon.Enter(startTS)}
+	g.horizon.Publish(slot, startTS)
+	return &Snapshot{startTS: startTS, slot: slot}
 }
 
 // EndRead releases a read view obtained from [Graph.BeginRead].

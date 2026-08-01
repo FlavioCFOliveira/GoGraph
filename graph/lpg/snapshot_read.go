@@ -37,15 +37,17 @@ import (
 //
 // Safe for concurrent use.
 func (g *Graph[N, W]) NodeLabelsByIDAsOf(id graph.NodeID, s *Snapshot) []string {
-	bag := g.labelBagFor(id, s)
-	if bag.len() == 0 {
-		return nil
-	}
-	out := make([]string, 0, bag.len())
-	bag.forEach(func(lid LabelID) {
-		if name, ok := g.reg.Resolve(lid); ok {
-			out = append(out, name)
+	var out []string
+	g.withLabelBag(id, s, func(bag labelBag) {
+		if bag.len() == 0 {
+			return
 		}
+		out = make([]string, 0, bag.len())
+		bag.forEach(func(lid LabelID) {
+			if name, ok := g.reg.Resolve(lid); ok {
+				out = append(out, name)
+			}
+		})
 	})
 	return out
 }
@@ -70,16 +72,23 @@ func (g *Graph[N, W]) HasNodeLabelByIDAsOf(id graph.NodeID, name string, s *Snap
 		return false
 	}
 	// Written out for the same reason as [Graph.NodePropertyByIDAsOf]: this is a
-	// per-ROW predicate on every labelled scan.
+	// per-ROW predicate on every labelled scan. The membership test runs INSIDE
+	// the lock, because the bag aliases the stored backing array; see
+	// [Graph.withLabelBag].
+	// The gate is the shard's own side map, read UNDER the lock. A graph-level
+	// counter sampled BEFORE the lock is fast and wrong: a writer can create
+	// the first version in between, and the reader then takes the raw current
+	// value here and the pre-write value at the next node. See
+	// [Graph.propBagAsOf].
 	sh := g.nodeLabelShardFor(id)
-	if s == nil || g.labelDeltaActive.Load() == 0 {
-		sh.mu.RLock()
-		bag := sh.m[id]
-		sh.mu.RUnlock()
-		return bag.has(lid)
+	sh.mu.RLock()
+	bag := sh.m[id]
+	if s != nil && sh.d != nil {
+		bag = g.labelBagAsOfLocked(sh, id, s.startTS, s.txID)
 	}
-	bag := g.labelBagAsOfSlow(sh, id, s.startTS, s.txID)
-	return bag.has(lid)
+	present := bag.has(lid)
+	sh.mu.RUnlock()
+	return present
 }
 
 // HasNodeLabelAsOf is [Graph.HasNodeLabelByIDAsOf] keyed by the external node
@@ -94,18 +103,38 @@ func (g *Graph[N, W]) HasNodeLabelAsOf(n N, name string, s *Snapshot) bool {
 	return g.HasNodeLabelByIDAsOf(id, name, s)
 }
 
-// labelBagFor resolves a node's label bag either as of s or as it currently
-// stands, taking the shard read lock in both cases.
+// withLabelBag resolves a node's label bag as of s and hands it to fn WHILE THE
+// SHARD READ LOCK IS HELD.
 //
-// The returned bag may alias the stored one, so callers must only read it —
-// which every caller here does, and which is the same contract the plain
-// accessors already work under.
-func (g *Graph[N, W]) labelBagFor(id graph.NodeID, s *Snapshot) labelBag {
+// The lock is not an implementation detail here. The bag is returned by value
+// but its small tier is a slice header over the STORED backing array, so
+// consuming it after the lock is released races a concurrent writer's in-place
+// mutation — `-race` reported exactly that, a write in labelBag.del against a
+// read in labelBag.has. Every accessor that CONSUMES a bag rather than copying
+// a scalar out of it goes through this.
+//
+// fn must not touch this shard again: sync.RWMutex is not re-entrant, and a
+// writer arriving in between deadlocks the pair. Reading a DIFFERENT structure
+// (the label registry, the existence records) is fine and is what the callers
+// do.
+func (g *Graph[N, W]) withLabelBag(id graph.NodeID, s *Snapshot, fn func(labelBag)) {
+	sh := g.nodeLabelShardFor(id)
 	startTS, txID, walk := snapshotTimes(s)
-	if !walk {
-		return g.labelBagPlain(id)
+	sh.mu.RLock()
+	defer sh.mu.RUnlock()
+	if !walk || sh.d == nil {
+		fn(sh.m[id])
+		return
 	}
-	return g.labelBagAsOf(id, startTS, txID)
+	fn(g.labelBagAsOfLocked(sh, id, startTS, txID))
+}
+
+// labelBagTest applies pred to a node's label bag as of s, under the shard
+// lock. pred must be pure; see [Graph.withLabelBag].
+func (g *Graph[N, W]) labelBagTest(id graph.NodeID, s *Snapshot, pred func(labelBag) bool) bool {
+	out := false
+	g.withLabelBag(id, s, func(b labelBag) { out = pred(b) })
+	return out
 }
 
 // ── node properties ──────────────────────────────────────────────────────────
@@ -115,15 +144,17 @@ func (g *Graph[N, W]) labelBagFor(id graph.NodeID, s *Snapshot) labelBag {
 //
 // Safe for concurrent use.
 func (g *Graph[N, W]) NodePropertiesByIDAsOf(id graph.NodeID, s *Snapshot) map[string]PropertyValue {
-	bag := g.propBagFor(id, s)
-	if bag.len() == 0 {
-		return nil
-	}
-	out := make(map[string]PropertyValue, bag.len())
-	bag.forEach(func(pid PropertyKeyID, v PropertyValue) {
-		if name, ok := g.pkeys.Resolve(pid); ok {
-			out[name] = v
+	var out map[string]PropertyValue
+	g.withPropBag(id, s, func(bag propBag) {
+		if bag.len() == 0 {
+			return
 		}
+		out = make(map[string]PropertyValue, bag.len())
+		bag.forEach(func(pid PropertyKeyID, v PropertyValue) {
+			if name, ok := g.pkeys.Resolve(pid); ok {
+				out[name] = v
+			}
+		})
 	})
 	return out
 }
@@ -149,20 +180,22 @@ func (g *Graph[N, W]) NodePropertyByIDAsOf(id graph.NodeID, key string, s *Snaps
 		return PropertyValue{}, false
 	}
 	// The fast path is written out HERE rather than delegated through
-	// propBagFor and propBagAsOf, and that is measured: this is the per-ROW
-	// accessor of a scalar projection, so two extra call frames returning a
-	// 32-byte bag cost 21 ns per row — 23 % of BenchmarkEngReadProjectLargeSerial
-	// over 60 000 rows. The slow path keeps its own function so this one stays
-	// small enough to inline.
+	// propBagAsOf, and that is measured: this is the per-ROW accessor of a
+	// scalar projection, so two extra call frames returning a 32-byte bag cost
+	// 21 ns per row — 23 % of BenchmarkEngReadProjectLargeSerial over 60 000
+	// rows. Both the GATE and the lookup run inside the lock: the gate because
+	// sampling it before would let a write land in between and tear the read
+	// (see [Graph.propBagAsOf]), the lookup because the bag aliases the stored
+	// backing array (see [Graph.withLabelBag]).
 	sh := g.nodePropShardFor(id)
-	if s == nil || g.propDeltaActive.Load() == 0 {
-		sh.mu.RLock()
-		bag := sh.m[id]
-		sh.mu.RUnlock()
-		return bag.get(pid)
+	sh.mu.RLock()
+	bag := sh.m[id]
+	if s != nil && sh.d != nil {
+		bag = g.propBagAsOfLocked(sh, id, s.startTS, s.txID)
 	}
-	bag := g.propBagAsOfSlow(sh, id, s.startTS, s.txID)
-	return bag.get(pid)
+	v, ok2 := bag.get(pid)
+	sh.mu.RUnlock()
+	return v, ok2
 }
 
 // GetNodePropertyAsOf is [Graph.NodePropertyByIDAsOf] keyed by the external
@@ -177,14 +210,18 @@ func (g *Graph[N, W]) GetNodePropertyAsOf(n N, key string, s *Snapshot) (Propert
 	return g.NodePropertyByIDAsOf(id, key, s)
 }
 
-// propBagFor resolves a node's property bag either as of s or as it currently
-// stands. See [Graph.labelBagFor] for the aliasing contract.
-func (g *Graph[N, W]) propBagFor(id graph.NodeID, s *Snapshot) propBag {
+// withPropBag is [Graph.withLabelBag] for the property bag, under the same
+// aliasing contract and the same re-entrancy restriction on fn.
+func (g *Graph[N, W]) withPropBag(id graph.NodeID, s *Snapshot, fn func(propBag)) {
+	sh := g.nodePropShardFor(id)
 	startTS, txID, walk := snapshotTimes(s)
-	if !walk {
-		return g.propBagPlain(id)
+	sh.mu.RLock()
+	defer sh.mu.RUnlock()
+	if !walk || sh.d == nil {
+		fn(sh.m[id])
+		return
 	}
-	return g.propBagAsOf(id, startTS, txID)
+	fn(g.propBagAsOfLocked(sh, id, startTS, txID))
 }
 
 // ── adjacency ────────────────────────────────────────────────────────────────

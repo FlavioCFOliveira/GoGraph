@@ -55,8 +55,7 @@ func TestDetachDelete_Hub1000Leaves(t *testing.T) {
 	// Hub must be gone from the label index.
 	lid, ok := g.Registry().Lookup("Hub")
 	if ok {
-		bm := g.NodeIndex().Intersect(uint32(lid))
-		if !bm.IsEmpty() {
+		if len(labelIndexMembers(g, lid)) != 0 {
 			t.Fatal("hub node still in Hub label index after DETACH DELETE")
 		}
 	}

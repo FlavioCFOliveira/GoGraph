@@ -33,8 +33,7 @@ func TestRemoveLabel_LastLabel(t *testing.T) {
 	if !ok {
 		return // label never registered — vacuously OK
 	}
-	bm := g.NodeIndex().Intersect(uint32(lid))
-	if !bm.IsEmpty() {
+	if len(labelIndexMembers(g, lid)) != 0 {
 		t.Fatal("expected no nodes with label Temp after removing last label")
 	}
 }
@@ -74,7 +73,7 @@ func TestRemoveLabel_OneOfMultiple(t *testing.T) {
 
 	// Employee gone.
 	if eid, ok := g.Registry().Lookup("Employee"); ok {
-		if bm := g.NodeIndex().Intersect(uint32(eid)); !bm.IsEmpty() {
+		if len(labelIndexMembers(g, eid)) != 0 {
 			t.Error("Employee label still present after REMOVE n:Employee")
 		}
 	}
@@ -115,9 +114,22 @@ func TestRemoveLabel_MultipleLabelsAtOnce(t *testing.T) {
 
 	for _, lbl := range []string{"Person", "Employee"} {
 		if lid, ok := g.Registry().Lookup(lbl); ok {
-			if bm := g.NodeIndex().Intersect(uint32(lid)); !bm.IsEmpty() {
+			if len(labelIndexMembers(g, lid)) != 0 {
 				t.Errorf("label %s still present after REMOVE n:Person:Employee", lbl)
 			}
 		}
 	}
+}
+
+// labelIndexMembers is the DERIVED label membership a scan sees, not the raw
+// bitmap.
+//
+// MVCC P4c (rmp #2290) DEFERS a label-index removal until the reclamation
+// watermark has passed it, so a reader older than the removal still finds the
+// entry and does not silently lose a row. The raw bitmap therefore over-reports
+// between the removal and the sweep, and lpg.Graph.LabelBitmapAsOf is what
+// every scan resolves through. These assertions are about what a QUERY sees, so
+// they ask the question a query asks.
+func labelIndexMembers(g *lpg.Graph[string, float64], lid lpg.LabelID) []uint64 {
+	return g.LabelBitmapAsOf(lid, nil).ToArray()
 }

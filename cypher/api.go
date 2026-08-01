@@ -2124,32 +2124,38 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	// panic paths — a snapshot that is never released holds the watermark for
 	// the life of the process.
 	//
-	// The visibility barrier is STILL taken. That is deliberate: with it held
-	// no writer is concurrent, so every as-of read must return exactly what the
-	// plain read returns, which makes this phase a provable identity rather
-	// than a semantic change. Retiring the barrier is P4c (rmp #2290).
+	// THE VISIBILITY BARRIER IS GONE FROM THE READ PATH (rmp #2274, #2290).
 	//
-	// THE START TIMESTAMP IS TAKEN INSIDE THE BARRIER, and that is not a
-	// detail. Taken outside, a writer can commit between the timestamp and the
-	// RLock, and the query then runs with a start timestamp older than the
-	// state its CANDIDATE structures show: the node mapper hands the scan a
-	// node the versioned stores correctly report as having no labels and no
-	// properties, and the query emits a row of nulls for a node that did not
-	// exist yet. Two tests caught exactly that
-	// (TestRunInTx_DurableThenVisible_ConcurrentReader and
-	// TestSEC14c_ConcurrentWriteRead_NoRace_NoPartialReads). Inside the
-	// barrier the two agree by construction. Making them agree WITHOUT the
-	// barrier is the candidate-set half of P4c.
-	var snap *lpg.Snapshot
-	defer func() { e.g.EndRead(snap) }()
-	e.g.View(func() {
-		snap = e.g.BeginRead()
-		// Sweep unreachable versions before building. It is once per query, not
-		// per row, and it is what stops a build-then-read workload paying a
-		// side-map probe forever for history nothing can reach; see
-		// lpg.Graph.ReclaimIdle for why a reader is entitled to do this and why
-		// it does not spin.
-		e.g.ReclaimIdle()
+	// It was what made a read safe, and it was also what made a read STARVE.
+	// Engine.Run held it across build and drain, a write took it exclusively,
+	// and Go's sync.RWMutex prefers a waiting writer — so once a writer queued
+	// behind a long analytical read, every short reader arriving after it
+	// parked until that read finished. Measured at head: a 95-second read plus
+	// a writer at 10/s collapsed short-read throughput 50.2× at one reader and
+	// 59.0× at eight, with a worst-case latency of 1m36s on a 4.5 µs point
+	// query. Neither ingredient alone cost anything.
+	//
+	// What replaces it is the whole MVCC programme, and every part is load-
+	// bearing: the versioned stores give the read the right CONTENT of each
+	// object (P1–P3c), the snapshot gives it ONE instant to read them at (P4b),
+	// versioned node existence and deferred index removal give it the right
+	// CANDIDATE SET (P4c), and the horizon keeps reclamation from freeing what
+	// it can still reach.
+	//
+	// WRITES STILL TAKE THE BARRIER EXCLUSIVELY. Moving the fsync out from
+	// under it, so several committers can be in flight at once, is P5 (#2193).
+	// Neither incumbent takes a global exclusive latch for an ordinary write —
+	// Memgraph takes `main_lock_` SHARED and reserves UNIQUE for global
+	// operations such as index creation — but a writer blocking writers is not
+	// what starved anybody.
+	snap := e.g.BeginRead()
+	defer e.g.EndRead(snap)
+	// Sweep unreachable versions before building. It is once per query, not per
+	// row, and it is what stops a build-then-read workload paying a side-map
+	// probe forever for history nothing can reach; see lpg.Graph.ReclaimIdle
+	// for why a reader is entitled to do this and why it does not spin.
+	e.g.ReclaimIdle()
+	func() {
 		op, cols, err := e.buildReadPhysical(ctx, entry, plan, params, queryReg, nil, snap)
 		if err != nil {
 			buildErr = err
@@ -2160,7 +2166,7 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		r.globalMem = e.globalMem
 		r.notifications = entry.notifications
 		r.materialize()
-	})
+	}()
 	if buildErr != nil {
 		return nil, fmt.Errorf("cypher: build plan: %w", buildErr)
 	}
@@ -5464,7 +5470,17 @@ func (w *lpgNodeWalker) LiveNodeCount() (int64, bool) {
 	if w.morsel != nil {
 		return 0, false
 	}
-	return int64(w.g.LiveOrder()), true
+	// EXACT for this query's instant, or nothing. The live count is read from
+	// the present, so a node born or removed after this read started would make
+	// the O(1) answer disagree with every other clause of the same query, which
+	// answers from the snapshot. When that is possible the pushdown declines
+	// and the scan counts — and the scan is snapshot-correct because
+	// WalkNodeIDs is (rmp #2290).
+	n, exact := w.g.LiveNodeCountExact()
+	if !exact {
+		return 0, false
+	}
+	return int64(n), true
 }
 
 // WalkNodeIDs implements nodeWalkerIface. Tombstoned node IDs (those
@@ -5622,7 +5638,11 @@ func (s *lpgLabelResolver) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 	if !ok {
 		return roaring64.New()
 	}
-	return s.g.NodeIndex().Intersect(uint32(lid))
+	// Through the snapshot-aware accessor, not the raw index. The index is a
+	// CANDIDATE source: it over-reports while a removal is deferred, and it
+	// under-reports nothing only because removals are deferred. See
+	// lpg/mvcc_index.go (rmp #2290).
+	return s.g.Raw().LabelBitmapAsOf(lid, s.g.Snapshot())
 }
 
 // ResolveLabelsCardinality reports the EXACT size of the labels' intersection
@@ -5671,15 +5691,15 @@ func (s *lpgLabelResolver) ResolveLabelsBitmap(names []string) *roaring64.Bitmap
 	if len(names) == 0 {
 		return roaring64.New()
 	}
-	ids := make([]uint32, 0, len(names))
+	ids := make([]lpg.LabelID, 0, len(names))
 	for _, n := range names {
 		lid, ok := s.g.Registry().Lookup(n)
 		if !ok {
 			return roaring64.New()
 		}
-		ids = append(ids, uint32(lid))
+		ids = append(ids, lid)
 	}
-	return s.g.NodeIndex().Intersect(ids...)
+	return s.g.Raw().LabelsBitmapAsOf(ids, s.g.Snapshot())
 }
 
 // ResolveLabelCount reports the number of live nodes that carry name, read
@@ -5695,7 +5715,12 @@ func (s *lpgLabelResolver) ResolveLabelCount(name string) (int64, bool) {
 	if !ok {
 		return 0, true
 	}
-	return int64(s.g.NodeIndex().Count(uint32(lid))), true
+	// EXACT or nothing. The cardinality is the raw index's, and the raw index
+	// over-reports while a removal is deferred and under-reports nothing only
+	// because they ARE deferred — but a count has no object to be re-checked
+	// against, so when the bitmap would need filtering the only sound answer is
+	// to decline and let the caller count the filtered scan (rmp #2290).
+	return s.g.Raw().LabelCountExact(lid, s.g.Snapshot())
 }
 
 // ResolveLabelID reports the stable interned id of name, used only to break

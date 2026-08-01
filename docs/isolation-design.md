@@ -49,20 +49,46 @@ and serves every read of the query from it. Justification:
   *nearly free* here and is equivalent to serialisable for this write model.
   (Fekete et al., *Making Snapshot Isolation Serializable*, ACM TODS 2005.)
 
-We therefore target SI; we do **not** add MVCC version chains or SSI machinery,
-which would pay read-path/GC cost for conflict handling we do not need.
+We therefore target SI.
+
+> **SUPERSEDED, 2026-08-01 (rmp #2274, #2288–#2291).** The sentence that stood
+> here said we would *not* add MVCC version chains, "which would pay
+> read-path/GC cost for conflict handling we do not need". The reasoning was
+> about CONFLICT handling and it was right — GoGraph is single-writer, so it
+> needs none. It was applied to the wrong question. The barrier below delivers
+> SI by EXCLUSION, and exclusion is what starved readers: a 95-second
+> analytical read plus one writer collapsed short-read throughput 50× and made
+> a 4.5 µs point query wait 1m36s, because Go's `sync.RWMutex` parks every
+> reader arriving behind a queued writer.
+>
+> Version chains now deliver the same SI without the exclusion. `Engine.Run`
+> takes NO barrier: it pins a start timestamp, registers it with a reclamation
+> horizon, and resolves every store as of that instant. The collapse is 1.89×
+> at one reader and 2.04× at eight, and the worst short-read latency is 4 ms
+> and no longer tracks the duration of the longest concurrent read — which was
+> the unbounded part. The GC cost the original sentence feared is real and is
+> bounded and observable: see `graph/lpg/mvcc_gc.go`.
+>
+> **Writes still take the barrier exclusively.** Moving the fsync out from
+> under it is rmp #2193. The design is recorded in
+> [`design-mvcc-delta-chains.md`](design-mvcc-delta-chains.md); everything
+> below describes the barrier, which remains the WRITE-side mechanism and is
+> still what a read-only explicit transaction does not take.
 
 **Shipped increment — read-only explicit transactions (task #1573).** A Bolt
 `BEGIN` carrying `mode="r"` opens a read-only explicit transaction via
 `cypher.Engine.BeginReadTx`, which acquires **neither** the single-writer
 serialisation **nor** the visibility barrier **nor** a WAL transaction.
 Each `RUN` inside it executes through the normal concurrent read path
-(`Engine.Run`, per-statement `Graph.View` RLock), so read-only transactions run
-concurrently with one another instead of serialising on the writer mutex. The
-isolation this provides is **per-statement read-committed** (a fresh `View`
-snapshot per `RUN`, not one pinned view for the whole transaction), matching
-Neo4j's documented default — a deliberate, weaker-than-full-SI choice for the
-multi-statement read-transaction case. Safety rests on one load-bearing
+(`Engine.Run`), so read-only transactions run concurrently with one another
+instead of serialising on the writer mutex. The isolation this provides is
+**per-statement snapshot isolation** — one pinned start timestamp per `RUN`,
+not one for the whole transaction — matching Neo4j's documented default for the
+multi-statement read-transaction case. Before rmp #2290 it was per-statement
+READ-COMMITTED: each `RUN` took a fresh `Graph.View` RLock, which excluded
+writers for its duration but gave the statement no stable instant of its own.
+The strengthening is a by-product of retiring the barrier, not a separate
+change. Safety rests on one load-bearing
 invariant: a read-only transaction **rejects every writing clause and DDL**
 (`ErrWriteInReadOnlyTx`, surfaced to Bolt as `Neo.ClientError.Request.Invalid`)
 *before* execution — a write on this lock-free path would otherwise run with no

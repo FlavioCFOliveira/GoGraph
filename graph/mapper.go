@@ -271,6 +271,44 @@ func (m *Mapper[N]) Reserve(n int) {
 // same NodeID. The fast path (k already interned) takes a read lock
 // only and performs no heap allocation.
 func (m *Mapper[N]) Intern(k N) NodeID {
+	id, _ := m.InternNew(k)
+	return id
+}
+
+// InternNew is [Mapper.Intern] with the answer to "did this call CREATE the
+// node?".
+//
+// created is true exactly once per key, on the call that first assigns it an
+// id. It exists because a layer above has to record WHEN a node came into
+// existence — MVCC needs a reader from before that instant not to see it — and
+// the alternative, a Lookup before every Intern, puts a second map probe on the
+// hottest write path there is, on behalf of a case that happens once per node.
+//
+// Safe for concurrent use; concurrent callers racing on the same new key see
+// exactly one created=true between them.
+func (m *Mapper[N]) InternNew(k N) (id NodeID, created bool) {
+	return m.InternNewHook(k, nil)
+}
+
+// InternNewHook is [Mapper.InternNew] with a callback invoked, for a newly
+// created id only, WHILE THE SHARD WRITE LOCK IS STILL HELD.
+//
+// # Why the hook and not a call after the return
+//
+// The layer above records when each node came into existence, so a reader from
+// before that instant does not see it. Recording it after InternNew returns
+// leaves a window in which the node is already reachable through [Mapper.Walk]
+// and carries no such record — and a reader in that window treats it as having
+// existed forever, emitting a row for a node that does not exist yet.
+//
+// Publishing the record under this lock closes it: [Mapper.Walk] holds the same
+// shard's read lock, so a reader that can see the id is ordered after the
+// callback that recorded it.
+//
+// onCreate must not re-enter the Mapper. It may take other locks, and the
+// order that establishes — mapper shard, then the caller's own — must not be
+// inverted anywhere.
+func (m *Mapper[N]) InternNewHook(k N, onCreate func(NodeID)) (id NodeID, created bool) {
 	shardIdx := m.shardFor(k)
 	s := &m.shards[shardIdx]
 
@@ -278,9 +316,9 @@ func (m *Mapper[N]) Intern(k N) NodeID {
 	id, ok := s.forward[k]
 	s.mu.RUnlock()
 	if ok {
-		return id
+		return id, false
 	}
-	return m.internSlow(s, shardIdx, k)
+	return m.internSlowHook(s, shardIdx, k, onCreate)
 }
 
 // internSlow is the write-locked slow path of [Mapper.Intern]. It is
@@ -289,16 +327,30 @@ func (m *Mapper[N]) Intern(k N) NodeID {
 // goroutines that both miss the read-locked fast path for the same
 // key.
 func (m *Mapper[N]) internSlow(s *mapperShard[N], shardIdx uint64, k N) NodeID {
+	id, _ := m.internSlowNew(s, shardIdx, k)
+	return id
+}
+
+// internSlowNew is [Mapper.internSlow] reporting whether it created the id.
+func (m *Mapper[N]) internSlowNew(s *mapperShard[N], shardIdx uint64, k N) (NodeID, bool) {
+	return m.internSlowHook(s, shardIdx, k, nil)
+}
+
+// internSlowHook is [Mapper.internSlowNew] with the creation callback.
+func (m *Mapper[N]) internSlowHook(s *mapperShard[N], shardIdx uint64, k N, onCreate func(NodeID)) (NodeID, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if id, ok := s.forward[k]; ok {
-		return id
+		return id, false
 	}
 	idx := uint64(len(s.reverse))
 	id := packNodeID(shardIdx, idx)
 	s.reverse = append(s.reverse, k)
 	s.forward[k] = id
-	return id
+	if onCreate != nil {
+		onCreate(id)
+	}
+	return id, true
 }
 
 // Lookup returns the [NodeID] previously assigned to k and true, or

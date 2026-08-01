@@ -287,16 +287,57 @@ func (v *ReadView[N, W]) OutDegreeMatchingBoundedByID(
 // flags. Topology reads go through the versioned methods above.
 func (v *ReadView[N, W]) AdjList() *adjlist.AdjList[N, W] { return v.g.AdjList() }
 
-// IsTombstoned reports whether id is CURRENTLY deleted. Not versioned: a node
-// deleted after this view's instant already reads as absent.
-func (v *ReadView[N, W]) IsTombstoned(id graph.NodeID) bool { return v.g.IsTombstoned(id) }
+// IsTombstoned reports whether id was ABSENT at this view's instant.
+//
+// It is the negation of [Graph.NodeExistsAsOf], kept under the old name because
+// every call site asks it that way round. It is versioned as of P4c
+// (rmp #2290): a node created after this view started reads as absent, and one
+// deleted after it reads as present — the tombstone bitmap alone can express
+// neither.
+func (v *ReadView[N, W]) IsTombstoned(id graph.NodeID) bool {
+	return !v.g.NodeExistsAsOf(id, v.snap)
+}
 
-// LiveNodeFilter returns the CURRENT liveness predicate. Not versioned; see
-// [ReadView.IsTombstoned].
-func (v *ReadView[N, W]) LiveNodeFilter() func(graph.NodeID) bool { return v.g.LiveNodeFilter() }
+// Exists is [ReadView.IsTombstoned] the way round the question is usually
+// asked.
+func (v *ReadView[N, W]) Exists(id graph.NodeID) bool { return v.g.NodeExistsAsOf(id, v.snap) }
 
-// LiveOrder returns the CURRENT live node count. Not versioned.
+// LiveNodeFilter returns the liveness predicate at this view's instant.
+func (v *ReadView[N, W]) LiveNodeFilter() func(graph.NodeID) bool {
+	if v.snap == nil {
+		return v.g.LiveNodeFilter()
+	}
+	snap := v.snap
+	g := v.g
+	return func(id graph.NodeID) bool { return g.NodeExistsAsOf(id, snap) }
+}
+
+// LiveOrder returns the CURRENT live node count.
+//
+// NOT versioned, and it is the one candidate structure that cannot simply be
+// re-checked: it is a COUNT, so there is no object to verify it against. Its
+// only uses are cardinality estimation, where an estimate is what is wanted,
+// and the O(1) count pushdown — which [ReadView.LiveNodeCountExact] gates.
 func (v *ReadView[N, W]) LiveOrder() uint64 { return v.g.LiveOrder() }
+
+// LiveNodeCountExact returns the live node count and whether it is EXACT for
+// this view's instant.
+//
+// It is exact when no node has been born or has died recently enough for this
+// reader to disagree with the present, which is every read-only workload and
+// every workload whose churn the reclaimer has caught up with. When it is not
+// exact the caller must count by scanning, which is snapshot-correct because
+// the scan itself is.
+//
+// Without this the O(1) count pushdown answers `MATCH (n) RETURN count(*)` from
+// the present while every other clause of the same query answers from the
+// snapshot.
+func (v *ReadView[N, W]) LiveNodeCountExact() (uint64, bool) {
+	if v.snap != nil && v.g.NodeLifeVersionCount() != 0 {
+		return 0, false
+	}
+	return v.g.LiveOrder(), true
+}
 
 // EdgeCreateCount returns the CURRENT per-pair CREATE multiplicity. Not
 // versioned.

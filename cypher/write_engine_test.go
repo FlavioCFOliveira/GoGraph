@@ -270,8 +270,7 @@ func TestRunInTx_RemoveLabels(t *testing.T) {
 		// Label was never registered — test is vacuously OK.
 		return
 	}
-	bm := g.NodeIndex().Intersect(uint32(lid))
-	if !bm.IsEmpty() {
+	if len(labelIndexMembers(g, lid)) != 0 {
 		t.Fatal("expected no nodes with label Employee after REMOVE n:Employee")
 	}
 }
@@ -299,8 +298,7 @@ func TestRunInTx_DeleteNode_Isolated(t *testing.T) {
 	if !ok {
 		return // label never registered — vacuously OK
 	}
-	bm := g.NodeIndex().Intersect(uint32(lid))
-	if !bm.IsEmpty() {
+	if len(labelIndexMembers(g, lid)) != 0 {
 		t.Fatal("expected no Isolated nodes after DELETE")
 	}
 }
@@ -328,8 +326,7 @@ func TestRunInTx_DetachDelete(t *testing.T) {
 	if !ok {
 		return
 	}
-	bm := g.NodeIndex().Intersect(uint32(lid))
-	if !bm.IsEmpty() {
+	if len(labelIndexMembers(g, lid)) != 0 {
 		t.Fatal("expected no Hub nodes after DETACH DELETE")
 	}
 }

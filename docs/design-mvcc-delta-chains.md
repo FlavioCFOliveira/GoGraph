@@ -322,16 +322,88 @@ start until P0's measurement is on the record.**
   barrier still held. Holding it makes the whole refactor a provable identity:
   no writer is concurrent, so every as-of read must return exactly what the
   plain read returns.
-- **P4c — retire the read barrier** from `Engine.Run`, and flip
-  `bench/mtaudit/fairness_soak_test.go` from red to green. This is the phase
-  that closes #2274. It also needs the CANDIDATE-SET discipline: the versioned
-  stores answer what an object contains, not which objects a scan should
-  consider, and the structures that answer that — the label bitmap index, the
-  property indexes, the tombstone set, the node mapper, the count store — are
-  not versioned. A superset is harmless because the reader re-checks the
-  versioned object; a MISSING entry is silent data loss, so removals from them
-  must be deferred until the watermark has passed, which is what PostgreSQL
-  defers to VACUUM and Memgraph to its index GC.
+- **P4c — DONE (rmp #2290). THE READ BARRIER IS GONE and #2274 is closed.**
+
+  | | before | after |
+  |---|---|---|
+  | collapse, 1 reader | 50.2× | **1.89×** |
+  | collapse, 8 readers | 59.0× | **2.04×** |
+  | worst short-read latency, 1 reader | 1m36.2s | **3.973 ms** |
+  | worst short-read latency, 8 readers | 1m36.6s | **4.586 ms** |
+  | a writer alone | free | free |
+
+  Worst-case latency improves by roughly 24 000×, and it no longer tracks the
+  duration of the longest concurrent read — which was the unbounded part.
+  Example 35 reports `readers_starved=0`, a 1.6× collapse and
+  `worst_read_vs_analytics=0.00`.
+
+  What it took beyond retiring the barrier was the CANDIDATE-SET discipline.
+  The versioned stores answer what an object contains, not which objects a scan
+  should consider, and the structures that answer that were not versioned:
+
+  - **Node existence** is now versioned, in PostgreSQL's shape rather than a
+    delta chain — a birth instant and a death instant, because that is what the
+    question is. Kept SPARSE, in per-shard maps holding only nodes born or
+    removed since the oldest reader, reclaimed by the same watermark. Two
+    events inside ONE transaction share a commit record and therefore an
+    instant, so a sequence number breaks the tie; without it a rolled-back
+    DELETE — which tombstones and then revives — made the node vanish for every
+    later reader.
+  - **Label-index removals are DEFERRED** until the watermark passes them. A
+    superset is harmless because the scan re-checks the versioned label bag; a
+    missing entry is a silently lost row. They are also CANCELLABLE, because a
+    rollback re-attaches the labels a failed statement stripped and a surviving
+    deferral would delete the restored entry at the next sweep.
+  - **The O(1) count pushdowns are gated.** A count has no object to be
+    re-checked against, so `LiveNodeCount` and `ResolveLabelCount` report
+    whether they are EXACT for the reader's instant and the caller counts the
+    filtered scan when they are not.
+  - **The horizon registration race is closed**: a reader claims its slot with a
+    hold-everything marker BEFORE it reads the clock, so a sweep landing between
+    the two frees nothing rather than freeing what the reader is about to need.
+
+  **The correctness bug the whole phase turned on**, found by example 27's
+  bank-transfer invariant — `readers observed a torn total 40 time(s)` — and by
+  nothing else: the version-chain readers gated on a GRAPH-LEVEL atomic counter
+  sampled BEFORE the shard lock. Between that sample and the read, a writer can
+  create the first version and apply its change, so the reader takes the raw
+  current value for that node and the pre-write value for the next one, and
+  reports a state that never existed. It is not new — the barrier had made it
+  unobservable, because a reader could not run while a writer held it — and it
+  became frequent the moment reclamation started returning the counter to zero
+  between transactions. Every such gate now reads the SHARD'S OWN side map,
+  under the shard lock, atomically with the value; the same treatment applies to
+  node existence, and the birth record is now written under the mapper's write
+  lock so a node is never reachable before it. A second, unrelated latent bug
+  surfaced the same way: the edge-type filter cache read its entry pointer AFTER
+  unlocking, which could pair a filter with a CSR from a different epoch.
+
+  Two performance defects were found by measurement and one deadlock by the soak
+  itself, and none of them by the short suite:
+
+  - Filtering the label bitmap by re-checking every MEMBER cost 180 µs on a
+    4.7 µs query — a 39× collapse that appeared as soon as any version existed
+    anywhere and persisted after the writer stopped, with THREE live versions.
+    The corrector now visits the SUSPECTS (the keys of the sparse side maps),
+    which is bounded by the churn the reclaimer has not caught up with.
+  - The opportunistic sweep's throttle LATCHED: a sweep that freed nothing
+    recorded the unchanged count, and every later read then skipped forever.
+    A tick cannot latch.
+  - The suspect walk held a shard read lock across a visit that re-acquires it.
+    Go's `sync.RWMutex` is not re-entrant, so a writer arriving in between
+    deadlocked all eight readers at zero CPU for eighteen minutes. It is pinned
+    by a watchdog test that now FAILS in thirty seconds with attribution
+    instead of hanging.
+
+  Measured read cost, interleaved against a clean worktree at the P4b commit:
+  `EngReadCount` unchanged, `EngReadLabel` +3.89 %, `EngReadFilterCount`
+  +8.69 %, `EngReadProject` +8.71 %, `EngReadProjectLargeSerial` +22.13 %,
+  geomean **+8.46 %**. That is what per-statement snapshot isolation costs a
+  read once the gates are safe, against removing a 50× collapse and a 1m36s
+  worst-case latency.
+
+  Writes still take the barrier exclusively; moving the fsync out from under it
+  is P5 (#2193).
 - **P5 — move the fsync outside the commit serialisation** so `SyncGroup`
   coalesces, closing #2193. Acceptance is the write-scaling table in §3 rising
   with writer count instead of staying flat.

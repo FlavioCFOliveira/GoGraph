@@ -53,6 +53,15 @@ import "github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 // against taste.
 const reclaimThreshold = 4096
 
+// reclaimIdleEvery is how many reads pass between opportunistic sweeps while
+// the graph holds any version at all.
+//
+// It bounds the sweep's share of the read path: at 64, a workload that keeps
+// versions permanently alive pays one 64-shard pass per 64 reads, and one that
+// merely churns pays a pass shortly after each write and then nothing, because
+// the sweep drives the count to zero and the gate above stops taking the tick.
+const reclaimIdleEvery = 64
+
 // reclaimIfDue sweeps the version chains when enough churn has accumulated
 // since the last sweep.
 //
@@ -107,11 +116,16 @@ func (g *Graph[N, W]) reclaimAfterDirectWrite() {
 	if !g.mvccArmed {
 		return
 	}
+	if g.stamp.Armed() {
+		// Inside a transaction: this goroutine already holds the barrier, so it
+		// must not try to take it again, and endWrite owns the sweep anyway.
+		// Checked FIRST: an earlier version charged the untracked count before
+		// testing this, so a graph with any untracked history could fall
+		// through to ApplyAtomically from inside the barrier.
+		return
+	}
 	if n := g.stamp.TakeUntracked(); n > 0 {
 		g.reclaimDebt.Add(n)
-	} else if g.stamp.Armed() {
-		// Inside a transaction: its endWrite owns the sweep.
-		return
 	}
 	if g.reclaimDebt.Load() < reclaimThreshold {
 		return
@@ -161,11 +175,22 @@ func (g *Graph[N, W]) reclaimAfterDirectWrite() {
 //
 // Safe for concurrent use.
 func (g *Graph[N, W]) ReclaimIdle() {
-	if !g.mvccArmed {
+	if !g.mvccArmed || g.VersionCount() == 0 {
 		return
 	}
-	n := g.VersionCount()
-	if n == 0 || n == g.lastIdleSweep.Load() {
+	// Throttled by a TICK, not by "has the count changed since I last swept".
+	// That first shape latched: a sweep that freed nothing — which happens
+	// whenever a reader's start timestamp lands just before a commit — recorded
+	// the unchanged count and every later read then skipped forever, leaving
+	// the residue in place for the life of the graph. Measured: three live
+	// versions were enough to keep the bitmap filter armed and hold short-read
+	// throughput at 1 104 op/s against a 215 232 op/s baseline, with the writer
+	// long since stopped.
+	//
+	// A tick cannot latch. It also costs nothing in the state that matters: the
+	// count is zero on a graph nobody is writing, so the guard above returns
+	// before the tick is even taken.
+	if g.idleTicks.Add(1)%reclaimIdleEvery != 0 {
 		return
 	}
 	if !g.sweeping.CompareAndSwap(false, true) {
@@ -173,7 +198,6 @@ func (g *Graph[N, W]) ReclaimIdle() {
 	}
 	defer g.sweeping.Store(false)
 	g.ReclaimNow()
-	g.lastIdleSweep.Store(g.VersionCount())
 }
 
 // ReclaimNow frees every version no active reader can reach, and returns how
@@ -196,7 +220,10 @@ func (g *Graph[N, W]) ReclaimNow() int {
 	if watermark == 0 {
 		return 0
 	}
-	return g.ReclaimVersions(watermark) + g.adj.Reclaim(watermark)
+	return g.ReclaimVersions(watermark) +
+		g.adj.Reclaim(watermark) +
+		g.reclaimNodeLife(watermark) +
+		g.applyDeferredIndexRemovals(watermark)
 }
 
 // VersionCount returns the total number of live version records across every
@@ -211,7 +238,9 @@ func (g *Graph[N, W]) VersionCount() int64 {
 	return g.labelDeltaActive.Load() +
 		g.propDeltaActive.Load() +
 		g.adj.VersionCount() +
-		g.EdgeSideVersionCount()
+		g.EdgeSideVersionCount() +
+		g.nodeLifeActive.Load() +
+		g.idxPendingActive.Load()
 }
 
 // Horizon returns the reader horizon this graph reclaims against.

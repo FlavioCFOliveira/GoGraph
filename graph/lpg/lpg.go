@@ -614,10 +614,23 @@ type Graph[N comparable, W any] struct {
 	// path both take, and safe against readers by the watermark argument — but
 	// two sweeps at once would race on the same chains, so exactly one runs.
 	sweeping atomic.Bool
-	// lastIdleSweep is the version count the previous opportunistic sweep left
-	// behind, so a read does not re-sweep a graph whose residue a long-lived
-	// reader is legitimately holding back. See [Graph.ReclaimIdle].
-	lastIdleSweep atomic.Int64
+	// idleTicks paces the opportunistic sweep a read makes; see
+	// [Graph.ReclaimIdle].
+	idleTicks atomic.Uint64
+	// nodeLifeShards version node EXISTENCE — when each node was created and
+	// when it was removed — so a reader knows which nodes it may see at all,
+	// not merely what they contain. nodeLifeActive is the lock-free gate. See
+	// mvcc_life.go.
+	nodeLifeShards [propMapShards]nodeLifeShard
+	nodeLifeActive atomic.Int64
+	// lifeSeq orders two existence events a commit timestamp cannot separate;
+	// see [lifeStamp].
+	lifeSeq atomic.Uint64
+	// idxDeferred holds label-index removals waiting for the watermark, so a
+	// reader older than the removal still finds the entry; idxPendingActive is
+	// the lock-free gate and the observable backlog. See mvcc_index.go.
+	idxDeferred      deferredIdx
+	idxPendingActive atomic.Int64
 }
 
 // ApplyAtomically runs fn while holding the graph's transaction-visibility
@@ -1098,18 +1111,28 @@ func (g *Graph[N, W]) SetIndexManager(m *index.Manager) { g.idxMgr.store(m) }
 // tombstoned node is never matched by a read clause, so a label can only
 // reach a removed key after AddNode has already revived it.
 func (g *Graph[N, W]) AddNode(n N) error {
-	if err := g.adj.AddNode(n); err != nil {
-		return err
+	// InternNew rather than Intern: MVCC has to know WHEN a node came into
+	// existence, so a reader from before that instant does not see it, and this
+	// is the one call that can tell without a second map probe on every
+	// AddNode. See mvcc_life.go.
+	// The birth is recorded UNDER the mapper's write lock, before the id
+	// becomes reachable through Walk. Recording it afterwards leaves a window
+	// in which a reader finds the node with no birth record and treats it as
+	// having existed forever; see [graph.Mapper.InternNewHook].
+	id, created := g.adj.Mapper().InternNewHook(n, g.noteNodeBorn)
+	if created {
+		if g.tombstoneActive.Load() == 0 {
+			g.reclaimAfterDirectWrite()
+			return nil
+		}
 	}
 	// Fast path: no node has ever been removed, so there is nothing to
-	// revive. This keeps the common AddNode free of the tombstone lock and
-	// the mapper lookup below.
+	// revive. This keeps the common AddNode free of the tombstone lock.
 	if g.tombstoneActive.Load() == 0 {
 		return nil
 	}
-	if id, ok := g.adj.Mapper().Lookup(n); ok {
-		g.revive(id)
-	}
+	g.revive(id)
+	g.reclaimAfterDirectWrite()
 	return nil
 }
 
@@ -1119,12 +1142,22 @@ func (g *Graph[N, W]) AddNode(n N) error {
 // bitmap under tombstoneMu, so it becomes visible atomically to the
 // lock-free IsTombstoned / LiveOrder / TombstonedIDs readers.
 func (g *Graph[N, W]) revive(id graph.NodeID) {
+	revived := false
+	defer func() {
+		// Recorded OUTSIDE the tombstone lock, and after it: noteNodeRevived
+		// takes a shard lock of its own, and taking one under the tombstone
+		// lock would invert the order the reclaimer uses.
+		if revived {
+			g.noteNodeRevived(id)
+		}
+	}()
 	g.tombstoneMu.Lock()
 	if cur := g.tombstones.Load(); cur != nil && cur.Contains(uint64(id)) {
 		next := cur.Clone()
 		next.Remove(uint64(id))
 		g.tombstones.Store(next)
 		g.tombstoneActive.Add(-1)
+		revived = true
 		// Reviving restores the node's arcs to the live topology, so the same
 		// invalidation argument as [Graph.RemoveNode] applies in reverse. Bumping
 		// on BOTH transitions is also what makes the generation a sound cache key:
@@ -1794,6 +1827,10 @@ func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, info *commitInfo) error
 	sh.m[id] = bag
 	sh.mu.Unlock()
 	g.nodeIdx.Add(uint32(lid), id)
+	// Withdraw any pending removal for this entry. Re-attaching a label the
+	// same statement stripped is what a ROLLBACK does, and a surviving deferred
+	// removal would delete the restored entry at the next sweep.
+	g.cancelDeferredIndexRemoval(uint32(lid), id)
 	return nil
 }
 
@@ -1810,9 +1847,20 @@ func (g *Graph[N, W]) RemoveNode(n N) {
 	if !ok {
 		return
 	}
+	died := false
+	defer func() {
+		// Outside the tombstone lock, for the lock-order reason given on
+		// [Graph.revive]. A reader older than this instant must still SEE the
+		// node, and the bitmap alone cannot tell it that.
+		if died {
+			g.noteNodeDied(id)
+			g.reclaimAfterDirectWrite()
+		}
+	}()
 	g.tombstoneMu.Lock()
 	cur := g.tombstones.Load()
 	if cur == nil || !cur.Contains(uint64(id)) {
+		died = true
 		var next *roaring64.Bitmap
 		if cur == nil {
 			next = roaring64.New()
@@ -1857,7 +1905,12 @@ func (g *Graph[N, W]) stripLabelBitmaps(id graph.NodeID) {
 	})
 	sh.mu.RUnlock()
 	for _, lid := range lids {
-		g.nodeIdx.Remove(uint32(lid), id)
+		// DEFERRED while versioning is armed: a reader older than the removal
+		// must still find this node in the label bitmap, or it silently loses a
+		// row. See mvcc_index.go.
+		if !g.deferLabelIndexRemoval(uint32(lid), id) {
+			g.nodeIdx.Remove(uint32(lid), id)
+		}
 	}
 }
 
@@ -2832,7 +2885,10 @@ func (g *Graph[N, W]) removeNodeLabelInfo(n N, name string, info *commitInfo) {
 		}
 	}
 	sh.mu.Unlock()
-	g.nodeIdx.Remove(uint32(lid), id)
+	// Deferred; see stripLabelBitmaps and mvcc_index.go.
+	if !g.deferLabelIndexRemoval(uint32(lid), id) {
+		g.nodeIdx.Remove(uint32(lid), id)
+	}
 }
 
 // HasNodeLabel reports whether n carries the named label.
@@ -2923,11 +2979,12 @@ func (g *Graph[N, W]) ForEachNodeLabelByID(id graph.NodeID, visit func(name stri
 //
 // Safe for concurrent use.
 func (g *Graph[N, W]) ForEachNodeLabelByIDAsOf(id graph.NodeID, snap *Snapshot, visit func(name string)) {
-	bag := g.labelBagFor(id, snap)
-	bag.forEach(func(lid LabelID) {
-		if name, ok := g.reg.Resolve(lid); ok {
-			visit(name)
-		}
+	g.withLabelBag(id, snap, func(bag labelBag) {
+		bag.forEach(func(lid LabelID) {
+			if name, ok := g.reg.Resolve(lid); ok {
+				visit(name)
+			}
+		})
 	})
 }
 

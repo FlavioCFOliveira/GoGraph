@@ -129,8 +129,10 @@ func (t *labelTx[N, W]) commit() uint64 {
 		panic("lpg: labelTx committed or aborted twice")
 	}
 	t.done = true
+	// Allocate, store, publish — in that order; see [mvcc.Clock.ReadTS].
 	ts := t.g.nextCommitTS()
 	t.info.Commit(ts)
+	t.g.mvccClock.PublishCommitTS(ts)
 	return ts
 }
 
@@ -165,7 +167,11 @@ func (g *Graph[N, W]) deltaStamp(info *commitInfo) (*commitInfo, uint64) {
 		return info, 0
 	}
 	if !g.mvccArmed {
-		return nil, g.nextCommitTS()
+		// Unversioned: nothing reads this timestamp back, but publish it anyway
+		// so the two counters cannot drift if the substrate is armed later.
+		ts := g.nextCommitTS()
+		g.mvccClock.PublishCommitTS(ts)
+		return nil, ts
 	}
 	// Through the SHARED stamp, not straight to the clock. Going straight to
 	// the clock produced the right timestamp and lost the accounting: the

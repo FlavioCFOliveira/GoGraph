@@ -470,11 +470,12 @@ func (g *Graph[N, W]) NodePropertiesByIDFunc(id graph.NodeID, visit func(name st
 //
 // Safe for concurrent use.
 func (g *Graph[N, W]) NodePropertiesByIDFuncAsOf(id graph.NodeID, snap *Snapshot, visit func(name string, pv PropertyValue)) {
-	bag := g.propBagFor(id, snap)
-	bag.forEach(func(k PropertyKeyID, v PropertyValue) {
-		if name, ok := g.propKeys().Resolve(k); ok {
-			visit(name, v)
-		}
+	g.withPropBag(id, snap, func(bag propBag) {
+		bag.forEach(func(k PropertyKeyID, v PropertyValue) {
+			if name, ok := g.propKeys().Resolve(k); ok {
+				visit(name, v)
+			}
+		})
 	})
 }
 

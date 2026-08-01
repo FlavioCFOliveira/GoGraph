@@ -95,13 +95,29 @@ func countTxNodesQuery(ctx context.Context, eng *cypher.Engine) (int64, error) {
 	return n, nil
 }
 
-// TestExplicitTx_Isolation_ReadCommitted verifies that the isolation contract
-// after task #1412 is read-committed: concurrent Engine.Run readers block while
-// an ExplicitTx is open and never observe uncommitted writes.
+// TestExplicitTx_Isolation_ReadCommitted verifies the isolation contract of a
+// concurrent reader while an ExplicitTx is open.
+//
+// # The contract CHANGED with MVCC P4c (rmp #2274, #2290), and strengthened
+//
+// It used to be that a reader BLOCKED: Engine.Run took the visibility barrier's
+// read side, an open ExplicitTx held its write side, and the reader waited for
+// Commit and then saw the committed state. That satisfied read-committed by
+// making the reader wait, and it is precisely the mechanism that starved
+// readers — a 95-second analytical read plus one writer collapsed short-read
+// throughput 50×, because Go's RWMutex parks every reader arriving behind a
+// queued writer.
+//
+// A reader now takes a SNAPSHOT and does not wait. It observes the state as of
+// the instant it began, so it still never sees uncommitted work — the guarantee
+// the old test existed to protect — and it now gets the stronger one too: a
+// stable view for its whole duration, rather than whatever the graph happened
+// to hold when the barrier let it through. The subtests below assert both
+// halves, and the liveness that is the point of the change.
 func TestExplicitTx_Isolation_ReadCommitted(t *testing.T) {
 	t.Parallel()
 
-	t.Run("reader_blocks_until_commit", func(t *testing.T) {
+	t.Run("reader_does_not_block_and_sees_no_uncommitted_work", func(t *testing.T) {
 		t.Parallel()
 
 		g := lpg.New[string, float64](adjlist.Config{Directed: true})
@@ -136,36 +152,41 @@ func TestExplicitTx_Isolation_ReadCommitted(t *testing.T) {
 		readerStarted := make(chan struct{})
 
 		go func() {
-			// Signal that this goroutine is about to call Engine.Run. It closes
-			// the channel BEFORE the call so the main goroutine knows the reader
-			// is about to contend on visMu.
 			close(readerStarted)
-			// This call blocks on visMu.RLock until the ExplicitTx releases visMu
-			// via Commit → release → UnlockBarrier.
+			// This no longer waits for anything: the read takes a snapshot and
+			// resolves every store as of it.
 			cnt, err := countTxNodesQuery(context.Background(), eng)
 			readCh <- readResult{count: cnt, err: err}
 		}()
-
-		// Wait for the goroutine to be scheduled, then give it time to reach the
-		// visMu.RLock contention point before proceeding with the commit.
 		<-readerStarted
-		time.Sleep(20 * time.Millisecond)
 
-		if err := tx.Commit(); err != nil {
-			t.Fatalf("Commit: %v", err)
-		}
-
+		// LIVENESS is the point of the change, so it is asserted first and
+		// while the transaction is still OPEN. Before MVCC this select would
+		// have taken the timeout branch every time.
 		select {
 		case rr := <-readCh:
 			if rr.err != nil {
 				t.Fatalf("concurrent Engine.Run: %v", rr.err)
 			}
-			// The reader ran after Commit (it was blocked) and must see the committed node.
-			if rr.count != 1 {
-				t.Errorf("reader observed %d nodes after Commit; want 1", rr.count)
+			// ISOLATION: the transaction has not committed, so its eagerly
+			// applied CREATE must not be visible.
+			if rr.count != 0 {
+				t.Errorf("a reader concurrent with an OPEN transaction observed %d nodes; "+
+					"want 0 — it must not see uncommitted work", rr.count)
 			}
 		case <-time.After(3 * time.Second):
-			t.Fatal("concurrent reader did not complete within 3 s after Commit")
+			t.Fatal("a reader concurrent with an open transaction did not complete within 3 s: " +
+				"it is still blocking on the writer, which is the reader starvation rmp #2274 " +
+				"exists to remove")
+		}
+
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+
+		// And a reader that starts AFTER the commit sees it.
+		if n := countTxNodes(t, eng); n != 1 {
+			t.Errorf("a reader started after Commit observed %d nodes; want 1", n)
 		}
 	})
 

@@ -25,8 +25,14 @@ package lpg
 // O(nodes carrying history), not O(nodes): the sparse side maps ARE the index
 // of what has versions, so a shard with no history costs one nil check.
 
-// ReclaimVersions frees every node-label and node-property version that no
-// reader can reach any more, and returns how many records were released.
+// ReclaimVersions frees every VERSION CHAIN record that no reader can reach any
+// more — node labels, node properties and the per-edge side stores — and
+// returns how many were released.
+//
+// Node EXISTENCE records are deliberately NOT included: they are a pair of
+// instants rather than a value history, they are swept by [Graph.ReclaimNow]
+// alongside the adjacency, and folding them in here would make this function's
+// count mean two different things.
 //
 // watermark is the oldest start timestamp among active readers, from
 // [mvcc.Horizon.Oldest]. Zero means reclaim nothing, which is what the horizon

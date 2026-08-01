@@ -114,18 +114,61 @@ func Visible(ts, startTS, txID uint64) bool {
 // Safe for concurrent use.
 type Clock struct {
 	commit atomic.Uint64
-	txSeq  atomic.Uint64
+	// visible is the highest timestamp every commit at or below which has been
+	// PUBLISHED. It is what a reader starts at, and it is a separate counter
+	// from the allocation one for a reason that is a correctness bug, not an
+	// optimisation — see [Clock.ReadTS].
+	visible atomic.Uint64
+	txSeq   atomic.Uint64
 }
 
 // NextCommitTS allocates the next commit timestamp. Monotonic, never reused.
+//
+// Allocating is NOT publishing: the caller must call [Clock.PublishCommitTS]
+// once the timestamp is stored in the transaction's commit record and its
+// changes are therefore visible.
 func (c *Clock) NextCommitTS() uint64 { return c.commit.Add(1) }
+
+// PublishCommitTS announces that every change committed at ts is now visible.
+//
+// Monotonic: a late publisher never moves the visible instant backwards.
+func (c *Clock) PublishCommitTS(ts uint64) {
+	for {
+		cur := c.visible.Load()
+		if cur >= ts {
+			return
+		}
+		if c.visible.CompareAndSwap(cur, ts) {
+			return
+		}
+	}
+}
 
 // ReadTS returns the timestamp a reader starting now must use.
 //
-// It is the CURRENT value, not the next: a transaction that committed at T is
-// visible to a reader whose start timestamp is T or later, so a reader starting
-// after that commit must observe at least T.
-func (c *Clock) ReadTS() uint64 { return c.commit.Load() }
+// # Why this is the PUBLISHED instant and not the allocated one
+//
+// Committing is two steps: allocate a timestamp, then store it into the shared
+// record. Between them the transaction's changes are still invisible — every
+// reader sees the in-flight transaction id — but the allocation counter has
+// already moved.
+//
+// A reader that started at the allocated-but-unpublished value straddles that
+// commit. It reads one object before the store and undoes the transaction
+// there, reads another after the store and finds the transaction visible
+// (its timestamp now equals the reader's own start timestamp), and reports a
+// state that never existed. Example 27's bank-transfer invariant caught it
+// exactly that way: "readers observed a torn total 40 time(s)". The barrier had
+// been hiding it — a reader could not run while a writer held it — and it
+// surfaced the moment reads stopped taking it (rmp #2290).
+//
+// Returning the published instant closes it: a transaction is either wholly
+// before a reader's start or wholly after it, with no window in between.
+// Publication is in allocation order because commits are serialised by the
+// write barrier, so one counter is enough and no in-progress list is needed —
+// which is what PostgreSQL's snapshot xip_list and Memgraph's
+// commit_log_->OldestActive() exist to supply when commits are NOT serialised.
+func (c *Clock) ReadTS() uint64 { return c.visible.Load() }
 
 // NextTxID allocates a transaction id, drawn from above [TxIDBase] so it can
 // never be mistaken for a commit timestamp.

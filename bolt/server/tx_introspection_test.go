@@ -153,14 +153,28 @@ func TestTxIntrospection_TerminateUnknownID(t *testing.T) {
 	}
 }
 
-// TestTxIntrospection_TerminateResolvesTheReaderStall is acceptance criterion (3)
-// and the point of the whole task: reproduce the audit's outage and END it by
-// operator action, without waiting for any timeout.
+// TestTxIntrospection_TerminateResolvesTheWriterStall is acceptance criterion
+// (3) and the point of the whole task: reproduce the audit's outage and END it
+// by operator action, without waiting for any timeout.
 //
-// Both automatic bounds are set far beyond the test's own patience, so if the
-// reader is served it is because the termination did it and nothing else could
-// have.
-func TestTxIntrospection_TerminateResolvesTheReaderStall(t *testing.T) {
+// # It used to be a READER stall, and that is a deliberate change
+//
+// An idle open transaction held the visibility barrier and every READER waited
+// behind it. MVCC P4c (rmp #2274, #2290) retired the read barrier, so a reader
+// now takes a snapshot and is served immediately — the fixture stopped
+// reproducing anything, which is the outcome the whole programme was for.
+//
+// The stall that REMAINS is the one an operator still needs a remedy for:
+// writes take the barrier exclusively (moving the fsync out from under it is
+// P5, rmp #2193), so a second writer waits for the first to finish. This test
+// now reproduces THAT, and still proves the same thing about termination: with
+// both automatic bounds set far beyond the test's own patience, if the victim
+// is served it is because the termination did it and nothing else could have.
+//
+// The reader half is not lost — it is asserted in the opposite direction, that
+// a reader is served WHILE the offender holds the barrier, so a regression that
+// reinstated the read barrier would fail here.
+func TestTxIntrospection_TerminateResolvesTheWriterStall(t *testing.T) {
 	t.Parallel()
 	srv, addr := startTestServerHandle(t, server.Options{
 		ConnTimeout:      60 * time.Second,
@@ -169,7 +183,7 @@ func TestTxIntrospection_TerminateResolvesTheReaderStall(t *testing.T) {
 	})
 
 	// The offender: BEGIN, one write, then silence. It holds the visibility
-	// barrier, so every reader waits behind it.
+	// barrier exclusively, so every WRITER waits behind it.
 	ab := newBoltTestClient(t, addr)
 	defer ab.close(t)
 	ab.negotiate(t)
@@ -183,8 +197,29 @@ func TestTxIntrospection_TerminateResolvesTheReaderStall(t *testing.T) {
 		t.Fatalf("the listing names %q, want offender", infos[0].Principal)
 	}
 
-	// The victim reads on another connection, on its own goroutine because it is
-	// expected to block until the termination lands.
+	// A READER must be served straight away, barrier or no barrier. This is the
+	// #2274 property asserted where it would be missed if it regressed.
+	freeReader := newBoltTestClient(t, addr)
+	defer freeReader.close(t)
+	freeReader.negotiate(t)
+	freeReader.hello(t)
+	readerDone := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		freeReader.run(t, "MATCH (n) RETURN count(n) AS c", nil)
+		freeReader.pullAll(t)
+		readerDone <- time.Since(start)
+	}()
+	select {
+	case d := <-readerDone:
+		t.Logf("a reader concurrent with the offender was served in %v", d)
+	case <-time.After(10 * time.Second):
+		t.Fatal("a reader was NOT served while an idle write transaction held the barrier: " +
+			"the read barrier is back and rmp #2274 has regressed")
+	}
+
+	// The victim WRITES on another connection, on its own goroutine because it
+	// is expected to block until the termination lands.
 	victim := newBoltTestClient(t, addr)
 	defer victim.close(t)
 	victim.negotiate(t)
@@ -193,16 +228,18 @@ func TestTxIntrospection_TerminateResolvesTheReaderStall(t *testing.T) {
 	served := make(chan time.Duration, 1)
 	go func() {
 		start := time.Now()
-		victim.run(t, "MATCH (n) RETURN count(n) AS c", nil)
+		victim.begin(t)
+		victim.run(t, "CREATE (:Victim {v: 2})", nil)
 		victim.pullAll(t)
+		victim.commit(t)
 		served <- time.Since(start)
 	}()
 
-	// Give the reader time to be genuinely blocked, then intervene.
+	// Give the writer time to be genuinely blocked, then intervene.
 	time.Sleep(200 * time.Millisecond)
 	select {
 	case d := <-served:
-		t.Fatalf("the reader completed in %v without intervention; the fixture is not "+
+		t.Fatalf("the writer completed in %v without intervention; the fixture is not "+
 			"reproducing the stall", d)
 	default:
 	}
@@ -213,13 +250,13 @@ func TestTxIntrospection_TerminateResolvesTheReaderStall(t *testing.T) {
 
 	select {
 	case d := <-served:
-		t.Logf("reader served %v after the BEGIN, released by operator termination "+
+		t.Logf("writer served %v after the BEGIN, released by operator termination "+
 			"(both automatic bounds were 5m)", d)
 		if d > 30*time.Second {
-			t.Fatalf("the reader took %v; the termination did not release the barrier promptly", d)
+			t.Fatalf("the writer took %v; the termination did not release the barrier promptly", d)
 		}
 	case <-time.After(30 * time.Second):
-		t.Fatal("the reader was never served after termination; the barrier was not released")
+		t.Fatal("the writer was never served after termination; the barrier was not released")
 	}
 
 	waitForTransactions(t, srv, 0)

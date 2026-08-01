@@ -127,6 +127,52 @@ func (h *Horizon) Enter(startTS uint64) int {
 	return unregistered
 }
 
+// holdEverything is the slot value a reader takes BEFORE it knows its own start
+// timestamp. It decodes to a start timestamp of zero, which [Horizon.Oldest]
+// reports as a watermark of zero — reclaim nothing.
+const holdEverything = 1
+
+// EnterHolding claims a slot for a reader that has NOT yet read the clock, and
+// returns it for [Horizon.Publish].
+//
+// # The race it closes
+//
+// The obvious sequence is: read the clock, then register. A reclaimer landing
+// between the two computes its watermark from a clock that has already moved
+// past the reader's start timestamp, and frees versions the reader is about to
+// need. The window is nanoseconds and the failure is a wrong answer.
+//
+// Registering FIRST removes it. Between EnterHolding and Publish the slot holds
+// back EVERYTHING, so a reclaimer in that window frees nothing at all; once the
+// timestamp is published the ordinary rule applies. The cost is that a
+// reclaimer racing a starting reader does no work — the right direction, and
+// the window is a single clock read wide.
+//
+// The barrier used to make this unnecessary: a reader under visMu.RLock
+// excluded every writer, and only writers reclaimed. Once reads stop taking the
+// barrier, neither half of that is true.
+func (h *Horizon) EnterHolding() int {
+	start := int(h.next.Add(1) & (horizonSlots - 1))
+	for i := 0; i < horizonSlots; i++ {
+		slot := (start + i) & (horizonSlots - 1)
+		if h.slots[slot].ts.CompareAndSwap(0, holdEverything) {
+			return slot
+		}
+	}
+	h.unreg.Add(1)
+	return unregistered
+}
+
+// Publish announces the start timestamp of a reader that claimed its slot with
+// [Horizon.EnterHolding]. It is a no-op for a reader that got no slot, which is
+// already holding reclamation back through [Horizon.Unregistered].
+func (h *Horizon) Publish(slot int, startTS uint64) {
+	if slot == unregistered {
+		return
+	}
+	h.slots[slot].ts.Store(startTS + 1)
+}
+
 // Leave releases the slot a reader took from [Horizon.Enter].
 //
 // Because a slot is exclusive, clearing it cannot release the watermark on

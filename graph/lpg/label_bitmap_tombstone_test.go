@@ -11,6 +11,8 @@ package lpg
 import (
 	"testing"
 
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
@@ -43,20 +45,20 @@ func TestRemoveNode_StripsLabelBitmap(t *testing.T) {
 	lidEmployee := uint32(g.Registry().Intern("Employee"))
 
 	// Pre-condition: bitmap contains the node.
-	if !g.NodeIndex().Has(lidPerson, id) {
+	if !labelIndexHas(g, uint32(lidPerson), id) {
 		t.Fatal("Person bitmap missing alice before RemoveNode")
 	}
-	if !g.NodeIndex().Has(lidEmployee, id) {
+	if !labelIndexHas(g, uint32(lidEmployee), id) {
 		t.Fatal("Employee bitmap missing alice before RemoveNode")
 	}
 
 	g.RemoveNode("alice")
 
 	// Post-condition: bitmap must NOT contain the node (task #1409).
-	if g.NodeIndex().Has(lidPerson, id) {
+	if labelIndexHas(g, uint32(lidPerson), id) {
 		t.Errorf("Person bitmap still contains alice after RemoveNode")
 	}
-	if g.NodeIndex().Has(lidEmployee, id) {
+	if labelIndexHas(g, uint32(lidEmployee), id) {
 		t.Errorf("Employee bitmap still contains alice after RemoveNode")
 	}
 }
@@ -78,7 +80,7 @@ func TestRemoveNode_StripsLabelBitmap_NoPriorRemoveNodeLabel(t *testing.T) {
 	// RemoveNode directly — no RemoveNodeLabel call first.
 	g.RemoveNode("bob")
 
-	if g.NodeIndex().Has(lid, id) {
+	if labelIndexHas(g, uint32(lid), id) {
 		t.Errorf("Manager bitmap still contains bob after direct RemoveNode (stale entry, task #1409)")
 	}
 }
@@ -102,7 +104,7 @@ func TestRevive_RestoresLabelBitmap(t *testing.T) {
 
 	// RemoveNode (no prior label strip) — strips from bitmap.
 	g.RemoveNode("carol")
-	if g.NodeIndex().Has(lid, id) {
+	if labelIndexHas(g, uint32(lid), id) {
 		t.Fatal("Admin bitmap still contains carol after RemoveNode (pre-condition failed)")
 	}
 
@@ -110,7 +112,7 @@ func TestRevive_RestoresLabelBitmap(t *testing.T) {
 	if err := g.AddNode("carol"); err != nil {
 		t.Fatalf("AddNode (revive): %v", err)
 	}
-	if !g.NodeIndex().Has(lid, id) {
+	if !labelIndexHas(g, uint32(lid), id) {
 		t.Errorf("Admin bitmap missing carol after revive (task #1409)")
 	}
 }
@@ -137,7 +139,7 @@ func TestRevive_ExecutorPath(t *testing.T) {
 	g.RemoveNode("dave")
 
 	// After executor delete: bitmap is empty.
-	if g.NodeIndex().Has(lid, id) {
+	if labelIndexHas(g, uint32(lid), id) {
 		t.Fatal("Dev bitmap contains dave after executor-path delete")
 	}
 
@@ -146,7 +148,7 @@ func TestRevive_ExecutorPath(t *testing.T) {
 		t.Fatalf("AddNode (revive): %v", err)
 	}
 	// Label bag is empty after executor removed Dev → bitmap stays empty.
-	if g.NodeIndex().Has(lid, id) {
+	if labelIndexHas(g, uint32(lid), id) {
 		t.Error("Dev bitmap contains dave after revive with empty label bag")
 	}
 
@@ -154,7 +156,7 @@ func TestRevive_ExecutorPath(t *testing.T) {
 	if err := g.SetNodeLabel("dave", "Dev"); err != nil {
 		t.Fatalf("SetNodeLabel after revive: %v", err)
 	}
-	if !g.NodeIndex().Has(lid, id) {
+	if !labelIndexHas(g, uint32(lid), id) {
 		t.Error("Dev bitmap missing dave after SetNodeLabel post-revive")
 	}
 }
@@ -181,14 +183,14 @@ func TestRemoveNode_MultipleNodes(t *testing.T) {
 	n1id, _ := g.AdjList().Mapper().Lookup("n1")
 	n3id, _ := g.AdjList().Mapper().Lookup("n3")
 
-	if g.NodeIndex().Has(lid, n2id) {
+	if labelIndexHas(g, uint32(lid), n2id) {
 		t.Error("Shared bitmap still contains n2 after RemoveNode")
 	}
 	// Siblings must be unaffected.
-	if !g.NodeIndex().Has(lid, n1id) {
+	if !labelIndexHas(g, uint32(lid), n1id) {
 		t.Error("Shared bitmap lost n1 after unrelated RemoveNode")
 	}
-	if !g.NodeIndex().Has(lid, n3id) {
+	if !labelIndexHas(g, uint32(lid), n3id) {
 		t.Error("Shared bitmap lost n3 after unrelated RemoveNode")
 	}
 }
@@ -225,7 +227,19 @@ func TestRemoveNode_IdempotentBitmap(t *testing.T) {
 
 	id, _ := g.AdjList().Mapper().Lookup("dup")
 	lid := uint32(g.Registry().Intern("X"))
-	if g.NodeIndex().Has(lid, id) {
+	if labelIndexHas(g, uint32(lid), id) {
 		t.Error("X bitmap contains dup after double RemoveNode")
 	}
+}
+
+// labelIndexHas is the DERIVED answer the scan path gets, not the raw bitmap.
+//
+// MVCC P4c (rmp #2290) defers a label-index removal until the reclamation
+// watermark has passed it, so a reader older than the removal still finds the
+// entry and does not silently lose a row. The raw bitmap therefore over-reports
+// between the removal and the sweep; [Graph.LabelBitmapAsOf] is what filters
+// it, and it is what every scan resolves through. These tests are about
+// whether a SCAN sees the node, so they ask the question the scan asks.
+func labelIndexHas(g *Graph[string, float64], lid uint32, id graph.NodeID) bool {
+	return g.LabelBitmapAsOf(LabelID(lid), nil).Contains(uint64(id))
 }

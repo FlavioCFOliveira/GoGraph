@@ -193,29 +193,33 @@ func (sh *nodeLabelShard) pushLabelDelta(id graph.NodeID, action uint8, lid Labe
 // every caller here does.
 func (g *Graph[N, W]) labelBagAsOf(id graph.NodeID, startTS, txID uint64) labelBag {
 	sh := g.nodeLabelShardFor(id)
-	// FAST PATH, and it is shaped rather than merely written. The gate is
-	// checked BEFORE the lock so a graph with no live version does exactly what
-	// a non-MVCC read does plus one uncontended atomic load, and the body holds
-	// no defer: a first version deferred the RUnlock and put the chain walk
-	// inline, which made the function too large to inline and cost 9.06 ns
-	// against a 5.03 ns baseline — an 80 % tax on every label read, paid by
-	// workloads that never write.
-	if g.labelDeltaActive.Load() == 0 {
-		sh.mu.RLock()
-		cur := sh.m[id]
+	// FAST PATH. The gate is the shard's own side map, read UNDER the lock and
+	// therefore atomically with the value — see [Graph.propBagAsOf] for the torn
+	// read a graph-level counter sampled before the lock produced. The body
+	// still holds no defer: a first version deferred the RUnlock and put the
+	// chain walk inline, which made the function too large to inline and cost
+	// 9.06 ns against a 5.03 ns baseline.
+	sh.mu.RLock()
+	cur := sh.m[id]
+	if sh.d == nil {
 		sh.mu.RUnlock()
 		return cur
 	}
-	return g.labelBagAsOfSlow(sh, id, startTS, txID)
+	out := g.labelBagAsOfLocked(sh, id, startTS, txID)
+	sh.mu.RUnlock()
+	return out
 }
 
-// labelBagAsOfSlow reconstructs the version when the graph does hold live
-// deltas. Split out so the fast path above stays small enough to inline.
+// labelBagAsOfLocked is [Graph.labelBagAsOfSlow] with the shard read lock
+// already held by the caller.
 //
-//go:noinline
-func (g *Graph[N, W]) labelBagAsOfSlow(sh *nodeLabelShard, id graph.NodeID, startTS, txID uint64) labelBag {
-	sh.mu.RLock()
-	defer sh.mu.RUnlock()
+// It exists because the returned bag ALIASES the stored one whenever no undo
+// applied, so consuming it after the lock is released is a data race on the
+// bag's backing array — which `-race` caught as a write in labelBag.del racing
+// a read in labelBag.has. Callers that consume the bag rather than copying it
+// out must therefore hold the lock across the consumption, and this is what
+// they resolve through.
+func (g *Graph[N, W]) labelBagAsOfLocked(sh *nodeLabelShard, id graph.NodeID, startTS, txID uint64) labelBag {
 	cur := sh.m[id]
 	if sh.d == nil {
 		return cur

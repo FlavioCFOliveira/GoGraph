@@ -85,7 +85,12 @@ func (g *Graph[N, W]) endWrite() {
 		// nothing to reclaim, and no reason to allocate a commit timestamp.
 		return
 	}
-	info.Commit(g.mvccClock.NextCommitTS())
+	// Allocate, store into the shared record, THEN publish. A reader must never
+	// start at a timestamp whose commit is still between the first two steps;
+	// see [mvcc.Clock.ReadTS] for the torn read that caused.
+	ts := g.mvccClock.NextCommitTS()
+	info.Commit(ts)
+	g.mvccClock.PublishCommitTS(ts)
 	g.reclaimDebt.Add(created)
 	g.reclaimIfDue()
 }

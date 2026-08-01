@@ -118,27 +118,37 @@ func (s *nodePropShard) pushPropDelta(id graph.NodeID, action uint8, key Propert
 
 // propBagAsOf reconstructs the property set of id as it was at startTS.
 //
-// Shaped exactly like [Graph.labelBagAsOf]: the gate is checked before the lock
-// so a graph with no live version pays one uncontended atomic load, and the
-// chain walk lives in a separate function so this one stays inlinable. That
-// shape was worth 1.60× to 1.02× on the label side; it is not decoration.
+// # The gate is checked UNDER the lock, and that is a correctness fix
+//
+// It used to be a graph-level atomic counter read BEFORE the lock, which is
+// fast and wrong. Between that read and the actual read a writer can create the
+// first delta and apply its change, so the reader takes the RAW CURRENT value
+// for this node — and the pre-write value for the next one, whose gate it
+// samples after. The result is a state that never existed. Example 27's
+// bank-transfer invariant reported it as "readers observed a torn total 40
+// time(s)", and it only became frequent once reclamation started returning the
+// counter to zero between transactions (rmp #2290).
+//
+// The shard's own side map is the gate now: nil means this shard holds no
+// history at all, it is a plain field read in the same cache line as the map
+// the read has already touched, and it is sampled ATOMICALLY WITH THE VALUE.
+// A window that cannot be observed cannot tear.
 func (g *Graph[N, W]) propBagAsOf(id graph.NodeID, startTS, txID uint64) propBag {
 	s := g.nodePropShardFor(id)
-	if g.propDeltaActive.Load() == 0 {
-		s.mu.RLock()
-		cur := s.m[id]
+	s.mu.RLock()
+	cur := s.m[id]
+	if s.d == nil {
 		s.mu.RUnlock()
 		return cur
 	}
-	return g.propBagAsOfSlow(s, id, startTS, txID)
+	out := g.propBagAsOfLocked(s, id, startTS, txID)
+	s.mu.RUnlock()
+	return out
 }
 
-// propBagAsOfSlow reconstructs the version when live deltas exist.
-//
-//go:noinline
-func (g *Graph[N, W]) propBagAsOfSlow(s *nodePropShard, id graph.NodeID, startTS, txID uint64) propBag {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+// propBagAsOfLocked is [Graph.propBagAsOfSlow] with the shard read lock already
+// held. See [Graph.labelBagAsOfLocked] for why the distinction matters.
+func (g *Graph[N, W]) propBagAsOfLocked(s *nodePropShard, id graph.NodeID, startTS, txID uint64) propBag {
 	cur := s.m[id]
 	if s.d == nil {
 		return cur

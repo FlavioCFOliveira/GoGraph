@@ -142,7 +142,12 @@ func (w *WriteStamp) Stamp() (*CommitInfo, uint64) {
 			return nil, 0
 		}
 		w.untracked.Add(1)
-		return nil, w.clock.NextCommitTS()
+		// An untransacted write is committed the instant it is made, so its
+		// timestamp is published immediately: there is no record for a reader
+		// to find in flight.
+		ts := w.clock.NextCommitTS()
+		w.clock.PublishCommitTS(ts)
+		return nil, ts
 	}
 	if info == armedPending {
 		if w.clock == nil {
@@ -155,7 +160,9 @@ func (w *WriteStamp) Stamp() (*CommitInfo, uint64) {
 			// The transaction closed underneath an unsynchronised caller. Treat
 			// the write as untransacted rather than stamping it with a record
 			// nobody will publish.
-			return nil, w.clock.NextCommitTS()
+			ts := w.clock.NextCommitTS()
+			w.clock.PublishCommitTS(ts)
+			return nil, ts
 		}
 	}
 	w.count.Add(1)
