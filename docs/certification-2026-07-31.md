@@ -26,6 +26,13 @@ bounded only by the longest concurrent read, a ten-minute analytical query is a 
 read outage, so the module cannot be certified for mixed OLTP-plus-analytics workloads until
 it is fixed.
 
+> **#2274 IS FIXED as of 2026-08-01** (sprint 333, phases P4a/P3c/P4b/P4c). The collapse is
+> 1.89× and 2.04×, and the worst short-read latency is 3.973 ms and 4.586 ms — no longer a
+> function of the analytical query's duration. See §5 for the re-measurement. **This verdict
+> line is left standing as the record of what was true on 2026-07-31**; the envelope in §6
+> that this blocker justified is superseded to the same extent, and a fresh certification
+> against the current head is the next cycle's work, not a claim made here.
+
 Everything else measured green: `make ci` exit 0, coverage 86.9 %, openCypher TCK 3897/3897
 under `-race`, and the store durability suites green.
 
@@ -185,10 +192,25 @@ used an 11.7 ms long read; the stall lasts exactly as long as the long read. The
 calibrates its long read and **fails if it is under 5 seconds** rather than quietly measuring
 nothing.
 
-`bench/mtaudit/fairness_soak_test.go` is **KNOWN RED** and is expected to stay red until
+`bench/mtaudit/fairness_soak_test.go` was **KNOWN RED** and is expected to stay red until
 #2274 phase P4. It is in the soak layer, which `make ci` does not run and which is not a
 release gate — which is also exactly how #2256 stayed red for ~260 sprints, so it is recorded
 here with its rmp id rather than left to be rediscovered.
+
+> **RESOLVED 2026-08-01 (rmp #2290, sprint 333).** `Engine.Run` no longer takes the
+> visibility barrier: it pins a start timestamp, registers it with a reclamation horizon, and
+> resolves every store as of that instant. Re-measured on this same harness:
+>
+> | readers | baseline | + both | collapse | worst short read |
+> |---|---|---|---|---|
+> | 1 | 213 880 op/s | **115 242** | **1.89×** | **3.973 ms** |
+> | 8 | 459 116 op/s | **224 939** | **2.04×** | **4.586 ms** |
+>
+> The latency figure is the one that mattered and it improves by roughly 24 000×; more to the
+> point, it no longer tracks the duration of the longest concurrent read, so the
+> amplification is no longer unbounded. A writer alone is free again. The soak gate PASSES
+> and example 35 reports `readers_starved=0`. Writes still take the barrier exclusively —
+> that is #2193, and it is a write-throughput ceiling rather than a read outage.
 
 ### Prior art, and a corrected conclusion
 
@@ -198,7 +220,8 @@ Read from source at `master`, 2026-07-31:
 |---|---|---|---|
 | **Neo4j** | none — reads take no locks | none global; per-node/relationship (Forseti) | n/a |
 | **Memgraph** | `main_lock_` **shared** | `main_lock_` **shared** (`WRITE`) | `UNIQUE` only — index creation |
-| **GoGraph** | `visMu.RLock()` | `visMu.Lock()` — **exclusive** | **every write** |
+| **GoGraph**, 2026-07-31 | `visMu.RLock()` | `visMu.Lock()` — **exclusive** | **every write** |
+| **GoGraph**, 2026-08-01 | **none** — a snapshot, no lock | `visMu.Lock()` — **exclusive** | writes only; readers are not admitted to the queue at all |
 
 Memgraph's lock *is* writer-preferring — `can_acquire<READ>()` requires
 `unique_pending_count == 0`, the same rule Go's `RWMutex` applies. **It does not starve
@@ -215,6 +238,12 @@ whole-graph-snapshot model. Memgraph's `Delta` records **one modification**, is 
 map anywhere. The delta-chain design has never been measured in GoGraph, so #2051 is not
 evidence against it. Sprint 330 / #2275 is a P0 spike whose only deliverable is that
 measurement, on one structure, before any later phase is authorised.
+
+> **The spike confirmed it and the programme shipped** (sprint 333). Per-modification cost is
+> 32 B and one allocation, flat in graph size. GoGraph's read path is now closer to Neo4j's
+> row in the table above than to its own: a read takes no lock on the graph at all. Its
+> ordinary WRITE still takes the exclusive mode, which is the one row where it remains
+> unlike both incumbents, and #2193 is that work.
 
 ## 6. The certified envelope
 

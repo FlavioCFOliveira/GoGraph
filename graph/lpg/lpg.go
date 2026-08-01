@@ -544,6 +544,12 @@ type Graph[N comparable, W any] struct {
 	validator atomicValidator
 
 	// visMu is the transaction-visibility barrier (audit gap F3,
+	// docs/isolation-design.md). Since rmp #2290 it is a WRITE-side mechanism:
+	// [Engine.Run] does not take it, and a read gets its consistency from a
+	// snapshot instead. A writer still holds it exclusively for the whole apply,
+	// which is what makes the write path single-writer and what lets the
+	// adjacency's commit window and the shared commit record use plain fields.
+	//
 	// docs/isolation-design.md). A writer applying a multi-op transaction
 	// holds visMu via [Graph.ApplyAtomically] for the whole apply, so the
 	// transaction's writes across every substructure become observable to
@@ -815,7 +821,25 @@ func (g *Graph[N, W]) ApplyInsideLocked(fn func() error) error {
 	return fn()
 }
 
-// View runs fn while holding the graph's transaction-visibility read lock,
+// View runs fn while holding the graph's transaction-visibility read lock.
+//
+// # It is NO LONGER how the query engine reads (rmp #2274, #2290)
+//
+// [Engine.Run] used to bracket every query in this, which gave it a consistent
+// view by EXCLUDING writers — and that exclusion is what starved readers: a
+// write takes the same barrier exclusively, Go's sync.RWMutex prefers a waiting
+// writer, and every reader arriving behind one parked for as long as the
+// longest in-flight read. A query now takes a SNAPSHOT ([Graph.BeginRead]) and
+// no lock at all.
+//
+// This remains the right primitive for a caller that needs a consistent view of
+// structures MVCC does not version — the raw label index, the count store, the
+// mapper — or that reads the graph through accessors with no as-of form. It is
+// still what the checkpointer and the statistics builder use. Nothing about it
+// changed; what changed is that it is no longer on the query hot path.
+//
+// The original description follows.
+//
 // so fn observes a consistent snapshot of the graph in which no in-flight
 // transaction is partially applied: any transaction committed via
 // [Graph.ApplyAtomically] is visible to fn either entirely or not at all,

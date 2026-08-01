@@ -44,39 +44,39 @@ package cypher
 // back alongside it. Commit fsyncs the WAL once, commits the index buffer, and
 // discards the undo log.
 //
-// # Isolation scope (read-committed)
+// # Isolation scope (snapshot isolation for readers)
 //
 // [Engine.BeginTx] acquires the graph's transaction-visibility write lock
 // ([lpg.Graph.LockBarrier]) for the whole lifetime of the transaction — from BEGIN
-// until COMMIT or ROLLBACK. While the lock is held, concurrent [lpg.Graph.View]
-// and [Engine.Run] readers block entirely rather than observing uncommitted writes,
-// so the transaction provides READ-COMMITTED isolation from the readers' perspective:
-// a reader either observes the state before the transaction began (while the tx is
-// open) or the fully committed state after it ends. Writes within the transaction
-// itself (across multiple [ExplicitTx.Exec] calls) are visible to the subsequent
-// statements in the same transaction because they share the live in-memory graph.
-// (task #1412, isolation option b)
+// until COMMIT or ROLLBACK. That excludes other WRITERS, and nothing else: since
+// rmp #2290 a concurrent [Engine.Run] reader does not take the barrier at all. It
+// pins a start timestamp and resolves every store as of that instant, so it
+// observes the state before this transaction began, in full, for its whole
+// duration — and is not delayed by it. Writes within the transaction itself
+// (across multiple [ExplicitTx.Exec] calls) are visible to the subsequent
+// statements in the same transaction because they share the live in-memory graph
+// and read it with no snapshot. (task #1412, isolation option b; strengthened by
+// rmp #2290.)
 //
-// # Operational contract: a write transaction blocks all transactional readers
+// # Operational contract: a write transaction blocks other WRITERS
 //
 // Because [Engine.BeginTx] holds the engine-wide visibility barrier
 // ([lpg.Graph.LockBarrier], an exclusive lock) for the ENTIRE lifetime of the
-// transaction, every concurrent transactional read — any [lpg.Graph.View] or
-// [Engine.Run] taking the barrier's read lock — is blocked for as long as the
-// write transaction stays open. That window spans not just the statements'
-// execution but also the client network round-trips and think-time BETWEEN
-// BEGIN, each RUN/PULL, and COMMIT. A single slow or idle-but-open write
-// transaction therefore serialises every reader on the engine (head-of-line
-// blocking), so a long-held write transaction can dominate reader tail latency.
+// transaction, every concurrent WRITE is blocked for as long as it stays open.
+// That window spans not just the statements' execution but also the client
+// network round-trips and think-time BETWEEN BEGIN, each RUN/PULL, and COMMIT.
 //
-// Callers must keep write transactions SHORT and must not hold one open across
-// user or network think-time. Prefer autocommit for single-statement writes.
-// For read-only workloads use [Engine.BeginReadTx], which takes neither the
-// writer serialisation nor the visibility barrier and so never blocks — and is
-// never blocked by — readers; the count fast path is likewise barrier-free.
-// This is an inherent property of the single-writer/read-committed isolation
-// design, not a defect; removing it is the deferred copy-on-write snapshot epic
-// (#1671). The reader tail under a held write transaction is characterised by
+// It no longer blocks READERS. It used to, and that was the module's worst
+// availability defect: a long read plus one writer collapsed short-read
+// throughput 50× and gave a 4.5 µs point query a 1m36s worst-case latency,
+// because Go's sync.RWMutex parks every reader arriving behind a queued writer
+// (rmp #2274). MVCC removed it — the same measurement now reads 1.89× and
+// 3.973 ms.
+//
+// Callers should still keep write transactions SHORT and not hold one open
+// across user or network think-time, because a held one still serialises every
+// other WRITER. Prefer autocommit for single-statement writes. The reader tail
+// under a held write transaction is characterised by
 // BenchmarkReaderLatencyUnderHeldWriteTx.
 //
 // # Concurrency contract
@@ -154,9 +154,10 @@ func (e *ErrStatementPipeline) Unwrap() error { return e.Err }
 // concurrency contract. In brief: writes accumulate and become durable together
 // on Commit (WAL-backed) or unwind together on Rollback; the handle holds both
 // the engine's writer serialisation and the graph's transaction-visibility write
-// lock (visMu) for its whole lifetime — write-write Isolation for writers, and
-// read-committed Isolation for concurrent readers (which block until the
-// transaction ends); it is NOT safe for concurrent use by multiple goroutines.
+// lock (visMu) for its whole lifetime — write-write Isolation for writers; a
+// concurrent reader takes no barrier and observes snapshot isolation against
+// the state before this transaction began, without waiting for it (rmp #2290);
+// it is NOT safe for concurrent use by multiple goroutines.
 type ExplicitTx struct {
 	eng *Engine
 
@@ -218,10 +219,11 @@ type ExplicitTx struct {
 	// unlockWriter is a no-op and barrierHeld is false. Each [ExplicitTx.Exec]
 	// rejects any writing/DDL statement with [ErrWriteInReadOnlyTx] before
 	// execution and routes a read through the engine's concurrent read path
-	// ([Engine.Run]), which takes its own per-statement [lpg.Graph.View]
-	// snapshot — so reads observe read-committed isolation across statements and
-	// never block (or are blocked by) other readers or writers. Commit and
-	// Rollback on a read-only handle are teardown-only no-ops.
+	// ([Engine.Run]), which pins its own per-statement snapshot — so reads
+	// observe per-statement SNAPSHOT isolation (a stable instant within a
+	// statement, a fresh one between statements) and never block, or are
+	// blocked by, other readers or writers. Commit and Rollback on a read-only
+	// handle are teardown-only no-ops.
 	readOnly bool
 
 	// barrierHeld is true when BeginTx has acquired the graph's
@@ -268,8 +270,9 @@ type ExplicitTx struct {
 // and what is done instead.
 //
 // See exectx.go for the full transaction and concurrency contract, including the
-// read-committed isolation scope: concurrent readers block while this transaction
-// is open and observe only the committed state once it ends (task #1412).
+// isolation scope: concurrent readers do NOT block while this transaction is
+// open, and observe the state before it began until it commits (task #1412,
+// strengthened by rmp #2290).
 func (e *Engine) BeginTx(ctx context.Context) (*ExplicitTx, error) {
 	defer cmetrics.Time("cypher.BeginTx").Stop()
 	if err := checkContext(ctx); err != nil {
@@ -413,8 +416,9 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 	// Read-only transaction: reject any writing/DDL statement BEFORE execution
 	// (no writer lock, no barrier, no WAL backs this handle), and route every
 	// permitted read through the engine's concurrent read path so it takes its
-	// own per-statement View snapshot (read-committed across statements). This
-	// path never touches buf/undo/walTx (all nil) or the visibility barrier.
+	// own per-statement snapshot (snapshot isolation within a statement, a fresh
+	// instant between statements). This path never touches buf/undo/walTx (all
+	// nil) or the visibility barrier.
 	if tx.readOnly {
 		if err := checkContext(tx.ctx); err != nil {
 			return nil, err

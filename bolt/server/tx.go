@@ -38,12 +38,14 @@ type Tx struct {
 	//     engine's writer serialisation and the visibility barrier from BEGIN
 	//     until COMMIT/ROLLBACK, so concurrent writers serialise behind it and
 	//     concurrent readers observe only committed state (write-write isolation
-	//     for writers, read-committed for readers).
+	//     for writers; a concurrent reader takes no barrier and sees snapshot
+	//     isolation against the pre-transaction state, without waiting).
 	//
 	//   - "r" opens a read-only transaction via cypher.Engine.BeginReadTx: it
 	//     acquires no writer lock, no barrier, and no WAL transaction, so it
 	//     never serialises behind or blocks a concurrent writer. Each RUN takes
-	//     its own per-statement View snapshot (read-committed across statements);
+	//     its own per-statement snapshot (snapshot isolation within a statement,
+	//     a fresh instant between statements);
 	//     any writing/DDL RUN is refused with cypher.ErrWriteInReadOnlyTx before
 	//     execution. Commit and Rollback are teardown-only no-ops.
 	//
