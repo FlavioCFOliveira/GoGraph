@@ -150,6 +150,39 @@ func TestCSRPairBuild_EdgeBetweenExistingNodes(t *testing.T) {
 	}
 }
 
+// TestCSRPairBuild_EdgeDeletedAfterSnapshot is the DELETE direction, and it is
+// the one an add-only test suite silently omits.
+//
+// Visibility has to hold both ways round: an arc removed after a read began was
+// present at that read's instant and must stay present for it. A build that
+// resolved the present would drop it, which is the same class of defect as
+// showing an arc added after the snapshot, and it fails on the opposite input —
+// so neither test substitutes for the other.
+func TestCSRPairBuild_EdgeDeletedAfterSnapshot(t *testing.T) {
+	t.Parallel()
+	_, g, run := snapCacheEngine(t)
+
+	old := g.BeginRead()
+	if old == nil {
+		t.Fatal("BeginRead returned nil: MVCC is disarmed, so this test proves nothing")
+	}
+	defer g.EndRead(old)
+
+	// Delete one of the five arcs. Both endpoints survive, so this isolates arc
+	// removal from node removal.
+	run(`MATCH (:N {key:'a'})-[r:R]->(:N {key:'b0'}) DELETE r`)
+
+	oldFwd, _ := csrPairFromGraph(g.ReadAt(old))
+	nowFwd, _ := csrPairFromGraph(g.ReadAt(nil))
+	if got := nowFwd.Size(); got != 4 {
+		t.Fatalf("pair at the CURRENT instant has %d arcs, want 4: the fixture is wrong", got)
+	}
+	if got := oldFwd.Size(); got != 5 {
+		t.Errorf("pair for the OLD snapshot has %d arcs, want 5: an arc that existed at "+
+			"this read's instant was removed from under it", got)
+	}
+}
+
 // TestCSRPairCache_NewReaderMustNotPoisonOldSnapshot is the mirror direction,
 // and it fails for the same missing key rather than for a second cause: the
 // current reader populates the entry first, and the old snapshot is then served
