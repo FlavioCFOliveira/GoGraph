@@ -39,6 +39,8 @@ func (p *planCacheEvictionProbe) IncCounter(name string, delta uint64) {
 }
 func (p *planCacheEvictionProbe) ObserveLatency(string, time.Duration) {}
 
+func (p *planCacheEvictionProbe) SetGauge(string, float64) {}
+
 // thrashQuery returns a syntactically valid Cypher query that is unique per
 // (goroutineID, index) pair. The WHERE clause uses a literal integer so each
 // text is different and occupies its own cache slot.

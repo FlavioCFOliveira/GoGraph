@@ -39,6 +39,8 @@ func (p *cacheProbe) IncCounter(name string, delta uint64) {
 
 func (p *cacheProbe) ObserveLatency(string, time.Duration) {}
 
+func (p *cacheProbe) SetGauge(string, float64) {}
+
 // withCacheProbe installs a fresh cacheProbe, runs fn, restores the
 // default no-op backend, then returns the probe for inspection.
 func withCacheProbe(t *testing.T, fn func()) *cacheProbe {

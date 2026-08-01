@@ -59,6 +59,8 @@ func (p *serverMetricsProbe) IncCounter(name string, delta uint64) {
 
 func (p *serverMetricsProbe) ObserveLatency(string, time.Duration) {}
 
+func (p *serverMetricsProbe) SetGauge(string, float64) {}
+
 // get returns the current value of a counter (0 if never emitted).
 func (p *serverMetricsProbe) get(name string) uint64 {
 	p.mu.Lock()

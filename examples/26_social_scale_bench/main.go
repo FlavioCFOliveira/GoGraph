@@ -1535,6 +1535,8 @@ func (c *colBackend) IncCounter(name string, delta uint64) {
 }
 func (c *colBackend) ObserveLatency(string, time.Duration) {}
 
+func (c *colBackend) SetGauge(string, float64) {}
+
 // columnarExercise builds a bounded social sub-graph and drives three
 // representative analytic queries that each engage one of the engine's columnar
 // (chunk-at-a-time) physical operators, measuring the allocation win each delivers
@@ -2420,6 +2422,8 @@ func (b *cyclicBackend) IncCounter(name string, delta uint64) {
 }
 
 func (b *cyclicBackend) ObserveLatency(string, time.Duration) {}
+
+func (b *cyclicBackend) SetGauge(string, float64) {}
 
 const (
 	// cyclicScaleSmall and cyclicScaleLarge are the two user counts the exercise runs,

@@ -71,6 +71,10 @@ func (b *recordingBackend) IncCounter(name string, delta uint64) {
 // ObserveLatency implements [metrics.Backend]: it counts the observation (and
 // sums the duration, retained for completeness) so the oracle can read an
 // invocation count for a wired symbol.
+// SetGauge implements metrics.Backend. The oracle compares COUNTS, and a gauge
+// is a level rather than an event, so there is nothing here to record.
+func (b *recordingBackend) SetGauge(string, float64) {}
+
 func (b *recordingBackend) ObserveLatency(name string, d time.Duration) {
 	b.mu.Lock()
 	b.latencyN[name]++

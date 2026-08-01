@@ -30,6 +30,7 @@
 //
 //	func (b *myBackend) IncCounter(name string, delta uint64)         { /* ... */ }
 //	func (b *myBackend) ObserveLatency(name string, d time.Duration)  { /* ... */ }
+//	func (b *myBackend) SetGauge(name string, v float64)              { /* ... */ }
 //
 //	metrics.SetBackend(&myBackend{})
 //

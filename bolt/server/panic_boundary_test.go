@@ -46,6 +46,8 @@ func (p *boltPanicProbe) IncCounter(name string, delta uint64) {
 
 func (p *boltPanicProbe) ObserveLatency(string, time.Duration) {}
 
+func (p *boltPanicProbe) SetGauge(string, float64) {}
+
 // TestBoltServer_RecoversConnectionHandlerPanic verifies that a recoverable
 // panic raised while handling one connection (here, from the auth handler) is
 // recovered inside the connection goroutine: the test process survives, the

@@ -57,6 +57,8 @@ func (c *countingBackend) IncCounter(name string, delta uint64) {
 }
 func (c *countingBackend) ObserveLatency(string, time.Duration) {}
 
+func (c *countingBackend) SetGauge(string, float64) {}
+
 // mixedFilterGraph builds a graph whose one "v" property spans every kind the
 // columnar filter must handle: integers around the small-int cache boundary and
 // int64 extremes, floats incl. NaN/±Inf/±0, strings incl. empty/unicode/a

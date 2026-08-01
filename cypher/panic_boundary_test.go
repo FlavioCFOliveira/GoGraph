@@ -66,6 +66,8 @@ func (p *panicProbe) IncCounter(name string, delta uint64) {
 
 func (p *panicProbe) ObserveLatency(string, time.Duration) {}
 
+func (p *panicProbe) SetGauge(string, float64) {}
+
 // withPanicProbe installs a fresh panicProbe, runs fn, restores the default
 // no-op backend, then returns the probe for inspection.
 func withPanicProbe(t *testing.T, fn func()) *panicProbe {

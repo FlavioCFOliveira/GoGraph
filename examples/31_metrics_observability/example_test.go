@@ -149,6 +149,8 @@ type recordingBackend struct {
 func (r *recordingBackend) IncCounter(string, uint64)            { r.n++ }
 func (r *recordingBackend) ObserveLatency(string, time.Duration) { r.n++ }
 
+func (r *recordingBackend) SetGauge(string, float64) {}
+
 // TestRestoresBackend confirms run installs its own registry rather than
 // routing to a pre-installed backend, and restores the no-op default on
 // exit so no example-owned global state is left behind. A sentinel backend

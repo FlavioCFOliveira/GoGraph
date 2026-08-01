@@ -105,6 +105,8 @@ func (p *engageCounter) IncCounter(name string, delta uint64) {
 }
 func (p *engageCounter) ObserveLatency(string, time.Duration) {}
 
+func (p *engageCounter) SetGauge(string, float64) {}
+
 // timeQuery returns the median wall time of runs executions of q, after a warm-up.
 // A median rather than a mean, so one scheduler hiccup cannot move the fit.
 func timeQuery(t *testing.T, eng *cypher.Engine, q string, runs int) float64 {

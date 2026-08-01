@@ -41,6 +41,16 @@ type Backend interface {
 	IncCounter(name string, delta uint64)
 	// ObserveLatency records a single latency sample under name.
 	ObserveLatency(name string, d time.Duration)
+	// SetGauge records the CURRENT value of a quantity that can go down as
+	// well as up.
+	//
+	// A counter cannot express one: the module's bounded-resources mandate asks
+	// that every cache, pool and queue surface its UTILISATION, and utilisation
+	// falls when the resource is released. MVCC version memory is the case that
+	// forced it — the number of live version records rises with write churn and
+	// falls when the reclaimer sweeps, and a monotonic counter can describe
+	// neither the level nor the bound.
+	SetGauge(name string, v float64)
 }
 
 // noopBackend ignores every event. It is the default until
@@ -49,6 +59,7 @@ type noopBackend struct{}
 
 func (noopBackend) IncCounter(string, uint64)            {}
 func (noopBackend) ObserveLatency(string, time.Duration) {}
+func (noopBackend) SetGauge(string, float64)             {}
 
 // backendPtr is an atomic.Pointer wrapping a [Backend]; readers
 // snap the current pointer on every event so backend swaps are
@@ -92,6 +103,13 @@ func SetBackend(b Backend) {
 // backend.
 func IncCounter(name string, delta uint64) {
 	current().IncCounter(name, delta)
+}
+
+// SetGauge records the current value of name on the current backend.
+//
+// Safe for concurrent use; a no-op until a backend is installed.
+func SetGauge(name string, v float64) {
+	current().SetGauge(name, v)
 }
 
 // ObserveLatency records a latency sample on the current backend.

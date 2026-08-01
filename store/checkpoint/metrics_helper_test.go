@@ -35,6 +35,8 @@ func (c *countingBackend) IncCounter(name string, delta uint64) {
 	c.counter[name] += delta
 }
 
+func (c *countingBackend) SetGauge(string, float64) {}
+
 func (c *countingBackend) ObserveLatency(name string, d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

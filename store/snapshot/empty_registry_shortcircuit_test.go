@@ -89,6 +89,8 @@ func (p *skipProbe) IncCounter(name string, delta uint64) {
 }
 func (p *skipProbe) ObserveLatency(string, time.Duration) {}
 
+func (p *skipProbe) SetGauge(string, float64) {}
+
 // withSkipProbe installs a metrics backend for the duration of fn.
 func withSkipProbe(fn func()) *skipProbe {
 	p := &skipProbe{}

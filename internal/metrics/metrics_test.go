@@ -14,6 +14,8 @@ type recordingBackend struct {
 	latency map[string][]time.Duration
 }
 
+func (r *recordingBackend) SetGauge(string, float64) {}
+
 func newRecording() *recordingBackend {
 	return &recordingBackend{
 		count:   map[string]uint64{},

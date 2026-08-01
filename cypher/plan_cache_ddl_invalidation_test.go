@@ -52,6 +52,8 @@ func (p *invalidationProbe) IncCounter(name string, delta uint64) {
 
 func (p *invalidationProbe) ObserveLatency(string, time.Duration) {}
 
+func (p *invalidationProbe) SetGauge(string, float64) {}
+
 // installInvalidationProbe swaps in a fresh probe and registers cleanup
 // to restore the no-op backend.
 func installInvalidationProbe(t *testing.T) *invalidationProbe {

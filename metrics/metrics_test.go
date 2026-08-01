@@ -22,6 +22,8 @@ type backendFunc struct {
 func (f backendFunc) IncCounter(name string, delta uint64)        { f.incCounter(name, delta) }
 func (f backendFunc) ObserveLatency(name string, d time.Duration) { f.observeLatency(name, d) }
 
+func (f backendFunc) SetGauge(string, float64) {}
+
 // TestSetBackendRoundTrip verifies that a custom Backend wired via
 // SetBackend actually receives events.
 func TestSetBackendRoundTrip(t *testing.T) {

@@ -75,6 +75,8 @@ func (c *captureBackend) IncCounter(name string, delta uint64) {
 
 func (c *captureBackend) ObserveLatency(string, time.Duration) {}
 
+func (c *captureBackend) SetGauge(string, float64) {}
+
 // buildInterruptedPublishState commits "pre" data, checkpoints it (the
 // WAL prefix is truncated, so the pre data lives ONLY in the snapshot),
 // commits WAL-only "post" data, then stages the exact interrupted-publish

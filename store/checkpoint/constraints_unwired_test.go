@@ -52,6 +52,8 @@ func (c *countingMetrics) IncCounter(name string, delta uint64) {
 	c.mu.Unlock()
 }
 func (c *countingMetrics) ObserveLatency(string, time.Duration) {}
+
+func (c *countingMetrics) SetGauge(string, float64) {}
 func (c *countingMetrics) count(name string) uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()

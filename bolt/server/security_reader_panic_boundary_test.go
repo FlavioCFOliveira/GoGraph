@@ -41,6 +41,8 @@ func (p *readerPanicProbe) IncCounter(name string, delta uint64) {
 
 func (p *readerPanicProbe) ObserveLatency(string, time.Duration) {}
 
+func (p *readerPanicProbe) SetGauge(string, float64) {}
+
 // TestBoltServer_RecoversReaderGoroutinePanic verifies that a recoverable panic
 // raised on the per-connection READER goroutine is recovered inside that
 // goroutine: the test process survives, the connection is closed, and the

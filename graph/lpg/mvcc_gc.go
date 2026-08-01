@@ -83,6 +83,7 @@ func (g *Graph[N, W]) reclaimIfDue() {
 	}
 	defer g.sweeping.Store(false)
 	g.ReclaimNow()
+	g.publishMVCCMetrics()
 }
 
 // reclaimAfterDirectWrite sweeps when a DIRECT Go-API mutation — one made
@@ -198,6 +199,7 @@ func (g *Graph[N, W]) ReclaimIdle() {
 	}
 	defer g.sweeping.Store(false)
 	g.ReclaimNow()
+	g.publishMVCCMetrics()
 }
 
 // ReclaimNow frees every version no active reader can reach, and returns how

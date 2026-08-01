@@ -51,6 +51,8 @@ func (c *countingBackend) IncCounter(name string, delta uint64) {
 	c.mu.Unlock()
 }
 
+func (c *countingBackend) SetGauge(string, float64) {}
+
 func (c *countingBackend) ObserveLatency(name string, d time.Duration) {
 	c.mu.Lock()
 	c.latency[name] = append(c.latency[name], d)

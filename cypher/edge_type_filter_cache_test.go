@@ -59,6 +59,8 @@ func (p *edgeTypeFilterCacheProbe) IncCounter(name string, delta uint64) {
 
 func (p *edgeTypeFilterCacheProbe) ObserveLatency(string, time.Duration) {}
 
+func (p *edgeTypeFilterCacheProbe) SetGauge(string, float64) {}
+
 // withEdgeTypeFilterCacheProbe installs a fresh probe, runs fn, restores the
 // default no-op backend, then returns the probe for inspection.
 func withEdgeTypeFilterCacheProbe(t *testing.T, fn func()) *edgeTypeFilterCacheProbe {

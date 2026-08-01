@@ -42,6 +42,8 @@ func (p *countMetricProbe) IncCounter(name string, delta uint64) {
 	p.mu.Unlock()
 }
 
+func (p *countMetricProbe) SetGauge(string, float64) {}
+
 func (p *countMetricProbe) ObserveLatency(name string, _ time.Duration) {
 	if !strings.HasPrefix(name, "cypher.countstore.") {
 		return

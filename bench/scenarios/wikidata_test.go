@@ -54,6 +54,8 @@ func (p *cacheHitProbe) IncCounter(name string, delta uint64) {
 
 func (p *cacheHitProbe) ObserveLatency(string, time.Duration) {}
 
+func (p *cacheHitProbe) SetGauge(string, float64) {}
+
 // TestWikidata_VarlenMatch_Nightly builds a synthetic Wikidata-like knowledge
 // graph and exercises variable-length MATCH with plan-cache verification.
 //

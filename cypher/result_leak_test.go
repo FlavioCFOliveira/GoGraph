@@ -28,6 +28,8 @@ func (p *leakProbe) IncCounter(name string, delta uint64) {
 
 func (p *leakProbe) ObserveLatency(string, time.Duration) {}
 
+func (p *leakProbe) SetGauge(string, float64) {}
+
 // withLeakProbe installs a fresh leakProbe, runs fn, then restores
 // the default (no-op) backend. It returns the probe so the test can
 // inspect counts after fn returns.

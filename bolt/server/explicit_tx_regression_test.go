@@ -111,6 +111,8 @@ func (b *leakCountingBackend) IncCounter(name string, delta uint64) {
 }
 func (b *leakCountingBackend) ObserveLatency(string, time.Duration) {}
 
+func (b *leakCountingBackend) SetGauge(string, float64) {}
+
 // quietLogger returns a slog.Logger that discards output, used to silence the
 // panic stack-trace logs the engine/connection boundaries emit during the
 // deliberate-panic tests.

@@ -38,6 +38,8 @@ func (p *engageProbe) IncCounter(name string, delta uint64) {
 }
 func (p *engageProbe) ObserveLatency(string, time.Duration) {}
 
+func (p *engageProbe) SetGauge(string, float64) {}
+
 // withEngageProbe installs a probe for the duration of fn and returns the count.
 func withEngageProbe(t *testing.T, fn func()) uint64 {
 	t.Helper()

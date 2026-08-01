@@ -31,6 +31,7 @@ package prometheus
 import (
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
@@ -58,6 +59,18 @@ var latencyBuckets = [10]time.Duration{
 type counter struct {
 	value atomic.Uint64
 }
+
+// gauge holds the CURRENT value of a quantity that can fall as well as rise.
+//
+// The bits are stored in an atomic.Uint64 via math.Float64bits rather than
+// behind a mutex: a gauge is written on the reclamation path and read by a
+// scrape, and neither should wait on the other.
+type gauge struct {
+	value atomic.Uint64
+}
+
+// load returns the gauge's current value.
+func (g *gauge) load() float64 { return math.Float64frombits(g.value.Load()) }
 
 // histogram holds per-bucket counts plus a running sum (in nanoseconds)
 // for Prometheus _sum exposition.
@@ -105,6 +118,9 @@ type Registry struct {
 
 	hists     sync.Map // string (sanitized) -> *histogram
 	histByRaw sync.Map // string (raw)        -> *histogram
+
+	gauges     sync.Map // string (sanitized) -> *gauge
+	gaugeByRaw sync.Map // string (raw)        -> *gauge
 }
 
 // New creates a new Registry ready for use as a metrics.Backend.
@@ -169,6 +185,18 @@ func (r *Registry) getOrCreateCounter(rawName string) *counter {
 	return c
 }
 
+// getOrCreateGauge returns the gauge for the raw (un-sanitized) name, creating
+// it on first sight; mirrors getOrCreateCounter.
+func (r *Registry) getOrCreateGauge(rawName string) *gauge {
+	if v, ok := r.gaugeByRaw.Load(rawName); ok {
+		return v.(*gauge)
+	}
+	actual, _ := r.gauges.LoadOrStore(sanitize(rawName), &gauge{})
+	g := actual.(*gauge)
+	r.gaugeByRaw.Store(rawName, g)
+	return g
+}
+
 // getOrCreateHistogram returns the histogram for the raw (un-sanitized) name,
 // creating it on first sight; mirrors getOrCreateCounter.
 func (r *Registry) getOrCreateHistogram(rawName string) *histogram {
@@ -185,6 +213,12 @@ func (r *Registry) getOrCreateHistogram(rawName string) *histogram {
 // delta. The name is sanitized before storage.
 func (r *Registry) IncCounter(name string, delta uint64) {
 	r.getOrCreateCounter(name).value.Add(delta)
+}
+
+// SetGauge implements metrics.Backend. It records the current value of the
+// named gauge. The name is sanitized before storage.
+func (r *Registry) SetGauge(name string, v float64) {
+	r.getOrCreateGauge(name).value.Store(math.Float64bits(v))
 }
 
 // ObserveLatency implements metrics.Backend. It records d in the latency
@@ -241,6 +275,22 @@ func (r *Registry) WriteText(w io.Writer) error {
 	for _, name := range cNames {
 		ew.printf("# TYPE %s counter\n", name)
 		ew.printf("%s %d\n", name, cSnap[name])
+	}
+
+	// Gauges, between the counters and the histograms and sorted the same way,
+	// so the exposition stays deterministic.
+	var gNames []string
+	gSnap := make(map[string]float64)
+	r.gauges.Range(func(k, v any) bool {
+		name := k.(string)
+		gNames = append(gNames, name)
+		gSnap[name] = v.(*gauge).load()
+		return true
+	})
+	sort.Strings(gNames)
+	for _, name := range gNames {
+		ew.printf("# TYPE %s gauge\n", name)
+		ew.printf("%s %g\n", name, gSnap[name])
 	}
 
 	// Snapshot histograms from the canonical sanitized-name map.
