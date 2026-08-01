@@ -364,6 +364,16 @@ func (v *ReadView[N, W]) NodeIndex() *label.Index { return v.g.NodeIndex() }
 
 // IndexManager returns the secondary-index manager, a candidate source read at
 // the PRESENT.
+//
+// Its candidates ARE re-checked against the versioned property store, so a seek
+// cannot return a node that did not match at the reader's instant. That was
+// asserted here without evidence until it was measured: the check is
+// cypher.TestIndexSeek_SelfContradictionUnderConcurrentWrites, which seeks by an
+// indexed property and then asserts the SAME property in a WHERE clause — a
+// contradiction that can only survive if the two answered at different instants.
+// Roughly two thousand observations per run against a writer churning the
+// indexed nodes produce zero, and the test carries sensitivity controls so it
+// cannot pass vacuously.
 func (v *ReadView[N, W]) IndexManager() *index.Manager { return v.g.IndexManager() }
 
 // ── immutable metadata ───────────────────────────────────────────────────────
