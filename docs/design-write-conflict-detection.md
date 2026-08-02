@@ -133,15 +133,31 @@ waits — it has no lock to deadlock on. Choosing it would be borrowing Neo4j's
 ## 5. Where it hooks
 
 Every versioned store, at the point a new version is linked at the head of a
-chain — the same points that already stamp a version:
+chain — the same points that already stamp a version. There are **four push
+primitives**, not nine sites — the five per-edge side
+stores share one generic implementation:
 
-| store | chain |
-|---|---|
-| node labels | `graph/lpg/mvcc_labels.go` `pushLabelDelta` |
-| node properties | `graph/lpg/mvcc_props.go` |
-| node existence | `graph/lpg/` node-life shards |
-| adjacency entries | `graph/adjlist/` versioned entry |
-| the five per-edge side stores | `graph/lpg/mvcc_sidemap.go` |
+| store | primitive | file:line |
+|---|---|---|
+| node labels | `nodeLabelShard.pushLabelDelta` | `graph/lpg/mvcc_labels.go:166` |
+| node properties | `nodePropShard.pushPropDelta` | `graph/lpg/mvcc_props.go:104` |
+| the five per-edge side stores | `sideVersions[K,V].push` | `graph/lpg/mvcc_sidemap.go:150` |
+| node existence | `noteNodeBorn` / `noteNodeDied` / `noteNodeRevived` | `graph/lpg/mvcc_life.go:100,121,138` |
+| adjacency entries | the versioned entry | `graph/adjlist/` |
+
+Each already has the head in hand — it is the value being displaced — and each
+already has a `mustUndo`-shaped stamp accessor (`preimageDelta.stamp`,
+`lifeStamp.at`), so the head timestamp needs no new plumbing.
+
+**What DOES need plumbing is the error.** These primitives return nothing today,
+and so do their callers (`SetNodeLabel` and friends). Threading a serialization
+failure out of them is the substance of the wiring, and it must reach the point
+that can abort the transaction and mark its commit record `AbortedTS` — not be
+swallowed at the first frame that has no error return.
+
+That is deliberate scope, not an obstacle: an engine whose write primitives
+cannot report failure cannot have conflict detection, and the signature change
+is what makes the detection reachable rather than advisory.
 
 A partial detector is worse than none: it would report clean on a store it does
 not cover while silently losing the update, and the caller cannot tell the
