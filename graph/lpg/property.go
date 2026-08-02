@@ -313,15 +313,6 @@ func (g *Graph[N, W]) setNodePropertyInfo(n N, key string, value PropertyValue, 
 	// for the same reason the label path guards on has().
 	if g.propDeltasEnabled() {
 		prev, had := bag.get(keyID)
-		record := !had || !propValuesDefinitelyEqual(prev, value)
-		// Write-write conflict (rmp #2300), tested only when a version would
-		// actually be recorded and BEFORE deltaStamp, so a write that changes
-		// nothing neither conflicts nor allocates. See
-		// graph/lpg/mvcc_conflict.go for the rule.
-		if record && g.noteConflict("node properties", s.headStamp(id)) {
-			s.mu.Unlock()
-			return g.TakeConflict()
-		}
 		switch {
 		case !had:
 			ci, ts := g.deltaStamp(info)
@@ -383,14 +374,6 @@ func (g *Graph[N, W]) delNodePropertyInfo(n N, key string, info *commitInfo) {
 		// records the pre-image so a reader can restore it.
 		if g.propDeltasEnabled() {
 			if prev, had := bag.get(keyID); had {
-				// See setNodePropertyInfo. delNodePropertyInfo cannot return an
-				// error, so the conflict is recorded and the delete is skipped:
-				// the transaction will abort at commit, and applying a doomed
-				// write would put a version on a chain whose head is not ours.
-				if g.noteConflict("node properties", s.headStamp(id)) {
-					s.mu.Unlock()
-					return
-				}
 				ci, ts := g.deltaStamp(info)
 				s.pushPropDelta(id, undoSetProp, keyID, prev, ci, ts, &g.propDeltaActive)
 			}

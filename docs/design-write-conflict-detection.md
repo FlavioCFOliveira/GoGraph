@@ -149,31 +149,44 @@ Each already has the head in hand — it is the value being displaced — and ea
 already has a `mustUndo`-shaped stamp accessor (`preimageDelta.stamp`,
 `lifeStamp.at`), so the head timestamp needs no new plumbing.
 
-### Status
+### BLOCKED on rmp #2301 — found by measurement, 2026-08-02
 
-**Landed:** node labels (`setNodeLabelInfo`, `removeNodeLabelInfo`) and node
-properties (`setNodePropertyInfo`, `delNodePropertyInfo`), each covered by a
-test verified to become a **lost update** when the check is removed.
+The wiring was implemented on the label and property stores, gated by tests
+verified to report a lost update without it, and then **reverted**, because
+`make ci` went red on `TestGraph_Concurrent` (`graph/lpg/lpg_test.go:116`) with
+a **false** serialization conflict.
 
-**Remaining:** node existence, adjacency entries, and the five per-edge side
-stores. Until they land, the detector is PARTIAL — it reports clean on a store
-it does not cover while the update is silently lost — so `#2300` is not
-closeable and this section is the checklist.
+**The cause is not the rule; it is who the snapshot belongs to.** The writer
+snapshot `noteConflict` reads is `Graph.writerSnap` — **per-graph**, because the
+write stamp still is. `reclaimAfterDirectWrite` opens an `ApplyAtomically`
+bracket to run a reclamation sweep (`graph/lpg/mvcc_gc.go:135`), and while that
+bracket is open **every other goroutine writing through the direct Go API sees
+that bracket's snapshot as its own** and is tested against a transaction it has
+nothing to do with. 64 goroutines writing disjoint nodes produced conflicts.
 
-**How the error reaches the caller.** Several of these primitives, and several of their
-callers, return nothing — `removeNodeLabelInfo`, `delNodePropertyInfo` and all
-five per-edge side stores. Rather than cascade signature changes through the
-public Go API, the conflict is **recorded on the graph** and taken by the caller
-that can act on it (`Graph.TakeConflict`).
+**There is no per-goroutine signal to fix it with.** The only structure that
+knows which goroutine holds the barrier is `barrierGuard`, and that is
+`//go:build race || gograph_debug` — absent from a release build, so it cannot
+carry a correctness decision.
 
-That is Memgraph's shape rather than a way around it: `PrepareForWrite` sets
-`transaction->has_serialization_error = true` and returns a bool, and the error
-surfaces where the flag is read. A serialization failure aborts the *whole*
-transaction, not one label write, so a per-operation return value would be
-modelling it at the wrong granularity. A primitive that cannot return still
-skips its write once a conflict is recorded — the transaction is doomed, and
-applying a doomed write would put a version on a chain whose head belongs to
-someone else.
+Conflict detection therefore cannot be sound until the writer snapshot is
+**per-transaction**, which is exactly rmp #2301. That dependency is not in the
+audit's graph (#2300 is recorded as depending only on #2299) and was found only
+by running the module's own concurrency test against the wiring.
+
+What survives the revert and is not blocked: the rule (`mvcc.Conflicts`), the
+typed error (`mvcc.ErrSerializationConflict`, `mvcc.Conflict`), their tests, and
+this document.
+
+**How the error reaches the caller.** These primitives return nothing today,
+and so do their callers (`SetNodeLabel` and friends). Threading a serialization
+failure out of them is the substance of the wiring, and it must reach the point
+that can abort the transaction and mark its commit record `AbortedTS` — not be
+swallowed at the first frame that has no error return.
+
+That is deliberate scope, not an obstacle: an engine whose write primitives
+cannot report failure cannot have conflict detection, and the signature change
+is what makes the detection reachable rather than advisory.
 
 A partial detector is worse than none: it would report clean on a store it does
 not cover while silently losing the update, and the caller cannot tell the
