@@ -80,7 +80,7 @@ func TestWriter_ReadsItsOwnUncommittedWork(t *testing.T) {
 	}
 
 	// The writer's own snapshot: its start instant, plus its own id.
-	own := &Snapshot{startTS: tx.startTS, txID: tx.id}
+	own := &Snapshot{startTS: tx.ctx.startTS, txID: tx.ctx.txID}
 	if !g.ReadAt(own).HasNodeLabel("a", "Marked") {
 		t.Fatal("a writer cannot see the label it just wrote through its own snapshot: " +
 			"the ts == txID branch of mvcc.Visible is not being reached")
@@ -88,7 +88,7 @@ func TestWriter_ReadsItsOwnUncommittedWork(t *testing.T) {
 
 	// A reader at the same instant WITHOUT the writer's id sees nothing: the
 	// label is uncommitted, and that is what makes the branch the only way in.
-	plain := &Snapshot{startTS: tx.startTS}
+	plain := &Snapshot{startTS: tx.ctx.startTS}
 	if g.ReadAt(plain).HasNodeLabel("a", "Marked") {
 		t.Fatal("an uncommitted label is visible to a reader that is not the writer — a dirty read")
 	}
@@ -121,8 +121,8 @@ func TestWriter_DoesNotObserveAnotherInFlightWriter(t *testing.T) {
 
 	txA := g.beginLabelTx()
 	txB := g.beginLabelTx()
-	if txA.id == txB.id {
-		t.Fatalf("two overlapping writers share the transaction id %d", txA.id)
+	if txA.ctx.txID == txB.ctx.txID {
+		t.Fatalf("two overlapping writers share the transaction id %d", txA.ctx.txID)
 	}
 
 	if err := txA.setNodeLabel("a", "FromA"); err != nil {
@@ -132,8 +132,8 @@ func TestWriter_DoesNotObserveAnotherInFlightWriter(t *testing.T) {
 		t.Fatalf("B setNodeLabel: %v", err)
 	}
 
-	viewA := g.ReadAt(&Snapshot{startTS: txA.startTS, txID: txA.id})
-	viewB := g.ReadAt(&Snapshot{startTS: txB.startTS, txID: txB.id})
+	viewA := g.ReadAt(&Snapshot{startTS: txA.ctx.startTS, txID: txA.ctx.txID})
+	viewB := g.ReadAt(&Snapshot{startTS: txB.ctx.startTS, txID: txB.ctx.txID})
 
 	if !viewA.HasNodeLabel("a", "FromA") {
 		t.Fatal("A cannot see its own uncommitted label")
@@ -152,7 +152,7 @@ func TestWriter_DoesNotObserveAnotherInFlightWriter(t *testing.T) {
 	// this is snapshot isolation, not read-committed.
 	tsA := txA.commit()
 	if viewB.HasNodeLabel("a", "FromA") {
-		t.Fatalf("B observes A's label committed at %d, after B began at %d", tsA, txB.startTS)
+		t.Fatalf("B observes A's label committed at %d, after B began at %d", tsA, txB.ctx.startTS)
 	}
 	// A reader starting now sees A's work and not B's.
 	now := g.ReadAt(&Snapshot{startTS: g.readTS()})

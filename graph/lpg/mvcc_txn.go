@@ -85,11 +85,13 @@ type commitInfo = mvcc.CommitInfo
 //
 // Not safe for concurrent use by multiple goroutines.
 type labelTx[N comparable, W any] struct {
-	g       *Graph[N, W]
-	info    *commitInfo
-	id      uint64
-	startTS uint64
-	done    bool
+	g *Graph[N, W]
+	// ctx is this transaction's identity — its commit record, start timestamp
+	// and id — carried into every store it writes (rmp #2301). It is ONE value
+	// rather than three loose fields so a write cannot be handed a record from
+	// one transaction and a snapshot from another.
+	ctx  *writeCtx
+	done bool
 }
 
 // nextCommitTS allocates the next commit timestamp. Monotonic and never reused.
@@ -112,9 +114,7 @@ func (g *Graph[N, W]) nextTxID() uint64 { return g.mvccClock.NextTxID() }
 // The order matters: the start timestamp is read BEFORE the transaction id is
 // minted, so a transaction can never see a commit that happened after it began.
 func (g *Graph[N, W]) beginLabelTx() *labelTx[N, W] {
-	startTS := g.readTS()
-	id := g.nextTxID()
-	return &labelTx[N, W]{g: g, info: mvcc.NewCommitInfo(id), id: id, startTS: startTS}
+	return &labelTx[N, W]{g: g, ctx: g.beginWriteCtx()}
 }
 
 // commit publishes every delta this transaction wrote, atomically.
@@ -131,7 +131,7 @@ func (t *labelTx[N, W]) commit() uint64 {
 	t.done = true
 	// Allocate, store, publish — in that order; see [mvcc.Clock.ReadTS].
 	ts := t.g.nextCommitTS()
-	t.info.Commit(ts)
+	t.ctx.info.Commit(ts)
 	t.g.mvccClock.PublishCommitTS(ts)
 	return ts
 }
@@ -146,7 +146,7 @@ func (t *labelTx[N, W]) abort() {
 		panic("lpg: labelTx committed or aborted twice")
 	}
 	t.done = true
-	t.info.Abort()
+	t.ctx.info.Abort()
 }
 
 // deltaStamp resolves how a new delta records its visibility, in three cases
@@ -186,32 +186,32 @@ func (g *Graph[N, W]) deltaStamp(info *commitInfo) (*commitInfo, uint64) {
 // setNodeLabel writes a label inside this transaction. The delta it records
 // stays invisible to every other reader until [labelTx.commit].
 func (t *labelTx[N, W]) setNodeLabel(n N, name string) error {
-	return t.g.setNodeLabelInfo(n, name, t.info)
+	return t.g.setNodeLabelInfo(n, name, t.ctx)
 }
 
 // removeNodeLabel removes a label inside this transaction.
 func (t *labelTx[N, W]) removeNodeLabel(n N, name string) {
-	t.g.removeNodeLabelInfo(n, name, t.info)
+	t.g.removeNodeLabelInfo(n, name, t.ctx)
 }
 
 // labelsOf reads a node's label set as this transaction must see it: its own
 // uncommitted writes included, every other in-flight transaction's excluded,
 // and committed work only if it committed at or before this transaction began.
 func (t *labelTx[N, W]) labelsOf(id graph.NodeID) labelBag {
-	return t.g.labelBagAsOf(id, t.startTS, t.id)
+	return t.g.labelBagAsOf(id, t.ctx.startTS, t.ctx.txID)
 }
 
 // setNodeProperty writes a property inside this transaction.
 func (t *labelTx[N, W]) setNodeProperty(n N, key string, v PropertyValue) error {
-	return t.g.setNodePropertyInfo(n, key, v, t.info)
+	return t.g.setNodePropertyInfo(n, key, v, t.ctx)
 }
 
 // delNodeProperty deletes a property inside this transaction.
 func (t *labelTx[N, W]) delNodeProperty(n N, key string) {
-	t.g.delNodePropertyInfo(n, key, t.info)
+	t.g.delNodePropertyInfo(n, key, t.ctx)
 }
 
 // propsOf reads a node's property set as this transaction must see it.
 func (t *labelTx[N, W]) propsOf(id graph.NodeID) propBag {
-	return t.g.propBagAsOf(id, t.startTS, t.id)
+	return t.g.propBagAsOf(id, t.ctx.startTS, t.ctx.txID)
 }

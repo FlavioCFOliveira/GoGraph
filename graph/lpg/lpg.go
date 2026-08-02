@@ -1844,7 +1844,7 @@ func (g *Graph[N, W]) SetNodeLabel(n N, name string) error {
 // transaction semantics the Go API already documents. It is threaded rather
 // than looked up so a transaction's deltas all point at ONE record and its
 // commit is a single store (rmp #2278).
-func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, info *commitInfo) error {
+func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, tx *writeCtx) error {
 	if err := g.adj.AddNode(n); err != nil {
 		return err
 	}
@@ -1863,7 +1863,16 @@ func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, info *commitInfo) error
 	// every match, so this guard is what keeps a delta per WRITE rather than a
 	// delta per statement.
 	if g.labelDeltasEnabled() && !bag.has(lid) {
-		ci, ts := g.deltaStamp(info)
+		// Write-write conflict (rmp #2300), tested against THIS transaction's
+		// snapshot — which travels in tx rather than being looked up on the
+		// graph, so a concurrent writer is never tested against a transaction
+		// that is not its own (rmp #2301). Checked before deltaStamp so a
+		// doomed write allocates no commit record.
+		if head := sh.headStamp(id); tx.conflicts(head) {
+			sh.mu.Unlock()
+			return tx.conflictErr("node labels", head)
+		}
+		ci, ts := g.deltaStamp(tx.record())
 		sh.pushLabelDelta(id, undoRemoveLabel, lid, ci, ts, &g.labelDeltaActive)
 	}
 	bag.add(lid)
@@ -2900,7 +2909,7 @@ func (g *Graph[N, W]) RemoveNodeLabel(n N, name string) {
 
 // removeNodeLabelInfo is [Graph.RemoveNodeLabel] with an explicit commit
 // record; see [Graph.setNodeLabelInfo].
-func (g *Graph[N, W]) removeNodeLabelInfo(n N, name string, info *commitInfo) {
+func (g *Graph[N, W]) removeNodeLabelInfo(n N, name string, tx *writeCtx) {
 	id, ok := g.adj.Mapper().Lookup(n)
 	if !ok {
 		return
@@ -2916,7 +2925,16 @@ func (g *Graph[N, W]) removeNodeLabelInfo(n N, name string, info *commitInfo) {
 		// actually being present for the same reason as the add path: removing
 		// a label the node does not carry changes nothing.
 		if g.labelDeltasEnabled() && bag.has(lid) {
-			ci, ts := g.deltaStamp(info)
+			// See setNodeLabelInfo. removeNodeLabelInfo cannot return an error,
+			// so a conflicting removal is SKIPPED: the transaction is doomed
+			// and applying a doomed write would put a version on a chain whose
+			// head belongs to someone else. The caller learns of it from the
+			// error its next writing call returns, or at commit.
+			if tx.conflicts(sh.headStamp(id)) {
+				sh.mu.Unlock()
+				return
+			}
+			ci, ts := g.deltaStamp(tx.record())
 			sh.pushLabelDelta(id, undoAddLabel, lid, ci, ts, &g.labelDeltaActive)
 		}
 		if bag.del(lid) {

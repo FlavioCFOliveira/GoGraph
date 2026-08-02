@@ -289,7 +289,7 @@ func (g *Graph[N, W]) SetNodeProperty(n N, key string, value PropertyValue) erro
 
 // setNodePropertyInfo is [Graph.SetNodeProperty] with an explicit commit
 // record; info is nil for an autocommit write. See [Graph.setNodeLabelInfo].
-func (g *Graph[N, W]) setNodePropertyInfo(n N, key string, value PropertyValue, info *commitInfo) error {
+func (g *Graph[N, W]) setNodePropertyInfo(n N, key string, value PropertyValue, tx *writeCtx) error {
 	if v := g.validator.load(); v != nil {
 		if err := v.Validate(key, value); err != nil {
 			return err
@@ -313,12 +313,22 @@ func (g *Graph[N, W]) setNodePropertyInfo(n N, key string, value PropertyValue, 
 	// for the same reason the label path guards on has().
 	if g.propDeltasEnabled() {
 		prev, had := bag.get(keyID)
+		// Only a write that RECORDS a version can conflict. Re-setting a
+		// property to the value it already holds records nothing, and MERGE's
+		// MATCH branch re-asserts properties on every match — without this
+		// guard a transaction that changed nothing would abort.
+		if record := !had || !propValuesDefinitelyEqual(prev, value); record {
+			if head := s.headStamp(id); tx.conflicts(head) {
+				s.mu.Unlock()
+				return tx.conflictErr("node properties", head)
+			}
+		}
 		switch {
 		case !had:
-			ci, ts := g.deltaStamp(info)
+			ci, ts := g.deltaStamp(tx.record())
 			s.pushPropDelta(id, undoDelProp, keyID, PropertyValue{}, ci, ts, &g.propDeltaActive)
 		case !propValuesDefinitelyEqual(prev, value):
-			ci, ts := g.deltaStamp(info)
+			ci, ts := g.deltaStamp(tx.record())
 			s.pushPropDelta(id, undoSetProp, keyID, prev, ci, ts, &g.propDeltaActive)
 		}
 	}
@@ -357,7 +367,7 @@ func (g *Graph[N, W]) DelNodeProperty(n N, key string) {
 
 // delNodePropertyInfo is [Graph.DelNodeProperty] with an explicit commit
 // record; info is nil for an autocommit write. See [Graph.setNodeLabelInfo].
-func (g *Graph[N, W]) delNodePropertyInfo(n N, key string, info *commitInfo) {
+func (g *Graph[N, W]) delNodePropertyInfo(n N, key string, tx *writeCtx) {
 	id, ok := g.adj.Mapper().Lookup(n)
 	if !ok {
 		return
@@ -374,7 +384,12 @@ func (g *Graph[N, W]) delNodePropertyInfo(n N, key string, info *commitInfo) {
 		// records the pre-image so a reader can restore it.
 		if g.propDeltasEnabled() {
 			if prev, had := bag.get(keyID); had {
-				ci, ts := g.deltaStamp(info)
+				// See setNodePropertyInfo; delNodePropertyInfo cannot return.
+				if tx.conflicts(s.headStamp(id)) {
+					s.mu.Unlock()
+					return
+				}
+				ci, ts := g.deltaStamp(tx.record())
 				s.pushPropDelta(id, undoSetProp, keyID, prev, ci, ts, &g.propDeltaActive)
 			}
 		}
