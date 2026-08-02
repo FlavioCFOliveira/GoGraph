@@ -5,7 +5,6 @@ package lpg
 import (
 	"fmt"
 	"sync"
-	"sync/atomic"
 )
 
 // barrierGuard enforces that no single goroutine re-enters the
@@ -99,25 +98,38 @@ type barrierGuard struct {
 	// a nil/empty map into existence.
 	readers map[int64]int
 
-	// writerGID is the goroutine id of the goroutine currently HOLDING visMu
-	// in write mode, or 0 when no writer holds it. It is stamped by
-	// [barrierGuard.stampWriter] only after visMu.Lock succeeds and cleared by
-	// [barrierGuard.clearWriter] before visMu.Unlock, so it is exclusively
-	// owned by the lock holder: a writer queued on visMu never appears here
-	// and can never clobber the active writer's id (#1355). visMu serialises
-	// writers, so at most one id is live at a time and a plain atomic
-	// suffices.
-	writerGID atomic.Int64
+	// writers holds the goroutine id of EVERY goroutine currently inside a
+	// write bracket. It is stamped by [barrierGuard.stampWriter] once the
+	// bracket is entered and cleared by [barrierGuard.clearWriter] on the way
+	// out, so a writer merely QUEUED on visMu never appears here and can never
+	// clobber an active writer's id (#1355).
+	//
+	// A SET rather than one id (rmp #2301). It was a single atomic.Int64
+	// because visMu serialised writers, so at most one could be live at a time.
+	// Sprint 334 retires that exclusion, and with two writers in flight the
+	// single field reports FALSE RESULTS in both directions: the second
+	// stampWriter overwrites the first's id, so the first's clearing
+	// compare-and-swap fails and strands a stale entry, and a genuine
+	// writer-to-writer re-entry on the overwritten goroutine goes undetected —
+	// the guard's whole purpose.
+	//
+	// A map under a mutex is the right cost here BECAUSE this file is
+	// //go:build race || gograph_debug: it is compiled only into the enforcing
+	// build, and the released binary links the no-op form in
+	// reentrancy_disabled.go, which allocates and locks nothing.
+	writers map[int64]struct{}
 
-	// readerMu guards readers. It is independent of visMu and is held only for
-	// the O(1) map mutation at the View entry/exit boundary.
+	// readerMu guards readers, writerMu guards writers. Both are independent of
+	// visMu and are held only for the O(1) map mutation at a bracket boundary.
 	readerMu sync.Mutex
+	writerMu sync.Mutex
 }
 
 // initBarrierGuard pre-creates the reader map so the common path never
 // allocates the map into existence under the boundary mutex.
 func (bg *barrierGuard) init() {
 	bg.readers = make(map[int64]int)
+	bg.writers = make(map[int64]struct{})
 }
 
 // currentGID returns the calling goroutine's id for callers that need to pair a
@@ -169,8 +181,11 @@ func (bg *barrierGuard) checkWriter() int64 {
 	if isReader {
 		panic(reentrancyMessage("ApplyAtomically", "View"))
 	}
-	// writer → writer: this goroutine already holds the write lock.
-	if bg.writerGID.Load() == gid {
+	// writer → writer: this goroutine is already inside a write bracket.
+	bg.writerMu.Lock()
+	_, isWriter := bg.writers[gid]
+	bg.writerMu.Unlock()
+	if isWriter {
 		panic(reentrancyMessage("ApplyAtomically", "ApplyAtomically"))
 	}
 	return gid
@@ -184,7 +199,9 @@ func (bg *barrierGuard) stampWriter(gid int64) {
 	if gid == 0 {
 		return
 	}
-	bg.writerGID.Store(gid)
+	bg.writerMu.Lock()
+	bg.writers[gid] = struct{}{}
+	bg.writerMu.Unlock()
 }
 
 // clearWriter clears the writer stamp set by stampWriter. gid==0 means
@@ -199,7 +216,12 @@ func (bg *barrierGuard) clearWriter(gid int64) {
 	if gid == 0 {
 		return
 	}
-	bg.writerGID.CompareAndSwap(gid, 0)
+	// Deletes only this goroutine's OWN entry, which is what the
+	// compare-and-swap on the single field used to provide (#1355) and what a
+	// set provides by construction, for any number of concurrent writers.
+	bg.writerMu.Lock()
+	delete(bg.writers, gid)
+	bg.writerMu.Unlock()
 }
 
 // enterReader marks the calling goroutine as an in-barrier reader, panicking if
@@ -211,9 +233,14 @@ func (bg *barrierGuard) enterReader() int64 {
 	if gid == 0 {
 		return 0
 	}
-	// writer → reader: this goroutine holds the write lock and is now trying to
-	// read — always a self-deadlock. Checked with a lock-free atomic load.
-	if bg.writerGID.Load() == gid {
+	// writer → reader: this goroutine is inside a write bracket and is now
+	// trying to read — always a self-deadlock. The set membership test replaced
+	// a lock-free atomic load when the guard learned to hold more than one
+	// writer (rmp #2301); the extra mutex is paid only in the enforcing build.
+	bg.writerMu.Lock()
+	_, isWriter := bg.writers[gid]
+	bg.writerMu.Unlock()
+	if isWriter {
 		panic(reentrancyMessage("View", "ApplyAtomically"))
 	}
 	bg.readerMu.Lock()
