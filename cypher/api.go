@@ -15740,14 +15740,20 @@ func (e *Engine) execUnderBarrier(
 		// the type-level note above and replayUndoOnPanic for why this must run
 		// while visMu is still held.
 		defer replayUndoOnPanic(undo)
-		// A view with NO snapshot: the write path applies eagerly and must see its
-		// own not-yet-published work, so it reads the current value. See
-		// lpg/readview.go.
-		walker := &lpgNodeWalker{g: e.g.ReadAt(nil)}
+		// The WRITING TRANSACTION'S OWN view (rmp #2299): as of the instant it
+		// began, plus the versions it has written itself. It applies eagerly and
+		// must see its own not-yet-published work, and until #2299 it got that
+		// by reading the PRESENT (ReadAt(nil)) — correct only while a barrier
+		// guarantees no other writer's uncommitted work can be in the present.
+		// The ts == txID branch of mvcc.Visible is what supplies the same
+		// read-your-own-writes without that guarantee. See lpg/readview.go and
+		// lpg.Graph.beginWrite.
+		wv := e.g.WriterView()
+		walker := &lpgNodeWalker{g: wv}
 		// The count-estimate provider (#2083) is consulted only on the read path
 		// (Engine.Run, where labelSrc carries cs); the write-path plan build never
 		// reads it, so cs is left nil here to keep the write path's resolver lean.
-		labelSrc := &lpgLabelResolver{g: e.g.ReadAt(nil)}
+		labelSrc := &lpgLabelResolver{g: wv}
 		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager(), e.maxCollectItems, e.edgeTypeFilterCache,
 			// #2229: the write path resolves `CALL db.*` from the same registry the
 			// read path uses. Shared, not snapshotted — procs.Registry is
@@ -16561,8 +16567,12 @@ func (a *lpgMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle u
 // from its forward-CSR edge position, reusing the read-path mechanism so the
 // write path identifies the exact same parallel instance reads would. Returns 0
 // when no handle is resolvable; the caller then mutates the per-pair store only.
+//
+// Through the WRITING TRANSACTION'S view (rmp #2299), not the present: the
+// instance it must resolve may be one this very transaction created, and it
+// must not be one another in-flight writer created.
 func (a *lpgMutatorAdapter) EdgeHandleAtPosition(src, dst string, edgePos uint64) uint64 {
-	return edgeHandleAtFwdPos(a.bopts, a.g.ReadAt(nil), src, dst, edgePos)
+	return edgeHandleAtFwdPos(a.bopts, a.g.WriterView(), src, dst, edgePos)
 }
 
 // FirstEdgeHandle resolves the handle on the first src→dst adjacency slot,
@@ -17393,7 +17403,7 @@ func (a *walMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle u
 // write path identifies the exact same parallel instance reads would. Returns 0
 // when no handle is resolvable; the caller then mutates the per-pair store only.
 func (a *walMutatorAdapter) EdgeHandleAtPosition(src, dst string, edgePos uint64) uint64 {
-	return edgeHandleAtFwdPos(a.bopts, a.g.ReadAt(nil), src, dst, edgePos)
+	return edgeHandleAtFwdPos(a.bopts, a.g.WriterView(), src, dst, edgePos)
 }
 
 // FirstEdgeHandle resolves the handle on the first src→dst adjacency slot,

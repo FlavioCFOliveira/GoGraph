@@ -564,6 +564,17 @@ type Graph[N comparable, W any] struct {
 	// stays lock-free.
 	visMu sync.RWMutex
 
+	// writerSnapVal and writerSnap are the read view the WRITE path resolves
+	// through while a write transaction is open (rmp #2299): as of the instant
+	// the transaction began, plus its own uncommitted versions.
+	//
+	// The value is held inline and the pointer published separately so opening
+	// a bracket allocates nothing — see [Graph.beginWrite]. Only the writer
+	// touches the value, and under the barrier there is exactly one writer;
+	// rmp #2301 moves both to per-transaction state when the barrier goes.
+	writerSnapVal Snapshot
+	writerSnap    atomic.Pointer[Snapshot]
+
 	// barrier enforces that no single goroutine re-enters visMu via
 	// [Graph.View] / [Graph.ApplyAtomically]. visMu is not re-entrant, so a
 	// nested acquisition from a goroutine already inside the barrier would
@@ -713,6 +724,10 @@ func (g *Graph[N, W]) ApplyAtomically(fn func() error) error {
 // #1355).
 func (g *Graph[N, W]) finishWrite(gid int64) {
 	g.endWrite()
+	// Return the writer's horizon slot after endWrite, so nothing the writer
+	// still reads is reclaimable while it runs, and unconditionally, because a
+	// bracket that versioned nothing still took a slot (rmp #2299).
+	g.releaseWriterSnapshot()
 	g.adj.EndCommit()
 	g.barrier.clearWriter(gid)
 }
@@ -800,6 +815,10 @@ func (g *Graph[N, W]) UnlockBarrier() {
 	// its commit instant is exactly where it has always been. Before EndCommit
 	// so the record is live for the whole window it stamped.
 	g.endWrite()
+	// Return the writer's horizon slot. After endWrite, so nothing it reads is
+	// reclaimable while it still runs, and unconditionally, because a bracket
+	// that versioned nothing still took a slot.
+	g.releaseWriterSnapshot()
 	// Close the adjacency commit window while visMu is still held (freezes the
 	// per-shard builders), matching the BeginCommit in LockBarrier, before
 	// releasing the barrier.

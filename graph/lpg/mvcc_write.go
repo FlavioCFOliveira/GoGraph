@@ -63,8 +63,49 @@ func (g *Graph[N, W]) beginWrite() {
 	if !g.mvccArmed {
 		return
 	}
-	g.stamp.Begin()
+	txID := g.stamp.Begin()
+	// The writer reads through a snapshot of its OWN (rmp #2299): as of the
+	// instant it began, PLUS the versions it has written itself, which is
+	// exactly what the ts == txID branch of [mvcc.Visible] delivers. Before
+	// this the write path read the present (ReadAt(nil)), which is correct only
+	// while a barrier guarantees there is no other writer whose uncommitted
+	// work "the present" could contain.
+	//
+	// Registered with the horizon in the same order a reader is — slot first,
+	// then clock, then publish — because a reclaimer landing between the clock
+	// read and the registration would compute a watermark past this writer's
+	// start timestamp and free versions it is about to read. See
+	// [mvcc.Horizon.EnterHolding]. Until rmp #2299 the horizon covered readers
+	// only, which was sound only because the writer read no snapshot at all
+	// (audit finding E22).
+	slot := g.horizon.EnterHolding()
+	startTS := g.mvccClock.ReadTS()
+	g.horizon.Publish(slot, startTS)
+	// By value into a field, then a pointer to it: opening a bracket must
+	// allocate nothing, which TestBarrierGuard_ApplyAtomicallyAllocatesNothing
+	// asserts. Only the writer touches it, and under the barrier there is
+	// exactly one — rmp #2301 moves it to per-transaction state when the
+	// barrier goes.
+	g.writerSnapVal = Snapshot{startTS: startTS, txID: txID, slot: slot}
+	g.writerSnap.Store(&g.writerSnapVal)
 }
+
+// writerView returns the graph bound to the current writer's snapshot, or to
+// the present when no write transaction is open.
+//
+// It is what the write path reads through. A nil snapshot means "the current
+// stored value", which is the right answer outside a transaction and the wrong
+// one inside one the moment a second writer exists.
+func (g *Graph[N, W]) writerView() *ReadView[N, W] {
+	return g.ReadAt(g.writerSnap.Load())
+}
+
+// WriterView is [Graph.writerView] for a caller in another package — the Cypher
+// engine's write path, which must read as of the writing transaction rather
+// than as of the present.
+//
+// Safe for concurrent use; the returned view is immutable.
+func (g *Graph[N, W]) WriterView() *ReadView[N, W] { return g.writerView() }
 
 // endWrite publishes every version this write created, atomically, and closes
 // the stamping window.
@@ -93,6 +134,23 @@ func (g *Graph[N, W]) endWrite() {
 	g.mvccClock.PublishCommitTS(ts)
 	g.reclaimDebt.Add(created)
 	g.reclaimIfDue()
+}
+
+// releaseWriterSnapshot closes the writer's read view and returns its horizon
+// slot.
+//
+// Split from [Graph.endWrite] because endWrite returns early when the
+// transaction versioned nothing, and a slot must be returned whether or not
+// anything was written — a bracket that writes nothing still took one.
+func (g *Graph[N, W]) releaseWriterSnapshot() {
+	if !g.mvccArmed {
+		return
+	}
+	snap := g.writerSnap.Swap(nil)
+	if snap == nil {
+		return
+	}
+	g.horizon.Leave(snap.slot)
 }
 
 // EnableMVCC arms the whole versioning substrate: node labels, node properties

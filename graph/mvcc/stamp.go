@@ -89,6 +89,19 @@ type WriteStamp struct {
 	// opens a transaction would leak one record per modification for the life
 	// of the process. See [WriteStamp.TakeUntracked].
 	untracked atomic.Int64
+	// pendingTxID is the transaction id [WriteStamp.Begin] minted for the open
+	// window, which the record allocated by the first version will carry.
+	//
+	// It is minted at Begin rather than with the record because the WRITER
+	// needs its own identity BEFORE it writes anything: it reads through a
+	// snapshot carrying that id, and the ts == txID branch of [Visible] is what
+	// lets it see its own uncommitted versions and nobody else's (rmp #2299).
+	// A lazily-minted id would not exist yet at the moment the read view is
+	// built, and a read view built with the wrong id sees none of its own work.
+	//
+	// The ALLOCATION stays lazy — that is the property the file comment above
+	// defends and it is untouched. What Begin now costs is one atomic add.
+	pendingTxID atomic.Uint64
 }
 
 // SetClock attaches the clock that mints transaction ids and commit
@@ -103,13 +116,28 @@ func (w *WriteStamp) SetClock(c *Clock) { w.clock = c }
 // Clock returns the attached clock, or nil.
 func (w *WriteStamp) Clock() *Clock { return w.clock }
 
-// Begin opens a transaction's stamping window. It allocates nothing; the record
+// Begin opens a transaction's stamping window and returns the transaction id
+// every version stamped in it will carry. It allocates nothing; the record
 // appears when the first version asks for it.
+//
+// The returned id is what the writer reads through: a snapshot carrying it sees
+// the transaction's own uncommitted versions, through the ts == txID branch of
+// [Visible], and no other transaction's (rmp #2299). It is zero when no clock
+// is attached, which is the unversioned case where nothing reads a timestamp
+// back.
 //
 // The caller must be the only writer for the window's duration — the higher
 // layer's exclusive barrier supplies that — so Begin never overwrites a live
 // record.
-func (w *WriteStamp) Begin() { w.info.Store(armedPending) }
+func (w *WriteStamp) Begin() uint64 {
+	var id uint64
+	if w.clock != nil {
+		id = w.clock.NextTxID()
+	}
+	w.pendingTxID.Store(id)
+	w.info.Store(armedPending)
+	return id
+}
 
 // End closes the window and returns the record the transaction's versions
 // share, together with how many of them there are.
@@ -153,7 +181,20 @@ func (w *WriteStamp) Stamp() (*CommitInfo, uint64) {
 		if w.clock == nil {
 			return nil, 0
 		}
-		cand := NewCommitInfo(w.clock.NextTxID())
+		// The id was minted by Begin, so the record the first version
+		// allocates carries the same id the writer is reading through. Minting
+		// a fresh one here would give the writer a record it cannot see its
+		// own writes through.
+		id := w.pendingTxID.Load()
+		if id == 0 {
+			// No open window minted one — an unsynchronised caller reached
+			// Stamp between Begin and its store, or the stamp was armed by a
+			// path that predates rmp #2299. Fall back rather than stamp a
+			// record with the zero id, which Visible would treat as a commit
+			// timestamp of zero and show to every reader.
+			id = w.clock.NextTxID()
+		}
+		cand := NewCommitInfo(id)
 		if w.info.CompareAndSwap(armedPending, cand) {
 			info = cand
 		} else if info = w.info.Load(); info == nil || info == armedPending {
