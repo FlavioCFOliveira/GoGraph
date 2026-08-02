@@ -1,0 +1,386 @@
+package mvccwrite
+
+// gate_test.go — the short-layer regression gates on write concurrency
+// (rmp #2297).
+//
+// The benchmark in scaling_test.go produces the sprint's number. This file
+// makes it binding: a change that re-serialises the writers turns `make ci` RED
+// rather than merely slow.
+//
+// # Two instruments, because one of them cannot survive a shared machine
+//
+// [measureScaling] is the headline instrument: throughput at N writers divided
+// by throughput at ONE writer. It is what "write throughput scales with writer
+// count" means, and it is the number the audit and docs/benchmarks quote.
+//
+// It also has a systematic bias that a shared machine makes severe. A process
+// with more runnable threads gets a larger share of a loaded host, so the
+// one-writer arm is starved harder than the N-writer arm and the RATIO comes
+// out too high. This is not noise that averages away; it is a bias with a
+// direction. It was found the hard way — the first version of this file turned
+// `make ci` red with a one-writer arm running 4.2x slower than in isolation
+// while the eight-writer arm lost only 1.2x, reporting 3.05x for work that was
+// serialised under a single mutex.
+//
+// [measureSerialisationRatio] is the load-immune instrument, and it is the one
+// with a future. It compares throughput at N writers against throughput of the
+// SAME work at the SAME N writers with every unit taken under one external
+// mutex. Both arms have identical goroutine counts, so whatever share of the
+// machine the process gets, it gets in both — the bias cancels. What it reads
+// is direct: how much does adding a global lock to the write path cost? On an
+// engine that already holds a global lock, the answer is nothing.
+//
+// Measured on an Apple M4 (10 cores) at head c97118fe, under `-race`, first
+// idle and then with a CPU load generator saturating every core at 2x:
+//
+//	                              idle          loaded (10 cores at 2x)
+//	engine, serialisation ratio   0.97–1.02     0.73–0.76
+//	parallel control, same ratio  6.92–7.26     3.41–6.93
+//
+// The two populations do not overlap in either condition. That an external
+// global mutex around every engine write costs 0% is the defect stated in one
+// number, and it is the number that must move.
+//
+// # The gates are RATCHETS, exactly like tckExecutionBaseline
+//
+// Every assertion that gates the ENGINE is a FLOOR — the robust direction,
+// since both instruments degrade under load and a floor only ever gets easier
+// to clear. The one ceiling in the file is asserted on the load-immune
+// instrument only, for the reason given in
+// [TestWriteScalingInstrument_SeesSerialisation].
+//
+// The floors start at their ENTRY values, because at entry the engine is
+// single-writer by construction and there is no higher number to enforce. Each
+// task that raises the measured value RAISES the constant; a constant is never
+// lowered to make a red build green.
+
+import (
+	"context"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"testing"
+
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+)
+
+// writeScalingFloor is the minimum ratio [TestWriteScalingGate] accepts:
+// throughput at gateWriters concurrent writers divided by throughput at one
+// writer, on the store-less engine.
+//
+// # Why 0.60
+//
+// Measured at head c97118fe on an Apple M4 (10 cores) with the race detector
+// enabled — which is how `make ci` runs it, and which costs ten times the
+// workload itself:
+//
+//	go test -race -run=TestWriteScalingGate -count=5 ./bench/mvccwrite/
+//	=> 0.873, 0.891, 0.895, 0.880, 0.887   (worst 0.873, spread 2.5%)
+//	   0.794 with every core saturated by an external load generator
+//
+// The floor sits 31% below the worst of the five idle runs and 24% below the
+// loaded one. That is far more headroom than the spread needs, deliberately: a
+// gate that goes red on a busy machine gets softened, and a softened gate is
+// not a gate.
+//
+// # This value is WEAK, and that is a statement about the engine
+//
+// A floor below 1.0 can only catch a serialised engine becoming MORE
+// serialised. It cannot catch the ABSENCE of scaling, because at head c97118fe
+// there is no scaling to lose: cypher.Engine.writeMu (cypher/api.go:1069) and
+// lpg.Graph.visMu (graph/lpg/lpg.go:565) make the write path single-writer by
+// construction. Both gates acquire their power when rmp #2304 retires the
+// barrier and these constants are ratcheted to [writeScalingTarget] or above.
+const writeScalingFloor = 0.60
+
+// writeConcurrencyFloor is the minimum ratio [TestWriteConcurrencyGate]
+// accepts: how much faster the engine is WITHOUT an external global mutex
+// serialising its writes than with one, at the same writer count.
+//
+// # Why 0.50
+//
+// Measured at head c97118fe under `-race`, best of gateRepeats: 0.97–1.02 idle,
+// 0.73–0.76 with every core saturated. The floor sits 32% below the worst
+// loaded observation.
+//
+// A value of 1.0 means an external global mutex around every write is free —
+// the engine was already serialised, so nothing was taken away. That is exactly
+// what the module does today, and it is why this floor is below 1.0 rather than
+// above it. When rmp #2304 lets writers apply concurrently, the same
+// measurement rises to the parallel population (measured 6.9–7.3 on the control
+// workload) and this constant is ratcheted to [writeScalingTarget] or above.
+const writeConcurrencyFloor = 0.50
+
+// writeScalingTarget is where [writeScalingFloor] and [writeConcurrencyFloor]
+// both go once rmp #2304 retires the exclusive visibility barrier: 3x at
+// gateWriters=8 concurrent writers, i.e. 37.5% parallel efficiency on an
+// eight-core machine.
+//
+// It is deliberately far below linear. The sprint's claim is that throughput
+// SCALES, not that it scales perfectly: a WAL append, a commit-timestamp mint
+// and a publication step remain genuinely serial sections even under ideal
+// MVCC, and Amdahl bounds what is left. 3x is the number that separates "the
+// writers run concurrently" from "the writers do not", with room on either side
+// for a loaded machine — the parallel control clears it by 2.3x even with every
+// core saturated.
+//
+// Today it is used by the two instrument-validation tests, which show that both
+// instruments have the power the gates will need once they are ratcheted to it.
+const writeScalingTarget = 3.0
+
+const (
+	// gateWriters is the concurrency the gates measure at. Eight is below the
+	// core count of any machine this is expected to run on, so a failure means
+	// serialisation rather than oversubscription.
+	gateWriters = 8
+	// gateOps is the total number of units of work per arm, split across the
+	// writers. Sized so one arm costs tens of milliseconds without the race
+	// detector and stays comfortably inside the short layer's per-package
+	// budget with it.
+	gateOps = 12000
+	// gateRepeats is how many times each arm pair is measured. Every assertion
+	// in this file reads the BEST ratio observed except the one ceiling, which
+	// reads the worst. Taking the best is the correct statistic for a floor:
+	// contention for the host can only depress a ratio, so the maximum removes
+	// false failures, while a genuinely serialised build cannot produce a high
+	// ratio even once.
+	gateRepeats = 3
+)
+
+// spread is the range of a repeated ratio measurement. `n` is what makes it
+// initialisable: a zero min cannot be distinguished from an unset one, and a
+// sentinel drawn from the value space cannot carry "nothing measured yet".
+type spread struct {
+	min, max float64
+	n        int
+}
+
+func (s spread) observe(v float64) spread {
+	if s.n == 0 || v < s.min {
+		s.min = v
+	}
+	if s.n == 0 || v > s.max {
+		s.max = v
+	}
+	s.n++
+	return s
+}
+
+// passesGate is the verdict every gate in this file returns. The two
+// instrument-validation tests route through it as well, so what they
+// demonstrate is the REAL predicate flipping, not a restatement of it that
+// could drift away from the gates it claims to validate.
+func passesGate(ratio, floor float64) bool { return ratio >= floor }
+
+// measureScaling runs `unit` twice — once on a single writer, once on `writers`
+// writers — with the same total number of units, and returns the spread of the
+// throughput ratio over [gateRepeats] repetitions.
+//
+// `unit` receives the writer index and the per-writer sequence number, so a
+// caller can give each writer a disjoint key space.
+//
+// Read [spread.max] for a floor. Do NOT assert a ceiling on this instrument on
+// a machine that is not idle: see this file's header for the bias and the
+// evidence.
+func measureScaling(tb testing.TB, writers, totalOps int, label string, unit func(writer, i int) error) spread {
+	tb.Helper()
+	var s spread
+	for r := 0; r < gateRepeats; r++ {
+		one := mustRunArm(tb, 1, totalOps, unit)
+		many := mustRunArm(tb, writers, totalOps/writers, unit)
+		ratio := many.commitsPerSec() / one.commitsPerSec()
+		tb.Logf("%s scaling: 1 writer %.0f/s (%.0f ns), %d writers %.0f/s (%.0f ns) => %.3fx",
+			label, one.commitsPerSec(), one.nsPerCommit(),
+			many.writers, many.commitsPerSec(), many.nsPerCommit(), ratio)
+		s = s.observe(ratio)
+	}
+	return s
+}
+
+// measureSerialisationRatio runs `unit` twice at the SAME writer count — once
+// as given, once with every invocation taken under one external mutex — and
+// returns the spread of the throughput ratio over [gateRepeats] repetitions.
+//
+// Because both arms run the same number of goroutines, they compete for the
+// host on equal terms and the bias that makes [measureScaling] unusable on a
+// busy machine cancels out. What the ratio measures is how much of the work was
+// genuinely concurrent: a workload that already serialises itself loses nothing
+// when a second lock is added, and reports ~1.0.
+func measureSerialisationRatio(tb testing.TB, writers, totalOps int, label string, unit func(writer, i int) error) spread {
+	tb.Helper()
+	var s spread
+	for r := 0; r < gateRepeats; r++ {
+		free := mustRunArm(tb, writers, totalOps/writers, unit)
+		var serialiser sync.Mutex
+		locked := mustRunArm(tb, writers, totalOps/writers, func(w, i int) error {
+			serialiser.Lock()
+			defer serialiser.Unlock()
+			return unit(w, i)
+		})
+		ratio := free.commitsPerSec() / locked.commitsPerSec()
+		tb.Logf("%s serialisation: %d writers free %.0f/s, under one mutex %.0f/s => %.3fx",
+			label, writers, free.commitsPerSec(), locked.commitsPerSec(), ratio)
+		s = s.observe(ratio)
+	}
+	return s
+}
+
+// mustRunArm is [runArm] with the error and the empty-arm case turned into test
+// failures, since neither is a measurement.
+func mustRunArm(tb testing.TB, writers, perWriter int, unit func(writer, i int) error) arm {
+	tb.Helper()
+	got, err := runArm(writers, perWriter, unit)
+	if err != nil {
+		tb.Fatalf("%d-writer arm: %v", writers, err)
+	}
+	if got.commitsPerSec() <= 0 {
+		tb.Fatalf("%d-writer arm made no progress", writers)
+	}
+	return got
+}
+
+// newGateEngine builds the store-less engine the gates measure — the wiring in
+// which nothing but the concurrency control can be responsible for the answer —
+// with its parse and plan-cache costs already paid.
+func newGateEngine(t *testing.T) (*cypher.Engine, context.Context) {
+	t.Helper()
+	r := newRig(t, wiringMem)
+	t.Cleanup(func() {
+		if err := r.close(); err != nil {
+			t.Errorf("close rig: %v", err)
+		}
+	})
+	warmUp(t, r.eng)
+	return r.eng, context.Background()
+}
+
+// TestWriteScalingGate gates the sprint's headline number: concurrent writers
+// must deliver at least [writeScalingFloor] times the throughput of one writer.
+func TestWriteScalingGate(t *testing.T) {
+	eng, ctx := newGateEngine(t)
+	got := measureScaling(t, gateWriters, gateOps, "engine/mem", func(writer, i int) error {
+		return commit(ctx, eng, writer, i)
+	})
+
+	if !passesGate(got.max, writeScalingFloor) {
+		t.Fatalf("write scaling regressed: %d writers deliver %.3fx the throughput of one (best of %d), floor is %.2fx.\n"+
+			"Either a change re-serialised the write path, or the machine is loaded. Re-run on an idle machine "+
+			"before touching the floor: a softened gate is not a gate.",
+			gateWriters, got.max, gateRepeats, writeScalingFloor)
+	}
+}
+
+// TestWriteConcurrencyGate gates the load-immune measure: putting an external
+// global mutex around every engine write must cost at least
+// [writeConcurrencyFloor] of the throughput. It is the gate that will detect a
+// silently re-serialised write path once rmp #2304 lands, because unlike
+// [TestWriteScalingGate] its verdict does not depend on how busy the host is.
+func TestWriteConcurrencyGate(t *testing.T) {
+	eng, ctx := newGateEngine(t)
+	got := measureSerialisationRatio(t, gateWriters, gateOps, "engine/mem", func(writer, i int) error {
+		return commit(ctx, eng, writer, i)
+	})
+
+	if !passesGate(got.max, writeConcurrencyFloor) {
+		t.Fatalf("write concurrency regressed: the write path runs only %.3fx faster without an external global "+
+			"mutex than with one (best of %d), floor is %.2fx. It is doing less concurrent work than it was.",
+			got.max, gateRepeats, writeConcurrencyFloor)
+	}
+}
+
+// spinSink keeps the compiler from eliminating the control workload.
+var spinSink atomic.Uint64
+
+// spinIterations sizes one spinUnit at roughly 20 microseconds on a modern
+// core — long enough that goroutine scheduling is noise against it, short
+// enough that a whole arm is milliseconds.
+const spinIterations = 20000
+
+// spinUnit is the synthetic unit of work the instrument-validation tests
+// measure: a dependent multiply-add chain, which occupies one core and shares
+// nothing, so N of them on N cores take the same wall-clock time as one.
+func spinUnit(int, int) error {
+	var x uint64 = 1
+	for i := 0; i < spinIterations; i++ {
+		x = x*6364136223846793005 + 1442695040888963407
+	}
+	spinSink.Add(x)
+	return nil
+}
+
+// requireCores skips when the machine cannot demonstrate the parallelism these
+// tests are about. This is an environment precondition, not unfinished work:
+// with fewer cores than writers the concurrent arm is oversubscribed and the
+// measurement says nothing about the instrument.
+func requireCores(t *testing.T) {
+	t.Helper()
+	if n := runtime.NumCPU(); n < gateWriters {
+		t.Skipf("needs at least %d cores to demonstrate parallelism; this machine has %d", gateWriters, n)
+	}
+}
+
+// TestWriteScalingInstrument_SeesConcurrency validates the positive direction of
+// both instruments. An instrument that cannot fail proves nothing, and the usual
+// validation — run the gate against a build that has the defect — is not
+// available here in the usual direction: the only build that exists HAS the
+// defect, and injecting more serialisation into an already fully serialised
+// engine barely moves either ratio, because both arms slow down together.
+//
+// So the validation points the gates' own measurement code at a synthetic
+// CPU-bound workload that genuinely runs in parallel. Both instruments must
+// clear [writeScalingTarget] — the value the gates ratchet to once rmp #2304
+// lands — so the demonstration is against the number they will actually
+// enforce.
+func TestWriteScalingInstrument_SeesConcurrency(t *testing.T) {
+	requireCores(t)
+	const ops = gateOps / 4
+
+	scaling := measureScaling(t, gateWriters, ops, "control/parallel", spinUnit)
+	if !passesGate(scaling.max, writeScalingTarget) {
+		t.Fatalf("the scaling instrument cannot see concurrency: %d independent CPU-bound writers on %d cores "+
+			"measured only %.3fx (best of %d), below the sprint target of %.2fx. TestWriteScalingGate reads the "+
+			"same measurement, so until this passes its verdict cannot be trusted.",
+			gateWriters, runtime.NumCPU(), scaling.max, gateRepeats, writeScalingTarget)
+	}
+
+	serial := measureSerialisationRatio(t, gateWriters, ops, "control/parallel", spinUnit)
+	if !passesGate(serial.max, writeScalingTarget) {
+		t.Fatalf("the serialisation instrument cannot see concurrency: forcing genuinely parallel work through "+
+			"one mutex cost only %.3fx (best of %d), below the sprint target of %.2fx. TestWriteConcurrencyGate "+
+			"reads the same measurement, so until this passes its verdict cannot be trusted.",
+			serial.max, gateRepeats, writeScalingTarget)
+	}
+}
+
+// TestWriteScalingInstrument_SeesSerialisation validates the negative direction:
+// the same work, changed in exactly one respect — every unit is already taken
+// under a mutex — must measure BELOW [writeScalingTarget], so a gate ratcheted
+// to it would FAIL. This is the artificial re-serialisation the gates exist to
+// catch.
+//
+// Only the load-immune instrument is asserted on. Both of its arms run the same
+// number of goroutines over the same already-serialised work, so they degrade
+// together and the ratio stays near 1.0 whatever else the host is doing. The
+// scaling instrument is measured and logged for comparison but NOT asserted on:
+// a ceiling on a one-versus-N ratio is exactly the assertion that a busy machine
+// breaks, and it did — see this file's header.
+func TestWriteScalingInstrument_SeesSerialisation(t *testing.T) {
+	requireCores(t)
+	const ops = gateOps / 4
+	var inner sync.Mutex
+	serialised := func(w, i int) error {
+		inner.Lock()
+		defer inner.Unlock()
+		return spinUnit(w, i)
+	}
+
+	// Logged as evidence, deliberately not asserted on.
+	_ = measureScaling(t, gateWriters, ops, "control/serialised", serialised)
+
+	serial := measureSerialisationRatio(t, gateWriters, ops, "control/serialised", serialised)
+	if passesGate(serial.min, writeScalingTarget) {
+		t.Fatalf("the serialisation instrument cannot see re-serialisation: work already behind a mutex still "+
+			"measured %.3fx (worst of %d), at or above the sprint target of %.2fx. A gate that passes serialised "+
+			"work would let rmp #2304 be silently undone.", serial.min, gateRepeats, writeScalingTarget)
+	}
+}
