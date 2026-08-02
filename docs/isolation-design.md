@@ -220,6 +220,52 @@ runtime supplies the RCU grace period); the existing `generation` refcount is
 used only where backing storage must be held stable across a serialise (e.g. a
 checkpoint writing to disk).
 
+### The commit frontier — what a reader's instant actually is
+
+`Clock.ReadTS` is the instant a reader starts at, and since rmp #2298 it is the
+newest timestamp below which **nothing is still in flight** — not simply the
+highest timestamp published.
+
+The two are the same number only while commits are serialised, which is why one
+counter sufficed until sprint 334. Once two writers may commit at once they
+diverge, and the difference is a wrong answer: writer A allocates 4 and begins
+its fsync; writer B allocates 5 and finishes first; a reader starting at "highest
+published" takes 5 and observes commit 5 while commit 4 — allocated *earlier* —
+is still invisible. It straddles a commit, which is the same torn read that
+Example 27's bank-transfer invariant caught during rmp #2290, reached from the
+other direction. When A finally publishes, commit 4 appears to a reader that has
+already reported a state without it.
+
+`graph/mvcc/commitlog.go` closes it with a bitmap of finished commit timestamps
+and a contiguous frontier — **Memgraph's `CommitLog`/`OldestActive` shape, not
+PostgreSQL's `xip_list`**. The reason is the read path: with a frontier,
+`ReadTS` stays one atomic load and `Visible` stays one comparison. An `xip` list
+would put an `xmin`/`xmax` pair plus an array search on the test that runs once
+per version-chain node on every versioned read. PostgreSQL can afford that
+because a backend holds an xid from its first write until commit — possibly
+minutes — so excluding everything above the oldest running xid would make its
+snapshots uselessly stale. GoGraph allocates the commit timestamp *at commit*,
+so the in-flight window is a commit critical section, not a transaction, and the
+frontier costs almost no staleness.
+
+**What it trades.** A reader cannot see a commit above the oldest unfinished one
+even after it has published. The staleness is the duration of the longest
+in-flight commit — a WAL fsync, measured at 3.73 ms. Memgraph accepts exactly
+this trade.
+
+**Two obligations follow, and both are enforced rather than assumed.** A
+timestamp that is allocated and then neither published nor abandoned stalls the
+frontier *forever*, so an allocate-then-fail path must call
+`Clock.AbandonCommitTS`; that is why it is a named operation rather than an
+internal detail. And the window is observable: `MVCCStats.InFlightCommits`
+reports the distance between the frontier and the newest timestamp handed out,
+which is both the staleness and the commit log's memory, named once.
+
+Measured cost: [`docs/benchmarks/mvcc-commit-frontier-2026-08-02.md`](benchmarks/mvcc-commit-frontier-2026-08-02.md).
+The read path does not move (unchanged code, 0.27 ns / 0.53 ns, zero allocs);
+publishing costs +0.93 ns per commit uncontended and is **1.42× faster** under
+concurrent publishers, which is the regime the sprint is moving towards.
+
 ## Secondary indexes — atomic flip and the live-maintenance fix
 
 This is where naive "snapshot the adjacency only" designs break, and it folds

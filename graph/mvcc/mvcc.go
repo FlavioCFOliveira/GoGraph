@@ -25,7 +25,10 @@
 // committed ones its commit timestamp, separated by kTransactionInitialId.
 package mvcc
 
-import "sync/atomic"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // TxIDBase separates commit timestamps from transaction ids.
 const TxIDBase uint64 = 1 << 63
@@ -114,12 +117,24 @@ func Visible(ts, startTS, txID uint64) bool {
 // Safe for concurrent use.
 type Clock struct {
 	commit atomic.Uint64
-	// visible is the highest timestamp every commit at or below which has been
-	// PUBLISHED. It is what a reader starts at, and it is a separate counter
+	// visible is the highest timestamp every commit at or below which has
+	// FINISHED. It is what a reader starts at, and it is a separate counter
 	// from the allocation one for a reason that is a correctness bug, not an
 	// optimisation — see [Clock.ReadTS].
+	//
+	// "Every commit at or below which" is the load-bearing clause, and it is
+	// what [commitLog] supplies: while commits were serialised, publication
+	// happened in allocation order and the highest published timestamp was also
+	// the highest contiguous one, so a monotone maximum was enough. It is not
+	// enough once two writers may publish out of order (rmp #2298).
 	visible atomic.Uint64
 	txSeq   atomic.Uint64
+
+	// pubMu guards log. It is taken once per commit, on the publish path only,
+	// and NEVER on a read: readers see the frontier through the visible atomic
+	// above, which this lock is what keeps monotone.
+	pubMu sync.Mutex
+	log   commitLog
 }
 
 // NextCommitTS allocates the next commit timestamp. Monotonic, never reused.
@@ -131,17 +146,65 @@ func (c *Clock) NextCommitTS() uint64 { return c.commit.Add(1) }
 
 // PublishCommitTS announces that every change committed at ts is now visible.
 //
-// Monotonic: a late publisher never moves the visible instant backwards.
-func (c *Clock) PublishCommitTS(ts uint64) {
-	for {
-		cur := c.visible.Load()
-		if cur >= ts {
-			return
-		}
-		if c.visible.CompareAndSwap(cur, ts) {
-			return
-		}
+// It does NOT simply raise the visible instant to ts. It records ts as finished
+// and moves the instant to the newest timestamp below which nothing is still in
+// flight, which is the same number only while commits are serialised. Publishing
+// out of allocation order is the case this exists for: a reader must never be
+// handed an instant that includes a commit but excludes an earlier one that has
+// not finished yet. See [commitLog] for the shape and the prior art.
+//
+// Monotonic: the frontier only ever advances, and a late publisher whose
+// timestamp is already behind it changes nothing.
+func (c *Clock) PublishCommitTS(ts uint64) { c.finishCommitTS(ts) }
+
+// AbandonCommitTS records that ts was allocated but will never be published —
+// the transaction failed after taking a timestamp and nothing it wrote will
+// ever be visible under it.
+//
+// It exists because the frontier is CONTIGUOUS: a timestamp that is neither
+// published nor abandoned stalls it forever, and every later commit becomes
+// permanently invisible to new readers while the commit log grows without
+// bound. An allocate-then-fail path is therefore obliged to call this, and the
+// obligation is why it is a named operation rather than an internal detail of
+// [Clock.PublishCommitTS].
+//
+// Every allocation in the module publishes today (graph/lpg/mvcc_write.go:91,
+// graph/lpg/mvcc_txn.go:133,171, graph/mvcc/stamp.go:148,163); the
+// allocate-then-fail path arrives with write-write conflict detection
+// (rmp #2300), which is what will call this.
+func (c *Clock) AbandonCommitTS(ts uint64) { c.finishCommitTS(ts) }
+
+// finishCommitTS marks ts finished and republishes the frontier.
+//
+// The visible store happens UNDER pubMu, not after it: two publishers releasing
+// the lock and then racing to store their own frontier could otherwise land the
+// older one last and move the visible instant backwards.
+func (c *Clock) finishCommitTS(ts uint64) {
+	c.pubMu.Lock()
+	frontier := c.log.finish(ts)
+	if frontier > c.visible.Load() {
+		c.visible.Store(frontier)
 	}
+	c.pubMu.Unlock()
+}
+
+// InFlightCommits reports how many allocated commit timestamps have not yet
+// finished: the distance between the frontier a reader starts at and the
+// newest timestamp handed out.
+//
+// It is the quantity to watch when readers look stale — a commit stuck between
+// allocation and publication holds the frontier for every reader — and it is
+// what makes the commit log's memory bound observable, since the log retains
+// exactly this window.
+//
+// Safe for concurrent use.
+func (c *Clock) InFlightCommits() uint64 {
+	allocated := c.commit.Load()
+	visible := c.visible.Load()
+	if allocated <= visible {
+		return 0
+	}
+	return allocated - visible
 }
 
 // ReadTS returns the timestamp a reader starting now must use.
@@ -164,10 +227,26 @@ func (c *Clock) PublishCommitTS(ts uint64) {
 //
 // Returning the published instant closes it: a transaction is either wholly
 // before a reader's start or wholly after it, with no window in between.
-// Publication is in allocation order because commits are serialised by the
-// write barrier, so one counter is enough and no in-progress list is needed —
-// which is what PostgreSQL's snapshot xip_list and Memgraph's
-// commit_log_->OldestActive() exist to supply when commits are NOT serialised.
+//
+// # And why the published instant is a CONTIGUOUS frontier, not a maximum
+//
+// This comment used to end by saying that publication happens in allocation
+// order because commits are serialised by the write barrier, so one counter
+// sufficed and no in-progress list was needed — "which is what PostgreSQL's
+// snapshot xip_list and Memgraph's commit_log_->OldestActive() exist to supply
+// when commits are NOT serialised". Sprint 334 is where commits stop being
+// serialised, so that is exactly what rmp #2298 supplied.
+//
+// The counter is no longer a maximum over published timestamps. It is the
+// newest timestamp below which NOTHING is still in flight, maintained by
+// [commitLog] on the publish path. Without that, writer B allocating 5 and
+// finishing before writer A's 4 would hand a reader an instant containing 5 but
+// not 4 — the same straddled commit described above, arrived at from the other
+// direction.
+//
+// The cost of the read is unchanged, and that is the point of the shape chosen:
+// one atomic load here, one comparison in [Visible]. See [commitLog] for the
+// prior art and the trade it accepts.
 func (c *Clock) ReadTS() uint64 { return c.visible.Load() }
 
 // NextTxID allocates a transaction id, drawn from above [TxIDBase] so it can

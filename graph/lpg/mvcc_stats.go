@@ -81,6 +81,17 @@ type MVCCStats struct {
 	// and the reason this field exists rather than being inferred from
 	// unexplained growth.
 	UnregisteredReaders int64
+	// InFlightCommits is how many commit timestamps have been allocated but
+	// have not finished: the distance between the instant a reader starts at
+	// and the newest timestamp handed out.
+	//
+	// It is the quantity to look at when readers appear stale, because the
+	// frontier is CONTIGUOUS — one commit stuck between allocation and
+	// publication holds it for every reader, however many later commits have
+	// already published (rmp #2298). It is also what the commit log retains, so
+	// a value that does not return to zero is both the staleness and the memory
+	// growth, named once.
+	InFlightCommits uint64
 }
 
 // OldestReaderAge returns how far behind the current instant the oldest active
@@ -114,6 +125,7 @@ func (g *Graph[N, W]) MVCCStats() MVCCStats {
 		Now:                 g.mvccClock.ReadTS(),
 		ActiveReaders:       g.horizon.Active(),
 		UnregisteredReaders: g.horizon.Unregistered(),
+		InFlightCommits:     g.mvccClock.InFlightCommits(),
 	}
 	s.Watermark = g.horizon.Oldest(s.Now)
 	s.Total = s.LabelDeltas + s.PropDeltas + s.AdjVersions +
@@ -138,6 +150,7 @@ func (g *Graph[N, W]) publishMVCCMetrics() {
 	metrics.SetGauge("lpg.mvcc.versions.bound", float64(s.Bound))
 	metrics.SetGauge("lpg.mvcc.watermark", float64(s.Watermark))
 	metrics.SetGauge("lpg.mvcc.oldest_reader_age", float64(s.OldestReaderAge()))
+	metrics.SetGauge("lpg.mvcc.in_flight_commits", float64(s.InFlightCommits))
 	metrics.SetGauge("lpg.mvcc.readers.active", float64(s.ActiveReaders))
 	metrics.SetGauge("lpg.mvcc.readers.unregistered", float64(s.UnregisteredReaders))
 }
