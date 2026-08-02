@@ -1846,3 +1846,36 @@ cache, and the audit remediation).
    **unreachable from pure Cypher**, because CREATE and MERGE both mint handles via
    `AddEdgeH` — handle 0 comes only from a raw `lpg`/`adjlist` `AddEdge` or a
    `store/txn` `OpAddEdge`.
+
+Incrementally synced at commit `d8847ce7` (2026-08-02, tasks #2300 and #2301,
+sprint 334 — write-write conflict detection extended to seven of eight versioned
+stores): +16 nodes (`Commit` `d8847ce7`; `Feature` `Write-write conflict
+detection`; `Component`s `writeCtx.conflict`, `noteNodeLife`,
+`nodeLifeShard.headStamp`, `sideVersions.headStamp`; 11 `Test`s — nine in the new
+`graph/lpg/mvcc_conflict_stores_test.go` covering node existence and each of the
+five per-edge side stores, plus
+`TestWriteCtx_VoidPrimitiveConflictDoomsTheTransaction` and
+`TestWriteCtx_DoomedTransactionRefusesEveryFurtherWrite` in
+`mvcc_writectx_test.go`). +edges: `Commit -[TOUCHES]->` `Package lpg` and `Spec
+design-write-conflict-detection.md`; `Commit -[FIXES]->` the new Feature and
+`Per-transaction write state`; the Feature `-[PART_OF]->` `MVCC as sole
+concurrency control` and `-[SPECIFIED_IN]->` the Spec; `VERIFIES` from all 17
+conflict-detection tests; `IMPLEMENTS` from the five Components. Provenance
+stamped on every node and edge touched.
+
+THE DEFECT THIS COMMIT CLOSED, recorded because it is a class rather than an
+incident: detection that only SKIPS a conflicting write, without recording it on
+the transaction, is a silent lost update whenever the primitive cannot return an
+error. `commit()` could not fail, so a transaction whose only conflicting write
+went through `removeNodeLabel` or `delNodeProperty` committed successfully having
+dropped it. The fix is Memgraph's `transaction->must_abort` read at
+`Storage::Commit`: `writeCtx.conflict` records, `labelTx.commit` returns
+`(uint64, error)` and aborts. A refused push now also returns `false` and all
+twelve callers abandon the mutation.
+
+COVERAGE IS 7/8, NOT 8/8. The adjacency (`graph/adjlist`) has no conflict
+detection: its version chain is stamped from a per-graph `mvcc.WriteStamp` and
+its commit window (`commitDepth`, `dirtyShards`, and each shard's `building`
+builder) is single-writer by contract. That is rmp #2301's remaining half and is
+tabulated in `docs/design-write-conflict-detection.md` so the gap is visible
+rather than implied.
