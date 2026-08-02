@@ -622,6 +622,15 @@ type Graph[N comparable, W any] struct {
 	// A POINTER, not a value: the horizon is 64 slots padded to a cache line
 	// each, so embedding it would put 8 KiB inside every Graph.
 	horizon *mvcc.Horizon
+	// conflict holds the FIRST write-write conflict detected against the open
+	// write transaction, or nil (rmp #2300). It is recorded rather than
+	// returned because a serialization failure aborts the whole transaction
+	// rather than one operation, and because Memgraph's PrepareForWrite does
+	// the same thing with transaction->has_serialization_error. Taken and
+	// cleared by [Graph.TakeConflict]; per-graph only for as long as the write
+	// stamp is (rmp #2301).
+	conflict atomic.Pointer[mvcc.Conflict]
+
 	// reclaimDebt counts versions created since the last reclamation pass, so
 	// the pass runs on a bounded amount of churn rather than on every commit.
 	// See [Graph.reclaimIfDue].
@@ -1863,6 +1872,15 @@ func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, info *commitInfo) error
 	// every match, so this guard is what keeps a delta per WRITE rather than a
 	// delta per statement.
 	if g.labelDeltasEnabled() && !bag.has(lid) {
+		// Write-write conflict (rmp #2300): the version about to be displaced
+		// must be one this transaction can SEE. If it is not, another
+		// transaction wrote it — still in flight, or committed after this
+		// snapshot began — and overwriting it would lose their update. Tested
+		// here because this is where the head is already in hand.
+		if g.noteConflict("node labels", sh.headStamp(id)) {
+			sh.mu.Unlock()
+			return g.TakeConflict()
+		}
 		ci, ts := g.deltaStamp(info)
 		sh.pushLabelDelta(id, undoRemoveLabel, lid, ci, ts, &g.labelDeltaActive)
 	}
@@ -2916,6 +2934,16 @@ func (g *Graph[N, W]) removeNodeLabelInfo(n N, name string, info *commitInfo) {
 		// actually being present for the same reason as the add path: removing
 		// a label the node does not carry changes nothing.
 		if g.labelDeltasEnabled() && bag.has(lid) {
+			// See setNodeLabelInfo for the rule. Checked BEFORE deltaStamp so
+			// a doomed write allocates no commit record. removeNodeLabelInfo
+			// cannot return an error, so the conflict is recorded and the
+			// removal is skipped: the transaction will abort at commit, and
+			// applying a doomed write would put a version on a chain whose head
+			// belongs to someone else.
+			if g.noteConflict("node labels", sh.headStamp(id)) {
+				sh.mu.Unlock()
+				return
+			}
 			ci, ts := g.deltaStamp(info)
 			sh.pushLabelDelta(id, undoAddLabel, lid, ci, ts, &g.labelDeltaActive)
 		}

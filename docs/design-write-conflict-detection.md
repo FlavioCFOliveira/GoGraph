@@ -149,15 +149,31 @@ Each already has the head in hand — it is the value being displaced — and ea
 already has a `mustUndo`-shaped stamp accessor (`preimageDelta.stamp`,
 `lifeStamp.at`), so the head timestamp needs no new plumbing.
 
-**What DOES need plumbing is the error.** These primitives return nothing today,
-and so do their callers (`SetNodeLabel` and friends). Threading a serialization
-failure out of them is the substance of the wiring, and it must reach the point
-that can abort the transaction and mark its commit record `AbortedTS` — not be
-swallowed at the first frame that has no error return.
+### Status
 
-That is deliberate scope, not an obstacle: an engine whose write primitives
-cannot report failure cannot have conflict detection, and the signature change
-is what makes the detection reachable rather than advisory.
+**Landed:** node labels (`setNodeLabelInfo`, `removeNodeLabelInfo`) and node
+properties (`setNodePropertyInfo`, `delNodePropertyInfo`), each covered by a
+test verified to become a **lost update** when the check is removed.
+
+**Remaining:** node existence, adjacency entries, and the five per-edge side
+stores. Until they land, the detector is PARTIAL — it reports clean on a store
+it does not cover while the update is silently lost — so `#2300` is not
+closeable and this section is the checklist.
+
+**How the error reaches the caller.** Several of these primitives, and several of their
+callers, return nothing — `removeNodeLabelInfo`, `delNodePropertyInfo` and all
+five per-edge side stores. Rather than cascade signature changes through the
+public Go API, the conflict is **recorded on the graph** and taken by the caller
+that can act on it (`Graph.TakeConflict`).
+
+That is Memgraph's shape rather than a way around it: `PrepareForWrite` sets
+`transaction->has_serialization_error = true` and returns a bool, and the error
+surfaces where the flag is read. A serialization failure aborts the *whole*
+transaction, not one label write, so a per-operation return value would be
+modelling it at the wrong granularity. A primitive that cannot return still
+skips its write once a conflict is recorded — the transaction is doomed, and
+applying a doomed write would put a version on a chain whose head belongs to
+someone else.
 
 A partial detector is worse than none: it would report clean on a store it does
 not cover while silently losing the update, and the caller cannot tell the
