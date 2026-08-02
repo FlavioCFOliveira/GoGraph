@@ -314,6 +314,15 @@ var historicalDocs = map[string]bool{
 	// assert nothing about the record; bench/r4audit/shortestpath_test.go
 	// reproduces the figures.
 	filepath.Join("docs", "benchmarks", "shortest-path-bidir-2026-07-27.md"): true,
+	// Quotes the three reproductions of rmp #2316 — an edge CREATE and an edge
+	// DELETE that a later clause of the same statement does not observe, and the
+	// node CREATE that it does — to name the shapes the investigation is about.
+	// Executing them here would assert nothing: they are valid Cypher that runs
+	// cleanly, and what is under discussion is the COUNT each returns, which
+	// this gate does not check. The behaviour itself is pinned in
+	// cypher/writer_rows_test.go, deliberately as OBSERVED rather than correct,
+	// so the remediation (rmp #2317) can change it.
+	filepath.Join("docs", "audit-same-statement-edge-visibility-2026-08-02.md"): true,
 }
 
 // TestDocumentedCypherExamplesRun executes every Cypher example the gated
