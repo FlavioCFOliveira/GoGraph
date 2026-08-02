@@ -234,6 +234,23 @@ type ExplicitTx struct {
 	// would re-acquire and panic on re-entrancy). Commit and Rollback release
 	// visMu via [lpg.Graph.UnlockBarrier] after their own in-barrier work.
 	barrierHeld bool
+
+	// view is the read instant every statement of a READ-ONLY handle executes
+	// at: one snapshot, opened by [Engine.BeginReadTx] and registered with the
+	// reclamation horizon for the whole lifetime of the transaction (rmp #2307).
+	// It is what makes an explicit read transaction SNAPSHOT-ISOLATED rather
+	// than read-committed — without it each Exec opened a fresh instant and a
+	// commit landing between two statements became visible mid-transaction.
+	//
+	// nil on a write handle, which needs no separate view: it holds visMu
+	// exclusively from BEGIN to COMMIT, so nothing else can publish a commit
+	// while it runs, and it must read the present to see its own writes.
+	//
+	// The horizon slot it occupies is released exactly once, in [release], so
+	// every exit path — Commit, Rollback, a panic in Exec, a panic in
+	// Commit/Rollback — returns it. A slot that is never returned pins the
+	// watermark for the life of the process.
+	view *pinnedView
 }
 
 // BeginTx opens an explicit, multi-statement transaction bound to ctx and
@@ -382,6 +399,11 @@ func (e *Engine) BeginReadTx(ctx context.Context) (*ExplicitTx, error) {
 		ctx:          ctx,
 		readOnly:     true,
 		unlockWriter: func() {}, // read-only: nothing to release
+		// One read instant for the whole transaction, registered with the
+		// reclamation horizon here and released exactly once in release()
+		// (rmp #2307). Taken LAST, after every failure return above, so a
+		// BeginReadTx that returns an error never leaves a slot pinned.
+		view: &pinnedView{snap: e.g.BeginRead()},
 		// buf, undo, walTx remain nil; barrierHeld stays false.
 	}, nil
 }
@@ -432,7 +454,11 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 		if queryHasWritingClause(query) || (ir.IsDDL(query) && !ir.IsShow(query)) {
 			return nil, ErrWriteInReadOnlyTx
 		}
-		return tx.eng.Run(tx.ctx, query, params)
+		// At the TRANSACTION's instant, not a fresh one (rmp #2307). Passing
+		// tx.view is the whole difference between snapshot isolation and
+		// read-committed here: runRead executes at that snapshot and, because
+		// the handle owns it, does not release it when the statement ends.
+		return tx.eng.runRead(tx.ctx, query, params, tx.view)
 	}
 	// A panic anywhere in the statement is converted to ErrInternalPanic by this
 	// boundary. Registered before the work below so it observes a panic raised in
@@ -713,6 +739,15 @@ func (tx *ExplicitTx) release() {
 		return
 	}
 	tx.finished = true
+	// Return the transaction's horizon slot before anything else (rmp #2307).
+	// The finished guard above makes this exactly-once across every exit path,
+	// and clearing view makes a double release unrepresentable rather than
+	// merely unlikely: EndRead on an already-returned slot would corrupt the
+	// watermark for every other reader.
+	if tx.view != nil {
+		tx.eng.g.EndRead(tx.view.snap)
+		tx.view = nil
+	}
 	// Release the visibility barrier BEFORE the writer serialisation (inverse
 	// acquisition order: writer outer, visMu inner).
 	if tx.barrierHeld {

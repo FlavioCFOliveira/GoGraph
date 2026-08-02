@@ -4,6 +4,50 @@ All notable changes to GoGraph are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **Isolation — an explicit read transaction is now SNAPSHOT ISOLATED across all
+  of its statements** (rmp #2307). `cypher.Engine.BeginReadTx` pins one MVCC read
+  instant at `BEGIN`, registers it with the reclamation horizon, and routes every
+  `Exec` on the handle at that instant, so a commit made by another transaction
+  between two statements is invisible to the second. A Bolt `BEGIN` with
+  `mode="r"` inherits this.
+
+  **This is an observable behaviour change, and it is strictly stronger.**
+  Previously each statement opened its own snapshot — read-committed across the
+  statements of the transaction — which made an explicit read transaction weaker
+  than a single autocommit statement, since an autocommit statement has always
+  had one instant for its whole duration. Transaction-wide snapshot isolation is
+  Memgraph's default and is stronger than Neo4j's documented multi-statement
+  read-transaction behaviour, so no caller relying on the old contract can
+  observe a *weaker* result. Code that depended on seeing another transaction's
+  commit mid-read-transaction must now open a new read transaction to see it.
+
+  The cost is explicit: an open read transaction pins the reclamation horizon, so
+  no version it can still reach is freed while it lives.
+  `lpg.MVCCStats.ActiveReaders` and `MVCCStats.OldestReaderAge()` report it, and
+  an abandoned Bolt handle is bounded by the existing idle reaper
+  (`Options.MaxTxIdleTime`) and total transaction timeout
+  (`Options.DefaultTxTimeout`), both of which roll the transaction back and so
+  return the horizon slot. Write transactions are unchanged: they reach the same
+  guarantee by holding the visibility barrier exclusively from `BEGIN` to
+  `COMMIT`.
+
+  openCypher TCK unchanged at its full baseline. See
+  [`docs/isolation-design.md`](docs/isolation-design.md).
+
+### Added
+
+- **`bench/mvccwrite` — the write-scaling harness and its regression gates**
+  (rmp #2297). Measures engine write throughput against writer count in two
+  wirings — store-less (the concurrency-control ceiling) and WAL-backed (where
+  group commit can pay) — and gates it in the short test layer so a change that
+  re-serialises the writers turns the local CI gate red. Entry baseline and the
+  full rationale in
+  [`docs/benchmarks/mvcc-write-scaling-2026-08-02.md`](docs/benchmarks/mvcc-write-scaling-2026-08-02.md).
+
 ## [0.10.0] — 2026-07-25
 
 The thirteenth published release of **GoGraph**, a Go module for graph

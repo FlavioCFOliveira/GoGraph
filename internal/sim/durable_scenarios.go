@@ -27,17 +27,23 @@ package sim
 // the store-layer tests is the end-to-end path (real Bolt wire -> engine ->
 // store -> WAL -> SimDisk) under a crash, not the coalescing arithmetic.
 //
-// # ST7 note: read-committed, not snapshot, isolation
+// # ST7 note: snapshot isolation, since rmp #2307
 //
-// [Engine.BeginReadTx] provides READ-COMMITTED isolation, not snapshot
-// isolation: each ExecAny takes its OWN per-statement lpg.Graph.View, so a read
-// observes the latest committed state and a later read in the same transaction
-// MAY observe a concurrent writer's commit (cypher/exectx.go BeginReadTx). The
-// literal "a read transaction does not observe a concurrent commit" is therefore
-// NOT a property this engine has — true snapshot isolation is the deferred
-// copy-on-write epic (#1671). [readTxIsolationScenario] instead certifies the
-// isolation guarantee the engine DOES provide — no dirty / partial-transaction
-// reads under concurrency — and that it survives a crash of the store (recovery
+// [Engine.BeginReadTx] provides SNAPSHOT ISOLATION across the whole
+// transaction: one read instant is pinned at BEGIN and every ExecAny on the
+// handle executes at it, so a commit made by a concurrent writer between two
+// statements is invisible to the second (cypher/exectx.go BeginReadTx).
+//
+// It said the opposite until rmp #2307 (sprint 334), when each ExecAny took its
+// own per-statement snapshot — read-committed across statements, so a later read
+// MAY have observed a concurrent commit — and the note here recorded that as a
+// property the engine did not have. It has it now, and it arrived through MVCC
+// version chains rather than the copy-on-write epic (#1671) once considered for
+// it. [readTxLoop] therefore asserts the two counts of one transaction are
+// EQUAL, which is the end-to-end certification of that level under fault
+// injection. [readTxIsolationScenario] additionally certifies the guarantee that
+// held at both levels — no dirty / partial-transaction reads under concurrency —
+// and that it survives a crash of the store (recovery
 // restores a whole number of committed batches, never a torn one).
 
 import (
@@ -564,11 +570,11 @@ const (
 // one) and that a fresh read-only transaction works on the recovered engine. It
 // is concurrent (leak/no-panic guarded), not bit-reproducible.
 //
-// It does NOT assert snapshot isolation (a read observing a fixed point-in-time
-// for the transaction's whole lifetime): BeginReadTx is read-committed by design
-// (see the ST7 note at the top of this file), so a later read MAY observe a
-// concurrent commit — asserting otherwise would test behaviour this engine does
-// not have.
+// It ALSO asserts snapshot isolation — a read observing a fixed point in time
+// for the transaction's whole lifetime — since rmp #2307 made that the
+// contract; see the ST7 note at the top of this file. Doing it here, rather
+// than only in cypher/readtx_snapshot_test.go, is what puts the property on the
+// end-to-end path under crash and fsync-fault injection.
 func readTxIsolationScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioReadTxIsolation,
@@ -741,10 +747,14 @@ func runReadTxIsolation(ctx context.Context, seed uint64) (*SimReport, error) {
 
 // readTxLoop repeatedly opens a read-only transaction and counts Person nodes
 // until done is closed or its context is cancelled, recording a dirty read (a
-// count not divisible by the batch) or a read error. It performs TWO counts per
-// transaction to exercise read-committed isolation across statements — the two
-// MAY differ (a concurrent commit landed between them, which is legal), but each
-// individually must be a whole batch (never a partial transaction).
+// count not divisible by the batch), an isolation violation, or a read error. It
+// performs TWO counts per transaction to exercise isolation ACROSS statements,
+// and asserts both properties the contract now gives:
+//
+//   - each count individually is a whole batch — never a partial transaction;
+//   - the two counts are EQUAL — the transaction observes one fixed instant
+//     (snapshot isolation, rmp #2307). They were allowed to differ until then,
+//     because each statement took its own snapshot.
 func readTxLoop(ctx context.Context, eng *cypher.Engine, done <-chan struct{}, dirty *dirtyObs, readErr *errObs) {
 	for {
 		select {
@@ -775,6 +785,17 @@ func readTxLoop(ctx context.Context, eng *cypher.Engine, done <-chan struct{}, d
 		}
 		if c2%int64(readTxBatch) != 0 {
 			dirty.set(c2)
+		}
+		// Snapshot isolation: both statements ran at the transaction's one
+		// pinned instant, so a batch committed between them is invisible to the
+		// second and the counts must agree. Checked only on a live context — a
+		// cancelled victim can return a zero count with no error.
+		if c1 != c2 && ctx.Err() == nil {
+			readErr.set(fmt.Errorf(
+				"isolation violation: two counts in ONE read transaction returned %d then %d; "+
+					"a commit that landed between them became visible, which is read-committed, "+
+					"not the snapshot isolation rmp #2307 contracts", c1, c2))
+			return
 		}
 	}
 }

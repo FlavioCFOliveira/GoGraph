@@ -2019,11 +2019,25 @@ func checkContext(ctx context.Context) error {
 	return nil
 }
 
+// pinnedView carries a caller-owned read view into the read path.
+//
+// A nil *pinnedView means "open your own snapshot and release it when the
+// statement finishes" — the autocommit contract, one instant per statement. A
+// non-nil one means "execute at THIS instant and do not release it", which is
+// what gives an explicit read transaction one instant for all of its statements
+// (rmp #2307).
+//
+// The wrapper exists because the snapshot itself cannot carry that distinction:
+// [lpg.Graph.BeginRead] legitimately returns nil when versioning is disarmed,
+// so a nil *lpg.Snapshot cannot be told apart from "no view supplied".
+type pinnedView struct{ snap *lpg.Snapshot }
+
 // Run parses, analyses, plans, and executes query, returning a materialised
-// [Result]. The query is built and drained inside the read visibility barrier
-// (Graph.View) so it observes a consistent, partial-transaction-free snapshot.
-// DDL statements take a dedicated fast path. Parameters are bound from params
-// and type-checked against the plan before execution.
+// [Result]. The query is built and drained at ONE read instant — a snapshot
+// opened here and released when the statement finishes — so it observes a
+// consistent, partial-transaction-free view. DDL statements take a dedicated
+// fast path. Parameters are bound from params and type-checked against the plan
+// before execution.
 //
 // If ctx is already cancelled or its deadline has elapsed when Run is called,
 // it returns promptly — before any parse, plan, or execution work — with an
@@ -2033,7 +2047,16 @@ func checkContext(ctx context.Context) error {
 // A recoverable panic raised while planning or executing the query is
 // intercepted and returned as an error wrapping [ErrInternalPanic]; it never
 // unwinds past this method to crash the embedding process.
-func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.Value) (res *Result, err error) {
+func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.Value) (*Result, error) {
+	return e.runRead(ctx, query, params, nil)
+}
+
+// runRead is the single read-execution path. It is [Engine.Run] with the read
+// view made explicit: at is nil for an autocommit statement, which opens and
+// releases its own snapshot, and non-nil for a statement of an explicit read
+// transaction, which executes at the transaction's instant and leaves releasing
+// it to [ExplicitTx.Commit] / [ExplicitTx.Rollback].
+func (e *Engine) runRead(ctx context.Context, query string, params map[string]expr.Value, at *pinnedView) (res *Result, err error) {
 	defer cmetrics.Time("cypher.Run").Stop()
 	defer func() {
 		if err != nil {
@@ -2148,8 +2171,21 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	// Memgraph takes `main_lock_` SHARED and reserves UNIQUE for global
 	// operations such as index creation — but a writer blocking writers is not
 	// what starved anybody.
-	snap := e.g.BeginRead()
-	defer e.g.EndRead(snap)
+	//
+	// AN EXPLICIT READ TRANSACTION SUPPLIES ITS OWN (rmp #2307). When at is
+	// non-nil the statement executes at the transaction's instant instead of
+	// opening a fresh one, which is what turns read-committed-across-statements
+	// into snapshot isolation for the whole transaction. The horizon slot is
+	// then owned by the handle, so it is NOT released here — releasing a
+	// snapshot the caller still holds would let reclamation free versions the
+	// next statement of that transaction can still reach.
+	var snap *lpg.Snapshot
+	if at != nil {
+		snap = at.snap
+	} else {
+		snap = e.g.BeginRead()
+		defer e.g.EndRead(snap)
+	}
 	// Sweep unreachable versions before building. It is once per query, not per
 	// row, and it is what stops a build-then-read workload paying a side-map
 	// probe forever for history nothing can reach; see lpg.Graph.ReclaimIdle

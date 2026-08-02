@@ -112,12 +112,22 @@ func TestReadTx_PermitsReads(t *testing.T) {
 	_ = res.Close()
 }
 
-// TestReadTx_ReadCommittedAcrossStatements verifies read-committed isolation:
-// a commit made by another (autocommit) transaction BETWEEN two statements of a
-// read-only transaction is observed by the second statement. This proves each
-// RUN takes its own fresh View snapshot rather than pinning one for the whole
-// transaction.
-func TestReadTx_ReadCommittedAcrossStatements(t *testing.T) {
+// TestReadTx_SnapshotIsolatedAcrossStatements verifies SNAPSHOT isolation: a
+// commit made by another (autocommit) transaction BETWEEN two statements of a
+// read-only transaction is NOT observed by the second statement, because every
+// statement of the handle executes at the one instant pinned by BeginReadTx.
+//
+// It asserted the opposite until rmp #2307 (sprint 334). The handle used to
+// acquire nothing and route each Exec back through Engine.Run, which opened a
+// fresh snapshot per statement — read-committed across statements, and so
+// strictly WEAKER than a single autocommit statement, which has always had one
+// instant for its whole duration. The behaviour change is deliberate, is
+// strictly stronger, and matches Memgraph's default; see
+// docs/isolation-design.md.
+//
+// The companion gate, with the reclamation-horizon and exit-path coverage, is
+// in readtx_snapshot_test.go.
+func TestReadTx_SnapshotIsolatedAcrossStatements(t *testing.T) {
 	eng, _ := storelessEngineWithGraph(t)
 
 	tx, err := eng.BeginReadTx(context.Background())
@@ -142,10 +152,12 @@ func TestReadTx_ReadCommittedAcrossStatements(t *testing.T) {
 		t.Fatalf("interleaved write drain: %v", err)
 	}
 
-	// Second read: must observe the freshly committed node (read-committed).
+	// Second read: must NOT observe the freshly committed node — the handle's
+	// instant predates the commit.
 	count2 := readCount(t, tx, "MATCH (n:M) RETURN count(n) AS c")
-	if count2 != 1 {
-		t.Fatalf("second read count = %d, want 1 (read-committed)", count2)
+	if count2 != 0 {
+		t.Fatalf("second read count = %d, want 0 (snapshot isolation): the read transaction "+
+			"observed a commit that landed after it began", count2)
 	}
 }
 

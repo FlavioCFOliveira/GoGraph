@@ -104,7 +104,9 @@ const (
 	// the idle reaper above is what closes that exposure. A READ transaction
 	// (BEGIN with mode "r") acquires no serialisation and no barrier, so those ARE
 	// concurrent and were previously unbounded per principal; that is what this
-	// caps, along with the session and cursor state each one holds.
+	// caps, along with the session and cursor state each one holds — and, since
+	// rmp #2307, the MVCC read snapshot each one pins for its lifetime, which
+	// holds the reclamation horizon back until the handle finishes.
 	//
 	// The count is of OPEN transactions, not of BEGINs queued on the writer
 	// serialisation: a burst of concurrent BEGINs from one principal is bounded by

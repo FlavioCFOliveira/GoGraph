@@ -305,6 +305,13 @@ The `BeginReadTx` read-only transaction is covered by two focused tests in
   would be a partial-transaction (dirty) read across the isolation barrier. The
   test is `-race`- and `goleak`-guarded with a deadlock watchdog.
 
+The **isolation level** itself is certified by the ST7 scenario
+(`internal/sim/durable_scenarios.go`), which since rmp #2307 asserts that the two
+counts taken inside ONE read transaction are equal — snapshot isolation across
+statements — on the end-to-end path under crash and fsync-fault injection. The
+level was per-statement read-committed until then, and ST7 recorded that as a
+property the engine did not have.
+
 ## Concurrency hypotheses chased
 
 The mem-pressure and cpu-starvation scenarios are backed by two focused

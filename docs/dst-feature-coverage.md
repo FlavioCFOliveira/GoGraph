@@ -101,10 +101,12 @@ crash/recovery.
 
 ### Read-transaction isolation
 
-`cypher.Engine.BeginReadTx` currently provides **read-committed** isolation (no
-dirty/partial reads), not snapshot isolation; true snapshot isolation is the
-deferred copy-on-write epic (#1671). The `readtx-isolation` scenario certifies
-the real, implemented contract.
+`cypher.Engine.BeginReadTx` provides **snapshot isolation across the whole
+transaction** since rmp #2307: one read instant is pinned at `BEGIN` and every
+statement of the handle executes at it. It was per-statement read-committed when
+this section was first written, and the `readtx-isolation` scenario — which
+asserts only that no dirty or partial read is ever observed — certifies a
+property both levels satisfy, so it remains valid under the stronger contract.
 
 ## Defects surfaced by this coverage work
 
@@ -127,8 +129,11 @@ The coverage work exercised the engine against these scenarios and found:
   point is a property-graph, not the edge-list the fault scenario builds. CSV
   and JSONL round-trips are covered. (A property-graph fixture would extend this
   to GraphML.)
-- **True snapshot isolation** for read transactions is the deferred CoW epic
-  (#1671); the DST certifies the current read-committed contract.
+- **Snapshot isolation for read transactions** shipped in rmp #2307 (sprint
+  334) via MVCC version chains rather than the copy-on-write epic (#1671) once
+  considered for it. The DST scenarios assert no-dirty-read, which the stronger
+  contract still satisfies; the isolation level itself is gated by
+  `cypher/readtx_snapshot_test.go` and `bolt/server/e2e_readtx_snapshot_test.go`.
 - **Multi-member WAL group-commit coalescing / fail-all** is engine-unreachable
   (serialised under `visMu`) and is covered by store-layer unit tests, not the
   DST — see the group-commit clarification above.

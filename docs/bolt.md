@@ -101,9 +101,18 @@ after 5.0 s, the idle bound.
 `MaxOpenTxPerPrincipal` bounds the other dimension. Note where it binds: a write
 transaction holds the writer serialisation, so the engine already caps those at
 one server-wide, and this limit is therefore about **read** transactions
-(`BEGIN` with `mode: "r"`), which acquire nothing and can genuinely be
-concurrent. It counts open transactions, not `BEGIN`s queued on the writer —
-concurrent `BEGIN`s are bounded by `MaxConnections`.
+(`BEGIN` with `mode: "r"`), which take no writer serialisation and no barrier and
+can genuinely be concurrent. It counts open transactions, not `BEGIN`s queued on
+the writer — concurrent `BEGIN`s are bounded by `MaxConnections`.
+
+Since rmp #2307 a read transaction does hold one thing: an MVCC read snapshot,
+pinned at `BEGIN` for its whole lifetime. That is what gives it **snapshot
+isolation across all of its statements** — a commit landing between two `RUN`s is
+invisible to the second — and it is also why the two bounds above matter more
+than they did: while the handle is open, no version it can still reach may be
+reclaimed. Both reaps roll the transaction back, which returns the snapshot;
+`lpg.MVCCStats.ActiveReaders` and `OldestReaderAge()` are where a leak would
+show.
 
 Both events are separately observable: `bolt.server.tx.idlereaped` counts
 transactions reaped for silence, `bolt.server.tx.timedout` those that exceeded

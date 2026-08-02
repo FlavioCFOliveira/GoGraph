@@ -1091,7 +1091,8 @@ This API is the engine substrate for the Bolt `BEGIN` / `RUN` / `COMMIT` /
 For read-only work, prefer `Engine.BeginReadTx`. It opens an explicit
 transaction that acquires **neither** the writer serialisation, **nor** the
 visibility barrier, **nor** a WAL transaction, so it never serialises behind, or
-blocks, a concurrent writer — roughly doubling concurrent read throughput.
+blocks, a concurrent writer — roughly doubling concurrent read throughput. What
+it does acquire is one MVCC read snapshot, held for the transaction's lifetime.
 
 ```go
 func (e *Engine) BeginReadTx(ctx context.Context) (*cypher.ExplicitTx, error)
@@ -1104,13 +1105,22 @@ It returns the same `*ExplicitTx` handle, with these differences from `BeginTx`:
   `cypher.ErrWriteInReadOnlyTx` **before** it runs. This guard is what keeps the
   lock-free read path safe: a write would otherwise execute with no writer lock,
   no barrier, and no WAL.
-- **Read-committed isolation across statements.** Each `Exec` takes its own
-  per-statement snapshot, so reads observe the latest committed state across the
-  statements of the transaction (matching Neo4j's default), rather than a single
-  snapshot for the whole transaction.
+- **Snapshot isolation across the whole transaction.** `BeginReadTx` pins ONE
+  read instant and every `Exec` on the handle executes at it, so a commit made by
+  anyone else between two statements is invisible to the second. This is
+  stronger than Neo4j's documented multi-statement read-transaction behaviour
+  and matches Memgraph's default. Until rmp #2307 each `Exec` took its own
+  per-statement snapshot — read-committed across statements — which made an
+  explicit read transaction weaker than a single autocommit statement.
+- **It pins the reclamation horizon while it is open.** No version the
+  transaction could still reach is freed until it finishes, so a long-lived read
+  transaction holds version memory. `lpg.MVCCStats.ActiveReaders` and
+  `OldestReaderAge()` report it. Finish the handle promptly; over Bolt, the idle
+  and total transaction timeouts bound an abandoned one.
 - **Teardown-only finish.** The caller must still finish the handle with exactly
-  one `Commit` or `Rollback`; on a read-only handle both are no-ops, because
-  nothing was acquired.
+  one `Commit` or `Rollback`. On a read-only handle neither makes anything
+  durable — but both release the transaction's read snapshot, so skipping them
+  leaks a horizon slot for the life of the process.
 
 ```go
 tx, err := eng.BeginReadTx(ctx)

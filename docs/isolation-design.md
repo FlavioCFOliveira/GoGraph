@@ -80,15 +80,61 @@ We therefore target SI.
 `cypher.Engine.BeginReadTx`, which acquires **neither** the single-writer
 serialisation **nor** the visibility barrier **nor** a WAL transaction.
 Each `RUN` inside it executes through the normal concurrent read path
-(`Engine.Run`), so read-only transactions run concurrently with one another
-instead of serialising on the writer mutex. The isolation this provides is
-**per-statement snapshot isolation** — one pinned start timestamp per `RUN`,
-not one for the whole transaction — matching Neo4j's documented default for the
-multi-statement read-transaction case. Before rmp #2290 it was per-statement
-READ-COMMITTED: each `RUN` took a fresh `Graph.View` RLock, which excluded
-writers for its duration but gave the statement no stable instant of its own.
-The strengthening is a by-product of retiring the barrier, not a separate
-change. Safety rests on one load-bearing
+(`Engine.runRead`), so read-only transactions run concurrently with one another
+instead of serialising on the writer mutex.
+
+**Isolation level: SNAPSHOT ISOLATION for the whole transaction** since
+rmp #2307 (sprint 334). `BeginReadTx` pins ONE start timestamp
+(`lpg.Graph.BeginRead`), registers it with the reclamation horizon, and routes
+every statement of the handle at that instant; `Commit`/`Rollback` return the
+horizon slot exactly once, on every exit path. A commit that lands between two
+statements of an open read transaction is therefore invisible to the second.
+
+This is a deliberate, observable strengthening, and it went through two weaker
+levels to get here:
+
+| Until | Level | Mechanism |
+|---|---|---|
+| rmp #2290 | per-statement **read-committed** | each `RUN` took a fresh `Graph.View` RLock — writers excluded for its duration, but no stable instant of its own |
+| rmp #2307 | per-statement **snapshot isolation** | each `RUN` pinned its own start timestamp; a commit between statements was still visible |
+| now | transaction-wide **snapshot isolation** | one start timestamp, pinned at `BEGIN`, used by every statement |
+
+Until #2307 an explicit read transaction was therefore strictly WEAKER than a
+single autocommit statement, which has always had one instant for its whole
+duration — exactly backwards, and a direct consequence of MVCC not yet being the
+norm. Transaction-wide SI is Memgraph's default and is strictly stronger than
+Neo4j's documented multi-statement read-transaction behaviour, so no client
+relying on the previous contract can observe a *weaker* result.
+
+**The cost is real and is observable.** A transaction-lifetime snapshot pins the
+reclamation horizon: while the handle is open, no version it can still reach may
+be freed. `lpg.MVCCStats` names it — `ActiveReaders` counts the registered
+handles and `OldestReaderAge()` says how far behind the oldest one is. An
+abandoned handle is bounded by the Bolt idle reaper (`Options.MaxTxIdleTime`,
+rmp #2175) and the total transaction timeout (`Options.DefaultTxTimeout`), both
+of which roll the transaction back and so return the slot.
+
+**Known bound: 64 concurrently registered readers.** The horizon has
+`horizonSlots = 64` exclusive slots (`graph/mvcc/horizon.go:58`). A reader that
+cannot get one is *unregistered*: it still reads correctly, but the watermark
+collapses to zero and **reclamation stops entirely** until it leaves — the sound
+direction, and the one state in which version memory has no bound. Measured at
+2026-08-02:
+
+| concurrently open read transactions | `ActiveReaders` | `UnregisteredReaders` | `Watermark` |
+|---:|---:|---:|---:|
+| 64 | 64 | 0 | 1 (reclaiming) |
+| 65 | 64 | 1 | **0 (suspended)** |
+| 128 | 64 | 64 | **0 (suspended)** |
+
+It recovers cleanly: once the handles close, `UnregisteredReaders` returns to 0
+and the watermark to the clock. This is not a new failure mode — a long
+analytical query already held a slot for its whole duration, and one was
+measured at 95 seconds — but a transaction-lifetime snapshot makes it far easier
+to reach, because an *idle* open handle now occupies a slot too. Sizing the slot
+count from a benchmark rather than from argument is rmp #2315.
+
+Safety rests on one load-bearing
 invariant: a read-only transaction **rejects every writing clause and DDL**
 (`ErrWriteInReadOnlyTx`, surfaced to Bolt as `Neo.ClientError.Request.Invalid`)
 *before* execution — a write on this lock-free path would otherwise run with no
