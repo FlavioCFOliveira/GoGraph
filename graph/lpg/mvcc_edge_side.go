@@ -18,48 +18,67 @@ package lpg
 // The presence check comes FIRST so a re-assertion records no version. That is
 // not a micro-optimisation: MERGE's match branch re-asserts a relationship type
 // on every idempotent match, so without the guard one statement would leave one
-// record per match instead of none.
-func (g *Graph[N, W]) addOverflowVersioned(sh *edgeLabelShard, k edgeKey, lid LabelID) bool {
+// record per match instead of none — and, since only a write that RECORDS a
+// version can conflict, it is also what keeps an idempotent re-assertion from
+// aborting a transaction that changed nothing.
+func (g *Graph[N, W]) addOverflowVersioned(sh *edgeLabelShard, k edgeKey, lid LabelID, tx *writeCtx) bool {
 	if sh.hasOverflow(k, lid) {
 		return false
 	}
-	g.pushOverflowVersion(sh, k)
+	if !g.pushOverflowVersion(sh, k, tx) {
+		return false
+	}
 	return sh.addOverflow(k, lid)
 }
 
 // removeOverflowVersioned records the pre-image and then detaches lid from k's
 // overflow list, reporting whether lid was present. The caller must hold the
 // shard's write lock.
-func (g *Graph[N, W]) removeOverflowVersioned(sh *edgeLabelShard, k edgeKey, lid LabelID) bool {
+func (g *Graph[N, W]) removeOverflowVersioned(sh *edgeLabelShard, k edgeKey, lid LabelID, tx *writeCtx) bool {
 	if !sh.hasOverflow(k, lid) {
 		return false
 	}
-	g.pushOverflowVersion(sh, k)
+	if !g.pushOverflowVersion(sh, k, tx) {
+		return false
+	}
 	return sh.removeOverflow(k, lid)
 }
 
 // clearOverflowVersioned records the pre-image and then drops every overflow
 // label on k, returning how many were dropped. The caller must hold the shard's
 // write lock.
-func (g *Graph[N, W]) clearOverflowVersioned(sh *edgeLabelShard, k edgeKey) int {
+func (g *Graph[N, W]) clearOverflowVersioned(sh *edgeLabelShard, k edgeKey, tx *writeCtx) int {
 	if len(sh.overflow[k]) == 0 {
 		return 0
 	}
-	g.pushOverflowVersion(sh, k)
+	if !g.pushOverflowVersion(sh, k, tx) {
+		return 0
+	}
 	return sh.clearOverflow(k)
 }
 
-// pushOverflowVersion records the overflow list of k before a change. The
-// caller must hold the shard's write lock.
+// pushOverflowVersion records the overflow list of k before a change, and
+// reports whether the change may proceed. The caller must hold the shard's
+// write lock.
+//
+// It returns FALSE when tx may not displace the newest version — a write-write
+// conflict (rmp #2300) — and in that case records nothing and mutates nothing.
+// The caller must abandon its mutation too: the transaction is doomed, and
+// applying the change to the stored value while recording no pre-image would
+// leave the store holding a write that no reader can ever undo.
 //
 // The pre-image is COPIED, because the stored slice is appended to in place by
 // [edgeLabelShard.addOverflow] and truncated in place by removeOverflow, so
 // retaining the header alone would hand a reader a window onto a mutated array.
 // The copy is one or two elements: overflow exists only for a pair that already
 // carries a second relationship type.
-func (g *Graph[N, W]) pushOverflowVersion(sh *edgeLabelShard, k edgeKey) {
+func (g *Graph[N, W]) pushOverflowVersion(sh *edgeLabelShard, k edgeKey, tx *writeCtx) bool {
 	if !g.mvccArmed {
-		return
+		return true
+	}
+	if head := sh.v.headStamp(k); tx.conflicts(head) {
+		_ = tx.conflictErr("edge relationship types", head)
+		return false
 	}
 	cur, had := sh.overflow[k]
 	var pre []LabelID
@@ -67,8 +86,9 @@ func (g *Graph[N, W]) pushOverflowVersion(sh *edgeLabelShard, k edgeKey) {
 		pre = make([]LabelID, len(cur))
 		copy(pre, cur)
 	}
-	info, ts := g.stamp.Stamp()
+	info, ts := g.deltaStamp(tx.record())
 	sh.v.push(k, pre, had, info, ts, &g.edgeLabelVersionActive)
+	return true
 }
 
 // overflowLabelsAsOf returns the overflow relationship types of k as they were
@@ -99,9 +119,16 @@ func (g *Graph[N, W]) overflowLabelsAsOf(sh *edgeLabelShard, k edgeKey, s *Snaps
 // mutator may grow in place, so the pre-image is deep-copied by
 // [cloneLabelBag] — the same reason the node-label reader copies before
 // applying an undo.
-func (g *Graph[N, W]) pushHandleLabelVersion(sh *edgeHandleLabelShard, k edgeKey, handle uint64) {
+// It returns FALSE when tx may not displace the newest version; see
+// [Graph.pushOverflowVersion] for why the caller must then abandon its mutation.
+func (g *Graph[N, W]) pushHandleLabelVersion(sh *edgeHandleLabelShard, k edgeKey, handle uint64, tx *writeCtx) bool {
 	if !g.mvccArmed {
-		return
+		return true
+	}
+	key := edgeHandleKey{pair: k, handle: handle}
+	if head := sh.v.headStamp(key); tx.conflicts(head) {
+		_ = tx.conflictErr("edge relationship types by handle", head)
+		return false
 	}
 	var pre labelBag
 	had := false
@@ -112,8 +139,9 @@ func (g *Graph[N, W]) pushHandleLabelVersion(sh *edgeHandleLabelShard, k edgeKey
 			pre = cloneLabelBag(bag)
 		}
 	}
-	info, ts := g.stamp.Stamp()
-	sh.v.push(edgeHandleKey{pair: k, handle: handle}, pre, had, info, ts, &g.edgeHandleLabelVersionActive)
+	info, ts := g.deltaStamp(tx.record())
+	sh.v.push(key, pre, had, info, ts, &g.edgeHandleLabelVersionActive)
+	return true
 }
 
 // handleLabelBagAsOf returns the label bag of one edge instance as it was at s,
@@ -139,9 +167,16 @@ func (g *Graph[N, W]) handleLabelBagAsOf(sh *edgeHandleLabelShard, k edgeKey, ha
 
 // pushHandlePropVersion records the property bag of one edge instance before a
 // change. The caller must hold the shard's lock.
-func (g *Graph[N, W]) pushHandlePropVersion(sh *edgeHandlePropShard, k edgeKey, handle uint64) {
+// It returns FALSE when tx may not displace the newest version; see
+// [Graph.pushOverflowVersion].
+func (g *Graph[N, W]) pushHandlePropVersion(sh *edgeHandlePropShard, k edgeKey, handle uint64, tx *writeCtx) bool {
 	if !g.mvccArmed {
-		return
+		return true
+	}
+	key := edgeHandleKey{pair: k, handle: handle}
+	if head := sh.v.headStamp(key); tx.conflicts(head) {
+		_ = tx.conflictErr("edge properties by handle", head)
+		return false
 	}
 	var pre propBag
 	had := false
@@ -152,17 +187,25 @@ func (g *Graph[N, W]) pushHandlePropVersion(sh *edgeHandlePropShard, k edgeKey, 
 			pre = clonePropBag(bag)
 		}
 	}
-	info, ts := g.stamp.Stamp()
-	sh.v.push(edgeHandleKey{pair: k, handle: handle}, pre, had, info, ts, &g.edgeHandlePropVersionActive)
+	info, ts := g.deltaStamp(tx.record())
+	sh.v.push(key, pre, had, info, ts, &g.edgeHandlePropVersionActive)
+	return true
 }
 
 // ── per-instance relationship types and properties (keyed by ordinal) ────────
 
 // pushInstanceLabelVersion records the label bag of the (pair, ordinal)
 // instance before a change. The caller must hold the shard's write lock.
-func (g *Graph[N, W]) pushInstanceLabelVersion(sh *edgeInstanceLabelShard, k edgeKey, idx int64) {
+// It returns FALSE when tx may not displace the newest version; see
+// [Graph.pushOverflowVersion].
+func (g *Graph[N, W]) pushInstanceLabelVersion(sh *edgeInstanceLabelShard, k edgeKey, idx int64, tx *writeCtx) bool {
 	if !g.mvccArmed {
-		return
+		return true
+	}
+	key := edgeInstanceKey{pair: k, idx: idx}
+	if head := sh.v.headStamp(key); tx.conflicts(head) {
+		_ = tx.conflictErr("edge relationship types by ordinal", head)
+		return false
 	}
 	var pre labelBag
 	had := false
@@ -173,15 +216,23 @@ func (g *Graph[N, W]) pushInstanceLabelVersion(sh *edgeInstanceLabelShard, k edg
 			pre = cloneLabelBag(bag)
 		}
 	}
-	info, ts := g.stamp.Stamp()
-	sh.v.push(edgeInstanceKey{pair: k, idx: idx}, pre, had, info, ts, &g.edgeInstanceLabelVersionActive)
+	info, ts := g.deltaStamp(tx.record())
+	sh.v.push(key, pre, had, info, ts, &g.edgeInstanceLabelVersionActive)
+	return true
 }
 
 // pushInstancePropVersion records the property bag of the (pair, ordinal)
 // instance before a change. The caller must hold the shard's write lock.
-func (g *Graph[N, W]) pushInstancePropVersion(sh *edgeInstancePropShard, k edgeKey, idx int64) {
+// It returns FALSE when tx may not displace the newest version; see
+// [Graph.pushOverflowVersion].
+func (g *Graph[N, W]) pushInstancePropVersion(sh *edgeInstancePropShard, k edgeKey, idx int64, tx *writeCtx) bool {
 	if !g.mvccArmed {
-		return
+		return true
+	}
+	key := edgeInstanceKey{pair: k, idx: idx}
+	if head := sh.v.headStamp(key); tx.conflicts(head) {
+		_ = tx.conflictErr("edge properties by ordinal", head)
+		return false
 	}
 	var pre propBag
 	had := false
@@ -192,8 +243,9 @@ func (g *Graph[N, W]) pushInstancePropVersion(sh *edgeInstancePropShard, k edgeK
 			pre = clonePropBag(bag)
 		}
 	}
-	info, ts := g.stamp.Stamp()
-	sh.v.push(edgeInstanceKey{pair: k, idx: idx}, pre, had, info, ts, &g.edgeInstancePropVersionActive)
+	info, ts := g.deltaStamp(tx.record())
+	sh.v.push(key, pre, had, info, ts, &g.edgeInstancePropVersionActive)
+	return true
 }
 
 // ── whole-pair drops ─────────────────────────────────────────────────────────
@@ -204,41 +256,59 @@ func (g *Graph[N, W]) pushInstancePropVersion(sh *edgeInstancePropShard, k edgeK
 // pre-image recorded. The loops are over the pair's own inner map, so their
 // cost is the number of parallel edges the pair had, and they run only on the
 // path that is already deleting them.
+//
+// Each reports whether every instance could be recorded. A conflict on ANY
+// instance refuses the whole pair drop: the pair is one unit as far as the
+// caller is concerned, and dropping part of it would leave the store in a state
+// no serial schedule produces. The loop stops at the first refusal rather than
+// recording pre-images the transaction can never publish.
 
-func (g *Graph[N, W]) pushHandleLabelVersionsForPair(sh *edgeHandleLabelShard, k edgeKey) {
+func (g *Graph[N, W]) pushHandleLabelVersionsForPair(sh *edgeHandleLabelShard, k edgeKey, tx *writeCtx) bool {
 	if !g.mvccArmed {
-		return
+		return true
 	}
 	for handle := range sh.m[k] {
-		g.pushHandleLabelVersion(sh, k, handle)
+		if !g.pushHandleLabelVersion(sh, k, handle, tx) {
+			return false
+		}
 	}
+	return true
 }
 
-func (g *Graph[N, W]) pushHandlePropVersionsForPair(sh *edgeHandlePropShard, k edgeKey) {
+func (g *Graph[N, W]) pushHandlePropVersionsForPair(sh *edgeHandlePropShard, k edgeKey, tx *writeCtx) bool {
 	if !g.mvccArmed {
-		return
+		return true
 	}
 	for handle := range sh.m[k] {
-		g.pushHandlePropVersion(sh, k, handle)
+		if !g.pushHandlePropVersion(sh, k, handle, tx) {
+			return false
+		}
 	}
+	return true
 }
 
-func (g *Graph[N, W]) pushInstanceLabelVersionsForPair(sh *edgeInstanceLabelShard, k edgeKey) {
+func (g *Graph[N, W]) pushInstanceLabelVersionsForPair(sh *edgeInstanceLabelShard, k edgeKey, tx *writeCtx) bool {
 	if !g.mvccArmed {
-		return
+		return true
 	}
 	for idx := range sh.m[k] {
-		g.pushInstanceLabelVersion(sh, k, idx)
+		if !g.pushInstanceLabelVersion(sh, k, idx, tx) {
+			return false
+		}
 	}
+	return true
 }
 
-func (g *Graph[N, W]) pushInstancePropVersionsForPair(sh *edgeInstancePropShard, k edgeKey) {
+func (g *Graph[N, W]) pushInstancePropVersionsForPair(sh *edgeInstancePropShard, k edgeKey, tx *writeCtx) bool {
 	if !g.mvccArmed {
-		return
+		return true
 	}
 	for idx := range sh.m[k] {
-		g.pushInstancePropVersion(sh, k, idx)
+		if !g.pushInstancePropVersion(sh, k, idx, tx) {
+			return false
+		}
 	}
+	return true
 }
 
 // ── reclamation ──────────────────────────────────────────────────────────────

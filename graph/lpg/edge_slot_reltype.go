@@ -214,6 +214,13 @@ func (g *Graph[N, W]) ForEachPairOverflowRelTypeByID(srcID, dstID graph.NodeID, 
 //
 // SetEdgeRelTypeAtSlotByID is safe for concurrent use.
 func (g *Graph[N, W]) SetEdgeRelTypeAtSlotByID(srcID, dstID graph.NodeID, ordinal int, name string) bool {
+	return g.setEdgeRelTypeAtSlotByIDInfo(srcID, dstID, ordinal, name, nil)
+}
+
+// setEdgeRelTypeAtSlotByIDInfo is [Graph.SetEdgeRelTypeAtSlotByID] with an explicit
+// write transaction; tx is nil for a direct Go-API mutation, which is committed the
+// instant it is made and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) setEdgeRelTypeAtSlotByIDInfo(srcID, dstID graph.NodeID, ordinal int, name string, tx *writeCtx) bool {
 	if ordinal < 0 {
 		return false
 	}
@@ -222,7 +229,7 @@ func (g *Graph[N, W]) SetEdgeRelTypeAtSlotByID(srcID, dstID graph.NodeID, ordina
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.Lock()
-	resolved, changed := g.setSlotRelTypeLocked(k, ordinal, lid, enc)
+	resolved, changed := g.setSlotRelTypeLocked(k, ordinal, lid, enc, tx)
 	sh.mu.Unlock()
 	if !resolved {
 		return false
@@ -241,7 +248,7 @@ func (g *Graph[N, W]) SetEdgeRelTypeAtSlotByID(srcID, dstID graph.NodeID, ordina
 // setSlotRelTypeLocked places lid on the slot of k at the canonical ordinal. The
 // caller must hold k's edge-label shard write lock. It reports whether the
 // ordinal resolved to a slot and whether the type state actually changed.
-func (g *Graph[N, W]) setSlotRelTypeLocked(k edgeKey, ordinal int, lid LabelID, enc uint32) (resolved, changed bool) {
+func (g *Graph[N, W]) setSlotRelTypeLocked(k edgeKey, ordinal int, lid LabelID, enc uint32, tx *writeCtx) (resolved, changed bool) {
 	neighbours, _, handles := g.adj.LoadEntryH(k.src)
 	var scratch [8]int
 	slots := canonicalPairSlots(neighbours, handles, k.dst, scratch[:0])
@@ -261,7 +268,7 @@ func (g *Graph[N, W]) setSlotRelTypeLocked(k edgeKey, ordinal int, lid LabelID, 
 	case enc:
 		return true, false
 	}
-	return true, g.addPairOverflowLocked(k, lid)
+	return true, g.addPairOverflowLocked(k, lid, tx)
 }
 
 // AddEdgeRelTypeOverflowByID adds name to the OVERFLOW list of the directed pair
@@ -281,11 +288,18 @@ func (g *Graph[N, W]) setSlotRelTypeLocked(k edgeKey, ordinal int, lid LabelID, 
 //
 // AddEdgeRelTypeOverflowByID is safe for concurrent use.
 func (g *Graph[N, W]) AddEdgeRelTypeOverflowByID(srcID, dstID graph.NodeID, name string) bool {
+	return g.addEdgeRelTypeOverflowByIDInfo(srcID, dstID, name, nil)
+}
+
+// addEdgeRelTypeOverflowByIDInfo is [Graph.AddEdgeRelTypeOverflowByID] with an explicit write transaction; tx is
+// nil for a direct Go-API mutation, which is committed the instant it is made
+// and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) addEdgeRelTypeOverflowByIDInfo(srcID, dstID graph.NodeID, name string, tx *writeCtx) bool {
 	lid := g.reg.Intern(name)
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.Lock()
-	changed := g.addPairOverflowLocked(k, lid)
+	changed := g.addPairOverflowLocked(k, lid, tx)
 	sh.mu.Unlock()
 	g.edgeIdx.Add(uint32(lid), srcID)
 	if changed {
@@ -297,9 +311,9 @@ func (g *Graph[N, W]) AddEdgeRelTypeOverflowByID(srcID, dstID graph.NodeID, name
 // addPairOverflowLocked appends lid to k's overflow list, keeping the
 // [Graph.edgeLabelOverflowActive] gate exact. The caller must hold k's
 // edge-label shard write lock.
-func (g *Graph[N, W]) addPairOverflowLocked(k edgeKey, lid LabelID) bool {
+func (g *Graph[N, W]) addPairOverflowLocked(k edgeKey, lid LabelID, tx *writeCtx) bool {
 	sh := g.edgeLabelShardFor(k)
-	if !g.addOverflowVersioned(sh, k, lid) {
+	if !g.addOverflowVersioned(sh, k, lid, tx) {
 		return false
 	}
 	g.edgeLabelOverflowActive.Add(1)

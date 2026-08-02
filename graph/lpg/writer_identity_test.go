@@ -93,7 +93,7 @@ func TestWriter_ReadsItsOwnUncommittedWork(t *testing.T) {
 		t.Fatal("an uncommitted label is visible to a reader that is not the writer — a dirty read")
 	}
 
-	ts := tx.commit()
+	ts := mustCommit(t, tx)
 	after := &Snapshot{startTS: ts}
 	if !g.ReadAt(after).HasNodeLabel("a", "Marked") {
 		t.Fatal("the label is not visible after commit")
@@ -150,7 +150,7 @@ func TestWriter_DoesNotObserveAnotherInFlightWriter(t *testing.T) {
 
 	// A commits. B, whose instant predates that commit, still must not see it —
 	// this is snapshot isolation, not read-committed.
-	tsA := txA.commit()
+	tsA := mustCommit(t, txA)
 	if viewB.HasNodeLabel("a", "FromA") {
 		t.Fatalf("B observes A's label committed at %d, after B began at %d", tsA, txB.ctx.startTS)
 	}
@@ -162,7 +162,7 @@ func TestWriter_DoesNotObserveAnotherInFlightWriter(t *testing.T) {
 	if now.HasNodeLabel("b", "FromB") {
 		t.Fatal("a reader sees B's label while B is still in flight")
 	}
-	tsB := txB.commit()
+	tsB := mustCommit(t, txB)
 	if tsB <= tsA {
 		t.Fatalf("B committed at %d, not after A at %d", tsB, tsA)
 	}

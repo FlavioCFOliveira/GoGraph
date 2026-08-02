@@ -161,7 +161,7 @@ func TestPropTx_CommitIsAtomic(t *testing.T) {
 			t.Fatalf("node %s: the writing transaction cannot see its own write", n)
 		}
 	}
-	commitTS := tx.commit()
+	commitTS := mustCommit(t, tx)
 	for n, id := range ids {
 		if bag := g.propBagAsOf(id, commitTS, 0); func() bool { _, had := bag.get(keyID); return !had }() {
 			t.Fatalf("node %s: a reader after the commit cannot see the property", n)
@@ -180,7 +180,7 @@ func TestPropTx_CommitIsAtomic(t *testing.T) {
 			t.Fatalf("node %s lost the property to an UNCOMMITTED delete", n)
 		}
 	}
-	after := tx2.commit()
+	after := mustCommit(t, tx2)
 	for n, id := range ids {
 		if bag := g.propBagAsOf(id, after, 0); func() bool { _, had := bag.get(keyID); return had }() {
 			t.Fatalf("node %s still carries the property after the delete committed", n)

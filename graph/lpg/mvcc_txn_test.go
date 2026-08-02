@@ -98,7 +98,7 @@ func TestLabelTx_CommitIsAtomic(t *testing.T) {
 		}
 	}
 
-	commitTS := tx.commit()
+	commitTS := mustCommit(t, tx)
 
 	// BEHAVIOURAL, after commit: a reader that started earlier still sees
 	// nothing; one starting now sees everything.
@@ -144,14 +144,14 @@ func TestLabelTx_DoubleFinishPanics(t *testing.T) {
 		t.Run(second, func(t *testing.T) {
 			g, _ := txGraph(t, "a")
 			tx := g.beginLabelTx()
-			tx.commit()
+			_, _ = tx.commit()
 			defer func() {
 				if recover() == nil {
 					t.Fatalf("a second %s did not panic", second)
 				}
 			}()
 			if second == "commit" {
-				tx.commit()
+				_, _ = tx.commit()
 			} else {
 				tx.abort()
 			}
@@ -215,7 +215,7 @@ func TestLabelTx_RemoveIsAlsoAtomic(t *testing.T) {
 			t.Fatalf("node %s: the removing transaction still sees the label it removed", n)
 		}
 	}
-	commitTS := tx.commit()
+	commitTS := mustCommit(t, tx)
 	for n, id := range ids {
 		if bag := g.labelBagAsOf(id, commitTS, 0); bag.has(lid) {
 			t.Fatalf("node %s still carries L after the removal committed", n)

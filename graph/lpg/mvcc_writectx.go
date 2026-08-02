@@ -42,6 +42,8 @@ package lpg
 // call is per-operation atomic by contract, not transactional.
 
 import (
+	"sync/atomic"
+
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
@@ -67,6 +69,23 @@ type writeCtx struct {
 	// it can tell a version it may overwrite from one it may not.
 	startTS uint64
 	txID    uint64
+	// conflict is the first serialization conflict this transaction hit, and
+	// the ONLY mutable field here. It is the flag Memgraph carries as
+	// `transaction->must_abort` (memgraph/memgraph, branch master, read
+	// 2026-08-02; src/storage/v2/mvcc.hpp PrepareForWrite sets it,
+	// src/storage/v2/storage.cpp Commit reads it and returns
+	// SerializationError). Detection RECORDS rather than returns because
+	// several push primitives return nothing — removeNodeLabelInfo,
+	// delNodePropertyInfo and the five per-edge side stores — and a
+	// serialization failure aborts the WHOLE transaction, not one label write,
+	// so threading an error out of each would cascade signature changes through
+	// the public Go API for a failure that is not per-operation at all.
+	//
+	// Atomic because the flag is the one thing two goroutines writing through
+	// the SAME transaction could touch at once, and -race is this task's
+	// acceptance instrument. It is read once per version actually recorded,
+	// never on a read path.
+	conflict atomic.Pointer[mvcc.Conflict]
 }
 
 // beginWriteCtx opens per-transaction write state.
@@ -104,13 +123,61 @@ func (w *writeCtx) conflicts(headTS uint64) bool {
 	if w == nil {
 		return false
 	}
+	// An already-doomed transaction refuses every further write, so the answer
+	// does not depend on this object at all. The load is ordered first because
+	// it is the cheaper test and because a doomed transaction must not be able
+	// to slip a write past on an object that happens not to conflict.
+	if w.conflict.Load() != nil {
+		return true
+	}
 	return mvcc.Conflicts(headTS, w.startTS, w.txID)
 }
 
-// conflictErr builds the typed serialization error for a conflict this
-// transaction hit in store.
+// conflictErr records a conflict this transaction hit in store and returns the
+// typed serialization error for it.
+//
+// It RECORDS as well as returns, because the transaction is now doomed however
+// the caller treats the return: a primitive that can report the failure and one
+// that cannot must leave the transaction in the same state, or a statement
+// whose only conflicting write went through a void-returning primitive would
+// commit having silently dropped it. That was measured, not assumed —
+// TestWriteCtx_VoidPrimitiveConflictDoomsTheTransaction fails with a lost
+// update against a build that only returns.
+//
+// The FIRST conflict wins. A doomed transaction may run more writes before its
+// caller notices, and the conflict that explains the failure is the one that
+// caused it, not the last one it tripped over on the way out.
 func (w *writeCtx) conflictErr(store string, headTS uint64) error {
-	return mvcc.NewConflict(store, headTS, w.startTS, w.txID)
+	c := mvcc.NewConflict(store, headTS, w.startTS, w.txID)
+	if !w.conflict.CompareAndSwap(nil, c) {
+		return w.conflict.Load()
+	}
+	return c
+}
+
+// doomed reports whether this transaction has already hit a serialization
+// conflict and can no longer commit.
+//
+// A doomed transaction SKIPS its remaining writes. Applying one would put a
+// version on a chain whose head belongs to someone else, and the transaction is
+// going to abort regardless — Memgraph's PrepareForWrite callers return without
+// writing for the same reason.
+//
+// A nil receiver — a direct Go-API mutation outside any transaction — is never
+// doomed.
+func (w *writeCtx) doomed() bool {
+	return w != nil && w.conflict.Load() != nil
+}
+
+// err returns the conflict that doomed this transaction, or nil.
+func (w *writeCtx) err() error {
+	if w == nil {
+		return nil
+	}
+	if c := w.conflict.Load(); c != nil {
+		return c
+	}
+	return nil
 }
 
 // headStamp returns the effective timestamp of the newest version recorded for

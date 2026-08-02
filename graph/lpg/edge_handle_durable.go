@@ -292,6 +292,13 @@ func (g *Graph[N, W]) EdgePropertiesByHandleIDAsOf(srcID, dstID graph.NodeID, ha
 //
 // SetEdgeLabelByHandleID is safe for concurrent use.
 func (g *Graph[N, W]) SetEdgeLabelByHandleID(srcID, dstID graph.NodeID, handle uint64, name string) {
+	g.setEdgeLabelByHandleIDInfo(srcID, dstID, handle, name, nil)
+}
+
+// setEdgeLabelByHandleIDInfo is [Graph.SetEdgeLabelByHandleID] with an explicit write transaction; tx is
+// nil for a direct Go-API mutation, which is committed the instant it is made
+// and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) setEdgeLabelByHandleIDInfo(srcID, dstID graph.NodeID, handle uint64, name string, tx *writeCtx) {
 	if handle == 0 {
 		return
 	}
@@ -312,7 +319,10 @@ func (g *Graph[N, W]) SetEdgeLabelByHandleID(srcID, dstID graph.NodeID, handle u
 	if bag.has(lid) {
 		return
 	}
-	g.pushHandleLabelVersion(sh, k, handle)
+	if !g.pushHandleLabelVersion(sh, k, handle, tx) {
+		// Refused: the conflict is recorded on tx and this write must not land.
+		return
+	}
 	bag.add(lid)
 	byHandle[handle] = bag
 }
@@ -329,6 +339,13 @@ func (g *Graph[N, W]) SetEdgeLabelByHandleID(srcID, dstID graph.NodeID, handle u
 //
 // SetEdgePropertyByHandleID is safe for concurrent use.
 func (g *Graph[N, W]) SetEdgePropertyByHandleID(srcID, dstID graph.NodeID, handle uint64, key string, value PropertyValue) {
+	g.setEdgePropertyByHandleIDInfo(srcID, dstID, handle, key, value, nil)
+}
+
+// setEdgePropertyByHandleIDInfo is [Graph.SetEdgePropertyByHandleID] with an explicit write transaction; tx is
+// nil for a direct Go-API mutation, which is committed the instant it is made
+// and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) setEdgePropertyByHandleIDInfo(srcID, dstID graph.NodeID, handle uint64, key string, value PropertyValue, tx *writeCtx) {
 	if handle == 0 {
 		return
 	}
@@ -346,7 +363,9 @@ func (g *Graph[N, W]) SetEdgePropertyByHandleID(srcID, dstID graph.NodeID, handl
 		sh.m[k] = byHandle
 	}
 	bag := byHandle[handle]
-	g.pushHandlePropVersion(sh, k, handle)
+	if !g.pushHandlePropVersion(sh, k, handle, tx) {
+		return
+	}
 	bag.set(pid, value)
 	byHandle[handle] = bag
 }
@@ -363,6 +382,13 @@ func (g *Graph[N, W]) SetEdgePropertyByHandleID(srcID, dstID graph.NodeID, handl
 //
 // DelEdgePropertyByHandleID is safe for concurrent use.
 func (g *Graph[N, W]) DelEdgePropertyByHandleID(srcID, dstID graph.NodeID, handle uint64, key string) {
+	g.delEdgePropertyByHandleIDInfo(srcID, dstID, handle, key, nil)
+}
+
+// delEdgePropertyByHandleIDInfo is [Graph.DelEdgePropertyByHandleID] with an explicit write transaction; tx is
+// nil for a direct Go-API mutation, which is committed the instant it is made
+// and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) delEdgePropertyByHandleIDInfo(srcID, dstID graph.NodeID, handle uint64, key string, tx *writeCtx) {
 	if handle == 0 {
 		return
 	}
@@ -382,7 +408,9 @@ func (g *Graph[N, W]) DelEdgePropertyByHandleID(srcID, dstID graph.NodeID, handl
 	if !ok {
 		return
 	}
-	g.pushHandlePropVersion(sh, k, handle)
+	if !g.pushHandlePropVersion(sh, k, handle, tx) {
+		return
+	}
 	if bag.del(pid) {
 		delete(byHandle, handle)
 		if len(byHandle) == 0 {

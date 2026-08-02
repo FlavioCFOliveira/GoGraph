@@ -149,7 +149,49 @@ Each already has the head in hand — it is the value being displaced — and ea
 already has a `mustUndo`-shaped stamp accessor (`preimageDelta.stamp`,
 `lifeStamp.at`), so the head timestamp needs no new plumbing.
 
-### BLOCKED on rmp #2301 — found by measurement, 2026-08-02
+### Status, 2026-08-02: seven of eight stores wired
+
+| store | detection | reached through |
+|---|---|---|
+| node labels | ✅ | `setNodeLabelInfo` / `removeNodeLabelInfo` |
+| node properties | ✅ | `setNodePropertyInfo` / `delNodePropertyInfo` |
+| node existence | ✅ | `noteNodeLife` (birth, death and revival) |
+| overflow relationship types | ✅ | `pushOverflowVersion` |
+| per-handle relationship types | ✅ | `pushHandleLabelVersion` |
+| per-handle properties | ✅ | `pushHandlePropVersion` |
+| per-ordinal relationship types | ✅ | `pushInstanceLabelVersion` |
+| per-ordinal properties | ✅ | `pushInstancePropVersion` |
+| **adjacency entries** | ❌ **remaining** | `graph/adjlist`, blocked on the same package's per-transaction commit window (rmp #2301 part b) |
+
+Each wired store has a test in `graph/lpg/mvcc_conflict_stores_test.go` or
+`graph/lpg/mvcc_writectx_test.go`, and **each was verified to report the lost
+update against a build with `writeCtx.conflicts` forced to false** — all six
+new store tests failed with *"the transaction committed at N after writing an
+object another writer is still writing: its write is silently lost"*.
+
+The §5 warning that a partial detector is worse than none still stands and is
+why the gap is tabulated here rather than left implicit: until the adjacency
+row is ticked, a transaction that changes **only** topology is not protected.
+The substrate is not claimed complete before it is.
+
+#### Two rules the wiring made explicit
+
+**Detection records, it does not merely return.** Several primitives return
+nothing — `removeNodeLabelInfo`, `delNodePropertyInfo`, all five per-edge side
+stores — and the first wiring had them *skip* the conflicting write on the
+reasoning that the caller would learn of it "from the error its next writing
+call returns, or at commit". Neither was true: `commit` could not fail, so a
+transaction whose only conflicting write went through such a primitive
+**committed successfully having silently dropped it**. Measured, not
+hypothesised. The conflict is therefore recorded on the `writeCtx` — Memgraph's
+`transaction->must_abort` — and `commit` reads it and refuses, which is where
+`Storage::Commit` reads its own.
+
+**A refused write must not land.** The push primitive returning `false` is not
+advisory: its caller must abandon the mutation too. Recording no pre-image while
+applying the change would leave the store holding a write no reader can undo.
+
+### BLOCKED on rmp #2301 — found by measurement, 2026-08-02 (RESOLVED)
 
 The wiring was implemented on the label and property stores, gated by tests
 verified to report a lost update without it, and then **reverted**, because
@@ -177,6 +219,15 @@ by running the module's own concurrency test against the wiring.
 What survives the revert and is not blocked: the rule (`mvcc.Conflicts`), the
 typed error (`mvcc.ErrSerializationConflict`, `mvcc.Conflict`), their tests, and
 this document.
+
+**Resolution.** rmp #2301 introduced `writeCtx` — the commit record, start
+timestamp and transaction id as one value passed by pointer and threaded through
+the write path, as Memgraph threads `Transaction *transaction` into every
+accessor. The snapshot now travels *with* the write instead of being looked up
+beside it, so two concurrent writers hold two distinct values and neither can be
+tested against the other's. `TestWriteCtx_DisjointDirectWritersDoNotConflict`
+reproduces the exact 64-goroutine workload that caught the defect and is the
+regression gate for it.
 
 **How the error reaches the caller.** These primitives return nothing today,
 and so do their callers (`SetNodeLabel` and friends). Threading a serialization

@@ -97,60 +97,104 @@ func (g *Graph[N, W]) nodeLifeShardFor(id graph.NodeID) *nodeLifeShard {
 // birth is recorded, so a node with no record is one that has existed for
 // longer than any reader can remember — which is what makes the absence of a
 // record mean "exists".
-func (g *Graph[N, W]) noteNodeBorn(id graph.NodeID) {
-	if !g.mvccArmed {
-		return
-	}
-	info, ts := g.stamp.Stamp()
-	seq := g.lifeSeq.Add(1)
-	sh := g.nodeLifeShardFor(id)
-	sh.mu.Lock()
-	if sh.born == nil {
-		sh.born = make(map[graph.NodeID]lifeStamp, 8)
-	}
-	sh.born[id] = lifeStamp{info: info, ts: ts, seq: seq}
-	// The death record is KEPT. A reader older than this birth but newer than
-	// the death must still see the node as gone, and only the record can tell
-	// it that; [Graph.NodeExistsAsOf] decides between the two by taking the
-	// later of the events that reader can see.
-	sh.mu.Unlock()
-	g.nodeLifeActive.Add(1)
+func (g *Graph[N, W]) noteNodeBorn(id graph.NodeID, tx *writeCtx) bool {
+	return g.noteNodeLife(id, tx, true)
+}
+
+// noteNodeBornAutocommit is [Graph.noteNodeBorn] outside any transaction, in the
+// shape [graph.Mapper.InternNewHook] takes.
+//
+// It exists so the autocommit AddNode path passes a bare method value, as it did
+// before the transaction was threaded through, rather than a closure over a nil
+// pointer.
+func (g *Graph[N, W]) noteNodeBornAutocommit(id graph.NodeID) {
+	g.noteNodeLife(id, nil, true)
 }
 
 // noteNodeDied records that id was removed now.
-func (g *Graph[N, W]) noteNodeDied(id graph.NodeID) {
-	if !g.mvccArmed {
-		return
-	}
-	info, ts := g.stamp.Stamp()
-	seq := g.lifeSeq.Add(1)
-	sh := g.nodeLifeShardFor(id)
-	sh.mu.Lock()
-	if sh.died == nil {
-		sh.died = make(map[graph.NodeID]lifeStamp, 8)
-	}
-	sh.died[id] = lifeStamp{info: info, ts: ts, seq: seq}
-	sh.mu.Unlock()
-	g.nodeLifeActive.Add(1)
+func (g *Graph[N, W]) noteNodeDied(id graph.NodeID, tx *writeCtx) bool {
+	return g.noteNodeLife(id, tx, false)
 }
 
 // noteNodeRevived records that a tombstoned id is live again.
-func (g *Graph[N, W]) noteNodeRevived(id graph.NodeID) {
+//
+// A revival is a BIRTH as far as a reader is concerned: from this instant the
+// node exists, and before it the death record still applies.
+func (g *Graph[N, W]) noteNodeRevived(id graph.NodeID, tx *writeCtx) bool {
+	return g.noteNodeLife(id, tx, true)
+}
+
+// noteNodeLife records a birth (alive) or a death, and reports whether the
+// change may proceed.
+//
+// The three entry points became one function when write-write conflict
+// detection arrived (rmp #2300), because the check has to run under the SAME
+// shard lock as the write it guards. Held separately — read the head, release,
+// then take the lock to write — two writers can both pass the check and both
+// write, which is the lost update the check exists to prevent. The node-label
+// and node-property paths already check inside their shard lock for the same
+// reason.
+//
+// The death record is KEPT across a birth: a reader older than the birth but
+// newer than the death must still see the node as gone, and only the record can
+// tell it that. [Graph.NodeExistsAsOf] decides between the two by taking the
+// later of the events that reader can see.
+func (g *Graph[N, W]) noteNodeLife(id graph.NodeID, tx *writeCtx, alive bool) bool {
 	if !g.mvccArmed {
-		return
+		return true
 	}
-	info, ts := g.stamp.Stamp()
-	seq := g.lifeSeq.Add(1)
 	sh := g.nodeLifeShardFor(id)
 	sh.mu.Lock()
-	if sh.born == nil {
-		sh.born = make(map[graph.NodeID]lifeStamp, 8)
+	if head := sh.headStamp(id); tx.conflicts(head) {
+		sh.mu.Unlock()
+		_ = tx.conflictErr("node existence", head)
+		return false
 	}
-	// A revival is a birth as far as a reader is concerned: from this instant
-	// the node exists, and before it the death record still applies.
-	sh.born[id] = lifeStamp{info: info, ts: ts, seq: seq}
+	// Inside the lock, so the record this write lands on is the one the check
+	// just cleared. deltaStamp allocates the transaction's commit record on
+	// first use; it takes no lock of its own and cannot reach back here.
+	info, ts := g.deltaStamp(tx.record())
+	seq := g.lifeSeq.Add(1)
+	st := lifeStamp{info: info, ts: ts, seq: seq}
+	if alive {
+		if sh.born == nil {
+			sh.born = make(map[graph.NodeID]lifeStamp, 8)
+		}
+		sh.born[id] = st
+	} else {
+		if sh.died == nil {
+			sh.died = make(map[graph.NodeID]lifeStamp, 8)
+		}
+		sh.died[id] = st
+	}
 	sh.mu.Unlock()
 	g.nodeLifeActive.Add(1)
+	return true
+}
+
+// headStamp returns the effective timestamp of the LATEST life event recorded
+// for id — birth or death, whichever happened last — or zero when the node has
+// no record at all.
+//
+// The caller must hold the shard lock. The two maps are one logical version
+// chain two entries deep, ordered by seq rather than by timestamp: both events
+// of one transaction share a commit record and therefore an identical
+// timestamp, and seq is what [Graph.NodeExistsAsOf] already uses to order them.
+func (sh *nodeLifeShard) headStamp(id graph.NodeID) uint64 {
+	born, hasBorn := sh.born[id]
+	died, hasDied := sh.died[id]
+	switch {
+	case hasBorn && hasDied:
+		if died.seq > born.seq {
+			return died.at()
+		}
+		return born.at()
+	case hasBorn:
+		return born.at()
+	case hasDied:
+		return died.at()
+	}
+	return 0
 }
 
 // NodeExistsAsOf reports whether id was a live node at s.

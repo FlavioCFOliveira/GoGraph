@@ -35,6 +35,13 @@ type edgeInstancePropShard struct {
 //
 // SetEdgePropertyAt is safe for concurrent use.
 func (g *Graph[N, W]) SetEdgePropertyAt(src, dst N, idx int64, key string, value PropertyValue) error {
+	return g.setEdgePropertyAtInfo(src, dst, idx, key, value, nil)
+}
+
+// setEdgePropertyAtInfo is [Graph.SetEdgePropertyAt] with an explicit write transaction; tx is
+// nil for a direct Go-API mutation, which is committed the instant it is made
+// and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) setEdgePropertyAtInfo(src, dst N, idx int64, key string, value PropertyValue, tx *writeCtx) error {
 	if v := g.validator.load(); v != nil {
 		if err := v.Validate(key, value); err != nil {
 			return err
@@ -67,7 +74,10 @@ func (g *Graph[N, W]) SetEdgePropertyAt(src, dst N, idx int64, key string, value
 	// propBag is stored by value: mutate a local copy and write it back under
 	// the shard lock (the write-back is load-bearing — set may grow/promote).
 	bag := byIdx[idx]
-	g.pushInstancePropVersion(sh, k, idx)
+	if !g.pushInstancePropVersion(sh, k, idx, tx) {
+		// Refused: the conflict is recorded on tx and this write must not land.
+		return nil
+	}
 	bag.set(pid, value)
 	byIdx[idx] = bag
 	return nil

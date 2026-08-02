@@ -142,6 +142,31 @@ type sideVersions[K comparable, V any] struct {
 // The caller must hold the owning shard's lock, which every reader here does.
 func (sv *sideVersions[K, V]) empty() bool { return sv.d == nil }
 
+// headStamp returns the effective timestamp of the newest version recorded for
+// k, or zero when the chain is empty.
+//
+// It is what write-write conflict detection tests against (rmp #2300): the
+// newest version's instant is what decides whether this writer may displace it.
+// Zero means nothing has written k since the last reclamation, which never
+// conflicts — reclamation only frees versions below the watermark, and anything
+// below it is visible to every live transaction.
+//
+// The caller must hold the owning shard's lock, exactly as [sideVersions.push]
+// requires.
+func (sv *sideVersions[K, V]) headStamp(k K) uint64 {
+	if sv.d == nil {
+		return 0
+	}
+	d := sv.d[k]
+	if d == nil {
+		return 0
+	}
+	if d.info != nil {
+		return d.info.TS()
+	}
+	return d.ts
+}
+
 // push records that k is about to change, retaining the value it held.
 //
 // active is the store's lock-free counter, kept exact so a reader can skip the

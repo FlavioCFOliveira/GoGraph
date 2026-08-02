@@ -384,8 +384,11 @@ func (g *Graph[N, W]) delNodePropertyInfo(n N, key string, tx *writeCtx) {
 		// records the pre-image so a reader can restore it.
 		if g.propDeltasEnabled() {
 			if prev, had := bag.get(keyID); had {
-				// See setNodePropertyInfo; delNodePropertyInfo cannot return.
-				if tx.conflicts(s.headStamp(id)) {
+				// See setNodePropertyInfo; delNodePropertyInfo cannot return, so
+				// the conflict is recorded on the transaction and commit
+				// refuses it. See [writeCtx.conflictErr].
+				if head := s.headStamp(id); tx.conflicts(head) {
+					_ = tx.conflictErr("node properties", head)
 					s.mu.Unlock()
 					return
 				}

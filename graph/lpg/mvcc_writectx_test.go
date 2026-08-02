@@ -18,6 +18,21 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
 
+// mustCommit commits a transaction that is expected to succeed and returns its
+// commit timestamp.
+//
+// It exists because commit REFUSES a transaction that hit a serialization
+// conflict (rmp #2300), so every commit now has two outcomes and a test that
+// meant to exercise the successful one has to say so.
+func mustCommit[N comparable, W any](t *testing.T, tx *labelTx[N, W]) uint64 {
+	t.Helper()
+	ts, err := tx.commit()
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	return ts
+}
+
 // TestWriteCtx_DisjointDirectWritersDoNotConflict is the regression gate for
 // the defect that reverted rmp #2300's first wiring.
 //
@@ -137,7 +152,7 @@ func TestWriteCtx_ConflictIsScopedToTheWritingTransaction(t *testing.T) {
 	}
 
 	// A's write survives, which is the point of refusing B.
-	tsA := txA.commit()
+	tsA := mustCommit(t, txA)
 	if !g.ReadAt(&Snapshot{startTS: tsA}).HasNodeLabel("a", "FromA") {
 		t.Fatal("A's label did not survive despite B being refused")
 	}
@@ -171,7 +186,7 @@ func TestWriteCtx_DisjointTransactionsDoNotConflict(t *testing.T) {
 	if err := txB.setNodeProperty("b", "v", Int64Value(2)); err != nil {
 		t.Fatalf("B setNodeProperty on a disjoint node: %v", err)
 	}
-	if txA.commit() == 0 || txB.commit() == 0 {
+	if mustCommit(t, txA) == 0 || mustCommit(t, txB) == 0 {
 		t.Fatal("a disjoint transaction failed to commit")
 	}
 }
@@ -200,7 +215,7 @@ func TestWriteCtx_OwnSecondWriteIsNotAConflict(t *testing.T) {
 		t.Fatalf("a transaction was refused its own second property write: %v", err)
 	}
 
-	ts := tx.commit()
+	ts := mustCommit(t, tx)
 	now := g.ReadAt(&Snapshot{startTS: ts})
 	if !now.HasNodeLabel("a", "One") || !now.HasNodeLabel("a", "Two") {
 		t.Fatal("both labels of the transaction's own two writes should be present")
@@ -229,5 +244,151 @@ func TestWriteCtx_PropertyWriteThatChangesNothingDoesNotConflict(t *testing.T) {
 		t.Fatalf("a write that changes nothing was refused: %v — MERGE's MATCH branch "+
 			"re-asserts properties on every match, so this would abort transactions "+
 			"that wrote nothing at all", err)
+	}
+}
+
+// TestWriteCtx_VoidPrimitiveConflictDoomsTheTransaction is the regression gate
+// for a LOST UPDATE that the first wiring of rmp #2300 shipped.
+//
+// Detection records rather than returns, because several push primitives return
+// nothing. The first implementation had those primitives SKIP the conflicting
+// write and record nothing, on the reasoning that "the caller learns of it from
+// the error its next writing call returns, or at commit". Neither was true:
+// commit could not fail, so a transaction whose only conflicting write went
+// through such a primitive committed successfully having silently dropped it.
+//
+// Measured against that build, both subtests reported the lost update — B's
+// removal of L survived and B's commit returned no error. They are the proof
+// that recording on the transaction, and reading it at commit, is load-bearing
+// rather than defensive.
+func TestWriteCtx_VoidPrimitiveConflictDoomsTheTransaction(t *testing.T) {
+	t.Run("label removal", func(t *testing.T) {
+		g := New[string, int64](adjlist.Config{Directed: true})
+		if err := g.AddNode("a"); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
+		if err := g.SetNodeLabel("a", "L"); err != nil {
+			t.Fatalf("SetNodeLabel: %v", err)
+		}
+
+		// A writes the node and stays in flight.
+		txA := g.beginLabelTx()
+		if err := txA.setNodeLabel("a", "FromA"); err != nil {
+			t.Fatalf("A setNodeLabel: %v", err)
+		}
+
+		// B removes a label on the same node, through a primitive that cannot
+		// return an error.
+		txB := g.beginLabelTx()
+		txB.removeNodeLabel("a", "L")
+
+		_, err := txB.commit()
+		if err == nil {
+			t.Fatal("B committed with no error after its removal was refused: the removal " +
+				"is silently lost and nothing anywhere reports it")
+		}
+		if !errors.Is(err, mvcc.ErrSerializationConflict) {
+			t.Fatalf("B's commit failed with %v, want a serialization conflict", err)
+		}
+		var c *mvcc.Conflict
+		if !errors.As(err, &c) || c.Store != "node labels" {
+			t.Fatalf("the commit error does not identify the store it came from: %v", err)
+		}
+
+		// B aborted, so nothing it wrote is visible and A's work is intact.
+		tsA := mustCommit(t, txA)
+		now := g.ReadAt(&Snapshot{startTS: tsA})
+		if !now.HasNodeLabel("a", "L") {
+			t.Fatal("B's refused removal was applied anyway")
+		}
+		if !now.HasNodeLabel("a", "FromA") {
+			t.Fatal("A's label did not survive despite B being refused")
+		}
+	})
+
+	t.Run("property delete", func(t *testing.T) {
+		g := New[string, int64](adjlist.Config{Directed: true})
+		if err := g.AddNode("a"); err != nil {
+			t.Fatalf("AddNode: %v", err)
+		}
+		if err := g.SetNodeProperty("a", "p", Int64Value(1)); err != nil {
+			t.Fatalf("SetNodeProperty: %v", err)
+		}
+
+		txA := g.beginLabelTx()
+		if err := txA.setNodeProperty("a", "other", Int64Value(9)); err != nil {
+			t.Fatalf("A setNodeProperty: %v", err)
+		}
+
+		txB := g.beginLabelTx()
+		txB.delNodeProperty("a", "p")
+
+		_, err := txB.commit()
+		if err == nil {
+			t.Fatal("B committed with no error after its property delete was refused: " +
+				"the delete is silently lost")
+		}
+		var c *mvcc.Conflict
+		if !errors.As(err, &c) || c.Store != "node properties" {
+			t.Fatalf("the commit error does not identify the store it came from: %v", err)
+		}
+
+		tsA := mustCommit(t, txA)
+		if _, had := g.ReadAt(&Snapshot{startTS: tsA}).GetNodeProperty("a", "p"); !had {
+			t.Fatal("B's refused property delete was applied anyway")
+		}
+	})
+}
+
+// TestWriteCtx_DoomedTransactionRefusesEveryFurtherWrite pins the second half of
+// the rule: once a transaction has hit a conflict it may not keep writing.
+//
+// A doomed transaction is going to abort, and a write it applies in the
+// meantime puts a version on a chain whose head belongs to someone else. The
+// conflict reported stays the FIRST one — the one that explains the failure —
+// rather than whichever object the transaction tripped over on its way out.
+func TestWriteCtx_DoomedTransactionRefusesEveryFurtherWrite(t *testing.T) {
+	g := New[string, int64](adjlist.Config{Directed: true})
+	for _, n := range []string{"a", "b"} {
+		if err := g.AddNode(n); err != nil {
+			t.Fatalf("AddNode %s: %v", n, err)
+		}
+	}
+
+	txA := g.beginLabelTx()
+	if err := txA.setNodeLabel("a", "FromA"); err != nil {
+		t.Fatalf("A setNodeLabel: %v", err)
+	}
+
+	txB := g.beginLabelTx()
+	first := txB.setNodeLabel("a", "FromB")
+	if first == nil {
+		t.Fatal("B was not refused a write to the node A is still writing")
+	}
+
+	// "b" is untouched by anyone, so this write does not conflict on its own
+	// merits. It must still be refused: B is doomed.
+	second := txB.setNodeLabel("b", "FromB")
+	if second == nil {
+		t.Fatal("a doomed transaction was allowed to keep writing: its versions would " +
+			"land on chains it can never publish")
+	}
+
+	var c1, c2 *mvcc.Conflict
+	if !errors.As(first, &c1) || !errors.As(second, &c2) {
+		t.Fatalf("untyped errors: %v / %v", first, second)
+	}
+	if c1 != c2 {
+		t.Fatalf("the second refusal reports a different conflict (%v) from the first (%v): "+
+			"the conflict that explains the failure is the first one", c2, c1)
+	}
+
+	if _, err := txB.commit(); err == nil {
+		t.Fatal("a doomed transaction committed")
+	}
+	// B's second write must not be on the chain at all.
+	tsA := mustCommit(t, txA)
+	if g.ReadAt(&Snapshot{startTS: tsA}).HasNodeLabel("b", "FromB") {
+		t.Fatal("a doomed transaction's write became visible")
 	}
 }

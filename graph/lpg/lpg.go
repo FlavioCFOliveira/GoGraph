@@ -1154,6 +1154,13 @@ func (g *Graph[N, W]) SetIndexManager(m *index.Manager) { g.idxMgr.store(m) }
 // tombstoned node is never matched by a read clause, so a label can only
 // reach a removed key after AddNode has already revived it.
 func (g *Graph[N, W]) AddNode(n N) error {
+	return g.addNodeInfo(n, nil)
+}
+
+// addNodeInfo is [Graph.AddNode] with an explicit write transaction; tx is
+// nil for a direct Go-API mutation, which is committed the instant it is made
+// and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) addNodeInfo(n N, tx *writeCtx) error {
 	// InternNew rather than Intern: MVCC has to know WHEN a node came into
 	// existence, so a reader from before that instant does not see it, and this
 	// is the one call that can tell without a second map probe on every
@@ -1162,7 +1169,23 @@ func (g *Graph[N, W]) AddNode(n N) error {
 	// becomes reachable through Walk. Recording it afterwards leaves a window
 	// in which a reader finds the node with no birth record and treats it as
 	// having existed forever; see [graph.Mapper.InternNewHook].
-	id, created := g.adj.Mapper().InternNewHook(n, g.noteNodeBorn)
+	//
+	// The two arms are spelled out rather than selected into a variable so the
+	// autocommit path keeps exactly the shape it had before the transaction was
+	// threaded through — a bare method value the compiler can keep off the heap.
+	// The hook cannot refuse, and does not need to: InternNewHook fires only for
+	// an id NEVER seen before, whose life chain is therefore empty, and an empty
+	// chain never conflicts. A delete-then-recreate reaches [Graph.revive]
+	// instead, which does propagate a refusal.
+	var (
+		id      graph.NodeID
+		created bool
+	)
+	if tx == nil {
+		id, created = g.adj.Mapper().InternNewHook(n, g.noteNodeBornAutocommit)
+	} else {
+		id, created = g.adj.Mapper().InternNewHook(n, func(nid graph.NodeID) { g.noteNodeBorn(nid, tx) })
+	}
 	if created {
 		if g.tombstoneActive.Load() == 0 {
 			g.reclaimAfterDirectWrite()
@@ -1174,7 +1197,7 @@ func (g *Graph[N, W]) AddNode(n N) error {
 	if g.tombstoneActive.Load() == 0 {
 		return nil
 	}
-	g.revive(id)
+	g.revive(id, tx)
 	g.reclaimAfterDirectWrite()
 	return nil
 }
@@ -1184,14 +1207,30 @@ func (g *Graph[N, W]) AddNode(n N) error {
 // a removed node is re-created. The clear publishes a fresh copy-on-write
 // bitmap under tombstoneMu, so it becomes visible atomically to the
 // lock-free IsTombstoned / LiveOrder / TombstonedIDs readers.
-func (g *Graph[N, W]) revive(id graph.NodeID) {
+//
+// # When the revival is REFUSED
+//
+// noteNodeRevived can report a write-write conflict (rmp #2300) — a revival is
+// the one birth that can, because the node already carries a death record and
+// its life chain is therefore not empty. The conflict is recorded on tx and the
+// transaction can no longer commit, so the revival never becomes VISIBLE. The
+// tombstone bitmap has already been cleared by then, and is repaired by the
+// physical undo log when the statement rolls back (cypher/undo.go).
+//
+// The check cannot be hoisted ahead of the tombstone clear here: it must run
+// under the life shard's lock, and holding that across tombstoneMu would invert
+// the order the reclaimer uses. Like [Graph.clearEdgePairState], this path is
+// currently unreachable with a non-nil tx — every caller is an autocommit path
+// and the engine still writes under the exclusive barrier — and rmp #2304 must
+// resolve the ordering when it removes that barrier.
+func (g *Graph[N, W]) revive(id graph.NodeID, tx *writeCtx) {
 	revived := false
 	defer func() {
 		// Recorded OUTSIDE the tombstone lock, and after it: noteNodeRevived
 		// takes a shard lock of its own, and taking one under the tombstone
 		// lock would invert the order the reclaimer uses.
 		if revived {
-			g.noteNodeRevived(id)
+			g.noteNodeRevived(id, tx)
 		}
 	}()
 	g.tombstoneMu.Lock()
@@ -1226,11 +1265,18 @@ func (g *Graph[N, W]) revive(id graph.NodeID) {
 //
 // Revive is safe for concurrent use.
 func (g *Graph[N, W]) Revive(n N) {
+	g.reviveInfo(n, nil)
+}
+
+// reviveInfo is [Graph.Revive] with an explicit write transaction; tx is
+// nil for a direct Go-API mutation, which is committed the instant it is made
+// and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) reviveInfo(n N, tx *writeCtx) {
 	id, ok := g.adj.Mapper().Lookup(n)
 	if !ok {
 		return
 	}
-	g.revive(id)
+	g.revive(id, tx)
 }
 
 // AddEdge inserts a directed edge (mirrored when the graph is
@@ -1428,6 +1474,13 @@ func (g *Graph[N, W]) NextEdgeHandle() uint64 { return g.nextEdgeHandle() }
 // using [adjlist.AdjList.RemoveEdge] directly; that path does not touch
 // labels or properties.
 func (g *Graph[N, W]) RemoveEdge(src, dst N) {
+	g.removeEdgeInfo(src, dst, nil)
+}
+
+// removeEdgeInfo is [Graph.RemoveEdge] with an explicit write transaction; tx is
+// nil for a direct Go-API mutation, which is committed the instant it is made
+// and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) removeEdgeInfo(src, dst N, tx *writeCtx) {
 	defer g.reclaimAfterDirectWrite()
 	srcID, srcOK := g.adj.Mapper().Lookup(src)
 	dstID, dstOK := g.adj.Mapper().Lookup(dst)
@@ -1472,10 +1525,10 @@ func (g *Graph[N, W]) RemoveEdge(src, dst N) {
 		// any captured labels and properties in case the removed slot was the one
 		// holding them.
 		if srcOK && dstOK {
-			g.reassertPairLabels(srcID, dstID, fwdLabels)
+			g.reassertPairLabels(srcID, dstID, fwdLabels, tx)
 			g.reassertPairProps(src, dst, fwdProps)
 			if !g.adj.Directed() {
-				g.reassertPairLabels(dstID, srcID, revLabels)
+				g.reassertPairLabels(dstID, srcID, revLabels, tx)
 				g.reassertPairProps(dst, src, revProps)
 			}
 		}
@@ -1484,12 +1537,12 @@ func (g *Graph[N, W]) RemoveEdge(src, dst N) {
 	if !srcOK || !dstOK {
 		return
 	}
-	g.clearEdgePairState(edgeKey{src: srcID, dst: dstID})
+	g.clearEdgePairState(edgeKey{src: srcID, dst: dstID}, tx)
 	if !g.adj.Directed() {
 		// The undirected edge is fully gone; clear the mirror direction's
 		// per-pair surfaces too (a label may have been set under either
 		// endpoint order).
-		g.clearEdgePairState(edgeKey{src: dstID, dst: srcID})
+		g.clearEdgePairState(edgeKey{src: dstID, dst: srcID}, tx)
 	}
 }
 
@@ -1519,6 +1572,13 @@ func (g *Graph[N, W]) RemoveEdge(src, dst N) {
 // Cypher executor and WAL replay, so the in-memory state and the recovered
 // state agree.
 func (g *Graph[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) bool {
+	return g.removeEdgeByHandleInfo(src, dst, handle, nil)
+}
+
+// removeEdgeByHandleInfo is [Graph.RemoveEdgeByHandle] with an explicit write transaction; tx is
+// nil for a direct Go-API mutation, which is committed the instant it is made
+// and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) removeEdgeByHandleInfo(src, dst N, handle uint64, tx *writeCtx) bool {
 	if handle == 0 {
 		had := g.adj.HasEdge(src, dst)
 		g.RemoveEdge(src, dst)
@@ -1559,10 +1619,10 @@ func (g *Graph[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) bool {
 		// re-asserting the captured labels/properties in case the removed slot was
 		// the one holding them.
 		if srcOK && dstOK {
-			g.reassertPairLabels(srcID, dstID, fwdLabels)
+			g.reassertPairLabels(srcID, dstID, fwdLabels, tx)
 			g.reassertPairProps(src, dst, fwdProps)
 			if !g.adj.Directed() {
-				g.reassertPairLabels(dstID, srcID, revLabels)
+				g.reassertPairLabels(dstID, srcID, revLabels, tx)
 				g.reassertPairProps(dst, src, revProps)
 			}
 		}
@@ -1571,9 +1631,9 @@ func (g *Graph[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) bool {
 	if !srcOK || !dstOK {
 		return true
 	}
-	g.clearEdgePairState(edgeKey{src: srcID, dst: dstID})
+	g.clearEdgePairState(edgeKey{src: srcID, dst: dstID}, tx)
 	if !g.adj.Directed() {
-		g.clearEdgePairState(edgeKey{src: dstID, dst: srcID})
+		g.clearEdgePairState(edgeKey{src: dstID, dst: srcID}, tx)
 	}
 	return true
 }
@@ -1621,7 +1681,7 @@ func (g *Graph[N, W]) pairLabelIDs(srcID, dstID graph.NodeID) []LabelID {
 // surviving slots keep the types they already had. Typing every free slot here
 // would spread the removed slot's type onto siblings that never carried it and
 // inflate their typed degree.
-func (g *Graph[N, W]) reassertPairLabels(srcID, dstID graph.NodeID, ids []LabelID) {
+func (g *Graph[N, W]) reassertPairLabels(srcID, dstID graph.NodeID, ids []LabelID, tx *writeCtx) {
 	if len(ids) == 0 {
 		return
 	}
@@ -1629,7 +1689,7 @@ func (g *Graph[N, W]) reassertPairLabels(srcID, dstID graph.NodeID, ids []LabelI
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.Lock()
 	for _, lid := range ids {
-		g.repairEdgeLabelLocked(k, lid)
+		g.repairEdgeLabelLocked(k, lid, tx)
 	}
 	sh.mu.Unlock()
 }
@@ -1639,7 +1699,7 @@ func (g *Graph[N, W]) reassertPairLabels(srcID, dstID graph.NodeID, ids []LabelI
 // the single-carrier counterpart of [Graph.setEdgeLabelLocked] and carries the
 // same lock requirement: the caller must hold k's edge-label shard write lock.
 // A no-op when the pair already carries lid.
-func (g *Graph[N, W]) repairEdgeLabelLocked(k edgeKey, lid LabelID) {
+func (g *Graph[N, W]) repairEdgeLabelLocked(k edgeKey, lid LabelID, tx *writeCtx) {
 	enc := encodeSlotLabel(lid)
 	free, present := g.columnTypedSlots(k.src, k.dst, lid, enc)
 	if len(free) > 0 {
@@ -1650,7 +1710,7 @@ func (g *Graph[N, W]) repairEdgeLabelLocked(k edgeKey, lid LabelID) {
 		return
 	}
 	sh := g.edgeLabelShardFor(k)
-	if g.addOverflowVersioned(sh, k, lid) {
+	if g.addOverflowVersioned(sh, k, lid, tx) {
 		g.edgeLabelOverflowActive.Add(1)
 	}
 }
@@ -1686,6 +1746,13 @@ func (g *Graph[N, W]) reassertPairProps(src, dst N, props map[string]PropertyVal
 //
 // RemoveAllEdgesFrom is safe for concurrent use.
 func (g *Graph[N, W]) RemoveAllEdgesFrom(src N) {
+	g.removeAllEdgesFromInfo(src, nil)
+}
+
+// removeAllEdgesFromInfo is [Graph.RemoveAllEdgesFrom] with an explicit write transaction; tx is
+// nil for a direct Go-API mutation, which is committed the instant it is made
+// and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) removeAllEdgesFromInfo(src N, tx *writeCtx) {
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
 		return
@@ -1708,9 +1775,9 @@ func (g *Graph[N, W]) RemoveAllEdgesFrom(src N) {
 
 	// Clear per-pair state for every affected endpoint pair.
 	for _, dstID := range dstIDs {
-		g.clearEdgePairState(edgeKey{src: srcID, dst: dstID})
+		g.clearEdgePairState(edgeKey{src: srcID, dst: dstID}, tx)
 		if !g.adj.Directed() {
-			g.clearEdgePairState(edgeKey{src: dstID, dst: srcID})
+			g.clearEdgePairState(edgeKey{src: dstID, dst: srcID}, tx)
 		}
 	}
 }
@@ -1720,7 +1787,29 @@ func (g *Graph[N, W]) RemoveAllEdgesFrom(src N) {
 // untouched: it is read only as an over-approximation that the executor
 // verifies against the authoritative per-pair labels, so a stale entry can
 // cost at most a filtered-out candidate, never a wrong result.
-func (g *Graph[N, W]) clearEdgePairState(k edgeKey) {
+//
+// It reports whether the drop was applied. FALSE means tx hit a write-write
+// conflict on one of the pair's side stores (rmp #2300): the conflict is
+// recorded on the transaction, the store that refused keeps its data, and the
+// transaction can no longer commit.
+//
+// # The atomicity boundary, stated plainly
+//
+// The four side stores take four separate locks, as they did before detection
+// existed, so a refusal part-way leaves the earlier stores dropped and the
+// later ones intact. That is not a hole, for two reasons that must BOTH hold:
+// the transaction is doomed and none of its versions can become visible, and
+// GoGraph rolls a failed statement back PHYSICALLY through the undo log
+// (cypher/undo.go), which restores the stored values. Pre-images already
+// recorded belong to an aborting transaction and are reclaimed.
+//
+// It is also currently unreachable with a non-nil tx: every caller is an
+// autocommit path and the engine's writes still run under the exclusive
+// barrier. When rmp #2304 removes that barrier, this path needs its conflict
+// checks HOISTED ahead of the adjacency removal its callers perform first, so a
+// refusal costs no physical rollback at all. That hoist is B2's work, not this
+// task's, and is recorded here so it is not discovered by accident.
+func (g *Graph[N, W]) clearEdgePairState(k edgeKey, tx *writeCtx) bool {
 	// Clear both halves of the per-pair label set together under the pair's
 	// shard write lock: the overflow entry AND the label on every dst-matching
 	// adjacency slot. They are two halves of one logical set and must transition
@@ -1729,9 +1818,14 @@ func (g *Graph[N, W]) clearEdgePairState(k edgeKey) {
 	// resurrect a removed edge's relationship type.
 	lsh := g.edgeLabelShardFor(k)
 	lsh.mu.Lock()
-	dropped := g.clearOverflowVersioned(lsh, k)
+	dropped := g.clearOverflowVersioned(lsh, k, tx)
 	g.clearSlotLabels(k.src, k.dst)
 	lsh.mu.Unlock()
+	if tx.doomed() {
+		// clearOverflowVersioned refused; it recorded the conflict and left the
+		// overflow list alone.
+		return false
+	}
 	if dropped > 0 {
 		g.edgeLabelOverflowActive.Add(int64(-dropped))
 	}
@@ -1750,14 +1844,24 @@ func (g *Graph[N, W]) clearEdgePairState(k edgeKey) {
 	// removed edge's per-handle type or properties.
 	hlsh := g.edgeHandleLabelShardFor(k)
 	hlsh.mu.Lock()
-	g.pushHandleLabelVersionsForPair(hlsh, k)
-	delete(hlsh.m, k)
+	ok := g.pushHandleLabelVersionsForPair(hlsh, k, tx)
+	if ok {
+		delete(hlsh.m, k)
+	}
 	hlsh.mu.Unlock()
+	if !ok {
+		return false
+	}
 	hpsh := g.edgeHandlePropShardFor(k)
 	hpsh.mu.Lock()
-	g.pushHandlePropVersionsForPair(hpsh, k)
-	delete(hpsh.m, k)
+	ok = g.pushHandlePropVersionsForPair(hpsh, k, tx)
+	if ok {
+		delete(hpsh.m, k)
+	}
 	hpsh.mu.Unlock()
+	if !ok {
+		return false
+	}
 	// Drop the per-CREATE-instance label, property, and multiplicity-counter
 	// stores. Without these, re-creating an edge between the same endpoints
 	// after RemoveEdge would resurrect the removed edge's per-instance labels
@@ -1765,18 +1869,29 @@ func (g *Graph[N, W]) clearEdgePairState(k edgeKey) {
 	// rather than starting fresh at 1.
 	ilsh := g.edgeInstanceLabelShardFor(k)
 	ilsh.mu.Lock()
-	g.pushInstanceLabelVersionsForPair(ilsh, k)
-	delete(ilsh.m, k)
+	ok = g.pushInstanceLabelVersionsForPair(ilsh, k, tx)
+	if ok {
+		delete(ilsh.m, k)
+	}
 	ilsh.mu.Unlock()
+	if !ok {
+		return false
+	}
 	ipsh := g.edgeInstancePropShardFor(k)
 	ipsh.mu.Lock()
-	g.pushInstancePropVersionsForPair(ipsh, k)
-	delete(ipsh.m, k)
+	ok = g.pushInstancePropVersionsForPair(ipsh, k, tx)
+	if ok {
+		delete(ipsh.m, k)
+	}
 	ipsh.mu.Unlock()
+	if !ok {
+		return false
+	}
 	ccsh := g.edgeCreateCountShardFor(k)
 	ccsh.mu.Lock()
 	delete(ccsh.m, k)
 	ccsh.mu.Unlock()
+	return true
 }
 
 // EdgeWeight returns the weight of the first edge from src to dst and true when
@@ -1895,6 +2010,13 @@ func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, tx *writeCtx) error {
 // fully-deleted node state. No-op when n was never interned or is
 // already tombstoned.
 func (g *Graph[N, W]) RemoveNode(n N) {
+	g.removeNodeInfo(n, nil)
+}
+
+// removeNodeInfo is [Graph.RemoveNode] with an explicit write transaction; tx is nil
+// for a direct Go-API mutation, which is committed the instant it is made and takes
+// no conflict check. See [writeCtx].
+func (g *Graph[N, W]) removeNodeInfo(n N, tx *writeCtx) {
 	id, ok := g.adj.Mapper().Lookup(n)
 	if !ok {
 		return
@@ -1905,7 +2027,7 @@ func (g *Graph[N, W]) RemoveNode(n N) {
 		// [Graph.revive]. A reader older than this instant must still SEE the
 		// node, and the bitmap alone cannot tell it that.
 		if died {
-			g.noteNodeDied(id)
+			g.noteNodeDied(id, tx)
 			g.reclaimAfterDirectWrite()
 		}
 	}()
@@ -2926,11 +3048,15 @@ func (g *Graph[N, W]) removeNodeLabelInfo(n N, name string, tx *writeCtx) {
 		// a label the node does not carry changes nothing.
 		if g.labelDeltasEnabled() && bag.has(lid) {
 			// See setNodeLabelInfo. removeNodeLabelInfo cannot return an error,
-			// so a conflicting removal is SKIPPED: the transaction is doomed
-			// and applying a doomed write would put a version on a chain whose
-			// head belongs to someone else. The caller learns of it from the
-			// error its next writing call returns, or at commit.
-			if tx.conflicts(sh.headStamp(id)) {
+			// so the conflict is RECORDED on the transaction and the write is
+			// skipped: applying a doomed write would put a version on a chain
+			// whose head belongs to someone else. The caller learns of it from
+			// the error its next writing call returns, or from commit, which
+			// refuses to publish a transaction carrying one. Recording is what
+			// makes the two paths equivalent — without it this removal would be
+			// dropped and the transaction would commit as if it had happened.
+			if head := sh.headStamp(id); tx.conflicts(head) {
+				_ = tx.conflictErr("node labels", head)
 				sh.mu.Unlock()
 				return
 			}
@@ -3083,6 +3209,13 @@ func (g *Graph[N, W]) HasNodeLabelByID(id graph.NodeID, name string) bool {
 // edge-label shard write lock so the slot and overflow halves transition
 // together with respect to a concurrent reader.
 func (g *Graph[N, W]) SetEdgeLabel(src, dst N, name string) {
+	g.setEdgeLabelInfo(src, dst, name, nil)
+}
+
+// setEdgeLabelInfo is [Graph.SetEdgeLabel] with an explicit write transaction; tx is
+// nil for a direct Go-API mutation, which is committed the instant it is made and
+// takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) setEdgeLabelInfo(src, dst N, name string, tx *writeCtx) {
 	if !g.adj.HasEdge(src, dst) {
 		return
 	}
@@ -3092,7 +3225,7 @@ func (g *Graph[N, W]) SetEdgeLabel(src, dst N, name string) {
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.Lock()
-	changed := g.setEdgeLabelLocked(k, lid)
+	changed := g.setEdgeLabelLocked(k, lid, tx)
 	sh.mu.Unlock()
 	g.edgeIdx.Add(uint32(lid), srcID)
 	if changed {
@@ -3146,7 +3279,7 @@ func (g *Graph[N, W]) SetEdgeLabel(src, dst N, name string) {
 // (rmp #2255). Re-asserting a type the pair already carries reports false — the
 // MERGE match branch re-asserts on every idempotent MERGE, and a spurious bump
 // would force an O(V+E) CSR cache rebuild for a mutation that changed nothing.
-func (g *Graph[N, W]) setEdgeLabelLocked(k edgeKey, lid LabelID) bool {
+func (g *Graph[N, W]) setEdgeLabelLocked(k edgeKey, lid LabelID, tx *writeCtx) bool {
 	enc := encodeSlotLabel(lid)
 	free, present := g.columnTypedSlots(k.src, k.dst, lid, enc)
 	if len(free) > 0 {
@@ -3160,7 +3293,7 @@ func (g *Graph[N, W]) setEdgeLabelLocked(k edgeKey, lid LabelID) bool {
 	}
 	// No free column-typed slot; spill to overflow, deduplicated.
 	sh := g.edgeLabelShardFor(k)
-	if !g.addOverflowVersioned(sh, k, lid) {
+	if !g.addOverflowVersioned(sh, k, lid, tx) {
 		return false
 	}
 	g.edgeLabelOverflowActive.Add(1)
@@ -3275,6 +3408,13 @@ func (g *Graph[N, W]) HasEdgeLabelAsOf(src, dst N, name string, snap *Snapshot) 
 //
 // RemoveEdgeLabel is safe for concurrent use.
 func (g *Graph[N, W]) RemoveEdgeLabel(src, dst N, name string) {
+	g.removeEdgeLabelInfo(src, dst, name, nil)
+}
+
+// removeEdgeLabelInfo is [Graph.RemoveEdgeLabel] with an explicit write transaction; tx is
+// nil for a direct Go-API mutation, which is committed the instant it is made
+// and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) removeEdgeLabelInfo(src, dst N, name string, tx *writeCtx) {
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
 		return
@@ -3297,7 +3437,7 @@ func (g *Graph[N, W]) RemoveEdgeLabel(src, dst N, name string) {
 	// and this is the exact inverse of [Graph.SetEdgeLabel], which types every free
 	// column-typed slot of the pair. The whole update is under the shard lock so
 	// the slot and overflow halves transition together for readers.
-	changed := g.removeOverflowVersioned(sh, k, lid)
+	changed := g.removeOverflowVersioned(sh, k, lid, tx)
 	if changed {
 		g.edgeLabelOverflowActive.Add(-1)
 	}
