@@ -126,13 +126,34 @@ func main() {
 // the range is what snapshot isolation actually promises. The reader samples the
 // ingest's acknowledged-commit counter before and after its query:
 //
-//   - lo, sampled BEFORE the query starts. Every one of those commits had
-//     already returned to the writer, so each is acknowledged and durable, and a
-//     transaction starting later MUST see it. An observation below lo is a
-//     committed write made INVISIBLE.
-//   - hi, sampled AFTER the query returns. The snapshot began before this
-//     sample, so it cannot legitimately contain a write acknowledged after it.
-//     An observation above hi is a read of the FUTURE.
+//   - lo, sampled BEFORE the query starts, from the ACKNOWLEDGED counter. Every
+//     one of those commits had already returned to the writer, so each is
+//     acknowledged and durable, and a transaction starting later MUST see it. An
+//     observation below lo is a committed write made INVISIBLE.
+//   - hi, sampled AFTER the query returns, from the STARTED counter. A write the
+//     ingest has not even begun cannot be visible to anybody, so it is a true
+//     upper bound. An observation above hi is a read of the FUTURE.
+//
+// # Why hi comes from a SEPARATE counter, and what happened when it did not
+//
+// An earlier version sampled both ends from the single acknowledged counter, and
+// it reported `2 future read(s) over 170 observations` against a CORRECT engine
+// during a loaded `make ci` run — while passing 8/8 standalone under -race.
+//
+// The reason is that publication precedes acknowledgement: the engine makes a
+// commit visible, THEN returns from the write, and only then does the ingest
+// increment its counter. A reader whose snapshot lands inside that window
+// legitimately sees the commit while hi has not yet counted it. Normally the
+// window is nanoseconds; under -race on a saturated machine the ingest goroutine
+// can be descheduled between the write returning and the increment for
+// milliseconds, and the reader's query takes microseconds. So the false positive
+// is not merely possible, it is expected under exactly the load a CI run applies.
+//
+// Sampling hi from a counter incremented BEFORE the write removes the window by
+// construction: nothing can be visible that has not been started. The cost is
+// that the ceiling is looser by the number of in-flight writes — one, because
+// the ingest is sequential — and the invisible-commit floor, which is the half
+// that catches a lost commit, is not weakened at all.
 //
 // Anything inside [lo, hi] is a legal serialisation and is not a finding.
 // Writes acknowledged during the query may or may not be visible, and either is
@@ -275,9 +296,13 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 		churning  atomic.Bool
 		checksRun atomic.Int64
 		committed atomic.Int64
-		st        stats
-		mu        sync.Mutex // guards st's slices and violation fields
-		wg        sync.WaitGroup
+		// started counts writes the ingest has BEGUN. It is the bracket's
+		// ceiling; see [observation] for why the acknowledged counter cannot
+		// serve that role. Always >= committed.
+		started atomic.Int64
+		st      stats
+		mu      sync.Mutex // guards st's slices and violation fields
+		wg      sync.WaitGroup
 	)
 
 	runCtx, stop := context.WithTimeout(ctx, cfg.duration)
@@ -343,9 +368,10 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 					mu.Unlock()
 					continue
 				}
-				// hi AFTER the query: see [observation] for why the bracket is
-				// sampled this way round.
-				o := observation{lo: lo, hi: committed.Load(), links: links, distinctSpokes: spokes}
+				// hi AFTER the query, and from the STARTED counter: see
+				// [observation] for why the acknowledged counter cannot serve as
+				// the ceiling, and for the false positive that proved it.
+				o := observation{lo: lo, hi: started.Load(), links: links, distinctSpokes: spokes}
 
 				mu.Lock()
 				st.observations++
@@ -384,6 +410,8 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 			q = fmt.Sprintf(
 				`MATCH (h:Hub {id: 0}), (s:Spoke {id: %d}) CREATE (h)-[:LINK]->(s)`, i)
 		}
+		// BEFORE the write, so the ceiling can never lag a published commit.
+		started.Add(1)
 		if err := runWrite(runCtx, eng, q); err != nil {
 			if runCtx.Err() != nil {
 				break
@@ -391,7 +419,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 			ingestErr = fmt.Errorf("ingest commit %d: %w", i, err)
 			break
 		}
-		// AFTER the commit returned, so the counter only ever names writes that
+		// AFTER the commit returned, so the FLOOR only ever names writes that
 		// are acknowledged. Incrementing before would make lo include a write
 		// still in flight, and the bracket would reject correct behaviour.
 		committed.Add(1)
