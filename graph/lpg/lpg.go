@@ -2163,13 +2163,13 @@ func (g *Graph[N, W]) removeNodeInfo(n N, tx *writeCtx) {
 	// via RemoveNodeLabel (the Cypher executor delete path), and
 	// correct when RemoveNode is called directly via the Go API without
 	// prior label removal.
-	g.stripLabelBitmaps(id)
+	g.stripLabelBitmaps(id, tx)
 }
 
 // stripLabelBitmaps removes id from every label bitmap that records it.
 // Called by RemoveNode to keep nodeIdx exact so consumers outside the
 // Cypher executor do not need to consult IsTombstoned (task #1409).
-func (g *Graph[N, W]) stripLabelBitmaps(id graph.NodeID) {
+func (g *Graph[N, W]) stripLabelBitmaps(id graph.NodeID, tx *writeCtx) {
 	sh := g.nodeLabelShardFor(id)
 	sh.mu.RLock()
 	bag := sh.m[id]
@@ -2182,7 +2182,7 @@ func (g *Graph[N, W]) stripLabelBitmaps(id graph.NodeID) {
 		// DEFERRED while versioning is armed: a reader older than the removal
 		// must still find this node in the label bitmap, or it silently loses a
 		// row. See mvcc_index.go.
-		if !g.deferLabelIndexRemoval(uint32(lid), id) {
+		if !g.deferLabelIndexRemoval(uint32(lid), id, tx) {
 			g.nodeIdx.Remove(uint32(lid), id)
 		}
 	}
@@ -3173,7 +3173,7 @@ func (g *Graph[N, W]) removeNodeLabelInfo(n N, name string, tx *writeCtx) {
 	}
 	sh.mu.Unlock()
 	// Deferred; see stripLabelBitmaps and mvcc_index.go.
-	if !g.deferLabelIndexRemoval(uint32(lid), id) {
+	if !g.deferLabelIndexRemoval(uint32(lid), id, tx) {
 		g.nodeIdx.Remove(uint32(lid), id)
 	}
 }

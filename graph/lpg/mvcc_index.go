@@ -65,11 +65,34 @@ type deferredIdx struct {
 //
 // Returns false when versioning is disarmed, in which case the caller removes
 // the entry immediately as it always did.
-func (g *Graph[N, W]) deferLabelIndexRemoval(lid uint32, id graph.NodeID) bool {
+//
+// # Whose instant the removal is stamped with (rmp #2303, MVCC B1)
+//
+// tx is the transaction performing the removal, and the stamp is taken FROM IT
+// rather than from the graph's ambient [mvcc.WriteStamp] slot. That distinction is
+// the whole of this structure's ordering basis.
+//
+// The ambient slot names whichever transaction currently holds the write
+// visibility barrier. While the barrier admits one writer that is always the right
+// answer, which is why reading it was correct until now. With concurrent writers
+// it is the WRONG answer in both directions: writer A's deferred removal could be
+// stamped with writer B's record, so it becomes reclaimable when B commits — before
+// A's own readers are done with the entry, which silently loses a row — or, if B is
+// still in flight, it carries an id no record will ever publish and the removal is
+// never swept at all, so the bitmap over-reports for the life of the process.
+//
+// This is the same defect class as audit finding E3, which rmp #2301 closed for the
+// commit record and the version count by moving them onto [writeCtx]; the deferred
+// index removal was the one remaining reader of the ambient slot on this path.
+//
+// A nil tx — a direct Go-API mutation outside any transaction — falls back to the
+// ambient stamp, which is correct for it: such a write is committed the instant it
+// is made, so there is no transaction whose instant could differ.
+func (g *Graph[N, W]) deferLabelIndexRemoval(lid uint32, id graph.NodeID, tx *writeCtx) bool {
 	if !g.mvccArmed {
 		return false
 	}
-	info, ts := g.stamp.Stamp()
+	info, ts := g.deferralStamp(tx)
 	k := idxEntry{id: id, lid: lid}
 	g.idxDeferred.mu.Lock()
 	if g.idxDeferred.pending == nil {
@@ -329,4 +352,16 @@ func (g *Graph[N, W]) LabelCountExact(lid LabelID, s *Snapshot) (int64, bool) {
 		return 0, false
 	}
 	return int64(g.nodeIdx.Count(uint32(lid))), true
+}
+
+// deferralStamp resolves the instant a deferred index removal is charged to.
+//
+// A transaction's own record and id, when there is one; the graph's ambient stamp
+// otherwise. See [Graph.deferLabelIndexRemoval] for why the difference matters
+// once writers overlap.
+func (g *Graph[N, W]) deferralStamp(tx *writeCtx) (*commitInfo, uint64) {
+	if tx != nil {
+		return tx.record(), tx.txID
+	}
+	return g.stamp.Stamp()
 }
