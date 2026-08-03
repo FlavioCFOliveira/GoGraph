@@ -2423,3 +2423,50 @@ process.
 **#2303 REMAINS OPEN on the last of four structures:** the
 `constraintActive`/`indexActive` gates (`graph/lpg/lpg.go:451,463`, read by
 `store/checkpoint/checkpoint.go:867`).
+
+Incrementally synced at commit `ced6f400` (2026-08-03, task #2303, sprint 334 —
+**the constraint/index gates are DERIVED, not mirrored; #2303's implementation
+complete**): +7 nodes (`Commit`; `Graph.SetIndexCountSource` and
+`Graph.SetConstraintCountSource` Methods; `derivedCount` Function; three `Test` in
+`graph/lpg/mvcc_gate_derived_test.go`), +11 edges, and **2 nodes REMOVED** —
+`Graph.SetActiveIndexCount` / `SetActiveConstraintCount` no longer exist.
+
+Both gates were an `atomic.Int64` the engine **stored a separately-read registry count
+into**, documented as correct because the engine held its single-writer lock. Accurate,
+and exactly the dependency rmp #2303 exists to remove: a store of a value the caller
+read earlier is a lost update as soon as a second writer exists. With one index
+registered — A drops it (registry 0, A reads 0), B creates another (registry 1, B reads
+1, stores 1), A stores 0 → **gate 0, registry 1**.
+
+**Under-reporting is the dangerous direction**: the checkpointer's phase-3
+self-sufficiency re-check consults `HasIndexes` to decide whether the WAL prefix holding
+a `CREATE INDEX` may be truncated, and a false answer truncates it — the index is
+silently gone on reopen. That is #1755's defect, resurrected by concurrency.
+
+**Derived, not maintained** — the task's own preferred answer and strictly the stronger
+of the two it offered. The graph holds a `func() int64` and calls it when the question is
+asked: no stored value to go stale, no window, no ordering requirement on the caller, and
+**no lock added**, which AC4 requires. The discriminating property is that the gate tracks
+its source with **nothing having notified it**, which a stored mirror cannot do;
+restoring the mirror fails two of the three tests. The churn test asserts
+**one-directionally** on purpose — over-reporting is safe (a retained prefix), under-
+reporting loses data.
+
+**GATE STATUS, STATED RATHER THAN GLOSSED.** `tidy fmt vet build test-short lint` green
+(119 packages, TCK green). **`make cover-gate` FAILS — and it fails on the PRE-CHANGE
+tree too**, with a *different* load-sensitive test. Verified by running the full
+cover-gate on the stashed pre-change tree, not by inspection: my run tripped
+`bench/mvccwrite` `TestWriteScalingInstrument_SeesConcurrency` (ratio 2.432× vs a 3.00×
+target, with available parallelism logged at 13.63× so `requireAvailableParallelism` did
+NOT skip); the pre-change run tripped `store/wal`
+`TestAppend_LoopInterleavesUnderConcurrency`. Both pass quiet. **Coverage instrumentation
+compresses these ratios while available parallelism still probes high, so the existing
+guard's threshold never fires** — the "differential is degenerate below a gate's floor"
+pattern. Filed as **rmp #2319** (BUG, p7/sev6, added to sprint 334) rather than worked
+around.
+
+**#2303's four structures are all implemented:** count store (`eff6ca74`),
+secondary-index publish (`e69d1974`), deferred label-index removal (`a00cfae8`), and
+these gates. Its AC3 is fully satisfied for three of them; for the deferred removal's
+BARRIER-path half it is unsatisfiable until rmp #2304 removes the barrier, which
+`graph/lpg/mvcc_index_ordering_test.go` records.
