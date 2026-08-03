@@ -319,6 +319,78 @@ func requireCores(t *testing.T) {
 	}
 }
 
+// minControlSpeedup is the parallel speed-up the CONTROL workload must actually
+// achieve before the serialisation instrument's verdict means anything.
+//
+// It is deliberately far below the ideal gateWriters: the point is not to demand
+// near-linear scaling, only to establish that the machine has spare capacity at
+// all. Half the writer count is comfortably clear of the ~1.2x seen on a saturated
+// machine (below) and comfortably below the ~6.1x a quiet one delivers.
+const minControlSpeedup = gateWriters / 2
+
+// requireAvailableParallelism skips when the machine cannot currently SUPPLY the
+// parallelism the instrument checks depend on, as opposed to merely owning enough
+// cores for it.
+//
+// # Why runtime.NumCPU() is not enough
+//
+// [requireCores] asks whether the cores EXIST. It cannot see whether they are
+// free, and `make ci` runs this package inside `go test -race ./...`, which
+// executes packages in parallel — so these CPU-bound control arms compete with
+// the rest of the module's race suite for the same cores.
+//
+// That matters because the two instruments are sensitive to load in OPPOSITE
+// directions, despite the file comment above calling the serialisation one
+// load-immune:
+//
+//   - measureScaling compares 1 writer against gateWriters. Under load BOTH arms
+//     slow, so the ratio survives and can even inflate — a 9.177x was observed on
+//     a machine whose true value is ~6x.
+//   - measureSerialisationRatio compares gateWriters FREE against gateWriters
+//     under one mutex. Under load the free arm collapses toward the serialised
+//     one, so the ratio COMPRESSES.
+//
+// Measured, same code, same build, same machine:
+//
+//	load average 18, inside `go test -race ./...`:
+//	    8 writers free  50380/s vs 1 writer 41384/s  =  1.2x available parallelism
+//	    serialisation ratio 2.452x  ->  FAILED the 3.00x target
+//	quiet machine, also under -race:
+//	    8 writers free 288181/s vs 1 writer 47249/s  =  6.1x available parallelism
+//	    serialisation ratio 6.900x  ->  passed comfortably
+//
+// Against minControlSpeedup = gateWriters/2 = 4, those two REAL measurements
+// decide correctly and with a wide margin:
+//
+//	50380/41384  = 1.22x  ->  SKIP    (the failing run: no verdict is reported)
+//	288181/47249 = 6.10x  ->  ASSERT  (the quiet run: the 6.90x check still runs)
+//
+// So the red was the machine, not the instrument and not the engine — and a gate
+// that reports a false NO-GO trains people to ignore gates. The honest outcome
+// when the machine cannot answer the question is to say so, which is the same
+// environment-precondition reasoning [requireCores] already applies one step
+// earlier.
+//
+// This cannot mask a genuine instrument defect: that would show up as a LOW
+// serialisation ratio while available parallelism is HIGH, and the assertion still
+// runs in exactly that case.
+//
+// It returns the measured speed-up so a caller can report it.
+func requireAvailableParallelism(t *testing.T, ops int) float64 {
+	t.Helper()
+	one := mustRunArm(t, 1, ops, spinUnit)
+	many := mustRunArm(t, gateWriters, ops/gateWriters, spinUnit)
+	speedup := many.commitsPerSec() / one.commitsPerSec()
+	if speedup < minControlSpeedup {
+		t.Skipf("the machine is not currently supplying the parallelism this check measures: "+
+			"%d free CPU-bound writers reached %.0f/s against 1 writer's %.0f/s = %.2fx, below "+
+			"the %dx this precondition needs. Nothing is concluded about the instrument; re-run "+
+			"with no competing load (see the doc comment for the measured numbers).",
+			gateWriters, many.commitsPerSec(), one.commitsPerSec(), speedup, minControlSpeedup)
+	}
+	return speedup
+}
+
 // TestWriteScalingInstrument_SeesConcurrency validates the positive direction of
 // both instruments. An instrument that cannot fail proves nothing, and the usual
 // validation — run the gate against a build that has the defect — is not
@@ -334,6 +406,10 @@ func requireCores(t *testing.T) {
 func TestWriteScalingInstrument_SeesConcurrency(t *testing.T) {
 	requireCores(t)
 	const ops = gateOps / 4
+	// Probe the machine BEFORE asserting anything, and skip rather than return a
+	// false verdict when it cannot supply the parallelism either instrument needs.
+	// See [requireAvailableParallelism] for the measurement that motivated this.
+	t.Logf("available parallelism: %.2fx", requireAvailableParallelism(t, ops))
 
 	scaling := measureScaling(t, gateWriters, ops, "control/parallel", spinUnit)
 	if !passesGate(scaling.max, writeScalingTarget) {
