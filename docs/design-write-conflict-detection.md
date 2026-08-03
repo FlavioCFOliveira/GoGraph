@@ -249,7 +249,36 @@ A conflicting transaction marks its shared commit record with
 `mvcc.AbortedTS` (`graph/mvcc/mvcc.go:33-40`). The existing visibility rule
 already handles it with no extra branch on the read path — `AbortedTS` sits
 above `TxIDBase`, so `Visible` returns false for every reader that is not the
-aborting transaction itself, and the chain becomes reclaimable.
+aborting transaction itself.
+
+### The chain is NOT reclaimable today — measured 2026-08-03, rmp #2318
+
+This section previously claimed the chain "becomes reclaimable". It does not, and
+the claim was corrected only when a test was written to assert it.
+
+Measured at `b3e1aa0b`: seed 50 versions, reclaim to zero, abort a transaction
+that wrote 50 more, reclaim again with no live reader → **`freed=0`, 50 records
+still live**. `AbortedTS` is `^uint64(0)`, the maximum `uint64`, and every
+reclaimer truncates on `stamp <= watermark` (`mvcc_reclaim.go:73,79,115,121`,
+`mvcc_sidemap.go:234,243`), which that value can never satisfy.
+
+The second half is the one that matters more. `labelTx.abort()` marks the record
+and **does not restore the stored value**, so the stored bag still holds the
+aborted transaction's writes and the aborted deltas are the only thing masking
+them. They are load-bearing *forever*, and a reclaimer that simply skipped the
+watermark for them would **expose the aborted writes** — a correctness
+regression, not merely a freed leak.
+
+This became live rather than theoretical when conflict detection started aborting
+real transactions: before that, `abort` was wired to no statement path, so no
+aborted chain existed. The fix is for reclamation to apply the undo to the stored
+value and then drop the delta — PostgreSQL's `VACUUM` shape for dead tuples — so
+it belongs with the bounded background vacuum (rmp #2308), not here. Tracked as
+rmp #2318.
+
+Note that the ordinary engine rollback path is unaffected and must stay so: it
+PUBLISHES its record rather than aborting it (`graph/lpg/mvcc_write.go:33-50`),
+because `cypher/undo.go` has already restored the stored value physically.
 
 There is **no cascading abort**: the audit established (§13.4) that none of
 PostgreSQL, InnoDB or Memgraph implements one, because a transaction can only
