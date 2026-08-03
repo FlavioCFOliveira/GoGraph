@@ -2047,3 +2047,35 @@ ALSO NOTE, for anyone asserting on it: there is **no `OrphanedOps` field on
 must install a `metrics.SetBackend` backend — and such tests must NOT be
 `t.Parallel()`, because that backend is process-global and two parallel tests
 would each count the other's orphans.
+
+Incrementally synced at commit `8c419e35` (2026-08-03, task #2302, sprint 334 —
+**resuming the transaction sequence across a reopen**, audit finding **E5**'s second
+half, acceptance criterion 4): +7 nodes (`Commit` `8c419e35`; two Components —
+`recovery.Result.MaxTxnSeq`, `txn.Options.ResumeTxnSeq`; four Tests in
+`store/txn/resume_txnseq_test.go`), +12 edges (the `WAL transaction contiguity`
+Feature `-[FIXES]->` the Commit, `-[IMPLEMENTS]->` both Components,
+`-[VERIFIES]->` all four Tests; `Commit -[TOUCHES]->` both Components, the Spec,
+and the packages `store/txn`, `store/recovery`).
+
+`txnSeq` was decoded by recovery and NEVER written back, so a store reopened on a
+non-empty WAL restarted at 0 and minted 1 again — one log holding two different
+transactions under one sequence number, which is precisely what recovery's
+suffix filter uses to tell one transaction's frames from another's. Measured:
+seeded `[1 2 3 4]`, unseeded `[1 2 1 2]`.
+
+DERIVED, NOT PERSISTED, and this is now the settled pattern for both counters in
+this sprint (the other is rmp #2309's MVCC clock): the WAL already carries the
+sequence in every frame, so a separate durable counter would be a second source of
+truth that can disagree with the log after a torn tail. `MaxTxnSeq` counts frames
+the replay DISCARDS and frames of an INCOMPLETE tail transaction — a sequence that
+was minted is spent, and re-minting it would put an abandoned transaction and a
+live one under one number.
+
+A DEADLOCK THE PARTIAL FIX INTRODUCED, recorded because the obvious half of the
+change is the half that hangs. Seeding the minting counter ALONE wedges the store:
+`waitApplyTurn` parks until `appliedSeq == seq-1`, and the predecessor of a resumed
+store's first transaction was applied by the PREVIOUS store instance, which no
+longer exists to advance anything. `TestResumeTxnSeq_IsMonotoneAcrossReopen` HUNG
+until `appliedSeq` was seeded too — and it would have hung in production on the
+first write after every restart. Any future change touching one watermark must
+touch both.
