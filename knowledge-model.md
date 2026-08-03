@@ -1948,3 +1948,41 @@ per-shard `buildingOwner` token at `e3a0ea1e`, so a builder is reused only by th
 transaction that created it. Conflict DETECTION still covers seven stores rather
 than eight, and that remains tabulated in
 `docs/design-write-conflict-detection.md`.
+
+Incrementally synced at commit `205ca672` (2026-08-03, task #2300, sprint 334 —
+**the serialization conflict's retriable path to a Bolt client**): +8 nodes
+(`Commit` `205ca672`; two Components — `FailureCode serialization-conflict
+mapping`, `sanitiseErr conflict message forwarding`; five Tests —
+`TestFailureCode_SerializationConflict`,
+`TestFailureCode_SerializationConflictIsRetriedByTheRealDriver`,
+`TestFailureCode_DemotedTransientCodesAreNotRetriable`,
+`TestSanitiseErr_ForwardsTheConflictMessage`,
+`TestFailureCode_ConflictIsNotClassifiedAsAClientFault`), +12 edges (`Feature
+Write-write conflict detection -[FIXES]->` the Commit, `-[IMPLEMENTS]->` both
+Components, `-[VERIFIES]->` all five Tests; `Commit -[TOUCHES]->` both Components,
+the Spec `design-write-conflict-detection.md`, and the package `bolt/server`).
+
+THE TRAP, recorded because it is a class rather than an incident: a Bolt status
+code being in the `Neo.TransientError.*` family is NOT sufficient for the official
+driver to retry it. `neo4j-go-driver` v5.28.4 runs `db.Neo4jError.reclassify()`
+BEFORE parsing the classification, and it rewrites
+`Neo.TransientError.Transaction.Terminated` and
+`…Transaction.LockClientStopped` into the `Neo.ClientError` family — so both are
+**never retried**. `Terminated` reads as the natural fit for "your transaction was
+aborted, try again" and would have been silently wrong. The conflict maps to
+`Neo.TransientError.Transaction.Outdated`, whose Neo4j `Status.java` text
+("transaction has seen state which has been invalidated by applied updates") is
+this rule exactly. The mapping is guarded by a test that asks
+`neo4j.IsRetryable` — the driver's own classifier — plus a NEGATIVE CONTROL over
+both demoted codes; the instrument was validated by moving the mapping onto
+`Terminated` and confirming the positive test fails.
+
+WHAT #2300 STILL CANNOT PROVE, recorded so the gap is visible rather than
+implied: a collision that actually travels the wire. The engine's writes pass no
+transaction, an explicit transaction holds the exclusive barrier for its whole
+lifetime (`cypher/exectx.go:353`), and a writer's start timestamp is read AFTER
+the barrier is acquired — so not even first-committer-wins can fire. The
+write-scaling gate's disjoint arm is therefore green over a code path that cannot
+fail, which is not evidence. Both become provable when rmp #2304 gives the engine
+a transaction to thread; §7.1 of `docs/design-write-conflict-detection.md`
+tabulates all four claims with their status.
