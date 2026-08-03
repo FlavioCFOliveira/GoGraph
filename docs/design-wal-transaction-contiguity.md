@@ -270,6 +270,27 @@ the first draft of rmp #2301).
 The consequence is that **the serving path's window currently SHADOWS per-transaction ownership.**
 With `visMu` gone, two concurrent writers would both present the same `bulkOwner` and would reuse
 each other's private, *unpublished* shard builders — one writer mutating another's slot array in
-place. So rmp #2304 must **retire the serving path's window** in favour of a token that travels with
-the write, which lpg already has in `writeCtx.txID`. Deleting `visMu` around it is not enough, and
-this is recorded here because the failure would be silent.
+place. ### Half of that hazard is closed now
+
+`builderOwner` was reordered: the **writing transaction wins** over the bulk window's token.
+
+The old order existed for a real reason — the commit *record* is allocated lazily, so reading it
+first could yield nil on a bracket's first write and a record on its second, changing the token
+mid-window and re-cloning the builder every write (a test caught exactly that on rmp #2301's first
+draft). `mvcc.WriteStamp.OpenTxID` closes that gap: the id is stored by `TxState.Arm` when the window
+opens, **before any write can happen**, because rmp #2299 minted it eagerly so the writer could read
+through it. It is stable for the whole transaction where the record is not.
+
+So while a transaction is open, `bulkOwner` is never consulted, and the shared token can no longer
+decide who may mutate a shard's private slot array. What remains for rmp #2304 is one problem
+instead of two: the **lookup** still resolves through `WriteStamp`'s single ambient slot and must
+become a parameter that travels with the write — the same ambient-versus-threaded distinction
+`graph/lpg/mvcc_writectx.go` already documents for conflict detection.
+
+**No single-writer test can gate this change, and that was checked rather than assumed.** With the
+old ordering restored, `TestBuilderOwner_TransactionKeepsCloneOnceWithNoBulkWindow` still passes:
+the first adjacency write allocates the record itself, so the nil window the old order guarded
+against never opens. For one writer the two orderings are indistinguishable — which is the claim the
+change makes — and the difference appears only with two concurrent writers, which the barrier still
+prevents. The test is therefore a guard on the property #2304 depends on, not a discriminator, and
+it says so.

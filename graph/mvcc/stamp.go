@@ -104,7 +104,7 @@ var armedPending = &CommitInfo{}
 // point of rmp #2301 and what a per-graph field could not give.
 //
 // The zero value is not armed. Arm it with [TxState.Arm], hand it to
-// [WriteStamp.Begin] so untransacted writes can find it, and close it with
+// [WriteStamp.Publish] so untransacted writes can find it, and close it with
 // [WriteStamp.End] or [TxState.Retract].
 //
 // Safe for concurrent use.
@@ -354,6 +354,29 @@ func (w *WriteStamp) OpenInfo() *CommitInfo {
 		return nil
 	}
 	return st.OpenRecord()
+}
+
+// OpenTxID returns the identity of the transaction currently open on this stamp,
+// or zero when none is.
+//
+// It is [WriteStamp.OpenInfo] for a caller that wants only the transaction's
+// IDENTITY and needs it to be stable from the transaction's FIRST write.
+// OpenInfo cannot offer that: the commit record is allocated lazily by the first
+// version that needs one, so a caller asking before then gets nil and a caller
+// asking after gets a record — two different answers within one transaction.
+//
+// The id has no such gap. [TxState.Arm] stores it when the window opens, before
+// any write can happen, which is what rmp #2299 minted it eagerly for. So a
+// per-(shard, transaction) decision keyed on this is stable for the whole
+// transaction, where the same decision keyed on the record is not.
+//
+// It allocates nothing and counts no version.
+func (w *WriteStamp) OpenTxID() uint64 {
+	st := w.cur.Load()
+	if st == nil {
+		return 0
+	}
+	return st.TxID()
 }
 
 // Armed reports whether a transaction is currently open on this stamp.

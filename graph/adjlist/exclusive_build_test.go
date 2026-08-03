@@ -160,3 +160,76 @@ func TestExclusiveBuild_WritesStillLandInPlace(t *testing.T) {
 		t.Fatalf("node a has %d neighbours after the rebuild window, want 3", n)
 	}
 }
+
+// TestBuilderOwner_TransactionKeepsCloneOnceWithNoBulkWindow pins clone-once with
+// the TRANSACTION as the sole owner — no bulk window at all, which is the
+// situation rmp #2304 leaves once the serving path's window is retired.
+//
+// # What it does NOT prove, checked rather than assumed
+//
+// It is NOT a regression gate for the ordering change in [AdjList.builderOwner].
+// That was verified: with the old record-first ordering restored, this test still
+// PASSES. The reason is that the first adjacency write of a transaction allocates
+// the commit record itself, so by the time it asks for an owner the record already
+// exists — the lazily-allocated nil window the old ordering guarded against never
+// opens in this scenario.
+//
+// And that is consistent with the change's own claim: for ONE writer the two
+// orderings behave identically. The reordering matters only with TWO concurrent
+// writers, where the single per-AdjList bulk token would be shared and the
+// per-transaction id would not — and the visibility barrier makes that
+// unreachable today. So no single-writer test can discriminate, by construction,
+// and this one is a guard on the property #2304 depends on rather than a
+// discriminator between orderings.
+func TestBuilderOwner_TransactionKeepsCloneOnceWithNoBulkWindow(t *testing.T) {
+	a := exclusiveRig(t)
+	if err := a.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge seed: %v", err)
+	}
+	id, ok := a.Mapper().Lookup("a")
+	if !ok {
+		t.Fatal("seed node absent")
+	}
+	sh := &a.shards[id&shardMask]
+
+	// A transaction, and NO BeginCommit: the token can only come from the stamp.
+	ws := a.WriteStampForTest()
+	txID := beginTx(ws)
+	if txID == 0 {
+		t.Fatal("the test transaction got no id, so it cannot own a builder")
+	}
+	if got := ws.OpenTxID(); got != txID {
+		t.Fatalf("OpenTxID = %d, want the armed transaction's id %d; without it the owner "+
+			"is only available once the first version has allocated the record", got, txID)
+	}
+
+	if err := a.AddEdge("a", "c", 1); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	afterFirst := sh.slotsRef.Load()
+	if err := a.AddEdge("a", "d", 1); err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+	afterSecond := sh.slotsRef.Load()
+
+	if afterFirst != afterSecond {
+		t.Fatal("the transaction's second write to the same shard re-cloned its slot array. " +
+			"The owner changed mid-transaction, which is the exact defect the old " +
+			"bulk-window-first ordering existed to avoid — so OpenTxID is not delivering a " +
+			"stable identity and the reordering in builderOwner is unsound")
+	}
+
+	info, _ := ws.End()
+	if info == nil {
+		t.Fatal("the transaction versioned nothing, so this test exercised no version chain")
+	}
+	info.Commit(ws.Clock().NextCommitTS())
+
+	n := 0
+	for range a.Neighbours("a") {
+		n++
+	}
+	if n != 3 {
+		t.Fatalf("node a has %d neighbours, want 3", n)
+	}
+}

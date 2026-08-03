@@ -2466,28 +2466,42 @@ func (a *AdjList[N, W]) markDirtyAndBuild(s *adjShard[W], next *shardSlots, owne
 // It ALLOCATES NOTHING and counts no version: it is an identity check, not a
 // stamp. See [mvcc.WriteStamp.OpenInfo].
 func (a *AdjList[N, W]) builderOwner() uint64 {
-	// The explicit bulk window wins when one is open, so a window stays
-	// consistent for its whole duration even if a transaction record also
-	// exists. Reading the record first would let the token CHANGE mid-window —
-	// the record is allocated lazily by the first version, so the first write of
-	// a bracket would own its builder under one token and the second would
-	// present another, and the builder would be re-cloned every write. That is
-	// the defect TestStoreEntry_InPlaceWindowMutationIsSoundUnderVersioning
-	// caught on the first draft of this change.
-	if a.bulkOwner != 0 {
-		return a.bulkOwner
-	}
+	// The WRITING TRANSACTION wins when there is one, and this ordering is the
+	// reverse of what it was until rmp #2302 — for a reason that only became true
+	// once the transaction id was minted eagerly.
+	//
+	// The old order preferred the bulk window's token because reading the
+	// transaction first let the token CHANGE mid-window: the commit RECORD is
+	// allocated lazily by the first version, so a bracket's first write owned its
+	// builder under one token and the second presented another, re-cloning the
+	// builder on every write. TestStoreEntry_InPlaceWindowMutationIsSoundUnderVersioning
+	// caught that on rmp #2301's first draft.
+	//
+	// [mvcc.WriteStamp.OpenTxID] closes that gap: the id is stored when the window
+	// opens, before any write can happen (rmp #2299 minted it eagerly precisely so
+	// the writer could read through it), so it is stable for the whole
+	// transaction where the record is not.
+	//
+	// Preferring it MATTERS rather than merely being tidier. The bulk token is ONE
+	// per-AdjList field, so while it wins, every writer in a window presents the
+	// same owner — and the owner is what decides who may mutate a shard's private,
+	// unpublished slot array in place. Under the barrier there is only ever one
+	// serving writer, so the two orders behave identically today; with the barrier
+	// gone (rmp #2304) the old order would let two writers reuse each other's
+	// builders. Keying on the transaction removes that by construction, and leaves
+	// #2304 with one problem instead of two: the LOOKUP still resolves through a
+	// single ambient slot and must become a parameter that travels with the write.
 	if a.stamp != nil {
-		if info := a.stamp.OpenInfo(); info != nil {
-			// While in flight the record's stamp IS the transaction id: unique,
-			// monotonic and never reused, so it identifies this transaction and
-			// can never be mistaken for another's. It is read while the
-			// transaction is still writing, so it cannot yet be a commit
-			// timestamp.
-			return info.TS()
+		if id := a.stamp.OpenTxID(); id != 0 {
+			// A transaction id is unique, monotonic and never reused, so it
+			// identifies this transaction and can never be mistaken for another's
+			// — nor for a commit timestamp, which lives below mvcc.TxIDBase.
+			return id
 		}
 	}
-	return 0
+	// No transaction: the explicit window's synthetic token, which is what an
+	// exclusive rebuild and an unversioned graph both rely on.
+	return a.bulkOwner
 }
 
 // BeginCommit opens a commit window so that the writes of one transaction
