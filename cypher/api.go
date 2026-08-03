@@ -15785,21 +15785,6 @@ func (e *Engine) execUnderBarrier(
 	return r, buildErr
 }
 
-// RecordConstraintInverse appends inv to this statement's undo log so a rollback
-// undoes a constraint-registry change (rmp #2321). It implements the optional
-// journal interface cypher/exec asserts; see cypher/exec/constraint_journal.go for
-// what replaced the whole-graph reseed and why the reseed was unsound under
-// concurrent writers.
-//
-// A nil undo log means this adapter tracks no transaction, so there is nothing to
-// roll back and nothing to record — the same reading undoLog.record itself takes.
-func (a *lpgMutatorAdapter) RecordConstraintInverse(inv func()) { a.undo.record(inv) }
-
-// RecordConstraintInverse is [lpgMutatorAdapter.RecordConstraintInverse] for the
-// durable write path. Both adapters implement it because both are reachable write
-// paths and a rolled-back statement must release its reservations either way.
-func (a *walMutatorAdapter) RecordConstraintInverse(inv func()) { a.undo.record(inv) }
-
 // setMutatorWriteTx hands a write adapter the transaction its statement is
 // running as, so every read it makes resolves through that transaction rather
 // than through the graph's ambient slot (rmp #2304).
@@ -16598,6 +16583,16 @@ func (a *lpgMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle u
 func (a *lpgMutatorAdapter) EdgeHandleAtPosition(src, dst string, edgePos uint64) uint64 {
 	return edgeHandleAtFwdPos(a.bopts, a.g.WriterViewOf(a.wtx), src, dst, edgePos)
 }
+
+// RecordConstraintInverse appends inv to this statement's undo log so a rollback
+// undoes a constraint-registry change (rmp #2321). It implements the optional
+// journal interface cypher/exec asserts; see cypher/exec/constraint_journal.go for
+// what replaced the whole-graph reseed and why the reseed was unsound under
+// concurrent writers.
+//
+// A nil undo log means this adapter tracks no transaction, so there is nothing to
+// roll back and nothing to record — the same reading undoLog.record itself takes.
+func (a *lpgMutatorAdapter) RecordConstraintInverse(inv func()) { a.undo.record(inv) }
 
 // FirstEdgeHandle resolves the handle on the first src→dst adjacency slot,
 // delegating to [lpg.Graph.FirstEdgeHandle]; used by the MERGE ON MATCH /
@@ -17433,6 +17428,11 @@ func (a *walMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle u
 func (a *walMutatorAdapter) EdgeHandleAtPosition(src, dst string, edgePos uint64) uint64 {
 	return edgeHandleAtFwdPos(a.bopts, a.g.WriterViewOf(a.wtx), src, dst, edgePos)
 }
+
+// RecordConstraintInverse is [lpgMutatorAdapter.RecordConstraintInverse] for the
+// durable write path. Both adapters implement it because both are reachable write
+// paths and a rolled-back statement must release its reservations either way.
+func (a *walMutatorAdapter) RecordConstraintInverse(inv func()) { a.undo.record(inv) }
 
 // FirstEdgeHandle resolves the handle on the first src→dst adjacency slot,
 // delegating to [lpg.Graph.FirstEdgeHandle]; used by the MERGE ON MATCH /
