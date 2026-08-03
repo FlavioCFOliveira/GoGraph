@@ -2217,3 +2217,73 @@ DATA-QUALITY NOTES observed during this sync, not corrected here:
   (`checkConcurrent`, `concTxnFacts`, `concPresentFacts`, `parseAcks`,
   `runConcurrentCrash`, `assertViolations`, `runCountdownChild`). That is the
   graph's existing convention, not an omission.
+
+Incrementally synced at commit `fc433015` (2026-08-03, task #2300, sprint 334 —
+**adjacency write-write conflict detection, on the commutative rule**): +16 nodes
+(`Commit`; three `Type` — `adjVersions`, `adjStamps`, `adjVersionShard`; one
+`Function` — `adjEffective`; four `Method` — `adjVersions.checkAppend`,
+`.stampAppend`, `.noteExclusive`, `Graph.addEdgeInfo`; seven `Test`), +15 edges
+(12 `CONTAINS`, 3 `HAS_METHOD`, 7 `VERIFIES`, 3 `IMPROVES`, 1 `Sprint`→`Commit`).
+
+**ADJACENCY COULD NOT USE THE RULE EVERY OTHER STORE USES.** Every other versioned
+store keeps a per-object delta chain, so a writer asks whether it may displace the
+head version. Adjacency keeps none — its only version signal is
+`Graph.topoGeneration`, **one global counter**, which cannot distinguish "someone
+changed node A" from "someone changed node Z". The standard rule would make every
+writer conflict with every other writer that touched the graph at all.
+
+**READING MEMGRAPH'S SOURCE INVERTED THE OBVIOUS ANSWER, and this is the entry
+worth keeping.** `CreateEdge` does NOT call `PrepareForWrite`; it calls
+**`PrepareForNonSequentialWrite`** on both endpoint vertices (memgraph/memgraph @
+`b3ac3cd`, `src/storage/v2/inmemory/storage.cpp` → `src/storage/v2/mvcc.hpp`).
+That returns `NON_SEQUENTIAL`, **not** `SERIALIZATION_ERROR`, when the head delta
+is itself an edge creation, and says why in its own comment: *"if the entire
+uncommitted delta chain is of edge creations … we can safely add a non-sequential
+delta"*. So **two transactions appending arcs to the SAME vertex do not conflict** —
+`ADD_OUT_EDGE`/`ADD_IN_EDGE` are commutative — and only a *blocking* delta
+upstream (property, label, edge removal) is a serialization error. It matters more
+in GoGraph than in Memgraph: on a power-law graph most arcs share few sources, so
+conflicting on every append would serialise exactly the hot path the sprint exists
+to open. **User decided the commutative rule.**
+
+**The shape, with no delta chain to walk:** `adjVersions` keeps **two stamps per
+node** across 64 shards — `appendTS` (commutative) and `exclusiveTS`
+(non-commutative). An append consults only `exclusiveTS`; a removal / pair clear /
+same-pair replacement consults **both**. **An append still RECORDS its stamp
+although it never conflicts with another append** — without it,
+`AddEdge(A→C)` followed by a concurrent `RemoveEdge(A→B)` is undetectable in that
+order and the append is silently lost. That is what Memgraph gets free by linking a
+delta whatever its action, and what `has_uncommitted_non_sequential_deltas`
+discriminates.
+
+**TWO DEFECTS THE TESTS CAUGHT IN THE FIRST DRAFT, both silent:**
+- the append **stamped nothing when it created its own source node** — the id does
+  not exist until after the insert, so `Lookup` failed and the stamp was skipped
+  for **most of a bulk CREATE**, leaving those nodes invisible to a later removal's
+  check. Check and record are now **separate**, for two different reasons: the
+  check precedes the mutation so a doomed transaction writes nothing, the record
+  follows it because the id is not there until then.
+- `truncate`/`len` were written **unwired**, which lint reported as dead code — and
+  that was not tidiness. Unwired, the stamp map grows one entry per node ever
+  written transactionally and never shrinks: the leak shape rmp #2289 closed for
+  direct writes. `truncate` now runs in `Graph.ReclaimNow` on the **same watermark
+  as every other store**; `len` is exposed as `MVCCStats.AdjConflictStamps`.
+
+`AdjConflictStamps` is reported **beside** `MVCCStats.Total`, not inside it: the
+stamps hold no pre-image, are never read, and no reader can hold them back, so
+folding them in would misreport the version memory a long read can pin.
+
+**Every positive case was verified to FAIL** against a build with the check removed
+(lost update, both transactions committing), **and re-verified after the
+check/record restructure moved the guard**. The commuting row and the
+disjoint-sources row keep PASSING under that defect, which is what proves they are
+not "everything conflicts" tests. Both orders of append-vs-removal are covered
+separately because the rule is asymmetric.
+
+**STATE OF #2300 AFTER THIS:** detection now covers node existence, node labels,
+node properties, adjacency and the five per-edge side stores — AC2's coverage gap
+closed. It is at **parity** with the other stores, which means it is still
+**unreachable from the Cypher engine**: `Graph.AddEdge` and `Graph.SetNodeLabel`
+both pass `tx == nil`, only `beginLabelTx` carries a `writeCtx`, and the ambient
+`Graph.writeTx` slot still encodes one-writer-at-a-time. No collision reaches a
+Bolt client until rmp #2304. AC4 overlaps rmp #2318.
