@@ -352,14 +352,109 @@ func (w *Writer) AppendCtx(ctx context.Context, payload []byte) error {
 		metrics.IncCounter("store.wal.AppendCtx.errors", 1)
 		return w.syncErr
 	}
+	if err := w.appendLocked(payload); err != nil {
+		metrics.IncCounter("store.wal.AppendCtx.errors", 1)
+		return err
+	}
+	return nil
+}
+
+// AppendRun appends every frame fn emits as ONE CONTIGUOUS RUN: no other
+// appender's frame can land between them.
+//
+// # Why this exists — rmp #2302, audit finding E5
+//
+// Crash recovery commits the ops carrying a marker's own TxnSeq and discards the
+// buffered prefix as orphaned (store/recovery/recovery.go:1421-1429), and that
+// reading is correct ONLY IF a transaction's frames are contiguous. Recovery says
+// so in its own words: "The store serialises commits (single writer), so a
+// transaction's frames are contiguous and never interleave with another's."
+//
+// That contiguity did not come from here. [Writer.AppendCtx] serialises
+// INDIVIDUAL appends; the run was held together by the store's single-writer
+// semaphore two layers up (store/txn). The instant two writers append
+// concurrently, interleaved frames make recovery drop COMMITTED ops — an
+// Atomicity and Durability violation whose only symptom is the
+// store.recovery.openCodec.orphanedOps counter.
+//
+// So contiguity moves into the component that owns the file. Recovery's
+// assumption stays TRUE rather than being relaxed, which is why this needs no
+// on-disk format change, no new frame field, and no change to
+// store/recovery at all.
+//
+// # The lock this holds, and why it is LESS than what it replaces
+//
+// w.mu is taken once, before fn, and released after it — so fn runs with the
+// writer exclusively held. That is a longer critical section than one Append, and
+// a strictly SHORTER one than the store semaphore it replaces, which spans a
+// commit's encoding, its append loop and everything else it does. Every other
+// writer can proceed with all of that; only the WAL append is exclusive.
+//
+// Group commit is unaffected: [Writer.SyncGroup] coalesces on Sync, not on
+// Append, and a run of appends followed by one Sync is the shape it already
+// coalesces.
+//
+// # Contract
+//
+// The emit closure handed to fn is valid ONLY for the duration of the call;
+// retaining it and calling it later writes into a writer this goroutine no longer
+// holds. fn MUST NOT call any other method on this Writer — w.mu is not
+// re-entrant and doing so deadlocks. Keep fn to encoding and appending.
+//
+// An error from fn is returned unchanged, and frames already emitted stay in the
+// buffer: they are an un-marked, incomplete transaction, which recovery discards
+// for atomicity exactly as it does for a crash between the data frames and the
+// commit marker. An error from append itself is the same fail-stop as
+// [Writer.AppendCtx]'s — a partial frame poisons the next Sync.
+//
+// Prior art: PostgreSQL's XLogInsertRecord does the expensive work (assembling
+// and CRCing the record) outside its insertion lock and holds it only for the
+// copy (postgres/postgres, master, src/backend/access/transam/xlog.c). This is
+// that insight at the granularity GoGraph needs: the per-op encoding stays with
+// the caller, and the lock covers only the framing.
+func (w *Writer) AppendRun(fn func(emit func([]byte) error) error) error {
+	defer metrics.Time("store.wal.AppendRun").Stop()
+	if w.closed.Load() {
+		metrics.IncCounter("store.wal.AppendRun.errors", 1)
+		return ErrWriterClosed
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.syncErr != nil {
+		// Poisoned by an earlier Sync failure; see [Writer.AppendCtx].
+		metrics.IncCounter("store.wal.AppendRun.errors", 1)
+		return w.syncErr
+	}
+	// done guards the closure against use after fn returns. It is the cheapest
+	// form of the contract above that can actually fail loudly instead of
+	// corrupting the log from a goroutine that no longer holds the mutex.
+	done := false
+	err := fn(func(payload []byte) error {
+		if done {
+			panic("wal: AppendRun's emit closure used after the run returned")
+		}
+		return w.appendLocked(payload)
+	})
+	done = true
+	if err != nil {
+		metrics.IncCounter("store.wal.AppendRun.errors", 1)
+	}
+	return err
+}
+
+// appendLocked encodes one frame into the buffer. The caller must hold w.mu and
+// must have checked closed/syncErr.
+//
+// It is the body [Writer.AppendCtx] and [Writer.AppendRun] share, so a run's
+// frames are framed and accounted exactly as a lone append's are — one
+// definition, not two that can drift.
+func (w *Writer) appendLocked(payload []byte) error {
 	n, err := Encode(w.bw, Frame{Payload: payload})
 	if err != nil {
-		// A partial frame may now sit in the buffer (and, when the
-		// buffer spilled, partially in the file). bufio's sticky error
-		// guarantees the next Flush fails, so SyncCtx poisons the
-		// writer and discards the partial bytes before any later sync
-		// could acknowledge them.
-		metrics.IncCounter("store.wal.AppendCtx.errors", 1)
+		// A partial frame may now sit in the buffer; bufio's sticky error
+		// guarantees the next Flush fails, so SyncCtx poisons the writer and
+		// discards the partial bytes before any later sync could acknowledge
+		// them. See [Writer.AppendCtx].
 		return err
 	}
 	w.appendedSize += int64(n)

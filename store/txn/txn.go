@@ -1391,21 +1391,31 @@ func (t *Tx[N, W]) appendOnly() (seq uint64, hasSeq bool, err error) {
 	// the pool on every exit path, including encode/append failures.
 	scratch := getEncodeScratch()
 	defer putEncodeScratch(scratch)
-	for _, op := range t.ops {
-		payload, enErr := encodeOpTypedV3Into((*scratch)[:0], op, seq, t.store.codec, t.store.wcodec)
-		if enErr != nil {
-			t.releaseAfterAppend()
-			return seq, true, enErr
+	// ONE contiguous run, not a loop of independent appends (rmp #2302, audit
+	// finding E5). Recovery commits the ops carrying a marker's own TxnSeq and
+	// discards the buffered prefix as orphaned, which is correct only while a
+	// transaction's frames cannot interleave with another's. That property used to
+	// rest on the store semaphore below still being held here; it now rests on the
+	// WAL writer itself, which is the component that owns the file. See
+	// [wal.Writer.AppendRun] and docs/design-wal-transaction-contiguity.md.
+	//
+	// The per-op encoding happens INSIDE the run, so the pooled scratch buffer is
+	// still reused for every frame and the commit allocates no more than before.
+	if aerr := t.store.wal.AppendRun(func(emit func([]byte) error) error {
+		for _, op := range t.ops {
+			payload, enErr := encodeOpTypedV3Into((*scratch)[:0], op, seq, t.store.codec, t.store.wcodec)
+			if enErr != nil {
+				return enErr
+			}
+			*scratch = payload // retain the (possibly grown) backing array for reuse
+			if err := emit(payload); err != nil {
+				return err
+			}
 		}
-		*scratch = payload // retain the (possibly grown) backing array for reuse
-		if aerr := t.store.wal.Append(payload); aerr != nil {
-			t.releaseAfterAppend()
-			return seq, true, aerr
-		}
-	}
-	marker := encodeCommitV3Into((*scratch)[:0], seq)
-	*scratch = marker
-	if aerr := t.store.wal.Append(marker); aerr != nil {
+		marker := encodeCommitV3Into((*scratch)[:0], seq)
+		*scratch = marker
+		return emit(marker)
+	}); aerr != nil {
 		t.releaseAfterAppend()
 		return seq, true, aerr
 	}
