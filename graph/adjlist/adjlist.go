@@ -180,24 +180,34 @@ type AdjList[N comparable, W any] struct {
 	// transaction clock, therefore no isolation to offer".
 	stamp *mvcc.WriteStamp
 
-	// dirtyShards lists the shards whose private builder must be frozen at the
-	// end of the current commit window. Appended on the first touch of a shard
-	// within the window; drained and cleared at EndCommit.
-	dirtyShards []*adjShard[W]
+	// bulkOwner is the builder-owner token of the open [AdjList.BeginCommit]
+	// window, or 0 when none is open.
+	//
+	// It is the one per-AdjList field left in the commit-window mechanism, and
+	// it is sound BY CONTRACT rather than by luck: BeginCommit's documented
+	// precondition is a provably-exclusive build with no concurrent reader and
+	// no concurrent writer (single-threaded WAL replay, bulk ingest).
+	//
+	// A token rather than a pointer, because minting a fresh *mvcc.CommitInfo
+	// per window costs an ALLOCATION per bracket, and
+	// TestBarrierGuard_ApplyAtomicallyAllocatesNothing requires a bracket that
+	// versions nothing to allocate nothing. Measured: the pointer form reported
+	// 1 alloc/op there.
+	bulkOwner uint64
+	// bulkSeq mints bulkOwner tokens when no clock is attached — the unversioned
+	// case, where no transaction token is ever produced, so the two spaces
+	// cannot collide. With a clock, tokens come from its transaction-id space,
+	// which is monotonic and never reused.
+	bulkSeq uint64
 
 	cfg Config
 
 	size atomic.Uint64
 
-	// commitDepth tracks the open commit-window nesting for the single writer
-	// (see [AdjList.BeginCommit]). 0 means no window is open and every write is
-	// its own 1-op window (clone-and-publish once). > 0 means a window is open
-	// and writes accumulate into each touched shard's private builder, published
-	// once per shard at the matching [AdjList.EndCommit]. It is mutated only by
-	// BeginCommit / EndCommit, which the higher layer calls only while holding
-	// its exclusive visibility barrier (so there is a single writer); it is not
-	// an atomic because the window protocol is single-writer by construction.
-	commitDepth int
+	// bulkDepth tracks [AdjList.BeginCommit] nesting for the bulk paths only.
+	// Mutated exclusively by BeginCommit / EndCommit under their documented
+	// single-writer precondition; see bulkOwner.
+	bulkDepth int
 }
 
 // SetAuxFactory registers the constructor the fused property-carrying append
@@ -231,10 +241,29 @@ type adjShard[W any] struct {
 	// shard takes its first version.
 	versioned map[uint64]struct{}
 
+	// buildingOwner is the token of the transaction that owns `building` — its
+	// in-flight transaction id, or the bulk window's token — and 0 when there is
+	// no builder. A builder is reused ONLY by the transaction that created it
+	// (rmp #2301).
+	//
+	// This is what replaced the per-AdjList commitDepth + dirtyShards pair. The
+	// ownership IS the transaction's identity, so there is no shared counter to
+	// race on, no shared dirty list to append to, and nesting needs no depth —
+	// nested statements of one transaction share its commit record, which is the
+	// whole reason that record exists.
+	//
+	// It also removes the need to FREEZE a builder at the end of a transaction.
+	// A builder can only be reused by a write presenting the same owner, and a
+	// finished transaction's record never appears on a write again — commit
+	// records are allocated per transaction and never reused — so the builder is
+	// unreachable for in-place mutation the moment its transaction ends. Guarded
+	// by mu.
+	buildingOwner uint64
+
 	// building is the PRIVATE, not-yet-published [shardSlots] clone the shard
-	// is accumulating writes into during an open commit window (see
-	// [AdjList.BeginCommit]). It is nil unless this shard has been touched in
-	// the current window. Guarded by mu. A reader never observes it — it is
+	// is accumulating writes into for buildingOwner's transaction. It is nil
+	// unless this shard has been touched by a transaction that is still able to
+	// reuse it. Guarded by mu. A reader never observes it — it is
 	// published into slotsRef only at [AdjList.EndCommit]. This is the
 	// clone-once-per-(shard, window) dedup that bounds a multi-op commit's COW
 	// cost to O(distinct shards touched) instead of O(ops): the first write to
@@ -2288,17 +2317,32 @@ func loadEntry[W any](s *adjShard[W], intraIdx uint64) *adjEntry[W] {
 // concurrent companion, which fail if either property is lost.
 func (a *AdjList[N, W]) storeEntry(s *adjShard[W], intraIdx uint64, entry *adjEntry[W]) error {
 	maxCap := a.cfg.MaxShardCapacity
-	inWindow := a.commitDepth > 0
+	// The transaction now writing, as an identity. Nil means "no transaction",
+	// in which case this write is its own one-op window and always clones — the
+	// behaviour an unbracketed write has always had.
+	owner := a.builderOwner()
+	inWindow := owner != 0
 
-	// Determine the slot array to write into. Within an open window, after the
-	// first touch of this shard, s.building is the private (already-published)
-	// builder we mutate in place. Otherwise we start from the frozen published
-	// array and copy-on-write.
+	// Determine the slot array to write into. A builder is reusable only when it
+	// belongs to THIS transaction; another transaction's builder is not ours to
+	// mutate, and reusing it would put our writes into an array that transaction
+	// may still publish over. Taking the published array instead is always
+	// correct: markDirtyAndBuild publishes a builder into slotsRef on first
+	// touch, so the published array already carries every write the other
+	// transaction has made.
 	base := s.building
+	if base != nil && s.buildingOwner != owner {
+		// Release the other transaction's builder rather than merely ignoring
+		// it, so a finished transaction's slot array is not kept alive by this
+		// field after slotsRef has moved on.
+		s.building = nil
+		s.buildingOwner = 0
+		base = nil
+	}
 	firstTouchInWindow := false
 	if base == nil {
 		base = s.slotsRef.Load()
-		firstTouchInWindow = inWindow // first time this shard is touched this window
+		firstTouchInWindow = inWindow // first time this transaction touches this shard
 	}
 
 	// MVCC P3 (rmp #2281), inert unless armed: record the entry this write
@@ -2344,7 +2388,7 @@ func (a *AdjList[N, W]) storeEntry(s *adjShard[W], intraIdx uint64, entry *adjEn
 		}
 		next.slots[intraIdx] = unsafe.Pointer(entry) //nolint:gosec // typed publication of *adjEntry[W]
 		if inWindow {
-			a.markDirtyAndBuild(s, next)
+			a.markDirtyAndBuild(s, next, owner)
 		}
 		s.slotsRef.Store(next)
 		return nil
@@ -2376,22 +2420,55 @@ func (a *AdjList[N, W]) storeEntry(s *adjShard[W], intraIdx uint64, entry *adjEn
 	copy(next.slots, base.slots)
 	next.slots[intraIdx] = unsafe.Pointer(entry) //nolint:gosec // typed publication of *adjEntry[W] into a fresh clone
 	if inWindow {
-		a.markDirtyAndBuild(s, next)
+		a.markDirtyAndBuild(s, next, owner)
 	}
 	s.slotsRef.Store(next)
 	return nil
 }
 
-// markDirtyAndBuild records s as dirty in the current commit window and adopts
-// next as its private builder, so subsequent same-shard writes this window
-// mutate next in place and EndCommit knows to freeze it. The caller must hold
-// s.mu and be inside an open window. A shard is appended to dirtyShards only on
-// its first touch this window (when s.building was still nil).
-func (a *AdjList[N, W]) markDirtyAndBuild(s *adjShard[W], next *shardSlots) {
-	if s.building == nil {
-		a.dirtyShards = append(a.dirtyShards, s)
-	}
+// markDirtyAndBuild adopts next as s's private builder on behalf of owner's
+// transaction, so subsequent same-shard writes by that transaction mutate next
+// in place instead of cloning the slot array again.
+//
+// The caller must hold s.mu and pass a non-nil owner. There is no dirty list to
+// append to and nothing to freeze later: see [adjShard.buildingOwner].
+func (a *AdjList[N, W]) markDirtyAndBuild(s *adjShard[W], next *shardSlots, owner uint64) {
 	s.building = next
+	s.buildingOwner = owner
+}
+
+// builderOwner returns the identity of the transaction currently writing, for
+// deciding whether a shard's builder may be mutated in place.
+//
+// The open transaction's shared commit record when there is one — which is
+// per-transaction by construction and is exactly the granularity the dedup
+// wants — otherwise the bulk paths' synthetic owner, otherwise nil.
+//
+// It ALLOCATES NOTHING and counts no version: it is an identity check, not a
+// stamp. See [mvcc.WriteStamp.OpenInfo].
+func (a *AdjList[N, W]) builderOwner() uint64 {
+	// The explicit bulk window wins when one is open, so a window stays
+	// consistent for its whole duration even if a transaction record also
+	// exists. Reading the record first would let the token CHANGE mid-window —
+	// the record is allocated lazily by the first version, so the first write of
+	// a bracket would own its builder under one token and the second would
+	// present another, and the builder would be re-cloned every write. That is
+	// the defect TestStoreEntry_InPlaceWindowMutationIsSoundUnderVersioning
+	// caught on the first draft of this change.
+	if a.bulkOwner != 0 {
+		return a.bulkOwner
+	}
+	if a.stamp != nil {
+		if info := a.stamp.OpenInfo(); info != nil {
+			// While in flight the record's stamp IS the transaction id: unique,
+			// monotonic and never reused, so it identifies this transaction and
+			// can never be mistaken for another's. It is read while the
+			// transaction is still writing, so it cannot yet be a commit
+			// timestamp.
+			return info.TS()
+		}
+	}
+	return 0
 }
 
 // BeginCommit opens a commit window so that the writes of one transaction
@@ -2399,29 +2476,31 @@ func (a *AdjList[N, W]) markDirtyAndBuild(s *adjShard[W], next *shardSlots) {
 // mutate that private builder in place for the rest of the window, instead of
 // cloning the whole array on every write. It bounds a multi-op commit's
 // copy-on-write cost to O(distinct shards touched) rather than O(ops). The
-// matching [AdjList.EndCommit] freezes every touched shard's builder.
+// matching [AdjList.EndCommit] retires that owner.
 //
-// # Single-writer contract (load-bearing)
+// # Single-writer contract (load-bearing, and now NARROW)
 //
 // BeginCommit/EndCommit are NOT internally synchronised and MUST be called only
-// by a single writer that holds an exclusive section excluding every other
-// writer AND every reader for the window's whole duration. The higher layer
-// supplies exactly this: it brackets the visibility barrier
-// (lpg.Graph.ApplyAtomically / LockBarrier = visMu.Lock), under which the
-// engine is single-writer and reads run under visMu.RLock (mutually excluded).
-// The window state (commitDepth, dirtyShards, and each shard's building) is
-// therefore mutated by one goroutine only; it is not guarded by an atomic or a
-// global lock because the exclusive section already guarantees that.
+// by a single writer with NO concurrent writer, NO concurrent reader and NO
+// concurrent [AdjList.PinSnapshot] for the window's whole duration. The
+// sanctioned callers are provably-exclusive bulk builds — single-threaded WAL
+// recovery replay, or a bulk-ingest loop the concurrent public API cannot reach.
+// Wrapping such a loop in ONE window restores baseline write cost (clone once
+// per shard, then in place).
 //
-// The only other sanctioned caller is a provably-exclusive bulk build with NO
-// concurrent reader and NO concurrent [AdjList.PinSnapshot] for the window's
-// whole duration (e.g. single-threaded WAL recovery replay, or a bulk-ingest
-// loop the concurrent public API cannot reach). Wrapping such a loop in ONE
-// window restores baseline write cost (clone once per shard, then in place).
+// That contract used to cover the ENGINE too, because the engine bracketed the
+// visibility barrier around every write and was therefore single-writer by
+// construction. It no longer needs to: a transaction with a commit record open
+// on the write stamp is identified by that record, so the dedup follows the
+// transaction rather than the lock, and two concurrent transactions cannot
+// disturb each other's builders (rmp #2301). The shared window state this
+// paragraph used to defend — a depth counter and a dirty-shard list on the
+// AdjList — no longer exists.
 //
-// Calls nest: a nested BeginCommit/EndCommit pair (e.g. an inner statement
-// applied inside an explicit transaction that already opened the window) just
-// adjusts the depth; only the outermost EndCommit freezes the builders.
+// Calls nest: a nested BeginCommit/EndCommit pair just adjusts the depth; only
+// the outermost EndCommit retires the owner. A transaction-owned builder needs
+// no depth at all — nested statements of one transaction share its commit
+// record, which is what makes them one transaction.
 //
 // # F3.5 / #1671 — the dedup SURVIVES the lock-free read path
 //
@@ -2432,9 +2511,44 @@ func (a *AdjList[N, W]) markDirtyAndBuild(s *adjShard[W], next *shardSlots) {
 // See the unwind note on [AdjList.storeEntry] for the full argument and the
 // tests that pin it.
 //
+// # What it is for now, after rmp #2301
+//
+// A transaction that has a commit record open on the write stamp gets the
+// clone-once dedup WITHOUT calling this at all: the record identifies the
+// transaction, and [adjShard.buildingOwner] uses it directly. That is the engine
+// path, and it is why the dedup is now safe under concurrent writers — the
+// window state that used to be shared (commitDepth, dirtyShards) is gone.
+//
+// BeginCommit remains for the paths that write with NO transaction open on the
+// stamp and are exclusive by contract: single-threaded WAL recovery replay and
+// bulk ingest. It installs a synthetic owner so those writes are deduped too.
+// Calling it from a path that already has a transaction open is harmless and
+// redundant — the record wins.
+//
 // BeginCommit is safe to call only as described above; misuse (concurrent
 // callers, or reads not excluded) is undefined.
-func (a *AdjList[N, W]) BeginCommit() { a.commitDepth++ }
+func (a *AdjList[N, W]) BeginCommit() {
+	a.bulkDepth++
+	if a.bulkOwner == 0 {
+		a.bulkOwner = a.mintBulkOwner()
+	}
+}
+
+// mintBulkOwner returns a builder-owner token that no transaction can present.
+//
+// From the clock's transaction-id space when there is a clock, so it can never
+// collide with a live transaction's id; from a local counter otherwise, which is
+// the unversioned case where no transaction token is ever produced. Allocates
+// nothing either way.
+func (a *AdjList[N, W]) mintBulkOwner() uint64 {
+	if a.stamp != nil {
+		if c := a.stamp.Clock(); c != nil {
+			return c.NextTxID()
+		}
+	}
+	a.bulkSeq++
+	return a.bulkSeq
+}
 
 // EndCommit closes the innermost commit window opened by [AdjList.BeginCommit].
 // On the OUTERMOST close (depth returns to 0) it freezes every shard touched
@@ -2449,24 +2563,23 @@ func (a *AdjList[N, W]) BeginCommit() { a.commitDepth++ }
 // that called BeginCommit, exactly once per BeginCommit, under the same
 // exclusive section.
 func (a *AdjList[N, W]) EndCommit() {
-	if a.commitDepth == 0 {
+	if a.bulkDepth == 0 {
 		return
 	}
-	a.commitDepth--
-	if a.commitDepth > 0 {
+	a.bulkDepth--
+	if a.bulkDepth > 0 {
 		return
 	}
-	// Outermost close: freeze every touched shard's builder. The shard's
-	// slotsRef already points at the builder; clearing s.building marks it
-	// frozen so the next write to that shard (in a later window or unbracketed)
-	// clones it afresh rather than mutating it in place.
-	for _, s := range a.dirtyShards {
-		s.mu.Lock()
-		s.building = nil
-		s.mu.Unlock()
-	}
-	// Reset the dirty list, keeping the backing array for reuse across commits.
-	a.dirtyShards = a.dirtyShards[:0]
+	// Outermost close: retire the synthetic owner. No shard needs visiting.
+	//
+	// Freezing each touched shard's builder used to be this function's whole
+	// job, and it is no longer necessary: a builder is reusable only by a write
+	// presenting its owner, and this owner is dropped here and never handed out
+	// again. The next write to any of those shards finds an owner mismatch and
+	// clones, which is precisely what the freeze used to arrange — but at O(1)
+	// instead of one lock acquisition per touched shard, and without a shared
+	// dirty list for concurrent writers to race on (rmp #2301).
+	a.bulkOwner = 0
 }
 
 // growShardLocked builds a FRESH [shardSlots] with at least minLen slots,

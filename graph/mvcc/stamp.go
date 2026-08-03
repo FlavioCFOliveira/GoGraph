@@ -210,6 +210,31 @@ func (w *WriteStamp) Stamp() (*CommitInfo, uint64) {
 	return info, 0
 }
 
+// OpenInfo returns the record of the open transaction WITHOUT allocating one
+// and without counting a version, or nil when no transaction is open or its
+// record has not been allocated yet.
+//
+// It is [WriteStamp.Info] for a caller that wants the record only as an
+// IDENTITY — to ask "which transaction is writing?" rather than "give me
+// something to stamp a version with". The adjacency uses it to decide whether a
+// shard's private slot-array builder belongs to the transaction now writing
+// (rmp #2301); getting nil there is not a problem, it just means clone rather
+// than mutate in place, which is what a transaction's first version would do
+// anyway.
+//
+// The distinction matters because [WriteStamp.Stamp] and [WriteStamp.Info] both
+// have side effects — they allocate the shared record on first use and add to
+// the version count — and an identity check must have neither, or a write that
+// records nothing would be charged a version and an untransacted write would be
+// handed a commit timestamp it never uses.
+func (w *WriteStamp) OpenInfo() *CommitInfo {
+	info := w.info.Load()
+	if info == nil || info == armedPending {
+		return nil
+	}
+	return info
+}
+
 // Armed reports whether a transaction is currently open on this stamp.
 //
 // The higher layer uses it to tell "I am inside the barrier" from "I am a bare
