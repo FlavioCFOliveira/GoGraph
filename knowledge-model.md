@@ -2287,3 +2287,50 @@ closed. It is at **parity** with the other stores, which means it is still
 both pass `tx == nil`, only `beginLabelTx` carries a `writeCtx`, and the ambient
 `Graph.writeTx` slot still encodes one-writer-at-a-time. No collision reaches a
 Bolt client until rmp #2304. AC4 overlaps rmp #2318.
+
+Incrementally synced at commit `eff6ca74` (2026-08-03, task #2303, sprint 334 —
+**the count store's ordering basis, and a live defect under a wrong premise**):
++4 nodes (`Commit`; three `Test` in `graph/index/count/commutative_test.go`),
++7 edges (3 `CONTAINS`, 3 `FIXES`, 1 `Sprint`→`Commit`).
+
+**A PREMISE OF MINE THAT WAS WRONG, AND THE TEST WRITTEN TO CONFIRM IT REFUTED IT.**
+`count.Store.Apply` is `cell.Add(delta)` — an ADDITIVE delta, not an assignment —
+and `MarkDirty` is a monotone set insert, so the first conclusion was that the count
+store was already commutative and needed only a corrected contract comment.
+
+It did not. `Apply` deleted a cell at **zero-OR-BELOW**, so a cell driven negative
+was deleted, its negative value **discarded**, and the next increment recreated it
+from zero — **permanently losing the decrement**. `-1` then `+1` on an empty cell
+read **1** where `+1` then `-1` read **0**: the aggregate was order-sensitive, which
+is precisely the dependency on writer exclusion rmp #2303 exists to remove.
+
+**WHY IT SURVIVED.** Under the visibility barrier the base is always correct, so no
+partial sum can go negative and the clamp is unreachable. The moment writers commit
+concurrently, one transaction's decrements can land before another's increments and
+the clamp silently eats them. Invisible to a green suite and to any single-writer
+test.
+
+**FIX:** delete at **exactly** zero and retain a negative cell — that is what makes
+addition commute. Bounded growth unchanged: a negative cell is transient, reaching
+exactly zero when its matching increment arrives, where it is deleted.
+
+`MarkDirty` needed no change, checked rather than assumed: nothing clears an
+individual entry (only a whole-store `Reset` does), and a concurrent test confirms no
+writer's marking displaces another's.
+
+**THE CONTRACT NOW SEPARATES TWO THINGS IT CONFLATED.** `exec.CountBuffer.Commit`
+still must run where the count becomes visible atomically with the graph writes it
+describes — a **visibility** requirement, which rmp #2304 must preserve by other
+means. It does **not** rest on the barrier imposing a total order across committers.
+The intra-transaction order (every delta, then every dirty mark) is a property of the
+buffer and survives concurrency, because one buffer belongs to one transaction.
+
+Differential: restoring the `<= 0` clamp fails
+`TestCountStore_ConcurrentDeltasReachZeroFromEitherOrder` with the message it
+carries. The wrong reasoning is recorded in the test file rather than quietly
+replaced.
+
+**#2303 REMAINS OPEN** on its other three structures: the secondary-index batch
+publish (`cypher/exec/index_writeback.go`), the deferred label-index removal
+(`graph/lpg/mvcc_index.go`), and the `constraintActive`/`indexActive` gates
+(`graph/lpg/lpg.go:451,463`, read by `store/checkpoint/checkpoint.go:867`).
