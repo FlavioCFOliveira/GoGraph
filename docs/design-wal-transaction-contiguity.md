@@ -225,11 +225,40 @@ audit's point is that it must not be silently *inherited* once writers overlap a
 path that legitimately needs no barrier during a rebuild must not quietly become a path that needs
 none while the engine serves.
 
-Two distinct entry points now, and an `atomic.Bool` that makes overlapping them **panic** rather
-than corrupt a builder — in either direction. Pinned by
-`TestExclusiveBuild_RefusesAServingWindow` and
-`TestExclusiveBuild_RefusesEntryInsideAServingWindow`; each fails by construction if the guard is
-removed, since both assert that `recover()` returned something.
+Two distinct entry points now, plus an `atomic.Bool` that makes the **one sound direction** panic:
+an exclusive build may not START inside a serving window, because a rebuild may only run on a graph
+nobody is serving. Pinned by `TestExclusiveBuild_RefusesEntryInsideAServingWindow`, which fails by
+construction if the guard is removed.
+
+### Only one direction is asserted — measured, after getting it wrong
+
+The first version *also* panicked whenever a serving window was opened **during** a rebuild. That is
+too strict, and `make ci` said so — three packages failed (`cypher`,
+`examples/04_persistence`, `examples/24_social_network_cli`) because recovery's own replay nests one,
+on the **same goroutine**, on the dominant path:
+
+```
+adjlist.BeginCommit
+lpg.ApplyAtomically              (lpg.go:712)
+lpg.reclaimAfterDirectWrite      (mvcc_gc.go:135)
+lpg.addNodeInfo                  (lpg.go:1206)
+recovery.applyOpCodec            (recovery.go:1616)
+```
+
+A replay creates versions fast enough to cross the reclamation threshold, and the sweep runs inside
+an `ApplyAtomically` bracket. The guard was rejecting correct behaviour.
+
+**The hazard is CONCURRENCY, not nesting** — a *second goroutine* writing while the rebuild runs.
+Telling the two apart needs goroutine identity, which `adjlist` does not have: the only structure
+that knows which goroutine holds a write window is lpg's `barrierGuard`, and it is
+`//go:build race || gograph_debug`. So the assertion in that direction belongs in **lpg**, alongside
+that guard, and is rmp #2304's to add when it retires the serving path's window. Until then the
+nesting is **counted** (`AdjList.NestedServingWindows`), so it is observable rather than merely
+tolerated — and it is load-bearing: if it ever stopped happening, the reclamation debt would
+accumulate through a whole replay with nothing draining it.
+
+`TestExclusiveBuild_AllowsAServingWindowNestedInside` now pins the behaviour the wrong guard
+rejected, so it cannot be re-added.
 
 ### A hazard for rmp #2304 that this surfaced
 

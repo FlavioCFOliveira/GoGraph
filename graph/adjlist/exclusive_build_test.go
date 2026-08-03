@@ -31,33 +31,51 @@ func exclusiveRig(t *testing.T) *AdjList[string, float64] {
 	return a
 }
 
-// TestExclusiveBuild_RefusesAServingWindow is the enforcement, in the direction
-// that matters most: a serving commit window opened while a rebuild is in flight.
+// TestExclusiveBuild_AllowsAServingWindowNestedInside pins the behaviour a wrong
+// guard rejected, so it cannot be re-added.
 //
-// That is the case the audit warns about. Once the barrier is gone, a writer
-// arriving mid-recovery would take the rebuild's bulkOwner as its own and mutate a
-// shard's private, unpublished slot array in place. The panic makes it a bug
-// report instead of a corrupted graph.
-func TestExclusiveBuild_RefusesAServingWindow(t *testing.T) {
+// The first version of this change panicked whenever a serving window was opened
+// during a rebuild. `make ci` rejected it, in three packages, because recovery's
+// own replay nests one on the SAME goroutine and on the dominant path: a replay
+// creates versions fast enough to cross the reclamation threshold, and
+// reclaimAfterDirectWrite runs the sweep inside an lpg.ApplyAtomically bracket,
+// which opens a serving window.
+//
+// The hazard is CONCURRENCY, not nesting. Distinguishing them needs goroutine
+// identity, which this package does not have — see BeginExclusiveBuild's doc for
+// where that assertion belongs. So the nesting is allowed and counted.
+func TestExclusiveBuild_AllowsAServingWindowNestedInside(t *testing.T) {
 	a := exclusiveRig(t)
 	a.BeginExclusiveBuild()
-	defer a.EndExclusiveBuild()
 
-	if !a.InExclusiveBuild() {
-		t.Fatal("BeginExclusiveBuild did not mark the graph as being rebuilt")
-	}
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("BeginCommit succeeded during an exclusive build: the serving path and " +
-				"the rebuild would share one builder-owner token, so one would mutate the " +
-				"other's unpublished slot array in place")
-		}
-		if msg, ok := r.(string); !ok || msg == "" {
-			t.Fatalf("panicked with %v, want a message naming the violated precondition", r)
-		}
-	}()
+	before := a.NestedServingWindows()
+	// This must NOT panic: it is exactly what recovery's reclamation sweep does.
 	a.BeginCommit()
+	if err := a.AddEdge("a", "b", 1); err != nil {
+		t.Fatalf("AddEdge inside the nested serving window: %v", err)
+	}
+	a.EndCommit()
+
+	if got := a.NestedServingWindows() - before; got != 1 {
+		t.Fatalf("nested serving windows counted %d, want 1: the nesting is legitimate but "+
+			"load-bearing (it is the reclamation sweep), so it has to stay observable", got)
+	}
+	if !a.InExclusiveBuild() {
+		t.Fatal("closing the nested serving window ended the exclusive build")
+	}
+
+	a.EndExclusiveBuild()
+	if a.InExclusiveBuild() {
+		t.Fatal("the rebuild window did not close")
+	}
+	// The write made inside the nested window survived.
+	n := 0
+	for range a.Neighbours("a") {
+		n++
+	}
+	if n != 1 {
+		t.Fatalf("node a has %d neighbours, want 1: the nested window's write was lost", n)
+	}
 }
 
 // TestExclusiveBuild_RefusesEntryInsideAServingWindow covers the mirror

@@ -221,6 +221,12 @@ type AdjList[N comparable, W any] struct {
 	// two goroutines would be a race in the detector before it could be a
 	// diagnosis.
 	exclusiveBuild atomic.Bool
+
+	// nestedServingWindows counts serving commit windows opened while an
+	// exclusive build was in progress. That nesting is legitimate — it is
+	// recovery's own reclamation sweep — and is counted rather than refused; see
+	// [AdjList.BeginExclusiveBuild].
+	nestedServingWindows atomic.Uint64
 }
 
 // SetAuxFactory registers the constructor the fused property-carrying append
@@ -2541,15 +2547,12 @@ func (a *AdjList[N, W]) builderOwner() uint64 {
 // BeginCommit is safe to call only as described above; misuse (concurrent
 // callers, or reads not excluded) is undefined.
 func (a *AdjList[N, W]) BeginCommit() {
-	// Refuse to open a serving window inside an exclusive build. The two modes
-	// share bulkOwner and bulkDepth, which are PLAIN fields, so overlapping them
-	// is a data race on the token that decides which transaction may mutate a
-	// shard's private builder in place — and the consequence is not a lost
-	// counter but one writer mutating another's not-yet-published slot array.
-	// See [AdjList.BeginExclusiveBuild] for why the two are separable at all.
+	// A serving window opened DURING an exclusive build is legitimate and happens
+	// on the dominant recovery path, so it is counted rather than refused. See
+	// [AdjList.BeginExclusiveBuild] for the measured stack and for why the
+	// dangerous case cannot be detected here.
 	if a.exclusiveBuild.Load() {
-		panic("adjlist: BeginCommit called during an exclusive build (recovery or bulk import); " +
-			"the exclusive-build precondition is no concurrent writer, and this is one")
+		a.nestedServingWindows.Add(1)
 	}
 	a.bulkDepth++
 	if a.bulkOwner == 0 {
@@ -2592,6 +2595,37 @@ func (a *AdjList[N, W]) BeginCommit() {
 // with the write — lpg already has one in writeCtx.txID — rather than merely
 // deleting visMu around it.
 //
+// # Why only ONE direction is asserted — measured, after getting it wrong
+//
+// The first version of this also panicked from [AdjList.BeginCommit] whenever a
+// serving window was opened during a rebuild. That is too strict, and `make ci`
+// said so: recovery's own replay nests one, on the SAME goroutine, on the
+// dominant path.
+//
+//	adjlist.BeginCommit
+//	lpg.ApplyAtomically              (lpg.go:712)
+//	lpg.reclaimAfterDirectWrite      (mvcc_gc.go:135)
+//	lpg.addNodeInfo                  (lpg.go:1206)
+//	recovery.applyOpCodec            (recovery.go:1616)
+//
+// A replay creates versions fast enough to cross the reclamation threshold, and
+// the sweep runs inside an ApplyAtomically bracket. Three packages failed on it
+// (cypher, examples/04_persistence, examples/24_social_network_cli), so the guard
+// was rejecting correct behaviour.
+//
+// The hazard is CONCURRENCY, not nesting — a SECOND goroutine writing while the
+// rebuild runs. Telling the two apart needs goroutine identity, which this package
+// does not have: the only structure that knows which goroutine holds a write
+// window is lpg's barrierGuard, and it is `//go:build race || gograph_debug`. So
+// the sound assertion in this direction belongs in lpg, alongside that guard, and
+// is rmp #2304's to add when it retires the serving path's window. Until then the
+// nesting is COUNTED — see [AdjList.NestedServingWindows] — so the behaviour is
+// observable rather than merely tolerated.
+//
+// What IS asserted here is the direction that holds unconditionally: an exclusive
+// build must not START inside a serving window, because a rebuild may only run on
+// a graph nobody is serving.
+//
 // Nested calls are permitted and expected (a replay applies many ops inside one
 // window); the depth is tracked exactly as BeginCommit's is. The matching
 // [AdjList.EndExclusiveBuild] must be called once per call, by the same
@@ -2624,6 +2658,15 @@ func (a *AdjList[N, W]) EndExclusiveBuild() {
 	a.bulkOwner = 0
 	a.exclusiveBuild.Store(false)
 }
+
+// NestedServingWindows reports how many serving commit windows have been opened
+// while an exclusive build was in progress.
+//
+// It exists because that nesting is legitimate but load-bearing: it is recovery's
+// own reclamation sweep, and if it ever stopped happening the reclamation debt
+// would be accumulating through a whole replay with nothing draining it. A counter
+// makes it observable; see [AdjList.BeginExclusiveBuild] for the measured stack.
+func (a *AdjList[N, W]) NestedServingWindows() uint64 { return a.nestedServingWindows.Load() }
 
 // InExclusiveBuild reports whether an exclusive rebuild window is open.
 //
