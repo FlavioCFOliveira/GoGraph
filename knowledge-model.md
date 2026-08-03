@@ -1986,3 +1986,64 @@ write-scaling gate's disjoint arm is therefore green over a code path that canno
 fail, which is not evidence. Both become provable when rmp #2304 gives the engine
 a transaction to thread; §7.1 of `docs/design-write-conflict-detection.md`
 tabulates all four claims with their status.
+
+Incrementally synced at commit `9eee3b18` (2026-08-03, task #2302, sprint 334 —
+**WAL transaction contiguity**, closing audit finding **E5**): +12 nodes
+(`Commit` `9eee3b18`; `Feature` `WAL transaction contiguity`; `Spec`
+`design-wal-transaction-contiguity.md`; two Components — `wal.Writer.AppendRun`,
+`wal.Writer.appendLocked`; seven Tests — four in `store/wal/append_run_test.go`
+and three in `store/recovery/interleaved_txn_test.go`), +18 edges (the Feature
+`-[PART_OF]-> MVCC as sole concurrency control`, `-[SPECIFIED_IN]->` the Spec,
+`-[FIXES]->` the Commit, `-[IMPLEMENTS]->` both Components, `-[VERIFIES]->` all
+seven Tests; `Commit -[TOUCHES]->` both Components, the Spec, and the packages
+`store/wal`, `store/txn`, `store/recovery`).
+
+WHAT E5 ACTUALLY WAS, and it is TWO defects rather than one — recorded because the
+first draft of the design named the wrong one. Recovery commits the ops carrying a
+marker's own `TxnSeq` and discards the buffered prefix as orphaned, licensed by its
+own comment: *"The store serialises commits (single writer), so a transaction's
+frames are contiguous."* That licence came from a semaphore two packages up, not
+from the WAL. Under interleaving the damage depends on WHERE the foreign frame
+lands:
+
+- foreign op in the buffer's **PREFIX** → the scan walks past it, `orphanedOps=1`,
+  the op is **LOST** and never seen again. Three of four ops remain, so the graph
+  looks entirely plausible. A **Durability** violation whose only signal is one
+  counter.
+- foreign op in the **MIDDLE** → the scan starts at 0 and applies it under the
+  WRONG marker, so an uncommitted transaction's op is durable after a crash.
+  `orphanedOps=0`, nothing dropped. An **Atomicity** violation with no signal at
+  all.
+
+The design was written against the middle order expecting data loss, and the test
+went GREEN over a live defect until the order was measured. Both arms are kept
+permanently, and each fails loudly if its defect stops reproducing — because that
+would mean the guarantee is no longer what protects atomicity and the positive
+tests would be proving nothing.
+
+THE SHAPE: `wal.Writer.AppendRun` holds the writer's own mutex for a whole run, so
+contiguity is a property of the component that owns the file. Recovery's
+assumption stays TRUE rather than being relaxed — hence no format change, no new
+frame field, no change to `store/recovery` at all. Rejected in writing:
+PostgreSQL's `XLogInsertRecord` space reservation (holes recovery must tolerate,
+for a concurrent-memcpy payoff nothing has measured) and InnoDB's
+group-by-mini-transaction (needs an aggregate buffer cap invented on top of
+`maxTxnOps`). What IS taken from PostgreSQL is the insight at the right
+granularity: expensive work outside the lock, the lock only for the copy — so the
+per-op encoding stays with the caller and the commit path keeps its pooled scratch
+buffer.
+
+MEASURED: a loop of `Append` shattered a 25-frame transaction into **8 runs**
+(longest 10) against 8 concurrent appenders; `AppendRun` gives exactly **1**.
+
+PARTIAL DELIVERY, tabulated in §3 of the Spec rather than implied: criteria 1, 2, 3
+and 7 are closed. Durable and monotone `txnSeq` (4), crash-injection with
+concurrent writers (5), the fsync-per-commit benchmark (6) and audit finding **E21**
+(recovery and bulkimport open the adjacency commit window with NO barrier,
+licensed only by a comment) remain open on #2302.
+
+ALSO NOTE, for anyone asserting on it: there is **no `OrphanedOps` field on
+`recovery.Result`**. The orphan count is metrics-only, so a test that asserts it
+must install a `metrics.SetBackend` backend — and such tests must NOT be
+`t.Parallel()`, because that backend is process-global and two parallel tests
+would each count the other's orphans.
