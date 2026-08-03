@@ -86,7 +86,48 @@
 // commit exists but cannot be reached" looks like from the outside, and it is
 // the number rmp #2193 has to move.
 //
-// The regression gate that keeps these numbers honest is in gate_test.go.
+// # What rmp #2304 MEASURED with the barrier removed, then reverted
+//
+// Medians over -count=10. The `wal` arm is the one that moved, and it moved
+// because the fsync is no longer inside an exclusive hold:
+//
+//	writers   mem commits/s   mem scaling   wal commits/s   wal scaling
+//	      1        338 069        1.000            267.0        1.000
+//	      2        280 733        0.845            380.2        1.424
+//	      4        280 620        0.844            550.1        2.060
+//	      8        278 413        0.838           1096.0        4.104
+//	     16        278 407        0.838           2161.0        8.094
+//	     32        275 996        0.831           4041.0       15.130
+//
+// THESE NUMBERS ARE NOT THE CURRENT HEAD. The change that produced them was
+// reverted: with the barrier removed the engine does not deliver atomic visibility,
+// because a statement's deltas still resolve their commit record through a
+// graph-wide ambient slot and two open brackets split one transaction across two
+// records (examples/27_concurrent_txn measured 105 942 torn reads). They are kept
+// because they are what the sprint is worth, measured rather than asserted, and
+// because they are the target the ratchet in gate_test.go aims at.
+//
+// Two readings, and both matter.
+//
+// The `wal` arm went from perfectly flat to 15.1x at thirty-two writers, with the
+// single-writer arm unchanged (266.6 -> 267.0 commits/s), so nothing was traded
+// for it. SyncGroup's leader/follower coalescing is reachable: writers now share
+// one fsync instead of queueing for their own.
+//
+// The `mem` arm did NOT move — 0.838x at sixteen writers against 0.835x before —
+// and that is expected rather than a disappointment. This arm's outermost lock is
+// cypher.Engine.writeMu, held for the whole statement and taken only when no store
+// is attached (cypher/api.go:1188-1190); visMu was the INNER of the two. The audit
+// says so in as many words: the store-less baseline "is writeMu + visMu and
+// nothing else" (§3.1), and removing the other mechanisms while the apply gate
+// stands "buys nothing" (§3.1, finding E18). Retiring writeMu, the store semaphore
+// and the apply gate is rmp #2306, and the mem arm is its number to move. Naming
+// which arm belongs to which task is the point of measuring both.
+//
+// The regression gates that keep these numbers honest are in gate_test.go —
+// including TestWALWriteScalingGate, which is the one with power: its floor is
+// above 1.0, so it fails if an exclusive hold is ever put back across the commit
+// path.
 package mvccwrite
 
 import (

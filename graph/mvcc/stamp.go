@@ -298,12 +298,62 @@ func (w *WriteStamp) Publish(st *TxState) { w.cur.Store(st) }
 //
 // See [TxState.Retract], which does the work; End additionally clears the slot,
 // so an untransacted write arriving afterwards is stamped as what it is.
+//
+// It is correct ONLY while at most one transaction is open at a time, because it
+// closes whichever transaction the slot happens to name rather than the caller's
+// own. A caller that can overlap another writer must use [WriteStamp.EndFor];
+// see it for what the difference costs.
 func (w *WriteStamp) End() (*CommitInfo, int64) {
 	st := w.cur.Swap(nil)
 	if st == nil {
 		return nil, 0
 	}
 	return st.Retract()
+}
+
+// EndFor closes the window of the transaction the CALLER owns and returns the
+// record its versions share, together with how many of them there are. It clears
+// the slot only if it still names st, so a writer that published later keeps its
+// own window open.
+//
+// # Why this exists and [WriteStamp.End] is not enough
+//
+// End takes whichever transaction the slot names. While the visibility barrier
+// admitted one writer at a time that was always the caller's own, and rmp #2301
+// left it that way on purpose: the slot's contract was only ever "whichever
+// arrived last". rmp #2304 lets two write brackets overlap, and then End is
+// audit finding E3 in its last remaining form — the same silent loss the state
+// moved onto [TxState] to prevent, one level up:
+//
+//	writer A  Publish(&A.tx)
+//	writer B  Publish(&B.tx)          the slot now names B
+//	writer A  End                     retracts B: takes B's record and count
+//	writer B  End                     the slot is nil — retracts nothing
+//
+// A publishes B's record at A's commit timestamp, so B's writes become visible
+// at the wrong instant and B's own versions keep an in-flight transaction id for
+// ever: invisible to every reader, unreclaimable by every reclaimer. And, as
+// with E3, every field involved is atomic, so -race is silent on it.
+//
+// Clearing the slot conditionally is the second half. An unconditional clear
+// would leave an overlapping writer's untransacted writes — every write the
+// Cypher engine makes resolves the transaction through this slot — stamped as
+// though no transaction were open, so one statement's mutations would take a
+// fresh timestamp each and stop being atomically visible.
+//
+// Pinned by TestWriteStamp_EndForClosesOnlyItsOwnTransaction.
+func (w *WriteStamp) EndFor(st *TxState) (*CommitInfo, int64) {
+	if st == nil {
+		return nil, 0
+	}
+	// Retract BEFORE clearing the slot. A late untransacted write that finds st
+	// through the slot in between reads a retracted window, which [TxState.Ensure]
+	// reports as "no window", and falls back to a fresh timestamp of its own —
+	// stamped later than it happened, which is the safe direction (see the file
+	// comment). The reverse order would leave a window nobody owns.
+	info, count := st.Retract()
+	w.cur.CompareAndSwap(st, nil)
+	return info, count
 }
 
 // Stamp returns how the version being created right now records its

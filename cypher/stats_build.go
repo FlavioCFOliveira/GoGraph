@@ -233,15 +233,28 @@ func finishStatsSnapshot(
 //
 // The split exists because the scan has two callers with opposite needs.
 // [Engine.RefreshStatistics] is invoked from outside any barrier and must take one, so it
-// wraps this in Graph.View. But db.stats.refresh() runs INSIDE query execution, which is
-// already inside Graph.View — and visMu is a non-re-entrant sync.RWMutex, so acquiring it
-// again from the same goroutine would DEADLOCK the engine. The re-entrancy guard catches
-// that as a panic, but only in a debug/race build; a production binary would simply hang.
+// wraps this in Graph.View. db.stats.refresh() runs INSIDE query execution and must NOT,
+// because visMu is not re-entrant: a second acquisition from the same goroutine deadlocks
+// the engine. The re-entrancy guard catches that as a panic, but only in a debug/race
+// build; a production binary would simply hang.
 //
-// Running under the caller's barrier is not a weakening: the scan only READS graph state,
-// and the caller's read barrier already pins exactly the consistent snapshot the scan
-// needs. Publishing the result is an atomic pointer swap on engine state, not graph state,
-// so it is safe under a read barrier too.
+// # What the in-query caller actually holds (rmp #2290, #2304)
+//
+// This used to say that caller was "already inside Graph.View", and it no longer is:
+// [Engine.Run] has taken no barrier since rmp #2290 — it reads through an MVCC snapshot —
+// and rmp #2304 made ordinary writes shared, so nothing on the read path excludes a writer
+// any more. An in-query refresh therefore scans the PRESENT while writers may be
+// mid-apply, and can accumulate an estimate from a transaction that is not yet visible.
+//
+// That is tolerable here and nowhere else: these are the best-effort APPROXIMATE planner
+// statistics (docs/statistics-design.md), consumed only as cardinality estimates. A torn
+// estimate makes the planner choose from slightly stale numbers, which is what an
+// approximate statistic is for; it can never make a query return a wrong answer. The
+// caller-driven [Engine.RefreshStatistics] still takes the exclusive View and so still
+// scans a graph in which nothing is half-applied.
+//
+// Publishing the result is an atomic pointer swap on engine state, not graph state, so it
+// is safe with or without a barrier.
 func (e *Engine) scanStatsLocked(ctx context.Context) (
 	byKey map[stats.Key]*statsAccum, labelN map[uint32]int64, generation uint64, scanErr error,
 ) {

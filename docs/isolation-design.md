@@ -51,96 +51,62 @@ and serves every read of the query from it. Justification:
 
 We therefore target SI.
 
-> **SUPERSEDED, 2026-08-01 (rmp #2274, #2288–#2291).** The sentence that stood
-> here said we would *not* add MVCC version chains, "which would pay
-> read-path/GC cost for conflict handling we do not need". The reasoning was
-> about CONFLICT handling and it was right — GoGraph is single-writer, so it
-> needs none. It was applied to the wrong question. The barrier below delivers
-> SI by EXCLUSION, and exclusion is what starved readers: a 95-second
-> analytical read plus one writer collapsed short-read throughput 50× and made
-> a 4.5 µs point query wait 1m36s, because Go's `sync.RWMutex` parks every
-> reader arriving behind a queued writer.
+> **MEASURED AND NOT YET IN FORCE, 2026-08-03 (rmp #2304).** The bullet above is
+> still true of the shipped engine, and the sprint intends to make it false. The
+> attempt and what it found are recorded here because both halves matter.
 >
-> Version chains now deliver the same SI without the exclusion. `Engine.Run`
-> takes NO barrier: it pins a start timestamp, registers it with a reclamation
-> horizon, and resolves every store as of that instant. The collapse is 1.89×
-> at one reader and 2.04× at eight, and the worst short-read latency is 4 ms
-> and no longer tracks the duration of the longest concurrent read — which was
-> the unbounded part. The GC cost the original sentence feared is real and is
-> bounded and observable: see `graph/lpg/mvcc_gc.go`.
+> Moving the ordinary write path to a SHARED hold on the schema barrier
+> (`lpg.Graph.ApplyVersioned`) was implemented and measured: durable write
+> throughput went from perfectly flat to **15.1x at 32 concurrent writers** (267 ->
+> 4041 commits/s), because `wal.Writer.SyncGroup`'s leader/follower coalescing
+> becomes reachable once the fsync is no longer inside an exclusive hold.
 >
-> **Writes still take the barrier exclusively.** Moving the fsync out from
-> under it is rmp #2193. The design is recorded in
-> [`design-mvcc-delta-chains.md`](design-mvcc-delta-chains.md); everything
-> below describes the barrier, which remains the WRITE-side mechanism and is
-> still what a read-only explicit transaction does not take.
-
-**Shipped increment — read-only explicit transactions (task #1573).** A Bolt
-`BEGIN` carrying `mode="r"` opens a read-only explicit transaction via
-`cypher.Engine.BeginReadTx`, which acquires **neither** the single-writer
-serialisation **nor** the visibility barrier **nor** a WAL transaction.
-Each `RUN` inside it executes through the normal concurrent read path
-(`Engine.runRead`), so read-only transactions run concurrently with one another
-instead of serialising on the writer mutex.
-
-**Isolation level: SNAPSHOT ISOLATION for the whole transaction** since
-rmp #2307 (sprint 334). `BeginReadTx` pins ONE start timestamp
-(`lpg.Graph.BeginRead`), registers it with the reclamation horizon, and routes
-every statement of the handle at that instant; `Commit`/`Rollback` return the
-horizon slot exactly once, on every exit path. A commit that lands between two
-statements of an open read transaction is therefore invisible to the second.
-
-This is a deliberate, observable strengthening, and it went through two weaker
-levels to get here:
-
-| Until | Level | Mechanism |
-|---|---|---|
-| rmp #2290 | per-statement **read-committed** | each `RUN` took a fresh `Graph.View` RLock — writers excluded for its duration, but no stable instant of its own |
-| rmp #2307 | per-statement **snapshot isolation** | each `RUN` pinned its own start timestamp; a commit between statements was still visible |
-| now | transaction-wide **snapshot isolation** | one start timestamp, pinned at `BEGIN`, used by every statement |
-
-Until #2307 an explicit read transaction was therefore strictly WEAKER than a
-single autocommit statement, which has always had one instant for its whole
-duration — exactly backwards, and a direct consequence of MVCC not yet being the
-norm. Transaction-wide SI is Memgraph's default and is strictly stronger than
-Neo4j's documented multi-statement read-transaction behaviour, so no client
-relying on the previous contract can observe a *weaker* result.
-
-**The cost is real and is observable.** A transaction-lifetime snapshot pins the
-reclamation horizon: while the handle is open, no version it can still reach may
-be freed. `lpg.MVCCStats` names it — `ActiveReaders` counts the registered
-handles and `OldestReaderAge()` says how far behind the oldest one is. An
-abandoned handle is bounded by the Bolt idle reaper (`Options.MaxTxIdleTime`,
-rmp #2175) and the total transaction timeout (`Options.DefaultTxTimeout`), both
-of which roll the transaction back and so return the slot.
-
-**Known bound: 64 concurrently registered readers.** The horizon has
-`horizonSlots = 64` exclusive slots (`graph/mvcc/horizon.go:58`). A reader that
-cannot get one is *unregistered*: it still reads correctly, but the watermark
-collapses to zero and **reclamation stops entirely** until it leaves — the sound
-direction, and the one state in which version memory has no bound. Measured at
-2026-08-02:
-
-| concurrently open read transactions | `ActiveReaders` | `UnregisteredReaders` | `Watermark` |
-|---:|---:|---:|---:|
-| 64 | 64 | 0 | 1 (reclaiming) |
-| 65 | 64 | 1 | **0 (suspended)** |
-| 128 | 64 | 64 | **0 (suspended)** |
-
-It recovers cleanly: once the handles close, `UnregisteredReaders` returns to 0
-and the watermark to the clock. This is not a new failure mode — a long
-analytical query already held a slot for its whole duration, and one was
-measured at 95 seconds — but a transaction-lifetime snapshot makes it far easier
-to reach, because an *idle* open handle now occupies a slot too. Sizing the slot
-count from a benchmark rather than from argument is rmp #2315.
-
-Safety rests on one load-bearing
-invariant: a read-only transaction **rejects every writing clause and DDL**
-(`ErrWriteInReadOnlyTx`, surfaced to Bolt as `Neo.ClientError.Request.Invalid`)
-*before* execution — a write on this lock-free path would otherwise run with no
-writer lock, no barrier and no WAL frame. `Commit`/`Rollback` are teardown-only
-no-ops with no durability obligation. Write transactions (`mode="w"`/absent) are
-unchanged and keep the single-writer + barrier path described above.
+> It was **reverted**, because in that state the engine does not deliver atomic
+> visibility. The deltas a statement writes still resolve their shared commit record
+> through a graph-wide AMBIENT slot — every Cypher mutator reaches `lpg` through the
+> public API, which carries no transaction — so with two brackets open the slot names
+> whichever published last and one statement's writes land on two different commit
+> records. A snapshot reader then observes half a transaction. Measured with
+> `examples/27_concurrent_txn`: **105 942 torn observations** in one run, and 147
+> overwrites of a still-open transaction's slot. `store/txn`'s in-memory apply was
+> reverted for the same reason.
+>
+> The prerequisite is therefore that a write **carries** its transaction rather than
+> looking it up: transaction-aware forms of the `lpg` mutators the write path calls,
+> threading the `lpg.WriteTx` that `ApplyVersioned` already hands its closure. That
+> is what `graph/mvcc/stamp.go` means when it says "a write that needs its own
+> transaction must CARRY it rather than look it up", and it is tracked as rmp #2306.
+>
+> Until then, **write-write conflicts remain impossible by construction on the
+> ordinary path**, so the bullet above still holds and SI remains equivalent to
+> serialisable for this write model. What already exists for the concurrent world is
+> the detection machinery it will need: per-object first-updater-wins reporting
+> `mvcc.ErrSerializationConflict`, surfaced to Bolt as
+> `Neo.TransientError.Transaction.Outdated` so a driver's managed transaction retries
+> it (rmp #2300).
+>
+> ### Concurrent `MERGE` and uniqueness — what the attempt exposed
+>
+> Two latent defects were found that the exclusive barrier hides, both of which must
+> be fixed before the barrier can go:
+>
+> 1. **`UNIQUE` enforcement is check-then-act.**
+>    `exec.ConstraintRegistry.CheckSetProperty` takes the read lock and only reads;
+>    `RecordPropertySet` takes the write lock later. Two concurrent writers can both
+>    pass the check and both insert. Measured with the barrier removed: 14 of 15 runs
+>    of 8 concurrent `MERGE` under a `UNIQUE` constraint produced 2 or 4 nodes instead
+>    of 1. Enforcement must become a single atomic test-and-reserve, as PostgreSQL's
+>    `_bt_doinsert` holds the buffer lock across the uniqueness check and the insert.
+> 2. **`MERGE` without a uniqueness constraint duplicates under concurrency.** Each
+>    statement reads at its own snapshot and cannot see a node whose commit is not yet
+>    durable. Neo4j documents the same caveat and directs users to a constraint;
+>    Memgraph likewise. This one is expected behaviour for a snapshot-isolated engine
+>    rather than a defect, but it only becomes reachable once (1) is fixed, because
+>    today the constraint does not reliably help.
+>
+> `cypher/merge_race_test.go` pins all three arms (unique, no-constraint, serial) and
+> passes against the shipped barrier, so the coverage is in place before the change
+> that needs it.
 
 ## Mechanism — per-shard versioned single-root snapshot
 

@@ -49,19 +49,37 @@ package lpg
 // signal ([mvcc.AbortedTS]) mean two different things. Pinned by
 // TestLabelTx_ComposesWithPhysicalUndo.
 
-// beginWrite opens the stamping window for one write transaction.
+// beginWrite opens the stamping window for one write transaction and RETURNS
+// the state that transaction owns, or nil when the substrate is disarmed.
 //
 // It ALLOCATES NOTHING. The shared commit record is created by the first
 // version that needs one, so a bracket that versions nothing — a read-only
 // apply, or a write that changes no value — stays allocation-free, which
 // [Graph.ApplyAtomically] is guarded to be. See [mvcc.WriteStamp].
 //
-// The caller must hold the visibility barrier in write mode. Nested calls are
-// impossible by construction — the barrier is not re-entrant and
-// [Graph.ApplyInsideLocked] does not call this — so the window never nests.
-func (g *Graph[N, W]) beginWrite() {
+// # The caller owns the returned state (rmp #2304)
+//
+// It returns the [writeCtx] rather than leaving the bracket to find it again on
+// the graph, and every caller must hand the same value back to [Graph.endWrite]
+// and [Graph.releaseWriterSnapshot]. Until rmp #2304 those two re-read the
+// graph's slot, which named the caller's own transaction only because the
+// exclusive barrier admitted one write bracket at a time. Once two brackets can
+// overlap, re-reading the slot means closing SOMEONE ELSE's transaction:
+// [mvcc.WriteStamp.EndFor] documents what that loses on the stamping side, and
+// [Graph.releaseWriterSnapshot] what it loses on the snapshot side — where it is
+// worse, because it recycles a live writer's state underneath it.
+//
+// The graph slot is still published, because a write that carries no transaction
+// has to resolve one somehow (the whole Cypher write path is such a write); what
+// changed is that a transaction's own lifecycle no longer depends on it.
+//
+// Nested calls remain forbidden: a nested bracket would be a nested transaction,
+// which this design has no meaning for. [Graph.ApplyInsideLocked] deliberately
+// does not call this, and the re-entrancy guard catches the rest under -race or
+// -tags gograph_debug.
+func (g *Graph[N, W]) beginWrite() *writeCtx {
 	if !g.mvccArmed {
-		return
+		return nil
 	}
 	// The writer reads through a snapshot of its OWN (rmp #2299): as of the
 	// instant it began, PLUS the versions it has written itself, which is
@@ -93,6 +111,7 @@ func (g *Graph[N, W]) beginWrite() {
 	w.snap.slot = slot
 	g.stamp.Publish(&w.tx)
 	g.writeTx.Store(w)
+	return w
 }
 
 // writerView returns the graph bound to the current writer's snapshot, or to
@@ -118,27 +137,94 @@ func (g *Graph[N, W]) writerSnapshot() *Snapshot {
 	return &w.snap
 }
 
+// WriteTx names one open write transaction to a caller in another package.
+//
+// It is what [Graph.ApplyVersioned] hands its closure, and what the Cypher
+// engine's write path carries so that its reads resolve through its OWN
+// transaction rather than through whichever transaction the graph's slot happens
+// to name (rmp #2304). Memgraph threads `Transaction *transaction` into every
+// accessor for the same reason (memgraph/memgraph, branch master, read
+// 2026-08-02; src/storage/v2/).
+//
+// The zero value names no transaction, which reads as "the present" — correct
+// for a direct mutation outside any transaction, and wrong inside one, so a
+// caller inside a bracket must pass the value it was given rather than the zero.
+//
+// It is valid only while its bracket is open, and it must not be retained past
+// it: the state it names is recycled on the unwind.
+type WriteTx struct{ w *writeCtx }
+
+// Valid reports whether tx names an open write transaction.
+//
+// It is false for the zero value and for a bracket opened on a graph whose
+// versioning substrate is disarmed ([Graph.DisableMVCC]), where there is no
+// transaction to name and every write is committed as it is made.
+func (tx WriteTx) Valid() bool { return tx.w != nil }
+
 // WriterView is [Graph.writerView] for a caller in another package — the Cypher
 // engine's write path, which must read as of the writing transaction rather
 // than as of the present.
 //
+// It resolves the transaction through the graph's slot, so it answers with
+// whichever write bracket published LAST. That is the caller's own only while at
+// most one bracket is open at a time; prefer [Graph.WriterViewOf], which cannot
+// be wrong. This form is kept for the explicit-transaction path, which holds the
+// barrier exclusively and therefore is the only open bracket by construction.
+//
 // Safe for concurrent use; the returned view is immutable.
 func (g *Graph[N, W]) WriterView() *ReadView[N, W] { return g.writerView() }
 
-// endWrite publishes every version this write created, atomically, and closes
-// the stamping window.
+// WriterViewOf returns the graph as write transaction tx reads it: as of the
+// instant tx began, plus the versions tx has written itself.
+//
+// This is the form the ordinary write path must use. The snapshot comes from the
+// transaction the caller was HANDED rather than from the graph's slot, so a
+// concurrent writer that opened its own bracket in between cannot substitute its
+// snapshot for this one — which is the whole difference rmp #2304 turns on, and
+// the same lesson rmp #2301 learned one level down: reading the writer's identity
+// off the graph produced a FALSE conflict between goroutines writing disjoint
+// nodes (see graph/lpg/mvcc_writectx.go).
+//
+// A zero tx reads the present, which is the correct answer outside a transaction.
+//
+// Safe for concurrent use; the returned view is immutable.
+func (g *Graph[N, W]) WriterViewOf(tx WriteTx) *ReadView[N, W] {
+	if tx.w == nil {
+		return g.ReadAt(nil)
+	}
+	return g.ReadAt(&tx.w.snap)
+}
+
+// AmbientWriteTx returns the write transaction the graph's slot currently names,
+// for a caller that holds the barrier EXCLUSIVELY and is therefore the only open
+// bracket — the explicit-transaction path, which opens its transaction in
+// [Graph.LockBarrier] and runs its statements through
+// [Graph.ApplyInsideLocked] later, with no closure to carry the handle in.
+//
+// Any other caller must use the handle [Graph.ApplyVersioned] gave it. This one
+// is correct by virtue of the exclusive hold and by nothing else.
+func (g *Graph[N, W]) AmbientWriteTx() WriteTx { return WriteTx{w: g.writeTx.Load()} }
+
+// endWrite publishes every version the write transaction w created, atomically,
+// and closes its stamping window.
 //
 // One store, however many versions there are across however many stores: that
-// is the whole reason the record is shared. It runs while the barrier is still
-// held, so the instant at which a transaction becomes visible is exactly the
-// instant it is today — this phase moves no visibility boundary.
+// is the whole reason the record is shared. Publication is a single atomic store
+// of the commit timestamp into the shared record, so the instant a transaction
+// becomes visible is one instant however many structures it spanned — which is
+// what took over from the exclusive barrier at rmp #2304 and is why removing the
+// barrier moves no visibility boundary.
+//
+// w must be the value [Graph.beginWrite] returned for this bracket; see
+// [mvcc.WriteStamp.EndFor] for what closing the graph's slot instead cost once
+// two brackets could overlap.
 //
 // It publishes on the rollback path too; see the file comment for why.
-func (g *Graph[N, W]) endWrite() {
-	if !g.mvccArmed {
+func (g *Graph[N, W]) endWrite(w *writeCtx) {
+	if !g.mvccArmed || w == nil {
 		return
 	}
-	info, created := g.stamp.End()
+	info, created := g.stamp.EndFor(&w.tx)
 	if info == nil {
 		// The transaction versioned nothing, so there is no record to publish,
 		// nothing to reclaim, and no reason to allocate a commit timestamp.
@@ -154,8 +240,8 @@ func (g *Graph[N, W]) endWrite() {
 	g.reclaimIfDue()
 }
 
-// releaseWriterSnapshot closes the writer's read view, returns its horizon slot
-// and recycles its per-transaction state.
+// releaseWriterSnapshot closes write transaction w's read view, returns its
+// horizon slot and recycles its per-transaction state.
 //
 // Split from [Graph.endWrite] because endWrite returns early when the
 // transaction versioned nothing, and a slot must be returned whether or not
@@ -163,14 +249,24 @@ func (g *Graph[N, W]) endWrite() {
 //
 // It must run AFTER endWrite: the state is recycled here, so the record must
 // already have been published from it.
-func (g *Graph[N, W]) releaseWriterSnapshot() {
-	if !g.mvccArmed {
+//
+// # w is a parameter, not a slot read (rmp #2304)
+//
+// Until rmp #2304 this swapped the graph's slot and released whatever it found.
+// With one write bracket at a time that was always the caller's own; with two it
+// is the most damaging of the three slot hazards, because it does not merely
+// mis-attribute state — it hands a LIVE writer's [writeCtx] to the free list
+// while that writer is still reading through the snapshot inside it, and returns
+// a horizon slot the live writer still needs, so the versions it is about to read
+// become reclaimable underneath it.
+//
+// The slot is cleared only if it still names w, for the same reason
+// [mvcc.WriteStamp.EndFor] clears conditionally.
+func (g *Graph[N, W]) releaseWriterSnapshot(w *writeCtx) {
+	if !g.mvccArmed || w == nil {
 		return
 	}
-	w := g.writeTx.Swap(nil)
-	if w == nil {
-		return
-	}
+	g.writeTx.CompareAndSwap(w, nil)
 	g.horizon.Leave(w.snap.slot)
 	g.releaseWriteCtx(w)
 }

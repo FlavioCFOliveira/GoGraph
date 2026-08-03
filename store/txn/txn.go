@@ -898,6 +898,38 @@ func (t *Tx[N, W]) AddEdge(src, dst N, w W) error {
 	// value is fixed in the WAL frame before the commit fsync; replay
 	// re-inserts it via AddEdgeHIfAbsent (idempotent against a snapshot
 	// that already loaded it).
+	//
+	// # Handle order does NOT track WAL order, and nothing needs it to
+	//
+	// Audit finding E19 (docs/audit-mvcc-sole-cc-2026-08-02.md), resolved by
+	// rmp #2304 as a documented non-dependency rather than by moving the mint.
+	//
+	// Handles are minted at BUFFER time, here, while the transaction's WAL
+	// sequence is minted later under the store semaphore ([Tx.appendOnly]). With
+	// one writer at a time the two agreed; with concurrent writers they do not —
+	// a transaction can buffer a higher handle and take a lower sequence. The
+	// question the finding raises is whether anything reads that correspondence.
+	// Nothing does, and the two reasons are structural rather than incidental:
+	//
+	//   - the handle travels IN the frame ([Op.Handle]), so recovery and snapshot
+	//     replay use the RECORDED value and never re-mint one. Frame order cannot
+	//     change which handle an edge gets.
+	//   - restoring the counter is a HIGH-WATER operation
+	//     ([lpg.Graph.SeedEdgeHandle] CASes upward and returns early if the
+	//     counter is already past the target), and every caller passes
+	//     handle+1 — store/recovery/recovery.go, store/snapshot/apply.go and
+	//     store/snapshot/edgehandles.go. A maximum is order-independent.
+	//
+	// What the handle contract actually promises is uniqueness and monotonicity of
+	// ISSUE (edge_handle.go), and both survive: the counter is an
+	// atomic.Uint64.Add, so two concurrent minters cannot collide. It never
+	// promised a correlation with commit order, and no code compares two handles
+	// to order them.
+	//
+	// So the mint stays here. Moving it under the semaphore would buy the
+	// correspondence at the cost of holding the semaphore across the buffering
+	// loop — which is the opposite of what rmp #2306 needs — for a property with
+	// no reader.
 	if t.store.wcodec == nil {
 		if !isZero(w) {
 			return ErrNoWeightCodec
@@ -1218,11 +1250,18 @@ func (t *Tx[N, W]) Commit() error {
 		return syncErr
 	}
 
-	// Apply to the in-memory graph after durability is secured, under the
-	// graph's visibility barrier (ApplyAtomically) so the whole transaction's
-	// writes flip visible to Graph.View readers as one atomic step — no
-	// reader can observe a partially-applied transaction (audit gap F3,
-	// docs/isolation-design.md). The transaction is already durable (op
+	// Apply to the in-memory graph after durability is secured, as ONE write
+	// transaction (ApplyVersioned) so the whole transaction's writes flip visible
+	// as a single atomic step — no reader can observe a partially-applied
+	// transaction (audit gap F3, docs/isolation-design.md).
+	//
+	// EXCLUSIVE for now. rmp #2304 moved this to the shared bracket
+	// (lpg.Graph.ApplyVersioned) and moved it back: a shared bracket here overlaps
+	// a concurrent Cypher bracket, and until the write path carries its transaction
+	// rather than resolving it through the graph's ambient slot, overlapping
+	// brackets split one transaction across two commit records. See the note at the
+	// autocommit call site in cypher/api.go and rmp #2306. The transaction is
+	// already durable (op
 	// frames + OpCommit marker fsynced), so an apply error here does not undo
 	// the commit: recovery — which builds the graph without a shard-capacity
 	// cap — replays the whole transaction atomically. Surface it as

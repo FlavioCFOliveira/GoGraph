@@ -516,11 +516,17 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 		mutator = &lpgMutatorAdapter{g: tx.eng.g, buf: tx.buf, undo: tx.undo, touched: tx.touched, cbuf: tx.cbuf, eng: tx.eng}
 	}
 
-	// Route through ApplyInsideLocked when the barrier is held for the whole tx
-	// lifetime (barrierHeld=true), since ApplyAtomically would panic on re-entry.
-	applyFn := tx.eng.g.ApplyAtomically
+	// Route through ApplyInsideLockedTx when the barrier is held for the whole tx
+	// lifetime (barrierHeld=true), since ApplyAtomicallyTx would panic on re-entry.
+	//
+	// The *Tx forms (rmp #2304) hand the statement the transaction it runs as, so
+	// its reads resolve through that transaction rather than through the graph's
+	// ambient slot. Both stay EXCLUSIVE here: an explicit transaction holds the
+	// barrier from BEGIN to COMMIT, and retiring THAT hold is rmp #2305, not this
+	// task. Only the autocommit path became shared.
+	applyFn := tx.eng.g.ApplyAtomicallyTx
 	if tx.barrierHeld {
-		applyFn = tx.eng.g.ApplyInsideLocked
+		applyFn = tx.eng.g.ApplyInsideLockedTx
 	}
 	r, buildErr := tx.eng.execUnderBarrier(tx.ctx, plan, queryReg, params, mutator, tx.buf, tx.undo, tx.walTx, false, applyFn, tx.touched)
 	if buildErr != nil {

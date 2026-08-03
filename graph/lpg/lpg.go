@@ -558,25 +558,43 @@ type Graph[N comparable, W any] struct {
 	idxMgr    atomicIndexManager
 	validator atomicValidator
 
-	// visMu is the transaction-visibility barrier (audit gap F3,
-	// docs/isolation-design.md). Since rmp #2290 it is a WRITE-side mechanism:
-	// [Engine.Run] does not take it, and a read gets its consistency from a
-	// snapshot instead. A writer still holds it exclusively for the whole apply,
-	// which is what makes the write path single-writer and what lets the
-	// adjacency's commit window and the shared commit record use plain fields.
+	// visMu is the SCHEMA barrier. It began as the transaction-visibility
+	// barrier (audit gap F3, docs/isolation-design.md) and has been narrowed
+	// twice; what it protects now is the catalog, not visibility.
 	//
-	// docs/isolation-design.md). A writer applying a multi-op transaction
-	// holds visMu via [Graph.ApplyAtomically] for the whole apply, so the
-	// transaction's writes across every substructure become observable to
-	// readers as one atomic step; a transactional reader pins a consistent,
-	// partial-transaction-free view via [Graph.View]. The per-shard mutexes
-	// below visMu still guard individual writes; visMu adds the missing
-	// transaction-level atomicity that single-op locking cannot provide.
-	// It is a RWMutex (not an atomic snapshot pointer) by deliberate,
-	// correctness-first choice; the lock-free per-shard snapshot is the
-	// performance optimisation tracked by the later F3 sub-tasks. The
-	// immutable CSR analytics path does not go through these methods and
-	// stays lock-free.
+	//   - rmp #2290 took it off the read path. [Engine.Run] does not acquire it;
+	//     a read gets its consistency from an MVCC snapshot.
+	//   - rmp #2304 took the ORDINARY WRITE path off its exclusive side. An
+	//     autocommit statement and the durable store's apply run under
+	//     [Graph.ApplyVersioned], which holds this SHARED, so writers no longer
+	//     exclude one another; atomic visibility comes from the transaction's
+	//     shared commit record instead (see ApplyVersioned for the substitution
+	//     and the prior art).
+	//
+	// Who still holds it EXCLUSIVELY, and why each genuinely needs to:
+	//
+	//   - index and constraint registration ([Graph.ApplyAtomically] from
+	//     cypher's runCreateIndex / runCreateConstraint / runDropConstraint).
+	//     The catalog is not versioned, so a reader building a plan has no
+	//     snapshot to read a half-registered index pair from.
+	//   - an explicit multi-statement transaction
+	//     ([Graph.LockBarrier]/[Graph.UnlockBarrier], task #1412). Retiring this
+	//     one is rmp #2305: holding it across client think-time is what makes an
+	//     idle Bolt session stall every writer.
+	//   - the checkpointer's capture (store/checkpoint), which needs a graph in
+	//     which nothing is half-applied and reads through accessors with no
+	//     as-of form. rmp #2310 moves it to a transactional instant.
+	//
+	// The SHARED side is held by every ordinary write for its whole bracket,
+	// publication included, which is precisely what makes the exclusive
+	// acquisitions above wait for every in-flight write to become visible.
+	// [Graph.View] also takes it shared, so a View no longer excludes a writer
+	// and is only a consistent view of what the catalog holders change; a caller
+	// that needs a consistent view of DATA takes a snapshot.
+	//
+	// It is a RWMutex rather than an atomic snapshot pointer by deliberate,
+	// correctness-first choice. The immutable CSR analytics path does not go
+	// through these methods and stays lock-free.
 	visMu sync.RWMutex
 
 	// writeTx names the write transaction whose bracket is currently open, and
@@ -727,19 +745,7 @@ func (g *Graph[N, W]) ApplyAtomically(fn func() error) error {
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
 	g.visMu.Lock()
 	g.barrier.stampWriter(gid)
-	// Open the adjacency commit window for exactly the visMu-held region so the
-	// transaction's adjacency writes clone each touched shard once (then mutate
-	// in place) instead of once per op (task #1526). EndCommit must run while
-	// visMu is still held — it freezes the per-shard builders — so it is
-	// deferred AFTER Unlock to run BEFORE it on the LIFO unwind.
-	g.adj.BeginCommit()
-	// Allocate the commit record that stamps every version this apply creates,
-	// on the same bracket as the adjacency window and for the same reason: this
-	// region IS one write transaction. endWrite publishes it, and is deferred
-	// LAST so the LIFO unwind runs it FIRST — while the barrier is still held,
-	// so the instant a transaction becomes visible does not move. See
-	// mvcc_write.go, including why a rolled-back apply publishes too.
-	g.beginWrite()
+	w := g.openWriteBracket()
 	// ONE deferred call for the whole unwind rather than three. Each open-coded
 	// defer costs about a nanosecond of bookkeeping, and adding a fourth for
 	// endWrite took this bracket from 9.6 ns to 14.3 ns on an EMPTY apply —
@@ -747,26 +753,159 @@ func (g *Graph[N, W]) ApplyAtomically(fn func() error) error {
 	// finishWrite gets it back; see that method for the ordering the fold must
 	// preserve.
 	defer g.visMu.Unlock()
-	defer g.finishWrite(gid)
+	defer g.finishWrite(w, gid)
 	return fn()
 }
 
-// finishWrite is the unwind of a barrier-held write, in the one order that is
-// correct: publish the transaction's versions, freeze the adjacency's per-shard
-// builders, then release the re-entrancy stamp — all with visMu still held,
-// because the caller defers Unlock FIRST so it runs LAST.
+// ApplyVersioned runs fn as one write transaction WITHOUT excluding other
+// writers: it holds the schema barrier in SHARED mode, so concurrent
+// ApplyVersioned brackets overlap and are serialised only by the per-object
+// latches that guard each version-chain head (rmp #2304).
+//
+// This is the ordinary write path — the Cypher engine's autocommit statement and
+// the durable store's in-memory apply. [Graph.ApplyAtomically] remains the
+// EXCLUSIVE bracket, and what is left inside it is catalog work: index and
+// constraint registration, and the checkpointer's capture. See the visMu field
+// comment for the division and for the prior art it follows.
+//
+// # What delivers atomic visibility now that a lock does not
+//
+// The guarantee is unchanged and its mechanism is different. Every version fn
+// creates points at ONE commit record, and [Graph.endWrite] publishes that
+// record's commit timestamp with a single atomic store, so a concurrent reader
+// resolving through [mvcc.Visible] observes either every version of the
+// transaction or none of them — however many stores they span, and whether or
+// not any other writer is mid-apply. Exclusion made the same promise by making
+// the interleaving impossible; versioning makes it by making the interleaving
+// unobservable. That substitution is only sound because A1-A5 and B1 landed
+// first: out-of-order commit publication (rmp #2298), a writer snapshot with a
+// real transaction id (#2299), per-object write-write conflict detection
+// (#2300), per-transaction commit state (#2301), WAL frame contiguity (#2302)
+// and a publication order for the derived structures (#2303).
+//
+// # What the shared hold is still for
+//
+// Not writers — DDL. A schema change must see a graph in which no write is
+// half-applied, and it has no snapshot to read that from because the catalog it
+// mutates is not versioned. Holding this shared for the whole bracket, including
+// the transaction's publication, is what lets [Graph.ApplyAtomically] wait for
+// every in-flight write to become visible before it registers an index or
+// validates a constraint. Memgraph draws the line in the same place — an
+// ordinary write takes `main_lock_` with a `std::shared_lock` and only the
+// index/constraint and durability transitions take it uniquely
+// (memgraph/memgraph, branch master, read 2026-08-02;
+// src/storage/v2/inmemory/storage.cpp) — and PostgreSQL expresses it through the
+// conflict matrix, where an ordinary write's RowExclusiveLock does not conflict
+// with itself and CREATE INDEX's ShareLock does (src/backend/storage/lmgr/lock.c,
+// LockConflicts).
+//
+// fn must not call [Graph.View], [Graph.ApplyAtomically] or ApplyVersioned: the
+// hold is shared, and Go's [sync.RWMutex] prefers a queued writer, so a nested
+// shared acquisition deadlocks the instant one queues. Enforced by the same
+// re-entrancy guard, under -race or -tags gograph_debug.
+//
+// Safe for concurrent use from any number of goroutines.
+func (g *Graph[N, W]) ApplyVersioned(fn func(WriteTx) error) error {
+	// The guard's WRITER role, not its reader role: this bracket writes, and
+	// what must be rejected is every nested acquisition in either mode. The
+	// stamp is taken only after the lock succeeds, for the reason spelled out in
+	// [Graph.ApplyAtomically].
+	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
+	g.visMu.RLock()
+	g.barrier.stampWriter(gid)
+	// NO adjacency commit window here, unlike the exclusive bracket — see
+	// [Graph.finishWriteShared] for why opening one would be a data race and why
+	// the shard-clone dedup it exists to provide is preserved without it.
+	w := g.beginWrite()
+	defer g.visMu.RUnlock()
+	defer g.finishWriteShared(w, gid)
+	return fn(WriteTx{w: w})
+}
+
+// openWriteBracket opens the adjacency's commit window and the transaction's
+// stamping window — the two halves of "this region is one write transaction" —
+// and returns the state the transaction owns.
+//
+// Shared by the exclusive and shared brackets so neither can drift from the
+// other on what opening a transaction means.
+func (g *Graph[N, W]) openWriteBracket() *writeCtx {
+	// Open the adjacency commit window for exactly the bracket's region so the
+	// transaction's adjacency writes clone each touched shard once (then mutate
+	// in place) instead of once per op (task #1526). EndCommit must run before
+	// the barrier is released — it freezes the per-shard builders — so the
+	// caller defers it AFTER the unlock to run BEFORE it on the LIFO unwind.
+	g.adj.BeginCommit()
+	// Allocate the commit record that stamps every version this apply creates,
+	// on the same bracket as the adjacency window and for the same reason: this
+	// region IS one write transaction. endWrite publishes it. See mvcc_write.go,
+	// including why a rolled-back apply publishes too.
+	return g.beginWrite()
+}
+
+// finishWrite is the unwind of an exclusively-held write, in the one order that
+// is correct: publish the transaction's versions, freeze the adjacency's
+// per-shard builders, then release the re-entrancy stamp — all with visMu still
+// held, because the caller defers Unlock FIRST so it runs LAST.
 //
 // Publishing before the builders freeze keeps the commit record live for the
 // whole window it stamped. Clearing the stamp under the lock keeps it removable
 // only by its owner, which is what stops a queued writer clobbering it (#1286,
 // #1355).
-func (g *Graph[N, W]) finishWrite(gid int64) {
-	g.endWrite()
+func (g *Graph[N, W]) finishWrite(w *writeCtx, gid int64) {
+	g.endWrite(w)
 	// Return the writer's horizon slot after endWrite, so nothing the writer
 	// still reads is reclaimable while it runs, and unconditionally, because a
 	// bracket that versioned nothing still took a slot (rmp #2299).
-	g.releaseWriterSnapshot()
+	g.releaseWriterSnapshot(w)
 	g.adj.EndCommit()
+	g.barrier.clearWriter(gid)
+}
+
+// finishWriteShared is [Graph.finishWrite] for the shared bracket. The order is
+// identical, minus the adjacency window the shared bracket never opened.
+//
+// # Why the shared bracket opens no adjacency window (rmp #2304)
+//
+// [AdjList.BeginCommit]/[AdjList.EndCommit] maintain two PLAIN per-AdjList
+// fields — a window depth and a synthetic owner token — and are documented as
+// "NOT internally synchronised", licensed by the exclusive barrier the serving
+// write path used to hold. Calling them from a shared bracket is a data race,
+// and not a theoretical one: `go test -race ./cypher/...` reported it on
+// EndCommit's depth read the first time this bracket opened a window, because the
+// unwind runs after the store semaphore has been released (the WAL append frees
+// it before the fsync) and therefore overlaps the next writer's open.
+//
+// Removing the window costs nothing, because what the window actually bought was
+// already provided by something better. Its job is to let a transaction's second
+// and later writes to the SAME adjacency shard mutate that shard's private
+// builder in place instead of re-cloning the slot array (task #1526, O(distinct
+// shards) rather than O(ops)), and the reuse test is an owner comparison —
+// [AdjList.builderOwner], which since rmp #2302 answers with the open
+// TRANSACTION's id and falls back to the synthetic window token only when there
+// is no transaction. A bracket published its transaction id in
+// [Graph.beginWrite] before it can write anything, so the dedup keys on the
+// transaction throughout, and the window token it no longer mints was the part
+// that was SHARED between writers — adjlist's own note at BeginExclusiveBuild
+// spells out that two concurrent writers presenting one token would reuse each
+// other's unpublished builders.
+//
+// The exclusive bracket keeps its window: it is the path a provably-exclusive
+// rebuild's reclamation sweep nests inside, and the counter that observes that
+// nesting ([AdjList.NestedServingWindows]) would otherwise stop counting.
+//
+// # What rmp #2306 must still discharge
+//
+// builderOwner resolves the transaction through the AMBIENT stamp slot, not
+// through a parameter. That is correct today for a reason outside this package:
+// the eager apply of a write is still bounded to one writer at a time — by
+// Engine.writeMu on a store-less engine and by the store's single-writer
+// semaphore on a WAL-backed one — so no second bracket can publish a transaction
+// id between this one's open and its last write. rmp #2306 retires both of those,
+// and must thread the owner into the adjacency write path at the same time. It is
+// recorded here rather than left to be rediscovered.
+func (g *Graph[N, W]) finishWriteShared(w *writeCtx, gid int64) {
+	g.endWrite(w)
+	g.releaseWriterSnapshot(w)
 	g.barrier.clearWriter(gid)
 }
 
@@ -838,6 +977,14 @@ func (g *Graph[N, W]) LockBarrierCtx(ctx context.Context) error {
 	// One commit record for the WHOLE explicit transaction, so every statement
 	// applied under this barrier via ApplyInsideLocked stamps its versions with
 	// it and the transaction publishes atomically. UnlockBarrier closes it.
+	//
+	// The returned state is NOT carried in a local here — this half of the
+	// bracket returns to its caller and the other half runs later, so there is
+	// nowhere to carry it. UnlockBarrier reads it back off the graph's slot,
+	// which is correct for this path and only for this path: the exclusive hold
+	// makes an explicit transaction the only open bracket by construction, so the
+	// slot cannot name anyone else. Every path that can overlap another writer
+	// carries the handle instead (rmp #2304; see [Graph.ApplyVersioned]).
 	g.beginWrite()
 	return nil
 }
@@ -849,14 +996,17 @@ func (g *Graph[N, W]) LockBarrierCtx(ctx context.Context) error {
 // called again from any goroutine.
 func (g *Graph[N, W]) UnlockBarrier() {
 	gid := g.barrier.currentGID()
+	// The transaction this barrier opened, read back off the slot the exclusive
+	// hold makes unambiguous; see the note in [Graph.LockBarrierCtx].
+	w := g.writeTx.Load()
 	// Publish the transaction's versions while the barrier is still held, so
 	// its commit instant is exactly where it has always been. Before EndCommit
 	// so the record is live for the whole window it stamped.
-	g.endWrite()
+	g.endWrite(w)
 	// Return the writer's horizon slot. After endWrite, so nothing it reads is
 	// reclaimable while it still runs, and unconditionally, because a bracket
 	// that versioned nothing still took a slot.
-	g.releaseWriterSnapshot()
+	g.releaseWriterSnapshot(w)
 	// Close the adjacency commit window while visMu is still held (freezes the
 	// per-shard builders), matching the BeginCommit in LockBarrier, before
 	// releasing the barrier.
@@ -878,7 +1028,67 @@ func (g *Graph[N, W]) ApplyInsideLocked(fn func() error) error {
 	return fn()
 }
 
-// View runs fn while holding the graph's transaction-visibility read lock.
+// ApplyAtomicallyTx is [Graph.ApplyAtomically] for a caller that needs the
+// transaction handle its bracket opened — the same exclusive bracket, with the
+// handle passed in rather than left to be looked up.
+//
+// It exists so the Cypher engine can thread one shape of apply function over
+// both the exclusive and the shared bracket ([Graph.ApplyVersioned]) and over
+// [Graph.ApplyInsideLockedTx], instead of resolving the writer's transaction off
+// the graph in three different places.
+func (g *Graph[N, W]) ApplyAtomicallyTx(fn func(WriteTx) error) error {
+	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
+	g.visMu.Lock()
+	g.barrier.stampWriter(gid)
+	w := g.openWriteBracket()
+	defer g.visMu.Unlock()
+	defer g.finishWrite(w, gid)
+	return fn(WriteTx{w: w})
+}
+
+// ApplyInsideLockedTx is [Graph.ApplyInsideLocked] with the enclosing
+// transaction's handle. It opens NO transaction of its own — the statement must
+// share the record the enclosing [Graph.LockBarrier] opened, or the explicit
+// transaction is not atomically visible — and takes the handle off the graph's
+// slot, which the exclusive hold makes unambiguous (see [Graph.AmbientWriteTx]).
+//
+// Calling it without holding the barrier via LockBarrier yields undefined
+// behaviour, exactly as with ApplyInsideLocked.
+func (g *Graph[N, W]) ApplyInsideLockedTx(fn func(WriteTx) error) error {
+	return fn(g.AmbientWriteTx())
+}
+
+// View runs fn while holding the graph's schema barrier in READ mode, so fn
+// observes a graph in which no write transaction is partially applied.
+//
+// # Why the shared hold suffices TODAY, and what breaks it (rmp #2304)
+//
+// It suffices for exactly one reason: an ordinary write holds the same barrier
+// EXCLUSIVELY, so a reader here and a writer cannot overlap. The guarantee comes
+// from the writer's side of the lock, not from this side.
+//
+// rmp #2304 moved ordinary writes to a SHARED hold ([Graph.ApplyVersioned]) and
+// measured what a shared View then gives: nothing. Sharing a lock with a writer is
+// not a weaker guarantee here but NO guarantee, because GoGraph updates the stored
+// value IN PLACE and keeps the inverse in the version chain (Memgraph's delta
+// shape, see mvcc_write.go) — so an accessor that resolves no version reads the
+// NEWEST value, uncommitted work included.
+// TestIsolation_Commit_NoPartialTransactionObservable reported 11 699
+// partial-transaction observations against that build.
+//
+// So when the shared write path lands for good (rmp #2306), this method must EITHER
+// take the barrier exclusively — which costs View-against-View concurrency and,
+// measured, deadlocks the nested-View case that a non-enforcing build tolerates
+// today (reentrancy_disabled_test.go) — OR its remaining callers must read through
+// an MVCC snapshot instead. rmp #2304 already moved the callers that only ever
+// needed a consistent view of DATA (EXPLAIN, PROFILE and the caller-driven
+// statistics rebuild), which is progress on the second route and shrinks what is
+// left to decide: the checkpointer's capture (rmp #2310) and the constraint
+// pre-validation scan.
+//
+// A caller that wants a consistent view of data and does NOT want to stop the
+// writers should already take a snapshot: [Graph.BeginRead] plus [Graph.ReadAt],
+// which is what [Engine.Run] does and what makes reads lock-free.
 //
 // # It is NO LONGER how the query engine reads (rmp #2274, #2290)
 //
@@ -901,7 +1111,9 @@ func (g *Graph[N, W]) ApplyInsideLocked(fn func() error) error {
 // transaction is partially applied: any transaction committed via
 // [Graph.ApplyAtomically] is visible to fn either entirely or not at all,
 // and that view is stable for fn's whole duration (snapshot isolation for
-// the bracketed reads). Concurrent View readers do not block one another.
+// the bracketed reads).
+//
+// Concurrent View callers do not block one another.
 //
 // Transactional readers that must not observe a partial transaction — the
 // query executor's read clauses, and any goroutine reading the mutable

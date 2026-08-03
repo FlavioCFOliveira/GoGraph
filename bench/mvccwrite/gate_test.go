@@ -128,11 +128,76 @@ const writeConcurrencyFloor = 0.50
 // instruments have the power the gates will need once they are ratcheted to it.
 const writeScalingTarget = 3.0
 
+// walWriteScalingFloor is the minimum ratio [TestWALWriteScalingGate] accepts on
+// the WAL-backed engine: throughput at gateWriters concurrent writers divided by
+// throughput at one writer.
+//
+// # This is the gate with power, and it is the one rmp #2304 earned
+//
+// The two floors above measure the store-less wiring, where the outermost lock is
+// cypher.Engine.writeMu and NOT the barrier: lockWriter takes writeMu only when
+// no store is attached (cypher/api.go:1188-1190), and it is held for the whole
+// statement. So retiring visMu could not and did not move that arm — it measures
+// 0.838x at sixteen writers after #2304 against 0.835x before — and the audit says
+// so directly (docs/audit-mvcc-sole-cc-2026-08-02.md §3.1: the store-less baseline
+// "is writeMu + visMu and nothing else", and removing the other mechanisms without
+// the apply gate "buys nothing"). Ratcheting those two constants to
+// [writeScalingTarget] now would turn `make ci` red over a lock rmp #2306 owns, so
+// they stay where they are, with this note explaining why rather than leaving the
+// header's ratchet plan looking unfulfilled.
+//
+// The WAL arm is the one visMu was gating, and it moved by an order of magnitude.
+// wal.Writer.SyncGroup's leader/follower coalescing was already built and already
+// unreachable, because visMu spanned the fsync while the store semaphore had been
+// released just before it (audit §11, steps 9c/9d). Measured medians over
+// -count=10 at -benchtime=400x, before and after:
+//
+//	writers   before             after              scaling
+//	      1   266.6 commits/s    267.0 commits/s     1.000
+//	      2   268.4              380.2               1.424
+//	      4   268.0              550.1               2.060
+//	      8   268.2             1096.0               4.104
+//	     16   268.0             2161.0               8.094
+//	     32   270.0             4041.0             15.130
+//
+// Flat at 1.00x across a 32x change in offered concurrency became 15.1x, with the
+// single-writer arm unchanged — so nothing was traded for it.
+//
+// # Why 0.90 TODAY, and what it becomes
+//
+// The WAL arm is the one the exclusive barrier gates, and rmp #2304 MEASURED what
+// removing it is worth — then had to put it back. With the autocommit path on the
+// shared bracket this arm reached 4.10x here under `-race` (and 15.13x at 32
+// writers on the benchmark, see scaling_test.go); with the exclusive bracket
+// restored it is flat at ~1.00x again, because visMu spans the fsync and
+// wal.Writer.SyncGroup's leader/follower coalescing cannot be reached.
+//
+// Under `-race` with the barrier in place, best of 3 per run:
+//
+//	go test -race -run=TestWALWriteScalingGate -count=5 ./bench/mvccwrite/
+//	=> approximately 1.00 (flat; each commit pays its own unshared fsync)
+//
+// So the floor is 0.90 — a "does not get WORSE" floor, exactly like the two
+// store-less floors above and for the same reason: there is no scaling here to
+// enforce yet. When the write path carries its transaction and the shared bracket
+// lands for good (rmp #2306), this constant is ratcheted to [writeScalingTarget],
+// which the measurement above already shows is clearable with 27% headroom.
+//
+// The test is added NOW rather than then because the arm it measures is the one the
+// sprint exists to move, and a gate that predates the change is the only kind that
+// can prove the change did something.
+const walWriteScalingFloor = 0.90
+
 const (
 	// gateWriters is the concurrency the gates measure at. Eight is below the
 	// core count of any machine this is expected to run on, so a failure means
 	// serialisation rather than oversubscription.
 	gateWriters = 8
+	// walGateOps is [gateOps] for the WAL-backed arm, three orders of magnitude
+	// smaller because every commit there pays a real fsync: a single-writer arm
+	// runs at ~267 commits/s against the store-less engine's ~338 000, so gateOps
+	// would take 45 seconds per arm and blow the short layer's budget on its own.
+	walGateOps = 160
 	// gateOps is the total number of units of work per arm, split across the
 	// writers. Sized so one arm costs tens of milliseconds without the race
 	// detector and stays comfortably inside the short layer's per-package
@@ -267,6 +332,44 @@ func TestWriteScalingGate(t *testing.T) {
 			"Either a change re-serialised the write path, or the machine is loaded. Re-run on an idle machine "+
 			"before touching the floor: a softened gate is not a gate.",
 			gateWriters, got.max, gateRepeats, writeScalingFloor)
+	}
+}
+
+// newWALGateEngine builds the WAL-backed engine — the durable production wiring,
+// in which the store's single-writer semaphore is released after the WAL append so
+// concurrent committers can share one fsync, and in which visMu used to prevent
+// exactly that.
+func newWALGateEngine(t *testing.T) (*cypher.Engine, context.Context) {
+	t.Helper()
+	r := newRig(t, wiringWAL)
+	t.Cleanup(func() {
+		if err := r.close(); err != nil {
+			t.Errorf("close rig: %v", err)
+		}
+	})
+	warmUp(t, r.eng)
+	return r.eng, context.Background()
+}
+
+// TestWALWriteScalingGate gates what rmp #2304 delivered: on the durable wiring,
+// concurrent writers must deliver at least [walWriteScalingFloor] times the
+// throughput of one.
+//
+// It is the regression test for the barrier's removal. Restoring an exclusive hold
+// anywhere across the commit path — the fsync in particular — returns this arm to
+// the flat 1.00x it measured before, which is far below the floor.
+func TestWALWriteScalingGate(t *testing.T) {
+	eng, ctx := newWALGateEngine(t)
+	got := measureScaling(t, gateWriters, walGateOps, "engine/wal", func(writer, i int) error {
+		return commit(ctx, eng, writer, i)
+	})
+
+	if !passesGate(got.max, walWriteScalingFloor) {
+		t.Fatalf("WAL write scaling regressed: %d writers deliver %.3fx the throughput of one (best of %d), "+
+			"floor is %.2fx.\nThe usual cause is an exclusive lock reintroduced across the commit path, which "+
+			"makes wal.Writer.SyncGroup's leader/follower coalescing unreachable again and returns this arm to "+
+			"1.00x. Re-run on an idle machine before touching the floor: a softened gate is not a gate.",
+			gateWriters, got.max, gateRepeats, walWriteScalingFloor)
 	}
 }
 
