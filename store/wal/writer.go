@@ -433,7 +433,21 @@ func (w *Writer) AppendRun(fn func(emit func([]byte) error) error) error {
 		if done {
 			panic("wal: AppendRun's emit closure used after the run returned")
 		}
-		return w.appendLocked(payload)
+		if aerr := w.appendLocked(payload); aerr != nil {
+			return aerr
+		}
+		// Crash-injection point: MID-APPEND of one transaction's run, with w.mu
+		// held and every other writer queued behind it. A kill here leaves a
+		// transaction whose frames are partly in the buffer (lost with the
+		// process) or, once the run has crossed bufio's buffer size, partly in
+		// the file with no OpCommit marker — which recovery must discard for
+		// atomicity. Combined with GOGRAPH_CRASH_AFTER it lands in the steady
+		// state of a concurrent workload rather than on the first commit.
+		//
+		// Elided to nothing in every build without the gograph_crashinject tag;
+		// see [crashpoint.Breakpoint].
+		crashpoint.Breakpoint("wal.appendrun.frame-emitted")
+		return nil
 	})
 	done = true
 	if err != nil {
@@ -673,6 +687,21 @@ func (w *Writer) leadGroupSyncLocked() error {
 	// synced are already written; concurrent Appends only mutate the in-memory
 	// bufio buffer, never the file, so f.Sync and those Appends do not race.
 	w.mu.Unlock()
+	// Crash-injection point: MID-FSYNC of a group commit. The leader's snapshot
+	// is flushed to the OS but nothing below it is durable yet, leaderActive is
+	// set, and every follower in the group is parked in SyncGroup on a watermark
+	// that will never be published. No member of the group has acknowledged, so
+	// recovery is free to restore or discard the whole flushed suffix — but
+	// whatever it restores must be complete transactions, and everything a
+	// PREVIOUS group acknowledged must still be there.
+	//
+	// SIGKILL does not drop the OS page cache, so this point tests recovery over
+	// a never-fsynced tail, not the loss of one. Losing the tail outright is what
+	// internal/sim's fsync-fault injection covers.
+	//
+	// Elided to nothing in every build without the gograph_crashinject tag;
+	// see [crashpoint.Breakpoint].
+	crashpoint.Breakpoint("wal.sync.pre-datasync")
 	// fdatasync on Linux (skips the redundant inode-metadata flush), full
 	// fsync elsewhere; see dataSync. This is the per-commit WAL data
 	// durability point: the appended frames and the grown file size are made

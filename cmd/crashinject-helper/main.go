@@ -56,6 +56,16 @@
 //	                 the resulting artefacts must reconstruct the full
 //	                 committed state — the promotion is idempotent and
 //	                 crash-safe across a second crash at this point.
+//
+//	wal.appendrun.frame-emitted
+//	wal.sync.pre-datasync
+//	               — drives MANY CONCURRENT WRITERS through the durable
+//	                 store API and crashes inside the WAL commit path while
+//	                 several transactions are genuinely in flight: mid-append
+//	                 of one transaction's frame run, or mid-fsync of a group
+//	                 commit. Every acknowledged commit is announced on stdout
+//	                 before the crash, so the parent has an oracle for what
+//	                 MUST have survived. See [runConcurrentWriters].
 package main
 
 import (
@@ -66,6 +76,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
@@ -130,6 +141,9 @@ func run() int {
 		runEdgeHandlePropCrash(dir, scenario)
 	case "edgehandle.delete.post-wal-sync":
 		runEdgeHandleDeleteCrash(dir)
+	case "wal.appendrun.frame-emitted",
+		"wal.sync.pre-datasync":
+		runConcurrentWriters(dir, scenario)
 	default:
 		fmt.Fprintf(os.Stderr, "crashinject-helper: unknown scenario %q\n", scenario)
 		return 1
@@ -709,4 +723,146 @@ func runEdgeHandleDeleteCrash(dir string) {
 		log.Fatalf("wal.Close: %v", cerr)
 	}
 	fmt.Println("runEdgeHandleDeleteCrash: completed without crash (GOGRAPH_CRASH_AT != edgehandle.delete.post-wal-sync)")
+}
+
+// Concurrent-writer crash scenario (rmp #2302, acceptance criterion 5).
+//
+// The environment variables the parent uses to size the workload. All three are
+// read from the environment rather than hard-coded so the PARENT is the single
+// authority on the universe of transaction ids: it computes the expectation from
+// the numbers it passed in, and the two sides cannot drift.
+const (
+	envConcWriters   = "GOGRAPH_CRASH_WRITERS"
+	envConcWarmup    = "GOGRAPH_CRASH_WARMUP"
+	envConcPerWriter = "GOGRAPH_CRASH_PERWRITER"
+)
+
+// ackPrefix is the token the parent scans for in the child's stdout. One line
+// per ACKNOWLEDGED commit — printed only after Commit has returned nil, which
+// means the transaction's frames and its OpCommit marker were fsynced.
+//
+// It is the DURABILITY ORACLE, and it is the reason this scenario can be
+// asserted at all. With concurrent writers there is no single hand-computable
+// post-crash shape: which transactions had committed when the kill landed is up
+// to the scheduler. What is not up to the scheduler is the contract — anything
+// acknowledged is durable — so the child states what it was promised and the
+// parent holds recovery to it.
+//
+// One fmt.Printf is one write(2) of about a dozen bytes to the pipe the harness
+// installs. POSIX guarantees writes of at most PIPE_BUF bytes are atomic, so
+// concurrent writers cannot interleave halves of a line, and no mutex is needed
+// here (one would perturb the very timing the scenario exists to exercise).
+const ackPrefix = "ACK "
+
+// concBase maps a transaction id to the first of the three node keys it owns.
+// The stride of 10 keeps every transaction's node keys disjoint from every
+// other's, which is what makes per-transaction completeness checkable
+// independently after a crash: a transaction is present iff its own three nodes
+// and three arcs are, and no other transaction can supply or hide them.
+func concBase(id int64) int64 { return id * 10 }
+
+// runConcurrentWriters drives `writers` goroutines committing durable
+// multi-op transactions through the typed Store/Tx API — the path that releases
+// the single-writer semaphore after the append and fsyncs outside it, so many
+// committers are inside wal.Writer.SyncGroup at once — and crashes at the named
+// breakpoint inside the WAL commit path while several transactions are in
+// flight.
+//
+// Each transaction id owns a disjoint 3-node ring and commits exactly six ops —
+// three arcs with id-derived weights, one label, one property — so its WAL run is
+// six op frames plus the OpCommit marker, long enough for the mid-append
+// breakpoint to land strictly inside it. Every
+// acknowledged commit prints an ACK line (see [ackPrefix]) BEFORE the crash, so
+// the parent can hold recovery to the durability contract without having to
+// predict the interleaving.
+//
+// A warm-up phase commits the first `warmup` ids sequentially. It is not
+// decoration: combined with GOGRAPH_CRASH_AFTER it guarantees the crash lands
+// after real acknowledged work, so "every acknowledged transaction survived"
+// cannot pass vacuously.
+func runConcurrentWriters(dir, scenario string) {
+	writers := envInt(envConcWriters, 8)
+	warmup := envInt(envConcWarmup, 4)
+	perWriter := envInt(envConcPerWriter, 200)
+
+	w, err := wal.Open(filepath.Join(dir, "wal"))
+	if err != nil {
+		log.Fatalf("wal.Open: %v", err)
+	}
+	g := lpg.New[int64, int64](adjlist.Config{Directed: true})
+	store := txn.NewStoreWithOptions[int64, int64](g, w, txn.Options[int64, int64]{
+		Codec:       txn.NewInt64Codec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
+
+	// Warm-up: ids 1..warmup, committed one at a time. These are acknowledged
+	// before any concurrency starts, so they are the transactions the crash
+	// MUST NOT be able to lose however it interleaves.
+	for id := int64(1); id <= int64(warmup); id++ {
+		commitConcTxn(store, id)
+	}
+
+	// Steady state: `writers` goroutines on disjoint id ranges. The breakpoint
+	// fires somewhere in here (see GOGRAPH_CRASH_AFTER) and SIGKILLs the whole
+	// process, so under the crash harness this loop never completes.
+	var wg sync.WaitGroup
+	for wi := 0; wi < writers; wi++ {
+		wg.Add(1)
+		go func(wi int) {
+			defer wg.Done()
+			first := int64(warmup) + 1 + int64(wi)*int64(perWriter)
+			for i := int64(0); i < int64(perWriter); i++ {
+				commitConcTxn(store, first+i)
+			}
+		}(wi)
+	}
+	wg.Wait()
+
+	// Reached only on the non-crash self-test path (the countdown outlived the
+	// workload, or GOGRAPH_CRASH_AT names neither breakpoint). Closing the WAL
+	// here proves the workload itself is clean.
+	if cerr := w.Close(); cerr != nil {
+		log.Fatalf("wal.Close: %v", cerr)
+	}
+	fmt.Printf("runConcurrentWriters: completed without crash (%s), %d transactions\n",
+		scenario, int64(warmup)+int64(writers)*int64(perWriter))
+}
+
+// commitConcTxn commits transaction `id`'s six ops and, on success, announces
+// the acknowledgement on stdout. A commit error is fatal: the scenario's whole
+// premise is that these commits succeed until the process is killed, so a
+// rejected one is a helper bug the parent must see rather than a crash it
+// should interpret.
+func commitConcTxn(store *txn.Store[int64, int64], id int64) {
+	base := concBase(id)
+	tx := store.Begin()
+	for k := int64(0); k < 3; k++ {
+		src := base + k
+		dst := base + (k+1)%3
+		if err := tx.AddEdge(src, dst, id*100+k+1); err != nil {
+			log.Fatalf("txn %d AddEdge(%d->%d): %v", id, src, dst, err)
+		}
+	}
+	if err := tx.SetNodeLabel(base, "T"); err != nil {
+		log.Fatalf("txn %d SetNodeLabel: %v", id, err)
+	}
+	if err := tx.SetNodeProperty(base+1, "txn", lpg.Int64Value(id)); err != nil {
+		log.Fatalf("txn %d SetNodeProperty: %v", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		log.Fatalf("txn %d Commit: %v", id, err)
+	}
+	// Acknowledged: frames + marker are fsynced. Announce it, unbuffered, so the
+	// line reaches the parent's pipe before any later SIGKILL.
+	fmt.Printf("%s%d\n", ackPrefix, id)
+}
+
+// envInt reads a positive integer from the environment, falling back to def for
+// an unset, malformed, or non-positive value.
+func envInt(name string, def int) int {
+	v, err := strconv.Atoi(os.Getenv(name))
+	if err != nil || v <= 0 {
+		return def
+	}
+	return v
 }

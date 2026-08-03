@@ -12,6 +12,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"strconv"
 	"syscall"
 	"testing"
 
@@ -30,6 +31,22 @@ const selfKillPoint = "test.selfkill.point"
 // SIGKILL it; reaching os.Exit(0) would mean the self-kill path did not
 // fire and the parent assertion catches that.
 func TestMain(m *testing.M) {
+	if n := os.Getenv(countdownChildEnv); n != "" {
+		// Countdown child mode: call Breakpoint exactly n times and exit with
+		// the number of calls that RETURNED. Any call that self-kills ends the
+		// process, so the parent reads the exit status to learn precisely which
+		// call fired. See TestBreakpoint_Countdown.
+		calls, err := strconv.Atoi(n)
+		if err != nil || calls < 0 || calls > 100 {
+			os.Exit(43) // distinctive: the parent passed something unusable
+		}
+		survived := 0
+		for i := 0; i < calls; i++ {
+			crashpoint.Breakpoint(selfKillPoint)
+			survived++
+		}
+		os.Exit(survived)
+	}
 	if os.Getenv(crashChildEnv) == "1" {
 		// GOGRAPH_CRASH_AT is set by the parent to selfKillPoint, so this
 		// call must self-kill via SIGKILL and never return.

@@ -137,8 +137,8 @@ rest are separable and are recorded here rather than implied.
 | 3 | the orphan-discard counter is zero under legitimate concurrent commits | **DONE** |
 | 7 | the chosen scheme cites project, file and symbol | **DONE** — §2 |
 | 4 | `txnSeq` durable and monotone across close/reopen | **DONE** — see §5 |
-| 5 | crash-injection battery with concurrent writers | **NOT YET** |
-| 6 | benchmark showing fsyncs/commit falls as concurrency rises | **INSTRUMENT EXISTS** — `BenchmarkWriteScaling_StoreAPI` already reports `commits/fsync`; the store path releases the semaphore before `SyncGroup`, so coalescing is reachable there. The flat 268/s the audit measured is the *Cypher* path, serialised by `visMu`, which is rmp #2304's to remove |
+| 5 | crash-injection battery with concurrent writers | **DONE** — see §7 |
+| 6 | benchmark showing fsyncs/commit falls as concurrency rises | **DONE** — measured, see §8 |
 | E21 | recovery and bulkimport open the adjacency commit window with no barrier, licensed only by a comment | **DONE** — see §6 |
 
 ---
@@ -294,3 +294,113 @@ against never opens. For one writer the two orderings are indistinguishable — 
 change makes — and the difference appears only with two concurrent writers, which the barrier still
 prevents. The test is therefore a guard on the property #2304 depends on, not a discriminator, and
 it says so.
+
+---
+
+## 7. Crash injection with concurrent writers (criterion 5)
+
+Every other scenario in `internal/crashinject` crashes a **single-threaded** child and asserts one
+hand-computed graph shape. That cannot be done here: which transactions had committed when the kill
+landed is up to the scheduler, so there is no single post-crash shape to write down.
+
+What is not up to the scheduler is the contract. So the child **announces every acknowledged commit
+on stdout** — one `ACK <id>` line, written only after `Commit` returned `nil`, i.e. after that
+transaction's frames and its `OpCommit` marker were fsynced — and the parent holds recovery to two
+properties over the surviving artefacts:
+
+- **Durability** — every acknowledged transaction is present after recovery, complete.
+- **Atomicity** — every transaction present after recovery is present in **full**. A transaction
+  that contributed some of its five facts and not others is a violation whether or not it was ever
+  acknowledged.
+
+Plus two closing conditions: recovery **invents nothing** (every node and arc in the graph is
+accounted for by some transaction in the universe), and the crash landed **after real acknowledged
+work**.
+
+**The workload.** Each transaction id owns a disjoint 3-node ring (`base = id * 10`) and commits six
+ops: three arcs with id-derived weights, one label, one property. The stride is what makes
+per-transaction completeness checkable *independently* — no transaction can supply or hide another's
+nodes — which is the design decision that makes a concurrent crash assertable at all. Eight writers
+drive 200 transactions each, after a four-transaction sequential warm-up.
+
+**The two crash points**, both new and both elided to nothing without the `gograph_crashinject` tag:
+
+| breakpoint | where | what it tears |
+|---|---|---|
+| `wal.appendrun.frame-emitted` | inside `AppendRun`'s emit, after a frame lands | one transaction's frame run, with `w.mu` held and every other writer queued behind it |
+| `wal.sync.pre-datasync` | in `leadGroupSyncLocked`, after `Flush`, before `dataSync` | a group commit: the leader's suffix is in the OS but nothing below it is durable, and every follower is parked on a watermark that will never be published |
+
+### The countdown, and why it is not a convenience
+
+A breakpoint on a hot durability path is reached by the process's **very first commit**, and killing
+there proves nothing: nothing has been acknowledged, so "every acknowledged transaction survived"
+holds vacuously. `GOGRAPH_CRASH_AFTER=n` lets the first *n* hits through and kills on the (n+1)th,
+moving the crash into the steady state where several writers are genuinely in flight.
+
+It makes the crash deterministic in **count**, not in interleaving — which is exactly why the oracle
+is an invariant over the child's own acknowledgements rather than one fixed shape.
+
+Prior art: SQLite's OOM simulator counts down to its injected failure the same way —
+`memfault.iCountdown`, *"Number of pending successes before a failure"*, decremented in
+`faultsimStep()` and configured by `faultsimConfig(nDelay, nRepeat)`
+(`sqlite/sqlite` @ `1b08739`, `src/test_malloc.c:27,65-71,119-120`). Its off-by-one is the whole
+contract, so both sides are pinned by `TestBreakpoint_Countdown`.
+
+### The instrument was verified to fail, on both arms
+
+A checker that has never been observed to fail is not evidence.
+
+- **Unit arm** (`TestConcurrentWritersOracle_ReportsViolations`) — hand-built graphs, no subprocess.
+  A partial transaction is reported as an atomicity violation; an acknowledged transaction that
+  vanished entirely as a durability violation; an invented node as a surplus; and a legitimately
+  absent *unacknowledged* transaction as **nothing**, because flagging that would fail every crash
+  test.
+- **End-to-end arm** — with `Tx.Commit` altered to acknowledge *without* calling `SyncGroup`, both
+  crash tests fail with **44 durability violations** naming the exact acknowledged-but-lost
+  transactions, including all four warm-up ids. Reverted after measuring.
+
+### What this battery does NOT yet detect, and why that is worth stating
+
+It does **not** detect finding E5 itself. Replacing `AppendRun` with a loop of `Append` and re-running
+these tests leaves them **passing**, because `appendOnly` is still called with the store's
+single-writer semaphore held: contiguity is currently **over-determined**, guaranteed twice, and
+removing either guarantee alone changes nothing observable.
+
+E5's detector is therefore the `store/wal` unit arm (criteria 1–3), which drives concurrent appenders
+against the writer directly and measures the run count — a loop of `Append` shatters a 25-frame
+transaction into **8 runs**, `AppendRun` gives exactly **1**.
+
+This battery becomes the E5 gate the moment rmp #2306 retires the semaphore. Until then its value is
+what the unit arm cannot reach: the **atomicity and durability of a real store, recovered from a real
+`kill -9`, with many transactions genuinely in flight**.
+
+A caveat stated rather than buried: `SIGKILL` does not drop the OS page cache, so the mid-fsync point
+tests recovery over a **never-fsynced tail**, not the **loss** of one. Losing the tail outright is
+what `internal/sim`'s fsync-fault injection covers.
+
+---
+
+## 8. Group commit still coalesces, measured (criterion 6)
+
+`BenchmarkWriteScaling_StoreAPI` (`store/txn/write_scaling_bench_test.go`) reports `commits/fsync`
+directly. Apple M4, 10 cores, `-benchtime 3000x -count 5`, no `-race`, quiet machine; median of five:
+
+| writers | commits/fsync | **fsyncs/commit** | ops/sec |
+|--:|--:|--:|--:|
+| 1 | 1.000 | 1.000 | 263 |
+| 8 | 4.121 | 0.243 | 1 073 |
+| 64 | 31.58 | 0.032 | 8 472 |
+| 256 | 107.1 | 0.0093 | 28 530 |
+| 1024 | 300.0 | 0.0033 | 78 667 |
+
+fsyncs per commit falls **300×** from one writer to 1024, and throughput rises **299×**. The
+criterion asks for the curve, and the curve is monotone across every step.
+
+The contiguity change did not cost this: `AppendRun` holds the writer's mutex for the append only,
+and `SyncGroup` coalesces on **Sync**, not on Append, so a run of appends followed by one sync is
+precisely the shape it already batched.
+
+The number to keep in view is that this is the **store API** path. The Cypher path is flat at
+**268 commits/s** at every writer count, because it fsyncs inside `visMu` — the same 268 the audit
+recorded, and rmp #2304's to remove. Two paths over one WAL, one of which coalesces 300× and one of
+which cannot coalesce at all, is the sprint's thesis in a single table.
