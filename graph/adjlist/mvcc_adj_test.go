@@ -43,7 +43,7 @@ func autoWrite(a *AdjList[string, float64], clk *mvcc.Clock, fn func()) uint64 {
 // commit record, published at a single timestamp on return.
 func txWrite(a *AdjList[string, float64], clk *mvcc.Clock, fn func()) (*mvcc.CommitInfo, uint64) {
 	ws := a.WriteStampForTest()
-	ws.Begin()
+	beginTx(ws)
 	fn()
 	info, _ := ws.End()
 	if info == nil {
@@ -162,7 +162,7 @@ func TestAdjVersion_UncommittedIsInvisible(t *testing.T) {
 	observer := clk.ReadTS()
 
 	ws := a.WriteStampForTest()
-	ws.Begin()
+	beginTx(ws)
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}

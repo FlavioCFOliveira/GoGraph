@@ -149,17 +149,37 @@ func (t *labelTx[N, W]) commit() (uint64, error) {
 		panic("lpg: labelTx committed or aborted twice")
 	}
 	t.done = true
+	// Retract closes the window and hands back the record together with the
+	// number of versions stamped on it. A nil record means the transaction
+	// versioned nothing, which is the lazy-allocation case: there is nothing to
+	// publish, nothing to abort and nothing to reclaim (rmp #2301).
+	info, versions := t.ctx.tx.Retract()
 	if err := t.ctx.err(); err != nil {
 		// Abort rather than publish. The versions this transaction did manage
 		// to write must never become visible, and marking the record is what
 		// tells both the read path and the reclaimer so.
-		t.ctx.info.Abort()
+		if info != nil {
+			info.Abort()
+			// Charged even on the abort path: the version records exist and
+			// occupy memory whatever their commit record says. rmp #2318 tracks
+			// the fact that the reclaimer cannot yet free them.
+			t.g.reclaimDebt.Add(versions)
+		}
 		return 0, err
+	}
+	if info == nil {
+		return 0, nil
 	}
 	// Allocate, store, publish — in that order; see [mvcc.Clock.ReadTS].
 	ts := t.g.nextCommitTS()
-	t.ctx.info.Commit(ts)
+	info.Commit(ts)
 	t.g.mvccClock.PublishCommitTS(ts)
+	// Charge what this transaction actually created, so a threaded transaction
+	// pays into the reclamation budget exactly as an untransacted write does.
+	// Before rmp #2301 the count lived on the per-graph stamp and a threaded
+	// transaction's versions were charged to nothing at all — the same hole
+	// rmp #2289 closed for direct writes.
+	t.g.reclaimDebt.Add(versions)
 	return ts, nil
 }
 
@@ -173,7 +193,12 @@ func (t *labelTx[N, W]) abort() {
 		panic("lpg: labelTx committed or aborted twice")
 	}
 	t.done = true
-	t.ctx.info.Abort()
+	info, versions := t.ctx.tx.Retract()
+	if info == nil {
+		return
+	}
+	info.Abort()
+	t.g.reclaimDebt.Add(versions)
 }
 
 // deltaStamp resolves how a new delta records its visibility, in three cases

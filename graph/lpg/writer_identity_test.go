@@ -33,7 +33,7 @@ func TestWriter_HasADistinctTransactionIdentity(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		var got *Snapshot
 		if err := g.ApplyAtomically(func() error {
-			got = g.writerSnap.Load()
+			got = g.writerSnapshot()
 			return nil
 		}); err != nil {
 			t.Fatalf("apply %d: %v", i, err)
@@ -60,7 +60,7 @@ func TestWriter_HasADistinctTransactionIdentity(t *testing.T) {
 
 	// And it is released when the bracket closes: a snapshot left behind would
 	// make every later read resolve as of a stale writer.
-	if g.writerSnap.Load() != nil {
+	if g.writerSnapshot() != nil {
 		t.Fatal("writer snapshot still published after the apply bracket closed")
 	}
 }
@@ -189,7 +189,7 @@ func TestWriter_RegistersWithTheReclamationHorizon(t *testing.T) {
 		s := g.MVCCStats()
 		inside = s.ActiveReaders
 		insideMark = s.Watermark
-		startTS = g.writerSnap.Load().StartTS()
+		startTS = g.writerSnapshot().StartTS()
 		return nil
 	}); err != nil {
 		t.Fatalf("apply: %v", err)
@@ -225,7 +225,7 @@ func TestWriter_HoldsReclamationBackWhileItRuns(t *testing.T) {
 	}
 
 	if err := g.ApplyAtomically(func() error {
-		snap := g.writerSnap.Load()
+		snap := g.writerSnapshot()
 		if snap == nil {
 			t.Fatal("no writer snapshot")
 			return nil

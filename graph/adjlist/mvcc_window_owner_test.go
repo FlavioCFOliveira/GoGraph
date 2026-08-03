@@ -57,7 +57,7 @@ func TestWindowOwner_SecondTransactionDoesNotAdoptAnothersBuilder(t *testing.T) 
 	ws := a.WriteStampForTest()
 
 	// A: two writes to node "a", so it owns the shard's builder.
-	ws.Begin()
+	beginTx(ws)
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("A first write: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestWindowOwner_SecondTransactionDoesNotAdoptAnothersBuilder(t *testing.T) 
 	infoA, _ := ws.End()
 
 	// B: a genuinely separate transaction writing the same shard.
-	ws.Begin()
+	beginTx(ws)
 	if err := a.AddEdge("a", "b", 3); err != nil {
 		t.Fatalf("B write: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestWindowOwner_OneTransactionStillDedupes(t *testing.T) {
 			}
 		}
 		ws := a.WriteStampForTest()
-		ws.Begin()
+		beginTx(ws)
 		a.BeginCommit()
 		if err := a.AddEdge("a", "b", 1); err != nil {
 			t.Fatalf("first write: %v", err)
@@ -169,7 +169,7 @@ func TestWindowOwner_OneTransactionStillDedupes(t *testing.T) {
 			}
 		}
 		ws := a.WriteStampForTest()
-		ws.Begin()
+		beginTx(ws)
 		if err := a.AddEdge("a", "b", 1); err != nil {
 			t.Fatalf("first write: %v", err)
 		}
@@ -301,7 +301,7 @@ func TestWindowOwner_TokenNeverCollidesWithATransactionID(t *testing.T) {
 		seen[a.bulkOwner] = "bulk"
 		a.EndCommit()
 
-		id := ws.Begin()
+		id := beginTx(ws)
 		if prev, ok := seen[id]; ok && prev == "bulk" {
 			t.Fatalf("transaction id %d collides with a bulk window token: that "+
 				"transaction could adopt the window's builder", id)

@@ -2,16 +2,27 @@ package lpg
 
 // mvcc_writectx.go — the per-transaction state a write carries (rmp #2301).
 //
-// # What was per-GRAPH, and why that stops working
+// Design: docs/design-per-transaction-write-state.md.
 //
-// Three pieces of write-side state are single fields on the Graph precisely
-// because there is exactly one writer: the write stamp holding "the commit
-// record of the write currently under the barrier", the adjacency's commit
-// window, and the re-entrancy guard's single writer goroutine id (audit
-// findings E3, E4, E16). Each becomes a data race the moment two writers
-// overlap, and [mvcc.WriteStamp.Begin] says so in its own doc: "the caller must
-// be the only writer for the window's duration … so Begin never overwrites a
-// live record."
+// # What was per-GRAPH, and why that stopped working
+//
+// Three pieces of write-side state were single fields precisely because there
+// was exactly one writer: the write stamp holding "the commit record of the
+// write currently under the barrier", the adjacency's commit window, and the
+// re-entrancy guard's single writer goroutine id (audit findings E3, E4, E16).
+// The write stamp's Begin said so in its own doc: "the caller must be the only
+// writer for the window's duration … so Begin never overwrites a live record."
+//
+// E3 is the one that hurts, and it is NOT a data race — every field was atomic,
+// so -race is silent on it. A second Begin destroyed the first transaction's
+// window, so its record was never published and its versions kept an in-flight
+// transaction id for ever: invisible to every reader, unreclaimable by every
+// reclaimer, reported by nothing. Measured, with the lost record and the stolen
+// version count, in the design doc §1.
+//
+// All three are now per-transaction: the stamping state on [mvcc.TxState] here,
+// the adjacency's window on a per-shard owner token, and the guard on a set of
+// goroutine ids.
 //
 // # The failure that made this concrete
 //
@@ -48,21 +59,33 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
 
-// writeCtx is one write transaction's identity, as carried into the stores it
-// touches.
+// writeCtx is one write transaction's identity AND its whole mutable write
+// state, as carried into the stores it touches.
 //
-// It is passed by pointer and never mutated after construction, so two
-// concurrent writers hold two distinct values and neither can observe the
-// other's — which is the whole point, and what a per-graph field could not give.
+// It is passed by pointer, and its identity fields are never mutated after
+// construction, so two concurrent writers hold two distinct values and neither
+// can observe the other's — which is the whole point, and what a per-graph field
+// could not give. The state that does change during a transaction — its commit
+// record, its version count, its conflict flag — changes only on the
+// transaction's own value.
 //
-// The zero value is not usable; obtain one from [Graph.beginWriteCtx] or take
-// the nil pointer, which means "not in a transaction".
+// The zero value is not usable; obtain one from [Graph.beginWriteCtx] or
+// [Graph.acquireWriteCtx], or take the nil pointer, which means "not in a
+// transaction".
 type writeCtx struct {
-	// info is the commit record every version this transaction writes points
-	// at, so publishing the transaction stays ONE atomic store however many
-	// stores it spans. That indirection is the reason the record is heap
-	// allocated; it must not regress into a per-delta timestamp.
-	info *commitInfo
+	// tx is this transaction's stamping state: the commit record every version it
+	// writes points at, and how many of them there are. Publishing the
+	// transaction stays ONE atomic store however many stores it spans — that
+	// indirection is the reason the record is heap allocated and it must not
+	// regress into a per-delta timestamp.
+	//
+	// BY VALUE, and the pointer to it is what [mvcc.WriteStamp] publishes, so a
+	// bracket needs one object rather than two. The record inside it is still
+	// allocated lazily, so a transaction that versions nothing allocates nothing.
+	tx mvcc.TxState
+	// snap is the read view this transaction resolves through, held inline so
+	// [Graph.writerView] can hand out &w.snap without allocating.
+	snap Snapshot
 	// startTS is the instant this transaction reads at, and txID its identity.
 	// Together they are what [mvcc.Visible] needs, so a transaction sees its own
 	// uncommitted work and nobody else's — and what [mvcc.Conflicts] needs, so
@@ -88,7 +111,8 @@ type writeCtx struct {
 	conflict atomic.Pointer[mvcc.Conflict]
 }
 
-// beginWriteCtx opens per-transaction write state.
+// beginWriteCtx opens per-transaction write state, NOT published on the graph's
+// slot: it is carried by the caller.
 //
 // The order matters and is the same as [Graph.beginLabelTx]'s: the start
 // timestamp is read BEFORE the transaction id is minted, so a transaction can
@@ -96,16 +120,91 @@ type writeCtx struct {
 func (g *Graph[N, W]) beginWriteCtx() *writeCtx {
 	startTS := g.readTS()
 	id := g.nextTxID()
-	return &writeCtx{info: mvcc.NewCommitInfo(id), startTS: startTS, txID: id}
+	w := &writeCtx{startTS: startTS, txID: id}
+	w.snap = Snapshot{startTS: startTS, txID: id}
+	w.tx.Arm(id)
+	return w
 }
 
-// record returns the commit record to stamp a version with, or nil when there
-// is no transaction.
+// acquireWriteCtx takes per-transaction write state for a barrier bracket,
+// recycled when possible.
+//
+// # Why recycled at all
+//
+// The state has to be per-transaction — that is audit finding E3 and the whole
+// of rmp #2301 — and opening a bracket has to allocate nothing, which
+// TestBarrierGuard_ApplyAtomicallyAllocatesNothing has asserted since #2168.
+// A field on the Graph satisfies the second and fails the first; a fresh
+// allocation per bracket satisfies the first and fails the second. Recycling is
+// what satisfies both.
+//
+// # Why ONE slot and not a sync.Pool — measured
+//
+// sync.Pool is the reflex for this shape and it was tried first. It cost too
+// much for what an empty bracket is: BenchmarkBarrier_ApplyAtomically went from
+// 19.1 ns/op to 31.3 ns/op, +64 %, all of it Get/Put bookkeeping
+// (runtime_procPin plus the per-P poolLocal walk) on a bracket whose entire job
+// is two atomic stores. One atomic slot does the same work in a Swap and a
+// Store.
+//
+// A single slot is the right size because the barrier admits ONE write bracket at
+// a time, so there is never a second live [writeCtx] to cache. When rmp #2304
+// removes the barrier the slot degrades in the only direction that is safe:
+// concurrent writers that find it empty ALLOCATE, so contention costs an
+// allocation and never correctness. That is the point at which a per-P pool
+// becomes worth its constant, and it should be re-measured then rather than
+// assumed now.
+//
+// # Why a recycled state can refuse to be reused
+//
+// [mvcc.TxState.Arm] refuses a state that still holds a record, which
+// happens when an unsynchronised public-API mutator allocated one into it after
+// its owner had finished. Reusing it would publish that stranded version with the
+// WRONG transaction, so the cached value is dropped and a fresh one taken.
+// Dropping it is safe: it is unreachable from anything but the stranded version,
+// which keeps its own reference.
+//
+// The state is returned ARMED, ready for [mvcc.WriteStamp.Publish]. Arming here
+// rather than in Publish is what makes the refusal impossible to ignore: nothing
+// but this function can reach a state that is out of the free slot and not yet
+// published, so the Arm here cannot lose a race and needs no retry.
+func (g *Graph[N, W]) acquireWriteCtx(startTS, txID uint64) *writeCtx {
+	w := g.writeCtxFree.Swap(nil)
+	if w == nil || !w.tx.Arm(txID) {
+		w = &writeCtx{}
+		w.tx.Arm(txID)
+	}
+	w.startTS, w.txID = startTS, txID
+	w.snap = Snapshot{startTS: startTS, txID: txID}
+	w.conflict.Store(nil)
+	return w
+}
+
+// releaseWriteCtx offers bracket state back for reuse.
+//
+// The caller must have closed the window ([mvcc.WriteStamp.End]) and released
+// the horizon slot first, and must not reference w afterwards. Nothing else
+// retains it: a version holds the *[mvcc.CommitInfo] inside, which is a separate
+// object and is never recycled, and the adjacency holds a transaction TOKEN
+// rather than a pointer.
+func (g *Graph[N, W]) releaseWriteCtx(w *writeCtx) {
+	g.writeCtxFree.Store(w)
+}
+
+// record returns the commit record to stamp a version with, allocating this
+// transaction's record if the version asking is its first, or nil when there is
+// no transaction.
+//
+// Every call site creates a version, so the count [mvcc.TxState.Ensure] keeps is
+// exactly the transaction's version count — which is what charges the
+// reclamation debt at commit. Before rmp #2301 a threaded transaction's versions
+// were charged to NOTHING: the same accounting hole rmp #2289 had already had to
+// close for untransacted writes.
 func (w *writeCtx) record() *commitInfo {
 	if w == nil {
 		return nil
 	}
-	return w.info
+	return w.tx.Ensure()
 }
 
 // conflicts reports whether this transaction may displace a version whose

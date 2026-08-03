@@ -564,16 +564,26 @@ type Graph[N comparable, W any] struct {
 	// stays lock-free.
 	visMu sync.RWMutex
 
-	// writerSnapVal and writerSnap are the read view the WRITE path resolves
-	// through while a write transaction is open (rmp #2299): as of the instant
-	// the transaction began, plus its own uncommitted versions.
+	// writeTx names the write transaction whose bracket is currently open, and
+	// through it the read view the WRITE path resolves through (rmp #2299): as of
+	// the instant the transaction began, plus its own uncommitted versions.
 	//
-	// The value is held inline and the pointer published separately so opening
-	// a bracket allocates nothing — see [Graph.beginWrite]. Only the writer
-	// touches the value, and under the barrier there is exactly one writer;
-	// rmp #2301 moves both to per-transaction state when the barrier goes.
-	writerSnapVal Snapshot
-	writerSnap    atomic.Pointer[Snapshot]
+	// A SLOT holding per-transaction state, not the state itself (rmp #2301): the
+	// commit record, the version count, the snapshot and the conflict flag all
+	// live on the [writeCtx] the bracket owns, so two writers cannot corrupt each
+	// other's. Before that they were fields here and on [mvcc.WriteStamp], and
+	// audit finding E3 is what a second writer did to them — see
+	// graph/mvcc/stamp.go.
+	//
+	// The state is recycled through [Graph.writeCtxPool] so opening a bracket
+	// still allocates nothing, which
+	// TestBarrierGuard_ApplyAtomicallyAllocatesNothing requires.
+	writeTx atomic.Pointer[writeCtx]
+	// writeCtxFree caches ONE finished [writeCtx] for the next bracket to reuse,
+	// so per-transaction state costs no allocation in steady state. See
+	// [Graph.acquireWriteCtx] for why one slot and not a sync.Pool, with the
+	// measurement that settled it.
+	writeCtxFree atomic.Pointer[writeCtx]
 
 	// barrier enforces that no single goroutine re-enters visMu via
 	// [Graph.View] / [Graph.ApplyAtomically]. visMu is not re-entrant, so a
@@ -608,11 +618,16 @@ type Graph[N comparable, W any] struct {
 	edgeHandlePropVersionActive    atomic.Int64
 	edgeInstanceLabelVersionActive atomic.Int64
 	edgeInstancePropVersionActive  atomic.Int64
-	// stamp holds the commit record of the write currently under the barrier,
-	// SHARED with the adjacency so one transaction's labels, properties,
+	// stamp NAMES the write transaction a write that carries none must resolve
+	// to, SHARED with the adjacency so one transaction's labels, properties,
 	// topology, relationship types and edge properties all publish with one
-	// atomic store. It allocates the record lazily, so a bracket that versions
-	// nothing allocates nothing. See mvcc_write.go and [mvcc.WriteStamp].
+	// atomic store. The record is allocated lazily, so a bracket that versions
+	// nothing allocates nothing.
+	//
+	// It holds no transaction state of its own since rmp #2301 — only the clock,
+	// the slot naming the open transaction's [mvcc.TxState], and the count of
+	// versions belonging to no transaction at all. See mvcc_write.go and
+	// [mvcc.WriteStamp].
 	stamp mvcc.WriteStamp
 	// horizon tracks the start timestamps of active readers so reclamation
 	// knows which versions no reader can reach. Readers register with it from

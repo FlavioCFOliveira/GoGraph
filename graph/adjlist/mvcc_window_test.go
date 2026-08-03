@@ -59,7 +59,7 @@ func TestStoreEntry_InPlaceWindowMutationIsSoundUnderVersioning(t *testing.T) {
 	// A transaction that writes node a TWICE inside one window. The second
 	// write is the in-place builder mutation this test is about.
 	ws := a.WriteStampForTest()
-	ws.Begin()
+	beginTx(ws)
 	a.BeginCommit()
 	if err := a.AddEdge("a", "c", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
@@ -149,7 +149,7 @@ func TestStoreEntry_InPlaceWindowMutationIsRaceFree(t *testing.T) {
 
 	// One transaction, `fanout` in-place writes to the same node in one window.
 	ws := a.WriteStampForTest()
-	ws.Begin()
+	beginTx(ws)
 	a.BeginCommit()
 	for i := 0; i < fanout; i++ {
 		if err := a.AddEdge("a", string(rune('b'+i)), 1); err != nil {
@@ -209,13 +209,13 @@ func TestWriteStamp_AllocatesOnlyWhenAVersionNeedsIt(t *testing.T) {
 	var ws mvcc.WriteStamp
 	ws.SetClock(&mvcc.Clock{})
 
-	ws.Begin()
+	beginTx(&ws)
 	if info, n := ws.End(); info != nil || n != 0 {
 		t.Fatalf("an empty transaction produced a commit record (%v) and %d versions, want none of "+
 			"either: the record must be allocated by the first version that needs one", info, n)
 	}
 
-	ws.Begin()
+	beginTx(&ws)
 	first, _ := ws.Stamp()
 	second, _ := ws.Stamp()
 	if first == nil || first != second {

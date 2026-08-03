@@ -63,7 +63,6 @@ func (g *Graph[N, W]) beginWrite() {
 	if !g.mvccArmed {
 		return
 	}
-	txID := g.stamp.Begin()
 	// The writer reads through a snapshot of its OWN (rmp #2299): as of the
 	// instant it began, PLUS the versions it has written itself, which is
 	// exactly what the ts == txID branch of [mvcc.Visible] delivers. Before
@@ -81,13 +80,19 @@ func (g *Graph[N, W]) beginWrite() {
 	slot := g.horizon.EnterHolding()
 	startTS := g.mvccClock.ReadTS()
 	g.horizon.Publish(slot, startTS)
-	// By value into a field, then a pointer to it: opening a bracket must
-	// allocate nothing, which TestBarrierGuard_ApplyAtomicallyAllocatesNothing
-	// asserts. Only the writer touches it, and under the barrier there is
-	// exactly one — rmp #2301 moves it to per-transaction state when the
-	// barrier goes.
-	g.writerSnapVal = Snapshot{startTS: startTS, txID: txID, slot: slot}
-	g.writerSnap.Store(&g.writerSnapVal)
+	// The start timestamp is read BEFORE the id is minted, matching
+	// [Graph.beginWriteCtx] and [Graph.beginLabelTx], so a transaction can never
+	// see a commit that happened after it began. It is the reverse of what this
+	// path did until rmp #2301, when the id came from the stamp's own Begin.
+	txID := g.nextTxID()
+	// PER-TRANSACTION state, recycled so the bracket still allocates nothing
+	// (rmp #2301, audit finding E3). Everything mutable a write transaction owns
+	// — its commit record, its version count, its snapshot — lives on this
+	// object; the graph keeps only a slot naming it.
+	w := g.acquireWriteCtx(startTS, txID)
+	w.snap.slot = slot
+	g.stamp.Publish(&w.tx)
+	g.writeTx.Store(w)
 }
 
 // writerView returns the graph bound to the current writer's snapshot, or to
@@ -97,7 +102,20 @@ func (g *Graph[N, W]) beginWrite() {
 // stored value", which is the right answer outside a transaction and the wrong
 // one inside one the moment a second writer exists.
 func (g *Graph[N, W]) writerView() *ReadView[N, W] {
-	return g.ReadAt(g.writerSnap.Load())
+	return g.ReadAt(g.writerSnapshot())
+}
+
+// writerSnapshot returns the snapshot of the write transaction whose bracket is
+// currently open, or nil when there is none.
+//
+// The pointer is into the transaction's own state, so it is valid only while the
+// bracket is open — which is the only window any caller has a use for it in.
+func (g *Graph[N, W]) writerSnapshot() *Snapshot {
+	w := g.writeTx.Load()
+	if w == nil {
+		return nil
+	}
+	return &w.snap
 }
 
 // WriterView is [Graph.writerView] for a caller in another package — the Cypher
@@ -136,21 +154,25 @@ func (g *Graph[N, W]) endWrite() {
 	g.reclaimIfDue()
 }
 
-// releaseWriterSnapshot closes the writer's read view and returns its horizon
-// slot.
+// releaseWriterSnapshot closes the writer's read view, returns its horizon slot
+// and recycles its per-transaction state.
 //
 // Split from [Graph.endWrite] because endWrite returns early when the
 // transaction versioned nothing, and a slot must be returned whether or not
 // anything was written — a bracket that writes nothing still took one.
+//
+// It must run AFTER endWrite: the state is recycled here, so the record must
+// already have been published from it.
 func (g *Graph[N, W]) releaseWriterSnapshot() {
 	if !g.mvccArmed {
 		return
 	}
-	snap := g.writerSnap.Swap(nil)
-	if snap == nil {
+	w := g.writeTx.Swap(nil)
+	if w == nil {
 		return
 	}
-	g.horizon.Leave(snap.slot)
+	g.horizon.Leave(w.snap.slot)
+	g.releaseWriteCtx(w)
 }
 
 // EnableMVCC arms the whole versioning substrate: node labels, node properties

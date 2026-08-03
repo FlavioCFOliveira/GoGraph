@@ -95,7 +95,10 @@ func TestWriteCtx_TwoTransactionsHaveDistinctState(t *testing.T) {
 	if a.txID == b.txID {
 		t.Fatalf("two write contexts share the transaction id %d", a.txID)
 	}
-	if a.info == b.info {
+	// record() allocates each transaction's shared record on first use, so
+	// asking both for one is what proves they are separate records rather than
+	// two nil placeholders.
+	if a.record() == b.record() {
 		t.Fatal("two write contexts share ONE commit record: publishing either would publish both")
 	}
 	if b.txID <= a.txID {
@@ -390,5 +393,140 @@ func TestWriteCtx_DoomedTransactionRefusesEveryFurtherWrite(t *testing.T) {
 	tsA := mustCommit(t, txA)
 	if g.ReadAt(&Snapshot{startTS: tsA}).HasNodeLabel("b", "FromB") {
 		t.Fatal("a doomed transaction's write became visible")
+	}
+}
+
+// TestWriteCtx_RecycledStateIsNeverSharedAcrossTransactions is the pool's
+// correctness gate (rmp #2301).
+//
+// Per-transaction state and a zero-allocation bracket pull in opposite
+// directions, and the pool is what satisfies both — at the price of a state that
+// outlives the transaction that used it. This drives many brackets in sequence,
+// so the pool really does recycle, and asserts that nothing crosses between
+// them: every bracket gets a fresh transaction id, and every bracket's write
+// becomes visible at its OWN commit rather than at a neighbour's.
+func TestWriteCtx_RecycledStateIsNeverSharedAcrossTransactions(t *testing.T) {
+	t.Parallel()
+	g := New[int, int64](adjlist.Config{Directed: true})
+
+	const brackets = 64
+	ids := make(map[uint64]bool, brackets)
+	commits := make([]uint64, brackets)
+	for i := 0; i < brackets; i++ {
+		var txID uint64
+		if err := g.ApplyAtomically(func() error {
+			txID = g.writerSnapshot().TxID()
+			return g.SetNodeLabel(i, "L")
+		}); err != nil {
+			t.Fatalf("bracket %d: %v", i, err)
+		}
+		if txID == 0 {
+			t.Fatalf("bracket %d ran with no transaction identity", i)
+		}
+		if ids[txID] {
+			t.Fatalf("bracket %d reused transaction id %d: recycled state kept its "+
+				"predecessor's identity, so two transactions publish as one", i, txID)
+		}
+		ids[txID] = true
+		commits[i] = g.mvccClock.ReadTS()
+	}
+
+	// Every bracket's label is visible as of its own commit and NOT before it.
+	// A shared record would make an earlier reader see a later bracket's work.
+	for i := 0; i < brackets; i++ {
+		at := g.ReadAt(&Snapshot{startTS: commits[i]})
+		if !at.HasNodeLabel(i, "L") {
+			t.Fatalf("bracket %d's label is invisible at its own commit %d", i, commits[i])
+		}
+		if i+1 < brackets && at.HasNodeLabel(i+1, "L") {
+			t.Fatalf("a reader at bracket %d's commit sees bracket %d's write: the two "+
+				"transactions share a commit record", i, i+1)
+		}
+	}
+
+	// And the state really was recycled rather than freshly allocated each time,
+	// which is the property TestBarrierGuard_ApplyAtomicallyAllocatesNothing
+	// asserts from the other side.
+	if g.writeTx.Load() != nil {
+		t.Fatal("write state still published after the last bracket closed")
+	}
+}
+
+// TestWriteCtx_ConcurrentTransactionsKeepTheirOwnRecord drives concurrent write
+// transactions through the per-transaction state, which is rmp #2301's
+// acceptance instrument under -race.
+//
+// The barrier still serialises ApplyAtomically, so the concurrency has to come
+// from the substrate's own transaction type, which takes no barrier at all —
+// which is precisely the shape rmp #2304 will generalise. Each transaction
+// writes its own nodes, so none of them may conflict, and every one of them must
+// be fully visible afterwards.
+func TestWriteCtx_ConcurrentTransactionsKeepTheirOwnRecord(t *testing.T) {
+	t.Parallel()
+	g := New[int, int64](adjlist.Config{Directed: true})
+
+	const (
+		writers   = 24
+		perWriter = 20
+	)
+	// Nodes exist up front so the test measures the version chains rather than
+	// concurrent node creation, which the mapper serialises on its own.
+	for w := 0; w < writers; w++ {
+		for i := 0; i < perWriter; i++ {
+			if err := g.AddNode(w*perWriter + i); err != nil {
+				t.Fatalf("AddNode: %v", err)
+			}
+		}
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(writers)
+	errs := make([]error, writers)
+	for w := 0; w < writers; w++ {
+		go func(w int) {
+			defer wg.Done()
+			tx := g.beginLabelTx()
+			for i := 0; i < perWriter; i++ {
+				n := w*perWriter + i
+				if err := tx.setNodeLabel(n, "L"); err != nil {
+					errs[w] = err
+					tx.abort()
+					return
+				}
+				if err := tx.setNodeProperty(n, "k", StringValue("v")); err != nil {
+					errs[w] = err
+					tx.abort()
+					return
+				}
+			}
+			if _, err := tx.commit(); err != nil {
+				errs[w] = err
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	for w, err := range errs {
+		if err != nil {
+			t.Fatalf("writer %d touched only its own nodes and still failed: %v", w, err)
+		}
+	}
+
+	// Every transaction's whole work is visible. A lost record would leave its
+	// versions stamped with a transaction id no reader can pass, so the label
+	// would read as absent forever.
+	now := g.ReadAt(&Snapshot{startTS: g.mvccClock.ReadTS()})
+	for n := 0; n < writers*perWriter; n++ {
+		if !now.HasNodeLabel(n, "L") {
+			t.Fatalf("node %d's label was never published: its transaction lost its "+
+				"commit record", n)
+		}
+		v, ok := now.GetNodeProperty(n, "k")
+		if !ok {
+			t.Fatalf("node %d's property was never published", n)
+		}
+		if s, isStr := v.String(); !isStr || s != "v" {
+			t.Fatalf("node %d's property read back as %v, want the string %q", n, v, "v")
+		}
 	}
 }
