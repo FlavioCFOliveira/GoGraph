@@ -265,7 +265,7 @@ func (op *CreateNode) Next(out *Row) (bool, error) {
 	// Constraint enforcement: check before any mutation.
 	if op.reg != nil {
 		for _, p := range props {
-			if err := op.reg.CheckSetProperty(op.labels, p.key, p.value, op.mgr); err != nil {
+			if err := reserveConstraintValue(op.reg, op.mutator, op.labels, p.key, p.value, op.mgr); err != nil {
 				return false, err
 			}
 		}

@@ -400,7 +400,7 @@ func (op *Merge) runOnMatchPath(rows []Row) error {
 func (op *Merge) runOnCreatePathWithProps(childRow Row, props []propLiteral) error {
 	if op.reg != nil {
 		for _, p := range props {
-			if cerr := op.reg.CheckSetProperty(op.labels, p.key, p.value, op.mgr); cerr != nil {
+			if cerr := reserveConstraintValue(op.reg, op.mutator, op.labels, p.key, p.value, op.mgr); cerr != nil {
 				return fmt.Errorf("exec: Merge: ON CREATE: %w", cerr)
 			}
 		}
@@ -561,7 +561,7 @@ func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalF
 			// The RHS evaluated to null → openCypher removes the property.
 			if op.reg != nil {
 				if oldVal, had := op.mutator.NodeProperties(nodeKey)[a.key]; had {
-					op.reg.ReleasePropertyValue(op.mutator.NodeLabels(nodeKey), a.key, oldVal)
+					releaseConstraintValue(op.reg, op.mutator, op.mutator.NodeLabels(nodeKey), a.key, oldVal)
 				}
 			}
 			op.mutator.DelNodeProperty(nodeKey, a.key)
@@ -584,9 +584,9 @@ func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalF
 			// releasing first cannot mask a real cross-node duplicate; a failed
 			// check aborts the transaction and rebuilds every value-set.
 			if oldVal, had := op.mutator.NodeProperties(nodeKey)[a.key]; had {
-				op.reg.ReleasePropertyValue(labels, a.key, oldVal)
+				releaseConstraintValue(op.reg, op.mutator, labels, a.key, oldVal)
 			}
-			if cerr := op.reg.CheckSetProperty(labels, a.key, pv, op.mgr); cerr != nil {
+			if cerr := reserveConstraintValue(op.reg, op.mutator, labels, a.key, pv, op.mgr); cerr != nil {
 				return cerr
 			}
 		}

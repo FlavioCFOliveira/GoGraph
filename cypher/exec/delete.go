@@ -105,7 +105,7 @@ func (op *DeleteNode) releaseNodeConstraintValues(nodeKey string, labels []strin
 		return
 	}
 	for k, pv := range op.mutator.NodeProperties(nodeKey) {
-		op.reg.ReleasePropertyValue(labels, k, pv)
+		releaseConstraintValue(op.reg, op.mutator, labels, k, pv)
 	}
 }
 

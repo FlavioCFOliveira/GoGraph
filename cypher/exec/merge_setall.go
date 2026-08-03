@@ -140,7 +140,7 @@ func clearNodePropsConstrained(mut GraphMutator, reg *ConstraintRegistry, nodeKe
 func delNodePropConstrained(mut GraphMutator, reg *ConstraintRegistry, nodeKey, key string) {
 	if reg != nil {
 		if oldVal, had := mut.NodeProperties(nodeKey)[key]; had {
-			reg.ReleasePropertyValue(mut.NodeLabels(nodeKey), key, oldVal)
+			releaseConstraintValue(reg, mut, mut.NodeLabels(nodeKey), key, oldVal)
 		}
 	}
 	mut.DelNodeProperty(nodeKey, key)
@@ -161,9 +161,9 @@ func setNodePropConstrained(
 	if reg != nil {
 		labels := mut.NodeLabels(nodeKey)
 		if oldVal, had := mut.NodeProperties(nodeKey)[key]; had {
-			reg.ReleasePropertyValue(labels, key, oldVal)
+			releaseConstraintValue(reg, mut, labels, key, oldVal)
 		}
-		if cerr := reg.CheckSetProperty(labels, key, val, mgr); cerr != nil {
+		if cerr := reserveConstraintValue(reg, mut, labels, key, val, mgr); cerr != nil {
 			return cerr
 		}
 	}

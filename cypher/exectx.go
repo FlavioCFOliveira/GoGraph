@@ -713,12 +713,12 @@ func (tx *ExplicitTx) rollbackInBarrierLocked() (undoOK bool) {
 		undoOK = false
 	}
 	tx.undo = nil
-	// Reseed the constraint registry from the restored graph. Runs after undo
-	// so the graph is back to its pre-transaction state before the value-sets
-	// are rebuilt.
-	if tx.eng.constraintReg != nil {
-		reseedConstraintsInsideBarrier(tx.eng.constraintReg, tx.eng.g)
-	}
+	// NO constraint reseed (rmp #2321). The undo replay above already released this
+	// transaction's own value-set reservations, because each was journaled as an
+	// inverse when it was taken (cypher/exec/constraint_journal.go). Rebuilding the
+	// value-sets from the graph — which is what stood here — also destroyed
+	// CONCURRENT writers' reservations, since a rebuild cannot see a commit that is
+	// not yet durable.
 	if tx.buf != nil {
 		tx.buf.Rollback()
 	}

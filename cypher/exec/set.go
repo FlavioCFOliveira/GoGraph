@@ -355,7 +355,7 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 					// Release the old value if it was constrained before
 					// removing the property; SET n.k = null is a removal.
 					if oldVal, had := op.mutator.NodeProperties(nodeKey)[op.propertyKey]; had {
-						op.reg.ReleasePropertyValue(op.mutator.NodeLabels(nodeKey), op.propertyKey, oldVal)
+						releaseConstraintValue(op.reg, op.mutator, op.mutator.NodeLabels(nodeKey), op.propertyKey, oldVal)
 					}
 				}
 				op.mutator.DelNodeProperty(nodeKey, op.propertyKey)
@@ -374,9 +374,9 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 				// duplicate; if the check then fails, the transaction aborts and
 				// every UNIQUE value-set is rebuilt from the graph (H-C, #1905).
 				if oldVal, had := op.mutator.NodeProperties(nodeKey)[op.propertyKey]; had {
-					op.reg.ReleasePropertyValue(labels, op.propertyKey, oldVal)
+					releaseConstraintValue(op.reg, op.mutator, labels, op.propertyKey, oldVal)
 				}
-				if cerr := op.reg.CheckSetProperty(labels, op.propertyKey, pv, op.mgr); cerr != nil {
+				if cerr := reserveConstraintValue(op.reg, op.mutator, labels, op.propertyKey, pv, op.mgr); cerr != nil {
 					return cerr
 				}
 			}
@@ -401,7 +401,7 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 				// openCypher: SET n.k = null removes the property k from n.
 				if op.reg != nil {
 					if oldVal, had := op.mutator.NodeProperties(nodeKey)[op.propertyKey]; had {
-						op.reg.ReleasePropertyValue(op.mutator.NodeLabels(nodeKey), op.propertyKey, oldVal)
+						releaseConstraintValue(op.reg, op.mutator, op.mutator.NodeLabels(nodeKey), op.propertyKey, oldVal)
 					}
 				}
 				op.mutator.DelNodeProperty(nodeKey, op.propertyKey)
@@ -415,9 +415,9 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 			// self-set is not rejected as its own duplicate (H-C, #1905); see the
 			// release-before-check rationale on the eval path above.
 			if oldVal, had := op.mutator.NodeProperties(nodeKey)[op.propertyKey]; had {
-				op.reg.ReleasePropertyValue(labels, op.propertyKey, oldVal)
+				releaseConstraintValue(op.reg, op.mutator, labels, op.propertyKey, oldVal)
 			}
-			if cerr := op.reg.CheckSetProperty(labels, op.propertyKey, pv, op.mgr); cerr != nil {
+			if cerr := reserveConstraintValue(op.reg, op.mutator, labels, op.propertyKey, pv, op.mgr); cerr != nil {
 				return cerr
 			}
 		}
@@ -441,11 +441,11 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 		if op.reg != nil {
 			for _, p := range op.parsedMap {
 				if oldVal, had := existingMerge[p.key]; had {
-					op.reg.ReleasePropertyValue(labels, p.key, oldVal)
+					releaseConstraintValue(op.reg, op.mutator, labels, p.key, oldVal)
 				}
 			}
 			for _, p := range op.parsedMap {
-				if cerr := op.reg.CheckSetProperty(labels, p.key, p.value, op.mgr); cerr != nil {
+				if cerr := reserveConstraintValue(op.reg, op.mutator, labels, p.key, p.value, op.mgr); cerr != nil {
 					return cerr
 				}
 			}
@@ -469,10 +469,10 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 		// as its own duplicate (H-C, #1905); SET n = {…} replaces every property
 		// anyway, so releasing them all up front is correct.
 		for k, oldVal := range existing {
-			op.reg.ReleasePropertyValue(labels, k, oldVal)
+			releaseConstraintValue(op.reg, op.mutator, labels, k, oldVal)
 		}
 		for _, p := range op.parsedMap {
-			if cerr := op.reg.CheckSetProperty(labels, p.key, p.value, op.mgr); cerr != nil {
+			if cerr := reserveConstraintValue(op.reg, op.mutator, labels, p.key, p.value, op.mgr); cerr != nil {
 				return cerr
 			}
 		}

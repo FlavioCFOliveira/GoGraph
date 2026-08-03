@@ -90,13 +90,24 @@ We therefore target SI.
 > Two latent defects were found that the exclusive barrier hides, both of which must
 > be fixed before the barrier can go:
 >
-> 1. **`UNIQUE` enforcement is check-then-act.**
->    `exec.ConstraintRegistry.CheckSetProperty` takes the read lock and only reads;
->    `RecordPropertySet` takes the write lock later. Two concurrent writers can both
->    pass the check and both insert. Measured with the barrier removed: 14 of 15 runs
->    of 8 concurrent `MERGE` under a `UNIQUE` constraint produced 2 or 4 nodes instead
->    of 1. Enforcement must become a single atomic test-and-reserve, as PostgreSQL's
->    `_bt_doinsert` holds the buffer lock across the uniqueness check and the insert.
+> 1. **`UNIQUE` enforcement was check-then-act — FIXED (rmp #2321).**
+>    `exec.ConstraintRegistry.CheckSetProperty` took the read lock and only read;
+>    `RecordPropertySet` took the write lock later, so two concurrent writers could
+>    both pass the check and both insert. Measured with the barrier removed: 14 of 15
+>    runs of 8 concurrent `MERGE` under a `UNIQUE` constraint produced 2 or 4 nodes
+>    instead of 1.
+>
+>    Enforcement is now a single atomic test-and-reserve,
+>    `exec.ConstraintRegistry.ReserveSetProperty`, following PostgreSQL's
+>    `_bt_doinsert`, which holds the leaf buffer lock across `_bt_check_unique` and
+>    the insert. A second defect had to go with it: the rollback path rebuilt every
+>    value-set from the graph, which under concurrency destroyed the WINNER's
+>    reservation (a rebuild cannot see a commit that is not yet durable), so a third
+>    writer was then free to duplicate it. Rollback now releases exactly the
+>    reservations the statement itself took, journaled as inverses on the transaction
+>    undo log — which also resolves the remaining half of audit finding E10, since the
+>    whole-graph O(N) walk on the error path is gone. Verified: 20 of 20 `-race` runs
+>    converge on one node with all eight statements succeeding.
 > 2. **`MERGE` without a uniqueness constraint duplicates under concurrency.** Each
 >    statement reads at its own snapshot and cannot see a node whose commit is not yet
 >    durable. Neo4j documents the same caveat and directs users to a constraint;

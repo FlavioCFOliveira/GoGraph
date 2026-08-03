@@ -522,10 +522,113 @@ func (r *ConstraintRegistry) NotNullProperties(label string) []string {
 //
 // Returns *ConstraintViolationError (which wraps ErrConstraintViolation) on
 // the first violation found; nil when all constraints pass.
+//
+// # It CHECKS ONLY, which is not enough for a concurrent writer
+//
+// This is a read: it takes the read lock, consults the value-set, and returns.
+// Reserving the value happens later and separately, in [RecordPropertySet], which
+// takes the WRITE lock — so between the two, another writer can run the same check
+// and reach the same conclusion. Two writers then both insert and the UNIQUE
+// constraint is violated with both statements reporting success.
+//
+// That is unreachable while the engine serialises whole write statements on the
+// exclusive visibility barrier, which is why this shape survived. It is NOT
+// reachable-but-rare: with the concurrent write path enabled it was measured at 14
+// of 15 runs (rmp #2321). A writer that can overlap another must therefore call
+// [ConstraintRegistry.ReserveSetProperty], which does both halves under one lock.
+//
+// This entry point remains for callers that genuinely only want to ASK —
+// pre-validation and diagnostics — and for the existing test surface.
 func (r *ConstraintRegistry) CheckSetProperty(labels []string, prop string, value lpg.PropertyValue, mgr *index.Manager) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.checkSetPropertyLocked(labels, prop, value, mgr)
+}
 
+// ReserveSetProperty validates that setting prop = value on a node with the given
+// labels violates no registered constraint AND, in the same critical section,
+// records the value as in use — so no concurrent writer can pass the same check.
+//
+// It is the enforcement entry point for every write path. On success the value is
+// already reserved and the caller's later [ConstraintRegistry.RecordPropertySet] is
+// a harmless idempotent no-op. On failure NOTHING is reserved, for any label.
+//
+// # Why atomic, and the prior art
+//
+// Splitting the test from the insert is a check-then-act race, and it is the defect
+// [ConstraintRegistry.CheckSetProperty] documents above. PostgreSQL closes the same
+// hole by holding the leaf page's buffer lock ACROSS the uniqueness check and the
+// insertion: `_bt_doinsert` calls `_bt_check_unique` with the buffer locked and does
+// not release it before inserting, and `_bt_stepright` states the reason in as many
+// words — "We must write-lock the target page before releasing write lock on current
+// page; else someone else's _bt_check_unique scan could fail to see our insertion"
+// (postgres/postgres, master @ 36f7330, 2026-08-03,
+// src/backend/access/nbtree/nbtinsert.c:1033). Memgraph validates unique constraints
+// under the constraint structure's own lock for the same reason
+// (memgraph/memgraph, branch master, src/storage/v2/constraints/unique_constraints.cpp).
+//
+// # Why a duplicate is a VIOLATION here and not a retriable conflict
+//
+// PostgreSQL distinguishes two cases: a duplicate committed by a finished
+// transaction is a constraint violation, while a duplicate inserted by a
+// STILL-RUNNING transaction makes the inserter release its lock, wait for that
+// transaction (`XactLockTableWait`, or `SpeculativeInsertionWait` for
+// `INSERT … ON CONFLICT`) and start over — so the outcome depends on whether the
+// peer commits or aborts.
+//
+// GoGraph cannot make that distinction here, and the reason is structural rather
+// than an oversight: PostgreSQL's index entry carries the inserting transaction id,
+// while this value-set is a set of strings with no owner and the registry has no
+// transaction-liveness oracle to consult even if it had one. So every duplicate is
+// reported as what openCypher calls it — a constraint violation, a client error —
+// which is always correct for a committed duplicate and conservative for an
+// in-flight one (it rejects a statement that a retry might have satisfied, rather
+// than admitting a statement that breaks the invariant). Refining the in-flight case
+// to a retriable [mvcc.ErrSerializationConflict], which is what Memgraph reports,
+// needs the value-set to carry its reserver's transaction id; that arrives with the
+// transaction threading in rmp #2320.
+//
+// # Intra-statement duplicates are now caught too
+//
+// A statement that writes the same constrained value to two nodes —
+// `SET a.email = 'x', b.email = 'x'` under a UNIQUE constraint on email — used to
+// pass, because every check ran before any record. Reserving at check time rejects
+// the second write. That is a fix, not a side effect: such a statement leaves the
+// graph violating a declared invariant.
+func (r *ConstraintRegistry) ReserveSetProperty(labels []string, prop string, value lpg.PropertyValue, mgr *index.Manager) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Phase 1 — verify EVERY label before reserving for any of them, so a
+	// violation on the second label cannot leave the first one reserved. A node
+	// carries all its labels at once; a partial reservation would be a phantom that
+	// only a whole-graph reseed could clear.
+	if err := r.checkSetPropertyLocked(labels, prop, value, mgr); err != nil {
+		return err
+	}
+
+	// Phase 2 — reserve. Same critical section, so no other writer observed the gap.
+	// A null value is not constrained by UNIQUE and has nothing to reserve.
+	if strVal, ok := propertyValueToString(value); ok {
+		for _, label := range labels {
+			key := constraintKey(label, prop)
+			if vs := r.valueSets[key]; vs != nil {
+				vs[strVal] = struct{}{}
+			}
+		}
+	}
+	return nil
+}
+
+// checkSetPropertyLocked is the constraint test shared by
+// [ConstraintRegistry.CheckSetProperty] and
+// [ConstraintRegistry.ReserveSetProperty]. The caller must hold r.mu in read mode
+// (to ask) or write mode (to ask and then reserve).
+//
+// Extracting it is what lets the two entry points differ ONLY in atomicity rather
+// than in what they consider a violation — a second copy of this logic would be
+// free to drift, and a drift here is an unenforced constraint.
+func (r *ConstraintRegistry) checkSetPropertyLocked(labels []string, prop string, value lpg.PropertyValue, mgr *index.Manager) error {
 	for _, label := range labels {
 		key := constraintKey(label, prop)
 

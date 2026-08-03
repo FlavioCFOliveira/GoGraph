@@ -5198,13 +5198,13 @@ func (r *Result) rollbackUnderBarrier() {
 	if r.undo != nil && !r.undo.replay() {
 		r.undoErr = wrapUndoFailure(nil)
 	}
-	// Reseed the constraint registry from the restored graph. Must run AFTER
-	// undo replay (so the graph is back to its pre-transaction state) and
-	// BEFORE releasing the buffer/WAL (so the value-sets are consistent with
-	// what's visible once the barrier drops).
-	if r.constraintReg != nil && r.g != nil {
-		reseedConstraintsInsideBarrier(r.constraintReg, r.g)
-	}
+	// NO constraint reseed here (rmp #2321). The undo replay above already
+	// released every value-set reservation this statement made, because each one
+	// was journaled as an inverse when it was taken
+	// (cypher/exec/constraint_journal.go). Rebuilding the value-sets from the graph
+	// instead — which is what stood here — destroyed CONCURRENT writers'
+	// reservations too, since a rebuild cannot see a commit that is not yet durable;
+	// that file has the measurement.
 	if r.buf != nil {
 		r.buf.Rollback()
 	}
@@ -5218,96 +5218,6 @@ func (r *Result) rollbackUnderBarrier() {
 	}
 	r.bufHandled = true
 	r.walHandled = true
-}
-
-// reseedConstraintsInsideBarrier rebuilds every UNIQUE value-set in reg from the
-// committed graph. It is called inside the write bracket immediately after an
-// undo-log replay, so the rolled-back statement's phantom reservations do not
-// falsely reject later valid writes (#1342).
-//
-// # It reads a SNAPSHOT, and since rmp #2304 it must (audit finding E10)
-//
-// This used to read the graph through the unversioned accessors — Graph.IsTombstoned,
-// Graph.HasNodeLabel, Graph.GetNodeProperty — which return the PRESENT: the newest
-// stored value, uncommitted work included, because GoGraph updates in place and keeps
-// the inverse in the version chain. That was sound only because the exclusive
-// visibility barrier meant there was no other writer whose uncommitted work the
-// present could contain.
-//
-// With ordinary writes running concurrently (lpg.Graph.ApplyVersioned) the present
-// contains exactly that, and reseeding from it puts another transaction's UNCOMMITTED
-// value into a UNIQUE value-set. If that transaction then rolls back — or fails its
-// fsync, which is a live possibility since it is mid-commit while this runs — the
-// value-set holds a reservation for a value that never existed, and the next client
-// to write it is rejected with a spurious constraint violation that no state in the
-// graph explains. Reseeding is supposed to REMOVE phantoms, so importing someone
-// else's would be the same defect it exists to fix.
-//
-// A fresh snapshot taken here is correct in both directions, and that is worth
-// stating because a stale one would not be:
-//
-//   - it EXCLUDES every unpublished transaction, so no other writer's uncommitted
-//     value is imported;
-//   - it INCLUDES every transaction published before now, so a value another writer
-//     legitimately committed while this statement ran is not dropped — dropping it
-//     would under-report the value-set and let a genuine duplicate through, which is
-//     the worse failure of the two;
-//   - it excludes THIS statement's own rolled-back writes, because the bracket
-//     publishes its record on the unwind (see lpg/mvcc_write.go on why a rolled-back
-//     statement publishes) and so has no commit timestamp at or below this snapshot.
-//
-// # The O(N) walk is unchanged, and why
-//
-// Audit finding E10 has a second half: this rebuilds every value-set by walking the
-// ENTIRE mapper, on an error path. The targeted form the audit prefers — releasing
-// exactly the values the statement reserved, via
-// [exec.ConstraintRegistry.ReleasePropertyValue], which already exists — needs the
-// undo log to say WHICH (label, property, value) triples were reserved. It cannot:
-// undoLog is a slice of opaque closures (cypher/undo.go), so the information is not
-// recoverable from it, and threading it out instead means adding a typed record at
-// every RecordPropertySet call site across cypher/exec (merge, merge_pattern,
-// merge_setall, set_all, remove, delete, detach_delete). That is a change to the undo
-// log's shape rather than to this function, it is a cost on an error path only, and
-// it is not made worse by rmp #2304 — so it is recorded here and left, deliberately,
-// rather than half-done.
-func reseedConstraintsInsideBarrier(reg *exec.ConstraintRegistry, g *lpg.Graph[string, float64]) {
-	mapper := g.AdjList().Mapper()
-
-	// The committed graph as of now. Registered with the reader horizon, so the
-	// versions it resolves through cannot be reclaimed underneath it.
-	snap := g.BeginRead()
-	defer g.EndRead(snap)
-	rv := g.ReadAt(snap)
-
-	// Snapshot (id, key) pairs first to avoid deadlocking the shard read lock
-	// with a nested Lookup inside the Walk callback.
-	type nodeRef struct {
-		key string
-		id  graph.NodeID
-	}
-	refs := make([]nodeRef, 0, mapper.Len())
-	mapper.Walk(func(id graph.NodeID, key string) bool {
-		refs = append(refs, nodeRef{id: id, key: key})
-		return true
-	})
-
-	reg.ReseedFromGraph(func(label, prop string) []lpg.PropertyValue {
-		var out []lpg.PropertyValue
-		for i := range refs {
-			ref := refs[i]
-			if rv.IsTombstoned(ref.id) {
-				continue
-			}
-			if !rv.HasNodeLabel(ref.key, label) {
-				continue
-			}
-			v, ok := rv.GetNodeProperty(ref.key, prop)
-			if ok {
-				out = append(out, v)
-			}
-		}
-		return out
-	})
 }
 
 // Err returns the first error encountered during iteration, or nil.
@@ -15874,6 +15784,21 @@ func (e *Engine) execUnderBarrier(
 	})
 	return r, buildErr
 }
+
+// RecordConstraintInverse appends inv to this statement's undo log so a rollback
+// undoes a constraint-registry change (rmp #2321). It implements the optional
+// journal interface cypher/exec asserts; see cypher/exec/constraint_journal.go for
+// what replaced the whole-graph reseed and why the reseed was unsound under
+// concurrent writers.
+//
+// A nil undo log means this adapter tracks no transaction, so there is nothing to
+// roll back and nothing to record — the same reading undoLog.record itself takes.
+func (a *lpgMutatorAdapter) RecordConstraintInverse(inv func()) { a.undo.record(inv) }
+
+// RecordConstraintInverse is [lpgMutatorAdapter.RecordConstraintInverse] for the
+// durable write path. Both adapters implement it because both are reachable write
+// paths and a rolled-back statement must release its reservations either way.
+func (a *walMutatorAdapter) RecordConstraintInverse(inv func()) { a.undo.record(inv) }
 
 // setMutatorWriteTx hands a write adapter the transaction its statement is
 // running as, so every read it makes resolves through that transaction rather
