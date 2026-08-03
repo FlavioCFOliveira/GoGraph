@@ -1251,7 +1251,7 @@ func (t *Tx[N, W]) Commit() error {
 	}
 
 	// Apply to the in-memory graph after durability is secured, as ONE write
-	// transaction (ApplyVersioned) so the whole transaction's writes flip visible
+	// transaction (ApplyAtomically) so the whole transaction's writes flip visible
 	// as a single atomic step — no reader can observe a partially-applied
 	// transaction (audit gap F3, docs/isolation-design.md).
 	//
