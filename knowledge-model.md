@@ -2139,3 +2139,81 @@ Also recorded: criterion 6 of #2302 needs no new instrument.
 `BenchmarkWriteScaling_StoreAPI` already reports `commits/fsync`, and the store
 path releases the semaphore BEFORE `SyncGroup`, so coalescing is reachable there —
 the flat 268/s the audit measured is the *Cypher* path, serialised by `visMu`.
+
+Incrementally synced at commit `2d11d717` (2026-08-03, task #2302, sprint 334 —
+**rmp #2302 CLOSED: crash injection with concurrent writers (criterion 5) and the
+group commit measured (criterion 6)**): +15 nodes (`Commit`; two `Spec` —
+`docs/benchmarks/group-commit-coalescing-2026-08-03.md` and the previously
+unmodelled `docs/design-wal-transaction-contiguity.md`; five `Function` —
+`runConcurrentWriters`, `commitConcTxn`, `envInt`, `concBase` in
+`cmd/crashinject-helper/main.go` and `parseSkip` in
+`internal/crashpoint/crashpoint_enabled.go`; seven `Test`), +26 edges (12
+`CONTAINS`, 5 `VERIFIES`, 4 `IMPROVES`, 5 `TOUCHES` — the `Sprint`→`Commit`
+`CONTAINS` and the two `SPECIFIED_IN` included).
+
+**A concurrent crash cannot be asserted against a shape, so it is asserted against
+the child's own acknowledgements.** With many writers, which transactions had
+committed when the kill landed is up to the scheduler. The helper's new
+`runConcurrentWriters` scenario therefore prints one `ACK <id>` line per
+acknowledged commit (written only after `Commit` returned nil, i.e. after that
+transaction's frames and `OpCommit` marker were fsynced) and the parent holds
+recovery to **Durability** (everything acknowledged is present and complete) and
+**Atomicity** (everything present is present in full). Each transaction owns a
+disjoint 3-node ring, `base = id*10`, which is the decision that makes
+per-transaction completeness checkable independently: no transaction can supply or
+hide another's state.
+
+Two new PRODUCTION crashpoints in `store/wal/writer.go`, both elided to nothing
+without the `gograph_crashinject` tag: `wal.appendrun.frame-emitted` inside
+`AppendRun`'s emit (tears one transaction's frame run with `w.mu` held) and
+`wal.sync.pre-datasync` in `leadGroupSyncLocked` between the `Flush` and the
+`dataSync` (tears a group commit with followers parked on a watermark that will
+never be published).
+
+**`GOGRAPH_CRASH_AFTER` — a countdown, and not a convenience.** A breakpoint on a
+hot durability path is reached by the process's FIRST commit, where a crash proves
+nothing: nothing has been acknowledged, so "everything acknowledged survived"
+holds vacuously. The countdown lets n hits through and kills on the (n+1)th. Prior
+art read in source: SQLite's OOM simulator counts down the same way —
+`memfault.iCountdown`, "Number of pending successes before a failure",
+`faultsimStep()`, `faultsimConfig(nDelay, nRepeat)` (`sqlite/sqlite` @ `1b08739`,
+`src/test_malloc.c:27,65-71,119-120`). Its off-by-one is the whole contract, so
+`TestBreakpoint_Countdown` pins both sides.
+
+**THE FACT MOST WORTH KEEPING: this battery does NOT detect audit finding E5
+today.** Replacing `AppendRun` with a loop of `Append` leaves the crash tests
+PASSING, because `store/txn.Tx.appendOnly` still runs with the store's
+single-writer semaphore held — contiguity is **over-determined**, guaranteed
+twice, so removing either guarantee alone changes nothing observable. E5's
+detector remains the `store/wal` unit arm, which drives concurrent appenders
+against the writer directly (a loop of `Append` shatters a 25-frame transaction
+into 8 runs; `AppendRun` gives 1). **This battery becomes the E5 gate the moment
+rmp #2306 retires the semaphore.** What it does detect was proven: altering
+`Tx.Commit` to acknowledge without `SyncGroup` makes both tests fail with 44
+durability violations naming the exact lost transactions. Also note `SIGKILL` does
+not drop the OS page cache, so the mid-fsync point tests recovery over a
+never-fsynced tail, not the loss of one.
+
+**Criterion 6, measured** (`BenchmarkWriteScaling_StoreAPI`, Apple M4, no `-race`,
+median of 5): `commits/fsync` 1.000 / 4.121 / 31.58 / 107.1 / 300.0 at 1 / 8 / 64 /
+256 / 1024 writers — fsyncs per commit falls **300x**, monotone at every step,
+throughput 263 → 78 667 ops/sec. `AppendRun` did not cost the group commit because
+`SyncGroup` coalesces on **Sync**, not on Append. The contrast localises the
+sprint's ceiling: the Cypher path over the same WAL is flat at **268 commits/s**
+because it fsyncs inside `visMu`, which is rmp #2304's to remove.
+
+DATA-QUALITY NOTES observed during this sync, not corrected here:
+- Only **one** `Commit` node existed for sprint 334 (`d8847ce7`) although the sprint
+  has ~12 commits, so the `Sprint`→`Commit` provenance layer is substantially
+  behind for this sprint.
+- `internal/crashinject/graph_shape_test.go` (task #2270) had **no** `Test` nodes at
+  all; its two tests were added here as hygiene.
+- `cmd/crashinject-helper/main.go` models only `main`, `run`, `runCheckpointCrash`
+  and `runWALMidFrame`; the later scenario functions
+  (`runCheckpointPrefixCrash`, `runRecoveryPromoteCrash`, `runConstraintDropCrash`,
+  `runEdgeHandlePropCrash`, `runEdgeHandleDeleteCrash`) remain unmodelled.
+- Test-file **helper** functions are not modelled as `Function` anywhere in the
+  graph (confirmed by query), so this sync did not add the new test helpers
+  (`checkConcurrent`, `concTxnFacts`, `concPresentFacts`, `parseAcks`,
+  `runConcurrentCrash`, `assertViolations`, `runCountdownChild`). That is the
+  graph's existing convention, not an omission.
