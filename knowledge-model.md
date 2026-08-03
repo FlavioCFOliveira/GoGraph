@@ -2334,3 +2334,42 @@ replaced.
 publish (`cypher/exec/index_writeback.go`), the deferred label-index removal
 (`graph/lpg/mvcc_index.go`), and the `constraintActive`/`indexActive` gates
 (`graph/lpg/lpg.go:451,463`, read by `store/checkpoint/checkpoint.go:867`).
+
+Incrementally synced at commit `e69d1974` (2026-08-03, task #2303, sprint 334 —
+**the secondary-index batch publish's ordering basis**): +4 nodes (`Commit`; three
+`Test` in `graph/index/manager_concurrent_batch_test.go`), +6 edges (3 `CONTAINS`,
+2 `IMPROVES`, 1 `Sprint`→`Commit`).
+
+`index.Manager.ApplyBatch` is called at the transaction boundary from
+`exec.IndexBuffer`, today inside the write visibility barrier so exactly one batch is
+ever in flight. **Tested before asserted this time** — and it holds. The basis has
+three parts:
+
+1. **Within a batch**, mutation order is preserved: one `IndexBuffer` belongs to one
+   transaction and `ApplyBatch` walks the slice in order. This is the half
+   concurrency cannot help with, because the Manager's own subscriber contract
+   **exempts same-property-key changes from order-independence** — they carry
+   old→new payloads.
+2. **Across concurrent batches**, every sub-index operation takes its own lock.
+3. **The same-property-key case cannot ARISE** between two concurrently-committing
+   transactions: both writing a property on one node is a write-write conflict
+   (`graph/lpg`'s node-property store, rmp #2300), so one aborts before it reaches a
+   buffer.
+
+**Part 3 is a DEPENDENCY on another package, not a property of `graph/index`**, and
+the test file records it so the coupling is visible from both ends: if node-property
+conflict detection were removed, the index could diverge from the graph with nothing
+in `graph/index` to catch it.
+
+**BOTH DIFFERENTIALS RUN, AND THE FIRST FOUND A DEFECT IN THE TEST ITSELF.** The
+order-preservation sequences were `add/remove/add` and `remove/add/remove` —
+**PALINDROMES, identical under reversal** — so the test PASSED against a build with
+`ApplyBatch` deliberately iterating the batch BACKWARDS. Only running the defect
+exposed it. Now asymmetric (`add/add/remove`, `remove/remove/add`) and both fail on
+reversal. Removing `label.Index.Add`'s internal lock kills
+`TestManager_ConcurrentApplyBatchLosesNothing` with `fatal error: concurrent map
+writes`, so part 2's lock is demonstrably load-bearing.
+
+**#2303 REMAINS OPEN on two of four structures:** the deferred label-index removal
+(`graph/lpg/mvcc_index.go:49-75`) and the `constraintActive`/`indexActive` gates
+(`graph/lpg/lpg.go:451,463`, read by `store/checkpoint/checkpoint.go:867`).
