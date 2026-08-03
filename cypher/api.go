@@ -1702,7 +1702,7 @@ func (e *Engine) ConstraintSpecsForSnapshot() []snapshot.ConstraintSpec {
 // from ever under-counting a durably-registered constraint — the only
 // direction that could cause silent constraint loss across a checkpoint (#1464).
 func (e *Engine) syncConstraintCount() {
-	e.g.SetActiveConstraintCount(int64(e.constraintReg.Count()))
+	e.g.SetConstraintCountSource(func() int64 { return int64(e.constraintReg.Count()) })
 }
 
 // IndexSpecsForSnapshot converts the engine's current USER secondary-index
@@ -1735,7 +1735,7 @@ func (e *Engine) IndexSpecsForSnapshot() []snapshot.IndexDefSpec {
 // apply path, so the store-direct storeIndexActive gate alone is blind to every
 // engine-declared index.
 func (e *Engine) syncIndexCount() {
-	e.g.SetActiveIndexCount(int64(e.indexDefReg.count()))
+	e.g.SetIndexCountSource(func() int64 { return int64(e.indexDefReg.count()) })
 }
 
 // ListIndexes returns the names of every secondary index currently registered

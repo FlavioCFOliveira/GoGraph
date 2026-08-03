@@ -442,26 +442,41 @@ type Graph[N comparable, W any] struct {
 	// 0 is observing a state in which no overflow label existed.
 	edgeLabelOverflowActive atomic.Int64
 
-	// constraintActive mirrors the cypher engine's schema-constraint count as a
-	// lock-free gate. The checkpointer reads it (via HasConstraints) to decide
+	// constraintCount DERIVES the cypher engine's schema-constraint count, rather
+	// than mirroring it. The checkpointer reads it (via HasConstraints) to decide
 	// whether a snapshot must carry constraints.bin before the WAL prefix that
 	// first declared the constraints can be truncated; without it an embedder
 	// that forgets checkpoint.WithConstraintSpecs would silently lose every
-	// schema constraint on the next reopen (#1464). It is maintained by
-	// Engine.syncConstraintCount under the engine's single-writer lock.
-	constraintActive atomic.Int64
+	// schema constraint on the next reopen (#1464).
+	//
+	// DERIVED, NOT MAINTAINED, and that is this gate's ordering basis (rmp #2303,
+	// audit finding on the constraintActive/indexActive gates). It used to be an
+	// atomic.Int64 that Engine.syncConstraintCount STORED the registry's count
+	// into, documented as correct because the engine held its single-writer lock.
+	// A store of a separately-read count is a lost update waiting for a second
+	// writer: A reads 1, B reads 2 and stores 2, A stores 1, and the gate
+	// UNDER-REPORTS. Under-reporting is the dangerous direction — the checkpointer
+	// then truncates the WAL prefix holding a CREATE CONSTRAINT and the constraint
+	// is silently gone on reopen, which is exactly #1464.
+	//
+	// A function call cannot be stale: it reads the registry at the instant the
+	// question is asked, so there is no window and no ordering requirement at all.
+	// Nil when no engine is attached, in which case only the store-direct count
+	// answers. Set once by [Graph.SetConstraintCountSource] at wiring time.
+	constraintCount atomic.Pointer[func() int64]
 
-	// indexActive mirrors the cypher engine's secondary-index-definition count
-	// as a lock-free gate, the exact index analogue of constraintActive. The
-	// engine's CREATE INDEX commits via Tx.CommitWALOnly, which appends the WAL
-	// frame but does NOT replay it through the store apply path, so the
-	// store-direct storeIndexActive counter never sees an engine index. The
+	// indexCount DERIVES the cypher engine's secondary-index-definition count, the
+	// exact index analogue of constraintCount above and derived for the same
+	// reason. The engine's CREATE INDEX commits via Tx.CommitWALOnly, which
+	// appends the WAL frame but does NOT replay it through the store apply path,
+	// so the store-direct storeIndexActive counter never sees an engine index. The
 	// checkpointer's phase-3 self-sufficiency re-check therefore consults
-	// HasIndexes, which ORs this engine-mirrored count with the store-direct one,
-	// so a CREATE INDEX committed during the lock-free snapshot-write window is
-	// caught and the WAL prefix holding it is retained (#1755). It is maintained
-	// by Engine.syncIndexCount under the engine's single-writer lock.
-	indexActive atomic.Int64
+	// HasIndexes, which ORs this derived count with the store-direct one, so a
+	// CREATE INDEX committed during the lock-free snapshot-write window is caught
+	// and the WAL prefix holding it is retained (#1755).
+	//
+	// Nil when no engine is attached. Set once by [Graph.SetIndexCountSource].
+	indexCount atomic.Pointer[func() int64]
 
 	// storeConstraints tracks the schema constraints declared through the
 	// txn.Store-direct API (txn.Tx.CreateConstraint / DropConstraint) for an
@@ -2690,7 +2705,7 @@ func (g *Graph[N, W]) OutDegreeByTypeBounded(src N, relType LabelID, limit int) 
 // through the cypher engine or directly through txn.Tx.CreateConstraint
 // (#1756).
 func (g *Graph[N, W]) HasConstraints() bool {
-	return g.constraintActive.Load() > 0 || g.storeConstraintActive.Load() > 0
+	return derivedCount(&g.constraintCount) > 0 || g.storeConstraintActive.Load() > 0
 }
 
 // storeConstraintKey identifies one store-direct constraint slot. Name is
@@ -2816,7 +2831,7 @@ func (g *Graph[N, W]) ClearStoreConstraints() {
 //
 // HasIndexes is safe for concurrent use.
 func (g *Graph[N, W]) HasIndexes() bool {
-	return g.indexActive.Load() > 0 || g.storeIndexActive.Load() > 0
+	return derivedCount(&g.indexCount) > 0 || g.storeIndexActive.Load() > 0
 }
 
 // AddStoreIndex records that a secondary index named name is declared through
@@ -2876,25 +2891,50 @@ func (g *Graph[N, W]) ClearStoreIndexes() {
 	g.storeIndexMu.Unlock()
 }
 
-// SetActiveConstraintCount records the number of schema constraints currently
-// registered, for HasConstraints to report. The cypher engine calls it under
-// its single-writer lock after every constraint registration, drop, and
-// recovery re-seed, so the value never under-counts a durably-registered
-// constraint that a concurrent checkpoint might otherwise miss.
+// SetConstraintCountSource attaches the function [Graph.HasConstraints] derives
+// the engine's schema-constraint count from. Called once, at wiring time, by
+// whatever owns the constraint registry; a nil src detaches it.
 //
-// SetActiveConstraintCount is safe for concurrent use.
-func (g *Graph[N, W]) SetActiveConstraintCount(n int64) { g.constraintActive.Store(n) }
+// It replaces a SetActiveConstraintCount(n int64) that stored a count the caller
+// had read separately. That shape is a lost update as soon as a second writer
+// exists — A reads 1, B reads 2 and stores 2, A stores 1, and the gate
+// under-reports, which makes the checkpointer truncate the WAL prefix holding a
+// CREATE CONSTRAINT (#1464). Deriving removes the window rather than guarding it:
+// there is no stored value to go stale, so the gate needs no ordering guarantee
+// from its caller at all. See the field comment on constraintCount.
+//
+// src must be safe for concurrent use: it is called from readers, including the
+// checkpointer, with no lock held here.
+func (g *Graph[N, W]) SetConstraintCountSource(src func() int64) {
+	if src == nil {
+		g.constraintCount.Store(nil)
+		return
+	}
+	g.constraintCount.Store(&src)
+}
 
-// SetActiveIndexCount records the number of secondary indexes currently
-// registered in the cypher engine's index-def registry, for HasIndexes to
-// report. The cypher engine calls it under its single-writer lock after every
-// index registration, drop, and recovery re-seed (Engine.syncIndexCount), so
-// the value never under-counts a durably-registered index that a concurrent
-// checkpoint might otherwise miss — the index analogue of
-// SetActiveConstraintCount (#1755).
+// SetIndexCountSource attaches the function [Graph.HasIndexes] derives the
+// engine's secondary-index count from — the index analogue of
+// [Graph.SetConstraintCountSource] (#1755), derived for the same reason. Called
+// once at wiring time; a nil src detaches it.
 //
-// SetActiveIndexCount is safe for concurrent use.
-func (g *Graph[N, W]) SetActiveIndexCount(n int64) { g.indexActive.Store(n) }
+// src must be safe for concurrent use: it is called from readers, including the
+// checkpointer's phase-3 re-check, with no lock held here.
+func (g *Graph[N, W]) SetIndexCountSource(src func() int64) {
+	if src == nil {
+		g.indexCount.Store(nil)
+		return
+	}
+	g.indexCount.Store(&src)
+}
+
+// derivedCount reads a count source, or zero when none is attached.
+func derivedCount(p *atomic.Pointer[func() int64]) int64 {
+	if fp := p.Load(); fp != nil {
+		return (*fp)()
+	}
+	return 0
+}
 
 // RestoreTombstones marks every id in ids as removed, reconstructing the
 // tombstone set captured by [Graph.TombstonedIDs] at snapshot time. It is
