@@ -225,6 +225,16 @@ func (g *Graph[N, W]) ReclaimNow() int {
 	return g.ReclaimVersions(watermark) +
 		g.adj.Reclaim(watermark) +
 		g.reclaimNodeLife(watermark) +
+		// The adjacency conflict stamps are bounded here and nowhere else. They
+		// are pure write-side bookkeeping — one pair of timestamps per node a
+		// transaction has touched, carrying no pre-image and taking part in no
+		// rollback — so nothing else has a reason to remove them, and without this
+		// sweep the map would grow to one entry per node ever written
+		// transactionally and stay there for the life of the process. A stamp at or
+		// below the watermark can no longer refuse anything, because
+		// [mvcc.Conflicts] is false for a head below every live transaction's
+		// start. See [adjVersions.truncate].
+		g.adjVer.truncate(watermark) +
 		g.applyDeferredIndexRemovals(watermark)
 }
 

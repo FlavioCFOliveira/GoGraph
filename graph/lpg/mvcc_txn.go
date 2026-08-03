@@ -287,6 +287,19 @@ func (t *labelTx[N, W]) addNode(n N) error { return t.g.addNodeInfo(n, t.ctx) }
 // transaction's instant.
 func (t *labelTx[N, W]) removeNode(n N) { t.g.removeNodeInfo(n, t.ctx) }
 
+// addEdge appends an arc inside this transaction — the COMMUTATIVE adjacency
+// write, which never conflicts with another transaction's append and is refused
+// only by a concurrent non-commutative write to the same source. See
+// [adjVersions].
+func (t *labelTx[N, W]) addEdge(src, dst N, w W) error {
+	return t.g.addEdgeInfo(src, dst, w, t.ctx)
+}
+
+// removeEdge removes an arc inside this transaction — the NON-COMMUTATIVE
+// adjacency write, refused by any concurrent adjacency write to the same source,
+// append included. See [adjVersions].
+func (t *labelTx[N, W]) removeEdge(src, dst N) { t.g.removeEdgeInfo(src, dst, t.ctx) }
+
 // setEdgeLabel writes a pair's relationship type inside this transaction. It
 // reaches the overflow store when the pair already carries one.
 func (t *labelTx[N, W]) setEdgeLabel(src, dst N, name string) {

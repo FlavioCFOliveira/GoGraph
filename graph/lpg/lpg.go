@@ -585,6 +585,14 @@ type Graph[N comparable, W any] struct {
 	// measurement that settled it.
 	writeCtxFree atomic.Pointer[writeCtx]
 
+	// adjVer is the per-node adjacency write-write conflict index (rmp #2300).
+	// Adjacency keeps no per-object delta chain — its only version signal is the
+	// global topoGeneration below — so it cannot use the rule every other store
+	// uses, and this holds the two stamps per node that replace it. See
+	// [adjVersions] for the rule, and for the Memgraph source that settled why an
+	// adjacency APPEND is commutative and must not conflict with another append.
+	adjVer adjVersions
+
 	// barrier enforces that no single goroutine re-enters visMu via
 	// [Graph.View] / [Graph.ApplyAtomically]. visMu is not re-entrant, so a
 	// nested acquisition from a goroutine already inside the barrier would
@@ -1306,8 +1314,52 @@ func (g *Graph[N, W]) reviveInfo(n N, tx *writeCtx) {
 // created onto a logically-removed node. The query executor upholds
 // this (CREATE routes every endpoint through the mutator's AddNode).
 func (g *Graph[N, W]) AddEdge(src, dst N, w W) error {
+	return g.addEdgeInfo(src, dst, w, nil)
+}
+
+// addEdgeInfo is [Graph.AddEdge] with an explicit write transaction; tx is nil
+// for a direct Go-API mutation, which is committed the instant it is made and
+// takes no conflict check. See [writeCtx].
+//
+// The append is the COMMUTATIVE adjacency write: it conflicts only with another
+// transaction's non-commutative write to the same source, never with another
+// append, and it records a stamp regardless so a later removal can see it. The
+// rule, and the Memgraph source that settled it, are in [adjVersions].
+func (g *Graph[N, W]) addEdgeInfo(src, dst N, w W, tx *writeCtx) error {
+	// Checked BEFORE the adjacency mutation so a doomed transaction appends
+	// nothing. A node that does not exist yet cannot carry a stamp, so nothing
+	// could conflict with it — an append is allowed to create its endpoints.
+	if tx != nil {
+		if srcID, ok := g.adj.Mapper().Lookup(src); ok {
+			if err := g.adjVer.checkAppend(srcID, tx); err != nil {
+				return err
+			}
+		}
+		if !g.adj.Directed() {
+			if dstID, ok := g.adj.Mapper().Lookup(dst); ok {
+				if err := g.adjVer.checkAppend(dstID, tx); err != nil {
+					return err
+				}
+			}
+		}
+	}
 	if err := g.adj.AddEdge(src, dst, w); err != nil {
 		return err
+	}
+	// Stamped AFTER the insert, because an append may CREATE its source and that
+	// node's id does not exist until now. Stamping before the insert skipped every
+	// edge-creates-its-endpoint write — most of a bulk CREATE — leaving those
+	// nodes invisible to a later removal's conflict check. See
+	// [adjVersions.checkAppend].
+	if tx != nil {
+		if srcID, ok := g.adj.Mapper().Lookup(src); ok {
+			g.adjVer.stampAppend(srcID, tx)
+		}
+		if !g.adj.Directed() {
+			if dstID, ok := g.adj.Mapper().Lookup(dst); ok {
+				g.adjVer.stampAppend(dstID, tx)
+			}
+		}
 	}
 	defer g.reclaimAfterDirectWrite()
 	// topoGeneration is bumped HERE, in the graph's own mutator, rather than left to
@@ -1500,6 +1552,23 @@ func (g *Graph[N, W]) removeEdgeInfo(src, dst N, tx *writeCtx) {
 	srcID, srcOK := g.adj.Mapper().Lookup(src)
 	dstID, dstOK := g.adj.Mapper().Lookup(dst)
 
+	// An arc removal is the NON-COMMUTATIVE adjacency write: it may not step over
+	// another transaction's in-flight append or removal on this source. Checked
+	// before anything is captured or mutated, so a doomed transaction leaves the
+	// adjacency untouched (rmp #2300). Recorded rather than returned — this
+	// primitive is void by contract, which is exactly the case
+	// [writeCtx.conflictErr] exists for.
+	if srcOK && tx != nil {
+		if err := g.adjVer.noteExclusive(srcID, tx); err != nil {
+			return
+		}
+		if !g.adj.Directed() && dstOK {
+			if err := g.adjVer.noteExclusive(dstID, tx); err != nil {
+				return
+			}
+		}
+	}
+
 	// Capture the per-pair label set BEFORE the adjacency removal. The
 	// underlying adjlist removes the first-matching slot, which may be the very
 	// slot carrying an inline relationship type; if a parallel edge survives we
@@ -1602,6 +1671,22 @@ func (g *Graph[N, W]) removeEdgeByHandleInfo(src, dst N, handle uint64, tx *writ
 
 	srcID, srcOK := g.adj.Mapper().Lookup(src)
 	dstID, dstOK := g.adj.Mapper().Lookup(dst)
+
+	// A by-handle removal is a non-commutative adjacency write, exactly as
+	// [Graph.removeEdgeInfo]'s is, and takes the same check before it mutates
+	// anything (rmp #2300). Returns false rather than a typed error because that
+	// is this primitive's own signature; the conflict is recorded on tx and the
+	// commit refuses it. See [writeCtx.conflictErr].
+	if srcOK && tx != nil {
+		if err := g.adjVer.noteExclusive(srcID, tx); err != nil {
+			return false
+		}
+		if !g.adj.Directed() && dstOK {
+			if err := g.adjVer.noteExclusive(dstID, tx); err != nil {
+				return false
+			}
+		}
+	}
 
 	// Capture the per-pair label set and property maps BEFORE the adjacency
 	// removal, exactly as [Graph.RemoveEdge] does: the removed slot may be the

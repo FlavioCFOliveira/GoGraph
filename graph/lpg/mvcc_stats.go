@@ -60,7 +60,17 @@ type MVCCStats struct {
 	// watermark. They are memory too, and they are the reason a label bitmap can
 	// over-report.
 	IndexRemovalBacklog int64
-	// Total is the sum of everything above: the memory the substrate is
+	// AdjConflictStamps is the number of nodes carrying an adjacency write-write
+	// conflict stamp ([adjVersions]).
+	//
+	// It is reported separately from Total rather than added to it, because it is
+	// not a version: it holds no pre-image, is never read, and takes no part in
+	// rollback or in a reader's visibility decision. It is write-side bookkeeping
+	// with the same LIFETIME as a version — bounded by the same watermark in the
+	// same sweep — so it belongs here to be observable, and folding it into Total
+	// would misreport the version memory a reader can hold back.
+	AdjConflictStamps int64
+	// Total is the sum of every VERSION count above: the memory the substrate is
 	// responsible for.
 	Total int64
 	// Bound is the number of records that may accumulate from CHURN between
@@ -121,6 +131,7 @@ func (g *Graph[N, W]) MVCCStats() MVCCStats {
 		EdgeSideVersions:    g.EdgeSideVersionCount(),
 		NodeLifeRecords:     g.nodeLifeActive.Load(),
 		IndexRemovalBacklog: g.idxPendingActive.Load(),
+		AdjConflictStamps:   int64(g.adjVer.len()),
 		Bound:               reclaimThreshold,
 		Now:                 g.mvccClock.ReadTS(),
 		ActiveReaders:       g.horizon.Active(),
@@ -146,6 +157,7 @@ func (g *Graph[N, W]) publishMVCCMetrics() {
 	metrics.SetGauge("lpg.mvcc.versions.edge_side", float64(s.EdgeSideVersions))
 	metrics.SetGauge("lpg.mvcc.versions.node_life", float64(s.NodeLifeRecords))
 	metrics.SetGauge("lpg.mvcc.index_removal_backlog", float64(s.IndexRemovalBacklog))
+	metrics.SetGauge("lpg.mvcc.adjacency_conflict_stamps", float64(s.AdjConflictStamps))
 	metrics.SetGauge("lpg.mvcc.versions.total", float64(s.Total))
 	metrics.SetGauge("lpg.mvcc.versions.bound", float64(s.Bound))
 	metrics.SetGauge("lpg.mvcc.watermark", float64(s.Watermark))
