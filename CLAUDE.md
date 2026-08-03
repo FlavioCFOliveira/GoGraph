@@ -58,6 +58,16 @@ Specify → Implement → Test → Document
 
 No step may be skipped or reordered.
 
+### Git command execution
+
+**Every `git` command is executed individually, on its own, and never together with any other command.** One `git` invocation per command execution — nothing before it, nothing after it.
+
+- Never chain a `git` command with another command, by any means: no `&&`, no `||`, no `;`, no pipelines, no command substitution wrapping another command, no shell loops that run several commands in one invocation.
+- Never chain two `git` commands together either. `git add` and `git commit` are two separate executions, run one after the other.
+- This holds for every `git` subcommand — reads included (`git status`, `git log`, `git diff`, `git show`, `git blame`) as much as writes (`git add`, `git commit`, `git branch`, `git checkout`, `git merge`, `git tag`, `git push`).
+- Redirecting or bounding a single `git` command's own output — for example `git log --oneline | head -20` — is the one permitted shaping of the invocation, because it runs no second command of its own.
+- **Precedence.** This rule overrides the general guidance to group independent commands or tool calls into a single message (see [Token Economy](#token-economy)): saving a round trip never justifies combining a `git` command with anything else. Isolation makes each command's exit status unambiguous and keeps a failed step from being masked by the next one.
+
 ### Self-contained development
 
 Every development cycle must be **self-contained**: never deliver only part of a task. Each cycle must produce a complete, usable result.
@@ -73,6 +83,8 @@ Whenever you identify a bug, create the regression tests needed to guarantee tha
 ### Production-grade by default
 
 Across the entire cycle — analysis → planning → development → testing — the result must be **production-grade**, and this standard applies to **every action you take**: development, fixes, evaluations, analyses, and audits alike. Apply your full knowledge and effort so that every change yields code ready to run in production, never a prototype or a partial solution.
+
+The standard each component and the architecture must meet is set out in [Component and Architecture Excellence](#component-and-architecture-excellence).
 
 ### Never guess — evidence over assumption
 
@@ -96,6 +108,86 @@ When deciding what the project should deliver — in audits and evaluations as m
 3. **Is it fast?** Is it as fast as it can be without compromising correctness or security, and what more can be done to maximise the deliverable's performance?
 
 Correctness outranks security, and security outranks speed: never trade a higher priority for a lower one. This order governs **trade-off priority**, whereas [Performance-First Engineering](#performance-first-engineering) governs the **rigour** of the performance work itself, which is pursued only once correctness and security are assured. When these criteria conflict, or are hard to satisfy together, stop and ask the user how to proceed, presenting the available options.
+
+---
+
+## Token Economy
+
+### Principle of action
+
+**Before performing any operation, weigh its cost in tokens and choose the cheapest alternative that produces the same result.** When two or more routes lead to the same information — or to the same effect — the cheaper route is mandatory.
+
+**Taking the cheap route must never affect the result of the operation.** The economy applies **exclusively to the means** used to reach the result, **never to the result itself**. What the cheap route returns must be **identical** to what the expensive route would have returned — not "close enough", not "approximately the same", not "probably the same": **identical**.
+
+**Mandatory precondition — the equivalence test.** You may take the cheaper alternative only when you are certain the result is equivalent. Before choosing, verify:
+
+- Does it return exactly the same information, with the same accuracy and the same level of detail?
+- Does it cover exactly the same scope — the same files, the same cases, the same data?
+- Does it produce exactly the same effect on the project?
+
+If the answer to any of these is "no" or "I do not know", the cheap alternative is **excluded** and you use the route that guarantees the result. **Whenever equivalence is in doubt, take the more reliable route, however much more it costs.** Economy is only the tie-breaker between options proven to be equivalent — never a criterion for deciding the result itself.
+
+**Never reduce, in order to save tokens:** the scope of the task, the depth of the analysis, the number of files or cases examined when all of them are relevant, the tests to run, the evidence to gather, verification against authoritative sources, the validation of acceptance criteria, or the quality of the deliverable. Saving tokens **is not** doing less: it is doing the same by a shorter route.
+
+**Precedence.** Token economy **never** justifies compromising correctness, security, completeness, or the gathering of evidence. If the cheaper route yields a different, incomplete, or uncertain result, then it is **not the same operation** — and in that case [Never guess — evidence over assumption](#never-guess--evidence-over-assumption), [Measure to decide](#measure-to-decide), and the [Decision framework — correct → secure → fast](#decision-framework--correct--secure--fast) prevail. Saving tokens must never lead you to guess or to assume.
+
+### Concrete applications
+
+**Prefer the local CLI — the general rule.**
+
+- **If an operation can be performed locally through a CLI, it must be performed through the CLI and by no other route.** The local CLI is systematically the cheapest option, so where an equivalent command exists, no other way of obtaining the same result is acceptable.
+- This governs every more expensive alternative: web queries, browser tooling, navigating graphical interfaces, or any remote service that returns what a local command already returns.
+- Examples:
+  - `git log`, `git show`, `git diff`, `git blame` locally, instead of consulting the repository's web interface.
+  - `gh issue view`, `gh pr view`, `gh api` (the GitHub CLI), instead of opening the corresponding web pages.
+  - `rmp` for everything concerning tasks, sprints, and the Knowledge Graph (see [Planning and Task Execution](#planning-and-task-execution) and [Knowledge Graph](#knowledge-graph)) — which is in any case the single source of truth.
+  - `--help`, `man`, or the command's own documentation, instead of searching for the same documentation online.
+  - Filtering and aggregating data locally (for example with `grep`, `jq`, `sort`, `wc`), instead of pulling the full set into context.
+- Reserve the more expensive routes — web, browser, remote services — for the cases where **no** local command can produce the same result.
+- This preference is equally subject to the equivalence test above: if the CLI does not return the same information, with the same scope and accuracy, use the route that guarantees the result.
+
+**Obtaining external information.**
+
+- When a repository can be cloned — preferably `git clone --depth 1` — and its files read locally, **avoid** `WebFetch` for the same content, above all when several files from the same repository are needed.
+- To consult a dependency's documentation, prefer what is already available locally: project files, the dependency's source, `go doc`, the command's `--help`. An internet search is the fallback, not the first move.
+- When a web search is genuinely necessary, run **one targeted, specific search** rather than several generic searches followed by reading irrelevant pages.
+
+**Consulting this project.**
+
+- Consult the **Knowledge Graph first** (see [Knowledge Graph](#knowledge-graph)). Reading the graph is cheaper than reading files or walking the code for the same answer — this is precisely what the graph is for.
+- Use targeted searches (`grep`/`glob` with precise patterns) instead of reading whole files to find a reference.
+- When reading a large file, read only the range of lines needed rather than the whole file.
+- For wide sweeps — many files or directories — **delegate to a sub-agent** that returns only the conclusion, instead of pulling the content of every file into the main context.
+
+**Never repeat work already done.**
+
+- Do not re-read files already read in this session, and do not re-confirm an edit that was applied successfully.
+- Do not re-derive facts already established in the conversation, and do not reopen decisions the user has already taken.
+- Do not launch the same search twice — for example, delegating a search to a sub-agent and also running it yourself. Delegate **or** run it, never both.
+
+**Commands and output.**
+
+- Limit command output to what is needed: `git log --oneline`, `git diff --stat` before the full diff, `git status --short`, `--name-only`, the `-q`/`--quiet` flags, or bound the result (for example with `head`).
+- Avoid dumping large files into the context or into a reply. Reference `path:line` instead of reproducing the content.
+- Prefer reading text — or a page's accessibility tree — over capturing images or screenshots, which are substantially more expensive, whenever the text suffices.
+
+**Tests and validation.**
+
+- While iterating, run the specific test or package under change; reserve the full suite for the task's final validation.
+- Do not run the full suite repeatedly to check a change that affects only one isolated component.
+- This relaxes no gate. `make ci` — `go test -race ./...`, the TCK regression gate, `goleak`, and the lint pass — still runs in full before a task is closed and before every push, exactly as the [Compliance Mandates](#compliance-mandates) and the [Reliability and Concurrency Mandates](#reliability-and-concurrency-mandates) require. Always read the command's exit status rather than inferring success from its output.
+
+**Model, effort, and parallelism.**
+
+- Match the model and the reasoning-effort level to the real difficulty of each operation (see [Execution](#execution)): simple, mechanical operations do not justify the most expensive model or the highest effort.
+- Group tool calls that are independent of one another into a single message, instead of issuing them one at a time. The sole exception is `git`: every `git` command runs alone, never grouped or chained with another command (see [Git command execution](#git-command-execution)).
+- Respect the limit of two concurrent evaluations or audits (see [Execution](#execution)): excessive parallelism multiplies cost without accelerating the result.
+
+### Safeguard
+
+Every application above is subject to the equivalence test in [Principle of action](#principle-of-action). They are shortcuts on the **route**, never cuts in the **result**.
+
+If, while executing, you find that the cheap route you chose is not producing the same result — it returned insufficient information, left part of the scope out, or raised doubt — **abandon it immediately and redo the operation by the complete route**. Tokens already spent are never a justification for accepting an inferior result.
 
 ---
 
@@ -175,11 +267,34 @@ Create whatever node and edge types best serve the project and your work; use th
 
 ---
 
+## Component and Architecture Excellence
+
+### Exemplary components
+
+Every component of the project must be an **exemplary** piece of engineering for the purpose it serves. "It works" is not the standard; being an exemplary implementation of its kind is.
+
+- **Explicit responsibility.** Every component states its responsibility clearly and explicitly, so that its boundaries of action are unambiguous. What it owns, what it does not own, and where its responsibility ends must be written down — in its package documentation and in the [Knowledge Graph](#knowledge-graph) — never left to be inferred from the code.
+- **Boundaries are enforced, not merely described.** A component does not reach across its boundary: it collaborates through the interfaces its neighbours expose. A responsibility that has leaked across a boundary is a defect, to be fixed like any other.
+- **Designed, implemented, and evaluated against prior art.** To **design**, **implement**, and **evaluate** each component, research which open-source projects implement that functionality in an exemplary way, and take those implementations as a source of inspiration by following [The inspiration protocol](#the-inspiration-protocol). More than one reference project may — and normally should — inform the same component.
+
+### Architecture
+
+The project's overall architecture, and the specific architecture of each of its components, must rest on the best practices that best fit the project's purpose — not on practice that is merely conventional, familiar, or fashionable.
+
+- **Fit for purpose first.** A pattern is adopted because it serves GoGraph's purpose: a small, ergonomic API; fast search; ACID durability; and reliability under high load and high concurrency. A pattern that does not serve those ends is rejected, however well regarded it is elsewhere.
+- **Informed by prior art.** Seek inspiration in other open-source projects so that the intended results are reached deliberately and assertively, following [The inspiration protocol](#the-inspiration-protocol) and the references in [Reference Projects (Open-Source Prior Art)](#reference-projects-open-source-prior-art).
+- **Ranked by the decision framework.** Architectural choices are ranked by [correct → secure → fast](#decision-framework--correct--secure--fast) and, when they bear on performance, held to [Performance-First Engineering](#performance-first-engineering).
+- **Recorded.** The architecture in force is documented in [Intended Architecture](#intended-architecture) and modelled in the [Knowledge Graph](#knowledge-graph). Changing it is a change of architecture, and therefore requires the user's prior agreement under [Decision autonomy](#decision-autonomy).
+
+---
+
 ## Reference Projects (Open-Source Prior Art)
 
 GoGraph is not built in a vacuum. For every feature the module implements, **use as reference and inspiration every open-source project that implements or solves the same — or a similar — problem**. Those projects are the empirical record of what the open-source community has learned about the technical and architectural problems GoGraph faces, and they must inform its decisions.
 
 **The source code is the ultimate source of truth.** Documentation, blog posts, and papers state intent; the code is what actually runs. Whenever it matters — and it usually does — read the reference project's source to verify how the approach is really implemented, what the real data structures and code paths are, and what the trade-offs actually cost. Then assess what adopting that approach would mean for GoGraph.
+
+**Use more than one reference per component.** Wherever it is possible, study at least two projects that solve the same problem, so that the strengths **and** the weaknesses of each approach can be compared rather than inherited. One reference tells you what a single team chose; two or three tell you which parts of that choice are essential and which are incidental to their context.
 
 ### Primary references
 
@@ -210,9 +325,47 @@ Reach for whatever fits the problem at hand: for example RocksDB, LevelDB, or SQ
 - **It serves four quality axes.** Every insight harvested must make GoGraph a more exemplary implementation in **Performance**, **Efficiency**, **Correctness**, and **Security**. An insight that serves none of these is noise.
 - **It makes decisions objective and assertive.** A design choice backed by how two or three mature engines actually solved the same problem is a settled question; an unbacked preference is not. Use prior art to close decisions, not to widen them.
 - **It is evidence, not authority.** The [Decision framework — correct → secure → fast](#decision-framework--correct--secure--fast) still ranks the trade-offs, and [Measure to decide](#measure-to-decide) still requires that any claimed win be measured **in GoGraph itself**: a technique that is fast in C++ or on the JVM may lose in Go. Benchmark before adopting, and record the result.
-- **Extract the insight, not the code.** Take the structural idea — the algorithm, the memory layout, the ordering of operations — and re-implement it idiomatically in Go. Never copy source from a reference project into GoGraph: several are copyleft or source-available (Neo4j is GPLv3, MariaDB GPLv2, Memgraph BSL 1.1), and none of their licences is GoGraph's to redistribute.
+- **Extract the insight, not the code.** Take the structural idea — the algorithm, the memory layout, the ordering of operations — and re-implement it idiomatically in Go. Copying source from a reference project into GoGraph is forbidden; see [Never copy — reimplement](#never-copy--reimplement).
 - **Cite what you consulted.** When a reference project influences a non-obvious decision, record which project, which version or commit, and which file or component you read — in the task description, a code comment, or the audit document — exactly as [Sub-Agents (Specialists)](#sub-agents-specialists) requires of specialist findings.
 - **Store what outlives the task.** Comparisons and insights of lasting value belong in the [Knowledge Graph](#knowledge-graph), so the project's understanding of the prior art compounds instead of being re-derived each cycle.
+
+### The inspiration protocol
+
+Before designing or implementing any component, **state clearly and objectively what that component is for**. Only then — and always as a function of that objective, the macro objective first — study how the leading or most successful open-source projects solved the same problem, and use that knowledge to take better-informed decisions **for this project**.
+
+Reference projects are treated as **good practice to be analysed**, never as a solution to be adopted automatically. What is extracted from them is **understanding** — the structure, the algorithm, the reason for the decision, the trade-offs accepted — never code to transcribe.
+
+Follow this sequence for each component:
+
+1. **Define the component's macro objective.** What problem it solves, what role it plays in the project, what guarantees it must offer, and under which constraints (correctness, security, performance, durability, concurrency). Written explicitly and without ambiguity.
+2. **Define the micro objectives.** The concrete features and behaviours: inputs and outputs, invariants, edge cases, quality and performance requirements, and acceptance criteria (see [Planning](#planning)).
+3. **Record the objectives and the decisions in the Knowledge Graph** (see [Knowledge Graph](#knowledge-graph)), so that they remain queryable and traceable.
+4. **Identify the reference projects.** Select the open-source projects that solve the same class of problem with recognised success. Selection criteria: maturity and real adoption, active maintenance, demonstrable engineering quality, documented design, and production use — **not** popularity on its own. The identification must be verified, never presumed (see [Never guess — evidence over assumption](#never-guess--evidence-over-assumption)).
+5. **Study the approach in primary sources.** Source code at a concrete version or tag, official documentation, design documents, ADRs, papers, and issue or pull-request discussions — in preference to secondary sources. The aim is to understand **why** the decision was taken, not merely what it was. To study a repository, apply [Token Economy](#token-economy): clone it locally instead of issuing many remote requests.
+6. **Analyse the favourable AND the unfavourable aspects.** For each approach, enumerate explicitly:
+   - what serves this component's objective, and why;
+   - what does **not** serve it, and what problems it would cause here;
+   - which trade-offs the approach accepts;
+   - what the reference project's premises and context were (scale, language, concurrency model, durability requirements, runtime environment), and **whether those premises hold in this project**;
+   - what the reference project **abandoned** over time, and why — negative evidence is frequently the most valuable of all.
+7. **Decide for this project.** The decision follows from the objectives defined in steps 1 and 2 and from the [Decision framework — correct → secure → fast](#decision-framework--correct--secure--fast). It is expected to be an **adaptation or a synthesis**: it may combine ideas from several references, or reject them all, provided it is reasoned.
+8. **Document the decision.** Record the decision taken, the alternatives considered, the sources consulted, and the reasoning, in a form that can be audited and revisited.
+9. **Validate empirically.** When the approach has a measurable impact, measure it **in this project** rather than trusting the reference's claims (see [Measure to decide](#measure-to-decide)).
+
+### Never copy — reimplement
+
+- **Copying code directly from open-source projects into GoGraph is forbidden**: whole files, blocks of code, or line-by-line transcription or translation into another language.
+- The implementation must be **original**, idiomatic for Go and for this project's conventions, and designed for the objectives defined in [The inspiration protocol](#the-inspiration-protocol).
+- **Copying a decision without understanding it is equally forbidden.** Adopting an approach merely because a reference project uses it is a form of guessing (see [Never guess — evidence over assumption](#never-guess--evidence-over-assumption)). If you cannot explain why it suits this component, do not adopt it.
+- **Licences and legal obligations.** Inspiration does not dispense with respecting the source project's licence. Several primary references are copyleft or source-available — Neo4j is GPLv3, MariaDB GPLv2, Memgraph BSL 1.1 — and none of their licences is GoGraph's to redistribute. Never incorporate third-party code without checking the licence **and without the user's explicit authorisation**. If you conclude that reusing code or adopting a dependency is the best route, **ask the user first** (see [Decision autonomy](#decision-autonomy)), presenting the options and identifying the licence of each.
+- **Attribution.** Record in the [Knowledge Graph](#knowledge-graph) and in the documentation which source inspired each decision — for traceability and credit, never as a way of legitimising a copy.
+
+### Prior-art safeguards
+
+- **"That is how project X does it" is never, on its own, a justification.** The justification is always this component's objective. Popularity is not fitness.
+- **A different context invalidates conclusions.** Compare the premises before comparing the solutions: an approach that is excellent in its own context may be unfit here.
+- **Approaches evolve.** Study a concrete version, and verify whether the approach is still in force in the reference project.
+- When a reference approach conflicts with this project's specification or objectives, **ask the user** how to proceed (see [Decision autonomy](#decision-autonomy)), presenting the options.
 
 ---
 
