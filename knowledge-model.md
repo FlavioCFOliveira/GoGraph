@@ -1879,3 +1879,72 @@ its commit window (`commitDepth`, `dirtyShards`, and each shard's `building`
 builder) is single-writer by contract. That is rmp #2301's remaining half and is
 tabulated in `docs/design-write-conflict-detection.md` so the gap is visible
 rather than implied.
+
+Incrementally synced at commit `ca4e1538` (2026-08-03, task #2301, sprint 334 —
+**MVCC A4: per-transaction commit state**, closing audit findings **E3, E4 and
+E16**): +14 nodes (`Commit` `ca4e1538`; `Package` `graph/mvcc` — it had no node at
+all before, which is itself a fidelity defect this sync repaired; `Spec`
+`design-per-transaction-write-state.md`; six Components — `mvcc.TxState`,
+`mvcc.WriteStamp.Publish`, `Graph.writeTx`, `Graph.acquireWriteCtx`,
+`Graph.releaseWriteCtx`, `Graph.writerSnapshot`; seven Tests —
+`TestWriteStamp_TwoTransactionsDoNotShareState`,
+`TestWriteStamp_VersionCountIsPerTransaction`,
+`TestWriteStamp_RetractedWindowRefusesLateVersions`,
+`TestTxState_RefusesReuseWhileARecordIsStranded`,
+`TestWriteStamp_ConcurrentTransactionsUnderRace`,
+`TestWriteCtx_RecycledStateIsNeverSharedAcrossTransactions`,
+`TestWriteCtx_ConcurrentTransactionsKeepTheirOwnRecord`), +26 edges (`Feature
+Per-transaction write state -[SPECIFIED_IN]->` the new Spec and `-[FIXES]->` the
+Commit; `-[IMPLEMENTS]->` each of the six new Components; `-[VERIFIES]->` each of
+the seven new Tests; `Commit -[TOUCHES]->` the Spec, the six Components, and the
+packages `graph/mvcc`, `graph/lpg`, `graph/adjlist`). Provenance stamped on every
+node and edge touched.
+
+WHAT E3 ACTUALLY WAS, recorded because the task's own premise was wrong: the
+commit record, the version count and the pending transaction id were fields on
+`mvcc.WriteStamp`, one set per graph, so a second `Begin` destroyed the first
+transaction's window. **It is not a data race** — every field was already atomic,
+so `-race` is silent on it — it is **silent data loss**. Measured against the
+pre-change build: writer A's record was never returned by anything (A got `nil`
+and 0 versions) while B was charged A's version too (2 versions). A's versions
+keep transaction id `9223372036854775809` for the life of the process: invisible
+to every reader for ever, and unreclaimable, because every reclaimer truncates on
+`stamp <= watermark`, which an in-flight id can never satisfy, and nothing
+reports it. The acceptance instrument is therefore an assertion on the retracted
+record and count, not the race detector.
+
+THE SHAPE: the transaction owns the state (`mvcc.TxState`, embedded by value in
+`writeCtx`), and the graph owns only a SLOT naming the transaction currently
+writing — replaced, never mutated. The slot survives because a write that carries
+no transaction must still resolve one: the public Go-API mutators are
+per-operation atomic rather than transactional, and `adjlist` reaches the shared
+record through `mvcc.WriteStamp` without being able to see lpg's transaction
+type. A write that DOES carry its transaction never consults the slot. Prior art
+read in source: Memgraph `src/storage/v2/` threads `Transaction *transaction`
+into every accessor; PostgreSQL `src/backend/access/transam/xact.c` keeps the
+top-level transaction state in a `static TransactionStateData` reused by every
+transaction a backend runs.
+
+THE HAZARD RECYCLING INTRODUCES, and the sentinel that closes it: a version
+arriving after its transaction was retracted must NOT be stamped with that
+transaction's record, because the record already carries a commit timestamp and
+the version would become visible EARLIER than it happened — a reader whose
+snapshot predates the write would observe it. `Retract` stores `nil`, so `Ensure`
+answers "no window" and the caller falls back to a timestamp of its own.
+Later-than-it-happened is safe; earlier is not. The mirror case, a record
+stranded in a finished state, is closed by `Arm` refusing to recycle it.
+
+COST, measured, `benchstat` n=6: `BenchmarkBarrier_ApplyAtomically`
+19.11 ns → 26.99 ns, **+41.27 % (p=0.002)** on an EMPTY bracket, allocations
+unchanged at **0/op**; one Cypher write end to end 3.090 µs → 3.111 µs, **not
+statistically significant (p=0.151, n=5)**. `sync.Pool` was tried FIRST and
+rejected on measurement (31.3 ns, +64 %, all `procPin` plus the per-P `poolLocal`
+walk); one atomic slot does the same work in a `Swap` and a `Store`, and degrades
+to allocation — never to sharing — when rmp #2304 removes the barrier.
+
+COVERAGE IS NOW 8/8 for per-transaction state. The adjacency gap recorded at
+`d8847ce7` is closed: `commitDepth` and `dirtyShards` were replaced by a
+per-shard `buildingOwner` token at `e3a0ea1e`, so a builder is reused only by the
+transaction that created it. Conflict DETECTION still covers seven stores rather
+than eight, and that remains tabulated in
+`docs/design-write-conflict-detection.md`.
