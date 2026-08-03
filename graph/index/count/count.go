@@ -238,7 +238,25 @@ func (s *Store) add(sh *shard, get func(*shard) *atomic.Int64, put func(*shard, 
 		cell = new(atomic.Int64)
 		put(sh, cell)
 	}
-	if cell.Add(delta) <= 0 {
+	// Deleted at EXACTLY zero, not at zero-or-below (rmp #2303, MVCC B1).
+	//
+	// `<= 0` clamped: a cell driven negative was deleted, the negative value was
+	// discarded, and the next increment recreated the cell from zero — so the
+	// decrement was permanently lost. That made the aggregate ORDER-SENSITIVE, and
+	// therefore dependent on writer exclusion: applying -1 then +1 to an empty
+	// cell read 1, where +1 then -1 read 0. Under the visibility barrier the base
+	// was always correct so no partial sum could go negative and the clamp was
+	// unreachable; the moment writers commit concurrently, one transaction's
+	// decrements can land before another's increments and the clamp silently eats
+	// them. TestCountStore_ConcurrentDeltasReachZeroFromEitherOrder fails against
+	// the `<= 0` form.
+	//
+	// Retaining a negative cell is what makes addition commute here, which is this
+	// store's whole ordering basis. It costs nothing in the steady state: a
+	// negative cell is transient under a correct workload — the matching increment
+	// takes it to exactly zero, where it is deleted — so the bounded-growth
+	// property the delete exists for is unchanged.
+	if cell.Add(delta) == 0 {
 		del(sh)
 	}
 	sh.mu.Unlock()

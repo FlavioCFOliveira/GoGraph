@@ -37,6 +37,30 @@ func (b *CountBuffer) MarkDirty(m count.DirtyMark) { b.dirty = append(b.dirty, m
 // fsync succeeds) so the count update becomes visible atomically with the graph
 // writes it describes — the durable-then-visible seam the secondary-index
 // fan-out uses.
+//
+// # What that requirement is, and what it is NOT (rmp #2303, MVCC B1)
+//
+// It is a VISIBILITY requirement, not an ORDERING one, and the distinction is what
+// lets rmp #2304 remove the barrier without redesigning this. A reader must not
+// observe a count that disagrees with the graph it can see; that is atomicity
+// between two structures and it needs whatever mechanism replaces the barrier to
+// publish both together.
+//
+// It does NOT rest on the barrier imposing a total order across committers. The
+// count store's own ordering basis is COMMUTATIVITY: [count.Store.Apply] is an
+// additive delta, and [count.Store.MarkDirty] is a monotone set insert, so any
+// interleaving of two transactions' buffers reaches the same state a serial
+// schedule would.
+//
+// That was not free, and it was not true when the claim was first made: Apply
+// deleted a cell at zero-or-below, which discarded a transiently-negative cell and
+// lost the decrement that produced it, making the aggregate order-sensitive. It
+// now deletes at exactly zero. See graph/index/count/commutative_test.go for the
+// measurement and the differential.
+//
+// The intra-transaction order — every delta, THEN every dirty marking — is a
+// property of this buffer and survives concurrency unchanged, because one buffer
+// belongs to one transaction.
 func (b *CountBuffer) Commit(cs *count.Store) {
 	if cs != nil {
 		for _, d := range b.deltas {
