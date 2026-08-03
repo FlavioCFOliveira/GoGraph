@@ -2105,3 +2105,37 @@ test's own workload and skips instead of returning a verdict the machine cannot
 support. It cannot mask a real instrument defect, which would appear as a LOW
 serialisation ratio while parallelism is HIGH — the case where the assertion still
 runs.
+
+Incrementally synced at commit `eeb7704e` (2026-08-03, task #2302, sprint 334 —
+**the exclusive-build window is now an enforced contract**, audit finding **E21**):
++7 nodes (`Commit`; two Components — `AdjList.BeginExclusiveBuild`,
+`AdjList.EndExclusiveBuild`; four Tests in
+`graph/adjlist/exclusive_build_test.go`), +12 edges.
+
+`AdjList.BeginCommit` and `BeginExclusiveBuild` mutate the SAME two plain fields,
+`bulkOwner` and `bulkDepth`. They differ entirely in what licenses them: the
+serving write path holds the graph's exclusive visibility barrier for the whole
+window, while `store/recovery` and `store/bulkimport` take **no barrier at all**
+and are licensed only by "the graph is not reachable by anyone yet". Both used to
+call `BeginCommit`, so that second licence lived in a comment — and the audit's
+point is that it must not be silently INHERITED once writers overlap at serving
+time. Two distinct entry points now, plus an `atomic.Bool` that makes overlapping
+them PANIC in either direction; every guard is pinned by a test that fails by
+construction if the guard is removed.
+
+A HAZARD FOR rmp #2304 THAT THIS SURFACED, recorded because the failure would be
+silent: `AdjList.builderOwner` prefers `bulkOwner` **over** the writing
+transaction's own record — deliberately, so a window's token cannot change
+mid-window (the record is allocated lazily by the first version, and reading it
+first re-clones the builder on every write; a test caught that on rmp #2301's
+first draft). So the SERVING path's window currently **shadows per-transaction
+ownership**: with `visMu` gone, two concurrent writers would both present the same
+`bulkOwner` and reuse each other's private, UNPUBLISHED shard builders — one
+mutating the other's slot array in place. #2304 must RETIRE the serving path's
+window in favour of a token that travels with the write (`writeCtx.txID` already
+exists), not merely delete `visMu` around it.
+
+Also recorded: criterion 6 of #2302 needs no new instrument.
+`BenchmarkWriteScaling_StoreAPI` already reports `commits/fsync`, and the store
+path releases the semaphore BEFORE `SyncGroup`, so coalescing is reachable there —
+the flat 268/s the audit measured is the *Cypher* path, serialised by `visMu`.
