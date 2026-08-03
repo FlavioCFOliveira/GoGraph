@@ -119,6 +119,22 @@ type Result[N comparable, W any] struct {
 	// where tombstones are reconstructed by replaying OpRemoveNode instead.
 	SnapshotTombstones int
 	WALOps             int
+	// MaxTxnSeq is the highest per-transaction sequence number observed in any
+	// v3 frame replayed from the WAL, or 0 when the WAL held no v3 frame.
+	//
+	// It exists so a store reopened on this directory can RESUME its sequence
+	// instead of restarting at 0 (rmp #2302, audit finding E5). txnSeq was
+	// decoded here and never written back, so a reopened store minted 1 again
+	// and the same sequence value could appear twice in one WAL — which
+	// recovery's TxnSeq-suffix atomicity filter tolerated only because frame
+	// contiguity plus equality happened to disambiguate it.
+	//
+	// It is DERIVED, not persisted, which is the same decision rmp #2309 takes
+	// for the MVCC clock: the WAL already carries the sequence in every frame, so
+	// a separate durable counter would be a second source of truth that can
+	// disagree with the log after a torn tail. Feed it to
+	// [txn.Options.ResumeTxnSeq].
+	MaxTxnSeq uint64
 	// WALTailOffset is the byte offset of the last durable frame boundary
 	// in the WAL. It equals the WAL file size when every frame was
 	// consumed cleanly, and the boundary of the last fully-consumed frame
@@ -1155,6 +1171,7 @@ func openCodec[N comparable, W any](
 		res.WALOps = walRes.WALOps
 		res.TailErr = walRes.TailErr
 		res.WALTailOffset = walRes.WALTailOffset
+		res.MaxTxnSeq = walRes.MaxTxnSeq
 		if walErr != nil {
 			// The only non-nil walErr is a ctx cancellation surfaced mid-replay;
 			// it is returned with the partially-recovered Result, exactly as the
@@ -1277,6 +1294,9 @@ type ReplayResult struct {
 	Indexes       []IndexRecord
 	WALOps        int
 	WALTailOffset int64
+	// MaxTxnSeq is the highest per-transaction sequence any replayed v3 frame
+	// carried, or 0 when there was none. See [Result.MaxTxnSeq], which it feeds.
+	MaxTxnSeq uint64
 }
 
 // IsClean reports whether replay stopped at a state from which it is safe to
@@ -1389,6 +1409,15 @@ func replayWALInto[N comparable, W any](
 			break
 		}
 		if op.Version == txn.OpRecordV3 {
+			// Track the highest sequence any v3 frame carries, INCLUDING frames
+			// this replay goes on to discard as orphaned and frames of an
+			// incomplete tail transaction. A sequence that was minted is spent:
+			// re-minting it after a reopen would put two different transactions
+			// under one number in one WAL, which is exactly the ambiguity
+			// [Result.MaxTxnSeq] exists to prevent. See rmp #2302.
+			if op.TxnSeq > res.MaxTxnSeq {
+				res.MaxTxnSeq = op.TxnSeq
+			}
 			if op.Kind != txn.OpCommit {
 				// Bound the in-flight transaction buffer: stop the instant
 				// the buffered op count would exceed the cap, BEFORE

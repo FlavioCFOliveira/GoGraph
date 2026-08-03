@@ -136,10 +136,50 @@ rest are separable and are recorded here rather than implied.
 | 2 | that test verified to FAIL against the contiguity assumption | **DONE** — see §4 |
 | 3 | the orphan-discard counter is zero under legitimate concurrent commits | **DONE** |
 | 7 | the chosen scheme cites project, file and symbol | **DONE** — §2 |
-| 4 | `txnSeq` durable and monotone across close/reopen | **NOT YET** |
+| 4 | `txnSeq` durable and monotone across close/reopen | **DONE** — see §5 |
 | 5 | crash-injection battery with concurrent writers | **NOT YET** |
 | 6 | benchmark showing fsyncs/commit falls as concurrency rises | **NOT YET** |
 | E21 | recovery and bulkimport open the adjacency commit window with no barrier, licensed only by a comment | **NOT YET** |
+
+---
+
+## 5. The transaction sequence across a reopen (criterion 4)
+
+`txnSeq` was decoded by recovery and **never written back**, so a store reopened on a non-empty WAL
+restarted at 0 and minted 1 again. One log could then hold two different transactions under one
+sequence number — and that number is exactly what recovery's suffix filter uses to tell one
+transaction's frames from another's. It tolerated the collision only because frame contiguity plus
+equality happened to disambiguate it: an accident, not a guarantee, and one that stops holding the
+moment a reopen follows a torn tail.
+
+**Derived, not persisted.** `recovery.Result.MaxTxnSeq` reports the highest sequence any replayed v3
+frame carried; `txn.Options.ResumeTxnSeq` seeds the store from it. The WAL already records the
+sequence in every frame, so a separate durable counter would be a second source of truth that can
+disagree with the log after a torn tail — the same reasoning rmp #2309 applies to the MVCC clock.
+
+`MaxTxnSeq` counts frames the replay goes on to **discard**, and frames of an **incomplete tail
+transaction**, not just committed ones. A sequence that was minted is spent: re-minting it would put
+an abandoned transaction and a live one under one number, which is precisely the ambiguity being
+closed. Pinned by `TestRecovery_MaxTxnSeqCountsAnIncompleteTail`.
+
+Measured:
+
+| arm | commit-marker sequences |
+|---|---|
+| seeded from `MaxTxnSeq` | `[1 2 3 4]` |
+| unseeded (the pre-change behaviour) | `[1 2 1 2]` |
+
+### A deadlock the partial fix introduced
+
+Seeding the minting counter **alone** wedges the store. `waitApplyTurn` parks until
+`appliedSeq == seq-1`, and the predecessor of a resumed store's first transaction was applied by the
+*previous* store instance, which no longer exists to advance anything. With only `txnSeq` seeded,
+`TestResumeTxnSeq_IsMonotoneAcrossReopen` **hung**: the first commit after the resume waited forever
+for a sequence nobody would ever complete.
+
+Both watermarks are seeded now. This is worth recording rather than quietly fixing, because the
+obvious half of the change is the half that hangs — and it would have hung in production on the
+first write after every restart.
 
 ---
 

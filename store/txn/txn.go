@@ -382,6 +382,29 @@ type Options[N comparable, W any] struct {
 	Codec Codec[N]
 	// WeightCodec serialises edge weights. Must not be nil.
 	WeightCodec WeightCodec[W]
+	// ResumeTxnSeq is the transaction sequence this store continues FROM: the
+	// first transaction it commits is assigned ResumeTxnSeq+1.
+	//
+	// # Why it is needed (rmp #2302, audit finding E5)
+	//
+	// The sequence groups a transaction's frames so recovery can apply them
+	// atomically, and recovery decoded it while nothing ever wrote it back. A
+	// store reopened on a non-empty WAL therefore restarted at 0 and minted 1
+	// again, so ONE WAL could hold two different transactions under one sequence
+	// number. Recovery's TxnSeq-suffix filter tolerated that only because frame
+	// contiguity plus equality happened to disambiguate it — an accident, not a
+	// guarantee, and one that stops holding the moment a reopen follows a torn
+	// tail.
+	//
+	// # Why it is DERIVED and not persisted
+	//
+	// Set it from [store/recovery.Result.MaxTxnSeq], which is the highest
+	// sequence any replayed v3 frame carried. The WAL already records the
+	// sequence in every frame, so a separate durable counter would be a second
+	// source of truth that can disagree with the log — the same reasoning
+	// rmp #2309 applies to the MVCC clock. Zero, the value every fresh store
+	// carries, starts at 1 as before.
+	ResumeTxnSeq uint64
 }
 
 // Store bundles an [lpg.Graph] with a [wal.Writer] and the single-
@@ -620,6 +643,19 @@ func NewStoreWithOptionsCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wa
 		wcodec:    opts.WeightCodec,
 		maxTxnOps: resolveMaxTxnOps(maxTxnOps),
 	}
+	// Resume rather than restart, so a sequence already spent in this WAL is
+	// never minted a second time. See [Options.ResumeTxnSeq].
+	//
+	// The apply gate has to be seeded TOO, and the reason is a deadlock this test
+	// found rather than a tidiness argument: waitApplyTurn parks until
+	// appliedSeq == seq-1, and the predecessor of a resumed store's FIRST
+	// transaction was applied by the previous store instance, which no longer
+	// exists to advance anything. Left at zero, the first commit after a resume
+	// waits for a sequence nobody will ever complete. Seeding both makes the
+	// resumed store's first transaction its own chain head, exactly as sequence 1
+	// is for a fresh store.
+	s.txnSeq.Store(opts.ResumeTxnSeq)
+	s.appliedSeq = opts.ResumeTxnSeq
 	s.applyWaiters = make(map[uint64]chan struct{}, 64)
 	s.inflightCond = sync.NewCond(&s.inflightMu)
 	return s
