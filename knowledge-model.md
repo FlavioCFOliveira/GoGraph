@@ -1031,23 +1031,40 @@ retire the exclusive visibility barrier: PREREQUISITES LANDED, BARRIER NOT REMOV
 `TestOverlap_WriterViewOfSeesOwnWriteNotTheOthers`,
 `TestWALWriteScalingGate`); +1 `CONTAINS` (Sprint 334 → Commit).
 
-NEW LABEL `Finding`, with edge type `DISCOVERED (Commit)->(Finding)`. A `Finding` records
-a defect the work MEASURED but did not fix, so the evidence stays queryable instead of
-living only in a commit message. Properties: `id` (kebab-case identity), `title`,
-`severity`, `property` (the ACID or compliance property at stake), `mechanism`,
-`evidence`, `task` (the rmp task that owns the fix), plus `blocks`, `gain` and `latent`
-where they apply. Two were created here, both CRITICAL:
-`mvcc-b2-ambient-slot-splits-transactions` (ACID Isolation — removing the barrier splits
-one statement across two commit records, because every Cypher mutator reaches `lpg`
-through the public API with a nil `writeCtx` and resolves the shared commit record from
-the graph-wide ambient stamp slot; measured 105 942 torn reads in
-`examples/27_concurrent_txn`, 147 overwrites of a still-armed slot, 0 untransacted-branch
-hits; owned by rmp #2320) and `unique-constraint-check-then-act` (ACID Consistency —
-`exec.ConstraintRegistry.CheckSetProperty` reads under `RLock` while `RecordPropertySet`
-inserts under `Lock` later, so two concurrent writers both pass; 14 of 15 `-race` runs of
-8 concurrent `MERGE` under a `UNIQUE` constraint produced 2 or 4 nodes; owned by rmp
-#2321). Both are LATENT on the shipped engine, which still serialises whole write
-statements on the exclusive barrier.
+CORRECTION to this entry as first written: `Finding` is **not** a new label — it already
+existed, keyed on `name` (e.g. `sec-2026-07-02-r2-snapshot-csr-size`) with `severity`,
+`status`, `title`, `task`, `sprint`, `commit`, `date`, `surface` and `rootclass`. The two
+nodes created here were initially keyed on an `id` property that no other Finding uses;
+they have been reconciled to the existing convention and now carry `name` as well. What IS
+new is the edge type `DISCOVERED (Commit)->(Finding)`, and three optional properties for a
+finding that was MEASURED but not fixed: `mechanism` (why it happens), `evidence` (the
+measurement) and `property` (the ACID or compliance property at stake), plus `fixedIn`,
+`fixNote` and `verified` once it is closed. The point of them is that the evidence stays
+queryable instead of living only in a commit message.
+
+Two were created, both CRITICAL:
+
+- `mvcc-2026-08-03-b2-ambient-slot-splits-transactions` — status **OPEN**, ACID Isolation,
+  owned by rmp #2320. Removing the write barrier splits one statement across two commit
+  records, because every Cypher mutator reaches `lpg` through the public API with a nil
+  `writeCtx` and resolves the shared commit record from the graph-wide ambient stamp slot.
+  Measured: 105 942 torn reads in `examples/27_concurrent_txn`, 147 overwrites of a
+  still-armed slot, 0 untransacted-branch hits (which rules out per-delta timestamps and
+  localises it to another live transaction's record).
+- `mvcc-2026-08-03-unique-constraint-check-then-act` — status **FIXED** in `82c92b4b`, ACID
+  Consistency, owned by rmp #2321. `ConstraintRegistry.CheckSetProperty` read under
+  `RLock` while `RecordPropertySet` inserted under `Lock` later, so two concurrent writers
+  both passed; 14 of 15 `-race` runs of 8 concurrent `MERGE` under a `UNIQUE` constraint
+  produced 2 or 4 nodes. Fixed by `ConstraintRegistry.ReserveSetProperty` (atomic
+  test-and-reserve, PostgreSQL's `_bt_doinsert` discipline) together with removing the
+  rollback's whole-graph value-set rebuild, which destroyed CONCURRENT writers'
+  reservations because a rebuild cannot see a commit that is not yet durable. Each
+  statement now journals its own registry changes as inverses on the transaction undo log
+  (`cypher/exec/constraint_journal.go`), which also closes the remaining half of audit
+  finding E10. Verified: 20 of 20 `-race` runs converge on one node with all eight
+  statements succeeding. +1 `Method` `exec.ConstraintRegistry.ReserveSetProperty`, +5
+  `Test` in `cypher/exec/constraints_reserve_test.go`; `reseedConstraintsInsideBarrier` was
+  DELETED.
 
 The barrier itself is UNCHANGED at this commit: `cypher/api.go`'s autocommit path uses
 `Graph.ApplyAtomicallyTx` and `store/txn` `Tx.Commit` uses `Graph.ApplyAtomically`, both
