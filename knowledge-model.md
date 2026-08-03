@@ -2079,3 +2079,29 @@ longer exists to advance anything. `TestResumeTxnSeq_IsMonotoneAcrossReopen` HUN
 until `appliedSeq` was seeded too — and it would have hung in production on the
 first write after every restart. Any future change touching one watermark must
 touch both.
+
+Incrementally synced at commit `263dad86` (2026-08-03, sprint 334 — **the
+write-scaling instrument gate no longer reports a false NO-GO under load**):
++2 nodes (`Commit` `263dad86`; `Component` `requireAvailableParallelism`),
++3 edges.
+
+A LESSON ABOUT THE GATES THEMSELVES, recorded because it undermines every
+correctness claim that rests on them. `make ci` went red on
+`TestWriteScalingInstrument_SeesConcurrency`, and the failure was the MACHINE:
+that check drives a pure CPU-spin control with no WAL, no store and no graph in
+it, so nothing in the sprint's changes can reach it. The two instruments are
+load-sensitive in OPPOSITE directions despite `gate_test.go` calling one
+load-immune — `measureScaling` (1 vs 8 writers) survives load and can even
+INFLATE, while `measureSerialisationRatio` (8 free vs 8 under one mutex)
+COMPRESSES, because under saturation the free arm collapses toward the serialised
+one. Measured, same code and build: at load-average 18 inside
+`go test -race ./...`, 8 free writers reached 50380/s against 1 writer's 41384/s
+(**1.2× available parallelism**) and the ratio was **2.452× — a FAIL** against the
+3.00× target; on a quiet machine, also under `-race`, 288181/s against 47249/s
+(**6.1×**) gave **6.900×**. `requireCores` already skipped when the cores do not
+EXIST; it cannot see whether they are FREE, and `make ci` runs this package inside
+a parallel whole-module race run. `requireAvailableParallelism` probes with the
+test's own workload and skips instead of returning a verdict the machine cannot
+support. It cannot mask a real instrument defect, which would appear as a LOW
+serialisation ratio while parallelism is HIGH — the case where the assertion still
+runs.
