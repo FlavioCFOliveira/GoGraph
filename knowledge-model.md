@@ -1021,6 +1021,47 @@ tagged crash-injection battery, `golangci-lint` (0 issues) and
 
 ---
 
+Incrementally synced at commit `7aa302f8` (2026-08-03, task #2304, sprint 334 — MVCC B2,
+retire the exclusive visibility barrier: PREREQUISITES LANDED, BARRIER NOT REMOVED):
++1 `Commit` (`7aa302f8`); +5 `Method` on `lpg` `Graph` (`ApplyVersioned`,
+`ApplyAtomicallyTx`, `ApplyInsideLockedTx`, `WriterViewOf`, `AmbientWriteTx`);
++1 `Type` `lpg.WriteTx`; +1 `Method` `mvcc.WriteStamp.EndFor`; +4 `Test`
+(`TestOverlap_DeferredIndexRemovalChargedToItsOwnTransaction`,
+`TestOverlap_TransactionsDoNotStealEachOthersState`,
+`TestOverlap_WriterViewOfSeesOwnWriteNotTheOthers`,
+`TestWALWriteScalingGate`); +1 `CONTAINS` (Sprint 334 → Commit).
+
+NEW LABEL `Finding`, with edge type `DISCOVERED (Commit)->(Finding)`. A `Finding` records
+a defect the work MEASURED but did not fix, so the evidence stays queryable instead of
+living only in a commit message. Properties: `id` (kebab-case identity), `title`,
+`severity`, `property` (the ACID or compliance property at stake), `mechanism`,
+`evidence`, `task` (the rmp task that owns the fix), plus `blocks`, `gain` and `latent`
+where they apply. Two were created here, both CRITICAL:
+`mvcc-b2-ambient-slot-splits-transactions` (ACID Isolation — removing the barrier splits
+one statement across two commit records, because every Cypher mutator reaches `lpg`
+through the public API with a nil `writeCtx` and resolves the shared commit record from
+the graph-wide ambient stamp slot; measured 105 942 torn reads in
+`examples/27_concurrent_txn`, 147 overwrites of a still-armed slot, 0 untransacted-branch
+hits; owned by rmp #2320) and `unique-constraint-check-then-act` (ACID Consistency —
+`exec.ConstraintRegistry.CheckSetProperty` reads under `RLock` while `RecordPropertySet`
+inserts under `Lock` later, so two concurrent writers both pass; 14 of 15 `-race` runs of
+8 concurrent `MERGE` under a `UNIQUE` constraint produced 2 or 4 nodes; owned by rmp
+#2321). Both are LATENT on the shipped engine, which still serialises whole write
+statements on the exclusive barrier.
+
+The barrier itself is UNCHANGED at this commit: `cypher/api.go`'s autocommit path uses
+`Graph.ApplyAtomicallyTx` and `store/txn` `Tx.Commit` uses `Graph.ApplyAtomically`, both
+exclusive. `Graph.ApplyVersioned` (the shared bracket) exists, is tested, and is what
+rmp #2320 will switch them to. `Graph.View` remains a SHARED hold, which is sound only
+because writers hold the same barrier exclusively — see its doc comment for the choice
+rmp #2320 forces. Also in this commit: audit finding E10 half-resolved
+(`reseedConstraintsInsideBarrier` reads an MVCC snapshot, so a rollback cannot import a
+concurrent writer's uncommitted value into a UNIQUE value-set; the O(N) walk is
+documented and deferred, needing typed undo entries), and audit finding E19 resolved as a
+documented NON-dependency (edge-handle order does not track WAL order and nothing reads
+that correspondence: the handle travels in the frame and every restore path is a
+high-water seed).
+
 ## Node labels
 
 | Label | Meaning | Properties (beyond `gitCommit`, `gitDate`) |
