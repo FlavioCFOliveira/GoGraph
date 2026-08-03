@@ -15,6 +15,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 	"github.com/FlavioCFOliveira/GoGraph/internal/clock"
 )
 
@@ -1891,6 +1892,15 @@ func (s *Session) sanitiseErr(err error) string {
 	// the tripped cap) — replacing them with the generic internal-error text
 	// would break debuggability without protecting anything internal.
 	if isClientFaultErr(err) {
+		return err.Error()
+	}
+	// An MVCC write-write conflict is not a client fault and not an internal
+	// error: it is the expected outcome of two transactions colliding, and the
+	// client's driver is going to RETRY it. Its message names the store the
+	// collision was detected in and nothing else — no timestamps, no ids, no
+	// internal state — so forwarding it costs no disclosure and gives an operator
+	// reading driver logs the one fact worth having (rmp #2300).
+	if errors.Is(err, mvcc.ErrSerializationConflict) {
 		return err.Error()
 	}
 	// All other errors (internal engine, storage, unexpected): generic + session ID.

@@ -130,6 +130,55 @@ That is a snapshot-isolation serialization failure, described exactly.
 waits — it has no lock to deadlock on. Choosing it would be borrowing Neo4j's
 *mechanism* vocabulary for a mechanism GoGraph deliberately does not have.
 
+### 4.1 The trap: two TransientError codes are silently demoted
+
+The rule above — "any four-part `Neo.TransientError.*.*` code is retried" — is
+**not quite true**, and the exception is exactly where an obvious guess lands.
+`neo4j/db/errors.go` runs `reclassify()` **before** `parse()`, and it rewrites two
+codes out of the family (neo4j-go-driver **v5.28.4**, the version in `go.mod`,
+read from the module cache 2026-08-03):
+
+```go
+func (e *Neo4jError) reclassify() {
+	switch e.Code {
+	case "Neo.TransientError.Transaction.LockClientStopped":
+		e.Code = "Neo.ClientError.Transaction.LockClientStopped"
+	case "Neo.TransientError.Transaction.Terminated":
+		e.Code = "Neo.ClientError.Transaction.Terminated"
+	}
+}
+```
+
+So **`Neo.TransientError.Transaction.Terminated` is never retried** — it becomes a
+`ClientError` before anything asks its classification. It reads as a natural fit
+for "your transaction was aborted, try again", and it would have been silently
+wrong: the managed transaction would report the conflict to the application on the
+first collision.
+
+`Outdated` is not on that list. Two tests keep it that way, and the second is what
+gives the first meaning:
+
+| test | asks |
+|---|---|
+| `TestFailureCode_SerializationConflictIsRetriedByTheRealDriver` | `neo4j.IsRetryable` — the driver's own exported classifier — about the code the server actually emits |
+| `TestFailureCode_DemotedTransientCodesAreNotRetriable` | the same classifier about both demoted codes, and refuses the mapping if the conflict is ever moved onto one |
+
+The instrument was validated against the mistake: with the mapping changed to
+`Transaction.Terminated`, the first test fails with *"the driver would NOT retry
+…"*. A test that only checked the chosen code would have gone green against that
+change.
+
+### 4.2 What the client is told
+
+A conflict is neither a client fault nor an internal error, so neither of
+`Session.sanitiseErr`'s existing branches gives the right answer, and without an
+explicit case the client would receive *"An internal error occurred"* — wrong
+twice: it is not internal, and it hides the one fact worth having. The conflict's
+own message is forwarded instead. It names the store the collision was detected in
+and nothing else — no timestamps, no transaction ids, no internal state — which
+`TestSanitiseErr_ForwardsTheConflictMessage` asserts positively and by
+absence.
+
 ## 5. Where it hooks
 
 Every versioned store, at the point a new version is linked at the head of a
@@ -297,3 +346,45 @@ Not "the code compiles", but:
 - **disjoint writers never conflict** — the write-scaling gate's disjoint
   key-space arm (rmp #2297) must report zero serialization errors, which is what
   distinguishes conflict detection from a global lock wearing a new name.
+
+### 7.1 Status against that list, 2026-08-03
+
+Measured, not estimated. Two of the four are complete; two are **blocked on the
+barrier's removal**, and the reason is verified in code rather than inferred.
+
+| # | claim | status |
+|---|---|---|
+| 1 | detected on every versioned store, each verified to lose the update without detection | **DONE** — 7 of 7 versioned stores (`graph/lpg/mvcc_conflict_stores_test.go`) |
+| 2 | the error reaches a real driver managed transaction and is retried | **PARTIAL** — see below |
+| 3 | an aborted transaction's versions are never visible **and are reclaimable** | **PARTIAL** — never visible: done. Reclaimable: **no**, and that is rmp #2318 |
+| 4 | disjoint writers never conflict | **DONE at the substrate**, vacuous at the engine — see below |
+
+**Claim 2, precisely.** Everything that does not need a live collision is done and
+tested against the driver itself: the mapping, the driver's own classifier saying
+it retries that code, the negative control for the two demoted codes, and the
+message-forwarding rule (§4.1, §4.2). What is missing is a collision that actually
+travels the wire, and it cannot happen yet:
+
+- the Cypher engine's writes pass **no transaction** (`tx == nil`), so they take no
+  conflict check at all — deliberate while nothing can overlap them;
+- an explicit transaction takes the exclusive visibility barrier for its whole
+  lifetime (`cypher/exectx.go:353`, `LockBarrierCtx`), so two Bolt sessions cannot
+  interleave a write;
+- and a writer's start timestamp is read **after** the barrier is acquired
+  (`Graph.beginWrite`), so even first-committer-wins cannot fire: any commit that
+  landed while the writer queued is already inside its snapshot.
+
+So the over-the-wire retry test is gated on rmp #2304 (autocommit) and rmp #2305
+(explicit transactions), which is where the engine gains a transaction to thread.
+It is recorded here rather than left implied, and #2300 is marked as depending on
+#2304 for that reason.
+
+**Claim 4, precisely.** The substrate proof is real and strong:
+`TestWriteCtx_DisjointTransactionsDoNotConflict` (two transactions, disjoint
+objects, both commit) and `TestWriteCtx_DisjointDirectWritersDoNotConflict` (64
+goroutines on disjoint nodes, crossing the reclamation threshold so a sweep bracket
+really does open underneath them). The write-scaling gate's disjoint arm also
+reports zero errors — but that arm drives the **engine**, whose writes take no
+conflict check, so on its own it proves nothing about detection. Saying so is the
+point: a green gate over a code path that cannot fail is not evidence, and it
+becomes evidence the moment #2304 lands.

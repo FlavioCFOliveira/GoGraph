@@ -13,6 +13,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/procs"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/sema"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 )
 
@@ -111,6 +112,43 @@ func FailureCode(err error) string {
 	// code is Neo4j's official per-transaction resource-budget code.
 	if errors.Is(err, txn.ErrTransactionTooLarge) {
 		return "Neo.ClientError.General.TransactionOutOfMemoryError"
+	}
+
+	// An MVCC write-write conflict ([mvcc.ErrSerializationConflict], rmp #2300):
+	// the transaction tried to modify an object whose newest version it cannot
+	// see. Unlike the cap above this IS worth retrying — a fresh snapshot
+	// includes the change it collided with — so it must reach the driver as a
+	// code the driver's own retry classifier accepts.
+	//
+	// # Why this exact code, verified rather than chosen
+	//
+	// SEMANTICS. neo4j/neo4j (branch master, read 2026-08-03;
+	// community/common/src/main/java/org/neo4j/kernel/api/exceptions/Status.java,
+	// enum Transaction) defines Outdated as TransientError with the description
+	// "transaction has seen state which has been invalidated by applied
+	// updates". That is this rule exactly: the writer's snapshot no longer
+	// covers the chain head. DeadlockDetected was rejected — GoGraph never
+	// waits, which is the documented reason PostgreSQL's wait-and-re-evaluate
+	// shape was not taken (graph/mvcc/conflict.go).
+	//
+	// RETRIABILITY. github.com/neo4j/neo4j-go-driver/v5 v5.28.4 — the version in
+	// go.mod — classifies in neo4j/db/errors.go: IsRetriable calls
+	// IsRetriableTransient, which is `classification == "TransientError"`, the
+	// second of the code's four dot-separated parts.
+	//
+	// THE TRAP. That same file's reclassify() runs BEFORE the classification is
+	// parsed and rewrites TWO codes out of the family:
+	//
+	//	Neo.TransientError.Transaction.LockClientStopped -> Neo.ClientError...
+	//	Neo.TransientError.Transaction.Terminated        -> Neo.ClientError...
+	//
+	// So `Neo.TransientError.Transaction.Terminated` — a plausible-looking
+	// choice — is silently demoted to a ClientError and is NEVER retried.
+	// Outdated is not on that list. TestFailureCode_SerializationConflictIsRetriedByTheRealDriver
+	// asks the driver itself, both for this code and for the demoted one, so a
+	// future edit to a "nearby" code cannot pass unnoticed.
+	if errors.Is(err, mvcc.ErrSerializationConflict) {
+		return "Neo.TransientError.Transaction.Outdated"
 	}
 
 	// Resource-limit guards — a query whose result set or buffering aggregator
