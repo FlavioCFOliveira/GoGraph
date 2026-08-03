@@ -1090,9 +1090,9 @@ func openCodec[N comparable, W any](
 			// Making the leak unreachable is worth more here than detecting it,
 			// since a leak is not observable through the public API and so
 			// cannot be regression-tested from outside graph/adjlist.
-			g.AdjList().BeginCommit()
+			g.AdjList().BeginExclusiveBuild()
 			csrErr := snapshot.ApplyCSRToGraph(g, &loaded.CSR)
-			g.AdjList().EndCommit()
+			g.AdjList().EndExclusiveBuild()
 			if csrErr != nil {
 				metrics.IncCounter("store.recovery.openCodec.errors", 1)
 				return res, fmt.Errorf("recovery: apply snapshot CSR: %w", csrErr)
@@ -1384,8 +1384,8 @@ func replayWALInto[N comparable, W any](
 	// in place thereafter, restoring the pre-COW write cost (O(shards touched)
 	// instead of O(ops)) for the dominant bulk-rebuild path. EndCommit freezes
 	// the builders before the graph is returned to the caller.
-	g.AdjList().BeginCommit()
-	defer g.AdjList().EndCommit()
+	g.AdjList().BeginExclusiveBuild()
+	defer g.AdjList().EndExclusiveBuild()
 	// pending buffers the ops of an in-flight v3 transaction until its
 	// OpCommit marker is read. The store serialises commits (single
 	// writer), so a transaction's frames are contiguous and never

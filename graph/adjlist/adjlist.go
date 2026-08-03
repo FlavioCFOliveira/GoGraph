@@ -208,6 +208,19 @@ type AdjList[N comparable, W any] struct {
 	// Mutated exclusively by BeginCommit / EndCommit under their documented
 	// single-writer precondition; see bulkOwner.
 	bulkDepth int
+
+	// exclusiveBuild is set while an [AdjList.BeginExclusiveBuild] window is
+	// open: a provably-exclusive rebuild that takes NO visibility barrier
+	// (WAL recovery, bulk import).
+	//
+	// It is what turns that path's precondition from a comment into an enforced
+	// contract (rmp #2302, audit finding E21): a serving commit window opened
+	// while it is set panics, and so does an exclusive build opened inside a
+	// serving window. ATOMIC rather than plain because the whole point is to
+	// catch the case where the two modes DO overlap, and a plain field read from
+	// two goroutines would be a race in the detector before it could be a
+	// diagnosis.
+	exclusiveBuild atomic.Bool
 }
 
 // SetAuxFactory registers the constructor the fused property-carrying append
@@ -2528,11 +2541,95 @@ func (a *AdjList[N, W]) builderOwner() uint64 {
 // BeginCommit is safe to call only as described above; misuse (concurrent
 // callers, or reads not excluded) is undefined.
 func (a *AdjList[N, W]) BeginCommit() {
+	// Refuse to open a serving window inside an exclusive build. The two modes
+	// share bulkOwner and bulkDepth, which are PLAIN fields, so overlapping them
+	// is a data race on the token that decides which transaction may mutate a
+	// shard's private builder in place — and the consequence is not a lost
+	// counter but one writer mutating another's not-yet-published slot array.
+	// See [AdjList.BeginExclusiveBuild] for why the two are separable at all.
+	if a.exclusiveBuild.Load() {
+		panic("adjlist: BeginCommit called during an exclusive build (recovery or bulk import); " +
+			"the exclusive-build precondition is no concurrent writer, and this is one")
+	}
 	a.bulkDepth++
 	if a.bulkOwner == 0 {
 		a.bulkOwner = a.mintBulkOwner()
 	}
 }
+
+// BeginExclusiveBuild opens a commit window for a provably-exclusive REBUILD of
+// the adjacency — WAL recovery replaying into a fresh graph, or a bulk import —
+// and asserts the precondition that makes it sound.
+//
+// # Why a distinct entry point (rmp #2302, audit finding E21)
+//
+// [AdjList.BeginCommit] and this method do the same thing to the same fields.
+// They differ entirely in what licenses them:
+//
+//   - BeginCommit is called by the serving write path (lpg's ApplyAtomically and
+//     LockBarrier) and is safe because the graph's exclusive visibility barrier is
+//     held for the whole window.
+//   - This is called by store/recovery and store/bulkimport, which take NO
+//     barrier. It was safe because the graph is not reachable by anyone yet —
+//     single-threaded replay, no concurrent reader, no concurrent writer.
+//
+// Until now both called BeginCommit, so that second licence lived only in a
+// comment. The audit's point is that it must not be silently INHERITED once
+// writers overlap at serving time: a path that legitimately needs no barrier
+// during a rebuild must not become a path that quietly needs none while the
+// engine serves. Splitting the entry points makes the two licences distinct at
+// the call site, and the flag makes overlapping them fail loudly instead of
+// corrupting a builder.
+//
+// # What #2304 still has to do, recorded here because it is easy to miss
+//
+// [AdjList.builderOwner] prefers bulkOwner OVER the writing transaction's own
+// record, deliberately, so a window's token cannot change mid-window. That means
+// the SERVING path's window currently SHADOWS per-transaction ownership: with the
+// barrier gone, two concurrent writers would both present the same bulkOwner and
+// would reuse each other's private, unpublished shard builders. rmp #2304 must
+// therefore retire the serving path's window in favour of a token that travels
+// with the write — lpg already has one in writeCtx.txID — rather than merely
+// deleting visMu around it.
+//
+// Nested calls are permitted and expected (a replay applies many ops inside one
+// window); the depth is tracked exactly as BeginCommit's is. The matching
+// [AdjList.EndExclusiveBuild] must be called once per call, by the same
+// goroutine.
+//
+// Not safe for concurrent use — that is the whole point.
+func (a *AdjList[N, W]) BeginExclusiveBuild() {
+	if a.bulkDepth > 0 && !a.exclusiveBuild.Load() {
+		panic("adjlist: BeginExclusiveBuild called inside a serving commit window; the " +
+			"exclusive-build precondition is that nothing else is writing this graph")
+	}
+	a.exclusiveBuild.Store(true)
+	a.bulkDepth++
+	if a.bulkOwner == 0 {
+		a.bulkOwner = a.mintBulkOwner()
+	}
+}
+
+// EndExclusiveBuild closes the innermost window opened by
+// [AdjList.BeginExclusiveBuild]. On the outermost close it clears the
+// exclusive-build flag, so the graph becomes available to the serving write path.
+func (a *AdjList[N, W]) EndExclusiveBuild() {
+	if a.bulkDepth == 0 {
+		return
+	}
+	a.bulkDepth--
+	if a.bulkDepth > 0 {
+		return
+	}
+	a.bulkOwner = 0
+	a.exclusiveBuild.Store(false)
+}
+
+// InExclusiveBuild reports whether an exclusive rebuild window is open.
+//
+// It exists so a caller that must not run against a half-rebuilt graph can say so
+// in a test or an assertion rather than assuming.
+func (a *AdjList[N, W]) InExclusiveBuild() bool { return a.exclusiveBuild.Load() }
 
 // mintBulkOwner returns a builder-owner token that no transaction can present.
 //

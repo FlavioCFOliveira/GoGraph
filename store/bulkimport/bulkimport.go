@@ -138,7 +138,7 @@ func New[W any](opts Options) *Builder[W] {
 	})
 	// Open the exclusive-build window for the whole import. Finish closes it,
 	// which freezes every touched shard's builder before the graph is handed out.
-	g.AdjList().BeginCommit()
+	g.AdjList().BeginExclusiveBuild()
 	hint := opts.ExpectNodes
 	if hint < 0 {
 		hint = 0
@@ -246,7 +246,7 @@ func (b *Builder[W]) Finish() (Stats, error) {
 		return b.stats, ErrFinished
 	}
 	b.finished = true
-	b.g.AdjList().EndCommit()
+	b.g.AdjList().EndExclusiveBuild()
 	return b.stats, nil
 }
 

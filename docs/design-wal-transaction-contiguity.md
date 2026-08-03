@@ -138,8 +138,8 @@ rest are separable and are recorded here rather than implied.
 | 7 | the chosen scheme cites project, file and symbol | **DONE** — §2 |
 | 4 | `txnSeq` durable and monotone across close/reopen | **DONE** — see §5 |
 | 5 | crash-injection battery with concurrent writers | **NOT YET** |
-| 6 | benchmark showing fsyncs/commit falls as concurrency rises | **NOT YET** |
-| E21 | recovery and bulkimport open the adjacency commit window with no barrier, licensed only by a comment | **NOT YET** |
+| 6 | benchmark showing fsyncs/commit falls as concurrency rises | **INSTRUMENT EXISTS** — `BenchmarkWriteScaling_StoreAPI` already reports `commits/fsync`; the store path releases the semaphore before `SyncGroup`, so coalescing is reachable there. The flat 268/s the audit measured is the *Cypher* path, serialised by `visMu`, which is rmp #2304's to remove |
+| E21 | recovery and bulkimport open the adjacency commit window with no barrier, licensed only by a comment | **DONE** — see §6 |
 
 ---
 
@@ -206,3 +206,41 @@ because the failure mode is silent and the next person to touch the append path 
 costs rather than read that it would. Each one also fails LOUDLY if the defect ever stops
 reproducing — because that would mean the guarantee this design rests on is no longer the thing
 protecting atomicity, and the positive tests would be proving nothing.
+
+
+---
+
+## 6. The exclusive-build window, enforced (audit finding E21)
+
+`AdjList.BeginCommit` and `AdjList.BeginExclusiveBuild` mutate the same two plain fields —
+`bulkOwner` and `bulkDepth`. They differ **entirely in what licenses them**:
+
+| caller | licence |
+|---|---|
+| the serving write path (`lpg.ApplyAtomically`, `lpg.LockBarrier`) | the graph's exclusive visibility barrier is held for the whole window |
+| `store/recovery`, `store/bulkimport` | **no barrier at all** — the graph is not reachable by anyone yet: single-threaded replay, no concurrent reader, no concurrent writer |
+
+Until this change **both called `BeginCommit`**, so the second licence lived only in a comment. The
+audit's point is that it must not be silently *inherited* once writers overlap at serving time: a
+path that legitimately needs no barrier during a rebuild must not quietly become a path that needs
+none while the engine serves.
+
+Two distinct entry points now, and an `atomic.Bool` that makes overlapping them **panic** rather
+than corrupt a builder — in either direction. Pinned by
+`TestExclusiveBuild_RefusesAServingWindow` and
+`TestExclusiveBuild_RefusesEntryInsideAServingWindow`; each fails by construction if the guard is
+removed, since both assert that `recover()` returned something.
+
+### A hazard for rmp #2304 that this surfaced
+
+`AdjList.builderOwner` prefers `bulkOwner` **over** the writing transaction's own record —
+deliberately, so a window's token cannot change mid-window (the record is allocated lazily by the
+first version, so reading it first would re-clone the builder on every write; a test caught that on
+the first draft of rmp #2301).
+
+The consequence is that **the serving path's window currently SHADOWS per-transaction ownership.**
+With `visMu` gone, two concurrent writers would both present the same `bulkOwner` and would reuse
+each other's private, *unpublished* shard builders — one writer mutating another's slot array in
+place. So rmp #2304 must **retire the serving path's window** in favour of a token that travels with
+the write, which lpg already has in `writeCtx.txID`. Deleting `visMu` around it is not enough, and
+this is recorded here because the failure would be silent.
