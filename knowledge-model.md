@@ -2373,3 +2373,53 @@ writes`, so part 2's lock is demonstrably load-bearing.
 **#2303 REMAINS OPEN on two of four structures:** the deferred label-index removal
 (`graph/lpg/mvcc_index.go:49-75`) and the `constraintActive`/`indexActive` gates
 (`graph/lpg/lpg.go:451,463`, read by `store/checkpoint/checkpoint.go:867`).
+
+Incrementally synced at commit `a00cfae8` (2026-08-03, task #2303, sprint 334 —
+**the deferred label-index removal is charged to its own transaction**): +5 nodes
+(`Commit`; `Graph.deferralStamp` Method; three `Test` in
+`graph/lpg/mvcc_index_ordering_test.go`), +9 edges (4 `CONTAINS`, 3 `FIXES`,
+1 `Sprint`→`Commit`).
+
+A label removal is deferred until the reclamation watermark has passed it, because a
+reader older than the removal must still find the node in the bitmap or it silently
+loses a row. "Passed it" needs an instant, and `deferLabelIndexRemoval` took that
+instant from the graph's **ambient `mvcc.WriteStamp` slot** rather than from the
+removing transaction. Same defect class as audit finding **E3**, which rmp #2301
+closed for the commit record and the version count; this path was the last reader of
+the ambient slot.
+
+**RUNNING THE DIFFERENTIAL CORRECTED THE DESCRIPTION OF THE DEFECT — and the wrong
+description had already been written into the test file before it was checked.** The
+claim "verified against the previous behaviour: the entry survived the sweep and the
+test failed" was **false**; the test passed. There are TWO paths and they fail
+differently:
+
+- **Barrier path** (`Graph.beginWrite`): the ambient slot IS occupied, so the old read
+  returned the ambient transaction's record. Wrong once writers overlap — **but the
+  barrier is what guarantees the slot has one occupant, so no test can produce the
+  collision until rmp #2304 removes it.** AC3 is therefore **not** satisfied for that
+  half and the file says so. Same situation as rmp #2300's AC5.
+- **labelTx path**: `Graph.beginWriteCtx` does **not** publish to the ambient slot, so
+  the old read fell through to `WriteStamp.Stamp`'s **untransacted** branch — which
+  allocates a commit timestamp **and publishes it immediately**. Worse, and
+  observable: the removal became reclaimable at an instant **before its own
+  transaction had committed or aborted**, so a rolled-back statement's label strip
+  could have its deferral swept, deleting an entry the undo legitimately restored
+  (the exact hazard `deferredIdx`'s keyed-not-list design exists to prevent). It also
+  accounted every deferral as an **untracked** write — the figure the substrate
+  reports for precisely the opposite thing.
+
+The second defect is fixed and gated: restoring `g.stamp.Stamp()` makes
+`TestDeferredIndexRemoval_ChargesNoUntrackedWrite` fail with **3 untracked writes for
+3 in-transaction deferrals**.
+
+`Graph.deferralStamp` resolves the instant: the transaction's own record and id when
+there is one, the ambient stamp otherwise. **A nil tx is correct to fall back** — such
+a write commits the instant it is made — and
+`TestDeferredIndexRemoval_UntransactedWriteStillSweeps` pins it, because a deferral
+that never swept would leak an over-reporting bitmap entry for the life of the
+process.
+
+**#2303 REMAINS OPEN on the last of four structures:** the
+`constraintActive`/`indexActive` gates (`graph/lpg/lpg.go:451,463`, read by
+`store/checkpoint/checkpoint.go:867`).
