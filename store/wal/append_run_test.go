@@ -141,7 +141,7 @@ func appendContiguity(t *testing.T, useRun bool, frameCount, competitors int) (r
 	}
 
 	if useRun {
-		if aerr := w.AppendRun(func(emit func([]byte) error) error {
+		if _, aerr := w.AppendRun(func(emit func([]byte) error) error {
 			for _, p := range frames {
 				if err := emit(p); err != nil {
 					return err
@@ -229,7 +229,7 @@ func TestAppendRun_PropagatesTheCallbackError(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	sentinel := fmt.Errorf("encode failed")
-	rerr := w.AppendRun(func(emit func([]byte) error) error {
+	_, rerr := w.AppendRun(func(emit func([]byte) error) error {
 		if aerr := emit([]byte("T:op0")); aerr != nil {
 			return aerr
 		}
@@ -269,7 +269,7 @@ func TestAppendRun_RejectsUseAfterTheRunReturns(t *testing.T) {
 	}()
 
 	var escaped func([]byte) error
-	if aerr := w.AppendRun(func(emit func([]byte) error) error {
+	if _, aerr := w.AppendRun(func(emit func([]byte) error) error {
 		escaped = emit
 		return nil
 	}); aerr != nil {

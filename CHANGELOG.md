@@ -6,6 +6,33 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Durability — a commit whose frames were already on stable storage could be
+  reported as FAILED** (rmp #2322). `wal.Writer.SyncGroup` consulted the writer's
+  sticky durability failure before testing whether the caller's own frames were
+  durable. The two are not mutually exclusive: the failure can belong to a *later*
+  group round that failed after a leader had already fsynced this caller's commit
+  marker. Such a committer was told its commit was lost, while recovery correctly
+  replayed the durable, fully marked transaction — a durable transaction nobody
+  acknowledged, which the crash simulator's atomicity oracle reported as
+  `<failed-resurrected>`.
+
+  `SyncGroup` now tests the caller's watermark against the durable size first, and
+  takes that watermark as a parameter instead of inferring it. **This is a breaking
+  change to two `store/wal` signatures**: `Writer.AppendRun` returns
+  `(int64, error)` — the run's own end offset — and `Writer.SyncGroup(target int64)`
+  takes it. The offset could not be recovered after the fact, because the writer's
+  accepted offset is shared: another appender advances it and a durability failure
+  rewinds it, so a committer reading it later was asking about somebody else's
+  frames. `Writer.SyncBuffered` is added for callers with nothing of their own to
+  acknowledge (an empty commit's courtesy flush) and must not be used to decide a
+  commit's fate.
+
+  The defect was latent while the store serialised commits behind its
+  single-writer semaphore, because group rounds could not overlap; it is a
+  prerequisite for retiring that semaphore.
+
 ### Changed
 
 - **Isolation — an explicit read transaction is now SNAPSHOT ISOLATED across all

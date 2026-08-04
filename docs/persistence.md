@@ -44,9 +44,28 @@ recovery. Concurrent commits are coalesced by **group commit**
 and every committer whose durability watermark the flush covers acknowledges
 without issuing its own fsync, so the per-commit fsync no longer caps
 write throughput under concurrency (≈ 118× at 256 concurrent writers, #1507)
-while the single-threaded commit cost is unchanged. A commit is acknowledged
+while the single-threaded commit cost is unchanged.
+
+Each committer's **durability watermark is its own**: `wal.Writer.AppendRun`
+returns the offset immediately after the run's last frame, and the committer
+passes that offset to `SyncGroup`. The watermark cannot be recovered afterwards
+from the writer's accepted offset, because that offset is shared — another
+appender advances it, and a durability failure rewinds it to the durable size.
+Deriving the watermark from it instead told a committer whose frames were already
+on stable storage that its commit had failed, while recovery went on to replay
+the (durable, fully marked) transaction: a durable transaction nobody
+acknowledged (#2322). For the same reason `SyncGroup` tests the caller's
+watermark against the durable size **before** it consults the writer's sticky
+failure — the two are not mutually exclusive, since the failure can belong to a
+later round that failed after a leader had already fsynced this caller's marker.
+`wal.Writer.SyncBuffered` remains for callers with nothing of their own to
+acknowledge (an empty commit's courtesy flush of a buffered tail) and must never
+be used to decide a commit's fate.
+
+A commit is acknowledged
 only after the covering fsync, so atomicity and durability are preserved (a
-failed group fsync fails every member of the group), and the in-memory state is
+failed group fsync fails every member of the group whose frames that fsync did
+not cover), and the in-memory state is
 applied strictly in WAL sequence order, so isolation is preserved (the
 group-commit measurements are in
 [docs/benchmarks/v0.3.1.md](benchmarks/v0.3.1.md)). Every store is a typed store

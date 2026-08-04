@@ -114,9 +114,17 @@ transaction's write survived a crash.
 ### The shape
 
 ```go
-// AppendRun appends every frame the callback emits as ONE contiguous run.
-func (w *Writer) AppendRun(fn func(emit func([]byte) error) error) error
+// AppendRun appends every frame the callback emits as ONE contiguous run and
+// returns the run's own durability watermark — the offset immediately after its
+// last frame — which the caller passes to SyncGroup.
+func (w *Writer) AppendRun(fn func(emit func([]byte) error) error) (int64, error)
 ```
+
+The returned watermark was added by #2322. The signature originally returned only
+`error`, leaving `SyncGroup` to infer the caller's watermark from the writer's
+current accepted offset — which is shared state that another appender advances and
+a durability failure rewinds, so the inference was unsound the moment two commits
+could overlap. See [docs/persistence.md](persistence.md).
 
 `w.mu` is taken once, before `fn`, and released after it. The `emit` closure handed to `fn` is
 valid only for the duration of the call and must not be retained. `fn` must not call back into the

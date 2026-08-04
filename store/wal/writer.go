@@ -444,18 +444,29 @@ func (w *Writer) AppendCtx(ctx context.Context, payload []byte) error {
 // copy (postgres/postgres, master, src/backend/access/transam/xlog.c). This is
 // that insight at the granularity GoGraph needs: the per-op encoding stays with
 // the caller, and the lock covers only the framing.
-func (w *Writer) AppendRun(fn func(emit func([]byte) error) error) error {
+// # Return value — the run's own durability watermark
+//
+// AppendRun returns the writer offset immediately after the run's last frame.
+// That offset is the run's OWN watermark, and it is what the caller must hand to
+// [Writer.SyncGroup] to make this run durable.
+//
+// The caller cannot derive it afterwards. The writer's accepted offset is shared
+// mutable state: another appender advances it, and a durability failure REWINDS
+// it ([Writer.poison] resets appendedSize to durableSize). A committer that reads
+// it later is asking about somebody else's frames — which is exactly how an
+// unacknowledged transaction was resurrected after recovery (rmp #2322).
+func (w *Writer) AppendRun(fn func(emit func([]byte) error) error) (int64, error) {
 	defer metrics.Time("store.wal.AppendRun").Stop()
 	if w.closed.Load() {
 		metrics.IncCounter("store.wal.AppendRun.errors", 1)
-		return ErrWriterClosed
+		return 0, ErrWriterClosed
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.syncErr != nil {
 		// Poisoned by an earlier Sync failure; see [Writer.AppendCtx].
 		metrics.IncCounter("store.wal.AppendRun.errors", 1)
-		return w.syncErr
+		return 0, w.syncErr
 	}
 	// done guards the closure against use after fn returns. It is the cheapest
 	// form of the contract above that can actually fail loudly instead of
@@ -485,7 +496,12 @@ func (w *Writer) AppendRun(fn func(emit func([]byte) error) error) error {
 	if err != nil {
 		metrics.IncCounter("store.wal.AppendRun.errors", 1)
 	}
-	return err
+	// Read under w.mu (the deferred Unlock runs after this value is taken), so the
+	// watermark is the one this run actually produced. Returned even on error: the
+	// caller still needs it to reach the poisoned writer's sticky error through
+	// SyncGroup, and a partial run carries no OpCommit marker so recovery discards
+	// it whether or not those bytes reach the platter.
+	return w.appendedSize, err
 }
 
 // appendLocked encodes one frame into the buffer. The caller must hold w.mu and
@@ -595,16 +611,17 @@ func (w *Writer) SyncCtx(ctx context.Context) error {
 //
 // # Contract
 //
-// SyncGroup must be called AFTER the caller has appended all of its frames via
-// [Writer.Append] / [Writer.AppendCtx] and is the durability barrier for those
-// frames. It captures the current appendedSize as the caller's watermark, then:
+// SyncGroup must be called AFTER the caller has appended all of its frames, with
+// target set to the watermark [Writer.AppendRun] returned for that run — the
+// offset immediately after the caller's last frame (its OpCommit marker). It is
+// the durability barrier for exactly those frames, then:
 //
-//   - If the writer is already poisoned, it returns the sticky error
-//     immediately (the un-synced suffix, including this caller's frames, was
-//     discarded by an earlier failed sync).
-//   - If a previous sync has already advanced durableSize past the caller's
-//     watermark (a concurrent leader covered it), it returns nil without any
-//     I/O — the follower fast path.
+//   - If a previous sync has already advanced durableSize to target (a
+//     concurrent leader covered it), it returns nil without any I/O — the
+//     follower fast path.
+//   - Otherwise, if the writer is poisoned, it returns the sticky error (the
+//     un-synced suffix, including this caller's frames, was discarded by an
+//     earlier failed sync).
 //   - Otherwise, if no leader is flushing, the caller becomes the LEADER:
 //     it flushes the buffer and fsyncs once, covering its own and every other
 //     buffered committer's frames, publishes the new durableSize, and wakes the
@@ -643,7 +660,7 @@ func (w *Writer) SyncCtx(ctx context.Context) error {
 //
 // Concurrency: safe for concurrent calls; it serialises on the same internal
 // mutex as Append/Sync and guarantees a single leader per fsync round.
-func (w *Writer) SyncGroup() error {
+func (w *Writer) SyncGroup(target int64) error {
 	defer metrics.Time("store.wal.SyncGroup").Stop()
 	if w.closed.Load() {
 		metrics.IncCounter("store.wal.SyncGroup.errors", 1)
@@ -651,27 +668,64 @@ func (w *Writer) SyncGroup() error {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	return w.syncToLocked(target)
+}
 
-	if w.syncErr != nil {
-		metrics.IncCounter("store.wal.SyncGroup.errors", 1)
-		return w.syncErr
+// SyncBuffered makes durable everything the writer has accepted at the moment of
+// the call, coalescing with any concurrent group round exactly as
+// [Writer.SyncGroup] does.
+//
+// It is a FLUSH, not a commit acknowledgement, and a committer must NOT use it to
+// learn whether its own frames are durable. The accepted offset is shared mutable
+// state — another appender advances it, and [Writer.poison] rewinds it — so
+// "everything accepted now" is not the caller's own watermark. Deciding a
+// commit's fate from it resurrected an unacknowledged transaction after recovery
+// (rmp #2322). Use [Writer.AppendRun]'s returned watermark with
+// [Writer.SyncGroup] for that. This exists for the callers that have nothing of
+// their own to acknowledge and merely want any buffered tail on disk.
+func (w *Writer) SyncBuffered() error {
+	defer metrics.Time("store.wal.SyncBuffered").Stop()
+	if w.closed.Load() {
+		metrics.IncCounter("store.wal.SyncBuffered.errors", 1)
+		return ErrWriterClosed
 	}
-	// The caller's durability watermark: every byte the writer has accepted so
-	// far, which includes the caller's just-appended frames and OpCommit marker.
-	// Taken under mu from the Writer's own appendedSize, so the coordinator
-	// never tracks offsets independently of the file.
-	target := w.appendedSize
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.syncToLocked(w.appendedSize)
+}
 
+// syncToLocked is the group-commit wait shared by [Writer.SyncGroup] and
+// [Writer.SyncBuffered]. The caller holds w.mu and has checked closed.
+//
+// # Why durability is tested BEFORE the poison — rmp #2322
+//
+// The two predicates are not mutually exclusive: a committer's frames can be
+// durable AND the writer poisoned, because the poison belongs to a LATER round
+// that failed after a leader had already fsynced this caller's marker. Only one
+// order is correct.
+//
+// Testing the poison first failed such a committer. Its frames were on stable
+// storage and its OpCommit marker with them, so recovery replayed the
+// transaction — while the client had been told the commit FAILED. That is
+// uncommitted state leaking in: a durable transaction nobody acknowledged, caught
+// by the crash simulator's ACID_ATOMICITY oracle at three seeds.
+//
+// Testing durability first cannot make the opposite error. target is the caller's
+// OWN watermark and durableSize only ever advances through a completed fsync, so
+// durableSize >= target means this caller's marker is on the platter — whatever
+// happened to a later round's bytes. Frames the poison discarded are, by
+// definition, above durableSize, so their committers still take the error branch.
+func (w *Writer) syncToLocked(target int64) error {
 	for {
-		if w.syncErr != nil {
-			metrics.IncCounter("store.wal.SyncGroup.errors", 1)
-			return w.syncErr
-		}
 		if w.durableSize >= target {
 			// A leader's fsync already covered this watermark: the follower
 			// fast path. The commit is durable with no I/O of our own.
 			metrics.IncCounter("store.wal.SyncGroup.coalesced", 1)
 			return nil
+		}
+		if w.syncErr != nil {
+			metrics.IncCounter("store.wal.SyncGroup.errors", 1)
+			return w.syncErr
 		}
 		if !w.leaderActive {
 			// Become the leader for this round and fsync the whole buffered

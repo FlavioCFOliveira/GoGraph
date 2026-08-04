@@ -51,13 +51,21 @@ func TestWAL_OpenFS_TruncatePrefixOverSimDisk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wal.OpenFS: %v", err)
 	}
-	for _, p := range [][]byte{p0, p1, p2} {
-		if err := w.Append(p); err != nil {
-			t.Fatalf("append: %v", err)
+	// One run, so the returned watermark is this appender's own end offset — the
+	// only offset SyncGroup accepts (rmp #2322).
+	mark, err := w.AppendRun(func(emit func([]byte) error) error {
+		for _, p := range [][]byte{p0, p1, p2} {
+			if err := emit(p); err != nil {
+				return err
+			}
 		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("append: %v", err)
 	}
 	// Durably commit all three frames (group-commit fsync over the SimDisk).
-	if err := w.SyncGroup(); err != nil {
+	if err := w.SyncGroup(mark); err != nil {
 		t.Fatalf("SyncGroup: %v", err)
 	}
 
@@ -77,10 +85,11 @@ func TestWAL_OpenFS_TruncatePrefixOverSimDisk(t *testing.T) {
 	// appends at the new (suffix) end, not behind a stale offset.
 	p3 := []byte("frame-three")
 	f3 := frameBytes(t, p3)
-	if err := w.Append(p3); err != nil {
+	mark3, err := w.AppendRun(func(emit func([]byte) error) error { return emit(p3) })
+	if err != nil {
 		t.Fatalf("post-truncate append: %v", err)
 	}
-	if err := w.SyncGroup(); err != nil {
+	if err := w.SyncGroup(mark3); err != nil {
 		t.Fatalf("post-truncate SyncGroup: %v", err)
 	}
 	if err := w.Close(); err != nil {
@@ -121,10 +130,11 @@ func TestWAL_OpenWith_TruncatePrefixUnsupported(t *testing.T) {
 		t.Fatalf("wal.OpenWith: %v", err)
 	}
 	defer func() { _ = w.Close() }()
-	if err := w.Append([]byte("x")); err != nil {
+	mark, err := w.AppendRun(func(emit func([]byte) error) error { return emit([]byte("x")) })
+	if err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	if err := w.SyncGroup(); err != nil {
+	if err := w.SyncGroup(mark); err != nil {
 		t.Fatalf("SyncGroup: %v", err)
 	}
 	if _, err := w.TruncatePrefix(1); !errors.Is(err, wal.ErrPrefixTruncateUnsupported) {

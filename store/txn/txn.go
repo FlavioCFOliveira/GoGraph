@@ -1199,7 +1199,7 @@ func (t *Tx[N, W]) Commit() error {
 	// and append while this one fsyncs — the precondition for fsync coalescing
 	// (#1507). The on-disk frame order is unchanged (still serialised by the
 	// semaphore in sequence order).
-	seq, hasSeq, appendErr := t.appendOnly()
+	seq, hasSeq, mark, appendErr := t.appendOnly()
 	// Pair the in-flight registration appendOnly made: cleared only after the
 	// entire commit (SyncGroup + apply gate) below has finished, so a draining
 	// RunUnderCommitLock never closes the WAL mid-fsync.
@@ -1214,7 +1214,10 @@ func (t *Tx[N, W]) Commit() error {
 			metrics.IncCounter("store.txn.Commit.errors", 1)
 			return appendErr
 		}
-		if syncErr := t.store.wal.SyncGroup(); syncErr != nil {
+		// SyncBuffered, not SyncGroup: this commit appended nothing, so it has no
+		// watermark of its own to acknowledge — only a courtesy flush of whatever
+		// tail another committer left buffered.
+		if syncErr := t.store.wal.SyncBuffered(); syncErr != nil {
 			metrics.IncCounter("store.txn.Commit.errors", 1)
 			return syncErr
 		}
@@ -1232,7 +1235,7 @@ func (t *Tx[N, W]) Commit() error {
 	// whole group on a sync error (poison fails all). If the append itself
 	// failed we still run SyncGroup so a poisoned writer surfaces the sticky
 	// error to this committer too; either way this transaction will not apply.
-	syncErr := t.store.wal.SyncGroup()
+	syncErr := t.store.wal.SyncGroup(mark)
 
 	// Group-commit phase 3 — APPLY in sequence order. Wait until every
 	// lower-sequence transaction has applied (or been skipped), so the
@@ -1318,20 +1321,21 @@ func (t *Tx[N, W]) CommitWALOnly() error {
 		return ErrTxFinished
 	}
 
-	seq, hasSeq, appendErr := t.appendOnly()
+	seq, hasSeq, mark, appendErr := t.appendOnly()
 	defer t.store.doneInflight()
 	if !hasSeq {
 		if appendErr != nil {
 			metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
 			return appendErr
 		}
-		if err := t.store.wal.SyncGroup(); err != nil {
+		// Nothing of our own to acknowledge; see the same branch in [Tx.Commit].
+		if err := t.store.wal.SyncBuffered(); err != nil {
 			metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
 			return err
 		}
 		return nil
 	}
-	syncErr := t.store.wal.SyncGroup()
+	syncErr := t.store.wal.SyncGroup(mark)
 	// A sequence was minted: take its apply-gate turn and advance it, applying
 	// nothing, so the dense chain stays intact for any Commit on this store.
 	t.waitApplyTurn(seq)
@@ -1446,14 +1450,14 @@ func releaseApplySlot(ch chan struct{}) { applySlotPool.Put(ch) }
 // before that lets [Store.RunUnderCommitLock] observe it (#1507 quiesce
 // boundary). The caller MUST pair it with exactly one [Store.doneInflight] once
 // the whole commit (SyncGroup + apply gate) finishes.
-func (t *Tx[N, W]) appendOnly() (seq uint64, hasSeq bool, err error) {
+func (t *Tx[N, W]) appendOnly() (seq uint64, hasSeq bool, watermark int64, err error) {
 	t.store.markInflight()
 	if len(t.ops) == 0 {
 		// Empty commit: mint no sequence and write no marker. The caller still
 		// runs SyncGroup to flush any prior buffered tail (the historical
 		// no-op-with-Sync behaviour), then applies nothing.
 		t.releaseAfterAppend()
-		return 0, false, nil
+		return 0, false, 0, nil
 	}
 	// Bounded resources / Durability: reject an over-cap transaction BEFORE
 	// minting a sequence or writing any frame, so a transaction recovery could
@@ -1464,7 +1468,7 @@ func (t *Tx[N, W]) appendOnly() (seq uint64, hasSeq bool, err error) {
 	if t.store.maxTxnOps > 0 && len(t.ops) > t.store.maxTxnOps {
 		metrics.IncCounter("store.txn.appendOnly.txnTooLarge", 1)
 		t.releaseAfterAppend()
-		return 0, false, fmt.Errorf("%w: %d ops > cap %d", ErrTransactionTooLarge, len(t.ops), t.store.maxTxnOps)
+		return 0, false, 0, fmt.Errorf("%w: %d ops > cap %d", ErrTransactionTooLarge, len(t.ops), t.store.maxTxnOps)
 	}
 	// Mint the sequence. From here hasSeq is true on every return: the sequence
 	// is consumed, so the caller must advance the apply gate past it even if the
@@ -1490,7 +1494,7 @@ func (t *Tx[N, W]) appendOnly() (seq uint64, hasSeq bool, err error) {
 	//
 	// The per-op encoding happens INSIDE the run, so the pooled scratch buffer is
 	// still reused for every frame and the commit allocates no more than before.
-	if aerr := t.store.wal.AppendRun(func(emit func([]byte) error) error {
+	mark, aerr := t.store.wal.AppendRun(func(emit func([]byte) error) error {
 		for _, op := range t.ops {
 			payload, enErr := encodeOpTypedV3Into((*scratch)[:0], op, seq, t.store.codec, t.store.wcodec)
 			if enErr != nil {
@@ -1504,14 +1508,15 @@ func (t *Tx[N, W]) appendOnly() (seq uint64, hasSeq bool, err error) {
 		marker := encodeCommitV3Into((*scratch)[:0], seq)
 		*scratch = marker
 		return emit(marker)
-	}); aerr != nil {
+	})
+	if aerr != nil {
 		t.releaseAfterAppend()
-		return seq, true, aerr
+		return seq, true, mark, aerr
 	}
 	// Frames + marker are buffered. Release the semaphore so the next
 	// transaction can append while this one fsyncs (group-commit coalescing).
 	t.releaseAfterAppend()
-	return seq, true, nil
+	return seq, true, mark, nil
 }
 
 // Rollback discards buffered ops without touching the WAL or graph.
