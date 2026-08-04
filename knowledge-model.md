@@ -1817,6 +1817,54 @@ falling 1.249 → 0.809 and allocations FLAT; the swap is −93.73% / −99.69% 
 that the motivating audit's reference points were **not reproducible** (its exponent 2.02
 measured 1.79 at the sprint base).
 
+### Sprint 334 sync — the MVCC background vacuum (2026-08-04)
+
+Recorded at `134dff2c` (task rmp #2308, MVCC C2). **Reclamation moved off the commit path**
+into a demand-started, self-terminating background vacuum; see
+[`docs/design-mvcc-vacuum.md`](docs/design-mvcc-vacuum.md).
+
+Added: `Commit 134dff2c`; `Task 2308` (COMPLETED); 4 `Type`s (`vacuumState`, `vacuumUnit`,
+`VacuumStats`, and `MVCCStats` — the last one **pre-existed in the code since sprint 333 but
+was absent from the graph**, so it is added here rather than updated); 20 `Method`s (12 on
+`Graph`: `Close`, `CloseCtx`, `VacuumStats`, `wakeVacuum`, `wakeVacuumOnRelease`,
+`startVacuum`, `vacuumLoop`, `vacuumPass`, `sweepUnit`, `awaitVacuumProgress`,
+`publishVacuumMetrics`, `chargeReclaimDebt`; 5 on `vacuumState`; `MVCCStats.WithinCeiling`;
+`cypher.Engine.Close`/`CloseCtx`); 9 `Test`s; 2 `Benchmark`s; 3 `Spec`s
+(`design-mvcc-vacuum.md`, `benchmarks/mvcc-vacuum-2026-08-04.md`, and
+`design-mvcc-delta-chains.md`, which also pre-existed on disk and not in the graph).
+
+Edges (80): `Sprint 334 -[CONTAINS]-> Commit`; `Task 2308 -[IMPLEMENTED_IN]-> Commit`;
+`Commit -[IMPROVES]->` `MVCC as sole concurrency control` (12051) and `MVCC snapshot
+isolation` (13861); `Commit -[FIXES]-> ACID Transactions` (9736) for the lost-row defect;
+`Commit -[TOUCHES]->` packages `graph/lpg`, `cypher`, `graph/adjlist`, `internal/sim` and the
+3 Specs; both MVCC Features `-[SPECIFIED_IN]->` the design Spec; `CONTAINS`/`HAS_METHOD` for
+every new symbol; each new Test `-[VERIFIES]-> MVCC as sole concurrency control`; both
+Benchmarks `-[MEASURES]-> Graph.vacuumLoop`.
+
+**REMOVED from the code, and therefore absent from the graph by design:**
+`Graph.ReclaimIdle` (the read-path inline sweep) and its call site in `cypher/api.go`,
+`Graph.reclaimIfDue`, and `reclaimAfterDirectWrite`'s barrier acquisition. None of the three
+had ever been symbol-synced, so there was nothing to delete — that gap is itself the
+limitation noted below.
+
+**Two write mistakes of mine were made and corrected during this sync; both are worth
+recording because they are traps, not slips.**
+
+1. A blanket `MATCH ()-[r]->() WHERE r.gitCommit IS NULL SET r.gitCommit=…` stamped **1 075
+   pre-existing unstamped edges** as last confirmed at this commit — a fidelity error, since
+   they were confirmed by earlier commits. Never stamp by "is null"; stamp only the edges the
+   sync actually created.
+2. The first correction used
+   `WHERE NOT (a.gitCommit=$FH OR b.gitCommit=$FH)`, which silently missed every edge whose
+   **both** endpoints lack `gitCommit`: in three-valued logic `NOT (NULL OR NULL)` is NULL,
+   not TRUE, so those rows are filtered out rather than matched. 408 wrong stamps survived.
+   The predicate must be `coalesce(a.gitCommit,'') <> $FH AND coalesce(b.gitCommit,'') <> $FH`.
+   Verified afterwards: 0 edges carry this commit's stamp without an endpoint that does.
+
+Both `IMPROVES` (not `IMPLEMENTS`) for the perf/architecture half and `FIXES` for the defect
+half follow the edge-type table, which the sprint-314 note above records being got wrong the
+first time.
+
 ## Known limitations (faithful, by design)
 
 - **Build-tag duplicates.** The extractor parses every `.go` file regardless of build
