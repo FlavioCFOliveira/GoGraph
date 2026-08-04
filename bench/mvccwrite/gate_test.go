@@ -64,6 +64,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 )
 
 // writeScalingFloor is the minimum ratio [TestWriteScalingGate] accepts:
@@ -529,6 +530,14 @@ func requireAvailableParallelism(t *testing.T, ops int) float64 {
 // enforce.
 func TestWriteScalingInstrument_SeesConcurrency(t *testing.T) {
 	requireCores(t)
+	// A CONTROL, so its precondition is the environment's ability to run two arms
+	// differently — which coverage instrumentation removes by making every basic
+	// block longer and more uniform. Measured under `make cover-gate`: available
+	// parallelism probed 13.63x while the serialisation ratio compressed to 2.432x
+	// and reported a false NO-GO (rmp #2319). The ENGINE gates above keep asserting
+	// here; this control asserts in the -race arm of the same `make ci`.
+	testlayers.RequireUninstrumented(t, "the serialisation ratio of genuinely parallel "+
+		"CPU-bound work forced through one mutex, which must exceed the sprint's scaling target")
 	const ops = gateOps / 4
 	// Probe the machine BEFORE asserting anything, and skip rather than return a
 	// false verdict when it cannot supply the parallelism either instrument needs.
@@ -565,6 +574,13 @@ func TestWriteScalingInstrument_SeesConcurrency(t *testing.T) {
 // a ceiling on a one-versus-N ratio is exactly the assertion that a busy machine
 // breaks, and it did — see this file's header.
 func TestWriteScalingInstrument_SeesSerialisation(t *testing.T) {
+	// The same class as its positive sibling: it requires the re-serialised arm to
+	// measure BELOW the target, which is a statement about the environment's ability
+	// to separate the arms at all. Included by the audit rmp #2319 asked for rather
+	// than because it was observed failing — an instrument of this class that is
+	// guarded only once it goes red is guarded by luck.
+	testlayers.RequireUninstrumented(t, "the scaling ratio of work that is already "+
+		"fully serialised, which must measure below the sprint's scaling target")
 	requireCores(t)
 	const ops = gateOps / 4
 	var inner sync.Mutex

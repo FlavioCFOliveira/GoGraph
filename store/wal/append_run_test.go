@@ -21,6 +21,8 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 )
 
 // txnFrames builds the payloads of one transaction: n op frames and a trailing
@@ -199,6 +201,16 @@ func TestAppendRun_KeepsATransactionContiguous(t *testing.T) {
 // hold-across-calls behaviour, or because the competitors stopped competing — then
 // the positive test is no longer measuring anything and this failure says so.
 func TestAppend_LoopInterleavesUnderConcurrency(t *testing.T) {
+	// A NEGATIVE CONTROL: it requires the interleaving to be OBSERVED, which needs
+	// the eight appenders to genuinely contend. Coverage instrumentation makes every
+	// basic block longer and more uniform, which is enough to stop the loop being
+	// caught mid-run — measured under `make cover-gate` as "a loop of 24 individual
+	// Appends stayed contiguous across 5 attempts against 8 concurrent appenders",
+	// with the same test passing on its own package (rmp #2319). Skipping states the
+	// precondition; lowering the bar would make AppendRun's contiguity test
+	// unfalsifiable.
+	testlayers.RequireUninstrumented(t, "the interleaving of a 24-frame append loop "+
+		"against 8 concurrent appenders, which must be observed at least once in 5 attempts")
 	const frames = 24
 	// Contention is scheduler-dependent, so allow several attempts before
 	// concluding the interleaving cannot be observed at all. One observation is

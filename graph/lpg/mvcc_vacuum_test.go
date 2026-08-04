@@ -92,24 +92,38 @@ func TestVacuum_CommitPathPerformsNoReclamation(t *testing.T) {
 		}
 	}
 
-	// A synchronous commit-path sweep cannot leave this many retained: it would
-	// have swept at the threshold, before returning.
-	if peak <= reclaimThreshold+2 {
-		t.Errorf("the retained count never exceeded %d over %d modifications, which is what a "+
-			"SYNCHRONOUS commit-path sweep produces: reclamation is still on the commit path",
-			reclaimThreshold+2, rounds)
-	}
-	// And it is still bounded, so "no sweep on the commit path" has not become "no
+	// It is still bounded, so "no sweep on the commit path" has not become "no
 	// reclamation".
 	if limit := int64(reclaimDebtCeiling + reclaimThreshold); peak > limit {
 		t.Errorf("the retained count peaked at %d over an instantaneous bound of %d", peak, limit)
 	}
 
+	// THE DISCRIMINATOR: every record that went is ATTRIBUTED to a vacuum pass.
+	// VacuumStats.Reclaimed is incremented only by [Graph.vacuumLoop], so records
+	// freed by a commit-path sweep do not appear in it. Measured on this workload,
+	// which creates about one version per round: the vacuum accounts for 16 322 of
+	// 16 384 (99.6 %) on the correct build, and for 8 676 (53 %) once a synchronous
+	// commit-path sweep is restored. Nine tenths separates them with margin.
+	//
+	// The obvious instrument — assert the retained count PEAKED above the threshold,
+	// which a synchronous sweep could never allow — was tried and REJECTED because it
+	// is itself a race: under -race the writer is slow enough that the sweeper keeps
+	// up perfectly and the peak never rises, so it failed on the CORRECT build inside
+	// make ci ("never exceeded 4098 over 16384 modifications"). Holding the
+	// single-sweeper slot was rejected for the opposite reason: the placement this
+	// replaces guarded itself with that same slot and skipped when it was busy, so it
+	// passed against the very code it was written to catch.
 	waitWithinBound(t, g)
 	vs := g.VacuumStats()
-	if vs.Passes == 0 || vs.Reclaimed == 0 {
-		t.Errorf("the substrate settled with %d vacuum passes and %d records reclaimed by them: "+
-			"the records were freed by something other than the vacuum", vs.Passes, vs.Reclaimed)
+	if vs.Passes == 0 {
+		t.Errorf("the substrate settled with ZERO vacuum passes: the records were freed by " +
+			"something other than the vacuum, which means reclamation is still on the " +
+			"commit path")
+	}
+	if want := int64(rounds) * 9 / 10; vs.Reclaimed < want {
+		t.Errorf("vacuum passes account for only %d records over %d modifications, short of the "+
+			"%d that attribution requires: the rest were freed by something other than the "+
+			"vacuum, which means reclamation is still on the commit path", vs.Reclaimed, rounds, want)
 	}
 }
 

@@ -599,6 +599,22 @@ func (g *Graph[N, W]) vacuumLoop() {
 
 		idle++
 		if idle >= vacuumIdlePasses {
+			// NOT YET, if versions arrived after this pass began. The debt is reset at
+			// the top of every pass, so a non-zero value here means work landed that no
+			// pass has looked at — and nothing will wake this goroutine for it: the
+			// churn signal fires only above [reclaimThreshold] and the drain signal only
+			// when a READER leaves, so a writer that stops just short of the threshold
+			// satisfies neither.
+			//
+			// Measured before this check, on TestMVCCBound_SustainedWritesStayFlat: the
+			// sweeper exited holding 5 648 records against a bound of 4 096, with a
+			// backlog of 2 715 and no active reader — nothing was holding them back and
+			// nothing was going to free them. It passed intermittently, because whether
+			// the last pass ran after the last write is a matter of scheduling.
+			if g.reclaimDebt.Load() > 0 {
+				idle = 0
+				continue
+			}
 			return
 		}
 		if backoff *= 2; backoff > vacuumMaxBackoff {
