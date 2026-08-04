@@ -46,7 +46,8 @@
 // ([Engine.BeginTx]) holds it from BEGIN until COMMIT/ROLLBACK, so concurrent
 // writers block until it finishes (write-write isolation). Reads ([Engine.Run])
 // never take the writer lock. The lock order is writer-lock (outermost) → the
-// graph visibility barrier (visMu, inside [lpg.Graph.ApplyAtomically]); both
+// graph schema barrier (visMu, taken SHARED inside [lpg.Graph.ApplyVersioned]
+// since rmp #2320, and exclusively only by DDL and an explicit transaction); both
 // wirings share it, so no deadlock is possible across them.
 //
 // # Transactions
@@ -954,11 +955,13 @@ type ConstraintDef struct {
 // Engine is safe for concurrent use. A single Engine may serve any number of
 // concurrent [Engine.Run] readers together with concurrent [Engine.RunInTx]
 // writers: each call builds its own operator tree, the plan cache is
-// internally synchronised, and both the physical-plan build and execution run
-// under the graph's visibility barrier ([lpg.Graph.View] for reads,
-// [lpg.Graph.ApplyAtomically] for writes). A writer that grows the node space
-// can therefore never tear a concurrent reader's plan build, and readers never
-// observe a partially-applied write transaction (#1077, audit gap F3).
+// internally synchronised, and the physical-plan build and execution of a WRITE
+// run under [lpg.Graph.ApplyVersioned], which holds the schema barrier shared
+// (rmp #2320). A reader takes a snapshot and no lock at all (rmp #2290). A writer
+// that grows the node space can therefore never tear a concurrent reader's plan
+// build, and readers never observe a partially-applied write transaction — the
+// second guarantee now coming from the transaction's shared commit record rather
+// than from exclusion (#1077, audit gap F3).
 //
 // Write queries remain subject to the underlying store's single-writer
 // constraint: when the Engine is backed by a [txn.Store], concurrent
@@ -1063,9 +1066,13 @@ type Engine struct {
 	// holds it from BEGIN until COMMIT or ROLLBACK, so a concurrent writer
 	// blocks until the transaction finishes — the same isolation the store
 	// mutex gives the WAL-backed wiring. The lock order is writeMu (outermost)
-	// → visMu (inside [lpg.Graph.ApplyAtomically]), matching the WAL-backed
-	// store-mutex → visMu order, so the two wirings share one deadlock-free
-	// ordering. readers ([Engine.Run] / [lpg.Graph.View]) never take it.
+	// → visMu (taken shared inside [lpg.Graph.ApplyVersioned]), matching the
+	// WAL-backed store-mutex → visMu order, so the two wirings share one
+	// deadlock-free ordering. Readers ([Engine.Run]) never take it.
+	//
+	// Since rmp #2320 THIS is what still serialises writes on a store-less engine:
+	// the barrier no longer does, so retiring it (rmp #2306) is what lets a
+	// store-less engine scale its writes at all.
 	writeMu sync.Mutex
 
 	// hashJoinEnabled gates the disconnected-equi-join hash-join optimisation
@@ -3647,15 +3654,18 @@ func commitIndexTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind txn.Inde
 // tombstone, label, and property state after every shard lock is released. The
 // keys are interned and immutable, so resolving them outside the walk is safe.
 //
-// Both phases run inside [lpg.Graph.View] (task #1341): the scan observes a
-// consistent snapshot in which no in-flight transaction is half-applied —
-// every transaction committed via [lpg.Graph.ApplyAtomically] is visible
-// either entirely or not at all. Holding the visibility read lock across the
-// Walk is deadlock-free with respect to the #1339 scenario: every writer
-// mutates only inside ApplyAtomically (visMu.Lock), so while View's read lock
-// is held no [graph.Mapper.Intern] can be queued on a shard. Callers must not
-// already be inside View/ApplyAtomically (the barrier is not re-entrant; the
-// lpg barrier guard panics on misuse).
+// Both phases run inside [lpg.Graph.View] (task #1341), which keeps the CATALOG
+// stable across the scan and keeps the Walk deadlock-free with respect to the
+// #1339 scenario. Callers must not already be inside View/ApplyAtomically (the
+// barrier is not re-entrant; the lpg barrier guard panics on misuse).
+//
+// It does NOT give the scan a consistent view of DATA: since rmp #2320 an ordinary
+// write holds the same barrier SHARED, so a value a concurrent writer is adding may
+// or may not be seen here. That is sound for what this scan is FOR — it
+// pre-validates a constraint that is not yet registered, and every write after
+// registration is checked by the enforcement path — so a value added during the
+// scan is caught there rather than missed. A scan that needed a consistent data
+// view would take a snapshot instead.
 //
 // Polls ctx at the same ~4096-row granularity as [Engine.backfillNodeHashIndex]
 // (rmp #1872 — this scan polled no cancellation at all before, leaving a large
@@ -15609,20 +15619,26 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 		mutator = la
 	}
 
-	// STILL THE EXCLUSIVE BRACKET. rmp #2304 flipped this to lpg.Graph.ApplyVersioned
-	// and had to flip it back: measured, that removes the barrier and delivers 15.1x
-	// WAL write scaling, but it also breaks atomic visibility, because the deltas a
-	// statement writes still resolve their commit record through the graph's AMBIENT
-	// slot (every mutator below reaches lpg through the public API, which carries no
-	// transaction). With two brackets open the slot names whichever published last,
-	// so one statement's writes land on two different commit records and a snapshot
-	// reader observes half a transaction. Measured with examples/27_concurrent_txn:
-	// 105 942 torn observations, and 147 slot overwrites of a still-open transaction.
+	// THE SHARED BRACKET (rmp #2320): concurrent autocommit statements overlap and
+	// are serialised only by the per-object latches guarding each version-chain
+	// head, not by the visibility barrier.
 	//
-	// Flipping it for good needs the write path to CARRY its transaction — the
-	// lpg.WriteTx this closure is already handed — which means exported transaction-
-	// aware forms of the ~21 lpg mutators the adapters call. See rmp #2306.
-	r, buildErr := e.execUnderBarrier(ctx, plan, queryReg, params, mutator, buf, undo, walTx, true, e.g.ApplyAtomicallyTx, touched)
+	// rmp #2304 made this flip first and had to revert it. Removing the barrier
+	// delivered 15.13x durable write scaling at 32 writers (267 -> 4041 commits/s)
+	// and broke atomic visibility, because the deltas a statement wrote still
+	// resolved their commit record through the graph's AMBIENT slot: every mutator
+	// reached lpg through the public API, which carried no transaction. With two
+	// brackets open the slot names whichever published last, so one statement's
+	// writes landed on two different commit records and a snapshot reader observed
+	// half a transaction — 105 942 torn observations from examples/27_concurrent_txn
+	// and 147 slot overwrites of a still-open transaction.
+	//
+	// rmp #2320 is what made the flip sound: the adapters mutate through
+	// lpg.WriteView, built from the lpg.WriteTx this closure is handed, so every
+	// version of one statement points at ONE commit record and publication stays a
+	// single atomic store however many stores the statement spanned. Exclusion made
+	// the interleaving impossible; versioning makes it unobservable.
+	r, buildErr := e.execUnderBarrier(ctx, plan, queryReg, params, mutator, buf, undo, walTx, true, e.g.ApplyVersioned, touched)
 	if buildErr != nil {
 		if walTx != nil {
 			_ = walTx.Rollback()
@@ -15710,6 +15726,12 @@ func (e *Engine) execUnderBarrier(
 		// bracket opens — they must be, since opening it is what mints the
 		// transaction — so this is the earliest point at which the handle exists.
 		setMutatorWriteTx(mutator, wtx)
+		// The undo log needs the same handle, and for a reason the forward path does
+		// not have: an undo runs when the transaction is DOOMED, and a doomed
+		// transaction refuses further writes — so the replay has to declare itself as
+		// unwinding or every inverse is refused and the rollback applies nothing
+		// (rmp #2320, see lpg.WriteTx.EnterUndo).
+		undo.bindTx(wtx)
 		// Roll the in-memory graph back BEFORE this panic leaves the barrier; see
 		// the type-level note above and replayUndoOnPanic for why this must run
 		// while visMu is still held.
@@ -15909,6 +15931,19 @@ type lpgMutatorAdapter struct {
 // back-pointer rather than caching it in a field (task #2101); the store is set
 // once at engine construction and never reassigned, so this is byte-identical to
 // the former cached field while saving one adapter word.
+// w returns the graph bound to THIS statement's write transaction — the surface
+// every mutation below goes through (rmp #2320).
+//
+// It is built per call from the two words the adapter already holds, so it costs
+// nothing: [lpg.WriteView] is a value type and does not escape. Building it here
+// rather than caching it in a field is deliberate — [setMutatorWriteTx] installs
+// wtx after the adapter is constructed, so a cached view would be built from the
+// zero transaction and would carry none.
+//
+// A zero wtx yields a view that carries no transaction, which is exactly right
+// for the read-only adapter stubs that never open a bracket.
+func (a *lpgMutatorAdapter) w() lpg.WriteView[string, float64] { return a.g.Writer(a.wtx) }
+
 func (a *lpgMutatorAdapter) cs() *count.Store {
 	if a.eng == nil {
 		return nil
@@ -16060,7 +16095,7 @@ func (a *lpgMutatorAdapter) countIsFresh(n string) bool {
 // rec returns the inverse-recording helper bound to this adapter's graph and
 // undo log.
 func (a *lpgMutatorAdapter) rec() mutationUndo {
-	return mutationUndo{g: a.g, undo: a.undo, touched: a.touched}
+	return mutationUndo{wv: a.w(), undo: a.undo, touched: a.touched}
 }
 
 // resolveID translates n to its stable NodeID, returning graph.NodeID(0)
@@ -16083,7 +16118,7 @@ func (a *lpgMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 	if existed && a.g.IsTombstoned(idBefore) {
 		existed = false
 	}
-	if err := a.g.AddNode(n); err != nil {
+	if err := a.w().AddNode(n); err != nil {
 		return 0, err
 	}
 	id, _ := a.g.AdjList().Mapper().Lookup(n)
@@ -16113,7 +16148,7 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	if !a.g.AdjList().Multigraph() && edgeExisted {
 		return 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
 	}
-	if err := a.g.AddEdge(src, dst, w); err != nil {
+	if err := a.w().AddEdge(src, dst, w); err != nil {
 		return 0, 0, err
 	}
 	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
@@ -16145,7 +16180,7 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	if !a.g.AdjList().Multigraph() && edgeExisted {
 		return 0, 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
 	}
-	handle, err := a.g.AddEdgeH(src, dst, w)
+	handle, err := a.w().AddEdgeH(src, dst, w)
 	if err != nil {
 		return 0, 0, 0, err
 	}
@@ -16188,7 +16223,7 @@ func (a *lpgMutatorAdapter) RemoveEdge(src, dst string) {
 			countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
 		}
 	}
-	a.g.RemoveEdge(src, dst)
+	a.w().RemoveEdge(src, dst)
 	r.recordRemoveEdge(&pre, present)
 }
 
@@ -16217,7 +16252,7 @@ func (a *lpgMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 			countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
 		}
 	}
-	removed := a.g.RemoveEdgeByHandle(src, dst, handle)
+	removed := a.w().RemoveEdgeByHandle(src, dst, handle)
 	if removed {
 		a.countRelDeleted()
 	}
@@ -16238,7 +16273,7 @@ func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) error {
 	// #2212: a label already present is a no-op and counts nothing. Probed
 	// independently of hadLabel, which is gated on the undo recorder being active.
 	labelIsNew := a.counters != nil && !a.g.HasNodeLabel(n, label)
-	if err := a.g.SetNodeLabel(n, label); err != nil {
+	if err := a.w().SetNodeLabel(n, label); err != nil {
 		return err
 	}
 	if labelIsNew {
@@ -16271,7 +16306,7 @@ func (a *lpgMutatorAdapter) RemoveNodeLabel(n, label string) {
 	}
 	// #2212: removing an absent label counts nothing.
 	labelWasPresent := a.counters != nil && a.g.HasNodeLabel(n, label)
-	a.g.RemoveNodeLabel(n, label)
+	a.w().RemoveNodeLabel(n, label)
 	if labelWasPresent {
 		a.countLabelRemoved()
 	}
@@ -16301,7 +16336,7 @@ func (a *lpgMutatorAdapter) RemoveNode(n string) {
 	if wasLive {
 		a.countNodeDeleted()
 	}
-	a.g.RemoveNode(n)
+	a.w().RemoveNode(n)
 	a.rec().recordRemoveNode(n, wasLive)
 }
 
@@ -16324,7 +16359,7 @@ func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	if r.active() || fanout || statsActive {
 		prev, had = a.g.GetNodeProperty(n, key)
 	}
-	if err := a.g.SetNodeProperty(n, key, value); err != nil {
+	if err := a.w().SetNodeProperty(n, key, value); err != nil {
 		return err
 	}
 	a.countPropertySet()
@@ -16368,7 +16403,7 @@ func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) {
 			a.countPropertyRemoved()
 		}
 	}
-	a.g.DelNodeProperty(n, key)
+	a.w().DelNodeProperty(n, key)
 	r.recordDelNodeProperty(n, key, prev, had)
 	if a.buf != nil {
 		ch := index.Change{
@@ -16408,7 +16443,7 @@ func (a *lpgMutatorAdapter) HasEdge(src, dst string) bool {
 func (a *lpgMutatorAdapter) SetEdgeLabel(src, dst, label string) {
 	r := a.rec()
 	hadLabel := r.active() && a.g.HasEdgeLabel(src, dst, label)
-	a.g.SetEdgeLabel(src, dst, label)
+	a.w().SetEdgeLabel(src, dst, label)
 	r.recordSetEdgeLabel(src, dst, label, hadLabel)
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
@@ -16428,7 +16463,7 @@ func (a *lpgMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 	if r.active() {
 		prev, had = a.g.GetEdgeProperty(src, dst, key)
 	}
-	if err := a.g.SetEdgeProperty(src, dst, key, value); err != nil {
+	if err := a.w().SetEdgeProperty(src, dst, key, value); err != nil {
 		return err
 	}
 	a.countPropertySet()
@@ -16459,7 +16494,7 @@ func (a *lpgMutatorAdapter) DelEdgeProperty(src, dst, key string) {
 			a.countPropertyRemoved()
 		}
 	}
-	a.g.DelEdgeProperty(src, dst, key)
+	a.w().DelEdgeProperty(src, dst, key)
 	r.recordDelEdgeProperty(src, dst, key, prev, had)
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
@@ -16504,19 +16539,19 @@ func (a *lpgMutatorAdapter) DecEdgeCreateCount(src, dst string) {
 // RemoveEdgeInstance delegate to the per-instance metadata stores on
 // the underlying [lpg.Graph].
 func (a *lpgMutatorAdapter) SetEdgeLabelAt(src, dst string, idx int64, label string) {
-	a.g.SetEdgeLabelAt(src, dst, idx, label)
+	a.w().SetEdgeLabelAt(src, dst, idx, label)
 }
 func (a *lpgMutatorAdapter) EdgeLabelsAt(src, dst string, idx int64) []string {
 	return a.g.EdgeLabelsAt(src, dst, idx)
 }
 func (a *lpgMutatorAdapter) SetEdgePropertyAt(src, dst string, idx int64, key string, value lpg.PropertyValue) error {
-	return a.g.SetEdgePropertyAt(src, dst, idx, key, value)
+	return a.w().SetEdgePropertyAt(src, dst, idx, key, value)
 }
 func (a *lpgMutatorAdapter) EdgePropertiesAt(src, dst string, idx int64) map[string]lpg.PropertyValue {
 	return a.g.EdgePropertiesAt(src, dst, idx)
 }
 func (a *lpgMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
-	a.g.RemoveEdgeInstance(src, dst, idx)
+	a.w().RemoveEdgeInstance(src, dst, idx)
 }
 
 // SetEdgeLabelByHandle / EdgeLabelsByHandle / SetEdgePropertyByHandle /
@@ -16529,7 +16564,7 @@ func (a *lpgMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
 // there is on the CREATE path (#1686/#1282). The store-less engine has no WAL,
 // so these buffer no transaction op; their durability is the in-memory graph.
 func (a *lpgMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) {
-	a.g.SetEdgeLabelByHandle(src, dst, handle, label)
+	a.w().SetEdgeLabelByHandle(src, dst, handle, label)
 	// Count-store (#2082): SetEdgeLabelByHandle is the single authoritative
 	// once-per-edge typing hook (create_relationship.go also fires SetEdgeLabel and
 	// SetEdgeLabelAt for the same edge; only the by-handle form is counted, so the
@@ -16549,7 +16584,7 @@ func (a *lpgMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint
 	if r.active() && handle != 0 {
 		prev, had = a.g.EdgePropertiesByHandle(src, dst, handle)[key]
 	}
-	if err := a.g.SetEdgePropertyByHandle(src, dst, handle, key, value); err != nil {
+	if err := a.w().SetEdgePropertyByHandle(src, dst, handle, key, value); err != nil {
 		return err
 	}
 	r.recordSetEdgePropertyByHandle(src, dst, handle, key, prev, had)
@@ -16562,14 +16597,14 @@ func (a *lpgMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint
 	if r.active() && handle != 0 {
 		prev, had = a.g.EdgePropertiesByHandle(src, dst, handle)[key]
 	}
-	a.g.DelEdgePropertyByHandle(src, dst, handle, key)
+	a.w().DelEdgePropertyByHandle(src, dst, handle, key)
 	r.recordDelEdgePropertyByHandle(src, dst, handle, key, prev, had)
 }
 func (a *lpgMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {
 	return a.g.EdgePropertiesByHandle(src, dst, handle)
 }
 func (a *lpgMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
-	a.g.RemoveEdgeInstanceByHandle(src, dst, handle)
+	a.w().RemoveEdgeInstanceByHandle(src, dst, handle)
 }
 
 // EdgeHandleAtPosition resolves the bound relationship instance's stable handle
@@ -16664,7 +16699,7 @@ func (a *lpgMutatorAdapter) RemoveAllEdgesFrom(n string) {
 	// Snapshot incoming neighbours for directed graphs: outgoing-only bulk
 	// removal won't remove edges pointing at n; those are handled by the
 	// detach_delete caller's InNeighbours loop via individual RemoveEdge calls.
-	a.g.RemoveAllEdgesFrom(n)
+	a.w().RemoveAllEdgesFrom(n)
 }
 
 // OutDegree returns the number of outgoing edges from n.
@@ -16895,8 +16930,21 @@ func (a *walMutatorAdapter) countIsFresh(n string) bool {
 
 // rec returns the inverse-recording helper bound to this adapter's graph and
 // undo log.
+// w returns the graph bound to THIS statement's write transaction — the surface
+// every mutation below goes through (rmp #2320).
+//
+// It is built per call from the two words the adapter already holds, so it costs
+// nothing: [lpg.WriteView] is a value type and does not escape. Building it here
+// rather than caching it in a field is deliberate — [setMutatorWriteTx] installs
+// wtx after the adapter is constructed, so a cached view would be built from the
+// zero transaction and would carry none.
+//
+// A zero wtx yields a view that carries no transaction, which is exactly right
+// for the read-only adapter stubs that never open a bracket.
+func (a *walMutatorAdapter) w() lpg.WriteView[string, float64] { return a.g.Writer(a.wtx) }
+
 func (a *walMutatorAdapter) rec() mutationUndo {
-	return mutationUndo{g: a.g, undo: a.undo, touched: a.touched}
+	return mutationUndo{wv: a.w(), undo: a.undo, touched: a.touched}
 }
 
 func (a *walMutatorAdapter) resolveID(n string) graph.NodeID {
@@ -16917,7 +16965,7 @@ func (a *walMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 	if existed && a.g.IsTombstoned(idBefore) {
 		existed = false
 	}
-	if err := a.g.AddNode(n); err != nil {
+	if err := a.w().AddNode(n); err != nil {
 		return 0, err
 	}
 	_ = a.tx.AddNode(n) //nolint:errcheck // tx is non-nil; only ErrTxFinished possible, which cannot occur here
@@ -16938,7 +16986,7 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	if !a.g.AdjList().Multigraph() && edgeExisted {
 		return 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
 	}
-	if err := a.g.AddEdge(src, dst, w); err != nil {
+	if err := a.w().AddEdge(src, dst, w); err != nil {
 		return 0, 0, err
 	}
 	_ = a.tx.AddEdge(src, dst, w) //nolint:errcheck // ErrNoWeightCodec cannot occur — store has wcodec via NewEngineWithStore
@@ -16981,7 +17029,7 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	if !a.g.AdjList().Multigraph() && edgeExisted {
 		return 0, 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
 	}
-	handle, err := a.g.AddEdgeH(src, dst, w)
+	handle, err := a.w().AddEdgeH(src, dst, w)
 	if err != nil {
 		return 0, 0, 0, err
 	}
@@ -17023,7 +17071,7 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 			countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
 		}
 	}
-	a.g.RemoveEdge(src, dst)
+	a.w().RemoveEdge(src, dst)
 	_ = a.tx.RemoveEdge(src, dst) //nolint:errcheck // ErrTxFinished impossible here
 	r.recordRemoveEdge(&pre, present)
 }
@@ -17051,7 +17099,7 @@ func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 			countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
 		}
 	}
-	removed := a.g.RemoveEdgeByHandle(src, dst, handle)
+	removed := a.w().RemoveEdgeByHandle(src, dst, handle)
 	if removed {
 		a.countRelDeleted()
 	}
@@ -17070,7 +17118,7 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 	// #2212: a label already present is a no-op and counts nothing. Probed
 	// independently of hadLabel, which is gated on the undo recorder being active.
 	labelIsNew := a.counters != nil && !a.g.HasNodeLabel(n, label)
-	if err := a.g.SetNodeLabel(n, label); err != nil {
+	if err := a.w().SetNodeLabel(n, label); err != nil {
 		return err
 	}
 	if labelIsNew {
@@ -17102,7 +17150,7 @@ func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) {
 	}
 	// #2212: removing an absent label counts nothing.
 	labelWasPresent := a.counters != nil && a.g.HasNodeLabel(n, label)
-	a.g.RemoveNodeLabel(n, label)
+	a.w().RemoveNodeLabel(n, label)
 	if labelWasPresent {
 		a.countLabelRemoved()
 	}
@@ -17133,7 +17181,7 @@ func (a *walMutatorAdapter) RemoveNode(n string) {
 	if wasLive {
 		a.countNodeDeleted()
 	}
-	a.g.RemoveNode(n)
+	a.w().RemoveNode(n)
 	a.rec().recordRemoveNode(n, wasLive)
 	_ = a.tx.RemoveNode(n) //nolint:errcheck // ErrTxFinished impossible here; not-found is safe to ignore
 }
@@ -17154,7 +17202,7 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	if r.active() || fanout || statsActive {
 		prev, had = a.g.GetNodeProperty(n, key)
 	}
-	if err := a.g.SetNodeProperty(n, key, value); err != nil {
+	if err := a.w().SetNodeProperty(n, key, value); err != nil {
 		return err
 	}
 	a.countPropertySet()
@@ -17196,7 +17244,7 @@ func (a *walMutatorAdapter) DelNodeProperty(n, key string) {
 			a.countPropertyRemoved()
 		}
 	}
-	a.g.DelNodeProperty(n, key)
+	a.w().DelNodeProperty(n, key)
 	r.recordDelNodeProperty(n, key, prev, had)
 	_ = a.tx.DelNodeProperty(n, key) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
@@ -17235,7 +17283,7 @@ func (a *walMutatorAdapter) HasEdge(src, dst string) bool {
 func (a *walMutatorAdapter) SetEdgeLabel(src, dst, label string) {
 	r := a.rec()
 	hadLabel := r.active() && a.g.HasEdgeLabel(src, dst, label)
-	a.g.SetEdgeLabel(src, dst, label)
+	a.w().SetEdgeLabel(src, dst, label)
 	r.recordSetEdgeLabel(src, dst, label, hadLabel)
 	_ = a.tx.SetEdgeLabel(src, dst, label) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
@@ -17256,7 +17304,7 @@ func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 	if r.active() {
 		prev, had = a.g.GetEdgeProperty(src, dst, key)
 	}
-	if err := a.g.SetEdgeProperty(src, dst, key, value); err != nil {
+	if err := a.w().SetEdgeProperty(src, dst, key, value); err != nil {
 		return err
 	}
 	a.countPropertySet()
@@ -17288,7 +17336,7 @@ func (a *walMutatorAdapter) DelEdgeProperty(src, dst, key string) {
 			a.countPropertyRemoved()
 		}
 	}
-	a.g.DelEdgeProperty(src, dst, key)
+	a.w().DelEdgeProperty(src, dst, key)
 	r.recordDelEdgeProperty(src, dst, key, prev, had)
 	_ = a.tx.DelEdgeProperty(src, dst, key) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
@@ -17346,19 +17394,19 @@ func (a *walMutatorAdapter) DecEdgeCreateCount(src, dst string) {
 // recordRemoveEdge re-adds the instance with that handle and restores them
 // (#1327).
 func (a *walMutatorAdapter) SetEdgeLabelAt(src, dst string, idx int64, label string) {
-	a.g.SetEdgeLabelAt(src, dst, idx, label)
+	a.w().SetEdgeLabelAt(src, dst, idx, label)
 }
 func (a *walMutatorAdapter) EdgeLabelsAt(src, dst string, idx int64) []string {
 	return a.g.EdgeLabelsAt(src, dst, idx)
 }
 func (a *walMutatorAdapter) SetEdgePropertyAt(src, dst string, idx int64, key string, value lpg.PropertyValue) error {
-	return a.g.SetEdgePropertyAt(src, dst, idx, key, value)
+	return a.w().SetEdgePropertyAt(src, dst, idx, key, value)
 }
 func (a *walMutatorAdapter) EdgePropertiesAt(src, dst string, idx int64) map[string]lpg.PropertyValue {
 	return a.g.EdgePropertiesAt(src, dst, idx)
 }
 func (a *walMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
-	a.g.RemoveEdgeInstance(src, dst, idx)
+	a.w().RemoveEdgeInstance(src, dst, idx)
 }
 
 // SetEdgeLabelByHandle / EdgeLabelsByHandle / SetEdgePropertyByHandle /
@@ -17378,7 +17426,7 @@ func (a *walMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
 // [lpg.Graph.ApplyAtomically] window and the one transaction the per-pair write
 // uses, so the per-pair and per-handle stores stay atomic together.
 func (a *walMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) {
-	a.g.SetEdgeLabelByHandle(src, dst, handle, label)
+	a.w().SetEdgeLabelByHandle(src, dst, handle, label)
 	_ = a.tx.SetEdgeLabelByHandle(src, dst, handle, label) //nolint:errcheck // ErrTxFinished impossible here
 	// Count-store (#2082): the single authoritative once-per-edge typing hook.
 	if a.cs() != nil {
@@ -17395,7 +17443,7 @@ func (a *walMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint
 	if r.active() && handle != 0 {
 		prev, had = a.g.EdgePropertiesByHandle(src, dst, handle)[key]
 	}
-	if err := a.g.SetEdgePropertyByHandle(src, dst, handle, key, value); err != nil {
+	if err := a.w().SetEdgePropertyByHandle(src, dst, handle, key, value); err != nil {
 		return err
 	}
 	r.recordSetEdgePropertyByHandle(src, dst, handle, key, prev, had)
@@ -17409,7 +17457,7 @@ func (a *walMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint
 	if r.active() && handle != 0 {
 		prev, had = a.g.EdgePropertiesByHandle(src, dst, handle)[key]
 	}
-	a.g.DelEdgePropertyByHandle(src, dst, handle, key)
+	a.w().DelEdgePropertyByHandle(src, dst, handle, key)
 	r.recordDelEdgePropertyByHandle(src, dst, handle, key, prev, had)
 	_ = a.tx.DelEdgePropertyByHandle(src, dst, handle, key) //nolint:errcheck // ErrTxFinished impossible here
 }
@@ -17417,7 +17465,7 @@ func (a *walMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint6
 	return a.g.EdgePropertiesByHandle(src, dst, handle)
 }
 func (a *walMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
-	a.g.RemoveEdgeInstanceByHandle(src, dst, handle)
+	a.w().RemoveEdgeInstanceByHandle(src, dst, handle)
 	_ = a.tx.RemoveEdgeInstanceByHandle(src, dst, handle) //nolint:errcheck // ErrTxFinished impossible here
 }
 
@@ -17501,7 +17549,7 @@ func (a *walMutatorAdapter) RemoveAllEdgesFrom(n string) {
 		countAllOutEdgesRemoved(a.g, a.cs(), a.countBuf(), n)
 	}
 	// Bulk-remove from the in-memory graph (O(d) instead of O(d²)).
-	a.g.RemoveAllEdgesFrom(n)
+	a.w().RemoveAllEdgesFrom(n)
 }
 
 // OutDegree returns the number of outgoing edges from n.

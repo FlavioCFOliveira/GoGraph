@@ -161,6 +161,35 @@ type WriteTx struct{ w *writeCtx }
 // transaction to name and every write is committed as it is made.
 func (tx WriteTx) Valid() bool { return tx.w != nil }
 
+// EnterUndo marks the start of this transaction's PHYSICAL undo replay, during
+// which its writes are withdrawals of work it already applied rather than new
+// updates.
+//
+// It must be paired with exactly one [WriteTx.ExitUndo], and the region must
+// cover the whole replay. Inside it, a write is no longer refused merely because
+// the transaction is doomed — which it always is when an undo has to run — while
+// the per-object head test still applies, so an inverse can withdraw this
+// transaction's own versions and nothing else. [writeCtx.undoing] carries the
+// full reasoning, the prior art and the lost update this closes.
+//
+// Both are no-ops on the zero value, so a caller can bracket unconditionally.
+//
+// The region must not be entered concurrently from two goroutines, which is
+// already the contract for driving one write transaction.
+func (tx WriteTx) EnterUndo() {
+	if tx.w != nil {
+		tx.w.undoing.Store(true)
+	}
+}
+
+// ExitUndo ends the region [WriteTx.EnterUndo] opened, restoring the ordinary
+// rule that a doomed transaction refuses further writes.
+func (tx WriteTx) ExitUndo() {
+	if tx.w != nil {
+		tx.w.undoing.Store(false)
+	}
+}
+
 // WriterView is [Graph.writerView] for a caller in another package — the Cypher
 // engine's write path, which must read as of the writing transaction rather
 // than as of the present.
@@ -315,3 +344,23 @@ func (g *Graph[N, W]) DisableMVCC() {
 
 // MVCCEnabled reports whether the versioning substrate is armed.
 func (g *Graph[N, W]) MVCCEnabled() bool { return g.mvccArmed }
+
+// AmbientVersionResolutions returns how many versions have resolved their
+// transaction through the graph's AMBIENT slot rather than carrying it — the
+// resolution rmp #2320 removed from the Cypher and store write paths.
+//
+// It is the observable form of an invariant that is otherwise only assertable by
+// inspecting version chains: a write path that carries its transaction leaves this
+// counter untouched, and a single ambient resolution inside a statement is enough
+// to split that statement across two commit records once a second write bracket is
+// open. Sample it before and after a region and require the difference to be zero.
+//
+// A non-zero difference is not automatically a defect: the direct Go-API mutators
+// resolve this way BY CONTRACT — they are per-operation atomic, not transactional
+// — as do the bulk builders, WAL replay and snapshot apply. It is a defect for any
+// path that runs inside a write bracket.
+//
+// Cumulative and never reset, so two observers cannot take it from each other.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) AmbientVersionResolutions() int64 { return g.stamp.AmbientResolutions() }

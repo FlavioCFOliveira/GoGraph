@@ -564,12 +564,13 @@ type Graph[N comparable, W any] struct {
 	//
 	//   - rmp #2290 took it off the read path. [Engine.Run] does not acquire it;
 	//     a read gets its consistency from an MVCC snapshot.
-	//   - rmp #2304 took the ORDINARY WRITE path off its exclusive side. An
+	//   - rmp #2320 took the ORDINARY WRITE path off its exclusive side. An
 	//     autocommit statement and the durable store's apply run under
 	//     [Graph.ApplyVersioned], which holds this SHARED, so writers no longer
 	//     exclude one another; atomic visibility comes from the transaction's
 	//     shared commit record instead (see ApplyVersioned for the substitution
-	//     and the prior art).
+	//     and the prior art). rmp #2304 made the same flip first and had to revert
+	//     it, because the writes did not yet CARRY their transaction.
 	//
 	// Who still holds it EXCLUSIVELY, and why each genuinely needs to:
 	//
@@ -581,16 +582,17 @@ type Graph[N comparable, W any] struct {
 	//     ([Graph.LockBarrier]/[Graph.UnlockBarrier], task #1412). Retiring this
 	//     one is rmp #2305: holding it across client think-time is what makes an
 	//     idle Bolt session stall every writer.
-	//   - the checkpointer's capture (store/checkpoint), which needs a graph in
-	//     which nothing is half-applied and reads through accessors with no
-	//     as-of form. rmp #2310 moves it to a transactional instant.
 	//
 	// The SHARED side is held by every ordinary write for its whole bracket,
 	// publication included, which is precisely what makes the exclusive
 	// acquisitions above wait for every in-flight write to become visible.
-	// [Graph.View] also takes it shared, so a View no longer excludes a writer
-	// and is only a consistent view of what the catalog holders change; a caller
-	// that needs a consistent view of DATA takes a snapshot.
+	// [Graph.View] also takes it shared, so a View does NOT exclude a writer and
+	// is only a consistent view of what the catalog holders change; a caller that
+	// needs a consistent view of DATA takes a snapshot. The checkpointer's capture
+	// (store/checkpoint) is such a View caller and rests on the store's own
+	// quiesce — RunUnderCommitLock drains in-flight commits to zero — rather than
+	// on this lock; rmp #2310 moves it to a transactional instant. See
+	// [Graph.View] for the full division and the measurement behind it.
 	//
 	// It is a RWMutex rather than an atomic snapshot pointer by deliberate,
 	// correctness-first choice. The immutable CSR analytics path does not go
@@ -893,16 +895,20 @@ func (g *Graph[N, W]) finishWrite(w *writeCtx, gid int64) {
 // rebuild's reclamation sweep nests inside, and the counter that observes that
 // nesting ([AdjList.NestedServingWindows]) would otherwise stop counting.
 //
-// # What rmp #2306 must still discharge
+// # The owner is now threaded (rmp #2320)
 //
-// builderOwner resolves the transaction through the AMBIENT stamp slot, not
-// through a parameter. That is correct today for a reason outside this package:
-// the eager apply of a write is still bounded to one writer at a time — by
-// Engine.writeMu on a store-less engine and by the store's single-writer
-// semaphore on a WAL-backed one — so no second bracket can publish a transaction
-// id between this one's open and its last write. rmp #2306 retires both of those,
-// and must thread the owner into the adjacency write path at the same time. It is
-// recorded here rather than left to be rediscovered.
+// This note used to record an outstanding obligation: [adjlist.AdjList.builderOwner]
+// resolved the transaction through the AMBIENT stamp slot rather than through a
+// parameter, which was correct only because the eager apply of a write was still
+// bounded to one writer at a time — by Engine.writeMu on a store-less engine and by
+// the store's single-writer semaphore on a WAL-backed one.
+//
+// rmp #2320 discharged it. The adjacency's write chain takes the transaction as an
+// explicit parameter ([adjlist.Writer] carries it, storeEntry consumes it), so the
+// owner comes from the write itself and the ambient lookup remains only for the
+// callers that genuinely have no transaction: the exclusive bulk builds, WAL replay,
+// snapshot apply and the direct Go API. rmp #2306 can therefore retire writeMu and
+// the store semaphore without a second problem attached.
 func (g *Graph[N, W]) finishWriteShared(w *writeCtx, gid int64) {
 	g.endWrite(w)
 	g.releaseWriterSnapshot(w)
@@ -1058,69 +1064,69 @@ func (g *Graph[N, W]) ApplyInsideLockedTx(fn func(WriteTx) error) error {
 	return fn(g.AmbientWriteTx())
 }
 
-// View runs fn while holding the graph's schema barrier in READ mode, so fn
-// observes a graph in which no write transaction is partially applied.
+// View runs fn while holding the graph's SCHEMA barrier in READ mode, so fn
+// observes a graph whose catalog — the declared indexes and constraints, and the
+// structures a DDL transition rebuilds — is not mid-transition.
 //
-// # Why the shared hold suffices TODAY, and what breaks it (rmp #2304)
+// # It does NOT isolate fn from concurrent DATA writes (rmp #2320)
 //
-// It suffices for exactly one reason: an ordinary write holds the same barrier
-// EXCLUSIVELY, so a reader here and a writer cannot overlap. The guarantee comes
-// from the writer's side of the lock, not from this side.
+// It used to, and the guarantee never came from this side of the lock: an
+// ordinary write held the same barrier EXCLUSIVELY, so a reader here and a writer
+// could not overlap. rmp #2320 moved ordinary writes to a SHARED hold
+// ([Graph.ApplyVersioned]), and a lock shared with a writer gives a reader here
+// not a weaker guarantee but NONE, because GoGraph updates the stored value IN
+// PLACE and keeps the inverse in the version chain (Memgraph's delta shape, see
+// mvcc_write.go) — so an accessor that resolves no version reads the NEWEST
+// value, another transaction's uncommitted work included. Measured on this build:
+// 7040 partial-transaction observations from a View reader using unversioned
+// accessors, against ZERO from a snapshot reader over 6 488 034 reads
+// (TestIsolation_Commit_NoPartialTransactionObservable and its negative control).
 //
-// rmp #2304 moved ordinary writes to a SHARED hold ([Graph.ApplyVersioned]) and
-// measured what a shared View then gives: nothing. Sharing a lock with a writer is
-// not a weaker guarantee here but NO guarantee, because GoGraph updates the stored
-// value IN PLACE and keeps the inverse in the version chain (Memgraph's delta
-// shape, see mvcc_write.go) — so an accessor that resolves no version reads the
-// NEWEST value, uncommitted work included.
-// TestIsolation_Commit_NoPartialTransactionObservable reported 11 699
-// partial-transaction observations against that build.
+// So the rule is now explicit and has exactly two halves:
 //
-// So when the shared write path lands for good (rmp #2306), this method must EITHER
-// take the barrier exclusively — which costs View-against-View concurrency and,
-// measured, deadlocks the nested-View case that a non-enforcing build tolerates
-// today (reentrancy_disabled_test.go) — OR its remaining callers must read through
-// an MVCC snapshot instead. rmp #2304 already moved the callers that only ever
-// needed a consistent view of DATA (EXPLAIN, PROFILE and the caller-driven
-// statistics rebuild), which is progress on the second route and shrinks what is
-// left to decide: the checkpointer's capture (rmp #2310) and the constraint
-// pre-validation scan.
+//   - a caller that needs a consistent view of DATA takes a SNAPSHOT —
+//     [Graph.BeginRead] plus [Graph.ReadAt], paired with [Graph.EndRead]. That is
+//     what [Engine.Run] does, it takes no lock at all, and it is the only thing
+//     that provides atomic visibility now;
+//   - a caller that needs a consistent view of the CATALOG, or that reads through
+//     an accessor with no as-of form, uses this.
 //
-// A caller that wants a consistent view of data and does NOT want to stop the
-// writers should already take a snapshot: [Graph.BeginRead] plus [Graph.ReadAt],
-// which is what [Engine.Run] does and what makes reads lock-free.
+// The division is where Memgraph and PostgreSQL both put it. Memgraph takes
+// `main_lock_` with a `std::shared_lock` for an ordinary write and uniquely only
+// for the index/constraint and durability transitions
+// (`src/storage/v2/inmemory/storage.cpp`); PostgreSQL expresses the same thing
+// through its conflict matrix, where an ordinary write's RowExclusiveLock does not
+// conflict with itself and CREATE INDEX's ShareLock does
+// (`src/backend/storage/lmgr/lock.c`, LockConflicts).
+//
+// # What still relies on it, and what each one actually rests on
+//
+// Three callers remain, and none of them depends on this method for data
+// atomicity:
+//
+//   - the checkpointer's capture (store/checkpoint) runs inside
+//     RunUnderCommitLock, which drains in-flight commits to ZERO before capturing,
+//     so no write can be half-applied while it walks. This hold is belt and
+//     braces; rmp #2310 replaces it with a transactional instant;
+//   - the approximate-statistics build (cypher/stats_build.go) is approximate by
+//     contract and stamps the generation it scanned, so a concurrent write costs
+//     accuracy and never correctness;
+//   - the constraint pre-validation scan (cypher/api.go scanLabelProperty) runs
+//     before the constraint is registered and is followed by enforcement on every
+//     subsequent write, so a value a concurrent writer added during the scan is
+//     caught by the enforcement path rather than missed.
 //
 // # It is NO LONGER how the query engine reads (rmp #2274, #2290)
 //
 // [Engine.Run] used to bracket every query in this, which gave it a consistent
 // view by EXCLUDING writers — and that exclusion is what starved readers: a
-// write takes the same barrier exclusively, Go's sync.RWMutex prefers a waiting
+// write took the same barrier exclusively, Go's sync.RWMutex prefers a waiting
 // writer, and every reader arriving behind one parked for as long as the
 // longest in-flight read. A query now takes a SNAPSHOT ([Graph.BeginRead]) and
 // no lock at all.
 //
-// This remains the right primitive for a caller that needs a consistent view of
-// structures MVCC does not version — the raw label index, the count store, the
-// mapper — or that reads the graph through accessors with no as-of form. It is
-// still what the checkpointer and the statistics builder use. Nothing about it
-// changed; what changed is that it is no longer on the query hot path.
-//
-// The original description follows.
-//
-// so fn observes a consistent snapshot of the graph in which no in-flight
-// transaction is partially applied: any transaction committed via
-// [Graph.ApplyAtomically] is visible to fn either entirely or not at all,
-// and that view is stable for fn's whole duration (snapshot isolation for
-// the bracketed reads).
-//
-// Concurrent View callers do not block one another.
-//
-// Transactional readers that must not observe a partial transaction — the
-// query executor's read clauses, and any goroutine reading the mutable
-// graph concurrently with writers — should perform their reads inside View.
-// Reads issued outside View remain per-operation atomic (the long-standing
-// concurrency contract) but may observe a partially-applied multi-op
-// transaction; View is what closes that window.
+// Concurrent View callers do not block one another, and they no longer block a
+// writer either.
 //
 // fn must not perform writes and must not call [Graph.ApplyAtomically] or
 // [Graph.View] (the RWMutex is not re-entrant). A nested [Graph.View] would
@@ -1299,8 +1305,8 @@ func (g *Graph[N, W]) entrySlotLabels(id graph.NodeID, snap *Snapshot) ([]graph.
 // adjacency slot of src. It is the slot half of [Graph.clearEdgePairState];
 // the caller must hold the pair's edge-label shard write lock so the slot and
 // overflow halves transition together.
-func (g *Graph[N, W]) clearSlotLabels(srcID, dstID graph.NodeID) {
-	g.adj.ClearEdgeLabelSlots(srcID, dstID)
+func (g *Graph[N, W]) clearSlotLabels(srcID, dstID graph.NodeID, tx *writeCtx) {
+	g.adj.Writer(tx.adjTx()).ClearEdgeLabelSlots(srcID, dstID)
 }
 
 // propKeys returns the property-key registry.
@@ -1438,7 +1444,7 @@ func (g *Graph[N, W]) addNodeInfo(n N, tx *writeCtx) error {
 	}
 	if created {
 		if g.tombstoneActive.Load() == 0 {
-			g.reclaimAfterDirectWrite()
+			g.reclaimAfterDirectWrite(tx)
 			return nil
 		}
 	}
@@ -1448,7 +1454,7 @@ func (g *Graph[N, W]) addNodeInfo(n N, tx *writeCtx) error {
 		return nil
 	}
 	g.revive(id, tx)
-	g.reclaimAfterDirectWrite()
+	g.reclaimAfterDirectWrite(tx)
 	return nil
 }
 
@@ -1570,7 +1576,7 @@ func (g *Graph[N, W]) addEdgeInfo(src, dst N, w W, tx *writeCtx) error {
 			}
 		}
 	}
-	if err := g.adj.AddEdge(src, dst, w); err != nil {
+	if err := g.adj.Writer(tx.adjTx()).AddEdge(src, dst, w); err != nil {
 		return err
 	}
 	// Stamped AFTER the insert, because an append may CREATE its source and that
@@ -1588,7 +1594,7 @@ func (g *Graph[N, W]) addEdgeInfo(src, dst N, w W, tx *writeCtx) error {
 			}
 		}
 	}
-	defer g.reclaimAfterDirectWrite()
+	defer g.reclaimAfterDirectWrite(tx)
 	// topoGeneration is bumped HERE, in the graph's own mutator, rather than left to
 	// callers. Every CSR-position-keyed cache is invalidated by that counter, and a
 	// caller that mutates the graph directly through this API -- an embedder holding
@@ -1727,9 +1733,55 @@ func (g *Graph[N, W]) AddEdgeLabeledWithProperty(src, dst N, w W, relType, key s
 //
 // AddEdgeH honours the same error and revival contract as [Graph.AddEdge].
 func (g *Graph[N, W]) AddEdgeH(src, dst N, w W) (handle uint64, err error) {
+	return g.addEdgeHInfo(src, dst, w, nil)
+}
+
+// addEdgeHInfo is [Graph.AddEdgeH] with an explicit write transaction; tx is nil
+// for a direct Go-API mutation, which is committed the instant it is made and
+// takes no conflict check. See [writeCtx].
+//
+// It exists because AddEdgeH writes through the ADJACENCY and not through any
+// node-side store, so it had no transaction-carrying form when rmp #2301 built
+// the rest of them — and threading the node side alone still split any statement
+// that created a relationship across two commit records. See [writeCtx.adjTx].
+//
+// The conflict check is the same one [Graph.addEdgeInfo] makes, and for the same
+// reason: an append is the COMMUTATIVE adjacency write, refused only by a
+// concurrent NON-commutative write to the same source. See [adjVersions].
+func (g *Graph[N, W]) addEdgeHInfo(src, dst N, w W, tx *writeCtx) (handle uint64, err error) {
+	// Checked BEFORE the adjacency mutation so a doomed transaction appends
+	// nothing, and before the handle is minted so a refused append consumes no
+	// identity. A node that does not exist yet cannot carry a stamp, so nothing
+	// could conflict with it — an append is allowed to create its endpoints.
+	if tx != nil {
+		if srcID, ok := g.adj.Mapper().Lookup(src); ok {
+			if err := g.adjVer.checkAppend(srcID, tx); err != nil {
+				return 0, err
+			}
+		}
+		if !g.adj.Directed() {
+			if dstID, ok := g.adj.Mapper().Lookup(dst); ok {
+				if err := g.adjVer.checkAppend(dstID, tx); err != nil {
+					return 0, err
+				}
+			}
+		}
+	}
 	h := g.nextEdgeHandle()
-	if err := g.adj.AddEdgeH(src, dst, w, h); err != nil {
+	if err := g.adj.Writer(tx.adjTx()).AddEdgeH(src, dst, w, h); err != nil {
 		return 0, err
+	}
+	// Stamped AFTER the insert, because an append may CREATE its source and that
+	// node's id does not exist until now; see [Graph.addEdgeInfo].
+	if tx != nil {
+		if srcID, ok := g.adj.Mapper().Lookup(src); ok {
+			g.adjVer.stampAppend(srcID, tx)
+		}
+		if !g.adj.Directed() {
+			if dstID, ok := g.adj.Mapper().Lookup(dst); ok {
+				g.adjVer.stampAppend(dstID, tx)
+			}
+		}
 	}
 	// Invalidate every CSR-position-keyed cache at SOURCE; see [Graph.AddEdge].
 	g.topoGeneration.Add(1)
@@ -1775,7 +1827,7 @@ func (g *Graph[N, W]) RemoveEdge(src, dst N) {
 // nil for a direct Go-API mutation, which is committed the instant it is made
 // and takes no conflict check. See [writeCtx].
 func (g *Graph[N, W]) removeEdgeInfo(src, dst N, tx *writeCtx) {
-	defer g.reclaimAfterDirectWrite()
+	defer g.reclaimAfterDirectWrite(tx)
 	srcID, srcOK := g.adj.Mapper().Lookup(src)
 	dstID, dstOK := g.adj.Mapper().Lookup(dst)
 
@@ -1821,7 +1873,7 @@ func (g *Graph[N, W]) removeEdgeInfo(src, dst N, tx *writeCtx) {
 		}
 	}
 
-	g.adj.RemoveEdge(src, dst)
+	g.adj.Writer(tx.adjTx()).RemoveEdge(src, dst)
 	// Deferred, not immediate: the bump must follow the LAST write to any
 	// epoch-keyed state, and the label/property re-assertion below is such a
 	// write. A reader that samples the epoch between an immediate bump and that
@@ -1892,7 +1944,10 @@ func (g *Graph[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) bool {
 func (g *Graph[N, W]) removeEdgeByHandleInfo(src, dst N, handle uint64, tx *writeCtx) bool {
 	if handle == 0 {
 		had := g.adj.HasEdge(src, dst)
-		g.RemoveEdge(src, dst)
+		// The transaction-carrying form: the exported one passes a nil writeCtx, so
+		// this whole removal would resolve its commit record through the ambient slot
+		// and publish on whichever transaction that names (rmp #2320).
+		g.removeEdgeInfo(src, dst, tx)
 		return had
 	}
 
@@ -1931,15 +1986,17 @@ func (g *Graph[N, W]) removeEdgeByHandleInfo(src, dst N, handle uint64, tx *writ
 		}
 	}
 
-	if !g.adj.RemoveEdgeByHandle(src, dst, handle) {
+	if !g.adj.Writer(tx.adjTx()).RemoveEdgeByHandle(src, dst, handle) {
 		return false
 	}
 	// Deferred so the bump follows the LAST write to epoch-keyed state below; see
 	// [Graph.RemoveEdge].
 	defer g.topoGeneration.Add(1)
 	// Drop the removed instance's per-handle labels and properties. Sibling
-	// handles are untouched.
-	g.RemoveEdgeInstanceByHandle(src, dst, handle)
+	// handles are untouched. Through the transaction-carrying form: the exported
+	// one carries none, and this was measured resolving TWO versions per DELETE
+	// through the ambient slot (rmp #2320).
+	g.removeEdgeInstanceByHandleInfo(src, dst, handle, tx)
 
 	if g.adj.HasEdge(src, dst) {
 		// Parallel sibling(s) remain: keep the shared per-pair surfaces alive by
@@ -2030,7 +2087,7 @@ func (g *Graph[N, W]) repairEdgeLabelLocked(k edgeKey, lid LabelID, tx *writeCtx
 	enc := encodeSlotLabel(lid)
 	free, present := g.columnTypedSlots(k.src, k.dst, lid, enc)
 	if len(free) > 0 {
-		g.adj.SetEdgeLabelSlotsAt(k.src, k.dst, free[:1], enc)
+		g.adj.Writer(tx.adjTx()).SetEdgeLabelSlotsAt(k.src, k.dst, free[:1], enc)
 		return
 	}
 	if present {
@@ -2095,7 +2152,7 @@ func (g *Graph[N, W]) removeAllEdgesFromInfo(src N, tx *writeCtx) {
 
 	// Bulk-remove from the adjacency layer. For undirected graphs this also
 	// removes the mirror entries from each dst's list.
-	g.adj.RemoveAllEdgesFrom(src)
+	g.adj.Writer(tx.adjTx()).RemoveAllEdgesFrom(src)
 	// Deferred so the bump follows the LAST write to epoch-keyed state below; see
 	// [Graph.RemoveEdge].
 	defer g.topoGeneration.Add(1)
@@ -2146,7 +2203,7 @@ func (g *Graph[N, W]) clearEdgePairState(k edgeKey, tx *writeCtx) bool {
 	lsh := g.edgeLabelShardFor(k)
 	lsh.mu.Lock()
 	dropped := g.clearOverflowVersioned(lsh, k, tx)
-	g.clearSlotLabels(k.src, k.dst)
+	g.clearSlotLabels(k.src, k.dst, tx)
 	lsh.mu.Unlock()
 	if tx.doomed() {
 		// clearOverflowVersioned refused; it recorded the conflict and left the
@@ -2275,7 +2332,7 @@ func (g *Graph[N, W]) EdgeWeightAsOf(src, dst N, snap *Snapshot) (W, bool) {
 // may safely ignore the return.
 func (g *Graph[N, W]) SetNodeLabel(n N, name string) error {
 	err := g.setNodeLabelInfo(n, name, nil)
-	g.reclaimAfterDirectWrite()
+	g.reclaimAfterDirectWrite(nil)
 	return err
 }
 
@@ -2355,7 +2412,7 @@ func (g *Graph[N, W]) removeNodeInfo(n N, tx *writeCtx) {
 		// node, and the bitmap alone cannot tell it that.
 		if died {
 			g.noteNodeDied(id, tx)
-			g.reclaimAfterDirectWrite()
+			g.reclaimAfterDirectWrite(tx)
 		}
 	}()
 	g.tombstoneMu.Lock()
@@ -3378,7 +3435,7 @@ func (g *Graph[N, W]) DecrEdgesRemoved() {
 // RemoveNodeLabel detaches name from n. No-op if absent.
 func (g *Graph[N, W]) RemoveNodeLabel(n N, name string) {
 	g.removeNodeLabelInfo(n, name, nil)
-	g.reclaimAfterDirectWrite()
+	g.reclaimAfterDirectWrite(nil)
 }
 
 // removeNodeLabelInfo is [Graph.RemoveNodeLabel] with an explicit commit
@@ -3636,7 +3693,7 @@ func (g *Graph[N, W]) setEdgeLabelLocked(k edgeKey, lid LabelID, tx *writeCtx) b
 	free, present := g.columnTypedSlots(k.src, k.dst, lid, enc)
 	if len(free) > 0 {
 		// At least one column-typed slot is free: place the type on all of them.
-		g.adj.SetEdgeLabelSlotsAt(k.src, k.dst, free, enc)
+		g.adj.Writer(tx.adjTx()).SetEdgeLabelSlotsAt(k.src, k.dst, free, enc)
 		return true
 	}
 	if present {
@@ -3793,7 +3850,7 @@ func (g *Graph[N, W]) removeEdgeLabelInfo(src, dst N, name string, tx *writeCtx)
 	if changed {
 		g.edgeLabelOverflowActive.Add(-1)
 	}
-	if g.clearSlotLabelsValue(srcID, dstID, lid) {
+	if g.clearSlotLabelsValue(srcID, dstID, lid, tx) {
 		changed = true
 	}
 	sh.mu.Unlock()
@@ -3819,6 +3876,6 @@ func (g *Graph[N, W]) removeEdgeLabelInfo(src, dst N, name string, tx *writeCtx)
 //
 // It reports whether any slot was actually cleared, which [Graph.RemoveEdgeLabel]
 // uses to bump the topology generation only on a genuine change (rmp #2255).
-func (g *Graph[N, W]) clearSlotLabelsValue(srcID, dstID graph.NodeID, lid LabelID) bool {
-	return g.adj.ClearEdgeLabelSlotsValue(srcID, dstID, encodeSlotLabel(lid)) > 0
+func (g *Graph[N, W]) clearSlotLabelsValue(srcID, dstID graph.NodeID, lid LabelID, tx *writeCtx) bool {
+	return g.adj.Writer(tx.adjTx()).ClearEdgeLabelSlotsValue(srcID, dstID, encodeSlotLabel(lid)) > 0
 }

@@ -99,8 +99,34 @@ func (g *Graph[N, W]) HasEdgeHandle(src, dst N, handle uint64) bool {
 // plain [Graph.AddEdge] so a pre-Stage-2 WAL frame (which carried no
 // handle) still replays. AddEdgeHIfAbsent is NOT safe for concurrent use.
 func (g *Graph[N, W]) AddEdgeHIfAbsent(src, dst N, w W, handle uint64) (inserted bool, err error) {
+	return g.addEdgeHIfAbsentInfo(src, dst, w, handle, nil)
+}
+
+// addEdgeHIfAbsentInfo is [Graph.AddEdgeHIfAbsent] with an explicit write
+// transaction; tx is nil for a replay or a direct Go-API mutation, which is
+// committed the instant it is made. See [writeCtx].
+//
+// It needs the transaction-carrying form for TWO callers that both run inside a
+// write bracket, which is what makes it different from the other replay
+// primitives in this file:
+//
+//   - the Cypher engine's in-memory undo log, whose inverse of a DELETE re-adds
+//     the removed instance (cypher/undo_record.go) while the failing statement's
+//     bracket is still open;
+//   - the durable store's in-memory apply, which replays a transaction's
+//     OpAddEdgeH frames inside one bracket (store/txn).
+//
+// A write on either path that resolved its commit record through the ambient slot
+// would publish part of its transaction at another transaction's instant once two
+// brackets overlap (rmp #2320).
+//
+// The read-then-write it performs is NOT made atomic by the transaction: the
+// method's contract already says it is not safe for concurrent use, and its
+// idempotence is against a snapshot that has already been loaded, not against a
+// concurrent writer.
+func (g *Graph[N, W]) addEdgeHIfAbsentInfo(src, dst N, w W, handle uint64, tx *writeCtx) (inserted bool, err error) {
 	if handle == 0 {
-		if err := g.adj.AddEdge(src, dst, w); err != nil {
+		if err := g.adj.Writer(tx.adjTx()).AddEdge(src, dst, w); err != nil {
 			return false, err
 		}
 		// Invalidate every CSR-position-keyed cache at SOURCE; see [Graph.AddEdge].
@@ -110,7 +136,7 @@ func (g *Graph[N, W]) AddEdgeHIfAbsent(src, dst N, w W, handle uint64) (inserted
 	if g.HasEdgeHandle(src, dst, handle) {
 		return false, nil
 	}
-	if err := g.adj.AddEdgeH(src, dst, w, handle); err != nil {
+	if err := g.adj.Writer(tx.adjTx()).AddEdgeH(src, dst, w, handle); err != nil {
 		return false, err
 	}
 	// Invalidate every CSR-position-keyed cache at SOURCE; see [Graph.AddEdge].

@@ -43,47 +43,66 @@ and serves every read of the query from it. Justification:
   per-query view is needed to avoid results for a graph state that never
   existed (e.g. `MATCH (a)-[:R]->(b) WHERE a.x > b.x` reading `a.x` and `b.x`
   across a commit). SI provides that stable view.
-- The engine is **single-writer** (`store/txn.Store` mutex). Write-write
-  conflicts and write skew — the hard parts of SI, and the only anomalies that
-  separate SI from serialisability — are impossible by construction. So SI is
-  *nearly free* here and is equivalent to serialisable for this write model.
-  (Fekete et al., *Making Snapshot Isolation Serializable*, ACM TODS 2005.)
+- Write-write conflicts and write skew are the hard parts of SI, and the only
+  anomalies that separate SI from serialisability. (Fekete et al., *Making
+  Snapshot Isolation Serializable*, ACM TODS 2005.) How GoGraph handles them
+  changed in this sprint — see the note below.
 
 We therefore target SI.
 
-> **MEASURED AND NOT YET IN FORCE, 2026-08-03 (rmp #2304).** The bullet above is
-> still true of the shipped engine, and the sprint intends to make it false. The
-> attempt and what it found are recorded here because both halves matter.
+> **IN FORCE since 2026-08-04 (rmp #2320).** This paragraph used to say that the
+> engine is **single-writer** (`store/txn.Store` mutex), so write-write conflicts and
+> write skew are *impossible by construction* and SI is nearly free. **That is no
+> longer true, and the change is the point of the sprint.**
 >
-> Moving the ordinary write path to a SHARED hold on the schema barrier
-> (`lpg.Graph.ApplyVersioned`) was implemented and measured: durable write
-> throughput went from perfectly flat to **15.1x at 32 concurrent writers** (267 ->
-> 4041 commits/s), because `wal.Writer.SyncGroup`'s leader/follower coalescing
-> becomes reachable once the fsync is no longer inside an exclusive hold.
+> The ordinary write path — an autocommit Cypher statement and `store/txn`'s
+> in-memory apply — now holds the schema barrier SHARED (`lpg.Graph.ApplyVersioned`),
+> so writers overlap. Durable write throughput went from perfectly flat to **15.1x at
+> 32 concurrent writers** (267 -> 4041 commits/s), because `wal.Writer.SyncGroup`'s
+> leader/follower coalescing becomes reachable once the fsync is no longer inside an
+> exclusive hold. The regression gate for it is `bench/mvccwrite`
+> `TestWALWriteScalingGate`, ratcheted to 3x at eight writers.
 >
-> It was **reverted**, because in that state the engine does not deliver atomic
-> visibility. The deltas a statement writes still resolve their shared commit record
-> through a graph-wide AMBIENT slot — every Cypher mutator reaches `lpg` through the
-> public API, which carries no transaction — so with two brackets open the slot names
-> whichever published last and one statement's writes land on two different commit
-> records. A snapshot reader then observes half a transaction. Measured with
-> `examples/27_concurrent_txn`: **105 942 torn observations** in one run, and 147
-> overwrites of a still-open transaction's slot. `store/txn`'s in-memory apply was
-> reverted for the same reason.
+> **What replaced exclusion.** Atomic visibility no longer comes from a lock. Every
+> version a transaction writes points at ONE shared commit record, and publishing the
+> transaction is a single atomic store into it, so a snapshot resolves either all of
+> a transaction or none of it however many stores it spanned and whoever else is
+> mid-apply. Exclusion made the interleaving impossible; versioning makes it
+> unobservable.
 >
-> The prerequisite is therefore that a write **carries** its transaction rather than
-> looking it up: transaction-aware forms of the `lpg` mutators the write path calls,
-> threading the `lpg.WriteTx` that `ApplyVersioned` already hands its closure. That
-> is what `graph/mvcc/stamp.go` means when it says "a write that needs its own
-> transaction must CARRY it rather than look it up", and it is tracked as rmp #2306.
+> **What that required.** rmp #2304 made the same flip first and had to REVERT it:
+> the deltas a statement wrote still resolved their commit record through a
+> graph-wide AMBIENT slot — every Cypher mutator reached `lpg` through the public API,
+> which carried no transaction — so with two brackets open the slot named whichever
+> published last and one statement's writes landed on two different commit records.
+> Measured with `examples/27_concurrent_txn`: **105 942 torn observations** in one
+> run, and 147 overwrites of a still-open transaction's slot. rmp #2320 threaded the
+> transaction through: `lpg.WriteView` and `adjlist.Writer` are accessors that carry
+> it, the adjacency's write chain takes it as an explicit parameter, and
+> `lpg.Graph.AmbientVersionResolutions` counts any write that still resolves through
+> the slot so the property is a gate rather than a claim.
 >
-> Until then, **write-write conflicts remain impossible by construction on the
-> ordinary path**, so the bullet above still holds and SI remains equivalent to
-> serialisable for this write model. What already exists for the concurrent world is
-> the detection machinery it will need: per-object first-updater-wins reporting
-> `mvcc.ErrSerializationConflict`, surfaced to Bolt as
-> `Neo.TransientError.Transaction.Outdated` so a driver's managed transaction retries
-> it (rmp #2300).
+> **Write-write conflicts are now REAL and are DETECTED.** Two transactions that
+> touch the same object no longer queue; the second to reach the version-chain head
+> is refused with `mvcc.ErrSerializationConflict` (first-updater-wins), surfaced to
+> Bolt as `Neo.TransientError.Transaction.Outdated` so a driver's managed transaction
+> retries it (rmp #2300). SI is therefore no longer *free*, and it is no longer
+> equivalent to serialisable by construction — it is equivalent to serialisable
+> because the conflicting transaction is REFUSED rather than serialised behind a lock.
+>
+> **A client must retry.** This is the half that is new to callers. A conflict can
+> arise even between transactions on DISJOINT objects, because a transaction's start
+> timestamp is the CONTIGUOUS commit frontier (rmp #2298): under N concurrent writers
+> a transaction routinely begins at an instant that excludes its own predecessor's
+> commit, so a writer re-touching its own object collides with itself.
+> PostgreSQL's `xip` list can express "T1 committed, T0 still running" and GoGraph's
+> frontier cannot, so GoGraph refuses where PostgreSQL proceeds. That is the trade
+> rmp #2298 accepted in exchange for never handing a reader a straddled commit, and
+> the retry is the client's half of it. `examples/27_concurrent_txn` demonstrates the
+> retry loop and reports the conflict rate as telemetry; note that the backoff must be
+> sized to a WAL fsync, not to a scheduler yield — a `runtime.Gosched` loop was
+> measured burning five attempts inside one fsync, every one of them against the same
+> in-flight version and with the same stale snapshot.
 >
 > ### Concurrent `MERGE` and uniqueness — what the attempt exposed
 >
@@ -336,19 +355,33 @@ mandate's specific lock-free requirement — untouched.
 
 Delivered:
 
-- **F3.2 (done).** `Graph.ApplyAtomically(fn)` (write lock) and `Graph.View(fn)`
-  (read lock) on `lpg.Graph`. `Tx.Commit` applies a transaction's ops inside
-  `ApplyAtomically`, so the whole transaction flips visible to `View` readers as
-  one atomic step. Proven by `lpg.TestIsolation_ApplyAtomically_View_NoPartialReads`
-  (50 000 multi-op transactions × 8 readers under `-race`, zero violations;
-  power-checked — without the barrier the same test observes hundreds of
-  thousands of partial-transaction violations) and the txn-layer integration
-  test `txn.TestIsolation_Commit_NoPartialTransactionObservable`.
+- **F3.2 (done, then SUPERSEDED by rmp #2320).** `Graph.ApplyAtomically(fn)`
+  (write lock) and `Graph.View(fn)` (read lock) on `lpg.Graph`. `Tx.Commit` applied
+  a transaction's ops inside `ApplyAtomically`, so the whole transaction flipped
+  visible to `View` readers as one atomic step. Proven at the time by
+  `lpg.TestIsolation_ApplyAtomically_View_NoPartialReads` (50 000 multi-op
+  transactions × 8 readers under `-race`, zero violations; power-checked — without
+  the barrier the same test observed hundreds of thousands of partial-transaction
+  violations).
+
+  **Since rmp #2320** `Tx.Commit` applies under `Graph.ApplyVersioned` (a SHARED
+  hold) and the guarantee comes from the transaction's shared commit record, not
+  from the lock. `Graph.View` is consequently the SCHEMA barrier only and gives a
+  reader no data isolation at all; a reader that needs a consistent view of data
+  takes a snapshot (`Graph.BeginRead` + `Graph.ReadAt`). Both halves are pinned:
+  `txn.TestIsolation_Commit_NoPartialTransactionObservable` asserts zero partial
+  observations through a snapshot, and its negative control
+  `txn.TestIsolation_ViewWithUnversionedReadIsNotAtomic` asserts that `View` plus an
+  unversioned accessor DOES observe them (measured 8 821–20 011 out of ~11 M reads),
+  so the relocation of the guarantee cannot drift back unnoticed.
 
 - **F3.3 (done).** The Cypher engine's query paths now execute under the
   barrier and *materialise* their rows: `Engine.Run` (read) drains the whole
   query inside `Graph.View`; `Engine.RunInTx` (write) drains inside
-  `Graph.ApplyAtomically`. Materialising releases the lock before the caller
+  `Graph.ApplyAtomically`. (Both moved since: rmp #2290 took `Engine.Run` off the
+  barrier entirely — it takes a snapshot and no lock — and rmp #2320 moved
+  `Engine.RunInTx` to the shared `Graph.ApplyVersioned`.) Materialising releases the
+  lock before the caller
   iterates, so a long-open `Result` can never deadlock a concurrent writer —
   the property that makes the barrier safe for the lazy, caller-managed
   executor (verified: `cypher/exec` never re-enters `View`/`ApplyAtomically`).
@@ -384,6 +417,16 @@ Delivered:
   deadlock. F2 proved recovery reconstructs the full state from the snapshot.
   The non-blocking LSN/watermark checkpoint (read a pinned view without holding
   the store mutex for the whole I/O) remains the deferred optimisation.
+
+  **Since rmp #2320** the eager apply is no longer nested inside an *exclusive*
+  visMu hold, so the `View` in the capture contributes nothing to consistency; what
+  the argument now rests on entirely is `RunUnderCommitLock`, which acquires the
+  store's single-writer semaphore AND drains in-flight commits to zero before `fn`
+  runs. Both write paths are inside that in-flight window for their whole apply —
+  the Cypher path from `BeginCtx` to `CommitWALOnly`, the store path from
+  `appendOnly` to `Commit`'s deferred `doneInflight` — so no transaction can be
+  half-applied while the capture walks. rmp #2310 replaces the whole arrangement
+  with a capture at a transactional instant.
 - **F3.6 (done).** Isolation proven by the invariant battery under `-race`:
   `lpg.TestIsolation_ApplyAtomically_View_NoPartialReads` (property atomicity,
   power-checked), `lpg.TestIsolation_CrossSubstructure_EdgeImpliesLabels`

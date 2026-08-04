@@ -264,7 +264,7 @@ func (g *Graph[N, W]) setSlotRelTypeLocked(k edgeKey, ordinal int, lid LabelID, 
 	switch cur {
 	case 0:
 		one := [1]int{idx}
-		return true, g.adj.SetEdgeLabelSlotsAt(k.src, k.dst, one[:], enc) > 0
+		return true, g.adj.Writer(tx.adjTx()).SetEdgeLabelSlotsAt(k.src, k.dst, one[:], enc) > 0
 	case enc:
 		return true, false
 	}

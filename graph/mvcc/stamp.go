@@ -264,6 +264,20 @@ type WriteStamp struct {
 	// correct under any number of concurrent writers: an atomic counter with one
 	// consumer.
 	untracked atomic.Int64
+	// ambient counts versions that resolved their transaction THROUGH THE SLOT
+	// rather than carrying it — the resolution rmp #2320 removed from the Cypher
+	// and store write paths, and the one that split a statement across two commit
+	// records once two brackets could overlap.
+	//
+	// It is the acceptance instrument for that removal: a path that carries its
+	// transaction leaves this counter untouched, so a test can assert ZERO rather
+	// than inspect chains to infer it. See [WriteStamp.TakeAmbient].
+	//
+	// It costs one atomic add on the ambient branch and NOTHING on the threaded
+	// one, because the threaded path never enters that branch — the write resolves
+	// its record from the [Tx] it carries and never calls [WriteStamp.Stamp] at
+	// all. So the instrument is free exactly where the hot path is.
+	ambient atomic.Int64
 }
 
 // SetClock attaches the clock that mints commit timestamps.
@@ -287,10 +301,10 @@ func (w *WriteStamp) Clock() *Clock { return w.clock }
 // It allocates nothing. The caller owns st and must close the window with
 // exactly one [WriteStamp.End].
 //
-// Concurrent Publish calls are what rmp #2304 will create. Each writer arms its
-// OWN state, so no record and no count is lost; the slot names whichever arrived
-// last, and that is the only thing the slot has ever promised — a write that
-// needs its own transaction must CARRY it rather than look it up.
+// Concurrent Publish calls are ordinary since rmp #2320. Each writer arms its OWN
+// state, so no record and no count is lost; the slot names whichever arrived last,
+// and that is the only thing the slot has ever promised — a write that needs its own
+// transaction must CARRY it rather than look it up, which is what [Tx] is for.
 func (w *WriteStamp) Publish(st *TxState) { w.cur.Store(st) }
 
 // End closes the window this stamp names and returns the record the
@@ -360,22 +374,41 @@ func (w *WriteStamp) EndFor(st *TxState) (*CommitInfo, int64) {
 // visibility: the open transaction's shared record, or nil with a fresh commit
 // timestamp when no transaction is open.
 //
+// It is the AMBIENT resolution — it answers with whichever transaction the slot
+// names, which is the caller's own only while at most one write bracket is open
+// at a time. A write that can overlap another writer must carry its transaction
+// and call [Tx.Record] instead; see [Tx] for what adopting a concurrent
+// transaction's record measured. Every resolution through here is counted, so
+// that separation is testable rather than asserted ([WriteStamp.TakeAmbient]).
+//
 // Called once per version created, never on a read.
 func (w *WriteStamp) Stamp() (*CommitInfo, uint64) {
 	if st := w.cur.Load(); st != nil {
 		if info := st.Ensure(); info != nil {
+			w.ambient.Add(1)
 			return info, 0
 		}
 	}
-	// No transaction is open: this write is committed the instant it is made and
-	// takes a timestamp of its own.
+	return w.UntransactedStamp()
+}
+
+// UntransactedStamp returns a fresh commit timestamp for a version that belongs
+// to no transaction, BYPASSING the slot entirely.
+//
+// Two callers need it. A write that carries no transaction at all and never had
+// one — [WriteStamp.Stamp]'s fallback. And a write that DOES carry a transaction
+// whose window has since been retracted: it must not fall back to the ambient
+// slot, because the slot may name a live concurrent transaction and adopting
+// that record is precisely the defect rmp #2320 removed.
+//
+// The timestamp is published immediately, because an untransacted write is
+// committed the instant it is made: there is no record for a reader to find in
+// flight.
+func (w *WriteStamp) UntransactedStamp() (*CommitInfo, uint64) {
 	if w.clock == nil {
 		return nil, 0
 	}
 	w.untracked.Add(1)
-	// An untransacted write is committed the instant it is made, so its
-	// timestamp is published immediately: there is no record for a reader to
-	// find in flight.
 	ts := w.clock.NextCommitTS()
 	w.clock.PublishCommitTS(ts)
 	return nil, ts
@@ -439,6 +472,24 @@ func (w *WriteStamp) Armed() bool { return w.cur.Load() != nil }
 // TakeUntracked returns how many versions have been stamped outside any
 // transaction since the last call, and resets the counter.
 func (w *WriteStamp) TakeUntracked() int64 { return w.untracked.Swap(0) }
+
+// TakeAmbient returns how many versions have resolved their transaction through
+// this stamp's SLOT — rather than carrying it — since the last call, and resets
+// the counter.
+//
+// A write path that carries its transaction must leave it at zero. That is the
+// assertion rmp #2320's acceptance rests on, and it is a direct observation
+// rather than an inference from chain shapes: a single ambient resolution inside
+// a statement is enough to split that statement across two commit records once a
+// second bracket is open.
+//
+// Reads and resets, so exactly one consumer may use it at a time.
+func (w *WriteStamp) TakeAmbient() int64 { return w.ambient.Swap(0) }
+
+// AmbientResolutions returns the running count without resetting it, for a
+// caller that must observe the counter from two places — a gate that samples
+// before and after a region rather than owning the counter outright.
+func (w *WriteStamp) AmbientResolutions() int64 { return w.ambient.Load() }
 
 // Info returns the record of the open transaction, allocating it if this is the
 // first caller to need one, or nil when no transaction is open.

@@ -39,11 +39,13 @@
 //
 //   - ATOMICITY. Half the transfers run as MULTI-STATEMENT explicit transactions
 //     ([cypher.Engine.BeginTx]: a debit statement, then a credit statement, then
-//     one Commit). The engine holds the visibility barrier for the whole
-//     transaction, so a concurrent reader can never slip between the debit and
-//     the credit — it sees the whole transaction or none of it. The other half
-//     run as SINGLE-STATEMENT autocommit writes ([cypher.Engine.RunInTx]) that
-//     debit and credit in one statement.
+//     one Commit); the other half run as SINGLE-STATEMENT autocommit writes
+//     ([cypher.Engine.RunInTx]) that debit and credit in one statement. In both
+//     shapes a concurrent reader can never slip between the debit and the credit —
+//     it sees the whole transaction or none of it. Atomicity also has to survive
+//     a REFUSED transfer: a transaction that loses a write-write conflict must
+//     leave nothing behind, so its physical rollback is exercised on every one of
+//     the conflicts the telemetry counts.
 //
 //   - CONSISTENCY / no lost updates. Because every transfer is a commutative
 //     delta on two accounts, replaying the committed transfers in any order
@@ -53,16 +55,31 @@
 //     interleaving lost an update (a serialisation failure); lost_updates counts
 //     them and must be 0.
 //
-// # Isolation model (verified against cypher/exectx.go and cypher/engine)
+// # Isolation model (verified against cypher/exectx.go and graph/lpg)
 //
-// The engine serialises writers on the store's single-writer mutex, and
-// [cypher.Engine.BeginTx] additionally holds the graph's visibility write-lock
-// for the transaction's whole lifetime — so writers are strictly serialised and
-// a transactional reader either observes the state before a write transaction
-// began or the fully committed state after it ended, never a partial state
-// (read-committed isolation, cypher/exectx.go). [cypher.Engine.BeginReadTx] is
-// the read-only path: it takes neither the writer serialisation nor the barrier
-// and so is never blocked by, and never blocks, other transactions.
+// Concurrency control is MVCC and nothing else (rmp #2320). An autocommit
+// statement applies under [lpg.Graph.ApplyVersioned], which holds the schema
+// barrier SHARED, so writers overlap instead of queueing: what makes a
+// transaction atomically visible is that every version it writes points at one
+// shared commit record, published with a single atomic store. A reader therefore
+// observes a transaction entirely or not at all, whichever writers are in flight.
+// [cypher.Engine.BeginTx] still holds the barrier exclusively for the
+// transaction's lifetime (retiring that is rmp #2305), so a multi-statement
+// transfer serialises against other writers where a single-statement one does
+// not. [cypher.Engine.BeginReadTx] is the read-only path: it takes no lock at all
+// and reads through a snapshot, so it is never blocked by, and never blocks, a
+// writer.
+//
+// Overlapping writers make WRITE-WRITE CONFLICTS real, and this example is where
+// they first became observable in the module. Two transfers touching the same
+// account collide, and the second to reach the version-chain head is REFUSED with
+// [mvcc.ErrSerializationConflict] rather than silently overwriting the first
+// (first-updater-wins). The writers therefore RETRY, which is the client's half
+// of the MVCC contract — see [retryOnConflict] for why the backoff is sized to a
+// WAL fsync and not to a scheduler yield — and the run reports the conflict rate
+// as telemetry (writer.conflicts_retried, writer.conflict_retries_max) so the
+// cost of the write concurrency is visible rather than hidden. A single-writer
+// engine reports zero there, because a conflict cannot arise.
 //
 // # Scale
 //
@@ -85,6 +102,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -103,6 +121,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
@@ -322,6 +341,13 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	fmt.Fprintf(w, "# run.elapsed=%s\n", stats.elapsed.Round(time.Microsecond))
 	fmt.Fprintf(w, "# writer.transfers_per_s=%.0f\n", rate(int64(stats.committed), stats.elapsed))
 	fmt.Fprintf(w, "# writer.mean_acquire_wait=%s\n", meanDuration(stats.acquireWaitTotal, stats.acquireWaitCount).Round(time.Nanosecond))
+	// The MVCC write-concurrency cost, in the open: how many attempts were refused
+	// with a serialization conflict and retried, and the deepest chain one transfer
+	// needed. Both are telemetry, not facts — the conflict rate depends on
+	// scheduling — but they are what proves writers genuinely overlap: a
+	// single-writer engine reports zero because a conflict cannot arise (rmp #2320).
+	fmt.Fprintf(w, "# writer.conflicts_retried=%d\n", stats.conflicts)
+	fmt.Fprintf(w, "# writer.conflict_retries_max=%d\n", stats.conflictRetriesMax)
 	fmt.Fprintf(w, "# reader.observations=%d\n", stats.readObservations)
 	fmt.Fprintf(w, "# reader.observations_per_s=%.0f\n", rate(stats.readObservations, stats.elapsed))
 	fmt.Fprintf(w, "# mem.heap_alloc=%s\n", humanBytes(built.HeapAlloc))
@@ -537,6 +563,14 @@ type runStats struct {
 	firstTorn        int64
 	acquireWaitTotal int64 // nanoseconds spent blocked acquiring a write transaction
 	acquireWaitCount int64
+	// conflicts is how many transfer attempts were REFUSED with a serialization
+	// conflict and retried, and conflictRetriesMax the deepest retry chain any one
+	// transfer needed. Both are zero on a single-writer engine and non-zero under
+	// MVCC's first-updater-wins, which is why they are reported rather than
+	// swallowed: they are the observable cost of the write concurrency this
+	// example exists to exercise (rmp #2320).
+	conflicts          int64
+	conflictRetriesMax int64
 }
 
 // runConcurrent launches cfg.readers reader goroutines and cfg.writers writer
@@ -556,6 +590,8 @@ func runConcurrent(ctx context.Context, eng *cypher.Engine, plan *plan) (runStat
 		firstTorn        atomic.Int64
 		acquireWaitTotal atomic.Int64
 		acquireWaitCount atomic.Int64
+		conflicts        atomic.Int64
+		conflictRetries  atomic.Int64
 		firstErr         atomic.Pointer[error]
 	)
 	setErr := func(e error) {
@@ -610,14 +646,21 @@ func runConcurrent(ctx context.Context, eng *cypher.Engine, plan *plan) (runStat
 					return
 				}
 				if t.multi {
-					wait, err := commitMultiStatement(ctx, eng, t)
+					var wait time.Duration
+					err := retryOnConflict(ctx, &conflicts, &conflictRetries, func() error {
+						var e error
+						wait, e = commitMultiStatement(ctx, eng, t)
+						return e
+					})
 					if err != nil {
 						setErr(fmt.Errorf("writer multi-statement: %w", err))
 						return
 					}
 					acquireWaitTotal.Add(int64(wait))
 					acquireWaitCount.Add(1)
-				} else if err := commitSingleStatement(ctx, eng, t); err != nil {
+				} else if err := retryOnConflict(ctx, &conflicts, &conflictRetries, func() error {
+					return commitSingleStatement(ctx, eng, t)
+				}); err != nil {
 					setErr(fmt.Errorf("writer single-statement: %w", err))
 					return
 				}
@@ -635,14 +678,108 @@ func runConcurrent(ctx context.Context, eng *cypher.Engine, plan *plan) (runStat
 		return runStats{}, *ep
 	}
 	return runStats{
-		committed:        int(committed.Load()),
-		elapsed:          elapsed,
-		readObservations: reads.Load(),
-		tornObservations: torn.Load(),
-		firstTorn:        firstTorn.Load(),
-		acquireWaitTotal: acquireWaitTotal.Load(),
-		acquireWaitCount: acquireWaitCount.Load(),
+		committed:          int(committed.Load()),
+		elapsed:            elapsed,
+		readObservations:   reads.Load(),
+		tornObservations:   torn.Load(),
+		firstTorn:          firstTorn.Load(),
+		acquireWaitTotal:   acquireWaitTotal.Load(),
+		acquireWaitCount:   acquireWaitCount.Load(),
+		conflicts:          conflicts.Load(),
+		conflictRetriesMax: conflictRetries.Load(),
 	}, nil
+}
+
+// maxConflictRetries bounds the retry chain for one transfer. It is a BOUND, not
+// a policy knob: an unbounded retry would turn a persistent conflict into a
+// livelock, and the workload has to fail loudly rather than spin. Eight is far
+// above what the default shape needs (measured deepest chain: see the
+// writer.conflict_retries_max fact) and still finite.
+const maxConflictRetries = 8
+
+// initialConflictBackoff and maxConflictBackoff bound the wait between attempts.
+// The floor is sized to a WAL fsync rather than to a scheduler quantum, because
+// that is what the retry is actually waiting for; the ceiling stops a pathological
+// chain from stretching the run.
+const (
+	initialConflictBackoff = 100 * time.Microsecond
+	maxConflictBackoff     = 5 * time.Millisecond
+)
+
+// retryOnConflict runs attempt, retrying while it is refused with an MVCC
+// serialization conflict, and counts what it observed.
+//
+// # Why the CLIENT retries, and why this is not a workaround
+//
+// Under MVCC the engine no longer serialises writers: two transactions that touch
+// the same account overlap, and the second one to reach the version-chain head is
+// REFUSED with [mvcc.ErrSerializationConflict] rather than silently overwriting
+// the first (first-updater-wins, rmp #2300). Retrying is the caller's half of that
+// contract and is exactly what every MVCC engine requires of its clients —
+// PostgreSQL returns SQLSTATE 40001 and expects the application to retry, and the
+// official Neo4j drivers retry `Neo.TransientError.*` inside their managed
+// transactions. Under the single-writer engine this example was written against,
+// the conflict could not arise; a transfer waited for the lock instead of being
+// refused. The retry is what a real client would do, so the example does it — and
+// it counts the conflicts rather than hiding them, because the conflict rate IS
+// the observable cost of the write concurrency the example exercises.
+//
+// A retried transfer stays correct without further care: every transfer is a
+// commutative delta over two accounts and a refused attempt is fully aborted (its
+// versions never become visible), so the expected final state the deterministic
+// replay computes is untouched by how many attempts a transfer needed.
+//
+// conflicts accumulates every refused attempt; retriesMax keeps the deepest chain
+// any single transfer needed, as a monotone maximum.
+func retryOnConflict(ctx context.Context, conflicts, retriesMax *atomic.Int64, attempt func() error) error {
+	backoff := initialConflictBackoff
+	for tries := 0; ; tries++ {
+		err := attempt()
+		if err == nil {
+			bumpMax(retriesMax, int64(tries))
+			return nil
+		}
+		if !errors.Is(err, mvcc.ErrSerializationConflict) {
+			return err
+		}
+		conflicts.Add(1)
+		if tries >= maxConflictRetries {
+			return fmt.Errorf("%d serialization conflicts on one transfer: %w", tries+1, err)
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		// Back off, and back off by TIME rather than by yielding.
+		//
+		// A yield was the first attempt and it was measured wrong. The blocking
+		// transaction is mid-COMMIT on a write-ahead log, so it clears only when
+		// its fsync returns — and the MVCC start timestamp a retry takes is the
+		// CONTIGUOUS commit frontier, which cannot advance past a commit that is
+		// still in flight. A Gosched loop therefore burns every retry inside one
+		// fsync: measured, five consecutive attempts all took startTS=117 against
+		// the same in-flight head, and the transfer failed having never once seen
+		// a fresh snapshot. Exponential backoff from 100 us gives the fsync room
+		// to land, which is what actually makes the retry a retry.
+		if backoff > maxConflictBackoff {
+			backoff = maxConflictBackoff
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+}
+
+// bumpMax raises dst to v when v is larger, as a lock-free monotone maximum.
+func bumpMax(dst *atomic.Int64, v int64) {
+	for {
+		cur := dst.Load()
+		if v <= cur || dst.CompareAndSwap(cur, v) {
+			return
+		}
+	}
 }
 
 // readerCount returns the number of reader goroutines, derived from the plan's

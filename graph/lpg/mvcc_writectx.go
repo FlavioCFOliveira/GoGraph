@@ -109,6 +109,48 @@ type writeCtx struct {
 	// acceptance instrument. It is read once per version actually recorded,
 	// never on a read path.
 	conflict atomic.Pointer[mvcc.Conflict]
+	// undoing marks the transaction as replaying its PHYSICAL undo log, during
+	// which its writes are withdrawals of its own work rather than new updates —
+	// so the doomed shortcut in [writeCtx.conflicts] must not refuse them
+	// (rmp #2320).
+	//
+	// # The lost update this closes, measured
+	//
+	// GoGraph rolls a failed statement back physically: the undo log replays
+	// inverse mutations through the same lpg mutators (cypher/undo.go, #1282).
+	// Once those inverses carried the transaction — which they must, or the
+	// inverse lands on a different commit record from the write it withdraws and
+	// the chain no longer nets out — they inherited the doomed test, and a
+	// transaction is doomed at exactly the moment its undo has to run. Every
+	// inverse was refused, the rollback silently did nothing, and the writes the
+	// statement had already applied stayed committed.
+	//
+	// That is not a hypothetical: examples/27_concurrent_txn's conservation
+	// invariant broke by 1 694 729 cents at four writers, deterministically, with
+	// `SET a.balance = …, b.balance = …` conflicting on the second property and
+	// the first one never being withdrawn. Pinned by
+	// TestWriteCtx_UndoOfADoomedTransactionIsNotRefused.
+	//
+	// # Why exempting the undo is sound, and not a hole
+	//
+	// The exemption is narrow: it removes ONLY the doomed shortcut, never the head
+	// test. An inverse touches objects this transaction itself wrote, whose chain
+	// head therefore carries this transaction's own id — which [mvcc.Visible]
+	// classifies as visible, so the head test permits it on its own merits. If an
+	// inverse ever reached an object another transaction owns, the head test would
+	// still refuse it.
+	//
+	// It is also what the prior art does. Memgraph's abort path walks the
+	// transaction's own deltas and restores each object directly, without going
+	// through PrepareForWrite at all — `InMemoryStorage::InMemoryAccessor::Abort`
+	// in `src/storage/v2/inmemory/storage.cpp`, whereas every forward mutator in
+	// `vertex_accessor.cpp` and `edge_accessor.cpp` opens with
+	// `if (!PrepareForWrite(transaction_, …)) return SERIALIZATION_ERROR`. Read at
+	// commit 572d5b4311a279de550522344a6f10d352d11c48 (branch master, 2026-08-03).
+	//
+	// Atomic for the same reason conflict is, and scoped by exactly one region:
+	// [WriteTx.EnterUndo] / [WriteTx.ExitUndo] around the undo replay.
+	undoing atomic.Bool
 }
 
 // beginWriteCtx opens per-transaction write state, NOT published on the graph's
@@ -147,13 +189,14 @@ func (g *Graph[N, W]) beginWriteCtx() *writeCtx {
 // is two atomic stores. One atomic slot does the same work in a Swap and a
 // Store.
 //
-// A single slot is the right size because the barrier admits ONE write bracket at
-// a time, so there is never a second live [writeCtx] to cache. When rmp #2304
-// removes the barrier the slot degrades in the only direction that is safe:
-// concurrent writers that find it empty ALLOCATE, so contention costs an
-// allocation and never correctness. That is the point at which a per-P pool
-// becomes worth its constant, and it should be re-measured then rather than
-// assumed now.
+// A single slot was the right size while the barrier admitted ONE write bracket at
+// a time, so there was never a second live [writeCtx] to cache. Since rmp #2320
+// removed the barrier from the ordinary write path the slot degrades in the only
+// direction that is safe: concurrent writers that find it empty ALLOCATE, so
+// contention costs an allocation and never correctness. Whether a per-P pool is now
+// worth its constant is an open MEASUREMENT — the write-scaling gate clears 3x with
+// the single slot, so it is not blocking, and it should be decided by benchmark
+// rather than by reflex.
 //
 // # Why a recycled state can refuse to be reused
 //
@@ -207,6 +250,29 @@ func (w *writeCtx) record() *commitInfo {
 	return w.tx.Ensure()
 }
 
+// adjTx is this transaction as the ADJACENCY must receive it: a carried handle
+// rather than an ambient lookup (rmp #2320).
+//
+// The adjacency needs two things from a write's transaction and neither can be
+// resolved beside the write once two brackets overlap — the shared commit record
+// its version points at, and the identity that owns a shard's copy-on-write
+// builder. [mvcc.Tx] carries both, and the nil receiver — a direct Go-API
+// mutation outside any transaction — yields the zero value, which adjlist reads
+// as "not transactional" exactly as this package reads a nil *writeCtx.
+//
+// Threading the node side alone was not enough and the shortfall was measured,
+// not reasoned about: `Graph.AddEdgeH`, `Graph.SetEdgeProperty` and
+// `Graph.DelEdgeProperty` write through the adjacency and not through any
+// node-side store, so a statement touching topology or a columnar edge property
+// still split across two commit records with its label and property writes
+// correctly threaded.
+func (w *writeCtx) adjTx() mvcc.Tx {
+	if w == nil {
+		return mvcc.Tx{}
+	}
+	return mvcc.NewTx(&w.tx)
+}
+
 // conflicts reports whether this transaction may displace a version whose
 // effective timestamp is headTS.
 //
@@ -226,7 +292,13 @@ func (w *writeCtx) conflicts(headTS uint64) bool {
 	// does not depend on this object at all. The load is ordered first because
 	// it is the cheaper test and because a doomed transaction must not be able
 	// to slip a write past on an object that happens not to conflict.
-	if w.conflict.Load() != nil {
+	//
+	// UNLESS the transaction is unwinding: an inverse is the withdrawal of a write
+	// this transaction already made, and refusing it leaves that write applied and
+	// committed. See [writeCtx.undoing] for the lost update that measured. The head
+	// test below still runs, so the exemption cannot let an inverse step on another
+	// transaction's version.
+	if w.conflict.Load() != nil && !w.undoing.Load() {
 		return true
 	}
 	return mvcc.Conflicts(headTS, w.startTS, w.txID)
@@ -264,8 +336,16 @@ func (w *writeCtx) conflictErr(store string, headTS uint64) error {
 //
 // A nil receiver — a direct Go-API mutation outside any transaction — is never
 // doomed.
+//
+// While the transaction is unwinding it reports FALSE, in lockstep with
+// [writeCtx.conflicts]: every caller reads this to mean "the write I just
+// attempted was refused", and during the undo replay no write is refused. The two
+// must give the same answer or a caller would skip bookkeeping for a write that
+// actually landed — [Graph.clearEdgePairState] is exactly such a caller. Whether
+// the transaction can still COMMIT is a different question and is answered by
+// [writeCtx.err], which this exemption does not touch.
 func (w *writeCtx) doomed() bool {
-	return w != nil && w.conflict.Load() != nil
+	return w != nil && w.conflict.Load() != nil && !w.undoing.Load()
 }
 
 // err returns the conflict that doomed this transaction, or nil.

@@ -163,30 +163,32 @@ const writeScalingTarget = 3.0
 // Flat at 1.00x across a 32x change in offered concurrency became 15.1x, with the
 // single-writer arm unchanged — so nothing was traded for it.
 //
-// # Why 0.90 TODAY, and what it becomes
+// # RATCHETED to writeScalingTarget (rmp #2320)
 //
-// The WAL arm is the one the exclusive barrier gates, and rmp #2304 MEASURED what
-// removing it is worth — then had to put it back. With the autocommit path on the
-// shared bracket this arm reached 4.10x here under `-race` (and 15.13x at 32
-// writers on the benchmark, see scaling_test.go); with the exclusive bracket
-// restored it is flat at ~1.00x again, because visMu spans the fsync and
-// wal.Writer.SyncGroup's leader/follower coalescing cannot be reached.
+// The WAL arm is the one the exclusive barrier gates, and rmp #2304 measured what
+// removing it is worth — then had to put it back, because the write path did not
+// yet CARRY its transaction. rmp #2320 threaded it, the shared bracket landed for
+// good, and this floor moved from a "does not get WORSE" 0.90 to the sprint's
+// actual target.
 //
-// Under `-race` with the barrier in place, best of 3 per run:
+// Measured at the ratchet, best of gateRepeats per run:
 //
-//	go test -race -run=TestWALWriteScalingGate -count=5 ./bench/mvccwrite/
-//	=> approximately 1.00 (flat; each commit pays its own unshared fsync)
+//	go test -count=3 -run=TestWALWriteScalingGate ./bench/mvccwrite/
+//	=> 4.99x, 5.12x, 4.27x   (worst single observation 3.22x)
 //
-// So the floor is 0.90 — a "does not get WORSE" floor, exactly like the two
-// store-less floors above and for the same reason: there is no scaling here to
-// enforce yet. When the write path carries its transaction and the shared bracket
-// lands for good (rmp #2306), this constant is ratcheted to [writeScalingTarget],
-// which the measurement above already shows is clearable with 27% headroom.
+//	go test -race -count=3 -run=TestWALWriteScalingGate ./bench/mvccwrite/
+//	=> 4.26x, 4.65x, 4.97x   (worst single observation 3.16x)
 //
-// The test is added NOW rather than then because the arm it measures is the one the
-// sprint exists to move, and a gate that predates the change is the only kind that
-// can prove the change did something.
-const walWriteScalingFloor = 0.90
+// So the gate clears its floor by 42% at worst and the worst SINGLE observation
+// still clears it, which is the margin that matters since the gate reads the best
+// of three: a loaded host can only depress a ratio, and a build that has gone back
+// to serialising writers cannot reach 3x even once. Before the ratchet this arm was
+// flat at ~1.00x, because visMu spanned the fsync and wal.Writer.SyncGroup's
+// leader/follower coalescing was unreachable.
+//
+// The full sweep at higher concurrency is in scaling_test.go and recorded in
+// docs/benchmarks/; it reaches 15.13x at 32 writers.
+const walWriteScalingFloor = writeScalingTarget
 
 const (
 	// gateWriters is the concurrency the gates measure at. Eight is below the

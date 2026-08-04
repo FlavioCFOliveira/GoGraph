@@ -113,8 +113,16 @@ func (g *Graph[N, W]) reclaimIfDue() {
 //
 // The caller must NOT hold any shard lock: this takes the barrier and then
 // every shard lock in turn.
-func (g *Graph[N, W]) reclaimAfterDirectWrite() {
+func (g *Graph[N, W]) reclaimAfterDirectWrite(tx *writeCtx) {
 	if !g.mvccArmed {
+		return
+	}
+	if tx != nil {
+		// This write CARRIES a transaction, so it is not a direct write at all
+		// and its bracket's endWrite owns the sweep. Tested before the ambient
+		// slot because it is the exact answer where the slot is only a proxy: once
+		// two brackets overlap the slot reports "a transaction is open" for every
+		// writer, the caller's own or not (rmp #2320).
 		return
 	}
 	if g.stamp.Armed() {

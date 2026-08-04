@@ -283,7 +283,7 @@ func (r *PropertyKeyRegistry) Resolve(id PropertyKeyID) (string, bool) {
 // error returned by the installed [SchemaValidator].
 func (g *Graph[N, W]) SetNodeProperty(n N, key string, value PropertyValue) error {
 	err := g.setNodePropertyInfo(n, key, value, nil)
-	g.reclaimAfterDirectWrite()
+	g.reclaimAfterDirectWrite(nil)
 	return err
 }
 
@@ -362,7 +362,7 @@ func (g *Graph[N, W]) GetNodeProperty(n N, key string) (PropertyValue, bool) {
 // DelNodeProperty removes the named property from n. No-op if absent.
 func (g *Graph[N, W]) DelNodeProperty(n N, key string) {
 	g.delNodePropertyInfo(n, key, nil)
-	g.reclaimAfterDirectWrite()
+	g.reclaimAfterDirectWrite(nil)
 }
 
 // delNodePropertyInfo is [Graph.DelNodeProperty] with an explicit commit

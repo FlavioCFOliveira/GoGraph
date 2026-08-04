@@ -108,7 +108,10 @@ The headline facts are the ACID certification:
   created nor destroyed; every transfer applied atomically (**atomicity**).
 - `lost_updates=0` — the final per-account state matched the deterministic
   replay; no concurrent read-modify-write interleaving lost a write
-  (**consistency / serialisability of writers**).
+  (**consistency / serialisability of writers**). Under MVCC this is the fact that
+  certifies write-write conflict DETECTION together with the physical rollback of
+  a refused transaction: writers overlap, collisions happen (the telemetry counts
+  them), and a colliding transfer must leave nothing behind.
 - `no_negative_balances=1` — the fully-capitalised ledger stayed non-negative.
 
 A single torn observation, lost update, or conservation failure makes `run`
@@ -122,20 +125,33 @@ For a **concurrency** subject (see [`docs/examples-standard.md`](../../docs/exam
 - **Writer throughput** (`# writer.transfers_per_s`) and **reader throughput**
   (`# reader.observations_per_s`) of the mixed workload.
 - **Contention** (`# writer.mean_acquire_wait`) — the mean time a writer blocked
-  acquiring a write transaction on the store's single-writer mutex, which rises
-  with the writer count.
+  acquiring a MULTI-STATEMENT write transaction, which still takes the graph's
+  schema barrier exclusively for its whole lifetime (retiring that is rmp #2305)
+  and therefore still rises with the writer count. An autocommit statement does
+  not appear here: it holds the barrier shared and queues behind nobody.
+- **Write-write conflicts** (`# writer.conflicts_retried`,
+  `# writer.conflict_retries_max`) — how many transfer attempts were refused with
+  `mvcc.ErrSerializationConflict` and retried, and the deepest retry chain one
+  transfer needed. This is the observable cost of concurrent writers, and it is
+  the load-bearing evidence that they genuinely overlap: a single-writer engine
+  reports zero because the conflict cannot arise. The retry backoff is sized to a
+  WAL fsync, not to a scheduler yield — a yield loop was measured spinning five
+  attempts inside one fsync, all against the same in-flight version and all with
+  the same stale snapshot.
 - **Scaling across worker counts** (`# scale.writers_N.transfers_per_s`) — the
-  identical workload at 1, 2, 4 … writers on a fresh store. Throughput that stays
-  flat as the writer count climbs is the observable signature of the single-writer
-  serialisation that underpins isolation; scaling it up makes the effect starker.
+  identical workload at 1, 2, 4 … writers on a fresh store, each level asserting
+  conservation on its own ledger.
 - **Index seek** (`# plan.debit_index_seek`) — evidence the keyed lookup plans as
   a `NodeByIndexSeek` rather than a full label scan.
 - **Live heap** (`# mem.heap_alloc`).
 
-When scaling up, watch how writer throughput fails to climb with `-writers`
-(serialised writers) while reader throughput and observation count grow with
-`-readers` (readers only block for the brief window a write transaction holds the
-visibility barrier).
+When scaling up, watch two things. Reader throughput and observation count grow
+with `-readers` and are never blocked by a writer at all: a read takes a snapshot
+and no lock. Writer throughput is bounded by the shape of the transfer — half the
+transfers are multi-statement and still serialise on the exclusive barrier — and
+by the conflict rate, since every refused attempt pays a retry. Raising `-accounts`
+spreads the transfers over more keys and drives `# writer.conflicts_retried`
+down.
 
 ## Key APIs
 

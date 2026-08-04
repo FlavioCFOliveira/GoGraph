@@ -224,16 +224,39 @@ func (a *AdjList[N, W]) EntryNeighboursAsOf(id graph.NodeID, startTS, txID uint6
 // Not safe for concurrent use.
 func (a *AdjList[N, W]) SetWriteStamp(s *mvcc.WriteStamp) { a.stamp = s }
 
-// writeStamp resolves how the version record of the write in progress is
-// timestamped: the open transaction's shared record, or a fresh commit
-// timestamp when there is no open transaction.
+// versionStamp resolves how the version record of the write in progress is
+// timestamped, from the transaction the write CARRIES.
 //
 // Called from storeEntry with the shard lock held and only when versioning is
 // armed AND this write actually supersedes something, so its cost is paid per
 // topology change and never on a read.
-func (a *AdjList[N, W]) writeStamp() (*mvcc.CommitInfo, uint64) {
+//
+// # The three cases, and why the middle one may not fall back to the slot
+//
+// A write that carries a transaction takes that transaction's shared record, so
+// every version of one transaction points at one record and publishing it is one
+// atomic store — whatever else is writing concurrently (rmp #2320).
+//
+// A write that carries a transaction whose window has already been RETRACTED
+// takes a fresh untransacted timestamp instead of consulting the ambient slot.
+// Consulting it would be the defect this threading removes, arrived at from the
+// far side: the slot may name a live concurrent transaction, and adopting that
+// record would publish this version at that transaction's commit instant. A
+// timestamp later than the write actually happened is the safe direction; see
+// the [mvcc.WriteStamp] file comment.
+//
+// A write that carries NO transaction resolves through the ambient slot, which
+// is the correct reading for adjlist's remaining untransacted callers — the
+// exclusive bulk builds, WAL replay, snapshot apply and the direct Go API.
+func (a *AdjList[N, W]) versionStamp(tx mvcc.Tx) (*mvcc.CommitInfo, uint64) {
 	if a.stamp == nil {
 		return nil, 0
+	}
+	if tx.Valid() {
+		if info := tx.Record(); info != nil {
+			return info, 0
+		}
+		return a.stamp.UntransactedStamp()
 	}
 	return a.stamp.Stamp()
 }

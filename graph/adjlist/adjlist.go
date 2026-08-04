@@ -581,7 +581,7 @@ func (a *AdjList[N, W]) HasEdge(src, dst N) bool {
 // strict orphan-free behaviour should detect ErrShardFull and treat
 // the graph as saturated.
 func (a *AdjList[N, W]) AddEdge(src, dst N, w W) error {
-	return a.addEdge(src, dst, w, edgeExtra{})
+	return a.addEdge(src, dst, w, edgeExtra{}, mvcc.Tx{})
 }
 
 // AddEdgeH is [AdjList.AddEdge] with an explicit, caller-supplied stable
@@ -600,7 +600,7 @@ func (a *AdjList[N, W]) AddEdge(src, dst N, w W) error {
 // a no-op and the supplied handle is ignored (the existing slot keeps its
 // original handle).
 func (a *AdjList[N, W]) AddEdgeH(src, dst N, w W, handle uint64) error {
-	return a.addEdge(src, dst, w, edgeExtra{handle: handle, hasHandle: true})
+	return a.addEdge(src, dst, w, edgeExtra{handle: handle, hasHandle: true}, mvcc.Tx{})
 }
 
 // AddEdgeLabeled is [AdjList.AddEdge] with an OPAQUE 4-byte label supplied AT
@@ -622,7 +622,7 @@ func (a *AdjList[N, W]) AddEdgeH(src, dst N, w W, handle uint64) error {
 // no-op and the supplied label is ignored (the existing slot keeps its label).
 // Use [AdjList.SetEdgeLabelSlot] to (re)label a slot of a pre-existing edge.
 func (a *AdjList[N, W]) AddEdgeLabeled(src, dst N, w W, label uint32) error {
-	return a.addEdge(src, dst, w, edgeExtra{label: label, hasLabel: true})
+	return a.addEdge(src, dst, w, edgeExtra{label: label, hasLabel: true}, mvcc.Tx{})
 }
 
 // AddEdgeLabeledH fuses [AdjList.AddEdgeH] and [AdjList.AddEdgeLabeled]: it
@@ -631,7 +631,7 @@ func (a *AdjList[N, W]) AddEdgeLabeled(src, dst N, w W, label uint32) error {
 // position oldLen at insertion time, so a labelled, handle-carrying edge is
 // still an O(1)-amortised append.
 func (a *AdjList[N, W]) AddEdgeLabeledH(src, dst N, w W, handle uint64, label uint32) error {
-	return a.addEdge(src, dst, w, edgeExtra{handle: handle, hasHandle: true, label: label, hasLabel: true})
+	return a.addEdge(src, dst, w, edgeExtra{handle: handle, hasHandle: true, label: label, hasLabel: true}, mvcc.Tx{})
 }
 
 // AddEdgeLabeledWithProp fuses [AdjList.AddEdgeLabeled] with one opaque
@@ -666,7 +666,7 @@ func (a *AdjList[N, W]) AddEdgeLabeledWithProp(src, dst N, w W, label uint32, pa
 	return a.addEdge(src, dst, w, edgeExtra{
 		label: label, hasLabel: true,
 		auxPayload: payload, hasAuxPayload: true,
-	})
+	}, mvcc.Tx{})
 }
 
 // edgeExtra carries the OPTIONAL parallel-column values an edge insertion may
@@ -713,13 +713,13 @@ func (ex edgeExtra) mirror() edgeExtra {
 // and mirror slots are assigned atomically — no concurrent parallel-edge
 // insertion can interleave between the two appends — so both directions
 // always reflect the same slot ordering.
-func (a *AdjList[N, W]) addEdge(src, dst N, w W, ex edgeExtra) error {
+func (a *AdjList[N, W]) addEdge(src, dst N, w W, ex edgeExtra, tx mvcc.Tx) error {
 	srcID := a.mapper.Intern(src)
 	dstID := a.mapper.Intern(dst)
 
 	// Directed graphs and self-loops need only the forward append.
 	if a.cfg.Directed || srcID == dstID {
-		inserted, err := a.upsertEdge(srcID, dstID, w, ex)
+		inserted, err := a.upsertEdge(srcID, dstID, w, ex, tx)
 		if err != nil {
 			return err
 		}
@@ -735,7 +735,7 @@ func (a *AdjList[N, W]) addEdge(src, dst N, w W, ex edgeExtra) error {
 
 	if srcShard == dstShard {
 		// Single shard covers both endpoints: one lock suffices.
-		inserted, err := a.upsertEdge(srcID, dstID, w, ex)
+		inserted, err := a.upsertEdge(srcID, dstID, w, ex, tx)
 		if err != nil {
 			return err
 		}
@@ -743,10 +743,10 @@ func (a *AdjList[N, W]) addEdge(src, dst N, w W, ex edgeExtra) error {
 			return nil
 		}
 		a.size.Add(1)
-		if _, err := a.upsertEdge(dstID, srcID, w, ex.mirror()); err != nil {
+		if _, err := a.upsertEdge(dstID, srcID, w, ex.mirror(), tx); err != nil {
 			// Both endpoints share a shard, so the forward append and this
 			// mirror append are already serialised; just undo the forward.
-			a.removeOneEdge(srcID, dstID)
+			a.removeOneEdge(srcID, dstID, tx)
 			a.size.Add(^uint64(0))
 			return err
 		}
@@ -761,7 +761,7 @@ func (a *AdjList[N, W]) addEdge(src, dst N, w W, ex edgeExtra) error {
 	sLo.mu.Lock()
 	sHi.mu.Lock()
 
-	inserted, err := a.upsertEdgeLocked(srcID, dstID, w, ex)
+	inserted, err := a.upsertEdgeLocked(srcID, dstID, w, ex, tx)
 	if err != nil {
 		sHi.mu.Unlock()
 		sLo.mu.Unlock()
@@ -773,10 +773,10 @@ func (a *AdjList[N, W]) addEdge(src, dst N, w W, ex edgeExtra) error {
 		return nil
 	}
 	// Forward slot appended. Now append the mirror under the same lock pair.
-	if _, err := a.upsertEdgeLocked(dstID, srcID, w, ex.mirror()); err != nil {
+	if _, err := a.upsertEdgeLocked(dstID, srcID, w, ex.mirror(), tx); err != nil {
 		// Undo the forward append before releasing — we still hold both locks
 		// so the rollback is atomic with respect to any reader.
-		a.removeOneEdgeLocked(srcID, dstID)
+		a.removeOneEdgeLocked(srcID, dstID, tx)
 		sHi.mu.Unlock()
 		sLo.mu.Unlock()
 		return err
@@ -795,11 +795,11 @@ func (a *AdjList[N, W]) addEdge(src, dst N, w W, ex edgeExtra) error {
 // snapshot is constructed fresh and swapped in via atomic.StorePointer
 // so concurrent readers always observe a consistent immutable
 // adjacency.
-func (a *AdjList[N, W]) upsertEdge(src, dst graph.NodeID, w W, ex edgeExtra) (bool, error) {
+func (a *AdjList[N, W]) upsertEdge(src, dst graph.NodeID, w W, ex edgeExtra, tx mvcc.Tx) (bool, error) {
 	s := &a.shards[src&shardMask]
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return a.upsertEdgeLocked(src, dst, w, ex)
+	return a.upsertEdgeLocked(src, dst, w, ex, tx)
 }
 
 // growCap returns the next backing-array capacity to use when appending to a
@@ -827,7 +827,7 @@ func growCap(cur int) int {
 // readers). When the array is full a new one is allocated with geometric
 // capacity (growCap), amortising the copy cost to O(log d) large allocations
 // per degree-d hub.
-func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtra) (bool, error) {
+func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtra, tx mvcc.Tx) (bool, error) {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
@@ -867,7 +867,7 @@ func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtr
 		if ex.hasAuxPayload && a.auxFactory != nil {
 			entry.aux = a.auxFactory(1, ex.auxPayload)
 		}
-		if err := a.storeEntry(s, intraIdx, entry); err != nil {
+		if err := a.storeEntry(s, intraIdx, entry, tx); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -939,7 +939,7 @@ func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtr
 		// fresh column of length newLen. A fresh entry that fuses no payload never
 		// gains an aux column, so a label-/property-free graph pays nothing.
 		ax := a.growAuxEx(current.aux, oldLen, ex)
-		if err := a.storeEntry(s, intraIdx, &adjEntry[W]{neighbours: nb, weights: ws, handles: hs, labels: ls, aux: ax}); err != nil {
+		if err := a.storeEntry(s, intraIdx, &adjEntry[W]{neighbours: nb, weights: ws, handles: hs, labels: ls, aux: ax}, tx); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -983,7 +983,7 @@ func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtr
 	// Carry the opaque aux column forward when it exists; a fused payload writes
 	// the new slot at oldLen PRESENT, otherwise the new slot is absent.
 	newAux := a.growAuxEx(current.aux, oldLen, ex)
-	if err := a.storeEntry(s, intraIdx, &adjEntry[W]{neighbours: newNb, weights: newW, handles: newH, labels: newL, aux: newAux}); err != nil {
+	if err := a.storeEntry(s, intraIdx, &adjEntry[W]{neighbours: newNb, weights: newW, handles: newH, labels: newL, aux: newAux}, tx); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -1034,6 +1034,13 @@ func (a *AdjList[N, W]) growAuxEx(cur AuxColumn, oldLen int, ex edgeExtra) AuxCo
 // falls back to first-match behaviour, which is correct in the single-writer
 // case that plain AddEdge implies.
 func (a *AdjList[N, W]) RemoveEdge(src, dst N) {
+	a.removeEdgeTx(src, dst, mvcc.Tx{})
+}
+
+// removeEdgeTx is [AdjList.RemoveEdge] with the write's own transaction carried in
+// rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
+// none, which is what the exported form above passes.
+func (a *AdjList[N, W]) removeEdgeTx(src, dst N, tx mvcc.Tx) {
 	srcID, ok := a.mapper.Lookup(src)
 	if !ok {
 		return
@@ -1042,7 +1049,7 @@ func (a *AdjList[N, W]) RemoveEdge(src, dst N) {
 	if !ok {
 		return
 	}
-	removed, removedHandle := a.removeOneEdgeWithHandle(srcID, dstID)
+	removed, removedHandle := a.removeOneEdgeWithHandle(srcID, dstID, tx)
 	if !removed {
 		return
 	}
@@ -1054,9 +1061,9 @@ func (a *AdjList[N, W]) RemoveEdge(src, dst N) {
 	// Mirror removal: prefer handle-based targeting when the removed slot
 	// carried a non-zero handle; fall back to first-match otherwise.
 	if removedHandle != 0 {
-		a.removeOneEdgeByHandle(dstID, srcID, removedHandle)
+		a.removeOneEdgeByHandle(dstID, srcID, removedHandle, tx)
 	} else {
-		a.removeOneEdge(dstID, srcID)
+		a.removeOneEdge(dstID, srcID, tx)
 	}
 }
 
@@ -1078,6 +1085,13 @@ func (a *AdjList[N, W]) RemoveEdge(src, dst N) {
 //
 // RemoveEdgeByHandle is safe for concurrent use.
 func (a *AdjList[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) bool {
+	return a.removeEdgeByHandleTx(src, dst, handle, mvcc.Tx{})
+}
+
+// removeEdgeByHandleTx is [AdjList.RemoveEdgeByHandle] with the write's own transaction carried in
+// rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
+// none, which is what the exported form above passes.
+func (a *AdjList[N, W]) removeEdgeByHandleTx(src, dst N, handle uint64, tx mvcc.Tx) bool {
 	srcID, ok := a.mapper.Lookup(src)
 	if !ok {
 		return false
@@ -1086,7 +1100,7 @@ func (a *AdjList[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) bool {
 	if !ok {
 		return false
 	}
-	if !a.removeOneEdgeByHandle(srcID, dstID, handle) {
+	if !a.removeOneEdgeByHandle(srcID, dstID, handle, tx) {
 		return false
 	}
 	a.size.Add(^uint64(0))
@@ -1097,7 +1111,7 @@ func (a *AdjList[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) bool {
 	// Undirected: retire the mirror slot carrying the same handle. A false
 	// return here is benign (the mirror may already be gone); the logical edge
 	// counter was decremented once above.
-	a.removeOneEdgeByHandle(dstID, srcID, handle)
+	a.removeOneEdgeByHandle(dstID, srcID, handle, tx)
 	return true
 }
 
@@ -1117,6 +1131,13 @@ func (a *AdjList[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) bool {
 //
 // RemoveAllEdgesFrom is safe for concurrent use.
 func (a *AdjList[N, W]) RemoveAllEdgesFrom(src N) {
+	a.removeAllEdgesFromTx(src, mvcc.Tx{})
+}
+
+// removeAllEdgesFromTx is [AdjList.RemoveAllEdgesFrom] with the write's own transaction carried in
+// rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
+// none, which is what the exported form above passes.
+func (a *AdjList[N, W]) removeAllEdgesFromTx(src N, tx mvcc.Tx) {
 	srcID, ok := a.mapper.Lookup(src)
 	if !ok {
 		return
@@ -1133,7 +1154,7 @@ func (a *AdjList[N, W]) RemoveAllEdgesFrom(src N) {
 	}
 	// Publish nil atomically: readers after this store see an empty adjacency
 	// for src. storeEntry cannot fail here because the slot already exists.
-	_ = a.storeEntry(s, intraIdx, nil)
+	_ = a.storeEntry(s, intraIdx, nil, tx)
 	removed := len(old.neighbours)
 	// Copy neighbour IDs before releasing the lock so the mirror-removal loop
 	// below is not affected by concurrent writes to the shard.
@@ -1152,7 +1173,7 @@ func (a *AdjList[N, W]) RemoveAllEdgesFrom(src N) {
 	// cleared by the slot zeroing above and must not be processed again.
 	for _, dstID := range dsts {
 		if dstID != srcID {
-			a.removeOneEdge(dstID, srcID)
+			a.removeOneEdge(dstID, srcID, tx)
 		}
 	}
 }
@@ -1161,7 +1182,7 @@ func (a *AdjList[N, W]) RemoveAllEdgesFrom(src N) {
 // omits one occurrence of dst (first match). Returns (true, handle) when an
 // edge was removed, where handle is the handle value stored in the removed
 // slot (0 when no handle column is present).
-func (a *AdjList[N, W]) removeOneEdgeWithHandle(src, dst graph.NodeID) (removed bool, handle uint64) {
+func (a *AdjList[N, W]) removeOneEdgeWithHandle(src, dst graph.NodeID, tx mvcc.Tx) (removed bool, handle uint64) {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
@@ -1191,19 +1212,19 @@ func (a *AdjList[N, W]) removeOneEdgeWithHandle(src, dst graph.NodeID) (removed 
 		// in the shard's slot array; no growth is required. Publish nil
 		// instead of an empty struct to avoid a small allocation on each
 		// last-edge removal; loadEntry handles nil slots correctly.
-		_ = a.storeEntry(s, intraIdx, nil)
+		_ = a.storeEntry(s, intraIdx, nil, tx)
 		return true, removedH
 	}
 	newEntry := compactEntry(current, idx)
 	// storeEntry cannot fail here: same slot, no growth required.
-	_ = a.storeEntry(s, intraIdx, newEntry)
+	_ = a.storeEntry(s, intraIdx, newEntry, tx)
 	return true, removedH
 }
 
 // removeOneEdge publishes a new adjacency snapshot for src that omits
 // one occurrence of dst. Returns true when an edge was removed.
-func (a *AdjList[N, W]) removeOneEdge(src, dst graph.NodeID) bool {
-	removed, _ := a.removeOneEdgeWithHandle(src, dst)
+func (a *AdjList[N, W]) removeOneEdge(src, dst graph.NodeID, tx mvcc.Tx) bool {
+	removed, _ := a.removeOneEdgeWithHandle(src, dst, tx)
 	return removed
 }
 
@@ -1211,7 +1232,7 @@ func (a *AdjList[N, W]) removeOneEdge(src, dst graph.NodeID) bool {
 // The caller must already hold the shard mutex for src. This variant is
 // used by [AdjList.addEdge] to roll back a forward append while still
 // holding both shard locks.
-func (a *AdjList[N, W]) removeOneEdgeLocked(src, dst graph.NodeID) {
+func (a *AdjList[N, W]) removeOneEdgeLocked(src, dst graph.NodeID, tx mvcc.Tx) {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
@@ -1230,17 +1251,17 @@ func (a *AdjList[N, W]) removeOneEdgeLocked(src, dst graph.NodeID) {
 		return
 	}
 	if len(current.neighbours) == 1 {
-		_ = a.storeEntry(s, intraIdx, nil)
+		_ = a.storeEntry(s, intraIdx, nil, tx)
 		return
 	}
-	_ = a.storeEntry(s, intraIdx, compactEntry(current, idx))
+	_ = a.storeEntry(s, intraIdx, compactEntry(current, idx), tx)
 }
 
 // removeOneEdgeByHandle publishes a new adjacency snapshot for src that omits
 // the slot whose handle equals targetHandle. The search scans dst-directed
 // neighbours for a matching handle. Returns true when a slot was removed.
 // Falls back silently when no slot with the target handle exists.
-func (a *AdjList[N, W]) removeOneEdgeByHandle(src, dst graph.NodeID, targetHandle uint64) bool {
+func (a *AdjList[N, W]) removeOneEdgeByHandle(src, dst graph.NodeID, targetHandle uint64, tx mvcc.Tx) bool {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
@@ -1250,7 +1271,7 @@ func (a *AdjList[N, W]) removeOneEdgeByHandle(src, dst graph.NodeID, targetHandl
 	current := loadEntry[W](s, intraIdx)
 	if current == nil || current.handles == nil {
 		// No handle column: fall back to first-match by neighbour.
-		return a.removeOneEdgeFallback(s, intraIdx, current, dst)
+		return a.removeOneEdgeFallback(s, intraIdx, current, dst, tx)
 	}
 	// Find the slot whose neighbour is dst AND whose handle matches.
 	idx := -1
@@ -1264,17 +1285,17 @@ func (a *AdjList[N, W]) removeOneEdgeByHandle(src, dst graph.NodeID, targetHandl
 		return false
 	}
 	if len(current.neighbours) == 1 {
-		_ = a.storeEntry(s, intraIdx, nil)
+		_ = a.storeEntry(s, intraIdx, nil, tx)
 		return true
 	}
-	_ = a.storeEntry(s, intraIdx, compactEntry(current, idx))
+	_ = a.storeEntry(s, intraIdx, compactEntry(current, idx), tx)
 	return true
 }
 
 // removeOneEdgeFallback is the first-match fallback used inside
 // [AdjList.removeOneEdgeByHandle] when the handle column is absent.
 // The caller must hold s.mu.
-func (a *AdjList[N, W]) removeOneEdgeFallback(s *adjShard[W], intraIdx uint64, current *adjEntry[W], dst graph.NodeID) bool {
+func (a *AdjList[N, W]) removeOneEdgeFallback(s *adjShard[W], intraIdx uint64, current *adjEntry[W], dst graph.NodeID, tx mvcc.Tx) bool {
 	if current == nil {
 		return false
 	}
@@ -1289,10 +1310,10 @@ func (a *AdjList[N, W]) removeOneEdgeFallback(s *adjShard[W], intraIdx uint64, c
 		return false
 	}
 	if len(current.neighbours) == 1 {
-		_ = a.storeEntry(s, intraIdx, nil)
+		_ = a.storeEntry(s, intraIdx, nil, tx)
 		return true
 	}
-	_ = a.storeEntry(s, intraIdx, compactEntry(current, idx))
+	_ = a.storeEntry(s, intraIdx, compactEntry(current, idx), tx)
 	return true
 }
 
@@ -1847,6 +1868,17 @@ func (a *AdjList[N, W]) UpdateEntryAux(
 	src graph.NodeID,
 	fn func(cur AuxColumn, neighbours []graph.NodeID) (AuxColumn, bool),
 ) bool {
+	return a.updateEntryAuxTx(src, fn, mvcc.Tx{})
+}
+
+// updateEntryAuxTx is [AdjList.UpdateEntryAux] with the write's own transaction
+// carried in rather than resolved through the ambient slot. The zero [mvcc.Tx]
+// carries none, which is what the exported form above passes.
+func (a *AdjList[N, W]) updateEntryAuxTx(
+	src graph.NodeID,
+	fn func(cur AuxColumn, neighbours []graph.NodeID) (AuxColumn, bool),
+	tx mvcc.Tx,
+) bool {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
@@ -1870,7 +1902,7 @@ func (a *AdjList[N, W]) UpdateEntryAux(
 	}
 	// storeEntry cannot fail here: the slot already exists, so no growth is
 	// required.
-	_ = a.storeEntry(s, intraIdx, entry)
+	_ = a.storeEntry(s, intraIdx, entry, tx)
 	return true
 }
 
@@ -1898,6 +1930,13 @@ func (a *AdjList[N, W]) UpdateEntryAux(
 // never mutated in place, so a concurrent lock-free reader holding the prior
 // snapshot is unaffected. SetEdgeLabelSlot is safe for concurrent use.
 func (a *AdjList[N, W]) SetEdgeLabelSlot(src, dst graph.NodeID, v uint32) bool {
+	return a.setEdgeLabelSlotTx(src, dst, v, mvcc.Tx{})
+}
+
+// setEdgeLabelSlotTx is [AdjList.SetEdgeLabelSlot] with the write's own transaction carried in
+// rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
+// none, which is what the exported form above passes.
+func (a *AdjList[N, W]) setEdgeLabelSlotTx(src, dst graph.NodeID, v uint32, tx mvcc.Tx) bool {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
@@ -1936,7 +1975,7 @@ func (a *AdjList[N, W]) SetEdgeLabelSlot(src, dst graph.NodeID, v uint32) bool {
 	}
 	// storeEntry cannot fail here: the slot already exists, so no growth is
 	// required.
-	_ = a.storeEntry(s, intraIdx, entry)
+	_ = a.storeEntry(s, intraIdx, entry, tx)
 	return true
 }
 
@@ -1951,6 +1990,13 @@ func (a *AdjList[N, W]) SetEdgeLabelSlot(src, dst graph.NodeID, v uint32) bool {
 // Concurrency: copy-on-write, identical to [AdjList.SetEdgeLabelSlot]; safe
 // for concurrent use.
 func (a *AdjList[N, W]) ClearEdgeLabelSlotValue(src, dst graph.NodeID, v uint32) bool {
+	return a.clearEdgeLabelSlotValueTx(src, dst, v, mvcc.Tx{})
+}
+
+// clearEdgeLabelSlotValueTx is [AdjList.ClearEdgeLabelSlotValue] with the write's own transaction carried in
+// rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
+// none, which is what the exported form above passes.
+func (a *AdjList[N, W]) clearEdgeLabelSlotValueTx(src, dst graph.NodeID, v uint32, tx mvcc.Tx) bool {
 	if v == 0 {
 		return false
 	}
@@ -1986,7 +2032,7 @@ func (a *AdjList[N, W]) ClearEdgeLabelSlotValue(src, dst graph.NodeID, v uint32)
 		// label column is replaced here.
 		aux: current.aux,
 	}
-	_ = a.storeEntry(s, intraIdx, entry)
+	_ = a.storeEntry(s, intraIdx, entry, tx)
 	return true
 }
 
@@ -2019,6 +2065,13 @@ func (a *AdjList[N, W]) ClearEdgeLabelSlotValue(src, dst graph.NodeID, v uint32)
 // Concurrency: copy-on-write, identical to [AdjList.SetEdgeLabelSlot]; safe for
 // concurrent use.
 func (a *AdjList[N, W]) SetEdgeLabelSlotsAt(src, dst graph.NodeID, idxs []int, v uint32) int {
+	return a.setEdgeLabelSlotsAtTx(src, dst, idxs, v, mvcc.Tx{})
+}
+
+// setEdgeLabelSlotsAtTx is [AdjList.SetEdgeLabelSlotsAt] with the write's own transaction carried in
+// rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
+// none, which is what the exported form above passes.
+func (a *AdjList[N, W]) setEdgeLabelSlotsAtTx(src, dst graph.NodeID, idxs []int, v uint32, tx mvcc.Tx) int {
 	if len(idxs) == 0 {
 		return 0
 	}
@@ -2059,7 +2112,7 @@ func (a *AdjList[N, W]) SetEdgeLabelSlotsAt(src, dst graph.NodeID, idxs []int, v
 	}
 	// storeEntry cannot fail here: the slots already exist, so no growth is
 	// required.
-	_ = a.storeEntry(s, intraIdx, entry)
+	_ = a.storeEntry(s, intraIdx, entry, tx)
 	return written
 }
 
@@ -2080,6 +2133,13 @@ func (a *AdjList[N, W]) SetEdgeLabelSlotsAt(src, dst graph.NodeID, idxs []int, v
 // Concurrency: copy-on-write, identical to [AdjList.SetEdgeLabelSlot]; safe for
 // concurrent use.
 func (a *AdjList[N, W]) ClearEdgeLabelSlotsValue(src, dst graph.NodeID, v uint32) int {
+	return a.clearEdgeLabelSlotsValueTx(src, dst, v, mvcc.Tx{})
+}
+
+// clearEdgeLabelSlotsValueTx is [AdjList.ClearEdgeLabelSlotsValue] with the write's own transaction carried in
+// rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
+// none, which is what the exported form above passes.
+func (a *AdjList[N, W]) clearEdgeLabelSlotsValueTx(src, dst graph.NodeID, v uint32, tx mvcc.Tx) int {
 	if v == 0 {
 		return 0
 	}
@@ -2118,7 +2178,7 @@ func (a *AdjList[N, W]) ClearEdgeLabelSlotsValue(src, dst graph.NodeID, v uint32
 		// label column is replaced here.
 		aux: current.aux,
 	}
-	_ = a.storeEntry(s, intraIdx, entry)
+	_ = a.storeEntry(s, intraIdx, entry, tx)
 	return cleared
 }
 
@@ -2133,6 +2193,13 @@ func (a *AdjList[N, W]) ClearEdgeLabelSlotsValue(src, dst graph.NodeID, v uint32
 // Concurrency: copy-on-write, identical to [AdjList.SetEdgeLabelSlot]; safe
 // for concurrent use.
 func (a *AdjList[N, W]) ClearEdgeLabelSlots(src, dst graph.NodeID) {
+	a.clearEdgeLabelSlotsTx(src, dst, mvcc.Tx{})
+}
+
+// clearEdgeLabelSlotsTx is [AdjList.ClearEdgeLabelSlots] with the write's own transaction carried in
+// rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
+// none, which is what the exported form above passes.
+func (a *AdjList[N, W]) clearEdgeLabelSlotsTx(src, dst graph.NodeID, tx mvcc.Tx) {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
@@ -2168,7 +2235,7 @@ func (a *AdjList[N, W]) ClearEdgeLabelSlots(src, dst graph.NodeID) {
 		// label column is replaced here.
 		aux: current.aux,
 	}
-	_ = a.storeEntry(s, intraIdx, entry)
+	_ = a.storeEntry(s, intraIdx, entry, tx)
 }
 
 // SetEdgeLabelSlots stores opaque label values on many of src's adjacency
@@ -2192,6 +2259,13 @@ func (a *AdjList[N, W]) ClearEdgeLabelSlots(src, dst graph.NodeID) {
 // the same atomic store-pointer mechanism — so a concurrent lock-free reader
 // holding the prior snapshot is unaffected. Safe for concurrent use.
 func (a *AdjList[N, W]) SetEdgeLabelSlots(src graph.NodeID, updates map[graph.NodeID]uint32) int {
+	return a.setEdgeLabelSlotsTx(src, updates, mvcc.Tx{})
+}
+
+// setEdgeLabelSlotsTx is [AdjList.SetEdgeLabelSlots] with the write's own transaction carried in
+// rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
+// none, which is what the exported form above passes.
+func (a *AdjList[N, W]) setEdgeLabelSlotsTx(src graph.NodeID, updates map[graph.NodeID]uint32, tx mvcc.Tx) int {
 	if len(updates) == 0 {
 		return 0
 	}
@@ -2243,7 +2317,7 @@ func (a *AdjList[N, W]) SetEdgeLabelSlots(src graph.NodeID, updates map[graph.No
 		// label column is replaced here.
 		aux: current.aux,
 	}
-	_ = a.storeEntry(s, intraIdx, entry)
+	_ = a.storeEntry(s, intraIdx, entry, tx)
 	return len(done)
 }
 
@@ -2334,12 +2408,22 @@ func loadEntry[W any](s *adjShard[W], intraIdx uint64) *adjEntry[W] {
 //
 // Pinned by TestStoreEntry_InPlaceWindowMutationIsSoundUnderVersioning and its
 // concurrent companion, which fail if either property is lost.
-func (a *AdjList[N, W]) storeEntry(s *adjShard[W], intraIdx uint64, entry *adjEntry[W]) error {
+func (a *AdjList[N, W]) storeEntry(s *adjShard[W], intraIdx uint64, entry *adjEntry[W], tx mvcc.Tx) error {
 	maxCap := a.cfg.MaxShardCapacity
-	// The transaction now writing, as an identity. Nil means "no transaction",
+	// The transaction now writing, as an identity. Zero means "no transaction",
 	// in which case this write is its own one-op window and always clones — the
 	// behaviour an unbracketed write has always had.
-	owner := a.builderOwner()
+	//
+	// From the transaction the write CARRIES when it carries one, and only from
+	// the ambient slot when it does not (rmp #2320). Reading the ambient slot for
+	// a write that has its own transaction is what let two concurrent writers
+	// present the same owner and mutate each other's unpublished builders; the
+	// note at [AdjList.builderOwner] recorded the obligation and this discharges
+	// it.
+	owner := tx.ID()
+	if owner == 0 {
+		owner = a.builderOwner()
+	}
 	inWindow := owner != 0
 
 	// Determine the slot array to write into. A builder is reusable only when it
@@ -2389,7 +2473,7 @@ func (a *AdjList[N, W]) storeEntry(s *adjShard[W], intraIdx uint64, entry *adjEn
 				// for anyone before it.
 				entry = &adjEntry[W]{}
 			}
-			info, ts := a.writeStamp()
+			info, ts := a.versionStamp(tx)
 			a.linkVersion(entry, prev, info, ts)
 			// Index the slot so reclamation need not scan the shard.
 			if s.versioned == nil {
@@ -2485,12 +2569,16 @@ func (a *AdjList[N, W]) builderOwner() uint64 {
 	// Preferring it MATTERS rather than merely being tidier. The bulk token is ONE
 	// per-AdjList field, so while it wins, every writer in a window presents the
 	// same owner — and the owner is what decides who may mutate a shard's private,
-	// unpublished slot array in place. Under the barrier there is only ever one
-	// serving writer, so the two orders behave identically today; with the barrier
-	// gone (rmp #2304) the old order would let two writers reuse each other's
-	// builders. Keying on the transaction removes that by construction, and leaves
-	// #2304 with one problem instead of two: the LOOKUP still resolves through a
-	// single ambient slot and must become a parameter that travels with the write.
+	// unpublished slot array in place. Under the barrier there was only ever one
+	// serving writer, so the two orders behaved identically; with the barrier gone
+	// the old order would let two writers reuse each other's builders. Keying on the
+	// transaction removes that by construction.
+	//
+	// This function is now the FALLBACK only. rmp #2320 made the transaction a
+	// parameter that travels with the write ([AdjList.storeEntry] prefers tx.ID()),
+	// so an ambient lookup happens only for a write that carries no transaction at
+	// all — the exclusive bulk builds, WAL replay, snapshot apply and the direct Go
+	// API — where there is no second writer to be confused with.
 	if a.stamp != nil {
 		if id := a.stamp.OpenTxID(); id != 0 {
 			// A transaction id is unique, monotonic and never reused, so it

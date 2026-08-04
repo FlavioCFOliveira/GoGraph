@@ -504,7 +504,7 @@ type Store[N comparable, W any] struct {
 	// frames are appended (so the next transaction can append while this one
 	// fsyncs), and the fsync itself is coalesced across committers by
 	// [wal.Writer.SyncGroup]. But [Tx.Commit]'s post-durability in-memory apply
-	// ([applyOp] under [lpg.Graph.ApplyAtomically]) must still run in
+	// ([applyOp] under [lpg.Graph.ApplyVersioned], rmp #2320) must still run in
 	// transaction-sequence order: applying a higher-seq transaction before a
 	// lower-seq one could materialise an op against a node a not-yet-applied
 	// earlier transaction was to create (lpg property writes are
@@ -687,9 +687,13 @@ func (s *Store[N, W]) MaxTxnOps() int { return s.maxTxnOps }
 // atomic, but may observe a multi-operation transaction half-applied — for
 // example the edge of an edge-plus-labels write before its endpoint labels.
 // An embedding application that reads this graph concurrently with committing
-// transactions must therefore wrap its reads in [lpg.Graph.View] to obtain the
-// no-partial-transaction guarantee; writes go through the [Tx] API, which
-// applies them under the same [lpg.Graph.ApplyAtomically] barrier.
+// transactions must therefore take an MVCC SNAPSHOT for its reads
+// ([lpg.Graph.BeginRead] plus [lpg.Graph.ReadAt]) to obtain the
+// no-partial-transaction guarantee; writes go through the [Tx] API, which applies
+// them under [lpg.Graph.ApplyVersioned] and publishes each transaction with one
+// atomic store into its shared commit record. [lpg.Graph.View] does NOT provide
+// that guarantee since rmp #2320 — it is the schema barrier and an ordinary write
+// holds it shared.
 //
 // See the lpg package documentation and docs/isolation-design.md for the full
 // opt-in contract and the tracked lock-free per-shard snapshot that will make
@@ -727,8 +731,10 @@ func (s *Store[N, W]) release() { <-s.sem }
 // commit lock — the SAME semaphore [Store.Begin] acquires and
 // [Tx.Commit]/[Tx.CommitWALOnly]/[Tx.Rollback] release. While fn runs no
 // transaction can be between Begin and its commit/rollback: neither a new
-// in-memory apply (the [lpg.Graph.ApplyAtomically] window opened inside a
-// transaction) nor a new WAL frame append can race fn.
+// in-memory apply (the [lpg.Graph.ApplyVersioned] window opened inside a
+// transaction) nor a new WAL frame append can race fn. Since rmp #2320 that
+// exclusion rests on THIS lock plus the in-flight drain and no longer on visMu,
+// because an ordinary write holds visMu shared.
 //
 // This is the serialisation seam a background checkpointer needs to take a
 // consistent snapshot and truncate the WAL atomically against the commit
@@ -742,8 +748,8 @@ func (s *Store[N, W]) release() { <-s.sem }
 // or open a transaction on this store (the lock is not re-entrant — that
 // would deadlock). fn MAY read the graph through [lpg.Graph.View]; the
 // resulting lock order is store-lock → visMu, which matches the engine's own
-// order (Begin acquires the store lock, then ApplyAtomically acquires visMu),
-// so no new deadlock is introduced. fn's error is returned unwrapped.
+// order (Begin acquires the store lock, then ApplyVersioned acquires visMu
+// shared), so no new deadlock is introduced. fn's error is returned unwrapped.
 //
 // Concurrency: safe to call from any goroutine; it serialises against every
 // transaction on the store.
@@ -1251,25 +1257,33 @@ func (t *Tx[N, W]) Commit() error {
 	}
 
 	// Apply to the in-memory graph after durability is secured, as ONE write
-	// transaction (ApplyAtomically) so the whole transaction's writes flip visible
-	// as a single atomic step — no reader can observe a partially-applied
-	// transaction (audit gap F3, docs/isolation-design.md).
+	// transaction so the whole transaction's writes flip visible as a single
+	// atomic step — no reader can observe a partially-applied transaction (audit
+	// gap F3, docs/isolation-design.md).
 	//
-	// EXCLUSIVE for now. rmp #2304 moved this to the shared bracket
-	// (lpg.Graph.ApplyVersioned) and moved it back: a shared bracket here overlaps
-	// a concurrent Cypher bracket, and until the write path carries its transaction
-	// rather than resolving it through the graph's ambient slot, overlapping
-	// brackets split one transaction across two commit records. See the note at the
-	// autocommit call site in cypher/api.go and rmp #2306. The transaction is
-	// already durable (op
-	// frames + OpCommit marker fsynced), so an apply error here does not undo
-	// the commit: recovery — which builds the graph without a shard-capacity
-	// cap — replays the whole transaction atomically. Surface it as
-	// ErrCommittedNotApplied so the caller knows the commit is durable and
-	// must not be retried (F5).
-	if err := t.store.g.ApplyAtomically(func() error {
+	// SHARED, not exclusive (rmp #2320): concurrent applies overlap and are
+	// serialised only by the per-object latches guarding each version-chain head.
+	// What makes the atomic-visibility promise now is not exclusion but the
+	// transaction every op CARRIES — applyOp writes through the [lpg.WriteView]
+	// this closure is handed, so every version the transaction creates points at
+	// one commit record and [lpg.Graph.ApplyVersioned] publishes it with one
+	// atomic store.
+	//
+	// rmp #2304 tried this flip before the ops carried their transaction and had to
+	// revert it: with two brackets open, writes resolving their record through the
+	// graph's ambient slot split one transaction across two records, and a snapshot
+	// reader observed half a transaction (105 942 torn observations from
+	// examples/27_concurrent_txn). That is what rmp #2320's threading removed.
+	//
+	// The transaction is already durable (op frames + OpCommit marker fsynced), so
+	// an apply error here does not undo the commit: recovery — which builds the
+	// graph without a shard-capacity cap — replays the whole transaction
+	// atomically. Surface it as ErrCommittedNotApplied so the caller knows the
+	// commit is durable and must not be retried (F5).
+	if err := t.store.g.ApplyVersioned(func(wtx lpg.WriteTx) error {
+		wv := t.store.g.Writer(wtx)
 		for _, op := range t.ops {
-			if aerr := applyOp(t.store.g, op); aerr != nil {
+			if aerr := applyOp(wv, op); aerr != nil {
 				return aerr
 			}
 		}
@@ -2230,7 +2244,7 @@ func decodeTxnTimeProp(buf []byte) (lpg.PropertyValue, []byte, error) {
 // fsynced for op by the time applyOp runs, so an error here means the
 // durable log and the in-memory view are temporarily inconsistent —
 // recovery will replay the same op and surface the same error.
-func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
+func applyOp[N comparable, W any](wv lpg.WriteView[N, W], op Op[N, W]) error {
 	switch op.Kind {
 	case OpAddEdge:
 		// rmp #1871: bump the cache-invalidation generation counter on
@@ -2240,15 +2254,15 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
 		// final counter value regardless), so unconditional is the safe
 		// default here, never a source of a false cache hit.
 		var zero W
-		if err := g.AddEdge(op.Src, op.Dst, zero); err != nil {
+		if err := wv.AddEdge(op.Src, op.Dst, zero); err != nil {
 			return err
 		}
-		g.BumpTopoGeneration()
+		wv.Graph().BumpTopoGeneration()
 	case OpAddEdgeWeighted:
-		if err := g.AddEdge(op.Src, op.Dst, op.Weight); err != nil {
+		if err := wv.AddEdge(op.Src, op.Dst, op.Weight); err != nil {
 			return err
 		}
-		g.BumpTopoGeneration()
+		wv.Graph().BumpTopoGeneration()
 	case OpAddEdgeH:
 		// Handle-bearing add: idempotent against a slot already carrying
 		// this handle (the snapshot loaded it, or an earlier frame applied
@@ -2258,34 +2272,34 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
 		// through the engine's own adapter, before ever reaching this
 		// replay-time call — inserted is false here for that case, so this
 		// does not double-bump (harmless either way, but pointless).
-		inserted, err := g.AddEdgeHIfAbsent(op.Src, op.Dst, op.Weight, op.Handle)
+		inserted, err := wv.AddEdgeHIfAbsent(op.Src, op.Dst, op.Weight, op.Handle)
 		if err != nil {
 			return err
 		}
 		if inserted {
-			g.BumpTopoGeneration()
+			wv.Graph().BumpTopoGeneration()
 		}
 	case OpSetEdgeLabelByHandle:
-		g.SetEdgeLabelByHandle(op.Src, op.Dst, op.Handle, op.Label)
+		wv.SetEdgeLabelByHandle(op.Src, op.Dst, op.Handle, op.Label)
 	case OpSetEdgePropertyByHandle:
-		return g.SetEdgePropertyByHandle(op.Src, op.Dst, op.Handle, op.Key, op.Value)
+		return wv.SetEdgePropertyByHandle(op.Src, op.Dst, op.Handle, op.Key, op.Value)
 	case OpDelEdgePropertyByHandle:
-		g.DelEdgePropertyByHandle(op.Src, op.Dst, op.Handle, op.Key)
+		wv.DelEdgePropertyByHandle(op.Src, op.Dst, op.Handle, op.Key)
 	case OpRemoveEdgeInstanceByHandle:
-		g.RemoveEdgeInstanceByHandle(op.Src, op.Dst, op.Handle)
-		g.BumpTopoGeneration() // rmp #1871; unconditional, see OpAddEdge above
+		wv.RemoveEdgeInstanceByHandle(op.Src, op.Dst, op.Handle)
+		wv.Graph().BumpTopoGeneration() // rmp #1871; unconditional, see OpAddEdge above
 	case OpRemoveEdgeByHandle:
 		// Instance-precise removal: retire the exact parallel slot carrying the
 		// handle plus its per-handle metadata (rmp #2018). Unconditional
 		// generation bump mirrors OpRemoveEdge.
-		g.RemoveEdgeByHandle(op.Src, op.Dst, op.Handle)
-		g.BumpTopoGeneration()
+		wv.RemoveEdgeByHandle(op.Src, op.Dst, op.Handle)
+		wv.Graph().BumpTopoGeneration()
 	case OpSetNodeLabel:
-		return g.SetNodeLabel(op.Src, op.Label)
+		return wv.SetNodeLabel(op.Src, op.Label)
 	case OpSetEdgeLabel:
-		g.SetEdgeLabel(op.Src, op.Dst, op.Label)
+		wv.SetEdgeLabel(op.Src, op.Dst, op.Label)
 	case OpAddNode:
-		return g.AddNode(op.Src)
+		return wv.AddNode(op.Src)
 	case OpRemoveNode:
 		// Logical removal: the mapper entry is permanent, so removal is a
 		// tombstone. Strip all labels and properties so the node is
@@ -2295,29 +2309,35 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
 		// state reconstructed by WAL replay (recovery.applyOpCodec does the
 		// same), so live and recovered graphs agree. A later OpAddNode for
 		// the same key revives it (g.AddNode clears the tombstone).
-		for _, lbl := range g.NodeLabels(op.Src) {
-			g.RemoveNodeLabel(op.Src, lbl)
+		// Enumerated through the TRANSACTION'S OWN view (rmp #2320), not through
+		// the present: this apply overlaps other writers' applies, so the present
+		// carries their uncommitted labels and properties. Stripping those would
+		// tear another transaction apart, and missing this transaction's own
+		// earlier ops would leave the tombstoned node still label-reachable.
+		rv := wv.Read()
+		for _, lbl := range rv.NodeLabels(op.Src) {
+			wv.RemoveNodeLabel(op.Src, lbl)
 		}
-		for k := range g.NodeProperties(op.Src) {
-			g.DelNodeProperty(op.Src, k)
+		for k := range rv.NodeProperties(op.Src) {
+			wv.DelNodeProperty(op.Src, k)
 		}
-		g.RemoveNode(op.Src)
+		wv.RemoveNode(op.Src)
 	case OpRemoveNodeLabel:
-		g.RemoveNodeLabel(op.Src, op.Label)
+		wv.RemoveNodeLabel(op.Src, op.Label)
 	case OpSetNodeProperty:
-		return g.SetNodeProperty(op.Src, op.Key, op.Value)
+		return wv.SetNodeProperty(op.Src, op.Key, op.Value)
 	case OpDelNodeProperty:
-		g.DelNodeProperty(op.Src, op.Key)
+		wv.DelNodeProperty(op.Src, op.Key)
 	case OpRemoveEdge:
 		// Use the LPG edge removal so a fully-disconnected pair also sheds
 		// its per-pair edge labels/properties (matching recovery replay),
 		// preventing a later re-add from resurrecting them.
-		g.RemoveEdge(op.Src, op.Dst)
-		g.BumpTopoGeneration() // rmp #1871; unconditional, see OpAddEdge above
+		wv.RemoveEdge(op.Src, op.Dst)
+		wv.Graph().BumpTopoGeneration() // rmp #1871; unconditional, see OpAddEdge above
 	case OpSetEdgeProperty:
-		return g.SetEdgeProperty(op.Src, op.Dst, op.Key, op.Value)
+		return wv.SetEdgeProperty(op.Src, op.Dst, op.Key, op.Value)
 	case OpDelEdgeProperty:
-		g.DelEdgeProperty(op.Src, op.Dst, op.Key)
+		wv.DelEdgeProperty(op.Src, op.Dst, op.Key)
 	case OpCreateConstraint:
 		// The store keeps no constraint registry of its own (constraint
 		// enforcement lives in the cypher engine), so the only in-memory effect
@@ -2326,11 +2346,11 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
 		// never goes through the engine's SetActiveConstraintCount, so a
 		// WAL-truncating checkpoint correctly judges its snapshot NOT
 		// self-sufficient and retains the OpCreateConstraint frame (#1756).
-		g.AddStoreConstraint(uint8(op.ConstraintKind), op.Label, op.Key)
+		wv.Graph().AddStoreConstraint(uint8(op.ConstraintKind), op.Label, op.Key)
 	case OpDropConstraint:
 		// Mirror the create: drop the store-direct constraint slot so the count
 		// falls back to zero once the last constraint is removed.
-		g.RemoveStoreConstraint(uint8(op.ConstraintKind), op.Label, op.Key)
+		wv.Graph().RemoveStoreConstraint(uint8(op.ConstraintKind), op.Label, op.Key)
 	case OpCreateIndex:
 		// As with constraints, the store keeps no index registry of its own
 		// (index maintenance lives in the cypher engine), so the only in-memory
@@ -2340,11 +2360,11 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
 		// checkpoint correctly judges its snapshot NOT self-sufficient and
 		// retains the OpCreateIndex frame (#1755). ConstraintName carries the
 		// index name for the index ops (see Tx.CreateIndex / Tx.DropIndex).
-		g.AddStoreIndex(op.ConstraintName)
+		wv.Graph().AddStoreIndex(op.ConstraintName)
 	case OpDropIndex:
 		// Mirror the create: drop the store-direct index slot so the count falls
 		// back to zero once the last index is removed.
-		g.RemoveStoreIndex(op.ConstraintName)
+		wv.Graph().RemoveStoreIndex(op.ConstraintName)
 	}
 	return nil
 }
