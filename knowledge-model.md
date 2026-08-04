@@ -1890,6 +1890,20 @@ The edge stamp used the 3VL-safe predicate the previous sync's note derives
 (`coalesce(a.gitCommit,'') = $FH OR coalesce(b.gitCommit,'') = $FH`), and the
 leak check afterwards returned 0.
 
+### Sprint 334 sync — the coverage precondition for concurrency controls (2026-08-04)
+
+Recorded at `83d1217d` (task rmp #2319). Added: `Commit 83d1217d`; `Task 2319`
+(COMPLETED); 2 `Function`s (`testlayers.RequireUninstrumented`, `Instrumented`); 1
+`Test`. Edges: `Sprint 334 -[CONTAINS]-> Commit`; `Task -[IMPLEMENTED_IN]-> Commit`;
+`Commit -[TOUCHES]->` `internal/testlayers`, `bench/mvccwrite`, `store/wal`,
+`graph/lpg`; `CONTAINS` per symbol. Leak check 0.
+
+Recorded here because it is a CONTRACT and not only a fix: a test that measures
+whether the ENVIRONMENT can demonstrate an effect is a CONTROL, and it skips under
+coverage instrumentation; a test that measures the MODULE is a GATE, and it never
+does. The two must not be confused, because guarding a gate that way would stop the
+coverage arm gating anything.
+
 ## Known limitations (faithful, by design)
 
 - **Build-tag duplicates.** The extractor parses every `.go` file regardless of build
