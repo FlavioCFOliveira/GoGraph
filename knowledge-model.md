@@ -2621,3 +2621,53 @@ barrier, the checkpointer's transaction-boundary consistency rests ENTIRELY on
 `store/txn.Store.RunUnderCommitLock`'s in-flight drain and no longer on `visMu`, so whatever
 replaces that drain must preserve the property (or rmp #2310 must land first). Recorded in
 #2306's AC4.
+
+Incrementally synced at commit `7ab8bbc3` (2026-08-04, task **rmp #2300**, sprint 334 — a
+refused transaction ABORTS instead of publishing, and the object it aborted on stays
+writable). +4 nodes (`Commit` `7ab8bbc3`, `Task` 2300, two `Finding`s), +4 edges
+(1 `IMPLEMENTS`, 2 `FIXES`, 1 sprint `CONTAINS`).
+
+**Two HIGH findings, the second created by fixing the first.**
+
+1. `refused-transaction-published-its-record-2300` — every write bracket published its
+   commit record, including a transaction refused by conflict detection, so the caller was
+   told the transaction failed and part of its work was visible to a fresh snapshot. An
+   ATOMICITY violation. It had been invisible because the Cypher engine's undo log
+   physically restores the stored value, and that undo log is a `cypher` structure —
+   absent for a caller using `lpg.Graph.ApplyVersioned` directly, which `store/txn`'s
+   apply is. **Rollback and abort are different things**, and `mvcc_write.go`'s
+   publication-on-rollback rationale covers only the first.
+2. `aborted-head-made-the-object-unwritable-2300` — marking the record `mvcc.AbortedTS`
+   fixed visibility and broke LIVENESS, because AbortedTS sits above `mvcc.TxIDBase` and
+   the plain "conflict = not visible" rule then refused every later writer to that object
+   forever. `make ci` caught it within minutes: examples/27's writers exhausted a
+   nine-attempt retry chain on the first account any transfer aborted on.
+
+**`mvcc.Conflicts` is therefore NOT the plain negation of `mvcc.Visible`, and the one
+asymmetry is deliberate.** An aborted head stays INVISIBLE — a reader must undo it to
+reach the pre-abort value — while being freely OVERWRITABLE, because displacing a
+transaction whose changes can never be seen loses no update. Memgraph needs no exemption:
+`InMemoryStorage::InMemoryAccessor::Abort`
+(`src/storage/v2/inmemory/storage.cpp` at `572d5b4311a279de550522344a6f10d352d11c48`)
+UNLINKS the transaction's deltas from every chain it touched. Unlinking is rmp #2318's;
+when it lands the exemption becomes unreachable rather than wrong.
+
+**An existing test asserted the opposite and measurement refuted it.**
+`TestConflicts_TheFourCases` wanted `true` for an aborted head, reasoning "an aborted
+version is not visible, so it is not overwritable through this path either". The case now
+carries the measurement, and the asymmetry is asserted directly instead of being an
+exclusion from the negation check.
+
+**AC4's reclamation half is NOT delivered and is pinned as such.** An `AbortedTS` head can
+never satisfy `at() <= watermark`, so the versions are retained for the life of the
+process — rmp #2318. `TestAbort_VersionsAreNotYetReclaimable_2318` asserts the CURRENT
+behaviour and its failure message says that reclaiming them is good news to be inverted,
+not a regression to restore.
+
+**No engine-internal retry for autocommit was added**, and the reasoning is recorded: a
+client must retry, which is the contract every MVCC engine imposes, and the Bolt boundary
+already returns a code the real driver retries. The load-bearing detail is that a retry's
+backoff must be sized to a WAL FSYNC and not to a scheduler yield — a `runtime.Gosched`
+loop was measured burning five consecutive attempts inside one fsync, all against the same
+in-flight head with `startTS` frozen, because the contiguous frontier cannot advance while
+that commit is still syncing.
