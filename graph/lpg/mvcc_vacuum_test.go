@@ -231,9 +231,22 @@ func TestVacuum_PassRespectsTheRecordBound(t *testing.T) {
 	}
 	g.EndRead(pin)
 	waitWithinBound(t, g)
-	if vs := g.VacuumStats(); vs.CappedPasses == 0 {
-		t.Errorf("%d reclaimable records were cleared with no pass hitting the %d-record bound: "+
-			"the pass is not bounded", held, vacuumRecordsPerPass)
+	// POLLED, not sampled once. The pass decrements each store's record counter
+	// while it runs and increments CappedPasses only as it returns, so
+	// waitWithinBound can observe a settled substrate a few instructions before the
+	// flag is published — which failed under -race in make ci while passing
+	// standalone.
+	deadline := time.Now().Add(settleTimeout)
+	for {
+		if g.VacuumStats().CappedPasses > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d reclaimable records were cleared with no pass hitting the %d-record "+
+				"bound: the pass is not bounded (vacuum %+v)",
+				held, vacuumRecordsPerPass, g.VacuumStats())
+		}
+		time.Sleep(200 * time.Microsecond)
 	}
 }
 

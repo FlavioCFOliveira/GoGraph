@@ -101,31 +101,48 @@ func (c *Conflict) ConcurrentWriter() bool { return c.HeadTS >= TxIDBase }
 // A headTS of zero means the object has no recorded version — nothing has
 // written it since the last reclamation — and never conflicts.
 //
-// # An ABORTED head never conflicts either (rmp #2300)
+// # An ABORTED head CONFLICTS (rmp #2318 — this reverses rmp #2300)
 //
-// [AbortedTS] names a transaction whose changes are permanently invisible to every
-// reader, so displacing its version cannot lose anybody's update — there is no
-// update to lose. It is the one place where [Conflicts] is NOT the plain negation
-// of [Visible]: an aborted version must stay INVISIBLE (a reader still has to undo
-// it to reach the pre-abort value, so it may not be treated as committed) while
-// being freely OVERWRITABLE.
+// rmp #2300 exempted an aborted head, on the argument that displacing a version no
+// reader can see cannot lose an update. The argument is true and the conclusion was
+// wrong, because it is not the VERSION that the next writer displaces — it is the
+// STORED VALUE, which still holds the aborted transaction's writes with the aborted
+// version as the only thing masking them. A writer allowed through builds its new
+// value on top of that dirty base, and then:
 //
-// Without this the exemption is not an optimisation but a liveness bug, and it was
-// measured the moment abort was wired: AbortedTS sits above [TxIDBase], so
-// `!Visible` is true for it forever, and the FIRST transaction to abort on an object
-// made that object permanently unwritable. Every later writer was refused, retried,
-// and was refused again — examples/27_concurrent_txn's writers exhausted a
-// nine-attempt retry chain on their first aborted account.
+//	T_abort adds label L to n, aborts. Stored = {…, L}; the head delta is aborted.
+//	T2 adds M and commits, building from the dirty stored bag: {…, L, M}.
+//	A reader after T2 walks the chain, finds T2's delta VISIBLE, and BREAKS —
+//	  never reaching the aborted delta behind it.
+//	The reader sees L.
 //
-// Memgraph does not need the exemption because its abort path UNLINKS the
-// transaction's deltas from the chains it touched
-// (`InMemoryStorage::InMemoryAccessor::Abort`, src/storage/v2/inmemory/storage.cpp,
-// read at 572d5b4311a279de550522344a6f10d352d11c48), so no aborted delta is ever at
-// a head to be tested. GoGraph keeps the version and exempts it instead; unlinking
-// is rmp #2318's, and when it lands this branch becomes unreachable rather than
-// wrong.
+// Measured exactly that (`reader sees L=true M=true`): a committed read observing
+// work from a transaction that was told it failed, which is an ATOMICITY violation.
+// For the ADJACENCY it is worse and unrecoverable, because that chain holds entry
+// SNAPSHOTS rather than undo actions — T2's entry itself contains the aborted edge,
+// so no walk can reconstruct a value that was never recorded.
+//
+// So an aborted head conflicts, and [Conflicts] is once again the plain negation of
+// [Visible]. What makes that safe is the OTHER half of rmp #2318: the background
+// vacuum now WITHDRAWS an aborted version — restoring the stored value through the
+// reader's own walk and then releasing the record — and an abort wakes it
+// unconditionally rather than through the churn threshold. Without a cleaner this
+// branch was a liveness bug and was measured as one: "the FIRST transaction to abort
+// on an object made that object permanently unwritable", and
+// examples/27_concurrent_txn's writers exhausted a nine-attempt retry chain on their
+// first aborted account. With one, the cost is a transient retriable serialization
+// failure, which is already this module's contract.
+//
+// Memgraph never needed the exemption because its abort path restores each object
+// and UNLINKS the transaction's deltas before returning
+// (`InMemoryStorage::InMemoryAccessor::Abort`,
+// src/storage/v2/inmemory/storage.cpp:1482-1790, read 2026-08-04 at commit
+// 0e8aa326), so no aborted delta is ever at a head to be tested. GoGraph withdraws
+// on the vacuum instead of at abort, because doing it at abort needs the
+// transaction's own write set — Memgraph's `transaction_.deltas` — and keeping one
+// taxes every write to serve the rare path.
 func Conflicts(headTS, startTS, txID uint64) bool {
-	if headTS == 0 || headTS == AbortedTS {
+	if headTS == 0 {
 		return false
 	}
 	return !Visible(headTS, startTS, txID)

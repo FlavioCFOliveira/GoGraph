@@ -65,14 +65,19 @@ func TestConflicts_TheFourCases(t *testing.T) {
 		{
 			name:   "an aborted transaction's version",
 			headTS: AbortedTS,
-			want:   false,
-			why: "an aborted transaction's changes are invisible to EVERY reader forever, so " +
-				"displacing its version loses no update — there is none to lose. This case " +
-				"used to say the opposite (\"not visible, so not overwritable either\") and " +
-				"MEASUREMENT REFUTED IT the moment rmp #2300 wired abort: AbortedTS is above " +
-				"TxIDBase, so refusing it made the first object any transaction aborted on " +
-				"PERMANENTLY UNWRITABLE, and examples/27_concurrent_txn's writers exhausted a " +
-				"nine-attempt retry chain on it",
+			want:   true,
+			why: "an aborted head CONFLICTS since rmp #2318, and this case has now been " +
+				"measured BOTH ways. rmp #2300 exempted it because refusing made the first " +
+				"object any transaction aborted on PERMANENTLY UNWRITABLE — " +
+				"examples/27_concurrent_txn's writers exhausted a nine-attempt retry chain. " +
+				"But the exemption let the NEXT writer build on a stored value that still " +
+				"held the aborted transaction's writes, and a later reader then saw them " +
+				"(measured: `reader sees L=true M=true`) — an ATOMICITY violation, and for " +
+				"the adjacency an unrecoverable one, because that chain holds entry " +
+				"SNAPSHOTS rather than undo actions. rmp #2318 withdraws an aborted version " +
+				"SYNCHRONOUSLY at abort, so the head is gone before the next writer arrives " +
+				"and this branch covers only the race window — where refusing yields a " +
+				"retriable serialization failure instead of a lost update",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -81,15 +86,13 @@ func TestConflicts_TheFourCases(t *testing.T) {
 				t.Fatalf("Conflicts(head=%d, start=%d, tx=%d) = %v, want %v — %s",
 					tc.headTS, startTS, myTx, got, tc.want, tc.why)
 			}
-			// The rule IS the negation of the read-side test, for every input but the
-			// two EXEMPT heads. Asserting it here is what stops the two drifting
-			// apart, which is how a lost update gets shipped.
-			//
-			// The zero head has no version to be visible at all. The ABORTED head is
-			// the one genuine asymmetry in the whole substrate and it is deliberate: it
-			// stays INVISIBLE, because a reader must still undo it to reach the
-			// pre-abort value, while being freely OVERWRITABLE. See [Conflicts].
-			if tc.headTS != 0 && tc.headTS != AbortedTS {
+			// The rule IS the exact negation of the read-side test for every input
+			// but the zero head, which has no version to be visible at all.
+			// Asserting it here is what stops the two drifting apart, which is how a
+			// lost update gets shipped. rmp #2318 removed the ABORTED head from this
+			// exclusion: it is no longer an asymmetry, because the version is
+			// withdrawn at abort rather than left to be overwritten.
+			if tc.headTS != 0 {
 				if got == Visible(tc.headTS, startTS, myTx) {
 					t.Fatalf("Conflicts and Visible agree for head=%d; they must be exact opposites",
 						tc.headTS)
@@ -97,16 +100,21 @@ func TestConflicts_TheFourCases(t *testing.T) {
 			}
 		})
 	}
-	// The aborted head's asymmetry, asserted directly rather than left as an
-	// exclusion from the loop above — so it is a stated property and not a hole.
-	t.Run("an aborted version is invisible AND overwritable", func(t *testing.T) {
+	// The aborted head is invisible AND unwritable, which is no longer an asymmetry
+	// at all — it is what [Conflicts] being the plain negation of [Visible] means.
+	// Stated directly because the property it replaces (invisible but overwritable)
+	// shipped an atomicity violation, and a reader of this file should see which one
+	// is in force.
+	t.Run("an aborted version is invisible AND unwritable", func(t *testing.T) {
 		if Visible(AbortedTS, startTS, myTx) {
 			t.Fatal("an aborted version is VISIBLE; readers would observe the work of a " +
 				"transaction that never committed")
 		}
-		if Conflicts(AbortedTS, startTS, myTx) {
-			t.Fatal("an aborted version blocks a writer; the object it heads is permanently " +
-				"unwritable and every later transaction livelocks on it")
+		if !Conflicts(AbortedTS, startTS, myTx) {
+			t.Fatal("a writer may overwrite an aborted version; it would build on a stored " +
+				"value that still holds the aborted transaction's writes, and a later reader " +
+				"would see them (rmp #2318). Liveness comes from withdrawing the version at " +
+				"abort, not from letting the writer through")
 		}
 	})
 }

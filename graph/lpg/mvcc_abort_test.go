@@ -202,19 +202,21 @@ func TestAbort_AnAbortedObjectStaysWritable(t *testing.T) {
 	}
 }
 
-// TestAbort_VersionsAreNotYetReclaimable_2318 pins the half of AC4 that is NOT yet
-// delivered, so the gap is recorded in a test rather than only in prose.
+// TestAbort_VersionsAreWithdrawnAtAbort is the INVERSION this test asked for.
 //
-// A version whose commit record reads [mvcc.AbortedTS] can never satisfy the
-// reclaimer's `at() <= watermark` test, because AbortedTS sits above
-// [mvcc.TxIDBase]. So an aborted transaction's versions are retained for the life of
-// the process. rmp #2318 owns closing it; when it does, this test is the one to
-// invert.
+// It used to pin the gap: a version whose commit record reads [mvcc.AbortedTS] can
+// never satisfy a reclaimer's `at() <= watermark` test, because AbortedTS sits above
+// [mvcc.TxIDBase], so an aborted transaction's versions were retained for the life of
+// the process. Its failure message said "invert this test and close #2318 rather than
+// restoring the old behaviour", and rmp #2318 did exactly that.
 //
-// It asserts the CURRENT behaviour deliberately and says so in its failure message,
-// so a future reader cannot mistake it for a property the module wants.
-func TestAbort_VersionsAreNotYetReclaimable_2318(t *testing.T) {
+// The withdrawal is SYNCHRONOUS, at abort, so the assertion is on what abort itself
+// leaves behind rather than on what a later sweep can reach; see
+// [Graph.withdrawAbortedNow] for why a present-time read leaves no correct
+// asynchronous option.
+func TestAbort_VersionsAreWithdrawnAtAbort(t *testing.T) {
 	g := New[string, float64](adjlist.Config{Directed: true})
+	defer func() { _ = g.Close() }()
 	if err := g.SetNodeProperty("n", "v", Int64Value(0)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -229,16 +231,16 @@ func TestAbort_VersionsAreNotYetReclaimable_2318(t *testing.T) {
 		return tx.w.err()
 	})
 
-	created := g.VersionCount() - base
-	if created == 0 {
-		t.Fatal("the refused transaction created no version, so there is nothing to " +
-			"reclaim and this test would prove nothing")
+	if left := g.VersionCount() - base; left != 0 {
+		t.Errorf("the aborted transaction left %d version record(s) behind, want 0", left)
 	}
-	_ = g.ReclaimNow()
-	if left := g.VersionCount() - base; left != created {
-		t.Fatalf("%d of %d aborted version(s) were reclaimed. That is the behaviour "+
-			"rmp #2318 exists to deliver, so this is GOOD NEWS and not a regression — "+
-			"invert this test and close #2318 rather than restoring the old behaviour.",
-			created-left, created)
+	// And the write it was refused for is not visible, which is what makes the
+	// withdrawal a withdrawal rather than a deletion of the mask.
+	v, ok := g.GetNodeProperty("n", "v")
+	if !ok {
+		t.Fatal("the property vanished with the aborted transaction's version")
+	}
+	if got, _ := v.Int64(); got != 0 {
+		t.Errorf("v = %d after an aborted write, want the pre-transaction 0", got)
 	}
 }

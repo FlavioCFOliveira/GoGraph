@@ -166,6 +166,35 @@ func (g *Graph[N, W]) ReclaimNow() int {
 	return freed
 }
 
+// abortWake reports that a transaction has ABORTED, so the vacuum must run
+// whether or not the reclamation debt is due.
+//
+// Aborted versions are not ordinary garbage (rmp #2318). They are the only thing
+// masking the aborted transaction's writes from the stored value, so until the
+// sweep withdraws them the object carries a value no reader may take at face
+// value. Waiting for [reclaimThreshold] versions of churn to accumulate first
+// would make that window unbounded, and abort is the rare path, so it pays for
+// its own wake.
+func (g *Graph[N, W]) abortWake(created int64) {
+	if !g.mvccArmed {
+		return
+	}
+	if created > 0 {
+		g.reclaimDebt.Add(created)
+	}
+	// SYNCHRONOUS withdrawal first: a present-time read takes the stored value
+	// directly, so the aborted transaction's writes must be out of it before this
+	// returns. See [Graph.withdrawAbortedNow] for why there is no correct
+	// asynchronous answer and what the scan costs.
+	if freed := g.withdrawAbortedNow(); freed > 0 {
+		g.reclaimDebt.Add(-int64(freed))
+	}
+	// The vacuum still runs, for anything the withdrawal could not reach — an
+	// aborted version that a live reader's watermark still pins, and the ordinary
+	// churn this transaction charged.
+	g.wakeVacuum()
+}
+
 // VersionCount returns the total number of live version records across every
 // store: node-label deltas, node-property deltas, adjacency entry versions, and
 // the five per-edge side stores (rmp #2291).

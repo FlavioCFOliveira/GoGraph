@@ -325,7 +325,11 @@ func (g *Graph[N, W]) reclaimEdgeSideVersions(watermark uint64) int {
 		for i := range g.edgeLabelShards {
 			sh := &g.edgeLabelShards[i]
 			sh.mu.Lock()
-			n := sh.v.reclaim(watermark)
+			// ABORTED heads first (rmp #2318): they can never satisfy reclaim's
+			// watermark test, and they are the only thing masking the aborted
+			// transaction's writes from the stored value.
+			n := g.withdrawAbortedEdgeLabelsLocked(sh)
+			n += sh.v.reclaim(watermark)
 			sh.mu.Unlock()
 			freed += n
 		}
@@ -354,6 +358,8 @@ func (g *Graph[N, W]) reclaimInstanceLabelVersions(watermark uint64) int {
 	for i := range g.edgeInstanceLabelShards {
 		sh := &g.edgeInstanceLabelShards[i]
 		sh.mu.Lock()
+		// ABORTED heads first; see rmp #2318 and mvcc_abort_sides.go.
+		freed += g.withdrawAbortedInstanceLabelsLocked(sh)
 		freed += sh.v.reclaim(watermark)
 		sh.mu.Unlock()
 	}
@@ -369,6 +375,8 @@ func (g *Graph[N, W]) reclaimInstancePropVersions(watermark uint64) int {
 	for i := range g.edgeInstancePropShards {
 		sh := &g.edgeInstancePropShards[i]
 		sh.mu.Lock()
+		// ABORTED heads first; see rmp #2318 and mvcc_abort_sides.go.
+		freed += g.withdrawAbortedInstancePropsLocked(sh)
 		freed += sh.v.reclaim(watermark)
 		sh.mu.Unlock()
 	}
@@ -384,6 +392,8 @@ func (g *Graph[N, W]) reclaimHandleLabelVersions(watermark uint64) int {
 	for i := range g.edgeHandleLabelShards {
 		sh := &g.edgeHandleLabelShards[i]
 		sh.mu.Lock()
+		// ABORTED heads first; see rmp #2318 and mvcc_abort_sides.go.
+		freed += g.withdrawAbortedHandleLabelsLocked(sh)
 		freed += sh.v.reclaim(watermark)
 		sh.mu.Unlock()
 	}
@@ -399,6 +409,8 @@ func (g *Graph[N, W]) reclaimHandlePropVersions(watermark uint64) int {
 	for i := range g.edgeHandlePropShards {
 		sh := &g.edgeHandlePropShards[i]
 		sh.mu.Lock()
+		// ABORTED heads first; see rmp #2318 and mvcc_abort_sides.go.
+		freed += g.withdrawAbortedHandlePropsLocked(sh)
 		freed += sh.v.reclaim(watermark)
 		sh.mu.Unlock()
 	}

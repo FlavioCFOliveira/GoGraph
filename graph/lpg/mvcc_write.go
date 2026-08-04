@@ -315,10 +315,10 @@ func (g *Graph[N, W]) endWrite(w *writeCtx) {
 	// thing as the rolled-back-statement case the file comment describes.
 	if w.err() != nil {
 		info.Abort()
-		// Charged even on the abort path: the version records exist and occupy
-		// memory whatever their commit record says. rmp #2318 tracks the fact that
-		// the reclaimer cannot yet free them eagerly.
-		g.chargeReclaimDebt(created)
+		// Charged AND woken unconditionally: the version records exist and occupy
+		// memory whatever their commit record says, and until the sweep withdraws
+		// them the stored value still carries this transaction's writes (rmp #2318).
+		g.abortWake(created)
 		return
 	}
 	// Allocate, store into the shared record, THEN publish. A reader must never

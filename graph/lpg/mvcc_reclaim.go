@@ -68,6 +68,17 @@ func (g *Graph[N, W]) reclaimLabelVersions(watermark uint64) int {
 				delete(sh.d, id)
 				continue
 			}
+			// ABORTED heads first (rmp #2318). They can never satisfy the
+			// watermark test below — AbortedTS is the maximum uint64 — and they
+			// are the only thing masking the aborted transaction's writes from
+			// the stored bag, so they are withdrawn by restoring the bag rather
+			// than merely dropped. See mvcc_abort_reclaim.go.
+			if n := g.reclaimAbortedLabelsLocked(sh, id); n > 0 {
+				freed += n
+				if head = sh.d[id]; head == nil {
+					continue
+				}
+			}
 			// The head itself unreachable means the node keeps no history at
 			// all, so the map entry goes with it and the shard shrinks.
 			if head.stampTS() <= watermark {
@@ -111,6 +122,14 @@ func (g *Graph[N, W]) reclaimPropVersions(watermark uint64) int {
 			if head == nil {
 				delete(s.d, id)
 				continue
+			}
+			// ABORTED heads first, by the identical argument as the label
+			// chains; see [Graph.reclaimAbortedPropsLocked].
+			if n := g.reclaimAbortedPropsLocked(s, id); n > 0 {
+				freed += n
+				if head = s.d[id]; head == nil {
+					continue
+				}
 			}
 			if head.stampTS() <= watermark {
 				freed += propChainLen(head)

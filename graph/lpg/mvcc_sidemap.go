@@ -254,6 +254,46 @@ func (sv *sideVersions[K, V]) reclaim(watermark uint64) int {
 	return freed
 }
 
+// withdrawAborted drops every ABORTED record at the head of k's chain and reports
+// the value the store must restore, so the aborted transaction's writes leave the
+// STORED value rather than merely being masked by records nothing can reclaim
+// (rmp #2318).
+//
+// The restored value is the pre-image of the OLDEST aborted record withdrawn,
+// which is the value the store held before the aborted transaction touched it —
+// every record newer than that one belongs to the same aborted transaction, so
+// stepping over all of them at once is what a reader's walk already does.
+//
+// withdrew is false when the head is not aborted, in which case the caller must
+// leave the stored value alone: pre and had are then meaningless.
+//
+// The caller must hold the shard lock, and must apply the restore before
+// releasing it, or a reader observes a chain that no longer masks a value that
+// has not yet been corrected.
+func (sv *sideVersions[K, V]) withdrawAborted(k K) (pre V, had bool, freed int, withdrew bool) {
+	if sv.d == nil {
+		return pre, false, 0, false
+	}
+	head := sv.d[k]
+	if head == nil || head.stamp() != mvcc.AbortedTS {
+		return pre, false, 0, false
+	}
+	d := head
+	for ; d != nil && d.stamp() == mvcc.AbortedTS; d = d.next {
+		pre, had = d.pre, d.had
+		freed++
+	}
+	if d == nil {
+		delete(sv.d, k)
+		if len(sv.d) == 0 {
+			sv.d = nil
+		}
+	} else {
+		sv.d[k] = d
+	}
+	return pre, had, freed, true
+}
+
 // stamp returns the commit timestamp of the change this record undoes.
 func (d *preimageDelta[V]) stamp() uint64 {
 	if d.info != nil {

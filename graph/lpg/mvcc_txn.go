@@ -160,10 +160,9 @@ func (t *labelTx[N, W]) commit() (uint64, error) {
 		// tells both the read path and the reclaimer so.
 		if info != nil {
 			info.Abort()
-			// Charged even on the abort path: the version records exist and
-			// occupy memory whatever their commit record says. rmp #2318 tracks
-			// the fact that the reclaimer cannot yet free them.
-			t.g.chargeReclaimDebt(versions)
+			// Charged AND woken unconditionally; see [Graph.abortWake] for why an
+			// aborted version is not ordinary garbage (rmp #2318).
+			t.g.abortWake(versions)
 		}
 		return 0, err
 	}
@@ -198,7 +197,7 @@ func (t *labelTx[N, W]) abort() {
 		return
 	}
 	info.Abort()
-	t.g.chargeReclaimDebt(versions)
+	t.g.abortWake(versions)
 }
 
 // deltaStamp resolves how a new delta records its visibility, in three cases

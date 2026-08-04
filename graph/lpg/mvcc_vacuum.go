@@ -719,7 +719,11 @@ func (g *Graph[N, W]) sweepUnit(u vacuumUnit, watermark uint64) int {
 	case unitAdjacency:
 		return g.adj.Reclaim(watermark)
 	case unitNodeLife:
-		return g.reclaimNodeLife(watermark)
+		// ABORTED life records first (rmp #2318): a birth or death stamped
+		// [mvcc.AbortedTS] can never satisfy the watermark test, and dropping it
+		// also has to reconcile the tombstone bitmap the aborted transaction
+		// left behind. See [Graph.reclaimAbortedLife].
+		return g.reclaimAbortedLife() + g.reclaimNodeLife(watermark)
 	case unitAdjStamps:
 		// The adjacency conflict stamps are bounded here and nowhere else. They
 		// are pure write-side bookkeeping — one pair of timestamps per node a
@@ -730,7 +734,7 @@ func (g *Graph[N, W]) sweepUnit(u vacuumUnit, watermark uint64) int {
 		// or below the watermark can no longer refuse anything, because
 		// [mvcc.Conflicts] is false for a head below every live transaction's
 		// start.
-		return g.adjVer.truncate(watermark)
+		return g.adjVer.clearAborted() + g.adjVer.truncate(watermark)
 	case unitIndexRemovals:
 		return g.applyDeferredIndexRemovals(watermark)
 	}
