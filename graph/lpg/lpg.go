@@ -824,6 +824,43 @@ func (g *Graph[N, W]) ApplyVersioned(fn func(WriteTx) error) error {
 	return fn(WriteTx{w: w})
 }
 
+// ApplyVersionedCtx is [Graph.ApplyVersioned] with the barrier acquisition bounded
+// by ctx. It returns ctx's error — wrapping [context.Canceled] or
+// [context.DeadlineExceeded] — without running fn if ctx finishes first, in which case
+// NOTHING is held and no transaction was opened.
+//
+// # Why a writer still needs a deadline (rmp #2306)
+//
+// The shared hold is uncontended against other ordinary writes, which is the point of
+// rmp #2320. It is NOT uncontended against the exclusive holders: a DDL statement, and
+// an explicit multi-statement transaction that holds the barrier from BEGIN to COMMIT
+// across client think-time. A writer arriving behind one of those waits for its whole
+// tenure.
+//
+// Before this, that wait ignored the caller's context entirely, and the measurement is
+// the reason this exists: with one explicit transaction open, an autocommit write
+// carrying a 200 ms deadline blocked for TEN MINUTES and returned only when the test
+// harness killed it. Retiring [Engine.writeMu] did not fix that — it moved the same
+// unbounded wait from the writer mutex onto this barrier, which is exactly the shape
+// rmp #2174 fixed for [Graph.LockBarrierCtx] and left unfixed here.
+//
+// rmp #2305 removes the transaction-lifetime hold and with it most of the reason to
+// wait at all. The bound is still owed: a DDL statement legitimately excludes writers
+// for as long as it runs, and a caller with a deadline is entitled to hear about it.
+//
+// Safe for concurrent use from any number of goroutines.
+func (g *Graph[N, W]) ApplyVersionedCtx(ctx context.Context, fn func(WriteTx) error) error {
+	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
+	if err := ctxlock.Acquire(ctx, g.visMu.TryRLock, g.visMu.RLock, g.visMu.RUnlock); err != nil {
+		return err
+	}
+	g.barrier.stampWriter(gid)
+	w := g.beginWrite()
+	defer g.visMu.RUnlock()
+	defer g.finishWriteShared(w, gid)
+	return fn(WriteTx{w: w})
+}
+
 // openWriteBracket opens the adjacency's commit window and the transaction's
 // stamping window — the two halves of "this region is one write transaction" —
 // and returns the state the transaction owns.

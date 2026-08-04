@@ -23,16 +23,30 @@ package cypher
 //     none of the rolled-back writes.
 //
 //   - store-less ([NewEngine]). There is no WAL, so durability does not apply
-//     (nothing is persisted). Write-write Isolation is still enforced: BeginTx
-//     takes the engine's writer mutex ([Engine.writeMu]) and holds it until
-//     COMMIT/ROLLBACK, so a concurrent writer — autocommit or another explicit
-//     transaction — blocks until this one finishes. Rollback is honoured in full
-//     via the in-memory undo log.
+//     (nothing is persisted). BeginTx acquires NO writer serialisation at all
+//     since rmp #2306: the engine's writer mutex used to be taken here and held
+//     until COMMIT/ROLLBACK, which made a paused client block every other writer in
+//     the process — and, because the acquire on the autocommit side was not
+//     context-aware, block it with the blocked caller's deadline IGNORED (measured
+//     at ten minutes against a 200 ms deadline). Write-write isolation now comes
+//     from MVCC: two transactions overlap and a genuine collision is REFUSED by
+//     per-object first-updater-wins detection (rmp #2300) rather than prevented.
+//     Rollback is honoured in full via the in-memory undo log.
 //
-// In both wirings the writer serialisation is the OUTERMOST lock and visMu
-// (taken inside [lpg.Graph.ApplyAtomically] by each Exec / Commit / Rollback) is
-// nested inside it. This matches the WAL-backed store-mutex → visMu order, so the
-// two wirings share one deadlock-free lock ordering.
+// # What still serialises, and what owns retiring it
+//
+// Two transaction-lifetime holds remain, both tracked:
+//
+//   - the graph's visibility barrier, taken exclusively by BeginTx and held to
+//     COMMIT/ROLLBACK. This is now the ONLY thing that makes a paused client block
+//     other writers, and retiring it is rmp #2305.
+//   - the store's single-writer mutex on a WAL-backed engine, taken by
+//     [txn.Store.BeginCtx]. Retiring it is the remaining half of rmp #2306.
+//
+// Schema changes are a separate matter and keep a lock of their own
+// ([Engine.schemaMu]): a DDL scans, validates and only then registers, so the
+// exclusive barrier — held for the registration alone — cannot make the sequence
+// atomic against a second DDL.
 //
 // # Atomicity and the undo log
 //
@@ -85,7 +99,8 @@ package cypher
 // (one Bolt session, whose message loop is single-threaded per connection) and
 // its methods must be called in sequence. Distinct ExplicitTx handles, and an
 // ExplicitTx alongside autocommit [Engine.RunInTx] calls on the same engine, ARE
-// safe to use concurrently — they serialise on the writer mutex described above.
+// safe to use concurrently — one handle is driven by one goroutine, and two handles
+// may now be open at once (rmp #2306).
 
 import (
 	"context"
@@ -192,15 +207,10 @@ type ExplicitTx struct {
 
 	// walTx is the single WAL transaction backing the whole explicit transaction,
 	// non-nil only on a WAL-backed engine. It holds the store's single-writer
-	// mutex from BeginTx until Commit/Rollback. nil on a store-less engine, where
-	// writer serialisation is the engine writer mutex instead (released via
-	// unlockWriter).
+	// mutex from BeginTx until Commit/Rollback — the remaining half of rmp #2306.
+	// nil on a store-less engine, which since rmp #2306 acquires NO writer
+	// serialisation at all: concurrency control there is MVCC and nothing else.
 	walTx *txn.Tx[string, float64]
-
-	// unlockWriter releases the engine-level writer mutex on a store-less engine;
-	// a no-op closure on a WAL-backed engine (the store mutex is released by
-	// walTx instead). Called exactly once when the handle finishes.
-	unlockWriter func()
 
 	// finished is set by Commit/Rollback (and by a panic during Exec) so a second
 	// finishing call, or any later Exec, is rejected with [ErrTxFinished] and the
@@ -215,8 +225,8 @@ type ExplicitTx struct {
 
 	// readOnly is true when the handle was opened by [Engine.BeginReadTx]. A
 	// read-only transaction acquires NONE of the writer serialisation, the
-	// visibility barrier, or a WAL transaction: walTx, buf and undo are nil,
-	// unlockWriter is a no-op and barrierHeld is false. Each [ExplicitTx.Exec]
+	// visibility barrier, or a WAL transaction: walTx, buf and undo are nil and
+	// barrierHeld is false. Each [ExplicitTx.Exec]
 	// rejects any writing/DDL statement with [ErrWriteInReadOnlyTx] before
 	// execution and routes a read through the engine's concurrent read path
 	// ([Engine.Run]), which pins its own per-statement snapshot — so reads
@@ -296,24 +306,17 @@ func (e *Engine) BeginTx(ctx context.Context) (*ExplicitTx, error) {
 		cmetrics.IncCounter("cypher.BeginTx.errors", 1)
 		return nil, err
 	}
-	// Acquire the engine writer serialisation FIRST (store-less only; no-op when
-	// WAL-backed). It is the outermost lock; visMu nests inside it in every Exec.
-	// The acquire honours ctx: a caller whose deadline elapses while queued behind
-	// another writer gets the context error rather than a transaction it is no
-	// longer entitled to (rmp #2174).
-	unlockWriter, werr := e.lockWriterCtx(ctx)
-	if werr != nil {
-		cmetrics.IncCounter("cypher.BeginTx.errors", 1)
-		return nil, werr
-	}
-
+	// NO writer serialisation is acquired (rmp #2306). BEGIN used to take the
+	// engine's writer mutex here and hold it until COMMIT or ROLLBACK, which made a
+	// paused client block every other writer in the process. Concurrency control is
+	// MVCC: two transactions overlap, and a genuine collision is refused by
+	// per-object detection rather than prevented by exclusion.
 	tx := &ExplicitTx{
-		eng:          e,
-		ctx:          ctx,
-		buf:          &exec.IndexBuffer{},
-		cbuf:         &exec.CountBuffer{},
-		undo:         &undoLog{},
-		unlockWriter: unlockWriter,
+		eng:  e,
+		ctx:  ctx,
+		buf:  &exec.IndexBuffer{},
+		cbuf: &exec.CountBuffer{},
+		undo: &undoLog{},
 	}
 	// Allocate the touched-node set only when an existence constraint is active,
 	// so a transaction with none records nothing (#1754).
@@ -322,17 +325,15 @@ func (e *Engine) BeginTx(ctx context.Context) (*ExplicitTx, error) {
 	}
 	// Open the WAL transaction on a WAL-backed engine. Store.BeginCtx takes the
 	// store's single-writer lock (so the store-less writer mutex above is a
-	// no-op in this wiring) and holds it until Commit/Rollback. The acquire is
-	// context-aware: under write contention a caller whose ctx is cancelled or
-	// whose deadline elapses gets back the context error instead of blocking on
-	// the lock for the holder's full duration (task #1301). On that error the
-	// store-less writer mutex acquired above must be released before returning,
-	// or it would leak; the per-statement context bound is otherwise enforced in
-	// Exec and by the deadline the Bolt layer derives onto ctx.
+	// and holds it until Commit/Rollback. The acquire is context-aware: under write
+	// contention a caller whose ctx is cancelled or whose deadline elapses gets back
+	// the context error instead of blocking on the lock for the holder's full
+	// duration (task #1301). Retiring this hold is the remaining half of rmp #2306;
+	// nothing acquired before it needs releasing now that the writer mutex is gone
+	// (rmp #2306).
 	if e.store != nil {
 		walTx, beginErr := e.store.BeginCtx(ctx)
 		if beginErr != nil {
-			unlockWriter()
 			cmetrics.IncCounter("cypher.BeginTx.errors", 1)
 			return nil, beginErr
 		}
@@ -340,21 +341,19 @@ func (e *Engine) BeginTx(ctx context.Context) (*ExplicitTx, error) {
 	}
 	// Hold the visibility barrier for the whole transaction so concurrent readers
 	// never observe uncommitted writes (task #1412, isolation option b). The
-	// barrier is acquired AFTER walTx is open (store single-writer mutex is outer,
-	// visMu is inner) to preserve the established lock ordering. On the error paths
-	// above, unlockWriter() is called before returning — no barrier has been
-	// acquired yet, so there is nothing to release on those paths.
-	// The acquire honours ctx (rmp #2174). A Graph.View reader holds the barrier's
-	// read side for its whole query, so a writer arriving mid-read queues behind
-	// it; before this change that wait ignored the caller's deadline entirely and
-	// the audit measured a 232x overrun that still returned err=nil. On the error
-	// path the WAL transaction and the writer serialisation acquired above must
-	// both be released, or the engine would be left with an orphaned writer.
+	// barrier is acquired AFTER walTx is open (store lock outer, visMu inner) to
+	// preserve the established lock ordering. The acquire honours ctx (rmp #2174):
+	// before that, the wait ignored the caller's deadline entirely and the audit
+	// measured a 232x overrun that still returned err=nil.
+	//
+	// THIS IS THE LAST TRANSACTION-LIFETIME EXCLUSIVE LOCK, and retiring it is
+	// rmp #2305. It is what still makes a paused client block every other writer;
+	// rmp #2306 removed the engine's writer mutex from this path, so the barrier is
+	// now the only thing left holding that property.
 	if berr := tx.eng.g.LockBarrierCtx(ctx); berr != nil {
 		if tx.walTx != nil {
 			_ = tx.walTx.Rollback() // nothing was written; discard the empty txn
 		}
-		unlockWriter()
 		cmetrics.IncCounter("cypher.BeginTx.errors", 1)
 		return nil, berr
 	}
@@ -395,10 +394,9 @@ func (e *Engine) BeginReadTx(ctx context.Context) (*ExplicitTx, error) {
 	}
 	cmetrics.IncCounter("cypher.BeginReadTx.opened", 1)
 	return &ExplicitTx{
-		eng:          e,
-		ctx:          ctx,
-		readOnly:     true,
-		unlockWriter: func() {}, // read-only: nothing to release
+		eng:      e,
+		ctx:      ctx,
+		readOnly: true,
 		// One read instant for the whole transaction, registered with the
 		// reclamation horizon here and released exactly once in release()
 		// (rmp #2307). Taken LAST, after every failure return above, so a
@@ -574,7 +572,7 @@ func (tx *ExplicitTx) Commit() (err error) {
 	// Read-only transaction: teardown only. No writer lock, no barrier, and no
 	// WAL transaction were acquired, so there is nothing to make durable or
 	// release beyond marking the handle finished (release() guards on
-	// barrierHeld/unlockWriter, both no-ops here). A second call is ErrTxFinished.
+	// barrierHeld is false here). A second call is ErrTxFinished.
 	if tx.readOnly {
 		tx.release()
 		cmetrics.IncCounter("cypher.ExplicitTx.committed", 1)
@@ -733,13 +731,13 @@ func (tx *ExplicitTx) rollbackInBarrierLocked() (undoOK bool) {
 }
 
 // release finishes the handle and releases the engine writer serialisation
-// exactly once. When barrierHeld is true it also releases the
-// transaction-visibility write lock (visMu via [lpg.Graph.UnlockBarrier]) BEFORE
-// releasing the engine writer serialisation, preserving the acquisition order
-// (writer lock outer → visMu inner → release visMu inner → release writer outer).
-// On a store-less engine unlockWriter unlocks [Engine.writeMu]; on a WAL-backed
-// engine it is a no-op (the store mutex is released by walTx's own
-// Commit/Rollback). Idempotent via the finished flag.
+// exactly once. When barrierHeld is true it releases the transaction-visibility
+// write lock (visMu via [lpg.Graph.UnlockBarrier]).
+//
+// There is no engine writer serialisation left to release: rmp #2306 retired it, so
+// the acquisition order it used to be the outer half of no longer exists. On a
+// WAL-backed engine the store's single-writer lock is still released by walTx's own
+// Commit/Rollback. Idempotent via the finished flag.
 func (tx *ExplicitTx) release() {
 	if tx.finished {
 		return
@@ -754,14 +752,9 @@ func (tx *ExplicitTx) release() {
 		tx.eng.g.EndRead(tx.view.snap)
 		tx.view = nil
 	}
-	// Release the visibility barrier BEFORE the writer serialisation (inverse
-	// acquisition order: writer outer, visMu inner).
 	if tx.barrierHeld {
 		tx.eng.g.UnlockBarrier()
 		tx.barrierHeld = false
-	}
-	if tx.unlockWriter != nil {
-		tx.unlockWriter()
 	}
 }
 

@@ -40,6 +40,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
@@ -136,6 +137,41 @@ type ConstraintRegistry struct {
 	notNullByLabel map[string][]string
 
 	mu sync.RWMutex
+
+	// uniqueActive is how many UNIQUE constraints are registered, maintained
+	// alongside the `unique` map so the WRITE PATH can skip this registry's lock
+	// entirely when there are none (rmp #2306).
+	//
+	// # Why an atomic counter and not len(unique) under the RLock
+	//
+	// Because taking the lock is the cost. Every constrained-or-not property write
+	// called [ConstraintRegistry.ReserveSetProperty], which takes mu EXCLUSIVELY, so
+	// one global mutex sat on the write hot path whether or not the graph had a single
+	// constraint. With writers serialised that was invisible; once rmp #2306 retired
+	// the engine's writer mutex it became THE ceiling. Measured by mutex profile at
+	// sixteen concurrent writers on `CREATE (n:Account {id: $id})` — a statement
+	// against a schema with NO constraints at all — ReserveSetProperty accounted for
+	// 57 % of all lock delay and RecordPropertySet for a further 41 %, together
+	// essentially the whole of it.
+	//
+	// # Why reading it without the lock is sound
+	//
+	// A registration can only happen under [Engine.ddlMu] AND the graph's schema
+	// barrier held EXCLUSIVELY, while an ordinary write holds that barrier SHARED for
+	// its whole bracket — and these methods are called from inside that bracket. So a
+	// write that reads zero here cannot have a constraint appear underneath it: the
+	// DDL cannot acquire the barrier until the write's bracket closes. The counter is
+	// atomic rather than plain only because the DDL writing it and the write reading
+	// it are different goroutines.
+	uniqueActive atomic.Int64
+	// notNullActive is the same counter for NOT NULL constraints.
+	//
+	// It is separate because [ConstraintRegistry.ReserveSetProperty] enforces BOTH
+	// kinds and must consult both, while the value-set methods
+	// ([ConstraintRegistry.RecordPropertySet],
+	// [ConstraintRegistry.ReleasePropertyValue]) touch only the UNIQUE value sets and
+	// gate on uniqueActive alone.
+	notNullActive atomic.Int64
 }
 
 // NewConstraintRegistry creates an empty ConstraintRegistry.
@@ -182,9 +218,13 @@ func constraintKey(label, prop string) ckey { return ckey{label: label, prop: pr
 func (r *ConstraintRegistry) RegisterUnique(label, prop, indexName string) {
 	r.mu.Lock()
 	key := constraintKey(label, prop)
+	_, existed := r.unique[key]
 	r.unique[key] = indexName
 	if r.valueSets[key] == nil {
 		r.valueSets[key] = make(map[string]struct{})
+	}
+	if !existed {
+		r.uniqueActive.Add(1)
 	}
 	r.mu.Unlock()
 }
@@ -342,7 +382,11 @@ func (r *ConstraintRegistry) mergeSeed(key ckey, seed map[string]struct{}) {
 // RegisterNotNull adds a not-null constraint for (label, prop).
 func (r *ConstraintRegistry) RegisterNotNull(label, prop string) {
 	r.mu.Lock()
-	r.notNull[constraintKey(label, prop)] = true
+	key := constraintKey(label, prop)
+	if !r.notNull[key] {
+		r.notNullActive.Add(1)
+	}
+	r.notNull[key] = true
 	r.addNotNullByLabel(label, prop)
 	r.mu.Unlock()
 }
@@ -387,17 +431,32 @@ func (r *ConstraintRegistry) removeNotNullByLabel(label, prop string) {
 func (r *ConstraintRegistry) UnregisterUnique(label, prop string) {
 	r.mu.Lock()
 	key := constraintKey(label, prop)
+	if _, existed := r.unique[key]; existed {
+		r.uniqueActive.Add(-1)
+	}
 	delete(r.unique, key)
 	delete(r.valueSets, key)
 	delete(r.uniqueNames, key)
 	r.mu.Unlock()
 }
 
+// HasAnyUnique reports whether any UNIQUE constraint is registered, WITHOUT taking
+// the registry lock.
+//
+// It is the write path's gate: with no UNIQUE constraint there is nothing to check
+// and nothing to reserve, so the three value-set methods return before touching mu.
+// See [ConstraintRegistry.uniqueActive] for the measurement that motivated it and
+// for why the lock-free read is sound.
+func (r *ConstraintRegistry) HasAnyUnique() bool { return r.uniqueActive.Load() > 0 }
+
 // UnregisterNotNull removes the not-null constraint for (label, prop). No-op
 // if absent.
 func (r *ConstraintRegistry) UnregisterNotNull(label, prop string) {
 	r.mu.Lock()
 	key := constraintKey(label, prop)
+	if r.notNull[key] {
+		r.notNullActive.Add(-1)
+	}
 	delete(r.notNull, key)
 	delete(r.notNullNames, key)
 	r.removeNotNullByLabel(label, prop)
@@ -473,19 +532,22 @@ func (r *ConstraintRegistry) HasNotNull(label, prop string) bool {
 }
 
 // HasAnyNotNull reports whether at least one NOT NULL (property-existence)
-// constraint is registered. It is the cheap gate the engine consults at every
-// commit before doing any touched-node existence-constraint work: when it
-// returns false the commit-time check is a no-op and the per-transaction
-// touched-node recording is skipped entirely, so a workload with no existence
-// constraints pays only this single lock-protected length read per commit.
+// constraint is registered, WITHOUT taking the registry lock.
+//
+// It is the cheap gate the engine consults on every statement before doing any
+// touched-node existence-constraint work: when it returns false the commit-time check
+// is a no-op and the per-transaction touched-node recording is skipped entirely.
+//
+// It used to take the read lock to measure `len(notNull)`, which put one lock
+// acquisition per statement on the write path — cheap while writers were serialised
+// and no longer free once rmp #2306 let them overlap, for the same reason
+// [ConstraintRegistry.uniqueActive] gives: the acquisition IS the cost. It now reads
+// the counter, which is sound for the same reason: a registration needs the schema
+// barrier held exclusively, and an ordinary write holds it shared for its whole
+// bracket.
 //
 // HasAnyNotNull is safe for concurrent use.
-func (r *ConstraintRegistry) HasAnyNotNull() bool {
-	r.mu.RLock()
-	n := len(r.notNull)
-	r.mu.RUnlock()
-	return n > 0
-}
+func (r *ConstraintRegistry) HasAnyNotNull() bool { return r.notNullActive.Load() > 0 }
 
 // NotNullProperties returns the property keys for which a NOT NULL constraint is
 // registered on label, or nil when label carries no existence constraint. It is
@@ -596,6 +658,15 @@ func (r *ConstraintRegistry) CheckSetProperty(labels []string, prop string, valu
 // the second write. That is a fix, not a side effect: such a statement leaves the
 // graph violating a declared invariant.
 func (r *ConstraintRegistry) ReserveSetProperty(labels []string, prop string, value lpg.PropertyValue, mgr *index.Manager) error {
+	// No constraint of EITHER kind: nothing to check and nothing to reserve, so do not
+	// take this registry's global lock — it would put one mutex on every property write
+	// for no benefit. BOTH counters, because this method enforces UNIQUE and NOT NULL;
+	// gating it on uniqueActive alone silently disabled NOT NULL enforcement and
+	// TestReserveSetProperty_NotNullStillEnforced caught it. See
+	// [ConstraintRegistry.notNullActive].
+	if r.uniqueActive.Load() == 0 && r.notNullActive.Load() == 0 {
+		return nil
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -698,6 +769,12 @@ func (r *ConstraintRegistry) checkSetPropertyLocked(labels []string, prop string
 // up-to-date so that subsequent CheckSetProperty calls detect violations.
 // It is a no-op when no unique constraint exists for (label, prop).
 func (r *ConstraintRegistry) RecordPropertySet(labels []string, prop string, value lpg.PropertyValue) {
+	// No UNIQUE constraint anywhere: nothing to record, and taking this registry's
+	// global lock would put one mutex on every property write for no benefit. See
+	// [ConstraintRegistry.uniqueActive].
+	if r.uniqueActive.Load() == 0 {
+		return
+	}
 	strVal, ok := propertyValueToString(value)
 	if !ok {
 		return
@@ -722,6 +799,12 @@ func (r *ConstraintRegistry) RecordPropertySet(labels []string, prop string, val
 // value-set, or when no unique constraint exists for (label, prop). It is
 // safe for concurrent use.
 func (r *ConstraintRegistry) ReleasePropertyValue(labels []string, prop string, value lpg.PropertyValue) {
+	// No UNIQUE constraint anywhere: nothing to release, and taking this registry's
+	// global lock would put one mutex on every property write for no benefit. See
+	// [ConstraintRegistry.uniqueActive].
+	if r.uniqueActive.Load() == 0 {
+		return
+	}
 	strVal, ok := propertyValueToString(value)
 	if !ok {
 		return

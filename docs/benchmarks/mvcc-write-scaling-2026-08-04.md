@@ -123,6 +123,86 @@ whichever arm reads better.
 `bench/mvccwrite`'s `writeScalingFloor` and `writeConcurrencyFloor` therefore stay
 where they are; only `walWriteScalingFloor` was ratcheted.
 
+## The store-less arm, after rmp #2306's first half
+
+The table above recorded the store-less arm at **0.750×** at sixteen writers, bounded
+by `cypher.Engine.writeMu` rather than by the barrier. rmp #2306 retired that mutex as
+a transaction serialiser, and a mutex profile then named the NEXT ceiling instead of
+leaving it to be guessed.
+
+Same command, `-benchtime=20000x -count=5`, medians:
+
+| writers | after retiring `writeMu` | + constraint gate | final (shared schema hold) | scaling |
+|---:|---:|---:|---:|---:|
+| 1 | 345 289 | 361 183 | 353 749 | 1.000 |
+| 2 | 497 426 | 543 745 | 504 942 | 1.537 |
+| 4 | 555 446 | 609 528 | 666 179 | 2.027 |
+| 8 | 477 775 | 576 159 | 624 584 | 1.901 |
+| 16 | 432 009 (1.242×) | 638 544 (1.768×) | 624 495 | **1.900×** |
+| 32 | 449 973 (1.294×) | 652 103 (1.805×) | 615 498 | **1.873×** |
+
+So the journey on this arm is **0.83× (sprint entry) → 0.750× → 1.242× → 1.900×** at
+sixteen writers, and the curve now RISES instead of peaking at four writers and falling
+away.
+
+The last column is after the schema lock became an RWMutex that ordinary writes take
+SHARED — see below. The shared acquisition costs nothing measurable: the ratio went UP,
+not down, which is within run-to-run variance on a contended benchmark but certainly not
+a regression.
+
+### What the mutex profile named, and why it was not guessed
+
+After `writeMu` went, throughput rose but then DEGRADED past four writers — a shape that
+says a different lock had become the bottleneck. A CPU profile showed 65 % of samples in
+`runtime.usleep` and `runtime.pthread_cond_wait`, i.e. spinning and parking on lock
+acquisition, but not which lock. A **mutex profile** answered directly:
+
+```
+97.99%  sync.(*Mutex).Unlock
+ 56.99%  cypher/exec.(*ConstraintRegistry).ReserveSetProperty
+ 40.75%  cypher/exec.(*ConstraintRegistry).RecordPropertySet
+```
+
+The constraint registry's single `sync.RWMutex`, taken EXCLUSIVELY on every property
+write — on a workload (`CREATE (n:Account {id: $id})`) whose schema declares **no
+constraints at all**. With writers serialised that lock was free; once they overlapped it
+became the whole of the contention.
+
+The fix is an atomic constraint counter read BEFORE the lock, so a graph with no
+constraint never takes it. Reading it lock-free is sound because a registration requires
+`Engine.ddlMu` **and** the schema barrier held exclusively, while an ordinary write holds
+that barrier shared for its whole bracket and calls these methods from inside it — so a
+constraint cannot appear under a write that read zero.
+
+One correction on the way: gating `ReserveSetProperty` on the UNIQUE counter alone
+silently disabled **NOT NULL** enforcement, because that method enforces both kinds.
+`TestReserveSetProperty_NotNullStillEnforced` caught it immediately, and the gate now
+consults both counters.
+
+### The first draft of this lost a correctness property, and a test caught it
+
+Narrowing the lock to DDL-versus-DDL only was wrong, and `-race` said so:
+`TestCreateIndexBackfill_ConcurrentWrites` reported `w3_22: want 1 row, got []`. A DDL
+must exclude ordinary WRITES too — `backfillNodeHashIndex` walks the mapper lock-free,
+so a write landing between the backfill scan and the registration was seen by NEITHER,
+and the retired `writeMu` hold had been the only thing preventing it.
+
+The schema lock is therefore an RWMutex: a DDL takes it exclusively for its whole
+scan-and-register sequence, an autocommit write takes it shared for its statement. That
+keeps the property `writeMu` gave while dropping the one that made the engine
+single-writer, because two writes holding it shared do not exclude each other. `visMu`
+cannot do this job even though it has the same shape — its exclusive hold covers only
+the registration, and extending it over the backfill would stop the scan using
+`Graph.View`, since visMu is not re-entrant.
+
+### Still short of the ratchet
+
+3.0× is `writeScalingFloor`/`writeConcurrencyFloor`'s target and 1.900× does not reach
+it, so those two constants are NOT ratcheted here. What it does clear is rmp #2304's
+carried AC2 — "materially better than the 0.83× entry baseline at sixteen writers" —
+by +113 %. The next ceiling needs its own profile; the store's single-writer semaphore
+and the apply gate are still in place and are the remaining half of rmp #2306.
+
 ## Reader latency did not regress (rmp #2304 AC6)
 
 `bench/mtaudit` `TestFairScheduling_LongReadPlusWriterDoesNotStarveReaders`, run with

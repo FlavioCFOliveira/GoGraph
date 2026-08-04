@@ -94,7 +94,6 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/index/count"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index/stats"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
-	"github.com/FlavioCFOliveira/GoGraph/internal/ctxlock"
 	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
@@ -1054,26 +1053,67 @@ type Engine struct {
 	// the constructor.
 	parallelScanThreshold int
 
-	// writeMu is the engine-level single-writer serialisation used ONLY when
-	// the engine is store-less (store == nil). A WAL-backed engine instead
-	// serialises every write on the store's own single-writer mutex (taken in
-	// [txn.Store.Begin] and released by Commit/Rollback), so this mutex is left
-	// untouched in that wiring to avoid a redundant second lock.
+	// schemaMu keeps a SCHEMA change exclusive of every concurrent write and of every
+	// other schema change: CREATE/DROP INDEX and CREATE/DROP CONSTRAINT take it
+	// exclusively, an autocommit write takes it shared.
 	//
-	// It provides write-write isolation for the store-less engine in two
-	// places: (a) every autocommit [Engine.RunInTx] statement holds it for the
-	// statement's duration; (b) an explicit transaction ([Engine.BeginTx])
-	// holds it from BEGIN until COMMIT or ROLLBACK, so a concurrent writer
-	// blocks until the transaction finishes — the same isolation the store
-	// mutex gives the WAL-backed wiring. The lock order is writeMu (outermost)
-	// → visMu (taken shared inside [lpg.Graph.ApplyVersioned]), matching the
-	// WAL-backed store-mutex → visMu order, so the two wirings share one
-	// deadlock-free ordering. Readers ([Engine.Run]) never take it.
+	// # What it used to be, and why that had to go (rmp #2306)
 	//
-	// Since rmp #2320 THIS is what still serialises writes on a store-less engine:
-	// the barrier no longer does, so retiring it (rmp #2306) is what lets a
-	// store-less engine scale its writes at all.
-	writeMu sync.Mutex
+	// It was `writeMu`, the engine's single-writer serialisation, and it was held for
+	// the whole duration of every autocommit statement and — worse — from BEGIN to
+	// COMMIT of every explicit transaction. That made the engine single-writer by
+	// construction on a store-less wiring, exactly as the store semaphore did on a
+	// WAL-backed one, and it survived rmp #2320's removal of the visibility barrier:
+	// the barrier stopped serialising writers and this took over.
+	//
+	// It was also the source of an unbounded stall. [Engine.lockWriter] took it with
+	// a plain Lock and was NOT context-aware, so an autocommit write blocked for the
+	// entire tenure of an open explicit transaction with the caller's deadline
+	// IGNORED — measured at ten minutes against a 200 ms deadline, the unfixed
+	// sibling of the defect rmp #2174 closed for BeginTx. Retiring the lock removes
+	// the wait rather than bounding it.
+	//
+	// Concurrency control is now MVCC and only MVCC: two writers overlap, and a
+	// genuine collision is REFUSED by per-object first-updater-wins detection
+	// (rmp #2300) instead of being prevented by exclusion.
+	//
+	// # Why DDL still needs it, and why it now covers both wirings
+	//
+	// A schema change is not one atomic step: it scans, validates, then registers,
+	// and the registration alone runs under the exclusive schema barrier
+	// ([lpg.Graph.ApplyAtomically]). Two concurrent DDLs could therefore both scan,
+	// both validate against a state neither will still see, and both register. The
+	// barrier cannot prevent that — it is held only for the last phase — so the whole
+	// sequence needs one lock, and this is it.
+	//
+	// It is taken in BOTH wirings now. The WAL-backed DDL paths used to lean on
+	// [txn.Store.BeginCtx]'s semaphore for the same mutual exclusion; that semaphore
+	// is ceasing to be a serialiser, so DDL must not depend on it.
+	//
+	// # Why ordinary writes take it SHARED, and why that is not a step backwards
+	//
+	// A DDL must also exclude ordinary WRITES, not merely other DDLs, and the first
+	// draft of this change missed that: with the lock taken by DDL alone, a write landing
+	// between an index's backfill scan and its registration was seen by NEITHER — the
+	// scan had already passed it and the index was not yet live to catch it
+	// incrementally. `TestCreateIndexBackfill_ConcurrentWrites` caught it under -race
+	// (`w3_22: want 1 row, got []`); `backfillNodeHashIndex` walks the mapper
+	// lock-free, so the old writeMu hold was the only thing excluding the writer.
+	//
+	// So it is an RWMutex: a DDL takes it EXCLUSIVELY for its whole scan-and-register
+	// sequence, an autocommit write takes it SHARED for its statement. That keeps the
+	// property writeMu gave — DDL excludes writes — while removing the one that made
+	// the engine single-writer, because two writes holding it shared do not exclude
+	// each other.
+	//
+	// visMu cannot do this job on its own even though it has the same shape: the DDL's
+	// exclusive hold covers only the registration, and extending it over the backfill
+	// would mean the scan could no longer use [lpg.Graph.View] (visMu is not
+	// re-entrant). This lock is one level out, so it needs no such surgery.
+	//
+	// Lock order: schemaMu (outermost) → the store's single-writer lock → visMu.
+	// Readers take none of them.
+	schemaMu sync.RWMutex
 
 	// hashJoinEnabled gates the disconnected-equi-join hash-join optimisation
 	// (#1506). True by default; set false by EngineOptions.DisableHashJoin. When
@@ -1183,39 +1223,6 @@ func (e *Engine) statsCollectorOrInit() *statsCollector {
 		return nc
 	}
 	return e.statsCollector.Load()
-}
-
-// lockWriter acquires the engine's write serialisation appropriate to its
-// wiring and returns the matching unlock closure. For a store-less engine it
-// locks [Engine.writeMu]; for a WAL-backed engine the store mutex is taken by
-// the caller's [txn.Store.Begin], so lockWriter is a no-op there and the
-// returned closure does nothing. The returned unlock is idempotent-safe to
-// call exactly once on the write path's single exit.
-func (e *Engine) lockWriter() func() {
-	if e.store != nil {
-		return func() {}
-	}
-	e.writeMu.Lock()
-	return e.writeMu.Unlock
-}
-
-// lockWriterCtx is [Engine.lockWriter] with the acquisition bounded by ctx. It
-// returns the unlock closure and nil once the serialisation is held, or a nil
-// closure and ctx's error if ctx finishes first — in which case NOTHING is held.
-//
-// On a WAL-backed engine this is the same no-op as lockWriter, because the
-// store's single-writer lock is taken by [txn.Store.BeginCtx], which has been
-// context-aware since task #1301. The store-less writer mutex was the half that
-// was not: the round-3 audit measured Engine.BeginTx overrunning a 50 ms
-// deadline and still returning err=nil (rmp #2174). See internal/ctxlock.
-func (e *Engine) lockWriterCtx(ctx context.Context) (func(), error) {
-	if e.store != nil {
-		return func() {}, nil
-	}
-	if err := ctxlock.Acquire(ctx, e.writeMu.TryLock, e.writeMu.Lock, e.writeMu.Unlock); err != nil {
-		return nil, err
-	}
-	return e.writeMu.Unlock, nil
 }
 
 // NewEngine creates an Engine backed by g. The default built-in function
@@ -2964,9 +2971,11 @@ func (e *Engine) runCreateBTreeIndex(ctx context.Context, p *ir.CreateIndex, idx
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// The whole DDL sequence — scan, validate, register — under one lock, in BOTH
+	// wirings; see [Engine.schemaMu] for why the schema barrier alone cannot do it.
+	e.schemaMu.Lock()
+	defer e.schemaMu.Unlock()
 	if e.store == nil {
-		e.writeMu.Lock()
-		defer e.writeMu.Unlock()
 		return e.createBTreeIndexLocked(ctx, p, idxMgr, nil)
 	}
 	// WAL-backed: open the serialising transaction before the backfill scan so
@@ -3124,9 +3133,9 @@ func (e *Engine) runDropIndex(ctx context.Context, p *ir.DropIndex, idxMgr *inde
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	e.schemaMu.Lock()
+	defer e.schemaMu.Unlock()
 	if e.store == nil {
-		e.writeMu.Lock()
-		defer e.writeMu.Unlock()
 		// Capture the (label, property) of the index about to be dropped so the
 		// internal numeric companion (#1652) can be cleaned up alongside it; see
 		// dropNumericCompanionIfOrphaned.
@@ -3265,13 +3274,12 @@ func (e *Engine) runCreateConstraint(ctx context.Context, p *ir.CreateConstraint
 	}
 	kind := execConstraintKind(p.Kind)
 
+	// One lock over scan + validate + register, in BOTH wirings. Lock order
+	// schemaMu → visMu (inside scanLabelProperty's View and the registration's
+	// ApplyAtomically). See [Engine.schemaMu].
+	e.schemaMu.Lock()
+	defer e.schemaMu.Unlock()
 	if e.store == nil {
-		// Store-less: writeMu is the same single-writer mutex every store-less
-		// RunInTx write holds for its duration, so the sequence below is
-		// atomic against concurrent writers. Lock order writeMu → visMu
-		// (inside scanLabelProperty's View) matches the write path.
-		e.writeMu.Lock()
-		defer e.writeMu.Unlock()
 		return e.createConstraintLocked(ctx, p, kind, idxMgr, nil)
 	}
 	// WAL-backed: open the transaction that will carry the durable constraint
@@ -3453,9 +3461,9 @@ func (e *Engine) runDropConstraint(ctx context.Context, p *ir.DropConstraint, id
 		return nil, err
 	}
 
+	e.schemaMu.Lock()
+	defer e.schemaMu.Unlock()
 	if e.store == nil {
-		e.writeMu.Lock()
-		defer e.writeMu.Unlock()
 		return e.dropConstraintLocked(ctx, p, idxMgr, nil)
 	}
 	tx, err := e.store.BeginCtx(ctx)
@@ -15580,8 +15588,13 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	// transaction's writer-mutex hold (#1280 write-write isolation). For a
 	// WAL-backed engine lockWriter is a no-op (Begin below takes the store
 	// mutex), so the lock is taken at most once on either wiring.
-	unlockWriter := e.lockWriter()
-	defer unlockWriter()
+
+	// SHARED hold on the schema lock for the whole statement (rmp #2306). It does not
+	// exclude another writer — that is the point — but it does exclude a DDL, whose
+	// backfill scan and registration must not have a write land between them. See
+	// [Engine.schemaMu] for the index-backfill race that measured.
+	e.schemaMu.RLock()
+	defer e.schemaMu.RUnlock()
 
 	// touched tracks the node keys this statement creates, labels, or strips a
 	// property from, so the commit-time NOT NULL existence check (#1754) re-checks
@@ -15638,10 +15651,25 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	// version of one statement points at ONE commit record and publication stays a
 	// single atomic store however many stores the statement spanned. Exclusion made
 	// the interleaving impossible; versioning makes it unobservable.
-	r, buildErr := e.execUnderBarrier(ctx, plan, queryReg, params, mutator, buf, undo, walTx, true, e.g.ApplyVersioned, touched)
+	r, buildErr := e.execUnderBarrier(ctx, plan, queryReg, params, mutator, buf, undo, walTx, true,
+		// Bounded by the caller's context (rmp #2306). The shared hold is uncontended
+		// against other ordinary writes but NOT against the exclusive holders — a DDL
+		// statement, or an explicit transaction holding the barrier across client
+		// think-time — and a writer queued behind one of those used to wait with its
+		// deadline ignored: measured at ten minutes against a 200 ms context.
+		func(apply func(lpg.WriteTx) error) error {
+			return e.g.ApplyVersionedCtx(ctx, apply)
+		}, touched)
 	if buildErr != nil {
 		if walTx != nil {
 			_ = walTx.Rollback()
+		}
+		// A context error here did not come from planning: it is the write bracket's
+		// bounded acquisition reporting that the caller's deadline elapsed while it was
+		// queued behind an exclusive holder (rmp #2306). Wrapping it as "build plan"
+		// would send a reader of the message to the planner for a lock problem.
+		if errors.Is(buildErr, context.Canceled) || errors.Is(buildErr, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("cypher: acquire write bracket: %w", buildErr)
 		}
 		return nil, fmt.Errorf("cypher: build plan: %w", buildErr)
 	}
@@ -15719,7 +15747,14 @@ func (e *Engine) execUnderBarrier(
 	applyFn func(func(lpg.WriteTx) error) error,
 	touched *touchedNodes,
 ) (r *Result, buildErr error) {
-	_ = applyFn(func(wtx lpg.WriteTx) error {
+	// The bracket's own error is captured, not discarded (rmp #2306). It used to be
+	// `_ =` because the closure always returned nil and the bracket itself could not
+	// fail — every statement error travelled out through r or buildErr instead. That
+	// stopped being true once the acquisition became context-bounded: it can now
+	// return ctx's error WITHOUT running the closure at all, and discarding that
+	// yielded (nil, nil) — a caller told the statement succeeded, handed a nil Result,
+	// and panicking on the first use of it.
+	if bracketErr := applyFn(func(wtx lpg.WriteTx) error {
 		// Hand the statement's own transaction to the adapter before anything
 		// reads or writes through it, so every read the write path makes resolves
 		// through THIS transaction (rmp #2304). The adapters are built before the
@@ -15803,7 +15838,13 @@ func (e *Engine) execUnderBarrier(
 		r.counters = mutatorCounters(mutator)
 		r.materialize()
 		return nil
-	})
+	}); bracketErr != nil {
+		// The bracket never opened, so nothing was applied and there is nothing to
+		// unwind here — the caller's own error path rolls back the WAL transaction it
+		// opened before calling us. Reported as the build error so the statement fails
+		// rather than returning a nil Result with a nil error.
+		return nil, bracketErr
+	}
 	return r, buildErr
 }
 

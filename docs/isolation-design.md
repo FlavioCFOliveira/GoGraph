@@ -357,6 +357,85 @@ R observes all of T or none of T, across every substructure.*
   noise; checkpoint-during-writes recovers exactly the committed state at the
   snapshot boundary.
 
+## Concurrency control is MVCC and nothing else (rmp #2306, first half)
+
+`Engine.writeMu` is gone as a transaction serialiser. It had been held for the whole of
+every autocommit statement and from BEGIN to COMMIT of every explicit transaction,
+which made a store-less engine single-writer by construction — and it SURVIVED
+rmp #2320's removal of the visibility barrier, quietly taking over the property the
+barrier had given up. The store-less write-scaling arm measured 0.750× at sixteen
+writers while the WAL arm reached 7.886×, and that gap was this lock.
+
+What remains of it is `Engine.schemaMu`, and its shape is the interesting part. A DDL is
+not one atomic step — it scans, validates, then registers, and only the registration runs
+under the exclusive schema barrier — so the barrier alone cannot make the sequence atomic
+against anything. It needs one lock over the whole thing, covering both wirings, because
+the WAL-backed DDL paths used to lean on the store semaphore for the same exclusion and
+that semaphore is ceasing to be a serialiser.
+
+**Narrowing it to DDL-versus-DDL was the first draft and it was wrong.** A DDL must
+exclude ordinary WRITES too: `backfillNodeHashIndex` walks the mapper lock-free, so a
+write landing between the backfill scan and the registration is seen by NEITHER — the
+scan has passed it, and the index is not yet live to catch it incrementally.
+`TestCreateIndexBackfill_ConcurrentWrites` reported it under `-race` as
+`w3_22: want 1 row, got []`, and the retired `writeMu` hold had been the only thing
+preventing it.
+
+So `schemaMu` is an **RWMutex**: a DDL takes it exclusively for its whole
+scan-and-register sequence, an autocommit write takes it shared for its statement. That
+keeps the property `writeMu` gave — DDL excludes writes — while dropping the one that made
+the engine single-writer, because two writes holding it shared do not exclude each other.
+The shared acquisition cost nothing measurable: store-less scaling at sixteen writers went
+1.768× → 1.900× across the change.
+
+`visMu` cannot do this job even though it has exactly the same reader/writer shape: its
+exclusive hold covers only the registration, and extending it over the backfill would stop
+the scan using `Graph.View`, since visMu is not re-entrant. `schemaMu` sits one level out
+and needs no such surgery.
+
+### The next ceiling was named by a mutex profile, not guessed
+
+With `writeMu` gone, throughput rose and then DEGRADED past four writers — the shape of
+a different lock taking over. A CPU profile showed 65 % of samples in `runtime.usleep`
+and `runtime.pthread_cond_wait`, i.e. spinning and parking on acquisition, but not on
+what. A mutex profile answered directly: `ConstraintRegistry.ReserveSetProperty` 56.99 %
+of all lock delay and `RecordPropertySet` 40.75 % — together essentially all of it — on
+a workload whose schema declares **no constraints at all**. One global `RWMutex`, taken
+exclusively per property write, free while writers were serialised and the whole
+bottleneck once they overlapped.
+
+It is now gated by atomic constraint counters read BEFORE the lock. Reading them
+lock-free is sound for a reason the shared/exclusive split supplies: a registration
+requires `schemaMu` **and** the schema barrier held exclusively, while an ordinary write
+holds that barrier shared for its whole bracket and consults the registry from inside
+it — so a constraint cannot appear under a write that read zero.
+
+Store-less scaling at sixteen writers: **0.83× (sprint entry) → 0.750× → 1.242× →
+1.900×**, rising instead of peaking at four writers and falling away.
+
+### A writer's deadline is now honoured wherever it can still block
+
+Retiring `writeMu` did not end the unbounded stall an open explicit transaction imposes
+on other writers — it MOVED it onto the barrier's shared acquisition, which was equally
+context-blind. `lpg.Graph.ApplyVersionedCtx` bounds it through `internal/ctxlock`, the
+same mechanism rmp #2174 gave the exclusive side. The bound is owed even after
+rmp #2305 removes the transaction-lifetime hold, because a DDL statement legitimately
+excludes writers for as long as it runs and a caller with a deadline is entitled to
+hear about it.
+
+Making the acquisition fallible exposed a latent bug: `execUnderBarrier` discarded the
+bracket's own error with `_ =`, which was safe only while the bracket could not fail
+before running its closure. With a bounded acquire it can, and the discard produced
+**`(nil, nil)`** — a caller told the statement had succeeded, handed a nil `Result`, and
+panicking on first use.
+
+### What rmp #2306 still owes
+
+The store's single-writer semaphore, a genuine quiesce primitive to replace what
+`RunUnderCommitLock`/`drainInflight` get from it, and a PROOF that the apply gate's
+forced sequencing is removable. Note that the quiesce is now load-bearing for the
+checkpointer, which since rmp #2320 rests on it rather than on `visMu`.
+
 ## The fsync-failure policy (rmp #2306, decided 2026-08-04)
 
 Group commit is **FAIL-ALL**, and that is kept deliberately rather than by omission.

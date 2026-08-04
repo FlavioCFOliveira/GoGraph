@@ -762,9 +762,9 @@ func (e *Engine) runCreateHashIndex(ctx context.Context, p *ir.CreateIndex, idxM
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	e.schemaMu.Lock()
+	defer e.schemaMu.Unlock()
 	if e.store == nil {
-		e.writeMu.Lock()
-		defer e.writeMu.Unlock()
 		return e.createHashIndexLocked(ctx, p, idxMgr, nil)
 	}
 	// WAL-backed: open the serialising transaction before the backfill scan so
