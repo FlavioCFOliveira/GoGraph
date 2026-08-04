@@ -34,9 +34,14 @@ package lpg
 // a direct Go-API write outside any transaction — still falls back to the ambient
 // stamp, which is correct for it: such a write commits the instant it is made.
 //
-// AC3 ASKS FOR A TEST VERIFIED TO FAIL AGAINST THE UNORDERED BUILD, AND FOR THIS
-// STRUCTURE THAT IS NOT YET POSSIBLE. Restoring `g.stamp.Stamp()` leaves both tests
-// below PASSING, and finding out why corrected the description of the defect:
+// AC3 ASKED FOR A TEST VERIFIED TO FAIL AGAINST THE UNORDERED BUILD, AND WHEN THIS
+// FILE WAS WRITTEN THAT WAS NOT POSSIBLE. It is now: rmp #2320 removed the exclusive
+// barrier from the ordinary write path, so two write brackets overlap and the
+// collision is producible. mvcc_index_overlap_test.go produces it deterministically
+// and both of its tests FAIL against `g.stamp.Stamp()`, naming the concurrent
+// writer's record (rmp #2304 AC8). The paragraphs below are kept because finding out
+// why the tests HERE could not discriminate is what corrected the description of the
+// defect:
 //
 //   - on the BARRIER path ([Graph.beginWrite]) the ambient slot IS occupied, so the
 //     old read returned the ambient transaction's record. That is the wrong record
@@ -50,8 +55,9 @@ package lpg
 //     became reclaimable at an instant BEFORE its own transaction committed, and it
 //     inflated the untracked-write counter once per deferral.
 //
-// TestDeferredIndexRemoval_ChargesNoUntrackedWrite pins that second one, which is
-// the part of this change a test can discriminate today.
+// TestDeferredIndexRemoval_ChargesNoUntrackedWrite pins that second one, which was
+// the part of this change a test could discriminate at the time. The first is now
+// pinned by mvcc_index_overlap_test.go.
 
 import (
 	"testing"

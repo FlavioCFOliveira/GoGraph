@@ -88,14 +88,40 @@ it — which is the margin that counts, since the gate reads the best of three: 
 loaded host can only depress a ratio, and a build that has gone back to
 serialising writers cannot reach 3× even once.
 
-## What did NOT move, and why
+## What did NOT move, and why — measured, not assumed
 
-The store-less arm (`BenchmarkWriteScaling/mem`) is unchanged. Its outermost lock
-is `cypher.Engine.writeMu`, not the barrier — `lockWriter` takes `writeMu` only
-when no store is attached, and holds it for the whole statement — so retiring the
-barrier could not affect it. `bench/mvccwrite`'s `writeScalingFloor` and
-`writeConcurrencyFloor` therefore stay where they are; retiring `writeMu` and the
-store semaphore is rmp #2306.
+The store-less arm (`BenchmarkWriteScaling/mem`) is unchanged in substance. Its
+outermost lock is `cypher.Engine.writeMu`, not the barrier — `lockWriter` takes
+`writeMu` only when no store is attached, and holds it for the whole statement — so
+retiring the barrier could not affect it.
+
+Measured on the same machine, `-benchtime=20000x -count=5`, medians:
+
+| writers | commits/s | scaling |
+|---:|---:|---:|
+| 1 | 354 647 | 1.000 |
+| 16 | 266 056 | **0.750** |
+
+The sprint's entry baseline for this arm was **0.83×** at sixteen writers (333 590 →
+276 043 commits/s at head `6b990377`). It is now 0.750×, and the difference is
+almost entirely in the NUMERATOR: the single-writer arm rose from 333 590 to
+354 647 (+6.3 %) while the sixteen-writer arm moved from 276 043 to 266 056
+(−3.6 %). A faster lone writer against an unchanged contended ceiling lowers the
+ratio without anything having got worse in absolute terms, and the two runs used
+different `-benchtime` values, so the −3.6 % should not be read as a regression.
+
+**What this means for rmp #2304's AC2.** That criterion asks for throughput
+"materially better than the 0.83× entry baseline at sixteen writers". On the arm
+where 0.83× was measured — the store-less one — that is NOT achieved and cannot be,
+because the lock that bounds it is `cypher.Engine.writeMu` and retiring it is
+rmp #2306's scope. On the arm the barrier actually gated, the same measurement is
+1.009× → **7.886×** at sixteen writers. The audit said as much in advance
+(`docs/audit-mvcc-sole-cc-2026-08-02.md` §3.1: the store-less baseline "is writeMu +
+visMu and nothing else"), and it is recorded here rather than resolved by choosing
+whichever arm reads better.
+
+`bench/mvccwrite`'s `writeScalingFloor` and `writeConcurrencyFloor` therefore stay
+where they are; only `walWriteScalingFloor` was ratcheted.
 
 ## The cost the throughput is bought with
 

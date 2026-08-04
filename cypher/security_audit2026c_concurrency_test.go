@@ -181,14 +181,20 @@ func TestSEC14c_ConcurrentWriteRead_NoRace_NoPartialReads(t *testing.T) {
 	}
 }
 
-// TestSEC14c_ConcurrentBeginWriters_SingleWriterSerialised hammers the
-// single-writer model indirectly through the engine: N goroutines each open
-// a write transaction that mutates the graph under contention. The
-// single-writer serialisation (visMu in write mode) must (a) admit exactly
-// one writer's mutations at a time — proven by every successful commit being
-// fully and exactly visible with no torn count — and (b) never deadlock
-// under contention. Bounded by a context deadline so a lock-ordering
-// regression fails fast.
+// TestSEC14c_ConcurrentBeginWriters_SingleWriterSerialised hammers the write path
+// through the engine: N goroutines each open a write transaction that mutates the
+// graph under contention. Every successful commit must be fully and exactly visible
+// with no torn count, and the engine must never deadlock. Bounded by a context
+// deadline so a lock-ordering regression fails fast.
+//
+// The mechanism it exercises CHANGED at rmp #2320 and the name is now historical.
+// visMu is no longer what serialises an ordinary write — it is held SHARED by
+// [lpg.Graph.ApplyVersioned], and atomic visibility comes from the transaction's
+// shared commit record instead. What still serialises writes on this store-LESS
+// wiring is cypher.Engine.writeMu, which BeginTx holds for the transaction's whole
+// lifetime; retiring it is rmp #2306. The invariant asserted below — no torn count,
+// no deadlock — is unchanged and is what the test is really for, so it is left
+// exactly as it was.
 func TestSEC14c_ConcurrentBeginWriters_SingleWriterSerialised(t *testing.T) {
 	// Deliberately NOT t.Parallel(): see the sibling test above — heavy
 	// concurrent writers must not contend with deadline-sensitive parallel
