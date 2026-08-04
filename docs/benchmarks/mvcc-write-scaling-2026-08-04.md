@@ -123,6 +123,22 @@ whichever arm reads better.
 `bench/mvccwrite`'s `writeScalingFloor` and `writeConcurrencyFloor` therefore stay
 where they are; only `walWriteScalingFloor` was ratcheted.
 
+## Reader latency did not regress (rmp #2304 AC6)
+
+`bench/mtaudit` `TestFairScheduling_LongReadPlusWriterDoesNotStarveReaders`, run with
+`-tags=soak`, WITHOUT `-race` and with no competing load, after the flip:
+
+| readers | baseline | + long read | + writer 10/s | + long read AND writer | collapse |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 215 921 op/s, worst 454 µs | 213 632, 448 µs | 209 855, 5.143 ms | 113 471, 3.977 ms | **1.903×** |
+| 8 | 441 265 op/s, worst 1.672 ms | 408 933, 2.254 ms | 434 439, 9.058 ms | 223 796, 5.288 ms | **1.972×** |
+
+The gate's tolerance is 4.0×, and the envelope certified when rmp #2274 fixed the
+reader-starvation collapse was 1.91× / 2.07×. So the shared write path leaves reader
+latency where it was — 1.903× and 1.972× are at or slightly better than the certified
+figures, and both worst-case short-read latencies stay in the millisecond range
+against the 1 m 36 s worst case that rmp #2274 was opened for.
+
 ## The cost the throughput is bought with
 
 Overlapping writers make write-write conflicts REAL. Two transactions touching the

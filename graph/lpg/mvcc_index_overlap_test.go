@@ -24,17 +24,24 @@ package lpg
 // writer B opens ITS bracket (so the slot names B), and only THEN does A defer its
 // removal. Against the ambient build A's removal is charged to B.
 //
-// # Both failure directions, and how each is observed
+// # Both failure directions, and one correction to the AC
 //
 // Charging the removal to the wrong transaction fails in two opposite ways, and the
-// two tests below cover one each:
+// two tests below cover one each: swept too EARLY, before the removing
+// transaction's own readers are done with the entry, which silently loses a row —
+// the exact failure the deferral exists to prevent; or too LATE, so the label
+// bitmap over-reports until an unrelated writer happens to finish.
 //
-//   - to a transaction that commits EARLIER, the removal is swept before the
-//     removing transaction's own readers are done with the entry, and a reader
-//     silently loses a row — the exact failure the deferral exists to prevent;
-//   - to a transaction still IN FLIGHT, it carries an id no record will ever
-//     publish, so `at() <= watermark` can never hold, the removal is NEVER swept,
-//     and the label bitmap over-reports for the life of the process.
+// rmp #2304's AC8 states the second direction as "charged to one still in flight,
+// it carries an id no record will ever publish and is NEVER swept". That is not
+// what the ambient read produces, and the correction belongs next to the test:
+// both resolutions store a *[mvcc.CommitInfo] and [lifeStamp.at] resolves through
+// it, so a removal charged to a live writer is swept at THAT writer's instant
+// rather than stranded. Stranding needs [lifeStamp.info] nil with an in-flight id
+// in [lifeStamp.ts], which [Graph.deferralStamp] yields only for a transaction whose
+// window is already retracted — unreachable while its bracket is open. So the harm
+// is mis-ORDERING, which is what
+// TestDeferredIndexRemoval_MisChargingWouldMoveTheSweepInstantBothWays measures.
 //
 // Both are observed on the pending entry's own record rather than on a downstream
 // symptom, because the record IS the ordering basis: an assertion on the sweep
@@ -127,16 +134,11 @@ func TestDeferredIndexRemoval_IsChargedToTheRemovingTransaction_NotAConcurrentOn
 			"as this test requires")
 	}
 	if got != aRecord {
-		which := "a third record"
-		if got == bRecord {
-			which = "writer B's record — the CONCURRENT writer's"
-		} else if got == nil {
-			which = "no record at all"
-		}
 		t.Fatalf("the deferred label-index removal is charged to %s instead of to the "+
 			"transaction that made it. It then becomes reclaimable at that transaction's "+
 			"instant rather than its own: swept too early, a reader that still needs the "+
-			"entry silently loses a row (rmp #2303 AC3 / rmp #2304 AC8).", which)
+			"entry silently loses a row (rmp #2303 AC3 / rmp #2304 AC8).",
+			recordName(got, aRecord, bRecord))
 	}
 }
 
@@ -270,7 +272,8 @@ func TestDeferredIndexRemoval_MisChargingWouldMoveTheSweepInstantBothWays(t *tes
 }
 
 // recordName describes which of the two known records got is, for a failure message
-// that names the defect instead of printing a pointer.
+// that names the defect instead of printing a pointer. Shared by both tests so the
+// two failure messages cannot drift apart on what they call the same thing.
 func recordName(got, a, b *mvcc.CommitInfo) string {
 	switch got {
 	case nil:
