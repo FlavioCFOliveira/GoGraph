@@ -2550,6 +2550,24 @@ func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, tx *writeCtx) error {
 	// can only ever end up a superset of the truth. Add-then-cancel lost the
 	// entry outright when the sweep landed in between; the failure is spelled out
 	// at applyDeferredIndexRemovals.
+	// Withdraw any pending removal for this entry BEFORE adding it, not after.
+	// Re-attaching a label the same statement stripped is what a ROLLBACK does, and a
+	// surviving deferred removal would delete the restored entry at the next sweep.
+	//
+	// The ORDER is load-bearing against the background vacuum (rmp #2308).
+	// Cancel-then-add makes this path and [Graph.applyDeferredIndexRemovals] mutually
+	// exclusive on idxDeferred.mu in both interleavings, so the bitmap can only ever
+	// end up a superset of the truth. Add-then-cancel lost the entry outright when the
+	// sweep landed in between; the failure is spelled out at
+	// applyDeferredIndexRemovals.
+	//
+	// MAKING IT CONDITIONAL on the label having been absent was tried for rmp #2326
+	// and is NOT justified: the cancel keys on (lid, id) with no transaction identity,
+	// which looks like it could withdraw a concurrent transaction's removal, but the
+	// bag read and the cancel are both reached under the shard lock, and the
+	// regression test written for that theory did not discriminate — it passed against
+	// the unconditional form. See rmp #2326, which records the hypothesis as UNPROVEN
+	// rather than fixed.
 	g.cancelDeferredIndexRemoval(uint32(lid), id)
 	g.nodeIdx.Add(uint32(lid), id)
 	return nil

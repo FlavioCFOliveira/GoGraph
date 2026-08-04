@@ -101,9 +101,14 @@ func TestVacuum_CommitPathPerformsNoReclamation(t *testing.T) {
 	// THE DISCRIMINATOR: every record that went is ATTRIBUTED to a vacuum pass.
 	// VacuumStats.Reclaimed is incremented only by [Graph.vacuumLoop], so records
 	// freed by a commit-path sweep do not appear in it. Measured on this workload,
-	// which creates about one version per round: the vacuum accounts for 16 322 of
-	// 16 384 (99.6 %) on the correct build, and for 8 676 (53 %) once a synchronous
-	// commit-path sweep is restored. Nine tenths separates them with margin.
+	// which creates about one version per round: on the correct build the vacuum
+	// accounts for 75 % to 99.6 % of them (the spread is scheduling — how much of the
+	// churn a pass happens to catch), and for 53 % once a synchronous commit-path
+	// sweep is restored. TWO THIRDS separates those ranges with margin on both sides.
+	//
+	// The first threshold was nine tenths, fitted to a single 99.6 % sample, and it
+	// failed on the correct build at 75 %. A bound fitted to one measurement is a
+	// bound fitted to that measurement's luck.
 	//
 	// The obvious instrument — assert the retained count PEAKED above the threshold,
 	// which a synchronous sweep could never allow — was tried and REJECTED because it
@@ -120,7 +125,7 @@ func TestVacuum_CommitPathPerformsNoReclamation(t *testing.T) {
 			"something other than the vacuum, which means reclamation is still on the " +
 			"commit path")
 	}
-	if want := int64(rounds) * 9 / 10; vs.Reclaimed < want {
+	if want := int64(rounds) * 2 / 3; vs.Reclaimed < want {
 		t.Errorf("vacuum passes account for only %d records over %d modifications, short of the "+
 			"%d that attribution requires: the rest were freed by something other than the "+
 			"vacuum, which means reclamation is still on the commit path", vs.Reclaimed, rounds, want)

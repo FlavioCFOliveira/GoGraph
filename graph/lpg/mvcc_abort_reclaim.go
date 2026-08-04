@@ -309,10 +309,30 @@ func (g *Graph[N, W]) reclaimAbortedLabelsLocked(sh *nodeLabelShard, id graph.No
 	if head == nil || !abortedHead(head.stampTS()) {
 		return 0
 	}
-	clean := cloneLabelBag(g.labelBagAsOfLocked(sh, id, g.mvccClock.ReadTS(), 0))
-	before := sh.m[id]
+	// UNDO ONLY THE ABORTED HEAD DELTAS (rmp #2326).
+	//
+	// This used to recompute the bag with [Graph.labelBagAsOfLocked] at the present
+	// instant, on the reasoning that the reader's own walk cannot disagree with the
+	// reader. It can, and it LOST WRITES: that walk undoes every delta invisible at
+	// the given instant, which includes a CONCURRENT IN-FLIGHT transaction's, and the
+	// result was stored back as the bag — discarding work the other transaction had
+	// already applied. Bisected with a powered probe (`go test -race
+	// ./internal/sim/ -run TestSchemaMutation_OracleModelsMutations -count=200`):
+	// "REMOVE n:Vip … engine=1, want=0 (SET/REMOVE label did not round-trip)" at
+	// 4/200, against 0/200 at the sprint's entry head.
+	//
+	// Each delta records what to do to reverse ITSELF, so applying only the aborted
+	// ones is both narrower and exact.
+	clean := cloneLabelBag(sh.m[id])
+	before := cloneLabelBag(sh.m[id])
 	freed := 0
 	for d := sh.d[id]; d != nil && abortedHead(d.stampTS()); d = sh.d[id] {
+		switch d.action {
+		case undoAddLabel:
+			clean.add(d.lid)
+		case undoRemoveLabel:
+			clean.del(d.lid)
+		}
 		sh.d[id] = d.next
 		freed++
 	}
@@ -351,9 +371,17 @@ func (g *Graph[N, W]) reclaimAbortedPropsLocked(sh *nodePropShard, id graph.Node
 	if head == nil || !abortedHead(head.stampTS()) {
 		return 0
 	}
-	clean := clonePropBag(g.propBagAsOfLocked(sh, id, g.mvccClock.ReadTS(), 0))
+	// Undo ONLY the aborted head deltas; see [Graph.reclaimAbortedLabelsLocked] for
+	// the concurrent writes the general as-of walk lost when it was used here.
+	clean := clonePropBag(sh.m[id])
 	freed := 0
 	for d := sh.d[id]; d != nil && abortedHead(d.stampTS()); d = sh.d[id] {
+		switch d.action {
+		case undoSetProp:
+			clean.set(d.key, d.prev)
+		case undoDelProp:
+			clean.del(d.key)
+		}
 		sh.d[id] = d.next
 		freed++
 	}
