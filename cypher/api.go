@@ -17783,14 +17783,55 @@ func ensureFwdCSR(bopts *buildOpts, g *lpg.ReadView[string, float64]) *csr.CSR[f
 		return nil
 	}
 	if bopts == nil {
-		return csr.BuildFromAdjListLive(g.AdjList(), g.LiveNodeFilter())
+		return buildFwdCSRAsOf(g)
 	}
 	if bopts.fwdCSRReady {
 		return bopts.fwdCSR
 	}
-	bopts.fwdCSR = csr.BuildFromAdjListLive(g.AdjList(), g.LiveNodeFilter())
+	bopts.fwdCSR = buildFwdCSRAsOf(g)
 	bopts.fwdCSRReady = true
 	return bopts.fwdCSR
+}
+
+// buildFwdCSRAsOf builds the reconstruction CSR at the READER'S INSTANT.
+//
+// # The wrong answer this closes (rmp #2295)
+//
+// It used to call csr.BuildFromAdjListLive(g.AdjList(), …), and g.AdjList() is
+// ReadView's documented UNVERSIONED escape hatch: it answers from the PRESENT. So
+// the CSR described a different graph from the one whose forward positions it is
+// asked about — Expand minted those at the reader's instant — and a concurrent
+// DELETE of a parallel relationship made the two disagree by one slot.
+//
+// Measured before this change, with a held read transaction:
+//
+//	CREATE (a:A),(b:B),(a)-[:R1]->(b),(a)-[:R2]->(b),(a)-[:R3]->(b)
+//	tx := BeginReadTx();  MATCH (:A)-[r]->(:B) RETURN type(r)  =>  [R1 R2 R3]
+//	another transaction: MATCH (:A)-[r:R3]->(:B) DELETE r
+//	the SAME tx re-runs the same query                         =>  [R1 R2 R1]
+//
+// The row count stays right — the snapshot began before the delete — and the third
+// row's TYPE is a sibling's. The present-time CSR has two slots for the pair, so
+// [edgeInstanceIdxFor] cannot place the third position, the per-instance guard in
+// buildRelationshipValueFromRow declines, and the per-pair union fallback hands
+// pickEdgeType a set whose first member is R1.
+//
+// rmp #2295 had been DOWNGRADED to hygiene on the reasoning that the guard's skew
+// "either declines or stays self-consistent" and "never attributes one instance's
+// type to another". The decline is real and is what saves the CREATE direction; what
+// that reasoning missed is that a decline is not harmless, because the fallback it
+// declines TO picks an arbitrary member of the pair's type union.
+//
+// This is the same instant discipline [csrPairFromGraphAt] already applies, and
+// [csr.BuildFromAdjListAsOf] exists for it; the caller still caches the result per
+// query, so a query reconstructing many relationships builds it once.
+func buildFwdCSRAsOf(g *lpg.ReadView[string, float64]) *csr.CSR[float64] {
+	if snap := g.Snapshot(); snap != nil {
+		return csr.BuildFromAdjListAsOf(g.AdjList(), g.LiveNodeFilter(), snap.StartTS(), snap.TxID())
+	}
+	// No snapshot means the caller reads the present deliberately — a mutation
+	// outside any transaction — and the present is then the right instant.
+	return csr.BuildFromAdjListLive(g.AdjList(), g.LiveNodeFilter())
 }
 
 // nodeIDOrNodeValue extracts a NodeID from a row column. The slot may hold a
