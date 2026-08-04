@@ -357,6 +357,50 @@ R observes all of T or none of T, across every substructure.*
   noise; checkpoint-during-writes recovers exactly the committed state at the
   snapshot boundary.
 
+## The fsync-failure policy (rmp #2306, decided 2026-08-04)
+
+Group commit is **FAIL-ALL**, and that is kept deliberately rather than by omission.
+When the group leader's fsync fails, `wal.Writer.poison` truncates the file back to
+the last durable offset, discards the whole un-synced suffix — every member's frames
+AND their `OpCommit` markers — sets a sticky error, and wakes every waiter to fail.
+
+**Why it is not softened.** The alternative is to acknowledge a commit whose
+durability is unknown, which the ACID mandate forbids outright. Nothing in the failed
+suffix can be claimed as durable, so nothing in it may be acknowledged.
+
+**It is the LENIENT end of the prior art.** PostgreSQL does not fail the transaction,
+it fails the PROCESS: `issue_xlog_fsync` carries the comment `/* PANIC if failed to
+fsync */` and calls `ereport(PANIC, …)`
+(`postgres/postgres`, branch master, read 2026-08-04 at commit
+`69ed7fd7e9da1cff2f04af04f630287971fe99fe`;
+`src/backend/access/transam/xlog.c`). GoGraph cannot take that route — it is a library
+embedded in the caller's process, killing the host is not its decision to make, and
+the reliability mandate forbids the library from crashing. So the writer handle dies
+and says so, which is PostgreSQL's conclusion scoped to what a library owns.
+
+**What DID change is identifiability.** Under a serial batch, fail-all was
+unremarkable: the batch was one unit. Once writers are independent, an innocent
+member fails because of another transaction's I/O — and it used to receive an
+undistinguished error, the same shape it would get from a conflict of its own. The two
+demand opposite responses. So every error a poisoned writer returns now wraps
+`wal.ErrDurabilityFailed`:
+
+- `errors.Is(err, wal.ErrDurabilityFailed)` identifies the class; `errors.Unwrap`
+  still reaches the device error, which is what an operator needs.
+- The Bolt boundary maps it to a **DatabaseError**, so the official driver's
+  `IsRetriable` (which tests `classification == "TransientError"`) never retries it —
+  asserted by asking the real driver in
+  `bolt/server.TestFailureCode_DurabilityFailureIsNotRetriedByTheRealDriver`, not by
+  restating the classification.
+- Every group MEMBER receives the class, not just the leader —
+  `wal.TestSyncGroup_FailAll` asserts it per member, which is the case fail-all makes
+  possible in the first place.
+
+One inconsistency surfaced while wiring it and was fixed: each `poison` site returned
+the bare cause while every *later* caller got the wrapped sticky error, so the member
+that poisoned the writer was the only one unable to identify what had happened. All
+five sites now return the class.
+
 ## Implementation status and chosen approach
 
 The guarantee is being delivered **correctness-first** via a transaction-

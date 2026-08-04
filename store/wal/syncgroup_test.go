@@ -59,6 +59,16 @@ func TestSyncGroup_FailAll(t *testing.T) {
 				if !errors.Is(serr, testfs.ErrSyncFailed) {
 					t.Errorf("SyncGroup error = %v; want ErrSyncFailed", serr)
 				}
+				// EVERY member — not just the leader — must receive the durability
+				// CLASS, because fail-all is precisely the policy that makes an
+				// innocent member fail (rmp #2306). A member that got only a bare I/O
+				// error could not tell this from a conflict of its own, and the Bolt
+				// boundary could not keep it out of the driver's retriable family.
+				if !errors.Is(serr, wal.ErrDurabilityFailed) {
+					t.Errorf("SyncGroup error = %v; not errors.Is(wal.ErrDurabilityFailed). "+
+						"A group member cannot identify a durability fail-stop, so a managed "+
+						"transaction would retry it against a poisoned writer.", serr)
+				}
 			} else {
 				nilAcks.Add(1)
 			}

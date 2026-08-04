@@ -28,6 +28,7 @@ import (
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/db"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // conflictCode is the code the server maps a serialization conflict to. It is
@@ -159,5 +160,47 @@ func TestFailureCode_ConflictIsNotClassifiedAsAClientFault(t *testing.T) {
 	if !errors.Is(mvcc.NewConflict("adjacency", 1<<63, 7, 1<<63+1), mvcc.ErrSerializationConflict) {
 		t.Fatal("the typed conflict no longer unwraps to the sentinel, so every errors.Is " +
 			"call site in the Bolt layer silently stops matching")
+	}
+}
+
+// TestFailureCode_DurabilityFailureIsNotRetriedByTheRealDriver is the other side of
+// the retry decision, and it is why [wal.ErrDurabilityFailed] is a named class rather
+// than an anonymous I/O error (rmp #2306).
+//
+// A group commit is FAIL-ALL: when the leader's fsync fails, every member's frames
+// and OpCommit markers are discarded together, so a transaction that did nothing
+// wrong fails because another transaction's I/O failed. That transaction must NOT be
+// retried — the writer is poisoned, the handle is dead, and the next attempt fails
+// identically. Its error therefore has to leave the TransientError family, and the
+// driver has to agree that it has.
+//
+// Asking the driver, rather than asserting the classification, is what makes this a
+// gate: if a future edit moved the durability failure onto a transient code, a
+// managed transaction would spin on a dead writer until it exhausted its retry
+// budget.
+func TestFailureCode_DurabilityFailureIsNotRetriedByTheRealDriver(t *testing.T) {
+	t.Parallel()
+
+	// The error a poisoned writer actually returns: the class wrapping a cause.
+	poisoned := fmt.Errorf("%w: %w", wal.ErrDurabilityFailed, errors.New("input/output error"))
+
+	code := FailureCode(poisoned)
+	asDriverSaw := &db.Neo4jError{Code: code, Msg: poisoned.Error()}
+	if neo4j.IsRetryable(asDriverSaw) {
+		t.Fatalf("the driver WOULD retry %q. A poisoned WAL writer refuses every further "+
+			"append and sync, so a managed transaction would spin on a dead handle until "+
+			"its retry budget ran out and then report the last failure instead of the "+
+			"first (rmp #2306).", code)
+	}
+	if got := asDriverSaw.Classification(); got == "TransientError" {
+		t.Fatalf("the driver classifies %q as TransientError; a durability failure is not "+
+			"transient", code)
+	}
+
+	// And it must not be confused with the conflict, which IS retriable. The two
+	// arrive at the same boundary and demand opposite responses.
+	if code == conflictCode {
+		t.Fatalf("a durability failure and a serialization conflict both map to %q; a "+
+			"client cannot tell 'retry me' from 'the disk is gone'", code)
 	}
 }

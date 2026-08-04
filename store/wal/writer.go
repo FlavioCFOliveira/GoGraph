@@ -32,6 +32,38 @@ var ErrWALLocked = errors.New("wal: WAL directory is locked by another process")
 // requires a real filesystem path — which only [Open] records.
 var ErrPrefixTruncateUnsupported = errors.New("wal: TruncatePrefix requires a path-backed writer (use Open, not OpenWith)")
 
+// ErrDurabilityFailed marks every error a POISONED writer returns: the write-ahead
+// log could not be made durable, the un-synced suffix has been discarded, and this
+// writer will refuse every further append and sync.
+//
+// It wraps the underlying I/O error, so `errors.Is(err, ErrDurabilityFailed)`
+// identifies the class and `errors.Unwrap` still reaches the cause.
+//
+// # Why it exists, and what it is NOT
+//
+// It is NOT retriable, and that is the whole point of naming it. A group commit is
+// FAIL-ALL: when the leader's fsync fails, every member's frames and OpCommit
+// markers are discarded together, so a transaction that did nothing wrong fails
+// because another transaction's I/O failed. While commits were serialised that was
+// unremarkable — the batch was one unit. Once writers are independent (rmp #2306) a
+// caller needs to tell "MY transaction lost a conflict, retry it" from "the storage
+// substrate failed, everything in flight is gone, and retrying will not help",
+// because the two demand opposite responses and both used to arrive as an
+// undistinguished error.
+//
+// Fail-all is kept rather than softened, because the alternative is to acknowledge a
+// commit whose durability is unknown, which the module's ACID mandate forbids
+// outright. It is also the LENIENT end of the prior art: PostgreSQL does not fail the
+// transaction, it fails the PROCESS —
+// `issue_xlog_fsync` carries the comment "PANIC if failed to fsync" and calls
+// `ereport(PANIC, …)` (postgres/postgres, branch master, read 2026-08-04 at commit
+// 69ed7fd7e9da1cff2f04af04f630287971fe99fe;
+// src/backend/access/transam/xlog.c). GoGraph cannot take that route: it is a library
+// embedded in the caller's process, killing the host is not its decision to make, and
+// the reliability mandate forbids the library from crashing. So the handle dies and
+// says so, which is PostgreSQL's conclusion scoped to what a library owns.
+var ErrDurabilityFailed = errors.New("wal: durability failed; the un-synced suffix was discarded and this writer is poisoned")
+
 // Stats is a snapshot of a [Writer]'s lifetime counters. Counters
 // are monotonic; subtract two snapshots to compute deltas. Values
 // are read with [sync/atomic.LoadUint64], so they may race slightly
@@ -522,7 +554,11 @@ func (w *Writer) SyncCtx(ctx context.Context) error {
 	if err := w.bw.Flush(); err != nil {
 		w.poison(err)
 		metrics.IncCounter("store.wal.SyncCtx.errors", 1)
-		return err
+		// The wrapped CLASS, not the bare cause: poison has just stored it into
+		// syncErr, and returning err here would hand the caller that POISONED the
+		// writer a less identifiable error than every other caller gets from now on
+		// (rmp #2306, see [ErrDurabilityFailed]).
+		return w.syncErr
 	}
 	// Per-commit WAL data durability: fdatasync on Linux, full fsync
 	// elsewhere (see dataSync). Like the group-commit leader path, this only
@@ -531,7 +567,11 @@ func (w *Writer) SyncCtx(ctx context.Context) error {
 	if err := dataSync(w.f); err != nil {
 		w.poison(err)
 		metrics.IncCounter("store.wal.SyncCtx.errors", 1)
-		return err
+		// The wrapped CLASS, not the bare cause: poison has just stored it into
+		// syncErr, and returning err here would hand the caller that POISONED the
+		// writer a less identifiable error than every other caller gets from now on
+		// (rmp #2306, see [ErrDurabilityFailed]).
+		return w.syncErr
 	}
 	w.durableSize = w.appendedSize
 	w.syncs.Add(1)
@@ -679,7 +719,11 @@ func (w *Writer) leadGroupSyncLocked() error {
 		w.leaderActive = false
 		w.poison(err)
 		metrics.IncCounter("store.wal.SyncGroup.errors", 1)
-		return err
+		// The wrapped CLASS, not the bare cause: poison has just stored it into
+		// syncErr, and returning err here would hand the caller that POISONED the
+		// writer a less identifiable error than every other caller gets from now on
+		// (rmp #2306, see [ErrDurabilityFailed]).
+		return w.syncErr
 	}
 
 	// Release mu for the slow fsync so followers can append into the (now
@@ -717,7 +761,11 @@ func (w *Writer) leadGroupSyncLocked() error {
 		// wakeup for both the Close waiter and every SyncGroup follower.
 		w.poison(syncErr)
 		metrics.IncCounter("store.wal.SyncGroup.errors", 1)
-		return syncErr
+		// The wrapped CLASS, not the bare cause: poison has just stored it into
+		// syncErr, and returning err here would hand the caller that POISONED the
+		// writer a less identifiable error than every other caller gets from now on
+		// (rmp #2306, see [ErrDurabilityFailed]).
+		return w.syncErr
 	}
 	// Publish: the fsync made every byte up to `flushed` durable. Advance
 	// durableSize to the snapshot we actually flushed (not the live
@@ -776,7 +824,11 @@ func (w *Writer) poison(err error) {
 	// further will be written through this writer.
 	w.bw.Reset(w.f)
 	w.appendedSize = w.durableSize
-	w.syncErr = err
+	// Wrapped in [ErrDurabilityFailed] so every caller — its own committer and every
+	// group member woken below — can identify the class without matching on an I/O
+	// error's text, and can tell it from a retriable serialization conflict. The
+	// cause stays reachable through errors.Unwrap.
+	w.syncErr = fmt.Errorf("%w: %w", ErrDurabilityFailed, err)
 	// Wake every group-commit waiter so each observes the sticky syncErr and
 	// fails its own commit: the un-synced suffix (every group member's frames
 	// and OpCommit markers) was just discarded, so no member may believe it
@@ -1006,7 +1058,11 @@ func (w *Writer) TruncatePrefix(upTo int64) (int64, error) {
 	if err := w.bw.Flush(); err != nil {
 		w.poison(err)
 		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
-		return 0, err
+		// The wrapped CLASS, not the bare cause: poison has just stored it into
+		// syncErr, and returning err here would hand the caller that POISONED the
+		// writer a less identifiable error than every other caller gets from now on
+		// (rmp #2306, see [ErrDurabilityFailed]).
+		return 0, w.syncErr
 	}
 
 	end := w.appendedSize // == durableSize after the flush under the quiesce boundary
@@ -1100,7 +1156,9 @@ func (w *Writer) TruncatePrefix(upTo int64) (int64, error) {
 // closed by the eventual [Writer.Close].
 func (w *Writer) poisonAfterRename(err error) {
 	w.syncFailed.Add(1)
-	w.syncErr = err
+	// Same class as [Writer.poison]'s: the writer is dead and no retry helps. See
+	// [ErrDurabilityFailed].
+	w.syncErr = fmt.Errorf("%w: %w", ErrDurabilityFailed, err)
 	if w.groupCond != nil {
 		w.groupCond.Broadcast()
 	}

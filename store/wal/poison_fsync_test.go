@@ -88,6 +88,18 @@ func TestPoison_TruncationIsDurable(t *testing.T) {
 	if !errors.Is(syncErr, testfs.ErrSyncFailed) {
 		t.Fatalf("Sync tx2: got %v, want ErrSyncFailed", syncErr)
 	}
+	// The poison error carries its CLASS as well as its cause (rmp #2306). Both
+	// halves matter: the class is how a caller — and the Bolt boundary — tells "the
+	// storage substrate failed, retrying cannot help" from a retriable serialization
+	// conflict, and the cause is how an operator finds out which device misbehaved.
+	// Asserting them together here is what proves the class is attached on the REAL
+	// path rather than only where a test constructs one.
+	if !errors.Is(syncErr, wal.ErrDurabilityFailed) {
+		t.Fatalf("Sync tx2 = %v, which is not errors.Is(ErrDurabilityFailed). A caller "+
+			"cannot identify a durability fail-stop, so the Bolt boundary cannot keep it "+
+			"out of the retriable family and a managed transaction would spin on a dead "+
+			"writer (rmp #2306).", syncErr)
+	}
 
 	// poison() must have called Sync at least once after the failed
 	// fsync attempt (the post-truncation durability fsync).

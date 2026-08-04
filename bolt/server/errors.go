@@ -15,6 +15,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
+	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // FailureCode returns the Neo4j-style dot-delimited error code for err.
@@ -112,6 +113,31 @@ func FailureCode(err error) string {
 	// code is Neo4j's official per-transaction resource-budget code.
 	if errors.Is(err, txn.ErrTransactionTooLarge) {
 		return "Neo.ClientError.General.TransactionOutOfMemoryError"
+	}
+
+	// A DURABILITY failure ([wal.ErrDurabilityFailed], rmp #2306): the write-ahead
+	// log could not be made durable, the un-synced suffix was discarded, and the
+	// writer is poisoned. It is the exact OPPOSITE of the conflict below and must not
+	// be confused with it: retrying cannot help, because the handle is dead and the
+	// next attempt fails the same way.
+	//
+	// Tested BEFORE the conflict so a poisoned commit can never be misread as
+	// retriable if the two ever appear wrapped together.
+	//
+	// # Why DatabaseError and not TransientError
+	//
+	// The classification is what the driver's retry decision turns on:
+	// neo4j-go-driver's IsRetriableTransient tests `classification ==
+	// "TransientError"` (github.com/neo4j/neo4j-go-driver/v5 v5.28.4,
+	// neo4j/db/errors.go), so a DatabaseError is never retried — which is the required
+	// behaviour here. The code stays the generic General.UnknownError rather than a
+	// more descriptive one because a better candidate would have to be verified
+	// against Neo4j's own Status.java taxonomy, and this task did not read it; naming
+	// an unverified code would be worse than a generic one that classifies correctly.
+	// TestFailureCode_DurabilityFailureIsNotRetriedByTheRealDriver asks the driver
+	// itself rather than asserting the classification.
+	if errors.Is(err, wal.ErrDurabilityFailed) {
+		return "Neo.DatabaseError.General.UnknownError"
 	}
 
 	// An MVCC write-write conflict ([mvcc.ErrSerializationConflict], rmp #2300):
