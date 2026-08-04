@@ -2528,3 +2528,56 @@ secondary-index publish (`e69d1974`), deferred label-index removal (`a00cfae8`),
 these gates. Its AC3 is fully satisfied for three of them; for the deferred removal's
 BARRIER-path half it is unsatisfiable until rmp #2304 removes the barrier, which
 `graph/lpg/mvcc_index_ordering_test.go` records.
+
+Incrementally synced at commit `525e209a` (2026-08-04, task **rmp #2320**, sprint 334 — the
+write path CARRIES its transaction, and the ordinary write path moves to the SHARED
+bracket). +9 nodes: `Commit` `525e209a`; `Task` 2320; three `Type`s (`mvcc.Tx` in
+`graph/mvcc/tx.go`, `lpg.WriteView` in `graph/lpg/writeview.go`, `adjlist.Writer` in
+`graph/adjlist/writer.go`); four `Finding`s
+(`undo-refused-by-doomed-test-2320`, `remove-edge-by-handle-ambient-resolution-2320`,
+`view-plus-unversioned-read-is-not-atomic-2320`,
+`self-conflict-from-contiguous-frontier-2320`, all status `FIXED`); one `Perf`
+(`mvcc-write-scaling-2320`). +14 edges: 3 `CONTAINS` (package→type), 8 `TOUCHES`
+(commit→`mvcc`/`lpg`/`adjlist`/`cypher`/`txn` packages and the three new types),
+4 `FIXES` (commit→finding), 1 `MEASURES` (commit→perf), 1 `IMPLEMENTS` (commit→task),
+1 `CONTAINS` (sprint 334→task 2320).
+
+**The shape, cited.** Memgraph at commit `572d5b4311a279de550522344a6f10d352d11c48`
+(branch `master`, read 2026-08-03) uses BOTH halves and so does GoGraph: an ACCESSOR
+holding the transaction (`memgraph::storage::Accessor`'s `Transaction transaction_`,
+`src/storage/v2/storage.hpp`, exposing `virtual VertexAccessor CreateVertex() = 0`) and an
+explicit PARAMETER in the storage primitives (`PrepareForWrite(Transaction *, TObj *)` and
+`CreateAndLinkDelta(Transaction *, TObj *, Args &&...)` with
+`transaction->EnsureCommitInfoExists()`, `src/storage/v2/mvcc.hpp`). `mvcc.Tx` is the
+parameter; `lpg.WriteView` and `adjlist.Writer` are the accessors. Embedding `*Graph` in
+`WriteView` was considered and REJECTED: zero call-site churn, but it exposes the whole
+graph through a value whose responsibility is one transaction's writes, and a mutator added
+to `Graph` and not to `WriteView` would fall through to the ambient path silently.
+
+**`lpg.Graph.View` is now the SCHEMA barrier and nothing more.** With ordinary writes on the
+shared hold, `View` plus an unversioned accessor gives a reader NO data isolation — 7040 to
+20 011 partial-transaction observations out of ~11 M reads, against ZERO out of 6 488 034
+snapshot reads. A caller needing a consistent view of DATA takes a snapshot
+(`BeginRead`/`ReadAt`). Both halves are pinned, the second by a NEGATIVE CONTROL
+(`txn.TestIsolation_ViewWithUnversionedReadIsNotAtomic`), so the relocation of the
+guarantee cannot drift back unnoticed. The three remaining `View` callers were each
+assessed and documented in the method's godoc: the checkpointer rests on
+`RunUnderCommitLock`'s in-flight drain (verified — both write paths sit inside that window
+for their whole apply), the statistics build is approximate by contract, and the constraint
+pre-validation scan is backstopped by post-registration enforcement.
+
+**New observability:** `lpg.Graph.AmbientVersionResolutions` counts versions that resolved
+their transaction through the graph-wide slot instead of carrying it. It is free on the
+threaded path — only the ambient branch increments — so "zero ambient resolutions across
+the write surface" is a gate rather than a claim, and all four new gates were verified to
+FAIL against a deliberately bypassed build.
+
+**A decoy-based gate at the Cypher level was written and DISCARDED**: it passed against the
+bypassed build, because the engine's own bracket publishes to the ambient slot AFTER any
+decoy opened before the statement, so the resolution lands on the right transaction by
+accident. The interleaving is only reproducible one layer down, in `lpg` —
+`TestWriteView_SecondWriteDoesNotAdoptAnOverlappingTransactionsRecord`.
+
+**Gate ratcheted:** `bench/mvccwrite` `walWriteScalingFloor` 0.90 → `writeScalingTarget`
+(3.0). The two store-LESS floors stay put: that arm's outermost lock is
+`cypher.Engine.writeMu`, which rmp #2306 owns.
