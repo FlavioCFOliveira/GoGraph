@@ -198,14 +198,17 @@ func TestMVCCReclaim_BoundedUnderChurn(t *testing.T) {
 			t.Fatalf("write %d: %v", i, err)
 		}
 	}
-	// The ceiling is one sweep's worth of debt plus whatever the sweep in
-	// progress had not yet charged. Two thresholds is a generous statement of
-	// that and still an order of magnitude below the unbounded behaviour.
-	if got := g.VersionCount(); got > 2*reclaimThreshold {
+	// The INSTANTANEOUS ceiling since rmp #2308: the sweep runs on a background
+	// vacuum, so what bounds a burst is the debt at which a committer waits for
+	// it, plus one threshold for what was charged while the relieving pass ran.
+	if limit := int64(reclaimDebtCeiling + reclaimThreshold); g.VersionCount() > limit {
 		t.Fatalf("after %d modifications the substrate holds %d versions, want at most %d: "+
 			"reclamation is not being driven and the memory is unbounded",
-			churn, got, 2*reclaimThreshold)
+			churn, g.VersionCount(), limit)
 	}
+	// And it settles back to the churn bound on its own, with nothing further
+	// written and no reclaimer called.
+	waitWithinBound(t, g)
 	// And it must go to zero when asked, with no reader holding it back.
 	if err := g.ApplyAtomically(func() error { g.ReclaimNow(); return nil }); err != nil {
 		t.Fatalf("ReclaimNow: %v", err)

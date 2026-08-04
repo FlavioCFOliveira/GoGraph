@@ -21,6 +21,9 @@ import (
 // exposed and P4c closes.
 func TestNodeExistence_IsVersionedInBothDirections(t *testing.T) {
 	g := mvccGraph(t)
+	// A reader must actually EXIST for the past this test reads through snapAt
+	// to be retained; see pinHorizon.
+	pinHorizon(t, g)
 	if err := g.ApplyAtomically(func() error { return g.AddNode("old") }); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -63,6 +66,9 @@ func TestNodeExistence_IsVersionedInBothDirections(t *testing.T) {
 // made the node vanish for every reader afterwards.
 func TestNodeExistence_RemoveThenReviveInOneTransaction(t *testing.T) {
 	g := mvccGraph(t)
+	// A reader must actually EXIST for the past this test reads through snapAt
+	// to be retained; see pinHorizon.
+	pinHorizon(t, g)
 	if err := g.ApplyAtomically(func() error { return g.AddNode("a") }); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -84,6 +90,9 @@ func TestNodeExistence_RemoveThenReviveInOneTransaction(t *testing.T) {
 // superset-good / missing-fatal asymmetry.
 func TestLabelIndex_RemovalIsDeferredAndVisibleToOlderReaders(t *testing.T) {
 	g := mvccGraph(t)
+	// A reader must actually EXIST for the past this test reads through snapAt
+	// to be retained; see pinHorizon.
+	pinHorizon(t, g)
 	if err := g.ApplyAtomically(func() error {
 		if err := g.AddNode("a"); err != nil {
 			return err
@@ -134,6 +143,9 @@ func TestLabelIndex_RemovalIsDeferredAndVisibleToOlderReaders(t *testing.T) {
 // scan afterwards.
 func TestLabelIndex_DeferredRemovalIsCancelledByReAdd(t *testing.T) {
 	g := mvccGraph(t)
+	// A reader must actually EXIST for the past this test reads through snapAt
+	// to be retained; see pinHorizon.
+	pinHorizon(t, g)
 	if err := g.ApplyAtomically(func() error {
 		if err := g.AddNode("a"); err != nil {
 			return err

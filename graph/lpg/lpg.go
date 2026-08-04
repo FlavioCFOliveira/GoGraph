@@ -680,18 +680,19 @@ type Graph[N comparable, W any] struct {
 	// A POINTER, not a value: the horizon is 64 slots padded to a cache line
 	// each, so embedding it would put 8 KiB inside every Graph.
 	horizon *mvcc.Horizon
-	// reclaimDebt counts versions created since the last reclamation pass, so
-	// the pass runs on a bounded amount of churn rather than on every commit.
-	// See [Graph.reclaimIfDue].
+	// vac is the background vacuum's control state: the demand-started,
+	// self-terminating goroutine that owns reclamation (rmp #2308). See
+	// mvcc_vacuum.go.
+	vac vacuumState
+	// reclaimDebt counts versions created since the last vacuum pass began, so
+	// the vacuum is woken on a bounded amount of churn rather than on every
+	// commit. See [Graph.chargeReclaimDebt].
 	reclaimDebt atomic.Int64
-	// sweeping serialises reclamation against itself. The reclaimers are
-	// mutually excluded from WRITERS by the per-shard locks they and the write
-	// path both take, and safe against readers by the watermark argument — but
-	// two sweeps at once would race on the same chains, so exactly one runs.
-	sweeping atomic.Bool
-	// idleTicks paces the opportunistic sweep a read makes; see
-	// [Graph.ReclaimIdle].
-	idleTicks atomic.Uint64
+	// Reclamation is serialised against itself by [vacuumState.sweeping], which
+	// admits one sweeper. The reclaimers are mutually excluded from WRITERS by the
+	// per-shard locks they and the write path both take, and safe against readers
+	// by the watermark argument — but two sweeps at once would race on the same
+	// chains, so exactly one runs. See mvcc_vacuum.go.
 	// nodeLifeShards version node EXISTENCE — when each node was created and
 	// when it was removed — so a reader knows which nodes it may see at all,
 	// not merely what they contain. nodeLifeActive is the lock-free gate. See
@@ -1504,6 +1505,11 @@ func New[N comparable, W any](cfg adjlist.Config) *Graph[N, W] {
 	// (newEdgePropColsWithValue) and edge_property.go (AddEdgeLabeledWithProperty).
 	g.adj.SetAuxFactory(newEdgePropColsAux)
 	g.barrier.init()
+	// The vacuum's channels. The goroutine itself is NOT started here: it is
+	// demand-started by the first write whose debt is due, and it terminates on
+	// its own, so a graph that is only read never spawns one. See
+	// mvcc_vacuum.go.
+	g.vac.init()
 	// MVCC is ARMED by default (rmp #2288). Every store a read touches carries
 	// version chains, every write allocates one shared commit record for them,
 	// and the reclamation driver keeps the memory bounded. Turn it off with
@@ -2533,11 +2539,19 @@ func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, tx *writeCtx) error {
 	bag.add(lid)
 	sh.m[id] = bag
 	sh.mu.Unlock()
-	g.nodeIdx.Add(uint32(lid), id)
-	// Withdraw any pending removal for this entry. Re-attaching a label the
-	// same statement stripped is what a ROLLBACK does, and a surviving deferred
-	// removal would delete the restored entry at the next sweep.
+	// Withdraw any pending removal for this entry BEFORE adding it, not after.
+	// Re-attaching a label the same statement stripped is what a ROLLBACK does,
+	// and a surviving deferred removal would delete the restored entry at the
+	// next sweep.
+	//
+	// The ORDER is load-bearing against the background vacuum (rmp #2308).
+	// Cancel-then-add makes this path and [Graph.applyDeferredIndexRemovals]
+	// mutually exclusive on idxDeferred.mu in both interleavings, so the bitmap
+	// can only ever end up a superset of the truth. Add-then-cancel lost the
+	// entry outright when the sweep landed in between; the failure is spelled out
+	// at applyDeferredIndexRemovals.
 	g.cancelDeferredIndexRemoval(uint32(lid), id)
+	g.nodeIdx.Add(uint32(lid), id)
 	return nil
 }
 

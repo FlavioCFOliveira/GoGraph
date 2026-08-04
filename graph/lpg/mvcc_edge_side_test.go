@@ -59,6 +59,9 @@ func hasName(names []string, want string) bool {
 // stops the test quietly exercising the adjacency slot column instead.
 func TestEdgeOverflowVersion_AddAndRemove(t *testing.T) {
 	g, srcID, dstID := sideGraph(t)
+	// A reader must actually EXIST for the past this test reads through snapAt
+	// to be retained; see pinHorizon.
+	pinHorizon(t, g)
 	if err := g.ApplyAtomically(func() error { g.SetEdgeLabel("a", "b", "KNOWS"); return nil }); err != nil {
 		t.Fatalf("first type: %v", err)
 	}
@@ -99,6 +102,9 @@ func TestEdgeOverflowVersion_AddAndRemove(t *testing.T) {
 // the pair rather than of each in isolation.
 func TestEdgeHandleVersion_LabelsAndProperties(t *testing.T) {
 	g, srcID, dstID := sideGraph(t)
+	// A reader must actually EXIST for the past this test reads through snapAt
+	// to be retained; see pinHorizon.
+	pinHorizon(t, g)
 	const handle = uint64(7)
 
 	before := g.readTS()
@@ -155,6 +161,9 @@ func TestEdgeHandleVersion_LabelsAndProperties(t *testing.T) {
 // TestEdgeInstanceVersion_LabelsAndProperties pins the two by-ordinal stores.
 func TestEdgeInstanceVersion_LabelsAndProperties(t *testing.T) {
 	g, _, _ := sideGraph(t)
+	// A reader must actually EXIST for the past this test reads through snapAt
+	// to be retained; see pinHorizon.
+	pinHorizon(t, g)
 	const idx = int64(1)
 
 	before := g.readTS()
@@ -207,6 +216,9 @@ func TestEdgeInstanceVersion_LabelsAndProperties(t *testing.T) {
 // than one for the pair.
 func TestEdgeSideVersion_SurvivesWholePairDrop(t *testing.T) {
 	g, srcID, dstID := sideGraph(t)
+	// A reader must actually EXIST for the past this test reads through snapAt
+	// to be retained; see pinHorizon.
+	pinHorizon(t, g)
 	const h1, h2 = uint64(11), uint64(12)
 	if err := g.ApplyAtomically(func() error {
 		g.SetEdgeLabelByHandle("a", "b", h1, "KNOWS")
@@ -268,4 +280,33 @@ func TestEdgeSideVersion_ReclaimReturnsToZero(t *testing.T) {
 // holding timestamps, and a registered reader would hold the watermark back and
 // mask exactly the reclamation behaviour under test. Tests that need the
 // horizon use [Graph.BeginRead].
+// snapAt fabricates a read view at ts.
+//
+// It carries a start timestamp and NO HORIZON SLOT, so reclamation neither knows
+// about it nor owes it anything: the versions it wants to see are, as far as the
+// watermark is concerned, unreachable. Pair every use with [pinHorizon]; see there.
 func snapAt(ts uint64) *Snapshot { return &Snapshot{startTS: ts} }
+
+// pinHorizon registers a real reader at the current instant for the rest of the
+// test, so nothing written after this point can be reclaimed while the test is
+// still looking at the past through [snapAt].
+//
+// # Why it became necessary at rmp #2308
+//
+// A synthetic snapshot is not a reader. Until the background vacuum existed, that
+// was harmless in a short test: the commit-path sweep only ran once the debt
+// passed [reclaimThreshold], which a test making a dozen writes never reached, so
+// nothing swept and the fabrication went unnoticed. The vacuum sweeps whenever the
+// watermark ADVANCES — and with no reader registered the watermark is simply the
+// clock, so it advances at the end of every write transaction and the pre-images
+// go immediately. Both TestEdgeOverflowVersion_AddAndRemove and
+// TestLabelIndex_RemovalIsDeferredAndVisibleToOlderReaders failed exactly that
+// way, reporting that an older reader could see a newer write.
+//
+// Reclamation was RIGHT in both cases, which is why the fix belongs in the test:
+// a test that wants the past retained has to own a reader that wants it.
+func pinHorizon[N comparable, W any](t *testing.T, g *Graph[N, W]) {
+	t.Helper()
+	s := g.BeginRead()
+	t.Cleanup(func() { g.EndRead(s) })
+}

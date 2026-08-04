@@ -1236,6 +1236,34 @@ func (e *Engine) statsCollectorOrInit() *statsCollector {
 	return e.statsCollector.Load()
 }
 
+// Close releases the background resources the engine's graph owns — currently the
+// MVCC vacuum goroutine — and waits for them to terminate. It is the [io.Closer]
+// the engine's owner calls at shutdown.
+//
+// # Why the engine has this at all (rmp #2308)
+//
+// The graph owns a goroutine now: reclamation moved off the commit path onto a
+// demand-started background vacuum. That vacuum exits on its own once there is
+// nothing left to reclaim, so an owner that never closes leaks nothing — but an
+// owner that wants the goroutine gone at a KNOWN instant had no way to say so,
+// because the engine holds the only reference to its graph. `internal/sim`'s
+// metrics oracle found the gap immediately: it certifies that a workload returns
+// to its exact goroutine baseline with zero slack, and it had no teardown to call.
+//
+// It closes the GRAPH and nothing else. The engine's own state — the plan cache,
+// the registries, the statistics collector — spawns no goroutine and needs no
+// teardown, and the durable store's pieces belong to [store.DB.Close], which the
+// embedder owns separately.
+//
+// Idempotent and safe to call concurrently with any other operation. The engine
+// stays usable afterwards; what stops is reclamation, so an owner that closes and
+// then keeps writing accumulates versions with nothing to release them.
+func (e *Engine) Close() error { return e.g.Close() }
+
+// CloseCtx is [Engine.Close] with a deadline on the join; see [lpg.Graph.CloseCtx]
+// for what the context does and does not bound.
+func (e *Engine) CloseCtx(ctx context.Context) error { return e.g.CloseCtx(ctx) }
+
 // NewEngine creates an Engine backed by g. The default built-in function
 // registry ([funcs.DefaultRegistry]) and the default plan cache capacity
 // ([DefaultPlanCacheCapacity]) are used. Use [NewEngineWithOptions] when a
@@ -2211,11 +2239,13 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 		snap = e.g.BeginRead()
 		defer e.g.EndRead(snap)
 	}
-	// Sweep unreachable versions before building. It is once per query, not per
-	// row, and it is what stops a build-then-read workload paying a side-map
-	// probe forever for history nothing can reach; see lpg.Graph.ReclaimIdle
-	// for why a reader is entitled to do this and why it does not spin.
-	e.g.ReclaimIdle()
+	// NO SWEEP HERE (rmp #2308). This used to call lpg.Graph.ReclaimIdle, which
+	// swept the version chains inline on the query's own goroutine — once per
+	// query, but still on the read path, and still O(objects carrying history).
+	// Reclamation is now the background vacuum's, and the trigger that used to
+	// live here lives at the end of the read view instead: lpg.Graph.EndRead
+	// wakes the vacuum when a departing reader lets the watermark advance. Same
+	// throttle, same convergence, none of it on the query.
 	func() {
 		op, cols, err := e.buildReadPhysical(ctx, entry, plan, params, queryReg, nil, snap)
 		if err != nil {

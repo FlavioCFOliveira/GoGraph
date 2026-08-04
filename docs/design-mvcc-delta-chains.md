@@ -197,6 +197,16 @@ equivalent in the current codebase and the largest source of unbounded-memory
 risk; it needs an explicit bound and its own metrics, per the project's
 bounded-resources mandate.
 
+> **As implemented (rmp #2308, 2026-08-04).** Reclamation is a demand-started,
+> self-terminating background vacuum, not a step on the commit path — see
+> [`design-mvcc-vacuum.md`](design-mvcc-vacuum.md). Because the sweep is
+> asynchronous there are now **two** bounds rather than one: `MVCCStats.Bound`
+> (4096, the settled bound churn returns to) and `MVCCStats.Ceiling` (16384, the
+> instantaneous bound at which a committer applies backpressure by waiting for one
+> pass). The paragraph above predicted "the largest source of unbounded-memory
+> risk" correctly: the first asynchronous build peaked at 14 589 retained records
+> against a stated bound of 8 192, which is what the ceiling exists to close.
+
 ## 6. Risks, stated up front
 
 - **This is the highest-risk change the module has attempted.** It touches the

@@ -163,7 +163,7 @@ func (t *labelTx[N, W]) commit() (uint64, error) {
 			// Charged even on the abort path: the version records exist and
 			// occupy memory whatever their commit record says. rmp #2318 tracks
 			// the fact that the reclaimer cannot yet free them.
-			t.g.reclaimDebt.Add(versions)
+			t.g.chargeReclaimDebt(versions)
 		}
 		return 0, err
 	}
@@ -179,7 +179,7 @@ func (t *labelTx[N, W]) commit() (uint64, error) {
 	// Before rmp #2301 the count lived on the per-graph stamp and a threaded
 	// transaction's versions were charged to nothing at all — the same hole
 	// rmp #2289 closed for direct writes.
-	t.g.reclaimDebt.Add(versions)
+	t.g.chargeReclaimDebt(versions)
 	return ts, nil
 }
 
@@ -198,7 +198,7 @@ func (t *labelTx[N, W]) abort() {
 		return
 	}
 	info.Abort()
-	t.g.reclaimDebt.Add(versions)
+	t.g.chargeReclaimDebt(versions)
 }
 
 // deltaStamp resolves how a new delta records its visibility, in three cases

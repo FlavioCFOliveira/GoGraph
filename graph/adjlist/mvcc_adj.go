@@ -288,8 +288,22 @@ func (a *AdjList[N, W]) versionStamp(tx mvcc.Tx) (*mvcc.CommitInfo, uint64) {
 // that sees nil stops at the current entry, which is the version it should get
 // anyway.
 //
-// Safe for concurrent use with readers. Not safe to run concurrently with
-// itself or with writers on the same AdjList.
+// # Why it IS safe against a concurrent writer (rmp #2308)
+//
+// This said "not safe to run concurrently with itself or with writers", and the
+// second half was pessimistic rather than true. It takes `s.mu.Lock()` on each
+// shard, and [AdjList.storeEntry] — the only writer of an entry's version chain,
+// through [AdjList.linkVersion] — is called under that same lock from every one
+// of its call sites. A version chain never leaves the shard that owns its slot,
+// so severing one under the shard lock excludes the only writer that could be
+// touching it. The barrier the caller used to hold added nothing here.
+//
+// Verified by reading the call sites rather than by trusting this comment, which
+// is how the correction was found; the sweep that relies on it is
+// [lpg.Graph.sweepUnit].
+//
+// Safe for concurrent use with readers and with writers. NOT safe to run
+// concurrently with itself: two sweeps would walk and sever the same chain.
 func (a *AdjList[N, W]) Reclaim(watermark uint64) int {
 	if watermark == 0 || a.versionActive.Load() == 0 {
 		return 0

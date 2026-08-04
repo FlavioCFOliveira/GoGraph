@@ -136,8 +136,38 @@ func (g *Graph[N, W]) cancelDeferredIndexRemoval(lid uint32, id graph.NodeID) {
 // applyDeferredIndexRemovals removes the entries the watermark has passed, and
 // returns how many it applied.
 //
-// Called from the reclamation sweep under the same contract as the other
-// reclaimers.
+// Called from the reclamation sweep ([Graph.sweepUnit]) and from
+// [Graph.ReclaimNow].
+//
+// # Why the bitmap removal happens UNDER the lock (rmp #2308)
+//
+// This is the one reclaimer that did not exclude a concurrent writer, and the
+// consequence was the exact failure the candidate-set discipline says nothing can
+// recover from — a node silently absent from a label scan, forever:
+//
+//	T1 removes label L from n, commits at 10; the removal is deferred, stamped 10
+//	the watermark reaches 10
+//	the sweep collects {L,n} as ready, deletes it from pending, RELEASES the lock
+//	T2 adds L back to n:  nodeIdx.Add(L,n) succeeds, then its cancel finds
+//	                      nothing pending to withdraw — the sweep already took it
+//	the sweep calls nodeIdx.Remove(L,n)
+//	n now carries L and is NOT in L's bitmap. Every later MATCH (n:L) misses it.
+//
+// It could not surface while the sweep ran under the visibility barrier, which
+// excluded T2 by construction. The background vacuum has no barrier, so the
+// exclusion has to be real: the bitmap removals now happen while
+// `idxDeferred.mu` is still held, and [Graph.setNodeLabelInfo] cancels BEFORE it
+// adds. That makes the two paths mutually exclusive in both interleavings —
+// a writer that cancels first removes the key so the sweep never collects it, and
+// a writer that arrives second blocks on the lock and re-adds the entry after the
+// sweep has removed it. Either way the bitmap ends up a SUPERSET of the truth,
+// which is the direction the discipline tolerates.
+//
+// Holding the lock across the removals costs nothing that matters: the work is
+// bounded by the ready set, the only other holders of this lock are the deferral
+// and cancellation paths, and neither is on a scan.
+//
+// Pinned by TestDeferredIndexRemoval_ConcurrentReaddIsNotLost.
 func (g *Graph[N, W]) applyDeferredIndexRemovals(watermark uint64) int {
 	if g.idxPendingActive.Load() == 0 {
 		return 0
@@ -155,11 +185,14 @@ func (g *Graph[N, W]) applyDeferredIndexRemovals(watermark uint64) int {
 	if len(g.idxDeferred.pending) == 0 {
 		g.idxDeferred.pending = nil
 	}
-	g.idxDeferred.mu.Unlock()
-
+	// Under the lock. See the comment above for the lost row this closes; the
+	// lock order is idxDeferred.mu then the index's own lock, which is the order
+	// the label-add path takes them in too.
 	for _, k := range ready {
 		g.nodeIdx.Remove(k.lid, k.id)
 	}
+	g.idxDeferred.mu.Unlock()
+
 	if n := len(ready); n > 0 {
 		g.idxPendingActive.Add(-int64(n))
 		return n

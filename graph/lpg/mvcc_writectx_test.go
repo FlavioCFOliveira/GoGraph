@@ -450,6 +450,10 @@ func TestWriteCtx_DoomedTransactionRefusesEveryFurtherWrite(t *testing.T) {
 func TestWriteCtx_RecycledStateIsNeverSharedAcrossTransactions(t *testing.T) {
 	t.Parallel()
 	g := New[int, int64](adjlist.Config{Directed: true})
+	// The visibility assertions below read the past through fabricated snapshots,
+	// which reclamation owes nothing to. A real reader has to hold the past open;
+	// see pinHorizon.
+	pinHorizon(t, g)
 
 	const brackets = 64
 	ids := make(map[uint64]bool, brackets)

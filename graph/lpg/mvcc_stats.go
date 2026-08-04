@@ -74,9 +74,20 @@ type MVCCStats struct {
 	// responsible for.
 	Total int64
 	// Bound is the number of records that may accumulate from CHURN between
-	// sweeps. Total above it means a reader is holding versions back, which is
-	// legitimate and is what the two fields below explain.
+	// sweeps in the SETTLED state — that is, the threshold at which the vacuum is
+	// woken. Total above it means either a reader is holding versions back, which
+	// is legitimate and is what the two fields below explain, or the vacuum has
+	// not yet caught up with a burst, which [MVCCStats.Ceiling] bounds.
 	Bound int64
+	// Ceiling is the instantaneous bound: the debt at which a committer stops
+	// merely signalling the vacuum and waits for it.
+	//
+	// It exists because the sweep is ASYNCHRONOUS (rmp #2308). Bound alone was a
+	// true instantaneous bound only while the committer swept before returning; a
+	// background sweeper can be outrun, so the module states both numbers — the
+	// one churn settles to, and the one it can never exceed for longer than a
+	// pass. See [reclaimDebtCeiling].
+	Ceiling int64
 	// Watermark is the oldest start timestamp among active readers, or zero when
 	// reclamation is suspended.
 	Watermark uint64
@@ -116,9 +127,23 @@ func (s *MVCCStats) OldestReaderAge() uint64 {
 	return s.Now - s.Watermark
 }
 
-// WithinBound reports whether version memory is at or below the churn bound —
-// that is, whether nothing is being held back by a reader.
+// WithinBound reports whether version memory is at or below the SETTLED churn
+// bound — that is, whether nothing is being held back by a reader and the vacuum
+// has caught up.
+//
+// Because the sweep is asynchronous it is a property of the settled state, not an
+// invariant of every instant: a caller sampling it in the middle of a write burst
+// should expect it to be false and [MVCCStats.WithinCeiling] to be true.
 func (s *MVCCStats) WithinBound() bool { return s.Total <= s.Bound }
+
+// WithinCeiling reports whether version memory is at or below the instantaneous
+// bound, counting what a reader is legitimately holding back.
+//
+// Unlike [MVCCStats.WithinBound] this is meant to hold at every instant of a
+// churn-only workload. A false value with no active reader is the bounded-resources
+// mandate being violated; a false value with an old reader is that reader's cost,
+// which [MVCCStats.OldestReaderAge] attributes.
+func (s *MVCCStats) WithinCeiling() bool { return s.Total <= s.Ceiling }
 
 // MVCCStats returns the current state of the versioning substrate.
 //
@@ -133,6 +158,7 @@ func (g *Graph[N, W]) MVCCStats() MVCCStats {
 		IndexRemovalBacklog: g.idxPendingActive.Load(),
 		AdjConflictStamps:   int64(g.adjVer.len()),
 		Bound:               reclaimThreshold,
+		Ceiling:             reclaimDebtCeiling,
 		Now:                 g.mvccClock.ReadTS(),
 		ActiveReaders:       g.horizon.Active(),
 		UnregisteredReaders: g.horizon.Unregistered(),
@@ -160,6 +186,7 @@ func (g *Graph[N, W]) publishMVCCMetrics() {
 	metrics.SetGauge("lpg.mvcc.adjacency_conflict_stamps", float64(s.AdjConflictStamps))
 	metrics.SetGauge("lpg.mvcc.versions.total", float64(s.Total))
 	metrics.SetGauge("lpg.mvcc.versions.bound", float64(s.Bound))
+	metrics.SetGauge("lpg.mvcc.versions.ceiling", float64(s.Ceiling))
 	metrics.SetGauge("lpg.mvcc.watermark", float64(s.Watermark))
 	metrics.SetGauge("lpg.mvcc.oldest_reader_age", float64(s.OldestReaderAge()))
 	metrics.SetGauge("lpg.mvcc.in_flight_commits", float64(s.InFlightCommits))

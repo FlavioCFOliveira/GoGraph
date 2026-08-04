@@ -318,7 +318,7 @@ func (g *Graph[N, W]) endWrite(w *writeCtx) {
 		// Charged even on the abort path: the version records exist and occupy
 		// memory whatever their commit record says. rmp #2318 tracks the fact that
 		// the reclaimer cannot yet free them eagerly.
-		g.reclaimDebt.Add(created)
+		g.chargeReclaimDebt(created)
 		return
 	}
 	// Allocate, store into the shared record, THEN publish. A reader must never
@@ -327,8 +327,11 @@ func (g *Graph[N, W]) endWrite(w *writeCtx) {
 	ts := g.mvccClock.NextCommitTS()
 	info.Commit(ts)
 	g.mvccClock.PublishCommitTS(ts)
-	g.reclaimDebt.Add(created)
-	g.reclaimIfDue()
+	// Accounting only. The sweep itself moved off this path at rmp #2308: a
+	// committer charges its versions and, once per [reclaimThreshold], wakes the
+	// background vacuum. It no longer sweeps, so a commit's cost no longer
+	// depends on how much garbage other transactions left behind.
+	g.chargeReclaimDebt(created)
 }
 
 // releaseWriterSnapshot closes write transaction w's read view, returns its
@@ -360,6 +363,22 @@ func (g *Graph[N, W]) releaseWriterSnapshot(w *writeCtx) {
 	g.writeTx.CompareAndSwap(w, nil)
 	g.horizon.Leave(w.snap.slot)
 	g.releaseWriteCtx(w)
+	// NO DRAIN WAKE HERE, deliberately (rmp #2308). A writer holds the horizon back
+	// exactly as a reader does (rmp #2299), so its departure does advance the
+	// watermark — but the versions it made were already charged to the reclamation
+	// debt, so the CHURN signal already accounts for them and a second signal here
+	// would only make the sweep run sooner, not more completely.
+	//
+	// Sooner is not free: with no reader registered the watermark is the clock
+	// itself, so a wake on every write transaction's release means one sweep pass
+	// per COMMIT rather than one per [reclaimThreshold] versions. That is the
+	// amortisation the debt counter exists to provide, and paying it on a
+	// background goroutine instead of on the committer does not make it cost
+	// nothing — it spends a core the write path wants.
+	//
+	// The drain wake belongs where the churn signal cannot reach: a READER's
+	// departure, which releases versions nothing has charged. See
+	// [Graph.EndRead].
 }
 
 // EnableMVCC arms the whole versioning substrate: node labels, node properties
