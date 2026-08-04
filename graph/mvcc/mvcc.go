@@ -168,10 +168,13 @@ func (c *Clock) PublishCommitTS(ts uint64) { c.finishCommitTS(ts) }
 // obligation is why it is a named operation rather than an internal detail of
 // [Clock.PublishCommitTS].
 //
-// Every allocation in the module publishes today (graph/lpg/mvcc_write.go:91,
-// graph/lpg/mvcc_txn.go:133,171, graph/mvcc/stamp.go:148,163); the
-// allocate-then-fail path arrives with write-write conflict detection
-// (rmp #2300), which is what will call this.
+// Every allocation in the module still publishes, and rmp #2300 did NOT change
+// that: a transaction refused by write-write conflict detection aborts WITHOUT
+// allocating a commit timestamp at all ([lpg.Graph.endWrite] marks the record
+// [AbortedTS] and returns), so there is nothing to abandon. This remains the
+// operation an allocate-THEN-fail path would owe the frontier, and it has no
+// caller — which is the honest state to record rather than deleting it and
+// leaving the obligation undocumented for whoever next writes such a path.
 func (c *Clock) AbandonCommitTS(ts uint64) { c.finishCommitTS(ts) }
 
 // finishCommitTS marks ts finished and republishes the frontier.

@@ -56,12 +56,14 @@ package mvccwrite
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
 
 // writeScalingFloor is the minimum ratio [TestWriteScalingGate] accepts:
@@ -294,9 +296,26 @@ func measureSerialisationRatio(tb testing.TB, writers, totalOps int, label strin
 
 // mustRunArm is [runArm] with the error and the empty-arm case turned into test
 // failures, since neither is a measurement.
+//
+// A SERIALIZATION CONFLICT is called out by name (rmp #2300 AC5). Every gate in
+// this file drives [commit], which gives each writer a disjoint 2^40 id space, so
+// two writers never touch the same object and a first-updater-wins refusal here is
+// not a legitimate outcome — it means conflict detection is refusing writers that do
+// not conflict, which would make the whole measurement meaningless as well as being
+// a defect in its own right. Reported as itself rather than as a generic "arm
+// failed", so the message says what broke.
 func mustRunArm(tb testing.TB, writers, perWriter int, unit func(writer, i int) error) arm {
 	tb.Helper()
 	got, err := runArm(writers, perWriter, unit)
+	if errors.Is(err, mvcc.ErrSerializationConflict) {
+		tb.Fatalf("%d-writer arm reported a SERIALIZATION CONFLICT on a DISJOINT key "+
+			"space: %v.\nEach writer owns 2^40 ids of its own (see commit), so no two "+
+			"writers touch the same object and no conflict is possible between them. "+
+			"Either the conflict predicate is refusing disjoint writers, or a writer is "+
+			"colliding with its OWN earlier transaction because the commit frontier has "+
+			"not advanced past it (rmp #2298) — the second is legitimate MVCC and means "+
+			"this gate needs a retry, not a softened floor.", writers, err)
+	}
 	if err != nil {
 		tb.Fatalf("%d-writer arm: %v", writers, err)
 	}

@@ -100,8 +100,32 @@ func (c *Conflict) ConcurrentWriter() bool { return c.HeadTS >= TxIDBase }
 //
 // A headTS of zero means the object has no recorded version — nothing has
 // written it since the last reclamation — and never conflicts.
+//
+// # An ABORTED head never conflicts either (rmp #2300)
+//
+// [AbortedTS] names a transaction whose changes are permanently invisible to every
+// reader, so displacing its version cannot lose anybody's update — there is no
+// update to lose. It is the one place where [Conflicts] is NOT the plain negation
+// of [Visible]: an aborted version must stay INVISIBLE (a reader still has to undo
+// it to reach the pre-abort value, so it may not be treated as committed) while
+// being freely OVERWRITABLE.
+//
+// Without this the exemption is not an optimisation but a liveness bug, and it was
+// measured the moment abort was wired: AbortedTS sits above [TxIDBase], so
+// `!Visible` is true for it forever, and the FIRST transaction to abort on an object
+// made that object permanently unwritable. Every later writer was refused, retried,
+// and was refused again — examples/27_concurrent_txn's writers exhausted a
+// nine-attempt retry chain on their first aborted account.
+//
+// Memgraph does not need the exemption because its abort path UNLINKS the
+// transaction's deltas from the chains it touched
+// (`InMemoryStorage::InMemoryAccessor::Abort`, src/storage/v2/inmemory/storage.cpp,
+// read at 572d5b4311a279de550522344a6f10d352d11c48), so no aborted delta is ever at
+// a head to be tested. GoGraph keeps the version and exempts it instead; unlinking
+// is rmp #2318's, and when it lands this branch becomes unreachable rather than
+// wrong.
 func Conflicts(headTS, startTS, txID uint64) bool {
-	if headTS == 0 {
+	if headTS == 0 || headTS == AbortedTS {
 		return false
 	}
 	return !Visible(headTS, startTS, txID)

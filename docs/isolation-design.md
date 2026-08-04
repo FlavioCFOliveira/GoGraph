@@ -90,6 +90,24 @@ We therefore target SI.
 > equivalent to serialisable by construction — it is equivalent to serialisable
 > because the conflicting transaction is REFUSED rather than serialised behind a lock.
 >
+> **A refused transaction ABORTS, and that is not the same as a rollback.** Its commit
+> record is marked `mvcc.AbortedTS`, so every reader undoes its versions forever and
+> lands on the pre-transaction value. Until rmp #2300 every bracket published its
+> record unconditionally, including a refused one, which was an ATOMICITY violation
+> measured at the substrate level: a transaction that wrote `n.v = 1`, was then
+> refused, and returned `mvcc.ErrSerializationConflict` left `n.v = 1` visible to a
+> fresh snapshot. It had not surfaced because the Cypher engine's undo log physically
+> restores the stored value — and that undo log is a `cypher` structure, absent for a
+> caller using `lpg.Graph.ApplyVersioned` directly, which the durable store's apply
+> is. Pinned by `lpg.TestAbort_ConflictedTransactionIsNeverVisible` with a negative
+> control (`TestAbort_ASuccessfulTransactionStillPublishes`) so the abort branch
+> cannot start firing for transactions that were never refused.
+>
+> The aborted versions are **not yet reclaimable** — `mvcc.AbortedTS` sits above
+> `mvcc.TxIDBase`, so the reclaimer's watermark test can never free the chain. That
+> is rmp #2318, and `lpg.TestAbort_VersionsAreNotYetReclaimable_2318` pins the current
+> behaviour so closing it has something to invert.
+>
 > **A client must retry.** This is the half that is new to callers. A conflict can
 > arise even between transactions on DISJOINT objects, because a transaction's start
 > timestamp is the CONTIGUOUS commit frontier (rmp #2298): under N concurrent writers

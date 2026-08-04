@@ -48,6 +48,25 @@ package lpg
 // past the point where anything needs it, and it would make the eager-reclaim
 // signal ([mvcc.AbortedTS]) mean two different things. Pinned by
 // TestLabelTx_ComposesWithPhysicalUndo.
+//
+// # Rollback is not ABORT (rmp #2300)
+//
+// The paragraph above is about a statement that ROLLED BACK: its inverses have run,
+// so the stored value is already right and the chain nets out either way. It does
+// NOT extend to a transaction that ABORTED — one refused by write-write conflict
+// detection — and treating the two alike was an atomicity violation, measured at
+// the substrate level:
+//
+//	transaction writes n.v = 1
+//	transaction hits a conflict on its second write, which is refused
+//	the bracket returns mvcc.ErrSerializationConflict
+//	a FRESH SNAPSHOT then reads n.v = 1
+//
+// The caller was told the transaction failed and half of it was visible. It had not
+// surfaced because the undo log is what rescues the Cypher path — and the undo log
+// is a CYPHER structure, which a caller using [Graph.ApplyVersioned] directly (the
+// durable store's apply among them) does not have. [Graph.endWrite] therefore
+// ABORTS a doomed transaction instead of publishing it. See there.
 
 // beginWrite opens the stamping window for one write transaction and RETURNS
 // the state that transaction owns, or nil when the substrate is disarmed.
@@ -248,7 +267,39 @@ func (g *Graph[N, W]) AmbientWriteTx() WriteTx { return WriteTx{w: g.writeTx.Loa
 // [mvcc.WriteStamp.EndFor] for what closing the graph's slot instead cost once
 // two brackets could overlap.
 //
-// It publishes on the rollback path too; see the file comment for why.
+// It publishes on the ROLLBACK path too; see the file comment for why.
+//
+// # It does NOT publish on the ABORT path (rmp #2300)
+//
+// A transaction that hit a write-write conflict is ABORTED rather than published:
+// its record is marked [mvcc.AbortedTS], so every reader undoes its versions
+// forever and the pre-transaction value is what they land on.
+//
+// Rollback and abort are different, and conflating them was an ATOMICITY
+// violation — measured, at the substrate level, before this branch existed:
+//
+//	transaction writes n.v = 1
+//	transaction hits a conflict on its second write, which is refused
+//	the bracket returns mvcc.ErrSerializationConflict
+//	a FRESH SNAPSHOT then reads n.v = 1
+//
+// The caller was told the transaction failed and half of it was visible anyway.
+// The reason it did not surface earlier is that the Cypher engine has an undo log
+// which physically restores the stored value (cypher/undo.go), so on that path the
+// chain nets out and publication is harmless — which is exactly what the file
+// comment above describes. But the undo log is a CYPHER structure: a caller using
+// [Graph.ApplyVersioned] directly has none, and the durable store's apply
+// (store/txn) is such a caller. The substrate has to be atomic on its own.
+//
+// Aborting is also the better answer where the undo log DOES run. The file comment
+// notes that aborting "would also be correct — every reader would undo both"; it
+// was not chosen because it keeps the chain alive past the point anything needs it.
+// That cost is real and it is rmp #2318's to reclaim; it does not justify leaving a
+// failed transaction partly visible.
+//
+// No commit timestamp is allocated on this path, so the contiguous frontier is not
+// asked to account for one ([mvcc.Clock.AbandonCommitTS] exists for the shape where
+// a timestamp IS taken and then abandoned, which this is not).
 func (g *Graph[N, W]) endWrite(w *writeCtx) {
 	if !g.mvccArmed || w == nil {
 		return
@@ -257,6 +308,17 @@ func (g *Graph[N, W]) endWrite(w *writeCtx) {
 	if info == nil {
 		// The transaction versioned nothing, so there is no record to publish,
 		// nothing to reclaim, and no reason to allocate a commit timestamp.
+		return
+	}
+	// A transaction that hit a serialization conflict ABORTS. See below for the
+	// measured atomicity violation that this closes, and why it is not the same
+	// thing as the rolled-back-statement case the file comment describes.
+	if w.err() != nil {
+		info.Abort()
+		// Charged even on the abort path: the version records exist and occupy
+		// memory whatever their commit record says. rmp #2318 tracks the fact that
+		// the reclaimer cannot yet free them eagerly.
+		g.reclaimDebt.Add(created)
 		return
 	}
 	// Allocate, store into the shared record, THEN publish. A reader must never
