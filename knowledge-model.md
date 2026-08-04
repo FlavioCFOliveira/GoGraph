@@ -1865,6 +1865,31 @@ Both `IMPROVES` (not `IMPLEMENTS`) for the perf/architecture half and `FIXES` fo
 half follow the edge-type table, which the sprint-314 note above records being got wrong the
 first time.
 
+### Sprint 334 sync — withdrawing an aborted transaction (2026-08-04)
+
+Recorded at `f52ca1ff` (task rmp #2318). An aborted transaction now WITHDRAWS its
+writes synchronously at abort; see
+[`docs/design-mvcc-abort-withdrawal.md`](docs/design-mvcc-abort-withdrawal.md).
+
+Added: `Commit f52ca1ff`; `Task 2318` (COMPLETED, `DEPENDS_ON Task 2308`); `Spec
+design-mvcc-abort-withdrawal.md`; 11 `Method`s (`Graph.withdrawAbortedNow`,
+`withdrawAbortedLabels`, `withdrawAbortedProps`, `withdrawAbortedSides`,
+`withdrawAbortedIndexRemovals`, `reclaimAbortedLabelsLocked`,
+`reclaimAbortedPropsLocked`, `reclaimAbortedLife`, `abortWake`;
+`sideVersions.withdrawAborted`; `adjVersions.clearAborted`); 5 `Test`s.
+
+Edges: `Sprint 334 -[CONTAINS]-> Commit`; `Task -[IMPLEMENTED_IN]-> Commit`;
+`Commit -[FIXES]->` `ACID Transactions` (9736) and `MVCC as sole concurrency
+control` (12051) — FIXES rather than IMPROVES, because the defect found was an
+Atomicity violation and not the memory leak the ticket described; `Commit
+-[TOUCHES]->` `graph/lpg`, `graph/mvcc` and the Spec; both Features
+`-[SPECIFIED_IN]->` the Spec; `CONTAINS`/`HAS_METHOD` per symbol; each Test
+`-[VERIFIES]-> ACID Transactions`.
+
+The edge stamp used the 3VL-safe predicate the previous sync's note derives
+(`coalesce(a.gitCommit,'') = $FH OR coalesce(b.gitCommit,'') = $FH`), and the
+leak check afterwards returned 0.
+
 ## Known limitations (faithful, by design)
 
 - **Build-tag duplicates.** The extractor parses every `.go` file regardless of build
