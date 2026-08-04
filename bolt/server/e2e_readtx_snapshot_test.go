@@ -138,9 +138,11 @@ func TestE2E_WriteTxSnapshotIsolationOverBolt(t *testing.T) {
 		t.Fatalf("first read saw %d, want 1", got)
 	}
 
-	// A separate session attempts a commit while the write transaction is open.
-	// It queues on the writer serialisation; the point of the test is that it
-	// cannot become visible to the statements below.
+	// A separate session commits while the write transaction is open. Since
+	// rmp #2305 it does NOT queue — nothing serialises writers — so it lands
+	// immediately; the point of the test is unchanged and is now the only point: it
+	// cannot become VISIBLE to the statements below, because wtx reads through the
+	// snapshot it took at BEGIN.
 	landed := make(chan error, 1)
 	go func() {
 		other := drv.NewSession(ctx, neo4j.SessionConfig{})
@@ -152,18 +154,26 @@ func TestE2E_WriteTxSnapshotIsolationOverBolt(t *testing.T) {
 		landed <- err
 	}()
 
-	// Give the queued writer a real chance to land if the isolation is broken.
-	// A false PASS here would come from the goroutine never having started, so
-	// the wait is generous relative to the microseconds a commit takes.
+	// Wait for it to actually land. Before rmp #2305 this was a 250 ms window that
+	// normally EXPIRED, because the commit was parked behind the writer
+	// serialisation, and the error was collected later after Commit released it.
+	// Now it completes promptly and must be collected HERE — collecting it twice is
+	// what hung this test for the full ten-minute timeout when the barrier hold went,
+	// since the second receive had nothing left to read.
+	//
+	// The assertion this feeds is stronger than the old one: the interleaved commit is
+	// known to have COMPLETED before the reads below, so their seeing 1 is genuine
+	// snapshot isolation rather than the commit simply not having happened yet.
 	select {
 	case err := <-landed:
-		// It completed already. That is only sound if it could not have been
-		// observed below — which the next assertion is what checks.
 		if err != nil {
 			t.Fatalf("interleaved commit: %v", err)
 		}
-	case <-time.After(250 * time.Millisecond):
-		// Expected: it is parked behind the writer serialisation.
+	case <-time.After(30 * time.Second):
+		t.Fatal("the interleaved commit did not land while a write transaction was open. " +
+			"Since rmp #2305 an open transaction blocks no writer, so it must complete " +
+			"promptly; if it is parked, a transaction-lifetime serialiser has been " +
+			"reintroduced.")
 	}
 
 	if got := countSnapNodes(ctx, t, wtx, "second read"); got != 1 {
@@ -182,9 +192,6 @@ func TestE2E_WriteTxSnapshotIsolationOverBolt(t *testing.T) {
 
 	if err := wtx.Commit(ctx); err != nil {
 		t.Fatalf("Commit: %v", err)
-	}
-	if err := <-landed; err != nil {
-		t.Fatalf("interleaved commit after release: %v", err)
 	}
 
 	// Everything is visible now: the seed, this transaction's write, and the

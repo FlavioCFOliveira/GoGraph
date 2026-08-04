@@ -1011,13 +1011,27 @@ with `Engine.BeginTx`:
 func (e *Engine) BeginTx(ctx context.Context) (*cypher.ExplicitTx, error)
 ```
 
-`BeginTx` acquires **no writer serialisation** — since rmp #2306 concurrency
-control is MVCC alone, and a write-write collision between two transactions is
-detected at commit rather than prevented. It does take the graph's visibility
-barrier exclusively for the lifetime of the returned handle, which until rmp #2305
-retires that hold still blocks concurrent writers. If `ctx` is already cancelled or
-its deadline has elapsed, `BeginTx` returns promptly, wrapping the context
-error.
+`BeginTx` acquires **no lock at all**. Since rmp #2305 and rmp #2306 concurrency
+control is MVCC alone: an open explicit transaction blocks neither readers nor
+writers, and two clients may hold open write transactions simultaneously and both
+make progress. What the transaction holds is its own unpublished **commit record**,
+published exactly once at `COMMIT` — which is what makes a multi-statement
+transaction become visible at a single instant and a rolled-back one leave no trace.
+Each statement takes the graph's schema barrier *shared* for its own duration and
+releases it before returning, so nothing is held across client think-time.
+
+A write-write collision between two open transactions is **refused at the
+conflicting statement** with a retriable serialization error (`Exec` fails), not
+deferred to `COMMIT`: detection is first-updater-wins on the version chain, so the
+loser is known the moment it tries to install its version. Over Bolt the error maps
+to a `TransientError`, so the official driver's managed transactions retry it.
+
+An abandoned transaction no longer causes an outage, but it still pins the
+reclamation horizon — no version it could read is freed while it lives — which is
+why `server.Options.MaxTxIdleTime` keeps a finite bound.
+
+If `ctx` is already cancelled or its deadline has elapsed, `BeginTx` returns
+promptly, wrapping the context error.
 
 The returned `*ExplicitTx` exposes:
 

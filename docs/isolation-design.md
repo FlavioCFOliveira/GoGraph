@@ -452,7 +452,50 @@ note that the attempt REFUTED it (see the apply-gate note in this document): the
 gate stays until conflict detection exempts the apply and the sequencing becomes
 per-object. `writeScalingFloor` and `writeConcurrencyFloor` also stay below
 `writeScalingTarget`, because they measure the store-LESS wiring, which never had
-the semaphore; its ceiling needs its own profile.
+the semaphore; its ceiling needs its own profile (rmp #2323).
+
+### rmp #2305 — the transaction-lifetime hold is gone (2026-08-04)
+
+`Engine.BeginTx` took the schema barrier **exclusively** and held it from `BEGIN`
+until `COMMIT`/`ROLLBACK`, across every client round-trip and all the think-time
+between them. Over Bolt that meant one client which sent `BEGIN` and stopped talking
+blocked **every other writer in the process** for as long as its transaction stayed
+open. The audit called it the most consequential single fact in it, and the reason is
+structural: no MVCC engine behaves this way, because an open transaction is supposed
+to hold *versions*, not the engine.
+
+It is retired. `BeginTx` now opens one **commit record** (`lpg.Graph.BeginVersionedTx`)
+and takes no lock; each statement takes the barrier **shared** for its own duration
+(`lpg.Graph.ApplyInVersionedTx`) and releases it before returning; `COMMIT` publishes
+the record exactly once (`lpg.Graph.EndVersionedTx`). That single publication is the
+transaction's commit instant, so atomicity comes from the record rather than from
+exclusion — which is the whole point of doing it with MVCC.
+
+Three consequences, each measured rather than argued:
+
+- **Two clients overlap.** Gated end-to-end against the official neo4j-go-driver by
+  `TestE2E_TwoExplicitWriteTransactionsOverlap` and
+  `TestE2E_AnIdleExplicitTransactionDoesNotStallAnotherWriter`, both verified to FAIL
+  against the build that held the barrier. Note that with `MaxTxIdleTime` at its 5 s
+  default **both tests pass against the defective build**, because the idle reaper
+  kills the blocked transaction and releases the barrier; they raise it deliberately.
+- **A collision surfaces at the conflicting STATEMENT**, not at `COMMIT`, as
+  `mvcc.ErrSerializationConflict` from `Exec`. That follows from the mechanism:
+  first-updater-wins identifies the loser the moment it tries to install a version
+  over an in-flight one, so there is nothing to defer. A commit-time validation shape
+  belongs to engines that buffer their writes; GoGraph applies eagerly.
+- **The physical undo log stays, and its soundness was verified rather than assumed.**
+  A rollback restores the stored value in place, which is sound only if no other
+  transaction built on the withdrawn value. It cannot have written it
+  (first-updater-wins refuses it) and cannot have read it (it reads through its own
+  snapshot, which excludes an unpublished version). Both halves are asserted by
+  `TestExplicitTx_PhysicalUndoIsSoundUnderConcurrency`, together with the liveness
+  half — that a rolled-back transaction leaves the object writable again.
+
+**The abandoned-transaction cost changed in kind.** It was an availability failure;
+it is now a memory-and-slot failure, because an open transaction pins the reclamation
+horizon. `server.Options.MaxTxIdleTime` was reviewed for this and **kept at 5 s**: the
+original justification is gone, but an unbounded resource cost remains.
 
 ## The fsync-failure policy (rmp #2306, decided 2026-08-04)
 

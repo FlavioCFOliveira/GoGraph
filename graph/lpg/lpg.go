@@ -861,6 +861,125 @@ func (g *Graph[N, W]) ApplyVersionedCtx(ctx context.Context, fn func(WriteTx) er
 	return fn(WriteTx{w: w})
 }
 
+// BeginVersionedTx opens a write transaction that OUTLIVES a single statement, for
+// a caller that runs several statements as one transaction — the Cypher engine's
+// explicit transaction ([cypher.Engine.BeginTx]).
+//
+// # What it deliberately does NOT do — rmp #2305
+//
+// It takes NO LOCK. Until rmp #2305 an explicit write transaction acquired the
+// schema barrier EXCLUSIVELY at BEGIN and held it until COMMIT or ROLLBACK, across
+// client network round-trips and think-time. Over Bolt that meant one client which
+// sent BEGIN and then stopped talking blocked EVERY other writer in the process for
+// as long as its transaction stayed open. The audit called it the most consequential
+// single fact in it, and the reason is structural: no MVCC engine behaves this way,
+// because an open transaction is supposed to hold VERSIONS, not the engine.
+//
+// So the lock is not held across the transaction at all. Each statement takes the
+// barrier SHARED for its own duration through [Graph.ApplyInVersionedTx], and
+// between statements nothing is held.
+//
+// # What the transaction is, then
+//
+// It is the commit record. Every version the transaction's statements write is
+// stamped with it, and [Graph.EndVersionedTx] publishes it ONCE — which is what
+// makes a multi-statement transaction become visible at a single instant, and what
+// makes a rolled-back one leave no trace. Atomicity comes from the record, not from
+// exclusion; that is the whole point of doing this with MVCC.
+//
+// # Contract
+//
+// The caller MUST close the returned transaction with exactly one call to
+// [Graph.EndVersionedTx], on every exit path including a panic, or its horizon slot
+// stays pinned and no version it could reach is ever reclaimed. The returned value
+// MUST be threaded into every write the transaction makes (via [Graph.Writer] or
+// [Graph.ApplyInVersionedTx]) and never resolved from the graph's ambient slot: two
+// concurrent explicit transactions overwrite that slot, and reading it would attribute
+// one transaction's writes to the other (rmp #2320's defect class).
+//
+// Safe for concurrent use from any number of goroutines.
+func (g *Graph[N, W]) BeginVersionedTx() WriteTx {
+	return WriteTx{w: g.beginWrite()}
+}
+
+// ApplyInVersionedTx runs fn AS tx, holding the schema barrier SHARED for the
+// duration of fn and nothing longer. It is the per-statement bracket of a
+// multi-statement transaction opened with [Graph.BeginVersionedTx].
+//
+// The shared hold is what a statement genuinely needs: a catalog — the declared
+// indexes and constraints, and the structures a DDL transition rebuilds — that does
+// not change underneath it. It does not exclude another writer, and it must not:
+// concurrent statements from different transactions overlap, and a collision
+// between them is arbitrated by the version chain, not by this lock.
+//
+// It differs from [Graph.ApplyVersioned] in exactly one way, and it is the
+// important one: ApplyVersioned opens and closes a transaction around fn, so each
+// call is its own atomic unit, whereas this runs fn inside a transaction the caller
+// already owns. Nothing is published when fn returns; publication happens once, in
+// [Graph.EndVersionedTx].
+//
+// It also differs from [Graph.ApplyInsideLockedTx], which resolves the transaction
+// from the graph's AMBIENT slot and is therefore only correct while a caller holds
+// the barrier exclusively. This takes the transaction as a parameter for the reason
+// rmp #2320 established: with concurrent writers the ambient slot names whichever
+// transaction published last.
+//
+// The acquisition is bounded by ctx, so a caller with a deadline is not held by a
+// concurrent DDL for longer than it agreed to wait (rmp #2174). When ctx finishes
+// first, fn does NOT run, nothing is held, and ctx's error is returned — the
+// caller's transaction remains open and usable.
+//
+// fn must not call [Graph.View], [Graph.ApplyAtomically] or [Graph.ApplyVersioned]:
+// the hold is shared, and Go's [sync.RWMutex] prefers a queued writer, so a nested
+// shared acquisition deadlocks the instant one queues. Enforced by the re-entrancy
+// guard under -race or -tags gograph_debug.
+//
+// Safe for concurrent use; each goroutine must pass its own transaction.
+func (g *Graph[N, W]) ApplyInVersionedTx(ctx context.Context, tx WriteTx, fn func(WriteTx) error) error {
+	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
+	if err := ctxlock.Acquire(ctx, g.visMu.TryRLock, g.visMu.RLock, g.visMu.RUnlock); err != nil {
+		return err
+	}
+	g.barrier.stampWriter(gid)
+	defer g.visMu.RUnlock()
+	defer g.barrier.clearWriter(gid)
+	return fn(tx)
+}
+
+// EndVersionedTx closes a transaction opened with [Graph.BeginVersionedTx]: it
+// publishes the transaction's commit record — making every version its statements
+// wrote visible at ONE instant — or, if the transaction was doomed, marks the record
+// aborted so none of them ever becomes visible. It then returns the transaction's
+// horizon slot and recycles its state.
+//
+// It is idempotent for the zero value and for a graph whose versioning substrate is
+// disarmed, so a caller may invoke it unconditionally on its teardown path.
+//
+// The publish runs under a SHARED hold on the schema barrier, matching every other
+// write bracket, so a commit cannot land in the middle of a DDL transition. The hold
+// is uncancellable: once a transaction's statements have applied, abandoning the
+// publish would leave the record neither published nor aborted, which stalls the
+// contiguous commit frontier permanently.
+//
+// Calling it exactly once per [Graph.BeginVersionedTx] is the caller's obligation.
+// Twice would return an already-returned horizon slot and corrupt the reclamation
+// watermark for every other transaction; never at all pins the slot forever.
+func (g *Graph[N, W]) EndVersionedTx(tx WriteTx) {
+	if tx.w == nil {
+		return
+	}
+	gid := g.barrier.checkWriter()
+	g.visMu.RLock()
+	g.barrier.stampWriter(gid)
+	defer g.visMu.RUnlock()
+	defer g.barrier.clearWriter(gid)
+	g.endWrite(tx.w)
+	// After endWrite, so nothing the transaction still reads is reclaimable while
+	// its record publishes, and unconditionally, because a transaction that
+	// versioned nothing still took a slot (rmp #2299).
+	g.releaseWriterSnapshot(tx.w)
+}
+
 // openWriteBracket opens the adjacency's commit window and the transaction's
 // stamping window — the two halves of "this region is one write transaction" —
 // and returns the state the transaction owns.

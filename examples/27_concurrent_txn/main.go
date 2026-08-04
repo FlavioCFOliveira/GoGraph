@@ -692,10 +692,24 @@ func runConcurrent(ctx context.Context, eng *cypher.Engine, plan *plan) (runStat
 
 // maxConflictRetries bounds the retry chain for one transfer. It is a BOUND, not
 // a policy knob: an unbounded retry would turn a persistent conflict into a
-// livelock, and the workload has to fail loudly rather than spin. Eight is far
-// above what the default shape needs (measured deepest chain: see the
-// writer.conflict_retries_max fact) and still finite.
-const maxConflictRetries = 8
+// livelock, and the workload has to fail loudly rather than spin.
+//
+// # Sized by measurement, and RESIZED when the concurrency changed (rmp #2305)
+//
+// It was 8, sized above a deepest chain of two or three. rmp #2305 retired the
+// transaction-lifetime barrier hold, so an autocommit writer and an open explicit
+// transaction now contend on the same accounts instead of being serialised against
+// each other — and the observed depth rose with the concurrency. Measured over three
+// runs of the default shape immediately after that change: deepest chain 9, 9 and 10,
+// with 584, 612 and 656 refused attempts in total. The old bound sat just BELOW the
+// new worst case, so the example failed loudly — which is what it is built to do.
+//
+// 24 keeps roughly the same proportional headroom over the worst observed chain that
+// 8 had, and is still finite. If it is ever exceeded, that is a real finding about the
+// engine's conflict behaviour and not a reason to raise it again without measuring.
+// The observed depth per run is reported as writer.conflict_retries_max, so the
+// margin can be checked rather than assumed.
+const maxConflictRetries = 24
 
 // initialConflictBackoff and maxConflictBackoff bound the wait between attempts.
 // The floor is sized to a WAL fsync rather than to a scheduler quantum, because

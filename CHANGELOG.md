@@ -41,6 +41,43 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **An open explicit write transaction no longer blocks anybody** (rmp #2305).
+  `cypher.Engine.BeginTx` took the graph's visibility barrier EXCLUSIVELY and held it
+  from `BEGIN` until `COMMIT`/`ROLLBACK` — across every client round-trip and all the
+  think-time between them. Over Bolt that meant one client which sent `BEGIN` and then
+  paused blocked **every other writer in the process** for as long as its transaction
+  stayed open. That hold is gone.
+
+  `BeginTx` now opens one **commit record** and takes no lock. Each statement takes the
+  schema barrier *shared* for its own duration and releases it before returning, so
+  nothing is held between statements. `COMMIT` publishes the record exactly once, and
+  that single publication is the transaction's commit instant: every version its
+  statements wrote becomes visible together, and a rolled-back transaction's versions
+  never become visible at all. Atomicity comes from the record, not from exclusion.
+
+  **Two clients may now hold open write transactions simultaneously and both make
+  progress**, verified end-to-end against the official neo4j-go-driver.
+
+  **A write-write collision between two open transactions is refused at the
+  conflicting statement** — `ExplicitTx.Exec` returns an error wrapping
+  `mvcc.ErrSerializationConflict` — rather than at `COMMIT`. Detection is
+  first-updater-wins on the version chain, so the loser is known the moment it tries to
+  install its version; there is nothing to defer. Over Bolt the error maps to a
+  `TransientError`, so the driver's managed transactions retry it. Callers driving
+  explicit transactions by hand should roll back and retry.
+
+  **New `lpg` API**: `Graph.BeginVersionedTx`, `Graph.ApplyInVersionedTx` and
+  `Graph.EndVersionedTx`. `Graph.LockBarrier`/`UnlockBarrier`/`ApplyInsideLocked` remain
+  for callers that genuinely need exclusive access, but they must not be used to hold a
+  transaction: `ApplyInsideLockedTx` resolves the transaction from the graph's *ambient*
+  slot, which two concurrent transactions overwrite.
+
+  **An abandoned transaction still costs something, but of a different kind:** it pins
+  the reclamation horizon, so no version it could read is freed while it lives.
+  `server.Options.MaxTxIdleTime` was reviewed for this and kept at its 5 s default —
+  the original availability justification is gone, but an unbounded resource cost
+  remains.
+
 - **Concurrency control is now MVCC and nothing else** (rmp #2306). The
   `txn.Store`'s capacity-one single-writer semaphore is retired. Independent write
   transactions run concurrently on both engine wirings, and a write-write
