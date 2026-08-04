@@ -2,6 +2,7 @@ package txn
 
 import (
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -228,5 +229,176 @@ func mustNoErr(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatalf("tx op: %v", err)
+	}
+}
+
+// TestIsolation_NoReaderObservesANonSerialisableState is rmp #2306's AC3: under
+// CONCURRENT commits, no reader may observe a state that no serial schedule of those
+// commits could produce.
+//
+// # The invariant, and the one that does NOT fit this layer
+//
+// A conserved SUM is the natural expression of "no serial schedule produces this", and
+// it was tried first — and it does not belong here. Conservation needs each transfer to
+// read the balances it adjusts, and [Tx] is an op buffer with no read-your-own-snapshot
+// surface: a writer must read through the graph, outside its transaction, so two
+// concurrent writers read the same balance and both write. The sum then changes for a
+// reason that has nothing to do with what a reader can observe — a LOST UPDATE in the
+// workload, not an isolation failure. Measured on the first attempt: 772 035 of
+// 1 073 756 observations "torn", which is the workload being wrong rather than the
+// engine. Conservation is a read-modify-write invariant and therefore a CYPHER-level
+// one, where `SET a.bal = a.bal - $amt` is atomic within the statement and conflicts are
+// retried — which is exactly what examples/27_concurrent_txn asserts.
+//
+// What DOES fit this layer is an invariant carried entirely by values the writer
+// chooses: each transaction stamps EVERY one of its node's properties with the same
+// generation. A reader that sees two different generations on one node has seen half a
+// transaction, and no ordering of any subset of the commits can produce that.
+//
+// # How this differs from the single-writer test above
+//
+// TestIsolation_Commit_NoPartialTransactionObservable has ONE writer and asks whether a
+// single transaction can be seen half-applied. Here MANY writers commit at once through
+// the durable path, so the question is whether the COMBINATION becomes observable in an
+// impossible state — which the shared commit record and the apply gate must jointly rule
+// out. Each writer owns its own node so nothing collides, isolating the visibility
+// question from the conflict question.
+//
+// # It is a GUARD, not a discriminator, and that is a property of this layer
+//
+// Removing the shared commit record (building every WriteView with no transaction)
+// leaves this test PASSING, and why is worth recording. TWO mechanisms provide atomic
+// visibility here, not one: the commit record, AND the apply gate, which serialises the
+// applies so only one write bracket is open at a time — and while that holds, an ambient
+// resolution names the right transaction anyway. Removing BOTH is not a valid control
+// either: without the gate, durable commits are refused at apply time
+// (TestApplyGate_ADurableCommitIsNeverRefusedByConflictDetection).
+//
+// So the property is over-determined at this layer and cannot be isolated by
+// subtraction — the same situation graph/lpg/mvcc_index_ordering_test.go recorded for
+// rmp #2303. The DISCRIMINATING version lives one layer down, where brackets genuinely
+// overlap: graph/lpg TestWriteView_ConcurrentWritersEachPublishTheirOwnTransaction,
+// verified to fail against a build whose writes carry no transaction. What THIS test
+// adds is the DURABLE path — Tx.Commit, the WAL, the apply gate — which that one does
+// not exercise.
+func TestIsolation_NoReaderObservesANonSerialisableState(t *testing.T) {
+	t.Parallel()
+
+	g, store, cleanup := newIsolationStore(t)
+	defer cleanup()
+
+	// Sized so a reader actually lands mid-transaction. The first attempt used one
+	// reader and 120 commits and did NOT discriminate: with a WAL fsync per commit the
+	// reader spent almost all its time between transactions. More readers is what
+	// closes that, not more writers — the writers are rate-limited by fsync either way.
+	const (
+		writers = 6
+		props   = 4
+		rounds  = 60
+		readers = 6
+	)
+	seed := store.Begin()
+	for w := 0; w < writers; w++ {
+		for p := 0; p < props; p++ {
+			mustNoErr(t, seed.SetNodeProperty(acct(w), gen(p), lpg.Int64Value(0)))
+		}
+	}
+	mustNoErr(t, seed.Commit())
+
+	var (
+		writersWG sync.WaitGroup
+		readerWG  sync.WaitGroup
+		stop      = make(chan struct{})
+		torn      atomic.Int64
+		observed  atomic.Int64
+		writeErrs atomic.Int64
+	)
+
+	for i := 0; i < readers; i++ {
+		readerWG.Add(1)
+		go readerLoop(g, stop, &readerWG, writers, props, &torn, &observed)
+	}
+
+	for w := 0; w < writers; w++ {
+		writersWG.Add(1)
+		go func(w int) {
+			defer writersWG.Done()
+			for r := 1; r <= rounds; r++ {
+				tx := store.Begin()
+				for p := 0; p < props; p++ {
+					if e := tx.SetNodeProperty(acct(w), gen(p), lpg.Int64Value(int64(r))); e != nil {
+						writeErrs.Add(1)
+						return
+					}
+				}
+				if e := tx.Commit(); e != nil {
+					writeErrs.Add(1)
+					return
+				}
+			}
+		}(w)
+	}
+
+	writersWG.Wait()
+	close(stop)
+	readerWG.Wait()
+
+	if n := writeErrs.Load(); n != 0 {
+		t.Fatalf("%d write(s) failed; each writer owns its own node, so nothing here can "+
+			"legitimately conflict and the workload did not run as intended", n)
+	}
+	if observed.Load() == 0 {
+		t.Fatal("the reader made no observation; the invariant was never exercised")
+	}
+	if n := torn.Load(); n != 0 {
+		t.Fatalf("%d of %d snapshot observation(s) saw two different generations on ONE "+
+			"node, i.e. half a transaction — a state no serial schedule of these commits can "+
+			"produce.", n, observed.Load())
+	}
+}
+
+// acct names the w-th writer's node; gen names the p-th generation-stamped property.
+func acct(w int) string { return "acct" + strconv.Itoa(w) }
+func gen(p int) string  { return "g" + strconv.Itoa(p) }
+
+// readerLoop is the reader every AC3 arm runs: it snapshots and checks that all of a
+// node's generation-stamped properties agree, which is what "half a transaction" would
+// break. Extracted so several readers share one body — the discrimination depends on
+// having enough of them, not on what each does.
+func readerLoop(
+	g *lpg.Graph[string, int64],
+	stop <-chan struct{},
+	wg *sync.WaitGroup,
+	writers, props int,
+	torn, observed *atomic.Int64,
+) {
+	defer wg.Done()
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		snap := g.BeginRead()
+		v := g.ReadAt(snap)
+		for w := 0; w < writers; w++ {
+			first, ok := v.GetNodeProperty(acct(w), gen(0))
+			if !ok {
+				continue
+			}
+			want, _ := first.Int64()
+			for p := 1; p < props; p++ {
+				got, ok := v.GetNodeProperty(acct(w), gen(p))
+				if !ok {
+					torn.Add(1)
+					continue
+				}
+				observed.Add(1)
+				if n, _ := got.Int64(); n != want {
+					torn.Add(1)
+				}
+			}
+		}
+		g.EndRead(snap)
 	}
 }
