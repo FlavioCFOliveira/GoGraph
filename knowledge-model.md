@@ -2581,3 +2581,43 @@ accident. The interleaving is only reproducible one layer down, in `lpg` —
 **Gate ratcheted:** `bench/mvccwrite` `walWriteScalingFloor` 0.90 → `writeScalingTarget`
 (3.0). The two store-LESS floors stay put: that arm's outermost lock is
 `cypher.Engine.writeMu`, which rmp #2306 owns.
+
+Incrementally synced at commits `fdd91c6b` and `a04a8946` (2026-08-04, task **rmp #2304**,
+sprint 334 — the exclusive visibility barrier is retired from the ordinary write path,
+completing what `525e209a` delivered). +3 nodes (two `Commit`s, `Task` 2304), +5 edges
+(2 `IMPLEMENTS`, 1 sprint `CONTAINS`, and the provenance stamps).
+
+**#2303's AC3 is now discharged**, by `graph/lpg/mvcc_index_overlap_test.go`. It could not
+be satisfied while the barrier existed, because the barrier was exactly what guaranteed the
+ambient stamp slot had one occupant; with the barrier gone the collision is producible, and
+both new tests FAIL against `g.stamp.Stamp()` naming the concurrent writer's record.
+
+**One acceptance claim was corrected rather than implemented.** #2304's AC8 states that a
+deferred removal charged to a still-in-flight transaction "carries an id no record will ever
+publish and is NEVER swept". Measurement says otherwise: both the threaded and the ambient
+resolution store a `*mvcc.CommitInfo` and `lifeStamp.at()` resolves through it, so such a
+removal is swept at the WRONG writer's instant rather than stranded. Stranding needs
+`lifeStamp.info` nil with an in-flight id in `lifeStamp.ts`, which `Graph.deferralStamp`
+yields only for a transaction whose window is already retracted — unreachable while its
+bracket is open. The harm is mis-ORDERING, and the second test measures it in both
+directions.
+
+**#2304's AC2 could not be met on the arm its own baseline came from, and the premise was
+refuted.** The sprint description says the 0.83× entry figure at sixteen writers was taken
+"with no WAL attached, so the ceiling is the barrier and nothing else". That arm's ceiling is
+`cypher.Engine.writeMu` — `lockWriter` takes it for the whole statement whenever no store is
+attached — exactly as `docs/audit-mvcc-sole-cc-2026-08-02.md` §3.1 already said. Measured
+after the flip: store-less 0.750× at sixteen writers (the fall is in the NUMERATOR: one
+writer +6.3 %, sixteen writers −3.6 %), WAL 1.009× → 7.886×. The store-less target and the
+ratchet of `writeScalingFloor`/`writeConcurrencyFloor` were therefore CARRIED INTO rmp
+#2306's AC1, with the refuted premise recorded there.
+
+**Reader latency did not regress:** `bench/mtaudit` `TestFairScheduling` with `-tags=soak`,
+no `-race`, no competing load — collapse 1.903× at one reader and 1.972× at eight, against a
+4.0× tolerance and the 1.91×/2.07× envelope certified when rmp #2274 fixed the starvation.
+
+**rmp #2306 gained an obligation it did not have before:** with ordinary writes on the shared
+barrier, the checkpointer's transaction-boundary consistency rests ENTIRELY on
+`store/txn.Store.RunUnderCommitLock`'s in-flight drain and no longer on `visMu`, so whatever
+replaces that drain must preserve the property (or rmp #2310 must land first). Recorded in
+#2306's AC4.
