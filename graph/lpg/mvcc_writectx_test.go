@@ -225,11 +225,53 @@ func TestWriteCtx_OwnSecondWriteIsNotAConflict(t *testing.T) {
 	}
 }
 
-// TestWriteCtx_PropertyWriteThatChangesNothingDoesNotConflict is the guard that
-// keeps MERGE working: its MATCH branch re-asserts properties on every match,
-// and a write that records no version has nothing to lose and nothing to
-// conflict over.
-func TestWriteCtx_PropertyWriteThatChangesNothingDoesNotConflict(t *testing.T) {
+// TestWriteCtx_ReassertingAVisibleValueDoesNotConflict is the requirement that
+// keeps MERGE working, stated correctly: its MATCH branch re-asserts a property it
+// just READ, so the version it re-asserts over is VISIBLE to its own transaction and
+// must not be refused.
+//
+// # It replaced a test that asserted the rmp #2324 defect
+//
+// The previous form had transaction A write v=7 and stay IN FLIGHT, then had B write
+// v=7 too, and asserted B was not refused — on the reasoning that a write recording
+// no version has nothing to conflict over. That reasoning is what lost 46% of
+// concurrent increments.
+//
+// B cannot have READ the 7 it wrote: A is uncommitted, so A's value is invisible to
+// B. B therefore computed 7 independently, from a value A has since displaced, and
+// accepting it discards B's update — or, if A aborts, leaves B's "successful" write
+// with no trace at all. Refusing B is the correct answer, and the equality of the two
+// values is a coincidence rather than idempotence.
+//
+// What MERGE actually needs is below, and it is unaffected by the fix.
+func TestWriteCtx_ReassertingAVisibleValueDoesNotConflict(t *testing.T) {
+	g := New[string, int64](adjlist.Config{Directed: true})
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+
+	// Commit v=7 so it is visible to any transaction beginning afterwards.
+	txSeed := g.beginLabelTx()
+	if err := txSeed.setNodeProperty("a", "v", Int64Value(7)); err != nil {
+		t.Fatalf("seed setNodeProperty: %v", err)
+	}
+	mustCommit(t, txSeed)
+
+	// MERGE's shape: a transaction reads the committed 7 and re-asserts it.
+	tx := g.beginLabelTx()
+	if err := tx.setNodeProperty("a", "v", Int64Value(7)); err != nil {
+		t.Fatalf("re-asserting a VISIBLE value was refused: %v — MERGE's MATCH branch "+
+			"re-asserts properties on every match, and the version it re-asserts over is "+
+			"visible to its own snapshot, so it must not conflict", err)
+	}
+	mustCommit(t, tx)
+}
+
+// TestWriteCtx_WritingOverAnInFlightVersionConflicts is the other half, and it is
+// the rmp #2324 gate at this layer: a transaction that writes the same value another
+// IN-FLIGHT transaction has written must be REFUSED, because it cannot have read that
+// value and so must have computed it from a version already displaced.
+func TestWriteCtx_WritingOverAnInFlightVersionConflicts(t *testing.T) {
 	g := New[string, int64](adjlist.Config{Directed: true})
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
@@ -241,12 +283,12 @@ func TestWriteCtx_PropertyWriteThatChangesNothingDoesNotConflict(t *testing.T) {
 	}
 
 	txB := g.beginLabelTx()
-	// B writes the value already there. No version is recorded, so there is
-	// nothing to conflict over — even though A is still in flight.
-	if err := txB.setNodeProperty("a", "v", Int64Value(7)); err != nil {
-		t.Fatalf("a write that changes nothing was refused: %v — MERGE's MATCH branch "+
-			"re-asserts properties on every match, so this would abort transactions "+
-			"that wrote nothing at all", err)
+	if err := txB.setNodeProperty("a", "v", Int64Value(7)); err == nil {
+		t.Fatal("B was allowed to write the value an in-flight transaction had just " +
+			"written. B cannot have READ it — A is uncommitted and invisible to B — so B " +
+			"computed it from a version A has displaced, and accepting the write discards " +
+			"B's update. This is the rmp #2324 lost update: the conflict test used to be " +
+			"skipped whenever the incoming value equalled the STORED one.")
 	}
 }
 

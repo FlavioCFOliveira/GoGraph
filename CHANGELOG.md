@@ -6,6 +6,39 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **CRITICAL: concurrent read-modify-write lost 46% of its committed updates**
+  (rmp #2324). Four writers each issuing 100 autocommit `SET a.bal = a.bal + 1`
+  statements, with every refusal retried until it succeeded, reported 400 successes
+  and left the property at **216**. Measured directly rather than inferred: those 400
+  successes wrote only ~200 **distinct** values, with one value written by five
+  different statements.
+
+  The write-write conflict test sat behind a "records nothing" guard — skipped when
+  the value being written already equalled the **stored** value, on the reasoning
+  that a write recording no version has nothing to conflict over. That is sound for
+  an idempotent write and unsound for an arithmetic one, because the incoming value
+  can equal the stored one **by coincidence**: A reads 1 and writes 2; B, whose
+  snapshot also says 1, computes 2 as well; B's write is compared against the
+  now-stored 2, judged a no-op, and accepted with no conflict test at all. B's
+  statement reports success having applied nothing.
+
+  The conflict test now runs unconditionally, before deciding whether anything needs
+  recording. This cannot cause the spurious abort the guard was added to prevent: a
+  `MERGE` re-asserting a property it just read re-asserts over a version that IS
+  visible to its own transaction, and a version that is NOT visible means another
+  transaction changed the object, which must be refused. Node **labels** keep their
+  equivalent guard and are sound with it, because set membership is genuinely
+  idempotent — adding a label another transaction already added leaves the same state,
+  with no arithmetic to lose.
+
+  The defect predates the MVCC sprint and was invisible to a fully green suite: the
+  one test covering this shape asserted the defective behaviour, and
+  `examples/27_concurrent_txn`'s conserved-total oracle passed because its default
+  contention rarely hit the window.
+
+
 ### Changed
 
 - **Concurrency control is now MVCC and nothing else** (rmp #2306). The

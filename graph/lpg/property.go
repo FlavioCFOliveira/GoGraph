@@ -313,15 +313,29 @@ func (g *Graph[N, W]) setNodePropertyInfo(n N, key string, value PropertyValue, 
 	// for the same reason the label path guards on has().
 	if g.propDeltasEnabled() {
 		prev, had := bag.get(keyID)
-		// Only a write that RECORDS a version can conflict. Re-setting a
-		// property to the value it already holds records nothing, and MERGE's
-		// MATCH branch re-asserts properties on every match — without this
-		// guard a transaction that changed nothing would abort.
-		if record := !had || !propValuesDefinitelyEqual(prev, value); record {
-			if head := s.headStamp(id); tx.conflicts(head) {
-				s.mu.Unlock()
-				return tx.conflictErr("node properties", head)
-			}
+		// The conflict test runs UNCONDITIONALLY, and that is the fix for rmp #2324.
+		//
+		// It used to sit behind a `record` guard — skipped when the value being
+		// written already equalled the stored one — on the reasoning that "only a
+		// write that RECORDS a version can conflict". That reasoning compares the
+		// incoming value against the LIVE stored value, and a stale writer's value
+		// can equal it by arithmetic coincidence, which is exactly what a lost
+		// update looks like: A reads 1 and writes 2; B, whose snapshot also says 1,
+		// computes 2 as well; B's write is judged a no-op against the now-stored 2,
+		// the conflict test is skipped, no version is recorded, and B's statement
+		// reports SUCCESS having applied nothing. Measured at 400 concurrent
+		// increments producing a final value of 216, with one value written by five
+		// different successful statements.
+		//
+		// Testing the head first cannot reintroduce the abort the guard was added to
+		// prevent. MERGE's MATCH branch re-asserts a property it just read, so the
+		// head it re-asserts over is visible to its own transaction and does not
+		// conflict; a head that is NOT visible means another transaction changed the
+		// object underneath, and refusing that is the correct answer rather than an
+		// unwanted one.
+		if head := s.headStamp(id); tx.conflicts(head) {
+			s.mu.Unlock()
+			return tx.conflictErr("node properties", head)
 		}
 		switch {
 		case !had:
