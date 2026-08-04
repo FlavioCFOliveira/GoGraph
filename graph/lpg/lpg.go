@@ -910,9 +910,9 @@ func (g *Graph[N, W]) finishWrite(w *writeCtx, gid int64) {
 // "NOT internally synchronised", licensed by the exclusive barrier the serving
 // write path used to hold. Calling them from a shared bracket is a data race,
 // and not a theoretical one: `go test -race ./cypher/...` reported it on
-// EndCommit's depth read the first time this bracket opened a window, because the
-// unwind runs after the store semaphore has been released (the WAL append frees
-// it before the fsync) and therefore overlaps the next writer's open.
+// EndCommit's depth read the first time this bracket opened a window, because
+// writers overlap: the unwind of one therefore runs concurrently with the open of
+// another.
 //
 // Removing the window costs nothing, because what the window actually bought was
 // already provided by something better. Its job is to let a transaction's second
@@ -944,8 +944,8 @@ func (g *Graph[N, W]) finishWrite(w *writeCtx, gid int64) {
 // explicit parameter ([adjlist.Writer] carries it, storeEntry consumes it), so the
 // owner comes from the write itself and the ambient lookup remains only for the
 // callers that genuinely have no transaction: the exclusive bulk builds, WAL replay,
-// snapshot apply and the direct Go API. rmp #2306 can therefore retire writeMu and
-// the store semaphore without a second problem attached.
+// snapshot apply and the direct Go API. rmp #2306 then retired writeMu and the
+// store semaphore with no second problem attached.
 func (g *Graph[N, W]) finishWriteShared(w *writeCtx, gid int64) {
 	g.endWrite(w)
 	g.releaseWriterSnapshot(w)

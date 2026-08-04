@@ -1563,7 +1563,8 @@ package's `func Benchmark` declarations against the graph during this sync. **+2
 `2026-07-27`. No new label or edge type.
 
 The substance is what the measurement overturned. GoGraph's group commit **already worked**:
-`Tx.Commit` releases the single-writer semaphore after the append and coalesces in
+`Tx.Commit` released the single-writer semaphore (retired by rmp #2306) after the
+append and coalesces in
 `wal.Writer.SyncGroup`, reaching 31 300 commits/s at 256 writers before this change. The
 "flat at 261 op/s from 1 to 1024 writers" that rounds 3 and 4 both recorded belongs
 **exclusively to the Cypher path**, which fsyncs while holding `lpg`'s `visMu` in write mode
@@ -2239,13 +2240,14 @@ art read in source: SQLite's OOM simulator counts down the same way —
 `TestBreakpoint_Countdown` pins both sides.
 
 **THE FACT MOST WORTH KEEPING: this battery does NOT detect audit finding E5
-today.** Replacing `AppendRun` with a loop of `Append` leaves the crash tests
-PASSING, because `store/txn.Tx.appendOnly` still runs with the store's
-single-writer semaphore held — contiguity is **over-determined**, guaranteed
-twice, so removing either guarantee alone changes nothing observable. E5's
-detector remains the `store/wal` unit arm, which drives concurrent appenders
-against the writer directly (a loop of `Append` shatters a 25-frame transaction
-into 8 runs; `AppendRun` gives 1). **This battery becomes the E5 gate the moment
+today, and NO LONGER as of rmp #2306.** While the store's capacity-one semaphore
+was held across `store/txn.Tx.appendOnly`, contiguity was **over-determined** —
+guaranteed twice — so replacing `AppendRun` with a loop of `Append` left the crash
+tests PASSING and removing either guarantee alone changed nothing observable.
+rmp #2306 retired that semaphore, so contiguity now rests **solely** on
+`wal.Writer.AppendRun`. E5's primary detector is still the `store/wal` unit arm,
+which drives concurrent appenders against the writer directly (a loop of `Append`
+shatters a 25-frame transaction into 8 runs; `AppendRun` gives 1). **This battery becomes the E5 gate the moment
 rmp #2306 retires the semaphore.** What it does detect was proven: altering
 `Tx.Commit` to acknowledge without `SyncGroup` makes both tests fail with 44
 durability violations naming the exact lost transactions. Also note `SIGKILL` does

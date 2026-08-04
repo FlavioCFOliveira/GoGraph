@@ -82,9 +82,9 @@ const mergeKeyInfix = "merge_"
 
 // globalNodeCounter provides a process-wide monotonic source for generated
 // node keys. Using an atomic counter avoids collisions if multiple Engine
-// instances operate on the same graph concurrently (though the single-writer
-// contract from CLAUDE.md prevents concurrent writes; the counter is a cheap
-// safety net).
+// instances operate on the same graph concurrently. Since rmp #2306 nothing
+// serialises writers — concurrency control is MVCC alone — so the atomic is no
+// longer a safety net but the actual mechanism keeping generated keys distinct.
 //
 // The counter is process-local and resets to zero in every new process. Across
 // process restarts this would produce keys that collide with previously

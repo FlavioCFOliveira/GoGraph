@@ -691,7 +691,7 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 		// engine's in-memory registry still reflects the attempted change until
 		// the DDL's compensator (cypher unwindConstraintRegistration /
 		// rewindConstraintDrop, or the inline forgetIndexDef) runs — and that
-		// compensator runs OUTSIDE the store single-writer lock, so it can lag
+		// compensator runs OUTSIDE the store's writer admission, so it can lag
 		// this capture. Folding constraintsFn() / indexDefsFn() in that window
 		// would persist a non-acknowledged schema change into constraints.bin /
 		// indexdefs.bin and enforce it (CREATE) or apply it (DROP) after a clean

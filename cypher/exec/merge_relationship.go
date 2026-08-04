@@ -27,9 +27,10 @@ package exec
 //
 // # Concurrency
 //
-// MergeRelationship is NOT safe for concurrent use. The engine's
-// single-writer guarantee serialises concurrent MERGE callers so the
-// search-then-create sequence is race-free against other writers.
+// MergeRelationship is NOT safe for concurrent use: one operator tree is driven by
+// one goroutine. Its search-then-create sequence is NOT race-free against other
+// writers — nothing serialises them since rmp #2306. See [Merge] for the measured
+// behaviour and the uniqueness-constraint remedy.
 
 import (
 	"context"
@@ -340,7 +341,8 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 	// is type-agnostic per (src, dst) pair, so without edgeHasRequestedType
 	// a `MERGE (a)-[:T2]->(b)` issued after a `T1` edge already exists
 	// would bind to the T1 edge and never create the distinct T2 parallel
-	// edge (rmp #1683). The single-writer guarantee makes this safe.
+	// edge (rmp #1683). This is safe because the operator tree is single-goroutine,
+	// not because writers are serialised (they are not, since rmp #2306).
 	if op.mutator.HasEdge(srcKey, dstKey) && op.edgeHasRequestedType(srcKey, dstKey) && op.matchesRelProps(srcKey, dstKey, effectiveProps) {
 		// Edge labels are per-(src,dst) in the LPG; adding the same
 		// label twice is idempotent. Ensure the requested type is

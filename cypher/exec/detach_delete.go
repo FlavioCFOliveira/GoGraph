@@ -181,8 +181,8 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 	// every 4096 edges (canonical stride) to keep a high-degree DETACH
 	// DELETE interruptible. Returning an error here propagates out of
 	// Next; the surrounding write path (ApplyAtomically barrier +
-	// recoverWriteQueryPanic) rolls the transaction back and releases the
-	// single-writer mutex.
+	// recoverWriteQueryPanic) rolls the transaction back and clears its writer
+	// registration.
 
 	// Remove all outgoing edges in O(degree) via the bulk path.
 	if err := op.ctx.Err(); err != nil {

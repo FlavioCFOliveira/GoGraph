@@ -178,7 +178,7 @@ func replayUndoOnPanic(undo *undoLog) {
 	if r := recover(); r != nil {
 		// Best-effort in-memory rollback; a failed inverse is logged and counted
 		// inside replay. We re-raise regardless so the panic boundary still
-		// releases the WAL single-writer mutex — never leave it held.
+		// deregisters the WAL writer — never leave it held.
 		undo.replay()
 		panic(r)
 	}

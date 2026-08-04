@@ -39,16 +39,27 @@
 // once published, so callers operate on the returned pointer without further
 // synchronisation.
 //
-// Write queries serialise on a single-writer lock: the backing [txn.Store]'s
-// writer mutex when the engine is WAL-backed ([NewEngineWithStore]), or the
-// engine's own writer mutex when it is store-less ([NewEngine]). Autocommit
-// [Engine.RunInTx] holds that lock for one statement; an explicit transaction
-// ([Engine.BeginTx]) holds it from BEGIN until COMMIT/ROLLBACK, so concurrent
-// writers block until it finishes (write-write isolation). Reads ([Engine.Run])
-// never take the writer lock. The lock order is writer-lock (outermost) → the
-// graph schema barrier (visMu, taken SHARED inside [lpg.Graph.ApplyVersioned]
-// since rmp #2320, and exclusively only by DDL and an explicit transaction); both
-// wirings share it, so no deadlock is possible across them.
+// Write queries DO NOT serialise. Concurrency control is MVCC and nothing else
+// (rmp #2306): independent writers run concurrently on both wirings, and a
+// write-write conflict between them is DETECTED at commit — surfaced as a
+// serialization conflict — rather than prevented by holding a lock. The two locks
+// that used to serialise them, the engine's own writer mutex and the backing
+// [txn.Store]'s capacity-one semaphore, are gone.
+//
+// What remains, and what each excludes:
+//
+//   - Engine.schemaMu — an RWMutex a DDL statement (CREATE/DROP INDEX or
+//     CONSTRAINT) takes EXCLUSIVELY and an ordinary write takes SHARED. It makes
+//     a DDL's validate-then-register sequence atomic against concurrent writes,
+//     which is what keeps a constraint from being registered over data that
+//     violates it. It does not order two ordinary writers against each other.
+//   - the graph schema barrier (visMu) — taken SHARED inside
+//     [lpg.Graph.ApplyVersioned] by every ordinary write since rmp #2320, and
+//     exclusively only by DDL and an explicit transaction.
+//
+// Reads ([Engine.Run]) take neither. The lock order is schemaMu (outermost) →
+// the store's writer admission → visMu; both wirings share it, so no deadlock is
+// possible across them.
 //
 // # Transactions
 //
@@ -962,7 +973,7 @@ type ConstraintDef struct {
 // second guarantee now coming from the transaction's shared commit record rather
 // than from exclusion (#1077, audit gap F3).
 //
-// Write queries remain subject to the underlying store's single-writer
+// Write queries remain subject to the underlying store's writer-admission
 // constraint: when the Engine is backed by a [txn.Store], concurrent
 // [Engine.RunInTx] calls serialise on the store's writer mutex.
 //
@@ -1000,7 +1011,7 @@ type Engine struct {
 	//
 	// It is internally synchronised (its own mutex) so IndexSpecsForSnapshot can
 	// read it concurrently with the checkpointer while a write query mutates it
-	// under the engine's single-writer serialisation. Every mutation
+	// under the engine's DDL exclusion. Every mutation
 	// (recordIndexDef / forgetIndexDef) is followed by syncIndexCount under that
 	// same write lock so the graph's lock-free HasIndexes gate stays in step.
 	indexDefReg *indexDefRegistry
@@ -1059,7 +1070,7 @@ type Engine struct {
 	//
 	// # What it used to be, and why that had to go (rmp #2306)
 	//
-	// It was `writeMu`, the engine's single-writer serialisation, and it was held for
+	// It was `writeMu`, the engine's DDL exclusion, and it was held for
 	// the whole duration of every autocommit statement and — worse — from BEGIN to
 	// COMMIT of every explicit transaction. That made the engine single-writer by
 	// construction on a store-less wiring, exactly as the store semaphore did on a
@@ -1111,7 +1122,7 @@ type Engine struct {
 	// would mean the scan could no longer use [lpg.Graph.View] (visMu is not
 	// re-entrant). This lock is one level out, so it needs no such surgery.
 	//
-	// Lock order: schemaMu (outermost) → the store's single-writer lock → visMu.
+	// Lock order: schemaMu (outermost) → the store's writer admission → visMu.
 	// Readers take none of them.
 	schemaMu sync.RWMutex
 
@@ -1710,7 +1721,7 @@ func (e *Engine) ConstraintSpecsForSnapshot() []snapshot.ConstraintSpec {
 // syncConstraintCount mirrors the engine's current schema-constraint count onto
 // the graph (Graph.SetActiveConstraintCount) so the checkpointer can tell — via
 // Graph.HasConstraints — whether a snapshot must carry constraints.bin before
-// the WAL is truncated. It is called under the engine's single-writer lock
+// the WAL is truncated. It is called under the engine's schema lock
 // after every constraint registration, drop, unwind, and recovery re-seed.
 // Sourcing the value from the live registry (not an inc/dec delta) keeps it
 // from ever under-counting a durably-registered constraint — the only
@@ -1740,7 +1751,7 @@ func (e *Engine) IndexSpecsForSnapshot() []snapshot.IndexDefSpec {
 // syncIndexCount mirrors the engine's current user-index-definition count onto
 // the graph (Graph.SetActiveIndexCount) so the checkpointer can tell — via
 // Graph.HasIndexes — whether a snapshot must carry indexdefs.bin before the WAL
-// is truncated. It is called under the engine's single-writer lock after every
+// is truncated. It is called under the engine's schema lock after every
 // index registration, drop, and recovery re-seed. Sourcing the value from the
 // live registry (not an inc/dec delta) keeps it from ever under-counting a
 // durably-registered index — the only direction that could cause silent index
@@ -1951,7 +1962,7 @@ func recoverQueryPanic(errp *error, entrypoint, counter string) {
 // convertQueryPanic performs the log+count+convert half of the panic boundary.
 // It is split out from [recoverQueryPanic] so that a write entrypoint can call
 // recover() itself, roll back its in-flight WAL transaction (releasing the
-// store's single-writer lock so future writes are not deadlocked), and only
+// store's writer registration so future writes are not deadlocked), and only
 // then funnel the recovered value through the same logging, counting, and
 // typed-error conversion. The stack trace is logged, never returned, so engine
 // internals are not leaked to the caller.
@@ -1973,12 +1984,12 @@ func convertQueryPanic(r any, errp *error, entrypoint, counter string) {
 // entrypoints that hold an in-flight WAL transaction. It differs from
 // [recoverQueryPanic] in one ACID-critical respect: on a recovered panic it
 // first rolls back the transaction pointed to by *txp, releasing the store's
-// single-writer mutex, and only then funnels the panic value through
+// writer registration, and only then funnels the panic value through
 // [convertQueryPanic] for logging, counting, and typed-error conversion.
 //
 // Without this rollback a panic raised after [txn.Store.Begin] — for example
 // inside the [lpg.Graph.ApplyAtomically] closure during plan build, exec, or
-// index commit — would convert to an error but leave the single-writer mutex
+// index commit — would convert to an error but leave the writer registered
 // held forever, deadlocking every subsequent write transaction and leaving a
 // partial WAL transaction dangling: a violation of ACID atomicity and
 // liveness. (The visibility barrier itself is safe: [lpg.Graph.ApplyAtomically]
@@ -3085,7 +3096,7 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 	}
 
 	// Record the user index def BEFORE the WAL commit, while this DDL still
-	// holds the single-writer serialisation (#F-STORE1). A concurrent
+	// holds the exclusive DDL lock (#F-STORE1). A concurrent
 	// non-blocking checkpoint captures (WAL watermark, index defs) under the
 	// commit lock + inflight drain; updating the registry inside the serialised
 	// window here — not after commitIndexTx releases it — guarantees the
@@ -3178,7 +3189,7 @@ func (e *Engine) runDropIndex(ctx context.Context, p *ir.DropIndex, idxMgr *inde
 			return res, nil
 		}
 		// Forget the def from the engine registry BEFORE the WAL commit, while
-		// this DDL still holds the single-writer serialisation (#F-STORE1). The
+		// this DDL still holds the exclusive DDL lock (#F-STORE1). The
 		// index is already gone from the index.Manager (the DropIndexOp above);
 		// aligning the def-registry removal into the same serialised window means
 		// a concurrent non-blocking checkpoint — which captures (WAL watermark,
@@ -3263,7 +3274,7 @@ func dropNumericCompanionIfOrphaned(idxMgr *index.Manager, label, property strin
 //
 // The whole validate → register → seed → WAL-append sequence runs under the
 // engine's writer serialisation (task #1341): for a WAL-backed engine the
-// store's single-writer lock — taken by opening the very transaction that
+// store's writer registration — taken by opening the very transaction that
 // carries the durable constraint op — and for a store-less engine
 // [Engine.writeMu]. Without it a concurrent writer could commit a duplicate
 // value between the validation scan and the value-set seed, leaving a UNIQUE
@@ -3283,17 +3294,20 @@ func (e *Engine) runCreateConstraint(ctx context.Context, p *ir.CreateConstraint
 		return e.createConstraintLocked(ctx, p, kind, idxMgr, nil)
 	}
 	// WAL-backed: open the transaction that will carry the durable constraint
-	// op BEFORE the validation scan. BeginCtx takes the store's single-writer
-	// lock — the same one every RunInTx write holds — so the whole sequence
-	// excludes concurrent writers. The durable op must be committed on THIS
+	// op BEFORE the validation scan. What makes the whole sequence exclude
+	// concurrent writers is schemaMu, taken EXCLUSIVELY above while an ordinary
+	// write takes it shared — NOT the store's admission, which since rmp #2306
+	// excludes nobody. Without that exclusion a writer could insert a violating
+	// row between the validation scan and the registration. The durable op must be committed on THIS
 	// transaction: a nested Begin (the previous appendConstraintOp design)
-	// would deadlock on the non-reentrant single-writer semaphore.
+	// deadlocked on the retired capacity-one semaphore, and would now simply be a
+	// second transaction whose ops are not part of this one.
 	tx, err := e.store.BeginCtx(ctx)
 	if err != nil {
 		return nil, err
 	}
 	res, rerr := e.createConstraintLocked(ctx, p, kind, idxMgr, tx)
-	// Release the single-writer lock when the sequence ended before reaching
+	// Deregister the writer when the sequence ended before reaching
 	// the commit (validation or registration error). After CommitWALOnly —
 	// on success OR failure — the tx is already finished and this Rollback is
 	// a guarded no-op (ErrTxFinished), never a double release; the error is
@@ -3308,7 +3322,7 @@ func (e *Engine) runCreateConstraint(ctx context.Context, p *ir.CreateConstraint
 func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstraint, kind exec.ConstraintKind, idxMgr *index.Manager, tx *txn.Tx[string, float64]) (*Result, error) {
 	// Keep Graph.HasConstraints in sync with the registry on every exit path
 	// (success, IF NOT EXISTS no-op, validation error, or unwind), under the
-	// single-writer lock the caller holds — so a concurrent checkpoint can never
+	// writer registration the caller holds — so a concurrent checkpoint can never
 	// observe a stale "no constraints" count and truncate the WAL (#1464).
 	defer e.syncConstraintCount()
 
@@ -3361,7 +3375,7 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 	// frame) are therefore outside the closure.
 	//
 	// Lock ordering: the caller holds the engine's writer serialisation (store's
-	// single-writer lock for WAL-backed engines, writeMu for store-less) which
+	// writer registration for WAL-backed engines, writeMu for store-less) which
 	// is taken before visMu everywhere in the write path — the ApplyAtomically
 	// call below takes visMu, matching that established ordering.
 	barrierErr := e.g.ApplyAtomically(func() error {
@@ -3472,7 +3486,7 @@ func (e *Engine) runDropConstraint(ctx context.Context, p *ir.DropConstraint, id
 	}
 	res, rerr := e.dropConstraintLocked(ctx, p, idxMgr, tx)
 	// Guarded no-op after CommitWALOnly (success or failure); releases the
-	// single-writer lock on the earlier error paths. See runCreateConstraint.
+	// writer registration on the earlier error paths. See runCreateConstraint.
 	_ = tx.Rollback()
 	return res, rerr
 }
@@ -3590,8 +3604,8 @@ func (e *Engine) constraintAlreadyRegistered(kind exec.ConstraintKind, label, pr
 // commits it WAL-only. tx is the same transaction whose Begin provides the
 // DDL's writer serialisation (task #1341), so the durable record is secured
 // without releasing the lock between registration and append. The commit
-// finishes the tx — on success AND on sync failure — releasing the
-// single-writer lock; the caller's guarded Rollback is then a no-op. The op
+// finishes the tx — on success AND on sync failure — clearing its writer
+// registration; the caller's guarded Rollback is then a no-op. The op
 // carries no node endpoints and applies nothing to the graph: the in-memory
 // registry was already updated by the operator, mirroring the eager-apply +
 // CommitWALOnly pattern the write path uses.
@@ -3611,7 +3625,7 @@ func commitConstraintTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind exe
 	}
 	if err != nil {
 		// Buffering failed; the tx is still open — the caller's deferred
-		// Rollback releases the single-writer lock.
+		// Rollback deregisters the writer.
 		return err
 	}
 	return tx.CommitWALOnly()
@@ -3621,7 +3635,7 @@ func commitConstraintTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind exe
 // WAL-only. tx is the same transaction whose Begin provides the DDL's writer
 // serialisation, so the durable record is secured without releasing the lock
 // between registration and append. The commit finishes the tx — on success
-// AND on sync failure — releasing the single-writer lock; the caller's
+// AND on sync failure — clearing its writer registration; the caller's
 // guarded Rollback is then a no-op. The op carries no node endpoints and
 // applies nothing to the graph: the in-memory index manager was already
 // updated, mirroring the constraint durability pattern (task #1343).
@@ -3637,7 +3651,7 @@ func commitIndexTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind txn.Inde
 	}
 	if err != nil {
 		// Buffering failed; the tx is still open — the caller's deferred
-		// Rollback releases the single-writer lock.
+		// Rollback deregisters the writer.
 		return err
 	}
 	return tx.CommitWALOnly()
@@ -4374,7 +4388,7 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
 // the leak (it depends on the GC schedule) and CANNOT report errors back to
 // the caller. For a write [Result] from [Engine.RunInTx] the WAL transaction
 // is already committed (fsynced) or rolled back under the barrier before
-// RunInTx returns (#1281), so the store's single-writer mutex is released at
+// RunInTx returns (#1281), so the store's writer registration is cleared at
 // that point — a leaked, unclosed Result leaks only the ResultSet, not the
 // write lock. Callers that need predictable resource release MUST still call
 // Close themselves.
@@ -15503,7 +15517,7 @@ func (a *execLabelAdapter) ResolveLabelCount(name string) (int64, bool) {
 // discarded.
 //
 // RunInTx is safe for concurrent use (each call creates an independent
-// operator tree), subject to the single-writer constraint on write queries.
+// operator tree), subject to the per-operator-tree single-goroutine constraint on write queries.
 //
 // If ctx is already cancelled or its deadline has elapsed when RunInTx is
 // called, it returns promptly — before any parse, plan, or [txn.Store.Begin]
@@ -15516,11 +15530,11 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 			cmetrics.IncCounter("cypher.RunInTx.errors", 1)
 		}
 	}()
-	// walTx holds the store's single-writer mutex from Begin() (below) until it
+	// walTx holds the store's writer registration from Begin() (below) until it
 	// is rolled back or handed to the Result for Commit/Rollback in
 	// Result.Close. It is declared here, before the recover boundary registers,
 	// so recoverWriteQueryPanic can roll it back on a panic raised anywhere
-	// after Begin — releasing the single-writer mutex that would otherwise
+	// after Begin — deregistering the writer, which would otherwise
 	// deadlock every future write (ACID atomicity + liveness). On the normal
 	// build-error path the explicit Rollback below still applies.
 	var walTx *txn.Tx[string, float64]
@@ -15582,8 +15596,9 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	// here) pays nothing.
 	undo := &undoLog{}
 
-	// Serialise store-less autocommit writes on the engine writer mutex so they
-	// honour the same single-writer contract an explicit transaction relies on:
+	// Historical note: store-less autocommit writes used to be serialised on the
+	// engine writer mutex so they
+	// honour the same contract an explicit transaction relies on:
 	// without it, a store-less autocommit write could race an open explicit
 	// transaction's writer-mutex hold (#1280 write-write isolation). For a
 	// WAL-backed engine lockWriter is a no-op (Begin below takes the store
@@ -15607,7 +15622,7 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	}
 
 	// The WAL transaction is opened OUTSIDE the visibility barrier: BeginCtx
-	// takes the store's single-writer lock and must not nest under visMu. The
+	// takes the store's writer admission and must not nest under visMu. The
 	// acquire is context-aware: under write contention a caller with a
 	// deadline gets back the context error the instant ctx is cancelled or
 	// expires, instead of blocking on the lock for the holder's full duration
@@ -15943,7 +15958,7 @@ type lpgMutatorAdapter struct {
 	// stats metadata and the driver's ContainsUpdates need. It is allocated by the
 	// engine when it builds a write adapter and is nil on a read-only adapter, so
 	// every count site is guarded and a read path pays nothing. Plain integers, no
-	// atomics: the write path is single-writer and each operator tree owns one
+	// atomics: each operator tree owns one
 	// adapter (see [exec.QueryCounters]).
 	counters *exec.QueryCounters
 	// countersStore is the inline backing store [Engine] points counters at on the

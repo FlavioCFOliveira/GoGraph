@@ -15,9 +15,9 @@ package cypher
 //
 // The handle works on both engine wirings (see [Engine]):
 //
-//   - WAL-backed ([NewEngineWithStore]). BeginTx opens one [txn.Tx]; that tx
-//     holds the store's single-writer mutex from BEGIN until COMMIT/ROLLBACK, so
-//     concurrent writers serialise behind the open transaction (Isolation). On
+//   - WAL-backed ([NewEngineWithStore]). BeginTx opens one [txn.Tx]; that tx is a
+//     registered writer from BEGIN until COMMIT/ROLLBACK, which since rmp #2306
+//     excludes no other writer — it only holds a quiesce off. On
 //     Commit the WAL is fsynced ONCE for the whole transaction (Durability); on
 //     Rollback the WAL transaction is discarded, so a fresh recovery observes
 //     none of the rolled-back writes.
@@ -35,13 +35,13 @@ package cypher
 //
 // # What still serialises, and what owns retiring it
 //
-// Two transaction-lifetime holds remain, both tracked:
+// ONE transaction-lifetime hold remains: the graph's visibility barrier, taken
+// exclusively by BeginTx and held to COMMIT/ROLLBACK. It is now the ONLY thing
+// that makes a paused client block other writers, and retiring it is rmp #2305.
 //
-//   - the graph's visibility barrier, taken exclusively by BeginTx and held to
-//     COMMIT/ROLLBACK. This is now the ONLY thing that makes a paused client block
-//     other writers, and retiring it is rmp #2305.
-//   - the store's single-writer mutex on a WAL-backed engine, taken by
-//     [txn.Store.BeginCtx]. Retiring it is the remaining half of rmp #2306.
+// The store's capacity-one semaphore was the other one; rmp #2306 retired it, so
+// [txn.Store.BeginCtx] now only registers the transaction as an admitted writer
+// for the quiesce accounting.
 //
 // Schema changes are a separate matter and keep a lock of their own
 // ([Engine.schemaMu]): a DDL scans, validates and only then registers, so the
@@ -206,7 +206,7 @@ type ExplicitTx struct {
 	touched *touchedNodes
 
 	// walTx is the single WAL transaction backing the whole explicit transaction,
-	// non-nil only on a WAL-backed engine. It holds the store's single-writer
+	// non-nil only on a WAL-backed engine. It holds the store's writer
 	// mutex from BeginTx until Commit/Rollback — the remaining half of rmp #2306.
 	// nil on a store-less engine, which since rmp #2306 acquires NO writer
 	// serialisation at all: concurrency control there is MVCC and nothing else.
@@ -263,12 +263,12 @@ type ExplicitTx struct {
 	view *pinnedView
 }
 
-// BeginTx opens an explicit, multi-statement transaction bound to ctx and
-// acquires the engine's writer serialisation: the store's single-writer mutex on
-// a WAL-backed engine, or the engine writer mutex on a store-less engine. The
-// caller MUST finish the returned handle with exactly one [ExplicitTx.Commit] or
-// [ExplicitTx.Rollback]; until then the writer serialisation is held and
-// concurrent writers block (write-write Isolation).
+// BeginTx opens an explicit, multi-statement transaction bound to ctx. It acquires
+// NO writer serialisation — concurrency control is MVCC alone since rmp #2306 —
+// but it does take the graph's visibility barrier exclusively, which until
+// rmp #2305 retires it still blocks concurrent writers for the transaction's
+// lifetime. The caller MUST finish the returned handle with exactly one
+// [ExplicitTx.Commit] or [ExplicitTx.Rollback].
 //
 // ctx bounds every statement executed through the handle. Pass the connection
 // context (optionally narrowed with a transaction timeout) so that a cancelled
@@ -323,14 +323,14 @@ func (e *Engine) BeginTx(ctx context.Context) (*ExplicitTx, error) {
 	if e.constraintReg != nil && e.constraintReg.HasAnyNotNull() {
 		tx.touched = &touchedNodes{}
 	}
-	// Open the WAL transaction on a WAL-backed engine. Store.BeginCtx takes the
-	// store's single-writer lock (so the store-less writer mutex above is a
-	// and holds it until Commit/Rollback. The acquire is context-aware: under write
-	// contention a caller whose ctx is cancelled or whose deadline elapses gets back
-	// the context error instead of blocking on the lock for the holder's full
-	// duration (task #1301). Retiring this hold is the remaining half of rmp #2306;
-	// nothing acquired before it needs releasing now that the writer mutex is gone
-	// (rmp #2306).
+	// Open the WAL transaction on a WAL-backed engine. Store.BeginCtx registers this
+	// transaction as an admitted writer until Commit/Rollback. It no longer excludes
+	// anybody (rmp #2306 retired the capacity-one semaphore), so the only thing that
+	// can make this call block is a quiesce in progress — and it stays
+	// context-aware for that case: a caller whose ctx is cancelled or whose deadline
+	// elapses gets the context error back instead of waiting out the quiesce
+	// (task #1301, rmp #2174). Nothing acquired before this point needs releasing on
+	// the error path.
 	if e.store != nil {
 		walTx, beginErr := e.store.BeginCtx(ctx)
 		if beginErr != nil {
@@ -725,7 +725,7 @@ func (tx *ExplicitTx) rollbackInBarrierLocked() (undoOK bool) {
 		tx.cbuf.Rollback()
 	}
 	if tx.walTx != nil {
-		_ = tx.walTx.Rollback() // release store single-writer mutex; in-memory state already restored
+		_ = tx.walTx.Rollback() // deregister the store writer; in-memory state already restored
 	}
 	return undoOK
 }
@@ -736,7 +736,7 @@ func (tx *ExplicitTx) rollbackInBarrierLocked() (undoOK bool) {
 //
 // There is no engine writer serialisation left to release: rmp #2306 retired it, so
 // the acquisition order it used to be the outer half of no longer exists. On a
-// WAL-backed engine the store's single-writer lock is still released by walTx's own
+// WAL-backed engine the store's writer admission is still released by walTx's own
 // Commit/Rollback. Idempotent via the finished flag.
 func (tx *ExplicitTx) release() {
 	if tx.finished {

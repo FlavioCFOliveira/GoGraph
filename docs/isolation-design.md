@@ -429,12 +429,30 @@ before running its closure. With a bounded acquire it can, and the discard produ
 **`(nil, nil)`** — a caller told the statement had succeeded, handed a nil `Result`, and
 panicking on first use.
 
-### What rmp #2306 still owes
+### What rmp #2306 delivered, and what it still owes
 
-The store's single-writer semaphore, a genuine quiesce primitive to replace what
-`RunUnderCommitLock`/`drainInflight` get from it, and a PROOF that the apply gate's
-forced sequencing is removable. Note that the quiesce is now load-bearing for the
-checkpointer, which since rmp #2320 rests on it rather than on `visMu`.
+**Delivered 2026-08-04.** The store's capacity-one semaphore is retired, together
+with a genuine quiesce primitive to replace what `RunUnderCommitLock` used to get
+from it: a dedicated admission gate that is closed *only* while a quiesce runs,
+merged with the in-flight counter so a writer is registered for its whole
+`Begin`→`Commit` lifetime. Closing the gate and draining the count happen under
+one mutex, so no writer can be admitted between the two. Two quiesces exclude each
+other explicitly rather than as a side effect of serialising everything.
+
+The retirement is **throughput-neutral**, and that refutes the premise: the
+semaphore was released after the WAL append and never covered the coalesced fsync
+that dominates a durable commit, so it was never the ceiling (both arms scale ~15×
+at 32 writers; all differences p > 0.18 at n=6). See
+[benchmarks/store-semaphore-retirement-2026-08-04.md](benchmarks/store-semaphore-retirement-2026-08-04.md).
+Its value is architectural: MVCC is now the sole concurrency control, and the
+quiesce is a quiesce.
+
+**Still owed.** A PROOF that the apply gate's forced sequencing is removable — and
+note that the attempt REFUTED it (see the apply-gate note in this document): the
+gate stays until conflict detection exempts the apply and the sequencing becomes
+per-object. `writeScalingFloor` and `writeConcurrencyFloor` also stay below
+`writeScalingTarget`, because they measure the store-LESS wiring, which never had
+the semaphore; its ceiling needs its own profile.
 
 ## The fsync-failure policy (rmp #2306, decided 2026-08-04)
 
@@ -561,12 +579,12 @@ Delivered:
 
   **Since rmp #2320** the eager apply is no longer nested inside an *exclusive*
   visMu hold, so the `View` in the capture contributes nothing to consistency; what
-  the argument now rests on entirely is `RunUnderCommitLock`, which acquires the
-  store's single-writer semaphore AND drains in-flight commits to zero before `fn`
-  runs. Both write paths are inside that in-flight window for their whole apply —
-  the Cypher path from `BeginCtx` to `CommitWALOnly`, the store path from
-  `appendOnly` to `Commit`'s deferred `doneInflight` — so no transaction can be
-  half-applied while the capture walks. rmp #2310 replaces the whole arrangement
+  the argument now rests on entirely is `RunUnderCommitLock`, which closes the
+  writer-admission gate AND drains the admitted writers to zero before `fn` runs.
+  Since rmp #2306 a writer is registered for its WHOLE lifetime — both paths from
+  `BeginCtx`/`Begin` to their `Commit` — where there used to be two abutting
+  windows (the semaphore's, then the in-flight counter's) that a quiesce needed to
+  abut exactly. So no transaction can be half-applied while the capture walks. rmp #2310 replaces the whole arrangement
   with a capture at a transactional instant.
 - **F3.6 (done).** Isolation proven by the invariant battery under `-race`:
   `lpg.TestIsolation_ApplyAtomically_View_NoPartialReads` (property atomicity,
@@ -584,8 +602,9 @@ untouched and stays lock-free):
 
 1. **Reader/writer mutual exclusion.** A write query holds the visibility write
    lock for its execution, excluding concurrent transactional readers (and vice
-   versa). Under the single-writer model writers are already serialised; this
-   adds reader exclusion during a write.
+   versa). This was written when writers were serialised anyway, so it read as
+   adding only reader exclusion; since rmp #2306 writers are NOT serialised, so an
+   exclusive hold here would also reintroduce writer serialisation.
 2. **Materialisation allocations.** Cypher queries now buffer their result rows
    (one shallow `Record` copy per row) instead of reusing a single streaming
    `Record`, adding `O(rows)` allocations per query and holding the full result

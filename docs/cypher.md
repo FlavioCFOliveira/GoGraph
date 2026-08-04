@@ -1011,11 +1011,13 @@ with `Engine.BeginTx`:
 func (e *Engine) BeginTx(ctx context.Context) (*cypher.ExplicitTx, error)
 ```
 
-`BeginTx` acquires the engine's writer serialisation (the WAL store's
-single-writer lock when the engine is WAL-backed, the engine writer mutex when
-it is store-less) and holds it for the lifetime of the returned handle. If `ctx`
-is already cancelled or its deadline has elapsed, `BeginTx` returns promptly
-without acquiring any lock, wrapping the context error.
+`BeginTx` acquires **no writer serialisation** — since rmp #2306 concurrency
+control is MVCC alone, and a write-write collision between two transactions is
+detected at commit rather than prevented. It does take the graph's visibility
+barrier exclusively for the lifetime of the returned handle, which until rmp #2305
+retires that hold still blocks concurrent writers. If `ctx` is already cancelled or
+its deadline has elapsed, `BeginTx` returns promptly, wrapping the context
+error.
 
 The returned `*ExplicitTx` exposes:
 

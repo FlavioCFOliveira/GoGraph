@@ -6,6 +6,38 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Concurrency control is now MVCC and nothing else** (rmp #2306). The
+  `txn.Store`'s capacity-one single-writer semaphore is retired. Independent write
+  transactions run concurrently on both engine wirings, and a write-write
+  collision is DETECTED at commit by first-updater-wins on the version chain
+  rather than prevented by holding a lock. `txn.Store.Begin`/`BeginCtx` now only
+  register the transaction as an admitted writer; the registration excludes no
+  other writer.
+
+  **Observable behaviour change.** With nothing serialising writers, two
+  concurrent `MERGE` statements on the same pattern can both find no match and
+  both create — measured at eight duplicates from eight writers. This is inherent
+  to MVCC (two CREATEs of two distinct new nodes are not a conflict, so there is
+  nothing to arbitrate) and matches Neo4j, which requires a uniqueness constraint
+  for the same reason. **With a `UNIQUE` constraint on the merged property the
+  duplicates collapse to exactly one**, because the constraint's reservation is
+  atomic. Callers relying on MERGE to be idempotent under concurrency must declare
+  the constraint.
+
+  Retiring the semaphore is **throughput-neutral** — the premise that it was a
+  bottleneck is refuted by measurement (all p > 0.18 at n=6; both arms scale ~15×
+  at 32 writers), because it was released after the WAL append and never covered
+  the coalesced fsync that dominates a durable commit. Full A/B in
+  [docs/benchmarks/store-semaphore-retirement-2026-08-04.md](docs/benchmarks/store-semaphore-retirement-2026-08-04.md).
+
+  Quiesce (`txn.Store.RunUnderCommitLock`, used by `store.DB.Close` and the
+  checkpointer) no longer borrows the semaphore. It closes a dedicated admission
+  gate and drains the admitted writers to zero, both under one mutex, so a writer
+  cannot be admitted between the two steps. Two quiesces exclude each other
+  explicitly rather than as a side effect.
+
 ### Fixed
 
 - **Durability — a commit whose frames were already on stable storage could be

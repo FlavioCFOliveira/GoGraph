@@ -72,10 +72,11 @@ package exec
 //
 // # Concurrency
 //
-// MergePattern is NOT safe for concurrent use. The engine's single-writer
-// guarantee serialises concurrent MERGE callers so the search-then-create
-// sequence is race-free against other writers, exactly as for
-// [MergeRelationship].
+// MergePattern is NOT safe for concurrent use: one operator tree is driven by one
+// goroutine. Its search-then-create sequence is NOT race-free against other
+// writers — nothing serialises them since rmp #2306 — exactly as for
+// [MergeRelationship]. See [Merge] for the measured behaviour and the
+// uniqueness-constraint remedy.
 //
 // # Atomicity
 //

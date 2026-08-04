@@ -104,7 +104,7 @@ func (i *Index[V]) BoundNode() (label, property string, ok bool) {
 //     value is inserted / deleted.
 //
 // Apply is idempotent (bitmap add/remove) and safe for concurrent use with
-// readers; writers are serialised upstream by the engine's single-writer
+// readers; writers are single-goroutine per operator tree upstream of the engine's
 // transaction contract. Edge changes and changes for other properties/labels
 // are ignored.
 func (i *Index[V]) applyBound(c index.Change) {

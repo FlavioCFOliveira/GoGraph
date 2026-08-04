@@ -763,7 +763,7 @@ func concBase(id int64) int64 { return id * 10 }
 
 // runConcurrentWriters drives `writers` goroutines committing durable
 // multi-op transactions through the typed Store/Tx API — the path that releases
-// the single-writer semaphore after the append and fsyncs outside it, so many
+// the writer admission (retired in rmp #2306) after the append and fsyncs outside it, so many
 // committers are inside wal.Writer.SyncGroup at once — and crashes at the named
 // breakpoint inside the WAL commit path while several transactions are in
 // flight.

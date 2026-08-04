@@ -411,17 +411,17 @@ type Options[N comparable, W any] struct {
 // writer lock that serialises transactions.
 //
 // Concurrency: any number of goroutines may call Begin/BeginCtx;
-// transactions serialise on a single-writer semaphore, so only one Tx is
+// transactions no longer serialise on a semaphore, so more than one Tx is
 // active at any moment. Reads on the underlying lpg.Graph remain
 // concurrent and lock-free per the lpg/adjlist contracts.
-// [Store.RunUnderCommitLock] runs a closure while holding that same
-// commit semaphore, so a background checkpointer can exclude the commit
-// window while it snapshots and truncates the WAL.
+// [Store.RunUnderCommitLock] is the one thing that DOES exclude writers: it
+// closes the admission gate and drains the admitted writers to zero, so a
+// background checkpointer can quiesce the store while it snapshots and
+// truncates the WAL.
 //
-// The single-writer lock is a buffered channel of capacity one used as a
-// binary semaphore rather than a [sync.Mutex], so the acquire is
-// cancellable: [Store.BeginCtx] selects the acquire against ctx.Done() and
-// returns the context error without blocking for the holder's full
+// Admission is cancellable, which is the property a deadline-bearing caller
+// needs: [Store.BeginCtx] waits on the current quiesce against ctx.Done() and
+// returns the context error without blocking for the quiesce's full
 // duration. A [sync.Mutex] cannot honour a deadline while it is contended;
 // the semaphore can, which is what makes the engine write path
 // ([cypher.Engine.RunInTx]) respect a caller's deadline under write
@@ -450,7 +450,7 @@ type Store[N comparable, W any] struct {
 	// the append path that fills the next group-commit batch.
 	//
 	// The entry count is bounded by the number of in-flight committers, which the
-	// single-writer semaphore and the in-flight counter already bound; each entry
+	// admission accounting already bounds; each entry
 	// is removed by the successor's wake or consumed by its own fast path.
 	applyWaiters map[uint64]chan struct{}
 
@@ -459,12 +459,26 @@ type Store[N comparable, W any] struct {
 
 	inflightCond *sync.Cond
 
-	// sem is the single-writer semaphore: a buffered channel of capacity
-	// one. A send acquires the writer (Begin / BeginCtx / RunUnderCommitLock);
-	// a receive releases it (Tx.release / RunUnderCommitLock's defer). It is
-	// allocated once at construction ([newStore]); a zero-value Store is not
-	// usable. See [Store.acquire] / [Store.release].
-	sem chan struct{}
+	// quiesceDone is the WRITER-ADMISSION GATE, and it is the whole of what
+	// replaced the single-writer semaphore (rmp #2306).
+	//
+	// nil is the steady state: writers are admitted freely and concurrently, so
+	// nothing here serialises independent transactions. It is non-nil only while a
+	// quiesce ([Store.RunUnderCommitLock]) is in progress, and is closed when that
+	// quiesce ends, which wakes every writer parked in [Store.enterWriter].
+	//
+	// The distinction from the semaphore it replaced matters. That semaphore did
+	// two unrelated jobs with one primitive: it serialised writers (concurrency
+	// control, which MVCC now owns outright) and it doubled as the quiesce
+	// boundary. Keeping only the second job makes this a genuine quiesce
+	// primitive — a barrier that is closed only when somebody actually needs the
+	// store still — and it costs an admitted writer nothing beyond the in-flight
+	// registration it already performed.
+	//
+	// Guarded by inflightMu, which also guards inflight, so closing the gate and
+	// reading the in-flight count are one atomic step: that is what makes the
+	// drain sound.
+	quiesceDone chan struct{}
 
 	// maxTxnOps is the per-transaction op cap enforced in the commit/append
 	// path: a transaction buffering more than this many ops is rejected with
@@ -491,18 +505,27 @@ type Store[N comparable, W any] struct {
 	// Commit/CommitWALOnly increments it once and stamps the
 	// value into every v3 op frame and the trailing [OpCommit] marker, so
 	// recovery can group a transaction's frames and apply them atomically.
-	// It is incremented only while the single-writer semaphore is held (the
-	// lock acquired in Begin), so the atomic type is for safe publication
-	// rather than contended access.
+	// Concurrent committers increment it at the same time since rmp #2306, so the
+	// atomic type carries genuine contended access and is no longer merely for
+	// safe publication. Add is what makes the sequence space dense and unique
+	// without any lock, which is the property the apply gate needs
+	// ([Tx.waitApplyTurn]).
 	txnSeq atomic.Uint64
 
+	// inflight counts ADMITTED WRITERS: incremented in [Store.enterWriter] when a
+	// transaction is admitted at Begin, decremented in [Store.exitWriter] when its
+	// Commit / CommitWALOnly / Rollback has entirely finished (past SyncGroup and
+	// the apply gate). It therefore covers a transaction's WHOLE lifetime.
+	//
+	// That is one window, where there used to be two abutting ones: the semaphore
+	// covered Begin through the append, and this counter covered the append through
+	// the end of the commit. A quiesce needed both, and needed them to abut
+	// exactly. Merging them removes the seam rather than reasoning about it.
 	inflight int
 
 	// --- group-commit apply gate (#1507) ---
 	//
-	// Group commit releases the single-writer semaphore after a transaction's
-	// frames are appended (so the next transaction can append while this one
-	// fsyncs), and the fsync itself is coalesced across committers by
+	// Committers overlap freely and the fsync is coalesced across them by
 	// [wal.Writer.SyncGroup]. But [Tx.Commit]'s post-durability in-memory apply
 	// ([applyOp] under [lpg.Graph.ApplyVersioned], rmp #2320) must still run in
 	// transaction-sequence order: applying a higher-seq transaction before a
@@ -510,34 +533,28 @@ type Store[N comparable, W any] struct {
 	// earlier transaction was to create (lpg property writes are
 	// create-on-demand), letting a [lpg.Graph.View] reader observe a state no
 	// serial schedule produces — a Consistency/Isolation regression. The apply
-	// gate restores that order WITHOUT holding the append semaphore across the
+	// gate restores that order WITHOUT serialising the commit path around the
 	// fsync: a committer waits until appliedSeq == its seq-1, applies, then
-	// advances appliedSeq and wakes the next committer.
+	// advances appliedSeq and wakes the next committer. rmp #2306 tried to remove
+	// it and MEASURED that it cannot be: see
+	// [TestApplyGate_ADurableCommitIsNeverRefusedByConflictDetection].
 	//
 	// applyMu guards appliedSeq and applyWaiters.
 	applyMu sync.Mutex
 
-	// --- in-flight commit tracker (#1507 quiesce boundary) ---
+	// --- quiesce boundary (#1507, reshaped by rmp #2306) ---
 	//
-	// Group commit releases the single-writer semaphore after the append phase
-	// but BEFORE the coalesced fsync ([wal.Writer.SyncGroup]) and the
-	// sequence-ordered apply. The semaphore therefore no longer bounds the
-	// in-flight-fsync window, but [Store.RunUnderCommitLock] — the seam
+	// A committer's fsync ([wal.Writer.SyncGroup]) and its sequence-ordered apply
+	// run after the WAL append, and [Store.RunUnderCommitLock] — the seam
 	// [store.DB] and a checkpointer use to exclude the commit path while they
-	// close or truncate the WAL — relied on the semaphore bounding it. Without a
-	// separate tracker, RunUnderCommitLock could acquire the semaphore while a
-	// committer is parked inside SyncGroup, and the caller's fn (e.g. wal.Close)
-	// would then race that in-flight flush+fsync, making un-acknowledged frames
-	// durable (an acked != durable violation).
+	// close or truncate the WAL — must exclude all of it, not just the append.
 	//
-	// inflight counts committers that have released the semaphore but not yet
-	// finished their SyncGroup + apply. A committer increments it WHILE STILL
-	// HOLDING the semaphore (in markInflight, before releaseAfterAppend), so
-	// once the semaphore is free the increment is already visible to a
-	// RunUnderCommitLock that then acquires it; the committer decrements (and
-	// broadcasts when reaching zero) only after its entire commit finishes
-	// (doneInflight). The increment MUST happen-before the release; reversing
-	// them reopens the race.
+	// It does that with the admission gate (quiesceDone) and the admitted-writer
+	// count (inflight), both guarded by inflightMu: close the gate so no new
+	// writer is admitted, then drain the count to zero so every admitted one has
+	// finished. Until rmp #2306 the first half was the capacity-one semaphore,
+	// which excluded new writers only as a side effect of serialising every
+	// write.
 	inflightMu sync.Mutex
 }
 
@@ -590,7 +607,6 @@ func NewStoreWithCodec[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer
 func NewStoreWithCodecCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer, codec Codec[N], maxTxnOps int) *Store[N, W] {
 	defer metrics.Time("store.txn.NewStoreWithCodecCapped").Stop()
 	s := &Store[N, W]{
-		sem:       make(chan struct{}, 1),
 		g:         g,
 		wal:       wlog,
 		codec:     codec,
@@ -636,7 +652,6 @@ func NewStoreWithOptions[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writ
 func NewStoreWithOptionsCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer, opts Options[N, W], maxTxnOps int) *Store[N, W] {
 	defer metrics.Time("store.txn.NewStoreWithOptionsCapped").Stop()
 	s := &Store[N, W]{
-		sem:       make(chan struct{}, 1),
 		g:         g,
 		wal:       wlog,
 		codec:     opts.Codec,
@@ -700,32 +715,57 @@ func (s *Store[N, W]) MaxTxnOps() int { return s.maxTxnOps }
 // every read transaction-consistent without the barrier.
 func (s *Store[N, W]) Graph() *lpg.Graph[N, W] { return s.g }
 
-// acquire takes the single-writer semaphore, honouring ctx. It first
-// fails fast if ctx is already done (so an already-cancelled caller never
-// acquires even when the semaphore is free — the select below would
-// otherwise pick a ready case pseudo-randomly), then blocks on a send into
-// the capacity-one channel, racing it against ctx.Done(). On cancellation
-// it returns ctx.Err() WITHOUT having acquired, so there is nothing to
-// release. A nil return means the writer is held and the caller must
-// eventually call [Store.release] exactly once.
-func (s *Store[N, W]) acquire(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	select {
-	case s.sem <- struct{}{}:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+// enterWriter admits a writer and registers it as in-flight, honouring ctx.
+//
+// In the steady state — no quiesce in progress — it does NOT block: any number of
+// writers are admitted concurrently, which is the point of retiring the
+// single-writer semaphore (rmp #2306). It blocks only while a
+// [Store.RunUnderCommitLock] has the admission gate closed, and it honours the
+// caller's deadline throughout, which is the property the old cancellable
+// semaphore acquire existed to provide (rmp #2174).
+//
+// The wait costs no goroutine: a parked writer selects on the current quiesce's
+// done channel against ctx.Done(). The loop re-checks under the mutex after each
+// wake because a second quiesce may have started in between; closing the gate is
+// not the same as holding it.
+//
+// A nil return means the writer is registered and the caller MUST call
+// [Store.exitWriter] exactly once.
+func (s *Store[N, W]) enterWriter(ctx context.Context) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		s.inflightMu.Lock()
+		if s.quiesceDone == nil {
+			s.inflight++
+			s.inflightMu.Unlock()
+			return nil
+		}
+		done := s.quiesceDone
+		s.inflightMu.Unlock()
+		metrics.IncCounter("store.txn.enterWriter.blocked", 1)
+		select {
+		case <-done:
+		case <-ctx.Done():
+			metrics.IncCounter("store.txn.enterWriter.errors", 1)
+			return ctx.Err()
+		}
 	}
 }
 
-// release frees the single-writer semaphore. It must be called exactly
-// once for every successful [Store.acquire]; calling it without a prior
-// successful acquire would let a second writer in and break mutual
-// exclusion. The receive cannot block: the channel holds exactly one token
-// while the writer is held.
-func (s *Store[N, W]) release() { <-s.sem }
+// exitWriter deregisters an admitted writer, waking a draining quiesce when the
+// count reaches zero. It must be called exactly once for every successful
+// [Store.enterWriter]; an unpaired call would let a quiesce believe the store is
+// still while a transaction is running.
+func (s *Store[N, W]) exitWriter() {
+	s.inflightMu.Lock()
+	s.inflight--
+	if s.inflight == 0 {
+		s.inflightCond.Broadcast()
+	}
+	s.inflightMu.Unlock()
+}
 
 // RunUnderCommitLock runs fn while holding the store's single-writer
 // commit lock — the SAME semaphore [Store.Begin] acquires and
@@ -755,60 +795,52 @@ func (s *Store[N, W]) release() { <-s.sem }
 // transaction on the store.
 func (s *Store[N, W]) RunUnderCommitLock(fn func() error) error {
 	defer metrics.Time("store.txn.RunUnderCommitLock").Stop()
-	// acquire(context.Background()) cannot fail, so the held token is
-	// guaranteed and the deferred release is always paired with it.
-	_ = s.acquire(context.Background())
-	defer s.release()
-	// Drain in-flight group commits before running fn. Holding the semaphore
-	// excludes any NEW commit from appending and bumping inflight; once the
-	// semaphore is held, every committer that already released it has its
-	// inflight increment visible (the increment happens-before the release).
-	// Waiting for inflight==0 therefore guarantees no SyncGroup (flush+fsync)
-	// is in flight when fn (e.g. wal.Close / wal.Truncate) runs, restoring the
-	// quiesce boundary the semaphore alone no longer provides under group
-	// commit. The wait is uncancellable, matching the acquire above.
-	s.drainInflight()
-	return fn()
-}
-
-// markInflight registers a committer as in-flight (past the append phase,
-// pending its SyncGroup + apply). It MUST be called while the single-writer
-// semaphore is still held, immediately before [Tx.releaseAfterAppend], so the
-// increment happens-before the release and is visible to any
-// [Store.RunUnderCommitLock] that subsequently acquires the semaphore.
-func (s *Store[N, W]) markInflight() {
 	s.inflightMu.Lock()
-	s.inflight++
-	s.inflightMu.Unlock()
-}
-
-// doneInflight clears the in-flight registration of a committer that has
-// finished its entire commit (SyncGroup returned and the apply gate advanced).
-// It broadcasts when the count reaches zero so a draining
-// [Store.RunUnderCommitLock] is woken. It must be called exactly once for every
-// [Store.markInflight].
-func (s *Store[N, W]) doneInflight() {
-	s.inflightMu.Lock()
-	s.inflight--
-	if s.inflight == 0 {
-		s.inflightCond.Broadcast()
+	// Two quiesces must not overlap: fn is a store-wide operation (wal.Close,
+	// wal.Truncate, a snapshot capture) and running two concurrently is exactly
+	// what the old capacity-one semaphore prevented as a side effect of
+	// serialising everything. Wait for any in-progress quiesce to finish and then
+	// re-check, because another waiter may win the gate first.
+	for s.quiesceDone != nil {
+		waitFor := s.quiesceDone
+		s.inflightMu.Unlock()
+		<-waitFor
+		s.inflightMu.Lock()
 	}
+	// CLOSE THE GATE, then drain — both under the one mutex that guards them, so
+	// no writer can be admitted between the two. Closing the gate stops NEW
+	// writers; draining to zero waits out the ones already admitted, including
+	// every committer inside a SyncGroup flush+fsync. Only then can fn touch the
+	// WAL. The drain is uncancellable, as the semaphore acquire it replaces was.
+	done := make(chan struct{})
+	s.quiesceDone = done
+	s.drainInflight()
 	s.inflightMu.Unlock()
+
+	err := fn()
+
+	// Reopen the gate BEFORE waking the parked writers. In the other order a woken
+	// writer re-checks, still sees a non-nil gate, and parks again on a channel
+	// that is already closed — a busy spin instead of an admission.
+	s.inflightMu.Lock()
+	s.quiesceDone = nil
+	s.inflightMu.Unlock()
+	close(done)
+	return err
 }
 
-// drainInflight blocks until no group commit is in flight. The caller must hold
-// the single-writer semaphore so no new commit can start; the wait is
-// uncancellable.
+// drainInflight blocks until no admitted writer remains. The caller must hold
+// inflightMu AND have already closed the admission gate (quiesceDone != nil), or
+// a newly admitted writer would make the count rise again after it reached zero
+// and the drain would prove nothing. The wait is uncancellable.
 func (s *Store[N, W]) drainInflight() {
-	s.inflightMu.Lock()
 	for s.inflight != 0 {
 		s.inflightCond.Wait()
 	}
-	s.inflightMu.Unlock()
 }
 
 // Begin opens a new transaction. The returned Tx holds the
-// store's single-writer lock until Commit or Rollback runs. The acquire is
+// writer registration until Commit or Rollback runs. The admission is
 // uncancellable; callers that need a deadline must use [Store.BeginCtx].
 func (s *Store[N, W]) Begin() *Tx[N, W] {
 	defer metrics.Time("store.txn.Begin").Stop()
@@ -823,11 +855,11 @@ func (s *Store[N, W]) Begin() *Tx[N, W] {
 // writer holds the lock — rather than blocking for the holder's full
 // duration. This is what lets a deadline-bearing engine write
 // ([cypher.Engine.RunInTx]) honour its deadline under write contention. On a
-// nil error the returned Tx holds the lock until Commit or Rollback runs;
-// once held, further ctx checks happen at the caller's discretion.
+// nil error the returned Tx is a registered writer until Commit or Rollback
+// runs; once admitted, further ctx checks happen at the caller's discretion.
 func (s *Store[N, W]) BeginCtx(ctx context.Context) (*Tx[N, W], error) {
 	defer metrics.Time("store.txn.BeginCtx").Stop()
-	if err := s.acquire(ctx); err != nil {
+	if err := s.enterWriter(ctx); err != nil {
 		metrics.IncCounter("store.txn.BeginCtx.errors", 1)
 		return nil, err
 	}
@@ -871,13 +903,16 @@ type Op[N comparable, W any] struct {
 	IndexKind IndexKind
 }
 
-// Tx is an in-progress transaction. It holds the store's single-writer
-// lock from [Store.Begin] / [Store.BeginCtx] until [Tx.Commit] or
-// [Tx.Rollback] runs, and buffers its mutations in an unsynchronised
-// slice. A Tx is therefore NOT safe for concurrent use: it is owned by
-// the single goroutine that opened it, which must drive every operation
-// and the terminal Commit/Rollback. Distinct transactions are serialised
-// by the single-writer lock, so they never run concurrently.
+// Tx is an in-progress transaction. It is registered as an admitted writer from
+// [Store.Begin] / [Store.BeginCtx] until [Tx.Commit] or [Tx.Rollback] runs, and
+// buffers its mutations in an unsynchronised slice. A Tx is therefore NOT safe
+// for concurrent use: it is owned by the single goroutine that opened it, which
+// must drive every operation and the terminal Commit/Rollback.
+//
+// DISTINCT transactions, by contrast, DO run concurrently. Until rmp #2306 they
+// were serialised by a capacity-one semaphore; concurrency control is now MVCC
+// alone, so two transactions overlap freely and a write-write conflict between
+// them is detected and reported rather than prevented by exclusion.
 type Tx[N comparable, W any] struct {
 	store    *Store[N, W]
 	ops      []Op[N, W]
@@ -911,8 +946,8 @@ func (t *Tx[N, W]) AddEdge(src, dst N, w W) error {
 	// rmp #2304 as a documented non-dependency rather than by moving the mint.
 	//
 	// Handles are minted at BUFFER time, here, while the transaction's WAL
-	// sequence is minted later under the store semaphore ([Tx.appendOnly]). With
-	// one writer at a time the two agreed; with concurrent writers they do not —
+	// sequence is minted later, in [Tx.appendOnly]. With one writer at a time the
+	// two agreed; with concurrent writers they do not —
 	// a transaction can buffer a higher handle and take a lower sequence. The
 	// question the finding raises is whether anything reads that correspondence.
 	// Nothing does, and the two reasons are structural rather than incidental:
@@ -1192,18 +1227,18 @@ func (t *Tx[N, W]) Commit() error {
 		return ErrTxFinished
 	}
 
-	// Group-commit phase 1 — APPEND under the single-writer semaphore: cap
-	// check, mint the transaction sequence, encode and append every op frame
-	// plus the OpCommit marker. The semaphore is released the instant the
-	// append completes (releaseAfterAppend) so the next transaction can Begin
-	// and append while this one fsyncs — the precondition for fsync coalescing
-	// (#1507). The on-disk frame order is unchanged (still serialised by the
-	// semaphore in sequence order).
+	// Group-commit phase 1 — APPEND: cap check, mint the transaction sequence,
+	// encode and append every op frame plus the OpCommit marker. Contiguity of a
+	// transaction's frames is enforced by [wal.Writer.AppendRun], which holds the
+	// writer's own mutex for the framing only; nothing here serialises the
+	// transaction as a whole (rmp #2306). Frame order need not match sequence
+	// order and recovery does not require it — it groups a transaction by the
+	// TxnSeq each frame carries.
 	seq, hasSeq, mark, appendErr := t.appendOnly()
 	// Pair the in-flight registration appendOnly made: cleared only after the
 	// entire commit (SyncGroup + apply gate) below has finished, so a draining
 	// RunUnderCommitLock never closes the WAL mid-fsync.
-	defer t.store.doneInflight()
+	defer t.store.exitWriter()
 
 	if !hasSeq {
 		// No sequence was minted (empty commit, or the cap-check rejection
@@ -1322,7 +1357,7 @@ func (t *Tx[N, W]) CommitWALOnly() error {
 	}
 
 	seq, hasSeq, mark, appendErr := t.appendOnly()
-	defer t.store.doneInflight()
+	defer t.store.exitWriter()
 	if !hasSeq {
 		if appendErr != nil {
 			metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
@@ -1353,9 +1388,10 @@ func (t *Tx[N, W]) CommitWALOnly() error {
 
 // waitApplyTurn blocks until the in-memory apply of every transaction with a
 // lower sequence than seq has completed (appliedSeq == seq-1), so this
-// transaction applies in WAL/sequence order. Sequences are dense and assigned
-// under the single-writer semaphore, so the predecessor is always exactly
-// seq-1. See the apply-gate fields on [Store].
+// transaction applies in WAL/sequence order. Sequences are dense because they
+// come from a single atomic increment ([Store.txnSeq]) — never because a lock
+// serialised the minting — so the predecessor is always exactly seq-1 whether or
+// not committers overlap. See the apply-gate fields on [Store].
 func (t *Tx[N, W]) waitApplyTurn(seq uint64) {
 	s := t.store
 	s.applyMu.Lock()
@@ -1451,12 +1487,11 @@ func releaseApplySlot(ch chan struct{}) { applySlotPool.Put(ch) }
 // boundary). The caller MUST pair it with exactly one [Store.doneInflight] once
 // the whole commit (SyncGroup + apply gate) finishes.
 func (t *Tx[N, W]) appendOnly() (seq uint64, hasSeq bool, watermark int64, err error) {
-	t.store.markInflight()
 	if len(t.ops) == 0 {
 		// Empty commit: mint no sequence and write no marker. The caller still
 		// runs SyncGroup to flush any prior buffered tail (the historical
 		// no-op-with-Sync behaviour), then applies nothing.
-		t.releaseAfterAppend()
+		t.markFinished()
 		return 0, false, 0, nil
 	}
 	// Bounded resources / Durability: reject an over-cap transaction BEFORE
@@ -1467,7 +1502,7 @@ func (t *Tx[N, W]) appendOnly() (seq uint64, hasSeq bool, watermark int64, err e
 	// (see [ErrTransactionTooLarge], [DefaultMaxTxnOps]).
 	if t.store.maxTxnOps > 0 && len(t.ops) > t.store.maxTxnOps {
 		metrics.IncCounter("store.txn.appendOnly.txnTooLarge", 1)
-		t.releaseAfterAppend()
+		t.markFinished()
 		return 0, false, 0, fmt.Errorf("%w: %d ops > cap %d", ErrTransactionTooLarge, len(t.ops), t.store.maxTxnOps)
 	}
 	// Mint the sequence. From here hasSeq is true on every return: the sequence
@@ -1488,7 +1523,7 @@ func (t *Tx[N, W]) appendOnly() (seq uint64, hasSeq bool, watermark int64, err e
 	// finding E5). Recovery commits the ops carrying a marker's own TxnSeq and
 	// discards the buffered prefix as orphaned, which is correct only while a
 	// transaction's frames cannot interleave with another's. That property used to
-	// rest on the store semaphore below still being held here; it now rests on the
+	// rest on the store semaphore that used to be held here; it now rests on the
 	// WAL writer itself, which is the component that owns the file. See
 	// [wal.Writer.AppendRun] and docs/design-wal-transaction-contiguity.md.
 	//
@@ -1510,12 +1545,12 @@ func (t *Tx[N, W]) appendOnly() (seq uint64, hasSeq bool, watermark int64, err e
 		return emit(marker)
 	})
 	if aerr != nil {
-		t.releaseAfterAppend()
+		t.markFinished()
 		return seq, true, mark, aerr
 	}
 	// Frames + marker are buffered. Release the semaphore so the next
 	// transaction can append while this one fsyncs (group-commit coalescing).
-	t.releaseAfterAppend()
+	t.markFinished()
 	return seq, true, mark, nil
 }
 
@@ -1526,28 +1561,23 @@ func (t *Tx[N, W]) Rollback() error {
 		metrics.IncCounter("store.txn.Rollback.errors", 1)
 		return ErrTxFinished
 	}
-	t.releaseAfterAppend()
+	t.markFinished()
+	t.store.exitWriter()
 	return nil
 }
 
-// releaseAfterAppend marks the transaction finished and frees the store's
-// single-writer semaphore, exactly once. It is called from [Tx.appendOnly] (on
-// every path), from [Tx.Rollback], and the entry-point finished guard in
-// Commit/CommitWALOnly/Rollback ensures it is reached once per transaction, so
-// the capacity-one semaphore is never over-released (which would let a second
-// writer in). The idempotency check makes a double call (defensive) a no-op.
+// markFinished marks the transaction as having consumed its lifecycle, exactly
+// once, so a second Commit / CommitWALOnly / Rollback is rejected with
+// [ErrTxFinished] rather than acting twice.
 //
-// NOTE: under group commit the semaphore is released here — after the frames
-// are appended but BEFORE the coalesced fsync — so the fsync window no longer
-// holds the writer lock. The fsync's durability and the sequence-ordered
-// in-memory apply are coordinated separately (SyncGroup and the apply gate);
-// they do not depend on the semaphore being held.
-func (t *Tx[N, W]) releaseAfterAppend() {
-	if t.finished {
-		return
-	}
+// It no longer releases anything. Until rmp #2306 this was releaseAfterAppend and
+// it freed the single-writer semaphore here — mid-commit, right after the append
+// — so that the coalesced fsync did not hold the writer lock. With the semaphore
+// retired there is nothing to free at this point: the writer's registration spans
+// the whole transaction and is cleared by [Store.exitWriter] when the commit has
+// entirely finished. Rollback, which does no commit, calls both.
+func (t *Tx[N, W]) markFinished() {
 	t.finished = true
-	t.store.release()
 }
 
 // encodeOpTyped serialises one op to a v2 (tagged) WAL payload using

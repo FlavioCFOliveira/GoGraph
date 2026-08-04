@@ -62,11 +62,10 @@ later round that failed after a leader had already fsynced this caller's marker.
 acknowledge (an empty commit's courtesy flush of a buffered tail) and must never
 be used to decide a commit's fate.
 
-A commit is acknowledged
-only after the covering fsync, so atomicity and durability are preserved (a
-failed group fsync fails every member of the group whose frames that fsync did
-not cover), and the in-memory state is
-applied strictly in WAL sequence order, so isolation is preserved (the
+A commit is acknowledged only after the covering fsync, so atomicity and
+durability are preserved (a failed group fsync fails every member of the group
+whose frames that fsync did not cover), and the in-memory state is applied
+strictly in WAL sequence order, so isolation is preserved (the
 group-commit measurements are in
 [docs/benchmarks/v0.3.1.md](benchmarks/v0.3.1.md)). Every store is a typed store
 on the v3 commit path; the legacy v1
@@ -74,15 +73,29 @@ fmt-codec write path was removed (see "WAL payload schema" below), so
 there is no non-durable, non-atomic per-op framing left in the module.
 
 `Tx.Rollback` neither writes to the WAL nor mutates the graph;
-nothing is durable, nothing is visible, mutex released.
+nothing is durable, nothing is visible, and the writer deregisters.
 
 ## Transaction isolation
 
-`Store` holds a single `sync.Mutex` taken by `Begin` and released
-by `Commit`/`Rollback`. The transactional layer is therefore
-**single-writer / multi-reader**: reads on the underlying graph go
-straight through `csr.CSR` / `adjlist.AdjList` which are lock-free
-on the read path, while writes serialise.
+**Writes do not serialise.** Since rmp #2306 the transactional layer's
+concurrency control is MVCC and nothing else: `Begin`/`BeginCtx` register the
+transaction as an admitted writer and `Commit`/`Rollback` deregister it, but the
+registration excludes no other writer. A write-write collision between two
+transactions is DETECTED at commit by first-updater-wins on the version chain and
+reported as a serialization conflict, rather than prevented by a lock. The
+registration exists for one purpose: a quiesce
+(`txn.Store.RunUnderCommitLock`) closes the admission gate and drains the
+admitted writers to zero, which is what lets `store.DB.Close` and the
+checkpointer touch the WAL with no commit in flight.
+
+Reads are unaffected and remain lock-free: they go straight through `csr.CSR` /
+`adjlist.AdjList`.
+
+This replaced a capacity-one semaphore that made the layer single-writer. Retiring
+it was throughput-neutral — it was released after the WAL append and never covered
+the coalesced fsync that dominates a durable commit — so its removal is an
+architectural correction rather than an optimisation. See
+[benchmarks/store-semaphore-retirement-2026-08-04.md](benchmarks/store-semaphore-retirement-2026-08-04.md).
 
 ## File layout on disk
 
@@ -960,11 +973,13 @@ signal — a goroutine leak. The correct order makes both impossible: the
 loop is gone before the WAL is touched for the last time.
 
 Quiescing writers is a **separate** responsibility and comes first: a
-`txn.Store` transaction holds the store's single-writer semaphore from
-`Begin` until `Commit`/`Rollback`, and a `cypher.Engine` write holds it
-for the statement's duration. The shutdown sequence must stop admitting
-new writes and let the active one finish **before** step 2, so no
-transaction is mid-commit when the WAL is closed.
+`txn.Store` transaction is a registered writer from `Begin` until
+`Commit`/`Rollback`, and a `cypher.Engine` write registers for the
+statement's duration. Registration does not exclude other writers — since
+rmp #2306 concurrency control is MVCC alone — but it is exactly what a
+quiesce drains. The shutdown sequence must close the admission gate and
+let every admitted writer finish **before** step 2, so no transaction is
+mid-commit when the WAL is closed.
 
 ### `store.DB` — the composed owner
 
