@@ -154,6 +154,38 @@ func (l *commitLog) finish(ts uint64) uint64 {
 	return l.frontier()
 }
 
+// rebase declares that every timestamp at or below floor has finished, discards
+// the tracking state below it, and leaves the log addressing floor+1 onwards.
+//
+// # Why recovery needs it, and the defect that proves it (rmp #2309)
+//
+// [Clock.RatchetTo] restores a derived clock by raising the allocation counter and
+// the visible frontier. Those two are atomics, but the CONTIGUITY is not: it lives
+// here, in `oldest`, and a log that still believes timestamp 1 is unfinished
+// computes a frontier of 0 forever.
+//
+// The consequence is total and silent. After a ratchet to F the next commit
+// allocates F+1 and calls [commitLog.finish], which sets its bit but does not
+// advance — F+1 is not `oldest`, which is still 1. `frontier()` returns 0,
+// [Clock.finishCommitTS] only ever raises `visible`, so the frontier never moves
+// past F again and EVERY POST-RECOVERY COMMIT IS INVISIBLE FOR THE LIFE OF THE
+// PROCESS. Writes keep succeeding; readers simply never see them.
+//
+// That is not hypothetical: the first version of RatchetTo moved only the two
+// counters, and internal/sim's full-stack crash-recovery scenario caught it as node
+// LOSS against the oracle (21 nodes expected, 15 present) — a shape that looks
+// nothing like a clock defect, which is why it is pinned by a test here as well.
+//
+// Not safe for concurrent use; the caller holds pubMu, and recovery has no commits
+// in flight by construction.
+func (l *commitLog) rebase(floor uint64) {
+	// A fresh head addressing floor+1 onwards: everything below is finished by
+	// declaration, so the old blocks describe nothing anyone can ask about.
+	l.head = &clBlock{}
+	l.headStart = floor + 1
+	l.oldest = floor + 1
+}
+
 // blockFor returns the block addressing ts, and the timestamp of its bit 0,
 // extending the chain as far as necessary.
 //

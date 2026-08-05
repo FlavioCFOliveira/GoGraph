@@ -5224,6 +5224,25 @@ func (r *Result) allocCommitTS() uint64 {
 	return r.mvccG.AllocateCommitTS(r.wtx)
 }
 
+// releaseTxHandle forgets the write transaction, so nothing after the bracket can
+// allocate through it.
+//
+// # The regression this exists to make unrepresentable
+//
+// lpg recycles a transaction's writeCtx the moment its bracket unwinds. A Result
+// that kept the handle could therefore reach [Result.allocCommitTS] on a LATER path
+// — [Result.closeLocked]'s WAL fallback is one — and write a commit timestamp into
+// state a DIFFERENT, live transaction now owns. endWrite would then publish that
+// instant as the other transaction's, so two transactions commit at one instant.
+//
+// That is not hypothetical: it is what the first version of rmp #2309's threading
+// did, and internal/sim caught it as node LOSS after full-stack recovery (oracle 21
+// nodes, engine 15) rather than as anything resembling a clock defect. Nulling the
+// handle at the bracket boundary makes the mistake impossible instead of forbidden.
+func (r *Result) releaseTxHandle() {
+	r.mvccG, r.wtx = nil, lpg.WriteTx{}
+}
+
 func (r *Result) commitUnderBarrier() {
 	if r.bufHandled && r.walHandled {
 		return
@@ -5442,7 +5461,21 @@ func (r *Result) closeLocked() error {
 		if err != nil || r.rs.Err() != nil || r.rowsErr != nil {
 			_ = r.tx.Rollback() // release store mutex; in-memory state already dirty
 		} else {
-			if werr := r.tx.CommitWALOnly(r.allocCommitTS()); werr != nil {
+			// commitTS 0, and it MUST be 0 (rmp #2309). This runs after the write
+			// bracket has unwound, so the writeCtx behind r.wtx has already gone
+			// back to the free list and may belong to a different, LIVE transaction
+			// by now. Allocating through it would stamp that transaction's state
+			// with an instant it never asked for, and endWrite would publish it —
+			// two transactions at one instant, which is the exact hazard the reset
+			// in lpg.acquireWriteCtx exists to prevent.
+			//
+			// Zero is also the right ANSWER, not merely the safe one: a Result that
+			// reached Close without in-barrier finalisation has no live MVCC
+			// transaction to name, so there is no instant for the record to carry.
+			//
+			// r.releaseTxHandle below makes this structural rather than a rule to
+			// remember, but the explicit 0 stays so the call site says why.
+			if werr := r.tx.CommitWALOnly(0); werr != nil {
 				err = werr
 			}
 		}
@@ -15933,6 +15966,11 @@ func (e *Engine) execUnderBarrier(
 			r.mvccG, r.wtx = e.g, wtx
 			r.materialize()
 			r.commitUnderBarrier()
+			// DROP THE HANDLE AT THE BRACKET BOUNDARY. Past this point the
+			// transaction's writeCtx is recycled, so keeping a reference would let a
+			// later path allocate through state another transaction now owns. See
+			// [Result.releaseTxHandle].
+			r.releaseTxHandle()
 			return nil
 		}
 		// Explicit-tx statement: build a read-back-only Result (no buf, no tx, no

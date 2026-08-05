@@ -230,6 +230,19 @@ func (c *Clock) finishCommitTS(ts uint64) {
 //
 // Not safe for concurrent use, and not safe on a clock with commits in flight:
 // call it during open, before the graph is published to any reader or writer.
+// # THREE things move, not two, and the third is not optional
+//
+// The allocation counter and the visible frontier are atomics, but the CONTIGUITY
+// that produces the frontier lives in [commitLog], and it must be rebased with
+// them. A log that still believes timestamp 1 is unfinished computes a frontier of
+// 0 for ever, so [Clock.finishCommitTS] — which only ever RAISES visible — can
+// never move it again, and every commit after the ratchet is invisible for the life
+// of the process. Writes keep succeeding and readers simply never see them.
+//
+// The first version of this method moved only the two counters. internal/sim's
+// full-stack crash-recovery scenario caught it as node LOSS against its oracle (21
+// expected, 15 present), which looks nothing like a clock defect — see
+// [commitLog.rebase] and TestClock_RatchetKeepsTheFrontierMovable.
 func (c *Clock) RatchetTo(floor uint64) uint64 {
 	c.pubMu.Lock()
 	defer c.pubMu.Unlock()
@@ -239,6 +252,8 @@ func (c *Clock) RatchetTo(floor uint64) uint64 {
 	if cur := c.visible.Load(); cur < floor {
 		c.visible.Store(floor)
 	}
+	// Rebase the contiguity to match, so the frontier can advance again.
+	c.log.rebase(c.visible.Load())
 	return c.commit.Load()
 }
 

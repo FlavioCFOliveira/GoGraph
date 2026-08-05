@@ -167,6 +167,31 @@ where there are no readers to observe a partially-applied transaction, but it do
 mean the recovered clock is inflated relative to the record. It becomes relevant to
 C3d/C4, where a snapshot must name the instant it captured.
 
+### The ratchet moves THREE things, and the first version moved two
+
+`RatchetTo` raised the allocation counter and the visible frontier. That is not
+enough, and the miss was total rather than marginal: **the contiguity that produces
+the frontier lives in `commitLog.oldest`**, and a log still believing timestamp 1 is
+unfinished computes a frontier of 0 for ever.
+
+Because `finishCommitTS` only ever *raises* `visible`, the frontier could then never
+move past the ratcheted value again. Every commit after recovery allocated a
+timestamp, set its bit, failed to advance `oldest`, and stayed **invisible for the
+life of the process** — while the writes themselves kept succeeding.
+
+**`make ci` caught it; none of the four tests written for C3a–C3d did.**
+`internal/sim`'s full-stack crash-recovery scenario failed as **node loss against its
+oracle** (21 nodes expected, 15 present) — a symptom that looks nothing like a clock
+defect, and which took a four-commit bisect in a scratch worktree to attribute to
+C3b. `commitLog.rebase` fixes it and `graph/mvcc/ratchet_test.go` now states the
+mechanism directly, so the next regression is named rather than discovered three
+layers away.
+
+**Two lessons, both about scope of coverage.** The unit tests for the ratchet
+asserted where the clock *was* and never that it could still *move*; and a primitive
+with three pieces of state was tested on two of them. A restore is not "the counters
+are right", it is "the mechanism works afterwards".
+
 **C3c — validate by crash injection (AC 3). DONE.**
 
 A `mvcc.commit.post-fsync-pre-publish` breakpoint sits in `commitUnderBarrier`
