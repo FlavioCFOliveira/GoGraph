@@ -199,11 +199,47 @@ live, which matches this signature exactly. That does **not** contradict the two
 above: both were taken on the SCAN arm, where a sub-microsecond fixed cost is 1% of the
 runtime and invisible. On a 5.7 µs read it would be most of the 0.70 µs.
 
-**The measurement that settles it:** profile the INDEXED arm, not the scan arm. If
-`suspectNodes` dominates the delta there, the fix is to sample once and close the
-clone-versus-sample race differently — keeping the correctness property #2326 established,
-which is not negotiable. If it does not, the candidate list above is wrong too and the cost
-is elsewhere.
+### PROFILED on the indexed arm: refuted a THIRD time, and the real cost is PLAN BUILDING
+
+`suspectNodes`, `correctBitmap`, `labelBitmapNeedsFilter`, `LabelBitmapAsOf`, `BeginRead`,
+`Horizon` and `Snapshot` appear **nowhere** in the indexed arm's profile. The candidate list
+above is wrong, including the #2326 double-sample suspicion. Three hypotheses, three
+refutations, all from the same task.
+
+What the reader actually spends on (cumulative, 4 s run, 1 throttled writer):
+
+| symbol | cum |
+|---|---|
+| `cypher.(*Engine).runRead` | 17.19% |
+| `cypher.(*Engine).buildReadPhysical` | 10.27% |
+| `cypher.buildOperator` / `buildOperatorRec` / `buildPlanEngine` | 9.57% |
+
+**More than half of the read is building the physical plan**, and none of it is version
+work. That explains every property of the measurement that the MVCC hypotheses could not:
+
+- **fixed per read** — a plan build is O(query), independent of rows returned, which is
+  exactly why it costs 0.70 µs on a 1-row seek and a similar order on a 2000-row scan;
+- **appears only when writers are active** — a plan or plan-fragment cache that a write
+  invalidates will miss on every read while a writer runs, forcing a rebuild per query.
+  With no writer the cache hits and the cost vanishes, which is precisely the shape of the
+  0-writer baseline.
+
+**So the AC 4 breach is most likely a plan-cache invalidation problem, not an MVCC
+version-visibility problem.** That is a much better place to be: it is MVCC-*adjacent*
+(writes invalidate, and this sprint made writes concurrent) but it does not touch the
+version machinery or the correctness properties #2326 established.
+
+**The measurement that settles it, and it is cheap:** find what keys the read-plan cache
+and what a write invalidates. If a write invalidates plans that do not depend on what it
+changed — a whole-cache flush, or a key on a global topology generation rather than on the
+labels and properties the plan actually reads — then the fix is to narrow the key, and the
+gain is bounded below by the 12.38% measured here. Verify by re-running this arm; the
+0-writer baseline is the target, since with a correctly-keyed cache a writer touching the
+top half of the id space should not invalidate a plan reading the bottom half at all.
+
+Do not treat the above as established. It is hypothesis four in a task that has refuted
+three, and the pattern in this project is that the stated bottleneck is not the measured
+one until it has been measured.
 
 ## The refuted hypothesis, kept for the record
 
@@ -239,9 +275,10 @@ anything measurable at this write rate.
   (heap profile, gctrace, and the indexed-read arm), remediation second.
 - **AC 4 is MEASURED and FAILING**, and worse than first recorded: +12.38% on an indexed
   read at 1000 commits/s against a ≤2.5% bound (+4.17% on a full scan). The overhead is
-  fixed per read, so the cheapest reads suffer most. What remains is a profile of the
-  INDEXED arm to attribute it — the scan arm's profiles cannot see a sub-microsecond fixed
-  cost.
+  fixed per read, so the cheapest reads suffer most. The indexed arm has now been
+  profiled: the cost is PLAN BUILDING, not version work, and the leading explanation is
+  read-plan cache invalidation by concurrent writes. Confirming that and narrowing the
+  cache key is the remaining work.
 - **The pre-MVCC cross-check.** Deliberately not required to reach the verdict above: the
   0-writer arm is the baseline, so the cost of *concurrent writing* is measured within one
   build. An absolute comparison against `b66b4e25` would answer a different question —
