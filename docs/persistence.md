@@ -512,6 +512,23 @@ is present; the writer stamps `2` for non-string-keyed snapshots that
 omit the mapper. `snapshot/csr.bin`, `labels.bin`, and
 `properties.bin` are byte-identical across v2 and v3.
 
+**`commit_ts` (optional).** A manifest written from a graph with an MVCC clock
+also carries `"commit_ts": <uint64>` — the **MVCC instant the image was captured
+at**. Recovery seeds the derived clock floor from it and then folds the WAL's
+maximum on top, so a reopened graph never re-mints an instant the image already
+contains (see [`design-mvcc-clock-recovery.md`](design-mvcc-clock-recovery.md)).
+It is the quantity Memgraph reads back as `info.start_timestamp`.
+
+This is the half of the derivation that matters in a checkpointed directory: a
+checkpoint truncates the WAL prefix, so the instants of everything the image
+folded are no longer in the log at all.
+
+**No version bump.** The manifest is JSON, so an older reader ignores the field
+and a newer reader on an older manifest decodes zero — the same *"absent means no
+timestamp"* policy the `OpCommit` body uses. `omitempty` keeps a manifest with no
+instant (the legacy CSR-only writer, which has no graph in hand, and any
+non-MVCC graph) byte-identical to what previous builds wrote.
+
 ### `snapshot/csr.bin` (binary, identical across v1, v2 and v3)
 
 | Offset  | Field            | Type                          |

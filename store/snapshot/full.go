@@ -692,6 +692,11 @@ func writeCaptureCore[W any](
 		Size:      capt.csr.Size(),
 		Files:     files,
 		Indexes:   idxEntries,
+		// The instant the capture was taken at, so recovery can derive the MVCC
+		// clock from an image whose WAL prefix has been truncated away
+		// (rmp #2309). Zero when the graph had no MVCC clock, which the
+		// omitempty tag then keeps out of the file entirely.
+		CommitTS: capt.commitTS,
 		GraphConfig: &GraphConfig{
 			Directed:   cfg.Directed,
 			Multigraph: cfg.Multigraph,

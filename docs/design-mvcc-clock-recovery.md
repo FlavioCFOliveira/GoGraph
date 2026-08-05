@@ -198,10 +198,39 @@ is for. The discriminating coverage until then is
 `TestClockRestore_NextCommitExceedsEveryPreviouslyPublishedInstant`, which
 manufactures the relationship with a hand-appended marker.
 
-**C3d — the snapshot's instant (AC 4).** The snapshot/checkpoint header records the
-instant it captured, with a test asserting that instant is consistent with the data in
-it. This is the piece #2310 (MVCC C4) depends on, and it is the natural boundary
-between the two tasks.
+**C3d — the snapshot's instant (AC 4). DONE.**
+
+`snapshot.Capture` records the instant at capture time — read **before** any
+component is serialised, so the recorded instant can only be at or *before* the state
+the image contains, never after it — `Manifest.CommitTS` carries it to disk, and
+recovery seeds the derived floor from it before folding the WAL's maximum on top.
+
+**No manifest version bump.** The manifest is JSON: an older reader ignores an
+unknown field, a newer reader on an older manifest decodes zero, and `omitempty`
+keeps a timestamp-less manifest byte-identical to what previous builds wrote. Same
+"absent means no timestamp" policy as the `OpCommit` body.
+
+**This is the half of the derivation that actually bites.** C3c measured that the WAL
+half is unobservable — replay overshoots on its own. A checkpoint truncates the WAL
+prefix, so the instants of everything the image folded are no longer in the log at
+all; deriving from the WAL alone would restore a clock far below data the image holds
+and then re-mint instants that are durably in it. Removing the seed fails
+`TestSnapshotInstant_RecoveryDerivesTheFloorFromTheImage` with `derived a maximum of
+0 from ... an image recorded at 4`.
+
+**A second defect was found by validating the first fix.** Recovery reads the
+snapshot's instant and then the WAL's, and the WAL step was a plain assignment. That
+discards the image's instant whenever the surviving suffix carries a smaller one —
+and after a checkpoint with no subsequent writes the suffix carries **nothing**, so
+the floor collapses to zero. That is the ordinary state of a freshly checkpointed
+directory. It is now a maximum, and
+`TestSnapshotInstant_AnEmptyWALDoesNotEraseTheImagesInstant` covers it; the
+WAL-removed sibling could not, because it never reaches the WAL branch at all.
+
+**What C4 (#2310) still owes.** The capture is taken under the caller's exclusion, so
+"the instant it captured" is currently exact by construction. Once writers continue
+during a capture that stops being true, and the recorded instant becomes the
+definition of what the image contains rather than a description of it.
 
 AC 6 (documentation of any new field) is discharged per part, in the WAL and snapshot
 format docs, as each field lands.

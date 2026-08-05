@@ -1054,6 +1054,18 @@ func openCodec[N comparable, W any](
 	if haveManifest {
 		res.SnapshotHit = true
 		res.SnapshotSchemaVersion = loaded.Manifest.Version
+		// Seed the derived MVCC clock floor from the instant the image was captured
+		// at (rmp #2309, MVCC C3d). The WAL replay below then RAISES it further if
+		// the log carries anything newer, which is the whole derivation: the
+		// maximum over everything durable, from both sources.
+		//
+		// This is the half that matters in a checkpointed directory. A snapshot
+		// truncates the WAL prefix, so the instants of everything it folded are no
+		// longer in the log at all — deriving from the WAL alone would restore a
+		// clock below data the image already holds and then re-mint instants that
+		// are durably in it. Absent (an older manifest, or a graph with no clock) it
+		// is zero and contributes nothing.
+		res.MaxCommitTS = loaded.Manifest.CommitTS
 		snapLabels = loaded.Labels
 		snapProps = loaded.Properties
 		snapEdgeHandles = loaded.EdgeHandles
@@ -1221,7 +1233,14 @@ func openCodec[N comparable, W any](
 		res.TailErr = walRes.TailErr
 		res.WALTailOffset = walRes.WALTailOffset
 		res.MaxTxnSeq = walRes.MaxTxnSeq
-		res.MaxCommitTS = walRes.MaxCommitTS
+		// MAXIMUM, not assignment: the snapshot's captured instant was already
+		// seeded above, and the derived floor is the maximum over EVERYTHING
+		// durable. Assigning here would discard the image's instant whenever the
+		// surviving WAL suffix is older than the snapshot — which is the ordinary
+		// state of a freshly checkpointed directory, where the suffix is empty.
+		if walRes.MaxCommitTS > res.MaxCommitTS {
+			res.MaxCommitTS = walRes.MaxCommitTS
+		}
 		if walErr != nil {
 			// The only non-nil walErr is a ctx cancellation surfaced mid-replay;
 			// it is returned with the partially-recovered Result, exactly as the

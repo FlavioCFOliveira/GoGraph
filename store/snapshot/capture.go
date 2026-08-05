@@ -86,10 +86,39 @@ type Capture[W any] struct {
 	edgeHandles component
 	indexes     []capturedIndex
 	config      GraphConfig
+	// commitTS is the MVCC instant this image was taken at, or 0 for a graph with
+	// no MVCC clock (rmp #2309, MVCC C3d).
+	//
+	// # Why a snapshot has to name its instant
+	//
+	// Recovery DERIVES the MVCC clock rather than reading a persisted counter, by
+	// folding a maximum over the commit timestamps it can see. A snapshot TRUNCATES
+	// the WAL prefix, so after a checkpoint the instants of everything it folded are
+	// no longer anywhere in the log — and a derivation that only reads the WAL would
+	// restore a clock far below what the snapshot already contains, then re-mint
+	// instants that are durably in the image.
+	//
+	// That is not a hypothetical gap: rmp #2309's C3c measured that WAL-only replay
+	// overshoots the durable maximum on its own (an instant per op against a maximum
+	// counting transactions), so the WAL half of the derivation is unobservable and
+	// the SNAPSHOT half is the one that actually carries it in a checkpointed
+	// directory — which is the normal production shape.
+	//
+	// It is the same quantity Memgraph reads back as info.start_timestamp from its
+	// snapshot, and restores as timestamp_ = max(timestamp_, next_timestamp).
+	commitTS uint64
 }
 
 // Order reports the vertex count of the captured CSR adjacency.
 func (c *Capture[W]) Order() uint64 { return c.csr.Order() }
+
+// CommitTS reports the MVCC instant this image was captured at, or 0 when the
+// originating graph had no MVCC clock.
+//
+// It is what [Manifest.CommitTS] records and what recovery folds into the derived
+// clock floor. Exported so a caller that publishes a capture through its own path
+// can carry the instant, and so a test can assert what an image claims.
+func (c *Capture[W]) CommitTS() uint64 { return c.commitTS }
 
 // Size reports the edge count of the captured CSR adjacency.
 func (c *Capture[W]) Size() uint64 { return c.csr.Size() }
@@ -150,7 +179,16 @@ func captureGraph[N comparable, W any](
 	if cs == nil {
 		return nil, errors.New("snapshot: nil CSR capture")
 	}
-	out := &Capture[W]{csr: cs}
+	// The instant this image is being taken at. Read FIRST, before any component is
+	// serialised, so the recorded instant can only be at or BEFORE the state the
+	// image contains — never after it. Getting that direction wrong would let
+	// recovery restore a clock below data the snapshot already holds.
+	//
+	// The caller holds whatever exclusion makes the read atomic (see [CaptureGraph]),
+	// so "at or before" is currently "exactly at". Once rmp #2310 lets writers
+	// continue during a capture that stops being true, and this read is where the
+	// captured instant has to come from.
+	out := &Capture[W]{csr: cs, commitTS: g.MVCCStats().Now}
 
 	var err error
 	// labels.bin — always emitted (possibly empty), matching the writer.
