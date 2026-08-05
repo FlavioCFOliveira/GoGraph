@@ -260,9 +260,37 @@ competition (fixed by indexing the writer, cost persisted), and plan-cache inval
 - it is **not** the suspect walk, **not** writer CPU competition, and **not** plan-cache
   invalidation.
 
-**The next measurement is a differential profile**, `go tool pprof -base` across the two
-arms already captured. Nothing further should be hypothesised before it is run — this
-document is now four wrong mechanisms long, and each one looked reasonable when written.
+### The differential profile is ALSO invalid, and this is where profiling stops helping
+
+`go tool pprof -base ix0.out ix.out` was run. Every GoGraph reader symbol comes out
+**negative**: `runRead` −950 ms, `buildReadPhysical` −770 ms, `buildOperatorRec` −700 ms.
+That is not a speed-up. The two arms executed **different numbers of reader iterations**
+in the same wall-clock budget — the 1-writer arm is slower per read, so it completed fewer
+— and a CPU profile counts samples per *run*, not per *operation*. Subtracting two
+un-normalised profiles measures the iteration-count difference, not the per-read cost
+difference.
+
+So a raw `pprof -base` between two benchmark arms cannot attribute this delta either.
+Three profiling attempts, three invalid attributions, each invalid for a *different*
+reason: wrong arm (scan instead of indexed, where a sub-microsecond fixed cost is
+invisible), single-arm inference about a differential, and now un-normalised subtraction.
+
+**What would actually work**, and none of it is a profile of these two arms as captured:
+
+- run both arms for an identical, fixed number of reader iterations (`-benchtime=Nx`) so
+  the profiles are comparable, then diff them;
+- or measure the candidate directly — instrument the read path with per-phase timers and
+  compare the phase totals **per read** between arms;
+- or bisect the read path: disable one suspected component at a time in a scratch build
+  and see which one moves the 12.38%.
+
+The second is cheapest and least likely to mislead, because it produces a per-operation
+number rather than a share of a run.
+
+**The measured facts stand.** AC 4 fails at +12.38%, reproducibly, and the overhead is
+fixed per read. Only the *mechanism* is unknown, and this document should not acquire a
+fifth hypothesis before one of the three methods above produces a per-operation
+attribution.
 
 ## The refuted hypothesis, kept for the record
 
@@ -299,8 +327,10 @@ anything measurable at this write rate.
 - **AC 4 is MEASURED and FAILING**, and worse than first recorded: +12.38% on an indexed
   read at 1000 commits/s against a ≤2.5% bound (+4.17% on a full scan). The overhead is
   fixed per read, so the cheapest reads suffer most. FOUR mechanisms have been proposed
-  and refuted; the delta is still unattributed, and the next step is a differential
-  profile (`pprof -base`) rather than a fifth hypothesis.
+  and refuted, and THREE profiling attempts were invalid for three different reasons. The
+  delta is still unattributed. The next step is a per-operation measurement — fixed
+  iteration counts, direct phase instrumentation, or component bisection — not another
+  profile of these two arms.
 - **The pre-MVCC cross-check.** Deliberately not required to reach the verdict above: the
   0-writer arm is the baseline, so the cost of *concurrent writing* is measured within one
   build. An absolute comparison against `b66b4e25` would answer a different question —
