@@ -778,8 +778,10 @@ func (g *Graph[N, W]) publishVacuumMetrics() {
 	// leaves. Every other gauge above describes a vacuum that is WORKING; this one says
 	// whether it can work, so reading them without it is misleading: passes and
 	// reclaimed both flatten, and nothing distinguishes "no garbage" from "suspended".
-	m := g.MVCCStats()
-	metrics.SetGauge("lpg.mvcc.horizon.unregistered_readers", float64(m.UnregisteredReaders))
-	metrics.SetGauge("lpg.mvcc.horizon.active_readers", float64(m.ActiveReaders))
+	// Only the CAPACITY is published here. The live counts already have series --
+	// lpg.mvcc.readers.active and lpg.mvcc.readers.unregistered -- and publishing them
+	// again under a second name would give an operator two names for one quantity,
+	// which is worse than having none. What was missing is the BOUND they should be
+	// read against, so a dashboard can compute utilisation without knowing the build.
 	metrics.SetGauge("lpg.mvcc.horizon.capacity", float64(mvcc.HorizonCapacity))
 }

@@ -125,9 +125,11 @@ direction at every point. The mechanism agrees, since the only thing that grew i
 per-commit cost. `bench/mvccwrite`'s gates — including the WAL scaling gate and the
 fsync-coalescing gate — are green.
 
-**The suspended state is now observable (AC 5).** `publishVacuumMetrics` publishes
-`lpg.mvcc.horizon.unregistered_readers`, `...active_readers` and `...capacity` on
-every vacuum pass, and `mvcc.HorizonCapacity` is exported so the bound can be read
-without the source. The operator guidance — alert on any non-zero unregistered count,
+**The suspended state is observable (AC 5).** It largely already was:
+`lpg.mvcc.readers.unregistered` and `lpg.mvcc.readers.active` predate this task. What
+was missing is the BOUND to read them against, so `publishVacuumMetrics` now publishes
+`lpg.mvcc.horizon.capacity` and `mvcc.HorizonCapacity` is exported. Two gauges
+duplicating the existing reader counts were added first and then removed: one quantity
+under two names is worse for an operator than one name. The operator guidance — alert on any non-zero unregistered count,
 and why the other vacuum gauges cannot reveal this state — is in
 `docs/isolation-design.md`, which also carries the table above (AC 6).

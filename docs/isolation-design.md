@@ -532,16 +532,17 @@ background vacuum pass, which sweeps up to 65536 records. 4096 was rejected beca
 that is where `Oldest` turns super-linear (5.3× for 4× slots against 4.1× below it) for
 4× the memory.
 
-**For an operator.** Three gauges are published on every vacuum pass:
+**For an operator.** Three series matter, and only the third is new — the live counts
+already had names, and giving one quantity two names would be worse than giving it none:
 
-- `lpg.mvcc.horizon.unregistered_readers` — **alert on any non-zero value.** It means
-  reclamation is suspended and version memory is growing. The other vacuum gauges
-  cannot tell you this: `passes` and `reclaimed` both flatten, and nothing distinguishes
-  "no garbage to collect" from "unable to collect".
-- `lpg.mvcc.horizon.active_readers` — registered readers. Approaching
-  `horizon.capacity` is the leading indicator.
-- `lpg.mvcc.horizon.capacity` — the compiled bound, so the ratio can be computed
-  without knowing the build.
+- `lpg.mvcc.readers.unregistered` — **alert on any non-zero value.** It means
+  reclamation is suspended and version memory is growing. The vacuum gauges cannot tell
+  you this: `passes` and `reclaimed` both flatten, and nothing distinguishes "no garbage
+  to collect" from "unable to collect".
+- `lpg.mvcc.readers.active` — registered readers. Approaching capacity is the leading
+  indicator.
+- `lpg.mvcc.horizon.capacity` — **new in #2315**, the compiled bound, so utilisation can
+  be computed against the two above without knowing the build.
 
 The remedy is to reduce concurrent **long-lived read transactions**, not concurrent
 queries: a statement-scoped read holds its slot for microseconds, while an explicit
