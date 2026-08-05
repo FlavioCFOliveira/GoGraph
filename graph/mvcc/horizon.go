@@ -55,7 +55,45 @@ import (
 // counter can mask rather than divide. Slots are EXCLUSIVE, so this is also the
 // number of readers that can be registered at once; beyond it reclamation
 // suspends rather than becoming unsound. See [Horizon.Enter].
-const horizonSlots = 64
+//
+// # Why 1024, from measurement (rmp #2315)
+//
+// It was 64, and 64 was chosen when a slot was held for the duration of ONE
+// STATEMENT. rmp #2307 gave an explicit read transaction a snapshot pinned for its
+// whole lifetime, so a slot is now held for a whole transaction INCLUDING WHILE IT
+// SITS IDLE. The exhaustion cliff was measured at exactly 65 concurrent read
+// transactions, and past it reclamation does not slow down — it SUSPENDS, which by
+// this file's own account is the one state in which version memory has no bound.
+//
+// The number comes from docs/benchmarks/mvcc-horizon-sizing-2026-08-05.md, which
+// measures 64/256/1024/4096 in both the near-empty and near-full regimes. Three
+// quantities move differently, so no single "bigger is worse" argument holds:
+//
+//   - [Horizon.Oldest] is O(slots) always, and it is NOT on the query path: #2308
+//     removed the read-path inline sweep, so it now runs once per background vacuum
+//     pass, which sweeps up to 65536 records. 448ns of scan is not measurable
+//     against that;
+//   - [Horizon.Enter] near-empty — the per-read-transaction cost, and the only one
+//     on a hot path — is FLAT, because the rotating start index probes one slot
+//     whatever the capacity: 2.135ns at 64 against 2.186ns at 1024, +2.4%;
+//   - [Horizon.Enter] near-full is O(slots), and that is the honest price of the
+//     capacity: a system running AT capacity pays the probe.
+//
+// 4096 was rejected on the measurement, not on an argument about cache sizes: it is
+// where Oldest turns super-linear (5.3x for 4x slots, against 4.1x below it) and it
+// costs 512 KiB per Graph. 256 was rejected because this module's own load-test grid
+// goes to 1024 goroutines, so it would leave the cliff reachable in normal operation.
+//
+// The cost is 128 KiB per [Horizon], one heap allocation per Graph.
+// TestHorizon_ExhaustionCliffAtCapacity pins the capacity so it cannot regress
+// silently.
+const horizonSlots = 1024
+
+// HorizonCapacity is the number of readers that can be registered at once, exported
+// so an operator can compare it against a live reader count without reading the
+// source. Past it, reclamation SUSPENDS: see [Horizon.Enter] and the rationale on
+// horizonSlots.
+const HorizonCapacity = horizonSlots
 
 // cacheLine is the padding unit. 128 rather than 64 because Apple silicon
 // prefetches pairs of lines, so 64-byte padding still lets two slots share a

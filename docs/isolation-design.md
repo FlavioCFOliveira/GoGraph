@@ -497,6 +497,63 @@ it is now a memory-and-slot failure, because an open transaction pins the reclam
 horizon. `server.Options.MaxTxIdleTime` was reviewed for this and **kept at 5 s**: the
 original justification is gone, but an unbounded resource cost remains.
 
+### The reclamation-horizon bound (rmp #2315, sized 2026-08-05)
+
+**Capacity is 1024 concurrent registered readers** (`mvcc.HorizonCapacity`). Slots are
+exclusive, so that is a hard count, not a soft target.
+
+Past capacity a reader still reads **correctly** — it is never given a wrong answer.
+What it loses is its representation in the watermark, so the watermark collapses to
+zero and **reclamation stops entirely** until it leaves. That is the sound direction
+(correctness is preserved, reclamation is sacrificed), but it is also the one state in
+which version memory has no bound, so it must be observable rather than inferred.
+
+It was 64, chosen when a slot was held for **one statement** — microseconds. rmp #2307
+gave an explicit read transaction a snapshot pinned for its whole lifetime, so a slot
+is now held for a whole transaction *including while it sits idle*, and the cliff was
+measured at exactly 65 concurrent read transactions.
+
+**1024 was chosen from measurement**, recorded in
+[`benchmarks/mvcc-horizon-sizing-2026-08-05.md`](benchmarks/mvcc-horizon-sizing-2026-08-05.md),
+which measures 64/256/1024/4096 in both the near-empty and near-full regimes:
+
+| slots | `Oldest` near-empty | `Oldest` near-full | `Enter` near-empty | `Enter` near-full | memory |
+|---|---|---|---|---|---|
+| 64 | 26.54n | 49.02n | 2.135n | 100.5n | 8 KiB |
+| 256 | 109.0n | 177.0n | 2.140n | 297.4n | 32 KiB |
+| **1024** | **448.1n** | **699.3n** | **2.186n** | **1.085µ** | **128 KiB** |
+| 4096 | 2.369µ | 2.932µ | 2.672n | 4.503µ | 512 KiB |
+
+The only quantity on a hot path is `Enter` near-empty — the per-read-transaction cost —
+and it is flat across the whole range (+2.4% from 64 to 1024) because the rotating start
+index probes one slot whatever the capacity. `Oldest` is O(slots) but no longer on the
+query path at all: #2308 removed the read-path inline sweep, so it runs once per
+background vacuum pass, which sweeps up to 65536 records. 4096 was rejected because
+that is where `Oldest` turns super-linear (5.3× for 4× slots against 4.1× below it) for
+4× the memory.
+
+**For an operator.** Three gauges are published on every vacuum pass:
+
+- `lpg.mvcc.horizon.unregistered_readers` — **alert on any non-zero value.** It means
+  reclamation is suspended and version memory is growing. The other vacuum gauges
+  cannot tell you this: `passes` and `reclaimed` both flatten, and nothing distinguishes
+  "no garbage to collect" from "unable to collect".
+- `lpg.mvcc.horizon.active_readers` — registered readers. Approaching
+  `horizon.capacity` is the leading indicator.
+- `lpg.mvcc.horizon.capacity` — the compiled bound, so the ratio can be computed
+  without knowing the build.
+
+The remedy is to reduce concurrent **long-lived read transactions**, not concurrent
+queries: a statement-scoped read holds its slot for microseconds, while an explicit
+read transaction holds one until it commits or rolls back. `MaxTxIdleTime` (5 s) bounds
+the idle case; an application holding more than 1024 read transactions genuinely
+concurrently needs to shorten them, because raising capacity trades memory for a cliff
+that moves rather than disappearing.
+
+`TestHorizon_ExhaustionCliffAtCapacity` and `TestHorizon_CapacityIsPinned` pin the
+number in **both** directions — verified to fail at 512 and at 2048 — so it cannot
+change silently.
+
 ## The fsync-failure policy (rmp #2306, decided 2026-08-04)
 
 Group commit is **FAIL-ALL**, and that is kept deliberately rather than by omission.

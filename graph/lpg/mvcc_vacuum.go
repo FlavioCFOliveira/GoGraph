@@ -95,6 +95,8 @@ import (
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
+
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
 
 // vacuumUnit names one store the sweep reclaims independently.
@@ -769,4 +771,15 @@ func (g *Graph[N, W]) publishVacuumMetrics() {
 	metrics.SetGauge("lpg.mvcc.vacuum.backlog", float64(s.Backlog))
 	metrics.SetGauge("lpg.mvcc.vacuum.records_per_pass", float64(s.RecordsPerPass))
 	metrics.SetGauge("lpg.mvcc.vacuum.starts", float64(s.Starts))
+	// The SUSPENSION signal, and the reason it is published from here rather than left
+	// in [MVCCStats] (rmp #2315). A non-zero value means at least one reader could not
+	// get a horizon slot, and while that holds the watermark is zero and reclamation
+	// does nothing at all — so version memory grows without bound until the reader
+	// leaves. Every other gauge above describes a vacuum that is WORKING; this one says
+	// whether it can work, so reading them without it is misleading: passes and
+	// reclaimed both flatten, and nothing distinguishes "no garbage" from "suspended".
+	m := g.MVCCStats()
+	metrics.SetGauge("lpg.mvcc.horizon.unregistered_readers", float64(m.UnregisteredReaders))
+	metrics.SetGauge("lpg.mvcc.horizon.active_readers", float64(m.ActiveReaders))
+	metrics.SetGauge("lpg.mvcc.horizon.capacity", float64(mvcc.HorizonCapacity))
 }

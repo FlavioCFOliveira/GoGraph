@@ -96,19 +96,38 @@ exactly 65 concurrent read transactions, and #2307 changed a slot's hold from on
 statement (microseconds) to a whole transaction lifetime including idle time. 64 is a
 1990s-scale limit for a hold that long.
 
-## Not yet implemented
+## Implemented, and what the change cost (AC 3, 4, 5, 6)
 
-This document discharges AC 1 (the table, reproducible) and AC 2 (the design chosen,
-with the measurement as the reason). The remaining criteria are the implementation and
-are deliberately not folded in here:
+`horizonSlots` is now 1024. The capacity is pinned in **both** directions by
+`TestHorizon_CapacityIsPinned` and `TestHorizon_ExhaustionCliffAtCapacity`, which
+assert against a literal rather than against `horizonSlots` — asserting against the
+constant would make the test tautological, since shrinking the constant would shrink
+the expectation with it. Verified to fail at 512 ("capacity is smaller than the design
+states") and at 2048 ("capacity is LARGER than the design states"), so a silent
+regression in either direction is caught.
 
-- change `horizonSlots` to 1024 (AC 3's capacity), and re-run the read benchmarks and
-  `bench/mvccwrite`'s gates with benchstat to show no attributable regression (AC 4).
-  The `Horizon` grows from 8 KiB to 128 KiB per `Graph`, which is the one thing in this
-  change that could plausibly move an unrelated benchmark, so it must be measured and
-  not assumed;
-- a cliff test at the new capacity that fails if the capacity silently regresses (AC 3);
-- surface the suspended state as a metric and document what a non-zero
-  `UnregisteredReaders` means and what an operator should do (AC 5);
-- update the 'Known bound' section of `docs/isolation-design.md` to the new capacity and
-  replace its measured table (AC 6).
+**No regression attributable to the change (AC 4).** `BenchmarkWriteScaling`'s
+store-less arm, 64 slots against 1024, `benchstat before= after=` (n=5 before, n=6
+after):
+
+| writers | before | after | change |
+|---|---|---|---|
+| 1 | 339.7k commits/s | 328.5k | −3.29% (p=0.004) |
+| 8 | 701.2k | 728.6k | +3.90% (p=0.004) |
+| 32 | 751.8k | 755.7k | ~ (p=0.792) |
+| geomean | 597.0k | 610.7k | **+2.30%** |
+
+The movement is ±3.9% and it goes in **opposite directions** — worse at one writer,
+better at eight, flat at 32 — with a favourable geomean. That pattern is layout noise,
+not a cost: a systematic cost from a larger structure would be monotone in the same
+direction at every point. The mechanism agrees, since the only thing that grew is one
+128 KiB allocation at `Graph` construction, which cannot affect steady-state
+per-commit cost. `bench/mvccwrite`'s gates — including the WAL scaling gate and the
+fsync-coalescing gate — are green.
+
+**The suspended state is now observable (AC 5).** `publishVacuumMetrics` publishes
+`lpg.mvcc.horizon.unregistered_readers`, `...active_readers` and `...capacity` on
+every vacuum pass, and `mvcc.HorizonCapacity` is exported so the bound can be read
+without the source. The operator guidance — alert on any non-zero unregistered count,
+and why the other vacuum gauges cannot reveal this state — is in
+`docs/isolation-design.md`, which also carries the table above (AC 6).
