@@ -28,9 +28,11 @@ package adjlist
 // something to say about the atomic store this rests on.
 
 import (
+	"runtime"
 	"sort"
 	"sync"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
@@ -137,14 +139,17 @@ func TestStoreEntry_InPlaceWindowMutationIsRaceFree(t *testing.T) {
 	id := idOf(t, a, "a")
 
 	var wg sync.WaitGroup
+	var ready sync.WaitGroup
 	stop := make(chan struct{})
 	var bad []int
 	seen := map[int]struct{}{}
 	var mu sync.Mutex
 
+	ready.Add(1)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		first := true
 		for {
 			select {
 			case <-stop:
@@ -161,8 +166,15 @@ func TestStoreEntry_InPlaceWindowMutationIsRaceFree(t *testing.T) {
 				bad = append(bad, got)
 			}
 			mu.Unlock()
+			if first {
+				first = false
+				ready.Done()
+			}
 		}
 	}()
+	// Do not write until the reader has completed a read. Without this the writer
+	// can finish before the runtime has started the goroutine at all.
+	ready.Wait()
 
 	// One transaction, `fanout` in-place writes to the same node in one window.
 	ws := a.WriteStampForTest()
@@ -181,10 +193,15 @@ func TestStoreEntry_InPlaceWindowMutationIsRaceFree(t *testing.T) {
 	// this test. Without it the reader below is pinned at start timestamp 0.
 	clk.PublishCommitTS(ts)
 
-	// Give the reader a window on the far side of the commit too.
-	for i := 0; i < 2000; i++ {
-		_ = a.EntryNeighboursAsOf(id, clk.ReadTS(), 0)
-	}
+	// WAIT for the reader to cross the commit boundary rather than hoping a fixed
+	// spin gives it the chance. The first version of this guard did the latter — 2000
+	// unrelated reads on the writer's own goroutine — and it FAILED under coverage
+	// instrumentation, where the reader had not completed a single iteration by the
+	// time the writer closed stop (the compression rmp #2319 recorded for exactly this
+	// class of instrument). A deadline turns a scheduling accident into a real signal:
+	// if the reader genuinely cannot see committed state, that is a defect worth
+	// failing on; if it merely needs longer, it gets longer.
+	sawCommitted := awaitObservation(&mu, seen, fanout, 10*time.Second)
 	close(stop)
 	wg.Wait()
 
@@ -196,13 +213,35 @@ func TestStoreEntry_InPlaceWindowMutationIsRaceFree(t *testing.T) {
 			len(bad), bad[:minIntTest(4, len(bad))], fanout)
 	}
 	// The claim in this test's doc comment, now enforced: the reader must have
-	// observed the commit boundary. Seeing only one count means it either never
-	// overlapped the writer or never advanced past start timestamp 0, and in both
-	// cases the absence of a violation above is not evidence of anything.
-	if _, ok := seen[fanout]; !ok {
-		t.Fatalf("the reader never observed the committed adjacency (%d neighbours); it saw "+
-			"only %v, so it did not cross the commit boundary and this test proves nothing "+
-			"about what a reader sees after a commit", fanout, keysOfTest(seen))
+	// observed the commit boundary. Without this the test cannot distinguish "the
+	// reader correctly stepped back over the window" from "the reader never saw
+	// anything at all", and for years it was the second.
+	if !sawCommitted {
+		t.Fatalf("the reader never observed the committed adjacency (%d neighbours) within the "+
+			"deadline; it saw only %v, so it did not cross the commit boundary and this test "+
+			"proves nothing about what a reader sees after a commit", fanout, keysOfTest(seen))
+	}
+}
+
+// awaitObservation blocks until want appears in seen, or the timeout elapses, and
+// reports which happened. seen is guarded by mu and written by another goroutine.
+//
+// It exists so a concurrency test asserts on an OUTCOME rather than on having spun
+// long enough for one — the difference between a deterministic gate and a test that
+// passes on a fast machine and fails under coverage instrumentation.
+func awaitObservation(mu *sync.Mutex, seen map[int]struct{}, want int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		mu.Lock()
+		_, ok := seen[want]
+		mu.Unlock()
+		if ok {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		runtime.Gosched()
 	}
 }
 

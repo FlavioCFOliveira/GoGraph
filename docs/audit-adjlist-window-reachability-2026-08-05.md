@@ -107,6 +107,22 @@ aspirational.
 readers observed **at least two distinct values**. A concurrency test whose oracle is
 "nothing bad was seen" should always also assert that something was seen.
 
+### …and the first version of that guard was itself timing-dependent
+
+The guard was added as a fixed spin — 2000 unrelated reads on the writer's goroutine,
+then check what the reader had seen. It passed under `-race` and **failed in the
+coverage-gate run**, where the reader goroutine had not completed a single iteration
+before the writer closed the stop channel: it saw the empty set.
+
+That is the same compression rmp #2319 recorded for concurrency-effect instruments
+under coverage instrumentation. Both tests now **wait for the outcome with a deadline**
+instead of spinning a fixed number of times, which turns a race against the scheduler
+into a real signal: if a reader genuinely cannot see committed state that is a defect
+worth failing on, and if it merely needs longer it gets longer.
+
+Both were re-validated against the defective build **after** the change — all four
+covering tests still fail there — because a revised instrument is an unvalidated one.
+
 ## Outcome against the acceptance criteria
 
 1. **Determined** from the code, with file:line evidence — above. A snapshot reader

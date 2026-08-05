@@ -48,6 +48,7 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestLoadEntry_SnapshotReaderReachesAnOpenWindowAndStepsBackOverIt is the deterministic
@@ -242,11 +243,22 @@ func TestLoadEntry_ConcurrentSnapshotReadersNeverObserveAnOpenWindow(t *testing.
 			clk.PublishCommitTS(ts)
 		}
 	}
+	// WAIT for the readers to observe the fully committed adjacency rather than
+	// assuming they got the chance. Under coverage instrumentation a reader goroutine
+	// can complete far fewer iterations than the writer, and a fixed spin turns that
+	// into a spurious failure (rmp #2319's compression, which caught the sibling test
+	// in mvcc_window_test.go). Asserting on the outcome with a deadline keeps the
+	// guard meaningful without making it a race against the scheduler.
+	sawFinal := awaitObservation(&mu, observed, windowFanout*txCount, 10*time.Second)
 	close(stop)
 	wg.Wait()
 
 	mu.Lock()
 	defer mu.Unlock()
+	if !sawFinal {
+		t.Fatalf("the readers never observed the fully committed adjacency (%d neighbours) "+
+			"within the deadline; they saw %v", windowFanout*txCount, keysOfTest(observed))
+	}
 	if len(bad) > 0 {
 		t.Fatalf("snapshot readers observed %d neighbour counts that no committed version "+
 			"ever had (e.g. %v; every committed count is a multiple of %d): an in-window "+
@@ -256,7 +268,9 @@ func TestLoadEntry_ConcurrentSnapshotReadersNeverObserveAnOpenWindow(t *testing.
 	}
 	// The readers must actually have raced the writer. If they only ever saw one count
 	// they were scheduled outside the whole write phase and the absence of a violation
-	// says nothing.
+	// says nothing. The deadline above makes this deterministic rather than a hope: to
+	// have seen the final count as well as the pre-write count is to have spanned the
+	// write phase.
 	if len(observed) < 2 {
 		t.Fatalf("the readers observed only %d distinct count(s), so they never overlapped "+
 			"the writer and this test had no opportunity to detect a violation", len(observed))
