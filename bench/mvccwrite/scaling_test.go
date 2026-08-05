@@ -169,6 +169,10 @@ var scalingWriters = []int{1, 2, 4, 8, 16, 32}
 type rig struct {
 	eng   *cypher.Engine
 	close func() error
+	// wr is the WAL writer in the wiringWAL case and nil otherwise, so a test can
+	// read [wal.Writer.Stats] and count fsyncs directly instead of inferring them
+	// from timing (rmp #2193).
+	wr *wal.Writer
 }
 
 // newRig builds an engine in the requested wiring. The graph is a multigraph so
@@ -193,7 +197,7 @@ func newRig(tb testing.TB, w wiring) *rig {
 		// WithQuiesce closes the WAL under the store's commit lock, so Close
 		// cannot race an in-flight commit's fsync.
 		db := store.New(wr, store.WithQuiesce(st.RunUnderCommitLock))
-		return &rig{eng: cypher.NewEngineWithStore(st), close: db.Close}
+		return &rig{eng: cypher.NewEngineWithStore(st), close: db.Close, wr: wr}
 	default:
 		tb.Fatalf("unknown wiring %q", w)
 		return nil
