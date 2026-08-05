@@ -57,6 +57,8 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
+
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // writeCtx is one write transaction's identity AND its whole mutable write
@@ -323,6 +325,22 @@ func (w *writeCtx) conflictErr(store string, headTS uint64) error {
 	if !w.conflict.CompareAndSwap(nil, c) {
 		return w.conflict.Load()
 	}
+	// Counted HERE, on the WINNING CAS, and that placement is the accuracy of the
+	// series (rmp #2312). A doomed transaction meets a conflict again on every write it
+	// still attempts, so counting where conflicts are DETECTED would report refused
+	// writes and scale with transaction size. The CAS succeeds exactly once per
+	// transaction, so this counts DOOMED TRANSACTIONS — which is what a contention rate
+	// means, and what an operator can divide by lpg.mvcc.commits.
+	//
+	// The per-store series is what says WHICH structure is contended; without it an
+	// operator sees that the workload contends but not on what. Store names come from
+	// the fixed set in [mvcc.NewConflict]'s callers, not from user data, so the label
+	// cardinality is bounded.
+	//
+	// Off the hot path by construction: once per conflicting transaction, never at all
+	// on a workload that does not contend.
+	metrics.IncCounter("lpg.mvcc.conflicts", 1)
+	metrics.IncCounter("lpg.mvcc.conflicts.store."+store, 1)
 	return c
 }
 
