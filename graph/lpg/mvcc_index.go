@@ -223,15 +223,30 @@ func (g *Graph[N, W]) IndexRemovalBacklog() int64 { return g.idxPendingActive.Lo
 //
 // Safe for concurrent use.
 func (g *Graph[N, W]) LabelBitmapAsOf(lid LabelID, s *Snapshot) *roaring64.Bitmap {
-	bm := g.nodeIdx.Intersect(uint32(lid))
-	if !g.labelBitmapNeedsFilter(s) {
+	return g.labelBitmapAsOfFiltered(s,
+		func() *roaring64.Bitmap { return g.nodeIdx.Intersect(uint32(lid)) },
+		func(bag labelBag) bool { return bag.has(lid) })
+}
+
+// labelBitmapAsOfFiltered is the shared body of [Graph.LabelBitmapAsOf] and
+// [Graph.LabelsBitmapAsOf]: clone, decide, correct.
+//
+// It samples the suspect set BEFORE clone() as well as after, and corrects against
+// both. See [Graph.suspectNodes] for why one post-clone sample is not enough and
+// why widening the sample instead of dropping its gates is the only sound direction.
+func (g *Graph[N, W]) labelBitmapAsOfFiltered(s *Snapshot, clone func() *roaring64.Bitmap, want func(labelBag) bool) *roaring64.Bitmap {
+	pre := g.suspectNodes()
+	bm := clone()
+	if !g.labelBitmapNeedsFilter(s) && len(pre) == 0 {
 		return bm
 	}
-	g.correctBitmap(bm, s, func(bag labelBag) bool { return bag.has(lid) })
+	g.correctBitmapOver(bm, s, want, append(pre, g.suspectNodes()...))
 	return bm
 }
 
-// correctBitmap adjusts bm in place so it describes s rather than the present.
+// correctBitmapOver adjusts bm in place so it describes s rather than the present,
+// against a suspect set the CALLER sampled — so that the sample can span the clone
+// rather than follow it. See [Graph.suspectNodes] for why that matters.
 //
 // # Why it visits the SUSPECTS and not the bitmap
 //
@@ -251,10 +266,10 @@ func (g *Graph[N, W]) LabelBitmapAsOf(lid LabelID, s *Snapshot) *roaring64.Bitma
 //
 // bm is mutated in place: [label.Index.Intersect] returns a bitmap the caller
 // owns, so there is nothing to clone.
-func (g *Graph[N, W]) correctBitmap(bm *roaring64.Bitmap, s *Snapshot, want func(labelBag) bool) {
+func (g *Graph[N, W]) correctBitmapOver(bm *roaring64.Bitmap, s *Snapshot, want func(labelBag) bool, suspects []graph.NodeID) {
 	// Every shard lock is RELEASED before the first check runs; see
 	// [Graph.suspectNodes].
-	for _, id := range g.suspectNodes() {
+	for _, id := range suspects {
 		present := bm.Contains(uint64(id))
 		// NodeExistsAsOf takes the LIFE shard lock and labelBagTest takes the
 		// LABEL shard lock, in that order and never nested — the two are
@@ -292,6 +307,28 @@ func (g *Graph[N, W]) correctBitmap(bm *roaring64.Bitmap, s *Snapshot, want func
 // The slice is small by construction — it is exactly the churn the reclaimer
 // has not yet caught up with — and it is allocated only when there IS churn,
 // because all three gates are checked first.
+//
+// # The gates stay, and the CALLER samples twice (rmp #2326)
+//
+// The three counters gate each loop, and that is load-bearing beyond cheapness: a
+// WITHDRAWN delta — a rolled-back SET — is still physically in the side map after
+// its counter has been decremented, and walking it unconditionally makes
+// [Graph.correctBitmap] take its `!present && should` branch and ADD the label back.
+// Dropping the gates fixed the staleness below but leaked a rejected SET into the
+// index; TestExistence_SetLabelOnNodeLackingProp_Rejected caught it.
+//
+// The staleness the gates cause is therefore fixed on the CALLER's side instead.
+// The order of events is: clone the bitmap, decide a filter is needed, gather the
+// suspects. A counter falling to zero between the clone and the gather — the vacuum
+// draining idxPendingActive is the ordinary way — returned an EMPTY set, so the
+// correction ran and corrected nothing while the clone still carried the entry the
+// sweep had just removed. For a scan that stale member is a superset a predicate can
+// reject; for a COUNT there is no predicate left and the wrong answer is final.
+//
+// So [Graph.labelBitmapAsOfFiltered] samples this BEFORE the clone as well as after
+// and corrects against the union: the pre-clone sample cannot have been drained by a
+// sweep that had not yet happened, and the post-clone sample catches churn that
+// arrived later. Both are gated, so a withdrawn delta is excluded from both.
 func (g *Graph[N, W]) suspectNodes() []graph.NodeID {
 	var out []graph.NodeID
 	if g.labelDeltaActive.Load() != 0 {
@@ -335,19 +372,16 @@ func (g *Graph[N, W]) LabelsBitmapAsOf(lids []LabelID, s *Snapshot) *roaring64.B
 	for i, l := range lids {
 		raw[i] = uint32(l)
 	}
-	bm := g.nodeIdx.Intersect(raw...)
-	if !g.labelBitmapNeedsFilter(s) {
-		return bm
-	}
-	g.correctBitmap(bm, s, func(bag labelBag) bool {
-		for _, l := range lids {
-			if !bag.has(l) {
-				return false
+	return g.labelBitmapAsOfFiltered(s,
+		func() *roaring64.Bitmap { return g.nodeIdx.Intersect(raw...) },
+		func(bag labelBag) bool {
+			for _, l := range lids {
+				if !bag.has(l) {
+					return false
+				}
 			}
-		}
-		return true
-	})
-	return bm
+			return true
+		})
 }
 
 // labelBitmapNeedsFilter reports whether the raw bitmap could disagree with
