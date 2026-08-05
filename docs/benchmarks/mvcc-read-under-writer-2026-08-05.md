@@ -89,15 +89,54 @@ write rate — that much survives, since the 0-writer baseline is measured in th
 — but how much of the rise is MVCC version work versus plain CPU competition is unresolved,
 and the honest reading is that no material *version-walk* cost has been demonstrated.
 
-**To fix the instrument** (next step, not done here): give the writer a constant-cost
-write — create a range index on `:Acct(id)` so its `MATCH` is a seek rather than a scan,
-or address the node by a form that needs no scan — then re-measure. Only then is the
-independent variable really the write rate.
+**The instrument was then fixed and re-measured** — see the next section.
 
 This is the second instrument in this task to be caught by measurement rather than by
 review. The lesson is the one already written into the file header, and it applies to the
 replacement as much as to the original: hold *everything* constant except the variable,
 and profile the arms before believing the delta.
+
+## Re-measured with a CONSTANT-COST writer (the corrected instrument)
+
+`CREATE INDEX acct_id FOR (n:Acct) ON (n.id)` is now created before seeding, so the
+writer's `MATCH` is a seek rather than a scan. The reader stays a full label scan by
+design — that is the workload under test — but the writer is now constant-cost, which is
+what makes the write rate the independent variable.
+
+n=6 per arm, every comparison p=0.002:
+
+| writers | 0 | 1 | 2 | 4 | 8 |
+|---|---|---|---|---|---|
+| read `sec/op` | 68.62µ ± 2% | 79.76µ ± 1% | 90.72µ ± 3% | 104.26µ ± 4% | 130.73µ ± 3% |
+| vs 0 writers | — | +16.24% | +32.20% | +51.94% | +90.51% |
+| writes landed | 0 | **232.9k** | 380.8k | 429.3k | 574.9k |
+
+**The write rate rose ~80×** at one writer (2.93k → 232.9k), which confirms directly what
+the profile alleged: the previous arms were spending their time in the writer's own scan,
+not in writing. Two consequences:
+
+- **read degradation FELL** at 8 writers, from +112.72% to +90.51%, while the churn
+  driving it rose ~59× (9.75k → 574.9k writes). Per unit of write churn the read cost is
+  therefore roughly two orders of magnitude lower than the first instrument implied;
+- the writers' share of CPU **halved**, from 39.22% to 20.53% cumulative under `RunInTx`.
+
+**The version-walk hypothesis is refuted a second time.** `suspectNodes` and
+`correctBitmap` do not appear in this profile either, at any write rate. Whatever the
+residual +90.51% is, it is not the suspect walk, and it is not `LabelCountExact` declining
+its fast path.
+
+**The residual is NOT attributed, and I am not going to guess at it.** Only ~41% of CPU
+lands in GoGraph symbols at all in this arm (writers 20.53%, the reader's `ResultSet.Next`
+11.53%); the remainder is runtime — GC and scheduling — which is consistent with 574.9k
+committed transactions' worth of allocation pressure but is not established as the cause.
+Naming it needs a heap profile and a `GODEBUG=gctrace=1` run, not another inference.
+
+**Verdict for AC 3.** No material MVCC *version-walk* cost has been demonstrated at any
+write rate on either instrument, so there is nothing identified to reduce, and a code
+change now would be optimising against an unattributed residual. That is the finding, and
+under this task's AC 3 it is the "not confirmed" branch: close with the finding, no code
+change — with the caveat that "not confirmed" here means *not attributable to MVCC*, not
+*no cost at all*, since the reader does slow measurably under a saturating writer.
 
 ## The refuted hypothesis, kept for the record
 
@@ -128,10 +167,9 @@ anything measurable at this write rate.
 
 ## What is NOT yet done
 
-- **AC 3 remediation.** Premature: the profile shows no material *version-walk* cost to
-  reduce, and the instrument must be fixed (indexed writer) before any figure justifies a
-  code change. Optimising against the current +112.72% would be optimising against CPU
-  competition.
+- **AC 3 remediation.** Not required on the evidence: no material version-walk cost was
+  demonstrated on either instrument. The residual read cost is real but unattributed, and
+  attributing it (heap profile, gctrace) is the honest next step — not an optimisation.
 - **AC 4, the realistic-write-rate bound of ≤2.5%.** Not answerable on this instrument:
   every arm here is **saturating**, so even the 1-writer arm (+3.80%) is a writer running
   flat out rather than a realistic rate. A throttled arm — writes/second as the

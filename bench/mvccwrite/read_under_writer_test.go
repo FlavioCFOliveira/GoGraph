@@ -47,6 +47,16 @@ const readUnderWriterNodes = 2000
 func seedFixedPopulation(tb testing.TB, eng *cypher.Engine) {
 	tb.Helper()
 	ctx := context.Background()
+	// An INDEX on :Acct(id) so the writer's MATCH is a SEEK, not a scan. Without it the
+	// writer's own query costs O(readUnderWriterNodes) per commit, which made a previous
+	// version of this benchmark confounded in a second way: the arms differed in total
+	// CPU demand as well as in write rate, and a CPU profile showed ~39% of all time in
+	// the writers' Filter/newRowPredicate path rather than in anything MVCC. The reader
+	// is a full label scan by design — that is the workload — but the WRITER has to be
+	// constant-cost or the independent variable is not the write rate.
+	if _, err := eng.RunInTx(ctx, "CREATE INDEX acct_id FOR (n:Acct) ON (n.id)", nil); err != nil {
+		tb.Fatalf("CREATE INDEX: %v", err)
+	}
 	for i := 0; i < readUnderWriterNodes; i++ {
 		if _, err := eng.RunInTx(ctx, "CREATE (n:Acct {id: $id, bal: 0})",
 			map[string]expr.Value{"id": expr.IntegerValue(int64(i))}); err != nil {
