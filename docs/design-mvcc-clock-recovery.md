@@ -167,11 +167,36 @@ where there are no readers to observe a partially-applied transaction, but it do
 mean the recovered clock is inflated relative to the record. It becomes relevant to
 C3d/C4, where a snapshot must name the instant it captured.
 
-**C3c — validate by crash injection (AC 3).** Extend the deterministic battery in
-`internal/crashinject` with kill -9 between the fsync and the visibility publish,
-asserting on the recovered **graph shape** and not merely on a clean exit — the gap
-recorded earlier in this project is that `internal/crashinject` has no graph-shape
-assertions.
+**C3c — validate by crash injection (AC 3). DONE.**
+
+A `mvcc.commit.post-fsync-pre-publish` breakpoint sits in `commitUnderBarrier`
+between the WAL fsync and the bracket unwind that publishes the instant, a helper
+scenario commits through the Cypher engine and crashes there, and
+`TestCrashRecovery_MVCCClock_PostFsyncPrePublish` asserts the recovered **graph
+shape** and the recovered **clock**. `GOGRAPH_CRASH_AFTER` skips the seed
+transactions so the crash lands on the last one, leaving a published prefix to
+distinguish from the durable-but-unpublished commit.
+
+**The recorded gap was stale.** This spec said `internal/crashinject` has no
+graph-shape assertions; task #2270 had already added them
+(`internal/crashinject/graph_shape_test.go`), so the new test reuses that
+harness's `runAndAssertKilled` rather than building one.
+
+**The clock assertion is a GUARD, not a discriminator, and that was measured.**
+Removing the clock restore from recovery entirely leaves the crash test green.
+WAL-only replay mints an instant per **op** while the durable maximum counts
+**transactions**, and ops-per-transaction is always at least one — so the replayed
+clock necessarily overshoots and the restore is unobservable in any WAL-only
+scenario.
+
+**Consequence for C3d, and it is the useful one:** the restore becomes load-bearing
+precisely when a snapshot folds the WAL prefix, leaving few ops to replay against
+high durable instants. That is not a reason to defer it — a snapshot-bearing
+directory is the normal production shape — but it does mean the snapshot must carry
+its captured instant for the derivation to be complete, which is exactly what C3d
+is for. The discriminating coverage until then is
+`TestClockRestore_NextCommitExceedsEveryPreviouslyPublishedInstant`, which
+manufactures the relationship with a hand-appended marker.
 
 **C3d — the snapshot's instant (AC 4).** The snapshot/checkpoint header records the
 instant it captured, with a test asserting that instant is consistent with the data in

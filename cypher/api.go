@@ -105,6 +105,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/index/count"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index/stats"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/crashpoint"
 	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
@@ -5256,6 +5257,18 @@ func (r *Result) commitUnderBarrier() {
 			return
 		}
 		r.walHandled = true
+		// DURABLE, BUT NOT YET VISIBLE (rmp #2309, MVCC C3c). The fsync has
+		// returned and the OpCommit marker carries this transaction's MVCC instant;
+		// the instant itself is published later, when the write bracket unwinds
+		// through lpg.Graph.endWrite. A crash here therefore leaves a durable
+		// commit whose timestamp NO READER EVER SAW, which is the one ordering
+		// case the derive-and-ratchet design has to get right: the transaction is
+		// committed (the fsync returned), so recovery must both apply it and put
+		// the clock floor ABOVE its instant, never re-minting it.
+		//
+		// Inert in a production build — internal/crashpoint compiles to an empty
+		// function without the gograph_crashinject tag, so this costs nothing.
+		crashpoint.Breakpoint("mvcc.commit.post-fsync-pre-publish")
 	}
 	if r.buf != nil {
 		r.buf.Commit(r.idxMgr)

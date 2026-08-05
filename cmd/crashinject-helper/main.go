@@ -79,6 +79,8 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/internal/crashinject"
@@ -144,6 +146,8 @@ func run() int {
 	case "wal.appendrun.frame-emitted",
 		"wal.sync.pre-datasync":
 		runConcurrentWriters(dir, scenario)
+	case "mvcc.commit.post-fsync-pre-publish":
+		runMVCCCommitCrash(dir, scenario)
 	default:
 		fmt.Fprintf(os.Stderr, "crashinject-helper: unknown scenario %q\n", scenario)
 		return 1
@@ -865,4 +869,68 @@ func envInt(name string, def int) int {
 		return def
 	}
 	return v
+}
+
+// mvccCommitSeed is the workload runMVCCCommitCrash commits BEFORE the crashing
+// transaction. Each entry is one autocommit Cypher transaction, so each takes its
+// own MVCC commit instant and each writes its instant into its own OpCommit marker.
+var mvccCommitSeed = []int64{10, 20, 30}
+
+// mvccCommitCrashKey is the id of the node the CRASHING transaction creates. It is
+// durable when the crash lands — the fsync returned before the breakpoint — but its
+// commit instant was never published, so recovery must apply it anyway.
+const mvccCommitCrashKey int64 = 40
+
+// runMVCCCommitCrash commits through the CYPHER engine and crashes in the window
+// between the WAL fsync and the MVCC visibility publish (rmp #2309, MVCC C3c).
+//
+// # Why the cypher engine and not txn.Store directly
+//
+// The MVCC commit timestamp only exists on the engine path. The store's own
+// Tx.Commit has no clock in scope and writes commitTS 0 by design, so a scenario
+// built on it would exercise the durability ordering but not the thing under test.
+//
+// # What the crash window is, and why it is the interesting one
+//
+// cypher's commitUnderBarrier fsyncs the WAL and only then lets the write bracket
+// unwind, which is what publishes the commit instant. Between the two the
+// transaction is DURABLE BUT INVISIBLE: its OpCommit marker carries a timestamp no
+// reader ever saw. Recovery must apply the transaction (the fsync returned, so it is
+// committed) AND derive a clock floor above that timestamp, so the instant is never
+// minted a second time.
+//
+// GOGRAPH_CRASH_AFTER skips the seed transactions' hits, so the crash lands on the
+// last one and the recovered graph has both a published prefix and one
+// durable-but-unpublished commit to distinguish.
+func runMVCCCommitCrash(dir, scenario string) {
+	walPath := filepath.Join(dir, "wal")
+	w, err := wal.Open(walPath)
+	if err != nil {
+		log.Fatalf("wal.Open: %v", err)
+	}
+
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	store := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewFloat64WeightCodec(),
+	})
+	eng := cypher.NewEngineWithStore(store)
+	ctx := context.Background()
+
+	for _, id := range mvccCommitSeed {
+		if _, cerr := eng.RunInTx(ctx, "CREATE (n:Acct {id: $id})",
+			map[string]expr.Value{"id": expr.IntegerValue(id)}); cerr != nil {
+			log.Fatalf("seed commit %d: %v", id, cerr)
+		}
+	}
+
+	// The crashing transaction. Under the harness the breakpoint inside
+	// commitUnderBarrier self-kills after its fsync, so this never returns.
+	if _, cerr := eng.RunInTx(ctx, "CREATE (n:Acct {id: $id})",
+		map[string]expr.Value{"id": expr.IntegerValue(mvccCommitCrashKey)}); cerr != nil {
+		log.Fatalf("crashing commit: %v", cerr)
+	}
+
+	// Reached only on the non-crash self-test path.
+	fmt.Printf("runMVCCCommitCrash: completed without crash (GOGRAPH_CRASH_AT != %s)\n", scenario)
 }
