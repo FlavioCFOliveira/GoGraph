@@ -236,3 +236,95 @@ func BenchmarkReadAtRealisticWriteRate(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkIndexedReadAtRealisticWriteRate is the arm that decides whether the AC 4
+// figure is a FIXED per-read overhead or a PER-ROW one.
+//
+// The sibling benchmark's reader is a full label scan costing ~68 us over 2000 nodes. A
+// realistic OLTP reader is an indexed point lookup costing a few microseconds. The two
+// respond oppositely to the two candidate mechanisms:
+//
+//   - a FIXED per-read cost (a snapshot acquisition, a horizon slot, a filter decision
+//     taken once per query) is a constant number of microseconds, so it is a SMALL
+//     percentage of a 68 us scan and a LARGE percentage of a 3 us seek;
+//   - a PER-ROW cost (a visibility test per row, a version walk per node touched) scales
+//     with rows examined, so it is a similar percentage of both — and near-zero on a seek
+//     that touches one row.
+//
+// Comparing this arm's percentage against the scan arm's therefore separates the two
+// without needing to profile either.
+func BenchmarkIndexedReadAtRealisticWriteRate(b *testing.B) {
+	for _, writers := range []int{0, 1} {
+		b.Run("writers="+strconv.Itoa(writers), func(b *testing.B) {
+			r := newRig(b, wiringMem)
+			defer func() { _ = r.close() }()
+			seedFixedPopulation(b, r.eng)
+
+			ctx := context.Background()
+			var (
+				stop    = make(chan struct{})
+				wg      sync.WaitGroup
+				written atomic.Int64
+			)
+			interval := time.Second / realisticWriteRate
+			for w := 0; w < writers; w++ {
+				wg.Add(1)
+				go func(w int) {
+					defer wg.Done()
+					tick := time.NewTicker(interval)
+					defer tick.Stop()
+					for i := 0; ; i++ {
+						select {
+						case <-stop:
+							return
+						case <-tick.C:
+						}
+						// Writers touch the TOP half of the id space and the reader the
+						// bottom, so the reader never seeks a node a writer is versioning:
+						// this isolates the cost of writing happening AT ALL from the cost
+						// of reading a contended row.
+						id := int64(readUnderWriterNodes/2 + (w*97+i)%(readUnderWriterNodes/2))
+						if _, err := r.eng.RunInTx(ctx,
+							"MATCH (n:Acct {id: $id}) SET n.bal = $v",
+							map[string]expr.Value{
+								"id": expr.IntegerValue(id),
+								"v":  expr.IntegerValue(int64(i)),
+							}); err == nil {
+							written.Add(1)
+						}
+					}
+				}(w)
+			}
+
+			start := time.Now()
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				// An indexed point lookup in the bottom half of the id space.
+				res, err := r.eng.Run(ctx, "MATCH (n:Acct {id: $id}) RETURN n.bal AS b",
+					map[string]expr.Value{
+						"id": expr.IntegerValue(int64(i % (readUnderWriterNodes / 2))),
+					})
+				if err != nil {
+					b.Fatalf("read: %v", err)
+				}
+				drain(b, res)
+			}
+			b.StopTimer()
+			elapsed := time.Since(start)
+
+			close(stop)
+			wg.Wait()
+			got := written.Load()
+			b.ReportMetric(float64(got), "writes")
+			if writers > 0 {
+				rate := float64(got) / elapsed.Seconds()
+				b.ReportMetric(rate, "writes/s")
+				if ceiling := float64(writers*realisticWriteRate) * 2; rate > ceiling {
+					b.Fatalf("the throttle did not hold: %0.f writes/s against an intended %d",
+						rate, writers*realisticWriteRate)
+				}
+			}
+		})
+	}
+}

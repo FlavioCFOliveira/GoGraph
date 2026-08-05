@@ -164,14 +164,46 @@ and AC 4 is a bound, not an attribution. So #2292 does **not** close on the "not
 confirmed" branch: there is a measured, reproducible, statistically significant breach at
 a realistic write rate, whatever its mechanism turns out to be.
 
-**One qualification that the AC does not settle, and I will not settle by assumption.**
-The reader here is a full label scan — `MATCH (n:Acct) RETURN count(n)`, 68 µs over 2000
-nodes. A realistic OLTP reader is an indexed point lookup costing a few microseconds, and
-a fixed per-read overhead would show up as a much *larger* percentage there, while a
-per-row overhead would show up as a much smaller one. Which it is decides whether 4.17% is
-the optimistic or the pessimistic figure, and it is one benchmark arm away: add an
-indexed-read arm against the same throttled writer. That is the measurement that should
-precede any remediation.
+### The indexed-read arm settles it: the overhead is FIXED PER READ, and 4.17% was the OPTIMISTIC figure
+
+`BenchmarkIndexedReadAtRealisticWriteRate` runs an indexed point lookup against the same
+throttled writer, with the writer confined to the top half of the id space and the reader
+to the bottom, so the reader never seeks a row a writer is versioning. Throttle held at
+999.3 writes/s.
+
+| reader | baseline | with 1 writer @1000/s | relative | absolute Δ |
+|---|---|---|---|---|
+| indexed seek (1 row) | 5.669µ ± 2% | 6.371µ ± 1% | **+12.38%** | 0.70µ |
+| full scan (2000 rows) | 67.79µ ± 2% | 70.61µ ± 1% | +4.17% | 2.82µ |
+
+n=6, p=0.002 both arms.
+
+**The two candidate mechanisms predict very different ratios, and the measurement
+discriminates cleanly.** A purely per-row cost would differ ~2000× in absolute terms
+between a 2000-row scan and a 1-row seek. A purely fixed per-read cost would be identical.
+The observed absolute difference is **4×** — so the overhead is overwhelmingly a FIXED
+per-read cost, with a small per-row component.
+
+**Consequence, and it is the worse direction.** A fixed cost is worst for the cheapest
+reads, which are exactly the OLTP reads this module targets. The realistic-rate breach is
+therefore **+12.38%, not +4.17%** — nearly 5× AC 4's ≤2.5% bound, on the read shape a real
+service issues most.
+
+**Leading candidate, stated as a prediction because this task has already refuted two of
+my hypotheses.** A fixed per-read cost that appears only when writers are active points at
+work done once per query and gated on churn: the snapshot acquisition, the horizon slot
+(`Enter`/`Leave`), or the `labelBitmapNeedsFilter` decision and what follows it. Note that
+`suspectNodes` is sampled **twice** per read since #2326's fix (`01bc9019`), once before
+the bitmap clone and once after — a fixed per-read cost that engages only when churn is
+live, which matches this signature exactly. That does **not** contradict the two profiles
+above: both were taken on the SCAN arm, where a sub-microsecond fixed cost is 1% of the
+runtime and invisible. On a 5.7 µs read it would be most of the 0.70 µs.
+
+**The measurement that settles it:** profile the INDEXED arm, not the scan arm. If
+`suspectNodes` dominates the delta there, the fix is to sample once and close the
+clone-versus-sample race differently — keeping the correctness property #2326 established,
+which is not negotiable. If it does not, the candidate list above is wrong too and the cost
+is elsewhere.
 
 ## The refuted hypothesis, kept for the record
 
@@ -205,9 +237,11 @@ anything measurable at this write rate.
 - **AC 3 remediation.** Now required after all, because AC 4 fails: the cost is within
   no bound even though it is attributable to no MVCC structure yet. Attribution first
   (heap profile, gctrace, and the indexed-read arm), remediation second.
-- **AC 4 is MEASURED and FAILING** — see the section above: +4.17% at 1000 commits/s
-  against a ≤2.5% bound. What remains is the indexed-read arm that decides whether that
-  figure is a fixed per-read overhead or a per-row one, which determines the remediation.
+- **AC 4 is MEASURED and FAILING**, and worse than first recorded: +12.38% on an indexed
+  read at 1000 commits/s against a ≤2.5% bound (+4.17% on a full scan). The overhead is
+  fixed per read, so the cheapest reads suffer most. What remains is a profile of the
+  INDEXED arm to attribute it — the scan arm's profiles cannot see a sub-microsecond fixed
+  cost.
 - **The pre-MVCC cross-check.** Deliberately not required to reach the verdict above: the
   0-writer arm is the baseline, so the cost of *concurrent writing* is measured within one
   build. An absolute comparison against `b66b4e25` would answer a different question —
