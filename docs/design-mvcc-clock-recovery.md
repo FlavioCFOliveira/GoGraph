@@ -131,11 +131,41 @@ versioned-nothing path (`cypher`).
 nothing, because every `endWrite` discharge path already zeroes the field. It is
 defence in depth, and the comment now says so.
 
-**C3b — derive and ratchet at recovery.** Track the maximum commit timestamp during
-replay, expose it from recovery alongside the existing `ResumeTxnSeq`, add a ratchet
-primitive to `mvcc.Clock` that raises both the allocation counter and the visible
-frontier and never lowers either, and wire it at open. Test AC 1: after close/reopen,
-the next commit timestamp exceeds every previously published one.
+**C3b — derive and ratchet at recovery. DONE.**
+
+`recovery.Result.MaxCommitTS` tracks the maximum during replay, `mvcc.Clock.RatchetTo`
+raises both the allocation counter and the visible frontier and never lowers either,
+and `lpg.Graph.RestoreMVCCClock` applies the `MaxCommitTS+1` floor.
+
+**Wired inside recovery, not left to the embedder — and the precedent is why.**
+`txn.Options.ResumeTxnSeq` is the same shape one layer down, and **no production
+caller sets it**: it appears only in its own tests. A restoration every reopen path
+must remember is one some reopen path will forget, and the failure is silent —
+writes keep succeeding at instants that collide with durable ones.
+
+### The obvious test passes without the fix, and that was measured
+
+The natural acceptance test — commit six transactions, reopen, check the clock — is
+**not discriminating**. Injecting the defect (removing the restore entirely) left it
+green.
+
+**Recovery mints an instant per replayed OP, not per transaction.** Six three-op
+`CREATE` statements produce `WALOps=18` and drive the recovered clock to **18**,
+while the durable maximum is **6**. Replay overshoots on its own, so the restore is a
+no-op in that shape and the test proved nothing.
+
+The restore only bites when the durable maximum **exceeds** what replay reaches —
+which is exactly the production case a snapshot creates, since the snapshot folds the
+WAL prefix and leaves few ops to replay against high timestamps. The test now appends
+a commit marker carrying `1_000_000` to reproduce that relationship without a
+snapshot's machinery, and against the injected defect it fails with `clock reads 18,
+at or below the 1000000 already durable`.
+
+**Noted, not chased:** that replay stamps each op with its own instant rather than
+one per transaction is a separate observation. It costs nothing during recovery,
+where there are no readers to observe a partially-applied transaction, but it does
+mean the recovered clock is inflated relative to the record. It becomes relevant to
+C3d/C4, where a snapshot must name the instant it captured.
 
 **C3c — validate by crash injection (AC 3).** Extend the deterministic battery in
 `internal/crashinject` with kill -9 between the fsync and the visibility publish,

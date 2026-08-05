@@ -191,6 +191,57 @@ func (c *Clock) finishCommitTS(ts uint64) {
 	c.pubMu.Unlock()
 }
 
+// RatchetTo raises the clock so that every timestamp it subsequently allocates,
+// and the instant every new reader starts at, is at least floor. It NEVER lowers
+// either, and it is a no-op when the clock has already passed floor.
+//
+// It returns the resulting allocation counter.
+//
+// # What it is for: recovery, and why the clock is DERIVED (rmp #2309)
+//
+// A process-local clock constructed at zero on every open would re-mint instants
+// that a previous process already made visible and made durable. The fix is not a
+// persisted counter — two of the three reference engines deliberately removed
+// theirs. InnoDB keeps TRX_SYS_TRX_ID_STORE "only for the purpose of upgrading"
+// and instead folds a max over every rollback segment at startup, then calls
+// init_max_trx_id(max + 1). Memgraph derives max(delta_ts)+1 from the WAL and
+// info.start_timestamp+1 from a snapshot, then restores
+// timestamp_ = max(timestamp_, next_timestamp). PostgreSQL does persist nextXid in
+// pg_control but STILL ratchets it per record during replay
+// (AdvanceNextFullTransactionIdPastXid).
+//
+// So the clock is derived from what the durable record actually says, and RAISED
+// rather than trusted — which is what this method is. A second source of truth
+// would be one that can disagree with the log after a torn tail.
+//
+// # Why it raises the VISIBLE frontier too, and why that is not a shortcut
+//
+// Both counters move. Raising only the allocation counter would leave the frontier
+// at zero, so every recovered commit would be invisible to a new reader until some
+// later commit's publication happened to sweep the frontier past it — a graph that
+// reads as empty immediately after recovery.
+//
+// It is sound here and ONLY here because recovery has no in-flight commits by
+// construction: every transaction in the file either reached its durable marker or
+// is discarded with the torn tail, so there is no allocated-but-unfinished instant
+// for the frontier to be holding back. That is exactly the precondition the
+// contiguous frontier normally enforces, satisfied by the situation rather than by
+// the commit log — which is why this must not be called on a live clock.
+//
+// Not safe for concurrent use, and not safe on a clock with commits in flight:
+// call it during open, before the graph is published to any reader or writer.
+func (c *Clock) RatchetTo(floor uint64) uint64 {
+	c.pubMu.Lock()
+	defer c.pubMu.Unlock()
+	if cur := c.commit.Load(); cur < floor {
+		c.commit.Store(floor)
+	}
+	if cur := c.visible.Load(); cur < floor {
+		c.visible.Store(floor)
+	}
+	return c.commit.Load()
+}
+
 // InFlightCommits reports how many allocated commit timestamps have not yet
 // finished: the distance between the frontier a reader starts at and the
 // newest timestamp handed out.

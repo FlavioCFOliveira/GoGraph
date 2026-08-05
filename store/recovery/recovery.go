@@ -135,6 +135,27 @@ type Result[N comparable, W any] struct {
 	// disagree with the log after a torn tail. Feed it to
 	// [txn.Options.ResumeTxnSeq].
 	MaxTxnSeq uint64
+	// MaxCommitTS is the highest MVCC commit timestamp any replayed [txn.OpCommit]
+	// marker carried, or 0 when none carried one — a WAL written before rmp #2309,
+	// or one written by a store with no MVCC clock.
+	//
+	// It is what restores the MVCC clock: the caller raises the clock to
+	// MaxCommitTS+1, so the next instant minted exceeds every instant that was ever
+	// made visible. Same DERIVE-don't-persist decision as [Result.MaxTxnSeq] above,
+	// and the same one the prior art reached: InnoDB keeps TRX_SYS_TRX_ID_STORE only
+	// for upgrades and folds a max over the rollback segments instead, Memgraph
+	// derives max(delta_ts)+1 from the WAL, and PostgreSQL persists nextXid but
+	// STILL ratchets it per record during replay.
+	//
+	// # It counts a timestamp that was durable but never visible, on purpose
+	//
+	// A crash between the fsync and the visibility publish leaves a durable
+	// OpCommit carrying an instant no reader ever saw. That transaction IS
+	// committed — the fsync returned — so recovery must treat its instant as spent
+	// and the floor must sit ABOVE it. That is why the caller adds one rather than
+	// resuming AT the maximum, and it is the same reasoning that makes MaxTxnSeq
+	// count frames this replay goes on to discard.
+	MaxCommitTS uint64
 	// WALTailOffset is the byte offset of the last durable frame boundary
 	// in the WAL. It equals the WAL file size when every frame was
 	// consumed cleanly, and the boundary of the last fully-consumed frame
@@ -1200,6 +1221,7 @@ func openCodec[N comparable, W any](
 		res.TailErr = walRes.TailErr
 		res.WALTailOffset = walRes.WALTailOffset
 		res.MaxTxnSeq = walRes.MaxTxnSeq
+		res.MaxCommitTS = walRes.MaxCommitTS
 		if walErr != nil {
 			// The only non-nil walErr is a ctx cancellation surfaced mid-replay;
 			// it is returned with the partially-recovered Result, exactly as the
@@ -1244,6 +1266,31 @@ func openCodec[N comparable, W any](
 	// re-seed above.
 	for i := range res.Indexes {
 		g.AddStoreIndex(res.Indexes[i].Name)
+	}
+
+	// RESTORE THE MVCC CLOCK (rmp #2309). The clock is process-local and starts at
+	// zero on every open, so without this a reopened graph re-mints instants a
+	// previous process already published AND made durable — the next commit would
+	// land at 1, at or below timestamps already in the file, and a reader could
+	// find a version that is simultaneously in its past and its future.
+	//
+	// It is DERIVED from what the durable record actually says, and RATCHETED
+	// rather than trusted: no counter is persisted, which is what InnoDB and
+	// Memgraph both concluded after removing theirs. +1 because a timestamp that
+	// reached the file is SPENT even if the crash landed between its fsync and its
+	// visibility publish — that transaction is committed, since the fsync returned,
+	// so the floor must sit ABOVE it and never re-mint it.
+	//
+	// Done HERE rather than left to the embedder, deliberately. [Options.ResumeTxnSeq]
+	// is the same shape one layer down and NO production caller wires it — it is set
+	// only in its own tests. A restoration that every reopen path must remember is
+	// one some reopen path will forget, and the failure is silent: writes keep
+	// succeeding at instants that collide with durable ones.
+	//
+	// The snapshot's own instant is C4's (rmp #2310) to fold in; this covers what
+	// the WAL carries, which is every transaction since the last checkpoint.
+	if res.MaxCommitTS > 0 {
+		g.RestoreMVCCClock(res.MaxCommitTS + 1)
 	}
 
 	// Mapper-less (v2) path only: apply snapshot-side labels after the WAL
@@ -1325,6 +1372,9 @@ type ReplayResult struct {
 	// MaxTxnSeq is the highest per-transaction sequence any replayed v3 frame
 	// carried, or 0 when there was none. See [Result.MaxTxnSeq], which it feeds.
 	MaxTxnSeq uint64
+	// MaxCommitTS is the highest MVCC commit timestamp any replayed OpCommit marker
+	// carried, or 0 when none did. See [Result.MaxCommitTS], which it feeds.
+	MaxCommitTS uint64
 }
 
 // IsClean reports whether replay stopped at a state from which it is safe to
@@ -1445,6 +1495,13 @@ func replayWALInto[N comparable, W any](
 			// [Result.MaxTxnSeq] exists to prevent. See rmp #2302.
 			if op.TxnSeq > res.MaxTxnSeq {
 				res.MaxTxnSeq = op.TxnSeq
+			}
+			// The MVCC instant, tracked for the same reason and with the same
+			// breadth: a timestamp that reached the file is SPENT, whether or not
+			// this replay goes on to apply the transaction carrying it, and whether
+			// or not it was ever made visible before the crash (rmp #2309).
+			if ts, ok := op.CommitTS(); ok && ts > res.MaxCommitTS {
+				res.MaxCommitTS = ts
 			}
 			if op.Kind != txn.OpCommit {
 				// Bound the in-flight transaction buffer: stop the instant

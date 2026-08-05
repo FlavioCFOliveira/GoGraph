@@ -301,6 +301,41 @@ func (g *Graph[N, W]) AmbientWriteTx() WriteTx { return WriteTx{w: g.writeTx.Loa
 // abandoned on this path, via [mvcc.Clock.AbandonCommitTS] — the shape that call
 // exists for. Before rmp #2309 no path allocated one early, so there was nothing to
 // abandon; there is now, and failing to would stall the frontier permanently.
+// RestoreMVCCClock raises this graph's MVCC clock so every instant it subsequently
+// allocates, and every instant a new reader starts at, is at or above floor. It
+// never lowers the clock.
+//
+// It is a no-op when the versioning substrate is disarmed, so a recovery path may
+// call it unconditionally.
+//
+// # Why the clock is restored at all, and why by derivation (rmp #2309)
+//
+// [mvcc.Clock] is process-local and constructed at zero on every open. Nothing
+// persists it, deliberately: two of the three reference engines removed their
+// persisted counter and derive instead — InnoDB folds a max over the rollback
+// segments at startup, Memgraph derives max(delta_ts)+1 from the WAL. A second
+// durable source of truth is one that can disagree with the log after a torn tail.
+//
+// So recovery reads the largest commit timestamp the WAL actually carries and hands
+// it here as a floor. Without it a reopened graph re-mints instants a previous
+// process already published and made durable, and a reader could reach a version
+// that is simultaneously in its past and its future.
+//
+// # It must be called before the graph has readers or writers
+//
+// It moves the visible frontier as well as the allocation counter, which is sound
+// only because recovery has no commits in flight: every transaction in the file
+// either reached its durable marker or went with the torn tail. See
+// [mvcc.Clock.RatchetTo].
+//
+// Not safe for concurrent use.
+func (g *Graph[N, W]) RestoreMVCCClock(floor uint64) {
+	if !g.mvccArmed {
+		return
+	}
+	g.mvccClock.RatchetTo(floor)
+}
+
 // AllocateCommitTS reserves this transaction's commit timestamp WITHOUT making it
 // visible, and returns it. It is idempotent: a second call returns the same value.
 //
