@@ -224,22 +224,45 @@ work. That explains every property of the measurement that the MVCC hypotheses c
   With no writer the cache hits and the cost vanishes, which is precisely the shape of the
   0-writer baseline.
 
-**So the AC 4 breach is most likely a plan-cache invalidation problem, not an MVCC
-version-visibility problem.** That is a much better place to be: it is MVCC-*adjacent*
-(writes invalidate, and this sprint made writes concurrent) but it does not touch the
-version machinery or the correctness properties #2326 established.
+**That conclusion was WRONG, and a second profile caught it before it was acted on.**
+Two facts kill it. First, the read-plan cache (`cypher/plan_cache.go`) is keyed by query
+TEXT and stores parse plus logical translation; `buildReadPhysical` runs on every
+execution regardless, and the only thing that clears the cache is the explicit
+`Engine.ClearPlanCache`. No write invalidates it. Second, and decisively, profiling the
+**0-writer** arm shows `buildReadPhysical` at **16.82%** cumulative against **10.27%** in
+the 1-writer arm — a *larger* share of the baseline, because with a writer present the
+writer's own work dilutes it.
 
-**The measurement that settles it, and it is cheap:** find what keys the read-plan cache
-and what a write invalidates. If a write invalidates plans that do not depend on what it
-changed — a whole-cache flush, or a key on a global topology generation rather than on the
-labels and properties the plan actually reads — then the fix is to narrow the key, and the
-gain is bounded below by the 12.38% measured here. Verify by re-running this arm; the
-0-writer baseline is the target, since with a correctly-keyed cache a writer touching the
-top half of the id space should not invalidate a plan reading the bottom half at all.
+So plan building is a large share of the read in **both** arms. It is where the read
+spends its time; it is **not** where the +12.38% delta comes from.
 
-Do not treat the above as established. It is hypothesis four in a task that has refuted
-three, and the pattern in this project is that the stated bottleneck is not the measured
-one until it has been measured.
+### The method error, which is the transferable lesson here
+
+A single-arm profile shows where time goes **in that arm**. It cannot attribute a
+**differential**. I profiled the 1-writer arm, saw plan building dominate, and wrote down
+a mechanism for the delta — which is a category error, and it produced hypothesis four in
+a task that had already refuted three. The 0-writer profile took one command and refuted
+it immediately.
+
+To attribute the delta properly, take profiles of both arms and diff them
+(`go tool pprof -base ix0.out ix.out`), or measure the candidate directly. That has not
+been done, so **the +12.38% remains unattributed** — and every mechanism proposed in this
+document so far has been refuted: the suspect walk (twice, on two arms), writer CPU
+competition (fixed by indexing the writer, cost persisted), and plan-cache invalidation.
+
+**What is actually established**, after four refuted mechanisms:
+
+- read cost rises with concurrent write rate, with graph size and writer cost controlled;
+- at a realistic 1000 commits/s the rise is **+12.38%** on an indexed read and +4.17% on a
+  full scan, against AC 4's ≤2.5% bound — so the bound fails, reproducibly, p=0.002;
+- the overhead is **fixed per read**, not per row (4× absolute difference between a 1-row
+  seek and a 2000-row scan, where per-row would predict ~2000×);
+- it is **not** the suspect walk, **not** writer CPU competition, and **not** plan-cache
+  invalidation.
+
+**The next measurement is a differential profile**, `go tool pprof -base` across the two
+arms already captured. Nothing further should be hypothesised before it is run — this
+document is now four wrong mechanisms long, and each one looked reasonable when written.
 
 ## The refuted hypothesis, kept for the record
 
@@ -275,10 +298,9 @@ anything measurable at this write rate.
   (heap profile, gctrace, and the indexed-read arm), remediation second.
 - **AC 4 is MEASURED and FAILING**, and worse than first recorded: +12.38% on an indexed
   read at 1000 commits/s against a ≤2.5% bound (+4.17% on a full scan). The overhead is
-  fixed per read, so the cheapest reads suffer most. The indexed arm has now been
-  profiled: the cost is PLAN BUILDING, not version work, and the leading explanation is
-  read-plan cache invalidation by concurrent writes. Confirming that and narrowing the
-  cache key is the remaining work.
+  fixed per read, so the cheapest reads suffer most. FOUR mechanisms have been proposed
+  and refuted; the delta is still unattributed, and the next step is a differential
+  profile (`pprof -base`) rather than a fifth hypothesis.
 - **The pre-MVCC cross-check.** Deliberately not required to reach the verdict above: the
   0-writer arm is the baseline, so the cost of *concurrent writing* is measured within one
   build. An absolute comparison against `b66b4e25` would answer a different question —
