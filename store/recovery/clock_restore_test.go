@@ -37,7 +37,7 @@ import (
 
 // writeAndClose commits n nodes through a WAL-backed engine and closes it,
 // returning the WAL path and the last instant the clock published.
-func writeAndClose(t *testing.T, dir string, n int, keyBase int) (walPath string, lastTS uint64) {
+func writeAndClose(t *testing.T, dir string, n, keyBase int) (walPath string, lastTS uint64) {
 	t.Helper()
 	walPath = filepath.Join(dir, "wal")
 	wr, err := wal.Open(walPath)

@@ -253,54 +253,6 @@ func (g *Graph[N, W]) WriterViewOf(tx WriteTx) *ReadView[N, W] {
 // is correct by virtue of the exclusive hold and by nothing else.
 func (g *Graph[N, W]) AmbientWriteTx() WriteTx { return WriteTx{w: g.writeTx.Load()} }
 
-// endWrite publishes every version the write transaction w created, atomically,
-// and closes its stamping window.
-//
-// One store, however many versions there are across however many stores: that
-// is the whole reason the record is shared. Publication is a single atomic store
-// of the commit timestamp into the shared record, so the instant a transaction
-// becomes visible is one instant however many structures it spanned — which is
-// what took over from the exclusive barrier at rmp #2304 and is why removing the
-// barrier moves no visibility boundary.
-//
-// w must be the value [Graph.beginWrite] returned for this bracket; see
-// [mvcc.WriteStamp.EndFor] for what closing the graph's slot instead cost once
-// two brackets could overlap.
-//
-// It publishes on the ROLLBACK path too; see the file comment for why.
-//
-// # It does NOT publish on the ABORT path (rmp #2300)
-//
-// A transaction that hit a write-write conflict is ABORTED rather than published:
-// its record is marked [mvcc.AbortedTS], so every reader undoes its versions
-// forever and the pre-transaction value is what they land on.
-//
-// Rollback and abort are different, and conflating them was an ATOMICITY
-// violation — measured, at the substrate level, before this branch existed:
-//
-//	transaction writes n.v = 1
-//	transaction hits a conflict on its second write, which is refused
-//	the bracket returns mvcc.ErrSerializationConflict
-//	a FRESH SNAPSHOT then reads n.v = 1
-//
-// The caller was told the transaction failed and half of it was visible anyway.
-// The reason it did not surface earlier is that the Cypher engine has an undo log
-// which physically restores the stored value (cypher/undo.go), so on that path the
-// chain nets out and publication is harmless — which is exactly what the file
-// comment above describes. But the undo log is a CYPHER structure: a caller using
-// [Graph.ApplyVersioned] directly has none, and the durable store's apply
-// (store/txn) is such a caller. The substrate has to be atomic on its own.
-//
-// Aborting is also the better answer where the undo log DOES run. The file comment
-// notes that aborting "would also be correct — every reader would undo both"; it
-// was not chosen because it keeps the chain alive past the point anything needs it.
-// That cost is real and it is rmp #2318's to reclaim; it does not justify leaving a
-// failed transaction partly visible.
-//
-// A commit timestamp allocated by [Graph.AllocateCommitTS] before the WAL fsync IS
-// abandoned on this path, via [mvcc.Clock.AbandonCommitTS] — the shape that call
-// exists for. Before rmp #2309 no path allocated one early, so there was nothing to
-// abandon; there is now, and failing to would stall the frontier permanently.
 // RestoreMVCCClock raises this graph's MVCC clock so every instant it subsequently
 // allocates, and every instant a new reader starts at, is at or above floor. It
 // never lowers the clock.
@@ -402,6 +354,54 @@ func (g *Graph[N, W]) abandonAllocatedCommitTS(w *writeCtx) {
 	w.commitTS = 0
 }
 
+// endWrite publishes every version the write transaction w created, atomically,
+// and closes its stamping window.
+//
+// One store, however many versions there are across however many stores: that
+// is the whole reason the record is shared. Publication is a single atomic store
+// of the commit timestamp into the shared record, so the instant a transaction
+// becomes visible is one instant however many structures it spanned — which is
+// what took over from the exclusive barrier at rmp #2304 and is why removing the
+// barrier moves no visibility boundary.
+//
+// w must be the value [Graph.beginWrite] returned for this bracket; see
+// [mvcc.WriteStamp.EndFor] for what closing the graph's slot instead cost once
+// two brackets could overlap.
+//
+// It publishes on the ROLLBACK path too; see the file comment for why.
+//
+// # It does NOT publish on the ABORT path (rmp #2300)
+//
+// A transaction that hit a write-write conflict is ABORTED rather than published:
+// its record is marked [mvcc.AbortedTS], so every reader undoes its versions
+// forever and the pre-transaction value is what they land on.
+//
+// Rollback and abort are different, and conflating them was an ATOMICITY
+// violation — measured, at the substrate level, before this branch existed:
+//
+//	transaction writes n.v = 1
+//	transaction hits a conflict on its second write, which is refused
+//	the bracket returns mvcc.ErrSerializationConflict
+//	a FRESH SNAPSHOT then reads n.v = 1
+//
+// The caller was told the transaction failed and half of it was visible anyway.
+// The reason it did not surface earlier is that the Cypher engine has an undo log
+// which physically restores the stored value (cypher/undo.go), so on that path the
+// chain nets out and publication is harmless — which is exactly what the file
+// comment above describes. But the undo log is a CYPHER structure: a caller using
+// [Graph.ApplyVersioned] directly has none, and the durable store's apply
+// (store/txn) is such a caller. The substrate has to be atomic on its own.
+//
+// Aborting is also the better answer where the undo log DOES run. The file comment
+// notes that aborting "would also be correct — every reader would undo both"; it
+// was not chosen because it keeps the chain alive past the point anything needs it.
+// That cost is real and it is rmp #2318's to reclaim; it does not justify leaving a
+// failed transaction partly visible.
+//
+// A commit timestamp allocated by [Graph.AllocateCommitTS] before the WAL fsync IS
+// abandoned on this path, via [mvcc.Clock.AbandonCommitTS] — the shape that call
+// exists for. Before rmp #2309 no path allocated one early, so there was nothing to
+// abandon; there is now, and failing to would stall the frontier permanently.
 func (g *Graph[N, W]) endWrite(w *writeCtx) {
 	if !g.mvccArmed || w == nil {
 		return
