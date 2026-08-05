@@ -292,6 +292,83 @@ fixed per read. Only the *mechanism* is unknown, and this document should not ac
 fifth hypothesis before one of the three methods above produces a per-operation
 attribution.
 
+## ATTRIBUTED, per operation: the horizon watermark scan and a churn-gated build
+
+The three methods the previous section proposed were tried in the order it recommended,
+and the first one worked. `cypher/read_phase_attribution_bench_test.go` runs **cumulative
+prefixes** of `Engine.runRead` — parse, then +snapshot, then +build, then the whole read —
+as separate benchmarks with the identical throttled writer behind each. Differencing
+adjacent prefixes gives each phase's cost **per read**; differencing the writer arms gives
+the phase that carries the delta.
+
+A prefix benchmark cannot suffer any of the three failures above: both arms execute the
+same phases the same number of times, and `sec/op` is already normalised per operation.
+`TestReadPhasePrefixMatchesRunRead` pins the transcription against the production path so
+it cannot drift into measuring a path nobody runs.
+
+### The phase split
+
+n=6, every comparison p=0.002 unless marked. Writer throttle held at 999.4 writes/s.
+
+| cumulative prefix | 0 writers | 1 writer | Δ |
+|---|---|---|---|
+| parse + param checks | 122.9n ± 1% | 124.3n ± 0% | +1.4n (+1.18%) |
+| + `BeginRead`/`EndRead` | 143.0n ± 0% | 344.5n ± 2% | +201.5n (**+140.91%**) |
+| + `buildReadPhysical` | 3.707µ ± 0% | 4.331µ ± 1% | +624n (+16.85%) |
+| + exec + materialise | 5.088µ ± 1% | 5.772µ ± 1% | +684n (**+13.44%**) |
+
+The +684 ns reproduces the +12.38% / 0.70 µs the `bench/mvccwrite` indexed arm measured, so
+this instrument is measuring the same effect. Differenced into phases:
+
+| phase | 0 writers | 1 writer | Δ | share of the delta |
+|---|---|---|---|---|
+| parse + param checks | 122.9n | 124.3n | +1.4n | 0.2% |
+| `BeginRead` + `EndRead` | 20.1n | 220.2n | **+200.1n** | **29.3%** |
+| `buildReadPhysical` | 3.564µ | 3.987µ | **+422.5n** | **61.8%** |
+| exec + materialise | 1.381µ | 1.441µ | +59.5n | 8.7% |
+
+### Three controls, and each one removes a rival explanation
+
+Every previous mechanism in this document was proposed and then refuted. These were run
+**before** anything was concluded, precisely so the same thing would not happen again.
+
+| control | what it changes | 4full result | what it rules out |
+|---|---|---|---|
+| writer on a **foreign graph** | same goroutines, allocation rate, scheduler and CPU demand; shares nothing with the reader | 5.051µ → 5.116µ, **~ (p=0.093)** | ambient load, GC, scheduling, memory bandwidth |
+| **read-only** transactions, same graph | same transaction rate and machinery; mints no version | 5.046µ → 5.099µ, **~ (p=0.180)** | transaction registration, commit machinery, the writer's own query |
+| **`GOGC=800`** | 8× less collection | 4.458µ → 5.159µ, **+15.74%** | garbage collection |
+
+The foreign-writer control is the decisive one: with the writer on its own graph **no
+phase moves at all** (2snapshot p=0.216, 3build p=0.909, 4full p=0.093), against +140.91%,
++16.85% and +13.44% on the shared graph. The cost is **sharing state with a writer**, and
+nothing else. The read-only control then narrows it further: a concurrent *transaction*
+costs ~0.9%; a concurrent *version* costs 13.44%. **It is version churn, not concurrency.**
+
+### The 29% is the horizon watermark scan, and it contradicts a recorded decision
+
+`Graph.EndRead` calls `wakeVacuumOnRelease` (`graph/lpg/mvcc_vacuum.go:422`), which is
+gated on `VersionCount() != 0` and then calls `Horizon.Oldest` — an **unconditional scan of
+all 1024 slots**, 128 KiB of distinct cache lines (`graph/mvcc/horizon.go:240`). So it runs
+**once per read query**, and only when versions exist: fixed per read, engaged only under
+churn, which is exactly the signature the measurement shows.
+
+`docs/benchmarks/mvcc-horizon-sizing-2026-08-05.md` chose 1024 slots on the explicit
+ground that **"the scan is no longer on the query path"**, with `Oldest` measured at
+448.1 ns at that size. That claim is **false**, and this is the measurement that catches
+it. The sizing decision itself is not necessarily wrong, but its stated justification does
+not hold, and 29% of this task's breach is the price.
+
+### The 62% is in the build, and it is NOT the version walk
+
+Withholding the snapshot from the builder — same horizon slot taken and released, but the
+build reads current values with no version walk — changes **nothing**: 4.306µ with the
+snapshot against 4.312µ without, under the same writer. So `buildReadPhysical` does not
+slow down because it is building *at an instant*; it slows down because versions *exist*.
+Some churn-gated path inside the build is the candidate, and it is not yet identified.
+
+**This is stated as unattributed, deliberately.** Four mechanisms have been refuted in this
+document already; the build's 62% gets a name when a measurement gives it one.
+
 ## The refuted hypothesis, kept for the record
 
 Written before the profile. **The profile refuted it** — see above. Kept because the
@@ -321,16 +398,16 @@ anything measurable at this write rate.
 
 ## What is NOT yet done
 
-- **AC 3 remediation.** Now required after all, because AC 4 fails: the cost is within
-  no bound even though it is attributable to no MVCC structure yet. Attribution first
-  (heap profile, gctrace, and the indexed-read arm), remediation second.
-- **AC 4 is MEASURED and FAILING**, and worse than first recorded: +12.38% on an indexed
-  read at 1000 commits/s against a ≤2.5% bound (+4.17% on a full scan). The overhead is
-  fixed per read, so the cheapest reads suffer most. FOUR mechanisms have been proposed
-  and refuted, and THREE profiling attempts were invalid for three different reasons. The
-  delta is still unattributed. The next step is a per-operation measurement — fixed
-  iteration counts, direct phase instrumentation, or component bisection — not another
-  profile of these two arms.
+- **AC 3 remediation.** Required, because AC 4 fails. The 29% share now has a name — the
+  `Horizon.Oldest` scan on every `EndRead` — and is actionable. The 62% in the build does
+  not yet.
+- **AC 4 is MEASURED and FAILING**: +12.38% on an indexed read at 1000 commits/s against a
+  ≤2.5% bound (+4.17% on a full scan). The overhead is fixed per read, so the cheapest
+  reads suffer most.
+- **The build's 62% is unattributed.** It is established to be shared-state cost driven by
+  version *existence* rather than by the version *walk*, by the foreign-graph, read-only
+  and withheld-snapshot controls. Which churn-gated path inside `buildReadPhysical` pays
+  it is the open question.
 - **The pre-MVCC cross-check.** Deliberately not required to reach the verdict above: the
   0-writer arm is the baseline, so the cost of *concurrent writing* is measured within one
   build. An absolute comparison against `b66b4e25` would answer a different question —
