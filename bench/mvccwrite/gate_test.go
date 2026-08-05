@@ -500,18 +500,32 @@ const minControlSpeedup = gateWriters / 2
 // serialisation ratio while available parallelism is HIGH, and the assertion still
 // runs in exactly that case.
 //
+// measureAvailableParallelism returns how many times faster [gateWriters] free
+// CPU-bound writers are than one, which is the CEILING any instrument built on
+// the same synthetic workload can report: work that cannot run in parallel on
+// this host at this moment cannot be shown to lose parallelism when serialised.
+//
+// It measures and reports; deciding what a given value means belongs to the
+// caller, because the two callers need different verdicts from it — one treats a
+// low value as an unmet precondition, the other as evidence that a shortfall it
+// just observed came from the machine rather than from the instrument.
+func measureAvailableParallelism(tb testing.TB, ops int) float64 {
+	tb.Helper()
+	one := mustRunArm(tb, 1, ops, spinUnit)
+	many := mustRunArm(tb, gateWriters, ops/gateWriters, spinUnit)
+	return many.commitsPerSec() / one.commitsPerSec()
+}
+
 // It returns the measured speed-up so a caller can report it.
 func requireAvailableParallelism(t *testing.T, ops int) float64 {
 	t.Helper()
-	one := mustRunArm(t, 1, ops, spinUnit)
-	many := mustRunArm(t, gateWriters, ops/gateWriters, spinUnit)
-	speedup := many.commitsPerSec() / one.commitsPerSec()
+	speedup := measureAvailableParallelism(t, ops)
 	if speedup < minControlSpeedup {
 		t.Skipf("the machine is not currently supplying the parallelism this check measures: "+
-			"%d free CPU-bound writers reached %.0f/s against 1 writer's %.0f/s = %.2fx, below "+
-			"the %dx this precondition needs. Nothing is concluded about the instrument; re-run "+
-			"with no competing load (see the doc comment for the measured numbers).",
-			gateWriters, many.commitsPerSec(), one.commitsPerSec(), speedup, minControlSpeedup)
+			"%d free CPU-bound writers scaled only %.2fx over 1 writer, below the %dx this "+
+			"precondition needs. Nothing is concluded about the instrument; re-run with no "+
+			"competing load (see the doc comment for the measured numbers).",
+			gateWriters, speedup, minControlSpeedup)
 	}
 	return speedup
 }
@@ -554,6 +568,26 @@ func TestWriteScalingInstrument_SeesConcurrency(t *testing.T) {
 
 	serial := measureSerialisationRatio(t, gateWriters, ops, "control/parallel", spinUnit)
 	if !passesGate(serial.max, writeScalingTarget) {
+		// A shortfall here has two possible causes, and they demand opposite verdicts:
+		// the instrument is blind (a real failure, which is what this control exists to
+		// catch), or the machine stopped supplying the parallelism the instrument needs
+		// (an unmet precondition, which concludes nothing). The probe above cannot
+		// separate them, because it runs BEFORE this measurement and measures the
+		// 1-vs-N quantity that [measureSerialisationRatio] deliberately avoids. Drift
+		// across a single run is real and was measured: in the run that motivated this
+		// (rmp #2326), the identical 8-writer free arm reported 100k-150k/s during
+		// [measureScaling] and only 65k-89k/s here, minutes later.
+		//
+		// So re-probe NOW, against the target this assertion enforces rather than
+		// against minControlSpeedup: a ratio cannot exceed the parallelism actually
+		// available while it is being measured.
+		if avail := measureAvailableParallelism(t, ops); !passesGate(avail, writeScalingTarget) {
+			t.Skipf("the machine stopped supplying the parallelism this check measures: the "+
+				"serialisation ratio reached only %.3fx against a %.2fx target, and re-probing "+
+				"immediately afterwards found just %.2fx of available parallelism — which is the "+
+				"ceiling of the ratio itself. Nothing is concluded about the instrument; re-run "+
+				"with no competing load.", serial.max, writeScalingTarget, avail)
+		}
 		t.Fatalf("the serialisation instrument cannot see concurrency: forcing genuinely parallel work through "+
 			"one mutex cost only %.3fx (best of %d), below the sprint target of %.2fx. TestWriteConcurrencyGate "+
 			"reads the same measurement, so until this passes its verdict cannot be trusted.",

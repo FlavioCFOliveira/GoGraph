@@ -2538,18 +2538,6 @@ func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, tx *writeCtx) error {
 	}
 	bag.add(lid)
 	sh.m[id] = bag
-	sh.mu.Unlock()
-	// Withdraw any pending removal for this entry BEFORE adding it, not after.
-	// Re-attaching a label the same statement stripped is what a ROLLBACK does,
-	// and a surviving deferred removal would delete the restored entry at the
-	// next sweep.
-	//
-	// The ORDER is load-bearing against the background vacuum (rmp #2308).
-	// Cancel-then-add makes this path and [Graph.applyDeferredIndexRemovals]
-	// mutually exclusive on idxDeferred.mu in both interleavings, so the bitmap
-	// can only ever end up a superset of the truth. Add-then-cancel lost the
-	// entry outright when the sweep landed in between; the failure is spelled out
-	// at applyDeferredIndexRemovals.
 	// Withdraw any pending removal for this entry BEFORE adding it, not after.
 	// Re-attaching a label the same statement stripped is what a ROLLBACK does, and a
 	// surviving deferred removal would delete the restored entry at the next sweep.
@@ -2568,8 +2556,18 @@ func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, tx *writeCtx) error {
 	// regression test written for that theory did not discriminate — it passed against
 	// the unconditional form. See rmp #2326, which records the hypothesis as UNPROVEN
 	// rather than fixed.
+	//
+	// BOTH RUN UNDER THE SHARD LOCK, with the bag write (rmp #2326). They used to run
+	// after sh.mu.Unlock(), which left a window in which the bag said the label was
+	// PRESENT and the bitmap did not yet contain it — and that is the UNRECOVERABLE
+	// direction: a present-time reader taking the raw bitmap misses the node
+	// entirely, which is a lost row rather than an over-report. The removal path has
+	// the mirror-image window and is closed the same way. The bag and the index must
+	// transition together or a reader can observe one without the other; before
+	// rmp #2308 the visibility barrier hid both windows.
 	g.cancelDeferredIndexRemoval(uint32(lid), id)
 	g.nodeIdx.Add(uint32(lid), id)
+	sh.mu.Unlock()
 	return nil
 }
 
@@ -3667,12 +3665,24 @@ func (g *Graph[N, W]) removeNodeLabelInfo(n N, name string, tx *writeCtx) {
 		} else {
 			sh.m[id] = bag
 		}
+		// INDEX MAINTENANCE UNDER THE SAME LOCK AS THE BAG WRITE (rmp #2326).
+		//
+		// This used to run after sh.mu.Unlock(), which left a window in which the
+		// bag said the label was ABSENT, the bitmap still said PRESENT, and
+		// idxPendingActive had not yet been incremented — so
+		// [Graph.labelBitmapNeedsFilter] returned false for a present-time reader
+		// and the RAW bitmap was served, reporting a label the node no longer had.
+		// Before rmp #2308 the sweep ran under the visibility barrier and no reader
+		// could observe that window; with the vacuum on its own goroutine it is
+		// reachable.
+		//
+		// Deferred rather than applied; see stripLabelBitmaps and mvcc_index.go for
+		// why a removal may not touch the bitmap until the watermark passes it.
+		if !g.deferLabelIndexRemoval(uint32(lid), id, tx) {
+			g.nodeIdx.Remove(uint32(lid), id)
+		}
 	}
 	sh.mu.Unlock()
-	// Deferred; see stripLabelBitmaps and mvcc_index.go.
-	if !g.deferLabelIndexRemoval(uint32(lid), id, tx) {
-		g.nodeIdx.Remove(uint32(lid), id)
-	}
 }
 
 // HasNodeLabel reports whether n carries the named label.
