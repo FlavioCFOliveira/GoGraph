@@ -1,0 +1,138 @@
+package mvccwrite
+
+// read_under_writer_test.go — rmp #2292: what a saturating writer costs a reader,
+// measured on an instrument that is not confounded.
+//
+// # Why BenchmarkEngReadUnderWriter cannot answer this
+//
+// That benchmark runs readers doing `MATCH (n) RETURN count(n)` — whose cost grows with
+// the node count — against an untothrottled writer whose every commit does
+// `CREATE (:W {id:...})`, which ADDS a node. The graph size is therefore an
+// UNCONTROLLED VARIABLE, and not merely a noisy one: the MVCC work changed it by two
+// orders of magnitude, because the writer is no longer starved by the readers. Its
+// recorded +39.02% mixes "reads got slower" with "the graph got bigger", in unknown
+// proportion, and no optimisation measured against it would be falsifiable.
+//
+// # What this measures instead
+//
+// The graph size is FIXED, and the independent variable is the WRITE RATE. The writer
+// SETs a property on a node that already exists, so it produces version churn — new
+// versions on existing chains, which is exactly the version-walk cost this task is
+// about — without changing the node count. The reader's scan cost is therefore constant
+// across every arm, and any movement in read latency is attributable to concurrent
+// writing rather than to graph growth.
+//
+// The zero-writer arm is the baseline, and it is the reason no pre-MVCC worktree is
+// needed to reach a verdict: if read cost is flat in write rate, there is no material
+// version-walk cost to reduce, whatever an absolute comparison against a pre-MVCC
+// commit would say about other changes made since.
+
+import (
+	"context"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"testing"
+
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+)
+
+// readUnderWriterNodes is the fixed population. Large enough that a scan is not
+// dominated by fixed query overhead, small enough that an arm completes quickly.
+const readUnderWriterNodes = 2000
+
+// seedFixedPopulation creates the invariant node population and returns nothing that
+// varies between arms.
+func seedFixedPopulation(tb testing.TB, eng *cypher.Engine) {
+	tb.Helper()
+	ctx := context.Background()
+	for i := 0; i < readUnderWriterNodes; i++ {
+		if _, err := eng.RunInTx(ctx, "CREATE (n:Acct {id: $id, bal: 0})",
+			map[string]expr.Value{"id": expr.IntegerValue(int64(i))}); err != nil {
+			tb.Fatalf("seed %d: %v", i, err)
+		}
+	}
+}
+
+// BenchmarkReadUnderConstantSizeWriter measures read latency against a rising write
+// rate with the node count held constant.
+//
+// Reported per arm: the reader's ns/op (the benchmark's own metric), plus the writes
+// the background writers actually landed, so a reader-latency figure can never be read
+// without knowing how much writing produced it — the confound that made the previous
+// instrument unusable.
+func BenchmarkReadUnderConstantSizeWriter(b *testing.B) {
+	for _, writers := range []int{0, 1, 2, 4, 8} {
+		b.Run("writers="+strconv.Itoa(writers), func(b *testing.B) {
+			r := newRig(b, wiringMem)
+			defer func() { _ = r.close() }()
+			seedFixedPopulation(b, r.eng)
+
+			ctx := context.Background()
+			var (
+				stop    = make(chan struct{})
+				wg      sync.WaitGroup
+				written atomic.Int64
+			)
+			// Writers SET an existing node's property: version churn on live chains,
+			// with the node count invariant.
+			for w := 0; w < writers; w++ {
+				wg.Add(1)
+				go func(w int) {
+					defer wg.Done()
+					for i := 0; ; i++ {
+						select {
+						case <-stop:
+							return
+						default:
+						}
+						// Disjoint node per writer, so the writers do not conflict with
+						// each other -- this measures what writing costs a READER, not
+						// what writers cost each other (that is #2323).
+						id := int64((w*97 + i) % readUnderWriterNodes)
+						if _, err := r.eng.RunInTx(ctx,
+							"MATCH (n:Acct {id: $id}) SET n.bal = $v",
+							map[string]expr.Value{
+								"id": expr.IntegerValue(id),
+								"v":  expr.IntegerValue(int64(i)),
+							}); err == nil {
+							written.Add(1)
+						}
+					}
+				}(w)
+			}
+
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				res, err := r.eng.Run(ctx, "MATCH (n:Acct) RETURN count(n) AS c", nil)
+				if err != nil {
+					b.Fatalf("read: %v", err)
+				}
+				drain(b, res)
+			}
+			b.StopTimer()
+
+			close(stop)
+			wg.Wait()
+			b.ReportMetric(float64(written.Load()), "writes")
+			if writers > 0 && written.Load() == 0 {
+				b.Fatalf("%d writers landed ZERO writes: the arm measured an idle graph and "+
+					"its read figure is not a figure for a contended one", writers)
+			}
+		})
+	}
+}
+
+// drain consumes a result set so the read is actually performed rather than merely
+// planned.
+func drain(b *testing.B, res *cypher.Result) {
+	b.Helper()
+	for res.Next() {
+		_ = res.Record()
+	}
+	if err := res.Err(); err != nil {
+		b.Fatalf("drain: %v", err)
+	}
+}
