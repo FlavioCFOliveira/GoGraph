@@ -37,20 +37,73 @@ Reader: `MATCH (n:Acct) RETURN count(n)`. n=6 per arm, every comparison p=0.002.
 | vs 0 writers | — | +3.80% | +12.16% | +53.58% | **+112.72%** |
 | writes landed | 0 | 2.93k | 5.22k | 6.28k | 9.75k |
 
-**A material cost is CONFIRMED.** Read latency roughly doubles under 8 saturating
-writers with the graph size controlled, so the original +39.02% was not merely a
-confound artefact — the real cost at high write rates is larger than that, and the old
-instrument was understating it as much as it was mismeasuring it.
+**Read latency rises with write rate, and the graph size is no longer the reason.**
+That much is established: the 0-writer baseline is measured in the same build, so the
+delta is the cost of concurrent writing rather than of a growing graph. It replaces the
++39.02%, which could not distinguish the two.
 
-The rise is also **super-linear in landed writes**: from 1 to 8 writers the write count
-rises 3.3× while the read cost rises 2.05× over a baseline that is already 68µ — i.e.
-the marginal cost per unit of churn grows. That is the signature of a per-read walk whose
-length scales with outstanding churn, not of lock contention, which would flatten as
-writers queue.
+**It is NOT yet an attribution, and the next section explains why** — the profile shows
+the writers' own queries consuming ~39% of CPU, so these arms differ in total CPU demand
+as well as in write rate. Read the figures as an upper bound on what concurrent writing
+costs a reader, not as a measurement of MVCC version work.
 
-## The likely mechanism, and it is the one the task named
+(The pre-profile reading of the curve — super-linear in landed writes, therefore a
+per-read walk rather than lock contention — is left in the refuted-hypothesis section
+below, because that inference is exactly what the profile overturned.)
 
-Not yet profiled, so this is a **hypothesis with a specific prediction**, not a finding.
+## PROFILED: the hypothesis below is REFUTED, and this instrument is still confounded
+
+Run immediately after the table, on the 8-writer arm
+(`-benchtime=3s -cpuprofile`), before attempting any remediation. It refuted the
+explanation and found a defect in the instrument itself.
+
+`suspectNodes` and `correctBitmap` **do not appear anywhere** in the top cumulative
+costs. The version-walk explanation below is therefore wrong, and the +112.72% is not a
+version-walk figure.
+
+What the profile actually shows:
+
+| symbol | cum |
+|---|---|
+| `cypher/exec.(*ResultSet).Next` | 41.78% |
+| `cypher.(*Engine).RunInTx` | 39.22% |
+| `cypher/exec.(*SetProperty).Next` | 38.51% |
+| `cypher/exec.(*Filter).Next` | 38.08% |
+| `cypher.newRowPredicate.func1` | 34.18% |
+| `lpg.(*PropertyKeyRegistry).Lookup` | 2.73% (490 ms flat) |
+
+**Nearly 39% of all CPU is the WRITERS' own work, not the reader's.** The writers run
+`MATCH (n:Acct {id: $id}) SET n.bal = $v`, and there is no index on `:Acct(id)` in this
+harness — so that `MATCH` is a full label scan with a per-row property filter, costing
+O(2000) per write. Each writer is doing a scan comparable to the reader's on every single
+commit.
+
+**So the arms do not differ only in write rate; they differ in total CPU demand.** Adding
+writers adds scanning work, and on 10 cores the 8-writer arm is contending for CPU with
+the reader. The +112.72% therefore mixes "concurrent writing costs a reader" with "eight
+extra O(N) scans are running", which is a different confound from the one this benchmark
+was built to remove, but a confound nonetheless.
+
+**The figure stands only as a bound, not as an attribution.** Read latency does rise with
+write rate — that much survives, since the 0-writer baseline is measured in the same build
+— but how much of the rise is MVCC version work versus plain CPU competition is unresolved,
+and the honest reading is that no material *version-walk* cost has been demonstrated.
+
+**To fix the instrument** (next step, not done here): give the writer a constant-cost
+write — create a range index on `:Acct(id)` so its `MATCH` is a seek rather than a scan,
+or address the node by a form that needs no scan — then re-measure. Only then is the
+independent variable really the write rate.
+
+This is the second instrument in this task to be caught by measurement rather than by
+review. The lesson is the one already written into the file header, and it applies to the
+replacement as much as to the original: hold *everything* constant except the variable,
+and profile the arms before believing the delta.
+
+## The refuted hypothesis, kept for the record
+
+Written before the profile. **The profile refuted it** — see above. Kept because the
+prediction it made is what made it refutable, and because the reasoning was sound even
+though the conclusion was wrong.
 
 The reader's `count` is served by `Graph.LabelCountExact`, which declines the O(1)
 bitmap answer whenever `labelBitmapNeedsFilter` is true — and concurrent writers make it
@@ -68,16 +121,17 @@ measuring. It was the correct trade (a wrong count has no predicate left to catc
 but its read-path cost was not measured at the time.
 
 **The prediction that would confirm or refute it:** a CPU profile of the 8-writer arm
-should show `correctBitmap` / `suspectNodes` dominating the reader's time. If it does
-not, this explanation is wrong and the cost is elsewhere. Run that before attempting any
-remediation — this project's record is that the stated bottleneck is usually not the
-measured one, and #2323 has just supplied another example.
+should show `correctBitmap` / `suspectNodes` dominating the reader's time. **It does not.
+The explanation is wrong**, and the corollary about #2326 having made this worse is
+therefore unsupported — nothing here shows the doubled suspect sample costs a reader
+anything measurable at this write rate.
 
 ## What is NOT yet done
 
-- **AC 3 remediation.** A material cost is confirmed, so the task requires it be
-  materially reduced. That is unstarted, and it should not begin before the profile above
-  names the cost.
+- **AC 3 remediation.** Premature: the profile shows no material *version-walk* cost to
+  reduce, and the instrument must be fixed (indexed writer) before any figure justifies a
+  code change. Optimising against the current +112.72% would be optimising against CPU
+  competition.
 - **AC 4, the realistic-write-rate bound of ≤2.5%.** Not answerable on this instrument:
   every arm here is **saturating**, so even the 1-writer arm (+3.80%) is a writer running
   flat out rather than a realistic rate. A throttled arm — writes/second as the
