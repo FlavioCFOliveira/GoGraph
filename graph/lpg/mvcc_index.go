@@ -387,6 +387,46 @@ func (g *Graph[N, W]) LabelCountExact(lid LabelID, s *Snapshot) (int64, bool) {
 	return int64(g.nodeIdx.Count(uint32(lid))), true
 }
 
+// LabelsCountExact is [Graph.LabelCountExact] for a CONJUNCTION of labels: the
+// number of nodes carrying every lid, and whether that number is EXACT for s.
+//
+// It exists because the conjunction count had no as-of form at all. The zero-alloc
+// path — roaring's AndCardinality straight over the live bitmaps — was reached
+// directly, bypassing [Graph.labelBitmapNeedsFilter], so a deferred label removal
+// left the node in both raw bitmaps and the count included a node whose per-row
+// label predicate correctly answered false. The count never evaluates a predicate,
+// so nothing downstream could correct it (rmp #2326).
+//
+// It CORRECTS rather than declines, which is the difference between this and
+// [Graph.LabelCountExact]. Declining was tried first and is wrong here: the
+// conjunction count also feeds a planner gate, and refusing it whenever any label
+// history is live made the intersection optimisation never engage at all —
+// TestLabelIntersect_Rapid detected that as a vacuous property. So the zero-alloc
+// AndCardinality is kept for the case where the raw bitmaps are authoritative, and
+// otherwise the answer is the cardinality of the FILTERED conjunction, which costs
+// the same clone the scan on that path pays anyway.
+//
+// ok is false only when the conjunction is not answerable at all (no labels).
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) LabelsCountExact(lids []LabelID, s *Snapshot) (int64, bool) {
+	if len(lids) == 0 {
+		return 0, false
+	}
+	if g.labelBitmapNeedsFilter(s) {
+		return int64(g.LabelsBitmapAsOf(lids, s).GetCardinality()), true
+	}
+	raw := make([]uint32, len(lids))
+	for i, l := range lids {
+		raw[i] = uint32(l)
+	}
+	n, ok := g.nodeIdx.IntersectCardinality(raw...)
+	if !ok {
+		return 0, false
+	}
+	return int64(n), true
+}
+
 // deferralStamp resolves the instant a deferred index removal is charged to.
 //
 // A transaction's own record and id, when there is one; the graph's ambient stamp

@@ -5713,16 +5713,24 @@ func (s *lpgLabelResolver) ResolveLabelsCardinality(names []string) (uint64, boo
 	if len(names) < 2 {
 		return 0, false
 	}
-	ids := make([]uint32, 0, len(names))
+	lids := make([]lpg.LabelID, 0, len(names))
 	for _, n := range names {
 		lid, ok := s.g.Registry().Lookup(n)
 		if !ok {
 			// An unknown label makes the conjunction empty by definition.
 			return 0, true
 		}
-		ids = append(ids, uint32(lid))
+		lids = append(lids, lid)
 	}
-	return s.g.NodeIndex().IntersectCardinality(ids...)
+	// Through the as-of form, NOT NodeIndex() directly: the raw bitmaps are only
+	// authoritative when nothing is deferred and no label or node history is live.
+	// See [lpg.Graph.LabelsCountExact] for what reading them unconditionally cost
+	// (rmp #2326).
+	n, ok := s.g.Raw().LabelsCountExact(lids, s.g.Snapshot())
+	if !ok {
+		return 0, false
+	}
+	return uint64(n), true
 }
 
 // ResolveLabelsBitmap implements [exec.LabelIntersectResolver]: the set-at-a-time
