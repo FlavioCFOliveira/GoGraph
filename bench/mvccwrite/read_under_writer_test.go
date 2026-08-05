@@ -33,6 +33,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
@@ -144,5 +145,94 @@ func drain(b *testing.B, res *cypher.Result) {
 	}
 	if err := res.Err(); err != nil {
 		b.Fatalf("drain: %v", err)
+	}
+}
+
+// realisticWriteRate is the per-writer commit rate the AC 4 bound is measured at, in
+// commits per second.
+//
+// The saturating arms above answer "what does a writer running flat out cost a reader",
+// which is the worst case and the wrong question for a production bound: at 232.9k
+// commits/s a single saturating writer is doing more writing than any OLTP workload this
+// module targets. 1000 commits/s per writer is a rate a real service might sustain, and
+// it is ~230x below saturation, so it separates "MVCC costs reads something structural"
+// from "a CPU-bound writer competes for cores".
+const realisticWriteRate = 1000
+
+// BenchmarkReadAtRealisticWriteRate measures read cost against a THROTTLED writer, which
+// is what rmp #2292's 2.5% bound is about.
+//
+// Throttling is by sleep between commits rather than by a token bucket: the writer is not
+// the thing being measured, so the simplest mechanism that produces a stable rate is the
+// right one. The achieved rate is reported so the bound is never read without evidence
+// that the intended rate was actually delivered.
+func BenchmarkReadAtRealisticWriteRate(b *testing.B) {
+	for _, writers := range []int{0, 1, 4} {
+		b.Run("writers="+strconv.Itoa(writers), func(b *testing.B) {
+			r := newRig(b, wiringMem)
+			defer func() { _ = r.close() }()
+			seedFixedPopulation(b, r.eng)
+
+			ctx := context.Background()
+			var (
+				stop    = make(chan struct{})
+				wg      sync.WaitGroup
+				written atomic.Int64
+			)
+			interval := time.Second / realisticWriteRate
+			for w := 0; w < writers; w++ {
+				wg.Add(1)
+				go func(w int) {
+					defer wg.Done()
+					tick := time.NewTicker(interval)
+					defer tick.Stop()
+					for i := 0; ; i++ {
+						select {
+						case <-stop:
+							return
+						case <-tick.C:
+						}
+						id := int64((w*97 + i) % readUnderWriterNodes)
+						if _, err := r.eng.RunInTx(ctx,
+							"MATCH (n:Acct {id: $id}) SET n.bal = $v",
+							map[string]expr.Value{
+								"id": expr.IntegerValue(id),
+								"v":  expr.IntegerValue(int64(i)),
+							}); err == nil {
+							written.Add(1)
+						}
+					}
+				}(w)
+			}
+
+			start := time.Now()
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				res, err := r.eng.Run(ctx, "MATCH (n:Acct) RETURN count(n) AS c", nil)
+				if err != nil {
+					b.Fatalf("read: %v", err)
+				}
+				drain(b, res)
+			}
+			b.StopTimer()
+			elapsed := time.Since(start)
+
+			close(stop)
+			wg.Wait()
+			got := written.Load()
+			b.ReportMetric(float64(got), "writes")
+			if writers > 0 {
+				rate := float64(got) / elapsed.Seconds()
+				b.ReportMetric(rate, "writes/s")
+				// The bound is meaningless if the throttle did not hold. Allow generous
+				// slack for scheduling, but reject an arm that silently saturated.
+				if ceiling := float64(writers*realisticWriteRate) * 2; rate > ceiling {
+					b.Fatalf("the throttle did not hold: %0.f writes/s against an intended "+
+						"%d, so this arm is a saturating one and its figure cannot be read "+
+						"as a realistic-rate bound", rate, writers*realisticWriteRate)
+				}
+			}
+		})
 	}
 }

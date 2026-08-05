@@ -138,6 +138,41 @@ under this task's AC 3 it is the "not confirmed" branch: close with the finding,
 change — with the caveat that "not confirmed" here means *not attributable to MVCC*, not
 *no cost at all*, since the reader does slow measurably under a saturating writer.
 
+## AC 4: the realistic-rate bound is BREACHED (+4.17% against ≤2.5%)
+
+Every arm above **saturates**, which answers the worst case and not the production
+question. `BenchmarkReadAtRealisticWriteRate` throttles each writer to 1000 commits/s —
+about 230× below saturation, and a rate a real service might sustain. The achieved rate is
+reported per arm so the bound is never read without evidence the throttle held; it held
+exactly.
+
+n=6, p=0.002:
+
+| writers | 0 | 1 | 4 |
+|---|---|---|---|
+| read `sec/op` | 67.79µ ± 2% | 70.61µ ± 1% | 73.71µ ± 1% |
+| vs 0 writers | — | **+4.17%** | +8.75% |
+| achieved writes/s | 0 | 999.7 | 3997.0 |
+
+**This FAILS AC 4, which requires ≤2.5%.** At a realistic 1000 commits/s a single writer
+costs a concurrent reader 4.17%, and four writers cost 8.75%. The bound is breached by
+1.67 percentage points at the single-writer rate.
+
+**This changes the verdict recorded above.** The saturating arms showed no *attributable*
+MVCC cost, and that still stands — but "no attributable cost" is not "within the bound",
+and AC 4 is a bound, not an attribution. So #2292 does **not** close on the "not
+confirmed" branch: there is a measured, reproducible, statistically significant breach at
+a realistic write rate, whatever its mechanism turns out to be.
+
+**One qualification that the AC does not settle, and I will not settle by assumption.**
+The reader here is a full label scan — `MATCH (n:Acct) RETURN count(n)`, 68 µs over 2000
+nodes. A realistic OLTP reader is an indexed point lookup costing a few microseconds, and
+a fixed per-read overhead would show up as a much *larger* percentage there, while a
+per-row overhead would show up as a much smaller one. Which it is decides whether 4.17% is
+the optimistic or the pessimistic figure, and it is one benchmark arm away: add an
+indexed-read arm against the same throttled writer. That is the measurement that should
+precede any remediation.
+
 ## The refuted hypothesis, kept for the record
 
 Written before the profile. **The profile refuted it** — see above. Kept because the
@@ -167,13 +202,12 @@ anything measurable at this write rate.
 
 ## What is NOT yet done
 
-- **AC 3 remediation.** Not required on the evidence: no material version-walk cost was
-  demonstrated on either instrument. The residual read cost is real but unattributed, and
-  attributing it (heap profile, gctrace) is the honest next step — not an optimisation.
-- **AC 4, the realistic-write-rate bound of ≤2.5%.** Not answerable on this instrument:
-  every arm here is **saturating**, so even the 1-writer arm (+3.80%) is a writer running
-  flat out rather than a realistic rate. A throttled arm — writes/second as the
-  independent variable — is needed, and it is a different benchmark.
+- **AC 3 remediation.** Now required after all, because AC 4 fails: the cost is within
+  no bound even though it is attributable to no MVCC structure yet. Attribution first
+  (heap profile, gctrace, and the indexed-read arm), remediation second.
+- **AC 4 is MEASURED and FAILING** — see the section above: +4.17% at 1000 commits/s
+  against a ≤2.5% bound. What remains is the indexed-read arm that decides whether that
+  figure is a fixed per-read overhead or a per-row one, which determines the remediation.
 - **The pre-MVCC cross-check.** Deliberately not required to reach the verdict above: the
   0-writer arm is the baseline, so the cost of *concurrent writing* is measured within one
   build. An absolute comparison against `b66b4e25` would answer a different question —
