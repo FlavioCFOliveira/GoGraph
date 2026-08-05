@@ -40,23 +40,71 @@ single-writer semaphore, and NOT the commit path — all three have been removed
 shown reachable, and the durable arm's 14.96× proves the commit path itself
 parallelises. Whatever remains is inside the shared MVCC structures the writers
 touch in common. This supersedes the earlier sprint-334 figure of "0.83× at 16
-writers": the same shape now measures 2.183× at 16.
+writers": the same shape now measures 2.183× at 16. The attribution below narrows
+"inside the shared MVCC structures" to a specific one.
 
-## What this spike has NOT yet established
+## Attribution (profiled 2026-08-05, same host)
 
-The ceiling is measured; it is **not yet attributed**. The number above says where
-scaling stops, not which structure stops it. Attribution requires a CPU profile and a
-contention profile of the 8- and 32-writer arms — `go test -bench` with
-`-cpuprofile`/`-blockprofile`/`-mutexprofile`, read with `go tool pprof` — to name the
-contended structures rather than infer them. Candidates worth testing, in the order the
-per-commit path touches them, but each is a hypothesis and none is evidence yet:
+The ceiling is now attributed, and the answer implicates a change made earlier in this
+same sprint.
+
+```
+go test -run '^$' -bench 'BenchmarkWriteScaling/mem/writers=32' -benchtime=3s \
+    -mutexprofile=mu.out ./bench/mvccwrite/
+go tool pprof -top -unit=ms mu.out ; go tool pprof -traces mu.out
+```
+
+**96.9% of all mutex delay flows through `cypher.(*Engine).RunInTx`**, and the contended
+stack tops out in `graph/lpg.(*Graph).setNodeLabelInfo`, reached on every commit via
+`WriteView.SetNodeLabel` → `lpgMutatorAdapter.SetNodeLabel` → `exec.(*CreateNode).Next`.
+By lock kind: `sync.(*Mutex).Unlock` 48.05% flat, `sync.(*RWMutex).Unlock` 36.08%,
+`RWMutex.RUnlock` 13.58%.
+
+The benchmark's unit is `CREATE (n:Account {id: $id})`, so **every** commit writes a
+label and every writer reaches this path. That is why the store-less arm plateaus while
+the WAL arm scales: the WAL arm's 3.7 ms fsync dominates and leaves the label write in
+the noise, whereas at 2.9 µs per commit the label write *is* the commit.
+
+**The mechanism, and it is a lock-nesting one.** `setNodeLabelInfo` takes the per-shard
+label lock `sh.mu` — sharded, so writers on different shards should not contend — and
+since commit `2284c0e8` it performs `nodeIdx.Add` / `deferLabelIndexRemoval` **inside**
+that lock. `nodeIdx` is a *single* `label.Index` with its own lock, shared by every
+shard. So a per-shard lock now encloses a global one, and shard-parallel writes are
+funnelled through one serialisation point.
+
+`2284c0e8` widened that critical section deliberately and for a real reason: the bag and
+the index have to transition together, and the add-path gap was losing rows outright —
+the unrecoverable direction. So this is a **correctness-versus-scaling trade that was
+made knowingly**, not an accident. But its scaling cost was not measured at the time,
+and it should have been. Correct still outranks fast, so nothing here argues for
+reverting it; it argues for a design that gets both.
+
+**Two things this does NOT say**, to keep the finding honest:
+
+- it does not quantify how much of the 2.2× ceiling `2284c0e8` is responsible for. The
+  before/after comparison run for #2315 post-dates that commit, so it cannot separate
+  them. Measuring that needs the ceiling re-measured against the pre-`2284c0e8` ordering
+  — which is *unsound* code, so it is a measurement-only arm that must never be shipped;
+- it does not establish that removing this nesting would lift the ceiling to any
+  particular figure. The next-largest contention source is unknown until this one moves.
+
+The candidate list below was written before the profile. **The first candidate was
+right** and the other three are unevidenced; they are kept only to show what was
+considered.
+
+## The pre-profile candidate list, kept for the record
+
+Written before the profile, when the ceiling was measured but unattributed. The **first
+candidate was right**; the other three were never evidenced and remain hypotheses. Kept
+only to show what was considered, and as a reminder that the list was not the finding:
 
 - the label/property shard maps and their `sync.RWMutex` per shard;
 - `mvcc.Clock`'s commit-log frontier, which every committer advances;
 - `mvcc.Horizon`'s 64 slots;
 - the node-id mapper and the adjacency structure's own locking.
 
-Do not act on that list without the profile. The pattern across this project is that
-the stated bottleneck is usually not the measured one, and the one certainty here is
-that two previously-blamed mechanisms (the semaphore, the WAL) are both cleared by the
-numbers above.
+The profile has since been run, so the list is history rather than guidance. Its lesson
+holds: two previously-blamed mechanisms (the semaphore, the WAL) were cleared by the
+numbers, and the answer turned out to be a lock NESTING introduced for correctness in
+this same sprint — which no amount of reasoning about the candidate list would have
+found.
