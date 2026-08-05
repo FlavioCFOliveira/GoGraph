@@ -47,13 +47,38 @@ instead folds a max over the rollback segments then adds exactly +1; Memgraph de
 persists `nextXid` but still ratchets per record during replay. Two of the three
 deliberately removed their persisted counter. **No new persisted counter (AC 2).**
 
-**3. `store/txn` has no MVCC dependency.** It never sees a commit timestamp, so the
-value has to be threaded in from the layer that allocates it. That allocation happens
-in the engine's commit finalisation — `cypher.ExplicitTx.Commit` runs under a shared
-hold and calls `Tx.CommitWALOnly` while the transaction's write context already carries
-its commit record — so the timestamp is known at the point the `OpCommit` frame is
-written. This is the plumbing that makes the task larger than it first appears: it
-crosses `graph/mvcc` → `graph/lpg` → `cypher` → `store/txn` → `store/recovery`.
+**3. `store/txn` has no MVCC dependency, and — the harder part — the timestamp does
+not exist yet when the `OpCommit` frame is written.** `store/txn` never sees a commit
+timestamp, so the value has to be threaded in from the layer that allocates it. That
+much only makes the task wide: it crosses `graph/mvcc` → `graph/lpg` → `cypher` →
+`store/txn` → `store/recovery`.
+
+The ordering is the real obstacle, and an earlier draft of this document got it wrong.
+It claimed the timestamp "is known at the point the `OpCommit` frame is written". It is
+not. `cypher.ExplicitTx.Commit` calls `Tx.CommitWALOnly` inside its `applyFn` block,
+while the commit record is allocated and published by `EndVersionedTx`, called from
+the **deferred** `release()` — which therefore runs strictly AFTER the WAL append and
+fsync. At encode time there is no timestamp to encode.
+
+So C3a cannot be pure plumbing. It has to move the allocation earlier:
+
+    allocate (NextCommitTS) → encode OpCommit carrying it → fsync → publish (PublishCommitTS)
+
+That is exactly PostgreSQL's shape — the XID is assigned before `XLogFlush`, the
+flushed record carries it, and only then is the commit marked visible — and it is
+compatible with `mvcc.Clock`'s documented "allocate, store, publish" order, because an
+allocated-but-unpublished timestamp is already a state the clock models (it is what
+`InFlightCommits` counts). Splitting `EndVersionedTx` into an allocate step and a
+publish step is the change C3a actually requires.
+
+**This is a change to commit sequencing, not a refactor.** It moves an allocation
+across the fsync boundary in the path the sprint's isolation guarantee rests on, and
+it lengthens the window in which a timestamp is allocated but not visible — which
+directly affects the contiguous commit frontier, since one in-flight commit holds the
+frontier back for every reader. It must therefore be implemented deliberately, with
+the frontier cost measured (`MVCCStats.InFlightCommits` is the observable) and with
+the crash case in C3c covering a kill between the fsync and the publish. It should
+not be folded into an unrelated change.
 
 ## The rule the implementation must honour
 
@@ -78,10 +103,13 @@ the derived floor must therefore sit above it. That is consistent with the exist
 The work does not fit one focused pass; each part below is independently complete and
 testable.
 
-**C3a — carry the commit timestamp into the WAL.** Thread the allocated timestamp from
-the write context to `Tx.CommitWALOnly` and encode it in the `OpCommit` body. Test: a
-WAL written by the new code decodes to the expected timestamp, and an `OpCommit` with
-an empty body still replays (the older-file case).
+**C3a — allocate before the fsync, and carry the timestamp into the WAL.** Split
+`EndVersionedTx` so the commit timestamp is allocated before the WAL append and
+published after the fsync, thread it to `Tx.CommitWALOnly`, and encode it in the
+`OpCommit` body (both encoders: `encodeCommitV3Into` on the pooled hot path and
+`encodeCommitV3`). Test: a WAL written by the new code decodes to the expected
+timestamp; an `OpCommit` with an empty body still replays (the older-file case); and
+the contiguous frontier does not regress -- see the sequencing note above.
 
 **C3b — derive and ratchet at recovery.** Track the maximum commit timestamp during
 replay, expose it from recovery alongside the existing `ResumeTxnSeq`, add a ratchet
