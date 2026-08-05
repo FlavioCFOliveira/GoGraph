@@ -369,6 +369,73 @@ Some churn-gated path inside the build is the candidate, and it is not yet ident
 **This is stated as unattributed, deliberately.** Four mechanisms have been refuted in this
 document already; the build's 62% gets a name when a measurement gives it one.
 
+## FIXED: `Oldest` is now O(active readers), and AC 4 passes
+
+`Horizon.Oldest` scanned all 1024 slots unconditionally — 128 KiB of distinct cache
+lines — to answer a question about however many readers were actually present, usually
+one. An occupancy summary (16 padded 64-bit words) now makes it visit only occupied
+slots.
+
+The shape is PostgreSQL's: `ComputeXidHorizons` walks `procArray->pgprocnos`, a dense
+list of live backends, rather than the whole `MaxBackends` array. PostgreSQL maintains
+that list under `ProcArrayLock`; a bitmap is the lock-free analogue, chosen because a
+dense list cannot be compacted without a lock and this module's own measurement
+(rmp #2203) is that a shared cache line on the read path is what stops reads scaling.
+
+### `Oldest` in isolation
+
+`BenchmarkHorizonOldestByOccupancy`, n=1, `-benchtime=200ms`:
+
+| active readers | before (measured at 1024 slots) | after | change |
+|---|---|---|---|
+| 0 | 448.1n | 6.615n | **68× faster** |
+| 1 | 448.1n | 7.771n | **58× faster** |
+| 8 | 448.1n | 14.48n | 31× faster |
+| 64 | 448.1n | 73.90n | 6× faster |
+| 1024 (capacity) | 699.3n | 704.9n | unchanged |
+
+At capacity it is the same scan it always was, which is correct: the work is real when
+the readers are real. What is gone is paying for 1024 readers when one is present.
+
+### The read path
+
+Same prefix instrument, n=6:
+
+| cumulative prefix | before, 0→1 writer | after, 0→1 writer |
+|---|---|---|
+| parse + param checks | +1.18% | ~ (p=0.058) |
+| + `BeginRead`/`EndRead` | +140.91% | +8.50% |
+| + `buildReadPhysical` | +16.85% | +1.62% |
+| + exec + materialise | **+13.44%** | **+1.20%** |
+
+**A correction to the phase split recorded above.** The build's 61.8% share was
+attributed to "some churn-gated path inside the build". It was not: removing the
+horizon scan collapsed the build prefix's delta from +16.85% to +1.62% as well. The
+two prefixes each perform exactly one `EndRead`, so the scan should have cancelled in
+their difference — it did not, because the two arms iterate at very different rates
+(≈7M/s for the snapshot prefix against ≈270k/s for the build prefix), which changes how
+often the vacuum runs and therefore how often `VersionCount() != 0` gates the scan on.
+**Differencing adjacent prefixes is confounded by that interaction; the top-line
+0→1-writer delta on each prefix is not.** Read the table above, not the increments.
+
+### AC 4: the bound now holds
+
+`bench/mvccwrite`, the instrument the bound is defined on, n=6:
+
+| reader shape | writers @1000/s | before | after |
+|---|---|---|---|
+| indexed point lookup | 1 | **+12.38%** | **~ (p=0.937)** — no measurable cost |
+| full label scan (2000 rows) | 1 | +4.17% | **+1.93%** |
+| full label scan (2000 rows) | 4 | +8.75% | +6.10% |
+
+The single-writer arms are the ones AC 4's ≤2.5% bound is stated at, and both pass. The
+worst-affected shape — the cheap indexed read a real OLTP service issues most, where a
+fixed per-read cost hurts worst — now shows **no measurable cost at all**.
+
+The four-writer arm runs at 4000 commits/s, four times the rate the bound is defined
+at, and remains at +6.10%. That residual is 2.1 ns per row scanned, which is per-row
+rather than fixed, and is not addressed here.
+
 ## The refuted hypothesis, kept for the record
 
 Written before the profile. **The profile refuted it** — see above. Kept because the
@@ -398,16 +465,13 @@ anything measurable at this write rate.
 
 ## What is NOT yet done
 
-- **AC 3 remediation.** Required, because AC 4 fails. The 29% share now has a name — the
-  `Horizon.Oldest` scan on every `EndRead` — and is actionable. The 62% in the build does
-  not yet.
-- **AC 4 is MEASURED and FAILING**: +12.38% on an indexed read at 1000 commits/s against a
-  ≤2.5% bound (+4.17% on a full scan). The overhead is fixed per read, so the cheapest
-  reads suffer most.
-- **The build's 62% is unattributed.** It is established to be shared-state cost driven by
-  version *existence* rather than by the version *walk*, by the foreign-graph, read-only
-  and withheld-snapshot controls. Which churn-gated path inside `buildReadPhysical` pays
-  it is the open question.
+- **AC 3 and AC 4 are DONE.** The cost was attributed to `Horizon.Oldest` running on
+  every read release, it was materially reduced (the indexed read's +12.38% is now
+  unmeasurable, the scan's +4.17% is +1.93%), and both single-writer arms are inside the
+  ≤2.5% bound.
+- **The four-writer arm remains at +6.10%**, at four times the rate the bound is defined
+  at. It is per-row (2.1 ns/row) rather than fixed, so it is a different cost from the
+  one this task was about, and it is not addressed here.
 - **The pre-MVCC cross-check.** Deliberately not required to reach the verdict above: the
   0-writer arm is the baseline, so the cost of *concurrent writing* is measured within one
   build. An absolute comparison against `b66b4e25` would answer a different question —

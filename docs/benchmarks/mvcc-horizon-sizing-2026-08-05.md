@@ -3,6 +3,30 @@
 rmp #2315 (MVCC C1b), measurement and decision. Head: `09fe41a6`, branch
 `sprint-334`. Host: Apple M4, 10 cores, `darwin/arm64`, idle.
 
+> **SUPERSEDED IN PART — read this first (rmp #2292, 2026-08-05).**
+>
+> The capacity decision below — **1024 slots — STANDS**, and the measured table is
+> still an accurate record of the algorithm as it was when measured.
+>
+> **Its central justification does not.** The decision rests on the claim that
+> *"the scan is no longer on the query path"*. That claim is **false**:
+> `Graph.EndRead` calls `wakeVacuumOnRelease`, which calls `Horizon.Oldest` on
+> **every read query** whenever versions exist. rmp #2292 measured the price at
+> **200 ns per read**, 29% of a +13.44% read regression under a single writer at
+> 1000 commits/s.
+>
+> The claim was checkable against `graph/lpg/mvcc_vacuum.go:422` when it was
+> written, and it was not checked. Recording *why* a number is affordable is only
+> worth doing if the reason is verified against the code, not inferred from a
+> recent change to a neighbouring one.
+>
+> **`Oldest` is no longer O(slots).** It now visits only occupied slots via an
+> occupancy summary, so it costs 7.8 ns at one active reader against the 448.1 ns
+> in the table below, and 704.9 ns at full capacity — unchanged where the work is
+> real. The `oldest` columns below therefore describe the **superseded**
+> algorithm; the `enter` columns and the memory column still describe the current
+> one. See `docs/benchmarks/mvcc-read-under-writer-2026-08-05.md`.
+
 ```
 go test -run '^$' -bench 'BenchmarkHorizonSizing|BenchmarkHorizonReal64' \
     -benchmem -count=10 ./graph/mvcc/
@@ -67,14 +91,24 @@ have been wrong:
 
 Stated with the reason, and the reason is the measurement.
 
-**The scan is no longer on the query path, which is what makes 1024 affordable.** The
-task's own cost model says `oldest` runs once per `reclaimIdleEvery=64` queries via
+**~~The scan is no longer on the query path, which is what makes 1024 affordable.~~**
+~~The task's own cost model says `oldest` runs once per `reclaimIdleEvery=64` queries via
 `Graph.ReclaimIdle`. **That is now stale**: #2308 removed `ReclaimIdle` and the
 read-path inline sweep with it, and the watermark scan now runs once per background
 vacuum pass (`Graph.vacuumPass`) or on an explicit `Graph.ReclaimNow`. A pass sweeps up
 to `vacuumRecordsPerPass=65536` records, so 448n–699n of scan per pass is not
 measurable against it. The 64→1024 cost that the original model would have charged to
-every 64th query is now charged to a background goroutine instead.
+every 64th query is now charged to a background goroutine instead.~~
+
+**REFUTED by rmp #2292 — see the banner at the top of this file.** #2308 did remove
+`Graph.ReclaimIdle`, but it replaced the read-path *sweep* with a read-path *wake*:
+`Graph.EndRead` → `wakeVacuumOnRelease` → `Horizon.Oldest`, once per read query
+whenever `VersionCount() != 0`. The scan stayed on the query path and this paragraph
+did not check. Measured cost: 200 ns per read, 29% of a +13.44% regression.
+
+**1024 is nevertheless still the right capacity**, for the reasons in the two
+paragraphs that follow, and now for a better one: `Oldest` is O(active readers), so
+capacity no longer prices the scan at all.
 
 **What remains on a hot path is `enter` near-empty, and it moves by 51 picoseconds**
 (2.135n → 2.186n, +2.4%) for a 16× capacity increase. That is the per-read-transaction

@@ -10,13 +10,26 @@ package mvcc
 // require changing production code BEFORE the decision the measurement is meant to
 // inform — precisely backwards.
 //
-// So this measures a replica whose Enter and Oldest are the same algorithms over the
-// same 128-byte-strided layout, parameterised by slot count. A replica is only worth
+// So this measures a replica whose enter and oldest are algorithms over the same
+// 128-byte-strided layout, parameterised by slot count. A replica is only worth
 // anything if it behaves like the original, so [TestSizingReplica_MatchesRealHorizon]
 // pins that: the replica at 64 slots must agree with the real Horizon on the
 // registration cliff and the watermark, and [BenchmarkHorizonReal64] measures the real
 // type at 64 so the replica's own 64-slot number can be compared against it. Treat a
 // divergence there as invalidating every larger figure in the table.
+//
+// # The replica now measures a SUPERSEDED algorithm, deliberately
+//
+// rmp #2292 replaced the real [Horizon.Oldest] with an occupancy-summary scan that
+// visits only occupied slots, so it is O(active readers) rather than O(slots). The
+// replica below still implements the O(slots) form, on purpose: its whole job is to
+// reproduce the cost curve the #2315 sizing table records, and rewriting it would
+// silently invalidate that table's provenance.
+//
+// The behavioural control still holds — the two agree on the watermark and the
+// registration cliff, which is all it ever asserted — but the replica's `oldest`
+// TIMINGS no longer describe production. For the current cost see
+// [BenchmarkHorizonOldestByOccupancy] in horizon_occupancy_test.go.
 
 import (
 	"strconv"
