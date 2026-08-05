@@ -158,6 +158,14 @@ func (t *labelTx[N, W]) commit() (uint64, error) {
 		// Abort rather than publish. The versions this transaction did manage
 		// to write must never become visible, and marking the record is what
 		// tells both the read path and the reclaimer so.
+		// Counted OUTSIDE the info guard (rmp #2312). A transaction doomed by its
+		// FIRST write records no version at all, so info is nil and there is nothing
+		// to mark — but the transaction still failed, and an abort the substrate does
+		// not count is a failure an operator cannot see. That was measured, not
+		// reasoned about: the conflict construction in
+		// TestMVCCStats_ConflictIsCountedAsBothAConflictAndAnAbort produced exactly
+		// this shape and reported one conflict against zero aborts.
+		t.g.writeCounts.Abort(t.ctx.txID)
 		if info != nil {
 			info.Abort()
 			// Charged AND woken unconditionally; see [Graph.abortWake] for why an
@@ -173,6 +181,9 @@ func (t *labelTx[N, W]) commit() (uint64, error) {
 	ts := t.g.nextCommitTS()
 	info.Commit(ts)
 	t.g.mvccClock.PublishCommitTS(ts)
+	// Counted on the same rule [Graph.endWrite] uses: a published instant is a
+	// commit, and a transaction that versioned nothing is neither (rmp #2312).
+	t.g.writeCounts.Commit(t.ctx.txID)
 	// Charge what this transaction actually created, so a threaded transaction
 	// pays into the reclamation budget exactly as an untransacted write does.
 	// Before rmp #2301 the count lived on the per-graph stamp and a threaded
@@ -193,6 +204,9 @@ func (t *labelTx[N, W]) abort() {
 	}
 	t.done = true
 	info, versions := t.ctx.tx.Retract()
+	// An explicit abort is a refusal whether or not the transaction versioned
+	// anything; see [labelTx.commit] for why the count is outside the guard.
+	t.g.writeCounts.Abort(t.ctx.txID)
 	if info == nil {
 		return
 	}

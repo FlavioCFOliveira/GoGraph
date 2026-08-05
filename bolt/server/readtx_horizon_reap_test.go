@@ -49,7 +49,7 @@ func TestAbandonedReadTx_IdleReaperReleasesTheHorizonSlot(t *testing.T) {
 		MaxTxIdleTime:    idleBound,
 	})
 
-	base := g.MVCCStats().ActiveReaders
+	base := g.MVCCStats().ActiveSnapshots
 
 	// The abandoning client: BEGIN mode="r", one statement, then silence. It
 	// never sends COMMIT, ROLLBACK or RESET and never closes the socket.
@@ -64,7 +64,7 @@ func TestAbandonedReadTx_IdleReaperReleasesTheHorizonSlot(t *testing.T) {
 	// The slot is held while the transaction is open. Asserted first so a
 	// failure downstream cannot be explained by the slot never having been
 	// taken — which would make the release assertion vacuous.
-	if got := g.MVCCStats().ActiveReaders; got != base+1 {
+	if got := g.MVCCStats().ActiveSnapshots; got != base+1 {
 		t.Fatalf("ActiveReaders %d with an open Bolt read transaction, want %d: "+
 			"the handle is not pinning the horizon, so this test proves nothing about releasing it",
 			got, base+1)
@@ -73,7 +73,7 @@ func TestAbandonedReadTx_IdleReaperReleasesTheHorizonSlot(t *testing.T) {
 	// The idle reaper must return it, well inside the total bound.
 	deadline := time.Now().Add(idleBound * 20)
 	for time.Now().Before(deadline) {
-		if g.MVCCStats().ActiveReaders == base {
+		if g.MVCCStats().ActiveSnapshots == base {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -81,5 +81,5 @@ func TestAbandonedReadTx_IdleReaperReleasesTheHorizonSlot(t *testing.T) {
 	s := g.MVCCStats()
 	t.Fatalf("ActiveReaders still %d after %v of silence (idle bound %v, total bound %v; "+
 		"watermark %d, now %d): an abandoned read transaction pins the reclamation horizon",
-		s.ActiveReaders, idleBound*20, idleBound, totalBound, s.Watermark, s.Now)
+		s.ActiveSnapshots, idleBound*20, idleBound, totalBound, s.Watermark, s.Now)
 }

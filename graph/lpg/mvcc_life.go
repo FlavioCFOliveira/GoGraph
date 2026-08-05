@@ -147,7 +147,7 @@ func (g *Graph[N, W]) noteNodeLife(id graph.NodeID, tx *writeCtx, alive bool) bo
 	sh.mu.Lock()
 	if head := sh.headStamp(id); tx.conflicts(head) {
 		sh.mu.Unlock()
-		_ = tx.conflictErr("node existence", head)
+		_ = tx.conflictErr(mvcc.StoreNodeExistence, head)
 		return false
 	}
 	// Inside the lock, so the record this write lands on is the one the check

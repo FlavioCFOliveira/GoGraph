@@ -33,7 +33,12 @@
 //     REMOVE-label write burst that lights the count-store observability
 //     counters (delta.applied, relabel.dirtied) and the reopen recompute
 //     histogram, and samples write throughput with the store active so its
-//     neutrality to the write path is observable.
+//     neutrality to the write path is observable;
+//     - the MVCC substrate — four concurrent writers, a deliberate
+//     write-write conflict, and a read snapshot pinned across a write burst,
+//     so the writer gauge, the commit/abort counts, the conflict rate and
+//     its per-store attribution, the retained chain-depth distribution and
+//     the background vacuum's own series are all populated.
 //  4. Serves reg.Handler() over a local httptest server and GETs /metrics,
 //     exactly as an operator's Prometheus scrape would.
 //  5. Parses the exposition and reports, as deterministic FACT lines,
@@ -67,6 +72,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -79,6 +85,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
@@ -88,6 +96,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/io/csv"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 	"github.com/FlavioCFOliveira/GoGraph/metrics"
 	"github.com/FlavioCFOliveira/GoGraph/search"
 )
@@ -440,7 +449,206 @@ func driveWorkload(
 	if err = driveCountStore(ctx, w, eng); err != nil {
 		return fmt.Errorf("count-store workload: %w", err)
 	}
+
+	// 8. The MVCC substrate — concurrency control is MVCC and nothing else, so
+	//    its health IS the module's health. Drive the write side deliberately so
+	//    the writer, commit, abort, conflict and chain-depth series are all
+	//    non-trivially populated rather than left at their zero values.
+	if err = driveMVCC(ctx, w, g); err != nil {
+		return fmt.Errorf("mvcc workload: %w", err)
+	}
 	return nil
+}
+
+// mvccWriters and mvccWritesPerWriter size the concurrent write burst below. Small
+// enough to keep the example instant in the short layer, large enough that several
+// writers are genuinely in flight at once and the vacuum has real churn to sweep.
+const (
+	mvccWriters         = 4
+	mvccWritesPerWriter = 64
+	// mvccRetryBudget bounds the retry loop below. A serialization conflict is
+	// retriable by contract, but a retry loop with no bound is an unbounded
+	// resource, which this module does not admit anywhere.
+	//
+	// A TIME budget and not an attempt count, deliberately. A fixed spin was tried
+	// first and it failed under coverage instrumentation: the conflict this loop
+	// retries is the contiguous frontier waiting for ANOTHER writer to publish, and
+	// under -cover that writer is slow enough that eight immediate attempts can all
+	// land before it does. An attempt count measures this machine's speed; a
+	// deadline measures the thing actually being waited for. The budget is generous
+	// because it is a backstop, not a tuning knob — the loop normally succeeds on
+	// its second attempt.
+	mvccRetryBudget = 30 * time.Second
+)
+
+// driveMVCC exercises the MVCC substrate's WRITE side and its reclamation, so every
+// series in the "graph/lpg — the MVCC substrate" section of docs/metrics.md is
+// populated by the time the exposition is scraped.
+//
+// It does four things the rest of this example does not:
+//
+//   - runs CONCURRENT writers against one graph, so the writer gauge, the commit
+//     count and the transaction-latency histogram describe more than one writer;
+//   - drives a deliberate CONFLICT on one hot node, so the conflict series and the
+//     per-store attribution move. The conflict is provoked rather than hoped for: two
+//     transactions are opened against the same node and the first to commit wins, so
+//     the second is refused;
+//   - holds a READ SNAPSHOT open across a burst of writes to the same key, so the
+//     versions cannot be reclaimed and the chain-depth distribution has a chain
+//     deeper than one to report;
+//   - reclaims synchronously afterwards, because the depth distribution is filled BY
+//     the reclaimer and a scrape taken before any sweep would find it empty.
+//
+// The deterministic facts it writes are the ones that hold regardless of scheduling;
+// the volatile counts go out as "# " telemetry.
+func driveMVCC(ctx context.Context, w io.Writer, g *lpg.Graph[string, float64]) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	before := g.MVCCStats()
+
+	// A read snapshot pinned across the burst: it holds the reclamation watermark
+	// below every version written from here on, which is what gives the chain-depth
+	// histogram something to measure.
+	snap := g.BeginRead()
+
+	// Concurrent writers, each on its own key, so they contend for nothing and the
+	// scaling the sprint exists to deliver is what is being exercised.
+	var wg sync.WaitGroup
+	var retried atomic.Int64
+	errs := make([]error, mvccWriters)
+	for i := 0; i < mvccWriters; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			key := fmt.Sprintf("mvcc-writer-%d", id)
+			for n := 0; n < mvccWritesPerWriter; n++ {
+				// RETRY on a serialization conflict, because that is the contract a
+				// client has to implement: under MVCC a write is refused rather than
+				// blocked, and the caller retries. It is exercised here rather than
+				// assumed away.
+				//
+				// These writers touch DISJOINT keys, so nothing here should contend at
+				// all — and yet a conflict does occur, roughly once per few hundred
+				// writes, once enough writers are in flight. It is not contention: it is
+				// the contiguous commit frontier (rmp #2298) leaving a writer's OWN
+				// previous commit invisible to its next transaction. Measured and filed
+				// as rmp #2328; when that is settled, this retry and this comment are to
+				// be revisited.
+				var err error
+				deadline := time.Now().Add(mvccRetryBudget)
+				for attempt := 0; ; attempt++ {
+					err = g.ApplyVersioned(func(tx lpg.WriteTx) error {
+						wv := g.Writer(tx)
+						if n == 0 && attempt == 0 {
+							if e := wv.AddNode(key); e != nil {
+								return e
+							}
+						}
+						return wv.SetNodeProperty(key, "seq", lpg.Int64Value(int64(n)))
+					})
+					if err == nil || !errors.Is(err, mvcc.ErrSerializationConflict) {
+						break
+					}
+					if time.Now().After(deadline) {
+						break
+					}
+					retried.Add(1)
+					// Yield: the transaction this one is waiting on is another
+					// goroutine's, and spinning without giving it the processor is how
+					// a retry loop turns a microsecond wait into a full budget.
+					runtime.Gosched()
+				}
+				if err != nil {
+					errs[id] = err
+					return
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			g.EndRead(snap)
+			return fmt.Errorf("writer %d: %w", i, err)
+		}
+	}
+
+	// The deliberate conflict. Two transactions read the same node and both write
+	// it; the first to publish wins and the second is refused with a retriable
+	// serialization error, which is exactly the contract a client must handle.
+	conflicts, err := driveMVCCConflict(g)
+	if err != nil {
+		g.EndRead(snap)
+		return err
+	}
+
+	// Reclaim WITH the reader still registered, so the sweep truncates only what is
+	// genuinely unreachable and the surviving chains are the ones the reader pinned.
+	g.ReclaimNow()
+	depth := g.ChainDepths()
+
+	g.EndRead(snap)
+	// And once more with the reader gone, so the vacuum's own series show a pass that
+	// actually freed something.
+	g.ReclaimNow()
+
+	after := g.MVCCStats()
+	// Deterministic facts: whatever the scheduling, this many transactions committed,
+	// at least one conflicted, and no writer is left in flight.
+	fmt.Fprintf(w, "mvcc.commits.delta=%d\n", after.Write.Commits-before.Write.Commits)
+	fmt.Fprintf(w, "mvcc.conflicts.observed=%d\n", conflicts)
+	fmt.Fprintf(w, "mvcc.writers.settled=%d\n", after.Write.Writers)
+	fmt.Fprintf(w, "mvcc.chain_depth.deepest_at_least_two=%d\n", boolFact(depth.Deepest >= 2))
+
+	// Telemetry: the shape of the substrate after the burst.
+	fmt.Fprintf(w, "# mvcc.aborts=%d retries=%d\n", after.Write.Aborts, retried.Load())
+	fmt.Fprintf(w, "# mvcc.conflict_rate=%.4f\n", after.Write.ConflictRate())
+	fmt.Fprintf(w, "# mvcc.chain_depth.chains=%d deepest=%d\n", depth.Chains(), depth.Deepest)
+	fmt.Fprintf(w, "# mvcc.chain_depth.buckets=%v\n", depth.Buckets)
+	fmt.Fprintf(w, "# mvcc.versions.total=%d bound=%d\n", after.Total, after.Bound)
+	fmt.Fprintf(w, "# mvcc.snapshots.active=%d capacity=%d\n", after.ActiveSnapshots, after.SnapshotCapacity)
+	vs := g.VacuumStats()
+	fmt.Fprintf(w, "# mvcc.vacuum.passes=%d reclaimed=%d mean_pass=%s\n",
+		vs.Passes, vs.Reclaimed, vs.MeanPass().Round(time.Microsecond))
+	return nil
+}
+
+// driveMVCCConflict provokes exactly one write-write conflict and returns how many
+// were observed, so the conflict series is populated by a refusal that actually
+// happened rather than by one the workload hoped for.
+//
+// Two explicit transactions write the same node. The first publishes; the second is
+// then displacing a version committed after it began, which is the definition of a
+// serialization conflict, and its commit is refused.
+func driveMVCCConflict(g *lpg.Graph[string, float64]) (int, error) {
+	const hot = "mvcc-hotspot"
+	if err := g.ApplyVersioned(func(tx lpg.WriteTx) error {
+		return g.Writer(tx).AddNode(hot)
+	}); err != nil {
+		return 0, fmt.Errorf("create hotspot: %w", err)
+	}
+
+	// Both transactions begin before either writes, so both read the same instant.
+	a := g.BeginVersionedTx()
+	b := g.BeginVersionedTx()
+	if err := g.Writer(a).SetNodeProperty(hot, "owner", lpg.StringValue("a")); err != nil {
+		g.EndVersionedTx(a)
+		g.EndVersionedTx(b)
+		return 0, fmt.Errorf("a write: %w", err)
+	}
+	// A publishes first and wins.
+	g.EndVersionedTx(a)
+
+	conflicts := 0
+	// B now tries to displace a version that committed after B began. The refusal is
+	// recorded on the transaction; whether it is returned here depends on which
+	// primitive the write went through, so both are treated as the conflict they are.
+	if err := g.Writer(b).SetNodeProperty(hot, "owner", lpg.StringValue("b")); err != nil {
+		conflicts++
+	}
+	g.EndVersionedTx(b)
+	return conflicts, nil
 }
 
 // countWriteBatch is the number of CALLS-edge CREATEs the count-store throughput
@@ -680,6 +888,23 @@ var expectedMetrics = []expectedMetric{
 	{"cypher.countstore.recompute", "histogram", "Engine reopen recompute (#2087)"},
 	{"cypher.countstore.delta.applied", "counter", "count-store commit fan-out (#2087)"},
 	{"cypher.countstore.relabel.dirtied", "counter", "count-store relabel (#2087)"},
+	// The MVCC substrate (rmp #2312). Concurrency control is MVCC and nothing
+	// else, so these are not an optional extra: they are how an operator sees
+	// whether the mechanism the whole module rests on is working.
+	{"graph.lpg.ApplyVersioned", "histogram", "Graph.ApplyVersioned (one write transaction)"},
+	{"graph.lpg.EndVersionedTx", "histogram", "Graph.EndVersionedTx (publish)"},
+	{"lpg.mvcc.writers.active", "gauge", "write transactions in flight"},
+	{"lpg.mvcc.commits", "gauge", "transactions that published an instant"},
+	{"lpg.mvcc.aborts", "gauge", "transactions refused publication"},
+	{"lpg.mvcc.conflict_rate", "gauge", "conflicts / (commits + aborts)"},
+	{"lpg.mvcc.conflicts", "counter", "one per doomed transaction"},
+	{"lpg.mvcc.conflicts.store.node_properties", "counter", "attributed to the contended store"},
+	{"lpg.mvcc.chain_depth.deepest", "gauge", "deepest retained version chain"},
+	{"lpg.mvcc.chain_depth.bucket.1", "gauge", "chains of retained depth 1"},
+	{"lpg.mvcc.oldest_snapshot_age", "gauge", "now - reclamation watermark"},
+	{"lpg.mvcc.snapshots.active", "gauge", "snapshots registered with the horizon"},
+	{"lpg.mvcc.vacuum.passes", "gauge", "completed reclamation passes"},
+	{"lpg.mvcc.vacuum.pass", "histogram", "one reclamation pass, start to finish"},
 }
 
 // reportMetrics parses the exposition and writes, for every expected

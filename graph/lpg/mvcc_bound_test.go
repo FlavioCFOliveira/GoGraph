@@ -56,8 +56,8 @@ func waitWithinBound(t *testing.T, g *Graph[string, float64]) MVCCStats {
 		if time.Now().After(deadline) {
 			t.Fatalf("version memory did not settle within %v: %d records held against a bound of "+
 				"%d (ceiling %d), with %d active readers, %d unregistered, oldest reader age %d; "+
-				"vacuum %+v", settleTimeout, s.Total, s.Bound, s.Ceiling, s.ActiveReaders,
-				s.UnregisteredReaders, s.OldestReaderAge(), g.VacuumStats())
+				"vacuum %+v", settleTimeout, s.Total, s.Bound, s.Ceiling, s.ActiveSnapshots,
+				s.UnregisteredSnapshots, s.OldestSnapshotAge(), g.VacuumStats())
 		}
 		time.Sleep(200 * time.Microsecond)
 	}
@@ -104,9 +104,9 @@ func TestMVCCBound_SustainedWritesStayFlat(t *testing.T) {
 	// And the SETTLED bound: with the writer stopped and no reader registered,
 	// nothing may hold a version back.
 	s := waitWithinBound(t, g)
-	if s.ActiveReaders != 0 {
+	if s.ActiveSnapshots != 0 {
 		t.Errorf("the horizon reports %d active readers after the workload; nothing should be "+
-			"holding versions back", s.ActiveReaders)
+			"holding versions back", s.ActiveSnapshots)
 	}
 }
 
@@ -158,20 +158,20 @@ func TestMVCCStats_AttributesGrowthToTheReaderHoldingIt(t *testing.T) {
 	}
 
 	s := g.MVCCStats()
-	if s.ActiveReaders != 1 {
-		t.Fatalf("the horizon reports %d active readers, want 1", s.ActiveReaders)
+	if s.ActiveSnapshots != 1 {
+		t.Fatalf("the horizon reports %d active readers, want 1", s.ActiveSnapshots)
 	}
 	if s.WithinBound() {
 		t.Fatal("a reader older than three thresholds of churn is holding nothing back; either " +
 			"the reader is not registered or the versions it needs were freed")
 	}
-	if s.OldestReaderAge() == 0 {
+	if s.OldestSnapshotAge() == 0 {
 		t.Error("the oldest reader's age is zero while it is demonstrably behind: growth cannot " +
 			"be attributed to the read that caused it")
 	}
-	if s.UnregisteredReaders != 0 {
+	if s.UnregisteredSnapshots != 0 {
 		t.Errorf("%d readers failed to register; reclamation is suspended for a different reason "+
-			"than this test is measuring", s.UnregisteredReaders)
+			"than this test is measuring", s.UnregisteredSnapshots)
 	}
 
 	// And once it leaves, the vacuum takes it all back with NOTHING further being
@@ -252,9 +252,31 @@ func TestMVCCMetrics_AreExported(t *testing.T) {
 		"lpg.mvcc.versions.ceiling",
 		"lpg.mvcc.versions.property",
 		"lpg.mvcc.watermark",
+		"lpg.mvcc.oldest_snapshot_age",
 		"lpg.mvcc.readers.active",
-		"lpg.mvcc.readers.unregistered",
+		"lpg.mvcc.snapshots.active",
+		"lpg.mvcc.snapshots.unregistered",
+		"lpg.mvcc.snapshots.capacity",
 		"lpg.mvcc.index_removal_backlog",
+		// The WRITE side (rmp #2312). Once MVCC is the module's only concurrency
+		// control, a substrate observable only in what it retains is half observable:
+		// these are what produces the retention, and the conflict rate is the signal
+		// that says whether the workload contends at all.
+		"lpg.mvcc.writers.active",
+		"lpg.mvcc.commits",
+		"lpg.mvcc.aborts",
+		"lpg.mvcc.conflicts.total",
+		"lpg.mvcc.conflict_rate",
+		"lpg.mvcc.conflicts.total.store.node_labels",
+		// The RETAINED-chain distribution, which is read cost per object. The buckets
+		// must all be published even when empty: a dashboard that has to guess which
+		// buckets exist cannot plot a distribution.
+		"lpg.mvcc.chain_depth.bucket.1",
+		"lpg.mvcc.chain_depth.bucket.128_inf",
+		"lpg.mvcc.chain_depth.deepest",
+		"lpg.mvcc.chain_depth.chains",
+		"lpg.mvcc.chain_depth.deepest.store.node_properties",
+		"lpg.mvcc.chain_depth.chains.store.adjacency",
 		// The vacuum's own utilisation, which the observability mandate asks of
 		// every goroutine and every bounded worker the library owns.
 		"lpg.mvcc.vacuum.running",
@@ -264,6 +286,8 @@ func TestMVCCMetrics_AreExported(t *testing.T) {
 		"lpg.mvcc.vacuum.capped_passes",
 		"lpg.mvcc.vacuum.records_per_pass",
 		"lpg.mvcc.vacuum.starts",
+		"lpg.mvcc.vacuum.exits",
+		"lpg.mvcc.vacuum.pass_mean_ns",
 	}
 	for _, name := range want {
 		if _, ok := rec.gauge(name); !ok {

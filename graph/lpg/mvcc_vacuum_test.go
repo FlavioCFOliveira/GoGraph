@@ -290,17 +290,17 @@ func TestVacuum_BoundedUnderChurnWithALongLivedReader(t *testing.T) {
 		}
 	}
 	s := g.MVCCStats()
-	if s.ActiveReaders != 1 {
+	if s.ActiveSnapshots != 1 {
 		g.EndRead(pin)
-		t.Fatalf("the horizon reports %d active readers, want 1", s.ActiveReaders)
+		t.Fatalf("the horizon reports %d active readers, want 1", s.ActiveSnapshots)
 	}
-	if s.OldestReaderAge() == 0 {
+	if s.OldestSnapshotAge() == 0 {
 		t.Error("the oldest reader's age is zero while it is demonstrably behind: the growth " +
 			"cannot be attributed to the read that caused it")
 	}
-	if s.UnregisteredReaders != 0 {
+	if s.UnregisteredSnapshots != 0 {
 		t.Errorf("%d readers failed to register: reclamation is suspended for a different reason "+
-			"than this test is measuring", s.UnregisteredReaders)
+			"than this test is measuring", s.UnregisteredSnapshots)
 	}
 	g.EndRead(pin)
 	settled := waitWithinBound(t, g)

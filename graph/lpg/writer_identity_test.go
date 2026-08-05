@@ -179,7 +179,7 @@ func TestWriter_RegistersWithTheReclamationHorizon(t *testing.T) {
 		t.Fatalf("AddNode: %v", err)
 	}
 
-	base := g.MVCCStats().ActiveReaders
+	base := g.MVCCStats().ActiveSnapshots
 	var (
 		inside     int
 		insideMark uint64
@@ -187,7 +187,7 @@ func TestWriter_RegistersWithTheReclamationHorizon(t *testing.T) {
 	)
 	if err := g.ApplyAtomically(func() error {
 		s := g.MVCCStats()
-		inside = s.ActiveReaders
+		inside = s.ActiveSnapshots
 		insideMark = s.Watermark
 		startTS = g.writerSnapshot().StartTS()
 		return nil
@@ -202,7 +202,7 @@ func TestWriter_RegistersWithTheReclamationHorizon(t *testing.T) {
 		t.Fatalf("watermark %d inside a write bracket whose snapshot starts at %d: reclamation "+
 			"is allowed past the writer's own instant", insideMark, startTS)
 	}
-	if got := g.MVCCStats().ActiveReaders; got != base {
+	if got := g.MVCCStats().ActiveSnapshots; got != base {
 		t.Fatalf("ActiveReaders %d after the bracket closed, want %d: the writer's horizon slot "+
 			"was not returned", got, base)
 	}

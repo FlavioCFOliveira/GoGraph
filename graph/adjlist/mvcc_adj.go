@@ -302,9 +302,18 @@ func (a *AdjList[N, W]) versionStamp(tx mvcc.Tx) (*mvcc.CommitInfo, uint64) {
 // is how the correction was found; the sweep that relies on it is
 // [lpg.Graph.sweepUnit].
 //
+// # The depth histogram
+//
+// hist accumulates the RETAINED depth of every chain this sweep leaves behind — the
+// number of version records a reader arriving now may still step through — or is nil
+// for a caller that does not measure. The count is the sever walk's own loop
+// counter, so measuring it costs a register increment on the sweeper and no second
+// traversal (rmp #2312). The caller resets it; this function only fills it, because
+// a caller that sweeps several stores decides when a distribution begins.
+//
 // Safe for concurrent use with readers and with writers. NOT safe to run
 // concurrently with itself: two sweeps would walk and sever the same chain.
-func (a *AdjList[N, W]) Reclaim(watermark uint64) int {
+func (a *AdjList[N, W]) Reclaim(watermark uint64, hist *mvcc.DepthHist) int {
 	if watermark == 0 || a.versionActive.Load() == 0 {
 		return 0
 	}
@@ -322,8 +331,11 @@ func (a *AdjList[N, W]) Reclaim(watermark uint64) int {
 				delete(s.versioned, intraIdx)
 				continue
 			}
-			n, stillVersioned := severChain(e, watermark)
+			n, retained, stillVersioned := severChain(e, watermark)
 			freed += n
+			if hist != nil {
+				hist.Observe(retained)
+			}
 			if !stillVersioned {
 				delete(s.versioned, intraIdx)
 			}
@@ -337,13 +349,17 @@ func (a *AdjList[N, W]) Reclaim(watermark uint64) int {
 }
 
 // severChain drops the unreachable tail of e's version chain and reports how
-// many records it released and whether any remain.
+// many records it released, how many it left reachable, and whether any remain.
 //
 // The chain runs newest-first, so the FIRST record whose supersede timestamp is
 // at or before the watermark makes everything behind it unreachable as well:
 // every active reader began at or after that instant, so none of them steps
 // back past it. Storing nil there releases the whole tail at once.
-func severChain[W any](e *adjEntry[W], watermark uint64) (freed int, remaining bool) {
+//
+// retained is the length of the prefix the walk did NOT sever: the records a reader
+// starting now may still have to step through to reach its own version. It is the
+// walk's existing loop, counted (rmp #2312).
+func severChain[W any](e *adjEntry[W], watermark uint64) (freed, retained int, remaining bool) {
 	for cur := e; cur != nil; {
 		v := cur.ver.Load()
 		if v == nil {
@@ -360,7 +376,8 @@ func severChain[W any](e *adjEntry[W], watermark uint64) (freed int, remaining b
 			}
 			break
 		}
+		retained++
 		cur = v.prev
 	}
-	return freed, e.ver.Load() != nil
+	return freed, retained, e.ver.Load() != nil
 }

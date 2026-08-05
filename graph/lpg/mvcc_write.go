@@ -130,6 +130,12 @@ func (g *Graph[N, W]) beginWrite() *writeCtx {
 	w.snap.slot = slot
 	g.stamp.Publish(&w.tx)
 	g.writeTx.Store(w)
+	// The writer gauge (rmp #2312). Paired with the EndWriter in
+	// [Graph.releaseWriterSnapshot], which every bracket reaches — including the ones
+	// that version nothing, which [Graph.endWrite] returns early from. Both carry the
+	// same transaction id, so both hit the same counter stripe and the per-stripe
+	// value can never go negative.
+	g.writeCounts.BeginWriter(txID)
 	return w
 }
 
@@ -417,6 +423,14 @@ func (g *Graph[N, W]) endWrite(w *writeCtx) {
 		// which makes every later commit invisible to new readers and grows the
 		// commit log without bound.
 		g.abandonAllocatedCommitTS(w)
+		// It may ALSO have failed: a transaction doomed by its first write records no
+		// version, so it arrives here rather than at the abort branch below. It is
+		// still a refusal and it is counted as one (rmp #2312) — an abort the substrate
+		// does not count is a failure an operator cannot see, and it would leave
+		// Commits+Aborts short of the transactions that actually reached an outcome.
+		if w.err() != nil {
+			g.writeCounts.Abort(w.txID)
+		}
 		return
 	}
 	// A transaction that hit a serialization conflict ABORTS. See below for the
@@ -424,6 +438,11 @@ func (g *Graph[N, W]) endWrite(w *writeCtx) {
 	// thing as the rolled-back-statement case the file comment describes.
 	if w.err() != nil {
 		info.Abort()
+		// Counted here, where publication is REFUSED, because Commits and Aborts are
+		// the two outcomes and must partition the transactions that reached one. The
+		// conflict that caused it is counted separately, at the detection site, and is
+		// a SUBSET of this — a cause, not a third outcome (rmp #2312).
+		g.writeCounts.Abort(w.txID)
 		// Same obligation as the versioned-nothing branch above: an aborted
 		// transaction's allocated timestamp is never published, so it must be
 		// abandoned or the frontier stalls on it.
@@ -450,6 +469,12 @@ func (g *Graph[N, W]) endWrite(w *writeCtx) {
 	w.commitTS = 0
 	info.Commit(ts)
 	g.mvccClock.PublishCommitTS(ts)
+	// A transaction that got this far PUBLISHED an instant, which is the only
+	// definition of "committed" the substrate has (rmp #2312). The versioned-nothing
+	// branch above is deliberately NOT counted: it published no instant, so counting
+	// it would put commits above the number of instants the clock ever allocated and
+	// make the conflict rate's denominator meaningless.
+	g.writeCounts.Commit(w.txID)
 	// Accounting only. The sweep itself moved off this path at rmp #2308: a
 	// committer charges its versions and, once per [reclaimThreshold], wakes the
 	// background vacuum. It no longer sweeps, so a commit's cost no longer
@@ -485,6 +510,9 @@ func (g *Graph[N, W]) releaseWriterSnapshot(w *writeCtx) {
 	}
 	g.writeTx.CompareAndSwap(w, nil)
 	g.horizon.Leave(w.snap.slot)
+	// BEFORE the state is recycled: the id is read off w, and after releaseWriteCtx
+	// another bracket may already own it (rmp #2312).
+	g.writeCounts.EndWriter(w.txID)
 	g.releaseWriteCtx(w)
 	// NO DRAIN WAKE HERE, deliberately (rmp #2308). A writer holds the horizon back
 	// exactly as a reader does (rmp #2299), so its departure does advance the

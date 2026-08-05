@@ -49,6 +49,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/index/label"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 	"github.com/FlavioCFOliveira/GoGraph/internal/ctxlock"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // LabelID is the compact internal identifier produced by the
@@ -684,6 +685,15 @@ type Graph[N comparable, W any] struct {
 	// self-terminating goroutine that owns reclamation (rmp #2308). See
 	// mvcc_vacuum.go.
 	vac vacuumState
+	// writeCounts is the write-side MVCC telemetry: writers in flight, commits,
+	// aborts and serialization conflicts by store (rmp #2312). Striped over
+	// cache-line-isolated banks keyed by transaction id, so observing the commit
+	// path does not contend with it; see [mvcc.WriteCounters].
+	writeCounts mvcc.WriteCounters
+	// chainDepth is the retained version-chain depth distribution, one histogram
+	// per versioned store, filled by the reclaimer during the walk it already
+	// performs (rmp #2312). Indexed by [depthStore]; see mvcc_depth.go.
+	chainDepth [depthStoreCount]mvcc.DepthHist
 	// reclaimDebt counts versions created since the last vacuum pass began, so
 	// the vacuum is woken on a bounded amount of churn rather than on every
 	// commit. See [Graph.chargeReclaimDebt].
@@ -809,6 +819,12 @@ func (g *Graph[N, W]) ApplyAtomically(fn func() error) error {
 //
 // Safe for concurrent use from any number of goroutines.
 func (g *Graph[N, W]) ApplyVersioned(fn func(WriteTx) error) error {
+	// COMMIT LATENCY (rmp #2312). This bracket opens a transaction, runs fn and
+	// publishes — so its duration IS the commit latency of an autocommit write
+	// transaction, which is the observability mandate's "latency histogram on every
+	// public blocking API" applied to the one API that commits. The cost is one
+	// time.Now pair, measured in docs/benchmarks/mvcc-observability-2026-08-05.md.
+	defer metrics.Time("graph.lpg.ApplyVersioned").Stop()
 	// The guard's WRITER role, not its reader role: this bracket writes, and
 	// what must be rejected is every nested acquisition in either mode. The
 	// stamp is taken only after the lock succeeds, for the reason spelled out in
@@ -851,6 +867,7 @@ func (g *Graph[N, W]) ApplyVersioned(fn func(WriteTx) error) error {
 //
 // Safe for concurrent use from any number of goroutines.
 func (g *Graph[N, W]) ApplyVersionedCtx(ctx context.Context, fn func(WriteTx) error) error {
+	defer metrics.Time("graph.lpg.ApplyVersionedCtx").Stop()
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
 	if err := ctxlock.Acquire(ctx, g.visMu.TryRLock, g.visMu.RLock, g.visMu.RUnlock); err != nil {
 		return err
@@ -969,6 +986,10 @@ func (g *Graph[N, W]) EndVersionedTx(tx WriteTx) {
 	if tx.w == nil {
 		return
 	}
+	// The PUBLISH latency of a multi-statement transaction (rmp #2312). Measured
+	// after the zero-value guard so a caller that closes an absent transaction
+	// unconditionally does not fill the histogram with samples of nothing.
+	defer metrics.Time("graph.lpg.EndVersionedTx").Stop()
 	gid := g.barrier.checkWriter()
 	g.visMu.RLock()
 	g.barrier.stampWriter(gid)
@@ -2531,7 +2552,7 @@ func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, tx *writeCtx) error {
 		// doomed write allocates no commit record.
 		if head := sh.headStamp(id); tx.conflicts(head) {
 			sh.mu.Unlock()
-			return tx.conflictErr("node labels", head)
+			return tx.conflictErr(mvcc.StoreNodeLabels, head)
 		}
 		ci, ts := g.deltaStamp(tx.record())
 		sh.pushLabelDelta(id, undoRemoveLabel, lid, ci, ts, &g.labelDeltaActive)
@@ -3651,7 +3672,7 @@ func (g *Graph[N, W]) removeNodeLabelInfo(n N, name string, tx *writeCtx) {
 			// makes the two paths equivalent — without it this removal would be
 			// dropped and the transaction would commit as if it had happened.
 			if head := sh.headStamp(id); tx.conflicts(head) {
-				_ = tx.conflictErr("node labels", head)
+				_ = tx.conflictErr(mvcc.StoreNodeLabels, head)
 				sh.mu.Unlock()
 				return
 			}

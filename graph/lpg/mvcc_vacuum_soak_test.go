@@ -95,11 +95,11 @@ func TestVacuumSoak_NoUnboundedGrowthUnderSustainedChurn(t *testing.T) {
 			// calling it on every modification made the instrument a bigger cost
 			// than the workload it measures.
 			if i%4096 == 0 {
-				if s := g.MVCCStats(); s.UnregisteredReaders != 0 {
+				if s := g.MVCCStats(); s.UnregisteredSnapshots != 0 {
 					g.EndRead(snap)
 					t.Fatalf("generation %d: %d readers failed to register, so reclamation is "+
 						"suspended and every other measurement here is meaningless",
-						gen, s.UnregisteredReaders)
+						gen, s.UnregisteredSnapshots)
 				}
 			}
 		}
@@ -117,7 +117,7 @@ func TestVacuumSoak_NoUnboundedGrowthUnderSustainedChurn(t *testing.T) {
 			if time.Now().After(deadline) {
 				t.Fatalf("generation %d did not settle: %d records held against a bound of %d "+
 					"(ceiling %d), %d active readers, oldest reader age %d; vacuum %+v",
-					gen, s.Total, s.Bound, s.Ceiling, s.ActiveReaders, s.OldestReaderAge(),
+					gen, s.Total, s.Bound, s.Ceiling, s.ActiveSnapshots, s.OldestSnapshotAge(),
 					g.VacuumStats())
 			}
 			time.Sleep(time.Millisecond)

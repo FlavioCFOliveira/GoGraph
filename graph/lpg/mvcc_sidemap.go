@@ -221,7 +221,12 @@ func (sv *sideVersions[K, V]) asOf(k K, cur V, curHad bool, startTS, txID uint64
 // — every reader began at or after that instant — so it and everything behind
 // it are unreachable, and one assignment releases the whole tail. That is the
 // identical argument the node-label reclaimer makes; see mvcc_reclaim.go.
-func (sv *sideVersions[K, V]) reclaim(watermark uint64) int {
+// hist accumulates the retained depth of every chain this sweep leaves behind, or
+// is nil for a caller that does not measure. It is a parameter rather than a field
+// because one histogram covers all five per-edge side stores: they are the same
+// generic type over different keys, so the store an operator cares about is "edge
+// sides", not which of the five. See [depthStore].
+func (sv *sideVersions[K, V]) reclaim(watermark uint64, hist *mvcc.DepthHist) int {
 	if sv.d == nil {
 		return 0
 	}
@@ -238,6 +243,8 @@ func (sv *sideVersions[K, V]) reclaim(watermark uint64) int {
 			delete(sv.d, k)
 			continue
 		}
+		// See [Graph.reclaimLabelVersions] for what retained measures.
+		retained := 1
 		prev := head
 		for d := head.next; d != nil; d = d.next {
 			if d.stamp() <= watermark {
@@ -245,7 +252,11 @@ func (sv *sideVersions[K, V]) reclaim(watermark uint64) int {
 				prev.next = nil
 				break
 			}
+			retained++
 			prev = d
+		}
+		if hist != nil {
+			hist.Observe(retained)
 		}
 	}
 	if len(sv.d) == 0 {

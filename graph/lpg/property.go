@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
 
 // PropertyKind tags a [PropertyValue] with its underlying Go type.
@@ -335,7 +336,7 @@ func (g *Graph[N, W]) setNodePropertyInfo(n N, key string, value PropertyValue, 
 		// unwanted one.
 		if head := s.headStamp(id); tx.conflicts(head) {
 			s.mu.Unlock()
-			return tx.conflictErr("node properties", head)
+			return tx.conflictErr(mvcc.StoreNodeProperties, head)
 		}
 		switch {
 		case !had:
@@ -402,7 +403,7 @@ func (g *Graph[N, W]) delNodePropertyInfo(n N, key string, tx *writeCtx) {
 				// the conflict is recorded on the transaction and commit
 				// refuses it. See [writeCtx.conflictErr].
 				if head := s.headStamp(id); tx.conflicts(head) {
-					_ = tx.conflictErr("node properties", head)
+					_ = tx.conflictErr(mvcc.StoreNodeProperties, head)
 					s.mu.Unlock()
 					return
 				}

@@ -59,7 +59,7 @@ func TestHorizon_ExhaustionCliffAtCapacity(t *testing.T) {
 		slots = append(slots, s)
 	}
 	if got := h.Unregistered(); got != 0 {
-		t.Fatalf("at capacity: UnregisteredReaders = %d, want 0", got)
+		t.Fatalf("at capacity: UnregisteredSnapshots = %d, want 0", got)
 	}
 	if got, want := h.Oldest(1<<40), uint64(10); got != want {
 		t.Fatalf("at capacity: Oldest = %d, want %d — the watermark must still advance "+
@@ -75,7 +75,7 @@ func TestHorizon_ExhaustionCliffAtCapacity(t *testing.T) {
 			wantHorizonCapacity+1, over)
 	}
 	if got := h.Unregistered(); got == 0 {
-		t.Fatal("past capacity: UnregisteredReaders = 0, want non-zero — an unregistered " +
+		t.Fatal("past capacity: UnregisteredSnapshots = 0, want non-zero — an unregistered " +
 			"reader that is not observable is the failure this metric exists to prevent")
 	}
 	if got := h.Oldest(1 << 40); got != 0 {
@@ -87,7 +87,7 @@ func TestHorizon_ExhaustionCliffAtCapacity(t *testing.T) {
 	// Recovery, in both quantities.
 	h.Leave(over)
 	if got := h.Unregistered(); got != 0 {
-		t.Fatalf("after the unregistered reader left: UnregisteredReaders = %d, want 0", got)
+		t.Fatalf("after the unregistered reader left: UnregisteredSnapshots = %d, want 0", got)
 	}
 	if got, want := h.Oldest(1<<40), uint64(10); got != want {
 		t.Fatalf("after the unregistered reader left: Oldest = %d, want %d — reclamation "+

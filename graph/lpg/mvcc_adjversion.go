@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
 
 // Adjacency write-write conflict detection (rmp #2300, audit finding on the
@@ -164,7 +165,7 @@ func (av *adjVersions) checkAppend(src graph.NodeID, tx *writeCtx) error {
 		return nil
 	}
 	if head := adjEffective(e.exclusiveInfo, e.exclusiveTS); tx.conflicts(head) {
-		return tx.conflictErr("adjacency", head)
+		return tx.conflictErr(mvcc.StoreAdjacency, head)
 	}
 	return nil
 }
@@ -212,10 +213,10 @@ func (av *adjVersions) noteExclusive(src graph.NodeID, tx *writeCtx) error {
 	e := sh.d[src]
 	if e != nil {
 		if head := adjEffective(e.exclusiveInfo, e.exclusiveTS); tx.conflicts(head) {
-			return tx.conflictErr("adjacency", head)
+			return tx.conflictErr(mvcc.StoreAdjacency, head)
 		}
 		if head := adjEffective(e.appendInfo, e.appendTS); tx.conflicts(head) {
-			return tx.conflictErr("adjacency", head)
+			return tx.conflictErr(mvcc.StoreAdjacency, head)
 		}
 	} else {
 		e = &adjStamps{}

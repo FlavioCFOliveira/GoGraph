@@ -9,6 +9,8 @@ package lpg
 // its fast path by churn in another — the same separation the node-label and
 // node-property pairs already have, and for the same reason.
 
+import "github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
+
 // ── overflow relationship types ──────────────────────────────────────────────
 
 // addOverflowVersioned records the pre-image and then adds lid to k's overflow
@@ -77,7 +79,7 @@ func (g *Graph[N, W]) pushOverflowVersion(sh *edgeLabelShard, k edgeKey, tx *wri
 		return true
 	}
 	if head := sh.v.headStamp(k); tx.conflicts(head) {
-		_ = tx.conflictErr("edge relationship types", head)
+		_ = tx.conflictErr(mvcc.StoreEdgeTypes, head)
 		return false
 	}
 	cur, had := sh.overflow[k]
@@ -127,7 +129,7 @@ func (g *Graph[N, W]) pushHandleLabelVersion(sh *edgeHandleLabelShard, k edgeKey
 	}
 	key := edgeHandleKey{pair: k, handle: handle}
 	if head := sh.v.headStamp(key); tx.conflicts(head) {
-		_ = tx.conflictErr("edge relationship types by handle", head)
+		_ = tx.conflictErr(mvcc.StoreEdgeTypesHandle, head)
 		return false
 	}
 	var pre labelBag
@@ -175,7 +177,7 @@ func (g *Graph[N, W]) pushHandlePropVersion(sh *edgeHandlePropShard, k edgeKey, 
 	}
 	key := edgeHandleKey{pair: k, handle: handle}
 	if head := sh.v.headStamp(key); tx.conflicts(head) {
-		_ = tx.conflictErr("edge properties by handle", head)
+		_ = tx.conflictErr(mvcc.StoreEdgePropsHandle, head)
 		return false
 	}
 	var pre propBag
@@ -204,7 +206,7 @@ func (g *Graph[N, W]) pushInstanceLabelVersion(sh *edgeInstanceLabelShard, k edg
 	}
 	key := edgeInstanceKey{pair: k, idx: idx}
 	if head := sh.v.headStamp(key); tx.conflicts(head) {
-		_ = tx.conflictErr("edge relationship types by ordinal", head)
+		_ = tx.conflictErr(mvcc.StoreEdgeTypesOrd, head)
 		return false
 	}
 	var pre labelBag
@@ -231,7 +233,7 @@ func (g *Graph[N, W]) pushInstancePropVersion(sh *edgeInstancePropShard, k edgeK
 	}
 	key := edgeInstanceKey{pair: k, idx: idx}
 	if head := sh.v.headStamp(key); tx.conflicts(head) {
-		_ = tx.conflictErr("edge properties by ordinal", head)
+		_ = tx.conflictErr(mvcc.StoreEdgePropsOrd, head)
 		return false
 	}
 	var pre propBag
@@ -320,6 +322,12 @@ func (g *Graph[N, W]) pushInstancePropVersionsForPair(sh *edgeInstancePropShard,
 // concurrent readers, not against a concurrent writer, which the barrier
 // excludes.
 func (g *Graph[N, W]) reclaimEdgeSideVersions(watermark uint64) int {
+	// ONE histogram for all five per-edge side stores, reset here — at the aggregate
+	// — because each of the five sub-sweeps below skips itself when its store holds
+	// nothing live, and a reset inside them would clear the other four's samples.
+	// See [depthStore] for why the five are not distinguished.
+	hist := g.depth(depthEdgeSides)
+	hist.Reset()
 	freed := 0
 	if g.edgeLabelVersionActive.Load() != 0 {
 		for i := range g.edgeLabelShards {
@@ -329,28 +337,28 @@ func (g *Graph[N, W]) reclaimEdgeSideVersions(watermark uint64) int {
 			// watermark test, and they are the only thing masking the aborted
 			// transaction's writes from the stored value.
 			n := g.withdrawAbortedEdgeLabelsLocked(sh)
-			n += sh.v.reclaim(watermark)
+			n += sh.v.reclaim(watermark, hist)
 			sh.mu.Unlock()
 			freed += n
 		}
 		g.edgeLabelVersionActive.Add(-int64(freed))
 	}
-	if n := g.reclaimHandleLabelVersions(watermark); n > 0 {
+	if n := g.reclaimHandleLabelVersions(watermark, hist); n > 0 {
 		freed += n
 	}
-	if n := g.reclaimHandlePropVersions(watermark); n > 0 {
+	if n := g.reclaimHandlePropVersions(watermark, hist); n > 0 {
 		freed += n
 	}
-	if n := g.reclaimInstanceLabelVersions(watermark); n > 0 {
+	if n := g.reclaimInstanceLabelVersions(watermark, hist); n > 0 {
 		freed += n
 	}
-	if n := g.reclaimInstancePropVersions(watermark); n > 0 {
+	if n := g.reclaimInstancePropVersions(watermark, hist); n > 0 {
 		freed += n
 	}
 	return freed
 }
 
-func (g *Graph[N, W]) reclaimInstanceLabelVersions(watermark uint64) int {
+func (g *Graph[N, W]) reclaimInstanceLabelVersions(watermark uint64, hist *mvcc.DepthHist) int {
 	if g.edgeInstanceLabelVersionActive.Load() == 0 {
 		return 0
 	}
@@ -360,14 +368,14 @@ func (g *Graph[N, W]) reclaimInstanceLabelVersions(watermark uint64) int {
 		sh.mu.Lock()
 		// ABORTED heads first; see rmp #2318 and mvcc_abort_sides.go.
 		freed += g.withdrawAbortedInstanceLabelsLocked(sh)
-		freed += sh.v.reclaim(watermark)
+		freed += sh.v.reclaim(watermark, hist)
 		sh.mu.Unlock()
 	}
 	g.edgeInstanceLabelVersionActive.Add(-int64(freed))
 	return freed
 }
 
-func (g *Graph[N, W]) reclaimInstancePropVersions(watermark uint64) int {
+func (g *Graph[N, W]) reclaimInstancePropVersions(watermark uint64, hist *mvcc.DepthHist) int {
 	if g.edgeInstancePropVersionActive.Load() == 0 {
 		return 0
 	}
@@ -377,14 +385,14 @@ func (g *Graph[N, W]) reclaimInstancePropVersions(watermark uint64) int {
 		sh.mu.Lock()
 		// ABORTED heads first; see rmp #2318 and mvcc_abort_sides.go.
 		freed += g.withdrawAbortedInstancePropsLocked(sh)
-		freed += sh.v.reclaim(watermark)
+		freed += sh.v.reclaim(watermark, hist)
 		sh.mu.Unlock()
 	}
 	g.edgeInstancePropVersionActive.Add(-int64(freed))
 	return freed
 }
 
-func (g *Graph[N, W]) reclaimHandleLabelVersions(watermark uint64) int {
+func (g *Graph[N, W]) reclaimHandleLabelVersions(watermark uint64, hist *mvcc.DepthHist) int {
 	if g.edgeHandleLabelVersionActive.Load() == 0 {
 		return 0
 	}
@@ -394,14 +402,14 @@ func (g *Graph[N, W]) reclaimHandleLabelVersions(watermark uint64) int {
 		sh.mu.Lock()
 		// ABORTED heads first; see rmp #2318 and mvcc_abort_sides.go.
 		freed += g.withdrawAbortedHandleLabelsLocked(sh)
-		freed += sh.v.reclaim(watermark)
+		freed += sh.v.reclaim(watermark, hist)
 		sh.mu.Unlock()
 	}
 	g.edgeHandleLabelVersionActive.Add(-int64(freed))
 	return freed
 }
 
-func (g *Graph[N, W]) reclaimHandlePropVersions(watermark uint64) int {
+func (g *Graph[N, W]) reclaimHandlePropVersions(watermark uint64, hist *mvcc.DepthHist) int {
 	if g.edgeHandlePropVersionActive.Load() == 0 {
 		return 0
 	}
@@ -411,7 +419,7 @@ func (g *Graph[N, W]) reclaimHandlePropVersions(watermark uint64) int {
 		sh.mu.Lock()
 		// ABORTED heads first; see rmp #2318 and mvcc_abort_sides.go.
 		freed += g.withdrawAbortedHandlePropsLocked(sh)
-		freed += sh.v.reclaim(watermark)
+		freed += sh.v.reclaim(watermark, hist)
 		sh.mu.Unlock()
 	}
 	g.edgeHandlePropVersionActive.Add(-int64(freed))

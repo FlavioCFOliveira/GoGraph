@@ -218,6 +218,11 @@ type vacuumState struct {
 	// doing its job — but a value that keeps growing says the workload is
 	// producing garbage faster than one pass can clear.
 	capped atomic.Uint64
+	// passNanos is the total time spent inside passes, so passNanos/passes is the
+	// mean pass duration for a caller that has no histogram backend installed
+	// (rmp #2312). The distribution goes to "lpg.mvcc.vacuum.pass"; this is the
+	// number [VacuumStats] can report without one.
+	passNanos atomic.Uint64
 }
 
 // initVacuum prepares the vacuum's channels. Called from [New]; the zero value
@@ -280,6 +285,20 @@ type VacuumStats struct {
 	Backlog int64
 	// RecordsPerPass is the explicit per-pass upper bound on work.
 	RecordsPerPass int
+	// PassTotal is the time spent inside passes, so PassTotal/Passes is the mean
+	// pass duration. The distribution is published as the latency series
+	// "lpg.mvcc.vacuum.pass"; this field is what a caller with no histogram
+	// backend can still read (rmp #2312).
+	PassTotal time.Duration
+}
+
+// MeanPass returns the average duration of a completed vacuum pass, or zero when
+// none has completed.
+func (s *VacuumStats) MeanPass() time.Duration {
+	if s.Passes == 0 {
+		return 0
+	}
+	return s.PassTotal / time.Duration(s.Passes)
 }
 
 // VacuumStats returns the current state of the background vacuum.
@@ -295,6 +314,7 @@ func (g *Graph[N, W]) VacuumStats() VacuumStats {
 		CappedPasses:   g.vac.capped.Load(),
 		Backlog:        g.reclaimDebt.Load(),
 		RecordsPerPass: vacuumRecordsPerPass,
+		PassTotal:      time.Duration(g.vac.passNanos.Load()),
 	}
 }
 
@@ -563,6 +583,14 @@ func (g *Graph[N, W]) vacuumLoop() {
 		// Cleared BEFORE the pass, so versions created while it runs are charged
 		// to the next one rather than being swallowed by this one's reset.
 		g.reclaimDebt.Store(0)
+		// PER-PASS DURATION (rmp #2312). The observability mandate asks for a latency
+		// histogram on every blocking operation, and a vacuum pass is the one the
+		// module owns rather than the caller: it holds per-shard locks the write path
+		// also takes, so a pass whose duration is growing is a pass that is starting
+		// to be felt by writers. Timed here and not inside [Graph.vacuumPass] so a
+		// pass that did not run — the slot was held by a synchronous sweep — records
+		// no sample, which would otherwise report a duration of nothing as fast.
+		passStart := time.Now()
 		freed, capped, ran := g.vacuumPass()
 		if !ran {
 			// A synchronous sweep holds the slot. Wait for it rather than counting
@@ -583,6 +611,9 @@ func (g *Graph[N, W]) vacuumLoop() {
 		if capped {
 			v.capped.Add(1)
 		}
+		d := time.Since(passStart)
+		v.passNanos.Add(uint64(d))
+		metrics.ObserveLatency("lpg.mvcc.vacuum.pass", d)
 		g.publishMVCCMetrics()
 		g.publishVacuumMetrics()
 
@@ -735,7 +766,11 @@ func (g *Graph[N, W]) sweepUnit(u vacuumUnit, watermark uint64) int {
 	case unitEdgeSide:
 		return g.reclaimEdgeSideVersions(watermark)
 	case unitAdjacency:
-		return g.adj.Reclaim(watermark)
+		// Reset HERE rather than inside Reclaim, because adjlist sweeps one store and
+		// this package decides when a distribution begins; see [mvcc.DepthHist].
+		hist := g.depth(depthAdjacency)
+		hist.Reset()
+		return g.adj.Reclaim(watermark, hist)
 	case unitNodeLife:
 		// ABORTED life records first (rmp #2318): a birth or death stamped
 		// [mvcc.AbortedTS] can never satisfy the watermark test, and dropping it
@@ -771,6 +806,11 @@ func (g *Graph[N, W]) publishVacuumMetrics() {
 	metrics.SetGauge("lpg.mvcc.vacuum.backlog", float64(s.Backlog))
 	metrics.SetGauge("lpg.mvcc.vacuum.records_per_pass", float64(s.RecordsPerPass))
 	metrics.SetGauge("lpg.mvcc.vacuum.starts", float64(s.Starts))
+	metrics.SetGauge("lpg.mvcc.vacuum.exits", float64(s.Exits))
+	// The MEAN pass duration beside the histogram, because the two answer different
+	// questions and a scrape may have only one of them: the histogram gives the tail,
+	// this gives a number a dashboard can plot without a backend that buckets.
+	metrics.SetGauge("lpg.mvcc.vacuum.pass_mean_ns", float64(s.MeanPass()))
 	// The SUSPENSION signal, and the reason it is published from here rather than left
 	// in [MVCCStats] (rmp #2315). A non-zero value means at least one reader could not
 	// get a horizon slot, and while that holds the watermark is zero and reclamation

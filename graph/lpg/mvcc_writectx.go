@@ -185,6 +185,12 @@ type writeCtx struct {
 	// Plain, not atomic: it is written by the committing goroutine before the fsync
 	// and read by the same goroutine after it, with the WAL fsync between them.
 	commitTS uint64
+	// counts is the graph's write-side telemetry bank, carried rather than looked up
+	// because [writeCtx] is not generic in the graph's type parameters and every
+	// other piece of per-transaction state already travels with the write (rmp
+	// #2312). Nil means "not counted", which is what a zero-value state used by a
+	// test constructing a bare writeCtx gets.
+	counts *mvcc.WriteCounters
 }
 
 // beginWriteCtx opens per-transaction write state, NOT published on the graph's
@@ -196,7 +202,7 @@ type writeCtx struct {
 func (g *Graph[N, W]) beginWriteCtx() *writeCtx {
 	startTS := g.readTS()
 	id := g.nextTxID()
-	w := &writeCtx{startTS: startTS, txID: id}
+	w := &writeCtx{startTS: startTS, txID: id, counts: &g.writeCounts}
 	w.snap = Snapshot{startTS: startTS, txID: id}
 	w.tx.Arm(id)
 	return w
@@ -253,6 +259,7 @@ func (g *Graph[N, W]) acquireWriteCtx(startTS, txID uint64) *writeCtx {
 	}
 	w.startTS, w.txID = startTS, txID
 	w.snap = Snapshot{startTS: startTS, txID: txID}
+	w.counts = &g.writeCounts
 	w.conflict.Store(nil)
 	// EVERY mutable field must be reset here, because this state is RECYCLED. A
 	// stale commitTS would be the worst of them: [Graph.endWrite] would publish a
@@ -372,6 +379,10 @@ func (w *writeCtx) conflicts(headTS uint64) bool {
 // The FIRST conflict wins. A doomed transaction may run more writes before its
 // caller notices, and the conflict that explains the failure is the one that
 // caused it, not the last one it tripped over on the way out.
+//
+// store must be one of the [mvcc] store constants, so the per-store counter it is
+// attributed to has bounded cardinality by construction; see [mvcc.StoreNodeLabels]
+// and the rest.
 func (w *writeCtx) conflictErr(store string, headTS uint64) error {
 	c := mvcc.NewConflict(store, headTS, w.startTS, w.txID)
 	if !w.conflict.CompareAndSwap(nil, c) {
@@ -385,14 +396,19 @@ func (w *writeCtx) conflictErr(store string, headTS uint64) error {
 	// means, and what an operator can divide by lpg.mvcc.commits.
 	//
 	// The per-store series is what says WHICH structure is contended; without it an
-	// operator sees that the workload contends but not on what. Store names come from
-	// the fixed set in [mvcc.NewConflict]'s callers, not from user data, so the label
-	// cardinality is bounded.
+	// operator sees that the workload contends but not on what. The store is resolved
+	// to a dense index from the closed set in [mvcc.ConflictStoreIndex], so the
+	// cardinality is bounded by construction and an unrecognised name loses its
+	// attribution rather than the count.
 	//
 	// Off the hot path by construction: once per conflicting transaction, never at all
 	// on a workload that does not contend.
+	idx := mvcc.ConflictStoreIndex(store)
+	if w.counts != nil {
+		w.counts.Conflict(idx)
+	}
 	metrics.IncCounter("lpg.mvcc.conflicts", 1)
-	metrics.IncCounter("lpg.mvcc.conflicts.store."+store, 1)
+	metrics.IncCounter(conflictStoreCounters[idx], 1)
 	return c
 }
 

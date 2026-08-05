@@ -105,7 +105,7 @@ func TestMVCCMetrics_ConflictSeriesMoves(t *testing.T) {
 	}
 
 	// The per-store label is what tells an operator WHICH structure contended.
-	perStore, ok := rec.get("lpg.mvcc.conflicts.store.node existence")
+	perStore, ok := rec.get("lpg.mvcc.conflicts.store.node_existence")
 	if !ok || perStore != 1 {
 		t.Errorf("the per-store series for the node-existence store did not move as expected "+
 			"(present=%v value=%d): without it an operator sees that the workload contends "+

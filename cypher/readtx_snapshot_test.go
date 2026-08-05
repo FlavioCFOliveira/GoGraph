@@ -142,25 +142,25 @@ func TestReadTx_PinsReclamationHorizon(t *testing.T) {
 	}
 
 	during := g.MVCCStats()
-	if during.ActiveReaders != base.ActiveReaders+1 {
+	if during.ActiveSnapshots != base.ActiveSnapshots+1 {
 		t.Fatalf("ActiveReaders %d while a read transaction is open, want %d: "+
 			"the handle did not register with the horizon",
-			during.ActiveReaders, base.ActiveReaders+1)
+			during.ActiveSnapshots, base.ActiveSnapshots+1)
 	}
-	if during.UnregisteredReaders != 0 {
-		t.Fatalf("UnregisteredReaders %d: the reader could not get a slot, so nothing is reclaimed",
-			during.UnregisteredReaders)
+	if during.UnregisteredSnapshots != 0 {
+		t.Fatalf("UnregisteredSnapshots %d: the reader could not get a slot, so nothing is reclaimed",
+			during.UnregisteredSnapshots)
 	}
 
 	// Advance the clock underneath the open transaction. Its watermark must stay
 	// behind, which is precisely what "it pins the horizon" means and what
-	// OldestReaderAge is for.
+	// OldestSnapshotAge is for.
 	for i := 1; i <= 5; i++ {
 		autocommit(t, eng, "CREATE (:P)")
 	}
 	held := g.MVCCStats()
-	if held.OldestReaderAge() == 0 {
-		t.Fatalf("OldestReaderAge is 0 with an open read transaction and %d commits since it began "+
+	if held.OldestSnapshotAge() == 0 {
+		t.Fatalf("OldestSnapshotAge is 0 with an open read transaction and %d commits since it began "+
 			"(watermark %d, now %d): the horizon is not being pinned",
 			5, held.Watermark, held.Now)
 	}
@@ -169,9 +169,9 @@ func TestReadTx_PinsReclamationHorizon(t *testing.T) {
 		t.Fatalf("Commit: %v", err)
 	}
 	after := g.MVCCStats()
-	if after.ActiveReaders != base.ActiveReaders {
+	if after.ActiveSnapshots != base.ActiveSnapshots {
 		t.Fatalf("ActiveReaders %d after Commit, want %d: the horizon slot was not returned",
-			after.ActiveReaders, base.ActiveReaders)
+			after.ActiveSnapshots, base.ActiveSnapshots)
 	}
 }
 
@@ -272,8 +272,8 @@ func TestReadTx_ReleasesHorizonSlotOnEveryExitPath(t *testing.T) {
 			if err != nil {
 				t.Fatalf("BeginReadTx: %v", err)
 			}
-			if got := g.MVCCStats().ActiveReaders; got != base.ActiveReaders+1 {
-				t.Fatalf("ActiveReaders %d after BeginReadTx, want %d", got, base.ActiveReaders+1)
+			if got := g.MVCCStats().ActiveSnapshots; got != base.ActiveSnapshots+1 {
+				t.Fatalf("ActiveReaders %d after BeginReadTx, want %d", got, base.ActiveSnapshots+1)
 			}
 			if tc.name == "cancelled context then Rollback" {
 				cancel()
@@ -284,19 +284,19 @@ func TestReadTx_ReleasesHorizonSlotOnEveryExitPath(t *testing.T) {
 
 			tc.finish(t, tx)
 
-			if got := g.MVCCStats().ActiveReaders; got != base.ActiveReaders {
+			if got := g.MVCCStats().ActiveSnapshots; got != base.ActiveSnapshots {
 				t.Fatalf("ActiveReaders %d after %s, want %d: the horizon slot was not returned exactly once",
-					got, tc.name, base.ActiveReaders)
+					got, tc.name, base.ActiveSnapshots)
 			}
 			// The watermark must be free to advance again. With no reader
 			// registered, Horizon.Oldest falls back to the clock's current
-			// instant, so Watermark == Now and OldestReaderAge is 0; a leaked
+			// instant, so Watermark == Now and OldestSnapshotAge is 0; a leaked
 			// slot would hold the watermark at the finished transaction's start
 			// timestamp and make the age non-zero.
 			autocommit(t, eng, "CREATE (:P)")
-			if s := g.MVCCStats(); s.OldestReaderAge() != 0 {
-				t.Fatalf("OldestReaderAge %d after %s with no active readers (watermark %d, now %d): "+
-					"a horizon slot is still held", s.OldestReaderAge(), tc.name, s.Watermark, s.Now)
+			if s := g.MVCCStats(); s.OldestSnapshotAge() != 0 {
+				t.Fatalf("OldestSnapshotAge %d after %s with no active readers (watermark %d, now %d): "+
+					"a horizon slot is still held", s.OldestSnapshotAge(), tc.name, s.Watermark, s.Now)
 			}
 		})
 	}
@@ -331,7 +331,7 @@ func TestReadTx_SnapshotSurvivesDisarmedVersioning(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
-	if got := g.MVCCStats().ActiveReaders; got != 0 {
+	if got := g.MVCCStats().ActiveSnapshots; got != 0 {
 		t.Fatalf("ActiveReaders %d with versioning disarmed, want 0", got)
 	}
 }
