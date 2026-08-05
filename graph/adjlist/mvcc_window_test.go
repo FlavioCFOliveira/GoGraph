@@ -28,6 +28,7 @@ package adjlist
 // something to say about the atomic store this rests on.
 
 import (
+	"sort"
 	"sync"
 	"testing"
 	"unsafe"
@@ -107,6 +108,20 @@ func TestStoreEntry_InPlaceWindowMutationIsSoundUnderVersioning(t *testing.T) {
 // the commit boundary — but that every count it observes is one a COMMITTED
 // version actually had. An intermediate in-window state has a count no
 // committed version ever held, so observing one fails here.
+//
+// # It did not cross the commit boundary until rmp #2327 fixed it
+//
+// The paragraph above was aspirational rather than true. [mvcc.CommitInfo.Commit]
+// only stamps the commit record; the clock's VISIBLE frontier advances through
+// [mvcc.Clock.PublishCommitTS], which this test never called. So `clk.ReadTS()`
+// returned 0 on every iteration, the reader read at start timestamp 0 forever, and
+// the only count it could ever observe was 0 — the empty pre-transaction adjacency.
+//
+// It was still a real negative control: an unversioned in-window write is visible to
+// a reader at any start timestamp, so injecting that defect does fail this test. What
+// it could NOT do is distinguish "the reader correctly stepped back" from "the reader
+// never saw anything at all", which is the weaker of the two things its own comment
+// claimed. The publication below and the guard at the end make the claim true.
 func TestStoreEntry_InPlaceWindowMutationIsRaceFree(t *testing.T) {
 	a, clk := versionedList(t)
 	const fanout = 6
@@ -124,6 +139,7 @@ func TestStoreEntry_InPlaceWindowMutationIsRaceFree(t *testing.T) {
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
 	var bad []int
+	seen := map[int]struct{}{}
 	var mu sync.Mutex
 
 	wg.Add(1)
@@ -139,11 +155,12 @@ func TestStoreEntry_InPlaceWindowMutationIsRaceFree(t *testing.T) {
 			got := len(a.EntryNeighboursAsOf(id, startTS, 0))
 			// The writer commits ONE transaction that adds all `fanout` edges,
 			// so the only committed counts are 0 and fanout.
+			mu.Lock()
+			seen[got] = struct{}{}
 			if got != 0 && got != fanout {
-				mu.Lock()
 				bad = append(bad, got)
-				mu.Unlock()
 			}
+			mu.Unlock()
 		}
 	}()
 
@@ -158,7 +175,11 @@ func TestStoreEntry_InPlaceWindowMutationIsRaceFree(t *testing.T) {
 	}
 	a.EndCommit()
 	info, _ := ws.End()
-	info.Commit(clk.NextCommitTS())
+	ts := clk.NextCommitTS()
+	info.Commit(ts)
+	// Advance the VISIBLE frontier, not merely the commit record — see the note on
+	// this test. Without it the reader below is pinned at start timestamp 0.
+	clk.PublishCommitTS(ts)
 
 	// Give the reader a window on the far side of the commit too.
 	for i := 0; i < 2000; i++ {
@@ -174,6 +195,25 @@ func TestStoreEntry_InPlaceWindowMutationIsRaceFree(t *testing.T) {
 			"and %d were ever committed, so an in-window state leaked past the version chain",
 			len(bad), bad[:minIntTest(4, len(bad))], fanout)
 	}
+	// The claim in this test's doc comment, now enforced: the reader must have
+	// observed the commit boundary. Seeing only one count means it either never
+	// overlapped the writer or never advanced past start timestamp 0, and in both
+	// cases the absence of a violation above is not evidence of anything.
+	if _, ok := seen[fanout]; !ok {
+		t.Fatalf("the reader never observed the committed adjacency (%d neighbours); it saw "+
+			"only %v, so it did not cross the commit boundary and this test proves nothing "+
+			"about what a reader sees after a commit", fanout, keysOfTest(seen))
+	}
+}
+
+// keysOfTest renders an observed-value set for a failure message.
+func keysOfTest(m map[int]struct{}) []int {
+	out := make([]int, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Ints(out)
+	return out
 }
 
 // TestAdjVersion_UnstampedWriteIsVisibleOnlyAfterwards pins the direct-mutation

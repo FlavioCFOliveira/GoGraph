@@ -282,18 +282,27 @@ type adjShard[W any] struct {
 	// building is the PRIVATE, not-yet-published [shardSlots] clone the shard
 	// is accumulating writes into for buildingOwner's transaction. It is nil
 	// unless this shard has been touched by a transaction that is still able to
-	// reuse it. Guarded by mu. A reader never observes it — it is
-	// published into slotsRef only at [AdjList.EndCommit]. This is the
-	// clone-once-per-(shard, window) dedup that bounds a multi-op commit's COW
-	// cost to O(distinct shards touched) instead of O(ops): the first write to
-	// a shard in a window clones its published slot array into building; every
-	// later write in the same window mutates building in place; the window end
-	// freezes building by publishing it. Mutating building in place mid-window
-	// is sound ONLY because the commit window is held under the higher layer's
-	// exclusive visibility barrier (lpg.Graph.ApplyAtomically / LockBarrier =
-	// visMu.Lock) and F3.2 reads stay under that barrier (visMu.RLock), so no
-	// reader can observe building before it is published — see the F3.5 unwind
-	// note on [AdjList.BeginCommit].
+	// reuse it. Guarded by mu. This is the clone-once-per-(shard, window) dedup
+	// that bounds a multi-op commit's COW cost to O(distinct shards touched)
+	// instead of O(ops): the first write to a shard in a window clones its
+	// published slot array into building; every later write in the same window
+	// mutates building in place; the window end freezes it by clearing this field.
+	//
+	// TWO CLAIMS THAT USED TO BE HERE WERE BOTH WRONG (rmp #2327).
+	//
+	// It said "a reader never observes it — it is published into slotsRef only at
+	// [AdjList.EndCommit]". Both halves are false: [AdjList.storeEntry] stores the
+	// builder into slotsRef on the shard's FIRST touch in the window, precisely so
+	// the writer gets read-your-own-writes, and every barrier-free reader — an MVCC
+	// snapshot read, the non-blocking checkpointer — can load it from there.
+	//
+	// It also said mutating building in place mid-window is sound ONLY because the
+	// window is held under the exclusive visibility barrier while reads stay under
+	// visMu.RLock. Sprint 334 made MVCC the module's concurrency control and reads
+	// no longer take that barrier, so the stated reason no longer holds. The real
+	// reason is on [loadEntry]: atomic slot publication, immutable entries, arrays
+	// that are replaced rather than resized, and version records that let an older
+	// reader step back over an in-flight write.
 	building *shardSlots
 
 	mu sync.Mutex
@@ -2331,10 +2340,38 @@ func (a *AdjList[N, W]) setEdgeLabelSlotsTx(src graph.NodeID, updates map[graph.
 // shard's first touch and mutates it in place thereafter), so a plain
 // slotsRef.Load() observes the writer's in-window writes — giving
 // read-your-own-writes within a transaction (e.g. lpg.Graph.RemoveEdge reads
-// HasEdge right after RemoveEdge). Concurrent readers cannot run during a
-// window (it is held under visMu.Lock while reads are under visMu.RLock), so
-// the only goroutine that ever observes the builder through slotsRef is the
-// window-owning writer itself.
+// HasEdge right after RemoveEdge).
+//
+// # Who else observes the builder, and why that is safe (rmp #2327)
+//
+// This comment used to say that the window-owning writer is the ONLY goroutine
+// that ever observes the builder, "because it is held under visMu.Lock while
+// reads are under visMu.RLock". THAT IS FALSE, and it has been since sprint 334
+// made MVCC the module's concurrency control: an MVCC snapshot reader resolves
+// through its own start timestamp and takes NO barrier, and the non-blocking
+// checkpointer reads adjacency under the store commit lock rather than visMu.
+// Both reach this function while a window is open, and a targeted test proves
+// they do — see TestLoadEntry_SnapshotReaderReachesAnOpenWindowAndStepsBackOverIt,
+// whose positive control reads the in-flight state through this very path.
+//
+// What makes that safe is NOT exclusion. It is four properties, and every one of
+// them is asserted rather than argued:
+//
+//  1. this load is an atomic.LoadPointer paired with the atomic.StorePointer the
+//     in-window mutation uses, so the pointer is never torn;
+//  2. an adjEntry is IMMUTABLE once published — a write replaces the slot pointer
+//     and never mutates the entry — so a complete old-or-new entry is all that can
+//     be observed;
+//  3. the slot ARRAY is never resized in place: growth allocates a fresh
+//     [shardSlots] and republishes slotsRef, so the slice header a reader has
+//     loaded is stable for as long as it holds it;
+//  4. ISOLATION comes from the version chain, not from the barrier: every write
+//     records the entry it supersedes ([AdjList.linkVersion]), so a reader whose
+//     start timestamp precedes the commit steps back over the in-flight write.
+//
+// Property 4 is the one that carries the isolation guarantee, and it is why this
+// function is deliberately version-agnostic: it returns the CURRENT entry, and
+// [AdjList.entryAsOf] is what walks back from it.
 func loadEntry[W any](s *adjShard[W], intraIdx uint64) *adjEntry[W] {
 	ss := s.slotsRef.Load()
 	if ss == nil || intraIdx >= uint64(len(ss.slots)) {
@@ -2376,9 +2413,17 @@ func loadEntry[W any](s *adjShard[W], intraIdx uint64) *adjEntry[W] {
 // array into the shard's private builder (s.building), records the shard as
 // dirty, and publishes the builder into slotsRef. Every LATER write to the same
 // shard within the window mutates that builder IN PLACE (no clone, no extra
-// Store) — sound because the window is held under visMu.Lock and F3.2 reads
-// stay under visMu.RLock, so no reader can observe the builder while it is
-// mutated. [AdjList.EndCommit] freezes every dirty builder (clears s.building),
+// Store).
+//
+// THAT IS NOT SOUND BECAUSE READERS ARE EXCLUDED — they are not (rmp #2327). This
+// comment used to claim the window is held under visMu.Lock while reads stay under
+// visMu.RLock, so no reader could observe the builder mid-mutation. Sprint 334
+// retired the barrier from the read path and the claim went with it. Readers DO
+// observe the builder; what makes that safe is set out in the section below and on
+// [loadEntry], and it rests on atomic slot publication, entry immutability, and the
+// version chain — never on a lock.
+//
+// [AdjList.EndCommit] freezes every dirty builder (clears s.building),
 // after which it is immutable forever. Outside any window every write is its
 // own 1-op window: clone-and-publish once (correct, just no dedup).
 //
@@ -2406,8 +2451,19 @@ func loadEntry[W any](s *adjShard[W], intraIdx uint64) *adjEntry[W] {
 // clock. Go's sync/atomic operations are sequentially consistent, so a reader
 // that observes the commit timestamp observes the slot array too.
 //
+// A third property, added by rmp #2327 because the argument above does not state
+// it: the slot ARRAY is never resized in place either. A write past the end of the
+// current array allocates a fresh [shardSlots] via growShardLocked and republishes
+// slotsRef, so a reader holding an older array has a stable slice header and is
+// merely reading an older version — the ordinary MVCC case again, not a torn one.
+//
 // Pinned by TestStoreEntry_InPlaceWindowMutationIsSoundUnderVersioning and its
-// concurrent companion, which fail if either property is lost.
+// concurrent companion, which fail if either property is lost, and by
+// TestLoadEntry_SnapshotReaderReachesAnOpenWindowAndStepsBackOverIt and
+// TestLoadEntry_ConcurrentSnapshotReadersNeverObserveAnOpenWindow, which drive the
+// barrier-free reader this argument is actually about. All four were validated
+// against a build in which the in-window mutation is left unversioned, and all four
+// fail there — so a pass is informative rather than merely quiet.
 func (a *AdjList[N, W]) storeEntry(s *adjShard[W], intraIdx uint64, entry *adjEntry[W], tx mvcc.Tx) error {
 	maxCap := a.cfg.MaxShardCapacity
 	// The transaction now writing, as an identity. Zero means "no transaction",
