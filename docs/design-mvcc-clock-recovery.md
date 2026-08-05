@@ -103,13 +103,33 @@ the derived floor must therefore sit above it. That is consistent with the exist
 The work does not fit one focused pass; each part below is independently complete and
 testable.
 
-**C3a — allocate before the fsync, and carry the timestamp into the WAL.** Split
-`EndVersionedTx` so the commit timestamp is allocated before the WAL append and
-published after the fsync, thread it to `Tx.CommitWALOnly`, and encode it in the
-`OpCommit` body (both encoders: `encodeCommitV3Into` on the pooled hot path and
-`encodeCommitV3`). Test: a WAL written by the new code decodes to the expected
-timestamp; an `OpCommit` with an empty body still replays (the older-file case); and
-the contiguous frontier does not regress -- see the sequencing note above.
+**C3a — allocate before the fsync, and carry the timestamp into the WAL. DONE.**
+
+Implemented as specified. `Graph.AllocateCommitTS` reserves the instant without
+publishing it; `Graph.endWrite` publishes that reservation instead of minting its
+own. Both encoders carry it, `Tx.CommitWALOnly` takes it, and `recovery.Op.CommitTS`
+reads it back — reporting **presence separately from value**, so an absent timestamp
+contributes nothing to the derived maximum while a genuine zero contributes zero.
+
+**The obligation the sequencing change creates, and where it is discharged.** An
+allocated timestamp that is neither published nor abandoned stalls the contiguous
+frontier *permanently*. The discharge therefore lives in `endWrite`, which every path
+reaches — publish on success, `Clock.AbandonCommitTS` on abort and on the
+versioned-nothing exit — rather than beside each caller, because a discharge a new
+caller can forget fails silently rather than loudly.
+
+Tested at three levels, and **every instrument was validated against a build with the
+defect injected**: the wire layout and the two encoders' byte-identity
+(`store/txn`); presence-vs-zero-vs-absent on decode (`store/recovery`); the
+allocation's idempotence, its identity with what is actually published, and the
+recycled-state hazard (`graph/lpg`); and end-to-end, that a real engine commit's
+instant reaches the file and that `InFlightCommits` returns to zero on the
+versioned-nothing path (`cypher`).
+
+**One documented claim was corrected by measurement.** The reset in
+`acquireWriteCtx` was described as the load-bearing clear; removing it changed
+nothing, because every `endWrite` discharge path already zeroes the field. It is
+defence in depth, and the comment now says so.
 
 **C3b — derive and ratchet at recovery.** Track the maximum commit timestamp during
 replay, expose it from recovery alongside the existing `ResumeTxnSeq`, add a ratchet

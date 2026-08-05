@@ -112,7 +112,7 @@ func TestTx_CommitWALOnly_RejectsOverCapTransaction(t *testing.T) {
 			t.Fatalf("AddNode(n%d): %v", i, err)
 		}
 	}
-	err := tx.CommitWALOnly()
+	err := tx.CommitWALOnly(0)
 	if err == nil {
 		t.Fatal("CommitWALOnly returned nil for an over-cap transaction, want ErrTransactionTooLarge")
 	}

@@ -153,6 +153,38 @@ type writeCtx struct {
 	// Atomic for the same reason conflict is, and scoped by exactly one region:
 	// [WriteTx.EnterUndo] / [WriteTx.ExitUndo] around the undo replay.
 	undoing atomic.Bool
+	// commitTS is a commit timestamp ALLOCATED BUT NOT YET PUBLISHED, or zero when
+	// the transaction has not reached its durability point (rmp #2309).
+	//
+	// # Why the allocation moves before the fsync
+	//
+	// The MVCC clock is restored at recovery by DERIVING it from the WAL rather
+	// than by trusting a persisted counter, which means the commit timestamp has to
+	// be IN the durable record. It cannot be, if it is minted after the record is
+	// written — and until this field existed it was: [Graph.endWrite] allocated it,
+	// and endWrite runs from the deferred release, strictly after the WAL append
+	// and fsync.
+	//
+	// So the order becomes allocate → encode → fsync → publish, which is
+	// PostgreSQL's: the XID is assigned before XLogFlush, the flushed record
+	// carries it, and only then is the commit marked visible. It is compatible with
+	// [mvcc.Clock]'s documented allocate/store/publish order because an
+	// allocated-but-unpublished timestamp is already a state the clock models — it
+	// is what InFlightCommits counts.
+	//
+	// # The obligation this creates
+	//
+	// A timestamp that is allocated and then neither published nor abandoned STALLS
+	// THE CONTIGUOUS FRONTIER PERMANENTLY: every later commit becomes invisible to
+	// new readers and the commit log grows without bound. So every path out of a
+	// transaction that allocated one must discharge it — publish on success,
+	// [mvcc.Clock.AbandonCommitTS] on abort and on the versioned-nothing case. That
+	// is why the discharge lives in endWrite, which every path reaches, rather than
+	// beside each caller.
+	//
+	// Plain, not atomic: it is written by the committing goroutine before the fsync
+	// and read by the same goroutine after it, with the WAL fsync between them.
+	commitTS uint64
 }
 
 // beginWriteCtx opens per-transaction write state, NOT published on the graph's
@@ -222,6 +254,26 @@ func (g *Graph[N, W]) acquireWriteCtx(startTS, txID uint64) *writeCtx {
 	w.startTS, w.txID = startTS, txID
 	w.snap = Snapshot{startTS: startTS, txID: txID}
 	w.conflict.Store(nil)
+	// EVERY mutable field must be reset here, because this state is RECYCLED. A
+	// stale commitTS would be the worst of them: [Graph.endWrite] would publish a
+	// timestamp belonging to a transaction that already committed, so two
+	// transactions would share one instant and the second's writes would become
+	// visible at the first's — a reader between them sees a state neither
+	// transaction ever produced.
+	//
+	// This clear is DEFENCE IN DEPTH, not the load-bearing one, and the distinction
+	// was established by removing it: every discharge path in [Graph.endWrite]
+	// already zeroes the field (the publish after reading it, and
+	// [Graph.abandonAllocatedCommitTS] on both failure exits), so the tests still
+	// pass without this line and only fail when BOTH clears are gone. It stays
+	// because the invariant it protects is "recycled state carries nothing", which
+	// should hold whatever a future discharge path forgets — the failure mode is a
+	// silent isolation violation, not a crash.
+	//
+	// TestAllocateCommitTS_RecycledStateCarriesNoStaleTimestamp pins the observable
+	// property (no two transactions share an instant), which is what actually
+	// matters; it is not a test of this line alone.
+	w.commitTS = 0
 	return w
 }
 

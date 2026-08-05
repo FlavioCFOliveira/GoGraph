@@ -297,9 +297,76 @@ func (g *Graph[N, W]) AmbientWriteTx() WriteTx { return WriteTx{w: g.writeTx.Loa
 // That cost is real and it is rmp #2318's to reclaim; it does not justify leaving a
 // failed transaction partly visible.
 //
-// No commit timestamp is allocated on this path, so the contiguous frontier is not
-// asked to account for one ([mvcc.Clock.AbandonCommitTS] exists for the shape where
-// a timestamp IS taken and then abandoned, which this is not).
+// A commit timestamp allocated by [Graph.AllocateCommitTS] before the WAL fsync IS
+// abandoned on this path, via [mvcc.Clock.AbandonCommitTS] — the shape that call
+// exists for. Before rmp #2309 no path allocated one early, so there was nothing to
+// abandon; there is now, and failing to would stall the frontier permanently.
+// AllocateCommitTS reserves this transaction's commit timestamp WITHOUT making it
+// visible, and returns it. It is idempotent: a second call returns the same value.
+//
+// It returns zero — meaning "no timestamp" — for the zero transaction and for a
+// graph whose versioning substrate is disarmed, so a durable caller may invoke it
+// unconditionally and encode whatever it gets.
+//
+// # What it is for (rmp #2309)
+//
+// A durable writer must put the commit instant INTO the WAL record, because the
+// MVCC clock is restored at recovery by deriving it from the WAL rather than by
+// trusting a persisted counter. That is impossible if the instant is minted after
+// the record is written, which is what [Graph.endWrite] used to do — it runs from
+// the caller's deferred teardown, strictly after the append and the fsync.
+//
+// So the sequence becomes:
+//
+//	AllocateCommitTS → encode the OpCommit marker → fsync → EndVersionedTx (publish)
+//
+// which is PostgreSQL's ordering: the XID is assigned before XLogFlush, the flushed
+// record carries it, and only then is the commit marked visible.
+//
+// # The caller's obligation, and why it is discharged elsewhere
+//
+// An allocated timestamp MUST eventually be published or abandoned. One that is
+// neither stalls the contiguous commit frontier permanently — every later commit
+// becomes invisible to new readers, and the commit log grows without bound.
+//
+// The caller does NOT discharge it directly. [Graph.endWrite] does, on every path:
+// it publishes on success and abandons on abort and on the versioned-nothing case.
+// That is deliberate — a discharge placed beside each caller is one a new caller can
+// forget, and the failure mode is a silent, permanent stall rather than a crash. So
+// the only obligation here is the one that already existed: call
+// [Graph.EndVersionedTx] exactly once per transaction.
+//
+// # It lengthens the in-flight window, on purpose
+//
+// Between this call and the publish sits a WAL fsync, so a transaction now holds an
+// unpublished timestamp for milliseconds rather than nanoseconds, and ONE in-flight
+// commit holds the frontier back for every reader. That cost is real and it is
+// observable: MVCCStats.InFlightCommits is the measure.
+//
+// Safe for concurrent use; each goroutine must pass its own transaction.
+func (g *Graph[N, W]) AllocateCommitTS(tx WriteTx) uint64 {
+	if !g.mvccArmed || tx.w == nil {
+		return 0
+	}
+	if tx.w.commitTS == 0 {
+		tx.w.commitTS = g.mvccClock.NextCommitTS()
+	}
+	return tx.w.commitTS
+}
+
+// abandonAllocatedCommitTS discharges a commit timestamp that was allocated by
+// [Graph.AllocateCommitTS] and will never be published, and clears it so a second
+// discharge cannot double-count.
+//
+// A no-op when nothing was allocated, which is every non-durable path.
+func (g *Graph[N, W]) abandonAllocatedCommitTS(w *writeCtx) {
+	if w.commitTS == 0 {
+		return
+	}
+	g.mvccClock.AbandonCommitTS(w.commitTS)
+	w.commitTS = 0
+}
+
 func (g *Graph[N, W]) endWrite(w *writeCtx) {
 	if !g.mvccArmed || w == nil {
 		return
@@ -308,6 +375,13 @@ func (g *Graph[N, W]) endWrite(w *writeCtx) {
 	if info == nil {
 		// The transaction versioned nothing, so there is no record to publish,
 		// nothing to reclaim, and no reason to allocate a commit timestamp.
+		//
+		// It may nonetheless HAVE one, allocated before the WAL fsync by
+		// [Graph.AllocateCommitTS] (rmp #2309). Abandon it: a timestamp that is
+		// neither published nor abandoned stalls the contiguous frontier forever,
+		// which makes every later commit invisible to new readers and grows the
+		// commit log without bound.
+		g.abandonAllocatedCommitTS(w)
 		return
 	}
 	// A transaction that hit a serialization conflict ABORTS. See below for the
@@ -315,6 +389,10 @@ func (g *Graph[N, W]) endWrite(w *writeCtx) {
 	// thing as the rolled-back-statement case the file comment describes.
 	if w.err() != nil {
 		info.Abort()
+		// Same obligation as the versioned-nothing branch above: an aborted
+		// transaction's allocated timestamp is never published, so it must be
+		// abandoned or the frontier stalls on it.
+		g.abandonAllocatedCommitTS(w)
 		// Charged AND woken unconditionally: the version records exist and occupy
 		// memory whatever their commit record says, and until the sweep withdraws
 		// them the stored value still carries this transaction's writes (rmp #2318).
@@ -324,7 +402,17 @@ func (g *Graph[N, W]) endWrite(w *writeCtx) {
 	// Allocate, store into the shared record, THEN publish. A reader must never
 	// start at a timestamp whose commit is still between the first two steps;
 	// see [mvcc.Clock.ReadTS] for the torn read that caused.
-	ts := g.mvccClock.NextCommitTS()
+	//
+	// The allocation may already have happened, in [Graph.AllocateCommitTS], for a
+	// durable transaction that had to put its timestamp INTO the WAL record before
+	// the fsync (rmp #2309). Reusing it is what makes the durable record and the
+	// visible instant the same number; minting a second one here would make the
+	// derived clock floor disagree with what actually became visible.
+	ts := w.commitTS
+	if ts == 0 {
+		ts = g.mvccClock.NextCommitTS()
+	}
+	w.commitTS = 0
 	info.Commit(ts)
 	g.mvccClock.PublishCommitTS(ts)
 	// Accounting only. The sweep itself moved off this path at rmp #2308: a

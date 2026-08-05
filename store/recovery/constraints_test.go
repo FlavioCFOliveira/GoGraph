@@ -47,7 +47,7 @@ func commitConstraintTx(t *testing.T, store *txn.Store[string, float64], create 
 	if err != nil {
 		t.Fatalf("buffer constraint op: %v", err)
 	}
-	if cerr := tx.CommitWALOnly(); cerr != nil {
+	if cerr := tx.CommitWALOnly(0); cerr != nil {
 		t.Fatalf("CommitWALOnly: %v", cerr)
 	}
 }

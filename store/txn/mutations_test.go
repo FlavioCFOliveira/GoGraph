@@ -419,7 +419,7 @@ func TestTx_CommitWALOnly_HappyPath(t *testing.T) {
 	if err := tx.AddEdge("alice", "bob", 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := tx.CommitWALOnly(); err != nil {
+	if err := tx.CommitWALOnly(0); err != nil {
 		t.Fatalf("CommitWALOnly: %v", err)
 	}
 
@@ -437,7 +437,7 @@ func TestTx_CommitWALOnly_HappyPath(t *testing.T) {
 	}
 
 	// The Tx is finished; further calls must surface ErrTxFinished.
-	if err := tx.CommitWALOnly(); !errors.Is(err, ErrTxFinished) {
+	if err := tx.CommitWALOnly(0); !errors.Is(err, ErrTxFinished) {
 		t.Fatalf("CommitWALOnly after finish: %v, want ErrTxFinished", err)
 	}
 }
@@ -462,7 +462,7 @@ func TestTx_CommitWALOnly_AfterClose(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if err := tx.CommitWALOnly(); !errors.Is(err, wal.ErrWriterClosed) {
+	if err := tx.CommitWALOnly(0); !errors.Is(err, wal.ErrWriterClosed) {
 		t.Fatalf("CommitWALOnly err = %v, want ErrWriterClosed", err)
 	}
 	// The lock must have been released even on error: a second
@@ -794,7 +794,7 @@ func TestTx_CommitWALOnly_SyncFailure_ZeroOps(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if err := tx.CommitWALOnly(); !errors.Is(err, wal.ErrWriterClosed) {
+	if err := tx.CommitWALOnly(0); !errors.Is(err, wal.ErrWriterClosed) {
 		t.Fatalf("CommitWALOnly err = %v, want ErrWriterClosed", err)
 	}
 	done := make(chan struct{})

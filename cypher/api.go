@@ -3658,7 +3658,10 @@ func commitConstraintTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind exe
 		// Rollback deregisters the writer.
 		return err
 	}
-	return tx.CommitWALOnly()
+	// commitTS 0 — "no MVCC timestamp" (rmp #2309). DDL registers schema, not graph
+	// versions: it mints no commit record and no MVCC instant, so there is nothing
+	// for recovery to derive a clock floor from here.
+	return tx.CommitWALOnly(0)
 }
 
 // commitIndexTx buffers the durable CREATE/DROP INDEX op on tx and commits it
@@ -3684,7 +3687,10 @@ func commitIndexTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind txn.Inde
 		// Rollback deregisters the writer.
 		return err
 	}
-	return tx.CommitWALOnly()
+	// commitTS 0 — "no MVCC timestamp" (rmp #2309). DDL registers schema, not graph
+	// versions: it mints no commit record and no MVCC instant, so there is nothing
+	// for recovery to derive a clock floor from here.
+	return tx.CommitWALOnly(0)
 }
 
 // scanLabelProperty walks the live (non-tombstoned) nodes carrying label and
@@ -4516,6 +4522,18 @@ type Result struct {
 	// read queries and write queries on an engine with no active constraints.
 	constraintReg *exec.ConstraintRegistry
 	g             *lpg.Graph[string, float64]
+	// mvccG and wtx are how a durable write allocates its MVCC commit timestamp
+	// BEFORE the WAL fsync, so the timestamp is inside the durable record and
+	// recovery can derive the clock from the WAL rather than trust a persisted
+	// counter (rmp #2309, docs/design-mvcc-clock-recovery.md).
+	//
+	// They are separate from g above, which is set only for constraint-carrying
+	// writes and is therefore nil on most of the paths that need this. Both are set
+	// together, inside the write bracket, which is the only place the transaction
+	// handle exists. A zero wtx or a nil mvccG yields timestamp 0 — "no MVCC
+	// timestamp" — which is the correct encoding for a store-only write.
+	mvccG *lpg.Graph[string, float64]
+	wtx   lpg.WriteTx
 	// touched is the per-transaction set of node keys this write statement
 	// created, labelled, or stripped a property from, used by the commit-time
 	// NOT NULL existence check (#1754). It is nil unless the engine has at least
@@ -5185,6 +5203,26 @@ func estimateRelSize(r expr.RelationshipValue) int64 {
 // briefly excluding transactional readers for the duration of the disk sync;
 // the lock-free per-shard snapshot is the tracked performance end-state, and
 // the read/analytics CSR path does not go through this barrier.
+// allocCommitTS reserves this write's MVCC commit instant without publishing it, so
+// the instant can be written INTO the WAL record that is about to be fsynced
+// (rmp #2309). It returns 0 — "no MVCC timestamp" — when this Result carries no
+// transaction handle, which is every store-only and read path.
+//
+// It is idempotent, so the two commit sites below may both call it: the second
+// returns what the first reserved rather than burning a second timestamp, which
+// matters because an allocated-and-unpublished timestamp holds the contiguous
+// commit frontier back for every reader.
+//
+// The reservation is discharged by lpg.Graph.endWrite on every path — published on
+// success, abandoned on abort and on the versioned-nothing case — so there is no
+// obligation here beyond the one that already existed.
+func (r *Result) allocCommitTS() uint64 {
+	if r.mvccG == nil {
+		return 0
+	}
+	return r.mvccG.AllocateCommitTS(r.wtx)
+}
+
 func (r *Result) commitUnderBarrier() {
 	if r.bufHandled && r.walHandled {
 		return
@@ -5209,7 +5247,7 @@ func (r *Result) commitUnderBarrier() {
 	// index commit so the transaction is durable the instant its writes are
 	// allowed to remain observable past the barrier.
 	if r.tx != nil {
-		if werr := r.tx.CommitWALOnly(); werr != nil {
+		if werr := r.tx.CommitWALOnly(r.allocCommitTS()); werr != nil {
 			cmetrics.IncCounter("cypher.RunInTx.wal.commitErrors", 1)
 			// The fsync failed: roll the not-durable write back so it never
 			// stays visible, then surface the error from RunInTx.
@@ -5391,7 +5429,7 @@ func (r *Result) closeLocked() error {
 		if err != nil || r.rs.Err() != nil || r.rowsErr != nil {
 			_ = r.tx.Rollback() // release store mutex; in-memory state already dirty
 		} else {
-			if werr := r.tx.CommitWALOnly(); werr != nil {
+			if werr := r.tx.CommitWALOnly(r.allocCommitTS()); werr != nil {
 				err = werr
 			}
 		}
@@ -15876,6 +15914,10 @@ func (e *Engine) execUnderBarrier(
 			if cm, ok := mutator.(countMutator); ok {
 				r.cbuf, r.cs = cm.countState()
 			}
+			// The transaction handle, so the WAL commit below can allocate this
+			// transaction's MVCC instant before it fsyncs (rmp #2309). This is the
+			// only scope in which the handle exists.
+			r.mvccG, r.wtx = e.g, wtx
 			r.materialize()
 			r.commitUnderBarrier()
 			return nil

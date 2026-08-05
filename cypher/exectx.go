@@ -653,7 +653,12 @@ func (tx *ExplicitTx) Commit() (err error) {
 		// indexes. If the fsync fails, roll everything back inside the barrier so
 		// the non-durable transaction never stays visible.
 		if tx.walTx != nil {
-			if werr := tx.walTx.CommitWALOnly(); werr != nil {
+			// Allocate this transaction's MVCC instant HERE, before the fsync, so
+			// the durable OpCommit record carries it and recovery can derive the
+			// clock from the WAL (rmp #2309). release() publishes it afterwards, so
+			// the allocate → encode → fsync → publish order holds and
+			// durable-then-visible is preserved.
+			if werr := tx.walTx.CommitWALOnly(tx.eng.g.AllocateCommitTS(tx.wtx)); werr != nil {
 				cmetrics.IncCounter("cypher.ExplicitTx.wal.commitErrors", 1)
 				walErr = werr
 				if undoOK := tx.rollbackInBarrierLocked(); !undoOK {

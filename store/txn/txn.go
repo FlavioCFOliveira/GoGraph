@@ -1234,7 +1234,15 @@ func (t *Tx[N, W]) Commit() error {
 	// transaction as a whole (rmp #2306). Frame order need not match sequence
 	// order and recovery does not require it — it groups a transaction by the
 	// TxnSeq each frame carries.
-	seq, hasSeq, mark, appendErr := t.appendOnly()
+	//
+	// commitTS is 0 — "no MVCC timestamp" (rmp #2309). This is the STORE's own
+	// commit path: it applies through the store, has no MVCC clock in scope, and
+	// mints no commit instant. Recovery treats a zero-or-absent timestamp as
+	// contributing nothing to the derived clock floor, which is exactly right here
+	// — a store-only writer has no instant to restore. The MVCC path is
+	// [Tx.CommitWALOnly], which is handed the timestamp its caller allocated before
+	// the fsync.
+	seq, hasSeq, mark, appendErr := t.appendOnly(0)
 	// Pair the in-flight registration appendOnly made: cleared only after the
 	// entire commit (SyncGroup + apply gate) below has finished, so a draining
 	// RunUnderCommitLock never closes the WAL mid-fsync.
@@ -1349,14 +1357,14 @@ func (t *Tx[N, W]) Commit() error {
 // Cypher engine's commitUnderBarrier, #1281) has already applied the mutations
 // eagerly inside the visibility barrier, and CommitWALOnly returning only after
 // the covering fsync preserves durable-before-visible.
-func (t *Tx[N, W]) CommitWALOnly() error {
+func (t *Tx[N, W]) CommitWALOnly(commitTS uint64) error {
 	defer metrics.Time("store.txn.CommitWALOnly").Stop()
 	if t.finished {
 		metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
 		return ErrTxFinished
 	}
 
-	seq, hasSeq, mark, appendErr := t.appendOnly()
+	seq, hasSeq, mark, appendErr := t.appendOnly(commitTS)
 	defer t.store.exitWriter()
 	if !hasSeq {
 		if appendErr != nil {
@@ -1486,7 +1494,7 @@ func releaseApplySlot(ch chan struct{}) { applySlotPool.Put(ch) }
 // before that lets [Store.RunUnderCommitLock] observe it (#1507 quiesce
 // boundary). The caller MUST pair it with exactly one [Store.doneInflight] once
 // the whole commit (SyncGroup + apply gate) finishes.
-func (t *Tx[N, W]) appendOnly() (seq uint64, hasSeq bool, watermark int64, err error) {
+func (t *Tx[N, W]) appendOnly(commitTS uint64) (seq uint64, hasSeq bool, watermark int64, err error) {
 	if len(t.ops) == 0 {
 		// Empty commit: mint no sequence and write no marker. The caller still
 		// runs SyncGroup to flush any prior buffered tail (the historical
@@ -1540,7 +1548,7 @@ func (t *Tx[N, W]) appendOnly() (seq uint64, hasSeq bool, watermark int64, err e
 				return err
 			}
 		}
-		marker := encodeCommitV3Into((*scratch)[:0], seq)
+		marker := encodeCommitV3Into((*scratch)[:0], seq, commitTS)
 		*scratch = marker
 		return emit(marker)
 	})
@@ -1696,9 +1704,33 @@ func encodeOpTypedV3Into[N comparable, W any](buf []byte, op Op[N, W], seq uint6
 // encodeCommitV3Into serialises the [OpCommit] marker into the supplied buffer
 // (which must be length 0), returning the extended slice. Pool-aware sibling of
 // [encodeCommitV3]; the bytes produced are identical.
-func encodeCommitV3Into(buf []byte, seq uint64) []byte {
+//
+// # The commit timestamp, and why it needs no format bump (rmp #2309)
+//
+// commitTS is the MVCC instant at which this transaction becomes visible, or zero
+// for a writer with no MVCC clock (the store's own [Tx.Commit] path). It is
+// appended to the [OpCommit] body, which was previously empty, so that recovery can
+// DERIVE the clock's floor from the WAL instead of trusting a persisted counter —
+// the shape InnoDB and Memgraph both settled on, and the reason no separate counter
+// record exists. See docs/design-mvcc-clock-recovery.md.
+//
+// This is deliberately NOT a format bump, and that was verified against the code
+// rather than assumed. The WAL frame header is magic + version + length + crc32c
+// (store/wal/format.go), so it carries no per-record shape. Inside the frame,
+// recovery's decodeV3 copies everything after the txnSeq word verbatim into
+// Op.Body, and [OpCommit]'s body was ignored by the replay state machine. So:
+//
+//   - an OLDER reader ignores the extra 8 bytes entirely;
+//   - a NEWER reader on an OLDER file sees an empty body and contributes nothing to
+//     the derived maximum, falling back to the floor.
+//
+// The compatibility policy is therefore "absent body means no timestamp", which is
+// a test obligation rather than a version negotiation. Neither [CurrentVersion] nor
+// [OpRecordV3] changes.
+func encodeCommitV3Into(buf []byte, seq, commitTS uint64) []byte {
 	buf = append(buf, OpRecordV3, byte(OpCommit))
-	return binary.LittleEndian.AppendUint64(buf, seq)
+	buf = binary.LittleEndian.AppendUint64(buf, seq)
+	return binary.LittleEndian.AppendUint64(buf, commitTS)
 }
 
 // encodeOpTypedV3 serialises one op to a v3 ([OpRecordV3]) WAL payload:
@@ -1719,14 +1751,14 @@ func encodeOpTypedV3[N comparable, W any](op Op[N, W], seq uint64, codec Codec[N
 }
 
 // encodeCommitV3 serialises the [OpCommit] marker for a v3 transaction:
-// version + kind + the transaction sequence, with no body. Recovery
+// version + kind + the transaction sequence + the MVCC commit timestamp. Recovery
 // applies the buffered ops carrying the same sequence when it reads this
 // frame; a torn write that loses it discards the whole transaction.
 //
 // Allocating convenience form of [encodeCommitV3Into]; the bytes are identical.
-func encodeCommitV3(seq uint64) []byte {
-	buf := make([]byte, 0, 2+8)
-	return encodeCommitV3Into(buf, seq)
+func encodeCommitV3(seq, commitTS uint64) []byte {
+	buf := make([]byte, 0, 2+8+8)
+	return encodeCommitV3Into(buf, seq, commitTS)
 }
 
 // appendOpBodyTyped appends the codec-encoded body for op to buf (which

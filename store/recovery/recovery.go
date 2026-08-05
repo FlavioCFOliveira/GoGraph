@@ -339,6 +339,31 @@ type Op struct {
 	Version uint8
 }
 
+// CommitTS returns the MVCC commit timestamp carried by a [txn.OpCommit] marker,
+// and reports whether one was present.
+//
+// # Why "present" is a separate answer from "zero" (rmp #2309)
+//
+// Recovery DERIVES the MVCC clock's floor as one past the largest commit timestamp
+// it observes, rather than reading a persisted counter — the shape InnoDB and
+// Memgraph both settled on after removing theirs. A marker with no timestamp must
+// therefore contribute NOTHING to that maximum, and a marker whose timestamp
+// genuinely is zero must contribute zero. Collapsing the two into a bare uint64
+// would make an absent timestamp indistinguishable from the smallest real one.
+//
+// Absence is the pre-#2309 on-disk shape: the marker's body was empty. That is the
+// whole of the compatibility policy — no version negotiation, because the frame
+// header carries no per-record shape and an older reader ignored this body anyway.
+// A body that is present but too short is treated as absent rather than as an
+// error: a torn tail is the recovery replay loop's concern, and a marker that got
+// that far has already passed its frame CRC.
+func (o Op) CommitTS() (uint64, bool) {
+	if o.Kind != txn.OpCommit || len(o.Body) < 8 {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint64(o.Body[:8]), true
+}
+
 // ErrUnsupportedRecordVersion is returned by [Decode] for a WAL record
 // whose leading version byte is neither [txn.OpRecordV2] nor
 // [txn.OpRecordV3]. In practice this is a legacy v1 ([txn.OpRecordV1])
@@ -416,8 +441,11 @@ func Decode(payload []byte) (Op, error) {
 //
 // The body (everything after the txnSeq word) matches the v2 layout, so it
 // is copied verbatim into [Op.Body] and walked by the same typed apply
-// path ([applyOpCodec]). An [txn.OpCommit] marker has an empty body; the
-// recovery replay loop reads it to apply the buffered transaction.
+// path ([applyOpCodec]). The recovery replay loop reads an [txn.OpCommit]
+// marker to apply the buffered transaction.
+//
+// An [txn.OpCommit] body carries the 8-byte MVCC commit timestamp since rmp #2309,
+// and is EMPTY in a file written before it. Both are valid; see [CommitTS].
 func decodeV3(payload []byte) (Op, error) {
 	if len(payload) < 10 { // version + kind + uint64 txnSeq
 		metrics.IncCounter("store.recovery.Decode.errors", 1)

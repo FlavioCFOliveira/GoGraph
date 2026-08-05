@@ -86,7 +86,7 @@ func TestApplyGate_NoLostWakeup_MixedCommitPaths(t *testing.T) {
 				if i%2 == 0 {
 					cerr = tx.Commit()
 				} else {
-					cerr = tx.CommitWALOnly()
+					cerr = tx.CommitWALOnly(0)
 				}
 				if cerr != nil {
 					firstErr.CompareAndSwap(nil, cerr)

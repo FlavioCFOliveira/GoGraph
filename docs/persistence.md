@@ -142,11 +142,28 @@ for a new record version.
 A **v3** payload is `version(0xFD) | kind | uint64 txnSeq (LE) | <v2 body>`.
 The body after `txnSeq` is byte-identical to the v2 body for that kind, so
 recovery reuses the v2 body walk. The `txnSeq` groups a transaction's frames;
-the trailing `OpCommit` marker (`version | OpCommit | txnSeq`, no body) is the
-atomicity boundary — recovery applies a v3 transaction's buffered ops only on
-reading its durable marker (see the Durability contract above). Typed stores
-emit v3; v2 frames remain fully readable so existing on-disk WALs replay
-unchanged.
+the trailing `OpCommit` marker is the atomicity boundary — recovery applies a
+v3 transaction's buffered ops only on reading its durable marker (see the
+Durability contract above). Typed stores emit v3; v2 frames remain fully
+readable so existing on-disk WALs replay unchanged.
+
+The `OpCommit` marker is `version | OpCommit | uint64 txnSeq | uint64 commitTS`,
+all little-endian. `commitTS` is the **MVCC instant at which the transaction
+becomes visible**, and it is what lets recovery **derive** the MVCC clock from
+the WAL instead of trusting a persisted counter — the shape InnoDB and Memgraph
+both settled on after removing theirs (see
+[`design-mvcc-clock-recovery.md`](design-mvcc-clock-recovery.md)). It is zero for
+a writer with no MVCC clock, which is the store's own `Tx.Commit` path.
+
+**No format bump was needed, and that was verified rather than assumed.** The
+frame header is `magic | version | length | crc32c`, so it carries no per-record
+shape, and the marker's body was previously empty and ignored by the replay
+state machine. So an **older reader** ignores the extra eight bytes, and a
+**newer reader on an older file** sees an empty body and contributes nothing to
+the derived maximum. The compatibility policy is therefore *"absent body means
+no timestamp"* — a test obligation (`recovery.Op.CommitTS` reports presence
+separately from value) rather than a version negotiation. Neither
+`wal.CurrentVersion` nor `txn.OpRecordV3` changed.
 
 | `OpKind`              | Value | Mutation                                          |
 |-----------------------|-------|---------------------------------------------------|
