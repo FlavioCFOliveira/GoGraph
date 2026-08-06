@@ -119,6 +119,23 @@ func TestVacuum_CommitPathPerformsNoReclamation(t *testing.T) {
 	// replaces guarded itself with that same slot and skipped when it was busy, so it
 	// passed against the very code it was written to catch.
 	waitWithinBound(t, g)
+	// WAIT FOR THE VACUUM TO QUIESCE before attributing (rmp #2335).
+	//
+	// waitWithinBound returns the moment the retained count is within the bound,
+	// which can be well before the sweeper has finished crediting itself for the
+	// churn — so the ratio below was being applied to however much of its work the
+	// sweeper happened to have done by then. Under a full-coverage build, where the
+	// vacuum goroutine gets markedly less CPU, that produced 10354 of 16384 (63.2 %)
+	// and a failure claiming reclamation was back on the commit path. It was not:
+	// a commit-path sweep measures 53 %, and 63.2 % is a STARVED SWEEPER, which is a
+	// fact about the machine rather than about where reclamation happens.
+	//
+	// Waiting for Reclaimed to stop growing removes the scheduler from the
+	// measurement. It does not weaken the discriminator: on a defective build the
+	// commit path has ALREADY freed the records, so Reclaimed plateaus low however
+	// long the wait runs — waiting cannot manufacture attribution that the vacuum
+	// never earned.
+	waitVacuumQuiesced(t, g)
 	vs := g.VacuumStats()
 	if vs.Passes == 0 {
 		t.Errorf("the substrate settled with ZERO vacuum passes: the records were freed by " +
@@ -127,8 +144,38 @@ func TestVacuum_CommitPathPerformsNoReclamation(t *testing.T) {
 	}
 	if want := int64(rounds) * 2 / 3; vs.Reclaimed < want {
 		t.Errorf("vacuum passes account for only %d records over %d modifications, short of the "+
-			"%d that attribution requires: the rest were freed by something other than the "+
-			"vacuum, which means reclamation is still on the commit path", vs.Reclaimed, rounds, want)
+			"%d that attribution requires, after the vacuum had QUIESCED (%d passes): the rest "+
+			"were freed by something other than the vacuum, which means reclamation is still on "+
+			"the commit path", vs.Reclaimed, rounds, want, vs.Passes)
+	}
+}
+
+// waitVacuumQuiesced blocks until the vacuum has stopped crediting itself, so an
+// attribution ratio measured afterwards reflects what the sweeper DID rather than
+// how much CPU it happened to get (rmp #2335).
+//
+// Quiescence is Reclaimed unchanged across several consecutive polls spanning a real
+// interval, not a single unchanged reading: one reading can fall between two passes.
+// The deadline is the same settleTimeout the bound wait uses, and expiring it is not
+// a failure — the caller's ratio then judges whatever was accumulated, which is the
+// pre-existing behaviour and cannot be weaker than it.
+func waitVacuumQuiesced(t *testing.T, g *Graph[string, float64]) {
+	t.Helper()
+	const stableFor = 5
+	deadline := time.Now().Add(settleTimeout)
+	last := g.VacuumStats().Reclaimed
+	stable := 0
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+		now := g.VacuumStats().Reclaimed
+		if now == last {
+			stable++
+			if stable >= stableFor {
+				return
+			}
+			continue
+		}
+		last, stable = now, 0
 	}
 }
 
