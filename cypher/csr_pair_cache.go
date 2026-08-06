@@ -284,6 +284,24 @@ func expandAdjacencySource(
 	}
 }
 
+// intersectAdjacencySource is [expandAdjacencySource] for the fused cyclic expand,
+// which filters two legs and so needs both filters keyed to the one adjacency.
+func intersectAdjacencySource(
+	bopts *buildOpts, g *lpg.ReadView[string, float64], midRelTypes, endRelTypes []string,
+) exec.IntersectAdjacencySource {
+	return func() (exec.CSRAdjacency, exec.CSRAdjacency, map[uint64]string, map[uint64]string) {
+		fwd, rev, at := csrPairCachedForAt(bopts, g)
+		var mid, end map[uint64]string
+		if len(midRelTypes) > 0 {
+			mid = edgeTypeFilterFor(g, fwd, midRelTypes, bopts, at)
+		}
+		if len(endRelTypes) > 0 {
+			end = edgeTypeFilterFor(g, fwd, endRelTypes, bopts, at)
+		}
+		return fwd, rev, mid, end
+	}
+}
+
 // newCSRPairCacheIfEnabled returns a cache unless the Engine opted out via
 // [EngineOptions.DisableCSRPairCache], in which case it returns nil and every
 // lookup falls through to an uncached build — the same behaviour the public

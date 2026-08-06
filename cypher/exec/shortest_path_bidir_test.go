@@ -195,16 +195,17 @@ func biOperator(t *testing.T, g biTestGraph, dir Direction) *ShortestPath {
 // biOperatorFiltered builds an initialised ShortestPath over an explicit CSR
 // pair, optionally with a relationship-type filter.
 //
-// The filter is applied BEFORE Init, as the planner does (buildShortestPath
-// chains WithTypeFilter onto the constructor and the pipeline Inits later).
-// Order is load-bearing: Init is where the reverse-position admit bitset is
-// built, so a filter attached afterwards would leave the operator unable to run a
-// typed two-sided search.
+// The filter reaches the operator through its [AdjacencySource], which Init
+// resolves before it builds the reverse-position admit bitset (rmp #2317). That
+// ordering used to be the CALLER's obligation — WithTypeFilter had to be chained
+// on before Init or the operator could not run a typed two-sided search — and is
+// now structural, because the filter and the adjacency it is keyed to arrive
+// together at the one point that needs them.
 func biOperatorFiltered(t *testing.T, fwd, rev *biCSR, dir Direction, edgeType string, filter map[uint64]string) *ShortestPath {
 	t.Helper()
-	op := NewShortestPath(biNoInput{}, fwd, rev, dir, 0, 1)
+	op := NewShortestPath(biNoInput{}, StaticAdjacency(fwd, rev, filter), dir, 0, 1)
 	if edgeType != "" {
-		op.WithTypeFilter(edgeType, filter)
+		op.WithTypeFilter(edgeType)
 	}
 	if err := op.Init(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -702,7 +703,7 @@ func TestBiBFS_FallsBackWithoutAUsableReverseCSR(t *testing.T) {
 	fwd := buildCSRWithHandles(4, [][2]int{{0, 1}, {1, 2}, {2, 3}})
 	placeholder := buildCSRWithHandles(4, nil)
 
-	op := NewShortestPath(biNoInput{}, fwd, placeholder, DirOut, 0, 1)
+	op := NewShortestPath(biNoInput{}, StaticAdjacency(fwd, placeholder, nil), DirOut, 0, 1)
 	if err := op.Init(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
 	}

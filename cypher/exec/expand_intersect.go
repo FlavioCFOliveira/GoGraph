@@ -95,11 +95,11 @@ const MetricExpandIntersectEngaged = "cypher.expand_intersect.engaged"
 
 // ExpandIntersectConfig configures a fused cyclic expand.
 type ExpandIntersectConfig struct {
-	// MidEdgeTypeFilter and EndEdgeTypeFilter map forward edge positions to the
-	// accepted type set for the middle (b→c) and closing (c→a) legs. Required
-	// whenever the corresponding EdgeType is non-empty.
-	MidEdgeTypeFilter map[uint64]string
-	EndEdgeTypeFilter map[uint64]string
+	// The two type filters are NOT here (rmp #2317). They map forward edge
+	// positions to the accepted type set for the middle (b→c) and closing (c→a)
+	// legs, so they are keyed to one particular adjacency and travel with it; see
+	// [IntersectAdjacencySource].
+	//
 	// MidEdgeType and EndEdgeType, when non-empty, restrict each leg to edges
 	// present in the corresponding filter.
 	MidEdgeType string
@@ -120,6 +120,9 @@ type ExpandIntersect struct {
 	input Operator
 	ctx   context.Context
 
+	// src yields the adjacency AND both type filters keyed to it, resolved in Init
+	// rather than held from plan-build time. See [IntersectAdjacencySource].
+	src      IntersectAdjacencySource
 	fwd, rev CSRAdjacency
 	fwdVerts []uint64
 	fwdEdges []graph.NodeID
@@ -159,21 +162,18 @@ type ExpandIntersect struct {
 // there is nothing to gain from copying it. A nil cfg is treated as the zero value,
 // which is an untyped fusion reading b from column 0 and a from column 0 — valid
 // but not useful, so callers always pass one.
-func NewExpandIntersect(input Operator, fwd, rev CSRAdjacency, cfg *ExpandIntersectConfig) *ExpandIntersect {
+func NewExpandIntersect(input Operator, src IntersectAdjacencySource, cfg *ExpandIntersectConfig) *ExpandIntersect {
 	if cfg == nil {
 		cfg = &ExpandIntersectConfig{}
 	}
 	return &ExpandIntersect{
-		input:     input,
-		fwd:       fwd,
-		rev:       rev,
-		midType:   cfg.MidEdgeType,
-		endType:   cfg.EndEdgeType,
-		midFilter: cfg.MidEdgeTypeFilter,
-		endFilter: cfg.EndEdgeTypeFilter,
-		relCols:   cfg.RelCols,
-		midCol:    cfg.MidCol,
-		endCol:    cfg.EndCol,
+		input:   input,
+		src:     src,
+		midType: cfg.MidEdgeType,
+		endType: cfg.EndEdgeType,
+		relCols: cfg.RelCols,
+		midCol:  cfg.MidCol,
+		endCol:  cfg.EndCol,
 	}
 }
 
@@ -194,6 +194,9 @@ func (op *ExpandIntersect) Init(ctx context.Context) error {
 		return err
 	}
 	cmetrics.IncCounter(MetricExpandIntersectEngaged, 1)
+	// Resolved NOW, not at plan-build time (rmp #2317); see
+	// [IntersectAdjacencySource].
+	op.fwd, op.rev, op.midFilter, op.endFilter = op.src()
 	op.fwdVerts = op.fwd.VerticesSlice()
 	op.fwdEdges = op.fwd.EdgesSlice()
 	op.revVerts = op.rev.VerticesSlice()

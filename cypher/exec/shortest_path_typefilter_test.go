@@ -33,12 +33,12 @@ import (
 func typeFilterOperator(t *testing.T, g biTestGraph, dir Direction, admit ...uint64) *ShortestPath {
 	t.Helper()
 	fwd, rev := g.csrPair()
-	op := NewShortestPath(biNoInput{}, fwd, rev, dir, 0, 1)
 	filter := make(map[uint64]string, len(admit))
 	for _, pos := range admit {
 		filter[pos] = "K"
 	}
-	op.WithTypeFilter("K", filter)
+	op := NewShortestPath(biNoInput{}, StaticAdjacency(fwd, rev, filter), dir, 0, 1)
+	op.WithTypeFilter("K")
 	if err := op.Init(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
 	}

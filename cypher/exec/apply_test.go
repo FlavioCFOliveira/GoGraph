@@ -649,7 +649,7 @@ func TestVarLenExpand_1to3Hops_Linear(t *testing.T) {
 	rev := buildCSR(5, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, exec.StaticAdjacency(fwd, rev, nil), &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   1,
@@ -672,7 +672,7 @@ func TestVarLenExpand_MinHops0_IncludesSource(t *testing.T) {
 	rev := buildCSR(3, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, exec.StaticAdjacency(fwd, rev, nil), &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   0,
@@ -697,7 +697,7 @@ func TestVarLenExpand_CyclicGraphTerminates(t *testing.T) {
 	rev := buildCSR(3, [][2]int{{1, 0}, {2, 1}, {0, 2}})
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, exec.StaticAdjacency(fwd, rev, nil), &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   1,
@@ -725,7 +725,7 @@ func TestVarLenExpand_SafetyCapExceeded(t *testing.T) {
 	rev := buildCSR(101, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, exec.StaticAdjacency(fwd, rev, nil), &exec.VarLengthConfig{
 		Direction:         exec.DirOut,
 		InputCol:          0,
 		MinHops:           1,
@@ -745,7 +745,7 @@ func TestVarLenExpand_IsolatedNode(t *testing.T) {
 	rev := buildCSR(3, [][2]int{{2, 1}})
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, exec.StaticAdjacency(fwd, rev, nil), &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   1,
@@ -767,7 +767,7 @@ func TestVarLenExpand_ExactHops(t *testing.T) {
 	rev := buildCSR(4, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, exec.StaticAdjacency(fwd, rev, nil), &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   2,
@@ -797,7 +797,7 @@ func TestVarLenExpand_MultipleInputRows(t *testing.T) {
 		exec.Row{expr.IntegerValue(0)},
 		exec.Row{expr.IntegerValue(1)},
 	)
-	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, exec.StaticAdjacency(fwd, rev, nil), &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   1,
@@ -824,7 +824,7 @@ func TestVarLenExpand_EdgeDeduplicationWithinPath(t *testing.T) {
 	rev := buildCSR(2, [][2]int{{1, 0}})
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, exec.StaticAdjacency(fwd, rev, nil), &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   1,
@@ -853,7 +853,7 @@ func TestVarLenExpand_CancellationHonoured(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, exec.StaticAdjacency(fwd, rev, nil), &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   1,
@@ -882,7 +882,7 @@ func TestShortestPath_DirectEdge(t *testing.T) {
 	rev := buildCSR(2, [][2]int{{1, 0}})
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0), expr.IntegerValue(1)})
-	op := exec.NewShortestPath(input, fwd, rev, exec.DirOut, 0, 1)
+	op := exec.NewShortestPath(input, exec.StaticAdjacency(fwd, rev, nil), exec.DirOut, 0, 1)
 
 	rows, err := exec.Drain(context.Background(), op)
 	if err != nil {
@@ -922,7 +922,7 @@ func TestShortestPath_Unreachable(t *testing.T) {
 	rev := buildCSR(2, [][2]int{{1, 0}})
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(1), expr.IntegerValue(0)})
-	op := exec.NewShortestPath(input, fwd, rev, exec.DirOut, 0, 1)
+	op := exec.NewShortestPath(input, exec.StaticAdjacency(fwd, rev, nil), exec.DirOut, 0, 1)
 
 	rows, err := exec.Drain(context.Background(), op)
 	if err != nil {
@@ -933,7 +933,7 @@ func TestShortestPath_Unreachable(t *testing.T) {
 	}
 
 	input2 := newSliceOperator(exec.Row{expr.IntegerValue(1), expr.IntegerValue(0)})
-	opt := exec.NewShortestPath(input2, fwd, rev, exec.DirOut, 0, 1).WithOptional(true)
+	opt := exec.NewShortestPath(input2, exec.StaticAdjacency(fwd, rev, nil), exec.DirOut, 0, 1).WithOptional(true)
 	rows2, err := exec.Drain(context.Background(), opt)
 	if err != nil {
 		t.Fatalf("Drain (optional): %v", err)
@@ -951,7 +951,7 @@ func TestShortestPath_SameNodeZeroHop(t *testing.T) {
 	rev := buildCSR(3, [][2]int{{1, 0}})
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(1), expr.IntegerValue(1)})
-	op := exec.NewShortestPath(input, fwd, rev, exec.DirOut, 0, 1).WithHopBounds(0, shortestNoMaxHopsForTest)
+	op := exec.NewShortestPath(input, exec.StaticAdjacency(fwd, rev, nil), exec.DirOut, 0, 1).WithHopBounds(0, shortestNoMaxHopsForTest)
 
 	rows, err := exec.Drain(context.Background(), op)
 	if err != nil {
@@ -976,7 +976,7 @@ func TestShortestPath_LongerPath(t *testing.T) {
 	rev := buildCSR(4, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0), expr.IntegerValue(3)})
-	op := exec.NewShortestPath(input, fwd, rev, exec.DirOut, 0, 1)
+	op := exec.NewShortestPath(input, exec.StaticAdjacency(fwd, rev, nil), exec.DirOut, 0, 1)
 
 	rows, err := exec.Drain(context.Background(), op)
 	if err != nil {
@@ -998,7 +998,7 @@ func TestShortestPath_ShortestAmongMultiple(t *testing.T) {
 	rev := buildCSR(4, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0), expr.IntegerValue(3)})
-	op := exec.NewShortestPath(input, fwd, rev, exec.DirOut, 0, 1)
+	op := exec.NewShortestPath(input, exec.StaticAdjacency(fwd, rev, nil), exec.DirOut, 0, 1)
 
 	rows, err := exec.Drain(context.Background(), op)
 	if err != nil {
@@ -1019,7 +1019,7 @@ func TestShortestPath_EmptyInput(t *testing.T) {
 	rev := buildCSR(2, [][2]int{{1, 0}})
 
 	input := newSliceOperator()
-	op := exec.NewShortestPath(input, fwd, rev, exec.DirOut, 0, 1)
+	op := exec.NewShortestPath(input, exec.StaticAdjacency(fwd, rev, nil), exec.DirOut, 0, 1)
 
 	rows, err := exec.Drain(context.Background(), op)
 	if err != nil {
@@ -1037,7 +1037,7 @@ func TestShortestPath_InvalidInputColumns(t *testing.T) {
 	rev := buildCSR(2, [][2]int{{1, 0}})
 
 	input := newSliceOperator(exec.Row{expr.StringValue("not-an-int"), expr.StringValue("not-an-int")})
-	op := exec.NewShortestPath(input, fwd, rev, exec.DirOut, 0, 1)
+	op := exec.NewShortestPath(input, exec.StaticAdjacency(fwd, rev, nil), exec.DirOut, 0, 1)
 
 	rows, err := exec.Drain(context.Background(), op)
 	if err != nil {
@@ -1049,7 +1049,7 @@ func TestShortestPath_InvalidInputColumns(t *testing.T) {
 
 	// OPTIONAL variant keeps the row with a Null path.
 	input2 := newSliceOperator(exec.Row{expr.StringValue("not-an-int"), expr.StringValue("not-an-int")})
-	opt := exec.NewShortestPath(input2, fwd, rev, exec.DirOut, 0, 1).WithOptional(true)
+	opt := exec.NewShortestPath(input2, exec.StaticAdjacency(fwd, rev, nil), exec.DirOut, 0, 1).WithOptional(true)
 	rows2, err := exec.Drain(context.Background(), opt)
 	if err != nil {
 		t.Fatalf("Drain (optional): %v", err)
@@ -1072,7 +1072,7 @@ func TestAllShortestPaths_TwoPaths(t *testing.T) {
 	rev := buildCSR(4, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0), expr.IntegerValue(3)})
-	op := exec.NewAllShortestPaths(input, fwd, rev, exec.DirOut, 0, 1)
+	op := exec.NewAllShortestPaths(input, exec.StaticAdjacency(fwd, rev, nil), exec.DirOut, 0, 1)
 
 	rows, err := exec.Drain(context.Background(), op)
 	if err != nil {
@@ -1095,7 +1095,7 @@ func TestAllShortestPaths_Unreachable(t *testing.T) {
 	rev := buildCSR(2, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(1), expr.IntegerValue(0)})
-	op := exec.NewAllShortestPaths(input, fwd, rev, exec.DirOut, 0, 1)
+	op := exec.NewAllShortestPaths(input, exec.StaticAdjacency(fwd, rev, nil), exec.DirOut, 0, 1)
 
 	rows, err := exec.Drain(context.Background(), op)
 	if err != nil {
@@ -1112,7 +1112,7 @@ func TestAllShortestPaths_SameNode(t *testing.T) {
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0), expr.IntegerValue(0)})
 	// minHops 0 admits the zero-length src==dst path.
-	op := exec.NewAllShortestPaths(input, fwd, rev, exec.DirOut, 0, 1).WithHopBounds(0, shortestNoMaxHopsForTest)
+	op := exec.NewAllShortestPaths(input, exec.StaticAdjacency(fwd, rev, nil), exec.DirOut, 0, 1).WithHopBounds(0, shortestNoMaxHopsForTest)
 
 	rows, err := exec.Drain(context.Background(), op)
 	if err != nil {
@@ -1129,7 +1129,7 @@ func TestAllShortestPaths_SinglePath(t *testing.T) {
 	rev := buildCSR(3, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0), expr.IntegerValue(2)})
-	op := exec.NewAllShortestPaths(input, fwd, rev, exec.DirOut, 0, 1)
+	op := exec.NewAllShortestPaths(input, exec.StaticAdjacency(fwd, rev, nil), exec.DirOut, 0, 1)
 
 	rows, err := exec.Drain(context.Background(), op)
 	if err != nil {
@@ -1147,7 +1147,7 @@ func TestAllShortestPaths_ThreePaths(t *testing.T) {
 	rev := buildCSR(5, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0), expr.IntegerValue(4)})
-	op := exec.NewAllShortestPaths(input, fwd, rev, exec.DirOut, 0, 1)
+	op := exec.NewAllShortestPaths(input, exec.StaticAdjacency(fwd, rev, nil), exec.DirOut, 0, 1)
 
 	rows, err := exec.Drain(context.Background(), op)
 	if err != nil {
@@ -1168,7 +1168,7 @@ func TestAllShortestPaths_MultipleInputRows(t *testing.T) {
 		exec.Row{expr.IntegerValue(0), expr.IntegerValue(3)}, // 2 shortest paths of len 2
 		exec.Row{expr.IntegerValue(1), expr.IntegerValue(3)}, // 1 shortest path of len 1
 	)
-	op := exec.NewAllShortestPaths(input, fwd, rev, exec.DirOut, 0, 1)
+	op := exec.NewAllShortestPaths(input, exec.StaticAdjacency(fwd, rev, nil), exec.DirOut, 0, 1)
 
 	rows, err := exec.Drain(context.Background(), op)
 	if err != nil {
@@ -1189,7 +1189,7 @@ func TestAllShortestPaths_PicksShorterNotLonger(t *testing.T) {
 	rev := buildCSR(4, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0), expr.IntegerValue(3)})
-	op := exec.NewAllShortestPaths(input, fwd, rev, exec.DirOut, 0, 1)
+	op := exec.NewAllShortestPaths(input, exec.StaticAdjacency(fwd, rev, nil), exec.DirOut, 0, 1)
 
 	rows, err := exec.Drain(context.Background(), op)
 	if err != nil {
@@ -1215,7 +1215,7 @@ func TestVarLenExpand_ZeroHopOnly(t *testing.T) {
 	rev := buildCSR(3, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, exec.StaticAdjacency(fwd, rev, nil), &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   0,
@@ -1256,7 +1256,7 @@ func TestVarLenExpand_OneToOneHop(t *testing.T) {
 	rev := buildCSR(7, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, exec.StaticAdjacency(fwd, rev, nil), &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   1,
@@ -1279,7 +1279,7 @@ func TestVarLenExpand_OneToFiveHops_Chain(t *testing.T) {
 	rev := buildCSR(6, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, exec.StaticAdjacency(fwd, rev, nil), &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   1,
@@ -1330,7 +1330,7 @@ func TestVarLenExpand_OneToFiveHops_Tree(t *testing.T) {
 	rev := buildCSR(9, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, exec.StaticAdjacency(fwd, rev, nil), &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   1,
@@ -1374,7 +1374,7 @@ func TestVarLenExpand_RingRelationshipIsomorphism(t *testing.T) {
 	rev := buildCSR(n, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, exec.StaticAdjacency(fwd, rev, nil), &exec.VarLengthConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 		MinHops:   1,
@@ -1402,7 +1402,7 @@ func TestVarLenExpand_TightCycleCapDoesNotExplode(t *testing.T) {
 	rev := buildCSR(3, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, exec.StaticAdjacency(fwd, rev, nil), &exec.VarLengthConfig{
 		Direction:         exec.DirOut,
 		InputCol:          0,
 		MinHops:           1,
@@ -1443,7 +1443,7 @@ func TestVarLenExpand_TimeoutCancelsBoundedEnumeration(t *testing.T) {
 	rev := buildCSR(n, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, exec.StaticAdjacency(fwd, rev, nil), &exec.VarLengthConfig{
 		Direction:         exec.DirOut,
 		InputCol:          0,
 		MinHops:           1,
@@ -1474,7 +1474,7 @@ func TestShortestPath_DeterministicTieBreaking(t *testing.T) {
 	var first sample
 	for run := 0; run < 5; run++ {
 		input := newSliceOperator(exec.Row{expr.IntegerValue(0), expr.IntegerValue(3)})
-		op := exec.NewShortestPath(input, fwd, rev, exec.DirOut, 0, 1)
+		op := exec.NewShortestPath(input, exec.StaticAdjacency(fwd, rev, nil), exec.DirOut, 0, 1)
 		rows, err := exec.Drain(context.Background(), op)
 		if err != nil {
 			t.Fatalf("run %d: Drain: %v", run, err)

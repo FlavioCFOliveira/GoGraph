@@ -259,6 +259,19 @@ type ExpandConfig struct {
 // the traversal follows the writes its own statement has made.
 type AdjacencySource func() (fwd, rev CSRAdjacency, edgeTypeFilter map[uint64]string)
 
+// IntersectAdjacencySource is [AdjacencySource] for the fused cyclic expand, which
+// filters TWO legs and therefore needs two type filters keyed to the one adjacency
+// it resolves.
+type IntersectAdjacencySource func() (fwd, rev CSRAdjacency, midFilter, endFilter map[uint64]string)
+
+// StaticIntersectAdjacency is [StaticAdjacency] for an [IntersectAdjacencySource],
+// and carries the same warning: a production plan must not use it.
+func StaticIntersectAdjacency(fwd, rev CSRAdjacency, midFilter, endFilter map[uint64]string) IntersectAdjacencySource {
+	return func() (CSRAdjacency, CSRAdjacency, map[uint64]string, map[uint64]string) {
+		return fwd, rev, midFilter, endFilter
+	}
+}
+
 // StaticAdjacency is an [AdjacencySource] over a fixed pair, for callers that
 // genuinely hold one — an offline traversal, or a test that builds its own CSR.
 // A production query plan must NOT use it: the pair it closes over is exactly the

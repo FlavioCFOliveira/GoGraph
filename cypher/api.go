@@ -8315,7 +8315,6 @@ func buildOperatorRec(
 			return child, nil
 		}
 
-		fwd, rev, pairAt := csrPairCachedForAt(bopts, g)
 		dir := irDirToExec(p.Direction)
 
 		cfg := exec.ExpandConfig{
@@ -8345,7 +8344,7 @@ func buildOperatorRec(
 		// full first. One intersecting operator computes the same set directly, so a
 		// candidate that does not close is never built into a row. Declines to nil
 		// for every shape it does not admit, leaving the plan below untouched.
-		if fused := tryFuseCyclicIntersect(p, child, fwd, rev, pairAt, g, schema, bopts); fused != nil {
+		if fused := tryFuseCyclicIntersect(p, child, g, schema, bopts); fused != nil {
 			return fused, nil
 		}
 		exp := exec.NewExpand(child, expandAdjacencySource(bopts, g, p.RelTypes), cfg)
@@ -8985,7 +8984,6 @@ func buildOperatorRec(
 			return child, nil
 		}
 
-		fwd, rev, pairAt := csrPairCachedForAt(bopts, g)
 		dir := irDirToExec(p.Direction)
 		minHops := p.MinDepth
 		maxHops := p.MaxDepth
@@ -8995,11 +8993,9 @@ func buildOperatorRec(
 		// honours MaxHops==0 as "no expansion beyond the source", which is
 		// exactly the desired semantics for *0 / *0..0 / *N..M (N>M).
 
-		var etFilter map[uint64]string
 		edgeType := ""
 		if len(p.RelTypes) > 0 {
 			edgeType = p.RelTypes[0]
-			etFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts, pairAt)
 		}
 
 		// Resolve excluded rel-variable names to row column indices via
@@ -9017,13 +9013,14 @@ func buildOperatorRec(
 		cfg := exec.VarLengthConfig{
 			Direction:       dir,
 			EdgeType:        edgeType,
-			EdgeTypeFilter:  etFilter,
 			InputCol:        fromCol,
 			MinHops:         minHops,
 			MaxHops:         maxHops,
 			ExcludedRelCols: excludedCols,
 		}
-		return exec.NewVarLengthExpand(child, fwd, rev, &cfg), nil
+		// The filter travels with the adjacency, both resolved at execution time; see
+		// [expandAdjacencySource].
+		return exec.NewVarLengthExpand(child, expandAdjacencySource(bopts, g, p.RelTypes), &cfg), nil
 
 	case *ir.NamedPath:
 		// NamedPath is a pure pass-through: build the child, then register
@@ -18562,14 +18559,11 @@ func buildShortestPathWithPred(
 		}
 	}
 
-	fwd, rev, pairAt := csrPairCachedForAt(bopts, g)
 	dir := irDirToExec(p.Direction)
 
 	edgeType := ""
-	var etFilter map[uint64]string
 	if len(p.RelTypes) > 0 {
 		edgeType = p.RelTypes[0]
-		etFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts, pairAt)
 	}
 
 	// Translate the IR's "unbounded" sentinel (math.MaxInt) to the operator's
@@ -18580,8 +18574,8 @@ func buildShortestPathWithPred(
 	}
 
 	if p.All {
-		op := exec.NewAllShortestPaths(child, fwd, rev, dir, srcCol, dstCol).
-			WithTypeFilter(edgeType, etFilter).
+		op := exec.NewAllShortestPaths(child, expandAdjacencySource(bopts, g, p.RelTypes), dir, srcCol, dstCol).
+			WithTypeFilter(edgeType).
 			WithHopBounds(p.MinDepth, maxHops).
 			WithOptional(p.Optional)
 		if pathPred != nil {
@@ -18589,8 +18583,8 @@ func buildShortestPathWithPred(
 		}
 		return op, nil
 	}
-	op := exec.NewShortestPath(child, fwd, rev, dir, srcCol, dstCol).
-		WithTypeFilter(edgeType, etFilter).
+	op := exec.NewShortestPath(child, expandAdjacencySource(bopts, g, p.RelTypes), dir, srcCol, dstCol).
+		WithTypeFilter(edgeType).
 		WithHopBounds(p.MinDepth, maxHops).
 		WithOptional(p.Optional)
 	if pathPred != nil {
@@ -18671,8 +18665,6 @@ var _ exec.GraphMutator = (*walMutatorAdapter)(nil)
 func tryFuseCyclicIntersect(
 	p *ir.Expand,
 	child exec.Operator,
-	fwd, rev *csr.CSR[float64],
-	pairAt csrPairKey,
 	g *lpg.ReadView[string, float64],
 	schema map[string]int,
 	bopts *buildOpts,
@@ -18747,16 +18739,15 @@ func tryFuseCyclicIntersect(
 	cfg := &exec.ExpandIntersectConfig{MidCol: midCol, EndCol: endCol}
 	if len(mid.RelTypes) > 0 {
 		cfg.MidEdgeType = mid.RelTypes[0]
-		cfg.MidEdgeTypeFilter = edgeTypeFilterFor(g, fwd, mid.RelTypes, bopts, pairAt)
 	}
 	if len(p.RelTypes) > 0 {
 		cfg.EndEdgeType = p.RelTypes[0]
-		cfg.EndEdgeTypeFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts, pairAt)
 	}
 	for _, name := range mid.SiblingRelVars {
 		if col, okCol := schema[name]; okCol {
 			cfg.RelCols = append(cfg.RelCols, col)
 		}
 	}
-	return exec.NewExpandIntersect(kids[0], fwd, rev, cfg)
+	// Both filters travel with the adjacency, all resolved at execution time.
+	return exec.NewExpandIntersect(kids[0], intersectAdjacencySource(bopts, g, mid.RelTypes, p.RelTypes), cfg)
 }

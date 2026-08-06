@@ -184,8 +184,11 @@ type pathState struct {
 // VarLengthExpand is NOT safe for concurrent use.
 type VarLengthExpand struct {
 	input Operator
-	fwd   CSRAdjacency
-	rev   CSRAdjacency
+	// src yields the adjacency, resolved in Init rather than held from plan-build
+	// time. See [AdjacencySource].
+	src AdjacencySource
+	fwd CSRAdjacency
+	rev CSRAdjacency
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 
@@ -257,8 +260,6 @@ type VarLengthExpand struct {
 
 // VarLengthConfig carries configuration for [NewVarLengthExpand].
 type VarLengthConfig struct {
-	// EdgeTypeFilter maps absolute edge positions to type labels.
-	EdgeTypeFilter map[uint64]string
 	// EdgeType, when non-empty, restricts expansion to edges of this type.
 	EdgeType string
 	// ExcludedRelCols lists column indices in the input row holding edge
@@ -293,7 +294,7 @@ type VarLengthConfig struct {
 
 // NewVarLengthExpand creates a VarLengthExpand operator. cfg is read-only and
 // taken by pointer to avoid copying the configuration struct on this hot path.
-func NewVarLengthExpand(input Operator, fwd, rev CSRAdjacency, cfg *VarLengthConfig) *VarLengthExpand {
+func NewVarLengthExpand(input Operator, src AdjacencySource, cfg *VarLengthConfig) *VarLengthExpand {
 	dir := cfg.Direction
 	if dir == 0 {
 		dir = DirOut
@@ -316,11 +317,9 @@ func NewVarLengthExpand(input Operator, fwd, rev CSRAdjacency, cfg *VarLengthCon
 	}
 	return &VarLengthExpand{
 		input:                  input,
-		fwd:                    fwd,
-		rev:                    rev,
+		src:                    src,
 		dir:                    dir,
 		edgeType:               cfg.EdgeType,
-		edgeTypeFilter:         cfg.EdgeTypeFilter,
 		inputCol:               cfg.InputCol,
 		minHops:                cfg.MinHops,
 		maxHops:                maxHops,
@@ -333,6 +332,8 @@ func NewVarLengthExpand(input Operator, fwd, rev CSRAdjacency, cfg *VarLengthCon
 // Init initialises the operator.
 func (op *VarLengthExpand) Init(ctx context.Context) error {
 	op.ctx = ctx
+	// Resolved NOW, not at plan-build time (rmp #2317); see [AdjacencySource].
+	op.fwd, op.rev, op.edgeTypeFilter = op.src()
 	op.fwdVerts = op.fwd.VerticesSlice()
 	op.fwdEdges = op.fwd.EdgesSlice()
 	op.fwdHandles = op.fwd.HandlesSlice()
