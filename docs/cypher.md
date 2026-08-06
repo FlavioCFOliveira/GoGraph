@@ -1130,9 +1130,21 @@ It returns the same `*ExplicitTx` handle, with these differences from `BeginTx`:
   explicit read transaction weaker than a single autocommit statement.
 - **It pins the reclamation horizon while it is open.** No version the
   transaction could still reach is freed until it finishes, so a long-lived read
-  transaction holds version memory. `lpg.MVCCStats.ActiveReaders` and
-  `OldestReaderAge()` report it. Finish the handle promptly; over Bolt, the idle
-  and total transaction timeouts bound an abandoned one.
+  transaction holds version memory. `lpg.MVCCStats.ActiveSnapshots` and
+  `OldestSnapshotAge()` report it — renamed in sprint 334, because the horizon
+  holds a writer's snapshot as well as a reader's and the old names
+  (`ActiveReaders`, `OldestReaderAge()`) under-reported what was pinning it.
+  Finish the handle promptly; over Bolt, the idle and total transaction timeouts
+  bound an abandoned one.
+- **Read-your-own-writes across transactions is NOT yet guaranteed.** The commit
+  frontier is contiguous, so a commit is acknowledged at an instant that may not
+  have published yet, and the same caller's next transaction can begin *below its
+  own commit*. A write followed by a separate read may therefore miss the write,
+  and a caller writing repeatedly to one key may see a retriable serialization
+  error with nothing else contending for it. `lpg.Session` (rmp #2328) closes
+  this by making a caller wait for its own commits to become visible, but the
+  Cypher engine does not carry one yet (rmp #2329). Until it does, read inside
+  the same transaction as the write when the guarantee matters.
 - **Teardown-only finish.** The caller must still finish the handle with exactly
   one `Commit` or `Rollback`. On a read-only handle neither makes anything
   durable — but both release the transaction's read snapshot, so skipping them

@@ -711,8 +711,14 @@ func (s *Store[N, W]) MaxTxnOps() int { return s.maxTxnOps }
 // holds it shared.
 //
 // See the lpg package documentation and docs/isolation-design.md for the full
-// opt-in contract and the tracked lock-free per-shard snapshot that will make
-// every read transaction-consistent without the barrier.
+// contract.
+//
+// (This used to end "and the tracked lock-free per-shard snapshot that will make every
+// read transaction-consistent without the barrier". That work is not tracked and will
+// not happen: rmp #2051's single atomically-published root was closed as SUPERSEDED in
+// sprint 334 — per-object version chains deliver the same guarantee and are what both
+// reference engines do. Every read IS transaction-consistent without the barrier
+// already, by carrying an instant. rmp #2314.)
 func (s *Store[N, W]) Graph() *lpg.Graph[N, W] { return s.g }
 
 // enterWriter admits a writer and registers it as in-flight, honouring ctx.

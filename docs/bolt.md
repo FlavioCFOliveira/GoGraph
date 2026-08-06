@@ -111,8 +111,26 @@ isolation across all of its statements** — a commit landing between two `RUN`s
 invisible to the second — and it is also why the two bounds above matter more
 than they did: while the handle is open, no version it can still reach may be
 reclaimed. Both reaps roll the transaction back, which returns the snapshot;
-`lpg.MVCCStats.ActiveReaders` and `OldestReaderAge()` are where a leak would
-show.
+`lpg.MVCCStats.ActiveSnapshots` and `OldestSnapshotAge()` are where a leak would
+show. (Those two were `ActiveReaders` and `OldestReaderAge()` until sprint 334
+renamed them: the horizon holds a writer's snapshot as well as a reader's, so the
+old names under-reported what was pinning it.)
+
+### Read-your-own-writes is NOT yet guaranteed per connection
+
+A Bolt connection is a session in every sense except this one. GoGraph's commit
+frontier is contiguous, so a commit is acknowledged at an instant that may not
+have published yet, and the same connection's next transaction can begin *below
+its own commit*. Two consequences a client can observe:
+
+- a write followed by a read on the same connection may not see the write;
+- a connection writing repeatedly to one key may get a retriable serialization
+  error with nothing else contending for it.
+
+`lpg.Session` (rmp #2328) is the mechanism that closes this — it makes a caller
+wait for its own commits to become visible — but the Bolt server does not carry
+one per connection yet (rmp #2329). Until it does, a client that needs
+read-your-own-writes must read inside the same transaction as the write.
 
 Both events are separately observable: `bolt.server.tx.idlereaped` counts
 transactions reaped for silence, `bolt.server.tx.timedout` those that exceeded

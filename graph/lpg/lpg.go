@@ -18,22 +18,46 @@
 // Transaction-atomic visibility, however, is OPT-IN. A committed
 // transaction may span several operations across several substructures
 // (adjacency, node/edge labels, node/edge properties, tombstones, the
-// roaring label bitmaps, and the secondary indexes). To observe a whole
-// transaction atomically — never a partial transaction, never a torn
-// cross-substructure view — reads must run inside [Graph.View] and writes
-// inside [Graph.ApplyAtomically], which flip a transaction's writes
-// visible as one step under a single visibility barrier:
+// roaring label bitmaps, and the secondary indexes).
+//
+// # Isolation comes from an INSTANT, not from a barrier (sprint 334)
+//
+// Every one of those structures is VERSIONED. A read carries a start timestamp
+// and resolves each structure against it, so it observes exactly the
+// transactions committed at or before that instant — a whole transaction or
+// none of it, and never a torn cross-substructure view. A write publishes its
+// whole transaction with ONE atomic store into a shared commit record, so there
+// is no window in which part of it is visible.
 //
 //   - Per-operation atomicity holds for every accessor, always.
-//   - Partial-transaction-free reads hold ONLY inside [Graph.View].
-//   - Cross-substructure consistency (e.g. "if the edge exists, both of
-//     its endpoint labels exist") holds ONLY inside [Graph.View].
+//   - Partial-transaction-free reads hold for any read carrying a snapshot
+//     ([Graph.BeginRead] / [Graph.ReadAt]), which is what the Cypher engine and
+//     every explicit read transaction take.
+//   - Cross-substructure consistency (e.g. "if the edge exists, both of its
+//     endpoint labels exist") holds for the same reads, for the same reason: one
+//     instant resolves every structure.
 //
-// A direct accessor call made outside [Graph.View] therefore observes a
-// consistent single operation, but may observe a multi-operation
-// transaction half-applied. The full model — and the tracked lock-free
-// per-shard snapshot that will make every read transaction-consistent
-// without the barrier — is described in docs/isolation-design.md.
+// A direct accessor called with NO snapshot reads the present. That is
+// per-operation atomic and is the right answer for a caller outside any
+// transaction, but it is not a transactional view: two such calls can straddle
+// a commit.
+//
+// [Graph.View] and [Graph.ApplyAtomically] still exist, and are now the SCHEMA
+// BARRIER — they serialise DDL against readers, not writers against each other.
+// An ordinary write holds the barrier SHARED and relies on versioning for its
+// isolation. Reads take no barrier at all.
+//
+// # What this paragraph used to say
+//
+// It said reads must run inside [Graph.View] to be partial-transaction-free,
+// and pointed at "the tracked lock-free per-shard snapshot that will make every
+// read transaction-consistent without the barrier" as future work. Neither is
+// true: reads are transaction-consistent WITHOUT the barrier today, and the
+// single-root design that was to deliver it was closed as superseded (rmp #2051,
+// closed by rmp #2311) in favour of the per-object version chains both
+// PostgreSQL and Memgraph use. Recorded rather than silently rewritten, because
+// a reader who remembers the old contract would otherwise look for a lock that
+// nothing takes. See docs/isolation-design.md for the full model.
 package lpg
 
 import (
