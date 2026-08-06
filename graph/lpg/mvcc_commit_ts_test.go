@@ -21,7 +21,7 @@ import (
 func commitTSGraph(t *testing.T) *Graph[string, float64] {
 	t.Helper()
 	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
-	g.EnableMVCC()
+	g.armMVCC()
 	return g
 }
 

@@ -216,7 +216,7 @@ func TestPropDelta_ArmedByDefaultAndDisarmable(t *testing.T) {
 	}
 
 	inert := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
-	inert.DisableMVCC()
+	inert.disarmMVCCForTest()
 	if err := inert.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}

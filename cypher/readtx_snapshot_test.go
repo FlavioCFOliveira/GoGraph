@@ -23,7 +23,6 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
-	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // autocommit runs one statement outside any explicit transaction and drains it,
@@ -309,37 +308,8 @@ func mustFinish(t *testing.T, err error) {
 	}
 }
 
-// TestReadTx_SnapshotSurvivesDisarmedVersioning covers the wiring's one
-// degenerate input: with versioning disarmed, [lpg.Graph.BeginRead] returns a
-// nil snapshot, which legitimately means "read the current value". The handle
-// must still work and must still be releasable — the nil is a valid view, not a
-// missing one, which is why the pinned view is carried in a wrapper rather than
-// signalled by a nil snapshot.
-func TestReadTx_SnapshotSurvivesDisarmedVersioning(t *testing.T) {
-	t.Parallel()
-	g := newDisarmedGraph(t)
-	eng := cypher.NewEngine(g)
-	autocommit(t, eng, "CREATE (:P)")
-
-	tx, err := eng.BeginReadTx(context.Background())
-	if err != nil {
-		t.Fatalf("BeginReadTx: %v", err)
-	}
-	if got := countPInTx(t, tx); got != 1 {
-		t.Fatalf("saw %d nodes, want 1", got)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
-	if got := g.MVCCStats().ActiveSnapshots; got != 0 {
-		t.Fatalf("ActiveReaders %d with versioning disarmed, want 0", got)
-	}
-}
-
-// newDisarmedGraph builds a graph with the versioning substrate off.
-func newDisarmedGraph(t *testing.T) *lpg.Graph[string, float64] {
-	t.Helper()
-	_, g := storelessEngineWithGraph(t)
-	g.DisableMVCC()
-	return g
-}
+// The disarmed-versioning case that used to live here is GONE, with the state it
+// covered: MVCC is armed by lpg.New and there is no way to disarm it (rmp #2311). It
+// asserted that BeginRead's nil snapshot — "read the current value" — still produced a
+// usable, releasable handle. That input is now unreachable from any caller, so the test
+// asserted nothing about the shipped module.

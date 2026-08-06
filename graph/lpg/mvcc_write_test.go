@@ -19,7 +19,7 @@ import (
 func mvccGraph(t *testing.T) *Graph[string, float64] {
 	t.Helper()
 	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
-	if !g.MVCCEnabled() {
+	if !g.mvccArmed {
 		t.Fatal("a new graph must have MVCC armed (rmp #2288)")
 	}
 	return g

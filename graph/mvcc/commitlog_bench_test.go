@@ -13,7 +13,8 @@ package mvcc
 // allocator, the same CPU state and the same run-to-run conditions. A
 // back-to-back A/B across two builds on this project's hardware has manufactured
 // phantom regressions from a byte-identical control before, which is why
-// graph/lpg carries EnableMVCC/DisableMVCC for exactly this purpose.
+// graph/lpg carries the unexported disarmMVCCForTest seam for exactly this purpose
+// (rmp #2311 removed the exported switch).
 
 import (
 	"sync/atomic"

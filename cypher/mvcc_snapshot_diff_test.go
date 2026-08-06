@@ -12,18 +12,19 @@ package cypher
 // agree exactly — which turns the whole refactor into a property that can be
 // checked rather than an argument that has to be believed.
 //
-// # Why two graphs and not two runs
+// # THE DIFFERENTIAL IS GONE; THE ABSOLUTE ORACLE REMAINS (rmp #2311)
 //
-// [lpg.Graph.DisableMVCC] must be called before anything is written, so the
-// arms cannot share a graph. Each arm builds its own from the same script, and
-// the fixtures are deterministic, so any difference is the read path.
+// The comparison needed a PLAIN arm — a graph with versioning disarmed — and that
+// state no longer exists: MVCC is armed by lpg.New and there is no way to turn it off,
+// because it is the module's only concurrency control. A differential against an arm
+// nobody can construct is not a test.
 //
-// # Why there is an ABSOLUTE oracle as well
-//
-// A differential goes green when BOTH arms are wrong the same way — this
-// project has watched that happen twice. So the corpus carries hand-computed
-// expected answers for the cases where the right answer can be written down,
-// and those are asserted against both arms independently.
+// What survives is the better half, and the file said so before the arm was removed:
+// "a differential goes green when BOTH arms are wrong the same way — this project has
+// watched that happen twice". So the corpus carries HAND-COMPUTED expected answers for
+// every case where the right answer can be written down, and those are asserted
+// against the one arm that ships. That is strictly stronger than agreement between two
+// implementations of the same mistake.
 
 import (
 	"context"
@@ -94,21 +95,18 @@ var snapshotDiffQueries = []struct{ name, q string }{
 }
 
 // snapshotDiffEngine builds one arm.
-func snapshotDiffEngine(t *testing.T, mvcc bool) *Engine {
+func snapshotDiffEngine(t *testing.T) *Engine {
 	t.Helper()
 	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
-	if !mvcc {
-		g.DisableMVCC()
-	}
 	g.SetIndexManager(index.NewManager())
 	eng := NewEngine(g)
 	ctx := context.Background()
 	if _, err := eng.RunInTx(ctx, "CREATE INDEX FOR (n:Person) ON (n.age)", nil); err != nil {
-		t.Fatalf("mvcc=%v CREATE INDEX: %v", mvcc, err)
+		t.Fatalf("CREATE INDEX: %v", err)
 	}
 	for i, q := range snapshotDiffFixture {
 		if _, err := eng.RunInTx(ctx, q, nil); err != nil {
-			t.Fatalf("mvcc=%v fixture[%d] %q: %v", mvcc, i, q, err)
+			t.Fatalf("fixture[%d] %q: %v", i, q, err)
 		}
 	}
 	return eng
@@ -186,37 +184,6 @@ func unquote(s string) string {
 	return s
 }
 
-// TestMVCCSnapshotRead_MatchesPlainRead is the P4b differential.
-func TestMVCCSnapshotRead_MatchesPlainRead(t *testing.T) {
-	versioned := snapshotDiffEngine(t, true)
-	plain := snapshotDiffEngine(t, false)
-	if !versioned.g.MVCCEnabled() {
-		t.Fatal("the versioned arm has MVCC disarmed, so this test compares two identical paths")
-	}
-	if plain.g.MVCCEnabled() {
-		t.Fatal("the plain arm has MVCC armed, so this test compares two identical paths")
-	}
-
-	for _, tc := range snapshotDiffQueries {
-		t.Run(tc.name, func(t *testing.T) {
-			got := runToString(t, versioned, tc.q)
-			want := runToString(t, plain, tc.q)
-			if got != want {
-				t.Errorf("the versioned read path disagrees with the plain one.\nquery: %s\n"+
-					"--- versioned ---\n%s\n--- plain ---\n%s", tc.q, got, want)
-			}
-			if strings.HasPrefix(got, "ERROR:") || strings.HasPrefix(got, "DRAIN ERROR:") {
-				t.Errorf("both arms failed identically, which the differential cannot distinguish "+
-					"from both arms being right: %s", got)
-			}
-		})
-	}
-}
-
-// TestMVCCSnapshotRead_AbsoluteOracle is the half the differential cannot
-// supply. Every expectation here is hand-computed from
-// [snapshotDiffFixture] and asserted against BOTH arms, so two arms that are
-// wrong in the same way still fail.
 func TestMVCCSnapshotRead_AbsoluteOracle(t *testing.T) {
 	oracle := []struct {
 		name, q string
@@ -248,10 +215,10 @@ func TestMVCCSnapshotRead_AbsoluteOracle(t *testing.T) {
 		{"age-sum", `MATCH (n:Person) RETURN sum(n.age) AS s`, []string{"123"}},
 		{"index-seek", `MATCH (n:Person {age:42}) RETURN n.name AS n`, []string{"alan"}},
 	}
-	for _, mvccOn := range []bool{true, false} {
-		eng := snapshotDiffEngine(t, mvccOn)
+	{
+		eng := snapshotDiffEngine(t)
 		for _, tc := range oracle {
-			t.Run(fmt.Sprintf("mvcc=%v/%s", mvccOn, tc.name), func(t *testing.T) {
+			t.Run(tc.name, func(t *testing.T) {
 				res, err := eng.Run(context.Background(), tc.q, nil)
 				if err != nil {
 					t.Fatalf("%s: %v", tc.q, err)

@@ -182,7 +182,7 @@ type WriteTx struct{ w *writeCtx }
 // Valid reports whether tx names an open write transaction.
 //
 // It is false for the zero value and for a bracket opened on a graph whose
-// versioning substrate is disarmed ([Graph.DisableMVCC]), where there is no
+// versioning substrate is disarmed (see [Graph.disarmMVCCForTest]), where there is no
 // transaction to name and every write is committed as it is made.
 func (tx WriteTx) Valid() bool { return tx.w != nil }
 
@@ -540,21 +540,33 @@ func (g *Graph[N, W]) releaseWriterSnapshot(w *writeCtx) {
 	// [Graph.EndRead].
 }
 
-// EnableMVCC arms the whole versioning substrate: node labels, node properties
-// and the adjacency — which carries the per-slot relationship types and the
-// columnar edge properties inside the same immutable entry, so versioning the
-// entry versions all three.
+// armMVCC arms the whole versioning substrate: node labels, node properties and the
+// adjacency — which carries the per-slot relationship types and the columnar edge
+// properties inside the same immutable entry, so versioning the entry versions all
+// three.
 //
-// It is on by default (see [New]) and this entry point exists so a benchmark
-// can compare both arms in ONE process rather than across two builds, which on
-// this project's hardware has manufactured phantom regressions from a
-// byte-identical control.
+// It is called once, by [New]. There is NO WAY TO DISARM IT (rmp #2311).
 //
-// Must be called before any write and never concurrently with another
-// operation.
+// # Why the public switch is gone
 //
-// Not safe for concurrent use.
-func (g *Graph[N, W]) EnableMVCC() {
+// Graph.DisableMVCC / EnableMVCC / MVCCEnabled were an exported switch that turned
+// versioning OFF at runtime. They directly contradicted the sprint's mandate that MVCC
+// is the module's ONLY concurrency-control mechanism: an exported switch tells the next
+// reader there is a choice, and there is not. A disarmed graph has no snapshot
+// isolation, so every guarantee the rest of this package documents would have been
+// conditional on a setter any caller could reach.
+//
+// # What replaced the capability, and why it was not merely deleted
+//
+// The switch existed so a benchmark could compare both arms in ONE process, and that
+// had real value: this project's hardware has repeatedly manufactured phantom
+// regressions from byte-identical control binaries, which is exactly the failure a
+// same-process A/B rules out.
+//
+// The replacement is [disarmMVCCForTest], an unexported seam with no exported setter,
+// reachable only from this package's own tests and benchmarks. A comparison that needs
+// it lives beside the code it measures; a consumer cannot reach it at all.
+func (g *Graph[N, W]) armMVCC() {
 	g.mvccArmed = true
 	g.labelDeltas = true
 	g.propDeltas = true
@@ -563,27 +575,22 @@ func (g *Graph[N, W]) EnableMVCC() {
 	g.adj.SetWriteStamp(&g.stamp)
 }
 
-// DisableMVCC disarms the versioning substrate.
+// disarmMVCCForTest turns the versioning substrate off, for a SAME-PROCESS A/B
+// comparison inside this package's own tests and benchmarks (rmp #2311).
 //
-// Reads then observe the current value with no version walk and writes record
-// no versions, which is the pre-MVCC behaviour. It exists for the same
-// same-process A/B reason as [Graph.EnableMVCC] and for a caller that knowingly
-// wants neither snapshot isolation nor the per-modification cost.
+// It is not part of the module's contract. A disarmed graph has no snapshot isolation,
+// no write-write conflict detection and no reclamation horizon, so nothing outside a
+// measurement may run on one — which is why there is no exported setter and why this
+// name says what it is for.
 //
-// Must be called before any write and never concurrently with another
-// operation.
-//
-// Not safe for concurrent use.
-func (g *Graph[N, W]) DisableMVCC() {
+// Must be called before any write and never concurrently with another operation.
+func (g *Graph[N, W]) disarmMVCCForTest() {
 	g.mvccArmed = false
 	g.labelDeltas = false
 	g.propDeltas = false
 	g.adj.DisableVersioning()
 	g.adj.SetWriteStamp(nil)
 }
-
-// MVCCEnabled reports whether the versioning substrate is armed.
-func (g *Graph[N, W]) MVCCEnabled() bool { return g.mvccArmed }
 
 // AmbientVersionResolutions returns how many versions have resolved their
 // transaction through the graph's AMBIENT slot rather than carrying it — the

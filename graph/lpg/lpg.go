@@ -1569,8 +1569,10 @@ func New[N comparable, W any](cfg adjlist.Config) *Graph[N, W] {
 	// MVCC is ARMED by default (rmp #2288). Every store a read touches carries
 	// version chains, every write allocates one shared commit record for them,
 	// and the reclamation driver keeps the memory bounded. Turn it off with
-	// [Graph.DisableMVCC] to measure the alternative in the same process.
-	g.EnableMVCC()
+	// There is no way to disarm it: MVCC is the module's only concurrency control
+	// (rmp #2311). A same-process A/B for measurement goes through the unexported
+	// [Graph.disarmMVCCForTest] seam.
+	g.armMVCC()
 	return g
 }
 
@@ -3543,6 +3545,30 @@ func (g *Graph[N, W]) RestoreTombstones(ids []graph.NodeID) {
 // [Graph.RemoveNode]. Used by the Cypher executor's AllNodesScan to
 // skip phantom nodes (those that the Mapper still indexes but that
 // the graph treats as deleted).
+//
+// # It is a DERIVED ACCELERATOR, not an independent answer (rmp #2311)
+//
+// The authoritative answer to "does this node exist" is the versioned life store —
+// [Graph.NodeExistsAsOf], which resolves the node's birth and death records against a
+// reader's instant. This bitmap answers the same question for the PRESENT ONLY, and it
+// keeps no history, so it cannot answer it as of any other instant at any price.
+//
+// It survives because it is materially faster and the rule for keeping it was
+// measurement, not preference. BenchmarkExistence, Apple M4, 100k nodes, benchstat
+// n=6:
+//
+//	clean graph      bitmap 1.179ns ± 1%   versioned 3.279ns ± 1%   2.78x
+//	1 in 8 removed   bitmap 5.644ns ± 1%   versioned 7.755ns ± 1%   1.37x
+//
+// 2.1 ns per existence test on the common path, on a question asked once per scanned
+// row, with no allocation in either arm.
+//
+// THE CONTRACT THAT COMES WITH KEEPING IT: it is maintained in lockstep with the death
+// records by [Graph.RemoveNode] and [Graph.revive], and a caller that needs the answer
+// AS OF a reader's instant must use [Graph.NodeExistsAsOf] and never this. Where the
+// versioned store has no record — a birth older than every live reader, or one already
+// reclaimed — NodeExistsAsOf itself falls back here, which is exactly the accelerator
+// relationship and not a second source of truth.
 func (g *Graph[N, W]) IsTombstoned(id graph.NodeID) bool {
 	// Lock-free fast path: on a graph that has never tombstoned a node the
 	// answer is always false, so skip even the pointer load (mirroring the

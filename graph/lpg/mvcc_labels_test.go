@@ -50,14 +50,14 @@ func TestLabelDelta_ReconstructsOlderVersion(t *testing.T) {
 	// Seed with the substrate DISARMED so "Base" is the committed state with no
 	// delta behind it, then arm. MVCC is on by default from P4a (rmp #2288), so
 	// this now has to be asked for explicitly.
-	g.DisableMVCC()
+	g.disarmMVCCForTest()
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
 	if err := g.SetNodeLabel("a", "Base"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
-	g.EnableMVCC()
+	g.armMVCC()
 	id, ok := g.adj.Mapper().Lookup("a")
 	if !ok {
 		t.Fatal("node a not interned")
@@ -139,7 +139,7 @@ func TestLabelDelta_ArmedByDefaultAndDisarmable(t *testing.T) {
 	}
 
 	inert := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
-	inert.DisableMVCC()
+	inert.disarmMVCCForTest()
 	if err := inert.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}

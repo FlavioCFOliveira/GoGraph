@@ -162,7 +162,7 @@ func TestClockRestore_NextCommitExceedsEveryPreviouslyPublishedInstant(t *testin
 // exactly this reason, rather than assigning.
 func TestClockRestore_IsARatchetNotAnAssignment(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
-	g.EnableMVCC()
+	// MVCC is armed by lpg.New and cannot be disarmed (rmp #2311); nothing to do here.
 	if err := g.ApplyVersioned(func(tx lpg.WriteTx) error {
 		return g.Writer(tx).AddNode("a")
 	}); err != nil {

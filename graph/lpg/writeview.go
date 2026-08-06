@@ -54,7 +54,7 @@ package lpg
 // that promotion carried the read methods and same-named mutators shadowed the
 // embedded ones. It costs zero call-site churn, and it fails on two counts that
 // matter more: it exposes the whole graph — [Graph.ApplyVersioned],
-// [Graph.LockBarrier], [Graph.EnableMVCC] — through a value whose responsibility
+// [Graph.LockBarrier], [Graph.SetIndexManager] — through a value whose responsibility
 // is one transaction's writes, and a mutator added to Graph but not to WriteView
 // would silently fall through to the ambient path with nothing to notice it.
 // This shape makes the second impossible to miss instead: every mutator is
