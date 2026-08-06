@@ -113,3 +113,47 @@ TestWriteScalingGate       engine/mem 1 writer 315856/s, 8 writers 701968/s => 2
 TestWALWriteScalingGate    engine/wal 1 writer    260/s, 8 writers    988/s => 3.799x   PASS
 TestWriteConcurrencyGate   8 writers free 658159/s, one mutex 306637/s      => 2.146x   PASS
 ```
+
+---
+
+## Addendum — rmp #2328, the session read floor (2026-08-06)
+
+The read-your-own-writes fix puts a wait on the READ side: a session that has
+committed waits for the visible frontier to reach its own commit before its next
+operation takes a start timestamp. **The write path is not touched**, which is the
+whole reason that placement was chosen over waiting before the acknowledgement.
+
+Re-run on the merged line, since a gate is only evidence if it is run on the line
+that ships:
+
+```
+TestWriteScalingGate       engine/mem 1 writer 319953/s, 8 writers 723077/s => 2.260x   PASS
+TestWALWriteScalingGate    engine/wal 1 writer    259/s, 8 writers   1019/s => 3.935x   PASS
+TestWriteConcurrencyGate   8 writers free 618194/s, one mutex 312119/s      => 1.981x   PASS
+```
+
+Against the same three gates measured earlier in this document for #2312 — 2.222x,
+3.799x, 2.146x — the memory and WAL arms are at or above where they were and the
+serialisation control is within its usual spread. Nothing regressed, which is what a
+change that adds no work to the write path should show.
+
+### What the wait costs, and where it would show
+
+The cost is a blocked reader, not a slower writer, and it is paid only by a session
+that reads immediately after its own commit while an EARLIER commit is still in
+flight. Two numbers bound it:
+
+- in `TestSession_FloorAdvancesAndWaitIsActuallyExercised`, at 12 concurrent writers
+  and 768 commits, a session's floor was ahead of the frontier **1 time** — so with
+  the fix in place the wait is entered on the order of 0.1% of operations;
+- the same workload with the wait REMOVED loses 4 of 768 read-backs and produces
+  self-conflicts on the first run of six, so the 0.1% is exactly the population that
+  was previously getting a wrong answer.
+
+`lpg.mvcc.sessions.waiting` is the gauge that reports it in production, and it is
+read together with `lpg.mvcc.in_flight_commits`: those commits are what holds the
+frontier back.
+
+**Not measured here:** the read-after-write latency of the Cypher and Bolt paths,
+because they do not carry a session yet (rmp #2329). Measuring it is that task's
+acceptance criterion 3, on the workload that will actually pay it.

@@ -867,16 +867,8 @@ func (g *Graph[N, W]) ApplyVersioned(fn func(WriteTx) error) error {
 //
 // Safe for concurrent use from any number of goroutines.
 func (g *Graph[N, W]) ApplyVersionedCtx(ctx context.Context, fn func(WriteTx) error) error {
-	defer metrics.Time("graph.lpg.ApplyVersionedCtx").Stop()
-	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
-	if err := ctxlock.Acquire(ctx, g.visMu.TryRLock, g.visMu.RLock, g.visMu.RUnlock); err != nil {
-		return err
-	}
-	g.barrier.stampWriter(gid)
-	w := g.beginWrite()
-	defer g.visMu.RUnlock()
-	defer g.finishWriteShared(w, gid)
-	return fn(WriteTx{w: w})
+	_, err := g.applyVersionedInstant(ctx, fn)
+	return err
 }
 
 // BeginVersionedTx opens a write transaction that OUTLIVES a single statement, for
@@ -982,9 +974,14 @@ func (g *Graph[N, W]) ApplyInVersionedTx(ctx context.Context, tx WriteTx, fn fun
 // Calling it exactly once per [Graph.BeginVersionedTx] is the caller's obligation.
 // Twice would return an already-returned horizon slot and corrupt the reclamation
 // watermark for every other transaction; never at all pins the slot forever.
-func (g *Graph[N, W]) EndVersionedTx(tx WriteTx) {
+func (g *Graph[N, W]) EndVersionedTx(tx WriteTx) { _ = g.endVersionedTxInstant(tx) }
+
+// endVersionedTxInstant is [Graph.EndVersionedTx] reporting the instant the
+// transaction published at, or zero when it published none. It exists for [Session],
+// which records that instant as its read floor (rmp #2328).
+func (g *Graph[N, W]) endVersionedTxInstant(tx WriteTx) uint64 {
 	if tx.w == nil {
-		return
+		return 0
 	}
 	// The PUBLISH latency of a multi-statement transaction (rmp #2312). Measured
 	// after the zero-value guard so a caller that closes an absent transaction
@@ -995,11 +992,12 @@ func (g *Graph[N, W]) EndVersionedTx(tx WriteTx) {
 	g.barrier.stampWriter(gid)
 	defer g.visMu.RUnlock()
 	defer g.barrier.clearWriter(gid)
-	g.endWrite(tx.w)
+	ts := g.endWrite(tx.w)
 	// After endWrite, so nothing the transaction still reads is reclaimable while
 	// its record publishes, and unconditionally, because a transaction that
 	// versioned nothing still took a slot (rmp #2299).
 	g.releaseWriterSnapshot(tx.w)
+	return ts
 }
 
 // openWriteBracket opens the adjacency's commit window and the transaction's
@@ -1088,9 +1086,46 @@ func (g *Graph[N, W]) finishWrite(w *writeCtx, gid int64) {
 // snapshot apply and the direct Go API. rmp #2306 then retired writeMu and the
 // store semaphore with no second problem attached.
 func (g *Graph[N, W]) finishWriteShared(w *writeCtx, gid int64) {
-	g.endWrite(w)
+	g.finishWriteSharedInstant(w, gid, nil)
+}
+
+// finishWriteSharedInstant is [Graph.finishWriteShared] with the published instant
+// reported into out, for a caller that must record it (rmp #2328).
+//
+// The instant has to be captured HERE and not by the caller afterwards: the
+// transaction's state is recycled by releaseWriterSnapshot on this same unwind, so
+// by the time the bracket has returned the record is gone and the object may already
+// belong to another transaction. out may be nil.
+func (g *Graph[N, W]) finishWriteSharedInstant(w *writeCtx, gid int64, out *uint64) {
+	ts := g.endWrite(w)
+	if out != nil {
+		*out = ts
+	}
 	g.releaseWriterSnapshot(w)
 	g.barrier.clearWriter(gid)
+}
+
+// applyVersionedInstant is [Graph.ApplyVersionedCtx] reporting the instant the
+// transaction published at, or zero when it published none.
+//
+// It exists for [Session], which must record that instant as its read floor. The
+// exported form does not return it because a caller that is not tracking a session
+// has no use for it and would have to discard it at every call site.
+// The results are NAMED on purpose: the instant is filled by the deferred finish,
+// which runs after the return statement has evaluated its values. Returning a local
+// would return the zero it held at that moment — which is exactly the bug the first
+// draft of this function had.
+func (g *Graph[N, W]) applyVersionedInstant(ctx context.Context, fn func(WriteTx) error) (ts uint64, err error) {
+	defer metrics.Time("graph.lpg.ApplyVersionedCtx").Stop()
+	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
+	if err := ctxlock.Acquire(ctx, g.visMu.TryRLock, g.visMu.RLock, g.visMu.RUnlock); err != nil {
+		return 0, err
+	}
+	g.barrier.stampWriter(gid)
+	w := g.beginWrite()
+	defer g.visMu.RUnlock()
+	defer g.finishWriteSharedInstant(w, gid, &ts)
+	return 0, fn(WriteTx{w: w})
 }
 
 // LockBarrier acquires the graph's transaction-visibility write lock and stamps

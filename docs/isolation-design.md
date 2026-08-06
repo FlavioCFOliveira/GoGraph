@@ -50,6 +50,10 @@ and serves every read of the query from it. Justification:
 
 We therefore target SI.
 
+SI says nothing about whether a caller observes its **own** committed writes in a
+later transaction; that is a session property, and GoGraph states it separately in
+[Commit visibility and the session contract](#commit-visibility-and-the-session-contract-rmp-2328-decided-2026-08-06).
+
 > **IN FORCE since 2026-08-04 (rmp #2320).** This paragraph used to say that the
 > engine is **single-writer** (`store/txn.Store` mutex), so write-write conflicts and
 > write skew are *impossible by construction* and SI is nearly free. **That is no
@@ -155,6 +159,70 @@ We therefore target SI.
 > `cypher/merge_race_test.go` pins all three arms (unique, no-constraint, serial) and
 > passes against the shipped barrier, so the coverage is in place before the change
 > that needs it.
+
+## Commit visibility and the session contract (rmp #2328, decided 2026-08-06)
+
+**An acknowledged commit is durable immediately. It becomes VISIBLE at the instant
+it published, and the caller's next operation is guaranteed to observe it only if
+that operation runs in the same `lpg.Session`.**
+
+### Why the guarantee needs a session at all
+
+The visible frontier is CONTIGUOUS: a commit at instant `T` stays invisible while any
+*earlier* allocated timestamp is still in flight (`mvcc.Clock`, rmp #2298). So
+`Graph.ApplyVersioned` returns success before `T` publishes, and the caller's next
+transaction — which takes its start timestamp from the frontier — can begin *below its
+own previous commit*.
+
+Two symptoms were measured at the sprint-334 head, with twelve concurrent writers on
+**disjoint keys**, so nothing contended by construction:
+
+| Symptom | Measured |
+|---|---|
+| A snapshot taken right after an acknowledged commit did not see it | 9 of 660 read-backs |
+| A writer's next transaction was refused on its OWN key | 6 of 6 conflicts had `startTS` < that goroutine's own previous `commitTS`; 0 conflicts at 1/2/4 writers, 3 at 8, 25 at 12 |
+
+The second is the one that misleads: an uncontended workload reports contention, and
+the conflict rate an operator reads rises with writer count rather than with real
+contention.
+
+### Where the wait is, and why not on the committer
+
+PostgreSQL and Memgraph both publish a commit *before* returning from it —
+`ProcArrayEndTransaction` runs inside `CommitTransaction`
+(`src/backend/storage/ipc/procarray.c`), and Memgraph marks the transaction committed
+under the engine lock before `Commit` returns
+(`src/storage/v2/inmemory/storage.cpp`). Doing the same here would make every
+committer wait for every earlier in-flight commit — the convoy rmp #2302 and rmp #2193
+removed to make writes scale.
+
+GoGraph puts the wait on the **read** side instead. A `Session` records the instant it
+committed at, and its next operation waits for the frontier to reach that instant
+(`mvcc.Clock.AwaitVisible`). Three consequences, and they are why this placement was
+chosen:
+
+- a writer that does not immediately read **never waits**;
+- a session whose commit is already visible pays **one atomic load**;
+- the snapshot is still taken **at a contiguous frontier point**, so it can never
+  observe a state no serial order produced. A snapshot pinned *above* the frontier
+  could — which is why the floor is a wait and not an assignment.
+
+### The contract, per entry point
+
+| Entry point | Guarantee |
+|---|---|
+| `Session.ApplyVersioned` / `ApplyVersionedCtx` | Observes every commit this session has made; records its own instant. |
+| `Session.BeginRead` / `BeginReadCtx` | Observes every commit this session has made. |
+| `Session.BeginVersionedTx` / `EndVersionedTx` | As above, for a multi-statement transaction. The instant is recorded on `EndVersionedTx`. |
+| `Graph.ApplyVersioned` / `BeginRead` / `BeginVersionedTx` | Snapshot isolation, and **no** cross-transaction guarantee. A subsequent snapshot may not observe a commit this caller just made. |
+
+Across two sessions nothing is promised beyond snapshot isolation — the same contract
+a connection gives in any client-server database.
+
+**Not yet plumbed through the query layers.** `cypher.Engine`, `ExplicitTx` and the
+Bolt per-connection session do not yet carry a `Session`, so a client driving GoGraph
+through Cypher or Bolt still gets the sessionless contract. That is tracked
+separately; the substrate and the direct Go API carry the guarantee today.
 
 ## Mechanism — per-shard versioned single-root snapshot
 

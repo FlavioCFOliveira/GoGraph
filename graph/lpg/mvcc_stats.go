@@ -154,6 +154,14 @@ type MVCCStats struct {
 	// a value that does not return to zero is both the staleness and the memory
 	// growth, named once.
 	InFlightCommits uint64
+	// SessionsWaiting is how many callers are blocked waiting for the frontier to
+	// reach their own last commit (rmp #2328).
+	//
+	// It is the observable form of the cost the read-side wait moves onto readers. A
+	// persistently non-zero value says sessions are waiting rather than reading, and
+	// it is read together with InFlightCommits: the frontier is held back by exactly
+	// those commits, so the two together say WHO is waiting and WHY.
+	SessionsWaiting int64
 }
 
 // OldestSnapshotAge returns how far behind the current instant the oldest active
@@ -233,6 +241,7 @@ func (g *Graph[N, W]) MVCCStats() MVCCStats {
 		Write:                 g.writeCounts.Load(),
 		ChainDepth:            g.ChainDepths(),
 		InFlightCommits:       g.mvccClock.InFlightCommits(),
+		SessionsWaiting:       g.mvccClock.AwaitingVisible(),
 	}
 	s.Watermark = g.horizon.Oldest(s.Now)
 	s.Total = s.LabelDeltas + s.PropDeltas + s.AdjVersions +
@@ -262,6 +271,7 @@ func (g *Graph[N, W]) publishMVCCMetrics() {
 	// see [MVCCStats.OldestSnapshotAge] for why it is not published twice.
 	metrics.SetGauge("lpg.mvcc.oldest_snapshot_age", float64(s.OldestSnapshotAge()))
 	metrics.SetGauge("lpg.mvcc.in_flight_commits", float64(s.InFlightCommits))
+	metrics.SetGauge("lpg.mvcc.sessions.waiting", float64(s.SessionsWaiting))
 	metrics.SetGauge("lpg.mvcc.snapshots.active", float64(s.ActiveSnapshots))
 	metrics.SetGauge("lpg.mvcc.snapshots.unregistered", float64(s.UnregisteredSnapshots))
 	metrics.SetGauge("lpg.mvcc.snapshots.capacity", float64(s.SnapshotCapacity))

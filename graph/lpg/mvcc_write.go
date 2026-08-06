@@ -408,9 +408,15 @@ func (g *Graph[N, W]) abandonAllocatedCommitTS(w *writeCtx) {
 // abandoned on this path, via [mvcc.Clock.AbandonCommitTS] — the shape that call
 // exists for. Before rmp #2309 no path allocated one early, so there was nothing to
 // abandon; there is now, and failing to would stall the frontier permanently.
-func (g *Graph[N, W]) endWrite(w *writeCtx) {
+// It returns the instant the transaction published at, or zero when it published
+// none — a transaction that versioned nothing, and one that aborted. That value is
+// what a [Session] records as its read floor (rmp #2328), and it is returned from
+// here rather than read off the transaction afterwards because the state is RECYCLED
+// on the unwind: by the time a caller could look, the record is gone and the object
+// may already belong to another bracket.
+func (g *Graph[N, W]) endWrite(w *writeCtx) uint64 {
 	if !g.mvccArmed || w == nil {
-		return
+		return 0
 	}
 	info, created := g.stamp.EndFor(&w.tx)
 	if info == nil {
@@ -431,7 +437,7 @@ func (g *Graph[N, W]) endWrite(w *writeCtx) {
 		if w.err() != nil {
 			g.writeCounts.Abort(w.txID)
 		}
-		return
+		return 0
 	}
 	// A transaction that hit a serialization conflict ABORTS. See below for the
 	// measured atomicity violation that this closes, and why it is not the same
@@ -451,7 +457,7 @@ func (g *Graph[N, W]) endWrite(w *writeCtx) {
 		// memory whatever their commit record says, and until the sweep withdraws
 		// them the stored value still carries this transaction's writes (rmp #2318).
 		g.abortWake(created)
-		return
+		return 0
 	}
 	// Allocate, store into the shared record, THEN publish. A reader must never
 	// start at a timestamp whose commit is still between the first two steps;
@@ -475,11 +481,13 @@ func (g *Graph[N, W]) endWrite(w *writeCtx) {
 	// it would put commits above the number of instants the clock ever allocated and
 	// make the conflict rate's denominator meaningless.
 	g.writeCounts.Commit(w.txID)
+	published := ts
 	// Accounting only. The sweep itself moved off this path at rmp #2308: a
 	// committer charges its versions and, once per [reclaimThreshold], wakes the
 	// background vacuum. It no longer sweeps, so a commit's cost no longer
 	// depends on how much garbage other transactions left behind.
 	g.chargeReclaimDebt(created)
+	return published
 }
 
 // releaseWriterSnapshot closes write transaction w's read view, returns its

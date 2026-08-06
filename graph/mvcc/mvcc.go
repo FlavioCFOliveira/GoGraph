@@ -135,6 +135,14 @@ type Clock struct {
 	// above, which this lock is what keeps monotone.
 	pubMu sync.Mutex
 	log   commitLog
+
+	// waiters is how many callers are inside [Clock.AwaitVisible], and wait is the
+	// broadcast channel generation they block on (rmp #2328). The publish path reads
+	// waiters to decide whether a broadcast is owed, so the common case — a commit
+	// with no session blocked on it — costs one atomic load and no channel work.
+	// See await.go.
+	waiters atomic.Int64
+	wait    atomic.Pointer[waitGate]
 }
 
 // NextCommitTS allocates the next commit timestamp. Monotonic, never reused.
@@ -185,10 +193,19 @@ func (c *Clock) AbandonCommitTS(ts uint64) { c.finishCommitTS(ts) }
 func (c *Clock) finishCommitTS(ts uint64) {
 	c.pubMu.Lock()
 	frontier := c.log.finish(ts)
-	if frontier > c.visible.Load() {
+	advanced := frontier > c.visible.Load()
+	if advanced {
 		c.visible.Store(frontier)
 	}
 	c.pubMu.Unlock()
+	// The broadcast happens AFTER the frontier is stored and OUTSIDE pubMu: a woken
+	// waiter re-reads the frontier, so waking it before the store would send it
+	// straight back to sleep having missed the advance it was waiting for, and doing
+	// it under the lock would put a channel close on the publish path's critical
+	// section (rmp #2328).
+	if advanced && c.waiters.Load() > 0 {
+		c.wakeWaiters()
+	}
 }
 
 // RatchetTo raises the clock so that every timestamp it subsequently allocates,

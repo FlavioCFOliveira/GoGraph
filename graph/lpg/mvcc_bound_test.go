@@ -257,6 +257,7 @@ func TestMVCCMetrics_AreExported(t *testing.T) {
 		"lpg.mvcc.snapshots.active",
 		"lpg.mvcc.snapshots.unregistered",
 		"lpg.mvcc.snapshots.capacity",
+		"lpg.mvcc.sessions.waiting",
 		"lpg.mvcc.index_removal_backlog",
 		// The WRITE side (rmp #2312). Once MVCC is the module's only concurrency
 		// control, a substrate observable only in what it retains is half observable:

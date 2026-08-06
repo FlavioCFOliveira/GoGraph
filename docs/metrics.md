@@ -384,6 +384,7 @@ in neither: there was no decision to record.
 | `lpg.mvcc.watermark` | gauge | The oldest start timestamp any active snapshot holds. |
 | `lpg.mvcc.oldest_snapshot_age` | gauge | `now - watermark`. This IS the watermark age; it is published once, under one name. |
 | `lpg.mvcc.in_flight_commits` | gauge | Timestamps allocated but not yet published. |
+| `lpg.mvcc.sessions.waiting` | gauge | Sessions blocked waiting for the frontier to reach their own last commit. Read with `in_flight_commits`: those commits are what is holding the frontier back. |
 | `lpg.mvcc.snapshots.active` | gauge | Snapshots registered with the horizon — readers AND writers. |
 | `lpg.mvcc.readers.active` | gauge | `snapshots.active - writers.active`. |
 | `lpg.mvcc.snapshots.unregistered` | gauge | Snapshots that could not get a slot. **While this is non-zero reclamation is SUSPENDED** and version memory has no bound. |

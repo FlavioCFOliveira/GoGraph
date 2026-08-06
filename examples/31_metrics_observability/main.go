@@ -521,24 +521,25 @@ func driveMVCC(ctx context.Context, w io.Writer, g *lpg.Graph[string, float64]) 
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
+			// ONE SESSION PER WRITER. A session is what guarantees a caller observes
+			// its own committed writes: without one, a writer's next transaction can
+			// begin below its own previous commit, because the commit frontier is
+			// contiguous and ApplyVersioned returns before the instant publishes
+			// (rmp #2328). These writers touch DISJOINT keys, so with a session they
+			// contend for nothing and never conflict; the retry below is kept because a
+			// serialization conflict remains part of the contract for a workload that
+			// DOES share keys, and an example that cannot handle one would be teaching
+			// the wrong thing.
+			sess := g.NewSession()
 			key := fmt.Sprintf("mvcc-writer-%d", id)
 			for n := 0; n < mvccWritesPerWriter; n++ {
 				// RETRY on a serialization conflict, because that is the contract a
 				// client has to implement: under MVCC a write is refused rather than
-				// blocked, and the caller retries. It is exercised here rather than
-				// assumed away.
-				//
-				// These writers touch DISJOINT keys, so nothing here should contend at
-				// all — and yet a conflict does occur, roughly once per few hundred
-				// writes, once enough writers are in flight. It is not contention: it is
-				// the contiguous commit frontier (rmp #2298) leaving a writer's OWN
-				// previous commit invisible to its next transaction. Measured and filed
-				// as rmp #2328; when that is settled, this retry and this comment are to
-				// be revisited.
+				// blocked, and the caller retries.
 				var err error
 				deadline := time.Now().Add(mvccRetryBudget)
 				for attempt := 0; ; attempt++ {
-					err = g.ApplyVersioned(func(tx lpg.WriteTx) error {
+					err = sess.ApplyVersioned(func(tx lpg.WriteTx) error {
 						wv := g.Writer(tx)
 						if n == 0 && attempt == 0 {
 							if e := wv.AddNode(key); e != nil {
