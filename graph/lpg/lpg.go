@@ -1676,6 +1676,26 @@ func (g *Graph[N, W]) addNodeInfo(n N, tx *writeCtx) error {
 	return nil
 }
 
+// internEndpoint interns n, recording a versioned birth stamped with tx when the id
+// is new (rmp #2331).
+//
+// It is the shared shape [Graph.addNodeInfo] uses, extracted so the edge path cannot
+// drift from it. The hook fires only for an id NEVER seen before, whose life chain is
+// therefore empty and cannot conflict, so it needs no refusal path — a
+// delete-then-recreate reaches [Graph.revive] instead.
+//
+// It deliberately does NOT revive a tombstoned endpoint: an append to a removed node
+// is a different question from creating one, and answering it here would change
+// AddEdge's semantics. What it guarantees is only that a node the append CREATES is
+// born at the transaction's instant rather than at the beginning of time.
+func (g *Graph[N, W]) internEndpoint(n N, tx *writeCtx) {
+	if tx == nil {
+		g.adj.Mapper().InternNewHook(n, g.noteNodeBornAutocommit)
+		return
+	}
+	g.adj.Mapper().InternNewHook(n, func(nid graph.NodeID) { g.noteNodeBorn(nid, tx) })
+}
+
 // revive clears any tombstone on id, marking the node live again. It is
 // the inverse of [Graph.RemoveNode] and is invoked by [Graph.AddNode] when
 // a removed node is re-created. The clear publishes a fresh copy-on-write
@@ -1793,6 +1813,31 @@ func (g *Graph[N, W]) addEdgeInfo(src, dst N, w W, tx *writeCtx) error {
 				}
 			}
 		}
+	}
+	// ENDPOINTS ARE INTERNED HERE, THROUGH THE HOOKED PATH (rmp #2331).
+	//
+	// adjlist.addEdge interns its endpoints with the plain Mapper.Intern, which fires
+	// no birth hook — so a node an append CREATED had no versioned birth record, and
+	// [Graph.noteNodeLife]'s stated invariant ("it is the ONLY place a birth is
+	// recorded, so a node with no record is one that has existed for longer than any
+	// reader can remember") was false. Both NodeExistsAsOf and NodeInternedAsOf read a
+	// missing record as "exists", so an endpoint created by an in-flight transaction
+	// was visible to every snapshot, including ones that predate it.
+	//
+	// Measured before the fix, inside a checkpoint capture taken while writers ran
+	// `tx.AddEdge(freshSrc, freshDst, 0)`: at an instant where FOUR transactions were
+	// visible the image held four arcs — the adjacency correctly withheld the fifth —
+	// and TEN nodes rather than eight. The fifth transaction's endpoints were visible
+	// while its own edge was not.
+	//
+	// Interning here rather than inside adjlist keeps the versioning knowledge in this
+	// package: adjlist does not import lpg and must not learn about life records. The
+	// call is idempotent for an endpoint that already exists — InternNewHook fires only
+	// for an id never seen before — so the cost on the common path is one extra map
+	// probe per endpoint, and adjlist's own Intern below then finds them present.
+	g.internEndpoint(src, tx)
+	if src != dst {
+		g.internEndpoint(dst, tx)
 	}
 	if err := g.adj.Writer(tx.adjTx()).AddEdge(src, dst, w); err != nil {
 		return err
