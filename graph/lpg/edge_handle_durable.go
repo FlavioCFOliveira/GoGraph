@@ -172,20 +172,10 @@ func (g *Graph[N, W]) SeedEdgeHandle(next uint64) {
 	if next == 0 {
 		return
 	}
-	// Raise the counter to next-1 so the following Add(1) yields next.
-	// nextEdgeHandle is edgeHandleSeq.Add(1); the stored value is the last
-	// HANDED-OUT handle. To make the next handout >= next, the stored value
-	// must be >= next-1.
-	target := next - 1
-	for {
-		cur := g.edgeHandleSeq.Load()
-		if cur >= target {
-			return
-		}
-		if g.edgeHandleSeq.CompareAndSwap(cur, target) {
-			return
-		}
-	}
+	// Raise the counter to next-1 so the following Add(1) yields next. The
+	// counter lives in the ADJACENCY (rmp #2317) and holds the last HANDED-OUT
+	// handle, so to make the next handout >= next it must be >= next-1.
+	g.adj.SeedHandleSeq(next - 1)
 }
 
 // EdgeHandleTriple is one live durable edge identity: the (src, dst)

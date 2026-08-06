@@ -109,12 +109,16 @@ func perSlotRecordCases() []perSlotRecordCase {
 			wantSlots:   [][2]uint32{{0, 0}},
 		},
 		{
-			// A handle-carrying slot inserted BEFORE a handle-less one: the
-			// adjacency order is (handle, no-handle) but the canonical order is
-			// (no-handle, handle), because csr.bin's runs are stably ordered by
-			// (destination, handle). The ordinals must follow the CANONICAL order,
-			// which is what the recovered adjacency will be in.
-			name: "canonical_order_puts_handleless_slot_first",
+			// Two MINTED handles: csr.bin's runs are stably ordered by
+			// (destination, handle), and minted handles are monotone, so the
+			// canonical order coincides with the insertion order.
+			//
+			// This case used to insert a handle-carrying slot BEFORE a handle-less
+			// one and assert the canonical order INVERTED them, because the 0
+			// sentinel sorted first. Since rmp #2317 there is no handle-less slot,
+			// so that particular inversion is unreachable — but the ordering rule
+			// itself is unchanged, and the case below still exercises it.
+			name: "canonical_order_follows_minted_handle_order",
 			build: func(t *testing.T, g *lpg.Graph[string, int64]) {
 				t.Helper()
 				if _, err := g.AddEdgeH("a", "b", 0); err != nil {
@@ -126,8 +130,30 @@ func perSlotRecordCases() []perSlotRecordCase {
 				}
 			},
 			wantStrings: []string{"K", "M"},
-			// Adjacency order is [handle-carrying(K), handle-less(M)]; canonical
-			// order is [handle-less(M), handle-carrying(K)], so M is ordinal 0.
+			// Adjacency order is [K, M] and both handles are minted in that order,
+			// so the canonical order is the same.
+			wantSlots: [][2]uint32{{0, 0}, {1, 1}},
+		},
+		{
+			// The divergence the case above used to cover, reproduced the way it
+			// remains reachable: handles supplied EXPLICITLY and out of order, which
+			// is exactly what a WAL replay does when it re-stamps the handles the log
+			// recorded. Adjacency order is [K(handle 900), M(handle 100)]; canonical
+			// order is by handle, so M comes first.
+			name: "canonical_order_reorders_explicit_handles",
+			build: func(t *testing.T, g *lpg.Graph[string, int64]) {
+				t.Helper()
+				if _, err := g.AddEdgeHIfAbsent("a", "b", 0, 900); err != nil {
+					t.Fatal(err)
+				}
+				g.SetEdgeLabel("a", "b", "K")
+				if _, err := g.AddEdgeHIfAbsent("a", "b", 0, 100); err != nil {
+					t.Fatal(err)
+				}
+				g.SetEdgeLabel("a", "b", "M")
+			},
+			wantStrings: []string{"K", "M"},
+			// Canonical order is [M(100), K(900)], so M is ordinal 0.
 			wantSlots: [][2]uint32{{0, 1}, {1, 0}},
 		},
 	}

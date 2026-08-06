@@ -67,6 +67,20 @@ func TestCapture_IsOneInstantWhileWritersCommit(t *testing.T) {
 	var mu sync.Mutex
 	var instants []uint64
 	var wg sync.WaitGroup
+	// quiesce emulates what the commit serialiser gives the checkpointer: writers
+	// hold it SHARED for the whole of their transaction, and the capture takes it
+	// EXCLUSIVELY just long enough to open the instant. Nothing else is done under
+	// it — the serialisation below runs with it released, while writers commit.
+	//
+	// It is not scaffolding to make the test pass. Opening an instant while a write
+	// transaction is still open is precisely what [snapshot.ErrCaptureNotQuiesced]
+	// forbids, because an id interned by that transaction sits BELOW ids later
+	// transactions have already interned and committed, and dropping it leaves a
+	// hole the recovered mapper rejects. Production gets this from
+	// txn.Store.RunUnderCommitLock, which closes admission and drains; a test
+	// driving lpg directly has to provide it, and this is the same guarantee in the
+	// smallest form.
+	var quiesce sync.RWMutex
 	for wtr := 0; wtr < 4; wtr++ {
 		wg.Add(1)
 		go func(id int) {
@@ -82,7 +96,8 @@ func TestCapture_IsOneInstantWhileWritersCommit(t *testing.T) {
 				b := fmt.Sprintf("w%d-b-%06d", id, n)
 				// ONE TRANSACTION: both endpoints and the edge. Either all three are in
 				// the image or none of them is.
-				if err := s.ApplyVersioned(func(tx lpg.WriteTx) error {
+				quiesce.RLock()
+				err := s.ApplyVersioned(func(tx lpg.WriteTx) error {
 					wv := g.Writer(tx)
 					if err := wv.AddNode(a); err != nil {
 						return err
@@ -91,7 +106,9 @@ func TestCapture_IsOneInstantWhileWritersCommit(t *testing.T) {
 						return err
 					}
 					return wv.AddEdge(a, b, 1)
-				}); err != nil {
+				})
+				quiesce.RUnlock()
+				if err != nil {
 					continue // a serialization conflict is retriable; keep going
 				}
 				// The session's floor IS this transaction's commit instant.
@@ -106,7 +123,13 @@ func TestCapture_IsOneInstantWhileWritersCommit(t *testing.T) {
 	// Let the writers get going, so the capture genuinely overlaps them.
 	waitForCommits(t, &committed, 200)
 
+	// The instant, and ONLY the instant, is taken under the exclusive hold.
+	quiesce.Lock()
 	at := g.BeginRead()
+	quiesce.Unlock()
+
+	// Everything below runs with writers free to commit again — which is the
+	// property under test.
 	cs := csr.BuildFromAdjListAsOf(g.AdjList(),
 		func(id graph.NodeID) bool { return g.NodeExistsAsOf(id, at) },
 		at.StartTS(), at.TxID())

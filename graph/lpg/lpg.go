@@ -571,15 +571,6 @@ type Graph[N comparable, W any] struct {
 	// touched (rmp #2143).
 	topoGeneration atomic.Uint64
 
-	// edgeHandleSeq is the source of stable per-edge handles for this
-	// graph. It is bumped once per logical edge creation by
-	// [Graph.AddEdgeH] / [Graph.nextEdgeHandle]; handles are monotone and
-	// never reused, even after the edge is deleted. See edge_handle.go for
-	// the full contract (and the Stage 2 note on durability). The first
-	// handle is 1 — 0 is reserved as the "no handle" sentinel in the
-	// adjlist/CSR handle columns.
-	edgeHandleSeq atomic.Uint64
-
 	idxMgr    atomicIndexManager
 	validator atomicValidator
 
@@ -2086,7 +2077,14 @@ func (g *Graph[N, W]) addEdgeHInfo(src, dst N, w W, tx *writeCtx) (handle uint64
 // nextEdgeHandle returns a fresh, never-reused stable edge handle. Handles
 // start at 1; 0 is the reserved "no handle" sentinel in the adjacency and
 // CSR handle columns. See edge_handle.go for the full contract.
-func (g *Graph[N, W]) nextEdgeHandle() uint64 { return g.edgeHandleSeq.Add(1) }
+// It delegates to the ADJACENCY's counter, which is the single source of edge
+// identity (rmp #2317). Two counters is exactly the defect this collapsed: while
+// the adjacency minted handles for its own inserts and this graph minted them for
+// AddEdgeH, both started at 1 and handed the SAME handle to different slots of the
+// same pair — measured as two slots of one pair reporting one type, and an edge
+// lost across a checkpoint, by
+// recovery.TestRecovery_PerSlotRelType_SurvivesCheckpoint.
+func (g *Graph[N, W]) nextEdgeHandle() uint64 { return g.adj.NextHandle() }
 
 // NextEdgeHandle returns a fresh, never-reused stable edge handle from the
 // per-graph monotone counter (the exported form of [Graph.nextEdgeHandle]).

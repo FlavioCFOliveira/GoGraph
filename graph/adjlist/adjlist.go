@@ -204,6 +204,34 @@ type AdjList[N comparable, W any] struct {
 
 	size atomic.Uint64
 
+	// handleSeq mints stable per-slot edge handles. It starts at 0 and every
+	// handle is handleSeq.Add(1), so handles begin at 1 and are never reused.
+	//
+	// # Why the adjacency owns edge identity (rmp #2317)
+	//
+	// A relationship's identity used to be its POSITION in a rebuilt CSR edges
+	// array. That is only stable while the array is not rebuilt, and it is
+	// rebuilt whenever the topology changes — which, once a later clause of a
+	// statement must observe an earlier edge write, is in the middle of a query.
+	//
+	// The alternative of a (source, ordinal) pair was measured and rejected: an
+	// append leaves existing ordinals alone, but [AdjList.RemoveEdge] compacts,
+	// so every ordinal after a removed slot shifts down and a bound relationship
+	// silently becomes a different edge.
+	//
+	// The handle is the only identity that survives both, which is why
+	// [AdjList.RemoveEdgeByHandle] already exists. It used to be OPTIONAL — a
+	// column present only when a caller supplied handles, with 0 as a "no handle"
+	// sentinel — so identity was available for edges created through Cypher and
+	// absent for edges created through the Go API, the graph/io loaders or bulk
+	// import. Two identities, one of them unsound, chosen by construction route.
+	//
+	// It is now mandatory and minted here, so every slot in every graph has one.
+	// Measured cost on 960k edges: 27.77 B/edge to 35.75 B/edge, +7.98 B/edge.
+	// Edges created through Cypher already carried a handle, so for a
+	// Cypher-driven workload the change costs nothing.
+	handleSeq atomic.Uint64
+
 	// bulkDepth tracks [AdjList.BeginCommit] nesting for the bulk paths only.
 	// Mutated exclusively by BeginCommit / EndCommit under their documented
 	// single-writer precondition; see bulkOwner.
@@ -593,6 +621,34 @@ func (a *AdjList[N, W]) AddEdge(src, dst N, w W) error {
 	return a.addEdge(src, dst, w, edgeExtra{}, mvcc.Tx{})
 }
 
+// NextHandle mints a fresh stable edge handle, never zero and never reused.
+//
+// It is exported because the layers above must be able to mint a handle BEFORE
+// the adjacency write, so the same value can be written to the WAL and stamped
+// onto the slot: recovery then re-stamps the recorded handle verbatim through
+// [AdjList.AddEdgeH] and a relationship keeps its identity across a restart.
+//
+// Safe for concurrent use.
+func (a *AdjList[N, W]) NextHandle() uint64 { return a.handleSeq.Add(1) }
+
+// SeedHandleSeq raises the handle counter so the next mint is above every handle
+// already present, and is the recovery seam for invariant I5: post-recovery edge
+// creation must never re-mint a handle a restored edge already carries.
+//
+// It only ever raises. A lower value is ignored rather than rejected, so a caller
+// folding a maximum over several sources — the snapshot's handle column, then the
+// WAL tail — can call it once per source in any order.
+//
+// Safe for concurrent use.
+func (a *AdjList[N, W]) SeedHandleSeq(highWater uint64) {
+	for {
+		cur := a.handleSeq.Load()
+		if highWater <= cur || a.handleSeq.CompareAndSwap(cur, highWater) {
+			return
+		}
+	}
+}
+
 // AddEdgeH is [AdjList.AddEdge] with an explicit, caller-supplied stable
 // edge handle. The handle is stored in the slot's parallel handle column
 // (see [adjEntry.handles]) so the read path can recover per-slot edge
@@ -723,6 +779,14 @@ func (ex edgeExtra) mirror() edgeExtra {
 // insertion can interleave between the two appends — so both directions
 // always reflect the same slot ordering.
 func (a *AdjList[N, W]) addEdge(src, dst N, w W, ex edgeExtra, tx mvcc.Tx) error {
+	// EVERY slot gets a handle (rmp #2317). A caller that supplied one — the
+	// Cypher write path, a WAL replay re-stamping the handle the log recorded —
+	// keeps it, so identity is preserved verbatim across recovery. A caller that
+	// did not gets a fresh one here rather than the old 0 sentinel, so no live
+	// slot is left without an identity. See [AdjList.handleSeq].
+	if !ex.hasHandle {
+		ex.handle, ex.hasHandle = a.NextHandle(), true
+	}
 	srcID := a.mapper.Intern(src)
 	dstID := a.mapper.Intern(dst)
 

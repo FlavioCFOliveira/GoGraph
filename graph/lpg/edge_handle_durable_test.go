@@ -97,7 +97,11 @@ func TestAddEdgeHIfAbsent_DistinctHandlesParallel(t *testing.T) {
 }
 
 // TestAddEdgeHIfAbsent_ZeroHandleFallsBack confirms a 0 handle falls back to a
-// plain handle-less AddEdge so pre-Stage-2 frames still replay.
+// plain AddEdge so pre-Stage-2 frames still replay.
+//
+// Since rmp #2317 that fallback MINTS an identity rather than leaving the slot
+// without one: 0 still means "the frame named no handle", but the resulting slot
+// is a normal slot and carries a handle like every other.
 func TestAddEdgeHIfAbsent_ZeroHandleFallsBack(t *testing.T) {
 	t.Parallel()
 	g := newDurableGraph(t)
@@ -113,8 +117,12 @@ func TestAddEdgeHIfAbsent_ZeroHandleFallsBack(t *testing.T) {
 	}
 	srcID, _ := g.AdjList().Mapper().Lookup("a")
 	_, _, handles := g.AdjList().LoadEntryH(srcID)
-	if handles != nil {
-		t.Fatalf("zero-handle insert left a handle column: %v", handles)
+	if len(handles) != 1 {
+		t.Fatalf("handles = %v, want one entry for the inserted slot", handles)
+	}
+	if handles[0] == 0 {
+		t.Error("the fallback insert left the slot without an identity; a 0 handle in the " +
+			"FRAME means 'unnamed', not 'identity-free' (rmp #2317)")
 	}
 }
 
@@ -169,8 +177,10 @@ func TestWalkEdgeHandles_EnumeratesLiveHandles(t *testing.T) {
 	if _, ok := got[0]; ok {
 		t.Fatal("WalkEdgeHandles yielded a 0 handle")
 	}
-	if len(got) != 3 {
-		t.Fatalf("WalkEdgeHandles yielded %d distinct handles, want 3", len(got))
+	// Four, not three: the plain AddEdge above now mints an identity too, so its
+	// slot is enumerated like any other (rmp #2317).
+	if len(got) != 4 {
+		t.Fatalf("WalkEdgeHandles yielded %d distinct handles, want 4", len(got))
 	}
 }
 

@@ -199,6 +199,30 @@ func ApplyCSRToGraph[N comparable, W any](g *lpg.Graph[N, W], rb *CSRReadback) e
 			ErrCorrupted, last, edgeCount)
 	}
 
+	// SEED THE HANDLE COUNTER ABOVE THE WHOLE IMAGE, BEFORE ANY EDGE IS INSERTED
+	// (rmp #2317).
+	//
+	// The loop below re-stamps a slot's original handle when the image carries one
+	// and mints a fresh one when it does not, and it used to seed the counter
+	// per-edge as each original was restored. That ordering has a collision: an
+	// edge minted at position k can be handed a handle that a LATER position
+	// restores, and AddEdgeHIfAbsent is idempotent against a handle already
+	// present — so the later edge would silently no-op onto the earlier slot
+	// instead of being inserted.
+	//
+	// Folding the maximum first makes every minted handle strictly greater than
+	// every restored one, which removes the collision class rather than making it
+	// unlikely. It costs one pass over a slice the loop below already walks.
+	var maxHandle uint64
+	for _, h := range rb.Handles {
+		if h > maxHandle {
+			maxHandle = h
+		}
+	}
+	if maxHandle > 0 {
+		g.SeedEdgeHandle(maxHandle + 1)
+	}
+
 	for src := uint64(0); src < maxSrc; src++ {
 		start := rb.Vertices[src]
 		end := rb.Vertices[src+1]

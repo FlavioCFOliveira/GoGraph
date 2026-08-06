@@ -58,16 +58,37 @@ func TestAdjList_AddEdgeH_DistinctHandles(t *testing.T) {
 	}
 }
 
-// TestAdjList_AddEdge_NoHandleColumn verifies that the plain AddEdge path
-// leaves the handle column nil — a simple graph that never needs per-edge
-// identity pays no extra memory.
-func TestAdjList_AddEdge_NoHandleColumn(t *testing.T) {
+// TestAdjList_AddEdge_MintsAHandle verifies that the plain AddEdge path mints an
+// identity for every slot.
+//
+// # This replaces the opposite assertion (rmp #2317)
+//
+// It used to assert the handle column stayed NIL after plain AddEdge, on the
+// reasoning that "a simple graph that never needs per-edge identity pays no extra
+// memory". The premise was wrong: a graph does not know whether it needs per-edge
+// identity, because whether it does depends on the QUERIES run against it, not on
+// how its edges were inserted. A relationship bound by Cypher must keep naming the
+// same edge across a mutation, and the only identity that survives compaction is
+// the handle — so an edge inserted through the Go API and later bound by a query
+// needed one all along and did not have it.
+//
+// The memory it saved was measured: +7.98 B/edge on 960k edges (27.77 to 35.75).
+// Edges created through Cypher already carried a handle, so a Cypher-driven
+// workload pays nothing for the change.
+func TestAdjList_AddEdge_MintsAHandle(t *testing.T) {
 	t.Parallel()
 	a := New[string, int](Config{Directed: true, Multigraph: true})
 	mustAddEdge(t, a, "a", "b", 1)
 	mustAddEdge(t, a, "a", "c", 2)
-	if h := handlesOf(t, a, "a"); h != nil {
-		t.Fatalf("handle column = %v after plain AddEdge; want nil", h)
+	h := handlesOf(t, a, "a")
+	if len(h) != 2 {
+		t.Fatalf("handle column = %v, want one entry per slot (2)", h)
+	}
+	if h[0] == 0 || h[1] == 0 {
+		t.Errorf("handles = %v: every slot must carry a non-zero identity", h)
+	}
+	if h[0] == h[1] {
+		t.Errorf("handles = %v: two slots share one identity", h)
 	}
 }
 

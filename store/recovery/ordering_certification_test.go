@@ -307,13 +307,28 @@ func TestRecovery_UnorderedLegacySnapshot_ReopensIdentically(t *testing.T) {
 	}
 	// Pin the handle contract of the legacy format explicitly rather than
 	// letting the normalisation above hide it.
+	//
+	// The legacy image carries no handle block, so recovery has nothing to RESTORE
+	// — but since rmp #2317 it does not leave the slots identity-free either: the
+	// re-insert mints a fresh handle for each, so a graph recovered from a legacy
+	// artefact is a normal graph whose relationships can be bound, mutated and
+	// re-identified like any other. What must hold is that the minted identities
+	// are real ones: non-zero and distinct within a slot run.
+	seen := make(map[uint64]string)
 	res.Graph.AdjList().Mapper().Walk(func(id graph.NodeID, key string) bool {
 		_, _, handles := res.Graph.AdjList().LoadEntryH(id)
 		for i, h := range handles {
-			if h != 0 {
-				t.Errorf("node %s slot %d recovered handle %d from a legacy snapshot that carries no handle block; want 0", key, i, h)
+			if h == 0 {
+				t.Errorf("node %s slot %d recovered without an identity; a legacy snapshot's "+
+					"edges must be minted fresh handles, not left at the 0 sentinel", key, i)
 				return false
 			}
+			if prev, dup := seen[h]; dup {
+				t.Errorf("node %s slot %d recovered handle %d, already used by node %s",
+					key, i, h, prev)
+				return false
+			}
+			seen[h] = key
 		}
 		return true
 	})
