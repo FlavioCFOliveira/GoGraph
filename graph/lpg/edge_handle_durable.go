@@ -446,3 +446,47 @@ func (g *Graph[N, W]) delEdgePropertyByHandleIDInfo(srcID, dstID graph.NodeID, h
 	}
 	byHandle[handle] = bag
 }
+
+// WalkEdgeHandlesAsOf is [Graph.WalkEdgeHandles] resolving every node's adjacency AS
+// OF s rather than as of the present (rmp #2310).
+//
+// A nil snapshot walks the current entries, so it is exactly [Graph.WalkEdgeHandles]
+// and a caller may pass whatever it has.
+//
+// It exists for the checkpoint capture, which must read every structure at ONE
+// transactional instant while writers keep committing. The unversioned form reads
+// each node's LIVE entry, so a capture using it would fold the handles of a
+// transaction that committed part-way through the walk — the partial-transaction
+// image that the exclusion this task removes used to prevent.
+//
+// Nodes are visited in mapper order, which is the order the unversioned form uses;
+// a node that did not exist at s simply has no entry as of s and contributes
+// nothing, so existence needs no separate test here.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) WalkEdgeHandlesAsOf(s *Snapshot, fn func(EdgeHandleTriple) bool) {
+	if s == nil {
+		g.WalkEdgeHandles(fn)
+		return
+	}
+	adj := g.adj
+	adj.Mapper().Walk(func(srcID graph.NodeID, _ N) bool {
+		v := adj.EntryViewAsOf(srcID, s.startTS, s.txID)
+		if v.Handles == nil {
+			return true
+		}
+		for i, dstID := range v.Neighbours {
+			if i >= len(v.Handles) {
+				break
+			}
+			h := v.Handles[i]
+			if h == 0 {
+				continue
+			}
+			if !fn(EdgeHandleTriple{Src: srcID, Dst: dstID, Handle: h}) {
+				return false
+			}
+		}
+		return true
+	})
+}

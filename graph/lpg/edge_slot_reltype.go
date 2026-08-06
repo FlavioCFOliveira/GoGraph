@@ -319,3 +319,40 @@ func (g *Graph[N, W]) addPairOverflowLocked(k edgeKey, lid LabelID, tx *writeCtx
 	g.edgeLabelOverflowActive.Add(1)
 	return true
 }
+
+// ForEachPairOverflowRelTypeByIDAsOf is [Graph.ForEachPairOverflowRelTypeByID]
+// resolving the pair's overflow relationship types AS OF s, rather than as of the
+// present (rmp #2310).
+//
+// A nil snapshot reads the current stored value, which is what the unversioned form
+// does, so a caller may pass whatever it has.
+//
+// It exists because a checkpoint capture must read every structure at ONE
+// transactional instant while writers keep committing. The unversioned form takes the
+// shard read lock and reports what the pair holds NOW, which is the right answer for a
+// caller inside the visibility barrier and the wrong one for a capture that no longer
+// excludes writers.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) ForEachPairOverflowRelTypeByIDAsOf(srcID, dstID graph.NodeID, s *Snapshot, visit func(name string)) {
+	if g.edgeLabelOverflowActive.Load() == 0 && s == nil {
+		return
+	}
+	k := edgeKey{src: srcID, dst: dstID}
+	sh := g.edgeLabelShardFor(k)
+	sh.mu.RLock()
+	// COPIED under the lock, exactly as the unversioned form does: the versioned
+	// reader may return the stored slice itself on its fast path, and that slice is
+	// appended to in place by the write path.
+	var ids []LabelID
+	if ls := g.overflowLabelsAsOf(sh, k, s); len(ls) > 0 {
+		ids = make([]LabelID, len(ls))
+		copy(ids, ls)
+	}
+	sh.mu.RUnlock()
+	for _, lid := range ids {
+		if name, ok := g.reg.Resolve(lid); ok {
+			visit(name)
+		}
+	}
+}

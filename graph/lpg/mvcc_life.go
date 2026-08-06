@@ -360,3 +360,42 @@ func (g *Graph[N, W]) LiveCountExactAsOf(s *Snapshot) bool {
 //
 // Safe for concurrent use.
 func (g *Graph[N, W]) NodeLifeVersionCount() int64 { return g.nodeLifeActive.Load() }
+
+// TombstonedIDsAsOf returns, in ascending order, every interned node id that did NOT
+// exist as of s — the set a snapshot must record so a recovered graph has the same
+// live nodes the image was taken from (rmp #2310).
+//
+// A nil snapshot returns [Graph.TombstonedIDs], the present-time answer.
+//
+// # Why it does not read the tombstone bitmap
+//
+// The bitmap is a COW accelerator maintained beside the versioned truth, and it
+// answers "is this node removed NOW". A capture that no longer excludes writers needs
+// "was this node removed as of s", and those differ by exactly the transactions that
+// committed during the capture — which is the whole class of partial-transaction image
+// this task exists to make impossible. So the authoritative store is consulted:
+// [Graph.NodeExistsAsOf], which resolves the node's birth and death records against s.
+//
+// The cost is one existence test per interned id, O(V). A capture already walks every
+// node to serialise its labels, properties and adjacency, so this adds a constant
+// factor to a walk that must happen anyway rather than a new traversal — and the
+// present-time form's bitmap read is not available at an arbitrary instant at any
+// price, because the bitmap keeps no history.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) TombstonedIDsAsOf(s *Snapshot) []graph.NodeID {
+	if s == nil {
+		return g.TombstonedIDs()
+	}
+	// Ascending by construction: the mapper walks ids in increasing order, which is
+	// the order the snapshot writer expects and the same order the bitmap's ToArray
+	// yields. Asserted by the round-trip test rather than assumed.
+	out := make([]graph.NodeID, 0, g.TombstoneCount())
+	g.adj.Mapper().Walk(func(id graph.NodeID, _ N) bool {
+		if !g.NodeExistsAsOf(id, s) {
+			out = append(out, id)
+		}
+		return true
+	})
+	return out
+}
