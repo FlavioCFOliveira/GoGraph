@@ -116,21 +116,34 @@ show. (Those two were `ActiveReaders` and `OldestReaderAge()` until sprint 334
 renamed them: the horizon holds a writer's snapshot as well as a reader's, so the
 old names under-reported what was pinning it.)
 
-### Read-your-own-writes is NOT yet guaranteed per connection
+### Read-your-own-writes IS guaranteed per connection
 
-A Bolt connection is a session in every sense except this one. GoGraph's commit
-frontier is contiguous, so a commit is acknowledged at an instant that may not
-have published yet, and the same connection's next transaction can begin *below
-its own commit*. Two consequences a client can observe:
+**A statement run on a connection observes every commit already made on that
+connection** — autocommit or explicit transaction, in either order. The server binds
+one `cypher.Session` per connection (rmp #2329), a connection being a session by
+definition: one client, one ordered conversation.
 
-- a write followed by a read on the same connection may not see the write;
-- a connection writing repeatedly to one key may get a retriable serialization
+Without it a client could observe two things, and both were measured (rmp #2328):
+
+- a write followed by a read on the same connection might not see the write;
+- a connection writing repeatedly to one key might get a retriable serialization
   error with nothing else contending for it.
 
-`lpg.Session` (rmp #2328) is the mechanism that closes this — it makes a caller
-wait for its own commits to become visible — but the Bolt server does not carry
-one per connection yet (rmp #2329). Until it does, a client that needs
-read-your-own-writes must read inside the same transaction as the write.
+Both follow from the commit frontier being CONTIGUOUS: a commit is acknowledged at an
+instant that may not have published yet, because an *earlier* in-flight commit holds
+the frontier back, so the connection's next transaction could begin below its own
+commit. The session closes it by making the connection's next operation wait for the
+frontier to reach its own last commit before taking a snapshot.
+
+**Across connections nothing is promised beyond snapshot isolation**, which is the
+same contract any client-server database gives. A client that needs two connections
+to agree must coordinate them itself.
+
+The wait costs nothing when it is not needed — measured at 32.06 µs against 32.13 µs
+sessionless on a read-after-write loop
+([`benchmarks/session-ryow-2026-08-06.md`](benchmarks/session-ryow-2026-08-06.md)) —
+because it returns after one atomic load whenever the frontier has already passed.
+`lpg.mvcc.sessions.waiting` reports whether connections are actually waiting.
 
 Both events are separately observable: `bolt.server.tx.idlereaped` counts
 transactions reaped for silence, `bolt.server.tx.timedout` those that exceeded

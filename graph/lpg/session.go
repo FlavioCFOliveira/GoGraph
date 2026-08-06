@@ -109,6 +109,20 @@ func (s *Session[N, W]) await(ctx context.Context) error {
 	return s.g.mvccClock.AwaitVisible(ctx, s.floor.Load())
 }
 
+// Await blocks until the visible frontier has reached this session's floor, so a
+// snapshot taken next observes every commit the session has made.
+//
+// It is the WAIT alone, without the snapshot [Session.BeginReadCtx] returns. A
+// caller that wants the guarantee for an operation that takes its OWN snapshot — a
+// query engine running a statement, say — must not hold a second one meanwhile: an
+// unused snapshot still occupies a horizon slot and pins reclamation for as long as
+// it is open.
+//
+// A session that has committed nothing returns immediately after one atomic load.
+//
+// Safe for concurrent use.
+func (s *Session[N, W]) Await(ctx context.Context) error { return s.await(ctx) }
+
 // BeginRead opens a read snapshot that observes every commit this session has made.
 //
 // It is [Graph.BeginRead] plus the session's guarantee: if this session has committed

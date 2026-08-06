@@ -194,6 +194,13 @@ func (e *ErrStatementPipeline) Unwrap() error { return e.Err }
 type ExplicitTx struct {
 	eng *Engine
 
+	// sess is the caller's session when this handle was opened through one, and nil
+	// otherwise (rmp #2329). It is what records this transaction's commit instant, so
+	// the caller's NEXT operation waits for the frontier to reach it. A nil session
+	// keeps the engine's sessionless contract: snapshot isolation with no
+	// cross-transaction promise. See [Session].
+	sess *lpg.Session[string, float64]
+
 	// ctx bounds every statement run through this handle. It is the connection
 	// context (optionally with a transaction timeout) supplied to BeginTx, so a
 	// cancelled connection or an elapsed tx_timeout interrupts an in-flight Exec
@@ -331,6 +338,12 @@ type ExplicitTx struct {
 // open, and observe the state before it began until it commits (task #1412,
 // strengthened by rmp #2290).
 func (e *Engine) BeginTx(ctx context.Context) (*ExplicitTx, error) {
+	return e.beginTxSession(ctx, nil)
+}
+
+// beginTxSession is [Engine.BeginTx] optionally bound to a caller session; see
+// [Session] and [ExplicitTx.sess].
+func (e *Engine) beginTxSession(ctx context.Context, sess *lpg.Session[string, float64]) (*ExplicitTx, error) {
 	defer cmetrics.Time("cypher.BeginTx").Stop()
 	if err := checkContext(ctx); err != nil {
 		cmetrics.IncCounter("cypher.BeginTx.errors", 1)
@@ -386,7 +399,20 @@ func (e *Engine) BeginTx(ctx context.Context) (*ExplicitTx, error) {
 	//
 	// Taken LAST, after every failure return above, so a BeginTx that returns an
 	// error never leaves a commit record unpublished or a horizon slot pinned.
-	tx.wtx = tx.eng.g.BeginVersionedTx()
+	// Through the SESSION when there is one: it waits for the frontier to reach this
+	// caller's last commit BEFORE the transaction takes its snapshot, so the
+	// transaction observes everything the caller has already done (rmp #2329).
+	tx.sess = sess
+	if sess != nil {
+		wtx, werr := sess.BeginVersionedTxCtx(ctx)
+		if werr != nil {
+			cmetrics.IncCounter("cypher.BeginTx.errors", 1)
+			return nil, werr
+		}
+		tx.wtx = wtx
+	} else {
+		tx.wtx = tx.eng.g.BeginVersionedTx()
+	}
 	cmetrics.IncCounter("cypher.BeginTx.opened", 1)
 	return tx, nil
 }
@@ -416,6 +442,13 @@ func (e *Engine) BeginTx(ctx context.Context) (*ExplicitTx, error) {
 // promptly with an error wrapping the context error (matchable via [errors.Is]
 // against [context.Canceled] / [context.DeadlineExceeded]).
 func (e *Engine) BeginReadTx(ctx context.Context) (*ExplicitTx, error) {
+	return e.beginReadTxSession(ctx, nil)
+}
+
+// beginReadTxSession is [Engine.BeginReadTx] optionally bound to a caller session.
+// The session's only role on a read handle is the WAIT before the snapshot is taken:
+// a read transaction publishes no instant, so there is nothing to record.
+func (e *Engine) beginReadTxSession(ctx context.Context, sess *lpg.Session[string, float64]) (*ExplicitTx, error) {
 	defer cmetrics.Time("cypher.BeginReadTx").Stop()
 	if err := checkContext(ctx); err != nil {
 		cmetrics.IncCounter("cypher.BeginReadTx.errors", 1)
@@ -430,7 +463,7 @@ func (e *Engine) BeginReadTx(ctx context.Context) (*ExplicitTx, error) {
 		// reclamation horizon here and released exactly once in release()
 		// (rmp #2307). Taken LAST, after every failure return above, so a
 		// BeginReadTx that returns an error never leaves a slot pinned.
-		view: &pinnedView{snap: e.g.BeginRead()},
+		view: &pinnedView{snap: beginReadFor(ctx, e, sess)},
 		// buf, undo, walTx remain nil; wtx stays the zero value.
 	}, nil
 }
@@ -807,7 +840,15 @@ func (tx *ExplicitTx) release() {
 	// return an already-returned slot and corrupt the reclamation watermark for
 	// every other transaction. A no-op on a read-only handle, whose wtx is the zero
 	// value.
-	tx.eng.g.EndVersionedTx(tx.wtx)
+	// Through the SESSION when there is one, which is what records the instant. The
+	// lpg contract is explicit that closing with Graph.EndVersionedTx instead
+	// publishes correctly but does NOT advance the session's floor, so the session
+	// would silently lose its guarantee from that point on.
+	if tx.sess != nil {
+		tx.sess.EndVersionedTx(tx.wtx)
+	} else {
+		tx.eng.g.EndVersionedTx(tx.wtx)
+	}
 	tx.wtx = lpg.WriteTx{}
 }
 

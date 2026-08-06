@@ -215,14 +215,39 @@ chosen:
 | `Session.BeginRead` / `BeginReadCtx` | Observes every commit this session has made. |
 | `Session.BeginVersionedTx` / `EndVersionedTx` | As above, for a multi-statement transaction. The instant is recorded on `EndVersionedTx`. |
 | `Graph.ApplyVersioned` / `BeginRead` / `BeginVersionedTx` | Snapshot isolation, and **no** cross-transaction guarantee. A subsequent snapshot may not observe a commit this caller just made. |
+| `cypher.Session.Run` / `RunInTx` / `RunAny` / `BeginTx` / `BeginReadTx` | Observes every commit this session has made; a write records its own instant. |
+| `cypher.Engine.Run` / `RunInTx` / `RunAny` / `BeginTx` / `BeginReadTx` | Snapshot isolation, and **no** cross-statement guarantee. |
+| A **Bolt connection** | Observes every commit made on that connection. The server binds one `cypher.Session` per connection. |
 
 Across two sessions nothing is promised beyond snapshot isolation — the same contract
 a connection gives in any client-server database.
 
-**Not yet plumbed through the query layers.** `cypher.Engine`, `ExplicitTx` and the
-Bolt per-connection session do not yet carry a `Session`, so a client driving GoGraph
-through Cypher or Bolt still gets the sessionless contract. That is tracked
-separately; the substrate and the direct Go API carry the guarantee today.
+### Carried through the query layers (rmp #2329, 2026-08-06)
+
+`cypher.Engine.NewSession()` returns a `cypher.Session` whose `Run`, `RunInTx`,
+`RunAny`, `BeginTx` and `BeginReadTx` carry the guarantee, and the Bolt server binds
+one per connection — a connection being a session by definition: one client, one
+ordered conversation.
+
+The Engine's own methods deliberately keep the sessionless contract. The wait is only
+worth paying for a caller with something of its own to wait for, so an unrelated
+reader pays nothing and a caller that needs the guarantee asks for it by name. That
+mirrors `lpg.Session` exactly, and mirrors how every database driver models a
+session.
+
+Measured cost (`docs/benchmarks/session-ryow-2026-08-06.md`): none, in either shape —
+read-after-write 32.06 µs through a session against 32.13 µs sessionless, read-only
+17.76 µs against 17.81 µs, both inside the run-to-run spread. `AwaitVisible` returns
+after one atomic load whenever the frontier has already passed the session's floor,
+which on a lightly loaded engine it has. The wait becomes real exactly when an
+earlier in-flight commit is holding the frontier back — which is the condition under
+which the sessionless path is not faster but WRONG. `lpg.mvcc.sessions.waiting` is
+the gauge that says whether it is happening.
+
+Both halves are gated end to end over the official neo4j-go-driver
+(`bolt/server/e2e_session_ryow_test.go`) and at the engine
+(`cypher/session_test.go`), each validated in both directions: unbinding the
+per-connection session fails the Bolt gates.
 
 ## Mechanism — per-shard versioned single-root snapshot
 

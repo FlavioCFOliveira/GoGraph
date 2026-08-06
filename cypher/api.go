@@ -15612,6 +15612,16 @@ func (a *execLabelAdapter) ResolveLabelCount(name string) (int64, bool) {
 // work — with an error wrapping the context error (matchable via [errors.Is]
 // against [context.Canceled] / [context.DeadlineExceeded]).
 func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]expr.Value) (res *Result, err error) {
+	return e.runInTxSession(ctx, nil, query, params)
+}
+
+// runInTxSession is [Engine.RunInTx] optionally bound to a caller SESSION.
+//
+// A nil session is the engine's own sessionless contract: snapshot isolation, with
+// no promise that a later call observes this commit. A non-nil session publishes the
+// commit's instant onto it, which is what makes the caller's NEXT operation wait for
+// the frontier to reach it (rmp #2329). See [Session].
+func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, float64], query string, params map[string]expr.Value) (res *Result, err error) {
 	defer cmetrics.Time("cypher.RunInTx").Stop()
 	defer func() {
 		if err != nil {
@@ -15761,6 +15771,12 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 		// think-time — and a writer queued behind one of those used to wait with its
 		// deadline ignored: measured at ten minutes against a 200 ms context.
 		func(apply func(lpg.WriteTx) error) error {
+			// Through the SESSION when the caller has one, so the commit's instant is
+			// recorded and the caller's next read waits for it (rmp #2329). The
+			// sessionless path is byte-identical to what it always did.
+			if sess != nil {
+				return sess.ApplyVersionedCtx(ctx, apply)
+			}
 			return e.g.ApplyVersionedCtx(ctx, apply)
 		}, touched)
 	if buildErr != nil {
