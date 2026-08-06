@@ -6,7 +6,37 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`lpg.Session` — read-your-own-writes across transactions** (rmp #2328). The commit
+  frontier is contiguous, so `ApplyVersioned` returns at an instant that has not yet
+  published and a caller's next transaction could begin *below its own commit*.
+  Measured with twelve writers on disjoint keys: **9 of 660** read-backs missed a commit
+  the client was told had succeeded, and **6 of 6** serialization conflicts were a
+  transaction conflicting with itself on a key nothing else touched. A `Session`
+  obtained from `Graph.NewSession` records the instant it committed at and waits for the
+  frontier to reach it before its next operation. Within one session every operation
+  observes every commit that session has made; across two sessions nothing is promised
+  beyond snapshot isolation — the same contract a connection gives in any client-server
+  database. A writer that does not immediately read never waits.
+  **The Cypher and Bolt layers do not carry a session yet**, so clients driving GoGraph
+  through them still get the sessionless contract; see `docs/isolation-design.md`.
+- **MVCC observability** (rmp #2312). Writers in flight, commits, aborts, serialization
+  conflicts by store, the retained version-chain depth *distribution*, vacuum pass
+  latency, horizon utilisation and commit-latency histograms are published through the
+  metrics backend. The full inventory is in `docs/metrics.md`, which had no MVCC section
+  before. Cost measured: the read path is unchanged and a write transaction pays two
+  atomic increments — 1.42 ns on an otherwise empty bracket, unmeasurable on one that
+  writes.
+
 ### Fixed
+
+- **A node created by an edge append was visible before its transaction committed**
+  (rmp #2331). `adjlist.addEdge` interned its endpoints without recording a versioned
+  birth, so a node an append *created* was visible to snapshots predating the
+  transaction while the arc itself correctly waited — one transaction becoming visible
+  in two pieces. All three edge paths are fixed, including the two handle-bearing ones
+  that every durable write goes through.
 
 - **CRITICAL: concurrent read-modify-write lost 46% of its committed updates**
   (rmp #2324). Four writers each issuing 100 autocommit `SET a.bal = a.bal + 1`
@@ -40,6 +70,21 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 
 ### Changed
+
+- **BREAKING: `Graph.DisableMVCC`, `Graph.EnableMVCC` and `Graph.MVCCEnabled` are
+  removed** (rmp #2311). MVCC is the module's only concurrency-control mechanism and is
+  armed by `lpg.New`; there is no way to disarm it. An exported switch implied a choice
+  that does not exist, and a disarmed graph had no snapshot isolation, so every
+  guarantee the module documents was conditional on a setter any caller could reach.
+- **BREAKING: `MVCCStats` field renames** (rmp #2312). `ActiveReaders` →
+  `ActiveSnapshots` (it counted writers too, since writers hold a snapshot),
+  `OldestReaderAge()` → `OldestSnapshotAge()`, `UnregisteredReaders` →
+  `UnregisteredSnapshots`. `ActiveReaders()` is now a derived method excluding writers.
+  The metric series `lpg.mvcc.readers.unregistered` and `lpg.mvcc.oldest_reader_age` are
+  renamed to `lpg.mvcc.snapshots.unregistered` and `lpg.mvcc.oldest_snapshot_age`, and
+  per-store conflict series use underscored store names.
+- **BREAKING: `AdjList.Reclaim` takes a `*mvcc.DepthHist`** (rmp #2312), so the
+  reclaimer can report retained chain depth from the walk it already performs.
 
 - **An open explicit write transaction no longer blocks anybody** (rmp #2305).
   `cypher.Engine.BeginTx` took the graph's visibility barrier EXCLUSIVELY and held it
