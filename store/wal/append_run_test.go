@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 )
@@ -100,7 +101,7 @@ func runsOf(tags []string, tag string) (runs, longest int) {
 // useRun selects the arm: AppendRun (the fix) or a loop of individual Append
 // calls (what the code did before, and what any future caller that reaches for
 // Append in a loop will get).
-func appendContiguity(t *testing.T, useRun bool, frameCount, competitors int) (runs, longest, total int) {
+func appendContiguity(t *testing.T, useRun bool, frameCount, competitors int) (runs, longest, total, foreign int) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "wal")
 	w, err := Open(path)
@@ -172,7 +173,12 @@ func appendContiguity(t *testing.T, useRun bool, frameCount, competitors int) (r
 
 	tags := readTags(t, path)
 	runs, longest = runsOf(tags, "T")
-	return runs, longest, len(frames)
+	// foreign is how many frames the COMPETITORS actually landed while the
+	// transaction was appending. It is what distinguishes "this machine could not
+	// produce contention" from "there was contention and the loop stayed contiguous
+	// anyway" — the first is an environment limit, the second is a real defect
+	// (rmp #2330).
+	return runs, longest, len(frames), len(tags) - len(frames)
 }
 
 // TestAppendRun_KeepsATransactionContiguous is the acceptance instrument.
@@ -185,7 +191,7 @@ func appendContiguity(t *testing.T, useRun bool, frameCount, competitors int) (r
 // leaves this one's earlier ops behind.
 func TestAppendRun_KeepsATransactionContiguous(t *testing.T) {
 	const frames = 24
-	runs, longest, total := appendContiguity(t, true, frames, 8)
+	runs, longest, total, _ := appendContiguity(t, true, frames, 8)
 	if runs != 1 || longest != total {
 		t.Fatalf("AppendRun produced %d runs, longest %d of %d frames: the transaction's "+
 			"frames interleaved with another appender's, which is exactly what recovery's "+
@@ -212,21 +218,41 @@ func TestAppend_LoopInterleavesUnderConcurrency(t *testing.T) {
 	testlayers.RequireUninstrumented(t, "the interleaving of a 24-frame append loop "+
 		"against 8 concurrent appenders, which must be observed at least once in 5 attempts")
 	const frames = 24
-	// Contention is scheduler-dependent, so allow several attempts before
-	// concluding the interleaving cannot be observed at all. One observation is
-	// enough: it proves the loop offers no contiguity guarantee.
-	for attempt := 0; attempt < 5; attempt++ {
-		runs, longest, total := appendContiguity(t, false, frames, 8)
+	// Contention is scheduler-dependent, so retry within a WALL-CLOCK BUDGET rather
+	// than for a fixed number of attempts. A fixed count measures this machine's
+	// speed: five attempts sufficed on an idle host and failed the gate under load,
+	// reproducibly, with fourteen CPU burners running (rmp #2330). One observation is
+	// enough — it proves the loop offers no contiguity guarantee.
+	deadline := time.Now().Add(10 * time.Second)
+	sawForeign := false
+	attempts := 0
+	for time.Now().Before(deadline) {
+		attempts++
+		runs, longest, total, foreign := appendContiguity(t, false, frames, 8)
+		if foreign > 0 {
+			sawForeign = true
+		}
 		if runs != 1 || longest != total {
-			t.Logf("attempt %d: the append loop produced %d runs, longest %d of %d frames — "+
-				"the defect reproduced", attempt, runs, longest, total)
+			t.Logf("attempt %d: the append loop produced %d runs, longest %d of %d frames, "+
+				"with %d foreign frames — the defect reproduced", attempts, runs, longest,
+				total, foreign)
 			return
 		}
 	}
-	t.Fatalf("a loop of %d individual Appends stayed contiguous across 5 attempts against 8 "+
-		"concurrent appenders. Either Append now serialises runs (in which case AppendRun's "+
-		"contiguity test proves nothing and this whole file needs rethinking) or the "+
-		"competitors are not actually contending", frames)
+	// THE BUDGET IS EXHAUSTED. What that means depends on whether the competitors ever
+	// landed a frame, and conflating the two is what made this test fail the gate for
+	// reasons unrelated to any change.
+	if !sawForeign {
+		t.Skipf("after %d attempts in 10s, the 8 competing appenders never landed a single "+
+			"frame while the %d-frame loop ran: this machine could not produce contention at "+
+			"all, so the interleaving this control exists to observe was never possible. That "+
+			"is an environment limit, not a defect", attempts, frames)
+	}
+	t.Fatalf("a loop of %d individual Appends stayed contiguous across %d attempts in 10s "+
+		"WHILE THE COMPETITORS WERE LANDING FRAMES. Contention was real and the loop was "+
+		"still never interrupted, so either Append now serialises runs — in which case "+
+		"AppendRun's contiguity test proves nothing and this whole file needs rethinking — "+
+		"or the interleaving window has closed", frames, attempts)
 }
 
 // TestAppendRun_PropagatesTheCallbackError covers the failure path: a run that
