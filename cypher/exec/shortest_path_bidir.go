@@ -259,7 +259,7 @@ func (op *ShortestPath) biBFSShortestPath(src, dst uint64) (expr.Value, bool, er
 	for _, m := range meets {
 		hops, ok := op.biJoin(predF, predB, src, dst, m.node)
 		if ok {
-			return buildHopList(src, hops), true, nil
+			return buildHopList(src, hops, op.fwdHandles), true, nil
 		}
 	}
 	// Every candidate meeting point repeated a relationship. The argument in the

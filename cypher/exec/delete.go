@@ -282,9 +282,11 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 						// handle; a zero handle (simple graph, or a position that no
 						// longer resolves) falls back to the first-match endpoint
 						// removal — unchanged behaviour.
+						// The column IS the handle since rmp #2317; it used to be a
+						// forward-CSR position needing a lookup to recover it.
 						var handle uint64
 						if intVal >= 0 {
-							handle = op.mutator.EdgeHandleAtPosition(srcKey, dstKey, uint64(intVal))
+							handle = uint64(intVal)
 						}
 						if handle != 0 {
 							if labels := op.mutator.EdgeLabelsByHandle(srcKey, dstKey, handle); len(labels) > 0 {

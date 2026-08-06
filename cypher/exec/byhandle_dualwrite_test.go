@@ -22,29 +22,32 @@ import (
 
 // relRow builds the (edgePos, srcID, dstID) row layout the Expand operator emits
 // for a bound relationship variable, with the rel column at schema index 0.
-func relRow(edgePos int64, srcID, dstID uint64) exec.Row {
+// The first column is the EMITTED relationship identity, which since rmp #2317 is
+// the stable handle rather than a forward-CSR position — so the row carries the
+// handle and no resolver stands between the two.
+func relRow(edgeID int64, srcID, dstID uint64) exec.Row {
 	return exec.Row{
-		expr.IntegerValue(edgePos),
+		expr.IntegerValue(edgeID),
 		expr.IntegerValue(int64(srcID)),
 		expr.IntegerValue(int64(dstID)),
 	}
 }
 
 // relColsAt0 is the RelCols for a rel variable at schema column 0 with src/dst
-// at 1/2 and the edge-position counter at column 0 (EdgeCol).
+// at 1/2 and the edge identity at column 0 (EdgeCol).
 func relColsAt0() exec.RelCols {
 	return exec.RelCols{SrcCol: 1, DstCol: 2, EdgeCol: 0}
 }
 
-// newRelStub seeds two nodes and a per-pair edge, and wires a handle resolver
-// that maps the bound edge position to the supplied handle.
-func newRelStub(t *testing.T, handle uint64) (*stubMutator, uint64, uint64) {
+// newRelStub seeds two nodes and a per-pair edge. The handle argument is what the
+// caller must now put in the row's identity column; there is no resolver, because
+// the row carries the handle itself (rmp #2317).
+func newRelStub(t *testing.T, _ uint64) (*stubMutator, uint64, uint64) {
 	t.Helper()
 	mut := newStubMutator()
 	aID := mustAddNode(t, mut, "a")
 	bID := mustAddNode(t, mut, "b")
 	mustAddEdge(t, mut, "a", "b", 0)
-	mut.handleAt = func(_, _ string, _ uint64) uint64 { return handle }
 	return mut, uint64(aID), uint64(bID)
 }
 
@@ -53,7 +56,7 @@ func TestByHandleDualWrite_SetSingleProperty(t *testing.T) {
 	const h = uint64(7)
 	mut, aID, bID := newRelStub(t, h)
 
-	op, err := exec.NewSetProperty("r", "tag", `"v1"`, map[string]int{"r": 0}, newSliceOperator(relRow(0, aID, bID)), mut)
+	op, err := exec.NewSetProperty("r", "tag", `"v1"`, map[string]int{"r": 0}, newSliceOperator(relRow(int64(h), aID, bID)), mut)
 	if err != nil {
 		t.Fatalf("NewSetProperty: %v", err)
 	}
@@ -80,7 +83,7 @@ func TestByHandleDualWrite_SetMerge(t *testing.T) {
 	const h = uint64(9)
 	mut, aID, bID := newRelStub(t, h)
 
-	op, err := exec.NewSetProperty("r", "", `+= {a: 1, b: 2}`, map[string]int{"r": 0}, newSliceOperator(relRow(0, aID, bID)), mut)
+	op, err := exec.NewSetProperty("r", "", `+= {a: 1, b: 2}`, map[string]int{"r": 0}, newSliceOperator(relRow(int64(h), aID, bID)), mut)
 	if err != nil {
 		t.Fatalf("NewSetProperty(+=): %v", err)
 	}
@@ -109,7 +112,7 @@ func TestByHandleDualWrite_SetNullDeletesByHandle(t *testing.T) {
 		t.Fatalf("seed per-pair: %v", err)
 	}
 
-	op, err := exec.NewSetProperty("r", "tag", `null`, map[string]int{"r": 0}, newSliceOperator(relRow(0, aID, bID)), mut)
+	op, err := exec.NewSetProperty("r", "tag", `null`, map[string]int{"r": 0}, newSliceOperator(relRow(int64(h), aID, bID)), mut)
 	if err != nil {
 		t.Fatalf("NewSetProperty(null): %v", err)
 	}
@@ -137,7 +140,7 @@ func TestByHandleDualWrite_Remove(t *testing.T) {
 		t.Fatalf("seed per-pair: %v", err)
 	}
 
-	op := exec.NewRemoveProperty("r", "tag", map[string]int{"r": 0}, newSliceOperator(relRow(0, aID, bID)), mut)
+	op := exec.NewRemoveProperty("r", "tag", map[string]int{"r": 0}, newSliceOperator(relRow(int64(h), aID, bID)), mut)
 	op.WithRelCols(relColsAt0())
 	if _, err := exec.Drain(context.Background(), op); err != nil {
 		t.Fatalf("Drain: %v", err)
@@ -154,7 +157,7 @@ func TestByHandleDualWrite_Remove(t *testing.T) {
 // written — the mutation never lands on a wrong instance.
 func TestByHandleDualWrite_NoHandleFallsBackToPerPairOnly(t *testing.T) {
 	t.Parallel()
-	mut, aID, bID := newRelStub(t, 0) // resolver returns 0
+	mut, aID, bID := newRelStub(t, 0) // the row carries no identity
 
 	op, err := exec.NewSetProperty("r", "tag", `"v1"`, map[string]int{"r": 0}, newSliceOperator(relRow(0, aID, bID)), mut)
 	if err != nil {

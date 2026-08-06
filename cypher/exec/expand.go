@@ -633,10 +633,36 @@ func (op *Expand) advanceFwdEdge() (src, edge, dst int64, st edgeStatus) {
 	if !op.passesFilter(pos) {
 		return 0, 0, 0, edgeSkip // filtered out; caller retries
 	}
-	if !op.passesRelMorphism(int64(pos)) {
+	edgeID := op.emittedEdgeID(op.fwdHandles, pos)
+	if !op.passesRelMorphism(edgeID) {
 		return 0, 0, 0, edgeSkip // cyphermorphism: duplicate edge; caller retries
 	}
-	return op.srcID, int64(pos), int64(d), edgeEmit
+	return op.srcID, edgeID, int64(d), edgeEmit
+}
+
+// emittedEdgeID is the relationship identity this operator emits for the slot at
+// pos of the given handle column (rmp #2317).
+//
+// # It is the stable handle, not the position
+//
+// A position indexes ONE adjacency. Since the adjacency is now resolved per Init
+// rather than once at plan-build time, a position emitted by one Init can name a
+// different edge in the next — and a bound relationship must not change identity
+// because its statement wrote something. The handle is minted per slot, is carried
+// verbatim across the compaction that shifts positions, and csr.BuildReverse gives
+// the SAME handle to both directions of one logical edge, which is what
+// cyphermorphism needs.
+//
+// The absent-column fallback returns the position. Every adjacency built from a
+// graph carries handles since rmp #2317 stage 2a, so this reaches only a CSR
+// assembled directly from arrays — an offline or test shape. Such an identity is
+// NOT stable across a rebuild, which is exactly why the column is mandatory
+// everywhere else.
+func (op *Expand) emittedEdgeID(handles []uint64, pos uint64) int64 {
+	if pos < uint64(len(handles)) {
+		return int64(handles[pos])
+	}
+	return int64(pos)
 }
 
 // advanceRevEdge consumes at most one reverse edge from the current source's
@@ -678,27 +704,29 @@ func (op *Expand) advanceRevEdge() (src, edge, dst int64, st edgeStatus) {
 			return 0, 0, 0, edgeSkip // filtered out; caller retries
 		}
 	}
-	// Canonical edge ID: prefer the forward-edge position when the
-	// (dst → src) edge exists in the forward CSR, so cyphermorphism
-	// observes the SAME id for the forward and reverse traversals of the
-	// same edge. This is required for openCypher 9 §3.2.2: an undirected
-	// `(:Label2)--()` step that follows a previous forward hop must
-	// reject the same edge being matched in the reverse direction.
-	var fwdPos uint64
-	var hasFwd bool
-	if op.revHandles != nil && op.fwdHandles != nil {
-		// Multigraph: recover the SPECIFIC forward edge instance by
-		// matching the stable handle that travelled with this reverse
-		// slot (csr.BuildReverse keeps one handle per logical edge across
-		// both directions). Without this, parallel edges (dst -> src)
-		// would all collapse onto the first forward position and report a
-		// single merged relationship type on the reverse hop (rmp #1634).
-		fwdPos, hasFwd = op.lookupFwdEdgePosByHandle(uint64(d), uint64(op.srcID), op.revHandles[pos])
-	} else {
-		fwdPos, hasFwd = op.lookupFwdEdgePos(uint64(d), uint64(op.srcID))
-	}
+	// Canonical edge ID (rmp #2317): the stable handle, which csr.BuildReverse
+	// gives to BOTH directions of one logical edge, so cyphermorphism observes the
+	// same id whichever way the edge was traversed. That is required by openCypher 9
+	// §3.2.2: an undirected `(:Label2)--()` step following a forward hop must reject
+	// the same edge matched in reverse.
+	//
+	// # This replaced a forward-position lookup, and the lookup is why it had to
+	//
+	// The id used to be the forward-CSR POSITION, which meant the reverse hop had to
+	// go and FIND the corresponding forward slot — by scanning dst's outgoing range,
+	// and in a multigraph by matching the handle that travelled with the reverse slot,
+	// because otherwise parallel (dst → src) edges all collapsed onto the first
+	// forward position and reported one merged relationship type (rmp #1634). Both
+	// scans existed only to recover an identity the handle already carries, so
+	// emitting the handle removes them: O(deg(dst)) per reverse edge becomes O(1).
+	//
+	// The absent-column fallback keeps a handle-less CSR working, with the same
+	// caveat [Expand.emittedEdgeID] documents; there the reverse hop still needs the
+	// forward position to produce an id the forward hop would agree with.
 	var edgeID int64
-	if hasFwd {
+	if pos < uint64(len(op.revHandles)) {
+		edgeID = int64(op.revHandles[pos])
+	} else if fwdPos, hasFwd := op.lookupFwdEdgePos(uint64(d), uint64(op.srcID)); hasFwd {
 		edgeID = int64(fwdPos)
 	} else {
 		edgeID = int64(uint64(len(op.fwdEdges)) + pos)
@@ -707,44 +735,6 @@ func (op *Expand) advanceRevEdge() (src, edge, dst int64, st edgeStatus) {
 		return 0, 0, 0, edgeSkip // cyphermorphism: duplicate edge; caller retries
 	}
 	return op.srcID, edgeID, int64(d), edgeEmit
-}
-
-// lookupFwdEdgePos returns the forward-CSR position of the edge
-// (src → dst), or (0, false) when no such edge exists. Used by the
-// reverse-traversal emit path so the cyphermorphism check observes the
-// same edge ID for forward and reverse traversals of an undirected edge.
-func (op *Expand) lookupFwdEdgePos(src, dst uint64) (uint64, bool) {
-	if src+1 >= uint64(len(op.fwdVerts)) {
-		return 0, false
-	}
-	// O(log d) since rmp #2141/#2142: the run is destination-ordered, and the
-	// lower bound returns the FIRST slot with this destination — the same slot
-	// the prior linear scan returned for parallel edges.
-	return firstDstPos(op.fwdEdges, op.fwdVerts[src], op.fwdVerts[src+1], dst)
-}
-
-// lookupFwdEdgePosByHandle returns the forward-CSR position of the edge
-// (src -> dst) whose stable handle equals handle, or (0, false) when no
-// such edge exists. Unlike [lookupFwdEdgePos] it disambiguates parallel
-// edges — multiple src -> dst slots — by their per-instance handle, so a
-// reverse traversal recovers the exact forward edge instance it came
-// from rather than always the first (rmp #1634). The caller guarantees
-// op.fwdHandles is non-nil (a multigraph snapshot).
-func (op *Expand) lookupFwdEdgePosByHandle(src, dst, handle uint64) (uint64, bool) {
-	if src+1 >= uint64(len(op.fwdVerts)) {
-		return 0, false
-	}
-	// O(log d + r), r = the parallel-edge multiplicity of this (src, dst) pair:
-	// binary-search to the destination run, then walk only that short run to
-	// disambiguate by handle. Never worse than the O(d) scan it replaces, since
-	// r <= d.
-	lo, hi := dstRun(op.fwdEdges, op.fwdVerts[src], op.fwdVerts[src+1], dst)
-	for pos := lo; pos < hi; pos++ {
-		if op.fwdHandles[pos] == handle {
-			return pos, true
-		}
-	}
-	return 0, false
 }
 
 // reverseEdgePassesFilter reports whether the forward edge (dst → src),
@@ -877,6 +867,23 @@ func (op *Expand) passesFilter(pos uint64) bool {
 	}
 	_, ok := op.edgeTypeFilter[pos]
 	return ok
+}
+
+// lookupFwdEdgePos returns the forward-CSR position of the edge
+// (src → dst), or (0, false) when no such edge exists.
+//
+// Since rmp #2317 it serves only the HANDLE-LESS fallback in the reverse emit path:
+// where the adjacency carries no handle column there is no orientation-free identity,
+// so the reverse hop still has to recover a forward position for cyphermorphism to
+// see one id for both directions of an undirected edge.
+func (op *Expand) lookupFwdEdgePos(src, dst uint64) (uint64, bool) {
+	if src+1 >= uint64(len(op.fwdVerts)) {
+		return 0, false
+	}
+	// O(log d) since rmp #2141/#2142: the run is destination-ordered, and the
+	// lower bound returns the FIRST slot with this destination — the same slot
+	// the prior linear scan returned for parallel edges.
+	return firstDstPos(op.fwdEdges, op.fwdVerts[src], op.fwdVerts[src+1], dst)
 }
 
 // buildRow writes (inputRow... || srcID || edgeID || dstID) into out.

@@ -275,12 +275,17 @@ func resolveEntityFromRow(varName string, schema map[string]int, row Row, mut Gr
 		}
 		return resolvedEntity{nodeKey: nodeKey}, nil
 	case expr.RelationshipValue:
+		// The VALUE carries the identity: since rmp #2317 RelationshipValue.ID is the
+		// stable handle, so a REMOVE issued after a WITH barrier reaches the same
+		// instance a read resolves. Leaving the handle at 0 here removed the property
+		// from the per-pair store only, which the direct read path never consults —
+		// so the REMOVE appeared to do nothing (rmp #2334).
 		srcKey, srcOK := mut.ResolveNodeLabel(graph.NodeID(v.StartID))
 		dstKey, dstOK := mut.ResolveNodeLabel(graph.NodeID(v.EndID))
 		if !srcOK || !dstOK {
 			return resolvedEntity{}, fmt.Errorf("cannot resolve relationship endpoints (%d, %d)", v.StartID, v.EndID)
 		}
-		return resolvedEntity{isRel: true, relSrcKey: srcKey, relDstKey: dstKey}, nil
+		return resolvedEntity{isRel: true, relSrcKey: srcKey, relDstKey: dstKey, relHandle: v.ID}, nil
 	}
 	if expr.IsNull(row[colIdx]) {
 		return resolvedEntity{}, errNullTarget
@@ -310,12 +315,17 @@ func resolveEntityMaybeRel(varName string, schema map[string]int, rc *RelCols, r
 		_ = v // edge-position counter; use endpoint columns + handle resolution
 		return resolveRelBindingFromRow(rc, row, mut)
 	case expr.RelationshipValue:
+		// The VALUE carries the identity: since rmp #2317 RelationshipValue.ID is the
+		// stable handle, so a REMOVE issued after a WITH barrier reaches the same
+		// instance a read resolves. Leaving the handle at 0 here removed the property
+		// from the per-pair store only, which the direct read path never consults —
+		// so the REMOVE appeared to do nothing (rmp #2334).
 		srcKey, srcOK := mut.ResolveNodeLabel(graph.NodeID(v.StartID))
 		dstKey, dstOK := mut.ResolveNodeLabel(graph.NodeID(v.EndID))
 		if !srcOK || !dstOK {
 			return resolvedEntity{}, fmt.Errorf("cannot resolve relationship endpoints (%d, %d)", v.StartID, v.EndID)
 		}
-		return resolvedEntity{isRel: true, relSrcKey: srcKey, relDstKey: dstKey}, nil
+		return resolvedEntity{isRel: true, relSrcKey: srcKey, relDstKey: dstKey, relHandle: v.ID}, nil
 	}
 	if expr.IsNull(row[colIdx]) {
 		return resolvedEntity{}, errNullTarget

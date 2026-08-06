@@ -596,7 +596,7 @@ func (op *ShortestPath) exhaustiveShortestPath(src, dst uint64, inputRow Row) (e
 				copy(nhandles, pp.handles)
 				nhandles[len(pp.handles)] = arc.handle
 				if arc.neighbour == dst && level >= op.minHops {
-					cand := buildHopList(src, nh)
+					cand := buildHopList(src, nh, op.fwdHandles)
 					okPred, err := op.testCandidate(inputRow, cand)
 					if err != nil {
 						return nil, false, err
@@ -764,7 +764,7 @@ func (op *ShortestPath) bfsShortestCycleForward(src uint64) (expr.Value, bool, e
 	// Closing hop m->src.
 	closeFwd, closeRev := op.resolveFwdPos(spPredEntry{parent: closingParent, rawPos: closingPos, fwd: closingFwd})
 	hops = append(hops, hop{dstID: src, fwdPos: closeFwd, reversed: closeRev})
-	return buildHopList(src, hops), true, nil
+	return buildHopList(src, hops, op.fwdHandles), true, nil
 }
 
 // srcBranchSentinel is the branch tag of the cycle anchor src itself. It must
@@ -1022,7 +1022,7 @@ func (op *ShortestPath) bfsShortestCycleBranch(src uint64) (expr.Value, bool, er
 	switch {
 	case selfLoop:
 		hops := []hop{op.hopForTraversal(src, src, selfArc.handle)}
-		return buildHopList(src, hops), true, nil
+		return buildHopList(src, hops, op.fwdHandles), true, nil
 	case dparallel:
 		// src -> m (first arc), then m -> src (second, distinct-handle arc).
 		m := dpFirst.neighbour
@@ -1030,9 +1030,9 @@ func (op *ShortestPath) bfsShortestCycleBranch(src uint64) (expr.Value, bool, er
 			op.hopForTraversal(src, m, dpFirst.handle),
 			op.hopForTraversal(m, src, dpSecond.handle),
 		}
-		return buildHopList(src, hops), true, nil
+		return buildHopList(src, hops, op.fwdHandles), true, nil
 	default:
-		return buildHopList(src, op.assembleBranchCycle(bpred, src, wU, wV, wArc)), true, nil
+		return buildHopList(src, op.assembleBranchCycle(bpred, src, wU, wV, wArc), op.fwdHandles), true, nil
 	}
 }
 
@@ -1165,7 +1165,7 @@ func (op *ShortestPath) reconstructList(pred map[uint64]spPredEntry, src, dst ui
 	for i, j := 0, len(hops)-1; i < j; i, j = i+1, j-1 {
 		hops[i], hops[j] = hops[j], hops[i]
 	}
-	return buildHopList(src, hops)
+	return buildHopList(src, hops, op.fwdHandles)
 }
 
 func (op *ShortestPath) emitRow(out *Row, inputRow Row, pathVal expr.Value) {
@@ -1645,7 +1645,7 @@ func (op *AllShortestPaths) exhaustiveAllShortest(src, dst uint64, inputRow Row)
 				copy(nhandles, pp.handles)
 				nhandles[len(pp.handles)] = arc.handle
 				if arc.neighbour == dst && level >= op.minHops {
-					cand := buildHopList(src, nh)
+					cand := buildHopList(src, nh, op.fwdHandles)
 					okPred, err := op.testCandidate(inputRow, cand)
 					if err != nil {
 						return nil, err
@@ -1743,7 +1743,7 @@ func (op *AllShortestPaths) reconstructAll(preds map[uint64][]aspPredEntry, src,
 			for i := range top.partial {
 				hops[i] = top.partial[len(top.partial)-1-i]
 			}
-			paths = append(paths, buildHopList(src, hops))
+			paths = append(paths, buildHopList(src, hops, op.fwdHandles))
 			continue
 		}
 
@@ -1898,7 +1898,7 @@ func (op *AllShortestPaths) reconstructAllCycles(preds map[uint64][]aspPredEntry
 				for i := range top.partial {
 					hops[i] = top.partial[len(top.partial)-1-i]
 				}
-				paths = append(paths, buildHopList(src, hops))
+				paths = append(paths, buildHopList(src, hops, op.fwdHandles))
 				continue
 			}
 
@@ -2142,7 +2142,7 @@ func (op *AllShortestPaths) bfsAllShortestCycleBranch(src uint64) ([]expr.ListVa
 		for i, s := range steps {
 			hops[i] = op.hopForTraversal(s.from, s.to, s.handle)
 		}
-		out = append(out, buildHopList(src, hops))
+		out = append(out, buildHopList(src, hops, op.fwdHandles))
 	}
 
 	const ctxCheckEvery = 1024
@@ -2414,7 +2414,7 @@ func extractEndpoints(row Row, srcCol, dstCol int) (src, dst uint64, valid bool)
 // buildHopList builds the flat alternating list
 // [srcID, fwdPos0, dst0, dir0, …] (stride [VLEHopStride]) from a src node and
 // its src→dst-ordered hops. A zero-hop path yields [srcID] (1 element).
-func buildHopList(src uint64, hops []hop) expr.ListValue {
+func buildHopList(src uint64, hops []hop, handles []uint64) expr.ListValue {
 	lv := make(expr.ListValue, 1+VLEHopStride*len(hops))
 	lv[0] = expr.IntegerValue(int64(src))
 	for i, h := range hops {
@@ -2422,7 +2422,9 @@ func buildHopList(src uint64, hops []hop) expr.ListValue {
 		if h.reversed {
 			dir = VLEDirReverse
 		}
-		lv[1+VLEHopStride*i] = expr.IntegerValue(int64(h.fwdPos))
+		// The EMITTED identity is the stable handle, not the forward position
+		// (rmp #2317); the position stays internal to this Init.
+		lv[1+VLEHopStride*i] = expr.IntegerValue(int64(emittedHopID(handles, h.fwdPos)))
 		lv[2+VLEHopStride*i] = expr.IntegerValue(int64(h.dstID))
 		lv[3+VLEHopStride*i] = expr.IntegerValue(int64(dir))
 	}
@@ -2440,4 +2442,15 @@ func appendValue(buf *[]expr.Value, inputRow Row, val expr.Value) Row {
 	copy(*buf, inputRow)
 	(*buf)[len(inputRow)] = val
 	return *buf
+}
+
+// emittedHopID is the relationship identity a hop list carries for a forward
+// position, agreeing bit-for-bit with [Expand.emittedEdgeID] (rmp #2317). A
+// synthetic position with no forward slot keeps its position, which is unique
+// within one Init.
+func emittedHopID(handles []uint64, fwdPos uint64) uint64 {
+	if fwdPos < uint64(len(handles)) {
+		return handles[fwdPos]
+	}
+	return fwdPos
 }

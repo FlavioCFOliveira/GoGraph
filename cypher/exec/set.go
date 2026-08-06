@@ -276,13 +276,16 @@ func (op *SetProperty) resolveEntity(varName string, row Row) (entityBinding, er
 		}
 		return entityBinding{nodeKey: nodeKey}, nil
 	case expr.RelationshipValue:
-		// Post-projection row: RelationshipValue already has StartID / EndID.
+		// Post-projection row: RelationshipValue already has StartID / EndID, and
+		// since rmp #2317 its ID is the stable HANDLE — so the write targets the
+		// same instance a read resolves. Leaving the handle at 0 here is what made
+		// a relationship's properties split-brain across two stores (rmp #2334).
 		srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(v.StartID))
 		dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(v.EndID))
 		if !srcOK || !dstOK {
 			return entityBinding{}, fmt.Errorf("cannot resolve relationship endpoints (%d, %d)", v.StartID, v.EndID)
 		}
-		return entityBinding{isRel: true, relSrcKey: srcKey, relDstKey: dstKey}, nil
+		return entityBinding{isRel: true, relSrcKey: srcKey, relDstKey: dstKey, relHandle: v.ID}, nil
 	default:
 		return entityBinding{}, fmt.Errorf("variable %q is not IntegerValue/NodeValue/RelationshipValue (got %T)", varName, row[colIdx])
 	}
@@ -318,22 +321,32 @@ func resolveRelBinding(rc *RelCols, row Row, mut GraphMutator) (entityBinding, e
 	}, nil
 }
 
-// resolveRelHandle resolves the stable handle of the bound relationship
-// instance from the forward-CSR edge position at rc.EdgeCol. It returns 0 (the
-// no-handle sentinel) when the edge-position column is out of range or does not
-// hold an IntegerValue (e.g. a post-projection RelationshipValue, which carries
-// endpoints but no edge position), or when the position does not resolve to a
-// stable handle. A 0 result means "mutate the per-pair store only" — never the
-// wrong parallel instance.
-func resolveRelHandle(rc *RelCols, row Row, srcKey, dstKey string, mut GraphMutator) uint64 {
+// resolveRelHandle reads the stable handle of the bound relationship instance
+// from rc.EdgeCol. It returns 0 (the no-handle sentinel) when the column is out of
+// range or does not hold an IntegerValue. A 0 result means "mutate the per-pair
+// store only" — never the wrong parallel instance.
+//
+// # It is now a read, not a resolution (rmp #2317)
+//
+// The column used to hold a forward-CSR POSITION, which had to be resolved against
+// a per-query CSR snapshot to recover the handle
+// ([GraphMutator.EdgeHandleAtPosition], now retired). It holds the handle itself.
+//
+// That lookup is also what made a relationship's properties SPLIT-BRAIN across two
+// stores (rmp #2334): a post-projection row carries a self-describing
+// RelationshipValue and no position, so the lookup returned 0 and the write went to
+// the per-pair store, while a read off the raw triplet resolved by handle and never
+// looked there. The same edge then reported two different values depending on query
+// shape. With the handle carried in the value, both paths name the same instance.
+func resolveRelHandle(rc *RelCols, row Row, _, _ string, _ GraphMutator) uint64 {
 	if rc.EdgeCol < 0 || rc.EdgeCol >= len(row) {
 		return 0
 	}
-	edgePos, ok := row[rc.EdgeCol].(expr.IntegerValue)
-	if !ok || edgePos < 0 {
+	h, ok := row[rc.EdgeCol].(expr.IntegerValue)
+	if !ok || h < 0 {
 		return 0
 	}
-	return mut.EdgeHandleAtPosition(srcKey, dstKey, uint64(edgePos))
+	return uint64(h)
 }
 
 // applyToNode applies the configured property mutation to a node identified by

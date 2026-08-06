@@ -59,10 +59,7 @@ type stubMutator struct {
 	// tests can assert that a SET/REMOVE on one parallel edge instance touches
 	// only that instance (#1686). Keyed by "src|dst|handle" → prop map.
 	byHandleProps map[string]map[string]lpg.PropertyValue
-	// handleAt, when set, resolves the stable handle of the instance at a
 	// forward-CSR edge position so the write operators exercise the by-handle
-	// dual-write path. nil ⇒ EdgeHandleAtPosition returns 0 (per-pair only).
-	handleAt func(src, dst string, edgePos uint64) uint64
 	// firstHandle, when set, resolves the by-pair first-slot handle so the MERGE
 	// ON MATCH / ON CREATE action path exercises the by-handle dual-write.
 	// nil ⇒ FirstEdgeHandle returns (0, false) (per-pair only).
@@ -349,13 +346,6 @@ func (s *stubMutator) RemoveEdgeInstanceByHandle(src, dst string, handle uint64)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.byHandleProps, byHandleKey(src, dst, handle))
-}
-
-func (s *stubMutator) EdgeHandleAtPosition(src, dst string, edgePos uint64) uint64 {
-	if s.handleAt == nil {
-		return 0
-	}
-	return s.handleAt(src, dst, edgePos)
 }
 
 func (s *stubMutator) FirstEdgeHandle(src, dst string) (uint64, bool) {

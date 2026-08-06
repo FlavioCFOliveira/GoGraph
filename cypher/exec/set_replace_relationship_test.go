@@ -117,7 +117,7 @@ func TestSetRel_WholeEntityReplace_DropsAbsentKeys(t *testing.T) {
 	mut, aID, bID := newRelStub(t, h)
 	seedRelProps(t, mut, h, map[string]lpg.PropertyValue{"a": lpg.Int64Value(1), "b": lpg.Int64Value(2)})
 
-	op, err := exec.NewSetProperty("r", "", `{a: 9}`, map[string]int{"r": 0}, newSliceOperator(relRow(0, aID, bID)), mut)
+	op, err := exec.NewSetProperty("r", "", `{a: 9}`, map[string]int{"r": 0}, newSliceOperator(relRow(int64(h), aID, bID)), mut)
 	if err != nil {
 		t.Fatalf("NewSetProperty: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestSetRel_Merge_KeepsAbsentKeys(t *testing.T) {
 	mut, aID, bID := newRelStub(t, h)
 	seedRelProps(t, mut, h, map[string]lpg.PropertyValue{"a": lpg.Int64Value(1), "b": lpg.Int64Value(2)})
 
-	op, err := exec.NewSetProperty("r", "", `+= {a: 9}`, map[string]int{"r": 0}, newSliceOperator(relRow(0, aID, bID)), mut)
+	op, err := exec.NewSetProperty("r", "", `+= {a: 9}`, map[string]int{"r": 0}, newSliceOperator(relRow(int64(h), aID, bID)), mut)
 	if err != nil {
 		t.Fatalf("NewSetProperty(+=): %v", err)
 	}
@@ -186,7 +186,7 @@ func TestSetRel_ReplaceToEmpty(t *testing.T) {
 	mut, aID, bID := newRelStub(t, h)
 	seedRelProps(t, mut, h, map[string]lpg.PropertyValue{"a": lpg.Int64Value(1), "b": lpg.Int64Value(2)})
 
-	op, err := exec.NewSetProperty("r", "", `{}`, map[string]int{"r": 0}, newSliceOperator(relRow(0, aID, bID)), mut)
+	op, err := exec.NewSetProperty("r", "", `{}`, map[string]int{"r": 0}, newSliceOperator(relRow(int64(h), aID, bID)), mut)
 	if err != nil {
 		t.Fatalf("NewSetProperty: %v", err)
 	}

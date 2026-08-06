@@ -114,3 +114,62 @@ a statement invisible to the rest of it.
   stage 2a made available. Acceptance criterion 3 is therefore open, and with it the
   `ensureEdgeIDResolver` path-reconstruction helper, which is the last thing keyed on
   a CSR position.
+
+## Stage 3 — the emitted relationship identity becomes the handle
+
+Acceptance criterion 3, and the fix for rmp #2334.
+
+The identity a row carries for a relationship was the absolute position of the edge
+in the forward CSR. It is now the stable per-slot handle, on every operator that
+emits one: `Expand`, `ExpandIntersect`, `VarLengthExpand`, `ShortestPath` and
+`AllShortestPaths`.
+
+Positions remain, and are still the right tool, wherever they are internal to one
+`Init`: the expand-into cursor seek, the shortest-path cursors, the type filter's
+keying, and the CSR range arithmetic. What changed is only what OUTLIVES an `Init` —
+because that is exactly what an identity must survive.
+
+### The correctness it buys
+
+`RelationshipValue.ID` is now the handle, so a write issued through a projected
+relationship reaches the instance a read resolves. Before, the two disagreed and the
+same edge reported two values by query shape (rmp #2334):
+
+| after `WITH r SET r.k = 2` | before | after |
+|---|---|---|
+| `MATCH (:A)-[r:R]->(:B) RETURN r.k` | 1 | 2 |
+| `... WITH r RETURN r.k` | 2 | 2 |
+| `... RETURN properties(r).k` | 1 | 2 |
+
+Gated across the full cross-product of five write shapes and three read shapes, plus
+`REMOVE` and `DELETE` after a barrier, and validated in both directions: reverting
+the emit alone fails the topology-change and parallel-edge gates; reverting the
+`RelationshipValue` handle alone fails the write-shape cross-product.
+
+### The cost
+
+| suite | geomean sec/op | allocations |
+|---|---|---|
+| bench/cypher_scale | +0.52% (nothing individually significant) | +0.49% B/op |
+| bench/expandinto | +0.88% over 18 arms | unchanged to 4 s.f. |
+
+### What it removed
+
+A reverse hop used to recover the corresponding FORWARD position to produce an id
+the forward hop would agree with — an O(deg(dst)) scan of dst's outgoing range per
+reverse edge, plus a handle match on top of it in a multigraph, because otherwise
+parallel edges all collapsed onto the first forward position (rmp #1634). A handle
+is already shared across both directions by `csr.BuildReverse`, so the scan is gone
+and the reverse hop reads one array slot.
+
+The whole position→handle resolution layer went with it: `EdgeHandleAtPosition` on
+the `GraphMutator` interface and both adapters, and the `edgeHandleAtFwdPos` helper
+the read path used. Both existed only to recover an identity the row now carries.
+
+`RemoveEdgeByHandle` on the adapters became orientation-tolerant. A handle names one
+logical edge and is orientation-free, but the endpoint keys come from a row's
+traversal columns — and `MATCH (a)-[r]-(b)` over a directed edge produces a row per
+direction, so half of them name the storage pair backwards. That was latent while
+the id was a position (it simply failed to resolve in the swapped orientation and
+fell back to endpoint matching) and became live the moment the handle resolved.
+openCypher TCK Delete4 [1] caught it.

@@ -6104,11 +6104,13 @@ func buildPlanWithMutatorFull(
 	bopts.writeFallback = func(child ir.LogicalPlan) (exec.Operator, error) {
 		return buildOperatorWrite(child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 	}
-	// Give the write adapter the SAME bopts (and its cached forward-CSR
-	// snapshot) the read-side builders use, so a relationship SET/REMOVE
-	// resolves the bound parallel instance's stable handle via the exact
-	// read-path mechanism ([edgeHandleAtFwdPos]) rather than a divergent one
-	// (#1686). Only the concrete write adapters carry a bopts field.
+	// Give the write adapter the SAME bopts the read-side builders use. It used to
+	// matter because a relationship SET/REMOVE resolved the bound instance's handle
+	// from a forward-CSR position against the bopts-cached snapshot, and had to use
+	// the exact read-path mechanism to agree with reads (#1686). Since rmp #2317 the
+	// row carries the handle itself and no resolution happens, but the adapters still
+	// read bopts for the count store and the undo log. Only the concrete write
+	// adapters carry the field.
 	switch m := mutator.(type) {
 	case *walMutatorAdapter:
 		m.bopts = bopts
@@ -12616,7 +12618,10 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.ReadVi
 			// latest-wins union over parallel siblings — keeping the property
 			// granularity congruent with the type granularity.
 			handled := false
-			fwdHandle := edgeHandleAtFwdPos(bopts, g, stKey, enKey, uint64(edgeIDVal))
+			// The row's edge id IS the stable handle since rmp #2317, so no lookup is
+			// needed: it used to be a forward-CSR POSITION that had to be resolved
+			// against a per-query CSR snapshot to recover the handle.
+			fwdHandle := uint64(edgeIDVal)
 			// hasByHandleEntry is the by-handle MEMBERSHIP signal that gates the
 			// property routing below (rmp #1684). A non-zero fwdHandle is NOT on
 			// its own sufficient: the public Go API (Graph.AddEdge[H] +
@@ -12711,7 +12716,11 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.ReadVi
 // both endpoints must resolve through the mapper, else the hop is returned with
 // the declared type and no properties (the same degenerate behaviour the prior
 // per-pair materialisers had when resolution failed).
-func resolveHopRel(bopts *buildOpts, g *lpg.ReadView[string, float64], prevID, dstID, fwdPos uint64, reversed bool, declaredType string, accepted []string) expr.RelationshipValue {
+// bopts is unused since rmp #2317: the hop's identity IS the handle, so nothing
+// here consults the per-query forward-CSR snapshot bopts carried for the retired
+// position→handle resolution. It is kept in the signature because every hop
+// materialiser shares it.
+func resolveHopRel(_ *buildOpts, g *lpg.ReadView[string, float64], prevID, dstID, fwdPos uint64, reversed bool, declaredType string, accepted []string) expr.RelationshipValue {
 	rel := expr.RelationshipValue{
 		ID:      fwdPos,
 		StartID: prevID,
@@ -12726,15 +12735,13 @@ func resolveHopRel(bopts *buildOpts, g *lpg.ReadView[string, float64], prevID, d
 	if !prevOK || !dstOK {
 		return rel
 	}
-	// The fwdPos the operator recorded is a valid forward-CSR position in the
-	// ENCODED traversal orientation: prevKey->dstKey, or dstKey->prevKey when the
-	// hop is flagged reversed. Recover the stable edge handle from that
-	// orientation (where the position indexes the real arc).
-	encStKey, encEnKey := prevKey, dstKey
-	if reversed {
-		encStKey, encEnKey = dstKey, prevKey
-	}
-	fwdHandle := edgeHandleAtFwdPos(bopts, g, encStKey, encEnKey, fwdPos)
+	// The id the operator recorded IS the stable edge handle since rmp #2317. It
+	// used to be a forward-CSR position in the ENCODED traversal orientation
+	// (prevKey->dstKey, or dstKey->prevKey when the hop is flagged reversed), which
+	// had to be resolved in that orientation because only there did the position
+	// index the real arc. A handle needs no orientation: csr.BuildReverse gives one
+	// handle to both directions of one logical edge.
+	fwdHandle := fwdPos
 
 	// The reported endpoints and the type/property lookup follow the edge's
 	// CREATE-direction storage pair. For a DIRECTED edge that is the encoded
@@ -12743,7 +12750,10 @@ func resolveHopRel(bopts *buildOpts, g *lpg.ReadView[string, float64], prevID, d
 	// the single CREATE-direction pair. Pick the orientation whose by-handle
 	// store actually carries this handle; without this an undirected reverse hop
 	// renders an empty type (#1785). The probe leaves a directed edge untouched.
-	stKey, enKey := encStKey, encEnKey
+	stKey, enKey := prevKey, dstKey
+	if reversed {
+		stKey, enKey = dstKey, prevKey
+	}
 	stID, enID := prevID, dstID
 	if reversed {
 		stID, enID = dstID, prevID
@@ -12952,59 +12962,6 @@ func relPresentByHandleOrPair(g *lpg.ReadView[string, float64], stKey, enKey str
 		return ok && !expr.IsNull(v)
 	}
 	return g.EdgeHasProperty(stKey, enKey, k)
-}
-
-// edgeHandleAtFwdPos returns the stable per-edge handle stored at forward
-// CSR position edgePos for the (srcKey, dstKey) pair, or 0 when: the graph
-// carries no handle column, edgePos is outside srcKey's adjacency range,
-// the slot at edgePos does not point at dstKey, or either endpoint is
-// unknown to the mapper. A 0 return signals the caller to fall back to the
-// positional per-instance idx path.
-//
-// Unlike edgeInstanceIdxFor this performs no positional counting: it reads
-// the handle directly from the CSR slot, which is why it remains correct
-// after a parallel sibling is deleted.
-//
-// The forward CSR is the per-query snapshot cached on bopts ([ensureFwdCSR]),
-// built once per query rather than once per row (#1574). All slot reads —
-// bounds, the edges[edgePos] != dstID guard, and the handle — are made against
-// that snapshot's own VerticesSlice/EdgesSlice/HandlesSlice so they stay
-// internally consistent.
-func edgeHandleAtFwdPos(bopts *buildOpts, g *lpg.ReadView[string, float64], srcKey, dstKey string, edgePos uint64) uint64 {
-	adj := g.AdjList()
-	srcID, ok := adj.Mapper().Lookup(srcKey)
-	if !ok {
-		return 0
-	}
-	dstID, ok := adj.Mapper().Lookup(dstKey)
-	if !ok {
-		return 0
-	}
-	fwdCSR := ensureFwdCSR(bopts, g)
-	if fwdCSR == nil {
-		return 0
-	}
-	handles := fwdCSR.HandlesSlice()
-	if handles == nil {
-		return 0
-	}
-	verts := fwdCSR.VerticesSlice()
-	edges := fwdCSR.EdgesSlice()
-	if uint64(srcID)+1 >= uint64(len(verts)) {
-		return 0
-	}
-	start := verts[uint64(srcID)]
-	end := verts[uint64(srcID)+1]
-	if edgePos < start || edgePos >= end || edgePos >= uint64(len(edges)) {
-		return 0
-	}
-	// Guard: the slot must actually point at dstKey. Defends against a
-	// stale edgePos that survived a concurrent rebuild landing on a
-	// different neighbour.
-	if edges[edgePos] != dstID {
-		return 0
-	}
-	return handles[edgePos]
 }
 
 // edgeInstanceIdxFor returns the 1-based per-CREATE instance index that
@@ -16430,7 +16387,43 @@ func (a *lpgMutatorAdapter) RemoveEdge(src, dst string) {
 // statement re-adds exactly that instance, not the first slot. The edges-removed
 // counter and undo record are gated on the actual removal result, so a no-op
 // removal (handle already gone / wrong handle) records nothing (rmp #2018).
+// orientHandleEndpoints returns the (src, dst) orientation under which handle is
+// actually stored on the graph, swapping the pair when the caller named it the
+// other way round (rmp #2317).
+//
+// # Why a caller can name it either way
+//
+// A handle identifies ONE LOGICAL EDGE and is orientation-free by construction:
+// csr.BuildReverse gives both directions the same handle. The endpoint keys a
+// caller supplies, by contrast, come from a row's traversal columns — and an
+// undirected pattern over a directed edge (`MATCH (a)-[r]-(b)`) produces a row per
+// direction, so half of them name the storage pair backwards.
+//
+// This mattered the moment the emitted relationship identity became the handle:
+// before, a reverse row carried a forward-CSR position that simply failed to
+// resolve in the swapped orientation and fell back to endpoint matching. Now the
+// handle resolves, so the removal must be applied to the pair that actually holds
+// it. openCypher TCK Delete4 [1] caught it — the reverse row's relationship delete
+// missed, and the node delete on that same row then failed with "cannot delete node
+// with existing relationships".
+//
+// A handle present in neither orientation leaves the pair untouched, so the caller
+// falls through to its existing endpoint-matching behaviour.
+func orientHandleEndpoints(g *lpg.Graph[string, float64], src, dst string, handle uint64) (string, string) {
+	if handle == 0 || g == nil {
+		return src, dst
+	}
+	if g.HasEdgeHandle(src, dst, handle) {
+		return src, dst
+	}
+	if g.HasEdgeHandle(dst, src, handle) {
+		return dst, src
+	}
+	return src, dst
+}
+
 func (a *lpgMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
+	src, dst = orientHandleEndpoints(a.g, src, dst, handle)
 	r := a.rec()
 	var pre removedEdgePreimage
 	if r.active() {
@@ -16801,18 +16794,6 @@ func (a *lpgMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint6
 }
 func (a *lpgMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
 	a.w().RemoveEdgeInstanceByHandle(src, dst, handle)
-}
-
-// EdgeHandleAtPosition resolves the bound relationship instance's stable handle
-// from its forward-CSR edge position, reusing the read-path mechanism so the
-// write path identifies the exact same parallel instance reads would. Returns 0
-// when no handle is resolvable; the caller then mutates the per-pair store only.
-//
-// Through the WRITING TRANSACTION'S view (rmp #2299), not the present: the
-// instance it must resolve may be one this very transaction created, and it
-// must not be one another in-flight writer created.
-func (a *lpgMutatorAdapter) EdgeHandleAtPosition(src, dst string, edgePos uint64) uint64 {
-	return edgeHandleAtFwdPos(a.bopts, a.g.WriterViewOf(a.wtx), src, dst, edgePos)
 }
 
 // RecordConstraintInverse appends inv to this statement's undo log so a rollback
@@ -17281,6 +17262,7 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 // instance. The edges-removed counter and undo record are gated on the actual
 // removal result (rmp #2018).
 func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
+	src, dst = orientHandleEndpoints(a.g, src, dst, handle)
 	r := a.rec()
 	var pre removedEdgePreimage
 	if r.active() {
@@ -17663,14 +17645,6 @@ func (a *walMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint6
 func (a *walMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
 	a.w().RemoveEdgeInstanceByHandle(src, dst, handle)
 	_ = a.tx.RemoveEdgeInstanceByHandle(src, dst, handle) //nolint:errcheck // ErrTxFinished impossible here
-}
-
-// EdgeHandleAtPosition resolves the bound relationship instance's stable handle
-// from its forward-CSR edge position, reusing the read-path mechanism so the
-// write path identifies the exact same parallel instance reads would. Returns 0
-// when no handle is resolvable; the caller then mutates the per-pair store only.
-func (a *walMutatorAdapter) EdgeHandleAtPosition(src, dst string, edgePos uint64) uint64 {
-	return edgeHandleAtFwdPos(a.bopts, a.g.WriterViewOf(a.wtx), src, dst, edgePos)
 }
 
 // RecordConstraintInverse is [lpgMutatorAdapter.RecordConstraintInverse] for the
