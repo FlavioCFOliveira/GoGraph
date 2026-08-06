@@ -33,7 +33,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
@@ -63,37 +62,6 @@ var snapshotDiffFixture = []string{
 	`MATCH (p:Person {name:'doomed'}) DETACH DELETE p`,
 }
 
-// snapshotDiffQueries is the read corpus. Each entry names the read surface it
-// is there to cover, so a future change that stops covering one is visible.
-var snapshotDiffQueries = []struct{ name, q string }{
-	{"all-nodes", `MATCH (n) RETURN count(*) AS c`},
-	{"label-scan", `MATCH (n:Person) RETURN n.name AS name ORDER BY name`},
-	{"multi-label", `MATCH (n:Person:Admin) RETURN n.name AS name ORDER BY name`},
-	{"node-props", `MATCH (n:Person) RETURN n.name AS name, n.age AS age, n.active AS active, n.nickname AS nick ORDER BY name`},
-	{"node-labels-fn", `MATCH (n) RETURN labels(n) AS ls, n.name AS name ORDER BY name`},
-	{"properties-map", `MATCH (n:Company) RETURN properties(n) AS p`},
-	{"expand-typed", `MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS a, b.name AS b ORDER BY a, b`},
-	{"expand-untyped", `MATCH (a)-[r]->(b) RETURN a.name AS a, type(r) AS t, b.name AS b ORDER BY a, t, b`},
-	{"rel-props", `MATCH (a)-[r:KNOWS]->(b) RETURN a.name AS a, b.name AS b, r.since AS since, r.weight AS w ORDER BY a, b`},
-	{"rel-props-map", `MATCH ()-[r:LIKES]->() RETURN properties(r) AS p`},
-	{"parallel-edges", `MATCH (a:Person {name:'ada'})-[r]->(b:Person {name:'alan'}) RETURN type(r) AS t, r.since AS s ORDER BY t`},
-	{"degree", `MATCH (a:Person) RETURN a.name AS name, size([(a)-->() | 1]) AS d ORDER BY name`},
-	{"optional-match", `MATCH (n:Person) OPTIONAL MATCH (n)-[:WORKS_AT]->(c) RETURN n.name AS n, c.name AS c ORDER BY n`},
-	{"var-length", `MATCH (a:Person {name:'ada'})-[*1..2]->(x) RETURN count(*) AS c`},
-	{"exists-subquery", `MATCH (n:Person) WHERE EXISTS { MATCH (n)-[:KNOWS]->() } RETURN n.name AS name ORDER BY name`},
-	{"count-subquery", `MATCH (n:Person) RETURN n.name AS name, COUNT { (n)-[:KNOWS]->() } AS k ORDER BY name`},
-	{"pattern-predicate", `MATCH (n:Person) WHERE (n)-[:WORKS_AT]->(:Company) RETURN n.name AS name ORDER BY name`},
-	{"pattern-comprehension", `MATCH (n:Person {name:'ada'}) RETURN [(n)-[r]->(m) | type(r)] AS ts`},
-	{"aggregation", `MATCH (n:Person) RETURN count(n) AS c, sum(n.age) AS total, avg(n.age) AS mean`},
-	{"group-by", `MATCH (a)-[:WORKS_AT]->(c) RETURN c.name AS company, count(*) AS n ORDER BY company`},
-	{"index-seek", `MATCH (n:Person {age: 42}) RETURN n.name AS name`},
-	{"range-seek", `MATCH (n:Person) WHERE n.age > 40 RETURN n.name AS name ORDER BY name`},
-	{"deleted-node-absent", `MATCH (n {name:'doomed'}) RETURN count(*) AS c`},
-	{"path", `MATCH p = (a:Person {name:'ada'})-[:KNOWS]->(b) RETURN length(p) AS len, b.name AS b ORDER BY b`},
-	{"startnode-endnode", `MATCH ()-[r:WORKS_AT]->() RETURN startNode(r).name AS s, endNode(r).name AS e ORDER BY s`},
-	{"unwind-join", `MATCH (a:Person), (b:Person) WHERE a.age < b.age RETURN a.name AS a, b.name AS b ORDER BY a, b`},
-}
-
 // snapshotDiffEngine builds one arm.
 func snapshotDiffEngine(t *testing.T) *Engine {
 	t.Helper()
@@ -110,33 +78,6 @@ func snapshotDiffEngine(t *testing.T) *Engine {
 		}
 	}
 	return eng
-}
-
-// runToString renders a result deterministically so two arms can be compared as
-// text. Rows are rendered in the order the query produced them; every corpus
-// query that could be order-sensitive carries an ORDER BY.
-func runToString(t *testing.T, eng *Engine, q string) string {
-	t.Helper()
-	res, err := eng.Run(context.Background(), q, map[string]expr.Value{})
-	if err != nil {
-		return "ERROR: " + err.Error()
-	}
-	defer func() { _ = res.Close() }()
-	var b strings.Builder
-	cols := res.Columns()
-	b.WriteString(strings.Join(cols, "|") + "\n")
-	for res.Next() {
-		row := res.Record()
-		parts := make([]string, 0, len(cols))
-		for _, c := range cols {
-			parts = append(parts, canonRender(row[c]))
-		}
-		b.WriteString(strings.Join(parts, "|") + "\n")
-	}
-	if err := res.Err(); err != nil {
-		return "DRAIN ERROR: " + err.Error()
-	}
-	return b.String()
 }
 
 // canonRender renders a value deterministically.
