@@ -8,6 +8,36 @@
 // Releases it; a publisher prepares the next generation in a fresh
 // allocation and atomically swaps the pointer. Old generations are
 // reclaimed only after every outstanding reader has Released them.
+//
+// # How a generation relates to an MVCC snapshot (rmp #2311)
+//
+// They answer different questions and neither replaces the other.
+//
+// An [lpg.Snapshot] is an INSTANT: a commit timestamp a reader resolves each object
+// against, so the reader observes exactly the transactions committed at or before it.
+// Visibility is decided per record, at read time, by [mvcc.Visible]. That is the
+// module's isolation mechanism and its only one.
+//
+// A generation is a PUBLISHED ARTEFACT: one immutable derived structure — typically a
+// CSR built for whole-graph analytics — held alive by refcount while readers use it.
+// It decides nothing about visibility; it is a cached result whose contents were fixed
+// when it was built.
+//
+// The two are related by exactly one rule: A GENERATION IS ONLY MEANINGFUL AS OF THE
+// INSTANT IT WAS BUILT AT. Build it with [csr.BuildFromAdjListAsOf] from a snapshot,
+// and it describes that snapshot's graph for as long as it is held. Build it from the
+// present while writers commit and it describes no instant at all — which is the
+// defect class rmp #2293 recorded for the CSR pair cache, and rmp #2310 for the
+// checkpoint capture.
+//
+// # This package is NOT a second snapshot mechanism in the engine
+//
+// Nothing in the module uses it: the engine's analytics reads go through the versioned
+// accessors like every other read, and the only caller is examples/33_generation_swap,
+// which demonstrates the publish-and-refcount pattern itself. It is a utility a
+// consumer may use to cache a derived structure, and the paragraph above is the
+// contract for doing so safely. It is not a competing notion of "a consistent view",
+// because it never decides what is visible.
 package generation
 
 import (

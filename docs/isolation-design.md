@@ -388,7 +388,33 @@ image is exactly one committed-transaction boundary — which is also what crash
 recovery needs (replay frames with `txnSeq` above the snapshot's). Recovery
 builds the in-memory Snapshot as it applies the snapshot + WAL tail.
 
-## Staged migration (each stage stays green)
+## Staged migration — SUPERSEDED AND ABANDONED (rmp #2051, closed 2026-08-06)
+
+> **This plan was NOT the one that shipped, and it will not be revisited.** It is kept
+> as the record of a design that was replaced, not as pending work.
+>
+> The table below describes a single immutable ROOT — every structure folded into one
+> `Snapshot` object, atomically published by a pointer swap, with readers pinning it.
+> Snapshot isolation was to come from that root. What shipped instead is PER-OBJECT
+> VERSION CHAINS with a commit timestamp: each store keeps its own versions, a reader
+> carries an instant, and visibility is decided per record ([mvcc.Visible]).
+>
+> **Why the root was abandoned.** Publishing one root means every write rebuilds it, so
+> a write costs O(size of the changed structure) rather than O(size of the change).
+> Making that affordable needs persistent structures with structural sharing — a HAMT
+> or CTrie — and that is a model NEITHER reference engine uses: PostgreSQL versions the
+> tuple (`xmin`/`xmax`, `heapam_visibility.c`) and Memgraph versions the object with a
+> delta chain (`src/storage/v2/vertex.hpp`, `mvcc.hpp`). Both decide visibility per
+> object at read time, which is what this module now does. Adopting a shape neither of
+> them chose, in order to obtain a property both of them already have, was the wrong
+> trade.
+>
+> **What replaced each stage.** F3.2–F3.4 are delivered by the versioned stores in
+> `graph/lpg/mvcc_*.go` and `graph/adjlist/mvcc_adj.go`; F3.5 by the shared commit
+> record published in one atomic store ([Graph.endWrite]) plus the contiguous frontier
+> ([mvcc.Clock]); F3.6 by the MVCC test suites and the write-scaling gates in
+> `bench/mvccwrite`. The guarantee column still holds — it is simply obtained a
+> different way.
 
 | Stage | Deliverable | Guarantee after stage |
 |-------|-------------|-----------------------|
