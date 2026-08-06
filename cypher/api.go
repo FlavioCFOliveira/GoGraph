@@ -383,10 +383,16 @@ type buildOpts struct {
 	// before #1574 each helper rebuilt the whole forward CSR (O(V+E)) PER result
 	// row, making `RETURN r` O(R·(V+E)) and dominating heap allocations.
 	//
-	// The whole query's reads run inside one [lpg.Graph.View] RLock, so the
-	// adjacency is stable for the snapshot's lifetime: a single snapshot reused
-	// across all rows is consistent with the Expand-time CSR that minted the
-	// positions (invariant I-POS: identical per-source out-degree counts and
+	// The whole query's reads resolve at ONE MVCC INSTANT, so the adjacency is stable
+	// for the snapshot's lifetime: a single snapshot reused across all rows is
+	// consistent with the Expand-time CSR that minted the positions
+	//
+	// (This used to read "run inside one [lpg.Graph.View] RLock". That stopped being
+	// true in sprint 334: a read no longer takes the visibility barrier at all — it
+	// carries a start timestamp and each structure resolves against it. The stability
+	// the paragraph depends on is unchanged, but it now comes from the instant rather
+	// than from excluding writers, and a reader who believed the old sentence would
+	// look for a lock that is not taken. rmp #2314.) (invariant I-POS: identical per-source out-degree counts and
 	// neighbour insertion order ⇒ identical edge positions, BuildFromAdjList
 	// being a deterministic pure function of the adjacency list). fwdCSRReady
 	// disambiguates "not yet built" from a nil snapshot. Forward-only by design:
@@ -2168,19 +2174,24 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 		return nil, err
 	}
 
-	// ── 2+3. Build the physical operator tree AND execute it under the read
-	// visibility barrier (#1077) ─────────────────────────────────────────────
-	// The physical build snapshots live mutable graph structures (the forward
-	// CSR in buildEdgeTypeFilter, the per-edge label/instance lookups). Running
-	// it inside Graph.View (visMu.RLock) means a concurrent writer — which grows
-	// the adjacency under Graph.ApplyAtomically (visMu.Lock) — cannot tear those
-	// snapshots mid-build. Draining the whole query inside the same barrier also
-	// gives the read a consistent, partial-transaction-free view (audit gap F3,
-	// docs/isolation-design.md); materialising releases the read lock before the
-	// caller iterates, so a long-open Result can never deadlock a writer.
+	// ── 2+3. Build the physical operator tree AND execute it AT ONE MVCC INSTANT ──
+	// The physical build snapshots derived structures (the forward CSR in
+	// buildEdgeTypeFilter, the per-edge label/instance lookups). They cannot be torn
+	// by a concurrent writer because every one of them resolves against the read view
+	// opened below — one start timestamp for the whole query, registered with the
+	// reclamation horizon so nothing it can still reach is freed while it runs. That
+	// is what gives the read a consistent, partial-transaction-free view.
 	//
-	// build runs under visMu.RLock; nothing here may call g.View/g.ApplyAtomically
-	// (visMu is non-re-entrant — see lpg.Graph.View/ApplyAtomically).
+	// (This described a VISIBILITY BARRIER until rmp #2314 corrected it: "Running it
+	// inside Graph.View (visMu.RLock) means a concurrent writer ... cannot tear those
+	// snapshots mid-build. Draining the whole query inside the same barrier also gives
+	// the read a consistent view". Sprint 334 removed the barrier from the read path —
+	// a read takes no visMu at all — so a reader who believed that sentence would look
+	// for exclusion that is not there and would misjudge what makes the build sound.
+	// The guarantee is unchanged; its mechanism is the instant, not the lock.)
+	//
+	// Nothing here may call g.View/g.ApplyAtomically: visMu is non-re-entrant, and a
+	// DDL transition still takes it exclusively — see lpg.Graph.View/ApplyAtomically.
 	var (
 		r        *Result
 		buildErr error
