@@ -131,3 +131,70 @@ func TestEndpointBirth_NodesAndEdgesStayInStep(t *testing.T) {
 			"while its own arc correctly did not", nodes, edges, 2*edges)
 	}
 }
+
+// TestEndpointBirth_HandlePathsAlsoRecordTheBirth covers the two HANDLE-bearing edge
+// paths, which are the ones a DURABLE write actually takes.
+//
+// [Graph.addEdgeInfo] is the direct Go API's path. store/txn's OpAddEdgeH apply goes
+// through [Graph.addEdgeHIfAbsentInfo], and [Graph.AddEdgeH] through addEdgeHInfo —
+// two separate functions that interned their endpoints through adjlist exactly as
+// addEdgeInfo did. Fixing only the first left every durable write exposed, and a
+// checkpoint capture measured it at 154 visible nodes against 71 visible edges where
+// 142 was owed.
+//
+// Table-driven over the three paths so a fourth cannot be added without either being
+// covered here or visibly absent.
+func TestEndpointBirth_HandlePathsAlsoRecordTheBirth(t *testing.T) {
+	paths := []struct {
+		name  string
+		write func(g *Graph[string, float64], tx WriteTx, a, b string) error
+	}{
+		{"AddEdge", func(g *Graph[string, float64], tx WriteTx, a, b string) error {
+			return g.Writer(tx).AddEdge(a, b, 1)
+		}},
+		{"AddEdgeH", func(g *Graph[string, float64], tx WriteTx, a, b string) error {
+			_, err := g.Writer(tx).AddEdgeH(a, b, 1)
+			return err
+		}},
+		{"AddEdgeHIfAbsent", func(g *Graph[string, float64], tx WriteTx, a, b string) error {
+			_, err := g.Writer(tx).AddEdgeHIfAbsent(a, b, 1, 7)
+			return err
+		}},
+	}
+	for _, p := range paths {
+		t.Run(p.name, func(t *testing.T) {
+			g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			defer func() { _ = g.Close() }()
+
+			before := g.BeginRead()
+			defer g.EndRead(before)
+
+			if err := g.ApplyVersioned(func(tx WriteTx) error {
+				return p.write(g, tx, "a", "b")
+			}); err != nil {
+				t.Fatalf("%s: %v", p.name, err)
+			}
+
+			srcID, dstID := nodeIDOf(t, g, "a"), nodeIDOf(t, g, "b")
+			// The arc is correctly withheld from the older snapshot on every path; the
+			// endpoints must give the same answer.
+			if len(g.adj.EntryViewAsOf(srcID, before.startTS, before.txID).Neighbours) > 0 {
+				t.Fatalf("%s: the arc is visible to a snapshot older than its transaction; "+
+					"this test's premise is gone", p.name)
+			}
+			if g.NodeExistsAsOf(srcID, before) || g.NodeExistsAsOf(dstID, before) {
+				t.Errorf("%s: a node created by the append exists as of a snapshot older "+
+					"than the transaction that created it (src=%v dst=%v) while its own arc "+
+					"does not — one transaction visible in two pieces", p.name,
+					g.NodeExistsAsOf(srcID, before), g.NodeExistsAsOf(dstID, before))
+			}
+			// And visible afterwards, or the fix has hidden real work.
+			after := g.BeginRead()
+			defer g.EndRead(after)
+			if !g.NodeExistsAsOf(srcID, after) || !g.NodeExistsAsOf(dstID, after) {
+				t.Errorf("%s: the endpoints are invisible to a snapshot taken after their "+
+					"transaction committed", p.name)
+			}
+		})
+	}
+}

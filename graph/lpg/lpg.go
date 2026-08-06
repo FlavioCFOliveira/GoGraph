@@ -2030,6 +2030,12 @@ func (g *Graph[N, W]) addEdgeHInfo(src, dst N, w W, tx *writeCtx) (handle uint64
 			}
 		}
 	}
+	// Endpoints interned through the hooked path, so a node this append CREATES is
+	// born at the transaction's instant; see [Graph.internEndpoint] (rmp #2331).
+	g.internEndpoint(src, tx)
+	if src != dst {
+		g.internEndpoint(dst, tx)
+	}
 	h := g.nextEdgeHandle()
 	if err := g.adj.Writer(tx.adjTx()).AddEdgeH(src, dst, w, h); err != nil {
 		return 0, err

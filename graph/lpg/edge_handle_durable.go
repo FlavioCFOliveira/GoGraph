@@ -125,6 +125,19 @@ func (g *Graph[N, W]) AddEdgeHIfAbsent(src, dst N, w W, handle uint64) (inserted
 // idempotence is against a snapshot that has already been loaded, not against a
 // concurrent writer.
 func (g *Graph[N, W]) addEdgeHIfAbsentInfo(src, dst N, w W, handle uint64, tx *writeCtx) (inserted bool, err error) {
+	// Endpoints interned through the hooked path BEFORE either insert, so a node this
+	// append CREATES is born at the transaction's instant rather than at the beginning
+	// of time; see [Graph.internEndpoint] (rmp #2331).
+	//
+	// This is the path store/txn's OpAddEdgeH apply takes, and therefore the one every
+	// DURABLE edge write reaches the graph through. The first fix covered
+	// [Graph.addEdgeInfo] alone, which the direct Go API uses; a checkpoint capture
+	// then measured the remainder at 154 visible nodes against 71 visible edges, where
+	// 142 was owed.
+	g.internEndpoint(src, tx)
+	if src != dst {
+		g.internEndpoint(dst, tx)
+	}
 	if handle == 0 {
 		if err := g.adj.Writer(tx.adjTx()).AddEdge(src, dst, w); err != nil {
 			return false, err
