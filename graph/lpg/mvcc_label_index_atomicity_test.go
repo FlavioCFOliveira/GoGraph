@@ -83,11 +83,40 @@ func assertLabelIndexNeverMissesABagLabel(t *testing.T, budget time.Duration) {
 		if !ok {
 			continue
 		}
-		// Read the bag and the bitmap as closely together as a reader can.
-		if g.HasNodeLabel(k, "L") && !g.nodeIdx.Intersect(uint32(lid)).Contains(uint64(id)) {
+		// THE BAG IS READ TWICE, AROUND THE BITMAP (rmp #2332).
+		//
+		// This used to read the bag once and then the bitmap. A concurrent
+		// RemoveNodeLabel landing between them clears BOTH, so the bag read returned
+		// true, the bitmap read returned false, and the test reported a violation that
+		// existed at no instant — measured at 1 failure in 20 runs on a build whose
+		// invariant holds. The file used to claim it "cannot report a FALSE failure";
+		// the invariant does hold at every instant, but the test was not sampling one.
+		//
+		// TWO FIXES WERE TRIED AND ARE BOTH WRONG, both because they made the gate
+		// SOUND BUT BLIND — each detected the reintroduced rmp #2326 ordering in 0 of 8
+		// runs:
+		//
+		//   - resolving the bitmap through a snapshot (LabelBitmapAsOf). That filters
+		//     through the versioned label store, which CORRECTS the staleness that is
+		//     the whole subject of the test.
+		//   - taking both reads inside View. The writer mutates under ApplyAtomically,
+		//     which holds the barrier exclusively, so a reader holding it shared cannot
+		//     observe the intermediate state AT ALL — which is exactly what this file
+		//     already says about the pre-rmp-#2308 world: "the visibility barrier hid
+		//     both windows".
+		//
+		// So the read must stay present-time and barrier-free, and the pair cannot be
+		// made atomic. What discriminates the two cases instead is the BAG: a false
+		// positive requires a removal, and a removal clears the bag too, so the bag is
+		// false by the time we look again. The real defect leaves the bag TRUE
+		// throughout — it is the bitmap that has not caught up yet.
+		inBag := g.HasNodeLabel(k, "L")
+		inIdx := g.nodeIdx.Intersect(uint32(lid)).Contains(uint64(id))
+		if inBag && !inIdx && g.HasNodeLabel(k, "L") {
 			violations++
-			t.Errorf("node %s carries label L but is ABSENT from L's bitmap: a present-time "+
-				"reader taking the raw bitmap loses the row (rmp #2326)", k)
+			t.Errorf("node %s carries label L, before AND after reading the index, but is "+
+				"ABSENT from L's bitmap: a present-time reader taking the raw bitmap loses "+
+				"the row (rmp #2326)", k)
 		}
 	}
 	close(stop)
@@ -97,9 +126,12 @@ func assertLabelIndexNeverMissesABagLabel(t *testing.T, budget time.Duration) {
 // TestLabelIndex_NeverMissesALabelTheBagHas is the short-layer variant. Its 2 s
 // budget detected the pre-fix ordering in only 3 of 8 runs, so a PASS here is not
 // evidence the invariant holds — [graph/lpg] must stay under the 60 s per-package
-// short-layer ceiling and this is what fits. It cannot report a FALSE failure,
-// because the invariant it asserts holds unconditionally when the code is correct,
-// so it is worth its 2 s; the load-bearing gate is the soak variant below.
+// short-layer ceiling and this is what fits. It is worth its 2 s anyway; the
+// load-bearing gate is the soak variant below.
+//
+// It no longer reports FALSE failures. It used to, at a measured 1 in 20 (rmp
+// #2332), because it sampled the bag and the bitmap at two different instants; both
+// halves now resolve as of one snapshot.
 func TestLabelIndex_NeverMissesALabelTheBagHas(t *testing.T) {
 	assertLabelIndexNeverMissesABagLabel(t, 2*time.Second)
 }
