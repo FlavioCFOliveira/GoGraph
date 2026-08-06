@@ -154,6 +154,49 @@ func (g *Graph[N, W]) ForEachPairSlotRelTypeByID(
 	}
 }
 
+// ForEachPairSlotRelTypeByIDAsOf is [Graph.ForEachPairSlotRelTypeByID] resolving the
+// pair's per-slot relationship types AS OF s rather than as of the present
+// (rmp #2310).
+//
+// A nil snapshot reads the live entry, so it is exactly the unversioned form.
+//
+// It exists for the checkpoint capture, which reads every structure at one
+// transactional instant while writers keep committing. The unversioned form reads the
+// LIVE entry through LoadEntryH/LoadEntryLabels; the versioned one takes ONE entry
+// view as of s and reads the neighbour and label columns out of it, so the two columns
+// cannot come from different instants — which they can in the live form, where a
+// commit landing between the two loads leaves the ordinals and the types describing
+// different states of the same pair.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) ForEachPairSlotRelTypeByIDAsOf(
+	srcID, dstID graph.NodeID,
+	s *Snapshot,
+	visit func(ordinal int, name string),
+) {
+	if s == nil {
+		g.ForEachPairSlotRelTypeByID(srcID, dstID, visit)
+		return
+	}
+	v := g.adj.EntryViewAsOf(srcID, s.startTS, s.txID)
+	if len(v.Neighbours) == 0 || len(v.Labels) == 0 {
+		return
+	}
+	var scratch [8]int
+	for ordinal, idx := range canonicalPairSlots(v.Neighbours, v.Handles, dstID, scratch[:0]) {
+		if idx >= len(v.Labels) {
+			continue
+		}
+		lid, ok := decodeSlotLabel(v.Labels[idx])
+		if !ok {
+			continue
+		}
+		if name, ok := g.reg.Resolve(lid); ok {
+			visit(ordinal, name)
+		}
+	}
+}
+
 // ForEachPairOverflowRelTypeByID streams the directed pair's OVERFLOW
 // relationship types, in list order, invoking visit once per resolved name.
 //

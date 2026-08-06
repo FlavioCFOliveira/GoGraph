@@ -450,7 +450,7 @@ func TestWriteLabels_WriterFailureAtMagic(t *testing.T) {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
 	w := errWriter{err: errors.New("write boom")}
-	_, _, err := WriteLabels(w, g)
+	_, _, err := WriteLabels(w, g, nil)
 	if err == nil {
 		t.Fatal("WriteLabels on a failing writer must return an error")
 	}
@@ -561,7 +561,7 @@ func TestWriteLabels_FlushFailure(t *testing.T) {
 		}
 	}
 	w := &partialWriter{n: 0, err: errors.New("flush boom")}
-	_, _, err := WriteLabels(w, g)
+	_, _, err := WriteLabels(w, g, nil)
 	if err == nil {
 		t.Fatal("WriteLabels must surface the underlying writer's failure")
 	}

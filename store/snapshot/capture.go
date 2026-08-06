@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"slices"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
@@ -29,6 +30,44 @@ type component struct {
 	crc     uint32
 	present bool
 }
+
+// ErrCaptureNotQuiesced is returned by [CaptureGraph] when the instant it was given
+// was opened while a write transaction was still open, so the image it would produce
+// cannot be loaded back.
+//
+// # The precondition
+//
+// A NodeID is packed as (intra << shardBits) | shard and intra is assigned when the
+// key is INTERNED, not when the transaction commits. [graph.Mapper.LoadFrom] — the
+// function recovery seeds the interning table with — requires the intra indexes it
+// receives to form the contiguous sequence 0..N-1 within each shard, and rejects the
+// whole snapshot otherwise.
+//
+// A capture at an instant must drop the ids that instant cannot see. That is safe
+// only while the dropped ids form a per-shard SUFFIX, which holds exactly when every
+// interned id belongs to an already-committed transaction — because then the only
+// invisible ids are those interned after the instant, and interning is monotone
+// within a shard. An id interned by a transaction that is still open breaks it: the
+// id sits below ids that later transactions have already interned and committed, so
+// dropping it leaves a hole in the middle.
+//
+// # Why this fails rather than compensating
+//
+// There is no correct image to produce. Including the open transaction's node would
+// put a node in the image that did not exist at the instant. Excluding every id above
+// the hole would drop nodes that were COMMITTED before the instant — and the
+// checkpointer is about to truncate the WAL prefix that holds them, so those commits
+// would be lost outright. Fail-stop is the only sound answer, and a checkpoint that
+// returns an error has published nothing and truncated nothing.
+//
+// # How the checkpointer satisfies it
+//
+// It opens the instant inside the commit serialiser, which closes writer admission
+// and drains the admitted writers to zero before running. A writer's registration
+// spans its whole commit, so when the drain completes there is no open transaction
+// and therefore no interned-but-uncommitted id. The same drain is what makes the
+// durable-offset watermark and the instant describe one transaction boundary.
+var ErrCaptureNotQuiesced = errors.New("snapshot: capture instant taken while a write transaction was open")
 
 // capturedIndex is one serialisable secondary index's payload, captured with
 // the same by-value discipline as [component].
@@ -64,21 +103,35 @@ type capturedIndex struct {
 // commit had not yet succeeded and might still be rolled back.
 //
 // The invariant this type enforces is therefore: every byte of a snapshot comes
-// from the same instant. A Capture is taken by the caller INSIDE its own
-// exclusion window — for the checkpointer, under the store's commit
-// serialisation and inside [lpg.Graph.View] — and the publish step
-// ([WriteCapture]) touches no graph at all. Publishing stays lock-free, because
-// what phase 2 writes is bytes, not a graph.
+// from the same instant. The publish step ([WriteCapture]) touches no graph at all,
+// so publishing stays lock-free because what phase 2 writes is bytes, not a graph.
+//
+// # How the one instant is obtained (rmp #2310)
+//
+// Originally by EXCLUSION: the caller took the Capture inside its own window, which
+// for the checkpointer meant the store's commit serialisation plus [lpg.Graph.View],
+// held for the whole serialisation. That made the stall proportional to the graph,
+// and it was the last place in the module where a reader excluded writers.
+//
+// Now by VERSIONING: the caller opens an MVCC snapshot and passes it as `at`, every
+// component resolves through it, and writers commit throughout. Exclusion is still
+// available for callers that want the present (`at == nil`) and is what the offline
+// one-shot writer uses. See [CaptureGraph] for the obligations each mode carries and
+// [ErrCaptureNotQuiesced] for the one precondition the versioned mode keeps.
 //
 // Concurrency: a Capture is an immutable value once returned; it shares no
 // state with the graph it was taken from and is safe to publish from another
-// goroutine. Taking one requires the caller to hold whatever exclusion makes
-// the read atomic — see [CaptureGraph].
+// goroutine.
 //
 // Cost: a Capture holds the whole serialised snapshot in memory until it is
 // published. That is the price of an atomic image; see [CaptureGraph].
 type Capture[W any] struct {
-	csr         *csr.CSR[W]
+	csr *csr.CSR[W]
+	// order is how many nodes the image carries — the count admitted by the same
+	// instant filter the mapper used. orderKnown distinguishes "not computed" (the
+	// present-time capture, which falls back to the CSR) from a genuine zero.
+	order       uint64
+	orderKnown  bool
 	labels      component
 	properties  component
 	mapper      component
@@ -109,8 +162,26 @@ type Capture[W any] struct {
 	commitTS uint64
 }
 
-// Order reports the vertex count of the captured CSR adjacency.
-func (c *Capture[W]) Order() uint64 { return c.csr.Order() }
+// Order reports how many NODES this image carries.
+//
+// # It is the mapper's count, not the CSR's vertex-array length (rmp #2310)
+//
+// The CSR's array is sized from the present id space, because node ids are packed as
+// (intra << shardBits) | shard and an id-indexed array must span that space whatever
+// instant is being read. A concurrent capture therefore has vertex SLOTS for ids
+// interned after its instant — empty slots naming no node, because the mapper the image
+// carries is filtered at the instant and does not hold them.
+//
+// Reporting the array length here made the manifest disagree with the image it
+// describes: measured as manifest Order=2178 against a reconstructed 2176, two slots
+// belonging to one transaction that was still in flight. What a consumer means by
+// "Order" is how many nodes it will get back, so that is what this returns.
+func (c *Capture[W]) Order() uint64 {
+	if c.orderKnown {
+		return c.order
+	}
+	return c.csr.Order()
+}
 
 // CommitTS reports the MVCC instant this image was captured at, or 0 when the
 // originating graph had no MVCC clock.
@@ -136,15 +207,26 @@ func (c *Capture[W]) Size() uint64 { return c.csr.Size() }
 // the WAL. When nil the mapper is emitted only for string-keyed graphs (the
 // historical v3 behaviour) and non-string snapshots stay v2.
 //
+// at is the MVCC instant every component is resolved at. When non-nil, writers may
+// commit freely throughout the capture and the image still describes exactly that
+// instant (rmp #2310). When nil, the capture reads the PRESENT and the caller must
+// hold its own exclusion for the read to be atomic — which is the offline and
+// single-goroutine shape, and the one [WriteSnapshotFull] uses.
+//
 // # Caller's obligation
 //
-// CaptureGraph performs NO locking of its own. The caller MUST hold whatever
-// exclusion makes the read of g atomic with respect to writers, and must have
-// built cs inside that same window. For the checkpointer that is the store's
-// commit serialisation plus [lpg.Graph.View]; for an offline or
-// single-goroutine caller it is trivially satisfied. Capturing without such
-// exclusion reintroduces exactly the cross-component skew this type exists to
-// prevent (rmp #2269).
+// CaptureGraph performs NO locking of its own, and which obligation the caller
+// carries depends on whether it supplies an instant.
+//
+// With at == nil the caller MUST hold whatever exclusion makes the read of g atomic
+// with respect to writers, and must have built cs inside that same window. Capturing
+// the present without such exclusion reintroduces exactly the cross-component skew
+// this type exists to prevent (rmp #2269).
+//
+// With at != nil the caller does NOT need to exclude writers for the capture — that
+// is the whole point — but it MUST have opened at while no write transaction was
+// open, and must have built cs at the same instant. See [ErrCaptureNotQuiesced] for
+// what that precondition is and why it cannot be dropped.
 //
 // The component writers this calls take only their own per-shard read locks and
 // never re-enter the visibility barrier, so calling CaptureGraph inside
@@ -161,9 +243,10 @@ func CaptureGraph[N comparable, W any](
 	g *lpg.Graph[N, W],
 	cs *csr.CSR[W],
 	codec keyEncoder[N],
+	at *lpg.Snapshot,
 ) (*Capture[W], error) {
 	defer metrics.Time("store.snapshot.CaptureGraph").Stop()
-	c, err := captureGraph(g, cs, codec)
+	c, err := captureGraph(g, cs, codec, at)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.CaptureGraph.errors", 1)
 	}
@@ -175,6 +258,7 @@ func captureGraph[N comparable, W any](
 	g *lpg.Graph[N, W],
 	cs *csr.CSR[W],
 	codec keyEncoder[N],
+	at *lpg.Snapshot,
 ) (*Capture[W], error) {
 	if cs == nil {
 		return nil, errors.New("snapshot: nil CSR capture")
@@ -184,40 +268,138 @@ func captureGraph[N comparable, W any](
 	// image contains — never after it. Getting that direction wrong would let
 	// recovery restore a clock below data the snapshot already holds.
 	//
-	// The caller holds whatever exclusion makes the read atomic (see [CaptureGraph]),
-	// so "at or before" is currently "exactly at". Once rmp #2310 lets writers
-	// continue during a capture that stops being true, and this read is where the
-	// captured instant has to come from.
-	out := &Capture[W]{csr: cs, commitTS: g.MVCCStats().Now}
+	// AS OF THE CAPTURE'S OWN INSTANT (rmp #2310). Writers no longer stop for a
+	// capture, so "the present" is a moving target and reading it here would record an
+	// instant the components do not describe. The snapshot's own start timestamp IS the
+	// instant every component below is read at, so it is exactly what the image
+	// contains — not merely at-or-before it.
+	//
+	// A nil snapshot means the caller is reading the present under its own exclusion,
+	// which is the only remaining shape that can do so; then the clock is the instant.
+	commitTS := g.MVCCStats().Now
+	if at != nil {
+		commitTS = at.StartTS()
+	}
+	out := &Capture[W]{csr: cs, commitTS: commitTS}
+
+	// ONE WALK OF THE MAPPER, and every number below derives from it (rmp #2310).
+	//
+	// A concurrent capture must not compute the same set twice: writers commit between
+	// two walks, so a mapper written at one moment and a dead set counted at another do
+	// not agree. That disagreement was measured and narrowed three times — 8 nodes, then
+	// 10, then 2 — without ever closing, because the window IS the design. So the walk
+	// happens once here and its results are handed to the writers.
+	//
+	// interned is membership as of the instant: the ids the image carries at all. dead
+	// is the subset of those the instant sees as removed. Order is their difference,
+	// which is exactly what a recovery reconstructs — it interns every mapper entry and
+	// then applies the tombstones.
+	var interned map[graph.NodeID]struct{}
+	var dead []graph.NodeID
+	if at != nil {
+		interned = make(map[graph.NodeID]struct{}, g.AdjList().Mapper().Len())
+		// skippedAt records, per mapper shard, the FIRST id the instant filter dropped.
+		// It exists to enforce the contiguity precondition described on
+		// [ErrCaptureNotQuiesced]: once a shard has dropped an id, every later id in
+		// that shard must be dropped too, or the image carries a hole recovery cannot
+		// load. A 256-entry slice rather than a map, because this is walked once per
+		// node on every checkpoint.
+		skippedAt := make([]graph.NodeID, graph.MapperShardCount())
+		skipped := make([]bool, graph.MapperShardCount())
+		var gapErr error
+		g.AdjList().Mapper().Walk(func(id graph.NodeID, _ N) bool {
+			shard := graph.MapperShardOf(id)
+			if !g.NodeInternedAsOf(id, at) {
+				if !skipped[shard] {
+					skipped[shard], skippedAt[shard] = true, id
+				}
+				return true
+			}
+			if skipped[shard] {
+				// A VISIBLE id above a DROPPED one in the same shard. See
+				// [ErrCaptureNotQuiesced] for why no correct image exists here and why
+				// failing is the only sound answer.
+				gapErr = fmt.Errorf("%w: shard %d drops node %d (interned, not visible at "+
+					"instant %d) but keeps node %d above it — the image would have an "+
+					"intra-index hole that graph.Mapper.LoadFrom rejects",
+					ErrCaptureNotQuiesced, shard, uint64(skippedAt[shard]), at.StartTS(), uint64(id))
+				return false
+			}
+			interned[id] = struct{}{}
+			if !g.NodeExistsAsOf(id, at) {
+				dead = append(dead, id)
+			}
+			return true
+		})
+		if gapErr != nil {
+			return nil, gapErr
+		}
+		// tombstones.bin's input contract is ASCENDING ids, and the walk above does not
+		// produce them in that order: a NodeID packs as (intra << shardBits) | shard and
+		// Walk is shard-major, so it yields 0, 256, 512, …, 1, 257, … on any graph with
+		// more than one node in a shard. The present-time path gets its ascending order
+		// from the roaring bitmap's ToArray; this one has to sort. O(D log D) in the
+		// tombstone count, after an O(V) walk.
+		slices.Sort(dead)
+		// Order is NOT computed here. It comes from the two writers' own emitted counts
+		// below, because a number counted here and bytes written later are two moments,
+		// and under -race that gap reopened the disagreement this task spent four fixes
+		// narrowing. The walk's job is to decide MEMBERSHIP once; the writers report how
+		// much of it they actually serialised.
+	}
 
 	var err error
 	// labels.bin — always emitted (possibly empty), matching the writer.
 	if out.labels, err = captureComponent(func(w io.Writer) (int64, uint32, error) {
-		return WriteLabels(w, g)
+		return WriteLabels(w, g, at)
 	}); err != nil {
 		return nil, fmt.Errorf("snapshot: capture %s: %w", LabelsFile, err)
 	}
 
 	// properties.bin — always emitted (possibly empty), matching the writer.
 	if out.properties, err = captureComponent(func(w io.Writer) (int64, uint32, error) {
-		return WriteProperties(w, g)
+		return WriteProperties(w, g, at)
 	}); err != nil {
 		return nil, fmt.Errorf("snapshot: capture %s: %w", PropertiesFile, err)
 	}
 
 	// mapper.bin — emitted for every key type when a codec is supplied,
 	// otherwise for string-keyed graphs only (the v2 fallback).
-	if out.mapper, err = captureMapper(g, codec); err != nil {
+	var mapperNodes uint64
+	if out.mapper, mapperNodes, err = captureMapper(g, codec, interned); err != nil {
 		return nil, fmt.Errorf("snapshot: capture %s: %w", MapperFile, err)
 	}
 
-	// tombstones.bin — emitted ONLY when the graph currently has a removed
-	// node, so a graph that never deleted one produces a byte-identical
-	// snapshot to the pre-component layout. The count probe and the write must
-	// observe the same instant, which the caller's exclusion guarantees.
-	if g.TombstoneCount() > 0 {
+	// tombstones.bin — emitted ONLY when the instant sees a removed node, from the set
+	// the single walk above produced. A present-time capture keeps the old behaviour.
+	var deadWritten uint64
+	if at != nil {
+		if len(dead) > 0 {
+			if out.tombstones, err = captureComponent(func(w io.Writer) (int64, uint32, error) {
+				size, crc, n, werr := writeTombstonesFromN(w, dead)
+				deadWritten = n
+				return size, crc, werr
+			}); err != nil {
+				return nil, fmt.Errorf("snapshot: capture %s: %w", TombstonesFile, err)
+			}
+		}
+		// ORDER, from the two writers' OWN numbers: every mapper entry the image carries
+		// minus every tombstone it carries. That is exactly what a recovery reconstructs
+		// — it interns the first set and then applies the second — so the manifest cannot
+		// describe a graph different from the one the bytes produce.
+		//
+		// Only when a mapper was actually EMITTED. Without one the image names no nodes
+		// of its own (a codec-less, non-string-keyed graph), recovery reconstructs the
+		// node set from the CSR alone, and mapperNodes is zero because nothing was
+		// written — not because the graph is empty. Claiming a known order of zero there
+		// would report an empty graph for a populated image.
+		if out.mapper.present && mapperNodes >= deadWritten {
+			out.order, out.orderKnown = mapperNodes-deadWritten, true
+		}
+
+	} else if g.TombstoneCount() > 0 {
 		if out.tombstones, err = captureComponent(func(w io.Writer) (int64, uint32, error) {
-			return WriteTombstones(w, g)
+			return WriteTombstones(w, g, nil)
 		}); err != nil {
 			return nil, fmt.Errorf("snapshot: capture %s: %w", TombstonesFile, err)
 		}
@@ -226,7 +408,7 @@ func captureGraph[N comparable, W any](
 	// edgehandles.bin — emitted ONLY when the graph carries per-handle edge
 	// metadata; WriteEdgeHandles reports that itself via emitted.
 	var buf bytes.Buffer
-	size, crc, emitted, ehErr := WriteEdgeHandles(&buf, g)
+	size, crc, emitted, ehErr := WriteEdgeHandles(&buf, g, at)
 	if ehErr != nil {
 		return nil, fmt.Errorf("snapshot: capture %s: %w", EdgeHandlesFile, ehErr)
 	}
@@ -267,22 +449,40 @@ func captureComponent(write func(io.Writer) (int64, uint32, error)) (component, 
 // emitted for every key type (a self-sufficient snapshot); without one it is
 // emitted only when N is string, and the returned component is absent
 // otherwise, which keeps the snapshot at v2 exactly as before.
-func captureMapper[N comparable, W any](g *lpg.Graph[N, W], codec keyEncoder[N]) (component, error) {
+func captureMapper[N comparable, W any](g *lpg.Graph[N, W], codec keyEncoder[N], interned map[graph.NodeID]struct{}) (comp component, emitted uint64, err error) {
 	mapper := g.AdjList().Mapper()
+	// BOUNDED AT THE CAPTURED INSTANT (rmp #2310). An id interned after `at` must not
+	// reach the image: the recovered graph would hold a node that did not exist at the
+	// instant the image claims. An id interned before it stays even if its node was
+	// already removed — that pairing of mapper entry plus tombstone is how a removal
+	// survives a restart.
+	var include func(graph.NodeID) bool
+	if interned != nil {
+		include = func(id graph.NodeID) bool { _, ok := interned[id]; return ok }
+	}
 	if codec != nil {
-		return captureComponent(func(w io.Writer) (int64, uint32, error) {
-			return WriteMapper(w, mapper, codec)
+		comp, err = captureComponent(func(w io.Writer) (int64, uint32, error) {
+			var n uint64
+			size, crc, n, werr := writeMapperN(w, mapper, codec, include)
+			emitted = n
+			return size, crc, werr
 		})
+		return comp, emitted, err
 	}
 	// Reflection-free probe, mirroring writeMapperIfStringKeyed: only the
 	// string-keyed mapper has a codec-free serialisation.
 	stringMapper, ok := any(mapper).(*graph.Mapper[string])
 	if !ok {
-		return component{}, nil
+		// No mapper is emitted at all, so the image names no nodes of its own and
+		// [Capture.Order] falls back to the CSR, exactly as it did before.
+		return component{}, 0, nil
 	}
-	return captureComponent(func(w io.Writer) (int64, uint32, error) {
-		return WriteMapperString(w, stringMapper)
+	comp, err = captureComponent(func(w io.Writer) (int64, uint32, error) {
+		size, crc, n, werr := writeMapperStringN(w, stringMapper, include)
+		emitted = n
+		return size, crc, werr
 	})
+	return comp, emitted, err
 }
 
 // captureIndexes serialises each registered index that supports serialisation.

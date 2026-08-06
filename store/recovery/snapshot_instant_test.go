@@ -75,7 +75,7 @@ func TestSnapshotInstant_IsRecordedAndConsistentWithTheData(t *testing.T) {
 			"capture to record and this test cannot discriminate")
 	}
 
-	capt, err := snapshot.CaptureGraph[string, float64](g, csr.BuildFromAdjList[string, float64](g.AdjList()), nil)
+	capt, err := snapshot.CaptureGraph[string, float64](g, csr.BuildFromAdjList[string, float64](g.AdjList()), nil, nil)
 	if err != nil {
 		t.Fatalf("CaptureGraph: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestSnapshotInstant_RecoveryDerivesTheFloorFromTheImage(t *testing.T) {
 			t.Fatalf("commit %d: %v", i, cerr)
 		}
 	}
-	capt, err := snapshot.CaptureGraph[string, float64](g, csr.BuildFromAdjList[string, float64](g.AdjList()), txn.NewStringCodec())
+	capt, err := snapshot.CaptureGraph[string, float64](g, csr.BuildFromAdjList[string, float64](g.AdjList()), txn.NewStringCodec(), nil)
 	if err != nil {
 		t.Fatalf("CaptureGraph: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestSnapshotInstant_AnEmptyWALDoesNotEraseTheImagesInstant(t *testing.T) {
 		}
 	}
 	capt, err := snapshot.CaptureGraph[string, float64](
-		g, csr.BuildFromAdjList[string, float64](g.AdjList()), txn.NewStringCodec())
+		g, csr.BuildFromAdjList[string, float64](g.AdjList()), txn.NewStringCodec(), nil)
 	if err != nil {
 		t.Fatalf("CaptureGraph: %v", err)
 	}

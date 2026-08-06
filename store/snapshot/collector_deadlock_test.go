@@ -79,11 +79,11 @@ func TestSnapshotCollectors_NoMapperReentryDeadlock(t *testing.T) {
 		go func() {
 			defer collectorWG.Done()
 			for it := 0; it < iterations; it++ {
-				if _, _, err := WriteLabels(io.Discard, g); err != nil {
+				if _, _, err := WriteLabels(io.Discard, g, nil); err != nil {
 					t.Errorf("WriteLabels: %v", err)
 					return
 				}
-				if _, _, err := WriteProperties(io.Discard, g); err != nil {
+				if _, _, err := WriteProperties(io.Discard, g, nil); err != nil {
 					t.Errorf("WriteProperties: %v", err)
 					return
 				}

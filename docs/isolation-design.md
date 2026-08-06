@@ -372,21 +372,46 @@ which a partial transaction leaks; the single-root rule is what makes
 
 ## Checkpoint and recovery
 
-`store/checkpoint` today holds the store mutex across the whole
-snapshot-write+truncate window, stalling writers during disk I/O. Under SI the
-checkpointer instead:
+**Delivered by rmp #2310.** `store/checkpoint` used to hold the commit
+serialisation across the whole image serialisation, stalling every writer for work
+proportional to the graph. It now takes a snapshot **at a transactional instant** and
+serialises outside the lock:
 
-1. `snap := g.snapshot.Load()` (and `generation.Acquire()` if it must hold
-   backing storage stable while serialising), recording the WAL watermark
-   (`commitTS` == highest durable F1 `txnSeq`).
-2. Serialises the pinned immutable snapshot **lock-free**, while writers keep
-   committing newer snapshots it does not see.
-3. Truncates the WAL up to the watermark under a brief lock.
+1. Under the commit serialisation, take two O(1) readings and nothing else: the WAL
+   durable offset `W`, and an MVCC instant `at := g.BeginRead()`. The constraint and
+   index-definition sets are read in the same window.
+2. **Lock-free**, serialise every component — adjacency, mapper, labels, properties,
+   tombstones, edge handles, index payloads — resolved through `at`, while writers
+   commit throughout. Release `at` as soon as the bytes exist.
+3. **Lock-free**, write and publish the self-sufficient snapshot from those bytes,
+   touching no graph.
+4. Under the commit serialisation again, briefly, truncate the WAL prefix up to `W`.
 
-This makes checkpoints non-blocking for writers and guarantees the on-disk
-image is exactly one committed-transaction boundary — which is also what crash
-recovery needs (replay frames with `txnSeq` above the snapshot's). Recovery
-builds the in-memory Snapshot as it applies the snapshot + WAL tail.
+Checkpoints are therefore non-blocking for writers, and the on-disk image is exactly
+one committed-transaction boundary — which is also what crash recovery needs.
+Recovery derives its MVCC clock floor from the instant the manifest records
+(rmp #2309).
+
+Two properties make the arrangement sound, and both rest on the same thing — the
+serialiser closes writer admission and drains the admitted writers to zero, and a
+writer stays registered through its MVCC publish:
+
+- `W` is a durability position and `at` is a visibility position. The drain is what
+  makes them describe the same set of transactions. Without it, a commit that is
+  durable below `W` but not yet published would be missing from the image and
+  truncated away — an acknowledged commit lost. Asserted by
+  `checkpoint.TestCheckpoint_WatermarkAndInstantDescribeTheSameBoundary`.
+- No id is interned by a still-open transaction when `at` is taken, which is what
+  keeps the instant-filtered mapper's per-shard intra indexes contiguous and therefore
+  loadable. Stated as `snapshot.ErrCaptureNotQuiesced`; the capture refuses rather than
+  publishing an image recovery would reject.
+
+The reclamation horizon is pinned only for step 2 — an in-memory, O(V+E) window with
+no disk I/O — never across the snapshot write. Pinned by
+`checkpoint.TestCheckpoint_ReleasesTheHorizonBeforeWritingTheSnapshot`.
+
+This closes audit findings E6, E7, E8 and E9 of
+[`audit-mvcc-sole-cc-2026-08-02.md`](audit-mvcc-sole-cc-2026-08-02.md).
 
 ## Staged migration — SUPERSEDED AND ABANDONED (rmp #2051, closed 2026-08-06)
 
@@ -779,8 +804,13 @@ Delivered:
   Since rmp #2306 a writer is registered for its WHOLE lifetime — both paths from
   `BeginCtx`/`Begin` to their `Commit` — where there used to be two abutting
   windows (the semaphore's, then the in-flight counter's) that a quiesce needed to
-  abut exactly. So no transaction can be half-applied while the capture walks. rmp #2310 replaces the whole arrangement
-  with a capture at a transactional instant.
+  abut exactly. So no transaction can be half-applied while the capture walks.
+
+  **Since rmp #2310** the capture no longer walks under that lock at all: the lock
+  holds only long enough to take the watermark and open an MVCC instant, and the image
+  is serialised at that instant while writers commit. The drain is still load-bearing,
+  but for two narrower properties — see "Checkpoint and recovery" above — rather than
+  for excluding a writer from the walk.
 - **F3.6 (done).** Isolation proven by the invariant battery under `-race`:
   `lpg.TestIsolation_ApplyAtomically_View_NoPartialReads` (property atomicity,
   power-checked), `lpg.TestIsolation_CrossSubstructure_EdgeImpliesLabels`

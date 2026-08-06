@@ -648,6 +648,44 @@ handled by full-page images.
 For GoGraph the Memgraph shape is decisive: the checkpointer should be *a reader at one MVCC
 instant*, which also closes the capture skew recorded as #2269.
 
+#### OUTCOME — delivered by rmp #2310 (2026-08-06). E6, E7, E8, E9 closed.
+
+The Memgraph shape was adopted. Phase 1 now holds the commit serialisation only long
+enough for two O(1) readings — the WAL durable offset and `lpg.Graph.BeginRead()` — and
+the whole image is serialised at that instant with the lock released, while writers
+commit. The instant is released before the snapshot write, so the reclamation horizon
+is pinned for an in-memory O(V+E) window and never across disk I/O.
+
+**E9's gate was re-justified without the exclusion premise.** The `Poisoned()` check
+protects the *schema-registry read* that happens in the same locked window, not the
+capture. The graph image needs no health gate at all: a transaction whose commit failed
+never publishes its instant, so its versions are invisible to `at` by construction —
+strictly stronger than a check that can only report that *some* writer failed.
+
+**Two things this audit did not anticipate, both found by measurement.**
+
+1. *The manifest's `Order` was the CSR's vertex-array length.* That array is sized from
+   the present id space, so a concurrent capture has slots for ids interned after the
+   instant. Measured: manifest `Order=1128` against `Size=563` on a workload where every
+   transaction contributes exactly two nodes and one edge. Fixed by reporting what the
+   components actually carry; the fixture's absolute oracle is now asserted against the
+   manifest itself, not only against the reconstruction.
+
+2. *Filtering the mapper can make the snapshot unloadable.* `graph.Mapper.LoadFrom`
+   requires per-shard intra indexes to be contiguous, and intra is assigned at INTERN
+   time. Dropping the ids an instant cannot see is safe only while the dropped set is a
+   per-shard suffix — which holds exactly when no write transaction is open when the
+   instant is taken, because interning is monotone within a shard. The commit
+   serialiser's drain guarantees it; the capture now verifies it and returns
+   `snapshot.ErrCaptureNotQuiesced` rather than publishing an image recovery would
+   reject *after* the WAL prefix was truncated. Reproduced deterministically in
+   `store/snapshot/mapper_gap_test.go`.
+
+   A related contract had silently broken in the same change: `TombstonedIDsAsOf`
+   documents ascending ids, and derived them from a shard-major mapper walk that is
+   ascending only while every shard holds one node — true below 256 nodes, false above.
+   Now sorted, with a fixture large enough to exercise it.
+
 ### 13.7 Garbage collection, and a horizon bug this audit had missed
 
 | | Where | Horizon | Bound |

@@ -153,7 +153,7 @@ func TestWriteLabels_PerSlotEdgeRecords(t *testing.T) {
 			}
 
 			var buf bytes.Buffer
-			size, _, err := WriteLabels(&buf, g)
+			size, _, err := WriteLabels(&buf, g, nil)
 			if err != nil {
 				t.Fatalf("WriteLabels: %v", err)
 			}

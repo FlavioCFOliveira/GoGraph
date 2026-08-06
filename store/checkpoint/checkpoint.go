@@ -45,6 +45,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/internal/clock"
@@ -127,6 +128,16 @@ type Checkpointer[N comparable, W any] struct {
 	// snapshot I/O: a test sets it to block and asserts a concurrent committer
 	// proceeds meanwhile. It is nil in production.
 	afterCaptureHook func()
+
+	// afterWatermarkHook, when non-nil, is invoked INSIDE the phase-1 commit
+	// lock, immediately after the durable-offset watermark and the MVCC instant
+	// have both been taken and before anything is serialised. It is a test-only
+	// seam (set by white-box tests in this package) used to assert the invariant
+	// that makes those two numbers describe the SAME transaction boundary — no
+	// commit may be durable-but-unpublished at this point, or the WAL prefix the
+	// watermark authorises truncating would contain a transaction the image, read
+	// at the instant, does not carry. It is nil in production.
+	afterWatermarkHook func()
 
 	triggerCh chan chan error
 	storeMu   *sync.Mutex
@@ -636,8 +647,22 @@ func (c *Checkpointer[N, W]) RunCheckpoint() error {
 // commits so the call is a true quiesce boundary), or the raw storeMu
 // otherwise (correct only when the caller serialises its own writes under
 // that same mutex). It is invoked TWICE per non-blocking checkpoint — once to
-// capture the watermark + CSR, once to truncate the WAL prefix — so the two
-// brief locked windows bracket the lock-free snapshot write.
+// take the watermark + the MVCC instant, once to truncate the WAL prefix — so the
+// two brief locked windows bracket the lock-free snapshot write.
+//
+// # The drain is load-bearing, not an implementation detail (rmp #2310)
+//
+// The wired serialiser closes writer admission and drains the admitted writers to
+// zero, and a writer's registration spans its whole commit. Two things depend on
+// that and on nothing else: the watermark and the instant describe the same set of
+// transactions, and no id is interned by a still-open transaction when the instant
+// is taken (see [snapshot.ErrCaptureNotQuiesced]).
+//
+// The storeMu fallback does NOT drain. It is correct only for the caller it was
+// written for — one that serialises its own writes under that same mutex, so there
+// is no concurrent writer to drain. A caller that uses the fallback AND writes
+// concurrently violates both properties; the capture detects the second and refuses,
+// rather than publishing a snapshot recovery cannot load.
 func (c *Checkpointer[N, W]) runUnderCommitLock(fn func() error) error {
 	if c.serialise != nil {
 		return c.serialise(fn)
@@ -651,13 +676,20 @@ func (c *Checkpointer[N, W]) runUnderCommitLock(fn func() error) error {
 // phases so writers stall only for the watermark+CSR capture, never for the
 // (potentially multi-second) snapshot disk I/O:
 //
-//	Phase 1 (under the commit lock — the quiesce boundary): capture a
-//	  transaction-boundary-consistent image. The WAL durable offset W is read
-//	  under the quiesce boundary, so it equals the byte length of every frame
-//	  committed so far (on a frame boundary); the ENTIRE graph image — adjacency
-//	  plus mapper, labels, properties, tombstones, edge handles and index
-//	  payloads — is captured inside one Graph.View, so every component reflects
-//	  that same boundary state (rmp #2269). Then the lock is released.
+//	Phase 1 (under the commit lock — the quiesce boundary): take TWO O(1)
+//	  readings, and nothing else that scales with the graph. The WAL durable
+//	  offset W, which equals the byte length of every frame committed so far (on a
+//	  frame boundary); and an MVCC instant, which is the moment the image
+//	  describes. The drain the commit lock performs is what makes those two
+//	  readings name the same transaction boundary, and it is also the
+//	  precondition the capture requires (see [snapshot.ErrCaptureNotQuiesced]).
+//	  The constraint and index-definition sets are read here too. Then the lock
+//	  is released.
+//	Phase 1b (lock-free): serialise the ENTIRE graph image — adjacency plus
+//	  mapper, labels, properties, tombstones, edge handles and index payloads —
+//	  at that instant, so every component reflects the same transaction boundary
+//	  (rmp #2269) while transactions commit throughout (rmp #2310). The instant is
+//	  released as soon as the bytes exist, before any disk I/O.
 //	Phase 2 (lock-free): write and publish the self-sufficient snapshot from the
 //	  captured bytes — touching no graph — while concurrent transactions commit
 //	  and append frames PAST W. fsync the WAL so the suffix [W,end) is durable.
@@ -681,6 +713,10 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 	var (
 		capt      *snapshot.Capture[W]
 		watermark int64
+		// at is the MVCC instant the image is read at, opened under the commit lock
+		// together with the watermark so the two describe the same transaction
+		// boundary, and released once the serialisation has finished (rmp #2310).
+		at *lpg.Snapshot
 	)
 	var constraints []snapshot.ConstraintSpec
 	var indexDefs []snapshot.IndexDefSpec
@@ -706,11 +742,29 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 		// Detecting the poison now — not at the phase-2 wlog.Sync(), which
 		// fires only AFTER writeSnapshot has already published the transient
 		// component — is what closes the window for BOTH the constraint and the
-		// index DDL paths. The poison is sticky, so if the writer is healthy
-		// here it stays healthy through this capture (no concurrent commit can
-		// run while the commit lock is held), and a DDL that poisons later, in
-		// the lock-free phase 2, is caught by the pre-truncate wlog.Sync() with
-		// the snapshot reflecting only the consistent phase-1 state.
+		// index DDL paths.
+		//
+		// # Re-justified without the exclusion premise (rmp #2310)
+		//
+		// This used to read "the poison is sticky, so if the writer is healthy here it
+		// stays healthy through this capture (no concurrent commit can run while the
+		// commit lock is held)". The parenthesis is no longer true: the serialisation
+		// now runs OUTSIDE this lock and transactions commit throughout it.
+		//
+		// The gate is still sound, and for a reason that never depended on exclusion.
+		// What it protects is the SCHEMA REGISTRY read below — constraintsFn and
+		// indexDefsFn — against a DDL whose WAL commit failed but whose compensator has
+		// not yet run. Both of those reads happen HERE, inside this same locked window,
+		// so what the gate must cover is this window and not the capture. A DDL that
+		// poisons the writer AFTER this point cannot have been folded into the
+		// constraint or index sets already read, and it is caught before anything is
+		// published by the pre-truncate wlog.Sync() in phase 3.
+		//
+		// The GRAPH image is a separate question and needs no health gate at all: it is
+		// read at an MVCC instant, and a transaction whose commit failed never publishes
+		// its instant, so its versions are invisible to `at` by construction. That is
+		// strictly stronger than the poison check, which can only report that SOME
+		// writer failed.
 		if perr := c.wlog.Poisoned(); perr != nil {
 			return perr
 		}
@@ -720,10 +774,12 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 		// the prefix a self-sufficient snapshot of this state folds, and the only
 		// safe WAL cut point (see wal.Writer.DurableOffset / TruncatePrefix).
 		watermark = c.wlog.DurableOffset()
-		// Capture the ENTIRE graph image — adjacency AND the mapper, labels,
-		// properties, tombstones, edge handles and index payloads — inside ONE
-		// View, so every component reflects the same transaction boundary
-		// (rmp #2269).
+		// The ENTIRE graph image — adjacency AND the mapper, labels, properties,
+		// tombstones, edge handles and index payloads — is captured at ONE instant, so
+		// every component reflects the same transaction boundary (rmp #2269). Until
+		// rmp #2310 that instant was enforced by EXCLUSION and the whole serialisation
+		// ran here, under the lock; it is now enforced by the MVCC snapshot opened
+		// below and the serialisation runs outside the lock.
 		//
 		// Capturing only the CSR here and handing the LIVE graph to the phase-2
 		// writer is what made a checkpoint publish a PARTIAL TRANSACTION: the
@@ -741,13 +797,39 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 		// I/O. The component writers take only their own per-shard read locks
 		// and never re-enter the barrier, so this cannot deadlock or trip
 		// View's re-entrancy guard.
-		var capErr error
-		c.g.View(func() {
-			cs := csr.BuildFromAdjList(c.g.AdjList())
-			capt, capErr = c.snap.CaptureGraph(cs, c.g, c.codec)
-		})
-		if capErr != nil {
-			return capErr
+		// THE INSTANT IS OPENED HERE, PAIRED WITH THE WATERMARK (rmp #2310).
+		//
+		// This is ALL the commit lock still does for the image: it makes the durable
+		// offset above and the MVCC instant below describe the SAME transaction
+		// boundary. Both are O(1) reads, so the exclusion window no longer scales with
+		// the graph — which is the whole point of the task. The serialisation itself
+		// happens after the lock is released, at this instant, while writers commit.
+		//
+		// # Why the two agree, stated as an invariant rather than assumed
+		//
+		// The watermark is a DURABILITY position and the instant is a VISIBILITY
+		// position, and they are not the same clock. The dangerous direction is a
+		// transaction that is durable below the watermark but whose commit instant is
+		// not yet published: `at` would not see it, the image would not carry it, and
+		// phase 3 would truncate away the only record of it. An acknowledged commit
+		// would be lost — the WAL prefix cut in half that AC3 names.
+		//
+		// It cannot happen because the commit serialiser CLOSES ADMISSION AND DRAINS
+		// the admitted writers to zero before running this closure, and a writer's
+		// registration spans its WHOLE commit — store/txn.Tx.Commit defers exitWriter
+		// past ApplyVersioned, which is what publishes the instant. So at this point
+		// there is no transaction between its fsync and its publish, and the durable
+		// prefix and the visible frontier describe the same set of transactions.
+		//
+		// That is a property of the serialiser, not of this file, so it is asserted
+		// rather than trusted: the seam below lets
+		// TestCheckpoint_WatermarkAndInstantDescribeTheSameBoundary check that no
+		// commit is in flight here, and it fails if a future change drains less.
+		//
+		// The snapshot is released by the deferred EndRead below, on every path.
+		at = c.g.BeginRead()
+		if c.afterWatermarkHook != nil {
+			c.afterWatermarkHook()
 		}
 		// Capture the constraint set inside the same locked window so it is
 		// transaction-boundary consistent with the CSR (see WithConstraintSpecs).
@@ -763,6 +845,55 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 	}); err != nil {
 		c.setErr(seq, err)
 		return err
+	}
+
+	// --- Phase 1b: SERIALISE THE IMAGE, LOCK-FREE, AT THE CAPTURED INSTANT ---
+	//
+	// This is the work that used to hold every writer out, and it is proportional to
+	// the graph. It now runs with the commit lock released: every component below
+	// resolves through `at`, so the image is the graph as of ONE transactional instant
+	// however many transactions commit while it runs.
+	//
+	// That is what Memgraph's CreateSnapshot does — it runs under a transaction and
+	// reads each vertex through storage::View::OLD rather than stopping writers
+	// (src/storage/v2/inmemory/storage.cpp CreateSnapshot;
+	// src/storage/v2/durability/snapshot.cpp) — and it is the same property PostgreSQL
+	// obtains by replaying WAL forward to a consistent point instead of quiescing.
+	//
+	// # The horizon cost, and its bound
+	//
+	// A held snapshot pins reclamation: for as long as `at` is open the vacuum cannot
+	// free a version newer than it, so version memory grows by whatever the concurrent
+	// writers produce in this window. The bound is therefore THIS SERIALISATION's
+	// duration and nothing else — it is O(V+E) in memory with no disk I/O, and the
+	// snapshot is released before phase 2, which is the multi-second part. The
+	// checkpoint never holds the horizon across its own disk writes.
+	//
+	// MVCCStats.OldestSnapshotAge reports it if a capture ever does stall, and
+	// TestCheckpoint_ReleasesTheHorizonBeforeWritingTheSnapshot pins the release
+	// point so a future refactor cannot quietly extend it over phase 2.
+	{
+		// live is resolved AT THE SAME INSTANT as the arcs, so the vertex set and the
+		// edge set cannot describe different states: a node removed during the capture
+		// is still live here, because its arcs as of `at` are in the image.
+		// The vertex ARRAY is sized from the present id space, and that is correct: node
+		// ids are packed as (intra << shardBits) | shard, so the space is sparse and an
+		// id-indexed array must span it whatever instant is being read. Extra slots are
+		// empty and name no node — membership comes from the mapper, which IS filtered at
+		// the instant, and from live below.
+		cs := csr.BuildFromAdjListAsOf(c.g.AdjList(),
+			func(id graph.NodeID) bool { return c.g.NodeExistsAsOf(id, at) },
+			at.StartTS(), at.TxID())
+		var capErr error
+		capt, capErr = c.snap.CaptureGraph(cs, c.g, c.codec, at)
+
+		// Released as soon as the bytes exist, and BEFORE phase 2's disk I/O: holding
+		// it longer would pin the reclamation horizon for the whole snapshot write.
+		c.g.EndRead(at)
+		if capErr != nil {
+			c.setErr(seq, capErr)
+			return capErr
+		}
 	}
 
 	// Test-only seam: fires at the start of phase 2, with the commit lock

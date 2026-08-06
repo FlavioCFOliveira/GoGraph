@@ -21,7 +21,7 @@ func TestMapper_WriteRead_Roundtrip(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	size, crc, err := WriteMapperString(&buf, m)
+	size, crc, err := WriteMapperString(&buf, m, nil)
 	if err != nil {
 		t.Fatalf("WriteMapperString: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestMapper_WriteRead_EmptyMapper(t *testing.T) {
 	t.Parallel()
 	m := graph.NewMapper[string]()
 	var buf bytes.Buffer
-	size, _, err := WriteMapperString(&buf, m)
+	size, _, err := WriteMapperString(&buf, m, nil)
 	if err != nil {
 		t.Fatalf("WriteMapperString: %v", err)
 	}

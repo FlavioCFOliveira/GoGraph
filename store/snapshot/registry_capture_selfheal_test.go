@@ -37,12 +37,12 @@ func TestSnapshotRegistryCapture_LabelSelfHeals(t *testing.T) {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
 
-	if _, err := collectNodeLabelRecords(g, stale); err == nil {
+	if _, err := collectNodeLabelRecords(g, nil, stale); err == nil {
 		t.Fatal("collectNodeLabelRecords with a stale registry snapshot must detect the missing name and error")
 	}
 
 	fresh := snapshotRegistry(g.Registry())
-	if _, err := collectNodeLabelRecords(g, fresh); err != nil {
+	if _, err := collectNodeLabelRecords(g, nil, fresh); err != nil {
 		t.Fatalf("collectNodeLabelRecords after re-capture must succeed (self-heal), got %v", err)
 	}
 }
@@ -62,12 +62,12 @@ func TestSnapshotRegistryCapture_PropertyKeySelfHeals(t *testing.T) {
 		t.Fatalf("SetNodeProperty: %v", err)
 	}
 
-	if _, err := collectNodePropertyRecords(g, stale, &propValueArena{}); err == nil {
+	if _, err := collectNodePropertyRecords(g, nil, stale, &propValueArena{}); err == nil {
 		t.Fatal("collectNodePropertyRecords with a stale key snapshot must detect the missing key and error")
 	}
 
 	fresh := snapshotPropertyKeys(g.PropertyKeys())
-	if _, err := collectNodePropertyRecords(g, fresh, &propValueArena{}); err != nil {
+	if _, err := collectNodePropertyRecords(g, nil, fresh, &propValueArena{}); err != nil {
 		t.Fatalf("collectNodePropertyRecords after re-capture must succeed (self-heal), got %v", err)
 	}
 }

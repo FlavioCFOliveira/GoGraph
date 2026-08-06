@@ -74,10 +74,31 @@ type TombstonesReadback struct {
 // matching the labels.bin / properties.bin discipline. The id list is
 // emitted in ascending order ([lpg.Graph.TombstonedIDs] sorts it) so the
 // component is deterministic across writes of the same logical state.
-func WriteTombstones[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int64, crc uint32, err error) {
-	defer metrics.Time("store.snapshot.WriteTombstones").Stop()
+func WriteTombstones[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], at *lpg.Snapshot) (size int64, crc uint32, err error) {
+	return WriteTombstonesFrom(w, g.TombstonedIDsAsOf(at))
+}
 
-	ids := g.TombstonedIDs()
+// WriteTombstonesFrom is [WriteTombstones] over an ALREADY-COMPUTED dead set.
+//
+// It exists because a concurrent capture must derive every number in its manifest from
+// ONE walk of the mapper (rmp #2310). Recomputing the set here would be a second walk
+// at a second moment, and while writers commit those two moments do not agree: each
+// narrowing of that window reduced the disagreement — 8 nodes, then 10, then 2 — and
+// none could close it, because the window IS the design. The capture now walks once,
+// keeps the interned set and the dead set from that walk, and hands both to the writers
+// that serialise them.
+//
+// ids must be ascending, which is what the reader expects.
+func WriteTombstonesFrom(w io.Writer, ids []graph.NodeID) (size int64, crc uint32, err error) {
+	size, crc, _, err = writeTombstonesFromN(w, ids)
+	return size, crc, err
+}
+
+// writeTombstonesFromN is [WriteTombstonesFrom] also reporting how many ids it wrote,
+// so [Capture.Order] can be computed from the writers' OWN numbers rather than from a
+// set counted elsewhere (rmp #2310).
+func writeTombstonesFromN(w io.Writer, ids []graph.NodeID) (size int64, crc uint32, emitted uint64, err error) {
+	defer metrics.Time("store.snapshot.WriteTombstones").Stop()
 
 	bw := bufio.NewWriterSize(w, 1<<16)
 	hasher := crc32.New(castagnoli)
@@ -85,30 +106,30 @@ func WriteTombstones[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size
 
 	if err := binary.Write(tee, binary.LittleEndian, tombstonesMagic); err != nil {
 		metrics.IncCounter("store.snapshot.WriteTombstones.errors", 1)
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	if err := binary.Write(tee, binary.LittleEndian, tombstonesFormatVersion); err != nil {
 		metrics.IncCounter("store.snapshot.WriteTombstones.errors", 1)
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	if err := binary.Write(tee, binary.LittleEndian, uint64(len(ids))); err != nil {
 		metrics.IncCounter("store.snapshot.WriteTombstones.errors", 1)
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	for _, id := range ids {
 		if err := binary.Write(tee, binary.LittleEndian, uint64(id)); err != nil {
 			metrics.IncCounter("store.snapshot.WriteTombstones.errors", 1)
-			return 0, 0, err
+			return 0, 0, 0, err
 		}
 	}
 	if err := bw.Flush(); err != nil {
 		metrics.IncCounter("store.snapshot.WriteTombstones.errors", 1)
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 
 	// Total bytes: 4 (magic) + 4 (formatVersion) + 8 (count) + count*8.
 	total := int64(4+4+8) + int64(len(ids))*8
-	return total, hasher.Sum32(), nil
+	return total, hasher.Sum32(), uint64(len(ids)), nil
 }
 
 // ReadTombstones parses a tombstones.bin payload produced by

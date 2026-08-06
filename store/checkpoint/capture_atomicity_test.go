@@ -215,7 +215,26 @@ func TestCheckpoint_CaptureIsAtomic_SnapshotOnlyArtefact(t *testing.T) {
 			}()
 			assertPairInvariant(t, fmt.Sprintf("snapshot-only checkpoint %d", c), res.Graph)
 		}()
-		// Cross-component identity: the manifest records the CAPTURED CSR's
+		// The SAME absolute oracle, applied to the manifest itself. Every
+		// transaction contributes exactly two nodes and one edge, so a manifest
+		// describing a transactional instant must satisfy Order == 2*Size just as
+		// the reconstructed graph must. Asserting it here rather than only on the
+		// reconstruction is what distinguishes the two ways this can fail: a
+		// manifest that is internally consistent but disagrees with the image means
+		// the components were read at different instants, whereas one that is
+		// internally INCONSISTENT means the manifest's own counts do not come from
+		// the same instant as each other (rmp #2310 — Order was taken from the CSR's
+		// vertex-array length, which is sized from the present id space and so
+		// counts slots for ids interned after the captured instant).
+		if man.Order != 2*man.Size {
+			stop.Store(true)
+			wg.Wait()
+			t.Fatalf("checkpoint %d: the MANIFEST is internally inconsistent — Order=%d Size=%d, "+
+				"want Order == 2*Size (%d). Every transaction contributes exactly two nodes and "+
+				"one edge, so these two numbers were not derived from the same instant",
+				c, man.Order, man.Size, 2*man.Size)
+		}
+		// Cross-component identity: the manifest records the captured image's
 		// Order/Size. Every other component must describe that same instant,
 		// so the reconstructed graph must match it exactly. This is the
 		// assertion that pinned the defect: the manifest was right and the

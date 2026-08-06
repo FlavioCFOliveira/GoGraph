@@ -78,6 +78,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
@@ -123,6 +124,27 @@ func run() int {
 		// the path is process-local and not user-tainted; gosec G703
 		// otherwise flags every os.RemoveAll(variable) call.
 		defer func() { _ = os.RemoveAll(dir) }() //nolint:gosec // G703: dir is from MkdirTemp, not user input
+	}
+
+	// A WORKLOAD OVERRIDE, checked before the breakpoint switch (rmp #2310).
+	//
+	// Every other scenario here is selected by its breakpoint name, which works
+	// because each breakpoint had exactly one workload worth driving it through.
+	// That stopped being true when the checkpoint capture became concurrent: the
+	// interesting new question is what the SAME crash point does when transactions
+	// are committing throughout the checkpoint, and there is no second breakpoint to
+	// name it with. Selecting the workload separately from the crash point is the
+	// honest way to express that, and it keeps the breakpoint name meaning one place
+	// in the code rather than one place-and-a-workload.
+	if w := os.Getenv(envWorkload); w != "" {
+		switch w {
+		case workloadCheckpointConcurrent:
+			runConcurrentCheckpointCrash(dir, scenario)
+			return 0
+		default:
+			fmt.Fprintf(os.Stderr, "crashinject-helper: unknown workload %q\n", w)
+			return 1
+		}
 	}
 
 	switch scenario {
@@ -852,6 +874,146 @@ func commitConcTxn(store *txn.Store[int64, int64], id int64) {
 	}
 	if err := tx.SetNodeProperty(base+1, "txn", lpg.Int64Value(id)); err != nil {
 		log.Fatalf("txn %d SetNodeProperty: %v", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		log.Fatalf("txn %d Commit: %v", id, err)
+	}
+	// Acknowledged: frames + marker are fsynced. Announce it, unbuffered, so the
+	// line reaches the parent's pipe before any later SIGKILL.
+	fmt.Printf("%s%d\n", ackPrefix, id)
+}
+
+// Concurrent-CHECKPOINT crash scenario (rmp #2310, acceptance criterion 4).
+const (
+	// envWorkload selects the workload independently of the breakpoint name; see
+	// the override in run().
+	envWorkload = "GOGRAPH_CRASH_WORKLOAD"
+	// workloadCheckpointConcurrent is the only value envWorkload currently takes.
+	workloadCheckpointConcurrent = "checkpoint-concurrent"
+)
+
+// pairBase maps a transaction id to the first of the TWO node keys it owns. The
+// stride of 2 with no gap is deliberate: every id in the space belongs to some
+// transaction, so a recovered graph holding a node no transaction owns is
+// detectable rather than absorbed into a gap.
+func pairBase(id int64) int64 { return id * 2 }
+
+// runConcurrentCheckpointCrash drives checkpoints and writers CONCURRENTLY and
+// crashes inside a checkpoint, after its self-sufficient snapshot has been
+// published and made durable but before the WAL prefix is truncated.
+//
+// # What it exercises that runCheckpointCrash does not
+//
+// runCheckpointCrash commits its whole workload, THEN checkpoints: the capture has
+// no concurrent writer, so it cannot exercise the property rmp #2310 introduced.
+// Since that task, phase 1 holds the commit lock only long enough to read the
+// durable WAL offset and open an MVCC snapshot, and the entire image is serialised
+// outside the lock while transactions commit. A crash landing in that window is the
+// one that can expose a TORN image — components read at different instants — because
+// the published snapshot is durable and the WAL prefix that could repair it is still
+// present but about to be discarded.
+//
+// # The workload shape, and why it is this shape
+//
+// Each transaction commits exactly TWO FRESH NODES AND THE ONE EDGE BETWEEN THEM.
+// That makes the structural oracle absolute and independent of the interleaving: for
+// this workload a consistent graph has Order == 2*Size exactly, and any image that
+// folded a transaction's endpoints without its edge — or its edge without its
+// endpoints — violates it. With concurrent writers there is no hand-computable
+// transaction COUNT, but there is a hand-computable SHAPE, and the shape is what a
+// torn capture breaks.
+//
+// Every acknowledged commit prints an ACK line (see [ackPrefix]) before the crash,
+// so the parent additionally holds recovery to the durability contract: every
+// transaction the child was promised must be in the recovered graph, with its own
+// two nodes and its own arc.
+func runConcurrentCheckpointCrash(dir, scenario string) {
+	writers := envInt(envConcWriters, 4)
+	warmup := envInt(envConcWarmup, 8)
+	perWriter := envInt(envConcPerWriter, 400)
+
+	w, err := wal.Open(filepath.Join(dir, "wal"))
+	if err != nil {
+		log.Fatalf("wal.Open: %v", err)
+	}
+	g := lpg.New[int64, int64](adjlist.Config{Directed: true})
+	store := txn.NewStoreWithOptions[int64, int64](g, w, txn.Options[int64, int64]{
+		Codec:       txn.NewInt64Codec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
+
+	// Warm-up, committed one at a time and acknowledged before any concurrency or
+	// any checkpoint starts. These are the transactions the crash MUST NOT lose
+	// however it interleaves, and they keep "every acknowledged transaction
+	// survived" from passing vacuously on a run where the crash lands early.
+	for id := int64(1); id <= int64(warmup); id++ {
+		commitPairTxn(store, id)
+	}
+
+	// The checkpointer is wired the production way: a codec-aware mapper (so the
+	// snapshot is self-sufficient and the WAL is genuinely truncated) and the store's
+	// real commit serialiser (so phase 1 takes the watermark and the MVCC instant
+	// under the same drain production uses).
+	var unusedMu sync.Mutex
+	cp := checkpoint.New[int64, int64](
+		checkpoint.Config{Dir: dir},
+		g, w, &unusedMu,
+		checkpoint.WithCommitSerialiser[int64, int64](store.RunUnderCommitLock),
+		checkpoint.WithMapperCodec[int64, int64](store.Codec()),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	cp.Start(ctx)
+
+	// Checkpoints fire continuously alongside the writers. The breakpoint lands in
+	// one of them and SIGKILLs the whole process, so under the crash harness neither
+	// this goroutine nor the writers below ever finish.
+	var stop atomic.Bool
+	var cpWG sync.WaitGroup
+	cpWG.Add(1)
+	go func() {
+		defer cpWG.Done()
+		for !stop.Load() {
+			if terr := cp.Trigger(); terr != nil {
+				log.Fatalf("checkpoint Trigger: %v", terr)
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	for wi := 0; wi < writers; wi++ {
+		wg.Add(1)
+		go func(wi int) {
+			defer wg.Done()
+			first := int64(warmup) + 1 + int64(wi)*int64(perWriter)
+			for i := int64(0); i < int64(perWriter); i++ {
+				commitPairTxn(store, first+i)
+			}
+		}(wi)
+	}
+	wg.Wait()
+	stop.Store(true)
+	cpWG.Wait()
+
+	// Reached only on the non-crash self-test path (GOGRAPH_CRASH_AT names a
+	// breakpoint this run never hit, or the countdown outlived the workload).
+	cp.Stop()
+	cancel()
+	if cerr := w.Close(); cerr != nil {
+		log.Fatalf("wal.Close: %v", cerr)
+	}
+	fmt.Printf("runConcurrentCheckpointCrash: completed without crash (%s), %d transactions\n",
+		scenario, int64(warmup)+int64(writers)*int64(perWriter))
+}
+
+// commitPairTxn commits transaction `id`'s two fresh nodes and the single arc
+// between them and, on success, announces the acknowledgement on stdout. A commit
+// error is fatal for the same reason it is in [commitConcTxn]: the scenario's premise
+// is that these commits succeed until the process is killed.
+func commitPairTxn(store *txn.Store[int64, int64], id int64) {
+	base := pairBase(id)
+	tx := store.Begin()
+	if err := tx.AddEdge(base, base+1, id); err != nil {
+		log.Fatalf("txn %d AddEdge(%d->%d): %v", id, base, base+1, err)
 	}
 	if err := tx.Commit(); err != nil {
 		log.Fatalf("txn %d Commit: %v", id, err)

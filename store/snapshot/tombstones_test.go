@@ -57,7 +57,7 @@ func TestWriteReadTombstones_RoundTrip(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	size, _, err := WriteTombstones(&buf, g)
+	size, _, err := WriteTombstones(&buf, g, nil)
 	if err != nil {
 		t.Fatalf("WriteTombstones: %v", err)
 	}

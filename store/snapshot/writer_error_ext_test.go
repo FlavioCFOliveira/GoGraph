@@ -150,7 +150,7 @@ func TestWriteLabels_NodeRecordWriteFailure(t *testing.T) {
 	// Accept 0 bytes: everything will be buffered by the bufio.Writer inside
 	// WriteLabels until the final Flush, where the failure surfaces.
 	w := &partialWriter{n: 0, err: errors.New("node-record flush boom")}
-	_, _, err := WriteLabels(w, g)
+	_, _, err := WriteLabels(w, g, nil)
 	if err == nil {
 		t.Fatal("WriteLabels must return an error when the underlying writer fails")
 	}
@@ -168,7 +168,7 @@ func TestWriteLabels_EdgeRecordWriteFailure(t *testing.T) {
 	g.SetEdgeLabel("a", "b", "KNOWS")
 
 	w := &partialWriter{n: 0, err: errors.New("edge-record flush boom")}
-	_, _, err := WriteLabels(w, g)
+	_, _, err := WriteLabels(w, g, nil)
 	if err == nil {
 		t.Fatal("WriteLabels must return an error when the underlying writer fails on edge records")
 	}
@@ -190,7 +190,7 @@ func TestWriteLabels_RoundtripEdgeLabels(t *testing.T) {
 	g.SetEdgeLabel("a", "b", "KNOWS")
 
 	var buf bytes.Buffer
-	_, _, err := WriteLabels(&buf, g)
+	_, _, err := WriteLabels(&buf, g, nil)
 	if err != nil {
 		t.Fatalf("WriteLabels: %v", err)
 	}
@@ -361,7 +361,7 @@ func TestWriteMapperString_WriterFailure(t *testing.T) {
 	m := graph.NewMapper[string]()
 	m.Intern("alice")
 	w := errWriter{err: errors.New("mapper string write boom")}
-	_, _, err := WriteMapperString(w, m)
+	_, _, err := WriteMapperString(w, m, nil)
 	if err == nil {
 		t.Fatal("WriteMapperString on a failing writer must return an error")
 	}
@@ -376,7 +376,7 @@ func TestWriteMapperString_FlushFailure(t *testing.T) {
 	m.Intern("alice")
 	m.Intern("bob")
 	w := &partialWriter{n: 0, err: errors.New("mapper string flush boom")}
-	_, _, err := WriteMapperString(w, m)
+	_, _, err := WriteMapperString(w, m, nil)
 	if err == nil {
 		t.Fatal("WriteMapperString must surface the underlying writer's Flush failure")
 	}
@@ -404,7 +404,7 @@ func TestWriteMapper_NonStringCodecFlushFailure(t *testing.T) {
 	m.Intern(1)
 	m.Intern(2)
 	w := &partialWriter{n: 0, err: errors.New("mapper codec flush boom")}
-	_, _, err := WriteMapper(w, m, dummyInt64Codec{})
+	_, _, err := WriteMapper(w, m, dummyInt64Codec{}, nil)
 	if err == nil {
 		t.Fatal("WriteMapper (codec path) must surface the underlying Flush failure")
 	}
@@ -417,7 +417,7 @@ func TestWriteMapper_NonStringCodecWriterFailure(t *testing.T) {
 	m := graph.NewMapper[int64]()
 	m.Intern(42)
 	w := errWriter{err: errors.New("mapper codec write boom")}
-	_, _, err := WriteMapper(w, m, dummyInt64Codec{})
+	_, _, err := WriteMapper(w, m, dummyInt64Codec{}, nil)
 	if err == nil {
 		t.Fatal("WriteMapper (codec path) on a failing writer must return an error")
 	}
@@ -565,7 +565,7 @@ func TestReadMapperBytes_V1LayoutAccepted(t *testing.T) {
 	id := m.Intern("alice")
 
 	var buf bytes.Buffer
-	if _, _, err := WriteMapperString(&buf, m); err != nil {
+	if _, _, err := WriteMapperString(&buf, m, nil); err != nil {
 		t.Fatalf("WriteMapperString: %v", err)
 	}
 	rb, err := ReadMapperBytes(&buf)

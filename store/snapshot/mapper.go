@@ -135,7 +135,15 @@ type MapperReadback struct {
 //
 // The CRC32C covers the entire on-disk file, including the magic
 // header. The reader recomputes the CRC end-to-end at load time.
-func WriteMapperString(w io.Writer, m *graph.Mapper[string]) (size int64, crc uint32, err error) {
+func WriteMapperString(w io.Writer, m *graph.Mapper[string], include func(graph.NodeID) bool) (size int64, crc uint32, err error) {
+	size, crc, _, err = writeMapperStringN(w, m, include)
+	return size, crc, err
+}
+
+// writeMapperStringN is [WriteMapperString] also reporting how many pairs it emitted —
+// the number of NODES the image carries, which is what [Capture.Order] must report so
+// the manifest cannot disagree with what a recovery reconstructs (rmp #2310).
+func writeMapperStringN(w io.Writer, m *graph.Mapper[string], include func(graph.NodeID) bool) (size int64, crc uint32, emitted uint64, err error) {
 	defer metrics.Time("store.snapshot.WriteMapperString").Stop()
 
 	bw := bufio.NewWriterSize(w, 1<<20)
@@ -144,20 +152,20 @@ func WriteMapperString(w io.Writer, m *graph.Mapper[string]) (size int64, crc ui
 
 	if err := binary.Write(tee, binary.LittleEndian, mapperMagic); err != nil {
 		metrics.IncCounter("store.snapshot.WriteMapperString.errors", 1)
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	if err := binary.Write(tee, binary.LittleEndian, mapperFormatVersionString); err != nil {
 		metrics.IncCounter("store.snapshot.WriteMapperString.errors", 1)
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 
 	// Collect pairs in Walk order. The mapper takes per-shard RLocks
 	// internally, so the snapshot writer sees a consistent view of the
 	// interning table even under concurrent reads.
-	pairs := collectMapperPairs(m)
+	pairs := collectMapperPairs(m, include)
 	if err := binary.Write(tee, binary.LittleEndian, uint64(len(pairs))); err != nil {
 		metrics.IncCounter("store.snapshot.WriteMapperString.errors", 1)
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 
 	total := int64(4 + 2 + 8)
@@ -169,18 +177,18 @@ func WriteMapperString(w io.Writer, m *graph.Mapper[string]) (size int64, crc ui
 	for i := range pairs {
 		if uint64(len(pairs[i].Key)) > uint64(^uint32(0)) {
 			metrics.IncCounter("store.snapshot.WriteMapperString.errors", 1)
-			return 0, 0, fmt.Errorf("snapshot: mapper key too long: %d bytes", len(pairs[i].Key))
+			return 0, 0, 0, fmt.Errorf("snapshot: mapper key too long: %d bytes", len(pairs[i].Key))
 		}
 		binary.LittleEndian.PutUint64(scratch[0:8], uint64(pairs[i].ID))
 		binary.LittleEndian.PutUint32(scratch[8:12], uint32(len(pairs[i].Key)))
 		if _, err := tee.Write(scratch[:12]); err != nil {
 			metrics.IncCounter("store.snapshot.WriteMapperString.errors", 1)
-			return 0, 0, err
+			return 0, 0, 0, err
 		}
 		if pairs[i].Key != "" {
 			if _, err := io.WriteString(tee, pairs[i].Key); err != nil {
 				metrics.IncCounter("store.snapshot.WriteMapperString.errors", 1)
-				return 0, 0, err
+				return 0, 0, 0, err
 			}
 		}
 		total += int64(8 + 4 + len(pairs[i].Key))
@@ -188,18 +196,26 @@ func WriteMapperString(w io.Writer, m *graph.Mapper[string]) (size int64, crc ui
 
 	if err := bw.Flush(); err != nil {
 		metrics.IncCounter("store.snapshot.WriteMapperString.errors", 1)
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
-	return total, hasher.Sum32(), nil
+	return total, hasher.Sum32(), uint64(len(pairs)), nil
 }
 
 // collectMapperPairs walks m and returns every (NodeID, key) pair in
 // Walk order. The function is split out so [WriteMapperString] stays
 // allocation-cheap on the hot path: a single slice allocation, sized
 // from m.Len(), then the per-pair append is amortised O(1).
-func collectMapperPairs(m *graph.Mapper[string]) []MapperPair {
+// include, when non-nil, filters the ids the mapper carries. It exists for the
+// concurrent capture (rmp #2310): an id interned AFTER the captured instant must not
+// appear, or the recovered graph holds a node that did not exist at that instant. The
+// filter is applied here rather than at the walk's call sites so both serialisation
+// paths — string and codec — cannot drift on which ids they emit.
+func collectMapperPairs(m *graph.Mapper[string], include func(graph.NodeID) bool) []MapperPair {
 	out := make([]MapperPair, 0, m.Len())
 	m.Walk(func(id graph.NodeID, k string) bool {
+		if include != nil && !include(id) {
+			return true
+		}
 		out = append(out, MapperPair{ID: id, Key: k})
 		return true
 	})
@@ -252,14 +268,21 @@ type keyDecoder[N comparable] interface {
 // intra-index-major) so the read side reconstructs the mapper
 // deterministically. The CRC32C covers the entire on-disk file,
 // including the magic header.
-func WriteMapper[N comparable](w io.Writer, m *graph.Mapper[N], codec keyEncoder[N]) (size int64, crc uint32, err error) {
+func WriteMapper[N comparable](w io.Writer, m *graph.Mapper[N], codec keyEncoder[N], include func(graph.NodeID) bool) (size int64, crc uint32, err error) {
+	size, crc, _, err = writeMapperN(w, m, codec, include)
+	return size, crc, err
+}
+
+// writeMapperN is [WriteMapper] also reporting how many pairs it emitted — the number
+// of NODES the image carries, which is what [Capture.Order] reports (rmp #2310).
+func writeMapperN[N comparable](w io.Writer, m *graph.Mapper[N], codec keyEncoder[N], include func(graph.NodeID) bool) (size int64, crc uint32, emitted uint64, err error) {
 	defer metrics.Time("store.snapshot.WriteMapper").Stop()
 
 	// String keys reuse the frozen version-1 path so the bytes stay
 	// identical to the pre-codec writer. The any() probe matches the
 	// exact dynamic type, mirroring the writer-side dispatch in full.go.
 	if sm, ok := any(m).(*graph.Mapper[string]); ok {
-		return WriteMapperString(w, sm)
+		return writeMapperStringN(w, sm, include)
 	}
 
 	bw := bufio.NewWriterSize(w, 1<<20)
@@ -268,24 +291,24 @@ func WriteMapper[N comparable](w io.Writer, m *graph.Mapper[N], codec keyEncoder
 
 	if err := binary.Write(tee, binary.LittleEndian, mapperMagic); err != nil {
 		metrics.IncCounter("store.snapshot.WriteMapper.errors", 1)
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	if err := binary.Write(tee, binary.LittleEndian, mapperFormatVersionCodec); err != nil {
 		metrics.IncCounter("store.snapshot.WriteMapper.errors", 1)
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 
 	// Collect (id, encoded-key) pairs in Walk order. Each key is encoded
 	// once here; the per-shard RLocks the mapper takes internally give the
 	// writer a consistent view under concurrent reads.
-	ids, keys, encErr := collectEncodedMapperPairs(m, codec)
+	ids, keys, encErr := collectEncodedMapperPairs(m, codec, include)
 	if encErr != nil {
 		metrics.IncCounter("store.snapshot.WriteMapper.errors", 1)
-		return 0, 0, encErr
+		return 0, 0, 0, encErr
 	}
 	if err := binary.Write(tee, binary.LittleEndian, uint64(len(ids))); err != nil {
 		metrics.IncCounter("store.snapshot.WriteMapper.errors", 1)
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 
 	total := int64(4 + 2 + 8)
@@ -297,18 +320,18 @@ func WriteMapper[N comparable](w io.Writer, m *graph.Mapper[N], codec keyEncoder
 	for i := range ids {
 		if uint64(len(keys[i])) > uint64(^uint32(0)) {
 			metrics.IncCounter("store.snapshot.WriteMapper.errors", 1)
-			return 0, 0, fmt.Errorf("snapshot: mapper key too long: %d bytes", len(keys[i]))
+			return 0, 0, 0, fmt.Errorf("snapshot: mapper key too long: %d bytes", len(keys[i]))
 		}
 		binary.LittleEndian.PutUint64(scratch[0:8], uint64(ids[i]))
 		binary.LittleEndian.PutUint32(scratch[8:12], uint32(len(keys[i])))
 		if _, err := tee.Write(scratch[:12]); err != nil {
 			metrics.IncCounter("store.snapshot.WriteMapper.errors", 1)
-			return 0, 0, err
+			return 0, 0, 0, err
 		}
 		if len(keys[i]) > 0 {
 			if _, err := tee.Write(keys[i]); err != nil {
 				metrics.IncCounter("store.snapshot.WriteMapper.errors", 1)
-				return 0, 0, err
+				return 0, 0, 0, err
 			}
 		}
 		total += int64(8 + 4 + len(keys[i]))
@@ -316,9 +339,9 @@ func WriteMapper[N comparable](w io.Writer, m *graph.Mapper[N], codec keyEncoder
 
 	if err := bw.Flush(); err != nil {
 		metrics.IncCounter("store.snapshot.WriteMapper.errors", 1)
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
-	return total, hasher.Sum32(), nil
+	return total, hasher.Sum32(), uint64(len(ids)), nil
 }
 
 // collectEncodedMapperPairs walks m in Walk order and returns parallel
@@ -326,11 +349,14 @@ func WriteMapper[N comparable](w io.Writer, m *graph.Mapper[N], codec keyEncoder
 // single consistent view of the interning table is serialised. A codec
 // error aborts the collection and surfaces to the caller, which fails
 // the whole snapshot write rather than persisting a partial mapper.
-func collectEncodedMapperPairs[N comparable](m *graph.Mapper[N], codec keyEncoder[N]) (ids []graph.NodeID, keys [][]byte, err error) {
+func collectEncodedMapperPairs[N comparable](m *graph.Mapper[N], codec keyEncoder[N], include func(graph.NodeID) bool) (ids []graph.NodeID, keys [][]byte, err error) {
 	n := m.Len()
 	ids = make([]graph.NodeID, 0, n)
 	keys = make([][]byte, 0, n)
 	m.Walk(func(id graph.NodeID, k N) bool {
+		if include != nil && !include(id) {
+			return true
+		}
 		enc, eerr := codec.Encode(nil, k)
 		if eerr != nil {
 			err = fmt.Errorf("snapshot: encode mapper key for node %d: %w", uint64(id), eerr)

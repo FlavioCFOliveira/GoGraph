@@ -39,6 +39,7 @@ package lpg
 // existence test is the lock-free counter check it was before.
 
 import (
+	"slices"
 	"sync"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -387,15 +388,82 @@ func (g *Graph[N, W]) TombstonedIDsAsOf(s *Snapshot) []graph.NodeID {
 	if s == nil {
 		return g.TombstonedIDs()
 	}
-	// Ascending by construction: the mapper walks ids in increasing order, which is
-	// the order the snapshot writer expects and the same order the bitmap's ToArray
-	// yields. Asserted by the round-trip test rather than assumed.
+	// SORTED EXPLICITLY. This said "ascending by construction: the mapper walks ids in
+	// increasing order", and that is false for any graph with more than one node in
+	// some shard. A NodeID packs as (intra << shardBits) | shard and Walk is
+	// shard-major, so a 2000-node graph walks 0, 256, 512, 768, 1, 257, … — ascending
+	// only while every shard holds a single node, which is why it survived being
+	// written down. The present-time form returns the roaring bitmap's ToArray, which
+	// genuinely is ascending, so without this sort the two forms of the same function
+	// would disagree on the order of their result and the snapshot writer's documented
+	// input contract would hold on one path and not the other.
+	//
+	// The cost is O(D log D) in the number of TOMBSTONES, against the O(V) existence
+	// walk it follows.
 	out := make([]graph.NodeID, 0, g.TombstoneCount())
 	g.adj.Mapper().Walk(func(id graph.NodeID, _ N) bool {
-		if !g.NodeExistsAsOf(id, s) {
+		// INTERNED as of s AND not alive as of s. Both halves are load-bearing.
+		//
+		// An id interned AFTER s is also "not alive as of s", but it is not a tombstone —
+		// it is a node the image does not carry at all, because the mapper is filtered by
+		// the same instant. Listing it here names an id the image has no entry for, and
+		// the manifest then disagrees with what a recovery reconstructs: measured at
+		// manifest Order=1552 against a reconstructed 1542.
+		//
+		// A tombstone is only meaningful for a node the image HOLDS: interned by the
+		// instant, and removed by it.
+		if g.NodeInternedAsOf(id, s) && !g.NodeExistsAsOf(id, s) {
 			out = append(out, id)
 		}
 		return true
 	})
+	slices.Sort(out)
 	return out
+}
+
+// NodeInternedAsOf reports whether id had been INTERNED at or before s — that is,
+// whether the node existed at any point up to that instant, whether or not it had
+// already been removed by then.
+//
+// A nil snapshot reports whether the id is interned at all.
+//
+// # Why this is a different question from NodeExistsAsOf, and who needs it
+//
+// [Graph.NodeExistsAsOf] answers "is this node ALIVE as of s". A snapshot image needs
+// a weaker question for its MAPPER: the id→key table must carry every id the image can
+// reference, and that includes ids whose node was removed before s — those are in the
+// mapper AND in the tombstone set, which is how a removal survives a restart.
+//
+// What the mapper must NOT carry is an id interned AFTER s. Before rmp #2310 that
+// could not happen, because the capture excluded writers and the mapper could not
+// grow during it. It can now, and it was measured the moment the exclusion was
+// removed: TestCheckpoint_CaptureIsAtomic_SnapshotOnlyArtefact recovered Order=322
+// against Size=157, eight nodes above the 2*Size the fixture guarantees — exactly the
+// endpoints of four transactions that committed during the capture and whose edges
+// were correctly excluded.
+//
+// A node with no birth record is treated as interned: it predates the versioned life
+// store, or its record has been reclaimed, and in both cases its birth is in the past
+// of every live reader.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) NodeInternedAsOf(id graph.NodeID, s *Snapshot) bool {
+	if s == nil {
+		return true
+	}
+	sh := g.nodeLifeShardFor(id)
+	sh.mu.RLock()
+	if sh.born == nil {
+		sh.mu.RUnlock()
+		return true
+	}
+	born, hasBorn := sh.born[id]
+	sh.mu.RUnlock()
+	if !hasBorn {
+		// No birth record: reclaimed or pre-versioning, so it is in every reader's
+		// past. A node born after s ALWAYS has one, because reclamation cannot free a
+		// record newer than the oldest live reader — and s is a live reader.
+		return true
+	}
+	return born.visibleTo(s.startTS, s.txID)
 }

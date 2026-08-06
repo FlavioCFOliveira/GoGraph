@@ -46,7 +46,7 @@ func TestEdgeHandles_RoundTrip(t *testing.T) {
 	g.SetEdgeLabelByHandle("x", "y", h2, "CALLS")
 
 	var buf bytes.Buffer
-	_, _, emitted, err := WriteEdgeHandles(&buf, g)
+	_, _, emitted, err := WriteEdgeHandles(&buf, g, nil)
 	if err != nil {
 		t.Fatalf("WriteEdgeHandles: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestEdgeHandles_EmptyGraphOmitsComponent(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	_, _, emitted, err := WriteEdgeHandles(&buf, g)
+	_, _, emitted, err := WriteEdgeHandles(&buf, g, nil)
 	if err != nil {
 		t.Fatalf("WriteEdgeHandles: %v", err)
 	}
