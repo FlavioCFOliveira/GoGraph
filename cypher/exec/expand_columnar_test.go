@@ -89,9 +89,9 @@ func equalKeys(a, b []string) (int, bool) {
 }
 
 // drainExpandRow drains a plain row-mode Expand over ids and returns its rows.
-func drainExpandRow(t *testing.T, ids []int64, fwd, rev *staticCSR, cfg exec.ExpandConfig) []exec.Row {
+func drainExpandRow(t *testing.T, ids []int64, fwd, rev *staticCSR, filter map[uint64]string, cfg exec.ExpandConfig) []exec.Row {
 	t.Helper()
-	op := exec.NewExpand(&nodeIDChunkSource{ids: ids}, fwd, rev, cfg)
+	op := exec.NewExpand(&nodeIDChunkSource{ids: ids}, exec.StaticAdjacency(fwd, rev, filter), cfg)
 	rows, err := exec.Drain(context.Background(), op)
 	if err != nil {
 		t.Fatalf("row-mode Drain: %v", err)
@@ -101,9 +101,9 @@ func drainExpandRow(t *testing.T, ids []int64, fwd, rev *staticCSR, cfg exec.Exp
 
 // drainExpandChunk drains a columnarExpand over ids via FillChunk with the given
 // per-call cap and child-batch size, boxing the resulting chunk back to rows.
-func drainExpandChunk(t *testing.T, ids []int64, fwd, rev *staticCSR, cfg exec.ExpandConfig, perCall, batch int) []exec.Row {
+func drainExpandChunk(t *testing.T, ids []int64, fwd, rev *staticCSR, filter map[uint64]string, cfg exec.ExpandConfig, perCall, batch int) []exec.Row {
 	t.Helper()
-	base := exec.NewExpand(&nodeIDChunkSource{ids: ids, batch: batch}, fwd, rev, cfg)
+	base := exec.NewExpand(&nodeIDChunkSource{ids: ids, batch: batch}, exec.StaticAdjacency(fwd, rev, filter), cfg)
 	cp, ok := exec.NewColumnarExpand(base)
 	if !ok {
 		t.Fatalf("NewColumnarExpand: child was not recognised as a ChunkProducer")
@@ -138,12 +138,12 @@ func drainExpandChunk(t *testing.T, ids []int64, fwd, rev *staticCSR, cfg exec.E
 // assertColumnarMatchesRow drives the chunk path across a matrix of per-call caps
 // and child-batch sizes (to exercise both cursor levels and their cross-call
 // resume) and asserts every run yields the row-mode multiset byte-for-byte.
-func assertColumnarMatchesRow(t *testing.T, ids []int64, fwd, rev *staticCSR, cfg exec.ExpandConfig) {
+func assertColumnarMatchesRow(t *testing.T, ids []int64, fwd, rev *staticCSR, filter map[uint64]string, cfg exec.ExpandConfig) {
 	t.Helper()
-	want := sortedRowKeys(drainExpandRow(t, ids, fwd, rev, cfg))
+	want := sortedRowKeys(drainExpandRow(t, ids, fwd, rev, filter, cfg))
 	for _, perCall := range []int{1, 2, 3, 7, 64, exec.DefaultChunkCapacity} {
 		for _, batch := range []int{0, 1, 2, 5} {
-			got := sortedRowKeys(drainExpandChunk(t, ids, fwd, rev, cfg, perCall, batch))
+			got := sortedRowKeys(drainExpandChunk(t, ids, fwd, rev, filter, cfg, perCall, batch))
 			if len(got) != len(want) {
 				t.Fatalf("perCall=%d batch=%d: got %d rows, want %d", perCall, batch, len(got), len(want))
 			}
@@ -163,14 +163,14 @@ func TestExpandColumnar_DirOut(t *testing.T) {
 	fwd := buildCSR(5, [][2]int{{0, 1}, {0, 2}, {1, 3}, {2, 3}, {3, 4}})
 	rev := buildCSR(5, [][2]int{{1, 0}, {2, 0}, {3, 1}, {3, 2}, {4, 3}})
 	ids := []int64{0, 1, 2, 3, 4}
-	assertColumnarMatchesRow(t, ids, fwd, rev, exec.ExpandConfig{Direction: exec.DirOut, InputCol: 0})
+	assertColumnarMatchesRow(t, ids, fwd, rev, nil, exec.ExpandConfig{Direction: exec.DirOut, InputCol: 0})
 }
 
 func TestExpandColumnar_DirIn(t *testing.T) {
 	fwd := buildCSR(5, [][2]int{{0, 1}, {2, 1}, {3, 1}, {1, 4}})
 	rev := buildCSR(5, [][2]int{{1, 0}, {1, 2}, {1, 3}, {4, 1}})
 	ids := []int64{0, 1, 2, 3, 4}
-	assertColumnarMatchesRow(t, ids, fwd, rev, exec.ExpandConfig{Direction: exec.DirIn, InputCol: 0})
+	assertColumnarMatchesRow(t, ids, fwd, rev, nil, exec.ExpandConfig{Direction: exec.DirIn, InputCol: 0})
 }
 
 func TestExpandColumnar_DirBoth(t *testing.T) {
@@ -179,7 +179,7 @@ func TestExpandColumnar_DirBoth(t *testing.T) {
 	fwd := buildCSR(4, [][2]int{{0, 1}, {0, 2}, {1, 2}, {2, 2}, {2, 3}})
 	rev := buildCSR(4, [][2]int{{1, 0}, {2, 0}, {2, 1}, {2, 2}, {3, 2}})
 	ids := []int64{0, 1, 2, 3}
-	assertColumnarMatchesRow(t, ids, fwd, rev, exec.ExpandConfig{Direction: exec.DirBoth, InputCol: 0})
+	assertColumnarMatchesRow(t, ids, fwd, rev, nil, exec.ExpandConfig{Direction: exec.DirBoth, InputCol: 0})
 }
 
 func TestExpandColumnar_EdgeTypeFilter(t *testing.T) {
@@ -188,8 +188,8 @@ func TestExpandColumnar_EdgeTypeFilter(t *testing.T) {
 	rev := buildCSR(4, [][2]int{{1, 0}, {2, 0}, {3, 0}, {3, 1}})
 	filter := map[uint64]string{0: "KNOWS", 2: "KNOWS"}
 	ids := []int64{0, 1}
-	assertColumnarMatchesRow(t, ids, fwd, rev, exec.ExpandConfig{
-		Direction: exec.DirOut, EdgeType: "KNOWS", EdgeTypeFilter: filter, InputCol: 0,
+	assertColumnarMatchesRow(t, ids, fwd, rev, filter, exec.ExpandConfig{
+		Direction: exec.DirOut, EdgeType: "KNOWS", InputCol: 0,
 	})
 }
 
@@ -200,8 +200,8 @@ func TestExpandColumnar_EdgeTypeFilter_Reverse(t *testing.T) {
 	rev := buildCSR(4, [][2]int{{1, 0}, {1, 2}, {1, 3}})
 	filter := map[uint64]string{0: "R", 2: "R"} // accept (0→1) and (3→1), not (2→1)
 	ids := []int64{1}
-	assertColumnarMatchesRow(t, ids, fwd, rev, exec.ExpandConfig{
-		Direction: exec.DirIn, EdgeType: "R", EdgeTypeFilter: filter, InputCol: 0,
+	assertColumnarMatchesRow(t, ids, fwd, rev, filter, exec.ExpandConfig{
+		Direction: exec.DirIn, EdgeType: "R", InputCol: 0,
 	})
 }
 
@@ -227,10 +227,10 @@ func TestExpandColumnar_Multigraph_ParallelEdges_ReverseHop(t *testing.T) {
 		handles:  []uint64{100, 200, 300},
 	}
 	ids := []int64{0, 1}
-	assertColumnarMatchesRow(t, ids, fwd, rev, exec.ExpandConfig{Direction: exec.DirIn, InputCol: 0})
+	assertColumnarMatchesRow(t, ids, fwd, rev, nil, exec.ExpandConfig{Direction: exec.DirIn, InputCol: 0})
 
 	// Sanity: the reverse hop from node 1 must recover three DISTINCT edgeIDs.
-	rows := drainExpandChunk(t, []int64{1}, fwd, rev, exec.ExpandConfig{Direction: exec.DirIn, InputCol: 0}, 2, 0)
+	rows := drainExpandChunk(t, []int64{1}, fwd, rev, nil, exec.ExpandConfig{Direction: exec.DirIn, InputCol: 0}, 2, 0)
 	if len(rows) != 3 {
 		t.Fatalf("reverse hop over 3 parallel edges: got %d rows, want 3", len(rows))
 	}
@@ -257,7 +257,7 @@ func TestExpandColumnar_Multigraph_DirBoth(t *testing.T) {
 		handles:  []uint64{30, 10, 20},
 	}
 	ids := []int64{0, 1}
-	assertColumnarMatchesRow(t, ids, fwd, rev, exec.ExpandConfig{Direction: exec.DirBoth, InputCol: 0})
+	assertColumnarMatchesRow(t, ids, fwd, rev, nil, exec.ExpandConfig{Direction: exec.DirBoth, InputCol: 0})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -315,7 +315,7 @@ func TestExpandColumnar_Cyphermorphism(t *testing.T) {
 	// Two input rows: one excludes edge position 1, the other excludes position 2.
 	inRows := [][2]int64{{0, 1}, {0, 2}}
 
-	rowOp := exec.NewExpand(&relColSource{rows: inRows}, fwd, rev, cfg)
+	rowOp := exec.NewExpand(&relColSource{rows: inRows}, exec.StaticAdjacency(fwd, rev, nil), cfg)
 	wantRows, err := exec.Drain(context.Background(), rowOp)
 	if err != nil {
 		t.Fatalf("row-mode Drain: %v", err)
@@ -324,7 +324,7 @@ func TestExpandColumnar_Cyphermorphism(t *testing.T) {
 
 	for _, perCall := range []int{1, 3, 64} {
 		for _, batch := range []int{0, 1} {
-			base := exec.NewExpand(&relColSource{rows: inRows, batch: batch}, fwd, rev, cfg)
+			base := exec.NewExpand(&relColSource{rows: inRows, batch: batch}, exec.StaticAdjacency(fwd, rev, nil), cfg)
 			cp, ok := exec.NewColumnarExpand(base)
 			if !ok {
 				t.Fatalf("NewColumnarExpand: not a ChunkProducer")
@@ -374,14 +374,14 @@ func TestExpandColumnar_HighDegree_FanOutResume(t *testing.T) {
 	rev := buildCSR(deg+1, nil)
 	cfg := exec.ExpandConfig{Direction: exec.DirOut, InputCol: 0}
 
-	want := sortedRowKeys(drainExpandRow(t, []int64{0}, fwd, rev, cfg))
+	want := sortedRowKeys(drainExpandRow(t, []int64{0}, fwd, rev, nil, cfg))
 	if len(want) != deg {
 		t.Fatalf("row-mode fan-out: got %d rows, want %d", len(want), deg)
 	}
 	// Tiny per-call caps force the fan-out of the single source across ~deg/perCall
 	// FillChunk calls; the cursor (fwdStart) must resume mid-adjacency each time.
 	for _, perCall := range []int{1, 3, 17, 1000} {
-		got := sortedRowKeys(drainExpandChunk(t, []int64{0}, fwd, rev, cfg, perCall, 0))
+		got := sortedRowKeys(drainExpandChunk(t, []int64{0}, fwd, rev, nil, cfg, perCall, 0))
 		if len(got) != deg {
 			t.Fatalf("perCall=%d: got %d rows, want %d (resume dropped/duplicated)", perCall, len(got), deg)
 		}
@@ -406,5 +406,5 @@ func TestExpandColumnar_MultiSource_BatchBoundary(t *testing.T) {
 	for i := range ids {
 		ids[i] = int64(i)
 	}
-	assertColumnarMatchesRow(t, ids, fwd, rev, exec.ExpandConfig{Direction: exec.DirOut, InputCol: 0})
+	assertColumnarMatchesRow(t, ids, fwd, rev, nil, exec.ExpandConfig{Direction: exec.DirOut, InputCol: 0})
 }

@@ -55,8 +55,8 @@ func applyOptions(opts *expandOptions, options []expandOption) {
 // All ExpandConfig fields behave identically to [NewExpand]. Options are
 // applied after base construction and augment the operator's behaviour without
 // altering its public type.
-func NewExpandWithOptions(input Operator, fwd, rev csrAdjacency, cfg ExpandConfig, options ...expandOption) *Expand {
-	op := NewExpand(input, fwd, rev, cfg)
+func NewExpandWithOptions(input Operator, src AdjacencySource, cfg ExpandConfig, options ...expandOption) *Expand {
+	op := NewExpand(input, src, cfg)
 	var opts expandOptions
 	applyOptions(&opts, options)
 	op.relCols = opts.relCols

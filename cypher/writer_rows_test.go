@@ -209,55 +209,121 @@ func TestWriteRows_LaterStatementsObserveEarlierStatements(t *testing.T) {
 	}
 }
 
-// TestWriteRows_StructuralChangesAreNotVisibleToALaterClause records a
-// pre-existing INCONSISTENCY, with its evidence, so it is not mistaken for
-// something rmp #2299 introduced or something rmp #2299 fixed.
+// TestWriteRows_LaterClauseObservesEarlierStructuralChanges asserts the GUARANTEE
+// that a later reading clause of a statement observes every earlier updating
+// clause of that statement — for relationships as well as for nodes.
 //
-// A node CREATE and a SET are visible to a later clause of the same statement
-// (asserted in TestWriteRows_LaterRowsObserveEarlierRows). An edge CREATE and a
-// node DELETE are NOT. Measured 2026-08-02, and measured IDENTICALLY with the
-// write path reading the present (ReadAt(nil)) and reading the writing
-// transaction's snapshot, so the substitution rmp #2299 made is
-// behaviour-preserving here — which is the only claim this file is entitled to
-// make about it.
+// # It was an observed-behaviour record, and is now an asserted guarantee
 //
-// Both writes DO land: the assertions below check the committed state after the
-// statement, and it is correct in both cases. What differs is only what a later
-// clause of the SAME statement observes.
+// Until rmp #2317 this file recorded the opposite for two of the seven cases, as
+// a measured inconsistency it deliberately declined to call correct: an edge
+// CREATE and an edge DELETE were invisible to a later clause while every node
+// write was visible. The cause was architectural rather than semantic —
+// relationship traversal expanded over a CSR materialised at PLAN-BUILD time,
+// before any row executed, while node reads went to live stores. Relationship
+// properties were read live too, which is why an edge property SET was visible
+// and an edge CREATE was not.
 //
-// Whether that is openCypher's Eager semantics working as specified or a
-// candidate-set gap is NOT settled here — it needs the specification and the
-// TCK, not an argument, and it is out of scope for a task about writer
-// identity. This test asserts the observed behaviour so a change to it is
-// noticed, and deliberately does not call it correct.
-func TestWriteRows_StructuralChangesAreNotVisibleToALaterClause(t *testing.T) {
-	t.Run("edge CREATE", func(t *testing.T) {
-		t.Parallel()
-		eng, _ := storelessEngineWithGraph(t)
-		autocommit(t, eng, "CREATE (:R1 {id: 1}), (:R2 {id: 2})")
-		got := writeScalar(t, eng,
-			"MATCH (a:R1), (b:R2) CREATE (a)-[:LINK]->(b) WITH 1 AS _ MATCH (:R1)-[:LINK]->(x:R2) RETURN count(x) AS n")
-		if got != 0 {
-			t.Fatalf("the traversal saw %d edges in the same statement, recorded behaviour is 0", got)
-		}
-		// The edge is really there once the statement finishes.
-		if after := readScalar(t, eng, "MATCH (:R1)-[:LINK]->(x:R2) RETURN count(x) AS n"); after != 1 {
-			t.Fatalf("after the statement the graph holds %d LINK edges, want 1: the CREATE itself failed", after)
-		}
-	})
-	t.Run("node DELETE", func(t *testing.T) {
-		t.Parallel()
-		eng, _ := storelessEngineWithGraph(t)
-		autocommit(t, eng, "CREATE (:D), (:D), (:D)")
-		got := writeScalar(t, eng,
-			"MATCH (n:D) WITH n LIMIT 2 DELETE n WITH 1 AS _ MATCH (m:D) RETURN count(m) AS n")
-		if got != 3 {
-			t.Fatalf("the second MATCH saw %d :D nodes in the same statement, recorded behaviour is 3", got)
-		}
-		if after := readScalar(t, eng, "MATCH (m:D) RETURN count(m) AS n"); after != 1 {
-			t.Fatalf("after the statement the graph holds %d :D nodes, want 1: the DELETE itself failed", after)
-		}
-	})
+// The adjacency is now resolved at EXECUTION time, per row, so the two cases
+// join the other five.
+//
+// # Why every case collapses its rows with an aggregation
+//
+// `WITH count(*) AS _` and not `WITH 1 AS _`. The latter does not collapse: it
+// projects one row per input row, so the second reading clause runs once per row
+// and the final count measures ROW MULTIPLICATION as much as visibility. The
+// node-DELETE case here previously used it and recorded "3" — a number that is
+// neither the visible count (1) nor the stale count (3 nodes × 1 row), and that
+// changed meaning with the row count rather than with the visibility.
+//
+// openCypher requires this composition to work: TCK Create3 [3] expects
+// +nodes 10 from `MATCH () CREATE () WITH * MATCH () CREATE ()`, reachable only
+// if the second MATCH observes the first CREATE. The suite has exactly two
+// scenarios composing an updating clause with a later reading clause and neither
+// covers relationships, so the relationship half is gated here.
+func TestWriteRows_LaterClauseObservesEarlierStructuralChanges(t *testing.T) {
+	cases := []struct {
+		name   string
+		setup  string
+		stmt   string
+		want   int64 // what the later clause must observe
+		after  string
+		wantAf int64 // the committed state, so a passing case cannot mean "the write did not happen"
+	}{
+		{
+			name:   "edge CREATE",
+			setup:  "CREATE (:R1 {id: 1}), (:R2 {id: 2})",
+			stmt:   "MATCH (a:R1), (b:R2) CREATE (a)-[:LINK]->(b) WITH count(*) AS _ MATCH (:R1)-[:LINK]->(x:R2) RETURN count(x) AS n",
+			want:   1,
+			after:  "MATCH (:R1)-[:LINK]->(x:R2) RETURN count(x) AS n",
+			wantAf: 1,
+		},
+		{
+			name:   "edge DELETE",
+			setup:  "CREATE (:R1)-[:LINK]->(:R2)",
+			stmt:   "MATCH (:R1)-[r:LINK]->(:R2) DELETE r WITH count(*) AS _ MATCH (:R1)-[:LINK]->(x:R2) RETURN count(x) AS n",
+			want:   0,
+			after:  "MATCH (:R1)-[:LINK]->(x:R2) RETURN count(x) AS n",
+			wantAf: 0,
+		},
+		{
+			name:   "node CREATE",
+			setup:  "CREATE (:A)",
+			stmt:   "MATCH (n:A) CREATE (:A) WITH count(*) AS _ MATCH (m:A) RETURN count(m) AS n",
+			want:   2,
+			after:  "MATCH (m:A) RETURN count(m) AS n",
+			wantAf: 2,
+		},
+		{
+			name:   "node DELETE",
+			setup:  "CREATE (:D), (:D), (:D)",
+			stmt:   "MATCH (n:D) WITH n LIMIT 2 DELETE n WITH count(*) AS _ MATCH (m:D) RETURN count(m) AS n",
+			want:   1,
+			after:  "MATCH (m:D) RETURN count(m) AS n",
+			wantAf: 1,
+		},
+		{
+			name:   "label SET",
+			setup:  "CREATE (:L), (:L)",
+			stmt:   "MATCH (n:L) SET n:X WITH count(*) AS _ MATCH (m:X) RETURN count(m) AS n",
+			want:   2,
+			after:  "MATCH (m:X) RETURN count(m) AS n",
+			wantAf: 2,
+		},
+		{
+			name:   "node property SET",
+			setup:  "CREATE (:P), (:P)",
+			stmt:   "MATCH (n:P) SET n.k = 1 WITH count(*) AS _ MATCH (m:P) WHERE m.k = 1 RETURN count(m) AS n",
+			want:   2,
+			after:  "MATCH (m:P) WHERE m.k = 1 RETURN count(m) AS n",
+			wantAf: 2,
+		},
+		{
+			name:   "edge property SET",
+			setup:  "CREATE (:R1)-[:LINK]->(:R2)",
+			stmt:   "MATCH (:R1)-[r:LINK]->(:R2) SET r.k = 1 WITH count(*) AS _ MATCH (:R1)-[s:LINK]->(:R2) WHERE s.k = 1 RETURN count(s) AS n",
+			want:   1,
+			after:  "MATCH (:R1)-[s:LINK]->(:R2) WHERE s.k = 1 RETURN count(s) AS n",
+			wantAf: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			eng, _ := storelessEngineWithGraph(t)
+			autocommit(t, eng, tc.setup)
+			if got := writeScalar(t, eng, tc.stmt); got != tc.want {
+				t.Errorf("the later clause observed %d, want %d: a reading clause must see "+
+					"every earlier updating clause of its own statement", got, tc.want)
+			}
+			// The write must also have LANDED. Without this a case could pass because
+			// the mutation silently did nothing.
+			if got := readScalar(t, eng, tc.after); got != tc.wantAf {
+				t.Errorf("after the statement the committed state reports %d, want %d: the "+
+					"mutation itself did not take effect", got, tc.wantAf)
+			}
+		})
+	}
 }
 
 // readScalar runs a read-only statement and returns its single integer column.

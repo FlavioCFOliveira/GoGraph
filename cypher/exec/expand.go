@@ -72,9 +72,12 @@ const (
 	DirBoth
 )
 
-// csrAdjacency is the minimal interface required from a CSR snapshot.
+// CSRAdjacency is the minimal interface required from a CSR snapshot.
 // csr.CSR[W] satisfies this interface for any W.
-type csrAdjacency interface {
+//
+// It is exported so a query planner in another package can supply an
+// [AdjacencySource] that resolves one at execution time (rmp #2317).
+type CSRAdjacency interface {
 	// VerticesSlice returns the CSR offsets array (length MaxNodeID+1).
 	VerticesSlice() []uint64
 	// EdgesSlice returns the flat neighbour array.
@@ -94,8 +97,11 @@ type csrAdjacency interface {
 // Expand is NOT safe for concurrent use.
 type Expand struct {
 	input Operator
-	fwd   csrAdjacency // forward CSR (always required)
-	rev   csrAdjacency // reverse CSR; required for DirIn / DirBoth
+	// src yields the adjacency to expand over, resolved in Init rather than held
+	// from plan-build time. See [AdjacencySource].
+	src AdjacencySource
+	fwd CSRAdjacency // forward adjacency for THIS Init; resolved from src
+	rev CSRAdjacency // reverse adjacency for THIS Init; nil for DirOut
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 
@@ -194,10 +200,14 @@ type Expand struct {
 }
 
 // ExpandConfig carries the optional configuration for [NewExpand].
+//
+// The relationship-type FILTER is deliberately not here: it is keyed to the
+// absolute edge positions of one particular adjacency, so it is supplied by the
+// [AdjacencySource] that yields that adjacency and cannot drift from it
+// (rmp #2317). It used to be a field, resolved at plan-build time alongside a
+// pair that is now resolved at execution time — two lifetimes for two halves of
+// one answer.
 type ExpandConfig struct {
-	// EdgeTypeFilter maps absolute edge positions to type labels.  Required
-	// when EdgeType is non-empty.
-	EdgeTypeFilter map[uint64]string
 	// MultiplicityFn returns the Cypher CREATE-call multiplicity recorded
 	// for the directed edge (srcID, dstID). When the returned count is N >
 	// 1, the operator emits the corresponding output row N times in a row,
@@ -208,7 +218,8 @@ type ExpandConfig struct {
 	// plain single-row Expand.
 	MultiplicityFn func(srcID, dstID uint64) int64
 	// EdgeType, when non-empty, restricts emitted edges to those whose
-	// positional index is present in EdgeTypeFilter with this type label.
+	// positional index is present in the [AdjacencySource]'s filter with this
+	// type label.
 	EdgeType string
 	// RelCols lists the input-row columns holding edge IDs already traversed
 	// by sibling Expand operators in the same MATCH pattern. Each emitted
@@ -223,24 +234,57 @@ type ExpandConfig struct {
 	Direction Direction
 }
 
+// AdjacencySource yields the adjacency a traversal expands over, RESOLVED AT THE
+// MOMENT IT IS CALLED rather than when the plan was built (rmp #2317).
+//
+// # Why a source and not a pair
+//
+// A relationship traversal used to receive two prebuilt CSRs, materialised while
+// the operator tree was being assembled — before any row executed. That froze the
+// topology to an instant chosen before the statement began, and it is why a later
+// clause of a statement could not observe an earlier edge CREATE or edge DELETE
+// while it observed every node write: the node side reads live stores, the edge
+// side read a frozen array.
+//
+// Both reference engines resolve relationships at execution time against the
+// transaction's own view — Memgraph's Expand::ExpandCursor::InitEdges goes through
+// vertex.OutEdges with a storage::View, and Neo4j's query context resolves
+// relationships per row rather than from a plan-time structure.
+//
+// The type filter is part of the source, not a separate config field, because it
+// is KEYED to the adjacency it was built against. Resolving one without the other
+// would apply a filter built for one topology to a different one.
+//
+// It is called from [Expand.Init], which runs once per outer row under Apply, so
+// the traversal follows the writes its own statement has made.
+type AdjacencySource func() (fwd, rev CSRAdjacency, edgeTypeFilter map[uint64]string)
+
+// StaticAdjacency is an [AdjacencySource] over a fixed pair, for callers that
+// genuinely hold one — an offline traversal, or a test that builds its own CSR.
+// A production query plan must NOT use it: the pair it closes over is exactly the
+// plan-build materialisation this type exists to remove.
+func StaticAdjacency(fwd, rev CSRAdjacency, edgeTypeFilter map[uint64]string) AdjacencySource {
+	return func() (CSRAdjacency, CSRAdjacency, map[uint64]string) { return fwd, rev, edgeTypeFilter }
+}
+
 // NewExpand creates an Expand operator.
-// fwd is the forward CSR; rev is the reverse CSR (required for DirIn/DirBoth,
-// ignored for DirOut).
-func NewExpand(input Operator, fwd, rev csrAdjacency, cfg ExpandConfig) *Expand {
+//
+// src yields the forward and reverse adjacency (the reverse is required for
+// DirIn/DirBoth and ignored for DirOut) together with the type filter keyed to
+// them. It is consulted in [Expand.Init], not here.
+func NewExpand(input Operator, src AdjacencySource, cfg ExpandConfig) *Expand {
 	dir := cfg.Direction
 	if dir == 0 {
 		dir = DirOut
 	}
 	return &Expand{
-		input:          input,
-		fwd:            fwd,
-		rev:            rev,
-		dir:            dir,
-		edgeType:       cfg.EdgeType,
-		edgeTypeFilter: cfg.EdgeTypeFilter,
-		inputCol:       cfg.InputCol,
-		relCols:        cfg.RelCols,
-		multiplicity:   cfg.MultiplicityFn,
+		input:        input,
+		src:          src,
+		dir:          dir,
+		edgeType:     cfg.EdgeType,
+		inputCol:     cfg.InputCol,
+		relCols:      cfg.RelCols,
+		multiplicity: cfg.MultiplicityFn,
 		// Expand-into is off unless the planner opts in via WithExpandInto (#2206).
 		intoCol: -1,
 		// The seek is on by default, so opting into expand-into gets the O(log d)
@@ -252,6 +296,10 @@ func NewExpand(input Operator, fwd, rev csrAdjacency, cfg ExpandConfig) *Expand 
 // Init initialises the operator and its child.
 func (op *Expand) Init(ctx context.Context) error {
 	op.ctx = ctx
+	// RESOLVE THE ADJACENCY NOW, not when the plan was built (rmp #2317). Init runs
+	// once per outer row under Apply, so a traversal in a later clause of a
+	// statement sees the edges its own earlier clauses created or deleted.
+	op.fwd, op.rev, op.edgeTypeFilter = op.src()
 	op.fwdVerts = op.fwd.VerticesSlice()
 	op.fwdEdges = op.fwd.EdgesSlice()
 	op.fwdHandles = op.fwd.HandlesSlice()

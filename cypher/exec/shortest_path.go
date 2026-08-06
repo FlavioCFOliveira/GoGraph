@@ -129,8 +129,8 @@ type hop struct {
 // ShortestPath is NOT safe for concurrent use.
 type ShortestPath struct {
 	input Operator
-	fwd   csrAdjacency
-	rev   csrAdjacency
+	fwd   CSRAdjacency
+	rev   CSRAdjacency
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 
@@ -211,7 +211,7 @@ type ShortestPath struct {
 // The returned operator has no type filter and no hop bounds; use
 // [ShortestPath.WithTypeFilter] and [ShortestPath.WithHopBounds] to configure
 // them.
-func NewShortestPath(input Operator, fwd, rev csrAdjacency, dir Direction, srcCol, dstCol int) *ShortestPath {
+func NewShortestPath(input Operator, fwd, rev CSRAdjacency, dir Direction, srcCol, dstCol int) *ShortestPath {
 	if dir == 0 {
 		dir = DirOut
 	}
@@ -1257,8 +1257,8 @@ func (op *ShortestPath) Close() error {
 // AllShortestPaths is NOT safe for concurrent use.
 type AllShortestPaths struct {
 	input Operator
-	fwd   csrAdjacency
-	rev   csrAdjacency
+	fwd   CSRAdjacency
+	rev   CSRAdjacency
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 
@@ -1308,7 +1308,7 @@ type AllShortestPaths struct {
 // NewAllShortestPaths creates an AllShortestPaths operator. Like
 // [NewShortestPath] it starts with no type filter and minHops == 1; configure
 // via [AllShortestPaths.WithTypeFilter] and [AllShortestPaths.WithHopBounds].
-func NewAllShortestPaths(input Operator, fwd, rev csrAdjacency, dir Direction, srcCol, dstCol int) *AllShortestPaths {
+func NewAllShortestPaths(input Operator, fwd, rev CSRAdjacency, dir Direction, srcCol, dstCol int) *AllShortestPaths {
 	if dir == 0 {
 		dir = DirOut
 	}

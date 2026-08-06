@@ -51,9 +51,7 @@ func TestCyphermorphism_RejectsDuplicateEdge(t *testing.T) {
 		},
 	)
 
-	op := exec.NewExpandWithOptions(
-		input, fwd, rev,
-		exec.ExpandConfig{Direction: exec.DirOut, InputCol: 2},
+	op := exec.NewExpandWithOptions(input, exec.StaticAdjacency(fwd, rev, nil), exec.ExpandConfig{Direction: exec.DirOut, InputCol: 2},
 		exec.WithCyphermorphism([]int{1}), // relCols: column 1 holds r1
 	)
 
@@ -84,9 +82,7 @@ func TestCyphermorphism_DistinctEdgesPass(t *testing.T) {
 		},
 	)
 
-	op := exec.NewExpandWithOptions(
-		input, fwd, rev,
-		exec.ExpandConfig{Direction: exec.DirOut, InputCol: 2},
+	op := exec.NewExpandWithOptions(input, exec.StaticAdjacency(fwd, rev, nil), exec.ExpandConfig{Direction: exec.DirOut, InputCol: 2},
 		exec.WithCyphermorphism([]int{1}),
 	)
 
@@ -122,9 +118,7 @@ func TestCyphermorphism_SameEdgeSuppressed(t *testing.T) {
 			expr.IntegerValue(1), // b = node 1
 		},
 	)
-	op := exec.NewExpandWithOptions(
-		input, fwd, rev,
-		exec.ExpandConfig{Direction: exec.DirOut, InputCol: 2},
+	op := exec.NewExpandWithOptions(input, exec.StaticAdjacency(fwd, rev, nil), exec.ExpandConfig{Direction: exec.DirOut, InputCol: 2},
 		exec.WithCyphermorphism([]int{1}),
 	)
 
@@ -157,11 +151,7 @@ func TestCyphermorphism_NilRelCols(t *testing.T) {
 		},
 	)
 	// No WithCyphermorphism — edge at pos 0 must still be emitted.
-	op := exec.NewExpandWithOptions(
-		input, fwd, rev,
-		exec.ExpandConfig{Direction: exec.DirOut, InputCol: 2},
-		// no options
-	)
+	op := exec.NewExpandWithOptions(input, exec.StaticAdjacency(fwd, rev, nil), exec.ExpandConfig{Direction: exec.DirOut, InputCol: 2}) // no options
 
 	rows, err := exec.Drain(context.Background(), op)
 	if err != nil {

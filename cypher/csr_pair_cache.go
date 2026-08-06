@@ -3,6 +3,7 @@ package cypher
 import (
 	"sync"
 
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
@@ -253,6 +254,34 @@ func csrPairCachedForAt(
 		return csrPairFromGraphAt(g)
 	}
 	return csrPairCachedAt(bopts.csrPairCache, g)
+}
+
+// expandAdjacencySource returns an [exec.AdjacencySource] that resolves the CSR
+// pair AND the relationship-type filter keyed to it at EXECUTION time rather than
+// when the plan is built (rmp #2317).
+//
+// # Why the filter travels with the pair
+//
+// edgeTypeFilter maps ABSOLUTE EDGE POSITIONS in the forward CSR's edges array to
+// type names. A filter built against one CSR is meaningless against another: the
+// positions name different edges. Resolving the two separately — the pair at
+// execution time and the filter at plan-build time — would apply a filter built
+// for the pre-write topology to the post-write one, which silently MISTYPES
+// relationships rather than merely missing them.
+//
+// Both come from caches keyed on the same [csrPairKey], so when the topology has
+// not moved this is two mutex-guarded hits and no rebuild; when it has moved, both
+// rebuild together and stay consistent by construction.
+func expandAdjacencySource(
+	bopts *buildOpts, g *lpg.ReadView[string, float64], relTypes []string,
+) exec.AdjacencySource {
+	return func() (exec.CSRAdjacency, exec.CSRAdjacency, map[uint64]string) {
+		fwd, rev, at := csrPairCachedForAt(bopts, g)
+		if len(relTypes) == 0 {
+			return fwd, rev, nil
+		}
+		return fwd, rev, edgeTypeFilterFor(g, fwd, relTypes, bopts, at)
+	}
 }
 
 // newCSRPairCacheIfEnabled returns a cache unless the Engine opted out via

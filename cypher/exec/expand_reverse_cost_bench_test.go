@@ -112,11 +112,11 @@ func intRows(ids ...int) []exec.Row {
 
 // drainExpand runs a single Expand over the given source rows to exhaustion,
 // returning the number of emitted rows so the compiler cannot elide the work.
-func drainExpand(b *testing.B, fwd, rev *staticCSR, cfg exec.ExpandConfig, srcRows []exec.Row) int {
+func drainExpand(b *testing.B, fwd, rev *staticCSR, filter map[uint64]string, cfg exec.ExpandConfig, srcRows []exec.Row) int {
 	b.Helper()
 	ctx := context.Background()
 	src := &benchSliceOp{rows: srcRows}
-	op := exec.NewExpand(src, fwd, rev, cfg)
+	op := exec.NewExpand(src, exec.StaticAdjacency(fwd, rev, filter), cfg)
 	if err := op.Init(ctx); err != nil {
 		b.Fatalf("init: %v", err)
 	}
@@ -163,7 +163,7 @@ func BenchmarkExpandDir_InVsOut_Baseline(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if n := drainExpand(b, fwd, rev, exec.ExpandConfig{Direction: exec.DirOut, InputCol: 0}, outRows); n != degree {
+			if n := drainExpand(b, fwd, rev, nil, exec.ExpandConfig{Direction: exec.DirOut, InputCol: 0}, outRows); n != degree {
 				b.Fatalf("OUT emitted %d, want %d", n, degree)
 			}
 		}
@@ -172,7 +172,7 @@ func BenchmarkExpandDir_InVsOut_Baseline(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if n := drainExpand(b, fwd, rev, exec.ExpandConfig{Direction: exec.DirIn, InputCol: 0}, inRows); n != degree {
+			if n := drainExpand(b, fwd, rev, nil, exec.ExpandConfig{Direction: exec.DirIn, InputCol: 0}, inRows); n != degree {
 				b.Fatalf("IN emitted %d, want %d", n, degree)
 			}
 		}
@@ -199,7 +199,7 @@ func BenchmarkExpandIn_PerEdge_vs_SourceOutdegree(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if n := drainExpand(b, fwd, rev, exec.ExpandConfig{Direction: exec.DirIn, InputCol: 0}, inRows); n != 1 {
+				if n := drainExpand(b, fwd, rev, nil, exec.ExpandConfig{Direction: exec.DirIn, InputCol: 0}, inRows); n != 1 {
 					b.Fatalf("emitted %d, want 1", n)
 				}
 			}
@@ -223,11 +223,10 @@ func BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if n := drainExpand(b, fwd, rev, exec.ExpandConfig{
-					Direction:      exec.DirIn,
-					InputCol:       0,
-					EdgeType:       "R",
-					EdgeTypeFilter: filter,
+				if n := drainExpand(b, fwd, rev, filter, exec.ExpandConfig{
+					Direction: exec.DirIn,
+					InputCol:  0,
+					EdgeType:  "R",
 				}, inRows); n != 1 {
 					b.Fatalf("emitted %d, want 1", n)
 				}
@@ -281,7 +280,7 @@ func BenchmarkExpandOut_PerEdge_SingleSource(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if n := drainExpand(b, fwd, rev, exec.ExpandConfig{Direction: exec.DirOut, InputCol: 0}, outRows); n != K {
+				if n := drainExpand(b, fwd, rev, nil, exec.ExpandConfig{Direction: exec.DirOut, InputCol: 0}, outRows); n != K {
 					b.Fatalf("emitted %d, want %d", n, K)
 				}
 			}

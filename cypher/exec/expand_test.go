@@ -15,7 +15,7 @@ import (
 // Test graph helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-// staticCSR is a minimal csrAdjacency stub built from an explicit edge list.
+// staticCSR is a minimal CSRAdjacency stub built from an explicit edge list.
 //
 //	edges: [][]int64 where edges[srcID] = list of dstIDs
 type staticCSR struct {
@@ -60,7 +60,7 @@ func TestExpand_DirOut_Basic(t *testing.T) {
 
 	// Input: single row with NodeID=0
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewExpand(input, fwd, rev, exec.ExpandConfig{
+	op := exec.NewExpand(input, exec.StaticAdjacency(fwd, rev, nil), exec.ExpandConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 	})
@@ -99,7 +99,7 @@ func TestExpand_DirIn_Basic(t *testing.T) {
 	rev := buildCSR(3, [][2]int{{1, 0}, {1, 2}})
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(1)})
-	op := exec.NewExpand(input, fwd, rev, exec.ExpandConfig{
+	op := exec.NewExpand(input, exec.StaticAdjacency(fwd, rev, nil), exec.ExpandConfig{
 		Direction: exec.DirIn,
 		InputCol:  0,
 	})
@@ -124,7 +124,7 @@ func TestExpand_DirBoth(t *testing.T) {
 	rev := buildCSR(3, [][2]int{{1, 0}, {2, 0}}) // reverse graph
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewExpand(input, fwd, rev, exec.ExpandConfig{
+	op := exec.NewExpand(input, exec.StaticAdjacency(fwd, rev, nil), exec.ExpandConfig{
 		Direction: exec.DirBoth,
 		InputCol:  0,
 	})
@@ -151,7 +151,7 @@ func TestExpand_IsolatedNode(t *testing.T) {
 
 	// NodeID 4 has no edges.
 	input := newSliceOperator(exec.Row{expr.IntegerValue(4)})
-	op := exec.NewExpand(input, fwd, rev, exec.ExpandConfig{
+	op := exec.NewExpand(input, exec.StaticAdjacency(fwd, rev, nil), exec.ExpandConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 	})
@@ -178,7 +178,7 @@ func TestExpand_MultipleInputRows(t *testing.T) {
 		exec.Row{expr.IntegerValue(0)},
 		exec.Row{expr.IntegerValue(1)},
 	)
-	op := exec.NewExpand(input, fwd, rev, exec.ExpandConfig{
+	op := exec.NewExpand(input, exec.StaticAdjacency(fwd, rev, nil), exec.ExpandConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 	})
@@ -210,11 +210,10 @@ func TestExpand_EdgeTypeFilter(t *testing.T) {
 	filter := map[uint64]string{0: "KNOWS"}
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewExpand(input, fwd, rev, exec.ExpandConfig{
-		Direction:      exec.DirOut,
-		EdgeType:       "KNOWS",
-		EdgeTypeFilter: filter,
-		InputCol:       0,
+	op := exec.NewExpand(input, exec.StaticAdjacency(fwd, rev, filter), exec.ExpandConfig{
+		Direction: exec.DirOut,
+		EdgeType:  "KNOWS",
+		InputCol:  0,
 	})
 
 	rows, err := exec.Drain(context.Background(), op)
@@ -245,7 +244,7 @@ func TestExpand_Cancellation(t *testing.T) {
 	rev := buildCSR(1001, nil)
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewExpand(input, fwd, rev, exec.ExpandConfig{
+	op := exec.NewExpand(input, exec.StaticAdjacency(fwd, rev, nil), exec.ExpandConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 	})

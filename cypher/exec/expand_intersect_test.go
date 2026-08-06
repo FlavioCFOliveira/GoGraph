@@ -72,18 +72,16 @@ func orderedPair(maxNode int, edgeList [][2]int) (fwd, rev *staticCSR) {
 func referenceChain(t *testing.T, fwd, rev *staticCSR, seeds []exec.Row,
 	midType, endType string, midFilter, endFilter map[uint64]string) []exec.Row {
 	t.Helper()
-	mid := exec.NewExpand(newSliceOperator(seeds...), fwd, rev, exec.ExpandConfig{
-		Direction:      exec.DirOut,
-		InputCol:       1, // b
-		EdgeType:       midType,
-		EdgeTypeFilter: midFilter,
+	mid := exec.NewExpand(newSliceOperator(seeds...), exec.StaticAdjacency(fwd, rev, midFilter), exec.ExpandConfig{
+		Direction: exec.DirOut,
+		InputCol:  1, // b
+		EdgeType:  midType,
 	})
-	closing := exec.NewExpand(mid, fwd, rev, exec.ExpandConfig{
-		Direction:      exec.DirOut,
-		InputCol:       4,        // c, appended by mid at base+2
-		RelCols:        []int{3}, // r2, appended by mid at base+1
-		EdgeType:       endType,
-		EdgeTypeFilter: endFilter,
+	closing := exec.NewExpand(mid, exec.StaticAdjacency(fwd, rev, endFilter), exec.ExpandConfig{
+		Direction: exec.DirOut,
+		InputCol:  4,        // c, appended by mid at base+2
+		RelCols:   []int{3}, // r2, appended by mid at base+1
+		EdgeType:  endType,
 	})
 	rows, err := exec.Drain(context.Background(), closing)
 	if err != nil {

@@ -30,7 +30,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
-// biCSR is a minimal [csrAdjacency] for these tests. The shared test helpers
+// biCSR is a minimal [CSRAdjacency] for these tests. The shared test helpers
 // live in package exec_test and are unreachable from here, and reaching the
 // forward-only reference implementation requires being inside package exec — so
 // this file carries its own small builders rather than exporting a seam purely

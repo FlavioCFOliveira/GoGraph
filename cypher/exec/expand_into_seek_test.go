@@ -24,7 +24,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
-// fakeCSR is a hand-assembled CSR satisfying csrAdjacency, so a test states the
+// fakeCSR is a hand-assembled CSR satisfying CSRAdjacency, so a test states the
 // adjacency it means rather than deriving it from a graph build.
 type fakeCSR struct {
 	verts   []uint64
@@ -103,7 +103,7 @@ func cursorsAfterLoad(t *testing.T, op *Expand, row Row) (fs, fe, rs, re uint64)
 // newSeekExpand builds an Expand over the fixture CSRs with source column 0 and the
 // bound destination in column 1.
 func newSeekExpand(dir Direction, seek bool) *Expand {
-	op := NewExpand(nil, seekFixtureCSR(), reverseFixtureCSR(), ExpandConfig{
+	op := NewExpand(nil, StaticAdjacency(seekFixtureCSR(), reverseFixtureCSR(), nil), ExpandConfig{
 		Direction: dir,
 		InputCol:  0,
 	})

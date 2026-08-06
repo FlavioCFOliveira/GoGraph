@@ -120,7 +120,7 @@ type ExpandIntersect struct {
 	input Operator
 	ctx   context.Context
 
-	fwd, rev csrAdjacency
+	fwd, rev CSRAdjacency
 	fwdVerts []uint64
 	fwdEdges []graph.NodeID
 	revVerts []uint64
@@ -159,7 +159,7 @@ type ExpandIntersect struct {
 // there is nothing to gain from copying it. A nil cfg is treated as the zero value,
 // which is an untyped fusion reading b from column 0 and a from column 0 — valid
 // but not useful, so callers always pass one.
-func NewExpandIntersect(input Operator, fwd, rev csrAdjacency, cfg *ExpandIntersectConfig) *ExpandIntersect {
+func NewExpandIntersect(input Operator, fwd, rev CSRAdjacency, cfg *ExpandIntersectConfig) *ExpandIntersect {
 	if cfg == nil {
 		cfg = &ExpandIntersectConfig{}
 	}

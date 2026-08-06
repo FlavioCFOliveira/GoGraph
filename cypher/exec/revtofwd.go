@@ -67,7 +67,7 @@ package exec
 // is load-bearing.
 //
 // Being a replay of another function's internals, it validates rather than
-// assumes. A caller may hand an operator any [csrAdjacency] as its reverse —
+// assumes. A caller may hand an operator any [CSRAdjacency] as its reverse —
 // several in-tree tests pass a placeholder, and a hand-built reverse need not use
 // the canonical scatter order — so every paired slot is checked as it is
 // produced: the reverse slot must record the forward slot's source, and, when

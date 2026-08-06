@@ -8324,7 +8324,9 @@ func buildOperatorRec(
 		}
 		if len(p.RelTypes) > 0 {
 			cfg.EdgeType = p.RelTypes[0]
-			cfg.EdgeTypeFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts, pairAt)
+			// The FILTER is not set here: it travels with the adjacency, resolved at
+			// execution time by [expandAdjacencySource], because it is keyed to that
+			// adjacency's edge positions (rmp #2317).
 		}
 		// Cyphermorphism: pass the schema columns of every sibling
 		// relationship variable already bound in this MATCH pattern so
@@ -8346,7 +8348,7 @@ func buildOperatorRec(
 		if fused := tryFuseCyclicIntersect(p, child, fwd, rev, pairAt, g, schema, bopts); fused != nil {
 			return fused, nil
 		}
-		exp := exec.NewExpand(child, fwd, rev, cfg)
+		exp := exec.NewExpand(child, expandAdjacencySource(bopts, g, p.RelTypes), cfg)
 		// Expand-into (#2206): when this hop's destination is a variable the row
 		// already carries, filter to edges landing on it INSIDE the operator instead
 		// of emitting one row per neighbour for the equality Selection above to
@@ -8891,7 +8893,6 @@ func buildOperatorRec(
 			return child, nil
 		}
 
-		fwd, rev, pairAt := csrPairCachedForAt(bopts, g)
 		dir := irDirToExec(p.Direction)
 
 		cfg := exec.ExpandConfig{
@@ -8900,9 +8901,9 @@ func buildOperatorRec(
 		}
 		if len(p.RelTypes) > 0 {
 			cfg.EdgeType = p.RelTypes[0]
-			cfg.EdgeTypeFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts, pairAt)
+			// The filter travels with the adjacency; see the Expand case above.
 		}
-		return exec.NewOptionalExpand(child, fwd, rev, cfg), nil
+		return exec.NewOptionalExpand(child, expandAdjacencySource(bopts, g, p.RelTypes), cfg), nil
 
 	case *ir.ShortestPath:
 		return buildShortestPath(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)

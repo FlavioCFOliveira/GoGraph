@@ -516,7 +516,7 @@ func TestOptionalExpand_ZeroMatchEmitsNullRow(t *testing.T) {
 	rev := buildCSR(6, [][2]int{{1, 0}, {2, 1}})
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(5)}) // isolated node
-	op := exec.NewOptionalExpand(input, fwd, rev, exec.ExpandConfig{
+	op := exec.NewOptionalExpand(input, exec.StaticAdjacency(fwd, rev, nil), exec.ExpandConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 	})
@@ -544,7 +544,7 @@ func TestOptionalExpand_MultiMatchEmitsAllRows(t *testing.T) {
 	rev := buildCSR(4, [][2]int{{1, 0}, {2, 0}, {3, 0}})
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewOptionalExpand(input, fwd, rev, exec.ExpandConfig{
+	op := exec.NewOptionalExpand(input, exec.StaticAdjacency(fwd, rev, nil), exec.ExpandConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 	})
@@ -576,7 +576,7 @@ func TestOptionalExpand_MixedMatchAndNoMatch(t *testing.T) {
 		exec.Row{expr.IntegerValue(0)}, // 2 matches
 		exec.Row{expr.IntegerValue(5)}, // 0 matches → 1 NULL row
 	)
-	op := exec.NewOptionalExpand(input, fwd, rev, exec.ExpandConfig{
+	op := exec.NewOptionalExpand(input, exec.StaticAdjacency(fwd, rev, nil), exec.ExpandConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 	})
@@ -601,7 +601,7 @@ func TestOptionalExpand_EmptyInput(t *testing.T) {
 	rev := buildCSR(3, [][2]int{{1, 0}})
 
 	input := newSliceOperator()
-	op := exec.NewOptionalExpand(input, fwd, rev, exec.ExpandConfig{
+	op := exec.NewOptionalExpand(input, exec.StaticAdjacency(fwd, rev, nil), exec.ExpandConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 	})
@@ -621,7 +621,7 @@ func TestOptionalExpand_SingleMatch(t *testing.T) {
 	rev := buildCSR(2, [][2]int{{1, 0}})
 
 	input := newSliceOperator(exec.Row{expr.IntegerValue(0)})
-	op := exec.NewOptionalExpand(input, fwd, rev, exec.ExpandConfig{
+	op := exec.NewOptionalExpand(input, exec.StaticAdjacency(fwd, rev, nil), exec.ExpandConfig{
 		Direction: exec.DirOut,
 		InputCol:  0,
 	})

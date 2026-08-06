@@ -184,8 +184,8 @@ type pathState struct {
 // VarLengthExpand is NOT safe for concurrent use.
 type VarLengthExpand struct {
 	input Operator
-	fwd   csrAdjacency
-	rev   csrAdjacency
+	fwd   CSRAdjacency
+	rev   CSRAdjacency
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 
@@ -293,7 +293,7 @@ type VarLengthConfig struct {
 
 // NewVarLengthExpand creates a VarLengthExpand operator. cfg is read-only and
 // taken by pointer to avoid copying the configuration struct on this hot path.
-func NewVarLengthExpand(input Operator, fwd, rev csrAdjacency, cfg *VarLengthConfig) *VarLengthExpand {
+func NewVarLengthExpand(input Operator, fwd, rev CSRAdjacency, cfg *VarLengthConfig) *VarLengthExpand {
 	dir := cfg.Direction
 	if dir == 0 {
 		dir = DirOut
