@@ -84,8 +84,20 @@ func TestE2E_FailureCancel(t *testing.T) {
 		}
 	}
 
-	// AC#3: cursor released — fresh session must succeed within 50 ms.
-	freshCtx, freshCancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	// AC#3: cursor released — a fresh session must SUCCEED.
+	//
+	// The bound is a LIVENESS deadline, not a latency assertion (rmp #2330). It was
+	// 50 ms, which is a latency budget: a fresh session opens a TCP connection, runs
+	// the Bolt handshake, HELLO, auth, RUN and PULL, and under the full-suite parallel
+	// load of `make ci` that comfortably exceeds 50 ms on a busy host. This test failed
+	// a gate run for exactly that reason and never reproduced in isolation, where the
+	// same work takes microseconds.
+	//
+	// What AC#3 actually claims is that the cancelled query RELEASED ITS CURSOR, so a
+	// later session is not blocked behind it. If it had not, the fresh session would
+	// block indefinitely and any deadline would catch it. Ten seconds bounds that hang
+	// while measuring nothing about how busy the machine is.
+	freshCtx, freshCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer freshCancel()
 
 	session2 := driver.NewSession(ctx, neo4j.SessionConfig{})
