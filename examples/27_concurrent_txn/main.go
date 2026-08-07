@@ -364,6 +364,7 @@ func run(ctx context.Context, w io.Writer, cfg *config) error {
 	// single-writer engine reports zero because a conflict cannot arise (rmp #2320).
 	fmt.Fprintf(w, "# writer.conflicts_retried=%d\n", stats.conflicts)
 	fmt.Fprintf(w, "# writer.conflict_retries_max=%d\n", stats.conflictRetriesMax)
+	fmt.Fprintf(w, "# writer.conflict_wait_max=%s (budget %s)\n", time.Duration(stats.conflictWaitMaxNs), conflictRetryBudget)
 	fmt.Fprintf(w, "# reader.observations=%d\n", stats.readObservations)
 	fmt.Fprintf(w, "# reader.observations_per_s=%.0f\n", rate(stats.readObservations, stats.elapsed))
 	fmt.Fprintf(w, "# mem.heap_alloc=%s\n", humanBytes(built.HeapAlloc))
@@ -593,6 +594,10 @@ type runStats struct {
 	// example exists to exercise (rmp #2320).
 	conflicts          int64
 	conflictRetriesMax int64
+	// conflictWaitMaxNs is the longest WALL TIME any one transfer spent in its retry
+	// chain. It is the number that sizes [conflictRetryBudget], so it is reported
+	// rather than left to be guessed at the next time the bound is questioned.
+	conflictWaitMaxNs int64
 	// tornDetail is the diagnosis of the first torn observation, or nil when none
 	// was seen. See [tornReport].
 	tornDetail *tornReport
@@ -615,8 +620,7 @@ func runConcurrent(ctx context.Context, eng *cypher.Engine, plan *plan) (runStat
 		firstTorn        atomic.Int64
 		acquireWaitTotal atomic.Int64
 		acquireWaitCount atomic.Int64
-		conflicts        atomic.Int64
-		conflictRetries  atomic.Int64
+		conflictCounts   conflictCounters
 		firstErr         atomic.Pointer[error]
 		firstReport      atomic.Pointer[tornReport]
 	)
@@ -681,7 +685,7 @@ func runConcurrent(ctx context.Context, eng *cypher.Engine, plan *plan) (runStat
 				}
 				if t.multi {
 					var wait time.Duration
-					err := retryOnConflict(ctx, &conflicts, &conflictRetries, func() error {
+					err := retryOnConflict(ctx, conflictRetryBudget, &conflictCounts, func() error {
 						var e error
 						wait, e = commitMultiStatement(ctx, eng, t, plan.splitMulti)
 						return e
@@ -692,7 +696,7 @@ func runConcurrent(ctx context.Context, eng *cypher.Engine, plan *plan) (runStat
 					}
 					acquireWaitTotal.Add(int64(wait))
 					acquireWaitCount.Add(1)
-				} else if err := retryOnConflict(ctx, &conflicts, &conflictRetries, func() error {
+				} else if err := retryOnConflict(ctx, conflictRetryBudget, &conflictCounts, func() error {
 					return commitSingleStatement(ctx, eng, t)
 				}); err != nil {
 					setErr(fmt.Errorf("writer single-statement: %w", err))
@@ -719,32 +723,52 @@ func runConcurrent(ctx context.Context, eng *cypher.Engine, plan *plan) (runStat
 		firstTorn:          firstTorn.Load(),
 		acquireWaitTotal:   acquireWaitTotal.Load(),
 		acquireWaitCount:   acquireWaitCount.Load(),
-		conflicts:          conflicts.Load(),
-		conflictRetriesMax: conflictRetries.Load(),
+		conflicts:          conflictCounts.conflicts.Load(),
+		conflictRetriesMax: conflictCounts.retriesMax.Load(),
+		conflictWaitMaxNs:  conflictCounts.waitMaxNs.Load(),
 		tornDetail:         firstReport.Load(),
 	}, nil
 }
 
-// maxConflictRetries bounds the retry chain for one transfer. It is a BOUND, not
-// a policy knob: an unbounded retry would turn a persistent conflict into a
-// livelock, and the workload has to fail loudly rather than spin.
+// conflictRetryBudget bounds the retry chain for one transfer by WALL CLOCK. It is
+// a BOUND, not a policy knob: an unbounded retry would turn a persistent conflict
+// into a livelock, and the workload has to fail loudly rather than spin.
 //
-// # Sized by measurement, and RESIZED when the concurrency changed (rmp #2305)
+// # Why a clock and not an attempt count (rmp #2330)
 //
-// It was 8, sized above a deepest chain of two or three. rmp #2305 retired the
-// transaction-lifetime barrier hold, so an autocommit writer and an open explicit
-// transaction now contend on the same accounts instead of being serialised against
-// each other — and the observed depth rose with the concurrency. Measured over three
-// runs of the default shape immediately after that change: deepest chain 9, 9 and 10,
-// with 584, 612 and 656 refused attempts in total. The old bound sat just BELOW the
-// new worst case, so the example failed loudly — which is what it is built to do.
+// It was an attempt count — 8, then 24, each sized above the deepest chain observed
+// on an idle machine. That is the defect class rmp #2330 named and made a project
+// rule after finding it five times in one sprint: *a bound on waiting for another
+// goroutine, process or network peer must be sized to catch a HANG, never to assert
+// a latency.* An attempt count asserts a latency, because the 24 waits below sum to
+// roughly 96 ms and what a transfer needs is however long the writers ahead of it
+// take to clear their fsyncs. On an idle host 24 was generous; under load it is not.
 //
-// 24 keeps roughly the same proportional headroom over the worst observed chain that
-// 8 had, and is still finite. If it is ever exceeded, that is a real finding about the
-// engine's conflict behaviour and not a reason to raise it again without measuring.
-// The observed depth per run is reported as writer.conflict_retries_max, so the
-// margin can be checked rather than assumed.
-const maxConflictRetries = 24
+// #2330's own AC4 sweep for siblings covered bolt/server and stopped there, so this
+// bound survived it. It was then caught the way the rule predicts — not by a defect,
+// but by parallel WAL load. Running examples 04, 17, 20, 21, 27, 35, 36 and 37
+// together under `go test -race`, this example failed 2 runs in 6 with "25
+// serialization conflicts on one transfer", while the same test passed 8 of 8 alone
+// and 8 of 8 under fourteen CPU burners. CPU starvation does not reproduce it;
+// competing fsyncs do, because the start timestamp a retry takes is the CONTIGUOUS
+// commit frontier (rmp #2298) and the frontier moves at the rate commits become
+// durable. In the captured chains the head was an in-flight transaction on 23 of 25
+// attempts, and the snapshot advanced by only 16 instants across the whole 96 ms.
+//
+// # Sized to catch a hang, from measurement
+//
+// The hang this must still catch is real and has been seen: before rmp #2318 gave
+// the vacuum an unconditional wake, "the FIRST transaction to abort on an object made
+// that object permanently unwritable", and this example's writers exhausted their
+// retry chain on their first aborted account (graph/mvcc/conflict.go). A wedged
+// object never clears, so any budget catches it; a contended one clears in
+// milliseconds.
+//
+// Measured under the eight-package parallel-WAL load that reproduces the failure,
+// with the bound lifted: see writer.conflict_wait_max in the run output. The budget
+// is set two orders of magnitude above the worst chain observed there, so reaching
+// it means the object stopped becoming writable rather than that the host was busy.
+const conflictRetryBudget = 30 * time.Second
 
 // initialConflictBackoff and maxConflictBackoff bound the wait between attempts.
 // The floor is sized to a WAL fsync rather than to a scheduler quantum, because
@@ -780,20 +804,28 @@ const (
 //
 // conflicts accumulates every refused attempt; retriesMax keeps the deepest chain
 // any single transfer needed, as a monotone maximum.
-func retryOnConflict(ctx context.Context, conflicts, retriesMax *atomic.Int64, attempt func() error) error {
+func retryOnConflict(ctx context.Context, budget time.Duration, c *conflictCounters, attempt func() error) error {
 	backoff := initialConflictBackoff
+	var chain conflictChain
+	started := time.Now()
 	for tries := 0; ; tries++ {
 		err := attempt()
 		if err == nil {
-			bumpMax(retriesMax, int64(tries))
+			bumpMax(&c.retriesMax, int64(tries))
+			if tries > 0 {
+				bumpMax(&c.waitMaxNs, int64(time.Since(started)))
+			}
 			return nil
 		}
 		if !errors.Is(err, mvcc.ErrSerializationConflict) {
 			return err
 		}
-		conflicts.Add(1)
-		if tries >= maxConflictRetries {
-			return fmt.Errorf("%d serialization conflicts on one transfer: %w", tries+1, err)
+		c.conflicts.Add(1)
+		chain.record(err)
+		if waited := time.Since(started); waited >= budget {
+			bumpMax(&c.waitMaxNs, int64(waited))
+			return fmt.Errorf("%d serialization conflicts on one transfer over %s (budget %s): %w\n%s",
+				tries+1, waited.Round(time.Millisecond), budget, err, chain.diagnosis())
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -819,6 +851,173 @@ func retryOnConflict(ctx context.Context, conflicts, retriesMax *atomic.Int64, a
 		}
 		backoff *= 2
 	}
+}
+
+// conflictChain records the refused attempts of ONE transfer, so that exhausting
+// [maxConflictRetries] reports WHY it was refused rather than only that it was.
+//
+// # Why this exists (the lesson of rmp #2333)
+//
+// The bound's own design note says that exceeding it "is a real finding about the
+// engine's conflict behaviour". A finding needs evidence, and the error this loop
+// used to return carried none: one message, no timestamps, no history. That is the
+// same shape as rmp #2333, where a gate reported a single unattributable number and
+// roughly 245 million observations were then spent failing to classify it.
+//
+// Everything needed is already in the error. [mvcc.Conflict] carries the blocking
+// version's timestamp, the losing transaction's snapshot, and its id; the loop threw
+// all three away. Keeping them turns an exhausted retry chain into a classification:
+//
+//   - the same HeadTS on every attempt — the head is STUCK, and its value says which
+//     kind. [mvcc.AbortedTS] means an aborted version that the background vacuum has
+//     not yet withdrawn, which graph/mvcc/conflict.go documents as making the object
+//     unwritable until it does; a transaction id means one writer held the head for
+//     the whole chain.
+//   - a StartTS that never advances — the retry never obtained a fresh snapshot, so
+//     it was not a retry. The start timestamp is the CONTIGUOUS commit frontier
+//     (rmp #2298), which cannot pass a commit whose fsync is still in flight.
+//   - both moving — ordinary contention: the transfer lost 25 fair races.
+//
+// The three call for different fixes, and nothing else distinguishes them after the
+// fact. The records are appended only on the refused path, which already pays a
+// backoff of at least 100 us, so the happy path allocates nothing.
+// conflictCounters is the telemetry one retry loop accumulates, grouped so the
+// loop takes one pointer rather than three. All three are read only after the
+// writers have joined.
+type conflictCounters struct {
+	conflicts  atomic.Int64 // every refused attempt, across all transfers
+	retriesMax atomic.Int64 // the deepest retry chain any one transfer needed
+	waitMaxNs  atomic.Int64 // the longest wall time any one transfer spent retrying
+}
+
+// conflictSample bounds how many refused attempts are RETAINED for display at each
+// end of the chain. The verdict itself is computed incrementally over every attempt,
+// so bounding the sample costs no accuracy — only the middle of a long chain is
+// elided. Without a bound a 30 s budget against a 5 ms backoff ceiling would retain
+// several thousand records and print them all.
+const conflictSample = 12
+
+type conflictChain struct {
+	n     int              // every refused attempt, counted
+	first []conflictRecord // the opening attempts, up to conflictSample
+	last  []conflictRecord // a rolling window of the closing attempts
+	// The verdict's inputs, maintained over ALL attempts rather than the sample.
+	headStuck  bool
+	startStuck bool
+	firstRec   conflictRecord
+	lastRec    conflictRecord
+}
+
+// conflictRecord is one refused attempt, as the engine described it.
+type conflictRecord struct {
+	store   string // the versioned store the conflict was detected in
+	headTS  uint64 // the blocking version's effective timestamp
+	startTS uint64 // the losing transaction's snapshot
+	txID    uint64 // the losing transaction's identity
+}
+
+// record appends err's conflict detail. A conflict the engine did not describe
+// with a typed [mvcc.Conflict] is recorded as a zero entry rather than dropped, so
+// the attempt count in the diagnosis always matches the count in the error.
+func (c *conflictChain) record(err error) {
+	rec := conflictRecord{store: "untyped"}
+	var detail *mvcc.Conflict
+	if errors.As(err, &detail) {
+		rec = conflictRecord{
+			store:   detail.Store,
+			headTS:  detail.HeadTS,
+			startTS: detail.StartTS,
+			txID:    detail.TxID,
+		}
+	}
+
+	c.n++
+	if c.n == 1 {
+		c.firstRec, c.headStuck, c.startStuck = rec, true, true
+	} else {
+		if rec.headTS != c.firstRec.headTS {
+			c.headStuck = false
+		}
+		if rec.startTS != c.firstRec.startTS {
+			c.startStuck = false
+		}
+	}
+	c.lastRec = rec
+
+	if len(c.first) < conflictSample {
+		c.first = append(c.first, rec)
+		return
+	}
+	if len(c.last) == conflictSample {
+		copy(c.last, c.last[1:])
+		c.last[conflictSample-1] = rec
+		return
+	}
+	c.last = append(c.last, rec)
+}
+
+// headKind names what the blocking version was, which is the discriminator the
+// whole diagnosis turns on.
+func headKind(headTS uint64) string {
+	switch {
+	case headTS == mvcc.AbortedTS:
+		return "ABORTED (awaiting vacuum withdrawal)"
+	case headTS >= mvcc.TxIDBase:
+		return "in-flight tx"
+	default:
+		return "committed"
+	}
+}
+
+// diagnosis renders the chain and states which of the three shapes it is.
+func (c *conflictChain) diagnosis() string {
+	if c.n == 0 {
+		return "  (no typed conflict detail was captured)"
+	}
+	first, last := c.firstRec, c.lastRec
+	headStuck, startStuck := c.headStuck, c.startStuck
+
+	var b strings.Builder
+	b.WriteString("  conflict chain (attempt: store head=HEAD start=START tx=TX):\n")
+	line := func(i int, r conflictRecord) {
+		fmt.Fprintf(&b, "    %4d: %-16s head=%d [%s] start=%d tx=%d\n",
+			i, r.store, r.headTS, headKind(r.headTS), r.startTS, r.txID)
+	}
+	for i, r := range c.first {
+		line(i+1, r)
+	}
+	if elided := c.n - len(c.first) - len(c.last); elided > 0 {
+		fmt.Fprintf(&b, "    ... %d further attempts elided ...\n", elided)
+	}
+	for i, r := range c.last {
+		line(c.n-len(c.last)+i+1, r)
+	}
+	fmt.Fprintf(&b, "  attempts: %d\n", c.n)
+	fmt.Fprintf(&b, "  head:    %s (first=%d last=%d)\n",
+		map[bool]string{true: "STUCK on one version", false: "moved"}[headStuck], first.headTS, last.headTS)
+	fmt.Fprintf(&b, "  snapshot: %s (first=%d last=%d)\n",
+		map[bool]string{true: "NEVER ADVANCED", false: "advanced"}[startStuck], first.startTS, last.startTS)
+
+	switch {
+	case headStuck && first.headTS == mvcc.AbortedTS:
+		b.WriteString("  VERDICT: an ABORTED version held the head for the whole chain — the background\n" +
+			"           vacuum did not withdraw it in time, so the object stayed unwritable\n" +
+			"           (see graph/mvcc/conflict.go, rmp #2318).")
+	case headStuck && first.headTS >= mvcc.TxIDBase:
+		b.WriteString("  VERDICT: ONE in-flight transaction held the head for the whole chain — it neither\n" +
+			"           committed nor aborted for the entire budget. That is a HANG, not contention.")
+	case startStuck:
+		b.WriteString("  VERDICT: the snapshot NEVER advanced — every attempt ran at the same instant, so\n" +
+			"           no attempt after the first was a retry. The contiguous commit frontier\n" +
+			"           (rmp #2298) did not move; suspect a commit stalled in fsync.")
+	default:
+		fmt.Fprintf(&b, "  VERDICT: STARVATION — head and snapshot both moved, so other transactions were\n"+
+			"           committing throughout while this transfer lost all %d races. The engine was\n"+
+			"           live; this writer never got a turn. first-updater-wins has no queue and no\n"+
+			"           age priority, so a loser's backoff grows while each fresh arrival starts at\n"+
+			"           the floor.", c.n)
+	}
+	return b.String()
 }
 
 // bumpMax raises dst to v when v is larger, as a lock-free monotone maximum.

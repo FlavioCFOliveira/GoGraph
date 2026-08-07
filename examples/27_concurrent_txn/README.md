@@ -130,14 +130,15 @@ For a **concurrency** subject (see [`docs/examples-standard.md`](../../docs/exam
   and therefore still rises with the writer count. An autocommit statement does
   not appear here: it holds the barrier shared and queues behind nobody.
 - **Write-write conflicts** (`# writer.conflicts_retried`,
-  `# writer.conflict_retries_max`) — how many transfer attempts were refused with
-  `mvcc.ErrSerializationConflict` and retried, and the deepest retry chain one
-  transfer needed. This is the observable cost of concurrent writers, and it is
-  the load-bearing evidence that they genuinely overlap: a single-writer engine
-  reports zero because the conflict cannot arise. The retry backoff is sized to a
-  WAL fsync, not to a scheduler yield — a yield loop was measured spinning five
-  attempts inside one fsync, all against the same in-flight version and all with
-  the same stale snapshot.
+  `# writer.conflict_retries_max`, `# writer.conflict_wait_max`) — how many
+  transfer attempts were refused with `mvcc.ErrSerializationConflict` and retried,
+  the deepest retry chain one transfer needed, and the longest WALL TIME any one
+  transfer spent retrying. This is the observable cost of concurrent writers, and
+  it is the load-bearing evidence that they genuinely overlap: a single-writer
+  engine reports zero because the conflict cannot arise. The retry backoff is sized
+  to a WAL fsync, not to a scheduler yield — a yield loop was measured spinning
+  five attempts inside one fsync, all against the same in-flight version and all
+  with the same stale snapshot.
 - **Scaling across worker counts** (`# scale.writers_N.transfers_per_s`) — the
   identical workload at 1, 2, 4 … writers on a fresh store, each level asserting
   conservation on its own ledger.
@@ -152,6 +153,57 @@ transfers are multi-statement and still serialise on the exclusive barrier — a
 by the conflict rate, since every refused attempt pays a retry. Raising `-accounts`
 spreads the transfers over more keys and drives `# writer.conflicts_retried`
 down.
+
+## The retry bound is a clock, and it says why it fired
+
+The retry chain is bounded so that a persistent conflict fails loudly instead of
+spinning forever. That bound used to be an **attempt count** — 24 — and it was the
+wrong instrument, for the reason rmp #2330 made a project rule after finding the
+same mistake five times in one sprint:
+
+> a bound on waiting for another goroutine, process or network peer must be sized
+> to catch a **HANG**, never to assert a latency.
+
+An attempt count asserts a latency. The 24 waits summed to roughly 96 ms, while what
+a transfer actually waits for is the writers ahead of it clearing their `fsync`s.
+#2330's own sweep for siblings covered `bolt/server` and stopped there, so this bound
+survived it — and was then caught exactly as the rule predicts. Running examples 04,
+17, 20, 21, 27, 35, 36 and 37 together under `go test -race`, this example failed
+**2 runs in 6** with `25 serialization conflicts on one transfer`, while passing
+**8 of 8 alone** and **8 of 8 under fourteen CPU burners**. CPU starvation does not
+reproduce it; competing `fsync`s do, because the start timestamp a retry takes is
+the contiguous commit frontier (rmp #2298) and that frontier advances only as
+commits become durable.
+
+The bound is now a **wall-clock budget of 30 s**, sized from measurement: under the
+same parallel-WAL load, with the bound lifted, the worst chain observed over eight
+runs was **20 attempts / 167 ms** (`# writer.conflict_wait_max` reports it every
+run). The budget therefore sits roughly two orders of magnitude above contention and
+still catches a wedged object immediately — and a wedged object is not hypothetical:
+before rmp #2318 gave the vacuum an unconditional wake, "the FIRST transaction to
+abort on an object made that object permanently unwritable", and this example's
+writers were what exhausted their chain on it.
+
+Exhausting the budget now prints the **conflict chain** rather than a bare count,
+because a bound that fires without evidence is what sent rmp #2333 hunting through
+245 million observations for one unattributable number. Everything needed was
+already in the error — `mvcc.Conflict` carries the blocking version's timestamp, the
+losing transaction's snapshot and its id — and the loop used to discard all three.
+Keeping them classifies the exhaustion into four outcomes:
+
+| Chain | Verdict | What it means |
+|---|---|---|
+| head stuck at `mvcc.AbortedTS` | `ABORTED` | an aborted version the vacuum never withdrew — the object is unwritable (rmp #2318) |
+| head stuck on one transaction id | `HANG` | one writer held the head for the whole budget without committing or aborting |
+| snapshot never advanced | stalled frontier | no attempt after the first was a retry; suspect a commit stuck in `fsync` |
+| head and snapshot both moved | `STARVATION` | the engine was live and this writer never got a turn |
+
+The first two are engine liveness defects. The last is a property of
+first-updater-wins itself: it has no queue and no age priority, so a loser's backoff
+grows while every fresh arrival starts at the floor. `retry_test.go` holds all four
+verdicts under test and — the direction that matters — proves a wedged head still
+fails while a chain of 40 progressing refusals no longer does, which is the case the
+old attempt count could not pass whatever the engine was doing.
 
 ## The torn-total gate, and how it explains itself
 
