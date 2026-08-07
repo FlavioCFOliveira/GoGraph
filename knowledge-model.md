@@ -2760,3 +2760,31 @@ backoff must be sized to a WAL FSYNC and not to a scheduler yield — a `runtime
 loop was measured burning five consecutive attempts inside one fsync, all against the same
 in-flight head with `startTS` frozen, because the contiguous frontier cannot advance while
 that commit is still syncing.
+
+Incrementally synced at commit `bf0414dc` (2026-08-07, task **rmp #2333**, sprint 334 — the
+torn-total gate could not say what it had seen). **First modelling of
+`examples/27_concurrent_txn` at all:** the graph's example coverage stopped at example 25,
+so this adds +8 nodes (`Package` `examples/27_concurrent_txn`; `Commit` `bf0414dc`; six
+`Test`s — `TestMain`, `TestRun`, `TestRunReproducibleAcrossReaderScaling`,
+`TestTornGate_CatchesADeliberateTear`, `TestAsInt64_RejectsNull`, and the soak-layer
+`TestSoak_TornTotalSearch`) and +8 edges (6 `CONTAINS`, 1 `TOUCHES`, 1 `FIXES` to the
+`ACID Transactions` Feature, id 9736).
+
+**The `FIXES` edge carries a caveat property, because rmp #2333 IS NOT CLOSED.** What was
+hardened is the ACID isolation INSTRUMENT, not the engine: the torn total observed once on
+2026-08-06 remains unreproduced, and no engine code was changed. Recording this as an
+ordinary fix would have misrepresented an open ACID question as a settled one.
+
+**Two of the ticket's own premises were refuted and both refutations are cheap to re-run.**
+The delta 941758 is not any of the 600 planned transfer amounts (range [2289, 998780]), so
+it is not "one debit without its credit"; and the failing run took 2.29s, while every
+CPU-starved arm takes 3.41–5.21s, so starvation was not the trigger. The closest-matching
+arm is the COVERAGE pass of `make ci` (`-coverpkg=./... -covermode=atomic`, no `-race` —
+`make ci` runs the suite TWICE), which the earlier search never targeted; 400 runs there
+(~47M observations) stayed clean.
+
+**New Test properties introduced by this sync**, all optional and additive:
+`kind` (currently only `negative-control`), `layer` and `buildTag` (currently only `soak`),
+`budgetEnv`, and `verifies` (a prose statement of the property a test pins). `Package`
+gains `role`, and `Commit` gains `subject`. Node identity is unchanged: `Package` by
+`path`, `Test` by `(name, file, pkg)`, `Commit` by `hash`.
