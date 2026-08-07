@@ -164,11 +164,14 @@ func TestIsolation_EdgeInstanceStores_CrossStoreRequiresView(t *testing.T) {
 	// anyway would be asserting something the code cannot deliver; asserting it
 	// through a half-pinned read would be worse, because it would pass by luck.
 	//
-	// rmp #2351 carries the decision this needs: establish whether any PRODUCTION
-	// reader correlates the two at all, and either version the counter or document it
-	// as an allocation sequence that is not part of any snapshot. Until then the hole
-	// characterised above is not merely opt-in — it is unconditional, and that is
-	// worth stating out loud rather than leaving as a deleted test.
+	// rmp #2351 DECIDED it: one production reader does correlate them
+	// (cypher/api.go edgeInstanceIdxFor), and it uses the pair as a CONSERVATIVE
+	// GUARD, so a stale-high count makes the guard decline and the caller falls back
+	// to the per-pair union of edge types — a loss of PRECISION, not a wrong row.
+	// The counter is therefore documented as an ALLOCATION SEQUENCE that belongs to
+	// no snapshot rather than versioned; see [Graph.EdgeCreateCount]. The hole
+	// characterised above is consequently unconditional BY DESIGN, which is worth
+	// stating out loud rather than leaving as a deleted test.
 	t.Logf("characterised the cross-store hole: direct reads observed %d violation(s). "+
 		"The View-wrapped half is RETRACTED — EdgeCreateCount is unversioned, so the "+
 		"correlation is not obtainable at any instant (rmp #2351)",
