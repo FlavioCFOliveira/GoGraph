@@ -246,24 +246,11 @@ func (g *Gate) WeakLockCtx(ctx context.Context, hint uint64) (int, error) {
 	// Blocked behind a strong holder. Park on the blocking path from a helper
 	// goroutine so the caller can abandon the WAIT on ctx — the acquisition itself
 	// cannot be abandoned, because sync.RWMutex has no cancellable acquire, so a
-	// hold that lands after the caller gave up must still be released. That is what
-	// the release goroutine below does; see internal/ctxlock for the same argument
-	// applied to visMu.
-	got := make(chan struct{})
-	go func() {
-		g.blocked.RLock()
-		close(got)
-	}()
-	select {
-	case <-got:
-		return gateSlow, nil
-	case <-ctx.Done():
-		go func() {
-			<-got
-			g.blocked.RUnlock()
-		}()
+	// hold that lands after the caller gave up must still be released.
+	if !acquireCtx(ctx, g.blocked.RLock, g.blocked.RUnlock) {
 		return 0, ctx.Err()
 	}
+	return gateSlow, nil
 }
 
 // WeakUnlock releases a weak acquisition made with [Gate.WeakLock].
@@ -307,20 +294,90 @@ func (g *Gate) StrongLockCtx(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	got := make(chan struct{})
-	go func() {
-		g.StrongLock()
-		close(got)
-	}()
-	select {
-	case <-got:
-		return nil
-	case <-ctx.Done():
-		go func() {
-			<-got
-			g.StrongUnlock()
-		}()
+	if !acquireCtx(ctx, g.StrongLock, g.StrongUnlock) {
 		return ctx.Err()
+	}
+	return nil
+}
+
+// acquireCtx runs a non-cancellable acquire on a helper goroutine and lets the
+// CALLER stop waiting when ctx finishes. It reports whether the caller now owns the
+// lock; when it reports false the caller owns nothing and ctx.Err() is the reason.
+//
+// # ONE helper per abandoned acquire, never two (rmp #2260, re-established by #2348)
+//
+// The obvious shape — a helper that acquires and closes a channel, plus a SECOND
+// goroutine spawned on the ctx.Done branch whose only job is to wait for the first
+// and unlock — costs two goroutines for every abandoned attempt. Both Ctx methods on
+// this gate had that shape until rmp #2348. The retired internal/ctxlock package had
+// already established the fix and measured what the transient costs; its argument
+// lives here now, which is the whole reason this helper exists rather than the inline
+// form it replaced.
+//
+// The three-way handoff is load-bearing and a plain boolean RACES: the helper can
+// read "the caller gave up" as false at the same instant the caller takes the
+// ctx.Done branch, leaving the lock held with no logical owner and nobody to release
+// it. With a CAS exactly one side wins and each side's losing branch knows that
+// cleaning up is its job.
+//
+// # What is bounded here, and what is not
+//
+// The live helper count tracks ARRIVAL RATE × HOLDER TENURE, not the number of
+// concurrent callers: each abandoned attempt parks one helper until the holder
+// releases. Measured (in ctxlock, against a barrier held for 3 s by acquirers with a
+// 2 ms deadline) the two-goroutine form reached 597 819 live goroutines and 1 677 MiB
+// from 256 callers. Halving the per-attempt cost does not change that asymptote, and
+// removing the transient altogether would mean refusing an acquire past some
+// admission limit — turning a blocking call into a failing one and changing every
+// caller's contract. That is a deliberate omission recorded here, not an oversight.
+func acquireCtx(ctx context.Context, lock, unlock func()) bool {
+	const (
+		stateWaiting   int32 = 0 // neither side has claimed the acquisition yet
+		stateHandedOff int32 = 1 // the helper published it; the caller owns the lock
+		stateAbandoned int32 = 2 // the caller gave up first; the helper must unlock
+	)
+	var state atomic.Int32
+	acquired := make(chan struct{})
+	go func() {
+		lock()
+		if state.CompareAndSwap(stateWaiting, stateHandedOff) {
+			close(acquired) // the caller is still waiting: hand it the lock
+			return
+		}
+		unlock() // the caller abandoned first; nothing ran under the lock
+	}()
+
+	select {
+	case <-acquired:
+		// Held. Re-check ctx so a deadline that elapsed WHILE QUEUED is reported
+		// rather than handing back a lock the caller may no longer use. Both Ctx
+		// methods here omitted this until rmp #2348.
+		//
+		// Its window is ONE SCHEDULING QUANTUM and it is stated that way rather than
+		// inflated: this arm is reachable with an expired ctx only when the helper's
+		// acquisition and the deadline become ready at the same instant, and the
+		// elapsed time is then still within budget. It is not the rmp #2174 defect —
+		// that one is being held for the HOLDER'S REMAINING TENURE, and what prevents
+		// it is abandoning the wait, not this check. Correct and free, so it stays;
+		// no test claims to cover it, because it is not observable from outside.
+		//
+		// Releasing here is correct: nothing has been done under the lock.
+		if ctx.Err() != nil {
+			unlock()
+			return false
+		}
+		return true
+	case <-ctx.Done():
+		if state.CompareAndSwap(stateWaiting, stateAbandoned) {
+			// Won the race: the helper has not published and will unlock once it
+			// acquires. No second goroutine is needed.
+			return false
+		}
+		// The helper published between ctx firing and this CAS, so the lock IS held
+		// and we own it. acquired is already closed, so this cannot block.
+		<-acquired
+		unlock()
+		return false
 	}
 }
 

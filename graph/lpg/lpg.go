@@ -1212,20 +1212,22 @@ func (g *Graph[N, W]) LockBarrier() {
 // the caller owns the barrier and must release it exactly once, as with
 // LockBarrier.
 //
-// The wait exists because [Graph.View] readers hold the barrier's read side for
-// the duration of their query, so a writer arriving mid-read queues behind it.
+// The wait exists because a DDL holds the visibility gate strongly for its whole
+// scan-and-register sequence, so a writer arriving mid-DDL queues behind it.
 // Before rmp #2174 that wait was unbounded from the caller's point of view: the
 // round-3 audit measured Engine.BeginTx with a 50 ms deadline returning after
 // 601 ms, and after 11.60 s under load, in both cases with a live transaction
-// and err=nil. See internal/ctxlock for how the wait is bounded and why a
-// queued acquire cannot simply be abandoned.
+// and err=nil. See [mvcc.Gate.StrongLockCtx] and the acquireCtx helper beside it
+// for how the wait is bounded and why a queued acquire cannot simply be
+// abandoned. (It used to say "[Graph.View] readers hold the barrier's read side";
+// rmp #2344 removed Graph.View and reads take no barrier at all.)
 func (g *Graph[N, W]) LockBarrierCtx(ctx context.Context) error {
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
 	if err := g.visGate.StrongLockCtx(ctx); err != nil {
 		return err
 	}
 	// The stamp records the CALLING goroutine, which is the logical holder even
-	// when ctxlock performed the acquire on a helper goroutine: the guard exists
+	// when the gate performed the acquire on a helper goroutine: the guard exists
 	// to detect same-goroutine nesting, and only the caller runs user code under
 	// the barrier.
 	g.barrier.stampWriter(gid)
