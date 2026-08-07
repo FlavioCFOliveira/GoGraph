@@ -153,6 +153,37 @@ by the conflict rate, since every refused attempt pays a retry. Raising `-accoun
 spreads the transfers over more keys and drives `# writer.conflicts_retried`
 down.
 
+## The torn-total gate, and how it explains itself
+
+The conserved total is the example's headline oracle, and a violation of it is rare
+enough that the run which produces one may be the only run that ever does. It is
+therefore built to be *attributable*, not merely loud.
+
+- **One instant per observation.** A reader takes exactly one snapshot, runs exactly
+  one aggregate, and compares it to the seeded total — a constant. It never samples
+  the graph twice and compares the two, which is the unsound shape that made the
+  rmp #2332 gate report violations that existed at no instant.
+- **A tear diagnoses itself.** When a reader holding an explicit read transaction
+  sees a wrong total, it re-reads every account balance **inside the same
+  transaction** — therefore at the same pinned instant the aggregate was computed
+  over — and the failure names a verdict:
+  - the per-account state is consistent → the **aggregate** disagreed with the rows
+    it summed, which is an execution defect and not an isolation one;
+  - the per-account state is itself inconsistent → a genuine **isolation
+    violation**, and the deviating accounts are listed with their deltas.
+  A reader using `Engine.Run` holds no pinned instant to re-read, so it reports
+  `UNATTRIBUTED` rather than guessing.
+- **A NULL is an error, not a zero**, and an ungrouped `sum()` must return exactly
+  one row. Both used to be absorbed silently — a NULL became a total of `0`, and a
+  multi-row result kept its last row — and both would then have been reported as an
+  isolation violation the engine had not committed.
+- **The gate is validated on a deliberately broken build.**
+  `TestTornGate_CatchesADeliberateTear` sets an internal negative-control seam that
+  commits a multi-statement transfer's debit and credit as two separate
+  transactions. That is a real tear, and the test asserts the gate both catches it
+  and attributes it to isolation rather than to the aggregate. A gate that has never
+  been shown to fire is not evidence that anything passed.
+
 ## Key APIs
 
 - `cypher.NewEngineWithStore` — a WAL-backed engine over a `txn.Store`.
