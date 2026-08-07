@@ -688,7 +688,9 @@ func (tx *ExplicitTx) Commit() (err error) {
 		// accumulated in-memory undo is replayed and the index/WAL rolled back,
 		// exactly like the fsync-failure branch below. touched is nil (check a
 		// no-op) unless the engine had an existence constraint active at BeginTx.
-		if nnErr := tx.touched.checkNotNullConstraints(tx.eng.constraintReg, tx.eng.g); nnErr != nil {
+		// Through THIS transaction's view (rmp #2350); see the same call in
+		// commitUnderBarrier.
+		if nnErr := tx.touched.checkNotNullConstraints(tx.eng.constraintReg, tx.eng.g.WriterViewOf(tx.wtx)); nnErr != nil {
 			cmetrics.IncCounter("cypher.ExplicitTx.constraint.notNullViolations", 1)
 			notNullErr = nnErr
 			if undoOK := tx.rollbackInBarrierLocked(); !undoOK {

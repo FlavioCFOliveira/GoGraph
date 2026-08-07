@@ -1,8 +1,6 @@
 package lpg
 
 import (
-	"runtime"
-	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -22,18 +20,15 @@ import (
 // observes that partial state because the writer holds the barrier for the
 // whole apply.
 //
-// This is a CONTRACT/characterization test, not a bug fix: it locks the
-// currently-documented opt-in behaviour described on those accessors and in
-// docs/isolation-design.md. It proves both halves under a deterministic
-// channel handshake (no flaky timing):
+// This is a CONTRACT/characterization test, not a bug fix: it locks the behaviour
+// described on those accessors and in docs/isolation-design.md, under a
+// deterministic channel handshake (no flaky timing). What it still proves is that
+// the direct correlation observes violation > 0.
 //
-//   - the direct (no-View) correlation observes violation > 0, while
-//   - the same correlation wrapped in [Graph.View] observes ZERO violations.
-//
-// The direct reader requests only the stores' own shard locks, never visMu, so
-// the handshake cannot deadlock against the writer that holds visMu via
-// [Graph.ApplyAtomically]. Run under -race: the per-shard locks make every
-// access data-race-free; the gap proven OPEN here is the logical cross-store
+// The reader requests only the stores' own shard locks, never the visibility gate,
+// so the handshake cannot deadlock against the writer that holds it via
+// [Graph.ApplyAtomically]. Run under -race: the per-shard locks make every access
+// data-race-free; the gap proven OPEN here is logical cross-store
 // partial-transaction visibility, not a memory race.
 func TestIsolation_EdgeInstanceStores_CrossStoreRequiresView(t *testing.T) {
 	t.Parallel()
@@ -154,98 +149,28 @@ func TestIsolation_EdgeInstanceStores_CrossStoreRequiresView(t *testing.T) {
 		t.Fatalf("after commit populated instances = %d, want 2", n)
 	}
 
-	// Reset to a clean single-pair graph for half 2 so the count starts at 0.
-	g2 := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
-	if err := g2.AddNode("a"); err != nil {
-		t.Fatalf("g2 AddNode a: %v", err)
-	}
-	if err := g2.AddNode("b"); err != nil {
-		t.Fatalf("g2 AddNode b: %v", err)
-	}
-	apply2 := func(beforeSecond func()) error {
-		return g2.ApplyAtomically(func() error {
-			h1, err := g2.AddEdgeH("a", "b", 0)
-			if err != nil {
-				return err
-			}
-			i1 := g2.IncEdgeCreateCount("a", "b")
-			if err := g2.SetEdgePropertyAt("a", "b", i1, "seq", Int64Value(i1)); err != nil {
-				return err
-			}
-			if err := g2.SetEdgePropertyByHandle("a", "b", h1, "seq", Int64Value(i1)); err != nil {
-				return err
-			}
-			if beforeSecond != nil {
-				beforeSecond()
-			}
-			h2, err := g2.AddEdgeH("a", "b", 0)
-			if err != nil {
-				return err
-			}
-			i2 := g2.IncEdgeCreateCount("a", "b")
-			if err := g2.SetEdgePropertyAt("a", "b", i2, "seq", Int64Value(i2)); err != nil {
-				return err
-			}
-			if err := g2.SetEdgePropertyByHandle("a", "b", h2, "seq", Int64Value(i2)); err != nil {
-				return err
-			}
-			return nil
-		})
-	}
-	viewCrossStoreViolated := func() bool {
-		c := g2.EdgeCreateCount("a", "b")
-		var n int64
-		for idx := int64(1); idx <= c; idx++ {
-			if len(g2.EdgePropertiesAt("a", "b", idx)) > 0 {
-				n++
-			}
-		}
-		return c != n
-	}
-
-	// Half 2 — the SAME correlation wrapped in View. The View read blocks until
-	// the whole transaction is visible (the writer holds visMu for the entire
-	// apply), so it can only observe count==0 (before) or count==2 with both
-	// instances populated (after): zero violations. We synchronise the writer's
-	// start with the reader so the View call genuinely contends with the apply.
-	var viewViolation atomic.Int64
-	var viewReads atomic.Int64
-	{
-		var wg sync.WaitGroup
-		startWrite := make(chan struct{})
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			<-startWrite
-			_ = apply2(func() {
-				runtime.Gosched() // widen the partial window the View must mask
-			})
-		}()
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			close(startWrite)
-			for i := 0; i < 2000; i++ {
-				viewReads.Add(1)
-				if viewCrossStoreViolated() {
-					viewViolation.Add(1)
-				}
-			}
-		}()
-
-		wg.Wait()
-	}
-
-	if v := viewViolation.Load(); v != 0 {
-		t.Fatalf("View-wrapped cross-store read observed %d partial-transaction violations; View must close the window", v)
-	}
-	if viewReads.Load() == 0 {
-		t.Fatal("View readers never read; half 2 did not exercise the invariant")
-	}
-
-	t.Logf("characterized cross-store opt-in barrier: direct reads observed %d violation(s); "+
-		"View reads observed 0 across %d reads",
-		directViolation.Load(), viewReads.Load())
+	// HALF 2 IS RETRACTED, NOT MIGRATED (rmp #2351).
+	//
+	// It used to run the same correlation wrapped in [Graph.View] and assert ZERO
+	// violations, because the writer held the barrier exclusively for the whole apply.
+	// rmp #2344 removed Graph.View, and every other reader in that task moved to a
+	// pinned SNAPSHOT — this one CANNOT. The two stores have different versioning
+	// status: [Graph.EdgePropertiesAt] has an as-of form
+	// ([Graph.EdgePropertiesAtAsOf], reachable through [ReadView]), and
+	// [Graph.EdgeCreateCount] has NONE — it is a raw counter with no version chain.
+	//
+	// So the count side cannot be pinned to any instant, and the correlation asserted
+	// here is not obtainable by ANY mechanism the module offers today. Asserting it
+	// anyway would be asserting something the code cannot deliver; asserting it
+	// through a half-pinned read would be worse, because it would pass by luck.
+	//
+	// rmp #2351 carries the decision this needs: establish whether any PRODUCTION
+	// reader correlates the two at all, and either version the counter or document it
+	// as an allocation sequence that is not part of any snapshot. Until then the hole
+	// characterised above is not merely opt-in — it is unconditional, and that is
+	// worth stating out loud rather than leaving as a deleted test.
+	t.Logf("characterised the cross-store hole: direct reads observed %d violation(s). "+
+		"The View-wrapped half is RETRACTED — EdgeCreateCount is unversioned, so the "+
+		"correlation is not obtainable at any instant (rmp #2351)",
+		directViolation.Load())
 }

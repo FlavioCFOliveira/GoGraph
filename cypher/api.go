@@ -5325,7 +5325,11 @@ func (r *Result) commitUnderBarrier() {
 	// required property rejects the WHOLE transaction atomically — exactly like
 	// the SET-to-null path and the fsync-failure branch below. touched is nil
 	// (and the check a no-op) unless the engine has an existence constraint active.
-	if nnErr := r.touched.checkNotNullConstraints(r.constraintReg, r.g); nnErr != nil {
+	// Through THIS transaction's view (rmp #2350). WriterViewOf resolves through the
+	// transaction id, so the check sees this statement's own eager writes and no other
+	// transaction's unpublished work; it falls back to the present only for a graph
+	// whose versioning substrate is disarmed, which has no concurrent writer to hide.
+	if nnErr := r.touched.checkNotNullConstraints(r.constraintReg, r.g.WriterViewOf(r.wtx)); nnErr != nil {
 		cmetrics.IncCounter("cypher.RunInTx.constraint.notNullViolations", 1)
 		r.notNullErr = nnErr
 		r.rollbackUnderBarrier()

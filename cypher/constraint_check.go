@@ -52,7 +52,7 @@ package cypher
 // single transaction and all recording happens on the executing goroutine inside
 // that transaction's write bracket. That much is still true.
 //
-// # THE SECOND HALF OF THIS PARAGRAPH WAS FALSE AND IS A KNOWN DEFECT (rmp #2350)
+// # THE SECOND HALF OF THIS PARAGRAPH WAS FALSE, AND THE CODE RESTED ON IT (rmp #2350)
 //
 // It read: "The commit-time scan also runs under the barrier, so it observes a
 // quiescent graph (no concurrent writer, no in-flight View)." Both halves are false —
@@ -67,11 +67,26 @@ package cypher
 // conflicts are per-substore and two transactions touching the same node through
 // DIFFERENT substores (one the label, one the property) never conflict.
 //
-// rmp #2350 carries the mechanism, both error directions, and the fix: read through
-// the committing transaction's own view so every accessor resolves through
-// [mvcc.Visible] with that transaction's id. It is recorded here rather than left in
-// the tracker because the next reader of this file must not inherit the retracted
-// claim as if it were the contract.
+// FIXED by rmp #2350: [touchedNodes.checkNotNullConstraints] now takes the committing
+// transaction's [lpg.ReadView] rather than the graph, so every accessor resolves
+// through [mvcc.Visible] with that transaction's id — its own eager writes visible,
+// every other transaction's unpublished work not. Both call sites pass
+// [lpg.Graph.WriterViewOf]. TestConstraint_NotNullCheck_IgnoresUncommittedWrites
+// builds the conflict-free interleaving and fails against the old read.
+//
+// The history is kept here rather than deleted because the next reader of this file
+// must not inherit the retracted claim as if it were the contract — and because the
+// enforcement POINT is unchanged and still correct. Only the READ was wrong.
+//
+// # The UNIQUE path does NOT share this, and that was checked rather than assumed
+//
+// UNIQUE is enforced through [exec.ConstraintRegistry]'s value-sets, reserved
+// eagerly at write time and released by a JOURNALED inverse on rollback
+// (cypher/exec/constraint_journal.go). It never reads present-time graph state to
+// decide, so there is no uncommitted state for it to observe. rmp #2321 already
+// established the same thing from the other side: rebuilding those value-sets from
+// the graph destroyed CONCURRENT writers' reservations, precisely because a rebuild
+// cannot see a commit that is not yet durable.
 
 import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
@@ -130,11 +145,16 @@ func (t *touchedNodes) empty() bool { return t == nil || len(t.keys) == 0 }
 //
 // It is gated by the caller on [exec.ConstraintRegistry.HasAnyNotNull]; a nil
 // receiver, a nil registry, or an empty touched set all short-circuit to nil.
-func (t *touchedNodes) checkNotNullConstraints(reg *exec.ConstraintRegistry, g *lpg.Graph[string, float64]) error {
-	if t.empty() || reg == nil || g == nil {
+func (t *touchedNodes) checkNotNullConstraints(reg *exec.ConstraintRegistry, v *lpg.ReadView[string, float64]) error {
+	if t.empty() || reg == nil || v == nil {
 		return nil
 	}
-	mapper := g.AdjList().Mapper()
+	// THROUGH THE COMMITTING TRANSACTION'S VIEW, never the raw graph (rmp #2350).
+	// Every accessor below resolves via [mvcc.Visible] with this transaction's id, so
+	// it sees this transaction's own eager writes and NO other transaction's
+	// unpublished work. Reading the raw graph instead decided constraints on
+	// uncommitted state, in both directions — see the file doc.
+	mapper := v.Raw().AdjList().Mapper()
 	for key := range t.keys {
 		id, ok := mapper.Lookup(key)
 		if !ok {
@@ -145,22 +165,22 @@ func (t *touchedNodes) checkNotNullConstraints(reg *exec.ConstraintRegistry, g *
 		// A node not in the final committed state (deleted / tombstoned) is exempt:
 		// the constraint quantifies over nodes that carry the label, and a removed
 		// node carries nothing. DETACH DELETE / DELETE therefore need no check.
-		if g.IsTombstoned(id) {
+		if v.IsTombstoned(id) {
 			continue
 		}
 		// Enumerate the node's final-state labels once, then test only those that
 		// carry a NOT NULL constraint. NodeLabelsByID avoids the key→ID Mapper
 		// lookup we already did above.
-		labels := g.NodeLabelsByID(id)
+		labels := v.NodeLabelsByID(id)
 		for _, label := range labels {
 			props := reg.NotNullProperties(label)
 			for _, prop := range props {
-				v, present := g.GetNodeProperty(key, prop)
+				pv, present := v.GetNodeProperty(key, prop)
 				// Absent property and an explicit null are identical in the Cypher
 				// data model: both fail IS NOT NULL. GetNodeProperty reports absent
 				// via present=false; a stored value is never the zero PropertyValue,
 				// but guard Kind()==0 too so the check matches CheckSetProperty.
-				if !present || v.Kind() == 0 {
+				if !present || pv.Kind() == 0 {
 					return &exec.ConstraintViolationError{
 						Label:    label,
 						Property: prop,
