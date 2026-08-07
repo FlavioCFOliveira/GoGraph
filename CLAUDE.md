@@ -80,9 +80,9 @@ Every development cycle must be **self-contained**: never deliver only part of a
 
 Whenever you identify a bug, create the regression tests needed to guarantee that the same defect cannot reappear as a consequence of future development. A fix is not complete until a test that fails on the old behaviour and passes on the corrected behaviour is in place.
 
-### Production-grade by default
+### Perfection Oriented
 
-Across the entire cycle — analysis → planning → development → testing — the result must be **production-grade**, and this standard applies to **every action you take**: development, fixes, evaluations, analyses, and audits alike. Apply your full knowledge and effort so that every change yields code ready to run in production, never a prototype or a partial solution.
+**Every action you take** — development, fixes, evaluations, analyses, audits, and any other — must be carried out to the standard of rigour demanded by a **production** environment, and carried out in an **exemplary and perfect** manner. Across the entire cycle — analysis → planning → development → testing — the result must be production-grade: apply your full knowledge and effort so that every change yields code ready to run in production, never a prototype or a partial solution.
 
 The standard each component and the architecture must meet is set out in [Component and Architecture Excellence](#component-and-architecture-excellence).
 
