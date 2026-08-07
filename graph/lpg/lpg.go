@@ -1320,92 +1320,27 @@ func (g *Graph[N, W]) ApplyInsideLockedTx(fn func(WriteTx) error) error {
 	return fn(g.AmbientWriteTx())
 }
 
-// View runs fn while holding the graph's SCHEMA barrier in READ mode, so fn
-// observes a graph whose catalog — the declared indexes and constraints, and the
-// structures a DDL transition rebuilds — is not mid-transition.
+// Graph.View was REMOVED in rmp #2344.
 //
-// # It does NOT isolate fn from concurrent DATA writes (rmp #2320)
+// It ran fn while holding the graph's visibility barrier in READ mode, and it was
+// the last pre-MVCC read barrier in the module. Nothing needs it: a caller that
+// needs a consistent view of DATA takes a SNAPSHOT ([Graph.BeginRead] plus
+// [Graph.ReadAt], paired with [Graph.EndRead]), and a caller that needs a
+// consistent view of the CATALOG is covered by the engine's schema gate, which is
+// strictly stronger — a DDL holds it exclusively while an ordinary write holds it
+// shared, whereas View shared the barrier WITH ordinary writes and therefore
+// excluded nothing at all.
 //
-// It used to, and the guarantee never came from this side of the lock: an
-// ordinary write held the same barrier EXCLUSIVELY, so a reader here and a writer
-// could not overlap. rmp #2320 moved ordinary writes to a SHARED hold
-// ([Graph.ApplyVersioned]), and a lock shared with a writer gives a reader here
-// not a weaker guarantee but NONE, because GoGraph updates the stored value IN
-// PLACE and keeps the inverse in the version chain (Memgraph's delta shape, see
-// mvcc_write.go) — so an accessor that resolves no version reads the NEWEST
-// value, another transaction's uncommitted work included. Measured on this build:
-// 7040 partial-transaction observations from a View reader using unversioned
-// accessors, against ZERO from a snapshot reader over 6 488 034 reads
-// (TestIsolation_Commit_NoPartialTransactionObservable and its negative control).
+// That last point is why keeping it was not harmless. Since rmp #2320 an ordinary
+// write holds the visibility barrier SHARED, so a View reader using unversioned
+// accessors read the newest stored value — another transaction's uncommitted work
+// included. Measured on this build: 7040 partial-transaction observations from a
+// View reader against ZERO from a snapshot reader over 6 488 034 reads. The method
+// looked like an isolation primitive and provided no isolation.
 //
-// So the rule is now explicit and has exactly two halves:
-//
-//   - a caller that needs a consistent view of DATA takes a SNAPSHOT —
-//     [Graph.BeginRead] plus [Graph.ReadAt], paired with [Graph.EndRead]. That is
-//     what [Engine.Run] does, it takes no lock at all, and it is the only thing
-//     that provides atomic visibility now;
-//   - a caller that needs a consistent view of the CATALOG, or that reads through
-//     an accessor with no as-of form, uses this.
-//
-// The division is where Memgraph and PostgreSQL both put it. Memgraph takes
-// `main_lock_` with a `std::shared_lock` for an ordinary write and uniquely only
-// for the index/constraint and durability transitions
-// (`src/storage/v2/inmemory/storage.cpp`); PostgreSQL expresses the same thing
-// through its conflict matrix, where an ordinary write's RowExclusiveLock does not
-// conflict with itself and CREATE INDEX's ShareLock does
-// (`src/backend/storage/lmgr/lock.c`, LockConflicts).
-//
-// # What still relies on it, and what each one actually rests on
-//
-// Three callers remain, and none of them depends on this method for data
-// atomicity:
-//
-//   - the checkpointer's capture (store/checkpoint) runs inside
-//     RunUnderCommitLock, which drains in-flight commits to ZERO before capturing,
-//     so no write can be half-applied while it walks. This hold is belt and
-//     braces; rmp #2310 replaces it with a transactional instant;
-//   - the approximate-statistics build (cypher/stats_build.go) is approximate by
-//     contract and stamps the generation it scanned, so a concurrent write costs
-//     accuracy and never correctness;
-//   - the constraint pre-validation scan (cypher/api.go scanLabelProperty) runs
-//     before the constraint is registered and is followed by enforcement on every
-//     subsequent write, so a value a concurrent writer added during the scan is
-//     caught by the enforcement path rather than missed.
-//
-// # It is NO LONGER how the query engine reads (rmp #2274, #2290)
-//
-// [Engine.Run] used to bracket every query in this, which gave it a consistent
-// view by EXCLUDING writers — and that exclusion is what starved readers: a
-// write took the same barrier exclusively, Go's sync.RWMutex prefers a waiting
-// writer, and every reader arriving behind one parked for as long as the
-// longest in-flight read. A query now takes a SNAPSHOT ([Graph.BeginRead]) and
-// no lock at all.
-//
-// Concurrent View callers do not block one another, and they no longer block a
-// writer either.
-//
-// fn must not perform writes and must not call [Graph.ApplyAtomically] or
-// [Graph.View] (the RWMutex is not re-entrant). A nested [Graph.View] would
-// deadlock the instant any writer queues behind the outer read lock, and a
-// nested [Graph.ApplyAtomically] always deadlocks.
-//
-// Both are CHECKED in builds made with -race or -tags gograph_debug: a nested
-// call from a goroutine already inside the barrier panics with a clear message
-// instead of deadlocking. The panic indicates a programmer error and is not
-// recovered by this package. A released build omits the check — identifying the
-// calling goroutine cost a runtime.Stack call measured at 97-99% of this method,
-// with a 64 B allocation and no scaling across cores — so there a violation
-// deadlocks silently. See graph/lpg/reentrancy_disabled.go.
-//
-// Concurrent View readers from DIFFERENT goroutines do not block one another and
-// never trip the guard; only a same-goroutine nested acquisition does.
-func (g *Graph[N, W]) View(fn func()) {
-	gid := g.barrier.enterReader() // panics on re-entry from this goroutine
-	defer g.barrier.exitReader(gid)
-	visTok := g.visGate.WeakLockAuto()
-	defer g.visGate.WeakUnlock(visTok)
-	fn()
-}
+// Removing it also retires the READER half of the re-entrancy guard, which had no
+// other caller: see [barrierGuard]. The WRITER half stays, because
+// [Graph.ApplyAtomically] still nests fatally.
 
 // SetValidator installs v as the runtime schema validator for this graph.
 // Once set, every call to [Graph.SetNodeProperty] and [Graph.SetEdgeProperty]

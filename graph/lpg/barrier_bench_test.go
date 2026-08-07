@@ -62,18 +62,6 @@ func BenchmarkBarrier_BareRWMutexParallel(b *testing.B) {
 	})
 }
 
-// BenchmarkBarrier_View measures the read-path cost of the visibility barrier
-// with an empty body: in a released build this is exactly one RLock/RUnlock pair
-// and must allocate zero bytes.
-func BenchmarkBarrier_View(b *testing.B) {
-	g := New[string, int64](adjlist.Config{Directed: true})
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		g.View(func() {})
-	}
-}
-
 // BenchmarkBarrier_ApplyAtomically measures the write-path cost of the
 // visibility barrier (Lock/Unlock plus the adjacency commit window) with an
 // empty transaction.
@@ -84,21 +72,4 @@ func BenchmarkBarrier_ApplyAtomically(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_ = g.ApplyAtomically(func() error { return nil })
 	}
-}
-
-// BenchmarkBarrier_ViewParallel measures aggregate View throughput across
-// goroutines with an empty body. visMu admits concurrent readers, so ns/op must
-// FALL as cores are added. Run with -cpu=1,10 and compare: under the enforcing
-// guard the per-op cost roughly doubled from 1 to 10 cores instead, because
-// every reader contended on the runtime's debuglock inside runtime.Stack rather
-// than on the graph.
-func BenchmarkBarrier_ViewParallel(b *testing.B) {
-	g := New[string, int64](adjlist.Config{Directed: true})
-	b.ReportAllocs()
-	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			g.View(func() {})
-		}
-	})
 }

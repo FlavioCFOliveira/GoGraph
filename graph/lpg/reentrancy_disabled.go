@@ -74,10 +74,3 @@ func (bg *barrierGuard) stampWriter(int64) {}
 
 // clearWriter clears nothing.
 func (bg *barrierGuard) clearWriter(int64) {}
-
-// enterReader performs no check and records nothing, returning the same 0
-// sentinel as [barrierGuard.checkWriter].
-func (bg *barrierGuard) enterReader() int64 { return 0 }
-
-// exitReader clears nothing.
-func (bg *barrierGuard) exitReader(int64) {}

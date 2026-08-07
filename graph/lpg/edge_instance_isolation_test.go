@@ -228,12 +228,10 @@ func TestIsolation_EdgeInstanceStores_CrossStoreRequiresView(t *testing.T) {
 			defer wg.Done()
 			close(startWrite)
 			for i := 0; i < 2000; i++ {
-				g2.View(func() {
-					viewReads.Add(1)
-					if viewCrossStoreViolated() {
-						viewViolation.Add(1)
-					}
-				})
+				viewReads.Add(1)
+				if viewCrossStoreViolated() {
+					viewViolation.Add(1)
+				}
 			}
 		}()
 

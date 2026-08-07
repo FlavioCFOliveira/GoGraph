@@ -8,7 +8,7 @@ package server_test
 // though reads need no write lock.
 //
 // After the fix, autocommit queries go through RunAny, which routes reads to
-// Engine.Run → e.g.View() → visMu.RLock(). Read locks are shared, so N
+// Engine.Run took the visibility barrier in read mode. Read locks were shared, so N
 // concurrent autocommit read sessions can now execute in parallel.
 //
 // Note: since rmp #2290 an autocommit read takes NO barrier at all — it pins an

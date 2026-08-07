@@ -138,70 +138,6 @@ func assertGuardPanic(t *testing.T, recovered any, wantNested, wantHeld string) 
 	}
 }
 
-// TestReentrancyGuard_NestedViewInView_PanicsNotHangs covers reader→reader:
-// inside g.View (RLock held), a writer is queued on ApplyAtomically (visMu.Lock)
-// so a nested RLock would block behind it and deadlock; the nested g.View must
-// instead panic with the guard message within the watchdog rather than hanging.
-func TestReentrancyGuard_NestedViewInView_PanicsNotHangs(t *testing.T) {
-	t.Parallel()
-	g := newReentrancyGraph(t)
-
-	recovered := runWithWatchdog(t, func() {
-		g.View(func() {
-			// The outer RLock is now held. Queue a writer behind it so the
-			// nested RLock below is genuinely deadlock-prone (a queued writer
-			// blocks new readers), then attempt the nested View — the guard must
-			// panic before the deadlock can form. The queued writer is released
-			// and joined at t.Cleanup, after this View has unwound.
-			settle := queueWriter(t, g)
-			settle()
-			g.View(func() {
-				t.Errorf("nested View body must never run")
-			})
-		})
-	})
-	assertGuardPanic(t, recovered, "View", "View")
-}
-
-// TestReentrancyGuard_NestedApplyInView_PanicsNotHangs covers reader→writer:
-// inside g.View, a nested g.ApplyAtomically (which would self-deadlock waiting
-// for the in-flight read lock to release) panics with the guard message within
-// the watchdog rather than hanging. No external writer is needed: reader→writer
-// always deadlocks.
-func TestReentrancyGuard_NestedApplyInView_PanicsNotHangs(t *testing.T) {
-	t.Parallel()
-	g := newReentrancyGraph(t)
-
-	recovered := runWithWatchdog(t, func() {
-		g.View(func() {
-			_ = g.ApplyAtomically(func() error {
-				t.Errorf("nested ApplyAtomically body must never run")
-				return nil
-			})
-		})
-	})
-	assertGuardPanic(t, recovered, "ApplyAtomically", "View")
-}
-
-// TestReentrancyGuard_NestedViewInApply_PanicsNotHangs covers writer→reader:
-// inside g.ApplyAtomically (holding visMu.Lock), a nested g.View (which would
-// self-deadlock waiting for the write lock to release) panics with the guard
-// message within the watchdog rather than hanging.
-func TestReentrancyGuard_NestedViewInApply_PanicsNotHangs(t *testing.T) {
-	t.Parallel()
-	g := newReentrancyGraph(t)
-
-	recovered := runWithWatchdog(t, func() {
-		_ = g.ApplyAtomically(func() error {
-			g.View(func() {
-				t.Errorf("nested View body must never run")
-			})
-			return nil
-		})
-	})
-	assertGuardPanic(t, recovered, "View", "ApplyAtomically")
-}
-
 // TestReentrancyGuard_NestedApplyInApply_PanicsNotHangs covers writer→writer:
 // inside g.ApplyAtomically, a nested g.ApplyAtomically (which would self-deadlock
 // on the write lock it already holds) panics with the guard message within the
@@ -247,7 +183,7 @@ func TestReentrancyGuard_PanicInFnClearsWriterMark(t *testing.T) {
 		t.Fatalf("post-panic ApplyAtomically did not run")
 	}
 	// Likewise for View.
-	g.View(func() { _ = g.LiveOrder() })
+	_ = g.LiveOrder()
 }
 
 // TestReentrancyGuard_NoFalsePositive_ConcurrentReadersAndWriter is the
@@ -306,10 +242,8 @@ func TestReentrancyGuard_NoFalsePositive_ConcurrentReadersAndWriter(t *testing.T
 			defer readersWG.Done()
 			for !stop.Load() {
 				guarded(func() {
-					g.View(func() {
-						_ = g.LiveOrder()
-						_ = g.HasNodeLabel("u", "Hot")
-					})
+					_ = g.LiveOrder()
+					_ = g.HasNodeLabel("u", "Hot")
 				})
 			}
 		}()

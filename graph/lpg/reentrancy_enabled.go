@@ -77,7 +77,7 @@ import (
 //     View/ApplyAtomically sailed past the guard into the deadlock the guard
 //     exists to prevent; the exit-side unconditional Store(0) likewise erased
 //     the other writer's stamp.)
-//   - Concurrent [Graph.View] readers are tracked in a small map keyed by
+//   - Concurrent writers are tracked in a small set keyed by
 //     goroutine id, guarded by a dedicated mutex (NOT visMu). The mutex is held
 //     only for the O(1) insert/remove at the RLock/RUnlock boundary, never while
 //     fn runs, so the read hot path stays exactly as lock-free as before. The
@@ -87,17 +87,8 @@ import (
 // goroutine ids come from [goID]; if the runtime makes that unparseable the
 // helper returns 0, the guard simply stops tripping, and the contract reverts to
 // documented-but-unenforced. The guard never produces a false positive against
-// legitimate concurrent (different-goroutine) View readers and an
-// ApplyAtomically writer.
+// legitimate concurrent (different-goroutine) ApplyAtomically writers.
 type barrierGuard struct {
-	// readers maps an in-View goroutine id to its current View nesting depth.
-	// Depth is always 1 in correct code (the guard panics before it can reach
-	// 2); the counter exists purely so the entry check can recognise "this
-	// goroutine is already a reader" without the entry itself being mistaken
-	// for a fresh reader. Pre-created in New so common-path inserts do not grow
-	// a nil/empty map into existence.
-	readers map[int64]int
-
 	// writers holds the goroutine id of EVERY goroutine currently inside a
 	// write bracket. It is stamped by [barrierGuard.stampWriter] once the
 	// bracket is entered and cleared by [barrierGuard.clearWriter] on the way
@@ -119,16 +110,14 @@ type barrierGuard struct {
 	// reentrancy_disabled.go, which allocates and locks nothing.
 	writers map[int64]struct{}
 
-	// readerMu guards readers, writerMu guards writers. Both are independent of
-	// visMu and are held only for the O(1) map mutation at a bracket boundary.
-	readerMu sync.Mutex
+	// writerMu guards writers. It is independent of the visibility gate and is
+	// held only for the O(1) map mutation at a bracket boundary.
 	writerMu sync.Mutex
 }
 
-// initBarrierGuard pre-creates the reader map so the common path never
-// allocates the map into existence under the boundary mutex.
+// initBarrierGuard pre-creates the writer set so the common path never allocates
+// the map into existence under the boundary mutex.
 func (bg *barrierGuard) init() {
-	bg.readers = make(map[int64]int)
 	bg.writers = make(map[int64]struct{})
 }
 
@@ -173,14 +162,6 @@ func (bg *barrierGuard) checkWriter() int64 {
 		// Runtime line unparseable: fail open (no enforcement), never crash.
 		return 0
 	}
-	// reader → writer: this goroutine is inside View and is now trying to take
-	// the write lock — always a self-deadlock.
-	bg.readerMu.Lock()
-	_, isReader := bg.readers[gid]
-	bg.readerMu.Unlock()
-	if isReader {
-		panic(reentrancyMessage("ApplyAtomically", "View"))
-	}
 	// writer → writer: this goroutine is already inside a write bracket.
 	bg.writerMu.Lock()
 	_, isWriter := bg.writers[gid]
@@ -224,52 +205,8 @@ func (bg *barrierGuard) clearWriter(gid int64) {
 	bg.writerMu.Unlock()
 }
 
-// enterReader marks the calling goroutine as an in-barrier reader, panicking if
-// the goroutine already holds the barrier in any role. It is called by
-// [Graph.View] BEFORE acquiring visMu.RLock. The returned gid must be passed to
-// exitReader (via defer) to clear the mark even if fn panics.
-func (bg *barrierGuard) enterReader() int64 {
-	gid := goID()
-	if gid == 0 {
-		return 0
-	}
-	// writer → reader: this goroutine is inside a write bracket and is now
-	// trying to read — always a self-deadlock. The set membership test replaced
-	// a lock-free atomic load when the guard learned to hold more than one
-	// writer (rmp #2301); the extra mutex is paid only in the enforcing build.
-	bg.writerMu.Lock()
-	_, isWriter := bg.writers[gid]
-	bg.writerMu.Unlock()
-	if isWriter {
-		panic(reentrancyMessage("View", "ApplyAtomically"))
-	}
-	bg.readerMu.Lock()
-	if bg.readers == nil {
-		// Defensive: New always pre-creates the map, but a future Graph built by
-		// another path must not nil-panic here. One-time, never on the common
-		// path for a New-constructed graph.
-		bg.readers = make(map[int64]int)
-	}
-	if _, isReader := bg.readers[gid]; isReader {
-		// reader → reader: deadlocks the instant any writer queues behind the
-		// outer RLock. Reject unconditionally rather than only when a writer is
-		// pending, so the contract is enforced deterministically.
-		bg.readerMu.Unlock()
-		panic(reentrancyMessage("View", "View"))
-	}
-	bg.readers[gid] = 1
-	bg.readerMu.Unlock()
-	return gid
-}
-
-// exitReader clears the reader mark set by enterReader. gid==0 means enterReader
-// failed open. It runs from a defer in [Graph.View], so it executes even when fn
-// panics and never strands a stale reader id.
-func (bg *barrierGuard) exitReader(gid int64) {
-	if gid == 0 {
-		return
-	}
-	bg.readerMu.Lock()
-	delete(bg.readers, gid)
-	bg.readerMu.Unlock()
-}
+// The READER half of this guard was removed with [Graph.View] in rmp #2344. It had
+// exactly one caller, and once reads take no barrier at all there is no reader to
+// mark: a snapshot read acquires nothing, so it cannot nest fatally with anything.
+// What remains is the WRITER half, because [Graph.ApplyAtomically] still deadlocks
+// when nested inside itself.

@@ -1125,10 +1125,30 @@ type Engine struct {
 	// the engine single-writer, because two writes holding it shared do not exclude
 	// each other.
 	//
-	// visMu cannot do this job on its own even though it has the same shape: the DDL's
-	// exclusive hold covers only the registration, and extending it over the backfill
-	// would mean the scan could no longer use [lpg.Graph.View] (visMu is not
-	// re-entrant). This lock is one level out, so it needs no such surgery.
+	// # Can this collapse into the graph's own visibility gate? The obstacle is gone,
+	// and the answer is still NO (rmp #2344 AC5)
+	//
+	// This used to read: "visMu cannot do this job on its own even though it has the
+	// same shape: the DDL's exclusive hold covers only the registration, and extending
+	// it over the backfill would mean the scan could no longer use [lpg.Graph.View]
+	// (visMu is not re-entrant)."
+	//
+	// THAT OBSTACLE NO LONGER EXISTS. rmp #2344 removed Graph.View outright, and the
+	// DDL scan takes no barrier at all. So the two gates COULD now be collapsed.
+	//
+	// They are not, and the reason is that the payoff was measured and is nil. An
+	// ordinary write currently takes two weak acquisitions; rmp #2337 measured a weak
+	// acquisition at 0.434 ns at ten cores, so collapsing saves ~0.4 ns of a 2892 ns
+	// commit — 0.014%, which is below the noise of any benchmark this module has. And
+	// rmp #2338 established that the write ceiling is set by the commit's ALLOCATION
+	// RATE (56 objects, 4.2 KB) and not by lock acquisitions at all: a lock-free
+	// workload allocating at that rate ceilings at ~2.6x on this host and the engine
+	// already reaches 86% of it.
+	//
+	// Against nil gain, collapsing would make a DDL hold the GRAPH's visibility gate
+	// strongly across its whole backfill scan rather than only across registration —
+	// widening a correctness-sensitive exclusion window to buy nothing. Keeping the
+	// two levels separate keeps the DDL's long phase out of the graph's gate.
 	//
 	// Lock order: schemaGate (outermost) → the store's writer admission → visMu.
 	// Readers take none of them.
