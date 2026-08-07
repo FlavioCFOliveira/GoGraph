@@ -3,6 +3,7 @@ package mvcc
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -61,6 +62,41 @@ func TestGate_StrongExcludesWeak(t *testing.T) {
 		}(uint64(i))
 	}
 
+	// awaitWeakProgress blocks until the weak side has run at least once more than
+	// mark, and fails the test if it does not within the deadline.
+	//
+	// WAITING FOR IT IS THE POINT, and this used to be a bare end-of-test check
+	// that weakRuns != 0. That check is correct but it is not a control: it made
+	// the test's validity depend on the scheduler. The strong loop below is tight,
+	// and a strong holder keeps `blocked` write-locked for its whole tenure while
+	// Go's RWMutex prefers a queued writer — so 2000 back-to-back strong
+	// acquisitions can starve every weak acquirer for the entire run. That is
+	// exactly what happened under `make ci`'s loaded coverage pass: the control
+	// fired, correctly reporting that the exclusion had never been exercised, and
+	// the test failed for want of SCHEDULING rather than for want of exclusion.
+	//
+	// Interleaving is now REQUIRED rather than hoped for: the loop waits for the
+	// weak side to make progress, so a gate that never admits a weak holder fails
+	// here with a deadline instead of passing by luck.
+	awaitWeakProgress := func(mark int64) {
+		t.Helper()
+		deadline := time.Now().Add(30 * time.Second)
+		for weakRuns.Load() <= mark {
+			if time.Now().After(deadline) {
+				close(stop)
+				wg.Wait()
+				t.Fatalf("the weak side made no progress in 30s past %d runs: either the "+
+					"gate never admits a weak holder, or the exclusion under test is "+
+					"never exercised — both make this test worthless", mark)
+			}
+			runtime.Gosched()
+		}
+	}
+
+	// The weak side must be demonstrably live BEFORE the strong loop starts.
+	awaitWeakProgress(0)
+	weakBefore := weakRuns.Load()
+
 	for i := 0; i < iterations; i++ {
 		g.StrongLock()
 		guarded++ // write under the strong hold
@@ -73,6 +109,12 @@ func TestGate_StrongExcludesWeak(t *testing.T) {
 			t.Fatalf("strong holder ran beside %d weak holders; want 0", n)
 		}
 		g.StrongUnlock()
+		// Periodically hand the weak side a real turn, and WAIT for it to take
+		// one, so the two sides genuinely interleave across the run rather than
+		// the strong loop monopolising the gate from start to finish.
+		if i%100 == 99 {
+			awaitWeakProgress(weakRuns.Load())
+		}
 	}
 
 	close(stop)
@@ -81,11 +123,13 @@ func TestGate_StrongExcludesWeak(t *testing.T) {
 	if got := strongRuns.Load(); got != iterations {
 		t.Fatalf("strong sections ran %d times, want %d", got, iterations)
 	}
-	// Positive control: the weak side must actually have run, or the exclusion
-	// above was never exercised and this test proves nothing.
-	if got := weakRuns.Load(); got == 0 {
-		t.Fatal("no weak section ever ran: the exclusion was never exercised, " +
-			"so this test would pass against a gate that excludes nothing")
+	// Positive control, now a statement about the strong loop rather than about
+	// the whole test: weak sections ran WHILE the strong loop was running, so the
+	// exclusion asserted inside it was genuinely exercised.
+	if got := weakRuns.Load(); got <= weakBefore {
+		t.Fatalf("no weak section ran during the strong loop (before=%d after=%d): "+
+			"the exclusion was never exercised, so this test would pass against a "+
+			"gate that excludes nothing", weakBefore, got)
 	}
 	if guarded != iterations {
 		t.Fatalf("guarded = %d, want %d", guarded, iterations)

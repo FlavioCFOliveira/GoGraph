@@ -9,23 +9,34 @@ package sim
 //
 // # ST1 resolution: group-commit folds into ST2
 //
-// ST1 (assert group-commit fsync coalescing) has NO reachable surface through
-// the Cypher engine and therefore none through this DST harness. The engine
-// serialises every write commit — including the WAL fsync — under one exclusive
-// visibility barrier (cypher/api.go execUnderBarrier -> commitUnderBarrier ->
-// txn.Tx.CommitWALOnly -> wal.Writer.SyncGroup), so through the engine path
-// SyncGroup is ALWAYS a solo leader with zero followers: the multi-member
-// coalescing / fail-all behaviour is unreachable here. That behaviour is a pure
-// store-layer property and is already unit-tested directly, with many goroutines
-// committing through one txn.Store, in store/wal/syncgroup_test.go and
-// store/txn/group_commit_durability_test.go.
+// ST1 (assert group-commit fsync coalescing) folds into ST2:
+// [durableCommitCrashScenario] drives [wal.Writer.SyncGroup] on EVERY durable
+// commit (adapter RunWrite -> RunInTx -> CommitWALOnly -> SyncGroup), and
+// additionally exercises it under a concurrent mid-flight fsync fault and crash
+// recovery. What the DST adds over the store-layer tests in
+// store/wal/syncgroup_test.go and store/txn/group_commit_durability_test.go is
+// the end-to-end path (real Bolt wire -> engine -> store -> WAL -> SimDisk)
+// under a crash, not the coalescing arithmetic.
 //
-// ST1 therefore folds into ST2: [durableCommitCrashScenario] DRIVES solo-leader
-// SyncGroup on EVERY durable commit (adapter RunWrite -> RunInTx ->
-// CommitWALOnly -> SyncGroup), and now additionally exercises it under a
-// concurrent mid-flight fsync fault and crash recovery. What the DST adds over
-// the store-layer tests is the end-to-end path (real Bolt wire -> engine ->
-// store -> WAL -> SimDisk) under a crash, not the coalescing arithmetic.
+// # The engine DOES produce group-commit followers — measured, rmp #2347
+//
+// This note used to justify the fold differently, and wrongly: it said the
+// engine "serialises every write commit — including the WAL fsync — under one
+// exclusive visibility barrier", so "through the engine path SyncGroup is
+// ALWAYS a solo leader with zero followers" and the multi-member coalescing
+// path was unreachable here.
+//
+// BOTH HALVES ARE FALSE since sprint 334 made MVCC the module's concurrency
+// control. The engine takes its barrier SHARED for an ordinary write
+// (cypher/api.go, Engine.schemaGate.WeakLockAuto), so two commits run
+// concurrently by design. MEASURED on 2026-08-07 with a metrics probe on
+// store.wal.SyncGroup.coalesced, driving 12 concurrent Bolt writers x 40
+// commits through a real store: 480 SyncGroup calls, of which 16 took the
+// FOLLOWER fast path. Multi-member coalescing is reachable through the engine
+// and these scenarios exercise it.
+//
+// The fold still stands — ST2 drives the path either way — but its reason is
+// now coverage of the end-to-end stack, never unreachability.
 //
 // # ST7 note: snapshot isolation, since rmp #2307
 //
@@ -149,7 +160,7 @@ func durableCommitCrashScenario() Scenario {
 				return nil, err
 			}
 			if v := r.violations(true); len(v) > 0 {
-				return durableReport(seed, v), nil
+				return durableReport(ScenarioDurableCommitCrash, ModeConcurrent, seed, v), nil
 			}
 			return nil, nil
 		},
@@ -340,7 +351,7 @@ func checkpointTeardownScenario() Scenario {
 				return nil, err
 			}
 			if v := r.violations(false); len(v) > 0 {
-				return durableReport(seed, v), nil
+				return durableReport(ScenarioCheckpointTeardown, ModeConcurrent, seed, v), nil
 			}
 			return nil, nil
 		},
@@ -740,7 +751,7 @@ func runReadTxIsolation(ctx context.Context, seed uint64) (*SimReport, error) {
 	}
 
 	if len(v) > 0 {
-		return durableReport(seed, v), nil
+		return durableReport(ScenarioReadTxIsolation, ModeConcurrent, seed, v), nil
 	}
 	return nil, nil
 }
@@ -890,8 +901,26 @@ func waitWGTimeout(wg *sync.WaitGroup, d time.Duration) bool {
 
 // durableReport renders a set of violations as a SimReport for a concurrent-
 // durable scenario.
-func durableReport(seed uint64, v []Violation) *SimReport {
+//
+// scenario names which scenario produced the failure. It is not optional: these
+// scenarios all report through this one constructor, so without it a sighting in
+// a CI log identifies the failing invariant but not the workload that broke it
+// (rmp #2347).
+//
+// It PANICS on an empty violation slice. Every caller reaches it under a
+// `len(v) > 0` guard, so an empty slice here means the guard was bypassed and
+// the harness is about to declare a failure it cannot describe — the fail-silent
+// shape that made the 2026-08-07 ST3 sighting unactionable. Failing loudly at
+// the point of construction is the whole point; a panic in a test harness costs
+// a stack trace, whereas a report that explains nothing costs an investigation.
+func durableReport(scenario string, mode ExecMode, seed uint64, v []Violation) *SimReport {
+	if len(v) == 0 {
+		panic("sim: durableReport called with no violations for scenario " + scenario +
+			"; a report must always name what it found")
+	}
 	return &SimReport{
+		Scenario:   scenario,
+		Mode:       mode,
 		Seed:       seed,
 		FailedOp:   Op{Kind: OpMatch, Cypher: "<durable recovery>"},
 		Violations: v,

@@ -26,6 +26,11 @@
 #   MIN_TOTAL           aggregate threshold percentage     (default 85.0)
 #   MIN_PER_PKG         per-package threshold percentage   (default 75.0)
 #   GO                  go binary                          (default go)
+#   COVER_TEST_LOG      log of the instrumented test run   (default cover.out.testlog)
+#   COVER_FAIL_LOG      log kept when that run FAILS; carries the run's PID so
+#                       a later run cannot overwrite it
+#                       (default cover.out.failed.$$.log)
+#   COVER_FAIL_LINES    cap on the failure summary printed to stderr (default 400)
 #
 # Compatibility: this script is portable across bash 3.2 (macOS
 # default) and modern bash; no associative arrays are used. Numeric
@@ -63,6 +68,17 @@ echo "==> generating coverage profile: ${COVER_PROFILE}"
 # (a silent ">/dev/null" previously hid the cause of any failure here).
 COVER_TEST_LOG=${COVER_TEST_LOG:-"${COVER_PROFILE}.testlog"}
 
+# Where a FAILING run's log is kept. Distinct from COVER_TEST_LOG and carrying
+# this run's PID, so that re-running the gate to chase a rare failure cannot
+# destroy the record of it (rmp #2347).
+COVER_FAIL_LOG=${COVER_FAIL_LOG:-"${COVER_PROFILE}.failed.$$.log"}
+# Line cap on the failure summary printed to stderr. The complete log is always
+# preserved and its path always printed, so this bounds noise, never evidence.
+COVER_FAIL_LINES=${COVER_FAIL_LINES:-400}
+# This script's own directory, so it can find failblocks.awk regardless of the
+# caller's working directory.
+_cover_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # CONCURRENCY SAFETY (rmp #2268). Every path this script writes used to be a
 # fixed name in the repository root, so two `make ci` runs in the same checkout
 # interleaved their writes into one profile; the gate then died parsing a
@@ -90,11 +106,20 @@ trap cleanup_cover_tmp EXIT
 # library is tested. The trade-off is a slower instrumented run, hence the
 # generous timeout.
 if ! "${GO}" test -coverpkg=./... -coverprofile="${_cover_profile_tmp}" -covermode=atomic -timeout=20m ./... >"${_cover_testlog_tmp}" 2>&1; then
+  # PRESERVE THE EVIDENCE BEFORE PRINTING ANYTHING (rmp #2347). The log used to
+  # be published to ${COVER_TEST_LOG}, which the NEXT run - green or not -
+  # overwrites. A rare failure was therefore destroyed by the very re-run
+  # performed to investigate it, which is exactly what happened to the ST3
+  # durability sighting of 2026-08-07. A failing log now also lands under a
+  # name carrying this run's PID, which no later run can clobber.
+  cp -f "${_cover_testlog_tmp}" "${COVER_TEST_LOG}" 2>/dev/null || true
+  mv -f "${_cover_testlog_tmp}" "${COVER_FAIL_LOG}" || true
+
   echo "cover_gate: 'go test' failed during coverage profile generation; failing output:" >&2
-  grep -E '(^--- FAIL|^FAIL[[:space:]]|panic:|fatal error:|_test\.go:[0-9]+:|signal:|DATA RACE)' "${_cover_testlog_tmp}" | tail -80 >&2 || true
-  echo "---- last 40 lines of go test output ----" >&2
-  tail -40 "${_cover_testlog_tmp}" >&2
-  mv -f "${_cover_testlog_tmp}" "${COVER_TEST_LOG}" || true
+  # Whole failure BLOCKS, not just their first lines. See scripts/failblocks.awk
+  # for what the previous line-pattern grep silently discarded.
+  awk -v max="${COVER_FAIL_LINES}" -f "${_cover_script_dir}/failblocks.awk" "${COVER_FAIL_LOG}" >&2 || true
+  echo "cover_gate: complete go test output preserved at: ${COVER_FAIL_LOG}" >&2
   exit 1
 fi
 mv -f "${_cover_testlog_tmp}" "${COVER_TEST_LOG}"
