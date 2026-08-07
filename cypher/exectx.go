@@ -310,16 +310,23 @@ type ExplicitTx struct {
 }
 
 // BeginTx opens an explicit, multi-statement transaction bound to ctx. It acquires
-// NO writer serialisation — concurrency control is MVCC alone since rmp #2306 —
-// but it does take the graph's visibility barrier exclusively, which until
-// rmp #2305 retires it still blocks concurrent writers for the transaction's
-// lifetime. The caller MUST finish the returned handle with exactly one
-// [ExplicitTx.Commit] or [ExplicitTx.Rollback].
+// NOTHING: no writer serialisation, no visibility barrier, no lock of any kind.
+// Concurrency control is MVCC alone. The caller MUST finish the returned handle with
+// exactly one [ExplicitTx.Commit] or [ExplicitTx.Rollback].
+//
+// This doc used to read "but it does take the graph's visibility barrier
+// exclusively, which until rmp #2305 retires it still blocks concurrent writers for
+// the transaction's lifetime". THAT IS FALSE and has been since rmp #2305 did retire
+// it — the sentence outlived the change it was describing, and it contradicted both
+// this file's own header ("What serialises an explicit transaction: NOTHING") and
+// the [ExplicitTx.view] field doc. What keeps this handle's reads stable is the
+// transaction id it stamps its versions with, not exclusion (rmp #2345).
 //
 // ctx bounds every statement executed through the handle. Pass the connection
 // context (optionally narrowed with a transaction timeout) so that a cancelled
 // connection, a server shutdown, or an elapsed timeout interrupts an in-flight
-// statement and guarantees the writer serialisation cannot be held forever.
+// statement. It no longer guards against a serialisation being held forever —
+// there is none to hold — but it still bounds a statement queued behind a DDL.
 //
 // ctx also bounds the ACQUISITION, not only the statements that follow. BeginTx
 // takes three things in order — the writer serialisation, the WAL transaction,

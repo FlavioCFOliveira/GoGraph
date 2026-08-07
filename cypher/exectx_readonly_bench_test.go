@@ -5,13 +5,17 @@ package cypher_test
 // two ways the Bolt server can open it:
 //
 //   - BenchmarkReadTx_WriterLock   — via Engine.BeginTx (the mode="w"/legacy
-//     path): every transaction acquires the store single-writer serialisation
-//     and the exclusive visibility barrier, so concurrent read transactions
-//     fully serialise.
-//   - BenchmarkReadTx_LockFree      — via Engine.BeginReadTx (the new mode="r"
-//     path): no writer lock, no exclusive barrier; each statement runs under a
-//     per-statement Graph.View RLock, so concurrent read transactions run in
-//     parallel.
+//     path).
+//   - BenchmarkReadTx_LockFree      — via Engine.BeginReadTx (the mode="r" path).
+//
+// HISTORICAL, AND THE GAP HAS SINCE CLOSED (rmp #2345). When this was written,
+// BeginTx acquired the store's single-writer serialisation and the exclusive
+// visibility barrier so concurrent read transactions fully serialised, while
+// BeginReadTx took neither and each statement ran under a per-statement
+// Graph.View RLock. NONE of that is true now: rmp #2305 retired the barrier hold,
+// rmp #2306 the serialisation, and rmp #2344 removed Graph.View entirely — reads
+// take no lock at all on either path. The benchmark is kept because it still
+// contrasts the two APIs' costs, but the mechanism it was built to expose is gone.
 //
 // Both execute the IDENTICAL read workload (two MATCH...RETURN statements per
 // transaction) under b.RunParallel, so the delta isolates the lock-contention

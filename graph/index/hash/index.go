@@ -328,10 +328,29 @@ func (*Index[V]) Kind() string { return "hash" }
 //     final value, so an interleaved property change in the same batch
 //     converges to the same final state regardless of replay order.
 //
-// Apply is idempotent (bitmap add/remove) and safe for concurrent use
-// with readers; writers are serialised upstream by the engine's
-// single-writer transaction contract. Edge changes and changes for
-// other properties/labels are ignored.
+// Apply is idempotent (bitmap add/remove) and safe for concurrent use with readers.
+// Edge changes and changes for other properties/labels are ignored.
+//
+// # What makes CONCURRENT Apply calls safe, restated (rmp #2345)
+//
+// This used to say "writers are serialised upstream by the engine's single-writer
+// transaction contract". THAT IS FALSE since rmp #2320: commitUnderBarrier runs under
+// a SHARED hold, so two transactions flush their index buffers concurrently and two
+// Apply calls can interleave.
+//
+// It is nonetheless sound, and the reason is worth stating because it is not the one
+// that was written down. Each mutation is made under its own per-shard lock
+// ([Index.Insert], [Index.Delete]), so no individual add or remove can tear. What
+// serialisation would additionally buy is atomicity of the DELETE-then-INSERT pair in
+// the OpSetNodeProperty arm — and the only interleaving that could strand a stale
+// entry is two transactions writing the SAME node's bound property, which the
+// substrate REFUSES: graph/lpg's property write path takes a write-write conflict
+// check against the node's version-chain head (graph/lpg/property.go), so one of the
+// two aborts and never reaches its Apply at all.
+//
+// So the ordering guarantee comes from conflict detection on the object, not from
+// exclusion on the writers. If that check is ever narrowed, this comment is the one
+// to revisit.
 //
 // On recovery from a corrupted snapshot, the index is left empty;
 // callers re-populate via [Index.Insert] from the live LPG.

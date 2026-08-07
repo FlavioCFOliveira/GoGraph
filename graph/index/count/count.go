@@ -211,8 +211,16 @@ func (s *Store) tShardOf(k triKey) *shard {
 
 // Apply applies one buffered delta to its cell. A key is created on first
 // observation and deleted when its counter returns to zero (bounded growth). A
-// zero delta is a no-op. Apply is a mutation and must be serialised by the
-// caller's write barrier (see the package concurrency contract).
+// zero delta is a no-op.
+//
+// It needs NO serialisation from the caller (rmp #2345). Every cell it touches goes
+// through [Store.add], whose aggregate is ORDER-INSENSITIVE — a cell is deleted at
+// exactly zero and a negative cell is retained, so addition commutes — and each
+// touch is made under that cell's own per-shard lock. Two writers applying
+// concurrently therefore reach the same totals in any interleaving. The package
+// contract states this at the top; it is restated here because this doc used to
+// require the engine's write barrier, which has not serialised writers since
+// rmp #2320.
 func (s *Store) Apply(d Delta) {
 	if d.Delta == 0 {
 		return
@@ -323,7 +331,8 @@ func (s *Store) CountT(a, rt, b uint32) int64 {
 }
 
 // MarkDirty toggles off the exactness of one X-scoped family set. It is a
-// mutation and must be serialised by the caller's write barrier.
+// mutation. It needs no caller serialisation, for the order-insensitivity reason
+// given on [Store.Apply].
 func (s *Store) MarkDirty(m DirtyMark) {
 	s.dmu.Lock()
 	switch m.Scope {
@@ -380,7 +389,7 @@ type Snapshot struct {
 
 // Snapshot returns a copy of every live cell (value > 0) and every dirty marking.
 // It is a read taken under the shard and dirty read locks, so it is safe to call
-// concurrently with the barrier-serialised writers.
+// concurrently with writers, which are NOT serialised against each other.
 func (s *Store) Snapshot() Snapshot {
 	snap := Snapshot{
 		E:    make(map[uint32]int64),
@@ -428,8 +437,8 @@ func (s *Store) Snapshot() Snapshot {
 // entry is a live combination, so this is an exact, allocation-free size
 // indicator for observability: it is bounded by the number of currently-observed
 // schema combinations (design §2.3), never by |V| or |E|. It is a read taken
-// under the shard read locks and is safe to call concurrently with the
-// barrier-serialised writers. The metrics [Backend] exposes no gauge, so this is
+// under the shard read locks and is safe to call concurrently with writers, which
+// are NOT serialised against each other. The metrics [Backend] exposes no gauge, so this is
 // the accessor an observer reads to surface the store's footprint (task #2087).
 func (s *Store) Cells() int {
 	n := 0
@@ -457,8 +466,8 @@ func keysOf(m map[uint32]struct{}) []uint32 {
 // RecomputeReset clears every cell and every dirty flag, returning the store to
 // its empty state. It is the seam an O(V+E) recompute-from-graph (task #2084)
 // resets before replaying the create-deltas of every live edge; clearing the
-// dirty sets restores full exactness. It is a mutation and must be serialised by
-// the caller's write barrier.
+// dirty sets restores full exactness. It is a mutation, and needs no caller
+// serialisation for the order-insensitivity reason given on [Store.Apply].
 func (s *Store) RecomputeReset() {
 	for i := range s.shards {
 		sh := &s.shards[i]

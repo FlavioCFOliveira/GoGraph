@@ -49,9 +49,29 @@ package cypher
 // # Concurrency
 //
 // touchedNodes is NOT safe for concurrent use: like [undoLog], it is owned by a
-// single transaction and all recording happens on the executing goroutine under
-// the write barrier. The commit-time scan also runs under the barrier, so it
-// observes a quiescent graph (no concurrent writer, no in-flight View).
+// single transaction and all recording happens on the executing goroutine inside
+// that transaction's write bracket. That much is still true.
+//
+// # THE SECOND HALF OF THIS PARAGRAPH WAS FALSE AND IS A KNOWN DEFECT (rmp #2350)
+//
+// It read: "The commit-time scan also runs under the barrier, so it observes a
+// quiescent graph (no concurrent writer, no in-flight View)." Both halves are false —
+// since rmp #2320 an ordinary write holds the barrier SHARED so concurrent writers
+// exist, and rmp #2344 removed Graph.View outright.
+//
+// This is NOT merely stale prose: [touchedNodes.checkNotNullConstraints] reads the
+// RAW graph's present-time accessors, so it can decide a constraint on another
+// transaction's UNCOMMITTED state — accepting a violation the other transaction
+// later rolls back, or rejecting a transaction for a violation that exists in no
+// committed state. Write-write conflict detection does not cover it, because
+// conflicts are per-substore and two transactions touching the same node through
+// DIFFERENT substores (one the label, one the property) never conflict.
+//
+// rmp #2350 carries the mechanism, both error directions, and the fix: read through
+// the committing transaction's own view so every accessor resolves through
+// [mvcc.Visible] with that transaction's id. It is recorded here rather than left in
+// the tracker because the next reader of this file must not inherit the retracted
+// claim as if it were the contract.
 
 import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"

@@ -59,7 +59,7 @@ const (
 	// when the caller leaves it at zero. It bounds an explicit transaction
 	// (opened by BEGIN) when the client supplies no tx_timeout of its own. A
 	// finite default is mandatory: an explicit transaction holds the engine's
-	// single-writer serialisation from BEGIN until COMMIT/ROLLBACK, so a client
+	// NO serialisation from BEGIN until COMMIT/ROLLBACK (rmp #2305), so a client
 	// that issues BEGIN and then stalls — never sending COMMIT, ROLLBACK, or even
 	// RESET — would otherwise block every other writer on the server forever, a
 	// liveness denial of service (#1302). The default of 30 s is generous enough
@@ -386,7 +386,7 @@ type Options struct {
 
 	// DefaultTxTimeout is the bounded timeout applied to an explicit transaction
 	// (opened by BEGIN) when the client supplies no tx_timeout. It guarantees the
-	// engine's single-writer serialisation, which an explicit transaction holds
+	// engine's former single-writer serialisation, which an explicit transaction held
 	// from BEGIN until COMMIT/ROLLBACK, can never be held indefinitely by an
 	// abandoned transaction (#1302). Zero or negative values default to
 	// [DefaultTxTimeout] (30 s). A client-supplied tx_timeout takes precedence;
@@ -951,7 +951,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	// reader stuck in ReadMessage), then JOIN the reader goroutine (so it is
 	// never left running at teardown — goleak-clean), then roll back any open
 	// explicit transaction via sess.Close. Rolling back releases the engine's
-	// single-writer serialisation immediately rather than leaving it for GC to
+	// transaction handle immediately rather than leaving it for GC to
 	// reclaim from a leaked transaction (#1309). sess.Close is idempotent.
 	defer func() {
 		cancelConn()

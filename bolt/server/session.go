@@ -1163,7 +1163,7 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 	} else {
 		// Autocommit mode (or defensive fallback when txActive is unexpectedly
 		// false in StateTxReady): route through RunAny so that reads take the
-		// lock-free Engine.Run path and only writes acquire the single-writer
+		// lock-free Engine.Run path and, since rmp #2306, not even writes acquire a single-writer
 		// lock via Engine.RunInTx. Routing all autocommit queries through
 		// RunInTxAny would block a read-only session behind any open explicit
 		// write transaction, violating the 'readers do not block writers where
@@ -1520,7 +1520,7 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 	}
 
 	// Determine the effective transaction timeout. A finite bound is mandatory:
-	// the explicit transaction holds the engine's single-writer serialisation
+	// the explicit transaction holds NO engine serialisation (rmp #2305 retired it)
 	// from BEGIN until COMMIT/ROLLBACK, so a client that BEGINs and then stalls
 	// would otherwise block every other writer indefinitely (#1302). Precedence:
 	// the client-supplied tx_timeout if present, else the server default
@@ -1772,12 +1772,17 @@ func (s *Session) drainResult() {
 //
 // Entering FAILED means no further RUN/COMMIT can run until RESET, and RESET
 // itself discards the transaction; a FAILED session can therefore never legally
-// resume the open transaction. Holding its writes — and the engine's
-// single-writer serialisation the transaction acquired at BEGIN — for the whole
-// FAILED→RESET window would block every other writer and keep a partial
-// transaction live for that entire window (or forever, if the client never
-// sends RESET and the connection is not torn down). Reclaiming at the FAILED
-// transition releases the writer serialisation immediately (#1312).
+// resume the open transaction. Holding its writes for the whole FAILED→RESET window
+// would keep a partial transaction live for that entire window (or forever, if the
+// client never sends RESET and the connection is not torn down). Reclaiming at the
+// FAILED transition ends it immediately (#1312).
+//
+// This used to add "and the engine's single-writer serialisation the transaction
+// acquired at BEGIN … would block every other writer". rmp #2305 retired that hold
+// and rmp #2306 the serialisation itself, so an abandoned transaction blocks no
+// writer today (rmp #2345). What it still costs is real and is the reason this
+// remains: its versions pin the reclamation horizon, and its writes stay
+// unpublished, so the case for reclaiming early is unchanged.
 //
 // abortTx is idempotent: a subsequent RESET (or the connection-teardown
 // [Session.Close]) finds tx already nil and does not double-roll-back. Every
