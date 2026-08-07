@@ -170,6 +170,45 @@ This is the same trap recorded for rmp #2332: *a profile cannot attribute a delt
 The instrument that can is a cumulative-prefix ablation ladder, which is what this
 spike ran.
 
+## The allocation ledger — where the 56 objects are (rmp #2339's starting point)
+
+Measured, not estimated: `-memprofile` at `-memprofilerate=1` over 200 000 commits of
+`BenchmarkWriteScaling/mem/writers=1`, 11 336 561 objects total = **56.7 per commit**.
+Flat objects per commit, per call site:
+
+| allocs/commit | call site |
+|---:|---|
+| 4.01 | `cypher/exec.(*CreateNode).Next` |
+| 4.00 | `cypher.buildPlanWithMutatorFull` |
+| 3.00 | `cypher.buildPropsEvalFn` |
+| 3.00 | `cypher.(*undoLog).record` |
+| 3.00 | `cypher.(*Engine).runInTxSession` |
+| *2.99* | *`bench/mvccwrite.commit` — the benchmark's own params map, NOT GoGraph* |
+| 2.85 | `graph/lpg.(*nodePropShard).pushPropDelta` |
+| 2.85 | `graph/lpg.(*nodeLabelShard).pushLabelDelta` |
+| 2.00 | `cypher.execUnderBarrier.func3` |
+| 2.00 | `cypher/exec.splitMapItems` |
+| 2.00 | `cypher/exec.NewCreateNode` |
+| 2.00 | `cypher/exec.(*IndexBuffer).Enqueue` |
+| 1.85 | `graph/lpg.(*Graph).noteNodeLife` |
+| 1.00 each | `ReadAt`, `propBag.set`, `reserveConstraintValue`, `parsePropLiteralWithParamsCtx`, `mergeProps`, `copyLabels`, `exec.Run`, `NewSingleRowOperator`, `newResultWithLimit` |
+
+Two observations that should shape the work, and one warning:
+
+- **~3 of the 56 are the benchmark's own**, not the engine's: `bench/mvccwrite.commit`
+  builds a fresh `map[string]expr.Value` per call. Any headline "allocs per commit"
+  figure must exclude it or it will claim a win that belongs to the harness.
+- **The write path builds its physical plan per statement.**
+  `buildPlanWithMutatorFull` is 4.00 flat and **15.0 cumulative** allocs/commit —
+  26.5% of everything. The read path has a plan cache; the write path does not,
+  because the operator tree it builds has the statement's mutator and its
+  transaction-bound views wired into it. Caching it is an **architectural** change to
+  the write path, not an allocation tidy-up, and it must be scoped and decided as one
+  rather than attempted as part of a sweep.
+- The two `push*Delta` sites (5.7 combined) are MVCC's own version records. They are
+  the substrate's cost of isolation and are the least likely to be removable without
+  weakening a guarantee.
+
 ## Reproducing
 
 Each arm is a one-file edit to `graph/lpg/lpg.go` plus a separate
