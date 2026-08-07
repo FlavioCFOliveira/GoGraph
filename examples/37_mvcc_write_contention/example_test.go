@@ -70,6 +70,15 @@ func TestRun(t *testing.T) {
 	// percentiles at zero and report nothing, while the phase still "passed".
 	mustLine(t, out, "contention.accounted=true")
 	mustLine(t, out, "contention.readers_sampled=true")
+	// The version sampler needs the same non-degeneracy guard, and did not have it.
+	// With a 2 ms tick against a 2 ms phase, seven runs in twelve of the documented
+	// default shape sampled NOTHING and published max_retained=0, max_chain_depth=0
+	// and max_concurrent_writers=0 as if they were measurements.
+	mustLine(t, out, "versions.sampled=true")
+	// Self-contradictory, so no external oracle is consulted: a write-write conflict
+	// IS two writers overlapping. A run that counts conflicts and reports a peak
+	// below two has contradicted itself, whatever the true peak was.
+	mustLine(t, out, "versions.writer_peak_consistent=true")
 
 	// Phase 3 — THE headline. A transfer debits one node and credits another in one
 	// transaction, so the total cannot change whatever instant observes it.

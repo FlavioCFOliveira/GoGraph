@@ -125,24 +125,50 @@ func phaseContention(ctx context.Context, w io.Writer, cfg *config) error {
 	stop := make(chan struct{})
 
 	// SAMPLER: version retention while the workload runs.
-	var maxChainDepth, maxVersions, maxWriters atomic.Int64
+	//
+	// # The tick has to be sized to the PHASE, not to a round number
+	//
+	// It was 2 ms — and this phase takes 2 ms, so the sampler got between zero and
+	// one observation and published whichever it happened to get. Measured over
+	// twelve runs of the documented default shape: SEVEN reported
+	// max_retained=0 max_chain_depth=0 max_concurrent_writers=0, and the other five
+	// ranged over 568-3983 retained and 0-8 writers. Every one of the seven had
+	// between 18 and 192 conflicts, and a conflict cannot happen without two
+	// concurrent writers — so all three zeros were a sampling miss published as a
+	// measurement, which is precisely the defect class the project has now found
+	// repeatedly ("a gate cited for years could only ever observe 0").
+	//
+	// Two changes make the reading real. The tick is 100 us, twenty samples across a
+	// 2 ms phase instead of one; and the phase is BRACKETED with a sample taken
+	// before the workload starts and another after it stops, so even a phase shorter
+	// than one tick yields observations. samples counts them, and the deterministic
+	// fact line below refuses to present the numbers when it is zero.
+	var maxChainDepth, maxVersions, maxWriters, samples atomic.Int64
+	sample := func() {
+		st := g.MVCCStats()
+		atomicMax(&maxVersions, st.Total)
+		atomicMax(&maxWriters, int64(st.Write.Writers))
+		// #nosec G115 -- a chain depth the substrate reports, bounded by the
+		// reclamation ceiling.
+		atomicMax(&maxChainDepth, int64(st.ChainDepth.Deepest))
+		samples.Add(1)
+	}
 	var sampleWG sync.WaitGroup
 	sampleWG.Add(1)
 	go func() {
 		defer sampleWG.Done()
-		tick := time.NewTicker(2 * time.Millisecond)
+		tick := time.NewTicker(100 * time.Microsecond)
 		defer tick.Stop()
 		for {
 			select {
 			case <-stop:
+				// The closing bracket: the workload has stopped but the vacuum has
+				// not necessarily swept, so this is the last instant at which what
+				// the run retained is still visible.
+				sample()
 				return
 			case <-tick.C:
-				st := g.MVCCStats()
-				atomicMax(&maxVersions, st.Total)
-				atomicMax(&maxWriters, int64(st.Write.Writers))
-				// #nosec G115 -- a chain depth the substrate reports, bounded by the
-				// reclamation ceiling.
-				atomicMax(&maxChainDepth, int64(st.ChainDepth.Deepest))
+				sample()
 			}
 		}
 	}()
@@ -180,6 +206,9 @@ func phaseContention(ctx context.Context, w io.Writer, cfg *config) error {
 	// leaves the count short forever. A WaitGroup cannot miscount.
 	var writers sync.WaitGroup
 	start := time.Now()
+	// The opening bracket, taken on this goroutine so it is ordered BEFORE the
+	// writers rather than merely scheduled before them.
+	sample()
 	for i := 0; i < cfg.producers; i++ {
 		writers.Add(1)
 		go func(id int) {
@@ -234,8 +263,8 @@ func phaseContention(ctx context.Context, w io.Writer, cfg *config) error {
 			fmt.Fprintf(w, "# conflicts.by_store.%s=%d\n", mvcc.ConflictStoreName(i), n)
 		}
 	}
-	fmt.Fprintf(w, "# versions.max_retained=%d versions.bound=%d versions.ceiling=%d max_chain_depth=%d max_concurrent_writers=%d\n",
-		maxVersions.Load(), st.Bound, st.Ceiling, maxChainDepth.Load(), maxWriters.Load())
+	fmt.Fprintf(w, "# versions.samples=%d versions.max_retained=%d versions.bound=%d versions.ceiling=%d max_chain_depth=%d max_concurrent_writers=%d\n",
+		samples.Load(), maxVersions.Load(), st.Bound, st.Ceiling, maxChainDepth.Load(), maxWriters.Load())
 
 	var all []time.Duration
 	for _, l := range readerLat {
@@ -250,6 +279,18 @@ func phaseContention(ctx context.Context, w io.Writer, cfg *config) error {
 	fmt.Fprintf(w, "contention.accounted=%v\n",
 		committed.Load()+unrecovered.Load() == int64(cfg.producers*cfg.opsPerProd))
 	fmt.Fprintf(w, "contention.readers_sampled=%v\n", len(all) > 0)
+	// The version sampler gets the same treatment the reader sampler already had.
+	// Without this line a sampler that observed nothing published max_retained=0,
+	// max_chain_depth=0 and max_concurrent_writers=0, and a reader of the output had
+	// no way to tell "versioning retained nothing" from "nobody looked" — measured
+	// at seven runs in twelve on the documented default shape.
+	fmt.Fprintf(w, "versions.sampled=%v\n", samples.Load() > 0)
+	// SELF-CONTRADICTORY, so it needs no external oracle: a write-write conflict is
+	// by definition two writers overlapping, so a run that counted conflicts and
+	// reported a peak of fewer than two concurrent writers has contradicted itself.
+	// Vacuously true when nothing conflicted, which is the honest answer then.
+	fmt.Fprintf(w, "versions.writer_peak_consistent=%v\n",
+		st.Write.Conflicts == 0 || maxWriters.Load() >= 2)
 	return nil
 }
 

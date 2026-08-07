@@ -113,9 +113,11 @@ scaling.levels=5
 # contention retried_orders=20 retry_succeeded=20 unrecovered=0
 # conflicts.total=20 aborts=20 commits=2604
 # conflicts.by_store.node properties=20
-# versions.max_retained=1854 versions.bound=4096 max_chain_depth=7
+# versions.samples=25 versions.max_retained=2331 versions.bound=4096 versions.ceiling=16384 max_chain_depth=10 max_concurrent_writers=8
 # reader.samples=8606 reader.p50=416ns reader.p95=1.083µs reader.p99=10.208µs
 contention.accounted=true
+versions.sampled=true
+versions.writer_peak_consistent=true
 ## phase 3 — conservation under concurrent transfers
 # conservation transfers=1483 refused=0 observations=25842
 conservation.torn_observations=0
@@ -161,6 +163,52 @@ shape into a real graph — a debit with no matching credit — and asserts the 
 observer reports it, with a positive arm that fails if the observer is simply wrong
 about an untouched fixture. Asserting the arithmetic instead would be a tautology
 that passes however broken the observer became.
+
+## The version sampler could not answer question 5, and said nothing about it
+
+Question 5 — *what does versioning retain?* — is answered by sampling
+`MVCCStats` while the workload runs. The sampler ticked every **2 ms**, and phase 2
+takes **2 ms**. It therefore got between zero and one observation, and published
+whichever it happened to get.
+
+Measured over twelve runs of the documented default shape above:
+
+| runs | `max_retained` | `max_chain_depth` | `max_concurrent_writers` |
+|---|---|---|---|
+| **7 of 12** | **0** | **0** | **0** |
+| 5 of 12 | 568 – 3983 | 0, 5, 5, 5, 20 | 0, 2, 5, 8 |
+
+Every one of the seven zero runs had between 18 and 192 conflicts. A write-write
+conflict *is* two writers overlapping, so `max_concurrent_writers=0` beside a
+non-zero conflict count is a self-contradiction: all three zeros were a sampling
+miss published as a measurement. The representative run in this README — 1854
+retained, depth 7 — was one draw from that distribution, not a typical result.
+
+This is the defect class the project keeps rediscovering, and the one the rest of
+this example already defends against: `contention.readers_sampled` and
+`conservation.observed_any` exist precisely so a phase that observed nothing cannot
+pass vacuously. The version sampler had no such guard.
+
+Three changes, and the third is the one that matters:
+
+1. the tick is **100 µs**, so a 2 ms phase yields ~20 observations rather than one;
+2. the phase is **bracketed** — one sample taken on the calling goroutine before the
+   writers start, one after they stop — so even a phase shorter than a tick observes
+   something;
+3. `versions.sampled` and `versions.writer_peak_consistent` are **deterministic fact
+   lines the gate asserts**, so a miss now fails the test instead of printing zeros.
+
+After the change, twelve runs of the same shape sampled 17–65 times each, reported
+`max_concurrent_writers=8` — the true producer count — in **all twelve**, and gave
+`max_retained` in a 2278–4023 band with a non-zero chain depth in nine. The guard is
+validated in the failing direction too: with the sampler's tick set beyond the run's
+lifetime and the brackets removed, `TestRun` fails on the missing
+`versions.sampled=true` line rather than passing on zeros.
+
+Note that `max_retained` may legitimately exceed `versions.bound`. `Bound` is the
+settled-churn threshold at which the vacuum is woken, not a cap; `Ceiling` (16384) is
+the instantaneous bound. A maximum-contention run measured 10184 retained — above the
+bound, well under the ceiling, which is exactly the documented catch-up state.
 
 ## Examples 35 and 36 under non-serialising writers
 
