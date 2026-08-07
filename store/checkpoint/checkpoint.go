@@ -672,6 +672,38 @@ func (c *Checkpointer[N, W]) runUnderCommitLock(fn func() error) error {
 	return fn()
 }
 
+// commitQuiesceTimeout bounds [Checkpointer.awaitCommitQuiescence].
+//
+// It is a FAIL-STOP bound, not a schedule. The wait it bounds is for transactions
+// that are already past their fsync and owe only in-memory work, with admission
+// closed so none can be added — microseconds in practice, and this is four orders
+// of magnitude above that so a loaded or coverage-instrumented run never trips it.
+// Reaching it means a commit timestamp was allocated and never discharged, which is
+// the permanent frontier stall [lpg.MVCCStats.InFlightCommits] exists to report:
+// every new reader is already stuck. Failing the checkpoint is then the safe
+// outcome, because nothing is truncated and the WAL keeps every record.
+const commitQuiesceTimeout = 30 * time.Second
+
+// awaitCommitQuiescence blocks until no transaction is between its WAL fsync and its
+// MVCC publish, so the durable offset and the visible instant taken next describe the
+// same set of transactions (rmp #2349).
+//
+// The caller must already hold the commit serialisation with admission closed; see
+// the invariant note inside [Checkpointer.runNonBlocking] phase 1 for why that is
+// what makes the wait terminate, and for the reference engines.
+func (c *Checkpointer[N, W]) awaitCommitQuiescence() error {
+	ctx, cancel := context.WithTimeout(context.Background(), commitQuiesceTimeout)
+	defer cancel()
+	if err := c.g.AwaitCommitQuiescence(ctx); err != nil {
+		metrics.IncCounter("store.checkpoint.quiesce.timeouts", 1)
+		return fmt.Errorf("checkpoint: %d commit(s) allocated an instant and never published "+
+			"it within %s, so the durable WAL prefix and the visible graph image cannot be "+
+			"shown to describe the same transactions; refusing to truncate: %w",
+			c.g.MVCCStats().InFlightCommits, commitQuiesceTimeout, err)
+	}
+	return nil
+}
+
 // runNonBlocking performs a non-blocking, LSN-watermarked checkpoint in three
 // phases so writers stall only for the watermark+CSR capture, never for the
 // (potentially multi-second) snapshot disk I/O:
@@ -721,6 +753,12 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 	var constraints []snapshot.ConstraintSpec
 	var indexDefs []snapshot.IndexDefSpec
 	if err := c.runUnderCommitLock(func() error {
+		// WAIT OUT THE DURABLE-BUT-UNPUBLISHED WINDOW (rmp #2349). This must happen
+		// before either reading below, and the "Why the two agree" note on the instant
+		// says what it is for and what it cost when it was missing.
+		if qerr := c.awaitCommitQuiescence(); qerr != nil {
+			return qerr
+		}
 		// WAL-health gate (rmp #1919). A concurrent schema DDL (CREATE/DROP
 		// CONSTRAINT or INDEX) whose WAL commit failed at fsync poisons the
 		// writer and discards its frame (DurableOffset excludes it), but the
@@ -805,7 +843,7 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 		// the graph — which is the whole point of the task. The serialisation itself
 		// happens after the lock is released, at this instant, while writers commit.
 		//
-		// # Why the two agree, stated as an invariant rather than assumed
+		// # Why the two agree — and the argument that was WRONG (rmp #2349)
 		//
 		// The watermark is a DURABILITY position and the instant is a VISIBILITY
 		// position, and they are not the same clock. The dangerous direction is a
@@ -814,17 +852,46 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 		// phase 3 would truncate away the only record of it. An acknowledged commit
 		// would be lost — the WAL prefix cut in half that AC3 names.
 		//
-		// It cannot happen because the commit serialiser CLOSES ADMISSION AND DRAINS
-		// the admitted writers to zero before running this closure, and a writer's
+		// This used to argue the window could not exist, because the commit serialiser
+		// closes admission and drains admitted writers to zero and "a writer's
 		// registration spans its WHOLE commit — store/txn.Tx.Commit defers exitWriter
-		// past ApplyVersioned, which is what publishes the instant. So at this point
-		// there is no transaction between its fsync and its publish, and the durable
-		// prefix and the visible frontier describe the same set of transactions.
+		// past ApplyVersioned, which is what publishes the instant".
 		//
-		// That is a property of the serialiser, not of this file, so it is asserted
-		// rather than trusted: the seam below lets
-		// TestCheckpoint_WatermarkAndInstantDescribeTheSameBoundary check that no
-		// commit is in flight here, and it fails if a future change drains less.
+		// THAT PREMISE WAS CHECKED ON THE WRONG PATH, and the loss was real. The Cypher
+		// engine — the only production writer — does not use Tx.Commit. It uses
+		// [txn.Tx.CommitWALOnly], which performs no in-memory apply and publishes no
+		// instant, so its own `defer exitWriter` fires the moment the fsync returns
+		// while the instant is published later, when the lpg write bracket unwinds
+		// through lpg.Graph.endWrite. cypher/api.go commitUnderBarrier names that state
+		// outright: "DURABLE, BUT NOT YET VISIBLE". Between the two the store's
+		// in-flight count is ZERO and the frame is already inside the durable offset,
+		// so the drain completed and both readings were taken inside the window.
+		// internal/sim ST3 lost exactly one acknowledged commit twice in fifteen
+		// coverage runs under parallel fsync load before this was found.
+		//
+		// SO THE WINDOW IS WAITED OUT INSTEAD OF ARGUED AWAY, at the top of this
+		// closure: [lpg.Graph.AwaitCommitQuiescence] blocks until every allocated
+		// commit instant has been published or abandoned. Admission is already closed
+		// and the admitted writers drained, so no new instant can be allocated while it
+		// waits and the ones outstanding are past their fsync with only in-memory work
+		// left — which is what bounds it. After it returns, every durable frame belongs
+		// to a transaction visible at `at`, by construction rather than by assumption.
+		//
+		// The wait is on the OBSERVER and the commit path pays nothing, which is
+		// PostgreSQL's arrangement for the identical problem: a backend raises
+		// DELAY_CHKPT_START around the gap between its commit record and its pg_xact
+		// update, and CreateCheckPoint spins until that set is empty rather than
+		// lengthening the commit — "it seems better to make checkpoint take a bit
+		// longer than to hold off insertions longer than necessary"
+		// (src/backend/access/transam/xlog.c:7683-7684, commit b5978350). See
+		// [mvcc.Clock.AwaitQuiescent] for the full citation and for why Memgraph's
+		// opposite arrangement was not adopted.
+		//
+		// The seam below still asserts the result rather than trusting it:
+		// TestCheckpoint_WatermarkAndInstantDescribeTheSameBoundary and
+		// TestCheckpoint_EngineCommitOrdering_KeepsAnAckedCommit both check that no
+		// commit is in flight here, the second with a transaction deliberately parked
+		// in the window so the reading is a fact about the ordering.
 		//
 		// The snapshot is released by the deferred EndRead below, on every path.
 		at = c.g.BeginRead()

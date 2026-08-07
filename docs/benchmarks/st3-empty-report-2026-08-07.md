@@ -2,7 +2,15 @@
 
 **Date:** 2026-08-07
 **Branch:** `sprint-335`
-**Status:** reporting defect FIXED and regression-guarded; underlying violation NOT reproduced
+**Status:** reporting defect FIXED and regression-guarded; underlying violation
+REPRODUCED under load and raised as rmp #2349 — fixed and made deterministic in
+[`checkpoint-instant-boundary-2026-08-07.md`](checkpoint-instant-boundary-2026-08-07.md)
+
+> The heading of section (b) below still reads "NOT reproduced" because that is
+> what it said when the search was started; the section itself records the
+> reproduction that followed. It is left in that order deliberately — the search
+> and its negative arms are the evidence, and rewriting them to the conclusion
+> would hide how the conclusion was reached.
 
 ## The sighting
 

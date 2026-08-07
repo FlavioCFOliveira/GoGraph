@@ -36,6 +36,24 @@ import (
 // at the moment phase 1 takes the durable-offset watermark and the MVCC instant, no
 // transaction is between its fsync and its commit publish.
 //
+// # IT COVERS ONE COMMIT PATH ONLY, AND NOT THE ENGINE'S (rmp #2349)
+//
+// Every writer below commits through st.Begin()/tx.Commit(). That is the path on
+// which the invariant held even before rmp #2349, because [txn.Tx.Commit] defers its
+// exitWriter past ApplyVersioned and therefore stays admitted through its own MVCC
+// publish. This test could never have observed the defect, and its passing was read
+// for one sprint as coverage it did not have.
+//
+// The PRODUCTION writer is the Cypher engine, which commits through
+// [txn.Tx.CommitWALOnly] — no in-memory apply, no publish, and its writer
+// registration released the moment the fsync returns while the instant is published
+// later at bracket unwind. That ordering is covered by
+// TestCheckpoint_EngineCommitOrdering_KeepsAnAckedCommit in
+// engine_commit_boundary_test.go, which parks a transaction inside the window so the
+// interleaving is deterministic rather than rare. Read the two together: this one
+// says the invariant holds across a busy store-path workload, that one says it holds
+// against the interleaving that actually broke it.
+//
 // # Why this is asserted here and not only through the artefact
 //
 // TestCheckpoint_CaptureIsAtomic_SnapshotPlusWALArtefact already proves recovery from
@@ -146,8 +164,8 @@ func TestCheckpoint_WatermarkAndInstantDescribeTheSameBoundary(t *testing.T) {
 		t.Errorf("%d commit(s) were allocated but unpublished inside the phase-1 window. The "+
 			"watermark is a durability position and the instant is a visibility position: a "+
 			"transaction durable below the watermark whose instant the image cannot see is "+
-			"truncated away by phase 3 and lost. The commit serialiser must drain admitted "+
-			"writers past their MVCC publish", n)
+			"truncated away by phase 3 and lost. Phase 1 must wait the window out before it "+
+			"reads either position (Checkpointer.awaitCommitQuiescence, rmp #2349)", n)
 	}
 	if !observedInFlight.Load() {
 		t.Logf("note: InFlightCommits never observed non-zero outside the window over %d commits; "+

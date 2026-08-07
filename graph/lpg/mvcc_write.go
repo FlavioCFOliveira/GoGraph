@@ -1,5 +1,7 @@
 package lpg
 
+import "context"
+
 // mvcc_write.go — MVCC P4a (rmp #2288): one shared commit record per write, and
 // the arming of the versioning substrate.
 //
@@ -345,6 +347,37 @@ func (g *Graph[N, W]) AllocateCommitTS(tx WriteTx) uint64 {
 		tx.w.commitTS = g.mvccClock.NextCommitTS()
 	}
 	return tx.w.commitTS
+}
+
+// AwaitCommitQuiescence blocks until every commit timestamp this graph has allocated
+// has been published or abandoned — until [MVCCStats.InFlightCommits] would read zero
+// — or until ctx finishes.
+//
+// It is the counterpart obligation to [Graph.AllocateCommitTS], and it exists for
+// the one observer that cannot tolerate the window that method opens: a durable
+// checkpoint, which pairs a WAL DURABILITY position with an MVCC VISIBILITY position
+// and truncates the WAL prefix the first one names. A transaction between its fsync
+// and its publish sits below the durable offset and above the visible frontier, so
+// the image does not carry it and the truncation destroys it — an acknowledged
+// commit lost (rmp #2349). Waiting here makes the two positions describe the same
+// set of transactions.
+//
+// The wait is on the OBSERVER, never on the committer: a writer that is not observed
+// pays nothing, which is the whole reason the durability and visibility steps are not
+// held under one lock. See [mvcc.Clock.AwaitQuiescent] for the prior art this follows
+// and for the reference engine that chose the other route.
+//
+// It returns immediately on a graph whose versioning substrate is disarmed, which
+// allocates no timestamps at all.
+//
+// Concurrency: safe for concurrent use. It takes no lock the write path takes, so a
+// caller may hold a write-admission gate closed across it — and the intended caller
+// does, which is what bounds the wait.
+func (g *Graph[N, W]) AwaitCommitQuiescence(ctx context.Context) error {
+	if !g.mvccArmed {
+		return nil
+	}
+	return g.mvccClock.AwaitQuiescent(ctx)
 }
 
 // abandonAllocatedCommitTS discharges a commit timestamp that was allocated by
