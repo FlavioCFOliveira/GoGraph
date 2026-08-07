@@ -12,18 +12,19 @@ package cypher
 // agree exactly — which turns the whole refactor into a property that can be
 // checked rather than an argument that has to be believed.
 //
-// # Why two graphs and not two runs
+// # THE DIFFERENTIAL IS GONE; THE ABSOLUTE ORACLE REMAINS (rmp #2311)
 //
-// [lpg.Graph.DisableMVCC] must be called before anything is written, so the
-// arms cannot share a graph. Each arm builds its own from the same script, and
-// the fixtures are deterministic, so any difference is the read path.
+// The comparison needed a PLAIN arm — a graph with versioning disarmed — and that
+// state no longer exists: MVCC is armed by lpg.New and there is no way to turn it off,
+// because it is the module's only concurrency control. A differential against an arm
+// nobody can construct is not a test.
 //
-// # Why there is an ABSOLUTE oracle as well
-//
-// A differential goes green when BOTH arms are wrong the same way — this
-// project has watched that happen twice. So the corpus carries hand-computed
-// expected answers for the cases where the right answer can be written down,
-// and those are asserted against both arms independently.
+// What survives is the better half, and the file said so before the arm was removed:
+// "a differential goes green when BOTH arms are wrong the same way — this project has
+// watched that happen twice". So the corpus carries HAND-COMPUTED expected answers for
+// every case where the right answer can be written down, and those are asserted
+// against the one arm that ships. That is strictly stronger than agreement between two
+// implementations of the same mistake.
 
 import (
 	"context"
@@ -32,7 +33,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
@@ -62,83 +62,22 @@ var snapshotDiffFixture = []string{
 	`MATCH (p:Person {name:'doomed'}) DETACH DELETE p`,
 }
 
-// snapshotDiffQueries is the read corpus. Each entry names the read surface it
-// is there to cover, so a future change that stops covering one is visible.
-var snapshotDiffQueries = []struct{ name, q string }{
-	{"all-nodes", `MATCH (n) RETURN count(*) AS c`},
-	{"label-scan", `MATCH (n:Person) RETURN n.name AS name ORDER BY name`},
-	{"multi-label", `MATCH (n:Person:Admin) RETURN n.name AS name ORDER BY name`},
-	{"node-props", `MATCH (n:Person) RETURN n.name AS name, n.age AS age, n.active AS active, n.nickname AS nick ORDER BY name`},
-	{"node-labels-fn", `MATCH (n) RETURN labels(n) AS ls, n.name AS name ORDER BY name`},
-	{"properties-map", `MATCH (n:Company) RETURN properties(n) AS p`},
-	{"expand-typed", `MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS a, b.name AS b ORDER BY a, b`},
-	{"expand-untyped", `MATCH (a)-[r]->(b) RETURN a.name AS a, type(r) AS t, b.name AS b ORDER BY a, t, b`},
-	{"rel-props", `MATCH (a)-[r:KNOWS]->(b) RETURN a.name AS a, b.name AS b, r.since AS since, r.weight AS w ORDER BY a, b`},
-	{"rel-props-map", `MATCH ()-[r:LIKES]->() RETURN properties(r) AS p`},
-	{"parallel-edges", `MATCH (a:Person {name:'ada'})-[r]->(b:Person {name:'alan'}) RETURN type(r) AS t, r.since AS s ORDER BY t`},
-	{"degree", `MATCH (a:Person) RETURN a.name AS name, size([(a)-->() | 1]) AS d ORDER BY name`},
-	{"optional-match", `MATCH (n:Person) OPTIONAL MATCH (n)-[:WORKS_AT]->(c) RETURN n.name AS n, c.name AS c ORDER BY n`},
-	{"var-length", `MATCH (a:Person {name:'ada'})-[*1..2]->(x) RETURN count(*) AS c`},
-	{"exists-subquery", `MATCH (n:Person) WHERE EXISTS { MATCH (n)-[:KNOWS]->() } RETURN n.name AS name ORDER BY name`},
-	{"count-subquery", `MATCH (n:Person) RETURN n.name AS name, COUNT { (n)-[:KNOWS]->() } AS k ORDER BY name`},
-	{"pattern-predicate", `MATCH (n:Person) WHERE (n)-[:WORKS_AT]->(:Company) RETURN n.name AS name ORDER BY name`},
-	{"pattern-comprehension", `MATCH (n:Person {name:'ada'}) RETURN [(n)-[r]->(m) | type(r)] AS ts`},
-	{"aggregation", `MATCH (n:Person) RETURN count(n) AS c, sum(n.age) AS total, avg(n.age) AS mean`},
-	{"group-by", `MATCH (a)-[:WORKS_AT]->(c) RETURN c.name AS company, count(*) AS n ORDER BY company`},
-	{"index-seek", `MATCH (n:Person {age: 42}) RETURN n.name AS name`},
-	{"range-seek", `MATCH (n:Person) WHERE n.age > 40 RETURN n.name AS name ORDER BY name`},
-	{"deleted-node-absent", `MATCH (n {name:'doomed'}) RETURN count(*) AS c`},
-	{"path", `MATCH p = (a:Person {name:'ada'})-[:KNOWS]->(b) RETURN length(p) AS len, b.name AS b ORDER BY b`},
-	{"startnode-endnode", `MATCH ()-[r:WORKS_AT]->() RETURN startNode(r).name AS s, endNode(r).name AS e ORDER BY s`},
-	{"unwind-join", `MATCH (a:Person), (b:Person) WHERE a.age < b.age RETURN a.name AS a, b.name AS b ORDER BY a, b`},
-}
-
 // snapshotDiffEngine builds one arm.
-func snapshotDiffEngine(t *testing.T, mvcc bool) *Engine {
+func snapshotDiffEngine(t *testing.T) *Engine {
 	t.Helper()
 	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
-	if !mvcc {
-		g.DisableMVCC()
-	}
 	g.SetIndexManager(index.NewManager())
 	eng := NewEngine(g)
 	ctx := context.Background()
 	if _, err := eng.RunInTx(ctx, "CREATE INDEX FOR (n:Person) ON (n.age)", nil); err != nil {
-		t.Fatalf("mvcc=%v CREATE INDEX: %v", mvcc, err)
+		t.Fatalf("CREATE INDEX: %v", err)
 	}
 	for i, q := range snapshotDiffFixture {
 		if _, err := eng.RunInTx(ctx, q, nil); err != nil {
-			t.Fatalf("mvcc=%v fixture[%d] %q: %v", mvcc, i, q, err)
+			t.Fatalf("fixture[%d] %q: %v", i, q, err)
 		}
 	}
 	return eng
-}
-
-// runToString renders a result deterministically so two arms can be compared as
-// text. Rows are rendered in the order the query produced them; every corpus
-// query that could be order-sensitive carries an ORDER BY.
-func runToString(t *testing.T, eng *Engine, q string) string {
-	t.Helper()
-	res, err := eng.Run(context.Background(), q, map[string]expr.Value{})
-	if err != nil {
-		return "ERROR: " + err.Error()
-	}
-	defer func() { _ = res.Close() }()
-	var b strings.Builder
-	cols := res.Columns()
-	b.WriteString(strings.Join(cols, "|") + "\n")
-	for res.Next() {
-		row := res.Record()
-		parts := make([]string, 0, len(cols))
-		for _, c := range cols {
-			parts = append(parts, canonRender(row[c]))
-		}
-		b.WriteString(strings.Join(parts, "|") + "\n")
-	}
-	if err := res.Err(); err != nil {
-		return "DRAIN ERROR: " + err.Error()
-	}
-	return b.String()
 }
 
 // canonRender renders a value deterministically.
@@ -186,37 +125,6 @@ func unquote(s string) string {
 	return s
 }
 
-// TestMVCCSnapshotRead_MatchesPlainRead is the P4b differential.
-func TestMVCCSnapshotRead_MatchesPlainRead(t *testing.T) {
-	versioned := snapshotDiffEngine(t, true)
-	plain := snapshotDiffEngine(t, false)
-	if !versioned.g.MVCCEnabled() {
-		t.Fatal("the versioned arm has MVCC disarmed, so this test compares two identical paths")
-	}
-	if plain.g.MVCCEnabled() {
-		t.Fatal("the plain arm has MVCC armed, so this test compares two identical paths")
-	}
-
-	for _, tc := range snapshotDiffQueries {
-		t.Run(tc.name, func(t *testing.T) {
-			got := runToString(t, versioned, tc.q)
-			want := runToString(t, plain, tc.q)
-			if got != want {
-				t.Errorf("the versioned read path disagrees with the plain one.\nquery: %s\n"+
-					"--- versioned ---\n%s\n--- plain ---\n%s", tc.q, got, want)
-			}
-			if strings.HasPrefix(got, "ERROR:") || strings.HasPrefix(got, "DRAIN ERROR:") {
-				t.Errorf("both arms failed identically, which the differential cannot distinguish "+
-					"from both arms being right: %s", got)
-			}
-		})
-	}
-}
-
-// TestMVCCSnapshotRead_AbsoluteOracle is the half the differential cannot
-// supply. Every expectation here is hand-computed from
-// [snapshotDiffFixture] and asserted against BOTH arms, so two arms that are
-// wrong in the same way still fail.
 func TestMVCCSnapshotRead_AbsoluteOracle(t *testing.T) {
 	oracle := []struct {
 		name, q string
@@ -248,10 +156,10 @@ func TestMVCCSnapshotRead_AbsoluteOracle(t *testing.T) {
 		{"age-sum", `MATCH (n:Person) RETURN sum(n.age) AS s`, []string{"123"}},
 		{"index-seek", `MATCH (n:Person {age:42}) RETURN n.name AS n`, []string{"alan"}},
 	}
-	for _, mvccOn := range []bool{true, false} {
-		eng := snapshotDiffEngine(t, mvccOn)
+	{
+		eng := snapshotDiffEngine(t)
 		for _, tc := range oracle {
-			t.Run(fmt.Sprintf("mvcc=%v/%s", mvccOn, tc.name), func(t *testing.T) {
+			t.Run(tc.name, func(t *testing.T) {
 				res, err := eng.Run(context.Background(), tc.q, nil)
 				if err != nil {
 					t.Fatalf("%s: %v", tc.q, err)

@@ -405,7 +405,7 @@ func TestRoundtrip_CommitWALOnly_RecoversIntoGraph(t *testing.T) {
 	_ = tx.SetNodeProperty("alice", "name", lpg.StringValue("Alice"))
 	_ = tx.AddEdge("alice", "bob", 0)
 	_ = tx.SetEdgeProperty("alice", "bob", "since", lpg.StringValue("2026"))
-	if err := tx.CommitWALOnly(); err != nil {
+	if err := tx.CommitWALOnly(0); err != nil {
 		t.Fatalf("CommitWALOnly: %v", err)
 	}
 

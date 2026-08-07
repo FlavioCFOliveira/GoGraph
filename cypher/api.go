@@ -39,15 +39,27 @@
 // once published, so callers operate on the returned pointer without further
 // synchronisation.
 //
-// Write queries serialise on a single-writer lock: the backing [txn.Store]'s
-// writer mutex when the engine is WAL-backed ([NewEngineWithStore]), or the
-// engine's own writer mutex when it is store-less ([NewEngine]). Autocommit
-// [Engine.RunInTx] holds that lock for one statement; an explicit transaction
-// ([Engine.BeginTx]) holds it from BEGIN until COMMIT/ROLLBACK, so concurrent
-// writers block until it finishes (write-write isolation). Reads ([Engine.Run])
-// never take the writer lock. The lock order is writer-lock (outermost) → the
-// graph visibility barrier (visMu, inside [lpg.Graph.ApplyAtomically]); both
-// wirings share it, so no deadlock is possible across them.
+// Write queries DO NOT serialise. Concurrency control is MVCC and nothing else
+// (rmp #2306): independent writers run concurrently on both wirings, and a
+// write-write conflict between them is DETECTED at commit — surfaced as a
+// serialization conflict — rather than prevented by holding a lock. The two locks
+// that used to serialise them, the engine's own writer mutex and the backing
+// [txn.Store]'s capacity-one semaphore, are gone.
+//
+// What remains, and what each excludes:
+//
+//   - Engine.schemaMu — an RWMutex a DDL statement (CREATE/DROP INDEX or
+//     CONSTRAINT) takes EXCLUSIVELY and an ordinary write takes SHARED. It makes
+//     a DDL's validate-then-register sequence atomic against concurrent writes,
+//     which is what keeps a constraint from being registered over data that
+//     violates it. It does not order two ordinary writers against each other.
+//   - the graph schema barrier (visMu) — taken SHARED inside
+//     [lpg.Graph.ApplyVersioned] by every ordinary write since rmp #2320, and
+//     exclusively only by DDL and an explicit transaction.
+//
+// Reads ([Engine.Run]) take neither. The lock order is schemaMu (outermost) →
+// the store's writer admission → visMu; both wirings share it, so no deadlock is
+// possible across them.
 //
 // # Transactions
 //
@@ -93,7 +105,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/index/count"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index/stats"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
-	"github.com/FlavioCFOliveira/GoGraph/internal/ctxlock"
+	"github.com/FlavioCFOliveira/GoGraph/internal/crashpoint"
 	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
@@ -371,10 +383,16 @@ type buildOpts struct {
 	// before #1574 each helper rebuilt the whole forward CSR (O(V+E)) PER result
 	// row, making `RETURN r` O(R·(V+E)) and dominating heap allocations.
 	//
-	// The whole query's reads run inside one [lpg.Graph.View] RLock, so the
-	// adjacency is stable for the snapshot's lifetime: a single snapshot reused
-	// across all rows is consistent with the Expand-time CSR that minted the
-	// positions (invariant I-POS: identical per-source out-degree counts and
+	// The whole query's reads resolve at ONE MVCC INSTANT, so the adjacency is stable
+	// for the snapshot's lifetime: a single snapshot reused across all rows is
+	// consistent with the Expand-time CSR that minted the positions
+	//
+	// (This used to read "run inside one [lpg.Graph.View] RLock". That stopped being
+	// true in sprint 334: a read no longer takes the visibility barrier at all — it
+	// carries a start timestamp and each structure resolves against it. The stability
+	// the paragraph depends on is unchanged, but it now comes from the instant rather
+	// than from excluding writers, and a reader who believed the old sentence would
+	// look for a lock that is not taken. rmp #2314.) (invariant I-POS: identical per-source out-degree counts and
 	// neighbour insertion order ⇒ identical edge positions, BuildFromAdjList
 	// being a deterministic pure function of the adjacency list). fwdCSRReady
 	// disambiguates "not yet built" from a nil snapshot. Forward-only by design:
@@ -954,13 +972,15 @@ type ConstraintDef struct {
 // Engine is safe for concurrent use. A single Engine may serve any number of
 // concurrent [Engine.Run] readers together with concurrent [Engine.RunInTx]
 // writers: each call builds its own operator tree, the plan cache is
-// internally synchronised, and both the physical-plan build and execution run
-// under the graph's visibility barrier ([lpg.Graph.View] for reads,
-// [lpg.Graph.ApplyAtomically] for writes). A writer that grows the node space
-// can therefore never tear a concurrent reader's plan build, and readers never
-// observe a partially-applied write transaction (#1077, audit gap F3).
+// internally synchronised, and the physical-plan build and execution of a WRITE
+// run under [lpg.Graph.ApplyVersioned], which holds the schema barrier shared
+// (rmp #2320). A reader takes a snapshot and no lock at all (rmp #2290). A writer
+// that grows the node space can therefore never tear a concurrent reader's plan
+// build, and readers never observe a partially-applied write transaction — the
+// second guarantee now coming from the transaction's shared commit record rather
+// than from exclusion (#1077, audit gap F3).
 //
-// Write queries remain subject to the underlying store's single-writer
+// Write queries remain subject to the underlying store's writer-admission
 // constraint: when the Engine is backed by a [txn.Store], concurrent
 // [Engine.RunInTx] calls serialise on the store's writer mutex.
 //
@@ -998,7 +1018,7 @@ type Engine struct {
 	//
 	// It is internally synchronised (its own mutex) so IndexSpecsForSnapshot can
 	// read it concurrently with the checkpointer while a write query mutates it
-	// under the engine's single-writer serialisation. Every mutation
+	// under the engine's DDL exclusion. Every mutation
 	// (recordIndexDef / forgetIndexDef) is followed by syncIndexCount under that
 	// same write lock so the graph's lock-free HasIndexes gate stays in step.
 	indexDefReg *indexDefRegistry
@@ -1051,22 +1071,67 @@ type Engine struct {
 	// the constructor.
 	parallelScanThreshold int
 
-	// writeMu is the engine-level single-writer serialisation used ONLY when
-	// the engine is store-less (store == nil). A WAL-backed engine instead
-	// serialises every write on the store's own single-writer mutex (taken in
-	// [txn.Store.Begin] and released by Commit/Rollback), so this mutex is left
-	// untouched in that wiring to avoid a redundant second lock.
+	// schemaMu keeps a SCHEMA change exclusive of every concurrent write and of every
+	// other schema change: CREATE/DROP INDEX and CREATE/DROP CONSTRAINT take it
+	// exclusively, an autocommit write takes it shared.
 	//
-	// It provides write-write isolation for the store-less engine in two
-	// places: (a) every autocommit [Engine.RunInTx] statement holds it for the
-	// statement's duration; (b) an explicit transaction ([Engine.BeginTx])
-	// holds it from BEGIN until COMMIT or ROLLBACK, so a concurrent writer
-	// blocks until the transaction finishes — the same isolation the store
-	// mutex gives the WAL-backed wiring. The lock order is writeMu (outermost)
-	// → visMu (inside [lpg.Graph.ApplyAtomically]), matching the WAL-backed
-	// store-mutex → visMu order, so the two wirings share one deadlock-free
-	// ordering. readers ([Engine.Run] / [lpg.Graph.View]) never take it.
-	writeMu sync.Mutex
+	// # What it used to be, and why that had to go (rmp #2306)
+	//
+	// It was `writeMu`, the engine's DDL exclusion, and it was held for
+	// the whole duration of every autocommit statement and — worse — from BEGIN to
+	// COMMIT of every explicit transaction. That made the engine single-writer by
+	// construction on a store-less wiring, exactly as the store semaphore did on a
+	// WAL-backed one, and it survived rmp #2320's removal of the visibility barrier:
+	// the barrier stopped serialising writers and this took over.
+	//
+	// It was also the source of an unbounded stall. [Engine.lockWriter] took it with
+	// a plain Lock and was NOT context-aware, so an autocommit write blocked for the
+	// entire tenure of an open explicit transaction with the caller's deadline
+	// IGNORED — measured at ten minutes against a 200 ms deadline, the unfixed
+	// sibling of the defect rmp #2174 closed for BeginTx. Retiring the lock removes
+	// the wait rather than bounding it.
+	//
+	// Concurrency control is now MVCC and only MVCC: two writers overlap, and a
+	// genuine collision is REFUSED by per-object first-updater-wins detection
+	// (rmp #2300) instead of being prevented by exclusion.
+	//
+	// # Why DDL still needs it, and why it now covers both wirings
+	//
+	// A schema change is not one atomic step: it scans, validates, then registers,
+	// and the registration alone runs under the exclusive schema barrier
+	// ([lpg.Graph.ApplyAtomically]). Two concurrent DDLs could therefore both scan,
+	// both validate against a state neither will still see, and both register. The
+	// barrier cannot prevent that — it is held only for the last phase — so the whole
+	// sequence needs one lock, and this is it.
+	//
+	// It is taken in BOTH wirings now. The WAL-backed DDL paths used to lean on
+	// [txn.Store.BeginCtx]'s semaphore for the same mutual exclusion; that semaphore
+	// is ceasing to be a serialiser, so DDL must not depend on it.
+	//
+	// # Why ordinary writes take it SHARED, and why that is not a step backwards
+	//
+	// A DDL must also exclude ordinary WRITES, not merely other DDLs, and the first
+	// draft of this change missed that: with the lock taken by DDL alone, a write landing
+	// between an index's backfill scan and its registration was seen by NEITHER — the
+	// scan had already passed it and the index was not yet live to catch it
+	// incrementally. `TestCreateIndexBackfill_ConcurrentWrites` caught it under -race
+	// (`w3_22: want 1 row, got []`); `backfillNodeHashIndex` walks the mapper
+	// lock-free, so the old writeMu hold was the only thing excluding the writer.
+	//
+	// So it is an RWMutex: a DDL takes it EXCLUSIVELY for its whole scan-and-register
+	// sequence, an autocommit write takes it SHARED for its statement. That keeps the
+	// property writeMu gave — DDL excludes writes — while removing the one that made
+	// the engine single-writer, because two writes holding it shared do not exclude
+	// each other.
+	//
+	// visMu cannot do this job on its own even though it has the same shape: the DDL's
+	// exclusive hold covers only the registration, and extending it over the backfill
+	// would mean the scan could no longer use [lpg.Graph.View] (visMu is not
+	// re-entrant). This lock is one level out, so it needs no such surgery.
+	//
+	// Lock order: schemaMu (outermost) → the store's writer admission → visMu.
+	// Readers take none of them.
+	schemaMu sync.RWMutex
 
 	// hashJoinEnabled gates the disconnected-equi-join hash-join optimisation
 	// (#1506). True by default; set false by EngineOptions.DisableHashJoin. When
@@ -1178,38 +1243,33 @@ func (e *Engine) statsCollectorOrInit() *statsCollector {
 	return e.statsCollector.Load()
 }
 
-// lockWriter acquires the engine's write serialisation appropriate to its
-// wiring and returns the matching unlock closure. For a store-less engine it
-// locks [Engine.writeMu]; for a WAL-backed engine the store mutex is taken by
-// the caller's [txn.Store.Begin], so lockWriter is a no-op there and the
-// returned closure does nothing. The returned unlock is idempotent-safe to
-// call exactly once on the write path's single exit.
-func (e *Engine) lockWriter() func() {
-	if e.store != nil {
-		return func() {}
-	}
-	e.writeMu.Lock()
-	return e.writeMu.Unlock
-}
-
-// lockWriterCtx is [Engine.lockWriter] with the acquisition bounded by ctx. It
-// returns the unlock closure and nil once the serialisation is held, or a nil
-// closure and ctx's error if ctx finishes first — in which case NOTHING is held.
+// Close releases the background resources the engine's graph owns — currently the
+// MVCC vacuum goroutine — and waits for them to terminate. It is the [io.Closer]
+// the engine's owner calls at shutdown.
 //
-// On a WAL-backed engine this is the same no-op as lockWriter, because the
-// store's single-writer lock is taken by [txn.Store.BeginCtx], which has been
-// context-aware since task #1301. The store-less writer mutex was the half that
-// was not: the round-3 audit measured Engine.BeginTx overrunning a 50 ms
-// deadline and still returning err=nil (rmp #2174). See internal/ctxlock.
-func (e *Engine) lockWriterCtx(ctx context.Context) (func(), error) {
-	if e.store != nil {
-		return func() {}, nil
-	}
-	if err := ctxlock.Acquire(ctx, e.writeMu.TryLock, e.writeMu.Lock, e.writeMu.Unlock); err != nil {
-		return nil, err
-	}
-	return e.writeMu.Unlock, nil
-}
+// # Why the engine has this at all (rmp #2308)
+//
+// The graph owns a goroutine now: reclamation moved off the commit path onto a
+// demand-started background vacuum. That vacuum exits on its own once there is
+// nothing left to reclaim, so an owner that never closes leaks nothing — but an
+// owner that wants the goroutine gone at a KNOWN instant had no way to say so,
+// because the engine holds the only reference to its graph. `internal/sim`'s
+// metrics oracle found the gap immediately: it certifies that a workload returns
+// to its exact goroutine baseline with zero slack, and it had no teardown to call.
+//
+// It closes the GRAPH and nothing else. The engine's own state — the plan cache,
+// the registries, the statistics collector — spawns no goroutine and needs no
+// teardown, and the durable store's pieces belong to [store.DB.Close], which the
+// embedder owns separately.
+//
+// Idempotent and safe to call concurrently with any other operation. The engine
+// stays usable afterwards; what stops is reclamation, so an owner that closes and
+// then keeps writing accumulates versions with nothing to release them.
+func (e *Engine) Close() error { return e.g.Close() }
+
+// CloseCtx is [Engine.Close] with a deadline on the join; see [lpg.Graph.CloseCtx]
+// for what the context does and does not bound.
+func (e *Engine) CloseCtx(ctx context.Context) error { return e.g.CloseCtx(ctx) }
 
 // NewEngine creates an Engine backed by g. The default built-in function
 // registry ([funcs.DefaultRegistry]) and the default plan cache capacity
@@ -1696,13 +1756,13 @@ func (e *Engine) ConstraintSpecsForSnapshot() []snapshot.ConstraintSpec {
 // syncConstraintCount mirrors the engine's current schema-constraint count onto
 // the graph (Graph.SetActiveConstraintCount) so the checkpointer can tell — via
 // Graph.HasConstraints — whether a snapshot must carry constraints.bin before
-// the WAL is truncated. It is called under the engine's single-writer lock
+// the WAL is truncated. It is called under the engine's schema lock
 // after every constraint registration, drop, unwind, and recovery re-seed.
 // Sourcing the value from the live registry (not an inc/dec delta) keeps it
 // from ever under-counting a durably-registered constraint — the only
 // direction that could cause silent constraint loss across a checkpoint (#1464).
 func (e *Engine) syncConstraintCount() {
-	e.g.SetActiveConstraintCount(int64(e.constraintReg.Count()))
+	e.g.SetConstraintCountSource(func() int64 { return int64(e.constraintReg.Count()) })
 }
 
 // IndexSpecsForSnapshot converts the engine's current USER secondary-index
@@ -1726,7 +1786,7 @@ func (e *Engine) IndexSpecsForSnapshot() []snapshot.IndexDefSpec {
 // syncIndexCount mirrors the engine's current user-index-definition count onto
 // the graph (Graph.SetActiveIndexCount) so the checkpointer can tell — via
 // Graph.HasIndexes — whether a snapshot must carry indexdefs.bin before the WAL
-// is truncated. It is called under the engine's single-writer lock after every
+// is truncated. It is called under the engine's schema lock after every
 // index registration, drop, and recovery re-seed. Sourcing the value from the
 // live registry (not an inc/dec delta) keeps it from ever under-counting a
 // durably-registered index — the only direction that could cause silent index
@@ -1735,7 +1795,7 @@ func (e *Engine) IndexSpecsForSnapshot() []snapshot.IndexDefSpec {
 // apply path, so the store-direct storeIndexActive gate alone is blind to every
 // engine-declared index.
 func (e *Engine) syncIndexCount() {
-	e.g.SetActiveIndexCount(int64(e.indexDefReg.count()))
+	e.g.SetIndexCountSource(func() int64 { return int64(e.indexDefReg.count()) })
 }
 
 // ListIndexes returns the names of every secondary index currently registered
@@ -1937,7 +1997,7 @@ func recoverQueryPanic(errp *error, entrypoint, counter string) {
 // convertQueryPanic performs the log+count+convert half of the panic boundary.
 // It is split out from [recoverQueryPanic] so that a write entrypoint can call
 // recover() itself, roll back its in-flight WAL transaction (releasing the
-// store's single-writer lock so future writes are not deadlocked), and only
+// store's writer registration so future writes are not deadlocked), and only
 // then funnel the recovered value through the same logging, counting, and
 // typed-error conversion. The stack trace is logged, never returned, so engine
 // internals are not leaked to the caller.
@@ -1959,12 +2019,12 @@ func convertQueryPanic(r any, errp *error, entrypoint, counter string) {
 // entrypoints that hold an in-flight WAL transaction. It differs from
 // [recoverQueryPanic] in one ACID-critical respect: on a recovered panic it
 // first rolls back the transaction pointed to by *txp, releasing the store's
-// single-writer mutex, and only then funnels the panic value through
+// writer registration, and only then funnels the panic value through
 // [convertQueryPanic] for logging, counting, and typed-error conversion.
 //
 // Without this rollback a panic raised after [txn.Store.Begin] — for example
 // inside the [lpg.Graph.ApplyAtomically] closure during plan build, exec, or
-// index commit — would convert to an error but leave the single-writer mutex
+// index commit — would convert to an error but leave the writer registered
 // held forever, deadlocking every subsequent write transaction and leaving a
 // partial WAL transaction dangling: a violation of ACID atomicity and
 // liveness. (The visibility barrier itself is safe: [lpg.Graph.ApplyAtomically]
@@ -2019,11 +2079,25 @@ func checkContext(ctx context.Context) error {
 	return nil
 }
 
+// pinnedView carries a caller-owned read view into the read path.
+//
+// A nil *pinnedView means "open your own snapshot and release it when the
+// statement finishes" — the autocommit contract, one instant per statement. A
+// non-nil one means "execute at THIS instant and do not release it", which is
+// what gives an explicit read transaction one instant for all of its statements
+// (rmp #2307).
+//
+// The wrapper exists because the snapshot itself cannot carry that distinction:
+// [lpg.Graph.BeginRead] legitimately returns nil when versioning is disarmed,
+// so a nil *lpg.Snapshot cannot be told apart from "no view supplied".
+type pinnedView struct{ snap *lpg.Snapshot }
+
 // Run parses, analyses, plans, and executes query, returning a materialised
-// [Result]. The query is built and drained inside the read visibility barrier
-// (Graph.View) so it observes a consistent, partial-transaction-free snapshot.
-// DDL statements take a dedicated fast path. Parameters are bound from params
-// and type-checked against the plan before execution.
+// [Result]. The query is built and drained at ONE read instant — a snapshot
+// opened here and released when the statement finishes — so it observes a
+// consistent, partial-transaction-free view. DDL statements take a dedicated
+// fast path. Parameters are bound from params and type-checked against the plan
+// before execution.
 //
 // If ctx is already cancelled or its deadline has elapsed when Run is called,
 // it returns promptly — before any parse, plan, or execution work — with an
@@ -2033,7 +2107,16 @@ func checkContext(ctx context.Context) error {
 // A recoverable panic raised while planning or executing the query is
 // intercepted and returned as an error wrapping [ErrInternalPanic]; it never
 // unwinds past this method to crash the embedding process.
-func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.Value) (res *Result, err error) {
+func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.Value) (*Result, error) {
+	return e.runRead(ctx, query, params, nil)
+}
+
+// runRead is the single read-execution path. It is [Engine.Run] with the read
+// view made explicit: at is nil for an autocommit statement, which opens and
+// releases its own snapshot, and non-nil for a statement of an explicit read
+// transaction, which executes at the transaction's instant and leaves releasing
+// it to [ExplicitTx.Commit] / [ExplicitTx.Rollback].
+func (e *Engine) runRead(ctx context.Context, query string, params map[string]expr.Value, at *pinnedView) (res *Result, err error) {
 	defer cmetrics.Time("cypher.Run").Stop()
 	defer func() {
 		if err != nil {
@@ -2091,19 +2174,24 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 		return nil, err
 	}
 
-	// ── 2+3. Build the physical operator tree AND execute it under the read
-	// visibility barrier (#1077) ─────────────────────────────────────────────
-	// The physical build snapshots live mutable graph structures (the forward
-	// CSR in buildEdgeTypeFilter, the per-edge label/instance lookups). Running
-	// it inside Graph.View (visMu.RLock) means a concurrent writer — which grows
-	// the adjacency under Graph.ApplyAtomically (visMu.Lock) — cannot tear those
-	// snapshots mid-build. Draining the whole query inside the same barrier also
-	// gives the read a consistent, partial-transaction-free view (audit gap F3,
-	// docs/isolation-design.md); materialising releases the read lock before the
-	// caller iterates, so a long-open Result can never deadlock a writer.
+	// ── 2+3. Build the physical operator tree AND execute it AT ONE MVCC INSTANT ──
+	// The physical build snapshots derived structures (the forward CSR in
+	// buildEdgeTypeFilter, the per-edge label/instance lookups). They cannot be torn
+	// by a concurrent writer because every one of them resolves against the read view
+	// opened below — one start timestamp for the whole query, registered with the
+	// reclamation horizon so nothing it can still reach is freed while it runs. That
+	// is what gives the read a consistent, partial-transaction-free view.
 	//
-	// build runs under visMu.RLock; nothing here may call g.View/g.ApplyAtomically
-	// (visMu is non-re-entrant — see lpg.Graph.View/ApplyAtomically).
+	// (This described a VISIBILITY BARRIER until rmp #2314 corrected it: "Running it
+	// inside Graph.View (visMu.RLock) means a concurrent writer ... cannot tear those
+	// snapshots mid-build. Draining the whole query inside the same barrier also gives
+	// the read a consistent view". Sprint 334 removed the barrier from the read path —
+	// a read takes no visMu at all — so a reader who believed that sentence would look
+	// for exclusion that is not there and would misjudge what makes the build sound.
+	// The guarantee is unchanged; its mechanism is the instant, not the lock.)
+	//
+	// Nothing here may call g.View/g.ApplyAtomically: visMu is non-re-entrant, and a
+	// DDL transition still takes it exclusively — see lpg.Graph.View/ApplyAtomically.
 	var (
 		r        *Result
 		buildErr error
@@ -2148,13 +2236,28 @@ func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.V
 	// Memgraph takes `main_lock_` SHARED and reserves UNIQUE for global
 	// operations such as index creation — but a writer blocking writers is not
 	// what starved anybody.
-	snap := e.g.BeginRead()
-	defer e.g.EndRead(snap)
-	// Sweep unreachable versions before building. It is once per query, not per
-	// row, and it is what stops a build-then-read workload paying a side-map
-	// probe forever for history nothing can reach; see lpg.Graph.ReclaimIdle
-	// for why a reader is entitled to do this and why it does not spin.
-	e.g.ReclaimIdle()
+	//
+	// AN EXPLICIT READ TRANSACTION SUPPLIES ITS OWN (rmp #2307). When at is
+	// non-nil the statement executes at the transaction's instant instead of
+	// opening a fresh one, which is what turns read-committed-across-statements
+	// into snapshot isolation for the whole transaction. The horizon slot is
+	// then owned by the handle, so it is NOT released here — releasing a
+	// snapshot the caller still holds would let reclamation free versions the
+	// next statement of that transaction can still reach.
+	var snap *lpg.Snapshot
+	if at != nil {
+		snap = at.snap
+	} else {
+		snap = e.g.BeginRead()
+		defer e.g.EndRead(snap)
+	}
+	// NO SWEEP HERE (rmp #2308). This used to call lpg.Graph.ReclaimIdle, which
+	// swept the version chains inline on the query's own goroutine — once per
+	// query, but still on the read path, and still O(objects carrying history).
+	// Reclamation is now the background vacuum's, and the trigger that used to
+	// live here lives at the end of the read view instead: lpg.Graph.EndRead
+	// wakes the vacuum when a departing reader lets the watermark advance. Same
+	// throttle, same convergence, none of it on the query.
 	func() {
 		op, cols, err := e.buildReadPhysical(ctx, entry, plan, params, queryReg, nil, snap)
 		if err != nil {
@@ -2348,23 +2451,20 @@ func (e *Engine) Explain(query string, params map[string]expr.Value) (s string, 
 // anything at construction time, and Init — which is what starts goroutines and
 // allocates working buffers — is never called, so there is nothing to release.
 func (e *Engine) explainPhysical(entry *planCacheEntry, params map[string]expr.Value) (string, error) {
-	var (
-		out      string
-		buildErr error
-	)
 	queryReg := newNowAwareRegistry(e.reg, time.Now())
-	e.g.View(func() {
-		op, _, err := e.buildReadPhysical(context.Background(), entry, entry.plan, params, queryReg, nil, nil)
-		if err != nil {
-			buildErr = err
-			return
-		}
-		out = exec.RenderPlan(op)
-	})
-	if buildErr != nil {
-		return "", fmt.Errorf("cypher: build plan: %w", buildErr)
+	// A SNAPSHOT, not the barrier (rmp #2304). EXPLAIN reads the same label
+	// cardinalities and index metadata Run reads to choose a plan, so it should
+	// read them the way Run does — and Run has taken no lock since rmp #2290.
+	// Coming here through Graph.View instead would now stop every writer for the
+	// duration of a diagnostic that renders a plan and throws it away, because
+	// #2304 made View exclusive.
+	snap := e.g.BeginRead()
+	defer e.g.EndRead(snap)
+	op, _, err := e.buildReadPhysical(context.Background(), entry, entry.plan, params, queryReg, nil, snap)
+	if err != nil {
+		return "", fmt.Errorf("cypher: build plan: %w", err)
 	}
-	return out, nil
+	return exec.RenderPlan(op), nil
 }
 
 // Profile executes query with the given params and returns the PHYSICAL plan
@@ -2409,14 +2509,18 @@ func (e *Engine) Profile(ctx context.Context, query string, params map[string]ex
 		drainErr error
 	)
 	queryReg := newNowAwareRegistry(e.reg, time.Now())
-	// PROFILE executes the query, so it takes a read view exactly as Run does —
-	// including taking the start timestamp INSIDE the barrier. Measuring a
-	// different isolation level from the one Run uses would make the
-	// measurements describe a query nobody runs.
-	var snap *lpg.Snapshot
-	defer func() { e.g.EndRead(snap) }()
-	e.g.View(func() {
-		snap = e.g.BeginRead()
+	// PROFILE executes the query, so it must read EXACTLY as Run does or its
+	// measurements describe a query nobody runs. Run takes a snapshot and no lock
+	// (rmp #2290), so this takes a snapshot and no lock too.
+	//
+	// It used to wrap the whole thing in Graph.View as well, which by #2290 was
+	// already measuring a stricter isolation than Run's, and which rmp #2304 turned
+	// into a writer stall for the length of a diagnostic query. Removing it makes
+	// the two paths agree again — which was the stated intent of the comment that
+	// stood here.
+	snap := e.g.BeginRead()
+	defer e.g.EndRead(snap)
+	func() {
 		prof := exec.NewProfiler()
 		op, cols, berr := e.buildReadPhysical(ctx, entry, entry.plan, params, queryReg, prof, snap)
 		if berr != nil {
@@ -2437,7 +2541,7 @@ func (e *Engine) Profile(ctx context.Context, query string, params map[string]ex
 		if cerr := r.Close(); cerr != nil && drainErr == nil {
 			drainErr = cerr
 		}
-	})
+	}()
 	if buildErr != nil {
 		return "", fmt.Errorf("cypher: build plan: %w", buildErr)
 	}
@@ -2920,9 +3024,11 @@ func (e *Engine) runCreateBTreeIndex(ctx context.Context, p *ir.CreateIndex, idx
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// The whole DDL sequence — scan, validate, register — under one lock, in BOTH
+	// wirings; see [Engine.schemaMu] for why the schema barrier alone cannot do it.
+	e.schemaMu.Lock()
+	defer e.schemaMu.Unlock()
 	if e.store == nil {
-		e.writeMu.Lock()
-		defer e.writeMu.Unlock()
 		return e.createBTreeIndexLocked(ctx, p, idxMgr, nil)
 	}
 	// WAL-backed: open the serialising transaction before the backfill scan so
@@ -3032,7 +3138,7 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 	}
 
 	// Record the user index def BEFORE the WAL commit, while this DDL still
-	// holds the single-writer serialisation (#F-STORE1). A concurrent
+	// holds the exclusive DDL lock (#F-STORE1). A concurrent
 	// non-blocking checkpoint captures (WAL watermark, index defs) under the
 	// commit lock + inflight drain; updating the registry inside the serialised
 	// window here — not after commitIndexTx releases it — guarantees the
@@ -3080,9 +3186,9 @@ func (e *Engine) runDropIndex(ctx context.Context, p *ir.DropIndex, idxMgr *inde
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	e.schemaMu.Lock()
+	defer e.schemaMu.Unlock()
 	if e.store == nil {
-		e.writeMu.Lock()
-		defer e.writeMu.Unlock()
 		// Capture the (label, property) of the index about to be dropped so the
 		// internal numeric companion (#1652) can be cleaned up alongside it; see
 		// dropNumericCompanionIfOrphaned.
@@ -3125,7 +3231,7 @@ func (e *Engine) runDropIndex(ctx context.Context, p *ir.DropIndex, idxMgr *inde
 			return res, nil
 		}
 		// Forget the def from the engine registry BEFORE the WAL commit, while
-		// this DDL still holds the single-writer serialisation (#F-STORE1). The
+		// this DDL still holds the exclusive DDL lock (#F-STORE1). The
 		// index is already gone from the index.Manager (the DropIndexOp above);
 		// aligning the def-registry removal into the same serialised window means
 		// a concurrent non-blocking checkpoint — which captures (WAL watermark,
@@ -3210,7 +3316,7 @@ func dropNumericCompanionIfOrphaned(idxMgr *index.Manager, label, property strin
 //
 // The whole validate → register → seed → WAL-append sequence runs under the
 // engine's writer serialisation (task #1341): for a WAL-backed engine the
-// store's single-writer lock — taken by opening the very transaction that
+// store's writer registration — taken by opening the very transaction that
 // carries the durable constraint op — and for a store-less engine
 // [Engine.writeMu]. Without it a concurrent writer could commit a duplicate
 // value between the validation scan and the value-set seed, leaving a UNIQUE
@@ -3221,27 +3327,29 @@ func (e *Engine) runCreateConstraint(ctx context.Context, p *ir.CreateConstraint
 	}
 	kind := execConstraintKind(p.Kind)
 
+	// One lock over scan + validate + register, in BOTH wirings. Lock order
+	// schemaMu → visMu (inside scanLabelProperty's View and the registration's
+	// ApplyAtomically). See [Engine.schemaMu].
+	e.schemaMu.Lock()
+	defer e.schemaMu.Unlock()
 	if e.store == nil {
-		// Store-less: writeMu is the same single-writer mutex every store-less
-		// RunInTx write holds for its duration, so the sequence below is
-		// atomic against concurrent writers. Lock order writeMu → visMu
-		// (inside scanLabelProperty's View) matches the write path.
-		e.writeMu.Lock()
-		defer e.writeMu.Unlock()
 		return e.createConstraintLocked(ctx, p, kind, idxMgr, nil)
 	}
 	// WAL-backed: open the transaction that will carry the durable constraint
-	// op BEFORE the validation scan. BeginCtx takes the store's single-writer
-	// lock — the same one every RunInTx write holds — so the whole sequence
-	// excludes concurrent writers. The durable op must be committed on THIS
+	// op BEFORE the validation scan. What makes the whole sequence exclude
+	// concurrent writers is schemaMu, taken EXCLUSIVELY above while an ordinary
+	// write takes it shared — NOT the store's admission, which since rmp #2306
+	// excludes nobody. Without that exclusion a writer could insert a violating
+	// row between the validation scan and the registration. The durable op must be committed on THIS
 	// transaction: a nested Begin (the previous appendConstraintOp design)
-	// would deadlock on the non-reentrant single-writer semaphore.
+	// deadlocked on the retired capacity-one semaphore, and would now simply be a
+	// second transaction whose ops are not part of this one.
 	tx, err := e.store.BeginCtx(ctx)
 	if err != nil {
 		return nil, err
 	}
 	res, rerr := e.createConstraintLocked(ctx, p, kind, idxMgr, tx)
-	// Release the single-writer lock when the sequence ended before reaching
+	// Deregister the writer when the sequence ended before reaching
 	// the commit (validation or registration error). After CommitWALOnly —
 	// on success OR failure — the tx is already finished and this Rollback is
 	// a guarded no-op (ErrTxFinished), never a double release; the error is
@@ -3256,7 +3364,7 @@ func (e *Engine) runCreateConstraint(ctx context.Context, p *ir.CreateConstraint
 func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstraint, kind exec.ConstraintKind, idxMgr *index.Manager, tx *txn.Tx[string, float64]) (*Result, error) {
 	// Keep Graph.HasConstraints in sync with the registry on every exit path
 	// (success, IF NOT EXISTS no-op, validation error, or unwind), under the
-	// single-writer lock the caller holds — so a concurrent checkpoint can never
+	// writer registration the caller holds — so a concurrent checkpoint can never
 	// observe a stale "no constraints" count and truncate the WAL (#1464).
 	defer e.syncConstraintCount()
 
@@ -3309,7 +3417,7 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 	// frame) are therefore outside the closure.
 	//
 	// Lock ordering: the caller holds the engine's writer serialisation (store's
-	// single-writer lock for WAL-backed engines, writeMu for store-less) which
+	// writer registration for WAL-backed engines, writeMu for store-less) which
 	// is taken before visMu everywhere in the write path — the ApplyAtomically
 	// call below takes visMu, matching that established ordering.
 	barrierErr := e.g.ApplyAtomically(func() error {
@@ -3409,9 +3517,9 @@ func (e *Engine) runDropConstraint(ctx context.Context, p *ir.DropConstraint, id
 		return nil, err
 	}
 
+	e.schemaMu.Lock()
+	defer e.schemaMu.Unlock()
 	if e.store == nil {
-		e.writeMu.Lock()
-		defer e.writeMu.Unlock()
 		return e.dropConstraintLocked(ctx, p, idxMgr, nil)
 	}
 	tx, err := e.store.BeginCtx(ctx)
@@ -3420,7 +3528,7 @@ func (e *Engine) runDropConstraint(ctx context.Context, p *ir.DropConstraint, id
 	}
 	res, rerr := e.dropConstraintLocked(ctx, p, idxMgr, tx)
 	// Guarded no-op after CommitWALOnly (success or failure); releases the
-	// single-writer lock on the earlier error paths. See runCreateConstraint.
+	// writer registration on the earlier error paths. See runCreateConstraint.
 	_ = tx.Rollback()
 	return res, rerr
 }
@@ -3538,8 +3646,8 @@ func (e *Engine) constraintAlreadyRegistered(kind exec.ConstraintKind, label, pr
 // commits it WAL-only. tx is the same transaction whose Begin provides the
 // DDL's writer serialisation (task #1341), so the durable record is secured
 // without releasing the lock between registration and append. The commit
-// finishes the tx — on success AND on sync failure — releasing the
-// single-writer lock; the caller's guarded Rollback is then a no-op. The op
+// finishes the tx — on success AND on sync failure — clearing its writer
+// registration; the caller's guarded Rollback is then a no-op. The op
 // carries no node endpoints and applies nothing to the graph: the in-memory
 // registry was already updated by the operator, mirroring the eager-apply +
 // CommitWALOnly pattern the write path uses.
@@ -3559,17 +3667,20 @@ func commitConstraintTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind exe
 	}
 	if err != nil {
 		// Buffering failed; the tx is still open — the caller's deferred
-		// Rollback releases the single-writer lock.
+		// Rollback deregisters the writer.
 		return err
 	}
-	return tx.CommitWALOnly()
+	// commitTS 0 — "no MVCC timestamp" (rmp #2309). DDL registers schema, not graph
+	// versions: it mints no commit record and no MVCC instant, so there is nothing
+	// for recovery to derive a clock floor from here.
+	return tx.CommitWALOnly(0)
 }
 
 // commitIndexTx buffers the durable CREATE/DROP INDEX op on tx and commits it
 // WAL-only. tx is the same transaction whose Begin provides the DDL's writer
 // serialisation, so the durable record is secured without releasing the lock
 // between registration and append. The commit finishes the tx — on success
-// AND on sync failure — releasing the single-writer lock; the caller's
+// AND on sync failure — clearing its writer registration; the caller's
 // guarded Rollback is then a no-op. The op carries no node endpoints and
 // applies nothing to the graph: the in-memory index manager was already
 // updated, mirroring the constraint durability pattern (task #1343).
@@ -3585,10 +3696,13 @@ func commitIndexTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind txn.Inde
 	}
 	if err != nil {
 		// Buffering failed; the tx is still open — the caller's deferred
-		// Rollback releases the single-writer lock.
+		// Rollback deregisters the writer.
 		return err
 	}
-	return tx.CommitWALOnly()
+	// commitTS 0 — "no MVCC timestamp" (rmp #2309). DDL registers schema, not graph
+	// versions: it mints no commit record and no MVCC instant, so there is nothing
+	// for recovery to derive a clock floor from here.
+	return tx.CommitWALOnly(0)
 }
 
 // scanLabelProperty walks the live (non-tombstoned) nodes carrying label and
@@ -3610,15 +3724,18 @@ func commitIndexTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind txn.Inde
 // tombstone, label, and property state after every shard lock is released. The
 // keys are interned and immutable, so resolving them outside the walk is safe.
 //
-// Both phases run inside [lpg.Graph.View] (task #1341): the scan observes a
-// consistent snapshot in which no in-flight transaction is half-applied —
-// every transaction committed via [lpg.Graph.ApplyAtomically] is visible
-// either entirely or not at all. Holding the visibility read lock across the
-// Walk is deadlock-free with respect to the #1339 scenario: every writer
-// mutates only inside ApplyAtomically (visMu.Lock), so while View's read lock
-// is held no [graph.Mapper.Intern] can be queued on a shard. Callers must not
-// already be inside View/ApplyAtomically (the barrier is not re-entrant; the
-// lpg barrier guard panics on misuse).
+// Both phases run inside [lpg.Graph.View] (task #1341), which keeps the CATALOG
+// stable across the scan and keeps the Walk deadlock-free with respect to the
+// #1339 scenario. Callers must not already be inside View/ApplyAtomically (the
+// barrier is not re-entrant; the lpg barrier guard panics on misuse).
+//
+// It does NOT give the scan a consistent view of DATA: since rmp #2320 an ordinary
+// write holds the same barrier SHARED, so a value a concurrent writer is adding may
+// or may not be seen here. That is sound for what this scan is FOR — it
+// pre-validates a constraint that is not yet registered, and every write after
+// registration is checked by the enforcement path — so a value added during the
+// scan is caught there rather than missed. A scan that needed a consistent data
+// view would take a snapshot instead.
 //
 // Polls ctx at the same ~4096-row granularity as [Engine.backfillNodeHashIndex]
 // (rmp #1872 — this scan polled no cancellation at all before, leaving a large
@@ -4319,7 +4436,7 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
 // the leak (it depends on the GC schedule) and CANNOT report errors back to
 // the caller. For a write [Result] from [Engine.RunInTx] the WAL transaction
 // is already committed (fsynced) or rolled back under the barrier before
-// RunInTx returns (#1281), so the store's single-writer mutex is released at
+// RunInTx returns (#1281), so the store's writer registration is cleared at
 // that point — a leaked, unclosed Result leaks only the ResultSet, not the
 // write lock. Callers that need predictable resource release MUST still call
 // Close themselves.
@@ -4417,6 +4534,18 @@ type Result struct {
 	// read queries and write queries on an engine with no active constraints.
 	constraintReg *exec.ConstraintRegistry
 	g             *lpg.Graph[string, float64]
+	// mvccG and wtx are how a durable write allocates its MVCC commit timestamp
+	// BEFORE the WAL fsync, so the timestamp is inside the durable record and
+	// recovery can derive the clock from the WAL rather than trust a persisted
+	// counter (rmp #2309, docs/design-mvcc-clock-recovery.md).
+	//
+	// They are separate from g above, which is set only for constraint-carrying
+	// writes and is therefore nil on most of the paths that need this. Both are set
+	// together, inside the write bracket, which is the only place the transaction
+	// handle exists. A zero wtx or a nil mvccG yields timestamp 0 — "no MVCC
+	// timestamp" — which is the correct encoding for a store-only write.
+	mvccG *lpg.Graph[string, float64]
+	wtx   lpg.WriteTx
 	// touched is the per-transaction set of node keys this write statement
 	// created, labelled, or stripped a property from, used by the commit-time
 	// NOT NULL existence check (#1754). It is nil unless the engine has at least
@@ -5086,6 +5215,45 @@ func estimateRelSize(r expr.RelationshipValue) int64 {
 // briefly excluding transactional readers for the duration of the disk sync;
 // the lock-free per-shard snapshot is the tracked performance end-state, and
 // the read/analytics CSR path does not go through this barrier.
+// allocCommitTS reserves this write's MVCC commit instant without publishing it, so
+// the instant can be written INTO the WAL record that is about to be fsynced
+// (rmp #2309). It returns 0 — "no MVCC timestamp" — when this Result carries no
+// transaction handle, which is every store-only and read path.
+//
+// It is idempotent, so the two commit sites below may both call it: the second
+// returns what the first reserved rather than burning a second timestamp, which
+// matters because an allocated-and-unpublished timestamp holds the contiguous
+// commit frontier back for every reader.
+//
+// The reservation is discharged by lpg.Graph.endWrite on every path — published on
+// success, abandoned on abort and on the versioned-nothing case — so there is no
+// obligation here beyond the one that already existed.
+func (r *Result) allocCommitTS() uint64 {
+	if r.mvccG == nil {
+		return 0
+	}
+	return r.mvccG.AllocateCommitTS(r.wtx)
+}
+
+// releaseTxHandle forgets the write transaction, so nothing after the bracket can
+// allocate through it.
+//
+// # The regression this exists to make unrepresentable
+//
+// lpg recycles a transaction's writeCtx the moment its bracket unwinds. A Result
+// that kept the handle could therefore reach [Result.allocCommitTS] on a LATER path
+// — [Result.closeLocked]'s WAL fallback is one — and write a commit timestamp into
+// state a DIFFERENT, live transaction now owns. endWrite would then publish that
+// instant as the other transaction's, so two transactions commit at one instant.
+//
+// That is not hypothetical: it is what the first version of rmp #2309's threading
+// did, and internal/sim caught it as node LOSS after full-stack recovery (oracle 21
+// nodes, engine 15) rather than as anything resembling a clock defect. Nulling the
+// handle at the bracket boundary makes the mistake impossible instead of forbidden.
+func (r *Result) releaseTxHandle() {
+	r.mvccG, r.wtx = nil, lpg.WriteTx{}
+}
+
 func (r *Result) commitUnderBarrier() {
 	if r.bufHandled && r.walHandled {
 		return
@@ -5110,7 +5278,7 @@ func (r *Result) commitUnderBarrier() {
 	// index commit so the transaction is durable the instant its writes are
 	// allowed to remain observable past the barrier.
 	if r.tx != nil {
-		if werr := r.tx.CommitWALOnly(); werr != nil {
+		if werr := r.tx.CommitWALOnly(r.allocCommitTS()); werr != nil {
 			cmetrics.IncCounter("cypher.RunInTx.wal.commitErrors", 1)
 			// The fsync failed: roll the not-durable write back so it never
 			// stays visible, then surface the error from RunInTx.
@@ -5119,6 +5287,18 @@ func (r *Result) commitUnderBarrier() {
 			return
 		}
 		r.walHandled = true
+		// DURABLE, BUT NOT YET VISIBLE (rmp #2309, MVCC C3c). The fsync has
+		// returned and the OpCommit marker carries this transaction's MVCC instant;
+		// the instant itself is published later, when the write bracket unwinds
+		// through lpg.Graph.endWrite. A crash here therefore leaves a durable
+		// commit whose timestamp NO READER EVER SAW, which is the one ordering
+		// case the derive-and-ratchet design has to get right: the transaction is
+		// committed (the fsync returned), so recovery must both apply it and put
+		// the clock floor ABOVE its instant, never re-minting it.
+		//
+		// Inert in a production build — internal/crashpoint compiles to an empty
+		// function without the gograph_crashinject tag, so this costs nothing.
+		crashpoint.Breakpoint("mvcc.commit.post-fsync-pre-publish")
 	}
 	if r.buf != nil {
 		r.buf.Commit(r.idxMgr)
@@ -5161,13 +5341,13 @@ func (r *Result) rollbackUnderBarrier() {
 	if r.undo != nil && !r.undo.replay() {
 		r.undoErr = wrapUndoFailure(nil)
 	}
-	// Reseed the constraint registry from the restored graph. Must run AFTER
-	// undo replay (so the graph is back to its pre-transaction state) and
-	// BEFORE releasing the buffer/WAL (so the value-sets are consistent with
-	// what's visible once the barrier drops).
-	if r.constraintReg != nil && r.g != nil {
-		reseedConstraintsInsideBarrier(r.constraintReg, r.g)
-	}
+	// NO constraint reseed here (rmp #2321). The undo replay above already
+	// released every value-set reservation this statement made, because each one
+	// was journaled as an inverse when it was taken
+	// (cypher/exec/constraint_journal.go). Rebuilding the value-sets from the graph
+	// instead — which is what stood here — destroyed CONCURRENT writers'
+	// reservations too, since a rebuild cannot see a commit that is not yet durable;
+	// that file has the measurement.
 	if r.buf != nil {
 		r.buf.Rollback()
 	}
@@ -5181,52 +5361,6 @@ func (r *Result) rollbackUnderBarrier() {
 	}
 	r.bufHandled = true
 	r.walHandled = true
-}
-
-// reseedConstraintsInsideBarrier rebuilds every UNIQUE value-set in reg from
-// the live graph g. It is called inside the write visibility barrier
-// (ApplyAtomically) immediately after an undo-log replay, so g reflects the
-// pre-transaction state and the registry must be brought into sync with it.
-//
-// Because this runs inside the barrier (no concurrent writers, no ongoing
-// View), it accesses graph state directly via the Mapper.Walk / GetNodeProperty
-// APIs without going through lpg.Graph.View (which would deadlock the
-// re-entrant barrier). The walk snapshot pattern mirrors scanLabelProperty in
-// api.go but is barrier-safe: it holds no shard locks at the point it reads
-// label/property state, because the barrier itself excludes concurrent Intern
-// calls.
-func reseedConstraintsInsideBarrier(reg *exec.ConstraintRegistry, g *lpg.Graph[string, float64]) {
-	mapper := g.AdjList().Mapper()
-
-	// Snapshot (id, key) pairs first to avoid deadlocking the shard read lock
-	// with a nested Lookup inside the Walk callback.
-	type nodeRef struct {
-		key string
-		id  graph.NodeID
-	}
-	refs := make([]nodeRef, 0, mapper.Len())
-	mapper.Walk(func(id graph.NodeID, key string) bool {
-		refs = append(refs, nodeRef{id: id, key: key})
-		return true
-	})
-
-	reg.ReseedFromGraph(func(label, prop string) []lpg.PropertyValue {
-		var out []lpg.PropertyValue
-		for i := range refs {
-			ref := refs[i]
-			if g.IsTombstoned(ref.id) {
-				continue
-			}
-			if !g.HasNodeLabel(ref.key, label) {
-				continue
-			}
-			v, ok := g.GetNodeProperty(ref.key, prop)
-			if ok {
-				out = append(out, v)
-			}
-		}
-		return out
-	})
 }
 
 // Err returns the first error encountered during iteration, or nil.
@@ -5338,7 +5472,21 @@ func (r *Result) closeLocked() error {
 		if err != nil || r.rs.Err() != nil || r.rowsErr != nil {
 			_ = r.tx.Rollback() // release store mutex; in-memory state already dirty
 		} else {
-			if werr := r.tx.CommitWALOnly(); werr != nil {
+			// commitTS 0, and it MUST be 0 (rmp #2309). This runs after the write
+			// bracket has unwound, so the writeCtx behind r.wtx has already gone
+			// back to the free list and may belong to a different, LIVE transaction
+			// by now. Allocating through it would stamp that transaction's state
+			// with an instant it never asked for, and endWrite would publish it —
+			// two transactions at one instant, which is the exact hazard the reset
+			// in lpg.acquireWriteCtx exists to prevent.
+			//
+			// Zero is also the right ANSWER, not merely the safe one: a Result that
+			// reached Close without in-barrier finalisation has no live MVCC
+			// transaction to name, so there is no instant for the record to carry.
+			//
+			// r.releaseTxHandle below makes this structural rather than a rule to
+			// remember, but the explicit 0 stays so the call site says why.
+			if werr := r.tx.CommitWALOnly(0); werr != nil {
 				err = werr
 			}
 		}
@@ -5660,16 +5808,24 @@ func (s *lpgLabelResolver) ResolveLabelsCardinality(names []string) (uint64, boo
 	if len(names) < 2 {
 		return 0, false
 	}
-	ids := make([]uint32, 0, len(names))
+	lids := make([]lpg.LabelID, 0, len(names))
 	for _, n := range names {
 		lid, ok := s.g.Registry().Lookup(n)
 		if !ok {
 			// An unknown label makes the conjunction empty by definition.
 			return 0, true
 		}
-		ids = append(ids, uint32(lid))
+		lids = append(lids, lid)
 	}
-	return s.g.NodeIndex().IntersectCardinality(ids...)
+	// Through the as-of form, NOT NodeIndex() directly: the raw bitmaps are only
+	// authoritative when nothing is deferred and no label or node history is live.
+	// See [lpg.Graph.LabelsCountExact] for what reading them unconditionally cost
+	// (rmp #2326).
+	n, ok := s.g.Raw().LabelsCountExact(lids, s.g.Snapshot())
+	if !ok {
+		return 0, false
+	}
+	return uint64(n), true
 }
 
 // ResolveLabelsBitmap implements [exec.LabelIntersectResolver]: the set-at-a-time
@@ -5948,11 +6104,13 @@ func buildPlanWithMutatorFull(
 	bopts.writeFallback = func(child ir.LogicalPlan) (exec.Operator, error) {
 		return buildOperatorWrite(child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 	}
-	// Give the write adapter the SAME bopts (and its cached forward-CSR
-	// snapshot) the read-side builders use, so a relationship SET/REMOVE
-	// resolves the bound parallel instance's stable handle via the exact
-	// read-path mechanism ([edgeHandleAtFwdPos]) rather than a divergent one
-	// (#1686). Only the concrete write adapters carry a bopts field.
+	// Give the write adapter the SAME bopts the read-side builders use. It used to
+	// matter because a relationship SET/REMOVE resolved the bound instance's handle
+	// from a forward-CSR position against the bopts-cached snapshot, and had to use
+	// the exact read-path mechanism to agree with reads (#1686). Since rmp #2317 the
+	// row carries the handle itself and no resolution happens, but the adapters still
+	// read bopts for the count store and the undo log. Only the concrete write
+	// adapters carry the field.
 	switch m := mutator.(type) {
 	case *walMutatorAdapter:
 		m.bopts = bopts
@@ -8159,7 +8317,6 @@ func buildOperatorRec(
 			return child, nil
 		}
 
-		fwd, rev, pairAt := csrPairCachedForAt(bopts, g)
 		dir := irDirToExec(p.Direction)
 
 		cfg := exec.ExpandConfig{
@@ -8168,7 +8325,9 @@ func buildOperatorRec(
 		}
 		if len(p.RelTypes) > 0 {
 			cfg.EdgeType = p.RelTypes[0]
-			cfg.EdgeTypeFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts, pairAt)
+			// The FILTER is not set here: it travels with the adjacency, resolved at
+			// execution time by [expandAdjacencySource], because it is keyed to that
+			// adjacency's edge positions (rmp #2317).
 		}
 		// Cyphermorphism: pass the schema columns of every sibling
 		// relationship variable already bound in this MATCH pattern so
@@ -8187,10 +8346,10 @@ func buildOperatorRec(
 		// full first. One intersecting operator computes the same set directly, so a
 		// candidate that does not close is never built into a row. Declines to nil
 		// for every shape it does not admit, leaving the plan below untouched.
-		if fused := tryFuseCyclicIntersect(p, child, fwd, rev, pairAt, g, schema, bopts); fused != nil {
+		if fused := tryFuseCyclicIntersect(p, child, g, schema, bopts); fused != nil {
 			return fused, nil
 		}
-		exp := exec.NewExpand(child, fwd, rev, cfg)
+		exp := exec.NewExpand(child, expandAdjacencySource(bopts, g, p.RelTypes), cfg)
 		// Expand-into (#2206): when this hop's destination is a variable the row
 		// already carries, filter to edges landing on it INSIDE the operator instead
 		// of emitting one row per neighbour for the equality Selection above to
@@ -8735,7 +8894,6 @@ func buildOperatorRec(
 			return child, nil
 		}
 
-		fwd, rev, pairAt := csrPairCachedForAt(bopts, g)
 		dir := irDirToExec(p.Direction)
 
 		cfg := exec.ExpandConfig{
@@ -8744,9 +8902,9 @@ func buildOperatorRec(
 		}
 		if len(p.RelTypes) > 0 {
 			cfg.EdgeType = p.RelTypes[0]
-			cfg.EdgeTypeFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts, pairAt)
+			// The filter travels with the adjacency; see the Expand case above.
 		}
-		return exec.NewOptionalExpand(child, fwd, rev, cfg), nil
+		return exec.NewOptionalExpand(child, expandAdjacencySource(bopts, g, p.RelTypes), cfg), nil
 
 	case *ir.ShortestPath:
 		return buildShortestPath(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
@@ -8828,7 +8986,6 @@ func buildOperatorRec(
 			return child, nil
 		}
 
-		fwd, rev, pairAt := csrPairCachedForAt(bopts, g)
 		dir := irDirToExec(p.Direction)
 		minHops := p.MinDepth
 		maxHops := p.MaxDepth
@@ -8838,11 +8995,9 @@ func buildOperatorRec(
 		// honours MaxHops==0 as "no expansion beyond the source", which is
 		// exactly the desired semantics for *0 / *0..0 / *N..M (N>M).
 
-		var etFilter map[uint64]string
 		edgeType := ""
 		if len(p.RelTypes) > 0 {
 			edgeType = p.RelTypes[0]
-			etFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts, pairAt)
 		}
 
 		// Resolve excluded rel-variable names to row column indices via
@@ -8860,13 +9015,14 @@ func buildOperatorRec(
 		cfg := exec.VarLengthConfig{
 			Direction:       dir,
 			EdgeType:        edgeType,
-			EdgeTypeFilter:  etFilter,
 			InputCol:        fromCol,
 			MinHops:         minHops,
 			MaxHops:         maxHops,
 			ExcludedRelCols: excludedCols,
 		}
-		return exec.NewVarLengthExpand(child, fwd, rev, &cfg), nil
+		// The filter travels with the adjacency, both resolved at execution time; see
+		// [expandAdjacencySource].
+		return exec.NewVarLengthExpand(child, expandAdjacencySource(bopts, g, p.RelTypes), &cfg), nil
 
 	case *ir.NamedPath:
 		// NamedPath is a pure pass-through: build the child, then register
@@ -12462,7 +12618,10 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.ReadVi
 			// latest-wins union over parallel siblings — keeping the property
 			// granularity congruent with the type granularity.
 			handled := false
-			fwdHandle := edgeHandleAtFwdPos(bopts, g, stKey, enKey, uint64(edgeIDVal))
+			// The row's edge id IS the stable handle since rmp #2317, so no lookup is
+			// needed: it used to be a forward-CSR POSITION that had to be resolved
+			// against a per-query CSR snapshot to recover the handle.
+			fwdHandle := uint64(edgeIDVal)
 			// hasByHandleEntry is the by-handle MEMBERSHIP signal that gates the
 			// property routing below (rmp #1684). A non-zero fwdHandle is NOT on
 			// its own sufficient: the public Go API (Graph.AddEdge[H] +
@@ -12557,7 +12716,11 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.ReadVi
 // both endpoints must resolve through the mapper, else the hop is returned with
 // the declared type and no properties (the same degenerate behaviour the prior
 // per-pair materialisers had when resolution failed).
-func resolveHopRel(bopts *buildOpts, g *lpg.ReadView[string, float64], prevID, dstID, fwdPos uint64, reversed bool, declaredType string, accepted []string) expr.RelationshipValue {
+// bopts is unused since rmp #2317: the hop's identity IS the handle, so nothing
+// here consults the per-query forward-CSR snapshot bopts carried for the retired
+// position→handle resolution. It is kept in the signature because every hop
+// materialiser shares it.
+func resolveHopRel(_ *buildOpts, g *lpg.ReadView[string, float64], prevID, dstID, fwdPos uint64, reversed bool, declaredType string, accepted []string) expr.RelationshipValue {
 	rel := expr.RelationshipValue{
 		ID:      fwdPos,
 		StartID: prevID,
@@ -12572,15 +12735,13 @@ func resolveHopRel(bopts *buildOpts, g *lpg.ReadView[string, float64], prevID, d
 	if !prevOK || !dstOK {
 		return rel
 	}
-	// The fwdPos the operator recorded is a valid forward-CSR position in the
-	// ENCODED traversal orientation: prevKey->dstKey, or dstKey->prevKey when the
-	// hop is flagged reversed. Recover the stable edge handle from that
-	// orientation (where the position indexes the real arc).
-	encStKey, encEnKey := prevKey, dstKey
-	if reversed {
-		encStKey, encEnKey = dstKey, prevKey
-	}
-	fwdHandle := edgeHandleAtFwdPos(bopts, g, encStKey, encEnKey, fwdPos)
+	// The id the operator recorded IS the stable edge handle since rmp #2317. It
+	// used to be a forward-CSR position in the ENCODED traversal orientation
+	// (prevKey->dstKey, or dstKey->prevKey when the hop is flagged reversed), which
+	// had to be resolved in that orientation because only there did the position
+	// index the real arc. A handle needs no orientation: csr.BuildReverse gives one
+	// handle to both directions of one logical edge.
+	fwdHandle := fwdPos
 
 	// The reported endpoints and the type/property lookup follow the edge's
 	// CREATE-direction storage pair. For a DIRECTED edge that is the encoded
@@ -12589,7 +12750,10 @@ func resolveHopRel(bopts *buildOpts, g *lpg.ReadView[string, float64], prevID, d
 	// the single CREATE-direction pair. Pick the orientation whose by-handle
 	// store actually carries this handle; without this an undirected reverse hop
 	// renders an empty type (#1785). The probe leaves a directed edge untouched.
-	stKey, enKey := encStKey, encEnKey
+	stKey, enKey := prevKey, dstKey
+	if reversed {
+		stKey, enKey = dstKey, prevKey
+	}
 	stID, enID := prevID, dstID
 	if reversed {
 		stID, enID = dstID, prevID
@@ -12798,59 +12962,6 @@ func relPresentByHandleOrPair(g *lpg.ReadView[string, float64], stKey, enKey str
 		return ok && !expr.IsNull(v)
 	}
 	return g.EdgeHasProperty(stKey, enKey, k)
-}
-
-// edgeHandleAtFwdPos returns the stable per-edge handle stored at forward
-// CSR position edgePos for the (srcKey, dstKey) pair, or 0 when: the graph
-// carries no handle column, edgePos is outside srcKey's adjacency range,
-// the slot at edgePos does not point at dstKey, or either endpoint is
-// unknown to the mapper. A 0 return signals the caller to fall back to the
-// positional per-instance idx path.
-//
-// Unlike edgeInstanceIdxFor this performs no positional counting: it reads
-// the handle directly from the CSR slot, which is why it remains correct
-// after a parallel sibling is deleted.
-//
-// The forward CSR is the per-query snapshot cached on bopts ([ensureFwdCSR]),
-// built once per query rather than once per row (#1574). All slot reads —
-// bounds, the edges[edgePos] != dstID guard, and the handle — are made against
-// that snapshot's own VerticesSlice/EdgesSlice/HandlesSlice so they stay
-// internally consistent.
-func edgeHandleAtFwdPos(bopts *buildOpts, g *lpg.ReadView[string, float64], srcKey, dstKey string, edgePos uint64) uint64 {
-	adj := g.AdjList()
-	srcID, ok := adj.Mapper().Lookup(srcKey)
-	if !ok {
-		return 0
-	}
-	dstID, ok := adj.Mapper().Lookup(dstKey)
-	if !ok {
-		return 0
-	}
-	fwdCSR := ensureFwdCSR(bopts, g)
-	if fwdCSR == nil {
-		return 0
-	}
-	handles := fwdCSR.HandlesSlice()
-	if handles == nil {
-		return 0
-	}
-	verts := fwdCSR.VerticesSlice()
-	edges := fwdCSR.EdgesSlice()
-	if uint64(srcID)+1 >= uint64(len(verts)) {
-		return 0
-	}
-	start := verts[uint64(srcID)]
-	end := verts[uint64(srcID)+1]
-	if edgePos < start || edgePos >= end || edgePos >= uint64(len(edges)) {
-		return 0
-	}
-	// Guard: the slot must actually point at dstKey. Defends against a
-	// stale edgePos that survived a concurrent rebuild landing on a
-	// different neighbour.
-	if edges[edgePos] != dstID {
-		return 0
-	}
-	return handles[edgePos]
 }
 
 // edgeInstanceIdxFor returns the 1-based per-CREATE instance index that
@@ -15494,24 +15605,34 @@ func (a *execLabelAdapter) ResolveLabelCount(name string) (int64, bool) {
 // discarded.
 //
 // RunInTx is safe for concurrent use (each call creates an independent
-// operator tree), subject to the single-writer constraint on write queries.
+// operator tree), subject to the per-operator-tree single-goroutine constraint on write queries.
 //
 // If ctx is already cancelled or its deadline has elapsed when RunInTx is
 // called, it returns promptly — before any parse, plan, or [txn.Store.Begin]
 // work — with an error wrapping the context error (matchable via [errors.Is]
 // against [context.Canceled] / [context.DeadlineExceeded]).
 func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]expr.Value) (res *Result, err error) {
+	return e.runInTxSession(ctx, nil, query, params)
+}
+
+// runInTxSession is [Engine.RunInTx] optionally bound to a caller SESSION.
+//
+// A nil session is the engine's own sessionless contract: snapshot isolation, with
+// no promise that a later call observes this commit. A non-nil session publishes the
+// commit's instant onto it, which is what makes the caller's NEXT operation wait for
+// the frontier to reach it (rmp #2329). See [Session].
+func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, float64], query string, params map[string]expr.Value) (res *Result, err error) {
 	defer cmetrics.Time("cypher.RunInTx").Stop()
 	defer func() {
 		if err != nil {
 			cmetrics.IncCounter("cypher.RunInTx.errors", 1)
 		}
 	}()
-	// walTx holds the store's single-writer mutex from Begin() (below) until it
+	// walTx holds the store's writer registration from Begin() (below) until it
 	// is rolled back or handed to the Result for Commit/Rollback in
 	// Result.Close. It is declared here, before the recover boundary registers,
 	// so recoverWriteQueryPanic can roll it back on a panic raised anywhere
-	// after Begin — releasing the single-writer mutex that would otherwise
+	// after Begin — deregistering the writer, which would otherwise
 	// deadlock every future write (ACID atomicity + liveness). On the normal
 	// build-error path the explicit Rollback below still applies.
 	var walTx *txn.Tx[string, float64]
@@ -15573,14 +15694,20 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	// here) pays nothing.
 	undo := &undoLog{}
 
-	// Serialise store-less autocommit writes on the engine writer mutex so they
-	// honour the same single-writer contract an explicit transaction relies on:
+	// Historical note: store-less autocommit writes used to be serialised on the
+	// engine writer mutex so they
+	// honour the same contract an explicit transaction relies on:
 	// without it, a store-less autocommit write could race an open explicit
 	// transaction's writer-mutex hold (#1280 write-write isolation). For a
 	// WAL-backed engine lockWriter is a no-op (Begin below takes the store
 	// mutex), so the lock is taken at most once on either wiring.
-	unlockWriter := e.lockWriter()
-	defer unlockWriter()
+
+	// SHARED hold on the schema lock for the whole statement (rmp #2306). It does not
+	// exclude another writer — that is the point — but it does exclude a DDL, whose
+	// backfill scan and registration must not have a write land between them. See
+	// [Engine.schemaMu] for the index-backfill race that measured.
+	e.schemaMu.RLock()
+	defer e.schemaMu.RUnlock()
 
 	// touched tracks the node keys this statement creates, labels, or strips a
 	// property from, so the commit-time NOT NULL existence check (#1754) re-checks
@@ -15593,7 +15720,7 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 	}
 
 	// The WAL transaction is opened OUTSIDE the visibility barrier: BeginCtx
-	// takes the store's single-writer lock and must not nest under visMu. The
+	// takes the store's writer admission and must not nest under visMu. The
 	// acquire is context-aware: under write contention a caller with a
 	// deadline gets back the context error the instant ctx is cancelled or
 	// expires, instead of blocking on the lock for the holder's full duration
@@ -15618,10 +15745,50 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 		mutator = la
 	}
 
-	r, buildErr := e.execUnderBarrier(ctx, plan, queryReg, params, mutator, buf, undo, walTx, true, e.g.ApplyAtomically, touched)
+	// THE SHARED BRACKET (rmp #2320): concurrent autocommit statements overlap and
+	// are serialised only by the per-object latches guarding each version-chain
+	// head, not by the visibility barrier.
+	//
+	// rmp #2304 made this flip first and had to revert it. Removing the barrier
+	// delivered 15.13x durable write scaling at 32 writers (267 -> 4041 commits/s)
+	// and broke atomic visibility, because the deltas a statement wrote still
+	// resolved their commit record through the graph's AMBIENT slot: every mutator
+	// reached lpg through the public API, which carried no transaction. With two
+	// brackets open the slot names whichever published last, so one statement's
+	// writes landed on two different commit records and a snapshot reader observed
+	// half a transaction — 105 942 torn observations from examples/27_concurrent_txn
+	// and 147 slot overwrites of a still-open transaction.
+	//
+	// rmp #2320 is what made the flip sound: the adapters mutate through
+	// lpg.WriteView, built from the lpg.WriteTx this closure is handed, so every
+	// version of one statement points at ONE commit record and publication stays a
+	// single atomic store however many stores the statement spanned. Exclusion made
+	// the interleaving impossible; versioning makes it unobservable.
+	r, buildErr := e.execUnderBarrier(ctx, plan, queryReg, params, mutator, buf, undo, walTx, true,
+		// Bounded by the caller's context (rmp #2306). The shared hold is uncontended
+		// against other ordinary writes but NOT against the exclusive holders — a DDL
+		// statement, or an explicit transaction holding the barrier across client
+		// think-time — and a writer queued behind one of those used to wait with its
+		// deadline ignored: measured at ten minutes against a 200 ms context.
+		func(apply func(lpg.WriteTx) error) error {
+			// Through the SESSION when the caller has one, so the commit's instant is
+			// recorded and the caller's next read waits for it (rmp #2329). The
+			// sessionless path is byte-identical to what it always did.
+			if sess != nil {
+				return sess.ApplyVersionedCtx(ctx, apply)
+			}
+			return e.g.ApplyVersionedCtx(ctx, apply)
+		}, touched)
 	if buildErr != nil {
 		if walTx != nil {
 			_ = walTx.Rollback()
+		}
+		// A context error here did not come from planning: it is the write bracket's
+		// bounded acquisition reporting that the caller's deadline elapsed while it was
+		// queued behind an exclusive holder (rmp #2306). Wrapping it as "build plan"
+		// would send a reader of the message to the planner for a lock problem.
+		if errors.Is(buildErr, context.Canceled) || errors.Is(buildErr, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("cypher: acquire write bracket: %w", buildErr)
 		}
 		return nil, fmt.Errorf("cypher: build plan: %w", buildErr)
 	}
@@ -15696,22 +15863,53 @@ func (e *Engine) execUnderBarrier(
 	undo *undoLog,
 	walTx *txn.Tx[string, float64],
 	commit bool,
-	applyFn func(func() error) error,
+	applyFn func(func(lpg.WriteTx) error) error,
 	touched *touchedNodes,
 ) (r *Result, buildErr error) {
-	_ = applyFn(func() error {
+	// The bracket's own error is captured, not discarded (rmp #2306). It used to be
+	// `_ =` because the closure always returned nil and the bracket itself could not
+	// fail — every statement error travelled out through r or buildErr instead. That
+	// stopped being true once the acquisition became context-bounded: it can now
+	// return ctx's error WITHOUT running the closure at all, and discarding that
+	// yielded (nil, nil) — a caller told the statement succeeded, handed a nil Result,
+	// and panicking on the first use of it.
+	if bracketErr := applyFn(func(wtx lpg.WriteTx) error {
+		// Hand the statement's own transaction to the adapter before anything
+		// reads or writes through it, so every read the write path makes resolves
+		// through THIS transaction (rmp #2304). The adapters are built before the
+		// bracket opens — they must be, since opening it is what mints the
+		// transaction — so this is the earliest point at which the handle exists.
+		setMutatorWriteTx(mutator, wtx)
+		// The undo log needs the same handle, and for a reason the forward path does
+		// not have: an undo runs when the transaction is DOOMED, and a doomed
+		// transaction refuses further writes — so the replay has to declare itself as
+		// unwinding or every inverse is refused and the rollback applies nothing
+		// (rmp #2320, see lpg.WriteTx.EnterUndo).
+		undo.bindTx(wtx)
 		// Roll the in-memory graph back BEFORE this panic leaves the barrier; see
 		// the type-level note above and replayUndoOnPanic for why this must run
 		// while visMu is still held.
 		defer replayUndoOnPanic(undo)
-		// A view with NO snapshot: the write path applies eagerly and must see its
-		// own not-yet-published work, so it reads the current value. See
-		// lpg/readview.go.
-		walker := &lpgNodeWalker{g: e.g.ReadAt(nil)}
+		// The WRITING TRANSACTION'S OWN view (rmp #2299): as of the instant it
+		// began, plus the versions it has written itself. It applies eagerly and
+		// must see its own not-yet-published work, and until #2299 it got that
+		// by reading the PRESENT (ReadAt(nil)) — correct only while a barrier
+		// guarantees no other writer's uncommitted work can be in the present.
+		// The ts == txID branch of mvcc.Visible is what supplies the same
+		// read-your-own-writes without that guarantee. See lpg/readview.go and
+		// lpg.Graph.beginWrite.
+		//
+		// Resolved from the HANDLE rather than from the graph (rmp #2304). Under
+		// the exclusive barrier the graph's slot always named this statement's own
+		// transaction because there was no other; once two brackets overlap it
+		// names whichever published last, and a write path reading through another
+		// transaction's snapshot sees neither its own work nor a consistent graph.
+		wv := e.g.WriterViewOf(wtx)
+		walker := &lpgNodeWalker{g: wv}
 		// The count-estimate provider (#2083) is consulted only on the read path
 		// (Engine.Run, where labelSrc carries cs); the write-path plan build never
 		// reads it, so cs is left nil here to keep the write path's resolver lean.
-		labelSrc := &lpgLabelResolver{g: e.g.ReadAt(nil)}
+		labelSrc := &lpgLabelResolver{g: wv}
 		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager(), e.maxCollectItems, e.edgeTypeFilterCache,
 			// #2229: the write path resolves `CALL db.*` from the same registry the
 			// read path uses. Shared, not snapshotted — procs.Registry is
@@ -15744,8 +15942,17 @@ func (e *Engine) execUnderBarrier(
 			if cm, ok := mutator.(countMutator); ok {
 				r.cbuf, r.cs = cm.countState()
 			}
+			// The transaction handle, so the WAL commit below can allocate this
+			// transaction's MVCC instant before it fsyncs (rmp #2309). This is the
+			// only scope in which the handle exists.
+			r.mvccG, r.wtx = e.g, wtx
 			r.materialize()
 			r.commitUnderBarrier()
+			// DROP THE HANDLE AT THE BRACKET BOUNDARY. Past this point the
+			// transaction's writeCtx is recycled, so keeping a reference would let a
+			// later path allocate through state another transaction now owns. See
+			// [Result.releaseTxHandle].
+			r.releaseTxHandle()
 			return nil
 		}
 		// Explicit-tx statement: build a read-back-only Result (no buf, no tx, no
@@ -15759,8 +15966,32 @@ func (e *Engine) execUnderBarrier(
 		r.counters = mutatorCounters(mutator)
 		r.materialize()
 		return nil
-	})
+	}); bracketErr != nil {
+		// The bracket never opened, so nothing was applied and there is nothing to
+		// unwind here — the caller's own error path rolls back the WAL transaction it
+		// opened before calling us. Reported as the build error so the statement fails
+		// rather than returning a nil Result with a nil error.
+		return nil, bracketErr
+	}
 	return r, buildErr
+}
+
+// setMutatorWriteTx hands a write adapter the transaction its statement is
+// running as, so every read it makes resolves through that transaction rather
+// than through the graph's ambient slot (rmp #2304).
+//
+// It is a type switch over the two write adapters for the same reason
+// [mutatorCounters] is: those are the only mutators that carry a transaction at
+// all, and a read-only mutator reaching here would have nothing to do with the
+// handle. Silently ignoring anything else is therefore the correct behaviour and
+// not a swallowed error.
+func setMutatorWriteTx(m exec.GraphMutator, wtx lpg.WriteTx) {
+	switch a := m.(type) {
+	case *lpgMutatorAdapter:
+		a.wtx = wtx
+	case *walMutatorAdapter:
+		a.wtx = wtx
+	}
 }
 
 // mutatorCounters returns the write-effect counters carried by a write adapter, or nil
@@ -15807,6 +16038,17 @@ type lpgMutatorAdapter struct {
 	// edge position, reusing the exact read-path mechanism ([edgeHandleAtFwdPos]).
 	// It may be nil (resolution then falls back to a fresh CSR build).
 	bopts *buildOpts
+	// wtx is the write transaction this statement is running as, set by
+	// [setMutatorWriteTx] the moment the bracket opens (rmp #2304). It is what
+	// [lpgMutatorAdapter.EdgeHandleAtPosition] resolves its read through, so the
+	// handle it finds is the one THIS transaction can see — its own uncommitted
+	// instances included, another in-flight writer's excluded.
+	//
+	// The zero value means "no transaction", which reads the present. That is the
+	// right answer for the read-only test stubs that never open a bracket, and the
+	// wrong one inside a bracket, which is why it is set from the closure rather
+	// than defaulted anywhere.
+	wtx lpg.WriteTx
 	// eng is the owning engine, threaded so the adapter can reach the engine's
 	// relationship count-store (#2082, via [lpgMutatorAdapter.cs]) and the lazily-
 	// installed approximate statistics collector (#2097/#2098, via
@@ -15829,7 +16071,7 @@ type lpgMutatorAdapter struct {
 	// stats metadata and the driver's ContainsUpdates need. It is allocated by the
 	// engine when it builds a write adapter and is nil on a read-only adapter, so
 	// every count site is guarded and a read path pays nothing. Plain integers, no
-	// atomics: the write path is single-writer and each operator tree owns one
+	// atomics: each operator tree owns one
 	// adapter (see [exec.QueryCounters]).
 	counters *exec.QueryCounters
 	// countersStore is the inline backing store [Engine] points counters at on the
@@ -15858,6 +16100,19 @@ type lpgMutatorAdapter struct {
 // back-pointer rather than caching it in a field (task #2101); the store is set
 // once at engine construction and never reassigned, so this is byte-identical to
 // the former cached field while saving one adapter word.
+// w returns the graph bound to THIS statement's write transaction — the surface
+// every mutation below goes through (rmp #2320).
+//
+// It is built per call from the two words the adapter already holds, so it costs
+// nothing: [lpg.WriteView] is a value type and does not escape. Building it here
+// rather than caching it in a field is deliberate — [setMutatorWriteTx] installs
+// wtx after the adapter is constructed, so a cached view would be built from the
+// zero transaction and would carry none.
+//
+// A zero wtx yields a view that carries no transaction, which is exactly right
+// for the read-only adapter stubs that never open a bracket.
+func (a *lpgMutatorAdapter) w() lpg.WriteView[string, float64] { return a.g.Writer(a.wtx) }
+
 func (a *lpgMutatorAdapter) cs() *count.Store {
 	if a.eng == nil {
 		return nil
@@ -16009,7 +16264,7 @@ func (a *lpgMutatorAdapter) countIsFresh(n string) bool {
 // rec returns the inverse-recording helper bound to this adapter's graph and
 // undo log.
 func (a *lpgMutatorAdapter) rec() mutationUndo {
-	return mutationUndo{g: a.g, undo: a.undo, touched: a.touched}
+	return mutationUndo{wv: a.w(), undo: a.undo, touched: a.touched}
 }
 
 // resolveID translates n to its stable NodeID, returning graph.NodeID(0)
@@ -16032,7 +16287,7 @@ func (a *lpgMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 	if existed && a.g.IsTombstoned(idBefore) {
 		existed = false
 	}
-	if err := a.g.AddNode(n); err != nil {
+	if err := a.w().AddNode(n); err != nil {
 		return 0, err
 	}
 	id, _ := a.g.AdjList().Mapper().Lookup(n)
@@ -16062,7 +16317,7 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	if !a.g.AdjList().Multigraph() && edgeExisted {
 		return 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
 	}
-	if err := a.g.AddEdge(src, dst, w); err != nil {
+	if err := a.w().AddEdge(src, dst, w); err != nil {
 		return 0, 0, err
 	}
 	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
@@ -16094,7 +16349,7 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	if !a.g.AdjList().Multigraph() && edgeExisted {
 		return 0, 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
 	}
-	handle, err := a.g.AddEdgeH(src, dst, w)
+	handle, err := a.w().AddEdgeH(src, dst, w)
 	if err != nil {
 		return 0, 0, 0, err
 	}
@@ -16137,7 +16392,7 @@ func (a *lpgMutatorAdapter) RemoveEdge(src, dst string) {
 			countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
 		}
 	}
-	a.g.RemoveEdge(src, dst)
+	a.w().RemoveEdge(src, dst)
 	r.recordRemoveEdge(&pre, present)
 }
 
@@ -16148,7 +16403,43 @@ func (a *lpgMutatorAdapter) RemoveEdge(src, dst string) {
 // statement re-adds exactly that instance, not the first slot. The edges-removed
 // counter and undo record are gated on the actual removal result, so a no-op
 // removal (handle already gone / wrong handle) records nothing (rmp #2018).
+// orientHandleEndpoints returns the (src, dst) orientation under which handle is
+// actually stored on the graph, swapping the pair when the caller named it the
+// other way round (rmp #2317).
+//
+// # Why a caller can name it either way
+//
+// A handle identifies ONE LOGICAL EDGE and is orientation-free by construction:
+// csr.BuildReverse gives both directions the same handle. The endpoint keys a
+// caller supplies, by contrast, come from a row's traversal columns — and an
+// undirected pattern over a directed edge (`MATCH (a)-[r]-(b)`) produces a row per
+// direction, so half of them name the storage pair backwards.
+//
+// This mattered the moment the emitted relationship identity became the handle:
+// before, a reverse row carried a forward-CSR position that simply failed to
+// resolve in the swapped orientation and fell back to endpoint matching. Now the
+// handle resolves, so the removal must be applied to the pair that actually holds
+// it. openCypher TCK Delete4 [1] caught it — the reverse row's relationship delete
+// missed, and the node delete on that same row then failed with "cannot delete node
+// with existing relationships".
+//
+// A handle present in neither orientation leaves the pair untouched, so the caller
+// falls through to its existing endpoint-matching behaviour.
+func orientHandleEndpoints(g *lpg.Graph[string, float64], src, dst string, handle uint64) (string, string) {
+	if handle == 0 || g == nil {
+		return src, dst
+	}
+	if g.HasEdgeHandle(src, dst, handle) {
+		return src, dst
+	}
+	if g.HasEdgeHandle(dst, src, handle) {
+		return dst, src
+	}
+	return src, dst
+}
+
 func (a *lpgMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
+	src, dst = orientHandleEndpoints(a.g, src, dst, handle)
 	r := a.rec()
 	var pre removedEdgePreimage
 	if r.active() {
@@ -16166,7 +16457,7 @@ func (a *lpgMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 			countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
 		}
 	}
-	removed := a.g.RemoveEdgeByHandle(src, dst, handle)
+	removed := a.w().RemoveEdgeByHandle(src, dst, handle)
 	if removed {
 		a.countRelDeleted()
 	}
@@ -16187,7 +16478,7 @@ func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) error {
 	// #2212: a label already present is a no-op and counts nothing. Probed
 	// independently of hadLabel, which is gated on the undo recorder being active.
 	labelIsNew := a.counters != nil && !a.g.HasNodeLabel(n, label)
-	if err := a.g.SetNodeLabel(n, label); err != nil {
+	if err := a.w().SetNodeLabel(n, label); err != nil {
 		return err
 	}
 	if labelIsNew {
@@ -16220,7 +16511,7 @@ func (a *lpgMutatorAdapter) RemoveNodeLabel(n, label string) {
 	}
 	// #2212: removing an absent label counts nothing.
 	labelWasPresent := a.counters != nil && a.g.HasNodeLabel(n, label)
-	a.g.RemoveNodeLabel(n, label)
+	a.w().RemoveNodeLabel(n, label)
 	if labelWasPresent {
 		a.countLabelRemoved()
 	}
@@ -16250,7 +16541,7 @@ func (a *lpgMutatorAdapter) RemoveNode(n string) {
 	if wasLive {
 		a.countNodeDeleted()
 	}
-	a.g.RemoveNode(n)
+	a.w().RemoveNode(n)
 	a.rec().recordRemoveNode(n, wasLive)
 }
 
@@ -16273,7 +16564,7 @@ func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	if r.active() || fanout || statsActive {
 		prev, had = a.g.GetNodeProperty(n, key)
 	}
-	if err := a.g.SetNodeProperty(n, key, value); err != nil {
+	if err := a.w().SetNodeProperty(n, key, value); err != nil {
 		return err
 	}
 	a.countPropertySet()
@@ -16317,7 +16608,7 @@ func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) {
 			a.countPropertyRemoved()
 		}
 	}
-	a.g.DelNodeProperty(n, key)
+	a.w().DelNodeProperty(n, key)
 	r.recordDelNodeProperty(n, key, prev, had)
 	if a.buf != nil {
 		ch := index.Change{
@@ -16357,7 +16648,7 @@ func (a *lpgMutatorAdapter) HasEdge(src, dst string) bool {
 func (a *lpgMutatorAdapter) SetEdgeLabel(src, dst, label string) {
 	r := a.rec()
 	hadLabel := r.active() && a.g.HasEdgeLabel(src, dst, label)
-	a.g.SetEdgeLabel(src, dst, label)
+	a.w().SetEdgeLabel(src, dst, label)
 	r.recordSetEdgeLabel(src, dst, label, hadLabel)
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
@@ -16377,7 +16668,7 @@ func (a *lpgMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 	if r.active() {
 		prev, had = a.g.GetEdgeProperty(src, dst, key)
 	}
-	if err := a.g.SetEdgeProperty(src, dst, key, value); err != nil {
+	if err := a.w().SetEdgeProperty(src, dst, key, value); err != nil {
 		return err
 	}
 	a.countPropertySet()
@@ -16408,7 +16699,7 @@ func (a *lpgMutatorAdapter) DelEdgeProperty(src, dst, key string) {
 			a.countPropertyRemoved()
 		}
 	}
-	a.g.DelEdgeProperty(src, dst, key)
+	a.w().DelEdgeProperty(src, dst, key)
 	r.recordDelEdgeProperty(src, dst, key, prev, had)
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
@@ -16453,19 +16744,19 @@ func (a *lpgMutatorAdapter) DecEdgeCreateCount(src, dst string) {
 // RemoveEdgeInstance delegate to the per-instance metadata stores on
 // the underlying [lpg.Graph].
 func (a *lpgMutatorAdapter) SetEdgeLabelAt(src, dst string, idx int64, label string) {
-	a.g.SetEdgeLabelAt(src, dst, idx, label)
+	a.w().SetEdgeLabelAt(src, dst, idx, label)
 }
 func (a *lpgMutatorAdapter) EdgeLabelsAt(src, dst string, idx int64) []string {
 	return a.g.EdgeLabelsAt(src, dst, idx)
 }
 func (a *lpgMutatorAdapter) SetEdgePropertyAt(src, dst string, idx int64, key string, value lpg.PropertyValue) error {
-	return a.g.SetEdgePropertyAt(src, dst, idx, key, value)
+	return a.w().SetEdgePropertyAt(src, dst, idx, key, value)
 }
 func (a *lpgMutatorAdapter) EdgePropertiesAt(src, dst string, idx int64) map[string]lpg.PropertyValue {
 	return a.g.EdgePropertiesAt(src, dst, idx)
 }
 func (a *lpgMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
-	a.g.RemoveEdgeInstance(src, dst, idx)
+	a.w().RemoveEdgeInstance(src, dst, idx)
 }
 
 // SetEdgeLabelByHandle / EdgeLabelsByHandle / SetEdgePropertyByHandle /
@@ -16478,7 +16769,7 @@ func (a *lpgMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
 // there is on the CREATE path (#1686/#1282). The store-less engine has no WAL,
 // so these buffer no transaction op; their durability is the in-memory graph.
 func (a *lpgMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) {
-	a.g.SetEdgeLabelByHandle(src, dst, handle, label)
+	a.w().SetEdgeLabelByHandle(src, dst, handle, label)
 	// Count-store (#2082): SetEdgeLabelByHandle is the single authoritative
 	// once-per-edge typing hook (create_relationship.go also fires SetEdgeLabel and
 	// SetEdgeLabelAt for the same edge; only the by-handle form is counted, so the
@@ -16498,7 +16789,7 @@ func (a *lpgMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint
 	if r.active() && handle != 0 {
 		prev, had = a.g.EdgePropertiesByHandle(src, dst, handle)[key]
 	}
-	if err := a.g.SetEdgePropertyByHandle(src, dst, handle, key, value); err != nil {
+	if err := a.w().SetEdgePropertyByHandle(src, dst, handle, key, value); err != nil {
 		return err
 	}
 	r.recordSetEdgePropertyByHandle(src, dst, handle, key, prev, had)
@@ -16511,23 +16802,25 @@ func (a *lpgMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint
 	if r.active() && handle != 0 {
 		prev, had = a.g.EdgePropertiesByHandle(src, dst, handle)[key]
 	}
-	a.g.DelEdgePropertyByHandle(src, dst, handle, key)
+	a.w().DelEdgePropertyByHandle(src, dst, handle, key)
 	r.recordDelEdgePropertyByHandle(src, dst, handle, key, prev, had)
 }
 func (a *lpgMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {
 	return a.g.EdgePropertiesByHandle(src, dst, handle)
 }
 func (a *lpgMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
-	a.g.RemoveEdgeInstanceByHandle(src, dst, handle)
+	a.w().RemoveEdgeInstanceByHandle(src, dst, handle)
 }
 
-// EdgeHandleAtPosition resolves the bound relationship instance's stable handle
-// from its forward-CSR edge position, reusing the read-path mechanism so the
-// write path identifies the exact same parallel instance reads would. Returns 0
-// when no handle is resolvable; the caller then mutates the per-pair store only.
-func (a *lpgMutatorAdapter) EdgeHandleAtPosition(src, dst string, edgePos uint64) uint64 {
-	return edgeHandleAtFwdPos(a.bopts, a.g.ReadAt(nil), src, dst, edgePos)
-}
+// RecordConstraintInverse appends inv to this statement's undo log so a rollback
+// undoes a constraint-registry change (rmp #2321). It implements the optional
+// journal interface cypher/exec asserts; see cypher/exec/constraint_journal.go for
+// what replaced the whole-graph reseed and why the reseed was unsound under
+// concurrent writers.
+//
+// A nil undo log means this adapter tracks no transaction, so there is nothing to
+// roll back and nothing to record — the same reading undoLog.record itself takes.
+func (a *lpgMutatorAdapter) RecordConstraintInverse(inv func()) { a.undo.record(inv) }
 
 // FirstEdgeHandle resolves the handle on the first src→dst adjacency slot,
 // delegating to [lpg.Graph.FirstEdgeHandle]; used by the MERGE ON MATCH /
@@ -16599,7 +16892,7 @@ func (a *lpgMutatorAdapter) RemoveAllEdgesFrom(n string) {
 	// Snapshot incoming neighbours for directed graphs: outgoing-only bulk
 	// removal won't remove edges pointing at n; those are handled by the
 	// detach_delete caller's InNeighbours loop via individual RemoveEdge calls.
-	a.g.RemoveAllEdgesFrom(n)
+	a.w().RemoveAllEdgesFrom(n)
 }
 
 // OutDegree returns the number of outgoing edges from n.
@@ -16676,6 +16969,10 @@ type walMutatorAdapter struct {
 	// edge position, reusing the exact read-path mechanism ([edgeHandleAtFwdPos]).
 	// It may be nil (resolution then falls back to a fresh CSR build).
 	bopts *buildOpts
+	// wtx is the write transaction this statement is running as; see the field of
+	// the same name on [lpgMutatorAdapter] for what it resolves and why the zero
+	// value is not a usable default inside a bracket (rmp #2304).
+	wtx lpg.WriteTx
 	// eng is the owning engine, threaded so the adapter reaches the relationship
 	// count-store (#2082, via [walMutatorAdapter.cs]) and the lazily-installed
 	// statistics collector (#2097/#2098, via [walMutatorAdapter.statsColl])
@@ -16826,8 +17123,21 @@ func (a *walMutatorAdapter) countIsFresh(n string) bool {
 
 // rec returns the inverse-recording helper bound to this adapter's graph and
 // undo log.
+// w returns the graph bound to THIS statement's write transaction — the surface
+// every mutation below goes through (rmp #2320).
+//
+// It is built per call from the two words the adapter already holds, so it costs
+// nothing: [lpg.WriteView] is a value type and does not escape. Building it here
+// rather than caching it in a field is deliberate — [setMutatorWriteTx] installs
+// wtx after the adapter is constructed, so a cached view would be built from the
+// zero transaction and would carry none.
+//
+// A zero wtx yields a view that carries no transaction, which is exactly right
+// for the read-only adapter stubs that never open a bracket.
+func (a *walMutatorAdapter) w() lpg.WriteView[string, float64] { return a.g.Writer(a.wtx) }
+
 func (a *walMutatorAdapter) rec() mutationUndo {
-	return mutationUndo{g: a.g, undo: a.undo, touched: a.touched}
+	return mutationUndo{wv: a.w(), undo: a.undo, touched: a.touched}
 }
 
 func (a *walMutatorAdapter) resolveID(n string) graph.NodeID {
@@ -16848,7 +17158,7 @@ func (a *walMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 	if existed && a.g.IsTombstoned(idBefore) {
 		existed = false
 	}
-	if err := a.g.AddNode(n); err != nil {
+	if err := a.w().AddNode(n); err != nil {
 		return 0, err
 	}
 	_ = a.tx.AddNode(n) //nolint:errcheck // tx is non-nil; only ErrTxFinished possible, which cannot occur here
@@ -16869,7 +17179,7 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	if !a.g.AdjList().Multigraph() && edgeExisted {
 		return 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
 	}
-	if err := a.g.AddEdge(src, dst, w); err != nil {
+	if err := a.w().AddEdge(src, dst, w); err != nil {
 		return 0, 0, err
 	}
 	_ = a.tx.AddEdge(src, dst, w) //nolint:errcheck // ErrNoWeightCodec cannot occur — store has wcodec via NewEngineWithStore
@@ -16912,7 +17222,7 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	if !a.g.AdjList().Multigraph() && edgeExisted {
 		return 0, 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
 	}
-	handle, err := a.g.AddEdgeH(src, dst, w)
+	handle, err := a.w().AddEdgeH(src, dst, w)
 	if err != nil {
 		return 0, 0, 0, err
 	}
@@ -16954,7 +17264,7 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 			countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
 		}
 	}
-	a.g.RemoveEdge(src, dst)
+	a.w().RemoveEdge(src, dst)
 	_ = a.tx.RemoveEdge(src, dst) //nolint:errcheck // ErrTxFinished impossible here
 	r.recordRemoveEdge(&pre, present)
 }
@@ -16968,6 +17278,7 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 // instance. The edges-removed counter and undo record are gated on the actual
 // removal result (rmp #2018).
 func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
+	src, dst = orientHandleEndpoints(a.g, src, dst, handle)
 	r := a.rec()
 	var pre removedEdgePreimage
 	if r.active() {
@@ -16982,7 +17293,7 @@ func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 			countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
 		}
 	}
-	removed := a.g.RemoveEdgeByHandle(src, dst, handle)
+	removed := a.w().RemoveEdgeByHandle(src, dst, handle)
 	if removed {
 		a.countRelDeleted()
 	}
@@ -17001,7 +17312,7 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 	// #2212: a label already present is a no-op and counts nothing. Probed
 	// independently of hadLabel, which is gated on the undo recorder being active.
 	labelIsNew := a.counters != nil && !a.g.HasNodeLabel(n, label)
-	if err := a.g.SetNodeLabel(n, label); err != nil {
+	if err := a.w().SetNodeLabel(n, label); err != nil {
 		return err
 	}
 	if labelIsNew {
@@ -17033,7 +17344,7 @@ func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) {
 	}
 	// #2212: removing an absent label counts nothing.
 	labelWasPresent := a.counters != nil && a.g.HasNodeLabel(n, label)
-	a.g.RemoveNodeLabel(n, label)
+	a.w().RemoveNodeLabel(n, label)
 	if labelWasPresent {
 		a.countLabelRemoved()
 	}
@@ -17064,7 +17375,7 @@ func (a *walMutatorAdapter) RemoveNode(n string) {
 	if wasLive {
 		a.countNodeDeleted()
 	}
-	a.g.RemoveNode(n)
+	a.w().RemoveNode(n)
 	a.rec().recordRemoveNode(n, wasLive)
 	_ = a.tx.RemoveNode(n) //nolint:errcheck // ErrTxFinished impossible here; not-found is safe to ignore
 }
@@ -17085,7 +17396,7 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	if r.active() || fanout || statsActive {
 		prev, had = a.g.GetNodeProperty(n, key)
 	}
-	if err := a.g.SetNodeProperty(n, key, value); err != nil {
+	if err := a.w().SetNodeProperty(n, key, value); err != nil {
 		return err
 	}
 	a.countPropertySet()
@@ -17127,7 +17438,7 @@ func (a *walMutatorAdapter) DelNodeProperty(n, key string) {
 			a.countPropertyRemoved()
 		}
 	}
-	a.g.DelNodeProperty(n, key)
+	a.w().DelNodeProperty(n, key)
 	r.recordDelNodeProperty(n, key, prev, had)
 	_ = a.tx.DelNodeProperty(n, key) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
@@ -17166,7 +17477,7 @@ func (a *walMutatorAdapter) HasEdge(src, dst string) bool {
 func (a *walMutatorAdapter) SetEdgeLabel(src, dst, label string) {
 	r := a.rec()
 	hadLabel := r.active() && a.g.HasEdgeLabel(src, dst, label)
-	a.g.SetEdgeLabel(src, dst, label)
+	a.w().SetEdgeLabel(src, dst, label)
 	r.recordSetEdgeLabel(src, dst, label, hadLabel)
 	_ = a.tx.SetEdgeLabel(src, dst, label) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
@@ -17187,7 +17498,7 @@ func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 	if r.active() {
 		prev, had = a.g.GetEdgeProperty(src, dst, key)
 	}
-	if err := a.g.SetEdgeProperty(src, dst, key, value); err != nil {
+	if err := a.w().SetEdgeProperty(src, dst, key, value); err != nil {
 		return err
 	}
 	a.countPropertySet()
@@ -17219,7 +17530,7 @@ func (a *walMutatorAdapter) DelEdgeProperty(src, dst, key string) {
 			a.countPropertyRemoved()
 		}
 	}
-	a.g.DelEdgeProperty(src, dst, key)
+	a.w().DelEdgeProperty(src, dst, key)
 	r.recordDelEdgeProperty(src, dst, key, prev, had)
 	_ = a.tx.DelEdgeProperty(src, dst, key) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
@@ -17277,19 +17588,19 @@ func (a *walMutatorAdapter) DecEdgeCreateCount(src, dst string) {
 // recordRemoveEdge re-adds the instance with that handle and restores them
 // (#1327).
 func (a *walMutatorAdapter) SetEdgeLabelAt(src, dst string, idx int64, label string) {
-	a.g.SetEdgeLabelAt(src, dst, idx, label)
+	a.w().SetEdgeLabelAt(src, dst, idx, label)
 }
 func (a *walMutatorAdapter) EdgeLabelsAt(src, dst string, idx int64) []string {
 	return a.g.EdgeLabelsAt(src, dst, idx)
 }
 func (a *walMutatorAdapter) SetEdgePropertyAt(src, dst string, idx int64, key string, value lpg.PropertyValue) error {
-	return a.g.SetEdgePropertyAt(src, dst, idx, key, value)
+	return a.w().SetEdgePropertyAt(src, dst, idx, key, value)
 }
 func (a *walMutatorAdapter) EdgePropertiesAt(src, dst string, idx int64) map[string]lpg.PropertyValue {
 	return a.g.EdgePropertiesAt(src, dst, idx)
 }
 func (a *walMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
-	a.g.RemoveEdgeInstance(src, dst, idx)
+	a.w().RemoveEdgeInstance(src, dst, idx)
 }
 
 // SetEdgeLabelByHandle / EdgeLabelsByHandle / SetEdgePropertyByHandle /
@@ -17309,7 +17620,7 @@ func (a *walMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
 // [lpg.Graph.ApplyAtomically] window and the one transaction the per-pair write
 // uses, so the per-pair and per-handle stores stay atomic together.
 func (a *walMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) {
-	a.g.SetEdgeLabelByHandle(src, dst, handle, label)
+	a.w().SetEdgeLabelByHandle(src, dst, handle, label)
 	_ = a.tx.SetEdgeLabelByHandle(src, dst, handle, label) //nolint:errcheck // ErrTxFinished impossible here
 	// Count-store (#2082): the single authoritative once-per-edge typing hook.
 	if a.cs() != nil {
@@ -17326,7 +17637,7 @@ func (a *walMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint
 	if r.active() && handle != 0 {
 		prev, had = a.g.EdgePropertiesByHandle(src, dst, handle)[key]
 	}
-	if err := a.g.SetEdgePropertyByHandle(src, dst, handle, key, value); err != nil {
+	if err := a.w().SetEdgePropertyByHandle(src, dst, handle, key, value); err != nil {
 		return err
 	}
 	r.recordSetEdgePropertyByHandle(src, dst, handle, key, prev, had)
@@ -17340,7 +17651,7 @@ func (a *walMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint
 	if r.active() && handle != 0 {
 		prev, had = a.g.EdgePropertiesByHandle(src, dst, handle)[key]
 	}
-	a.g.DelEdgePropertyByHandle(src, dst, handle, key)
+	a.w().DelEdgePropertyByHandle(src, dst, handle, key)
 	r.recordDelEdgePropertyByHandle(src, dst, handle, key, prev, had)
 	_ = a.tx.DelEdgePropertyByHandle(src, dst, handle, key) //nolint:errcheck // ErrTxFinished impossible here
 }
@@ -17348,17 +17659,14 @@ func (a *walMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint6
 	return a.g.EdgePropertiesByHandle(src, dst, handle)
 }
 func (a *walMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
-	a.g.RemoveEdgeInstanceByHandle(src, dst, handle)
+	a.w().RemoveEdgeInstanceByHandle(src, dst, handle)
 	_ = a.tx.RemoveEdgeInstanceByHandle(src, dst, handle) //nolint:errcheck // ErrTxFinished impossible here
 }
 
-// EdgeHandleAtPosition resolves the bound relationship instance's stable handle
-// from its forward-CSR edge position, reusing the read-path mechanism so the
-// write path identifies the exact same parallel instance reads would. Returns 0
-// when no handle is resolvable; the caller then mutates the per-pair store only.
-func (a *walMutatorAdapter) EdgeHandleAtPosition(src, dst string, edgePos uint64) uint64 {
-	return edgeHandleAtFwdPos(a.bopts, a.g.ReadAt(nil), src, dst, edgePos)
-}
+// RecordConstraintInverse is [lpgMutatorAdapter.RecordConstraintInverse] for the
+// durable write path. Both adapters implement it because both are reachable write
+// paths and a rolled-back statement must release its reservations either way.
+func (a *walMutatorAdapter) RecordConstraintInverse(inv func()) { a.undo.record(inv) }
 
 // FirstEdgeHandle resolves the handle on the first src→dst adjacency slot,
 // delegating to [lpg.Graph.FirstEdgeHandle]; used by the MERGE ON MATCH /
@@ -17427,7 +17735,7 @@ func (a *walMutatorAdapter) RemoveAllEdgesFrom(n string) {
 		countAllOutEdgesRemoved(a.g, a.cs(), a.countBuf(), n)
 	}
 	// Bulk-remove from the in-memory graph (O(d) instead of O(d²)).
-	a.g.RemoveAllEdgesFrom(n)
+	a.w().RemoveAllEdgesFrom(n)
 }
 
 // OutDegree returns the number of outgoing edges from n.
@@ -17575,14 +17883,55 @@ func ensureFwdCSR(bopts *buildOpts, g *lpg.ReadView[string, float64]) *csr.CSR[f
 		return nil
 	}
 	if bopts == nil {
-		return csr.BuildFromAdjListLive(g.AdjList(), g.LiveNodeFilter())
+		return buildFwdCSRAsOf(g)
 	}
 	if bopts.fwdCSRReady {
 		return bopts.fwdCSR
 	}
-	bopts.fwdCSR = csr.BuildFromAdjListLive(g.AdjList(), g.LiveNodeFilter())
+	bopts.fwdCSR = buildFwdCSRAsOf(g)
 	bopts.fwdCSRReady = true
 	return bopts.fwdCSR
+}
+
+// buildFwdCSRAsOf builds the reconstruction CSR at the READER'S INSTANT.
+//
+// # The wrong answer this closes (rmp #2295)
+//
+// It used to call csr.BuildFromAdjListLive(g.AdjList(), …), and g.AdjList() is
+// ReadView's documented UNVERSIONED escape hatch: it answers from the PRESENT. So
+// the CSR described a different graph from the one whose forward positions it is
+// asked about — Expand minted those at the reader's instant — and a concurrent
+// DELETE of a parallel relationship made the two disagree by one slot.
+//
+// Measured before this change, with a held read transaction:
+//
+//	CREATE (a:A),(b:B),(a)-[:R1]->(b),(a)-[:R2]->(b),(a)-[:R3]->(b)
+//	tx := BeginReadTx();  MATCH (:A)-[r]->(:B) RETURN type(r)  =>  [R1 R2 R3]
+//	another transaction: MATCH (:A)-[r:R3]->(:B) DELETE r
+//	the SAME tx re-runs the same query                         =>  [R1 R2 R1]
+//
+// The row count stays right — the snapshot began before the delete — and the third
+// row's TYPE is a sibling's. The present-time CSR has two slots for the pair, so
+// [edgeInstanceIdxFor] cannot place the third position, the per-instance guard in
+// buildRelationshipValueFromRow declines, and the per-pair union fallback hands
+// pickEdgeType a set whose first member is R1.
+//
+// rmp #2295 had been DOWNGRADED to hygiene on the reasoning that the guard's skew
+// "either declines or stays self-consistent" and "never attributes one instance's
+// type to another". The decline is real and is what saves the CREATE direction; what
+// that reasoning missed is that a decline is not harmless, because the fallback it
+// declines TO picks an arbitrary member of the pair's type union.
+//
+// This is the same instant discipline [csrPairFromGraphAt] already applies, and
+// [csr.BuildFromAdjListAsOf] exists for it; the caller still caches the result per
+// query, so a query reconstructing many relationships builds it once.
+func buildFwdCSRAsOf(g *lpg.ReadView[string, float64]) *csr.CSR[float64] {
+	if snap := g.Snapshot(); snap != nil {
+		return csr.BuildFromAdjListAsOf(g.AdjList(), g.LiveNodeFilter(), snap.StartTS(), snap.TxID())
+	}
+	// No snapshot means the caller reads the present deliberately — a mutation
+	// outside any transaction — and the present is then the right instant.
+	return csr.BuildFromAdjListLive(g.AdjList(), g.LiveNodeFilter())
 }
 
 // nodeIDOrNodeValue extracts a NodeID from a row column. The slot may hold a
@@ -18200,14 +18549,11 @@ func buildShortestPathWithPred(
 		}
 	}
 
-	fwd, rev, pairAt := csrPairCachedForAt(bopts, g)
 	dir := irDirToExec(p.Direction)
 
 	edgeType := ""
-	var etFilter map[uint64]string
 	if len(p.RelTypes) > 0 {
 		edgeType = p.RelTypes[0]
-		etFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts, pairAt)
 	}
 
 	// Translate the IR's "unbounded" sentinel (math.MaxInt) to the operator's
@@ -18218,8 +18564,8 @@ func buildShortestPathWithPred(
 	}
 
 	if p.All {
-		op := exec.NewAllShortestPaths(child, fwd, rev, dir, srcCol, dstCol).
-			WithTypeFilter(edgeType, etFilter).
+		op := exec.NewAllShortestPaths(child, expandAdjacencySource(bopts, g, p.RelTypes), dir, srcCol, dstCol).
+			WithTypeFilter(edgeType).
 			WithHopBounds(p.MinDepth, maxHops).
 			WithOptional(p.Optional)
 		if pathPred != nil {
@@ -18227,8 +18573,8 @@ func buildShortestPathWithPred(
 		}
 		return op, nil
 	}
-	op := exec.NewShortestPath(child, fwd, rev, dir, srcCol, dstCol).
-		WithTypeFilter(edgeType, etFilter).
+	op := exec.NewShortestPath(child, expandAdjacencySource(bopts, g, p.RelTypes), dir, srcCol, dstCol).
+		WithTypeFilter(edgeType).
 		WithHopBounds(p.MinDepth, maxHops).
 		WithOptional(p.Optional)
 	if pathPred != nil {
@@ -18309,8 +18655,6 @@ var _ exec.GraphMutator = (*walMutatorAdapter)(nil)
 func tryFuseCyclicIntersect(
 	p *ir.Expand,
 	child exec.Operator,
-	fwd, rev *csr.CSR[float64],
-	pairAt csrPairKey,
 	g *lpg.ReadView[string, float64],
 	schema map[string]int,
 	bopts *buildOpts,
@@ -18385,16 +18729,15 @@ func tryFuseCyclicIntersect(
 	cfg := &exec.ExpandIntersectConfig{MidCol: midCol, EndCol: endCol}
 	if len(mid.RelTypes) > 0 {
 		cfg.MidEdgeType = mid.RelTypes[0]
-		cfg.MidEdgeTypeFilter = edgeTypeFilterFor(g, fwd, mid.RelTypes, bopts, pairAt)
 	}
 	if len(p.RelTypes) > 0 {
 		cfg.EndEdgeType = p.RelTypes[0]
-		cfg.EndEdgeTypeFilter = edgeTypeFilterFor(g, fwd, p.RelTypes, bopts, pairAt)
 	}
 	for _, name := range mid.SiblingRelVars {
 		if col, okCol := schema[name]; okCol {
 			cfg.RelCols = append(cfg.RelCols, col)
 		}
 	}
-	return exec.NewExpandIntersect(kids[0], fwd, rev, cfg)
+	// Both filters travel with the adjacency, all resolved at execution time.
+	return exec.NewExpandIntersect(kids[0], intersectAdjacencySource(bopts, g, mid.RelTypes, p.RelTypes), cfg)
 }

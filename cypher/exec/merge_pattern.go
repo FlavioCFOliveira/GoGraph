@@ -72,10 +72,11 @@ package exec
 //
 // # Concurrency
 //
-// MergePattern is NOT safe for concurrent use. The engine's single-writer
-// guarantee serialises concurrent MERGE callers so the search-then-create
-// sequence is race-free against other writers, exactly as for
-// [MergeRelationship].
+// MergePattern is NOT safe for concurrent use: one operator tree is driven by one
+// goroutine. Its search-then-create sequence is NOT race-free against other
+// writers — nothing serialises them since rmp #2306 — exactly as for
+// [MergeRelationship]. See [Merge] for the measured behaviour and the
+// uniqueness-constraint remedy.
 //
 // # Atomicity
 //
@@ -956,7 +957,7 @@ func (op *MergePattern) createChain(childRow Row) (binding, error) {
 		}
 		if op.reg != nil {
 			for _, p := range props {
-				if err := op.reg.CheckSetProperty(n.labels, p.key, p.value, op.mgr); err != nil {
+				if err := reserveConstraintValue(op.reg, op.mutator, n.labels, p.key, p.value, op.mgr); err != nil {
 					return nil, fmt.Errorf("exec: MergePattern: ON CREATE %q: %w", n.varName, err)
 				}
 			}
@@ -1193,7 +1194,7 @@ func (op *MergePattern) applyNodeAction(key string, act mergeAction, evalRow Row
 			// as a phantom reservation (#1904).
 			if op.reg != nil {
 				if oldVal, had := op.mutator.NodeProperties(key)[act.key]; had {
-					op.reg.ReleasePropertyValue(op.mutator.NodeLabels(key), act.key, oldVal)
+					releaseConstraintValue(op.reg, op.mutator, op.mutator.NodeLabels(key), act.key, oldVal)
 				}
 			}
 			op.mutator.DelNodeProperty(key, act.key)
@@ -1214,9 +1215,9 @@ func (op *MergePattern) applyNodeAction(key string, act mergeAction, evalRow Row
 		// own duplicate. UNIQUE guarantees at most one holder, so releasing first
 		// cannot mask a real cross-node duplicate.
 		if oldVal, had := op.mutator.NodeProperties(key)[act.key]; had {
-			op.reg.ReleasePropertyValue(labels, act.key, oldVal)
+			releaseConstraintValue(op.reg, op.mutator, labels, act.key, oldVal)
 		}
-		if err := op.reg.CheckSetProperty(labels, act.key, v, op.mgr); err != nil {
+		if err := reserveConstraintValue(op.reg, op.mutator, labels, act.key, v, op.mgr); err != nil {
 			return err
 		}
 	}

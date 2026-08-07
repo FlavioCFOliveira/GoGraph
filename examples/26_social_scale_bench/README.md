@@ -589,7 +589,7 @@ go run ./examples/26_social_scale_bench \
 | `csr.runs_ordered` | the #2141 invariant, asserted live. The run **fails** if false |
 | `csr.order` / `csr.size` | vertices and arcs in the snapshot the queries traverse |
 | `csr.bytes` / `csr.bytes_per_arc` | snapshot footprint. Three `uint64` arrays, so ~8 B/arc is the floor |
-| `csr.has_handles` | whether a handle column exists (`false` for plain `AddEdge`) |
+| `csr.has_handles` | whether a handle column exists (always `true`: every edge slot carries a stable identity) |
 | `degree.measured` | **which** degree is reported — `FRIEND+LIKE combined`, because a CSR run carries both types and has no type information |
 | `degree.expected_range` | the range the generator can produce; the run **fails** if the measurement escapes it |
 | `degree.min` / `max` / `mean` / `p50` / `p99` | the realised distribution |
@@ -635,7 +635,7 @@ csr.size=5993585
 csr.runs_ordered=true
 csr.bytes=46.67 MiB
 csr.bytes_per_arc=8.2
-csr.has_handles=false
+csr.has_handles=true
 degree.threshold=16
 degree.sources=100000
 degree.min=20

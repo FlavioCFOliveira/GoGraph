@@ -15,6 +15,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 	"github.com/FlavioCFOliveira/GoGraph/internal/clock"
 )
 
@@ -50,6 +51,19 @@ type Session struct {
 
 	// eng is the Cypher engine that executes queries.
 	eng *cypher.Engine
+
+	// csess is this CONNECTION's Cypher session (rmp #2329).
+	//
+	// A Bolt connection IS a session by definition — one client, one ordered
+	// conversation — so it gets the read-your-own-writes guarantee: a statement run
+	// here observes every commit this connection has already made, even when an
+	// unrelated in-flight commit is holding the visible frontier back.
+	//
+	// Without it the engine's sessionless contract applies, which is correct snapshot
+	// isolation but lets a client that writes and then reads miss its own write
+	// (rmp #2328). It is per connection and never shared, which is what keeps one
+	// client from waiting on another's commits.
+	csess *cypher.Session
 
 	// result is the open streaming cursor, non-nil only in STREAMING or
 	// TX_STREAMING states.
@@ -264,6 +278,7 @@ func newSession(eng *cypher.Engine, auth AuthHandler, localAddr string) *Session
 	return &Session{
 		id:                 randomID(),
 		eng:                eng,
+		csess:              eng.NewSession(),
 		auth:               auth,
 		state:              StateNegotiation,
 		localAddr:          localAddr,
@@ -1153,7 +1168,7 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 		// RunInTxAny would block a read-only session behind any open explicit
 		// write transaction, violating the 'readers do not block writers where
 		// avoidable' mandate (task #1432).
-		result, runErr = s.eng.RunAny(runCtx, m.Query, params)
+		result, runErr = s.csess.RunAny(runCtx, m.Query, params)
 	}
 
 	next, transErr := Transition(s.state, m, runErr == nil)
@@ -1547,7 +1562,7 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 	// the effective timeout. BeginTx acquires the engine writer serialisation; a
 	// failure here (e.g. an already-cancelled context) leaves the session in
 	// READY with no open transaction.
-	tx, err := newTx(ctx, s.eng, mode, effective)
+	tx, err := newTx(ctx, s.eng, s.csess, mode, effective)
 	if err != nil {
 		// newTx failed before acquiring any resources (s.tx is still nil), so
 		// enterFailed has no transaction to reclaim here; it is used for the single
@@ -1891,6 +1906,15 @@ func (s *Session) sanitiseErr(err error) string {
 	// the tripped cap) — replacing them with the generic internal-error text
 	// would break debuggability without protecting anything internal.
 	if isClientFaultErr(err) {
+		return err.Error()
+	}
+	// An MVCC write-write conflict is not a client fault and not an internal
+	// error: it is the expected outcome of two transactions colliding, and the
+	// client's driver is going to RETRY it. Its message names the store the
+	// collision was detected in and nothing else — no timestamps, no ids, no
+	// internal state — so forwarding it costs no disclosure and gives an operator
+	// reading driver logs the one fact worth having (rmp #2300).
+	if errors.Is(err, mvcc.ErrSerializationConflict) {
 		return err.Error()
 	}
 	// All other errors (internal engine, storage, unexpected): generic + session ID.

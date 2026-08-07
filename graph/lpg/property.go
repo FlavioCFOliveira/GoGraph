@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
 
 // PropertyKind tags a [PropertyValue] with its underlying Go type.
@@ -283,13 +284,13 @@ func (r *PropertyKeyRegistry) Resolve(id PropertyKeyID) (string, bool) {
 // error returned by the installed [SchemaValidator].
 func (g *Graph[N, W]) SetNodeProperty(n N, key string, value PropertyValue) error {
 	err := g.setNodePropertyInfo(n, key, value, nil)
-	g.reclaimAfterDirectWrite()
+	g.reclaimAfterDirectWrite(nil)
 	return err
 }
 
 // setNodePropertyInfo is [Graph.SetNodeProperty] with an explicit commit
 // record; info is nil for an autocommit write. See [Graph.setNodeLabelInfo].
-func (g *Graph[N, W]) setNodePropertyInfo(n N, key string, value PropertyValue, info *commitInfo) error {
+func (g *Graph[N, W]) setNodePropertyInfo(n N, key string, value PropertyValue, tx *writeCtx) error {
 	if v := g.validator.load(); v != nil {
 		if err := v.Validate(key, value); err != nil {
 			return err
@@ -313,12 +314,36 @@ func (g *Graph[N, W]) setNodePropertyInfo(n N, key string, value PropertyValue, 
 	// for the same reason the label path guards on has().
 	if g.propDeltasEnabled() {
 		prev, had := bag.get(keyID)
+		// The conflict test runs UNCONDITIONALLY, and that is the fix for rmp #2324.
+		//
+		// It used to sit behind a `record` guard — skipped when the value being
+		// written already equalled the stored one — on the reasoning that "only a
+		// write that RECORDS a version can conflict". That reasoning compares the
+		// incoming value against the LIVE stored value, and a stale writer's value
+		// can equal it by arithmetic coincidence, which is exactly what a lost
+		// update looks like: A reads 1 and writes 2; B, whose snapshot also says 1,
+		// computes 2 as well; B's write is judged a no-op against the now-stored 2,
+		// the conflict test is skipped, no version is recorded, and B's statement
+		// reports SUCCESS having applied nothing. Measured at 400 concurrent
+		// increments producing a final value of 216, with one value written by five
+		// different successful statements.
+		//
+		// Testing the head first cannot reintroduce the abort the guard was added to
+		// prevent. MERGE's MATCH branch re-asserts a property it just read, so the
+		// head it re-asserts over is visible to its own transaction and does not
+		// conflict; a head that is NOT visible means another transaction changed the
+		// object underneath, and refusing that is the correct answer rather than an
+		// unwanted one.
+		if head := s.headStamp(id); tx.conflicts(head) {
+			s.mu.Unlock()
+			return tx.conflictErr(mvcc.StoreNodeProperties, head)
+		}
 		switch {
 		case !had:
-			ci, ts := g.deltaStamp(info)
+			ci, ts := g.deltaStamp(tx.record())
 			s.pushPropDelta(id, undoDelProp, keyID, PropertyValue{}, ci, ts, &g.propDeltaActive)
 		case !propValuesDefinitelyEqual(prev, value):
-			ci, ts := g.deltaStamp(info)
+			ci, ts := g.deltaStamp(tx.record())
 			s.pushPropDelta(id, undoSetProp, keyID, prev, ci, ts, &g.propDeltaActive)
 		}
 	}
@@ -352,12 +377,12 @@ func (g *Graph[N, W]) GetNodeProperty(n N, key string) (PropertyValue, bool) {
 // DelNodeProperty removes the named property from n. No-op if absent.
 func (g *Graph[N, W]) DelNodeProperty(n N, key string) {
 	g.delNodePropertyInfo(n, key, nil)
-	g.reclaimAfterDirectWrite()
+	g.reclaimAfterDirectWrite(nil)
 }
 
 // delNodePropertyInfo is [Graph.DelNodeProperty] with an explicit commit
 // record; info is nil for an autocommit write. See [Graph.setNodeLabelInfo].
-func (g *Graph[N, W]) delNodePropertyInfo(n N, key string, info *commitInfo) {
+func (g *Graph[N, W]) delNodePropertyInfo(n N, key string, tx *writeCtx) {
 	id, ok := g.adj.Mapper().Lookup(n)
 	if !ok {
 		return
@@ -374,7 +399,15 @@ func (g *Graph[N, W]) delNodePropertyInfo(n N, key string, info *commitInfo) {
 		// records the pre-image so a reader can restore it.
 		if g.propDeltasEnabled() {
 			if prev, had := bag.get(keyID); had {
-				ci, ts := g.deltaStamp(info)
+				// See setNodePropertyInfo; delNodePropertyInfo cannot return, so
+				// the conflict is recorded on the transaction and commit
+				// refuses it. See [writeCtx.conflictErr].
+				if head := s.headStamp(id); tx.conflicts(head) {
+					_ = tx.conflictErr(mvcc.StoreNodeProperties, head)
+					s.mu.Unlock()
+					return
+				}
+				ci, ts := g.deltaStamp(tx.record())
 				s.pushPropDelta(id, undoSetProp, keyID, prev, ci, ts, &g.propDeltaActive)
 			}
 		}

@@ -382,23 +382,46 @@ type Options[N comparable, W any] struct {
 	Codec Codec[N]
 	// WeightCodec serialises edge weights. Must not be nil.
 	WeightCodec WeightCodec[W]
+	// ResumeTxnSeq is the transaction sequence this store continues FROM: the
+	// first transaction it commits is assigned ResumeTxnSeq+1.
+	//
+	// # Why it is needed (rmp #2302, audit finding E5)
+	//
+	// The sequence groups a transaction's frames so recovery can apply them
+	// atomically, and recovery decoded it while nothing ever wrote it back. A
+	// store reopened on a non-empty WAL therefore restarted at 0 and minted 1
+	// again, so ONE WAL could hold two different transactions under one sequence
+	// number. Recovery's TxnSeq-suffix filter tolerated that only because frame
+	// contiguity plus equality happened to disambiguate it — an accident, not a
+	// guarantee, and one that stops holding the moment a reopen follows a torn
+	// tail.
+	//
+	// # Why it is DERIVED and not persisted
+	//
+	// Set it from [store/recovery.Result.MaxTxnSeq], which is the highest
+	// sequence any replayed v3 frame carried. The WAL already records the
+	// sequence in every frame, so a separate durable counter would be a second
+	// source of truth that can disagree with the log — the same reasoning
+	// rmp #2309 applies to the MVCC clock. Zero, the value every fresh store
+	// carries, starts at 1 as before.
+	ResumeTxnSeq uint64
 }
 
 // Store bundles an [lpg.Graph] with a [wal.Writer] and the single-
 // writer lock that serialises transactions.
 //
 // Concurrency: any number of goroutines may call Begin/BeginCtx;
-// transactions serialise on a single-writer semaphore, so only one Tx is
+// transactions no longer serialise on a semaphore, so more than one Tx is
 // active at any moment. Reads on the underlying lpg.Graph remain
 // concurrent and lock-free per the lpg/adjlist contracts.
-// [Store.RunUnderCommitLock] runs a closure while holding that same
-// commit semaphore, so a background checkpointer can exclude the commit
-// window while it snapshots and truncates the WAL.
+// [Store.RunUnderCommitLock] is the one thing that DOES exclude writers: it
+// closes the admission gate and drains the admitted writers to zero, so a
+// background checkpointer can quiesce the store while it snapshots and
+// truncates the WAL.
 //
-// The single-writer lock is a buffered channel of capacity one used as a
-// binary semaphore rather than a [sync.Mutex], so the acquire is
-// cancellable: [Store.BeginCtx] selects the acquire against ctx.Done() and
-// returns the context error without blocking for the holder's full
+// Admission is cancellable, which is the property a deadline-bearing caller
+// needs: [Store.BeginCtx] waits on the current quiesce against ctx.Done() and
+// returns the context error without blocking for the quiesce's full
 // duration. A [sync.Mutex] cannot honour a deadline while it is contended;
 // the semaphore can, which is what makes the engine write path
 // ([cypher.Engine.RunInTx]) respect a caller's deadline under write
@@ -427,7 +450,7 @@ type Store[N comparable, W any] struct {
 	// the append path that fills the next group-commit batch.
 	//
 	// The entry count is bounded by the number of in-flight committers, which the
-	// single-writer semaphore and the in-flight counter already bound; each entry
+	// admission accounting already bounds; each entry
 	// is removed by the successor's wake or consumed by its own fast path.
 	applyWaiters map[uint64]chan struct{}
 
@@ -436,12 +459,26 @@ type Store[N comparable, W any] struct {
 
 	inflightCond *sync.Cond
 
-	// sem is the single-writer semaphore: a buffered channel of capacity
-	// one. A send acquires the writer (Begin / BeginCtx / RunUnderCommitLock);
-	// a receive releases it (Tx.release / RunUnderCommitLock's defer). It is
-	// allocated once at construction ([newStore]); a zero-value Store is not
-	// usable. See [Store.acquire] / [Store.release].
-	sem chan struct{}
+	// quiesceDone is the WRITER-ADMISSION GATE, and it is the whole of what
+	// replaced the single-writer semaphore (rmp #2306).
+	//
+	// nil is the steady state: writers are admitted freely and concurrently, so
+	// nothing here serialises independent transactions. It is non-nil only while a
+	// quiesce ([Store.RunUnderCommitLock]) is in progress, and is closed when that
+	// quiesce ends, which wakes every writer parked in [Store.enterWriter].
+	//
+	// The distinction from the semaphore it replaced matters. That semaphore did
+	// two unrelated jobs with one primitive: it serialised writers (concurrency
+	// control, which MVCC now owns outright) and it doubled as the quiesce
+	// boundary. Keeping only the second job makes this a genuine quiesce
+	// primitive — a barrier that is closed only when somebody actually needs the
+	// store still — and it costs an admitted writer nothing beyond the in-flight
+	// registration it already performed.
+	//
+	// Guarded by inflightMu, which also guards inflight, so closing the gate and
+	// reading the in-flight count are one atomic step: that is what makes the
+	// drain sound.
+	quiesceDone chan struct{}
 
 	// maxTxnOps is the per-transaction op cap enforced in the commit/append
 	// path: a transaction buffering more than this many ops is rejected with
@@ -468,53 +505,56 @@ type Store[N comparable, W any] struct {
 	// Commit/CommitWALOnly increments it once and stamps the
 	// value into every v3 op frame and the trailing [OpCommit] marker, so
 	// recovery can group a transaction's frames and apply them atomically.
-	// It is incremented only while the single-writer semaphore is held (the
-	// lock acquired in Begin), so the atomic type is for safe publication
-	// rather than contended access.
+	// Concurrent committers increment it at the same time since rmp #2306, so the
+	// atomic type carries genuine contended access and is no longer merely for
+	// safe publication. Add is what makes the sequence space dense and unique
+	// without any lock, which is the property the apply gate needs
+	// ([Tx.waitApplyTurn]).
 	txnSeq atomic.Uint64
 
+	// inflight counts ADMITTED WRITERS: incremented in [Store.enterWriter] when a
+	// transaction is admitted at Begin, decremented in [Store.exitWriter] when its
+	// Commit / CommitWALOnly / Rollback has entirely finished (past SyncGroup and
+	// the apply gate). It therefore covers a transaction's WHOLE lifetime.
+	//
+	// That is one window, where there used to be two abutting ones: the semaphore
+	// covered Begin through the append, and this counter covered the append through
+	// the end of the commit. A quiesce needed both, and needed them to abut
+	// exactly. Merging them removes the seam rather than reasoning about it.
 	inflight int
 
 	// --- group-commit apply gate (#1507) ---
 	//
-	// Group commit releases the single-writer semaphore after a transaction's
-	// frames are appended (so the next transaction can append while this one
-	// fsyncs), and the fsync itself is coalesced across committers by
+	// Committers overlap freely and the fsync is coalesced across them by
 	// [wal.Writer.SyncGroup]. But [Tx.Commit]'s post-durability in-memory apply
-	// ([applyOp] under [lpg.Graph.ApplyAtomically]) must still run in
+	// ([applyOp] under [lpg.Graph.ApplyVersioned], rmp #2320) must still run in
 	// transaction-sequence order: applying a higher-seq transaction before a
 	// lower-seq one could materialise an op against a node a not-yet-applied
 	// earlier transaction was to create (lpg property writes are
 	// create-on-demand), letting a [lpg.Graph.View] reader observe a state no
 	// serial schedule produces — a Consistency/Isolation regression. The apply
-	// gate restores that order WITHOUT holding the append semaphore across the
+	// gate restores that order WITHOUT serialising the commit path around the
 	// fsync: a committer waits until appliedSeq == its seq-1, applies, then
-	// advances appliedSeq and wakes the next committer.
+	// advances appliedSeq and wakes the next committer. rmp #2306 tried to remove
+	// it and MEASURED that it cannot be: see
+	// [TestApplyGate_ADurableCommitIsNeverRefusedByConflictDetection].
 	//
 	// applyMu guards appliedSeq and applyWaiters.
 	applyMu sync.Mutex
 
-	// --- in-flight commit tracker (#1507 quiesce boundary) ---
+	// --- quiesce boundary (#1507, reshaped by rmp #2306) ---
 	//
-	// Group commit releases the single-writer semaphore after the append phase
-	// but BEFORE the coalesced fsync ([wal.Writer.SyncGroup]) and the
-	// sequence-ordered apply. The semaphore therefore no longer bounds the
-	// in-flight-fsync window, but [Store.RunUnderCommitLock] — the seam
+	// A committer's fsync ([wal.Writer.SyncGroup]) and its sequence-ordered apply
+	// run after the WAL append, and [Store.RunUnderCommitLock] — the seam
 	// [store.DB] and a checkpointer use to exclude the commit path while they
-	// close or truncate the WAL — relied on the semaphore bounding it. Without a
-	// separate tracker, RunUnderCommitLock could acquire the semaphore while a
-	// committer is parked inside SyncGroup, and the caller's fn (e.g. wal.Close)
-	// would then race that in-flight flush+fsync, making un-acknowledged frames
-	// durable (an acked != durable violation).
+	// close or truncate the WAL — must exclude all of it, not just the append.
 	//
-	// inflight counts committers that have released the semaphore but not yet
-	// finished their SyncGroup + apply. A committer increments it WHILE STILL
-	// HOLDING the semaphore (in markInflight, before releaseAfterAppend), so
-	// once the semaphore is free the increment is already visible to a
-	// RunUnderCommitLock that then acquires it; the committer decrements (and
-	// broadcasts when reaching zero) only after its entire commit finishes
-	// (doneInflight). The increment MUST happen-before the release; reversing
-	// them reopens the race.
+	// It does that with the admission gate (quiesceDone) and the admitted-writer
+	// count (inflight), both guarded by inflightMu: close the gate so no new
+	// writer is admitted, then drain the count to zero so every admitted one has
+	// finished. Until rmp #2306 the first half was the capacity-one semaphore,
+	// which excluded new writers only as a side effect of serialising every
+	// write.
 	inflightMu sync.Mutex
 }
 
@@ -567,7 +607,6 @@ func NewStoreWithCodec[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer
 func NewStoreWithCodecCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer, codec Codec[N], maxTxnOps int) *Store[N, W] {
 	defer metrics.Time("store.txn.NewStoreWithCodecCapped").Stop()
 	s := &Store[N, W]{
-		sem:       make(chan struct{}, 1),
 		g:         g,
 		wal:       wlog,
 		codec:     codec,
@@ -613,13 +652,25 @@ func NewStoreWithOptions[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writ
 func NewStoreWithOptionsCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer, opts Options[N, W], maxTxnOps int) *Store[N, W] {
 	defer metrics.Time("store.txn.NewStoreWithOptionsCapped").Stop()
 	s := &Store[N, W]{
-		sem:       make(chan struct{}, 1),
 		g:         g,
 		wal:       wlog,
 		codec:     opts.Codec,
 		wcodec:    opts.WeightCodec,
 		maxTxnOps: resolveMaxTxnOps(maxTxnOps),
 	}
+	// Resume rather than restart, so a sequence already spent in this WAL is
+	// never minted a second time. See [Options.ResumeTxnSeq].
+	//
+	// The apply gate has to be seeded TOO, and the reason is a deadlock this test
+	// found rather than a tidiness argument: waitApplyTurn parks until
+	// appliedSeq == seq-1, and the predecessor of a resumed store's FIRST
+	// transaction was applied by the previous store instance, which no longer
+	// exists to advance anything. Left at zero, the first commit after a resume
+	// waits for a sequence nobody will ever complete. Seeding both makes the
+	// resumed store's first transaction its own chain head, exactly as sequence 1
+	// is for a fresh store.
+	s.txnSeq.Store(opts.ResumeTxnSeq)
+	s.appliedSeq = opts.ResumeTxnSeq
 	s.applyWaiters = make(map[uint64]chan struct{}, 64)
 	s.inflightCond = sync.NewCond(&s.inflightMu)
 	return s
@@ -651,48 +702,85 @@ func (s *Store[N, W]) MaxTxnOps() int { return s.maxTxnOps }
 // atomic, but may observe a multi-operation transaction half-applied — for
 // example the edge of an edge-plus-labels write before its endpoint labels.
 // An embedding application that reads this graph concurrently with committing
-// transactions must therefore wrap its reads in [lpg.Graph.View] to obtain the
-// no-partial-transaction guarantee; writes go through the [Tx] API, which
-// applies them under the same [lpg.Graph.ApplyAtomically] barrier.
+// transactions must therefore take an MVCC SNAPSHOT for its reads
+// ([lpg.Graph.BeginRead] plus [lpg.Graph.ReadAt]) to obtain the
+// no-partial-transaction guarantee; writes go through the [Tx] API, which applies
+// them under [lpg.Graph.ApplyVersioned] and publishes each transaction with one
+// atomic store into its shared commit record. [lpg.Graph.View] does NOT provide
+// that guarantee since rmp #2320 — it is the schema barrier and an ordinary write
+// holds it shared.
 //
 // See the lpg package documentation and docs/isolation-design.md for the full
-// opt-in contract and the tracked lock-free per-shard snapshot that will make
-// every read transaction-consistent without the barrier.
+// contract.
+//
+// (This used to end "and the tracked lock-free per-shard snapshot that will make every
+// read transaction-consistent without the barrier". That work is not tracked and will
+// not happen: rmp #2051's single atomically-published root was closed as SUPERSEDED in
+// sprint 334 — per-object version chains deliver the same guarantee and are what both
+// reference engines do. Every read IS transaction-consistent without the barrier
+// already, by carrying an instant. rmp #2314.)
 func (s *Store[N, W]) Graph() *lpg.Graph[N, W] { return s.g }
 
-// acquire takes the single-writer semaphore, honouring ctx. It first
-// fails fast if ctx is already done (so an already-cancelled caller never
-// acquires even when the semaphore is free — the select below would
-// otherwise pick a ready case pseudo-randomly), then blocks on a send into
-// the capacity-one channel, racing it against ctx.Done(). On cancellation
-// it returns ctx.Err() WITHOUT having acquired, so there is nothing to
-// release. A nil return means the writer is held and the caller must
-// eventually call [Store.release] exactly once.
-func (s *Store[N, W]) acquire(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	select {
-	case s.sem <- struct{}{}:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+// enterWriter admits a writer and registers it as in-flight, honouring ctx.
+//
+// In the steady state — no quiesce in progress — it does NOT block: any number of
+// writers are admitted concurrently, which is the point of retiring the
+// single-writer semaphore (rmp #2306). It blocks only while a
+// [Store.RunUnderCommitLock] has the admission gate closed, and it honours the
+// caller's deadline throughout, which is the property the old cancellable
+// semaphore acquire existed to provide (rmp #2174).
+//
+// The wait costs no goroutine: a parked writer selects on the current quiesce's
+// done channel against ctx.Done(). The loop re-checks under the mutex after each
+// wake because a second quiesce may have started in between; closing the gate is
+// not the same as holding it.
+//
+// A nil return means the writer is registered and the caller MUST call
+// [Store.exitWriter] exactly once.
+func (s *Store[N, W]) enterWriter(ctx context.Context) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		s.inflightMu.Lock()
+		if s.quiesceDone == nil {
+			s.inflight++
+			s.inflightMu.Unlock()
+			return nil
+		}
+		done := s.quiesceDone
+		s.inflightMu.Unlock()
+		metrics.IncCounter("store.txn.enterWriter.blocked", 1)
+		select {
+		case <-done:
+		case <-ctx.Done():
+			metrics.IncCounter("store.txn.enterWriter.errors", 1)
+			return ctx.Err()
+		}
 	}
 }
 
-// release frees the single-writer semaphore. It must be called exactly
-// once for every successful [Store.acquire]; calling it without a prior
-// successful acquire would let a second writer in and break mutual
-// exclusion. The receive cannot block: the channel holds exactly one token
-// while the writer is held.
-func (s *Store[N, W]) release() { <-s.sem }
+// exitWriter deregisters an admitted writer, waking a draining quiesce when the
+// count reaches zero. It must be called exactly once for every successful
+// [Store.enterWriter]; an unpaired call would let a quiesce believe the store is
+// still while a transaction is running.
+func (s *Store[N, W]) exitWriter() {
+	s.inflightMu.Lock()
+	s.inflight--
+	if s.inflight == 0 {
+		s.inflightCond.Broadcast()
+	}
+	s.inflightMu.Unlock()
+}
 
 // RunUnderCommitLock runs fn while holding the store's single-writer
 // commit lock — the SAME semaphore [Store.Begin] acquires and
 // [Tx.Commit]/[Tx.CommitWALOnly]/[Tx.Rollback] release. While fn runs no
 // transaction can be between Begin and its commit/rollback: neither a new
-// in-memory apply (the [lpg.Graph.ApplyAtomically] window opened inside a
-// transaction) nor a new WAL frame append can race fn.
+// in-memory apply (the [lpg.Graph.ApplyVersioned] window opened inside a
+// transaction) nor a new WAL frame append can race fn. Since rmp #2320 that
+// exclusion rests on THIS lock plus the in-flight drain and no longer on visMu,
+// because an ordinary write holds visMu shared.
 //
 // This is the serialisation seam a background checkpointer needs to take a
 // consistent snapshot and truncate the WAL atomically against the commit
@@ -706,67 +794,59 @@ func (s *Store[N, W]) release() { <-s.sem }
 // or open a transaction on this store (the lock is not re-entrant — that
 // would deadlock). fn MAY read the graph through [lpg.Graph.View]; the
 // resulting lock order is store-lock → visMu, which matches the engine's own
-// order (Begin acquires the store lock, then ApplyAtomically acquires visMu),
-// so no new deadlock is introduced. fn's error is returned unwrapped.
+// order (Begin acquires the store lock, then ApplyVersioned acquires visMu
+// shared), so no new deadlock is introduced. fn's error is returned unwrapped.
 //
 // Concurrency: safe to call from any goroutine; it serialises against every
 // transaction on the store.
 func (s *Store[N, W]) RunUnderCommitLock(fn func() error) error {
 	defer metrics.Time("store.txn.RunUnderCommitLock").Stop()
-	// acquire(context.Background()) cannot fail, so the held token is
-	// guaranteed and the deferred release is always paired with it.
-	_ = s.acquire(context.Background())
-	defer s.release()
-	// Drain in-flight group commits before running fn. Holding the semaphore
-	// excludes any NEW commit from appending and bumping inflight; once the
-	// semaphore is held, every committer that already released it has its
-	// inflight increment visible (the increment happens-before the release).
-	// Waiting for inflight==0 therefore guarantees no SyncGroup (flush+fsync)
-	// is in flight when fn (e.g. wal.Close / wal.Truncate) runs, restoring the
-	// quiesce boundary the semaphore alone no longer provides under group
-	// commit. The wait is uncancellable, matching the acquire above.
-	s.drainInflight()
-	return fn()
-}
-
-// markInflight registers a committer as in-flight (past the append phase,
-// pending its SyncGroup + apply). It MUST be called while the single-writer
-// semaphore is still held, immediately before [Tx.releaseAfterAppend], so the
-// increment happens-before the release and is visible to any
-// [Store.RunUnderCommitLock] that subsequently acquires the semaphore.
-func (s *Store[N, W]) markInflight() {
 	s.inflightMu.Lock()
-	s.inflight++
-	s.inflightMu.Unlock()
-}
-
-// doneInflight clears the in-flight registration of a committer that has
-// finished its entire commit (SyncGroup returned and the apply gate advanced).
-// It broadcasts when the count reaches zero so a draining
-// [Store.RunUnderCommitLock] is woken. It must be called exactly once for every
-// [Store.markInflight].
-func (s *Store[N, W]) doneInflight() {
-	s.inflightMu.Lock()
-	s.inflight--
-	if s.inflight == 0 {
-		s.inflightCond.Broadcast()
+	// Two quiesces must not overlap: fn is a store-wide operation (wal.Close,
+	// wal.Truncate, a snapshot capture) and running two concurrently is exactly
+	// what the old capacity-one semaphore prevented as a side effect of
+	// serialising everything. Wait for any in-progress quiesce to finish and then
+	// re-check, because another waiter may win the gate first.
+	for s.quiesceDone != nil {
+		waitFor := s.quiesceDone
+		s.inflightMu.Unlock()
+		<-waitFor
+		s.inflightMu.Lock()
 	}
+	// CLOSE THE GATE, then drain — both under the one mutex that guards them, so
+	// no writer can be admitted between the two. Closing the gate stops NEW
+	// writers; draining to zero waits out the ones already admitted, including
+	// every committer inside a SyncGroup flush+fsync. Only then can fn touch the
+	// WAL. The drain is uncancellable, as the semaphore acquire it replaces was.
+	done := make(chan struct{})
+	s.quiesceDone = done
+	s.drainInflight()
 	s.inflightMu.Unlock()
+
+	err := fn()
+
+	// Reopen the gate BEFORE waking the parked writers. In the other order a woken
+	// writer re-checks, still sees a non-nil gate, and parks again on a channel
+	// that is already closed — a busy spin instead of an admission.
+	s.inflightMu.Lock()
+	s.quiesceDone = nil
+	s.inflightMu.Unlock()
+	close(done)
+	return err
 }
 
-// drainInflight blocks until no group commit is in flight. The caller must hold
-// the single-writer semaphore so no new commit can start; the wait is
-// uncancellable.
+// drainInflight blocks until no admitted writer remains. The caller must hold
+// inflightMu AND have already closed the admission gate (quiesceDone != nil), or
+// a newly admitted writer would make the count rise again after it reached zero
+// and the drain would prove nothing. The wait is uncancellable.
 func (s *Store[N, W]) drainInflight() {
-	s.inflightMu.Lock()
 	for s.inflight != 0 {
 		s.inflightCond.Wait()
 	}
-	s.inflightMu.Unlock()
 }
 
 // Begin opens a new transaction. The returned Tx holds the
-// store's single-writer lock until Commit or Rollback runs. The acquire is
+// writer registration until Commit or Rollback runs. The admission is
 // uncancellable; callers that need a deadline must use [Store.BeginCtx].
 func (s *Store[N, W]) Begin() *Tx[N, W] {
 	defer metrics.Time("store.txn.Begin").Stop()
@@ -781,11 +861,11 @@ func (s *Store[N, W]) Begin() *Tx[N, W] {
 // writer holds the lock — rather than blocking for the holder's full
 // duration. This is what lets a deadline-bearing engine write
 // ([cypher.Engine.RunInTx]) honour its deadline under write contention. On a
-// nil error the returned Tx holds the lock until Commit or Rollback runs;
-// once held, further ctx checks happen at the caller's discretion.
+// nil error the returned Tx is a registered writer until Commit or Rollback
+// runs; once admitted, further ctx checks happen at the caller's discretion.
 func (s *Store[N, W]) BeginCtx(ctx context.Context) (*Tx[N, W], error) {
 	defer metrics.Time("store.txn.BeginCtx").Stop()
-	if err := s.acquire(ctx); err != nil {
+	if err := s.enterWriter(ctx); err != nil {
 		metrics.IncCounter("store.txn.BeginCtx.errors", 1)
 		return nil, err
 	}
@@ -829,13 +909,16 @@ type Op[N comparable, W any] struct {
 	IndexKind IndexKind
 }
 
-// Tx is an in-progress transaction. It holds the store's single-writer
-// lock from [Store.Begin] / [Store.BeginCtx] until [Tx.Commit] or
-// [Tx.Rollback] runs, and buffers its mutations in an unsynchronised
-// slice. A Tx is therefore NOT safe for concurrent use: it is owned by
-// the single goroutine that opened it, which must drive every operation
-// and the terminal Commit/Rollback. Distinct transactions are serialised
-// by the single-writer lock, so they never run concurrently.
+// Tx is an in-progress transaction. It is registered as an admitted writer from
+// [Store.Begin] / [Store.BeginCtx] until [Tx.Commit] or [Tx.Rollback] runs, and
+// buffers its mutations in an unsynchronised slice. A Tx is therefore NOT safe
+// for concurrent use: it is owned by the single goroutine that opened it, which
+// must drive every operation and the terminal Commit/Rollback.
+//
+// DISTINCT transactions, by contrast, DO run concurrently. Until rmp #2306 they
+// were serialised by a capacity-one semaphore; concurrency control is now MVCC
+// alone, so two transactions overlap freely and a write-write conflict between
+// them is detected and reported rather than prevented by exclusion.
 type Tx[N comparable, W any] struct {
 	store    *Store[N, W]
 	ops      []Op[N, W]
@@ -862,6 +945,38 @@ func (t *Tx[N, W]) AddEdge(src, dst N, w W) error {
 	// value is fixed in the WAL frame before the commit fsync; replay
 	// re-inserts it via AddEdgeHIfAbsent (idempotent against a snapshot
 	// that already loaded it).
+	//
+	// # Handle order does NOT track WAL order, and nothing needs it to
+	//
+	// Audit finding E19 (docs/audit-mvcc-sole-cc-2026-08-02.md), resolved by
+	// rmp #2304 as a documented non-dependency rather than by moving the mint.
+	//
+	// Handles are minted at BUFFER time, here, while the transaction's WAL
+	// sequence is minted later, in [Tx.appendOnly]. With one writer at a time the
+	// two agreed; with concurrent writers they do not —
+	// a transaction can buffer a higher handle and take a lower sequence. The
+	// question the finding raises is whether anything reads that correspondence.
+	// Nothing does, and the two reasons are structural rather than incidental:
+	//
+	//   - the handle travels IN the frame ([Op.Handle]), so recovery and snapshot
+	//     replay use the RECORDED value and never re-mint one. Frame order cannot
+	//     change which handle an edge gets.
+	//   - restoring the counter is a HIGH-WATER operation
+	//     ([lpg.Graph.SeedEdgeHandle] CASes upward and returns early if the
+	//     counter is already past the target), and every caller passes
+	//     handle+1 — store/recovery/recovery.go, store/snapshot/apply.go and
+	//     store/snapshot/edgehandles.go. A maximum is order-independent.
+	//
+	// What the handle contract actually promises is uniqueness and monotonicity of
+	// ISSUE (edge_handle.go), and both survive: the counter is an
+	// atomic.Uint64.Add, so two concurrent minters cannot collide. It never
+	// promised a correlation with commit order, and no code compares two handles
+	// to order them.
+	//
+	// So the mint stays here. Moving it under the semaphore would buy the
+	// correspondence at the cost of holding the semaphore across the buffering
+	// loop — which is the opposite of what rmp #2306 needs — for a property with
+	// no reader.
 	if t.store.wcodec == nil {
 		if !isZero(w) {
 			return ErrNoWeightCodec
@@ -1118,18 +1233,26 @@ func (t *Tx[N, W]) Commit() error {
 		return ErrTxFinished
 	}
 
-	// Group-commit phase 1 — APPEND under the single-writer semaphore: cap
-	// check, mint the transaction sequence, encode and append every op frame
-	// plus the OpCommit marker. The semaphore is released the instant the
-	// append completes (releaseAfterAppend) so the next transaction can Begin
-	// and append while this one fsyncs — the precondition for fsync coalescing
-	// (#1507). The on-disk frame order is unchanged (still serialised by the
-	// semaphore in sequence order).
-	seq, hasSeq, appendErr := t.appendOnly()
+	// Group-commit phase 1 — APPEND: cap check, mint the transaction sequence,
+	// encode and append every op frame plus the OpCommit marker. Contiguity of a
+	// transaction's frames is enforced by [wal.Writer.AppendRun], which holds the
+	// writer's own mutex for the framing only; nothing here serialises the
+	// transaction as a whole (rmp #2306). Frame order need not match sequence
+	// order and recovery does not require it — it groups a transaction by the
+	// TxnSeq each frame carries.
+	//
+	// commitTS is 0 — "no MVCC timestamp" (rmp #2309). This is the STORE's own
+	// commit path: it applies through the store, has no MVCC clock in scope, and
+	// mints no commit instant. Recovery treats a zero-or-absent timestamp as
+	// contributing nothing to the derived clock floor, which is exactly right here
+	// — a store-only writer has no instant to restore. The MVCC path is
+	// [Tx.CommitWALOnly], which is handed the timestamp its caller allocated before
+	// the fsync.
+	seq, hasSeq, mark, appendErr := t.appendOnly(0)
 	// Pair the in-flight registration appendOnly made: cleared only after the
 	// entire commit (SyncGroup + apply gate) below has finished, so a draining
 	// RunUnderCommitLock never closes the WAL mid-fsync.
-	defer t.store.doneInflight()
+	defer t.store.exitWriter()
 
 	if !hasSeq {
 		// No sequence was minted (empty commit, or the cap-check rejection
@@ -1140,7 +1263,10 @@ func (t *Tx[N, W]) Commit() error {
 			metrics.IncCounter("store.txn.Commit.errors", 1)
 			return appendErr
 		}
-		if syncErr := t.store.wal.SyncGroup(); syncErr != nil {
+		// SyncBuffered, not SyncGroup: this commit appended nothing, so it has no
+		// watermark of its own to acknowledge — only a courtesy flush of whatever
+		// tail another committer left buffered.
+		if syncErr := t.store.wal.SyncBuffered(); syncErr != nil {
 			metrics.IncCounter("store.txn.Commit.errors", 1)
 			return syncErr
 		}
@@ -1158,7 +1284,7 @@ func (t *Tx[N, W]) Commit() error {
 	// whole group on a sync error (poison fails all). If the append itself
 	// failed we still run SyncGroup so a poisoned writer surfaces the sticky
 	// error to this committer too; either way this transaction will not apply.
-	syncErr := t.store.wal.SyncGroup()
+	syncErr := t.store.wal.SyncGroup(mark)
 
 	// Group-commit phase 3 — APPLY in sequence order. Wait until every
 	// lower-sequence transaction has applied (or been skipped), so the
@@ -1182,19 +1308,34 @@ func (t *Tx[N, W]) Commit() error {
 		return syncErr
 	}
 
-	// Apply to the in-memory graph after durability is secured, under the
-	// graph's visibility barrier (ApplyAtomically) so the whole transaction's
-	// writes flip visible to Graph.View readers as one atomic step — no
-	// reader can observe a partially-applied transaction (audit gap F3,
-	// docs/isolation-design.md). The transaction is already durable (op
-	// frames + OpCommit marker fsynced), so an apply error here does not undo
-	// the commit: recovery — which builds the graph without a shard-capacity
-	// cap — replays the whole transaction atomically. Surface it as
-	// ErrCommittedNotApplied so the caller knows the commit is durable and
-	// must not be retried (F5).
-	if err := t.store.g.ApplyAtomically(func() error {
+	// Apply to the in-memory graph after durability is secured, as ONE write
+	// transaction so the whole transaction's writes flip visible as a single
+	// atomic step — no reader can observe a partially-applied transaction (audit
+	// gap F3, docs/isolation-design.md).
+	//
+	// SHARED, not exclusive (rmp #2320): concurrent applies overlap and are
+	// serialised only by the per-object latches guarding each version-chain head.
+	// What makes the atomic-visibility promise now is not exclusion but the
+	// transaction every op CARRIES — applyOp writes through the [lpg.WriteView]
+	// this closure is handed, so every version the transaction creates points at
+	// one commit record and [lpg.Graph.ApplyVersioned] publishes it with one
+	// atomic store.
+	//
+	// rmp #2304 tried this flip before the ops carried their transaction and had to
+	// revert it: with two brackets open, writes resolving their record through the
+	// graph's ambient slot split one transaction across two records, and a snapshot
+	// reader observed half a transaction (105 942 torn observations from
+	// examples/27_concurrent_txn). That is what rmp #2320's threading removed.
+	//
+	// The transaction is already durable (op frames + OpCommit marker fsynced), so
+	// an apply error here does not undo the commit: recovery — which builds the
+	// graph without a shard-capacity cap — replays the whole transaction
+	// atomically. Surface it as ErrCommittedNotApplied so the caller knows the
+	// commit is durable and must not be retried (F5).
+	if err := t.store.g.ApplyVersioned(func(wtx lpg.WriteTx) error {
+		wv := t.store.g.Writer(wtx)
 		for _, op := range t.ops {
-			if aerr := applyOp(t.store.g, op); aerr != nil {
+			if aerr := applyOp(wv, op); aerr != nil {
 				return aerr
 			}
 		}
@@ -1222,27 +1363,28 @@ func (t *Tx[N, W]) Commit() error {
 // Cypher engine's commitUnderBarrier, #1281) has already applied the mutations
 // eagerly inside the visibility barrier, and CommitWALOnly returning only after
 // the covering fsync preserves durable-before-visible.
-func (t *Tx[N, W]) CommitWALOnly() error {
+func (t *Tx[N, W]) CommitWALOnly(commitTS uint64) error {
 	defer metrics.Time("store.txn.CommitWALOnly").Stop()
 	if t.finished {
 		metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
 		return ErrTxFinished
 	}
 
-	seq, hasSeq, appendErr := t.appendOnly()
-	defer t.store.doneInflight()
+	seq, hasSeq, mark, appendErr := t.appendOnly(commitTS)
+	defer t.store.exitWriter()
 	if !hasSeq {
 		if appendErr != nil {
 			metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
 			return appendErr
 		}
-		if err := t.store.wal.SyncGroup(); err != nil {
+		// Nothing of our own to acknowledge; see the same branch in [Tx.Commit].
+		if err := t.store.wal.SyncBuffered(); err != nil {
 			metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
 			return err
 		}
 		return nil
 	}
-	syncErr := t.store.wal.SyncGroup()
+	syncErr := t.store.wal.SyncGroup(mark)
 	// A sequence was minted: take its apply-gate turn and advance it, applying
 	// nothing, so the dense chain stays intact for any Commit on this store.
 	t.waitApplyTurn(seq)
@@ -1260,9 +1402,10 @@ func (t *Tx[N, W]) CommitWALOnly() error {
 
 // waitApplyTurn blocks until the in-memory apply of every transaction with a
 // lower sequence than seq has completed (appliedSeq == seq-1), so this
-// transaction applies in WAL/sequence order. Sequences are dense and assigned
-// under the single-writer semaphore, so the predecessor is always exactly
-// seq-1. See the apply-gate fields on [Store].
+// transaction applies in WAL/sequence order. Sequences are dense because they
+// come from a single atomic increment ([Store.txnSeq]) — never because a lock
+// serialised the minting — so the predecessor is always exactly seq-1 whether or
+// not committers overlap. See the apply-gate fields on [Store].
 func (t *Tx[N, W]) waitApplyTurn(seq uint64) {
 	s := t.store
 	s.applyMu.Lock()
@@ -1357,14 +1500,13 @@ func releaseApplySlot(ch chan struct{}) { applySlotPool.Put(ch) }
 // before that lets [Store.RunUnderCommitLock] observe it (#1507 quiesce
 // boundary). The caller MUST pair it with exactly one [Store.doneInflight] once
 // the whole commit (SyncGroup + apply gate) finishes.
-func (t *Tx[N, W]) appendOnly() (seq uint64, hasSeq bool, err error) {
-	t.store.markInflight()
+func (t *Tx[N, W]) appendOnly(commitTS uint64) (seq uint64, hasSeq bool, watermark int64, err error) {
 	if len(t.ops) == 0 {
 		// Empty commit: mint no sequence and write no marker. The caller still
 		// runs SyncGroup to flush any prior buffered tail (the historical
 		// no-op-with-Sync behaviour), then applies nothing.
-		t.releaseAfterAppend()
-		return 0, false, nil
+		t.markFinished()
+		return 0, false, 0, nil
 	}
 	// Bounded resources / Durability: reject an over-cap transaction BEFORE
 	// minting a sequence or writing any frame, so a transaction recovery could
@@ -1374,8 +1516,8 @@ func (t *Tx[N, W]) appendOnly() (seq uint64, hasSeq bool, err error) {
 	// (see [ErrTransactionTooLarge], [DefaultMaxTxnOps]).
 	if t.store.maxTxnOps > 0 && len(t.ops) > t.store.maxTxnOps {
 		metrics.IncCounter("store.txn.appendOnly.txnTooLarge", 1)
-		t.releaseAfterAppend()
-		return 0, false, fmt.Errorf("%w: %d ops > cap %d", ErrTransactionTooLarge, len(t.ops), t.store.maxTxnOps)
+		t.markFinished()
+		return 0, false, 0, fmt.Errorf("%w: %d ops > cap %d", ErrTransactionTooLarge, len(t.ops), t.store.maxTxnOps)
 	}
 	// Mint the sequence. From here hasSeq is true on every return: the sequence
 	// is consumed, so the caller must advance the apply gate past it even if the
@@ -1391,28 +1533,39 @@ func (t *Tx[N, W]) appendOnly() (seq uint64, hasSeq bool, err error) {
 	// the pool on every exit path, including encode/append failures.
 	scratch := getEncodeScratch()
 	defer putEncodeScratch(scratch)
-	for _, op := range t.ops {
-		payload, enErr := encodeOpTypedV3Into((*scratch)[:0], op, seq, t.store.codec, t.store.wcodec)
-		if enErr != nil {
-			t.releaseAfterAppend()
-			return seq, true, enErr
+	// ONE contiguous run, not a loop of independent appends (rmp #2302, audit
+	// finding E5). Recovery commits the ops carrying a marker's own TxnSeq and
+	// discards the buffered prefix as orphaned, which is correct only while a
+	// transaction's frames cannot interleave with another's. That property used to
+	// rest on the store semaphore that used to be held here; it now rests on the
+	// WAL writer itself, which is the component that owns the file. See
+	// [wal.Writer.AppendRun] and docs/design-wal-transaction-contiguity.md.
+	//
+	// The per-op encoding happens INSIDE the run, so the pooled scratch buffer is
+	// still reused for every frame and the commit allocates no more than before.
+	mark, aerr := t.store.wal.AppendRun(func(emit func([]byte) error) error {
+		for _, op := range t.ops {
+			payload, enErr := encodeOpTypedV3Into((*scratch)[:0], op, seq, t.store.codec, t.store.wcodec)
+			if enErr != nil {
+				return enErr
+			}
+			*scratch = payload // retain the (possibly grown) backing array for reuse
+			if err := emit(payload); err != nil {
+				return err
+			}
 		}
-		*scratch = payload // retain the (possibly grown) backing array for reuse
-		if aerr := t.store.wal.Append(payload); aerr != nil {
-			t.releaseAfterAppend()
-			return seq, true, aerr
-		}
-	}
-	marker := encodeCommitV3Into((*scratch)[:0], seq)
-	*scratch = marker
-	if aerr := t.store.wal.Append(marker); aerr != nil {
-		t.releaseAfterAppend()
-		return seq, true, aerr
+		marker := encodeCommitV3Into((*scratch)[:0], seq, commitTS)
+		*scratch = marker
+		return emit(marker)
+	})
+	if aerr != nil {
+		t.markFinished()
+		return seq, true, mark, aerr
 	}
 	// Frames + marker are buffered. Release the semaphore so the next
 	// transaction can append while this one fsyncs (group-commit coalescing).
-	t.releaseAfterAppend()
-	return seq, true, nil
+	t.markFinished()
+	return seq, true, mark, nil
 }
 
 // Rollback discards buffered ops without touching the WAL or graph.
@@ -1422,28 +1575,23 @@ func (t *Tx[N, W]) Rollback() error {
 		metrics.IncCounter("store.txn.Rollback.errors", 1)
 		return ErrTxFinished
 	}
-	t.releaseAfterAppend()
+	t.markFinished()
+	t.store.exitWriter()
 	return nil
 }
 
-// releaseAfterAppend marks the transaction finished and frees the store's
-// single-writer semaphore, exactly once. It is called from [Tx.appendOnly] (on
-// every path), from [Tx.Rollback], and the entry-point finished guard in
-// Commit/CommitWALOnly/Rollback ensures it is reached once per transaction, so
-// the capacity-one semaphore is never over-released (which would let a second
-// writer in). The idempotency check makes a double call (defensive) a no-op.
+// markFinished marks the transaction as having consumed its lifecycle, exactly
+// once, so a second Commit / CommitWALOnly / Rollback is rejected with
+// [ErrTxFinished] rather than acting twice.
 //
-// NOTE: under group commit the semaphore is released here — after the frames
-// are appended but BEFORE the coalesced fsync — so the fsync window no longer
-// holds the writer lock. The fsync's durability and the sequence-ordered
-// in-memory apply are coordinated separately (SyncGroup and the apply gate);
-// they do not depend on the semaphore being held.
-func (t *Tx[N, W]) releaseAfterAppend() {
-	if t.finished {
-		return
-	}
+// It no longer releases anything. Until rmp #2306 this was releaseAfterAppend and
+// it freed the single-writer semaphore here — mid-commit, right after the append
+// — so that the coalesced fsync did not hold the writer lock. With the semaphore
+// retired there is nothing to free at this point: the writer's registration spans
+// the whole transaction and is cleared by [Store.exitWriter] when the commit has
+// entirely finished. Rollback, which does no commit, calls both.
+func (t *Tx[N, W]) markFinished() {
 	t.finished = true
-	t.store.release()
 }
 
 // encodeOpTyped serialises one op to a v2 (tagged) WAL payload using
@@ -1562,9 +1710,33 @@ func encodeOpTypedV3Into[N comparable, W any](buf []byte, op Op[N, W], seq uint6
 // encodeCommitV3Into serialises the [OpCommit] marker into the supplied buffer
 // (which must be length 0), returning the extended slice. Pool-aware sibling of
 // [encodeCommitV3]; the bytes produced are identical.
-func encodeCommitV3Into(buf []byte, seq uint64) []byte {
+//
+// # The commit timestamp, and why it needs no format bump (rmp #2309)
+//
+// commitTS is the MVCC instant at which this transaction becomes visible, or zero
+// for a writer with no MVCC clock (the store's own [Tx.Commit] path). It is
+// appended to the [OpCommit] body, which was previously empty, so that recovery can
+// DERIVE the clock's floor from the WAL instead of trusting a persisted counter —
+// the shape InnoDB and Memgraph both settled on, and the reason no separate counter
+// record exists. See docs/design-mvcc-clock-recovery.md.
+//
+// This is deliberately NOT a format bump, and that was verified against the code
+// rather than assumed. The WAL frame header is magic + version + length + crc32c
+// (store/wal/format.go), so it carries no per-record shape. Inside the frame,
+// recovery's decodeV3 copies everything after the txnSeq word verbatim into
+// Op.Body, and [OpCommit]'s body was ignored by the replay state machine. So:
+//
+//   - an OLDER reader ignores the extra 8 bytes entirely;
+//   - a NEWER reader on an OLDER file sees an empty body and contributes nothing to
+//     the derived maximum, falling back to the floor.
+//
+// The compatibility policy is therefore "absent body means no timestamp", which is
+// a test obligation rather than a version negotiation. Neither [CurrentVersion] nor
+// [OpRecordV3] changes.
+func encodeCommitV3Into(buf []byte, seq, commitTS uint64) []byte {
 	buf = append(buf, OpRecordV3, byte(OpCommit))
-	return binary.LittleEndian.AppendUint64(buf, seq)
+	buf = binary.LittleEndian.AppendUint64(buf, seq)
+	return binary.LittleEndian.AppendUint64(buf, commitTS)
 }
 
 // encodeOpTypedV3 serialises one op to a v3 ([OpRecordV3]) WAL payload:
@@ -1585,14 +1757,14 @@ func encodeOpTypedV3[N comparable, W any](op Op[N, W], seq uint64, codec Codec[N
 }
 
 // encodeCommitV3 serialises the [OpCommit] marker for a v3 transaction:
-// version + kind + the transaction sequence, with no body. Recovery
+// version + kind + the transaction sequence + the MVCC commit timestamp. Recovery
 // applies the buffered ops carrying the same sequence when it reads this
 // frame; a torn write that loses it discards the whole transaction.
 //
 // Allocating convenience form of [encodeCommitV3Into]; the bytes are identical.
-func encodeCommitV3(seq uint64) []byte {
-	buf := make([]byte, 0, 2+8)
-	return encodeCommitV3Into(buf, seq)
+func encodeCommitV3(seq, commitTS uint64) []byte {
+	buf := make([]byte, 0, 2+8+8)
+	return encodeCommitV3Into(buf, seq, commitTS)
 }
 
 // appendOpBodyTyped appends the codec-encoded body for op to buf (which
@@ -2145,7 +2317,7 @@ func decodeTxnTimeProp(buf []byte) (lpg.PropertyValue, []byte, error) {
 // fsynced for op by the time applyOp runs, so an error here means the
 // durable log and the in-memory view are temporarily inconsistent —
 // recovery will replay the same op and surface the same error.
-func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
+func applyOp[N comparable, W any](wv lpg.WriteView[N, W], op Op[N, W]) error {
 	switch op.Kind {
 	case OpAddEdge:
 		// rmp #1871: bump the cache-invalidation generation counter on
@@ -2155,15 +2327,15 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
 		// final counter value regardless), so unconditional is the safe
 		// default here, never a source of a false cache hit.
 		var zero W
-		if err := g.AddEdge(op.Src, op.Dst, zero); err != nil {
+		if err := wv.AddEdge(op.Src, op.Dst, zero); err != nil {
 			return err
 		}
-		g.BumpTopoGeneration()
+		wv.Graph().BumpTopoGeneration()
 	case OpAddEdgeWeighted:
-		if err := g.AddEdge(op.Src, op.Dst, op.Weight); err != nil {
+		if err := wv.AddEdge(op.Src, op.Dst, op.Weight); err != nil {
 			return err
 		}
-		g.BumpTopoGeneration()
+		wv.Graph().BumpTopoGeneration()
 	case OpAddEdgeH:
 		// Handle-bearing add: idempotent against a slot already carrying
 		// this handle (the snapshot loaded it, or an earlier frame applied
@@ -2173,34 +2345,34 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
 		// through the engine's own adapter, before ever reaching this
 		// replay-time call — inserted is false here for that case, so this
 		// does not double-bump (harmless either way, but pointless).
-		inserted, err := g.AddEdgeHIfAbsent(op.Src, op.Dst, op.Weight, op.Handle)
+		inserted, err := wv.AddEdgeHIfAbsent(op.Src, op.Dst, op.Weight, op.Handle)
 		if err != nil {
 			return err
 		}
 		if inserted {
-			g.BumpTopoGeneration()
+			wv.Graph().BumpTopoGeneration()
 		}
 	case OpSetEdgeLabelByHandle:
-		g.SetEdgeLabelByHandle(op.Src, op.Dst, op.Handle, op.Label)
+		wv.SetEdgeLabelByHandle(op.Src, op.Dst, op.Handle, op.Label)
 	case OpSetEdgePropertyByHandle:
-		return g.SetEdgePropertyByHandle(op.Src, op.Dst, op.Handle, op.Key, op.Value)
+		return wv.SetEdgePropertyByHandle(op.Src, op.Dst, op.Handle, op.Key, op.Value)
 	case OpDelEdgePropertyByHandle:
-		g.DelEdgePropertyByHandle(op.Src, op.Dst, op.Handle, op.Key)
+		wv.DelEdgePropertyByHandle(op.Src, op.Dst, op.Handle, op.Key)
 	case OpRemoveEdgeInstanceByHandle:
-		g.RemoveEdgeInstanceByHandle(op.Src, op.Dst, op.Handle)
-		g.BumpTopoGeneration() // rmp #1871; unconditional, see OpAddEdge above
+		wv.RemoveEdgeInstanceByHandle(op.Src, op.Dst, op.Handle)
+		wv.Graph().BumpTopoGeneration() // rmp #1871; unconditional, see OpAddEdge above
 	case OpRemoveEdgeByHandle:
 		// Instance-precise removal: retire the exact parallel slot carrying the
 		// handle plus its per-handle metadata (rmp #2018). Unconditional
 		// generation bump mirrors OpRemoveEdge.
-		g.RemoveEdgeByHandle(op.Src, op.Dst, op.Handle)
-		g.BumpTopoGeneration()
+		wv.RemoveEdgeByHandle(op.Src, op.Dst, op.Handle)
+		wv.Graph().BumpTopoGeneration()
 	case OpSetNodeLabel:
-		return g.SetNodeLabel(op.Src, op.Label)
+		return wv.SetNodeLabel(op.Src, op.Label)
 	case OpSetEdgeLabel:
-		g.SetEdgeLabel(op.Src, op.Dst, op.Label)
+		wv.SetEdgeLabel(op.Src, op.Dst, op.Label)
 	case OpAddNode:
-		return g.AddNode(op.Src)
+		return wv.AddNode(op.Src)
 	case OpRemoveNode:
 		// Logical removal: the mapper entry is permanent, so removal is a
 		// tombstone. Strip all labels and properties so the node is
@@ -2210,29 +2382,35 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
 		// state reconstructed by WAL replay (recovery.applyOpCodec does the
 		// same), so live and recovered graphs agree. A later OpAddNode for
 		// the same key revives it (g.AddNode clears the tombstone).
-		for _, lbl := range g.NodeLabels(op.Src) {
-			g.RemoveNodeLabel(op.Src, lbl)
+		// Enumerated through the TRANSACTION'S OWN view (rmp #2320), not through
+		// the present: this apply overlaps other writers' applies, so the present
+		// carries their uncommitted labels and properties. Stripping those would
+		// tear another transaction apart, and missing this transaction's own
+		// earlier ops would leave the tombstoned node still label-reachable.
+		rv := wv.Read()
+		for _, lbl := range rv.NodeLabels(op.Src) {
+			wv.RemoveNodeLabel(op.Src, lbl)
 		}
-		for k := range g.NodeProperties(op.Src) {
-			g.DelNodeProperty(op.Src, k)
+		for k := range rv.NodeProperties(op.Src) {
+			wv.DelNodeProperty(op.Src, k)
 		}
-		g.RemoveNode(op.Src)
+		wv.RemoveNode(op.Src)
 	case OpRemoveNodeLabel:
-		g.RemoveNodeLabel(op.Src, op.Label)
+		wv.RemoveNodeLabel(op.Src, op.Label)
 	case OpSetNodeProperty:
-		return g.SetNodeProperty(op.Src, op.Key, op.Value)
+		return wv.SetNodeProperty(op.Src, op.Key, op.Value)
 	case OpDelNodeProperty:
-		g.DelNodeProperty(op.Src, op.Key)
+		wv.DelNodeProperty(op.Src, op.Key)
 	case OpRemoveEdge:
 		// Use the LPG edge removal so a fully-disconnected pair also sheds
 		// its per-pair edge labels/properties (matching recovery replay),
 		// preventing a later re-add from resurrecting them.
-		g.RemoveEdge(op.Src, op.Dst)
-		g.BumpTopoGeneration() // rmp #1871; unconditional, see OpAddEdge above
+		wv.RemoveEdge(op.Src, op.Dst)
+		wv.Graph().BumpTopoGeneration() // rmp #1871; unconditional, see OpAddEdge above
 	case OpSetEdgeProperty:
-		return g.SetEdgeProperty(op.Src, op.Dst, op.Key, op.Value)
+		return wv.SetEdgeProperty(op.Src, op.Dst, op.Key, op.Value)
 	case OpDelEdgeProperty:
-		g.DelEdgeProperty(op.Src, op.Dst, op.Key)
+		wv.DelEdgeProperty(op.Src, op.Dst, op.Key)
 	case OpCreateConstraint:
 		// The store keeps no constraint registry of its own (constraint
 		// enforcement lives in the cypher engine), so the only in-memory effect
@@ -2241,11 +2419,11 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
 		// never goes through the engine's SetActiveConstraintCount, so a
 		// WAL-truncating checkpoint correctly judges its snapshot NOT
 		// self-sufficient and retains the OpCreateConstraint frame (#1756).
-		g.AddStoreConstraint(uint8(op.ConstraintKind), op.Label, op.Key)
+		wv.Graph().AddStoreConstraint(uint8(op.ConstraintKind), op.Label, op.Key)
 	case OpDropConstraint:
 		// Mirror the create: drop the store-direct constraint slot so the count
 		// falls back to zero once the last constraint is removed.
-		g.RemoveStoreConstraint(uint8(op.ConstraintKind), op.Label, op.Key)
+		wv.Graph().RemoveStoreConstraint(uint8(op.ConstraintKind), op.Label, op.Key)
 	case OpCreateIndex:
 		// As with constraints, the store keeps no index registry of its own
 		// (index maintenance lives in the cypher engine), so the only in-memory
@@ -2255,11 +2433,11 @@ func applyOp[N comparable, W any](g *lpg.Graph[N, W], op Op[N, W]) error {
 		// checkpoint correctly judges its snapshot NOT self-sufficient and
 		// retains the OpCreateIndex frame (#1755). ConstraintName carries the
 		// index name for the index ops (see Tx.CreateIndex / Tx.DropIndex).
-		g.AddStoreIndex(op.ConstraintName)
+		wv.Graph().AddStoreIndex(op.ConstraintName)
 	case OpDropIndex:
 		// Mirror the create: drop the store-direct index slot so the count falls
 		// back to zero once the last index is removed.
-		g.RemoveStoreIndex(op.ConstraintName)
+		wv.Graph().RemoveStoreIndex(op.ConstraintName)
 	}
 	return nil
 }

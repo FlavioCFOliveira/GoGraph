@@ -68,7 +68,7 @@ func TestDB_CloseQuiescesInFlightWriters(t *testing.T) {
 					t.Errorf("writer %d: AddEdge: %v", w, err)
 					return
 				}
-				err := tx.CommitWALOnly()
+				err := tx.CommitWALOnly(0)
 				switch {
 				case err == nil:
 					acked.Add(1)
@@ -178,7 +178,7 @@ func TestDB_CloseBlocksUntilInFlightCommitReleases(t *testing.T) {
 		_ = tx.Rollback()
 		t.Fatalf("AddEdge after Close: %v", err)
 	}
-	if err := tx.CommitWALOnly(); !errors.Is(err, wal.ErrWriterClosed) {
+	if err := tx.CommitWALOnly(0); !errors.Is(err, wal.ErrWriterClosed) {
 		t.Fatalf("CommitWALOnly after quiesced Close = %v; want wal.ErrWriterClosed", err)
 	}
 }

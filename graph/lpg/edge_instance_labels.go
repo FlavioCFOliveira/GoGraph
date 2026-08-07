@@ -50,6 +50,13 @@ type edgeInstanceLabelShard struct {
 //
 // SetEdgeLabelAt is safe for concurrent use.
 func (g *Graph[N, W]) SetEdgeLabelAt(src, dst N, idx int64, name string) {
+	g.setEdgeLabelAtInfo(src, dst, idx, name, nil)
+}
+
+// setEdgeLabelAtInfo is [Graph.SetEdgeLabelAt] with an explicit write transaction; tx is
+// nil for a direct Go-API mutation, which is committed the instant it is made
+// and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) setEdgeLabelAtInfo(src, dst N, idx int64, name string, tx *writeCtx) {
 	if idx <= 0 {
 		return
 	}
@@ -80,7 +87,9 @@ func (g *Graph[N, W]) SetEdgeLabelAt(src, dst N, idx int64, name string) {
 	if bag.has(lid) {
 		return
 	}
-	g.pushInstanceLabelVersion(sh, k, idx)
+	if !g.pushInstanceLabelVersion(sh, k, idx, tx) {
+		return
+	}
 	bag.add(lid)
 	byIdx[idx] = bag
 }
@@ -150,6 +159,13 @@ func (g *Graph[N, W]) EdgeLabelsAtAsOf(src, dst N, idx int64, snap *Snapshot) []
 //
 // RemoveEdgeInstance is safe for concurrent use.
 func (g *Graph[N, W]) RemoveEdgeInstance(src, dst N, idx int64) {
+	g.removeEdgeInstanceInfo(src, dst, idx, nil)
+}
+
+// removeEdgeInstanceInfo is [Graph.RemoveEdgeInstance] with an explicit write transaction; tx is
+// nil for a direct Go-API mutation, which is committed the instant it is made
+// and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) removeEdgeInstanceInfo(src, dst N, idx int64, tx *writeCtx) {
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
 		return
@@ -162,8 +178,7 @@ func (g *Graph[N, W]) RemoveEdgeInstance(src, dst N, idx int64) {
 	{
 		sh := g.edgeInstanceLabelShardFor(k)
 		sh.mu.Lock()
-		if byIdx, ok := sh.m[k]; ok {
-			g.pushInstanceLabelVersion(sh, k, idx)
+		if byIdx, ok := sh.m[k]; ok && g.pushInstanceLabelVersion(sh, k, idx, tx) {
 			delete(byIdx, idx)
 			if len(byIdx) == 0 {
 				delete(sh.m, k)
@@ -174,8 +189,7 @@ func (g *Graph[N, W]) RemoveEdgeInstance(src, dst N, idx int64) {
 	{
 		sh := g.edgeInstancePropShardFor(k)
 		sh.mu.Lock()
-		if byIdx, ok := sh.m[k]; ok {
-			g.pushInstancePropVersion(sh, k, idx)
+		if byIdx, ok := sh.m[k]; ok && g.pushInstancePropVersion(sh, k, idx, tx) {
 			delete(byIdx, idx)
 			if len(byIdx) == 0 {
 				delete(sh.m, k)

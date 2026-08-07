@@ -184,8 +184,11 @@ type pathState struct {
 // VarLengthExpand is NOT safe for concurrent use.
 type VarLengthExpand struct {
 	input Operator
-	fwd   csrAdjacency
-	rev   csrAdjacency
+	// src yields the adjacency, resolved in Init rather than held from plan-build
+	// time. See [AdjacencySource].
+	src AdjacencySource
+	fwd CSRAdjacency
+	rev CSRAdjacency
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 
@@ -257,8 +260,6 @@ type VarLengthExpand struct {
 
 // VarLengthConfig carries configuration for [NewVarLengthExpand].
 type VarLengthConfig struct {
-	// EdgeTypeFilter maps absolute edge positions to type labels.
-	EdgeTypeFilter map[uint64]string
 	// EdgeType, when non-empty, restricts expansion to edges of this type.
 	EdgeType string
 	// ExcludedRelCols lists column indices in the input row holding edge
@@ -293,7 +294,7 @@ type VarLengthConfig struct {
 
 // NewVarLengthExpand creates a VarLengthExpand operator. cfg is read-only and
 // taken by pointer to avoid copying the configuration struct on this hot path.
-func NewVarLengthExpand(input Operator, fwd, rev csrAdjacency, cfg *VarLengthConfig) *VarLengthExpand {
+func NewVarLengthExpand(input Operator, src AdjacencySource, cfg *VarLengthConfig) *VarLengthExpand {
 	dir := cfg.Direction
 	if dir == 0 {
 		dir = DirOut
@@ -316,11 +317,9 @@ func NewVarLengthExpand(input Operator, fwd, rev csrAdjacency, cfg *VarLengthCon
 	}
 	return &VarLengthExpand{
 		input:                  input,
-		fwd:                    fwd,
-		rev:                    rev,
+		src:                    src,
 		dir:                    dir,
 		edgeType:               cfg.EdgeType,
-		edgeTypeFilter:         cfg.EdgeTypeFilter,
 		inputCol:               cfg.InputCol,
 		minHops:                cfg.MinHops,
 		maxHops:                maxHops,
@@ -333,6 +332,8 @@ func NewVarLengthExpand(input Operator, fwd, rev csrAdjacency, cfg *VarLengthCon
 // Init initialises the operator.
 func (op *VarLengthExpand) Init(ctx context.Context) error {
 	op.ctx = ctx
+	// Resolved NOW, not at plan-build time (rmp #2317); see [AdjacencySource].
+	op.fwd, op.rev, op.edgeTypeFilter = op.src()
 	op.fwdVerts = op.fwd.VerticesSlice()
 	op.fwdEdges = op.fwd.EdgesSlice()
 	op.fwdHandles = op.fwd.HandlesSlice()
@@ -729,7 +730,17 @@ func (op *VarLengthExpand) enqueueEdges(uid uint64, isFwd bool, parent *pathStat
 		// Relationship-uniqueness: skip if this edge is already on the path.
 		// Key the bitset on the FORWARD position so a reverse-direction
 		// traversal of the same edge is recognised as the same edge.
-		if parent != nil && bitsetContains(parent.visited, fwdAbsPos) {
+		// RELATIONSHIP UNIQUENESS keys on the EMITTED identity (rmp #2317), not on
+		// the forward position, so it compares equal to the ids sibling patterns
+		// carry in the row — which is what lets an excluded-rel column seed the set
+		// directly. A CSR either has a full handle column or none, so handles and
+		// positions never mix within one Init and cannot collide.
+		//
+		// The reverse-to-forward alias above still runs, and still matters for the
+		// no-handle case; where handles exist it is redundant, because
+		// csr.BuildReverse gives both directions of one logical edge the same handle.
+		edgeUID := op.emittedEdgeID(fwdAbsPos)
+		if parent != nil && bitsetContains(parent.visited, edgeUID) {
 			continue
 		}
 
@@ -751,10 +762,10 @@ func (op *VarLengthExpand) enqueueEdges(uid uint64, isFwd bool, parent *pathStat
 			newPath = make([]edgeStep, len(parent.path)+1)
 			copy(newPath, parent.path)
 			newPath[len(parent.path)] = edgeStep{fwdPos: fwdAbsPos, dstID: dst, reversed: reversed}
-			newVisited = bitsetAdd(parent.visited, fwdAbsPos)
+			newVisited = bitsetAdd(parent.visited, edgeUID)
 		} else {
 			newPath = []edgeStep{{fwdPos: fwdAbsPos, dstID: dst, reversed: reversed}}
-			newVisited = bitsetAdd(nil, fwdAbsPos)
+			newVisited = bitsetAdd(nil, edgeUID)
 		}
 
 		*target = append(*target, pathState{
@@ -799,7 +810,11 @@ func (op *VarLengthExpand) buildRow(out *Row, inputRow Row, ps pathState) {
 		if step.reversed {
 			dir = VLEDirReverse
 		}
-		pathList[1+VLEHopStride*i] = expr.IntegerValue(int64(step.fwdPos))
+		// The EMITTED identity is the stable handle, not the forward position
+		// (rmp #2317). The position stays internal: it is what the
+		// relationship-uniqueness bitset keys on, and what the reverse-to-forward
+		// alias makes comparable across directions.
+		pathList[1+VLEHopStride*i] = expr.IntegerValue(int64(op.emittedEdgeID(step.fwdPos)))
 		pathList[2+VLEHopStride*i] = expr.IntegerValue(int64(step.dstID))
 		pathList[3+VLEHopStride*i] = expr.IntegerValue(int64(dir))
 	}
@@ -856,4 +871,19 @@ func bitsetAdd(bs []uint64, pos uint64) []uint64 {
 	copy(newBs, bs)
 	newBs[word] |= 1 << bit
 	return newBs
+}
+
+// emittedEdgeID is the relationship identity this operator emits for a forward
+// position, and it must agree bit-for-bit with [Expand.emittedEdgeID] because a
+// cyphermorphism check compares ids a VLE hop emitted against ids a sibling Expand
+// carries in the row (rmp #2317).
+//
+// A synthetic reverse position that the reverse-to-forward alias could not resolve
+// has no forward slot and therefore no handle; it keeps its position, which is
+// unique within this Init and is all the uniqueness bitset needs.
+func (op *VarLengthExpand) emittedEdgeID(fwdPos uint64) uint64 {
+	if fwdPos < uint64(len(op.fwdHandles)) {
+		return op.fwdHandles[fwdPos]
+	}
+	return fwdPos
 }

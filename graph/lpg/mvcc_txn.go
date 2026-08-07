@@ -85,11 +85,13 @@ type commitInfo = mvcc.CommitInfo
 //
 // Not safe for concurrent use by multiple goroutines.
 type labelTx[N comparable, W any] struct {
-	g       *Graph[N, W]
-	info    *commitInfo
-	id      uint64
-	startTS uint64
-	done    bool
+	g *Graph[N, W]
+	// ctx is this transaction's identity — its commit record, start timestamp
+	// and id — carried into every store it writes (rmp #2301). It is ONE value
+	// rather than three loose fields so a write cannot be handed a record from
+	// one transaction and a snapshot from another.
+	ctx  *writeCtx
+	done bool
 }
 
 // nextCommitTS allocates the next commit timestamp. Monotonic and never reused.
@@ -112,28 +114,83 @@ func (g *Graph[N, W]) nextTxID() uint64 { return g.mvccClock.NextTxID() }
 // The order matters: the start timestamp is read BEFORE the transaction id is
 // minted, so a transaction can never see a commit that happened after it began.
 func (g *Graph[N, W]) beginLabelTx() *labelTx[N, W] {
-	startTS := g.readTS()
-	id := g.nextTxID()
-	return &labelTx[N, W]{g: g, info: mvcc.NewCommitInfo(id), id: id, startTS: startTS}
+	return &labelTx[N, W]{g: g, ctx: g.beginWriteCtx()}
 }
 
-// commit publishes every delta this transaction wrote, atomically.
+// commit publishes every delta this transaction wrote, atomically, or refuses
+// to publish anything when the transaction hit a serialization conflict.
 //
 // One store, regardless of how many deltas there are: that is the property the
 // shared commit record exists to provide. After it returns, a reader whose
 // start timestamp is at or after the allocated commit timestamp sees all of the
 // transaction's changes, and one that started earlier sees none of them. There
 // is no interval in which it sees some.
-func (t *labelTx[N, W]) commit() uint64 {
+//
+// # Why commit is the backstop
+//
+// A conflict detected by a primitive that cannot return an error — a label
+// removal, a property delete, any of the five per-edge side stores — is
+// recorded on the [writeCtx] instead (rmp #2300). Commit is where that record
+// is read, which is the same place Memgraph reads its own: Storage::Commit
+// tests `transaction_.must_abort` and returns SerializationError
+// (memgraph/memgraph, branch master, read 2026-08-02; src/storage/v2/storage.cpp).
+//
+// Without this check a transaction whose ONLY conflicting write went through
+// such a primitive would commit successfully having dropped it — a lost update
+// with nothing anywhere reporting it. That was measured against the build that
+// only skipped, and is pinned by
+// TestWriteCtx_VoidPrimitiveConflictDoomsTheTransaction.
+//
+// A refused transaction is ABORTED, not left open: its record is marked
+// [mvcc.AbortedTS], so its versions are invisible to every reader forever and
+// reclamation can recognise the chain. The returned timestamp is zero.
+func (t *labelTx[N, W]) commit() (uint64, error) {
 	if t.done {
 		panic("lpg: labelTx committed or aborted twice")
 	}
 	t.done = true
+	// Retract closes the window and hands back the record together with the
+	// number of versions stamped on it. A nil record means the transaction
+	// versioned nothing, which is the lazy-allocation case: there is nothing to
+	// publish, nothing to abort and nothing to reclaim (rmp #2301).
+	info, versions := t.ctx.tx.Retract()
+	if err := t.ctx.err(); err != nil {
+		// Abort rather than publish. The versions this transaction did manage
+		// to write must never become visible, and marking the record is what
+		// tells both the read path and the reclaimer so.
+		// Counted OUTSIDE the info guard (rmp #2312). A transaction doomed by its
+		// FIRST write records no version at all, so info is nil and there is nothing
+		// to mark — but the transaction still failed, and an abort the substrate does
+		// not count is a failure an operator cannot see. That was measured, not
+		// reasoned about: the conflict construction in
+		// TestMVCCStats_ConflictIsCountedAsBothAConflictAndAnAbort produced exactly
+		// this shape and reported one conflict against zero aborts.
+		t.g.writeCounts.Abort(t.ctx.txID)
+		if info != nil {
+			info.Abort()
+			// Charged AND woken unconditionally; see [Graph.abortWake] for why an
+			// aborted version is not ordinary garbage (rmp #2318).
+			t.g.abortWake(versions)
+		}
+		return 0, err
+	}
+	if info == nil {
+		return 0, nil
+	}
 	// Allocate, store, publish — in that order; see [mvcc.Clock.ReadTS].
 	ts := t.g.nextCommitTS()
-	t.info.Commit(ts)
+	info.Commit(ts)
 	t.g.mvccClock.PublishCommitTS(ts)
-	return ts
+	// Counted on the same rule [Graph.endWrite] uses: a published instant is a
+	// commit, and a transaction that versioned nothing is neither (rmp #2312).
+	t.g.writeCounts.Commit(t.ctx.txID)
+	// Charge what this transaction actually created, so a threaded transaction
+	// pays into the reclamation budget exactly as an untransacted write does.
+	// Before rmp #2301 the count lived on the per-graph stamp and a threaded
+	// transaction's versions were charged to nothing at all — the same hole
+	// rmp #2289 closed for direct writes.
+	t.g.chargeReclaimDebt(versions)
+	return ts, nil
 }
 
 // abort marks the transaction's changes permanently invisible.
@@ -146,7 +203,15 @@ func (t *labelTx[N, W]) abort() {
 		panic("lpg: labelTx committed or aborted twice")
 	}
 	t.done = true
-	t.info.Abort()
+	info, versions := t.ctx.tx.Retract()
+	// An explicit abort is a refusal whether or not the transaction versioned
+	// anything; see [labelTx.commit] for why the count is outside the guard.
+	t.g.writeCounts.Abort(t.ctx.txID)
+	if info == nil {
+		return
+	}
+	info.Abort()
+	t.g.abortWake(versions)
 }
 
 // deltaStamp resolves how a new delta records its visibility, in three cases
@@ -186,32 +251,99 @@ func (g *Graph[N, W]) deltaStamp(info *commitInfo) (*commitInfo, uint64) {
 // setNodeLabel writes a label inside this transaction. The delta it records
 // stays invisible to every other reader until [labelTx.commit].
 func (t *labelTx[N, W]) setNodeLabel(n N, name string) error {
-	return t.g.setNodeLabelInfo(n, name, t.info)
+	return t.g.setNodeLabelInfo(n, name, t.ctx)
 }
 
 // removeNodeLabel removes a label inside this transaction.
 func (t *labelTx[N, W]) removeNodeLabel(n N, name string) {
-	t.g.removeNodeLabelInfo(n, name, t.info)
+	t.g.removeNodeLabelInfo(n, name, t.ctx)
 }
 
 // labelsOf reads a node's label set as this transaction must see it: its own
 // uncommitted writes included, every other in-flight transaction's excluded,
 // and committed work only if it committed at or before this transaction began.
 func (t *labelTx[N, W]) labelsOf(id graph.NodeID) labelBag {
-	return t.g.labelBagAsOf(id, t.startTS, t.id)
+	return t.g.labelBagAsOf(id, t.ctx.startTS, t.ctx.txID)
 }
 
 // setNodeProperty writes a property inside this transaction.
 func (t *labelTx[N, W]) setNodeProperty(n N, key string, v PropertyValue) error {
-	return t.g.setNodePropertyInfo(n, key, v, t.info)
+	return t.g.setNodePropertyInfo(n, key, v, t.ctx)
 }
 
 // delNodeProperty deletes a property inside this transaction.
 func (t *labelTx[N, W]) delNodeProperty(n N, key string) {
-	t.g.delNodePropertyInfo(n, key, t.info)
+	t.g.delNodePropertyInfo(n, key, t.ctx)
 }
 
 // propsOf reads a node's property set as this transaction must see it.
 func (t *labelTx[N, W]) propsOf(id graph.NodeID) propBag {
-	return t.g.propBagAsOf(id, t.startTS, t.id)
+	return t.g.propBagAsOf(id, t.ctx.startTS, t.ctx.txID)
+}
+
+// ── the remaining versioned stores ───────────────────────────────────────────
+//
+// Node existence and the five per-edge side stores reach their version chains
+// through the same [writeCtx] the label and property paths do (rmp #2301), so
+// write-write conflict detection covers them too (rmp #2300). Each is a thin
+// forward to the store's `…Info` form with this transaction's context, exactly
+// as setNodeLabel is.
+//
+// They are unexported for the same reason [labelTx] is: this is a substrate,
+// and the shape the engine will drive it through is rmp #2304's to settle.
+
+// addNode creates a node inside this transaction, recording its birth at the
+// transaction's instant.
+func (t *labelTx[N, W]) addNode(n N) error { return t.g.addNodeInfo(n, t.ctx) }
+
+// removeNode removes a node inside this transaction, recording its death at the
+// transaction's instant.
+func (t *labelTx[N, W]) removeNode(n N) { t.g.removeNodeInfo(n, t.ctx) }
+
+// addEdge appends an arc inside this transaction — the COMMUTATIVE adjacency
+// write, which never conflicts with another transaction's append and is refused
+// only by a concurrent non-commutative write to the same source. See
+// [adjVersions].
+func (t *labelTx[N, W]) addEdge(src, dst N, w W) error {
+	return t.g.addEdgeInfo(src, dst, w, t.ctx)
+}
+
+// removeEdge removes an arc inside this transaction — the NON-COMMUTATIVE
+// adjacency write, refused by any concurrent adjacency write to the same source,
+// append included. See [adjVersions].
+func (t *labelTx[N, W]) removeEdge(src, dst N) { t.g.removeEdgeInfo(src, dst, t.ctx) }
+
+// setEdgeLabel writes a pair's relationship type inside this transaction. It
+// reaches the overflow store when the pair already carries one.
+func (t *labelTx[N, W]) setEdgeLabel(src, dst N, name string) {
+	t.g.setEdgeLabelInfo(src, dst, name, t.ctx)
+}
+
+// removeEdgeLabel detaches a pair's relationship type inside this transaction.
+func (t *labelTx[N, W]) removeEdgeLabel(src, dst N, name string) {
+	t.g.removeEdgeLabelInfo(src, dst, name, t.ctx)
+}
+
+// setEdgeLabelByHandle writes one parallel edge instance's relationship type,
+// addressed by its stable handle.
+func (t *labelTx[N, W]) setEdgeLabelByHandle(src, dst N, handle uint64, name string) {
+	t.g.setEdgeLabelByHandleInfo(src, dst, handle, name, t.ctx)
+}
+
+// setEdgePropertyByHandle writes one parallel edge instance's property,
+// addressed by its stable handle.
+func (t *labelTx[N, W]) setEdgePropertyByHandle(src, dst N, handle uint64, key string, v PropertyValue) error {
+	return t.g.setEdgePropertyByHandleInfo(src, dst, handle, key, v, t.ctx)
+}
+
+// setEdgeLabelAt writes one parallel edge instance's relationship type,
+// addressed by its ordinal within the pair.
+func (t *labelTx[N, W]) setEdgeLabelAt(src, dst N, idx int64, name string) {
+	t.g.setEdgeLabelAtInfo(src, dst, idx, name, t.ctx)
+}
+
+// setEdgePropertyAt writes one parallel edge instance's property, addressed by
+// its ordinal within the pair.
+func (t *labelTx[N, W]) setEdgePropertyAt(src, dst N, idx int64, key string, v PropertyValue) error {
+	return t.g.setEdgePropertyAtInfo(src, dst, idx, key, v, t.ctx)
 }

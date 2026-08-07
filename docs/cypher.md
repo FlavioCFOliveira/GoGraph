@@ -1011,11 +1011,27 @@ with `Engine.BeginTx`:
 func (e *Engine) BeginTx(ctx context.Context) (*cypher.ExplicitTx, error)
 ```
 
-`BeginTx` acquires the engine's writer serialisation (the WAL store's
-single-writer lock when the engine is WAL-backed, the engine writer mutex when
-it is store-less) and holds it for the lifetime of the returned handle. If `ctx`
-is already cancelled or its deadline has elapsed, `BeginTx` returns promptly
-without acquiring any lock, wrapping the context error.
+`BeginTx` acquires **no lock at all**. Since rmp #2305 and rmp #2306 concurrency
+control is MVCC alone: an open explicit transaction blocks neither readers nor
+writers, and two clients may hold open write transactions simultaneously and both
+make progress. What the transaction holds is its own unpublished **commit record**,
+published exactly once at `COMMIT` — which is what makes a multi-statement
+transaction become visible at a single instant and a rolled-back one leave no trace.
+Each statement takes the graph's schema barrier *shared* for its own duration and
+releases it before returning, so nothing is held across client think-time.
+
+A write-write collision between two open transactions is **refused at the
+conflicting statement** with a retriable serialization error (`Exec` fails), not
+deferred to `COMMIT`: detection is first-updater-wins on the version chain, so the
+loser is known the moment it tries to install its version. Over Bolt the error maps
+to a `TransientError`, so the official driver's managed transactions retry it.
+
+An abandoned transaction no longer causes an outage, but it still pins the
+reclamation horizon — no version it could read is freed while it lives — which is
+why `server.Options.MaxTxIdleTime` keeps a finite bound.
+
+If `ctx` is already cancelled or its deadline has elapsed, `BeginTx` returns
+promptly, wrapping the context error.
 
 The returned `*ExplicitTx` exposes:
 
@@ -1091,7 +1107,8 @@ This API is the engine substrate for the Bolt `BEGIN` / `RUN` / `COMMIT` /
 For read-only work, prefer `Engine.BeginReadTx`. It opens an explicit
 transaction that acquires **neither** the writer serialisation, **nor** the
 visibility barrier, **nor** a WAL transaction, so it never serialises behind, or
-blocks, a concurrent writer — roughly doubling concurrent read throughput.
+blocks, a concurrent writer — roughly doubling concurrent read throughput. What
+it does acquire is one MVCC read snapshot, held for the transaction's lifetime.
 
 ```go
 func (e *Engine) BeginReadTx(ctx context.Context) (*cypher.ExplicitTx, error)
@@ -1104,13 +1121,53 @@ It returns the same `*ExplicitTx` handle, with these differences from `BeginTx`:
   `cypher.ErrWriteInReadOnlyTx` **before** it runs. This guard is what keeps the
   lock-free read path safe: a write would otherwise execute with no writer lock,
   no barrier, and no WAL.
-- **Read-committed isolation across statements.** Each `Exec` takes its own
-  per-statement snapshot, so reads observe the latest committed state across the
-  statements of the transaction (matching Neo4j's default), rather than a single
-  snapshot for the whole transaction.
+- **Snapshot isolation across the whole transaction.** `BeginReadTx` pins ONE
+  read instant and every `Exec` on the handle executes at it, so a commit made by
+  anyone else between two statements is invisible to the second. This is
+  stronger than Neo4j's documented multi-statement read-transaction behaviour
+  and matches Memgraph's default. Until rmp #2307 each `Exec` took its own
+  per-statement snapshot — read-committed across statements — which made an
+  explicit read transaction weaker than a single autocommit statement.
+- **It pins the reclamation horizon while it is open.** No version the
+  transaction could still reach is freed until it finishes, so a long-lived read
+  transaction holds version memory. `lpg.MVCCStats.ActiveSnapshots` and
+  `OldestSnapshotAge()` report it — renamed in sprint 334, because the horizon
+  holds a writer's snapshot as well as a reader's and the old names
+  (`ActiveReaders`, `OldestReaderAge()`) under-reported what was pinning it.
+  Finish the handle promptly; over Bolt, the idle and total transaction timeouts
+  bound an abandoned one.
+- **Read-your-own-writes across transactions needs a `Session`.** The commit
+  frontier is contiguous, so a commit is acknowledged at an instant that may not
+  have published yet, and the same caller's next transaction can begin *below its
+  own commit*. A write followed by a separate read may therefore miss the write,
+  and a caller writing repeatedly to one key may see a retriable serialization
+  error with nothing else contending for it.
+
+  `Engine.NewSession()` closes it (rmp #2329). A `cypher.Session` carries the
+  instant it committed at and waits for the frontier to reach it before its next
+  operation takes a snapshot, so `Session.Run`, `RunInTx`, `RunAny`, `BeginTx` and
+  `BeginReadTx` all observe every commit that session has made. Over Bolt this is
+  automatic: the server binds one per connection.
+
+  The `Engine`'s own methods deliberately keep the weaker contract, so an unrelated
+  reader pays no wait — the guarantee is asked for by name. It costs nothing when it
+  is not needed (32.06 µs against 32.13 µs sessionless on a read-after-write loop;
+  see [`benchmarks/session-ryow-2026-08-06.md`](benchmarks/session-ryow-2026-08-06.md)),
+  because the wait returns after one atomic load whenever the frontier has already
+  passed the session's floor.
+
+  ```go
+  s := eng.NewSession()
+  if _, err := s.RunInTx(ctx, "CREATE (:Person {name: 'ada'})", nil); err != nil {
+      // handle
+  }
+  // Guaranteed to see the write above, even under concurrent unrelated commits.
+  res, err := s.Run(ctx, "MATCH (p:Person) RETURN count(p)", nil)
+  ```
 - **Teardown-only finish.** The caller must still finish the handle with exactly
-  one `Commit` or `Rollback`; on a read-only handle both are no-ops, because
-  nothing was acquired.
+  one `Commit` or `Rollback`. On a read-only handle neither makes anything
+  durable — but both release the transaction's read snapshot, so skipping them
+  leaks a horizon slot for the life of the process.
 
 ```go
 tx, err := eng.BeginReadTx(ctx)

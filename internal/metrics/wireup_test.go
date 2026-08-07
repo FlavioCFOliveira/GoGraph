@@ -199,9 +199,36 @@ func driveTxnSample(t *testing.T, be *countingBackend, walPath string) {
 	expectLatency(t, be, "store.txn.Commit")
 }
 
+// driveMVCCSample exercises the MVCC write brackets — the autocommit transaction
+// and the begin/publish pair of a multi-statement one (rmp #2312).
+//
+// They are the module's only commit path for the in-memory engine, and a
+// `defer metrics.Time` silently dropped from one of them would leave the substrate
+// that all concurrency control now rests on with no latency series at all.
+func driveMVCCSample(t *testing.T, be *countingBackend) {
+	t.Helper()
+	gph := newSmokeGraph()
+	defer func() { _ = gph.Close() }()
+
+	if err := gph.ApplyVersioned(func(tx lpg.WriteTx) error {
+		return gph.Writer(tx).AddNode("smoke")
+	}); err != nil {
+		t.Fatalf("ApplyVersioned: %v", err)
+	}
+	tx := gph.BeginVersionedTx()
+	if err := gph.Writer(tx).AddNode("smoke-explicit"); err != nil {
+		gph.EndVersionedTx(tx)
+		t.Fatalf("explicit write: %v", err)
+	}
+	gph.EndVersionedTx(tx)
+
+	expectLatency(t, be, "graph.lpg.ApplyVersioned")
+	expectLatency(t, be, "graph.lpg.EndVersionedTx")
+}
+
 // TestWireUp_FiresPerCallSite installs a counting backend and exercises
 // a representative sample of instrumented public APIs across search,
-// search/centrality, graph/io/csv, store/wal, and store/txn. It then
+// search/centrality, graph/io/csv, store/wal, store/txn and graph/lpg. It then
 // asserts that every sampled call site recorded at least one latency
 // sample under the documented name.
 //
@@ -226,6 +253,7 @@ func TestWireUp_FiresPerCallSite(t *testing.T) {
 	dir := t.TempDir()
 	driveWALSample(t, be, filepath.Join(dir, "wal.bin"))
 	driveTxnSample(t, be, filepath.Join(dir, "wal2.bin"))
+	driveMVCCSample(t, be)
 }
 
 // TestWireUp_ErrorCounterFires drives one wired error path and

@@ -179,6 +179,13 @@ func (g *Graph[N, W]) HasEdgeHandleLabelRecordByIDAsOf(srcID, dstID graph.NodeID
 //
 // SetEdgeLabelByHandle is safe for concurrent use.
 func (g *Graph[N, W]) SetEdgeLabelByHandle(src, dst N, handle uint64, name string) {
+	g.setEdgeLabelByHandleInfo(src, dst, handle, name, nil)
+}
+
+// setEdgeLabelByHandleInfo is [Graph.SetEdgeLabelByHandle] with an explicit write transaction; tx is
+// nil for a direct Go-API mutation, which is committed the instant it is made
+// and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) setEdgeLabelByHandleInfo(src, dst N, handle uint64, name string, tx *writeCtx) {
 	if handle == 0 {
 		return
 	}
@@ -226,7 +233,11 @@ func (g *Graph[N, W]) SetEdgeLabelByHandle(src, dst N, handle uint64, name strin
 		// force an O(V+E) rebuild for a mutation that changed nothing.
 		return
 	}
-	g.pushHandleLabelVersion(sh, k, handle)
+	if !g.pushHandleLabelVersion(sh, k, handle, tx) {
+		// Refused: the conflict is recorded on tx and this write must not land,
+		// so the epoch must not move either.
+		return
+	}
 	bag.add(lid)
 	byHandle[handle] = bag
 	changed = true
@@ -288,6 +299,13 @@ func (g *Graph[N, W]) EdgeLabelsByHandleAsOf(src, dst N, handle uint64, snap *Sn
 //
 // SetEdgePropertyByHandle is safe for concurrent use.
 func (g *Graph[N, W]) SetEdgePropertyByHandle(src, dst N, handle uint64, key string, value PropertyValue) error {
+	return g.setEdgePropertyByHandleInfo(src, dst, handle, key, value, nil)
+}
+
+// setEdgePropertyByHandleInfo is [Graph.SetEdgePropertyByHandle] with an explicit write transaction; tx is
+// nil for a direct Go-API mutation, which is committed the instant it is made
+// and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) setEdgePropertyByHandleInfo(src, dst N, handle uint64, key string, value PropertyValue, tx *writeCtx) error {
 	if v := g.validator.load(); v != nil {
 		if err := v.Validate(key, value); err != nil {
 			return err
@@ -320,7 +338,9 @@ func (g *Graph[N, W]) SetEdgePropertyByHandle(src, dst N, handle uint64, key str
 	// propBag is stored by value: mutate a local copy and write it back under
 	// the shard lock (the write-back is load-bearing — set may grow/promote).
 	bag := byHandle[handle]
-	g.pushHandlePropVersion(sh, k, handle)
+	if !g.pushHandlePropVersion(sh, k, handle, tx) {
+		return nil
+	}
 	bag.set(pid, value)
 	byHandle[handle] = bag
 	return nil
@@ -444,6 +464,13 @@ func (g *Graph[N, W]) FirstEdgeHandleAsOf(src, dst N, snap *Snapshot) (uint64, b
 //
 // DelEdgePropertyByHandle is safe for concurrent use.
 func (g *Graph[N, W]) DelEdgePropertyByHandle(src, dst N, handle uint64, key string) {
+	g.delEdgePropertyByHandleInfo(src, dst, handle, key, nil)
+}
+
+// delEdgePropertyByHandleInfo is [Graph.DelEdgePropertyByHandle] with an explicit write transaction; tx is
+// nil for a direct Go-API mutation, which is committed the instant it is made
+// and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) delEdgePropertyByHandleInfo(src, dst N, handle uint64, key string, tx *writeCtx) {
 	if handle == 0 {
 		return
 	}
@@ -474,7 +501,9 @@ func (g *Graph[N, W]) DelEdgePropertyByHandle(src, dst N, handle uint64, key str
 	}
 	// propBag is stored by value: mutate a local copy and either write it back
 	// or drop the entry when the removal emptied it.
-	g.pushHandlePropVersion(sh, k, handle)
+	if !g.pushHandlePropVersion(sh, k, handle, tx) {
+		return
+	}
 	if bag.del(pid) {
 		delete(byHandle, handle)
 		if len(byHandle) == 0 {
@@ -493,6 +522,13 @@ func (g *Graph[N, W]) DelEdgePropertyByHandle(src, dst N, handle uint64, key str
 //
 // RemoveEdgeInstanceByHandle is safe for concurrent use.
 func (g *Graph[N, W]) RemoveEdgeInstanceByHandle(src, dst N, handle uint64) {
+	g.removeEdgeInstanceByHandleInfo(src, dst, handle, nil)
+}
+
+// removeEdgeInstanceByHandleInfo is [Graph.RemoveEdgeInstanceByHandle] with an explicit write transaction; tx is
+// nil for a direct Go-API mutation, which is committed the instant it is made
+// and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) removeEdgeInstanceByHandleInfo(src, dst N, handle uint64, tx *writeCtx) {
 	if handle == 0 {
 		return
 	}
@@ -508,8 +544,7 @@ func (g *Graph[N, W]) RemoveEdgeInstanceByHandle(src, dst N, handle uint64) {
 	{
 		sh := g.edgeHandleLabelShardFor(k)
 		sh.mu.Lock()
-		if byHandle, ok := sh.m[k]; ok {
-			g.pushHandleLabelVersion(sh, k, handle)
+		if byHandle, ok := sh.m[k]; ok && g.pushHandleLabelVersion(sh, k, handle, tx) {
 			delete(byHandle, handle)
 			if len(byHandle) == 0 {
 				delete(sh.m, k)
@@ -520,8 +555,7 @@ func (g *Graph[N, W]) RemoveEdgeInstanceByHandle(src, dst N, handle uint64) {
 	{
 		sh := g.edgeHandlePropShardFor(k)
 		sh.mu.Lock()
-		if byHandle, ok := sh.m[k]; ok {
-			g.pushHandlePropVersion(sh, k, handle)
+		if byHandle, ok := sh.m[k]; ok && g.pushHandlePropVersion(sh, k, handle, tx) {
 			delete(byHandle, handle)
 			if len(byHandle) == 0 {
 				delete(sh.m, k)

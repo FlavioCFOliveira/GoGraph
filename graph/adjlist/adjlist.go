@@ -180,24 +180,81 @@ type AdjList[N comparable, W any] struct {
 	// transaction clock, therefore no isolation to offer".
 	stamp *mvcc.WriteStamp
 
-	// dirtyShards lists the shards whose private builder must be frozen at the
-	// end of the current commit window. Appended on the first touch of a shard
-	// within the window; drained and cleared at EndCommit.
-	dirtyShards []*adjShard[W]
+	// bulkOwner is the builder-owner token of the open [AdjList.BeginCommit]
+	// window, or 0 when none is open.
+	//
+	// It is the one per-AdjList field left in the commit-window mechanism, and
+	// it is sound BY CONTRACT rather than by luck: BeginCommit's documented
+	// precondition is a provably-exclusive build with no concurrent reader and
+	// no concurrent writer (single-threaded WAL replay, bulk ingest).
+	//
+	// A token rather than a pointer, because minting a fresh *mvcc.CommitInfo
+	// per window costs an ALLOCATION per bracket, and
+	// TestBarrierGuard_ApplyAtomicallyAllocatesNothing requires a bracket that
+	// versions nothing to allocate nothing. Measured: the pointer form reported
+	// 1 alloc/op there.
+	bulkOwner uint64
+	// bulkSeq mints bulkOwner tokens when no clock is attached — the unversioned
+	// case, where no transaction token is ever produced, so the two spaces
+	// cannot collide. With a clock, tokens come from its transaction-id space,
+	// which is monotonic and never reused.
+	bulkSeq uint64
 
 	cfg Config
 
 	size atomic.Uint64
 
-	// commitDepth tracks the open commit-window nesting for the single writer
-	// (see [AdjList.BeginCommit]). 0 means no window is open and every write is
-	// its own 1-op window (clone-and-publish once). > 0 means a window is open
-	// and writes accumulate into each touched shard's private builder, published
-	// once per shard at the matching [AdjList.EndCommit]. It is mutated only by
-	// BeginCommit / EndCommit, which the higher layer calls only while holding
-	// its exclusive visibility barrier (so there is a single writer); it is not
-	// an atomic because the window protocol is single-writer by construction.
-	commitDepth int
+	// handleSeq mints stable per-slot edge handles. It starts at 0 and every
+	// handle is handleSeq.Add(1), so handles begin at 1 and are never reused.
+	//
+	// # Why the adjacency owns edge identity (rmp #2317)
+	//
+	// A relationship's identity used to be its POSITION in a rebuilt CSR edges
+	// array. That is only stable while the array is not rebuilt, and it is
+	// rebuilt whenever the topology changes — which, once a later clause of a
+	// statement must observe an earlier edge write, is in the middle of a query.
+	//
+	// The alternative of a (source, ordinal) pair was measured and rejected: an
+	// append leaves existing ordinals alone, but [AdjList.RemoveEdge] compacts,
+	// so every ordinal after a removed slot shifts down and a bound relationship
+	// silently becomes a different edge.
+	//
+	// The handle is the only identity that survives both, which is why
+	// [AdjList.RemoveEdgeByHandle] already exists. It used to be OPTIONAL — a
+	// column present only when a caller supplied handles, with 0 as a "no handle"
+	// sentinel — so identity was available for edges created through Cypher and
+	// absent for edges created through the Go API, the graph/io loaders or bulk
+	// import. Two identities, one of them unsound, chosen by construction route.
+	//
+	// It is now mandatory and minted here, so every slot in every graph has one.
+	// Measured cost on 960k edges: 27.77 B/edge to 35.75 B/edge, +7.98 B/edge.
+	// Edges created through Cypher already carried a handle, so for a
+	// Cypher-driven workload the change costs nothing.
+	handleSeq atomic.Uint64
+
+	// bulkDepth tracks [AdjList.BeginCommit] nesting for the bulk paths only.
+	// Mutated exclusively by BeginCommit / EndCommit under their documented
+	// single-writer precondition; see bulkOwner.
+	bulkDepth int
+
+	// exclusiveBuild is set while an [AdjList.BeginExclusiveBuild] window is
+	// open: a provably-exclusive rebuild that takes NO visibility barrier
+	// (WAL recovery, bulk import).
+	//
+	// It is what turns that path's precondition from a comment into an enforced
+	// contract (rmp #2302, audit finding E21): a serving commit window opened
+	// while it is set panics, and so does an exclusive build opened inside a
+	// serving window. ATOMIC rather than plain because the whole point is to
+	// catch the case where the two modes DO overlap, and a plain field read from
+	// two goroutines would be a race in the detector before it could be a
+	// diagnosis.
+	exclusiveBuild atomic.Bool
+
+	// nestedServingWindows counts serving commit windows opened while an
+	// exclusive build was in progress. That nesting is legitimate — it is
+	// recovery's own reclamation sweep — and is counted rather than refused; see
+	// [AdjList.BeginExclusiveBuild].
+	nestedServingWindows atomic.Uint64
 }
 
 // SetAuxFactory registers the constructor the fused property-carrying append
@@ -231,21 +288,49 @@ type adjShard[W any] struct {
 	// shard takes its first version.
 	versioned map[uint64]struct{}
 
+	// buildingOwner is the token of the transaction that owns `building` — its
+	// in-flight transaction id, or the bulk window's token — and 0 when there is
+	// no builder. A builder is reused ONLY by the transaction that created it
+	// (rmp #2301).
+	//
+	// This is what replaced the per-AdjList commitDepth + dirtyShards pair. The
+	// ownership IS the transaction's identity, so there is no shared counter to
+	// race on, no shared dirty list to append to, and nesting needs no depth —
+	// nested statements of one transaction share its commit record, which is the
+	// whole reason that record exists.
+	//
+	// It also removes the need to FREEZE a builder at the end of a transaction.
+	// A builder can only be reused by a write presenting the same owner, and a
+	// finished transaction's record never appears on a write again — commit
+	// records are allocated per transaction and never reused — so the builder is
+	// unreachable for in-place mutation the moment its transaction ends. Guarded
+	// by mu.
+	buildingOwner uint64
+
 	// building is the PRIVATE, not-yet-published [shardSlots] clone the shard
-	// is accumulating writes into during an open commit window (see
-	// [AdjList.BeginCommit]). It is nil unless this shard has been touched in
-	// the current window. Guarded by mu. A reader never observes it — it is
-	// published into slotsRef only at [AdjList.EndCommit]. This is the
-	// clone-once-per-(shard, window) dedup that bounds a multi-op commit's COW
-	// cost to O(distinct shards touched) instead of O(ops): the first write to
-	// a shard in a window clones its published slot array into building; every
-	// later write in the same window mutates building in place; the window end
-	// freezes building by publishing it. Mutating building in place mid-window
-	// is sound ONLY because the commit window is held under the higher layer's
-	// exclusive visibility barrier (lpg.Graph.ApplyAtomically / LockBarrier =
-	// visMu.Lock) and F3.2 reads stay under that barrier (visMu.RLock), so no
-	// reader can observe building before it is published — see the F3.5 unwind
-	// note on [AdjList.BeginCommit].
+	// is accumulating writes into for buildingOwner's transaction. It is nil
+	// unless this shard has been touched by a transaction that is still able to
+	// reuse it. Guarded by mu. This is the clone-once-per-(shard, window) dedup
+	// that bounds a multi-op commit's COW cost to O(distinct shards touched)
+	// instead of O(ops): the first write to a shard in a window clones its
+	// published slot array into building; every later write in the same window
+	// mutates building in place; the window end freezes it by clearing this field.
+	//
+	// TWO CLAIMS THAT USED TO BE HERE WERE BOTH WRONG (rmp #2327).
+	//
+	// It said "a reader never observes it — it is published into slotsRef only at
+	// [AdjList.EndCommit]". Both halves are false: [AdjList.storeEntry] stores the
+	// builder into slotsRef on the shard's FIRST touch in the window, precisely so
+	// the writer gets read-your-own-writes, and every barrier-free reader — an MVCC
+	// snapshot read, the non-blocking checkpointer — can load it from there.
+	//
+	// It also said mutating building in place mid-window is sound ONLY because the
+	// window is held under the exclusive visibility barrier while reads stay under
+	// visMu.RLock. Sprint 334 made MVCC the module's concurrency control and reads
+	// no longer take that barrier, so the stated reason no longer holds. The real
+	// reason is on [loadEntry]: atomic slot publication, immutable entries, arrays
+	// that are replaced rather than resized, and version records that let an older
+	// reader step back over an in-flight write.
 	building *shardSlots
 
 	mu sync.Mutex
@@ -533,7 +618,35 @@ func (a *AdjList[N, W]) HasEdge(src, dst N) bool {
 // strict orphan-free behaviour should detect ErrShardFull and treat
 // the graph as saturated.
 func (a *AdjList[N, W]) AddEdge(src, dst N, w W) error {
-	return a.addEdge(src, dst, w, edgeExtra{})
+	return a.addEdge(src, dst, w, edgeExtra{}, mvcc.Tx{})
+}
+
+// NextHandle mints a fresh stable edge handle, never zero and never reused.
+//
+// It is exported because the layers above must be able to mint a handle BEFORE
+// the adjacency write, so the same value can be written to the WAL and stamped
+// onto the slot: recovery then re-stamps the recorded handle verbatim through
+// [AdjList.AddEdgeH] and a relationship keeps its identity across a restart.
+//
+// Safe for concurrent use.
+func (a *AdjList[N, W]) NextHandle() uint64 { return a.handleSeq.Add(1) }
+
+// SeedHandleSeq raises the handle counter so the next mint is above every handle
+// already present, and is the recovery seam for invariant I5: post-recovery edge
+// creation must never re-mint a handle a restored edge already carries.
+//
+// It only ever raises. A lower value is ignored rather than rejected, so a caller
+// folding a maximum over several sources — the snapshot's handle column, then the
+// WAL tail — can call it once per source in any order.
+//
+// Safe for concurrent use.
+func (a *AdjList[N, W]) SeedHandleSeq(highWater uint64) {
+	for {
+		cur := a.handleSeq.Load()
+		if highWater <= cur || a.handleSeq.CompareAndSwap(cur, highWater) {
+			return
+		}
+	}
 }
 
 // AddEdgeH is [AdjList.AddEdge] with an explicit, caller-supplied stable
@@ -552,7 +665,7 @@ func (a *AdjList[N, W]) AddEdge(src, dst N, w W) error {
 // a no-op and the supplied handle is ignored (the existing slot keeps its
 // original handle).
 func (a *AdjList[N, W]) AddEdgeH(src, dst N, w W, handle uint64) error {
-	return a.addEdge(src, dst, w, edgeExtra{handle: handle, hasHandle: true})
+	return a.addEdge(src, dst, w, edgeExtra{handle: handle, hasHandle: true}, mvcc.Tx{})
 }
 
 // AddEdgeLabeled is [AdjList.AddEdge] with an OPAQUE 4-byte label supplied AT
@@ -574,7 +687,7 @@ func (a *AdjList[N, W]) AddEdgeH(src, dst N, w W, handle uint64) error {
 // no-op and the supplied label is ignored (the existing slot keeps its label).
 // Use [AdjList.SetEdgeLabelSlot] to (re)label a slot of a pre-existing edge.
 func (a *AdjList[N, W]) AddEdgeLabeled(src, dst N, w W, label uint32) error {
-	return a.addEdge(src, dst, w, edgeExtra{label: label, hasLabel: true})
+	return a.addEdge(src, dst, w, edgeExtra{label: label, hasLabel: true}, mvcc.Tx{})
 }
 
 // AddEdgeLabeledH fuses [AdjList.AddEdgeH] and [AdjList.AddEdgeLabeled]: it
@@ -583,7 +696,7 @@ func (a *AdjList[N, W]) AddEdgeLabeled(src, dst N, w W, label uint32) error {
 // position oldLen at insertion time, so a labelled, handle-carrying edge is
 // still an O(1)-amortised append.
 func (a *AdjList[N, W]) AddEdgeLabeledH(src, dst N, w W, handle uint64, label uint32) error {
-	return a.addEdge(src, dst, w, edgeExtra{handle: handle, hasHandle: true, label: label, hasLabel: true})
+	return a.addEdge(src, dst, w, edgeExtra{handle: handle, hasHandle: true, label: label, hasLabel: true}, mvcc.Tx{})
 }
 
 // AddEdgeLabeledWithProp fuses [AdjList.AddEdgeLabeled] with one opaque
@@ -618,7 +731,7 @@ func (a *AdjList[N, W]) AddEdgeLabeledWithProp(src, dst N, w W, label uint32, pa
 	return a.addEdge(src, dst, w, edgeExtra{
 		label: label, hasLabel: true,
 		auxPayload: payload, hasAuxPayload: true,
-	})
+	}, mvcc.Tx{})
 }
 
 // edgeExtra carries the OPTIONAL parallel-column values an edge insertion may
@@ -665,13 +778,21 @@ func (ex edgeExtra) mirror() edgeExtra {
 // and mirror slots are assigned atomically — no concurrent parallel-edge
 // insertion can interleave between the two appends — so both directions
 // always reflect the same slot ordering.
-func (a *AdjList[N, W]) addEdge(src, dst N, w W, ex edgeExtra) error {
+func (a *AdjList[N, W]) addEdge(src, dst N, w W, ex edgeExtra, tx mvcc.Tx) error {
+	// EVERY slot gets a handle (rmp #2317). A caller that supplied one — the
+	// Cypher write path, a WAL replay re-stamping the handle the log recorded —
+	// keeps it, so identity is preserved verbatim across recovery. A caller that
+	// did not gets a fresh one here rather than the old 0 sentinel, so no live
+	// slot is left without an identity. See [AdjList.handleSeq].
+	if !ex.hasHandle {
+		ex.handle, ex.hasHandle = a.NextHandle(), true
+	}
 	srcID := a.mapper.Intern(src)
 	dstID := a.mapper.Intern(dst)
 
 	// Directed graphs and self-loops need only the forward append.
 	if a.cfg.Directed || srcID == dstID {
-		inserted, err := a.upsertEdge(srcID, dstID, w, ex)
+		inserted, err := a.upsertEdge(srcID, dstID, w, ex, tx)
 		if err != nil {
 			return err
 		}
@@ -687,7 +808,7 @@ func (a *AdjList[N, W]) addEdge(src, dst N, w W, ex edgeExtra) error {
 
 	if srcShard == dstShard {
 		// Single shard covers both endpoints: one lock suffices.
-		inserted, err := a.upsertEdge(srcID, dstID, w, ex)
+		inserted, err := a.upsertEdge(srcID, dstID, w, ex, tx)
 		if err != nil {
 			return err
 		}
@@ -695,10 +816,10 @@ func (a *AdjList[N, W]) addEdge(src, dst N, w W, ex edgeExtra) error {
 			return nil
 		}
 		a.size.Add(1)
-		if _, err := a.upsertEdge(dstID, srcID, w, ex.mirror()); err != nil {
+		if _, err := a.upsertEdge(dstID, srcID, w, ex.mirror(), tx); err != nil {
 			// Both endpoints share a shard, so the forward append and this
 			// mirror append are already serialised; just undo the forward.
-			a.removeOneEdge(srcID, dstID)
+			a.removeOneEdge(srcID, dstID, tx)
 			a.size.Add(^uint64(0))
 			return err
 		}
@@ -713,7 +834,7 @@ func (a *AdjList[N, W]) addEdge(src, dst N, w W, ex edgeExtra) error {
 	sLo.mu.Lock()
 	sHi.mu.Lock()
 
-	inserted, err := a.upsertEdgeLocked(srcID, dstID, w, ex)
+	inserted, err := a.upsertEdgeLocked(srcID, dstID, w, ex, tx)
 	if err != nil {
 		sHi.mu.Unlock()
 		sLo.mu.Unlock()
@@ -725,10 +846,10 @@ func (a *AdjList[N, W]) addEdge(src, dst N, w W, ex edgeExtra) error {
 		return nil
 	}
 	// Forward slot appended. Now append the mirror under the same lock pair.
-	if _, err := a.upsertEdgeLocked(dstID, srcID, w, ex.mirror()); err != nil {
+	if _, err := a.upsertEdgeLocked(dstID, srcID, w, ex.mirror(), tx); err != nil {
 		// Undo the forward append before releasing — we still hold both locks
 		// so the rollback is atomic with respect to any reader.
-		a.removeOneEdgeLocked(srcID, dstID)
+		a.removeOneEdgeLocked(srcID, dstID, tx)
 		sHi.mu.Unlock()
 		sLo.mu.Unlock()
 		return err
@@ -747,11 +868,11 @@ func (a *AdjList[N, W]) addEdge(src, dst N, w W, ex edgeExtra) error {
 // snapshot is constructed fresh and swapped in via atomic.StorePointer
 // so concurrent readers always observe a consistent immutable
 // adjacency.
-func (a *AdjList[N, W]) upsertEdge(src, dst graph.NodeID, w W, ex edgeExtra) (bool, error) {
+func (a *AdjList[N, W]) upsertEdge(src, dst graph.NodeID, w W, ex edgeExtra, tx mvcc.Tx) (bool, error) {
 	s := &a.shards[src&shardMask]
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return a.upsertEdgeLocked(src, dst, w, ex)
+	return a.upsertEdgeLocked(src, dst, w, ex, tx)
 }
 
 // growCap returns the next backing-array capacity to use when appending to a
@@ -779,7 +900,7 @@ func growCap(cur int) int {
 // readers). When the array is full a new one is allocated with geometric
 // capacity (growCap), amortising the copy cost to O(log d) large allocations
 // per degree-d hub.
-func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtra) (bool, error) {
+func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtra, tx mvcc.Tx) (bool, error) {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
@@ -819,7 +940,7 @@ func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtr
 		if ex.hasAuxPayload && a.auxFactory != nil {
 			entry.aux = a.auxFactory(1, ex.auxPayload)
 		}
-		if err := a.storeEntry(s, intraIdx, entry); err != nil {
+		if err := a.storeEntry(s, intraIdx, entry, tx); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -891,7 +1012,7 @@ func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtr
 		// fresh column of length newLen. A fresh entry that fuses no payload never
 		// gains an aux column, so a label-/property-free graph pays nothing.
 		ax := a.growAuxEx(current.aux, oldLen, ex)
-		if err := a.storeEntry(s, intraIdx, &adjEntry[W]{neighbours: nb, weights: ws, handles: hs, labels: ls, aux: ax}); err != nil {
+		if err := a.storeEntry(s, intraIdx, &adjEntry[W]{neighbours: nb, weights: ws, handles: hs, labels: ls, aux: ax}, tx); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -935,7 +1056,7 @@ func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtr
 	// Carry the opaque aux column forward when it exists; a fused payload writes
 	// the new slot at oldLen PRESENT, otherwise the new slot is absent.
 	newAux := a.growAuxEx(current.aux, oldLen, ex)
-	if err := a.storeEntry(s, intraIdx, &adjEntry[W]{neighbours: newNb, weights: newW, handles: newH, labels: newL, aux: newAux}); err != nil {
+	if err := a.storeEntry(s, intraIdx, &adjEntry[W]{neighbours: newNb, weights: newW, handles: newH, labels: newL, aux: newAux}, tx); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -986,6 +1107,13 @@ func (a *AdjList[N, W]) growAuxEx(cur AuxColumn, oldLen int, ex edgeExtra) AuxCo
 // falls back to first-match behaviour, which is correct in the single-writer
 // case that plain AddEdge implies.
 func (a *AdjList[N, W]) RemoveEdge(src, dst N) {
+	a.removeEdgeTx(src, dst, mvcc.Tx{})
+}
+
+// removeEdgeTx is [AdjList.RemoveEdge] with the write's own transaction carried in
+// rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
+// none, which is what the exported form above passes.
+func (a *AdjList[N, W]) removeEdgeTx(src, dst N, tx mvcc.Tx) {
 	srcID, ok := a.mapper.Lookup(src)
 	if !ok {
 		return
@@ -994,7 +1122,7 @@ func (a *AdjList[N, W]) RemoveEdge(src, dst N) {
 	if !ok {
 		return
 	}
-	removed, removedHandle := a.removeOneEdgeWithHandle(srcID, dstID)
+	removed, removedHandle := a.removeOneEdgeWithHandle(srcID, dstID, tx)
 	if !removed {
 		return
 	}
@@ -1006,9 +1134,9 @@ func (a *AdjList[N, W]) RemoveEdge(src, dst N) {
 	// Mirror removal: prefer handle-based targeting when the removed slot
 	// carried a non-zero handle; fall back to first-match otherwise.
 	if removedHandle != 0 {
-		a.removeOneEdgeByHandle(dstID, srcID, removedHandle)
+		a.removeOneEdgeByHandle(dstID, srcID, removedHandle, tx)
 	} else {
-		a.removeOneEdge(dstID, srcID)
+		a.removeOneEdge(dstID, srcID, tx)
 	}
 }
 
@@ -1030,6 +1158,13 @@ func (a *AdjList[N, W]) RemoveEdge(src, dst N) {
 //
 // RemoveEdgeByHandle is safe for concurrent use.
 func (a *AdjList[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) bool {
+	return a.removeEdgeByHandleTx(src, dst, handle, mvcc.Tx{})
+}
+
+// removeEdgeByHandleTx is [AdjList.RemoveEdgeByHandle] with the write's own transaction carried in
+// rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
+// none, which is what the exported form above passes.
+func (a *AdjList[N, W]) removeEdgeByHandleTx(src, dst N, handle uint64, tx mvcc.Tx) bool {
 	srcID, ok := a.mapper.Lookup(src)
 	if !ok {
 		return false
@@ -1038,7 +1173,7 @@ func (a *AdjList[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) bool {
 	if !ok {
 		return false
 	}
-	if !a.removeOneEdgeByHandle(srcID, dstID, handle) {
+	if !a.removeOneEdgeByHandle(srcID, dstID, handle, tx) {
 		return false
 	}
 	a.size.Add(^uint64(0))
@@ -1049,7 +1184,7 @@ func (a *AdjList[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) bool {
 	// Undirected: retire the mirror slot carrying the same handle. A false
 	// return here is benign (the mirror may already be gone); the logical edge
 	// counter was decremented once above.
-	a.removeOneEdgeByHandle(dstID, srcID, handle)
+	a.removeOneEdgeByHandle(dstID, srcID, handle, tx)
 	return true
 }
 
@@ -1069,6 +1204,13 @@ func (a *AdjList[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) bool {
 //
 // RemoveAllEdgesFrom is safe for concurrent use.
 func (a *AdjList[N, W]) RemoveAllEdgesFrom(src N) {
+	a.removeAllEdgesFromTx(src, mvcc.Tx{})
+}
+
+// removeAllEdgesFromTx is [AdjList.RemoveAllEdgesFrom] with the write's own transaction carried in
+// rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
+// none, which is what the exported form above passes.
+func (a *AdjList[N, W]) removeAllEdgesFromTx(src N, tx mvcc.Tx) {
 	srcID, ok := a.mapper.Lookup(src)
 	if !ok {
 		return
@@ -1085,7 +1227,7 @@ func (a *AdjList[N, W]) RemoveAllEdgesFrom(src N) {
 	}
 	// Publish nil atomically: readers after this store see an empty adjacency
 	// for src. storeEntry cannot fail here because the slot already exists.
-	_ = a.storeEntry(s, intraIdx, nil)
+	_ = a.storeEntry(s, intraIdx, nil, tx)
 	removed := len(old.neighbours)
 	// Copy neighbour IDs before releasing the lock so the mirror-removal loop
 	// below is not affected by concurrent writes to the shard.
@@ -1104,7 +1246,7 @@ func (a *AdjList[N, W]) RemoveAllEdgesFrom(src N) {
 	// cleared by the slot zeroing above and must not be processed again.
 	for _, dstID := range dsts {
 		if dstID != srcID {
-			a.removeOneEdge(dstID, srcID)
+			a.removeOneEdge(dstID, srcID, tx)
 		}
 	}
 }
@@ -1113,7 +1255,7 @@ func (a *AdjList[N, W]) RemoveAllEdgesFrom(src N) {
 // omits one occurrence of dst (first match). Returns (true, handle) when an
 // edge was removed, where handle is the handle value stored in the removed
 // slot (0 when no handle column is present).
-func (a *AdjList[N, W]) removeOneEdgeWithHandle(src, dst graph.NodeID) (removed bool, handle uint64) {
+func (a *AdjList[N, W]) removeOneEdgeWithHandle(src, dst graph.NodeID, tx mvcc.Tx) (removed bool, handle uint64) {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
@@ -1143,19 +1285,19 @@ func (a *AdjList[N, W]) removeOneEdgeWithHandle(src, dst graph.NodeID) (removed 
 		// in the shard's slot array; no growth is required. Publish nil
 		// instead of an empty struct to avoid a small allocation on each
 		// last-edge removal; loadEntry handles nil slots correctly.
-		_ = a.storeEntry(s, intraIdx, nil)
+		_ = a.storeEntry(s, intraIdx, nil, tx)
 		return true, removedH
 	}
 	newEntry := compactEntry(current, idx)
 	// storeEntry cannot fail here: same slot, no growth required.
-	_ = a.storeEntry(s, intraIdx, newEntry)
+	_ = a.storeEntry(s, intraIdx, newEntry, tx)
 	return true, removedH
 }
 
 // removeOneEdge publishes a new adjacency snapshot for src that omits
 // one occurrence of dst. Returns true when an edge was removed.
-func (a *AdjList[N, W]) removeOneEdge(src, dst graph.NodeID) bool {
-	removed, _ := a.removeOneEdgeWithHandle(src, dst)
+func (a *AdjList[N, W]) removeOneEdge(src, dst graph.NodeID, tx mvcc.Tx) bool {
+	removed, _ := a.removeOneEdgeWithHandle(src, dst, tx)
 	return removed
 }
 
@@ -1163,7 +1305,7 @@ func (a *AdjList[N, W]) removeOneEdge(src, dst graph.NodeID) bool {
 // The caller must already hold the shard mutex for src. This variant is
 // used by [AdjList.addEdge] to roll back a forward append while still
 // holding both shard locks.
-func (a *AdjList[N, W]) removeOneEdgeLocked(src, dst graph.NodeID) {
+func (a *AdjList[N, W]) removeOneEdgeLocked(src, dst graph.NodeID, tx mvcc.Tx) {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
@@ -1182,17 +1324,17 @@ func (a *AdjList[N, W]) removeOneEdgeLocked(src, dst graph.NodeID) {
 		return
 	}
 	if len(current.neighbours) == 1 {
-		_ = a.storeEntry(s, intraIdx, nil)
+		_ = a.storeEntry(s, intraIdx, nil, tx)
 		return
 	}
-	_ = a.storeEntry(s, intraIdx, compactEntry(current, idx))
+	_ = a.storeEntry(s, intraIdx, compactEntry(current, idx), tx)
 }
 
 // removeOneEdgeByHandle publishes a new adjacency snapshot for src that omits
 // the slot whose handle equals targetHandle. The search scans dst-directed
 // neighbours for a matching handle. Returns true when a slot was removed.
 // Falls back silently when no slot with the target handle exists.
-func (a *AdjList[N, W]) removeOneEdgeByHandle(src, dst graph.NodeID, targetHandle uint64) bool {
+func (a *AdjList[N, W]) removeOneEdgeByHandle(src, dst graph.NodeID, targetHandle uint64, tx mvcc.Tx) bool {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
@@ -1202,7 +1344,7 @@ func (a *AdjList[N, W]) removeOneEdgeByHandle(src, dst graph.NodeID, targetHandl
 	current := loadEntry[W](s, intraIdx)
 	if current == nil || current.handles == nil {
 		// No handle column: fall back to first-match by neighbour.
-		return a.removeOneEdgeFallback(s, intraIdx, current, dst)
+		return a.removeOneEdgeFallback(s, intraIdx, current, dst, tx)
 	}
 	// Find the slot whose neighbour is dst AND whose handle matches.
 	idx := -1
@@ -1216,17 +1358,17 @@ func (a *AdjList[N, W]) removeOneEdgeByHandle(src, dst graph.NodeID, targetHandl
 		return false
 	}
 	if len(current.neighbours) == 1 {
-		_ = a.storeEntry(s, intraIdx, nil)
+		_ = a.storeEntry(s, intraIdx, nil, tx)
 		return true
 	}
-	_ = a.storeEntry(s, intraIdx, compactEntry(current, idx))
+	_ = a.storeEntry(s, intraIdx, compactEntry(current, idx), tx)
 	return true
 }
 
 // removeOneEdgeFallback is the first-match fallback used inside
 // [AdjList.removeOneEdgeByHandle] when the handle column is absent.
 // The caller must hold s.mu.
-func (a *AdjList[N, W]) removeOneEdgeFallback(s *adjShard[W], intraIdx uint64, current *adjEntry[W], dst graph.NodeID) bool {
+func (a *AdjList[N, W]) removeOneEdgeFallback(s *adjShard[W], intraIdx uint64, current *adjEntry[W], dst graph.NodeID, tx mvcc.Tx) bool {
 	if current == nil {
 		return false
 	}
@@ -1241,10 +1383,10 @@ func (a *AdjList[N, W]) removeOneEdgeFallback(s *adjShard[W], intraIdx uint64, c
 		return false
 	}
 	if len(current.neighbours) == 1 {
-		_ = a.storeEntry(s, intraIdx, nil)
+		_ = a.storeEntry(s, intraIdx, nil, tx)
 		return true
 	}
-	_ = a.storeEntry(s, intraIdx, compactEntry(current, idx))
+	_ = a.storeEntry(s, intraIdx, compactEntry(current, idx), tx)
 	return true
 }
 
@@ -1799,6 +1941,17 @@ func (a *AdjList[N, W]) UpdateEntryAux(
 	src graph.NodeID,
 	fn func(cur AuxColumn, neighbours []graph.NodeID) (AuxColumn, bool),
 ) bool {
+	return a.updateEntryAuxTx(src, fn, mvcc.Tx{})
+}
+
+// updateEntryAuxTx is [AdjList.UpdateEntryAux] with the write's own transaction
+// carried in rather than resolved through the ambient slot. The zero [mvcc.Tx]
+// carries none, which is what the exported form above passes.
+func (a *AdjList[N, W]) updateEntryAuxTx(
+	src graph.NodeID,
+	fn func(cur AuxColumn, neighbours []graph.NodeID) (AuxColumn, bool),
+	tx mvcc.Tx,
+) bool {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
@@ -1822,7 +1975,7 @@ func (a *AdjList[N, W]) UpdateEntryAux(
 	}
 	// storeEntry cannot fail here: the slot already exists, so no growth is
 	// required.
-	_ = a.storeEntry(s, intraIdx, entry)
+	_ = a.storeEntry(s, intraIdx, entry, tx)
 	return true
 }
 
@@ -1850,6 +2003,13 @@ func (a *AdjList[N, W]) UpdateEntryAux(
 // never mutated in place, so a concurrent lock-free reader holding the prior
 // snapshot is unaffected. SetEdgeLabelSlot is safe for concurrent use.
 func (a *AdjList[N, W]) SetEdgeLabelSlot(src, dst graph.NodeID, v uint32) bool {
+	return a.setEdgeLabelSlotTx(src, dst, v, mvcc.Tx{})
+}
+
+// setEdgeLabelSlotTx is [AdjList.SetEdgeLabelSlot] with the write's own transaction carried in
+// rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
+// none, which is what the exported form above passes.
+func (a *AdjList[N, W]) setEdgeLabelSlotTx(src, dst graph.NodeID, v uint32, tx mvcc.Tx) bool {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
@@ -1888,7 +2048,7 @@ func (a *AdjList[N, W]) SetEdgeLabelSlot(src, dst graph.NodeID, v uint32) bool {
 	}
 	// storeEntry cannot fail here: the slot already exists, so no growth is
 	// required.
-	_ = a.storeEntry(s, intraIdx, entry)
+	_ = a.storeEntry(s, intraIdx, entry, tx)
 	return true
 }
 
@@ -1903,6 +2063,13 @@ func (a *AdjList[N, W]) SetEdgeLabelSlot(src, dst graph.NodeID, v uint32) bool {
 // Concurrency: copy-on-write, identical to [AdjList.SetEdgeLabelSlot]; safe
 // for concurrent use.
 func (a *AdjList[N, W]) ClearEdgeLabelSlotValue(src, dst graph.NodeID, v uint32) bool {
+	return a.clearEdgeLabelSlotValueTx(src, dst, v, mvcc.Tx{})
+}
+
+// clearEdgeLabelSlotValueTx is [AdjList.ClearEdgeLabelSlotValue] with the write's own transaction carried in
+// rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
+// none, which is what the exported form above passes.
+func (a *AdjList[N, W]) clearEdgeLabelSlotValueTx(src, dst graph.NodeID, v uint32, tx mvcc.Tx) bool {
 	if v == 0 {
 		return false
 	}
@@ -1938,7 +2105,7 @@ func (a *AdjList[N, W]) ClearEdgeLabelSlotValue(src, dst graph.NodeID, v uint32)
 		// label column is replaced here.
 		aux: current.aux,
 	}
-	_ = a.storeEntry(s, intraIdx, entry)
+	_ = a.storeEntry(s, intraIdx, entry, tx)
 	return true
 }
 
@@ -1971,6 +2138,13 @@ func (a *AdjList[N, W]) ClearEdgeLabelSlotValue(src, dst graph.NodeID, v uint32)
 // Concurrency: copy-on-write, identical to [AdjList.SetEdgeLabelSlot]; safe for
 // concurrent use.
 func (a *AdjList[N, W]) SetEdgeLabelSlotsAt(src, dst graph.NodeID, idxs []int, v uint32) int {
+	return a.setEdgeLabelSlotsAtTx(src, dst, idxs, v, mvcc.Tx{})
+}
+
+// setEdgeLabelSlotsAtTx is [AdjList.SetEdgeLabelSlotsAt] with the write's own transaction carried in
+// rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
+// none, which is what the exported form above passes.
+func (a *AdjList[N, W]) setEdgeLabelSlotsAtTx(src, dst graph.NodeID, idxs []int, v uint32, tx mvcc.Tx) int {
 	if len(idxs) == 0 {
 		return 0
 	}
@@ -2011,7 +2185,7 @@ func (a *AdjList[N, W]) SetEdgeLabelSlotsAt(src, dst graph.NodeID, idxs []int, v
 	}
 	// storeEntry cannot fail here: the slots already exist, so no growth is
 	// required.
-	_ = a.storeEntry(s, intraIdx, entry)
+	_ = a.storeEntry(s, intraIdx, entry, tx)
 	return written
 }
 
@@ -2032,6 +2206,13 @@ func (a *AdjList[N, W]) SetEdgeLabelSlotsAt(src, dst graph.NodeID, idxs []int, v
 // Concurrency: copy-on-write, identical to [AdjList.SetEdgeLabelSlot]; safe for
 // concurrent use.
 func (a *AdjList[N, W]) ClearEdgeLabelSlotsValue(src, dst graph.NodeID, v uint32) int {
+	return a.clearEdgeLabelSlotsValueTx(src, dst, v, mvcc.Tx{})
+}
+
+// clearEdgeLabelSlotsValueTx is [AdjList.ClearEdgeLabelSlotsValue] with the write's own transaction carried in
+// rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
+// none, which is what the exported form above passes.
+func (a *AdjList[N, W]) clearEdgeLabelSlotsValueTx(src, dst graph.NodeID, v uint32, tx mvcc.Tx) int {
 	if v == 0 {
 		return 0
 	}
@@ -2070,7 +2251,7 @@ func (a *AdjList[N, W]) ClearEdgeLabelSlotsValue(src, dst graph.NodeID, v uint32
 		// label column is replaced here.
 		aux: current.aux,
 	}
-	_ = a.storeEntry(s, intraIdx, entry)
+	_ = a.storeEntry(s, intraIdx, entry, tx)
 	return cleared
 }
 
@@ -2085,6 +2266,13 @@ func (a *AdjList[N, W]) ClearEdgeLabelSlotsValue(src, dst graph.NodeID, v uint32
 // Concurrency: copy-on-write, identical to [AdjList.SetEdgeLabelSlot]; safe
 // for concurrent use.
 func (a *AdjList[N, W]) ClearEdgeLabelSlots(src, dst graph.NodeID) {
+	a.clearEdgeLabelSlotsTx(src, dst, mvcc.Tx{})
+}
+
+// clearEdgeLabelSlotsTx is [AdjList.ClearEdgeLabelSlots] with the write's own transaction carried in
+// rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
+// none, which is what the exported form above passes.
+func (a *AdjList[N, W]) clearEdgeLabelSlotsTx(src, dst graph.NodeID, tx mvcc.Tx) {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
@@ -2120,7 +2308,7 @@ func (a *AdjList[N, W]) ClearEdgeLabelSlots(src, dst graph.NodeID) {
 		// label column is replaced here.
 		aux: current.aux,
 	}
-	_ = a.storeEntry(s, intraIdx, entry)
+	_ = a.storeEntry(s, intraIdx, entry, tx)
 }
 
 // SetEdgeLabelSlots stores opaque label values on many of src's adjacency
@@ -2144,6 +2332,13 @@ func (a *AdjList[N, W]) ClearEdgeLabelSlots(src, dst graph.NodeID) {
 // the same atomic store-pointer mechanism — so a concurrent lock-free reader
 // holding the prior snapshot is unaffected. Safe for concurrent use.
 func (a *AdjList[N, W]) SetEdgeLabelSlots(src graph.NodeID, updates map[graph.NodeID]uint32) int {
+	return a.setEdgeLabelSlotsTx(src, updates, mvcc.Tx{})
+}
+
+// setEdgeLabelSlotsTx is [AdjList.SetEdgeLabelSlots] with the write's own transaction carried in
+// rather than resolved through the ambient slot. The zero [mvcc.Tx] carries
+// none, which is what the exported form above passes.
+func (a *AdjList[N, W]) setEdgeLabelSlotsTx(src graph.NodeID, updates map[graph.NodeID]uint32, tx mvcc.Tx) int {
 	if len(updates) == 0 {
 		return 0
 	}
@@ -2195,7 +2390,7 @@ func (a *AdjList[N, W]) SetEdgeLabelSlots(src graph.NodeID, updates map[graph.No
 		// label column is replaced here.
 		aux: current.aux,
 	}
-	_ = a.storeEntry(s, intraIdx, entry)
+	_ = a.storeEntry(s, intraIdx, entry, tx)
 	return len(done)
 }
 
@@ -2209,10 +2404,38 @@ func (a *AdjList[N, W]) SetEdgeLabelSlots(src graph.NodeID, updates map[graph.No
 // shard's first touch and mutates it in place thereafter), so a plain
 // slotsRef.Load() observes the writer's in-window writes — giving
 // read-your-own-writes within a transaction (e.g. lpg.Graph.RemoveEdge reads
-// HasEdge right after RemoveEdge). Concurrent readers cannot run during a
-// window (it is held under visMu.Lock while reads are under visMu.RLock), so
-// the only goroutine that ever observes the builder through slotsRef is the
-// window-owning writer itself.
+// HasEdge right after RemoveEdge).
+//
+// # Who else observes the builder, and why that is safe (rmp #2327)
+//
+// This comment used to say that the window-owning writer is the ONLY goroutine
+// that ever observes the builder, "because it is held under visMu.Lock while
+// reads are under visMu.RLock". THAT IS FALSE, and it has been since sprint 334
+// made MVCC the module's concurrency control: an MVCC snapshot reader resolves
+// through its own start timestamp and takes NO barrier, and the non-blocking
+// checkpointer reads adjacency under the store commit lock rather than visMu.
+// Both reach this function while a window is open, and a targeted test proves
+// they do — see TestLoadEntry_SnapshotReaderReachesAnOpenWindowAndStepsBackOverIt,
+// whose positive control reads the in-flight state through this very path.
+//
+// What makes that safe is NOT exclusion. It is four properties, and every one of
+// them is asserted rather than argued:
+//
+//  1. this load is an atomic.LoadPointer paired with the atomic.StorePointer the
+//     in-window mutation uses, so the pointer is never torn;
+//  2. an adjEntry is IMMUTABLE once published — a write replaces the slot pointer
+//     and never mutates the entry — so a complete old-or-new entry is all that can
+//     be observed;
+//  3. the slot ARRAY is never resized in place: growth allocates a fresh
+//     [shardSlots] and republishes slotsRef, so the slice header a reader has
+//     loaded is stable for as long as it holds it;
+//  4. ISOLATION comes from the version chain, not from the barrier: every write
+//     records the entry it supersedes ([AdjList.linkVersion]), so a reader whose
+//     start timestamp precedes the commit steps back over the in-flight write.
+//
+// Property 4 is the one that carries the isolation guarantee, and it is why this
+// function is deliberately version-agnostic: it returns the CURRENT entry, and
+// [AdjList.entryAsOf] is what walks back from it.
 func loadEntry[W any](s *adjShard[W], intraIdx uint64) *adjEntry[W] {
 	ss := s.slotsRef.Load()
 	if ss == nil || intraIdx >= uint64(len(ss.slots)) {
@@ -2254,9 +2477,17 @@ func loadEntry[W any](s *adjShard[W], intraIdx uint64) *adjEntry[W] {
 // array into the shard's private builder (s.building), records the shard as
 // dirty, and publishes the builder into slotsRef. Every LATER write to the same
 // shard within the window mutates that builder IN PLACE (no clone, no extra
-// Store) — sound because the window is held under visMu.Lock and F3.2 reads
-// stay under visMu.RLock, so no reader can observe the builder while it is
-// mutated. [AdjList.EndCommit] freezes every dirty builder (clears s.building),
+// Store).
+//
+// THAT IS NOT SOUND BECAUSE READERS ARE EXCLUDED — they are not (rmp #2327). This
+// comment used to claim the window is held under visMu.Lock while reads stay under
+// visMu.RLock, so no reader could observe the builder mid-mutation. Sprint 334
+// retired the barrier from the read path and the claim went with it. Readers DO
+// observe the builder; what makes that safe is set out in the section below and on
+// [loadEntry], and it rests on atomic slot publication, entry immutability, and the
+// version chain — never on a lock.
+//
+// [AdjList.EndCommit] freezes every dirty builder (clears s.building),
 // after which it is immutable forever. Outside any window every write is its
 // own 1-op window: clone-and-publish once (correct, just no dedup).
 //
@@ -2284,21 +2515,57 @@ func loadEntry[W any](s *adjShard[W], intraIdx uint64) *adjEntry[W] {
 // clock. Go's sync/atomic operations are sequentially consistent, so a reader
 // that observes the commit timestamp observes the slot array too.
 //
+// A third property, added by rmp #2327 because the argument above does not state
+// it: the slot ARRAY is never resized in place either. A write past the end of the
+// current array allocates a fresh [shardSlots] via growShardLocked and republishes
+// slotsRef, so a reader holding an older array has a stable slice header and is
+// merely reading an older version — the ordinary MVCC case again, not a torn one.
+//
 // Pinned by TestStoreEntry_InPlaceWindowMutationIsSoundUnderVersioning and its
-// concurrent companion, which fail if either property is lost.
-func (a *AdjList[N, W]) storeEntry(s *adjShard[W], intraIdx uint64, entry *adjEntry[W]) error {
+// concurrent companion, which fail if either property is lost, and by
+// TestLoadEntry_SnapshotReaderReachesAnOpenWindowAndStepsBackOverIt and
+// TestLoadEntry_ConcurrentSnapshotReadersNeverObserveAnOpenWindow, which drive the
+// barrier-free reader this argument is actually about. All four were validated
+// against a build in which the in-window mutation is left unversioned, and all four
+// fail there — so a pass is informative rather than merely quiet.
+func (a *AdjList[N, W]) storeEntry(s *adjShard[W], intraIdx uint64, entry *adjEntry[W], tx mvcc.Tx) error {
 	maxCap := a.cfg.MaxShardCapacity
-	inWindow := a.commitDepth > 0
+	// The transaction now writing, as an identity. Zero means "no transaction",
+	// in which case this write is its own one-op window and always clones — the
+	// behaviour an unbracketed write has always had.
+	//
+	// From the transaction the write CARRIES when it carries one, and only from
+	// the ambient slot when it does not (rmp #2320). Reading the ambient slot for
+	// a write that has its own transaction is what let two concurrent writers
+	// present the same owner and mutate each other's unpublished builders; the
+	// note at [AdjList.builderOwner] recorded the obligation and this discharges
+	// it.
+	owner := tx.ID()
+	if owner == 0 {
+		owner = a.builderOwner()
+	}
+	inWindow := owner != 0
 
-	// Determine the slot array to write into. Within an open window, after the
-	// first touch of this shard, s.building is the private (already-published)
-	// builder we mutate in place. Otherwise we start from the frozen published
-	// array and copy-on-write.
+	// Determine the slot array to write into. A builder is reusable only when it
+	// belongs to THIS transaction; another transaction's builder is not ours to
+	// mutate, and reusing it would put our writes into an array that transaction
+	// may still publish over. Taking the published array instead is always
+	// correct: markDirtyAndBuild publishes a builder into slotsRef on first
+	// touch, so the published array already carries every write the other
+	// transaction has made.
 	base := s.building
+	if base != nil && s.buildingOwner != owner {
+		// Release the other transaction's builder rather than merely ignoring
+		// it, so a finished transaction's slot array is not kept alive by this
+		// field after slotsRef has moved on.
+		s.building = nil
+		s.buildingOwner = 0
+		base = nil
+	}
 	firstTouchInWindow := false
 	if base == nil {
 		base = s.slotsRef.Load()
-		firstTouchInWindow = inWindow // first time this shard is touched this window
+		firstTouchInWindow = inWindow // first time this transaction touches this shard
 	}
 
 	// MVCC P3 (rmp #2281), inert unless armed: record the entry this write
@@ -2326,7 +2593,7 @@ func (a *AdjList[N, W]) storeEntry(s *adjShard[W], intraIdx uint64, entry *adjEn
 				// for anyone before it.
 				entry = &adjEntry[W]{}
 			}
-			info, ts := a.writeStamp()
+			info, ts := a.versionStamp(tx)
 			a.linkVersion(entry, prev, info, ts)
 			// Index the slot so reclamation need not scan the shard.
 			if s.versioned == nil {
@@ -2344,7 +2611,7 @@ func (a *AdjList[N, W]) storeEntry(s *adjShard[W], intraIdx uint64, entry *adjEn
 		}
 		next.slots[intraIdx] = unsafe.Pointer(entry) //nolint:gosec // typed publication of *adjEntry[W]
 		if inWindow {
-			a.markDirtyAndBuild(s, next)
+			a.markDirtyAndBuild(s, next, owner)
 		}
 		s.slotsRef.Store(next)
 		return nil
@@ -2376,22 +2643,73 @@ func (a *AdjList[N, W]) storeEntry(s *adjShard[W], intraIdx uint64, entry *adjEn
 	copy(next.slots, base.slots)
 	next.slots[intraIdx] = unsafe.Pointer(entry) //nolint:gosec // typed publication of *adjEntry[W] into a fresh clone
 	if inWindow {
-		a.markDirtyAndBuild(s, next)
+		a.markDirtyAndBuild(s, next, owner)
 	}
 	s.slotsRef.Store(next)
 	return nil
 }
 
-// markDirtyAndBuild records s as dirty in the current commit window and adopts
-// next as its private builder, so subsequent same-shard writes this window
-// mutate next in place and EndCommit knows to freeze it. The caller must hold
-// s.mu and be inside an open window. A shard is appended to dirtyShards only on
-// its first touch this window (when s.building was still nil).
-func (a *AdjList[N, W]) markDirtyAndBuild(s *adjShard[W], next *shardSlots) {
-	if s.building == nil {
-		a.dirtyShards = append(a.dirtyShards, s)
-	}
+// markDirtyAndBuild adopts next as s's private builder on behalf of owner's
+// transaction, so subsequent same-shard writes by that transaction mutate next
+// in place instead of cloning the slot array again.
+//
+// The caller must hold s.mu and pass a non-nil owner. There is no dirty list to
+// append to and nothing to freeze later: see [adjShard.buildingOwner].
+func (a *AdjList[N, W]) markDirtyAndBuild(s *adjShard[W], next *shardSlots, owner uint64) {
 	s.building = next
+	s.buildingOwner = owner
+}
+
+// builderOwner returns the identity of the transaction currently writing, for
+// deciding whether a shard's builder may be mutated in place.
+//
+// The open transaction's shared commit record when there is one — which is
+// per-transaction by construction and is exactly the granularity the dedup
+// wants — otherwise the bulk paths' synthetic owner, otherwise nil.
+//
+// It ALLOCATES NOTHING and counts no version: it is an identity check, not a
+// stamp. See [mvcc.WriteStamp.OpenInfo].
+func (a *AdjList[N, W]) builderOwner() uint64 {
+	// The WRITING TRANSACTION wins when there is one, and this ordering is the
+	// reverse of what it was until rmp #2302 — for a reason that only became true
+	// once the transaction id was minted eagerly.
+	//
+	// The old order preferred the bulk window's token because reading the
+	// transaction first let the token CHANGE mid-window: the commit RECORD is
+	// allocated lazily by the first version, so a bracket's first write owned its
+	// builder under one token and the second presented another, re-cloning the
+	// builder on every write. TestStoreEntry_InPlaceWindowMutationIsSoundUnderVersioning
+	// caught that on rmp #2301's first draft.
+	//
+	// [mvcc.WriteStamp.OpenTxID] closes that gap: the id is stored when the window
+	// opens, before any write can happen (rmp #2299 minted it eagerly precisely so
+	// the writer could read through it), so it is stable for the whole
+	// transaction where the record is not.
+	//
+	// Preferring it MATTERS rather than merely being tidier. The bulk token is ONE
+	// per-AdjList field, so while it wins, every writer in a window presents the
+	// same owner — and the owner is what decides who may mutate a shard's private,
+	// unpublished slot array in place. Under the barrier there was only ever one
+	// serving writer, so the two orders behaved identically; with the barrier gone
+	// the old order would let two writers reuse each other's builders. Keying on the
+	// transaction removes that by construction.
+	//
+	// This function is now the FALLBACK only. rmp #2320 made the transaction a
+	// parameter that travels with the write ([AdjList.storeEntry] prefers tx.ID()),
+	// so an ambient lookup happens only for a write that carries no transaction at
+	// all — the exclusive bulk builds, WAL replay, snapshot apply and the direct Go
+	// API — where there is no second writer to be confused with.
+	if a.stamp != nil {
+		if id := a.stamp.OpenTxID(); id != 0 {
+			// A transaction id is unique, monotonic and never reused, so it
+			// identifies this transaction and can never be mistaken for another's
+			// — nor for a commit timestamp, which lives below mvcc.TxIDBase.
+			return id
+		}
+	}
+	// No transaction: the explicit window's synthetic token, which is what an
+	// exclusive rebuild and an unversioned graph both rely on.
+	return a.bulkOwner
 }
 
 // BeginCommit opens a commit window so that the writes of one transaction
@@ -2399,29 +2717,31 @@ func (a *AdjList[N, W]) markDirtyAndBuild(s *adjShard[W], next *shardSlots) {
 // mutate that private builder in place for the rest of the window, instead of
 // cloning the whole array on every write. It bounds a multi-op commit's
 // copy-on-write cost to O(distinct shards touched) rather than O(ops). The
-// matching [AdjList.EndCommit] freezes every touched shard's builder.
+// matching [AdjList.EndCommit] retires that owner.
 //
-// # Single-writer contract (load-bearing)
+// # Single-writer contract (load-bearing, and now NARROW)
 //
 // BeginCommit/EndCommit are NOT internally synchronised and MUST be called only
-// by a single writer that holds an exclusive section excluding every other
-// writer AND every reader for the window's whole duration. The higher layer
-// supplies exactly this: it brackets the visibility barrier
-// (lpg.Graph.ApplyAtomically / LockBarrier = visMu.Lock), under which the
-// engine is single-writer and reads run under visMu.RLock (mutually excluded).
-// The window state (commitDepth, dirtyShards, and each shard's building) is
-// therefore mutated by one goroutine only; it is not guarded by an atomic or a
-// global lock because the exclusive section already guarantees that.
+// by a single writer with NO concurrent writer, NO concurrent reader and NO
+// concurrent [AdjList.PinSnapshot] for the window's whole duration. The
+// sanctioned callers are provably-exclusive bulk builds — single-threaded WAL
+// recovery replay, or a bulk-ingest loop the concurrent public API cannot reach.
+// Wrapping such a loop in ONE window restores baseline write cost (clone once
+// per shard, then in place).
 //
-// The only other sanctioned caller is a provably-exclusive bulk build with NO
-// concurrent reader and NO concurrent [AdjList.PinSnapshot] for the window's
-// whole duration (e.g. single-threaded WAL recovery replay, or a bulk-ingest
-// loop the concurrent public API cannot reach). Wrapping such a loop in ONE
-// window restores baseline write cost (clone once per shard, then in place).
+// That contract used to cover the ENGINE too, because the engine bracketed the
+// visibility barrier around every write and was therefore single-writer by
+// construction. It no longer needs to: a transaction with a commit record open
+// on the write stamp is identified by that record, so the dedup follows the
+// transaction rather than the lock, and two concurrent transactions cannot
+// disturb each other's builders (rmp #2301). The shared window state this
+// paragraph used to defend — a depth counter and a dirty-shard list on the
+// AdjList — no longer exists.
 //
-// Calls nest: a nested BeginCommit/EndCommit pair (e.g. an inner statement
-// applied inside an explicit transaction that already opened the window) just
-// adjusts the depth; only the outermost EndCommit freezes the builders.
+// Calls nest: a nested BeginCommit/EndCommit pair just adjusts the depth; only
+// the outermost EndCommit retires the owner. A transaction-owned builder needs
+// no depth at all — nested statements of one transaction share its commit
+// record, which is what makes them one transaction.
 //
 // # F3.5 / #1671 — the dedup SURVIVES the lock-free read path
 //
@@ -2432,9 +2752,165 @@ func (a *AdjList[N, W]) markDirtyAndBuild(s *adjShard[W], next *shardSlots) {
 // See the unwind note on [AdjList.storeEntry] for the full argument and the
 // tests that pin it.
 //
+// # What it is for now, after rmp #2301
+//
+// A transaction that has a commit record open on the write stamp gets the
+// clone-once dedup WITHOUT calling this at all: the record identifies the
+// transaction, and [adjShard.buildingOwner] uses it directly. That is the engine
+// path, and it is why the dedup is now safe under concurrent writers — the
+// window state that used to be shared (commitDepth, dirtyShards) is gone.
+//
+// BeginCommit remains for the paths that write with NO transaction open on the
+// stamp and are exclusive by contract: single-threaded WAL recovery replay and
+// bulk ingest. It installs a synthetic owner so those writes are deduped too.
+// Calling it from a path that already has a transaction open is harmless and
+// redundant — the record wins.
+//
 // BeginCommit is safe to call only as described above; misuse (concurrent
 // callers, or reads not excluded) is undefined.
-func (a *AdjList[N, W]) BeginCommit() { a.commitDepth++ }
+func (a *AdjList[N, W]) BeginCommit() {
+	// A serving window opened DURING an exclusive build is legitimate and happens
+	// on the dominant recovery path, so it is counted rather than refused. See
+	// [AdjList.BeginExclusiveBuild] for the measured stack and for why the
+	// dangerous case cannot be detected here.
+	if a.exclusiveBuild.Load() {
+		a.nestedServingWindows.Add(1)
+	}
+	a.bulkDepth++
+	if a.bulkOwner == 0 {
+		a.bulkOwner = a.mintBulkOwner()
+	}
+}
+
+// BeginExclusiveBuild opens a commit window for a provably-exclusive REBUILD of
+// the adjacency — WAL recovery replaying into a fresh graph, or a bulk import —
+// and asserts the precondition that makes it sound.
+//
+// # Why a distinct entry point (rmp #2302, audit finding E21)
+//
+// [AdjList.BeginCommit] and this method do the same thing to the same fields.
+// They differ entirely in what licenses them:
+//
+//   - BeginCommit is called by the serving write path (lpg's ApplyAtomically and
+//     LockBarrier) and is safe because the graph's exclusive visibility barrier is
+//     held for the whole window.
+//   - This is called by store/recovery and store/bulkimport, which take NO
+//     barrier. It was safe because the graph is not reachable by anyone yet —
+//     single-threaded replay, no concurrent reader, no concurrent writer.
+//
+// Until now both called BeginCommit, so that second licence lived only in a
+// comment. The audit's point is that it must not be silently INHERITED once
+// writers overlap at serving time: a path that legitimately needs no barrier
+// during a rebuild must not become a path that quietly needs none while the
+// engine serves. Splitting the entry points makes the two licences distinct at
+// the call site, and the flag makes overlapping them fail loudly instead of
+// corrupting a builder.
+//
+// # What #2304 still has to do, recorded here because it is easy to miss
+//
+// [AdjList.builderOwner] prefers bulkOwner OVER the writing transaction's own
+// record, deliberately, so a window's token cannot change mid-window. That means
+// the SERVING path's window currently SHADOWS per-transaction ownership: with the
+// barrier gone, two concurrent writers would both present the same bulkOwner and
+// would reuse each other's private, unpublished shard builders. rmp #2304 must
+// therefore retire the serving path's window in favour of a token that travels
+// with the write — lpg already has one in writeCtx.txID — rather than merely
+// deleting visMu around it.
+//
+// # Why only ONE direction is asserted — measured, after getting it wrong
+//
+// The first version of this also panicked from [AdjList.BeginCommit] whenever a
+// serving window was opened during a rebuild. That is too strict, and `make ci`
+// said so: recovery's own replay nests one, on the SAME goroutine, on the
+// dominant path.
+//
+//	adjlist.BeginCommit
+//	lpg.ApplyAtomically              (lpg.go:712)
+//	lpg.reclaimAfterDirectWrite      (mvcc_gc.go:135)
+//	lpg.addNodeInfo                  (lpg.go:1206)
+//	recovery.applyOpCodec            (recovery.go:1616)
+//
+// A replay creates versions fast enough to cross the reclamation threshold, and
+// the sweep runs inside an ApplyAtomically bracket. Three packages failed on it
+// (cypher, examples/04_persistence, examples/24_social_network_cli), so the guard
+// was rejecting correct behaviour.
+//
+// The hazard is CONCURRENCY, not nesting — a SECOND goroutine writing while the
+// rebuild runs. Telling the two apart needs goroutine identity, which this package
+// does not have: the only structure that knows which goroutine holds a write
+// window is lpg's barrierGuard, and it is `//go:build race || gograph_debug`. So
+// the sound assertion in this direction belongs in lpg, alongside that guard, and
+// is rmp #2304's to add when it retires the serving path's window. Until then the
+// nesting is COUNTED — see [AdjList.NestedServingWindows] — so the behaviour is
+// observable rather than merely tolerated.
+//
+// What IS asserted here is the direction that holds unconditionally: an exclusive
+// build must not START inside a serving window, because a rebuild may only run on
+// a graph nobody is serving.
+//
+// Nested calls are permitted and expected (a replay applies many ops inside one
+// window); the depth is tracked exactly as BeginCommit's is. The matching
+// [AdjList.EndExclusiveBuild] must be called once per call, by the same
+// goroutine.
+//
+// Not safe for concurrent use — that is the whole point.
+func (a *AdjList[N, W]) BeginExclusiveBuild() {
+	if a.bulkDepth > 0 && !a.exclusiveBuild.Load() {
+		panic("adjlist: BeginExclusiveBuild called inside a serving commit window; the " +
+			"exclusive-build precondition is that nothing else is writing this graph")
+	}
+	a.exclusiveBuild.Store(true)
+	a.bulkDepth++
+	if a.bulkOwner == 0 {
+		a.bulkOwner = a.mintBulkOwner()
+	}
+}
+
+// EndExclusiveBuild closes the innermost window opened by
+// [AdjList.BeginExclusiveBuild]. On the outermost close it clears the
+// exclusive-build flag, so the graph becomes available to the serving write path.
+func (a *AdjList[N, W]) EndExclusiveBuild() {
+	if a.bulkDepth == 0 {
+		return
+	}
+	a.bulkDepth--
+	if a.bulkDepth > 0 {
+		return
+	}
+	a.bulkOwner = 0
+	a.exclusiveBuild.Store(false)
+}
+
+// NestedServingWindows reports how many serving commit windows have been opened
+// while an exclusive build was in progress.
+//
+// It exists because that nesting is legitimate but load-bearing: it is recovery's
+// own reclamation sweep, and if it ever stopped happening the reclamation debt
+// would be accumulating through a whole replay with nothing draining it. A counter
+// makes it observable; see [AdjList.BeginExclusiveBuild] for the measured stack.
+func (a *AdjList[N, W]) NestedServingWindows() uint64 { return a.nestedServingWindows.Load() }
+
+// InExclusiveBuild reports whether an exclusive rebuild window is open.
+//
+// It exists so a caller that must not run against a half-rebuilt graph can say so
+// in a test or an assertion rather than assuming.
+func (a *AdjList[N, W]) InExclusiveBuild() bool { return a.exclusiveBuild.Load() }
+
+// mintBulkOwner returns a builder-owner token that no transaction can present.
+//
+// From the clock's transaction-id space when there is a clock, so it can never
+// collide with a live transaction's id; from a local counter otherwise, which is
+// the unversioned case where no transaction token is ever produced. Allocates
+// nothing either way.
+func (a *AdjList[N, W]) mintBulkOwner() uint64 {
+	if a.stamp != nil {
+		if c := a.stamp.Clock(); c != nil {
+			return c.NextTxID()
+		}
+	}
+	a.bulkSeq++
+	return a.bulkSeq
+}
 
 // EndCommit closes the innermost commit window opened by [AdjList.BeginCommit].
 // On the OUTERMOST close (depth returns to 0) it freezes every shard touched
@@ -2449,24 +2925,23 @@ func (a *AdjList[N, W]) BeginCommit() { a.commitDepth++ }
 // that called BeginCommit, exactly once per BeginCommit, under the same
 // exclusive section.
 func (a *AdjList[N, W]) EndCommit() {
-	if a.commitDepth == 0 {
+	if a.bulkDepth == 0 {
 		return
 	}
-	a.commitDepth--
-	if a.commitDepth > 0 {
+	a.bulkDepth--
+	if a.bulkDepth > 0 {
 		return
 	}
-	// Outermost close: freeze every touched shard's builder. The shard's
-	// slotsRef already points at the builder; clearing s.building marks it
-	// frozen so the next write to that shard (in a later window or unbracketed)
-	// clones it afresh rather than mutating it in place.
-	for _, s := range a.dirtyShards {
-		s.mu.Lock()
-		s.building = nil
-		s.mu.Unlock()
-	}
-	// Reset the dirty list, keeping the backing array for reuse across commits.
-	a.dirtyShards = a.dirtyShards[:0]
+	// Outermost close: retire the synthetic owner. No shard needs visiting.
+	//
+	// Freezing each touched shard's builder used to be this function's whole
+	// job, and it is no longer necessary: a builder is reusable only by a write
+	// presenting its owner, and this owner is dropped here and never handed out
+	// again. The next write to any of those shards finds an owner mismatch and
+	// clones, which is precisely what the freeze used to arrange — but at O(1)
+	// instead of one lock acquisition per touched shard, and without a shared
+	// dirty list for concurrent writers to race on (rmp #2301).
+	a.bulkOwner = 0
 }
 
 // growShardLocked builds a FRESH [shardSlots] with at least minLen slots,

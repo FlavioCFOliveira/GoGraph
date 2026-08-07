@@ -50,6 +50,29 @@ import (
 // published with a single atomic store, so a concurrent lock-free reader
 // observes either the prior block or the fully-updated one.
 func (g *Graph[N, W]) SetEdgeProperty(src, dst N, key string, value PropertyValue) error {
+	return g.setEdgePropertyInfo(src, dst, key, value, nil)
+}
+
+// setEdgePropertyInfo is [Graph.SetEdgeProperty] with an explicit write
+// transaction; tx is nil for a direct Go-API mutation, which is committed the
+// instant it is made. See [writeCtx].
+//
+// It exists because the columnar edge-property write goes through the ADJACENCY
+// ENTRY — [adjlist.AdjList.UpdateEntryAux] publishes a whole new entry carrying
+// the rebuilt block — and not through any node-side store, so it had no
+// transaction-carrying form when rmp #2301 built the rest of them. Without it a
+// statement that set a relationship property had that write stamped with
+// whichever transaction the ambient slot named, splitting the statement across
+// two commit records (rmp #2320).
+//
+// It takes no write-write conflict check, which is the status quo for this store
+// and is rmp #2300's to close: the adjacency's conflict index ([adjVersions]) is
+// per-SOURCE-NODE, so refusing here would refuse two writers setting properties
+// on two different relationships out of the same node. Threading the record is
+// independent of that and strictly narrows what can go wrong: today two such
+// writers lose an update silently AND publish at two instants; after this they
+// still lose the update — until #2300 — but each statement is atomic.
+func (g *Graph[N, W]) setEdgePropertyInfo(src, dst N, key string, value PropertyValue, tx *writeCtx) error {
 	if v := g.validator.load(); v != nil {
 		if err := v.Validate(key, value); err != nil {
 			return err
@@ -61,7 +84,7 @@ func (g *Graph[N, W]) SetEdgeProperty(src, dst N, key string, value PropertyValu
 	srcID, _ := g.adj.Mapper().Lookup(src)
 	dstID, _ := g.adj.Mapper().Lookup(dst)
 	keyID := g.pkeys.Intern(key)
-	g.adj.UpdateEntryAux(srcID, func(cur adjlist.AuxColumn, neighbours []graph.NodeID) (adjlist.AuxColumn, bool) {
+	g.adj.Writer(tx.adjTx()).UpdateEntryAux(srcID, func(cur adjlist.AuxColumn, neighbours []graph.NodeID) (adjlist.AuxColumn, bool) {
 		block := asEdgePropCols(cur)
 		length := len(neighbours)
 		changed := false
@@ -203,6 +226,15 @@ func (g *Graph[N, W]) EdgeHasPropertyAsOf(src, dst N, key string, snap *Snapshot
 // (src, dst). No-op if absent. The key is cleared on every dst-matching slot so
 // the per-pair view no longer reports it.
 func (g *Graph[N, W]) DelEdgeProperty(src, dst N, key string) {
+	g.delEdgePropertyInfo(src, dst, key, nil)
+}
+
+// delEdgePropertyInfo is [Graph.DelEdgeProperty] with an explicit write
+// transaction; tx is nil for a direct Go-API mutation. It is the removal half of
+// [Graph.setEdgePropertyInfo] and exists for exactly the same reason — see there
+// for why this store had no transaction-carrying form and why it takes no
+// conflict check.
+func (g *Graph[N, W]) delEdgePropertyInfo(src, dst N, key string, tx *writeCtx) {
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
 		return
@@ -215,7 +247,7 @@ func (g *Graph[N, W]) DelEdgeProperty(src, dst N, key string) {
 	if !ok {
 		return
 	}
-	g.adj.UpdateEntryAux(srcID, func(cur adjlist.AuxColumn, neighbours []graph.NodeID) (adjlist.AuxColumn, bool) {
+	g.adj.Writer(tx.adjTx()).UpdateEntryAux(srcID, func(cur adjlist.AuxColumn, neighbours []graph.NodeID) (adjlist.AuxColumn, bool) {
 		block := asEdgePropCols(cur)
 		if block == nil {
 			return cur, false

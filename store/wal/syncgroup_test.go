@@ -39,10 +39,19 @@ func TestSyncGroup_FailAll(t *testing.T) {
 	const members = 8
 	// Append every member's frame up front so all frames are buffered before any
 	// SyncGroup runs: they form one group covered by a single leader fsync.
+	//
+	// Each member keeps its OWN watermark, which is what SyncGroup takes: a
+	// committer cannot ask the writer what its frames' end offset was after the
+	// fact, because the accepted offset is shared and a poison rewinds it (rmp
+	// #2322). AppendRun of a single frame is exactly one Append plus that offset.
+	marks := make([]int64, members)
 	for m := 0; m < members; m++ {
-		if aerr := w.Append(bytes.Repeat([]byte{byte(0xA0 + m)}, 16)); aerr != nil {
+		frame := bytes.Repeat([]byte{byte(0xA0 + m)}, 16)
+		mark, aerr := w.AppendRun(func(emit func([]byte) error) error { return emit(frame) })
+		if aerr != nil {
 			t.Fatalf("Append(%d): %v", m, aerr)
 		}
+		marks[m] = mark
 	}
 
 	var failures atomic.Int64
@@ -51,18 +60,28 @@ func TestSyncGroup_FailAll(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(members)
 	for m := 0; m < members; m++ {
-		go func() {
+		go func(m int) {
 			defer wg.Done()
 			<-start
-			if serr := w.SyncGroup(); serr != nil {
+			if serr := w.SyncGroup(marks[m]); serr != nil {
 				failures.Add(1)
 				if !errors.Is(serr, testfs.ErrSyncFailed) {
 					t.Errorf("SyncGroup error = %v; want ErrSyncFailed", serr)
 				}
+				// EVERY member — not just the leader — must receive the durability
+				// CLASS, because fail-all is precisely the policy that makes an
+				// innocent member fail (rmp #2306). A member that got only a bare I/O
+				// error could not tell this from a conflict of its own, and the Bolt
+				// boundary could not keep it out of the driver's retriable family.
+				if !errors.Is(serr, wal.ErrDurabilityFailed) {
+					t.Errorf("SyncGroup error = %v; not errors.Is(wal.ErrDurabilityFailed). "+
+						"A group member cannot identify a durability fail-stop, so a managed "+
+						"transaction would retry it against a poisoned writer.", serr)
+				}
 			} else {
 				nilAcks.Add(1)
 			}
-		}()
+		}(m)
 	}
 	close(start)
 	wg.Wait()
@@ -115,10 +134,14 @@ func TestSyncGroup_Coalesces(t *testing.T) {
 	defer func() { _ = w.Close() }()
 
 	const members = 64
+	marks := make([]int64, members)
 	for m := 0; m < members; m++ {
-		if aerr := w.Append(bytes.Repeat([]byte{byte(m)}, 8)); aerr != nil {
+		frame := bytes.Repeat([]byte{byte(m)}, 8)
+		mark, aerr := w.AppendRun(func(emit func([]byte) error) error { return emit(frame) })
+		if aerr != nil {
 			t.Fatalf("Append(%d): %v", m, aerr)
 		}
+		marks[m] = mark
 	}
 
 	start := make(chan struct{})
@@ -126,15 +149,15 @@ func TestSyncGroup_Coalesces(t *testing.T) {
 	wg.Add(members)
 	var acks atomic.Int64
 	for m := 0; m < members; m++ {
-		go func() {
+		go func(m int) {
 			defer wg.Done()
 			<-start
-			if serr := w.SyncGroup(); serr != nil {
+			if serr := w.SyncGroup(marks[m]); serr != nil {
 				t.Errorf("SyncGroup: %v", serr)
 				return
 			}
 			acks.Add(1)
-		}()
+		}(m)
 	}
 	close(start)
 	wg.Wait()

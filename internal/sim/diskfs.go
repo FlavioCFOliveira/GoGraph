@@ -125,14 +125,14 @@ func (s simWALFS) ParentDirSync(childPath string) error { return s.disk.ParentDi
 // (string/float64) to match the checkpointer.
 type simCheckpointBackend struct{ disk *SimDisk }
 
-func (s simCheckpointBackend) CaptureGraph(cs *csr.CSR[float64], g *lpg.Graph[string, float64], codec txn.Codec[string]) (*snapshot.Capture[float64], error) {
+func (s simCheckpointBackend) CaptureGraph(cs *csr.CSR[float64], g *lpg.Graph[string, float64], codec txn.Codec[string], at *lpg.Snapshot) (*snapshot.Capture[float64], error) {
 	if codec != nil {
-		return snapshot.CaptureGraph[string, float64](g, cs, codec)
+		return snapshot.CaptureGraph[string, float64](g, cs, codec, at)
 	}
 	// No codec configured: the simulator always supplies the string codec, but
 	// honour the nil case for completeness by capturing with an explicit string
 	// codec so the snapshot stays self-sufficient.
-	return snapshot.CaptureGraph[string, float64](g, cs, txn.NewStringCodec())
+	return snapshot.CaptureGraph[string, float64](g, cs, txn.NewStringCodec(), at)
 }
 
 func (s simCheckpointBackend) WriteCapture(snapDir string, capt *snapshot.Capture[float64], constraints []snapshot.ConstraintSpec, indexDefs []snapshot.IndexDefSpec) error {

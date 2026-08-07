@@ -55,7 +55,7 @@ func TestSec_VarLen_PerQueryBudget_TripsAcrossRows(t *testing.T) {
 	fwd, rev := fanOut5()
 
 	input := newSliceOperator(mRowsAtNode0(10)...)
-	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, exec.StaticAdjacency(fwd, rev, nil), &exec.VarLengthConfig{
 		Direction:              exec.DirOut,
 		InputCol:               0,
 		MinHops:                1,
@@ -82,7 +82,7 @@ func TestSec_VarLen_PerQueryBudget_GenerousCapCompletes(t *testing.T) {
 
 	const m = 10
 	input := newSliceOperator(mRowsAtNode0(m)...)
-	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, exec.StaticAdjacency(fwd, rev, nil), &exec.VarLengthConfig{
 		Direction:              exec.DirOut,
 		InputCol:               0,
 		MinHops:                1,
@@ -114,7 +114,7 @@ func TestSec_VarLen_PerQueryBudget_DefaultIsFinite(t *testing.T) {
 	fwd, rev := fanOut5()
 
 	input := newSliceOperator(mRowsAtNode0(3)...)
-	op := exec.NewVarLengthExpand(input, fwd, rev, &exec.VarLengthConfig{
+	op := exec.NewVarLengthExpand(input, exec.StaticAdjacency(fwd, rev, nil), &exec.VarLengthConfig{
 		Direction:              exec.DirOut,
 		InputCol:               0,
 		MinHops:                1,

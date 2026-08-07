@@ -53,7 +53,23 @@ func TestGoleak_Sessions_AllTransitions(t *testing.T) {
 	opts := []goleak.Option{goleak.IgnoreCurrent()}
 
 	eng := newEngine(t)
-	srv, err := server.NewServer(eng, server.Options{ConnTimeout: 5 * time.Second, Auth: server.NoAuthHandler{}})
+	// MaxOpenTxPerPrincipal is raised above numSessions DELIBERATELY (rmp #2305).
+	//
+	// All 64 sessions authenticate as the same principal, and a quarter of them open an
+	// explicit transaction and drop the connection without committing. Until rmp #2305
+	// an open explicit transaction held the graph's visibility barrier exclusively, so
+	// at most ONE was open at a time and the default quota of 16 was unreachable. Now
+	// they genuinely overlap, the quota is reached, and BEGIN is refused with
+	// LimitExceeded — the quota doing its job, not a defect.
+	//
+	// This test is about goroutine and mutex leaks across every session transition, so
+	// it needs every BEGIN to be admitted. Quota behaviour itself is covered by
+	// bolt/server's txquota tests.
+	srv, err := server.NewServer(eng, server.Options{
+		ConnTimeout:           5 * time.Second,
+		Auth:                  server.NoAuthHandler{},
+		MaxOpenTxPerPrincipal: numSessions + 8,
+	})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

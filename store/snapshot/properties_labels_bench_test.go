@@ -61,7 +61,7 @@ func BenchmarkWriteProperties(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		if _, _, err := WriteProperties(io.Discard, g); err != nil {
+		if _, _, err := WriteProperties(io.Discard, g, nil); err != nil {
 			b.Fatalf("WriteProperties: %v", err)
 		}
 	}
@@ -74,7 +74,7 @@ func BenchmarkWriteLabels(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		if _, _, err := WriteLabels(io.Discard, g); err != nil {
+		if _, _, err := WriteLabels(io.Discard, g, nil); err != nil {
 			b.Fatalf("WriteLabels: %v", err)
 		}
 	}

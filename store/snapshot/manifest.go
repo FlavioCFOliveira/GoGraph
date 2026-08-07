@@ -158,6 +158,20 @@ type Manifest struct {
 	Version     int              `json:"version"`
 	Order       uint64           `json:"order"`
 	Size        uint64           `json:"size"`
+	// CommitTS is the MVCC instant the image was captured at, or 0 / absent when
+	// the originating graph had no MVCC clock or the writer had no graph in hand
+	// (the legacy CSR-only writer, which omits GraphConfig for the same reason).
+	//
+	// Recovery folds it into the derived clock floor, so a reopened graph never
+	// re-mints an instant the image already contains (rmp #2309, MVCC C3d). It is
+	// the quantity Memgraph reads back as info.start_timestamp.
+	//
+	// NO MANIFEST VERSION BUMP. The manifest is JSON, so an older reader ignores an
+	// unknown field and a newer reader on an older manifest decodes the zero value —
+	// which is exactly the "absent means no timestamp" policy the OpCommit body
+	// uses. `omitempty` keeps a timestamp-less manifest byte-identical to what
+	// previous builds wrote, so no fixture or golden file moves.
+	CommitTS uint64 `json:"commit_ts,omitempty"`
 }
 
 // WriteManifest writes m to w in canonical (pretty-printed) JSON.

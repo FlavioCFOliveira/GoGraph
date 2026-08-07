@@ -72,7 +72,11 @@ type Tx struct {
 // [cypher.Engine.BeginReadTx], which holds no writer lock or barrier. On failure
 // (a context already done before BEGIN) it returns the error and holds no
 // resources.
-func newTx(ctx context.Context, eng *cypher.Engine, mode string, timeout time.Duration) (*Tx, error) {
+// csess is the CONNECTION's Cypher session (rmp #2329). The transaction is opened
+// through it, so it observes every commit this connection has already made and its
+// own commit instant is recorded when it closes. A nil session falls back to the
+// engine's sessionless contract.
+func newTx(ctx context.Context, eng *cypher.Engine, csess *cypher.Session, mode string, timeout time.Duration) (*Tx, error) {
 	txCtx := ctx
 	cancel := context.CancelFunc(func() {}) // no-op default
 	if timeout > 0 {
@@ -82,10 +86,15 @@ func newTx(ctx context.Context, eng *cypher.Engine, mode string, timeout time.Du
 		engTx *cypher.ExplicitTx
 		err   error
 	)
-	if mode == "r" {
+	switch {
+	case csess == nil && mode == "r":
 		engTx, err = eng.BeginReadTx(txCtx)
-	} else {
+	case csess == nil:
 		engTx, err = eng.BeginTx(txCtx)
+	case mode == "r":
+		engTx, err = csess.BeginReadTx(txCtx)
+	default:
+		engTx, err = csess.BeginTx(txCtx)
 	}
 	if err != nil {
 		cancel()

@@ -68,9 +68,18 @@ func TestE2E_CtxCancelMidStream(t *testing.T) {
 		t.Logf("AC#1: err=%v (isCtxCanceled=%v, isNeo4j=%v)", streamErr, isCtxCanceled, isNeo)
 	}
 
-	// AC#2: server-side cursor released within 50 ms — fresh session must
-	// respond within that window.
-	freshDeadline, freshCancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	// AC#2: the server-side cursor was RELEASED, so a fresh session is not blocked
+	// behind it.
+	//
+	// A LIVENESS deadline, not a latency assertion (rmp #2330). This read "released
+	// within 50 ms — fresh session must respond within that window", which measures
+	// how busy the machine is: a fresh session opens a TCP connection and runs the
+	// handshake, HELLO, auth, RUN and PULL, and under the full-suite parallel load of
+	// `make ci` that exceeds 50 ms on a busy host. Its sibling in
+	// e2e_failure_cancel_test.go failed a gate run for exactly that reason. If the
+	// cursor were still held, the fresh session would block indefinitely and any
+	// deadline would catch it.
+	freshDeadline, freshCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer freshCancel()
 
 	session2 := driver.NewSession(ctx, neo4j.SessionConfig{})

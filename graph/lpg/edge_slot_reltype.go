@@ -154,6 +154,49 @@ func (g *Graph[N, W]) ForEachPairSlotRelTypeByID(
 	}
 }
 
+// ForEachPairSlotRelTypeByIDAsOf is [Graph.ForEachPairSlotRelTypeByID] resolving the
+// pair's per-slot relationship types AS OF s rather than as of the present
+// (rmp #2310).
+//
+// A nil snapshot reads the live entry, so it is exactly the unversioned form.
+//
+// It exists for the checkpoint capture, which reads every structure at one
+// transactional instant while writers keep committing. The unversioned form reads the
+// LIVE entry through LoadEntryH/LoadEntryLabels; the versioned one takes ONE entry
+// view as of s and reads the neighbour and label columns out of it, so the two columns
+// cannot come from different instants — which they can in the live form, where a
+// commit landing between the two loads leaves the ordinals and the types describing
+// different states of the same pair.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) ForEachPairSlotRelTypeByIDAsOf(
+	srcID, dstID graph.NodeID,
+	s *Snapshot,
+	visit func(ordinal int, name string),
+) {
+	if s == nil {
+		g.ForEachPairSlotRelTypeByID(srcID, dstID, visit)
+		return
+	}
+	v := g.adj.EntryViewAsOf(srcID, s.startTS, s.txID)
+	if len(v.Neighbours) == 0 || len(v.Labels) == 0 {
+		return
+	}
+	var scratch [8]int
+	for ordinal, idx := range canonicalPairSlots(v.Neighbours, v.Handles, dstID, scratch[:0]) {
+		if idx >= len(v.Labels) {
+			continue
+		}
+		lid, ok := decodeSlotLabel(v.Labels[idx])
+		if !ok {
+			continue
+		}
+		if name, ok := g.reg.Resolve(lid); ok {
+			visit(ordinal, name)
+		}
+	}
+}
+
 // ForEachPairOverflowRelTypeByID streams the directed pair's OVERFLOW
 // relationship types, in list order, invoking visit once per resolved name.
 //
@@ -214,6 +257,13 @@ func (g *Graph[N, W]) ForEachPairOverflowRelTypeByID(srcID, dstID graph.NodeID, 
 //
 // SetEdgeRelTypeAtSlotByID is safe for concurrent use.
 func (g *Graph[N, W]) SetEdgeRelTypeAtSlotByID(srcID, dstID graph.NodeID, ordinal int, name string) bool {
+	return g.setEdgeRelTypeAtSlotByIDInfo(srcID, dstID, ordinal, name, nil)
+}
+
+// setEdgeRelTypeAtSlotByIDInfo is [Graph.SetEdgeRelTypeAtSlotByID] with an explicit
+// write transaction; tx is nil for a direct Go-API mutation, which is committed the
+// instant it is made and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) setEdgeRelTypeAtSlotByIDInfo(srcID, dstID graph.NodeID, ordinal int, name string, tx *writeCtx) bool {
 	if ordinal < 0 {
 		return false
 	}
@@ -222,7 +272,7 @@ func (g *Graph[N, W]) SetEdgeRelTypeAtSlotByID(srcID, dstID graph.NodeID, ordina
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.Lock()
-	resolved, changed := g.setSlotRelTypeLocked(k, ordinal, lid, enc)
+	resolved, changed := g.setSlotRelTypeLocked(k, ordinal, lid, enc, tx)
 	sh.mu.Unlock()
 	if !resolved {
 		return false
@@ -241,7 +291,7 @@ func (g *Graph[N, W]) SetEdgeRelTypeAtSlotByID(srcID, dstID graph.NodeID, ordina
 // setSlotRelTypeLocked places lid on the slot of k at the canonical ordinal. The
 // caller must hold k's edge-label shard write lock. It reports whether the
 // ordinal resolved to a slot and whether the type state actually changed.
-func (g *Graph[N, W]) setSlotRelTypeLocked(k edgeKey, ordinal int, lid LabelID, enc uint32) (resolved, changed bool) {
+func (g *Graph[N, W]) setSlotRelTypeLocked(k edgeKey, ordinal int, lid LabelID, enc uint32, tx *writeCtx) (resolved, changed bool) {
 	neighbours, _, handles := g.adj.LoadEntryH(k.src)
 	var scratch [8]int
 	slots := canonicalPairSlots(neighbours, handles, k.dst, scratch[:0])
@@ -257,11 +307,11 @@ func (g *Graph[N, W]) setSlotRelTypeLocked(k edgeKey, ordinal int, lid LabelID, 
 	switch cur {
 	case 0:
 		one := [1]int{idx}
-		return true, g.adj.SetEdgeLabelSlotsAt(k.src, k.dst, one[:], enc) > 0
+		return true, g.adj.Writer(tx.adjTx()).SetEdgeLabelSlotsAt(k.src, k.dst, one[:], enc) > 0
 	case enc:
 		return true, false
 	}
-	return true, g.addPairOverflowLocked(k, lid)
+	return true, g.addPairOverflowLocked(k, lid, tx)
 }
 
 // AddEdgeRelTypeOverflowByID adds name to the OVERFLOW list of the directed pair
@@ -281,11 +331,18 @@ func (g *Graph[N, W]) setSlotRelTypeLocked(k edgeKey, ordinal int, lid LabelID, 
 //
 // AddEdgeRelTypeOverflowByID is safe for concurrent use.
 func (g *Graph[N, W]) AddEdgeRelTypeOverflowByID(srcID, dstID graph.NodeID, name string) bool {
+	return g.addEdgeRelTypeOverflowByIDInfo(srcID, dstID, name, nil)
+}
+
+// addEdgeRelTypeOverflowByIDInfo is [Graph.AddEdgeRelTypeOverflowByID] with an explicit write transaction; tx is
+// nil for a direct Go-API mutation, which is committed the instant it is made
+// and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) addEdgeRelTypeOverflowByIDInfo(srcID, dstID graph.NodeID, name string, tx *writeCtx) bool {
 	lid := g.reg.Intern(name)
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.Lock()
-	changed := g.addPairOverflowLocked(k, lid)
+	changed := g.addPairOverflowLocked(k, lid, tx)
 	sh.mu.Unlock()
 	g.edgeIdx.Add(uint32(lid), srcID)
 	if changed {
@@ -297,11 +354,48 @@ func (g *Graph[N, W]) AddEdgeRelTypeOverflowByID(srcID, dstID graph.NodeID, name
 // addPairOverflowLocked appends lid to k's overflow list, keeping the
 // [Graph.edgeLabelOverflowActive] gate exact. The caller must hold k's
 // edge-label shard write lock.
-func (g *Graph[N, W]) addPairOverflowLocked(k edgeKey, lid LabelID) bool {
+func (g *Graph[N, W]) addPairOverflowLocked(k edgeKey, lid LabelID, tx *writeCtx) bool {
 	sh := g.edgeLabelShardFor(k)
-	if !g.addOverflowVersioned(sh, k, lid) {
+	if !g.addOverflowVersioned(sh, k, lid, tx) {
 		return false
 	}
 	g.edgeLabelOverflowActive.Add(1)
 	return true
+}
+
+// ForEachPairOverflowRelTypeByIDAsOf is [Graph.ForEachPairOverflowRelTypeByID]
+// resolving the pair's overflow relationship types AS OF s, rather than as of the
+// present (rmp #2310).
+//
+// A nil snapshot reads the current stored value, which is what the unversioned form
+// does, so a caller may pass whatever it has.
+//
+// It exists because a checkpoint capture must read every structure at ONE
+// transactional instant while writers keep committing. The unversioned form takes the
+// shard read lock and reports what the pair holds NOW, which is the right answer for a
+// caller inside the visibility barrier and the wrong one for a capture that no longer
+// excludes writers.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) ForEachPairOverflowRelTypeByIDAsOf(srcID, dstID graph.NodeID, s *Snapshot, visit func(name string)) {
+	if g.edgeLabelOverflowActive.Load() == 0 && s == nil {
+		return
+	}
+	k := edgeKey{src: srcID, dst: dstID}
+	sh := g.edgeLabelShardFor(k)
+	sh.mu.RLock()
+	// COPIED under the lock, exactly as the unversioned form does: the versioned
+	// reader may return the stored slice itself on its fast path, and that slice is
+	// appended to in place by the write path.
+	var ids []LabelID
+	if ls := g.overflowLabelsAsOf(sh, k, s); len(ls) > 0 {
+		ids = make([]LabelID, len(ls))
+		copy(ids, ls)
+	}
+	sh.mu.RUnlock()
+	for _, lid := range ids {
+		if name, ok := g.reg.Resolve(lid); ok {
+			visit(name)
+		}
+	}
 }

@@ -312,13 +312,21 @@ func TestExplicitTx_PanicDuringRunReleasesWriterMutex(t *testing.T) {
 }
 
 // TestGoleak_BeginDisconnect verifies that opening explicit transactions and then
-// dropping the connection WITHOUT COMMIT/ROLLBACK leaks no goroutines and no
-// engine writer mutex: after driving many BEGIN→RUN→drop cycles concurrently, a
-// final write must still complete and goleak must be clean at teardown (#1309).
+// dropping the connection WITHOUT COMMIT/ROLLBACK leaks no goroutines and nothing the
+// engine holds: after driving many BEGIN→RUN→drop cycles concurrently, a final write
+// must still complete and goleak must be clean at teardown (#1309).
+//
+// MaxOpenTxPerPrincipal is raised above the cycle count DELIBERATELY (rmp #2305). All
+// the clients authenticate as one principal, and until rmp #2305 an open explicit
+// transaction held the visibility barrier exclusively, so at most ONE was open at a
+// time and the default quota of 16 was unreachable. They now genuinely overlap and the
+// quota is reached, refusing BEGIN with LimitExceeded — the quota working, not a
+// defect. This test is about leaks, so it needs every BEGIN admitted.
 func TestGoleak_BeginDisconnect(t *testing.T) {
-	addr := startTestServerWithEngine(t, newWALEngine(t), server.Options{})
-
 	const cycles = 32
+	addr := startTestServerWithEngine(t, newWALEngine(t), server.Options{
+		MaxOpenTxPerPrincipal: cycles + 8,
+	})
 	var wg sync.WaitGroup
 	wg.Add(cycles)
 	for i := 0; i < cycles; i++ {

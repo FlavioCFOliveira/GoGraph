@@ -39,6 +39,7 @@ package lpg
 // existence test is the lock-free counter check it was before.
 
 import (
+	"slices"
 	"sync"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -97,60 +98,104 @@ func (g *Graph[N, W]) nodeLifeShardFor(id graph.NodeID) *nodeLifeShard {
 // birth is recorded, so a node with no record is one that has existed for
 // longer than any reader can remember — which is what makes the absence of a
 // record mean "exists".
-func (g *Graph[N, W]) noteNodeBorn(id graph.NodeID) {
-	if !g.mvccArmed {
-		return
-	}
-	info, ts := g.stamp.Stamp()
-	seq := g.lifeSeq.Add(1)
-	sh := g.nodeLifeShardFor(id)
-	sh.mu.Lock()
-	if sh.born == nil {
-		sh.born = make(map[graph.NodeID]lifeStamp, 8)
-	}
-	sh.born[id] = lifeStamp{info: info, ts: ts, seq: seq}
-	// The death record is KEPT. A reader older than this birth but newer than
-	// the death must still see the node as gone, and only the record can tell
-	// it that; [Graph.NodeExistsAsOf] decides between the two by taking the
-	// later of the events that reader can see.
-	sh.mu.Unlock()
-	g.nodeLifeActive.Add(1)
+func (g *Graph[N, W]) noteNodeBorn(id graph.NodeID, tx *writeCtx) bool {
+	return g.noteNodeLife(id, tx, true)
+}
+
+// noteNodeBornAutocommit is [Graph.noteNodeBorn] outside any transaction, in the
+// shape [graph.Mapper.InternNewHook] takes.
+//
+// It exists so the autocommit AddNode path passes a bare method value, as it did
+// before the transaction was threaded through, rather than a closure over a nil
+// pointer.
+func (g *Graph[N, W]) noteNodeBornAutocommit(id graph.NodeID) {
+	g.noteNodeLife(id, nil, true)
 }
 
 // noteNodeDied records that id was removed now.
-func (g *Graph[N, W]) noteNodeDied(id graph.NodeID) {
-	if !g.mvccArmed {
-		return
-	}
-	info, ts := g.stamp.Stamp()
-	seq := g.lifeSeq.Add(1)
-	sh := g.nodeLifeShardFor(id)
-	sh.mu.Lock()
-	if sh.died == nil {
-		sh.died = make(map[graph.NodeID]lifeStamp, 8)
-	}
-	sh.died[id] = lifeStamp{info: info, ts: ts, seq: seq}
-	sh.mu.Unlock()
-	g.nodeLifeActive.Add(1)
+func (g *Graph[N, W]) noteNodeDied(id graph.NodeID, tx *writeCtx) bool {
+	return g.noteNodeLife(id, tx, false)
 }
 
 // noteNodeRevived records that a tombstoned id is live again.
-func (g *Graph[N, W]) noteNodeRevived(id graph.NodeID) {
+//
+// A revival is a BIRTH as far as a reader is concerned: from this instant the
+// node exists, and before it the death record still applies.
+func (g *Graph[N, W]) noteNodeRevived(id graph.NodeID, tx *writeCtx) bool {
+	return g.noteNodeLife(id, tx, true)
+}
+
+// noteNodeLife records a birth (alive) or a death, and reports whether the
+// change may proceed.
+//
+// The three entry points became one function when write-write conflict
+// detection arrived (rmp #2300), because the check has to run under the SAME
+// shard lock as the write it guards. Held separately — read the head, release,
+// then take the lock to write — two writers can both pass the check and both
+// write, which is the lost update the check exists to prevent. The node-label
+// and node-property paths already check inside their shard lock for the same
+// reason.
+//
+// The death record is KEPT across a birth: a reader older than the birth but
+// newer than the death must still see the node as gone, and only the record can
+// tell it that. [Graph.NodeExistsAsOf] decides between the two by taking the
+// later of the events that reader can see.
+func (g *Graph[N, W]) noteNodeLife(id graph.NodeID, tx *writeCtx, alive bool) bool {
 	if !g.mvccArmed {
-		return
+		return true
 	}
-	info, ts := g.stamp.Stamp()
-	seq := g.lifeSeq.Add(1)
 	sh := g.nodeLifeShardFor(id)
 	sh.mu.Lock()
-	if sh.born == nil {
-		sh.born = make(map[graph.NodeID]lifeStamp, 8)
+	if head := sh.headStamp(id); tx.conflicts(head) {
+		sh.mu.Unlock()
+		_ = tx.conflictErr(mvcc.StoreNodeExistence, head)
+		return false
 	}
-	// A revival is a birth as far as a reader is concerned: from this instant
-	// the node exists, and before it the death record still applies.
-	sh.born[id] = lifeStamp{info: info, ts: ts, seq: seq}
+	// Inside the lock, so the record this write lands on is the one the check
+	// just cleared. deltaStamp allocates the transaction's commit record on
+	// first use; it takes no lock of its own and cannot reach back here.
+	info, ts := g.deltaStamp(tx.record())
+	seq := g.lifeSeq.Add(1)
+	st := lifeStamp{info: info, ts: ts, seq: seq}
+	if alive {
+		if sh.born == nil {
+			sh.born = make(map[graph.NodeID]lifeStamp, 8)
+		}
+		sh.born[id] = st
+	} else {
+		if sh.died == nil {
+			sh.died = make(map[graph.NodeID]lifeStamp, 8)
+		}
+		sh.died[id] = st
+	}
 	sh.mu.Unlock()
 	g.nodeLifeActive.Add(1)
+	return true
+}
+
+// headStamp returns the effective timestamp of the LATEST life event recorded
+// for id — birth or death, whichever happened last — or zero when the node has
+// no record at all.
+//
+// The caller must hold the shard lock. The two maps are one logical version
+// chain two entries deep, ordered by seq rather than by timestamp: both events
+// of one transaction share a commit record and therefore an identical
+// timestamp, and seq is what [Graph.NodeExistsAsOf] already uses to order them.
+func (sh *nodeLifeShard) headStamp(id graph.NodeID) uint64 {
+	born, hasBorn := sh.born[id]
+	died, hasDied := sh.died[id]
+	switch {
+	case hasBorn && hasDied:
+		if died.seq > born.seq {
+			return died.at()
+		}
+		return born.at()
+	case hasBorn:
+		return born.at()
+	case hasDied:
+		return died.at()
+	}
+	return 0
 }
 
 // NodeExistsAsOf reports whether id was a live node at s.
@@ -316,3 +361,109 @@ func (g *Graph[N, W]) LiveCountExactAsOf(s *Snapshot) bool {
 //
 // Safe for concurrent use.
 func (g *Graph[N, W]) NodeLifeVersionCount() int64 { return g.nodeLifeActive.Load() }
+
+// TombstonedIDsAsOf returns, in ascending order, every interned node id that did NOT
+// exist as of s — the set a snapshot must record so a recovered graph has the same
+// live nodes the image was taken from (rmp #2310).
+//
+// A nil snapshot returns [Graph.TombstonedIDs], the present-time answer.
+//
+// # Why it does not read the tombstone bitmap
+//
+// The bitmap is a COW accelerator maintained beside the versioned truth, and it
+// answers "is this node removed NOW". A capture that no longer excludes writers needs
+// "was this node removed as of s", and those differ by exactly the transactions that
+// committed during the capture — which is the whole class of partial-transaction image
+// this task exists to make impossible. So the authoritative store is consulted:
+// [Graph.NodeExistsAsOf], which resolves the node's birth and death records against s.
+//
+// The cost is one existence test per interned id, O(V). A capture already walks every
+// node to serialise its labels, properties and adjacency, so this adds a constant
+// factor to a walk that must happen anyway rather than a new traversal — and the
+// present-time form's bitmap read is not available at an arbitrary instant at any
+// price, because the bitmap keeps no history.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) TombstonedIDsAsOf(s *Snapshot) []graph.NodeID {
+	if s == nil {
+		return g.TombstonedIDs()
+	}
+	// SORTED EXPLICITLY. This said "ascending by construction: the mapper walks ids in
+	// increasing order", and that is false for any graph with more than one node in
+	// some shard. A NodeID packs as (intra << shardBits) | shard and Walk is
+	// shard-major, so a 2000-node graph walks 0, 256, 512, 768, 1, 257, … — ascending
+	// only while every shard holds a single node, which is why it survived being
+	// written down. The present-time form returns the roaring bitmap's ToArray, which
+	// genuinely is ascending, so without this sort the two forms of the same function
+	// would disagree on the order of their result and the snapshot writer's documented
+	// input contract would hold on one path and not the other.
+	//
+	// The cost is O(D log D) in the number of TOMBSTONES, against the O(V) existence
+	// walk it follows.
+	out := make([]graph.NodeID, 0, g.TombstoneCount())
+	g.adj.Mapper().Walk(func(id graph.NodeID, _ N) bool {
+		// INTERNED as of s AND not alive as of s. Both halves are load-bearing.
+		//
+		// An id interned AFTER s is also "not alive as of s", but it is not a tombstone —
+		// it is a node the image does not carry at all, because the mapper is filtered by
+		// the same instant. Listing it here names an id the image has no entry for, and
+		// the manifest then disagrees with what a recovery reconstructs: measured at
+		// manifest Order=1552 against a reconstructed 1542.
+		//
+		// A tombstone is only meaningful for a node the image HOLDS: interned by the
+		// instant, and removed by it.
+		if g.NodeInternedAsOf(id, s) && !g.NodeExistsAsOf(id, s) {
+			out = append(out, id)
+		}
+		return true
+	})
+	slices.Sort(out)
+	return out
+}
+
+// NodeInternedAsOf reports whether id had been INTERNED at or before s — that is,
+// whether the node existed at any point up to that instant, whether or not it had
+// already been removed by then.
+//
+// A nil snapshot reports whether the id is interned at all.
+//
+// # Why this is a different question from NodeExistsAsOf, and who needs it
+//
+// [Graph.NodeExistsAsOf] answers "is this node ALIVE as of s". A snapshot image needs
+// a weaker question for its MAPPER: the id→key table must carry every id the image can
+// reference, and that includes ids whose node was removed before s — those are in the
+// mapper AND in the tombstone set, which is how a removal survives a restart.
+//
+// What the mapper must NOT carry is an id interned AFTER s. Before rmp #2310 that
+// could not happen, because the capture excluded writers and the mapper could not
+// grow during it. It can now, and it was measured the moment the exclusion was
+// removed: TestCheckpoint_CaptureIsAtomic_SnapshotOnlyArtefact recovered Order=322
+// against Size=157, eight nodes above the 2*Size the fixture guarantees — exactly the
+// endpoints of four transactions that committed during the capture and whose edges
+// were correctly excluded.
+//
+// A node with no birth record is treated as interned: it predates the versioned life
+// store, or its record has been reclaimed, and in both cases its birth is in the past
+// of every live reader.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) NodeInternedAsOf(id graph.NodeID, s *Snapshot) bool {
+	if s == nil {
+		return true
+	}
+	sh := g.nodeLifeShardFor(id)
+	sh.mu.RLock()
+	if sh.born == nil {
+		sh.mu.RUnlock()
+		return true
+	}
+	born, hasBorn := sh.born[id]
+	sh.mu.RUnlock()
+	if !hasBorn {
+		// No birth record: reclaimed or pre-versioning, so it is in every reader's
+		// past. A node born after s ALWAYS has one, because reclamation cannot free a
+		// record newer than the oldest live reader — and s is a live reader.
+		return true
+	}
+	return born.visibleTo(s.startTS, s.txID)
+}

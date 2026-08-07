@@ -12,7 +12,7 @@ package snapshot
 // FRESH value arena per attempt.
 //
 // The test seam is the per-call function parameter that the exported writers
-// delegate to: writeLabels(w, g, snapReg) and writeProperties(w, g, snapKeys,
+// delegate to: writeLabels(w, g, nil, snapReg) and writeProperties(w, g, nil, snapKeys,
 // newArena). Production passes the real snapshotRegistry / snapshotPropertyKeys
 // / newPropValueArena; these tests pass locally-scoped closures whose only state
 // is a stack-local counter. There is NO package-level mutable variable, so the
@@ -71,7 +71,7 @@ func TestWriteLabels_SelfHealRetriesAndSucceeds(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	size, crc, err := writeLabels(&buf, g, snap)
+	size, crc, err := writeLabels(&buf, g, nil, snap)
 	if err != nil {
 		t.Fatalf("writeLabels must self-heal and succeed, got %v", err)
 	}
@@ -133,7 +133,7 @@ func TestWriteLabels_BreakRequiresBothCollectors(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if _, _, err := writeLabels(&buf, g, snap); err != nil {
+	if _, _, err := writeLabels(&buf, g, nil, snap); err != nil {
 		t.Fatalf("writeLabels must self-heal on an edge-only race, got %v", err)
 	}
 	if calls != 2 {
@@ -180,7 +180,7 @@ func TestWriteLabels_ExhaustionReturnsErrorWritesNothing(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	size, crc, err := writeLabels(&buf, g, snap)
+	size, crc, err := writeLabels(&buf, g, nil, snap)
 	if err == nil {
 		t.Fatal("writeLabels must return the collector error when the retry budget is exhausted")
 	}
@@ -239,7 +239,7 @@ func TestWriteProperties_SelfHealRetriesAndSucceeds(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if _, _, err := writeProperties(&buf, g, snap, newArena); err != nil {
+	if _, _, err := writeProperties(&buf, g, nil, snap, newArena); err != nil {
 		t.Fatalf("writeProperties must self-heal and succeed, got %v", err)
 	}
 	if snapCalls != forcedRetries+1 {
@@ -301,7 +301,7 @@ func TestWriteProperties_BreakRequiresBothCollectors(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if _, _, err := writeProperties(&buf, g, snap, newPropValueArena); err != nil {
+	if _, _, err := writeProperties(&buf, g, nil, snap, newPropValueArena); err != nil {
 		t.Fatalf("writeProperties must self-heal on an edge-only race, got %v", err)
 	}
 	if snapCalls != 2 {
@@ -349,7 +349,7 @@ func TestWriteProperties_ExhaustionReturnsErrorWritesNothing(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	size, crc, err := writeProperties(&buf, g, snap, newArena)
+	size, crc, err := writeProperties(&buf, g, nil, snap, newArena)
 	if err == nil {
 		t.Fatal("writeProperties must return the collector error when the retry budget is exhausted")
 	}

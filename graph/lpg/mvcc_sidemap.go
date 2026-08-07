@@ -142,6 +142,31 @@ type sideVersions[K comparable, V any] struct {
 // The caller must hold the owning shard's lock, which every reader here does.
 func (sv *sideVersions[K, V]) empty() bool { return sv.d == nil }
 
+// headStamp returns the effective timestamp of the newest version recorded for
+// k, or zero when the chain is empty.
+//
+// It is what write-write conflict detection tests against (rmp #2300): the
+// newest version's instant is what decides whether this writer may displace it.
+// Zero means nothing has written k since the last reclamation, which never
+// conflicts — reclamation only frees versions below the watermark, and anything
+// below it is visible to every live transaction.
+//
+// The caller must hold the owning shard's lock, exactly as [sideVersions.push]
+// requires.
+func (sv *sideVersions[K, V]) headStamp(k K) uint64 {
+	if sv.d == nil {
+		return 0
+	}
+	d := sv.d[k]
+	if d == nil {
+		return 0
+	}
+	if d.info != nil {
+		return d.info.TS()
+	}
+	return d.ts
+}
+
 // push records that k is about to change, retaining the value it held.
 //
 // active is the store's lock-free counter, kept exact so a reader can skip the
@@ -196,7 +221,12 @@ func (sv *sideVersions[K, V]) asOf(k K, cur V, curHad bool, startTS, txID uint64
 // — every reader began at or after that instant — so it and everything behind
 // it are unreachable, and one assignment releases the whole tail. That is the
 // identical argument the node-label reclaimer makes; see mvcc_reclaim.go.
-func (sv *sideVersions[K, V]) reclaim(watermark uint64) int {
+// hist accumulates the retained depth of every chain this sweep leaves behind, or
+// is nil for a caller that does not measure. It is a parameter rather than a field
+// because one histogram covers all five per-edge side stores: they are the same
+// generic type over different keys, so the store an operator cares about is "edge
+// sides", not which of the five. See [depthStore].
+func (sv *sideVersions[K, V]) reclaim(watermark uint64, hist *mvcc.DepthHist) int {
 	if sv.d == nil {
 		return 0
 	}
@@ -213,6 +243,8 @@ func (sv *sideVersions[K, V]) reclaim(watermark uint64) int {
 			delete(sv.d, k)
 			continue
 		}
+		// See [Graph.reclaimLabelVersions] for what retained measures.
+		retained := 1
 		prev := head
 		for d := head.next; d != nil; d = d.next {
 			if d.stamp() <= watermark {
@@ -220,13 +252,57 @@ func (sv *sideVersions[K, V]) reclaim(watermark uint64) int {
 				prev.next = nil
 				break
 			}
+			retained++
 			prev = d
+		}
+		if hist != nil {
+			hist.Observe(retained)
 		}
 	}
 	if len(sv.d) == 0 {
 		sv.d = nil
 	}
 	return freed
+}
+
+// withdrawAborted drops every ABORTED record at the head of k's chain and reports
+// the value the store must restore, so the aborted transaction's writes leave the
+// STORED value rather than merely being masked by records nothing can reclaim
+// (rmp #2318).
+//
+// The restored value is the pre-image of the OLDEST aborted record withdrawn,
+// which is the value the store held before the aborted transaction touched it —
+// every record newer than that one belongs to the same aborted transaction, so
+// stepping over all of them at once is what a reader's walk already does.
+//
+// withdrew is false when the head is not aborted, in which case the caller must
+// leave the stored value alone: pre and had are then meaningless.
+//
+// The caller must hold the shard lock, and must apply the restore before
+// releasing it, or a reader observes a chain that no longer masks a value that
+// has not yet been corrected.
+func (sv *sideVersions[K, V]) withdrawAborted(k K) (pre V, had bool, freed int, withdrew bool) {
+	if sv.d == nil {
+		return pre, false, 0, false
+	}
+	head := sv.d[k]
+	if head == nil || head.stamp() != mvcc.AbortedTS {
+		return pre, false, 0, false
+	}
+	d := head
+	for ; d != nil && d.stamp() == mvcc.AbortedTS; d = d.next {
+		pre, had = d.pre, d.had
+		freed++
+	}
+	if d == nil {
+		delete(sv.d, k)
+		if len(sv.d) == 0 {
+			sv.d = nil
+		}
+	} else {
+		sv.d[k] = d
+	}
+	return pre, had, freed, true
 }
 
 // stamp returns the commit timestamp of the change this record undoes.

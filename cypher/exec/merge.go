@@ -15,14 +15,27 @@ package exec
 // strings of the form `n.key = "value"`. They are parsed as single-property
 // SET operations.
 //
-// # Single-writer safety
-//
-// Merge is safe under the single-writer guarantee: no concurrent MERGE
-// operations can race on the same graph instance.
-//
 // # Concurrency
 //
-// Merge is NOT safe for concurrent use.
+// Merge is NOT safe for concurrent use: one operator tree is driven by one
+// goroutine.
+//
+// It used to claim more — that a "single-writer guarantee" stopped two MERGE
+// statements racing on the same graph. That guarantee was the engine's writer
+// mutex and the store's capacity-one semaphore, and rmp #2306 retired both.
+//
+// The search-then-create sequence is therefore NOT atomic against another writer:
+// two concurrent MERGE statements on the same pattern can both find no match and
+// both create, because two CREATEs of two distinct new nodes are not a
+// write-write conflict and MVCC has nothing to arbitrate. Measured at eight
+// duplicates from eight writers
+// (cypher.TestConcurrentMerge_WithoutAConstraintMayCreateDuplicates).
+//
+// That is the documented behaviour rather than a defect, and it matches Neo4j,
+// which requires a uniqueness constraint for the same structural reason. With a
+// UNIQUE constraint on the merged property the reservation is atomic and the
+// duplicates collapse to one
+// (cypher.TestConcurrentMerge_AUniqueConstraintCollapsesTheDuplicates).
 
 import (
 	"context"
@@ -400,7 +413,7 @@ func (op *Merge) runOnMatchPath(rows []Row) error {
 func (op *Merge) runOnCreatePathWithProps(childRow Row, props []propLiteral) error {
 	if op.reg != nil {
 		for _, p := range props {
-			if cerr := op.reg.CheckSetProperty(op.labels, p.key, p.value, op.mgr); cerr != nil {
+			if cerr := reserveConstraintValue(op.reg, op.mutator, op.labels, p.key, p.value, op.mgr); cerr != nil {
 				return fmt.Errorf("exec: Merge: ON CREATE: %w", cerr)
 			}
 		}
@@ -561,7 +574,7 @@ func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalF
 			// The RHS evaluated to null → openCypher removes the property.
 			if op.reg != nil {
 				if oldVal, had := op.mutator.NodeProperties(nodeKey)[a.key]; had {
-					op.reg.ReleasePropertyValue(op.mutator.NodeLabels(nodeKey), a.key, oldVal)
+					releaseConstraintValue(op.reg, op.mutator, op.mutator.NodeLabels(nodeKey), a.key, oldVal)
 				}
 			}
 			op.mutator.DelNodeProperty(nodeKey, a.key)
@@ -584,9 +597,9 @@ func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalF
 			// releasing first cannot mask a real cross-node duplicate; a failed
 			// check aborts the transaction and rebuilds every value-set.
 			if oldVal, had := op.mutator.NodeProperties(nodeKey)[a.key]; had {
-				op.reg.ReleasePropertyValue(labels, a.key, oldVal)
+				releaseConstraintValue(op.reg, op.mutator, labels, a.key, oldVal)
 			}
-			if cerr := op.reg.CheckSetProperty(labels, a.key, pv, op.mgr); cerr != nil {
+			if cerr := reserveConstraintValue(op.reg, op.mutator, labels, a.key, pv, op.mgr); cerr != nil {
 				return cerr
 			}
 		}

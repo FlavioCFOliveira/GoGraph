@@ -361,7 +361,10 @@ func captureAndWrite[N comparable, W any](
 	constraints []ConstraintSpec,
 	indexDefs []IndexDefSpec,
 ) error {
-	capt, err := CaptureGraph(g, c, codec)
+	// nil instant: this path is the full, one-shot snapshot writer, whose caller holds
+	// its own exclusion and is reading the present. The CONCURRENT capture — the one
+	// rmp #2310 built — goes through CaptureGraph with a snapshot instead.
+	capt, err := CaptureGraph(g, c, codec, nil)
 	if err != nil {
 		return err
 	}
@@ -688,10 +691,22 @@ func writeCaptureCore[W any](
 	m := Manifest{
 		Version:   manifestVersion,
 		CreatedAt: time.Now().UTC(),
-		Order:     capt.csr.Order(),
-		Size:      capt.csr.Size(),
-		Files:     files,
-		Indexes:   idxEntries,
+		// The IMAGE's node count, not the captured CSR's vertex-array length
+		// (rmp #2310). Under a concurrent capture the array is sized from the
+		// present id space and so has slots for ids interned after the captured
+		// instant; [Capture.Order] reports what the components actually carry, which
+		// is what a consumer of this manifest gets back. Measured before the change:
+		// manifest Order=1128 against Size=563, two slots belonging to a transaction
+		// that had not committed at the instant.
+		Order:   capt.Order(),
+		Size:    capt.csr.Size(),
+		Files:   files,
+		Indexes: idxEntries,
+		// The instant the capture was taken at, so recovery can derive the MVCC
+		// clock from an image whose WAL prefix has been truncated away
+		// (rmp #2309). Zero when the graph had no MVCC clock, which the
+		// omitempty tag then keeps out of the file entirely.
+		CommitTS: capt.commitTS,
 		GraphConfig: &GraphConfig{
 			Directed:   cfg.Directed,
 			Multigraph: cfg.Multigraph,

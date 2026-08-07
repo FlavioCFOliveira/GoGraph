@@ -137,10 +137,10 @@ type edgeHandleRaw struct {
 // byte-equality contract the snapshot relies on.
 //
 //nolint:gocyclo // edgehandles write: collect + two string tables + per-record labels + per-record props, each guarded
-func WriteEdgeHandles[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int64, crc uint32, emitted bool, err error) {
+func WriteEdgeHandles[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], at *lpg.Snapshot) (size int64, crc uint32, emitted bool, err error) {
 	defer metrics.Time("store.snapshot.WriteEdgeHandles").Stop()
 
-	raws, labelNames, keyNames := collectEdgeHandleRecords(g)
+	raws, labelNames, keyNames := collectEdgeHandleRecords(g, at)
 	if len(raws) == 0 {
 		return 0, 0, false, nil
 	}
@@ -277,12 +277,12 @@ func writeEdgeHandleRecord(w io.Writer, scratch []byte, r *edgeHandleRaw, labelI
 // de-duplicated, sorted label-name and property-key tables. A handle with no
 // label and no property is skipped (nothing to persist for it). Within each
 // record the label names and property keys are sorted for byte-stability.
-func collectEdgeHandleRecords[N comparable, W any](g *lpg.Graph[N, W]) (raws []edgeHandleRaw, labelNames, keyNames []string) {
+func collectEdgeHandleRecords[N comparable, W any](g *lpg.Graph[N, W], at *lpg.Snapshot) (raws []edgeHandleRaw, labelNames, keyNames []string) {
 	labelSet := make(map[string]struct{})
 	keySet := make(map[string]struct{})
-	g.WalkEdgeHandles(func(t lpg.EdgeHandleTriple) bool {
-		labels := g.EdgeLabelsByHandleID(t.Src, t.Dst, t.Handle)
-		props := g.EdgePropertiesByHandleID(t.Src, t.Dst, t.Handle)
+	g.WalkEdgeHandlesAsOf(at, func(t lpg.EdgeHandleTriple) bool {
+		labels := g.EdgeLabelsByHandleIDAsOf(t.Src, t.Dst, t.Handle, at)
+		props := g.EdgePropertiesByHandleIDAsOf(t.Src, t.Dst, t.Handle, at)
 		if len(labels) == 0 && len(props) == 0 {
 			return true
 		}

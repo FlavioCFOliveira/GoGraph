@@ -32,9 +32,15 @@ type TransactionInfo struct {
 	// Remote is the client's network address, as the server sees it.
 	Remote string
 
-	// Mode is "w" for a writing transaction or "r" for a read-only one. A writing
-	// transaction holds the engine's writer serialisation and visibility barrier,
-	// which is what makes it worth finding: a read-only one blocks nobody.
+	// Mode is "w" for a writing transaction or "r" for a read-only one.
+	//
+	// NEITHER blocks anybody as of rmp #2305/#2306. A writing transaction used to
+	// hold the engine's writer serialisation and the visibility barrier for its whole
+	// lifetime, so an abandoned one was an outage and finding it was urgent; it now
+	// holds only its own unpublished commit record and a reclamation-horizon slot.
+	// What an abandoned writing transaction still costs is therefore version memory —
+	// no version it can reach is reclaimable while it lives — not other clients'
+	// progress.
 	Mode string
 
 	// State is the Bolt state machine state of the owning session, rendered for a
@@ -212,10 +218,17 @@ func (r *txRegistry) terminate(id string) error {
 // Transactions returns a snapshot of every explicit transaction currently open
 // on this server, oldest first.
 //
-// It is the diagnostic half of the pair [Server.TerminateTransaction] completes:
-// an open writing transaction holds the engine's writer serialisation and
-// visibility barrier, so while one is open every reader waits, and finding it
-// requires knowing its principal, its age and its current statement.
+// It is the diagnostic half of the pair [Server.TerminateTransaction] completes.
+//
+// The reason it matters CHANGED with rmp #2305/#2306, and the old reason is worth
+// stating so nobody restores it: an open writing transaction used to hold the
+// engine's writer serialisation and the visibility barrier for its whole lifetime,
+// so "while one is open every reader waits" was literally true and an abandoned
+// transaction was an outage. It no longer holds either. What an abandoned
+// transaction pins now is the reclamation horizon — no version it could still read
+// is freed while it lives — so the symptom is unbounded version memory rather than
+// stalled clients, and finding it still requires knowing its principal, its age and
+// its current statement.
 //
 // Transactions is safe to call from any goroutine at any time, including while
 // the server is serving. The returned slice and its elements are copies.

@@ -222,17 +222,28 @@ func TestGraph_FirstEdgeHandle(t *testing.T) {
 	}
 }
 
-// TestGraph_FirstEdgeHandle_NoHandleSlot verifies the 0-sentinel case: a
-// plain AddEdge (no handle) makes FirstEdgeHandle report (0, false).
-func TestGraph_FirstEdgeHandle_NoHandleSlot(t *testing.T) {
+// TestGraph_PlainAddEdgeStillHasAnIdentity replaces the former
+// TestGraph_FirstEdgeHandle_NoHandleSlot, which asserted the 0-sentinel case: a
+// plain AddEdge used to make FirstEdgeHandle report (0, false).
+//
+// Since rmp #2317 there is no such case. Edge identity is not a property of how
+// the edge was inserted — a relationship bound by a query must keep naming the
+// same edge across a mutation whether it was created by Cypher or by the Go API,
+// and a CSR position cannot do that because RemoveEdge compacts. So every slot
+// carries a handle and FirstEdgeHandle always finds one.
+func TestGraph_PlainAddEdgeStillHasAnIdentity(t *testing.T) {
 	t.Parallel()
 	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
 
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	if h, ok := g.FirstEdgeHandle("a", "b"); ok || h != 0 {
-		t.Fatalf("FirstEdgeHandle on no-handle edge = (%d, %v), want (0, false)", h, ok)
+	h, ok := g.FirstEdgeHandle("a", "b")
+	if !ok {
+		t.Fatal("FirstEdgeHandle reported no handle for an edge created by plain AddEdge")
+	}
+	if h == 0 {
+		t.Error("FirstEdgeHandle returned the 0 sentinel as a live identity")
 	}
 }
 

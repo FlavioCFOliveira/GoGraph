@@ -25,7 +25,10 @@
 // committed ones its commit timestamp, separated by kTransactionInitialId.
 package mvcc
 
-import "sync/atomic"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // TxIDBase separates commit timestamps from transaction ids.
 const TxIDBase uint64 = 1 << 63
@@ -114,12 +117,32 @@ func Visible(ts, startTS, txID uint64) bool {
 // Safe for concurrent use.
 type Clock struct {
 	commit atomic.Uint64
-	// visible is the highest timestamp every commit at or below which has been
-	// PUBLISHED. It is what a reader starts at, and it is a separate counter
+	// visible is the highest timestamp every commit at or below which has
+	// FINISHED. It is what a reader starts at, and it is a separate counter
 	// from the allocation one for a reason that is a correctness bug, not an
 	// optimisation — see [Clock.ReadTS].
+	//
+	// "Every commit at or below which" is the load-bearing clause, and it is
+	// what [commitLog] supplies: while commits were serialised, publication
+	// happened in allocation order and the highest published timestamp was also
+	// the highest contiguous one, so a monotone maximum was enough. It is not
+	// enough once two writers may publish out of order (rmp #2298).
 	visible atomic.Uint64
 	txSeq   atomic.Uint64
+
+	// pubMu guards log. It is taken once per commit, on the publish path only,
+	// and NEVER on a read: readers see the frontier through the visible atomic
+	// above, which this lock is what keeps monotone.
+	pubMu sync.Mutex
+	log   commitLog
+
+	// waiters is how many callers are inside [Clock.AwaitVisible], and wait is the
+	// broadcast channel generation they block on (rmp #2328). The publish path reads
+	// waiters to decide whether a broadcast is owed, so the common case — a commit
+	// with no session blocked on it — costs one atomic load and no channel work.
+	// See await.go.
+	waiters atomic.Int64
+	wait    atomic.Pointer[waitGate]
 }
 
 // NextCommitTS allocates the next commit timestamp. Monotonic, never reused.
@@ -131,17 +154,143 @@ func (c *Clock) NextCommitTS() uint64 { return c.commit.Add(1) }
 
 // PublishCommitTS announces that every change committed at ts is now visible.
 //
-// Monotonic: a late publisher never moves the visible instant backwards.
-func (c *Clock) PublishCommitTS(ts uint64) {
-	for {
-		cur := c.visible.Load()
-		if cur >= ts {
-			return
-		}
-		if c.visible.CompareAndSwap(cur, ts) {
-			return
-		}
+// It does NOT simply raise the visible instant to ts. It records ts as finished
+// and moves the instant to the newest timestamp below which nothing is still in
+// flight, which is the same number only while commits are serialised. Publishing
+// out of allocation order is the case this exists for: a reader must never be
+// handed an instant that includes a commit but excludes an earlier one that has
+// not finished yet. See [commitLog] for the shape and the prior art.
+//
+// Monotonic: the frontier only ever advances, and a late publisher whose
+// timestamp is already behind it changes nothing.
+func (c *Clock) PublishCommitTS(ts uint64) { c.finishCommitTS(ts) }
+
+// AbandonCommitTS records that ts was allocated but will never be published —
+// the transaction failed after taking a timestamp and nothing it wrote will
+// ever be visible under it.
+//
+// It exists because the frontier is CONTIGUOUS: a timestamp that is neither
+// published nor abandoned stalls it forever, and every later commit becomes
+// permanently invisible to new readers while the commit log grows without
+// bound. An allocate-then-fail path is therefore obliged to call this, and the
+// obligation is why it is a named operation rather than an internal detail of
+// [Clock.PublishCommitTS].
+//
+// Every allocation in the module still publishes, and rmp #2300 did NOT change
+// that: a transaction refused by write-write conflict detection aborts WITHOUT
+// allocating a commit timestamp at all ([lpg.Graph.endWrite] marks the record
+// [AbortedTS] and returns), so there is nothing to abandon. This remains the
+// operation an allocate-THEN-fail path would owe the frontier, and it has no
+// caller — which is the honest state to record rather than deleting it and
+// leaving the obligation undocumented for whoever next writes such a path.
+func (c *Clock) AbandonCommitTS(ts uint64) { c.finishCommitTS(ts) }
+
+// finishCommitTS marks ts finished and republishes the frontier.
+//
+// The visible store happens UNDER pubMu, not after it: two publishers releasing
+// the lock and then racing to store their own frontier could otherwise land the
+// older one last and move the visible instant backwards.
+func (c *Clock) finishCommitTS(ts uint64) {
+	c.pubMu.Lock()
+	frontier := c.log.finish(ts)
+	advanced := frontier > c.visible.Load()
+	if advanced {
+		c.visible.Store(frontier)
 	}
+	c.pubMu.Unlock()
+	// The broadcast happens AFTER the frontier is stored and OUTSIDE pubMu: a woken
+	// waiter re-reads the frontier, so waking it before the store would send it
+	// straight back to sleep having missed the advance it was waiting for, and doing
+	// it under the lock would put a channel close on the publish path's critical
+	// section (rmp #2328).
+	if advanced && c.waiters.Load() > 0 {
+		c.wakeWaiters()
+	}
+}
+
+// RatchetTo raises the clock so that every timestamp it subsequently allocates,
+// and the instant every new reader starts at, is at least floor. It NEVER lowers
+// either, and it is a no-op when the clock has already passed floor.
+//
+// It returns the resulting allocation counter.
+//
+// # What it is for: recovery, and why the clock is DERIVED (rmp #2309)
+//
+// A process-local clock constructed at zero on every open would re-mint instants
+// that a previous process already made visible and made durable. The fix is not a
+// persisted counter — two of the three reference engines deliberately removed
+// theirs. InnoDB keeps TRX_SYS_TRX_ID_STORE "only for the purpose of upgrading"
+// and instead folds a max over every rollback segment at startup, then calls
+// init_max_trx_id(max + 1). Memgraph derives max(delta_ts)+1 from the WAL and
+// info.start_timestamp+1 from a snapshot, then restores
+// timestamp_ = max(timestamp_, next_timestamp). PostgreSQL does persist nextXid in
+// pg_control but STILL ratchets it per record during replay
+// (AdvanceNextFullTransactionIdPastXid).
+//
+// So the clock is derived from what the durable record actually says, and RAISED
+// rather than trusted — which is what this method is. A second source of truth
+// would be one that can disagree with the log after a torn tail.
+//
+// # Why it raises the VISIBLE frontier too, and why that is not a shortcut
+//
+// Both counters move. Raising only the allocation counter would leave the frontier
+// at zero, so every recovered commit would be invisible to a new reader until some
+// later commit's publication happened to sweep the frontier past it — a graph that
+// reads as empty immediately after recovery.
+//
+// It is sound here and ONLY here because recovery has no in-flight commits by
+// construction: every transaction in the file either reached its durable marker or
+// is discarded with the torn tail, so there is no allocated-but-unfinished instant
+// for the frontier to be holding back. That is exactly the precondition the
+// contiguous frontier normally enforces, satisfied by the situation rather than by
+// the commit log — which is why this must not be called on a live clock.
+//
+// Not safe for concurrent use, and not safe on a clock with commits in flight:
+// call it during open, before the graph is published to any reader or writer.
+// # THREE things move, not two, and the third is not optional
+//
+// The allocation counter and the visible frontier are atomics, but the CONTIGUITY
+// that produces the frontier lives in [commitLog], and it must be rebased with
+// them. A log that still believes timestamp 1 is unfinished computes a frontier of
+// 0 for ever, so [Clock.finishCommitTS] — which only ever RAISES visible — can
+// never move it again, and every commit after the ratchet is invisible for the life
+// of the process. Writes keep succeeding and readers simply never see them.
+//
+// The first version of this method moved only the two counters. internal/sim's
+// full-stack crash-recovery scenario caught it as node LOSS against its oracle (21
+// expected, 15 present), which looks nothing like a clock defect — see
+// [commitLog.rebase] and TestClock_RatchetKeepsTheFrontierMovable.
+func (c *Clock) RatchetTo(floor uint64) uint64 {
+	c.pubMu.Lock()
+	defer c.pubMu.Unlock()
+	if cur := c.commit.Load(); cur < floor {
+		c.commit.Store(floor)
+	}
+	if cur := c.visible.Load(); cur < floor {
+		c.visible.Store(floor)
+	}
+	// Rebase the contiguity to match, so the frontier can advance again.
+	c.log.rebase(c.visible.Load())
+	return c.commit.Load()
+}
+
+// InFlightCommits reports how many allocated commit timestamps have not yet
+// finished: the distance between the frontier a reader starts at and the
+// newest timestamp handed out.
+//
+// It is the quantity to watch when readers look stale — a commit stuck between
+// allocation and publication holds the frontier for every reader — and it is
+// what makes the commit log's memory bound observable, since the log retains
+// exactly this window.
+//
+// Safe for concurrent use.
+func (c *Clock) InFlightCommits() uint64 {
+	allocated := c.commit.Load()
+	visible := c.visible.Load()
+	if allocated <= visible {
+		return 0
+	}
+	return allocated - visible
 }
 
 // ReadTS returns the timestamp a reader starting now must use.
@@ -164,10 +313,26 @@ func (c *Clock) PublishCommitTS(ts uint64) {
 //
 // Returning the published instant closes it: a transaction is either wholly
 // before a reader's start or wholly after it, with no window in between.
-// Publication is in allocation order because commits are serialised by the
-// write barrier, so one counter is enough and no in-progress list is needed —
-// which is what PostgreSQL's snapshot xip_list and Memgraph's
-// commit_log_->OldestActive() exist to supply when commits are NOT serialised.
+//
+// # And why the published instant is a CONTIGUOUS frontier, not a maximum
+//
+// This comment used to end by saying that publication happens in allocation
+// order because commits are serialised by the write barrier, so one counter
+// sufficed and no in-progress list was needed — "which is what PostgreSQL's
+// snapshot xip_list and Memgraph's commit_log_->OldestActive() exist to supply
+// when commits are NOT serialised". Sprint 334 is where commits stop being
+// serialised, so that is exactly what rmp #2298 supplied.
+//
+// The counter is no longer a maximum over published timestamps. It is the
+// newest timestamp below which NOTHING is still in flight, maintained by
+// [commitLog] on the publish path. Without that, writer B allocating 5 and
+// finishing before writer A's 4 would hand a reader an instant containing 5 but
+// not 4 — the same straddled commit described above, arrived at from the other
+// direction.
+//
+// The cost of the read is unchanged, and that is the point of the shape chosen:
+// one atomic load here, one comparison in [Visible]. See [commitLog] for the
+// prior art and the trade it accepts.
 func (c *Clock) ReadTS() uint64 { return c.visible.Load() }
 
 // NextTxID allocates a transaction id, drawn from above [TxIDBase] so it can

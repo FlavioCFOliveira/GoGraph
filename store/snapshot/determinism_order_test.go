@@ -74,7 +74,7 @@ func TestWriteProperties_ByteStableAcrossRepeatedWrites(t *testing.T) {
 	var first []byte
 	for i := 0; i < 20; i++ {
 		var buf bytes.Buffer
-		if _, _, err := WriteProperties(&buf, g); err != nil {
+		if _, _, err := WriteProperties(&buf, g, nil); err != nil {
 			t.Fatalf("WriteProperties: %v", err)
 		}
 		if i == 0 {
@@ -97,7 +97,7 @@ func TestWriteLabels_ByteStableAcrossRepeatedWrites(t *testing.T) {
 	var first []byte
 	for i := 0; i < 20; i++ {
 		var buf bytes.Buffer
-		if _, _, err := WriteLabels(&buf, g); err != nil {
+		if _, _, err := WriteLabels(&buf, g, nil); err != nil {
 			t.Fatalf("WriteLabels: %v", err)
 		}
 		if i == 0 {
@@ -160,16 +160,16 @@ func TestCollectors_IndependentOfInsertionOrder(t *testing.T) {
 	asc, desc := build(false), build(true)
 
 	var ascProps, descProps, ascLabels, descLabels bytes.Buffer
-	if _, _, err := WriteProperties(&ascProps, asc); err != nil {
+	if _, _, err := WriteProperties(&ascProps, asc, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := WriteProperties(&descProps, desc); err != nil {
+	if _, _, err := WriteProperties(&descProps, desc, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := WriteLabels(&ascLabels, asc); err != nil {
+	if _, _, err := WriteLabels(&ascLabels, asc, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := WriteLabels(&descLabels, desc); err != nil {
+	if _, _, err := WriteLabels(&descLabels, desc, nil); err != nil {
 		t.Fatal(err)
 	}
 

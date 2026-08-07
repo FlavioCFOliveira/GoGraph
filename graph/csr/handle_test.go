@@ -57,8 +57,9 @@ func TestCSR_HandlesSlice_AlignsWithEdges(t *testing.T) {
 }
 
 // TestCSR_HandlesSlice_NilForSimpleGraph verifies the lazy/opt-in column:
-// a plain graph that never used AddEdgeH carries no handle column.
-func TestCSR_HandlesSlice_NilForSimpleGraph(t *testing.T) {
+// a plain graph that never used AddEdgeH still carries a handle column, because
+// since rmp #2317 every slot has an identity whatever route created it.
+func TestCSR_HandlesSlice_PresentForPlainAddEdge(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
 	if err := a.AddEdge("a", "b", 0); err != nil {
@@ -68,8 +69,12 @@ func TestCSR_HandlesSlice_NilForSimpleGraph(t *testing.T) {
 		t.Fatalf("AddEdge: %v", err)
 	}
 	c := BuildFromAdjList(a)
-	if h := c.HandlesSlice(); h != nil {
-		t.Fatalf("HandlesSlice() = %v for plain AddEdge graph; want nil (lazy column)", h)
+	h := c.HandlesSlice()
+	if len(h) != 2 {
+		t.Fatalf("HandlesSlice() = %v, want one entry per edge (2)", h)
+	}
+	if h[0] == 0 || h[1] == 0 || h[0] == h[1] {
+		t.Errorf("HandlesSlice() = %v, want two distinct non-zero identities", h)
 	}
 }
 
@@ -116,17 +121,24 @@ func TestCSR_BuildReverse_CarriesHandles(t *testing.T) {
 	}
 }
 
-// TestCSR_BuildReverse_NilHandlesForSimpleGraph verifies BuildReverse does
-// not synthesise a handle column when the forward CSR has none.
-func TestCSR_BuildReverse_NilHandlesForSimpleGraph(t *testing.T) {
+// TestCSR_BuildReverse_CarriesHandlesForPlainAddEdge verifies the reverse CSR
+// carries the forward handle even for a graph built with plain AddEdge, so one
+// logical edge keeps ONE identity in both directions whatever route created it
+// (rmp #2317).
+func TestCSR_BuildReverse_CarriesHandlesForPlainAddEdge(t *testing.T) {
 	t.Parallel()
 	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
 	if err := a.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	rev := BuildFromAdjList(a).BuildReverse()
-	if h := rev.HandlesSlice(); h != nil {
-		t.Fatalf("reverse HandlesSlice() = %v for simple graph; want nil", h)
+	fwd := BuildFromAdjList(a)
+	rev := fwd.BuildReverse()
+	fh, rh := fwd.HandlesSlice(), rev.HandlesSlice()
+	if len(fh) != 1 || len(rh) != 1 {
+		t.Fatalf("forward handles = %v, reverse handles = %v, want one each", fh, rh)
+	}
+	if rh[0] != fh[0] {
+		t.Errorf("reverse handle = %d, want %d (the same logical edge)", rh[0], fh[0])
 	}
 }
 

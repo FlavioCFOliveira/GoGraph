@@ -23,13 +23,13 @@ func TestWriteMapper_StringByteIdenticalToV1(t *testing.T) {
 	}
 
 	var v1 bytes.Buffer
-	v1Size, v1CRC, err := WriteMapperString(&v1, m)
+	v1Size, v1CRC, err := WriteMapperString(&v1, m, nil)
 	if err != nil {
 		t.Fatalf("WriteMapperString: %v", err)
 	}
 
 	var codecBuf bytes.Buffer
-	cSize, cCRC, err := WriteMapper[string](&codecBuf, m, txn.NewStringCodec())
+	cSize, cCRC, err := WriteMapper[string](&codecBuf, m, txn.NewStringCodec(), nil)
 	if err != nil {
 		t.Fatalf("WriteMapper[string]: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestWriteMapper_CodecVersionIsTwo(t *testing.T) {
 		m.Intern(k)
 	}
 	var buf bytes.Buffer
-	if _, _, err := WriteMapper[int64](&buf, m, txn.NewInt64Codec()); err != nil {
+	if _, _, err := WriteMapper[int64](&buf, m, txn.NewInt64Codec(), nil); err != nil {
 		t.Fatalf("WriteMapper[int64]: %v", err)
 	}
 	ver, _ := decodeMapperHeaderVersion(t, buf.Bytes())
@@ -145,7 +145,7 @@ func roundTripKeys[N comparable](t *testing.T, codec txn.Codec[N], keys []N) {
 	}
 
 	var buf bytes.Buffer
-	size, crc, err := WriteMapper[N](&buf, m, codec)
+	size, crc, err := WriteMapper[N](&buf, m, codec, nil)
 	if err != nil {
 		t.Fatalf("WriteMapper: %v", err)
 	}

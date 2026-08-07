@@ -1021,6 +1021,64 @@ tagged crash-injection battery, `golangci-lint` (0 issues) and
 
 ---
 
+Incrementally synced at commit `7aa302f8` (2026-08-03, task #2304, sprint 334 — MVCC B2,
+retire the exclusive visibility barrier: PREREQUISITES LANDED, BARRIER NOT REMOVED):
++1 `Commit` (`7aa302f8`); +5 `Method` on `lpg` `Graph` (`ApplyVersioned`,
+`ApplyAtomicallyTx`, `ApplyInsideLockedTx`, `WriterViewOf`, `AmbientWriteTx`);
++1 `Type` `lpg.WriteTx`; +1 `Method` `mvcc.WriteStamp.EndFor`; +4 `Test`
+(`TestOverlap_DeferredIndexRemovalChargedToItsOwnTransaction`,
+`TestOverlap_TransactionsDoNotStealEachOthersState`,
+`TestOverlap_WriterViewOfSeesOwnWriteNotTheOthers`,
+`TestWALWriteScalingGate`); +1 `CONTAINS` (Sprint 334 → Commit).
+
+CORRECTION to this entry as first written: `Finding` is **not** a new label — it already
+existed, keyed on `name` (e.g. `sec-2026-07-02-r2-snapshot-csr-size`) with `severity`,
+`status`, `title`, `task`, `sprint`, `commit`, `date`, `surface` and `rootclass`. The two
+nodes created here were initially keyed on an `id` property that no other Finding uses;
+they have been reconciled to the existing convention and now carry `name` as well. What IS
+new is the edge type `DISCOVERED (Commit)->(Finding)`, and three optional properties for a
+finding that was MEASURED but not fixed: `mechanism` (why it happens), `evidence` (the
+measurement) and `property` (the ACID or compliance property at stake), plus `fixedIn`,
+`fixNote` and `verified` once it is closed. The point of them is that the evidence stays
+queryable instead of living only in a commit message.
+
+Two were created, both CRITICAL:
+
+- `mvcc-2026-08-03-b2-ambient-slot-splits-transactions` — status **OPEN**, ACID Isolation,
+  owned by rmp #2320. Removing the write barrier splits one statement across two commit
+  records, because every Cypher mutator reaches `lpg` through the public API with a nil
+  `writeCtx` and resolves the shared commit record from the graph-wide ambient stamp slot.
+  Measured: 105 942 torn reads in `examples/27_concurrent_txn`, 147 overwrites of a
+  still-armed slot, 0 untransacted-branch hits (which rules out per-delta timestamps and
+  localises it to another live transaction's record).
+- `mvcc-2026-08-03-unique-constraint-check-then-act` — status **FIXED** in `82c92b4b`, ACID
+  Consistency, owned by rmp #2321. `ConstraintRegistry.CheckSetProperty` read under
+  `RLock` while `RecordPropertySet` inserted under `Lock` later, so two concurrent writers
+  both passed; 14 of 15 `-race` runs of 8 concurrent `MERGE` under a `UNIQUE` constraint
+  produced 2 or 4 nodes. Fixed by `ConstraintRegistry.ReserveSetProperty` (atomic
+  test-and-reserve, PostgreSQL's `_bt_doinsert` discipline) together with removing the
+  rollback's whole-graph value-set rebuild, which destroyed CONCURRENT writers'
+  reservations because a rebuild cannot see a commit that is not yet durable. Each
+  statement now journals its own registry changes as inverses on the transaction undo log
+  (`cypher/exec/constraint_journal.go`), which also closes the remaining half of audit
+  finding E10. Verified: 20 of 20 `-race` runs converge on one node with all eight
+  statements succeeding. +1 `Method` `exec.ConstraintRegistry.ReserveSetProperty`, +5
+  `Test` in `cypher/exec/constraints_reserve_test.go`; `reseedConstraintsInsideBarrier` was
+  DELETED.
+
+The barrier itself is UNCHANGED at this commit: `cypher/api.go`'s autocommit path uses
+`Graph.ApplyAtomicallyTx` and `store/txn` `Tx.Commit` uses `Graph.ApplyAtomically`, both
+exclusive. `Graph.ApplyVersioned` (the shared bracket) exists, is tested, and is what
+rmp #2320 will switch them to. `Graph.View` remains a SHARED hold, which is sound only
+because writers hold the same barrier exclusively — see its doc comment for the choice
+rmp #2320 forces. Also in this commit: audit finding E10 half-resolved
+(`reseedConstraintsInsideBarrier` reads an MVCC snapshot, so a rollback cannot import a
+concurrent writer's uncommitted value into a UNIQUE value-set; the O(N) walk is
+documented and deferred, needing typed undo entries), and audit finding E19 resolved as a
+documented NON-dependency (edge-handle order does not track WAL order and nothing reads
+that correspondence: the handle travels in the frame and every restore path is a
+high-water seed).
+
 ## Node labels
 
 | Label | Meaning | Properties (beyond `gitCommit`, `gitDate`) |
@@ -1505,7 +1563,8 @@ package's `func Benchmark` declarations against the graph during this sync. **+2
 `2026-07-27`. No new label or edge type.
 
 The substance is what the measurement overturned. GoGraph's group commit **already worked**:
-`Tx.Commit` releases the single-writer semaphore after the append and coalesces in
+`Tx.Commit` released the single-writer semaphore (retired by rmp #2306) after the
+append and coalesces in
 `wal.Writer.SyncGroup`, reaching 31 300 commits/s at 256 writers before this change. The
 "flat at 261 op/s from 1 to 1024 writers" that rounds 3 and 4 both recorded belongs
 **exclusively to the Cypher path**, which fsyncs while holding `lpg`'s `visMu` in write mode
@@ -1758,6 +1817,93 @@ falling 1.249 → 0.809 and allocations FLAT; the swap is −93.73% / −99.69% 
 that the motivating audit's reference points were **not reproducible** (its exponent 2.02
 measured 1.79 at the sprint base).
 
+### Sprint 334 sync — the MVCC background vacuum (2026-08-04)
+
+Recorded at `134dff2c` (task rmp #2308, MVCC C2). **Reclamation moved off the commit path**
+into a demand-started, self-terminating background vacuum; see
+[`docs/design-mvcc-vacuum.md`](docs/design-mvcc-vacuum.md).
+
+Added: `Commit 134dff2c`; `Task 2308` (COMPLETED); 4 `Type`s (`vacuumState`, `vacuumUnit`,
+`VacuumStats`, and `MVCCStats` — the last one **pre-existed in the code since sprint 333 but
+was absent from the graph**, so it is added here rather than updated); 20 `Method`s (12 on
+`Graph`: `Close`, `CloseCtx`, `VacuumStats`, `wakeVacuum`, `wakeVacuumOnRelease`,
+`startVacuum`, `vacuumLoop`, `vacuumPass`, `sweepUnit`, `awaitVacuumProgress`,
+`publishVacuumMetrics`, `chargeReclaimDebt`; 5 on `vacuumState`; `MVCCStats.WithinCeiling`;
+`cypher.Engine.Close`/`CloseCtx`); 9 `Test`s; 2 `Benchmark`s; 3 `Spec`s
+(`design-mvcc-vacuum.md`, `benchmarks/mvcc-vacuum-2026-08-04.md`, and
+`design-mvcc-delta-chains.md`, which also pre-existed on disk and not in the graph).
+
+Edges (80): `Sprint 334 -[CONTAINS]-> Commit`; `Task 2308 -[IMPLEMENTED_IN]-> Commit`;
+`Commit -[IMPROVES]->` `MVCC as sole concurrency control` (12051) and `MVCC snapshot
+isolation` (13861); `Commit -[FIXES]-> ACID Transactions` (9736) for the lost-row defect;
+`Commit -[TOUCHES]->` packages `graph/lpg`, `cypher`, `graph/adjlist`, `internal/sim` and the
+3 Specs; both MVCC Features `-[SPECIFIED_IN]->` the design Spec; `CONTAINS`/`HAS_METHOD` for
+every new symbol; each new Test `-[VERIFIES]-> MVCC as sole concurrency control`; both
+Benchmarks `-[MEASURES]-> Graph.vacuumLoop`.
+
+**REMOVED from the code, and therefore absent from the graph by design:**
+`Graph.ReclaimIdle` (the read-path inline sweep) and its call site in `cypher/api.go`,
+`Graph.reclaimIfDue`, and `reclaimAfterDirectWrite`'s barrier acquisition. None of the three
+had ever been symbol-synced, so there was nothing to delete — that gap is itself the
+limitation noted below.
+
+**Two write mistakes of mine were made and corrected during this sync; both are worth
+recording because they are traps, not slips.**
+
+1. A blanket `MATCH ()-[r]->() WHERE r.gitCommit IS NULL SET r.gitCommit=…` stamped **1 075
+   pre-existing unstamped edges** as last confirmed at this commit — a fidelity error, since
+   they were confirmed by earlier commits. Never stamp by "is null"; stamp only the edges the
+   sync actually created.
+2. The first correction used
+   `WHERE NOT (a.gitCommit=$FH OR b.gitCommit=$FH)`, which silently missed every edge whose
+   **both** endpoints lack `gitCommit`: in three-valued logic `NOT (NULL OR NULL)` is NULL,
+   not TRUE, so those rows are filtered out rather than matched. 408 wrong stamps survived.
+   The predicate must be `coalesce(a.gitCommit,'') <> $FH AND coalesce(b.gitCommit,'') <> $FH`.
+   Verified afterwards: 0 edges carry this commit's stamp without an endpoint that does.
+
+Both `IMPROVES` (not `IMPLEMENTS`) for the perf/architecture half and `FIXES` for the defect
+half follow the edge-type table, which the sprint-314 note above records being got wrong the
+first time.
+
+### Sprint 334 sync — withdrawing an aborted transaction (2026-08-04)
+
+Recorded at `f52ca1ff` (task rmp #2318). An aborted transaction now WITHDRAWS its
+writes synchronously at abort; see
+[`docs/design-mvcc-abort-withdrawal.md`](docs/design-mvcc-abort-withdrawal.md).
+
+Added: `Commit f52ca1ff`; `Task 2318` (COMPLETED, `DEPENDS_ON Task 2308`); `Spec
+design-mvcc-abort-withdrawal.md`; 11 `Method`s (`Graph.withdrawAbortedNow`,
+`withdrawAbortedLabels`, `withdrawAbortedProps`, `withdrawAbortedSides`,
+`withdrawAbortedIndexRemovals`, `reclaimAbortedLabelsLocked`,
+`reclaimAbortedPropsLocked`, `reclaimAbortedLife`, `abortWake`;
+`sideVersions.withdrawAborted`; `adjVersions.clearAborted`); 5 `Test`s.
+
+Edges: `Sprint 334 -[CONTAINS]-> Commit`; `Task -[IMPLEMENTED_IN]-> Commit`;
+`Commit -[FIXES]->` `ACID Transactions` (9736) and `MVCC as sole concurrency
+control` (12051) — FIXES rather than IMPROVES, because the defect found was an
+Atomicity violation and not the memory leak the ticket described; `Commit
+-[TOUCHES]->` `graph/lpg`, `graph/mvcc` and the Spec; both Features
+`-[SPECIFIED_IN]->` the Spec; `CONTAINS`/`HAS_METHOD` per symbol; each Test
+`-[VERIFIES]-> ACID Transactions`.
+
+The edge stamp used the 3VL-safe predicate the previous sync's note derives
+(`coalesce(a.gitCommit,'') = $FH OR coalesce(b.gitCommit,'') = $FH`), and the
+leak check afterwards returned 0.
+
+### Sprint 334 sync — the coverage precondition for concurrency controls (2026-08-04)
+
+Recorded at `83d1217d` (task rmp #2319). Added: `Commit 83d1217d`; `Task 2319`
+(COMPLETED); 2 `Function`s (`testlayers.RequireUninstrumented`, `Instrumented`); 1
+`Test`. Edges: `Sprint 334 -[CONTAINS]-> Commit`; `Task -[IMPLEMENTED_IN]-> Commit`;
+`Commit -[TOUCHES]->` `internal/testlayers`, `bench/mvccwrite`, `store/wal`,
+`graph/lpg`; `CONTAINS` per symbol. Leak check 0.
+
+Recorded here because it is a CONTRACT and not only a fix: a test that measures
+whether the ENVIRONMENT can demonstrate an effect is a CONTROL, and it skips under
+coverage instrumentation; a test that measures the MODULE is a GATE, and it never
+does. The two must not be confused, because guarding a gate that way would stop the
+coverage arm gating anything.
+
 ## Known limitations (faithful, by design)
 
 - **Build-tag duplicates.** The extractor parses every `.go` file regardless of build
@@ -1846,3 +1992,799 @@ cache, and the audit remediation).
    **unreachable from pure Cypher**, because CREATE and MERGE both mint handles via
    `AddEdgeH` — handle 0 comes only from a raw `lpg`/`adjlist` `AddEdge` or a
    `store/txn` `OpAddEdge`.
+
+Incrementally synced at commit `d8847ce7` (2026-08-02, tasks #2300 and #2301,
+sprint 334 — write-write conflict detection extended to seven of eight versioned
+stores): +16 nodes (`Commit` `d8847ce7`; `Feature` `Write-write conflict
+detection`; `Component`s `writeCtx.conflict`, `noteNodeLife`,
+`nodeLifeShard.headStamp`, `sideVersions.headStamp`; 11 `Test`s — nine in the new
+`graph/lpg/mvcc_conflict_stores_test.go` covering node existence and each of the
+five per-edge side stores, plus
+`TestWriteCtx_VoidPrimitiveConflictDoomsTheTransaction` and
+`TestWriteCtx_DoomedTransactionRefusesEveryFurtherWrite` in
+`mvcc_writectx_test.go`). +edges: `Commit -[TOUCHES]->` `Package lpg` and `Spec
+design-write-conflict-detection.md`; `Commit -[FIXES]->` the new Feature and
+`Per-transaction write state`; the Feature `-[PART_OF]->` `MVCC as sole
+concurrency control` and `-[SPECIFIED_IN]->` the Spec; `VERIFIES` from all 17
+conflict-detection tests; `IMPLEMENTS` from the five Components. Provenance
+stamped on every node and edge touched.
+
+THE DEFECT THIS COMMIT CLOSED, recorded because it is a class rather than an
+incident: detection that only SKIPS a conflicting write, without recording it on
+the transaction, is a silent lost update whenever the primitive cannot return an
+error. `commit()` could not fail, so a transaction whose only conflicting write
+went through `removeNodeLabel` or `delNodeProperty` committed successfully having
+dropped it. The fix is Memgraph's `transaction->must_abort` read at
+`Storage::Commit`: `writeCtx.conflict` records, `labelTx.commit` returns
+`(uint64, error)` and aborts. A refused push now also returns `false` and all
+twelve callers abandon the mutation.
+
+COVERAGE IS 7/8, NOT 8/8. The adjacency (`graph/adjlist`) has no conflict
+detection: its version chain is stamped from a per-graph `mvcc.WriteStamp` and
+its commit window (`commitDepth`, `dirtyShards`, and each shard's `building`
+builder) is single-writer by contract. That is rmp #2301's remaining half and is
+tabulated in `docs/design-write-conflict-detection.md` so the gap is visible
+rather than implied.
+
+Incrementally synced at commit `ca4e1538` (2026-08-03, task #2301, sprint 334 —
+**MVCC A4: per-transaction commit state**, closing audit findings **E3, E4 and
+E16**): +14 nodes (`Commit` `ca4e1538`; `Package` `graph/mvcc` — it had no node at
+all before, which is itself a fidelity defect this sync repaired; `Spec`
+`design-per-transaction-write-state.md`; six Components — `mvcc.TxState`,
+`mvcc.WriteStamp.Publish`, `Graph.writeTx`, `Graph.acquireWriteCtx`,
+`Graph.releaseWriteCtx`, `Graph.writerSnapshot`; seven Tests —
+`TestWriteStamp_TwoTransactionsDoNotShareState`,
+`TestWriteStamp_VersionCountIsPerTransaction`,
+`TestWriteStamp_RetractedWindowRefusesLateVersions`,
+`TestTxState_RefusesReuseWhileARecordIsStranded`,
+`TestWriteStamp_ConcurrentTransactionsUnderRace`,
+`TestWriteCtx_RecycledStateIsNeverSharedAcrossTransactions`,
+`TestWriteCtx_ConcurrentTransactionsKeepTheirOwnRecord`), +26 edges (`Feature
+Per-transaction write state -[SPECIFIED_IN]->` the new Spec and `-[FIXES]->` the
+Commit; `-[IMPLEMENTS]->` each of the six new Components; `-[VERIFIES]->` each of
+the seven new Tests; `Commit -[TOUCHES]->` the Spec, the six Components, and the
+packages `graph/mvcc`, `graph/lpg`, `graph/adjlist`). Provenance stamped on every
+node and edge touched.
+
+WHAT E3 ACTUALLY WAS, recorded because the task's own premise was wrong: the
+commit record, the version count and the pending transaction id were fields on
+`mvcc.WriteStamp`, one set per graph, so a second `Begin` destroyed the first
+transaction's window. **It is not a data race** — every field was already atomic,
+so `-race` is silent on it — it is **silent data loss**. Measured against the
+pre-change build: writer A's record was never returned by anything (A got `nil`
+and 0 versions) while B was charged A's version too (2 versions). A's versions
+keep transaction id `9223372036854775809` for the life of the process: invisible
+to every reader for ever, and unreclaimable, because every reclaimer truncates on
+`stamp <= watermark`, which an in-flight id can never satisfy, and nothing
+reports it. The acceptance instrument is therefore an assertion on the retracted
+record and count, not the race detector.
+
+THE SHAPE: the transaction owns the state (`mvcc.TxState`, embedded by value in
+`writeCtx`), and the graph owns only a SLOT naming the transaction currently
+writing — replaced, never mutated. The slot survives because a write that carries
+no transaction must still resolve one: the public Go-API mutators are
+per-operation atomic rather than transactional, and `adjlist` reaches the shared
+record through `mvcc.WriteStamp` without being able to see lpg's transaction
+type. A write that DOES carry its transaction never consults the slot. Prior art
+read in source: Memgraph `src/storage/v2/` threads `Transaction *transaction`
+into every accessor; PostgreSQL `src/backend/access/transam/xact.c` keeps the
+top-level transaction state in a `static TransactionStateData` reused by every
+transaction a backend runs.
+
+THE HAZARD RECYCLING INTRODUCES, and the sentinel that closes it: a version
+arriving after its transaction was retracted must NOT be stamped with that
+transaction's record, because the record already carries a commit timestamp and
+the version would become visible EARLIER than it happened — a reader whose
+snapshot predates the write would observe it. `Retract` stores `nil`, so `Ensure`
+answers "no window" and the caller falls back to a timestamp of its own.
+Later-than-it-happened is safe; earlier is not. The mirror case, a record
+stranded in a finished state, is closed by `Arm` refusing to recycle it.
+
+COST, measured, `benchstat` n=6: `BenchmarkBarrier_ApplyAtomically`
+19.11 ns → 26.99 ns, **+41.27 % (p=0.002)** on an EMPTY bracket, allocations
+unchanged at **0/op**; one Cypher write end to end 3.090 µs → 3.111 µs, **not
+statistically significant (p=0.151, n=5)**. `sync.Pool` was tried FIRST and
+rejected on measurement (31.3 ns, +64 %, all `procPin` plus the per-P `poolLocal`
+walk); one atomic slot does the same work in a `Swap` and a `Store`, and degrades
+to allocation — never to sharing — when rmp #2304 removes the barrier.
+
+COVERAGE IS NOW 8/8 for per-transaction state. The adjacency gap recorded at
+`d8847ce7` is closed: `commitDepth` and `dirtyShards` were replaced by a
+per-shard `buildingOwner` token at `e3a0ea1e`, so a builder is reused only by the
+transaction that created it. Conflict DETECTION still covers seven stores rather
+than eight, and that remains tabulated in
+`docs/design-write-conflict-detection.md`.
+
+Incrementally synced at commit `205ca672` (2026-08-03, task #2300, sprint 334 —
+**the serialization conflict's retriable path to a Bolt client**): +8 nodes
+(`Commit` `205ca672`; two Components — `FailureCode serialization-conflict
+mapping`, `sanitiseErr conflict message forwarding`; five Tests —
+`TestFailureCode_SerializationConflict`,
+`TestFailureCode_SerializationConflictIsRetriedByTheRealDriver`,
+`TestFailureCode_DemotedTransientCodesAreNotRetriable`,
+`TestSanitiseErr_ForwardsTheConflictMessage`,
+`TestFailureCode_ConflictIsNotClassifiedAsAClientFault`), +12 edges (`Feature
+Write-write conflict detection -[FIXES]->` the Commit, `-[IMPLEMENTS]->` both
+Components, `-[VERIFIES]->` all five Tests; `Commit -[TOUCHES]->` both Components,
+the Spec `design-write-conflict-detection.md`, and the package `bolt/server`).
+
+THE TRAP, recorded because it is a class rather than an incident: a Bolt status
+code being in the `Neo.TransientError.*` family is NOT sufficient for the official
+driver to retry it. `neo4j-go-driver` v5.28.4 runs `db.Neo4jError.reclassify()`
+BEFORE parsing the classification, and it rewrites
+`Neo.TransientError.Transaction.Terminated` and
+`…Transaction.LockClientStopped` into the `Neo.ClientError` family — so both are
+**never retried**. `Terminated` reads as the natural fit for "your transaction was
+aborted, try again" and would have been silently wrong. The conflict maps to
+`Neo.TransientError.Transaction.Outdated`, whose Neo4j `Status.java` text
+("transaction has seen state which has been invalidated by applied updates") is
+this rule exactly. The mapping is guarded by a test that asks
+`neo4j.IsRetryable` — the driver's own classifier — plus a NEGATIVE CONTROL over
+both demoted codes; the instrument was validated by moving the mapping onto
+`Terminated` and confirming the positive test fails.
+
+WHAT #2300 STILL CANNOT PROVE, recorded so the gap is visible rather than
+implied: a collision that actually travels the wire. The engine's writes pass no
+transaction, an explicit transaction holds the exclusive barrier for its whole
+lifetime (`cypher/exectx.go:353`), and a writer's start timestamp is read AFTER
+the barrier is acquired — so not even first-committer-wins can fire. The
+write-scaling gate's disjoint arm is therefore green over a code path that cannot
+fail, which is not evidence. Both become provable when rmp #2304 gives the engine
+a transaction to thread; §7.1 of `docs/design-write-conflict-detection.md`
+tabulates all four claims with their status.
+
+Incrementally synced at commit `9eee3b18` (2026-08-03, task #2302, sprint 334 —
+**WAL transaction contiguity**, closing audit finding **E5**): +12 nodes
+(`Commit` `9eee3b18`; `Feature` `WAL transaction contiguity`; `Spec`
+`design-wal-transaction-contiguity.md`; two Components — `wal.Writer.AppendRun`,
+`wal.Writer.appendLocked`; seven Tests — four in `store/wal/append_run_test.go`
+and three in `store/recovery/interleaved_txn_test.go`), +18 edges (the Feature
+`-[PART_OF]-> MVCC as sole concurrency control`, `-[SPECIFIED_IN]->` the Spec,
+`-[FIXES]->` the Commit, `-[IMPLEMENTS]->` both Components, `-[VERIFIES]->` all
+seven Tests; `Commit -[TOUCHES]->` both Components, the Spec, and the packages
+`store/wal`, `store/txn`, `store/recovery`).
+
+WHAT E5 ACTUALLY WAS, and it is TWO defects rather than one — recorded because the
+first draft of the design named the wrong one. Recovery commits the ops carrying a
+marker's own `TxnSeq` and discards the buffered prefix as orphaned, licensed by its
+own comment: *"The store serialises commits (single writer), so a transaction's
+frames are contiguous."* That licence came from a semaphore two packages up, not
+from the WAL. Under interleaving the damage depends on WHERE the foreign frame
+lands:
+
+- foreign op in the buffer's **PREFIX** → the scan walks past it, `orphanedOps=1`,
+  the op is **LOST** and never seen again. Three of four ops remain, so the graph
+  looks entirely plausible. A **Durability** violation whose only signal is one
+  counter.
+- foreign op in the **MIDDLE** → the scan starts at 0 and applies it under the
+  WRONG marker, so an uncommitted transaction's op is durable after a crash.
+  `orphanedOps=0`, nothing dropped. An **Atomicity** violation with no signal at
+  all.
+
+The design was written against the middle order expecting data loss, and the test
+went GREEN over a live defect until the order was measured. Both arms are kept
+permanently, and each fails loudly if its defect stops reproducing — because that
+would mean the guarantee is no longer what protects atomicity and the positive
+tests would be proving nothing.
+
+THE SHAPE: `wal.Writer.AppendRun` holds the writer's own mutex for a whole run, so
+contiguity is a property of the component that owns the file. Recovery's
+assumption stays TRUE rather than being relaxed — hence no format change, no new
+frame field, no change to `store/recovery` at all. Rejected in writing:
+PostgreSQL's `XLogInsertRecord` space reservation (holes recovery must tolerate,
+for a concurrent-memcpy payoff nothing has measured) and InnoDB's
+group-by-mini-transaction (needs an aggregate buffer cap invented on top of
+`maxTxnOps`). What IS taken from PostgreSQL is the insight at the right
+granularity: expensive work outside the lock, the lock only for the copy — so the
+per-op encoding stays with the caller and the commit path keeps its pooled scratch
+buffer.
+
+MEASURED: a loop of `Append` shattered a 25-frame transaction into **8 runs**
+(longest 10) against 8 concurrent appenders; `AppendRun` gives exactly **1**.
+
+PARTIAL DELIVERY, tabulated in §3 of the Spec rather than implied: criteria 1, 2, 3
+and 7 are closed. Durable and monotone `txnSeq` (4), crash-injection with
+concurrent writers (5), the fsync-per-commit benchmark (6) and audit finding **E21**
+(recovery and bulkimport open the adjacency commit window with NO barrier,
+licensed only by a comment) remain open on #2302.
+
+ALSO NOTE, for anyone asserting on it: there is **no `OrphanedOps` field on
+`recovery.Result`**. The orphan count is metrics-only, so a test that asserts it
+must install a `metrics.SetBackend` backend — and such tests must NOT be
+`t.Parallel()`, because that backend is process-global and two parallel tests
+would each count the other's orphans.
+
+Incrementally synced at commit `8c419e35` (2026-08-03, task #2302, sprint 334 —
+**resuming the transaction sequence across a reopen**, audit finding **E5**'s second
+half, acceptance criterion 4): +7 nodes (`Commit` `8c419e35`; two Components —
+`recovery.Result.MaxTxnSeq`, `txn.Options.ResumeTxnSeq`; four Tests in
+`store/txn/resume_txnseq_test.go`), +12 edges (the `WAL transaction contiguity`
+Feature `-[FIXES]->` the Commit, `-[IMPLEMENTS]->` both Components,
+`-[VERIFIES]->` all four Tests; `Commit -[TOUCHES]->` both Components, the Spec,
+and the packages `store/txn`, `store/recovery`).
+
+`txnSeq` was decoded by recovery and NEVER written back, so a store reopened on a
+non-empty WAL restarted at 0 and minted 1 again — one log holding two different
+transactions under one sequence number, which is precisely what recovery's
+suffix filter uses to tell one transaction's frames from another's. Measured:
+seeded `[1 2 3 4]`, unseeded `[1 2 1 2]`.
+
+DERIVED, NOT PERSISTED, and this is now the settled pattern for both counters in
+this sprint (the other is rmp #2309's MVCC clock): the WAL already carries the
+sequence in every frame, so a separate durable counter would be a second source of
+truth that can disagree with the log after a torn tail. `MaxTxnSeq` counts frames
+the replay DISCARDS and frames of an INCOMPLETE tail transaction — a sequence that
+was minted is spent, and re-minting it would put an abandoned transaction and a
+live one under one number.
+
+A DEADLOCK THE PARTIAL FIX INTRODUCED, recorded because the obvious half of the
+change is the half that hangs. Seeding the minting counter ALONE wedges the store:
+`waitApplyTurn` parks until `appliedSeq == seq-1`, and the predecessor of a resumed
+store's first transaction was applied by the PREVIOUS store instance, which no
+longer exists to advance anything. `TestResumeTxnSeq_IsMonotoneAcrossReopen` HUNG
+until `appliedSeq` was seeded too — and it would have hung in production on the
+first write after every restart. Any future change touching one watermark must
+touch both.
+
+Incrementally synced at commit `263dad86` (2026-08-03, sprint 334 — **the
+write-scaling instrument gate no longer reports a false NO-GO under load**):
++2 nodes (`Commit` `263dad86`; `Component` `requireAvailableParallelism`),
++3 edges.
+
+A LESSON ABOUT THE GATES THEMSELVES, recorded because it undermines every
+correctness claim that rests on them. `make ci` went red on
+`TestWriteScalingInstrument_SeesConcurrency`, and the failure was the MACHINE:
+that check drives a pure CPU-spin control with no WAL, no store and no graph in
+it, so nothing in the sprint's changes can reach it. The two instruments are
+load-sensitive in OPPOSITE directions despite `gate_test.go` calling one
+load-immune — `measureScaling` (1 vs 8 writers) survives load and can even
+INFLATE, while `measureSerialisationRatio` (8 free vs 8 under one mutex)
+COMPRESSES, because under saturation the free arm collapses toward the serialised
+one. Measured, same code and build: at load-average 18 inside
+`go test -race ./...`, 8 free writers reached 50380/s against 1 writer's 41384/s
+(**1.2× available parallelism**) and the ratio was **2.452× — a FAIL** against the
+3.00× target; on a quiet machine, also under `-race`, 288181/s against 47249/s
+(**6.1×**) gave **6.900×**. `requireCores` already skipped when the cores do not
+EXIST; it cannot see whether they are FREE, and `make ci` runs this package inside
+a parallel whole-module race run. `requireAvailableParallelism` probes with the
+test's own workload and skips instead of returning a verdict the machine cannot
+support. It cannot mask a real instrument defect, which would appear as a LOW
+serialisation ratio while parallelism is HIGH — the case where the assertion still
+runs.
+
+Incrementally synced at commit `eeb7704e` (2026-08-03, task #2302, sprint 334 —
+**the exclusive-build window is now an enforced contract**, audit finding **E21**):
++7 nodes (`Commit`; two Components — `AdjList.BeginExclusiveBuild`,
+`AdjList.EndExclusiveBuild`; four Tests in
+`graph/adjlist/exclusive_build_test.go`), +12 edges.
+
+`AdjList.BeginCommit` and `BeginExclusiveBuild` mutate the SAME two plain fields,
+`bulkOwner` and `bulkDepth`. They differ entirely in what licenses them: the
+serving write path holds the graph's exclusive visibility barrier for the whole
+window, while `store/recovery` and `store/bulkimport` take **no barrier at all**
+and are licensed only by "the graph is not reachable by anyone yet". Both used to
+call `BeginCommit`, so that second licence lived in a comment — and the audit's
+point is that it must not be silently INHERITED once writers overlap at serving
+time. Two distinct entry points now, plus an `atomic.Bool` that makes overlapping
+them PANIC in either direction; every guard is pinned by a test that fails by
+construction if the guard is removed.
+
+A HAZARD FOR rmp #2304 THAT THIS SURFACED, recorded because the failure would be
+silent: `AdjList.builderOwner` prefers `bulkOwner` **over** the writing
+transaction's own record — deliberately, so a window's token cannot change
+mid-window (the record is allocated lazily by the first version, and reading it
+first re-clones the builder on every write; a test caught that on rmp #2301's
+first draft). So the SERVING path's window currently **shadows per-transaction
+ownership**: with `visMu` gone, two concurrent writers would both present the same
+`bulkOwner` and reuse each other's private, UNPUBLISHED shard builders — one
+mutating the other's slot array in place. #2304 must RETIRE the serving path's
+window in favour of a token that travels with the write (`writeCtx.txID` already
+exists), not merely delete `visMu` around it.
+
+Also recorded: criterion 6 of #2302 needs no new instrument.
+`BenchmarkWriteScaling_StoreAPI` already reports `commits/fsync`, and the store
+path releases the semaphore BEFORE `SyncGroup`, so coalescing is reachable there —
+the flat 268/s the audit measured is the *Cypher* path, serialised by `visMu`.
+
+Incrementally synced at commit `2d11d717` (2026-08-03, task #2302, sprint 334 —
+**rmp #2302 CLOSED: crash injection with concurrent writers (criterion 5) and the
+group commit measured (criterion 6)**): +15 nodes (`Commit`; two `Spec` —
+`docs/benchmarks/group-commit-coalescing-2026-08-03.md` and the previously
+unmodelled `docs/design-wal-transaction-contiguity.md`; five `Function` —
+`runConcurrentWriters`, `commitConcTxn`, `envInt`, `concBase` in
+`cmd/crashinject-helper/main.go` and `parseSkip` in
+`internal/crashpoint/crashpoint_enabled.go`; seven `Test`), +26 edges (12
+`CONTAINS`, 5 `VERIFIES`, 4 `IMPROVES`, 5 `TOUCHES` — the `Sprint`→`Commit`
+`CONTAINS` and the two `SPECIFIED_IN` included).
+
+**A concurrent crash cannot be asserted against a shape, so it is asserted against
+the child's own acknowledgements.** With many writers, which transactions had
+committed when the kill landed is up to the scheduler. The helper's new
+`runConcurrentWriters` scenario therefore prints one `ACK <id>` line per
+acknowledged commit (written only after `Commit` returned nil, i.e. after that
+transaction's frames and `OpCommit` marker were fsynced) and the parent holds
+recovery to **Durability** (everything acknowledged is present and complete) and
+**Atomicity** (everything present is present in full). Each transaction owns a
+disjoint 3-node ring, `base = id*10`, which is the decision that makes
+per-transaction completeness checkable independently: no transaction can supply or
+hide another's state.
+
+Two new PRODUCTION crashpoints in `store/wal/writer.go`, both elided to nothing
+without the `gograph_crashinject` tag: `wal.appendrun.frame-emitted` inside
+`AppendRun`'s emit (tears one transaction's frame run with `w.mu` held) and
+`wal.sync.pre-datasync` in `leadGroupSyncLocked` between the `Flush` and the
+`dataSync` (tears a group commit with followers parked on a watermark that will
+never be published).
+
+**`GOGRAPH_CRASH_AFTER` — a countdown, and not a convenience.** A breakpoint on a
+hot durability path is reached by the process's FIRST commit, where a crash proves
+nothing: nothing has been acknowledged, so "everything acknowledged survived"
+holds vacuously. The countdown lets n hits through and kills on the (n+1)th. Prior
+art read in source: SQLite's OOM simulator counts down the same way —
+`memfault.iCountdown`, "Number of pending successes before a failure",
+`faultsimStep()`, `faultsimConfig(nDelay, nRepeat)` (`sqlite/sqlite` @ `1b08739`,
+`src/test_malloc.c:27,65-71,119-120`). Its off-by-one is the whole contract, so
+`TestBreakpoint_Countdown` pins both sides.
+
+**THE FACT MOST WORTH KEEPING: this battery does NOT detect audit finding E5
+today, and NO LONGER as of rmp #2306.** While the store's capacity-one semaphore
+was held across `store/txn.Tx.appendOnly`, contiguity was **over-determined** —
+guaranteed twice — so replacing `AppendRun` with a loop of `Append` left the crash
+tests PASSING and removing either guarantee alone changed nothing observable.
+rmp #2306 retired that semaphore, so contiguity now rests **solely** on
+`wal.Writer.AppendRun`. E5's primary detector is still the `store/wal` unit arm,
+which drives concurrent appenders against the writer directly (a loop of `Append`
+shatters a 25-frame transaction into 8 runs; `AppendRun` gives 1). **This battery becomes the E5 gate the moment
+rmp #2306 retires the semaphore.** What it does detect was proven: altering
+`Tx.Commit` to acknowledge without `SyncGroup` makes both tests fail with 44
+durability violations naming the exact lost transactions. Also note `SIGKILL` does
+not drop the OS page cache, so the mid-fsync point tests recovery over a
+never-fsynced tail, not the loss of one.
+
+**Criterion 6, measured** (`BenchmarkWriteScaling_StoreAPI`, Apple M4, no `-race`,
+median of 5): `commits/fsync` 1.000 / 4.121 / 31.58 / 107.1 / 300.0 at 1 / 8 / 64 /
+256 / 1024 writers — fsyncs per commit falls **300x**, monotone at every step,
+throughput 263 → 78 667 ops/sec. `AppendRun` did not cost the group commit because
+`SyncGroup` coalesces on **Sync**, not on Append. The contrast localises the
+sprint's ceiling: the Cypher path over the same WAL is flat at **268 commits/s**
+because it fsyncs inside `visMu`, which is rmp #2304's to remove.
+
+DATA-QUALITY NOTES observed during this sync, not corrected here:
+- Only **one** `Commit` node existed for sprint 334 (`d8847ce7`) although the sprint
+  has ~12 commits, so the `Sprint`→`Commit` provenance layer is substantially
+  behind for this sprint.
+- `internal/crashinject/graph_shape_test.go` (task #2270) had **no** `Test` nodes at
+  all; its two tests were added here as hygiene.
+- `cmd/crashinject-helper/main.go` models only `main`, `run`, `runCheckpointCrash`
+  and `runWALMidFrame`; the later scenario functions
+  (`runCheckpointPrefixCrash`, `runRecoveryPromoteCrash`, `runConstraintDropCrash`,
+  `runEdgeHandlePropCrash`, `runEdgeHandleDeleteCrash`) remain unmodelled.
+- Test-file **helper** functions are not modelled as `Function` anywhere in the
+  graph (confirmed by query), so this sync did not add the new test helpers
+  (`checkConcurrent`, `concTxnFacts`, `concPresentFacts`, `parseAcks`,
+  `runConcurrentCrash`, `assertViolations`, `runCountdownChild`). That is the
+  graph's existing convention, not an omission.
+
+Incrementally synced at commit `fc433015` (2026-08-03, task #2300, sprint 334 —
+**adjacency write-write conflict detection, on the commutative rule**): +16 nodes
+(`Commit`; three `Type` — `adjVersions`, `adjStamps`, `adjVersionShard`; one
+`Function` — `adjEffective`; four `Method` — `adjVersions.checkAppend`,
+`.stampAppend`, `.noteExclusive`, `Graph.addEdgeInfo`; seven `Test`), +15 edges
+(12 `CONTAINS`, 3 `HAS_METHOD`, 7 `VERIFIES`, 3 `IMPROVES`, 1 `Sprint`→`Commit`).
+
+**ADJACENCY COULD NOT USE THE RULE EVERY OTHER STORE USES.** Every other versioned
+store keeps a per-object delta chain, so a writer asks whether it may displace the
+head version. Adjacency keeps none — its only version signal is
+`Graph.topoGeneration`, **one global counter**, which cannot distinguish "someone
+changed node A" from "someone changed node Z". The standard rule would make every
+writer conflict with every other writer that touched the graph at all.
+
+**READING MEMGRAPH'S SOURCE INVERTED THE OBVIOUS ANSWER, and this is the entry
+worth keeping.** `CreateEdge` does NOT call `PrepareForWrite`; it calls
+**`PrepareForNonSequentialWrite`** on both endpoint vertices (memgraph/memgraph @
+`b3ac3cd`, `src/storage/v2/inmemory/storage.cpp` → `src/storage/v2/mvcc.hpp`).
+That returns `NON_SEQUENTIAL`, **not** `SERIALIZATION_ERROR`, when the head delta
+is itself an edge creation, and says why in its own comment: *"if the entire
+uncommitted delta chain is of edge creations … we can safely add a non-sequential
+delta"*. So **two transactions appending arcs to the SAME vertex do not conflict** —
+`ADD_OUT_EDGE`/`ADD_IN_EDGE` are commutative — and only a *blocking* delta
+upstream (property, label, edge removal) is a serialization error. It matters more
+in GoGraph than in Memgraph: on a power-law graph most arcs share few sources, so
+conflicting on every append would serialise exactly the hot path the sprint exists
+to open. **User decided the commutative rule.**
+
+**The shape, with no delta chain to walk:** `adjVersions` keeps **two stamps per
+node** across 64 shards — `appendTS` (commutative) and `exclusiveTS`
+(non-commutative). An append consults only `exclusiveTS`; a removal / pair clear /
+same-pair replacement consults **both**. **An append still RECORDS its stamp
+although it never conflicts with another append** — without it,
+`AddEdge(A→C)` followed by a concurrent `RemoveEdge(A→B)` is undetectable in that
+order and the append is silently lost. That is what Memgraph gets free by linking a
+delta whatever its action, and what `has_uncommitted_non_sequential_deltas`
+discriminates.
+
+**TWO DEFECTS THE TESTS CAUGHT IN THE FIRST DRAFT, both silent:**
+- the append **stamped nothing when it created its own source node** — the id does
+  not exist until after the insert, so `Lookup` failed and the stamp was skipped
+  for **most of a bulk CREATE**, leaving those nodes invisible to a later removal's
+  check. Check and record are now **separate**, for two different reasons: the
+  check precedes the mutation so a doomed transaction writes nothing, the record
+  follows it because the id is not there until then.
+- `truncate`/`len` were written **unwired**, which lint reported as dead code — and
+  that was not tidiness. Unwired, the stamp map grows one entry per node ever
+  written transactionally and never shrinks: the leak shape rmp #2289 closed for
+  direct writes. `truncate` now runs in `Graph.ReclaimNow` on the **same watermark
+  as every other store**; `len` is exposed as `MVCCStats.AdjConflictStamps`.
+
+`AdjConflictStamps` is reported **beside** `MVCCStats.Total`, not inside it: the
+stamps hold no pre-image, are never read, and no reader can hold them back, so
+folding them in would misreport the version memory a long read can pin.
+
+**Every positive case was verified to FAIL** against a build with the check removed
+(lost update, both transactions committing), **and re-verified after the
+check/record restructure moved the guard**. The commuting row and the
+disjoint-sources row keep PASSING under that defect, which is what proves they are
+not "everything conflicts" tests. Both orders of append-vs-removal are covered
+separately because the rule is asymmetric.
+
+**STATE OF #2300 AFTER THIS:** detection now covers node existence, node labels,
+node properties, adjacency and the five per-edge side stores — AC2's coverage gap
+closed. It is at **parity** with the other stores, which means it is still
+**unreachable from the Cypher engine**: `Graph.AddEdge` and `Graph.SetNodeLabel`
+both pass `tx == nil`, only `beginLabelTx` carries a `writeCtx`, and the ambient
+`Graph.writeTx` slot still encodes one-writer-at-a-time. No collision reaches a
+Bolt client until rmp #2304. AC4 overlaps rmp #2318.
+
+Incrementally synced at commit `eff6ca74` (2026-08-03, task #2303, sprint 334 —
+**the count store's ordering basis, and a live defect under a wrong premise**):
++4 nodes (`Commit`; three `Test` in `graph/index/count/commutative_test.go`),
++7 edges (3 `CONTAINS`, 3 `FIXES`, 1 `Sprint`→`Commit`).
+
+**A PREMISE OF MINE THAT WAS WRONG, AND THE TEST WRITTEN TO CONFIRM IT REFUTED IT.**
+`count.Store.Apply` is `cell.Add(delta)` — an ADDITIVE delta, not an assignment —
+and `MarkDirty` is a monotone set insert, so the first conclusion was that the count
+store was already commutative and needed only a corrected contract comment.
+
+It did not. `Apply` deleted a cell at **zero-OR-BELOW**, so a cell driven negative
+was deleted, its negative value **discarded**, and the next increment recreated it
+from zero — **permanently losing the decrement**. `-1` then `+1` on an empty cell
+read **1** where `+1` then `-1` read **0**: the aggregate was order-sensitive, which
+is precisely the dependency on writer exclusion rmp #2303 exists to remove.
+
+**WHY IT SURVIVED.** Under the visibility barrier the base is always correct, so no
+partial sum can go negative and the clamp is unreachable. The moment writers commit
+concurrently, one transaction's decrements can land before another's increments and
+the clamp silently eats them. Invisible to a green suite and to any single-writer
+test.
+
+**FIX:** delete at **exactly** zero and retain a negative cell — that is what makes
+addition commute. Bounded growth unchanged: a negative cell is transient, reaching
+exactly zero when its matching increment arrives, where it is deleted.
+
+`MarkDirty` needed no change, checked rather than assumed: nothing clears an
+individual entry (only a whole-store `Reset` does), and a concurrent test confirms no
+writer's marking displaces another's.
+
+**THE CONTRACT NOW SEPARATES TWO THINGS IT CONFLATED.** `exec.CountBuffer.Commit`
+still must run where the count becomes visible atomically with the graph writes it
+describes — a **visibility** requirement, which rmp #2304 must preserve by other
+means. It does **not** rest on the barrier imposing a total order across committers.
+The intra-transaction order (every delta, then every dirty mark) is a property of the
+buffer and survives concurrency, because one buffer belongs to one transaction.
+
+Differential: restoring the `<= 0` clamp fails
+`TestCountStore_ConcurrentDeltasReachZeroFromEitherOrder` with the message it
+carries. The wrong reasoning is recorded in the test file rather than quietly
+replaced.
+
+**#2303 REMAINS OPEN** on its other three structures: the secondary-index batch
+publish (`cypher/exec/index_writeback.go`), the deferred label-index removal
+(`graph/lpg/mvcc_index.go`), and the `constraintActive`/`indexActive` gates
+(`graph/lpg/lpg.go:451,463`, read by `store/checkpoint/checkpoint.go:867`).
+
+Incrementally synced at commit `e69d1974` (2026-08-03, task #2303, sprint 334 —
+**the secondary-index batch publish's ordering basis**): +4 nodes (`Commit`; three
+`Test` in `graph/index/manager_concurrent_batch_test.go`), +6 edges (3 `CONTAINS`,
+2 `IMPROVES`, 1 `Sprint`→`Commit`).
+
+`index.Manager.ApplyBatch` is called at the transaction boundary from
+`exec.IndexBuffer`, today inside the write visibility barrier so exactly one batch is
+ever in flight. **Tested before asserted this time** — and it holds. The basis has
+three parts:
+
+1. **Within a batch**, mutation order is preserved: one `IndexBuffer` belongs to one
+   transaction and `ApplyBatch` walks the slice in order. This is the half
+   concurrency cannot help with, because the Manager's own subscriber contract
+   **exempts same-property-key changes from order-independence** — they carry
+   old→new payloads.
+2. **Across concurrent batches**, every sub-index operation takes its own lock.
+3. **The same-property-key case cannot ARISE** between two concurrently-committing
+   transactions: both writing a property on one node is a write-write conflict
+   (`graph/lpg`'s node-property store, rmp #2300), so one aborts before it reaches a
+   buffer.
+
+**Part 3 is a DEPENDENCY on another package, not a property of `graph/index`**, and
+the test file records it so the coupling is visible from both ends: if node-property
+conflict detection were removed, the index could diverge from the graph with nothing
+in `graph/index` to catch it.
+
+**BOTH DIFFERENTIALS RUN, AND THE FIRST FOUND A DEFECT IN THE TEST ITSELF.** The
+order-preservation sequences were `add/remove/add` and `remove/add/remove` —
+**PALINDROMES, identical under reversal** — so the test PASSED against a build with
+`ApplyBatch` deliberately iterating the batch BACKWARDS. Only running the defect
+exposed it. Now asymmetric (`add/add/remove`, `remove/remove/add`) and both fail on
+reversal. Removing `label.Index.Add`'s internal lock kills
+`TestManager_ConcurrentApplyBatchLosesNothing` with `fatal error: concurrent map
+writes`, so part 2's lock is demonstrably load-bearing.
+
+**#2303 REMAINS OPEN on two of four structures:** the deferred label-index removal
+(`graph/lpg/mvcc_index.go:49-75`) and the `constraintActive`/`indexActive` gates
+(`graph/lpg/lpg.go:451,463`, read by `store/checkpoint/checkpoint.go:867`).
+
+Incrementally synced at commit `a00cfae8` (2026-08-03, task #2303, sprint 334 —
+**the deferred label-index removal is charged to its own transaction**): +5 nodes
+(`Commit`; `Graph.deferralStamp` Method; three `Test` in
+`graph/lpg/mvcc_index_ordering_test.go`), +9 edges (4 `CONTAINS`, 3 `FIXES`,
+1 `Sprint`→`Commit`).
+
+A label removal is deferred until the reclamation watermark has passed it, because a
+reader older than the removal must still find the node in the bitmap or it silently
+loses a row. "Passed it" needs an instant, and `deferLabelIndexRemoval` took that
+instant from the graph's **ambient `mvcc.WriteStamp` slot** rather than from the
+removing transaction. Same defect class as audit finding **E3**, which rmp #2301
+closed for the commit record and the version count; this path was the last reader of
+the ambient slot.
+
+**RUNNING THE DIFFERENTIAL CORRECTED THE DESCRIPTION OF THE DEFECT — and the wrong
+description had already been written into the test file before it was checked.** The
+claim "verified against the previous behaviour: the entry survived the sweep and the
+test failed" was **false**; the test passed. There are TWO paths and they fail
+differently:
+
+- **Barrier path** (`Graph.beginWrite`): the ambient slot IS occupied, so the old read
+  returned the ambient transaction's record. Wrong once writers overlap — **but the
+  barrier is what guarantees the slot has one occupant, so no test can produce the
+  collision until rmp #2304 removes it.** AC3 is therefore **not** satisfied for that
+  half and the file says so. Same situation as rmp #2300's AC5.
+- **labelTx path**: `Graph.beginWriteCtx` does **not** publish to the ambient slot, so
+  the old read fell through to `WriteStamp.Stamp`'s **untransacted** branch — which
+  allocates a commit timestamp **and publishes it immediately**. Worse, and
+  observable: the removal became reclaimable at an instant **before its own
+  transaction had committed or aborted**, so a rolled-back statement's label strip
+  could have its deferral swept, deleting an entry the undo legitimately restored
+  (the exact hazard `deferredIdx`'s keyed-not-list design exists to prevent). It also
+  accounted every deferral as an **untracked** write — the figure the substrate
+  reports for precisely the opposite thing.
+
+The second defect is fixed and gated: restoring `g.stamp.Stamp()` makes
+`TestDeferredIndexRemoval_ChargesNoUntrackedWrite` fail with **3 untracked writes for
+3 in-transaction deferrals**.
+
+`Graph.deferralStamp` resolves the instant: the transaction's own record and id when
+there is one, the ambient stamp otherwise. **A nil tx is correct to fall back** — such
+a write commits the instant it is made — and
+`TestDeferredIndexRemoval_UntransactedWriteStillSweeps` pins it, because a deferral
+that never swept would leak an over-reporting bitmap entry for the life of the
+process.
+
+**#2303 REMAINS OPEN on the last of four structures:** the
+`constraintActive`/`indexActive` gates (`graph/lpg/lpg.go:451,463`, read by
+`store/checkpoint/checkpoint.go:867`).
+
+Incrementally synced at commit `ced6f400` (2026-08-03, task #2303, sprint 334 —
+**the constraint/index gates are DERIVED, not mirrored; #2303's implementation
+complete**): +7 nodes (`Commit`; `Graph.SetIndexCountSource` and
+`Graph.SetConstraintCountSource` Methods; `derivedCount` Function; three `Test` in
+`graph/lpg/mvcc_gate_derived_test.go`), +11 edges, and **2 nodes REMOVED** —
+`Graph.SetActiveIndexCount` / `SetActiveConstraintCount` no longer exist.
+
+Both gates were an `atomic.Int64` the engine **stored a separately-read registry count
+into**, documented as correct because the engine held its single-writer lock. Accurate,
+and exactly the dependency rmp #2303 exists to remove: a store of a value the caller
+read earlier is a lost update as soon as a second writer exists. With one index
+registered — A drops it (registry 0, A reads 0), B creates another (registry 1, B reads
+1, stores 1), A stores 0 → **gate 0, registry 1**.
+
+**Under-reporting is the dangerous direction**: the checkpointer's phase-3
+self-sufficiency re-check consults `HasIndexes` to decide whether the WAL prefix holding
+a `CREATE INDEX` may be truncated, and a false answer truncates it — the index is
+silently gone on reopen. That is #1755's defect, resurrected by concurrency.
+
+**Derived, not maintained** — the task's own preferred answer and strictly the stronger
+of the two it offered. The graph holds a `func() int64` and calls it when the question is
+asked: no stored value to go stale, no window, no ordering requirement on the caller, and
+**no lock added**, which AC4 requires. The discriminating property is that the gate tracks
+its source with **nothing having notified it**, which a stored mirror cannot do;
+restoring the mirror fails two of the three tests. The churn test asserts
+**one-directionally** on purpose — over-reporting is safe (a retained prefix), under-
+reporting loses data.
+
+**GATE STATUS, STATED RATHER THAN GLOSSED.** `tidy fmt vet build test-short lint` green
+(119 packages, TCK green). **`make cover-gate` FAILS — and it fails on the PRE-CHANGE
+tree too**, with a *different* load-sensitive test. Verified by running the full
+cover-gate on the stashed pre-change tree, not by inspection: my run tripped
+`bench/mvccwrite` `TestWriteScalingInstrument_SeesConcurrency` (ratio 2.432× vs a 3.00×
+target, with available parallelism logged at 13.63× so `requireAvailableParallelism` did
+NOT skip); the pre-change run tripped `store/wal`
+`TestAppend_LoopInterleavesUnderConcurrency`. Both pass quiet. **Coverage instrumentation
+compresses these ratios while available parallelism still probes high, so the existing
+guard's threshold never fires** — the "differential is degenerate below a gate's floor"
+pattern. Filed as **rmp #2319** (BUG, p7/sev6, added to sprint 334) rather than worked
+around.
+
+**#2303's four structures are all implemented:** count store (`eff6ca74`),
+secondary-index publish (`e69d1974`), deferred label-index removal (`a00cfae8`), and
+these gates. Its AC3 is fully satisfied for three of them; for the deferred removal's
+BARRIER-path half it is unsatisfiable until rmp #2304 removes the barrier, which
+`graph/lpg/mvcc_index_ordering_test.go` records.
+
+Incrementally synced at commit `525e209a` (2026-08-04, task **rmp #2320**, sprint 334 — the
+write path CARRIES its transaction, and the ordinary write path moves to the SHARED
+bracket). +9 nodes: `Commit` `525e209a`; `Task` 2320; three `Type`s (`mvcc.Tx` in
+`graph/mvcc/tx.go`, `lpg.WriteView` in `graph/lpg/writeview.go`, `adjlist.Writer` in
+`graph/adjlist/writer.go`); four `Finding`s
+(`undo-refused-by-doomed-test-2320`, `remove-edge-by-handle-ambient-resolution-2320`,
+`view-plus-unversioned-read-is-not-atomic-2320`,
+`self-conflict-from-contiguous-frontier-2320`, all status `FIXED`); one `Perf`
+(`mvcc-write-scaling-2320`). +14 edges: 3 `CONTAINS` (package→type), 8 `TOUCHES`
+(commit→`mvcc`/`lpg`/`adjlist`/`cypher`/`txn` packages and the three new types),
+4 `FIXES` (commit→finding), 1 `MEASURES` (commit→perf), 1 `IMPLEMENTS` (commit→task),
+1 `CONTAINS` (sprint 334→task 2320).
+
+**The shape, cited.** Memgraph at commit `572d5b4311a279de550522344a6f10d352d11c48`
+(branch `master`, read 2026-08-03) uses BOTH halves and so does GoGraph: an ACCESSOR
+holding the transaction (`memgraph::storage::Accessor`'s `Transaction transaction_`,
+`src/storage/v2/storage.hpp`, exposing `virtual VertexAccessor CreateVertex() = 0`) and an
+explicit PARAMETER in the storage primitives (`PrepareForWrite(Transaction *, TObj *)` and
+`CreateAndLinkDelta(Transaction *, TObj *, Args &&...)` with
+`transaction->EnsureCommitInfoExists()`, `src/storage/v2/mvcc.hpp`). `mvcc.Tx` is the
+parameter; `lpg.WriteView` and `adjlist.Writer` are the accessors. Embedding `*Graph` in
+`WriteView` was considered and REJECTED: zero call-site churn, but it exposes the whole
+graph through a value whose responsibility is one transaction's writes, and a mutator added
+to `Graph` and not to `WriteView` would fall through to the ambient path silently.
+
+**`lpg.Graph.View` is now the SCHEMA barrier and nothing more.** With ordinary writes on the
+shared hold, `View` plus an unversioned accessor gives a reader NO data isolation — 7040 to
+20 011 partial-transaction observations out of ~11 M reads, against ZERO out of 6 488 034
+snapshot reads. A caller needing a consistent view of DATA takes a snapshot
+(`BeginRead`/`ReadAt`). Both halves are pinned, the second by a NEGATIVE CONTROL
+(`txn.TestIsolation_ViewWithUnversionedReadIsNotAtomic`), so the relocation of the
+guarantee cannot drift back unnoticed. The three remaining `View` callers were each
+assessed and documented in the method's godoc: the checkpointer rests on
+`RunUnderCommitLock`'s in-flight drain (verified — both write paths sit inside that window
+for their whole apply), the statistics build is approximate by contract, and the constraint
+pre-validation scan is backstopped by post-registration enforcement.
+
+**New observability:** `lpg.Graph.AmbientVersionResolutions` counts versions that resolved
+their transaction through the graph-wide slot instead of carrying it. It is free on the
+threaded path — only the ambient branch increments — so "zero ambient resolutions across
+the write surface" is a gate rather than a claim, and all four new gates were verified to
+FAIL against a deliberately bypassed build.
+
+**A decoy-based gate at the Cypher level was written and DISCARDED**: it passed against the
+bypassed build, because the engine's own bracket publishes to the ambient slot AFTER any
+decoy opened before the statement, so the resolution lands on the right transaction by
+accident. The interleaving is only reproducible one layer down, in `lpg` —
+`TestWriteView_SecondWriteDoesNotAdoptAnOverlappingTransactionsRecord`.
+
+**Gate ratcheted:** `bench/mvccwrite` `walWriteScalingFloor` 0.90 → `writeScalingTarget`
+(3.0). The two store-LESS floors stay put: that arm's outermost lock is
+`cypher.Engine.writeMu`, which rmp #2306 owns.
+
+Incrementally synced at commits `fdd91c6b` and `a04a8946` (2026-08-04, task **rmp #2304**,
+sprint 334 — the exclusive visibility barrier is retired from the ordinary write path,
+completing what `525e209a` delivered). +3 nodes (two `Commit`s, `Task` 2304), +5 edges
+(2 `IMPLEMENTS`, 1 sprint `CONTAINS`, and the provenance stamps).
+
+**#2303's AC3 is now discharged**, by `graph/lpg/mvcc_index_overlap_test.go`. It could not
+be satisfied while the barrier existed, because the barrier was exactly what guaranteed the
+ambient stamp slot had one occupant; with the barrier gone the collision is producible, and
+both new tests FAIL against `g.stamp.Stamp()` naming the concurrent writer's record.
+
+**One acceptance claim was corrected rather than implemented.** #2304's AC8 states that a
+deferred removal charged to a still-in-flight transaction "carries an id no record will ever
+publish and is NEVER swept". Measurement says otherwise: both the threaded and the ambient
+resolution store a `*mvcc.CommitInfo` and `lifeStamp.at()` resolves through it, so such a
+removal is swept at the WRONG writer's instant rather than stranded. Stranding needs
+`lifeStamp.info` nil with an in-flight id in `lifeStamp.ts`, which `Graph.deferralStamp`
+yields only for a transaction whose window is already retracted — unreachable while its
+bracket is open. The harm is mis-ORDERING, and the second test measures it in both
+directions.
+
+**#2304's AC2 could not be met on the arm its own baseline came from, and the premise was
+refuted.** The sprint description says the 0.83× entry figure at sixteen writers was taken
+"with no WAL attached, so the ceiling is the barrier and nothing else". That arm's ceiling is
+`cypher.Engine.writeMu` — `lockWriter` takes it for the whole statement whenever no store is
+attached — exactly as `docs/audit-mvcc-sole-cc-2026-08-02.md` §3.1 already said. Measured
+after the flip: store-less 0.750× at sixteen writers (the fall is in the NUMERATOR: one
+writer +6.3 %, sixteen writers −3.6 %), WAL 1.009× → 7.886×. The store-less target and the
+ratchet of `writeScalingFloor`/`writeConcurrencyFloor` were therefore CARRIED INTO rmp
+#2306's AC1, with the refuted premise recorded there.
+
+**Reader latency did not regress:** `bench/mtaudit` `TestFairScheduling` with `-tags=soak`,
+no `-race`, no competing load — collapse 1.903× at one reader and 1.972× at eight, against a
+4.0× tolerance and the 1.91×/2.07× envelope certified when rmp #2274 fixed the starvation.
+
+**rmp #2306 gained an obligation it did not have before:** with ordinary writes on the shared
+barrier, the checkpointer's transaction-boundary consistency rests ENTIRELY on
+`store/txn.Store.RunUnderCommitLock`'s in-flight drain and no longer on `visMu`, so whatever
+replaces that drain must preserve the property (or rmp #2310 must land first). Recorded in
+#2306's AC4.
+
+Incrementally synced at commit `7ab8bbc3` (2026-08-04, task **rmp #2300**, sprint 334 — a
+refused transaction ABORTS instead of publishing, and the object it aborted on stays
+writable). +4 nodes (`Commit` `7ab8bbc3`, `Task` 2300, two `Finding`s), +4 edges
+(1 `IMPLEMENTS`, 2 `FIXES`, 1 sprint `CONTAINS`).
+
+**Two HIGH findings, the second created by fixing the first.**
+
+1. `refused-transaction-published-its-record-2300` — every write bracket published its
+   commit record, including a transaction refused by conflict detection, so the caller was
+   told the transaction failed and part of its work was visible to a fresh snapshot. An
+   ATOMICITY violation. It had been invisible because the Cypher engine's undo log
+   physically restores the stored value, and that undo log is a `cypher` structure —
+   absent for a caller using `lpg.Graph.ApplyVersioned` directly, which `store/txn`'s
+   apply is. **Rollback and abort are different things**, and `mvcc_write.go`'s
+   publication-on-rollback rationale covers only the first.
+2. `aborted-head-made-the-object-unwritable-2300` — marking the record `mvcc.AbortedTS`
+   fixed visibility and broke LIVENESS, because AbortedTS sits above `mvcc.TxIDBase` and
+   the plain "conflict = not visible" rule then refused every later writer to that object
+   forever. `make ci` caught it within minutes: examples/27's writers exhausted a
+   nine-attempt retry chain on the first account any transfer aborted on.
+
+**`mvcc.Conflicts` is therefore NOT the plain negation of `mvcc.Visible`, and the one
+asymmetry is deliberate.** An aborted head stays INVISIBLE — a reader must undo it to
+reach the pre-abort value — while being freely OVERWRITABLE, because displacing a
+transaction whose changes can never be seen loses no update. Memgraph needs no exemption:
+`InMemoryStorage::InMemoryAccessor::Abort`
+(`src/storage/v2/inmemory/storage.cpp` at `572d5b4311a279de550522344a6f10d352d11c48`)
+UNLINKS the transaction's deltas from every chain it touched. Unlinking is rmp #2318's;
+when it lands the exemption becomes unreachable rather than wrong.
+
+**An existing test asserted the opposite and measurement refuted it.**
+`TestConflicts_TheFourCases` wanted `true` for an aborted head, reasoning "an aborted
+version is not visible, so it is not overwritable through this path either". The case now
+carries the measurement, and the asymmetry is asserted directly instead of being an
+exclusion from the negation check.
+
+**AC4's reclamation half is NOT delivered and is pinned as such.** An `AbortedTS` head can
+never satisfy `at() <= watermark`, so the versions are retained for the life of the
+process — rmp #2318. `TestAbort_VersionsAreNotYetReclaimable_2318` asserts the CURRENT
+behaviour and its failure message says that reclaiming them is good news to be inverted,
+not a regression to restore.
+
+**No engine-internal retry for autocommit was added**, and the reasoning is recorded: a
+client must retry, which is the contract every MVCC engine imposes, and the Bolt boundary
+already returns a code the real driver retries. The load-bearing detail is that a retry's
+backoff must be sized to a WAL FSYNC and not to a scheduler yield — a `runtime.Gosched`
+loop was measured burning five consecutive attempts inside one fsync, all against the same
+in-flight head with `startTS` frozen, because the contiguous frontier cannot advance while
+that commit is still syncing.
+
+Incrementally synced at commit `bf0414dc` (2026-08-07, task **rmp #2333**, sprint 334 — the
+torn-total gate could not say what it had seen). **First modelling of
+`examples/27_concurrent_txn` at all:** the graph's example coverage stopped at example 25,
+so this adds +8 nodes (`Package` `examples/27_concurrent_txn`; `Commit` `bf0414dc`; six
+`Test`s — `TestMain`, `TestRun`, `TestRunReproducibleAcrossReaderScaling`,
+`TestTornGate_CatchesADeliberateTear`, `TestAsInt64_RejectsNull`, and the soak-layer
+`TestSoak_TornTotalSearch`) and +8 edges (6 `CONTAINS`, 1 `TOUCHES`, 1 `FIXES` to the
+`ACID Transactions` Feature, id 9736).
+
+**The `FIXES` edge carries a caveat property, because rmp #2333 IS NOT CLOSED.** What was
+hardened is the ACID isolation INSTRUMENT, not the engine: the torn total observed once on
+2026-08-06 remains unreproduced, and no engine code was changed. Recording this as an
+ordinary fix would have misrepresented an open ACID question as a settled one.
+
+**Two of the ticket's own premises were refuted and both refutations are cheap to re-run.**
+The delta 941758 is not any of the 600 planned transfer amounts (range [2289, 998780]), so
+it is not "one debit without its credit"; and the failing run took 2.29s, while every
+CPU-starved arm takes 3.41–5.21s, so starvation was not the trigger. The closest-matching
+arm is the COVERAGE pass of `make ci` (`-coverpkg=./... -covermode=atomic`, no `-race` —
+`make ci` runs the suite TWICE), which the earlier search never targeted; 400 runs there
+(~47M observations) stayed clean.
+
+**New Test properties introduced by this sync**, all optional and additive:
+`kind` (currently only `negative-control`), `layer` and `buildTag` (currently only `soak`),
+`budgetEnv`, and `verifies` (a prose statement of the property a test pins). `Package`
+gains `role`, and `Commit` gains `subject`. Node identity is unchanged: `Package` by
+`path`, `Test` by `(name, file, pkg)`, `Commit` by `hash`.

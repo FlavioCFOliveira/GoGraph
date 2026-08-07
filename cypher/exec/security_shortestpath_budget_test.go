@@ -64,7 +64,7 @@ func TestSec_ShortestPath_ExhaustiveBudget_PerRowTrips(t *testing.T) {
 	t.Parallel()
 	fwd, rev := completeDigraph(5)
 	input := newSliceOperator(srcDstRow(0, 4))
-	op := exec.NewShortestPath(input, fwd, rev, exec.DirOut, 0, 1).
+	op := exec.NewShortestPath(input, exec.StaticAdjacency(fwd, rev, nil), exec.DirOut, 0, 1).
 		WithPathPredicate(alwaysFalsePred).
 		WithWorkBudget(4, 0) // per-row cap 4; aggregate default (huge)
 
@@ -87,7 +87,7 @@ func TestSec_ShortestPath_ExhaustiveBudget_AggregateTripsAcrossRows(t *testing.T
 		rows[i] = srcDstRow(0, 4)
 	}
 	input := newSliceOperator(rows...)
-	op := exec.NewShortestPath(input, fwd, rev, exec.DirOut, 0, 1).
+	op := exec.NewShortestPath(input, exec.StaticAdjacency(fwd, rev, nil), exec.DirOut, 0, 1).
 		WithPathPredicate(alwaysFalsePred).
 		WithWorkBudget(1_000_000, 10) // per-row never fires; aggregate cap 10
 
@@ -105,7 +105,7 @@ func TestSec_ShortestPath_ExhaustiveBudget_GenerousCapCompletes(t *testing.T) {
 	t.Parallel()
 	fwd, rev := completeDigraph(5)
 	input := newSliceOperator(srcDstRow(0, 4))
-	op := exec.NewShortestPath(input, fwd, rev, exec.DirOut, 0, 1).
+	op := exec.NewShortestPath(input, exec.StaticAdjacency(fwd, rev, nil), exec.DirOut, 0, 1).
 		WithPathPredicate(alwaysTruePred).
 		WithWorkBudget(1_000_000, 1_000_000)
 
@@ -124,7 +124,7 @@ func TestSec_AllShortestPaths_ExhaustiveBudget_PerRowTrips(t *testing.T) {
 	t.Parallel()
 	fwd, rev := completeDigraph(5)
 	input := newSliceOperator(srcDstRow(0, 4))
-	op := exec.NewAllShortestPaths(input, fwd, rev, exec.DirOut, 0, 1).
+	op := exec.NewAllShortestPaths(input, exec.StaticAdjacency(fwd, rev, nil), exec.DirOut, 0, 1).
 		WithPathPredicate(alwaysFalsePred).
 		WithWorkBudget(4, 0)
 
@@ -141,7 +141,7 @@ func TestSec_AllShortestPaths_ExhaustiveBudget_GenerousCapCompletes(t *testing.T
 	t.Parallel()
 	fwd, rev := completeDigraph(5)
 	input := newSliceOperator(srcDstRow(0, 4))
-	op := exec.NewAllShortestPaths(input, fwd, rev, exec.DirOut, 0, 1).
+	op := exec.NewAllShortestPaths(input, exec.StaticAdjacency(fwd, rev, nil), exec.DirOut, 0, 1).
 		WithPathPredicate(alwaysTruePred).
 		WithWorkBudget(1_000_000, 1_000_000)
 

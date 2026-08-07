@@ -31,44 +31,13 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
-// beginTxResult carries the outcome of a watchdogged BeginTx.
-type beginTxResult struct {
-	tx      *cypher.ExplicitTx
-	err     error
-	elapsed time.Duration
-}
-
-// beginTxWatchdogged calls BeginTx on its own goroutine and fails the test if it
-// has not returned within watchdog.
-//
-// Every contended case here needs this. Before the fix BeginTx waited for the
-// holder unconditionally, so a direct call BLOCKS FOREVER on the old behaviour:
-// the test would burn the whole package timeout and report itself as a panic
-// with a goroutine dump, rather than as a failure naming the defect. The short
-// layer also has a 60 s per-package target, which a hanging test destroys. With
-// the watchdog the same regression fails in seconds with a message that says
-// what happened.
-//
-// The abandoned BeginTx goroutine is left running on the failure path; the test
-// is already failing at that point, and it cannot be joined precisely because
-// the wait it is stuck in is the defect.
-func beginTxWatchdogged(ctx context.Context, t *testing.T, eng *cypher.Engine, watchdog time.Duration) beginTxResult {
-	t.Helper()
-	out := make(chan beginTxResult, 1)
-	start := time.Now()
-	go func() {
-		tx, err := eng.BeginTx(ctx)
-		out <- beginTxResult{tx: tx, err: err, elapsed: time.Since(start)}
-	}()
-	select {
-	case r := <-out:
-		return r
-	case <-time.After(watchdog):
-		t.Fatalf("BeginTx did not return within %v; its acquisition is ignoring the context "+
-			"deadline entirely, which is the defect A1 describes", watchdog)
-		return beginTxResult{}
-	}
-}
+// A watchdogged BeginTx helper used to live here, because BeginTx could block
+// indefinitely on a contended acquisition and a direct call would burn the whole
+// package timeout instead of failing with a message. rmp #2305 retired the last
+// acquisition BeginTx made, so it cannot block and the helper had no callers left;
+// it is deleted rather than kept for a case that no longer exists. The property it
+// protected now lives at the statement seam, in
+// [TestExplicitTxExec_HonoursDeadlineUnderAnExclusiveBarrierHolder].
 
 // beginTxFixture builds a small engine with a few nodes to read.
 func beginTxFixture(t *testing.T) (*lpg.Graph[string, float64], *cypher.Engine) {
@@ -129,18 +98,24 @@ func TestBeginTx_ExpiredContextReturnsError(t *testing.T) {
 	}
 }
 
-// TestBeginTx_DeadlineHonouredWhileBarrierHeldByReader is the audit's scenario:
-// a reader holds the barrier far longer than the caller's deadline. BeginTx must
-// return at its own deadline, not at the reader's release.
+// TestBeginTx_DoesNotWaitForAnythingAtAll replaced the old "deadline honoured while
+// a reader holds the barrier" test.
 //
-// The reader is a Graph.View held open for a fixed duration, which is exactly
-// what a slow Engine.Run does — Run brackets the whole query in View.
-func TestBeginTx_DeadlineHonouredWhileBarrierHeldByReader(t *testing.T) {
+// That test asserted BeginTx returned context.DeadlineExceeded while a
+// [lpg.Graph.View] reader held the barrier's read side, because BeginTx took the
+// barrier EXCLUSIVELY and so queued behind any reader. rmp #2305 retired that hold:
+// BeginTx takes no lock, so it cannot block on a reader, and asserting that it does
+// would assert the defect.
+//
+// What is asserted instead is the stronger property the retirement delivers — BeginTx
+// completes PROMPTLY even while a reader holds the barrier — with a ceiling far below
+// the reader's hold, so a reintroduced acquisition fails the test rather than merely
+// slowing it.
+func TestBeginTx_DoesNotWaitForAnythingAtAll(t *testing.T) {
 	t.Parallel()
 	g, eng := beginTxFixture(t)
 
 	const readerHold = 2 * time.Second
-	const budget = 50 * time.Millisecond
 
 	readerIn := make(chan struct{})
 	readerOut := make(chan struct{})
@@ -153,47 +128,89 @@ func TestBeginTx_DeadlineHonouredWhileBarrierHeldByReader(t *testing.T) {
 	}()
 	<-readerIn // the barrier's read side is now held
 
-	ctx, cancel := context.WithTimeout(context.Background(), budget)
-	defer cancel()
-
-	r := beginTxWatchdogged(ctx, t, eng, 5*time.Second)
-	tx, err, elapsed := r.tx, r.err, r.elapsed
-
-	if err == nil {
-		_ = tx.Rollback()
-		t.Fatalf("BeginTx returned a live transaction after %v despite a %v deadline, "+
-			"while a reader held the barrier for %v — this is the defect A1 describes",
-			elapsed, budget, readerHold)
+	start := time.Now()
+	tx, err := eng.BeginTx(context.Background())
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("BeginTx failed while a reader held the barrier: %v — since rmp #2305 it "+
+			"does not interact with the barrier at all", err)
 	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("BeginTx error = %v, want it to wrap context.DeadlineExceeded", err)
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
 	}
-	if elapsed >= readerHold {
-		t.Fatalf("BeginTx waited %v — the reader's full hold; the deadline was ignored", elapsed)
-	}
-	// Generous margin: this asserts an order of magnitude, not scheduler timing.
-	if elapsed > budget+500*time.Millisecond {
-		t.Fatalf("BeginTx returned after %v, want close to its %v deadline", elapsed, budget)
+	if elapsed > readerHold/4 {
+		t.Fatalf("BeginTx took %v while a reader held the barrier for %v. It is queueing "+
+			"behind the reader, so a transaction-lifetime barrier acquisition has been "+
+			"reintroduced (rmp #2305 retired it).", elapsed, readerHold)
 	}
 
 	<-readerOut
-	// The engine must be usable again: nothing may be left holding the barrier or
-	// the writer serialisation. A successful transaction here proves both were
-	// released, including by the abandoned acquire ctxlock left behind.
-	okCtx, okCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer okCancel()
-	tx2, err := eng.BeginTx(okCtx)
-	if err != nil {
-		t.Fatalf("BeginTx after the cancelled attempt: %v — something was left held", err)
-	}
-	if err := tx2.Rollback(); err != nil {
-		t.Fatalf("Rollback: %v", err)
-	}
 }
 
-// TestBeginTx_DeadlineHonouredWhileWriterHeldByAnotherTx covers the other
-// acquisition: the store-less writer serialisation, held by an open transaction.
-func TestBeginTx_DeadlineHonouredWhileWriterHeldByAnotherTx(t *testing.T) {
+// TestExplicitTxExec_HonoursDeadlineUnderAnExclusiveBarrierHolder keeps the deadline
+// property the test above used to carry, aimed at the acquisition that still exists.
+//
+// Since rmp #2305 each Exec takes the schema barrier SHARED for its own duration. A
+// shared holder cannot block it, but an EXCLUSIVE one can — a DDL, or any caller
+// using [lpg.Graph.ApplyAtomically] / [lpg.Graph.LockBarrier]. When one does, the
+// statement must honour the caller's deadline rather than wait out the holder: that
+// is the defect rmp #2174 closed for BeginTx, and it must not reappear at the
+// statement seam that replaced it.
+func TestExplicitTxExec_HonoursDeadlineUnderAnExclusiveBarrierHolder(t *testing.T) {
+	t.Parallel()
+	g, eng := beginTxFixture(t)
+
+	const budget = 50 * time.Millisecond
+	const holderHold = 3 * time.Second
+
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	// Opened BEFORE the barrier is taken: BEGIN acquires nothing, so it succeeds
+	// regardless, and the deadline question belongs to Exec.
+	tx, err := eng.BeginTx(ctx)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+
+	held := make(chan struct{})
+	released := make(chan struct{})
+	go func() {
+		defer close(released)
+		g.LockBarrier()
+		close(held)
+		time.Sleep(holderHold)
+		g.UnlockBarrier()
+	}()
+	<-held
+
+	start := time.Now()
+	_, execErr := tx.Exec("CREATE (:Late {v:1})", nil)
+	elapsed := time.Since(start)
+
+	if execErr == nil {
+		t.Fatal("Exec succeeded while another goroutine held the schema barrier " +
+			"EXCLUSIVELY; its shared acquisition cannot have happened")
+	}
+	if !errors.Is(execErr, context.DeadlineExceeded) {
+		t.Fatalf("Exec error = %v, want it to wrap context.DeadlineExceeded", execErr)
+	}
+	if elapsed >= holderHold {
+		t.Fatalf("Exec waited %v — the holder's full hold; the statement's shared barrier "+
+			"acquisition is IGNORING the caller's deadline (rmp #2174's defect at the "+
+			"statement seam)", elapsed)
+	}
+	_ = tx.Rollback()
+	<-released
+}
+
+// TestBeginTx_SucceedsWhileAnotherTransactionIsOpen is the inversion of the old
+// "deadline honoured while another tx holds the writer serialisation" test.
+//
+// There is no writer serialisation to hold: rmp #2306 retired the engine's writer
+// mutex and the store's capacity-one semaphore, and rmp #2305 the barrier hold. A
+// second BEGIN while the first is open must therefore SUCCEED — the outcome the old
+// test called a failure — and must do so promptly.
+func TestBeginTx_SucceedsWhileAnotherTransactionIsOpen(t *testing.T) {
 	t.Parallel()
 	_, eng := beginTxFixture(t)
 
@@ -202,39 +219,25 @@ func TestBeginTx_DeadlineHonouredWhileWriterHeldByAnotherTx(t *testing.T) {
 		t.Fatalf("first BeginTx: %v", err)
 	}
 
-	const budget = 50 * time.Millisecond
+	// A short budget on purpose: anything serialising the second BEGIN behind the
+	// first expires it and fails the test.
+	const budget = 500 * time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 
-	r := beginTxWatchdogged(ctx, t, eng, 5*time.Second)
-	tx, err, elapsed := r.tx, r.err, r.elapsed
-
-	if err == nil {
-		_ = tx.Rollback()
+	second, err := eng.BeginTx(ctx)
+	if err != nil {
 		_ = held.Rollback()
-		t.Fatal("a second BeginTx succeeded while the first still held the writer serialisation")
+		t.Fatalf("a second BeginTx failed within %v while the first was still open: %v.\n"+
+			"Two explicit transactions must be openable at once: concurrency control is "+
+			"MVCC alone (rmp #2305, rmp #2306), so BEGIN acquires nothing another "+
+			"transaction could be holding.", budget, err)
 	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		_ = held.Rollback()
-		t.Fatalf("BeginTx error = %v, want it to wrap context.DeadlineExceeded", err)
+	if err := second.Rollback(); err != nil {
+		t.Fatalf("Rollback of the second: %v", err)
 	}
-	if elapsed > budget+500*time.Millisecond {
-		_ = held.Rollback()
-		t.Fatalf("BeginTx returned after %v, want close to its %v deadline", elapsed, budget)
-	}
-
 	if err := held.Rollback(); err != nil {
 		t.Fatalf("Rollback of the holder: %v", err)
-	}
-	// Free again.
-	okCtx, okCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer okCancel()
-	tx2, err := eng.BeginTx(okCtx)
-	if err != nil {
-		t.Fatalf("BeginTx after the holder released: %v", err)
-	}
-	if err := tx2.Rollback(); err != nil {
-		t.Fatalf("Rollback: %v", err)
 	}
 }
 
@@ -283,7 +286,9 @@ func TestBeginTx_ConcurrentContendersAllTerminate(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+			// Short, so a reintroduced serialiser expires it rather than merely
+			// slowing the test down.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			tx, berr := eng.BeginTx(ctx)
 			if berr == nil {
@@ -301,12 +306,14 @@ func TestBeginTx_ConcurrentContendersAllTerminate(t *testing.T) {
 		t.Fatal("contenders did not all return; a BeginTx wait is still unbounded")
 	}
 
+	// Every contender must have SUCCEEDED. The old form asserted the opposite — that
+	// each returned context.DeadlineExceeded because it queued behind the open holder
+	// — which is precisely the behaviour rmp #2305 and rmp #2306 retired. A
+	// DeadlineExceeded here now means a serialiser has come back.
 	for i, e := range errs {
-		if e == nil {
-			t.Fatalf("contender %d acquired while the holder was open", i)
-		}
-		if !errors.Is(e, context.DeadlineExceeded) {
-			t.Fatalf("contender %d error = %v, want context.DeadlineExceeded", i, e)
+		if e != nil {
+			t.Fatalf("contender %d failed with %v while a transaction was open. Every "+
+				"contender must be admitted: nothing serialises BEGIN since rmp #2305.", i, e)
 		}
 	}
 
@@ -317,8 +324,8 @@ func TestBeginTx_ConcurrentContendersAllTerminate(t *testing.T) {
 	defer okCancel()
 	tx2, err := eng.BeginTx(okCtx)
 	if err != nil {
-		t.Fatalf("BeginTx after %d abandoned acquires: %v — one of them leaked the lock",
-			contenders, err)
+		t.Fatalf("BeginTx after %d concurrent transactions: %v — one of them leaked "+
+			"something", contenders, err)
 	}
 	if err := tx2.Rollback(); err != nil {
 		t.Fatalf("Rollback: %v", err)

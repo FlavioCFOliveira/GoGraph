@@ -44,7 +44,7 @@ import "strings"
 // will reject anyway, and masking it can only make the classifier say "read",
 // which routes the statement to the read path where it fails cleanly — whereas
 // leaving it unmasked could route a genuinely unparseable statement to the write
-// path and take the single-writer lock to do it.
+// path and register as a writer to do it.
 //
 // # Cost
 //

@@ -158,7 +158,9 @@ func assertCSROrdering(t *testing.T, out string, facts map[string]int64, cfg con
 	// The snapshot footprint must be per-arc sane: three uint64 arrays over
 	// Size() arcs plus Order()+1 offsets, so 8 B/arc is the floor and the
 	// offsets push it a little above.
-	mustContain(t, out, "csr.has_handles=false") // plain AddEdge mints no handles
+	// Every slot carries a stable identity since rmp #2317, whatever route created
+	// it, so the handle column is present even for a graph built with plain AddEdge.
+	mustContain(t, out, "csr.has_handles=true")
 }
 
 // assertAnalytical pins the analytical-aggregation and subquery facts (#1971):

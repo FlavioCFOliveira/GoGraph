@@ -87,15 +87,15 @@ func (s *singleRow) Close() error { return nil }
 
 // NewOptionalExpand creates an OptionalExpand operator.
 //   - input is the upstream operator supplying node IDs.
-//   - fwd is the forward CSR adjacency.
-//   - rev is the reverse CSR adjacency (required for DirIn/DirBoth).
-//   - cfg is the Expand configuration (direction, edge-type filter, inputCol).
+//   - src yields the forward and reverse adjacency at execution time; see
+//     [AdjacencySource].
+//   - cfg is the Expand configuration (direction, inputCol).
 //
 // The NULL-extension row uses the same column layout as Expand:
 // inputRow... || srcID || Null(edgeID) || Null(dstID).
-func NewOptionalExpand(input Operator, fwd, rev csrAdjacency, cfg ExpandConfig) *OptionalExpand {
+func NewOptionalExpand(input Operator, src AdjacencySource, cfg ExpandConfig) *OptionalExpand {
 	sr := &singleRow{}
-	child := NewExpand(sr, fwd, rev, cfg)
+	child := NewExpand(sr, src, cfg)
 	return &OptionalExpand{
 		child:     child,
 		singleArg: sr,

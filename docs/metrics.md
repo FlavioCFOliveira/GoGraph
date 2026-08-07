@@ -313,6 +313,123 @@ retaining objects between calls):
 | `bolt.pool.encoder.get` / `.put` | `EncodePool` acquire / release (Bolt PackStream encoder). |
 | `bolt.pool.decoder.get` / `.put` | `DecodePool` acquire / release (Bolt PackStream decoder). |
 
+### `graph/lpg` — the MVCC substrate
+
+Multi-version concurrency control is GoGraph's **only** concurrency-control
+mechanism, so the health of the MVCC substrate is the health of the module. These
+series are what makes it observable.
+
+Two naming shapes appear here, and the difference is deliberate:
+
+* the **latency** series follow the module-wide
+  `<package-path>.<ExportedSymbol>` convention, because they instrument public
+  blocking APIs exactly as every other entry in this document does;
+* the **substrate** series are named `lpg.mvcc.<quantity>`, because they describe a
+  mechanism rather than a call. They are gauges and counters published from the
+  background vacuum, not from any request path, so the workload they describe does
+  not pay for them.
+
+Bucketed series carry the bucket in the NAME (`…store.node_labels`,
+`…bucket.4_7`) rather than in a Prometheus label: `metrics.Backend` takes a name
+and a value and has no label dimension. Every such name is drawn from a closed set
+and built once at init, so cardinality is bounded by construction and publication
+allocates nothing.
+
+#### Commit latency
+
+| Metric | Description |
+| --- | --- |
+| `graph.lpg.ApplyVersioned` | One autocommit write transaction, open to publish. |
+| `graph.lpg.ApplyVersionedCtx` | As above, with a context-bounded barrier acquisition. |
+| `graph.lpg.EndVersionedTx` | The publish of a multi-statement transaction. |
+| `lpg.mvcc.vacuum.pass` | One reclamation pass, start to finish. |
+
+The durable commit is measured a layer up, by `store.txn.Commit` and
+`store.txn.CommitWALOnly`; the client-visible one by `cypher.ExplicitTx.Commit` and
+`cypher.RunInTx`.
+
+#### Write outcomes
+
+`Commits` and `Aborts` are the two outcomes and partition the transactions that
+reached one. `Conflicts` is a CAUSE and is a **subset of aborts**, not a third
+bucket — the same relationship `pg_stat_database` has between `xact_rollback` and
+its conflict counters. A transaction that versioned nothing and hit no conflict is
+in neither: there was no decision to record.
+
+| Metric | Kind | Description |
+| --- | --- | --- |
+| `lpg.mvcc.writers.active` | gauge | Write transactions in flight. |
+| `lpg.mvcc.commits` | gauge | Transactions that published an instant. |
+| `lpg.mvcc.aborts` | gauge | Transactions refused publication. |
+| `lpg.mvcc.conflicts` | counter | One per DOOMED TRANSACTION, at the detection site. |
+| `lpg.mvcc.conflicts.store.<store>` | counter | The same, attributed to the store that refused it. |
+| `lpg.mvcc.conflicts.total` | gauge | Cumulative conflicts, sampled with the commit count so the two can be divided without racing two scrapes. |
+| `lpg.mvcc.conflicts.total.store.<store>` | gauge | Cumulative conflicts per store. |
+| `lpg.mvcc.conflict_rate` | gauge | `conflicts / (commits + aborts)`. |
+
+`<store>` is one of `node_labels`, `node_properties`, `node_existence`,
+`adjacency`, `edge_types`, `edge_types_by_handle`, `edge_types_by_ordinal`,
+`edge_props_by_handle`, `edge_props_by_ordinal`, `other`.
+
+#### Retention and the reclamation horizon
+
+| Metric | Kind | Description |
+| --- | --- | --- |
+| `lpg.mvcc.versions.{label,property,adjacency,edge_side,node_life}` | gauge | Live version records per store. |
+| `lpg.mvcc.versions.total` | gauge | Their sum: the memory the substrate is responsible for. |
+| `lpg.mvcc.versions.bound` | gauge | The churn bound the settled state returns to. |
+| `lpg.mvcc.versions.ceiling` | gauge | The instantaneous bound a committer waits at. |
+| `lpg.mvcc.index_removal_backlog` | gauge | Label-index removals waiting for the watermark. |
+| `lpg.mvcc.adjacency_conflict_stamps` | gauge | Nodes carrying an adjacency conflict stamp. |
+| `lpg.mvcc.watermark` | gauge | The oldest start timestamp any active snapshot holds. |
+| `lpg.mvcc.oldest_snapshot_age` | gauge | `now - watermark`. This IS the watermark age; it is published once, under one name. |
+| `lpg.mvcc.in_flight_commits` | gauge | Timestamps allocated but not yet published. |
+| `lpg.mvcc.sessions.waiting` | gauge | Sessions blocked waiting for the frontier to reach their own last commit. Read with `in_flight_commits`: those commits are what is holding the frontier back. |
+| `lpg.mvcc.snapshots.active` | gauge | Snapshots registered with the horizon — readers AND writers. |
+| `lpg.mvcc.readers.active` | gauge | `snapshots.active - writers.active`. |
+| `lpg.mvcc.snapshots.unregistered` | gauge | Snapshots that could not get a slot. **While this is non-zero reclamation is SUSPENDED** and version memory has no bound. |
+| `lpg.mvcc.snapshots.capacity` | gauge | The slot capacity the two above should be read against. |
+| `lpg.mvcc.horizon.capacity` | gauge | The same constant, published beside the vacuum's series. |
+
+#### Version-chain depth
+
+Chain depth is read cost: a read steps back through each record newer than its own
+instant. The distribution is what matters, because one object with a chain of 200 is
+a latency spike that a mean over a million short chains reports as 1.0002. The
+buckets hold **retained** depth — what a read arriving now would walk — measured by
+the reclaimer during the walk it already performs.
+
+Each store's contribution describes that store's most recent complete sweep.
+
+| Metric | Kind | Description |
+| --- | --- | --- |
+| `lpg.mvcc.chain_depth.bucket.<b>` | gauge | Chains whose retained depth is in bucket `<b>`: `1`, `2_3`, `4_7`, `8_15`, `16_31`, `32_63`, `64_127`, `128_inf`. |
+| `lpg.mvcc.chain_depth.chains` | gauge | Chains counted, over every store. |
+| `lpg.mvcc.chain_depth.deepest` | gauge | The exact deepest retained chain — the last bucket is unbounded above, so without this a chain of 130 and one of 5000 read alike. |
+| `lpg.mvcc.chain_depth.{chains,deepest}.store.<s>` | gauge | The same, per store: `node_labels`, `node_properties`, `edge_sides`, `adjacency`. |
+
+Node existence has no entry: it is versioned, but at most one birth and one death
+per node, so it keeps no chain. Its retention is `lpg.mvcc.versions.node_life`.
+
+#### The background vacuum
+
+| Metric | Kind | Description |
+| --- | --- | --- |
+| `lpg.mvcc.vacuum.running` | gauge | 1 while a sweeper goroutine is alive. |
+| `lpg.mvcc.vacuum.starts` / `.exits` | gauge | Sweeper lifecycle. They differ by at most one. |
+| `lpg.mvcc.vacuum.passes` | gauge | Completed passes. |
+| `lpg.mvcc.vacuum.reclaimed` | gauge | Records released in total. |
+| `lpg.mvcc.vacuum.capped_passes` | gauge | Passes that stopped at the per-pass record bound. |
+| `lpg.mvcc.vacuum.backlog` | gauge | Versions created since the last pass began. |
+| `lpg.mvcc.vacuum.records_per_pass` | gauge | The per-pass upper bound on work. |
+| `lpg.mvcc.vacuum.pass_mean_ns` | gauge | Mean pass duration, for a consumer with no histogram backend. |
+| `lpg.mvcc.vacuum.pressure_unrelieved` | counter | A committer waited at the ceiling and the sweep freed nothing. |
+
+The measured cost of all of the above is recorded in
+[`benchmarks/mvcc-observability-2026-08-05.md`](benchmarks/mvcc-observability-2026-08-05.md):
+the read path is unchanged, and a write transaction pays two atomic increments —
+1.42 ns on an otherwise empty bracket, unmeasurable on one that writes.
+
 ## Error counters
 
 Every metric listed above that can return a non-nil `error` has a

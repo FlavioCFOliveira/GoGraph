@@ -46,9 +46,15 @@ package exec
 // # Concurrency
 //
 // QueryCounters is NOT safe for concurrent use, and deliberately holds plain integers
-// rather than atomics: the Cypher write path is single-writer (the engine serialises
-// writers), and each physical operator tree owns exactly one write adapter, so no
-// synchronisation is required and adding any would cost the write path for nothing.
+// rather than atomics. The reason is OWNERSHIP, not serialisation: each physical
+// operator tree owns exactly one write adapter and the adapter owns its counters
+// inline, so concurrent statements never share a QueryCounters and there is nothing
+// to synchronise. Adding atomics would cost the write path for nothing.
+//
+// This note used to give the reason as "the Cypher write path is single-writer",
+// which stopped being true when rmp #2306 retired the writer serialisers. The
+// safety survived because it never rested on that; pinned by
+// cypher.TestConcurrentCreate_PerStatementCountersAreNotShared.
 type QueryCounters struct {
 	NodesCreated         int64
 	NodesDeleted         int64

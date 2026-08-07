@@ -224,16 +224,39 @@ func (a *AdjList[N, W]) EntryNeighboursAsOf(id graph.NodeID, startTS, txID uint6
 // Not safe for concurrent use.
 func (a *AdjList[N, W]) SetWriteStamp(s *mvcc.WriteStamp) { a.stamp = s }
 
-// writeStamp resolves how the version record of the write in progress is
-// timestamped: the open transaction's shared record, or a fresh commit
-// timestamp when there is no open transaction.
+// versionStamp resolves how the version record of the write in progress is
+// timestamped, from the transaction the write CARRIES.
 //
 // Called from storeEntry with the shard lock held and only when versioning is
 // armed AND this write actually supersedes something, so its cost is paid per
 // topology change and never on a read.
-func (a *AdjList[N, W]) writeStamp() (*mvcc.CommitInfo, uint64) {
+//
+// # The three cases, and why the middle one may not fall back to the slot
+//
+// A write that carries a transaction takes that transaction's shared record, so
+// every version of one transaction points at one record and publishing it is one
+// atomic store — whatever else is writing concurrently (rmp #2320).
+//
+// A write that carries a transaction whose window has already been RETRACTED
+// takes a fresh untransacted timestamp instead of consulting the ambient slot.
+// Consulting it would be the defect this threading removes, arrived at from the
+// far side: the slot may name a live concurrent transaction, and adopting that
+// record would publish this version at that transaction's commit instant. A
+// timestamp later than the write actually happened is the safe direction; see
+// the [mvcc.WriteStamp] file comment.
+//
+// A write that carries NO transaction resolves through the ambient slot, which
+// is the correct reading for adjlist's remaining untransacted callers — the
+// exclusive bulk builds, WAL replay, snapshot apply and the direct Go API.
+func (a *AdjList[N, W]) versionStamp(tx mvcc.Tx) (*mvcc.CommitInfo, uint64) {
 	if a.stamp == nil {
 		return nil, 0
+	}
+	if tx.Valid() {
+		if info := tx.Record(); info != nil {
+			return info, 0
+		}
+		return a.stamp.UntransactedStamp()
 	}
 	return a.stamp.Stamp()
 }
@@ -265,9 +288,32 @@ func (a *AdjList[N, W]) writeStamp() (*mvcc.CommitInfo, uint64) {
 // that sees nil stops at the current entry, which is the version it should get
 // anyway.
 //
-// Safe for concurrent use with readers. Not safe to run concurrently with
-// itself or with writers on the same AdjList.
-func (a *AdjList[N, W]) Reclaim(watermark uint64) int {
+// # Why it IS safe against a concurrent writer (rmp #2308)
+//
+// This said "not safe to run concurrently with itself or with writers", and the
+// second half was pessimistic rather than true. It takes `s.mu.Lock()` on each
+// shard, and [AdjList.storeEntry] — the only writer of an entry's version chain,
+// through [AdjList.linkVersion] — is called under that same lock from every one
+// of its call sites. A version chain never leaves the shard that owns its slot,
+// so severing one under the shard lock excludes the only writer that could be
+// touching it. The barrier the caller used to hold added nothing here.
+//
+// Verified by reading the call sites rather than by trusting this comment, which
+// is how the correction was found; the sweep that relies on it is
+// [lpg.Graph.sweepUnit].
+//
+// # The depth histogram
+//
+// hist accumulates the RETAINED depth of every chain this sweep leaves behind — the
+// number of version records a reader arriving now may still step through — or is nil
+// for a caller that does not measure. The count is the sever walk's own loop
+// counter, so measuring it costs a register increment on the sweeper and no second
+// traversal (rmp #2312). The caller resets it; this function only fills it, because
+// a caller that sweeps several stores decides when a distribution begins.
+//
+// Safe for concurrent use with readers and with writers. NOT safe to run
+// concurrently with itself: two sweeps would walk and sever the same chain.
+func (a *AdjList[N, W]) Reclaim(watermark uint64, hist *mvcc.DepthHist) int {
 	if watermark == 0 || a.versionActive.Load() == 0 {
 		return 0
 	}
@@ -285,8 +331,11 @@ func (a *AdjList[N, W]) Reclaim(watermark uint64) int {
 				delete(s.versioned, intraIdx)
 				continue
 			}
-			n, stillVersioned := severChain(e, watermark)
+			n, retained, stillVersioned := severChain(e, watermark)
 			freed += n
+			if hist != nil {
+				hist.Observe(retained)
+			}
 			if !stillVersioned {
 				delete(s.versioned, intraIdx)
 			}
@@ -300,13 +349,17 @@ func (a *AdjList[N, W]) Reclaim(watermark uint64) int {
 }
 
 // severChain drops the unreachable tail of e's version chain and reports how
-// many records it released and whether any remain.
+// many records it released, how many it left reachable, and whether any remain.
 //
 // The chain runs newest-first, so the FIRST record whose supersede timestamp is
 // at or before the watermark makes everything behind it unreachable as well:
 // every active reader began at or after that instant, so none of them steps
 // back past it. Storing nil there releases the whole tail at once.
-func severChain[W any](e *adjEntry[W], watermark uint64) (freed int, remaining bool) {
+//
+// retained is the length of the prefix the walk did NOT sever: the records a reader
+// starting now may still have to step through to reach its own version. It is the
+// walk's existing loop, counted (rmp #2312).
+func severChain[W any](e *adjEntry[W], watermark uint64) (freed, retained int, remaining bool) {
 	for cur := e; cur != nil; {
 		v := cur.ver.Load()
 		if v == nil {
@@ -323,7 +376,8 @@ func severChain[W any](e *adjEntry[W], watermark uint64) (freed int, remaining b
 			}
 			break
 		}
+		retained++
 		cur = v.prev
 	}
-	return freed, e.ver.Load() != nil
+	return freed, retained, e.ver.Load() != nil
 }

@@ -266,8 +266,11 @@ func RunWithMetricsOracle(ctx context.Context, seed uint64, ops int, wlFactory f
 	if err != nil {
 		return MetricsOracleResult{}, err
 	}
-	// A goroutine slack of 0 is the strict baseline; the in-memory engine spawns
-	// no goroutines, so a clean run returns exactly to baseline.
+	// A goroutine slack of 0 is the strict baseline. The engine itself spawns no
+	// goroutines; its GRAPH spawns the MVCC vacuum (rmp #2308), and
+	// driveMetricsWorkload closes the engine so that goroutine is joined before
+	// the after-snapshot is taken. The zero stays honest because of that close,
+	// not because nothing runs in the background.
 	return oracle.lastCheck(stats, 0), nil
 }
 
@@ -278,6 +281,9 @@ func RunWithMetricsOracle(ctx context.Context, seed uint64, ops int, wlFactory f
 func driveMetricsWorkload(ctx context.Context, seed uint64, ops int, wlFactory func(*Seed) *Workload, oracle *MetricsOracle) (MetricsRunStats, error) {
 	s := NewSeed(seed)
 	g := newMetricsEngine()
+	// Closed on every exit path; the successful path closes EARLIER, before the
+	// after-snapshot, for the reason stated there.
+	defer func() { _ = g.Close() }()
 	eng := NewEngineAdapter(g)
 	model := NewGraphOracle()
 	workload := wlFactory(s)
@@ -304,6 +310,14 @@ func driveMetricsWorkload(ctx context.Context, seed uint64, ops int, wlFactory f
 			_ = executeOnEngine(ctx, eng, op)
 			applyOpToOracle(model, op, true)
 		}
+	}
+	// Join the graph's background vacuum BEFORE the after-snapshot. This oracle
+	// certifies a return to the EXACT goroutine baseline with zero slack, and the
+	// graph owns a vacuum goroutine since rmp #2308; a deferred close would run
+	// after the snapshot and the run finished 13 -> 14, which the oracle correctly
+	// reported as a leak. Close is idempotent, so the defer above stays valid.
+	if err := g.Close(); err != nil {
+		return stats, err
 	}
 	oracle.after = oracle.Snapshot()
 	return stats, nil

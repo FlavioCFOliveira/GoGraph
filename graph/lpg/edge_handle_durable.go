@@ -99,8 +99,47 @@ func (g *Graph[N, W]) HasEdgeHandle(src, dst N, handle uint64) bool {
 // plain [Graph.AddEdge] so a pre-Stage-2 WAL frame (which carried no
 // handle) still replays. AddEdgeHIfAbsent is NOT safe for concurrent use.
 func (g *Graph[N, W]) AddEdgeHIfAbsent(src, dst N, w W, handle uint64) (inserted bool, err error) {
+	return g.addEdgeHIfAbsentInfo(src, dst, w, handle, nil)
+}
+
+// addEdgeHIfAbsentInfo is [Graph.AddEdgeHIfAbsent] with an explicit write
+// transaction; tx is nil for a replay or a direct Go-API mutation, which is
+// committed the instant it is made. See [writeCtx].
+//
+// It needs the transaction-carrying form for TWO callers that both run inside a
+// write bracket, which is what makes it different from the other replay
+// primitives in this file:
+//
+//   - the Cypher engine's in-memory undo log, whose inverse of a DELETE re-adds
+//     the removed instance (cypher/undo_record.go) while the failing statement's
+//     bracket is still open;
+//   - the durable store's in-memory apply, which replays a transaction's
+//     OpAddEdgeH frames inside one bracket (store/txn).
+//
+// A write on either path that resolved its commit record through the ambient slot
+// would publish part of its transaction at another transaction's instant once two
+// brackets overlap (rmp #2320).
+//
+// The read-then-write it performs is NOT made atomic by the transaction: the
+// method's contract already says it is not safe for concurrent use, and its
+// idempotence is against a snapshot that has already been loaded, not against a
+// concurrent writer.
+func (g *Graph[N, W]) addEdgeHIfAbsentInfo(src, dst N, w W, handle uint64, tx *writeCtx) (inserted bool, err error) {
+	// Endpoints interned through the hooked path BEFORE either insert, so a node this
+	// append CREATES is born at the transaction's instant rather than at the beginning
+	// of time; see [Graph.internEndpoint] (rmp #2331).
+	//
+	// This is the path store/txn's OpAddEdgeH apply takes, and therefore the one every
+	// DURABLE edge write reaches the graph through. The first fix covered
+	// [Graph.addEdgeInfo] alone, which the direct Go API uses; a checkpoint capture
+	// then measured the remainder at 154 visible nodes against 71 visible edges, where
+	// 142 was owed.
+	g.internEndpoint(src, tx)
+	if src != dst {
+		g.internEndpoint(dst, tx)
+	}
 	if handle == 0 {
-		if err := g.adj.AddEdge(src, dst, w); err != nil {
+		if err := g.adj.Writer(tx.adjTx()).AddEdge(src, dst, w); err != nil {
 			return false, err
 		}
 		// Invalidate every CSR-position-keyed cache at SOURCE; see [Graph.AddEdge].
@@ -110,7 +149,7 @@ func (g *Graph[N, W]) AddEdgeHIfAbsent(src, dst N, w W, handle uint64) (inserted
 	if g.HasEdgeHandle(src, dst, handle) {
 		return false, nil
 	}
-	if err := g.adj.AddEdgeH(src, dst, w, handle); err != nil {
+	if err := g.adj.Writer(tx.adjTx()).AddEdgeH(src, dst, w, handle); err != nil {
 		return false, err
 	}
 	// Invalidate every CSR-position-keyed cache at SOURCE; see [Graph.AddEdge].
@@ -133,20 +172,10 @@ func (g *Graph[N, W]) SeedEdgeHandle(next uint64) {
 	if next == 0 {
 		return
 	}
-	// Raise the counter to next-1 so the following Add(1) yields next.
-	// nextEdgeHandle is edgeHandleSeq.Add(1); the stored value is the last
-	// HANDED-OUT handle. To make the next handout >= next, the stored value
-	// must be >= next-1.
-	target := next - 1
-	for {
-		cur := g.edgeHandleSeq.Load()
-		if cur >= target {
-			return
-		}
-		if g.edgeHandleSeq.CompareAndSwap(cur, target) {
-			return
-		}
-	}
+	// Raise the counter to next-1 so the following Add(1) yields next. The
+	// counter lives in the ADJACENCY (rmp #2317) and holds the last HANDED-OUT
+	// handle, so to make the next handout >= next it must be >= next-1.
+	g.adj.SeedHandleSeq(next - 1)
 }
 
 // EdgeHandleTriple is one live durable edge identity: the (src, dst)
@@ -292,6 +321,13 @@ func (g *Graph[N, W]) EdgePropertiesByHandleIDAsOf(srcID, dstID graph.NodeID, ha
 //
 // SetEdgeLabelByHandleID is safe for concurrent use.
 func (g *Graph[N, W]) SetEdgeLabelByHandleID(srcID, dstID graph.NodeID, handle uint64, name string) {
+	g.setEdgeLabelByHandleIDInfo(srcID, dstID, handle, name, nil)
+}
+
+// setEdgeLabelByHandleIDInfo is [Graph.SetEdgeLabelByHandleID] with an explicit write transaction; tx is
+// nil for a direct Go-API mutation, which is committed the instant it is made
+// and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) setEdgeLabelByHandleIDInfo(srcID, dstID graph.NodeID, handle uint64, name string, tx *writeCtx) {
 	if handle == 0 {
 		return
 	}
@@ -312,7 +348,10 @@ func (g *Graph[N, W]) SetEdgeLabelByHandleID(srcID, dstID graph.NodeID, handle u
 	if bag.has(lid) {
 		return
 	}
-	g.pushHandleLabelVersion(sh, k, handle)
+	if !g.pushHandleLabelVersion(sh, k, handle, tx) {
+		// Refused: the conflict is recorded on tx and this write must not land.
+		return
+	}
 	bag.add(lid)
 	byHandle[handle] = bag
 }
@@ -329,6 +368,13 @@ func (g *Graph[N, W]) SetEdgeLabelByHandleID(srcID, dstID graph.NodeID, handle u
 //
 // SetEdgePropertyByHandleID is safe for concurrent use.
 func (g *Graph[N, W]) SetEdgePropertyByHandleID(srcID, dstID graph.NodeID, handle uint64, key string, value PropertyValue) {
+	g.setEdgePropertyByHandleIDInfo(srcID, dstID, handle, key, value, nil)
+}
+
+// setEdgePropertyByHandleIDInfo is [Graph.SetEdgePropertyByHandleID] with an explicit write transaction; tx is
+// nil for a direct Go-API mutation, which is committed the instant it is made
+// and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) setEdgePropertyByHandleIDInfo(srcID, dstID graph.NodeID, handle uint64, key string, value PropertyValue, tx *writeCtx) {
 	if handle == 0 {
 		return
 	}
@@ -346,7 +392,9 @@ func (g *Graph[N, W]) SetEdgePropertyByHandleID(srcID, dstID graph.NodeID, handl
 		sh.m[k] = byHandle
 	}
 	bag := byHandle[handle]
-	g.pushHandlePropVersion(sh, k, handle)
+	if !g.pushHandlePropVersion(sh, k, handle, tx) {
+		return
+	}
 	bag.set(pid, value)
 	byHandle[handle] = bag
 }
@@ -363,6 +411,13 @@ func (g *Graph[N, W]) SetEdgePropertyByHandleID(srcID, dstID graph.NodeID, handl
 //
 // DelEdgePropertyByHandleID is safe for concurrent use.
 func (g *Graph[N, W]) DelEdgePropertyByHandleID(srcID, dstID graph.NodeID, handle uint64, key string) {
+	g.delEdgePropertyByHandleIDInfo(srcID, dstID, handle, key, nil)
+}
+
+// delEdgePropertyByHandleIDInfo is [Graph.DelEdgePropertyByHandleID] with an explicit write transaction; tx is
+// nil for a direct Go-API mutation, which is committed the instant it is made
+// and takes no conflict check. See [writeCtx].
+func (g *Graph[N, W]) delEdgePropertyByHandleIDInfo(srcID, dstID graph.NodeID, handle uint64, key string, tx *writeCtx) {
 	if handle == 0 {
 		return
 	}
@@ -382,7 +437,9 @@ func (g *Graph[N, W]) DelEdgePropertyByHandleID(srcID, dstID graph.NodeID, handl
 	if !ok {
 		return
 	}
-	g.pushHandlePropVersion(sh, k, handle)
+	if !g.pushHandlePropVersion(sh, k, handle, tx) {
+		return
+	}
 	if bag.del(pid) {
 		delete(byHandle, handle)
 		if len(byHandle) == 0 {
@@ -391,4 +448,48 @@ func (g *Graph[N, W]) DelEdgePropertyByHandleID(srcID, dstID graph.NodeID, handl
 		return
 	}
 	byHandle[handle] = bag
+}
+
+// WalkEdgeHandlesAsOf is [Graph.WalkEdgeHandles] resolving every node's adjacency AS
+// OF s rather than as of the present (rmp #2310).
+//
+// A nil snapshot walks the current entries, so it is exactly [Graph.WalkEdgeHandles]
+// and a caller may pass whatever it has.
+//
+// It exists for the checkpoint capture, which must read every structure at ONE
+// transactional instant while writers keep committing. The unversioned form reads
+// each node's LIVE entry, so a capture using it would fold the handles of a
+// transaction that committed part-way through the walk — the partial-transaction
+// image that the exclusion this task removes used to prevent.
+//
+// Nodes are visited in mapper order, which is the order the unversioned form uses;
+// a node that did not exist at s simply has no entry as of s and contributes
+// nothing, so existence needs no separate test here.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) WalkEdgeHandlesAsOf(s *Snapshot, fn func(EdgeHandleTriple) bool) {
+	if s == nil {
+		g.WalkEdgeHandles(fn)
+		return
+	}
+	adj := g.adj
+	adj.Mapper().Walk(func(srcID graph.NodeID, _ N) bool {
+		v := adj.EntryViewAsOf(srcID, s.startTS, s.txID)
+		if v.Handles == nil {
+			return true
+		}
+		for i, dstID := range v.Neighbours {
+			if i >= len(v.Handles) {
+				break
+			}
+			h := v.Handles[i]
+			if h == 0 {
+				continue
+			}
+			if !fn(EdgeHandleTriple{Src: srcID, Dst: dstID, Handle: h}) {
+				return false
+			}
+		}
+		return true
+	})
 }

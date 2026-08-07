@@ -153,28 +153,34 @@ func TestTxIntrospection_TerminateUnknownID(t *testing.T) {
 	}
 }
 
-// TestTxIntrospection_TerminateResolvesTheWriterStall is acceptance criterion
-// (3) and the point of the whole task: reproduce the audit's outage and END it
-// by operator action, without waiting for any timeout.
+// TestTxIntrospection_TerminationEndsAnAbandonedTransaction is what this test became
+// once there was no stall left to resolve.
 //
-// # It used to be a READER stall, and that is a deliberate change
+// # Its fixture has now stopped reproducing an outage TWICE, and both times that was
+// the point
 //
-// An idle open transaction held the visibility barrier and every READER waited
-// behind it. MVCC P4c (rmp #2274, #2290) retired the read barrier, so a reader
-// now takes a snapshot and is served immediately — the fixture stopped
-// reproducing anything, which is the outcome the whole programme was for.
+// It began as a READER stall: an idle open transaction held the visibility barrier and
+// every reader waited behind it. MVCC P4c (rmp #2274, #2290) retired the read barrier,
+// so the fixture stopped reproducing anything and the test was re-aimed at the stall
+// that remained — writes took the barrier exclusively, so a second WRITER waited.
 //
-// The stall that REMAINS is the one an operator still needs a remedy for:
-// writes take the barrier exclusively (moving the fsync out from under it is
-// P5, rmp #2193), so a second writer waits for the first to finish. This test
-// now reproduces THAT, and still proves the same thing about termination: with
-// both automatic bounds set far beyond the test's own patience, if the victim
-// is served it is because the termination did it and nothing else could have.
+// rmp #2305 retired that hold too. An abandoned transaction now blocks neither readers
+// nor writers, so there is no stall for termination to resolve, and asserting one would
+// assert the defect.
 //
-// The reader half is not lost — it is asserted in the opposite direction, that
-// a reader is served WHILE the offender holds the barrier, so a regression that
-// reinstated the read barrier would fail here.
-func TestTxIntrospection_TerminateResolvesTheWriterStall(t *testing.T) {
+// # What termination is FOR now, and what this asserts
+//
+// An abandoned transaction still costs something: it pins the reclamation horizon, so
+// no version it could still read is freed while it lives, and it occupies one of the
+// per-principal transaction slots. Termination is the operator's remedy for THAT, and
+// it must still work on demand rather than only via a timeout — which is why both
+// automatic bounds are set to five minutes, far beyond the test's own patience.
+//
+// So the assertions are: an idle offender blocks NEITHER a reader NOR a writer (the
+// rmp #2274 and rmp #2305 properties, asserted where a regression in either would be
+// caught), and terminating it removes it from the registry promptly by operator action
+// alone.
+func TestTxIntrospection_TerminationEndsAnAbandonedTransaction(t *testing.T) {
 	t.Parallel()
 	srv, addr := startTestServerHandle(t, server.Options{
 		ConnTimeout:      60 * time.Second,
@@ -182,8 +188,7 @@ func TestTxIntrospection_TerminateResolvesTheWriterStall(t *testing.T) {
 		MaxTxIdleTime:    5 * time.Minute,
 	})
 
-	// The offender: BEGIN, one write, then silence. It holds the visibility
-	// barrier exclusively, so every WRITER waits behind it.
+	// The offender: BEGIN, one write, then silence.
 	ab := newBoltTestClient(t, addr)
 	defer ab.close(t)
 	ab.negotiate(t)
@@ -197,8 +202,8 @@ func TestTxIntrospection_TerminateResolvesTheWriterStall(t *testing.T) {
 		t.Fatalf("the listing names %q, want offender", infos[0].Principal)
 	}
 
-	// A READER must be served straight away, barrier or no barrier. This is the
-	// #2274 property asserted where it would be missed if it regressed.
+	// A READER must be served straight away. The rmp #2274 property, asserted where it
+	// would be missed if it regressed.
 	freeReader := newBoltTestClient(t, addr)
 	defer freeReader.close(t)
 	freeReader.negotiate(t)
@@ -214,51 +219,42 @@ func TestTxIntrospection_TerminateResolvesTheWriterStall(t *testing.T) {
 	case d := <-readerDone:
 		t.Logf("a reader concurrent with the offender was served in %v", d)
 	case <-time.After(10 * time.Second):
-		t.Fatal("a reader was NOT served while an idle write transaction held the barrier: " +
+		t.Fatal("a reader was NOT served while an idle write transaction was open: " +
 			"the read barrier is back and rmp #2274 has regressed")
 	}
 
-	// The victim WRITES on another connection, on its own goroutine because it
-	// is expected to block until the termination lands.
-	victim := newBoltTestClient(t, addr)
-	defer victim.close(t)
-	victim.negotiate(t)
-	victim.hello(t)
-
-	served := make(chan time.Duration, 1)
+	// A WRITER must be served straight away too. The rmp #2305 property, and the one
+	// this test used to assert the opposite of.
+	writer := newBoltTestClient(t, addr)
+	defer writer.close(t)
+	writer.negotiate(t)
+	writer.hello(t)
+	writerDone := make(chan time.Duration, 1)
 	go func() {
 		start := time.Now()
-		victim.begin(t)
-		victim.run(t, "CREATE (:Victim {v: 2})", nil)
-		victim.pullAll(t)
-		victim.commit(t)
-		served <- time.Since(start)
+		writer.begin(t)
+		writer.run(t, "CREATE (:Victim {v: 2})", nil)
+		writer.pullAll(t)
+		writer.commit(t)
+		writerDone <- time.Since(start)
 	}()
-
-	// Give the writer time to be genuinely blocked, then intervene.
-	time.Sleep(200 * time.Millisecond)
 	select {
-	case d := <-served:
-		t.Fatalf("the writer completed in %v without intervention; the fixture is not "+
-			"reproducing the stall", d)
-	default:
+	case d := <-writerDone:
+		t.Logf("a writer concurrent with the offender committed in %v", d)
+	case <-time.After(10 * time.Second):
+		t.Fatal("a writer was NOT served while an idle write transaction was open. The " +
+			"offender is holding a transaction-lifetime lock across client think-time, " +
+			"which rmp #2305 retired — over Bolt that is one paused client blocking every " +
+			"other writer in the process.")
 	}
 
+	// Termination remains the operator's remedy for the resource the offender DOES
+	// still hold: its reclamation-horizon slot and its per-principal transaction slot.
+	// Both automatic bounds are 5m, so if it leaves the registry it is because the
+	// termination did it.
 	if err := srv.TerminateTransaction(infos[0].ID); err != nil {
 		t.Fatalf("TerminateTransaction: %v", err)
 	}
-
-	select {
-	case d := <-served:
-		t.Logf("writer served %v after the BEGIN, released by operator termination "+
-			"(both automatic bounds were 5m)", d)
-		if d > 30*time.Second {
-			t.Fatalf("the writer took %v; the termination did not release the barrier promptly", d)
-		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("the writer was never served after termination; the barrier was not released")
-	}
-
 	waitForTransactions(t, srv, 0)
 }
 

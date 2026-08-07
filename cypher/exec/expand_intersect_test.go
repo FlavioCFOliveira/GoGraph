@@ -72,18 +72,16 @@ func orderedPair(maxNode int, edgeList [][2]int) (fwd, rev *staticCSR) {
 func referenceChain(t *testing.T, fwd, rev *staticCSR, seeds []exec.Row,
 	midType, endType string, midFilter, endFilter map[uint64]string) []exec.Row {
 	t.Helper()
-	mid := exec.NewExpand(newSliceOperator(seeds...), fwd, rev, exec.ExpandConfig{
-		Direction:      exec.DirOut,
-		InputCol:       1, // b
-		EdgeType:       midType,
-		EdgeTypeFilter: midFilter,
+	mid := exec.NewExpand(newSliceOperator(seeds...), exec.StaticAdjacency(fwd, rev, midFilter), exec.ExpandConfig{
+		Direction: exec.DirOut,
+		InputCol:  1, // b
+		EdgeType:  midType,
 	})
-	closing := exec.NewExpand(mid, fwd, rev, exec.ExpandConfig{
-		Direction:      exec.DirOut,
-		InputCol:       4,        // c, appended by mid at base+2
-		RelCols:        []int{3}, // r2, appended by mid at base+1
-		EdgeType:       endType,
-		EdgeTypeFilter: endFilter,
+	closing := exec.NewExpand(mid, exec.StaticAdjacency(fwd, rev, endFilter), exec.ExpandConfig{
+		Direction: exec.DirOut,
+		InputCol:  4,        // c, appended by mid at base+2
+		RelCols:   []int{3}, // r2, appended by mid at base+1
+		EdgeType:  endType,
 	})
 	rows, err := exec.Drain(context.Background(), closing)
 	if err != nil {
@@ -116,14 +114,13 @@ func referenceChain(t *testing.T, fwd, rev *staticCSR, seeds []exec.Row,
 func fusedRows(t *testing.T, fwd, rev *staticCSR, seeds []exec.Row,
 	midType, endType string, midFilter, endFilter map[uint64]string) []exec.Row {
 	t.Helper()
-	op := exec.NewExpandIntersect(newSliceOperator(seeds...), fwd, rev,
+	op := exec.NewExpandIntersect(newSliceOperator(seeds...),
+		exec.StaticIntersectAdjacency(fwd, rev, midFilter, endFilter),
 		&exec.ExpandIntersectConfig{
-			MidCol:            1, // b
-			EndCol:            0, // a
-			MidEdgeType:       midType,
-			EndEdgeType:       endType,
-			MidEdgeTypeFilter: midFilter,
-			EndEdgeTypeFilter: endFilter,
+			MidCol:      1, // b
+			EndCol:      0, // a
+			MidEdgeType: midType,
+			EndEdgeType: endType,
 		})
 	rows, err := exec.Drain(context.Background(), op)
 	if err != nil {
@@ -365,8 +362,7 @@ func TestExpandIntersect_SiblingMorphismExcludesAnEdge(t *testing.T) {
 	// Seed carries a sibling edge id in column 2. Forward slot for 1→2 is index 1
 	// (runs: node0 -> [1] at 0, node1 -> [2] at 1, node2 -> [0] at 2).
 	seeds := []exec.Row{{expr.IntegerValue(0), expr.IntegerValue(1), expr.IntegerValue(1)}}
-	op := exec.NewExpandIntersect(newSliceOperator(seeds...), fwd, rev,
-		&exec.ExpandIntersectConfig{MidCol: 1, EndCol: 0, RelCols: []int{2}})
+	op := exec.NewExpandIntersect(newSliceOperator(seeds...), exec.StaticIntersectAdjacency(fwd, rev, nil, nil), &exec.ExpandIntersectConfig{MidCol: 1, EndCol: 0, RelCols: []int{2}})
 	rows, err := exec.Drain(context.Background(), op)
 	if err != nil {
 		t.Fatalf("drain: %v", err)
@@ -410,7 +406,7 @@ func TestExpandIntersect_EmptyLegsAndOutOfRangeNodes(t *testing.T) {
 func TestExpandIntersect_PlanHooks(t *testing.T) {
 	fwd, rev := orderedPair(3, [][2]int{{0, 1}, {1, 0}})
 	child := newSliceOperator()
-	op := exec.NewExpandIntersect(child, fwd, rev, &exec.ExpandIntersectConfig{
+	op := exec.NewExpandIntersect(child, exec.StaticIntersectAdjacency(fwd, rev, nil, nil), &exec.ExpandIntersectConfig{
 		MidCol: 1, EndCol: 0, MidEdgeType: "KNOWS", EndEdgeType: "LIKES",
 	})
 	kids := op.PlanChildren()
@@ -420,7 +416,7 @@ func TestExpandIntersect_PlanHooks(t *testing.T) {
 	if d := op.PlanDetail(); d != "mid=KNOWS close=LIKES" {
 		t.Fatalf("PlanDetail = %q; want %q", d, "mid=KNOWS close=LIKES")
 	}
-	untypedOp := exec.NewExpandIntersect(child, fwd, rev, &exec.ExpandIntersectConfig{})
+	untypedOp := exec.NewExpandIntersect(child, exec.StaticIntersectAdjacency(fwd, rev, nil, nil), &exec.ExpandIntersectConfig{})
 	if d := untypedOp.PlanDetail(); d != "mid=* close=*" {
 		t.Fatalf("untyped PlanDetail = %q; want %q", d, "mid=* close=*")
 	}
@@ -441,8 +437,7 @@ func TestExpandIntersect_PlanHooks(t *testing.T) {
 func TestExpandIntersect_ReInitIsRepeatable(t *testing.T) {
 	fwd, rev := orderedPair(4, [][2]int{{0, 1}, {1, 2}, {2, 0}})
 	seeds := []exec.Row{{expr.IntegerValue(0), expr.IntegerValue(1)}}
-	op := exec.NewExpandIntersect(newSliceOperator(seeds...), fwd, rev,
-		&exec.ExpandIntersectConfig{MidCol: 1, EndCol: 0})
+	op := exec.NewExpandIntersect(newSliceOperator(seeds...), exec.StaticIntersectAdjacency(fwd, rev, nil, nil), &exec.ExpandIntersectConfig{MidCol: 1, EndCol: 0})
 
 	drainOnce := func(pass int) []exec.Row {
 		if err := op.Init(context.Background()); err != nil {

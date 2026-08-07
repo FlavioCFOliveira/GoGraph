@@ -37,10 +37,10 @@ A reader running concurrently with a writer has **no single correct answer** to
 is precisely what snapshot isolation promises. So each reader brackets its
 observation against the ingest's acknowledged-commit counter:
 
-| Sample | When | Meaning |
-|---|---|---|
-| `lo` | **before** the query starts | every one of those commits had already returned to the writer, so a transaction starting later **must** see it |
-| `hi` | **after** the query returns | the snapshot began before this sample, so it cannot legitimately contain a write acknowledged after it |
+| Sample | When | From | Meaning |
+|---|---|---|---|
+| `lo` | **before** the query starts | the **acknowledged** counter | every one of those commits had already returned to the writer, so a transaction starting later **must** see it |
+| `hi` | **after** the query returns | the **started** counter | a write the ingest has not even begun cannot be visible to anybody, so it is a true upper bound |
 
 The rule is `lo ≤ observed ≤ hi`:
 
@@ -51,6 +51,42 @@ The rule is `lo ≤ observed ≤ hi`:
 Writes acknowledged *during* the query may or may not be visible, and either is
 correct. That is why pinning a single expected number would manufacture false
 failures.
+
+### Why the two ends come from two different counters
+
+They did not always. An earlier version took both from the acknowledged counter,
+and on **2026-08-02** it reported `2 future read(s) over 170 observations`
+against a correct engine during a loaded `make ci` run — while passing 8 out of 8
+standalone under `-race`.
+
+The cause is an ordering the instrument did not account for: the engine
+**publishes** a commit, then **returns** from the write, and only then does the
+ingest increment its counter. A reader whose snapshot lands inside that window
+legitimately sees the commit while `hi` has not yet counted it. The window is
+normally nanoseconds, but under `-race` on a saturated machine the ingest
+goroutine can be descheduled inside it for milliseconds, while the reader's query
+takes microseconds.
+
+Two things support that diagnosis over the alternative — a genuine isolation
+violation. First, it follows from the code: the increment provably sits after the
+publication. Second, the observed graph was **internally consistent** — 9 links
+and 9 distinct spokes, with `0 misaligned far-endpoint counts` — which is a
+snapshot one commit ahead of the counter, not a torn read.
+
+**What the evidence actually is, and is not.** The failure was never reproduced
+on demand: twenty-five runs under `-race` with the machine saturated passed on the
+*defective* build as well as the fixed one. What does exist is one red and one
+green under comparable conditions — the defective build failed a loaded `make ci`
+in 2.421 s over 170 observations, and the fixed build passed a `make ci` that ran
+under elevated load (`graph/lpg` +47 %, `cypher` +18 % against the red run) with
+this example taking 2.766 s, so it performed comparable work. That is a single
+red-then-green pair, not a reproducible one; the fix's real basis is still the
+ordering argument, which is provable from the code.
+
+Sampling `hi` from a counter incremented **before** the write closes the window by
+construction. The ceiling is looser by the number of in-flight writes — one,
+because the ingest is sequential — and the invisible-commit floor, the half that
+catches a lost commit, is not weakened at all.
 
 A second, independent invariant runs alongside it: the ingest gives every spoke
 exactly one `LINK`, so `count(r)` must equal `count(DISTINCT s)`. This is not

@@ -147,7 +147,7 @@ func shouldPollWorkerRelative(i, lo int) bool {
 // concurrent-safe reads any read query issues, idx (a hash.Index) is documented
 // safe for concurrent use, and per-key insertion is commutative (set
 // semantics), so the resulting index contents are identical regardless of
-// worker count or scheduling. CREATE INDEX runs under the single-writer DDL
+// worker count or scheduling. CREATE INDEX runs under the exclusive DDL
 // lock, so the only effect is shorter wall-clock on the blocking DDL — but that
 // matters: a 100M-node index build must not freeze writers for minutes.
 //
@@ -549,7 +549,7 @@ type indexDefEntry struct {
 // indexdefs.bin so an index survives a WAL-truncating checkpoint (#1755).
 //
 // It is internally synchronised: mutations (record / forget) run under the
-// engine's single-writer serialisation, but snapshot reads happen concurrently
+// engine's DDL exclusion, but snapshot reads happen concurrently
 // from the checkpointer goroutine, so every access takes the mutex. The numeric
 // companion and UNIQUE backing indexes never enter this registry, so it contains
 // exactly the user-named indexes a plain CREATE INDEX declares — no name-suffix
@@ -632,7 +632,7 @@ func (r *indexDefRegistry) specs() []snapshot.IndexDefSpec {
 
 // recordIndexDef records a user index definition in the engine registry and
 // re-syncs the graph's lock-free index-count gate. Callers hold the engine's
-// single-writer serialisation. The numeric companion and UNIQUE backing index
+// exclusive DDL lock. The numeric companion and UNIQUE backing index
 // are NOT recorded through this method (their creation sites do not call it).
 func (e *Engine) recordIndexDef(name string, hash bool, label, property string) {
 	e.indexDefReg.record(name, indexDefEntry{hash: hash, label: label, property: property})
@@ -641,7 +641,7 @@ func (e *Engine) recordIndexDef(name string, hash bool, label, property string) 
 
 // forgetIndexDef drops a user index definition from the engine registry and
 // re-syncs the graph's lock-free index-count gate. Callers hold the engine's
-// single-writer serialisation.
+// exclusive DDL lock.
 func (e *Engine) forgetIndexDef(name string) {
 	e.indexDefReg.forget(name)
 	e.syncIndexCount()
@@ -762,9 +762,9 @@ func (e *Engine) runCreateHashIndex(ctx context.Context, p *ir.CreateIndex, idxM
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	e.schemaMu.Lock()
+	defer e.schemaMu.Unlock()
 	if e.store == nil {
-		e.writeMu.Lock()
-		defer e.writeMu.Unlock()
 		return e.createHashIndexLocked(ctx, p, idxMgr, nil)
 	}
 	// WAL-backed: open the serialising transaction before the backfill scan so
@@ -775,7 +775,7 @@ func (e *Engine) runCreateHashIndex(ctx context.Context, p *ir.CreateIndex, idxM
 	}
 	res, rerr := e.createHashIndexLocked(ctx, p, idxMgr, tx)
 	// Guarded no-op after CommitWALOnly (success or failure); releases the
-	// single-writer lock on earlier error paths. See runCreateConstraint.
+	// writer registration on earlier error paths. See runCreateConstraint.
 	_ = tx.Rollback()
 	return res, rerr
 }
@@ -859,7 +859,7 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 	e.ClearPlanCache()
 
 	// Record the user index def in the engine registry BEFORE the WAL commit,
-	// while this DDL still holds the single-writer serialisation (#F-STORE1). A
+	// while this DDL still holds the exclusive DDL lock (#F-STORE1). A
 	// concurrent non-blocking checkpoint captures (WAL watermark, index defs)
 	// under the commit lock + inflight drain; performing the registry update
 	// here — inside the serialised window, before commitIndexTx releases it —

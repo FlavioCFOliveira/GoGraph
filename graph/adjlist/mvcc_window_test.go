@@ -28,8 +28,11 @@ package adjlist
 // something to say about the atomic store this rests on.
 
 import (
+	"runtime"
+	"sort"
 	"sync"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
@@ -59,7 +62,7 @@ func TestStoreEntry_InPlaceWindowMutationIsSoundUnderVersioning(t *testing.T) {
 	// A transaction that writes node a TWICE inside one window. The second
 	// write is the in-place builder mutation this test is about.
 	ws := a.WriteStampForTest()
-	ws.Begin()
+	beginTx(ws)
 	a.BeginCommit()
 	if err := a.AddEdge("a", "c", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
@@ -107,6 +110,20 @@ func TestStoreEntry_InPlaceWindowMutationIsSoundUnderVersioning(t *testing.T) {
 // the commit boundary — but that every count it observes is one a COMMITTED
 // version actually had. An intermediate in-window state has a count no
 // committed version ever held, so observing one fails here.
+//
+// # It did not cross the commit boundary until rmp #2327 fixed it
+//
+// The paragraph above was aspirational rather than true. [mvcc.CommitInfo.Commit]
+// only stamps the commit record; the clock's VISIBLE frontier advances through
+// [mvcc.Clock.PublishCommitTS], which this test never called. So `clk.ReadTS()`
+// returned 0 on every iteration, the reader read at start timestamp 0 forever, and
+// the only count it could ever observe was 0 — the empty pre-transaction adjacency.
+//
+// It was still a real negative control: an unversioned in-window write is visible to
+// a reader at any start timestamp, so injecting that defect does fail this test. What
+// it could NOT do is distinguish "the reader correctly stepped back" from "the reader
+// never saw anything at all", which is the weaker of the two things its own comment
+// claimed. The publication below and the guard at the end make the claim true.
 func TestStoreEntry_InPlaceWindowMutationIsRaceFree(t *testing.T) {
 	a, clk := versionedList(t)
 	const fanout = 6
@@ -122,13 +139,17 @@ func TestStoreEntry_InPlaceWindowMutationIsRaceFree(t *testing.T) {
 	id := idOf(t, a, "a")
 
 	var wg sync.WaitGroup
+	var ready sync.WaitGroup
 	stop := make(chan struct{})
 	var bad []int
+	seen := map[int]struct{}{}
 	var mu sync.Mutex
 
+	ready.Add(1)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		first := true
 		for {
 			select {
 			case <-stop:
@@ -139,17 +160,25 @@ func TestStoreEntry_InPlaceWindowMutationIsRaceFree(t *testing.T) {
 			got := len(a.EntryNeighboursAsOf(id, startTS, 0))
 			// The writer commits ONE transaction that adds all `fanout` edges,
 			// so the only committed counts are 0 and fanout.
+			mu.Lock()
+			seen[got] = struct{}{}
 			if got != 0 && got != fanout {
-				mu.Lock()
 				bad = append(bad, got)
-				mu.Unlock()
+			}
+			mu.Unlock()
+			if first {
+				first = false
+				ready.Done()
 			}
 		}
 	}()
+	// Do not write until the reader has completed a read. Without this the writer
+	// can finish before the runtime has started the goroutine at all.
+	ready.Wait()
 
 	// One transaction, `fanout` in-place writes to the same node in one window.
 	ws := a.WriteStampForTest()
-	ws.Begin()
+	beginTx(ws)
 	a.BeginCommit()
 	for i := 0; i < fanout; i++ {
 		if err := a.AddEdge("a", string(rune('b'+i)), 1); err != nil {
@@ -158,12 +187,21 @@ func TestStoreEntry_InPlaceWindowMutationIsRaceFree(t *testing.T) {
 	}
 	a.EndCommit()
 	info, _ := ws.End()
-	info.Commit(clk.NextCommitTS())
+	ts := clk.NextCommitTS()
+	info.Commit(ts)
+	// Advance the VISIBLE frontier, not merely the commit record — see the note on
+	// this test. Without it the reader below is pinned at start timestamp 0.
+	clk.PublishCommitTS(ts)
 
-	// Give the reader a window on the far side of the commit too.
-	for i := 0; i < 2000; i++ {
-		_ = a.EntryNeighboursAsOf(id, clk.ReadTS(), 0)
-	}
+	// WAIT for the reader to cross the commit boundary rather than hoping a fixed
+	// spin gives it the chance. The first version of this guard did the latter — 2000
+	// unrelated reads on the writer's own goroutine — and it FAILED under coverage
+	// instrumentation, where the reader had not completed a single iteration by the
+	// time the writer closed stop (the compression rmp #2319 recorded for exactly this
+	// class of instrument). A deadline turns a scheduling accident into a real signal:
+	// if the reader genuinely cannot see committed state, that is a defect worth
+	// failing on; if it merely needs longer, it gets longer.
+	sawCommitted := awaitObservation(&mu, seen, fanout, 10*time.Second)
 	close(stop)
 	wg.Wait()
 
@@ -174,6 +212,47 @@ func TestStoreEntry_InPlaceWindowMutationIsRaceFree(t *testing.T) {
 			"and %d were ever committed, so an in-window state leaked past the version chain",
 			len(bad), bad[:minIntTest(4, len(bad))], fanout)
 	}
+	// The claim in this test's doc comment, now enforced: the reader must have
+	// observed the commit boundary. Without this the test cannot distinguish "the
+	// reader correctly stepped back over the window" from "the reader never saw
+	// anything at all", and for years it was the second.
+	if !sawCommitted {
+		t.Fatalf("the reader never observed the committed adjacency (%d neighbours) within the "+
+			"deadline; it saw only %v, so it did not cross the commit boundary and this test "+
+			"proves nothing about what a reader sees after a commit", fanout, keysOfTest(seen))
+	}
+}
+
+// awaitObservation blocks until want appears in seen, or the timeout elapses, and
+// reports which happened. seen is guarded by mu and written by another goroutine.
+//
+// It exists so a concurrency test asserts on an OUTCOME rather than on having spun
+// long enough for one — the difference between a deterministic gate and a test that
+// passes on a fast machine and fails under coverage instrumentation.
+func awaitObservation(mu *sync.Mutex, seen map[int]struct{}, want int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		mu.Lock()
+		_, ok := seen[want]
+		mu.Unlock()
+		if ok {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		runtime.Gosched()
+	}
+}
+
+// keysOfTest renders an observed-value set for a failure message.
+func keysOfTest(m map[int]struct{}) []int {
+	out := make([]int, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Ints(out)
+	return out
 }
 
 // TestAdjVersion_UnstampedWriteIsVisibleOnlyAfterwards pins the direct-mutation
@@ -209,13 +288,13 @@ func TestWriteStamp_AllocatesOnlyWhenAVersionNeedsIt(t *testing.T) {
 	var ws mvcc.WriteStamp
 	ws.SetClock(&mvcc.Clock{})
 
-	ws.Begin()
+	beginTx(&ws)
 	if info, n := ws.End(); info != nil || n != 0 {
 		t.Fatalf("an empty transaction produced a commit record (%v) and %d versions, want none of "+
 			"either: the record must be allocated by the first version that needs one", info, n)
 	}
 
-	ws.Begin()
+	beginTx(&ws)
 	first, _ := ws.Stamp()
 	second, _ := ws.Stamp()
 	if first == nil || first != second {

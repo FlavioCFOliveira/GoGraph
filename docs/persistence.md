@@ -44,10 +44,28 @@ recovery. Concurrent commits are coalesced by **group commit**
 and every committer whose durability watermark the flush covers acknowledges
 without issuing its own fsync, so the per-commit fsync no longer caps
 write throughput under concurrency (≈ 118× at 256 concurrent writers, #1507)
-while the single-threaded commit cost is unchanged. A commit is acknowledged
-only after the covering fsync, so atomicity and durability are preserved (a
-failed group fsync fails every member of the group), and the in-memory state is
-applied strictly in WAL sequence order, so isolation is preserved (the
+while the single-threaded commit cost is unchanged.
+
+Each committer's **durability watermark is its own**: `wal.Writer.AppendRun`
+returns the offset immediately after the run's last frame, and the committer
+passes that offset to `SyncGroup`. The watermark cannot be recovered afterwards
+from the writer's accepted offset, because that offset is shared — another
+appender advances it, and a durability failure rewinds it to the durable size.
+Deriving the watermark from it instead told a committer whose frames were already
+on stable storage that its commit had failed, while recovery went on to replay
+the (durable, fully marked) transaction: a durable transaction nobody
+acknowledged (#2322). For the same reason `SyncGroup` tests the caller's
+watermark against the durable size **before** it consults the writer's sticky
+failure — the two are not mutually exclusive, since the failure can belong to a
+later round that failed after a leader had already fsynced this caller's marker.
+`wal.Writer.SyncBuffered` remains for callers with nothing of their own to
+acknowledge (an empty commit's courtesy flush of a buffered tail) and must never
+be used to decide a commit's fate.
+
+A commit is acknowledged only after the covering fsync, so atomicity and
+durability are preserved (a failed group fsync fails every member of the group
+whose frames that fsync did not cover), and the in-memory state is applied
+strictly in WAL sequence order, so isolation is preserved (the
 group-commit measurements are in
 [docs/benchmarks/v0.3.1.md](benchmarks/v0.3.1.md)). Every store is a typed store
 on the v3 commit path; the legacy v1
@@ -55,15 +73,29 @@ fmt-codec write path was removed (see "WAL payload schema" below), so
 there is no non-durable, non-atomic per-op framing left in the module.
 
 `Tx.Rollback` neither writes to the WAL nor mutates the graph;
-nothing is durable, nothing is visible, mutex released.
+nothing is durable, nothing is visible, and the writer deregisters.
 
 ## Transaction isolation
 
-`Store` holds a single `sync.Mutex` taken by `Begin` and released
-by `Commit`/`Rollback`. The transactional layer is therefore
-**single-writer / multi-reader**: reads on the underlying graph go
-straight through `csr.CSR` / `adjlist.AdjList` which are lock-free
-on the read path, while writes serialise.
+**Writes do not serialise.** Since rmp #2306 the transactional layer's
+concurrency control is MVCC and nothing else: `Begin`/`BeginCtx` register the
+transaction as an admitted writer and `Commit`/`Rollback` deregister it, but the
+registration excludes no other writer. A write-write collision between two
+transactions is DETECTED at commit by first-updater-wins on the version chain and
+reported as a serialization conflict, rather than prevented by a lock. The
+registration exists for one purpose: a quiesce
+(`txn.Store.RunUnderCommitLock`) closes the admission gate and drains the
+admitted writers to zero, which is what lets `store.DB.Close` and the
+checkpointer touch the WAL with no commit in flight.
+
+Reads are unaffected and remain lock-free: they go straight through `csr.CSR` /
+`adjlist.AdjList`.
+
+This replaced a capacity-one semaphore that made the layer single-writer. Retiring
+it was throughput-neutral — it was released after the WAL append and never covered
+the coalesced fsync that dominates a durable commit — so its removal is an
+architectural correction rather than an optimisation. See
+[benchmarks/store-semaphore-retirement-2026-08-04.md](benchmarks/store-semaphore-retirement-2026-08-04.md).
 
 ## File layout on disk
 
@@ -110,11 +142,28 @@ for a new record version.
 A **v3** payload is `version(0xFD) | kind | uint64 txnSeq (LE) | <v2 body>`.
 The body after `txnSeq` is byte-identical to the v2 body for that kind, so
 recovery reuses the v2 body walk. The `txnSeq` groups a transaction's frames;
-the trailing `OpCommit` marker (`version | OpCommit | txnSeq`, no body) is the
-atomicity boundary — recovery applies a v3 transaction's buffered ops only on
-reading its durable marker (see the Durability contract above). Typed stores
-emit v3; v2 frames remain fully readable so existing on-disk WALs replay
-unchanged.
+the trailing `OpCommit` marker is the atomicity boundary — recovery applies a
+v3 transaction's buffered ops only on reading its durable marker (see the
+Durability contract above). Typed stores emit v3; v2 frames remain fully
+readable so existing on-disk WALs replay unchanged.
+
+The `OpCommit` marker is `version | OpCommit | uint64 txnSeq | uint64 commitTS`,
+all little-endian. `commitTS` is the **MVCC instant at which the transaction
+becomes visible**, and it is what lets recovery **derive** the MVCC clock from
+the WAL instead of trusting a persisted counter — the shape InnoDB and Memgraph
+both settled on after removing theirs (see
+[`design-mvcc-clock-recovery.md`](design-mvcc-clock-recovery.md)). It is zero for
+a writer with no MVCC clock, which is the store's own `Tx.Commit` path.
+
+**No format bump was needed, and that was verified rather than assumed.** The
+frame header is `magic | version | length | crc32c`, so it carries no per-record
+shape, and the marker's body was previously empty and ignored by the replay
+state machine. So an **older reader** ignores the extra eight bytes, and a
+**newer reader on an older file** sees an empty body and contributes nothing to
+the derived maximum. The compatibility policy is therefore *"absent body means
+no timestamp"* — a test obligation (`recovery.Op.CommitTS` reports presence
+separately from value) rather than a version negotiation. Neither
+`wal.CurrentVersion` nor `txn.OpRecordV3` changed.
 
 | `OpKind`              | Value | Mutation                                          |
 |-----------------------|-------|---------------------------------------------------|
@@ -462,6 +511,23 @@ A v3 manifest is a v2 manifest with an extra `mapper.bin` entry in
 is present; the writer stamps `2` for non-string-keyed snapshots that
 omit the mapper. `snapshot/csr.bin`, `labels.bin`, and
 `properties.bin` are byte-identical across v2 and v3.
+
+**`commit_ts` (optional).** A manifest written from a graph with an MVCC clock
+also carries `"commit_ts": <uint64>` — the **MVCC instant the image was captured
+at**. Recovery seeds the derived clock floor from it and then folds the WAL's
+maximum on top, so a reopened graph never re-mints an instant the image already
+contains (see [`design-mvcc-clock-recovery.md`](design-mvcc-clock-recovery.md)).
+It is the quantity Memgraph reads back as `info.start_timestamp`.
+
+This is the half of the derivation that matters in a checkpointed directory: a
+checkpoint truncates the WAL prefix, so the instants of everything the image
+folded are no longer in the log at all.
+
+**No version bump.** The manifest is JSON, so an older reader ignores the field
+and a newer reader on an older manifest decodes zero — the same *"absent means no
+timestamp"* policy the `OpCommit` body uses. `omitempty` keeps a manifest with no
+instant (the legacy CSR-only writer, which has no graph in hand, and any
+non-MVCC graph) byte-identical to what previous builds wrote.
 
 ### `snapshot/csr.bin` (binary, identical across v1, v2 and v3)
 
@@ -941,11 +1007,13 @@ signal — a goroutine leak. The correct order makes both impossible: the
 loop is gone before the WAL is touched for the last time.
 
 Quiescing writers is a **separate** responsibility and comes first: a
-`txn.Store` transaction holds the store's single-writer semaphore from
-`Begin` until `Commit`/`Rollback`, and a `cypher.Engine` write holds it
-for the statement's duration. The shutdown sequence must stop admitting
-new writes and let the active one finish **before** step 2, so no
-transaction is mid-commit when the WAL is closed.
+`txn.Store` transaction is a registered writer from `Begin` until
+`Commit`/`Rollback`, and a `cypher.Engine` write registers for the
+statement's duration. Registration does not exclude other writers — since
+rmp #2306 concurrency control is MVCC alone — but it is exactly what a
+quiesce drains. The shutdown sequence must close the admission gate and
+let every admitted writer finish **before** step 2, so no transaction is
+mid-commit when the WAL is closed.
 
 ### `store.DB` — the composed owner
 

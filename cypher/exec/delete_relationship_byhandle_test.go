@@ -39,19 +39,16 @@ func TestDeleteRelationship_ByHandle_RemovesBoundInstance(t *testing.T) {
 		t.Fatalf("seed h2: %v", err)
 	}
 
-	// Bind forward-CSR edge position 7 → h2 (the second instance).
-	mut.handleAt = func(src, dst string, edgePos uint64) uint64 {
-		if src == "a" && dst == "b" && edgePos == 7 {
-			return h2
-		}
-		return 0
-	}
-
-	// r at column 0 (a post-projection RelationshipValue); endpoints and the
-	// forward-CSR edge position at columns 1..3, matching a WithRelCols wiring.
+	// The row BINDS h2 directly: since rmp #2317 the identity column carries the
+	// stable handle, so there is no position to resolve and no resolver to wire.
+	// The instance a DELETE retires is the one the row names, not the one a
+	// per-query CSR snapshot happens to map a position onto.
+	//
+	// r at column 0 (a post-projection RelationshipValue); endpoints and the edge
+	// identity at columns 1..3, matching a WithRelCols wiring.
 	schema := map[string]int{"r": 0}
 	rel := expr.RelationshipValue{StartID: uint64(aID), EndID: uint64(bID), Type: "T2"}
-	row := exec.Row{rel, expr.IntegerValue(aID), expr.IntegerValue(bID), expr.IntegerValue(7)}
+	row := exec.Row{rel, expr.IntegerValue(aID), expr.IntegerValue(bID), expr.IntegerValue(int64(h2))}
 	src := newSliceOperator(row)
 	op := exec.NewDeleteRelationship("r", schema, src, mut).
 		WithRelCols(exec.RelCols{SrcCol: 1, DstCol: 2, EdgeCol: 3})

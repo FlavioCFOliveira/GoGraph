@@ -209,8 +209,8 @@ const maxRegistryCaptureRetries = 8
 // nothing written or truncated — the identical fail-safe posture
 // [Checkpointer.truncatePrefixLocked] uses for a schema DDL racing phase 2,
 // #1774), never a Consistency violation.
-func WriteLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int64, crc uint32, err error) {
-	return writeLabels(w, g, snapshotRegistry)
+func WriteLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], at *lpg.Snapshot) (size int64, crc uint32, err error) {
+	return writeLabels(w, g, at, snapshotRegistry)
 }
 
 // writeLabels is the seam-injected body of [WriteLabels]. snapReg captures the
@@ -222,7 +222,7 @@ func WriteLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int
 // and safe for concurrent independent calls as the code it replaced.
 //
 //nolint:gocyclo // labels write: header + string table + node records + edge records, each guarded
-func writeLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], snapReg func(*lpg.LabelRegistry) []string) (size int64, crc uint32, err error) {
+func writeLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], at *lpg.Snapshot, snapReg func(*lpg.LabelRegistry) []string) (size int64, crc uint32, err error) {
 	defer metrics.Time("store.snapshot.WriteLabels").Stop()
 
 	bw := bufio.NewWriterSize(w, 1<<20)
@@ -287,9 +287,9 @@ func writeLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], snapReg f
 			break
 		}
 		var cerr error
-		nodeRecs, cerr = collectNodeLabelRecords(g, names)
+		nodeRecs, cerr = collectNodeLabelRecords(g, at, names)
 		if cerr == nil {
-			edgeRecs, cerr = collectEdgeLabelRecords(g, names)
+			edgeRecs, cerr = collectEdgeLabelRecords(g, at, names)
 		}
 		if cerr == nil {
 			break
@@ -467,6 +467,7 @@ func distinctDestinationsSorted(
 // (#1648 — see [collectInternedNodeIDs]).
 func collectNodeLabelRecords[N comparable, W any](
 	g *lpg.Graph[N, W],
+	at *lpg.Snapshot,
 	names []string,
 ) ([]NodeLabelEntry, error) {
 	idx := buildNameIndex(names)
@@ -490,7 +491,7 @@ func collectNodeLabelRecords[N comparable, W any](
 	}
 	for _, id := range collectInternedNodeIDs(g) {
 		curNodeID = uint64(id)
-		g.ForEachNodeLabelByID(id, visit)
+		g.ForEachNodeLabelByIDAsOf(id, at, visit)
 		if visitErr != nil {
 			return nil, visitErr
 		}
@@ -528,6 +529,7 @@ func collectNodeLabelRecords[N comparable, W any](
 // the Walk callback (#1648 — see [collectInternedNodeIDs]).
 func collectEdgeLabelRecords[N comparable, W any](
 	g *lpg.Graph[N, W],
+	at *lpg.Snapshot,
 	names []string,
 ) ([]EdgeLabelEntry, error) {
 	idx := buildNameIndex(names)
@@ -580,11 +582,11 @@ func collectEdgeLabelRecords[N comparable, W any](
 		dsts = distinctDestinationsSorted(neighbours, seen, dsts)
 		for _, dstID := range dsts {
 			curDst = uint64(dstID)
-			g.ForEachPairSlotRelTypeByID(srcID, dstID, visitSlot)
+			g.ForEachPairSlotRelTypeByIDAsOf(srcID, dstID, at, visitSlot)
 			if visitErr != nil {
 				return nil, visitErr
 			}
-			g.ForEachPairOverflowRelTypeByID(srcID, dstID, visitOverflow)
+			g.ForEachPairOverflowRelTypeByIDAsOf(srcID, dstID, at, visitOverflow)
 			if visitErr != nil {
 				return nil, visitErr
 			}

@@ -332,7 +332,7 @@ func TestWriteProperties_WriterFailure(t *testing.T) {
 		t.Fatalf("SetNodeProperty: %v", err)
 	}
 	w := errWriter{err: errors.New("write boom")}
-	_, _, err := WriteProperties(w, g)
+	_, _, err := WriteProperties(w, g, nil)
 	if err == nil {
 		t.Fatal("WriteProperties on a failing writer must return an error")
 	}
@@ -355,7 +355,7 @@ func TestWriteProperties_FlushFailure(t *testing.T) {
 		}
 	}
 	w := &partialWriter{n: 0, err: errors.New("flush boom")}
-	_, _, err := WriteProperties(w, g)
+	_, _, err := WriteProperties(w, g, nil)
 	if err == nil {
 		t.Fatal("WriteProperties must surface the underlying writer's failure")
 	}

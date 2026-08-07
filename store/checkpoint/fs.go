@@ -29,10 +29,12 @@ import (
 type snapshotBackend[N comparable, W any] interface {
 	// CaptureGraph serialises every live-graph-derived snapshot component of g
 	// into an atomic in-memory image, emitting mapper.bin via codec (nil
-	// selects the string-only mapper). The checkpointer calls it in phase 1,
-	// UNDER the commit serialisation and inside [lpg.Graph.View], so the image
-	// is a single transaction-boundary instant.
-	CaptureGraph(cs *csr.CSR[W], g *lpg.Graph[N, W], codec txn.Codec[N]) (*snapshot.Capture[W], error)
+	// selects the string-only mapper). at is the MVCC instant every component is
+	// resolved at: the checkpointer opens it in phase 1 under the commit
+	// serialisation and calls this in phase 1b with the lock RELEASED, so the
+	// image is a single transaction-boundary instant while writers commit
+	// throughout (rmp #2310).
+	CaptureGraph(cs *csr.CSR[W], g *lpg.Graph[N, W], codec txn.Codec[N], at *lpg.Snapshot) (*snapshot.Capture[W], error)
 	// WriteCapture publishes a capture taken by CaptureGraph to snapDir, adding
 	// constraints.bin from constraints (nil/empty emits none) and indexdefs.bin
 	// from indexDefs (nil/empty emits none). It touches no graph, so the
@@ -49,13 +51,13 @@ type snapshotBackend[N comparable, W any] interface {
 // the manifest read are byte-identical to the pre-seam checkpointer.
 type osSnapshotBackend[N comparable, W any] struct{}
 
-func (osSnapshotBackend[N, W]) CaptureGraph(cs *csr.CSR[W], g *lpg.Graph[N, W], codec txn.Codec[N]) (*snapshot.Capture[W], error) {
+func (osSnapshotBackend[N, W]) CaptureGraph(cs *csr.CSR[W], g *lpg.Graph[N, W], codec txn.Codec[N], at *lpg.Snapshot) (*snapshot.Capture[W], error) {
 	if codec != nil {
-		return snapshot.CaptureGraph[N, W](g, cs, codec)
+		return snapshot.CaptureGraph[N, W](g, cs, codec, at)
 	}
 	// No codec: mapper.bin is emitted for string-keyed graphs only, keeping the
 	// historical v2 fallback for every other key type.
-	return snapshot.CaptureGraph[N, W](g, cs, nil)
+	return snapshot.CaptureGraph[N, W](g, cs, nil, at)
 }
 
 func (osSnapshotBackend[N, W]) WriteCapture(snapDir string, capt *snapshot.Capture[W], constraints []snapshot.ConstraintSpec, indexDefs []snapshot.IndexDefSpec) error {

@@ -46,7 +46,7 @@ func TestEdgeHandles_RoundTrip(t *testing.T) {
 	g.SetEdgeLabelByHandle("x", "y", h2, "CALLS")
 
 	var buf bytes.Buffer
-	_, _, emitted, err := WriteEdgeHandles(&buf, g)
+	_, _, emitted, err := WriteEdgeHandles(&buf, g, nil)
 	if err != nil {
 		t.Fatalf("WriteEdgeHandles: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestEdgeHandles_EmptyGraphOmitsComponent(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	_, _, emitted, err := WriteEdgeHandles(&buf, g)
+	_, _, emitted, err := WriteEdgeHandles(&buf, g, nil)
 	if err != nil {
 		t.Fatalf("WriteEdgeHandles: %v", err)
 	}
@@ -163,28 +163,37 @@ func TestCSR_HandleColumn_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestCSR_NoHandleColumn_ByteCompatible confirms a handle-less CSR writes no
-// trailing handle block — the byte layout matches the pre-Stage-2 format, so
-// the v1 golden and cross-process byte-equality fixtures are unaffected.
+// TestCSR_NoHandleColumn_ByteCompatible confirms a CSR with no handle column
+// writes no trailing handle block — the byte layout matches the pre-Stage-2
+// format, so the v1 golden and cross-process byte-equality fixtures are
+// unaffected, and a legacy artefact still reads back with nil handles.
+//
+// # It builds the CSR directly rather than from an adjacency (rmp #2317)
+//
+// It used to build the CSR from an adjlist populated with plain AddEdge, on the
+// premise that such a graph carries no handles. Every slot now carries one, so
+// that route can no longer produce a handle-less CSR — but the FORMAT's
+// handle-less branch is still live, because it is what reads an artefact written
+// before handles existed. csr.FromArrays constructs exactly that shape, which
+// tests the property the format actually has to keep rather than a property of
+// how a graph happens to be built.
 func TestCSR_NoHandleColumn_ByteCompatible(t *testing.T) {
 	t.Parallel()
-	a := adjlist.New[string, int64](adjlist.Config{Directed: true})
-	if err := a.AddEdge("a", "b", 1); err != nil {
-		t.Fatal(err)
-	}
-	cs := csr.BuildFromAdjList(a)
+	// One arc 0->1, no handle column.
+	cs := csr.FromArrays[int64](
+		[]uint64{0, 1, 1},
+		[]graph.NodeID{1},
+		[]int64{1},
+		2, 1,
+	)
 	if cs.HandlesSlice() != nil {
-		t.Fatal("handle-less graph produced a CSR handle column")
+		t.Fatal("FromArrays synthesised a handle column")
 	}
 	var buf bytes.Buffer
 	size, _, err := WriteCSR(&buf, cs)
 	if err != nil {
 		t.Fatalf("WriteCSR: %v", err)
 	}
-	// Header (18) + 1 vertex offset slot (8 per vertex; one src 'a') + edges +
-	// weights. The exact value is not the point; the point is that the
-	// reported size equals the buffer length AND no trailing handle flag byte
-	// was written (the reader returns nil handles).
 	if int64(buf.Len()) != size {
 		t.Fatalf("WriteCSR size %d != buffer len %d", size, buf.Len())
 	}

@@ -35,7 +35,19 @@ import (
 // touched-node recording is skipped entirely on the common path. See
 // constraint_check.go.
 type mutationUndo struct {
-	g       *lpg.Graph[string, float64]
+	// wv is the graph bound to the write transaction the statement is running as
+	// (rmp #2320). The inverses below MUTATE, and they run while the failing
+	// statement's bracket is still open, so they must be charged to that
+	// statement's transaction: an inverse that resolved its commit record through
+	// the graph's ambient slot would put the rollback of one statement onto a
+	// CONCURRENT writer's commit record, publishing it at that writer's instant.
+	// The forward mutation and its inverse must land on ONE record — that is what
+	// makes the chain net out to the original value for a reader from before the
+	// statement (see graph/lpg/mvcc_txn.go, "they compose").
+	//
+	// Read-side helpers reach the graph through wv.Graph(); the capture paths below
+	// are reads and use it.
+	wv      lpg.WriteView[string, float64]
 	undo    *undoLog
 	touched *touchedNodes
 }
@@ -73,8 +85,8 @@ func (m mutationUndo) recordAddNode(n string, wasNew bool) {
 		return
 	}
 	m.undo.record(func() {
-		m.g.RemoveNode(n)
-		m.g.DecrNodesAdded()
+		m.wv.RemoveNode(n)
+		m.wv.Graph().DecrNodesAdded()
 	})
 }
 
@@ -101,15 +113,15 @@ func (m mutationUndo) recordAddEdge(src, dst string, srcNew, dstNew bool) {
 	}
 	selfLoop := src == dst
 	m.undo.record(func() {
-		m.g.RemoveEdge(src, dst)
-		m.g.DecrEdgesAdded()
+		m.wv.RemoveEdge(src, dst)
+		m.wv.Graph().DecrEdgesAdded()
 		if srcNew {
-			m.g.RemoveNode(src)
-			m.g.DecrNodesAdded()
+			m.wv.RemoveNode(src)
+			m.wv.Graph().DecrNodesAdded()
 		}
 		if dstNew && !selfLoop {
-			m.g.RemoveNode(dst)
-			m.g.DecrNodesAdded()
+			m.wv.RemoveNode(dst)
+			m.wv.Graph().DecrNodesAdded()
 		}
 	})
 }
@@ -130,7 +142,7 @@ func (m mutationUndo) recordSetNodeLabel(n, label string, hadLabel bool) {
 	if !m.active() {
 		return
 	}
-	m.undo.record(func() { m.g.RemoveNodeLabel(n, label) })
+	m.undo.record(func() { m.wv.RemoveNodeLabel(n, label) })
 }
 
 // recordRemoveNodeLabel records the inverse of detaching label from n. hadLabel
@@ -141,7 +153,7 @@ func (m mutationUndo) recordRemoveNodeLabel(n, label string, hadLabel bool) {
 	if !m.active() || !hadLabel {
 		return
 	}
-	m.undo.record(func() { _ = m.g.SetNodeLabel(n, label) })
+	m.undo.record(func() { _ = m.wv.SetNodeLabel(n, label) })
 }
 
 // recordRemoveNode records the inverse of tombstoning the live node n: revive
@@ -156,8 +168,8 @@ func (m mutationUndo) recordRemoveNode(n string, wasLive bool) {
 		return
 	}
 	m.undo.record(func() {
-		m.g.Revive(n)
-		m.g.DecrNodesRemoved()
+		m.wv.Revive(n)
+		m.wv.Graph().DecrNodesRemoved()
 	})
 }
 
@@ -171,9 +183,9 @@ func (m mutationUndo) recordSetNodeProperty(n, key string, prev lpg.PropertyValu
 	}
 	m.undo.record(func() {
 		if had {
-			_ = m.g.SetNodeProperty(n, key, prev)
+			_ = m.wv.SetNodeProperty(n, key, prev)
 		} else {
-			m.g.DelNodeProperty(n, key)
+			m.wv.DelNodeProperty(n, key)
 		}
 	})
 }
@@ -193,7 +205,7 @@ func (m mutationUndo) recordDelNodeProperty(n, key string, prev lpg.PropertyValu
 	if !m.active() {
 		return
 	}
-	m.undo.record(func() { _ = m.g.SetNodeProperty(n, key, prev) })
+	m.undo.record(func() { _ = m.wv.SetNodeProperty(n, key, prev) })
 }
 
 // recordSetEdgeLabel records the inverse of attaching label to edge (src, dst).
@@ -205,7 +217,7 @@ func (m mutationUndo) recordSetEdgeLabel(src, dst, label string, hadLabel bool) 
 	if !m.active() || hadLabel {
 		return
 	}
-	m.undo.record(func() { m.g.RemoveEdgeLabel(src, dst, label) })
+	m.undo.record(func() { m.wv.RemoveEdgeLabel(src, dst, label) })
 }
 
 // recordSetEdgeProperty records the inverse of SetEdgeProperty(src, dst, key, …)
@@ -216,9 +228,9 @@ func (m mutationUndo) recordSetEdgeProperty(src, dst, key string, prev lpg.Prope
 	}
 	m.undo.record(func() {
 		if had {
-			_ = m.g.SetEdgeProperty(src, dst, key, prev)
+			_ = m.wv.SetEdgeProperty(src, dst, key, prev)
 		} else {
-			m.g.DelEdgeProperty(src, dst, key)
+			m.wv.DelEdgeProperty(src, dst, key)
 		}
 	})
 }
@@ -229,7 +241,7 @@ func (m mutationUndo) recordDelEdgeProperty(src, dst, key string, prev lpg.Prope
 	if !m.active() || !had {
 		return
 	}
-	m.undo.record(func() { _ = m.g.SetEdgeProperty(src, dst, key, prev) })
+	m.undo.record(func() { _ = m.wv.SetEdgeProperty(src, dst, key, prev) })
 }
 
 // recordSetEdgePropertyByHandle records the inverse of
@@ -253,9 +265,9 @@ func (m mutationUndo) recordSetEdgePropertyByHandle(src, dst string, handle uint
 	}
 	m.undo.record(func() {
 		if had {
-			_ = m.g.SetEdgePropertyByHandle(src, dst, handle, key, prev)
+			_ = m.wv.SetEdgePropertyByHandle(src, dst, handle, key, prev)
 		} else {
-			m.g.DelEdgePropertyByHandle(src, dst, handle, key)
+			m.wv.DelEdgePropertyByHandle(src, dst, handle, key)
 		}
 	})
 }
@@ -269,7 +281,7 @@ func (m mutationUndo) recordDelEdgePropertyByHandle(src, dst string, handle uint
 	if !m.active() || handle == 0 || !had {
 		return
 	}
-	m.undo.record(func() { _ = m.g.SetEdgePropertyByHandle(src, dst, handle, key, prev) })
+	m.undo.record(func() { _ = m.wv.SetEdgePropertyByHandle(src, dst, handle, key, prev) })
 }
 
 // recordIncEdgeCreateCount records the inverse of bumping the CREATE-multiplicity
@@ -280,7 +292,7 @@ func (m mutationUndo) recordIncEdgeCreateCount(src, dst string) {
 	if !m.active() {
 		return
 	}
-	m.undo.record(func() { m.g.DecEdgeCreateCount(src, dst) })
+	m.undo.record(func() { m.wv.Graph().DecEdgeCreateCount(src, dst) })
 }
 
 // recordDecEdgeCreateCount records the inverse of decrementing the CREATE-
@@ -290,7 +302,7 @@ func (m mutationUndo) recordDecEdgeCreateCount(src, dst string, had bool) {
 	if !m.active() || !had {
 		return
 	}
-	m.undo.record(func() { m.g.IncEdgeCreateCount(src, dst) })
+	m.undo.record(func() { m.wv.Graph().IncEdgeCreateCount(src, dst) })
 }
 
 // removedEdgePreimage captures the state of an edge the statement is about to
@@ -348,7 +360,7 @@ func (m mutationUndo) captureRemovedEdge(src, dst string) removedEdgePreimage {
 	// The FIRST src→dst slot is the one [Graph.RemoveEdge] drops; capture its
 	// handle so the by-handle capture path below records the exact instance.
 	var handle uint64
-	if h, ok := m.g.FirstEdgeHandle(src, dst); ok {
+	if h, ok := m.wv.Graph().FirstEdgeHandle(src, dst); ok {
 		handle = h
 	}
 	return m.captureRemovedEdgeH(src, dst, handle)
@@ -382,23 +394,23 @@ func (m mutationUndo) captureRemovedEdgeByHandle(src, dst string, handle uint64)
 // re-added instance's weight is exact for the engine's only caller.
 func (m mutationUndo) captureRemovedEdgeH(src, dst string, handle uint64) removedEdgePreimage {
 	pre := removedEdgePreimage{src: src, dst: dst}
-	if !m.g.AdjList().HasEdge(src, dst) {
+	if !m.wv.Graph().AdjList().HasEdge(src, dst) {
 		return pre
 	}
 	pre.hadEdge = true
-	if w, ok := m.g.EdgeWeight(src, dst); ok {
+	if w, ok := m.wv.Graph().EdgeWeight(src, dst); ok {
 		pre.weight = w
 	}
-	pre.labels = m.g.EdgeLabels(src, dst)
-	pre.props = m.g.EdgeProperties(src, dst)
-	pre.createCount = m.g.EdgeCreateCount(src, dst)
+	pre.labels = m.wv.Graph().EdgeLabels(src, dst)
+	pre.props = m.wv.Graph().EdgeProperties(src, dst)
+	pre.createCount = m.wv.Graph().EdgeCreateCount(src, dst)
 	// When the removed instance carries a stable handle, snapshot that handle's
 	// per-instance labels and properties so the inverse re-adds the instance
 	// with its own metadata even if the removal cleared the handle store.
 	if handle != 0 {
 		pre.handle = handle
-		pre.handleLabels = m.g.EdgeLabelsByHandle(src, dst, handle)
-		pre.handleProps = m.g.EdgePropertiesByHandle(src, dst, handle)
+		pre.handleLabels = m.wv.Graph().EdgeLabelsByHandle(src, dst, handle)
+		pre.handleProps = m.wv.Graph().EdgePropertiesByHandle(src, dst, handle)
 	}
 	return pre
 }
@@ -423,30 +435,30 @@ func (m mutationUndo) recordRemoveEdge(pre *removedEdgePreimage, wasPresent bool
 		// its stable identity — the adjacency slot would otherwise come back
 		// with the 0 sentinel and the handle-keyed read path would mis-map it
 		// to a surviving sibling. A 0 handle falls back to a plain AddEdge.
-		_, _ = m.g.AddEdgeHIfAbsent(pre.src, pre.dst, pre.weight, pre.handle)
-		m.g.DecrEdgesRemoved()
+		_, _ = m.wv.AddEdgeHIfAbsent(pre.src, pre.dst, pre.weight, pre.handle)
+		m.wv.Graph().DecrEdgesRemoved()
 		for _, lbl := range pre.labels {
-			m.g.SetEdgeLabel(pre.src, pre.dst, lbl)
+			m.wv.SetEdgeLabel(pre.src, pre.dst, lbl)
 		}
 		for k, v := range pre.props {
-			_ = m.g.SetEdgeProperty(pre.src, pre.dst, k, v)
+			_ = m.wv.SetEdgeProperty(pre.src, pre.dst, k, v)
 		}
 		// Re-assert the removed instance's per-handle labels and properties.
 		// Idempotent when the handle store survived the removal (the common
 		// case: RemoveEdge keeps it while a sibling survives); authoritative
 		// when it did not. No-op when handle is 0.
 		for _, lbl := range pre.handleLabels {
-			m.g.SetEdgeLabelByHandle(pre.src, pre.dst, pre.handle, lbl)
+			m.wv.SetEdgeLabelByHandle(pre.src, pre.dst, pre.handle, lbl)
 		}
 		for k, v := range pre.handleProps {
 			// Restoring a value that passed validation at the original write; ignore the error.
-			_ = m.g.SetEdgePropertyByHandle(pre.src, pre.dst, pre.handle, k, v)
+			_ = m.wv.SetEdgePropertyByHandle(pre.src, pre.dst, pre.handle, k, v)
 		}
 		// Restore the CREATE-multiplicity counter to its captured value. The
 		// re-add above does not touch the counter (only IncEdgeCreateCount does),
 		// so set it explicitly by replaying the delta from its current value.
-		for c := m.g.EdgeCreateCount(pre.src, pre.dst); c < pre.createCount; c++ {
-			m.g.IncEdgeCreateCount(pre.src, pre.dst)
+		for c := m.wv.Graph().EdgeCreateCount(pre.src, pre.dst); c < pre.createCount; c++ {
+			m.wv.Graph().IncEdgeCreateCount(pre.src, pre.dst)
 		}
 	})
 }

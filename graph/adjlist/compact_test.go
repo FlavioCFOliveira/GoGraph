@@ -88,9 +88,14 @@ func TestCompact_TrimsSlack(t *testing.T) {
 	}
 }
 
-// TestCompact_PreservesNilColumns confirms a label-free / handle-free graph
-// keeps its optional columns nil after Compact (no zero-length slice gained),
-// so downstream nil checks behave identically.
+// TestCompact_PreservesNilColumns confirms a label-free graph keeps its optional
+// LABEL column nil after Compact (no zero-length slice gained), so downstream nil
+// checks behave identically, and that Compact preserves every slot's handle.
+//
+// The handle column is no longer optional (rmp #2317): every slot carries an
+// identity, so Compact must carry it through rather than leave it nil. That the
+// identities SURVIVE compaction is the point — compaction is the operation that
+// shifts ordinals, which is why a position could never be an identity.
 func TestCompact_PreservesNilColumns(t *testing.T) {
 	t.Parallel()
 	a := New[int, int](Config{Directed: true, Multigraph: true})
@@ -104,8 +109,13 @@ func TestCompact_PreservesNilColumns(t *testing.T) {
 	if post == nil {
 		t.Fatal("Compact dropped the entry for node 0")
 	}
-	if post.handles != nil {
-		t.Errorf("handles = %v, want nil (handle-free graph)", post.handles)
+	if len(post.handles) != len(post.neighbours) {
+		t.Errorf("handles = %v, want one entry per slot (%d)", post.handles, len(post.neighbours))
+	}
+	for i, h := range post.handles {
+		if h == 0 {
+			t.Errorf("handles[%d] = 0 after Compact: every slot must keep its identity", i)
+		}
 	}
 	if post.labels != nil {
 		t.Errorf("labels = %v, want nil (label-free graph)", post.labels)

@@ -30,7 +30,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 )
 
-// biCSR is a minimal [csrAdjacency] for these tests. The shared test helpers
+// biCSR is a minimal [CSRAdjacency] for these tests. The shared test helpers
 // live in package exec_test and are unreachable from here, and reaching the
 // forward-only reference implementation requires being inside package exec — so
 // this file carries its own small builders rather than exporting a seam purely
@@ -195,16 +195,17 @@ func biOperator(t *testing.T, g biTestGraph, dir Direction) *ShortestPath {
 // biOperatorFiltered builds an initialised ShortestPath over an explicit CSR
 // pair, optionally with a relationship-type filter.
 //
-// The filter is applied BEFORE Init, as the planner does (buildShortestPath
-// chains WithTypeFilter onto the constructor and the pipeline Inits later).
-// Order is load-bearing: Init is where the reverse-position admit bitset is
-// built, so a filter attached afterwards would leave the operator unable to run a
-// typed two-sided search.
+// The filter reaches the operator through its [AdjacencySource], which Init
+// resolves before it builds the reverse-position admit bitset (rmp #2317). That
+// ordering used to be the CALLER's obligation — WithTypeFilter had to be chained
+// on before Init or the operator could not run a typed two-sided search — and is
+// now structural, because the filter and the adjacency it is keyed to arrive
+// together at the one point that needs them.
 func biOperatorFiltered(t *testing.T, fwd, rev *biCSR, dir Direction, edgeType string, filter map[uint64]string) *ShortestPath {
 	t.Helper()
-	op := NewShortestPath(biNoInput{}, fwd, rev, dir, 0, 1)
+	op := NewShortestPath(biNoInput{}, StaticAdjacency(fwd, rev, filter), dir, 0, 1)
 	if edgeType != "" {
-		op.WithTypeFilter(edgeType, filter)
+		op.WithTypeFilter(edgeType)
 	}
 	if err := op.Init(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -321,6 +322,25 @@ func pathLen(v expr.Value) int {
 // This is the half of the comparison a length check cannot do. It is written
 // against the graph rather than against the other algorithm, so it stays a valid
 // oracle even if both algorithms were wrong in the same way.
+// slotOfEmittedID maps an emitted relationship identity back to the forward-CSR
+// slot it names: the handle's slot when the fixture carries a handle column, and
+// the id itself when it does not (the handle-less fallback [Expand.emittedEdgeID]
+// documents).
+func slotOfEmittedID(fwd *biCSR, edgeID uint64) (uint64, bool) {
+	if len(fwd.handles) == 0 {
+		if edgeID >= uint64(len(fwd.edges)) {
+			return 0, false
+		}
+		return edgeID, true
+	}
+	for pos, h := range fwd.handles {
+		if h == edgeID {
+			return uint64(pos), true
+		}
+	}
+	return 0, false
+}
+
 func validatePath(t *testing.T, fwd *biCSR, v expr.Value, src, dst uint64, admits func(int) bool) {
 	t.Helper()
 	lv, ok := v.(expr.ListValue)
@@ -334,12 +354,17 @@ func validatePath(t *testing.T, fwd *biCSR, v expr.Value, src, dst uint64, admit
 	seen := map[uint64]struct{}{}
 	hops := (len(lv) - 1) / VLEHopStride
 	for i := 0; i < hops; i++ {
-		fwdPos := uint64(lv[1+VLEHopStride*i].(expr.IntegerValue))
+		// The hop carries the EMITTED relationship identity, which since rmp #2317
+		// is the stable HANDLE rather than a forward-CSR position. Resolve it back
+		// to the slot it names, exactly as production does, so the structural checks
+		// below still reason about the real arc.
+		edgeID := uint64(lv[1+VLEHopStride*i].(expr.IntegerValue))
 		next := uint64(lv[2+VLEHopStride*i].(expr.IntegerValue))
 		dir := int64(lv[3+VLEHopStride*i].(expr.IntegerValue))
 
-		if fwdPos >= uint64(len(fwd.edges)) {
-			t.Fatalf("hop %d: forward position %d out of range", i, fwdPos)
+		fwdPos, resolved := slotOfEmittedID(fwd, edgeID)
+		if !resolved {
+			t.Fatalf("hop %d: emitted edge id %d names no slot of the forward CSR", i, edgeID)
 		}
 		// Recover the edge the forward position denotes: its source is the vertex
 		// whose CSR range contains fwdPos, its destination is fwd.edges[fwdPos].
@@ -702,7 +727,7 @@ func TestBiBFS_FallsBackWithoutAUsableReverseCSR(t *testing.T) {
 	fwd := buildCSRWithHandles(4, [][2]int{{0, 1}, {1, 2}, {2, 3}})
 	placeholder := buildCSRWithHandles(4, nil)
 
-	op := NewShortestPath(biNoInput{}, fwd, placeholder, DirOut, 0, 1)
+	op := NewShortestPath(biNoInput{}, StaticAdjacency(fwd, placeholder, nil), DirOut, 0, 1)
 	if err := op.Init(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
 	}

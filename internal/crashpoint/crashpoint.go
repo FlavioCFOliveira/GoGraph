@@ -43,6 +43,20 @@ const EnvCrashAt = "GOGRAPH_CRASH_AT"
 // where to place its artefacts (WAL files, temp data).
 const EnvCrashDir = "GOGRAPH_CRASH_DIR"
 
+// EnvCrashAfter is the environment variable that delays the self-kill by a
+// number of matching [Breakpoint] hits: with GOGRAPH_CRASH_AFTER=n the first n
+// hits of the named point return normally and the (n+1)th kills. Unset, empty,
+// malformed, or negative means "kill on the first hit" — the behaviour every
+// scenario written before the countdown existed relies on.
+//
+// It exists because a breakpoint on a hot durability path is reached by the
+// very first commit a process makes, where a crash is vacuous: nothing has
+// been acknowledged, so there is nothing whose survival could be checked. See
+// [Breakpoint] for the reasoning and the prior art.
+//
+// Without the gograph_crashinject build tag this variable is never read.
+const EnvCrashAfter = "GOGRAPH_CRASH_AFTER"
+
 // Breakpoint is the crash-injection hook embedded in production
 // durability paths (for example store/wal.Writer.Truncate and
 // store/checkpoint). Its behaviour is selected at compile time:

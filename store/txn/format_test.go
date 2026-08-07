@@ -88,7 +88,7 @@ func TestEncodeScratchPool_ReuseNoContamination(t *testing.T) {
 		}
 		want = append(want, b)
 	}
-	want = append(want, encodeCommitV3(seq))
+	want = append(want, encodeCommitV3(seq, 0))
 
 	// Subject: one pooled scratch reused across the sequence, copying each
 	// frame out immediately (as wal.Append does) before reuse.
@@ -103,7 +103,7 @@ func TestEncodeScratchPool_ReuseNoContamination(t *testing.T) {
 		*scratch = payload
 		got = append(got, append([]byte(nil), payload...)) // copy, mirroring Append
 	}
-	marker := encodeCommitV3Into((*scratch)[:0], seq)
+	marker := encodeCommitV3Into((*scratch)[:0], seq, 0)
 	*scratch = marker
 	got = append(got, append([]byte(nil), marker...))
 

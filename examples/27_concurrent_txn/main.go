@@ -39,11 +39,13 @@
 //
 //   - ATOMICITY. Half the transfers run as MULTI-STATEMENT explicit transactions
 //     ([cypher.Engine.BeginTx]: a debit statement, then a credit statement, then
-//     one Commit). The engine holds the visibility barrier for the whole
-//     transaction, so a concurrent reader can never slip between the debit and
-//     the credit — it sees the whole transaction or none of it. The other half
-//     run as SINGLE-STATEMENT autocommit writes ([cypher.Engine.RunInTx]) that
-//     debit and credit in one statement.
+//     one Commit); the other half run as SINGLE-STATEMENT autocommit writes
+//     ([cypher.Engine.RunInTx]) that debit and credit in one statement. In both
+//     shapes a concurrent reader can never slip between the debit and the credit —
+//     it sees the whole transaction or none of it. Atomicity also has to survive
+//     a REFUSED transfer: a transaction that loses a write-write conflict must
+//     leave nothing behind, so its physical rollback is exercised on every one of
+//     the conflicts the telemetry counts.
 //
 //   - CONSISTENCY / no lost updates. Because every transfer is a commutative
 //     delta on two accounts, replaying the committed transfers in any order
@@ -53,16 +55,31 @@
 //     interleaving lost an update (a serialisation failure); lost_updates counts
 //     them and must be 0.
 //
-// # Isolation model (verified against cypher/exectx.go and cypher/engine)
+// # Isolation model (verified against cypher/exectx.go and graph/lpg)
 //
-// The engine serialises writers on the store's single-writer mutex, and
-// [cypher.Engine.BeginTx] additionally holds the graph's visibility write-lock
-// for the transaction's whole lifetime — so writers are strictly serialised and
-// a transactional reader either observes the state before a write transaction
-// began or the fully committed state after it ended, never a partial state
-// (read-committed isolation, cypher/exectx.go). [cypher.Engine.BeginReadTx] is
-// the read-only path: it takes neither the writer serialisation nor the barrier
-// and so is never blocked by, and never blocks, other transactions.
+// Concurrency control is MVCC and nothing else (rmp #2320). An autocommit
+// statement applies under [lpg.Graph.ApplyVersioned], which holds the schema
+// barrier SHARED, so writers overlap instead of queueing: what makes a
+// transaction atomically visible is that every version it writes points at one
+// shared commit record, published with a single atomic store. A reader therefore
+// observes a transaction entirely or not at all, whichever writers are in flight.
+// [cypher.Engine.BeginTx] still holds the barrier exclusively for the
+// transaction's lifetime (retiring that is rmp #2305), so a multi-statement
+// transfer serialises against other writers where a single-statement one does
+// not. [cypher.Engine.BeginReadTx] is the read-only path: it takes no lock at all
+// and reads through a snapshot, so it is never blocked by, and never blocks, a
+// writer.
+//
+// Overlapping writers make WRITE-WRITE CONFLICTS real, and this example is where
+// they first became observable in the module. Two transfers touching the same
+// account collide, and the second to reach the version-chain head is REFUSED with
+// [mvcc.ErrSerializationConflict] rather than silently overwriting the first
+// (first-updater-wins). The writers therefore RETRY, which is the client's half
+// of the MVCC contract — see [retryOnConflict] for why the backoff is sized to a
+// WAL fsync and not to a scheduler yield — and the run reports the conflict rate
+// as telemetry (writer.conflicts_retried, writer.conflict_retries_max) so the
+// cost of the write concurrency is visible rather than hidden. A single-writer
+// engine reports zero there, because a conflict cannot arise.
 //
 // # Scale
 //
@@ -85,6 +102,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -103,6 +121,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
@@ -152,6 +171,22 @@ type config struct {
 	maxAmount    int64 // maximum transfer amount in cents (min is always 1)
 	sweepOps     int   // transfers per level of the writer-scaling sweep
 	seed         int64 // RNG seed; fixes the deterministic data shape
+
+	// faultSplitMultiStatement is a NEGATIVE CONTROL, never a workload knob, and
+	// it is deliberately not reachable from a command-line flag.
+	//
+	// When set, a multi-statement transfer commits its debit and its credit as TWO
+	// SEPARATE autocommit transactions instead of one. That opens a real, wide
+	// window in which a reader observes the debit without its credit — an actual
+	// torn total, produced on purpose.
+	//
+	// It exists because a gate that has never been shown to FAIL is not evidence
+	// that anything passed. rmp #2333 spent a reproduction search of roughly 7.3
+	// million clean observations on a single unattributable sighting; the gate and
+	// its diagnosis are therefore validated against a deliberately broken run (see
+	// TestTornGate_CatchesADeliberateTear) rather than trusted because they are
+	// quiet.
+	faultSplitMultiStatement bool
 }
 
 // defaultConfig returns the small, deterministic configuration the regression
@@ -179,7 +214,7 @@ func defaultConfig() config {
 // that would allow an account to go negative (which would make the committed
 // set data-dependent and break determinism). It is checked once, at the
 // boundary, before any work.
-func (c config) validate() error {
+func (c *config) validate() error {
 	switch {
 	case c.accounts < 2:
 		return fmt.Errorf("accounts must be >= 2, got %d", c.accounts)
@@ -223,7 +258,7 @@ func main() {
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
 	flag.Parse()
 
-	if err := run(context.Background(), os.Stdout, cfg); err != nil {
+	if err := run(context.Background(), os.Stdout, &cfg); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -235,7 +270,7 @@ func main() {
 // All output goes to w so a test can capture and assert on the deterministic
 // lines. run returns wrapped errors instead of terminating so a test can drive
 // it and honours ctx cancellation throughout; only main exits.
-func run(ctx context.Context, w io.Writer, cfg config) error {
+func run(ctx context.Context, w io.Writer, cfg *config) error {
 	if err := cfg.validate(); err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
@@ -278,7 +313,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 
 	// Sanity: the freshly seeded total must equal the computed initial total,
 	// confirming the seed landed before the concurrent phase relies on it.
-	seeded, err := readTotalRun(ctx, eng)
+	seeded, _, err := readTotalRun(ctx, eng, plan.initialTotal)
 	if err != nil {
 		return fmt.Errorf("read seeded total: %w", err)
 	}
@@ -299,7 +334,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	}
 
 	// Post-run verification against the durable, committed state.
-	finalTotal, err := readTotalRun(ctx, eng)
+	finalTotal, _, err := readTotalRun(ctx, eng, plan.initialTotal)
 	if err != nil {
 		return fmt.Errorf("read final total: %w", err)
 	}
@@ -322,6 +357,13 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	fmt.Fprintf(w, "# run.elapsed=%s\n", stats.elapsed.Round(time.Microsecond))
 	fmt.Fprintf(w, "# writer.transfers_per_s=%.0f\n", rate(int64(stats.committed), stats.elapsed))
 	fmt.Fprintf(w, "# writer.mean_acquire_wait=%s\n", meanDuration(stats.acquireWaitTotal, stats.acquireWaitCount).Round(time.Nanosecond))
+	// The MVCC write-concurrency cost, in the open: how many attempts were refused
+	// with a serialization conflict and retried, and the deepest chain one transfer
+	// needed. Both are telemetry, not facts — the conflict rate depends on
+	// scheduling — but they are what proves writers genuinely overlap: a
+	// single-writer engine reports zero because a conflict cannot arise (rmp #2320).
+	fmt.Fprintf(w, "# writer.conflicts_retried=%d\n", stats.conflicts)
+	fmt.Fprintf(w, "# writer.conflict_retries_max=%d\n", stats.conflictRetriesMax)
 	fmt.Fprintf(w, "# reader.observations=%d\n", stats.readObservations)
 	fmt.Fprintf(w, "# reader.observations_per_s=%.0f\n", rate(stats.readObservations, stats.elapsed))
 	fmt.Fprintf(w, "# mem.heap_alloc=%s\n", humanBytes(built.HeapAlloc))
@@ -341,8 +383,10 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	// saw a partially-applied transaction — a module isolation bug — so the run
 	// returns an error naming it rather than reporting success.
 	if stats.tornObservations > 0 {
-		return fmt.Errorf("ISOLATION VIOLATION: readers observed a torn total %d time(s); first torn value %d, expected %d — the engine let a reader see a partially-applied write transaction",
-			stats.tornObservations, stats.firstTorn, plan.initialTotal)
+		return fmt.Errorf("ISOLATION VIOLATION: readers observed a torn total %d time(s); first torn value %d, expected %d (delta %+d)%s",
+			stats.tornObservations, stats.firstTorn, plan.initialTotal,
+			stats.firstTorn-plan.initialTotal,
+			tornDiagnosis(stats.tornDetail, plan.accounts))
 	}
 	if lostUpdates > 0 {
 		return fmt.Errorf("LOST UPDATE: %d account(s) diverged from the deterministic replay — a concurrent read-modify-write interleaving lost a write", lostUpdates)
@@ -396,6 +440,9 @@ type plan struct {
 	total          int // total transfers across all writers
 	multiStatement int // transfers executed via BeginTx
 	readers        int // reader goroutines to run against this plan
+	// splitMulti carries config.faultSplitMultiStatement to the writer goroutines.
+	// It is a negative control; see the field's documentation on [config].
+	splitMulti bool
 }
 
 // generatePlan builds the deterministic plan from a seeded RNG: cfg.accounts
@@ -406,7 +453,7 @@ type plan struct {
 // every transfer — order-independent, because each transfer is a commutative
 // delta — so the concurrent run can be checked against them regardless of
 // scheduling.
-func generatePlan(cfg config) plan {
+func generatePlan(cfg *config) plan {
 	//nolint:gosec // G404: a seeded math/rand is intentional — the example must
 	// reproduce a fixed workload for a given -seed; crypto/rand would defeat that.
 	rng := rand.New(rand.NewSource(cfg.seed))
@@ -453,6 +500,7 @@ func generatePlan(cfg config) plan {
 		total:          total,
 		multiStatement: multiStatement,
 		readers:        cfg.readers,
+		splitMulti:     cfg.faultSplitMultiStatement,
 	}
 }
 
@@ -537,6 +585,17 @@ type runStats struct {
 	firstTorn        int64
 	acquireWaitTotal int64 // nanoseconds spent blocked acquiring a write transaction
 	acquireWaitCount int64
+	// conflicts is how many transfer attempts were REFUSED with a serialization
+	// conflict and retried, and conflictRetriesMax the deepest retry chain any one
+	// transfer needed. Both are zero on a single-writer engine and non-zero under
+	// MVCC's first-updater-wins, which is why they are reported rather than
+	// swallowed: they are the observable cost of the write concurrency this
+	// example exists to exercise (rmp #2320).
+	conflicts          int64
+	conflictRetriesMax int64
+	// tornDetail is the diagnosis of the first torn observation, or nil when none
+	// was seen. See [tornReport].
+	tornDetail *tornReport
 }
 
 // runConcurrent launches cfg.readers reader goroutines and cfg.writers writer
@@ -556,7 +615,10 @@ func runConcurrent(ctx context.Context, eng *cypher.Engine, plan *plan) (runStat
 		firstTorn        atomic.Int64
 		acquireWaitTotal atomic.Int64
 		acquireWaitCount atomic.Int64
+		conflicts        atomic.Int64
+		conflictRetries  atomic.Int64
 		firstErr         atomic.Pointer[error]
+		firstReport      atomic.Pointer[tornReport]
 	)
 	setErr := func(e error) {
 		if e != nil {
@@ -578,21 +640,29 @@ func runConcurrent(ctx context.Context, eng *cypher.Engine, plan *plan) (runStat
 				}
 				var (
 					total int64
+					rep   *tornReport
 					err   error
 				)
 				if useReadTx {
-					total, err = readTotalReadTx(ctx, eng)
+					total, rep, err = readTotalReadTx(ctx, eng, plan.initialTotal)
 				} else {
-					total, err = readTotalRun(ctx, eng)
+					total, rep, err = readTotalRun(ctx, eng, plan.initialTotal)
 				}
 				if err != nil {
 					setErr(fmt.Errorf("reader: %w", err))
 					return
 				}
 				reads.Add(1)
-				if total != plan.initialTotal {
+				if rep != nil {
 					torn.Add(1)
 					firstTorn.CompareAndSwap(0, total)
+					// Keep the FIRST report, and prefer one that carries a
+					// same-instant diagnosis: an Engine.Run reader arriving first
+					// with nothing but a number must not displace the attribution
+					// a read-transaction reader can supply.
+					if cur := firstReport.Load(); cur == nil || (!cur.sameInstant && rep.sameInstant) {
+						firstReport.CompareAndSwap(cur, rep)
+					}
 				}
 			}
 		}()
@@ -610,14 +680,21 @@ func runConcurrent(ctx context.Context, eng *cypher.Engine, plan *plan) (runStat
 					return
 				}
 				if t.multi {
-					wait, err := commitMultiStatement(ctx, eng, t)
+					var wait time.Duration
+					err := retryOnConflict(ctx, &conflicts, &conflictRetries, func() error {
+						var e error
+						wait, e = commitMultiStatement(ctx, eng, t, plan.splitMulti)
+						return e
+					})
 					if err != nil {
 						setErr(fmt.Errorf("writer multi-statement: %w", err))
 						return
 					}
 					acquireWaitTotal.Add(int64(wait))
 					acquireWaitCount.Add(1)
-				} else if err := commitSingleStatement(ctx, eng, t); err != nil {
+				} else if err := retryOnConflict(ctx, &conflicts, &conflictRetries, func() error {
+					return commitSingleStatement(ctx, eng, t)
+				}); err != nil {
 					setErr(fmt.Errorf("writer single-statement: %w", err))
 					return
 				}
@@ -635,14 +712,123 @@ func runConcurrent(ctx context.Context, eng *cypher.Engine, plan *plan) (runStat
 		return runStats{}, *ep
 	}
 	return runStats{
-		committed:        int(committed.Load()),
-		elapsed:          elapsed,
-		readObservations: reads.Load(),
-		tornObservations: torn.Load(),
-		firstTorn:        firstTorn.Load(),
-		acquireWaitTotal: acquireWaitTotal.Load(),
-		acquireWaitCount: acquireWaitCount.Load(),
+		committed:          int(committed.Load()),
+		elapsed:            elapsed,
+		readObservations:   reads.Load(),
+		tornObservations:   torn.Load(),
+		firstTorn:          firstTorn.Load(),
+		acquireWaitTotal:   acquireWaitTotal.Load(),
+		acquireWaitCount:   acquireWaitCount.Load(),
+		conflicts:          conflicts.Load(),
+		conflictRetriesMax: conflictRetries.Load(),
+		tornDetail:         firstReport.Load(),
 	}, nil
+}
+
+// maxConflictRetries bounds the retry chain for one transfer. It is a BOUND, not
+// a policy knob: an unbounded retry would turn a persistent conflict into a
+// livelock, and the workload has to fail loudly rather than spin.
+//
+// # Sized by measurement, and RESIZED when the concurrency changed (rmp #2305)
+//
+// It was 8, sized above a deepest chain of two or three. rmp #2305 retired the
+// transaction-lifetime barrier hold, so an autocommit writer and an open explicit
+// transaction now contend on the same accounts instead of being serialised against
+// each other — and the observed depth rose with the concurrency. Measured over three
+// runs of the default shape immediately after that change: deepest chain 9, 9 and 10,
+// with 584, 612 and 656 refused attempts in total. The old bound sat just BELOW the
+// new worst case, so the example failed loudly — which is what it is built to do.
+//
+// 24 keeps roughly the same proportional headroom over the worst observed chain that
+// 8 had, and is still finite. If it is ever exceeded, that is a real finding about the
+// engine's conflict behaviour and not a reason to raise it again without measuring.
+// The observed depth per run is reported as writer.conflict_retries_max, so the
+// margin can be checked rather than assumed.
+const maxConflictRetries = 24
+
+// initialConflictBackoff and maxConflictBackoff bound the wait between attempts.
+// The floor is sized to a WAL fsync rather than to a scheduler quantum, because
+// that is what the retry is actually waiting for; the ceiling stops a pathological
+// chain from stretching the run.
+const (
+	initialConflictBackoff = 100 * time.Microsecond
+	maxConflictBackoff     = 5 * time.Millisecond
+)
+
+// retryOnConflict runs attempt, retrying while it is refused with an MVCC
+// serialization conflict, and counts what it observed.
+//
+// # Why the CLIENT retries, and why this is not a workaround
+//
+// Under MVCC the engine no longer serialises writers: two transactions that touch
+// the same account overlap, and the second one to reach the version-chain head is
+// REFUSED with [mvcc.ErrSerializationConflict] rather than silently overwriting
+// the first (first-updater-wins, rmp #2300). Retrying is the caller's half of that
+// contract and is exactly what every MVCC engine requires of its clients —
+// PostgreSQL returns SQLSTATE 40001 and expects the application to retry, and the
+// official Neo4j drivers retry `Neo.TransientError.*` inside their managed
+// transactions. Under the single-writer engine this example was written against,
+// the conflict could not arise; a transfer waited for the lock instead of being
+// refused. The retry is what a real client would do, so the example does it — and
+// it counts the conflicts rather than hiding them, because the conflict rate IS
+// the observable cost of the write concurrency the example exercises.
+//
+// A retried transfer stays correct without further care: every transfer is a
+// commutative delta over two accounts and a refused attempt is fully aborted (its
+// versions never become visible), so the expected final state the deterministic
+// replay computes is untouched by how many attempts a transfer needed.
+//
+// conflicts accumulates every refused attempt; retriesMax keeps the deepest chain
+// any single transfer needed, as a monotone maximum.
+func retryOnConflict(ctx context.Context, conflicts, retriesMax *atomic.Int64, attempt func() error) error {
+	backoff := initialConflictBackoff
+	for tries := 0; ; tries++ {
+		err := attempt()
+		if err == nil {
+			bumpMax(retriesMax, int64(tries))
+			return nil
+		}
+		if !errors.Is(err, mvcc.ErrSerializationConflict) {
+			return err
+		}
+		conflicts.Add(1)
+		if tries >= maxConflictRetries {
+			return fmt.Errorf("%d serialization conflicts on one transfer: %w", tries+1, err)
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		// Back off, and back off by TIME rather than by yielding.
+		//
+		// A yield was the first attempt and it was measured wrong. The blocking
+		// transaction is mid-COMMIT on a write-ahead log, so it clears only when
+		// its fsync returns — and the MVCC start timestamp a retry takes is the
+		// CONTIGUOUS commit frontier, which cannot advance past a commit that is
+		// still in flight. A Gosched loop therefore burns every retry inside one
+		// fsync: measured, five consecutive attempts all took startTS=117 against
+		// the same in-flight head, and the transfer failed having never once seen
+		// a fresh snapshot. Exponential backoff from 100 us gives the fsync room
+		// to land, which is what actually makes the retry a retry.
+		if backoff > maxConflictBackoff {
+			backoff = maxConflictBackoff
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+}
+
+// bumpMax raises dst to v when v is larger, as a lock-free monotone maximum.
+func bumpMax(dst *atomic.Int64, v int64) {
+	for {
+		cur := dst.Load()
+		if v <= cur || dst.CompareAndSwap(cur, v) {
+			return
+		}
+	}
 }
 
 // readerCount returns the number of reader goroutines, derived from the plan's
@@ -655,7 +841,22 @@ func (p *plan) readerCount() int { return p.readers }
 // reader can never observe the debit without the credit. It returns the time
 // spent blocked acquiring the transaction (a contention proxy). Any failure
 // rolls the transaction back.
-func commitMultiStatement(ctx context.Context, eng *cypher.Engine, t transfer) (time.Duration, error) {
+func commitMultiStatement(ctx context.Context, eng *cypher.Engine, t transfer, split bool) (time.Duration, error) {
+	if split {
+		// NEGATIVE CONTROL (config.faultSplitMultiStatement): commit the debit and
+		// the credit as two independent autocommit transactions. Between them the
+		// ledger really is short by t.amount, so a reader observing that window
+		// sees a genuinely torn total. This is the deliberately broken behaviour
+		// the gate is validated against; it is unreachable from a flag.
+		start := time.Now()
+		if err := runWriteAny(ctx, eng, qDebit, map[string]any{"id": acctKey(t.from), "amt": t.amount}); err != nil {
+			return time.Since(start), fmt.Errorf("debit: %w", err)
+		}
+		if err := runWriteAny(ctx, eng, qCredit, map[string]any{"id": acctKey(t.to), "amt": t.amount}); err != nil {
+			return time.Since(start), fmt.Errorf("credit: %w", err)
+		}
+		return time.Since(start), nil
+	}
 	acquireStart := time.Now()
 	tx, err := eng.BeginTx(ctx)
 	wait := time.Since(acquireStart)
@@ -705,28 +906,150 @@ func commitSingleStatement(ctx context.Context, eng *cypher.Engine, t transfer) 
 // Read helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+// tornReport is everything known about a torn observation, captured at the moment
+// it is seen.
+//
+// # Why the gate carries a diagnosis at all (rmp #2333)
+//
+// A torn total is rare enough that the run which produces one may be the only run
+// that ever does. The gate used to report the wrong value and nothing else, and a
+// single unattributable number is what a reproduction search of roughly 7.3 million
+// clean observations was then spent on — without settling even whether the engine or
+// the instrument was at fault.
+//
+// The decisive question is answerable at the instant of the tear and at no other
+// time: does a per-account read AT THE SAME INSTANT sum to the aggregate's answer?
+//
+//   - It sums to expected  → the per-row state was consistent and the AGGREGATE
+//     disagreed with it. That is an execution defect, not an isolation one.
+//   - It sums to total     → the snapshot genuinely held an inconsistent state, and
+//     the accounts that deviate name the transaction that was torn.
+//
+// Only a reader holding an explicit read transaction can ask it, because only that
+// reader can issue a second statement at the same pinned instant; the Engine.Run
+// readers record what they can and say so.
+type tornReport struct {
+	readerKind    string  // "Engine.Run" or "BeginReadTx"
+	total         int64   // what the aggregate answered
+	expected      int64   // the conserved total it had to equal
+	sameInstant   bool    // perAccount was read at the SAME snapshot as total
+	perAccount    []int64 // per-account balances at that instant (nil unless sameInstant)
+	perAccountSum int64   // their sum (meaningful only when sameInstant)
+}
+
+// verdict classifies the tear from the evidence actually gathered, and never
+// beyond it.
+func (r *tornReport) verdict() string {
+	switch {
+	case !r.sameInstant:
+		return "UNATTRIBUTED (this reader holds no pinned instant to re-read)"
+	case r.perAccountSum == r.expected:
+		return "AGGREGATE DEFECT: the same instant read per account is consistent, so sum() disagreed with the rows it summed — NOT an isolation violation"
+	case r.perAccountSum == r.total:
+		return "ISOLATION VIOLATION: the snapshot itself held an inconsistent state"
+	default:
+		return "INCONSISTENT EVIDENCE: the same-instant per-account sum matches neither the aggregate nor the expected total"
+	}
+}
+
+// tornDiagnosis renders a torn observation's evidence for the failure message.
+//
+// It reports the classification and, when a same-instant per-account read was
+// obtained, which accounts deviated from their SEEDED balance and by how much. The
+// seeded balances are the right baseline: every transfer is a commutative delta on
+// a conserved total, so the deviations are exactly the net flow the observed instant
+// had applied to each account, and a torn transaction shows up as one account
+// carrying a delta the ledger does not balance.
+func tornDiagnosis(r *tornReport, seeded []account) string {
+	if r == nil {
+		return "; no diagnosis captured"
+	}
+	base := make([]int64, len(seeded))
+	for i, a := range seeded {
+		base[a.id] = a.initial
+		_ = i
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n  reader=%s\n  verdict=%s", r.readerKind, r.verdict())
+	if r.sameInstant {
+		fmt.Fprintf(&b, "\n  same-instant per-account sum=%d (aggregate said %d, expected %d)",
+			r.perAccountSum, r.total, r.expected)
+		fmt.Fprintf(&b, "\n  per-account deviation from seed:%s", r.deviations(base))
+	}
+	return b.String()
+}
+
+// deviations lists the accounts whose balance differs from base, as "id:delta".
+func (r *tornReport) deviations(base []int64) string {
+	if !r.sameInstant {
+		return ""
+	}
+	var b strings.Builder
+	for id, got := range r.perAccount {
+		if id < len(base) && got != base[id] {
+			fmt.Fprintf(&b, " %d:%+d", id, got-base[id])
+		}
+	}
+	return b.String()
+}
+
 // readTotalRun computes the conserved total via the concurrent read path
 // (Engine.Run), which takes a per-query visibility snapshot.
-func readTotalRun(ctx context.Context, eng *cypher.Engine) (int64, error) {
+//
+// It returns a [tornReport] when the total does not equal want. The snapshot is
+// released when the statement completes, so this path cannot re-read at the same
+// instant and reports what it has.
+func readTotalRun(ctx context.Context, eng *cypher.Engine, want int64) (int64, *tornReport, error) {
 	res, err := eng.Run(ctx, qTotal, nil)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	defer func() { _ = res.Close() }()
-	return scalarTotal(res)
+	total, err := scalarTotal(res)
+	if err != nil || total == want {
+		return total, nil, err
+	}
+	return total, &tornReport{readerKind: "Engine.Run", total: total, expected: want}, nil
 }
 
 // readTotalReadTx computes the conserved total inside a read-only explicit
 // transaction (BeginReadTx), which acquires neither the writer serialisation nor
 // the visibility barrier.
-func readTotalReadTx(ctx context.Context, eng *cypher.Engine) (int64, error) {
+//
+// On a mismatch it re-reads every account balance INSIDE THE SAME TRANSACTION, so
+// the dump describes the very instant the aggregate was computed over rather than a
+// later one. See [tornReport] for what that distinguishes.
+func readTotalReadTx(ctx context.Context, eng *cypher.Engine, want int64) (int64, *tornReport, error) {
 	tx, err := eng.BeginReadTx(ctx)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	// Rollback (a teardown-only no-op on a read-only handle) always finishes the
 	// handle, even if Exec fails partway.
 	defer func() { _ = tx.Rollback() }()
+
+	total, err := scalarTotalTx(tx)
+	if err != nil || total == want {
+		return total, nil, err
+	}
+
+	rep := &tornReport{readerKind: "BeginReadTx", total: total, expected: want}
+	bal, derr := dumpBalancesTx(tx)
+	if derr != nil {
+		// The diagnosis failed; the observation itself still stands and is
+		// reported without it rather than being lost.
+		return total, rep, nil
+	}
+	rep.sameInstant = true
+	rep.perAccount = bal
+	for _, b := range bal {
+		rep.perAccountSum += b
+	}
+	return total, rep, nil
+}
+
+// scalarTotalTx runs qTotal at tx's pinned instant.
+func scalarTotalTx(tx *cypher.ExplicitTx) (int64, error) {
 	res, err := tx.ExecAny(qTotal, nil)
 	if err != nil {
 		return 0, err
@@ -735,12 +1058,32 @@ func readTotalReadTx(ctx context.Context, eng *cypher.Engine) (int64, error) {
 	return scalarTotal(res)
 }
 
+// dumpBalancesTx runs qDump at tx's pinned instant — the same instant
+// [scalarTotalTx] just used on the same handle.
+func dumpBalancesTx(tx *cypher.ExplicitTx) ([]int64, error) {
+	res, err := tx.ExecAny(qDump, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = res.Close() }()
+	return dumpBalances(res)
+}
+
 // scalarTotal extracts the single integer "total" column from a materialised
-// result. sum() over the integer balances is itself an integer; an empty ledger
-// would yield NULL, which is treated as 0.
+// result.
+//
+// # EXACTLY one row, and never a NULL (rmp #2333)
+//
+// An ungrouped sum() emits exactly one row, so any other count is a defect in the
+// engine rather than a shape this example should absorb. The earlier version kept
+// the LAST row it saw and reported "no rows" only when it saw none, so a result
+// carrying two rows — a partially combined parallel aggregate, say — would have
+// been silently reduced to one of its partials and then reported as a torn total,
+// blaming isolation for an aggregation defect. A NULL is rejected by [asInt64] for
+// the same reason.
 func scalarTotal(res *cypher.Result) (int64, error) {
 	var total int64
-	var got bool
+	rows := 0
 	for res.Next() {
 		v, ok := res.Record()["total"]
 		if !ok {
@@ -748,16 +1091,16 @@ func scalarTotal(res *cypher.Result) (int64, error) {
 		}
 		n, err := asInt64(v)
 		if err != nil {
-			return 0, err
+			return 0, fmt.Errorf("total: %w", err)
 		}
 		total = n
-		got = true
+		rows++
 	}
 	if err := res.Err(); err != nil {
 		return 0, err
 	}
-	if !got {
-		return 0, fmt.Errorf("total query returned no rows")
+	if rows != 1 {
+		return 0, fmt.Errorf("total query returned %d rows, want exactly 1", rows)
 	}
 	return total, nil
 }
@@ -769,7 +1112,15 @@ func readBalances(ctx context.Context, eng *cypher.Engine) ([]int64, error) {
 		return nil, err
 	}
 	defer func() { _ = res.Close() }()
+	return dumpBalances(res)
+}
 
+// dumpBalances parses a qDump result into a slice indexed by account id.
+//
+// It is split out of [readBalances] so the torn-total diagnosis can run the same
+// parse over a result produced INSIDE a read transaction — that is, at the same
+// instant as the aggregate it is explaining. See [tornReport].
+func dumpBalances(res *cypher.Result) ([]int64, error) {
 	// The account ids are the dense range [0, accounts); grow the slice as ids
 	// arrive so no separate count query is needed.
 	out := make([]int64, 0)
@@ -846,7 +1197,7 @@ func diffAgainstExpected(observed, expected []int64) (lostUpdates int, minBalanc
 // throughput that stays flat as the writer count climbs is the observable
 // signature of the isolation design. Each level is verified to conserve the
 // total before its store is torn down.
-func scalingSweep(ctx context.Context, w io.Writer, cfg config) error {
+func scalingSweep(ctx context.Context, w io.Writer, cfg *config) error {
 	maxWorkers := cfg.writers
 	if procs := runtime.GOMAXPROCS(0); procs < maxWorkers {
 		maxWorkers = procs
@@ -856,7 +1207,7 @@ func scalingSweep(ctx context.Context, w io.Writer, cfg config) error {
 			return err
 		}
 		perLevel := sweepLevelConfig(cfg, workers)
-		levelPlan := generatePlan(perLevel)
+		levelPlan := generatePlan(&perLevel)
 
 		eng, closeFn, err := openEngine(ctx, "gograph-ex27-sweep-")
 		if err != nil {
@@ -879,7 +1230,7 @@ func scalingSweep(ctx context.Context, w io.Writer, cfg config) error {
 			return fmt.Errorf("sweep workers=%d: %w", workers, err)
 		}
 
-		total, err := readTotalRun(ctx, eng)
+		total, _, err := readTotalRun(ctx, eng, levelPlan.initialTotal)
 		if err != nil {
 			closeFn()
 			return fmt.Errorf("sweep read total: %w", err)
@@ -897,8 +1248,10 @@ func scalingSweep(ctx context.Context, w io.Writer, cfg config) error {
 // accounts and amount bounds as cfg, but with the given writer count and a
 // single reader, distributing cfg.sweepOps transfers as evenly as possible and
 // disabling the nested sweep.
-func sweepLevelConfig(cfg config, workers int) config {
-	c := cfg
+func sweepLevelConfig(cfg *config, workers int) config {
+	// A COPY, not the pointer: every field below is overridden for this level and
+	// must not reach back into the caller's configuration.
+	c := *cfg
 	c.writers = workers
 	c.readers = 1
 	c.opsPerWriter = (cfg.sweepOps + workers - 1) / workers
@@ -950,6 +1303,17 @@ func drainClose(res *cypher.Result) error {
 // record (an interface{} holding an [expr.Value]), widening a float value (which
 // sum() never produces for integer inputs, but which keeps the helper robust)
 // and treating NULL as 0.
+// NULL IS AN ERROR, NOT A ZERO (rmp #2333).
+//
+// This used to map both an untyped nil and a Cypher NULL to 0. Every value this
+// example reads is an account balance or a sum over account balances, and the
+// ledger is never empty, so a NULL is a defect in every case — but converting it
+// to 0 turned that defect into a torn-total report of "0", indistinguishable from
+// a genuine isolation violation and attributed to the engine. It also hid the
+// opposite failure: a NULL balance in [readBalances] became a zero balance and was
+// reported as a lost update.
+//
+// Rejecting it means the run fails naming what actually happened.
 func asInt64(v any) (int64, error) {
 	switch x := v.(type) {
 	case expr.IntegerValue:
@@ -957,14 +1321,17 @@ func asInt64(v any) (int64, error) {
 	case expr.FloatValue:
 		return int64(x), nil
 	case nil:
-		return 0, nil
+		return 0, errNullValue
 	default:
 		if val, ok := v.(expr.Value); ok && val == expr.Null {
-			return 0, nil
+			return 0, errNullValue
 		}
 		return 0, fmt.Errorf("value is %T, want integer", v)
 	}
 }
+
+// errNullValue reports a NULL where an integer was required.
+var errNullValue = errors.New("value is NULL, want integer")
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Telemetry and formatting helpers

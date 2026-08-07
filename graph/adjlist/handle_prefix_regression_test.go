@@ -3,9 +3,9 @@ package adjlist
 // handle_prefix_regression_test.go — regression coverage for the fast-path
 // handle-column growth bug in upsertEdgeLocked (graph/adjlist/adjlist.go).
 //
-// A node that accrues several handle-less edges (AddEdge) leaves its handle
-// column nil/short while its neighbour backing array grows and retains spare
-// capacity. A subsequent handle-bearing edge (AddEdgeH) then takes the
+// A node that accrued several handle-less edges (AddEdge) left its handle
+// column nil/short while its neighbour backing array grew and retained spare
+// capacity. A subsequent handle-bearing edge (AddEdgeH) then took the
 // spare-capacity fast path with a still-short handle column. Before the fix
 // the fast path sized the new column from len(current.handles) instead of
 // oldLen, so growCap of the short length could be < newLen, panicking with
@@ -14,22 +14,34 @@ package adjlist
 // handle-bearing and handle-less parallel edges per node, so any graph written
 // before the regression could no longer be opened.
 //
+// # Since rmp #2317 the short column is UNREACHABLE, and these tests say so
+//
+// Every slot now carries a handle: AddEdge mints one rather than leaving the 0
+// sentinel, so the column is allocated with the first edge and is always
+// length-aligned with neighbours. The mixed sequence below can therefore no
+// longer produce a short column at all.
+//
+// The tests are kept, and re-aimed at the invariant that replaced the sentinel:
+// mixing minted and caller-supplied handles must keep the column aligned, must
+// preserve a supplied handle VERBATIM (recovery re-stamps the handle the WAL
+// recorded), and must never hand two slots the same identity.
+//
 // Layer: short.
 
 import "testing"
 
 // TestAdjList_HandleAfterHandlelessPrefix_NoPanic reproduces the minimal
-// sequence: a handle-less prefix long enough that the neighbour array has been
-// grown (cap > len), followed by a handle-bearing append on the fast path. It
-// must not panic, and the resulting handle column must stay length-aligned with
-// neighbours — the leading (handle-less) slots are the 0 "no handle" sentinel
-// and the handle-bearing slot carries its handle.
+// sequence: a prefix of minted-handle edges long enough that the neighbour array
+// has been grown (cap > len), followed by a caller-supplied-handle append on the
+// fast path. It must not panic, the handle column must stay length-aligned with
+// neighbours, every slot must carry a non-zero handle, and the supplied one must
+// arrive verbatim.
 func TestAdjList_HandleAfterHandlelessPrefix_NoPanic(t *testing.T) {
 	t.Parallel()
 	a := New[string, int](Config{Directed: true, Multigraph: true})
 
-	// Five handle-less edges: neighbours grows to len 5 / cap 8, while the
-	// handle column stays nil (len 0).
+	// Five auto-minted edges: neighbours grows to len 5 / cap 8, and the handle
+	// column grows with it.
 	const handleless = 5
 	for i := 0; i < handleless; i++ {
 		dst := string(rune('a' + i))
@@ -38,8 +50,8 @@ func TestAdjList_HandleAfterHandlelessPrefix_NoPanic(t *testing.T) {
 		}
 	}
 
-	// Handle-bearing edge on the spare-capacity fast path with a still-nil
-	// handle column. Pre-fix this panicked with makeslice: cap out of range.
+	// Caller-supplied handle on the spare-capacity fast path. Pre-fix, against a
+	// still-nil column, this panicked with makeslice: cap out of range.
 	const wantHandle = uint64(42)
 	if err := a.AddEdgeH("hub", "z", 1, wantHandle); err != nil {
 		t.Fatalf("AddEdgeH after handle-less prefix: %v", err)
@@ -52,17 +64,23 @@ func TestAdjList_HandleAfterHandlelessPrefix_NoPanic(t *testing.T) {
 	if len(h) != len(nb) {
 		t.Fatalf("handles len = %d, want %d (aligned with neighbours)", len(h), len(nb))
 	}
-	for i := 0; i < handleless; i++ {
-		if h[i] != 0 {
-			t.Errorf("handle[%d] = %d, want 0 (handle-less sentinel)", i, h[i])
+	seen := make(map[uint64]int, len(h))
+	for i, got := range h {
+		if got == 0 {
+			t.Errorf("handle[%d] = 0: every slot must carry an identity (rmp #2317)", i)
 		}
+		if prev, dup := seen[got]; dup {
+			t.Errorf("handle[%d] = %d duplicates slot %d: identities must be distinct", i, got, prev)
+		}
+		seen[got] = i
 	}
 	if got := h[handleless]; got != wantHandle {
-		t.Errorf("handle[%d] = %d, want %d", handleless, got, wantHandle)
+		t.Errorf("handle[%d] = %d, want %d (a supplied handle is preserved verbatim)",
+			handleless, got, wantHandle)
 	}
 }
 
-// TestAdjList_HandleAfterHandlelessPrefix_Degrees sweeps the handle-less prefix
+// TestAdjList_HandleAfterHandlelessPrefix_Degrees sweeps the minted-handle prefix
 // length across the geometric capacity boundaries (growCap min 4, then ×2) so
 // the regression is caught whichever capacity tier the fast path lands in.
 func TestAdjList_HandleAfterHandlelessPrefix_Degrees(t *testing.T) {
@@ -93,8 +111,12 @@ func TestAdjList_HandleAfterHandlelessPrefix_Degrees(t *testing.T) {
 				t.Fatalf("prefix=%d: last handle = %d, want %d", prefix, hs[len(hs)-1], h)
 			}
 			for i := 0; i < prefix; i++ {
-				if hs[i] != 0 {
-					t.Fatalf("prefix=%d: handle[%d] = %d, want 0", prefix, i, hs[i])
+				if hs[i] == 0 {
+					t.Fatalf("prefix=%d: handle[%d] = 0: every slot must carry an identity", prefix, i)
+				}
+				if hs[i] == h {
+					t.Fatalf("prefix=%d: minted handle[%d] collided with the supplied handle %d",
+						prefix, i, h)
 				}
 			}
 		})

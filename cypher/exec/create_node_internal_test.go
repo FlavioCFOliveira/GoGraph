@@ -122,16 +122,15 @@ func (m *seedStubMutator) DelEdgePropertyByHandle(string, string, uint64, string
 func (m *seedStubMutator) EdgePropertiesByHandle(string, string, uint64) map[string]lpg.PropertyValue {
 	return nil
 }
-func (m *seedStubMutator) RemoveEdgeInstanceByHandle(string, string, uint64)  {}
-func (m *seedStubMutator) EdgeHandleAtPosition(string, string, uint64) uint64 { return 0 }
-func (m *seedStubMutator) FirstEdgeHandle(string, string) (uint64, bool)      { return 0, false }
-func (m *seedStubMutator) OutNeighbours(string) []string                      { panic("unused") }
-func (m *seedStubMutator) InNeighbours(string) []string                       { panic("unused") }
-func (m *seedStubMutator) RemoveAllEdgesFrom(string)                          { panic("unused") }
-func (m *seedStubMutator) OutDegree(string) int                               { panic("unused") }
-func (m *seedStubMutator) ResolveNodeID(string) (graph.NodeID, bool)          { panic("unused") }
-func (m *seedStubMutator) RemoveNode(string)                                  { panic("unused") }
-func (m *seedStubMutator) IsTombstoned(graph.NodeID) bool                     { return false }
+func (m *seedStubMutator) RemoveEdgeInstanceByHandle(string, string, uint64) {}
+func (m *seedStubMutator) FirstEdgeHandle(string, string) (uint64, bool)     { return 0, false }
+func (m *seedStubMutator) OutNeighbours(string) []string                     { panic("unused") }
+func (m *seedStubMutator) InNeighbours(string) []string                      { panic("unused") }
+func (m *seedStubMutator) RemoveAllEdgesFrom(string)                         { panic("unused") }
+func (m *seedStubMutator) OutDegree(string) int                              { panic("unused") }
+func (m *seedStubMutator) ResolveNodeID(string) (graph.NodeID, bool)         { panic("unused") }
+func (m *seedStubMutator) RemoveNode(string)                                 { panic("unused") }
+func (m *seedStubMutator) IsTombstoned(graph.NodeID) bool                    { return false }
 
 // Compile-time check: seedStubMutator must satisfy GraphMutator so the
 // production seedGlobalNodeCounter accepts it directly. If a future change

@@ -52,6 +52,11 @@ func (g *Graph[N, W]) ReclaimVersions(watermark uint64) int {
 
 // reclaimLabelVersions truncates the label chains.
 func (g *Graph[N, W]) reclaimLabelVersions(watermark uint64) int {
+	// The depth histogram is reset even on the nothing-to-do path, so a store with
+	// no live versions reports an empty distribution rather than the one its last
+	// sweep left behind. See [mvcc.DepthHist].
+	hist := g.depth(depthNodeLabels)
+	hist.Reset()
 	if g.labelDeltaActive.Load() == 0 {
 		return 0
 	}
@@ -68,6 +73,17 @@ func (g *Graph[N, W]) reclaimLabelVersions(watermark uint64) int {
 				delete(sh.d, id)
 				continue
 			}
+			// ABORTED heads first (rmp #2318). They can never satisfy the
+			// watermark test below — AbortedTS is the maximum uint64 — and they
+			// are the only thing masking the aborted transaction's writes from
+			// the stored bag, so they are withdrawn by restoring the bag rather
+			// than merely dropped. See mvcc_abort_reclaim.go.
+			if n := g.reclaimAbortedLabelsLocked(sh, id); n > 0 {
+				freed += n
+				if head = sh.d[id]; head == nil {
+					continue
+				}
+			}
 			// The head itself unreachable means the node keeps no history at
 			// all, so the map entry goes with it and the shard shrinks.
 			if head.stampTS() <= watermark {
@@ -75,13 +91,19 @@ func (g *Graph[N, W]) reclaimLabelVersions(watermark uint64) int {
 				delete(sh.d, id)
 				continue
 			}
+			// retained counts the records this walk LEAVES on the chain — the depth a
+			// reader arriving now would step through. It is the walk's own loop
+			// counter, so measuring it costs a register increment on the sweeper.
+			retained := 1
 			for d := head; d.next != nil; d = d.next {
 				if d.next.stampTS() <= watermark {
 					freed += labelChainLen(d.next)
 					d.next = nil
 					break
 				}
+				retained++
 			}
+			hist.Observe(retained)
 		}
 		if len(sh.d) == 0 {
 			sh.d = nil // a shard with no history costs one nil check again
@@ -96,6 +118,8 @@ func (g *Graph[N, W]) reclaimLabelVersions(watermark uint64) int {
 
 // reclaimPropVersions truncates the property chains, by the identical rule.
 func (g *Graph[N, W]) reclaimPropVersions(watermark uint64) int {
+	hist := g.depth(depthNodeProps)
+	hist.Reset()
 	if g.propDeltaActive.Load() == 0 {
 		return 0
 	}
@@ -112,18 +136,30 @@ func (g *Graph[N, W]) reclaimPropVersions(watermark uint64) int {
 				delete(s.d, id)
 				continue
 			}
+			// ABORTED heads first, by the identical argument as the label
+			// chains; see [Graph.reclaimAbortedPropsLocked].
+			if n := g.reclaimAbortedPropsLocked(s, id); n > 0 {
+				freed += n
+				if head = s.d[id]; head == nil {
+					continue
+				}
+			}
 			if head.stampTS() <= watermark {
 				freed += propChainLen(head)
 				delete(s.d, id)
 				continue
 			}
+			// See [Graph.reclaimLabelVersions] for what retained measures.
+			retained := 1
 			for d := head; d.next != nil; d = d.next {
 				if d.next.stampTS() <= watermark {
 					freed += propChainLen(d.next)
 					d.next = nil
 					break
 				}
+				retained++
 			}
+			hist.Observe(retained)
 		}
 		if len(s.d) == 0 {
 			s.d = nil

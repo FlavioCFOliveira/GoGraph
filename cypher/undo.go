@@ -40,6 +40,7 @@ import (
 	"log/slog"
 	"runtime/debug"
 
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
@@ -65,6 +66,29 @@ type undoLog struct {
 	// correct order (e.g. a property set on a node is undone before the node
 	// that carried it is tombstoned).
 	inverses []func()
+	// wtx is the write transaction whose work this log unwinds, installed by
+	// [undoLog.bindTx] when the bracket opens (rmp #2320).
+	//
+	// replay needs it for ONE thing: to mark the transaction as unwinding for the
+	// duration, so its own inverses are not refused by the write-write conflict
+	// check. An undo has to run precisely when the transaction is doomed, and a
+	// doomed transaction refuses further writes — so without this the rollback
+	// silently applied nothing and the writes the statement had already made
+	// stayed committed. See [lpg.WriteTx.EnterUndo] for the measurement.
+	//
+	// The zero value carries no transaction, which makes the bracket a no-op —
+	// correct for a log built outside any bracket, as the tests do.
+	wtx lpg.WriteTx
+}
+
+// bindTx installs the write transaction whose work this log unwinds. It is a
+// no-op on a nil log, so callers thread an optional *undoLog without nil checks,
+// exactly as record does.
+func (u *undoLog) bindTx(wtx lpg.WriteTx) {
+	if u == nil {
+		return
+	}
+	u.wtx = wtx
 }
 
 // record appends inv as the inverse of a just-applied mutation. inv must be
@@ -95,6 +119,12 @@ func (u *undoLog) replay() (ok bool) {
 	if u == nil || len(u.inverses) == 0 {
 		return true
 	}
+	// Mark the transaction as unwinding for the whole replay, so its inverses are
+	// judged as withdrawals of its own work rather than as new updates. Deferred
+	// rather than cleared at the end of the loop so it is restored even if the
+	// loop is left by a panic that escaped runUndo's guard.
+	u.wtx.EnterUndo()
+	defer u.wtx.ExitUndo()
 	ok = true
 	for i := len(u.inverses) - 1; i >= 0; i-- {
 		inv := u.inverses[i]
@@ -148,7 +178,7 @@ func replayUndoOnPanic(undo *undoLog) {
 	if r := recover(); r != nil {
 		// Best-effort in-memory rollback; a failed inverse is logged and counted
 		// inside replay. We re-raise regardless so the panic boundary still
-		// releases the WAL single-writer mutex — never leave it held.
+		// deregisters the WAL writer — never leave it held.
 		undo.replay()
 		panic(r)
 	}

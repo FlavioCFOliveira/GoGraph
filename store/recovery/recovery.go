@@ -119,6 +119,43 @@ type Result[N comparable, W any] struct {
 	// where tombstones are reconstructed by replaying OpRemoveNode instead.
 	SnapshotTombstones int
 	WALOps             int
+	// MaxTxnSeq is the highest per-transaction sequence number observed in any
+	// v3 frame replayed from the WAL, or 0 when the WAL held no v3 frame.
+	//
+	// It exists so a store reopened on this directory can RESUME its sequence
+	// instead of restarting at 0 (rmp #2302, audit finding E5). txnSeq was
+	// decoded here and never written back, so a reopened store minted 1 again
+	// and the same sequence value could appear twice in one WAL — which
+	// recovery's TxnSeq-suffix atomicity filter tolerated only because frame
+	// contiguity plus equality happened to disambiguate it.
+	//
+	// It is DERIVED, not persisted, which is the same decision rmp #2309 takes
+	// for the MVCC clock: the WAL already carries the sequence in every frame, so
+	// a separate durable counter would be a second source of truth that can
+	// disagree with the log after a torn tail. Feed it to
+	// [txn.Options.ResumeTxnSeq].
+	MaxTxnSeq uint64
+	// MaxCommitTS is the highest MVCC commit timestamp any replayed [txn.OpCommit]
+	// marker carried, or 0 when none carried one — a WAL written before rmp #2309,
+	// or one written by a store with no MVCC clock.
+	//
+	// It is what restores the MVCC clock: the caller raises the clock to
+	// MaxCommitTS+1, so the next instant minted exceeds every instant that was ever
+	// made visible. Same DERIVE-don't-persist decision as [Result.MaxTxnSeq] above,
+	// and the same one the prior art reached: InnoDB keeps TRX_SYS_TRX_ID_STORE only
+	// for upgrades and folds a max over the rollback segments instead, Memgraph
+	// derives max(delta_ts)+1 from the WAL, and PostgreSQL persists nextXid but
+	// STILL ratchets it per record during replay.
+	//
+	// # It counts a timestamp that was durable but never visible, on purpose
+	//
+	// A crash between the fsync and the visibility publish leaves a durable
+	// OpCommit carrying an instant no reader ever saw. That transaction IS
+	// committed — the fsync returned — so recovery must treat its instant as spent
+	// and the floor must sit ABOVE it. That is why the caller adds one rather than
+	// resuming AT the maximum, and it is the same reasoning that makes MaxTxnSeq
+	// count frames this replay goes on to discard.
+	MaxCommitTS uint64
 	// WALTailOffset is the byte offset of the last durable frame boundary
 	// in the WAL. It equals the WAL file size when every frame was
 	// consumed cleanly, and the boundary of the last fully-consumed frame
@@ -323,6 +360,31 @@ type Op struct {
 	Version uint8
 }
 
+// CommitTS returns the MVCC commit timestamp carried by a [txn.OpCommit] marker,
+// and reports whether one was present.
+//
+// # Why "present" is a separate answer from "zero" (rmp #2309)
+//
+// Recovery DERIVES the MVCC clock's floor as one past the largest commit timestamp
+// it observes, rather than reading a persisted counter — the shape InnoDB and
+// Memgraph both settled on after removing theirs. A marker with no timestamp must
+// therefore contribute NOTHING to that maximum, and a marker whose timestamp
+// genuinely is zero must contribute zero. Collapsing the two into a bare uint64
+// would make an absent timestamp indistinguishable from the smallest real one.
+//
+// Absence is the pre-#2309 on-disk shape: the marker's body was empty. That is the
+// whole of the compatibility policy — no version negotiation, because the frame
+// header carries no per-record shape and an older reader ignored this body anyway.
+// A body that is present but too short is treated as absent rather than as an
+// error: a torn tail is the recovery replay loop's concern, and a marker that got
+// that far has already passed its frame CRC.
+func (o Op) CommitTS() (uint64, bool) {
+	if o.Kind != txn.OpCommit || len(o.Body) < 8 {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint64(o.Body[:8]), true
+}
+
 // ErrUnsupportedRecordVersion is returned by [Decode] for a WAL record
 // whose leading version byte is neither [txn.OpRecordV2] nor
 // [txn.OpRecordV3]. In practice this is a legacy v1 ([txn.OpRecordV1])
@@ -400,8 +462,11 @@ func Decode(payload []byte) (Op, error) {
 //
 // The body (everything after the txnSeq word) matches the v2 layout, so it
 // is copied verbatim into [Op.Body] and walked by the same typed apply
-// path ([applyOpCodec]). An [txn.OpCommit] marker has an empty body; the
-// recovery replay loop reads it to apply the buffered transaction.
+// path ([applyOpCodec]). The recovery replay loop reads an [txn.OpCommit]
+// marker to apply the buffered transaction.
+//
+// An [txn.OpCommit] body carries the 8-byte MVCC commit timestamp since rmp #2309,
+// and is EMPTY in a file written before it. Both are valid; see [CommitTS].
 func decodeV3(payload []byte) (Op, error) {
 	if len(payload) < 10 { // version + kind + uint64 txnSeq
 		metrics.IncCounter("store.recovery.Decode.errors", 1)
@@ -989,6 +1054,18 @@ func openCodec[N comparable, W any](
 	if haveManifest {
 		res.SnapshotHit = true
 		res.SnapshotSchemaVersion = loaded.Manifest.Version
+		// Seed the derived MVCC clock floor from the instant the image was captured
+		// at (rmp #2309, MVCC C3d). The WAL replay below then RAISES it further if
+		// the log carries anything newer, which is the whole derivation: the
+		// maximum over everything durable, from both sources.
+		//
+		// This is the half that matters in a checkpointed directory. A snapshot
+		// truncates the WAL prefix, so the instants of everything it folded are no
+		// longer in the log at all — deriving from the WAL alone would restore a
+		// clock below data the image already holds and then re-mint instants that
+		// are durably in it. Absent (an older manifest, or a graph with no clock) it
+		// is zero and contributes nothing.
+		res.MaxCommitTS = loaded.Manifest.CommitTS
 		snapLabels = loaded.Labels
 		snapProps = loaded.Properties
 		snapEdgeHandles = loaded.EdgeHandles
@@ -1074,9 +1151,9 @@ func openCodec[N comparable, W any](
 			// Making the leak unreachable is worth more here than detecting it,
 			// since a leak is not observable through the public API and so
 			// cannot be regression-tested from outside graph/adjlist.
-			g.AdjList().BeginCommit()
+			g.AdjList().BeginExclusiveBuild()
 			csrErr := snapshot.ApplyCSRToGraph(g, &loaded.CSR)
-			g.AdjList().EndCommit()
+			g.AdjList().EndExclusiveBuild()
 			if csrErr != nil {
 				metrics.IncCounter("store.recovery.openCodec.errors", 1)
 				return res, fmt.Errorf("recovery: apply snapshot CSR: %w", csrErr)
@@ -1155,6 +1232,15 @@ func openCodec[N comparable, W any](
 		res.WALOps = walRes.WALOps
 		res.TailErr = walRes.TailErr
 		res.WALTailOffset = walRes.WALTailOffset
+		res.MaxTxnSeq = walRes.MaxTxnSeq
+		// MAXIMUM, not assignment: the snapshot's captured instant was already
+		// seeded above, and the derived floor is the maximum over EVERYTHING
+		// durable. Assigning here would discard the image's instant whenever the
+		// surviving WAL suffix is older than the snapshot — which is the ordinary
+		// state of a freshly checkpointed directory, where the suffix is empty.
+		if walRes.MaxCommitTS > res.MaxCommitTS {
+			res.MaxCommitTS = walRes.MaxCommitTS
+		}
 		if walErr != nil {
 			// The only non-nil walErr is a ctx cancellation surfaced mid-replay;
 			// it is returned with the partially-recovered Result, exactly as the
@@ -1199,6 +1285,31 @@ func openCodec[N comparable, W any](
 	// re-seed above.
 	for i := range res.Indexes {
 		g.AddStoreIndex(res.Indexes[i].Name)
+	}
+
+	// RESTORE THE MVCC CLOCK (rmp #2309). The clock is process-local and starts at
+	// zero on every open, so without this a reopened graph re-mints instants a
+	// previous process already published AND made durable — the next commit would
+	// land at 1, at or below timestamps already in the file, and a reader could
+	// find a version that is simultaneously in its past and its future.
+	//
+	// It is DERIVED from what the durable record actually says, and RATCHETED
+	// rather than trusted: no counter is persisted, which is what InnoDB and
+	// Memgraph both concluded after removing theirs. +1 because a timestamp that
+	// reached the file is SPENT even if the crash landed between its fsync and its
+	// visibility publish — that transaction is committed, since the fsync returned,
+	// so the floor must sit ABOVE it and never re-mint it.
+	//
+	// Done HERE rather than left to the embedder, deliberately. [Options.ResumeTxnSeq]
+	// is the same shape one layer down and NO production caller wires it — it is set
+	// only in its own tests. A restoration that every reopen path must remember is
+	// one some reopen path will forget, and the failure is silent: writes keep
+	// succeeding at instants that collide with durable ones.
+	//
+	// The snapshot's own instant is C4's (rmp #2310) to fold in; this covers what
+	// the WAL carries, which is every transaction since the last checkpoint.
+	if res.MaxCommitTS > 0 {
+		g.RestoreMVCCClock(res.MaxCommitTS + 1)
 	}
 
 	// Mapper-less (v2) path only: apply snapshot-side labels after the WAL
@@ -1277,6 +1388,12 @@ type ReplayResult struct {
 	Indexes       []IndexRecord
 	WALOps        int
 	WALTailOffset int64
+	// MaxTxnSeq is the highest per-transaction sequence any replayed v3 frame
+	// carried, or 0 when there was none. See [Result.MaxTxnSeq], which it feeds.
+	MaxTxnSeq uint64
+	// MaxCommitTS is the highest MVCC commit timestamp any replayed OpCommit marker
+	// carried, or 0 when none did. See [Result.MaxCommitTS], which it feeds.
+	MaxCommitTS uint64
 }
 
 // IsClean reports whether replay stopped at a state from which it is safe to
@@ -1364,8 +1481,8 @@ func replayWALInto[N comparable, W any](
 	// in place thereafter, restoring the pre-COW write cost (O(shards touched)
 	// instead of O(ops)) for the dominant bulk-rebuild path. EndCommit freezes
 	// the builders before the graph is returned to the caller.
-	g.AdjList().BeginCommit()
-	defer g.AdjList().EndCommit()
+	g.AdjList().BeginExclusiveBuild()
+	defer g.AdjList().EndExclusiveBuild()
 	// pending buffers the ops of an in-flight v3 transaction until its
 	// OpCommit marker is read. The store serialises commits (single
 	// writer), so a transaction's frames are contiguous and never
@@ -1389,6 +1506,22 @@ func replayWALInto[N comparable, W any](
 			break
 		}
 		if op.Version == txn.OpRecordV3 {
+			// Track the highest sequence any v3 frame carries, INCLUDING frames
+			// this replay goes on to discard as orphaned and frames of an
+			// incomplete tail transaction. A sequence that was minted is spent:
+			// re-minting it after a reopen would put two different transactions
+			// under one number in one WAL, which is exactly the ambiguity
+			// [Result.MaxTxnSeq] exists to prevent. See rmp #2302.
+			if op.TxnSeq > res.MaxTxnSeq {
+				res.MaxTxnSeq = op.TxnSeq
+			}
+			// The MVCC instant, tracked for the same reason and with the same
+			// breadth: a timestamp that reached the file is SPENT, whether or not
+			// this replay goes on to apply the transaction carrying it, and whether
+			// or not it was ever made visible before the crash (rmp #2309).
+			if ts, ok := op.CommitTS(); ok && ts > res.MaxCommitTS {
+				res.MaxCommitTS = ts
+			}
 			if op.Kind != txn.OpCommit {
 				// Bound the in-flight transaction buffer: stop the instant
 				// the buffered op count would exceed the cap, BEFORE

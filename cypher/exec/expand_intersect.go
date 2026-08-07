@@ -95,11 +95,11 @@ const MetricExpandIntersectEngaged = "cypher.expand_intersect.engaged"
 
 // ExpandIntersectConfig configures a fused cyclic expand.
 type ExpandIntersectConfig struct {
-	// MidEdgeTypeFilter and EndEdgeTypeFilter map forward edge positions to the
-	// accepted type set for the middle (b→c) and closing (c→a) legs. Required
-	// whenever the corresponding EdgeType is non-empty.
-	MidEdgeTypeFilter map[uint64]string
-	EndEdgeTypeFilter map[uint64]string
+	// The two type filters are NOT here (rmp #2317). They map forward edge
+	// positions to the accepted type set for the middle (b→c) and closing (c→a)
+	// legs, so they are keyed to one particular adjacency and travel with it; see
+	// [IntersectAdjacencySource].
+	//
 	// MidEdgeType and EndEdgeType, when non-empty, restrict each leg to edges
 	// present in the corresponding filter.
 	MidEdgeType string
@@ -120,11 +120,15 @@ type ExpandIntersect struct {
 	input Operator
 	ctx   context.Context
 
-	fwd, rev csrAdjacency
-	fwdVerts []uint64
-	fwdEdges []graph.NodeID
-	revVerts []uint64
-	revEdges []graph.NodeID
+	// src yields the adjacency AND both type filters keyed to it, resolved in Init
+	// rather than held from plan-build time. See [IntersectAdjacencySource].
+	src        IntersectAdjacencySource
+	fwd, rev   CSRAdjacency
+	fwdHandles []uint64
+	fwdVerts   []uint64
+	fwdEdges   []graph.NodeID
+	revVerts   []uint64
+	revEdges   []graph.NodeID
 
 	midType, endType     string
 	midFilter, endFilter map[uint64]string
@@ -159,21 +163,18 @@ type ExpandIntersect struct {
 // there is nothing to gain from copying it. A nil cfg is treated as the zero value,
 // which is an untyped fusion reading b from column 0 and a from column 0 — valid
 // but not useful, so callers always pass one.
-func NewExpandIntersect(input Operator, fwd, rev csrAdjacency, cfg *ExpandIntersectConfig) *ExpandIntersect {
+func NewExpandIntersect(input Operator, src IntersectAdjacencySource, cfg *ExpandIntersectConfig) *ExpandIntersect {
 	if cfg == nil {
 		cfg = &ExpandIntersectConfig{}
 	}
 	return &ExpandIntersect{
-		input:     input,
-		fwd:       fwd,
-		rev:       rev,
-		midType:   cfg.MidEdgeType,
-		endType:   cfg.EndEdgeType,
-		midFilter: cfg.MidEdgeTypeFilter,
-		endFilter: cfg.EndEdgeTypeFilter,
-		relCols:   cfg.RelCols,
-		midCol:    cfg.MidCol,
-		endCol:    cfg.EndCol,
+		input:   input,
+		src:     src,
+		midType: cfg.MidEdgeType,
+		endType: cfg.EndEdgeType,
+		relCols: cfg.RelCols,
+		midCol:  cfg.MidCol,
+		endCol:  cfg.EndCol,
 	}
 }
 
@@ -194,6 +195,10 @@ func (op *ExpandIntersect) Init(ctx context.Context) error {
 		return err
 	}
 	cmetrics.IncCounter(MetricExpandIntersectEngaged, 1)
+	// Resolved NOW, not at plan-build time (rmp #2317); see
+	// [IntersectAdjacencySource].
+	op.fwd, op.rev, op.midFilter, op.endFilter = op.src()
+	op.fwdHandles = op.fwd.HandlesSlice()
 	op.fwdVerts = op.fwd.VerticesSlice()
 	op.fwdEdges = op.fwd.EdgesSlice()
 	op.revVerts = op.rev.VerticesSlice()
@@ -279,7 +284,7 @@ func (op *ExpandIntersect) Next(out *Row) (bool, error) {
 			op.haveR2 = false
 			continue
 		}
-		op.buildRow(out, op.bID, int64(op.r2Cur), op.cID, int64(pos), op.aID)
+		op.buildRow(out, op.bID, op.emittedEdgeID(op.r2Cur), op.cID, op.emittedEdgeID(pos), op.aID)
 		op.emitCount++
 		return true, nil
 	}
@@ -399,7 +404,7 @@ func (op *ExpandIntersect) advanceR2() bool {
 			if !passesTypeFilter(op.midType, op.midFilter, pos) {
 				continue
 			}
-			if !op.passesRelMorphism(int64(pos)) {
+			if !op.passesRelMorphism(op.emittedEdgeID(pos)) {
 				continue
 			}
 			op.r2Cur = pos
@@ -427,12 +432,29 @@ func (op *ExpandIntersect) advanceR3() (uint64, bool) {
 		if !passesTypeFilter(op.endType, op.endFilter, pos) {
 			continue
 		}
-		if !op.passesRelMorphism(int64(pos)) {
+		if !op.passesRelMorphism(op.emittedEdgeID(pos)) {
 			continue
 		}
 		return pos, true
 	}
 	return 0, false
+}
+
+// emittedEdgeID is the relationship identity this operator emits for a FORWARD
+// position, and it must agree with [Expand.emittedEdgeID] to the bit: the fused
+// operator replaces a two-Expand chain, and cyphermorphism compares the ids one hop
+// emitted against the ids a sibling hop carries in the row. Emitting positions here
+// while Expand emitted handles made the fused and unfused plans disagree on which
+// edges were duplicates — measured as a hand-computed oracle of 18 rows returning 15
+// (rmp #2317).
+//
+// Both legs of the fusion walk forward positions, so both map through the forward
+// handle column.
+func (op *ExpandIntersect) emittedEdgeID(pos uint64) int64 {
+	if pos < uint64(len(op.fwdHandles)) {
+		return int64(op.fwdHandles[pos])
+	}
+	return int64(pos)
 }
 
 // passesRelMorphism reports whether edgeID is absent from every cyphermorphism

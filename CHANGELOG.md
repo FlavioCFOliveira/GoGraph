@@ -4,6 +4,224 @@ All notable changes to GoGraph are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`lpg.Session` — read-your-own-writes across transactions** (rmp #2328). The commit
+  frontier is contiguous, so `ApplyVersioned` returns at an instant that has not yet
+  published and a caller's next transaction could begin *below its own commit*.
+  Measured with twelve writers on disjoint keys: **9 of 660** read-backs missed a commit
+  the client was told had succeeded, and **6 of 6** serialization conflicts were a
+  transaction conflicting with itself on a key nothing else touched. A `Session`
+  obtained from `Graph.NewSession` records the instant it committed at and waits for the
+  frontier to reach it before its next operation. Within one session every operation
+  observes every commit that session has made; across two sessions nothing is promised
+  beyond snapshot isolation — the same contract a connection gives in any client-server
+  database. A writer that does not immediately read never waits.
+  **The Cypher and Bolt layers do not carry a session yet**, so clients driving GoGraph
+  through them still get the sessionless contract; see `docs/isolation-design.md`.
+- **MVCC observability** (rmp #2312). Writers in flight, commits, aborts, serialization
+  conflicts by store, the retained version-chain depth *distribution*, vacuum pass
+  latency, horizon utilisation and commit-latency histograms are published through the
+  metrics backend. The full inventory is in `docs/metrics.md`, which had no MVCC section
+  before. Cost measured: the read path is unchanged and a write transaction pays two
+  atomic increments — 1.42 ns on an otherwise empty bracket, unmeasurable on one that
+  writes.
+
+### Fixed
+
+- **A node created by an edge append was visible before its transaction committed**
+  (rmp #2331). `adjlist.addEdge` interned its endpoints without recording a versioned
+  birth, so a node an append *created* was visible to snapshots predating the
+  transaction while the arc itself correctly waited — one transaction becoming visible
+  in two pieces. All three edge paths are fixed, including the two handle-bearing ones
+  that every durable write goes through.
+
+- **CRITICAL: concurrent read-modify-write lost 46% of its committed updates**
+  (rmp #2324). Four writers each issuing 100 autocommit `SET a.bal = a.bal + 1`
+  statements, with every refusal retried until it succeeded, reported 400 successes
+  and left the property at **216**. Measured directly rather than inferred: those 400
+  successes wrote only ~200 **distinct** values, with one value written by five
+  different statements.
+
+  The write-write conflict test sat behind a "records nothing" guard — skipped when
+  the value being written already equalled the **stored** value, on the reasoning
+  that a write recording no version has nothing to conflict over. That is sound for
+  an idempotent write and unsound for an arithmetic one, because the incoming value
+  can equal the stored one **by coincidence**: A reads 1 and writes 2; B, whose
+  snapshot also says 1, computes 2 as well; B's write is compared against the
+  now-stored 2, judged a no-op, and accepted with no conflict test at all. B's
+  statement reports success having applied nothing.
+
+  The conflict test now runs unconditionally, before deciding whether anything needs
+  recording. This cannot cause the spurious abort the guard was added to prevent: a
+  `MERGE` re-asserting a property it just read re-asserts over a version that IS
+  visible to its own transaction, and a version that is NOT visible means another
+  transaction changed the object, which must be refused. Node **labels** keep their
+  equivalent guard and are sound with it, because set membership is genuinely
+  idempotent — adding a label another transaction already added leaves the same state,
+  with no arithmetic to lose.
+
+  The defect predates the MVCC sprint and was invisible to a fully green suite: the
+  one test covering this shape asserted the defective behaviour, and
+  `examples/27_concurrent_txn`'s conserved-total oracle passed because its default
+  contention rarely hit the window.
+
+
+### Changed
+
+- **BREAKING: `Graph.DisableMVCC`, `Graph.EnableMVCC` and `Graph.MVCCEnabled` are
+  removed** (rmp #2311). MVCC is the module's only concurrency-control mechanism and is
+  armed by `lpg.New`; there is no way to disarm it. An exported switch implied a choice
+  that does not exist, and a disarmed graph had no snapshot isolation, so every
+  guarantee the module documents was conditional on a setter any caller could reach.
+- **BREAKING: `MVCCStats` field renames** (rmp #2312). `ActiveReaders` →
+  `ActiveSnapshots` (it counted writers too, since writers hold a snapshot),
+  `OldestReaderAge()` → `OldestSnapshotAge()`, `UnregisteredReaders` →
+  `UnregisteredSnapshots`. `ActiveReaders()` is now a derived method excluding writers.
+  The metric series `lpg.mvcc.readers.unregistered` and `lpg.mvcc.oldest_reader_age` are
+  renamed to `lpg.mvcc.snapshots.unregistered` and `lpg.mvcc.oldest_snapshot_age`, and
+  per-store conflict series use underscored store names.
+- **BREAKING: `AdjList.Reclaim` takes a `*mvcc.DepthHist`** (rmp #2312), so the
+  reclaimer can report retained chain depth from the walk it already performs.
+
+- **An open explicit write transaction no longer blocks anybody** (rmp #2305).
+  `cypher.Engine.BeginTx` took the graph's visibility barrier EXCLUSIVELY and held it
+  from `BEGIN` until `COMMIT`/`ROLLBACK` — across every client round-trip and all the
+  think-time between them. Over Bolt that meant one client which sent `BEGIN` and then
+  paused blocked **every other writer in the process** for as long as its transaction
+  stayed open. That hold is gone.
+
+  `BeginTx` now opens one **commit record** and takes no lock. Each statement takes the
+  schema barrier *shared* for its own duration and releases it before returning, so
+  nothing is held between statements. `COMMIT` publishes the record exactly once, and
+  that single publication is the transaction's commit instant: every version its
+  statements wrote becomes visible together, and a rolled-back transaction's versions
+  never become visible at all. Atomicity comes from the record, not from exclusion.
+
+  **Two clients may now hold open write transactions simultaneously and both make
+  progress**, verified end-to-end against the official neo4j-go-driver.
+
+  **A write-write collision between two open transactions is refused at the
+  conflicting statement** — `ExplicitTx.Exec` returns an error wrapping
+  `mvcc.ErrSerializationConflict` — rather than at `COMMIT`. Detection is
+  first-updater-wins on the version chain, so the loser is known the moment it tries to
+  install its version; there is nothing to defer. Over Bolt the error maps to a
+  `TransientError`, so the driver's managed transactions retry it. Callers driving
+  explicit transactions by hand should roll back and retry.
+
+  **New `lpg` API**: `Graph.BeginVersionedTx`, `Graph.ApplyInVersionedTx` and
+  `Graph.EndVersionedTx`. `Graph.LockBarrier`/`UnlockBarrier`/`ApplyInsideLocked` remain
+  for callers that genuinely need exclusive access, but they must not be used to hold a
+  transaction: `ApplyInsideLockedTx` resolves the transaction from the graph's *ambient*
+  slot, which two concurrent transactions overwrite.
+
+  **An abandoned transaction still costs something, but of a different kind:** it pins
+  the reclamation horizon, so no version it could read is freed while it lives.
+  `server.Options.MaxTxIdleTime` was reviewed for this and kept at its 5 s default —
+  the original availability justification is gone, but an unbounded resource cost
+  remains.
+
+- **Concurrency control is now MVCC and nothing else** (rmp #2306). The
+  `txn.Store`'s capacity-one single-writer semaphore is retired. Independent write
+  transactions run concurrently on both engine wirings, and a write-write
+  collision is DETECTED at commit by first-updater-wins on the version chain
+  rather than prevented by holding a lock. `txn.Store.Begin`/`BeginCtx` now only
+  register the transaction as an admitted writer; the registration excludes no
+  other writer.
+
+  **Observable behaviour change.** With nothing serialising writers, two
+  concurrent `MERGE` statements on the same pattern can both find no match and
+  both create — measured at eight duplicates from eight writers. This is inherent
+  to MVCC (two CREATEs of two distinct new nodes are not a conflict, so there is
+  nothing to arbitrate) and matches Neo4j, which requires a uniqueness constraint
+  for the same reason. **With a `UNIQUE` constraint on the merged property the
+  duplicates collapse to exactly one**, because the constraint's reservation is
+  atomic. Callers relying on MERGE to be idempotent under concurrency must declare
+  the constraint.
+
+  Retiring the semaphore is **throughput-neutral** — the premise that it was a
+  bottleneck is refuted by measurement (all p > 0.18 at n=6; both arms scale ~15×
+  at 32 writers), because it was released after the WAL append and never covered
+  the coalesced fsync that dominates a durable commit. Full A/B in
+  [docs/benchmarks/store-semaphore-retirement-2026-08-04.md](docs/benchmarks/store-semaphore-retirement-2026-08-04.md).
+
+  Quiesce (`txn.Store.RunUnderCommitLock`, used by `store.DB.Close` and the
+  checkpointer) no longer borrows the semaphore. It closes a dedicated admission
+  gate and drains the admitted writers to zero, both under one mutex, so a writer
+  cannot be admitted between the two steps. Two quiesces exclude each other
+  explicitly rather than as a side effect.
+
+### Fixed
+
+- **Durability — a commit whose frames were already on stable storage could be
+  reported as FAILED** (rmp #2322). `wal.Writer.SyncGroup` consulted the writer's
+  sticky durability failure before testing whether the caller's own frames were
+  durable. The two are not mutually exclusive: the failure can belong to a *later*
+  group round that failed after a leader had already fsynced this caller's commit
+  marker. Such a committer was told its commit was lost, while recovery correctly
+  replayed the durable, fully marked transaction — a durable transaction nobody
+  acknowledged, which the crash simulator's atomicity oracle reported as
+  `<failed-resurrected>`.
+
+  `SyncGroup` now tests the caller's watermark against the durable size first, and
+  takes that watermark as a parameter instead of inferring it. **This is a breaking
+  change to two `store/wal` signatures**: `Writer.AppendRun` returns
+  `(int64, error)` — the run's own end offset — and `Writer.SyncGroup(target int64)`
+  takes it. The offset could not be recovered after the fact, because the writer's
+  accepted offset is shared: another appender advances it and a durability failure
+  rewinds it, so a committer reading it later was asking about somebody else's
+  frames. `Writer.SyncBuffered` is added for callers with nothing of their own to
+  acknowledge (an empty commit's courtesy flush) and must not be used to decide a
+  commit's fate.
+
+  The defect was latent while the store serialised commits behind its
+  single-writer semaphore, because group rounds could not overlap; it is a
+  prerequisite for retiring that semaphore.
+
+### Changed
+
+- **Isolation — an explicit read transaction is now SNAPSHOT ISOLATED across all
+  of its statements** (rmp #2307). `cypher.Engine.BeginReadTx` pins one MVCC read
+  instant at `BEGIN`, registers it with the reclamation horizon, and routes every
+  `Exec` on the handle at that instant, so a commit made by another transaction
+  between two statements is invisible to the second. A Bolt `BEGIN` with
+  `mode="r"` inherits this.
+
+  **This is an observable behaviour change, and it is strictly stronger.**
+  Previously each statement opened its own snapshot — read-committed across the
+  statements of the transaction — which made an explicit read transaction weaker
+  than a single autocommit statement, since an autocommit statement has always
+  had one instant for its whole duration. Transaction-wide snapshot isolation is
+  Memgraph's default and is stronger than Neo4j's documented multi-statement
+  read-transaction behaviour, so no caller relying on the old contract can
+  observe a *weaker* result. Code that depended on seeing another transaction's
+  commit mid-read-transaction must now open a new read transaction to see it.
+
+  The cost is explicit: an open read transaction pins the reclamation horizon, so
+  no version it can still reach is freed while it lives.
+  `lpg.MVCCStats.ActiveReaders` and `MVCCStats.OldestReaderAge()` report it, and
+  an abandoned Bolt handle is bounded by the existing idle reaper
+  (`Options.MaxTxIdleTime`) and total transaction timeout
+  (`Options.DefaultTxTimeout`), both of which roll the transaction back and so
+  return the horizon slot. Write transactions are unchanged: they reach the same
+  guarantee by holding the visibility barrier exclusively from `BEGIN` to
+  `COMMIT`.
+
+  openCypher TCK unchanged at its full baseline. See
+  [`docs/isolation-design.md`](docs/isolation-design.md).
+
+### Added
+
+- **`bench/mvccwrite` — the write-scaling harness and its regression gates**
+  (rmp #2297). Measures engine write throughput against writer count in two
+  wirings — store-less (the concurrency-control ceiling) and WAL-backed (where
+  group commit can pay) — and gates it in the short test layer so a change that
+  re-serialises the writers turns the local CI gate red. Entry baseline and the
+  full rationale in
+  [`docs/benchmarks/mvcc-write-scaling-2026-08-02.md`](docs/benchmarks/mvcc-write-scaling-2026-08-02.md).
+
 ## [0.10.0] — 2026-07-25
 
 The thirteenth published release of **GoGraph**, a Go module for graph

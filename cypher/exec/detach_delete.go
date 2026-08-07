@@ -181,8 +181,8 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 	// every 4096 edges (canonical stride) to keep a high-degree DETACH
 	// DELETE interruptible. Returning an error here propagates out of
 	// Next; the surrounding write path (ApplyAtomically barrier +
-	// recoverWriteQueryPanic) rolls the transaction back and releases the
-	// single-writer mutex.
+	// recoverWriteQueryPanic) rolls the transaction back and clears its writer
+	// registration.
 
 	// Remove all outgoing edges in O(degree) via the bulk path.
 	if err := op.ctx.Err(); err != nil {
@@ -209,7 +209,7 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 	// the registry no longer treats them as "in use".
 	if op.reg != nil {
 		for k, pv := range op.mutator.NodeProperties(nodeKey) {
-			op.reg.ReleasePropertyValue(nodeLabels, k, pv)
+			releaseConstraintValue(op.reg, op.mutator, nodeLabels, k, pv)
 		}
 	}
 	// Stripping the node's labels and properties is internal teardown, not a
@@ -276,7 +276,7 @@ func (op *DetachDelete) detachDeletePath(p expr.PathValue) error {
 		pathLabels := op.mutator.NodeLabels(nodeKey)
 		if op.reg != nil {
 			for k, pv := range op.mutator.NodeProperties(nodeKey) {
-				op.reg.ReleasePropertyValue(pathLabels, k, pv)
+				releaseConstraintValue(op.reg, op.mutator, pathLabels, k, pv)
 			}
 		}
 		// Stripping the node's labels and properties is internal teardown, not a

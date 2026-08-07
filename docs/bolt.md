@@ -101,9 +101,49 @@ after 5.0 s, the idle bound.
 `MaxOpenTxPerPrincipal` bounds the other dimension. Note where it binds: a write
 transaction holds the writer serialisation, so the engine already caps those at
 one server-wide, and this limit is therefore about **read** transactions
-(`BEGIN` with `mode: "r"`), which acquire nothing and can genuinely be
-concurrent. It counts open transactions, not `BEGIN`s queued on the writer —
-concurrent `BEGIN`s are bounded by `MaxConnections`.
+(`BEGIN` with `mode: "r"`), which take no writer serialisation and no barrier and
+can genuinely be concurrent. It counts open transactions, not `BEGIN`s queued on
+the writer — concurrent `BEGIN`s are bounded by `MaxConnections`.
+
+Since rmp #2307 a read transaction does hold one thing: an MVCC read snapshot,
+pinned at `BEGIN` for its whole lifetime. That is what gives it **snapshot
+isolation across all of its statements** — a commit landing between two `RUN`s is
+invisible to the second — and it is also why the two bounds above matter more
+than they did: while the handle is open, no version it can still reach may be
+reclaimed. Both reaps roll the transaction back, which returns the snapshot;
+`lpg.MVCCStats.ActiveSnapshots` and `OldestSnapshotAge()` are where a leak would
+show. (Those two were `ActiveReaders` and `OldestReaderAge()` until sprint 334
+renamed them: the horizon holds a writer's snapshot as well as a reader's, so the
+old names under-reported what was pinning it.)
+
+### Read-your-own-writes IS guaranteed per connection
+
+**A statement run on a connection observes every commit already made on that
+connection** — autocommit or explicit transaction, in either order. The server binds
+one `cypher.Session` per connection (rmp #2329), a connection being a session by
+definition: one client, one ordered conversation.
+
+Without it a client could observe two things, and both were measured (rmp #2328):
+
+- a write followed by a read on the same connection might not see the write;
+- a connection writing repeatedly to one key might get a retriable serialization
+  error with nothing else contending for it.
+
+Both follow from the commit frontier being CONTIGUOUS: a commit is acknowledged at an
+instant that may not have published yet, because an *earlier* in-flight commit holds
+the frontier back, so the connection's next transaction could begin below its own
+commit. The session closes it by making the connection's next operation wait for the
+frontier to reach its own last commit before taking a snapshot.
+
+**Across connections nothing is promised beyond snapshot isolation**, which is the
+same contract any client-server database gives. A client that needs two connections
+to agree must coordinate them itself.
+
+The wait costs nothing when it is not needed — measured at 32.06 µs against 32.13 µs
+sessionless on a read-after-write loop
+([`benchmarks/session-ryow-2026-08-06.md`](benchmarks/session-ryow-2026-08-06.md)) —
+because it returns after one atomic load whenever the frontier has already passed.
+`lpg.mvcc.sessions.waiting` reports whether connections are actually waiting.
 
 Both events are separately observable: `bolt.server.tx.idlereaped` counts
 transactions reaped for silence, `bolt.server.tx.timedout` those that exceeded

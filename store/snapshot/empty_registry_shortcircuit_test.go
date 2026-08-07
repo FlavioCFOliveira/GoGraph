@@ -111,10 +111,10 @@ func TestEmptyRegistry_WalkIsSkipped(t *testing.T) {
 	t.Run("attribute-free graph skips both walks", func(t *testing.T) {
 		g := bareGraph(t, 200000, 100000)
 		p := withSkipProbe(func() {
-			if _, _, err := snapshot.WriteLabels(io.Discard, g); err != nil {
+			if _, _, err := snapshot.WriteLabels(io.Discard, g, nil); err != nil {
 				t.Fatalf("WriteLabels: %v", err)
 			}
-			if _, _, err := snapshot.WriteProperties(io.Discard, g); err != nil {
+			if _, _, err := snapshot.WriteProperties(io.Discard, g, nil); err != nil {
 				t.Fatalf("WriteProperties: %v", err)
 			}
 		})
@@ -139,10 +139,10 @@ func TestEmptyRegistry_WalkIsSkipped(t *testing.T) {
 			t.Fatalf("SetNodeProperty: %v", err)
 		}
 		p := withSkipProbe(func() {
-			if _, _, err := snapshot.WriteLabels(io.Discard, g); err != nil {
+			if _, _, err := snapshot.WriteLabels(io.Discard, g, nil); err != nil {
 				t.Fatalf("WriteLabels: %v", err)
 			}
-			if _, _, err := snapshot.WriteProperties(io.Discard, g); err != nil {
+			if _, _, err := snapshot.WriteProperties(io.Discard, g, nil); err != nil {
 				t.Fatalf("WriteProperties: %v", err)
 			}
 		})
@@ -211,11 +211,11 @@ func TestEmptyRegistry_OutputIsUnchanged(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			g := mk(c.nodeAttrs, c.edgeAttrs)
 			var bl, bp bytes.Buffer
-			szL, crcL, err := snapshot.WriteLabels(&bl, g)
+			szL, crcL, err := snapshot.WriteLabels(&bl, g, nil)
 			if err != nil {
 				t.Fatalf("WriteLabels: %v", err)
 			}
-			szP, crcP, err := snapshot.WriteProperties(&bp, g)
+			szP, crcP, err := snapshot.WriteProperties(&bp, g, nil)
 			if err != nil {
 				t.Fatalf("WriteProperties: %v", err)
 			}

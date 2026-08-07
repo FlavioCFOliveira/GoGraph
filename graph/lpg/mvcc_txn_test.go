@@ -98,7 +98,7 @@ func TestLabelTx_CommitIsAtomic(t *testing.T) {
 		}
 	}
 
-	commitTS := tx.commit()
+	commitTS := mustCommit(t, tx)
 
 	// BEHAVIOURAL, after commit: a reader that started earlier still sees
 	// nothing; one starting now sees everything.
@@ -144,14 +144,14 @@ func TestLabelTx_DoubleFinishPanics(t *testing.T) {
 		t.Run(second, func(t *testing.T) {
 			g, _ := txGraph(t, "a")
 			tx := g.beginLabelTx()
-			tx.commit()
+			_, _ = tx.commit()
 			defer func() {
 				if recover() == nil {
 					t.Fatalf("a second %s did not panic", second)
 				}
 			}()
 			if second == "commit" {
-				tx.commit()
+				_, _ = tx.commit()
 			} else {
 				tx.abort()
 			}
@@ -215,7 +215,7 @@ func TestLabelTx_RemoveIsAlsoAtomic(t *testing.T) {
 			t.Fatalf("node %s: the removing transaction still sees the label it removed", n)
 		}
 	}
-	commitTS := tx.commit()
+	commitTS := mustCommit(t, tx)
 	for n, id := range ids {
 		if bag := g.labelBagAsOf(id, commitTS, 0); bag.has(lid) {
 			t.Fatalf("node %s still carries L after the removal committed", n)
@@ -287,8 +287,17 @@ func TestLabelTx_ComposesWithPhysicalUndo(t *testing.T) {
 				"physically AND aborted: the two rollback mechanisms did not compose", ts)
 		}
 	}
-	// Both deltas are on the chain; that is the cost of the composition, and it
-	// is asserted so a future change that silently drops one is caught.
+	// NEITHER delta is on the chain any more, and that is rmp #2318's doing rather
+	// than a regression. This used to assert 2 — "the cost of the composition" — on
+	// the reasoning that an aborted transaction leaves twice the deltas and P6 would
+	// reclaim them later. It never could: [mvcc.AbortedTS] is the maximum uint64 and
+	// every reclaimer truncates on `stamp <= watermark`. So the abort now WITHDRAWS
+	// them synchronously, restoring the stored value through the reader's own walk,
+	// and the composition's cost is zero rather than two.
+	//
+	// The property that matters is asserted above and is unchanged: no reader at any
+	// instant sees the label. What is asserted here is only that the withdrawal
+	// leaves nothing behind.
 	sh := g.nodeLabelShardFor(id)
 	sh.mu.RLock()
 	n := 0
@@ -296,7 +305,8 @@ func TestLabelTx_ComposesWithPhysicalUndo(t *testing.T) {
 		n++
 	}
 	sh.mu.RUnlock()
-	if n != 2 {
-		t.Fatalf("expected the change and its inverse to leave 2 deltas, found %d", n)
+	if n != 0 {
+		t.Fatalf("the abort left %d delta(s) on the chain; AbortedTS cannot satisfy the "+
+			"watermark test, so nothing else will ever free them", n)
 	}
 }

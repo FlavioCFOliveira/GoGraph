@@ -11,10 +11,10 @@ package server_test
 // Engine.Run → e.g.View() → visMu.RLock(). Read locks are shared, so N
 // concurrent autocommit read sessions can now execute in parallel.
 //
-// Note: autocommit reads DO still block behind open explicit transactions
-// because BeginTx acquires visMu.Lock() (via LockBarrier, #1412) for the
-// transaction's lifetime, guaranteeing read-committed isolation — readers
-// never see uncommitted writes. That blocking is correct and intentional.
+// Note: since rmp #2290 an autocommit read takes NO barrier at all — it pins an
+// MVCC snapshot and resolves every store as of that instant, so it neither
+// blocks behind, nor is blocked by, an open explicit write transaction, and it
+// still never sees uncommitted writes.
 
 import (
 	"context"

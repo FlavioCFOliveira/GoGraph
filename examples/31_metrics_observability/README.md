@@ -17,6 +17,15 @@ and `relabel.dirtied` counters and the reopen `recompute` histogram, and the
 same burst samples write throughput with the store active so its neutrality
 to the write path is directly observable.
 
+And it surfaces the **MVCC substrate**, which since sprint 334 is GoGraph's
+only concurrency-control mechanism — so its health is the module's health. A
+dedicated phase drives four concurrent writers, provokes a deliberate
+write-write conflict, and holds a read snapshot open across a write burst so
+the version chains have a depth worth reporting. That lights the writer gauge,
+the commit and abort counts, the conflict rate and its per-store attribution,
+the retained chain-depth distribution, and the background vacuum's own
+lifecycle and per-pass latency.
+
 ## Domain / scenario
 
 A **service-mesh call graph**: nodes are microservices (`:SERVICE`), edges
@@ -128,6 +137,23 @@ and pinned by the test; the observed values behind them are telemetry.
   combination) rather than by `|E|`, and `countstore.write_throughput_ops_per_sec`
   samples the autocommit write rate with the store active, so its neutrality
   to the write path is observable.
+- **The MVCC substrate under concurrent writers** — `mvcc.commits.delta`
+  counts the transactions that published an instant, `mvcc.conflicts.observed`
+  proves the conflict path was actually taken rather than hoped for,
+  `mvcc.writers.settled` asserts no writer is left in flight, and
+  `mvcc.chain_depth.deepest_at_least_two` asserts the pinned read snapshot
+  really did hold a chain open. The volatile shape — abort count, retry count,
+  conflict rate, chain-depth buckets, version totals against the bound,
+  horizon occupancy against its capacity, and the vacuum's pass count and mean
+  pass duration — goes out as telemetry.
+- **A real retriable conflict, and one that should not happen** — the four
+  writers touch disjoint keys, so nothing should contend; a conflict
+  nonetheless appears every few hundred writes once enough writers are in
+  flight. It is not contention but the contiguous commit frontier leaving a
+  writer's own previous commit invisible to its next transaction, measured and
+  filed as rmp #2328. The example retries, which is what a client must do
+  under MVCC, and counts the retries so the effect is visible rather than
+  hidden.
 - **The exposition itself** — total series count, extra series discovered
   beyond the pinned set, and total scrape byte size, so a reader sees the
   real shape of a `/metrics` scrape.
@@ -151,6 +177,17 @@ and pinned by the test; the observed values behind them are telemetry.
 - `csv.WriteCtx` / `csv.ReadIntoCtx` — instrumented edge-list interchange.
 - `packstream.EncodePool` — the pooled Bolt encoder whose `Get`/`Put` emit
   utilisation counters.
+- `lpg.Graph.ApplyVersioned` / `BeginVersionedTx` / `EndVersionedTx` — the
+  instrumented MVCC write brackets: an autocommit transaction, and the
+  begin/publish pair of a multi-statement one.
+- `lpg.Graph.MVCCStats` / `VacuumStats` / `ChainDepths` — the substrate's
+  state, read directly for the facts and telemetry the metrics backend
+  publishes as gauges.
+- `lpg.Graph.BeginRead` / `EndRead` / `ReclaimNow` — a pinned read snapshot
+  and a synchronous sweep, which is what gives the chain-depth distribution
+  something to measure.
+- `mvcc.ErrSerializationConflict` — the retriable error a write-write
+  conflict surfaces as.
 
 ## Further reading
 

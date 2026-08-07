@@ -21,10 +21,14 @@ package exec
 //
 // # Concurrency
 //
-// The closure is invoked inside the writer transaction that holds the
-// engine's single-writer lock, so concurrent MERGE callers cannot both
-// observe a zero-match result and both fire ON CREATE. The closure itself
-// is read-only against the mutator and re-entrant.
+// The closure is read-only against the mutator and re-entrant, and is driven by
+// the one goroutine that owns the operator tree.
+//
+// It does NOT exclude another writer. Two concurrent MERGE callers CAN both
+// observe a zero-match result and both fire ON CREATE: the engine's writer mutex
+// and the store's capacity-one semaphore, which used to prevent that, were
+// retired by rmp #2306. See [Merge] for the measured behaviour and the
+// uniqueness-constraint remedy.
 
 import (
 	"bytes"

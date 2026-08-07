@@ -188,8 +188,8 @@ const propertiesCapHintMax = 1 << 20
 // sustained churn falls back to the prior fail-stop — a clean abort of
 // this checkpoint attempt with nothing written or truncated — never a
 // silently inconsistent record.
-func WriteProperties[N comparable, W any](w io.Writer, g *lpg.Graph[N, W]) (size int64, crc uint32, err error) {
-	return writeProperties(w, g, snapshotPropertyKeys, newPropValueArena)
+func WriteProperties[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], at *lpg.Snapshot) (size int64, crc uint32, err error) {
+	return writeProperties(w, g, at, snapshotPropertyKeys, newPropValueArena)
 }
 
 // newPropValueArena is the production value-arena factory: it hands writeProperties
@@ -210,6 +210,7 @@ func newPropValueArena() *propValueArena { return &propValueArena{} }
 func writeProperties[N comparable, W any](
 	w io.Writer,
 	g *lpg.Graph[N, W],
+	at *lpg.Snapshot,
 	snapKeys func(*lpg.PropertyKeyRegistry) []string,
 	newArena func() *propValueArena,
 ) (size int64, crc uint32, err error) {
@@ -271,9 +272,9 @@ func writeProperties[N comparable, W any](
 		// sub-slices into it and keep its backing arrays alive via the GC.
 		arena := newArena()
 		var cerr error
-		nodeRecs, cerr = collectNodePropertyRecords(g, keys, arena)
+		nodeRecs, cerr = collectNodePropertyRecords(g, at, keys, arena)
 		if cerr == nil {
-			edgeRecs, cerr = collectEdgePropertyRecords(g, keys, arena)
+			edgeRecs, cerr = collectEdgePropertyRecords(g, at, keys, arena)
 		}
 		if cerr == nil {
 			break
@@ -442,6 +443,7 @@ func snapshotPropertyKeys(reg *lpg.PropertyKeyRegistry) []string {
 // keeps the writer robust against a future divergence.
 func collectNodePropertyRecords[N comparable, W any](
 	g *lpg.Graph[N, W],
+	at *lpg.Snapshot,
 	keys []string,
 	arena *propValueArena,
 ) ([]NodePropertyEntry, error) {
@@ -483,7 +485,7 @@ func collectNodePropertyRecords[N comparable, W any](
 	}
 	for _, id := range collectInternedNodeIDs(g) {
 		curNodeID = uint64(id)
-		g.NodePropertiesByIDFunc(id, visit)
+		g.NodePropertiesByIDFuncAsOf(id, at, visit)
 		if visitErr != nil {
 			return nil, visitErr
 		}
@@ -499,6 +501,7 @@ func collectNodePropertyRecords[N comparable, W any](
 // mirroring the LPG's in-memory shard semantics.
 func collectEdgePropertyRecords[N comparable, W any](
 	g *lpg.Graph[N, W],
+	at *lpg.Snapshot,
 	keys []string,
 	arena *propValueArena,
 ) ([]EdgePropertyEntry, error) {
@@ -546,7 +549,7 @@ func collectEdgePropertyRecords[N comparable, W any](
 		dsts = distinctDestinationsSorted(neighbours, seen, dsts)
 		for _, dstID := range dsts {
 			clear(coalesce)
-			g.ForEachEdgePropertyByID(srcID, dstID, visit)
+			g.ForEachEdgePropertyByIDAsOf(srcID, dstID, at, visit)
 			if visitErr != nil {
 				return nil, visitErr
 			}

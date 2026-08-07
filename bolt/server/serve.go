@@ -78,13 +78,34 @@ const (
 	//
 	// A finite default is mandatory, and 5 s rather than 30 s because of what the
 	// round-3 audit demonstrated: one authenticated client sends BEGIN and stops
-	// talking, and because an open transaction holds the global visibility
-	// barrier, a 4.7 ms read on every other connection becomes 30.001 s —
+	// talking, and because an open transaction held the global visibility
+	// barrier, a 4.7 ms read on every other connection became 30.001 s —
 	// the full DefaultTxTimeout — followed by a hard TransactionTimedOut, and it
-	// is repeatable indefinitely (rmp #2175). The total-lifetime bound cannot fix
+	// was repeatable indefinitely (rmp #2175). The total-lifetime bound cannot fix
 	// that on its own: lowering it shortens the outage but also kills legitimate
 	// long transactions, whereas an idle bound distinguishes the two cases, since
 	// a working client sends messages.
+	//
+	// # Reviewed after rmp #2305, and KEPT at 5 s
+	//
+	// The outage above is GONE. An open transaction no longer holds the visibility
+	// barrier or any writer serialisation, so an abandoned one blocks nobody: the
+	// gates in bolt/server's e2e_concurrent_write_tx_test.go assert exactly that
+	// against the official driver. The original justification for a bound this tight
+	// therefore no longer applies, and the honest question is whether to relax it.
+	//
+	// It stays, because what an abandoned transaction now costs is still unbounded,
+	// just in a different resource: it pins the reclamation horizon, so no version it
+	// could still read is freed while it lives, and it occupies one of the horizon's
+	// fixed number of slots. An availability failure became a memory-and-slot failure;
+	// neither is acceptable without a bound, and 5 s remains far longer than any
+	// working client needs between the messages of one transaction.
+	//
+	// What DID change is the severity of setting it high. Before rmp #2305 a large
+	// MaxTxIdleTime was an availability risk; now it is a memory-growth risk. That is
+	// why the concurrency gates can safely raise it to ten minutes to remove the
+	// reaper's interference with what they measure — a thing that would have been
+	// reckless on the previous build.
 	//
 	// 5 s is far longer than any client needs between the messages of one
 	// transaction — a driver pipelines them — and short enough that an abandoned
@@ -97,23 +118,34 @@ const (
 	// how many explicit transactions one authenticated principal may hold open at
 	// once, across all of its connections.
 	//
-	// Where it actually binds, stated plainly rather than oversold: a WRITE
-	// transaction holds the engine's writer serialisation for its whole life, so
-	// the engine already caps concurrently-open write transactions at ONE
-	// server-wide and this bound can never be the binding constraint for them —
-	// the idle reaper above is what closes that exposure. A READ transaction
-	// (BEGIN with mode "r") acquires no serialisation and no barrier, so those ARE
-	// concurrent and were previously unbounded per principal; that is what this
-	// caps, along with the session and cursor state each one holds.
+	// # It binds on WRITE transactions too as of rmp #2305
 	//
-	// The count is of OPEN transactions, not of BEGINs queued on the writer
-	// serialisation: a burst of concurrent BEGINs from one principal is bounded by
-	// MaxConnections, not by this. Counting queued BEGINs here would reject
-	// legitimate concurrent traffic.
+	// This note used to say the bound could never be the binding constraint for
+	// write transactions, because one held the engine's writer serialisation for its
+	// whole life and the engine therefore capped concurrently-open write
+	// transactions at ONE server-wide. rmp #2305 retired that hold. Write
+	// transactions now overlap freely, so this is a REAL limit for them, and a
+	// client that opens more than the default 16 at once is refused with
+	// LimitExceeded. Two goroutine-leak tests in this package had to raise it for
+	// exactly that reason.
 	//
-	// The default of 16 is generous for a connection pool — one connection holds
-	// at most one open transaction — while still bounding the resource, as the
-	// bounded-resources mandate requires.
+	// A READ transaction (BEGIN with mode "r") has always been concurrent and
+	// unbounded per principal without this; that is what it originally capped, along
+	// with the session and cursor state each one holds — and, since rmp #2307, the
+	// MVCC read snapshot each one pins for its lifetime, which holds the reclamation
+	// horizon back until the handle finishes. A write transaction pins the horizon
+	// the same way since rmp #2305, so both modes now cost the same thing.
+	//
+	// The count is of OPEN transactions, not of BEGINs waiting to be admitted: a
+	// burst of concurrent BEGINs from one principal is bounded by MaxConnections,
+	// not by this. Counting waiting BEGINs here would reject legitimate concurrent
+	// traffic.
+	//
+	// The default of 16 is generous for a connection pool — one connection holds at
+	// most one open transaction — while still bounding the resource, as the
+	// bounded-resources mandate requires. It is KEPT at 16 rather than raised now
+	// that it binds on writers: a pool with more than sixteen connections per
+	// principal should say so explicitly.
 	//
 	// Set a negative value to disable enforcement — which is a deliberate,
 	// visible choice at the call site, not something reachable by accident.

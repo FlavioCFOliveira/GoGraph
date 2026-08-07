@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
@@ -191,27 +192,32 @@ func TestExplicitTx_Commit_StorelessVisible(t *testing.T) {
 	}
 }
 
-// TestExplicitTx_WriteWriteIsolation_WALBacked is the #1280 isolation AC: while
-// session A holds an open explicit transaction (after one write), a concurrent
-// writer B must BLOCK until A commits. The test proves B does not complete before
-// A commits, then completes promptly once A releases the writer mutex.
+// TestExplicitTx_WriteWriteIsolation_WALBacked is the #1280 isolation AC, restated
+// for MVCC by rmp #2305: while session A holds an open explicit transaction, a
+// concurrent DISJOINT writer B must NOT block, and A's uncommitted writes must stay
+// invisible to it.
+//
+// The original form of this test asserted the opposite — that B blocked until A
+// committed — because A held the graph's schema barrier exclusively from BEGIN to
+// COMMIT. Retiring that hold is rmp #2305, so asserting it would now assert the
+// defect. What "write-write isolation" means under MVCC is that B cannot SEE A's
+// uncommitted work and that a genuine collision is REFUSED, not that B waits.
 func TestExplicitTx_WriteWriteIsolation_WALBacked(t *testing.T) {
 	eng, _, w, _ := walEngineWithGraph(t)
 	t.Cleanup(func() { _ = w.Close() })
 	assertWriteWriteIsolation(t, eng)
 }
 
-// TestExplicitTx_WriteWriteIsolation_Storeless is the store-less analogue: the
-// engine writer mutex (not a store mutex) must serialise a concurrent autocommit
-// write behind an open explicit transaction.
+// TestExplicitTx_WriteWriteIsolation_Storeless is the store-less analogue.
 func TestExplicitTx_WriteWriteIsolation_Storeless(t *testing.T) {
 	eng, _ := storelessEngineWithGraph(t)
 	assertWriteWriteIsolation(t, eng)
 }
 
-// assertWriteWriteIsolation drives the A-blocks-B scenario against eng on either
-// wiring: A opens an explicit tx and writes; B (a concurrent autocommit write)
-// must not finish until A commits.
+// assertWriteWriteIsolation drives the A-does-not-block-B scenario against eng on
+// either wiring, and asserts the three properties that replaced the blocking one:
+// B completes promptly, B does not observe A's uncommitted write, and A's write
+// becomes visible only once A commits.
 func assertWriteWriteIsolation(t *testing.T, eng *cypher.Engine) {
 	t.Helper()
 
@@ -227,40 +233,66 @@ func assertWriteWriteIsolation(t *testing.T, eng *cypher.Engine) {
 		t.Fatalf("A drain: %v", derr)
 	}
 
-	// B starts and attempts a write; it must block on the writer serialisation A
-	// holds. bStarted is closed just before B issues its write so the test does
-	// not race the goroutine launch; bDone carries B's completion.
-	bStarted := make(chan struct{})
+	// B writes a DISJOINT node while A's transaction is open. It must complete
+	// promptly: nothing serialises writers since rmp #2305/#2306.
 	bDone := make(chan error, 1)
-	go func() {
-		close(bStarted)
-		bDone <- runWrite(t, eng, "CREATE (:B {v:1})")
-	}()
-	<-bStarted
+	go func() { bDone <- runWrite(t, eng, "CREATE (:B {v:1})") }()
 
-	// B must NOT complete while A's transaction is open. Give it a generous
-	// window to (incorrectly) finish; if it does, isolation is broken.
-	select {
-	case e := <-bDone:
-		t.Fatalf("B write completed (%v) while A's explicit transaction was still open — write-write isolation broken", e)
-	case <-time.After(300 * time.Millisecond):
-		// Expected: B is blocked behind A.
-	}
-
-	// Commit A — releases the writer serialisation.
-	if err := txA.Commit(); err != nil {
-		t.Fatalf("A Commit: %v", err)
-	}
-
-	// B must now complete promptly.
 	select {
 	case e := <-bDone:
 		if e != nil {
-			t.Fatalf("B write failed after A committed: %v", e)
+			t.Fatalf("B's disjoint write failed while A's transaction was open: %v.\n"+
+				"Two writers on disjoint data must not collide.", e)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("B write did not complete after A committed — writer serialisation leaked")
+		t.Fatal("B's disjoint write did not complete while A's explicit transaction was " +
+			"open. Something is serialising writers: rmp #2305 retired the " +
+			"transaction-lifetime barrier hold and rmp #2306 the store semaphore, so an " +
+			"open transaction must not block an unrelated write.")
 	}
+
+	// ISOLATION: B committed, but A's write is still uncommitted, so a reader must
+	// see B's node and NOT A's. This is the property the blocking used to provide
+	// and that the unpublished commit record provides now.
+	if n := countLabelledNodes(t, eng, "A"); n != 0 {
+		t.Errorf("a reader observed %d :A node(s) while A's transaction was still open, "+
+			"want 0. An uncommitted write must not be visible: its versions are stamped "+
+			"with a commit record that has not been published.", n)
+	}
+	if n := countLabelledNodes(t, eng, "B"); n != 1 {
+		t.Errorf("a reader observed %d :B node(s) after B committed, want 1", n)
+	}
+
+	// Commit A — its commit record publishes and its write becomes visible.
+	if err := txA.Commit(); err != nil {
+		t.Fatalf("A Commit: %v", err)
+	}
+	if n := countLabelledNodes(t, eng, "A"); n != 1 {
+		t.Errorf("after A committed a reader observed %d :A node(s), want 1", n)
+	}
+}
+
+// countLabelledNodes returns how many nodes carry the given label, read through the
+// engine's ordinary concurrent read path.
+func countLabelledNodes(t *testing.T, eng *cypher.Engine, label string) int64 {
+	t.Helper()
+	res, err := eng.Run(context.Background(), "MATCH (n:"+label+") RETURN count(n) AS c", nil)
+	if err != nil {
+		t.Fatalf("count %s: %v", label, err)
+	}
+	var got int64
+	for res.Next() {
+		if v, ok := res.Record()["c"]; ok {
+			if n, isInt := v.(expr.IntegerValue); isInt {
+				got = int64(n)
+			}
+		}
+	}
+	if err := res.Err(); err != nil {
+		t.Fatalf("count %s drain: %v", label, err)
+	}
+	_ = res.Close()
+	return got
 }
 
 // TestExplicitTx_ContextCancelInterruptsExec is the #1302 cancellation AC at the

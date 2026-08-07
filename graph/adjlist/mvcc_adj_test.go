@@ -43,7 +43,7 @@ func autoWrite(a *AdjList[string, float64], clk *mvcc.Clock, fn func()) uint64 {
 // commit record, published at a single timestamp on return.
 func txWrite(a *AdjList[string, float64], clk *mvcc.Clock, fn func()) (*mvcc.CommitInfo, uint64) {
 	ws := a.WriteStampForTest()
-	ws.Begin()
+	beginTx(ws)
 	fn()
 	info, _ := ws.End()
 	if info == nil {
@@ -162,7 +162,7 @@ func TestAdjVersion_UncommittedIsInvisible(t *testing.T) {
 	observer := clk.ReadTS()
 
 	ws := a.WriteStampForTest()
-	ws.Begin()
+	beginTx(ws)
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
@@ -371,13 +371,13 @@ func TestAdjVersion_ReclaimFreesOnlyTheUnreachable(t *testing.T) {
 
 	// A watermark of zero means "reclaim nothing", which is what the horizon
 	// reports while a reader could not be registered.
-	if n := a.Reclaim(0); n != 0 {
+	if n := a.Reclaim(0, nil); n != 0 {
 		t.Fatalf("Reclaim(0) freed %d records; zero means reclaim NOTHING", n)
 	}
 
 	// Watermark at ts2: readers all began at or after ts2, so the versions
 	// superseded at ts1 and ts2 are unreachable and the one at ts3 is not.
-	freed := a.Reclaim(ts2)
+	freed := a.Reclaim(ts2, nil)
 	if freed == 0 {
 		t.Fatal("Reclaim freed nothing with a watermark past two versions")
 	}
@@ -420,7 +420,7 @@ func TestAdjVersion_ReclaimIsBoundedByTheHorizon(t *testing.T) {
 
 	var h mvcc.Horizon
 	slot := h.Enter(old) // a long reader, started before either write
-	a.Reclaim(h.Oldest(clk.ReadTS()))
+	a.Reclaim(h.Oldest(clk.ReadTS()), nil)
 	if got := len(a.EntryNeighboursAsOf(id, old, 0)); got != 0 {
 		t.Fatalf("the long reader sees %d neighbours after reclamation, want 0: the horizon "+
 			"did not hold reclamation back", got)
@@ -428,7 +428,7 @@ func TestAdjVersion_ReclaimIsBoundedByTheHorizon(t *testing.T) {
 	h.Leave(slot)
 
 	// With the reader gone the watermark advances and the history goes.
-	if n := a.Reclaim(h.Oldest(clk.ReadTS())); n == 0 {
+	if n := a.Reclaim(h.Oldest(clk.ReadTS()), nil); n == 0 {
 		t.Fatal("Reclaim freed nothing once the long reader left")
 	}
 	if a.VersionCount() != 0 {

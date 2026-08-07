@@ -192,26 +192,9 @@ type GraphMutator interface {
 	// specific logical edge while leaving sibling handles untouched.
 	RemoveEdgeInstanceByHandle(src, dst string, handle uint64)
 
-	// EdgeHandleAtPosition resolves the stable per-edge handle of the bound
-	// relationship instance whose forward-CSR edge position is `edgePos` (the
-	// edge-position counter the Expand operator places in a relationship
-	// variable's column). It returns the exact handle of that one parallel
-	// instance, or 0 when no handle is resolvable — the edge carries no stable
-	// handle (simple-graph / pre-handle storage), either endpoint is unknown,
-	// the position is out of range, or the slot does not point at dst. Callers
-	// that get 0 must fall back to the per-pair store only and must NOT mutate
-	// any by-handle instance, so a SET/REMOVE never corrupts the wrong instance.
-	//
-	// It is the write-path counterpart of the read path's position→handle
-	// resolution and reads the same per-query forward-CSR snapshot, so it is
-	// exact for parallel edges and consistent with how reads identify the bound
-	// instance.
-	EdgeHandleAtPosition(src, dst string, edgePos uint64) uint64
-
 	// FirstEdgeHandle returns the stable per-edge handle stamped on the FIRST
 	// adjacency slot from src to dst, and whether such a handled slot exists.
-	// It is the by-PAIR handle resolver (not positional like
-	// [GraphMutator.EdgeHandleAtPosition]): MERGE binds a single logical
+	// It is the by-PAIR handle resolver: MERGE binds a single logical
 	// (src, dst) edge rather than a specific parallel instance, so the
 	// ON MATCH / ON CREATE action path uses it to mirror its per-pair property
 	// writes onto the matched edge's by-handle store. Returns 0 / false when

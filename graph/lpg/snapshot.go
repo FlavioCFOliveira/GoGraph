@@ -94,6 +94,13 @@ func (g *Graph[N, W]) EndRead(s *Snapshot) {
 		return
 	}
 	g.horizon.Leave(s.slot)
+	// The DRAIN wake (rmp #2308). A reader's departure is the one way the
+	// reclamation watermark advances without anything being written, so nothing
+	// else would tell the vacuum that the versions this reader was pinning are now
+	// free. It replaces the read-path sweep [Graph.ReclaimIdle] used to perform
+	// inline: same trigger, same throttle, but the work now happens on the
+	// vacuum's goroutine instead of on the query's.
+	g.wakeVacuumOnRelease()
 }
 
 // snapshotTimes unpacks a snapshot into the pair every versioned store's walk

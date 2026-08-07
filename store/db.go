@@ -39,9 +39,10 @@
 //
 // # Quiescing writers
 //
-// A [txn.Store] transaction holds the store's single-writer semaphore from
-// Begin until Commit/Rollback, and a [cypher.Engine] write holds it for the
-// statement. [DB.Close] called concurrently with an in-flight commit would
+// A [txn.Store] transaction is a registered writer from Begin until
+// Commit/Rollback, and a [cypher.Engine] write registers for the statement.
+// Registration does not exclude other writers — since rmp #2306 concurrency
+// control is MVCC alone — but it is exactly what a quiesce drains. [DB.Close] called concurrently with an in-flight commit would
 // otherwise race [wal.Writer.Close] (flush + fsync + refuse appends) against
 // the commit's append/sync, risking a transaction whose frames were flushed
 // durable by Close while its Commit returned an error — in-memory/durable

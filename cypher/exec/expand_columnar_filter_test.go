@@ -80,7 +80,7 @@ func TestExpandColumnarFilter_WherePostTraversal(t *testing.T) {
 
 	// OFF: row-mode Expand → Filter.
 	_, boxedFn := farNodeProps(props, dstCol, k)
-	rowExpand := exec.NewExpand(&nodeIDChunkSource{ids: ids}, fwd, rev, cfg)
+	rowExpand := exec.NewExpand(&nodeIDChunkSource{ids: ids}, exec.StaticAdjacency(fwd, rev, nil), cfg)
 	rowFilter := exec.NewFilter(rowExpand, boxedFn)
 	wantRows, err := exec.Drain(context.Background(), rowFilter)
 	if err != nil {
@@ -93,7 +93,7 @@ func TestExpandColumnarFilter_WherePostTraversal(t *testing.T) {
 	for _, perCall := range []int{1, 5, 64, exec.DefaultChunkCapacity} {
 		for _, batch := range []int{0, 1, 3} {
 			chunkPred, boxed := farNodeProps(props, dstCol, k)
-			base := exec.NewExpand(&nodeIDChunkSource{ids: ids, batch: batch}, fwd, rev, cfg)
+			base := exec.NewExpand(&nodeIDChunkSource{ids: ids, batch: batch}, exec.StaticAdjacency(fwd, rev, nil), cfg)
 			cp, ok := exec.NewColumnarExpand(base)
 			if !ok {
 				t.Fatalf("NewColumnarExpand: not a ChunkProducer")
@@ -160,7 +160,7 @@ func BenchmarkExpandFilter_Columnar(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		chunkPred, boxed := farNodeProps(benchProps, dstCol, k)
-		base := exec.NewExpand(&nodeIDChunkSource{ids: benchIDs}, benchFwd, benchRev, cfg)
+		base := exec.NewExpand(&nodeIDChunkSource{ids: benchIDs}, exec.StaticAdjacency(benchFwd, benchRev, nil), cfg)
 		cp, _ := exec.NewColumnarExpand(base)
 		cf := exec.NewColumnarFilter(cp, boxed, chunkPred)
 		if err := cf.Init(context.Background()); err != nil {
@@ -197,7 +197,7 @@ func BenchmarkExpandFilter_RowMode(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, boxed := farNodeProps(benchProps, dstCol, k)
-		exp := exec.NewExpand(&nodeIDChunkSource{ids: benchIDs}, benchFwd, benchRev, cfg)
+		exp := exec.NewExpand(&nodeIDChunkSource{ids: benchIDs}, exec.StaticAdjacency(benchFwd, benchRev, nil), cfg)
 		f := exec.NewFilter(exp, boxed)
 		if err := f.Init(context.Background()); err != nil {
 			b.Fatalf("Init: %v", err)
