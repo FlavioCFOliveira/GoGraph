@@ -3,7 +3,10 @@
 **Date:** 2026-08-07
 **Branch:** `sprint-335`
 **Outcome:** the SPIKE's own premise is **REFUTED**. rmp #2339 as scoped would deliver
-at most ~3.6% and is a **NO-GO** in that form.
+at most ~3.6% and is a **NO-GO** in that form. The ceiling is set by the commit's
+**allocation rate**, not by any lock: a share-nothing, lock-free workload matched to a
+commit's cost and allocation profile ceilings at ~2.6× on this host, and GoGraph
+already reaches 86% of that.
 
 ## What the ticket asserted
 
@@ -88,14 +91,71 @@ contributor looks like:
    ~9% of the scaling factor and ~22% of throughput. It is real but partial: the
    ceiling moves 2.2× → 2.4×, not 2.2× → 10×.
 
-**Not established, and stated as unattributed rather than guessed.** After removing
-the entire label subsystem and disabling the GC, the ceiling is still ~2.4× on a
-10-core machine. **Roughly 4× of the gap has no owner yet.** No claim is made here
-about where it is. The candidates not yet ablated include the mapper's intern path
-(every `CREATE` interns a new node through a shared counter), `mvcc.Clock.finishCommitTS`
-(which takes a process-global `pubMu` on the publish of *every* commit), the count
-store, the plan cache, and the Go scheduler itself. Each needs its own ablation arm;
-none is asserted.
+## The ~4× that appeared to be missing was never available
+
+The four arms above left the ceiling at ~2.4× and roughly 4× unattributed. That
+remainder has now been measured, and it is **not GoGraph's to recover**.
+
+### The control that was being compared against was the wrong one
+
+`gate_test.go`'s `control/parallel` measures **6.19–6.28×** at eight writers at this
+head — a CPU-bound spin that shares nothing *and allocates nothing*. Comparing an
+engine commit against it charges the concurrency control for a cost the Go runtime
+imposes on any program of this allocation profile, because **one
+`CREATE (n:Account {id: $id})` costs 56 allocations and 4242 B**, measured with
+`-benchmem` and flat in the writer count (56/4242 at one writer, 55/4103 at eight).
+
+### The allocation-matched control
+
+`bench/mvccwrite/alloc_control_test.go` (`BenchmarkAllocScalingControl`) is N
+goroutines each performing a unit that allocates the same count and volume as one
+commit and is padded with a non-allocating spin to the same per-unit cost. It shares
+**nothing**: no map, no counter, no lock, no critical section. `calibrateSpin`
+resolves the pad on the host actually running it, so the match is measured rather
+than inherited — 2873 ns/unit against the commit's 2892 ns, 55 allocs/4400 B against
+56/4242.
+
+Whatever it scores is the ceiling a **perfectly parallel** Go program of this
+allocation profile reaches on this machine.
+
+| writers | alloc-matched ceiling | GoGraph engine | engine ÷ ceiling |
+|---:|---:|---:|---:|
+| 1 | 1.000 | 1.000 | 100.0% |
+| 2 | 1.837 | 1.575 | 85.7% |
+| 4 | 2.615 | 2.133 | 81.6% |
+| 8 | 2.611 | 2.107 | 80.7% |
+| 16 | 2.560 | 2.231 | 87.1% |
+| 32 | 2.591 | 2.241 | 86.5% |
+
+*(n=5 each, means; the two benchmarks share `runArm`, so the harness is identical.)*
+
+**A lock-free, share-nothing workload allocating at a commit's rate ceilings at
+~2.6× on this host.** GoGraph reaches **2.24×, which is 86% of that.**
+
+### What this means
+
+The "missing 4×" was an artefact of comparing against 10 equal cores, or against a
+non-allocating control. It does not exist. The real distance between GoGraph's write
+path and the achievable ceiling is **~13–19%**, not 4×.
+
+**The binding constraint on in-memory write scaling is the ALLOCATION RATE of a
+commit — 56 objects and 4.2 KB per `CREATE` — and not any lock in the concurrency
+control.** That is consistent with, and explains, arm A4: the GC is the visible half
+of the same cost, and turning it off recovers part of the same ceiling.
+
+The lever that raises write scaling is therefore reducing allocations per commit,
+which raises the ceiling itself. Restructuring the label index, sharding it, or
+dissolving the joint transition cannot: they were measured at +0.6%, ≤+3.6% and
+−1.4% respectively, and the remaining headroom above them is ~13%, not 350%.
+
+### Still unattributed, and small
+
+The 13–19% between GoGraph and the allocation-matched ceiling has no owner yet. The
+candidates are the ones the mutex profile names and this spike did **not** ablate:
+the mapper's intern path, `mvcc.Clock.finishCommitTS`'s process-global `pubMu` (taken
+on every commit's publish, 4.9% of `sync.Mutex` delay), the plan cache (8.3%), and the
+count store. None is asserted here. They are worth ablating only once the allocation
+rate is addressed, because they are bounded above by 19% of the current ceiling.
 
 ## Why the original profile misled
 
