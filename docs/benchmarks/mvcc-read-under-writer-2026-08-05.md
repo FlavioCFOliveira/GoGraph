@@ -1,5 +1,15 @@
 # Read cost under a saturating writer — 2026-08-05
 
+> **SUPERSEDED 2026-08-07 (rmp #2342).** The +112.72% headline below is **CPU
+> competition, not version work**, and is retired as a measure of what concurrent
+> writing costs a reader. This report already said it was an upper bound and not an
+> attribution; holding the busy-goroutine count fixed removes the rise entirely —
+> flat from 0 to 4 writers, every arm p ≥ 0.39. See
+> [`mvcc-read-under-writer-fixedcpu-2026-08-07.md`](mvcc-read-under-writer-fixedcpu-2026-08-07.md).
+> The report is kept because its refuted hypothesis and its own statement of the
+> confound are what made the follow-up possible.
+
+
 rmp #2292. Head `e98dd00f`, branch `sprint-334`. Host: Apple M4, 10 cores,
 `darwin/arm64`, idle.
 
