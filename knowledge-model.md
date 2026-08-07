@@ -2788,3 +2788,47 @@ arm is the COVERAGE pass of `make ci` (`-coverpkg=./... -covermode=atomic`, no `
 `budgetEnv`, and `verifies` (a prose statement of the property a test pins). `Package`
 gains `role`, and `Commit` gains `subject`. Node identity is unchanged: `Package` by
 `path`, `Test` by `(name, file, pkg)`, `Commit` by `hash`.
+
+Incrementally synced at commit `0b8b8145` (2026-08-07, task **rmp #2349**, sprint 335 — an
+acked commit was lost in the post-fsync-pre-publish window). **First modelling of sprint
+335 at all**, and of the `mvcc.Clock` Type. +10 nodes (`Sprint` `335` OPEN; `Commit`
+`0b8b8145`; `Feature` `Durable checkpoint instant boundary`; `Type` `mvcc.Clock`; `Method`s
+`Clock.AwaitQuiescent`, `Graph.AwaitCommitQuiescence`, `Checkpointer.awaitCommitQuiescence`;
+`Test` `TestCheckpoint_EngineCommitOrdering_KeepsAnAckedCommit`; `Benchmark`
+`BenchmarkCheckpointUnderWriters`; `Spec`
+`docs/benchmarks/checkpoint-instant-boundary-2026-08-07.md`) and +19 edges
+(`Sprint 335 -[CONTAINS]-> Commit`; `Sprint 335 -[DELIVERS]->` the new Feature; three
+`FIXES` from the Commit to `ACID Transactions`, `WAL & Recovery` and the new Feature; four
+`TOUCHES` to Packages `store/checkpoint`, `graph/mvcc`, `graph/lpg`, `bench/mvccwrite` plus
+one to the Spec; six `CONTAINS`/`HAS_METHOD` for the new symbols; two `VERIFIES` to the new
+Feature; one `SPECIFIED_IN`; one `IMPLEMENTS` from `store/checkpoint`).
+
+**THE REFUTED PREMISE, recorded because it was load-bearing for an ACID argument.** The
+comment in `store/checkpoint/checkpoint.go` phase 1 argued that the durable watermark and
+the MVCC instant always describe the same transactions because "a writer's registration
+spans its WHOLE commit — `store/txn.Tx.Commit` defers `exitWriter` past `ApplyVersioned`,
+which is what publishes the instant". **That is TRUE for `txn.Tx.Commit` and FALSE for
+`txn.Tx.CommitWALOnly`, which is the path the Cypher engine — the only production writer —
+actually takes.** `CommitWALOnly` applies nothing in memory and publishes no instant, so its
+`exitWriter` fires when the fsync returns while the instant is published later, at write-
+bracket unwind through `lpg.Graph.endWrite`. The store's in-flight count is zero inside that
+window, so the drain proved nothing and the checkpoint truncated away the only record of an
+acknowledged commit. Anyone reasoning about the quiesce boundary must check BOTH commit
+paths; the drain alone does not cover the publish.
+
+**The fix waits on the OBSERVER, and the prior art disagrees with itself, which is the
+argument.** PostgreSQL (commit `b5978350`) has the identical decoupling and names it at
+`src/backend/access/transam/xlog.c:7684-7687`; its remedy is `DELAY_CHKPT_IN_COMMIT` plus a
+checkpoint-side wait (`xact.c:1469-1471`, `:1577-1582`; `xlog.c:7695-7712`). Memgraph
+(commit `b3ac3cdc`) instead loads the start timestamp and the last durable timestamp under
+one `engine_lock_` acquisition (`src/storage/v2/inmemory/storage.cpp:2833-2844`) so the pair
+is consistent by construction — which works only because its commit publishes durability and
+visibility under the same lock, the convoy rmp #2302/#2193 removed here. GoGraph has
+PostgreSQL's decoupling, so it took PostgreSQL's remedy.
+
+**KNOWN FIDELITY GAP, recorded rather than silently fixed.** The `graph/mvcc` Package's
+symbol inventory is stale: before this sync it held only the `Horizon` and `horizonOcc`
+Types, though the package now also declares `Clock`, `WriteStamp`, `commitLog`, `Depths`,
+`WriteCounts` and more. Only `Clock` was added here, because that is what this task read and
+attached to. A full re-survey of `graph/mvcc` (and, likely, of every package that grew during
+sprints 334–335) is owed.
