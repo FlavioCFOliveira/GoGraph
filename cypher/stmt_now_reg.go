@@ -31,6 +31,18 @@ func newNowAwareRegistry(delegate expr.FunctionRegistry, t time.Time) expr.Funct
 	return &nowAwareRegistry{delegate: delegate, now: t.UTC()}
 }
 
+// bind is [newNowAwareRegistry] for a wrapper that already has storage — the one
+// carried inline by each write mutator adapter (rmp #2339), so an autocommit
+// write freezes its "now" without a malloc for the two words that hold it.
+//
+// The returned registry aliases r, so a caller must not bind the same wrapper
+// twice while a statement built on it is still running. The write path binds
+// once per statement, before the plan is built.
+func (r *nowAwareRegistry) bind(delegate expr.FunctionRegistry, t time.Time) expr.FunctionRegistry {
+	r.delegate, r.now = delegate, t.UTC()
+	return r
+}
+
 // Resolve implements [expr.FunctionRegistry]. For the five temporal-now
 // constructors the returned function handles the zero-argument case using
 // r.now; all other call shapes (and all other function names) are delegated

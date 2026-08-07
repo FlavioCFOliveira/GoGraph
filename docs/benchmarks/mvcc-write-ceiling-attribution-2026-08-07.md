@@ -172,6 +172,16 @@ spike ran.
 
 ## The allocation ledger — where the 56 objects are (rmp #2339's starting point)
 
+> **SUPERSEDED, and the conclusion this section drew was WRONG.** rmp #2339 cut the
+> profile from 56 objects to 43 and re-calibrated the control to the new profile. The
+> ceiling **did not move**: 2.718 → 2.713 at thirty-two writers, p=1.000. What the
+> allocation cut bought was a constant factor — +8.1% throughput on the control, −6.75%
+> ns/commit on the engine at one writer — not headroom. The claim below and in rmp
+> #2339's scope that reducing allocations is "the only lever that raises the CEILING
+> ITSELF" is refuted by measurement. See
+> [`mvcc-commit-allocation-cut-2026-08-08.md`](mvcc-commit-allocation-cut-2026-08-08.md)
+> for the arms, the surviving ledger, and where the remaining gap now points.
+
 Measured, not estimated: `-memprofile` at `-memprofilerate=1` over 200 000 commits of
 `BenchmarkWriteScaling/mem/writers=1`, 11 336 561 objects total = **56.7 per commit**.
 Flat objects per commit, per call site:
@@ -208,6 +218,23 @@ Two observations that should shape the work, and one warning:
 - The two `push*Delta` sites (5.7 combined) are MVCC's own version records. They are
   the substrate's cost of isolation and are the least likely to be removable without
   weakening a guarantee.
+
+### One attempt already made, and reverted — read the ledger COLUMN, not the row
+
+`splitMapItems` shows 2.00 flat allocs/commit and grew from a nil slice, so pre-sizing
+it looked like a free 2/56. It is not: the benchmark's statement carries ONE property,
+so the old code allocated once and the pre-sized code allocates once. Measured
+interleaved, n=5: **56.00 allocs/op before and after, p=1.000.** The 2.00 is
+`splitMapItems` being called TWICE per commit at one allocation each, not once at two.
+
+It was reverted rather than merged — it duplicated a state machine (the counting pass
+must track string literals and nesting identically or it under-sizes) for a gain that
+is zero on this workload and unverified on any other.
+
+**The lesson for the rest of this work:** a flat count in the ledger says how many
+objects a call site produces per commit, not how many a single call produces. Before
+pre-sizing anything here, establish the CALL COUNT and the per-call allocation
+separately, or the same non-result follows.
 
 ## Reproducing
 

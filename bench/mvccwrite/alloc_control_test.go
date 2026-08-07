@@ -11,8 +11,8 @@ package mvccwrite
 // tell a concurrent build from a serialised one.
 //
 // It is the WRONG ceiling to compare engine write throughput against. A commit of
-// `CREATE (n:Account {id: $id})` costs 56 allocations and 4.2 KB, measured at both one
-// and eight writers, and the allocator and the garbage collector are SHARED. A
+// `CREATE (n:Account {id: $id})` costs 43 allocations and 4.1 KB, measured at both one
+// and thirty-two writers, and the allocator and the garbage collector are SHARED. A
 // workload allocating at that rate cannot reach a non-allocating workload's scaling
 // however perfectly lock-free it is, so comparing 2.1x against 6.3x silently charges
 // the concurrency control for a cost the Go runtime imposes on any program of this
@@ -36,20 +36,36 @@ import (
 
 // allocsPerCommit and bytesPerCommit are the measured allocation profile of one
 // autocommit `CREATE (n:Account {id: $id})` on the `mem` wiring, from
-// `BenchmarkWriteScaling/mem -benchmem` at head bc9ffc8a: 56 allocs/op, 4242 B/op at
-// one writer and 55 allocs/op, 4103 B/op at eight — flat in the writer count, so the
+// `BenchmarkWriteScaling/mem -benchmem`.
+//
+// THESE CONSTANTS MUST BE RE-MEASURED WHENEVER THE WRITE PATH'S ALLOCATION
+// PROFILE CHANGES. The entire value of this control is that its allocation rate
+// is the engine's; a stale pair silently compares the engine against the ceiling
+// of a program it no longer resembles.
+//
+// Current, at head 232be262 + rmp #2339: 43 allocs/op, 4151 B/op at one writer,
+// 41 allocs/op, 3832 B/op at thirty-two — flat in the writer count, so the
 // profile is the statement's and not an artefact of contention.
+//
+// Previously, at head bc9ffc8a (rmp #2338's ledger): 56 allocs/op, 4242 B/op at
+// one writer. rmp #2339 removed thirteen objects per commit from the write
+// path's transient state; see docs/benchmarks/ for the ledger and the arms.
 //
 // The control matches the COUNT and the total VOLUME, not the exact size histogram:
 // what the allocator and the collector scale on is object count and bytes, and a
 // faithful histogram would tie this control to one statement shape for no gain.
 const (
-	allocsPerCommit = 56
-	bytesPerCommit  = 4242
+	allocsPerCommit = 43
+	bytesPerCommit  = 4151
 )
 
 // nsPerCommitTarget is the single-writer cost of one commit on the `mem` wiring,
-// measured alongside the allocation profile above: 2892 ns.
+// measured alongside the allocation profile above: 2690 ns at head 232be262 +
+// rmp #2339 (2892 ns at bc9ffc8a, before it).
+//
+// It is re-measured with the pair above and for the same reason: allocations per
+// SECOND is the quantity that matters, so a profile and a per-unit cost from
+// different builds describe no program at all.
 //
 // # Matching the RATE, not just the shape, and why the first version was wrong
 //
@@ -65,7 +81,7 @@ const (
 // shares nothing, so the control's allocation rate at any writer count is the
 // engine's. calibrateSpin resolves the iteration count on the machine actually
 // running the benchmark rather than hard-coding one measured elsewhere.
-const nsPerCommitTarget = 2892
+const nsPerCommitTarget = 2690
 
 // allocSink is written by every unit so the compiler cannot prove the allocations
 // dead. It is per-goroutine — the whole point of this control is that nothing is

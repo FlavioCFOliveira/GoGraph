@@ -15726,7 +15726,12 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 	// Engine.RunInTx calls never race on the process-global statementNow
 	// in funcs. (statementNow is still used by the TCK runner and standalone
 	// unit tests via funcs.SetStatementNow; see cypher/funcs/now.go.)
-	queryReg := newNowAwareRegistry(e.reg, time.Now())
+	//
+	// The instant is read HERE, at the top of the statement, and unchanged from
+	// what it always was; only the wrapper that carries it is built later, once
+	// the mutator adapter exists to hold it inline (rmp #2339). Nothing between
+	// this point and there consults the registry.
+	stmtNow := time.Now()
 
 	entry, err := e.parseAndAnalyse(query)
 	if err != nil {
@@ -15745,15 +15750,17 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 		return nil, err
 	}
 
-	buf := &exec.IndexBuffer{}
-
-	// undo records the inverse of every in-memory mutation this write statement
-	// applies eagerly, so the live graph can be rolled back inside the barrier
-	// on a pipeline error or panic (task #1282, Atomicity). It is allocated for
-	// every write transaction but its backing slice grows lazily on the first
-	// recorded mutation, so a write that mutates nothing (or a read misrouted
-	// here) pays nothing.
-	undo := &undoLog{}
+	// buf and undo are not allocated here: they ride INSIDE the mutator adapter
+	// built below (rmp #2339), which is one heap object this statement was going
+	// to pay for anyway. undo records the inverse of every in-memory mutation
+	// this write statement applies eagerly, so the live graph can be rolled back
+	// inside the barrier on a pipeline error or panic (task #1282, Atomicity);
+	// both start empty, so a write that mutates nothing (or a read misrouted
+	// here) still pays nothing.
+	var (
+		buf  *exec.IndexBuffer
+		undo *undoLog
+	)
 
 	// Historical note: store-less autocommit writes used to be serialised on the
 	// engine writer mutex so they
@@ -15788,6 +15795,9 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 	// (backpressure honoured at the engine↔txn seam, task #1301). The mutator
 	// adapter only captures references; no graph reads happen yet.
 	var mutator exec.GraphMutator
+	// queryReg is bound to the adapter's inline wrapper in both branches below,
+	// so the statement-frozen "now" costs no allocation of its own (rmp #2339).
+	var queryReg expr.FunctionRegistry
 	if e.store != nil {
 		walTx, err = e.store.BeginCtx(ctx)
 		if err != nil {
@@ -15795,14 +15805,22 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 		}
 		// cbuf is left nil: it is allocated lazily on the first count delta, so a
 		// bare CREATE (:N) over an edgeless graph allocates none (#2082).
-		wa := &walMutatorAdapter{g: e.g, tx: walTx, buf: buf, undo: undo, touched: touched, eng: e}
-		// Aim the counters at the adapter's own inline store (#2212): this statement's
-		// write effects are recorded with no allocation beyond the adapter itself.
+		wa := &walMutatorAdapter{g: e.g, tx: walTx, touched: touched, eng: e}
+		// Aim the counters, the index buffer and the undo log at the adapter's own
+		// inline stores (#2212, rmp #2339): this statement's write effects, index
+		// write-back and rollback record are all held with no allocation beyond
+		// the adapter itself.
 		wa.counters = &wa.countersStore
+		wa.buf, wa.undo = &wa.bufStore, &wa.undoStore
+		buf, undo = wa.buf, wa.undo
+		queryReg = wa.nowReg.bind(e.reg, stmtNow)
 		mutator = wa
 	} else {
-		la := &lpgMutatorAdapter{g: e.g, buf: buf, undo: undo, touched: touched, eng: e}
+		la := &lpgMutatorAdapter{g: e.g, touched: touched, eng: e}
 		la.counters = &la.countersStore // see the walMutatorAdapter branch above
+		la.buf, la.undo = &la.bufStore, &la.undoStore
+		buf, undo = la.buf, la.undo
+		queryReg = la.nowReg.bind(e.reg, stmtNow)
 		mutator = la
 	}
 
@@ -15978,11 +15996,18 @@ func (e *Engine) execUnderBarrier(
 		// names whichever published last, and a write path reading through another
 		// transaction's snapshot sees neither its own work nor a consistent graph.
 		wv := e.g.WriterViewOf(wtx)
-		walker := &lpgNodeWalker{g: wv}
-		// The count-estimate provider (#2083) is consulted only on the read path
+		// From the adapter's inline scratch when it has one, so the walker and the
+		// label resolver cost no allocation of their own (rmp #2339). The
+		// count-estimate provider (#2083) is consulted only on the read path
 		// (Engine.Run, where labelSrc carries cs); the write-path plan build never
-		// reads it, so cs is left nil here to keep the write path's resolver lean.
-		labelSrc := &lpgLabelResolver{g: wv}
+		// reads it, so bind leaves it nil to keep the write path's resolver lean.
+		var walker nodeWalkerIface
+		var labelSrc labelResolverIface
+		if sc := mutatorBuildScratch(mutator); sc != nil {
+			walker, labelSrc = sc.bind(wv)
+		} else {
+			walker, labelSrc = &lpgNodeWalker{g: wv}, &lpgLabelResolver{g: wv}
+		}
 		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager(), e.maxCollectItems, e.edgeTypeFilterCache,
 			// #2229: the write path resolves `CALL db.*` from the same registry the
 			// read path uses. Shared, not snapshotted — procs.Registry is
@@ -16065,6 +16090,50 @@ func setMutatorWriteTx(m exec.GraphMutator, wtx lpg.WriteTx) {
 	case *walMutatorAdapter:
 		a.wtx = wtx
 	}
+}
+
+// buildScratch is the plan-build state [Engine.execUnderBarrier] needs once per
+// statement: the node walker and the label resolver the physical builder reads
+// the graph through. Both are two-word values whose only per-statement content
+// is the writer view, so allocating them fresh inside the bracket cost two
+// mallocs per commit for nothing (rmp #2339). The write adapters carry one
+// inline and hand it back through [mutatorBuildScratch].
+type buildScratch struct {
+	walker   lpgNodeWalker
+	labelSrc lpgLabelResolver
+}
+
+// bind points the scratch at wv — this statement's writer view — and returns the
+// two interfaces the builder takes. It is called once per statement, at the top
+// of the bracket, before anything reads through either.
+func (s *buildScratch) bind(wv *lpg.ReadView[string, float64]) (nodeWalkerIface, labelResolverIface) {
+	s.walker.g = wv
+	// eng stays nil: the count-estimate provider (#2083) is consulted only on
+	// the read path, so the write-path resolver is deliberately lean. Assigned
+	// explicitly because the scratch is REUSED across the statements of an
+	// explicit transaction and must not inherit a previous statement's field.
+	s.labelSrc.g, s.labelSrc.eng = wv, nil
+	return &s.walker, &s.labelSrc
+}
+
+// mutatorBuildScratch returns the plan-build scratch carried by a write adapter,
+// or nil for any other mutator — which is the read-only test stubs, and they
+// never reach [Engine.execUnderBarrier].
+//
+// Reusing it across the statements of an EXPLICIT transaction is sound because
+// the statement's operator tree never outlives its own bracket: both call sites
+// drain it to a materialised Result ([Result.materialize]) before
+// execUnderBarrier returns, and a drain stopped early by a row/byte cap
+// abandons the tree rather than resuming it. Nothing therefore reads a walker
+// bound to a superseded writer view.
+func mutatorBuildScratch(m exec.GraphMutator) *buildScratch {
+	switch a := m.(type) {
+	case *lpgMutatorAdapter:
+		return &a.buildScratch
+	case *walMutatorAdapter:
+		return &a.buildScratch
+	}
+	return nil
 }
 
 // mutatorCounters returns the write-effect counters carried by a write adapter, or nil
@@ -16153,6 +16222,27 @@ type lpgMutatorAdapter struct {
 	// leaves counters nil and never touches this field, which is what preserves the
 	// nil-means-no-write-surface contract on [Result.Counters].
 	countersStore exec.QueryCounters
+	// bufStore and undoStore are the inline backing stores the AUTOCOMMIT write
+	// path points buf and undo at, for exactly the reason countersStore exists
+	// above: the adapter is already one heap object, so the statement's index
+	// buffer and undo log ride inside it instead of costing a malloc each.
+	// Measured (rmp #2339): &exec.IndexBuffer{} and &undoLog{} were two of the
+	// three objects [Engine.runInTxSession] allocated per commit before the
+	// bracket even opened. Since both now carry their own inline element arrays,
+	// folding them in also collapses the append ladders they used to pay.
+	//
+	// An EXPLICIT transaction leaves both untouched: its buf and undo are the
+	// handle's SHARED ones, which outlive any single statement and therefore
+	// cannot live inside a per-statement adapter. See [ExplicitTx].
+	bufStore  exec.IndexBuffer
+	undoStore undoLog
+	// nowReg is the inline statement-frozen-"now" function registry, bound once
+	// per statement by [nowAwareRegistry.bind]; see it for why it is not allocated.
+	nowReg nowAwareRegistry
+	// buildScratch is the inline node walker and label resolver
+	// [Engine.execUnderBarrier] binds to this statement's writer view; see
+	// [buildScratch] for why it is reused rather than allocated per statement.
+	buildScratch buildScratch
 	// countingOff pauses effect counting for a span of internal teardown; see
 	// [exec.EffectCountingSuppressor].
 	countingOff bool
@@ -17025,6 +17115,18 @@ type walMutatorAdapter struct {
 	// countersStore is the inline backing store, as on [lpgMutatorAdapter]: pointing
 	// counters into the adapter keeps per-statement counting allocation-free.
 	countersStore exec.QueryCounters
+	// bufStore and undoStore are the inline backing stores for the AUTOCOMMIT
+	// path, exactly as on [lpgMutatorAdapter] — see the fields of the same name
+	// there for the measurement (rmp #2339) and for why an explicit transaction
+	// must not use them.
+	bufStore  exec.IndexBuffer
+	undoStore undoLog
+	// nowReg is the inline statement-frozen-"now" function registry, bound once
+	// per statement by [nowAwareRegistry.bind]; see it for why it is not allocated.
+	nowReg nowAwareRegistry
+	// buildScratch is the inline plan-build scratch, exactly as on
+	// [lpgMutatorAdapter].
+	buildScratch buildScratch
 	// countingOff pauses effect counting for a span of internal teardown; see
 	// [exec.EffectCountingSuppressor].
 	countingOff bool
