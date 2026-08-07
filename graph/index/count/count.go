@@ -23,15 +23,27 @@
 //
 // # Concurrency contract
 //
-// The Store is safe for concurrent use with the following discipline, which the
-// Cypher engine already provides: all MUTATIONS ([Store.Apply], [Store.MarkDirty],
-// [Store.RecomputeReset]) are serialised by the engine's write barrier
-// (visMu.Lock in commitUnderBarrier), and all READS ([Store.CountE]/[Store.CountD]/
-// [Store.CountT] and the dirty predicates) run under the query's read barrier
-// (visMu.RLock in Graph.View). The per-shard [sync.RWMutex] and the dirty-set
-// mutex are defence-in-depth that keep any non-barrier access path race-free; the
-// atomic cells make an individual counter read lock-free regardless. The store
-// spawns no goroutines.
+// The Store is safe for concurrent use, and it no longer rests on any exclusion
+// the engine provides. This contract used to say that all MUTATIONS were
+// serialised by the engine's write barrier (visMu.Lock in commitUnderBarrier) and
+// that all READS ran under a read barrier (visMu.RLock in Graph.View). BOTH HALVES
+// ARE FALSE, and have been since sprint 334 made MVCC the module's concurrency
+// control: commitUnderBarrier now runs inside a SHARED hold, so two writers mutate
+// this store concurrently, and an ordinary query read takes no barrier at all —
+// Graph.View survives only for DDL-adjacent scans.
+//
+// What makes it safe is therefore the structure itself, not exclusion:
+//
+//   - the per-shard [sync.RWMutex] serialises the insert-add-delete-on-zero
+//     sequence in [Store.add], which is the only sequence that is not a single
+//     atomic operation. It is genuinely contended now rather than defence-in-depth;
+//   - the atomic cells make an individual counter read lock-free regardless;
+//   - the aggregate is ORDER-INSENSITIVE (rmp #2303): a cell is deleted at exactly
+//     zero rather than at zero-or-below, so concurrent partial sums that transit a
+//     negative value do not lose a decrement. That property is what replaced writer
+//     exclusion, and [Store.add] documents the failure it fixes.
+//
+// The store spawns no goroutines.
 package count
 
 import (
@@ -229,8 +241,11 @@ func (s *Store) Apply(d Delta) {
 
 // add is the shared insert-add-delete-on-zero routine. It runs entirely under
 // the shard write lock; the closures read/insert/delete the family-specific map
-// entry. Writes are serialised by the engine barrier, so the lock is
-// uncontended in production and exists for defence-in-depth.
+// entry. The lock is REAL contention, not defence-in-depth: this comment used to
+// say writes are serialised by the engine barrier so the lock is uncontended in
+// production, and that has been false since sprint 334 let two writers commit at
+// once under a shared hold. Sizing the shard count is therefore a live
+// performance question rather than a settled one.
 func (s *Store) add(sh *shard, get func(*shard) *atomic.Int64, put func(*shard, *atomic.Int64), del func(*shard), delta int64) {
 	sh.mu.Lock()
 	cell := get(sh)

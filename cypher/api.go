@@ -105,6 +105,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/index/count"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index/stats"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 	"github.com/FlavioCFOliveira/GoGraph/internal/crashpoint"
 	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
@@ -1129,9 +1130,29 @@ type Engine struct {
 	// would mean the scan could no longer use [lpg.Graph.View] (visMu is not
 	// re-entrant). This lock is one level out, so it needs no such surgery.
 	//
-	// Lock order: schemaMu (outermost) → the store's writer admission → visMu.
+	// Lock order: schemaGate (outermost) → the store's writer admission → visMu.
 	// Readers take none of them.
-	schemaMu sync.RWMutex
+	//
+	// # Why this is an mvcc.Gate and not a sync.RWMutex (rmp #2337)
+	//
+	// It was a sync.RWMutex, and the shared acquisition an ordinary write takes was
+	// an atomic add on that mutex's ONE readerCount word — a coherence miss on a
+	// shared cache line, paid by every write on every core, purely to announce a
+	// NON-conflict. rmp #2203 measured that shape degrading 17.6× from 1 to 10 cores.
+	//
+	// [mvcc.Gate] expresses the same weak/strong contract — many weak holders
+	// together, a strong holder excluding all of them — with the weak side striped
+	// over padded per-slot counters and the strong flag read-mostly, so an
+	// uncontended weak acquisition touches no globally shared line. Measured on an
+	// Apple M4, 10 cores, both arms in one invocation: the gate goes 3.77 ns at 1
+	// core to 0.434 ns at 10 (it SCALES), where sync.RWMutex goes 3.75 ns to 89.5 ns
+	// (it DEGRADES 23.9×). See docs/benchmarks/mvcc-weak-strong-gate-2026-08-07.md.
+	//
+	// The semantics are unchanged and that is deliberate: this is an implementation
+	// substitution, not a contract change. MVCC cannot subsume this barrier, because
+	// what it guards is the CATALOG, which is not versioned; Memgraph and PostgreSQL
+	// both keep the identical weak/strong split for the same reason.
+	schemaGate mvcc.Gate
 
 	// hashJoinEnabled gates the disconnected-equi-join hash-join optimisation
 	// (#1506). True by default; set false by EngineOptions.DisableHashJoin. When
@@ -3026,8 +3047,8 @@ func (e *Engine) runCreateBTreeIndex(ctx context.Context, p *ir.CreateIndex, idx
 	}
 	// The whole DDL sequence — scan, validate, register — under one lock, in BOTH
 	// wirings; see [Engine.schemaMu] for why the schema barrier alone cannot do it.
-	e.schemaMu.Lock()
-	defer e.schemaMu.Unlock()
+	e.schemaGate.StrongLock()
+	defer e.schemaGate.StrongUnlock()
 	if e.store == nil {
 		return e.createBTreeIndexLocked(ctx, p, idxMgr, nil)
 	}
@@ -3186,8 +3207,8 @@ func (e *Engine) runDropIndex(ctx context.Context, p *ir.DropIndex, idxMgr *inde
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	e.schemaMu.Lock()
-	defer e.schemaMu.Unlock()
+	e.schemaGate.StrongLock()
+	defer e.schemaGate.StrongUnlock()
 	if e.store == nil {
 		// Capture the (label, property) of the index about to be dropped so the
 		// internal numeric companion (#1652) can be cleaned up alongside it; see
@@ -3314,13 +3335,17 @@ func dropNumericCompanionIfOrphaned(idxMgr *index.Manager, label, property strin
 // engine) appends a durable constraint op so the schema change survives a
 // crash.
 //
-// The whole validate → register → seed → WAL-append sequence runs under the
-// engine's writer serialisation (task #1341): for a WAL-backed engine the
-// store's writer registration — taken by opening the very transaction that
-// carries the durable constraint op — and for a store-less engine
-// [Engine.writeMu]. Without it a concurrent writer could commit a duplicate
-// value between the validation scan and the value-set seed, leaving a UNIQUE
-// constraint active over already-violating data that the value-set never saw.
+// The whole validate → register → seed → WAL-append sequence runs under
+// [Engine.schemaMu], held EXCLUSIVELY, in BOTH wirings. Without that exclusion a
+// concurrent writer could commit a duplicate value between the validation scan and
+// the value-set seed, leaving a UNIQUE constraint active over already-violating
+// data that the value-set never saw.
+//
+// This used to name the engine's writer serialisation (task #1341) — the store's
+// writer registration for a WAL-backed engine, and Engine.writeMu for a store-less
+// one. Neither serialises anything now: writeMu was retired outright by rmp #2306
+// and the store's admission excludes nobody since the same task. schemaMu is what
+// carries the property, which is why ordinary writes take it SHARED.
 func (e *Engine) runCreateConstraint(ctx context.Context, p *ir.CreateConstraint, idxMgr *index.Manager) (*Result, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -3330,8 +3355,8 @@ func (e *Engine) runCreateConstraint(ctx context.Context, p *ir.CreateConstraint
 	// One lock over scan + validate + register, in BOTH wirings. Lock order
 	// schemaMu → visMu (inside scanLabelProperty's View and the registration's
 	// ApplyAtomically). See [Engine.schemaMu].
-	e.schemaMu.Lock()
-	defer e.schemaMu.Unlock()
+	e.schemaGate.StrongLock()
+	defer e.schemaGate.StrongUnlock()
 	if e.store == nil {
 		return e.createConstraintLocked(ctx, p, kind, idxMgr, nil)
 	}
@@ -3411,15 +3436,19 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 	// Registration, backfill, and value-set seed run inside the visibility
 	// barrier (ApplyAtomically) so concurrent Graph.View readers never observe
 	// the constraint or its backing index in a partially-constructed state.
-	// The visibility barrier is not re-entrant, so nothing inside the closure
-	// may call Graph.View or Graph.ApplyAtomically; both scanLabelProperty
-	// (which calls View) and commitConstraintTx (which only appends a WAL
-	// frame) are therefore outside the closure.
+	// The visibility barrier is not re-entrant, so nothing inside the closure may
+	// call Graph.View or Graph.ApplyAtomically. scanLabelProperty is outside it for
+	// the ORDERING reason rather than that one — it must complete before the
+	// registration it validates — and no longer takes any barrier itself, so it is
+	// no longer constrained to sit outside; commitConstraintTx only appends a WAL
+	// frame and is outside so the append is not held under visMu.
 	//
-	// Lock ordering: the caller holds the engine's writer serialisation (store's
-	// writer registration for WAL-backed engines, writeMu for store-less) which
-	// is taken before visMu everywhere in the write path — the ApplyAtomically
-	// call below takes visMu, matching that established ordering.
+	// Lock ordering: the caller holds [Engine.schemaMu] exclusively, and schemaMu is
+	// taken before visMu everywhere in the write path — the ApplyAtomically call
+	// below takes visMu, matching that established ordering. This used to name the
+	// engine's writer serialisation (store's writer registration for WAL-backed,
+	// writeMu for store-less); writeMu no longer exists (rmp #2306) and the store's
+	// admission no longer serialises, so schemaMu is the outermost lock.
 	barrierErr := e.g.ApplyAtomically(func() error {
 		// For UNIQUE constraints, build a bound hash index that self-maintains
 		// from the index.Manager change fan-out (emitted at commit time by the
@@ -3517,8 +3546,8 @@ func (e *Engine) runDropConstraint(ctx context.Context, p *ir.DropConstraint, id
 		return nil, err
 	}
 
-	e.schemaMu.Lock()
-	defer e.schemaMu.Unlock()
+	e.schemaGate.StrongLock()
+	defer e.schemaGate.StrongUnlock()
 	if e.store == nil {
 		return e.dropConstraintLocked(ctx, p, idxMgr, nil)
 	}
@@ -3724,18 +3753,29 @@ func commitIndexTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind txn.Inde
 // tombstone, label, and property state after every shard lock is released. The
 // keys are interned and immutable, so resolving them outside the walk is safe.
 //
-// Both phases run inside [lpg.Graph.View] (task #1341), which keeps the CATALOG
-// stable across the scan and keeps the Walk deadlock-free with respect to the
-// #1339 scenario. Callers must not already be inside View/ApplyAtomically (the
-// barrier is not re-entrant; the lpg barrier guard panics on misuse).
+// It takes NO BARRIER. Both phases used to run inside [lpg.Graph.View] (task
+// #1341) for CATALOG stability across the scan. [Engine.schemaMu] supplies that
+// already, and strictly better: every catalog mutator — both [lpg.Graph.ApplyAtomically]
+// call sites, and every DDL entry point (runCreateBTreeIndex, runCreateHashIndex,
+// runDropIndex, runCreateConstraint, runDropConstraint) — holds schemaMu
+// EXCLUSIVELY, while an ordinary write holds it shared. Each of this function's three
+// callers is therefore already covered: createConstraintLocked and rewindConstraintDrop
+// run under runCreateConstraint's and runDropConstraint's exclusive hold, and
+// registerRecoveredConstraints runs inside NewEngineWithOptions before the engine is
+// published to anyone. Dropping the View also removes a lock-order hazard, since it
+// nested visMu inside schemaMu purely to obtain what schemaMu already guaranteed.
 //
-// It does NOT give the scan a consistent view of DATA: since rmp #2320 an ordinary
-// write holds the same barrier SHARED, so a value a concurrent writer is adding may
-// or may not be seen here. That is sound for what this scan is FOR — it
+// It never gave the scan a consistent view of DATA and still does not: since rmp #2320
+// an ordinary write holds the barrier SHARED, so a value a concurrent writer is adding
+// may or may not be seen here. That is sound for what this scan is FOR — it
 // pre-validates a constraint that is not yet registered, and every write after
 // registration is checked by the enforcement path — so a value added during the
 // scan is caught there rather than missed. A scan that needed a consistent data
 // view would take a snapshot instead.
+//
+// The #1339 deadlock is prevented by the TWO-PHASE structure below, not by any lock:
+// phase 1 snapshots (id, key) pairs under the mapper shard locks and phase 2 resolves
+// state after every shard lock is released.
 //
 // Polls ctx at the same ~4096-row granularity as [Engine.backfillNodeHashIndex]
 // (rmp #1872 — this scan polled no cancellation at all before, leaving a large
@@ -3750,38 +3790,35 @@ func (e *Engine) scanLabelProperty(ctx context.Context, label, prop string) (val
 		key string
 		id  graph.NodeID
 	}
-	e.g.View(func() {
-		// Phase 1 — snapshot the interned nodes. The callback must not touch
-		// any other graph state (see the deadlock note above).
-		refs := make([]nodeRef, 0, mapper.Len())
-		mapper.Walk(func(id graph.NodeID, key string) bool {
-			refs = append(refs, nodeRef{id: id, key: key})
-			return true
-		})
-
-		// Phase 2 — resolve graph state with no shard lock held.
-		for i := range refs {
-			if i&pollGranularityMask == 0 {
-				if cerr := ctx.Err(); cerr != nil {
-					err = cerr
-					return
-				}
-			}
-			r := refs[i]
-			if e.g.IsTombstoned(r.id) {
-				continue
-			}
-			if !e.g.HasNodeLabel(r.key, label) {
-				continue
-			}
-			v, ok := e.g.GetNodeProperty(r.key, prop)
-			if !ok {
-				anyNull = true
-				continue
-			}
-			values = append(values, v)
-		}
+	// Phase 1 — snapshot the interned nodes. The callback must not touch any
+	// other graph state (see the deadlock note above).
+	refs := make([]nodeRef, 0, mapper.Len())
+	mapper.Walk(func(id graph.NodeID, key string) bool {
+		refs = append(refs, nodeRef{id: id, key: key})
+		return true
 	})
+
+	// Phase 2 — resolve graph state with no shard lock held.
+	for i := range refs {
+		if i&pollGranularityMask == 0 {
+			if cerr := ctx.Err(); cerr != nil {
+				return values, anyNull, cerr
+			}
+		}
+		r := refs[i]
+		if e.g.IsTombstoned(r.id) {
+			continue
+		}
+		if !e.g.HasNodeLabel(r.key, label) {
+			continue
+		}
+		v, ok := e.g.GetNodeProperty(r.key, prop)
+		if !ok {
+			anyNull = true
+			continue
+		}
+		values = append(values, v)
+	}
 	return values, anyNull, err
 }
 
@@ -15706,8 +15743,8 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 	// exclude another writer — that is the point — but it does exclude a DDL, whose
 	// backfill scan and registration must not have a write land between them. See
 	// [Engine.schemaMu] for the index-backfill race that measured.
-	e.schemaMu.RLock()
-	defer e.schemaMu.RUnlock()
+	schemaTok := e.schemaGate.WeakLockAuto()
+	defer e.schemaGate.WeakUnlock(schemaTok)
 
 	// touched tracks the node keys this statement creates, labels, or strips a
 	// property from, so the commit-time NOT NULL existence check (#1754) re-checks
@@ -15814,17 +15851,29 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 	return r, nil
 }
 
-// execUnderBarrier builds the physical operator tree for plan and runs the
-// whole statement to a materialised [Result] inside one [lpg.Graph.ApplyAtomically]
-// (visMu) acquisition — the shared core of both the autocommit [Engine.RunInTx]
-// path and the explicit-transaction [ExplicitTx.Exec] path.
+// execUnderBarrier builds the physical operator tree for plan and runs the whole
+// statement to a materialised [Result] inside ONE write bracket supplied by the
+// caller as applyFn — the shared core of both the autocommit [Engine.RunInTx] path
+// and the explicit-transaction [ExplicitTx.Exec] path.
 //
-// Running build + drain under visMu stops a concurrent reader observing a torn
-// snapshot and stops a concurrent writer growing the node space mid-build
-// (#1077), and makes every eager mutation flip visible to [lpg.Graph.View]
-// readers atomically (audit gap F3, docs/isolation-design.md). build runs under
-// visMu.Lock, so nothing in it may call g.View / g.ApplyAtomically (visMu is
-// non-re-entrant).
+// THE NAME IS HISTORICAL. This used to run inside [lpg.Graph.ApplyAtomically], an
+// EXCLUSIVE visMu acquisition, and the comment here used to say that running build
+// and drain under visMu is what stops a concurrent reader observing a torn snapshot
+// and a concurrent writer growing the node space mid-build (#1077). That is no
+// longer the mechanism: both call sites now pass a SHARED bracket —
+// [lpg.Graph.ApplyInVersionedTx] for an explicit transaction and the bounded shared
+// hold of applyVersionedInstant for autocommit — so concurrent writers DO run
+// alongside this one.
+//
+// What replaced exclusion is versioning: every version the statement writes points
+// at one commit record, published with a single atomic store, so a concurrent
+// reader resolving through [mvcc.Visible] sees all of the statement or none of it
+// (rmp #2300, #2320). The shared hold that remains excludes only DDL.
+//
+// The re-entrancy constraint survives and is stricter than it looks: nothing inside
+// may call g.View / g.ApplyAtomically / g.ApplyVersioned, because visMu is
+// non-re-entrant and Go's RWMutex prefers a queued writer, so a nested SHARED
+// acquisition deadlocks the moment an exclusive acquirer queues.
 //
 // commit selects the transaction-finalisation behaviour:
 //

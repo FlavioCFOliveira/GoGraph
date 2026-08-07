@@ -185,12 +185,15 @@ func (e *ErrStatementPipeline) Unwrap() error { return e.Err }
 //
 // See the package file exectx.go for the full transaction, durability, and
 // concurrency contract. In brief: writes accumulate and become durable together
-// on Commit (WAL-backed) or unwind together on Rollback; the handle holds both
-// the engine's writer serialisation and the graph's transaction-visibility write
-// lock (visMu) for its whole lifetime — write-write Isolation for writers; a
-// concurrent reader takes no barrier and observes snapshot isolation against
-// the state before this transaction began, without waiting for it (rmp #2290);
-// it is NOT safe for concurrent use by multiple goroutines.
+// on Commit (WAL-backed) or unwind together on Rollback; the handle holds NO LOCK
+// across its lifetime — each statement takes the schema barrier SHARED for its own
+// duration and nothing is held between statements (rmp #2305), and the engine's
+// former writer serialisation (Engine.writeMu) no longer exists at all (rmp #2306).
+// Write-write isolation therefore comes from per-object conflict detection against
+// this transaction's snapshot (rmp #2300), not from exclusion. A concurrent reader
+// takes no barrier and observes snapshot isolation against the state before this
+// transaction began, without waiting for it (rmp #2290); the handle itself is NOT
+// safe for concurrent use by multiple goroutines.
 type ExplicitTx struct {
 	eng *Engine
 
@@ -289,9 +292,15 @@ type ExplicitTx struct {
 	// than read-committed — without it each Exec opened a fresh instant and a
 	// commit landing between two statements became visible mid-transaction.
 	//
-	// nil on a write handle, which needs no separate view: it holds visMu
-	// exclusively from BEGIN to COMMIT, so nothing else can publish a commit
-	// while it runs, and it must read the present to see its own writes.
+	// nil on a write handle, which needs no separate view because it must read the
+	// PRESENT to see its own uncommitted writes: it resolves through its own
+	// transaction id via [mvcc.Visible], not through a pinned start instant.
+	//
+	// This used to say the write handle holds visMu exclusively from BEGIN to
+	// COMMIT so nothing else can publish a commit while it runs. THAT IS FALSE
+	// since rmp #2305: no lock spans the handle, other transactions publish
+	// commits freely while it is open, and what keeps this handle's own reads
+	// stable is the transaction id it stamps its versions with — not exclusion.
 	//
 	// The horizon slot it occupies is released exactly once, in [release], so
 	// every exit path — Commit, Rollback, a panic in Exec, a panic in

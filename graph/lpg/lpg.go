@@ -72,7 +72,6 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index/label"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
-	"github.com/FlavioCFOliveira/GoGraph/internal/ctxlock"
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
@@ -610,10 +609,37 @@ type Graph[N comparable, W any] struct {
 	// on this lock; rmp #2310 moves it to a transactional instant. See
 	// [Graph.View] for the full division and the measurement behind it.
 	//
-	// It is a RWMutex rather than an atomic snapshot pointer by deliberate,
-	// correctness-first choice. The immutable CSR analytics path does not go
+	// # Why this is an mvcc.Gate and no longer a sync.RWMutex (rmp #2337)
+	//
+	// The contract is UNCHANGED — many weak (ordinary write) holders together, a
+	// strong (DDL) holder excluding all of them — and only the implementation moved.
+	// As a sync.RWMutex the shared acquisition was an atomic add on that mutex's ONE
+	// readerCount word, so every write on every core took a coherence miss on a
+	// single shared line purely to announce a NON-conflict; rmp #2203 measured that
+	// shape degrading 17.6x from 1 to 10 cores. [mvcc.Gate] stripes the weak side
+	// over padded per-slot counters and makes the strong flag read-mostly, so an
+	// uncontended weak acquisition touches no globally shared line: 3.77 ns at 1 core
+	// falling to 0.434 ns at 10, where the RWMutex rises from 3.75 ns to 89.5 ns
+	// (docs/benchmarks/mvcc-weak-strong-gate-2026-08-07.md).
+	//
+	// WHAT IT DOES NOT BUY, STATED SO NOBODY INFERS OTHERWISE. The end-to-end effect
+	// on BenchmarkWriteScaling/mem is NOT ESTABLISHED. Interleaved back-to-back arms
+	// measured the swap as performance-neutral within noise, and an earlier
+	// across-time comparison that appeared to show a gain was invalid — the host
+	// drifts enough between runs to manufacture both a win and a regression from the
+	// same code. What is established is the primitive's own scaling and the removal
+	// of a shared cache line from the write path; the write-scaling CEILING is set
+	// elsewhere, by the label.Index nesting of rmp #2338/#2339.
+	//
+	// MVCC cannot subsume this barrier: what it guards is the CATALOG, which is not
+	// versioned, so a DDL has no snapshot to be made visible through. Memgraph and
+	// PostgreSQL both keep the identical weak/strong split for the same reason.
+	//
+	// The gate is non-re-entrant in both modes, exactly as the RWMutex was, and the
+	// re-entrancy guard below is unchanged — it tracks goroutine identity and never
+	// depended on the primitive's type. The immutable CSR analytics path does not go
 	// through these methods and stays lock-free.
-	visMu sync.RWMutex
+	visGate mvcc.Gate
 
 	// writeTx names the write transaction whose bracket is currently open, and
 	// through it the read view the WRITE path resolves through (rmp #2299): as of
@@ -771,7 +797,7 @@ func (g *Graph[N, W]) ApplyAtomically(fn func() error) error {
 	// stamp is removed while the lock is still held and only ever by its
 	// owner.
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
-	g.visMu.Lock()
+	g.visGate.StrongLock()
 	g.barrier.stampWriter(gid)
 	w := g.openWriteBracket()
 	// ONE deferred call for the whole unwind rather than three. Each open-coded
@@ -780,7 +806,7 @@ func (g *Graph[N, W]) ApplyAtomically(fn func() error) error {
 	// most of it the defer, not the atomics. Folding the three into
 	// finishWrite gets it back; see that method for the ordering the fold must
 	// preserve.
-	defer g.visMu.Unlock()
+	defer g.visGate.StrongUnlock()
 	defer g.finishWrite(w, gid)
 	return fn()
 }
@@ -845,13 +871,13 @@ func (g *Graph[N, W]) ApplyVersioned(fn func(WriteTx) error) error {
 	// stamp is taken only after the lock succeeds, for the reason spelled out in
 	// [Graph.ApplyAtomically].
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
-	g.visMu.RLock()
+	visTok := g.visGate.WeakLockAuto()
 	g.barrier.stampWriter(gid)
 	// NO adjacency commit window here, unlike the exclusive bracket — see
 	// [Graph.finishWriteShared] for why opening one would be a data race and why
 	// the shard-clone dedup it exists to provide is preserved without it.
 	w := g.beginWrite()
-	defer g.visMu.RUnlock()
+	defer g.visGate.WeakUnlock(visTok)
 	defer g.finishWriteShared(w, gid)
 	return fn(WriteTx{w: w})
 }
@@ -962,11 +988,12 @@ func (g *Graph[N, W]) BeginVersionedTx() WriteTx {
 // Safe for concurrent use; each goroutine must pass its own transaction.
 func (g *Graph[N, W]) ApplyInVersionedTx(ctx context.Context, tx WriteTx, fn func(WriteTx) error) error {
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
-	if err := ctxlock.Acquire(ctx, g.visMu.TryRLock, g.visMu.RLock, g.visMu.RUnlock); err != nil {
+	visTok, err := g.visGate.WeakLockCtxAuto(ctx)
+	if err != nil {
 		return err
 	}
 	g.barrier.stampWriter(gid)
-	defer g.visMu.RUnlock()
+	defer g.visGate.WeakUnlock(visTok)
 	defer g.barrier.clearWriter(gid)
 	return fn(tx)
 }
@@ -1003,9 +1030,9 @@ func (g *Graph[N, W]) endVersionedTxInstant(tx WriteTx) uint64 {
 	// unconditionally does not fill the histogram with samples of nothing.
 	defer metrics.Time("graph.lpg.EndVersionedTx").Stop()
 	gid := g.barrier.checkWriter()
-	g.visMu.RLock()
+	visTok := g.visGate.WeakLockAuto()
 	g.barrier.stampWriter(gid)
-	defer g.visMu.RUnlock()
+	defer g.visGate.WeakUnlock(visTok)
 	defer g.barrier.clearWriter(gid)
 	ts := g.endWrite(tx.w)
 	// After endWrite, so nothing the transaction still reads is reclaimable while
@@ -1133,12 +1160,13 @@ func (g *Graph[N, W]) finishWriteSharedInstant(w *writeCtx, gid int64, out *uint
 func (g *Graph[N, W]) applyVersionedInstant(ctx context.Context, fn func(WriteTx) error) (ts uint64, err error) {
 	defer metrics.Time("graph.lpg.ApplyVersionedCtx").Stop()
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
-	if err := ctxlock.Acquire(ctx, g.visMu.TryRLock, g.visMu.RLock, g.visMu.RUnlock); err != nil {
+	visTok, err := g.visGate.WeakLockCtxAuto(ctx)
+	if err != nil {
 		return 0, err
 	}
 	g.barrier.stampWriter(gid)
 	w := g.beginWrite()
-	defer g.visMu.RUnlock()
+	defer g.visGate.WeakUnlock(visTok)
 	defer g.finishWriteSharedInstant(w, gid, &ts)
 	return 0, fn(WriteTx{w: w})
 }
@@ -1193,7 +1221,7 @@ func (g *Graph[N, W]) LockBarrier() {
 // queued acquire cannot simply be abandoned.
 func (g *Graph[N, W]) LockBarrierCtx(ctx context.Context) error {
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
-	if err := ctxlock.Acquire(ctx, g.visMu.TryLock, g.visMu.Lock, g.visMu.Unlock); err != nil {
+	if err := g.visGate.StrongLockCtx(ctx); err != nil {
 		return err
 	}
 	// The stamp records the CALLING goroutine, which is the logical holder even
@@ -1246,7 +1274,7 @@ func (g *Graph[N, W]) UnlockBarrier() {
 	// releasing the barrier.
 	g.adj.EndCommit()
 	g.barrier.clearWriter(gid)
-	g.visMu.Unlock()
+	g.visGate.StrongUnlock()
 }
 
 // ApplyInsideLocked is the barrier-already-held variant of [Graph.ApplyAtomically].
@@ -1272,10 +1300,10 @@ func (g *Graph[N, W]) ApplyInsideLocked(fn func() error) error {
 // the graph in three different places.
 func (g *Graph[N, W]) ApplyAtomicallyTx(fn func(WriteTx) error) error {
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
-	g.visMu.Lock()
+	g.visGate.StrongLock()
 	g.barrier.stampWriter(gid)
 	w := g.openWriteBracket()
-	defer g.visMu.Unlock()
+	defer g.visGate.StrongUnlock()
 	defer g.finishWrite(w, gid)
 	return fn(WriteTx{w: w})
 }
@@ -1374,8 +1402,8 @@ func (g *Graph[N, W]) ApplyInsideLockedTx(fn func(WriteTx) error) error {
 func (g *Graph[N, W]) View(fn func()) {
 	gid := g.barrier.enterReader() // panics on re-entry from this goroutine
 	defer g.barrier.exitReader(gid)
-	g.visMu.RLock()
-	defer g.visMu.RUnlock()
+	visTok := g.visGate.WeakLockAuto()
+	defer g.visGate.WeakUnlock(visTok)
 	fn()
 }
 

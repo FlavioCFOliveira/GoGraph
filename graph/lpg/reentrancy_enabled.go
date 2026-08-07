@@ -151,7 +151,7 @@ func reentrancyMessage(nested, held string) string {
 	return fmt.Sprintf(
 		"lpg: Graph.%s is not re-entrant; this goroutine is already inside Graph.%s, "+
 			"and a nested barrier acquisition from the same goroutine would deadlock the engine "+
-			"(visMu is a non-re-entrant sync.RWMutex). Restructure the call so the inner work runs "+
+			"(the visibility barrier is a non-re-entrant mvcc.Gate). Restructure the call so the inner work runs "+
 			"outside the enclosing View/ApplyAtomically.",
 		nested, held)
 }

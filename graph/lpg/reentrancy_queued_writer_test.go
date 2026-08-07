@@ -54,7 +54,7 @@ func waitUntilQueuedOnWriteLock(t *testing.T, gid int64) {
 		}
 		for _, seg := range strings.Split(string(buf[:n]), "\n\n") {
 			if strings.HasPrefix(seg, prefix) &&
-				strings.Contains(seg, "sync.(*RWMutex).Lock") &&
+				strings.Contains(seg, "Gate).StrongLock") &&
 				strings.Contains(seg, "ApplyAtomically") {
 				return
 			}
