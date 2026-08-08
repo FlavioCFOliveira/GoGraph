@@ -7,14 +7,15 @@ recollection.
 ## How these numbers were produced
 
 - `BenchmarkWriteContention` in `bench/mvccwrite`, arms `create-labelled-node`,
-  `update-property`, `label-add-remove`, `mixed`.
+  `update-property`, `label-add-remove`, `mixed`, `create-edge`.
 - **Interleaved**: two `go test -c` binaries alternated inside one loop, **n = 10** each,
   compared with `benchstat`. An across-time comparison on this host has been shown
   worthless.
 - **No `-race`.** Host load averages 9.16 / 9.13 / 10.17 at the time of the run, which
   matters for the self-control below and is why it was run at all.
 - Apple M4, 10 cores, `darwin/arm64`, Go toolchain as vendored.
-- `create-edge` is **excluded** — see the caveat at the end.
+- `create-edge` was excluded at first and is now included; see the note at the end for the
+  fixture change that made it measurable.
 
 ## The harness is validated, not assumed
 
@@ -53,9 +54,10 @@ total work is constant across writer counts, so it equals `ns/op(1) / ns/op(N)`.
 | `update-property` | 3111 | 1768 | 1616 | 1517 | **2.05×** |
 | `label-add-remove` | 4459 | 3089 | 3009 | 2825 | **1.58×** |
 | `mixed` | 5954 | 2083 | 1965 | 1990 | **2.99×** |
+| `create-edge` | 13820 | 7901 | 8221 | 8567 | **1.61×** |
 
-`allocs/op` is **independent of the writer count** on all four — 43/42/41/41,
-52/53/53/53, 62/64/65/66, 56/56/55/55. That independence is the invariant that says the
+`allocs/op` is **independent of the writer count** on all five — 43/42/41/41,
+52/53/53/53, 62/64/65/66, 56/56/55/55, 167/168/161/161. That independence is the invariant that says the
 fixture is not leaking into the measurement, and its violation is what exposed three
 successive artefacts while these arms were being built.
 
@@ -73,14 +75,21 @@ cross-check that the new harness measures the same thing the old one did.
   hammering one, which is consistent with the deficit being per-substore shared state
   rather than a single global lock.
 
-## Caveat: `create-edge` is excluded and is NOT a baseline
+## `create-edge` — why it was excluded, and what fixed it
 
-Its `allocs/op` still varies with the writer count (1118 → 804 → 329 → 215), so it fails
-the independence invariant. The arm creates edges between `key(w,i)` and `key(w,i+1)`
-with `i % contentionPool`, so pairs repeat and accumulate **parallel edges**; the number
-each pair receives depends on `b.N / writers`, hence on the writer count. Fix the arm
-(distinct pairs per iteration, or a pair count that does not depend on `writers`) before
-quoting anything from it.
+Its `allocs/op` originally varied with the writer count (1118 → 804 → 329 → 215), failing
+the independence invariant. The arm joined two POOLED nodes, so pairs repeated and it
+accumulated **parallel edges** — as many as `b.N / writers` per pair — which made per-op
+cost a function of the writer count rather than of contention.
+
+Creating **both endpoints fresh** per iteration fixed it: `allocs/op` is now 167/168/161/161,
+flat, and the arm is in the table above. Adjacency, the per-edge side stores and the count
+store are all still exercised — the three structures the arm exists for — while no node's
+degree and no pair's edge count grows with `b.N`. It is the most expensive arm because its
+unit is two nodes plus an edge.
+
+Its 1.61× is the second-worst scaler after `label-add-remove`, which is consistent with the
+edge write touching the most shared structures per commit.
 
 ## Discipline for the tasks that compare against this
 

@@ -436,11 +436,25 @@ var contentionWorkloads = []contentionWorkload{
 		name:  "create-edge",
 		setup: seedPool,
 		unit: func(ctx context.Context, eng *cypher.Engine, w, i int) error {
+			// BOTH ENDPOINTS ARE FRESH, and that is what makes the arm measurable.
+			//
+			// It used to join two POOLED nodes, so pairs repeated and the arm
+			// accumulated PARALLEL EDGES between them — as many as b.N/writers per
+			// pair. Per-op cost then depended on the writer count (allocs/op ran
+			// 1118 -> 215 across writers 1..32), so the arm failed the independence
+			// invariant that says a fixture is not leaking into its own measurement,
+			// and it was excluded from the rmp #2359 baseline for that reason.
+			//
+			// Creating both endpoints per iteration keeps adjacency, the per-edge side
+			// stores and the count store exercised — the three structures this arm
+			// exists for — while no node's degree and no pair's edge count grows with
+			// b.N. It is a heavier unit than a bare create, as expected: two nodes and
+			// an edge.
 			return runOne(ctx, eng,
-				`MATCH (a:Account {k: $a}), (b:Account {k: $b}) CREATE (a)-[:PAYS {amt: $amt}]->(b)`,
+				`CREATE (a:Account {k: $a})-[:PAYS {amt: $amt}]->(b:Account {k: $b})`,
 				map[string]expr.Value{
-					"a":   expr.StringValue(contentionKey(w, i)),
-					"b":   expr.StringValue(contentionKey(w, i+1)),
+					"a":   expr.StringValue("e" + itoaSmall(w) + "-" + itoaSmall(i) + "-a"),
+					"b":   expr.StringValue("e" + itoaSmall(w) + "-" + itoaSmall(i) + "-b"),
 					"amt": expr.IntegerValue(int64(i)),
 				})
 		},
