@@ -43,13 +43,23 @@ package mvccwrite
 //     op's allocation count cannot depend on how many peers are running. FIXED, in
 //     seedPool.
 //
-//  2. PER-NODE CHURN STILL VARIES WITH THE WRITER COUNT. Each writer runs perWriter =
-//     b.N/writers iterations over a pool of `contentionPool` nodes, so at ONE writer
-//     each node receives ~writers times more updates than at N — and therefore a far
-//     deeper property delta chain to walk. That is why the single-writer arm measures
-//     51 us/op against 1.8 us at 32, and why the ratio comes out at an impossible
-//     28x for 32 writers. NOT YET FIXED. The ratio is measuring chain depth as much
-//     as concurrency.
+//  2. STILL OPEN, and my explanation for it was TESTED AND REFUTED. update-property
+//     reports an impossible 28x scaling at 32 writers: 50.9 us per commit at one
+//     writer against 1.85 us at 32, i.e. per-commit cost ~27x LOWER with more
+//     writers. I hypothesised per-node churn — each writer runs b.N/writers
+//     iterations over a fixed pool, so one writer would give each node ~writers times
+//     more updates and a deeper delta chain to walk. So I made per-writer work
+//     CONSTANT, which makes each node take ~78 updates at EVERY writer count, and the
+//     ratio moved 28.28x -> 27.55x. Churn is not the cause, and the speculative change
+//     was reverted rather than shipped.
+//
+//     The anomaly is therefore unexplained and the ratio must not be quoted. Next
+//     candidate, untested: the VACUUM. Total write volume grows with the writer count
+//     (640k updates at 32 writers against 20k at one), so the reclaim threshold may
+//     only be reached in the busy arms, leaving the single-writer arm walking chains
+//     nobody has swept. MVCCStats.ChainDepth and VacuumStats would settle it. Until
+//     something is MEASURED, "more writers is faster per commit" is an observation
+//     about this fixture and not about the engine.
 //
 // So: the per-arm ABSOLUTE numbers at a FIXED writer count are usable, and the
 // oracle guarantees each arm touches its target. The cross-writer-count ratio of a
