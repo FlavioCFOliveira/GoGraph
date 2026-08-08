@@ -30,7 +30,10 @@ scenario is free of one, and it reproduces badly. This harness answers the
 complementary question — *"over every interleaving of these steps, is the
 observable outcome the expected one?"* — and answers it the same way every run.
 
-It **complements** the existing tests; it replaces none of them.
+It **complements** the existing tests; it replaces none of them. Its companion
+is [`internal/anomaly`](isolation-anomalies.md), which classifies what an
+interleaving produced against the Adya phenomena — this harness decides WHICH
+executions to try, that one decides WHAT a bad outcome is called.
 
 ---
 
