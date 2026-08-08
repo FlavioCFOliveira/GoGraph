@@ -2949,3 +2949,49 @@ allocs/op IDENTICAL at every count (all samples equal, p=1.000), sec/op all flat
 −0.27%), B/op geomean −0.70%. A structural control carries the claim where the benchmark
 cannot: with no invariant declared `MVCCStats.ConstraintStamps` stays 0, and the same
 workload with one makes it non-zero.
+
+Incrementally synced at commit `496eeb96` (2026-08-08, task **rmp #2355**, sprint 336 —
+the property path decided UNIQUE from a raw label read). +10 nodes (`Task` `2355`
+COMPLETED and `Task` `2365` BACKLOG; `Commit` `496eeb96`; `Function` `exec.labelsInTx`;
+`Method` `NodeLabelsInTx` on both mutator adapters; 5 `Test`s in
+`cypher/constraint_unique_rawlabel_test.go`) plus 1 `Finding`, and +16 edges.
+
+**THE DEFECT, and why it is the same family as #2353.** A UNIQUE constraint attaches to a
+LABEL, so deciding what to reserve or release for a property write begins by asking which
+labels the node carries — and every such site asked the RAW graph, which answers with the
+newest stored value including other in-flight transactions' eager writes. Conflicts being
+per SUBSTORE, a peer writing the LABEL never collided with this transaction writing the
+PROPERTY, so a peer's uncommitted `REMOVE b:Person` made the node look unconstrained and
+the value was written with no reservation. Two `:Person` nodes then shared a value declared
+UNIQUE. The codebase already NAMED this class in `cypher/api.go` when rmp #2352 hardened the
+LABEL path; the property path's ~26 sites were left on the raw read.
+
+**THE CHOKE POINT.** `exec.labelsInTx` is the single helper all 27 constraint-decision sites
+now route through, resolving via `txVisibleNodeReader.NodeLabelsInTx` and falling back to the
+raw read only for a mutator carrying no transaction. ONE helper rather than 27 corrected
+reads, deliberately: per-site drift is what left this path behind last time. The three
+remaining raw label reads in `cypher/exec` are MERGE MATCH semantics
+(`merge_search.go:100,217`, `merge_pattern.go:754`), deliberately untouched and filed as
+**#2365** with instructions to REPRODUCE before fixing.
+
+**THE TICKET'S SECOND HALF WAS MISDIAGNOSED**, and the `Finding` records the correction. The
+leaked reservation was attributed to the property writer releasing nothing; it does release.
+The cause is the ABORTING transaction: its undo re-adds the label and re-reserves the value
+IT sees — the pre-image, since the peer's new value is invisible to it — landing AFTER the
+peer already released it, so the value ends up reserved with no live holder. Established by
+ORDERING rather than by reading: rollback after the peer write leaks, before does not, no
+peer does not. The mirror leaks separately: with the removal COMMITTED the node is no longer
+a member yet the newly written value stays reserved. Both are availability defects rather
+than consistency ones, which is why they were assessed apart from the duplicate.
+
+**THE STAMP WAS EXTENDED TO UNIQUENESS** (user decision, 2026-08-08) rather than the undo
+ordering patched: both kinds of invariant bind a label to a property, so both need the two
+substores to collide, and node granularity is what the reference engines use.
+**Widening the GATE alone was measured to be a no-op** — neither a label LOSS nor a property
+SET was a stamping site, because the original sites cover only writes that can introduce a
+MISSING property. Two new sites were required (`recordRemoveNodeLabel`,
+`recordSetNodeProperty`), and the stamp now carries its OWN gate
+(`mutationUndo.stampCon`, set from `HasAnyNotNull() || HasAnyUnique()`) instead of riding on
+`touched`, which stays existence-only so a uniqueness-only schema does not pay the
+commit-time existence scan. The conflict-surface increase is bounded by
+`TestUnique_DisjointNodesUnderUniqueDoNotConflict`.
