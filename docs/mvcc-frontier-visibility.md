@@ -1,8 +1,29 @@
-# The contiguous frontier hides acknowledged commits (rmp #2369, #2368)
+# The contiguous frontier and cross-statement visibility (rmp #2369 RETRACTED, #2368 open)
 
-**Status: open defect.** An acknowledged commit can be invisible to a later transaction.
-This document records the reproduction and the root cause so the fix can be judged
-against evidence rather than against a remembered argument.
+**Status: RETRACTED as a defect. The mechanism below is real and correctly described;
+the "defect" framing was wrong and is corrected here.**
+
+`cypher/session.go` states the observed behaviour as the INTENDED contract, verbatim:
+*"Engine gives every statement SNAPSHOT ISOLATION ... It promises nothing ACROSS
+statements. A caller that commits and then reads may take its snapshot at an instant
+the commit has not reached, because a commit becomes visible when the CONTIGUOUS
+frontier advances past it, and an earlier in-flight commit can hold that frontier back.
+That is correct snapshot isolation and it is what a database gives an unrelated
+reader."*
+
+The reproduction below used **bare `eng.RunInTx`**, which is exactly the case that
+promises nothing across statements. It therefore measured the documented contract, not
+a violation of it. `Session` (rmp #2328/#2329) is the read-your-own-writes surface, and
+it uses a floor plus a **wait** rather than an assignment — deliberately, because
+*"the snapshot is still taken at a contiguous frontier point, so it can never observe a
+state no serial order produced. A snapshot pinned ABOVE the frontier could."*
+
+What remains genuinely open is narrower, and is tracked on rmp #2369: whether `Session`
+DELIVERS that guarantee under load (NOT established — the attempt to test it was
+broken), and whether the DEFAULT surface should give read-your-own-writes without the
+caller opting in, since every reference engine does so on an ordinary connection. The
+livelock in rmp #2368 is unaffected by this retraction: a write that cannot progress
+after 64 fresh attempts is not explained by any isolation contract.
 
 ## The reproduction, at the primitive level
 
@@ -25,7 +46,7 @@ A **finished** commit stays invisible for as long as **any older** commit is in 
 because `Clock.ReadTS` returns the **contiguous frontier** (`visible`), which advances
 only as the commit log's `oldest` advances.
 
-## Why that becomes a consistency defect under load
+## What that means under load (measured on the BARE-ENGINE surface)
 
 `Graph.beginWrite` and `Graph.beginWriteCtx` both take a new transaction's `startTS`
 from `Clock.ReadTS()`. With sustained concurrent writers there is essentially always a
@@ -71,9 +92,11 @@ succeeding; readers never saw them."* Sprint 335 measured the frontier's tail co
 accepted it (*"the contiguous frontier costs p50 nothing and p99 one fsync"*); what was
 not established is that under sustained multi-writer load the tail becomes **permanent**.
 
-## How the reference engines avoid it
+## How the reference engines compare
 
-Every reference uses a **richer snapshot than a scalar**, and none can exhibit this.
+Every reference uses a **richer snapshot than a scalar**. Corrected reading: this makes
+their DEFAULT stronger than GoGraph's default, not GoGraph incorrect — GoGraph offers
+the same guarantee through `Session`.
 
 | Engine | Snapshot | Consequence |
 |---|---|---|
@@ -82,9 +105,12 @@ Every reference uses a **richer snapshot than a scalar**, and none can exhibit t
 | Memgraph | Start timestamp loaded under `engine_lock_` together with the last committed timestamp (`src/storage/v2/inmemory/storage.cpp`) | A new view is consistent with the newest **commit**, not with the oldest unfinished one. |
 
 GoGraph excludes a **contiguous prefix**; the references exclude only the **specific
-in-flight set**. That difference is the defect, and it is not a tuning constant.
+in-flight set**. That is a real difference in DEFAULT behaviour and worth a decision,
+but it is not a correctness defect: GoGraph provides read-your-own-writes through
+`Session`, and its snapshot is deliberately never pinned above the frontier, so it
+cannot observe a state no serial order produced.
 
-## Options for the fix — architecture change, needs sign-off
+## Options IF the default is to change — architecture change, needs sign-off
 
 1. **Snapshot = (frontier, in-flight set)** — the PostgreSQL/InnoDB shape. `mvcc.Visible`
    excludes only the in-flight set. Correct and reference-aligned. Costs a set read per
@@ -102,7 +128,11 @@ in-flight set**. That difference is the defect, and it is not a tuning constant.
 Seven hypotheses were refuted in this area before the root cause held: a missing index,
 per-node churn, unswept delta chains, a mis-calibrated planner crossover, aborted heads
 as a self-perpetuating obstacle, the publication window alone, and a stale-read probe
-that passed vacuously. **Instrument before proposing.** The regression test must assert
+that passed vacuously, and finally the "defect" framing of this very document, which
+the module's own `session.go` header refutes. A ninth: the attempt to test `Session`
+hand-rolled a count extraction with a type assertion instead of using `countQ`, so
+every round read 0 and appeared to fail. **Instrument before proposing, and read the
+contract before calling anything a defect.** The regression test must assert
 the reference behaviour — `ReadTS() >= b` immediately after `PublishCommitTS(b)` — which
 fails today, so it lands with the fix; committing it against the present behaviour would
 encode the defect as correct.
