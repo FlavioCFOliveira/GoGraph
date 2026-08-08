@@ -188,6 +188,34 @@ type WriteTx struct{ w *writeCtx }
 // transaction to name and every write is committed as it is made.
 func (tx WriteTx) Valid() bool { return tx.w != nil }
 
+// Err returns the serialization conflict this transaction has been doomed by, or
+// nil when it is still viable. The error wraps [mvcc.ErrSerializationConflict] and
+// carries the store attribution through [mvcc.Conflict].
+//
+// # Why an embedder needs this and cannot do without it
+//
+// Most primitives report a conflict by returning it, so a caller learns at the
+// statement. But a conflict hit by a primitive that CANNOT return an error — a
+// label removal, a property delete, any of the five per-edge side stores — is
+// recorded on the transaction instead, and the only way to observe it is to ask
+// (rmp #2300).
+//
+// [labelTx.commit] asks, which is what makes the substrate's own transactions
+// safe. An embedder that drives the write bracket itself — cypher's ExplicitTx and
+// its autocommit path both do — must ask too, and BEFORE it makes anything
+// durable, or a transaction whose only conflicting write went through such a
+// primitive commits successfully having dropped it. That is a lost update with
+// nothing anywhere reporting it, and it is what rmp #2354 measured: a `REMOVE
+// n:Label` that collided with a peer's uncommitted removal returned nil from the
+// statement AND nil from Commit, and the label was still there afterwards.
+//
+// Memgraph reads the same record in the same place — Storage::Commit tests
+// `transaction_.must_abort` and returns SerializationError
+// (src/storage/v2/storage.cpp).
+//
+// Nil on the zero value, so a caller can ask unconditionally.
+func (tx WriteTx) Err() error { return tx.w.err() }
+
 // EnterUndo marks the start of this transaction's PHYSICAL undo replay, during
 // which its writes are withdrawals of work it already applied rather than new
 // updates.

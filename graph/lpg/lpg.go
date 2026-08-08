@@ -2613,22 +2613,53 @@ func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, tx *writeCtx) error {
 	// shard lock. The write-back is load-bearing — add may grow or promote the
 	// bag's backing storage, so the updated header must be re-stored.
 	bag := sh.m[id]
-	// P0 MVCC spike (rmp #2275), inert unless armed: record the undo BEFORE
-	// mutating, and only when the label is not already present — re-asserting a
-	// label the node already carries changes nothing, so a delta for it would be
-	// a version that never existed. MERGE's MATCH branch re-asserts labels on
-	// every match, so this guard is what keeps a delta per WRITE rather than a
-	// delta per statement.
-	if g.labelDeltasEnabled() && !bag.has(lid) {
+	// P0 MVCC spike (rmp #2275), inert unless armed.
+	if g.labelDeltasEnabled() {
 		// Write-write conflict (rmp #2300), tested against THIS transaction's
 		// snapshot — which travels in tx rather than being looked up on the
 		// graph, so a concurrent writer is never tested against a transaction
 		// that is not its own (rmp #2301). Checked before deltaStamp so a
 		// doomed write allocates no commit record.
+		//
+		// THE TEST RUNS UNCONDITIONALLY, and that is the fix for rmp #2354.
+		//
+		// It used to sit inside the `!bag.has(lid)` guard below, on the reasoning
+		// that only a write which RECORDS a version can conflict. That reasoning
+		// compares against the RAW STORED bag, which already carries other
+		// in-flight transactions' eager writes, so a peer's UNCOMMITTED add of the
+		// same label made has() true and skipped the test — and with it the delta.
+		// The write then reported SUCCESS having applied nothing, and when the peer
+		// rolled back its label went with it:
+		//
+		//	T1: SET n:Acct (eager write puts :Acct in the raw bag), uncommitted
+		//	T2: SET n:Acct → has() is true ⇒ no conflict, no delta, bag.add a no-op
+		//	T2: COMMIT → nil
+		//	T1: ROLLBACK → its undo strips :Acct
+		//	final state: n carries NO :Acct, yet T2 was told it committed.
+		//
+		// Measured exactly that (TestLabelStore_ConcurrentAddThenPeerRollback):
+		// an acknowledged commit that applied nothing, which is a LOST UPDATE.
+		// This is the identical defect rmp #2324 fixed for the node-PROPERTY store,
+		// whose comment in graph/lpg/property.go records the same reasoning failing
+		// there; the label store kept the guard.
+		//
+		// Testing the head first cannot reintroduce a spurious abort. MERGE's MATCH
+		// branch re-asserts a label it just read, and the head it re-asserts over is
+		// its OWN write or an older committed one — visible either way, so no
+		// conflict. A head that is NOT visible means another transaction changed
+		// this node's labels underneath, and refusing that is the correct answer.
 		if head := sh.headStamp(id); tx.conflicts(head) {
 			sh.mu.Unlock()
 			return tx.conflictErr(mvcc.StoreNodeLabels, head)
 		}
+	}
+	// Record the undo BEFORE mutating, and only when the label is not already
+	// present — re-asserting a label the node already carries changes nothing, so a
+	// delta for it would be a version that never existed. MERGE's MATCH branch
+	// re-asserts labels on every match, so this guard is what keeps a delta per
+	// WRITE rather than a delta per statement. Only the DELTA is guarded; the
+	// conflict test above is not (rmp #2354).
+	if g.labelDeltasEnabled() && !bag.has(lid) {
 		ci, ts := g.deltaStamp(tx.record())
 		sh.pushLabelDelta(id, undoRemoveLabel, lid, ci, ts, &g.labelDeltaActive)
 	}
@@ -3757,24 +3788,46 @@ func (g *Graph[N, W]) removeNodeLabelInfo(n N, name string, tx *writeCtx) {
 	}
 	sh := g.nodeLabelShardFor(id)
 	sh.mu.Lock()
+	// P0 MVCC spike (rmp #2275), inert unless armed.
+	//
+	// THE CONFLICT TEST RUNS BEFORE — AND OUTSIDE — BOTH GUARDS (rmp #2354).
+	//
+	// It used to sit inside `if bag, ok2 := sh.m[id]; ok2` AND inside
+	// `bag.has(lid)`, and each of those independently lost this transaction's
+	// removal to a peer's UNCOMMITTED write, because both read the RAW stored bag:
+	//
+	//   - bag.has(lid) false — a peer already removed the label eagerly, so this
+	//     removal was skipped silently and the transaction committed as if it had
+	//     happened. When the peer rolled back, the label came back.
+	//   - sh.m[id] absent — the same, in the case where the peer's eager removal
+	//     took the node's LAST label and deleted the bag entry outright, so not even
+	//     the has() guard was reached.
+	//
+	// [nodeLabelShard.headStamp] reads the DELTA CHAIN (sh.d) and not the bag, so it
+	// answers correctly in both cases, including for a node with no bag entry at all
+	// — where an untouched chain yields zero and never conflicts.
+	//
+	// See setNodeLabelInfo for the add-path half and for the rmp #2324 precedent on
+	// the property store. removeNodeLabelInfo cannot return an error, so the
+	// conflict is RECORDED on the transaction and the write skipped: applying a
+	// doomed write would put a version on a chain whose head belongs to someone
+	// else. The caller learns of it from the error its next writing call returns, or
+	// from commit, which refuses to publish a transaction carrying one. Recording is
+	// what makes the two paths equivalent — without it this removal would be dropped
+	// and the transaction would commit as if it had happened.
+	if g.labelDeltasEnabled() {
+		if head := sh.headStamp(id); tx.conflicts(head) {
+			_ = tx.conflictErr(mvcc.StoreNodeLabels, head)
+			sh.mu.Unlock()
+			return
+		}
+	}
 	if bag, ok2 := sh.m[id]; ok2 {
-		// P0 MVCC spike (rmp #2275), inert unless armed. Guarded on the label
-		// actually being present for the same reason as the add path: removing
-		// a label the node does not carry changes nothing.
+		// Record the undo only when the label is actually present, for the same
+		// reason as the add path: removing a label the node does not carry changes
+		// nothing, so a delta for it would be a version that never existed. Only the
+		// DELTA is guarded; the conflict test above is not (rmp #2354).
 		if g.labelDeltasEnabled() && bag.has(lid) {
-			// See setNodeLabelInfo. removeNodeLabelInfo cannot return an error,
-			// so the conflict is RECORDED on the transaction and the write is
-			// skipped: applying a doomed write would put a version on a chain
-			// whose head belongs to someone else. The caller learns of it from
-			// the error its next writing call returns, or from commit, which
-			// refuses to publish a transaction carrying one. Recording is what
-			// makes the two paths equivalent — without it this removal would be
-			// dropped and the transaction would commit as if it had happened.
-			if head := sh.headStamp(id); tx.conflicts(head) {
-				_ = tx.conflictErr(mvcc.StoreNodeLabels, head)
-				sh.mu.Unlock()
-				return
-			}
 			ci, ts := g.deltaStamp(tx.record())
 			sh.pushLabelDelta(id, undoAddLabel, lid, ci, ts, &g.labelDeltaActive)
 		}

@@ -4615,6 +4615,15 @@ type Result struct {
 	// and WAL rolled back), so it is neither visible nor durable. RunInTx surfaces
 	// it to the caller; Err also reports it. It wraps [exec.ErrConstraintViolation].
 	notNullErr error
+	// conflictErr is set non-nil by commitUnderBarrier when the transaction was
+	// doomed by a write-write serialization conflict that no statement reported —
+	// one recorded by a primitive that cannot return an error (a label removal, a
+	// property delete, any of the five per-edge side stores). Without reading it the
+	// statement committed having silently dropped that write, which is a lost update
+	// (rmp #2354); see [lpg.WriteTx.Err]. The write was rolled back inside the
+	// barrier, so it is neither visible nor durable. It wraps
+	// [mvcc.ErrSerializationConflict] and is RETRIABLE.
+	conflictErr error
 	// walErr is set non-nil when the in-barrier WAL fsync (CommitWALOnly)
 	// failed for an otherwise-successful write (#1281, durable-then-visible).
 	// The eager in-memory mutations have ALREADY been rolled back (undo
@@ -5319,6 +5328,22 @@ func (r *Result) commitUnderBarrier() {
 		r.rollbackUnderBarrier()
 		return
 	}
+	// SERIALIZATION-CONFLICT BACKSTOP (rmp #2354, ACID Atomicity + Isolation).
+	//
+	// The check above catches only a statement that REPORTED an error. A conflict hit
+	// by a primitive that cannot return one — a label removal, a property delete, any
+	// of the five per-edge side stores — is RECORDED on the transaction and surfaces
+	// nowhere unless asked for; see [lpg.WriteTx.Err] for why the recording exists and
+	// what it costs to ignore it. Without this, such a statement committed
+	// successfully having silently dropped its conflicting write, which is a lost
+	// update. The explicit-transaction path carries the identical check
+	// (cypher/exectx.go); both are needed because both drive the bracket themselves.
+	if cerr := r.wtx.Err(); cerr != nil {
+		cmetrics.IncCounter("cypher.RunInTx.serializationConflicts", 1)
+		r.conflictErr = cerr
+		r.rollbackUnderBarrier()
+		return
+	}
 	// Commit-time NOT NULL existence check (#1754, ACID Consistency). Runs on the
 	// success path, INSIDE the barrier, BEFORE the WAL fsync, so a node left in
 	// its final committed state carrying a constrained label but lacking the
@@ -5447,6 +5472,13 @@ func (r *Result) rollbackUnderBarrier() {
 func (r *Result) Err() error {
 	if r.rowsErr != nil {
 		return r.rowsErr
+	}
+	// Before the NOT NULL verdict: a doomed transaction's own view is a state that
+	// will never commit, so a constraint conclusion drawn from it rests on an invalid
+	// premise. The conflict is also the RETRIABLE answer and the one the caller can
+	// act on (rmp #2354).
+	if r.conflictErr != nil {
+		return r.conflictErr
 	}
 	if r.notNullErr != nil {
 		return r.notNullErr
@@ -15894,6 +15926,15 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 		werr := r.walErr
 		_ = r.Close()
 		return nil, fmt.Errorf("cypher: commit WAL: %w", werr)
+	}
+	// A serialization conflict recorded by a primitive that could not report one
+	// (rmp #2354) rolled the write back inside the barrier; surface it rather than a
+	// Result for a write that is neither visible nor durable. Checked before the NOT
+	// NULL verdict, for the reason given on [Result.Err].
+	if r != nil && r.conflictErr != nil {
+		cErr := r.conflictErr
+		_ = r.Close()
+		return nil, cErr
 	}
 	// A commit-time NOT NULL existence violation (#1754) rolled the write back
 	// inside the barrier; surface the typed violation instead of a Result for a

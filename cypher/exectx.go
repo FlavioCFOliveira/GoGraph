@@ -670,6 +670,7 @@ func (tx *ExplicitTx) Commit() (err error) {
 
 	var walErr error
 	var notNullErr error
+	var conflictErr error
 	// The finalisation runs under a SHARED hold carrying this transaction, exactly as
 	// a statement does. It is UNCANCELLABLE: the statements have already applied, so
 	// abandoning the finalisation would leave the commit record neither published nor
@@ -681,6 +682,36 @@ func (tx *ExplicitTx) Commit() (err error) {
 			func(lpg.WriteTx) error { return fn() })
 	}
 	_ = applyFn(func() error {
+		// SERIALIZATION-CONFLICT BACKSTOP (rmp #2354, ACID Atomicity + Isolation).
+		//
+		// Runs before everything else, inside the barrier, BEFORE the WAL fsync.
+		//
+		// tx.failed above catches only a statement that RETURNED an error. A conflict
+		// hit by a primitive that cannot return one — a label removal, a property
+		// delete, any of the five per-edge side stores — is RECORDED on the
+		// transaction instead and surfaces nowhere unless it is asked for
+		// ([lpg.WriteTx.Err], and see it for the prior art). Without this check such a
+		// transaction committed successfully having silently dropped that write:
+		//
+		//	T1: REMOVE n:Acct   (uncommitted)
+		//	T2: REMOVE n:Acct   → conflict RECORDED, statement returns nil
+		//	T2: COMMIT          → nil, and the label is still there
+		//
+		// which is a lost update with nothing reporting it. Measured exactly that by
+		// TestLabelStore_ConcurrentRemove, which fails against a build without this.
+		// lpg's own labelTx.commit has always asked; this path never did.
+		//
+		// A doomed transaction is rolled back atomically here, exactly like the NOT
+		// NULL violation and the fsync failure below, so none of its eager writes
+		// survive the barrier.
+		if cerr := tx.wtx.Err(); cerr != nil {
+			cmetrics.IncCounter("cypher.ExplicitTx.serializationConflicts", 1)
+			conflictErr = cerr
+			if undoOK := tx.rollbackInBarrierLocked(); !undoOK {
+				conflictErr = wrapUndoFailure(conflictErr)
+			}
+			return nil
+		}
 		// Commit-time NOT NULL existence check (#1754, ACID Consistency). Runs
 		// FIRST, inside the barrier, BEFORE the WAL fsync, so a node left in its
 		// final committed state carrying a constrained label but lacking the
@@ -732,6 +763,13 @@ func (tx *ExplicitTx) Commit() (err error) {
 		tx.undo = nil
 		return nil
 	})
+	// Reported BEFORE the NOT NULL verdict: a doomed transaction's own view is a
+	// state that will never commit, so a constraint conclusion drawn from it is
+	// drawn from an invalid premise. The conflict is also the RETRIABLE answer, and
+	// it is the one the caller can act on.
+	if conflictErr != nil {
+		return conflictErr
+	}
 	if notNullErr != nil {
 		return notNullErr
 	}
