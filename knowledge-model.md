@@ -2890,3 +2890,62 @@ ATTRIBUTED rather than dismissed as size-class noise: `unsafe.Sizeof(cypher.Resu
 COUNT did not change — only its class. The three commit-failure fields on `Result`
 (`conflictErr`, `notNullErr`, `walErr`) are strictly mutually exclusive, so collapsing them
 lands at ~368 bytes, BELOW the pre-#2354 baseline; filed as rmp **#2364**.
+
+Incrementally synced at commit `46a8505b` (2026-08-08, task **rmp #2353**, sprint 336 —
+write skew across two substores committed a state violating a declared existence
+invariant). +10 nodes (`Task` `2353` COMPLETED; `Commit` `46a8505b`; `Type`s
+`constraintVersions`, `constraintStamp`, `constraintVersionShard`; `Method`
+`WriteView.NoteConstraintTouch`; 5 `Test`s in `cypher/constraint_writeskew_test.go`) plus
+1 `Finding`, and +15 edges (`Task -[BELONGS_TO]-> Sprint`; `Sprint -[CONTAINS]->` Task and
+Commit; `Task -[IMPLEMENTED_IN]-> Commit`; `Task -[FOUND]-> Finding`; `Commit -[FIXES]->`
+the Finding and the `ACID Transactions` / `MVCC snapshot isolation` Features; three
+`TOUCHES` to Packages `lpg`, `cypher`, `mvcc`; three `CREATES` to the new Types; one
+`TOUCHES` to the new Method; five `CONTAINS` to the new Tests). New store name
+`mvcc.StoreNodeConstraint`, and a new `MVCCStats.ConstraintStamps` series.
+
+**THE DEFECT.** A NOT NULL invariant binds a LABEL to a PROPERTY, but conflict detection
+is per SUBSTORE, so the two halves never met: `T1: REMOVE n.email` and `T2: SET n:Acct`
+both committed and left a node carrying `:Acct` with no `email`. Neither transaction is
+wrong on its own snapshot — T1 sees no constrained label so it has nothing to check, and
+T2's snapshot predates T1's commit so it still sees the property. Textbook write skew,
+which plain Snapshot Isolation permits by definition and which this project's CONSISTENCY
+mandate does not. `cypher/constraint_check.go` already NAMED the mechanism without closing
+it. The premise was re-verified at HEAD before any work, because rmp #2354 had changed
+label-path conflict detection after the task was written.
+
+**THE SHAPE, and why it is scoped.** Node granularity is what every reference engine uses
+here: PostgreSQL and InnoDB version the whole ROW so both halves share one tuple version;
+Memgraph links every write onto a single delta chain per vertex
+(`src/storage/v2/vertex.hpp`); Neo4j locks the node. Taking that wholesale was the REJECTED
+option, because it raises the conflict rate for every workload including the majority that
+declare no existence invariant and cannot suffer the anomaly. So `constraintVersions`
+applies node granularity ONLY to nodes a declared existence invariant covers, hooked into
+the `mutationUndo.touch` seam whose set already exists only when the registry reports one.
+Test and stamp share ONE critical section — split, two transactions both find the slot
+empty and both proceed, which is the anomaly itself. Swept by BOTH reclamation paths, since
+a stamp left at `mvcc.AbortedTS` refuses every later writer on that node forever.
+
+**A SECOND, SEPARATE DEFECT, found while measuring the first** and recorded as its own
+`Finding`: a label scan yielded a ROW for a node whose `labels(n)` did not include the
+label. `Graph.setNodeLabelInfo` adds to the bitmap IMMEDIATELY while the undo of that add
+had its removal DEFERRED and then discarded by `Graph.withdrawAbortedIndexRemovals` —
+right for new work, wrong for withdrawing the transaction's own add.
+`Graph.deferLabelIndexRemoval` now declines to defer while unwinding, the exemption
+`writeCtx.undoing` already grants the conflict test. The reproducing boundary was MEASURED
+and is narrower than first written: only the serialization-conflict refusal path reaches
+it; six existence-check refusal shapes are clean.
+
+**COST, and the regression the measurement caught.** AC 5 required an unscoped schema to
+show no measurable change, and the first run refuted it: `+1 allocs/op` at one writer
+(p=0.000), surviving a fixed-`b.N` re-run so not an amortisation artefact. Bisected into
+FOUR interleaved arms, the cost was NOT on the write path — an arm carrying only the struct
+field and the store type measured identical to base, and an arm without the `touch` call
+site still showed it. It was the RECLAIMER: `-benchmem` attributes the vacuum goroutine's
+allocations to the write benchmark, and the two new sweep calls walked 64 shards under 64
+locks to discover an empty store. Gated on an `active` counter, following the
+`idxPendingActive` precedent `withdrawAbortedIndexRemovals` already sets. After the gate,
+`BenchmarkWriteScaling/mem` at writers 1/4/16/32, interleaved n=14 with benchstat:
+allocs/op IDENTICAL at every count (all samples equal, p=1.000), sec/op all flat (geomean
+−0.27%), B/op geomean −0.70%. A structural control carries the claim where the benchmark
+cannot: with no invariant declared `MVCCStats.ConstraintStamps` stays 0, and the same
+workload with one makes it non-zero.
