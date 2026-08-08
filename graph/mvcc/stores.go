@@ -38,6 +38,13 @@ const (
 	StoreEdgeTypesOrd    = "edge relationship types by ordinal"
 	StoreEdgePropsHandle = "edge properties by handle"
 	StoreEdgePropsOrd    = "edge properties by ordinal"
+	// StoreNodeConstraint is the per-node constraint stamp (rmp #2353). It is the
+	// one store here whose granularity is the NODE rather than one of the node's
+	// substores, and it exists precisely because the others are narrower: a
+	// declared invariant spanning two substores cannot be enforced by conflict
+	// detection that never compares them. It is stamped only for nodes under an
+	// active existence constraint, so a schema declaring none never reaches it.
+	StoreNodeConstraint = "node constraint"
 	// StoreOther is where a name that is not one of the above is counted. It is
 	// not a store; it is the bucket that keeps the cardinality bounded without
 	// losing the count.
@@ -62,6 +69,7 @@ var conflictStores = [...]conflictStore{
 	{StoreEdgeTypesOrd, "edge_types_by_ordinal"},
 	{StoreEdgePropsHandle, "edge_props_by_handle"},
 	{StoreEdgePropsOrd, "edge_props_by_ordinal"},
+	{StoreNodeConstraint, "node_constraint"},
 	{StoreOther, "other"},
 }
 

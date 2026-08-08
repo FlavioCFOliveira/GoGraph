@@ -670,6 +670,15 @@ type Graph[N comparable, W any] struct {
 	// adjacency APPEND is commutative and must not conflict with another append.
 	adjVer adjVersions
 
+	// conVer is the per-node CONSTRAINT write-write conflict index (rmp #2353).
+	// Every other store here versions ONE substore of a node, which is why write
+	// skew across two of them could commit a state violating a declared NOT NULL
+	// constraint: the label half and the property half never met. This holds one
+	// stamp per node, written only for nodes an existence constraint actually
+	// covers, so the node granularity every reference engine uses applies exactly
+	// where the invariant needs it and nowhere else. See [constraintVersions].
+	conVer constraintVersions
+
 	// barrier enforces that no single goroutine re-enters visMu via
 	// [Graph.View] / [Graph.ApplyAtomically]. visMu is not re-entrant, so a
 	// nested acquisition from a goroutine already inside the barrier would

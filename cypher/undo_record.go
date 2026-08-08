@@ -61,7 +61,39 @@ func (m mutationUndo) active() bool { return m.undo != nil }
 // the commit-time existence check (constraint_check.go) reads at commit. A nil
 // touched set makes it a no-op, so the common no-existence-constraint path pays
 // nothing.
-func (m mutationUndo) touch(n string) { m.touched.touch(n) }
+//
+// # It also STAMPS the node's constraint slot (rmp #2353)
+//
+// Recording the node is not enough on its own, because the commit-time check runs
+// against the committing transaction's OWN view (rmp #2350, correctly) and a write
+// skew is invisible from either side of it: T1 removing the property sees no
+// constrained label, T2 adding the label still sees the property, and the violation
+// exists only in the merged state. Ordinary conflict detection does not close it
+// either — conflicts are per SUBSTORE, and those two writes are in different ones.
+//
+// So this seam does double duty: the set feeds the commit-time check, and
+// [lpg.WriteView.NoteConstraintTouch] stamps a per-NODE slot both halves share, so
+// the second half to arrive is refused. The touch sites are exactly the writes that
+// can INTRODUCE a violation — a node creation, a label gain, a property removal —
+// which is why the stamping needed no new bookkeeping.
+//
+// The conflict is deliberately NOT returned. Three of the four callers are void
+// (recordAddNode, recordAddEdge, recordDelNodeProperty), and NoteConstraintTouch
+// RECORDS on the transaction as well as reporting, so the doomed transaction is
+// refused at commit by the backstop rmp #2354 added — the identical contract every
+// other void primitive here already has. Returning it from one caller and not the
+// others would be a third way for the same failure to surface.
+//
+// ZERO COST WHEN UNCONSTRAINED: the nil check short-circuits before the stamp, and
+// the set is nil unless the registry holds a NOT NULL constraint. An unconstrained
+// schema therefore reaches neither the map nor the stamp shard.
+func (m mutationUndo) touch(n string) {
+	if m.touched == nil {
+		return
+	}
+	m.touched.touch(n)
+	_ = m.wv.NoteConstraintTouch(n)
+}
 
 // recordAddNode records the inverse of an AddNode that freshly created (or
 // revived a tombstoned) node key n. wasNew is the adapter's determination that

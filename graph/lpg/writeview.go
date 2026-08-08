@@ -125,6 +125,43 @@ func (wv WriteView[N, W]) Tx() WriteTx { return WriteTx{w: wv.w} }
 // outside a bracket.
 func (wv WriteView[N, W]) Read() *ReadView[N, W] { return wv.g.WriterViewOf(wv.Tx()) }
 
+// NoteConstraintTouch records that this transaction made a write to n that could
+// INTRODUCE a property-existence violation — a property removal, a label gain, a
+// node creation — and reports the write-write conflict it hit, or nil.
+//
+// # Why an embedder must call this, and only sometimes
+//
+// Conflict detection here is per SUBSTORE, so two transactions writing DIFFERENT
+// substores of one node never meet. A NOT NULL constraint binds a label to a
+// property — two substores — so write skew across them committed a state violating
+// the declared invariant while neither transaction violated it on its own snapshot
+// (rmp #2353). This is the seam that makes such a pair collide: both halves stamp
+// the same per-node slot, so the second one to arrive is refused.
+//
+// CALL IT ONLY FOR NODES AN EXISTENCE CONSTRAINT ACTUALLY COVERS. The stamp is
+// node-granular — every reference engine's granularity for this, because
+// PostgreSQL and InnoDB version the whole row and Memgraph the whole vertex — and
+// node granularity conflicts more than substore granularity does. Applying it to
+// every write would raise the conflict rate for the majority of workloads, which
+// declare no existence constraint and cannot suffer the anomaly at all. cypher
+// gates it on the same [exec.ConstraintRegistry.HasAnyNotNull] test that decides
+// whether to record touched nodes, so an unconstrained schema never calls in.
+//
+// The conflict is RECORDED on the transaction as well as returned, so a caller that
+// cannot report one still dooms the transaction and commit refuses to publish it;
+// see [WriteTx.Err]. A view carrying no transaction, or a key that was never
+// interned, is a no-op returning nil.
+func (wv WriteView[N, W]) NoteConstraintTouch(n N) error {
+	if wv.w == nil {
+		return nil
+	}
+	id, ok := wv.g.adj.Mapper().Lookup(n)
+	if !ok {
+		return nil
+	}
+	return wv.g.conVer.note(id, wv.w)
+}
+
 // ── nodes ────────────────────────────────────────────────────────────────────
 
 // AddNode is [Graph.AddNode] inside this view's transaction.
