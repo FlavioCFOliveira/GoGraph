@@ -2995,3 +2995,47 @@ MISSING property. Two new sites were required (`recordRemoveNodeLabel`,
 `touched`, which stays existence-only so a uniqueness-only schema does not pay the
 commit-time existence scan. The conflict-surface increase is bounded by
 `TestUnique_DisjointNodesUnderUniqueDoNotConflict`.
+
+Incrementally synced at commit `d855f602` (2026-08-08, task **rmp #2357**, sprint 336 —
+the suspected unjournaled-insert phantom, RETIRED). +4 nodes (`Task` `2357` COMPLETED,
+`Task` `2366` BACKLOG, `Commit` `d855f602`, `Test`
+`TestUnique_RollbackLeavesNoPhantomReservation`) plus **3 `Finding`s**, and +11 edges.
+This task produced more findings than code, which is what a verification task should do.
+
+**#2357's PREMISE IS RETIRED, not fixed.** It suspected that the second, UNJOURNALED
+value-set insert (`ConstraintRegistry.RecordPropertySet`) could survive a rollback as a
+phantom, because it took its own label read separate from the reserve's. The two could
+diverge only while BOTH were raw reads; rmp #2355 routed every constraint decision through
+`exec.labelsInTx`, so both resolve through the SAME transaction view, a peer's unpublished
+label change is invisible to both, and the only write between them is a PROPERTY write.
+Verified by grep that no raw label read feeds any reserve/record/release call in
+`cypher/exec`. Independently, #2355's stamp makes a concurrent label change on that node
+conflict, so the required interleaving is refused. Impossible, not merely unobserved.
+
+**A CONTENTION FINDING, handed to #2358.** `RecordPropertySet`'s body is the SAME
+set-insert loop as `ReserveSetProperty`'s phase 2, and all TEN write-path callers were
+verified individually to be preceded by a reserve with identical `(labels, key, value)`.
+`reserveConstraintValue` calls `ReserveSetProperty`, which inserts, and journals the
+release inverse — so each `RecordPropertySet` is an idempotent no-op that acquires the
+registry's write lock a SECOND time per constrained property write, on a lock
+`label_constraints.go` records as 57% of ALL lock delay at sixteen writers. The ONE caller
+that must stay is `constraint_journal.go`, where it IS the journaled inverse of a release.
+Deleting the rest belongs to #2358, already scoped to these call sites.
+
+**A FOURTH DEFECT IN THIS FAMILY, reproduced and filed as #2366.** With the peer
+COMMITTING its label removal while the property writer ROLLS BACK, the writer's JOURNALED
+inverse re-reserves the old value from its own view after the peer's committed release
+already freed it, leaving it reserved with no live holder. The stamp DID fire — that is why
+the writer rolled back — so this is not a missing collision. The `UNIQUE` value-set
+(`cypher/exec/constraints.go` `valueSets`) is a plain NON-VERSIONED map whose inverses are
+replayed per transaction with no ordering against a peer's commit. Fail-safe in direction
+(a value becomes unusable, never duplicated) but it accumulates. Note rmp #2321 established
+that a GLOBAL rebuild of the value-sets destroys concurrent writers' reservations, so a
+naive reseed is not an available remedy.
+
+**THE STRUCTURAL CONCLUSION of sprint 336 so far**, now on its fifth instance across
+#2352, #2353, #2355, #2357 and #2366: conflict detection and constraint enforcement are per
+SUBSTORE, while every declared invariant binds TWO substores — and the `UNIQUE` value-set
+sits outside the versioning substrate altogether. The reference engines do not have this
+class of defect because PostgreSQL and InnoDB version the whole ROW and Memgraph the whole
+VERTEX, so any two writers to one object meet.
