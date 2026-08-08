@@ -189,6 +189,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -293,6 +294,43 @@ func seedPool(ctx context.Context, eng *cypher.Engine, writers int) error {
 	return nil
 }
 
+// writerSessions holds one cypher.Session per writer, so an arm whose statements are
+// DEPENDENT gets read-your-own-writes. Keyed by writer index; built lazily under a
+// mutex because arms are constructed once and driven from many goroutines.
+var (
+	writerSessionsMu sync.Mutex
+	writerSessions   map[int]*cypher.Session
+	writerSessionEng *cypher.Engine
+)
+
+// writerSession returns writer w's session on eng, resetting the table when the engine
+// changes (each sub-benchmark builds a fresh one).
+func writerSession(eng *cypher.Engine, w int) *cypher.Session {
+	writerSessionsMu.Lock()
+	defer writerSessionsMu.Unlock()
+	if writerSessionEng != eng {
+		writerSessionEng, writerSessions = eng, map[int]*cypher.Session{}
+	}
+	s, ok := writerSessions[w]
+	if !ok {
+		s = eng.NewSession()
+		writerSessions[w] = s
+	}
+	return s
+}
+
+// drainResult drains a statement and returns the first error from either channel.
+func drainResult(r *cypher.Result, err error) error {
+	if err != nil {
+		return err
+	}
+	for r.Next() { //nolint:revive // draining is the point
+	}
+	re := r.Err()
+	_ = r.Close()
+	return re
+}
+
 // grew reports the delta of one counter, naming it for the failure message.
 func grew(name string, before, after int64) error {
 	if after <= before {
@@ -371,12 +409,24 @@ var contentionWorkloads = []contentionWorkload{
 		// invisible to the baseline arm.
 		name:  "label-add-remove",
 		setup: seedPool,
+		// THROUGH ONE SESSION PER WRITER, and that is a correctness requirement of the
+		// ARM, not a tuning choice. The two statements are DEPENDENT: the REMOVE must
+		// observe the SET. cypher/session.go promises read-your-own-writes only within
+		// a Session; a bare Engine caller gets snapshot isolation alone, so consecutive
+		// autocommit statements have no guarantee of seeing their own predecessor.
+		//
+		// Written with bare eng.RunInTx this arm LIVELOCKED at 16 and 32 writers — 64
+		// fresh retries all refused, on nodes no peer touches — which was filed as rmp
+		// #2368 and looked like an engine defect introduced by rmp #2354. It was the
+		// arm. Through per-writer Sessions the same workload runs with ZERO retries and
+		// ZERO conflicts. See TestLabelToggle_PerWriterSessionMakesProgress.
 		unit: func(ctx context.Context, eng *cypher.Engine, w, i int) error {
 			id := map[string]expr.Value{"k": expr.StringValue(contentionKey(w, i))}
-			if err := runOne(ctx, eng, `MATCH (n:Account {k: $k}) SET n:Hot`, id); err != nil {
+			s := writerSession(eng, w)
+			if err := drainResult(s.RunInTx(ctx, `MATCH (n:Account {k: $k}) SET n:Hot`, id)); err != nil {
 				return err
 			}
-			return runOne(ctx, eng, `MATCH (n:Account {k: $k}) REMOVE n:Hot`, id)
+			return drainResult(s.RunInTx(ctx, `MATCH (n:Account {k: $k}) REMOVE n:Hot`, id))
 		},
 		observe: func(b, a lpg.MVCCStats) error { return grew("LabelDeltas", b.LabelDeltas, a.LabelDeltas) },
 	},
@@ -537,4 +587,86 @@ func BenchmarkWriteContention(b *testing.B) {
 // relationships between one pair without the engine refusing them.
 func contentionAdjConfig() adjlist.Config {
 	return adjlist.Config{Directed: true, Multigraph: true}
+}
+
+// TestLabelToggle_PerWriterSessionMakesProgress answers the question rmp #2368 was
+// left on: is the label-toggle livelock a DEFECT, or the documented cross-statement
+// boundary seen from the write side?
+//
+// The livelock is that a writer's retry conflicts with ITS OWN previous commit,
+// because Graph.readTS returns the contiguous frontier and the retry's fresh snapshot
+// is still behind that commit. cypher/session.go promises read-your-own-writes only
+// WITHIN a Session, via a floor plus a wait; a bare Engine caller gets snapshot
+// isolation alone. So a writer issuing consecutive autocommit statements through bare
+// eng.RunInTx has no guarantee of observing its own predecessor — which is exactly
+// what the conflict reports.
+//
+// If per-writer Sessions make progress, rmp #2368 is a benchmark error and the only
+// open question is the API DEFAULT (rmp #2369). If they do NOT, the livelock is real
+// and #2354's unconditional head test needs an exemption for a head this session has
+// already committed.
+//
+// It lives in this file rather than its own because a separate probe file was silently
+// excluded from this package's test binary (go test -list showed the function absent,
+// with no build error) and the cause was never diagnosed.
+func TestLabelToggle_PerWriterSessionMakesProgress(t *testing.T) {
+	const writers, rounds, maxRetry = 8, 40, 64
+
+	g := lpg.New[string, float64](contentionAdjConfig())
+	eng := cypher.NewEngine(g)
+	ctx := context.Background()
+	if err := seedPool(ctx, eng, writers); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	sess := make([]*cypher.Session, writers)
+	for w := range sess {
+		sess[w] = eng.NewSession()
+	}
+
+	drain := func(r *cypher.Result, err error) error {
+		if err != nil {
+			return err
+		}
+		for r.Next() { //nolint:revive // draining is the point
+		}
+		re := r.Err()
+		_ = r.Close()
+		return re
+	}
+
+	var retries atomic.Int64
+	before := g.MVCCStats().Write.Conflicts
+	got, err := runArm(writers, rounds, func(w, i int) error {
+		k := map[string]expr.Value{"k": expr.StringValue(contentionKey(w, i))}
+		for _, q := range []string{
+			`MATCH (n:Account {k: $k}) SET n:Hot`,
+			`MATCH (n:Account {k: $k}) REMOVE n:Hot`,
+		} {
+			var last error
+			ok := false
+			for a := 0; a < maxRetry; a++ {
+				last = drain(sess[w].RunInTx(ctx, q, k))
+				if last == nil {
+					ok = true
+					break
+				}
+				if !errors.Is(last, mvcc.ErrSerializationConflict) {
+					return last
+				}
+				retries.Add(1)
+			}
+			if !ok {
+				return fmt.Errorf("%s: no progress in %d retries THROUGH A SESSION: %w", q, maxRetry, last)
+			}
+		}
+		return nil
+	})
+	conflicts := g.MVCCStats().Write.Conflicts - before
+	t.Logf("per-writer Sessions: commits=%d retries=%d conflicts=%d err=%v",
+		got.commits, retries.Load(), conflicts, err)
+	if err != nil {
+		t.Fatalf("a writer made no progress even through its own Session, so rmp #2368 is "+
+			"NOT merely the cross-statement contract: %v", err)
+	}
 }
