@@ -6460,7 +6460,14 @@ func buildOperatorWrite(
 			return nil, err
 		}
 		schemaCopy := copySchema(schema)
-		return exec.NewSetLabels(p.NodeVar, p.Labels, schemaCopy, child, mutator), nil
+		sl := exec.NewSetLabels(p.NodeVar, p.Labels, schemaCopy, child, mutator)
+		if constraintReg != nil {
+			// Attaching a label puts the node under that label's UNIQUE
+			// constraints; without this the label write bypassed them entirely
+			// (rmp #2352).
+			sl.WithConstraints(constraintReg, idxMgr)
+		}
+		return sl, nil
 
 	case *ir.RemoveProperty:
 		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
@@ -6485,7 +6492,13 @@ func buildOperatorWrite(
 			return nil, err
 		}
 		schemaCopy := copySchema(schema)
-		return exec.NewRemoveLabels(p.NodeVar, p.Labels, schemaCopy, child, mutator), nil
+		rl := exec.NewRemoveLabels(p.NodeVar, p.Labels, schemaCopy, child, mutator)
+		if constraintReg != nil {
+			// Detaching a label frees that label's UNIQUE reservations; without
+			// this they would linger as phantoms (rmp #2352).
+			rl.WithConstraintRegistry(constraintReg)
+		}
+		return rl, nil
 
 	case *ir.DeleteNode:
 		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
@@ -16802,6 +16815,24 @@ func (a *lpgMutatorAdapter) NodeLabels(n string) []string {
 	return a.g.NodeLabels(n)
 }
 
+// HasNodeLabelInTx reports whether n carries label in THIS transaction's view.
+//
+// It satisfies the exec package's optional transaction-visible reader (rmp
+// #2352). WriterViewOf resolves every accessor through mvcc.Visible with this
+// transaction's identity, so it sees this transaction's own eager writes and no
+// other transaction's unpublished work — unlike [lpgMutatorAdapter.NodeLabels],
+// which reads the raw present and would decide a constraint on a peer's
+// uncommitted state (the class rmp #2350 fixed for NOT NULL).
+func (a *lpgMutatorAdapter) HasNodeLabelInTx(n, label string) bool {
+	return a.g.WriterViewOf(a.wtx).HasNodeLabel(n, label)
+}
+
+// NodePropertyInTx returns n's value for key in THIS transaction's view. See
+// [lpgMutatorAdapter.HasNodeLabelInTx] for why the view and not the raw graph.
+func (a *lpgMutatorAdapter) NodePropertyInTx(n, key string) (lpg.PropertyValue, bool) {
+	return a.g.WriterViewOf(a.wtx).GetNodeProperty(n, key)
+}
+
 // HasEdge reports whether a directed edge from src to dst is present.
 func (a *lpgMutatorAdapter) HasEdge(src, dst string) bool {
 	return a.g.AdjList().HasEdge(src, dst)
@@ -17641,6 +17672,18 @@ func (a *walMutatorAdapter) NodeProperties(n string) map[string]lpg.PropertyValu
 // NodeLabels returns a snapshot of all labels on n.
 func (a *walMutatorAdapter) NodeLabels(n string) []string {
 	return a.g.NodeLabels(n)
+}
+
+// HasNodeLabelInTx reports whether n carries label in THIS transaction's view.
+// See [lpgMutatorAdapter.HasNodeLabelInTx] for why the view and not the raw graph.
+func (a *walMutatorAdapter) HasNodeLabelInTx(n, label string) bool {
+	return a.g.WriterViewOf(a.wtx).HasNodeLabel(n, label)
+}
+
+// NodePropertyInTx returns n's value for key in THIS transaction's view. See
+// [lpgMutatorAdapter.HasNodeLabelInTx] for why the view and not the raw graph.
+func (a *walMutatorAdapter) NodePropertyInTx(n, key string) (lpg.PropertyValue, bool) {
+	return a.g.WriterViewOf(a.wtx).GetNodeProperty(n, key)
 }
 
 // HasEdge reports whether a directed edge from src to dst is present.

@@ -662,11 +662,18 @@ func (op *SetProperty) refreshNodeRowProperties(row Row, pv any) {
 
 // SetLabels adds one or more labels to an already-bound node per input row.
 //
+// Attaching a label puts the node under every UNIQUE constraint declared on that
+// label, so the operator reserves the node's current value for each constrained
+// property before it writes — see cypher/exec/label_constraints.go. Enforcement
+// is inert unless a UNIQUE constraint is registered.
+//
 // SetLabels is NOT safe for concurrent use.
 type SetLabels struct {
 	child   Operator
 	mutator GraphMutator
-	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
+	ctx     context.Context     //nolint:containedctx // stored for per-Next ctx check
+	reg     *ConstraintRegistry // nil means no constraint enforcement
+	mgr     *index.Manager      // secondary unique-index source; may be nil
 	schema  map[string]int
 	nodeVar string
 	labels  []string
@@ -689,6 +696,15 @@ func NewSetLabels(
 		child:   child,
 		mutator: mutator,
 	}
+}
+
+// WithConstraints attaches the constraint registry and index manager so
+// SetLabels enforces the UNIQUE constraints the added labels bring into play.
+// Returns op for chaining.
+func (op *SetLabels) WithConstraints(reg *ConstraintRegistry, mgr *index.Manager) *SetLabels {
+	op.reg = reg
+	op.mgr = mgr
+	return op
 }
 
 // Init initialises the operator and its child.
@@ -725,7 +741,26 @@ func (op *SetLabels) Next(out *Row) (bool, error) {
 		return false, fmt.Errorf("exec: SetLabels: cannot resolve NodeID %d", nodeID)
 	}
 
+	// Gate on the lock-free atomic counter: with no UNIQUE constraint registered
+	// nothing below runs and the label write costs exactly what it always did —
+	// no registry lock, no graph read, no allocation (rmp #2352, and see
+	// [ConstraintRegistry.uniqueActive] for the measurement that demands it).
+	enforce := op.reg != nil && op.reg.HasAnyUnique()
+	var rd nodeStateReader
+	if enforce {
+		rd = nodeStateReaderFor(op.mutator)
+	}
+
 	for _, lbl := range op.labels {
+		// Reserve BEFORE the write: the reservation's already-a-member guard reads
+		// the node's labels, and after SetNodeLabel it would suppress the check.
+		// The violation is returned unwrapped so errors.Is / errors.As reach the
+		// typed *ConstraintViolationError, exactly as the property path does.
+		if enforce {
+			if cerr := reserveLabelUnique(op.reg, op.mutator, op.mgr, rd, nodeKey, lbl); cerr != nil {
+				return false, cerr
+			}
+		}
 		if err := op.mutator.SetNodeLabel(nodeKey, lbl); err != nil {
 			return false, fmt.Errorf("exec: SetLabels SetNodeLabel: %w", err)
 		}

@@ -1175,7 +1175,23 @@ func (op *MergePattern) hopIndexByRelVar(v string) (int, bool) {
 // evaluator for a non-literal expression (#1965); see [MergePattern.applyActions].
 func (op *MergePattern) applyNodeAction(key string, act mergeAction, evalRow Row, evals map[string]ValueEvalFn) error {
 	if len(act.setLabels) > 0 {
+		// Attaching a label puts the node under every UNIQUE constraint declared
+		// on that label, so reserve before writing — see
+		// cypher/exec/label_constraints.go. The pattern-MERGE action path is a
+		// distinct label-write site from both the SetLabels operator and the
+		// single-node MERGE action, and all three need the same enforcement or the
+		// duplicate simply commits through whichever one was left out (rmp #2352).
+		enforceLabels := op.reg != nil && op.reg.HasAnyUnique()
+		var rd nodeStateReader
+		if enforceLabels {
+			rd = nodeStateReaderFor(op.mutator)
+		}
 		for _, lbl := range act.setLabels {
+			if enforceLabels {
+				if cerr := reserveLabelUnique(op.reg, op.mutator, op.mgr, rd, key, lbl); cerr != nil {
+					return cerr
+				}
+			}
 			if err := op.mutator.SetNodeLabel(key, lbl); err != nil {
 				return fmt.Errorf("exec: MergePattern: SetNodeLabel: %w", err)
 			}

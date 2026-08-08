@@ -556,7 +556,22 @@ func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalF
 
 		// Label-set action (`SET a:Foo:Bar`): add every label to the node.
 		if len(a.setLabels) > 0 {
+			// Attaching a label puts the node under every UNIQUE constraint
+			// declared on that label, so reserve before writing — see
+			// cypher/exec/label_constraints.go. This is a SECOND label-write site
+			// besides the SetLabels operator, and enforcing at only one of them
+			// leaves the identical duplicate committing through MERGE (rmp #2352).
+			enforceLabels := op.reg != nil && op.reg.HasAnyUnique()
+			var rd nodeStateReader
+			if enforceLabels {
+				rd = nodeStateReaderFor(op.mutator)
+			}
 			for _, lbl := range a.setLabels {
+				if enforceLabels {
+					if cerr := reserveLabelUnique(op.reg, op.mutator, op.mgr, rd, nodeKey, lbl); cerr != nil {
+						return cerr
+					}
+				}
 				if serr := op.mutator.SetNodeLabel(nodeKey, lbl); serr != nil {
 					return fmt.Errorf("exec: Merge: action SetNodeLabel %q: %w", lbl, serr)
 				}
