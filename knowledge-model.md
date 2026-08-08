@@ -2832,3 +2832,61 @@ Types, though the package now also declares `Clock`, `WriteStamp`, `commitLog`, 
 `WriteCounts` and more. Only `Clock` was added here, because that is what this task read and
 attached to. A full re-survey of `graph/mvcc` (and, likely, of every package that grew during
 sprints 334–335) is owed.
+
+Incrementally synced at commit `b1f0974f` (2026-08-08, task **rmp #2354**, sprint 336 — an
+acknowledged `COMMIT` could apply NOTHING). **First modelling of sprint 336 at all.**
++13 nodes (`Sprint` `336` OPEN; `Task` `2354` COMPLETED; `Commit` `b1f0974f`; `Method`
+`WriteTx.Err`; 8 `Test`s in `cypher/constraint_label_conflict_test.go`) and +2 `Finding`
+nodes (below), with +26 edges (`Task -[BELONGS_TO]-> Sprint`, `Sprint -[CONTAINS]->`
+Task and Commit, `Task -[IMPLEMENTED_IN]-> Commit`; three `FIXES` from the Commit to
+`ACID Transactions`, `MVCC snapshot isolation` and `MVCC as sole concurrency control`;
+two `TOUCHES` to Packages `lpg` and `cypher`; four `TOUCHES` to Methods
+`WriteTx.Err`, `Result.commitUnderBarrier`, `Result.Err`, `ExplicitTx.Commit`; three
+`TOUCHES` to Types `Result`, `WriteTx`, `ExplicitTx`; eight `CONTAINS` to the new Tests;
+two `PRODUCED` and two `FOUND` to the Findings).
+
+**THE DEFECT, and why it is a repeat.** `graph/lpg/lpg.go setNodeLabelInfo` guarded BOTH
+the write-write conflict test AND the delta on `!bag.has(lid)`, where `bag` is the RAW
+stored bag read by value — so it already carried other in-flight transactions' eager
+writes. A peer's UNCOMMITTED add of the same label made `has()` true, skipped the whole
+block, and made `bag.add` a no-op: the write reported SUCCESS having recorded nothing, and
+the label vanished with the peer's rollback. **This is the identical defect rmp #2324 fixed
+for the node-PROPERTY store**, whose own comment in `graph/lpg/property.go` records the
+same reasoning ("only a write that RECORDS a version can conflict") failing there at 400
+concurrent increments producing 216. `removeNodeLabelInfo` carried the mirror guard and one
+case worse: a peer's eager removal of the node's LAST label deleted the shard's bag entry
+outright, so the `has()` guard was not even reached. `nodeLabelShard.headStamp` reads the
+DELTA CHAIN rather than the bag, so it answers correctly for a node with no bag entry at
+all. The conflict test now runs UNCONDITIONALLY on both directions; only the DELTA stays
+guarded, which is what keeps a delta per WRITE rather than per statement.
+
+**The backstop exists in TWO places because two paths drive the write bracket themselves**
+— `cypher/exectx.go ExplicitTx.Commit` and `cypher/api.go commitUnderBarrier` (autocommit),
+the latter via the new `Result.conflictErr` field. A conflict hit by a primitive that cannot
+RETURN one (a label removal, a property delete, any of the five per-edge side stores) is
+recorded on the transaction and surfaces nowhere unless asked for, which is what
+`lpg.WriteTx.Err` is for. Memgraph reads the same record in the same place —
+`Storage::Commit` tests `transaction_.must_abort`. Both halves are now pinned by tests; the
+autocommit half previously had none, and it is the half the common caller uses.
+
+**TWO FINDINGS, both retired or bounded by measurement rather than argument.**
+`Finding` *The tx-visible hadLabel hardening is UNREACHABLE…* records that #2354's own
+technical requirement — resolve the adapter pre-check `hadLabel` through
+`HasNodeLabelInTx` instead of the raw graph — was implemented in a worktree and measured
+NEITHER needed NOR harmful: any raw/view divergence implies a foreign head on the node's
+delta chain, which the now-unconditional conflict test dooms before any constraint is
+consulted. `hadLabel` stays the RAW read, because that is the read the PHYSICAL undo
+journal requires. `Finding` *The undo replay DISCARDS the error…* records that
+`cypher/undo_record.go` swallows the error from its replayed inverses
+(`_ = m.wv.SetNodeLabel(...)`), so an INCOMPLETE rollback reports success; unreachable in
+the shipped build only because the raw read keeps the journal to inverses this transaction
+really made over a head it still owns.
+
+**COST, measured with interleaved arms (n=10, benchstat) because across-time comparison on
+this host is worthless.** `BenchmarkWriteScaling/mem` at writers 1/4/16/32: allocs/op
+IDENTICAL at every count, sec/op geomean +0.24%, B/op +0.59%. The B/op delta was
+ATTRIBUTED rather than dismissed as size-class noise: `unsafe.Sizeof(cypher.Result)` went
+384 → 400 bytes for the new field, crossing Go's 384 → 416 size class, so the allocation
+COUNT did not change — only its class. The three commit-failure fields on `Result`
+(`conflictErr`, `notNullErr`, `walErr`) are strictly mutually exclusive, so collapsing them
+lands at ~368 bytes, BELOW the pre-#2354 baseline; filed as rmp **#2364**.
