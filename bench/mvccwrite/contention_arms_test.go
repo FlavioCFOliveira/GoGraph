@@ -53,7 +53,19 @@ package mvccwrite
 //     ratio moved 28.28x -> 27.55x. Churn is not the cause, and the speculative change
 //     was reverted rather than shipped.
 //
-//     LOCALISED to graph SIZE, mechanism NOT established. seedPool creates
+//     RESOLVED — IT WAS THE FIXTURE, and the mechanism is a documented contract.
+//     A Cypher CREATE INDEX builds a STRING-KEYED hash index, and
+//     cypher.tryNewHashSeek declines a seek whose value kind does not match the index
+//     key type (see its #F-CY2 contract note: "a Cypher CREATE INDEX never builds" an
+//     int64 hash index). The pool was keyed on an INTEGER, so every lookup fell back to
+//     a label scan with a row filter — which is why the cost tracked the graph size and
+//     why the whole cascade of false readings below happened. contentionKey now returns
+//     a STRING. Measured after: 3212 ns/op at 256 nodes against 2949 at 4096, i.e.
+//     node-count INDEPENDENT, and allocs/op flat at 52-53 across writers 1..32 where it
+//     had been 174 -> 16052. rmp #2367 is retired by that evidence.
+//
+//     THE HISTORICAL READING, kept because four hypotheses were needed to get here and
+//     three of them were wrong: seedPool creates
 //     contentionPool nodes PER WRITER, so :Account holds 256 rows at one writer and
 //     8192 at 32 — and per-operation cost is 10x WORSE with FEWER nodes, for IDENTICAL
 //     timed work (writer 0 always updates keys 0..255, ~12 updates each either way).
@@ -76,11 +88,24 @@ package mvccwrite
 //     #2367 as unsupported. EXPLAIN is not accepted by the parser at all, for read or
 //     write, so no plan dump was available to settle it.
 //
-//     FOUR explanations have now been proposed here and THREE refuted by measurement
-//     (missing index; per-node churn; unswept chains), and the fourth is unproven. The
-//     base rate for a plausible-sounding mechanism in this area is poor. Until #2367
-//     names the mechanism with evidence, no mutating arm here can produce a contention
-//     baseline, because its cost is a function of its own seed size.
+//     FIVE explanations were proposed and FOUR were wrong: a missing index (an index
+//     was added, and it was silently unusable); per-node churn; unswept delta chains;
+//     and a cost-based planner with a mis-calibrated crossover, which was WITHDRAWN
+//     when no such threshold existed. The base rate for a plausible-sounding mechanism
+//     here is poor — check the contract before theorising about the substrate.
+//
+// # WHAT THE ARMS NOW SHOW, and the one that FAILS
+//
+// With the lookup seeking, at writers 1/4/16/32: create-labelled-node 2764 -> 1296
+// ns/op, update-property 3098 -> 1508 with allocs/op FLAT at 52-53, create-edge and
+// mixed likewise steady. label-add-remove passes at 1 and 4 writers (4434, 3163 ns/op)
+// and FAILS at 16 and 32 with "still conflicting after 64 retries" on nodes NO peer
+// touches, since every writer owns a disjoint key range. That is a LIVELOCK, filed as
+// rmp #2368, and it is evidence against a claim rmp #2354 made in its own commit
+// message — that testing the label head unconditionally "cannot reintroduce a spurious
+// abort" for a transaction re-asserting over its own write. Attribution against
+// 30dc804b comes first there; the benchmark failing is honest signal and is left
+// failing rather than tuned away.
 //
 // # How these arms must be run
 //
@@ -193,7 +218,29 @@ type contentionWorkload struct {
 
 // key packs a writer's id space so the ranges are disjoint, exactly as the
 // pre-existing arm does.
-func contentionKey(w, i int) int64 { return int64(w)<<40 | int64(i%contentionPool) }
+// It returns a STRING, and that is load-bearing rather than cosmetic. A Cypher
+// CREATE INDEX builds a STRING-KEYED hash index, and cypher.tryNewHashSeek declines a
+// seek whose value kind does not match the index key type — a documented contract, not
+// a defect. Keying the pool on an INTEGER therefore made every lookup fall back to a
+// label scan with a row filter, which is what produced this file's whole cascade of
+// false readings. Measured after the change: 3212 ns/op at 256 nodes against 2949 at
+// 4096, i.e. node-count INDEPENDENT, where the integer key gave 41933 against 4025.
+func contentionKey(w, i int) string { return "w" + itoaSmall(w) + "-" + itoaSmall(i%contentionPool) }
+
+// itoaSmall formats a small non-negative int without pulling strconv in.
+func itoaSmall(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b [12]byte
+	p := len(b)
+	for n > 0 {
+		p--
+		b[p] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(b[p:])
+}
 
 // runOne executes q with the given parameters in one autocommit transaction and
 // drains it, because a write-operator error is reported on the Result and not by
@@ -223,13 +270,13 @@ func seedPool(ctx context.Context, eng *cypher.Engine, writers int) error {
 	// -> 16052, and that was almost entirely the fixture: an op's allocation count
 	// cannot depend on how many peers are running. A real workload looks up by an
 	// indexed key, and so must this one, or the arm measures its own seed data.
-	if err := runOne(ctx, eng, `CREATE INDEX acct_id FOR (n:Account) ON (n.id)`, nil); err != nil {
+	if err := runOne(ctx, eng, `CREATE INDEX acct_k FOR (n:Account) ON (n.k)`, nil); err != nil {
 		return fmt.Errorf("seed index: %w", err)
 	}
 	for w := 0; w < writers; w++ {
 		for i := 0; i < contentionPool; i++ {
-			if err := runOne(ctx, eng, `CREATE (n:Account {id: $id, v: 0})`,
-				map[string]expr.Value{"id": expr.IntegerValue(contentionKey(w, i))}); err != nil {
+			if err := runOne(ctx, eng, `CREATE (n:Account {k: $k, v: 0})`,
+				map[string]expr.Value{"k": expr.StringValue(contentionKey(w, i))}); err != nil {
 				return fmt.Errorf("seed w=%d i=%d: %w", w, i, err)
 			}
 		}
@@ -301,10 +348,10 @@ var contentionWorkloads = []contentionWorkload{
 		name:  "update-property",
 		setup: seedPool,
 		unit: func(ctx context.Context, eng *cypher.Engine, w, i int) error {
-			return runOne(ctx, eng, `MATCH (n:Account {id: $id}) SET n.v = $v`,
+			return runOne(ctx, eng, `MATCH (n:Account {k: $k}) SET n.v = $v`,
 				map[string]expr.Value{
-					"id": expr.IntegerValue(contentionKey(w, i)),
-					"v":  expr.IntegerValue(int64(i)),
+					"k": expr.StringValue(contentionKey(w, i)),
+					"v": expr.IntegerValue(int64(i)),
 				})
 		},
 		observe: func(b, a lpg.MVCCStats) error { return grew("PropDeltas", b.PropDeltas, a.PropDeltas) },
@@ -316,11 +363,11 @@ var contentionWorkloads = []contentionWorkload{
 		name:  "label-add-remove",
 		setup: seedPool,
 		unit: func(ctx context.Context, eng *cypher.Engine, w, i int) error {
-			id := map[string]expr.Value{"id": expr.IntegerValue(contentionKey(w, i))}
-			if err := runOne(ctx, eng, `MATCH (n:Account {id: $id}) SET n:Hot`, id); err != nil {
+			id := map[string]expr.Value{"k": expr.StringValue(contentionKey(w, i))}
+			if err := runOne(ctx, eng, `MATCH (n:Account {k: $k}) SET n:Hot`, id); err != nil {
 				return err
 			}
-			return runOne(ctx, eng, `MATCH (n:Account {id: $id}) REMOVE n:Hot`, id)
+			return runOne(ctx, eng, `MATCH (n:Account {k: $k}) REMOVE n:Hot`, id)
 		},
 		observe: func(b, a lpg.MVCCStats) error { return grew("LabelDeltas", b.LabelDeltas, a.LabelDeltas) },
 	},
@@ -331,10 +378,10 @@ var contentionWorkloads = []contentionWorkload{
 		setup: seedPool,
 		unit: func(ctx context.Context, eng *cypher.Engine, w, i int) error {
 			return runOne(ctx, eng,
-				`MATCH (a:Account {id: $a}), (b:Account {id: $b}) CREATE (a)-[:PAYS {amt: $amt}]->(b)`,
+				`MATCH (a:Account {k: $a}), (b:Account {k: $b}) CREATE (a)-[:PAYS {amt: $amt}]->(b)`,
 				map[string]expr.Value{
-					"a":   expr.IntegerValue(contentionKey(w, i)),
-					"b":   expr.IntegerValue(contentionKey(w, i+1)),
+					"a":   expr.StringValue(contentionKey(w, i)),
+					"b":   expr.StringValue(contentionKey(w, i+1)),
 					"amt": expr.IntegerValue(int64(i)),
 				})
 		},
@@ -353,20 +400,20 @@ var contentionWorkloads = []contentionWorkload{
 		unit: func(ctx context.Context, eng *cypher.Engine, w, i int) error {
 			switch i % 3 {
 			case 0:
-				return runOne(ctx, eng, `CREATE (n:Account {id: $id})`,
-					map[string]expr.Value{"id": expr.IntegerValue(int64(w)<<40 | int64(contentionPool+i))})
+				return runOne(ctx, eng, `CREATE (n:Account {k: $k})`,
+					map[string]expr.Value{"k": expr.StringValue("m" + itoaSmall(w) + "-" + itoaSmall(i))})
 			case 1:
-				return runOne(ctx, eng, `MATCH (n:Account {id: $id}) SET n.v = $v`,
+				return runOne(ctx, eng, `MATCH (n:Account {k: $k}) SET n.v = $v`,
 					map[string]expr.Value{
-						"id": expr.IntegerValue(contentionKey(w, i)),
-						"v":  expr.IntegerValue(int64(i)),
+						"k": expr.StringValue(contentionKey(w, i)),
+						"v": expr.IntegerValue(int64(i)),
 					})
 			default:
 				return runOne(ctx, eng,
-					`MATCH (a:Account {id: $a}), (b:Account {id: $b}) CREATE (a)-[:PAYS]->(b)`,
+					`MATCH (a:Account {k: $a}), (b:Account {k: $b}) CREATE (a)-[:PAYS]->(b)`,
 					map[string]expr.Value{
-						"a": expr.IntegerValue(contentionKey(w, i)),
-						"b": expr.IntegerValue(contentionKey(w, i+1)),
+						"a": expr.StringValue(contentionKey(w, i)),
+						"b": expr.StringValue(contentionKey(w, i+1)),
 					})
 			}
 		},
