@@ -53,6 +53,57 @@ package mvccwrite
 //     ratio moved 28.28x -> 27.55x. Churn is not the cause, and the speculative change
 //     was reverted rather than shipped.
 //
+//     EXPLAINED, and it was never the substrate. THE PLANNER CHANGES ITS MIND WITH THE
+//     SEEDED NODE COUNT. seedPool creates contentionPool nodes PER WRITER, so the
+//     :Account label holds 256 rows at one writer and 8192 at 32 — and the planner is
+//     cost-based, choosing a LABEL SCAN at small cardinality and an INDEX SEEK at
+//     large. Measured with the TIMED WORK HELD IDENTICAL (writer 0 always updates keys
+//     0..255) and only the count of OTHER nodes varied, ordered 16/4/1/16 so warm-up
+//     cannot explain it:
+//
+//     	4096 other nodes ->  4354 ns/op        (seek)
+//     	1024 other nodes ->  4025 ns/op        (seek)
+//     	 256 other nodes -> 41933 ns/op        (scan: 10x SLOWER)
+//     	4096 other nodes ->  4024 ns/op        (seek)
+//
+//     So per-commit cost fell ~27x as writers rose because the PLAN changed, not
+//     because contention eased. The impossible 28x "scaling" was the fixture crossing
+//     the planner's threshold. Filed as rmp #2367: the crossover is mis-calibrated —
+//     the planner declines a seek that is ~10x cheaper at 256 rows — which is a real
+//     finding about the engine and affects the commonest update shape in the language.
+//
+//     UNTIL #2367 IS FIXED, no mutating arm here can produce a contention baseline: its
+//     plan is a function of its own seed size. Three of my explanations were refuted
+//     before this one held (missing index; per-node churn; unswept chains), so treat
+//     any new theory here as unproven until it is measured.
+//
+// # How these arms must be run
+//
+// # DO NOT QUOTE THE `scaling` METRIC OF THE MUTATING ARMS YET (rmp #2359)
+//
+// The arms and their oracle are sound; the SCALING RATIO of the arms that mutate a
+// pooled node is not yet, and the reason is written here so nobody quotes it.
+//
+// Two fixture artefacts were found by measuring, and each one inverted the verdict:
+//
+//  1. NO INDEX ON THE LOOKUP KEY. `MATCH (n:Account {id: $id})` was a label scan, so
+//     each unit's cost grew with the seeded node count — which grows with the writer
+//     count, since every writer owns a pool. update-property read as COLLAPSING to
+//     0.145x at 32 writers; with the index it reads 28.3x. create-edge went 0.142x to
+//     19.1x. The tell was allocs/op climbing 195 -> 16052 with the writer count: an
+//     op's allocation count cannot depend on how many peers are running. FIXED, in
+//     seedPool.
+//
+//  2. STILL OPEN, and my explanation for it was TESTED AND REFUTED. update-property
+//     reports an impossible 28x scaling at 32 writers: 50.9 us per commit at one
+//     writer against 1.85 us at 32, i.e. per-commit cost ~27x LOWER with more
+//     writers. I hypothesised per-node churn — each writer runs b.N/writers
+//     iterations over a fixed pool, so one writer would give each node ~writers times
+//     more updates and a deeper delta chain to walk. So I made per-writer work
+//     CONSTANT, which makes each node take ~78 updates at EVERY writer count, and the
+//     ratio moved 28.28x -> 27.55x. Churn is not the cause, and the speculative change
+//     was reverted rather than shipped.
+//
 //     The VACUUM/CHAIN-DEPTH candidate has since been ELIMINATED too, by the
 //     straightforward test: if unswept delta chains were the cost, ns/op at one writer
 //     would RISE with the number of updates each pooled node receives. It FALLS —
