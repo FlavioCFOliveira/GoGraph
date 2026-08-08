@@ -204,7 +204,7 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 	}
 
 	// Strip all labels.
-	nodeLabels := op.mutator.NodeLabels(nodeKey)
+	nodeLabels := labelsInTx(op.mutator, nodeKey)
 	// Release all constrained property values before stripping the node so
 	// the registry no longer treats them as "in use".
 	if op.reg != nil {
@@ -273,7 +273,7 @@ func (op *DetachDelete) detachDeletePath(p expr.PathValue) error {
 			swept++
 			op.mutator.RemoveEdge(src, nodeKey)
 		}
-		pathLabels := op.mutator.NodeLabels(nodeKey)
+		pathLabels := labelsInTx(op.mutator, nodeKey)
 		if op.reg != nil {
 			for k, pv := range op.mutator.NodeProperties(nodeKey) {
 				releaseConstraintValue(op.reg, op.mutator, pathLabels, k, pv)

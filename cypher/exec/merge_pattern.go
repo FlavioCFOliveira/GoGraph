@@ -1210,7 +1210,7 @@ func (op *MergePattern) applyNodeAction(key string, act mergeAction, evalRow Row
 			// as a phantom reservation (#1904).
 			if op.reg != nil {
 				if oldVal, had := op.mutator.NodeProperties(key)[act.key]; had {
-					releaseConstraintValue(op.reg, op.mutator, op.mutator.NodeLabels(key), act.key, oldVal)
+					releaseConstraintValue(op.reg, op.mutator, labelsInTx(op.mutator, key), act.key, oldVal)
 				}
 			}
 			op.mutator.DelNodeProperty(key, act.key)
@@ -1224,7 +1224,7 @@ func (op *MergePattern) applyNodeAction(key string, act mergeAction, evalRow Row
 		v = val
 	}
 	if op.reg != nil {
-		labels := op.mutator.NodeLabels(key)
+		labels := labelsInTx(op.mutator, key)
 		// Release this node's own old constrained value BEFORE the check and the
 		// overwrite, so the replaced value is not leaked as a permanent phantom
 		// reservation (#1904) and an idempotent self-set is not rejected as its
@@ -1241,7 +1241,7 @@ func (op *MergePattern) applyNodeAction(key string, act mergeAction, evalRow Row
 		return fmt.Errorf("exec: MergePattern: SetNodeProperty: %w", err)
 	}
 	if op.reg != nil {
-		labels := op.mutator.NodeLabels(key)
+		labels := labelsInTx(op.mutator, key)
 		op.reg.RecordPropertySet(labels, act.key, v)
 	}
 	return nil

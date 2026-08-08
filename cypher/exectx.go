@@ -232,6 +232,8 @@ type ExplicitTx struct {
 	// existence constraint active when BeginTx ran, so a transaction with none
 	// records nothing. Shared by all statement mutators; checked once at Commit.
 	touched *touchedNodes
+	// stampCon: see [mutationUndo.stampCon] (rmp #2353/#2355).
+	stampCon bool
 
 	// walTx is the single WAL transaction backing the whole explicit transaction,
 	// non-nil only on a WAL-backed engine. It holds the store's writer
@@ -382,6 +384,10 @@ func (e *Engine) beginTxSession(ctx context.Context, sess *lpg.Session[string, f
 	if e.constraintReg != nil && e.constraintReg.HasAnyNotNull() {
 		tx.touched = &touchedNodes{}
 	}
+	// The per-node CONSTRAINT stamp is gated separately and more widely; see the
+	// matching comment on the autocommit path (rmp #2353, widened by rmp #2355).
+	tx.stampCon = e.constraintReg != nil &&
+		(e.constraintReg.HasAnyNotNull() || e.constraintReg.HasAnyUnique())
 	// Open the WAL transaction on a WAL-backed engine. Store.BeginCtx registers this
 	// transaction as an admitted writer until Commit/Rollback. It no longer excludes
 	// anybody (rmp #2306 retired the capacity-one semaphore), so the only thing that
@@ -587,9 +593,9 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 	// buffer so every statement's count deltas accumulate together and the handle
 	// flushes them once at Commit (#2082), mirroring the shared index buffer.
 	if tx.walTx != nil {
-		mutator = &walMutatorAdapter{g: tx.eng.g, tx: tx.walTx, buf: tx.buf, undo: tx.undo, touched: tx.touched, cbuf: tx.cbuf, eng: tx.eng}
+		mutator = &walMutatorAdapter{g: tx.eng.g, tx: tx.walTx, buf: tx.buf, undo: tx.undo, touched: tx.touched, stampCon: tx.stampCon, cbuf: tx.cbuf, eng: tx.eng}
 	} else {
-		mutator = &lpgMutatorAdapter{g: tx.eng.g, buf: tx.buf, undo: tx.undo, touched: tx.touched, cbuf: tx.cbuf, eng: tx.eng}
+		mutator = &lpgMutatorAdapter{g: tx.eng.g, buf: tx.buf, undo: tx.undo, touched: tx.touched, stampCon: tx.stampCon, cbuf: tx.cbuf, eng: tx.eng}
 	}
 
 	// One statement, one SHARED hold on the schema barrier, carrying THIS handle's

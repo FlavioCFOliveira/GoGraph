@@ -368,7 +368,7 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 					// Release the old value if it was constrained before
 					// removing the property; SET n.k = null is a removal.
 					if oldVal, had := op.mutator.NodeProperties(nodeKey)[op.propertyKey]; had {
-						releaseConstraintValue(op.reg, op.mutator, op.mutator.NodeLabels(nodeKey), op.propertyKey, oldVal)
+						releaseConstraintValue(op.reg, op.mutator, labelsInTx(op.mutator, nodeKey), op.propertyKey, oldVal)
 					}
 				}
 				op.mutator.DelNodeProperty(nodeKey, op.propertyKey)
@@ -378,7 +378,7 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 				return nil
 			}
 			if op.reg != nil {
-				labels := op.mutator.NodeLabels(nodeKey)
+				labels := labelsInTx(op.mutator, nodeKey)
 				// Release this node's own old constrained value BEFORE the check,
 				// so an idempotent self-set (SET n.k = its current value) is not
 				// rejected as a duplicate of itself and the old slot is freed
@@ -397,7 +397,7 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 				return serr
 			}
 			if op.reg != nil {
-				labels := op.mutator.NodeLabels(nodeKey)
+				labels := labelsInTx(op.mutator, nodeKey)
 				op.reg.RecordPropertySet(labels, op.propertyKey, pv)
 			}
 			// Read-your-own-writes: refresh the row's NodeValue snapshot
@@ -414,7 +414,7 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 				// openCypher: SET n.k = null removes the property k from n.
 				if op.reg != nil {
 					if oldVal, had := op.mutator.NodeProperties(nodeKey)[op.propertyKey]; had {
-						releaseConstraintValue(op.reg, op.mutator, op.mutator.NodeLabels(nodeKey), op.propertyKey, oldVal)
+						releaseConstraintValue(op.reg, op.mutator, labelsInTx(op.mutator, nodeKey), op.propertyKey, oldVal)
 					}
 				}
 				op.mutator.DelNodeProperty(nodeKey, op.propertyKey)
@@ -423,7 +423,7 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 			return nil // non-literal expression: no-op for current IR
 		}
 		if op.reg != nil {
-			labels := op.mutator.NodeLabels(nodeKey)
+			labels := labelsInTx(op.mutator, nodeKey)
 			// Release the old constrained value BEFORE the check so an idempotent
 			// self-set is not rejected as its own duplicate (H-C, #1905); see the
 			// release-before-check rationale on the eval path above.
@@ -438,7 +438,7 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 			return serr
 		}
 		if op.reg != nil {
-			labels := op.mutator.NodeLabels(nodeKey)
+			labels := labelsInTx(op.mutator, nodeKey)
 			op.reg.RecordPropertySet(labels, op.propertyKey, pv)
 		}
 		op.refreshNodeRowProperties(row, pv)
@@ -450,7 +450,7 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 		// self-set of a UNIQUE property is not rejected as its own duplicate
 		// (H-C, #1905).
 		existingMerge := op.mutator.NodeProperties(nodeKey)
-		labels := op.mutator.NodeLabels(nodeKey)
+		labels := labelsInTx(op.mutator, nodeKey)
 		if op.reg != nil {
 			for _, p := range op.parsedMap {
 				if oldVal, had := existingMerge[p.key]; had {
@@ -475,7 +475,7 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 	}
 	// SET n = {…}: replace all properties.
 	existing := op.mutator.NodeProperties(nodeKey)
-	labels := op.mutator.NodeLabels(nodeKey)
+	labels := labelsInTx(op.mutator, nodeKey)
 	if op.reg != nil {
 		// Release all existing constrained values BEFORE the check so an entry in
 		// the replacement map equal to the node's current value is not rejected

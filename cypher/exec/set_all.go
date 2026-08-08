@@ -652,7 +652,7 @@ func (op *SetAllProperties) clearTarget(target entityBinding) {
 	props := op.mutator.NodeProperties(target.nodeKey)
 	var labels []string
 	if op.reg != nil {
-		labels = op.mutator.NodeLabels(target.nodeKey)
+		labels = labelsInTx(op.mutator, target.nodeKey)
 	}
 	for k, oldVal := range props {
 		if op.reg != nil {
@@ -683,7 +683,7 @@ func (op *SetAllProperties) writeOne(target entityBinding, key string, value lpg
 		return nil
 	}
 	if op.reg != nil {
-		labels := op.mutator.NodeLabels(target.nodeKey)
+		labels := labelsInTx(op.mutator, target.nodeKey)
 		// Release the node's own prior value for this key before the check so an
 		// idempotent self-set is not rejected as its own duplicate.
 		if oldVal, had := op.mutator.NodeProperties(target.nodeKey)[key]; had {
@@ -697,7 +697,7 @@ func (op *SetAllProperties) writeOne(target entityBinding, key string, value lpg
 		return serr
 	}
 	if op.reg != nil {
-		labels := op.mutator.NodeLabels(target.nodeKey)
+		labels := labelsInTx(op.mutator, target.nodeKey)
 		op.reg.RecordPropertySet(labels, key, value)
 	}
 	return nil
@@ -718,7 +718,7 @@ func (op *SetAllProperties) deleteOne(target entityBinding, key string) {
 	}
 	if op.reg != nil {
 		if oldVal, had := op.mutator.NodeProperties(target.nodeKey)[key]; had {
-			releaseConstraintValue(op.reg, op.mutator, op.mutator.NodeLabels(target.nodeKey), key, oldVal)
+			releaseConstraintValue(op.reg, op.mutator, labelsInTx(op.mutator, target.nodeKey), key, oldVal)
 		}
 	}
 	op.mutator.DelNodeProperty(target.nodeKey, key)

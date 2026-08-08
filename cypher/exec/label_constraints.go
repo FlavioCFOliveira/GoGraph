@@ -84,6 +84,47 @@ type txVisibleNodeReader interface {
 	// NodePropertyInTx returns the value n carries under key in this
 	// transaction's view, and whether it carries one at all.
 	NodePropertyInTx(n, key string) (lpg.PropertyValue, bool)
+	// NodeLabelsInTx returns n's FULL label set in this transaction's view.
+	//
+	// The label path needed only the single-label probe above, because it already
+	// knows which label it is attaching. The PROPERTY path does not: it must ask
+	// which constraints the node is currently subject to, which means enumerating
+	// its labels — and enumerating them from the raw graph is the defect rmp #2355
+	// fixed. See [labelsInTx].
+	NodeLabelsInTx(n string) []string
+}
+
+// labelsInTx returns n's labels as THIS transaction sees them: its own eager writes
+// included, no other transaction's unpublished work.
+//
+// # Why every constraint decision on the property path must come through here
+//
+// A UNIQUE constraint attaches to a LABEL, so deciding what to reserve or release
+// for a property write starts by asking which labels the node carries. Asking the
+// raw graph gets the newest stored value, which includes other in-flight
+// transactions' eager writes — and conflicts are per SUBSTORE, so a peer writing the
+// LABEL while this transaction writes the PROPERTY never collides. rmp #2355
+// measured both halves of the consequence:
+//
+//	T1: REMOVE b:Person      (uncommitted; the raw bag now shows no :Person)
+//	T2: SET b.email = 'new'  (raw read => "unconstrained" => NO reservation)
+//	T1: ROLLBACK             (b is a :Person again)
+//	=> a second :Person then took 'new' too, and 'old' was never released,
+//	   leaving it reserved with no live node holding it.
+//
+// ONE helper rather than a corrected read at each of the ~26 decision sites,
+// deliberately: the drift between sites is what left the property path behind when
+// rmp #2352 hardened the label path, and a single choke point is what stops the next
+// site from drifting again.
+//
+// The fallback is not a degradation. A mutator that does not implement
+// [txVisibleNodeReader] carries no transaction at all — the read-only and test stubs
+// — and for such a caller the present IS its view.
+func labelsInTx(mut GraphMutator, n string) []string {
+	if tv, ok := mut.(txVisibleNodeReader); ok {
+		return tv.NodeLabelsInTx(n)
+	}
+	return mut.NodeLabels(n)
 }
 
 // nodeStateReader reads the label membership and property values the label

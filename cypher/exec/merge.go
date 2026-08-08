@@ -589,7 +589,7 @@ func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalF
 			// The RHS evaluated to null → openCypher removes the property.
 			if op.reg != nil {
 				if oldVal, had := op.mutator.NodeProperties(nodeKey)[a.key]; had {
-					releaseConstraintValue(op.reg, op.mutator, op.mutator.NodeLabels(nodeKey), a.key, oldVal)
+					releaseConstraintValue(op.reg, op.mutator, labelsInTx(op.mutator, nodeKey), a.key, oldVal)
 				}
 			}
 			op.mutator.DelNodeProperty(nodeKey, a.key)
@@ -603,7 +603,7 @@ func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalF
 		}
 		// Constraint enforcement for ON MATCH / ON CREATE action.
 		if op.reg != nil {
-			labels := op.mutator.NodeLabels(nodeKey)
+			labels := labelsInTx(op.mutator, nodeKey)
 			// Release this node's own old constrained value BEFORE the check and
 			// the overwrite. Without this the replaced value leaks as a permanent
 			// phantom reservation (no live node holds it yet it is blocked
@@ -622,7 +622,7 @@ func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalF
 			return fmt.Errorf("exec: Merge: action SetNodeProperty: %w", serr)
 		}
 		if op.reg != nil {
-			labels := op.mutator.NodeLabels(nodeKey)
+			labels := labelsInTx(op.mutator, nodeKey)
 			op.reg.RecordPropertySet(labels, a.key, pv)
 		}
 	}

@@ -15831,6 +15831,13 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 	if e.constraintReg != nil && e.constraintReg.HasAnyNotNull() {
 		touched = &touchedNodes{}
 	}
+	// The per-node CONSTRAINT stamp is gated SEPARATELY and more widely: a UNIQUE
+	// constraint binds a label to a property just as an existence constraint does, so
+	// both need the two substores to collide (rmp #2353, widened by rmp #2355). It is
+	// NOT gated on `touched`, because allocating that set for a UNIQUE-only schema
+	// would put the commit-time existence scan on every commit for nothing.
+	stampCon := e.constraintReg != nil &&
+		(e.constraintReg.HasAnyNotNull() || e.constraintReg.HasAnyUnique())
 
 	// The WAL transaction is opened OUTSIDE the visibility barrier: BeginCtx
 	// takes the store's writer admission and must not nest under visMu. The
@@ -15850,7 +15857,7 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 		}
 		// cbuf is left nil: it is allocated lazily on the first count delta, so a
 		// bare CREATE (:N) over an edgeless graph allocates none (#2082).
-		wa := &walMutatorAdapter{g: e.g, tx: walTx, touched: touched, eng: e}
+		wa := &walMutatorAdapter{g: e.g, tx: walTx, touched: touched, stampCon: stampCon, eng: e}
 		// Aim the counters, the index buffer and the undo log at the adapter's own
 		// inline stores (#2212, rmp #2339): this statement's write effects, index
 		// write-back and rollback record are all held with no allocation beyond
@@ -15861,7 +15868,7 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 		queryReg = wa.nowReg.bind(e.reg, stmtNow)
 		mutator = wa
 	} else {
-		la := &lpgMutatorAdapter{g: e.g, touched: touched, eng: e}
+		la := &lpgMutatorAdapter{g: e.g, touched: touched, stampCon: stampCon, eng: e}
 		la.counters = &la.countersStore // see the walMutatorAdapter branch above
 		la.buf, la.undo = &la.bufStore, &la.undoStore
 		buf, undo = la.buf, la.undo
@@ -16228,6 +16235,8 @@ type lpgMutatorAdapter struct {
 	// NULL constraints at commit (#1754). It is nil unless the engine has at
 	// least one existence constraint active, so the common path records nothing.
 	touched *touchedNodes
+	// stampCon: see [mutationUndo.stampCon] (rmp #2353/#2355).
+	stampCon bool
 	// bopts is the per-query build options carrying the cached forward-CSR
 	// snapshot ([ensureFwdCSR]). It is used only by [EdgeHandleAtPosition] to
 	// resolve a bound relationship instance's stable handle from its forward-CSR
@@ -16481,7 +16490,7 @@ func (a *lpgMutatorAdapter) countIsFresh(n string) bool {
 // rec returns the inverse-recording helper bound to this adapter's graph and
 // undo log.
 func (a *lpgMutatorAdapter) rec() mutationUndo {
-	return mutationUndo{wv: a.w(), undo: a.undo, touched: a.touched}
+	return mutationUndo{wv: a.w(), undo: a.undo, touched: a.touched, stampCon: a.stampCon}
 }
 
 // resolveID translates n to its stable NodeID, returning graph.NodeID(0)
@@ -16868,6 +16877,16 @@ func (a *lpgMutatorAdapter) HasNodeLabelInTx(n, label string) bool {
 	return a.g.WriterViewOf(a.wtx).HasNodeLabel(n, label)
 }
 
+// NodeLabelsInTx returns n's FULL label set in THIS transaction's view.
+//
+// The property path needs the whole set rather than a single probe, because it must
+// ask which constraints the node is currently subject to (rmp #2355). See
+// [lpgMutatorAdapter.HasNodeLabelInTx] for why the view and not the raw graph, and
+// [exec.labelsInTx] for what reading the raw graph here actually admitted.
+func (a *lpgMutatorAdapter) NodeLabelsInTx(n string) []string {
+	return a.g.WriterViewOf(a.wtx).NodeLabels(n)
+}
+
 // NodePropertyInTx returns n's value for key in THIS transaction's view. See
 // [lpgMutatorAdapter.HasNodeLabelInTx] for why the view and not the raw graph.
 func (a *lpgMutatorAdapter) NodePropertyInTx(n, key string) (lpg.PropertyValue, bool) {
@@ -17210,6 +17229,8 @@ type walMutatorAdapter struct {
 	// NULL constraints at commit (#1754). It is nil unless the engine has at
 	// least one existence constraint active, so the common path records nothing.
 	touched *touchedNodes
+	// stampCon: see [mutationUndo.stampCon] (rmp #2353/#2355).
+	stampCon bool
 	// bopts is the per-query build options carrying the cached forward-CSR
 	// snapshot ([ensureFwdCSR]). It is used only by [EdgeHandleAtPosition] to
 	// resolve a bound relationship instance's stable handle from its forward-CSR
@@ -17384,7 +17405,7 @@ func (a *walMutatorAdapter) countIsFresh(n string) bool {
 func (a *walMutatorAdapter) w() lpg.WriteView[string, float64] { return a.g.Writer(a.wtx) }
 
 func (a *walMutatorAdapter) rec() mutationUndo {
-	return mutationUndo{wv: a.w(), undo: a.undo, touched: a.touched}
+	return mutationUndo{wv: a.w(), undo: a.undo, touched: a.touched, stampCon: a.stampCon}
 }
 
 func (a *walMutatorAdapter) resolveID(n string) graph.NodeID {
@@ -17719,6 +17740,13 @@ func (a *walMutatorAdapter) NodeLabels(n string) []string {
 // See [lpgMutatorAdapter.HasNodeLabelInTx] for why the view and not the raw graph.
 func (a *walMutatorAdapter) HasNodeLabelInTx(n, label string) bool {
 	return a.g.WriterViewOf(a.wtx).HasNodeLabel(n, label)
+}
+
+// NodeLabelsInTx returns n's FULL label set in THIS transaction's view. See
+// [lpgMutatorAdapter.NodeLabelsInTx] for why the property path needs the whole set
+// (rmp #2355).
+func (a *walMutatorAdapter) NodeLabelsInTx(n string) []string {
+	return a.g.WriterViewOf(a.wtx).NodeLabels(n)
 }
 
 // NodePropertyInTx returns n's value for key in THIS transaction's view. See

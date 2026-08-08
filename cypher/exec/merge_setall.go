@@ -140,7 +140,7 @@ func clearNodePropsConstrained(mut GraphMutator, reg *ConstraintRegistry, nodeKe
 func delNodePropConstrained(mut GraphMutator, reg *ConstraintRegistry, nodeKey, key string) {
 	if reg != nil {
 		if oldVal, had := mut.NodeProperties(nodeKey)[key]; had {
-			releaseConstraintValue(reg, mut, mut.NodeLabels(nodeKey), key, oldVal)
+			releaseConstraintValue(reg, mut, labelsInTx(mut, nodeKey), key, oldVal)
 		}
 	}
 	mut.DelNodeProperty(nodeKey, key)
@@ -159,7 +159,7 @@ func setNodePropConstrained(
 	val lpg.PropertyValue,
 ) error {
 	if reg != nil {
-		labels := mut.NodeLabels(nodeKey)
+		labels := labelsInTx(mut, nodeKey)
 		if oldVal, had := mut.NodeProperties(nodeKey)[key]; had {
 			releaseConstraintValue(reg, mut, labels, key, oldVal)
 		}
@@ -171,7 +171,7 @@ func setNodePropConstrained(
 		return fmt.Errorf("exec: MERGE ON action SetNodeProperty %q: %w", key, serr)
 	}
 	if reg != nil {
-		reg.RecordPropertySet(mut.NodeLabels(nodeKey), key, val)
+		reg.RecordPropertySet(labelsInTx(mut, nodeKey), key, val)
 	}
 	return nil
 }

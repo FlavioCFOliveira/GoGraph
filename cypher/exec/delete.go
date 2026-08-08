@@ -209,7 +209,7 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 				// user-visible side effect: openCypher declares DELETE as -nodes only
 				// (#2212). Suppress effect counting for the span.
 				resumeCounting := suppressEffectCounting(op.mutator)
-				pathNodeLabels := op.mutator.NodeLabels(nodeKey)
+				pathNodeLabels := labelsInTx(op.mutator, nodeKey)
 				op.releaseNodeConstraintValues(nodeKey, pathNodeLabels)
 				for _, lbl := range pathNodeLabels {
 					op.mutator.RemoveNodeLabel(nodeKey, lbl)
@@ -340,7 +340,7 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 	// tombstoned, so `RETURN id(n)` still works but `RETURN n.foo` /
 	// `labels(n)` raise EntityNotFound on the Deleted flag (Return2 [15]
 	// / [16]).
-	deletedLabels := append([]string(nil), op.mutator.NodeLabels(nodeKey)...)
+	deletedLabels := append([]string(nil), labelsInTx(op.mutator, nodeKey)...)
 	var deletedProps expr.MapValue
 	if raw := op.mutator.NodeProperties(nodeKey); len(raw) > 0 {
 		deletedProps = make(expr.MapValue, len(raw))
@@ -358,7 +358,7 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 	// (#2212). Suppress effect counting for the span.
 	resumeCounting := suppressEffectCounting(op.mutator)
 	// Remove all labels.
-	for _, lbl := range op.mutator.NodeLabels(nodeKey) {
+	for _, lbl := range labelsInTx(op.mutator, nodeKey) {
 		op.mutator.RemoveNodeLabel(nodeKey, lbl)
 	}
 	// Remove all properties.

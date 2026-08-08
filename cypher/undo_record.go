@@ -50,6 +50,16 @@ type mutationUndo struct {
 	wv      lpg.WriteView[string, float64]
 	undo    *undoLog
 	touched *touchedNodes
+	// stampCon says whether this transaction must stamp the per-node CONSTRAINT
+	// slot on writes that can break a declared invariant (rmp #2353, widened to
+	// UNIQUE by rmp #2355).
+	//
+	// A SEPARATE gate from touched, and deliberately so. touched is allocated only
+	// for an EXISTENCE constraint, because it feeds the commit-time existence scan
+	// and allocating it for a UNIQUE-only schema would put that scan on every
+	// commit for nothing. The stamp is needed for BOTH kinds, so it carries its own
+	// flag rather than riding on the set.
+	stampCon bool
 }
 
 // active reports whether undo recording is enabled. The helpers short-circuit
@@ -88,10 +98,34 @@ func (m mutationUndo) active() bool { return m.undo != nil }
 // the set is nil unless the registry holds a NOT NULL constraint. An unconstrained
 // schema therefore reaches neither the map nor the stamp shard.
 func (m mutationUndo) touch(n string) {
-	if m.touched == nil {
+	if m.touched != nil {
+		m.touched.touch(n)
+	}
+	m.noteCon(n)
+}
+
+// noteCon stamps n's per-node CONSTRAINT slot, so a transaction writing one half of
+// a declared invariant collides with a transaction writing the other half (rmp
+// #2353 for existence, rmp #2355 for uniqueness).
+//
+// # Why uniqueness needed MORE sites than existence
+//
+// The existence check cares only about writes that can INTRODUCE a missing property:
+// a node creation, a label gain, a property removal. Uniqueness is broken by a
+// different set — a label LOSS releases a reservation, and a property SET to a new
+// value moves one — and neither of those touches. So rmp #2355's interleaving
+// (T1 REMOVE label, T2 SET property) stamped NOTHING under the existence sites
+// alone, which is why widening the gate without widening the sites would have
+// changed no behaviour at all. Measured before it was written.
+//
+// Gated on the schema declaring SOME constraint, decided once per transaction. A
+// schema with none never reaches the stamp store; a schema with one accepts
+// node-granular conflict on the nodes it constrains, which is the granularity every
+// reference engine uses and the scoping rule rmp #2353 established.
+func (m mutationUndo) noteCon(n string) {
+	if !m.stampCon {
 		return
 	}
-	m.touched.touch(n)
 	_ = m.wv.NoteConstraintTouch(n)
 }
 
@@ -182,7 +216,14 @@ func (m mutationUndo) recordSetNodeLabel(n, label string, hadLabel bool) {
 // re-attaches it; when it was absent the removal was a no-op and nothing is
 // recorded.
 func (m mutationUndo) recordRemoveNodeLabel(n, label string, hadLabel bool) {
-	if !m.active() || !hadLabel {
+	if !hadLabel {
+		return
+	}
+	// Losing a label RELEASES any UNIQUE reservation the node held under it, so it
+	// is a write to one half of a declared invariant (rmp #2355). Stamped before the
+	// undo guard, because the stamp is gated on the schema and not on undo activity.
+	m.noteCon(n)
+	if !m.active() {
 		return
 	}
 	m.undo.record(func() { _ = m.wv.SetNodeLabel(n, label) })
@@ -210,6 +251,10 @@ func (m mutationUndo) recordRemoveNode(n string, wasLive bool) {
 // the property existed, the inverse restores the old value; otherwise it
 // deletes the key the statement added.
 func (m mutationUndo) recordSetNodeProperty(n, key string, prev lpg.PropertyValue, had bool) {
+	// Setting a property MOVES any UNIQUE reservation the node held for that key, so
+	// it is a write to the other half of a declared invariant (rmp #2355). Stamped
+	// before the undo guard, for the same reason as the label loss above.
+	m.noteCon(n)
 	if !m.active() {
 		return
 	}
