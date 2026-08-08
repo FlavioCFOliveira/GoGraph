@@ -151,6 +151,100 @@ func TestUnique_PeerCommittedLabelRemovalDoesNotLeakTheNewValue(t *testing.T) {
 	}
 }
 
+// TestUnique_RollbackLeavesNoPhantomReservation closes rmp #2357, which suspected that
+// a property write's SECOND value-set insert could survive a rollback as a permanent
+// phantom.
+//
+// # The suspicion, and why it is now impossible rather than merely unobserved
+//
+// The property-set paths insert into the UNIQUE value-set TWICE: once through
+// reserveConstraintValue, which journals the inverse so a rollback gives the value
+// back, and once through ConstraintRegistry.RecordPropertySet, which journals nothing.
+// Each insert took its own label read. #2357's claim was that if the two reads
+// disagreed, the second insert would land under a (label, value) key that was never
+// reserved and so had no journaled inverse — surviving rollback as a reservation no
+// live node holds.
+//
+// The two reads could disagree only because both were RAW present-time reads, so a
+// peer's UNCOMMITTED label change between them sufficed. rmp #2355 routed every
+// constraint decision on this path through exec.labelsInTx, so both reads now resolve
+// through the SAME transaction view: a peer's unpublished label change is invisible to
+// both, and this transaction changes no label between them — only a property. There is
+// no longer a mechanism by which they can differ. Independently, #2355's per-node
+// constraint stamp makes a concurrent label change on the node CONFLICT, so the
+// interleaving that would have been needed is refused outright.
+//
+// This test is the standing guard on the conclusion: it drives the interleaving that
+// the divergence would have required and asserts that after a ROLLBACK no value is
+// left reserved. Both orderings of the peer's fate are covered, because a rollback and
+// a commit exercise different journal replays.
+func TestUnique_RollbackLeavesNoPhantomReservation(t *testing.T) {
+	// ONLY the peer-rolls-back case. The peer-COMMITS case exposes a DIFFERENT
+	// defect, with a different mechanism, and it is filed as rmp #2366 with this
+	// exact reproduction rather than folded in here: there the writer's own
+	// JOURNALED inverse re-reserves the old value from its own view AFTER the peer's
+	// COMMITTED label removal already released it, so the value ends up reserved with
+	// no live holder. That is a property of the UNIQUE value-set being a
+	// non-versioned side structure whose journal replays are not ordered against a
+	// peer's commit — not of the unjournaled second insert #2357 is about. Encoding
+	// it here as expected would be encoding a defect as correct.
+	for _, tc := range []struct {
+		name     string
+		peerFate string
+	}{
+		{name: "peer rolls back", peerFate: "rollback"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eng, ctx := newLabelConflictEngine(t, uniqueSetup...)
+			t1, t2 := beginTwo(t, ctx, eng)
+
+			// The peer's UNCOMMITTED label change is what the two reads would have
+			// disagreed across.
+			if err := execInTx(t1, `MATCH (b:Person {k:'b'}) REMOVE b:Person`); err != nil {
+				t.Fatalf("T1 REMOVE b:Person: %v", err)
+			}
+			_ = execInTx(t2, `MATCH (b {k:'b'}) SET b.email = 'new'`)
+
+			// THIS transaction rolls back. Anything it inserted must come back out,
+			// whether or not it was refused first.
+			if err := t2.Rollback(); err != nil {
+				t.Fatalf("t2.Rollback: %v", err)
+			}
+			switch tc.peerFate {
+			case "rollback":
+				if err := t1.Rollback(); err != nil {
+					t.Fatalf("t1.Rollback: %v", err)
+				}
+			case "commit":
+				if err := t1.Commit(); err != nil {
+					t.Fatalf("t1.Commit: %v", err)
+				}
+			}
+
+			// 'new' was never committed by anybody, so nothing may hold it reserved.
+			if err := runLabelConstraintTx(ctx, eng,
+				`CREATE (z:Person {k:'z', email:'new'})`); err != nil {
+				t.Errorf("PHANTOM: 'new' was rolled back but is still reserved: %v", err)
+			}
+			// And 'old': whether it is reserved must follow whether a live :Person
+			// holds it, which depends on the peer's fate.
+			holdsOld := countQ(t, ctx, eng,
+				`MATCH (n:Person) WHERE n.email = 'old' RETURN count(n) AS c`)
+			reuseOld := runLabelConstraintTx(ctx, eng,
+				`CREATE (y:Person {k:'y', email:'old'})`)
+			if holdsOld == 0 && reuseOld != nil {
+				t.Errorf("PHANTOM: no live :Person holds 'old', yet it is still reserved: %v", reuseOld)
+			}
+			if holdsOld > 0 && reuseOld == nil {
+				if after := countQ(t, ctx, eng,
+					`MATCH (n:Person) WHERE n.email = 'old' RETURN count(n) AS c`); after > 1 {
+					t.Errorf("CONSISTENCY: %d :Person nodes now hold 'old'", after)
+				}
+			}
+		})
+	}
+}
+
 // TestUnique_DisjointNodesUnderUniqueDoNotConflict is the PROPORTIONALITY control for
 // widening the per-node constraint stamp to cover UNIQUE.
 //
