@@ -53,13 +53,34 @@ package mvccwrite
 //     ratio moved 28.28x -> 27.55x. Churn is not the cause, and the speculative change
 //     was reverted rather than shipped.
 //
-//     The anomaly is therefore unexplained and the ratio must not be quoted. Next
-//     candidate, untested: the VACUUM. Total write volume grows with the writer count
-//     (640k updates at 32 writers against 20k at one), so the reclaim threshold may
-//     only be reached in the busy arms, leaving the single-writer arm walking chains
-//     nobody has swept. MVCCStats.ChainDepth and VacuumStats would settle it. Until
-//     something is MEASURED, "more writers is faster per commit" is an observation
-//     about this fixture and not about the engine.
+//     The VACUUM/CHAIN-DEPTH candidate has since been ELIMINATED too, by the
+//     straightforward test: if unswept delta chains were the cost, ns/op at one writer
+//     would RISE with the number of updates each pooled node receives. It FALLS —
+//     96 us/op at ~7 updates/node (b.N=2000), 63 us at ~31 (b.N=8000), 47 us at ~125
+//     (b.N=32000), with allocs/op flat at 160-172 throughout. Deeper chains are
+//     cheaper here, so chain depth is not the mechanism; a FIXED cost being amortised
+//     over b.N is. Fitting total time against b.N puts that fixed cost at roughly
+//     0.17 s per sub-benchmark, which is inside the timed region and is not the seed
+//     (seedPool runs before ResetTimer).
+//
+//     So TWO explanations were proposed and refuted by measurement. A CPU profile of
+//     the single-writer arm then named the actual cost, and it is STILL the fixture:
+//     `NodeByLabelScan.Next` plus `newRowPredicate` account for ~31 % cumulative, so
+//     `MATCH (n:Account {id: $id})` is executing as a LABEL SCAN WITH A ROW FILTER and
+//     the index created in seedPool is NOT being used. Artefact 1 was therefore only
+//     half fixed: the index exists and is not picked. (`EXPLAIN` is rejected on this
+//     write shape, so the plan was established from the profile rather than from a
+//     plan dump.)
+//
+//     CONSEQUENCE FOR EVERY NUMBER HERE: the mutating arms' ABSOLUTE figures are
+//     inflated by a scan proportional to the seeded node count, and that count grows
+//     with the writer count, so the cross-writer ratio is confounded as well. Nothing
+//     in these arms says anything about engine contention until the lookup is a seek.
+//     Whether the planner cannot use an index for `MATCH (n:Label {prop: $param})` in
+//     a write statement, or seedPool declares it wrongly, is the FIRST thing to settle
+//     — and if it is the planner, that is a finding about the engine and not about this
+//     file. Report MVCCStats.ChainDepth alongside regardless: having it would have
+//     killed the chain hypothesis in one run instead of two.
 //
 // So: the per-arm ABSOLUTE numbers at a FIXED writer count are usable, and the
 // oracle guarantees each arm touches its target. The cross-writer-count ratio of a
