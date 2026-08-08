@@ -53,29 +53,34 @@ package mvccwrite
 //     ratio moved 28.28x -> 27.55x. Churn is not the cause, and the speculative change
 //     was reverted rather than shipped.
 //
-//     EXPLAINED, and it was never the substrate. THE PLANNER CHANGES ITS MIND WITH THE
-//     SEEDED NODE COUNT. seedPool creates contentionPool nodes PER WRITER, so the
-//     :Account label holds 256 rows at one writer and 8192 at 32 — and the planner is
-//     cost-based, choosing a LABEL SCAN at small cardinality and an INDEX SEEK at
-//     large. Measured with the TIMED WORK HELD IDENTICAL (writer 0 always updates keys
-//     0..255) and only the count of OTHER nodes varied, ordered 16/4/1/16 so warm-up
-//     cannot explain it:
+//     LOCALISED to graph SIZE, mechanism NOT established. seedPool creates
+//     contentionPool nodes PER WRITER, so :Account holds 256 rows at one writer and
+//     8192 at 32 — and per-operation cost is 10x WORSE with FEWER nodes, for IDENTICAL
+//     timed work (writer 0 always updates keys 0..255, ~12 updates each either way).
+//     Ordered 16/4/1/16 so warm-up cannot explain it:
 //
 //     	4096 other nodes ->  4354 ns/op        (seek)
 //     	1024 other nodes ->  4025 ns/op        (seek)
 //     	 256 other nodes -> 41933 ns/op        (scan: 10x SLOWER)
 //     	4096 other nodes ->  4024 ns/op        (seek)
 //
-//     So per-commit cost fell ~27x as writers rose because the PLAN changed, not
-//     because contention eased. The impossible 28x "scaling" was the fixture crossing
-//     the planner's threshold. Filed as rmp #2367: the crossover is mis-calibrated —
-//     the planner declines a seek that is ~10x cheaper at 256 rows — which is a real
-//     finding about the engine and affects the commonest update shape in the language.
+//     So per-commit cost falls ~27x as writers rise because the GRAPH GROWS, not
+//     because contention eases, and the impossible 28x "scaling" is that and nothing
+//     more. Filed as rmp #2367.
 //
-//     UNTIL #2367 IS FIXED, no mutating arm here can produce a contention baseline: its
-//     plan is a function of its own seed size. Three of my explanations were refuted
-//     before this one held (missing index; per-node churn; unswept chains), so treat
-//     any new theory here as unproven until it is measured.
+//     A CPU profile of the slow case attributes ~31 % cumulative to
+//     NodeByLabelScan.Next plus newRowPredicate, which SUGGESTS the index is not being
+//     consulted at 256 rows. That is a SUGGESTION and not the diagnosis: a first search
+//     of the planner found NO cardinality threshold governing scan-versus-seek, so the
+//     "cost-based planner with a mis-calibrated crossover" reading was WITHDRAWN from
+//     #2367 as unsupported. EXPLAIN is not accepted by the parser at all, for read or
+//     write, so no plan dump was available to settle it.
+//
+//     FOUR explanations have now been proposed here and THREE refuted by measurement
+//     (missing index; per-node churn; unswept chains), and the fourth is unproven. The
+//     base rate for a plausible-sounding mechanism in this area is poor. Until #2367
+//     names the mechanism with evidence, no mutating arm here can produce a contention
+//     baseline, because its cost is a function of its own seed size.
 //
 // # How these arms must be run
 //
