@@ -1,0 +1,446 @@
+spec lost-update: 2 sessions, 20 permutations
+# P4 lost update. Two transactions read counter c and each writes back a value
+# derived from what it read. GoGraph's concurrency control is MVCC with per-object
+# write-write conflict detection, so one of the two MUST be refused in every
+# interleaving where both write before either commits. An interleaving in which
+# both commit and one increment vanishes is the anomaly.
+
+starting permutation: s1r s1w s1c s2r s2w s2c
+step s1r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s1w: MATCH (c:Counter {name:'c'}) SET c.n = 10 RETURN c.n AS n
+n 
+--
+10
+(1 row)
+step s1c: COMMIT
+step s2r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s2w: MATCH (c:Counter {name:'c'}) SET c.n = 20 RETURN c.n AS n
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+
+starting permutation: s1r s1w s2r s1c s2w s2c
+step s1r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s1w: MATCH (c:Counter {name:'c'}) SET c.n = 10 RETURN c.n AS n
+n 
+--
+10
+(1 row)
+step s2r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (c:Counter {name:'c'}) SET c.n = 20 RETURN c.n AS n
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+
+starting permutation: s1r s1w s2r s2w s1c s2c
+step s1r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s1w: MATCH (c:Counter {name:'c'}) SET c.n = 10 RETURN c.n AS n
+n 
+--
+10
+(1 row)
+step s2r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s2w: MATCH (c:Counter {name:'c'}) SET c.n = 20 RETURN c.n AS n
+ERROR: serialization conflict
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+
+starting permutation: s1r s1w s2r s2w s2c s1c
+step s1r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s1w: MATCH (c:Counter {name:'c'}) SET c.n = 10 RETURN c.n AS n
+n 
+--
+10
+(1 row)
+step s2r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s2w: MATCH (c:Counter {name:'c'}) SET c.n = 20 RETURN c.n AS n
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+
+starting permutation: s1r s2r s1w s1c s2w s2c
+step s1r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s2r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s1w: MATCH (c:Counter {name:'c'}) SET c.n = 10 RETURN c.n AS n
+n 
+--
+10
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (c:Counter {name:'c'}) SET c.n = 20 RETURN c.n AS n
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+
+starting permutation: s1r s2r s1w s2w s1c s2c
+step s1r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s2r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s1w: MATCH (c:Counter {name:'c'}) SET c.n = 10 RETURN c.n AS n
+n 
+--
+10
+(1 row)
+step s2w: MATCH (c:Counter {name:'c'}) SET c.n = 20 RETURN c.n AS n
+ERROR: serialization conflict
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+
+starting permutation: s1r s2r s1w s2w s2c s1c
+step s1r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s2r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s1w: MATCH (c:Counter {name:'c'}) SET c.n = 10 RETURN c.n AS n
+n 
+--
+10
+(1 row)
+step s2w: MATCH (c:Counter {name:'c'}) SET c.n = 20 RETURN c.n AS n
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+
+starting permutation: s1r s2r s2w s1w s1c s2c
+step s1r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s2r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s2w: MATCH (c:Counter {name:'c'}) SET c.n = 20 RETURN c.n AS n
+n 
+--
+20
+(1 row)
+step s1w: MATCH (c:Counter {name:'c'}) SET c.n = 10 RETURN c.n AS n
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+
+starting permutation: s1r s2r s2w s1w s2c s1c
+step s1r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s2r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s2w: MATCH (c:Counter {name:'c'}) SET c.n = 20 RETURN c.n AS n
+n 
+--
+20
+(1 row)
+step s1w: MATCH (c:Counter {name:'c'}) SET c.n = 10 RETURN c.n AS n
+ERROR: serialization conflict
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+
+starting permutation: s1r s2r s2w s2c s1w s1c
+step s1r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s2r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s2w: MATCH (c:Counter {name:'c'}) SET c.n = 20 RETURN c.n AS n
+n 
+--
+20
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (c:Counter {name:'c'}) SET c.n = 10 RETURN c.n AS n
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+
+starting permutation: s2r s1r s1w s1c s2w s2c
+step s2r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s1r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s1w: MATCH (c:Counter {name:'c'}) SET c.n = 10 RETURN c.n AS n
+n 
+--
+10
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (c:Counter {name:'c'}) SET c.n = 20 RETURN c.n AS n
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+
+starting permutation: s2r s1r s1w s2w s1c s2c
+step s2r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s1r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s1w: MATCH (c:Counter {name:'c'}) SET c.n = 10 RETURN c.n AS n
+n 
+--
+10
+(1 row)
+step s2w: MATCH (c:Counter {name:'c'}) SET c.n = 20 RETURN c.n AS n
+ERROR: serialization conflict
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+
+starting permutation: s2r s1r s1w s2w s2c s1c
+step s2r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s1r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s1w: MATCH (c:Counter {name:'c'}) SET c.n = 10 RETURN c.n AS n
+n 
+--
+10
+(1 row)
+step s2w: MATCH (c:Counter {name:'c'}) SET c.n = 20 RETURN c.n AS n
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+
+starting permutation: s2r s1r s2w s1w s1c s2c
+step s2r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s1r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s2w: MATCH (c:Counter {name:'c'}) SET c.n = 20 RETURN c.n AS n
+n 
+--
+20
+(1 row)
+step s1w: MATCH (c:Counter {name:'c'}) SET c.n = 10 RETURN c.n AS n
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+
+starting permutation: s2r s1r s2w s1w s2c s1c
+step s2r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s1r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s2w: MATCH (c:Counter {name:'c'}) SET c.n = 20 RETURN c.n AS n
+n 
+--
+20
+(1 row)
+step s1w: MATCH (c:Counter {name:'c'}) SET c.n = 10 RETURN c.n AS n
+ERROR: serialization conflict
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+
+starting permutation: s2r s1r s2w s2c s1w s1c
+step s2r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s1r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s2w: MATCH (c:Counter {name:'c'}) SET c.n = 20 RETURN c.n AS n
+n 
+--
+20
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (c:Counter {name:'c'}) SET c.n = 10 RETURN c.n AS n
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+
+starting permutation: s2r s2w s1r s1w s1c s2c
+step s2r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s2w: MATCH (c:Counter {name:'c'}) SET c.n = 20 RETURN c.n AS n
+n 
+--
+20
+(1 row)
+step s1r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s1w: MATCH (c:Counter {name:'c'}) SET c.n = 10 RETURN c.n AS n
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+
+starting permutation: s2r s2w s1r s1w s2c s1c
+step s2r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s2w: MATCH (c:Counter {name:'c'}) SET c.n = 20 RETURN c.n AS n
+n 
+--
+20
+(1 row)
+step s1r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s1w: MATCH (c:Counter {name:'c'}) SET c.n = 10 RETURN c.n AS n
+ERROR: serialization conflict
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+
+starting permutation: s2r s2w s1r s2c s1w s1c
+step s2r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s2w: MATCH (c:Counter {name:'c'}) SET c.n = 20 RETURN c.n AS n
+n 
+--
+20
+(1 row)
+step s1r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (c:Counter {name:'c'}) SET c.n = 10 RETURN c.n AS n
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+
+starting permutation: s2r s2w s2c s1r s1w s1c
+step s2r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s2w: MATCH (c:Counter {name:'c'}) SET c.n = 20 RETURN c.n AS n
+n 
+--
+20
+(1 row)
+step s2c: COMMIT
+step s1r: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+0
+(1 row)
+step s1w: MATCH (c:Counter {name:'c'}) SET c.n = 10 RETURN c.n AS n
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback

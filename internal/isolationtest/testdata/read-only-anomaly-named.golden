@@ -1,0 +1,44 @@
+spec read-only-anomaly-named: 3 sessions, 1 permutations
+# The read-only transaction anomaly under snapshot isolation (Fekete, O'Neil &
+# O'Neil). Two accounts start at 0. s1 credits Y by 20; s2 reads both and then
+# debits X by 11 (an overdraft charge it would not have applied had it seen the
+# credit). A read-only s3 can observe X=0, Y=20 — a state no serial ordering of s1
+# and s2 produces. GoGraph is snapshot-isolated, so this is EXPECTED; the
+# transcript is the before-picture for any future serialisable mode.
+
+starting permutation: s2rx s2ry s1ry s1wy s1c s3b s3r s2wx s2c s3c
+step s2rx: MATCH (a:Acct {id:'X'}) RETURN a.bal AS bal
+bal
+---
+0  
+(1 row)
+step s2ry: MATCH (a:Acct {id:'Y'}) RETURN a.bal AS bal
+bal
+---
+0  
+(1 row)
+step s1ry: MATCH (a:Acct {id:'Y'}) RETURN a.bal AS bal
+bal
+---
+0  
+(1 row)
+step s1wy: MATCH (a:Acct {id:'Y'}) SET a.bal = 20 RETURN a.bal AS bal
+bal
+---
+20 
+(1 row)
+step s1c: COMMIT
+step s3b: BEGIN READ
+step s3r: MATCH (a:Acct) RETURN a.id AS id, a.bal AS bal ORDER BY a.id
+id |bal
+---+---
+"X"|0  
+"Y"|20 
+(2 rows)
+step s2wx: MATCH (a:Acct {id:'X'}) SET a.bal = -11 RETURN a.bal AS bal
+bal
+---
+-11
+(1 row)
+step s2c: COMMIT
+step s3c: COMMIT

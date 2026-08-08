@@ -11,7 +11,12 @@ For the three-layer test discipline and CI integration, see
 harness — the seed-reproducible, VOPR-modelled simulator that drives the engine
 through randomised operations and faults and checks it against a
 correct-by-construction oracle (including the `search/` algorithm battery) — see
-[docs/dst.md](dst.md).
+[docs/dst.md](dst.md). For the isolation harness — the scripted, EXHAUSTIVE,
+deterministic enumeration of a concurrent scenario's interleavings, modelled on
+PostgreSQL's `src/test/isolation` — see
+[docs/isolation-harness.md](isolation-harness.md). The two are complementary:
+DST samples a large space at random, while the isolation harness certifies a
+small one completely.
 
 ---
 
@@ -27,6 +32,7 @@ correct-by-construction oracle (including the `search/` algorithm battery) — s
    - [`internal/crashpoint` and `internal/crashinject`](#internalcrashpoint-and-internalcrashinject)
    - [`internal/subproc`](#internalsubproc)
 7. [Golden-file helper (`internal/goldens`)](#golden-file-helper-internalgoldens)
+   - [Isolation harness (`internal/isolationtest`)](#isolation-harness-internalisolationtest)
 8. [Test layers quick-reference](#test-layers-quick-reference)
 9. [Add-new-shape recipe](#add-new-shape-recipe)
 
@@ -301,6 +307,35 @@ On mismatch, reports a unified diff. With `-update` or
 `GOGRAPH_UPDATE_GOLDENS=1`, overwrites the file atomically
 (temp file + rename) and continues. Call `goldens.UpdateRequested()`
 in `TestMain` to gate conditional generation logic.
+
+### Isolation harness (`internal/isolationtest`)
+
+Package: `github.com/FlavioCFOliveira/GoGraph/internal/isolationtest`
+
+The scripted, **exhaustive**, deterministic counterpart of the randomised DST
+battery, modelled on PostgreSQL's `src/test/isolation` (read at commit
+`0ec3f048`). A spec declares named sessions holding named steps; the harness runs
+**every** interleaving that preserves each session's own step order, and diffs the
+rendered transcript against `testdata/<spec>.golden`.
+
+```go
+isolationtest.Check(t, spec, &isolationtest.Runner{NewEngine: memEngine})
+```
+
+Two assertion mechanisms, answering different questions: the **golden
+transcript** catches a change in behaviour, while **`Runner.Observe`** catches
+incorrect behaviour by asserting an invariant over each step's structured rows.
+A failing permutation is named, and `Runner.Only` replays it alone.
+
+Shipped: `lost-update`, `write-skew`, `bank-transfer` and a named
+`read-only-anomaly` permutation at the **short** layer (20 permutations each);
+the exhaustive `read-only-anomaly` (4 200 permutations, ~15 s under `-race`) at
+**soak**. The harness is proven to catch a real fault rather than merely to pass
+— see the negative control in `fault_test.go`.
+
+Full specification, including the enumeration algorithm, the determinism
+argument, what was deliberately not copied from PostgreSQL, and the recipe for a
+new spec: [docs/isolation-harness.md](isolation-harness.md).
 
 ---
 
