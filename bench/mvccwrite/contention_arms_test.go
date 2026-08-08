@@ -101,11 +101,20 @@ package mvccwrite
 // mixed likewise steady. label-add-remove passes at 1 and 4 writers (4434, 3163 ns/op)
 // and FAILS at 16 and 32 with "still conflicting after 64 retries" on nodes NO peer
 // touches, since every writer owns a disjoint key range. That is a LIVELOCK, filed as
-// rmp #2368, and it is evidence against a claim rmp #2354 made in its own commit
-// message — that testing the label head unconditionally "cannot reintroduce a spurious
-// abort" for a transaction re-asserting over its own write. Attribution against
-// 30dc804b comes first there; the benchmark failing is honest signal and is left
-// failing rather than tuned away.
+// rmp #2368, and it is ATTRIBUTED: 30dc804b (pre-#2354) PASSES at 16 writers with
+// 3496 ns/op and 0 retries/op, b1f0974f (the #2354 commit) FAILS, HEAD fails
+// identically — same arm source in all three, so only the engine differs.
+//
+// So rmp #2354 introduced it, and this refutes a claim #2354 made in its own commit
+// message: that testing the label head unconditionally "cannot reintroduce a spurious
+// abort" because the head re-asserted over "is its OWN write or an older committed one
+// — visible either way". That is false for consecutive autocommit statements from one
+// goroutine, and this arm is the counter-example. #2354's five regression tests are all
+// SAFETY assertions and none of them could observe a LIVENESS defect, which is why a
+// green suite said nothing about it.
+//
+// The benchmark is left FAILING rather than tuned away: it is the only thing in the
+// tree that reports this.
 //
 // # How these arms must be run
 //
