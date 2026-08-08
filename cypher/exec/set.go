@@ -396,10 +396,6 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 			if serr := op.mutator.SetNodeProperty(nodeKey, op.propertyKey, pv); serr != nil {
 				return serr
 			}
-			if op.reg != nil {
-				labels := labelsInTx(op.mutator, nodeKey)
-				op.reg.RecordPropertySet(labels, op.propertyKey, pv)
-			}
 			// Read-your-own-writes: refresh the row's NodeValue snapshot
 			// so downstream RETURN n.<key> reads the freshly set value
 			// instead of the pre-SET snapshot captured during the upstream
@@ -437,10 +433,6 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 		if serr := op.mutator.SetNodeProperty(nodeKey, op.propertyKey, pv); serr != nil {
 			return serr
 		}
-		if op.reg != nil {
-			labels := labelsInTx(op.mutator, nodeKey)
-			op.reg.RecordPropertySet(labels, op.propertyKey, pv)
-		}
 		op.refreshNodeRowProperties(row, pv)
 		return nil
 	}
@@ -466,9 +458,6 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 		for _, p := range op.parsedMap {
 			if serr := op.mutator.SetNodeProperty(nodeKey, p.key, p.value); serr != nil {
 				return serr
-			}
-			if op.reg != nil {
-				op.reg.RecordPropertySet(labels, p.key, p.value)
 			}
 		}
 		return nil
@@ -496,9 +485,6 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 	for _, p := range op.parsedMap {
 		if serr := op.mutator.SetNodeProperty(nodeKey, p.key, p.value); serr != nil {
 			return serr
-		}
-		if op.reg != nil {
-			op.reg.RecordPropertySet(labels, p.key, p.value)
 		}
 	}
 	return nil

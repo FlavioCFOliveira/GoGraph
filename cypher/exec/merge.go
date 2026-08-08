@@ -433,9 +433,6 @@ func (op *Merge) runOnCreatePathWithProps(childRow Row, props []propLiteral) err
 		if serr := op.mutator.SetNodeProperty(nodeKey, p.key, p.value); serr != nil {
 			return fmt.Errorf("exec: Merge: ON CREATE SetNodeProperty: %w", serr)
 		}
-		if op.reg != nil {
-			op.reg.RecordPropertySet(op.labels, p.key, p.value)
-		}
 	}
 
 	createdRow := op.combineRows(childRow, Row{expr.IntegerValue(int64(nodeID))})
@@ -620,10 +617,6 @@ func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalF
 		}
 		if serr := op.mutator.SetNodeProperty(nodeKey, a.key, pv); serr != nil {
 			return fmt.Errorf("exec: Merge: action SetNodeProperty: %w", serr)
-		}
-		if op.reg != nil {
-			labels := labelsInTx(op.mutator, nodeKey)
-			op.reg.RecordPropertySet(labels, a.key, pv)
 		}
 	}
 	return nil

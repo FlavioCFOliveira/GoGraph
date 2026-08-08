@@ -820,6 +820,25 @@ func (r *ConstraintRegistry) checkSetPropertyLocked(labels []string, prop string
 // written to a node with the given labels. This keeps the unique value sets
 // up-to-date so that subsequent CheckSetProperty calls detect violations.
 // It is a no-op when no unique constraint exists for (label, prop).
+// # DO NOT CALL THIS FROM A WRITE PATH (rmp #2357/#2358)
+//
+// Its only legitimate caller is [releaseConstraintValue], where it IS the journaled
+// inverse of a release: a rolled-back release must put the value back.
+//
+// Every write path must reserve through [reserveConstraintValue] and nothing else.
+// Eleven write sites used to call this immediately AFTER their reserve, and every
+// one of those calls was dead weight: the body below is the SAME set insert as
+// [ConstraintRegistry.ReserveSetProperty]'s phase 2, over the same (labels, prop,
+// value), and a set insert is idempotent — so the value was already present. What it
+// was not free of is r.mu: each call took this registry's WRITE lock a second time
+// per constrained property write, and
+// [nodeStateReader] records that this lock measured 57 % of ALL lock delay at sixteen
+// writers on a schema with no constraints at all. Verified site by site before the
+// calls were removed, including the three whose reserve sits more than a dozen lines
+// above it.
+//
+// A new write path that "records" what it has already reserved therefore buys
+// nothing and pays a lock acquisition. Reserve, and stop.
 func (r *ConstraintRegistry) RecordPropertySet(labels []string, prop string, value lpg.PropertyValue) {
 	// No UNIQUE constraint anywhere: nothing to record, and taking this registry's
 	// global lock would put one mutex on every property write for no benefit. See

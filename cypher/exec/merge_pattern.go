@@ -966,9 +966,6 @@ func (op *MergePattern) createChain(childRow Row) (binding, error) {
 			if err := op.mutator.SetNodeProperty(key, p.key, p.value); err != nil {
 				return nil, fmt.Errorf("SetNodeProperty %q.%s: %w", n.varName, p.key, err)
 			}
-			if op.reg != nil {
-				op.reg.RecordPropertySet(n.labels, p.key, p.value)
-			}
 		}
 		id, ok := op.mutator.ResolveNodeID(key)
 		if !ok {
@@ -1239,10 +1236,6 @@ func (op *MergePattern) applyNodeAction(key string, act mergeAction, evalRow Row
 	}
 	if err := op.mutator.SetNodeProperty(key, act.key, v); err != nil {
 		return fmt.Errorf("exec: MergePattern: SetNodeProperty: %w", err)
-	}
-	if op.reg != nil {
-		labels := labelsInTx(op.mutator, key)
-		op.reg.RecordPropertySet(labels, act.key, v)
 	}
 	return nil
 }

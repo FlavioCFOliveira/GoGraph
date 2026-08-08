@@ -304,9 +304,6 @@ func (op *CreateNode) Next(out *Row) (bool, error) {
 		if err := op.mutator.SetNodeProperty(nodeKey, p.key, p.value); err != nil {
 			return false, err
 		}
-		if op.reg != nil {
-			op.reg.RecordPropertySet(op.labels, p.key, p.value)
-		}
 	}
 
 	// Build output row: child columns + optional NodeID column.

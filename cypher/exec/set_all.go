@@ -696,10 +696,6 @@ func (op *SetAllProperties) writeOne(target entityBinding, key string, value lpg
 	if serr := op.mutator.SetNodeProperty(target.nodeKey, key, value); serr != nil {
 		return serr
 	}
-	if op.reg != nil {
-		labels := labelsInTx(op.mutator, target.nodeKey)
-		op.reg.RecordPropertySet(labels, key, value)
-	}
 	return nil
 }
 

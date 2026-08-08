@@ -170,8 +170,5 @@ func setNodePropConstrained(
 	if serr := mut.SetNodeProperty(nodeKey, key, val); serr != nil {
 		return fmt.Errorf("exec: MERGE ON action SetNodeProperty %q: %w", key, serr)
 	}
-	if reg != nil {
-		reg.RecordPropertySet(labelsInTx(mut, nodeKey), key, val)
-	}
 	return nil
 }
