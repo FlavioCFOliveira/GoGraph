@@ -2611,10 +2611,18 @@ func (g *Graph[N, W]) SetNodeLabel(n N, name string) error {
 // than looked up so a transaction's deltas all point at ONE record and its
 // commit is a single store (rmp #2278).
 func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, tx *writeCtx) error {
-	if err := g.adj.AddNode(n); err != nil {
-		return err
-	}
-	id, _ := g.adj.Mapper().Lookup(n)
+	// ONE mapper shard acquisition, not two (rmp #2360). Mapper.Intern already
+	// RETURNS the id it assigned, and [adjlist.AdjList.AddNode] is exactly
+	// `mapper.Intern(n); return nil` — so the Lookup that used to follow it re-took
+	// the same shard's lock to re-resolve a key the intern had just resolved. The id
+	// is identical by construction: the mapper's slot assignment is permanent by
+	// contract, so interning a key twice yields the same NodeID, and reading it from
+	// the intern is the same value the Lookup returned.
+	//
+	// The reference engines do not pay this either: PostgreSQL and InnoDB resolve a
+	// tuple's identity once per write, and Memgraph's accessor carries the vertex
+	// pointer rather than re-looking it up per store.
+	id := g.adj.Mapper().Intern(n)
 	lid := g.reg.Intern(name)
 	sh := g.nodeLabelShardFor(id)
 	sh.mu.Lock()
