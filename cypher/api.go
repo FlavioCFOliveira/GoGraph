@@ -6034,6 +6034,17 @@ func useParallelScanForRows(rows uint64, bopts *buildOpts) bool {
 // BuildPlan — IR → physical operator tree
 // ─────────────────────────────────────────────────────────────────────────────
 
+// parallelScanCheapDeclineCount counts how many times the single-label
+// parallel-scan gate declined on the ZERO-ALLOCATION cardinality screen, i.e.
+// without materialising the label's bitmap (rmp #2380).
+//
+// It is a diagnostic seam read only by the in-package regression test: an
+// allocation pin alone cannot distinguish "the screen worked" from "the shape
+// never reached the gate", and that distinction is the whole finding.
+// Process-global and monotonic; tests snapshot it around a query rather than
+// resetting it.
+var parallelScanCheapDeclineCount atomic.Uint64
+
 // nodeWalkerIface is the minimal interface needed from a node source.
 type nodeWalkerIface interface {
 	WalkNodeIDs(fn func(graph.NodeID) bool)
@@ -9329,10 +9340,40 @@ func tryBuildParallelScanProject(
 		// on that label's own cardinality (#2187), so a small label inside a large graph
 		// stays serial.
 		if leafLabel != "" {
+			// Screen on the CHEAP count before materialising anything.
+			//
+			// A gate must cost less than the decision it informs — the same rule
+			// [exactIntersectionCardinality] states for the multi-label sibling, and
+			// for the same measured reason. newLabelWalker below obtains the label's
+			// bitmap, and obtaining it CLONES the label's live set; the threshold is a
+			// strict card > parallelScanThreshold (50 000 by default), so every graph
+			// smaller than that paid a full clone for an answer that was always "no"
+			// and then discarded it. Measured on examples/35_mvcc_mixed_workload — 3000
+			// nodes, so the gate can never admit — that clone was 47.9% of ALL
+			// allocation in the process, against 50 MB for the serial scans it declined
+			// to parallelise: the gate cost about 130x the work it was deciding about
+			// (rmp #2380).
+			//
+			// ResolveLabelCount reads the label index cardinality directly and
+			// allocates nothing. It reports exact=false whenever the bitmap would need
+			// snapshot filtering, in which case this screen abstains and the original
+			// path below decides, exactly as before.
+			if lc, ok := labelSrc.(labelCounter); ok {
+				if n, exact := lc.ResolveLabelCount(leafLabel); exact && n >= 0 &&
+					!useParallelScanForRows(uint64(n), bopts) {
+					parallelScanCheapDeclineCount.Add(1)
+					return nil, false, nil
+				}
+			}
 			lblWalker, card, resolved := newLabelWalker(leafLabel, labelSrc)
 			if !resolved {
 				return nil, false, nil
 			}
+			// Re-checked on the materialised bitmap's own cardinality, which stays the
+			// authoritative one: the screen above can abstain, and it samples suspect
+			// nodes at a different instant, so it decides only the clear-cut "far below
+			// the threshold" case. Both answers select an execution strategy, never a
+			// result — the parallel and serial plans emit identical rows.
 			if !useParallelScanForRows(card, bopts) {
 				return nil, false, nil
 			}
