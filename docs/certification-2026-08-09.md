@@ -315,15 +315,38 @@ gate runs every package binary in parallel under `-race`, and within `graph/lpg`
 `t.Parallel()` tests interleave with each other. Neither CPU pressure nor whole-package runs
 reproduced that mix.
 
-**One mechanism was proposed, tested, and REFUTED — it is recorded here so it is not
-re-proposed.** The failing test's writer is asymmetric: it adds the edge through the graph API
-(`g.AddEdge`, versioned) but removes it through the **raw** adjacency list
-(`g.AdjList().RemoveEdge`). If the raw removal recorded no version, a snapshot taken before it
-would lose the edge immediately while still seeing the properly-versioned labels — exactly the
-reported disagreement, and a test bug rather than an engine defect. A deterministic
-single-threaded probe (pin a snapshot in state A, transition to state B, re-read both through
-the same snapshot) showed **both** the raw and the versioned removal keep the pinned snapshot at
-`edge=true label=true`. The asymmetry is real; it is not the mechanism.
+**Two mechanisms were proposed, tested deterministically, and REFUTED.** They are recorded
+because a refuted mechanism that is not written down gets re-derived.
+
+1. **The raw adjacency removal.** The failing test's writer is asymmetric: it adds the edge
+   through the graph API (`g.AddEdge`, versioned) but removes it through the **raw** adjacency
+   list (`g.AdjList().RemoveEdge`). If the raw removal recorded no version, a snapshot taken
+   before it would lose the edge at once while still seeing the properly-versioned labels —
+   exactly the reported disagreement, and a test bug rather than an engine defect. A
+   single-threaded probe (pin a snapshot in state A, transition to state B, re-read both through
+   the same snapshot) showed **both** the raw and the versioned removal leave the pinned snapshot
+   at `edge=true label=true`. The asymmetry is real and worth tidying; it is not the cause.
+2. **Autocommit inside the bracket.** `ApplyAtomically` opens one write bracket and holds
+   `visGate.StrongLock`, but the writes *inside* it are the exported **autocommit** methods,
+   which pass `tx = nil` and are documented as *"committed the instant it is made"* — so they may
+   take separate commit instants, and a reader allocating a `startTS` mid-bracket could land
+   between the edge's commit and the labels'. A probe with an **injected schedule point** between
+   the two substructure writes showed the reader is **not excluded** — it completes rather than
+   blocking on the gate — but it consistently observes the **pre-write state for both**
+   substructures, three runs out of three. The writes' visibility is gated together at bracket
+   close.
+
+3. **The same, on the add direction.** The schedule point was then injected on the *other*
+   transition (add the edge, pause, add the labels), in case the two directions differ. The
+   mid-bracket reader again saw a consistent state — `edge=false label=false`, three runs out of
+   three.
+
+So a directly-injected mid-bracket read behaves correctly in **both** directions: the snapshot is
+not excluded from taking a `startTS`, but it consistently observes the pre-write state for both
+substructures. What that leaves is the label **index** and its deferred-removal sweep on the
+barrier-free vacuum goroutine — though note the failing assertion reads the label **bag**
+(`HasNodeLabel`), not the index, so the index is not obviously on that path — and the gate's own
+environment, which is the one variable nothing here has reproduced.
 
 **So the honest state is: unexplained.** The next steps are recorded on rmp #2378 — instrument
 to the base rate (one observation in 23 runs of a 40 000-toggle workload needs hundreds of
