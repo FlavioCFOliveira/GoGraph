@@ -10470,8 +10470,39 @@ func newAggregationEval(
 ) func(exec.Row) (expr.Value, error) {
 	// AST path — always preferred when present.
 	if astExpr != nil {
+		// DEMAND-GATE THE ROW CONTEXT (#1630, extended here to the aggregation
+		// pre-projection). Without it this closure built a FULL value for every
+		// variable in the row, once per row — including, for an edge variable, its
+		// type, its endpoints and its whole property map. A grouped aggregation over
+		// a relationship pattern names no relationship at all:
+		//
+		//	MATCH (u:USER)-[:FRIEND]->(:USER) WITH u, count(*) AS deg
+		//	MATCH (:USER)-[:LIKE]->(a:ARTICLE) RETURN a.id, count(*)
+		//
+		// so that materialisation was pure waste. A CPU profile of
+		// examples/26_social_scale_bench attributed 17.16% of ALL samples to
+		// buildRelationshipValueFromRow, reached only from populateRowCtx, of which
+		// 46.8% was buildEdgeProps alone.
+		//
+		// analyseNodeScalarUse runs ONCE at build time and a bailout restores the
+		// previous eager path exactly. The context is built through
+		// buildRowCtxWithUse, whose arena is nil, so every value handed to the
+		// expression is independently allocated and may escape into the projected
+		// row — the property populateRowCtx documents for that path. The gate
+		// therefore only ever OMITS variables the expression never names, and a
+		// variable it never names cannot appear in its result.
+		//
+		// Measured interleaved, 4 pairs, examples/26 at 60k users: top_articles
+		// 2.983-3.004s -> 1.135-1.163s (-61.8%), friend_degree 4.227-4.249s ->
+		// 1.695-1.709s (-59.9%), and the count_friend control flat at 1.77-1.83s ->
+		// 1.75-1.78s, which is what rules out a machine-wide drift reading.
+		// TCK 3897/3897 unchanged.
+		scalarUse, bail := analyseNodeScalarUse(astExpr)
+		if bail {
+			scalarUse = nil
+		}
 		return func(row exec.Row) (expr.Value, error) {
-			rowCtx := buildRowCtx(row, schemaSnap, g, bopts)
+			rowCtx := buildRowCtxWithUse(row, schemaSnap, g, bopts, scalarUse)
 			return evalRow(bopts, astExpr, rowCtx, params, reg)
 		}
 	}
