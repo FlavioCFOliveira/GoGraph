@@ -600,7 +600,43 @@ snapshot is strictly weaker than the reference shape. PostgreSQL's snapshot is `
 decide visibility from state captured **once**, at snapshot time. GoGraph decides it per read, from
 state that is still moving.
 
-### The hole is CLOSED, and it closes against my own story
+### LOCALISED: the LABEL substore is correct; the ADJACENCY as-of read is not
+
+The decisive measurement. At the tear, for each node, the **reconstructed** value, the **raw stored
+bag**, and whether a delta chain exists:
+
+```
+reconstructed: u=true v=true | RAW bag: u=false v=false | chain present: u=true v=true
+observed:      edge=false label(u)=true label(v)=true
+```
+
+Read that carefully, because it exonerates the half of the system I had been investigating for hours.
+As of this snapshot the state should be A = `{edge, u:Hot, v:Hot}`. The raw bags say `false` — the
+writer's removal has landed in the stored bags. **Both label chains correctly undid it and
+reconstructed `true`.** The label substore is doing exactly the right thing, for both nodes, at the
+moment of the tear.
+
+**The edge read `false`.** The adjacency as-of reconstruction failed to undo the same transaction's
+edge removal that the label chains undid correctly — same transaction, same shared commit record.
+
+So this is **not** a cross-substructure architecture problem, and the framing I committed to earlier
+is retired: `Snapshot` does not need to capture an in-flight set for *this* defect, and #2369's option
+choice is **not** a prerequisite. It is a **single-substore bug in the adjacency versioned read path**
+— `AdjList.EntryViewAsOf` and the version chain that `storeEntry`/`versionStamp` maintain, reached
+from `Graph.EdgeWeightAsOf`. That is a bounded target.
+
+**Candidate eleven is also dead.** It predicted a *skipped* delta; the chains are present for both
+nodes and they worked. And with a single writer toggling, every transition genuinely changes the bag,
+so the `!bag.has(lid)` guard never skips here anyway — which I said before reading the result rather
+than after.
+
+**Where to start, concretely:** `versionStamp`'s own comment says a version is recorded "only when
+versioning is armed AND this write actually supersedes something". Establish whether the REMOVE path
+records a version an older snapshot can undo — `addEdgeInfo` follows its insert with an explicit
+`g.adjVer.stampAppend(srcID, tx)` (`lpg.go:1843`) and `removeEdgeInfo` has no counterpart, calling
+only `noteExclusive` *before* the write. Reproduce with the recipe, ≥100 runs per arm.
+
+### A superseded story, kept for the record
 
 The two head deltas were captured at the moment of the tear, over 60 further runs (2 failures):
 
