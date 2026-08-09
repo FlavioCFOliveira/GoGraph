@@ -21,6 +21,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
@@ -80,8 +81,11 @@ func main() {
 	flag.IntVar(&cfg.readers, "readers", cfg.readers, "concurrent OLTP reader goroutines")
 	flag.DurationVar(&cfg.phaseWindow, "phase-window", cfg.phaseWindow, "measurement window per phase")
 	flag.DurationVar(&cfg.writeEvery, "write-every", cfg.writeEvery, "ingest interval")
+	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
-	if err := run(context.Background(), os.Stdout, cfg); err != nil {
+	if err := prof.Run(os.Stdout, func() error {
+		return run(context.Background(), os.Stdout, cfg)
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}

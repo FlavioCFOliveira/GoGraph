@@ -133,6 +133,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/io/csv"
@@ -206,9 +207,12 @@ func main() {
 	flag.IntVar(&cfg.topK, "top-k", cfg.topK, "number of highest-PageRank node ids to report")
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
 	flag.BoolVar(&cfg.bulkParallel, "bulk-parallel", cfg.bulkParallel, "engage the bulk loader's parallel build for the bulk-ingest stage")
+	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
 
-	if err := run(context.Background(), os.Stdout, cfg); err != nil {
+	if err := prof.Run(os.Stdout, func() error {
+		return run(context.Background(), os.Stdout, cfg)
+	}); err != nil {
 		log.Fatal(err)
 	}
 }

@@ -79,6 +79,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
@@ -167,9 +168,12 @@ func main() {
 	flag.IntVar(&cfg.fanoutMax, "fanout-max", cfg.fanoutMax, "maximum out-degree per node")
 	flag.Float64Var(&cfg.hubFrac, "hub-frac", cfg.hubFrac, "fraction of nodes promoted to :HUB, in [0,1]")
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
+	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
 
-	if err := run(context.Background(), os.Stdout, cfg); err != nil {
+	if err := prof.Run(os.Stdout, func() error {
+		return run(context.Background(), os.Stdout, cfg)
+	}); err != nil {
 		log.Fatal(err)
 	}
 }

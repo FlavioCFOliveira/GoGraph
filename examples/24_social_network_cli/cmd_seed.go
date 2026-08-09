@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 )
@@ -22,6 +23,10 @@ type seedConfig struct {
 	dir      string
 	scale    scaleConfig
 	evidence bool
+	// prof is the profiling destination parsed from the same flag set. It is
+	// nil when the config was built directly (as the round-trip tests do),
+	// which exprof treats as inert.
+	prof *exprof.Config
 }
 
 // cmdSeed populates the data directory with the deterministic
@@ -54,7 +59,9 @@ func cmdSeed(args []string) error {
 	if err != nil {
 		return err
 	}
-	return runSeedWithConfig(context.Background(), cfg, os.Stdout)
+	return cfg.prof.Run(os.Stdout, func() error {
+		return runSeedWithConfig(context.Background(), cfg, os.Stdout)
+	})
 }
 
 // parseSeedArgs parses the seed subcommand's flags into a seedConfig,
@@ -70,6 +77,7 @@ func parseSeedArgs(args []string) (seedConfig, error) {
 	fs.IntVar(&cfg.scale.friends, "friends", cfg.scale.friends, "FOLLOWS out-degree per synthetic user")
 	fs.Int64Var(&cfg.scale.seed, "seed", cfg.scale.seed, "RNG seed (fixes the synthetic data shape)")
 	fs.BoolVar(&cfg.evidence, "evidence", cfg.evidence, "print \"# \" telemetry (seed throughput, live heap)")
+	cfg.prof = exprof.Bind(fs)
 	if perr := fs.Parse(args); perr != nil {
 		return seedConfig{}, newUsageError("seed: flag parse: %v", perr)
 	}

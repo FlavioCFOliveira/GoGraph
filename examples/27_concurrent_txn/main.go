@@ -119,6 +119,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
@@ -256,9 +257,12 @@ func main() {
 	flag.Int64Var(&cfg.maxAmount, "max-amount", cfg.maxAmount, "maximum transfer amount in cents (min is 1)")
 	flag.IntVar(&cfg.sweepOps, "sweep-ops", cfg.sweepOps, "transfers per level of the writer-scaling sweep (0 disables)")
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
+	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
 
-	if err := run(context.Background(), os.Stdout, &cfg); err != nil {
+	if err := prof.Run(os.Stdout, func() error {
+		return run(context.Background(), os.Stdout, &cfg)
+	}); err != nil {
 		log.Fatal(err)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 )
 
 // cmdStats counts nodes by label and edges by relationship type and
@@ -27,28 +28,31 @@ import (
 // and the per-query wall-clock latency of each count. Telemetry is off by
 // default so the deterministic output is unchanged.
 func cmdStats(args []string) error {
-	dir, evidence, err := parseStatsArgs(args)
+	dir, evidence, prof, err := parseStatsArgs(args)
 	if err != nil {
 		return err
 	}
-	return runStatsWithEvidence(context.Background(), dir, os.Stdout, evidence)
+	return prof.Run(os.Stdout, func() error {
+		return runStatsWithEvidence(context.Background(), dir, os.Stdout, evidence)
+	})
 }
 
 // parseStatsArgs parses the stats subcommand's flags: the shared -d <dir>
 // and the opt-in -evidence toggle. A flag-parse failure or a missing -d is
 // mapped to a *usageError (exit code 2).
-func parseStatsArgs(args []string) (dir string, evidence bool, err error) {
+func parseStatsArgs(args []string) (dir string, evidence bool, prof *exprof.Config, err error) {
 	fs := flag.NewFlagSet("stats", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&dir, "d", "", "data directory (required)")
 	fs.BoolVar(&evidence, "evidence", false, "print \"# \" telemetry (graph order/size, live heap, per-query latency)")
+	prof = exprof.Bind(fs)
 	if perr := fs.Parse(args); perr != nil {
-		return "", false, newUsageError("stats: flag parse: %v", perr)
+		return "", false, nil, newUsageError("stats: flag parse: %v", perr)
 	}
 	if dir == "" {
-		return "", false, newUsageError("stats: missing required flag -d <dir>")
+		return "", false, nil, newUsageError("stats: missing required flag -d <dir>")
 	}
-	return dir, evidence, nil
+	return dir, evidence, prof, nil
 }
 
 // runStats is the entry point used by both cmdStats and the round-trip

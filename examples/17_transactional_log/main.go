@@ -97,6 +97,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
@@ -195,6 +196,7 @@ func main() {
 		"real-crash demo: number of durably-committed transfers before the kill")
 	flag.StringVar(&crashChildDir, "crash-child-dir", "",
 		"INTERNAL: crash-child data dir; when set, this process commits -crash-committed transfers, appends torn work, and SIGKILLs itself")
+	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
 
 	ctx := context.Background()
@@ -203,15 +205,25 @@ func main() {
 		// INTERNAL crash-child mode: commit, tear, and self-SIGKILL. On a
 		// supported platform this call does not return; the error path covers
 		// only a pre-crash failure or an unsupported platform.
+		//
+		// Deliberately NOT profiled. The process is killed with SIGKILL by
+		// design, so no teardown can run: a profile started here would be
+		// truncated garbage. The parent re-execs this mode with a fixed argument
+		// list (see runRealCrashDemo) that never forwards -profile-dir, so the
+		// child cannot inherit one either.
 		if err := runCrashChild(ctx, cfg, crashChildDir, crashCommitted); err != nil {
 			log.Fatal(err)
 		}
 	case realCrash:
-		if err := runRealCrashDemo(ctx, os.Stdout, cfg, crashCommitted, os.Args[0]); err != nil {
+		if err := prof.Run(os.Stdout, func() error {
+			return runRealCrashDemo(ctx, os.Stdout, cfg, crashCommitted, os.Args[0])
+		}); err != nil {
 			log.Fatal(err)
 		}
 	default:
-		if err := run(ctx, os.Stdout, cfg); err != nil {
+		if err := prof.Run(os.Stdout, func() error {
+			return run(ctx, os.Stdout, cfg)
+		}); err != nil {
 			log.Fatal(err)
 		}
 	}

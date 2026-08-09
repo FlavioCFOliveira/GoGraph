@@ -93,6 +93,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
@@ -158,9 +159,12 @@ func main() {
 	flag.IntVar(&cfg.width, "width", cfg.width, "width of the region (the long axis)")
 	flag.IntVar(&cfg.height, "height", cfg.height, "height of the region (the short axis)")
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the town placement and every fact)")
+	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
 
-	if err := run(context.Background(), os.Stdout, cfg); err != nil {
+	if err := prof.Run(os.Stdout, func() error {
+		return run(context.Background(), os.Stdout, cfg)
+	}); err != nil {
 		log.Fatal(err)
 	}
 }

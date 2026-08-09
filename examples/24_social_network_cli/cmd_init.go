@@ -19,19 +19,21 @@ import (
 // The absolute path is resolved via filepath.Abs so the reply is
 // stable regardless of the caller's working directory.
 func cmdInit(args []string) error {
-	dir, _, err := parseDataDir("init", args)
+	dir, _, prof, err := parseDataDir("init", args)
 	if err != nil {
 		return err
 	}
-	if err := initEmpty(dir); err != nil {
-		return fmt.Errorf("init: %w", err)
-	}
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return fmt.Errorf("init: resolve %q: %w", dir, err)
-	}
-	return writeJSONObject(os.Stdout, map[string]any{
-		"status":   "ok",
-		"data_dir": abs,
+	return prof.Run(os.Stdout, func() error {
+		if err := initEmpty(dir); err != nil {
+			return fmt.Errorf("init: %w", err)
+		}
+		abs, err := filepath.Abs(dir)
+		if err != nil {
+			return fmt.Errorf("init: resolve %q: %w", dir, err)
+		}
+		return writeJSONObject(os.Stdout, map[string]any{
+			"status":   "ok",
+			"data_dir": abs,
+		})
 	})
 }

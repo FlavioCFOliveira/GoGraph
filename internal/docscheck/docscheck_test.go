@@ -346,3 +346,58 @@ func TestExamplesIndexCoversEveryExample(t *testing.T) {
 			stated, len(dirs), dirs)
 	}
 }
+
+// TestEveryExampleCanProduceAProfile pins the profiling half of the examples
+// contract: every example binds examples/internal/exprof, so every one of them
+// accepts -profile-dir and -trace on identical terms.
+//
+// This gate exists because of what its absence cost. Before rmp #2377 only 2 of
+// the 37 examples exposed a profiling flag, and the single largest performance
+// finding of the 2026-08-09 certification — a relationship property map built
+// for a variable no query names, worth 2.5x on grouped aggregations — was
+// findable ONLY because one of those two happened to have it. The other 35
+// workloads, persistence and recovery and traversal and interchange and Bolt
+// among them, could not be attributed to a call site at all.
+//
+// It is a structural check on purpose: running 37 example binaries to completion
+// belongs in the certification sweep, not in the short test layer. What it
+// guarantees is that a new example cannot be added without the flag, which is
+// the drift that actually happens.
+func TestEveryExampleCanProduceAProfile(t *testing.T) {
+	root := repoRoot(t)
+	dirs := exampleDirs(t, root)
+	if len(dirs) == 0 {
+		t.Fatal("found no example directories under examples/")
+	}
+
+	for _, d := range dirs {
+		dir := filepath.Join(root, "examples", d)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Errorf("read example %q: %v", d, err)
+			continue
+		}
+		bound := false
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			src, err := os.ReadFile(filepath.Join(dir, name)) // #nosec G304 -- repo-relative example source.
+			if err != nil {
+				t.Errorf("read %s/%s: %v", d, name, err)
+				continue
+			}
+			if strings.Contains(string(src), "exprof.Bind(") {
+				bound = true
+				break
+			}
+		}
+		if !bound {
+			t.Errorf("example %q never calls exprof.Bind: it cannot produce a pprof profile, "+
+				"so its workload is unattributable to any call site. Bind the flags with "+
+				"exprof.Bind(flag.CommandLine) and drive the work through Config.Run "+
+				"(see examples/internal/exprof).", d)
+		}
+	}
+}

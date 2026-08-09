@@ -75,6 +75,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph/io/csv"
 	"github.com/FlavioCFOliveira/GoGraph/graph/io/jsonl"
 )
@@ -134,9 +135,12 @@ func main() {
 	flag.IntVar(&cfg.weightMax, "weight-max", cfg.weightMax, "edge weight drawn from [1, weight-max]")
 	flag.IntVar(&cfg.sampleN, "sample", cfg.sampleN, "number of sample lines of each format to print")
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
+	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
 
-	if err := run(context.Background(), os.Stdout, cfg); err != nil {
+	if err := prof.Run(os.Stdout, func() error {
+		return run(context.Background(), os.Stdout, cfg)
+	}); err != nil {
 		log.Fatal(err)
 	}
 }

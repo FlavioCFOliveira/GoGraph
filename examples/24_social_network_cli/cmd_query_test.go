@@ -8,15 +8,49 @@ import (
 	"testing"
 )
 
-// TestReadQuery_Positional uses the first positional argument verbatim
-// (after trimming whitespace) and ignores any subsequent arguments.
+// TestReadQuery_Positional uses the single positional argument verbatim,
+// after trimming whitespace.
 func TestReadQuery_Positional(t *testing.T) {
-	got, err := readQuery([]string{"  MATCH (n) RETURN n  ", "ignored"}, strings.NewReader(""))
+	got, err := readQuery([]string{"  MATCH (n) RETURN n  "}, strings.NewReader(""))
 	if err != nil {
 		t.Fatalf("readQuery: %v", err)
 	}
 	if got != "MATCH (n) RETURN n" {
 		t.Fatalf("got %q, want %q", got, "MATCH (n) RETURN n")
+	}
+}
+
+// TestReadQuery_RejectsTrailingArguments pins the fail-stop contract on the
+// argument the operator did not get to use.
+//
+// Go's flag package stops parsing at the first non-flag argument, so a flag
+// written after the query text is a trailing POSITIONAL, not a flag. This was
+// found during rmp #2377: `query -d dir "MATCH ..." -profile-dir /tmp/p`
+// returned exit 0 and wrote no profile, because the two trailing arguments were
+// discarded in silence. An unconsumed argument is now named and refused.
+func TestReadQuery_RejectsTrailingArguments(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		positional []string
+	}{
+		{"a mis-ordered flag", []string{"MATCH (n) RETURN n", "-profile-dir", "/tmp/p"}},
+		{"one stray argument", []string{"MATCH (n) RETURN n", "stray"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := readQuery(tc.positional, strings.NewReader(""))
+			if err == nil {
+				t.Fatal("trailing arguments accepted; want a usage error")
+			}
+			var ue *usageError
+			if !errors.As(err, &ue) {
+				t.Fatalf("want *usageError (exit 2), got %T: %v", err, err)
+			}
+			// The message must name what was dropped, or it does not help.
+			if !strings.Contains(err.Error(), tc.positional[1]) {
+				t.Errorf("error does not name the unconsumed argument %q: %v",
+					tc.positional[1], err)
+			}
+		})
 	}
 }
 

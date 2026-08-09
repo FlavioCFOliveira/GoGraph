@@ -67,6 +67,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
@@ -131,9 +132,12 @@ func main() {
 	flag.Int64Var(&cfg.attractive, "attractiveness", cfg.attractive, "additive attractiveness constant (Price's a; >= 0)")
 	flag.IntVar(&cfg.topK, "top-k", cfg.topK, "number of highest-PageRank node ids to report")
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
+	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
 
-	if err := run(context.Background(), os.Stdout, cfg); err != nil {
+	if err := prof.Run(os.Stdout, func() error {
+		return run(context.Background(), os.Stdout, cfg)
+	}); err != nil {
 		log.Fatal(err)
 	}
 }
