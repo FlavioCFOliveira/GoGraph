@@ -600,7 +600,39 @@ snapshot is strictly weaker than the reference shape. PostgreSQL's snapshot is `
 decide visibility from state captured **once**, at snapshot time. GoGraph decides it per read, from
 state that is still moving.
 
-**One link in this story is NOT verified, and it must be said.** The *experimental* result is solid
+### The hole is CLOSED, and it closes against my own story
+
+The two head deltas were captured at the moment of the tear, over 60 further runs (2 failures):
+
+```
+startTS=35199 clockReadTS=35221 | u: stampTS=35221 | v: stampTS=35221 | SAME info pointer=true
+startTS=18395 clockReadTS=18413 | u: stampTS=9223372036854812630 | v: same | SAME info pointer=true
+```
+
+**Identical record, identical timestamp — and the two labels still disagreed** (`label(u)=true
+label(v)=false`). That is a hard fact and it refutes the read-order/flip story as the *whole*
+explanation: if both nodes' deltas share one record and one timestamp, `mustUndo` **cannot** classify
+them differently. Whatever the flip does, it is not what separated these two reads.
+
+What remains is forced rather than suggested: the delta classification was the same for both, so the
+difference came from each node's **stored bag**, and **the undo chain did not correct for it**. An undo
+chain can only roll back a transition it recorded — and `setNodeLabelInfo` records one **only when
+`!bag.has(lid)`**, a guard read against the RAW stored bag, with the file's own comment noting *"Only
+the DELTA is guarded; the conflict test above is not (rmp #2354)."* A write whose delta is skipped
+leaves that node with no history for the transition, so a reader that should reconstruct the old value
+gets the new bag instead.
+
+**That is candidate eleven, and unlike the ten before it, it is forced by a measurement rather than
+suggested by reading.** It is also narrow and does not obviously need an architecture change — which
+would make the #2369 option choice unnecessary if it holds. It is **not implemented and not
+validated**: the guard sits on the hot write path, the pre-fix rate is 2–4 per 100, and a change here
+needs ≥100 runs per arm plus the full gate before anyone believes it.
+
+**Note also what this does NOT explain**: the second sample's `stampTS` is above `TxIDBase`, i.e. the
+record was in flight at report time, and the reader had already been given a torn view. Anyone
+continuing should reconcile that before treating the missing-delta account as complete.
+
+**A superseded link in the earlier story, kept for the record.** The *experimental* result is solid
 and was pre-registered: the answer a reader gets changes between its two substructure reads, and the
 direction tracks read order. What is **not** established is *why the contiguous frontier permits it*.
 `startTS` is `Clock.ReadTS()`, the contiguous frontier, which only advances past a commit once that
