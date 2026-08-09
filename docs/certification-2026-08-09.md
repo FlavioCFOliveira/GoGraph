@@ -633,6 +633,29 @@ capture the visibility basis **once** — the in-flight set, PostgreSQL's `xmin`
 InnoDB's read view — which is **option (a) in #2369's technical requirements** and needs the
 maintainer's decision.
 
+### The blast radius: it REACHES the engine's production write path
+
+The last open question was scope. The failing test writes through `ApplyAtomically` — the **exclusive
+bare-Go-API bracket**. The Cypher engine, which is the module's production surface, writes through
+`ApplyVersioned` (shared bracket, per-object latches). Those publish differently, and I had been
+treating #2378 as module-wide without ever measuring whether it reaches the path real callers use.
+
+Measured, by switching only the writer's bracket and running the recipe at 100 iterations:
+
+| writer bracket | runs | failures |
+|---|---:|---:|
+| `ApplyAtomically` (bare API, exclusive) | 100 | 2–4 |
+| **`ApplyVersioned` (the ENGINE's bracket)** | 100 | **5** |
+
+**It reaches production, at the same rate or slightly worse.** So there is **no envelope to retreat
+to**: this cannot be certified as "safe through Cypher, defective only on the bare API". The unqualified
+NOT CERTIFIED verdict stands, and it stands on a measurement rather than on caution.
+
+Note this does *not* contradict `36_mvcc_snapshot_topology` / `27` / `35` reporting zero violations at
+scale: those examples assert different invariants — topology-dimension snapshot isolation and property
+conservation — not this cross-substructure edge-plus-labels pair. Their green results remain valid
+evidence for what they cover, and are not evidence about this.
+
 ### The fix, designed concretely — a per-snapshot memo, not a Clock change
 
 Option (a) is usually written as "capture the in-flight set at `BeginRead`", the PostgreSQL shape.
