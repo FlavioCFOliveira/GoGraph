@@ -392,11 +392,27 @@ suggests: it needs a shard whose delta map is emptied by the **abort** reclaim
 (`mvcc_abort_reclaim.go`, which deliberately runs regardless of the debt) at a moment when a live
 older snapshot would still have needed one of them.
 
-So this is a **candidate with a live objection**, not a diagnosis. The experiment that would
-settle it either way: hold a snapshot, drive the label shard's deltas into a state the abort
-reclaim empties, force the sweep, and re-read the label through the held snapshot. If the answer
-changes, the branch is unsound; if the reclaim refuses to empty the map, the objection stands and
-this candidate joins the three already refuted.
+**Tested, and the objection wins — so this is REFUTED too.** A probe held a snapshot across a
+label removal (confirming the as-of read honours it: `heldSnapshotSeesHot=true`, `len(sh.d)=1`),
+then churned the shard and called `ReclaimNow()` **40 times**. `sh.d` was **never** emptied while
+the snapshot was live, and the held snapshot's answer never changed. Two runs, same result. The
+sweep declines to free what a live reader still needs, exactly as `horizon.Oldest` implies.
+
+### Where that leaves it
+
+**Four candidate mechanisms, all excluded by deterministic measurement** — the raw adjacency
+removal, autocommit-inside-the-bracket in each direction, and the reclaim nilling the delta map.
+The oracle has been checked and holds up. Attribution is settled and pre-existing. The failure has
+not reproduced in **27** attempts, including three full `go test -race ./...` runs at HEAD after
+the observation.
+
+What has *not* been reproduced is the gate's own environment: many parallel `-race` package
+binaries, plus this package's `t.Parallel()` tests interleaving with each other, plus the vacuum
+goroutine. Every reproduction attempt substituted something for that mix — CPU burners,
+whole-package runs, injected schedule points — and none of the substitutes exhibits it. The next
+cycle should reproduce the environment rather than model it, and should instrument to the base
+rate: one observation in 27 runs of a 40 000-toggle workload needs hundreds of iterations, with a
+probe that does not perturb what it measures.
 
 **So the honest state is: unexplained.** The next steps are recorded on rmp #2378 — instrument
 to the base rate (one observation in 23 runs of a 40 000-toggle workload needs hundreds of
