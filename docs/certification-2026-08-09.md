@@ -633,6 +633,33 @@ capture the visibility basis **once** — the in-flight set, PostgreSQL's `xmin`
 InnoDB's read view — which is **option (a) in #2369's technical requirements** and needs the
 maintainer's decision.
 
+### ORIGIN: #2378 is coeval with #2344, and #2344's validating measurement was a false negative
+
+Rather than guess an eighteenth mechanism, the question became *when did this start*. The answer needed
+no bisect. `git log -S 'BeginRead' -- graph/lpg/isolation_test.go` names one commit: **`5a71cc1c`,
+"remove Graph.View, the last pre-MVCC read barrier" (rmp #2344, 2026-08-07)**. Before it, this test's
+reader held the barrier, so its three reads were atomic **by construction** and the defect could not be
+observed. That commit migrated the reader to a pinned snapshot.
+
+**Its own message records the validation it relied on:**
+
+> *"Measured on this build: 7040 partial-transaction observations from a View reader against **ZERO
+> from a snapshot reader over 6488034 reads**."*
+
+Zero. Against 6.5 M reads. And this cycle measures the same assertion tearing at **2–5 per 100 runs**,
+roughly one per 1.5 M reads — a rate that 6.5 M reads would have caught several times over **if the
+measurement had been taken in an environment where it reproduces.** It almost certainly was not: this
+defect required the gate's full parallel-package `-race` load, and five substitute environments
+returned clean before I found that recipe.
+
+So the most probable account, and the one the next cycle should test first: **`Graph.View` was removed
+on the strength of a snapshot-reader measurement that could not see this defect**, the migrated tests
+went green, and the gap has been open since 2026-08-07. The check is cheap and decisive — run the
+recipe at `5a71cc1c` and at its parent.
+
+**That is the same error this cycle made five times**, and it is why the recipe matters more than any
+of the seventeen mechanisms: a clean number from the wrong environment is not evidence.
+
 ### The blast radius: it REACHES the engine's production write path
 
 The last open question was scope. The failing test writes through `ApplyAtomically` — the **exclusive
