@@ -658,10 +658,31 @@ should already have been giving. Note also that "first classification" need not 
 frontier does not advance past an unfinished commit. So the lazy form is safe without enumerating
 anything at snapshot time.
 
-**Validation this fix must pass**, and it should be written down before it is run: zero failures in
-≥100 runs under the recipe against a pre-fix 2–4 per 100; TCK 3897/3897; `make ci` green three
-consecutive times read from `MAKE_CI_EXIT`; and a benchmark showing the added map lookup does not
-regress the read path, since that path is the module's measured advantage.
+**Validation this fix must pass**, written down before it was run: zero failures in ≥100 runs under
+the recipe against a pre-fix 1–4 per 100; TCK 3897/3897; `make ci` green three consecutive times; and
+no read-path regression.
+
+### IMPLEMENTED, MEASURED, REFUTED — REVERTED
+
+It was built. `Snapshot` gained `verdict map[*commitInfo]bool` with a mutex; the label path resolved
+every delta through it; and `AdjList.EntryViewAsOfVisible(id, visible)` was added so the adjacency
+could take the same verdict as a callback without `adjlist` depending on `lpg.Snapshot`.
+
+| arm | runs | failures |
+|---|---:|---:|
+| pre-fix | — | 1–4 per 100 |
+| **label path only** | 100 | **0** |
+| **both stores wired** | 100 | **2** |
+
+**The label-only zero was luck, and the pre-stated criterion caught it.** At a ~3 % rate, `P(0 in 100)
+≈ 5 %` — so a single clean batch proves nothing, which is exactly why "zero in 100 **with both wired**"
+was written down first. Wiring the second store did not improve on it; it landed back inside the
+pre-fix range. **The memo is not the mechanism.** Reverted, because keeping it would add a mutex and a
+map lookup to the module's fastest path in exchange for nothing.
+
+Note the shape of the near-miss: had the criterion been "zero in 100 on the arm I happened to run
+first", this cycle would have shipped a read-path slowdown, declared the defect fixed, and closed the
+certification on a false positive. **Sixteen candidates, sixteen refutations.**
 
 Thirteen candidate *mechanisms* were refuted; what survives is the *phenomenon*, measured and
 pre-registered. **The lesson for whoever continues: instrument the values the READ used, at the moment
