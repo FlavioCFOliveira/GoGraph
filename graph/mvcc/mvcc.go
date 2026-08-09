@@ -187,16 +187,49 @@ func (c *Clock) AbandonCommitTS(ts uint64) { c.finishCommitTS(ts) }
 
 // finishCommitTS marks ts finished and republishes the frontier.
 //
-// The visible store happens UNDER pubMu, not after it: two publishers releasing
-// the lock and then racing to store their own frontier could otherwise land the
-// older one last and move the visible instant backwards.
+// # The fast path, and the two conditions that make it sound (rmp #2362)
+//
+// Publication is USUALLY in order, and when it is, this is trivial work done
+// under a process-global lock: the frontier is already at ts-1 and moving it to
+// ts is one increment. InnoDB short-circuits the same case in the same shape —
+// Link_buf::add_link_advance_tail returns after a relaxed load and a release
+// store when the reporting thread IS the tail (storage/innobase/include/
+// ut0link_buf.h) — and that is what the CAS below does.
+//
+// It is guarded by [commitLog.blocked] rather than by the frontier alone, and the
+// guard is re-checked AFTER the CAS because the two are not atomic together. The
+// failure it prevents is not a slow path but a PERMANENT STALL: advancing by one
+// while a bit is already set above the frontier strands every commit above it,
+// durable and acknowledged and invisible for ever. docs/mvcc-publish-fast-path.md
+// has the derivation; [commitLog.blocked] has the invariant.
 func (c *Clock) finishCommitTS(ts uint64) {
-	c.pubMu.Lock()
-	frontier := c.log.finish(ts)
-	advanced := frontier > c.visible.Load()
-	if advanced {
-		c.visible.Store(frontier)
+	if c.log.fastPathUsable() && c.visible.CompareAndSwap(ts-1, ts) {
+		if c.log.fastPathUsable() {
+			// The broadcast rule below applies here too: the frontier is already
+			// stored, and no lock is held.
+			if c.waiters.Load() > 0 {
+				c.wakeWaiters()
+			}
+			return
+		}
+		// A publisher entered, or a bit landed above the frontier, between the
+		// check and the CAS. ts is already in `visible`, so the finish() below
+		// takes its `ts < l.oldest` early return; syncTo is what catches up.
 	}
+
+	c.pubMu.Lock()
+	// Held for the whole critical section, and taken BEFORE `visible` is read: a
+	// fast path whose CAS lands in here must see it on its re-check, or it could
+	// advance the frontier past the read below and strand the bit set here.
+	c.log.enterPublish()
+	// ONE read of the frontier serves both the catch-up and the install: syncTo
+	// needs the floor, and raiseVisible needs a value to compare-and-swap against,
+	// and a stale one there only costs a retry.
+	seen := c.visible.Load()
+	c.log.syncTo(seen)
+	frontier := c.log.finish(ts)
+	advanced := c.raiseVisibleFrom(seen, frontier)
+	c.log.exitPublish()
 	c.pubMu.Unlock()
 	// The broadcast happens AFTER the frontier is stored and OUTSIDE pubMu: a woken
 	// waiter re-reads the frontier, so waking it before the store would send it
@@ -205,6 +238,32 @@ func (c *Clock) finishCommitTS(ts uint64) {
 	// section (rmp #2328).
 	if advanced && c.waiters.Load() > 0 {
 		c.wakeWaiters()
+	}
+}
+
+// raiseVisible moves the published frontier up to at least f, and reports whether
+// it moved.
+//
+// It is a compare-and-swap loop rather than a store because the publish fast path
+// raises `visible` WITHOUT pubMu (rmp #2362). A plain store from the locked path
+// could land under a fast path's advance and move the frontier BACKWARDS, handing
+// a later reader an instant earlier than one already observed — a state no serial
+// order produced.
+func (c *Clock) raiseVisible(f uint64) bool { return c.raiseVisibleFrom(c.visible.Load(), f) }
+
+// raiseVisibleFrom is [Clock.raiseVisible] starting from a frontier the caller has
+// already read. A stale cur costs one failed compare-and-swap and a reload; it can
+// never install a lower value, because the loop only ever swaps a value it has
+// just observed for a strictly greater one.
+func (c *Clock) raiseVisibleFrom(cur, f uint64) bool {
+	for {
+		if f <= cur {
+			return false
+		}
+		if c.visible.CompareAndSwap(cur, f) {
+			return true
+		}
+		cur = c.visible.Load()
 	}
 }
 
@@ -266,9 +325,11 @@ func (c *Clock) RatchetTo(floor uint64) uint64 {
 	if cur := c.commit.Load(); cur < floor {
 		c.commit.Store(floor)
 	}
-	if cur := c.visible.Load(); cur < floor {
-		c.visible.Store(floor)
-	}
+	// Raised with the same compare-and-swap loop the publish path uses: recovery
+	// has no commit in flight by construction, but the frontier is no longer a
+	// pubMu-only field and a plain store here would be the one place that assumes
+	// it is.
+	c.raiseVisible(floor)
 	// Rebase the contiguity to match, so the frontier can advance again.
 	c.log.rebase(c.visible.Load())
 	return c.commit.Load()

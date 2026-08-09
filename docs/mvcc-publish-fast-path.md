@@ -139,3 +139,86 @@ fall-through therefore needs a *catch-up* entry point — sync `oldest` from `vi
 `advance()` — rather than a plain `finish(ts)`. That is the piece to write, and
 `TestClock_Frontier*` in `graph/mvcc/frontier_liveness_test.go` is the oracle it must satisfy;
 those tests already fail on the naive one-condition version at a window of **two**.
+
+---
+
+# What was implemented, and the fourth subtlety the code found
+
+Everything above is the analysis that preceded the code. The code then found one more hole,
+which is why the guard that shipped is not the one written above.
+
+## A fourth subtlety: `pending == 0` is not enough even WITH the re-check
+
+The guard above counts only *set bits above the frontier*. That is necessary and still not
+sufficient, and the failing interleaving needs no unusual timing at all:
+
+```
+frontier f; commits f+1 (in order) and f+2 (out of order) both in flight
+
+B (f+2)  takes pubMu, reads the frontier: f
+A (f+1)  pending == 0 (B has set no bit yet) -> CAS f -> f+1 -> re-check: still 0 -> RETURNS
+B        records f+2 above f, computes its frontier from what it read: f
+B        installs nothing, because f is not above the f+1 A just published
+=> frontier f+1, and commit f+2 is durable, acknowledged, and invisible for ever
+```
+
+A's re-check is honest — nothing was pending when it looked. The bit arrives *after*. So the
+guard must also be raised while a publisher is **inside** the locked path, from before it
+reads the frontier until after it has installed one:
+
+```
+blocked != 0  ⟺  a publisher is inside the locked path  OR  a bit sits above the frontier
+```
+
+Both halves are load-bearing, and the proof that together they are sufficient is short.
+A stall needs a fast path whose re-check `Q` reads zero and a publisher `B` that read the
+frontier before that fast path's CAS `P` and stranded a bit. In program order B does
+`enter < read < bit < exit`, and `read < P < Q`. For `Q` to read zero, B's `exit` must
+precede `Q`; but `bit < exit < Q` means the stranded bit was already counted when `Q`
+looked, so `Q` cannot have read zero. Contradiction. ∎
+
+Both halves were then verified **by injection**, not by the argument alone. Against
+`TestClock_FrontierSurvivesTheFastPathLockedPathRace`, deleting the publisher bracket fails
+at rounds 348 and 10 406; deleting the post-CAS re-check fails at 3 407, 12 813, 15 605,
+17 792 and 23 282. The test runs 100 000 rounds, sized to the worst of those.
+
+## The shape that shipped
+
+- `commitLog.blocked` is an atomic **flag**, not a count. The fast path only compares it
+  with zero, so the number of reasons interests no reader; publishing every reason cost
+  measurably more (see below). The real count lives in `commitLog.bits`, plain arithmetic
+  under `pubMu`, and `blocked` is stored only when the safe/unsafe transition happens.
+- `commitLog.syncTo(floor)` is the catch-up entry point. It declares everything at or below
+  `floor` finished, retires the blocks the jump skips (`retireBehind`), and then advances
+  over anything already recorded above. The locked path calls it **unconditionally**, before
+  `finish`.
+- One read of `visible` serves both `syncTo`'s floor and the install; the install is a
+  compare-and-swap loop (`raiseVisibleFrom`) rather than a store, because the fast path can
+  now raise the frontier without the lock and a plain store could land an older value on top
+  of a newer one.
+
+### One shortcut that looked safe and is not
+
+"While the flag is up, no fast path can complete, so nothing but a locked publisher can
+raise the frontier, so `syncTo` can be skipped." **False.** A fast path raises `visible`
+with its CAS and only *then* sees the flag on its re-check, so a raise can and does land
+while the flag is up. `syncTo` is unconditional for that reason, and the reason is recorded
+on `enterPublish` so it is not re-derived and re-adopted.
+
+## Measured
+
+`docs/benchmarks/mvcc-publish-fastpath-2026-08-09.md`, interleaved with a byte-identical
+self-control in the same loop, n = 10, noise floor ≈1%:
+
+- End-to-end on rmp #2359's arms: **every significant row is a win, none is a regression**.
+  `label-add-remove` −3.58%/−3.55%/−3.69% at 8/16/32 writers; `update-property` and
+  `create-labelled-node` ≈ −1.2%; one writer flat everywhere.
+- The win tracks **publications per unit of work**, which is the mechanism claimed:
+  `label-add-remove` is two statements, hence two commits, and gains twice what the
+  single-statement arms gain.
+- Mechanism level: in-order publication **−54.6%** (6.08 ns → 2.76 ns). The synthetic
+  reverse-window arm, in which the fast path never fires once, is **+98.6%** — recorded as a
+  real regression, and one that no end-to-end arm pays.
+
+The prediction in this document was "at most ~2.5%". The measured end-to-end win exceeds it
+on the arm with the most commits and falls short of it on the others.

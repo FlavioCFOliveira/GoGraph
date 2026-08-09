@@ -78,7 +78,10 @@ package mvcc
 // in docs/benchmarks/mvcc-write-scaling-2026-08-02.md. Memgraph accepts exactly
 // this trade, and it buys a hot path that does not grow.
 
-import "math/bits"
+import (
+	"math/bits"
+	"sync/atomic"
+)
 
 const (
 	// clWordBits is how many timestamps one bitmap word carries.
@@ -116,6 +119,50 @@ type commitLog struct {
 	// headStart is the timestamp of bit 0 of head. It only ever increases, by
 	// whole blocks, as fully-finished blocks are retired.
 	headStart uint64
+	// blocked counts the reasons the publish fast path in [Clock.finishCommitTS]
+	// must not run. It is ZERO in the state that path exists for, so its guard is
+	// one atomic load (rmp #2362).
+	//
+	// TWO things block it, and both are load-bearing:
+	//
+	//  1. A SET BIT ABOVE THE FRONTIER. [commitLog.advance] walks over every
+	//     contiguous set bit and can move the frontier by many; the fast path moves
+	//     it by exactly one. With a bit already set above, advancing by one strands
+	//     the rest — durable, acknowledged, and invisible for ever, because no
+	//     later publication revisits them. docs/mvcc-publish-fast-path.md records
+	//     that stall and the reasoning that found it.
+	//
+	//  2. A PUBLISHER INSIDE THE LOCKED PATH ([commitLog.blockFastPath]). The
+	//     locked path reads `visible` to catch the log up to it; a fast path that
+	//     advanced `visible` AFTER that read would leave the bit the publisher is
+	//     about to set stranded in exactly the same way. Holding this up across the
+	//     whole critical section is what forces such a fast path to see a non-zero
+	//     count on its post-CAS re-check and fall through to the lock, where the
+	//     catch-up is exact.
+	//
+	// Together they close the race that neither closes alone: a stall needs a fast
+	// path whose re-check sees zero AND a publisher that missed its advance, and
+	// the publisher's own count cannot be released before the bit it stranded is
+	// counted, so the re-check cannot see zero.
+	//
+	// It is a FLAG, not a count, and it is written only on the transition. The fast
+	// path compares it with zero and nothing else, so the exact number of reasons is
+	// of no interest to any reader — and publishing it on every reason is what made
+	// an out-of-order publication cost twice as much when this was an
+	// atomic read-modify-write. The real count lives in `bits` below, in plain
+	// arithmetic under pubMu, and a run of out-of-order publications now stores here
+	// twice in total rather than twice per commit.
+	//
+	// Written only under pubMu; read without it by the fast path, hence atomic.
+	blocked atomic.Int64
+	// flagged mirrors `blocked` for the writer's own use, so the store above can be
+	// skipped when the flag is already in the state it needs. Plain: every write to
+	// both is under pubMu.
+	flagged bool
+	// bits is how many set bits sit ABOVE the frontier — reason 1 above. Plain,
+	// because pubMu serialises every mutation; it reaches the fast path only
+	// through `blocked`.
+	bits int64
 	// oldest is the smallest allocated timestamp that has NOT finished. Every
 	// timestamp below it has, so oldest-1 is the frontier a reader may start
 	// at. Timestamps are allocated from 1, so it starts at 1 and the initial
@@ -148,11 +195,103 @@ func (l *commitLog) finish(ts uint64) uint64 {
 	block, start := l.blockFor(ts)
 	off := ts - start
 	block.words[off/clWordBits] |= 1 << (off % clWordBits)
-	if ts == l.oldest {
-		l.advance()
+	if ts != l.oldest {
+		l.bits++ // a bit above the frontier; see [commitLog.blocked]
+		return l.frontier()
+	}
+	before := l.oldest
+	l.advance()
+	// advance() consumed this timestamp plus every already-finished one above it.
+	// This one was never counted — it was never above the frontier — and the rest
+	// were counted when their bits were set.
+	if n := l.oldest - before; n > 1 {
+		l.bits -= int64(n - 1)
 	}
 	return l.frontier()
 }
+
+// syncTo declares that every timestamp at or below floor has finished — whoever
+// recorded it, and whether or not this log holds a bit for it — and resumes the
+// contiguous walk from there. It returns the resulting frontier.
+//
+// # Why the locked path cannot skip it (rmp #2362)
+//
+// The publish fast path raises [Clock.visible] WITHOUT taking pubMu, and therefore
+// without touching the log, so `oldest` can lag the published frontier by an
+// unbounded amount — a single writer committing in order never enters the locked
+// path at all. Two things then go wrong if the locked path walks from its own
+// stale position:
+//
+//   - [commitLog.blockFor] extends the chain from headStart, so it would allocate
+//     one block for every [clIDsPerBlock] timestamps the fast path published;
+//   - the frontier it computes is BELOW `visible`, so a bit set above the true
+//     frontier is never consumed and the commit carrying it stays invisible.
+//
+// # Why the jump needs no adjustment to `blocked`
+//
+// Nothing in (oldest, floor] can carry a set bit. A bit above `oldest` blocks the
+// fast path, so `visible` cannot have passed it; and the locked path calls this
+// BEFORE [commitLog.finish], so a timestamp at or below the published frontier
+// takes finish's `ts < l.oldest` early return and records nothing. The jump
+// therefore crosses clear bits only, and only the advance below retires any.
+//
+// Not safe for concurrent use; the caller holds pubMu.
+func (l *commitLog) syncTo(floor uint64) uint64 {
+	if l.oldest == 0 {
+		// Zero value. Timestamps are allocated from 1.
+		l.oldest, l.headStart = 1, 1
+	}
+	if floor < l.oldest {
+		return l.frontier() // already at or ahead of the published frontier
+	}
+	l.oldest = floor + 1
+	l.retireBehind()
+	// Whatever is already finished above the new position must be consumed HERE.
+	// This runs on the fall-through case, where the fast path has already put ts
+	// into `visible`, so the finish(ts) that follows takes its early return and
+	// never advances — leaving this the only chance to close the gap.
+	before := l.oldest
+	l.advance()
+	if n := l.oldest - before; n > 0 {
+		l.bits -= int64(n)
+	}
+	return l.frontier()
+}
+
+// enterPublish and exitPublish bracket a publisher's critical section, so a fast
+// path whose CAS lands inside it falls through to the lock rather than advancing
+// the frontier the publisher is about to compute. See [commitLog.blocked] for why
+// this is necessary and not merely conservative.
+//
+// enterPublish MUST be called before the publisher reads the frontier it will
+// compute from — that ordering is the whole point, and reversing it reopens the
+// stall.
+//
+// The flag being up does NOT mean the log is in step with the published frontier,
+// and an earlier draft that skipped [commitLog.syncTo] on that reasoning was
+// wrong: a fast path can raise `visible` and only THEN see the flag on its
+// re-check, so a raise can land while the flag is up. syncTo is unconditional for
+// that reason.
+func (l *commitLog) enterPublish() {
+	if l.flagged {
+		return
+	}
+	l.flagged = true
+	l.blocked.Store(1)
+}
+
+// exitPublish lowers the flag, unless a set bit above the frontier keeps it up on
+// its own.
+func (l *commitLog) exitPublish() {
+	if l.bits != 0 {
+		return
+	}
+	l.flagged = false
+	l.blocked.Store(0)
+}
+
+// fastPathUsable reports whether the frontier may be advanced without pubMu.
+func (l *commitLog) fastPathUsable() bool { return l.blocked.Load() == 0 }
 
 // rebase declares that every timestamp at or below floor has finished, discards
 // the tracking state below it, and leaves the log addressing floor+1 onwards.
@@ -184,6 +323,38 @@ func (l *commitLog) rebase(floor uint64) {
 	l.head = &clBlock{}
 	l.headStart = floor + 1
 	l.oldest = floor + 1
+	// Every bit the log held described a timestamp below the new floor, so nothing
+	// above the frontier is recorded any more; recovery has no commit in flight by
+	// construction, so the publisher half is zero too. Leaving a stale count here
+	// would disable the publish fast path for the life of the process.
+	l.bits = 0
+	l.flagged = false
+	l.blocked.Store(0)
+}
+
+// retireBehind drops every block the log has left entirely behind, so that head
+// addresses `oldest` again.
+//
+// [commitLog.advance] does this one block at a time as it walks, which is right
+// when the frontier moves by a handful of timestamps. A jump from
+// [commitLog.syncTo] can skip arbitrarily many at once — a long run of fast-path
+// publications leaves `oldest` as far behind as it likes — so the case where
+// nothing follows head is rebased directly rather than one block per iteration.
+func (l *commitLog) retireBehind() {
+	if l.head == nil {
+		l.headStart = l.oldest // nothing allocated: rebase the empty log
+		return
+	}
+	for l.oldest >= l.headStart+clIDsPerBlock {
+		if l.head.next == nil {
+			// Nothing follows, so nothing at or above `oldest` is recorded: reuse
+			// the block the log already owns rather than churning an allocation.
+			*l.head = clBlock{}
+			l.headStart = l.oldest
+			return
+		}
+		l.retireHead()
+	}
 }
 
 // blockFor returns the block addressing ts, and the timestamp of its bit 0,
