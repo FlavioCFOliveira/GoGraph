@@ -600,7 +600,45 @@ snapshot is strictly weaker than the reference shape. PostgreSQL's snapshot is `
 decide visibility from state captured **once**, at snapshot time. GoGraph decides it per read, from
 state that is still moving.
 
-### LOCALISED: the LABEL substore is correct; the ADJACENCY as-of read is not
+### THE SYNTHESIS, and it retracts one of my own refutations
+
+A further run instrumented the adjacency directly at the tear:
+
+```
+edge: reader=false rawPresent=true asOf(startTS)=false asOf(1)=false
+observed: edge=false label(u)=false label(v)=true
+```
+
+The adjacency **is** filtering correctly here — the present view holds the edge, the snapshot's view
+does not. As of this snapshot the state is therefore B = `{no edge, no labels}`, so `label(u)=false` is
+**right** and **`label(v)=true` is the wrong value**. In the previous sample the labels were right and
+the edge was wrong. **Neither substore is consistently at fault.**
+
+That is the finding, and it means **no single-substore bug explains this**. What every sample does fit,
+without exception, is the plain phenomenon: **the reader straddles a commit, and different
+substructures land on different sides of it.** The read-order inversion test — pre-registered and
+confirmed — said exactly that, and it remains the strongest evidence in this file.
+
+**I must retract the refutation I published against it.** I claimed the straddle account was
+disproved because an instrumented sample showed the same commit record and the same timestamp for both
+labels. That measurement was taken **at report time, after the reader had finished** — by which point
+the record had moved on. It never observed the values the reads actually used, so it could not
+contradict the straddle account, and I treated it as though it did. The "localised to the adjacency"
+and "single-substore bug" conclusions built on it are withdrawn.
+
+**So the standing conclusion is the architectural one**, and it is the one I had before I talked myself
+out of it: `Snapshot` is `{startTS, slot}`, a scalar, and each substructure a reader touches resolves
+independently against commit state that is still moving. Nothing ties the reads together. The fix is to
+capture the visibility basis **once** — the in-flight set, PostgreSQL's `xmin` + in-progress-XID shape,
+InnoDB's read view — which is **option (a) in #2369's technical requirements** and needs the
+maintainer's decision.
+
+Thirteen candidate *mechanisms* were refuted; what survives is the *phenomenon*, measured and
+pre-registered. **The lesson for whoever continues: instrument the values the READ used, at the moment
+it used them. Every instrumented sample in this file that was taken after the fact misled me,
+including the one I used to overturn a correct conclusion.**
+
+### (withdrawn) LOCALISED: the LABEL substore is correct; the ADJACENCY as-of read is not
 
 The decisive measurement. At the tear, for each node, the **reconstructed** value, the **raw stored
 bag**, and whether a delta chain exists:
