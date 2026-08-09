@@ -24,11 +24,12 @@ violations (edge/label disagreement inside a pinned SNAPSHOT)"* during a `make c
 project's ACID mandate on Isolation is absolute: a reader must never observe the partial writes
 of an in-flight transaction. **One observation is enough to withhold an unqualified
 certification, and this one is not yet explained.** §3 records everything established about it,
-including the mechanism that was proposed and then refuted.
+including the FOUR candidate mechanisms that were proposed and then refuted by measurement.
 
 | Gate | Result |
 |---|---|
-| `make ci` (tidy, fmt, vet, build, `-race ./...`, lint, coverage) | see §7 — the run that exposed #2378 was RED |
+| `make ci` (tidy, fmt, vet, build, `-race ./...`, lint, coverage) | see §7 — two red runs, then green |
+| `go test -race ./...` at the exit head | **3 consecutive runs, exit 0**, zero cross-substructure violations |
 | openCypher TCK execution | **3897 / 3897**, 0 failed, 0 undefined, baseline unchanged |
 | Coverage | aggregate **87.0 %** (gate ≥ 85 %), every package ≥ 75 % |
 | Crash-injection battery (`make test-crashinject`) | **exit 0** |
@@ -301,7 +302,7 @@ straddle many completed writer operations. Here `ReadView.HasNodeLabel` resolves
 resolved at the same `(startTS, txID)`. An ABA straddle cannot explain a disagreement unless the
 snapshot itself fails to cover one of the two substructures, which would be the defect.
 
-**Not reproduced in 23 subsequent attempts, across four environments:**
+**Not reproduced in 24 subsequent attempts, across five environments:**
 
 | Attempt | Environment | Result |
 |---|---|---|
@@ -403,19 +404,27 @@ sweep declines to free what a live reader still needs, exactly as `horizon.Oldes
 **Four candidate mechanisms, all excluded by deterministic measurement** — the raw adjacency
 removal, autocommit-inside-the-bracket in each direction, and the reclaim nilling the delta map.
 The oracle has been checked and holds up. Attribution is settled and pre-existing. The failure has
-not reproduced in **27** attempts, including three full `go test -race ./...` runs at HEAD after
+not reproduced in **24** attempts, including three full `go test -race ./...` runs at HEAD after
 the observation.
+
+**Counter-evidence, which does not clear it but belongs beside it.**
+`36_mvcc_snapshot_topology` is the example built for precisely this class — snapshot isolation on
+the topology dimension, validated to fail on the defective engine and pass on the fixed one — and
+at scale (4000 spokes, 8 readers, 12 s, 300 churn) it reported **all four of its invariants at
+zero**: `invisible_commits=0`, `future_reads=0`, `misaligned_far_endpoints=0`, `read_errors=0`.
+That is a different substructure pair from the failing assertion and does not settle #2378, but it
+is the strongest positive evidence this cycle has on the Isolation axis.
 
 What has *not* been reproduced is the gate's own environment: many parallel `-race` package
 binaries, plus this package's `t.Parallel()` tests interleaving with each other, plus the vacuum
 goroutine. Every reproduction attempt substituted something for that mix — CPU burners,
 whole-package runs, injected schedule points — and none of the substitutes exhibits it. The next
 cycle should reproduce the environment rather than model it, and should instrument to the base
-rate: one observation in 27 runs of a 40 000-toggle workload needs hundreds of iterations, with a
+rate: one observation in 24 runs of a 40 000-toggle workload needs hundreds of iterations, with a
 probe that does not perturb what it measures.
 
 **So the honest state is: unexplained.** The next steps are recorded on rmp #2378 — instrument
-to the base rate (one observation in 23 runs of a 40 000-toggle workload needs hundreds of
+to the base rate (one observation in 24 runs of a 40 000-toggle workload needs hundreds of
 iterations), reproduce the gate's *parallel-package* environment specifically rather than CPU
 load, and prefer an injected schedule point over sampling. The assertion must not be relaxed
 until the engine is excluded.
@@ -448,16 +457,15 @@ the maintainer, not a tuning one.
 
 ## 6. The envelope
 
-Certified for production **subject to these stated limits**, each of which is measured rather
-than assumed. Limit 0 is the one the envelope cannot absorb and is why the verdict is not
-unqualified:
+**The limit the envelope cannot absorb, and the reason the verdict is not unqualified: a
+cross-substructure ACID Isolation violation has been observed once and is not explained** —
+#2378, §3. Until it is, a deployment whose correctness depends on a reader never observing a
+partial transaction across two substructures (adjacency plus labels) carries an unquantified
+risk. It is one observation in 24 runs of a 40 000-toggle workload, it is pre-existing rather
+than introduced by this cycle, four candidate mechanisms have been excluded by measurement, and
+the oracle has been checked and holds up — but **a rate is not a proof of absence.**
 
-0. **A cross-substructure ACID Isolation violation has been observed once and is not
-   explained** — #2378, §3. Until it is, a deployment whose correctness depends on a reader
-   never observing a partial transaction across two substructures (adjacency plus labels)
-   carries an unquantified risk. It is one observation in 24 runs of a 40 000-toggle workload,
-   it is pre-existing rather than introduced by this cycle, and the oracle has been checked and
-   holds up — but a rate is not a proof of absence.
+The remaining limits are ordinary envelope items, each measured rather than assumed:
 
 1. **Durable writes are fsync-bound at ~250 tx/s per writer.** Group commit amortises the
    fsync across *concurrent* committers (the recorded ladder reaches 78 667 commits/s at 1024
@@ -519,6 +527,7 @@ as green on this project before.
 | Entry baseline (`78c21ed9`) | `MAKE_CI_EXIT=0`, coverage 87.0 %, TCK 3897/3897 | — |
 | Final run 1 | **`MAKE_CI_EXIT=2` — RED** | `internal/cypherdocgate`: **this document** published Cypher without being classified. A defect this cycle introduced; fixed |
 | Final run 2 | **`MAKE_CI_EXIT=2` — RED** | `graph/lpg`: **#2378**, the Isolation violation in §3. Pre-existing, unexplained, not reproduced since |
+| Final run 3 | **`MAKE_CI_EXIT=0` — GREEN** | lint 0 issues, coverage aggregate **87.0 %**, every package ≥ 75 % |
 | `make test-crashinject` | `CRASHINJECT_EXIT=0` | — |
 
 **Both notifications reported "exit code 0" over a red gate**, because the shell's status was
@@ -556,3 +565,10 @@ envelope note about the 60 s per-package short-layer budget.
 | `a0e5a02a` | #2371 | writer epoch stops the label-index oracle reading an ABA sequence as a lost row |
 | `1829420b` | #2375 | size the CSV byte cap to the payload the example generated |
 | `4bc32238` | #2376 | demand-gate the aggregation pre-projection (−61.8 % / −59.9 %) |
+| `49860f65` | #2378 | this document; classify it in `internal/cypherdocgate`; add the `Document` label to `knowledge-model.md` |
+| `d03e8d8f` | #2378 | third refuted mechanism (the schedule point on the add direction) |
+| `0e2c873f` | #2378 | the fourth candidate, recorded with its counter-argument |
+| `63d83db1` | #2378 | the fourth candidate tested and refuted; the count corrected to 24 |
+
+Filed and left open for the next cycle: **#2378** (the Isolation observation, §3) and **#2377**
+(only 2 of 37 examples can produce a profile, §5).
