@@ -28,7 +28,7 @@ including the FOUR candidate mechanisms that were proposed and then refuted by m
 
 | Gate | Result |
 |---|---|
-| `make ci` (tidy, fmt, vet, build, `-race ./...`, lint, coverage) | see §7 — two red runs, then green |
+| `make ci` (tidy, fmt, vet, build, `-race ./...`, lint, coverage) | **INTERMITTENT** — green on the exit head, but #2378 makes it red roughly 1 run in 4. See §7 |
 | `go test -race ./...` at the exit head | **3 consecutive runs, exit 0**, zero cross-substructure violations |
 | openCypher TCK execution | **3897 / 3897**, 0 failed, 0 undefined, baseline unchanged |
 | Coverage | aggregate **87.0 %** (gate ≥ 85 %), every package ≥ 75 % |
@@ -587,6 +587,13 @@ is trustworthy — this is the third cycle on which that has mattered.
 **Two red runs, two different causes, and the gate was right both times.** The first found an
 omission in this very document within minutes of it being written. The second found the item that
 withholds the certification. A gate that had been quietly passing would have shipped both.
+
+**The gate is therefore INTERMITTENT, and that is its own cost.** #2378 reproduces at about 20 %
+per run of the isolation test under peer load, and `make ci` tripped on it in 1 of the 4 runs this
+cycle — so a green `make ci` is evidence but not proof, and every task whose acceptance criteria
+end in "make ci green" is standing on a gate that fails roughly one time in four for a reason
+unrelated to the change under test. Until #2378 is closed, read a single green run accordingly,
+and re-run before concluding a change is at fault.
 
 **The gate caught a defect this cycle introduced, and it was in this document.**
 `internal/cypherdocgate`'s `TestEveryDocWithCypherIsClassified` requires every document under
