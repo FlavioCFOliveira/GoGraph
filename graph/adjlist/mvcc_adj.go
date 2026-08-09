@@ -159,6 +159,29 @@ func (a *AdjList[N, W]) entryAsOf(s *adjShard[W], intraIdx, startTS, txID uint64
 // e must be the CURRENT entry of the slot: the walk starts there and follows the
 // version chain backwards, so starting from an older entry would resolve against
 // a truncated chain and could return a version this reader must not see.
+// entryAsOfLoadedVisible resolves through the caller's pinned verdict, and does
+// NOT short-circuit on the global versionActive counter: that counter answers a
+// whole-adjacency question and cannot gate a per-entry one (rmp #2378).
+func (a *AdjList[N, W]) entryAsOfLoadedVisible(e *adjEntry[W], visible func(*mvcc.CommitInfo, uint64) bool) *adjEntry[W] {
+	for e != nil {
+		v := e.ver.Load()
+		if v == nil {
+			break
+		}
+		if visible(v.info, v.ts) {
+			break
+		}
+		e = v.prev
+	}
+	return e
+}
+
+// EntryViewAsOfVisible is [AdjList.EntryViewAsOf] through a pinned verdict.
+func (a *AdjList[N, W]) EntryViewAsOfVisible(id graph.NodeID, visible func(*mvcc.CommitInfo, uint64) bool) EntryView[W] {
+	s := &a.shards[id&shardMask]
+	return viewOf(a.entryAsOfLoadedVisible(loadEntry(s, uint64(id)>>shardBits), visible))
+}
+
 func (a *AdjList[N, W]) entryAsOfLoaded(e *adjEntry[W], startTS, txID uint64) *adjEntry[W] {
 	if a.versionActive.Load() == 0 || e == nil {
 		return e

@@ -126,7 +126,7 @@ func (g *Graph[N, W]) withLabelBag(id graph.NodeID, s *Snapshot, fn func(labelBa
 		fn(sh.m[id])
 		return
 	}
-	fn(g.labelBagAsOfLocked(sh, id, startTS, txID))
+	fn(g.labelBagAsOfLockedSnap(sh, id, s, startTS, txID))
 }
 
 // labelBagTest applies pred to a node's label bag as of s, under the shard
@@ -235,7 +235,9 @@ func (g *Graph[N, W]) EntryViewAsOf(id graph.NodeID, s *Snapshot) adjlist.EntryV
 	if !walk {
 		return g.adj.LoadEntryView(id)
 	}
-	return g.adj.EntryViewAsOf(id, startTS, txID)
+	return g.adj.EntryViewAsOfVisible(id, func(info *commitInfo, ts uint64) bool {
+		return s.visible(info, ts, startTS, txID)
+	})
 }
 
 // HasEdgeByIDAsOf reports whether a directed edge srcID→dstID existed at s.
