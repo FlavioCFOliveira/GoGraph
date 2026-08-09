@@ -1,0 +1,469 @@
+# Production-readiness certification — GoGraph module
+
+**Date:** 2026-08-09 · **Entry head:** `78c21ed9` · **Exit head:** see §8 · Apple M4 (10 cores), `darwin/arm64`, go1.26.5
+
+Scope: the **`GoGraph` module**, exercised through the **37 programs under `examples/`**. The
+examples are **instruments**, not subjects — they drive the module under realistic, seeded,
+scale-parametrised conditions so its correctness, performance and efficiency can be observed.
+Every program was run at its deterministic default and, where its flags allow, at a scale
+where the evidence becomes interesting. `pprof` was used to attribute cost to call sites.
+
+---
+
+## Verdict: **NOT CERTIFIED for unrestricted production.**
+
+**Certified for production within the envelope in §6**, with one open item that the envelope
+cannot absorb: **#2378**, a cross-substructure **ACID Isolation** violation observed **once**,
+under the gate, and not reproduced since.
+
+Four defects were found, fixed and pinned — including a 2.5× query-performance win that only a
+CPU profile could have found. The openCypher TCK is 100 %, coverage is 87 %, the crash-injection
+battery is green, and every other ACID check this cycle ran holds. But `graph/lpg`'s
+`TestIsolation_CrossSubstructure_EdgeImpliesLabels` reported *"observed 1 cross-substructure
+violations (edge/label disagreement inside a pinned SNAPSHOT)"* during a `make ci` run, and the
+project's ACID mandate on Isolation is absolute: a reader must never observe the partial writes
+of an in-flight transaction. **One observation is enough to withhold an unqualified
+certification, and this one is not yet explained.** §3 records everything established about it,
+including the mechanism that was proposed and then refuted.
+
+| Gate | Result |
+|---|---|
+| `make ci` (tidy, fmt, vet, build, `-race ./...`, lint, coverage) | see §7 — the run that exposed #2378 was RED |
+| openCypher TCK execution | **3897 / 3897**, 0 failed, 0 undefined, baseline unchanged |
+| Coverage | aggregate **87.0 %** (gate ≥ 85 %), every package ≥ 75 % |
+| Crash-injection battery (`make test-crashinject`) | **exit 0** |
+| `goleak` | green (inside `make ci`) |
+| Examples: build | **37 / 37** |
+| Examples: run to completion at the deterministic default | **34 / 37** — the other three are accounted for below, and none is a defect |
+
+**What is worth carrying forward from this cycle is that the instruments and their operator
+were wrong far more often than the module was.** Eight times I gave an example something other
+than what I thought: three combinations were genuinely invalid and all three were **refused at
+the boundary with a precise, actionable message**, and the other five were valid input I had
+misread, where the module did exactly what I asked (§2). Nothing crashed, hung without
+explanation, or returned a silently wrong answer.
+
+Twice I was one message away from filing a defect that does not exist: an ACID **Consistency**
+violation that was my own fixture error, and a **lost row** that is an ABA artefact in a test
+oracle. Both were caught only by measuring instead of concluding — and one of them, #2371, had
+been sitting in the backlog at severity 8 on the strength of its symptom's vocabulary.
+
+---
+
+## 1. What was broken, and how it presented
+
+### #2376 — a grouped aggregation materialised a relationship the query never names
+
+**Found by `pprof`, which is the only reason it was found at all.** A CPU profile of
+`examples/26_social_scale_bench` (120 000 users, ~3 M `FRIEND` edges, via its `-profile-dir`
+flag) attributed **17.16 % of all samples** to `cypher.buildRelationshipValueFromRow`, reached
+from exactly one caller, `populateRowCtx`. Its own breakdown:
+
+| callee | share of the 17.16 % |
+|---|---:|
+| `buildEdgeProps` | 46.8 % |
+| `ReadView.HasEdge` | 25.2 % |
+| `ReadView.EdgeLabels` | 13.2 % |
+| `EdgeLabelsByHandle` | 5.5 % |
+| `edgeInstanceIdxFor` | 4.7 % |
+| `pickEdgeType` | 3.5 % |
+
+Almost half of it was building the relationship's **property map** — for a variable that
+neither slow query mentions:
+
+```cypher
+MATCH (u:USER)-[:FRIEND]->(:USER) WITH u, count(*) AS deg
+MATCH (:USER)-[:LIKE]->(a:ARTICLE)  RETURN a.id, count(*)
+```
+
+The demand gate that prevents exactly this (#1630) was already in `populateRowCtx`, but it
+engaged only for a non-nil `scalarUse`, and `newAggregationEval`'s AST path called
+`buildRowCtx`, which passes nil. So every matched row built a full relationship value.
+
+`analyseNodeScalarUse` now runs once at build time — the idiom `newRowPredicate` already uses —
+and the row context is built through `buildRowCtxWithUse`. A bailout restores the previous path
+byte for byte, because `buildRowCtx` *is* `buildRowCtxWithUse` with a nil `scalarUse`.
+
+**The pooled path was rejected on a lifetime argument, not a performance one.**
+`evalRowPooled` hands out arena-borrowed lazy values whose lifetime ends at `releaseRowCtx`,
+and unlike a `WHERE` predicate the value here becomes a projected row cell. `populateRowCtx`
+documents the arena-nil path as the one that preserves escape safety, so with a nil arena the
+gate can only ever **omit** a variable the expression never names — and a variable it never
+names cannot appear in its result. The pooled variant was implemented and measured anyway
+(`top_articles` −65.4 % against −61.8 %); the safe one was kept for 4 points of margin.
+
+Measured **interleaved**, 4 pairs, `examples/26` at 60 000 users:
+
+| query | before | after | change |
+|---|---|---|---|
+| `top_articles` | 2.983–3.004 s | 1.135–1.163 s | **−61.8 %** (2.62×) |
+| `friend_degree` | 4.227–4.249 s | 1.695–1.709 s | **−59.9 %** (2.49×) |
+| `count_friend` (control) | 1.766–1.831 s | 1.755–1.781 s | **flat** |
+
+The flat control is what rules out a machine-wide drift reading. Allocations on a 2000-node /
+8000-edge fixture with two properties per edge fell **21.45 → 10.95 per matched row (−48.9 %)**,
+1374.5 → 774.5 B/row.
+
+The change is **result-identical**, so a differential test cannot see it. The pin is therefore
+an allocation bound with a limit of 16 allocations per matched row, injection-validated: it
+fails at **20.45** allocs/row against the ungated build and passes at **10.45**. (Those two
+figures are the pin's own query — `min`/`max`/`count` — and so differ slightly from the
+`min`/`max`/`avg`/`percentileCont` shape measured above; they are not the same fixture and
+should not be quoted as one.)
+
+### #2371 — the label-index oracle read an ABA sequence as a lost row
+
+`TestLabelIndex_NeverMissesALabelTheBagHas` failed about **1 run in 10**, and its message
+describes a **lost row** — a candidate ACID **Consistency** defect of exactly the class the
+previous sprint existed to close. It is not one.
+
+Both mutation paths already hold the shard lock across the bag write **and** the index
+maintenance (`setNodeLabelInfo`, `removeNodeLabelInfo`), so no within-operation intermediate is
+observable on this direction. A writer-epoch probe then measured what the reader's three
+separately-locked reads actually span: **22.4 % of windows had two or more writer operations
+complete inside them, and the widest held 714.** A removal followed by a re-add restores the
+bag to `true`, so all three reads are honest at their own instants while the conjunction
+describes a state that existed at none. The file's own argument for excluding false positives
+— *"a removal clears the bag too, so the bag is false by the time we look again"* — holds only
+for a window containing **at most one** writer step.
+
+**The rate discriminates on its own.** With the #2326 ordering injected, the test fails **7 runs
+in 8 within 0.06–0.38 s**. The reported flake was 1 in 10 over 2 s. Two orders of magnitude
+apart — a real ordering defect does not hide.
+
+The fix is a writer epoch sampled either side of the three reads. A window in which no
+operation *completed* still contains any operation mid-flight, which is exactly the #2326
+intermediate, so the guard removes the ABA reading **without weakening detection**: against the
+injected ordering the guarded oracle reported 10, 23 and 36 violations in three 10 s runs, every
+one with a stable epoch, and it still fails 7 runs in 8 — the same detection rate as before. A
+`sampled == 0` fatal keeps the guard from ever making the gate blind; at HEAD it samples
+68 000–77 000 single-instant windows per 2 s run, discarding 37–39 %.
+
+**Stability after the fix: 200 consecutive runs, 0 failures**, 100 of them under a deliberate
+10-worker CPU load. Before the fix it did not reproduce at HEAD in 55 runs (25 at load ≈ 2, 30
+at load ≈ 20) with nothing in `graph/lpg` or `graph/adjlist` changed since it was measured —
+which is why the mechanism had to be established structurally rather than by catching one.
+
+### #2375 — the CSV examples capped their own generated input
+
+`go run ./examples/18_oocore_pipeline -nodes 500000 -out-degree 12` died with
+`csv: input exceeds maximum size` part-way through its own generated edge list. 18 is the
+**out-of-core** example — its subject is data larger than memory — and its CSV stage silently
+ceilinged the whole pipeline at 128 MiB.
+
+**The module is not at fault.** `csv.DefaultMaxBytes` is deliberate memory-exhaustion
+hardening, documented with its peak-RAM analysis, and configurable through `Options.MaxBytes`.
+The defect is that these examples applied the **untrusted-input** default to input they
+generated themselves in process — trusted by construction, and whose exact length they had
+already computed for their own telemetry. Same shape in `06_csv_import` and
+`31_metrics_observability`.
+
+Each site now sizes `MaxBytes` from the known payload. The cap is **raised, never disabled**:
+`MaxBytes <= 0` opts out of the bound entirely, and an example is documentation as much as an
+exercise. After the change 18 completes at 500 000 nodes / 6 249 637 edges, and 06 round-trips
+8 001 046 edges through **396.78 MiB** of CSV — over three times the previous ceiling.
+
+### #2374 — the examples index was three examples short, and nothing could see it
+
+`examples/README.md` claimed **34** runnable examples against an actual **37**, and omitted
+`37_mvcc_write_contention` entirely. The examples are the module's exercise instruments, so an
+unindexed example is an instrument nobody knows to run.
+
+Nothing could have caught either drift: `scripts/check_doc_freshness.sh` does not look at
+`examples/` at all, and no Go test read `examples/README.md`. The gate now lives in
+`internal/docscheck`, which already runs under `go test ./...` and therefore under `make ci`,
+and asserts that every `examples/NN_*` directory is linked, that each carries its own
+`README.md` as the examples rule requires, and that the stated count equals the directory
+count. Validated by injection in both directions.
+
+---
+
+## 2. What the exercise proved about the module
+
+### The three examples that do not exit 0 at their bare default
+
+None is a defect, and each was driven to completion by another route:
+
+- `24_social_network_cli` requires a subcommand and `-d` (prints its usage, exit 2). Driven
+  through `init`, `seed`, `stats`, `snapshot`, `plandiff` and `query` — all exit 0.
+- `25_software_house_api` requires `-d` (prints `error: -d <dir> is required`, exit 2). Driven
+  through its full documented flow including SIGTERM and restart; see below.
+- `26_social_scale_bench` defaults to **1 000 000 users / ~175 M edges by design**, so it needs
+  more than a 180 s budget (~8.8 GiB resident). It is the cycle's profiling instrument and was
+  run at 60 000 and 120 000 users.
+
+### Correctness and ACID
+
+`04_persistence` at 20 000 packages, i.e. 20 000 WAL-committed transactions plus one
+deliberately aborted one:
+
+| observable | value | property |
+|---|---|---|
+| `wal.commit_markers` | **20001** — exactly one per committed transaction | Atomicity |
+| `wal.phantom_frames` | **0** — the aborted transaction leaked nothing | Atomicity |
+| `rollback.applied_after_reopen` | **0** — the rollback did not resurrect | Atomicity + Durability |
+| `recovered.snapshot_hit` | `true`, 40 002 nodes / 100 229 edges rebuilt | Durability |
+
+`25_software_house_api` at a scaled seed (3763 nodes / 19 209 edges), across a SIGTERM and a
+restart:
+
+| property | before | after restart |
+|---|---|---|
+| `UNIQUE` on `Component.key` rejects a duplicate | **409** | **409** |
+| `EXPLAIN` on the indexed `Developer.key` | `NodeByIndexSeek` | `NodeByIndexSeek` |
+| the API's durable `CREATE` present | — | yes |
+| node total | 3763 | 3764 — exactly the one write |
+| edge total | 19 209 | 19 209 |
+
+`24_social_network_cli` drives every subcommand in a **separate process**, so the
+recovery path is exercised on each; after `plandiff`, `stats` in a fresh process reported the
+enlarged graph (2005 users / 50 407 `FOLLOWS`), so the writes crossed the process boundary
+durably.
+
+The constraint machinery was additionally probed directly, in all three shapes: an
+engine write then the declaration rejects the duplicate; declaring over already-violating data
+is refused (`pre-existing data contains duplicate value`); and a write that **bypasses** the
+engine, followed by the declaration, also rejects the duplicate.
+
+### Concurrency and scale
+
+| Example | Scale | Wall | CPU | Peak RSS | Parallelism |
+|---|---|---:|---:|---:|---:|
+| **20_concurrent_reads** | 200 k nodes, 16 workers | 280.1 s | **1589.7 s** | 486 MiB | **5.7×** |
+| 35_mvcc_mixed_workload | 200 k nodes, 8 readers | 3.6 s | 13.9 s | 35.9 MiB | 3.9× |
+| 05_out_of_core | 500 k nodes | 6.8 s | 22.0 s | 623 MiB | 3.2× |
+| 19_pattern_query | 300 k nodes | 12.9 s | 38.6 s | 690 MiB | 3.0× |
+| 22_cypher | 300 k users | 41.9 s | 121.8 s | 2017 MiB | 2.9× |
+| 01_basic | 400 k nodes, **11 653 070 edges** | 11.2 s | 29.0 s | 1217 MiB | 2.6× |
+| 10_dimacs9_routing | 400 k v, 1.6 M e, 3000 probes | 58.8 s | 63.2 s | 367 MiB | — |
+| 23_bolt_server | 100 k nodes, 16 sessions, 4000 q | 1.9 s | 5.5 s | 253 MiB | — |
+
+`20_concurrent_reads` reaching **5.7× on 10 cores** is direct evidence for the lock-free
+immutable-snapshot read contract.
+
+Two throughput figures from `01_basic` at 400 000 junctions and 11 653 070 roads are worth
+quoting on their own: the graph builds at **1 094 975 edges/s**, and a single-source Dijkstra
+reaching **all 400 000 nodes completes in 192.9 ms — 2 073 907 nodes/s** over a frozen CSR
+snapshot that took 143.5 ms to build. Resident heap for that graph is 433.2 MiB.
+
+### Input validation at the boundary
+
+Eight times over the cycle I gave an example something other than what I thought I was giving
+it. The eight split into two kinds, and the distinction matters:
+
+**Three were genuinely invalid, and all three were refused at the boundary before any work,
+with a message naming the violated constraint:**
+
+- `-links 12` exceeds `-seed-net 5` — *"a new page needs that many distinct existing targets"* (08)
+- `-bridges 8` below `communities-1 = 39` — *"to connect every community"* (11)
+- `min-initial` below `writers × ops × max-amount` — *"to guarantee no overdraft"* (27)
+
+**Five were valid input I had misread**, so the module correctly did exactly what I asked and
+the surprise was mine:
+
+- `-radius 22` is 22× the auto-tuned connectivity threshold, not 22 units (01)
+- `-edges` is out-degree per node capped at the earlier-page count, not a total (07)
+- `-batch` is a context-check interval, not a commit batch (04)
+- `/seed`'s fields are `scale_components…`, not `components…` (25)
+- the duplicate key I asserted on was never in the fixture (25)
+
+No combination produced a crash, an unexplained hang, or a silently wrong result.
+
+---
+
+## 3. The open item: #2378, an Isolation violation seen once
+
+**What was observed.** During a `make ci` run at `4bc32238`:
+
+```
+--- FAIL: TestIsolation_CrossSubstructure_EdgeImpliesLabels (39.76s)
+    isolation_test.go:92: observed 1 cross-substructure violations
+                          (edge/label disagreement inside a pinned SNAPSHOT)
+```
+
+**Why it is severity 9.** The test pins a snapshot (`BeginRead` / `ReadAt` / `EndRead`) and
+reads the edge and both node labels through it. The writer toggles between two *consistent*
+states — `{edge u→v, u:Hot, v:Hot}` and `{none}` — under `ApplyAtomically`. A reader that sees
+the edge without the labels has therefore observed a **partial transaction across two
+substructures**, which is the defect class the sprint-336 structural finding named: an invariant
+binds two substores while each substore is maintained independently.
+
+**Attribution is settled, and it is not this cycle's.**
+`git diff --name-only 78c21ed9 HEAD -- 'graph/**/*.go'` returns exactly one path,
+`graph/lpg/mvcc_label_index_atomicity_test.go` — a **test** file, which cannot change engine
+behaviour. The defect, if it is one, predates sprint 337.
+
+**The oracle was checked before the engine, and it holds up.** This is *not* the shape that
+produced the #2371 false positive. There, three separately-locked **present-time** reads could
+straddle many completed writer operations. Here `ReadView.HasNodeLabel` resolves through
+`HasNodeLabelAsOf(n, name, v.snap)` and the edge through `EdgeWeightAsOf(..., snap)`, and
+`snapshotTimes` returns `walk = true` for **any** non-nil snapshot — so both substructures are
+resolved at the same `(startTS, txID)`. An ABA straddle cannot explain a disagreement unless the
+snapshot itself fails to cover one of the two substructures, which would be the defect.
+
+**Not reproduced in 23 subsequent attempts, across four environments:**
+
+| Attempt | Environment | Result |
+|---|---|---|
+| 6 runs | the single test in isolation at `78c21ed9` | green, ~1.9 s each |
+| 10 runs | the same, under a deliberate 14-worker CPU load | green |
+| 3 runs | whole `graph/lpg` package at `78c21ed9`, with `-race` runs of `cypher`, `store` and `search` as peer load | green |
+| 1 run | the entry-head `make ci` itself | green |
+
+The failing run took **39.76 s against ~1.9 s in isolation**, so it was heavily contended — the
+gate runs every package binary in parallel under `-race`, and within `graph/lpg` the
+`t.Parallel()` tests interleave with each other. Neither CPU pressure nor whole-package runs
+reproduced that mix.
+
+**One mechanism was proposed, tested, and REFUTED — it is recorded here so it is not
+re-proposed.** The failing test's writer is asymmetric: it adds the edge through the graph API
+(`g.AddEdge`, versioned) but removes it through the **raw** adjacency list
+(`g.AdjList().RemoveEdge`). If the raw removal recorded no version, a snapshot taken before it
+would lose the edge immediately while still seeing the properly-versioned labels — exactly the
+reported disagreement, and a test bug rather than an engine defect. A deterministic
+single-threaded probe (pin a snapshot in state A, transition to state B, re-read both through
+the same snapshot) showed **both** the raw and the versioned removal keep the pinned snapshot at
+`edge=true label=true`. The asymmetry is real; it is not the mechanism.
+
+**So the honest state is: unexplained.** The next steps are recorded on rmp #2378 — instrument
+to the base rate (one observation in 23 runs of a 40 000-toggle workload needs hundreds of
+iterations), reproduce the gate's *parallel-package* environment specifically rather than CPU
+load, and prefer an injected schedule point over sampling. The assertion must not be relaxed
+until the engine is excluded.
+
+## 4. Performance envelope, measured
+
+| Dimension | Measured | Note |
+|---|---|---|
+| Durable single-writer commit rate | **250 tx/s** | one fsync per commit by definition; matches the recorded 263 tx/s baseline |
+| Durable commit at 200 k transactions | 300 s wall / **10.6 s CPU** | 97 % idle — the path is fsync-bound, not CPU-bound |
+| WAL + snapshot on disk | 34.84 MiB WAL + 12.49 MiB snapshot for 20 k tx | 495.2 disk bytes per edge |
+| Read parallelism | **5.7×** on 10 cores | 16 workers over an immutable snapshot |
+| Grouped aggregation over a relationship pattern | **2.5–2.6× faster** this cycle | #2376 |
+| CSV parse / serialise | 203.10 MiB/s serialise, 4.1 M rows/s | 8 M edges, 396.78 MiB |
+
+---
+
+## 5. What `pprof` says is left
+
+The CPU profile of `examples/26` after #2376 still puts `populateRowCtx` at the top of the
+Cypher read path. The remaining costs there are `upgradeNodeIDToValue` (22.4 % of
+`populateRowCtx`) and the map traffic of the row context itself (`mapaccess2_faststr`,
+`mapassign_faststr`, `mapIterStart`/`Next` — together another 22 %). A row context keyed by
+string in a `map` is a per-row hash-and-probe cost for a schema that is fixed at plan time; a
+slice indexed by a plan-assigned column would remove it. **Not attempted this cycle** — it
+changes a structure the whole expression evaluator reads, which is an architecture decision for
+the maintainer, not a tuning one.
+
+---
+
+## 6. The envelope
+
+Certified for production **subject to these stated limits**, each of which is measured rather
+than assumed. Limit 0 is the one the envelope cannot absorb and is why the verdict is not
+unqualified:
+
+0. **A cross-substructure ACID Isolation violation has been observed once and is not
+   explained** — #2378, §3. Until it is, a deployment whose correctness depends on a reader
+   never observing a partial transaction across two substructures (adjacency plus labels)
+   carries an unquantified risk. It is one observation in 24 runs of a 40 000-toggle workload,
+   it is pre-existing rather than introduced by this cycle, and the oracle has been checked and
+   holds up — but a rate is not a proof of absence.
+
+1. **Durable writes are fsync-bound at ~250 tx/s per writer.** Group commit amortises the
+   fsync across *concurrent* committers (the recorded ladder reaches 78 667 commits/s at 1024
+   writers through the store API), but a single writer pays one whole fsync per commit by
+   definition. **A workload that issues many small durable transactions from one goroutine
+   should batch them into fewer, larger transactions.**
+2. **Concurrent Cypher write throughput plateaus at about 2× by four writers.** This is
+   recorded in `docs/mvcc-contention-findings.md` and
+   `docs/benchmarks/mvcc-contention-arms-2026-08-08.md`; the only genuinely serialising
+   structure identified is `pubMu`, whose lock-free fast path landed as #2362, with the
+   batching follow-up deferred as #2370. Reads are unaffected.
+3. **Node memory is 378–423 bytes per node, against Neo4j's 128 and Memgraph's 204** — 3–3.3×
+   worse than the best incumbent, while edges are best-in-class at 8.71 B/edge. This is a
+   **known, analysed, unimplemented** finding: `docs/design-node-memory.md` records the
+   measurement and concludes the in-memory model must *split* so nodes stop paying an
+   edge-shaped cost. That is a representation change and therefore requires the maintainer's
+   agreement; this cycle did not attempt it. The sweep points the same way without
+   corroborating the number, which is a different measurement: `02_property_graph` reports
+   **692.2 bytes per node by its own accounting** at 400 000 persons, and 615 MiB resident for
+   the 420 000-node graph. Treat 378–423 as the head-to-head figure and 692.2 as this example's
+   own; they are not the same metric and should not be quoted as agreeing.
+4. **Interchange readers cap untrusted input at 128 MiB by default** (`csv`, `graphml`,
+   `jsonl`). This is intended hardening, not a limit to work around: raise
+   `Options.MaxBytes` for input whose provenance and size you know, as the examples now
+   demonstrate. Leave the default for anything you did not write.
+5. **Exact algorithms remain exact.** Brandes betweenness is O(V·E) and Yen's k-shortest paths
+   is expensive by construction; at 40 000 and 120 000 nodes respectively they exceed a
+   five-minute budget. That is the algorithm, not the implementation — but it bounds what
+   `03_advanced_algorithms` and `14_routing_alternatives` can be scaled to.
+6. **`cypher/tck` runs 61.5 s under `-race`**, marginally over the documented 60 s per-package
+   short-layer budget.
+
+Not exercised this cycle, and therefore not certified by it: the **soak and nightly layers**,
+and a fresh **hostile/security audit** (last covered by the 2026-07-26 and 2026-07-31 cycles).
+
+**Which tools this cycle actually used**, so the evidence is not overstated: `runtime/pprof`
+CPU and heap profiles (via the `-profile-dir` flag that only `26_social_scale_bench` and
+`37_mvcc_write_contention` expose), `rusage` peak RSS per example, each example's own
+`runtime.MemStats` telemetry, on-disk WAL and snapshot sizes, coverage through `make ci`, and
+interleaved A/B timing with a flat control. **Not used:** `runtime/trace` and `go tool trace`
+(`37` exposes a `-trace` flag that went unexercised), `GODEBUG=gctrace=1`, per-example coverage
+attribution via `go build -cover` + `GOCOVERDIR`, and rendered flame graphs — the profiles were
+read as `-top`/`-peek` tables instead. **Only 2 of the 37 examples can produce a profile at
+all**; the other 35 have no profiling flag, so persistence, recovery, traversal, search,
+interchange and Bolt are all unattributable without a throwaway benchmark. That matters
+concretely: #2376, the largest performance finding of this cycle, was findable *only* because
+`26` happened to expose the flag. Filed as **#2377**.
+
+---
+
+## 7. Gate evidence
+
+Exit status was read from the recorded `MAKE_CI_EXIT` line inside each log, never from a
+wrapper's status — a pipeline's exit code is the last stage's, which has misreported a red gate
+as green on this project before.
+
+| Run | Result | Cause |
+|---|---|---|
+| Entry baseline (`78c21ed9`) | `MAKE_CI_EXIT=0`, coverage 87.0 %, TCK 3897/3897 | — |
+| Final run 1 | **`MAKE_CI_EXIT=2` — RED** | `internal/cypherdocgate`: **this document** published Cypher without being classified. A defect this cycle introduced; fixed |
+| Final run 2 | **`MAKE_CI_EXIT=2` — RED** | `graph/lpg`: **#2378**, the Isolation violation in §3. Pre-existing, unexplained, not reproduced since |
+| `make test-crashinject` | `CRASHINJECT_EXIT=0` | — |
+
+**Both notifications reported "exit code 0" over a red gate**, because the shell's status was
+that of the trailing `echo`, not of `make`. Only the `MAKE_CI_EXIT` line written *inside* the log
+is trustworthy — this is the third cycle on which that has mattered.
+
+**Two red runs, two different causes, and the gate was right both times.** The first found an
+omission in this very document within minutes of it being written. The second found the item that
+withholds the certification. A gate that had been quietly passing would have shipped both.
+
+**The gate caught a defect this cycle introduced, and it was in this document.**
+`internal/cypherdocgate`'s `TestEveryDocWithCypherIsClassified` requires every document under
+`docs/` that publishes a ` ```cypher ` fence to be either *gated* — its statements executed —
+or recorded as *historical*, with the reason it must not be. §1 quotes two aggregation shapes
+to name what the profile attributed, so it belongs in `historicalDocs`: the queries are
+verbatim from `examples/26_social_scale_bench` and are exercised there, and the figures here are
+timings of that example at a specific commit, which executing the snippets would not assert.
+The document is now classified with that reason.
+
+That is worth recording for two reasons. The gate is not decorative — it found a real omission
+within minutes of the document being written. And the harness's completion notification claimed
+**"exit code 0" over a red gate**, because the shell's status was that of the trailing `echo`,
+not of `make`. Only the `MAKE_CI_EXIT` line written *inside* the log is trustworthy.
+
+`cypher/tck` ran 65.9 s under `-race` in the red run and is the package named in the §6
+envelope note about the 60 s per-package short-layer budget.
+
+---
+
+## 8. Commits
+
+| Commit | Task | What |
+|---|---|---|
+| `883b1163` | #2374 | index all 37 examples; gate the index in `internal/docscheck` |
+| `a0e5a02a` | #2371 | writer epoch stops the label-index oracle reading an ABA sequence as a lost row |
+| `1829420b` | #2375 | size the CSV byte cap to the payload the example generated |
+| `4bc32238` | #2376 | demand-gate the aggregation pre-projection (−61.8 % / −59.9 %) |

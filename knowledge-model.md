@@ -1098,6 +1098,7 @@ high-water seed).
 | `Agent` | A specialist sub-agent mandated by `CLAUDE.md`. | `name`, `kind` (`subagent`), `description`, `source` |
 | `Skill` | A project-relevant Claude Code skill. | `name`, `kind` (`skill`), `description`, `path` |
 | `Memory` | A persistent assistant memory file (mirror of the harness memory directory). | `name` (frontmatter slug), `file` (basename), `type` (`user`\|`feedback`\|`project`\|`reference`), `description` |
+| `Document` | A prose document under `docs/` that records a decision, a design, an audit or a certification. Present in the live graph since before this table existed (see the data-quality note below); its certification use was documented 2026-08-09 (sprint 337). | `path` (repo-relative, the identity), `title`, `kind` (`certification`\|`design`\|`audit`), `verdict` (certifications only — the cycle's stated outcome) |
 
 ### Enumerated property values
 
