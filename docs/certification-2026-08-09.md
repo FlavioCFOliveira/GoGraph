@@ -600,10 +600,22 @@ snapshot is strictly weaker than the reference shape. PostgreSQL's snapshot is `
 decide visibility from state captured **once**, at snapshot time. GoGraph decides it per read, from
 state that is still moving.
 
-**So the fix is an architecture change and needs the maintainer's agreement** (per the project's
-decision-autonomy rule): `Snapshot` must capture the visibility basis once — the in-flight set, or an
-equivalent — so that every substructure a reader touches is resolved against one observation. That is
-option (a) already written up in #2369's technical requirements, and it is not a tuning change.
+**One link in this story is NOT verified, and it must be said.** The *experimental* result is solid
+and was pre-registered: the answer a reader gets changes between its two substructure reads, and the
+direction tracks read order. What is **not** established is *why the contiguous frontier permits it*.
+`startTS` is `Clock.ReadTS()`, the contiguous frontier, which only advances past a commit once that
+commit has finished — so a transaction in flight when the snapshot was taken should have
+`TS_c > startTS`, and committing later should leave it invisible. On that reasoning the tear should be
+impossible, and it demonstrably is not. Either the frontier is not as conservative as its contract
+says, or the version being read is not stamped by the record I traced. **Anyone continuing this must
+close that gap first**; the read-order evidence stands on its own, but the mechanism above is a story
+with a hole in it, and ten stories have already died this cycle.
+
+**Either way the fix is an architecture change and needs the maintainer's agreement** (per the
+project's decision-autonomy rule): `Snapshot` must capture the visibility basis once — the in-flight
+set, or an equivalent — so that every substructure a reader touches is resolved against one
+observation. That is option (a) already written up in #2369's technical requirements, and it is not a
+tuning change.
 Run it under the recipe, with ~100 runs, before designing anything. The recipe above gives ~20 % per
 run, which is a workable base rate — the next cycle can iterate on a hypothesis in minutes rather
 than waiting for the gate to trip. What is *not* known is the mechanism: four candidates are
