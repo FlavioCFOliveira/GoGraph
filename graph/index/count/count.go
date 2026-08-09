@@ -145,7 +145,38 @@ type shard struct {
 	dIn  map[uint64]*atomic.Int64
 	t    map[triKey]*atomic.Int64
 	mu   sync.RWMutex
+	// cells is the LOCK-FREE FAST REJECT (rmp #2363 item B): how many cells this
+	// shard currently holds across all four maps. A reader that finds it zero knows
+	// every lookup in this shard must miss, and returns WITHOUT taking mu at all.
+	//
+	// This is MySQL's m_min_id shape. Its Trx_shard is
+	// ut::Cacheline_padded<ut::Guarded<...>> holding a std::atomic<trx_id_t>
+	// (storage/innobase/include/trx0sys.h), and the atomic exists so a lookup can be
+	// rejected before the latch is ever acquired. Three parts: padded shard, own
+	// latch, atomic fast-reject. This store had the middle one only.
+	//
+	// Maintained in exactly one place — [Store.add], the sole insert/delete routine
+	// — under the write lock, so it cannot drift from the maps it describes.
+	cells atomic.Int64
+	// pad keeps one shard per cache line, so two independent shards cannot
+	// false-share. Without it the struct is ~64 bytes on a 128-byte line (Apple
+	// silicon), which puts two shards' locks and counters in one line and makes
+	// writers to DIFFERENT shards invalidate each other.
+	//
+	// The cost is stated rather than assumed: cacheLine-sized shards at numShards=64
+	// is 8 KiB of shard array, against ~4 KiB unpadded. 4 KiB more per Store, once.
+	_ [shardPad]byte
 }
+
+// cacheLine is the padding target. 128 rather than 64 because Apple silicon's
+// line is 128 bytes and x86 prefetches line pairs, so 128 is the safe choice on
+// both.
+const cacheLine = 128
+
+// shardPad is the filler that rounds [shard] up to a whole cache line. Written as
+// a computed expression so adding a field cannot silently defeat the padding: if
+// the struct outgrows the line the expression goes negative and the build fails.
+const shardPad = cacheLine - (4*8+24+8)%cacheLine
 
 // Store is the sharded relationship count-store. Its zero value is not usable;
 // construct one with [New].
@@ -260,6 +291,7 @@ func (s *Store) add(sh *shard, get func(*shard) *atomic.Int64, put func(*shard, 
 	if cell == nil {
 		cell = new(atomic.Int64)
 		put(sh, cell)
+		sh.cells.Add(1) // see [shard.cells]
 	}
 	// Deleted at EXACTLY zero, not at zero-or-below (rmp #2303, MVCC B1).
 	//
@@ -281,6 +313,7 @@ func (s *Store) add(sh *shard, get func(*shard) *atomic.Int64, put func(*shard, 
 	// property the delete exists for is unchanged.
 	if cell.Add(delta) == 0 {
 		del(sh)
+		sh.cells.Add(-1) // see [shard.cells]
 	}
 	sh.mu.Unlock()
 }
@@ -288,6 +321,20 @@ func (s *Store) add(sh *shard, get func(*shard) *atomic.Int64, put func(*shard, 
 // CountE returns the live edge count of relationship type rt (0 when absent).
 func (s *Store) CountE(rt uint32) int64 {
 	sh := s.eShardOf(rt)
+	// LOCK-FREE FAST REJECT (rmp #2363 item B). An empty shard cannot hold this key,
+	// so the answer is 0 without touching mu. See [shard.cells] for the MySQL
+	// m_min_id shape this follows.
+	//
+	// SAFE UNDER CONCURRENCY BY DIRECTION, not by luck: cells is maintained under the
+	// write lock, so a zero read means no cell existed at some instant within this
+	// call. A concurrent insert racing this read is exactly the race the RLock
+	// version has too — a reader either sees the new cell or does not — and either
+	// answer is a legal snapshot read. What it can never do is MISS a cell that was
+	// already there, because cells is incremented BEFORE the lock is released and a
+	// non-zero value always sends the reader down the locked path.
+	if sh.cells.Load() == 0 {
+		return 0
+	}
 	sh.mu.RLock()
 	cell := sh.e[rt]
 	sh.mu.RUnlock()
@@ -302,6 +349,20 @@ func (s *Store) CountE(rt uint32) int64 {
 func (s *Store) CountD(label, rt uint32, dir Direction) int64 {
 	k := dkey(label, rt)
 	sh := s.dShardOf(k)
+	// LOCK-FREE FAST REJECT (rmp #2363 item B). An empty shard cannot hold this key,
+	// so the answer is 0 without touching mu. See [shard.cells] for the MySQL
+	// m_min_id shape this follows.
+	//
+	// SAFE UNDER CONCURRENCY BY DIRECTION, not by luck: cells is maintained under the
+	// write lock, so a zero read means no cell existed at some instant within this
+	// call. A concurrent insert racing this read is exactly the race the RLock
+	// version has too — a reader either sees the new cell or does not — and either
+	// answer is a legal snapshot read. What it can never do is MISS a cell that was
+	// already there, because cells is incremented BEFORE the lock is released and a
+	// non-zero value always sends the reader down the locked path.
+	if sh.cells.Load() == 0 {
+		return 0
+	}
 	sh.mu.RLock()
 	var cell *atomic.Int64
 	if dir == In {
@@ -321,6 +382,20 @@ func (s *Store) CountD(label, rt uint32, dir Direction) int64 {
 func (s *Store) CountT(a, rt, b uint32) int64 {
 	tk := triKey{a: a, rt: rt, b: b}
 	sh := s.tShardOf(tk)
+	// LOCK-FREE FAST REJECT (rmp #2363 item B). An empty shard cannot hold this key,
+	// so the answer is 0 without touching mu. See [shard.cells] for the MySQL
+	// m_min_id shape this follows.
+	//
+	// SAFE UNDER CONCURRENCY BY DIRECTION, not by luck: cells is maintained under the
+	// write lock, so a zero read means no cell existed at some instant within this
+	// call. A concurrent insert racing this read is exactly the race the RLock
+	// version has too — a reader either sees the new cell or does not — and either
+	// answer is a legal snapshot read. What it can never do is MISS a cell that was
+	// already there, because cells is incremented BEFORE the lock is released and a
+	// non-zero value always sends the reader down the locked path.
+	if sh.cells.Load() == 0 {
+		return 0
+	}
 	sh.mu.RLock()
 	cell := sh.t[tk]
 	sh.mu.RUnlock()
