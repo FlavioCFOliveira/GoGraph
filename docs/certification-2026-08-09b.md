@@ -22,6 +22,7 @@ This cycle closed that gap and then used it.
 | openCypher TCK execution | baseline `3897` unchanged |
 | Examples: build | **37 / 37** |
 | Examples: produce a valid `cpu.pprof` + `heap.pprof` | **42 / 42 runs** (37 examples; example 24 counted once per subcommand) |
+| Examples: exit status, re-run after both fixes | **42 / 42 exit 0** |
 | Deterministic facts with profiling off vs on | byte-identical |
 
 The headline is not the fix; it is that **the fix was invisible before this cycle's first task
@@ -192,7 +193,10 @@ Per-task validation beyond the gate:
 | Commit | Task | What |
 |---|---|---|
 | `1fc53bc5` | #2377 | every example can produce a pprof profile; shared `examples/internal/exprof` |
-| *(this commit)* | #2380 | screen the parallel-scan gate on the zero-alloc count; this document |
+| `cb3c5b39` | #2380 | screen the parallel-scan gate on the zero-alloc count; this document |
+
+After both commits the example sweep was re-run end to end: **42 / 42 runs exit 0 and produce a
+valid profile pair**, so the fix did not disturb any example's behaviour.
 
 ---
 
