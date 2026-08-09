@@ -650,11 +650,25 @@ That produces exactly what was measured — labels correct, edge at present time
 state) — and it explains the rarity, the load sensitivity (the reclaimer runs on the vacuum
 goroutine) and why threading a transaction changed nothing.
 
-**It is a candidate, not a proven cause**, and this cycle has refuted eleven of those. It is also on a
-hot read path, so the check exists for a reason and cannot simply be deleted. Validate it the way this
-defect now permits: reproduce with the recipe, instrument `versionActive` at the tear, and require
-≥100 runs per arm before and after. `removeEdgeInfo` having no `stampAppend` counterpart to
-`addEdgeInfo`'s (`lpg.go:1843`) is worth checking in the same pass.
+**IMPLEMENTED, MEASURED, AND REFUTED — REVERTED.** The disjunct was removed (leaving `if e == nil`)
+and the recipe run at **100 iterations**: **3 failures**, against a pre-fix rate of 2–4 per 100. That
+is no change. The criteria were written down *before* the run — zero failures in 100, then TCK and
+three green gates — so this is a clean refutation rather than a judgement call, and the change was
+reverted rather than kept, because shipping a change that fixed nothing would leave a comment
+asserting a cause the measurement had already denied.
+
+Worth keeping from the attempt: dropping the counter is **semantically neutral** (with no versions on
+the entry, `e.ver.Load()` is nil and the loop breaks immediately), so the gate is *not* what serves
+the present-time answer here. Something else in the adjacency as-of path does.
+
+**That is thirteen candidates refuted.** What survives, and it came from measurement rather than from
+any of them, is the **localisation**: at the tear the label chains are present and reconstruct
+correctly while the adjacency returns the removed state. The defect is in the adjacency versioned read
+path — `AdjList.entryAsOfLoaded` / `EntryViewAsOf` and the chain `storeEntry`/`versionStamp` maintain
+— and it is *not* the `versionActive` gate. `removeEdgeInfo` having no `stampAppend` counterpart to
+`addEdgeInfo`'s (`lpg.go:1843`) is the next thing to check, and the honest next step is to instrument
+the adjacency chain itself at the tear — the entry, its version, and `supersededAt()` — exactly as
+instrumenting the label bag localised this far.
 
 ### A superseded story, kept for the record
 
