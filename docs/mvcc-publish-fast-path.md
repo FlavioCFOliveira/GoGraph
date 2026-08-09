@@ -104,3 +104,38 @@ every writer. It is the only remaining candidate that fits the measured signatur
 - **PostgreSQL**'s group-clear on `ProcArrayEndTransaction` batches the equivalent work
   under one acquisition instead of eliminating it. Worth considering only *after* the fast
   path, since it addresses the same traffic a different way.
+
+## A third subtlety: the `pending` check and the CAS are not atomic together
+
+The two-condition guard above is necessary but **not sufficient as written**, and this is the
+last thing to get right.
+
+`pending` can go 0 → 1 between the check and the CAS. If a slow-path `finish` sets a bit
+*above* the frontier in that window, the fast path still advances `visible` by one and leaves
+that bit behind. If no further commit arrives, it is the same stall — reached through a race
+rather than through ordinary ordering.
+
+The invariant that makes the rest of the design work is: **the fast path only runs when
+`pending == 0`, so there are never set bits above the frontier while it advances** — which is
+also what lets the slow path fast-forward `oldest` from `visible` without skipping a recorded
+bit. The race above is the one hole in it.
+
+Closing it is cheap: **re-check `pending` after the CAS**, and if it is non-zero fall through
+to the locked path so `advance()` can catch up.
+
+```go
+if c.log.pending.Load() == 0 && c.visible.CompareAndSwap(ts-1, ts) {
+    if c.log.pending.Load() == 0 {
+        ...wake waiters...
+        return
+    }
+    // a bit landed above us mid-CAS: fall through and let advance() catch up
+}
+```
+
+But note the consequence for the locked path: `ts` is **already** reflected in `visible`, so
+`finish(ts)` will take its `ts < l.oldest` early return and never call `advance()`. The
+fall-through therefore needs a *catch-up* entry point — sync `oldest` from `visible`, then
+`advance()` — rather than a plain `finish(ts)`. That is the piece to write, and
+`TestClock_Frontier*` in `graph/mvcc/frontier_liveness_test.go` is the oracle it must satisfy;
+those tests already fail on the naive one-condition version at a window of **two**.
