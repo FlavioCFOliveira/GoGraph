@@ -252,9 +252,14 @@ func (g *Graph[N, W]) setEdgeLabelByHandleInfo(src, dst N, handle uint64, name s
 // by its own per-shard mutex and is only per-operation atomic: it is NOT
 // cross-store consistent with [Graph.EdgeCreateCount],
 // [Graph.EdgePropertiesByHandle], or the adjacency layer outside a
-// transaction barrier. To read a consistent cross-store view, bracket
-// the correlated reads in [Graph.View] (writers commit under
-// [Graph.ApplyAtomically]); see docs/isolation-design.md.
+// transaction barrier. To read a consistent cross-store view, take a
+// snapshot with [Graph.BeginRead] and resolve every correlated read
+// through the [ReadView] that [Graph.ReadAt] returns, releasing it with
+// [Graph.EndRead]. (This used to say "bracket the correlated reads in
+// Graph.View"; that method was removed by rmp #2344 and the advice was
+// left pointing at it — see rmp #2379.) Writers must share ONE
+// transaction record for their writes to land at one instant; see
+// [Graph.ApplyAtomically]. Also see docs/isolation-design.md.
 //
 // EdgeLabelsByHandle is safe for concurrent use.
 func (g *Graph[N, W]) EdgeLabelsByHandle(src, dst N, handle uint64) []string {
@@ -354,9 +359,14 @@ func (g *Graph[N, W]) setEdgePropertyByHandleInfo(src, dst N, handle uint64, key
 // by its own per-shard mutex and is only per-operation atomic: it is NOT
 // cross-store consistent with [Graph.EdgeCreateCount],
 // [Graph.EdgeLabelsByHandle], or the adjacency layer outside a
-// transaction barrier. To read a consistent cross-store view, bracket
-// the correlated reads in [Graph.View] (writers commit under
-// [Graph.ApplyAtomically]); see docs/isolation-design.md.
+// transaction barrier. To read a consistent cross-store view, take a
+// snapshot with [Graph.BeginRead] and resolve every correlated read
+// through the [ReadView] that [Graph.ReadAt] returns, releasing it with
+// [Graph.EndRead]. (This used to say "bracket the correlated reads in
+// Graph.View"; that method was removed by rmp #2344 and the advice was
+// left pointing at it — see rmp #2379.) Writers must share ONE
+// transaction record for their writes to land at one instant; see
+// [Graph.ApplyAtomically]. Also see docs/isolation-design.md.
 //
 // EdgePropertiesByHandle is safe for concurrent use.
 func (g *Graph[N, W]) EdgePropertiesByHandle(src, dst N, handle uint64) map[string]PropertyValue {

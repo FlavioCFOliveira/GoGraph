@@ -770,12 +770,43 @@ type Graph[N comparable, W any] struct {
 }
 
 // ApplyAtomically runs fn while holding the graph's transaction-visibility
-// write lock. Every mutation fn performs (across adjacency, labels,
-// properties, tombstones, bitmaps, and indexes) becomes visible to
-// [Graph.View] readers as a single atomic step: a concurrent View reader
-// observes either none of fn's writes or all of them, never a partial set.
+// write lock, which excludes every other WRITER for the duration of fn.
 // fn is the in-memory apply of one durable transaction; callers invoke it
 // only after the transaction's WAL frames are fsynced.
+//
+// # It does NOT, by itself, make fn's writes atomically visible to a reader
+//
+// This paragraph used to promise that every mutation fn performs "becomes
+// visible to [Graph.View] readers as a single atomic step". That guarantee was
+// scoped to a reader type that **no longer exists**: Graph.View was removed by
+// rmp #2344, and snapshots ([Graph.BeginRead] / [Graph.ReadAt]) are now the only
+// readers. The promise was never restated for them, and it does not carry over.
+//
+// The reason is [Graph.deltaStamp]: a write that passes a NIL transaction record
+// — which is what the bare exported mutators such as [Graph.AddEdge] and
+// [Graph.SetNodeLabel] do — takes a FRESH commit instant of its own. Several such
+// writes inside one ApplyAtomically bracket therefore commit at several distinct
+// instants, and a snapshot whose startTS lands between two of them observes a
+// PARTIAL set. Measured under a full `go test -race ./...` peer load: an edge plus
+// two labels written this way tore in 5 runs out of 40, with the reader seeing the
+// edge and neither label (rmp #2378).
+//
+// SO THREAD ONE TRANSACTION. Use [Graph.ApplyAtomicallyTx] and issue the writes
+// through [Graph.Writer], so deltaStamp answers every write with the same record
+// and they share one commit instant. The same requirement is stated on
+// [Graph.ApplyInsideLockedTx].
+//
+// THAT IS NECESSARY AND, AT THE TIME OF WRITING, NOT SUFFICIENT. Threading one
+// transaction removes the edge-vs-label tear above, but the same workload still
+// tore in 3 runs of 40 with two LABEL writes disagreeing with each other — nodes
+// in different label shards, one transaction, observed at different instants by one
+// pinned snapshot. That is an engine-level cross-shard split and it is tracked as
+// rmp #2378; until it is closed, a caller must not rely on writes to DIFFERENT
+// label shards becoming visible together, even inside one transaction.
+//
+// Exclusive-writer brackets around state that is not versioned per-write — an
+// index registration, for example — are unaffected, since there is no commit
+// instant to split.
 //
 // ApplyAtomically must not be called re-entrantly, and the mutations inside fn
 // must not call [Graph.View] or [Graph.ApplyAtomically] (the RWMutex is not

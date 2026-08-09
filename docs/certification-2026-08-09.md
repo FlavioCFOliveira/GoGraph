@@ -14,7 +14,7 @@ where the evidence becomes interesting. `pprof` was used to attribute cost to ca
 
 **Certified for production within the envelope in §6**, with one open item that the envelope
 cannot absorb: **#2378**, a cross-substructure **ACID Isolation** violation observed **once**,
-under the gate — and now **reproducible on demand at about 20 % per run** (§3).
+under the gate — now **reproducible on demand**, and **half diagnosed**: one cause was a caller error and is fixed, the second is engine-level and stays open (§3).
 
 Four defects were found, fixed and pinned — including a 2.5× query-performance win that only a
 CPU profile could have found. The openCypher TCK is 100 %, coverage is 87 %, the crash-injection
@@ -23,8 +23,10 @@ battery is green, and every other ACID check this cycle ran holds. But `graph/lp
 violations (edge/label disagreement inside a pinned SNAPSHOT)"* during a `make ci` run, and the
 project's ACID mandate on Isolation is absolute: a reader must never observe the partial writes
 of an in-flight transaction. **One observation is enough to withhold an unqualified
-certification, and this one is not yet explained.** §3 records everything established about it,
-including the FOUR candidate mechanisms that were proposed and then refuted by measurement.
+certification.** §3 records everything established: the reproduction recipe, the five candidate
+mechanisms refuted by measurement, and the two DIFFERENT tears the diagnostic then separated —
+an edge-vs-label split caused by bare autocommit writes inside `ApplyAtomically` (fixed), and a
+**label-vs-label split across shards inside ONE transaction**, which no caller error explains.
 
 | Gate | Result |
 |---|---|
@@ -494,8 +496,40 @@ of 1 in 1 200 503 reads. Whoever picks this up should instrument **inside the re
 environment**, around `lpg.go:1833–1843`, rather than reaching for another single-shot probe:
 that is now five single-shot probes that all came back clean on a defect that reproduces at 20 %.
 
-**So the honest state is: REPRODUCIBLE with a signature and a located suspect, and still
-unproven.** The recipe above gives ~20 % per
+### The cause is now half-known: TWO tears, not one, and the second is engine-level
+
+The suspect above was tested, and the result **split the defect in two**.
+
+`Graph.deltaStamp` (`mvcc_txn.go:230`) answers a **nil** transaction record with `g.stamp.Stamp()`
+— *a fresh commit instant per write*. The bare exported mutators pass nil, so `AddEdge` and each
+`SetNodeLabel` inside one `ApplyAtomically` bracket commit at **three distinct instants**, and a
+snapshot landing between them sees a partial set. That is the edge-vs-label signature exactly, and
+the module states the requirement itself on `Graph.ApplyInsideLockedTx`: *"the statement must share
+the record the enclosing `LockBarrier` opened, or the explicit transaction is not atomically
+visible."*
+
+Threading the writes through one `WriteTx` (`ApplyAtomicallyTx` + `Graph.Writer(tx)`) was then
+measured under the same recipe:
+
+| Writer form | Runs | Failed | Signature |
+|---|---:|---:|---|
+| `ApplyAtomically` + bare autocommit writes | 40 | **5** | `edge=true label(u)=false label(v)=false` |
+| `ApplyAtomicallyTx` + one shared `WriteTx` | 60 | **3** | `label(u) != label(v)` — **the two labels disagree** |
+
+**The edge-vs-label tear is gone. A label-vs-label tear is not.** Three runs in forty failed with
+`edge=true label(u)=true label(v)=false` and `edge=false label(u)=false label(v)=true` — two label
+writes, in **one transaction**, on nodes in **different label shards**, observed at different
+instants by one pinned snapshot. No caller error can explain that: it is an engine-level
+cross-shard visibility split.
+
+So the honest state is: **one cause identified and fixed at the call site, a second cause
+identified as engine-level and still open.** #2378 stays open for the second.
+
+**And the first draft of this section was wrong.** On the strength of the first 20 shared-`WriteTx`
+runs coming back clean I wrote "0 violations in 60 runs" into two source comments and called the
+defect a test bug. The next 40 runs refuted it. The diagnostic added earlier in this cycle — the
+one that classifies *which* pair tore — is the only reason the difference was visible rather than
+looking like the same failure recurring. The recipe above gives ~20 % per
 run, which is a workable base rate — the next cycle can iterate on a hypothesis in minutes rather
 than waiting for the gate to trip. What is *not* known is the mechanism: four candidates are
 excluded, and the deterministic probes that excluded them all ran outside the environment that

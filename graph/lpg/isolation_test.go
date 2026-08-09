@@ -52,15 +52,47 @@ func TestIsolation_CrossSubstructure_EdgeImpliesLabels(t *testing.T) {
 		present := false
 		for i := 0; i < toggles; i++ {
 			want := !present
-			_ = g.ApplyAtomically(func() error {
+			// THE WRITES MUST SHARE ONE TRANSACTION RECORD, or they are not
+			// atomically visible to a snapshot reader — which is the whole
+			// subject of this test (rmp #2378).
+			//
+			// This used to call the bare autocommit methods inside
+			// [Graph.ApplyAtomically]. That bracket holds visGate exclusively, so
+			// it excludes other WRITERS, but each bare call passes a nil
+			// transaction and [Graph.deltaStamp] answers a nil record with
+			// `g.stamp.Stamp()` — A FRESH COMMIT INSTANT PER WRITE. The edge
+			// therefore committed at one instant and each label at a later one,
+			// and a reader whose startTS landed between them saw the edge without
+			// the labels. Measured under the gate's own environment (a full
+			// `go test -race ./...` as peer load): 5 violating runs in 40, with
+			// the signature `edge=true label(u)=false label(v)=false` — the ADD
+			// path, since the remove path takes the edge down first.
+			//
+			// A shared record makes deltaStamp return that record for every write,
+			// so all three land at one instant. The module states the requirement
+			// itself, on [Graph.ApplyInsideLockedTx]: "the statement must share the
+			// record the enclosing LockBarrier opened, or the explicit transaction
+			// is not atomically visible."
+			//
+			// THREADING ONE [WriteTx] FIXES THAT TEAR AND NOT THE OTHER ONE.
+			// Measured under the same recipe: the edge-vs-label signature is GONE,
+			// but 3 runs in 40 still fail with `label(u) != label(v)` — two label
+			// writes in ONE transaction, on nodes in DIFFERENT label shards,
+			// observed at different instants by one pinned snapshot. That is an
+			// engine-level cross-shard visibility split, not a caller error, and it
+			// is what keeps rmp #2378 open. (An earlier draft of this comment
+			// claimed "0 violations in 60 runs" on the strength of the first 20;
+			// the next 40 refuted it.)
+			_ = g.ApplyAtomicallyTx(func(tx WriteTx) error {
+				wv := g.Writer(tx)
 				if want {
-					_ = g.AddEdge("u", "v", 0)
-					_ = g.SetNodeLabel("u", "Hot")
-					_ = g.SetNodeLabel("v", "Hot")
+					_ = wv.AddEdge("u", "v", 0)
+					_ = wv.SetNodeLabel("u", "Hot")
+					_ = wv.SetNodeLabel("v", "Hot")
 				} else {
-					g.AdjList().RemoveEdge("u", "v")
-					g.RemoveNodeLabel("u", "Hot")
-					g.RemoveNodeLabel("v", "Hot")
+					wv.RemoveEdge("u", "v")
+					wv.RemoveNodeLabel("u", "Hot")
+					wv.RemoveNodeLabel("v", "Hot")
 				}
 				return nil
 			})
@@ -148,11 +180,12 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 	g := New[string, int64](adjlist.Config{Directed: true})
 
 	// Seed both nodes.
-	if err := g.ApplyAtomically(func() error {
-		if err := g.SetNodeProperty("a", "v", Int64Value(0)); err != nil {
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+		wv := g.Writer(tx)
+		if err := wv.SetNodeProperty("a", "v", Int64Value(0)); err != nil {
 			return err
 		}
-		return g.SetNodeProperty("b", "v", Int64Value(0))
+		return wv.SetNodeProperty("b", "v", Int64Value(0))
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -174,11 +207,20 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 		defer wg.Done()
 		defer done.Store(true)
 		for i := int64(1); i <= iterations; i++ {
-			if err := g.ApplyAtomically(func() error {
-				if err := g.SetNodeProperty("a", "v", Int64Value(i)); err != nil {
+			// One shared transaction record, for the reason spelled out in
+			// TestIsolation_CrossSubstructure_EdgeImpliesLabels: the bare
+			// autocommit writes take a FRESH commit instant each
+			// ([Graph.deltaStamp] on a nil record), so a snapshot reader can land
+			// between a.v and b.v. This test was written for the Graph.View era
+			// and its READER was migrated to snapshots (rmp #2344) while its
+			// writer was not — the same latent defect as rmp #2378, in the same
+			// file (found while fixing that one).
+			if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+				wv := g.Writer(tx)
+				if err := wv.SetNodeProperty("a", "v", Int64Value(i)); err != nil {
 					return err
 				}
-				return g.SetNodeProperty("b", "v", Int64Value(i))
+				return wv.SetNodeProperty("b", "v", Int64Value(i))
 			}); err != nil {
 				writeErr.Add(1)
 				return
