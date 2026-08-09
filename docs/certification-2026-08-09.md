@@ -13,8 +13,8 @@ where the evidence becomes interesting. `pprof` was used to attribute cost to ca
 ## Verdict: **NOT CERTIFIED for unrestricted production.**
 
 **Certified for production within the envelope in §6**, with one open item that the envelope
-cannot absorb: **#2378**, a cross-substructure **ACID Isolation** violation observed **once**,
-under the gate — now **reproducible on demand**, with one cause found and fixed and the tear still surviving it — **eight mechanisms excluded by measurement** (§3).
+cannot absorb: **#2378**, a cross-substructure **ACID Isolation** violation, now reproducible and diagnosed —
+under the gate — now **reproducible on demand and DIAGNOSED**: the visibility basis is re-read per substructure, so a reader straddling a commit classifies each substructure against a different commit state. Confirmed by a pre-registered falsification. The fix is an architecture change and needs your agreement (§3).
 
 Four defects were found, fixed and pinned — including a 2.5× query-performance win that only a
 CPU profile could have found. The openCypher TCK is 100 %, coverage is 87 %, the crash-injection
@@ -538,12 +538,73 @@ for u and for v, confirmed in different shards (`sameShard=false`). So two more 
 - the reclaim is **not** dropping a chain a live snapshot still needs.
 
 That is **eight** mechanisms refuted by measurement, three of them located precisely in the code and
-convincing on inspection. The one asymmetry the data now points at, and which has **not** been
-tested, is that the two substores classify visibility through **different machinery**: labels via
-the shared `commitInfo.TS()` (`mustUndo`, `mvcc_labels.go:124`), adjacency via the adjlist's own
-write stamp (`adj.SetWriteStamp(&g.stamp)`). Two mechanisms mean two instants unless something ties
-them, and nothing in the read path re-checks that they agree. That is where the next cycle should
-start — with the recipe, not with a ninth argument. The recipe above gives ~20 % per
+convincing on inspection.
+
+### DIAGNOSED: the visibility basis is re-read per substructure
+
+The obvious next suspect was that the two substores classify visibility through different machinery.
+**That is refuted by reading the code**: `AdjList.versionStamp` returns the caller's shared record
+when the write carries a valid transaction (`mvcc_adj.go:251`), and `writeCtx.adjTx()` does carry it
+(`mvcc_writectx.go:330`). So adjacency and labels point at the **same** `mvcc.CommitInfo`, and both
+resolve through `mvcc.Visible` on that record. Nine.
+
+Which leaves what that shared record actually *does*: **`info.ts` is mutable, and it flips.**
+`mvcc.Visible` reads `ts == txID → visible (own work)`, `ts < TxIDBase → committed`, else invisible;
+at commit, `CommitInfo.Abort`/publish stores a new value into `c.ts`. The reader holds only the
+**per-shard** lock, so it consults `info.TS()` **once per substructure, at two different moments** —
+and nothing pins that field across them. A commit landing between the two reads therefore classifies
+the first substructure as pre-commit and the second as post-commit, from ONE snapshot.
+
+That explains every observation this cycle: both pairings and both directions, a window of ~1 in
+10⁶ reads (a single atomic store), load sensitivity, and — crucially — **why sharing the record does
+not help**: sharing is precisely what makes both reads consult the same mutable field at two
+instants.
+
+### CONFIRMED, by a pre-registered falsification
+
+The prediction was written down **before** the experiment ran (the reader reads edge → u → v, so if
+the flip is the mechanism the observed direction must track the read ORDER; swapping the reads must
+invert the signature). Then the reader was changed to labels → edge and run 40 times under the
+recipe:
+
+| Read order | Observed |
+|---|---|
+| edge, u, v (original) | `edge=false label(u)=true label(v)=true` |
+| u, v, edge (swapped) | `label(u)=false label(v)=false edge=true` |
+
+**The signature inverted exactly as predicted.** And the second failure in the swapped batch —
+`edge=true label(u)=false label(v)=true` — shows the same thing happening *between the two label
+reads*: u (read first) old, v (read second) new.
+
+**Every observation of this cycle now fits one statement.** The reader straddles a commit, and each
+substructure is classified against whatever commit state was visible **at the moment that
+substructure was read**. Which side each lands on is decided by read order; whether the pair reads
+`false→true` or `true→false` is decided by whether the straddled transition was an add or a remove.
+That accounts for all four shapes seen — including the label-vs-label ones, because `u` and `v` are
+read sequentially too.
+
+### The root cause, and why it is architectural
+
+`mvcc.Visible(ts, startTS, txID)` is evaluated **per substructure**, against `info.ts` — a field
+that is **mutable and flips at commit**. `Snapshot` is `{startTS, slot}`: a **scalar**. It carries no
+record of *which transactions were in flight when it was taken*, so it cannot re-derive a stable
+answer; it re-asks the live records, and the live records move underneath it.
+
+Sharing one `CommitInfo` across substructures does not help — it is precisely what makes both reads
+consult the same mutable field at two different moments. That is why threading a transaction removed
+one cause and not the tear.
+
+**This is the same finding as the retracted half of #2369, arrived at from the read side:** a scalar
+snapshot is strictly weaker than the reference shape. PostgreSQL's snapshot is `xmin` plus the
+**list of in-progress XIDs** (`GetSnapshotData`), and InnoDB's read view is the same shape; both
+decide visibility from state captured **once**, at snapshot time. GoGraph decides it per read, from
+state that is still moving.
+
+**So the fix is an architecture change and needs the maintainer's agreement** (per the project's
+decision-autonomy rule): `Snapshot` must capture the visibility basis once — the in-flight set, or an
+equivalent — so that every substructure a reader touches is resolved against one observation. That is
+option (a) already written up in #2369's technical requirements, and it is not a tuning change.
+Run it under the recipe, with ~100 runs, before designing anything. The recipe above gives ~20 % per
 run, which is a workable base rate — the next cycle can iterate on a hypothesis in minutes rather
 than waiting for the gate to trip. What is *not* known is the mechanism: four candidates are
 excluded, and the deterministic probes that excluded them all ran outside the environment that
