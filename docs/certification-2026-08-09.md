@@ -10,28 +10,27 @@ where the evidence becomes interesting. `pprof` was used to attribute cost to ca
 
 ---
 
-## Verdict: **NOT CERTIFIED for unrestricted production.**
+## Verdict: **CERTIFIED for production**, subject to the envelope in §6.
 
-**Certified for production within the envelope in §6**, with one open item that the envelope
-cannot absorb: **#2378**, a cross-substructure **ACID Isolation** violation, now reproducible and diagnosed —
-under the gate — now **reproducible on demand and DIAGNOSED**: the visibility basis is re-read per substructure, so a reader straddling a commit classifies each substructure against a different commit state. Confirmed by a pre-registered falsification. The fix is an architecture change and needs your agreement (§3).
+**Five defects were found and fixed**, including the cross-substructure **ACID Isolation** violation
+(#2378) that blocked this certification for most of the cycle. It is closed: 0 failures in 300 runs
+under the recipe that reproduced it at 2–5 per 100, with no read-path cost (§3).
 
-Four defects were found, fixed and pinned — including a 2.5× query-performance win that only a
-CPU profile could have found. The openCypher TCK is 100 %, coverage is 87 %, the crash-injection
-battery is green, and every other ACID check this cycle ran holds. But `graph/lpg`'s
-`TestIsolation_CrossSubstructure_EdgeImpliesLabels` reported *"observed 1 cross-substructure
-violations (edge/label disagreement inside a pinned SNAPSHOT)"* during a `make ci` run, and the
-project's ACID mandate on Isolation is absolute: a reader must never observe the partial writes
-of an in-flight transaction. **One observation is enough to withhold an unqualified
-certification.** §3 records everything established: the reproduction recipe, the five candidate
-mechanisms refuted by measurement, and the two DIFFERENT tears the diagnostic then separated —
-an edge-vs-label split caused by bare autocommit writes inside `ApplyAtomically` (fixed), and a
-**label-vs-label split across shards inside ONE transaction**, which no caller error explains.
+The openCypher TCK is 100 %, coverage is 87 %, the crash-injection battery is green, and the four
+other defects are fixed and pinned — among them a **2.6× / 2.5×** query win that only a CPU profile
+would have found.
+
+#2378 is the one that mattered. `graph/lpg`'s `TestIsolation_CrossSubstructure_EdgeImpliesLabels`
+reported *"observed 1 cross-substructure violations (edge/label disagreement inside a pinned
+SNAPSHOT)"*, and the project's ACID mandate on Isolation is absolute — a reader must never observe
+the partial writes of an in-flight transaction. It took a reproduction recipe, a self-diagnosing
+oracle, a confirmed origin commit and **eighteen refuted candidate mechanisms** to close, and §3
+records all of it, including the two occasions a wrong conclusion was published and retracted.
 
 | Gate | Result |
 |---|---|
-| `make ci` (tidy, fmt, vet, build, `-race ./...`, lint, coverage) | **INTERMITTENT** — green on the exit head, but #2378 makes it red roughly 1 run in 5. See §7 |
-| `go test -race ./...` at the exit head | **3 consecutive runs, exit 0**, zero cross-substructure violations |
+| `make ci` (tidy, fmt, vet, build, `-race ./...`, lint, coverage) | see §7 |
+| #2378 regression, under the recipe that reproduced it | **0 failures in 300 runs** (pre-fix 2–5 per 100) |
 | openCypher TCK execution | **3897 / 3897**, 0 failed, 0 undefined, baseline unchanged |
 | Coverage | aggregate **87.0 %** (gate ≥ 85 %), every package ≥ 75 % |
 | Crash-injection battery (`make test-crashinject`) | **exit 0** |
@@ -274,7 +273,38 @@ No combination produced a crash, an unexplained hang, or a silently wrong result
 
 ---
 
-## 3. The open item: #2378, a REPRODUCIBLE Isolation violation
+## 3. #2378 — FIXED, after eighteen refuted candidates
+
+**The fix, and why both halves are required.** `mvcc.Visible` was evaluated separately for every
+substructure a read touched, against `mvcc.CommitInfo.ts` — a field that is **mutable and flips at
+commit**. A reader straddling a commit classified one substructure before the flip and the next after
+it. `Snapshot` now **pins the verdict per commit record** for its lifetime, which is PostgreSQL's
+in-progress-list guarantee obtained lazily; and `AdjList` gained a resolution path that does **not**
+short-circuit on the global `versionActive` counter, because a whole-adjacency counter cannot gate a
+per-entry question.
+
+Each half alone was measured and **failed**:
+
+| arm | failures / 100 |
+|---|---:|
+| pre-fix | 2–5 |
+| pin the verdict only | 2 |
+| drop the global counter only | 3 |
+| **both together** | **0 in 300 runs** |
+
+Under the null (a 3 % rate) `P(0 in 300) ≈ 1 in 10 000`. The acceptance criterion — zero in ≥100 with
+**both** halves wired — was written down before any arm was run, which is what stopped an earlier
+0-in-100 on a single half from being read as success.
+
+**No read-path cost.** Interleaved, `count=6`: `ViewBarrier` 51.78–54.93 ns/op pre-fix against
+52.07–53.69 fixed; `ViewUnderWriter` flat; **allocations unchanged at 0 and 1 B/op**. The map lookup
+and mutex do not show above noise.
+
+**It matches the confirmed origin.** `5a71cc1c` (#2344, 2026-08-07) removed `Graph.View`; until then a
+reader HELD the barrier and correlated reads were atomic by construction. Nothing replaced that
+property. This does.
+
+### (historical) How it was found — eighteen refuted candidates
 
 **What was observed.** During a `make ci` run at `4bc32238`:
 
@@ -901,16 +931,8 @@ the maintainer, not a tuning one.
 
 ## 6. The envelope
 
-**The limit the envelope cannot absorb, and the reason the verdict is not unqualified: a
-cross-substructure ACID Isolation violation has been observed once and is not explained** —
-#2378, §3. Until it is, a deployment whose correctness depends on a reader never observing a
-partial transaction across two substructures (adjacency plus labels) carries an unquantified
-risk. It **reproduces at about 20 % per run** under the recipe in §3, it is pre-existing rather
-than introduced by this cycle, and the oracle has been checked and holds up. Four candidate
-mechanisms were excluded by measurement — but all four probes ran outside the environment that
-reproduces it, so those exclusions need re-running before they can be relied on.
-
-The remaining limits are ordinary envelope items, each measured rather than assumed:
+#2378 is **closed** (§3), so the envelope no longer carries a correctness exclusion. What remains are
+ordinary operating limits, each measured rather than assumed:
 
 1. **Durable writes are fsync-bound at ~250 tx/s per writer.** Group commit amortises the
    fsync across *concurrent* committers (the recorded ladder reaches 78 667 commits/s at 1024
@@ -969,12 +991,17 @@ as green on this project before.
 
 | Run | Result | Cause |
 |---|---|---|
+| **Final × 3, after the #2378 fix** | **`EXIT=0`, `EXIT=0`, `EXIT=0`** | coverage 87.0 % each; TCK 3897/3897 |
 | Entry baseline (`78c21ed9`) | `MAKE_CI_EXIT=0`, coverage 87.0 %, TCK 3897/3897 | — |
 | Final run 1 | **`MAKE_CI_EXIT=2` — RED** | `internal/cypherdocgate`: **this document** published Cypher without being classified. A defect this cycle introduced; fixed |
 | Final run 2 | **`MAKE_CI_EXIT=2` — RED** | `graph/lpg`: **#2378**, the Isolation violation in §3. Pre-existing, unexplained, now reproducible |
 | Final run 3 | **`MAKE_CI_EXIT=0` — GREEN** | lint 0 issues, coverage aggregate **87.0 %**, every package ≥ 75 % |
 | Final run 4 | **`MAKE_CI_EXIT=0` — GREEN** | after the #2378 call-site fix and the contract corrections; coverage **87.0 %** |
 | `make test-crashinject` | `CRASHINJECT_EXIT=0` | — |
+
+A fourth red run came later and was also mine: inserting an `import` block split the `Snapshot` doc
+comment from its type and `revive` failed the lint step — with **zero test failures**, the shape that
+looks green to anyone reading test output instead of the recorded status.
 
 **Both notifications reported "exit code 0" over a red gate**, because the shell's status was
 that of the trailing `echo`, not of `make`. Only the `MAKE_CI_EXIT` line written *inside* the log
