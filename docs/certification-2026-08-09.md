@@ -14,7 +14,7 @@ where the evidence becomes interesting. `pprof` was used to attribute cost to ca
 
 **Certified for production within the envelope in §6**, with one open item that the envelope
 cannot absorb: **#2378**, a cross-substructure **ACID Isolation** violation observed **once**,
-under the gate, and not reproduced since.
+under the gate — and now **reproducible on demand at about 20 % per run** (§3).
 
 Four defects were found, fixed and pinned — including a 2.5× query-performance win that only a
 CPU profile could have found. The openCypher TCK is 100 %, coverage is 87 %, the crash-injection
@@ -272,7 +272,7 @@ No combination produced a crash, an unexplained hang, or a silently wrong result
 
 ---
 
-## 3. The open item: #2378, an Isolation violation seen once
+## 3. The open item: #2378, a REPRODUCIBLE Isolation violation
 
 **What was observed.** During a `make ci` run at `4bc32238`:
 
@@ -302,7 +302,9 @@ straddle many completed writer operations. Here `ReadView.HasNodeLabel` resolves
 resolved at the same `(startTS, txID)`. An ABA straddle cannot explain a disagreement unless the
 snapshot itself fails to cover one of the two substructures, which would be the defect.
 
-**Not reproduced in 24 subsequent attempts, across five environments:**
+### It IS reproducible — the missing variable was the gate's own environment
+
+24 attempts across five substitute environments all came back green:
 
 | Attempt | Environment | Result |
 |---|---|---|
@@ -310,11 +312,29 @@ snapshot itself fails to cover one of the two substructures, which would be the 
 | 10 runs | the same, under a deliberate 14-worker CPU load | green |
 | 3 runs | whole `graph/lpg` package at `78c21ed9`, with `-race` runs of `cypher`, `store` and `search` as peer load | green |
 | 1 run | the entry-head `make ci` itself | green |
+| 3 runs | full `go test -race ./...` at the exit head | green |
 
-The failing run took **39.76 s against ~1.9 s in isolation**, so it was heavily contended — the
-gate runs every package binary in parallel under `-race`, and within `graph/lpg` the
-`t.Parallel()` tests interleave with each other. Neither CPU pressure nor whole-package runs
-reproduced that mix.
+Every one of those **substituted something** for the gate's environment — CPU burners, a subset
+of peer packages, injected schedule points. The failing run had taken **39.76 s against ~1.9 s
+in isolation**, which said plainly that contention was the variable; what it did not say is that
+*the kind* of contention matters. Running the whole suite as peer load while hammering the test
+reproduces it:
+
+```bash
+# terminal 1 — the gate's own environment: every package binary, in parallel, under -race
+go test -race -count=1 ./...
+# terminal 2 — 20x the sampling of one gate run, inside that environment
+go test -race -count=20 -run TestIsolation_CrossSubstructure_EdgeImpliesLabels ./graph/lpg/
+```
+
+**4 of 20 runs failed — about 20 % — with 1–2 violations each**, the failing runs taking 7.4–9.1 s
+against ~1.9 s solo. That is a working recipe, and it moves #2378 from "seen once, unexplained"
+to "reproducible on demand", which is the difference between an item that can be investigated and
+one that can only be waited for.
+
+The lesson generalises past this defect: **five substitutes for an environment all reported green
+on a defect that reproduces at 20 % in the environment itself.** Modelling the load was the wrong
+move; running the real thing was cheap and worked immediately.
 
 **Two mechanisms were proposed, tested deterministically, and REFUTED.** They are recorded
 because a refuted mechanism that is not written down gets re-derived.
@@ -403,9 +423,9 @@ sweep declines to free what a live reader still needs, exactly as `horizon.Oldes
 
 **Four candidate mechanisms, all excluded by deterministic measurement** — the raw adjacency
 removal, autocommit-inside-the-bracket in each direction, and the reclaim nilling the delta map.
-The oracle has been checked and holds up. Attribution is settled and pre-existing. The failure has
-not reproduced in **24** attempts, including three full `go test -race ./...` runs at HEAD after
-the observation.
+The oracle has been checked and holds up. Attribution is settled and pre-existing. **But every one
+of those four probes ran OUTSIDE the environment that reproduces the defect**, so each exclusion is
+weaker than it looked when it was made and should be re-run under the recipe above.
 
 **Counter-evidence, which does not clear it but belongs beside it.**
 `36_mvcc_snapshot_topology` is the example built for precisely this class — snapshot isolation on
@@ -415,19 +435,48 @@ zero**: `invisible_commits=0`, `future_reads=0`, `misaligned_far_endpoints=0`, `
 That is a different substructure pair from the failing assertion and does not settle #2378, but it
 is the strongest positive evidence this cycle has on the Isolation axis.
 
-What has *not* been reproduced is the gate's own environment: many parallel `-race` package
-binaries, plus this package's `t.Parallel()` tests interleaving with each other, plus the vacuum
-goroutine. Every reproduction attempt substituted something for that mix — CPU burners,
-whole-package runs, injected schedule points — and none of the substitutes exhibits it. The next
-cycle should reproduce the environment rather than model it, and should instrument to the base
-rate: one observation in 24 runs of a 40 000-toggle workload needs hundreds of iterations, with a
-probe that does not perturb what it measures.
+### The signature, from the first reproduction with the diagnostic in place
 
-**So the honest state is: unexplained.** The next steps are recorded on rmp #2378 — instrument
-to the base rate (one observation in 24 runs of a 40 000-toggle workload needs hundreds of
-iterations), reproduce the gate's *parallel-package* environment specifically rather than CPU
-load, and prefer an injected schedule point over sampling. The assertion must not be relaxed
-until the engine is excluded.
+Re-running the recipe with the improved oracle produced the tear immediately, and it is
+specific:
+
+```
+edge=true label(u)=false label(v)=false
+— the edge disagrees with the labels, which agree with each other
+1200503 reads were taken
+```
+
+Two things follow. **It is not a cross-shard label disagreement** — `u` and `v` agree, so the
+label substore is internally consistent at that instant, and the split is squarely between
+adjacency and labels. And the *direction* names the transition: state A is
+`{edge, u:Hot, v:Hot}` and state B is `{none}`, so `edge=true, labels=false` is a mix in which
+the **edge has landed and the labels have not**. The writer's remove path takes the edge down
+*first*, which would show `edge=false, labels=true`; only the **add** path — `AddEdge`, then
+`SetNodeLabel(u)`, then `SetNodeLabel(v)` — produces this shape. So the working statement is:
+
+> On the add path, within one `ApplyAtomically` bracket, **the edge becomes visible to a
+> snapshot before the labels do.**
+
+That is the same suspect the structural finding of the previous sprint named — two substores,
+one invariant — and it is consistent with the two sides being stamped through different
+machinery: adjacency through `adj.SetWriteStamp(&g.stamp)`, labels through `deltaStamp`.
+
+The window is narrow: **1 violation in 1 200 503 reads** in that run, and 1 of 20 runs failed
+against 4 of 20 in the previous batch, so the per-run rate moves with the ambient load. That is
+why probe 2378C — which injected a single schedule point on the add path and saw a consistent
+state — did not contradict this: one sampling point cannot find a window this narrow, and a
+million can.
+
+**So the honest state is: REPRODUCIBLE with a signature, and still unexplained.** The recipe above gives ~20 % per
+run, which is a workable base rate — the next cycle can iterate on a hypothesis in minutes rather
+than waiting for the gate to trip. What is *not* known is the mechanism: four candidates are
+excluded, and the deterministic probes that excluded them all ran outside the environment that
+actually reproduces it, so they should be re-run inside it before being treated as settled.
+
+The assertion must not be relaxed until the engine is excluded. Two concrete next steps are
+recorded on rmp #2378: re-run the four exclusion probes under the peer-load environment, and use
+the new diagnostic to establish **which pair** tears — the condition trips on `lu != lv` as well
+as on `e != lu`, and those point at different suspects.
 
 ## 4. Performance envelope, measured
 
@@ -461,9 +510,10 @@ the maintainer, not a tuning one.
 cross-substructure ACID Isolation violation has been observed once and is not explained** —
 #2378, §3. Until it is, a deployment whose correctness depends on a reader never observing a
 partial transaction across two substructures (adjacency plus labels) carries an unquantified
-risk. It is one observation in 24 runs of a 40 000-toggle workload, it is pre-existing rather
-than introduced by this cycle, four candidate mechanisms have been excluded by measurement, and
-the oracle has been checked and holds up — but **a rate is not a proof of absence.**
+risk. It **reproduces at about 20 % per run** under the recipe in §3, it is pre-existing rather
+than introduced by this cycle, and the oracle has been checked and holds up. Four candidate
+mechanisms were excluded by measurement — but all four probes ran outside the environment that
+reproduces it, so those exclusions need re-running before they can be relied on.
 
 The remaining limits are ordinary envelope items, each measured rather than assumed:
 
@@ -526,7 +576,7 @@ as green on this project before.
 |---|---|---|
 | Entry baseline (`78c21ed9`) | `MAKE_CI_EXIT=0`, coverage 87.0 %, TCK 3897/3897 | — |
 | Final run 1 | **`MAKE_CI_EXIT=2` — RED** | `internal/cypherdocgate`: **this document** published Cypher without being classified. A defect this cycle introduced; fixed |
-| Final run 2 | **`MAKE_CI_EXIT=2` — RED** | `graph/lpg`: **#2378**, the Isolation violation in §3. Pre-existing, unexplained, not reproduced since |
+| Final run 2 | **`MAKE_CI_EXIT=2` — RED** | `graph/lpg`: **#2378**, the Isolation violation in §3. Pre-existing, unexplained, now reproducible |
 | Final run 3 | **`MAKE_CI_EXIT=0` — GREEN** | lint 0 issues, coverage aggregate **87.0 %**, every package ≥ 75 % |
 | `make test-crashinject` | `CRASHINJECT_EXIT=0` | — |
 
