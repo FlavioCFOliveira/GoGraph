@@ -14,7 +14,7 @@ where the evidence becomes interesting. `pprof` was used to attribute cost to ca
 
 **Certified for production within the envelope in §6**, with one open item that the envelope
 cannot absorb: **#2378**, a cross-substructure **ACID Isolation** violation observed **once**,
-under the gate — now **reproducible on demand**, and **half diagnosed**: one cause was a caller error and is fixed, the second is engine-level and stays open (§3).
+under the gate — now **reproducible on demand**, with one cause found and fixed and the tear still surviving it — **eight mechanisms excluded by measurement** (§3).
 
 Four defects were found, fixed and pinned — including a 2.5× query-performance win that only a
 CPU profile could have found. The openCypher TCK is 100 %, coverage is 87 %, the crash-injection
@@ -30,7 +30,7 @@ an edge-vs-label split caused by bare autocommit writes inside `ApplyAtomically`
 
 | Gate | Result |
 |---|---|
-| `make ci` (tidy, fmt, vet, build, `-race ./...`, lint, coverage) | **INTERMITTENT** — green on the exit head, but #2378 makes it red roughly 1 run in 4. See §7 |
+| `make ci` (tidy, fmt, vet, build, `-race ./...`, lint, coverage) | **INTERMITTENT** — green on the exit head, but #2378 makes it red roughly 1 run in 5. See §7 |
 | `go test -race ./...` at the exit head | **3 consecutive runs, exit 0**, zero cross-substructure violations |
 | openCypher TCK execution | **3897 / 3897**, 0 failed, 0 undefined, baseline unchanged |
 | Coverage | aggregate **87.0 %** (gate ≥ 85 %), every package ≥ 75 % |
@@ -496,7 +496,7 @@ of 1 in 1 200 503 reads. Whoever picks this up should instrument **inside the re
 environment**, around `lpg.go:1833–1843`, rather than reaching for another single-shot probe:
 that is now five single-shot probes that all came back clean on a defect that reproduces at 20 %.
 
-### The cause is now half-known: TWO tears, not one, and the second is engine-level
+### One cause found and fixed; the tear SURVIVES it, and eight mechanisms are now excluded
 
 The suspect above was tested, and the result **split the defect in two**.
 
@@ -516,20 +516,34 @@ measured under the same recipe:
 | `ApplyAtomically` + bare autocommit writes | 40 | **5** | `edge=true label(u)=false label(v)=false` |
 | `ApplyAtomicallyTx` + one shared `WriteTx` | 60 | **3** | `label(u) != label(v)` — **the two labels disagree** |
 
-**The edge-vs-label tear is gone. A label-vs-label tear is not.** Three runs in forty failed with
-`edge=true label(u)=true label(v)=false` and `edge=false label(u)=false label(v)=true` — two label
-writes, in **one transaction**, on nodes in **different label shards**, observed at different
-instants by one pinned snapshot. No caller error can explain that: it is an engine-level
-cross-shard visibility split.
+**The tear SURVIVES the shared transaction.** Across 100 shared-`WriteTx` runs, 4 failed — and in
+**both pairings and both directions**: `label(u) != label(v)`, `edge=false label(u)=true
+label(v)=true`, and `edge=true label(u)=false label(v)=false`. So threading one transaction removes
+the three-separate-instants cause and **something else remains**. #2378 stays open.
 
-So the honest state is: **one cause identified and fixed at the call site, a second cause
-identified as engine-level and still open.** #2378 stays open for the second.
+**This section was rewritten twice because I twice stated a signature from too few samples.** First
+"0 violations in 60 runs", from the first 20 clean runs — refuted by the next 40. Then "the
+edge-vs-label tear is gone", from 3 samples that happened to all be label-vs-label — refuted by the
+next 40, which produced the edge-vs-label shape again. Both claims had already been written into two
+source comments before the refutation arrived; both are corrected. **At a rate of ~4 %, a signature
+needs ~100 runs, not 20.**
 
-**And the first draft of this section was wrong.** On the strength of the first 20 shared-`WriteTx`
-runs coming back clean I wrote "0 violations in 60 runs" into two source comments and called the
-defect a test bug. The next 40 runs refuted it. The diagnostic added earlier in this cycle — the
-one that classifies *which* pair tore — is the only reason the difference was visible rather than
-looking like the same failure recurring. The recipe above gives ~20 % per
+### What the instrumentation EXCLUDED
+
+The read path was then instrumented to fire at the violation itself, inside the reproducing
+environment. At the tear, both nodes had **live delta chains** — `sh.d != nil` and `sh.d[id] != nil`
+for u and for v, confirmed in different shards (`sameShard=false`). So two more mechanisms are dead:
+
+- `labelBagAsOfLocked`'s per-node present-time fallback (`d == nil → return cur`) is **not** taken;
+- the reclaim is **not** dropping a chain a live snapshot still needs.
+
+That is **eight** mechanisms refuted by measurement, three of them located precisely in the code and
+convincing on inspection. The one asymmetry the data now points at, and which has **not** been
+tested, is that the two substores classify visibility through **different machinery**: labels via
+the shared `commitInfo.TS()` (`mustUndo`, `mvcc_labels.go:124`), adjacency via the adjlist's own
+write stamp (`adj.SetWriteStamp(&g.stamp)`). Two mechanisms mean two instants unless something ties
+them, and nothing in the read path re-checks that they agree. That is where the next cycle should
+start — with the recipe, not with a ninth argument. The recipe above gives ~20 % per
 run, which is a workable base rate — the next cycle can iterate on a hypothesis in minutes rather
 than waiting for the gate to trip. What is *not* known is the mechanism: four candidates are
 excluded, and the deterministic probes that excluded them all ran outside the environment that
@@ -640,6 +654,7 @@ as green on this project before.
 | Final run 1 | **`MAKE_CI_EXIT=2` — RED** | `internal/cypherdocgate`: **this document** published Cypher without being classified. A defect this cycle introduced; fixed |
 | Final run 2 | **`MAKE_CI_EXIT=2` — RED** | `graph/lpg`: **#2378**, the Isolation violation in §3. Pre-existing, unexplained, now reproducible |
 | Final run 3 | **`MAKE_CI_EXIT=0` — GREEN** | lint 0 issues, coverage aggregate **87.0 %**, every package ≥ 75 % |
+| Final run 4 | **`MAKE_CI_EXIT=0` — GREEN** | after the #2378 call-site fix and the contract corrections; coverage **87.0 %** |
 | `make test-crashinject` | `CRASHINJECT_EXIT=0` | — |
 
 **Both notifications reported "exit code 0" over a red gate**, because the shell's status was
@@ -651,7 +666,7 @@ omission in this very document within minutes of it being written. The second fo
 withholds the certification. A gate that had been quietly passing would have shipped both.
 
 **The gate is therefore INTERMITTENT, and that is its own cost.** #2378 reproduces at about 20 %
-per run of the isolation test under peer load, and `make ci` tripped on it in 1 of the 4 runs this
+per run of the isolation test under peer load, and `make ci` tripped on it in 1 of the 5 runs this
 cycle — so a green `make ci` is evidence but not proof, and every task whose acceptance criteria
 end in "make ci green" is standing on a gate that fails roughly one time in four for a reason
 unrelated to the change under test. Until #2378 is closed, read a single green run accordingly,

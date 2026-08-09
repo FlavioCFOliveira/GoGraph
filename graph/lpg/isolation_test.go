@@ -74,15 +74,25 @@ func TestIsolation_CrossSubstructure_EdgeImpliesLabels(t *testing.T) {
 			// record the enclosing LockBarrier opened, or the explicit transaction
 			// is not atomically visible."
 			//
-			// THREADING ONE [WriteTx] FIXES THAT TEAR AND NOT THE OTHER ONE.
-			// Measured under the same recipe: the edge-vs-label signature is GONE,
-			// but 3 runs in 40 still fail with `label(u) != label(v)` — two label
-			// writes in ONE transaction, on nodes in DIFFERENT label shards,
-			// observed at different instants by one pinned snapshot. That is an
-			// engine-level cross-shard visibility split, not a caller error, and it
-			// is what keeps rmp #2378 open. (An earlier draft of this comment
-			// claimed "0 violations in 60 runs" on the strength of the first 20;
-			// the next 40 refuted it.)
+			// THREADING ONE [WriteTx] IS NECESSARY AND NOT SUFFICIENT — the tear
+			// SURVIVES it, and rmp #2378 stays open.
+			//
+			// Measured under the same recipe with the writes threaded as below:
+			// 4 failing runs in 100, in BOTH pairings and BOTH directions —
+			// `label(u) != label(v)`, `edge=false label(u)=true label(v)=true`, and
+			// `edge=true label(u)=false label(v)=false`. So the fix above removes
+			// the three-separate-instants cause and something else remains.
+			//
+			// TWO DRAFTS OF THIS COMMENT WERE WRONG, both from too few samples:
+			// "0 violations in 60 runs" (from the first 20), then "the edge-vs-label
+			// signature is GONE" (from 3 samples that happened to be label-vs-label).
+			// Do not restate a signature from fewer than ~100 runs at this rate.
+			//
+			// What the instrumentation EXCLUDED: at a violation both nodes had live
+			// delta chains (`sh.d != nil` and `sh.d[id] != nil` for u and v, in
+			// different shards), so labelBagAsOfLocked's per-node present-time
+			// fallback is NOT the mechanism, and neither is the reclaim dropping a
+			// chain that was still needed.
 			_ = g.ApplyAtomicallyTx(func(tx WriteTx) error {
 				wv := g.Writer(tx)
 				if want {

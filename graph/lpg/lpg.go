@@ -797,12 +797,13 @@ type Graph[N comparable, W any] struct {
 // [Graph.ApplyInsideLockedTx].
 //
 // THAT IS NECESSARY AND, AT THE TIME OF WRITING, NOT SUFFICIENT. Threading one
-// transaction removes the edge-vs-label tear above, but the same workload still
-// tore in 3 runs of 40 with two LABEL writes disagreeing with each other — nodes
-// in different label shards, one transaction, observed at different instants by one
-// pinned snapshot. That is an engine-level cross-shard split and it is tracked as
-// rmp #2378; until it is closed, a caller must not rely on writes to DIFFERENT
-// label shards becoming visible together, even inside one transaction.
+// transaction removes the three-separate-instants cause, but the tear SURVIVES it:
+// the same workload still tore in 4 runs of 100, in both pairings and both
+// directions — two labels disagreeing with each other, and the edge disagreeing
+// with both labels in each direction. So a caller must NOT yet rely on writes
+// across DIFFERENT substructures, or across different label shards, becoming
+// visible together even inside one transaction. Tracked as rmp #2378, which also
+// records what the instrumentation has excluded.
 //
 // Exclusive-writer brackets around state that is not versioned per-write — an
 // index registration, for example — are unaffected, since there is no commit
