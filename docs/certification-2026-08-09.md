@@ -630,11 +630,31 @@ nodes and they worked. And with a single writer toggling, every transition genui
 so the `!bag.has(lid)` guard never skips here anyway — which I said before reading the result rather
 than after.
 
-**Where to start, concretely:** `versionStamp`'s own comment says a version is recorded "only when
-versioning is armed AND this write actually supersedes something". Establish whether the REMOVE path
-records a version an older snapshot can undo — `addEdgeInfo` follows its insert with an explicit
-`g.adjVer.stampAppend(srcID, tx)` (`lpg.go:1843`) and `removeEdgeInfo` has no counterpart, calling
-only `noteExclusive` *before* the write. Reproduce with the recipe, ≥100 runs per arm.
+**The leading candidate, and it fits the measurement without strain.** `entryAsOfLoaded`
+(`graph/adjlist/mvcc_adj.go:163`) opens with:
+
+```go
+if a.versionActive.Load() == 0 || e == nil {
+    return e   // the PRESENT entry — no as-of filtering at all
+}
+```
+
+`versionActive` is a **single global counter** of live version records. The label side has the same
+shape of fast path, but keyed **per shard and per node** (`sh.d == nil`, `sh.d[id] == nil`) — and the
+measurement confirmed both of those chains were **present** at the tear, which is why the labels
+reconstructed correctly. The adjacency's gate is global, so it can read 0 for reasons that have
+nothing to do with the edge being read: the reclaimer freeing the last version elsewhere is enough,
+and the reader then silently takes the present entry.
+
+That produces exactly what was measured — labels correct, edge at present time (`false`, the removed
+state) — and it explains the rarity, the load sensitivity (the reclaimer runs on the vacuum
+goroutine) and why threading a transaction changed nothing.
+
+**It is a candidate, not a proven cause**, and this cycle has refuted eleven of those. It is also on a
+hot read path, so the check exists for a reason and cannot simply be deleted. Validate it the way this
+defect now permits: reproduce with the recipe, instrument `versionActive` at the tear, and require
+≥100 runs per arm before and after. `removeEdgeInfo` having no `stampAppend` counterpart to
+`addEdgeInfo`'s (`lpg.go:1843`) is worth checking in the same pass.
 
 ### A superseded story, kept for the record
 
