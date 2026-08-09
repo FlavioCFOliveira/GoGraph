@@ -343,10 +343,60 @@ because a refuted mechanism that is not written down gets re-derived.
 
 So a directly-injected mid-bracket read behaves correctly in **both** directions: the snapshot is
 not excluded from taking a `startTS`, but it consistently observes the pre-write state for both
-substructures. What that leaves is the label **index** and its deferred-removal sweep on the
-barrier-free vacuum goroutine — though note the failing assertion reads the label **bag**
-(`HasNodeLabel`), not the index, so the index is not obviously on that path — and the gate's own
-environment, which is the one variable nothing here has reproduced.
+substructures.
+
+### The leading candidate, located but NOT yet tested
+
+Reading the two paths side by side turns up an asymmetry that fits every observed property. It is
+recorded here **as a hypothesis, not a diagnosis** — three earlier mechanisms that looked at least
+as convincing were refuted by measurement, and this one has not been measured.
+
+`Graph.withLabelBag` (`graph/lpg/snapshot_read.go:120`) resolves a node's label bag as of a
+snapshot, and its first branch is:
+
+```go
+if !walk || sh.d == nil {
+	fn(sh.m[id])   // the PRESENT bag — the snapshot is ignored
+	return
+}
+```
+
+`sh.d` is the shard's label **delta map**, and it is set back to `nil` by the reclaim path once
+the shard's deltas are all freed — `graph/lpg/mvcc_abort_reclaim.go:203`:
+
+```go
+if len(sh.d) == 0 {
+	sh.d = nil
+}
+```
+
+Both take the shard lock, so there is no data race — but there is a **semantic** one. If the
+sweep nils `sh.d` while a reader still holds an older snapshot, that reader's next label read
+falls into the present-time branch and answers at the *wrong instant*, while the adjacency side
+continues to resolve as-of correctly (`EntryViewAsOf` → `adj.EntryViewAsOf(id, startTS, txID)`).
+Edge as-of the snapshot against label at present time is precisely the reported disagreement.
+
+It also explains what the three refuted mechanisms could not: the sweep runs on the **vacuum
+goroutine**, which is why the failure is load-sensitive and why no directly-injected mid-bracket
+read reproduces it — the sweep is not involved in that interleaving at all. And it is the same
+defect class the previous sprint named: **a structure the read path depends on, reclaimed
+independently of the reader's instant.**
+
+**And here is the counter-argument, found by reading further — it is recorded because a candidate
+stated without its objection is a claim, not a hypothesis.** `ReclaimNow` computes
+`watermark := g.horizon.Oldest(g.mvccClock.ReadTS())`, a reclamation horizon that accounts for
+live readers, so the ordinary sweep should not free a version a held snapshot still needs. And
+`sh.d == nil` means the shard has **no versions to walk at all**, in which case the present bag
+*is* the correct answer for every snapshot. The remaining gap is narrower than the branch first
+suggests: it needs a shard whose delta map is emptied by the **abort** reclaim
+(`mvcc_abort_reclaim.go`, which deliberately runs regardless of the debt) at a moment when a live
+older snapshot would still have needed one of them.
+
+So this is a **candidate with a live objection**, not a diagnosis. The experiment that would
+settle it either way: hold a snapshot, drive the label shard's deltas into a state the abort
+reclaim empties, force the sweep, and re-read the label through the held snapshot. If the answer
+changes, the branch is unsound; if the reclaim refuses to empty the map, the objection stands and
+this candidate joins the three already refuted.
 
 **So the honest state is: unexplained.** The next steps are recorded on rmp #2378 — instrument
 to the base rate (one observation in 23 runs of a 40 000-toggle workload needs hundreds of
