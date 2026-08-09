@@ -297,3 +297,68 @@ func EnforceUniqueOnLabelRemove(
 	}
 	releaseLabelUnique(reg, mutator, nodeStateReaderFor(mutator), nodeKey, label)
 }
+
+// EnforceUniqueOnPropertySet is the PROPERTY half of the choke point (rmp #2358):
+// the mutator adapter calls it from inside its own SetNodeProperty, so an operator
+// that writes a property cannot skip enforcement.
+//
+// # The release must precede the check, and it is not an optimisation
+//
+// The node's OWN old value is released first, even when it equals the new one.
+// Without that, an idempotent self-set — SET n.k = n.k, and every statement that
+// rewrites a value unchanged — would be rejected as a duplicate of ITSELF. Releasing
+// first cannot mask a real cross-node duplicate, because a UNIQUE constraint
+// guarantees at most one holder of a value: whatever is released was this node's.
+//
+// # Which labels
+//
+// [labelsInTx], never the raw label set: a UNIQUE constraint attaches to a label, so
+// deciding what to reserve starts by asking which labels the node carries, and
+// asking the raw graph would include another in-flight transaction's uncommitted
+// label writes. That is the defect rmp #2355 fixed at each site individually, and
+// having ONE site is what stops the next one from drifting.
+//
+// The old value is likewise read through the transaction's view rather than the raw
+// store — for the same reason, and because a value this transaction has already
+// written is the one it must give back.
+//
+// Callers gate on nothing: the zero-constraint check is here, and it is a lock-free
+// atomic load.
+func EnforceUniqueOnPropertySet(
+	reg *ConstraintRegistry, mutator GraphMutator, mgr *index.Manager,
+	nodeKey, key string, value lpg.PropertyValue,
+) error {
+	if reg == nil || !reg.HasAnyUnique() {
+		return nil
+	}
+	labels := labelsInTx(mutator, nodeKey)
+	if len(labels) == 0 {
+		return nil // an unlabelled node is under no UNIQUE constraint
+	}
+	rd := nodeStateReaderFor(mutator)
+	if old, had := rd.property(nodeKey, key); had && old.Kind() != 0 {
+		releaseConstraintValue(reg, mutator, labels, key, old)
+	}
+	return reserveConstraintValue(reg, mutator, labels, key, value, mgr)
+}
+
+// EnforceUniqueOnPropertyDelete gives back what removing a property frees, so a
+// later legitimate write of the same value is not refused by a phantom.
+//
+// It MUST run before the property is removed: it reads the value it is releasing.
+// SET n.k = null is a removal and reaches here through the same door.
+func EnforceUniqueOnPropertyDelete(
+	reg *ConstraintRegistry, mutator GraphMutator, nodeKey, key string,
+) {
+	if reg == nil || !reg.HasAnyUnique() {
+		return
+	}
+	labels := labelsInTx(mutator, nodeKey)
+	if len(labels) == 0 {
+		return
+	}
+	rd := nodeStateReaderFor(mutator)
+	if old, had := rd.property(nodeKey, key); had && old.Kind() != 0 {
+		releaseConstraintValue(reg, mutator, labels, key, old)
+	}
+}

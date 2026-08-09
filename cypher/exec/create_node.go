@@ -281,15 +281,12 @@ func (op *CreateNode) Next(out *Row) (bool, error) {
 		return false, err
 	}
 
-	// Constraint enforcement: check before any mutation.
-	if op.reg != nil {
-		for _, p := range props {
-			if err := reserveConstraintValue(op.reg, op.mutator, op.labels, p.key, p.value, op.mgr); err != nil {
-				return false, err
-			}
-		}
-	}
-
+	// UNIQUE is reserved inside SetNodeProperty, at the mutator choke point
+	// (rmp #2358). The labels are attached BEFORE any property is written, below,
+	// so the property write sees the node's full label set and reserves under
+	// exactly the constraints the new node is subject to. A violation aborts the
+	// statement and the undo log removes the partially built node, so the CREATE is
+	// still all-or-nothing.
 	nodeKey := op.freshNodeKey()
 	nodeID, err := op.mutator.AddNode(nodeKey)
 	if err != nil {

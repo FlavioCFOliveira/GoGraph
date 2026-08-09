@@ -120,13 +120,8 @@ func (op *RemoveProperty) Next(out *Row) (bool, error) {
 				op.mutator.DelEdgePropertyByHandle(ent.relSrcKey, ent.relDstKey, ent.relHandle, op.propertyKey)
 			}
 		} else {
-			// Release the constrained value before removing the property so
-			// the slot is freed in the registry.
-			if op.reg != nil {
-				if oldVal, had := op.mutator.NodeProperties(ent.nodeKey)[op.propertyKey]; had {
-					releaseConstraintValue(op.reg, op.mutator, labelsInTx(op.mutator, ent.nodeKey), op.propertyKey, oldVal)
-				}
-			}
+			// DelNodeProperty frees the constrained slot, at the mutator choke
+			// point and before the removal it guards (rmp #2358).
 			op.mutator.DelNodeProperty(ent.nodeKey, op.propertyKey)
 		}
 	}

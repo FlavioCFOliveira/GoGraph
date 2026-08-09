@@ -15,6 +15,7 @@ package exec
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -159,6 +160,58 @@ func TestUniqueEnforcement_LabelPathGoesThroughTheChokePoint(t *testing.T) {
 			"frees it while a second node still holds it. See rmp #2358.",
 			labelEnforcementAllowedFile, offenders)
 	}
+}
+
+// TestUniqueEnforcement_PropertyPathGoesThroughTheChokePoint is the property half
+// of the gate above, and it is the one that covers the twenty-six sites rmp #2358
+// moved.
+//
+// reserveConstraintValue / releaseConstraintValue are the journaled primitives. The
+// two files below are their declaration site and the enforcement entry points the
+// mutator adapters call; anywhere else, a call means an operator is enforcing on its
+// own behalf again — which is exactly the arrangement that let a value be reserved
+// TWICE, once by the operator and once by the adapter, leaving one release to free
+// it while a second node still held it.
+func TestUniqueEnforcement_PropertyPathGoesThroughTheChokePoint(t *testing.T) {
+	allowed := map[string]bool{
+		"constraint_journal.go": true, // declares reserve/releaseConstraintValue
+		"label_constraints.go":  true, // the four Enforce* entry points
+	}
+	offenders := map[string][]string{}
+	for _, path := range packageGoFiles(t) {
+		base := filepath.Base(path)
+		if allowed[base] || strings.HasSuffix(base, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(path) //nolint:gosec // a fixed set of files in this package
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := string(src)
+		for _, fn := range []string{"reserveConstraintValue(", "releaseConstraintValue("} {
+			if strings.Contains(body, fn) {
+				offenders[base] = append(offenders[base], strings.TrimSuffix(fn, "("))
+			}
+		}
+	}
+	if len(offenders) != 0 {
+		t.Errorf("property UNIQUE enforcement is called outside %v: %v\n"+
+			"A property write enforces inside the mutator adapter's SetNodeProperty / "+
+			"DelNodeProperty, through EnforceUniqueOnPropertySet / "+
+			"EnforceUniqueOnPropertyDelete. An operator that also enforces reserves the "+
+			"value TWICE, and one release then frees it while a second node still holds "+
+			"it. See rmp #2358.", keysOf(allowed), offenders)
+	}
+}
+
+// keysOf returns the allowlist's file names, for the failure message.
+func keysOf(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // packageGoFiles lists this package's non-generated .go files.

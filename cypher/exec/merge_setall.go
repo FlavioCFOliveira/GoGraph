@@ -25,7 +25,6 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
-	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
@@ -42,13 +41,11 @@ type MergeSetAllAction struct {
 
 // applyWholeEntityValueToNode applies a whole-entity SET value v to the node
 // identified by nodeKey with `=` (isReplace) / `+=` semantics, dispatching on
-// v's runtime kind. Constraint enforcement mirrors the per-property MERGE
-// action path: a violation is returned as an error (the transaction aborts),
-// not silently skipped.
+// v's runtime kind. Constraint enforcement happens inside the mutator's property
+// writes (rmp #2358); a violation is returned as an error, so the transaction
+// aborts rather than the write being silently skipped.
 func applyWholeEntityValueToNode(
 	mut GraphMutator,
-	reg *ConstraintRegistry,
-	mgr *index.Manager,
 	targetVar, nodeKey string,
 	isReplace bool,
 	v expr.Value,
@@ -56,7 +53,7 @@ func applyWholeEntityValueToNode(
 	if v == nil || expr.IsNull(v) {
 		// `SET n = null` clears all properties; `SET n += null` is a no-op.
 		if isReplace {
-			clearNodePropsConstrained(mut, reg, nodeKey)
+			clearNodeProps(mut, nodeKey)
 		}
 		return nil
 	}
@@ -67,13 +64,13 @@ func applyWholeEntityValueToNode(
 			return err
 		}
 		if isReplace {
-			clearNodePropsConstrained(mut, reg, nodeKey)
+			clearNodeProps(mut, nodeKey)
 		}
 		for _, k := range nullKeys {
-			delNodePropConstrained(mut, reg, nodeKey, k)
+			delNodeProp(mut, nodeKey, k)
 		}
 		for _, p := range props {
-			if err := setNodePropConstrained(mut, reg, mgr, nodeKey, p.key, p.value); err != nil {
+			if err := setNodeProp(mut, nodeKey, p.key, p.value); err != nil {
 				return err
 			}
 		}
@@ -83,14 +80,14 @@ func applyWholeEntityValueToNode(
 		if !ok {
 			return nil // unresolvable source: no-op (null-source semantics)
 		}
-		return copyPropsToNode(mut, reg, mgr, mut.NodeProperties(srcKey), nodeKey, isReplace)
+		return copyPropsToNode(mut, mut.NodeProperties(srcKey), nodeKey, isReplace)
 	case expr.RelationshipValue:
 		s, ok1 := mut.ResolveNodeLabel(graph.NodeID(src.StartID))
 		d, ok2 := mut.ResolveNodeLabel(graph.NodeID(src.EndID))
 		if !ok1 || !ok2 {
 			return nil
 		}
-		return copyPropsToNode(mut, reg, mgr, mut.EdgeProperties(s, d), nodeKey, isReplace)
+		return copyPropsToNode(mut, mut.EdgeProperties(s, d), nodeKey, isReplace)
 	default:
 		return fmt.Errorf("TypeError: SET %s: expected a Map, Node or Relationship but was %s", targetVar, v.Kind())
 	}
@@ -101,8 +98,6 @@ func applyWholeEntityValueToNode(
 // safe.
 func copyPropsToNode(
 	mut GraphMutator,
-	reg *ConstraintRegistry,
-	mgr *index.Manager,
 	srcProps map[string]lpg.PropertyValue,
 	nodeKey string,
 	isReplace bool,
@@ -112,62 +107,53 @@ func copyPropsToNode(
 		snap[k] = v
 	}
 	if isReplace {
-		clearNodePropsConstrained(mut, reg, nodeKey)
+		clearNodeProps(mut, nodeKey)
 	}
 	for k, v := range snap {
-		if err := setNodePropConstrained(mut, reg, mgr, nodeKey, k, v); err != nil {
+		if err := setNodeProp(mut, nodeKey, k, v); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// clearNodePropsConstrained removes every property from nodeKey, releasing any
-// constrained value first so it does not leak as a phantom reservation.
-func clearNodePropsConstrained(mut GraphMutator, reg *ConstraintRegistry, nodeKey string) {
+// clearNodeProps removes every property from nodeKey. Each removal releases its
+// constrained value at the mutator choke point, so none leaks as a phantom
+// reservation (rmp #2358).
+func clearNodeProps(mut GraphMutator, nodeKey string) {
 	props := mut.NodeProperties(nodeKey)
 	keys := make([]string, 0, len(props))
 	for k := range props {
 		keys = append(keys, k)
 	}
 	for _, k := range keys {
-		delNodePropConstrained(mut, reg, nodeKey, k)
+		delNodeProp(mut, nodeKey, k)
 	}
 }
 
-// delNodePropConstrained removes one property from nodeKey, releasing its
-// constrained value first.
-func delNodePropConstrained(mut GraphMutator, reg *ConstraintRegistry, nodeKey, key string) {
-	if reg != nil {
-		if oldVal, had := mut.NodeProperties(nodeKey)[key]; had {
-			releaseConstraintValue(reg, mut, labelsInTx(mut, nodeKey), key, oldVal)
-		}
-	}
+// delNodeProp removes one property from nodeKey. DelNodeProperty releases its
+// constrained value at the mutator choke point (rmp #2358), so this no longer
+// carries a registry — which is why it lost the "Constrained" suffix its old name
+// promised and no longer delivered.
+func delNodeProp(mut GraphMutator, nodeKey, key string) {
 	mut.DelNodeProperty(nodeKey, key)
 }
 
-// setNodePropConstrained writes one (key,value) pair to nodeKey with
-// pre-write constraint enforcement, mirroring the per-property MERGE action
-// path: the node's own prior constrained value is released before the check so
-// an idempotent self-set is not rejected as its own duplicate, and a violation
-// is returned as an error.
-func setNodePropConstrained(
+// setNodeProp writes one (key,value) pair to nodeKey. SetNodeProperty enforces
+// UNIQUE — releasing the node's own prior value before the check, so an idempotent
+// self-set is not rejected as its own duplicate — and this returns the violation as
+// an error so the enclosing statement aborts rather than silently skipping.
+func setNodeProp(
 	mut GraphMutator,
-	reg *ConstraintRegistry,
-	mgr *index.Manager,
 	nodeKey, key string,
 	val lpg.PropertyValue,
 ) error {
-	if reg != nil {
-		labels := labelsInTx(mut, nodeKey)
-		if oldVal, had := mut.NodeProperties(nodeKey)[key]; had {
-			releaseConstraintValue(reg, mut, labels, key, oldVal)
-		}
-		if cerr := reserveConstraintValue(reg, mut, labels, key, val, mgr); cerr != nil {
-			return cerr
-		}
-	}
 	if serr := mut.SetNodeProperty(nodeKey, key, val); serr != nil {
+		// A violation must reach the caller UNWRAPPED so errors.As recovers the
+		// typed *ConstraintViolationError; only a genuine write failure is wrapped.
+		if isConstraintViolation(serr) {
+			return serr
+		}
 		return fmt.Errorf("exec: MERGE ON action SetNodeProperty %q: %w", key, serr)
 	}
 	return nil

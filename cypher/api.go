@@ -16798,6 +16798,13 @@ func (a *lpgMutatorAdapter) IsTombstoned(id graph.NodeID) bool {
 
 // SetNodeProperty sets the named property on n.
 func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyValue) error {
+	// UNIQUE enforcement lives HERE, at the write surface every operator must
+	// traverse, so a new property-write site cannot silently skip it (rmp #2358).
+	// Before the write: it releases this node's own old value and reserves the new
+	// one, and after the write the old value is gone.
+	if err := exec.EnforceUniqueOnPropertySet(a.constraintReg(), a, a.g.IndexManager(), n, key, value); err != nil {
+		return err
+	}
 	r := a.rec()
 	fanout := indexFanoutActive(a.g, a.buf)
 	// sc is loaded once (a single lock-free pointer load; nil on a stats-free
@@ -16839,6 +16846,9 @@ func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 
 // DelNodeProperty removes the named property from n.
 func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) {
+	// See SetNodeProperty (rmp #2358); the release must precede the removal because
+	// it reads the value it gives back.
+	exec.EnforceUniqueOnPropertyDelete(a.constraintReg(), a, n, key)
 	r := a.rec()
 	fanout := indexFanoutActive(a.g, a.buf)
 	sc := a.statsColl()
@@ -17690,6 +17700,10 @@ func (a *walMutatorAdapter) IsTombstoned(id graph.NodeID) bool {
 
 // SetNodeProperty sets the named property on n.
 func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyValue) error {
+	// See the lpgMutatorAdapter twin (rmp #2358).
+	if err := exec.EnforceUniqueOnPropertySet(a.constraintReg(), a, a.g.IndexManager(), n, key, value); err != nil {
+		return err
+	}
 	r := a.rec()
 	fanout := indexFanoutActive(a.g, a.buf)
 	sc := a.statsColl()
@@ -17726,6 +17740,8 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 
 // DelNodeProperty removes the named property from n.
 func (a *walMutatorAdapter) DelNodeProperty(n, key string) {
+	// See the lpgMutatorAdapter twin (rmp #2358).
+	exec.EnforceUniqueOnPropertyDelete(a.constraintReg(), a, n, key)
 	r := a.rec()
 	fanout := indexFanoutActive(a.g, a.buf)
 	sc := a.statsColl()

@@ -364,35 +364,14 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 				return evalErr
 			}
 			if isNull {
-				if op.reg != nil {
-					// Release the old value if it was constrained before
-					// removing the property; SET n.k = null is a removal.
-					if oldVal, had := op.mutator.NodeProperties(nodeKey)[op.propertyKey]; had {
-						releaseConstraintValue(op.reg, op.mutator, labelsInTx(op.mutator, nodeKey), op.propertyKey, oldVal)
-					}
-				}
+				// SET n.k = null is a removal; DelNodeProperty releases (rmp #2358).
 				op.mutator.DelNodeProperty(nodeKey, op.propertyKey)
 				return nil
 			}
 			if !hasValue {
 				return nil
 			}
-			if op.reg != nil {
-				labels := labelsInTx(op.mutator, nodeKey)
-				// Release this node's own old constrained value BEFORE the check,
-				// so an idempotent self-set (SET n.k = its current value) is not
-				// rejected as a duplicate of itself and the old slot is freed
-				// before the overwrite. A UNIQUE constraint guarantees at most one
-				// holder, so releasing first cannot mask a real cross-node
-				// duplicate; if the check then fails, the transaction aborts and
-				// every UNIQUE value-set is rebuilt from the graph (H-C, #1905).
-				if oldVal, had := op.mutator.NodeProperties(nodeKey)[op.propertyKey]; had {
-					releaseConstraintValue(op.reg, op.mutator, labels, op.propertyKey, oldVal)
-				}
-				if cerr := reserveConstraintValue(op.reg, op.mutator, labels, op.propertyKey, pv, op.mgr); cerr != nil {
-					return cerr
-				}
-			}
+			// Released-then-reserved inside SetNodeProperty (rmp #2358).
 			if serr := op.mutator.SetNodeProperty(nodeKey, op.propertyKey, pv); serr != nil {
 				return serr
 			}
@@ -408,28 +387,13 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 		if parseErr != nil {
 			if errors.Is(parseErr, ErrPropertyValueIsNull) {
 				// openCypher: SET n.k = null removes the property k from n.
-				if op.reg != nil {
-					if oldVal, had := op.mutator.NodeProperties(nodeKey)[op.propertyKey]; had {
-						releaseConstraintValue(op.reg, op.mutator, labelsInTx(op.mutator, nodeKey), op.propertyKey, oldVal)
-					}
-				}
+				// DelNodeProperty releases (rmp #2358).
 				op.mutator.DelNodeProperty(nodeKey, op.propertyKey)
 				return nil
 			}
 			return nil // non-literal expression: no-op for current IR
 		}
-		if op.reg != nil {
-			labels := labelsInTx(op.mutator, nodeKey)
-			// Release the old constrained value BEFORE the check so an idempotent
-			// self-set is not rejected as its own duplicate (H-C, #1905); see the
-			// release-before-check rationale on the eval path above.
-			if oldVal, had := op.mutator.NodeProperties(nodeKey)[op.propertyKey]; had {
-				releaseConstraintValue(op.reg, op.mutator, labels, op.propertyKey, oldVal)
-			}
-			if cerr := reserveConstraintValue(op.reg, op.mutator, labels, op.propertyKey, pv, op.mgr); cerr != nil {
-				return cerr
-			}
-		}
+		// Released-then-reserved inside SetNodeProperty (rmp #2358).
 		if serr := op.mutator.SetNodeProperty(nodeKey, op.propertyKey, pv); serr != nil {
 			return serr
 		}
@@ -437,24 +401,8 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 		return nil
 	}
 	if op.merge {
-		// For merge mode (SET n += {…}), read existing props once so we can
-		// release any old constrained value BEFORE checking it, so an idempotent
-		// self-set of a UNIQUE property is not rejected as its own duplicate
-		// (H-C, #1905).
-		existingMerge := op.mutator.NodeProperties(nodeKey)
-		labels := labelsInTx(op.mutator, nodeKey)
-		if op.reg != nil {
-			for _, p := range op.parsedMap {
-				if oldVal, had := existingMerge[p.key]; had {
-					releaseConstraintValue(op.reg, op.mutator, labels, p.key, oldVal)
-				}
-			}
-			for _, p := range op.parsedMap {
-				if cerr := reserveConstraintValue(op.reg, op.mutator, labels, p.key, p.value, op.mgr); cerr != nil {
-					return cerr
-				}
-			}
-		}
+		// SET n += {…}: each SetNodeProperty releases this node's own old value for
+		// its key and reserves the new one, at the mutator choke point (rmp #2358).
 		for _, p := range op.parsedMap {
 			if serr := op.mutator.SetNodeProperty(nodeKey, p.key, p.value); serr != nil {
 				return serr
@@ -462,23 +410,12 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 		}
 		return nil
 	}
-	// SET n = {…}: replace all properties.
+	// SET n = {…}: replace all properties. Every existing value is released by the
+	// DelNodeProperty sweep below, which runs BEFORE any SetNodeProperty, so an
+	// entry in the replacement map equal to the node's current value is not
+	// rejected as its own duplicate (H-C, #1905) — the ordering is what preserves
+	// that, now that enforcement is at the mutator (rmp #2358).
 	existing := op.mutator.NodeProperties(nodeKey)
-	labels := labelsInTx(op.mutator, nodeKey)
-	if op.reg != nil {
-		// Release all existing constrained values BEFORE the check so an entry in
-		// the replacement map equal to the node's current value is not rejected
-		// as its own duplicate (H-C, #1905); SET n = {…} replaces every property
-		// anyway, so releasing them all up front is correct.
-		for k, oldVal := range existing {
-			releaseConstraintValue(op.reg, op.mutator, labels, k, oldVal)
-		}
-		for _, p := range op.parsedMap {
-			if cerr := reserveConstraintValue(op.reg, op.mutator, labels, p.key, p.value, op.mgr); cerr != nil {
-				return cerr
-			}
-		}
-	}
 	for k := range existing {
 		op.mutator.DelNodeProperty(nodeKey, k)
 	}

@@ -419,7 +419,7 @@ func (op *MergePattern) applySetAllActions(b binding, evalRow Row, actions []Mer
 		if err != nil {
 			return err
 		}
-		if err := applyWholeEntityValueToNode(op.mutator, op.reg, op.mgr, a.TargetVar, nodeKey, a.IsReplace, v); err != nil {
+		if err := applyWholeEntityValueToNode(op.mutator, a.TargetVar, nodeKey, a.IsReplace, v); err != nil {
 			return err
 		}
 	}
@@ -955,15 +955,13 @@ func (op *MergePattern) createChain(childRow Row) (binding, error) {
 		if epErr != nil {
 			return nil, epErr
 		}
-		if op.reg != nil {
-			for _, p := range props {
-				if err := reserveConstraintValue(op.reg, op.mutator, n.labels, p.key, p.value, op.mgr); err != nil {
-					return nil, fmt.Errorf("exec: MergePattern: ON CREATE %q: %w", n.varName, err)
-				}
-			}
-		}
 		for _, p := range props {
+			// Reserved inside SetNodeProperty (rmp #2358); the labels are attached
+			// before this loop, so the reservation sees the full label set.
 			if err := op.mutator.SetNodeProperty(key, p.key, p.value); err != nil {
+				if isConstraintViolation(err) {
+					return nil, err
+				}
 				return nil, fmt.Errorf("SetNodeProperty %q.%s: %w", n.varName, p.key, err)
 			}
 		}
@@ -1197,13 +1195,8 @@ func (op *MergePattern) applyNodeAction(key string, act mergeAction, evalRow Row
 		}
 		if remove {
 			// SET x.k = null (literal or expression→null) removes the property;
-			// release its old constrained value so a UNIQUE slot is not leaked
-			// as a phantom reservation (#1904).
-			if op.reg != nil {
-				if oldVal, had := op.mutator.NodeProperties(key)[act.key]; had {
-					releaseConstraintValue(op.reg, op.mutator, labelsInTx(op.mutator, key), act.key, oldVal)
-				}
-			}
+			// DelNodeProperty releases its old constrained value, so a UNIQUE slot
+			// is not leaked as a phantom reservation (#1904, rmp #2358).
 			op.mutator.DelNodeProperty(key, act.key)
 			return nil
 		}
@@ -1214,21 +1207,13 @@ func (op *MergePattern) applyNodeAction(key string, act mergeAction, evalRow Row
 		}
 		v = val
 	}
-	if op.reg != nil {
-		labels := labelsInTx(op.mutator, key)
-		// Release this node's own old constrained value BEFORE the check and the
-		// overwrite, so the replaced value is not leaked as a permanent phantom
-		// reservation (#1904) and an idempotent self-set is not rejected as its
-		// own duplicate. UNIQUE guarantees at most one holder, so releasing first
-		// cannot mask a real cross-node duplicate.
-		if oldVal, had := op.mutator.NodeProperties(key)[act.key]; had {
-			releaseConstraintValue(op.reg, op.mutator, labels, act.key, oldVal)
-		}
-		if err := reserveConstraintValue(op.reg, op.mutator, labels, act.key, v, op.mgr); err != nil {
+	// Released-then-reserved inside SetNodeProperty (rmp #2358), which is what stops
+	// the replaced value leaking as a permanent phantom reservation (#1904) and an
+	// idempotent self-set being rejected as its own duplicate.
+	if err := op.mutator.SetNodeProperty(key, act.key, v); err != nil {
+		if isConstraintViolation(err) {
 			return err
 		}
-	}
-	if err := op.mutator.SetNodeProperty(key, act.key, v); err != nil {
 		return fmt.Errorf("exec: MergePattern: SetNodeProperty: %w", err)
 	}
 	return nil
