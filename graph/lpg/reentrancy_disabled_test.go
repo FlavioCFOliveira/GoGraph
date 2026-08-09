@@ -34,26 +34,6 @@ func TestBarrierGuard_ZeroSizedInProductionBuild(t *testing.T) {
 	}
 }
 
-// TestBarrierGuard_ViewAllocatesNothing pins acceptance criterion (1) of #2168:
-// Graph.View must allocate zero bytes in a released build. Under the enforcing
-// guard every call allocated 64 bytes for the runtime.Stack buffer that goID
-// parses, on a path taken once per query.
-//
-// testing.AllocsPerRun is used rather than a benchmark so the property is
-// asserted by the test suite, not merely observed by whoever runs -bench.
-func TestBarrierGuard_ViewAllocatesNothing(t *testing.T) {
-	// Not parallel: AllocsPerRun sets GOMAXPROCS to 1 for its duration and is
-	// documented as unreliable when other goroutines are allocating.
-	g := New[string, int64](adjlist.Config{Directed: true})
-
-	// Warm up so first-call lazy initialisation is not counted.
-	g.View(func() {})
-
-	if got := testing.AllocsPerRun(200, func() { g.View(func() {}) }); got != 0 {
-		t.Fatalf("Graph.View allocated %v objects per call, want 0 in a non-race, non-debug build", got)
-	}
-}
-
 // TestBarrierGuard_ApplyAtomicallyAllocatesNothing is the write-side companion:
 // the guard's writer stamp and clear must cost nothing either.
 func TestBarrierGuard_ApplyAtomicallyAllocatesNothing(t *testing.T) {
@@ -89,7 +69,7 @@ func TestBarrierGuard_ConcurrentReadersAndWriterUnaffected(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
-				g.View(func() { _ = g.LiveOrder() })
+				_ = g.LiveOrder()
 			}
 		}()
 	}
@@ -106,35 +86,4 @@ func TestBarrierGuard_ConcurrentReadersAndWriterUnaffected(t *testing.T) {
 	}()
 
 	wg.Wait()
-}
-
-// TestBarrierGuard_NestedViewDoesNotPanicInProductionBuild pins the contract
-// this build deliberately gives up, exactly as
-// search/overflow_assert_production_test.go pins its own: without enforcement a
-// nested acquisition is NOT reported.
-//
-// The nesting below is safe to execute only because there is no concurrent
-// writer on this graph: Go's RWMutex admits a recursive RLock while no writer is
-// queued. That is precisely why the invariant needs enforcing rather than
-// testing — with a writer in flight the same code deadlocks the engine, which is
-// what the enforcing build panics on and what the public godoc forbids. The test
-// therefore asserts only that production stays panic-free; it does not endorse
-// the pattern.
-func TestBarrierGuard_NestedViewDoesNotPanicInProductionBuild(t *testing.T) {
-	t.Parallel()
-	g := New[string, int64](adjlist.Config{Directed: true})
-
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("nested View panicked in a non-race, non-debug build: %v", r)
-		}
-	}()
-
-	inner := false
-	g.View(func() {
-		g.View(func() { inner = true })
-	})
-	if !inner {
-		t.Fatal("nested View body did not run")
-	}
 }

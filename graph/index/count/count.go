@@ -23,15 +23,27 @@
 //
 // # Concurrency contract
 //
-// The Store is safe for concurrent use with the following discipline, which the
-// Cypher engine already provides: all MUTATIONS ([Store.Apply], [Store.MarkDirty],
-// [Store.RecomputeReset]) are serialised by the engine's write barrier
-// (visMu.Lock in commitUnderBarrier), and all READS ([Store.CountE]/[Store.CountD]/
-// [Store.CountT] and the dirty predicates) run under the query's read barrier
-// (visMu.RLock in Graph.View). The per-shard [sync.RWMutex] and the dirty-set
-// mutex are defence-in-depth that keep any non-barrier access path race-free; the
-// atomic cells make an individual counter read lock-free regardless. The store
-// spawns no goroutines.
+// The Store is safe for concurrent use, and it no longer rests on any exclusion
+// the engine provides. This contract used to say that all MUTATIONS were
+// serialised by the engine's write barrier (visMu.Lock in commitUnderBarrier) and
+// that all READS ran under a read barrier (visMu.RLock in Graph.View). BOTH HALVES
+// ARE FALSE, and have been since sprint 334 made MVCC the module's concurrency
+// control: commitUnderBarrier now runs inside a SHARED hold, so two writers mutate
+// this store concurrently, and an ordinary query read takes no barrier at all —
+// Graph.View survives only for DDL-adjacent scans.
+//
+// What makes it safe is therefore the structure itself, not exclusion:
+//
+//   - the per-shard [sync.RWMutex] serialises the insert-add-delete-on-zero
+//     sequence in [Store.add], which is the only sequence that is not a single
+//     atomic operation. It is genuinely contended now rather than defence-in-depth;
+//   - the atomic cells make an individual counter read lock-free regardless;
+//   - the aggregate is ORDER-INSENSITIVE (rmp #2303): a cell is deleted at exactly
+//     zero rather than at zero-or-below, so concurrent partial sums that transit a
+//     negative value do not lose a decrement. That property is what replaced writer
+//     exclusion, and [Store.add] documents the failure it fixes.
+//
+// The store spawns no goroutines.
 package count
 
 import (
@@ -133,7 +145,38 @@ type shard struct {
 	dIn  map[uint64]*atomic.Int64
 	t    map[triKey]*atomic.Int64
 	mu   sync.RWMutex
+	// cells is the LOCK-FREE FAST REJECT (rmp #2363 item B): how many cells this
+	// shard currently holds across all four maps. A reader that finds it zero knows
+	// every lookup in this shard must miss, and returns WITHOUT taking mu at all.
+	//
+	// This is MySQL's m_min_id shape. Its Trx_shard is
+	// ut::Cacheline_padded<ut::Guarded<...>> holding a std::atomic<trx_id_t>
+	// (storage/innobase/include/trx0sys.h), and the atomic exists so a lookup can be
+	// rejected before the latch is ever acquired. Three parts: padded shard, own
+	// latch, atomic fast-reject. This store had the middle one only.
+	//
+	// Maintained in exactly one place — [Store.add], the sole insert/delete routine
+	// — under the write lock, so it cannot drift from the maps it describes.
+	cells atomic.Int64
+	// pad keeps one shard per cache line, so two independent shards cannot
+	// false-share. Without it the struct is ~64 bytes on a 128-byte line (Apple
+	// silicon), which puts two shards' locks and counters in one line and makes
+	// writers to DIFFERENT shards invalidate each other.
+	//
+	// The cost is stated rather than assumed: cacheLine-sized shards at numShards=64
+	// is 8 KiB of shard array, against ~4 KiB unpadded. 4 KiB more per Store, once.
+	_ [shardPad]byte
 }
+
+// cacheLine is the padding target. 128 rather than 64 because Apple silicon's
+// line is 128 bytes and x86 prefetches line pairs, so 128 is the safe choice on
+// both.
+const cacheLine = 128
+
+// shardPad is the filler that rounds [shard] up to a whole cache line. Written as
+// a computed expression so adding a field cannot silently defeat the padding: if
+// the struct outgrows the line the expression goes negative and the build fails.
+const shardPad = cacheLine - (4*8+24+8)%cacheLine
 
 // Store is the sharded relationship count-store. Its zero value is not usable;
 // construct one with [New].
@@ -199,8 +242,16 @@ func (s *Store) tShardOf(k triKey) *shard {
 
 // Apply applies one buffered delta to its cell. A key is created on first
 // observation and deleted when its counter returns to zero (bounded growth). A
-// zero delta is a no-op. Apply is a mutation and must be serialised by the
-// caller's write barrier (see the package concurrency contract).
+// zero delta is a no-op.
+//
+// It needs NO serialisation from the caller (rmp #2345). Every cell it touches goes
+// through [Store.add], whose aggregate is ORDER-INSENSITIVE — a cell is deleted at
+// exactly zero and a negative cell is retained, so addition commutes — and each
+// touch is made under that cell's own per-shard lock. Two writers applying
+// concurrently therefore reach the same totals in any interleaving. The package
+// contract states this at the top; it is restated here because this doc used to
+// require the engine's write barrier, which has not serialised writers since
+// rmp #2320.
 func (s *Store) Apply(d Delta) {
 	if d.Delta == 0 {
 		return
@@ -229,14 +280,18 @@ func (s *Store) Apply(d Delta) {
 
 // add is the shared insert-add-delete-on-zero routine. It runs entirely under
 // the shard write lock; the closures read/insert/delete the family-specific map
-// entry. Writes are serialised by the engine barrier, so the lock is
-// uncontended in production and exists for defence-in-depth.
+// entry. The lock is REAL contention, not defence-in-depth: this comment used to
+// say writes are serialised by the engine barrier so the lock is uncontended in
+// production, and that has been false since sprint 334 let two writers commit at
+// once under a shared hold. Sizing the shard count is therefore a live
+// performance question rather than a settled one.
 func (s *Store) add(sh *shard, get func(*shard) *atomic.Int64, put func(*shard, *atomic.Int64), del func(*shard), delta int64) {
 	sh.mu.Lock()
 	cell := get(sh)
 	if cell == nil {
 		cell = new(atomic.Int64)
 		put(sh, cell)
+		sh.cells.Add(1) // see [shard.cells]
 	}
 	// Deleted at EXACTLY zero, not at zero-or-below (rmp #2303, MVCC B1).
 	//
@@ -258,6 +313,7 @@ func (s *Store) add(sh *shard, get func(*shard) *atomic.Int64, put func(*shard, 
 	// property the delete exists for is unchanged.
 	if cell.Add(delta) == 0 {
 		del(sh)
+		sh.cells.Add(-1) // see [shard.cells]
 	}
 	sh.mu.Unlock()
 }
@@ -265,6 +321,20 @@ func (s *Store) add(sh *shard, get func(*shard) *atomic.Int64, put func(*shard, 
 // CountE returns the live edge count of relationship type rt (0 when absent).
 func (s *Store) CountE(rt uint32) int64 {
 	sh := s.eShardOf(rt)
+	// LOCK-FREE FAST REJECT (rmp #2363 item B). An empty shard cannot hold this key,
+	// so the answer is 0 without touching mu. See [shard.cells] for the MySQL
+	// m_min_id shape this follows.
+	//
+	// SAFE UNDER CONCURRENCY BY DIRECTION, not by luck: cells is maintained under the
+	// write lock, so a zero read means no cell existed at some instant within this
+	// call. A concurrent insert racing this read is exactly the race the RLock
+	// version has too — a reader either sees the new cell or does not — and either
+	// answer is a legal snapshot read. What it can never do is MISS a cell that was
+	// already there, because cells is incremented BEFORE the lock is released and a
+	// non-zero value always sends the reader down the locked path.
+	if sh.cells.Load() == 0 {
+		return 0
+	}
 	sh.mu.RLock()
 	cell := sh.e[rt]
 	sh.mu.RUnlock()
@@ -279,6 +349,20 @@ func (s *Store) CountE(rt uint32) int64 {
 func (s *Store) CountD(label, rt uint32, dir Direction) int64 {
 	k := dkey(label, rt)
 	sh := s.dShardOf(k)
+	// LOCK-FREE FAST REJECT (rmp #2363 item B). An empty shard cannot hold this key,
+	// so the answer is 0 without touching mu. See [shard.cells] for the MySQL
+	// m_min_id shape this follows.
+	//
+	// SAFE UNDER CONCURRENCY BY DIRECTION, not by luck: cells is maintained under the
+	// write lock, so a zero read means no cell existed at some instant within this
+	// call. A concurrent insert racing this read is exactly the race the RLock
+	// version has too — a reader either sees the new cell or does not — and either
+	// answer is a legal snapshot read. What it can never do is MISS a cell that was
+	// already there, because cells is incremented BEFORE the lock is released and a
+	// non-zero value always sends the reader down the locked path.
+	if sh.cells.Load() == 0 {
+		return 0
+	}
 	sh.mu.RLock()
 	var cell *atomic.Int64
 	if dir == In {
@@ -298,6 +382,20 @@ func (s *Store) CountD(label, rt uint32, dir Direction) int64 {
 func (s *Store) CountT(a, rt, b uint32) int64 {
 	tk := triKey{a: a, rt: rt, b: b}
 	sh := s.tShardOf(tk)
+	// LOCK-FREE FAST REJECT (rmp #2363 item B). An empty shard cannot hold this key,
+	// so the answer is 0 without touching mu. See [shard.cells] for the MySQL
+	// m_min_id shape this follows.
+	//
+	// SAFE UNDER CONCURRENCY BY DIRECTION, not by luck: cells is maintained under the
+	// write lock, so a zero read means no cell existed at some instant within this
+	// call. A concurrent insert racing this read is exactly the race the RLock
+	// version has too — a reader either sees the new cell or does not — and either
+	// answer is a legal snapshot read. What it can never do is MISS a cell that was
+	// already there, because cells is incremented BEFORE the lock is released and a
+	// non-zero value always sends the reader down the locked path.
+	if sh.cells.Load() == 0 {
+		return 0
+	}
 	sh.mu.RLock()
 	cell := sh.t[tk]
 	sh.mu.RUnlock()
@@ -308,7 +406,8 @@ func (s *Store) CountT(a, rt, b uint32) int64 {
 }
 
 // MarkDirty toggles off the exactness of one X-scoped family set. It is a
-// mutation and must be serialised by the caller's write barrier.
+// mutation. It needs no caller serialisation, for the order-insensitivity reason
+// given on [Store.Apply].
 func (s *Store) MarkDirty(m DirtyMark) {
 	s.dmu.Lock()
 	switch m.Scope {
@@ -365,7 +464,7 @@ type Snapshot struct {
 
 // Snapshot returns a copy of every live cell (value > 0) and every dirty marking.
 // It is a read taken under the shard and dirty read locks, so it is safe to call
-// concurrently with the barrier-serialised writers.
+// concurrently with writers, which are NOT serialised against each other.
 func (s *Store) Snapshot() Snapshot {
 	snap := Snapshot{
 		E:    make(map[uint32]int64),
@@ -413,8 +512,8 @@ func (s *Store) Snapshot() Snapshot {
 // entry is a live combination, so this is an exact, allocation-free size
 // indicator for observability: it is bounded by the number of currently-observed
 // schema combinations (design §2.3), never by |V| or |E|. It is a read taken
-// under the shard read locks and is safe to call concurrently with the
-// barrier-serialised writers. The metrics [Backend] exposes no gauge, so this is
+// under the shard read locks and is safe to call concurrently with writers, which
+// are NOT serialised against each other. The metrics [Backend] exposes no gauge, so this is
 // the accessor an observer reads to surface the store's footprint (task #2087).
 func (s *Store) Cells() int {
 	n := 0
@@ -442,8 +541,8 @@ func keysOf(m map[uint32]struct{}) []uint32 {
 // RecomputeReset clears every cell and every dirty flag, returning the store to
 // its empty state. It is the seam an O(V+E) recompute-from-graph (task #2084)
 // resets before replaying the create-deltas of every live edge; clearing the
-// dirty sets restores full exactness. It is a mutation and must be serialised by
-// the caller's write barrier.
+// dirty sets restores full exactness. It is a mutation, and needs no caller
+// serialisation for the order-insensitivity reason given on [Store.Apply].
 func (s *Store) RecomputeReset() {
 	for i := range s.shards {
 		sh := &s.shards[i]

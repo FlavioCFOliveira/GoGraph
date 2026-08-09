@@ -44,6 +44,8 @@ package exec
 // journals the inverse of a release as well.
 
 import (
+	"errors"
+
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
@@ -122,6 +124,18 @@ func journalConstraintInverse(mutator GraphMutator, inv func()) {
 		return
 	}
 	j.RecordConstraintInverse(inv)
+}
+
+// isConstraintViolation reports whether err is (or wraps) a constraint violation.
+//
+// It exists because enforcement moved INSIDE the mutator (rmp #2358): a write
+// method now returns either a genuine write failure, which its caller wraps with
+// operator context, or a violation, which must reach the caller UNWRAPPED so
+// errors.As can recover the typed *ConstraintViolationError the Bolt layer reports.
+// Wrapping a violation in an operator's own message is not cosmetic — it changes the
+// error TYPE a driver sees, and the TCK asserts on that type.
+func isConstraintViolation(err error) bool {
+	return errors.Is(err, ErrConstraintViolation)
 }
 
 // copyLabels returns a defensive copy of labels for capture in a closure that

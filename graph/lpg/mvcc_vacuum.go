@@ -787,7 +787,14 @@ func (g *Graph[N, W]) sweepUnit(u vacuumUnit, watermark uint64) int {
 		// or below the watermark can no longer refuse anything, because
 		// [mvcc.Conflicts] is false for a head below every live transaction's
 		// start.
-		return g.adjVer.clearAborted() + g.adjVer.truncate(watermark)
+		//
+		// The CONSTRAINT stamps (rmp #2353) are swept here too, and for the identical
+		// reason: same pure-bookkeeping shape, same unbounded growth without a sweep.
+		// They ride this unit rather than getting their own because they are written
+		// only for nodes under an existence constraint, so on the schemas that have
+		// none the extra call walks 64 nil maps and returns zero.
+		return g.adjVer.clearAborted() + g.adjVer.truncate(watermark) +
+			g.conVer.clearAborted() + g.conVer.truncate(watermark)
 	case unitIndexRemovals:
 		return g.applyDeferredIndexRemovals(watermark)
 	}

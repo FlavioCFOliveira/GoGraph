@@ -354,7 +354,13 @@ func (v *ReadView[N, W]) LiveNodeCountExact() (uint64, bool) {
 	return v.g.LiveOrder(), true
 }
 
-// EdgeCreateCount returns the CURRENT per-pair CREATE multiplicity. Not
+// EdgeCreateCount returns the CURRENT per-pair CREATE multiplicity.
+//
+// IT IGNORES THIS VIEW'S INSTANT, and that is not an oversight: the counter is
+// unversioned and belongs to no snapshot (rmp #2351). It is exposed here so a caller
+// holding a view does not have to reach past it to the graph, NOT because the value
+// is resolved at the view's instant. See [Graph.EdgeCreateCount] for what correlating
+// it with anything costs. Not
 // versioned.
 func (v *ReadView[N, W]) EdgeCreateCount(src, dst N) int64 { return v.g.EdgeCreateCount(src, dst) }
 

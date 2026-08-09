@@ -64,16 +64,47 @@ func (g *Graph[N, W]) IncEdgeCreateCount(src, dst N) int64 {
 // EdgeCreateCount returns the CREATE multiplicity counter for the
 // directed edge (src, dst), or 0 when no CREATE was recorded.
 //
-// This counter is guarded by its own per-shard mutex and is only
-// per-operation atomic: it is NOT cross-store consistent with the
-// adjacency layer, [Graph.EdgeLabelsAt], or [Graph.EdgePropertiesAt]
-// outside a transaction barrier. A reader that correlates this count
-// with the populated per-instance indices (or any other substructure)
-// while a multi-CREATE multigraph transaction is committing can observe
-// a partial cross-store state — e.g. the count already at 2 while only
-// one instance has been populated. To read a consistent cross-store
-// view, bracket the correlated reads in [Graph.View] (writers commit
-// under [Graph.ApplyAtomically]); see docs/isolation-design.md.
+// # IT IS AN ALLOCATION SEQUENCE, NOT A QUERYABLE QUANTITY (rmp #2351)
+//
+// This counter is UNVERSIONED. It is guarded by its own per-shard mutex and is only
+// per-operation atomic; unlike every other per-instance store it has NO as-of form,
+// so it belongs to NO snapshot. [Graph.EdgePropertiesAt] has
+// [Graph.EdgePropertiesAtAsOf] and [ReadView] resolves it at an instant — this has
+// no counterpart, and that asymmetry is the point of this note.
+//
+// What it exists for is allocating the 1-based instance index a CREATE stamps onto
+// the per-instance stores ([Graph.IncEdgeCreateCount], wired by
+// CreateRelationship). For that it need only be monotone per pair, which an atomic
+// counter is. It is not a quantity a reader can correlate with anything at a
+// defined instant.
+//
+// # What that costs a reader, named rather than left to be discovered
+//
+// A reader that correlates this count with the populated per-instance indices can
+// observe a partial cross-store state — the count already at 2 while only one
+// instance is populated. That used to be OPT-IN: bracketing the correlated reads in
+// Graph.View closed it, because writers committed under an exclusive barrier.
+// rmp #2344 removed Graph.View and the hole is now UNCONDITIONAL, because there is
+// no snapshot to pin the count side to.
+//
+// ONE production reader does correlate them, and it was checked rather than
+// assumed: cypher/api.go's edgeInstanceIdxFor reads this count beside the
+// snapshot-resolved CSR, and its single caller uses the pair as a CONSERVATIVE
+// GUARD — `parallelCount >= totalCreates && totalCreates > 0` — before trusting a
+// per-instance edge type. A count that is stale-HIGH relative to the reader's
+// snapshot (a concurrent parallel CREATE) makes the guard DECLINE, and the caller
+// falls back to the per-pair union of edge types. So the failure mode is a LOSS OF
+// PRECISION — the pair's union instead of that instance's type — and not a wrong
+// row. That is why this is documented rather than versioned: putting a version
+// chain on a path that currently costs one atomic add, to buy precision in a
+// fallback branch, is not a trade rmp #2338's measurements support.
+//
+// If a future reader needs this count to be consistent with anything at an instant,
+// it needs an as-of form first. Do not add one speculatively.
+//
+// See docs/isolation-design.md and
+// TestIsolation_EdgeInstanceStores_CrossStoreRequiresView, whose second half was
+// retracted for exactly this reason.
 //
 // EdgeCreateCount is safe for concurrent use.
 func (g *Graph[N, W]) EdgeCreateCount(src, dst N) int64 {

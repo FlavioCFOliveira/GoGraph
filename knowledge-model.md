@@ -2788,3 +2788,254 @@ arm is the COVERAGE pass of `make ci` (`-coverpkg=./... -covermode=atomic`, no `
 `budgetEnv`, and `verifies` (a prose statement of the property a test pins). `Package`
 gains `role`, and `Commit` gains `subject`. Node identity is unchanged: `Package` by
 `path`, `Test` by `(name, file, pkg)`, `Commit` by `hash`.
+
+Incrementally synced at commit `0b8b8145` (2026-08-07, task **rmp #2349**, sprint 335 — an
+acked commit was lost in the post-fsync-pre-publish window). **First modelling of sprint
+335 at all**, and of the `mvcc.Clock` Type. +10 nodes (`Sprint` `335` OPEN; `Commit`
+`0b8b8145`; `Feature` `Durable checkpoint instant boundary`; `Type` `mvcc.Clock`; `Method`s
+`Clock.AwaitQuiescent`, `Graph.AwaitCommitQuiescence`, `Checkpointer.awaitCommitQuiescence`;
+`Test` `TestCheckpoint_EngineCommitOrdering_KeepsAnAckedCommit`; `Benchmark`
+`BenchmarkCheckpointUnderWriters`; `Spec`
+`docs/benchmarks/checkpoint-instant-boundary-2026-08-07.md`) and +19 edges
+(`Sprint 335 -[CONTAINS]-> Commit`; `Sprint 335 -[DELIVERS]->` the new Feature; three
+`FIXES` from the Commit to `ACID Transactions`, `WAL & Recovery` and the new Feature; four
+`TOUCHES` to Packages `store/checkpoint`, `graph/mvcc`, `graph/lpg`, `bench/mvccwrite` plus
+one to the Spec; six `CONTAINS`/`HAS_METHOD` for the new symbols; two `VERIFIES` to the new
+Feature; one `SPECIFIED_IN`; one `IMPLEMENTS` from `store/checkpoint`).
+
+**THE REFUTED PREMISE, recorded because it was load-bearing for an ACID argument.** The
+comment in `store/checkpoint/checkpoint.go` phase 1 argued that the durable watermark and
+the MVCC instant always describe the same transactions because "a writer's registration
+spans its WHOLE commit — `store/txn.Tx.Commit` defers `exitWriter` past `ApplyVersioned`,
+which is what publishes the instant". **That is TRUE for `txn.Tx.Commit` and FALSE for
+`txn.Tx.CommitWALOnly`, which is the path the Cypher engine — the only production writer —
+actually takes.** `CommitWALOnly` applies nothing in memory and publishes no instant, so its
+`exitWriter` fires when the fsync returns while the instant is published later, at write-
+bracket unwind through `lpg.Graph.endWrite`. The store's in-flight count is zero inside that
+window, so the drain proved nothing and the checkpoint truncated away the only record of an
+acknowledged commit. Anyone reasoning about the quiesce boundary must check BOTH commit
+paths; the drain alone does not cover the publish.
+
+**The fix waits on the OBSERVER, and the prior art disagrees with itself, which is the
+argument.** PostgreSQL (commit `b5978350`) has the identical decoupling and names it at
+`src/backend/access/transam/xlog.c:7684-7687`; its remedy is `DELAY_CHKPT_IN_COMMIT` plus a
+checkpoint-side wait (`xact.c:1469-1471`, `:1577-1582`; `xlog.c:7695-7712`). Memgraph
+(commit `b3ac3cdc`) instead loads the start timestamp and the last durable timestamp under
+one `engine_lock_` acquisition (`src/storage/v2/inmemory/storage.cpp:2833-2844`) so the pair
+is consistent by construction — which works only because its commit publishes durability and
+visibility under the same lock, the convoy rmp #2302/#2193 removed here. GoGraph has
+PostgreSQL's decoupling, so it took PostgreSQL's remedy.
+
+**KNOWN FIDELITY GAP, recorded rather than silently fixed.** The `graph/mvcc` Package's
+symbol inventory is stale: before this sync it held only the `Horizon` and `horizonOcc`
+Types, though the package now also declares `Clock`, `WriteStamp`, `commitLog`, `Depths`,
+`WriteCounts` and more. Only `Clock` was added here, because that is what this task read and
+attached to. A full re-survey of `graph/mvcc` (and, likely, of every package that grew during
+sprints 334–335) is owed.
+
+Incrementally synced at commit `b1f0974f` (2026-08-08, task **rmp #2354**, sprint 336 — an
+acknowledged `COMMIT` could apply NOTHING). **First modelling of sprint 336 at all.**
++13 nodes (`Sprint` `336` OPEN; `Task` `2354` COMPLETED; `Commit` `b1f0974f`; `Method`
+`WriteTx.Err`; 8 `Test`s in `cypher/constraint_label_conflict_test.go`) and +2 `Finding`
+nodes (below), with +26 edges (`Task -[BELONGS_TO]-> Sprint`, `Sprint -[CONTAINS]->`
+Task and Commit, `Task -[IMPLEMENTED_IN]-> Commit`; three `FIXES` from the Commit to
+`ACID Transactions`, `MVCC snapshot isolation` and `MVCC as sole concurrency control`;
+two `TOUCHES` to Packages `lpg` and `cypher`; four `TOUCHES` to Methods
+`WriteTx.Err`, `Result.commitUnderBarrier`, `Result.Err`, `ExplicitTx.Commit`; three
+`TOUCHES` to Types `Result`, `WriteTx`, `ExplicitTx`; eight `CONTAINS` to the new Tests;
+two `PRODUCED` and two `FOUND` to the Findings).
+
+**THE DEFECT, and why it is a repeat.** `graph/lpg/lpg.go setNodeLabelInfo` guarded BOTH
+the write-write conflict test AND the delta on `!bag.has(lid)`, where `bag` is the RAW
+stored bag read by value — so it already carried other in-flight transactions' eager
+writes. A peer's UNCOMMITTED add of the same label made `has()` true, skipped the whole
+block, and made `bag.add` a no-op: the write reported SUCCESS having recorded nothing, and
+the label vanished with the peer's rollback. **This is the identical defect rmp #2324 fixed
+for the node-PROPERTY store**, whose own comment in `graph/lpg/property.go` records the
+same reasoning ("only a write that RECORDS a version can conflict") failing there at 400
+concurrent increments producing 216. `removeNodeLabelInfo` carried the mirror guard and one
+case worse: a peer's eager removal of the node's LAST label deleted the shard's bag entry
+outright, so the `has()` guard was not even reached. `nodeLabelShard.headStamp` reads the
+DELTA CHAIN rather than the bag, so it answers correctly for a node with no bag entry at
+all. The conflict test now runs UNCONDITIONALLY on both directions; only the DELTA stays
+guarded, which is what keeps a delta per WRITE rather than per statement.
+
+**The backstop exists in TWO places because two paths drive the write bracket themselves**
+— `cypher/exectx.go ExplicitTx.Commit` and `cypher/api.go commitUnderBarrier` (autocommit),
+the latter via the new `Result.conflictErr` field. A conflict hit by a primitive that cannot
+RETURN one (a label removal, a property delete, any of the five per-edge side stores) is
+recorded on the transaction and surfaces nowhere unless asked for, which is what
+`lpg.WriteTx.Err` is for. Memgraph reads the same record in the same place —
+`Storage::Commit` tests `transaction_.must_abort`. Both halves are now pinned by tests; the
+autocommit half previously had none, and it is the half the common caller uses.
+
+**TWO FINDINGS, both retired or bounded by measurement rather than argument.**
+`Finding` *The tx-visible hadLabel hardening is UNREACHABLE…* records that #2354's own
+technical requirement — resolve the adapter pre-check `hadLabel` through
+`HasNodeLabelInTx` instead of the raw graph — was implemented in a worktree and measured
+NEITHER needed NOR harmful: any raw/view divergence implies a foreign head on the node's
+delta chain, which the now-unconditional conflict test dooms before any constraint is
+consulted. `hadLabel` stays the RAW read, because that is the read the PHYSICAL undo
+journal requires. `Finding` *The undo replay DISCARDS the error…* records that
+`cypher/undo_record.go` swallows the error from its replayed inverses
+(`_ = m.wv.SetNodeLabel(...)`), so an INCOMPLETE rollback reports success; unreachable in
+the shipped build only because the raw read keeps the journal to inverses this transaction
+really made over a head it still owns.
+
+**COST, measured with interleaved arms (n=10, benchstat) because across-time comparison on
+this host is worthless.** `BenchmarkWriteScaling/mem` at writers 1/4/16/32: allocs/op
+IDENTICAL at every count, sec/op geomean +0.24%, B/op +0.59%. The B/op delta was
+ATTRIBUTED rather than dismissed as size-class noise: `unsafe.Sizeof(cypher.Result)` went
+384 → 400 bytes for the new field, crossing Go's 384 → 416 size class, so the allocation
+COUNT did not change — only its class. The three commit-failure fields on `Result`
+(`conflictErr`, `notNullErr`, `walErr`) are strictly mutually exclusive, so collapsing them
+lands at ~368 bytes, BELOW the pre-#2354 baseline; filed as rmp **#2364**.
+
+Incrementally synced at commit `46a8505b` (2026-08-08, task **rmp #2353**, sprint 336 —
+write skew across two substores committed a state violating a declared existence
+invariant). +10 nodes (`Task` `2353` COMPLETED; `Commit` `46a8505b`; `Type`s
+`constraintVersions`, `constraintStamp`, `constraintVersionShard`; `Method`
+`WriteView.NoteConstraintTouch`; 5 `Test`s in `cypher/constraint_writeskew_test.go`) plus
+1 `Finding`, and +15 edges (`Task -[BELONGS_TO]-> Sprint`; `Sprint -[CONTAINS]->` Task and
+Commit; `Task -[IMPLEMENTED_IN]-> Commit`; `Task -[FOUND]-> Finding`; `Commit -[FIXES]->`
+the Finding and the `ACID Transactions` / `MVCC snapshot isolation` Features; three
+`TOUCHES` to Packages `lpg`, `cypher`, `mvcc`; three `CREATES` to the new Types; one
+`TOUCHES` to the new Method; five `CONTAINS` to the new Tests). New store name
+`mvcc.StoreNodeConstraint`, and a new `MVCCStats.ConstraintStamps` series.
+
+**THE DEFECT.** A NOT NULL invariant binds a LABEL to a PROPERTY, but conflict detection
+is per SUBSTORE, so the two halves never met: `T1: REMOVE n.email` and `T2: SET n:Acct`
+both committed and left a node carrying `:Acct` with no `email`. Neither transaction is
+wrong on its own snapshot — T1 sees no constrained label so it has nothing to check, and
+T2's snapshot predates T1's commit so it still sees the property. Textbook write skew,
+which plain Snapshot Isolation permits by definition and which this project's CONSISTENCY
+mandate does not. `cypher/constraint_check.go` already NAMED the mechanism without closing
+it. The premise was re-verified at HEAD before any work, because rmp #2354 had changed
+label-path conflict detection after the task was written.
+
+**THE SHAPE, and why it is scoped.** Node granularity is what every reference engine uses
+here: PostgreSQL and InnoDB version the whole ROW so both halves share one tuple version;
+Memgraph links every write onto a single delta chain per vertex
+(`src/storage/v2/vertex.hpp`); Neo4j locks the node. Taking that wholesale was the REJECTED
+option, because it raises the conflict rate for every workload including the majority that
+declare no existence invariant and cannot suffer the anomaly. So `constraintVersions`
+applies node granularity ONLY to nodes a declared existence invariant covers, hooked into
+the `mutationUndo.touch` seam whose set already exists only when the registry reports one.
+Test and stamp share ONE critical section — split, two transactions both find the slot
+empty and both proceed, which is the anomaly itself. Swept by BOTH reclamation paths, since
+a stamp left at `mvcc.AbortedTS` refuses every later writer on that node forever.
+
+**A SECOND, SEPARATE DEFECT, found while measuring the first** and recorded as its own
+`Finding`: a label scan yielded a ROW for a node whose `labels(n)` did not include the
+label. `Graph.setNodeLabelInfo` adds to the bitmap IMMEDIATELY while the undo of that add
+had its removal DEFERRED and then discarded by `Graph.withdrawAbortedIndexRemovals` —
+right for new work, wrong for withdrawing the transaction's own add.
+`Graph.deferLabelIndexRemoval` now declines to defer while unwinding, the exemption
+`writeCtx.undoing` already grants the conflict test. The reproducing boundary was MEASURED
+and is narrower than first written: only the serialization-conflict refusal path reaches
+it; six existence-check refusal shapes are clean.
+
+**COST, and the regression the measurement caught.** AC 5 required an unscoped schema to
+show no measurable change, and the first run refuted it: `+1 allocs/op` at one writer
+(p=0.000), surviving a fixed-`b.N` re-run so not an amortisation artefact. Bisected into
+FOUR interleaved arms, the cost was NOT on the write path — an arm carrying only the struct
+field and the store type measured identical to base, and an arm without the `touch` call
+site still showed it. It was the RECLAIMER: `-benchmem` attributes the vacuum goroutine's
+allocations to the write benchmark, and the two new sweep calls walked 64 shards under 64
+locks to discover an empty store. Gated on an `active` counter, following the
+`idxPendingActive` precedent `withdrawAbortedIndexRemovals` already sets. After the gate,
+`BenchmarkWriteScaling/mem` at writers 1/4/16/32, interleaved n=14 with benchstat:
+allocs/op IDENTICAL at every count (all samples equal, p=1.000), sec/op all flat (geomean
+−0.27%), B/op geomean −0.70%. A structural control carries the claim where the benchmark
+cannot: with no invariant declared `MVCCStats.ConstraintStamps` stays 0, and the same
+workload with one makes it non-zero.
+
+Incrementally synced at commit `496eeb96` (2026-08-08, task **rmp #2355**, sprint 336 —
+the property path decided UNIQUE from a raw label read). +10 nodes (`Task` `2355`
+COMPLETED and `Task` `2365` BACKLOG; `Commit` `496eeb96`; `Function` `exec.labelsInTx`;
+`Method` `NodeLabelsInTx` on both mutator adapters; 5 `Test`s in
+`cypher/constraint_unique_rawlabel_test.go`) plus 1 `Finding`, and +16 edges.
+
+**THE DEFECT, and why it is the same family as #2353.** A UNIQUE constraint attaches to a
+LABEL, so deciding what to reserve or release for a property write begins by asking which
+labels the node carries — and every such site asked the RAW graph, which answers with the
+newest stored value including other in-flight transactions' eager writes. Conflicts being
+per SUBSTORE, a peer writing the LABEL never collided with this transaction writing the
+PROPERTY, so a peer's uncommitted `REMOVE b:Person` made the node look unconstrained and
+the value was written with no reservation. Two `:Person` nodes then shared a value declared
+UNIQUE. The codebase already NAMED this class in `cypher/api.go` when rmp #2352 hardened the
+LABEL path; the property path's ~26 sites were left on the raw read.
+
+**THE CHOKE POINT.** `exec.labelsInTx` is the single helper all 27 constraint-decision sites
+now route through, resolving via `txVisibleNodeReader.NodeLabelsInTx` and falling back to the
+raw read only for a mutator carrying no transaction. ONE helper rather than 27 corrected
+reads, deliberately: per-site drift is what left this path behind last time. The three
+remaining raw label reads in `cypher/exec` are MERGE MATCH semantics
+(`merge_search.go:100,217`, `merge_pattern.go:754`), deliberately untouched and filed as
+**#2365** with instructions to REPRODUCE before fixing.
+
+**THE TICKET'S SECOND HALF WAS MISDIAGNOSED**, and the `Finding` records the correction. The
+leaked reservation was attributed to the property writer releasing nothing; it does release.
+The cause is the ABORTING transaction: its undo re-adds the label and re-reserves the value
+IT sees — the pre-image, since the peer's new value is invisible to it — landing AFTER the
+peer already released it, so the value ends up reserved with no live holder. Established by
+ORDERING rather than by reading: rollback after the peer write leaks, before does not, no
+peer does not. The mirror leaks separately: with the removal COMMITTED the node is no longer
+a member yet the newly written value stays reserved. Both are availability defects rather
+than consistency ones, which is why they were assessed apart from the duplicate.
+
+**THE STAMP WAS EXTENDED TO UNIQUENESS** (user decision, 2026-08-08) rather than the undo
+ordering patched: both kinds of invariant bind a label to a property, so both need the two
+substores to collide, and node granularity is what the reference engines use.
+**Widening the GATE alone was measured to be a no-op** — neither a label LOSS nor a property
+SET was a stamping site, because the original sites cover only writes that can introduce a
+MISSING property. Two new sites were required (`recordRemoveNodeLabel`,
+`recordSetNodeProperty`), and the stamp now carries its OWN gate
+(`mutationUndo.stampCon`, set from `HasAnyNotNull() || HasAnyUnique()`) instead of riding on
+`touched`, which stays existence-only so a uniqueness-only schema does not pay the
+commit-time existence scan. The conflict-surface increase is bounded by
+`TestUnique_DisjointNodesUnderUniqueDoNotConflict`.
+
+Incrementally synced at commit `d855f602` (2026-08-08, task **rmp #2357**, sprint 336 —
+the suspected unjournaled-insert phantom, RETIRED). +4 nodes (`Task` `2357` COMPLETED,
+`Task` `2366` BACKLOG, `Commit` `d855f602`, `Test`
+`TestUnique_RollbackLeavesNoPhantomReservation`) plus **3 `Finding`s**, and +11 edges.
+This task produced more findings than code, which is what a verification task should do.
+
+**#2357's PREMISE IS RETIRED, not fixed.** It suspected that the second, UNJOURNALED
+value-set insert (`ConstraintRegistry.RecordPropertySet`) could survive a rollback as a
+phantom, because it took its own label read separate from the reserve's. The two could
+diverge only while BOTH were raw reads; rmp #2355 routed every constraint decision through
+`exec.labelsInTx`, so both resolve through the SAME transaction view, a peer's unpublished
+label change is invisible to both, and the only write between them is a PROPERTY write.
+Verified by grep that no raw label read feeds any reserve/record/release call in
+`cypher/exec`. Independently, #2355's stamp makes a concurrent label change on that node
+conflict, so the required interleaving is refused. Impossible, not merely unobserved.
+
+**A CONTENTION FINDING, handed to #2358.** `RecordPropertySet`'s body is the SAME
+set-insert loop as `ReserveSetProperty`'s phase 2, and all TEN write-path callers were
+verified individually to be preceded by a reserve with identical `(labels, key, value)`.
+`reserveConstraintValue` calls `ReserveSetProperty`, which inserts, and journals the
+release inverse — so each `RecordPropertySet` is an idempotent no-op that acquires the
+registry's write lock a SECOND time per constrained property write, on a lock
+`label_constraints.go` records as 57% of ALL lock delay at sixteen writers. The ONE caller
+that must stay is `constraint_journal.go`, where it IS the journaled inverse of a release.
+Deleting the rest belongs to #2358, already scoped to these call sites.
+
+**A FOURTH DEFECT IN THIS FAMILY, reproduced and filed as #2366.** With the peer
+COMMITTING its label removal while the property writer ROLLS BACK, the writer's JOURNALED
+inverse re-reserves the old value from its own view after the peer's committed release
+already freed it, leaving it reserved with no live holder. The stamp DID fire — that is why
+the writer rolled back — so this is not a missing collision. The `UNIQUE` value-set
+(`cypher/exec/constraints.go` `valueSets`) is a plain NON-VERSIONED map whose inverses are
+replayed per transaction with no ordering against a peer's commit. Fail-safe in direction
+(a value becomes unusable, never duplicated) but it accumulates. Note rmp #2321 established
+that a GLOBAL rebuild of the value-sets destroys concurrent writers' reservations, so a
+naive reseed is not an available remedy.
+
+**THE STRUCTURAL CONCLUSION of sprint 336 so far**, now on its fifth instance across
+#2352, #2353, #2355, #2357 and #2366: conflict detection and constraint enforcement are per
+SUBSTORE, while every declared invariant binds TWO substores — and the `UNIQUE` value-set
+sits outside the versioning substrate altogether. The reference engines do not have this
+class of defect because PostgreSQL and InnoDB version the whole ROW and Memgraph the whole
+VERTEX, so any two writers to one object meet.

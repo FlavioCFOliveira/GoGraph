@@ -238,12 +238,12 @@ func TestSEC14c_ConcurrentBeginWriters_SingleWriterSerialised(t *testing.T) {
 	}
 	wg.Wait()
 	if ctx.Err() != nil {
-		t.Fatalf("writers exceeded deadline (possible single-writer deadlock): %v", ctx.Err())
+		t.Fatalf("writers exceeded deadline (possible deadlock or livelock): %v", ctx.Err())
 	}
 
 	// Every successful commit must be fully and exactly visible.
 	if got := countLabel(ctx, t, eng, "W"); got != okCount.Load() {
-		t.Errorf("single-writer serialisation lost a commit: committed %d but graph holds %d",
+		t.Errorf("a commit was LOST: committed %d but graph holds %d",
 			okCount.Load(), got)
 	}
 }

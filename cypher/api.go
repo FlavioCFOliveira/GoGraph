@@ -105,6 +105,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/index/count"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index/stats"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 	"github.com/FlavioCFOliveira/GoGraph/internal/crashpoint"
 	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
@@ -1124,14 +1125,54 @@ type Engine struct {
 	// the engine single-writer, because two writes holding it shared do not exclude
 	// each other.
 	//
-	// visMu cannot do this job on its own even though it has the same shape: the DDL's
-	// exclusive hold covers only the registration, and extending it over the backfill
-	// would mean the scan could no longer use [lpg.Graph.View] (visMu is not
-	// re-entrant). This lock is one level out, so it needs no such surgery.
+	// # Can this collapse into the graph's own visibility gate? The obstacle is gone,
+	// and the answer is still NO (rmp #2344 AC5)
 	//
-	// Lock order: schemaMu (outermost) → the store's writer admission → visMu.
+	// This used to read: "visMu cannot do this job on its own even though it has the
+	// same shape: the DDL's exclusive hold covers only the registration, and extending
+	// it over the backfill would mean the scan could no longer use [lpg.Graph.View]
+	// (visMu is not re-entrant)."
+	//
+	// THAT OBSTACLE NO LONGER EXISTS. rmp #2344 removed Graph.View outright, and the
+	// DDL scan takes no barrier at all. So the two gates COULD now be collapsed.
+	//
+	// They are not, and the reason is that the payoff was measured and is nil. An
+	// ordinary write currently takes two weak acquisitions; rmp #2337 measured a weak
+	// acquisition at 0.434 ns at ten cores, so collapsing saves ~0.4 ns of a 2892 ns
+	// commit — 0.014%, which is below the noise of any benchmark this module has. And
+	// rmp #2338 established that the write ceiling is set by the commit's ALLOCATION
+	// RATE (56 objects, 4.2 KB) and not by lock acquisitions at all: a lock-free
+	// workload allocating at that rate ceilings at ~2.6x on this host and the engine
+	// already reaches 86% of it.
+	//
+	// Against nil gain, collapsing would make a DDL hold the GRAPH's visibility gate
+	// strongly across its whole backfill scan rather than only across registration —
+	// widening a correctness-sensitive exclusion window to buy nothing. Keeping the
+	// two levels separate keeps the DDL's long phase out of the graph's gate.
+	//
+	// Lock order: schemaGate (outermost) → the store's writer admission → visMu.
 	// Readers take none of them.
-	schemaMu sync.RWMutex
+	//
+	// # Why this is an mvcc.Gate and not a sync.RWMutex (rmp #2337)
+	//
+	// It was a sync.RWMutex, and the shared acquisition an ordinary write takes was
+	// an atomic add on that mutex's ONE readerCount word — a coherence miss on a
+	// shared cache line, paid by every write on every core, purely to announce a
+	// NON-conflict. rmp #2203 measured that shape degrading 17.6× from 1 to 10 cores.
+	//
+	// [mvcc.Gate] expresses the same weak/strong contract — many weak holders
+	// together, a strong holder excluding all of them — with the weak side striped
+	// over padded per-slot counters and the strong flag read-mostly, so an
+	// uncontended weak acquisition touches no globally shared line. Measured on an
+	// Apple M4, 10 cores, both arms in one invocation: the gate goes 3.77 ns at 1
+	// core to 0.434 ns at 10 (it SCALES), where sync.RWMutex goes 3.75 ns to 89.5 ns
+	// (it DEGRADES 23.9×). See docs/benchmarks/mvcc-weak-strong-gate-2026-08-07.md.
+	//
+	// The semantics are unchanged and that is deliberate: this is an implementation
+	// substitution, not a contract change. MVCC cannot subsume this barrier, because
+	// what it guards is the CATALOG, which is not versioned; Memgraph and PostgreSQL
+	// both keep the identical weak/strong split for the same reason.
+	schemaGate mvcc.Gate
 
 	// hashJoinEnabled gates the disconnected-equi-join hash-join optimisation
 	// (#1506). True by default; set false by EngineOptions.DisableHashJoin. When
@@ -3026,8 +3067,8 @@ func (e *Engine) runCreateBTreeIndex(ctx context.Context, p *ir.CreateIndex, idx
 	}
 	// The whole DDL sequence — scan, validate, register — under one lock, in BOTH
 	// wirings; see [Engine.schemaMu] for why the schema barrier alone cannot do it.
-	e.schemaMu.Lock()
-	defer e.schemaMu.Unlock()
+	e.schemaGate.StrongLock()
+	defer e.schemaGate.StrongUnlock()
 	if e.store == nil {
 		return e.createBTreeIndexLocked(ctx, p, idxMgr, nil)
 	}
@@ -3186,8 +3227,8 @@ func (e *Engine) runDropIndex(ctx context.Context, p *ir.DropIndex, idxMgr *inde
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	e.schemaMu.Lock()
-	defer e.schemaMu.Unlock()
+	e.schemaGate.StrongLock()
+	defer e.schemaGate.StrongUnlock()
 	if e.store == nil {
 		// Capture the (label, property) of the index about to be dropped so the
 		// internal numeric companion (#1652) can be cleaned up alongside it; see
@@ -3314,13 +3355,17 @@ func dropNumericCompanionIfOrphaned(idxMgr *index.Manager, label, property strin
 // engine) appends a durable constraint op so the schema change survives a
 // crash.
 //
-// The whole validate → register → seed → WAL-append sequence runs under the
-// engine's writer serialisation (task #1341): for a WAL-backed engine the
-// store's writer registration — taken by opening the very transaction that
-// carries the durable constraint op — and for a store-less engine
-// [Engine.writeMu]. Without it a concurrent writer could commit a duplicate
-// value between the validation scan and the value-set seed, leaving a UNIQUE
-// constraint active over already-violating data that the value-set never saw.
+// The whole validate → register → seed → WAL-append sequence runs under
+// [Engine.schemaMu], held EXCLUSIVELY, in BOTH wirings. Without that exclusion a
+// concurrent writer could commit a duplicate value between the validation scan and
+// the value-set seed, leaving a UNIQUE constraint active over already-violating
+// data that the value-set never saw.
+//
+// This used to name the engine's writer serialisation (task #1341) — the store's
+// writer registration for a WAL-backed engine, and Engine.writeMu for a store-less
+// one. Neither serialises anything now: writeMu was retired outright by rmp #2306
+// and the store's admission excludes nobody since the same task. schemaMu is what
+// carries the property, which is why ordinary writes take it SHARED.
 func (e *Engine) runCreateConstraint(ctx context.Context, p *ir.CreateConstraint, idxMgr *index.Manager) (*Result, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -3330,8 +3375,8 @@ func (e *Engine) runCreateConstraint(ctx context.Context, p *ir.CreateConstraint
 	// One lock over scan + validate + register, in BOTH wirings. Lock order
 	// schemaMu → visMu (inside scanLabelProperty's View and the registration's
 	// ApplyAtomically). See [Engine.schemaMu].
-	e.schemaMu.Lock()
-	defer e.schemaMu.Unlock()
+	e.schemaGate.StrongLock()
+	defer e.schemaGate.StrongUnlock()
 	if e.store == nil {
 		return e.createConstraintLocked(ctx, p, kind, idxMgr, nil)
 	}
@@ -3411,15 +3456,19 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 	// Registration, backfill, and value-set seed run inside the visibility
 	// barrier (ApplyAtomically) so concurrent Graph.View readers never observe
 	// the constraint or its backing index in a partially-constructed state.
-	// The visibility barrier is not re-entrant, so nothing inside the closure
-	// may call Graph.View or Graph.ApplyAtomically; both scanLabelProperty
-	// (which calls View) and commitConstraintTx (which only appends a WAL
-	// frame) are therefore outside the closure.
+	// The visibility barrier is not re-entrant, so nothing inside the closure may
+	// call Graph.View or Graph.ApplyAtomically. scanLabelProperty is outside it for
+	// the ORDERING reason rather than that one — it must complete before the
+	// registration it validates — and no longer takes any barrier itself, so it is
+	// no longer constrained to sit outside; commitConstraintTx only appends a WAL
+	// frame and is outside so the append is not held under visMu.
 	//
-	// Lock ordering: the caller holds the engine's writer serialisation (store's
-	// writer registration for WAL-backed engines, writeMu for store-less) which
-	// is taken before visMu everywhere in the write path — the ApplyAtomically
-	// call below takes visMu, matching that established ordering.
+	// Lock ordering: the caller holds [Engine.schemaMu] exclusively, and schemaMu is
+	// taken before visMu everywhere in the write path — the ApplyAtomically call
+	// below takes visMu, matching that established ordering. This used to name the
+	// engine's writer serialisation (store's writer registration for WAL-backed,
+	// writeMu for store-less); writeMu no longer exists (rmp #2306) and the store's
+	// admission no longer serialises, so schemaMu is the outermost lock.
 	barrierErr := e.g.ApplyAtomically(func() error {
 		// For UNIQUE constraints, build a bound hash index that self-maintains
 		// from the index.Manager change fan-out (emitted at commit time by the
@@ -3517,8 +3566,8 @@ func (e *Engine) runDropConstraint(ctx context.Context, p *ir.DropConstraint, id
 		return nil, err
 	}
 
-	e.schemaMu.Lock()
-	defer e.schemaMu.Unlock()
+	e.schemaGate.StrongLock()
+	defer e.schemaGate.StrongUnlock()
 	if e.store == nil {
 		return e.dropConstraintLocked(ctx, p, idxMgr, nil)
 	}
@@ -3724,18 +3773,29 @@ func commitIndexTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind txn.Inde
 // tombstone, label, and property state after every shard lock is released. The
 // keys are interned and immutable, so resolving them outside the walk is safe.
 //
-// Both phases run inside [lpg.Graph.View] (task #1341), which keeps the CATALOG
-// stable across the scan and keeps the Walk deadlock-free with respect to the
-// #1339 scenario. Callers must not already be inside View/ApplyAtomically (the
-// barrier is not re-entrant; the lpg barrier guard panics on misuse).
+// It takes NO BARRIER. Both phases used to run inside [lpg.Graph.View] (task
+// #1341) for CATALOG stability across the scan. [Engine.schemaMu] supplies that
+// already, and strictly better: every catalog mutator — both [lpg.Graph.ApplyAtomically]
+// call sites, and every DDL entry point (runCreateBTreeIndex, runCreateHashIndex,
+// runDropIndex, runCreateConstraint, runDropConstraint) — holds schemaMu
+// EXCLUSIVELY, while an ordinary write holds it shared. Each of this function's three
+// callers is therefore already covered: createConstraintLocked and rewindConstraintDrop
+// run under runCreateConstraint's and runDropConstraint's exclusive hold, and
+// registerRecoveredConstraints runs inside NewEngineWithOptions before the engine is
+// published to anyone. Dropping the View also removes a lock-order hazard, since it
+// nested visMu inside schemaMu purely to obtain what schemaMu already guaranteed.
 //
-// It does NOT give the scan a consistent view of DATA: since rmp #2320 an ordinary
-// write holds the same barrier SHARED, so a value a concurrent writer is adding may
-// or may not be seen here. That is sound for what this scan is FOR — it
+// It never gave the scan a consistent view of DATA and still does not: since rmp #2320
+// an ordinary write holds the barrier SHARED, so a value a concurrent writer is adding
+// may or may not be seen here. That is sound for what this scan is FOR — it
 // pre-validates a constraint that is not yet registered, and every write after
 // registration is checked by the enforcement path — so a value added during the
 // scan is caught there rather than missed. A scan that needed a consistent data
 // view would take a snapshot instead.
+//
+// The #1339 deadlock is prevented by the TWO-PHASE structure below, not by any lock:
+// phase 1 snapshots (id, key) pairs under the mapper shard locks and phase 2 resolves
+// state after every shard lock is released.
 //
 // Polls ctx at the same ~4096-row granularity as [Engine.backfillNodeHashIndex]
 // (rmp #1872 — this scan polled no cancellation at all before, leaving a large
@@ -3750,38 +3810,35 @@ func (e *Engine) scanLabelProperty(ctx context.Context, label, prop string) (val
 		key string
 		id  graph.NodeID
 	}
-	e.g.View(func() {
-		// Phase 1 — snapshot the interned nodes. The callback must not touch
-		// any other graph state (see the deadlock note above).
-		refs := make([]nodeRef, 0, mapper.Len())
-		mapper.Walk(func(id graph.NodeID, key string) bool {
-			refs = append(refs, nodeRef{id: id, key: key})
-			return true
-		})
-
-		// Phase 2 — resolve graph state with no shard lock held.
-		for i := range refs {
-			if i&pollGranularityMask == 0 {
-				if cerr := ctx.Err(); cerr != nil {
-					err = cerr
-					return
-				}
-			}
-			r := refs[i]
-			if e.g.IsTombstoned(r.id) {
-				continue
-			}
-			if !e.g.HasNodeLabel(r.key, label) {
-				continue
-			}
-			v, ok := e.g.GetNodeProperty(r.key, prop)
-			if !ok {
-				anyNull = true
-				continue
-			}
-			values = append(values, v)
-		}
+	// Phase 1 — snapshot the interned nodes. The callback must not touch any
+	// other graph state (see the deadlock note above).
+	refs := make([]nodeRef, 0, mapper.Len())
+	mapper.Walk(func(id graph.NodeID, key string) bool {
+		refs = append(refs, nodeRef{id: id, key: key})
+		return true
 	})
+
+	// Phase 2 — resolve graph state with no shard lock held.
+	for i := range refs {
+		if i&pollGranularityMask == 0 {
+			if cerr := ctx.Err(); cerr != nil {
+				return values, anyNull, cerr
+			}
+		}
+		r := refs[i]
+		if e.g.IsTombstoned(r.id) {
+			continue
+		}
+		if !e.g.HasNodeLabel(r.key, label) {
+			continue
+		}
+		v, ok := e.g.GetNodeProperty(r.key, prop)
+		if !ok {
+			anyNull = true
+			continue
+		}
+		values = append(values, v)
+	}
 	return values, anyNull, err
 }
 
@@ -4558,6 +4615,15 @@ type Result struct {
 	// and WAL rolled back), so it is neither visible nor durable. RunInTx surfaces
 	// it to the caller; Err also reports it. It wraps [exec.ErrConstraintViolation].
 	notNullErr error
+	// conflictErr is set non-nil by commitUnderBarrier when the transaction was
+	// doomed by a write-write serialization conflict that no statement reported —
+	// one recorded by a primitive that cannot return an error (a label removal, a
+	// property delete, any of the five per-edge side stores). Without reading it the
+	// statement committed having silently dropped that write, which is a lost update
+	// (rmp #2354); see [lpg.WriteTx.Err]. The write was rolled back inside the
+	// barrier, so it is neither visible nor durable. It wraps
+	// [mvcc.ErrSerializationConflict] and is RETRIABLE.
+	conflictErr error
 	// walErr is set non-nil when the in-barrier WAL fsync (CommitWALOnly)
 	// failed for an otherwise-successful write (#1281, durable-then-visible).
 	// The eager in-memory mutations have ALREADY been rolled back (undo
@@ -5262,13 +5328,33 @@ func (r *Result) commitUnderBarrier() {
 		r.rollbackUnderBarrier()
 		return
 	}
+	// SERIALIZATION-CONFLICT BACKSTOP (rmp #2354, ACID Atomicity + Isolation).
+	//
+	// The check above catches only a statement that REPORTED an error. A conflict hit
+	// by a primitive that cannot return one — a label removal, a property delete, any
+	// of the five per-edge side stores — is RECORDED on the transaction and surfaces
+	// nowhere unless asked for; see [lpg.WriteTx.Err] for why the recording exists and
+	// what it costs to ignore it. Without this, such a statement committed
+	// successfully having silently dropped its conflicting write, which is a lost
+	// update. The explicit-transaction path carries the identical check
+	// (cypher/exectx.go); both are needed because both drive the bracket themselves.
+	if cerr := r.wtx.Err(); cerr != nil {
+		cmetrics.IncCounter("cypher.RunInTx.serializationConflicts", 1)
+		r.conflictErr = cerr
+		r.rollbackUnderBarrier()
+		return
+	}
 	// Commit-time NOT NULL existence check (#1754, ACID Consistency). Runs on the
 	// success path, INSIDE the barrier, BEFORE the WAL fsync, so a node left in
 	// its final committed state carrying a constrained label but lacking the
 	// required property rejects the WHOLE transaction atomically — exactly like
 	// the SET-to-null path and the fsync-failure branch below. touched is nil
 	// (and the check a no-op) unless the engine has an existence constraint active.
-	if nnErr := r.touched.checkNotNullConstraints(r.constraintReg, r.g); nnErr != nil {
+	// Through THIS transaction's view (rmp #2350). WriterViewOf resolves through the
+	// transaction id, so the check sees this statement's own eager writes and no other
+	// transaction's unpublished work; it falls back to the present only for a graph
+	// whose versioning substrate is disarmed, which has no concurrent writer to hide.
+	if nnErr := r.touched.checkNotNullConstraints(r.constraintReg, r.g.WriterViewOf(r.wtx)); nnErr != nil {
 		cmetrics.IncCounter("cypher.RunInTx.constraint.notNullViolations", 1)
 		r.notNullErr = nnErr
 		r.rollbackUnderBarrier()
@@ -5386,6 +5472,13 @@ func (r *Result) rollbackUnderBarrier() {
 func (r *Result) Err() error {
 	if r.rowsErr != nil {
 		return r.rowsErr
+	}
+	// Before the NOT NULL verdict: a doomed transaction's own view is a state that
+	// will never commit, so a constraint conclusion drawn from it rests on an invalid
+	// premise. The conflict is also the RETRIABLE answer and the one the caller can
+	// act on (rmp #2354).
+	if r.conflictErr != nil {
+		return r.conflictErr
 	}
 	if r.notNullErr != nil {
 		return r.notNullErr
@@ -6399,7 +6492,14 @@ func buildOperatorWrite(
 			return nil, err
 		}
 		schemaCopy := copySchema(schema)
-		return exec.NewSetLabels(p.NodeVar, p.Labels, schemaCopy, child, mutator), nil
+		sl := exec.NewSetLabels(p.NodeVar, p.Labels, schemaCopy, child, mutator)
+		if constraintReg != nil {
+			// Attaching a label puts the node under that label's UNIQUE
+			// constraints; without this the label write bypassed them entirely
+			// (rmp #2352).
+			sl.WithConstraints(constraintReg, idxMgr)
+		}
+		return sl, nil
 
 	case *ir.RemoveProperty:
 		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
@@ -6424,7 +6524,13 @@ func buildOperatorWrite(
 			return nil, err
 		}
 		schemaCopy := copySchema(schema)
-		return exec.NewRemoveLabels(p.NodeVar, p.Labels, schemaCopy, child, mutator), nil
+		rl := exec.NewRemoveLabels(p.NodeVar, p.Labels, schemaCopy, child, mutator)
+		if constraintReg != nil {
+			// Detaching a label frees that label's UNIQUE reservations; without
+			// this they would linger as phantoms (rmp #2352).
+			rl.WithConstraintRegistry(constraintReg)
+		}
+		return rl, nil
 
 	case *ir.DeleteNode:
 		child, err := buildOperatorWrite(p.Child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
@@ -15665,7 +15771,12 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 	// Engine.RunInTx calls never race on the process-global statementNow
 	// in funcs. (statementNow is still used by the TCK runner and standalone
 	// unit tests via funcs.SetStatementNow; see cypher/funcs/now.go.)
-	queryReg := newNowAwareRegistry(e.reg, time.Now())
+	//
+	// The instant is read HERE, at the top of the statement, and unchanged from
+	// what it always was; only the wrapper that carries it is built later, once
+	// the mutator adapter exists to hold it inline (rmp #2339). Nothing between
+	// this point and there consults the registry.
+	stmtNow := time.Now()
 
 	entry, err := e.parseAndAnalyse(query)
 	if err != nil {
@@ -15684,15 +15795,17 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 		return nil, err
 	}
 
-	buf := &exec.IndexBuffer{}
-
-	// undo records the inverse of every in-memory mutation this write statement
-	// applies eagerly, so the live graph can be rolled back inside the barrier
-	// on a pipeline error or panic (task #1282, Atomicity). It is allocated for
-	// every write transaction but its backing slice grows lazily on the first
-	// recorded mutation, so a write that mutates nothing (or a read misrouted
-	// here) pays nothing.
-	undo := &undoLog{}
+	// buf and undo are not allocated here: they ride INSIDE the mutator adapter
+	// built below (rmp #2339), which is one heap object this statement was going
+	// to pay for anyway. undo records the inverse of every in-memory mutation
+	// this write statement applies eagerly, so the live graph can be rolled back
+	// inside the barrier on a pipeline error or panic (task #1282, Atomicity);
+	// both start empty, so a write that mutates nothing (or a read misrouted
+	// here) still pays nothing.
+	var (
+		buf  *exec.IndexBuffer
+		undo *undoLog
+	)
 
 	// Historical note: store-less autocommit writes used to be serialised on the
 	// engine writer mutex so they
@@ -15706,8 +15819,8 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 	// exclude another writer — that is the point — but it does exclude a DDL, whose
 	// backfill scan and registration must not have a write land between them. See
 	// [Engine.schemaMu] for the index-backfill race that measured.
-	e.schemaMu.RLock()
-	defer e.schemaMu.RUnlock()
+	schemaTok := e.schemaGate.WeakLockAuto()
+	defer e.schemaGate.WeakUnlock(schemaTok)
 
 	// touched tracks the node keys this statement creates, labels, or strips a
 	// property from, so the commit-time NOT NULL existence check (#1754) re-checks
@@ -15718,6 +15831,13 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 	if e.constraintReg != nil && e.constraintReg.HasAnyNotNull() {
 		touched = &touchedNodes{}
 	}
+	// The per-node CONSTRAINT stamp is gated SEPARATELY and more widely: a UNIQUE
+	// constraint binds a label to a property just as an existence constraint does, so
+	// both need the two substores to collide (rmp #2353, widened by rmp #2355). It is
+	// NOT gated on `touched`, because allocating that set for a UNIQUE-only schema
+	// would put the commit-time existence scan on every commit for nothing.
+	stampCon := e.constraintReg != nil &&
+		(e.constraintReg.HasAnyNotNull() || e.constraintReg.HasAnyUnique())
 
 	// The WAL transaction is opened OUTSIDE the visibility barrier: BeginCtx
 	// takes the store's writer admission and must not nest under visMu. The
@@ -15727,6 +15847,9 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 	// (backpressure honoured at the engine↔txn seam, task #1301). The mutator
 	// adapter only captures references; no graph reads happen yet.
 	var mutator exec.GraphMutator
+	// queryReg is bound to the adapter's inline wrapper in both branches below,
+	// so the statement-frozen "now" costs no allocation of its own (rmp #2339).
+	var queryReg expr.FunctionRegistry
 	if e.store != nil {
 		walTx, err = e.store.BeginCtx(ctx)
 		if err != nil {
@@ -15734,14 +15857,22 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 		}
 		// cbuf is left nil: it is allocated lazily on the first count delta, so a
 		// bare CREATE (:N) over an edgeless graph allocates none (#2082).
-		wa := &walMutatorAdapter{g: e.g, tx: walTx, buf: buf, undo: undo, touched: touched, eng: e}
-		// Aim the counters at the adapter's own inline store (#2212): this statement's
-		// write effects are recorded with no allocation beyond the adapter itself.
+		wa := &walMutatorAdapter{g: e.g, tx: walTx, touched: touched, stampCon: stampCon, eng: e}
+		// Aim the counters, the index buffer and the undo log at the adapter's own
+		// inline stores (#2212, rmp #2339): this statement's write effects, index
+		// write-back and rollback record are all held with no allocation beyond
+		// the adapter itself.
 		wa.counters = &wa.countersStore
+		wa.buf, wa.undo = &wa.bufStore, &wa.undoStore
+		buf, undo = wa.buf, wa.undo
+		queryReg = wa.nowReg.bind(e.reg, stmtNow)
 		mutator = wa
 	} else {
-		la := &lpgMutatorAdapter{g: e.g, buf: buf, undo: undo, touched: touched, eng: e}
+		la := &lpgMutatorAdapter{g: e.g, touched: touched, stampCon: stampCon, eng: e}
 		la.counters = &la.countersStore // see the walMutatorAdapter branch above
+		la.buf, la.undo = &la.bufStore, &la.undoStore
+		buf, undo = la.buf, la.undo
+		queryReg = la.nowReg.bind(e.reg, stmtNow)
 		mutator = la
 	}
 
@@ -15803,6 +15934,15 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 		_ = r.Close()
 		return nil, fmt.Errorf("cypher: commit WAL: %w", werr)
 	}
+	// A serialization conflict recorded by a primitive that could not report one
+	// (rmp #2354) rolled the write back inside the barrier; surface it rather than a
+	// Result for a write that is neither visible nor durable. Checked before the NOT
+	// NULL verdict, for the reason given on [Result.Err].
+	if r != nil && r.conflictErr != nil {
+		cErr := r.conflictErr
+		_ = r.Close()
+		return nil, cErr
+	}
 	// A commit-time NOT NULL existence violation (#1754) rolled the write back
 	// inside the barrier; surface the typed violation instead of a Result for a
 	// write that is neither visible nor durable, mirroring the walErr handling.
@@ -15814,17 +15954,29 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 	return r, nil
 }
 
-// execUnderBarrier builds the physical operator tree for plan and runs the
-// whole statement to a materialised [Result] inside one [lpg.Graph.ApplyAtomically]
-// (visMu) acquisition — the shared core of both the autocommit [Engine.RunInTx]
-// path and the explicit-transaction [ExplicitTx.Exec] path.
+// execUnderBarrier builds the physical operator tree for plan and runs the whole
+// statement to a materialised [Result] inside ONE write bracket supplied by the
+// caller as applyFn — the shared core of both the autocommit [Engine.RunInTx] path
+// and the explicit-transaction [ExplicitTx.Exec] path.
 //
-// Running build + drain under visMu stops a concurrent reader observing a torn
-// snapshot and stops a concurrent writer growing the node space mid-build
-// (#1077), and makes every eager mutation flip visible to [lpg.Graph.View]
-// readers atomically (audit gap F3, docs/isolation-design.md). build runs under
-// visMu.Lock, so nothing in it may call g.View / g.ApplyAtomically (visMu is
-// non-re-entrant).
+// THE NAME IS HISTORICAL. This used to run inside [lpg.Graph.ApplyAtomically], an
+// EXCLUSIVE visMu acquisition, and the comment here used to say that running build
+// and drain under visMu is what stops a concurrent reader observing a torn snapshot
+// and a concurrent writer growing the node space mid-build (#1077). That is no
+// longer the mechanism: both call sites now pass a SHARED bracket —
+// [lpg.Graph.ApplyInVersionedTx] for an explicit transaction and the bounded shared
+// hold of applyVersionedInstant for autocommit — so concurrent writers DO run
+// alongside this one.
+//
+// What replaced exclusion is versioning: every version the statement writes points
+// at one commit record, published with a single atomic store, so a concurrent
+// reader resolving through [mvcc.Visible] sees all of the statement or none of it
+// (rmp #2300, #2320). The shared hold that remains excludes only DDL.
+//
+// The re-entrancy constraint survives and is stricter than it looks: nothing inside
+// may call g.View / g.ApplyAtomically / g.ApplyVersioned, because visMu is
+// non-re-entrant and Go's RWMutex prefers a queued writer, so a nested SHARED
+// acquisition deadlocks the moment an exclusive acquirer queues.
 //
 // commit selects the transaction-finalisation behaviour:
 //
@@ -15905,11 +16057,18 @@ func (e *Engine) execUnderBarrier(
 		// names whichever published last, and a write path reading through another
 		// transaction's snapshot sees neither its own work nor a consistent graph.
 		wv := e.g.WriterViewOf(wtx)
-		walker := &lpgNodeWalker{g: wv}
-		// The count-estimate provider (#2083) is consulted only on the read path
+		// From the adapter's inline scratch when it has one, so the walker and the
+		// label resolver cost no allocation of their own (rmp #2339). The
+		// count-estimate provider (#2083) is consulted only on the read path
 		// (Engine.Run, where labelSrc carries cs); the write-path plan build never
-		// reads it, so cs is left nil here to keep the write path's resolver lean.
-		labelSrc := &lpgLabelResolver{g: wv}
+		// reads it, so bind leaves it nil to keep the write path's resolver lean.
+		var walker nodeWalkerIface
+		var labelSrc labelResolverIface
+		if sc := mutatorBuildScratch(mutator); sc != nil {
+			walker, labelSrc = sc.bind(wv)
+		} else {
+			walker, labelSrc = &lpgNodeWalker{g: wv}, &lpgLabelResolver{g: wv}
+		}
 		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager(), e.maxCollectItems, e.edgeTypeFilterCache,
 			// #2229: the write path resolves `CALL db.*` from the same registry the
 			// read path uses. Shared, not snapshotted — procs.Registry is
@@ -15994,6 +16153,50 @@ func setMutatorWriteTx(m exec.GraphMutator, wtx lpg.WriteTx) {
 	}
 }
 
+// buildScratch is the plan-build state [Engine.execUnderBarrier] needs once per
+// statement: the node walker and the label resolver the physical builder reads
+// the graph through. Both are two-word values whose only per-statement content
+// is the writer view, so allocating them fresh inside the bracket cost two
+// mallocs per commit for nothing (rmp #2339). The write adapters carry one
+// inline and hand it back through [mutatorBuildScratch].
+type buildScratch struct {
+	walker   lpgNodeWalker
+	labelSrc lpgLabelResolver
+}
+
+// bind points the scratch at wv — this statement's writer view — and returns the
+// two interfaces the builder takes. It is called once per statement, at the top
+// of the bracket, before anything reads through either.
+func (s *buildScratch) bind(wv *lpg.ReadView[string, float64]) (nodeWalkerIface, labelResolverIface) {
+	s.walker.g = wv
+	// eng stays nil: the count-estimate provider (#2083) is consulted only on
+	// the read path, so the write-path resolver is deliberately lean. Assigned
+	// explicitly because the scratch is REUSED across the statements of an
+	// explicit transaction and must not inherit a previous statement's field.
+	s.labelSrc.g, s.labelSrc.eng = wv, nil
+	return &s.walker, &s.labelSrc
+}
+
+// mutatorBuildScratch returns the plan-build scratch carried by a write adapter,
+// or nil for any other mutator — which is the read-only test stubs, and they
+// never reach [Engine.execUnderBarrier].
+//
+// Reusing it across the statements of an EXPLICIT transaction is sound because
+// the statement's operator tree never outlives its own bracket: both call sites
+// drain it to a materialised Result ([Result.materialize]) before
+// execUnderBarrier returns, and a drain stopped early by a row/byte cap
+// abandons the tree rather than resuming it. Nothing therefore reads a walker
+// bound to a superseded writer view.
+func mutatorBuildScratch(m exec.GraphMutator) *buildScratch {
+	switch a := m.(type) {
+	case *lpgMutatorAdapter:
+		return &a.buildScratch
+	case *walMutatorAdapter:
+		return &a.buildScratch
+	}
+	return nil
+}
+
 // mutatorCounters returns the write-effect counters carried by a write adapter, or nil
 // for any other mutator (#2212). Reading them off the mutator the caller already passed
 // keeps [Engine.execUnderBarrier]'s signature unchanged, and returning nil for an
@@ -16032,6 +16235,8 @@ type lpgMutatorAdapter struct {
 	// NULL constraints at commit (#1754). It is nil unless the engine has at
 	// least one existence constraint active, so the common path records nothing.
 	touched *touchedNodes
+	// stampCon: see [mutationUndo.stampCon] (rmp #2353/#2355).
+	stampCon bool
 	// bopts is the per-query build options carrying the cached forward-CSR
 	// snapshot ([ensureFwdCSR]). It is used only by [EdgeHandleAtPosition] to
 	// resolve a bound relationship instance's stable handle from its forward-CSR
@@ -16080,6 +16285,27 @@ type lpgMutatorAdapter struct {
 	// leaves counters nil and never touches this field, which is what preserves the
 	// nil-means-no-write-surface contract on [Result.Counters].
 	countersStore exec.QueryCounters
+	// bufStore and undoStore are the inline backing stores the AUTOCOMMIT write
+	// path points buf and undo at, for exactly the reason countersStore exists
+	// above: the adapter is already one heap object, so the statement's index
+	// buffer and undo log ride inside it instead of costing a malloc each.
+	// Measured (rmp #2339): &exec.IndexBuffer{} and &undoLog{} were two of the
+	// three objects [Engine.runInTxSession] allocated per commit before the
+	// bracket even opened. Since both now carry their own inline element arrays,
+	// folding them in also collapses the append ladders they used to pay.
+	//
+	// An EXPLICIT transaction leaves both untouched: its buf and undo are the
+	// handle's SHARED ones, which outlive any single statement and therefore
+	// cannot live inside a per-statement adapter. See [ExplicitTx].
+	bufStore  exec.IndexBuffer
+	undoStore undoLog
+	// nowReg is the inline statement-frozen-"now" function registry, bound once
+	// per statement by [nowAwareRegistry.bind]; see it for why it is not allocated.
+	nowReg nowAwareRegistry
+	// buildScratch is the inline node walker and label resolver
+	// [Engine.execUnderBarrier] binds to this statement's writer view; see
+	// [buildScratch] for why it is reused rather than allocated per statement.
+	buildScratch buildScratch
 	// countingOff pauses effect counting for a span of internal teardown; see
 	// [exec.EffectCountingSuppressor].
 	countingOff bool
@@ -16112,6 +16338,17 @@ type lpgMutatorAdapter struct {
 // A zero wtx yields a view that carries no transaction, which is exactly right
 // for the read-only adapter stubs that never open a bracket.
 func (a *lpgMutatorAdapter) w() lpg.WriteView[string, float64] { return a.g.Writer(a.wtx) }
+
+// constraintReg returns the engine's constraint registry, or nil when the adapter
+// has no engine (a read-only test stub). A nil registry means nothing is declared,
+// so the enforcement entry points in [exec] treat it as "no constraints" rather than
+// as a missing capability — the same contract the optional journal interface uses.
+func (a *lpgMutatorAdapter) constraintReg() *exec.ConstraintRegistry {
+	if a.eng == nil {
+		return nil
+	}
+	return a.eng.constraintReg
+}
 
 func (a *lpgMutatorAdapter) cs() *count.Store {
 	if a.eng == nil {
@@ -16264,7 +16501,7 @@ func (a *lpgMutatorAdapter) countIsFresh(n string) bool {
 // rec returns the inverse-recording helper bound to this adapter's graph and
 // undo log.
 func (a *lpgMutatorAdapter) rec() mutationUndo {
-	return mutationUndo{wv: a.w(), undo: a.undo, touched: a.touched}
+	return mutationUndo{wv: a.w(), undo: a.undo, touched: a.touched, stampCon: a.stampCon}
 }
 
 // resolveID translates n to its stable NodeID, returning graph.NodeID(0)
@@ -16466,6 +16703,12 @@ func (a *lpgMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 
 // SetNodeLabel attaches label to n.
 func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) error {
+	// UNIQUE enforcement lives HERE, at the write surface every operator must
+	// traverse, so a new label-write site cannot silently skip it (rmp #2358).
+	// Before the write, because the already-a-member guard reads the node's labels.
+	if err := exec.EnforceUniqueOnLabelSet(a.constraintReg(), a, a.g.IndexManager(), n, label); err != nil {
+		return err
+	}
 	r := a.rec()
 	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
 	// Count-store (#2082): the relabel affects D/T only when the label is newly
@@ -16500,6 +16743,9 @@ func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) error {
 
 // RemoveNodeLabel detaches label from n.
 func (a *lpgMutatorAdapter) RemoveNodeLabel(n, label string) {
+	// See SetNodeLabel: enforcement is at this surface (rmp #2358), and the release
+	// must precede the write because it reads both membership and property values.
+	exec.EnforceUniqueOnLabelRemove(a.constraintReg(), a, n, label)
 	r := a.rec()
 	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
 	// Count-store (#2082): decrement the OUT-scoped D/T cells before the removal
@@ -16552,6 +16798,13 @@ func (a *lpgMutatorAdapter) IsTombstoned(id graph.NodeID) bool {
 
 // SetNodeProperty sets the named property on n.
 func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyValue) error {
+	// UNIQUE enforcement lives HERE, at the write surface every operator must
+	// traverse, so a new property-write site cannot silently skip it (rmp #2358).
+	// Before the write: it releases this node's own old value and reserves the new
+	// one, and after the write the old value is gone.
+	if err := exec.EnforceUniqueOnPropertySet(a.constraintReg(), a, a.g.IndexManager(), n, key, value); err != nil {
+		return err
+	}
 	r := a.rec()
 	fanout := indexFanoutActive(a.g, a.buf)
 	// sc is loaded once (a single lock-free pointer load; nil on a stats-free
@@ -16593,6 +16846,9 @@ func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 
 // DelNodeProperty removes the named property from n.
 func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) {
+	// See SetNodeProperty (rmp #2358); the release must precede the removal because
+	// it reads the value it gives back.
+	exec.EnforceUniqueOnPropertyDelete(a.constraintReg(), a, n, key)
 	r := a.rec()
 	fanout := indexFanoutActive(a.g, a.buf)
 	sc := a.statsColl()
@@ -16637,6 +16893,34 @@ func (a *lpgMutatorAdapter) NodeProperties(n string) map[string]lpg.PropertyValu
 // NodeLabels returns a snapshot of all labels on n.
 func (a *lpgMutatorAdapter) NodeLabels(n string) []string {
 	return a.g.NodeLabels(n)
+}
+
+// HasNodeLabelInTx reports whether n carries label in THIS transaction's view.
+//
+// It satisfies the exec package's optional transaction-visible reader (rmp
+// #2352). WriterViewOf resolves every accessor through mvcc.Visible with this
+// transaction's identity, so it sees this transaction's own eager writes and no
+// other transaction's unpublished work — unlike [lpgMutatorAdapter.NodeLabels],
+// which reads the raw present and would decide a constraint on a peer's
+// uncommitted state (the class rmp #2350 fixed for NOT NULL).
+func (a *lpgMutatorAdapter) HasNodeLabelInTx(n, label string) bool {
+	return a.g.WriterViewOf(a.wtx).HasNodeLabel(n, label)
+}
+
+// NodeLabelsInTx returns n's FULL label set in THIS transaction's view.
+//
+// The property path needs the whole set rather than a single probe, because it must
+// ask which constraints the node is currently subject to (rmp #2355). See
+// [lpgMutatorAdapter.HasNodeLabelInTx] for why the view and not the raw graph, and
+// [exec.labelsInTx] for what reading the raw graph here actually admitted.
+func (a *lpgMutatorAdapter) NodeLabelsInTx(n string) []string {
+	return a.g.WriterViewOf(a.wtx).NodeLabels(n)
+}
+
+// NodePropertyInTx returns n's value for key in THIS transaction's view. See
+// [lpgMutatorAdapter.HasNodeLabelInTx] for why the view and not the raw graph.
+func (a *lpgMutatorAdapter) NodePropertyInTx(n, key string) (lpg.PropertyValue, bool) {
+	return a.g.WriterViewOf(a.wtx).GetNodeProperty(n, key)
 }
 
 // HasEdge reports whether a directed edge from src to dst is present.
@@ -16952,6 +17236,18 @@ type walMutatorAdapter struct {
 	// countersStore is the inline backing store, as on [lpgMutatorAdapter]: pointing
 	// counters into the adapter keeps per-statement counting allocation-free.
 	countersStore exec.QueryCounters
+	// bufStore and undoStore are the inline backing stores for the AUTOCOMMIT
+	// path, exactly as on [lpgMutatorAdapter] — see the fields of the same name
+	// there for the measurement (rmp #2339) and for why an explicit transaction
+	// must not use them.
+	bufStore  exec.IndexBuffer
+	undoStore undoLog
+	// nowReg is the inline statement-frozen-"now" function registry, bound once
+	// per statement by [nowAwareRegistry.bind]; see it for why it is not allocated.
+	nowReg nowAwareRegistry
+	// buildScratch is the inline plan-build scratch, exactly as on
+	// [lpgMutatorAdapter].
+	buildScratch buildScratch
 	// countingOff pauses effect counting for a span of internal teardown; see
 	// [exec.EffectCountingSuppressor].
 	countingOff bool
@@ -16963,6 +17259,8 @@ type walMutatorAdapter struct {
 	// NULL constraints at commit (#1754). It is nil unless the engine has at
 	// least one existence constraint active, so the common path records nothing.
 	touched *touchedNodes
+	// stampCon: see [mutationUndo.stampCon] (rmp #2353/#2355).
+	stampCon bool
 	// bopts is the per-query build options carrying the cached forward-CSR
 	// snapshot ([ensureFwdCSR]). It is used only by [EdgeHandleAtPosition] to
 	// resolve a bound relationship instance's stable handle from its forward-CSR
@@ -16986,6 +17284,14 @@ type walMutatorAdapter struct {
 	// (#2082), so initial CREATE labelling is not mistaken for a relabel; see the
 	// lpgMutatorAdapter twin.
 	fresh map[string]struct{}
+}
+
+// constraintReg mirrors [lpgMutatorAdapter.constraintReg].
+func (a *walMutatorAdapter) constraintReg() *exec.ConstraintRegistry {
+	if a.eng == nil {
+		return nil
+	}
+	return a.eng.constraintReg
 }
 
 // cs returns the engine's relationship count-store, or nil when the adapter has
@@ -17137,7 +17443,7 @@ func (a *walMutatorAdapter) countIsFresh(n string) bool {
 func (a *walMutatorAdapter) w() lpg.WriteView[string, float64] { return a.g.Writer(a.wtx) }
 
 func (a *walMutatorAdapter) rec() mutationUndo {
-	return mutationUndo{wv: a.w(), undo: a.undo, touched: a.touched}
+	return mutationUndo{wv: a.w(), undo: a.undo, touched: a.touched, stampCon: a.stampCon}
 }
 
 func (a *walMutatorAdapter) resolveID(n string) graph.NodeID {
@@ -17303,6 +17609,11 @@ func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 
 // SetNodeLabel attaches label to n.
 func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
+	// See the lpgMutatorAdapter twin: UNIQUE is enforced at this surface, before the
+	// write (rmp #2358).
+	if err := exec.EnforceUniqueOnLabelSet(a.constraintReg(), a, a.g.IndexManager(), n, label); err != nil {
+		return err
+	}
 	r := a.rec()
 	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
 	// Count-store (#2082): see the lpgMutatorAdapter twin; Size()==0 short-circuits
@@ -17335,6 +17646,8 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 
 // RemoveNodeLabel detaches label from n.
 func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) {
+	// See the lpgMutatorAdapter twin (rmp #2358).
+	exec.EnforceUniqueOnLabelRemove(a.constraintReg(), a, n, label)
 	r := a.rec()
 	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
 	// Count-store (#2082): decrement OUT-scoped cells before the removal, dirty
@@ -17387,6 +17700,10 @@ func (a *walMutatorAdapter) IsTombstoned(id graph.NodeID) bool {
 
 // SetNodeProperty sets the named property on n.
 func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyValue) error {
+	// See the lpgMutatorAdapter twin (rmp #2358).
+	if err := exec.EnforceUniqueOnPropertySet(a.constraintReg(), a, a.g.IndexManager(), n, key, value); err != nil {
+		return err
+	}
 	r := a.rec()
 	fanout := indexFanoutActive(a.g, a.buf)
 	sc := a.statsColl()
@@ -17423,6 +17740,8 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 
 // DelNodeProperty removes the named property from n.
 func (a *walMutatorAdapter) DelNodeProperty(n, key string) {
+	// See the lpgMutatorAdapter twin (rmp #2358).
+	exec.EnforceUniqueOnPropertyDelete(a.constraintReg(), a, n, key)
 	r := a.rec()
 	fanout := indexFanoutActive(a.g, a.buf)
 	sc := a.statsColl()
@@ -17466,6 +17785,25 @@ func (a *walMutatorAdapter) NodeProperties(n string) map[string]lpg.PropertyValu
 // NodeLabels returns a snapshot of all labels on n.
 func (a *walMutatorAdapter) NodeLabels(n string) []string {
 	return a.g.NodeLabels(n)
+}
+
+// HasNodeLabelInTx reports whether n carries label in THIS transaction's view.
+// See [lpgMutatorAdapter.HasNodeLabelInTx] for why the view and not the raw graph.
+func (a *walMutatorAdapter) HasNodeLabelInTx(n, label string) bool {
+	return a.g.WriterViewOf(a.wtx).HasNodeLabel(n, label)
+}
+
+// NodeLabelsInTx returns n's FULL label set in THIS transaction's view. See
+// [lpgMutatorAdapter.NodeLabelsInTx] for why the property path needs the whole set
+// (rmp #2355).
+func (a *walMutatorAdapter) NodeLabelsInTx(n string) []string {
+	return a.g.WriterViewOf(a.wtx).NodeLabels(n)
+}
+
+// NodePropertyInTx returns n's value for key in THIS transaction's view. See
+// [lpgMutatorAdapter.HasNodeLabelInTx] for why the view and not the raw graph.
+func (a *walMutatorAdapter) NodePropertyInTx(n, key string) (lpg.PropertyValue, bool) {
+	return a.g.WriterViewOf(a.wtx).GetNodeProperty(n, key)
 }
 
 // HasEdge reports whether a directed edge from src to dst is present.

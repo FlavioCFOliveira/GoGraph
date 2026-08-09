@@ -185,12 +185,15 @@ func (e *ErrStatementPipeline) Unwrap() error { return e.Err }
 //
 // See the package file exectx.go for the full transaction, durability, and
 // concurrency contract. In brief: writes accumulate and become durable together
-// on Commit (WAL-backed) or unwind together on Rollback; the handle holds both
-// the engine's writer serialisation and the graph's transaction-visibility write
-// lock (visMu) for its whole lifetime — write-write Isolation for writers; a
-// concurrent reader takes no barrier and observes snapshot isolation against
-// the state before this transaction began, without waiting for it (rmp #2290);
-// it is NOT safe for concurrent use by multiple goroutines.
+// on Commit (WAL-backed) or unwind together on Rollback; the handle holds NO LOCK
+// across its lifetime — each statement takes the schema barrier SHARED for its own
+// duration and nothing is held between statements (rmp #2305), and the engine's
+// former writer serialisation (Engine.writeMu) no longer exists at all (rmp #2306).
+// Write-write isolation therefore comes from per-object conflict detection against
+// this transaction's snapshot (rmp #2300), not from exclusion. A concurrent reader
+// takes no barrier and observes snapshot isolation against the state before this
+// transaction began, without waiting for it (rmp #2290); the handle itself is NOT
+// safe for concurrent use by multiple goroutines.
 type ExplicitTx struct {
 	eng *Engine
 
@@ -229,6 +232,8 @@ type ExplicitTx struct {
 	// existence constraint active when BeginTx ran, so a transaction with none
 	// records nothing. Shared by all statement mutators; checked once at Commit.
 	touched *touchedNodes
+	// stampCon: see [mutationUndo.stampCon] (rmp #2353/#2355).
+	stampCon bool
 
 	// walTx is the single WAL transaction backing the whole explicit transaction,
 	// non-nil only on a WAL-backed engine. It holds the store's writer
@@ -289,9 +294,15 @@ type ExplicitTx struct {
 	// than read-committed — without it each Exec opened a fresh instant and a
 	// commit landing between two statements became visible mid-transaction.
 	//
-	// nil on a write handle, which needs no separate view: it holds visMu
-	// exclusively from BEGIN to COMMIT, so nothing else can publish a commit
-	// while it runs, and it must read the present to see its own writes.
+	// nil on a write handle, which needs no separate view because it must read the
+	// PRESENT to see its own uncommitted writes: it resolves through its own
+	// transaction id via [mvcc.Visible], not through a pinned start instant.
+	//
+	// This used to say the write handle holds visMu exclusively from BEGIN to
+	// COMMIT so nothing else can publish a commit while it runs. THAT IS FALSE
+	// since rmp #2305: no lock spans the handle, other transactions publish
+	// commits freely while it is open, and what keeps this handle's own reads
+	// stable is the transaction id it stamps its versions with — not exclusion.
 	//
 	// The horizon slot it occupies is released exactly once, in [release], so
 	// every exit path — Commit, Rollback, a panic in Exec, a panic in
@@ -301,16 +312,23 @@ type ExplicitTx struct {
 }
 
 // BeginTx opens an explicit, multi-statement transaction bound to ctx. It acquires
-// NO writer serialisation — concurrency control is MVCC alone since rmp #2306 —
-// but it does take the graph's visibility barrier exclusively, which until
-// rmp #2305 retires it still blocks concurrent writers for the transaction's
-// lifetime. The caller MUST finish the returned handle with exactly one
-// [ExplicitTx.Commit] or [ExplicitTx.Rollback].
+// NOTHING: no writer serialisation, no visibility barrier, no lock of any kind.
+// Concurrency control is MVCC alone. The caller MUST finish the returned handle with
+// exactly one [ExplicitTx.Commit] or [ExplicitTx.Rollback].
+//
+// This doc used to read "but it does take the graph's visibility barrier
+// exclusively, which until rmp #2305 retires it still blocks concurrent writers for
+// the transaction's lifetime". THAT IS FALSE and has been since rmp #2305 did retire
+// it — the sentence outlived the change it was describing, and it contradicted both
+// this file's own header ("What serialises an explicit transaction: NOTHING") and
+// the [ExplicitTx.view] field doc. What keeps this handle's reads stable is the
+// transaction id it stamps its versions with, not exclusion (rmp #2345).
 //
 // ctx bounds every statement executed through the handle. Pass the connection
 // context (optionally narrowed with a transaction timeout) so that a cancelled
 // connection, a server shutdown, or an elapsed timeout interrupts an in-flight
-// statement and guarantees the writer serialisation cannot be held forever.
+// statement. It no longer guards against a serialisation being held forever —
+// there is none to hold — but it still bounds a statement queued behind a DDL.
 //
 // ctx also bounds the ACQUISITION, not only the statements that follow. BeginTx
 // takes three things in order — the writer serialisation, the WAL transaction,
@@ -330,8 +348,8 @@ type ExplicitTx struct {
 //
 // The error is returned within the deadline plus a small, bounded margin: the
 // margin is one scheduling hop, not the holder's remaining tenure. See
-// internal/ctxlock for why a queued lock acquisition cannot simply be abandoned
-// and what is done instead.
+// [mvcc.Gate.StrongLockCtx] and the acquireCtx helper beside it for why a queued
+// lock acquisition cannot simply be abandoned and what is done instead.
 //
 // See exectx.go for the full transaction and concurrency contract, including the
 // isolation scope: concurrent readers do NOT block while this transaction is
@@ -366,6 +384,10 @@ func (e *Engine) beginTxSession(ctx context.Context, sess *lpg.Session[string, f
 	if e.constraintReg != nil && e.constraintReg.HasAnyNotNull() {
 		tx.touched = &touchedNodes{}
 	}
+	// The per-node CONSTRAINT stamp is gated separately and more widely; see the
+	// matching comment on the autocommit path (rmp #2353, widened by rmp #2355).
+	tx.stampCon = e.constraintReg != nil &&
+		(e.constraintReg.HasAnyNotNull() || e.constraintReg.HasAnyUnique())
 	// Open the WAL transaction on a WAL-backed engine. Store.BeginCtx registers this
 	// transaction as an admitted writer until Commit/Rollback. It no longer excludes
 	// anybody (rmp #2306 retired the capacity-one semaphore), so the only thing that
@@ -571,9 +593,9 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 	// buffer so every statement's count deltas accumulate together and the handle
 	// flushes them once at Commit (#2082), mirroring the shared index buffer.
 	if tx.walTx != nil {
-		mutator = &walMutatorAdapter{g: tx.eng.g, tx: tx.walTx, buf: tx.buf, undo: tx.undo, touched: tx.touched, cbuf: tx.cbuf, eng: tx.eng}
+		mutator = &walMutatorAdapter{g: tx.eng.g, tx: tx.walTx, buf: tx.buf, undo: tx.undo, touched: tx.touched, stampCon: tx.stampCon, cbuf: tx.cbuf, eng: tx.eng}
 	} else {
-		mutator = &lpgMutatorAdapter{g: tx.eng.g, buf: tx.buf, undo: tx.undo, touched: tx.touched, cbuf: tx.cbuf, eng: tx.eng}
+		mutator = &lpgMutatorAdapter{g: tx.eng.g, buf: tx.buf, undo: tx.undo, touched: tx.touched, stampCon: tx.stampCon, cbuf: tx.cbuf, eng: tx.eng}
 	}
 
 	// One statement, one SHARED hold on the schema barrier, carrying THIS handle's
@@ -654,6 +676,7 @@ func (tx *ExplicitTx) Commit() (err error) {
 
 	var walErr error
 	var notNullErr error
+	var conflictErr error
 	// The finalisation runs under a SHARED hold carrying this transaction, exactly as
 	// a statement does. It is UNCANCELLABLE: the statements have already applied, so
 	// abandoning the finalisation would leave the commit record neither published nor
@@ -665,6 +688,36 @@ func (tx *ExplicitTx) Commit() (err error) {
 			func(lpg.WriteTx) error { return fn() })
 	}
 	_ = applyFn(func() error {
+		// SERIALIZATION-CONFLICT BACKSTOP (rmp #2354, ACID Atomicity + Isolation).
+		//
+		// Runs before everything else, inside the barrier, BEFORE the WAL fsync.
+		//
+		// tx.failed above catches only a statement that RETURNED an error. A conflict
+		// hit by a primitive that cannot return one — a label removal, a property
+		// delete, any of the five per-edge side stores — is RECORDED on the
+		// transaction instead and surfaces nowhere unless it is asked for
+		// ([lpg.WriteTx.Err], and see it for the prior art). Without this check such a
+		// transaction committed successfully having silently dropped that write:
+		//
+		//	T1: REMOVE n:Acct   (uncommitted)
+		//	T2: REMOVE n:Acct   → conflict RECORDED, statement returns nil
+		//	T2: COMMIT          → nil, and the label is still there
+		//
+		// which is a lost update with nothing reporting it. Measured exactly that by
+		// TestLabelStore_ConcurrentRemove, which fails against a build without this.
+		// lpg's own labelTx.commit has always asked; this path never did.
+		//
+		// A doomed transaction is rolled back atomically here, exactly like the NOT
+		// NULL violation and the fsync failure below, so none of its eager writes
+		// survive the barrier.
+		if cerr := tx.wtx.Err(); cerr != nil {
+			cmetrics.IncCounter("cypher.ExplicitTx.serializationConflicts", 1)
+			conflictErr = cerr
+			if undoOK := tx.rollbackInBarrierLocked(); !undoOK {
+				conflictErr = wrapUndoFailure(conflictErr)
+			}
+			return nil
+		}
 		// Commit-time NOT NULL existence check (#1754, ACID Consistency). Runs
 		// FIRST, inside the barrier, BEFORE the WAL fsync, so a node left in its
 		// final committed state carrying a constrained label but lacking the
@@ -672,7 +725,9 @@ func (tx *ExplicitTx) Commit() (err error) {
 		// accumulated in-memory undo is replayed and the index/WAL rolled back,
 		// exactly like the fsync-failure branch below. touched is nil (check a
 		// no-op) unless the engine had an existence constraint active at BeginTx.
-		if nnErr := tx.touched.checkNotNullConstraints(tx.eng.constraintReg, tx.eng.g); nnErr != nil {
+		// Through THIS transaction's view (rmp #2350); see the same call in
+		// commitUnderBarrier.
+		if nnErr := tx.touched.checkNotNullConstraints(tx.eng.constraintReg, tx.eng.g.WriterViewOf(tx.wtx)); nnErr != nil {
 			cmetrics.IncCounter("cypher.ExplicitTx.constraint.notNullViolations", 1)
 			notNullErr = nnErr
 			if undoOK := tx.rollbackInBarrierLocked(); !undoOK {
@@ -714,6 +769,13 @@ func (tx *ExplicitTx) Commit() (err error) {
 		tx.undo = nil
 		return nil
 	})
+	// Reported BEFORE the NOT NULL verdict: a doomed transaction's own view is a
+	// state that will never commit, so a constraint conclusion drawn from it is
+	// drawn from an invalid premise. The conflict is also the RETRIABLE answer, and
+	// it is the one the caller can act on.
+	if conflictErr != nil {
+		return conflictErr
+	}
 	if notNullErr != nil {
 		return notNullErr
 	}

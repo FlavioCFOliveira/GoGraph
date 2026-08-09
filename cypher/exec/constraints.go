@@ -135,6 +135,17 @@ type ConstraintRegistry struct {
 	// allocation and a reader that already holds one is never affected by a
 	// concurrent modification.
 	notNullByLabel map[string][]string
+	// uniqueByLabel is the same label → property-keys index for UNIQUE
+	// constraints, maintained alongside unique by RegisterUnique /
+	// UnregisterUnique under the identical copy-on-write discipline (see
+	// [addLabelProp]), so [UniqueProperties] hands back the internal slice with
+	// zero allocation.
+	//
+	// It exists because the LABEL-set path needs the inverse lookup the (label,
+	// prop)-keyed `unique` map cannot answer: `SET n:Person` knows the label and
+	// must discover which of that label's properties are constrained, whereas
+	// every property-set caller already knows both halves of the key (rmp #2352).
+	uniqueByLabel map[string][]string
 
 	mu sync.RWMutex
 
@@ -183,6 +194,7 @@ func NewConstraintRegistry() *ConstraintRegistry {
 		uniqueNames:    make(map[ckey]string),
 		notNullNames:   make(map[ckey]string),
 		notNullByLabel: make(map[string][]string),
+		uniqueByLabel:  make(map[string][]string),
 	}
 }
 
@@ -223,6 +235,7 @@ func (r *ConstraintRegistry) RegisterUnique(label, prop, indexName string) {
 	if r.valueSets[key] == nil {
 		r.valueSets[key] = make(map[string]struct{})
 	}
+	addLabelProp(r.uniqueByLabel, label, prop)
 	if !existed {
 		r.uniqueActive.Add(1)
 	}
@@ -387,14 +400,24 @@ func (r *ConstraintRegistry) RegisterNotNull(label, prop string) {
 		r.notNullActive.Add(1)
 	}
 	r.notNull[key] = true
-	r.addNotNullByLabel(label, prop)
+	addLabelProp(r.notNullByLabel, label, prop)
 	r.mu.Unlock()
 }
 
-// addNotNullByLabel adds prop to the copy-on-write label index, deduplicating.
-// Callers hold r.mu.
-func (r *ConstraintRegistry) addNotNullByLabel(label, prop string) {
-	old := r.notNullByLabel[label]
+// addLabelProp adds prop to idx[label] in the copy-on-write label index,
+// deduplicating. Callers hold r.mu.
+//
+// The slice is REPLACED rather than appended to in place. That is the property
+// [NotNullProperties] and [UniqueProperties] rest on: they return the registry's
+// own slice with zero allocation, so a reader already holding one must never see
+// it change underneath. `append` onto a slice with spare capacity would mutate
+// the shared backing array and break exactly that.
+//
+// One helper serves both the NOT NULL and the UNIQUE index because the discipline
+// is identical and a second copy would be free to drift — and a drift here is a
+// label whose constraint the write path stops finding.
+func addLabelProp(idx map[string][]string, label, prop string) {
+	old := idx[label]
 	for _, p := range old {
 		if p == prop {
 			return // already present
@@ -403,13 +426,14 @@ func (r *ConstraintRegistry) addNotNullByLabel(label, prop string) {
 	next := make([]string, len(old)+1)
 	copy(next, old)
 	next[len(old)] = prop
-	r.notNullByLabel[label] = next
+	idx[label] = next
 }
 
-// removeNotNullByLabel removes prop from the copy-on-write label index, dropping
-// the label entry when it becomes empty. Callers hold r.mu.
-func (r *ConstraintRegistry) removeNotNullByLabel(label, prop string) {
-	old := r.notNullByLabel[label]
+// removeLabelProp removes prop from idx[label] in the copy-on-write label index,
+// dropping the label entry when it becomes empty. Callers hold r.mu. See
+// [addLabelProp] for why the slice is replaced rather than mutated.
+func removeLabelProp(idx map[string][]string, label, prop string) {
+	old := idx[label]
 	if len(old) == 0 {
 		return
 	}
@@ -420,10 +444,10 @@ func (r *ConstraintRegistry) removeNotNullByLabel(label, prop string) {
 		}
 	}
 	if len(next) == 0 {
-		delete(r.notNullByLabel, label)
+		delete(idx, label)
 		return
 	}
-	r.notNullByLabel[label] = next
+	idx[label] = next
 }
 
 // UnregisterUnique removes the unique constraint for (label, prop). No-op if
@@ -437,6 +461,7 @@ func (r *ConstraintRegistry) UnregisterUnique(label, prop string) {
 	delete(r.unique, key)
 	delete(r.valueSets, key)
 	delete(r.uniqueNames, key)
+	removeLabelProp(r.uniqueByLabel, label, prop)
 	r.mu.Unlock()
 }
 
@@ -459,7 +484,7 @@ func (r *ConstraintRegistry) UnregisterNotNull(label, prop string) {
 	}
 	delete(r.notNull, key)
 	delete(r.notNullNames, key)
-	r.removeNotNullByLabel(label, prop)
+	removeLabelProp(r.notNullByLabel, label, prop)
 	r.mu.Unlock()
 }
 
@@ -564,6 +589,33 @@ func (r *ConstraintRegistry) HasAnyNotNull() bool { return r.notNullActive.Load(
 func (r *ConstraintRegistry) NotNullProperties(label string) []string {
 	r.mu.RLock()
 	out := r.notNullByLabel[label]
+	r.mu.RUnlock()
+	return out
+}
+
+// UniqueProperties returns the property keys for which a UNIQUE constraint is
+// registered on label, or nil when label carries no uniqueness constraint. It is
+// the per-label lookup the LABEL-set path uses to discover which of a node's
+// properties attaching that label brings under a uniqueness constraint (rmp
+// #2352) — the inverse of the (label, prop) lookup every property-set caller
+// makes, which already knows both halves of the key.
+//
+// The lookup is O(1) via the uniqueByLabel index and allocates nothing: it
+// returns the registry's own copy-on-write slice, which RegisterUnique /
+// UnregisterUnique never mutate in place. The caller must treat the result as
+// READ-ONLY (it is shared and must not be appended to or modified). Most labels
+// carry zero or one uniqueness constraint, so the common return is nil or a
+// one-element slice.
+//
+// Callers on the write path MUST gate this behind [HasAnyUnique], which is a
+// lock-free atomic load: UniqueProperties itself takes the registry read lock,
+// and putting that on every label write of an unconstrained schema is precisely
+// the cost [ConstraintRegistry.uniqueActive] exists to avoid.
+//
+// UniqueProperties is safe for concurrent use.
+func (r *ConstraintRegistry) UniqueProperties(label string) []string {
+	r.mu.RLock()
+	out := r.uniqueByLabel[label]
 	r.mu.RUnlock()
 	return out
 }
@@ -768,6 +820,25 @@ func (r *ConstraintRegistry) checkSetPropertyLocked(labels []string, prop string
 // written to a node with the given labels. This keeps the unique value sets
 // up-to-date so that subsequent CheckSetProperty calls detect violations.
 // It is a no-op when no unique constraint exists for (label, prop).
+// # DO NOT CALL THIS FROM A WRITE PATH (rmp #2357/#2358)
+//
+// Its only legitimate caller is [releaseConstraintValue], where it IS the journaled
+// inverse of a release: a rolled-back release must put the value back.
+//
+// Every write path must reserve through [reserveConstraintValue] and nothing else.
+// Eleven write sites used to call this immediately AFTER their reserve, and every
+// one of those calls was dead weight: the body below is the SAME set insert as
+// [ConstraintRegistry.ReserveSetProperty]'s phase 2, over the same (labels, prop,
+// value), and a set insert is idempotent — so the value was already present. What it
+// was not free of is r.mu: each call took this registry's WRITE lock a second time
+// per constrained property write, and
+// [nodeStateReader] records that this lock measured 57 % of ALL lock delay at sixteen
+// writers on a schema with no constraints at all. Verified site by site before the
+// calls were removed, including the three whose reserve sits more than a dozen lines
+// above it.
+//
+// A new write path that "records" what it has already reserved therefore buys
+// nothing and pays a lock acquisition. Reserve, and stop.
 func (r *ConstraintRegistry) RecordPropertySet(labels []string, prop string, value lpg.PropertyValue) {
 	// No UNIQUE constraint anywhere: nothing to record, and taking this registry's
 	// global lock would put one mutex on every property write for no benefit. See

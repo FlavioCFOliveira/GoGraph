@@ -650,14 +650,8 @@ func (op *SetAllProperties) clearTarget(target entityBinding) {
 		return
 	}
 	props := op.mutator.NodeProperties(target.nodeKey)
-	var labels []string
-	if op.reg != nil {
-		labels = op.mutator.NodeLabels(target.nodeKey)
-	}
-	for k, oldVal := range props {
-		if op.reg != nil {
-			releaseConstraintValue(op.reg, op.mutator, labels, k, oldVal)
-		}
+	for k := range props {
+		// DelNodeProperty releases, at the mutator choke point (rmp #2358).
 		op.mutator.DelNodeProperty(target.nodeKey, k)
 	}
 }
@@ -682,23 +676,11 @@ func (op *SetAllProperties) writeOne(target entityBinding, key string, value lpg
 		}
 		return nil
 	}
-	if op.reg != nil {
-		labels := op.mutator.NodeLabels(target.nodeKey)
-		// Release the node's own prior value for this key before the check so an
-		// idempotent self-set is not rejected as its own duplicate.
-		if oldVal, had := op.mutator.NodeProperties(target.nodeKey)[key]; had {
-			releaseConstraintValue(op.reg, op.mutator, labels, key, oldVal)
-		}
-		if cerr := reserveConstraintValue(op.reg, op.mutator, labels, key, value, op.mgr); cerr != nil {
-			return cerr
-		}
-	}
+	// Released-then-reserved inside SetNodeProperty, at the mutator choke point,
+	// which is also what returns a genuine violation as an error so the enclosing
+	// statement rolls back atomically rather than silently skipping (rmp #2358).
 	if serr := op.mutator.SetNodeProperty(target.nodeKey, key, value); serr != nil {
 		return serr
-	}
-	if op.reg != nil {
-		labels := op.mutator.NodeLabels(target.nodeKey)
-		op.reg.RecordPropertySet(labels, key, value)
 	}
 	return nil
 }
@@ -716,11 +698,7 @@ func (op *SetAllProperties) deleteOne(target entityBinding, key string) {
 		}
 		return
 	}
-	if op.reg != nil {
-		if oldVal, had := op.mutator.NodeProperties(target.nodeKey)[key]; had {
-			releaseConstraintValue(op.reg, op.mutator, op.mutator.NodeLabels(target.nodeKey), key, oldVal)
-		}
-	}
+	// DelNodeProperty releases, at the mutator choke point (rmp #2358).
 	op.mutator.DelNodeProperty(target.nodeKey, key)
 }
 

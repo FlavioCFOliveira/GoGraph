@@ -104,16 +104,14 @@ func TestIsolation_ViewWithUnversionedReadIsNotAtomic(t *testing.T) {
 	defer cleanup()
 
 	violation, reads := runIsolationWorkload(t, g, store, func(g *lpg.Graph[string, int64]) (ia, ib int64, ok bool) {
-		g.View(func() {
-			va, oka := g.GetNodeProperty("a", "v")
-			vb, okb := g.GetNodeProperty("b", "v")
-			if !oka || !okb {
-				return
-			}
-			ia, _ = va.Int64()
-			ib, _ = vb.Int64()
-			ok = true
-		})
+		va, oka := g.GetNodeProperty("a", "v")
+		vb, okb := g.GetNodeProperty("b", "v")
+		if !oka || !okb {
+			return
+		}
+		ia, _ = va.Int64()
+		ib, _ = vb.Int64()
+		ok = true
 		return ia, ib, ok
 	})
 

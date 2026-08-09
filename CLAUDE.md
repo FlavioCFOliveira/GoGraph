@@ -60,6 +60,11 @@ No step may be skipped or reordered.
 
 ### Git command execution
 
+**Every `git` command is prepared and executed individually, under the coordination of the `gitflow` skill.** The skill owns the branching model and decides *which* git operation is correct for the situation; this section governs *how* each one is issued.
+
+- **The `gitflow` skill coordinates every git operation.** Invoke it for the operations it owns — opening and closing a sprint's working branch, recording a closed task as a commit, cutting a release or a hotfix, merging, and any question about branch state relative to the gitflow model. Do not improvise a branching or merging decision that the skill exists to make.
+- **The skill coordinates; it does not batch.** Whatever the skill prescribes is still issued one `git` invocation at a time, exactly as the rules below require. A plan produced by the skill is a sequence of individual executions, never a single compound one.
+
 **Every `git` command is executed individually, on its own, and never together with any other command.** One `git` invocation per command execution — nothing before it, nothing after it.
 
 - Never chain a `git` command with another command, by any means: no `&&`, no `||`, no `;`, no pipelines, no command substitution wrapping another command, no shell loops that run several commands in one invocation.

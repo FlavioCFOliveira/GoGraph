@@ -120,13 +120,8 @@ func (op *RemoveProperty) Next(out *Row) (bool, error) {
 				op.mutator.DelEdgePropertyByHandle(ent.relSrcKey, ent.relDstKey, ent.relHandle, op.propertyKey)
 			}
 		} else {
-			// Release the constrained value before removing the property so
-			// the slot is freed in the registry.
-			if op.reg != nil {
-				if oldVal, had := op.mutator.NodeProperties(ent.nodeKey)[op.propertyKey]; had {
-					releaseConstraintValue(op.reg, op.mutator, op.mutator.NodeLabels(ent.nodeKey), op.propertyKey, oldVal)
-				}
-			}
+			// DelNodeProperty frees the constrained slot, at the mutator choke
+			// point and before the removal it guards (rmp #2358).
 			op.mutator.DelNodeProperty(ent.nodeKey, op.propertyKey)
 		}
 	}
@@ -150,11 +145,19 @@ func (op *RemoveProperty) Close() error {
 // RemoveLabels removes one or more labels from an already-bound node per input
 // row.
 //
+// Detaching a label takes the node OUT of every UNIQUE constraint declared on
+// that label, so the operator releases the node's reservation for each
+// constrained property before it writes — without that, the value stays reserved
+// for ever and a later legitimate write of it is refused by a phantom. See
+// cypher/exec/label_constraints.go. Enforcement is inert unless a UNIQUE
+// constraint is registered.
+//
 // RemoveLabels is NOT safe for concurrent use.
 type RemoveLabels struct {
 	child   Operator
 	mutator GraphMutator
-	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
+	ctx     context.Context     //nolint:containedctx // stored for per-Next ctx check
+	reg     *ConstraintRegistry // nil means no constraint maintenance
 	schema  map[string]int
 	nodeVar string
 	labels  []string
@@ -177,6 +180,15 @@ func NewRemoveLabels(
 		child:   child,
 		mutator: mutator,
 	}
+}
+
+// WithConstraintRegistry attaches a ConstraintRegistry so RemoveLabels releases
+// the unique-constraint reservations the detached labels free. Returns op for
+// chaining. No index.Manager is needed: releasing consults only the registry's
+// own value-set, never the backing hash index.
+func (op *RemoveLabels) WithConstraintRegistry(reg *ConstraintRegistry) *RemoveLabels {
+	op.reg = reg
+	return op
 }
 
 // Init initialises the operator and its child.
@@ -218,6 +230,8 @@ func (op *RemoveLabels) Next(out *Row) (bool, error) {
 	}
 
 	for _, lbl := range op.labels {
+		// RemoveNodeLabel gives the reservation back, at the mutator choke point and
+		// before the write it guards (rmp #2358).
 		op.mutator.RemoveNodeLabel(nodeKey, lbl)
 	}
 

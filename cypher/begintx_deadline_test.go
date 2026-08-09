@@ -121,12 +121,16 @@ func TestBeginTx_DoesNotWaitForAnythingAtAll(t *testing.T) {
 	readerOut := make(chan struct{})
 	go func() {
 		defer close(readerOut)
-		g.View(func() {
-			close(readerIn)
-			time.Sleep(readerHold)
-		})
+		// A READER, as a reader now is: a pinned MVCC snapshot and no lock at
+		// all (rmp #2344 removed lpg.Graph.View, which is what this used to
+		// hold). Holding it for readerHold is what makes a reintroduced
+		// acquisition in BeginTx observable as a delay.
+		snap := g.BeginRead()
+		defer g.EndRead(snap)
+		close(readerIn)
+		time.Sleep(readerHold)
 	}()
-	<-readerIn // the barrier's read side is now held
+	<-readerIn // a reader now holds an open snapshot
 
 	start := time.Now()
 	tx, err := eng.BeginTx(context.Background())

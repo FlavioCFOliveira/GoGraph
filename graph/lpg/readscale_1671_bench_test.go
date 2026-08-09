@@ -61,13 +61,11 @@ func BenchmarkReadScale1671_ViewBarrier(b *testing.B) {
 			i++
 			var hot bool
 			var v int64
-			g.View(func() {
-				hot = g.HasNodeLabelByID(id, "Hot")
-				if pv, ok := g.NodePropertyByID(id, "v"); ok {
-					iv, _ := pv.Int64()
-					v = iv
-				}
-			})
+			hot = g.HasNodeLabelByID(id, "Hot")
+			if pv, ok := g.NodePropertyByID(id, "v"); ok {
+				iv, _ := pv.Int64()
+				v = iv
+			}
 			if hot {
 				atomic.AddInt64(&ctr, v)
 			}
@@ -114,13 +112,11 @@ func BenchmarkReadScale1671_ViewUnderWriter(b *testing.B) {
 			i++
 			var hot bool
 			var v int64
-			g.View(func() {
-				hot = g.HasNodeLabelByID(id, "Hot")
-				if pv, ok := g.NodePropertyByID(id, "v"); ok {
-					iv, _ := pv.Int64()
-					v = iv
-				}
-			})
+			hot = g.HasNodeLabelByID(id, "Hot")
+			if pv, ok := g.NodePropertyByID(id, "v"); ok {
+				iv, _ := pv.Int64()
+				v = iv
+			}
 			if hot {
 				atomic.AddInt64(&ctr, v)
 			}

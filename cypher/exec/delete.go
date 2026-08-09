@@ -96,19 +96,6 @@ func (op *DeleteNode) WithConstraintRegistry(reg *ConstraintRegistry) *DeleteNod
 	return op
 }
 
-// releaseNodeConstraintValues releases unique-constraint value reservations
-// for every constrained property of nodeKey. It is called immediately before
-// the node's labels and properties are stripped so the registry no longer
-// treats the values as "in use". A nil reg is a no-op.
-func (op *DeleteNode) releaseNodeConstraintValues(nodeKey string, labels []string) {
-	if op.reg == nil {
-		return
-	}
-	for k, pv := range op.mutator.NodeProperties(nodeKey) {
-		releaseConstraintValue(op.reg, op.mutator, labels, k, pv)
-	}
-}
-
 // WithTargetEvalFn attaches a per-row evaluator for non-variable DELETE
 // targets (subscripts, property access, …). When set, the operator
 // resolves the target value via the evaluator instead of the schema
@@ -209,8 +196,8 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 				// user-visible side effect: openCypher declares DELETE as -nodes only
 				// (#2212). Suppress effect counting for the span.
 				resumeCounting := suppressEffectCounting(op.mutator)
-				pathNodeLabels := op.mutator.NodeLabels(nodeKey)
-				op.releaseNodeConstraintValues(nodeKey, pathNodeLabels)
+				// RemoveNodeLabel releases; see the twin below (rmp #2358).
+				pathNodeLabels := labelsInTx(op.mutator, nodeKey)
 				for _, lbl := range pathNodeLabels {
 					op.mutator.RemoveNodeLabel(nodeKey, lbl)
 				}
@@ -340,7 +327,7 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 	// tombstoned, so `RETURN id(n)` still works but `RETURN n.foo` /
 	// `labels(n)` raise EntityNotFound on the Deleted flag (Return2 [15]
 	// / [16]).
-	deletedLabels := append([]string(nil), op.mutator.NodeLabels(nodeKey)...)
+	deletedLabels := append([]string(nil), labelsInTx(op.mutator, nodeKey)...)
 	var deletedProps expr.MapValue
 	if raw := op.mutator.NodeProperties(nodeKey); len(raw) > 0 {
 		deletedProps = make(expr.MapValue, len(raw))
@@ -349,16 +336,18 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 				deletedProps[k] = v
 			}
 		}
-		// Release every constrained property value so the slot is no longer
-		// treated as "in use" after the node is gone.
-		op.releaseNodeConstraintValues(nodeKey, deletedLabels)
 	}
+	// The constrained values this node holds are given back by RemoveNodeLabel
+	// below, at the mutator choke point (rmp #2358). The bulk release that used to
+	// stand here would now be a SECOND release of the same reservations, and a
+	// release is not idempotent: it would hand a live value back and admit a
+	// genuine duplicate afterwards.
 	// Stripping the node's labels and properties is internal teardown, not a
 	// user-visible side effect: openCypher declares DELETE as -nodes only
 	// (#2212). Suppress effect counting for the span.
 	resumeCounting := suppressEffectCounting(op.mutator)
 	// Remove all labels.
-	for _, lbl := range op.mutator.NodeLabels(nodeKey) {
+	for _, lbl := range labelsInTx(op.mutator, nodeKey) {
 		op.mutator.RemoveNodeLabel(nodeKey, lbl)
 	}
 	// Remove all properties.

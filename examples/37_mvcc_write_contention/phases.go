@@ -121,6 +121,14 @@ func phaseContention(ctx context.Context, w io.Writer, cfg *config) error {
 		retrySucc   atomic.Int64
 		unrecovered atomic.Int64
 		hotOrders   atomic.Int64
+		// inFlight/peakWriters measure this example's OWN write concurrency EXACTLY,
+		// by bracketing each commitOrder call rather than by sampling the substrate.
+		// The writer_peak_consistent invariant below depends on the difference: a
+		// sampled peak reports what the sampler happened to catch, which is not the
+		// same claim as "two writers overlapped" and made that invariant fail on
+		// perfectly correct runs.
+		inFlight    atomic.Int64
+		peakWriters atomic.Int64
 	)
 	stop := make(chan struct{})
 
@@ -227,7 +235,13 @@ func phaseContention(ctx context.Context, w io.Writer, cfg *config) error {
 					hotOrders.Add(1)
 				}
 				n := n
+				// One transaction's whole lifetime sits inside this call, so two
+				// transactions overlapping IS two commitOrder calls overlapping, and
+				// this bracket therefore records the true peak rather than a sample
+				// of it.
+				atomicMax(&peakWriters, inFlight.Add(1))
 				tries, err := commitOrder(g, sess, cust, inv, n)
+				inFlight.Add(-1)
 				if tries > 0 {
 					retried.Add(1)
 				}
@@ -289,8 +303,17 @@ func phaseContention(ctx context.Context, w io.Writer, cfg *config) error {
 	// by definition two writers overlapping, so a run that counted conflicts and
 	// reported a peak of fewer than two concurrent writers has contradicted itself.
 	// Vacuously true when nothing conflicted, which is the honest answer then.
+	//
+	// IT MUST USE THE EXACT PEAK, NOT THE SAMPLED ONE. This read maxWriters, which
+	// the 100 us sampler above derives from an INSTANTANEOUS substrate gauge. A
+	// conflict proves two transactions overlapped; a sampler proves only what it
+	// happened to catch, and with short transactions it routinely caught neither —
+	// so the invariant reported false on correct runs and failed `make ci`. Measured
+	// at 8 failures in 10 on an unmodified tree. peakWriters brackets each
+	// commitOrder call instead, so the two sides of the implication are now the same
+	// kind of claim and the invariant can only fire on a real contradiction.
 	fmt.Fprintf(w, "versions.writer_peak_consistent=%v\n",
-		st.Write.Conflicts == 0 || maxWriters.Load() >= 2)
+		st.Write.Conflicts == 0 || peakWriters.Load() >= 2)
 	return nil
 }
 

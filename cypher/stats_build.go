@@ -194,20 +194,25 @@ func (a *statsAccum) finalize(generation uint64, labelCount int64) *stats.Stats[
 	})
 }
 
-// buildStatsSnapshot performs the consistent read scan and returns the fresh
+// buildStatsSnapshot runs the statistics scan and returns the fresh
 // per-(label, property) statistics map, ready for Publish. It captures the graph
-// generation and each label's exact live count once, inside the View, so the
-// (g0, N0) stamps are consistent with the scanned snapshot.
+// generation and each label's exact live count once, so the (g0, N0) stamps come
+// from the same pass as the scanned rows.
+//
+// It takes NO BARRIER. This used to wrap the scan in [lpg.Graph.View] and claim the
+// result was a consistent read of a graph in which nothing is half-applied. THAT WAS
+// FALSE: Graph.View acquires visMu SHARED, and since rmp #2304 an ordinary write holds
+// it shared too, so the two never excluded each other. The View bought no consistency
+// this scan did not already have — as [Engine.scanStatsLocked] states for the in-query
+// caller, the scan reads the PRESENT while writers may be mid-apply.
+//
+// That is tolerable here for the reason given there and nowhere else: these are
+// best-effort APPROXIMATE planner statistics, consumed only as cardinality estimates,
+// so a torn estimate costs the planner slightly stale numbers and can never make a
+// query return a wrong answer. A scan that needed real consistency would take an MVCC
+// snapshot; that is a deliberate future change, not something the View was providing.
 func (e *Engine) buildStatsSnapshot(ctx context.Context) (map[stats.Key]*stats.Stats[expr.Value], error) {
-	g := e.g
-	byKey := make(map[stats.Key]*statsAccum)
-	labelN := make(map[uint32]int64)
-	var generation uint64
-	var scanErr error
-
-	g.View(func() {
-		byKey, labelN, generation, scanErr = e.scanStatsLocked(ctx)
-	})
+	byKey, labelN, generation, scanErr := e.scanStatsLocked(ctx)
 	if scanErr != nil {
 		return nil, scanErr
 	}
@@ -249,9 +254,15 @@ func finishStatsSnapshot(
 // That is tolerable here and nowhere else: these are the best-effort APPROXIMATE planner
 // statistics (docs/statistics-design.md), consumed only as cardinality estimates. A torn
 // estimate makes the planner choose from slightly stale numbers, which is what an
-// approximate statistic is for; it can never make a query return a wrong answer. The
-// caller-driven [Engine.RefreshStatistics] still takes the exclusive View and so still
-// scans a graph in which nothing is half-applied.
+// approximate statistic is for; it can never make a query return a wrong answer.
+//
+// It applies to BOTH callers. This used to end by saying the caller-driven
+// [Engine.RefreshStatistics] still takes the exclusive View and so still scans a graph in
+// which nothing is half-applied — which contradicted the paragraph above it and was
+// false twice over: View acquires visMu SHARED, not exclusively, and a shared holder
+// excludes neither an ordinary write nor anything else. That View has been removed, so
+// the two paths now scan identically and the "Locked" suffix records history rather than
+// a lock.
 //
 // Publishing the result is an atomic pointer swap on engine state, not graph state, so it
 // is safe with or without a barrier.

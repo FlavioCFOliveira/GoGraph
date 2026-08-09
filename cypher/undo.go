@@ -66,6 +66,18 @@ type undoLog struct {
 	// correct order (e.g. a property set on a node is undone before the node
 	// that carried it is tombstoned).
 	inverses []func()
+	// inline is the array inverses starts out on, so a statement that records a
+	// handful of mutations allocates no slice at all.
+	//
+	// Measured (rmp #2339, -memprofilerate=1 over 200 000 commits of
+	// BenchmarkWriteScaling/mem/writers=1): one `CREATE (n:Account {id: $id})`
+	// records exactly three inverses — the node, its label, its property — and
+	// growing the nil slice through capacities 1, 2 and 4 cost THREE mallocs and
+	// 56 B on every commit, making undo.go:104 the single heaviest allocating
+	// line on the write path. Four entries cover that shape and the
+	// two-property one; past it append spills to the heap exactly as before, so
+	// nothing is capped and no statement is refused.
+	inline [4]func()
 	// wtx is the write transaction whose work this log unwinds, installed by
 	// [undoLog.bindTx] when the bracket opens (rmp #2320).
 	//
@@ -101,6 +113,13 @@ func (u *undoLog) record(inv func()) {
 	if u == nil {
 		return
 	}
+	// Start on the inline array rather than on nil. Done here rather than at
+	// construction because the zero undoLog must stay usable: callers build one
+	// with &undoLog{} and the tests with a bare var, and neither runs an
+	// initialiser.
+	if u.inverses == nil {
+		u.inverses = u.inline[:0]
+	}
 	u.inverses = append(u.inverses, inv)
 }
 
@@ -135,8 +154,13 @@ func (u *undoLog) replay() (ok bool) {
 			ok = false
 		}
 	}
-	// Empty the log: the backing array is released for GC and a repeat replay
-	// (error path followed by a defensive panic-path call) is a clean no-op.
+	// Empty the log so a repeat replay (error path followed by a defensive
+	// panic-path call) is a clean no-op. The elements are zeroed BEFORE the
+	// slice is dropped: since rmp #2339 the backing array is usually `inline`,
+	// part of the undoLog itself, so nilling the header alone would leave every
+	// inverse — and everything each closure captured — reachable for as long as
+	// the log is. clear covers the spilled-to-heap case at no cost.
+	clear(u.inverses)
 	u.inverses = nil
 	return ok
 }

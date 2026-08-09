@@ -83,6 +83,15 @@ type MVCCStats struct {
 	// same sweep — so it belongs here to be observable, and folding it into Total
 	// would misreport the version memory a reader can hold back.
 	AdjConflictStamps int64
+	// ConstraintStamps is the number of nodes carrying a per-node CONSTRAINT
+	// write-write conflict stamp ([constraintVersions], rmp #2353).
+	//
+	// Reported separately from Total for the same reason as AdjConflictStamps: it is
+	// write-side bookkeeping with a version's lifetime, not a version. It stays ZERO
+	// on any schema declaring no existence constraint, which makes this series the
+	// direct way for an operator to confirm the constraint stamp is costing an
+	// unconstrained workload nothing.
+	ConstraintStamps int64
 	// Total is the sum of every VERSION count above: the memory the substrate is
 	// responsible for.
 	Total int64
@@ -232,6 +241,7 @@ func (g *Graph[N, W]) MVCCStats() MVCCStats {
 		NodeLifeRecords:       g.nodeLifeActive.Load(),
 		IndexRemovalBacklog:   g.idxPendingActive.Load(),
 		AdjConflictStamps:     int64(g.adjVer.len()),
+		ConstraintStamps:      int64(g.conVer.len()),
 		Bound:                 reclaimThreshold,
 		Ceiling:               reclaimDebtCeiling,
 		Now:                   g.mvccClock.ReadTS(),
@@ -263,6 +273,7 @@ func (g *Graph[N, W]) publishMVCCMetrics() {
 	metrics.SetGauge("lpg.mvcc.versions.node_life", float64(s.NodeLifeRecords))
 	metrics.SetGauge("lpg.mvcc.index_removal_backlog", float64(s.IndexRemovalBacklog))
 	metrics.SetGauge("lpg.mvcc.adjacency_conflict_stamps", float64(s.AdjConflictStamps))
+	metrics.SetGauge("lpg.mvcc.constraint_stamps", float64(s.ConstraintStamps))
 	metrics.SetGauge("lpg.mvcc.versions.total", float64(s.Total))
 	metrics.SetGauge("lpg.mvcc.versions.bound", float64(s.Bound))
 	metrics.SetGauge("lpg.mvcc.versions.ceiling", float64(s.Ceiling))

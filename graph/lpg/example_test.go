@@ -105,16 +105,22 @@ func ExampleGraph_RemoveEdge() {
 
 // ExampleGraph_View shows the recommended way to read a graph that may be
 // mutated concurrently: wrap a multi-op transaction in [lpg.Graph.ApplyAtomically]
-// and the reads that must observe it whole in [lpg.Graph.View]. Per-operation
-// accessors are always individually atomic, but only View guarantees a reader
-// never sees a multi-op transaction half-applied — here, the edge without its
-// endpoint labels. Inside View the cross-substructure invariant "the edge exists
-// ⇔ both endpoint labels exist" always holds.
-func ExampleGraph_View() {
+// / ExampleGraph_BeginRead demonstrates ATOMIC VISIBILITY: a multi-op transaction
+// becomes observable all at once, and a reader that pins a SNAPSHOT never sees it
+// half-applied.
+//
+// The snapshot is what provides this, and it is the only thing that does
+// (rmp #2344). Per-operation accessors are individually atomic but say nothing
+// about a transaction spanning several substructures; reading through
+// [lpg.Graph.ReadAt] at an instant taken by [lpg.Graph.BeginRead] does. Inside the
+// snapshot the cross-substructure invariant "the edge exists iff both endpoint
+// labels exist" always holds. A snapshot read takes NO LOCK, so it neither blocks
+// writers nor is blocked by them.
+func ExampleGraph_BeginRead() {
 	g := lpg.New[string, int](adjlist.Config{Directed: true})
 
 	// One transaction establishes a cross-substructure invariant: the edge
-	// alice→bob and both endpoint :Hot labels become visible together.
+	// alice->bob and both endpoint :Hot labels become visible together.
 	_ = g.ApplyAtomically(func() error {
 		_ = g.AddEdge("alice", "bob", 0)
 		_ = g.SetNodeLabel("alice", "Hot")
@@ -122,17 +128,20 @@ func ExampleGraph_View() {
 		return nil
 	})
 
-	// A consistent read pins the whole transaction for its duration.
-	g.View(func() {
-		edge := g.AdjList().HasEdge("alice", "bob")
-		srcHot := g.HasNodeLabel("alice", "Hot")
-		dstHot := g.HasNodeLabel("bob", "Hot")
-		// The invariant "edge ⇔ src:Hot ⇔ dst:Hot": all three observations
-		// agree, so the set of distinct values has size one.
-		consistent := edge == srcHot && srcHot == dstHot
-		fmt.Println("edge:", edge, "src:Hot:", srcHot, "dst:Hot:", dstHot)
-		fmt.Println("invariant holds:", consistent)
-	})
+	// Pin an instant. Every read below resolves at it, however many writers
+	// commit meanwhile.
+	snap := g.BeginRead()
+	defer g.EndRead(snap)
+	v := g.ReadAt(snap)
+
+	edge := v.Raw().AdjList().HasEdge("alice", "bob")
+	srcHot := v.HasNodeLabel("alice", "Hot")
+	dstHot := v.HasNodeLabel("bob", "Hot")
+	// The invariant "edge <=> src:Hot <=> dst:Hot": all three observations
+	// agree, so the set of distinct values has size one.
+	consistent := edge == srcHot && srcHot == dstHot
+	fmt.Println("edge:", edge, "src:Hot:", srcHot, "dst:Hot:", dstHot)
+	fmt.Println("invariant holds:", consistent)
 	// Output:
 	// edge: true src:Hot: true dst:Hot: true
 	// invariant holds: true

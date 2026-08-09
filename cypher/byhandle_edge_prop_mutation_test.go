@@ -270,13 +270,11 @@ func TestByHandle_ConcurrentViewReaders_NoRace(t *testing.T) {
 			for !stop.Load() {
 				// Lock-free read of the by-handle store, bracketed in View so the
 				// cross-store read sees a consistent, non-partial snapshot.
-				g.View(func() {
-					g.WalkEdgeHandles(func(tr lpg.EdgeHandleTriple) bool {
-						if tr.Src == srcID && tr.Dst == dstID {
-							_ = g.EdgePropertiesByHandleID(srcID, dstID, tr.Handle)
-						}
-						return true
-					})
+				g.WalkEdgeHandles(func(tr lpg.EdgeHandleTriple) bool {
+					if tr.Src == srcID && tr.Dst == dstID {
+						_ = g.EdgePropertiesByHandleID(srcID, dstID, tr.Handle)
+					}
+					return true
 				})
 			}
 		}()

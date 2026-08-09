@@ -224,7 +224,7 @@ func (op *Merge) applySetAllActions(actions []MergeSetAllAction, row Row) error 
 		if err != nil {
 			return err
 		}
-		if err := applyWholeEntityValueToNode(op.mutator, op.reg, op.mgr, a.TargetVar, nodeKey, a.IsReplace, v); err != nil {
+		if err := applyWholeEntityValueToNode(op.mutator, a.TargetVar, nodeKey, a.IsReplace, v); err != nil {
 			return err
 		}
 	}
@@ -411,14 +411,8 @@ func (op *Merge) runOnMatchPath(rows []Row) error {
 // exactly as the ON MATCH path already does. Without this an expression
 // action such as `ON CREATE SET n.x = other.y` could not resolve `other`.
 func (op *Merge) runOnCreatePathWithProps(childRow Row, props []propLiteral) error {
-	if op.reg != nil {
-		for _, p := range props {
-			if cerr := reserveConstraintValue(op.reg, op.mutator, op.labels, p.key, p.value, op.mgr); cerr != nil {
-				return fmt.Errorf("exec: Merge: ON CREATE: %w", cerr)
-			}
-		}
-	}
-
+	// Reserved inside SetNodeProperty (rmp #2358); the labels are attached before
+	// any property is written, below, so the reservation sees the full label set.
 	nodeKey := op.freshNodeKey()
 	nodeID, err := op.mutator.AddNode(nodeKey)
 	if err != nil {
@@ -432,9 +426,6 @@ func (op *Merge) runOnCreatePathWithProps(childRow Row, props []propLiteral) err
 	for _, p := range props {
 		if serr := op.mutator.SetNodeProperty(nodeKey, p.key, p.value); serr != nil {
 			return fmt.Errorf("exec: Merge: ON CREATE SetNodeProperty: %w", serr)
-		}
-		if op.reg != nil {
-			op.reg.RecordPropertySet(op.labels, p.key, p.value)
 		}
 	}
 
@@ -556,8 +547,16 @@ func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalF
 
 		// Label-set action (`SET a:Foo:Bar`): add every label to the node.
 		if len(a.setLabels) > 0 {
+			// Attaching a label puts the node under every UNIQUE constraint declared
+			// on that label. SetNodeLabel reserves for it, at the mutator choke point
+			// (rmp #2358) — this was one of the three label-write sites that had to be
+			// found and fixed one by one when enforcement lived in the operators
+			// (rmp #2352), which is the reason it no longer lives here.
 			for _, lbl := range a.setLabels {
 				if serr := op.mutator.SetNodeLabel(nodeKey, lbl); serr != nil {
+					if isConstraintViolation(serr) {
+						return serr
+					}
 					return fmt.Errorf("exec: Merge: action SetNodeLabel %q: %w", lbl, serr)
 				}
 			}
@@ -572,11 +571,7 @@ func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalF
 		}
 		if remove {
 			// The RHS evaluated to null → openCypher removes the property.
-			if op.reg != nil {
-				if oldVal, had := op.mutator.NodeProperties(nodeKey)[a.key]; had {
-					releaseConstraintValue(op.reg, op.mutator, op.mutator.NodeLabels(nodeKey), a.key, oldVal)
-				}
-			}
+			// DelNodeProperty releases (rmp #2358).
 			op.mutator.DelNodeProperty(nodeKey, a.key)
 			continue
 		}
@@ -586,29 +581,15 @@ func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalF
 			// type — matching regular SET). No write.
 			continue
 		}
-		// Constraint enforcement for ON MATCH / ON CREATE action.
-		if op.reg != nil {
-			labels := op.mutator.NodeLabels(nodeKey)
-			// Release this node's own old constrained value BEFORE the check and
-			// the overwrite. Without this the replaced value leaks as a permanent
-			// phantom reservation (no live node holds it yet it is blocked
-			// forever, #1904), and an idempotent MERGE self-set is rejected as its
-			// own duplicate. A UNIQUE constraint guarantees at most one holder, so
-			// releasing first cannot mask a real cross-node duplicate; a failed
-			// check aborts the transaction and rebuilds every value-set.
-			if oldVal, had := op.mutator.NodeProperties(nodeKey)[a.key]; had {
-				releaseConstraintValue(op.reg, op.mutator, labels, a.key, oldVal)
-			}
-			if cerr := reserveConstraintValue(op.reg, op.mutator, labels, a.key, pv, op.mgr); cerr != nil {
-				return cerr
-			}
-		}
+		// Released-then-reserved inside SetNodeProperty (rmp #2358), which is what
+		// stops the replaced value leaking as a permanent phantom reservation
+		// (#1904) and an idempotent MERGE self-set being rejected as its own
+		// duplicate.
 		if serr := op.mutator.SetNodeProperty(nodeKey, a.key, pv); serr != nil {
+			if isConstraintViolation(serr) {
+				return serr
+			}
 			return fmt.Errorf("exec: Merge: action SetNodeProperty: %w", serr)
-		}
-		if op.reg != nil {
-			labels := op.mutator.NodeLabels(nodeKey)
-			op.reg.RecordPropertySet(labels, a.key, pv)
 		}
 	}
 	return nil

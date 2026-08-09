@@ -1,5 +1,7 @@
 package lpg
 
+import "context"
+
 // mvcc_write.go — MVCC P4a (rmp #2288): one shared commit record per write, and
 // the arming of the versioning substrate.
 //
@@ -186,6 +188,34 @@ type WriteTx struct{ w *writeCtx }
 // transaction to name and every write is committed as it is made.
 func (tx WriteTx) Valid() bool { return tx.w != nil }
 
+// Err returns the serialization conflict this transaction has been doomed by, or
+// nil when it is still viable. The error wraps [mvcc.ErrSerializationConflict] and
+// carries the store attribution through [mvcc.Conflict].
+//
+// # Why an embedder needs this and cannot do without it
+//
+// Most primitives report a conflict by returning it, so a caller learns at the
+// statement. But a conflict hit by a primitive that CANNOT return an error — a
+// label removal, a property delete, any of the five per-edge side stores — is
+// recorded on the transaction instead, and the only way to observe it is to ask
+// (rmp #2300).
+//
+// [labelTx.commit] asks, which is what makes the substrate's own transactions
+// safe. An embedder that drives the write bracket itself — cypher's ExplicitTx and
+// its autocommit path both do — must ask too, and BEFORE it makes anything
+// durable, or a transaction whose only conflicting write went through such a
+// primitive commits successfully having dropped it. That is a lost update with
+// nothing anywhere reporting it, and it is what rmp #2354 measured: a `REMOVE
+// n:Label` that collided with a peer's uncommitted removal returned nil from the
+// statement AND nil from Commit, and the label was still there afterwards.
+//
+// Memgraph reads the same record in the same place — Storage::Commit tests
+// `transaction_.must_abort` and returns SerializationError
+// (src/storage/v2/storage.cpp).
+//
+// Nil on the zero value, so a caller can ask unconditionally.
+func (tx WriteTx) Err() error { return tx.w.err() }
+
 // EnterUndo marks the start of this transaction's PHYSICAL undo replay, during
 // which its writes are withdrawals of work it already applied rather than new
 // updates.
@@ -345,6 +375,37 @@ func (g *Graph[N, W]) AllocateCommitTS(tx WriteTx) uint64 {
 		tx.w.commitTS = g.mvccClock.NextCommitTS()
 	}
 	return tx.w.commitTS
+}
+
+// AwaitCommitQuiescence blocks until every commit timestamp this graph has allocated
+// has been published or abandoned — until [MVCCStats.InFlightCommits] would read zero
+// — or until ctx finishes.
+//
+// It is the counterpart obligation to [Graph.AllocateCommitTS], and it exists for
+// the one observer that cannot tolerate the window that method opens: a durable
+// checkpoint, which pairs a WAL DURABILITY position with an MVCC VISIBILITY position
+// and truncates the WAL prefix the first one names. A transaction between its fsync
+// and its publish sits below the durable offset and above the visible frontier, so
+// the image does not carry it and the truncation destroys it — an acknowledged
+// commit lost (rmp #2349). Waiting here makes the two positions describe the same
+// set of transactions.
+//
+// The wait is on the OBSERVER, never on the committer: a writer that is not observed
+// pays nothing, which is the whole reason the durability and visibility steps are not
+// held under one lock. See [mvcc.Clock.AwaitQuiescent] for the prior art this follows
+// and for the reference engine that chose the other route.
+//
+// It returns immediately on a graph whose versioning substrate is disarmed, which
+// allocates no timestamps at all.
+//
+// Concurrency: safe for concurrent use. It takes no lock the write path takes, so a
+// caller may hold a write-admission gate closed across it — and the intended caller
+// does, which is what bounds the wait.
+func (g *Graph[N, W]) AwaitCommitQuiescence(ctx context.Context) error {
+	if !g.mvccArmed {
+		return nil
+	}
+	return g.mvccClock.AwaitQuiescent(ctx)
 }
 
 // abandonAllocatedCommitTS discharges a commit timestamp that was allocated by

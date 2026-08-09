@@ -67,22 +67,29 @@ func TestIsolation_CrossSubstructure_EdgeImpliesLabels(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for !done.Load() {
-				g.View(func() {
-					e := g.AdjList().HasEdge("u", "v")
-					lu := g.HasNodeLabel("u", "Hot")
-					lv := g.HasNodeLabel("v", "Hot")
+				// A SNAPSHOT, which since rmp #2344 is the only thing that
+				// provides atomic visibility: Graph.View is gone, and it never
+				// gave this guarantee anyway once ordinary writes held the
+				// barrier shared. Every read below resolves at one instant.
+				func() {
+					snap := g.BeginRead()
+					defer g.EndRead(snap)
+					view := g.ReadAt(snap)
+					_, e := g.EdgeWeightAsOf("u", "v", snap)
+					lu := view.HasNodeLabel("u", "Hot")
+					lv := view.HasNodeLabel("v", "Hot")
 					reads.Add(1)
 					if e != lu || e != lv {
 						violation.Add(1)
 					}
-				})
+				}()
 			}
 		}()
 	}
 
 	wg.Wait()
 	if v := violation.Load(); v != 0 {
-		t.Fatalf("observed %d cross-substructure violations (edge/label disagreement inside a pinned View)", v)
+		t.Fatalf("observed %d cross-substructure violations (edge/label disagreement inside a pinned SNAPSHOT)", v)
 	}
 	if reads.Load() == 0 {
 		t.Fatal("readers never read; test did not exercise the invariant")
@@ -149,10 +156,15 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for !done.Load() {
-				g.View(func() {
-					va, oka := g.GetNodeProperty("a", "v")
-					vb, okb := g.GetNodeProperty("b", "v")
+				stop := false
+				func() {
+					snap := g.BeginRead()
+					defer g.EndRead(snap)
+					view := g.ReadAt(snap)
+					va, oka := view.GetNodeProperty("a", "v")
+					vb, okb := view.GetNodeProperty("b", "v")
 					if !oka || !okb {
+						stop = true
 						return
 					}
 					ia, _ := va.Int64()
@@ -161,7 +173,10 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 					if ia != ib {
 						violation.Add(1)
 					}
-				})
+				}()
+				if stop {
+					return
+				}
 			}
 		}()
 	}
@@ -171,7 +186,7 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 		t.Fatalf("writer hit %d errors", writeErr.Load())
 	}
 	if v := violation.Load(); v != 0 {
-		t.Fatalf("observed %d partial-transaction violations (a.v != b.v inside a pinned View)", v)
+		t.Fatalf("observed %d partial-transaction violations (a.v != b.v inside a pinned SNAPSHOT)", v)
 	}
 	if reads.Load() == 0 {
 		t.Fatal("readers never observed both properties; test did not exercise the invariant")
@@ -222,6 +237,20 @@ func TestIsolation_DirectReadObservesPartialTransaction(t *testing.T) {
 		return e != lu || e != lv
 	}
 
+	// snapshotEdgeImpliesLabels evaluates the SAME invariant through a pinned
+	// MVCC snapshot. Since rmp #2344 this is what closes the window — Graph.View
+	// is gone, and it had stopped closing it anyway once ordinary writes took the
+	// barrier shared.
+	snapshotEdgeImpliesLabels := func() bool {
+		snap := g.BeginRead()
+		defer g.EndRead(snap)
+		view := g.ReadAt(snap)
+		_, e := g.EdgeWeightAsOf("u", "v", snap)
+		lu := view.HasNodeLabel("u", "Hot")
+		lv := view.HasNodeLabel("v", "Hot")
+		return e != lu || e != lv
+	}
+
 	// Half 1 — direct read, NO View. A writer opens a transaction, adds the
 	// edge, then blocks BEFORE setting the labels until the reader has read.
 	// The reader, reading directly, must observe {edge present, labels absent}
@@ -253,7 +282,7 @@ func TestIsolation_DirectReadObservesPartialTransaction(t *testing.T) {
 	}
 
 	if directViolation.Load() == 0 {
-		t.Fatalf("direct (no-View) read did not observe the documented partial-transaction hole; " +
+		t.Fatalf("direct (unpinned) read did not observe the documented partial-transaction hole; " +
 			"expected violation > 0")
 	}
 
@@ -267,11 +296,11 @@ func TestIsolation_DirectReadObservesPartialTransaction(t *testing.T) {
 		t.Fatalf("reset: %v", err)
 	}
 
-	// Half 2 — the SAME read wrapped in View. The View read blocks until the
-	// whole transaction is visible (the writer holds visMu for the entire
-	// apply), so it can only ever observe the fully-applied state: zero
-	// violations. We synchronise the writer's start with the reader's attempt
-	// so the View call genuinely contends with a multi-op apply.
+	// Half 2 — the SAME invariant read through a pinned SNAPSHOT. The snapshot
+	// resolves every read at one instant, so it can only ever observe the
+	// fully-applied state or the pre-transaction state, never a mixture: zero
+	// violations. The writer's start is synchronised with the reader so the
+	// snapshot genuinely contends with a multi-op apply.
 	var viewViolation atomic.Int64
 	var viewReads atomic.Int64
 	{
@@ -295,15 +324,13 @@ func TestIsolation_DirectReadObservesPartialTransaction(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			close(startWrite)
-			// Read repeatedly through View while the writer applies. Every
+			// Read repeatedly through a snapshot while the writer applies. Every
 			// pinned read must see the invariant hold.
 			for i := 0; i < 2000; i++ {
-				g.View(func() {
-					viewReads.Add(1)
-					if readEdgeImpliesLabels() {
-						viewViolation.Add(1)
-					}
-				})
+				viewReads.Add(1)
+				if snapshotEdgeImpliesLabels() {
+					viewViolation.Add(1)
+				}
 			}
 		}()
 
@@ -311,13 +338,13 @@ func TestIsolation_DirectReadObservesPartialTransaction(t *testing.T) {
 	}
 
 	if v := viewViolation.Load(); v != 0 {
-		t.Fatalf("View-wrapped read observed %d partial-transaction violations; View must close the window", v)
+		t.Fatalf("snapshot read observed %d partial-transaction violations; the snapshot must close the window", v)
 	}
 	if viewReads.Load() == 0 {
-		t.Fatal("View readers never read; half 2 did not exercise the invariant")
+		t.Fatal("snapshot readers never read; half 2 did not exercise the invariant")
 	}
 
 	t.Logf("characterized opt-in barrier: direct reads observed %d violation(s); "+
-		"View reads observed 0 across %d reads",
+		"snapshot reads observed 0 across %d reads",
 		directViolation.Load(), viewReads.Load())
 }

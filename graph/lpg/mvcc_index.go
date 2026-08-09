@@ -88,8 +88,47 @@ type deferredIdx struct {
 // A nil tx — a direct Go-API mutation outside any transaction — falls back to the
 // ambient stamp, which is correct for it: such a write is committed the instant it
 // is made, so there is no transaction whose instant could differ.
+// # AN UNDO REPLAY IS NOT DEFERRABLE (rmp #2353)
+//
+// While the transaction is UNWINDING, a removal is not new work: it is the
+// withdrawal of an add this transaction already applied. And the add WAS applied
+// immediately — [Graph.setNodeLabelInfo] calls nodeIdx.Add directly, with no
+// deferral — so deferring its withdrawal makes the pair asymmetric, and the
+// asymmetry is fatal on the abort path: the pending removal is stamped with this
+// transaction's record, the record resolves to [mvcc.AbortedTS], and
+// [Graph.withdrawAbortedIndexRemovals] then CANCELS it on the reasoning that "a
+// removal the transaction never committed must not fire". That reasoning is right
+// for a removal the transaction was making as new work and wrong for one
+// withdrawing its own add: cancelling it leaves the bitmap carrying a label the
+// store no longer has, for the life of the process.
+//
+// MEASURED, not deduced. `MATCH (n:Acct) RETURN n.k` yielded a row for a node whose
+// labels(n) was ["Plain"] — a label scan returning a node that does not carry the
+// label. No per-row re-verification caught it, because the row came from the
+// candidate set and the node had no version of that label to reject.
+//
+// WHICH ROLLBACKS ACTUALLY REACH IT, measured rather than assumed. Only a
+// transaction refused by the SERIALIZATION-CONFLICT backstop leaves the residue.
+// The shapes refused by the commit-time NOT NULL check do NOT — probed with an
+// autocommit statement and an explicit transaction, each with and without a
+// concurrent open reader, and with a peer committing on the same node and on an
+// unrelated one: all six came out clean. So the reproducing case is narrower than
+// "any in-barrier rollback of a label add", which is what this comment first
+// claimed. It is pinned by TestConstraint_NotNullWriteSkewAcrossSubstores, which
+// fails on the CONSISTENCY assertion against a build without the exemption below;
+// TestLabelIndex_NotNullRefusalLeavesNoStaleCandidate is the control that records
+// the clean shapes.
+//
+// So an unwinding transaction removes immediately. Nothing is lost by not
+// deferring: deferral exists so a concurrent reader whose snapshot still sees the
+// label can still find it, and no reader's snapshot can legitimately see an add
+// made by a transaction that is aborting. This is the same exemption
+// [writeCtx.undoing] already grants the conflict test, and for the same reason.
 func (g *Graph[N, W]) deferLabelIndexRemoval(lid uint32, id graph.NodeID, tx *writeCtx) bool {
 	if !g.mvccArmed {
+		return false
+	}
+	if tx != nil && tx.undoing.Load() {
 		return false
 	}
 	info, ts := g.deferralStamp(tx)

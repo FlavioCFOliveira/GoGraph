@@ -145,6 +145,12 @@ func (g *Graph[N, W]) withdrawAbortedNow() int {
 		g.withdrawAbortedSides() + g.reclaimAbortedLife() +
 		g.withdrawAbortedIndexRemovals()
 	g.adjVer.clearAborted()
+	// The constraint stamps an aborted transaction set must go the same way (rmp
+	// #2353): a stamp at [mvcc.AbortedTS] refuses every later writer forever, and
+	// the watermark sweep cannot reach it because AbortedTS is above every watermark
+	// there can be. Leaving them behind would turn one rolled-back transaction into
+	// a permanent conflict on the nodes it touched.
+	g.conVer.clearAborted()
 	return freed
 }
 

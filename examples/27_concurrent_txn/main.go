@@ -371,9 +371,17 @@ func run(ctx context.Context, w io.Writer, cfg *config) error {
 	fmt.Fprintf(w, "# mem.heap_growth=%s\n", humanBytes(saturatingSub(built.HeapAlloc, base.HeapAlloc)))
 
 	// Writer-scaling sweep (telemetry only): the identical fixed workload run at
-	// 1, 2, 4 … writers on a fresh ephemeral store. Throughput that does NOT
-	// climb with the writer count is the observable signature of the
-	// single-writer serialisation that underpins isolation.
+	// 1, 2, 4 … writers on a fresh ephemeral store.
+	//
+	// READ IT AS TELEMETRY, NOT AS A DIAGNOSIS (rmp #2345). This used to say flat
+	// throughput is "the observable signature of the single-writer serialisation that
+	// underpins isolation". Both halves are now false: rmp #2306 retired the
+	// serialisation, and isolation is underpinned by MVCC, not by exclusion. Worse,
+	// the inference does not hold — rmp #2338 ablated the locks and found the
+	// in-memory write ceiling is set by the commit's ALLOCATION RATE, with a
+	// share-nothing lock-free workload of the same profile ceilinging at ~2.6x on a
+	// ten-core host. A flat curve here is a fact about the workload's allocation
+	// behaviour at least as much as about any lock.
 	if cfg.sweepOps > 0 {
 		if err := scalingSweep(ctx, w, cfg); err != nil {
 			return fmt.Errorf("scaling sweep: %w", err)

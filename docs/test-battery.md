@@ -11,7 +11,12 @@ For the three-layer test discipline and CI integration, see
 harness — the seed-reproducible, VOPR-modelled simulator that drives the engine
 through randomised operations and faults and checks it against a
 correct-by-construction oracle (including the `search/` algorithm battery) — see
-[docs/dst.md](dst.md).
+[docs/dst.md](dst.md). For the isolation harness — the scripted, EXHAUSTIVE,
+deterministic enumeration of a concurrent scenario's interleavings, modelled on
+PostgreSQL's `src/test/isolation` — see
+[docs/isolation-harness.md](isolation-harness.md). The two are complementary:
+DST samples a large space at random, while the isolation harness certifies a
+small one completely.
 
 ---
 
@@ -27,6 +32,8 @@ correct-by-construction oracle (including the `search/` algorithm battery) — s
    - [`internal/crashpoint` and `internal/crashinject`](#internalcrashpoint-and-internalcrashinject)
    - [`internal/subproc`](#internalsubproc)
 7. [Golden-file helper (`internal/goldens`)](#golden-file-helper-internalgoldens)
+   - [Isolation harness (`internal/isolationtest`)](#isolation-harness-internalisolationtest)
+   - [Anomaly classifier (`internal/anomaly`)](#anomaly-classifier-internalanomaly)
 8. [Test layers quick-reference](#test-layers-quick-reference)
 9. [Add-new-shape recipe](#add-new-shape-recipe)
 
@@ -301,6 +308,60 @@ On mismatch, reports a unified diff. With `-update` or
 `GOGRAPH_UPDATE_GOLDENS=1`, overwrites the file atomically
 (temp file + rename) and continues. Call `goldens.UpdateRequested()`
 in `TestMain` to gate conditional generation logic.
+
+### Isolation harness (`internal/isolationtest`)
+
+Package: `github.com/FlavioCFOliveira/GoGraph/internal/isolationtest`
+
+The scripted, **exhaustive**, deterministic counterpart of the randomised DST
+battery, modelled on PostgreSQL's `src/test/isolation` (read at commit
+`0ec3f048`). A spec declares named sessions holding named steps; the harness runs
+**every** interleaving that preserves each session's own step order, and diffs the
+rendered transcript against `testdata/<spec>.golden`.
+
+```go
+isolationtest.Check(t, spec, &isolationtest.Runner{NewEngine: memEngine})
+```
+
+Two assertion mechanisms, answering different questions: the **golden
+transcript** catches a change in behaviour, while **`Runner.Observe`** catches
+incorrect behaviour by asserting an invariant over each step's structured rows.
+A failing permutation is named, and `Runner.Only` replays it alone.
+
+Shipped: `lost-update`, `write-skew`, `bank-transfer` and a named
+`read-only-anomaly` permutation at the **short** layer (20 permutations each);
+the exhaustive `read-only-anomaly` (4 200 permutations, ~15 s under `-race`) at
+**soak**. The harness is proven to catch a real fault rather than merely to pass
+— see the negative control in `fault_test.go`.
+
+Full specification, including the enumeration algorithm, the determinism
+argument, what was deliberately not copied from PostgreSQL, and the recipe for a
+new spec: [docs/isolation-harness.md](isolation-harness.md).
+
+### Anomaly classifier (`internal/anomaly`)
+
+Package: `github.com/FlavioCFOliveira/GoGraph/internal/anomaly`
+
+Turns an observed transaction history into a NAMED phenomenon — G0, G1a, G1b,
+G1c, G-single, G-nonadjacent, G2-item — instead of a bare domain symptom, so a
+sighting points at a mechanism rather than starting a search.
+
+```go
+h := recorder.History()
+rep, err := anomaly.Check(&h, anomaly.SnapshotIsolation)
+```
+
+The level boundary is the substance: snapshot isolation forbids G-nonadjacent
+(⊇ G-single, the shape of a lost update) and **permits** G2-item cycles whose
+anti-dependencies are adjacent, which is write skew. Both directions are
+asserted. The `Recorder` is sharded and pre-sized because a shared lock on the
+recording path measurably suppressed the anomaly it was there to observe.
+
+Definitions cited to Adya (ICDE 2000), Berenson et al. (SIGMOD 1995), Cerone et
+al. (CONCUR 2015) and verified against Jepsen's Elle. Full specification, the
+validation on a healthy and a defective engine, the perturbation measurement,
+and the rmp #2336 classification attempt:
+[docs/isolation-anomalies.md](isolation-anomalies.md).
 
 ---
 

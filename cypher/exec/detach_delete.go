@@ -203,15 +203,14 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 		op.mutator.RemoveEdge(src, nodeKey)
 	}
 
-	// Strip all labels.
-	nodeLabels := op.mutator.NodeLabels(nodeKey)
-	// Release all constrained property values before stripping the node so
-	// the registry no longer treats them as "in use".
-	if op.reg != nil {
-		for k, pv := range op.mutator.NodeProperties(nodeKey) {
-			releaseConstraintValue(op.reg, op.mutator, nodeLabels, k, pv)
-		}
-	}
+	// Strip all labels. Every constrained value the node holds is given back by
+	// RemoveNodeLabel itself, at the mutator choke point (rmp #2358): detaching a
+	// label releases exactly the values reserved under it, and the labels are
+	// stripped BEFORE the properties, so each value is still readable when its
+	// label goes. The bulk release that used to stand here would now be a SECOND
+	// release of the same reservations, and a release is not idempotent — it would
+	// hand a live value back and admit a genuine duplicate afterwards.
+	nodeLabels := labelsInTx(op.mutator, nodeKey)
 	// Stripping the node's labels and properties is internal teardown, not a
 	// user-visible side effect: openCypher declares DELETE as -nodes only
 	// (#2212). Suppress effect counting for the span.
@@ -273,12 +272,9 @@ func (op *DetachDelete) detachDeletePath(p expr.PathValue) error {
 			swept++
 			op.mutator.RemoveEdge(src, nodeKey)
 		}
-		pathLabels := op.mutator.NodeLabels(nodeKey)
-		if op.reg != nil {
-			for k, pv := range op.mutator.NodeProperties(nodeKey) {
-				releaseConstraintValue(op.reg, op.mutator, pathLabels, k, pv)
-			}
-		}
+		// See the twin above: RemoveNodeLabel releases, so a bulk release here would
+		// be a second one (rmp #2358).
+		pathLabels := labelsInTx(op.mutator, nodeKey)
 		// Stripping the node's labels and properties is internal teardown, not a
 		// user-visible side effect: openCypher declares DELETE as -nodes only
 		// (#2212). Suppress effect counting for the span.

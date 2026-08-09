@@ -72,7 +72,6 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 	"github.com/FlavioCFOliveira/GoGraph/graph/index/label"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
-	"github.com/FlavioCFOliveira/GoGraph/internal/ctxlock"
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
@@ -610,10 +609,37 @@ type Graph[N comparable, W any] struct {
 	// on this lock; rmp #2310 moves it to a transactional instant. See
 	// [Graph.View] for the full division and the measurement behind it.
 	//
-	// It is a RWMutex rather than an atomic snapshot pointer by deliberate,
-	// correctness-first choice. The immutable CSR analytics path does not go
+	// # Why this is an mvcc.Gate and no longer a sync.RWMutex (rmp #2337)
+	//
+	// The contract is UNCHANGED — many weak (ordinary write) holders together, a
+	// strong (DDL) holder excluding all of them — and only the implementation moved.
+	// As a sync.RWMutex the shared acquisition was an atomic add on that mutex's ONE
+	// readerCount word, so every write on every core took a coherence miss on a
+	// single shared line purely to announce a NON-conflict; rmp #2203 measured that
+	// shape degrading 17.6x from 1 to 10 cores. [mvcc.Gate] stripes the weak side
+	// over padded per-slot counters and makes the strong flag read-mostly, so an
+	// uncontended weak acquisition touches no globally shared line: 3.77 ns at 1 core
+	// falling to 0.434 ns at 10, where the RWMutex rises from 3.75 ns to 89.5 ns
+	// (docs/benchmarks/mvcc-weak-strong-gate-2026-08-07.md).
+	//
+	// WHAT IT DOES NOT BUY, STATED SO NOBODY INFERS OTHERWISE. The end-to-end effect
+	// on BenchmarkWriteScaling/mem is NOT ESTABLISHED. Interleaved back-to-back arms
+	// measured the swap as performance-neutral within noise, and an earlier
+	// across-time comparison that appeared to show a gain was invalid — the host
+	// drifts enough between runs to manufacture both a win and a regression from the
+	// same code. What is established is the primitive's own scaling and the removal
+	// of a shared cache line from the write path; the write-scaling CEILING is set
+	// elsewhere, by the label.Index nesting of rmp #2338/#2339.
+	//
+	// MVCC cannot subsume this barrier: what it guards is the CATALOG, which is not
+	// versioned, so a DDL has no snapshot to be made visible through. Memgraph and
+	// PostgreSQL both keep the identical weak/strong split for the same reason.
+	//
+	// The gate is non-re-entrant in both modes, exactly as the RWMutex was, and the
+	// re-entrancy guard below is unchanged — it tracks goroutine identity and never
+	// depended on the primitive's type. The immutable CSR analytics path does not go
 	// through these methods and stays lock-free.
-	visMu sync.RWMutex
+	visGate mvcc.Gate
 
 	// writeTx names the write transaction whose bracket is currently open, and
 	// through it the read view the WRITE path resolves through (rmp #2299): as of
@@ -643,6 +669,15 @@ type Graph[N comparable, W any] struct {
 	// [adjVersions] for the rule, and for the Memgraph source that settled why an
 	// adjacency APPEND is commutative and must not conflict with another append.
 	adjVer adjVersions
+
+	// conVer is the per-node CONSTRAINT write-write conflict index (rmp #2353).
+	// Every other store here versions ONE substore of a node, which is why write
+	// skew across two of them could commit a state violating a declared NOT NULL
+	// constraint: the label half and the property half never met. This holds one
+	// stamp per node, written only for nodes an existence constraint actually
+	// covers, so the node granularity every reference engine uses applies exactly
+	// where the invariant needs it and nowhere else. See [constraintVersions].
+	conVer constraintVersions
 
 	// barrier enforces that no single goroutine re-enters visMu via
 	// [Graph.View] / [Graph.ApplyAtomically]. visMu is not re-entrant, so a
@@ -771,7 +806,7 @@ func (g *Graph[N, W]) ApplyAtomically(fn func() error) error {
 	// stamp is removed while the lock is still held and only ever by its
 	// owner.
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
-	g.visMu.Lock()
+	g.visGate.StrongLock()
 	g.barrier.stampWriter(gid)
 	w := g.openWriteBracket()
 	// ONE deferred call for the whole unwind rather than three. Each open-coded
@@ -780,7 +815,7 @@ func (g *Graph[N, W]) ApplyAtomically(fn func() error) error {
 	// most of it the defer, not the atomics. Folding the three into
 	// finishWrite gets it back; see that method for the ordering the fold must
 	// preserve.
-	defer g.visMu.Unlock()
+	defer g.visGate.StrongUnlock()
 	defer g.finishWrite(w, gid)
 	return fn()
 }
@@ -845,13 +880,13 @@ func (g *Graph[N, W]) ApplyVersioned(fn func(WriteTx) error) error {
 	// stamp is taken only after the lock succeeds, for the reason spelled out in
 	// [Graph.ApplyAtomically].
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
-	g.visMu.RLock()
+	visTok := g.visGate.WeakLockAuto()
 	g.barrier.stampWriter(gid)
 	// NO adjacency commit window here, unlike the exclusive bracket — see
 	// [Graph.finishWriteShared] for why opening one would be a data race and why
 	// the shard-clone dedup it exists to provide is preserved without it.
 	w := g.beginWrite()
-	defer g.visMu.RUnlock()
+	defer g.visGate.WeakUnlock(visTok)
 	defer g.finishWriteShared(w, gid)
 	return fn(WriteTx{w: w})
 }
@@ -962,11 +997,12 @@ func (g *Graph[N, W]) BeginVersionedTx() WriteTx {
 // Safe for concurrent use; each goroutine must pass its own transaction.
 func (g *Graph[N, W]) ApplyInVersionedTx(ctx context.Context, tx WriteTx, fn func(WriteTx) error) error {
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
-	if err := ctxlock.Acquire(ctx, g.visMu.TryRLock, g.visMu.RLock, g.visMu.RUnlock); err != nil {
+	visTok, err := g.visGate.WeakLockCtxAuto(ctx)
+	if err != nil {
 		return err
 	}
 	g.barrier.stampWriter(gid)
-	defer g.visMu.RUnlock()
+	defer g.visGate.WeakUnlock(visTok)
 	defer g.barrier.clearWriter(gid)
 	return fn(tx)
 }
@@ -1003,9 +1039,9 @@ func (g *Graph[N, W]) endVersionedTxInstant(tx WriteTx) uint64 {
 	// unconditionally does not fill the histogram with samples of nothing.
 	defer metrics.Time("graph.lpg.EndVersionedTx").Stop()
 	gid := g.barrier.checkWriter()
-	g.visMu.RLock()
+	visTok := g.visGate.WeakLockAuto()
 	g.barrier.stampWriter(gid)
-	defer g.visMu.RUnlock()
+	defer g.visGate.WeakUnlock(visTok)
 	defer g.barrier.clearWriter(gid)
 	ts := g.endWrite(tx.w)
 	// After endWrite, so nothing the transaction still reads is reclaimable while
@@ -1133,12 +1169,13 @@ func (g *Graph[N, W]) finishWriteSharedInstant(w *writeCtx, gid int64, out *uint
 func (g *Graph[N, W]) applyVersionedInstant(ctx context.Context, fn func(WriteTx) error) (ts uint64, err error) {
 	defer metrics.Time("graph.lpg.ApplyVersionedCtx").Stop()
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
-	if err := ctxlock.Acquire(ctx, g.visMu.TryRLock, g.visMu.RLock, g.visMu.RUnlock); err != nil {
+	visTok, err := g.visGate.WeakLockCtxAuto(ctx)
+	if err != nil {
 		return 0, err
 	}
 	g.barrier.stampWriter(gid)
 	w := g.beginWrite()
-	defer g.visMu.RUnlock()
+	defer g.visGate.WeakUnlock(visTok)
 	defer g.finishWriteSharedInstant(w, gid, &ts)
 	return 0, fn(WriteTx{w: w})
 }
@@ -1184,20 +1221,22 @@ func (g *Graph[N, W]) LockBarrier() {
 // the caller owns the barrier and must release it exactly once, as with
 // LockBarrier.
 //
-// The wait exists because [Graph.View] readers hold the barrier's read side for
-// the duration of their query, so a writer arriving mid-read queues behind it.
+// The wait exists because a DDL holds the visibility gate strongly for its whole
+// scan-and-register sequence, so a writer arriving mid-DDL queues behind it.
 // Before rmp #2174 that wait was unbounded from the caller's point of view: the
 // round-3 audit measured Engine.BeginTx with a 50 ms deadline returning after
 // 601 ms, and after 11.60 s under load, in both cases with a live transaction
-// and err=nil. See internal/ctxlock for how the wait is bounded and why a
-// queued acquire cannot simply be abandoned.
+// and err=nil. See [mvcc.Gate.StrongLockCtx] and the acquireCtx helper beside it
+// for how the wait is bounded and why a queued acquire cannot simply be
+// abandoned. (It used to say "[Graph.View] readers hold the barrier's read side";
+// rmp #2344 removed Graph.View and reads take no barrier at all.)
 func (g *Graph[N, W]) LockBarrierCtx(ctx context.Context) error {
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
-	if err := ctxlock.Acquire(ctx, g.visMu.TryLock, g.visMu.Lock, g.visMu.Unlock); err != nil {
+	if err := g.visGate.StrongLockCtx(ctx); err != nil {
 		return err
 	}
 	// The stamp records the CALLING goroutine, which is the logical holder even
-	// when ctxlock performed the acquire on a helper goroutine: the guard exists
+	// when the gate performed the acquire on a helper goroutine: the guard exists
 	// to detect same-goroutine nesting, and only the caller runs user code under
 	// the barrier.
 	g.barrier.stampWriter(gid)
@@ -1246,7 +1285,7 @@ func (g *Graph[N, W]) UnlockBarrier() {
 	// releasing the barrier.
 	g.adj.EndCommit()
 	g.barrier.clearWriter(gid)
-	g.visMu.Unlock()
+	g.visGate.StrongUnlock()
 }
 
 // ApplyInsideLocked is the barrier-already-held variant of [Graph.ApplyAtomically].
@@ -1272,10 +1311,10 @@ func (g *Graph[N, W]) ApplyInsideLocked(fn func() error) error {
 // the graph in three different places.
 func (g *Graph[N, W]) ApplyAtomicallyTx(fn func(WriteTx) error) error {
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
-	g.visMu.Lock()
+	g.visGate.StrongLock()
 	g.barrier.stampWriter(gid)
 	w := g.openWriteBracket()
-	defer g.visMu.Unlock()
+	defer g.visGate.StrongUnlock()
 	defer g.finishWrite(w, gid)
 	return fn(WriteTx{w: w})
 }
@@ -1292,92 +1331,27 @@ func (g *Graph[N, W]) ApplyInsideLockedTx(fn func(WriteTx) error) error {
 	return fn(g.AmbientWriteTx())
 }
 
-// View runs fn while holding the graph's SCHEMA barrier in READ mode, so fn
-// observes a graph whose catalog — the declared indexes and constraints, and the
-// structures a DDL transition rebuilds — is not mid-transition.
+// Graph.View was REMOVED in rmp #2344.
 //
-// # It does NOT isolate fn from concurrent DATA writes (rmp #2320)
+// It ran fn while holding the graph's visibility barrier in READ mode, and it was
+// the last pre-MVCC read barrier in the module. Nothing needs it: a caller that
+// needs a consistent view of DATA takes a SNAPSHOT ([Graph.BeginRead] plus
+// [Graph.ReadAt], paired with [Graph.EndRead]), and a caller that needs a
+// consistent view of the CATALOG is covered by the engine's schema gate, which is
+// strictly stronger — a DDL holds it exclusively while an ordinary write holds it
+// shared, whereas View shared the barrier WITH ordinary writes and therefore
+// excluded nothing at all.
 //
-// It used to, and the guarantee never came from this side of the lock: an
-// ordinary write held the same barrier EXCLUSIVELY, so a reader here and a writer
-// could not overlap. rmp #2320 moved ordinary writes to a SHARED hold
-// ([Graph.ApplyVersioned]), and a lock shared with a writer gives a reader here
-// not a weaker guarantee but NONE, because GoGraph updates the stored value IN
-// PLACE and keeps the inverse in the version chain (Memgraph's delta shape, see
-// mvcc_write.go) — so an accessor that resolves no version reads the NEWEST
-// value, another transaction's uncommitted work included. Measured on this build:
-// 7040 partial-transaction observations from a View reader using unversioned
-// accessors, against ZERO from a snapshot reader over 6 488 034 reads
-// (TestIsolation_Commit_NoPartialTransactionObservable and its negative control).
+// That last point is why keeping it was not harmless. Since rmp #2320 an ordinary
+// write holds the visibility barrier SHARED, so a View reader using unversioned
+// accessors read the newest stored value — another transaction's uncommitted work
+// included. Measured on this build: 7040 partial-transaction observations from a
+// View reader against ZERO from a snapshot reader over 6 488 034 reads. The method
+// looked like an isolation primitive and provided no isolation.
 //
-// So the rule is now explicit and has exactly two halves:
-//
-//   - a caller that needs a consistent view of DATA takes a SNAPSHOT —
-//     [Graph.BeginRead] plus [Graph.ReadAt], paired with [Graph.EndRead]. That is
-//     what [Engine.Run] does, it takes no lock at all, and it is the only thing
-//     that provides atomic visibility now;
-//   - a caller that needs a consistent view of the CATALOG, or that reads through
-//     an accessor with no as-of form, uses this.
-//
-// The division is where Memgraph and PostgreSQL both put it. Memgraph takes
-// `main_lock_` with a `std::shared_lock` for an ordinary write and uniquely only
-// for the index/constraint and durability transitions
-// (`src/storage/v2/inmemory/storage.cpp`); PostgreSQL expresses the same thing
-// through its conflict matrix, where an ordinary write's RowExclusiveLock does not
-// conflict with itself and CREATE INDEX's ShareLock does
-// (`src/backend/storage/lmgr/lock.c`, LockConflicts).
-//
-// # What still relies on it, and what each one actually rests on
-//
-// Three callers remain, and none of them depends on this method for data
-// atomicity:
-//
-//   - the checkpointer's capture (store/checkpoint) runs inside
-//     RunUnderCommitLock, which drains in-flight commits to ZERO before capturing,
-//     so no write can be half-applied while it walks. This hold is belt and
-//     braces; rmp #2310 replaces it with a transactional instant;
-//   - the approximate-statistics build (cypher/stats_build.go) is approximate by
-//     contract and stamps the generation it scanned, so a concurrent write costs
-//     accuracy and never correctness;
-//   - the constraint pre-validation scan (cypher/api.go scanLabelProperty) runs
-//     before the constraint is registered and is followed by enforcement on every
-//     subsequent write, so a value a concurrent writer added during the scan is
-//     caught by the enforcement path rather than missed.
-//
-// # It is NO LONGER how the query engine reads (rmp #2274, #2290)
-//
-// [Engine.Run] used to bracket every query in this, which gave it a consistent
-// view by EXCLUDING writers — and that exclusion is what starved readers: a
-// write took the same barrier exclusively, Go's sync.RWMutex prefers a waiting
-// writer, and every reader arriving behind one parked for as long as the
-// longest in-flight read. A query now takes a SNAPSHOT ([Graph.BeginRead]) and
-// no lock at all.
-//
-// Concurrent View callers do not block one another, and they no longer block a
-// writer either.
-//
-// fn must not perform writes and must not call [Graph.ApplyAtomically] or
-// [Graph.View] (the RWMutex is not re-entrant). A nested [Graph.View] would
-// deadlock the instant any writer queues behind the outer read lock, and a
-// nested [Graph.ApplyAtomically] always deadlocks.
-//
-// Both are CHECKED in builds made with -race or -tags gograph_debug: a nested
-// call from a goroutine already inside the barrier panics with a clear message
-// instead of deadlocking. The panic indicates a programmer error and is not
-// recovered by this package. A released build omits the check — identifying the
-// calling goroutine cost a runtime.Stack call measured at 97-99% of this method,
-// with a 64 B allocation and no scaling across cores — so there a violation
-// deadlocks silently. See graph/lpg/reentrancy_disabled.go.
-//
-// Concurrent View readers from DIFFERENT goroutines do not block one another and
-// never trip the guard; only a same-goroutine nested acquisition does.
-func (g *Graph[N, W]) View(fn func()) {
-	gid := g.barrier.enterReader() // panics on re-entry from this goroutine
-	defer g.barrier.exitReader(gid)
-	g.visMu.RLock()
-	defer g.visMu.RUnlock()
-	fn()
-}
+// Removing it also retires the READER half of the re-entrancy guard, which had no
+// other caller: see [barrierGuard]. The WRITER half stays, because
+// [Graph.ApplyAtomically] still nests fatally.
 
 // SetValidator installs v as the runtime schema validator for this graph.
 // Once set, every call to [Graph.SetNodeProperty] and [Graph.SetEdgeProperty]
@@ -2637,10 +2611,18 @@ func (g *Graph[N, W]) SetNodeLabel(n N, name string) error {
 // than looked up so a transaction's deltas all point at ONE record and its
 // commit is a single store (rmp #2278).
 func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, tx *writeCtx) error {
-	if err := g.adj.AddNode(n); err != nil {
-		return err
-	}
-	id, _ := g.adj.Mapper().Lookup(n)
+	// ONE mapper shard acquisition, not two (rmp #2360). Mapper.Intern already
+	// RETURNS the id it assigned, and [adjlist.AdjList.AddNode] is exactly
+	// `mapper.Intern(n); return nil` — so the Lookup that used to follow it re-took
+	// the same shard's lock to re-resolve a key the intern had just resolved. The id
+	// is identical by construction: the mapper's slot assignment is permanent by
+	// contract, so interning a key twice yields the same NodeID, and reading it from
+	// the intern is the same value the Lookup returned.
+	//
+	// The reference engines do not pay this either: PostgreSQL and InnoDB resolve a
+	// tuple's identity once per write, and Memgraph's accessor carries the vertex
+	// pointer rather than re-looking it up per store.
+	id := g.adj.Mapper().Intern(n)
 	lid := g.reg.Intern(name)
 	sh := g.nodeLabelShardFor(id)
 	sh.mu.Lock()
@@ -2648,22 +2630,53 @@ func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, tx *writeCtx) error {
 	// shard lock. The write-back is load-bearing — add may grow or promote the
 	// bag's backing storage, so the updated header must be re-stored.
 	bag := sh.m[id]
-	// P0 MVCC spike (rmp #2275), inert unless armed: record the undo BEFORE
-	// mutating, and only when the label is not already present — re-asserting a
-	// label the node already carries changes nothing, so a delta for it would be
-	// a version that never existed. MERGE's MATCH branch re-asserts labels on
-	// every match, so this guard is what keeps a delta per WRITE rather than a
-	// delta per statement.
-	if g.labelDeltasEnabled() && !bag.has(lid) {
+	// P0 MVCC spike (rmp #2275), inert unless armed.
+	if g.labelDeltasEnabled() {
 		// Write-write conflict (rmp #2300), tested against THIS transaction's
 		// snapshot — which travels in tx rather than being looked up on the
 		// graph, so a concurrent writer is never tested against a transaction
 		// that is not its own (rmp #2301). Checked before deltaStamp so a
 		// doomed write allocates no commit record.
+		//
+		// THE TEST RUNS UNCONDITIONALLY, and that is the fix for rmp #2354.
+		//
+		// It used to sit inside the `!bag.has(lid)` guard below, on the reasoning
+		// that only a write which RECORDS a version can conflict. That reasoning
+		// compares against the RAW STORED bag, which already carries other
+		// in-flight transactions' eager writes, so a peer's UNCOMMITTED add of the
+		// same label made has() true and skipped the test — and with it the delta.
+		// The write then reported SUCCESS having applied nothing, and when the peer
+		// rolled back its label went with it:
+		//
+		//	T1: SET n:Acct (eager write puts :Acct in the raw bag), uncommitted
+		//	T2: SET n:Acct → has() is true ⇒ no conflict, no delta, bag.add a no-op
+		//	T2: COMMIT → nil
+		//	T1: ROLLBACK → its undo strips :Acct
+		//	final state: n carries NO :Acct, yet T2 was told it committed.
+		//
+		// Measured exactly that (TestLabelStore_ConcurrentAddThenPeerRollback):
+		// an acknowledged commit that applied nothing, which is a LOST UPDATE.
+		// This is the identical defect rmp #2324 fixed for the node-PROPERTY store,
+		// whose comment in graph/lpg/property.go records the same reasoning failing
+		// there; the label store kept the guard.
+		//
+		// Testing the head first cannot reintroduce a spurious abort. MERGE's MATCH
+		// branch re-asserts a label it just read, and the head it re-asserts over is
+		// its OWN write or an older committed one — visible either way, so no
+		// conflict. A head that is NOT visible means another transaction changed
+		// this node's labels underneath, and refusing that is the correct answer.
 		if head := sh.headStamp(id); tx.conflicts(head) {
 			sh.mu.Unlock()
 			return tx.conflictErr(mvcc.StoreNodeLabels, head)
 		}
+	}
+	// Record the undo BEFORE mutating, and only when the label is not already
+	// present — re-asserting a label the node already carries changes nothing, so a
+	// delta for it would be a version that never existed. MERGE's MATCH branch
+	// re-asserts labels on every match, so this guard is what keeps a delta per
+	// WRITE rather than a delta per statement. Only the DELTA is guarded; the
+	// conflict test above is not (rmp #2354).
+	if g.labelDeltasEnabled() && !bag.has(lid) {
 		ci, ts := g.deltaStamp(tx.record())
 		sh.pushLabelDelta(id, undoRemoveLabel, lid, ci, ts, &g.labelDeltaActive)
 	}
@@ -3792,24 +3805,46 @@ func (g *Graph[N, W]) removeNodeLabelInfo(n N, name string, tx *writeCtx) {
 	}
 	sh := g.nodeLabelShardFor(id)
 	sh.mu.Lock()
+	// P0 MVCC spike (rmp #2275), inert unless armed.
+	//
+	// THE CONFLICT TEST RUNS BEFORE — AND OUTSIDE — BOTH GUARDS (rmp #2354).
+	//
+	// It used to sit inside `if bag, ok2 := sh.m[id]; ok2` AND inside
+	// `bag.has(lid)`, and each of those independently lost this transaction's
+	// removal to a peer's UNCOMMITTED write, because both read the RAW stored bag:
+	//
+	//   - bag.has(lid) false — a peer already removed the label eagerly, so this
+	//     removal was skipped silently and the transaction committed as if it had
+	//     happened. When the peer rolled back, the label came back.
+	//   - sh.m[id] absent — the same, in the case where the peer's eager removal
+	//     took the node's LAST label and deleted the bag entry outright, so not even
+	//     the has() guard was reached.
+	//
+	// [nodeLabelShard.headStamp] reads the DELTA CHAIN (sh.d) and not the bag, so it
+	// answers correctly in both cases, including for a node with no bag entry at all
+	// — where an untouched chain yields zero and never conflicts.
+	//
+	// See setNodeLabelInfo for the add-path half and for the rmp #2324 precedent on
+	// the property store. removeNodeLabelInfo cannot return an error, so the
+	// conflict is RECORDED on the transaction and the write skipped: applying a
+	// doomed write would put a version on a chain whose head belongs to someone
+	// else. The caller learns of it from the error its next writing call returns, or
+	// from commit, which refuses to publish a transaction carrying one. Recording is
+	// what makes the two paths equivalent — without it this removal would be dropped
+	// and the transaction would commit as if it had happened.
+	if g.labelDeltasEnabled() {
+		if head := sh.headStamp(id); tx.conflicts(head) {
+			_ = tx.conflictErr(mvcc.StoreNodeLabels, head)
+			sh.mu.Unlock()
+			return
+		}
+	}
 	if bag, ok2 := sh.m[id]; ok2 {
-		// P0 MVCC spike (rmp #2275), inert unless armed. Guarded on the label
-		// actually being present for the same reason as the add path: removing
-		// a label the node does not carry changes nothing.
+		// Record the undo only when the label is actually present, for the same
+		// reason as the add path: removing a label the node does not carry changes
+		// nothing, so a delta for it would be a version that never existed. Only the
+		// DELTA is guarded; the conflict test above is not (rmp #2354).
 		if g.labelDeltasEnabled() && bag.has(lid) {
-			// See setNodeLabelInfo. removeNodeLabelInfo cannot return an error,
-			// so the conflict is RECORDED on the transaction and the write is
-			// skipped: applying a doomed write would put a version on a chain
-			// whose head belongs to someone else. The caller learns of it from
-			// the error its next writing call returns, or from commit, which
-			// refuses to publish a transaction carrying one. Recording is what
-			// makes the two paths equivalent — without it this removal would be
-			// dropped and the transaction would commit as if it had happened.
-			if head := sh.headStamp(id); tx.conflicts(head) {
-				_ = tx.conflictErr(mvcc.StoreNodeLabels, head)
-				sh.mu.Unlock()
-				return
-			}
 			ci, ts := g.deltaStamp(tx.record())
 			sh.pushLabelDelta(id, undoAddLabel, lid, ci, ts, &g.labelDeltaActive)
 		}

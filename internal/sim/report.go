@@ -30,28 +30,51 @@ type SimReport struct {
 	// produced for this failure ([ShrinkTrace]). It is attached by the CLI replay
 	// path after a deterministic failure is shrunk; a report from a live run
 	// leaves it nil.
-	Shrunk      *ShrinkResult
+	Shrunk *ShrinkResult
+	// Scenario is the catalogue key of the scenario that produced the failure,
+	// and Mode the harness it ran under. Both are rendered, because a report is
+	// read by an operator who has only the log: without them a sighting says
+	// what broke but not what was running, and a CONCURRENT mode is precisely
+	// the case where "not bit-reproducible" changes how it must be chased
+	// (rmp #2347).
+	Scenario    string
 	FailedOp    Op
 	Violations  []Violation
 	OracleState OracleSnapshot
 	Seed        uint64
 	FailedTick  int64
+	Mode        ExecMode
 }
 
 // String renders a human-readable failure report. It always includes a
 // "Reproduce with:" line carrying the seed so a failure can be replayed
 // verbatim.
+//
+// IT CAN NEVER RENDER EMPTY, and a report that carries no violation says so
+// LOUDLY rather than rendering a bare header (rmp #2347). A non-nil report
+// means the scenario failed; one that names no violated invariant is itself a
+// reporting defect, and an operator who cannot tell that from a clean run has
+// been told nothing. [TestSimReportNeverRendersEmptyShort] pins both halves.
 func (r *SimReport) String() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "SIMULATION FAILED\n")
+	if r.Scenario != "" {
+		fmt.Fprintf(&b, "  Scenario:    %s (mode=%s)\n", r.Scenario, r.Mode)
+	}
 	fmt.Fprintf(&b, "  Seed:        %d\n", r.Seed)
 	fmt.Fprintf(&b, "  Failed tick: %d\n", r.FailedTick)
 	fmt.Fprintf(&b, "  Failed op:   kind=%s cypher=%q params=%v\n", r.FailedOp.Kind, r.FailedOp.Cypher, r.FailedOp.Params)
 	fmt.Fprintf(&b, "  Oracle:      nodes=%d edges=%d ops=%d\n",
 		r.OracleState.NodeCount, r.OracleState.EdgeCount, r.OracleState.OpCount)
-	fmt.Fprintf(&b, "  Violations (%d):\n", len(r.Violations))
-	for _, v := range r.Violations {
-		fmt.Fprintf(&b, "    - %s\n", v.String())
+	if len(r.Violations) == 0 {
+		fmt.Fprintf(&b, "  Violations (0): *** REPORTING DEFECT: this report names no violated "+
+			"invariant. A non-nil report means the scenario FAILED, so the absence of a "+
+			"violation here is a bug in whatever built the report, not a clean run. ***\n")
+	} else {
+		fmt.Fprintf(&b, "  Violations (%d):\n", len(r.Violations))
+		for _, v := range r.Violations {
+			fmt.Fprintf(&b, "    - %s\n", v.String())
+		}
 	}
 	fmt.Fprintf(&b, "Reproduce with: go run ./cmd/sim %d\n", r.Seed)
 	if r.Shrunk != nil {

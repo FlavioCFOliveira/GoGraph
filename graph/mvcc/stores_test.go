@@ -18,7 +18,7 @@ func TestConflictStores_EveryNameHasAnIndex(t *testing.T) {
 	names := []string{
 		StoreNodeLabels, StoreNodeProperties, StoreNodeExistence, StoreAdjacency,
 		StoreEdgeTypes, StoreEdgeTypesHandle, StoreEdgeTypesOrd,
-		StoreEdgePropsHandle, StoreEdgePropsOrd,
+		StoreEdgePropsHandle, StoreEdgePropsOrd, StoreNodeConstraint,
 	}
 	other := ConflictStoreIndex(StoreOther)
 	seen := make(map[int]string, len(names))

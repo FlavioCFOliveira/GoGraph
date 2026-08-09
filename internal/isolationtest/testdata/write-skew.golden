@@ -1,0 +1,488 @@
+spec write-skew: 2 sessions, 20 permutations
+# A5B write skew (Berenson et al., SIGMOD 1995 §4.4.4). Two on-call doctors; the
+# rule is that at least one must stay on call. Each transaction reads the count of
+# on-call doctors, sees 2, and takes ITSELF off call — writing a different node, so
+# there is no write-write conflict to detect. Snapshot isolation ALLOWS this and
+# the invariant ends up violated. That is the documented price of SI, not a defect;
+# this transcript exists so the day GoGraph offers serialisability the change is
+# visible as a diff rather than as folklore.
+
+starting permutation: s1r s1w s1c s2r s2w s2c
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false RETURN d.name AS who
+who    
+-------
+"alice"
+(1 row)
+step s1c: COMMIT
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false RETURN d.name AS who
+who  
+-----
+"bob"
+(1 row)
+step s2c: COMMIT
+
+starting permutation: s1r s1w s2r s1c s2w s2c
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false RETURN d.name AS who
+who    
+-------
+"alice"
+(1 row)
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false RETURN d.name AS who
+who  
+-----
+"bob"
+(1 row)
+step s2c: COMMIT
+
+starting permutation: s1r s1w s2r s2w s1c s2c
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false RETURN d.name AS who
+who    
+-------
+"alice"
+(1 row)
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false RETURN d.name AS who
+who  
+-----
+"bob"
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+
+starting permutation: s1r s1w s2r s2w s2c s1c
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false RETURN d.name AS who
+who    
+-------
+"alice"
+(1 row)
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false RETURN d.name AS who
+who  
+-----
+"bob"
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+
+starting permutation: s1r s2r s1w s1c s2w s2c
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false RETURN d.name AS who
+who    
+-------
+"alice"
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false RETURN d.name AS who
+who  
+-----
+"bob"
+(1 row)
+step s2c: COMMIT
+
+starting permutation: s1r s2r s1w s2w s1c s2c
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false RETURN d.name AS who
+who    
+-------
+"alice"
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false RETURN d.name AS who
+who  
+-----
+"bob"
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+
+starting permutation: s1r s2r s1w s2w s2c s1c
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false RETURN d.name AS who
+who    
+-------
+"alice"
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false RETURN d.name AS who
+who  
+-----
+"bob"
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+
+starting permutation: s1r s2r s2w s1w s1c s2c
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false RETURN d.name AS who
+who  
+-----
+"bob"
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false RETURN d.name AS who
+who    
+-------
+"alice"
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+
+starting permutation: s1r s2r s2w s1w s2c s1c
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false RETURN d.name AS who
+who  
+-----
+"bob"
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false RETURN d.name AS who
+who    
+-------
+"alice"
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+
+starting permutation: s1r s2r s2w s2c s1w s1c
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false RETURN d.name AS who
+who  
+-----
+"bob"
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false RETURN d.name AS who
+who    
+-------
+"alice"
+(1 row)
+step s1c: COMMIT
+
+starting permutation: s2r s1r s1w s1c s2w s2c
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false RETURN d.name AS who
+who    
+-------
+"alice"
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false RETURN d.name AS who
+who  
+-----
+"bob"
+(1 row)
+step s2c: COMMIT
+
+starting permutation: s2r s1r s1w s2w s1c s2c
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false RETURN d.name AS who
+who    
+-------
+"alice"
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false RETURN d.name AS who
+who  
+-----
+"bob"
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+
+starting permutation: s2r s1r s1w s2w s2c s1c
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false RETURN d.name AS who
+who    
+-------
+"alice"
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false RETURN d.name AS who
+who  
+-----
+"bob"
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+
+starting permutation: s2r s1r s2w s1w s1c s2c
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false RETURN d.name AS who
+who  
+-----
+"bob"
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false RETURN d.name AS who
+who    
+-------
+"alice"
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+
+starting permutation: s2r s1r s2w s1w s2c s1c
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false RETURN d.name AS who
+who  
+-----
+"bob"
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false RETURN d.name AS who
+who    
+-------
+"alice"
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+
+starting permutation: s2r s1r s2w s2c s1w s1c
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false RETURN d.name AS who
+who  
+-----
+"bob"
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false RETURN d.name AS who
+who    
+-------
+"alice"
+(1 row)
+step s1c: COMMIT
+
+starting permutation: s2r s2w s1r s1w s1c s2c
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false RETURN d.name AS who
+who  
+-----
+"bob"
+(1 row)
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false RETURN d.name AS who
+who    
+-------
+"alice"
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+
+starting permutation: s2r s2w s1r s1w s2c s1c
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false RETURN d.name AS who
+who  
+-----
+"bob"
+(1 row)
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false RETURN d.name AS who
+who    
+-------
+"alice"
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+
+starting permutation: s2r s2w s1r s2c s1w s1c
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false RETURN d.name AS who
+who  
+-----
+"bob"
+(1 row)
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false RETURN d.name AS who
+who    
+-------
+"alice"
+(1 row)
+step s1c: COMMIT
+
+starting permutation: s2r s2w s2c s1r s1w s1c
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false RETURN d.name AS who
+who  
+-----
+"bob"
+(1 row)
+step s2c: COMMIT
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false RETURN d.name AS who
+who    
+-------
+"alice"
+(1 row)
+step s1c: COMMIT

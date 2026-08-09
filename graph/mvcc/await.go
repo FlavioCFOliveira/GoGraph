@@ -119,6 +119,69 @@ func (c *Clock) AwaitVisible(ctx context.Context, floor uint64) error {
 	}
 }
 
+// AwaitQuiescent blocks until no allocated commit timestamp remains unpublished —
+// until [Clock.InFlightCommits] would report zero — or until ctx finishes.
+//
+// # What it is for: the durability/visibility boundary (rmp #2349)
+//
+// Committing is two steps, and this module deliberately does NOT hold one lock
+// across both: a timestamp is allocated, the WAL record carrying it is fsynced, and
+// only afterwards is the timestamp published. Between the fsync and the publish a
+// transaction is DURABLE BUT INVISIBLE, and any observer that reads a durability
+// position and a visibility position at that moment gets two numbers describing
+// DIFFERENT sets of transactions.
+//
+// A checkpoint is exactly such an observer, and for it the disagreement is
+// unrecoverable: it takes the durable WAL offset as the prefix its image folds, and
+// the image itself at a visible instant. A transaction inside the window is below
+// the offset and absent from the image, so truncating that prefix discards the only
+// record of an acknowledged commit.
+//
+// This is the wait that closes the window, and it is PostgreSQL's answer to the same
+// problem. A backend there raises DELAY_CHKPT_START before inserting its commit
+// record and clears it after updating pg_xact (src/backend/access/transam/xact.c,
+// commit b5978350, lines 1469-1471 and 1577-1582), and CreateCheckPoint spins until
+// no backend is inside that window (src/backend/access/transam/xlog.c:7695-7712)
+// before it moves on. Its own comment names the cause — "xact.c does commit record
+// XLOG insertion and clog update as two separate steps protected by different
+// locks, but again that seems best on grounds of minimizing lock contention"
+// (xlog.c:7684-7687) — and states the trade-off it chose: "it seems better to make
+// checkpoint take a bit longer than to hold off insertions longer than necessary".
+// That is the trade-off taken here too, which is why the wait is on the OBSERVER
+// and the commit path pays nothing.
+//
+// Memgraph reaches the same property by the other route, and the contrast is why it
+// was not copied: InMemoryStorage::CreateTransaction loads the start timestamp and
+// the last durable timestamp under ONE acquisition of engine_lock_
+// (src/storage/v2/inmemory/storage.cpp:2833-2844, commit b3ac3cdc), so its snapshot
+// reads a mutually consistent pair by construction. That works because its commit
+// publishes durability and visibility under the same engine lock — which is the
+// convoy rmp #2302 and rmp #2193 removed here to make writes scale.
+//
+// # Termination
+//
+// It terminates once allocation stops, since every allocated timestamp is discharged
+// by [Clock.PublishCommitTS] or [Clock.AbandonCommitTS]. A caller that observes it
+// while allocation continues may loop indefinitely by design — that is the caller's
+// to bound, and it is why this takes a context. The intended caller holds an
+// admission gate closed, so no new timestamp can be allocated while it waits.
+//
+// Safe for concurrent use.
+func (c *Clock) AwaitQuiescent(ctx context.Context) error {
+	for {
+		// Read the allocation counter FIRST. Waiting for a floor read after the
+		// frontier would let an allocation that lands between the two escape the
+		// wait, which is the whole failure this closes.
+		allocated := c.commit.Load()
+		if c.visible.Load() >= allocated {
+			return nil
+		}
+		if err := c.AwaitVisible(ctx, allocated); err != nil {
+			return err
+		}
+	}
+}
+
 // AwaitingVisible reports how many callers are currently blocked in
 // [Clock.AwaitVisible].
 //

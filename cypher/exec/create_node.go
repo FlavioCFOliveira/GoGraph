@@ -126,6 +126,24 @@ type CreateNode struct {
 	propsRaw    string // original properties string, retained for re-parse with params
 	labels      []string
 	props       []propLiteral // parsed once from the properties string
+	// childRow is the scratch [Row] handed to the child on every [CreateNode.Next].
+	//
+	// It is a field rather than a local for one reason: a local's address escapes
+	// through the child's interface call, so `var childRow Row` heap-allocated a
+	// fresh 24-byte slice header on EVERY Next. Measured (rmp #2339,
+	// -memprofilerate=1 over 200 000 commits of
+	// BenchmarkWriteScaling/mem/writers=1) that was 3 objects and 72 B per commit
+	// — Next runs three times per statement — and the single heaviest allocating
+	// line in this package. Taking the address of a field on the already-heap
+	// operator costs nothing.
+	//
+	// Reusing it is sound because CreateNode is not safe for concurrent use (one
+	// operator tree per statement) and because the operator contract is that
+	// Next REPLACES *out rather than appending into it — no operator in this
+	// package reads or extends the row it is handed. Next also clears the field
+	// on the branch that hands the child's row straight out, so the caller's row
+	// and this scratch never alias past the return.
+	childRow Row
 }
 
 // propLiteral is a pre-parsed key/value pair from a literal property map
@@ -248,29 +266,27 @@ func (op *CreateNode) Next(out *Row) (bool, error) {
 		return false, err
 	}
 
-	var childRow Row
-	ok, err := op.child.Next(&childRow)
+	// Into the operator's own scratch, not a local: see [CreateNode.childRow].
+	ok, err := op.child.Next(&op.childRow)
 	if err != nil {
 		return false, err
 	}
 	if !ok {
 		return false, nil
 	}
+	childRow := op.childRow
 
 	props, err := mergeProps(op.props, op.propsExprFn, childRow)
 	if err != nil {
 		return false, err
 	}
 
-	// Constraint enforcement: check before any mutation.
-	if op.reg != nil {
-		for _, p := range props {
-			if err := reserveConstraintValue(op.reg, op.mutator, op.labels, p.key, p.value, op.mgr); err != nil {
-				return false, err
-			}
-		}
-	}
-
+	// UNIQUE is reserved inside SetNodeProperty, at the mutator choke point
+	// (rmp #2358). The labels are attached BEFORE any property is written, below,
+	// so the property write sees the node's full label set and reserves under
+	// exactly the constraints the new node is subject to. A violation aborts the
+	// statement and the undo log removes the partially built node, so the CREATE is
+	// still all-or-nothing.
 	nodeKey := op.freshNodeKey()
 	nodeID, err := op.mutator.AddNode(nodeKey)
 	if err != nil {
@@ -285,13 +301,13 @@ func (op *CreateNode) Next(out *Row) (bool, error) {
 		if err := op.mutator.SetNodeProperty(nodeKey, p.key, p.value); err != nil {
 			return false, err
 		}
-		if op.reg != nil {
-			op.reg.RecordPropertySet(op.labels, p.key, p.value)
-		}
 	}
 
 	// Build output row: child columns + optional NodeID column.
 	if op.nodeVar == "" {
+		// Hand the child's row out and drop this operator's reference to it, so
+		// the caller's row and the scratch cannot alias past the return.
+		op.childRow = nil
 		*out = childRow
 		return true, nil
 	}

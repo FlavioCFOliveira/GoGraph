@@ -4,7 +4,8 @@ package server_test
 // transaction when a Bolt session enters the FAILED state (#1312).
 //
 // While an explicit write transaction is open, the session holds the engine's
-// single-writer serialisation (the store mutex on a WAL-backed engine). An
+// former single-writer serialisation (the store mutex on a WAL-backed engine,
+// retired by rmp #2306). An
 // illegal message moves the session to FAILED. A FAILED session can never
 // legally resume the transaction — only RESET escapes FAILED, and RESET
 // discards the transaction anyway — so holding the writer lock for the whole

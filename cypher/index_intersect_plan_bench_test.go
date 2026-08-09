@@ -29,7 +29,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
@@ -84,23 +83,14 @@ func benchPlanBuild(b *testing.B, fx iiBenchFixture, q string) {
 	ctx := context.Background()
 	// One untimed build so any lazily-initialised planner state (the index
 	// manager's listing, the label registry's interning) is warm in both arms.
-	var warmErr error
-	fx.g.View(func() {
-		_, _, warmErr = fx.eng.buildReadPhysical(ctx, entry, entry.plan, nil, reg, nil, nil)
-	})
+	_, _, warmErr := fx.eng.buildReadPhysical(ctx, entry, entry.plan, nil, reg, nil, nil)
 	if warmErr != nil {
 		b.Fatalf("warm build: %v", warmErr)
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		var (
-			op       exec.Operator
-			buildErr error
-		)
-		fx.g.View(func() {
-			op, _, buildErr = fx.eng.buildReadPhysical(ctx, entry, entry.plan, nil, reg, nil, nil)
-		})
+		op, _, buildErr := fx.eng.buildReadPhysical(ctx, entry, entry.plan, nil, reg, nil, nil)
 		if buildErr != nil {
 			b.Fatalf("build: %v", buildErr)
 		}

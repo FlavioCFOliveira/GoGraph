@@ -166,13 +166,11 @@ func TestPatternEvaluator_EvalPatternComp_BudgetTrips(t *testing.T) {
 	pc := singleHopComprehension("a", "b")
 	row := boundAnchorRow(t, g, "a")
 
-	g.View(func() {
-		_, err := pe.EvalPatternComp(context.Background(), pc, row, nil, funcs.DefaultRegistry)
-		if !errors.Is(err, funcs.ErrCollectItemsExceeded) {
-			t.Fatalf("EvalPatternComp over degree %d with budget %d: err = %v, want ErrCollectItemsExceeded",
-				degree, budget, err)
-		}
-	})
+	_, err := pe.EvalPatternComp(context.Background(), pc, row, nil, funcs.DefaultRegistry)
+	if !errors.Is(err, funcs.ErrCollectItemsExceeded) {
+		t.Fatalf("EvalPatternComp over degree %d with budget %d: err = %v, want ErrCollectItemsExceeded",
+			degree, budget, err)
+	}
 }
 
 // TestPatternEvaluator_EvalPatternComp_DefaultDoesNotTrip is the guard that the
@@ -187,19 +185,17 @@ func TestPatternEvaluator_EvalPatternComp_DefaultDoesNotTrip(t *testing.T) {
 	pc := singleHopComprehension("a", "b")
 	row := boundAnchorRow(t, g, "a")
 
-	g.View(func() {
-		v, err := pe.EvalPatternComp(context.Background(), pc, row, nil, funcs.DefaultRegistry)
-		if err != nil {
-			t.Fatalf("EvalPatternComp under default budget: unexpected err %v", err)
-		}
-		list, ok := v.(expr.ListValue)
-		if !ok {
-			t.Fatalf("result is %T, want expr.ListValue", v)
-		}
-		if len(list) != degree {
-			t.Fatalf("result list has %d elements, want %d (full anchor degree)", len(list), degree)
-		}
-	})
+	v, err := pe.EvalPatternComp(context.Background(), pc, row, nil, funcs.DefaultRegistry)
+	if err != nil {
+		t.Fatalf("EvalPatternComp under default budget: unexpected err %v", err)
+	}
+	list, ok := v.(expr.ListValue)
+	if !ok {
+		t.Fatalf("result is %T, want expr.ListValue", v)
+	}
+	if len(list) != degree {
+		t.Fatalf("result list has %d elements, want %d (full anchor degree)", len(list), degree)
+	}
 }
 
 // TestPatternEvaluator_EvalPatternComp_CancelAborts asserts that a cancelled
@@ -218,13 +214,11 @@ func TestPatternEvaluator_EvalPatternComp_CancelAborts(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancelled before evaluation begins
 
-	g.View(func() {
-		v, err := pe.EvalPatternComp(ctx, pc, row, nil, funcs.DefaultRegistry)
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("EvalPatternComp with cancelled context: err = %v, want context.Canceled", err)
-		}
-		if v != nil {
-			t.Fatalf("EvalPatternComp aborted: value = %v, want nil", v)
-		}
-	})
+	v, err := pe.EvalPatternComp(ctx, pc, row, nil, funcs.DefaultRegistry)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("EvalPatternComp with cancelled context: err = %v, want context.Canceled", err)
+	}
+	if v != nil {
+		t.Fatalf("EvalPatternComp aborted: value = %v, want nil", v)
+	}
 }
