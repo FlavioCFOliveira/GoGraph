@@ -793,7 +793,14 @@ func csvRoundTrip(ctx context.Context, adj *adjlist.AdjList[string, int64]) (boo
 	if err != nil {
 		return false, fmt.Errorf("WriteCtx: %w", err)
 	}
-	_, read, err := csv.ReadIntoCtx(ctx, &buf, opts)
+	// Size the byte cap to what was just written. csv.DefaultMaxBytes is a 128 MiB
+	// memory-exhaustion bound for input of unknown provenance; this buffer was
+	// written on the line above and its length is known exactly, so the default
+	// would only put a hidden ceiling on the -services knob (rmp #2375). Raised,
+	// never disabled — MaxBytes <= 0 removes the bound altogether.
+	readOpts := opts
+	readOpts.MaxBytes = int64(buf.Len())
+	_, read, err := csv.ReadIntoCtx(ctx, &buf, readOpts)
 	if err != nil {
 		return false, fmt.Errorf("ReadIntoCtx: %w", err)
 	}
