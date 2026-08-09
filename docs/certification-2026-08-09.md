@@ -652,10 +652,15 @@ measurement had been taken in an environment where it reproduces.** It almost ce
 defect required the gate's full parallel-package `-race` load, and five substitute environments
 returned clean before I found that recipe.
 
-So the most probable account, and the one the next cycle should test first: **`Graph.View` was removed
-on the strength of a snapshot-reader measurement that could not see this defect**, the migrated tests
-went green, and the gap has been open since 2026-08-07. The check is cheap and decisive — run the
-recipe at `5a71cc1c` and at its parent.
+**CONFIRMED BY MEASUREMENT, not left as an account.** The recipe was run against a worktree at
+`5a71cc1c` itself: **2 failures in 60 runs**, the same assertion, the same message. So the defect has
+been present since **2026-08-07**, and that commit's *"ZERO from a snapshot reader over 6488034 reads"*
+was a **false negative** — the measurement was taken in an environment where the defect does not
+surface.
+
+`Graph.View` was therefore removed on the strength of evidence that could not see what its removal
+exposed. The migrated tests went green, the new `internal/scriptgate` gate locked the removal in, and
+the gap has been open ever since.
 
 **That is the same error this cycle made five times**, and it is why the recipe matters more than any
 of the seventeen mechanisms: a clean number from the wrong environment is not evidence.
