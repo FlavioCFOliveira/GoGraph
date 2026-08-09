@@ -633,6 +633,36 @@ capture the visibility basis **once** — the in-flight set, PostgreSQL's `xmin`
 InnoDB's read view — which is **option (a) in #2369's technical requirements** and needs the
 maintainer's decision.
 
+### The fix, designed concretely — a per-snapshot memo, not a Clock change
+
+Option (a) is usually written as "capture the in-flight set at `BeginRead`", the PostgreSQL shape.
+There is a strictly smaller form that gives the same guarantee and touches neither the `Clock` nor
+`BeginRead`: **memoise the visibility verdict per commit record, per snapshot.**
+
+`Snapshot` gains a `map[*mvcc.CommitInfo]bool` (guarded, or a `sync.Map` if a snapshot may be shared
+across goroutines). The first time a snapshot classifies a record it stores the verdict; every later
+read reuses it. Threading is the work: `mustUndo(startTS, txID)` and the adjacency's
+`Visible(v.supersededAt(), …)` both need the snapshot, not just the two scalars.
+
+**Why it is exactly equivalent to capturing the in-flight set**, case by case:
+
+- record **in flight** at first classification → invisible, and *pinned* invisible for this snapshot's
+  lifetime. That is precisely PostgreSQL's rule for a transaction in the in-progress list.
+- record **committed at `TS ≤ startTS`** → visible, and `ts` is immutable once committed, so the memo
+  changes nothing.
+- record **committed at `TS > startTS`** → invisible, likewise immutable.
+
+So the memo alters exactly one case — the in-flight one — and pins it to the answer the snapshot
+should already have been giving. Note also that "first classification" need not equal "state at
+`BeginRead`": a record that commits in between can only have `TS_c > startTS`, because the contiguous
+frontier does not advance past an unfinished commit. So the lazy form is safe without enumerating
+anything at snapshot time.
+
+**Validation this fix must pass**, and it should be written down before it is run: zero failures in
+≥100 runs under the recipe against a pre-fix 2–4 per 100; TCK 3897/3897; `make ci` green three
+consecutive times read from `MAKE_CI_EXIT`; and a benchmark showing the added map lookup does not
+regress the read path, since that path is the module's measured advantage.
+
 Thirteen candidate *mechanisms* were refuted; what survives is the *phenomenon*, measured and
 pre-registered. **The lesson for whoever continues: instrument the values the READ used, at the moment
 it used them. Every instrumented sample in this file that was taken after the fact misled me,
