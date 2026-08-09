@@ -16339,6 +16339,17 @@ type lpgMutatorAdapter struct {
 // for the read-only adapter stubs that never open a bracket.
 func (a *lpgMutatorAdapter) w() lpg.WriteView[string, float64] { return a.g.Writer(a.wtx) }
 
+// constraintReg returns the engine's constraint registry, or nil when the adapter
+// has no engine (a read-only test stub). A nil registry means nothing is declared,
+// so the enforcement entry points in [exec] treat it as "no constraints" rather than
+// as a missing capability — the same contract the optional journal interface uses.
+func (a *lpgMutatorAdapter) constraintReg() *exec.ConstraintRegistry {
+	if a.eng == nil {
+		return nil
+	}
+	return a.eng.constraintReg
+}
+
 func (a *lpgMutatorAdapter) cs() *count.Store {
 	if a.eng == nil {
 		return nil
@@ -16692,6 +16703,12 @@ func (a *lpgMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 
 // SetNodeLabel attaches label to n.
 func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) error {
+	// UNIQUE enforcement lives HERE, at the write surface every operator must
+	// traverse, so a new label-write site cannot silently skip it (rmp #2358).
+	// Before the write, because the already-a-member guard reads the node's labels.
+	if err := exec.EnforceUniqueOnLabelSet(a.constraintReg(), a, a.g.IndexManager(), n, label); err != nil {
+		return err
+	}
 	r := a.rec()
 	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
 	// Count-store (#2082): the relabel affects D/T only when the label is newly
@@ -16726,6 +16743,9 @@ func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) error {
 
 // RemoveNodeLabel detaches label from n.
 func (a *lpgMutatorAdapter) RemoveNodeLabel(n, label string) {
+	// See SetNodeLabel: enforcement is at this surface (rmp #2358), and the release
+	// must precede the write because it reads both membership and property values.
+	exec.EnforceUniqueOnLabelRemove(a.constraintReg(), a, n, label)
 	r := a.rec()
 	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
 	// Count-store (#2082): decrement the OUT-scoped D/T cells before the removal
@@ -17256,6 +17276,14 @@ type walMutatorAdapter struct {
 	fresh map[string]struct{}
 }
 
+// constraintReg mirrors [lpgMutatorAdapter.constraintReg].
+func (a *walMutatorAdapter) constraintReg() *exec.ConstraintRegistry {
+	if a.eng == nil {
+		return nil
+	}
+	return a.eng.constraintReg
+}
+
 // cs returns the engine's relationship count-store, or nil when the adapter has
 // no engine (a read-only test stub); mirrors [lpgMutatorAdapter.cs].
 func (a *walMutatorAdapter) cs() *count.Store {
@@ -17571,6 +17599,11 @@ func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 
 // SetNodeLabel attaches label to n.
 func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
+	// See the lpgMutatorAdapter twin: UNIQUE is enforced at this surface, before the
+	// write (rmp #2358).
+	if err := exec.EnforceUniqueOnLabelSet(a.constraintReg(), a, a.g.IndexManager(), n, label); err != nil {
+		return err
+	}
 	r := a.rec()
 	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
 	// Count-store (#2082): see the lpgMutatorAdapter twin; Size()==0 short-circuits
@@ -17603,6 +17636,8 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 
 // RemoveNodeLabel detaches label from n.
 func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) {
+	// See the lpgMutatorAdapter twin (rmp #2358).
+	exec.EnforceUniqueOnLabelRemove(a.constraintReg(), a, n, label)
 	r := a.rec()
 	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
 	// Count-store (#2082): decrement OUT-scoped cells before the removal, dirty

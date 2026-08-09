@@ -727,27 +727,15 @@ func (op *SetLabels) Next(out *Row) (bool, error) {
 		return false, fmt.Errorf("exec: SetLabels: cannot resolve NodeID %d", nodeID)
 	}
 
-	// Gate on the lock-free atomic counter: with no UNIQUE constraint registered
-	// nothing below runs and the label write costs exactly what it always did —
-	// no registry lock, no graph read, no allocation (rmp #2352, and see
-	// [ConstraintRegistry.uniqueActive] for the measurement that demands it).
-	enforce := op.reg != nil && op.reg.HasAnyUnique()
-	var rd nodeStateReader
-	if enforce {
-		rd = nodeStateReaderFor(op.mutator)
-	}
-
 	for _, lbl := range op.labels {
-		// Reserve BEFORE the write: the reservation's already-a-member guard reads
-		// the node's labels, and after SetNodeLabel it would suppress the check.
-		// The violation is returned unwrapped so errors.Is / errors.As reach the
-		// typed *ConstraintViolationError, exactly as the property path does.
-		if enforce {
-			if cerr := reserveLabelUnique(op.reg, op.mutator, op.mgr, rd, nodeKey, lbl); cerr != nil {
-				return false, cerr
-			}
-		}
+		// UNIQUE is reserved inside SetNodeLabel, at the mutator choke point
+		// (rmp #2358). The violation is returned UNWRAPPED so errors.Is / errors.As
+		// reach the typed *ConstraintViolationError, exactly as the property path
+		// does; only a genuine write failure is wrapped.
 		if err := op.mutator.SetNodeLabel(nodeKey, lbl); err != nil {
+			if isConstraintViolation(err) {
+				return false, err
+			}
 			return false, fmt.Errorf("exec: SetLabels SetNodeLabel: %w", err)
 		}
 	}

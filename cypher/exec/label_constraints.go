@@ -241,3 +241,59 @@ func releaseLabelUnique(
 		releaseConstraintValue(reg, mutator, []string{label}, prop, value)
 	}
 }
+
+// EnforceUniqueOnLabelSet and EnforceUniqueOnLabelRemove are the LABEL half of the
+// choke point (rmp #2358): the mutator adapter calls them from inside its own
+// SetNodeLabel / RemoveNodeLabel, so an operator that writes a label cannot skip
+// enforcement by forgetting to call anything.
+//
+// # Why enforcement moved here, and what it is worth
+//
+// GoGraph used to enforce UNIQUE at each write SITE. Nothing in that design forced
+// a NEW site to enforce anything: an operator that wrote a label and forgot to
+// reserve compiled, passed every existing test, and silently admitted duplicates.
+// That happened twice in one sprint — the SetLabels operator (rmp #2352), then both
+// MERGE action paths — which is why the placement, not the semantics, was the
+// defect.
+//
+// Both reference engines enforce at the single write surface every operator must
+// traverse. Memgraph's VertexAccessor::AddLabel does both halves itself
+// (src/storage/v2/vertex_accessor.cpp:232, commit 343f7fe); Neo4j's
+// Operations.nodeAddLabel validates through checkConstraintsAndAddLabelToNode BEFORE
+// txState().nodeDoAddLabel, and nodeRemoveLabel is symmetric
+// (community/kernel/.../newapi/Operations.java:791-850, commit eccd584). GoGraph
+// already used this shape for its own NOT NULL enforcement — the touch lives in the
+// adapters — so UNIQUE was the outlier.
+//
+// # The zero-constraint path stays free
+//
+// [ConstraintRegistry.HasAnyUnique] is a lock-free atomic load and it is the gate
+// here, so a schema with no UNIQUE constraint pays one nil check and one atomic load
+// per label write and nothing else: no registry lock, no graph read, no allocation.
+// That matters — [ConstraintRegistry.uniqueActive] records this registry's lock at
+// 57 % of ALL lock delay at sixteen writers on a schema with no constraints at all.
+//
+// The caller passes ITSELF as mutator, which is what makes the transaction-visible
+// reads ([labelsInTx], [txVisibleNodeReader]) resolve through the writing
+// transaction rather than the raw graph.
+func EnforceUniqueOnLabelSet(
+	reg *ConstraintRegistry, mutator GraphMutator, mgr *index.Manager, nodeKey, label string,
+) error {
+	if reg == nil || !reg.HasAnyUnique() {
+		return nil
+	}
+	return reserveLabelUnique(reg, mutator, mgr, nodeStateReaderFor(mutator), nodeKey, label)
+}
+
+// EnforceUniqueOnLabelRemove gives back what detaching label frees. It MUST run
+// before the label is actually detached — it reads both the membership and the
+// property values, and after the write neither is available. See
+// [EnforceUniqueOnLabelSet] for the placement rationale.
+func EnforceUniqueOnLabelRemove(
+	reg *ConstraintRegistry, mutator GraphMutator, nodeKey, label string,
+) {
+	if reg == nil || !reg.HasAnyUnique() {
+		return
+	}
+	releaseLabelUnique(reg, mutator, nodeStateReaderFor(mutator), nodeKey, label)
+}

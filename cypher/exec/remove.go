@@ -234,21 +234,9 @@ func (op *RemoveLabels) Next(out *Row) (bool, error) {
 		return false, fmt.Errorf("exec: RemoveLabels: cannot resolve NodeID %d", nodeID)
 	}
 
-	// Gate on the lock-free atomic counter: with no UNIQUE constraint registered
-	// nothing below runs and the label write costs exactly what it always did
-	// (rmp #2352). See [ConstraintRegistry.uniqueActive].
-	enforce := op.reg != nil && op.reg.HasAnyUnique()
-	var rd nodeStateReader
-	if enforce {
-		rd = nodeStateReaderFor(op.mutator)
-	}
-
 	for _, lbl := range op.labels {
-		// Release BEFORE the write: the release reads both the node's membership
-		// and its property values, and after RemoveNodeLabel neither is readable.
-		if enforce {
-			releaseLabelUnique(op.reg, op.mutator, rd, nodeKey, lbl)
-		}
+		// RemoveNodeLabel gives the reservation back, at the mutator choke point and
+		// before the write it guards (rmp #2358).
 		op.mutator.RemoveNodeLabel(nodeKey, lbl)
 	}
 

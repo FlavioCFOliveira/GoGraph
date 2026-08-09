@@ -102,6 +102,65 @@ func TestUniqueEnforcement_EveryReserveIsJournalled(t *testing.T) {
 	}
 }
 
+// labelEnforcementAllowedFile is the ONE file permitted to call
+// [reserveLabelUnique] / [releaseLabelUnique].
+//
+// It holds them and the two exported entry points the mutator adapters call
+// ([EnforceUniqueOnLabelSet], [EnforceUniqueOnLabelRemove]). Everywhere else, a
+// call means an operator is enforcing on its own behalf — which is the design
+// rmp #2358 replaced, and the one that let rmp #2352 happen twice.
+const labelEnforcementAllowedFile = "label_constraints.go"
+
+// TestUniqueEnforcement_LabelPathGoesThroughTheChokePoint fails if an operator
+// enforces UNIQUE on a label write itself instead of letting the mutator do it.
+//
+// THIS IS THE GATE THAT CARRIES THE TASK'S MOTIVATING PROPERTY, and it is worth
+// being precise about what it does and does not give.
+//
+// What it gives: an operator CANNOT reach the graph except through
+// [GraphMutator], and the adapters that implement it enforce inside their own
+// SetNodeLabel / RemoveNodeLabel. So a new label-write site gets enforcement
+// whether or not its author knew the constraint machinery exists. This gate keeps
+// the other half true — that no site ALSO enforces on its own, which would reserve
+// twice for a value only one release will give back.
+//
+// Note which direction is dangerous, because rmp #2358's own description had it
+// only half right. [ConstraintRegistry.ReleasePropertyValue] is a `delete` from a
+// set, so a duplicate RELEASE is idempotent and harmless. A duplicate RESERVE is
+// not: two reserves put ONE entry in the set, and the first release frees it while
+// a second node still holds the value. So this gate is about the reserve side.
+//
+// What it does not give: it cannot see a site that writes a label through some
+// future API that bypasses [GraphMutator]. There is no such API today, and adding
+// one is the change that would have to defeat this deliberately.
+func TestUniqueEnforcement_LabelPathGoesThroughTheChokePoint(t *testing.T) {
+	offenders := map[string][]string{}
+	for _, path := range packageGoFiles(t) {
+		base := filepath.Base(path)
+		if base == labelEnforcementAllowedFile || strings.HasSuffix(base, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(path) //nolint:gosec // a fixed set of files in this package
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := string(src)
+		for _, fn := range []string{"reserveLabelUnique(", "releaseLabelUnique("} {
+			if strings.Contains(body, fn) {
+				offenders[base] = append(offenders[base], strings.TrimSuffix(fn, "("))
+			}
+		}
+	}
+	if len(offenders) != 0 {
+		t.Errorf("label UNIQUE enforcement is called outside %s: %v\n"+
+			"A label write enforces inside the mutator adapter's SetNodeLabel / "+
+			"RemoveNodeLabel, through EnforceUniqueOnLabelSet / EnforceUniqueOnLabelRemove. "+
+			"An operator that also enforces reserves the value TWICE, and one release then "+
+			"frees it while a second node still holds it. See rmp #2358.",
+			labelEnforcementAllowedFile, offenders)
+	}
+}
+
 // packageGoFiles lists this package's non-generated .go files.
 func packageGoFiles(t *testing.T) []string {
 	t.Helper()

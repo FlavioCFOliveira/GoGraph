@@ -45,6 +45,9 @@ type labelProbeMutator struct {
 	labels map[string]bool
 	props  map[string]lpg.PropertyValue
 	key    string
+	// reg is the registry this double enforces against, mirroring the real
+	// adapters' engine back-pointer. See SetNodeLabel below.
+	reg *ConstraintRegistry
 }
 
 func newLabelProbeMutator(key string) *labelProbeMutator {
@@ -56,8 +59,28 @@ func newLabelProbeMutator(key string) *labelProbeMutator {
 }
 
 func (m *labelProbeMutator) ResolveNodeLabel(graph.NodeID) (string, bool) { return m.key, true }
-func (m *labelProbeMutator) SetNodeLabel(_, label string) error           { m.labels[label] = true; return nil }
-func (m *labelProbeMutator) RemoveNodeLabel(_, label string)              { delete(m.labels, label) }
+
+// SetNodeLabel and RemoveNodeLabel enforce UNIQUE the way the REAL mutator
+// adapters do — inside the write method, through the exported choke point
+// (rmp #2358). They are a double of the adapter, so they must double the
+// enforcement too: a double that skips it would make every claim in this file
+// about a mutator that does not exist.
+//
+// This is the whole of what rmp #2358 changed in this file. Not one assertion
+// below moved, and the two "does take the lock" controls are what proves it:
+// they still fail if the double stops enforcing.
+func (m *labelProbeMutator) SetNodeLabel(n, label string) error {
+	if err := EnforceUniqueOnLabelSet(m.reg, m, nil, n, label); err != nil {
+		return err
+	}
+	m.labels[label] = true
+	return nil
+}
+
+func (m *labelProbeMutator) RemoveNodeLabel(n, label string) {
+	EnforceUniqueOnLabelRemove(m.reg, m, n, label)
+	delete(m.labels, label)
+}
 
 func (m *labelProbeMutator) NodeLabels(string) []string {
 	out := make([]string, 0, len(m.labels))
@@ -105,6 +128,7 @@ func driveOnce(op Operator) error {
 // newSetLabelsProbe builds a SetLabels over a one-row source with reg attached.
 func newSetLabelsProbe(reg *ConstraintRegistry) (Operator, *labelProbeMutator) {
 	mut := newLabelProbeMutator("n1")
+	mut.reg = reg // the double enforces, as the real adapters do (rmp #2358)
 	op := NewSetLabels("n", []string{"Person"}, map[string]int{"n": 0}, &oneRowSource{}, mut)
 	if reg != nil {
 		op.WithConstraints(reg, nil)
@@ -117,6 +141,7 @@ func newSetLabelsProbe(reg *ConstraintRegistry) (Operator, *labelProbeMutator) {
 func newRemoveLabelsProbe(reg *ConstraintRegistry) (Operator, *labelProbeMutator) {
 	mut := newLabelProbeMutator("n1")
 	mut.labels["Person"] = true
+	mut.reg = reg // the double enforces, as the real adapters do (rmp #2358)
 	op := NewRemoveLabels("n", []string{"Person"}, map[string]int{"n": 0}, &oneRowSource{}, mut)
 	if reg != nil {
 		op.WithConstraintRegistry(reg)
