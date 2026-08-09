@@ -37,6 +37,12 @@ func TestIsolation_CrossSubstructure_EdgeImpliesLabels(t *testing.T) {
 		done      atomic.Bool
 		violation atomic.Int64
 		reads     atomic.Int64
+		// The first violating observation, so a failure names which pair
+		// disagreed rather than only how many did (rmp #2378).
+		firstSeen atomic.Bool
+		firstEdge atomic.Bool
+		firstLU   atomic.Bool
+		firstLV   atomic.Bool
 	)
 
 	wg.Add(1)
@@ -81,6 +87,24 @@ func TestIsolation_CrossSubstructure_EdgeImpliesLabels(t *testing.T) {
 					reads.Add(1)
 					if e != lu || e != lv {
 						violation.Add(1)
+						// WHICH PAIR disagreed, and what was actually seen (rmp #2378).
+						//
+						// This fired once under `make ci` on 2026-08-09 and has not
+						// reproduced in 24 attempts since, so the next occurrence may be
+						// the only other one for a long time and it must arrive
+						// diagnostic rather than as a bare count. The old message named
+						// "edge/label" for every case, but `e != lu || e != lv` also trips
+						// when the two LABEL reads disagree with EACH OTHER — u and v can
+						// hash to different label shards, which is a materially different
+						// suspect from edge-versus-label.
+						//
+						// Only the FIRST observation is kept, via CompareAndSwap: it is the
+						// one whose interleaving is least perturbed by the recording.
+						if firstSeen.CompareAndSwap(false, true) {
+							firstEdge.Store(e)
+							firstLU.Store(lu)
+							firstLV.Store(lv)
+						}
 					}
 				}()
 			}
@@ -89,7 +113,18 @@ func TestIsolation_CrossSubstructure_EdgeImpliesLabels(t *testing.T) {
 
 	wg.Wait()
 	if v := violation.Load(); v != 0 {
-		t.Fatalf("observed %d cross-substructure violations (edge/label disagreement inside a pinned SNAPSHOT)", v)
+		e, lu, lv := firstEdge.Load(), firstLU.Load(), firstLV.Load()
+		which := "edge disagrees with both labels"
+		switch {
+		case lu != lv:
+			which = "THE TWO LABELS DISAGREE WITH EACH OTHER (u and v may be in different label shards)"
+		case e != lu:
+			which = "the edge disagrees with the labels, which agree with each other"
+		}
+		t.Fatalf("observed %d cross-substructure violations inside a pinned SNAPSHOT "+
+			"(rmp #2378). First observation: edge=%v label(u)=%v label(v)=%v — %s. "+
+			"%d reads were taken",
+			v, e, lu, lv, which, reads.Load())
 	}
 	if reads.Load() == 0 {
 		t.Fatal("readers never read; test did not exercise the invariant")
