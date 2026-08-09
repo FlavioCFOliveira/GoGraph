@@ -421,7 +421,7 @@ sweep declines to free what a live reader still needs, exactly as `horizon.Oldes
 
 ### Where that leaves it
 
-**Four candidate mechanisms, all excluded by deterministic measurement** — the raw adjacency
+**Five candidate mechanisms, all excluded by deterministic measurement** — the raw adjacency
 removal, autocommit-inside-the-bracket in each direction, and the reclaim nilling the delta map.
 The oracle has been checked and holds up. Attribution is settled and pre-existing. **But every one
 of those four probes ran OUTSIDE the environment that reproduces the defect**, so each exclusion is
@@ -467,7 +467,35 @@ why probe 2378C — which injected a single schedule point on the add path and s
 state — did not contradict this: one sampling point cannot find a window this narrow, and a
 million can.
 
-**So the honest state is: REPRODUCIBLE with a signature, and still unexplained.** The recipe above gives ~20 % per
+### The code-level lead the signature points at, and the fifth exclusion
+
+The two substructures order their write and their version record **the opposite way round**, and
+it is deliberate on both sides:
+
+- **Labels record the undo BEFORE mutating.** `setNodeLabelInfo` says so in as many words —
+  *"Record the undo BEFORE mutating"* — so there is no instant at which the bag has changed and
+  no version exists.
+- **Adjacency inserts and stamps AFTER.** `addEdgeInfo` calls
+  `g.adj.Writer(tx.adjTx()).AddEdge(...)` at `lpg.go:1833` and only then
+  `g.adjVer.stampAppend(srcID, tx)` at `:1843`, with the reason written down: *"Stamped AFTER
+  the insert, because an append may CREATE its source and that node's id does not exist until
+  now. Stamping before the insert skipped every edge-creates-its-endpoint write."*
+
+That asymmetry produces exactly the observed shape — an edge present with no version to hide it
+from an older reader, while the labels are still correctly hidden — and the ordering was chosen
+for an unrelated reason (`checkAppend`, #2143), so its Isolation consequence looks unconsidered
+rather than accepted.
+
+**It is a lead, not a conclusion, and the obvious deterministic test does NOT trigger it.** A
+fifth probe took a snapshot *before* the bracket and then performed the whole add: the older
+snapshot correctly saw `edge=false label(u)=false label(v)=false`, three runs of three. So the
+simple case is clean and the tear needs the concurrent interleaving — consistent with a window
+of 1 in 1 200 503 reads. Whoever picks this up should instrument **inside the reproducing
+environment**, around `lpg.go:1833–1843`, rather than reaching for another single-shot probe:
+that is now five single-shot probes that all came back clean on a defect that reproduces at 20 %.
+
+**So the honest state is: REPRODUCIBLE with a signature and a located suspect, and still
+unproven.** The recipe above gives ~20 % per
 run, which is a workable base rate — the next cycle can iterate on a hypothesis in minutes rather
 than waiting for the gate to trip. What is *not* known is the mechanism: four candidates are
 excluded, and the deterministic probes that excluded them all ran outside the environment that
