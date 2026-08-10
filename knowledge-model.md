@@ -1094,7 +1094,7 @@ high-water seed).
 | `Spec` | A documentation/specification file under `docs/` (plus root `README.md`/`CHANGELOG.md`). | `name` (basename), `path` (repo-relative), `title` (first `# ` heading) |
 | `Feature` | A curated major capability of the module. | `name`, `description` |
 | `Sprint` | A planning sprint from the `rmp` roadmap. | `id` (int), `name`, `status` (`OPEN`\|`CLOSED`\|`PENDING`), `objective` |
-| `Commit` | A git commit that delivered one or more tasks. | `hash` (short — **8-char** in the live graph; this table said 7 until 2026-07-29 and the drift silently made 7-char lookups miss), `fullHash` (full 40-char), `message`, `sprintId` (int) |
+| `Commit` | A git commit that delivered one or more tasks, or that integrated a sprint into an integration branch. | `hash` (short — **8-char** in the live graph; this table said 7 until 2026-07-29 and the drift silently made 7-char lookups miss), `fullHash` (full 40-char), `message`, `sprintId` (int), `kind` (`merge` only — set on a sprint-integration merge commit; absent on an ordinary delivery commit), `branch` (the branch the merge landed on, e.g. `main`; set with `kind`) |
 | `Agent` | A specialist sub-agent mandated by `CLAUDE.md`. | `name`, `kind` (`subagent`), `description`, `source` |
 | `Skill` | A project-relevant Claude Code skill. | `name`, `kind` (`skill`), `description`, `path` |
 | `Memory` | A persistent assistant memory file (mirror of the harness memory directory). | `name` (frontmatter slug), `file` (basename), `type` (`user`\|`feedback`\|`project`\|`reference`), `description` |
