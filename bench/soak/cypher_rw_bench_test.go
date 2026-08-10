@@ -244,10 +244,31 @@ func newBenchServer(b *testing.B) string {
 	// MaxConnections is set to max(concurrencyLevel) + headroom.  Because we
 	// share one server across all goroutines in the sub-benchmark, we pick a
 	// ceiling that comfortably covers any concurrency level we test.
+	//
+	// MaxOpenTxPerPrincipal is sized the SAME way, and must be: every goroutine
+	// here authenticates as the one principal that NoAuthHandler grants, and the
+	// write and mixed arms each hold an explicit transaction open per goroutine
+	// (BEGIN / RUN / PULL / COMMIT). Left at the zero value it would default to
+	// DefaultMaxOpenTxPerPrincipal (16), and rmp #2305 made that bound apply to
+	// WRITE transactions as well as read ones — before that change a write
+	// transaction held the engine's writer serialisation for its whole life, so
+	// the server capped concurrent write transactions at one and this bound could
+	// never bind. It binds now: measured on 2026-08-10, BenchmarkBoltWriteOnly at
+	// conc=64 failed with `Neo.ClientError.General.LimitExceeded: principal
+	// "bench" already holds the maximum of 16 concurrently open transactions`, so
+	// the write and mixed sweeps could not produce a figure at 64, 256 or 1024 at
+	// all. That refusal is the server behaving correctly — a typed, bounded
+	// rejection rather than unbounded queueing — which is precisely why the
+	// benchmark, not the server, is what has to be configured.
+	//
+	// The point of this sweep is the ENGINE's behaviour under concurrency, so the
+	// admission limit is lifted out of the way rather than measured here; the
+	// limit itself is covered by bolt/server's own tests.
 	srv, err := server.NewServer(eng, server.Options{
-		MaxConnections: 1200,
-		ConnTimeout:    15 * time.Second,
-		Auth:           server.NoAuthHandler{},
+		MaxConnections:        1200,
+		MaxOpenTxPerPrincipal: 1200,
+		ConnTimeout:           15 * time.Second,
+		Auth:                  server.NoAuthHandler{},
 	})
 	if err != nil {
 		b.Fatalf("newBenchServer NewServer: %v", err)
