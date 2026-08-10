@@ -252,37 +252,42 @@ func (c *Chunk) AppendBool(j int, v bool) { c.pushBool(c.typedCol(j, stBool), v)
 // are the shared primitives behind the strict Append* API (statically typed
 // columns) and the dynamic Put* API (Put-decided columns); the caller has
 // already selected/committed col.store to the matching backing.
+//
+// Each escalates the backing to the Chunk's capacity through [growTo] before
+// appending. That call is inert for a statically sized column and for every push
+// but the one that exhausts [dynamicCommitFloor]; it is what keeps a dynamic
+// column that fills to capacity at two allocations rather than a doubling series.
 func (c *Chunk) pushI64(col *column, v int64) {
 	row := col.n
-	col.i64 = append(col.i64, v)
+	col.i64 = append(growTo(col.i64, c.capacity), v)
 	col.n++
 	c.recordValid(col, row)
 }
 
 func (c *Chunk) pushF64(col *column, v float64) {
 	row := col.n
-	col.f64 = append(col.f64, v)
+	col.f64 = append(growTo(col.f64, c.capacity), v)
 	col.n++
 	c.recordValid(col, row)
 }
 
 func (c *Chunk) pushStr(col *column, v string) {
 	row := col.n
-	col.str = append(col.str, v)
+	col.str = append(growTo(col.str, c.capacity), v)
 	col.n++
 	c.recordValid(col, row)
 }
 
 func (c *Chunk) pushBool(col *column, v bool) {
 	row := col.n
-	col.b = append(col.b, v)
+	col.b = append(growTo(col.b, c.capacity), v)
 	col.n++
 	c.recordValid(col, row)
 }
 
 func (c *Chunk) pushBoxed(col *column, v expr.Value) {
 	row := col.n
-	col.boxed = append(col.boxed, v)
+	col.boxed = append(growTo(col.boxed, c.capacity), v)
 	col.n++
 	c.recordValid(col, row)
 }
@@ -290,19 +295,25 @@ func (c *Chunk) pushBoxed(col *column, v expr.Value) {
 // AppendNull appends a NULL to column j. A placeholder zero value is written to
 // the live backing to keep row indices aligned; the validity bitmap records the
 // NULL, and it is the bitmap — never the placeholder — that box-at-sink honours.
+//
+// It escalates through [growTo] for the same reason the push helpers do: a
+// column fed mostly NULLs — an OPTIONAL MATCH that misses, a projection over a
+// sparse property — reaches the batch through this path and nothing else, and
+// without the escalation it would walk the doubling series up from
+// [dynamicCommitFloor] that growTo exists to avoid.
 func (c *Chunk) AppendNull(j int) {
 	col := &c.cols[j]
 	switch col.store {
 	case stI64:
-		col.i64 = append(col.i64, 0)
+		col.i64 = append(growTo(col.i64, c.capacity), 0)
 	case stF64:
-		col.f64 = append(col.f64, 0)
+		col.f64 = append(growTo(col.f64, c.capacity), 0)
 	case stStr:
-		col.str = append(col.str, "")
+		col.str = append(growTo(col.str, c.capacity), "")
 	case stBool:
-		col.b = append(col.b, false)
+		col.b = append(growTo(col.b, c.capacity), false)
 	case stBoxed:
-		col.boxed = append(col.boxed, nil)
+		col.boxed = append(growTo(col.boxed, c.capacity), nil)
 	}
 	row := col.n
 	col.n++
@@ -464,53 +475,93 @@ func (c *Chunk) CopyCellTo(srcCol, srcRow int, dst *Chunk, dstCol int) {
 // typed (non-dynamic) column, where a matching-kind Put is an ordinary append and
 // a mismatching-kind Put promotes to boxed rather than panicking.
 
-// commitDynamic commits an undecided column to storage st and gives it a
-// backing pre-sized to the Chunk's capacity when it has none yet.
+// dynamicCommitFloor is the number of rows a committing Put reserves for an
+// undecided column, instead of the Chunk's full capacity.
+//
+// It exists because a Chunk's capacity is a HINT, not a prediction: when the
+// plan exposes no sound [ResultSet.RowCountHint] — which an indexed point lookup
+// correctly does not, since every operator that can drop rows deliberately
+// withholds one — [NewDynamicChunk] falls back to [DefaultChunkCapacity]. A
+// reservation made against that fallback is a reservation against a number
+// nobody claimed, and rmp #2389 measured what that costs: a query returning ONE
+// row reserved 32 KB to hold 8 bytes, 3.2 million times over, for -56% throughput
+// on examples/35_mvcc_mixed_workload.
+//
+// 16 rows is chosen so that the overwhelmingly common small result — a point
+// lookup, a LIMIT, an existence check — is served by a single 128-byte
+// allocation for an int64 column, while a column that goes on to fill escalates
+// in one step (see [growTo]) rather than walking append's doubling series. The
+// full-batch case therefore still costs two allocations, not sixteen.
+const dynamicCommitFloor = 16
+
+// commitDynamic commits an undecided column to storage st and reserves a small
+// floor of backing for it when it has none yet.
 //
 // It exists because [NewDynamicChunk] cannot size a backing whose type it does
-// not know. Without the sizing here the first fill walks append's whole growth
-// series up from nil. Measured on one int64 column filled to the default 4096-row
-// capacity: 128 248 B in 16 allocations before, 32 768 B in 1 allocation after —
-// -74.4% bytes and -34.9% wall-clock — against 32 960 B in 3 allocations for the
-// identically shaped column [NewChunk] pre-sizes, which is the cost this brings
-// a dynamic column down to.
+// not know, and a column left at nil walks append's whole growth series up from
+// one element. Reserving [dynamicCommitFloor] rows removes that series for small
+// results outright and shortens it to a single escalation for large ones: the
+// first push that finds the floor full jumps straight to the Chunk's capacity in
+// [growTo]. Measured on one int64 column filled to the default 4096-row capacity,
+// the fill costs 2 allocations against the 16 a nil backing walked.
 //
 // The cap == 0 guard is what keeps a reused chunk free: [Chunk.Reset] restores
 // the undecided tag but RETAINS every backing, so a pooled chunk re-committing
 // to the same kind finds its array already there and allocates nothing. The
 // make is therefore paid at most once per backing per chunk lifetime.
 //
-// The trade this accepts, stated plainly: a chunk that commits a column and then
-// stops well short of capacity now holds a capacity-sized array where the growth
-// series would have left a small one. That is precisely what [NewChunk] already
-// does for every statically typed column, so it is the established behaviour
-// rather than a new one — and it is why the win was measured on a whole workload
-// instead of on the full-batch case alone. examples/23_bolt_server, whose 20 000
-// queries each return few rows, still allocated 27.7% less in total.
+// The trade this accepts, stated plainly: a column that fills to capacity pays
+// one extra allocation and one copy of at most [dynamicCommitFloor] elements,
+// against a column that stops short no longer holding a capacity-sized array it
+// never used. rmp #2389 measured both halves on the two examples that sit at
+// opposite ends of that trade and neither regressed.
 func (c *Chunk) commitDynamic(col *column, st storageTag) {
 	col.store = st
+	n := min(c.capacity, dynamicCommitFloor)
 	switch st {
 	case stI64:
 		if cap(col.i64) == 0 {
-			col.i64 = make([]int64, 0, c.capacity)
+			col.i64 = make([]int64, 0, n)
 		}
 	case stF64:
 		if cap(col.f64) == 0 {
-			col.f64 = make([]float64, 0, c.capacity)
+			col.f64 = make([]float64, 0, n)
 		}
 	case stStr:
 		if cap(col.str) == 0 {
-			col.str = make([]string, 0, c.capacity)
+			col.str = make([]string, 0, n)
 		}
 	case stBool:
 		if cap(col.b) == 0 {
-			col.b = make([]bool, 0, c.capacity)
+			col.b = make([]bool, 0, n)
 		}
 	case stBoxed:
 		if cap(col.boxed) == 0 {
-			col.boxed = make([]expr.Value, 0, c.capacity)
+			col.boxed = make([]expr.Value, 0, n)
 		}
 	}
+}
+
+// growTo raises s's capacity to target in ONE step when s is full and still
+// short of target, and returns it unchanged otherwise.
+//
+// It is the second half of the [dynamicCommitFloor] trade: a column that starts
+// at the floor and goes on to fill would otherwise walk append's doubling series
+// from 16 to the capacity, copying more in total than the single reservation it
+// replaced. Jumping straight to the capacity the first time the floor is
+// exhausted keeps the filling column at two allocations.
+//
+// It is inert for a statically typed column: [NewChunk] already sizes those to
+// the capacity, so cap(s) >= target holds from the start and the first branch
+// returns immediately. Past the capacity it is inert too, and append's own
+// amortised doubling takes over — the capacity is a hint, never a cap on rows.
+func growTo[T any](s []T, target int) []T {
+	if len(s) < cap(s) || cap(s) >= target {
+		return s
+	}
+	grown := make([]T, len(s), target)
+	copy(grown, s)
+	return grown
 }
 
 // PutInt64 appends v as an integer to column j, committing or promoting its
@@ -642,11 +693,13 @@ func (c *Chunk) PutValue(j int, v expr.Value) {
 // columns are rare, so this is amortised negligible. col.store must be a typed
 // scalar backing on entry; it is stBoxed on return.
 func (c *Chunk) promoteToBoxed(col *column) {
-	// Sized to the Chunk's capacity, not merely to the rows already stored: the
-	// promotion happens mid-fill, so a slice of length col.n would be regrown for
-	// the rest of the batch — the same defect [Chunk.commitDynamic] removes one
-	// branch over.
-	boxed := make([]expr.Value, col.n, max(col.n, c.capacity))
+	// Sized past the rows already stored, but only to the same floor
+	// [Chunk.commitDynamic] reserves rather than to the Chunk's full capacity:
+	// the promotion happens mid-fill, so a slice of exactly col.n would be
+	// regrown by the very next push, while a capacity-sized one reserves against
+	// a hint nobody claimed (rmp #2389). [growTo] escalates it in one step if the
+	// rest of the batch does arrive.
+	boxed := make([]expr.Value, col.n, max(col.n, min(dynamicCommitFloor, c.capacity)))
 	for row := 0; row < col.n; row++ {
 		if !isValid(col, row) {
 			continue // leave nil → boxes to expr.Null

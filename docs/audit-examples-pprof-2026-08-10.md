@@ -65,6 +65,12 @@ sprint, not a fix.
 
 ## 1. FIXED — dynamic chunks were never pre-sized (rmp #2381)
 
+> **SUPERSEDED, in part, by §6 (rmp #2389).** Everything measured below stands and reproduces. What
+> it does not say is that the *same* change made a single-row result reserve the whole 4096-row
+> capacity, which cost **2.28× throughput** on `examples/35_mvcc_mixed_workload`. The reservation was
+> measured on one workload shape and shipped as if it were general. §6 keeps this win and removes
+> that cost; read the two together.
+
 *Class: documentation accuracy (correct) + efficiency.*
 
 `NewDynamicChunk`'s godoc opened with "each **pre-sized to capacity rows**" while its own next
@@ -108,10 +114,12 @@ At `-nodes 20000 -queries 20000 -sessions 8`, arms alternating every round and n
 
 Every deterministic fact the example pins was **identical across all six runs**.
 
-Pinned by `TestCommitDynamicPreSizesBacking` (all six commit paths),
-`TestCommitDynamicFirstFillDoesNotAllocate` (12 allocations against 3, pre-fix),
-`TestCommitDynamicReuseAllocatesNothing` (the reuse guard) and `TestPromoteToBoxedPreSizes`. All
-four fail against the pre-fix build, verified in a scratch worktree at `cbc45aa2`.
+Pinned by `TestCommitDynamicFirstFillDoesNotAllocate` (12 allocations against 3, pre-fix),
+`TestCommitDynamicReuseAllocatesNothing` (the reuse guard) and `TestPromoteToBoxedPreSizes`, all
+verified to fail against the pre-fix build in a scratch worktree at `cbc45aa2`. The fourth test this
+section originally listed, `TestCommitDynamicPreSizesBacking`, asserted that the committing `Put`
+reserves the *whole* capacity — the assertion §6 had to overturn, since it pinned the regression
+rather than the fix. It is replaced there by `TestCommitDynamicReservesTheFloorNotTheCapacity`.
 
 ---
 
@@ -252,6 +260,53 @@ Memoising `analyseNodeScalarUse` on the plan-cache entry is precedent-backed and
 Caching the **physical plan** itself would be far larger and is an architecture change — it needs the
 maintainer's decision before any work starts.
 
+### Re-measured after §6, and it is now the largest remaining cost
+
+The 65.30 % above was taken at `cbc45aa2`. At HEAD with §6 applied, on the same
+`-nodes 3000 -readers 4 -phase-window 3s` run, `buildReadPhysical` is **66.86 % of 47.53 GB** —
+`buildIRProjection` 25.58 %, `analyseNodeScalarUse` 18.63 %, `newRowPredicate` 14.07 %. The share is
+unchanged because §6 removed a cost that sat *beside* this one, not inside it.
+
+### What the two peer engines do (read at source, to settle the question rather than argue it)
+
+Memgraph `343f7fe3` and Neo4j `eccd584a` (branch 2026.06):
+
+- **Memgraph caches the executable operator tree**, because it has no separate physical plan:
+  `LogicalOperator::MakeCursor(...) **const**` (`src/query/plan/operator.hpp:255`) is overridden by
+  every operator, and the cache holds
+  `LRUCache<HashedString, shared_ptr<PlanWrapper>>` (`cypher_query_interpreter.hpp:162`). The key is
+  the **stripped** query text — literals are replaced by fixed tokens
+  (`frontend/stripped.hpp:24-27`) and moved into `Parameters` — so `{id:1}` and `{id:2}` are **one**
+  entry. Per execution it builds only a cursor and a frame, both from an arena
+  (`interpreter.cpp:3642-3644`); the frame's width comes from the **cached** symbol table and slots
+  are reached by array index, never by rebuilding a name→index map.
+- Memgraph precomputes `required_indices` on the cached plan with a comment that is the exact
+  analogue of the case above (`cypher_query_interpreter.hpp:94`): *"A pure function of the plan, so it
+  is derived once at construction and reused for the readiness check every time this plan is served."*
+- **Neo4j caches the executable plan too** — five layers, the fourth keyed on `LogicalPlan` identity
+  and holding a built Pipe tree (`CypherQueryCaches.scala:685`; `InterpretedRuntime.scala:105-141`),
+  carrying the warning *"Executable plan for a single cypher query. Warning, this class will get
+  cached! Do not leak transaction objects or other resources in here."* Per execution it allocates
+  only cursors, the parameter array and a fresh `QueryState`.
+
+**So the boundary both peers draw is the same:** the operator tree, expression trees, slot layout,
+output columns and required indices are immutable, cached and shared; the cursor, the row/frame
+storage, the transaction view and the parameter **values** are per execution. Per-execution work is
+proportional to the data plus a small O(operators) instantiation term — never to the analytical
+complexity of the query.
+
+**The root cause here is binding, not Go.** GoGraph's builders *capture* execution state in
+build-time closures — `buildIRProjection(items, child, schema, g, params, reg, bopts)` takes both the
+read view `g` and `params` — which binds the tree to one execution. Both peers *pass* that state as a
+call argument instead (`Pull(Frame&, ExecutionContext&)`), and neither needs a lock, because sharing
+is read-only.
+
+**The honest counterweight:** `buildReadPhysical` is genuinely mixed. `e.g.ReadAt(snap)` and the live
+cardinality gate `computeReorderSwaps` legitimately depend on the snapshot and must stay per
+execution. So the question is not "cache the whole thing" but **separate the plan-pure part from the
+execution-bound part** — which is exactly the boundary the peers draw, and exactly why it is an
+architecture decision rather than a refactor.
+
 ---
 
 ## 4. OPEN — example 20 demonstrates the costly PageRank API
@@ -281,6 +336,127 @@ hundred CPU samples, and the aggregate CPU across the whole default sweep put no
 **0.11 s**. The heap profiles are informative at default scale because allocation counting does not
 depend on run length; the CPU profiles are not. Any future cycle reading CPU from an example must
 raise its scale first — as this one did for 26.
+
+---
+
+## 6. FIXED — the pre-size of §1 charged every single-row result for a 4096-row batch (rmp #2389)
+
+*Class: efficiency + bounded resources. Found by re-profiling at HEAD before building on §3.*
+
+**This is a regression the previous cycle shipped, and it was found only because the premise of §3
+was re-measured at HEAD instead of being taken from the audit that recorded it.** Re-profiling
+`examples/35_mvcc_mixed_workload` put `exec.Chunk.commitDynamic` — the helper §1 introduced — at
+**81.45 % of all allocation in the process**, and pushed §3's `buildReadPhysical` from 65.30 % down
+to 12.26 % purely by inflating the denominator.
+
+### The mechanism
+
+`NewDynamicChunk` maps a capacity below 1 onto `DefaultChunkCapacity` (4096). `materializeColumnar`
+passes `capHint`, which is **0 whenever the plan exposes no `RowCountHint`** — and an indexed point
+lookup correctly exposes none, because every operator that can drop rows deliberately withholds one.
+Before §1 that 4096 was an inert hint and `append` grew the backing; §1 turned it into an
+unconditional eager reservation on the first `Put`.
+
+The hot query is `MATCH (n:Account {id: $id}) RETURN n.balance AS b` — **exactly one row**. Dividing
+the profile gives 99 779.09 MB over 3 206 926 allocations = **32 626 B each**, i.e. 4096 × 8 bytes
+reserved to hold 8, about 3.2 million times.
+
+### Measured — three arms, interleaved, arms never overlapping, 3 rounds
+
+`NONE` is the pre-§1 shape (no reservation); `OLD` is the shipped `cb7caef7`; `NEW` is the fix.
+
+| example | arm | total allocation | throughput |
+|---|---|---|---|
+| **35** (`-nodes 3000 -readers 4 -phase-window 3s`) | OLD | 126.92 / 126.97 / 128.24 GB | 345 404 / 357 898 / 350 500 ops/s |
+| | **NEW** | **46.41 / 46.73 / 47.50 GB** | **767 889 / 778 929 / 795 826 ops/s** |
+| | NONE | 45.90 / 46.40 / 46.67 GB | 786 758 / 779 698 / 805 284 ops/s |
+| **23** (`-nodes 20000 -queries 20000 -sessions 8`) | OLD | 4.83 / 4.83 / 4.75 GB | 7 597 / 7 362 / 7 290 q/s |
+| | **NEW** | **4.70 / 4.75 / 4.87 GB** | **7 355 / 7 321 / 7 228 q/s** |
+| | NONE | 6.64 / 6.57 / 6.58 GB | 7 048 / 6 872 / 6 775 q/s |
+
+Against the shipped build the fix is **−63 % allocation and 2.22× throughput** on example 35, while
+example 23 — the workload §1 was measured on — **keeps its win**: `NEW` tracks `OLD` within noise on
+both axes and stays clearly ahead of `NONE`. Every deterministic fact both examples print is
+identical across every arm (example 23 differs only in log timestamps).
+
+**Both premises were true, which is the point.** §1's win reproduces exactly as recorded, and it is
+still catastrophic on the other shape. The distinguishing variable is not the plan, the index or the
+hint — both examples run on the same 4096 default with no hint at all — it is simply **how many rows
+the chunk actually receives**: example 23 drives thousands per chunk through
+`EagerAggregation.consumeChunk`, where removing the reservation moves 636 MB of `commitDynamic` into
+2 464 MB of `Chunk.pushI64` growth-copying; example 35 receives one.
+
+### The fix
+
+A `dynamicCommitFloor` of 16 rows is reserved on commit instead of the capacity, and a new `growTo`
+escalates a column **straight to the capacity in one step** the first time the floor is exhausted —
+so a filling column still costs two allocations rather than a doubling series, and a one-row result
+costs 128 bytes rather than 32 KB. `growTo` is inert for statically sized columns (`NewChunk` already
+sizes those to capacity) and inert past the capacity, where `append`'s own amortised growth resumes.
+`promoteToBoxed` is sized to the same floor.
+
+Benchmarks, `-benchmem`: single row **320 B/op, 3 allocs**; full 4096-row batch **33 088 B/op,
+4 allocs** against the shipped 32 960 B in 3 — one extra allocation and a 128-byte copy is the whole
+price of the trade.
+
+### What the prior art says, and the rule worth keeping
+
+DuckDB, ClickHouse and Memgraph were read at source
+(`e500d778`, `f70042f0`, `343f7fe3`) to settle the design rather than argue it:
+
+- **DuckDB** fixes `STANDARD_VECTOR_SIZE` at 2048 (`common/vector_size.hpp:16`), every
+  `DataChunk::Initialize` defaults to it, and the pipeline never passes a capacity
+  (`parallel/pipeline_executor.cpp:64,886`). `estimated_cardinality` has three consumers — EXPLAIN,
+  **degree of parallelism**, progress — and allocates nothing.
+- **ClickHouse** fixes `DEFAULT_BLOCK_SIZE` at 65409 (`Core/Defines.h:32`) and states in the source
+  that `IColumn::reserve` "affects performance only (not correctness)" (`Columns/IColumn.h:623`).
+  `FilterTransform` filters the first column against a hard upper bound, reads the **exact** surviving
+  count, then sizes every remaining column at exactly that (`FilterTransform.cpp:303,307,353`).
+- **Memgraph**, the closest architectural peer, has no result buffer at all: its `Frame` is sized by
+  **symbol count** — columns, never rows (`query/interpret/frame.hpp:58`), and every `reserve()` in
+  `query/plan/operator.cpp` comes from a column count, an actual `.size()`, a fixed batch constant or
+  a bound taken from the query text. Its `CostEstimator` output is consumed only to choose between
+  candidate plans.
+
+So the rule, which none of the three violates and which is now the review criterion here:
+**an allocation width may be derived from a fixed constant, an exactly-known count, or a hard upper
+bound — never from a statistical estimate.** GoGraph's `RowCountHint` is documented as a true upper
+bound rather than an estimate, so sizing from it stays legitimate; what was not legitimate was
+reserving the *fallback default* as though someone had claimed it.
+
+### Pinned by
+
+`TestCommitDynamicReservesTheFloorNotTheCapacity` (all six commit paths) and the amended
+`TestPromoteToBoxedPreSizes`, both asserting an **absolute** bound of 64 rows rather than one written
+in terms of `dynamicCommitFloor` — a test phrased against the constant moves its own goalposts and
+would go green again the moment someone raised the floor back to the capacity. Both were verified to
+fail against the shipped behaviour, reproduced in a scratch worktree by setting the floor to
+`DefaultChunkCapacity` (reported: "reserved 4096 rows, want at most 64").
+`TestCommitDynamicFloorIsBoundedByTheCapacity` pins the other side — a chunk deliberately narrower
+than the floor is never widened past the capacity it asked for.
+`BenchmarkDynamicChunkSingleRow` and `BenchmarkDynamicChunkFullBatch` pin the two shapes as a pair,
+because **either one alone is satisfied by a wrong answer**. Read them in **B/op, not allocs/op**: an
+allocation count is blind to this regression — 4096 slots and 16 slots are both exactly one
+allocation, and §1 was measured against a count.
+
+### A bounded-resources note, stated without overclaiming
+
+This is a *cost* finding, not a vulnerability, and no exploit is claimed. But the direction is worth
+recording under the **secure** rung rather than only the fast one: before the fix, the memory a query
+reserved was a function of a number the planner *predicted*, charged in full before a single row
+arrived. After it, reservation tracks the rows that actually materialise — the floor is paid up
+front, and the capacity only when the rows to fill it exist. A plan reporting a large upper bound
+that then yields nothing now costs 128 bytes instead of its whole bound. The engine-wide ceilings
+(#1292 row cap, #1328 byte budget, #1842 ~1 MiB charge) were and remain the actual guard; this
+narrows what has to be caught by them.
+
+### Left open, deliberately
+
+A result between 17 and 4096 rows escalates to the full capacity on its 17th row, so a 20-row result
+still reserves 32 KB. A quadrupling escalation would cut that at the cost of three more allocations
+on the full-batch path. **It is not implemented because it is not measured**: no example in the
+corpus was shown to produce results in that band, and the two that were measured both sit at the
+extremes. Filed as a question for the next cycle rather than guessed at now.
 
 ---
 
