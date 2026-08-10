@@ -4066,10 +4066,10 @@ func (b *globalMemBudget) release(n int64) {
 //
 //   - 0 (the zero value)               → the GOMEMLIMIT-derived default: half of
 //     the Go soft memory limit when the operator has set one (via GOMEMLIMIT or
-//     [runtime/debug.SetMemoryLimit]), else 0 (unlimited). Tying the default to
-//     the operator's own declared memory budget gives default-on protection
-//     precisely when a budget exists, and never rejects a legitimate workload on
-//     a host whose memory the module cannot know.
+//     [runtime/debug.SetMemoryLimit]), else [DefaultGlobalMaxResultBytes]. Tying
+//     the default to the operator's own declared memory budget gives protection
+//     scaled to that budget precisely when one exists; when none does, the
+//     absolute default applies rather than no ceiling at all.
 //   - [GlobalMaxResultBytesUnlimited]  → 0 (unlimited, the explicit opt-out)
 //   - a positive value                 → used verbatim (bytes)
 func resolveGlobalMaxResultBytes(opt int64) int64 {
@@ -4083,9 +4083,32 @@ func resolveGlobalMaxResultBytes(opt int64) int64 {
 		if lim > 0 && lim < math.MaxInt64 {
 			return lim / 2
 		}
-		return 0
+		// No soft memory limit to derive from. This branch used to return 0, i.e.
+		// no engine-wide ceiling, which is the state of any process that has not
+		// set GOMEMLIMIT — see [DefaultGlobalMaxResultBytes].
+		return DefaultGlobalMaxResultBytes
 	}
 }
+
+// DefaultGlobalMaxResultBytes is the engine-wide result-byte ceiling applied when
+// [EngineOptions.GlobalMaxResultBytes] is left at zero AND the process has no Go
+// soft memory limit to derive one from.
+//
+// The per-query budget is finite by default ([DefaultMaxResultBytes], 1 GiB), but
+// a per-query bound says nothing about the sum: N concurrent clients each staying
+// inside their own 1 GiB may still materialise N GiB, and the engine-wide ceiling
+// is the only bound that governs that. Because the GOMEMLIMIT derivation above
+// yields nothing when no memory limit is set — the Go runtime's default state —
+// that ceiling was absent in the commonest deployment, so the aggregate was
+// bounded only by the concurrency the caller admitted. Under the extreme
+// concurrency this module targets, the aggregate is the bound that matters.
+//
+// The value is 4 GiB: 4x the per-query default, so a workload that legitimately
+// runs several large results concurrently is unaffected, while a fleet of
+// concurrent large-result queries is bounded. A deployment that sets GOMEMLIMIT
+// keeps the derived half and is unaffected; [GlobalMaxResultBytesUnlimited]
+// remains the explicit opt-out.
+const DefaultGlobalMaxResultBytes int64 = 4 << 30 // 4 GiB
 
 // MaxCollectItemsUnlimited is the explicit opt-out sentinel for
 // [EngineOptions.MaxCollectItems]: set the field to this value to disable the

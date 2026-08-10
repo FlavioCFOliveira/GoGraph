@@ -422,6 +422,31 @@ var ErrNoAuthHandler = errors.New("bolt: no auth handler configured; set Options
 // value, which selects the GOMEMLIMIT-derived default.
 const MaxInboundDecodeBytesUnlimited int64 = -1
 
+// DefaultMaxInboundDecodeBytes is the engine-wide inbound-decode ceiling applied
+// when [Options.MaxInboundDecodeBytes] is left at zero AND the process has no
+// Go soft memory limit to derive one from.
+//
+// It exists because the GOMEMLIMIT derivation below silently produced NO ceiling
+// in the commonest deployment. An unset GOMEMLIMIT is the Go runtime's default —
+// debug.SetMemoryLimit(-1) then reports math.MaxInt64 — so the documented
+// "engine-wide inbound-memory ceiling" was inert unless the operator had
+// separately set a memory limit, and the real bound was MaxConnections times the
+// per-connection limits: 1024 x 16 MiB of reassembly buffers plus 1024 x 128 MiB
+// of decoded collections. That allocation is reachable PRE-AUTHENTICATION,
+// because a HELLO must be decoded before it can be authenticated. The
+// bounded-resources mandate requires an explicit finite upper bound, and the
+// existence of [MaxInboundDecodeBytesUnlimited] settles that zero was never
+// meant to mean unlimited: an opt-out sentinel would be redundant if it did.
+//
+// The value is 1 GiB, matching [github.com/FlavioCFOliveira/GoGraph/cypher.DefaultMaxResultBytes]
+// so the module's finite defaults share one scale. It is 64x the largest single
+// message a client may send ([proto.DefaultMaxMessageBytes], 16 MiB) and 8x the
+// worst-case decoded size of one message, so it admits several concurrent
+// large-message decodes while bounding a hostile fleet's aggregate to something
+// any production host survives. A deployment that sets GOMEMLIMIT keeps the
+// derived one-eighth fraction and is unaffected.
+const DefaultMaxInboundDecodeBytes int64 = 1 << 30 // 1 GiB
+
 // resolveMaxInboundDecodeBytes maps [Options.MaxInboundDecodeBytes] to the
 // concrete ceiling in bytes (0 = unlimited), mirroring
 // cypher's resolveGlobalMaxResultBytes but with a one-eighth GOMEMLIMIT
@@ -438,7 +463,10 @@ func resolveMaxInboundDecodeBytes(opt int64) int64 {
 		if lim > 0 && lim < math.MaxInt64 {
 			return lim / 8
 		}
-		return 0
+		// No soft memory limit to derive from. This branch used to return 0,
+		// i.e. no ceiling at all, which is the state of any process that has not
+		// set GOMEMLIMIT — see [DefaultMaxInboundDecodeBytes].
+		return DefaultMaxInboundDecodeBytes
 	}
 }
 

@@ -85,20 +85,31 @@ func TestEngine_GlobalMemoryBudget_AggregateCeilingAndRelease(t *testing.T) {
 	}
 }
 
-// TestEngine_GlobalMemoryBudget_UnlimitedByDefault confirms that, absent a
-// GOMEMLIMIT and without an explicit ceiling, the engine imposes no global bound:
-// the same overlapping results that trip a small ceiling above all succeed. This
-// pins the safe default — the module never rejects a legitimate workload on a
-// host whose memory it cannot know.
-func TestEngine_GlobalMemoryBudget_UnlimitedByDefault(t *testing.T) {
+// TestEngine_GlobalMemoryBudget_DefaultAdmitsLegitimateOverlap confirms that the
+// default global ceiling does not reject a legitimate workload: the same
+// overlapping results that trip a deliberately small ceiling above all succeed
+// under the default.
+//
+// This test was named ..._UnlimitedByDefault and its comment asserted that "the
+// engine imposes no global bound". That stopped being true when the zero value
+// was given a finite fallback ([cypher.DefaultGlobalMaxResultBytes]) for the
+// no-GOMEMLIMIT case, because an absent aggregate ceiling meant N concurrent
+// queries summed without limit. It kept passing regardless — this workload is
+// ~160 KB against a 4 GiB ceiling — so only the name and the comment were wrong,
+// which is the more dangerous failure: a future reader would have taken it as
+// evidence that the default is unbounded. What it actually pins, and what is
+// worth pinning, is the other direction: the finite default must be generous
+// enough that ordinary overlapping results are never refused.
+func TestEngine_GlobalMemoryBudget_DefaultAdmitsLegitimateOverlap(t *testing.T) {
 	const (
 		nodes   = 5
 		blobLen = 4096
 		query   = "MATCH (n) RETURN n.blob AS blob"
 	)
 	g := newWideGraph(t, nodes, blobLen)
-	// Default options: GlobalMaxResultBytes zero → GOMEMLIMIT-derived, and no
-	// GOMEMLIMIT is set in the test process, so the ceiling is unlimited.
+	// Default options: GlobalMaxResultBytes zero → GOMEMLIMIT/2 when a soft limit
+	// is set, else the finite DefaultGlobalMaxResultBytes. Either way the ceiling
+	// is finite, and this workload is orders of magnitude below it.
 	eng := cypher.NewEngine(g)
 	ctx := context.Background()
 
@@ -114,7 +125,8 @@ func TestEngine_GlobalMemoryBudget_UnlimitedByDefault(t *testing.T) {
 			t.Fatalf("Run %d: %v", i, err)
 		}
 		if err := res.Err(); err != nil {
-			t.Fatalf("result %d errored under the default (unlimited) global ceiling: %v", i, err)
+			t.Fatalf("result %d errored under the DEFAULT global ceiling: %v — the finite "+
+				"default must not refuse an ordinary overlapping-result workload", i, err)
 		}
 		results = append(results, res) // keep open to accumulate charge
 	}
