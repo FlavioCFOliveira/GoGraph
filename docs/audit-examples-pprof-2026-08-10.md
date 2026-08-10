@@ -143,10 +143,57 @@ largest identifiable cluster, and `madvise` is the GC handing the churn back to 
 | `aeshashbody` | 3.47 % | 3.47 % |
 | `graph.fnv1aString` | 2.25 % | 2.25 % |
 
-The module already has the machinery that should prevent this: the lazy/partial node materialisation
-of #1500/#1659, gated by `analyseNodeScalarUse`. The open question is **why the gate is not engaging
-for this example's query shapes** — whether the queries genuinely need whole entities, or whether the
-analysis bails. That is the first thing to measure, before any redesign.
+### The spike answered it, and the answer is not what the profile suggested (rmp #2384)
+
+The question was "why is the lazy materialisation gate not engaging?". **It is engaging.** Counters
+placed at every decision point, one 67 s run of example 26 at 20 000 users:
+
+| counter | value |
+|---|---|
+| relationship row-context materialisations | **17 009 744** |
+| … gated presence path taken (`r.k IS NOT NULL`) | 6 511 214 (**38.3 %**) |
+| … value path taken (`relUse.keys` non-empty) | 10 498 530 (61.7 %) |
+| … fell through for lack of demand info (`scalarUse` nil, or variable unreferenced) | **0** |
+| … `needsWholeNode` | **0** |
+| map entries returned, whole-map path | 10 498 530 over 10 498 530 calls = **exactly 1.0 per call** |
+| property keys demanded, same calls | 10 498 530 = **exactly 1.0 per call** |
+
+**Two hypotheses formed from reading the code were refuted by these counters.** The first: the edge
+branch in `populateRowCtx` `continue`s *before* the demand gate that skips variables an expression
+never names, so an unreferenced edge variable would build its whole map. Real asymmetry, but
+**unreachable** — that case occurred 0 times. The second: `buildEdgeProps` materialises the by-handle
+map before its gate and could discard it. Also 0.
+
+**There is no over-fetching.** Entries returned equals keys demanded, exactly 1.0 both ways, because
+a `FRIEND` carries exactly one property (`since`). A "fetch only the demanded keys" change would
+return precisely nothing here.
+
+**The cost is the container, not the content.** `buildEdgeProps` is 1.99 GB flat / **6.03 GB cum =
+18.35 %** of the run, and per-line attribution splits it cleanly:
+
+| path | line | bytes | calls | per call |
+|---|---|---|---|---|
+| presence | `out = make(expr.MapValue, …)` + `out[k] = relPresencePlaceholder` | 313.51 MB + 1.69 GB = **2.00 GB** | 6 511 214 | **~330 B to answer a boolean** |
+| value | `m := edgePropsToExprMap(g, stKey, enKey)` | **4.03 GB** | 10 498 530 | **~412 B to deliver one value** |
+
+So the engine allocates a fresh one-entry Go map **per relationship per row**. The node path avoids
+exactly this: `upgradeNodeIDToValuePartial` hands back a lazy value that answers `n.k` without
+materialising a map, and it is used 3 102 MB against 17 MB for the eager whole-node path — the node
+gate is working. Relationships have no equivalent, because `expr.RelationshipValue` carries its
+properties as a `MapValue`.
+
+**Secondary, CPU only:** `EdgePropertiesByHandle` was called on **all 17 009 744** materialisations
+and its result was used **0** times (`served_via_by_handle = 0`) — this graph records no by-handle
+edge properties. It allocates nothing (it returns nil on an empty result, and never appears in the
+heap profile), so this is wasted work rather than wasted memory.
+
+*Instrumentation caveat:* the instrumented build totalled 33.63 GB against 33.48 GB uninstrumented,
+and `buildEdgeProps` flat 2 042 MB against 2 141 MB — within 0.5 %, so the attribution above is
+representative rather than an artefact of the probe.
+
+**This is where the spike stops.** Removing the per-row map means changing how a relationship's
+properties are represented in the row context, which is a design change; it goes to the maintainer
+before any code moves.
 
 ---
 
