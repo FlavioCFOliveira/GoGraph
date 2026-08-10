@@ -11,8 +11,21 @@
 //   - goroutines: 1.0 / sample
 //   - file descriptors: 2.0 / sample
 //
-// Smoke run (default / -short): 30 s warm-up + 60 s measurement (~6 post-warm-up samples).
-// Full soak (SOAK_FULL=1, no -short): 5 min warm-up + 55 min measurement.
+// # Which configurations actually assert the slope
+//
+//   - Short layer (plain -tags=soak): 5 s warm-up + 20 s measurement, which at a
+//     10 s sample interval yields 2 samples — below minRegressionPoints. The
+//     slope check therefore CANNOT run, and the test SKIPS rather than passing
+//     silently. The short layer exercises the workload; it does not certify
+//     no-growth. See rmp #2396.
+//   - Intermediate (documented): SOAK_NOGROWTH_MEASURE=90s gives 9 samples, so
+//     the slope check runs and asserts, in about 95 s.
+//   - Full soak (SOAK_FULL=1, no -short): 5 min warm-up + 55 min measurement,
+//     ~330 samples. This is the variant that meets CLAUDE.md's soak criterion.
+//
+// Because SOAK_NOGROWTH_* and SOAK_FULL express an expectation that the
+// criterion be evaluated, too few samples under any of them is a FAILURE rather
+// than a skip (see requireRegressionPoints).
 //
 // Samples are written as CSV to bench/soak/soak-artefacts/no-growth-<ts>.csv.
 package main_test
@@ -57,15 +70,26 @@ type ngSample struct {
 
 // TestNoGrowth_HeapFDGoroutine runs the growth-regression soak.
 func TestNoGrowth_HeapFDGoroutine(t *testing.T) {
-	// Smoke: 5 s warm-up + 20 s measurement (3 samples at 10s intervals) — fits
-	// comfortably within the 60 s per-test CI budget.
-	// Full soak (SOAK_FULL=1, no -short): 5 min warm-up + 55 min measurement.
+	// Short layer: 5 s warm-up + 20 s measurement, inside the 60 s per-test CI
+	// budget. Full soak (SOAK_FULL=1, no -short): 5 min + 55 min.
+	//
+	// Both are overridable so an intermediate window can be requested without
+	// editing the file — which is what makes the slope check reachable outside
+	// the hour-long variant. The sample INTERVAL is deliberately not
+	// overridable: shrinking it is the one adjustment that would manufacture
+	// samples without lengthening the observation, turning the regression into a
+	// noise detector on a handful of adjacent points.
 	warmup := 5 * time.Second
 	measurement := 20 * time.Second
-	if !testing.Short() && os.Getenv("SOAK_FULL") == "1" {
+	if soakFullRun() {
 		warmup = 5 * time.Minute
 		measurement = 55 * time.Minute
 	}
+	warmup = soakEnvDuration("SOAK_NOGROWTH_WARMUP", warmup)
+	measurement = soakEnvDuration("SOAK_NOGROWTH_MEASURE", measurement)
+	t.Logf("no_growth: config warmup=%v measurement=%v interval=%v (expect %d samples, need %d to assert)",
+		warmup, measurement, noGrowthSampleInterval,
+		int(measurement/noGrowthSampleInterval), minRegressionPoints)
 
 	// ── Build seed graph for background workload ──────────────────────────────
 	const graphN = 512
@@ -83,7 +107,14 @@ func TestNoGrowth_HeapFDGoroutine(t *testing.T) {
 	snapPtr.Store(csr.BuildFromAdjList(a))
 
 	// ── Background workload ───────────────────────────────────────────────────
-	ctx, cancel := context.WithTimeout(context.Background(), warmup+measurement)
+	// One sample interval of grace beyond the window. Without it the final
+	// ticker tick and the context deadline fall on the same instant, so the last
+	// sample is decided by a race between two timers and the sample count is
+	// nondeterministic — the 2026-08-10 run collected 1 sample where the
+	// arithmetic says 2. The measurement loop below ends the window on
+	// measureEnd; the deadline is only a backstop. Cancel is explicit at `done`,
+	// so the grace does not lengthen the run.
+	ctx, cancel := context.WithTimeout(context.Background(), warmup+measurement+noGrowthSampleInterval)
 	defer cancel()
 
 	const bgReaders = 4
@@ -109,6 +140,19 @@ func TestNoGrowth_HeapFDGoroutine(t *testing.T) {
 				runtime.Gosched()
 			}
 		}(i)
+	}
+
+	// ── The fd instrument must be able to measure before we rely on it ────────
+	// ngCountFDs reports -1 when neither /proc/self/fd nor /dev/fd can be read.
+	// That -1 was previously recorded as a sample VALUE, and a metric that is
+	// constant across every sample has slope 0.000 — so on a host where fd
+	// counting is unavailable the fd criterion passed while measuring nothing,
+	// exactly the failure mode rmp #2396 is about. Establish up front that the
+	// count is real, and refuse to certify no-fd-growth otherwise.
+	if n := ngCountFDs(); n < 0 {
+		t.Fatalf("no_growth: cannot count file descriptors (neither /proc/self/fd nor "+
+			"/dev/fd is readable); the fd no-growth criterion cannot be evaluated on this "+
+			"host, and a slope over a constant sentinel would pass without measuring anything (got %d)", n)
 	}
 
 	// ── Warm-up ───────────────────────────────────────────────────────────────
@@ -156,9 +200,15 @@ done:
 	ngWriteCSV(t, samples)
 
 	// ── Regression assertions ─────────────────────────────────────────────────
-	if len(samples) < 2 {
-		t.Log("no_growth: insufficient samples for regression (< 2); skipping slope check")
-		goleak.VerifyNone(t)
+	// goleak runs first and unconditionally: the workload has stopped, so no
+	// goroutine of ours may survive it, and that check is independent of how many
+	// samples the window produced. Ordering it ahead of the slope gate keeps it
+	// live on the paths where the gate skips or fails.
+	goleak.VerifyNone(t)
+
+	if !requireRegressionPoints(t, "no_growth", len(samples),
+		"run with SOAK_NOGROWTH_MEASURE=90s for 9 samples (~95 s), or SOAK_FULL=1 for the full 60-minute gate",
+		"SOAK_NOGROWTH_MEASURE", "SOAK_NOGROWTH_WARMUP") {
 		return
 	}
 
@@ -186,8 +236,7 @@ done:
 		t.Errorf("no_growth: fd slope %.3f/sample >= epsilon %.3f",
 			fdSlope, noGrowthEpsilonFD)
 	}
-
-	goleak.VerifyNone(t)
+	t.Logf("no_growth: SLOPE CHECK ASSERTED over %d samples", len(samples))
 }
 
 // linRegSlope computes the ordinary least-squares slope of y=yf(i) vs xs[i].

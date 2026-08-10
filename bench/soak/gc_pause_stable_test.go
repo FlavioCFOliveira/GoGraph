@@ -56,12 +56,23 @@ type gcPauseSample struct {
 
 // TestGCPause_Stable runs the GC pause stability soak.
 func TestGCPause_Stable(t *testing.T) {
-	// Smoke: 20 s — at least 4 samples at the 5-second interval.
+	// Short layer: 20 s, i.e. ~4 samples at the 5 s interval — enough for the
+	// max-pause ceiling, below minRegressionPoints for the slope.
 	// Full soak (SOAK_FULL=1, no -short): 30 min.
 	measurement := 20 * time.Second
-	if !testing.Short() && os.Getenv("SOAK_FULL") == "1" {
+	if soakFullRun() {
 		measurement = 30 * time.Minute
 	}
+	measurement = soakEnvDuration("SOAK_GCPAUSE_MEASURE", measurement)
+	// Unlike no_growth, this loop is bounded by the context itself rather than by
+	// a separate measureEnd, so the final tick races the deadline and the sample
+	// count is the window divided by the interval, minus 0 or 1. That is
+	// immaterial here: the ceiling needs one sample and the slope needs
+	// minRegressionPoints, and neither bound sits at the boundary. Adding grace
+	// would lengthen the short layer's runtime for no gain.
+	t.Logf("gc_pause: config measurement=%v interval=%v (expect %d samples, need %d for the slope)",
+		measurement, gcPauseSampleInterval,
+		int(measurement/gcPauseSampleInterval), minRegressionPoints)
 
 	// ── Build seed graph for background workload ──────────────────────────────
 	const graphN = 1024
@@ -176,9 +187,36 @@ done:
 	gcPauseWriteCSV(t, samples)
 
 	// ── Assertions ────────────────────────────────────────────────────────────
-	if len(samples) < 2 {
-		t.Log("gc_pause: insufficient samples (< 2); skipping regression")
-		goleak.VerifyNone(t)
+	goleak.VerifyNone(t)
+
+	// The max-pause CEILING is checked first and independently of the sample
+	// count, because a ceiling needs no regression: one sample is enough to
+	// exceed 200 ms. Until rmp #2396 this check sat *after* an early return taken
+	// when fewer than 2 samples existed, so a run that happened to collect one
+	// sample skipped the ceiling too — and "max GC pause 0.19 ms against a 200 ms
+	// ceiling" is the strongest single figure the 2026-08-10 certification
+	// quotes. A ceiling assertion must not be contingent on a regression's
+	// preconditions.
+	if len(samples) == 0 {
+		t.Fatal("gc_pause: no samples collected at all; neither the ceiling nor the slope was evaluated")
+	}
+	var overallMax uint64
+	for _, s := range samples {
+		if s.maxNs > overallMax {
+			overallMax = s.maxNs
+		}
+	}
+	maxPauseMs := float64(overallMax) / float64(time.Millisecond)
+	t.Logf("gc_pause: overall max pause=%.2fms (ceiling=%.1fms) ASSERTED over %d samples",
+		maxPauseMs, gcPauseMaxCeilingMs, len(samples))
+	if maxPauseMs >= gcPauseMaxCeilingMs {
+		t.Errorf("gc_pause: max pause %.2fms >= ceiling %.1fms", maxPauseMs, gcPauseMaxCeilingMs)
+	}
+
+	// The slope, by contrast, does depend on having enough points.
+	if !requireRegressionPoints(t, "gc_pause", len(samples),
+		"run with SOAK_GCPAUSE_MEASURE=60s for 12 samples, or SOAK_FULL=1 for the 30-minute variant",
+		"SOAK_GCPAUSE_MEASURE") {
 		return
 	}
 
@@ -194,21 +232,7 @@ done:
 		t.Errorf("gc_pause: pause slope %.3f ms/sample >= epsilon %.1f",
 			slope, gcPauseEpsilonMs)
 	}
-
-	// Max pause ceiling check.
-	var overallMax uint64
-	for _, s := range samples {
-		if s.maxNs > overallMax {
-			overallMax = s.maxNs
-		}
-	}
-	maxPauseMs := float64(overallMax) / float64(time.Millisecond)
-	t.Logf("gc_pause: overall max pause=%.2fms (ceiling=%.1fms)", maxPauseMs, gcPauseMaxCeilingMs)
-	if maxPauseMs >= gcPauseMaxCeilingMs {
-		t.Errorf("gc_pause: max pause %.2fms >= ceiling %.1fms", maxPauseMs, gcPauseMaxCeilingMs)
-	}
-
-	goleak.VerifyNone(t)
+	t.Logf("gc_pause: SLOPE CHECK ASSERTED over %d samples", len(samples))
 }
 
 // gcPauseWriteCSV writes the pause samples to soak-artefacts/gc-pause-<ts>.csv.
