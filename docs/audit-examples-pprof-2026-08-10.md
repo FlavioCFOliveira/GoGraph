@@ -653,6 +653,77 @@ fixed here, and no measurement of it was taken, so no claim is made.
 
 ---
 
+## 8. The second full sweep — all 37 examples re-profiled at `5a634f7d`
+
+*Run after §6, §3.1 and §7 landed, both to rank what remains and to check those three
+changes did not regress anything outside the two examples they were measured on.*
+
+**Coverage: 37/37, 42 profile sets.** Example 24 needs a subcommand and a data directory, so its
+six subcommands were driven as six processes; example 25 needs a data directory and only stops on a
+signal, so it was terminated with SIGTERM so `exprof` could flush. Both were missed by the first
+pass of the sweep script and are included here. Every run was bounded by a small Go supervisor that
+sends SIGTERM and only then SIGKILL — `perl alarm` does not bound a Go child, and this host has no
+coreutils `timeout`.
+
+**No regression anywhere.** `exec.growTo` — the helper §6 introduced — appears at 81.16% of
+`examples/27_concurrent_txn` and 35.67% of `examples/23_bolt_server`, which looks alarming and is
+not: it is where the reservation is now *attributed*, and an aggregation chunk genuinely fills so
+reserving its capacity is correct. Verified rather than assumed, interleaved 3 rounds of example 27
+against today's entry head `cb7caef7`: **4.11–4.56 GB before against 4.01–4.45 GB after**
+(overlapping), with the object count consistently **lower** after — 8.14–9.11 M against 9.29–9.50 M.
+Example 26 is likewise down from 33.48 GB to 30.23 GB at the same 20 000-user scale.
+
+Ranked by total allocation, the top of the sweep is: 26 (31.1 GB at 20k users), 35 (8.8 GB),
+**27 (4.9 GB)**, 20 (210 MB), 23 (178 MB), 17 (174 MB), **24/plandiff (413 MB)**,
+**24/query (128 MB)**, 31 (77 MB), 01 (51 MB). Everything else is under 50 MB.
+
+### What it found — two new opportunities, both filed
+
+**rmp #2395 (priority 9) — an unbracketed bulk load clones the shard slot array PER EDGE, and
+`lpg.Graph` exposes no commit window at all.** This is the headline, and it explains §"Example 26
+does not complete at its own default" above. Measured on `examples/01_basic` (5000 nodes,
+101 974 edges, 50.65 MB): `adjlist.storeEntry` line 2642 —
+`&shardSlots{slots: make([]unsafe.Pointer, len(base.slots))}` — is **245 092 allocations, 50.75% of
+every object in the process, about 2.4 clones per edge**. `storeEntry`'s own code states the cause:
+outside a transaction "this write is its own one-op window and always clones". The columns
+themselves are innocent — they grow geometrically and the object counts confirm it.
+
+**The module has already measured this effect on itself and fixed it in one place:** `store/recovery`
+brackets its snapshot CSR apply in one adjacency commit window and records
+**737.6 MiB → 113.6 MiB, 147.45 ms → 73.57 ms, byte-identical recovered graph** (rmp #2170); WAL
+replay brackets itself too (#1526). So the fast path exists and is proven — **and the public API
+cannot reach it.** `BeginCommit`/`EndCommit` are exported on `adjlist.AdjList` but have no equivalent
+on `lpg.Graph`, and example 26 builds through `lpg.Graph.AddEdge*`. That is the 242× amplification.
+
+The fix is deliberately *not* "export the pair": recovery's own comment names the hazard — a **leaked
+window** would let a later write mutate an already-published slot array under a concurrent reader,
+which is why recovery uses three consecutive statements with no branch between them. A scoped
+callback that cannot leak is the right shape, with recovery's preconditions promoted from assumptions
+to a documented contract.
+
+**rmp #2394 (priority 8) — the aggregation's scratch chunk is allocated fresh per execution, and
+`exec.ChunkPool` exists for exactly this and is used by nothing.** `growTo` is 3.94 GB of example
+27's 4.85 GB over **129 053 allocations of exactly 32 768 B** — `DefaultChunkCapacity × int64`, one
+per scratch chunk per query execution. `EagerAggregation` already reuses its scratch *within* an
+execution (`Reset` + refill, the right pattern) but nils the field at Init and Close.
+`exec.ChunkPool` at `chunk.go:1129` is a `sync.Pool` of Chunks whose own godoc says operators
+processing a high volume of batches "should obtain chunks from a shared pool to reduce GC pressure" —
+and a grep of the whole tree shows **nothing outside its own file and tests refers to it**. It is
+dead code, against an explicit project mandate that per-query ephemeral allocations be pooled, and
+against DuckDB's `DataChunk::Reset` + `VectorCache`, which reuses per pipeline iteration
+(`pipeline_executor.cpp:148,191,386,582,768`). Caveat recorded in the task: `ChunkPool` vends
+*statically* typed chunks, so it does not fit the aggregation's dynamic chunk as written.
+
+### What it confirmed rather than discovered
+
+`search/centrality.pageRankBuildReverseStructure` is 36.61% of example 20 — rmp #2382 still stands.
+`cypher.populateRowCtx` is 33.42% cumulative of example 24's `plandiff`, so #2384's per-row property
+materialisation is not confined to example 26. Example 24's `query` subcommand spends **75.65%** of
+its allocation in `store/recovery.replayWALInto`, which is inherent to a CLI that re-opens the store
+per invocation rather than a defect — and that replay is already bracketed.
+
+---
+
 ## On the security rung of correct → secure → fast → efficient
 
 This sweep produced **no security finding, and it is not evidence of their absence.** A CPU or heap
