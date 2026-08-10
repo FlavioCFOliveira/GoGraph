@@ -191,9 +191,40 @@ heap profile), so this is wasted work rather than wasted memory.
 and `buildEdgeProps` flat 2 042 MB against 2 141 MB — within 0.5 %, so the attribution above is
 representative rather than an artefact of the probe.
 
-**This is where the spike stops.** Removing the per-row map means changing how a relationship's
-properties are represented in the row context, which is a design change; it goes to the maintainer
-before any code moves.
+**This is where the spike stopped.** Removing the per-row map means changing how a relationship's
+properties are represented in the row context, which is a design change; it went to the maintainer,
+who approved all three follow-ups (rmp #2386, #2387, #2388), to be taken narrowest first.
+
+### 2a. FIXED — the presence answer is interned, not allocated per row (rmp #2386)
+
+The presence map holds one constant placeholder per **present** key, so for a fixed presence-key set
+there are only **2^N distinct answers** — and the row path was allocating a fresh map to express one
+of them, ~330 B to deliver a boolean.
+
+All 2^N maps are now precomputed once, at the end of `analyseNodeScalarUse` (after its C1
+reconciliation, so the table is indexed by the final key set), and stored read-only on the
+`nodeScalarUse`. Being written once at build time and never afterwards is what makes them safe to
+hand to the concurrent row workers a parallel scan creates, with no synchronisation. The row selects
+by a mask built from the same per-row storage presence checks as before — only the container is
+shared. `presenceMaps[0]` stays **nil**, preserving the absent-map (not empty-map) result that
+box-at-sink depends on, and the table is bounded at `presenceInternMaxKeys = 4`, above which the
+per-row build is used unchanged.
+
+Measured in example 26 at 20 000 users, arms interleaved over 3 rounds and never overlapping:
+
+| metric | before | after |
+|---|---|---|
+| total allocation | 32.50 – 32.63 GB | **30.50 – 30.76 GB** (**−6.0 %**) |
+| `buildEdgeProps` flat | 5.95 – 6.42 % | **0 %** |
+
+The 1.95 GB removed matches the 2.00 GB the spike predicted. Every deterministic fact was identical
+across all six runs, and the example's own build-phase telemetry (`mem.total_alloc = 9.50 GiB`) is
+byte-identical in both arms — an unchanged control confirming the build path was not touched.
+
+The end-to-end semantics were already pinned by `rel_presence_isnull_test.go`, including the mixed
+present/absent case the mask indexing has to get right, and that suite passes unchanged. The new
+`presence_intern_internal_test.go` pins the table itself: every subset covered, the absent-map-is-nil
+invariant, the stable sorted key ordering, the bound, and that a selection allocates nothing.
 
 ---
 

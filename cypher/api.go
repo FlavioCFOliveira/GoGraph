@@ -11762,6 +11762,26 @@ type nodeScalarUse struct {
 	// always disjoint. presenceKeys is consulted only for relationship variables
 	// today; for node variables it is harmless (the node path ignores it).
 	presenceKeys map[string]struct{}
+	// presenceKeyOrder and presenceMaps intern the presence path's answer (rmp
+	// #2386). The map that path returns holds one constant placeholder per
+	// PRESENT key, so for a fixed key set there are only 2^N distinct answers —
+	// yet the row path allocated a fresh map for each row to express one of them.
+	// Measured on examples/26 at 20k users: 2.00 GB over 6 511 214 calls, about
+	// 330 B allocated to deliver a boolean, 6.1% of that run's total allocation.
+	//
+	// Both are built ONCE, at the end of [analyseNodeScalarUse], and are read-only
+	// afterwards, which is what makes them safe to hand to concurrent row workers
+	// without synchronisation. presenceKeyOrder fixes the bit position of each key
+	// (map iteration order is random and could not index a table); presenceMaps is
+	// indexed by the resulting present-set mask, and presenceMaps[0] is nil — the
+	// same absent-map the per-row build returned when no key was present.
+	//
+	// Both are nil when the key set is empty or larger than
+	// [presenceInternMaxKeys], in which case the per-row build is used unchanged.
+	// The bound is what keeps the table from growing exponentially on a
+	// pathological predicate.
+	presenceKeyOrder []string
+	presenceMaps     []expr.MapValue
 	// needsLabels is set by a label predicate `n:Label` or other label-MEMBERSHIP
 	// reader. It is satisfied by the lazy on-demand path (a [expr.LazyNodeValue]
 	// answers HasLabel without enumerating the full label set), so it does NOT by
@@ -11966,8 +11986,51 @@ func analyseNodeScalarUse(e ast.Expression) (uses map[string]*nodeScalarUse, bai
 				delete(u.presenceKeys, k)
 			}
 		}
+		u.internPresenceMaps()
 	}
 	return uses, bailout
+}
+
+// presenceInternMaxKeys bounds the interned presence table at 2^4 = 16 maps per
+// variable. One presence key is the shape that occurs in practice (`WHERE
+// r.k IS NOT NULL`); the bound exists so a predicate naming many presence-only
+// keys falls back to the per-row build instead of materialising an exponential
+// table.
+const presenceInternMaxKeys = 4
+
+// internPresenceMaps precomputes every answer the presence path can return for
+// this variable, so the row path can select one instead of allocating one.
+//
+// It must run AFTER the C1 reconciliation above has removed the keys that are
+// also value uses, because the table is indexed by the final key set. It is the
+// only writer of presenceKeyOrder/presenceMaps; every later reader is read-only,
+// which is what makes the shared maps safe under the concurrent row workers a
+// parallel scan creates.
+func (u *nodeScalarUse) internPresenceMaps() {
+	n := len(u.presenceKeys)
+	if n == 0 || n > presenceInternMaxKeys {
+		return
+	}
+	u.presenceKeyOrder = make([]string, 0, n)
+	for k := range u.presenceKeys {
+		u.presenceKeyOrder = append(u.presenceKeyOrder, k)
+	}
+	// Sorted so the bit positions are stable for a given key set rather than
+	// dependent on map iteration order.
+	slices.Sort(u.presenceKeyOrder)
+
+	u.presenceMaps = make([]expr.MapValue, 1<<n)
+	for mask := 1; mask < 1<<n; mask++ {
+		m := make(expr.MapValue, n)
+		for i, k := range u.presenceKeyOrder {
+			if mask&(1<<i) != 0 {
+				m[k] = relPresencePlaceholder
+			}
+		}
+		u.presenceMaps[mask] = m
+	}
+	// presenceMaps[0] stays nil: the per-row build returned an absent map when no
+	// key was present, and box-at-sink must keep seeing exactly that.
 }
 
 // classifyFieldExtractor recognises a call of the form f(<bare variable>) where
@@ -13077,6 +13140,22 @@ func buildEdgeProps(g *lpg.ReadView[string, float64], stKey, enKey string, fwdHa
 			return out
 		case len(relUse.presenceKeys) > 0:
 			// r.k IS [NOT] NULL only (#1638): presence placeholders.
+			//
+			// The presence answer is one of only 2^N maps for a fixed key set, all
+			// of them precomputed and read-only on the nodeScalarUse (rmp #2386), so
+			// the row selects one instead of allocating one. The storage presence
+			// check per key is unchanged and still runs per row — only the container
+			// is shared. Falls back to the per-row build when the table was not
+			// interned (an empty or oversized key set).
+			if relUse.presenceMaps != nil {
+				mask := 0
+				for i, k := range relUse.presenceKeyOrder {
+					if relPresentByHandleOrPair(g, stKey, enKey, useByHandle, byHandle, k) {
+						mask |= 1 << i
+					}
+				}
+				return relUse.presenceMaps[mask]
+			}
 			var out expr.MapValue
 			for k := range relUse.presenceKeys {
 				if relPresentByHandleOrPair(g, stKey, enKey, useByHandle, byHandle, k) {
