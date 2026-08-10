@@ -8,7 +8,7 @@ GoGraph is a Go module for working with graphs: persistence, manipulation, and �
 
 ## Compliance Mandates
 
-These two properties are non-negotiable invariants of the module. Every change — feature work, refactor, bug fix, performance tuning — must preserve them. A change that regresses either property is not acceptable.
+These four properties are non-negotiable invariants of the module. Every change — feature work, refactor, bug fix, performance tuning — must preserve them. A change that regresses any of them is not acceptable.
 
 ### 1. 100% Cypher TCK Compliant
 
@@ -29,6 +29,30 @@ The module guarantees the **ACID** transactional properties — **Atomicity**, *
 - **Durability** — once a commit acknowledgement is returned, the change survives process crash, host crash, and `kill -9`. Verified by the deterministic crash-injection battery in `internal/crashinject/` and the WAL recovery tests in `store/wal/` and `store/recovery/`.
 
 These properties must be preserved both for the in-memory engine and for every persistence backend. Any code path that could compromise an ACID property — a non-atomic multi-step write, a read that could observe partial state, a commit that does not durably flush — must be rejected at code review and must not be merged.
+
+### 3. EXTREME / MASSIVE Concurrent Ready
+
+The module is **designed and prepared to operate in an exemplary manner in production environments of extreme concurrency**. Concurrency is not a capability bolted on at the edges: it is a property of the design, present from the choice of every data structure to the shape of every public API.
+
+- **Concurrent by design, never concurrent by adaptation.** Every component is designed from the outset for simultaneous use by a massive number of goroutines. A design that works only because callers serialise access externally does not satisfy this mandate.
+- **Exemplary under sustained massive load.** Under heavy, prolonged, highly concurrent load the module must remain correct, stable, and predictable: no data race, no deadlock, no goroutine or memory leak, no unbounded growth, no latency cliff, and no crash. Saturation is answered with backpressure or a typed error, never with failure.
+- **Scales with the hardware.** Throughput must rise with the cores made available to it. A hot path that serialises every caller on a single global lock is a defect against this mandate, not merely a missed optimisation — use sharding, atomics, or immutable snapshots instead.
+- **Every concurrency contract is explicit.** Each exported type states in its godoc whether it is safe for concurrent use, and under which operations. Silence about a type's concurrency contract is a defect.
+- **Proven, never presumed.** Readiness for extreme concurrency is established by measurement — race-detector runs, leak detection, and latency and throughput measured at the concurrency levels the module publishes (1, 8, 64, 256, 1024 goroutines) — never by inspection or by assertion.
+
+The concrete, enforceable rules that implement this mandate are set out in [Reliability and Concurrency Mandates](#reliability-and-concurrency-mandates); that section is how the mandate is met, and this mandate is why the section exists.
+
+### 4. ULTRA EFFICIENT by Design
+
+The module uses, **by design, the minimum resources necessary** to perform its tasks. Wasteful use of resources must be fought at all times, in every component and on every code path.
+
+- **Minimal by design, not by later optimisation.** The efficient structure is chosen when the component is designed, rather than a wasteful one being tuned afterwards. Efficiency is a design input, not a clean-up phase.
+- **Every resource vector counts.** CPU, memory (RAM), storage (disk), and I/O are all in scope. A change that saves one vector by squandering another must be justified explicitly and measured, not assumed to be a net win.
+- **Waste is a defect.** An avoidable allocation, a redundant copy, a needless recomputation, a byte written that need not be written, a goroutine that need not exist — each is a defect to be fixed like any other, never an acceptable cost of doing business.
+- **Efficiency is measured, never claimed.** Every efficiency claim rests on evidence gathered in this project: benchmarks compared with `benchstat`, `pprof` CPU and heap profiles, allocation counts, and measured on-disk footprint. This is [Measure to decide](#measure-to-decide) applied to resource use.
+- **Never at the expense of a higher priority.** Efficiency is pursued only once correctness and security are assured, exactly as the [Decision framework — correct → secure → fast](#decision-framework--correct--secure--fast) requires. Resources are never saved by weakening a guarantee.
+
+The concrete, enforceable rules that implement this mandate are set out in [Performance-First Engineering](#performance-first-engineering); that section is how the mandate is met, and this mandate is why the section exists.
 
 ## Behavioural Rules
 
