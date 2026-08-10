@@ -460,6 +460,50 @@ func (g *Graph[N, W]) LabelCountExact(lid LabelID, s *Snapshot) (int64, bool) {
 	return int64(g.nodeIdx.Count(uint32(lid))), true
 }
 
+// LabelCountBound returns an UPPER BOUND on the number of nodes carrying lid as
+// of s, and whether that bound happens to be exact.
+//
+// It exists because [Graph.LabelCountExact] declines the moment any history is
+// live, and a caller that only needs to know whether the cardinality can EXCEED
+// some threshold does not need an exact count — it needs a bound. Declining
+// forced those callers to materialise the filtered bitmap instead, which is far
+// more expensive than the question: rmp #2392 measured a planner gate cloning a
+// 3000-node label bitmap once per query, 4.1 GB over one run of
+// examples/35_mvcc_mixed_workload, purely because a concurrent writer kept
+// deltas live and so made the exact count unavailable. A bound answers that
+// question with three atomic loads and no allocation at all.
+//
+// # Why the bound is sound
+//
+// [Graph.LabelBitmapAsOf] starts from the raw index bitmap and corrects it over
+// the SUSPECT set (see [Graph.correctBitmapOver]). A correction either removes a
+// member or adds one, and it visits each suspect once, so it can add at most one
+// member per suspect:
+//
+//	countAsOf(lid, s)  ≤  rawCount(lid) + |suspects|
+//
+// [Graph.suspectNodes] builds that set from exactly three sources — the
+// node-label delta keys, the node-life born/died keys, and the deferred
+// index-removal keys — each of which maintains its own active counter. Summing
+// those three therefore bounds |suspects| without walking a single shard. The sum
+// is deliberately LOOSE: a suspect that removes a member, or that concerns a
+// different label entirely, still counts towards it. Loose in this direction is
+// the safe one — it can only make the bound larger, never smaller than the truth.
+//
+// exact is true only when no filtering is needed at all, in which case the raw
+// count is returned unchanged and is the same value [Graph.LabelCountExact]
+// gives. A caller that needs an exact count must still use that method; this one
+// never promises one.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) LabelCountBound(lid LabelID, s *Snapshot) (n int64, exact bool) {
+	raw := int64(g.nodeIdx.Count(uint32(lid)))
+	if !g.labelBitmapNeedsFilter(s) {
+		return raw, true
+	}
+	return raw + g.labelDeltaActive.Load() + g.nodeLifeActive.Load() + g.idxPendingActive.Load(), false
+}
+
 // LabelsCountExact is [Graph.LabelCountExact] for a CONJUNCTION of labels: the
 // number of nodes carrying every lid, and whether that number is EXACT for s.
 //

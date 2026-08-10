@@ -6143,6 +6143,26 @@ func (s *lpgLabelResolver) ResolveLabelCount(name string) (int64, bool) {
 	return s.g.Raw().LabelCountExact(lid, s.g.Snapshot())
 }
 
+// ResolveLabelCountBound reports an UPPER BOUND on the number of live nodes that
+// carry name, allocating nothing, together with whether that bound is exact.
+//
+// It backs the planner's cheap threshold screens, which ask only whether a
+// cardinality can EXCEED a threshold — a question a bound answers and an exact
+// count is not needed for. [lpgLabelResolver.ResolveLabelCount] declines the
+// moment any history is live, which in a mixed read/write workload is always, and
+// that forced the screens to materialise a bitmap to learn what they could have
+// bounded for three atomic loads (rmp #2392). An unknown label yields (0, true),
+// matching [lpgLabelResolver.ResolveLabelBitmap]'s empty bitmap.
+//
+// See [lpg.Graph.LabelCountBound] for why the bound is sound.
+func (s *lpgLabelResolver) ResolveLabelCountBound(name string) (int64, bool) {
+	lid, ok := s.g.Registry().Lookup(name)
+	if !ok {
+		return 0, true
+	}
+	return s.g.Raw().LabelCountBound(lid, s.g.Snapshot())
+}
+
 // ResolveLabelID reports the stable interned id of name, used only to break
 // ties between equal-cardinality labels deterministically (#2077). ok is false
 // for a label that was never interned (which necessarily has zero live nodes),
@@ -9525,12 +9545,22 @@ func tryBuildParallelScanProject(
 			// to parallelise: the gate cost about 130x the work it was deciding about
 			// (rmp #2380).
 			//
-			// ResolveLabelCount reads the label index cardinality directly and
-			// allocates nothing. It reports exact=false whenever the bitmap would need
-			// snapshot filtering, in which case this screen abstains and the original
-			// path below decides, exactly as before.
-			if lc, ok := labelSrc.(labelCounter); ok {
-				if n, exact := lc.ResolveLabelCount(leafLabel); exact && n >= 0 &&
+			// The screen reads an UPPER BOUND on the label cardinality and allocates
+			// nothing. A bound is all this decision needs: if the cardinality CANNOT
+			// exceed the threshold then the parallel path is out, whatever the exact
+			// count turns out to be.
+			//
+			// It used to demand an EXACT count, and that made it useless in exactly
+			// the workload it was written for. The exact count is unavailable whenever
+			// the label bitmap would need snapshot filtering — i.e. whenever any MVCC
+			// history is live — so a single concurrent writer made the screen abstain
+			// on every query and fall through to materialising the bitmap below, only
+			// to decline on it anyway. Measured on examples/35_mvcc_mixed_workload with
+			// the ingest interval as the only variable: with writes every 100 ms the
+			// clone was 4.1 GB of the run; with writes effectively off, newLabelWalker
+			// vanished from the heap profile entirely (rmp #2392).
+			if lc, ok := labelSrc.(labelBounder); ok {
+				if n, _ := lc.ResolveLabelCountBound(leafLabel); n >= 0 &&
 					!useParallelScanForRows(uint64(n), bopts) {
 					parallelScanCheapDeclineCount.Add(1)
 					return nil, false, nil

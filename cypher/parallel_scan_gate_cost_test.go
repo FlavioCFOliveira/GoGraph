@@ -39,12 +39,23 @@ package cypher
 // counter is what makes a green result mean something, and the paired
 // above-threshold case is what stops the gate passing vacuously if parallel scan
 // were ever disabled outright.
+//
+// # Why these tests no longer wait for the graph to quiesce
+//
+// They used to call a waitQuiescent helper first, because the screen demanded an
+// EXACT label count and that is unavailable while any MVCC history is live. The
+// helper was a standing liability: it waited on a BACKGROUND reclaim goroutine, so
+// under `make ci` — every package's binary at once, under -race — it timed out and
+// turned the gate red twice, once at a 5-second deadline and once at 60 seconds
+// having drained only 3343 of 4096 records. rmp #2392 removed the reason it
+// existed: the screen now reads a sound UPPER BOUND, which live history inflates
+// upwards but never invalidates, so these tests hold with history in flight and the
+// wait is gone rather than lengthened.
 
 import (
 	"context"
 	"strconv"
 	"testing"
-	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
@@ -72,44 +83,6 @@ func seedGateGraph(t *testing.T, n int) *lpg.Graph[string, float64] {
 		}
 	}
 	return g
-}
-
-// waitQuiescent blocks until the graph carries no live label or property history,
-// or the deadline passes.
-//
-// It is required, not hygiene. The cheap screen reads the label cardinality
-// through [lpgLabelResolver.ResolveLabelCount], which reports exact=false
-// whenever the bitmap would need snapshot filtering — and seeding leaves MVCC
-// deltas live until they are reclaimed. Without this wait the screen legitimately
-// abstains on whichever runs still have history, and the assertion below failed 7
-// times in 100. With it: 0 in 300.
-//
-// The abstention is correct behaviour, so the wait belongs in the test rather
-// than a relaxation belonging in the gate. Note that probing exactness with a NIL
-// snapshot reports exact=true unconditionally and hides this entirely — the
-// engine's resolver pins a real snapshot.
-// The deadline is generous on purpose. Reclamation is done by a BACKGROUND
-// goroutine, so what is being waited on is the scheduler, not a correctness
-// property — and under `make ci` this test competes with every other package's
-// binary at once under -race. A 5-second deadline was not enough there: it failed
-// once with labelDeltas stalled at 577 of the 4096 seeded, i.e. mid-drain rather
-// than never started, while the same test passes 20 consecutive runs in isolation
-// in well under a second. Slow progress for a background reclaim on a saturated
-// host is the graceful degradation the module promises, not a defect, so the fix
-// is a deadline that tolerates it rather than a gate that flakes.
-func waitQuiescent(t *testing.T, g *lpg.Graph[string, float64]) {
-	t.Helper()
-	const quiesceDeadline = 60 * time.Second
-	deadline := time.Now().Add(quiesceDeadline)
-	for g.LabelDeltaCount() != 0 || g.PropDeltaCount() != 0 {
-		if time.Now().After(deadline) {
-			t.Fatalf("graph never quiesced within %s: labelDeltas=%d propDeltas=%d — "+
-				"if these are far below the seeded population the vacuum is progressing and merely starved, "+
-				"which points at host load rather than at the code under test",
-				quiesceDeadline, g.LabelDeltaCount(), g.PropDeltaCount())
-		}
-		time.Sleep(time.Millisecond)
-	}
 }
 
 // collectV runs q and returns the v column, so two plans can be compared row for
@@ -147,9 +120,11 @@ const gateQuery = "MATCH (n:P) RETURN n.v AS v"
 // to answer a question whose answer was fixed.
 func TestParallelScanGate_DeclinesWithoutMaterialising(t *testing.T) {
 	g := seedGateGraph(t, gateNodes)
-	waitQuiescent(t, g)
-	// Threshold well above the population: the gate can only decline.
-	eng := NewEngineWithOptions(g, EngineOptions{ParallelScanThreshold: gateNodes * 4})
+	// Threshold well above the population: the gate can only decline. The margin is
+	// generous because the screen now reads an UPPER BOUND that adds every live
+	// suspect, so a graph with history still in flight bounds higher than its
+	// population (rmp #2392).
+	eng := NewEngineWithOptions(g, EngineOptions{ParallelScanThreshold: gateNodes * 8})
 
 	before := parallelScanCheapDeclineCount.Load()
 	rows := collectV(t, eng, gateQuery)
@@ -160,7 +135,7 @@ func TestParallelScanGate_DeclinesWithoutMaterialising(t *testing.T) {
 	}
 	if after == before {
 		t.Fatal("the cheap cardinality screen never fired: the gate still resolves " +
-			"the label bitmap to decide it does not want it (rmp #2380)")
+			"the label bitmap to decide it does not want it (rmp #2380/#2392)")
 	}
 }
 
@@ -169,7 +144,6 @@ func TestParallelScanGate_DeclinesWithoutMaterialising(t *testing.T) {
 // altogether, which would "fix" the allocation by removing the feature.
 func TestParallelScanGate_StillAdmitsAboveThreshold(t *testing.T) {
 	g := seedGateGraph(t, gateNodes)
-	waitQuiescent(t, g)
 	// Threshold below the population: the screen must NOT decline, and the
 	// materialised path must take over.
 	eng := NewEngineWithOptions(g, EngineOptions{ParallelScanThreshold: gateNodes / 4})
@@ -192,7 +166,6 @@ func TestParallelScanGate_StillAdmitsAboveThreshold(t *testing.T) {
 // the screen safe at all: it selects an execution strategy, never a result.
 func TestParallelScanGate_ResultsAreIdenticalEitherSide(t *testing.T) {
 	g := seedGateGraph(t, gateNodes)
-	waitQuiescent(t, g)
 
 	below := collectV(t,
 		NewEngineWithOptions(g, EngineOptions{ParallelScanThreshold: gateNodes * 4}), gateQuery)

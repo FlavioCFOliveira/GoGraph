@@ -542,6 +542,117 @@ extremes. Filed as a question for the next cycle rather than guessed at now.
 
 ---
 
+## 7. FIXED — the parallel-scan gate's cheap screen was defeated by any concurrent writer (rmp #2392)
+
+*Class: efficiency, in the planner. The third instance of the same anti-pattern.*
+
+`tryBuildParallelScanProject` screens cheaply before deciding whether to parallelise a labelled scan:
+if the label cardinality is far below `parallelScanThreshold` (50 000 by default) it declines without
+materialising anything. That screen — added by §3's sibling, rmp #2380 — demanded an **exact** count,
+and `ResolveLabelCount` declines to give one whenever the label bitmap would need snapshot filtering,
+which is **whenever any MVCC history is live**. So a single concurrent writer made the screen abstain
+on every query, fall through to `newLabelWalker`, clone the whole label bitmap, and then decline on it
+anyway.
+
+**The screen therefore worked only on a quiescent graph, and an OLTP workload with concurrent writes
+is never quiescent.**
+
+### Diagnosed by changing one variable, not by reading the code
+
+Two rounds each, same binary, only the ingest interval changed:
+
+| ingest interval | live deltas | `newLabelWalker` allocation |
+|---|---|---|
+| `-write-every 100ms` (default) | yes | **4.11 GB / 4360.84 MB** |
+| `-write-every 1h` (effectively none) | no | **absent from the heap profile** |
+
+### The fix: a bound, not a count
+
+The decision only asks *can this cardinality exceed the threshold*. That is a question a **bound**
+settles, and demanding an exact count was the whole mistake. New `lpg.Graph.LabelCountBound` returns
+`rawCount + labelDeltas + nodeLife + idxPending` — three atomic loads, no allocation.
+
+Its soundness is not asserted, it is argued from the correction algorithm: `LabelBitmapAsOf` starts
+from the raw bitmap and corrects it over the **suspect** set, visiting each suspect once and either
+adding or removing one member, so it can add at most one member per suspect —
+`countAsOf ≤ rawCount + |suspects|`. `suspectNodes` builds that set from exactly three sources, each
+of which already maintains an active counter, so summing those three bounds `|suspects|` without
+walking a shard. The bound is deliberately **loose**: a suspect that removes a member, or concerns a
+different label entirely, still counts. Loose upwards is the safe direction — it can only keep the
+parallel path under consideration, never wrongly rule it out.
+
+This is the ClickHouse pattern §6's prior-art sweep recorded, one level up: decide against a hard
+upper bound rather than a statistic.
+
+### Measured — interleaved, 3 rounds, arms never overlapping
+
+`newLabelWalker` is **absent** in every fixed round. The effect on throughput is concentrated exactly
+where the mechanism predicted — the phase where analytics runs *concurrently with the writer*:
+
+| phase | before | after |
+|---|---|---|
+| baseline (no writes) | 804 / 836 / 833 k ops/s | 845 / 825 / 828 k — flat, as expected |
+| writer_only | 799 / 808 / 795 k | 802 / 808 / 809 k — flat |
+| **analytics_and_writer** | **276 / 266 / 282 k** | **616 / 607 / 601 k — 2.20×** |
+
+And the example's own headline verdict moves with it:
+**`verdict.throughput_collapse` 2.9× / 3.1× / 3.0× → a consistent 1.4×.** The "concurrent analytics
+collapses OLTP throughput by 3×" conclusion this example exists to measure was **substantially an
+artefact of a planner gate cloning a bitmap it discarded**. `analytics.duration` improves slightly
+(389–394 ms → 382–384 ms); `verdict.max_latency_amplification` is noisy in both arms (3.9–5.0) and no
+claim is made from it. Every deterministic fact the example prints is identical.
+
+**Total allocation did NOT fall, and that is expected rather than a contradiction.** The example's
+phases are fixed-DURATION, so a per-operation saving converts into more operations, not less
+allocation: 39.4–40.0 GB became 40.4–40.9 GB while the same window served 2.2× more reader
+operations. In a time-boxed workload the per-operation metric is the one that carries the result, and
+reading total allocation alone would have hidden a 2.2× win — as would reading only
+`phase.baseline.throughput_ops`, the one phase with no writer and therefore the one phase the fix
+cannot affect. Both were the first numbers I looked at.
+
+### Pinned by
+
+`TestParallelScanGate_DeclinesCheaplyWhileHistoryIsLive`, which **fails against the pre-fix build**
+with 4096 live label deltas. Getting it to fail took a second attempt worth recording: the first
+version merely skipped `waitQuiescent` and asserted history was live *straight after seeding* — and it
+passed against the pre-fix build, because the vacuum reclaims within milliseconds and the query had
+not run yet. It now **pins the reader horizon** (`Horizon().Enter(0)`, released by a cleanup), which is
+what a long-running reader does in production and makes the state deterministic.
+`…BoundNeverDeclinesAboveTheThreshold` pins the direction that matters, and
+`TestLabelCountBound_IsAnUpperBound` checks the bound against the row count a real scan yields — an
+absolute oracle for the soundness claim rather than a comparison between two arms that could share a
+fault. `TestLabelCountBound_IsExactWithNoHistory` is the control for the other half: with no history
+the bound must be the exact count, so the loose path is genuinely reserved for the case that needs it.
+
+### It also removed a standing liability from the suite
+
+The pinned-horizon helper had to be got right twice more before the gate went green, and both mistakes
+were mine. Pinning at the sibling file's 4096 nodes left thousands of unreclaimable records per test
+to drain while LATER tests ran, and that starved two other tests' quiescence waits into a 60-second
+timeout — **one of them pre-existing, and both symptoms looked exactly like host load**. Adding a
+drain to the cleanup made it worse, not better: the reclaimer has to be woken and nothing wakes it
+once the test stops writing, so each cleanup burned its whole deadline and a sub-second package became
+180 seconds.
+
+The right answer was to remove the dependency rather than tune it. **`waitQuiescent` is deleted.** It
+existed only because the screen demanded an exact count, and this change removes that demand — the
+three sibling tests now hold with history in flight. That matters beyond tidiness: the same helper had
+turned `make ci` red twice earlier in this cycle, once at a 5-second deadline and once at 60 seconds
+having drained only 3343 of 4096 records under `-race`. A test that waits on a background goroutine's
+progress is a gate that fails on a busy machine, and the fix removed the wait instead of lengthening
+it a third time.
+
+### The sibling gate is NOT the same defect, and was checked
+
+`Graph.LabelsCountExact` — the multi-label conjunction count — does **not** abstain. It *corrects*:
+when filtering is needed it answers with the cardinality of the filtered conjunction, and its own doc
+records that declining was tried first and made the intersection optimisation never engage at all.
+It does still build a bitmap to read a cardinality on that path, so whether it pays a clone the
+caller then discards is **worth measuring** — but it is a different mechanism from the abstention
+fixed here, and no measurement of it was taken, so no claim is made.
+
+---
+
 ## On the security rung of correct → secure → fast → efficient
 
 This sweep produced **no security finding, and it is not evidence of their absence.** A CPU or heap

@@ -97,6 +97,21 @@ type labelCounter interface {
 	ResolveLabelCount(name string) (int64, bool)
 }
 
+// labelBounder is the zero-allocation UPPER-BOUND capability a label resolver may
+// provide. It is the weaker sibling of [labelCounter] and exists for the planner's
+// threshold screens, which ask only whether a cardinality can EXCEED a threshold:
+// a bound settles that, and demanding an exact count instead made those screens
+// abstain — and so pay for a materialised bitmap — the moment any MVCC history was
+// live, which under a concurrent writer is always (rmp #2392).
+//
+// The returned bool reports whether the bound happens to be exact. A screen that
+// only ever DECLINES on the bound may ignore it: if the upper bound is below the
+// threshold then so is the truth. Anything that needs the real number must use
+// [labelCounter] instead.
+type labelBounder interface {
+	ResolveLabelCountBound(name string) (int64, bool)
+}
+
 // labelCardinalityEstimate returns the EXACT live-node count for label as an
 // estExact estimate. It reads the count via [labelCounter.ResolveLabelCount]
 // when the resolver provides it (zero-allocation — no bitmap is built), and
