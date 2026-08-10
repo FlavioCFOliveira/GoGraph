@@ -1,6 +1,6 @@
 # Production-readiness certification — GoGraph under extreme load and concurrency (2026-08-10, round 2)
 
-**Date:** 2026-08-10 · **Entry head:** `b78f78b7` · **Exit head:** see §11 · Apple M4 (10 cores),
+**Date:** 2026-08-10 · **Entry head:** `b78f78b7` · **Exit head:** `013df3c5` (see §11) · Apple M4 (10 cores),
 `darwin/arm64`, macOS 26.5.2, go1.26.5, `kern.ipc.somaxconn=128`, `ulimit -n` 1048576 · Peer read at
 **Memgraph `9ddfa27`** (2026-08-10)
 
@@ -461,7 +461,10 @@ was ahead, is no longer absent.
 | `59dae9ad` | #2398 | bound the engine-wide memory ceilings by default (**HIGH**) |
 | `70a2495d` | #2397 | add a pooled-connection arm so the sweep measures the engine |
 | `95eeec20` | #2393 | measure the plan-cache literal miss, and bound who it affects |
-| — | — | this document (sprint 338 closes with it) |
+| `013df3c5` | — | this document (sprint 338 closes with it) |
+
+**Exit head `013df3c5`: `make ci` green, `MAKE_CI_EXIT=0` read inside the log, coverage 87.0%, TCK
+`ok` in 65.768 s, no `FAIL` / `DATA RACE` / `panic:` / `make: ***` anywhere in the log.**
 
 All four are on branch `sprint-338`, which branches off the `sprint-337` line. **Note on branch state:**
 `sprint-337` was never merged into `main` — `main` is still at `Merge branch 'sprint-336'` — so this
