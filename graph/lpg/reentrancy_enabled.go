@@ -8,7 +8,7 @@ import (
 )
 
 // barrierGuard enforces that no single goroutine re-enters the
-// transaction-visibility barrier ([Graph.View] / [Graph.ApplyAtomically]).
+// transaction-visibility barrier ([Graph.ApplyAtomically]).
 //
 // # When this implementation is compiled
 //
@@ -29,9 +29,9 @@ import (
 // The local gate runs `go test -race ./...`, so the guard is enforced on every
 // change; `-tags gograph_debug` turns it on for any other build. The cost of
 // the split is that in a released binary a nested acquisition deadlocks
-// silently instead of panicking — see the [Graph.View] and
-// [Graph.ApplyAtomically] godoc, which state the contract, and
-// reentrancy_disabled.go, which documents the trade-off in full.
+// silently instead of panicking — see the [Graph.ApplyAtomically] godoc, which
+// states the contract, and reentrancy_disabled.go, which documents the
+// trade-off in full.
 //
 // # Why a guard is needed
 //
@@ -55,8 +55,9 @@ import (
 //
 // # Mechanism and cost
 //
-// The barrier is entered once per query ([Graph.View]) or once per write
-// transaction ([Graph.ApplyAtomically]) — never per row — so an O(1) bookkeeping
+// The barrier is entered once per write transaction
+// ([Graph.ApplyAtomically]) — never per row, and no longer once per query, since
+// rmp #2344 removed Graph.View and a read takes no barrier — so an O(1) bookkeeping
 // step per acquisition is acceptable; there is no per-row overhead and no
 // allocation on the common (non-nested) path:
 //
@@ -64,8 +65,8 @@ import (
 //     stamped immediately AFTER visMu.Lock succeeds and cleared (a CAS on the
 //     goroutine's own id) immediately BEFORE visMu.Unlock, so it is exactly
 //     "the goroutine currently HOLDING visMu in write mode" — never a writer
-//     merely queued on the lock. Both [Graph.View] and [Graph.ApplyAtomically]
-//     check it with one atomic load — no lock, no allocation — which catches
+//     merely queued on the lock. [Graph.ApplyAtomically] checks it with one
+//     atomic load — no lock, no allocation — which catches
 //     every nesting that involves the writer (writer→writer, writer→reader,
 //     reader→writer). The entry-side check still runs BEFORE Lock, so the
 //     panic fires instead of the lock deadlocking. A writer queued on visMu is
@@ -205,7 +206,7 @@ func (bg *barrierGuard) clearWriter(gid int64) {
 	bg.writerMu.Unlock()
 }
 
-// The READER half of this guard was removed with [Graph.View] in rmp #2344. It had
+// The READER half of this guard was removed with Graph.View in rmp #2344. It had
 // exactly one caller, and once reads take no barrier at all there is no reader to
 // mark: a snapshot read acquires nothing, so it cannot nest fatally with anything.
 // What remains is the WRITER half, because [Graph.ApplyAtomically] still deadlocks

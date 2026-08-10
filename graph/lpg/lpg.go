@@ -42,14 +42,16 @@
 // transaction, but it is not a transactional view: two such calls can straddle
 // a commit.
 //
-// [Graph.View] and [Graph.ApplyAtomically] still exist, and are now the SCHEMA
-// BARRIER — they serialise DDL against readers, not writers against each other.
+// [Graph.ApplyAtomically] still exists and is now the SCHEMA BARRIER — it
+// serialises DDL against readers, not writers against each other. (Graph.View
+// was the read side of that pair; rmp #2344 removed it, and reads now take no
+// barrier at all — they take a snapshot.)
 // An ordinary write holds the barrier SHARED and relies on versioning for its
 // isolation. Reads take no barrier at all.
 //
 // # What this paragraph used to say
 //
-// It said reads must run inside [Graph.View] to be partial-transaction-free,
+// It said reads must run inside Graph.View to be partial-transaction-free,
 // and pointed at "the tracked lock-free per-shard snapshot that will make every
 // read transaction-consistent without the barrier" as future work. Neither is
 // true: reads are transaction-consistent WITHOUT the barrier today, and the
@@ -627,13 +629,15 @@ type Graph[N comparable, W any] struct {
 	// The SHARED side is held by every ordinary write for its whole bracket,
 	// publication included, which is precisely what makes the exclusive
 	// acquisitions above wait for every in-flight write to become visible.
-	// [Graph.View] also takes it shared, so a View does NOT exclude a writer and
-	// is only a consistent view of what the catalog holders change; a caller that
+	// Reads take this lock in NO mode at all: rmp #2344 removed Graph.View, which
+	// used to take it shared, so a read never excludes a writer and this lock is
+	// now only a consistent view of what the catalog holders change. A caller that
 	// needs a consistent view of DATA takes a snapshot. The checkpointer's capture
 	// (store/checkpoint) is such a View caller and rests on the store's own
 	// quiesce — RunUnderCommitLock drains in-flight commits to zero — rather than
 	// on this lock; rmp #2310 moves it to a transactional instant. See
-	// [Graph.View] for the full division and the measurement behind it.
+	// [Graph.BeginRead] for the reader side that replaced Graph.View, and
+	// docs/isolation-design.md for the full division and the measurement behind it.
 	//
 	// # Why this is an mvcc.Gate and no longer a sync.RWMutex (rmp #2337)
 	//
@@ -706,7 +710,7 @@ type Graph[N comparable, W any] struct {
 	conVer constraintVersions
 
 	// barrier enforces that no single goroutine re-enters visMu via
-	// [Graph.View] / [Graph.ApplyAtomically]. visMu is not re-entrant, so a
+	// [Graph.ApplyAtomically]. visMu is not re-entrant, so a
 	// nested acquisition from a goroutine already inside the barrier would
 	// deadlock the engine; the guard converts that silent hang into an immediate
 	// panic.
@@ -800,10 +804,10 @@ type Graph[N comparable, W any] struct {
 // fn is the in-memory apply of one durable transaction; callers invoke it
 // only after the transaction's WAL frames are fsynced.
 //
-// # It does NOT, by itself, make fn's writes atomically visible to a reader
+// # By itself it does NOT make fn's writes atomically visible; one threaded transaction does
 //
 // This paragraph used to promise that every mutation fn performs "becomes
-// visible to [Graph.View] readers as a single atomic step". That guarantee was
+// visible to Graph.View readers as a single atomic step". That guarantee was
 // scoped to a reader type that **no longer exists**: Graph.View was removed by
 // rmp #2344, and snapshots ([Graph.BeginRead] / [Graph.ReadAt]) are now the only
 // readers. The promise was never restated for them, and it does not carry over.
@@ -822,22 +826,33 @@ type Graph[N comparable, W any] struct {
 // and they share one commit instant. The same requirement is stated on
 // [Graph.ApplyInsideLockedTx].
 //
-// THAT IS NECESSARY AND, AT THE TIME OF WRITING, NOT SUFFICIENT. Threading one
-// transaction removes the three-separate-instants cause, but the tear SURVIVES it:
-// the same workload still tore in 4 runs of 100, in both pairings and both
-// directions — two labels disagreeing with each other, and the edge disagreeing
-// with both labels in each direction. So a caller must NOT yet rely on writes
-// across DIFFERENT substructures, or across different label shards, becoming
-// visible together even inside one transaction. Tracked as rmp #2378, which also
-// records what the instrumentation has excluded.
+// THREADING ONE TRANSACTION WAS NECESSARY BUT, FOR A TIME, NOT SUFFICIENT — AND
+// THAT GAP IS NOW CLOSED. Removing the three-separate-instants cause left a
+// residual tear: the same workload still tore in 4 runs of 100, in both pairings
+// and both directions. rmp #2378 found why and fixed it in commit 509929e2:
+// mvcc.Visible was re-evaluated per substructure against a MUTABLE
+// CommitInfo.ts that flips at commit, so a reader straddling a commit split.
+// A Snapshot now PINS the visibility verdict per commit record, and AdjList
+// resolves through it instead of short-circuiting on the global versionActive
+// counter. Both halves were required — the pinned verdict alone still tore 2 in
+// 100 and the counter alone 3 in 100 — and together they measured ZERO IN 300
+// RUNS against a pre-fix rate of 2 to 5 per 100, under the peer load that was
+// the only environment able to reproduce it. Read-path cost and allocations
+// were unchanged.
+//
+// So a caller threading ONE transaction may now rely on writes across different
+// substructures, and across different label shards, becoming visible together.
+// A caller that does NOT thread one transaction still cannot: the several
+// distinct commit instants described above are a separate cause and are not
+// affected by that fix.
 //
 // Exclusive-writer brackets around state that is not versioned per-write — an
 // index registration, for example — are unaffected, since there is no commit
 // instant to split.
 //
 // ApplyAtomically must not be called re-entrantly, and the mutations inside fn
-// must not call [Graph.View] or [Graph.ApplyAtomically] (the RWMutex is not
-// re-entrant, so a nested acquisition from this goroutine would deadlock).
+// must not call [Graph.ApplyAtomically] (the RWMutex is not re-entrant, so a
+// nested acquisition from this goroutine would deadlock).
 //
 // The invariant is CHECKED in builds made with -race or -tags gograph_debug: a
 // nested call from a goroutine already inside the barrier panics with a clear
@@ -986,7 +1001,7 @@ func (g *Graph[N, W]) ApplyAtomically(fn func() error) error {
 // with itself and CREATE INDEX's ShareLock does (src/backend/storage/lmgr/lock.c,
 // LockConflicts).
 //
-// fn must not call [Graph.View], [Graph.ApplyAtomically] or ApplyVersioned: the
+// fn must not call [Graph.ApplyAtomically] or ApplyVersioned: the
 // hold is shared, and Go's [sync.RWMutex] prefers a queued writer, so a nested
 // shared acquisition deadlocks the instant one queues. Enforced by the same
 // re-entrancy guard, under -race or -tags gograph_debug.
@@ -1113,7 +1128,7 @@ func (g *Graph[N, W]) BeginVersionedTx() WriteTx {
 // first, fn does NOT run, nothing is held, and ctx's error is returned — the
 // caller's transaction remains open and usable.
 //
-// fn must not call [Graph.View], [Graph.ApplyAtomically] or [Graph.ApplyVersioned]:
+// fn must not call [Graph.ApplyAtomically] or [Graph.ApplyVersioned]:
 // the hold is shared, and Go's [sync.RWMutex] prefers a queued writer, so a nested
 // shared acquisition deadlocks the instant one queues. Enforced by the re-entrancy
 // guard under -race or -tags gograph_debug.
@@ -1352,7 +1367,7 @@ func (g *Graph[N, W]) LockBarrier() {
 // 601 ms, and after 11.60 s under load, in both cases with a live transaction
 // and err=nil. See [mvcc.Gate.StrongLockCtx] and the acquireCtx helper beside it
 // for how the wait is bounded and why a queued acquire cannot simply be
-// abandoned. (It used to say "[Graph.View] readers hold the barrier's read side";
+// abandoned. (It used to say "Graph.View readers hold the barrier's read side";
 // rmp #2344 removed Graph.View and reads take no barrier at all.)
 func (g *Graph[N, W]) LockBarrierCtx(ctx context.Context) error {
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
@@ -1389,8 +1404,9 @@ func (g *Graph[N, W]) LockBarrierCtx(ctx context.Context) error {
 // UnlockBarrier releases the transaction-visibility write lock acquired via
 // [Graph.LockBarrier]. It MUST be called from the same goroutine that called
 // LockBarrier, and exactly once per LockBarrier call. After this call completes,
-// concurrent [Graph.View] readers may proceed and [Graph.ApplyAtomically] may be
-// called again from any goroutine.
+// [Graph.ApplyAtomically] may be called again from any goroutine. (It used to say
+// "concurrent Graph.View readers may proceed" as well; rmp #2344 removed that
+// reader, and a snapshot reader never waited on this barrier in the first place.)
 func (g *Graph[N, W]) UnlockBarrier() {
 	gid := g.barrier.currentGID()
 	// The transaction this barrier opened, read back off the slot the exclusive

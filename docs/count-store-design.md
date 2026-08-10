@@ -286,9 +286,16 @@ exact **with the `estExact` provider contract of §7 unchanged**.
 ## 4. Question 4 — Snapshot / isolation consistency
 
 The pinned-snapshot foundation (#2051) is **deferred / non-existent**; this design
-targets the **current** model: `lpg.Graph.View` takes `visMu.RLock`
-(`graph/lpg/lpg.go:629`), `ApplyAtomically` / `LockBarrier` take `visMu.Lock`
-(`:520`, `:565`), and the single writer serialises commits.
+targets the model **as it stood when this document was written**:
+`lpg.Graph.View` takes `visMu.RLock` (`graph/lpg/lpg.go:629`), `ApplyAtomically` /
+`LockBarrier` take `visMu.Lock` (`:520`, `:565`), and the single writer serialises
+commits.
+
+> **Superseded (rmp #2379, 2026-08-10).** That is no longer the current model.
+> `Graph.View` was removed by rmp #2344 and reads take no barrier: they pin an MVCC
+> snapshot (`Graph.BeginRead` / `Graph.ReadAt` / `Graph.EndRead`). The pinned-snapshot
+> foundation this section calls non-existent has since been delivered, so the
+> paragraph above describes history, not the engine.
 
 ### 4.1 The consistency argument
 

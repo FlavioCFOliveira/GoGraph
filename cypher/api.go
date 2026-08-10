@@ -388,7 +388,7 @@ type buildOpts struct {
 	// for the snapshot's lifetime: a single snapshot reused across all rows is
 	// consistent with the Expand-time CSR that minted the positions
 	//
-	// (This used to read "run inside one [lpg.Graph.View] RLock". That stopped being
+	// (This used to read "run inside one lpg.Graph.View RLock". That stopped being
 	// true in sprint 334: a read no longer takes the visibility barrier at all — it
 	// carries a start timestamp and each structure resolves against it. The stability
 	// the paragraph depends on is unchanged, but it now comes from the instant rather
@@ -1140,7 +1140,7 @@ type Engine struct {
 	//
 	// This used to read: "visMu cannot do this job on its own even though it has the
 	// same shape: the DDL's exclusive hold covers only the registration, and extending
-	// it over the backfill would mean the scan could no longer use [lpg.Graph.View]
+	// it over the backfill would mean the scan could no longer use lpg.Graph.View
 	// (visMu is not re-entrant)."
 	//
 	// THAT OBSTACLE NO LONGER EXISTS. rmp #2344 removed Graph.View outright, and the
@@ -2343,9 +2343,12 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 // what makes that class of defect unrepresentable, so DO NOT reintroduce a
 // second gate-resolution site for rendering.
 //
-// The caller must already hold the graph's read barrier ([lpg.Graph.View]): the
-// cost gates read live label counts, the node total, and count-store cells, and
-// they must all come from one consistent snapshot.
+// The caller must already have pinned a snapshot ([lpg.Graph.BeginRead] plus
+// [lpg.Graph.ReadAt]): the cost gates read live label counts, the node total, and
+// count-store cells, and they must all come from one consistent instant. (This
+// used to say "must already hold the graph's read barrier"; rmp #2344 removed
+// lpg.Graph.View and a read takes no barrier at all — the snapshot's start
+// timestamp is what makes the correlated reads agree.)
 //
 // prof is nil for an ordinary execution and non-nil only for [Engine.Profile];
 // it is threaded onto the build options so the single wrapping point in
@@ -3790,7 +3793,7 @@ func commitIndexTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind txn.Inde
 // tombstone, label, and property state after every shard lock is released. The
 // keys are interned and immutable, so resolving them outside the walk is safe.
 //
-// It takes NO BARRIER. Both phases used to run inside [lpg.Graph.View] (task
+// It takes NO BARRIER. Both phases used to run inside lpg.Graph.View (task
 // #1341) for CATALOG stability across the scan. [Engine.schemaMu] supplies that
 // already, and strictly better: every catalog mutator — both [lpg.Graph.ApplyAtomically]
 // call sites, and every DDL entry point (runCreateBTreeIndex, runCreateHashIndex,
@@ -5410,8 +5413,12 @@ func estimateRelSize(r expr.RelationshipValue) int64 {
 // enforcing the durable-then-visible ordering ACID Durability requires
 // (#1281). The visibility barrier (visMu) is still held when this runs, so
 // whatever decision it makes — keep the writes or roll them back — becomes
-// observable to a concurrent [lpg.Graph.View] reader as a single atomic step,
-// and the WAL fsync that gates "keep" happens-before that visibility flip.
+// observable to a concurrent SNAPSHOT reader as a single atomic step, and the WAL
+// fsync that gates "keep" happens-before that visibility flip. (This used to name
+// a concurrent lpg.Graph.View reader; rmp #2344 removed that reader. The property
+// survives for snapshot readers because the statement's writes share one
+// transaction record and rmp #2378 pinned the visibility verdict per record —
+// measured zero tears in 300 runs.)
 //
 // It is a no-op for read queries (buf == nil and tx == nil) and is idempotent
 // (bufHandled / walHandled). The keep/roll-back decision uses the
@@ -5581,7 +5588,7 @@ func (r *Result) commitUnderBarrier() {
 // rollbackUnderBarrier undoes a write query's eager in-memory mutations,
 // secondary-index buffer, and WAL transaction, all while the visibility barrier
 // is still held, so the rolled-back transaction never becomes observable to a
-// concurrent [lpg.Graph.View] reader (#1282 for the in-memory undo, #1281 for
+// concurrent snapshot reader (#1282 for the in-memory undo, #1281 for
 // the WAL rollback). It is shared by the drain-error and fsync-failure branches
 // of commitUnderBarrier. The undo runs first so the secondary indexes are
 // dropped only after the graph entries they describe are gone; the WAL
@@ -6195,8 +6202,10 @@ var parallelCountScanBuildCount atomic.Uint64
 // false and therefore keeps the serial path.
 //
 // The live count is read via [lpg.Graph.LiveOrder], which the build already
-// observes under the visibility-barrier RLock ([lpg.Graph.View]); it is stable
-// for the query's lifetime.
+// observes through the query's pinned snapshot; it is stable for the query's
+// lifetime. (This used to say "under the visibility-barrier RLock"; rmp #2344
+// removed lpg.Graph.View and the stability now comes from the snapshot's start
+// timestamp rather than from holding a lock.)
 func useParallelScan(walker nodeWalkerIface, bopts *buildOpts) bool {
 	if bopts == nil || !bopts.parallelScanEnabled {
 		return false
@@ -11760,7 +11769,9 @@ func edgePropsToExprMap(g *lpg.ReadView[string, float64], srcKey, dstKey string)
 // Isolation: it returns a freshly owned map and aliases no graph-internal state;
 // it is safe for concurrent use under the same per-shard contract as
 // [lpg.Graph.EdgePropertiesByHandle]. To read a view consistent with the
-// adjacency layer, the caller brackets the correlated reads under [lpg.Graph.View].
+// adjacency layer, the caller resolves the correlated reads through one
+// [lpg.ReadView] pinned by [lpg.Graph.BeginRead] / [lpg.Graph.ReadAt] and released
+// with [lpg.Graph.EndRead] — which is exactly what the g parameter already is.
 func edgePropsByHandleToExprMap(g *lpg.ReadView[string, float64], srcKey, dstKey string, handle uint64) expr.MapValue {
 	raw := g.EdgePropertiesByHandle(srcKey, dstKey, handle)
 	if len(raw) == 0 {
@@ -16072,7 +16083,7 @@ func (a *execLabelAdapter) ResolveLabelCount(name string) (int64, bool) {
 // violated, the WAL fsync fails, or the pipeline panics, the whole statement
 // rolls back: the undo log replays in reverse inside the write visibility
 // barrier, restoring the graph to its pre-statement state, before the barrier
-// is ever released — so a concurrent [lpg.Graph.View] reader can never
+// is ever released — so a concurrent snapshot reader can never
 // observe a partially-applied write. Only once every check passes does the
 // WAL fsync (durability before visibility), after which the undo log is
 // discarded.

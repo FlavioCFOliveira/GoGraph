@@ -9,7 +9,7 @@ package cypher
 // row, the WAL transaction and the secondary-index buffer roll back, but the
 // rows already applied to the in-memory graph would otherwise remain — an
 // in-memory-vs-durable divergence that violates Atomicity: concurrent
-// [lpg.Graph.View] readers and the next query observe a partial transaction
+// snapshot readers and the next query observe a partial transaction
 // until the process restarts and recovery rebuilds the graph from the WAL.
 //
 // undoLog closes that gap. As each mutation is applied to the in-memory graph
@@ -194,7 +194,7 @@ func runUndo(inv func()) (ok bool) {
 // returns, is the whole point of #1282: the deferred visMu.Unlock lives in
 // ApplyAtomically's frame and runs only once this closure has fully unwound, so
 // a recover sited here observes the lock still held and no concurrent
-// [lpg.Graph.View] reader can ever see the partial transaction.
+// snapshot reader can ever see the partial transaction.
 //
 // When no panic is in flight it is a no-op, so the happy path is unaffected.
 // undo may be nil (no mutations tracked); replay tolerates that.

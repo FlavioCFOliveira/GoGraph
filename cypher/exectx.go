@@ -455,7 +455,7 @@ func (e *Engine) beginTxSession(ctx context.Context, sess *lpg.Session[string, f
 //     rejection is what keeps the lock-free read path safe, since a write would
 //     otherwise run with no writer lock, no barrier, and no WAL; and
 //   - otherwise runs through the engine's concurrent read path ([Engine.Run]),
-//     taking its OWN per-statement [lpg.Graph.View] snapshot. Reads therefore
+//     taking its OWN per-statement snapshot ([lpg.Graph.BeginRead]). Reads therefore
 //     observe READ-COMMITTED isolation across the statements of the transaction
 //     (each RUN sees the latest committed state, matching Neo4j's default), and
 //     run fully in parallel with other readers and writers.

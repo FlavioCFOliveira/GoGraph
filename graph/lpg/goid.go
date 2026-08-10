@@ -12,7 +12,7 @@ import (
 // The Go runtime deliberately does not export goroutine identifiers, because
 // goroutine-local state is an anti-pattern in almost all code. This package
 // uses the id for exactly one narrow, internal purpose: the re-entrancy guard
-// in [Graph.View] / [Graph.ApplyAtomically] must answer the question "is the
+// in [Graph.ApplyAtomically] must answer the question "is the
 // CURRENT goroutine already inside the visibility barrier?", and the only
 // stable way to identify "the current goroutine" without goroutine-local
 // storage is its id. The id is used solely to detect a would-be deadlock and

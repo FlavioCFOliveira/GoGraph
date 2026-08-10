@@ -140,8 +140,10 @@ func (t *touchedNodes) empty() bool { return t == nil || len(t.keys) == 0 }
 // observe it. Because the barrier excludes concurrent writers and Views, it reads
 // graph state directly via the barrier-safe [lpg.Graph.HasNodeLabel] /
 // [lpg.Graph.GetNodeProperty] / [lpg.Graph.IsTombstoned] APIs (the same pattern
-// reseedConstraintsInsideBarrier uses), never through [lpg.Graph.View] (which
-// would deadlock the non-re-entrant barrier).
+// reseedConstraintsInsideBarrier uses), never through a barrier-taking reader.
+// (This used to name lpg.Graph.View, which would have deadlocked the
+// non-re-entrant barrier; rmp #2344 removed it, so the hazard is gone rather than
+// merely avoided — but the direct-API pattern is still the right one here.)
 //
 // It is gated by the caller on [exec.ConstraintRegistry.HasAnyNotNull]; a nil
 // receiver, a nil registry, or an empty touched set all short-circuit to nil.
