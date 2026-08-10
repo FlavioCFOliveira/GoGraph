@@ -13318,8 +13318,23 @@ func buildEdgeProps(g *lpg.ReadView[string, float64], stKey, enKey string, fwdHa
 	// that records a by-handle property without a by-handle label; today every
 	// by-handle edge also has its type recorded, which is what hasByHandleEntry
 	// already captures from the type-resolution path.
+	//
+	// The probe is skipped when the graph has NEVER recorded a by-handle edge
+	// property (rmp #2387). That leaves the routing decision below unchanged
+	// rather than approximating it: with the latch false the by-handle store is
+	// provably empty, so edgePropsByHandleToExprMap could only return nil, so
+	// the len(byHandle) > 0 disjunct could only be false — and the decision
+	// reduces to hasByHandleEntry, which is resolved from the separate by-handle
+	// TYPE store and is untouched here. When hasByHandleEntry DOES hold the
+	// probe still runs, because byHandle is then the value source every branch
+	// reads. The future writer the disjunct exists for is preserved too: a
+	// writer that records a by-handle property without a by-handle label sets
+	// the latch by doing so, which re-enables the probe that then observes it.
+	// The latch is one atomic load in place of two Mapper lookups, a shard
+	// mutex and a double map lookup, and the load is only reached when a handle
+	// is actually bound.
 	var byHandle expr.MapValue
-	if fwdHandle != 0 {
+	if fwdHandle != 0 && (hasByHandleEntry || g.AnyEdgeHandlePropertyEverWritten()) {
 		byHandle = edgePropsByHandleToExprMap(g, stKey, enKey, fwdHandle)
 	}
 	useByHandle := fwdHandle != 0 && (hasByHandleEntry || len(byHandle) > 0)

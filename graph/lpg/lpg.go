@@ -414,6 +414,32 @@ type Graph[N comparable, W any] struct {
 	edgeHandleLabelShards [propMapShards]edgeHandleLabelShard
 	edgeHandlePropShards  [propMapShards]edgeHandlePropShard
 
+	// anyHandleProp latches true the first time a by-handle edge PROPERTY is
+	// written and is NEVER cleared. It exists so a reader that only needs to
+	// know whether the by-handle property store can hold anything at all can
+	// answer with one atomic load instead of two Mapper lookups, a shard
+	// mutex and a double map lookup — the shape rmp #2387 measured at 1.15%
+	// of example 26's CPU, where the probe ran 17 009 744 times and its
+	// result was used zero times because the graph is built through the Go
+	// API, which writes the per-pair store only.
+	//
+	// Monotonicity is what makes it safe, and it is deliberately one-way:
+	//   - It is set BEFORE the write takes the shard lock, so any by-handle
+	//     property that is visible to a reader was preceded, in the
+	//     sequentially-consistent order Go's memory model gives atomics, by
+	//     the latch store. A false observation of `false` therefore cannot
+	//     hide a visible property.
+	//   - It is never cleared, so a delete, an abort-withdraw or a vacuum
+	//     can only ever leave it conservatively true. Over-reporting costs a
+	//     probe that returns nothing; under-reporting would lose a stored
+	//     property, so the asymmetry is chosen on purpose.
+	// The two writers are setEdgePropertyByHandleInfo (edge_handle.go) and
+	// setEdgePropertyByHandleIDInfo (edge_handle_durable.go); every other
+	// shard site is a read, a delete, or the abort path's restore of a
+	// pre-image, which by definition needs a prior write that already
+	// latched. See [Graph.AnyEdgeHandlePropertyEverWritten].
+	anyHandleProp atomic.Bool
+
 	// tombstones records NodeIDs that have been removed by RemoveNode.
 	// The underlying Mapper cannot release the index slot (NodeID stability
 	// is a hard contract), so removal is observable only via this set:

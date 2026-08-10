@@ -229,6 +229,17 @@ func (v *ReadView[N, W]) EdgePropertiesByHandleID(srcID, dstID graph.NodeID, han
 	return v.g.EdgePropertiesByHandleIDAsOf(srcID, dstID, handle, v.snap)
 }
 
+// AnyEdgeHandlePropertyEverWritten forwards
+// [Graph.AnyEdgeHandlePropertyEverWritten]. It deliberately does NOT consult
+// this view's snapshot: the latch is a whole-graph, monotonic, never-cleared
+// fact about whether the by-handle property store was ever written, so it is
+// the same answer at every instant and is safe to read through a view. False
+// proves that [ReadView.EdgePropertiesByHandle] must return empty; true proves
+// nothing beyond "the read is worth making".
+func (v *ReadView[N, W]) AnyEdgeHandlePropertyEverWritten() bool {
+	return v.g.AnyEdgeHandlePropertyEverWritten()
+}
+
 // ── topology ─────────────────────────────────────────────────────────────────
 
 // EntryView returns every column of id's adjacency entry at this view's
