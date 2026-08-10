@@ -88,13 +88,25 @@ func seedGateGraph(t *testing.T, n int) *lpg.Graph[string, float64] {
 // than a relaxation belonging in the gate. Note that probing exactness with a NIL
 // snapshot reports exact=true unconditionally and hides this entirely — the
 // engine's resolver pins a real snapshot.
+// The deadline is generous on purpose. Reclamation is done by a BACKGROUND
+// goroutine, so what is being waited on is the scheduler, not a correctness
+// property — and under `make ci` this test competes with every other package's
+// binary at once under -race. A 5-second deadline was not enough there: it failed
+// once with labelDeltas stalled at 577 of the 4096 seeded, i.e. mid-drain rather
+// than never started, while the same test passes 20 consecutive runs in isolation
+// in well under a second. Slow progress for a background reclaim on a saturated
+// host is the graceful degradation the module promises, not a defect, so the fix
+// is a deadline that tolerates it rather than a gate that flakes.
 func waitQuiescent(t *testing.T, g *lpg.Graph[string, float64]) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	const quiesceDeadline = 60 * time.Second
+	deadline := time.Now().Add(quiesceDeadline)
 	for g.LabelDeltaCount() != 0 || g.PropDeltaCount() != 0 {
 		if time.Now().After(deadline) {
-			t.Fatalf("graph never quiesced: labelDeltas=%d propDeltas=%d",
-				g.LabelDeltaCount(), g.PropDeltaCount())
+			t.Fatalf("graph never quiesced within %s: labelDeltas=%d propDeltas=%d — "+
+				"if these are far below the seeded population the vacuum is progressing and merely starved, "+
+				"which points at host load rather than at the code under test",
+				quiesceDeadline, g.LabelDeltaCount(), g.PropDeltaCount())
 		}
 		time.Sleep(time.Millisecond)
 	}

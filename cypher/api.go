@@ -529,6 +529,16 @@ type buildOpts struct {
 	// which therefore always build the serial EagerAggregation pipeline.
 	parallelScanEnabled bool
 	fwdCSRReady         bool
+	// scalarUseMemo is the plan-cache entry's cross-execution memo for
+	// [analyseNodeScalarUse] (rmp #2383). The read-path build points it at the
+	// entry serving this query; every other build path leaves it nil, and
+	// [analyseNodeScalarUseFor] then runs the analysis directly.
+	//
+	// It is a pointer INTO the shared entry, not per-build state, so unlike every
+	// other field here it outlives the build and is reached concurrently — which is
+	// the whole point, and why [nodeScalarUseMemo] is itself safe for concurrent
+	// use.
+	scalarUseMemo *nodeScalarUseMemo
 }
 
 // evalRow is the canonical bridge from a per-row closure to [expr.Eval] /
@@ -2368,6 +2378,13 @@ func (e *Engine) buildReadPhysical(
 	patEval := newPatternEvaluator(rv, e.maxCollectItems)
 	bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx, maxCollectItems: e.maxCollectItems}
 	bopts.profiler = prof
+	// Point the build at this plan's cross-execution analysis memo (rmp #2383).
+	// entry is nil on no read path today, but the guard keeps the coupling
+	// one-directional: a future caller without an entry loses the memo, not the
+	// build.
+	if entry != nil {
+		bopts.scalarUseMemo = &entry.scalarUse
+	}
 	// Edge-type-filter cache sharing (#1871): the SAME cache instance
 	// serves every concurrent Run call, so a relationship-type-filtered
 	// pattern amortises its O(V+E) build across the whole Engine's query
@@ -4366,6 +4383,160 @@ type planCacheEntry struct {
 	// query with no single-edge pattern pays nothing at build time. nil when the
 	// query has no candidate.
 	anchorSwapCandidates []anchorSite
+	// scalarUse memoises [analyseNodeScalarUse] across executions of this plan
+	// (rmp #2383). It is the same class as the four fields above — a pure function
+	// of the immutable plan — but it is filled LAZILY rather than at entry
+	// creation, and that difference is deliberate.
+	//
+	// Eager population would have to walk the plan and predict which expressions
+	// the build will analyse, duplicating knowledge that lives in the builder; a
+	// position missed by that walk is silently never memoised. Filling it from the
+	// build's own call sites cannot drift.
+	//
+	// It is therefore the one field that is written after loadOrStore, which is
+	// why it is a [nodeScalarUseMemo] rather than a plain map — see that type for
+	// the concurrency argument and for the ceiling that keeps it bounded. Every
+	// value it holds is immutable once stored, so concurrent readers observe a
+	// fully built analysis or none.
+	scalarUse nodeScalarUseMemo
+}
+
+// nodeScalarUseMemo memoises [analyseNodeScalarUse] per AST expression for the
+// lifetime of one [planCacheEntry].
+//
+// # Why it exists
+//
+// The analysis is a pure function of an immutable [ast.Expression], yet it ran on
+// EVERY execution at three build sites. Measured on
+// examples/35_mvcc_mixed_workload (an indexed point lookup at ~780k ops/s), it was
+// 18.63% of all heap allocation in the process — it builds a map plus two sets per
+// node variable, and then the build throws the whole thing away when the query
+// ends. Memgraph derives the analogous per-plan fact once at plan construction and
+// reuses it for every execution served from that plan
+// (src/query/cypher_query_interpreter.hpp: "A pure function of the plan, so it is
+// derived once at construction and reused … every time this plan is served").
+//
+// # Concurrency
+//
+// Safe for concurrent use. A [planCacheEntry] is shared by every concurrent
+// execution of the same query text, so this is a read-mostly cache reached from
+// many goroutines: [sync.Map] is used because after the first execution there are
+// no more stores at all, and its read path is then an atomic load with no lock.
+//
+// Two properties make sharing sound, and both are load-bearing:
+//
+//   - Stores go through LoadOrStore, so every caller for a given expression
+//     receives the SAME analysis. A concurrent double-compute wastes one analysis
+//     and stores one of them; it cannot produce two divergent answers, because the
+//     function is pure.
+//   - A stored analysis is IMMUTABLE. No consumer writes to the returned map, to a
+//     *nodeScalarUse in it, or to the sets inside one — the same invariant rmp
+//     #2386 already relies on when it hands presenceMaps to concurrent row workers
+//     without synchronisation. A consumer that mutated one would now corrupt every
+//     later execution of the query, so [TestNodeScalarUseMemoValueIsNotMutated]
+//     pins it.
+//
+// # Bound — and why an explicit ceiling is REQUIRED, not belt-and-braces
+//
+// The obvious argument is that the table is bounded by the number of distinct
+// expressions in one query, since every execution of one cached plan runs the same
+// build over the same plan. **That argument is false, and assuming it would make
+// this an unbounded cache.** Two build paths synthesise a FRESH ast node on every
+// execution and hand it straight to the analyser:
+//
+//   - the min-label re-anchor — ENABLED BY DEFAULT, and firing on any multi-label
+//     pattern — builds a residual predicate at min_label_scan_plan.go:251;
+//   - the single-edge anchor swap builds one at anchor_swap_plan.go:300 and wraps
+//     it in a fresh ir.Selection reached through the ordinary Selection build.
+//
+// For those shapes a pointer key can never hit, so each execution would add an
+// entry for as long as the plan stayed cached. [scalarUseMemoMaxEntries] is the
+// ceiling that makes that impossible: past it the memo stops storing and simply
+// answers from the live analysis, which is exactly today's behaviour. Bounded also
+// by the entry's own lifetime — the table is dropped with the entry, including by
+// ClearPlanCache on any schema-changing DDL.
+//
+// The stable shapes are unaffected: their expressions are read straight off the
+// cached IR, so they are stored once, well inside the ceiling, and hit forever.
+type nodeScalarUseMemo struct {
+	m sync.Map // ast.Expression (always a pointer type) -> *nodeScalarAnalysis
+
+	// entries counts what has been stored, so the ceiling can be enforced without
+	// walking the sync.Map (which has no Len). It is only ever incremented, and it
+	// may overshoot the ceiling slightly under a concurrent burst of first-time
+	// stores — which is harmless: the bound it enforces is a ceiling on unbounded
+	// GROWTH, not an exact quota.
+	entries atomic.Int64
+
+	// hits and misses exist so a test can prove the memo is CONSULTED rather than
+	// merely present — a memo that is populated but never read is invisible to a
+	// result-identical differential test.
+	hits   atomic.Int64
+	misses atomic.Int64
+}
+
+// scalarUseMemoMaxEntries is the ceiling on entries in one [nodeScalarUseMemo].
+//
+// It exists because two build paths synthesise a fresh predicate per execution
+// (see [nodeScalarUseMemo]), so the table would otherwise grow with the execution
+// count. 256 is chosen to sit far above the number of distinct expressions any
+// realistic single query analyses — the shapes measured for rmp #2383 store
+// between 1 and 4 — while capping the worst case at a few hundred small maps per
+// cached plan.
+const scalarUseMemoMaxEntries = 256
+
+// nodeScalarAnalysis is one memoised [analyseNodeScalarUse] result: the pair it
+// returns, kept together so a single map lookup answers both. Immutable once
+// stored in a [nodeScalarUseMemo].
+type nodeScalarAnalysis struct {
+	uses    map[string]*nodeScalarUse
+	bailout bool
+}
+
+// get returns the memoised analysis of x, computing and storing it on a miss.
+//
+// The (uses, bailout) pair is returned RAW, exactly as [analyseNodeScalarUse]
+// produced it: the three call sites apply different gates to a bailout — two null
+// the analysis outright, the projection builder folds it together with
+// needsWholeNode — so the memo must not pre-apply any of them.
+func (m *nodeScalarUseMemo) get(x ast.Expression) (map[string]*nodeScalarUse, bool) {
+	if x == nil {
+		// Not memoised: a nil expression is not a valid map key here and the
+		// analysis of one is trivially empty.
+		return analyseNodeScalarUse(x)
+	}
+	if v, ok := m.m.Load(x); ok {
+		m.hits.Add(1)
+		a := v.(*nodeScalarAnalysis)
+		return a.uses, a.bailout
+	}
+	m.misses.Add(1)
+	uses, bailout := analyseNodeScalarUse(x)
+	if m.entries.Load() >= scalarUseMemoMaxEntries {
+		// Ceiling reached: answer from the live analysis and store nothing. This is
+		// the path a per-execution synthesised predicate settles into, and it is
+		// exactly the behaviour that preceded the memo.
+		return uses, bailout
+	}
+	actual, loaded := m.m.LoadOrStore(x, &nodeScalarAnalysis{uses: uses, bailout: bailout})
+	if !loaded {
+		m.entries.Add(1)
+	}
+	a := actual.(*nodeScalarAnalysis)
+	return a.uses, a.bailout
+}
+
+// analyseNodeScalarUseFor routes the analysis of x through the memo on bopts when
+// there is one, and calls [analyseNodeScalarUse] directly when there is not.
+//
+// The fallback is not dead code: buildOpts is also built on paths that have no
+// plan-cache entry to memoise against — the plan-rendering paths and the write
+// path's own builder — and those must keep working, just without the memo.
+func analyseNodeScalarUseFor(bopts *buildOpts, x ast.Expression) (map[string]*nodeScalarUse, bool) {
+	if bopts == nil || bopts.scalarUseMemo == nil {
+		return analyseNodeScalarUse(x)
+	}
+	return bopts.scalarUseMemo.get(x)
 }
 
 // parseAndAnalyse parses, runs the scope analyser, and translates query into
@@ -10538,7 +10709,7 @@ func newAggregationEval(
 		// 1.695-1.709s (-59.9%), and the count_friend control flat at 1.77-1.83s ->
 		// 1.75-1.78s, which is what rules out a machine-wide drift reading.
 		// TCK 3897/3897 unchanged.
-		scalarUse, bail := analyseNodeScalarUse(astExpr)
+		scalarUse, bail := analyseNodeScalarUseFor(bopts, astExpr)
 		if bail {
 			scalarUse = nil
 		}
@@ -14140,7 +14311,7 @@ func buildIRProjection(
 				// any other whole-node use returns the node itself into the row, so
 				// it must keep full eager materialisation; the gate below disables
 				// the partial path for those cases by nulling scalarUse.
-				scalarUse, bail := analyseNodeScalarUse(capturedExpr)
+				scalarUse, bail := analyseNodeScalarUseFor(bopts, capturedExpr)
 				projectsWholeNode := bail
 				for _, u := range scalarUse {
 					if u.needsWholeNode {
@@ -15109,7 +15280,7 @@ func buildScalarPropertyChunkFiller(nodeChunkCol int, propName string, g *lpg.Re
 // disables the lazy path and restores full eager materialisation.
 func newRowPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, bopts *buildOpts) exec.FilterFn {
 	schemaSnap := copySchema(schema)
-	scalarUse, bail := analyseNodeScalarUse(predExpr)
+	scalarUse, bail := analyseNodeScalarUseFor(bopts, predExpr)
 	if bail {
 		scalarUse = nil
 	}

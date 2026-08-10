@@ -236,9 +236,10 @@ invariant, the stable sorted key ordering, the bound, and that a selection alloc
 
 ---
 
-## 3. OPEN — the physical plan is rebuilt on every execution
+## 3. PARTLY FIXED — the physical plan is rebuilt on every execution
 
-*Class: efficiency. Two parts are in scope today; the third is an architecture decision.*
+*Class: efficiency. The `analyseNodeScalarUse` part is fixed (rmp #2383, see §3.1); `copySchema` and
+the physical plan itself remain open, the latter as an architecture decision.*
 
 `examples/35_mvcc_mixed_workload` allocates 9 125.86 MB, and **`cypher.(*Engine).buildReadPhysical`
 is 5 959.06 MB of it — 65.30 % of the run's entire allocation.**
@@ -306,6 +307,87 @@ cardinality gate `computeReorderSwaps` legitimately depend on the snapshot and m
 execution. So the question is not "cache the whole thing" but **separate the plan-pure part from the
 execution-bound part** — which is exactly the boundary the peers draw, and exactly why it is an
 architecture decision rather than a refactor.
+
+### 3.1 FIXED — `analyseNodeScalarUse` is memoised per cached plan (rmp #2383)
+
+A fifth memoised field on `planCacheEntry`, alongside the four that already carry the comment "pure
+function of the plan". Measured on the same `-nodes 3000 -readers 4 -phase-window 3s` run, arms
+interleaved over 3 rounds and never overlapping, against the committed `449e8ae4`:
+
+| metric | before | after | change |
+|---|---|---|---|
+| total allocation | 44.56 / 44.75 / 44.32 GB | **40.55 / 40.33 / 40.23 GB** | **−9.4 %** |
+| `phase.baseline.throughput_ops` | 729 757 / 743 050 / 736 218 | **830 183 / 833 752 / 831 964** | **+12.7 %** |
+| `analyseNodeScalarUse` (cum) | 18.28 % (8.15 GB) | **absent from the profile** | — |
+| `buildReadPhysical` (cum) | 67.15 % | **59.56 %** | −7.6 pp |
+
+Every deterministic fact the example prints is identical in both arms.
+
+**The memo is filled LAZILY, from the build's own call sites, and that is deliberate.** Eager
+population at entry creation would have to walk the plan and predict which expressions the build
+analyses, duplicating knowledge that lives in the builder — and a position the walk missed would
+simply never be memoised, silently. Filling it from the call sites cannot drift. It is therefore the
+one field written after `loadOrStore`, which is why it is a `sync.Map` behind a `nodeScalarUseMemo`
+rather than a plain map.
+
+#### The first design was WRONG about its own bound, and a verification sweep caught it
+
+That design justified the absence of a ceiling by arguing that "every execution of one cached plan
+runs the same build over the same plan, so the set of analysed expressions is identical every time and
+the table is complete after the first execution". **That is false on two build paths**, both of which
+synthesise a fresh `ast` node per execution and hand it straight to the analyser:
+
+- the **min-label re-anchor** — `minLabelScanEnabled` defaults to on, and it fires on any multi-label
+  pattern — builds a residual predicate at `min_label_scan_plan.go:251` and passes it directly to
+  `newRowPredicate`;
+- the **single-edge anchor swap** builds one at `anchor_swap_plan.go:300`, wraps it in a fresh
+  `ir.Selection`, and the ordinary Selection build then reaches `newRowPredicate` with that pointer.
+
+A pointer key can never hit for those, so each execution took a miss **and a store**: the table grew
+for as long as the plan stayed cached. **Measured, with the ceiling check removed: 768 executions of
+`MATCH (n:Person:Admin) WHERE n.age > 1 RETURN n.name` left 770 entries** — one per execution plus the
+two stable ones. That is an unbounded cache, which the bounded-resource rule forbids outright and
+which no throughput number justifies; it is a rung-2 defect against a rung-3 win.
+
+`scalarUseMemoMaxEntries` (256) is now the declared ceiling: past it the memo stores nothing and
+answers from the live analysis, which is precisely the pre-memo behaviour. The stable shapes are
+untouched — their expressions come straight off the cached IR, so they are stored once, far inside the
+ceiling, and hit forever. `TestNodeScalarUseMemoIsBoundedForSynthesisedPredicates` runs 3× the ceiling
+in executions so the assertion cannot pass vacuously, and it was verified to fail with the check
+removed.
+
+**The two synthesis sites are worth fixing on their own account** — a multi-label pattern gets no
+benefit from this memo at all today — but that is a separate change to those planner paths, filed
+rather than bundled in here.
+
+**Two properties make sharing sound, and both are tested rather than asserted.** Stores go through
+`LoadOrStore`, so every caller for one expression gets the same analysis. And a stored analysis is
+immutable — the same invariant §2a already relies on when it hands `presenceMaps` to concurrent row
+workers without synchronisation.
+
+The oracle for both is deliberately **absolute, not differential**: after the query has run five
+times, every memoised entry is recomputed FRESH and compared with `reflect.DeepEqual`. A differential
+between two engines would go green if both shared the same corrupted value, and `DeepEqual` is used
+instead of a hand-written field comparison so a field added to `nodeScalarUse` later cannot escape the
+check. That single assertion covers both requirements: a value that is not what the unmemoised path
+would produce, and a value a consumer mutated, both surface as the same inequality.
+
+`TestNodeScalarUseMemoIsConsulted` asserts on the hit/miss counters that the memo is **read**, not
+merely populated — a populated-but-ignored memo is invisible to any result-level test, since the
+results would be identical and only the win absent. `TestNodeScalarUseMemoObservesBothBailoutStates`
+earns its place: it **failed on first run** and showed that no query in the test corpus memoised a
+`bailout=true` analysis, because a pattern comprehension in the projection list never reaches the
+analysis at all. Moving it into the predicate fixed the coverage. `…ConcurrentExecutions` drives one
+cached plan from 16 goroutines and re-checks the shared value afterwards;
+`…AbsentFallsBackToTheAnalysis` pins that a nil memo means "compute it", never "there is nothing to
+compute", which is what the plan-rendering and write-path builders depend on.
+
+**`copySchema` is NOT addressed here, and memoisation is the wrong tool for it.** It is a shallow map
+copy taken mid-build at 33 sites, defensive against the builder's own continuing mutation of its
+schema map, so its value is a function of the build's position rather than of the plan alone. The
+structural answer is the one Memgraph uses — resolve the column layout once at plan time and reach
+slots by array index, never rebuilding a name→index map — and that is part of the architecture
+decision above, not a separate memo.
 
 ---
 
