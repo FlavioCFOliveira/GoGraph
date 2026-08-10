@@ -854,6 +854,72 @@ type Graph[N comparable, W any] struct {
 //
 // Concurrent calls from DIFFERENT goroutines are unaffected: they serialise on
 // visMu as before, and the guard never trips on them.
+//
+// # It IS the bulk-load bracket (rmp #2395)
+//
+// Beyond excluding other writers, this method opens a write TRANSACTION for the
+// duration of fn, and that is what makes it the bulk-load bracket. The
+// adjacency's clone-once dedup keys on a non-zero BUILDER OWNER
+// ([adjlist.AdjList.storeEntry] takes it from the write's own transaction, else
+// from [adjlist.AdjList.builderOwner], which prefers the ambient transaction's
+// id and falls back to the token [adjlist.AdjList.BeginCommit] mints). With an
+// owner, each touched shard's slot array is cloned AT MOST ONCE and then
+// mutated in place. With NO owner — a direct Go-API write outside any bracket —
+// every single write clones the whole array again. A bulk load that appends
+// edges one call at a time therefore pays a copy per edge, which the 2026-08-10
+// profile sweep measured at 50.75% of every object allocated by
+// examples/01_basic.
+//
+// So the ownership matters, not the window as such: this bracket also calls
+// BeginCommit, but that call is redundant here and the transaction is what
+// carries the dedup. BeginCommit exists for the exclusive paths that write with
+// NO transaction open — single-threaded WAL replay and bulk import — which is
+// why it documents a narrower single-writer contract.
+//
+// So a caller loading many edges should wrap the loop rather than reach for a
+// different API — there is no separate bulk-import entry point on Graph, and
+// none is needed. Measured on a 5 000-node / 101 974-edge build, three
+// interleaved rounds in one process, with the resulting graph verified
+// byte-identical by an order-sensitive fingerprint over every out-neighbour and
+// weight:
+//
+//	per-edge, unbracketed        86 MB   1.36M objects   69 ms
+//	one ApplyAtomically          58 MB   1.06M objects   50 ms   (0.68x / 0.78x)
+//	ApplyAtomically per 10k      60 MB   1.11M objects   55 ms   (0.70x / 0.81x)
+//
+// The bracket changes COST, never CONTENT. Chunking recovers almost all of the
+// win while bounding how long the exclusive barrier is held, which is the shape
+// to prefer when the load cannot lock out readers for its whole duration — a
+// single bracket over a very large load blocks every other writer, and every
+// snapshot-taking reader, until fn returns.
+//
+// TWO mechanisms produce that saving, and they were separated by measurement
+// rather than assumed: forcing the adjacency's dedup off leaves the bracketed
+// arm at 0.921x instead of 0.758x, so roughly two thirds of the objects saved
+// are the per-edge slot-array clone and the remaining third is ONE shared MVCC
+// commit record in place of a fresh one per write. Both follow from the
+// transaction, which is why bracketing is the whole answer and no separate
+// bulk-import API is needed. graph/lpg/bulkload_bracket_test.go pins the
+// combined effect against a threshold chosen between those two regimes, so
+// losing the dedup alone fails the test.
+//
+// Two cautions:
+//
+//   - This buys ALLOCATION, not atomic visibility. Everything the sections
+//     above say about writes committing at several distinct instants still
+//     applies; use [Graph.ApplyAtomicallyTx] with [Graph.Writer] when the load
+//     must also land at one instant. ApplyAtomicallyTx opens the same window
+//     (both go through openWriteBracket), so it costs nothing to prefer it.
+//   - A caller writing directly against [adjlist.AdjList] rather than Graph —
+//     as examples/01_basic does — has no transaction to borrow an owner from and
+//     brackets with [adjlist.AdjList.BeginCommit]/EndCommit instead, honouring
+//     that pair's narrower single-writer contract itself. Graph's bracket cannot
+//     leak, because it closes on every path out of fn including a panic; the raw
+//     pair can, which is why it spells that contract out.
+//
+// The equivalent bracket is why store/recovery's snapshot apply records
+// 737.6 MiB -> 113.6 MiB and 147.45 ms -> 73.57 ms at 50k nodes / 500k edges
+// (rmp #2170) and why WAL replay brackets itself (rmp #1526).
 func (g *Graph[N, W]) ApplyAtomically(fn func() error) error {
 	// Guard ordering (#1286, #1355): the re-entrancy CHECK runs before Lock so
 	// a nested call panics instead of deadlocking, but the writer STAMP is
