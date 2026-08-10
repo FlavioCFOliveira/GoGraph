@@ -18,6 +18,8 @@ package main_test
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"runtime"
 	"testing"
@@ -223,39 +225,86 @@ func boltDialWrite(ctx context.Context, addr, query string) error {
 // It returns the loopback address the server is listening on.
 func newBenchServer(b *testing.B) string {
 	b.Helper()
+	return newBenchServerSeeded(b, 16)
+}
 
-	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+// newBenchServerSeeded is newBenchServer with an explicit :BenchSeed node count,
+// so the pooled arm can seed a graph on which the query does measurable work
+// instead of counting 16 nodes (rmp #2397).
+func newBenchServerSeeded(b *testing.B, seedNodes int) string {
+	b.Helper()
+
+	// Multigraph, because the write arms CREATE nodes and the engine otherwise
+	// logs a warning about parallel-relationship semantics on every server it
+	// constructs — and those warnings land ON the benchmark result lines, where
+	// they hid the ns/op values. Separating stdout from stderr does not help; the
+	// only clean fix is not to emit them.
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
 	eng := cypher.NewEngine(g)
 
-	// Seed a handful of nodes so read queries return non-trivially.
-	for i := range 16 {
+	// Seed nodes so read queries return non-trivially.
+	for i := range seedNodes {
 		res, err := eng.RunInTx(context.Background(),
 			fmt.Sprintf(`CREATE (n:BenchSeed {id: %d})`, i), nil)
 		if err != nil {
-			b.Fatalf("newBenchServer seed %d: %v", i, err)
+			b.Fatalf("newBenchServerSeeded seed %d: %v", i, err)
 		}
 		for res.Next() {
 		}
 		if err := res.Close(); err != nil {
-			b.Fatalf("newBenchServer seed close %d: %v", i, err)
+			b.Fatalf("newBenchServerSeeded seed close %d: %v", i, err)
 		}
 	}
 
 	// MaxConnections is set to max(concurrencyLevel) + headroom.  Because we
 	// share one server across all goroutines in the sub-benchmark, we pick a
 	// ceiling that comfortably covers any concurrency level we test.
+	//
+	// MaxOpenTxPerPrincipal is sized the SAME way, and must be: every goroutine
+	// here authenticates as the one principal that NoAuthHandler grants, and the
+	// write and mixed arms each hold an explicit transaction open per goroutine
+	// (BEGIN / RUN / PULL / COMMIT). Left at the zero value it would default to
+	// DefaultMaxOpenTxPerPrincipal (16), and rmp #2305 made that bound apply to
+	// WRITE transactions as well as read ones — before that change a write
+	// transaction held the engine's writer serialisation for its whole life, so
+	// the server capped concurrent write transactions at one and this bound could
+	// never bind. It binds now: measured on 2026-08-10, BenchmarkBoltWriteOnly at
+	// conc=64 failed with `Neo.ClientError.General.LimitExceeded: principal
+	// "bench" already holds the maximum of 16 concurrently open transactions`, so
+	// the write and mixed sweeps could not produce a figure at 64, 256 or 1024 at
+	// all. That refusal is the server behaving correctly — a typed, bounded
+	// rejection rather than unbounded queueing — which is precisely why the
+	// benchmark, not the server, is what has to be configured.
+	//
+	// The point of this sweep is the ENGINE's behaviour under concurrency, so the
+	// admission limit is lifted out of the way rather than measured here; the
+	// limit itself is covered by bolt/server's own tests.
+	// ConnTimeout is the per-connection IDLE read deadline. The churn arm never
+	// idles, but the pooled arm opens conc connections before it starts timing,
+	// and at conc=1024 the earliest of those would be reaped by a 15 s idle
+	// deadline before the measurement began — the pool would then measure
+	// reconnects. 5 minutes covers pool construction with margin; it is a harness
+	// setting and bounds nothing the benchmark is measuring.
+	// A discard logger for the same reason: the no-auth and no-TLS warnings are
+	// correct and deliberate on a loopback benchmark server, but they are printed
+	// once per server construction and the benchmark constructs one per
+	// sub-benchmark AND per b.N trial, so they interleave with the results. The
+	// warnings are asserted where they belong, in bolt/server's own tests.
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	srv, err := server.NewServer(eng, server.Options{
-		MaxConnections: 1200,
-		ConnTimeout:    15 * time.Second,
-		Auth:           server.NoAuthHandler{},
+		MaxConnections:        1200,
+		MaxOpenTxPerPrincipal: 1200,
+		ConnTimeout:           5 * time.Minute,
+		Auth:                  server.NoAuthHandler{},
+		Logger:                quiet,
 	})
 	if err != nil {
-		b.Fatalf("newBenchServer NewServer: %v", err)
+		b.Fatalf("newBenchServerSeeded NewServer: %v", err)
 	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		b.Fatalf("newBenchServer listen: %v", err)
+		b.Fatalf("newBenchServerSeeded listen: %v", err)
 	}
 	addr := ln.Addr().String()
 

@@ -292,7 +292,13 @@ var gatedDocs = []string{
 // so a new document cannot quietly escape the gate.
 var historicalDocs = map[string]bool{
 	filepath.Join("docs", "audit-production-readiness-2026-07-02-round2.md"): true,
-	filepath.Join("docs", "benchmarks", "bound-key-seek-2026-07-26.md"):      true,
+	// Quotes the two aggregation shapes whose CPU profile attributed 17.16% of all
+	// samples to materialising a relationship they do not name, to identify the
+	// shapes under discussion. They are verbatim from examples/26_social_scale_bench
+	// and are exercised there; executing them here would assert nothing about the
+	// record, whose figures are timings of that example at a specific commit.
+	filepath.Join("docs", "certification-2026-08-09.md"):                true,
+	filepath.Join("docs", "benchmarks", "bound-key-seek-2026-07-26.md"): true,
 	// Quotes the CREATE INDEX that used to build an index holding no entries,
 	// to show what the defect looked like. Running it would succeed and
 	// demonstrate nothing, since the statement was always valid — it was the

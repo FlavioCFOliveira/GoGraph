@@ -6,7 +6,7 @@ package lpg
 // re-entrancy guard. It is compiled into every binary built without `-race` and
 // without `-tags gograph_debug` — which is every released binary. Every method
 // has an empty body over a zero-sized struct, so the compiler elides the calls
-// entirely and [Graph.View] and [Graph.ApplyAtomically] pay nothing beyond the
+// entirely and [Graph.ApplyAtomically] pays nothing beyond the
 // visMu acquisition itself.
 //
 // # Why the guard is not always on

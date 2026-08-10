@@ -1,6 +1,6 @@
 # GoGraph examples
 
-This directory contains 34 runnable, self-documenting examples of
+This directory contains 37 runnable, self-documenting examples of
 GoGraph — from a shortest-path query to a persistent, `kill -9`-safe REST
 service. Each example serves the two objectives the project sets for
 examples: it **demonstrates** a capability in a realistic end-to-end
@@ -57,6 +57,7 @@ see [`../docs/examples-standard.md`](../docs/examples-standard.md).
 | [34_bolt_transactions](34_bolt_transactions/README.md) | The Bolt v5 write/transaction surface via the official `neo4j-go-driver`: BasicAuth (accept/reject), a committed `ExecuteWrite`, a rolled-back explicit transaction, a FAILURE + RESET recovery, and one read over an encrypted `bolt+ssc` (TLS) connection. | Six wire-level guarantees pinned as facts; scenario wall-clock. |
 | [35_mvcc_mixed_workload](35_mvcc_mixed_workload/README.md) | Reader latency when an OLTP point query, an analytical self-join and a WAL-backed ingest stream share one engine. Measures all four combinations, because each role ALONE is nearly free and only the combination collapses. The instrument for rmp #2274 and the acceptance evidence for the MVCC programme. | Short-read throughput and p50/p99/max per phase; analytical-query duration; worst-read-to-report ratio; live MVCC version records; heap. |
 | [36_mvcc_snapshot_topology](36_mvcc_snapshot_topology/README.md) | Snapshot isolation on the TOPOLOGY dimension: readers count an anchored, relationship-typed expand while an ingest commits structural writes, and each observation is BRACKETED by the acknowledged-commit counter sampled either side of the query. Complements 27, which pins a property invariant and cannot see a relationship appearing under a running read. The instrument for rmp #2293, validated to fail on the defective engine and pass on the fixed one. | Invisible commits, future reads, misaligned far-endpoint counts and read errors (all must be 0); read-your-writes at end of run; reader p50/p99/max; peak live MVCC versions; heap growth. |
+| [37_mvcc_write_contention](37_mvcc_write_contention/README.md) | The WRITE side of MVCC, which 35 and 36 do not reach: several producers ingest concurrently against their own customer records while every order also touches a small shared inventory set, so a settable fraction of transactions genuinely collides. Drives write-write conflict detection, retriable serialization errors, logical aborts, read-your-own-writes inside an open transaction, and a commit timestamp surviving a restart. | Commits/s at 1/2/4/8/16 writers with the ratio against one writer; conflict rate by store, retry count and retry success against the hot-spot fraction that produced them; a conservation invariant that no external oracle can supply; reader latency and version retention under contention; the clock after restart. |
 
 ## Interchange
 

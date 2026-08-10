@@ -69,6 +69,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/bolt/server"
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 
@@ -141,9 +142,12 @@ func main() {
 	flag.IntVar(&cfg.queries, "queries", cfg.queries, "number of read queries to fire over the wire")
 	flag.IntVar(&cfg.sessions, "sessions", cfg.sessions, "number of concurrent driver sessions")
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
+	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
 
-	if err := run(context.Background(), os.Stdout, cfg); err != nil {
+	if err := prof.Run(os.Stdout, func() error {
+		return run(context.Background(), os.Stdout, cfg)
+	}); err != nil {
 		log.Fatal(err)
 	}
 }

@@ -130,19 +130,17 @@ import (
 	"log"
 	"math/rand"
 	"os"
-	"path/filepath"
 	"runtime"
-	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
@@ -242,113 +240,39 @@ func main() {
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
 	flag.BoolVar(&cfg.relTypes, "rel-types", cfg.relTypes,
 		"store explicit FRIEND/LIKE relationship types (false: infer type from endpoint labels, no per-edge label stored)")
-	var profileDir string
-	flag.StringVar(&profileDir, "profile-dir", "",
-		"if set, write cpu.pprof and heap.pprof here (attribute CPU and allocations to call sites; "+
-			"inspect with: go tool pprof -http=:0 <file>)")
+	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
 
 	// CPU profiling must be started before any measured work and stopped after
-	// all of it, so it wraps the whole battery rather than one section.
-	stopCPU, err := startCPUProfile(profileDir)
-	if err != nil {
-		log.Fatal(err)
-	}
-
+	// all of it, so it wraps the whole battery rather than one section. exprof.Run
+	// gives that for free and, unlike a defer, still holds on the error paths
+	// below: log.Fatal exits through os.Exit, which does not run deferred calls.
 	ctx := context.Background()
-	if err := run(ctx, os.Stdout, cfg); err != nil {
-		stopCPU()
+	if err := prof.Run(os.Stdout, func() error {
+		if err := run(ctx, os.Stdout, cfg); err != nil {
+			return err
+		}
+		// The columnar exercise runs on its own bounded working set (never the full
+		// -users scale — see columnarExercise), so it is driven separately from the
+		// main battery rather than from run: it must stay cheap and identical however
+		// large -users is, and the regression test drives it directly.
+		if err := columnarExercise(ctx, cfg, os.Stdout); err != nil {
+			return err
+		}
+		// The parallelism exercise likewise runs on its own fixed-scale working set
+		// (never the -users scale — see parallelismExercise), large enough to cross the
+		// parallel-scan threshold, so it too is driven from main rather than from run.
+		if err := parallelismExercise(ctx, cfg, os.Stdout); err != nil {
+			return err
+		}
+		// The fused cyclic expand exercise runs on its own fixed-scale ring at TWO sizes
+		// (never the -users scale — see cyclicJoinExercise), because the plan it is
+		// contrasted against enumerates Theta(n*d^2) intermediate rows and would be
+		// unbounded at this example's default population.
+		return cyclicJoinExercise(ctx, cfg, os.Stdout)
+	}); err != nil {
 		log.Fatal(err)
 	}
-	// The columnar exercise runs on its own bounded working set (never the full
-	// -users scale — see columnarExercise), so it is driven separately from the
-	// main battery rather than from run: it must stay cheap and identical however
-	// large -users is, and the regression test drives it directly.
-	if err := columnarExercise(ctx, cfg, os.Stdout); err != nil {
-		log.Fatal(err)
-	}
-	// The parallelism exercise likewise runs on its own fixed-scale working set
-	// (never the -users scale — see parallelismExercise), large enough to cross the
-	// parallel-scan threshold, so it too is driven from main rather than from run.
-	if err := parallelismExercise(ctx, cfg, os.Stdout); err != nil {
-		stopCPU()
-		log.Fatal(err)
-	}
-	// The fused cyclic expand exercise runs on its own fixed-scale ring at TWO sizes
-	// (never the -users scale — see cyclicJoinExercise), because the plan it is
-	// contrasted against enumerates Theta(n*d^2) intermediate rows and would be
-	// unbounded at this example's default population.
-	if err := cyclicJoinExercise(ctx, cfg, os.Stdout); err != nil {
-		stopCPU()
-		log.Fatal(err)
-	}
-
-	// Stop the CPU profile before the heap profile so the heap snapshot is not
-	// perturbed by the profiler's own teardown allocations.
-	stopCPU()
-	if err := writeHeapProfile(profileDir, os.Stdout); err != nil {
-		log.Fatal(err)
-	}
-}
-
-// startCPUProfile begins a CPU profile in dir and returns a stop function. When
-// dir is empty it is a no-op returning a no-op stop, so the default run pays
-// nothing and needs no branch at the call site.
-//
-// The returned stop is safe to call more than once: every error path in main
-// calls it before log.Fatal, and log.Fatal exits without running defers, so a
-// deferred stop would silently truncate the profile on exactly the runs where it
-// is most wanted.
-func startCPUProfile(dir string) (func(), error) {
-	if dir == "" {
-		return func() {}, nil
-	}
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return nil, fmt.Errorf("profile dir: %w", err)
-	}
-	// #nosec G304 -- dir is the operator-supplied -profile-dir for this example
-	// binary; the basename is a fixed constant, so the path is not attacker-chosen.
-	f, err := os.Create(filepath.Join(dir, "cpu.pprof"))
-	if err != nil {
-		return nil, fmt.Errorf("create cpu profile: %w", err)
-	}
-	if err := pprof.StartCPUProfile(f); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("start cpu profile: %w", err)
-	}
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			pprof.StopCPUProfile()
-			_ = f.Close()
-		})
-	}, nil
-}
-
-// writeHeapProfile writes a heap profile to dir, or does nothing when dir is
-// empty.
-//
-// runtime.GC runs first because a heap profile reports what is LIVE as of the
-// last completed collection; without it the profile can attribute garbage that
-// simply has not been swept yet, which reads as a leak that is not there.
-func writeHeapProfile(dir string, w io.Writer) error {
-	if dir == "" {
-		return nil
-	}
-	runtime.GC()
-	path := filepath.Join(dir, "heap.pprof")
-	// #nosec G304 -- as above: operator-supplied directory, fixed basename.
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("create heap profile: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-	if err := pprof.WriteHeapProfile(f); err != nil {
-		return fmt.Errorf("write heap profile: %w", err)
-	}
-	fmt.Fprintf(w, "# pprof.cpu=%s\n", filepath.Join(dir, "cpu.pprof"))
-	fmt.Fprintf(w, "# pprof.heap=%s\n", path)
-	return nil
 }
 
 // run builds the social network described by cfg, queries it, and

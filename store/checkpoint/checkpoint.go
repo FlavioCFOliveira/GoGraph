@@ -6,7 +6,7 @@
 // The checkpoint is NON-BLOCKING: it holds the store's commit serialisation
 // only to capture a transaction-boundary-consistent image — the WAL durable
 // offset (the watermark) and a [snapshot.Capture] of the WHOLE graph, taken
-// inside one [lpg.Graph.View] — then RELEASES the lock and writes the
+// from one pinned snapshot ([lpg.Graph.BeginRead]) — then RELEASES the lock and writes the
 // (potentially multi-second) snapshot disk I/O while transactions commit
 // concurrently. It re-acquires the lock only briefly at the end to
 // prefix-truncate the WAL up to the captured watermark, discarding the frames
@@ -319,8 +319,9 @@ func WithIndexSpecs[N comparable, W any](fn func() []snapshot.IndexDefSpec) Opti
 // RunUnderCommitLock closes both windows because no transaction can be
 // between Begin and commit while serialise holds the commit mutex.
 //
-// The snapshot is additionally taken inside [lpg.Graph.View] regardless of
-// this option, so the captured adjacency is always barrier-consistent; the
+// The capture is additionally taken from a pinned MVCC snapshot
+// ([lpg.Graph.BeginRead], released by a deferred EndRead) regardless of this
+// option, so the captured adjacency always describes one instant; the
 // serialiser is what additionally makes the truncate safe and the snapshot
 // transaction-boundary aligned for the engine wiring.
 //

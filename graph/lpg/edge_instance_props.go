@@ -94,9 +94,12 @@ func (g *Graph[N, W]) setEdgePropertyAtInfo(src, dst N, idx int64, key string, v
 // populated instance indices with [Graph.EdgeCreateCount] while a
 // multi-CREATE multigraph transaction commits can observe a partial
 // cross-store state (count ahead of the populated indices). To read a
-// consistent cross-store view, bracket the correlated reads in
-// [Graph.View] (writers commit under [Graph.ApplyAtomically]); see
-// docs/isolation-design.md.
+// consistent cross-store view, take a snapshot with [Graph.BeginRead] and
+// resolve every correlated read through the [ReadView] that [Graph.ReadAt]
+// returns, releasing it with [Graph.EndRead]. (This used to say "bracket the
+// correlated reads in Graph.View"; that method was removed by rmp #2344 — see
+// rmp #2379.) Writers must share ONE transaction record for their writes to land
+// at one instant; see [Graph.ApplyAtomically]. Also see docs/isolation-design.md.
 //
 // EdgePropertiesAt is safe for concurrent use.
 func (g *Graph[N, W]) EdgePropertiesAt(src, dst N, idx int64) map[string]PropertyValue {

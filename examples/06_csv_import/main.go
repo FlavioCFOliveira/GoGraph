@@ -75,6 +75,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph/io/csv"
 	"github.com/FlavioCFOliveira/GoGraph/graph/io/jsonl"
 )
@@ -134,9 +135,12 @@ func main() {
 	flag.IntVar(&cfg.weightMax, "weight-max", cfg.weightMax, "edge weight drawn from [1, weight-max]")
 	flag.IntVar(&cfg.sampleN, "sample", cfg.sampleN, "number of sample lines of each format to print")
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
+	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
 
-	if err := run(context.Background(), os.Stdout, cfg); err != nil {
+	if err := prof.Run(os.Stdout, func() error {
+		return run(context.Background(), os.Stdout, cfg)
+	}); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -172,8 +176,20 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	bytesIn := srcCSV.Len()
 
 	// 2. Parse the generated CSV back, genuinely exercising the reader.
+	//
+	// THE BYTE CAP IS SIZED TO THE PAYLOAD, not left at the untrusted-input
+	// default. csv.DefaultMaxBytes is 128 MiB — a deliberate memory-exhaustion
+	// bound, and the correct default for a file of unknown provenance. This buffer
+	// was generated in this process on the line above and its exact length is
+	// bytesIn, so the bound that belongs here is that length. Leaving the default
+	// in place silently ceilings the example's -nodes knob (rmp #2375).
+	//
+	// RAISED, never disabled: MaxBytes <= 0 opts out of the bound altogether, and
+	// an example should demonstrate sizing the cap rather than removing it.
+	readOpts := csv.DefaultOptions()
+	readOpts.MaxBytes = int64(bytesIn)
 	parseStart := time.Now()
-	a, ingested, err := csv.ReadIntoCtx(ctx, bytes.NewReader(srcCSV.Bytes()), csv.DefaultOptions())
+	a, ingested, err := csv.ReadIntoCtx(ctx, bytes.NewReader(srcCSV.Bytes()), readOpts)
 	if err != nil {
 		return fmt.Errorf("csv.ReadIntoCtx: %w", err)
 	}
@@ -206,7 +222,10 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 
 	// 5. Round-trip invariant: re-parse the written CSV and confirm the
 	// edge count is unchanged.
-	rt, rtEdges, err := csv.ReadIntoCtx(ctx, bytes.NewReader(csvOut.Bytes()), csv.DefaultOptions())
+	// Sized to what leg 3 just wrote, for the reason given at leg 2.
+	rtOpts := csv.DefaultOptions()
+	rtOpts.MaxBytes = int64(bytesOutCSV)
+	rt, rtEdges, err := csv.ReadIntoCtx(ctx, bytes.NewReader(csvOut.Bytes()), rtOpts)
 	if err != nil {
 		return fmt.Errorf("csv.ReadIntoCtx (round-trip): %w", err)
 	}

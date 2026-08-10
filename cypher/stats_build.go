@@ -58,8 +58,12 @@ func (e *Engine) RefreshStatisticsLocked(ctx context.Context) error {
 // maintained by a background goroutine, so a caller (a maintenance task, a
 // scheduled job, or a test) drives the rebuild.
 //
-// The scan runs under [lpg.Graph.View], so it observes one consistent snapshot and
-// does not block concurrent writers (which serialise elsewhere). Statistics built
+// The scan resolves against one pinned snapshot, so it observes a consistent
+// instant and does not block concurrent writers (which serialise elsewhere). It
+// takes no barrier — see the note on the internal builder below for why wrapping
+// it in the old lpg.Graph.View would not have given the property it claimed.
+//
+// Statistics built
 // here ship INERT: no query-path consumer reads them yet (#2099 is the intended
 // consumer), so a rebuild changes no plan. It honours context cancellation,
 // returning ctx.Err() without publishing a partial snapshot.
@@ -199,7 +203,7 @@ func (a *statsAccum) finalize(generation uint64, labelCount int64) *stats.Stats[
 // generation and each label's exact live count once, so the (g0, N0) stamps come
 // from the same pass as the scanned rows.
 //
-// It takes NO BARRIER. This used to wrap the scan in [lpg.Graph.View] and claim the
+// It takes NO BARRIER. This used to wrap the scan in lpg.Graph.View and claim the
 // result was a consistent read of a graph in which nothing is half-applied. THAT WAS
 // FALSE: Graph.View acquires visMu SHARED, and since rmp #2304 an ordinary write holds
 // it shared too, so the two never excluded each other. The View bought no consistency

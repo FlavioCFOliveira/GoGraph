@@ -184,6 +184,62 @@ A regression test asserts the bare-line facts and ignores every `# ` line.
 This is the convention example 26 established; keep the `key=value` shape so
 the facts are easy to assert and the telemetry is easy to grep.
 
+### Profiling — mandatory, and identical everywhere
+
+**Every example must be able to produce a `pprof` profile.** An example whose
+cost cannot be attributed to a call site is an instrument that measures without
+explaining, and the module's own Examples mandate names CPU and heap profiling
+as required tooling.
+
+The contract is supplied by [`examples/internal/exprof`](../examples/internal/exprof)
+and is the same for all of them — a reader who learns it on one example knows it
+on every other:
+
+| Flag | Effect |
+|---|---|
+| `-profile-dir <dir>` | writes `cpu.pprof` and `heap.pprof` into `<dir>` |
+| `-trace <file>` | writes a `runtime/trace` to `<file>` |
+
+Bind the flags alongside the example's own, and drive the work through
+`Config.Run`:
+
+```go
+func main() {
+	cfg := defaultConfig()
+	flag.IntVar(&cfg.nodes, "nodes", cfg.nodes, "number of nodes")
+	prof := exprof.Bind(flag.CommandLine)
+	flag.Parse()
+
+	if err := prof.Run(os.Stdout, func() error {
+		return run(context.Background(), os.Stdout, cfg)
+	}); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+Three properties are not negotiable, and `Config.Run` is what supplies them:
+
+1. **Inert unless asked.** With neither flag set nothing is created and not one
+   byte is written, so the regression test pins the same output either way.
+   Switching profiling on adds only `# pprof.cpu=`, `# pprof.heap=` and
+   `# trace=` telemetry lines — the deterministic facts stay byte-identical.
+2. **The profilers stop even when the run fails.** Examples end a failed run with
+   `log.Fatal`, and `os.Exit` does not run deferred calls, so a `defer` would
+   truncate the profile on exactly the runs worth profiling.
+3. **The CPU profile wraps the whole measured battery**, not one section, and the
+   heap profile is taken after it stops.
+
+An example that drives several batteries from `main` (as 26 does) puts all of
+them inside the one closure. An example whose flags are parsed per subcommand (as
+24 does) binds on each subcommand's `FlagSet`, so the flag works wherever that
+subcommand's other flags do. A process that is killed by design — 17's crash
+child — is deliberately **not** profiled, and says so in a comment: no teardown
+can run after `SIGKILL`, so the artefact would be truncated garbage.
+
+`internal/docscheck.TestEveryExampleCanProduceAProfile` gates this: a new example
+that does not bind the flags fails the short test layer.
+
 ---
 
 ## Pillar 4 — Regression test standard

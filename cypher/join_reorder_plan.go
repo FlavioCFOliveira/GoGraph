@@ -38,7 +38,7 @@ package cypher
 // # The admissibility gate (design §1)
 //
 // A swap is admitted only when ALL hold, read from ONE count-store snapshot
-// (the read-path build runs under [lpg.Graph.View]'s visibility barrier, so the
+// (the read-path build resolves them against the query's pinned snapshot, so the
 // live node total and every label count are consistent with the query's graph):
 //
 //   - Both components' cardinalities are EstExact (node counts always are for

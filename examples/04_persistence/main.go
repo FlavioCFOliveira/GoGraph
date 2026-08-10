@@ -81,6 +81,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
@@ -194,9 +195,12 @@ func main() {
 	flag.IntVar(&cfg.depsMax, "deps-max", cfg.depsMax, "maximum DEPENDS_ON out-degree per release")
 	flag.IntVar(&cfg.batch, "batch", cfg.batch, "packages processed between context-cancellation checks")
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
+	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
 
-	if err := run(context.Background(), os.Stdout, cfg); err != nil {
+	if err := prof.Run(os.Stdout, func() error {
+		return run(context.Background(), os.Stdout, cfg)
+	}); err != nil {
 		log.Fatal(err)
 	}
 }

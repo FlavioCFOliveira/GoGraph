@@ -133,6 +133,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/io/csv"
@@ -206,9 +207,12 @@ func main() {
 	flag.IntVar(&cfg.topK, "top-k", cfg.topK, "number of highest-PageRank node ids to report")
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
 	flag.BoolVar(&cfg.bulkParallel, "bulk-parallel", cfg.bulkParallel, "engage the bulk loader's parallel build for the bulk-ingest stage")
+	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
 
-	if err := run(context.Background(), os.Stdout, cfg); err != nil {
+	if err := prof.Run(os.Stdout, func() error {
+		return run(context.Background(), os.Stdout, cfg)
+	}); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -266,7 +270,23 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	// Stage 1 (cont.) — ingest the CSV through the edge-list reader, which
 	// interns each page name to a compact NodeID and returns an in-memory
 	// adjacency list.
-	adj, nEdges, err := csv.ReadIntoCtx(ctx, csvBuf, csv.DefaultOptions())
+	//
+	// THE BYTE CAP IS SIZED TO THIS PAYLOAD, not left at the untrusted-input
+	// default. csv.DefaultMaxBytes is 128 MiB, a deliberate memory-exhaustion
+	// bound for input of unknown provenance — and the right default for a caller
+	// parsing a file it did not write. This input is neither unknown nor a file:
+	// generateCSV produced it in this process a few lines above, and csvBytes is
+	// its exact length. Leaving the default in place capped this OUT-OF-CORE
+	// pipeline — whose whole subject is data larger than memory — at about 6 M
+	// edges, so `-nodes 500000 -out-degree 12` died mid-ingest with
+	// ErrInputTooLarge (rmp #2375).
+	//
+	// The cap is RAISED, never disabled: MaxBytes <= 0 opts out of the bound
+	// entirely, and an example is documentation as much as it is an exercise, so
+	// it should demonstrate sizing the cap rather than removing it.
+	csvOpts := csv.DefaultOptions()
+	csvOpts.MaxBytes = int64(csvBytes) //nolint:gosec // G115: bounded by the buffer just written
+	adj, nEdges, err := csv.ReadIntoCtx(ctx, csvBuf, csvOpts)
 	if err != nil {
 		return fmt.Errorf("csv.ReadIntoCtx: %w", err)
 	}

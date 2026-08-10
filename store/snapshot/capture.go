@@ -109,7 +109,8 @@ type capturedIndex struct {
 // # How the one instant is obtained (rmp #2310)
 //
 // Originally by EXCLUSION: the caller took the Capture inside its own window, which
-// for the checkpointer meant the store's commit serialisation plus [lpg.Graph.View],
+// for the checkpointer meant the store's commit serialisation plus the old
+// lpg.Graph.View,
 // held for the whole serialisation. That made the stall proportional to the graph,
 // and it was the last place in the module where a reader excluded writers.
 //
@@ -229,9 +230,11 @@ func (c *Capture[W]) Size() uint64 { return c.csr.Size() }
 // what that precondition is and why it cannot be dropped.
 //
 // The component writers this calls take only their own per-shard read locks and
-// never re-enter the visibility barrier, so calling CaptureGraph inside
-// [lpg.Graph.View] is deadlock-free and does not trip the barrier's
-// re-entrancy guard.
+// never re-enter the visibility barrier, so calling CaptureGraph from inside a
+// barrier hold is deadlock-free and does not trip the barrier's re-entrancy
+// guard. (This used to name lpg.Graph.View as the enclosing hold; rmp #2344
+// removed it, and the checkpointer now pins a snapshot with
+// [lpg.Graph.BeginRead] instead.)
 //
 // # Cost
 //

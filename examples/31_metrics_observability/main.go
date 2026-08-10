@@ -92,6 +92,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/io/csv"
@@ -169,9 +170,12 @@ func main() {
 	flag.IntVar(&cfg.callsMin, "calls-min", cfg.callsMin, "minimum CALLS out-degree per service")
 	flag.IntVar(&cfg.callsMax, "calls-max", cfg.callsMax, "maximum CALLS out-degree per service")
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
+	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
 
-	if err := run(context.Background(), os.Stdout, cfg); err != nil {
+	if err := prof.Run(os.Stdout, func() error {
+		return run(context.Background(), os.Stdout, cfg)
+	}); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -793,7 +797,14 @@ func csvRoundTrip(ctx context.Context, adj *adjlist.AdjList[string, int64]) (boo
 	if err != nil {
 		return false, fmt.Errorf("WriteCtx: %w", err)
 	}
-	_, read, err := csv.ReadIntoCtx(ctx, &buf, opts)
+	// Size the byte cap to what was just written. csv.DefaultMaxBytes is a 128 MiB
+	// memory-exhaustion bound for input of unknown provenance; this buffer was
+	// written on the line above and its length is known exactly, so the default
+	// would only put a hidden ceiling on the -services knob (rmp #2375). Raised,
+	// never disabled — MaxBytes <= 0 removes the bound altogether.
+	readOpts := opts
+	readOpts.MaxBytes = int64(buf.Len())
+	_, read, err := csv.ReadIntoCtx(ctx, &buf, readOpts)
 	if err != nil {
 		return false, fmt.Errorf("ReadIntoCtx: %w", err)
 	}

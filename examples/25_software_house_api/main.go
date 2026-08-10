@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 )
 
 func main() {
@@ -19,7 +21,7 @@ func main() {
 // requested scale, serves HTTP until a termination signal arrives, then shuts
 // down gracefully. It returns a process exit code: 0 on a clean run, 1 on a
 // runtime failure, 2 on a usage error.
-func run(args []string) int {
+func run(args []string) (code int) {
 	fs := flag.NewFlagSet("25_software_house_api", flag.ContinueOnError)
 	dir := fs.String("d", "", "data directory holding the WAL and snapshot (required)")
 	addr := fs.String("addr", ":8080", "HTTP listen address")
@@ -27,6 +29,7 @@ func run(args []string) int {
 	scaleTasks := fs.Int("scale-tasks", 0, "extra synthetic :Task nodes to seed at startup")
 	scaleDevelopers := fs.Int("scale-developers", 0, "extra synthetic :Developer nodes to seed at startup")
 	scaleSeed := fs.Int64("scale-seed", 1, "RNG seed fixing the synthetic data shape")
+	prof := exprof.Bind(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -34,6 +37,24 @@ func run(args []string) int {
 		fmt.Fprintln(os.Stderr, "error: -d <dir> is required")
 		return 2
 	}
+
+	// Profiling covers the whole server lifetime — startup recovery, the seed,
+	// every request served, and the graceful shutdown — because for a server
+	// those are the phases worth attributing. Unlike the one-shot examples this
+	// one returns its exit code to main rather than calling os.Exit itself, so a
+	// deferred Finish does run; it is registered first so it runs LAST, after the
+	// store and the listener have been closed.
+	sess, err := prof.Start()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 2
+	}
+	defer func() {
+		if ferr := sess.Finish(os.Stdout); ferr != nil && code == 0 {
+			fmt.Fprintf(os.Stderr, "error: %v\n", ferr)
+			code = 1
+		}
+	}()
 	scale := synthScale{
 		components: *scaleComponents,
 		tasks:      *scaleTasks,

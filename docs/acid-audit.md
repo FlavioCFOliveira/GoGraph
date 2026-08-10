@@ -187,9 +187,16 @@ observes a violation.
 **Resolution (fixed).** Delivered as a staged epic (F3.1–F3.6); design in
 [`isolation-design.md`](isolation-design.md). A graph-level transaction-
 visibility barrier — `lpg.Graph.ApplyAtomically` (write lock) and
-`lpg.Graph.View` (read lock) — makes a whole transaction's writes flip visible
+`lpg.Graph.View` (read lock) — made a whole transaction's writes flip visible
 to readers as one atomic step, so **no reader ever observes a partial
 transaction**:
+
+> **Mechanism updated since (rmp #2379, 2026-08-10).** The *guarantee* still holds,
+> but the read side named here is gone: rmp #2344 removed `lpg.Graph.View`, and a
+> reader now pins an MVCC snapshot (`BeginRead` / `ReadAt` / `EndRead`) instead of
+> taking a lock. rmp #2378 (commit `509929e2`) completed the cross-substructure half
+> by pinning each snapshot's visibility verdict per commit record — zero tears in
+> 300 runs against a pre-fix 2–5 per 100. `ApplyAtomically` is unchanged.
 
 - **store/txn API** (F3.2): `Tx.Commit` applies inside `ApplyAtomically`.
 - **Cypher engine** (F3.3): `Engine.Run` executes inside `View`, `Engine.RunInTx`

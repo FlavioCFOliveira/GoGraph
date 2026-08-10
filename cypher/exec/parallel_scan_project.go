@@ -35,9 +35,11 @@ package exec
 // caller's goroutine, then concatenates the per-worker buffers and streams them.
 // The happens-before edge (worker return → wg.Done → wg.Wait) makes the read of
 // each worker's buffer race-free with no additional synchronisation. Because the
-// join and the streaming run on the goroutine that drives Next — which the engine
-// drives inside the graph's visibility-barrier RLock ([lpg.Graph.View]) — no
-// worker goroutine outlives the barrier.
+// join and the streaming run on the goroutine that drives Next, no worker
+// goroutine outlives the statement — wg.Wait joins every one of them before Next
+// returns. (This used to say the engine drives Next inside the graph's
+// visibility-barrier RLock, lpg.Graph.View; rmp #2344 removed that reader and a
+// read takes no barrier, so the join — not a lock — is what bounds the workers.)
 //
 // # Result multiset
 //

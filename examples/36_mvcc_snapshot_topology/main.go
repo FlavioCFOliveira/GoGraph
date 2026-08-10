@@ -21,6 +21,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
@@ -105,9 +106,12 @@ func main() {
 		"self-contradiction observations that must complete before the churn phase ends")
 	flag.IntVar(&cfg.churn, "churn", cfg.churn,
 		"delete-then-re-add pairs run after the ingest, which is what makes the self-contradiction query detectable")
+	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
 
-	if err := run(context.Background(), os.Stdout, cfg); err != nil {
+	if err := prof.Run(os.Stdout, func() error {
+		return run(context.Background(), os.Stdout, cfg)
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "example 36: %v\n", err)
 		os.Exit(1)
 	}

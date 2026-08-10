@@ -51,6 +51,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/bolt/server"
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 
@@ -88,9 +89,12 @@ func main() {
 	flag.IntVar(&cfg.persons, "persons", cfg.persons, "number of :Person nodes to seed")
 	flag.StringVar(&cfg.password, "password", cfg.password, "Bolt credential the server requires")
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (reserved)")
+	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
 
-	if err := run(context.Background(), os.Stdout, cfg); err != nil {
+	if err := prof.Run(os.Stdout, func() error {
+		return run(context.Background(), os.Stdout, cfg)
+	}); err != nil {
 		log.Fatal(err)
 	}
 }

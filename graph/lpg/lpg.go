@@ -42,14 +42,16 @@
 // transaction, but it is not a transactional view: two such calls can straddle
 // a commit.
 //
-// [Graph.View] and [Graph.ApplyAtomically] still exist, and are now the SCHEMA
-// BARRIER — they serialise DDL against readers, not writers against each other.
+// [Graph.ApplyAtomically] still exists and is now the SCHEMA BARRIER — it
+// serialises DDL against readers, not writers against each other. (Graph.View
+// was the read side of that pair; rmp #2344 removed it, and reads now take no
+// barrier at all — they take a snapshot.)
 // An ordinary write holds the barrier SHARED and relies on versioning for its
 // isolation. Reads take no barrier at all.
 //
 // # What this paragraph used to say
 //
-// It said reads must run inside [Graph.View] to be partial-transaction-free,
+// It said reads must run inside Graph.View to be partial-transaction-free,
 // and pointed at "the tracked lock-free per-shard snapshot that will make every
 // read transaction-consistent without the barrier" as future work. Neither is
 // true: reads are transaction-consistent WITHOUT the barrier today, and the
@@ -414,6 +416,32 @@ type Graph[N comparable, W any] struct {
 	edgeHandleLabelShards [propMapShards]edgeHandleLabelShard
 	edgeHandlePropShards  [propMapShards]edgeHandlePropShard
 
+	// anyHandleProp latches true the first time a by-handle edge PROPERTY is
+	// written and is NEVER cleared. It exists so a reader that only needs to
+	// know whether the by-handle property store can hold anything at all can
+	// answer with one atomic load instead of two Mapper lookups, a shard
+	// mutex and a double map lookup — the shape rmp #2387 measured at 1.15%
+	// of example 26's CPU, where the probe ran 17 009 744 times and its
+	// result was used zero times because the graph is built through the Go
+	// API, which writes the per-pair store only.
+	//
+	// Monotonicity is what makes it safe, and it is deliberately one-way:
+	//   - It is set BEFORE the write takes the shard lock, so any by-handle
+	//     property that is visible to a reader was preceded, in the
+	//     sequentially-consistent order Go's memory model gives atomics, by
+	//     the latch store. A false observation of `false` therefore cannot
+	//     hide a visible property.
+	//   - It is never cleared, so a delete, an abort-withdraw or a vacuum
+	//     can only ever leave it conservatively true. Over-reporting costs a
+	//     probe that returns nothing; under-reporting would lose a stored
+	//     property, so the asymmetry is chosen on purpose.
+	// The two writers are setEdgePropertyByHandleInfo (edge_handle.go) and
+	// setEdgePropertyByHandleIDInfo (edge_handle_durable.go); every other
+	// shard site is a read, a delete, or the abort path's restore of a
+	// pre-image, which by definition needs a prior write that already
+	// latched. See [Graph.AnyEdgeHandlePropertyEverWritten].
+	anyHandleProp atomic.Bool
+
 	// tombstones records NodeIDs that have been removed by RemoveNode.
 	// The underlying Mapper cannot release the index slot (NodeID stability
 	// is a hard contract), so removal is observable only via this set:
@@ -601,13 +629,15 @@ type Graph[N comparable, W any] struct {
 	// The SHARED side is held by every ordinary write for its whole bracket,
 	// publication included, which is precisely what makes the exclusive
 	// acquisitions above wait for every in-flight write to become visible.
-	// [Graph.View] also takes it shared, so a View does NOT exclude a writer and
-	// is only a consistent view of what the catalog holders change; a caller that
+	// Reads take this lock in NO mode at all: rmp #2344 removed Graph.View, which
+	// used to take it shared, so a read never excludes a writer and this lock is
+	// now only a consistent view of what the catalog holders change. A caller that
 	// needs a consistent view of DATA takes a snapshot. The checkpointer's capture
 	// (store/checkpoint) is such a View caller and rests on the store's own
 	// quiesce — RunUnderCommitLock drains in-flight commits to zero — rather than
 	// on this lock; rmp #2310 moves it to a transactional instant. See
-	// [Graph.View] for the full division and the measurement behind it.
+	// [Graph.BeginRead] for the reader side that replaced Graph.View, and
+	// docs/isolation-design.md for the full division and the measurement behind it.
 	//
 	// # Why this is an mvcc.Gate and no longer a sync.RWMutex (rmp #2337)
 	//
@@ -680,7 +710,7 @@ type Graph[N comparable, W any] struct {
 	conVer constraintVersions
 
 	// barrier enforces that no single goroutine re-enters visMu via
-	// [Graph.View] / [Graph.ApplyAtomically]. visMu is not re-entrant, so a
+	// [Graph.ApplyAtomically]. visMu is not re-entrant, so a
 	// nested acquisition from a goroutine already inside the barrier would
 	// deadlock the engine; the guard converts that silent hang into an immediate
 	// panic.
@@ -770,16 +800,59 @@ type Graph[N comparable, W any] struct {
 }
 
 // ApplyAtomically runs fn while holding the graph's transaction-visibility
-// write lock. Every mutation fn performs (across adjacency, labels,
-// properties, tombstones, bitmaps, and indexes) becomes visible to
-// [Graph.View] readers as a single atomic step: a concurrent View reader
-// observes either none of fn's writes or all of them, never a partial set.
+// write lock, which excludes every other WRITER for the duration of fn.
 // fn is the in-memory apply of one durable transaction; callers invoke it
 // only after the transaction's WAL frames are fsynced.
 //
+// # By itself it does NOT make fn's writes atomically visible; one threaded transaction does
+//
+// This paragraph used to promise that every mutation fn performs "becomes
+// visible to Graph.View readers as a single atomic step". That guarantee was
+// scoped to a reader type that **no longer exists**: Graph.View was removed by
+// rmp #2344, and snapshots ([Graph.BeginRead] / [Graph.ReadAt]) are now the only
+// readers. The promise was never restated for them, and it does not carry over.
+//
+// The reason is [Graph.deltaStamp]: a write that passes a NIL transaction record
+// — which is what the bare exported mutators such as [Graph.AddEdge] and
+// [Graph.SetNodeLabel] do — takes a FRESH commit instant of its own. Several such
+// writes inside one ApplyAtomically bracket therefore commit at several distinct
+// instants, and a snapshot whose startTS lands between two of them observes a
+// PARTIAL set. Measured under a full `go test -race ./...` peer load: an edge plus
+// two labels written this way tore in 5 runs out of 40, with the reader seeing the
+// edge and neither label (rmp #2378).
+//
+// SO THREAD ONE TRANSACTION. Use [Graph.ApplyAtomicallyTx] and issue the writes
+// through [Graph.Writer], so deltaStamp answers every write with the same record
+// and they share one commit instant. The same requirement is stated on
+// [Graph.ApplyInsideLockedTx].
+//
+// THREADING ONE TRANSACTION WAS NECESSARY BUT, FOR A TIME, NOT SUFFICIENT — AND
+// THAT GAP IS NOW CLOSED. Removing the three-separate-instants cause left a
+// residual tear: the same workload still tore in 4 runs of 100, in both pairings
+// and both directions. rmp #2378 found why and fixed it in commit 509929e2:
+// mvcc.Visible was re-evaluated per substructure against a MUTABLE
+// CommitInfo.ts that flips at commit, so a reader straddling a commit split.
+// A Snapshot now PINS the visibility verdict per commit record, and AdjList
+// resolves through it instead of short-circuiting on the global versionActive
+// counter. Both halves were required — the pinned verdict alone still tore 2 in
+// 100 and the counter alone 3 in 100 — and together they measured ZERO IN 300
+// RUNS against a pre-fix rate of 2 to 5 per 100, under the peer load that was
+// the only environment able to reproduce it. Read-path cost and allocations
+// were unchanged.
+//
+// So a caller threading ONE transaction may now rely on writes across different
+// substructures, and across different label shards, becoming visible together.
+// A caller that does NOT thread one transaction still cannot: the several
+// distinct commit instants described above are a separate cause and are not
+// affected by that fix.
+//
+// Exclusive-writer brackets around state that is not versioned per-write — an
+// index registration, for example — are unaffected, since there is no commit
+// instant to split.
+//
 // ApplyAtomically must not be called re-entrantly, and the mutations inside fn
-// must not call [Graph.View] or [Graph.ApplyAtomically] (the RWMutex is not
-// re-entrant, so a nested acquisition from this goroutine would deadlock).
+// must not call [Graph.ApplyAtomically] (the RWMutex is not re-entrant, so a
+// nested acquisition from this goroutine would deadlock).
 //
 // The invariant is CHECKED in builds made with -race or -tags gograph_debug: a
 // nested call from a goroutine already inside the barrier panics with a clear
@@ -796,6 +869,72 @@ type Graph[N comparable, W any] struct {
 //
 // Concurrent calls from DIFFERENT goroutines are unaffected: they serialise on
 // visMu as before, and the guard never trips on them.
+//
+// # It IS the bulk-load bracket (rmp #2395)
+//
+// Beyond excluding other writers, this method opens a write TRANSACTION for the
+// duration of fn, and that is what makes it the bulk-load bracket. The
+// adjacency's clone-once dedup keys on a non-zero BUILDER OWNER
+// ([adjlist.AdjList.storeEntry] takes it from the write's own transaction, else
+// from [adjlist.AdjList.builderOwner], which prefers the ambient transaction's
+// id and falls back to the token [adjlist.AdjList.BeginCommit] mints). With an
+// owner, each touched shard's slot array is cloned AT MOST ONCE and then
+// mutated in place. With NO owner — a direct Go-API write outside any bracket —
+// every single write clones the whole array again. A bulk load that appends
+// edges one call at a time therefore pays a copy per edge, which the 2026-08-10
+// profile sweep measured at 50.75% of every object allocated by
+// examples/01_basic.
+//
+// So the ownership matters, not the window as such: this bracket also calls
+// BeginCommit, but that call is redundant here and the transaction is what
+// carries the dedup. BeginCommit exists for the exclusive paths that write with
+// NO transaction open — single-threaded WAL replay and bulk import — which is
+// why it documents a narrower single-writer contract.
+//
+// So a caller loading many edges should wrap the loop rather than reach for a
+// different API — there is no separate bulk-import entry point on Graph, and
+// none is needed. Measured on a 5 000-node / 101 974-edge build, three
+// interleaved rounds in one process, with the resulting graph verified
+// byte-identical by an order-sensitive fingerprint over every out-neighbour and
+// weight:
+//
+//	per-edge, unbracketed        86 MB   1.36M objects   69 ms
+//	one ApplyAtomically          58 MB   1.06M objects   50 ms   (0.68x / 0.78x)
+//	ApplyAtomically per 10k      60 MB   1.11M objects   55 ms   (0.70x / 0.81x)
+//
+// The bracket changes COST, never CONTENT. Chunking recovers almost all of the
+// win while bounding how long the exclusive barrier is held, which is the shape
+// to prefer when the load cannot lock out readers for its whole duration — a
+// single bracket over a very large load blocks every other writer, and every
+// snapshot-taking reader, until fn returns.
+//
+// TWO mechanisms produce that saving, and they were separated by measurement
+// rather than assumed: forcing the adjacency's dedup off leaves the bracketed
+// arm at 0.921x instead of 0.758x, so roughly two thirds of the objects saved
+// are the per-edge slot-array clone and the remaining third is ONE shared MVCC
+// commit record in place of a fresh one per write. Both follow from the
+// transaction, which is why bracketing is the whole answer and no separate
+// bulk-import API is needed. graph/lpg/bulkload_bracket_test.go pins the
+// combined effect against a threshold chosen between those two regimes, so
+// losing the dedup alone fails the test.
+//
+// Two cautions:
+//
+//   - This buys ALLOCATION, not atomic visibility. Everything the sections
+//     above say about writes committing at several distinct instants still
+//     applies; use [Graph.ApplyAtomicallyTx] with [Graph.Writer] when the load
+//     must also land at one instant. ApplyAtomicallyTx opens the same window
+//     (both go through openWriteBracket), so it costs nothing to prefer it.
+//   - A caller writing directly against [adjlist.AdjList] rather than Graph —
+//     as examples/01_basic does — has no transaction to borrow an owner from and
+//     brackets with [adjlist.AdjList.BeginCommit]/EndCommit instead, honouring
+//     that pair's narrower single-writer contract itself. Graph's bracket cannot
+//     leak, because it closes on every path out of fn including a panic; the raw
+//     pair can, which is why it spells that contract out.
+//
+// The equivalent bracket is why store/recovery's snapshot apply records
+// 737.6 MiB -> 113.6 MiB and 147.45 ms -> 73.57 ms at 50k nodes / 500k edges
+// (rmp #2170) and why WAL replay brackets itself (rmp #1526).
 func (g *Graph[N, W]) ApplyAtomically(fn func() error) error {
 	// Guard ordering (#1286, #1355): the re-entrancy CHECK runs before Lock so
 	// a nested call panics instead of deadlocking, but the writer STAMP is
@@ -862,7 +1001,7 @@ func (g *Graph[N, W]) ApplyAtomically(fn func() error) error {
 // with itself and CREATE INDEX's ShareLock does (src/backend/storage/lmgr/lock.c,
 // LockConflicts).
 //
-// fn must not call [Graph.View], [Graph.ApplyAtomically] or ApplyVersioned: the
+// fn must not call [Graph.ApplyAtomically] or ApplyVersioned: the
 // hold is shared, and Go's [sync.RWMutex] prefers a queued writer, so a nested
 // shared acquisition deadlocks the instant one queues. Enforced by the same
 // re-entrancy guard, under -race or -tags gograph_debug.
@@ -989,7 +1128,7 @@ func (g *Graph[N, W]) BeginVersionedTx() WriteTx {
 // first, fn does NOT run, nothing is held, and ctx's error is returned — the
 // caller's transaction remains open and usable.
 //
-// fn must not call [Graph.View], [Graph.ApplyAtomically] or [Graph.ApplyVersioned]:
+// fn must not call [Graph.ApplyAtomically] or [Graph.ApplyVersioned]:
 // the hold is shared, and Go's [sync.RWMutex] prefers a queued writer, so a nested
 // shared acquisition deadlocks the instant one queues. Enforced by the re-entrancy
 // guard under -race or -tags gograph_debug.
@@ -1228,7 +1367,7 @@ func (g *Graph[N, W]) LockBarrier() {
 // 601 ms, and after 11.60 s under load, in both cases with a live transaction
 // and err=nil. See [mvcc.Gate.StrongLockCtx] and the acquireCtx helper beside it
 // for how the wait is bounded and why a queued acquire cannot simply be
-// abandoned. (It used to say "[Graph.View] readers hold the barrier's read side";
+// abandoned. (It used to say "Graph.View readers hold the barrier's read side";
 // rmp #2344 removed Graph.View and reads take no barrier at all.)
 func (g *Graph[N, W]) LockBarrierCtx(ctx context.Context) error {
 	gid := g.barrier.checkWriter() // panics on re-entry from this goroutine
@@ -1265,8 +1404,9 @@ func (g *Graph[N, W]) LockBarrierCtx(ctx context.Context) error {
 // UnlockBarrier releases the transaction-visibility write lock acquired via
 // [Graph.LockBarrier]. It MUST be called from the same goroutine that called
 // LockBarrier, and exactly once per LockBarrier call. After this call completes,
-// concurrent [Graph.View] readers may proceed and [Graph.ApplyAtomically] may be
-// called again from any goroutine.
+// [Graph.ApplyAtomically] may be called again from any goroutine. (It used to say
+// "concurrent Graph.View readers may proceed" as well; rmp #2344 removed that
+// reader, and a snapshot reader never waited on this barrier in the first place.)
 func (g *Graph[N, W]) UnlockBarrier() {
 	gid := g.barrier.currentGID()
 	// The transaction this barrier opened, read back off the slot the exclusive

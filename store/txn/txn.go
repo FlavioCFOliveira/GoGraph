@@ -531,7 +531,7 @@ type Store[N comparable, W any] struct {
 	// transaction-sequence order: applying a higher-seq transaction before a
 	// lower-seq one could materialise an op against a node a not-yet-applied
 	// earlier transaction was to create (lpg property writes are
-	// create-on-demand), letting a [lpg.Graph.View] reader observe a state no
+	// create-on-demand), letting a snapshot reader observe a state no
 	// serial schedule produces — a Consistency/Isolation regression. The apply
 	// gate restores that order WITHOUT serialising the commit path around the
 	// fsync: a committer waits until appliedSeq == its seq-1, applies, then
@@ -696,19 +696,27 @@ func (s *Store[N, W]) MaxTxnOps() int { return s.maxTxnOps }
 // Graph returns the underlying mutable graph.
 //
 // Reads through the returned [lpg.Graph] are partial-transaction-free and
-// cross-substructure-consistent ONLY when performed inside [lpg.Graph.View].
-// A direct accessor call made outside View (HasNodeLabel, NodeProperties,
+// cross-substructure-consistent ONLY when performed through an MVCC SNAPSHOT
+// ([lpg.Graph.BeginRead] plus [lpg.Graph.ReadAt], released with
+// [lpg.Graph.EndRead]).
+// A direct accessor call made outside a snapshot (HasNodeLabel, NodeProperties,
 // AdjList().Neighbours, NodeIndex().Scan, and the like) remains per-operation
 // atomic, but may observe a multi-operation transaction half-applied — for
 // example the edge of an edge-plus-labels write before its endpoint labels.
 // An embedding application that reads this graph concurrently with committing
-// transactions must therefore take an MVCC SNAPSHOT for its reads
-// ([lpg.Graph.BeginRead] plus [lpg.Graph.ReadAt]) to obtain the
-// no-partial-transaction guarantee; writes go through the [Tx] API, which applies
-// them under [lpg.Graph.ApplyVersioned] and publishes each transaction with one
-// atomic store into its shared commit record. [lpg.Graph.View] does NOT provide
-// that guarantee since rmp #2320 — it is the schema barrier and an ordinary write
-// holds it shared.
+// transactions must therefore take a snapshot for its reads; writes go through
+// the [Tx] API, which applies them under [lpg.Graph.ApplyVersioned] and publishes
+// each transaction with one atomic store into its shared commit record.
+//
+// The cross-substructure half of that guarantee is measured, not assumed: rmp
+// #2378 found that a snapshot re-evaluated visibility per substructure against a
+// mutable commit timestamp and so could straddle a commit, and fixed it in commit
+// 509929e2 by pinning the verdict per commit record — zero tears in 300 runs
+// against a pre-fix 2 to 5 per 100.
+//
+// (This paragraph used to say the guarantee held only inside lpg.Graph.View, and
+// then that lpg.Graph.View did not provide it either since rmp #2320. rmp #2344
+// removed that method outright; the snapshot is the only reader now.)
 //
 // See the lpg package documentation and docs/isolation-design.md for the full
 // contract.
@@ -792,10 +800,13 @@ func (s *Store[N, W]) exitWriter() {
 // previous mutex semantics: a checkpointer that takes this lock blocks until
 // the active writer releases. fn must not call [Store.Begin]/[Store.BeginCtx]
 // or open a transaction on this store (the lock is not re-entrant — that
-// would deadlock). fn MAY read the graph through [lpg.Graph.View]; the
-// resulting lock order is store-lock → visMu, which matches the engine's own
-// order (Begin acquires the store lock, then ApplyVersioned acquires visMu
-// shared), so no new deadlock is introduced. fn's error is returned unwrapped.
+// would deadlock). fn MAY read the graph — the checkpointer does exactly that,
+// pinning a snapshot with [lpg.Graph.BeginRead] inside this window. A read takes
+// no barrier since rmp #2344 removed lpg.Graph.View, so it cannot invert a lock
+// order; when fn instead takes the write barrier the order is store-lock → visMu,
+// which matches the engine's own order (Begin acquires the store lock, then
+// ApplyVersioned acquires visMu shared), so no new deadlock is introduced. fn's
+// error is returned unwrapped.
 //
 // Concurrency: safe to call from any goroutine; it serialises against every
 // transaction on the store.

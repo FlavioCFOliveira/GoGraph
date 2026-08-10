@@ -26,15 +26,12 @@ import (
 	"io"
 	"math/rand/v2"
 	"os"
-	"path/filepath"
 	"runtime"
-	"runtime/pprof"
-	"runtime/trace"
 	"sort"
-	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
@@ -42,9 +39,7 @@ import (
 
 // config is the operator-settable shape of the workload.
 type config struct {
-	profileDir string
-	traceFile  string
-	storeDir   string
+	storeDir string
 
 	customers  int
 	inventory  int
@@ -92,10 +87,6 @@ func (c *config) validate() error {
 
 func main() {
 	cfg := defaultConfig()
-	flag.StringVar(&cfg.profileDir, "profile-dir", "",
-		"if set, write cpu.pprof and heap.pprof here (inspect with: go tool pprof -http=:0 <file>)")
-	flag.StringVar(&cfg.traceFile, "trace", "",
-		"if set, write a runtime/trace here (inspect with: go tool trace <file>)")
 	flag.StringVar(&cfg.storeDir, "store-dir", "",
 		"directory for the durable store used by the restart phase (default: a temp dir, removed on exit)")
 	flag.IntVar(&cfg.customers, "customers", cfg.customers, "customer nodes per run")
@@ -105,13 +96,16 @@ func main() {
 	flag.IntVar(&cfg.readers, "readers", cfg.readers, "concurrent reader goroutines")
 	flag.IntVar(&cfg.hotPct, "hot-pct", cfg.hotPct, "percent of orders that touch the shared inventory (the contention dial)")
 	flag.Uint64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
+	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
 
 	if err := cfg.validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
 		os.Exit(1)
 	}
-	if err := run(context.Background(), os.Stdout, &cfg); err != nil {
+	if err := prof.Run(os.Stdout, func() error {
+		return run(context.Background(), os.Stdout, &cfg)
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "run: %v\n", err)
 		os.Exit(1)
 	}
@@ -119,17 +113,6 @@ func main() {
 
 // run drives every phase and writes the report to w.
 func run(ctx context.Context, w io.Writer, cfg *config) error {
-	stopCPU, err := startCPUProfile(cfg.profileDir)
-	if err != nil {
-		return err
-	}
-	defer stopCPU()
-	stopTrace, err := startTrace(cfg.traceFile)
-	if err != nil {
-		return err
-	}
-	defer stopTrace()
-
 	fmt.Fprintf(w, "# config producers=%d readers=%d ops-per-producer=%d customers=%d inventory=%d hot-pct=%d seed=%d\n",
 		cfg.producers, cfg.readers, cfg.opsPerProd, cfg.customers, cfg.inventory, cfg.hotPct, cfg.seed)
 
@@ -160,8 +143,7 @@ func run(ctx context.Context, w io.Writer, cfg *config) error {
 	fmt.Fprintf(w, "# mem.heap_alloc_delta_bytes=%d\n", int64(m1.HeapAlloc)-int64(m0.HeapAlloc))
 	fmt.Fprintf(w, "# mem.total_alloc_bytes=%d\n", m1.TotalAlloc-m0.TotalAlloc)
 	fmt.Fprintf(w, "# mem.num_gc=%d\n", m1.NumGC-m0.NumGC)
-	stopCPU()
-	return writeHeapProfile(cfg.profileDir, w)
+	return nil
 }
 
 // newGraph builds an in-memory graph for one phase.
@@ -259,71 +241,6 @@ func percentiles(ds []time.Duration) (p50, p95, p99 time.Duration) {
 		return ds[i]
 	}
 	return at(0.50), at(0.95), at(0.99)
-}
-
-// startCPUProfile begins a CPU profile in dir, or does nothing when dir is empty.
-// The returned stop is idempotent and must be called before the process exits: a
-// deferred stop alone would truncate the profile on an early return.
-func startCPUProfile(dir string) (func(), error) {
-	if dir == "" {
-		return func() {}, nil
-	}
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return nil, fmt.Errorf("profile dir: %w", err)
-	}
-	// #nosec G304 -- operator-supplied -profile-dir, fixed basename.
-	f, err := os.Create(filepath.Join(dir, "cpu.pprof"))
-	if err != nil {
-		return nil, fmt.Errorf("create cpu profile: %w", err)
-	}
-	if err := pprof.StartCPUProfile(f); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("start cpu profile: %w", err)
-	}
-	var once sync.Once
-	return func() { once.Do(func() { pprof.StopCPUProfile(); _ = f.Close() }) }, nil
-}
-
-// writeHeapProfile writes a heap profile to dir, or does nothing when dir is empty.
-// runtime.GC runs first because a heap profile reports what was LIVE as of the last
-// collection; without it the profile attributes garbage that is merely unswept,
-// which reads as a leak that is not there.
-func writeHeapProfile(dir string, w io.Writer) error {
-	if dir == "" {
-		return nil
-	}
-	runtime.GC()
-	path := filepath.Join(dir, "heap.pprof")
-	// #nosec G304 -- operator-supplied directory, fixed basename.
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("create heap profile: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-	if err := pprof.WriteHeapProfile(f); err != nil {
-		return fmt.Errorf("write heap profile: %w", err)
-	}
-	fmt.Fprintf(w, "# pprof.cpu=%s\n", filepath.Join(dir, "cpu.pprof"))
-	fmt.Fprintf(w, "# pprof.heap=%s\n", path)
-	return nil
-}
-
-// startTrace begins a runtime/trace to path, or does nothing when path is empty.
-func startTrace(path string) (func(), error) {
-	if path == "" {
-		return func() {}, nil
-	}
-	// #nosec G304 -- operator-supplied -trace path.
-	f, err := os.Create(path)
-	if err != nil {
-		return nil, fmt.Errorf("create trace: %w", err)
-	}
-	if err := trace.Start(f); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("start trace: %w", err)
-	}
-	var once sync.Once
-	return func() { once.Do(func() { trace.Stop(); _ = f.Close() }) }, nil
 }
 
 // newRand returns a deterministic source for the given seed and stream.

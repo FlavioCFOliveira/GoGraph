@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 )
 
 // usageError signals an invocation problem (unknown subcommand, missing
@@ -45,17 +47,22 @@ Run '24_social_network_cli help' to print this help, or
 // parseDataDir parses the common '-d <dir>' flag from args and returns
 // the validated directory along with any remaining positional arguments.
 // The returned error is a *usageError when -d is missing or malformed.
-func parseDataDir(subcmd string, args []string) (dir string, rest []string, err error) {
+//
+// It also binds the common profiling flags, so every subcommand accepts
+// -profile-dir and -trace on the same terms as every other example. The
+// returned *exprof.Config is inert unless the operator set one of them.
+func parseDataDir(subcmd string, args []string) (dir string, rest []string, prof *exprof.Config, err error) {
 	fs := flag.NewFlagSet(subcmd, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&dir, "d", "", "data directory (required)")
+	prof = exprof.Bind(fs)
 	if perr := fs.Parse(args); perr != nil {
-		return "", nil, newUsageError("%s: flag parse: %v", subcmd, perr)
+		return "", nil, nil, newUsageError("%s: flag parse: %v", subcmd, perr)
 	}
 	if dir == "" {
-		return "", nil, newUsageError("%s: missing required flag -d <dir>", subcmd)
+		return "", nil, nil, newUsageError("%s: missing required flag -d <dir>", subcmd)
 	}
-	return dir, fs.Args(), nil
+	return dir, fs.Args(), prof, nil
 }
 
 // dispatch routes argv to the matching subcommand. It is split out from

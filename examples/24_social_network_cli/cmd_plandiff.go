@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 )
@@ -147,31 +148,34 @@ const (
 
 // cmdPlandiff is the `plandiff` entry point.
 func cmdPlandiff(args []string) error {
-	cfg, err := parsePlandiffArgs(args)
+	cfg, prof, err := parsePlandiffArgs(args)
 	if err != nil {
 		return err
 	}
-	return runPlandiff(context.Background(), cfg, os.Stdout)
+	return prof.Run(os.Stdout, func() error {
+		return runPlandiff(context.Background(), cfg, os.Stdout)
+	})
 }
 
 // parsePlandiffArgs parses the plandiff flags. A parse failure or missing -d maps
 // to a *usageError (exit 2); a non-positive scale is a runtime error (exit 1).
-func parsePlandiffArgs(args []string) (plandiffConfig, error) {
+func parsePlandiffArgs(args []string) (plandiffConfig, *exprof.Config, error) {
 	cfg := plandiffConfig{scale: 1}
 	fs := flag.NewFlagSet("plandiff", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&cfg.dir, "d", "", "data directory (required)")
 	fs.IntVar(&cfg.scale, "scale", cfg.scale, "multiplier for the synthetic content population (>= 1)")
+	prof := exprof.Bind(fs)
 	if perr := fs.Parse(args); perr != nil {
-		return plandiffConfig{}, newUsageError("plandiff: flag parse: %v", perr)
+		return plandiffConfig{}, nil, newUsageError("plandiff: flag parse: %v", perr)
 	}
 	if cfg.dir == "" {
-		return plandiffConfig{}, newUsageError("plandiff: missing required flag -d <dir>")
+		return plandiffConfig{}, nil, newUsageError("plandiff: missing required flag -d <dir>")
 	}
 	if cfg.scale < 1 {
-		return plandiffConfig{}, fmt.Errorf("plandiff: scale must be >= 1, got %d", cfg.scale)
+		return plandiffConfig{}, nil, fmt.Errorf("plandiff: scale must be >= 1, got %d", cfg.scale)
 	}
-	return cfg, nil
+	return cfg, prof, nil
 }
 
 // runPlandiff opens the data directory, ensures the synthetic content layer is

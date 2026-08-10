@@ -23,7 +23,6 @@ import (
 	"net"
 	"os"
 	"runtime"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -44,27 +43,9 @@ type soakSnapshot struct {
 	goroutines int
 }
 
-// soakEnvInt returns the positive integer value of environment variable key,
-// or def when the variable is unset, empty, non-numeric, or non-positive.
-func soakEnvInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	return def
-}
-
-// soakEnvDuration returns the positive duration value of environment variable
-// key (e.g. "30m", "4h"), or def when unset, empty, unparseable, or non-positive.
-func soakEnvDuration(key string, def time.Duration) time.Duration {
-	if v := os.Getenv(key); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			return d
-		}
-	}
-	return def
-}
+// soakEnvInt and soakEnvDuration now live in soakenv_test.go, alongside the
+// shared abstention rule, so that every soak instrument reads its window the
+// same way rather than only the ones compiled under the soakfull tag.
 
 // TestBoltSoak_1024_4h runs a 1024-connection, 4-hour soak test.
 // The function only compiles when the 'soakfull' build tag is set

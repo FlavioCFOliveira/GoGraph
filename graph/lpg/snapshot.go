@@ -25,6 +25,12 @@ package lpg
 // plain accessors delegate with nil is what keeps one implementation per
 // accessor instead of two that can drift.
 
+import (
+	"sync"
+
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
+)
+
 // Snapshot is a consistent read view of the graph at one instant.
 //
 // Obtain one with [Graph.BeginRead] and release it with [Graph.EndRead],
@@ -47,6 +53,77 @@ type Snapshot struct {
 	// slot is the horizon slot this reader occupies, returned to
 	// [Graph.EndRead].
 	slot int
+	// verdict PINS this snapshot's visibility answer for each commit record it has
+	// already classified (rmp #2378).
+	//
+	// # The defect this closes
+	//
+	// [mvcc.Visible] is evaluated separately for every substructure a read
+	// touches, against [mvcc.CommitInfo.TS] — a field that is MUTABLE and flips
+	// when the transaction commits. A reader that straddles a commit therefore
+	// classified one substructure before the flip and the next after it, and
+	// observed a state no serial order produced: an edge and its two endpoint
+	// labels, written by ONE transaction, seen partially applied through a pinned
+	// snapshot. Measured at 2-5 failures per 100 runs of
+	// [TestIsolation_CrossSubstructure_EdgeImpliesLabels] under the gate's own
+	// parallel-package load, on BOTH the exclusive bare-API bracket and the
+	// engine's [Graph.ApplyVersioned].
+	//
+	// It dates from rmp #2344 (`5a71cc1c`), which removed Graph.View. Until then a
+	// reader HELD the visibility barrier, so its correlated reads were atomic by
+	// construction and the tear could not occur. Nothing replaced that property;
+	// the snapshot resolves each read as-of, but nothing tied the reads together.
+	//
+	// # Why memoising the verdict is exactly the reference shape
+	//
+	// PostgreSQL's snapshot is xmin plus the LIST of in-progress XIDs
+	// (GetSnapshotData), and InnoDB's read view is the same: both decide visibility
+	// from state captured ONCE. Pinning the verdict per record gets that lazily —
+	//
+	//   - a record IN FLIGHT when first classified stays invisible for this
+	//     snapshot's lifetime, which is precisely the in-progress-list rule;
+	//   - a record committed at or below startTS is visible, and its ts is
+	//     immutable thereafter, so the memo changes nothing;
+	//   - a record committed above startTS is invisible, likewise immutable.
+	//
+	// So exactly one case changes, and it changes to the answer the snapshot should
+	// always have given. Lazy is safe: a record committing between [Graph.BeginRead]
+	// and its first classification can only have done so ABOVE startTS, because the
+	// contiguous frontier never advances past an unfinished commit.
+	//
+	// # Both halves are required
+	//
+	// Pinning the verdict alone does NOT fix it (measured 2/100), because
+	// AdjList.entryAsOfLoaded short-circuits on a GLOBAL versionActive counter and
+	// never consults the verdict on those reads. Dropping that counter alone does
+	// not fix it either (measured 3/100), because the verdict still moves mid-read.
+	// Together: 0 failures in 300 runs.
+	mu      sync.Mutex
+	verdict map[*commitInfo]bool
+}
+
+// visible reports whether a change stamped by info — or by the raw ts when info
+// is nil — is visible to this snapshot, PINNING the answer for any record this
+// snapshot classifies more than once. See the verdict field.
+//
+// A nil snapshot, or a raw timestamp with no record, resolves straight through:
+// there is nothing mutable to pin. Safe for concurrent use, because a ReadView
+// may be shared.
+func (s *Snapshot) visible(info *commitInfo, ts, startTS, txID uint64) bool {
+	if s == nil || info == nil {
+		return mvcc.Visible(ts, startTS, txID)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if v, ok := s.verdict[info]; ok {
+		return v
+	}
+	v := mvcc.Visible(info.TS(), startTS, txID)
+	if s.verdict == nil {
+		s.verdict = make(map[*commitInfo]bool, 4)
+	}
+	s.verdict[info] = v
+	return v
 }
 
 // StartTS returns the instant this snapshot observes.

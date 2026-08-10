@@ -107,6 +107,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/search"
@@ -179,9 +180,12 @@ func main() {
 	flag.IntVar(&cfg.clusterSize, "cluster-size", cfg.clusterSize, "sites per cluster (s)")
 	flag.IntVar(&cfg.chords, "chords", cfg.chords, "extra random chords per cluster beyond the Hamiltonian cycle")
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic topology)")
+	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
 
-	if err := run(context.Background(), os.Stdout, cfg); err != nil {
+	if err := prof.Run(os.Stdout, func() error {
+		return run(context.Background(), os.Stdout, cfg)
+	}); err != nil {
 		log.Fatal(err)
 	}
 }

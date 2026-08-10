@@ -236,6 +236,62 @@ Three composite pipeline targets wrap these:
 | `make ci-soak` | Like `ci` but runs **test-soak** instead of test-short |
 | `make ci-nightly` | Like `ci` but runs **test-nightly** instead of test-short |
 
+## What the soak layer asserts — and what it does not
+
+**Running `-tags=soak` does not, on its own, certify no-growth or latency
+stability.** The reliability instruments in `bench/soak/` fit a linear
+regression over a measurement window, and the short layer's window is far too
+small to hold one. This is a property of the layer's 60-second budget, not a
+defect — but it must never again be read as evidence, because the 2026-08-10
+certification did exactly that (rmp #2396): the layer reported `ok` while
+neither slope check had evaluated anything.
+
+| Instrument | Asserts in the short layer | Needs a longer window |
+|---|---|---|
+| `TestGCPause_Stable` | **max GC pause < 200 ms** — a ceiling needs no regression, so it asserts from a single sample | pause-slope regression |
+| `TestNoGrowth_HeapFDGoroutine` | nothing; it exercises the workload and writes the CSV | heap / goroutine / fd slopes |
+| `TestLatencyP99_Stable` | that round-trips succeeded at all (zero successes is an error) | p99-over-time slope |
+| `TestBoltSoak_60s`, `TestBoltCypherMixed_Smoke`, `TestCypherRW_Analytics_Smoke` | success/failure counts, cap errors, goroutine deltas | — |
+
+A slope check that cannot run **skips** rather than passing, so `go test -v`
+shows `--- SKIP` and names the setting that would make it assert. Run the soak
+layer with **`-v`**: without it `go test` prints only `ok` for the package, and
+Go shows neither the skip nor its reason — so a non-verbose soak run still
+cannot be read as evidence that anything was asserted. Skipping is
+allowed *only* in the short layer at its default window: under `SOAK_FULL=1`,
+`GOGRAPH_NIGHTLY=1`, or any explicit `SOAK_*` window override, too few samples
+is a **failure**, because those configurations assert that the criterion will be
+evaluated. The floor is `minRegressionPoints` = 6 samples
+(`bench/soak/soakenv_test.go`): ordinary least squares spends two points on the
+fit itself, so two points regress with zero residual degrees of freedom and
+three leave one, while six leave four — the smallest count at which one
+anomalous sample cannot dictate the slope.
+
+Intermediate windows that make each slope check assert without paying for the
+full multi-hour variant:
+
+```bash
+# Heap / fd / goroutine growth — 9 samples in ~95 s.
+SOAK_NOGROWTH_MEASURE=90s go test -tags=soak -count=1 -v \
+  -run TestNoGrowth_HeapFDGoroutine ./bench/soak/
+
+# p99 stability — 10 windows, 8 post-warm-up, in ~100 s.
+SOAK_P99_DURATION=100s SOAK_P99_WINDOW=10s go test -tags=soak -count=1 -v \
+  -run TestLatencyP99_Stable ./bench/soak/
+
+# GC pause slope — 12 samples in ~60 s.
+SOAK_GCPAUSE_MEASURE=60s go test -tags=soak -count=1 -v \
+  -run TestGCPause_Stable ./bench/soak/
+```
+
+The sample *interval* is deliberately not overridable. Shrinking it is the one
+adjustment that manufactures samples without lengthening the observation, which
+would convert the regression into a noise detector over a handful of adjacent
+points. The window is what gets extended.
+
+The release-grade variants remain `SOAK_FULL=1` (5 min warm-up + 55 min
+measurement for no-growth, ~330 samples; 4 h at 64 goroutines for p99).
+
 ## Sample invocations
 
 ```bash

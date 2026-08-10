@@ -42,6 +42,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
@@ -98,9 +99,12 @@ func main() {
 	flag.IntVar(&cfg.baseNodes, "base-nodes", cfg.baseNodes, "nodes in the first version")
 	flag.IntVar(&cfg.growth, "growth", cfg.growth, "extra nodes each subsequent version adds")
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed")
+	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
 
-	if err := run(context.Background(), os.Stdout, cfg); err != nil {
+	if err := prof.Run(os.Stdout, func() error {
+		return run(context.Background(), os.Stdout, cfg)
+	}); err != nil {
 		log.Fatal(err)
 	}
 }

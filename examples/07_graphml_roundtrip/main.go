@@ -66,6 +66,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/io/dot"
@@ -121,9 +122,12 @@ func main() {
 	flag.IntVar(&cfg.maxWeight, "max-weight", cfg.maxWeight, "link weights are drawn uniformly from [1, max-weight]")
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
 	flag.IntVar(&cfg.sampleLines, "sample", cfg.sampleLines, "print this many leading lines of each serialised format (0: none)")
+	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
 
-	if err := run(context.Background(), os.Stdout, cfg); err != nil {
+	if err := prof.Run(os.Stdout, func() error {
+		return run(context.Background(), os.Stdout, cfg)
+	}); err != nil {
 		log.Fatal(err)
 	}
 }

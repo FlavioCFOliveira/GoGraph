@@ -7,6 +7,7 @@ package lpg
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -48,6 +49,9 @@ func assertLabelIndexNeverMissesABagLabel(t *testing.T, budget time.Duration) {
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
+	// writerEpoch counts COMPLETED writer operations. It is what lets the reader
+	// tell a genuine intermediate state from an ABA sequence; see the reader below.
+	var writerEpoch atomic.Uint64
 	// WRITER: churn the label on and off across the population.
 	wg.Add(1)
 	go func() {
@@ -64,6 +68,11 @@ func assertLabelIndexNeverMissesABagLabel(t *testing.T, budget time.Duration) {
 			} else {
 				_ = g.ApplyAtomically(func() error { g.RemoveNodeLabel(k, "L"); return nil })
 			}
+			// Bumped AFTER the operation completes, so an epoch the reader finds
+			// unchanged across its window means no operation FINISHED inside it —
+			// while an operation still in flight, whose intermediate state is the
+			// whole subject of this test, leaves the epoch untouched.
+			writerEpoch.Add(1)
 		}
 	}()
 
@@ -74,6 +83,11 @@ func assertLabelIndexNeverMissesABagLabel(t *testing.T, budget time.Duration) {
 	// 8 s detected 4/4 runs, 2 s only 3/8. Hence the two layers — see the callers.
 	deadline := time.Now().Add(budget)
 	violations := 0
+	// sampled counts windows in which NO writer operation completed — the only
+	// windows that witness one instant, and therefore the only ones this oracle may
+	// judge. Asserted non-zero at the end: a guard that discards every sample is a
+	// gate that cannot fail, which proves nothing.
+	sampled, straddled := 0, 0
 	for iter := 0; violations == 0; iter++ {
 		if iter%1024 == 0 && time.Now().After(deadline) {
 			break
@@ -110,17 +124,63 @@ func assertLabelIndexNeverMissesABagLabel(t *testing.T, budget time.Duration) {
 		// positive requires a removal, and a removal clears the bag too, so the bag is
 		// false by the time we look again. The real defect leaves the bag TRUE
 		// throughout — it is the bitmap that has not caught up yet.
+		//
+		// THAT ARGUMENT IS TRUE ONLY OF A WINDOW HOLDING AT MOST ONE WRITER STEP, AND
+		// THE WINDOW ROUTINELY HOLDS HUNDREDS (rmp #2371).
+		//
+		// Two completed operations — a removal AND a re-add — restore the bag to true,
+		// so all three reads are honest at their own instants while the conjunction
+		// describes a state that existed at none. Measured at HEAD with a writer-epoch
+		// probe: 22.4 % of this reader's windows had TWO OR MORE writer operations
+		// complete inside them, and the widest held 714. The writer toggles ONE node as
+		// fast as it can and the reader takes three separately-locked reads, so this is
+		// the common case, not a corner.
+		//
+		// THE EPOCH IS THE DISCRIMINATOR, and it costs nothing: two atomic loads. A
+		// window in which no operation COMPLETED still contains any operation that is
+		// mid-flight, which is exactly the rmp #2326 intermediate — the bag written
+		// under the shard lock, the lock released, the bitmap not yet caught up. So the
+		// guard removes the ABA reading without weakening detection.
+		//
+		// VALIDATED BY INJECTION, not by this argument: with the rmp #2326 ordering put
+		// back (index maintenance moved after sh.mu.Unlock in setNodeLabelInfo), this
+		// oracle reported 10, 23 and 36 violations in three 10 s runs and EVERY ONE had
+		// a stable epoch — zero were attributed to a straddled window. The rate also
+		// discriminates on its own: the real ordering defect fails 7 runs in 8 within
+		// 0.06–0.38 s, whereas the flake reported in rmp #2371 was about 1 run in 10
+		// over 2 s. Those are two orders of magnitude apart.
+		before := writerEpoch.Load()
 		inBag := g.HasNodeLabel(k, "L")
 		inIdx := g.nodeIdx.Intersect(uint32(lid)).Contains(uint64(id))
-		if inBag && !inIdx && g.HasNodeLabel(k, "L") {
+		inBagAgain := g.HasNodeLabel(k, "L")
+		if writerEpoch.Load() != before {
+			// The three reads span more than one instant; they cannot witness an
+			// instantaneous invariant either way.
+			straddled++
+			continue
+		}
+		sampled++
+		if inBag && !inIdx && inBagAgain {
 			violations++
 			t.Errorf("node %s carries label L, before AND after reading the index, but is "+
-				"ABSENT from L's bitmap: a present-time reader taking the raw bitmap loses "+
-				"the row (rmp #2326)", k)
+				"ABSENT from L's bitmap, with NO writer operation completing between the "+
+				"three reads: a present-time reader taking the raw bitmap loses the row "+
+				"(rmp #2326)", k)
 		}
 	}
 	close(stop)
 	wg.Wait()
+
+	// An oracle that judged nothing is not a passing oracle. If the writer were fast
+	// enough that every window straddled an operation, the loop above would discard
+	// every sample and report success having tested nothing (see rmp #2371 and the
+	// "assert something was seen" rule).
+	if sampled == 0 {
+		t.Fatalf("no single-instant window was sampled in %s (%d straddled): the guard "+
+			"discarded every observation, so this run tested nothing", budget, straddled)
+	}
+	t.Logf("sampled %d single-instant windows, discarded %d straddled ones (%.1f%%)",
+		sampled, straddled, 100*float64(straddled)/float64(sampled+straddled))
 }
 
 // TestLabelIndex_NeverMissesALabelTheBagHas is the short-layer variant. Its 2 s
@@ -129,9 +189,24 @@ func assertLabelIndexNeverMissesABagLabel(t *testing.T, budget time.Duration) {
 // short-layer ceiling and this is what fits. It is worth its 2 s anyway; the
 // load-bearing gate is the soak variant below.
 //
-// It no longer reports FALSE failures. It used to, at a measured 1 in 20 (rmp
-// #2332), because it sampled the bag and the bitmap at two different instants; both
-// halves now resolve as of one snapshot.
+// # It reported FALSE failures TWICE, and the second fix is the epoch
+//
+// The first attempt (rmp #2332) added the second bag read and this comment then
+// claimed the false failures were gone. They were not: rmp #2371 measured the same
+// test failing about 1 run in 10 at commit 21321e4e, which made `make ci` red
+// intermittently and eroded the gate every other task depends on.
+//
+// The second bag read closes only the ONE-STEP window. The reader's three reads
+// routinely straddle MANY completed writer operations — 22.4 % of windows hold two
+// or more, the widest 714 — and a removal followed by a re-add restores the bag to
+// true, so the conjunction can be reported over a state that existed at no instant.
+// The writer-epoch guard in the helper closes that, and the injection evidence for
+// why it is not merely a loosened assertion is recorded there.
+//
+// Not reproduced at HEAD in 55 consecutive runs (25 at load ≈ 2, 30 at load ≈ 20)
+// with nothing in graph/lpg or graph/adjlist changed since it was measured — which
+// is consistent with a rare sampling artefact and inconsistent with the ordering
+// defect, whose signature is 7 failures in 8 runs inside 0.4 s.
 func TestLabelIndex_NeverMissesALabelTheBagHas(t *testing.T) {
 	assertLabelIndexNeverMissesABagLabel(t, 2*time.Second)
 }

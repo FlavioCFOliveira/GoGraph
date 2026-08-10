@@ -79,8 +79,10 @@ package exec
 // # Lifecycle / cancellation / concurrency contract
 //
 // The join (wg.Wait) and the single-goroutine combine run on the goroutine that
-// drives Next, which the engine drives inside the graph's visibility-barrier
-// RLock ([lpg.Graph.View]); no worker goroutine outlives the barrier. The
+// drives Next; no worker goroutine outlives the statement, because wg.Wait joins
+// every one of them before Next returns. (This used to credit the graph's
+// visibility-barrier RLock, lpg.Graph.View; rmp #2344 removed it and a read takes
+// no barrier, so the join is what bounds the workers.) The
 // happens-before edge (worker return → wg.Done → wg.Wait) makes the read of each
 // worker's state race-free with no extra synchronisation. Workers check ctx.Err
 // between morsels and periodically inside the drain loop; Close cancels then joins

@@ -219,6 +219,38 @@ func (g *Graph[N, W]) labelBagAsOf(id graph.NodeID, startTS, txID uint64) labelB
 // a read in labelBag.has. Callers that consume the bag rather than copying it
 // out must therefore hold the lock across the consumption, and this is what
 // they resolve through.
+func (g *Graph[N, W]) labelBagAsOfLockedSnap(sh *nodeLabelShard, id graph.NodeID, snap *Snapshot, startTS, txID uint64) labelBag {
+	cur := sh.m[id]
+	if sh.d == nil {
+		return cur
+	}
+	d := sh.d[id]
+	if d == nil {
+		return cur
+	}
+	var out labelBag
+	copied := false
+	for ; d != nil; d = d.next {
+		if snap.visible(d.info, d.ts, startTS, txID) {
+			break
+		}
+		if !copied {
+			out = cloneLabelBag(cur)
+			copied = true
+		}
+		switch d.action {
+		case undoAddLabel:
+			out.add(d.lid)
+		case undoRemoveLabel:
+			out.del(d.lid)
+		}
+	}
+	if !copied {
+		return cur
+	}
+	return out
+}
+
 func (g *Graph[N, W]) labelBagAsOfLocked(sh *nodeLabelShard, id graph.NodeID, startTS, txID uint64) labelBag {
 	cur := sh.m[id]
 	if sh.d == nil {

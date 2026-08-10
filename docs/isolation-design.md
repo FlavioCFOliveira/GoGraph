@@ -5,6 +5,16 @@ F3 isolation re-architecture (audit gap F3 in [`acid-audit.md`](acid-audit.md)).
 It is implemented in stages F3.2–F3.6; each stage leaves the module green and
 never weaker than today's behaviour, and the full guarantee lands at F3.5.
 
+> **Reading note (rmp #2379, 2026-08-10).** `Graph.View` appears throughout the
+> staging history below and **no longer exists**: rmp #2344 removed it, and a read
+> now takes no barrier at all — it pins an MVCC snapshot with `Graph.BeginRead` /
+> `Graph.ReadAt`, released with `Graph.EndRead`. `Graph.ApplyAtomically` remains as
+> the write/schema barrier. Every `Graph.View` below is therefore a record of what
+> the design was at that stage, not advice to follow. The cross-substructure half
+> of the snapshot guarantee was completed later still, by rmp #2378 (commit
+> `509929e2`): a snapshot now pins its visibility verdict per commit record, which
+> measured zero tears in 300 runs against a pre-fix 2–5 per 100.
+
 ## The gap (what we are fixing)
 
 The ACID mandate requires: *"concurrent transactions behave as if serialised;

@@ -98,6 +98,30 @@ func (g *Graph[N, W]) edgeHandlePropShardFor(k edgeKey) *edgeHandlePropShard {
 	return &g.edgeHandlePropShards[uint64(k.src)&(propMapShards-1)]
 }
 
+// AnyEdgeHandlePropertyEverWritten reports whether a by-handle edge property
+// has EVER been written to this graph. It is a one-way latch, not a live
+// count: it is set before the first such write becomes visible and is never
+// cleared, so a later delete, transaction abort or vacuum leaves it true even
+// though the store is empty again.
+//
+// It answers exactly one question — "can [Graph.EdgePropertiesByHandle] and
+// its variants possibly return anything?" — so a caller whose only use for the
+// by-handle map is to discover that it is empty can skip the read entirely.
+// A false result is a proof of absence; a true result is not a proof of
+// presence, so it must never be used to report that a property EXISTS. Read it
+// with that asymmetry in mind: false is exact, true is conservative.
+//
+// The intended use is a probe skip on a graph populated through the Go API
+// ([Graph.AddEdgeH] plus [Graph.SetEdgeProperty]), which stamps a handle but
+// records properties in the per-pair store only, so the by-handle store stays
+// empty for the process lifetime (rmp #2387).
+//
+// AnyEdgeHandlePropertyEverWritten is safe for concurrent use and takes no
+// lock.
+func (g *Graph[N, W]) AnyEdgeHandlePropertyEverWritten() bool {
+	return g.anyHandleProp.Load()
+}
+
 // edgeHandleHasLabel reports whether the edge identified by handle on the
 // directed (srcID, dstID) pair carries lid, and whether a handle-keyed label
 // record exists for it at all.
@@ -252,9 +276,14 @@ func (g *Graph[N, W]) setEdgeLabelByHandleInfo(src, dst N, handle uint64, name s
 // by its own per-shard mutex and is only per-operation atomic: it is NOT
 // cross-store consistent with [Graph.EdgeCreateCount],
 // [Graph.EdgePropertiesByHandle], or the adjacency layer outside a
-// transaction barrier. To read a consistent cross-store view, bracket
-// the correlated reads in [Graph.View] (writers commit under
-// [Graph.ApplyAtomically]); see docs/isolation-design.md.
+// transaction barrier. To read a consistent cross-store view, take a
+// snapshot with [Graph.BeginRead] and resolve every correlated read
+// through the [ReadView] that [Graph.ReadAt] returns, releasing it with
+// [Graph.EndRead]. (This used to say "bracket the correlated reads in
+// Graph.View"; that method was removed by rmp #2344 and the advice was
+// left pointing at it — see rmp #2379.) Writers must share ONE
+// transaction record for their writes to land at one instant; see
+// [Graph.ApplyAtomically]. Also see docs/isolation-design.md.
 //
 // EdgeLabelsByHandle is safe for concurrent use.
 func (g *Graph[N, W]) EdgeLabelsByHandle(src, dst N, handle uint64) []string {
@@ -324,6 +353,12 @@ func (g *Graph[N, W]) setEdgePropertyByHandleInfo(src, dst N, handle uint64, key
 	}
 	pid := g.pkeys.Intern(key)
 	k := edgeKey{src: srcID, dst: dstID}
+	// Latch BEFORE the lock, so the store is ordered ahead of any state this
+	// write makes visible; see [Graph.anyHandleProp]. Latching here rather than
+	// after the write means a refused write (a validator rejection above, or a
+	// conflict below) can leave the latch conservatively true, which costs a
+	// probe and never a lost read.
+	g.anyHandleProp.Store(true)
 	sh := g.edgeHandlePropShardFor(k)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
@@ -354,9 +389,14 @@ func (g *Graph[N, W]) setEdgePropertyByHandleInfo(src, dst N, handle uint64, key
 // by its own per-shard mutex and is only per-operation atomic: it is NOT
 // cross-store consistent with [Graph.EdgeCreateCount],
 // [Graph.EdgeLabelsByHandle], or the adjacency layer outside a
-// transaction barrier. To read a consistent cross-store view, bracket
-// the correlated reads in [Graph.View] (writers commit under
-// [Graph.ApplyAtomically]); see docs/isolation-design.md.
+// transaction barrier. To read a consistent cross-store view, take a
+// snapshot with [Graph.BeginRead] and resolve every correlated read
+// through the [ReadView] that [Graph.ReadAt] returns, releasing it with
+// [Graph.EndRead]. (This used to say "bracket the correlated reads in
+// Graph.View"; that method was removed by rmp #2344 and the advice was
+// left pointing at it — see rmp #2379.) Writers must share ONE
+// transaction record for their writes to land at one instant; see
+// [Graph.ApplyAtomically]. Also see docs/isolation-design.md.
 //
 // EdgePropertiesByHandle is safe for concurrent use.
 func (g *Graph[N, W]) EdgePropertiesByHandle(src, dst N, handle uint64) map[string]PropertyValue {

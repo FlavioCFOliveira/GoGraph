@@ -77,6 +77,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
@@ -145,9 +146,12 @@ func main() {
 	flag.IntVar(&cfg.seedNet, "seed-net", cfg.seedNet, "size of the seed core (a directed ring)")
 	flag.IntVar(&cfg.topK, "top-k", cfg.topK, "how many top-ranked pages to report as facts")
 	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
+	prof := exprof.Bind(flag.CommandLine)
 	flag.Parse()
 
-	if err := run(context.Background(), os.Stdout, cfg); err != nil {
+	if err := prof.Run(os.Stdout, func() error {
+		return run(context.Background(), os.Stdout, cfg)
+	}); err != nil {
 		log.Fatal(err)
 	}
 }

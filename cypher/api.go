@@ -388,7 +388,7 @@ type buildOpts struct {
 	// for the snapshot's lifetime: a single snapshot reused across all rows is
 	// consistent with the Expand-time CSR that minted the positions
 	//
-	// (This used to read "run inside one [lpg.Graph.View] RLock". That stopped being
+	// (This used to read "run inside one lpg.Graph.View RLock". That stopped being
 	// true in sprint 334: a read no longer takes the visibility barrier at all — it
 	// carries a start timestamp and each structure resolves against it. The stability
 	// the paragraph depends on is unchanged, but it now comes from the instant rather
@@ -529,6 +529,16 @@ type buildOpts struct {
 	// which therefore always build the serial EagerAggregation pipeline.
 	parallelScanEnabled bool
 	fwdCSRReady         bool
+	// scalarUseMemo is the plan-cache entry's cross-execution memo for
+	// [analyseNodeScalarUse] (rmp #2383). The read-path build points it at the
+	// entry serving this query; every other build path leaves it nil, and
+	// [analyseNodeScalarUseFor] then runs the analysis directly.
+	//
+	// It is a pointer INTO the shared entry, not per-build state, so unlike every
+	// other field here it outlives the build and is reached concurrently — which is
+	// the whole point, and why [nodeScalarUseMemo] is itself safe for concurrent
+	// use.
+	scalarUseMemo *nodeScalarUseMemo
 }
 
 // evalRow is the canonical bridge from a per-row closure to [expr.Eval] /
@@ -1130,7 +1140,7 @@ type Engine struct {
 	//
 	// This used to read: "visMu cannot do this job on its own even though it has the
 	// same shape: the DDL's exclusive hold covers only the registration, and extending
-	// it over the backfill would mean the scan could no longer use [lpg.Graph.View]
+	// it over the backfill would mean the scan could no longer use lpg.Graph.View
 	// (visMu is not re-entrant)."
 	//
 	// THAT OBSTACLE NO LONGER EXISTS. rmp #2344 removed Graph.View outright, and the
@@ -2333,9 +2343,12 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 // what makes that class of defect unrepresentable, so DO NOT reintroduce a
 // second gate-resolution site for rendering.
 //
-// The caller must already hold the graph's read barrier ([lpg.Graph.View]): the
-// cost gates read live label counts, the node total, and count-store cells, and
-// they must all come from one consistent snapshot.
+// The caller must already have pinned a snapshot ([lpg.Graph.BeginRead] plus
+// [lpg.Graph.ReadAt]): the cost gates read live label counts, the node total, and
+// count-store cells, and they must all come from one consistent instant. (This
+// used to say "must already hold the graph's read barrier"; rmp #2344 removed
+// lpg.Graph.View and a read takes no barrier at all — the snapshot's start
+// timestamp is what makes the correlated reads agree.)
 //
 // prof is nil for an ordinary execution and non-nil only for [Engine.Profile];
 // it is threaded onto the build options so the single wrapping point in
@@ -2368,6 +2381,13 @@ func (e *Engine) buildReadPhysical(
 	patEval := newPatternEvaluator(rv, e.maxCollectItems)
 	bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx, maxCollectItems: e.maxCollectItems}
 	bopts.profiler = prof
+	// Point the build at this plan's cross-execution analysis memo (rmp #2383).
+	// entry is nil on no read path today, but the guard keeps the coupling
+	// one-directional: a future caller without an entry loses the memo, not the
+	// build.
+	if entry != nil {
+		bopts.scalarUseMemo = &entry.scalarUse
+	}
 	// Edge-type-filter cache sharing (#1871): the SAME cache instance
 	// serves every concurrent Run call, so a relationship-type-filtered
 	// pattern amortises its O(V+E) build across the whole Engine's query
@@ -3773,7 +3793,7 @@ func commitIndexTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind txn.Inde
 // tombstone, label, and property state after every shard lock is released. The
 // keys are interned and immutable, so resolving them outside the walk is safe.
 //
-// It takes NO BARRIER. Both phases used to run inside [lpg.Graph.View] (task
+// It takes NO BARRIER. Both phases used to run inside lpg.Graph.View (task
 // #1341) for CATALOG stability across the scan. [Engine.schemaMu] supplies that
 // already, and strictly better: every catalog mutator — both [lpg.Graph.ApplyAtomically]
 // call sites, and every DDL entry point (runCreateBTreeIndex, runCreateHashIndex,
@@ -4046,10 +4066,10 @@ func (b *globalMemBudget) release(n int64) {
 //
 //   - 0 (the zero value)               → the GOMEMLIMIT-derived default: half of
 //     the Go soft memory limit when the operator has set one (via GOMEMLIMIT or
-//     [runtime/debug.SetMemoryLimit]), else 0 (unlimited). Tying the default to
-//     the operator's own declared memory budget gives default-on protection
-//     precisely when a budget exists, and never rejects a legitimate workload on
-//     a host whose memory the module cannot know.
+//     [runtime/debug.SetMemoryLimit]), else [DefaultGlobalMaxResultBytes]. Tying
+//     the default to the operator's own declared memory budget gives protection
+//     scaled to that budget precisely when one exists; when none does, the
+//     absolute default applies rather than no ceiling at all.
 //   - [GlobalMaxResultBytesUnlimited]  → 0 (unlimited, the explicit opt-out)
 //   - a positive value                 → used verbatim (bytes)
 func resolveGlobalMaxResultBytes(opt int64) int64 {
@@ -4063,9 +4083,32 @@ func resolveGlobalMaxResultBytes(opt int64) int64 {
 		if lim > 0 && lim < math.MaxInt64 {
 			return lim / 2
 		}
-		return 0
+		// No soft memory limit to derive from. This branch used to return 0, i.e.
+		// no engine-wide ceiling, which is the state of any process that has not
+		// set GOMEMLIMIT — see [DefaultGlobalMaxResultBytes].
+		return DefaultGlobalMaxResultBytes
 	}
 }
+
+// DefaultGlobalMaxResultBytes is the engine-wide result-byte ceiling applied when
+// [EngineOptions.GlobalMaxResultBytes] is left at zero AND the process has no Go
+// soft memory limit to derive one from.
+//
+// The per-query budget is finite by default ([DefaultMaxResultBytes], 1 GiB), but
+// a per-query bound says nothing about the sum: N concurrent clients each staying
+// inside their own 1 GiB may still materialise N GiB, and the engine-wide ceiling
+// is the only bound that governs that. Because the GOMEMLIMIT derivation above
+// yields nothing when no memory limit is set — the Go runtime's default state —
+// that ceiling was absent in the commonest deployment, so the aggregate was
+// bounded only by the concurrency the caller admitted. Under the extreme
+// concurrency this module targets, the aggregate is the bound that matters.
+//
+// The value is 4 GiB: 4x the per-query default, so a workload that legitimately
+// runs several large results concurrently is unaffected, while a fleet of
+// concurrent large-result queries is bounded. A deployment that sets GOMEMLIMIT
+// keeps the derived half and is unaffected; [GlobalMaxResultBytesUnlimited]
+// remains the explicit opt-out.
+const DefaultGlobalMaxResultBytes int64 = 4 << 30 // 4 GiB
 
 // MaxCollectItemsUnlimited is the explicit opt-out sentinel for
 // [EngineOptions.MaxCollectItems]: set the field to this value to disable the
@@ -4366,6 +4409,160 @@ type planCacheEntry struct {
 	// query with no single-edge pattern pays nothing at build time. nil when the
 	// query has no candidate.
 	anchorSwapCandidates []anchorSite
+	// scalarUse memoises [analyseNodeScalarUse] across executions of this plan
+	// (rmp #2383). It is the same class as the four fields above — a pure function
+	// of the immutable plan — but it is filled LAZILY rather than at entry
+	// creation, and that difference is deliberate.
+	//
+	// Eager population would have to walk the plan and predict which expressions
+	// the build will analyse, duplicating knowledge that lives in the builder; a
+	// position missed by that walk is silently never memoised. Filling it from the
+	// build's own call sites cannot drift.
+	//
+	// It is therefore the one field that is written after loadOrStore, which is
+	// why it is a [nodeScalarUseMemo] rather than a plain map — see that type for
+	// the concurrency argument and for the ceiling that keeps it bounded. Every
+	// value it holds is immutable once stored, so concurrent readers observe a
+	// fully built analysis or none.
+	scalarUse nodeScalarUseMemo
+}
+
+// nodeScalarUseMemo memoises [analyseNodeScalarUse] per AST expression for the
+// lifetime of one [planCacheEntry].
+//
+// # Why it exists
+//
+// The analysis is a pure function of an immutable [ast.Expression], yet it ran on
+// EVERY execution at three build sites. Measured on
+// examples/35_mvcc_mixed_workload (an indexed point lookup at ~780k ops/s), it was
+// 18.63% of all heap allocation in the process — it builds a map plus two sets per
+// node variable, and then the build throws the whole thing away when the query
+// ends. Memgraph derives the analogous per-plan fact once at plan construction and
+// reuses it for every execution served from that plan
+// (src/query/cypher_query_interpreter.hpp: "A pure function of the plan, so it is
+// derived once at construction and reused … every time this plan is served").
+//
+// # Concurrency
+//
+// Safe for concurrent use. A [planCacheEntry] is shared by every concurrent
+// execution of the same query text, so this is a read-mostly cache reached from
+// many goroutines: [sync.Map] is used because after the first execution there are
+// no more stores at all, and its read path is then an atomic load with no lock.
+//
+// Two properties make sharing sound, and both are load-bearing:
+//
+//   - Stores go through LoadOrStore, so every caller for a given expression
+//     receives the SAME analysis. A concurrent double-compute wastes one analysis
+//     and stores one of them; it cannot produce two divergent answers, because the
+//     function is pure.
+//   - A stored analysis is IMMUTABLE. No consumer writes to the returned map, to a
+//     *nodeScalarUse in it, or to the sets inside one — the same invariant rmp
+//     #2386 already relies on when it hands presenceMaps to concurrent row workers
+//     without synchronisation. A consumer that mutated one would now corrupt every
+//     later execution of the query, so [TestNodeScalarUseMemoValueIsNotMutated]
+//     pins it.
+//
+// # Bound — and why an explicit ceiling is REQUIRED, not belt-and-braces
+//
+// The obvious argument is that the table is bounded by the number of distinct
+// expressions in one query, since every execution of one cached plan runs the same
+// build over the same plan. **That argument is false, and assuming it would make
+// this an unbounded cache.** Two build paths synthesise a FRESH ast node on every
+// execution and hand it straight to the analyser:
+//
+//   - the min-label re-anchor — ENABLED BY DEFAULT, and firing on any multi-label
+//     pattern — builds a residual predicate at min_label_scan_plan.go:251;
+//   - the single-edge anchor swap builds one at anchor_swap_plan.go:300 and wraps
+//     it in a fresh ir.Selection reached through the ordinary Selection build.
+//
+// For those shapes a pointer key can never hit, so each execution would add an
+// entry for as long as the plan stayed cached. [scalarUseMemoMaxEntries] is the
+// ceiling that makes that impossible: past it the memo stops storing and simply
+// answers from the live analysis, which is exactly today's behaviour. Bounded also
+// by the entry's own lifetime — the table is dropped with the entry, including by
+// ClearPlanCache on any schema-changing DDL.
+//
+// The stable shapes are unaffected: their expressions are read straight off the
+// cached IR, so they are stored once, well inside the ceiling, and hit forever.
+type nodeScalarUseMemo struct {
+	m sync.Map // ast.Expression (always a pointer type) -> *nodeScalarAnalysis
+
+	// entries counts what has been stored, so the ceiling can be enforced without
+	// walking the sync.Map (which has no Len). It is only ever incremented, and it
+	// may overshoot the ceiling slightly under a concurrent burst of first-time
+	// stores — which is harmless: the bound it enforces is a ceiling on unbounded
+	// GROWTH, not an exact quota.
+	entries atomic.Int64
+
+	// hits and misses exist so a test can prove the memo is CONSULTED rather than
+	// merely present — a memo that is populated but never read is invisible to a
+	// result-identical differential test.
+	hits   atomic.Int64
+	misses atomic.Int64
+}
+
+// scalarUseMemoMaxEntries is the ceiling on entries in one [nodeScalarUseMemo].
+//
+// It exists because two build paths synthesise a fresh predicate per execution
+// (see [nodeScalarUseMemo]), so the table would otherwise grow with the execution
+// count. 256 is chosen to sit far above the number of distinct expressions any
+// realistic single query analyses — the shapes measured for rmp #2383 store
+// between 1 and 4 — while capping the worst case at a few hundred small maps per
+// cached plan.
+const scalarUseMemoMaxEntries = 256
+
+// nodeScalarAnalysis is one memoised [analyseNodeScalarUse] result: the pair it
+// returns, kept together so a single map lookup answers both. Immutable once
+// stored in a [nodeScalarUseMemo].
+type nodeScalarAnalysis struct {
+	uses    map[string]*nodeScalarUse
+	bailout bool
+}
+
+// get returns the memoised analysis of x, computing and storing it on a miss.
+//
+// The (uses, bailout) pair is returned RAW, exactly as [analyseNodeScalarUse]
+// produced it: the three call sites apply different gates to a bailout — two null
+// the analysis outright, the projection builder folds it together with
+// needsWholeNode — so the memo must not pre-apply any of them.
+func (m *nodeScalarUseMemo) get(x ast.Expression) (map[string]*nodeScalarUse, bool) {
+	if x == nil {
+		// Not memoised: a nil expression is not a valid map key here and the
+		// analysis of one is trivially empty.
+		return analyseNodeScalarUse(x)
+	}
+	if v, ok := m.m.Load(x); ok {
+		m.hits.Add(1)
+		a := v.(*nodeScalarAnalysis)
+		return a.uses, a.bailout
+	}
+	m.misses.Add(1)
+	uses, bailout := analyseNodeScalarUse(x)
+	if m.entries.Load() >= scalarUseMemoMaxEntries {
+		// Ceiling reached: answer from the live analysis and store nothing. This is
+		// the path a per-execution synthesised predicate settles into, and it is
+		// exactly the behaviour that preceded the memo.
+		return uses, bailout
+	}
+	actual, loaded := m.m.LoadOrStore(x, &nodeScalarAnalysis{uses: uses, bailout: bailout})
+	if !loaded {
+		m.entries.Add(1)
+	}
+	a := actual.(*nodeScalarAnalysis)
+	return a.uses, a.bailout
+}
+
+// analyseNodeScalarUseFor routes the analysis of x through the memo on bopts when
+// there is one, and calls [analyseNodeScalarUse] directly when there is not.
+//
+// The fallback is not dead code: buildOpts is also built on paths that have no
+// plan-cache entry to memoise against — the plan-rendering paths and the write
+// path's own builder — and those must keep working, just without the memo.
+func analyseNodeScalarUseFor(bopts *buildOpts, x ast.Expression) (map[string]*nodeScalarUse, bool) {
+	if bopts == nil || bopts.scalarUseMemo == nil {
+		return analyseNodeScalarUse(x)
+	}
+	return bopts.scalarUseMemo.get(x)
 }
 
 // parseAndAnalyse parses, runs the scope analyser, and translates query into
@@ -5239,8 +5436,12 @@ func estimateRelSize(r expr.RelationshipValue) int64 {
 // enforcing the durable-then-visible ordering ACID Durability requires
 // (#1281). The visibility barrier (visMu) is still held when this runs, so
 // whatever decision it makes — keep the writes or roll them back — becomes
-// observable to a concurrent [lpg.Graph.View] reader as a single atomic step,
-// and the WAL fsync that gates "keep" happens-before that visibility flip.
+// observable to a concurrent SNAPSHOT reader as a single atomic step, and the WAL
+// fsync that gates "keep" happens-before that visibility flip. (This used to name
+// a concurrent lpg.Graph.View reader; rmp #2344 removed that reader. The property
+// survives for snapshot readers because the statement's writes share one
+// transaction record and rmp #2378 pinned the visibility verdict per record —
+// measured zero tears in 300 runs.)
 //
 // It is a no-op for read queries (buf == nil and tx == nil) and is idempotent
 // (bufHandled / walHandled). The keep/roll-back decision uses the
@@ -5410,7 +5611,7 @@ func (r *Result) commitUnderBarrier() {
 // rollbackUnderBarrier undoes a write query's eager in-memory mutations,
 // secondary-index buffer, and WAL transaction, all while the visibility barrier
 // is still held, so the rolled-back transaction never becomes observable to a
-// concurrent [lpg.Graph.View] reader (#1282 for the in-memory undo, #1281 for
+// concurrent snapshot reader (#1282 for the in-memory undo, #1281 for
 // the WAL rollback). It is shared by the drain-error and fsync-failure branches
 // of commitUnderBarrier. The undo runs first so the secondary indexes are
 // dropped only after the graph entries they describe are gone; the WAL
@@ -5972,6 +6173,26 @@ func (s *lpgLabelResolver) ResolveLabelCount(name string) (int64, bool) {
 	return s.g.Raw().LabelCountExact(lid, s.g.Snapshot())
 }
 
+// ResolveLabelCountBound reports an UPPER BOUND on the number of live nodes that
+// carry name, allocating nothing, together with whether that bound is exact.
+//
+// It backs the planner's cheap threshold screens, which ask only whether a
+// cardinality can EXCEED a threshold — a question a bound answers and an exact
+// count is not needed for. [lpgLabelResolver.ResolveLabelCount] declines the
+// moment any history is live, which in a mixed read/write workload is always, and
+// that forced the screens to materialise a bitmap to learn what they could have
+// bounded for three atomic loads (rmp #2392). An unknown label yields (0, true),
+// matching [lpgLabelResolver.ResolveLabelBitmap]'s empty bitmap.
+//
+// See [lpg.Graph.LabelCountBound] for why the bound is sound.
+func (s *lpgLabelResolver) ResolveLabelCountBound(name string) (int64, bool) {
+	lid, ok := s.g.Registry().Lookup(name)
+	if !ok {
+		return 0, true
+	}
+	return s.g.Raw().LabelCountBound(lid, s.g.Snapshot())
+}
+
 // ResolveLabelID reports the stable interned id of name, used only to break
 // ties between equal-cardinality labels deterministically (#2077). ok is false
 // for a label that was never interned (which necessarily has zero live nodes),
@@ -6004,8 +6225,10 @@ var parallelCountScanBuildCount atomic.Uint64
 // false and therefore keeps the serial path.
 //
 // The live count is read via [lpg.Graph.LiveOrder], which the build already
-// observes under the visibility-barrier RLock ([lpg.Graph.View]); it is stable
-// for the query's lifetime.
+// observes through the query's pinned snapshot; it is stable for the query's
+// lifetime. (This used to say "under the visibility-barrier RLock"; rmp #2344
+// removed lpg.Graph.View and the stability now comes from the snapshot's start
+// timestamp rather than from holding a lock.)
 func useParallelScan(walker nodeWalkerIface, bopts *buildOpts) bool {
 	if bopts == nil || !bopts.parallelScanEnabled {
 		return false
@@ -6033,6 +6256,17 @@ func useParallelScanForRows(rows uint64, bopts *buildOpts) bool {
 // ─────────────────────────────────────────────────────────────────────────────
 // BuildPlan — IR → physical operator tree
 // ─────────────────────────────────────────────────────────────────────────────
+
+// parallelScanCheapDeclineCount counts how many times the single-label
+// parallel-scan gate declined on the ZERO-ALLOCATION cardinality screen, i.e.
+// without materialising the label's bitmap (rmp #2380).
+//
+// It is a diagnostic seam read only by the in-package regression test: an
+// allocation pin alone cannot distinguish "the screen worked" from "the shape
+// never reached the gate", and that distinction is the whole finding.
+// Process-global and monotonic; tests snapshot it around a query rather than
+// resetting it.
+var parallelScanCheapDeclineCount atomic.Uint64
 
 // nodeWalkerIface is the minimal interface needed from a node source.
 type nodeWalkerIface interface {
@@ -9329,10 +9563,50 @@ func tryBuildParallelScanProject(
 		// on that label's own cardinality (#2187), so a small label inside a large graph
 		// stays serial.
 		if leafLabel != "" {
+			// Screen on the CHEAP count before materialising anything.
+			//
+			// A gate must cost less than the decision it informs — the same rule
+			// [exactIntersectionCardinality] states for the multi-label sibling, and
+			// for the same measured reason. newLabelWalker below obtains the label's
+			// bitmap, and obtaining it CLONES the label's live set; the threshold is a
+			// strict card > parallelScanThreshold (50 000 by default), so every graph
+			// smaller than that paid a full clone for an answer that was always "no"
+			// and then discarded it. Measured on examples/35_mvcc_mixed_workload — 3000
+			// nodes, so the gate can never admit — that clone was 47.9% of ALL
+			// allocation in the process, against 50 MB for the serial scans it declined
+			// to parallelise: the gate cost about 130x the work it was deciding about
+			// (rmp #2380).
+			//
+			// The screen reads an UPPER BOUND on the label cardinality and allocates
+			// nothing. A bound is all this decision needs: if the cardinality CANNOT
+			// exceed the threshold then the parallel path is out, whatever the exact
+			// count turns out to be.
+			//
+			// It used to demand an EXACT count, and that made it useless in exactly
+			// the workload it was written for. The exact count is unavailable whenever
+			// the label bitmap would need snapshot filtering — i.e. whenever any MVCC
+			// history is live — so a single concurrent writer made the screen abstain
+			// on every query and fall through to materialising the bitmap below, only
+			// to decline on it anyway. Measured on examples/35_mvcc_mixed_workload with
+			// the ingest interval as the only variable: with writes every 100 ms the
+			// clone was 4.1 GB of the run; with writes effectively off, newLabelWalker
+			// vanished from the heap profile entirely (rmp #2392).
+			if lc, ok := labelSrc.(labelBounder); ok {
+				if n, _ := lc.ResolveLabelCountBound(leafLabel); n >= 0 &&
+					!useParallelScanForRows(uint64(n), bopts) {
+					parallelScanCheapDeclineCount.Add(1)
+					return nil, false, nil
+				}
+			}
 			lblWalker, card, resolved := newLabelWalker(leafLabel, labelSrc)
 			if !resolved {
 				return nil, false, nil
 			}
+			// Re-checked on the materialised bitmap's own cardinality, which stays the
+			// authoritative one: the screen above can abstain, and it samples suspect
+			// nodes at a different instant, so it decides only the clear-cut "far below
+			// the threshold" case. Both answers select an execution strategy, never a
+			// result — the parallel and serial plans emit identical rows.
 			if !useParallelScanForRows(card, bopts) {
 				return nil, false, nil
 			}
@@ -10470,8 +10744,39 @@ func newAggregationEval(
 ) func(exec.Row) (expr.Value, error) {
 	// AST path — always preferred when present.
 	if astExpr != nil {
+		// DEMAND-GATE THE ROW CONTEXT (#1630, extended here to the aggregation
+		// pre-projection). Without it this closure built a FULL value for every
+		// variable in the row, once per row — including, for an edge variable, its
+		// type, its endpoints and its whole property map. A grouped aggregation over
+		// a relationship pattern names no relationship at all:
+		//
+		//	MATCH (u:USER)-[:FRIEND]->(:USER) WITH u, count(*) AS deg
+		//	MATCH (:USER)-[:LIKE]->(a:ARTICLE) RETURN a.id, count(*)
+		//
+		// so that materialisation was pure waste. A CPU profile of
+		// examples/26_social_scale_bench attributed 17.16% of ALL samples to
+		// buildRelationshipValueFromRow, reached only from populateRowCtx, of which
+		// 46.8% was buildEdgeProps alone.
+		//
+		// analyseNodeScalarUse runs ONCE at build time and a bailout restores the
+		// previous eager path exactly. The context is built through
+		// buildRowCtxWithUse, whose arena is nil, so every value handed to the
+		// expression is independently allocated and may escape into the projected
+		// row — the property populateRowCtx documents for that path. The gate
+		// therefore only ever OMITS variables the expression never names, and a
+		// variable it never names cannot appear in its result.
+		//
+		// Measured interleaved, 4 pairs, examples/26 at 60k users: top_articles
+		// 2.983-3.004s -> 1.135-1.163s (-61.8%), friend_degree 4.227-4.249s ->
+		// 1.695-1.709s (-59.9%), and the count_friend control flat at 1.77-1.83s ->
+		// 1.75-1.78s, which is what rules out a machine-wide drift reading.
+		// TCK 3897/3897 unchanged.
+		scalarUse, bail := analyseNodeScalarUseFor(bopts, astExpr)
+		if bail {
+			scalarUse = nil
+		}
 		return func(row exec.Row) (expr.Value, error) {
-			rowCtx := buildRowCtx(row, schemaSnap, g, bopts)
+			rowCtx := buildRowCtxWithUse(row, schemaSnap, g, bopts, scalarUse)
 			return evalRow(bopts, astExpr, rowCtx, params, reg)
 		}
 	}
@@ -11487,7 +11792,9 @@ func edgePropsToExprMap(g *lpg.ReadView[string, float64], srcKey, dstKey string)
 // Isolation: it returns a freshly owned map and aliases no graph-internal state;
 // it is safe for concurrent use under the same per-shard contract as
 // [lpg.Graph.EdgePropertiesByHandle]. To read a view consistent with the
-// adjacency layer, the caller brackets the correlated reads under [lpg.Graph.View].
+// adjacency layer, the caller resolves the correlated reads through one
+// [lpg.ReadView] pinned by [lpg.Graph.BeginRead] / [lpg.Graph.ReadAt] and released
+// with [lpg.Graph.EndRead] — which is exactly what the g parameter already is.
 func edgePropsByHandleToExprMap(g *lpg.ReadView[string, float64], srcKey, dstKey string, handle uint64) expr.MapValue {
 	raw := g.EdgePropertiesByHandle(srcKey, dstKey, handle)
 	if len(raw) == 0 {
@@ -11690,6 +11997,26 @@ type nodeScalarUse struct {
 	// always disjoint. presenceKeys is consulted only for relationship variables
 	// today; for node variables it is harmless (the node path ignores it).
 	presenceKeys map[string]struct{}
+	// presenceKeyOrder and presenceMaps intern the presence path's answer (rmp
+	// #2386). The map that path returns holds one constant placeholder per
+	// PRESENT key, so for a fixed key set there are only 2^N distinct answers —
+	// yet the row path allocated a fresh map for each row to express one of them.
+	// Measured on examples/26 at 20k users: 2.00 GB over 6 511 214 calls, about
+	// 330 B allocated to deliver a boolean, 6.1% of that run's total allocation.
+	//
+	// Both are built ONCE, at the end of [analyseNodeScalarUse], and are read-only
+	// afterwards, which is what makes them safe to hand to concurrent row workers
+	// without synchronisation. presenceKeyOrder fixes the bit position of each key
+	// (map iteration order is random and could not index a table); presenceMaps is
+	// indexed by the resulting present-set mask, and presenceMaps[0] is nil — the
+	// same absent-map the per-row build returned when no key was present.
+	//
+	// Both are nil when the key set is empty or larger than
+	// [presenceInternMaxKeys], in which case the per-row build is used unchanged.
+	// The bound is what keeps the table from growing exponentially on a
+	// pathological predicate.
+	presenceKeyOrder []string
+	presenceMaps     []expr.MapValue
 	// needsLabels is set by a label predicate `n:Label` or other label-MEMBERSHIP
 	// reader. It is satisfied by the lazy on-demand path (a [expr.LazyNodeValue]
 	// answers HasLabel without enumerating the full label set), so it does NOT by
@@ -11894,8 +12221,51 @@ func analyseNodeScalarUse(e ast.Expression) (uses map[string]*nodeScalarUse, bai
 				delete(u.presenceKeys, k)
 			}
 		}
+		u.internPresenceMaps()
 	}
 	return uses, bailout
+}
+
+// presenceInternMaxKeys bounds the interned presence table at 2^4 = 16 maps per
+// variable. One presence key is the shape that occurs in practice (`WHERE
+// r.k IS NOT NULL`); the bound exists so a predicate naming many presence-only
+// keys falls back to the per-row build instead of materialising an exponential
+// table.
+const presenceInternMaxKeys = 4
+
+// internPresenceMaps precomputes every answer the presence path can return for
+// this variable, so the row path can select one instead of allocating one.
+//
+// It must run AFTER the C1 reconciliation above has removed the keys that are
+// also value uses, because the table is indexed by the final key set. It is the
+// only writer of presenceKeyOrder/presenceMaps; every later reader is read-only,
+// which is what makes the shared maps safe under the concurrent row workers a
+// parallel scan creates.
+func (u *nodeScalarUse) internPresenceMaps() {
+	n := len(u.presenceKeys)
+	if n == 0 || n > presenceInternMaxKeys {
+		return
+	}
+	u.presenceKeyOrder = make([]string, 0, n)
+	for k := range u.presenceKeys {
+		u.presenceKeyOrder = append(u.presenceKeyOrder, k)
+	}
+	// Sorted so the bit positions are stable for a given key set rather than
+	// dependent on map iteration order.
+	slices.Sort(u.presenceKeyOrder)
+
+	u.presenceMaps = make([]expr.MapValue, 1<<n)
+	for mask := 1; mask < 1<<n; mask++ {
+		m := make(expr.MapValue, n)
+		for i, k := range u.presenceKeyOrder {
+			if mask&(1<<i) != 0 {
+				m[k] = relPresencePlaceholder
+			}
+		}
+		u.presenceMaps[mask] = m
+	}
+	// presenceMaps[0] stays nil: the per-row build returned an absent map when no
+	// key was present, and box-at-sink must keep seeing exactly that.
 }
 
 // classifyFieldExtractor recognises a call of the form f(<bare variable>) where
@@ -12982,8 +13352,23 @@ func buildEdgeProps(g *lpg.ReadView[string, float64], stKey, enKey string, fwdHa
 	// that records a by-handle property without a by-handle label; today every
 	// by-handle edge also has its type recorded, which is what hasByHandleEntry
 	// already captures from the type-resolution path.
+	//
+	// The probe is skipped when the graph has NEVER recorded a by-handle edge
+	// property (rmp #2387). That leaves the routing decision below unchanged
+	// rather than approximating it: with the latch false the by-handle store is
+	// provably empty, so edgePropsByHandleToExprMap could only return nil, so
+	// the len(byHandle) > 0 disjunct could only be false — and the decision
+	// reduces to hasByHandleEntry, which is resolved from the separate by-handle
+	// TYPE store and is untouched here. When hasByHandleEntry DOES hold the
+	// probe still runs, because byHandle is then the value source every branch
+	// reads. The future writer the disjunct exists for is preserved too: a
+	// writer that records a by-handle property without a by-handle label sets
+	// the latch by doing so, which re-enables the probe that then observes it.
+	// The latch is one atomic load in place of two Mapper lookups, a shard
+	// mutex and a double map lookup, and the load is only reached when a handle
+	// is actually bound.
 	var byHandle expr.MapValue
-	if fwdHandle != 0 {
+	if fwdHandle != 0 && (hasByHandleEntry || g.AnyEdgeHandlePropertyEverWritten()) {
 		byHandle = edgePropsByHandleToExprMap(g, stKey, enKey, fwdHandle)
 	}
 	useByHandle := fwdHandle != 0 && (hasByHandleEntry || len(byHandle) > 0)
@@ -13005,6 +13390,22 @@ func buildEdgeProps(g *lpg.ReadView[string, float64], stKey, enKey string, fwdHa
 			return out
 		case len(relUse.presenceKeys) > 0:
 			// r.k IS [NOT] NULL only (#1638): presence placeholders.
+			//
+			// The presence answer is one of only 2^N maps for a fixed key set, all
+			// of them precomputed and read-only on the nodeScalarUse (rmp #2386), so
+			// the row selects one instead of allocating one. The storage presence
+			// check per key is unchanged and still runs per row — only the container
+			// is shared. Falls back to the per-row build when the table was not
+			// interned (an empty or oversized key set).
+			if relUse.presenceMaps != nil {
+				mask := 0
+				for i, k := range relUse.presenceKeyOrder {
+					if relPresentByHandleOrPair(g, stKey, enKey, useByHandle, byHandle, k) {
+						mask |= 1 << i
+					}
+				}
+				return relUse.presenceMaps[mask]
+			}
 			var out expr.MapValue
 			for k := range relUse.presenceKeys {
 				if relPresentByHandleOrPair(g, stKey, enKey, useByHandle, byHandle, k) {
@@ -13989,7 +14390,7 @@ func buildIRProjection(
 				// any other whole-node use returns the node itself into the row, so
 				// it must keep full eager materialisation; the gate below disables
 				// the partial path for those cases by nulling scalarUse.
-				scalarUse, bail := analyseNodeScalarUse(capturedExpr)
+				scalarUse, bail := analyseNodeScalarUseFor(bopts, capturedExpr)
 				projectsWholeNode := bail
 				for _, u := range scalarUse {
 					if u.needsWholeNode {
@@ -14958,7 +15359,7 @@ func buildScalarPropertyChunkFiller(nodeChunkCol int, propName string, g *lpg.Re
 // disables the lazy path and restores full eager materialisation.
 func newRowPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, bopts *buildOpts) exec.FilterFn {
 	schemaSnap := copySchema(schema)
-	scalarUse, bail := analyseNodeScalarUse(predExpr)
+	scalarUse, bail := analyseNodeScalarUseFor(bopts, predExpr)
 	if bail {
 		scalarUse = nil
 	}
@@ -15705,7 +16106,7 @@ func (a *execLabelAdapter) ResolveLabelCount(name string) (int64, bool) {
 // violated, the WAL fsync fails, or the pipeline panics, the whole statement
 // rolls back: the undo log replays in reverse inside the write visibility
 // barrier, restoring the graph to its pre-statement state, before the barrier
-// is ever released — so a concurrent [lpg.Graph.View] reader can never
+// is ever released — so a concurrent snapshot reader can never
 // observe a partially-applied write. Only once every check passes does the
 // WAL fsync (durability before visibility), after which the undo log is
 // discarded.

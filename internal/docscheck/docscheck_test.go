@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -268,5 +269,135 @@ func TestSecurityAndReadmeLinks(t *testing.T) {
 	const wantAdvisory = "https://github.com/FlavioCFOliveira/GoGraph/security/advisories/new"
 	if !strings.Contains(sec, wantAdvisory) {
 		t.Errorf("SECURITY.md does not contain the real advisory URL %q", wantAdvisory)
+	}
+}
+
+// exampleDirPattern matches an example sub-directory of examples/, which the
+// project's conventions name "<NN>_<slug>".
+var exampleDirPattern = regexp.MustCompile(`^\d\d_`)
+
+// exampleDirs returns the example sub-directories of examples/, sorted.
+func exampleDirs(t *testing.T, root string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(root, "examples"))
+	if err != nil {
+		t.Fatalf("read examples/: %v", err)
+	}
+	var dirs []string
+	for _, e := range entries {
+		if e.IsDir() && exampleDirPattern.MatchString(e.Name()) {
+			dirs = append(dirs, e.Name())
+		}
+	}
+	sort.Strings(dirs)
+	return dirs
+}
+
+// TestExamplesIndexCoversEveryExample pins the examples/ index against the
+// directory listing.
+//
+// The examples are the module's exercise instruments, so an example that is not
+// indexed is an instrument nobody knows to run. This gate exists because
+// 37_mvcc_write_contention was absent from examples/README.md while the file's
+// opening line still claimed 34 examples against an actual 37 — a documentation
+// drift that no gate could see, since scripts/check_doc_freshness.sh does not
+// look at examples/ at all.
+//
+// It asserts three things the project's own rules require:
+//
+//   - every example directory is linked from examples/README.md;
+//   - every example directory carries its own README.md (the per-example
+//     README is mandatory, not optional);
+//   - the count stated in the index's opening sentence matches reality.
+func TestExamplesIndexCoversEveryExample(t *testing.T) {
+	root := repoRoot(t)
+	dirs := exampleDirs(t, root)
+	if len(dirs) == 0 {
+		t.Fatal("found no example directories under examples/")
+	}
+	index := readDoc(t, root, "examples/README.md")
+
+	for _, d := range dirs {
+		// The index links each example as "(<dir>/README.md)".
+		if !strings.Contains(index, d+"/README.md") {
+			t.Errorf("examples/README.md does not index example %q: every example must be "+
+				"listed so it can be found and run", d)
+		}
+		if _, err := os.Stat(filepath.Join(root, "examples", d, "README.md")); err != nil {
+			t.Errorf("example %q has no README.md of its own (%v): each example sub-folder "+
+				"must document its scenario, objective and purpose", d, err)
+		}
+	}
+
+	// "This directory contains N runnable, self-documenting examples" — the stated
+	// count is a fact about the tree, so it is pinned like any other.
+	countRe := regexp.MustCompile(`contains (\d+) runnable`)
+	m := countRe.FindStringSubmatch(index)
+	if m == nil {
+		t.Fatalf("examples/README.md does not state its example count in the expected "+
+			"\"contains N runnable\" form; found opening: %.120q", index)
+	}
+	stated, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatalf("parse stated example count %q: %v", m[1], err)
+	}
+	if stated != len(dirs) {
+		t.Errorf("examples/README.md states %d examples but examples/ holds %d: %v",
+			stated, len(dirs), dirs)
+	}
+}
+
+// TestEveryExampleCanProduceAProfile pins the profiling half of the examples
+// contract: every example binds examples/internal/exprof, so every one of them
+// accepts -profile-dir and -trace on identical terms.
+//
+// This gate exists because of what its absence cost. Before rmp #2377 only 2 of
+// the 37 examples exposed a profiling flag, and the single largest performance
+// finding of the 2026-08-09 certification — a relationship property map built
+// for a variable no query names, worth 2.5x on grouped aggregations — was
+// findable ONLY because one of those two happened to have it. The other 35
+// workloads, persistence and recovery and traversal and interchange and Bolt
+// among them, could not be attributed to a call site at all.
+//
+// It is a structural check on purpose: running 37 example binaries to completion
+// belongs in the certification sweep, not in the short test layer. What it
+// guarantees is that a new example cannot be added without the flag, which is
+// the drift that actually happens.
+func TestEveryExampleCanProduceAProfile(t *testing.T) {
+	root := repoRoot(t)
+	dirs := exampleDirs(t, root)
+	if len(dirs) == 0 {
+		t.Fatal("found no example directories under examples/")
+	}
+
+	for _, d := range dirs {
+		dir := filepath.Join(root, "examples", d)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Errorf("read example %q: %v", d, err)
+			continue
+		}
+		bound := false
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			src, err := os.ReadFile(filepath.Join(dir, name)) // #nosec G304 -- repo-relative example source.
+			if err != nil {
+				t.Errorf("read %s/%s: %v", d, name, err)
+				continue
+			}
+			if strings.Contains(string(src), "exprof.Bind(") {
+				bound = true
+				break
+			}
+		}
+		if !bound {
+			t.Errorf("example %q never calls exprof.Bind: it cannot produce a pprof profile, "+
+				"so its workload is unattributable to any call site. Bind the flags with "+
+				"exprof.Bind(flag.CommandLine) and drive the work through Config.Run "+
+				"(see examples/internal/exprof).", d)
+		}
 	}
 }

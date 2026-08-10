@@ -25,11 +25,13 @@ import (
 // command returns an error from openStore that points users at
 // `init -d <dir>`.
 func cmdSnapshot(args []string) error {
-	dir, _, err := parseDataDir("snapshot", args)
+	dir, _, prof, err := parseDataDir("snapshot", args)
 	if err != nil {
 		return err
 	}
-	return runSnapshot(context.Background(), dir, os.Stdout)
+	return prof.Run(os.Stdout, func() error {
+		return runSnapshot(context.Background(), dir, os.Stdout)
+	})
 }
 
 // runSnapshot is the entry point used by both cmdSnapshot and the

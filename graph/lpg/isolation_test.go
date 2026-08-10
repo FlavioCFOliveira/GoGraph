@@ -37,6 +37,12 @@ func TestIsolation_CrossSubstructure_EdgeImpliesLabels(t *testing.T) {
 		done      atomic.Bool
 		violation atomic.Int64
 		reads     atomic.Int64
+		// The first violating observation, so a failure names which pair
+		// disagreed rather than only how many did (rmp #2378).
+		firstSeen atomic.Bool
+		firstEdge atomic.Bool
+		firstLU   atomic.Bool
+		firstLV   atomic.Bool
 	)
 
 	wg.Add(1)
@@ -46,15 +52,57 @@ func TestIsolation_CrossSubstructure_EdgeImpliesLabels(t *testing.T) {
 		present := false
 		for i := 0; i < toggles; i++ {
 			want := !present
-			_ = g.ApplyAtomically(func() error {
+			// THE WRITES MUST SHARE ONE TRANSACTION RECORD, or they are not
+			// atomically visible to a snapshot reader — which is the whole
+			// subject of this test (rmp #2378).
+			//
+			// This used to call the bare autocommit methods inside
+			// [Graph.ApplyAtomically]. That bracket holds visGate exclusively, so
+			// it excludes other WRITERS, but each bare call passes a nil
+			// transaction and [Graph.deltaStamp] answers a nil record with
+			// `g.stamp.Stamp()` — A FRESH COMMIT INSTANT PER WRITE. The edge
+			// therefore committed at one instant and each label at a later one,
+			// and a reader whose startTS landed between them saw the edge without
+			// the labels. Measured under the gate's own environment (a full
+			// `go test -race ./...` as peer load): 5 violating runs in 40, with
+			// the signature `edge=true label(u)=false label(v)=false` — the ADD
+			// path, since the remove path takes the edge down first.
+			//
+			// A shared record makes deltaStamp return that record for every write,
+			// so all three land at one instant. The module states the requirement
+			// itself, on [Graph.ApplyInsideLockedTx]: "the statement must share the
+			// record the enclosing LockBarrier opened, or the explicit transaction
+			// is not atomically visible."
+			//
+			// THREADING ONE [WriteTx] IS NECESSARY AND NOT SUFFICIENT — the tear
+			// SURVIVES it, and rmp #2378 stays open.
+			//
+			// Measured under the same recipe with the writes threaded as below:
+			// 4 failing runs in 100, in BOTH pairings and BOTH directions —
+			// `label(u) != label(v)`, `edge=false label(u)=true label(v)=true`, and
+			// `edge=true label(u)=false label(v)=false`. So the fix above removes
+			// the three-separate-instants cause and something else remains.
+			//
+			// TWO DRAFTS OF THIS COMMENT WERE WRONG, both from too few samples:
+			// "0 violations in 60 runs" (from the first 20), then "the edge-vs-label
+			// signature is GONE" (from 3 samples that happened to be label-vs-label).
+			// Do not restate a signature from fewer than ~100 runs at this rate.
+			//
+			// What the instrumentation EXCLUDED: at a violation both nodes had live
+			// delta chains (`sh.d != nil` and `sh.d[id] != nil` for u and v, in
+			// different shards), so labelBagAsOfLocked's per-node present-time
+			// fallback is NOT the mechanism, and neither is the reclaim dropping a
+			// chain that was still needed.
+			_ = g.ApplyAtomicallyTx(func(tx WriteTx) error {
+				wv := g.Writer(tx)
 				if want {
-					_ = g.AddEdge("u", "v", 0)
-					_ = g.SetNodeLabel("u", "Hot")
-					_ = g.SetNodeLabel("v", "Hot")
+					_ = wv.AddEdge("u", "v", 0)
+					_ = wv.SetNodeLabel("u", "Hot")
+					_ = wv.SetNodeLabel("v", "Hot")
 				} else {
-					g.AdjList().RemoveEdge("u", "v")
-					g.RemoveNodeLabel("u", "Hot")
-					g.RemoveNodeLabel("v", "Hot")
+					wv.RemoveEdge("u", "v")
+					wv.RemoveNodeLabel("u", "Hot")
+					wv.RemoveNodeLabel("v", "Hot")
 				}
 				return nil
 			})
@@ -81,6 +129,24 @@ func TestIsolation_CrossSubstructure_EdgeImpliesLabels(t *testing.T) {
 					reads.Add(1)
 					if e != lu || e != lv {
 						violation.Add(1)
+						// WHICH PAIR disagreed, and what was actually seen (rmp #2378).
+						//
+						// This fired once under `make ci` on 2026-08-09 and has not
+						// reproduced in 24 attempts since, so the next occurrence may be
+						// the only other one for a long time and it must arrive
+						// diagnostic rather than as a bare count. The old message named
+						// "edge/label" for every case, but `e != lu || e != lv` also trips
+						// when the two LABEL reads disagree with EACH OTHER — u and v can
+						// hash to different label shards, which is a materially different
+						// suspect from edge-versus-label.
+						//
+						// Only the FIRST observation is kept, via CompareAndSwap: it is the
+						// one whose interleaving is least perturbed by the recording.
+						if firstSeen.CompareAndSwap(false, true) {
+							firstEdge.Store(e)
+							firstLU.Store(lu)
+							firstLV.Store(lv)
+						}
 					}
 				}()
 			}
@@ -89,7 +155,18 @@ func TestIsolation_CrossSubstructure_EdgeImpliesLabels(t *testing.T) {
 
 	wg.Wait()
 	if v := violation.Load(); v != 0 {
-		t.Fatalf("observed %d cross-substructure violations (edge/label disagreement inside a pinned SNAPSHOT)", v)
+		e, lu, lv := firstEdge.Load(), firstLU.Load(), firstLV.Load()
+		which := "edge disagrees with both labels"
+		switch {
+		case lu != lv:
+			which = "THE TWO LABELS DISAGREE WITH EACH OTHER (u and v may be in different label shards)"
+		case e != lu:
+			which = "the edge disagrees with the labels, which agree with each other"
+		}
+		t.Fatalf("observed %d cross-substructure violations inside a pinned SNAPSHOT "+
+			"(rmp #2378). First observation: edge=%v label(u)=%v label(v)=%v — %s. "+
+			"%d reads were taken",
+			v, e, lu, lv, which, reads.Load())
 	}
 	if reads.Load() == 0 {
 		t.Fatal("readers never read; test did not exercise the invariant")
@@ -113,11 +190,12 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 	g := New[string, int64](adjlist.Config{Directed: true})
 
 	// Seed both nodes.
-	if err := g.ApplyAtomically(func() error {
-		if err := g.SetNodeProperty("a", "v", Int64Value(0)); err != nil {
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+		wv := g.Writer(tx)
+		if err := wv.SetNodeProperty("a", "v", Int64Value(0)); err != nil {
 			return err
 		}
-		return g.SetNodeProperty("b", "v", Int64Value(0))
+		return wv.SetNodeProperty("b", "v", Int64Value(0))
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -139,11 +217,20 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 		defer wg.Done()
 		defer done.Store(true)
 		for i := int64(1); i <= iterations; i++ {
-			if err := g.ApplyAtomically(func() error {
-				if err := g.SetNodeProperty("a", "v", Int64Value(i)); err != nil {
+			// One shared transaction record, for the reason spelled out in
+			// TestIsolation_CrossSubstructure_EdgeImpliesLabels: the bare
+			// autocommit writes take a FRESH commit instant each
+			// ([Graph.deltaStamp] on a nil record), so a snapshot reader can land
+			// between a.v and b.v. This test was written for the Graph.View era
+			// and its READER was migrated to snapshots (rmp #2344) while its
+			// writer was not — the same latent defect as rmp #2378, in the same
+			// file (found while fixing that one).
+			if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+				wv := g.Writer(tx)
+				if err := wv.SetNodeProperty("a", "v", Int64Value(i)); err != nil {
 					return err
 				}
-				return g.SetNodeProperty("b", "v", Int64Value(i))
+				return wv.SetNodeProperty("b", "v", Int64Value(i))
 			}); err != nil {
 				writeErr.Add(1)
 				return

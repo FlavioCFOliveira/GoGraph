@@ -380,6 +380,11 @@ func (g *Graph[N, W]) setEdgePropertyByHandleIDInfo(srcID, dstID graph.NodeID, h
 	}
 	pid := g.pkeys.Intern(key)
 	k := edgeKey{src: srcID, dst: dstID}
+	// Latch BEFORE the lock; see [Graph.anyHandleProp] and the sibling comment
+	// in setEdgePropertyByHandleInfo. This is the recovery/snapshot-replay
+	// writer, so it is also the path that must re-latch a graph rebuilt from
+	// durable state — a restored by-handle property is a written one.
+	g.anyHandleProp.Store(true)
 	sh := g.edgeHandlePropShardFor(k)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()

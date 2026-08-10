@@ -20,7 +20,7 @@ import (
 // On a Cypher error, cmdQuery returns the wrapped error so main maps it
 // to exit code 1 and prints the diagnostic on stderr.
 func cmdQuery(args []string) error {
-	dir, rest, err := parseDataDir("query", args)
+	dir, rest, prof, err := parseDataDir("query", args)
 	if err != nil {
 		return err
 	}
@@ -28,15 +28,28 @@ func cmdQuery(args []string) error {
 	if err != nil {
 		return err
 	}
-	ctx := context.Background()
-	return runQuery(ctx, dir, query, os.Stdout)
+	return prof.Run(os.Stdout, func() error {
+		return runQuery(context.Background(), dir, query, os.Stdout)
+	})
 }
 
 // readQuery returns the Cypher text either from the first positional
 // argument or, if none is given, from r (typically os.Stdin). Empty
 // queries are rejected as usage errors so callers see a clear message
 // instead of an opaque parser error.
+//
+// Arguments beyond the first are rejected rather than ignored. Go's flag
+// package stops parsing at the first non-flag argument, so a flag written after
+// the query — `query -d dir "MATCH ..." -profile-dir /tmp/p` — is not a flag at
+// all but a trailing positional. Discarding it silently means the operator asked
+// for a profile, got exit 0, and got no profile: fail-silent, which this project
+// forbids. Naming the unconsumed arguments turns that into an actionable error.
 func readQuery(positional []string, r io.Reader) (string, error) {
+	if len(positional) > 1 {
+		return "", newUsageError("query: unexpected argument(s) after the query: %v; "+
+			"flags must precede the query text (Go's flag package stops parsing at the "+
+			"first positional argument)", positional[1:])
+	}
 	if len(positional) > 0 {
 		q := strings.TrimSpace(positional[0])
 		if q == "" {

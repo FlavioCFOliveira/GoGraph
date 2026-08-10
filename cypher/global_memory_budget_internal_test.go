@@ -36,10 +36,22 @@ func TestResolveGlobalMaxResultBytes_Policy(t *testing.T) {
 		}
 	})
 
-	t.Run("default_unlimited_when_no_gomemlimit", func(t *testing.T) {
+	// Previously "default_unlimited_when_no_gomemlimit", asserting 0. That pinned
+	// the defect as though it were the contract: an unset GOMEMLIMIT is the Go
+	// runtime's default, so the engine-wide ceiling was absent in the commonest
+	// deployment and N concurrent queries — each inside the finite per-query
+	// budget — summed without any bound. The zero value now always resolves to a
+	// finite ceiling; GlobalMaxResultBytesUnlimited above remains the only opt-out.
+	t.Run("default_finite_when_no_gomemlimit", func(t *testing.T) {
 		debug.SetMemoryLimit(math.MaxInt64) // the "no soft limit" value
-		if got := resolveGlobalMaxResultBytes(0); got != 0 {
-			t.Fatalf("default with no GOMEMLIMIT: got %d, want 0 (unlimited)", got)
+		got := resolveGlobalMaxResultBytes(0)
+		if got != DefaultGlobalMaxResultBytes {
+			t.Fatalf("default with no GOMEMLIMIT: got %d, want %d (DefaultGlobalMaxResultBytes)",
+				got, DefaultGlobalMaxResultBytes)
+		}
+		if got <= 0 {
+			t.Fatalf("default with no GOMEMLIMIT: got %d, which is unlimited; the zero value "+
+				"must select a bound, not the absence of one", got)
 		}
 	})
 }

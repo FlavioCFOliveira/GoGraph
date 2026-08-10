@@ -9,8 +9,19 @@
 // After a warm-up (first 2 windows) it fits a least-squares linear
 // regression on p99-over-time and asserts |slope| < 5 ms/window.
 //
-// Smoke (default / -short): 30 s with 8 goroutines.
-// Full soak (SOAK_FULL=1, no -short): 4 h with 64 goroutines.
+// # Which configurations actually assert the slope
+//
+//   - Short layer (plain -tags=soak): 10 s against a 30 s window, so the window
+//     ticker never fires and only the final partial window is collected — one
+//     window, of which the warm-up claims two. The slope check therefore CANNOT
+//     run and the test SKIPS rather than passing silently (rmp #2396).
+//   - Intermediate (documented): SOAK_P99_DURATION=100s SOAK_P99_WINDOW=10s
+//     gives 10 windows, 8 of them post-warm-up, so the slope check runs.
+//   - Full soak (SOAK_FULL=1, no -short): 4 h with 64 goroutines at a 30 s
+//     window, ~480 windows.
+//
+// Too few windows under SOAK_P99_* or SOAK_FULL is a FAILURE rather than a skip,
+// because those settings express an expectation that the criterion be evaluated.
 //
 // p99-over-time is written as CSV to bench/soak/soak-artefacts/p99-<ts>.csv.
 package main_test
@@ -41,9 +52,9 @@ import (
 )
 
 const (
-	p99WindowSize       = 30 * time.Second
-	p99WarmupWindows    = 2   // windows excluded from regression
-	p99EpsilonLatencyMs = 5.0 // ms per window
+	p99DefaultWindowSize = 30 * time.Second
+	p99WarmupWindows     = 2   // windows excluded from regression, always
+	p99EpsilonLatencyMs  = 5.0 // ms per window
 )
 
 // p99Window accumulates per-request latency samples for one 30-second window.
@@ -86,15 +97,24 @@ func (h *p99Histogram) P99Ms() float64 {
 
 // TestLatencyP99_Stable runs the p99 stability soak.
 func TestLatencyP99_Stable(t *testing.T) {
-	// Smoke: 10 s with 8 goroutines (collects latency samples, skips regression
-	// when fewer than 2 post-warm-up windows exist — that is expected for smoke).
-	// Full soak (SOAK_FULL=1, no -short): 4 h with 64 goroutines.
+	// Short layer: 10 s with 8 goroutines. Full soak: 4 h with 64.
+	//
+	// Duration and window size are both overridable, because with the 30 s
+	// default window no run shorter than four minutes can produce enough
+	// post-warm-up windows to regress at all — which is why the short layer's
+	// slope check has never asserted.
 	nGoroutines := 8
 	dur := 10 * time.Second
-	if !testing.Short() && os.Getenv("SOAK_FULL") == "1" {
+	if soakFullRun() {
 		nGoroutines = 64
 		dur = 4 * time.Hour
 	}
+	dur = soakEnvDuration("SOAK_P99_DURATION", dur)
+	windowSize := soakEnvDuration("SOAK_P99_WINDOW", p99DefaultWindowSize)
+	nGoroutines = soakEnvInt("SOAK_P99_GOROUTINES", nGoroutines)
+	t.Logf("p99_stable: config duration=%v window=%v goroutines=%d "+
+		"(expect ~%d windows, %d warm-up, need %d post-warm-up to assert)",
+		dur, windowSize, nGoroutines, int(dur/windowSize), p99WarmupWindows, minRegressionPoints)
 
 	// ── Build server ──────────────────────────────────────────────────────────
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
@@ -172,7 +192,7 @@ func TestLatencyP99_Stable(t *testing.T) {
 
 	// ── Window collector ──────────────────────────────────────────────────────
 	var windows []p99Window
-	windowTicker := time.NewTicker(p99WindowSize)
+	windowTicker := time.NewTicker(windowSize)
 	defer windowTicker.Stop()
 	windowIdx := 0
 	collectDone := make(chan struct{})
@@ -223,14 +243,22 @@ func TestLatencyP99_Stable(t *testing.T) {
 		t.Error("p99_stable: zero successful round-trips")
 	}
 
-	// Only include post-warm-up windows in the regression.
-	postWarmup := windows
+	// goleak first and unconditionally — see the same note in no_growth_test.go.
+	goleak.VerifyNone(t)
+
+	// Drop the warm-up windows ALWAYS, not only when more than p99WarmupWindows
+	// exist. The old guard (`if len(windows) > p99WarmupWindows`) meant a run
+	// producing exactly one or two windows regressed over the warm-up itself —
+	// precisely the windows excluded for being unrepresentative — so a short run
+	// could report a slope computed from the data the test declares invalid.
+	var postWarmup []p99Window
 	if len(windows) > p99WarmupWindows {
 		postWarmup = windows[p99WarmupWindows:]
 	}
-	if len(postWarmup) < 2 {
-		t.Log("p99_stable: insufficient post-warmup windows for regression; skipping slope check")
-		goleak.VerifyNone(t)
+	if !requireRegressionPoints(t, "p99_stable", len(postWarmup),
+		"run with SOAK_P99_DURATION=100s SOAK_P99_WINDOW=10s for 8 post-warm-up windows (~100 s), "+
+			"or SOAK_FULL=1 for the full 4-hour gate",
+		"SOAK_P99_DURATION", "SOAK_P99_WINDOW") {
 		return
 	}
 
@@ -244,8 +272,7 @@ func TestLatencyP99_Stable(t *testing.T) {
 		t.Errorf("p99_stable: p99 slope %.3f ms/window >= epsilon %.1f",
 			slope, p99EpsilonLatencyMs)
 	}
-
-	goleak.VerifyNone(t)
+	t.Logf("p99_stable: SLOPE CHECK ASSERTED over %d post-warm-up windows", len(postWarmup))
 }
 
 // p99WriteCSV writes the per-window p99 trace to soak-artefacts/p99-<ts>.csv.
