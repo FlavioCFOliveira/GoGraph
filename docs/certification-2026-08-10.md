@@ -421,8 +421,8 @@ around nothing. Corrected, with the measurement cited, in `lpg.go`, `store/txn/t
 |---|---|---|
 | `67977beb` | #2387 | skip the by-handle property probe behind a monotonic latch |
 | `c1c92c0a` | #2395 | record `ApplyAtomically` as the bulk-load bracket, and pin it |
-| see §13 | #2379 | retire the stale `Graph.View` godoc; correct the `ApplyAtomically` contract |
-| see §13 | — | this document, and the `bench/soak` transaction-bound fix of §5.1 |
+| `a6890fb4` | #2379 | retire the stale `Graph.View` godoc; correct the `ApplyAtomically` contract |
+| `145ca543` | — | this document, and the `bench/soak` transaction-bound fix of §5.1 |
 
 ## 13. Findings filed
 
