@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"sync"
 
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
@@ -151,3 +152,27 @@ func (c *planCache) Len() int {
 // Capacity returns the configured maximum. Intended for tests and
 // operational introspection.
 func (c *planCache) Capacity() int { return c.cap }
+
+// mergeAutoParams returns params extended with the auto-parameters
+// [parser.StripLiterals] hoisted out of the query text.
+//
+// The caller's map is never mutated: it belongs to the caller, may be reused
+// across executions, and may be read concurrently. When there is nothing to
+// merge the original map is returned unchanged, so the common path allocates
+// nothing.
+//
+// Auto-parameter names contain spaces and are backtick-quoted in the rewritten
+// text, so they cannot collide with a user parameter.
+func mergeAutoParams(params map[string]expr.Value, auto map[string]string) map[string]expr.Value {
+	if len(auto) == 0 {
+		return params
+	}
+	out := make(map[string]expr.Value, len(params)+len(auto))
+	for k, v := range params {
+		out[k] = v
+	}
+	for k, v := range auto {
+		out[k] = expr.StringValue(v)
+	}
+	return out
+}

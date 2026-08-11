@@ -570,7 +570,8 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 
 	queryReg := newNowAwareRegistry(tx.eng.reg, time.Now())
 
-	entry, err := tx.eng.parseAndAnalyse(query)
+	entry, autoParams, err := tx.eng.parseAndAnalyse(query)
+	params = mergeAutoParams(params, autoParams)
 	if err != nil {
 		return nil, err
 	}

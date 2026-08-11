@@ -1983,7 +1983,28 @@ func checkParamTypesCached(entry *planCacheEntry, params map[string]expr.Value) 
 	if len(params) == 0 {
 		return nil
 	}
-	return sema.CheckParams(entry.paramTypes, params)
+	// An AUTO-parameter is a literal the engine hoisted out of the query text
+	// (see [parser.StripLiterals]), so it must behave like the literal it
+	// replaced. This check exists to tell a caller that the value THEY supplied
+	// has the wrong type; openCypher says a type-incompatible LITERAL simply
+	// compares false and yields zero rows. Applying the check to a hoisted
+	// literal would turn `MATCH (n:Person {age: 'thirty'})` from an empty result
+	// into an error purely because of an internal rewrite.
+	inferred := entry.paramTypes
+	for name := range inferred {
+		if !parser.IsAutoParam(name) {
+			continue
+		}
+		filtered := make(map[string]expr.Kind, len(inferred))
+		for k, v := range inferred {
+			if !parser.IsAutoParam(k) {
+				filtered[k] = v
+			}
+		}
+		inferred = filtered
+		break
+	}
+	return sema.CheckParams(inferred, params)
 }
 
 // checkParamPresence validates that every parameter name referenced by the
@@ -2191,7 +2212,8 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 	}
 
 	// ── 1. Parse, analyse, and retrieve from plan cache ──────────────────────
-	entry, err := e.parseAndAnalyse(query)
+	entry, autoParams, err := e.parseAndAnalyse(query)
+	params = mergeAutoParams(params, autoParams)
 	if err != nil {
 		return nil, err
 	}
@@ -2494,7 +2516,8 @@ func (e *Engine) Explain(query string, params map[string]expr.Value) (s string, 
 	if ir.IsDDL(query) {
 		return "(DDL — no query plan)", nil
 	}
-	entry, err := e.parseAndAnalyse(query)
+	entry, autoParams, err := e.parseAndAnalyse(query)
+	params = mergeAutoParams(params, autoParams)
 	if err != nil {
 		return "", err
 	}
@@ -2549,7 +2572,8 @@ func (e *Engine) Profile(ctx context.Context, query string, params map[string]ex
 	if ir.IsDDL(query) {
 		return "", fmt.Errorf("cypher: Profile: DDL has no query plan")
 	}
-	entry, err := e.parseAndAnalyse(query)
+	entry, autoParams, err := e.parseAndAnalyse(query)
+	params = mergeAutoParams(params, autoParams)
 	if err != nil {
 		return "", err
 	}
@@ -2634,7 +2658,8 @@ func (e *Engine) ExplainLogical(query string, params map[string]expr.Value) (s s
 	if ir.IsDDL(query) {
 		return "(DDL — no query plan)", nil
 	}
-	entry, perr := e.parseAndAnalyse(query)
+	entry, autoParams, perr := e.parseAndAnalyse(query)
+	params = mergeAutoParams(params, autoParams)
 	if perr != nil {
 		return "", perr
 	}
@@ -4573,10 +4598,44 @@ func analyseNodeScalarUseFor(bopts *buildOpts, x ast.Expression) (map[string]*no
 // A non-nil error is returned only for parse or translation failures; a
 // semantically invalid (but parseable) query yields a cache entry whose
 // semaErr field is set, and parseAndAnalyse returns (entry, nil).
-func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
-	if v, ok := e.cache.get(query); ok {
-		return v, nil
+func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, map[string]string, error) {
+	// The cache is keyed on query text, so a query that inlines a rotating
+	// string literal would miss on every execution and pay a full parse —
+	// measured at 65% more CPU per query than the same query written with a
+	// parameter (docs/cpu-vs-neo4j-memgraph-2026-08-11.md §6). Hoisting the
+	// literal onto a parameter collapses every spelling onto one entry.
+	//
+	// The key is resolved BEFORE the cache is consulted, so each call performs
+	// exactly one counted lookup. Probing the raw text first and the rewritten
+	// text second would be cheaper by a hair and would report a permanent extra
+	// MISS for every hoisted query — a miss that can never become a hit, which
+	// makes the hit ratio lie. StripLiterals rejects a quote-free query in a
+	// single IndexByte pass, so a fully parameterised query pays almost nothing
+	// for the attempt.
+	key, auto := query, map[string]string(nil)
+	if stripped, hoisted, ok := parser.StripLiterals(query); ok {
+		key, auto = stripped, hoisted
 	}
+	if v, ok := e.cache.get(key); ok {
+		return v, auto, nil
+	}
+	entry, err := e.buildPlanCacheEntry(key)
+	if err != nil && key != query {
+		// The rewrite does not parse. Abandon it and use the original: the
+		// scanner may forgo an optimisation, never turn a working query into a
+		// failing one.
+		entry, err = e.buildPlanCacheEntry(query)
+		auto = nil
+	}
+	return entry, auto, err
+}
+
+// buildPlanCacheEntry parses, analyses and translates query, then publishes the
+// result under query's own text. It is the cache-miss half of
+// [Engine.parseAndAnalyse], split out so the literal-hoisting path can build an
+// entry for the rewritten text and fall back to the original when the rewrite
+// does not parse.
+func (e *Engine) buildPlanCacheEntry(query string) (*planCacheEntry, error) {
 	astNode, err := parser.Parse(query)
 	if err != nil {
 		return nil, fmt.Errorf("cypher: parse: %w", err)
@@ -16226,7 +16285,8 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 	// this point and there consults the registry.
 	stmtNow := time.Now()
 
-	entry, err := e.parseAndAnalyse(query)
+	entry, autoParams, err := e.parseAndAnalyse(query)
+	params = mergeAutoParams(params, autoParams)
 	if err != nil {
 		return nil, err
 	}

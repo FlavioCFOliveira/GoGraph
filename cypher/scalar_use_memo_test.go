@@ -29,6 +29,7 @@ import (
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/parser"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
@@ -58,6 +59,20 @@ var memoQueries = []string{
 
 // buildMemoGraph seeds a graph through the write path so the queries above have
 // something to match and the count store is populated as production maintains it.
+// planCacheKeyFor returns the key the engine actually files a query under.
+//
+// A query that inlines a hoistable string literal is cached under its REWRITTEN
+// text, not its original (rmp #2412), so a white-box lookup by the query as
+// written finds nothing. Deriving the key the same way the engine does keeps
+// these tests asserting what they were written to assert — that the memo is
+// consulted — instead of accidentally asserting how the cache is keyed.
+func planCacheKeyFor(q string) string {
+	if stripped, _, ok := parser.StripLiterals(q); ok {
+		return stripped
+	}
+	return q
+}
+
 func buildMemoGraph(t *testing.T) *lpg.Graph[string, float64] {
 	t.Helper()
 	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
@@ -90,7 +105,7 @@ func TestNodeScalarUseMemoIsConsulted(t *testing.T) {
 
 			// First execution: cold. Every analysed expression is a miss.
 			drainRows(t, e, q)
-			entry, ok := e.cache.get(q)
+			entry, ok := e.cache.get(planCacheKeyFor(q))
 			if !ok {
 				t.Fatalf("query is not in the plan cache after one execution")
 			}
@@ -134,7 +149,7 @@ func TestNodeScalarUseMemoValueIsNotMutated(t *testing.T) {
 			for i := 0; i < 5; i++ {
 				drainRows(t, e, q)
 			}
-			entry, ok := e.cache.get(q)
+			entry, ok := e.cache.get(planCacheKeyFor(q))
 			if !ok {
 				t.Fatalf("query is not in the plan cache")
 			}
@@ -173,7 +188,7 @@ func TestNodeScalarUseMemoObservesBothBailoutStates(t *testing.T) {
 	for _, q := range memoQueries {
 		e := NewEngine(g)
 		drainRows(t, e, q)
-		entry, ok := e.cache.get(q)
+		entry, ok := e.cache.get(planCacheKeyFor(q))
 		if !ok {
 			t.Fatalf("query %q is not in the plan cache", q)
 		}
@@ -231,7 +246,7 @@ func TestNodeScalarUseMemoIsBoundedForSynthesisedPredicates(t *testing.T) {
 		drainRows(t, e, q)
 	}
 
-	entry, ok := e.cache.get(q)
+	entry, ok := e.cache.get(planCacheKeyFor(q))
 	if !ok {
 		t.Fatalf("query is not in the plan cache")
 	}
@@ -292,7 +307,7 @@ func TestNodeScalarUseMemoConcurrentExecutions(t *testing.T) {
 	}
 	wg.Wait()
 
-	entry, ok := e.cache.get(q)
+	entry, ok := e.cache.get(planCacheKeyFor(q))
 	if !ok {
 		t.Fatalf("query is not in the plan cache")
 	}

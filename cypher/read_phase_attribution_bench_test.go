@@ -210,7 +210,7 @@ const (
 // must not grow a phase parameter for a benchmark's benefit, and a transcription that
 // drifts is caught by TestReadPhasePrefixMatchesRunRead.
 func (e *Engine) runReadPrefix(ctx context.Context, phase readPhase, query string, params map[string]expr.Value) error {
-	entry, err := e.parseAndAnalyse(query)
+	entry, _, err := e.parseAndAnalyse(query)
 	if err != nil {
 		return err
 	}

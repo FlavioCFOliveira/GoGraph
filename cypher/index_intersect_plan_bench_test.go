@@ -75,7 +75,7 @@ func iiBenchSmall(b *testing.B) iiBenchFixture {
 // acquires anything at construction time.
 func benchPlanBuild(b *testing.B, fx iiBenchFixture, q string) {
 	b.Helper()
-	entry, err := fx.eng.parseAndAnalyse(q)
+	entry, _, err := fx.eng.parseAndAnalyse(q)
 	if err != nil {
 		b.Fatalf("parseAndAnalyse: %v", err)
 	}
