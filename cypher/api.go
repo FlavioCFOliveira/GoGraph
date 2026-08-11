@@ -7257,6 +7257,39 @@ func setSnap[V any](m map[string]V) map[string]struct{} {
 }
 
 // copySchema returns a shallow copy of the schema map.
+// schemaBinding is one variable's place in a row: its name and its column.
+type schemaBinding struct {
+	name string
+	col  int
+}
+
+// schemaWalk is a query's schema flattened into a fixed traversal order.
+//
+// populateRowCtx runs once per ROW and used to obtain that order by ranging the
+// schema map, so every row paid a Go map iteration — `internal/runtime/maps.
+// (*Iter).Next` measured 7.18% of all engine CPU on a scan-and-filter workload,
+// with the string hashing beneath it on top (docs/cpu-vs-neo4j-memgraph-2026-08-11.md
+// §5). The order is a pure function of the schema, which is fixed for a whole
+// execution, so it is derived once and walked as a slice thereafter.
+//
+// Bindings are ordered by COLUMN, not by name, so the walk reads the row left to
+// right instead of jumping around it.
+//
+// This does not remove the per-row map WRITES into the RowContext, nor the
+// name-keyed lookups the evaluator then performs; those need the row context
+// itself to become slot-addressed (rmp #2411).
+type schemaWalk []schemaBinding
+
+// newSchemaWalk flattens schema into a column-ordered walk.
+func newSchemaWalk(schema map[string]int) schemaWalk {
+	w := make(schemaWalk, 0, len(schema))
+	for name, col := range schema {
+		w = append(w, schemaBinding{name: name, col: col})
+	}
+	slices.SortFunc(w, func(a, b schemaBinding) int { return a.col - b.col })
+	return w
+}
+
 func copySchema(schema map[string]int) map[string]int {
 	cp := make(map[string]int, len(schema))
 	for k, v := range schema {
@@ -12672,7 +12705,7 @@ func buildRowCtxWithUse(row exec.Row, schema map[string]int, g *lpg.ReadView[str
 	ctx := make(expr.RowContext, len(schema))
 	// arena nil: this path allocates a fresh map (escaping/eager callers) and so
 	// must allocate fresh lazy nodes too — no reuse, no pooled lifecycle.
-	populateRowCtx(ctx, row, schema, g, bopts, scalarUse, nil)
+	populateRowCtx(ctx, row, newSchemaWalk(schema), g, bopts, scalarUse, nil)
 	return ctx
 }
 
@@ -12797,12 +12830,21 @@ func releaseRowCtx(p *pooledRowCtx) {
 // historical behaviour), preserving exact semantics. It is the shared body of
 // the non-escaping Filter-predicate and scalar-projection evaluation closures.
 func evalRowPooled(bopts *buildOpts, e ast.Expression, row exec.Row, schema map[string]int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, scalarUse map[string]*nodeScalarUse) (expr.Value, error) {
+	return evalRowPooledWalk(bopts, e, row, newSchemaWalk(schema), len(schema), g, params, reg, scalarUse)
+}
+
+// evalRowPooledWalk is [evalRowPooled] for a caller that already derived the
+// schema walk once for the whole execution, which is where it belongs: the walk
+// is a pure function of the schema and rebuilding it per row was measurable.
+func evalRowPooledWalk(bopts *buildOpts, e ast.Expression, row exec.Row, walk schemaWalk, width int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, scalarUse map[string]*nodeScalarUse) (expr.Value, error) {
 	if scalarUse == nil {
-		return evalRow(bopts, e, buildRowCtxWithUse(row, schema, g, bopts, nil), params, reg)
+		ctx := make(expr.RowContext, width)
+		populateRowCtx(ctx, row, walk, g, bopts, nil, nil)
+		return evalRow(bopts, e, ctx, params, reg)
 	}
-	p := acquireRowCtx(len(schema))
+	p := acquireRowCtx(width)
 	defer releaseRowCtx(p)
-	populateRowCtx(p.ctx, row, schema, g, bopts, scalarUse, p)
+	populateRowCtx(p.ctx, row, walk, g, bopts, scalarUse, p)
 	return evalRow(bopts, e, p.ctx, params, reg)
 }
 
@@ -12816,8 +12858,9 @@ func evalRowPooled(bopts *buildOpts, e ast.Expression, row exec.Row, schema map[
 // caller passes nil and gets a freshly allocated lazy node per row, preserving
 // the exact prior behaviour and escape safety. A borrowed lazy node is valid
 // only until the arena's pooledRowCtx is released and must never escape the row.
-func populateRowCtx(ctx expr.RowContext, row exec.Row, schema map[string]int, g *lpg.ReadView[string, float64], bopts *buildOpts, scalarUse map[string]*nodeScalarUse, arena *pooledRowCtx) {
-	for varName, colIdx := range schema {
+func populateRowCtx(ctx expr.RowContext, row exec.Row, walk schemaWalk, g *lpg.ReadView[string, float64], bopts *buildOpts, scalarUse map[string]*nodeScalarUse, arena *pooledRowCtx) {
+	for _, b := range walk {
+		varName, colIdx := b.name, b.col
 		if colIdx >= len(row) || row[colIdx] == nil {
 			continue
 		}
@@ -15359,12 +15402,16 @@ func buildScalarPropertyChunkFiller(nodeChunkCol int, propName string, g *lpg.Re
 // disables the lazy path and restores full eager materialisation.
 func newRowPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, bopts *buildOpts) exec.FilterFn {
 	schemaSnap := copySchema(schema)
+	// Derived ONCE per execution: the predicate closure runs per row, and the
+	// walk is a pure function of the schema.
+	walk := newSchemaWalk(schemaSnap)
+	width := len(schemaSnap)
 	scalarUse, bail := analyseNodeScalarUseFor(bopts, predExpr)
 	if bail {
 		scalarUse = nil
 	}
 	return func(row exec.Row) (expr.Value, error) {
-		return evalRowPooled(bopts, predExpr, row, schemaSnap, g, params, reg, scalarUse)
+		return evalRowPooledWalk(bopts, predExpr, row, walk, width, g, params, reg, scalarUse)
 	}
 }
 
