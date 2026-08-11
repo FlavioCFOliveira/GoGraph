@@ -1970,6 +1970,32 @@ measured*, and the spike redirected itself:
 - **#2413** — `TestHandlePropLatch_SetBeforeVisible` had never been green, so
   `make ci` was red on the cover-gate stage before any of this work started.
 
+### Sprint 341 sync — parameter/literal parity (2026-08-11)
+
+Recorded at `797d2182`. Added: `Sprint 341` (CLOSED); 3 `Commit`s (`3fd78c5e`,
+`1a9aa1e4`, `30c04fa9`); `Task` 2417; and the symbols introduced —
+`parser.StripLiterals`, `cypher.stringOperand`, and the rewritten `lpg.bagUint`.
+Edges: `Sprint -[CONTAINS]->` each commit, `Task -[IMPLEMENTED_IN]->` its commit
+for 2412/2414/2417, `Commit -[TOUCHES]->` `cypher`, `cypher/parser`, `graph/lpg`.
+
+**The finding worth carrying: #2414 was a defect on the RECOMMENDED usage.** The
+string range extractor admitted literals only — a documented scope limitation
+("parameter range seeks are deliberately out of scope for this increment") whose
+numeric companion had been extended by #1652 and which nobody went back for. So
+`n.sk = 'lit'` seeked a btree index while `n.sk = $p`, the spelling every driver
+sends, planned a full `NodeByLabelScan`. Nothing failed: the answers stayed
+right and only the plan collapsed, which is why it survived. It was found only
+because literal hoisting (#2412) rewrote literals into parameters and the
+existing plan tests went red.
+
+With parity in place #2412 re-landed, and re-profiling then surfaced #2417: a
+`copy` with a VARIABLE length does not inline, so `bagUint` decoded every
+property field through a `runtime.memmove` CALL — 10.20 % of all engine CPU,
+100 % of it from that one function, removed by a switch on the four widths.
+
+After this sprint GoGraph is the cheapest of the three engines on seven of the
+eight measured workloads; `scan_filter` remains at 1.99× Memgraph and is #2411.
+
 ## Known limitations (faithful, by design)
 
 - **Build-tag duplicates.** The extractor parses every `.go` file regardless of build
