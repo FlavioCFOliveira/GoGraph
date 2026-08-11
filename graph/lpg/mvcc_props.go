@@ -190,9 +190,13 @@ func clonePropBag(b propBag) propBag {
 		for k, v := range b.m {
 			out.m[k] = v
 		}
-	case len(b.pairs) > 0:
-		out.pairs = make([]kv, len(b.pairs))
-		copy(out.pairs, b.pairs)
+	case len(b.buf) > 0:
+		// The buffer must be copied even though it is immutable: the caller is
+		// entitled to mutate the clone, and a mutation of the stream tier
+		// rebuilds the buffer rather than writing it, so sharing would be safe
+		// today and a trap the first time that changes.
+		out.buf = make([]byte, len(b.buf))
+		copy(out.buf, b.buf)
 	}
 	return out
 }
