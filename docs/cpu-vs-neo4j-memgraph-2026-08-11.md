@@ -615,6 +615,48 @@ predicate itself adds 196.4 ns/node against Memgraph's 57.7 (3.4×, down from
 boxing, which is exactly what #2411 addresses and why §10.3 recommends sequencing
 it after #2414 rather than dropping it.
 
+### 10.5 Final standing after sprint 341
+
+Sprint 341 fixed the two findings §10.2 and §10.3 had left open, plus one more
+that re-profiling surfaced. Same battery, all three engines restarted, one sweep.
+
+| workload | **GoGraph** | Memgraph | Neo4j |
+|---|---|---|---|
+| `noop` | **45.7** | 61.4 | 116.8 |
+| `seek` | **50.2** | 65.3 | 125.9 |
+| `seek_literal` | **50.9** | 64.6 | 780.5 |
+| `expand` | **57.2** | 77.3 | 140.5 |
+| `expand2` | **62.7** | 68.8 | 139.5 |
+| `scan_count` | **237.6** | 268.4 | 123.2 ¹ |
+| `unwind` K=1 000 | **328.7** | 950.0 | 892.8 |
+| `scan_filter` | 1 104.2 | **554.3** | 629.3 |
+
+¹ count-store served, not a scan.
+
+**GoGraph is now the cheapest engine on seven of the eight workloads**, including
+the rotating-literal arm that was its weakest relative showing (85.0 → 50.9 µs,
+now below Memgraph's 64.6 and 15× below Neo4j's 780.5).
+
+What landed:
+
+- **#2414 — a parameter now seeks the index.** The string range extractor
+  admitted literals only, so `n.sk = $p` — the spelling every driver sends — fell
+  back to a full `NodeByLabelScan` while `n.sk = 'lit'` seeked. This was a
+  standalone defect, reproducible without any hoisting, and the worse of the two
+  because it penalised the recommended usage.
+- **#2412 — literal hoisting, re-landed** on top of it, with auto-parameters
+  exempt from the parameter type check so a hoisted literal behaves like the
+  literal it replaced.
+- **#2417 — `bagUint` decoded through a `memmove` call.** A `copy` with a
+  variable length does not inline; a live profile put **10.20 % of all engine
+  CPU** in `memmove` and 100 % of that in `bagUint`. A switch on the four
+  possible widths took `scan_filter` down another **11.1 %**.
+
+`scan_filter` remains the one deficit, now **1.99×** Memgraph (220.8 vs 110.9
+ns/node) against 2.74× when the audit opened. The residue is still the
+name-keyed row context and the boxing — #2411 — whose recommendation is
+unchanged except that its prerequisite is now done.
+
 ---
 
 ## 11. Reproduce
