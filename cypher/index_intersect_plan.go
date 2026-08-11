@@ -255,7 +255,7 @@ func recogniseIndexedConjunct(
 	prefixSeek bool,
 ) (indexRangeConjunct, bool) {
 	// String / prefix conjunct over a bound string btree.
-	if pred, ok := extractSingleStringCmp(e, nodeVar, prefixSeek); ok {
+	if pred, ok := extractSingleStringCmp(e, nodeVar, params, prefixSeek); ok {
 		if sub, found := findBoundStringBTree(idxMgr, label, pred.propKey); found {
 			lo, hi := boundsOf(pred.lo, pred.hi)
 			count, exact := budgetedStringRangeCount(sub, pred, budget)

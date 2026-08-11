@@ -288,7 +288,7 @@ func rangeSeekInRangeCount(sel *ir.Selection, idxMgr *index.Manager, g *lpg.Read
 	const fullBudget = ^uint64(0) // never early-exit: count the whole (selective) range.
 
 	// String range over a bound string btree.
-	if pred, okPred := extractStringRangePred(sel.PredicateExpr, lblScan.NodeVar, prefixSeek); okPred {
+	if pred, okPred := extractStringRangePred(sel.PredicateExpr, lblScan.NodeVar, params, prefixSeek); okPred {
 		if sub, okSub := findBoundStringBTree(idxMgr, lblScan.Label, pred.propKey); okSub {
 			lo := ""
 			if pred.lo != nil {
