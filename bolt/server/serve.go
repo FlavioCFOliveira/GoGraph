@@ -920,6 +920,12 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	// budget (the default when no GOMEMLIMIT is set) detaches the accounting.
 	cr.SetInboundBudget(s.inbound)
 	cw := proto.NewChunkedWriter(conn)
+	// RECORD frames accumulate in the writer's buffer instead of each costing a
+	// write syscall of its own; sendResponse flushes on every other message
+	// type. Every run of RECORDs is terminated by SUCCESS, FAILURE or IGNORED,
+	// so the client still has every record in hand before this loop goes back to
+	// waiting for its next request. See sendResponse for the full argument.
+	cw.SetAutoFlush(false)
 	// Pass the listener address so ROUTE responses can populate the routing table.
 	localAddr := ""
 	s.mu.Lock()
@@ -1409,6 +1415,22 @@ func sendResponse(cw *proto.ChunkedWriter, msg any) error {
 	}
 	if err := cw.WriteMessage(rb.buf.Bytes()); err != nil {
 		return fmt.Errorf("bolt: write response %T: %w", msg, err)
+	}
+	// The connection's writer has auto-flush disabled (see handleConn), so a
+	// RECORD costs no syscall of its own and a K-row result is delivered in
+	// O(bytes/bufsize) writes rather than K. Flushing on every message that is
+	// NOT a RECORD is what keeps that safe: the Bolt protocol terminates every
+	// run of RECORDs with a SUCCESS, FAILURE or IGNORED summary, and the server
+	// only ever waits for the client after sending one. So the buffer is always
+	// drained before the exchange can block, and a client that is streaming
+	// still sees each batch as soon as its summary lands.
+	//
+	// Flushing per RECORD instead measured 70% of all server CPU in write(2)
+	// under a row-returning query (docs/cpu-vs-neo4j-memgraph-2026-08-11.md §4).
+	if _, isRecord := msg.(*proto.Record); !isRecord {
+		if err := cw.Flush(); err != nil {
+			return fmt.Errorf("bolt: flush response %T: %w", msg, err)
+		}
 	}
 	return nil
 }
