@@ -484,7 +484,7 @@ cheaper win than the change it was investigating.
 | **#2415** schema walk per row | **FIXED** (found by the #2411 spike) | scan+filter **−12.6 %** |
 | **#2416** property decode per record | **FIXED** (found by the #2411 spike) | scan+filter **−12.7 %** |
 | **#2412** literal normalisation | **REVERTED, blocked on #2414** | worked, but broke index selection |
-| **#2411** slot-addressed rows | **SPIKE DONE — decision is yours** | see below |
+| **#2411** slot-addressed rows | **SPIKE DONE — decision is yours** | see §10.3; the one deficit left at HEAD (§10.4) |
 | **#2413** latch test never green | **FIXED** | `make ci` was red before this |
 
 ### 10.1 What the fixes bought
@@ -553,6 +553,67 @@ Both peers do address rows by integer slot — Memgraph reaches a variable as
 `elems_[symbol.position()]` with no hashing at all — so the destination is not in
 doubt. The question is only whether it is the next thing, and on this evidence it
 is not.
+
+### 10.4 The module's state, re-measured at HEAD
+
+The tables in §3 and §7 are the *pre-remediation* standing and are kept as the
+record of what was found. This is the same battery re-run at `02a1b5ef`, all
+three engines restarted and measured in one sweep, median of 3 rounds.
+
+**Cross-engine comparisons are only valid within a single run.** Restarting the
+containers moved the peers too — Memgraph's `seek` read 91.9 µs in the original
+sweep and 64.8 µs here — so the figures below are compared against each other,
+never against §3.
+
+| workload | **GoGraph @HEAD** | Memgraph | Neo4j | GoGraph rank |
+|---|---|---|---|---|
+| `noop` — fixed cost per query | **46.2** | 61.0 | 117.2 | **best**, 1.32× / 2.54× |
+| `seek` — indexed point lookup | **50.7** | 64.8 | 125.2 | **best**, 1.28× / 2.47× |
+| `seek_literal` — rotating literal | 85.0 | **64.2** | 767.0 | middle (see §10.2) |
+| `expand` — 1 hop, 8 rows | **58.3** | 78.0 | 140.4 | **best**, 1.34× / 2.41× |
+| `expand2` — 2 hops, aggregated | **63.1** | 67.8 | 140.6 | **best** |
+| `scan_count` — 5 000 nodes | **260.4** | 264.7 | 123.3 ¹ | **best** real scan |
+| `scan_filter` — 5 000 nodes + predicate | 1 242.3 | **553.3** | 518.8 | **worst**, 2.25× / 2.39× |
+| `unwind` K=1 000 | **328.0** | 948.4 | 872.2 | **best**, 2.89× / 2.66× |
+
+¹ count-store served, not a scan.
+
+**The fit, and the inversion it records:**
+
+| engine | fixed `a` (µs/query) | marginal `b` (µs/row) | of which delivery |
+|---|---|---|---|
+| **GoGraph @HEAD** | **46.2** | **0.2755** | 0.223 |
+| Memgraph | 61.0 | 0.8705 | 0.846 |
+| Neo4j | 117.2 | 0.7515 | 0.738 |
+
+**GoGraph's marginal cost per row went from the worst of the three to the best**
+— 1.878 → 0.2755 µs, now **3.16× cheaper than Memgraph and 2.73× cheaper than
+Neo4j**. It was the headline deficit of this audit and it is now a lead.
+
+**Under concurrency the margin widens further** (2 rounds, µs CPU per operation):
+
+| workload | clients | **GoGraph** | Memgraph | Neo4j |
+|---|---|---|---|---|
+| `seek` | 1 | 51.2 | 65.3 | 133.8 |
+| `seek` | 8 | **29.9** | 114.3 | 141.8 |
+| `seek` | 64 | **29.0** | 76.7 | 111.9 |
+| `expand` | 1 | 59.2 | 79.1 | 146.6 |
+| `expand` | 8 | **43.2** | 143.7 | 163.0 |
+| `expand` | 64 | **44.7** | 128.2 | 150.4 |
+
+At 64 clients GoGraph serves a point lookup for **2.64× less CPU than Memgraph
+and 3.86× less than Neo4j**, and a 1-hop expansion for **2.87× / 3.36×** — while
+being the only one of the three whose per-operation cost *falls* as clients are
+added.
+
+**One deficit remains, and it is the one the spike scoped: `scan_filter`.** At
+248.5 ns per node against Memgraph's 110.7 and Neo4j's 103.8, evaluating a
+predicate per scanned node is still 2.25× the peers. The bare scan is not the
+problem — GoGraph's is the fastest real scan of the three at 52.1 ns/node. The
+predicate itself adds 196.4 ns/node against Memgraph's 57.7 (3.4×, down from
+4.67× before #2415 and #2416). That residue is the name-keyed row context and the
+boxing, which is exactly what #2411 addresses and why §10.3 recommends sequencing
+it after #2414 rather than dropping it.
 
 ---
 
