@@ -1936,6 +1936,40 @@ At 64 concurrent clients GoGraph uses 2.51× less CPU per point lookup than Memg
 and 3.66× less than Neo4j, and is the only one of the three whose per-operation cost
 falls as clients are added.
 
+### Sprint 340 sync — remediating the CPU audit (2026-08-11)
+
+Recorded at `8a4be5b2`. Added: `Sprint 340` (CLOSED); 4 `Commit`s (`6fc5a693`,
+`d7f6c1a8`, `80e16db2`, `88e6be61`); 4 `Task`s (2413, 2414, 2415, 2416); and the
+symbols the sprint introduced — `proto.ChunkedWriter.SetAutoFlush` and `.Flush`,
+`cypher.schemaWalk` and `cypher.newSchemaWalk`, `lpg.bagKeyAt`.
+
+Edges: `Sprint 340 -[CONTAINS]->` each commit; `Task -[IMPLEMENTED_IN]->` its
+commit for 2410, 2413, 2415 and 2416; `Commit -[TOUCHES]->` `bolt/proto`,
+`bolt/server`, `cypher`, `graph/lpg`; and `Task 2412 -[DEPENDS_ON]-> Task 2414`,
+which is the one relationship in this sync worth reading twice.
+
+**What the sprint established, and why the graph should carry it.** Three
+findings went in; two came out fixed, one came out *blocked with its blocker
+measured*, and the spike redirected itself:
+
+- **#2410** — the Bolt writer flushed per message, so a K-row result cost K
+  `write(2)` syscalls. Fixed by defaulting auto-flush ON and letting only the
+  server opt out: a 1 000-row query fell **1 943.6 → 322.2 µs of CPU (6.03×)**.
+- **#2412** — literal normalisation WORKED (eight literals collapsed onto one
+  cache entry, TCK still 3897) and was reverted anyway, because a parameter is
+  not planned like a literal here: the btree string-equality, range and prefix
+  seeks all fall back to `NodeByLabelScan`, and a type mismatch that yields zero
+  rows for a literal *raises* for a parameter. Hence #2414 and the `DEPENDS_ON`.
+- **#2411** — the spike found the row context was no longer the biggest item.
+  After **#2415** hoisted the schema walk out of the per-row loop (−12.6 %),
+  `lpg.bagDecodeAt` was 28.18 % cumulative, and **#2416** stopped the property
+  lookup decoding the value of every record it walks past (−12.7 %). Together
+  `scan_filter` went **314.7 → 238.4 ns/node**, narrowing the gap to Memgraph
+  from 2.74× to 2.07×, with no architecture change. The spike's recommendation is
+  to do #2414 first, re-profile, and only then decide #2411.
+- **#2413** — `TestHandlePropLatch_SetBeforeVisible` had never been green, so
+  `make ci` was red on the cover-gate stage before any of this work started.
+
 ## Known limitations (faithful, by design)
 
 - **Build-tag duplicates.** The extractor parses every `.go` file regardless of build
