@@ -125,12 +125,24 @@ type edgePropColumn struct {
 	// position in idx (the k-th element is the value of slot idx[k]). Bit-packed
 	// bool is never sparse (its break-even fill is ~0.06, see reshaped), so
 	// boolBits always has the dense, slot-indexed meaning.
-	i64      []int64
-	f64      []float64
-	boolBits []uint64 // bit i = bool value of slot i (DENSE only; bool is never sparse)
-	days     []int32
-	str      []string
-	boxed    []PropertyValue
+	// nums is the shared 8-byte-word backing for every POINTER-FREE scalar
+	// representation, of which a column uses exactly one:
+	//   PropInt64   -> the value, two's-complement, per slot
+	//   PropFloat64 -> the value's IEEE-754 bits (math.Float64bits), per slot
+	//   PropBool    -> packed bits, one per slot (DENSE only; bool is never sparse)
+	//   date        -> the frame-of-reference bit-packed residuals, when
+	//                  packedDate is set (see packed's former documentation below)
+	// They shared no bytes before sprint 339 (#2406) and cost four slice headers
+	// of which three were always nil: the audit of 2026-08-11 measured the whole
+	// struct at 240 B, instantiated once per (source node, property key), which
+	// is 34 B/edge at degree 8 and 144 B/edge at degree 2. Merging them is free
+	// because int64<->uint64 is the two's-complement identity and
+	// Float64bits/Float64frombits is an exact bijection including NaN payloads
+	// and negative zero.
+	nums  []uint64
+	days  []int32
+	str   []string
+	boxed []PropertyValue
 
 	// packed is the frame-of-reference (FOR) bit-packed form of a DENSE date
 	// column, produced by [edgePropCols.Compact] when the value range is narrow
@@ -147,7 +159,6 @@ type edgePropColumn struct {
 	// helpers never have to understand packing. This mirrors the immutable
 	// compressed-segment model of C-Store/Vertica and DuckDB, where a compressed
 	// column is rebuilt on change rather than mutated in place.
-	packed []uint64
 
 	// valid is the Arrow-style validity bitmap used in the DENSE representation:
 	// bit i set ⇔ slot i carries a value. nil ⇔ the dense column is fully present
@@ -915,9 +926,9 @@ func (col *edgePropColumn) toDense() edgePropColumn {
 func allocSparseBacking(col *edgePropColumn, kind PropertyKind, p int) {
 	switch kind {
 	case PropInt64:
-		col.i64 = make([]int64, 0, p)
+		col.nums = make([]uint64, 0, p)
 	case PropFloat64:
-		col.f64 = make([]float64, 0, p)
+		col.nums = make([]uint64, 0, p)
 	case dateKind:
 		col.days = make([]int32, 0, p)
 	case PropString:
@@ -925,7 +936,7 @@ func allocSparseBacking(col *edgePropColumn, kind PropertyKind, p int) {
 	case PropBool:
 		// Unreachable: bool never goes sparse. A bit-packed bool has no compact
 		// COO value array; fall back to a per-present-slot bit word.
-		col.boolBits = make([]uint64, words(p))
+		col.nums = make([]uint64, words(p))
 	default:
 		col.boxed = make([]PropertyValue, 0, p)
 	}
@@ -935,11 +946,11 @@ func allocSparseBacking(col *edgePropColumn, kind PropertyKind, p int) {
 func allocDenseBacking(col *edgePropColumn, kind PropertyKind, n int) {
 	switch kind {
 	case PropInt64:
-		col.i64 = make([]int64, n)
+		col.nums = make([]uint64, n)
 	case PropFloat64:
-		col.f64 = make([]float64, n)
+		col.nums = make([]uint64, n)
 	case PropBool:
-		col.boolBits = make([]uint64, words(n))
+		col.nums = make([]uint64, words(n))
 	case dateKind:
 		col.days = make([]int32, n)
 	case PropString:
@@ -954,9 +965,9 @@ func allocDenseBacking(col *edgePropColumn, kind PropertyKind, n int) {
 func (col *edgePropColumn) appendSparseValueFromDense(src *edgePropColumn, slot int) {
 	switch col.kind {
 	case PropInt64:
-		col.i64 = append(col.i64, src.i64[slot])
+		col.nums = append(col.nums, src.nums[slot])
 	case PropFloat64:
-		col.f64 = append(col.f64, src.f64[slot])
+		col.nums = append(col.nums, src.nums[slot])
 	case dateKind:
 		col.days = append(col.days, src.days[slot])
 	case PropString:
@@ -971,9 +982,9 @@ func (col *edgePropColumn) appendSparseValueFromDense(src *edgePropColumn, slot 
 func (col *edgePropColumn) scatterDenseValueFromSparse(src *edgePropColumn, k, s int) {
 	switch col.kind {
 	case PropInt64:
-		col.i64[s] = src.i64[k]
+		col.nums[s] = src.nums[k]
 	case PropFloat64:
-		col.f64[s] = src.f64[k]
+		col.nums[s] = src.nums[k]
 	case dateKind:
 		col.days[s] = src.days[k]
 	case PropString:
@@ -1049,11 +1060,11 @@ func newColumn(key PropertyKeyID, kind PropertyKind, length int) edgePropColumn 
 	col := edgePropColumn{key: key, kind: kind, length: length}
 	switch kind {
 	case PropInt64:
-		col.i64 = make([]int64, length)
+		col.nums = make([]uint64, length)
 	case PropFloat64:
-		col.f64 = make([]float64, length)
+		col.nums = make([]uint64, length)
 	case PropBool:
-		col.boolBits = make([]uint64, words(length))
+		col.nums = make([]uint64, words(length))
 	case dateKind:
 		col.days = make([]int32, length)
 	case PropString:
@@ -1088,11 +1099,11 @@ func (col *edgePropColumn) cloneCol() edgePropColumn {
 	out := *col
 	switch col.kind {
 	case PropInt64:
-		out.i64 = cloneI64(col.i64)
+		out.nums = cloneU64(col.nums)
 	case PropFloat64:
-		out.f64 = cloneF64(col.f64)
+		out.nums = cloneU64(col.nums)
 	case PropBool:
-		out.boolBits = cloneU64(col.boolBits)
+		out.nums = cloneU64(col.nums)
 	case dateKind:
 		out.days = cloneI32(col.days)
 	case PropString:
@@ -1118,9 +1129,9 @@ func (col *edgePropColumn) hasSlack() bool {
 	}
 	switch col.kind {
 	case PropInt64:
-		return cap(col.i64) > len(col.i64)
+		return cap(col.nums) > len(col.nums)
 	case PropFloat64:
-		return cap(col.f64) > len(col.f64)
+		return cap(col.nums) > len(col.nums)
 	case dateKind:
 		return cap(col.days) > len(col.days)
 	case PropString:
@@ -1138,9 +1149,9 @@ func (col *edgePropColumn) compactBacking() edgePropColumn {
 	out.idx = exactI32(col.idx)
 	switch col.kind {
 	case PropInt64:
-		out.i64 = exactI64(col.i64)
+		out.nums = exactU64(col.nums)
 	case PropFloat64:
-		out.f64 = exactF64(col.f64)
+		out.nums = exactU64(col.nums)
 	case dateKind:
 		out.days = exactI32Vals(col.days)
 	case PropString:
@@ -1182,11 +1193,11 @@ func (col *edgePropColumn) grown(oldLen int) edgePropColumn {
 	out := edgePropColumn{key: col.key, kind: col.kind, length: newLen}
 	switch col.kind {
 	case PropInt64:
-		out.i64 = growI64(col.i64, newLen)
+		out.nums = growU64(col.nums, newLen)
 	case PropFloat64:
-		out.f64 = growF64(col.f64, newLen)
+		out.nums = growU64(col.nums, newLen)
 	case PropBool:
-		out.boolBits = growU64(col.boolBits, words(newLen))
+		out.nums = growU64(col.nums, words(newLen))
 	case dateKind:
 		out.days = growI32(col.days, newLen)
 	case PropString:
@@ -1221,11 +1232,11 @@ func (col *edgePropColumn) grownTo(newLen int) edgePropColumn {
 	out := edgePropColumn{key: col.key, kind: col.kind, length: newLen}
 	switch col.kind {
 	case PropInt64:
-		out.i64 = growI64(col.i64, newLen)
+		out.nums = growU64(col.nums, newLen)
 	case PropFloat64:
-		out.f64 = growF64(col.f64, newLen)
+		out.nums = growU64(col.nums, newLen)
 	case PropBool:
-		out.boolBits = growU64(col.boolBits, words(newLen))
+		out.nums = growU64(col.nums, words(newLen))
 	case dateKind:
 		out.days = growI32(col.days, newLen)
 	case PropString:
@@ -1407,10 +1418,10 @@ func (col *edgePropColumn) tailAppendSparse(slotIdx int32, v PropertyValue, days
 	switch col.kind {
 	case PropInt64:
 		i, _ := v.Int64()
-		col.i64 = append(col.i64, i)
+		col.nums = append(col.nums, uint64(i))
 	case PropFloat64:
 		f, _ := v.Float64()
-		col.f64 = append(col.f64, f)
+		col.nums = append(col.nums, math.Float64bits(f))
 	case dateKind:
 		col.days = append(col.days, days)
 	case PropString:
@@ -1457,11 +1468,11 @@ func (col *edgePropColumn) compacted(idx int) edgePropColumn {
 	out := edgePropColumn{key: col.key, kind: col.kind, length: n - 1}
 	switch col.kind {
 	case PropInt64:
-		out.i64 = spliceI64(col.i64, idx)
+		out.nums = spliceU64(col.nums, idx)
 	case PropFloat64:
-		out.f64 = spliceF64(col.f64, idx)
+		out.nums = spliceU64(col.nums, idx)
 	case PropBool:
-		out.boolBits = spliceBits(col.boolBits, idx, n)
+		out.nums = spliceBits(col.nums, idx, n)
 	case dateKind:
 		out.days = spliceI32(col.days, idx)
 	case PropString:
@@ -1508,9 +1519,9 @@ func (col *edgePropColumn) compactedSparse(idx int) edgePropColumn {
 func (col *edgePropColumn) appendSparseValueFromSparse(src *edgePropColumn, k int) {
 	switch col.kind {
 	case PropInt64:
-		col.i64 = append(col.i64, src.i64[k])
+		col.nums = append(col.nums, src.nums[k])
 	case PropFloat64:
-		col.f64 = append(col.f64, src.f64[k])
+		col.nums = append(col.nums, src.nums[k])
 	case dateKind:
 		col.days = append(col.days, src.days[k])
 	case PropString:
@@ -1537,16 +1548,16 @@ func (col *edgePropColumn) setSlot(slot int, v PropertyValue, days int32) {
 	switch col.kind {
 	case PropInt64:
 		i, _ := v.Int64()
-		col.i64[slot] = i
+		col.nums[slot] = uint64(i)
 	case PropFloat64:
 		f, _ := v.Float64()
-		col.f64[slot] = f
+		col.nums[slot] = math.Float64bits(f)
 	case PropBool:
 		b, _ := v.Bool()
 		if b {
-			col.boolBits[slot>>6] |= 1 << (uint(slot) & 63)
+			col.nums[slot>>6] |= 1 << (uint(slot) & 63)
 		} else {
-			col.boolBits[slot>>6] &^= 1 << (uint(slot) & 63)
+			col.nums[slot>>6] &^= 1 << (uint(slot) & 63)
 		}
 	case dateKind:
 		col.days[slot] = days
@@ -1576,10 +1587,10 @@ func (col *edgePropColumn) overwriteSparseValue(pos int, v PropertyValue, days i
 	switch col.kind {
 	case PropInt64:
 		i, _ := v.Int64()
-		col.i64[pos] = i
+		col.nums[pos] = uint64(i)
 	case PropFloat64:
 		f, _ := v.Float64()
-		col.f64[pos] = f
+		col.nums[pos] = math.Float64bits(f)
 	case dateKind:
 		col.days[pos] = days
 	case PropString:
@@ -1596,10 +1607,10 @@ func (col *edgePropColumn) insertSparseValue(pos int, v PropertyValue, days int3
 	switch col.kind {
 	case PropInt64:
 		i, _ := v.Int64()
-		col.i64 = insertI64(col.i64, pos, i)
+		col.nums = insertU64(col.nums, pos, uint64(i))
 	case PropFloat64:
 		f, _ := v.Float64()
-		col.f64 = insertF64(col.f64, pos, f)
+		col.nums = insertU64(col.nums, pos, math.Float64bits(f))
 	case dateKind:
 		col.days = insertI32(col.days, pos, days)
 	case PropString:
@@ -1652,9 +1663,9 @@ func (col *edgePropColumn) clearSlotSparse(slot int) {
 	col.idx = removeI32(col.idx, pos)
 	switch col.kind {
 	case PropInt64:
-		col.i64 = removeI64(col.i64, pos)
+		col.nums = removeU64(col.nums, pos)
 	case PropFloat64:
-		col.f64 = removeF64(col.f64, pos)
+		col.nums = removeU64(col.nums, pos)
 	case dateKind:
 		col.days = removeI32(col.days, pos)
 	case PropString:
@@ -1728,12 +1739,12 @@ func (col *edgePropColumn) slotValue(slot int) (PropertyValue, bool) {
 	}
 	switch col.kind {
 	case PropInt64:
-		return Int64Value(col.i64[i]), true
+		return Int64Value(int64(col.nums[i])), true
 	case PropFloat64:
-		return Float64Value(col.f64[i]), true
+		return Float64Value(math.Float64frombits(col.nums[i])), true
 	case PropBool:
 		// bool is never sparse, so i == slot here.
-		return BoolValue(col.boolBits[i>>6]&(1<<(uint(i)&63)) != 0), true
+		return BoolValue(col.nums[i>>6]&(1<<(uint(i)&63)) != 0), true
 	case dateKind:
 		if col.packedDate {
 			// FOR bit-packed dense date column: the packed form is dense and
@@ -1744,7 +1755,7 @@ func (col *edgePropColumn) slotValue(slot int) (PropertyValue, bool) {
 			// the read is byte-identical to the plain form.
 			ed := col.forMin
 			if col.forWidth != 0 {
-				ed += int32(unpackResidualLSB(col.packed, i, col.forWidth))
+				ed += int32(unpackResidualLSB(col.nums, i, col.forWidth))
 			}
 			return StringValue(epochDayToString(ed)), true
 		}
@@ -1852,24 +1863,6 @@ func (col *edgePropColumn) popcountValid() int {
 	return total
 }
 
-func cloneI64(s []int64) []int64 {
-	if s == nil {
-		return nil
-	}
-	out := make([]int64, len(s))
-	copy(out, s)
-	return out
-}
-
-func cloneF64(s []float64) []float64 {
-	if s == nil {
-		return nil
-	}
-	out := make([]float64, len(s))
-	copy(out, s)
-	return out
-}
-
 func cloneI32(s []int32) []int32 {
 	if s == nil {
 		return nil
@@ -1886,6 +1879,40 @@ func cloneStr(s []string) []string {
 	out := make([]string, len(s))
 	copy(out, s)
 	return out
+}
+
+// exactU64, spliceU64, insertU64 and removeU64 are the uint64 forms of the
+// per-element helpers. Sprint 339 (#2406) merged the int64, float64, bool-bit
+// and packed-date backings into one []uint64 (see [edgePropColumn.nums]), so
+// these four now serve every pointer-free scalar kind and the typed I64/F64
+// variants they replaced are gone.
+
+func exactU64(s []uint64) []uint64 {
+	if s == nil || cap(s) == len(s) {
+		return s
+	}
+	out := make([]uint64, len(s))
+	copy(out, s)
+	return out
+}
+
+func spliceU64(s []uint64, idx int) []uint64 {
+	out := make([]uint64, len(s)-1)
+	copy(out, s[:idx])
+	copy(out[idx:], s[idx+1:])
+	return out
+}
+
+func insertU64(s []uint64, pos int, v uint64) []uint64 {
+	s = append(s, 0)
+	copy(s[pos+1:], s[pos:])
+	s[pos] = v
+	return s
+}
+
+func removeU64(s []uint64, pos int) []uint64 {
+	copy(s[pos:], s[pos+1:])
+	return s[:len(s)-1]
 }
 
 func cloneU64(s []uint64) []uint64 {
@@ -1906,29 +1933,13 @@ func cloneBoxed(s []PropertyValue) []PropertyValue {
 	return out
 }
 
-func growI64(s []int64, n int) []int64     { out := make([]int64, n); copy(out, s); return out }
-func growF64(s []float64, n int) []float64 { out := make([]float64, n); copy(out, s); return out }
-func growI32(s []int32, n int) []int32     { out := make([]int32, n); copy(out, s); return out }
-func growStr(s []string, n int) []string   { out := make([]string, n); copy(out, s); return out }
-func growU64(s []uint64, n int) []uint64   { out := make([]uint64, n); copy(out, s); return out }
+func growI32(s []int32, n int) []int32   { out := make([]int32, n); copy(out, s); return out }
+func growStr(s []string, n int) []string { out := make([]string, n); copy(out, s); return out }
+func growU64(s []uint64, n int) []uint64 { out := make([]uint64, n); copy(out, s); return out }
 
 func growBoxed(s []PropertyValue, n int) []PropertyValue {
 	out := make([]PropertyValue, n)
 	copy(out, s)
-	return out
-}
-
-func spliceI64(s []int64, idx int) []int64 {
-	out := make([]int64, len(s)-1)
-	copy(out, s[:idx])
-	copy(out[idx:], s[idx+1:])
-	return out
-}
-
-func spliceF64(s []float64, idx int) []float64 {
-	out := make([]float64, len(s)-1)
-	copy(out, s[:idx])
-	copy(out[idx:], s[idx+1:])
 	return out
 }
 
@@ -1966,20 +1977,6 @@ func insertI32(s []int32, pos int, v int32) []int32 {
 	return s
 }
 
-func insertI64(s []int64, pos int, v int64) []int64 {
-	s = append(s, 0)
-	copy(s[pos+1:], s[pos:])
-	s[pos] = v
-	return s
-}
-
-func insertF64(s []float64, pos int, v float64) []float64 {
-	s = append(s, 0)
-	copy(s[pos+1:], s[pos:])
-	s[pos] = v
-	return s
-}
-
 func insertStr(s []string, pos int, v string) []string {
 	s = append(s, "")
 	copy(s[pos+1:], s[pos:])
@@ -1995,16 +1992,6 @@ func insertBoxed(s []PropertyValue, pos int, v PropertyValue) []PropertyValue {
 }
 
 func removeI32(s []int32, pos int) []int32 {
-	copy(s[pos:], s[pos+1:])
-	return s[:len(s)-1]
-}
-
-func removeI64(s []int64, pos int) []int64 {
-	copy(s[pos:], s[pos+1:])
-	return s[:len(s)-1]
-}
-
-func removeF64(s []float64, pos int) []float64 {
 	copy(s[pos:], s[pos+1:])
 	return s[:len(s)-1]
 }
@@ -2046,24 +2033,6 @@ func exactI32(s []int32) []int32 {
 }
 
 func exactI32Vals(s []int32) []int32 { return exactI32(s) }
-
-func exactI64(s []int64) []int64 {
-	if s == nil || cap(s) == len(s) {
-		return s
-	}
-	out := make([]int64, len(s))
-	copy(out, s)
-	return out
-}
-
-func exactF64(s []float64) []float64 {
-	if s == nil || cap(s) == len(s) {
-		return s
-	}
-	out := make([]float64, len(s))
-	copy(out, s)
-	return out
-}
 
 func exactStr(s []string) []string {
 	if s == nil || cap(s) == len(s) {
@@ -2178,7 +2147,7 @@ func (col *edgePropColumn) maybePackDate() (edgePropColumn, bool) {
 	if width == 0 {
 		return out, true // constant column: packed stays nil, reads return forMin
 	}
-	out.packed = packResidualsLSB(col.days, col.length, mn, width, col.slotValid)
+	out.nums = packResidualsLSB(col.days, col.length, mn, width, col.slotValid)
 	return out, true
 }
 
@@ -2242,7 +2211,7 @@ func (col *edgePropColumn) unpackedDate() edgePropColumn {
 		if !col.slotValid(slot) {
 			continue // leave absent slots at the zero value
 		}
-		out.days[slot] = col.forMin + int32(unpackResidualLSB(col.packed, slot, col.forWidth))
+		out.days[slot] = col.forMin + int32(unpackResidualLSB(col.nums, slot, col.forWidth))
 	}
 	return out
 }

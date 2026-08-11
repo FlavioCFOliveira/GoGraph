@@ -183,7 +183,7 @@ func TestSparse_BoolNeverSparse(t *testing.T) {
 	if col.sparse {
 		t.Fatalf("bool column must never be sparse (break-even ~0.06)")
 	}
-	if col.boolBits == nil {
+	if col.nums == nil {
 		t.Fatalf("bool column must keep its bit-packed backing")
 	}
 	if v, ok := block.get(key, 0); !ok {
@@ -505,9 +505,9 @@ func assertIdxInvariant(t *testing.T, col *edgePropColumn) {
 func sparseBackingLen(col *edgePropColumn) int {
 	switch col.kind {
 	case PropInt64:
-		return len(col.i64)
+		return len(col.nums)
 	case PropFloat64:
-		return len(col.f64)
+		return len(col.nums)
 	case dateKind:
 		return len(col.days)
 	case PropString:
