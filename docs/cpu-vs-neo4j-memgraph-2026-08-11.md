@@ -472,7 +472,91 @@ fix. #2411 is the larger win in the long run but is an architecture change.
 
 ---
 
-## 10. Reproduce
+## 10. Remediation — sprint 340
+
+All three findings were taken on. Two are fixed and merged, one is blocked by a
+prerequisite the attempt itself uncovered, and the spike produced a bigger,
+cheaper win than the change it was investigating.
+
+| id | outcome | measured |
+|---|---|---|
+| **#2410** Bolt flush per message | **FIXED** | 1 000-row query **6.03× less CPU**; 8-row expand **1.44×** |
+| **#2415** schema walk per row | **FIXED** (found by the #2411 spike) | scan+filter **−12.6 %** |
+| **#2416** property decode per record | **FIXED** (found by the #2411 spike) | scan+filter **−12.7 %** |
+| **#2412** literal normalisation | **REVERTED, blocked on #2414** | worked, but broke index selection |
+| **#2411** slot-addressed rows | **SPIKE DONE — decision is yours** | see below |
+| **#2413** latch test never green | **FIXED** | `make ci` was red before this |
+
+### 10.1 What the fixes bought
+
+`unwind` K=1 000 fell **1 943.6 → 322.2 µs** of CPU, taking per-row delivery from
+1.845 to 0.223 µs — from **2× worse than both peers to ~4× better**. The
+regression test counts real connection writes: a 500-record result now costs
+**3 writes, and 502 with the fix reverted**.
+
+`scan_filter` fell **1 573.7 → 1 192.1 µs**, i.e. **314.7 → 238.4 ns per node**,
+narrowing the gap to Memgraph's 114.9 from **2.74× to 2.07×**.
+
+### 10.2 #2412 — literal normalisation is blocked, and the blocker is worth knowing
+
+A byte-scanner stripper was written, wired ahead of the plan cache, and it
+worked: eight distinct literals collapsed onto **one** cache entry with correct
+per-literal results, and **the TCK stayed at 3897/3897**. It was reverted anyway,
+because `make ci` then failed eleven `cypher` tests showing that **GoGraph does
+not plan a parameter the way it plans a literal**:
+
+- the btree string-equality seek, the range seek and the prefix seek all fall
+  back to `NodeByLabelScan`;
+- index intersection loses its engagement;
+- and, worse than any performance effect, a literal whose type does not match the
+  index yields **zero rows** where a parameter **raises an error** — a query that
+  returned empty would start failing.
+
+Hoisting would therefore trade a 65 % CPU win on an anti-pattern for label scans
+on indexed queries. Filed as **#2414** (planner and type parity), with #2412
+blocked on it. Two design facts worth keeping: the ANTLR lexer is unusable for
+stripping — `'p42'` tokenises as ERRCHAR/ID/ERRCHAR and a bare number is
+sometimes ID and sometimes DIGIT — which is why Memgraph hand-wrote its own
+stripper; and a hand-written scanner costs **330 ns against the 15 µs parse it
+avoids**, so the idea is sound once the planner is ready.
+
+### 10.3 #2411 — recommendation
+
+**The spike changed its own priority ordering.** Profiling after #2415 showed
+that the largest remaining item in a scan-and-filter was **not** the row context:
+it was `bagDecodeAt` at **28.18 % cumulative**, which #2416 then addressed for a
+further −12.7 % without touching any architecture.
+
+What remains for a slot-addressed row context, from the current profile:
+
+| remaining cost | share | needs |
+|---|---|---|
+| name-keyed map traffic (`mapaccess2_faststr`, `aeshashbody`, `putSlotSmallFastStr`, `memequal`) | ~13 % flat | slot addressing |
+| boxing into `any` (`convTstring`) | 13.9 % cum | slot addressing, or typed slots |
+| allocation (`mallocgc`) | 16.8 % cum | mostly downstream of the two above |
+
+**Recommendation: do not start #2411 yet.** The two cheap fixes already took 24 %
+off the workload with no architectural risk, and the honest estimate for the
+remainder is that slot addressing targets perhaps 20–25 % more — real, but for a
+change that touches the expression evaluator, the row context and every operator
+that builds a row, on a code base whose public surface includes
+`expr.RowContext`. The sequencing that follows from the measurements is:
+
+1. **#2414 first** (planner/type parity). It unblocks #2412 *and* is a
+   prerequisite for trusting any plan-level change.
+2. **Then re-profile.** Two of the three biggest items in the original profile
+   are gone; the third should be re-measured before a large change is scoped
+   against it.
+3. **Then decide #2411** on fresh numbers.
+
+Both peers do address rows by integer slot — Memgraph reaches a variable as
+`elems_[symbol.position()]` with no hashing at all — so the destination is not in
+doubt. The question is only whether it is the next thing, and on this evidence it
+is not.
+
+---
+
+## 11. Reproduce
 
 ```bash
 docker network create ggbench
