@@ -3,7 +3,9 @@ package lpg
 import (
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
@@ -142,11 +144,132 @@ func TestHandlePropLatch_MonotonicAcrossDelete(t *testing.T) {
 	}
 }
 
+// TestHandlePropLatch_LatchedBeforeTheWriteCanBeVisible is the DECISIVE
+// ordering test, and it is deterministic in both directions.
+//
+// The racing sibling below cannot be: the window between "the property becomes
+// visible" and "the latch is stored" in a build that got the order wrong is a
+// few nanoseconds wide, and a reader doing map lookups will essentially never
+// land inside it. Moving the store after the unlock — the exact defect the
+// latch exists to forbid — was verified to pass the racing test 10 times out of
+// 10. A test that a real defect walks straight through is not an oracle.
+//
+// So instead of racing the writer, this test HOLDS THE SHARD LOCK the writer
+// must take. While the lock is held the writer is parked before it can publish
+// anything, so the latch's value at that moment answers the question exactly:
+//
+//   - stored before the write is visible  ⇒ latch is already true while parked
+//   - stored after                        ⇒ latch stays false until we unlock
+//
+// The poll below therefore fails by TIMEOUT on a mis-ordered build and passes in
+// microseconds on a correct one, with a budget generous enough that host load
+// cannot turn it into a flake.
+// It is table-driven over BOTH creation sites, because the latch has two
+// writers — the natural-key public API and the snapshot/WAL replay writer — and
+// a fix or a regression on one says nothing about the other.
+func TestHandlePropLatch_LatchedBeforeTheWriteCanBeVisible(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		write func(g *Graph[string, float64], srcID, dstID graph.NodeID, h uint64)
+	}{
+		{
+			"string-keyed", // setEdgePropertyByHandleInfo, edge_handle.go
+			func(g *Graph[string, float64], _, _ graph.NodeID, h uint64) {
+				_ = g.SetEdgePropertyByHandle("a", "b", h, "w", Int64Value(1))
+			},
+		},
+		{
+			"id-keyed", // setEdgePropertyByHandleIDInfo, edge_handle_durable.go
+			func(g *Graph[string, float64], srcID, dstID graph.NodeID, h uint64) {
+				g.SetEdgePropertyByHandleID(srcID, dstID, h, "w", Int64Value(1))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g := newMultigraph(t)
+
+			h, err := g.AddEdgeH("a", "b", 1)
+			if err != nil {
+				t.Fatalf("AddEdgeH: %v", err)
+			}
+			if g.AnyEdgeHandlePropertyEverWritten() {
+				t.Fatal("latch true before any by-handle property was written")
+			}
+
+			srcID, ok := g.adj.Mapper().Lookup("a")
+			if !ok {
+				t.Fatal("source not interned")
+			}
+			dstID, ok := g.adj.Mapper().Lookup("b")
+			if !ok {
+				t.Fatal("destination not interned")
+			}
+			sh := g.edgeHandlePropShardFor(edgeKey{src: srcID, dst: dstID})
+
+			// Park the writer: it cannot reach any publishing step while we
+			// hold this.
+			sh.mu.Lock()
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				tc.write(g, srcID, dstID, h)
+			}()
+
+			deadline := time.Now().Add(5 * time.Second)
+			latched := false
+			for time.Now().Before(deadline) {
+				if g.AnyEdgeHandlePropertyEverWritten() {
+					latched = true
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+			// Release before asserting, so a failure cannot deadlock the writer.
+			sh.mu.Unlock()
+			<-done
+
+			if !latched {
+				t.Fatal("the latch was still false while the writer was parked on the shard lock: " +
+					"it is being stored AFTER the write becomes visible, so a reader can observe " +
+					"a by-handle property with the latch reading false and skip a probe that would " +
+					"have returned data")
+			}
+			if got := g.EdgePropertiesByHandle("a", "b", h); len(got) == 0 {
+				t.Fatal("property missing after the writer completed")
+			}
+		})
+	}
+}
+
 // TestHandlePropLatch_SetBeforeVisible is the ordering assertion the latch's
 // soundness argument rests on: a reader that observes the property must also
-// observe the latch. Writers race against readers that check the latch first
-// and only then read; any reader seeing the value with the latch still false
-// would be the defect.
+// observe the latch.
+//
+// It is a SMOKE TEST, not the oracle — see
+// TestHandlePropLatch_LatchedBeforeTheWriteCanBeVisible for the decisive one.
+// What it is good for is proving that ordinary concurrent traffic produces no
+// violation, which is a different question from whether a mis-ordered build
+// would be caught.
+//
+// THE ORDER OF THE TWO READS IS THE WHOLE TEST. The reader samples the
+// PROPERTY first and the LATCH second, because the property is the earlier
+// event in the ordering under test: the writer stores the latch and only then
+// makes the property visible, so a reader that saw the property at T1 must see
+// the latch at any T2 > T1. A false latch there is a genuine violation.
+//
+// Sampling them the other way round — latch first, property second — does NOT
+// test the ordering and cannot be made to pass: between the two reads a writer
+// may latch and write, so the reader legitimately holds a stale `false` while
+// seeing the value, and the test reports a violation that never happened. That
+// is what this test did when it was introduced (67977beb, 2026-08-10), which is
+// why it failed deterministically from its first commit. A reader observing
+// "no properties" while a concurrent write is in flight is simply a read
+// ordered before that write, which is what the latch's documented contract
+// ("false is exact") means for a concurrent caller.
 func TestHandlePropLatch_SetBeforeVisible(t *testing.T) {
 	t.Parallel()
 	g := newMultigraph(t)
@@ -176,16 +299,17 @@ func TestHandlePropLatch_SetBeforeVisible(t *testing.T) {
 			}
 		}(i)
 	}
-	// Readers: check the latch, then read. Seeing a value under a false latch
-	// is the violation.
+	// Readers: read the property, THEN the latch. Seeing a value whose latch is
+	// still false when sampled afterwards is the violation. See the doc comment
+	// for why this order, and only this order, expresses the property.
 	for i := range handles {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			<-start
 			for attempt := 0; attempt < 64; attempt++ {
-				latched := g.AnyEdgeHandlePropertyEverWritten()
 				got := g.EdgePropertiesByHandle("src", handleLatchKey(i), handles[i])
+				latched := g.AnyEdgeHandlePropertyEverWritten()
 				if len(got) > 0 && !latched {
 					violations <- "read a by-handle property while the latch was false"
 					return
