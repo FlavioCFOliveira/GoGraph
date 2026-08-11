@@ -62,20 +62,19 @@ func (g *Graph[N, W]) withdrawAbortedHandleLabelsLocked(sh *edgeHandleLabelShard
 			continue
 		}
 		freed += n
-		inner := sh.m[k.pair]
+		// The zero instMap is a valid empty one, so an absent pair needs no
+		// special case: set materialises it and the write-back installs it.
+		im := sh.m[k.pair]
 		if had {
-			if inner == nil {
-				inner = make(map[uint64]labelBag, 1)
-				sh.m[k.pair] = inner
-			}
-			inner[k.handle] = pre
+			im.set(k.handle, pre)
+			sh.m[k.pair] = im
 			continue
 		}
-		if inner != nil {
-			delete(inner, k.handle)
-			if len(inner) == 0 {
-				delete(sh.m, k.pair)
-			}
+		im.del(k.handle)
+		if im.len() == 0 {
+			delete(sh.m, k.pair)
+		} else {
+			sh.m[k.pair] = im
 		}
 	}
 	return freed
@@ -93,20 +92,19 @@ func (g *Graph[N, W]) withdrawAbortedHandlePropsLocked(sh *edgeHandlePropShard) 
 			continue
 		}
 		freed += n
-		inner := sh.m[k.pair]
+		// The zero instMap is a valid empty one, so an absent pair needs no
+		// special case: set materialises it and the write-back installs it.
+		im := sh.m[k.pair]
 		if had {
-			if inner == nil {
-				inner = make(map[uint64]propBag, 1)
-				sh.m[k.pair] = inner
-			}
-			inner[k.handle] = pre
+			im.set(k.handle, pre)
+			sh.m[k.pair] = im
 			continue
 		}
-		if inner != nil {
-			delete(inner, k.handle)
-			if len(inner) == 0 {
-				delete(sh.m, k.pair)
-			}
+		im.del(k.handle)
+		if im.len() == 0 {
+			delete(sh.m, k.pair)
+		} else {
+			sh.m[k.pair] = im
 		}
 	}
 	return freed
@@ -125,20 +123,19 @@ func (g *Graph[N, W]) withdrawAbortedInstanceLabelsLocked(sh *edgeInstanceLabelS
 			continue
 		}
 		freed += n
-		inner := sh.m[k.pair]
+		// The zero instMap is a valid empty one, so an absent pair needs no
+		// special case: set materialises it and the write-back installs it.
+		im := sh.m[k.pair]
 		if had {
-			if inner == nil {
-				inner = make(map[int64]labelBag, 1)
-				sh.m[k.pair] = inner
-			}
-			inner[k.idx] = pre
+			im.set(k.idx, pre)
+			sh.m[k.pair] = im
 			continue
 		}
-		if inner != nil {
-			delete(inner, k.idx)
-			if len(inner) == 0 {
-				delete(sh.m, k.pair)
-			}
+		im.del(k.idx)
+		if im.len() == 0 {
+			delete(sh.m, k.pair)
+		} else {
+			sh.m[k.pair] = im
 		}
 	}
 	return freed
@@ -156,20 +153,19 @@ func (g *Graph[N, W]) withdrawAbortedInstancePropsLocked(sh *edgeInstancePropSha
 			continue
 		}
 		freed += n
-		inner := sh.m[k.pair]
+		// The zero instMap is a valid empty one, so an absent pair needs no
+		// special case: set materialises it and the write-back installs it.
+		im := sh.m[k.pair]
 		if had {
-			if inner == nil {
-				inner = make(map[int64]propBag, 1)
-				sh.m[k.pair] = inner
-			}
-			inner[k.idx] = pre
+			im.set(k.idx, pre)
+			sh.m[k.pair] = im
 			continue
 		}
-		if inner != nil {
-			delete(inner, k.idx)
-			if len(inner) == 0 {
-				delete(sh.m, k.pair)
-			}
+		im.del(k.idx)
+		if im.len() == 0 {
+			delete(sh.m, k.pair)
+		} else {
+			sh.m[k.pair] = im
 		}
 	}
 	return freed

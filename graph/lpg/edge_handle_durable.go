@@ -253,9 +253,10 @@ func (g *Graph[N, W]) EdgeLabelsByHandleIDAsOf(srcID, dstID graph.NodeID, handle
 	// The lookup is INLINE rather than through handleLabelBagAsOf, and that is
 	// measured, not stylistic: each extra call frame returning a 40-byte bag
 	// cost 3.6 ns on BenchmarkEdgeSideRead_LabelsByHandle, a tenth of the whole
-	// read. Indexing the nil inner map is deliberate — Go returns the zero value
-	// and false, which is exactly "no record".
-	bag, ok := sh.m[k][handle]
+	// read. Indexing the nil OUTER map is deliberate — Go returns the zero
+	// instMap, whose get reports "no record", which is exactly right.
+	im := sh.m[k]
+	bag, ok := im.get(handle)
 	if snap != nil && !sh.v.empty() {
 		bag, ok = sh.v.asOf(edgeHandleKey{pair: k, handle: handle}, bag, ok, snap.startTS, snap.txID)
 	}
@@ -296,7 +297,8 @@ func (g *Graph[N, W]) EdgePropertiesByHandleIDAsOf(srcID, dstID graph.NodeID, ha
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	// Inline for the reason given on [Graph.EdgeLabelsByHandleIDAsOf].
-	bag, ok := sh.m[k][handle]
+	im := sh.m[k]
+	bag, ok := im.get(handle)
 	if snap != nil && !sh.v.empty() {
 		bag, ok = sh.v.asOf(edgeHandleKey{pair: k, handle: handle}, bag, ok, snap.startTS, snap.txID)
 	}
@@ -337,14 +339,11 @@ func (g *Graph[N, W]) setEdgeLabelByHandleIDInfo(srcID, dstID graph.NodeID, hand
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	if sh.m == nil {
-		sh.m = make(map[edgeKey]map[uint64]labelBag)
+		sh.m = make(map[edgeKey]instMap[uint64, labelBag])
 	}
-	byHandle, ok := sh.m[k]
-	if !ok {
-		byHandle = make(map[uint64]labelBag)
-		sh.m[k] = byHandle
-	}
-	bag := byHandle[handle]
+	// Both tiers are held BY VALUE; each write-back is load-bearing.
+	im := sh.m[k]
+	bag, _ := im.get(handle)
 	if bag.has(lid) {
 		return
 	}
@@ -353,7 +352,8 @@ func (g *Graph[N, W]) setEdgeLabelByHandleIDInfo(srcID, dstID graph.NodeID, hand
 		return
 	}
 	bag.add(lid)
-	byHandle[handle] = bag
+	im.set(handle, bag)
+	sh.m[k] = im
 }
 
 // SetEdgePropertyByHandleID records key=value on the edge identified by
@@ -389,19 +389,17 @@ func (g *Graph[N, W]) setEdgePropertyByHandleIDInfo(srcID, dstID graph.NodeID, h
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	if sh.m == nil {
-		sh.m = make(map[edgeKey]map[uint64]propBag)
+		sh.m = make(map[edgeKey]instMap[uint64, propBag])
 	}
-	byHandle, ok := sh.m[k]
-	if !ok {
-		byHandle = make(map[uint64]propBag)
-		sh.m[k] = byHandle
-	}
-	bag := byHandle[handle]
+	// Both tiers are held BY VALUE; each write-back is load-bearing.
+	im := sh.m[k]
+	bag, _ := im.get(handle)
 	if !g.pushHandlePropVersion(sh, k, handle, tx) {
 		return
 	}
 	bag.set(pid, value)
-	byHandle[handle] = bag
+	im.set(handle, bag)
+	sh.m[k] = im
 }
 
 // DelEdgePropertyByHandleID removes exactly key from the property bag of the
@@ -434,11 +432,11 @@ func (g *Graph[N, W]) delEdgePropertyByHandleIDInfo(srcID, dstID graph.NodeID, h
 	sh := g.edgeHandlePropShardFor(k)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
-	byHandle, ok := sh.m[k]
+	im, ok := sh.m[k]
 	if !ok {
 		return
 	}
-	bag, ok := byHandle[handle]
+	bag, ok := im.get(handle)
 	if !ok {
 		return
 	}
@@ -446,13 +444,16 @@ func (g *Graph[N, W]) delEdgePropertyByHandleIDInfo(srcID, dstID graph.NodeID, h
 		return
 	}
 	if bag.del(pid) {
-		delete(byHandle, handle)
-		if len(byHandle) == 0 {
+		im.del(handle)
+		if im.len() == 0 {
 			delete(sh.m, k)
+		} else {
+			sh.m[k] = im
 		}
 		return
 	}
-	byHandle[handle] = bag
+	im.set(handle, bag)
+	sh.m[k] = im
 }
 
 // WalkEdgeHandlesAsOf is [Graph.WalkEdgeHandles] resolving every node's adjacency AS

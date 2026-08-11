@@ -28,12 +28,14 @@ import (
 	"sync"
 )
 
-// edgeInstanceLabelShard holds the per-(src, dst, idx) label sets. The
-// innermost per-instance set is the compact tiered [labelBag] (sprint 221,
-// #1633), stored by value, so a 1-2-label edge instance pays a small slice
-// instead of a ~300 B Go map.
+// edgeInstanceLabelShard holds the per-(src, dst, idx) label sets. Both levels
+// below the shard are compact tiered unions stored by value: the per-pair
+// instance map is an [instMap] (sprint 339, #2401), so a pair carrying one
+// relationship pays one small slice instead of a whole Go map, and the
+// innermost per-instance set is a [labelBag] (sprint 221, #1633), so a
+// 1-2-label instance pays a small slice too.
 type edgeInstanceLabelShard struct {
-	m map[edgeKey]map[int64]labelBag
+	m map[edgeKey]instMap[int64, labelBag]
 	// v indexes the pre-image chains of the instances a writer has touched, so
 	// a reader can reconstruct one instance's type set as of its own start
 	// timestamp (rmp #2291).
@@ -74,16 +76,14 @@ func (g *Graph[N, W]) setEdgeLabelAtInfo(src, dst N, idx int64, name string, tx 
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	if sh.m == nil {
-		sh.m = make(map[edgeKey]map[int64]labelBag)
+		sh.m = make(map[edgeKey]instMap[int64, labelBag])
 	}
-	byIdx, ok := sh.m[k]
-	if !ok {
-		byIdx = make(map[int64]labelBag)
-		sh.m[k] = byIdx
-	}
-	// labelBag is stored by value: mutate a local copy and write it back under
-	// the shard lock (the write-back is load-bearing — add may grow/promote).
-	bag := byIdx[idx]
+	// Both the instMap and the labelBag inside it are stored BY VALUE: mutate
+	// local copies and write both back under the shard lock. Each write-back is
+	// load-bearing — add may grow or promote the bag, and set may grow or
+	// promote the instMap.
+	im := sh.m[k]
+	bag, _ := im.get(idx)
 	if bag.has(lid) {
 		return
 	}
@@ -91,7 +91,8 @@ func (g *Graph[N, W]) setEdgeLabelAtInfo(src, dst N, idx int64, name string, tx 
 		return
 	}
 	bag.add(lid)
-	byIdx[idx] = bag
+	im.set(idx, bag)
+	sh.m[k] = im
 }
 
 // EdgeLabelsAt returns the labels recorded at instance `idx` of the
@@ -139,7 +140,8 @@ func (g *Graph[N, W]) EdgeLabelsAtAsOf(src, dst N, idx int64, snap *Snapshot) []
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
 	// Inline for the reason given on [Graph.EdgeLabelsByHandleIDAsOf].
-	bag, ok := sh.m[k][idx]
+	im := sh.m[k]
+	bag, ok := im.get(idx)
 	if snap != nil && !sh.v.empty() {
 		bag, ok = sh.v.asOf(edgeInstanceKey{pair: k, idx: idx}, bag, ok, snap.startTS, snap.txID)
 	}
@@ -182,10 +184,12 @@ func (g *Graph[N, W]) removeEdgeInstanceInfo(src, dst N, idx int64, tx *writeCtx
 	{
 		sh := g.edgeInstanceLabelShardFor(k)
 		sh.mu.Lock()
-		if byIdx, ok := sh.m[k]; ok && g.pushInstanceLabelVersion(sh, k, idx, tx) {
-			delete(byIdx, idx)
-			if len(byIdx) == 0 {
+		if im, ok := sh.m[k]; ok && g.pushInstanceLabelVersion(sh, k, idx, tx) {
+			im.del(idx)
+			if im.len() == 0 {
 				delete(sh.m, k)
+			} else {
+				sh.m[k] = im
 			}
 		}
 		sh.mu.Unlock()
@@ -193,10 +197,12 @@ func (g *Graph[N, W]) removeEdgeInstanceInfo(src, dst N, idx int64, tx *writeCtx
 	{
 		sh := g.edgeInstancePropShardFor(k)
 		sh.mu.Lock()
-		if byIdx, ok := sh.m[k]; ok && g.pushInstancePropVersion(sh, k, idx, tx) {
-			delete(byIdx, idx)
-			if len(byIdx) == 0 {
+		if im, ok := sh.m[k]; ok && g.pushInstancePropVersion(sh, k, idx, tx) {
+			im.del(idx)
+			if im.len() == 0 {
 				delete(sh.m, k)
+			} else {
+				sh.m[k] = im
 			}
 		}
 		sh.mu.Unlock()

@@ -66,7 +66,7 @@ import (
 // #1633), stored by value, so a 1-2-label edge handle pays a small slice
 // instead of a ~300 B Go map.
 type edgeHandleLabelShard struct {
-	m map[edgeKey]map[uint64]labelBag
+	m map[edgeKey]instMap[uint64, labelBag]
 	// v indexes the pre-image chains of the instances a writer has touched, so
 	// a reader can reconstruct one instance's type set as of its own start
 	// timestamp (rmp #2291). Keyed by (pair, handle) rather than by pair, so a
@@ -81,7 +81,7 @@ type edgeHandleLabelShard struct {
 // #1633), stored by value, so a 1-2-property edge handle pays a small slice
 // instead of a ~300 B Go map.
 type edgeHandlePropShard struct {
-	m map[edgeKey]map[uint64]propBag
+	m map[edgeKey]instMap[uint64, propBag]
 	// v indexes the pre-image chains of the instances a writer has touched.
 	// See [edgeHandleLabelShard].v for why it is keyed by (pair, handle).
 	v  sideVersions[edgeHandleKey, propBag]
@@ -239,16 +239,14 @@ func (g *Graph[N, W]) setEdgeLabelByHandleInfo(src, dst N, handle uint64, name s
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	if sh.m == nil {
-		sh.m = make(map[edgeKey]map[uint64]labelBag)
+		sh.m = make(map[edgeKey]instMap[uint64, labelBag])
 	}
-	byHandle, ok := sh.m[k]
-	if !ok {
-		byHandle = make(map[uint64]labelBag)
-		sh.m[k] = byHandle
-	}
-	// labelBag is stored by value: mutate a local copy and write it back under
-	// the shard lock (the write-back is load-bearing — add may grow/promote).
-	bag := byHandle[handle]
+	// Both the instMap and the labelBag inside it are stored BY VALUE: mutate
+	// local copies and write both back under the shard lock. Each write-back is
+	// load-bearing — add may grow or promote the bag, and set may grow or
+	// promote the instMap.
+	im := sh.m[k]
+	bag, _ := im.get(handle)
 	if bag.has(lid) {
 		// Already recorded for this handle. Re-asserting it must NOT bump the
 		// epoch: the MERGE MATCH branch (cypher/exec/merge_relationship.go) calls
@@ -263,7 +261,8 @@ func (g *Graph[N, W]) setEdgeLabelByHandleInfo(src, dst N, handle uint64, name s
 		return
 	}
 	bag.add(lid)
-	byHandle[handle] = bag
+	im.set(handle, bag)
+	sh.m[k] = im
 	changed = true
 }
 
@@ -363,21 +362,19 @@ func (g *Graph[N, W]) setEdgePropertyByHandleInfo(src, dst N, handle uint64, key
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	if sh.m == nil {
-		sh.m = make(map[edgeKey]map[uint64]propBag)
+		sh.m = make(map[edgeKey]instMap[uint64, propBag])
 	}
-	byHandle, ok := sh.m[k]
-	if !ok {
-		byHandle = make(map[uint64]propBag)
-		sh.m[k] = byHandle
-	}
-	// propBag is stored by value: mutate a local copy and write it back under
-	// the shard lock (the write-back is load-bearing — set may grow/promote).
-	bag := byHandle[handle]
+	// Both the instMap and the propBag inside it are stored BY VALUE: mutate
+	// local copies and write both back under the shard lock. Each write-back is
+	// load-bearing — set may grow or promote either tier.
+	im := sh.m[k]
+	bag, _ := im.get(handle)
 	if !g.pushHandlePropVersion(sh, k, handle, tx) {
 		return nil
 	}
 	bag.set(pid, value)
-	byHandle[handle] = bag
+	im.set(handle, bag)
+	sh.m[k] = im
 	return nil
 }
 
@@ -531,27 +528,30 @@ func (g *Graph[N, W]) delEdgePropertyByHandleInfo(src, dst N, handle uint64, key
 	sh := g.edgeHandlePropShardFor(k)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
-	byHandle, ok := sh.m[k]
+	im, ok := sh.m[k]
 	if !ok {
 		return
 	}
-	bag, ok := byHandle[handle]
+	bag, ok := im.get(handle)
 	if !ok {
 		return
 	}
-	// propBag is stored by value: mutate a local copy and either write it back
-	// or drop the entry when the removal emptied it.
+	// Both tiers are stored by value: mutate local copies and either write them
+	// back or drop the entry when the removal emptied it.
 	if !g.pushHandlePropVersion(sh, k, handle, tx) {
 		return
 	}
 	if bag.del(pid) {
-		delete(byHandle, handle)
-		if len(byHandle) == 0 {
+		im.del(handle)
+		if im.len() == 0 {
 			delete(sh.m, k)
+		} else {
+			sh.m[k] = im
 		}
 		return
 	}
-	byHandle[handle] = bag
+	im.set(handle, bag)
+	sh.m[k] = im
 }
 
 // RemoveEdgeInstanceByHandle discards every per-handle label and property
@@ -584,10 +584,12 @@ func (g *Graph[N, W]) removeEdgeInstanceByHandleInfo(src, dst N, handle uint64, 
 	{
 		sh := g.edgeHandleLabelShardFor(k)
 		sh.mu.Lock()
-		if byHandle, ok := sh.m[k]; ok && g.pushHandleLabelVersion(sh, k, handle, tx) {
-			delete(byHandle, handle)
-			if len(byHandle) == 0 {
+		if im, ok := sh.m[k]; ok && g.pushHandleLabelVersion(sh, k, handle, tx) {
+			im.del(handle)
+			if im.len() == 0 {
 				delete(sh.m, k)
+			} else {
+				sh.m[k] = im
 			}
 		}
 		sh.mu.Unlock()
@@ -595,10 +597,12 @@ func (g *Graph[N, W]) removeEdgeInstanceByHandleInfo(src, dst N, handle uint64, 
 	{
 		sh := g.edgeHandlePropShardFor(k)
 		sh.mu.Lock()
-		if byHandle, ok := sh.m[k]; ok && g.pushHandlePropVersion(sh, k, handle, tx) {
-			delete(byHandle, handle)
-			if len(byHandle) == 0 {
+		if im, ok := sh.m[k]; ok && g.pushHandlePropVersion(sh, k, handle, tx) {
+			im.del(handle)
+			if im.len() == 0 {
 				delete(sh.m, k)
+			} else {
+				sh.m[k] = im
 			}
 		}
 		sh.mu.Unlock()
