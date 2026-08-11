@@ -132,7 +132,30 @@ func bagPutUint(dst []byte, v uint64, n int) []byte {
 }
 
 // bagUint reads an n-byte little-endian unsigned integer at off.
+//
+// n is always a power of two in [1,8] — it comes from [bagSizeOf], which is
+// 1<<sel over a two-bit selector — so every width is handled by a case below
+// and the default is unreachable in practice, kept only so a future selector
+// cannot silently read garbage.
+//
+// The switch is the point. This used to be `copy(tmp[:], buf[off:off+n])` into
+// a zeroed [8]byte, and a copy whose length is a VARIABLE compiles to a
+// runtime.memmove CALL rather than to inline loads. bagUint runs several times
+// per record — the key id, the payload width, a string's length — and every
+// property lookup walks records, so that call dominated: a live profile of a
+// scan-and-filter workload attributed 10.20% of ALL engine CPU to memmove, and
+// 100% of that memmove to this function.
 func bagUint(buf []byte, off, n int) uint64 {
+	switch n {
+	case 1:
+		return uint64(buf[off])
+	case 2:
+		return uint64(binary.LittleEndian.Uint16(buf[off:]))
+	case 4:
+		return uint64(binary.LittleEndian.Uint32(buf[off:]))
+	case 8:
+		return binary.LittleEndian.Uint64(buf[off:])
+	}
 	var tmp [8]byte
 	copy(tmp[:], buf[off:off+n])
 	return binary.LittleEndian.Uint64(tmp[:])
