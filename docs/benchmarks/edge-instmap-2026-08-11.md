@@ -85,8 +85,19 @@ is spike **#2403**, which requires a design decision that is the user's to take.
 
 ## 3. What was verified
 
-- **Behaviour unchanged.** Full `make ci` **exit 0** (read from the log, not from the wrapper),
-  aggregate coverage 87.1 %, TCK **3897 scenarios, 3897 passed, 0 failed, 0 undefined**.
+- **Behaviour unchanged.** Full `make ci` **exit 0** (read from the log, not from the wrapper —
+  the background-task notification reported 0 for a run that had exited 2), 122 packages, lint
+  0 issues, aggregate coverage 87.1 %, TCK **3897 scenarios, 3897 passed, 0 failed, 0 undefined**.
+
+  Two intermediate gate runs went red and neither was this change; both are recorded rather than
+  re-run away. (1) The coverage stage failed with `_pkg_.a: no such file or directory` import
+  errors — a build-cache artefact; the same stage passed standalone at the identical 87.1 %.
+  (2) `TestGateCtx_ReturnsWithinItsBudget` in `graph/mvcc` failed a **5 ms latency budget at
+  117.9 ms**, during a run started immediately after `go clean -cache` with the machine at a
+  **load average of 17.3 on 10 cores**. `git diff --name-only main..HEAD -- 'graph/mvcc/*.go'`
+  returns **zero files**, which is what proves the attribution, and the test passes **20/20** in
+  isolation at load 3.2. A latency-budget assertion is a load question before it is a code
+  question.
 - **The read path is not the price.** Interleaved A/B over five rounds of
   `BenchmarkEdgeSideRead_*` (`git stash` between arms): **B/op and allocs/op byte-identical on
   every arm**, sec/op geomean **−2.33 %** — four of the five arms marginally faster, because a
