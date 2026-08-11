@@ -292,6 +292,12 @@ var gatedDocs = []string{
 // so a new document cannot quietly escape the gate.
 var historicalDocs = map[string]bool{
 	filepath.Join("docs", "audit-production-readiness-2026-07-02-round2.md"): true,
+	// Quotes the four statements of the one test that fails when the
+	// ordinal-keyed edge-instance stores stop being written, to name the
+	// behaviour the spike found them load-bearing for. Executing them here
+	// would assert the present engine against a record of an experiment run
+	// against a deliberately broken prototype.
+	filepath.Join("docs", "edge-instance-store-retirement-2026-08-11.md"): true,
 	// Quotes the two aggregation shapes whose CPU profile attributed 17.16% of all
 	// samples to materialising a relationship they do not name, to identify the
 	// shapes under discussion. They are verbatim from examples/26_social_scale_bench
