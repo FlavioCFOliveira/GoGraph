@@ -1905,6 +1905,37 @@ coverage instrumentation; a test that measures the MODULE is a GATE, and it neve
 does. The two must not be confused, because guarding a gate that way would stop the
 coverage arm gating anything.
 
+### Sprint 339 sync — the CPU-efficiency head-to-head vs Neo4j and Memgraph (2026-08-11)
+
+Recorded at `2ba5d36e` (and `283c7eb1` for the concurrency harness committed with it).
+Added: 2 `Commit`s (`2ba5d36e`, `283c7eb1`); 2 `Spec`s
+(`docs/cpu-vs-neo4j-memgraph-2026-08-11.md`,
+`docs/concurrency-vs-neo4j-memgraph-2026-08-11.md`); 3 `Test`s (`TestCPUEfficiency`,
+`TestConcurrencySweep`, `TestDeleteBatchScaling`, all in `bench/comparison`); 3 `Task`s
+(2410 BUG, 2411 SPIKE, 2412 IMPROVEMENT, all BACKLOG); and 1 `Function`
+(`cypher.populateRowCtx`) that the extractor had never captured — a genuine fidelity
+gap found by this audit, not a new symbol.
+
+Edges: `Commit -[TOUCHES]->` `bench/comparison` and each `Spec`; `CONTAINS` for
+`TestCPUEfficiency`; `Spec -[FOUND]->` the four symbols the audit indicted
+(`proto.ChunkedWriter.WriteMessage`, `expr.RowContext`, `cypher.populateRowCtx`,
+`cypher.planCache`); `Task -[CONCERNS]->` its symbol; `Task -[FROM_AUDIT]-> Spec`.
+No new label or edge type: `FOUND`, `CONCERNS` and `FROM_AUDIT` already existed in the
+live graph (see the edge-table data-quality note).
+
+Why these four symbols are worth having in the graph as *indicted*: the audit measured
+processor time per operation against both peers and found GoGraph has the **lowest**
+fixed CPU per query of the three (47.8 µs vs Memgraph 71.6, Neo4j 167.7) but the
+**highest** marginal cost per row (1.88 µs vs 0.88 and 0.96). A matched pair isolating
+delivery from computation showed 97 % of that per-row cost is
+`ChunkedWriter.WriteMessage` flushing per Bolt message — one `write(2)` syscall per
+returned row. Separately, `RowContext` being a `map[string]Value` rebuilt per row by
+`populateRowCtx` puts ~19 % of engine CPU in Go map machinery on a scan-plus-filter,
+and `planCache` being keyed on raw query text costs +65 % CPU when a literal rotates.
+At 64 concurrent clients GoGraph uses 2.51× less CPU per point lookup than Memgraph
+and 3.66× less than Neo4j, and is the only one of the three whose per-operation cost
+falls as clients are added.
+
 ## Known limitations (faithful, by design)
 
 - **Build-tag duplicates.** The extractor parses every `.go` file regardless of build
