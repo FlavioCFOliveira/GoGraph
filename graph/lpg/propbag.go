@@ -264,6 +264,42 @@ func bagDecodeAt(buf []byte, off int) bagRecord {
 	}
 }
 
+// bagKeyAt decodes ONLY the key of the record at off, and the offset of the
+// record after it. It never materialises the value.
+//
+// Every scan that is looking for a particular key — get, set, del — used
+// [bagDecodeAt], which builds a [PropertyValue] for each record it walks past
+// and then discards all but the match. That is pure waste, and it is not small:
+// a record's `next` is computable from its metadata byte alone, whereas
+// building the value zig-zag decodes an integer, reassembles a float, or forms
+// a string header. On a scan-and-filter workload reading one property of three,
+// bagDecodeAt was 28.18% of all engine CPU
+// (docs/cpu-vs-neo4j-memgraph-2026-08-11.md §5).
+//
+// It must stay in exact lockstep with bagDecodeAt's advance: the two are
+// pinned against each other by TestBagKeyAtAgreesWithDecodeAt.
+func bagKeyAt(buf []byte, off int) (key PropertyKeyID, next int) {
+	meta := buf[off]
+	kind := PropertyKind(meta & bagMaskType >> bagShiftType)
+	idN := bagSizeOf(meta & bagMaskIDSize >> bagShiftIDSize)
+	paySel := meta & bagMaskPaySize
+	p := off + 1
+	key = PropertyKeyID(bagUint(buf, p, idN))
+	p += idN
+
+	switch kind {
+	case PropBool:
+		return key, p
+	case PropInt64:
+		return key, p + bagSizeOf(paySel)
+	case PropFloat64:
+		return key, p + 8
+	default: // PropString
+		lN := bagSizeOf(paySel)
+		return key, p + lN + int(bagUint(buf, p, lN))
+	}
+}
+
 // propBag is the per-node property bag. The zero value is a valid empty bag.
 // The fields form a tagged union resolved by which is non-nil:
 //   - m != nil -> map state (promoted; never demotes).
@@ -279,12 +315,18 @@ func (b *propBag) get(key PropertyKeyID) (PropertyValue, bool) {
 		v, ok := b.m[key]
 		return v, ok
 	}
-	for off := 0; off < len(b.buf); {
-		r := bagDecodeAt(b.buf, off)
-		if r.key == key {
-			return r.val, true
+	// The buffer is snapshotted ONCE. The key-only scan and the value decode on
+	// the match are two reads, and taking them from b.buf separately would let a
+	// concurrent writer swap the buffer between them, leaving the second read to
+	// apply this buffer's offset to a different one. Published buffers are
+	// immutable, so a snapshot is a consistent view for the whole scan.
+	buf := b.buf
+	for off := 0; off < len(buf); {
+		k, next := bagKeyAt(buf, off)
+		if k == key {
+			return bagDecodeAt(buf, off).val, true
 		}
-		off = r.next
+		off = next
 	}
 	return PropertyValue{}, false
 }
@@ -310,7 +352,7 @@ func (b *propBag) count() int {
 	n := 0
 	for off := 0; off < len(b.buf); {
 		n++
-		off = bagDecodeAt(b.buf, off).next
+		_, off = bagKeyAt(b.buf, off)
 	}
 	return n
 }
@@ -335,12 +377,12 @@ func (b *propBag) set(key PropertyKeyID, val PropertyValue) {
 	// Locate an existing record for key, and measure the stream while doing so.
 	found, foundEnd, n := -1, 0, 0
 	for off := 0; off < len(b.buf); {
-		r := bagDecodeAt(b.buf, off)
+		k, next := bagKeyAt(b.buf, off)
 		n++
-		if r.key == key {
-			found, foundEnd = off, r.next
+		if k == key {
+			found, foundEnd = off, next
 		}
-		off = r.next
+		off = next
 	}
 
 	if found < 0 {
@@ -372,18 +414,18 @@ func (b *propBag) del(key PropertyKeyID) (nowEmpty bool) {
 		return len(b.m) == 0
 	}
 	for off := 0; off < len(b.buf); {
-		r := bagDecodeAt(b.buf, off)
-		if r.key != key {
-			off = r.next
+		k, recEnd := bagKeyAt(b.buf, off)
+		if k != key {
+			off = recEnd
 			continue
 		}
-		if len(b.buf)-(r.next-off) == 0 {
+		if len(b.buf)-(recEnd-off) == 0 {
 			b.buf = nil
 			return true
 		}
-		next := make([]byte, 0, len(b.buf)-(r.next-off))
+		next := make([]byte, 0, len(b.buf)-(recEnd-off))
 		next = append(next, b.buf[:off]...)
-		next = append(next, b.buf[r.next:]...)
+		next = append(next, b.buf[recEnd:]...)
 		b.buf = next
 		return false
 	}
