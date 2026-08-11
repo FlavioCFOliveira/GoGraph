@@ -10,11 +10,21 @@ scaling best of the three. This one measures the other half of the
 of memory each engine spends to hold the same graph, and on what.**
 
 > **Remediation.** This document records the state at `b3887752` and is not revised as findings
-> are fixed. Sprint 339 has since addressed F1 and F7's second half: the relationship write path
-> now costs **483.92 B/edge against the 1 326.61 measured here**, and the fixture that OOM-killed
-> the engine completes in 2 457 MB. See
-> [`benchmarks/edge-instmap-2026-08-11.md`](benchmarks/edge-instmap-2026-08-11.md). Every figure
-> below is the pre-remediation measurement.
+> are fixed. Every figure below is the pre-remediation measurement. Sprint 339 has since
+> addressed F1, F4 and F7:
+>
+> | | measured here | after sprint 339 |
+> |---|---:|---:|
+> | typed relationship | 1 326.61 B | **483.92 B** |
+> | node, 1 label, 3 properties | 505.48 B | **320.72 B** |
+> | 4 M-relationship fixture in 8 GB | **OOM-killed** | completes |
+>
+> See [`benchmarks/edge-instmap-2026-08-11.md`](benchmarks/edge-instmap-2026-08-11.md) and
+> [`benchmarks/propbag-bytestream-2026-08-11.md`](benchmarks/propbag-bytestream-2026-08-11.md).
+> The property-carrying-relationship fixture needed one further thing the audit did not consider:
+> **`GOMEMLIMIT` is set nowhere in the module**, so the Go runtime targets twice the live heap
+> with no knowledge of a container cap. Setting it to the cap is what let that fixture finish
+> (#2407).
 
 ---
 

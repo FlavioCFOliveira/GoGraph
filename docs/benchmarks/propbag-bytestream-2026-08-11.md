@@ -69,6 +69,18 @@ The three-property shape encodes to **exactly 26 bytes**, the same figure Memgra
 produces for it — the arithmetic transferred intact. The remaining 116.61 B of the property term
 is the `nodePropShards` map entry (~101 B/node), which this change does not touch; that is #2405.
 
+End-to-end through Cypher over Bolt in the audit's own containers, 1 000 000 nodes per shape,
+against the peer figures that audit measured:
+
+| shape | GoGraph before | GoGraph after | Memgraph | gap before → after |
+|---|---:|---:|---:|---|
+| node, 1 label, 1 string property | 354.64 | **299.21** | 130.61 | 2.72× → **2.29×** |
+| node, 1 label, 3 properties | 505.48 | **320.72** | 147.34 | 3.43× → **2.18×** |
+
+The clearest single number: the two extra properties of the three-property shape now cost
+**21.5 B/node** where they cost 150.84 before — because three records share one 32-byte buffer
+instead of three boxed pairs in a growing slice.
+
 ## 4. The cost, stated plainly
 
 This trades CPU for memory, and the microbenchmarks show the CPU side clearly. Interleaved A/B,
