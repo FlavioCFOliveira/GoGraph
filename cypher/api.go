@@ -17636,25 +17636,17 @@ func (a *lpgMutatorAdapter) OutNeighbours(n string) []string {
 // performing a full graph walk. This is O(V+E) and should only be called for
 // DETACH DELETE operations where correctness trumps performance.
 func (a *lpgMutatorAdapter) InNeighbours(n string) []string {
-	nID, ok := a.g.AdjList().Mapper().Lookup(n)
-	if !ok {
-		return nil
-	}
-	var result []string
-	a.g.AdjList().Mapper().Walk(func(id graph.NodeID, key string) bool {
-		if id == nID {
-			return true
-		}
-		nbs, _ := a.g.AdjList().LoadEntry(id)
-		for _, nb := range nbs {
-			if nb == nID {
-				result = append(result, key)
-				break
-			}
-		}
-		return true
-	})
-	return result
+	// Reads the adjacency's live in-edge index, in O(in-degree).
+	//
+	// It used to walk every interned node and scan that node's whole adjacency
+	// entry looking for n — O(order + size) per call, on a question the delete
+	// path asks ONCE PER NODE DELETED. Deleting k nodes from a graph of n
+	// therefore cost O(k·n), and because the graph keeps its slots after a
+	// delete, the cost grew with every node ever interned rather than with the
+	// live graph: five seed-and-wipe cycles of the same 20 000 nodes measured
+	// 895 ms, 1.635 s, 2.393 s, 3.143 s, 3.924 s for identical work, at exactly
+	// one core. That is rmp #2400, and the walk was 78% of its CPU profile.
+	return a.g.AdjList().InNeighbours(n)
 }
 
 // RemoveAllEdgesFrom removes all outgoing edges from n in O(degree) time.
@@ -18532,28 +18524,11 @@ func (a *walMutatorAdapter) OutNeighbours(n string) []string {
 	return out
 }
 
-// InNeighbours returns a snapshot of the incoming neighbour keys of n by
-// performing a full graph walk.
+// InNeighbours returns a snapshot of the incoming neighbour keys of n, read
+// from the adjacency's live in-edge index in O(in-degree). See
+// [lpgMutatorAdapter.InNeighbours] for why this is not a graph walk.
 func (a *walMutatorAdapter) InNeighbours(n string) []string {
-	nID, ok := a.g.AdjList().Mapper().Lookup(n)
-	if !ok {
-		return nil
-	}
-	var result []string
-	a.g.AdjList().Mapper().Walk(func(id graph.NodeID, key string) bool {
-		if id == nID {
-			return true
-		}
-		nbs, _ := a.g.AdjList().LoadEntry(id)
-		for _, nb := range nbs {
-			if nb == nID {
-				result = append(result, key)
-				break
-			}
-		}
-		return true
-	})
-	return result
+	return a.g.AdjList().InNeighbours(n)
 }
 
 // RemoveAllEdgesFrom removes all outgoing edges from n in O(degree) time.

@@ -335,16 +335,35 @@ scan is not the problem: the cost is inside the delete and it scales with the nu
 Per node: **GoGraph 82 µs, Neo4j 2.2 µs, Memgraph 0.2 µs** — 37× and 410× respectively, before
 any degradation.
 
-**Root cause, confirmed at source.** `graph/lpg/lpg.go:2888-2899` (`removeNodeInfo`) takes the
+> **CORRECTED 2026-08-11, after the fix was measured. The root cause stated below in
+> ~~struck-through~~ form was WRONG.** It was read in the source and never priced, and
+> "confirmed at source" meant confirmed to *exist*, not confirmed to *cost*. The tombstone
+> clone is **0.99%** of the CPU profile of this very workload. The real cause is
+> `lpgMutatorAdapter.InNeighbours` answering "what points at this node" with a walk of
+> **every interned node** — 78.77% of the profile — once per node deleted, which is why the
+> cost grew with the nodes ever interned rather than with the tombstones. Full attribution,
+> both measurements, and the fix are in
+> [`benchmarks/delete-in-edge-index-2026-08-11.md`](benchmarks/delete-in-edge-index-2026-08-11.md).
+> The finding itself stands: it was a real defect, reachable as a failure, and it is now
+> fixed and gated.
+
+~~**Root cause, confirmed at source.** `graph/lpg/lpg.go:2888-2899` (`removeNodeInfo`) takes the
 global `tombstoneMu` and calls `cur.Clone()` — a deep copy of the entire roaring64 tombstone
 bitmap — **once per node removed**. Removing *k* nodes with *t* existing tombstones is
 O(k·t), and because the clone runs under one process-wide mutex the whole bulk delete
-serialises on a single core however many are available.
+serialises on a single core however many are available.~~
 
-The copy-on-write design is deliberate and its rationale (`lpg.go:453-467`) is sound for
+~~The copy-on-write design is deliberate and its rationale (`lpg.go:453-467`) is sound for
 *readers*, who stay lock-free — this is the same instinct that makes §4.1's read path the best
-of the three. What fails is its stated premise: *"The clone cost is O(tombstones) and paid only
-on the **rare** delete/revive."* A bulk delete is not rare, and nothing enforces the premise.
+of the three. What fails is its stated premise: "The clone cost is O(tombstones) and paid only
+on the **rare** delete/revive." A bulk delete is not rare, and nothing enforces the premise.~~
+
+The copy-on-write tombstone design is untouched by the fix, and its stated premise — *"the
+clone cost is O(tombstones) and paid only on the rare delete/revive"* — turns out to hold in
+practice for a different reason than it claims: a dense id range compresses to a handful of
+roaring containers, so the clone is nearly independent of cardinality. Removing 2 000 nodes
+costs 831 ns each with no tombstones present and 1 273 ns each with 160 000 — a factor of
+1.53 across an eightyfold increase in the set being cloned.
 
 **It is reachable as an outright failure, not merely as slowness:** a single-statement delete
 of ~90 000 nodes exceeds `DefaultTxTimeout` (30 s) and returns
@@ -379,7 +398,10 @@ Three qualifications keep that verdict honest:
 2. **The write comparison was not made.** Durability differs across the three (§2.2), so the
    write arm was withdrawn rather than published as a concurrency result.
 3. **The delete path is a genuine defect** (F1) on an axis where both peers are orders of
-   magnitude better, and it degrades without bound under churn.
+   magnitude better, and it degrades without bound under churn. **Fixed on 2026-08-11**, in
+   sprint 342, once its cause was measured rather than inferred: 59.9× at the sixth wipe
+   cycle and flat thereafter, for +1.92% on end-to-end relationship creation. The
+   correction to this document's own attribution is in §6.
 
 ## 8. What this assessment did not establish
 
@@ -392,7 +414,11 @@ Three qualifications keep that verdict honest:
   Every engine held the working set in memory; page-cache behaviour under pressure is
   untested, and it is the regime Neo4j is most engineered for.
 - **Anything about GoGraph's durable write path**, which `ggserver` deliberately omits.
-- **Whether F1 has an equivalent on the edge-delete path.** Only node delete was measured.
+- ~~**Whether F1 has an equivalent on the edge-delete path.** Only node delete was measured.~~
+  **ANSWERED 2026-08-11 (rmp #2418): it did, with the same single cause.** `DETACH DELETE`
+  degraded 5.04× over six cycles where node delete degraded 4.67×, because both reach the
+  same in-neighbour scan. Both are fixed and gated; see
+  [`benchmarks/delete-in-edge-index-2026-08-11.md`](benchmarks/delete-in-edge-index-2026-08-11.md).
 - **Multi-socket behaviour.** One 10-core Apple M4; Forseti's own javadoc warns that its
   characteristics change on large multi-socket machines, and nothing here tests that.
 
