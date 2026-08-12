@@ -247,27 +247,36 @@ properties**, exactly as the previous cycle refuted it for labels: neither the s
 gate nor the per-node chain-absent branch was taken. Reclamation is not dropping a chain a live
 snapshot needs. That is now established for both substructures and should not be re-proposed.
 
-**And one number does not fit.** `a`'s chain head is stamped **85468** on a graph whose
-`mvcc.Clock` is a per-graph value and whose writer performs at most `iterations = 50000`
-transactions — so that clock can never issue an instant above ~50 001. It is not `AbortedTS`
-either (that is `^uint64(0)`). Three checks were run against my own harness before recording
-this, because a harness is the first thing to distrust:
+**AND THE OTHER NUMBER WAS MY OWN BUG — RETRACTED.** This report previously recorded
+`a`'s head stamp of **85468** as an anomaly, on the grounds that the graph's per-graph clock
+can never issue an instant above ~50 001. That claim is **withdrawn**. The stamp was never a
+commit timestamp: the capture packed it as `stampTS() << 2` with the low two bits as flags,
+and **a stamp is not a small number** — an *in-flight* record carries the transaction id,
+which is `mvcc.TxIDBase + k = 2^63 + k`, so the shift **overflowed**:
 
-| check | result |
-|---|---|
-| the oracle's packed encoding round-trips | raw 1001 → packed 4004 → decoded 1001 ✓ |
-| instants allocated per transaction, quiescent | **exactly 1.0000** over 20 000 transactions |
-| instants allocated per transaction, with 8 readers | **exactly 1.0000**; both heads agree |
+```
+(2^63 + k) << 2  mod 2^64  ==  4k        →  decoder's >>2 prints k
+```
 
-So the encoding is sound and nothing allocates extra instants under concurrency. **The stamp
-is therefore either a genuine anomaly of the first order, or evidence of a flaw in the capture
-that these three checks did not reach.** It is recorded as an open question, not as a
-diagnosis, because it rests on **one sample** — and this cycle has already had to withdraw
-three separate figures stated from a single observation.
+The "85468" was the *sequence number of a transaction that was still in flight*, rendered as
+a plausible commit timestamp. **The one fact that mattered — that this node's head was
+uncommitted — is precisely the fact the encoding erased.**
 
-**The next step is a second sample.** If a subsequent capture reproduces a head stamp above
-what the graph's clock can issue, the lead is real and specific; if it shows a stamp in range,
-the first one was a capture artefact and the fall-through refutation above still stands.
+It was found by a probe that asserted the bound continuously instead of waiting for a tear:
+it reported **338 830 breaches in 861 490 samples** with a worst value of
+`9223372036854875804`, and `9223372036854875804 − 2^63 = 99 996`. Those are ordinary in-flight
+transaction ids, not a defect — the probe's *premise* was wrong, and that is what exposed the
+encoding.
+
+**Two lessons, both already in this project's own notes and both re-learned here.** A harness
+must never fold a flag into a field drawn from the answer's own value space. And the value
+space must be checked against its real range before packing — `stampTS` spans both sides of
+`2^63`, which no two-bit shift can survive.
+
+The capture now returns the stamp unmodified and names the state explicitly — `COMMITTED at
+N`, `IN FLIGHT as transaction N`, or `ABORTED` — and additionally reports **whether the two
+heads share one commit record**, which is the premise the whole guarantee rests on. A fresh
+120-run capture is in flight with the corrected instrument.
 
 **Work landed for the next cycle.** The oracle was given the self-diagnosing treatment its
 sibling received at `469aea82` and did not have: it now captures the first violating pair,

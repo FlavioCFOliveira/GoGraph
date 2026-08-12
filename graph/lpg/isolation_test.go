@@ -7,7 +7,9 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
 
 // TestIsolation_CrossSubstructure_EdgeImpliesLabels proves the barrier flips a
@@ -238,8 +240,9 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 		// look. The previous cycle established for LABELS that both nodes held live
 		// chains at the violation; nothing has ever established it for PROPERTIES,
 		// which is this arm.
-		firstAFacts atomic.Uint64
-		firstBFacts atomic.Uint64
+		firstAFacts atomic.Value // string
+		firstBFacts atomic.Value // string
+		firstShared atomic.Value // string
 	)
 
 	wg.Add(1)
@@ -307,8 +310,11 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 							firstReA.Store(ra)
 							firstReB.Store(rb)
 							firstStartTS.Store(snap.startTS)
-							firstAFacts.Store(propChainFacts(g, "a"))
-							firstBFacts.Store(propChainFacts(g, "b"))
+							_, sa := propChainFacts(g, "a")
+							_, sb := propChainFacts(g, "b")
+							firstAFacts.Store(sa)
+							firstBFacts.Store(sb)
+							firstShared.Store(headsShareRecord(g, "a", "b"))
 						}
 					}
 				}()
@@ -332,10 +338,10 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 		}
 		t.Fatalf("observed %d partial-transaction violations (a.v != b.v inside a pinned SNAPSHOT); "+
 			"first observation a.v=%d b.v=%d (delta %d, %s); re-read of the SAME snapshot (startTS=%d) gave a.v=%d b.v=%d — %s; "+
-			"substrate at the violation: a: %s | b: %s",
+			"substrate at the violation: a: %s | b: %s | %s",
 			v, ia, ib, ia-ib, tearDirection(ia, ib),
 			firstStartTS.Load(), ra, rb, persistence,
-			describeChainFacts(firstAFacts.Load()), describeChainFacts(firstBFacts.Load()))
+			firstAFacts.Load(), firstBFacts.Load(), firstShared.Load())
 	}
 	if reads.Load() == 0 {
 		t.Fatal("readers never observed both properties; test did not exercise the invariant")
@@ -356,34 +362,92 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 // Either of the first two bits being set at a violation would mean the read was a
 // present-time read rather than an as-of-snapshot one, which is a materially
 // different defect from a mis-ordered visibility decision.
-func propChainFacts(g *Graph[string, int64], key string) uint64 {
+// It returns the stamp UNMODIFIED, and reports the two absent cases through a
+// separate return value rather than through reserved bits of the stamp.
+//
+// # An earlier version packed both into one word, and that destroyed the signal
+//
+// It returned `stampTS() << 2` with the low two bits as flags. A stamp is not a
+// small number: an IN-FLIGHT record carries the transaction id, which is
+// [mvcc.TxIDBase] + k = 2^63 + k, so the shift OVERFLOWED and
+// (2^63+k)<<2 mod 2^64 == 4k. The decoder's >>2 then printed k — a plausible
+// small integer that looked exactly like a commit timestamp. The first captured
+// violation reported "head stamped 85468", which was never a timestamp at all but
+// the sequence number of a transaction that was still IN FLIGHT, and the one fact
+// that mattered — that this node's head was uncommitted — was the fact the
+// encoding erased.
+//
+// Hence: no packing, no reserved bits, and the in-flight case named explicitly.
+func propChainFacts(g *Graph[string, int64], key string) (stamp uint64, state string) {
 	id, ok := g.adj.Mapper().Lookup(key)
 	if !ok {
-		return 1 // no such node: treat as "no history", the conservative reading
+		return 0, "NO SUCH NODE"
 	}
 	sh := g.nodePropShardFor(id)
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
 	if sh.d == nil {
-		return 1
+		return 0, "SHARD HELD NO HISTORY — the read returned the CURRENT bag, not an as-of-snapshot one"
 	}
 	d := sh.d[id]
 	if d == nil {
-		return 2
+		return 0, "NODE HAD NO CHAIN — the read returned the CURRENT bag, not an as-of-snapshot one"
 	}
-	return d.stampTS() << 2
+	ts := d.stampTS()
+	switch {
+	case ts == mvcc.AbortedTS:
+		return ts, "live chain, head ABORTED"
+	case ts >= mvcc.TxIDBase:
+		return ts, fmt.Sprintf("live chain, head IN FLIGHT as transaction %d", ts-mvcc.TxIDBase)
+	default:
+		return ts, fmt.Sprintf("live chain, head COMMITTED at %d", ts)
+	}
 }
 
-// describeChainFacts renders [propChainFacts] for a failure message.
-func describeChainFacts(v uint64) string {
-	switch {
-	case v&1 != 0:
-		return "SHARD HELD NO HISTORY — the read returned the CURRENT bag, not an as-of-snapshot one"
-	case v&2 != 0:
-		return "NODE HAD NO CHAIN — the read returned the CURRENT bag, not an as-of-snapshot one"
-	default:
-		return fmt.Sprintf("live chain, head stamped %d", v>>2)
+// headsShareRecord reports whether the two nodes' chain heads carry the SAME
+// commit record. That is the premise the whole isolation guarantee rests on here:
+// both properties are written inside ONE ApplyAtomicallyTx, so their deltas must
+// share one *commitInfo and therefore commit at one instant. If they ever do not,
+// the two writes commit separately and a snapshot landing between them sees a
+// partial transaction — which is exactly the failure mode this file's other test
+// documents for the bare autocommit path.
+//
+// It is sampled at the violation rather than asserted up front because a
+// quiescent check already passes; the question is whether it still holds under
+// the interleaving that produces the tear.
+func headsShareRecord(g *Graph[string, int64], ka, kb string) string {
+	ia, oka := g.adj.Mapper().Lookup(ka)
+	ib, okb := g.adj.Mapper().Lookup(kb)
+	if !oka || !okb {
+		return "record comparison unavailable (a node was absent)"
 	}
+	ra, oka := headRecord(g, ia)
+	rb, okb := headRecord(g, ib)
+	switch {
+	case !oka || !okb:
+		return "record comparison unavailable (a chain was absent)"
+	case ra == nil || rb == nil:
+		return fmt.Sprintf("AT LEAST ONE HEAD CARRIES NO RECORD (a=%v b=%v) — that write took a fresh instant of its own", ra != nil, rb != nil)
+	case ra == rb:
+		return "both heads share ONE commit record, as the transaction requires"
+	default:
+		return "THE TWO HEADS CARRY DIFFERENT COMMIT RECORDS — the two writes of one transaction did not commit together"
+	}
+}
+
+// headRecord returns the commit record of id's chain head.
+func headRecord(g *Graph[string, int64], id graph.NodeID) (*commitInfo, bool) {
+	sh := g.nodePropShardFor(id)
+	sh.mu.RLock()
+	defer sh.mu.RUnlock()
+	if sh.d == nil {
+		return nil, false
+	}
+	d := sh.d[id]
+	if d == nil {
+		return nil, false
+	}
+	return d.info, true
 }
 
 // mustInt64 unwraps a property read for the diagnostic re-read, reporting -1 for
