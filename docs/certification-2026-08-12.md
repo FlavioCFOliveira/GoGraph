@@ -395,6 +395,61 @@ stored value is newer than the chain that would undo it (`graph/lpg/property.go:
 
 **Status: OPEN. This is the certification blocker.**
 
+### 2.1.6 DIAGNOSED — the verdict memo reached 2 of the 9 snapshot read paths
+
+`mvcc.Visible` is evaluated against `mvcc.CommitInfo.TS`, a field that is **mutable and flips
+when the transaction commits**. `Snapshot.visible` exists to pin that answer per record for a
+snapshot's lifetime, so two reads through one snapshot cannot classify the same transaction
+differently. That is the whole subject of #2378.
+
+**It reached two of the nine snapshot read paths.** Every other path passed only the two
+timestamps, and therefore re-read the mutable field live — which the memo cannot reach:
+
+| path | decides via | memoised |
+|---|---|---|
+| `EntryViewAsOf` (adjacency) | `s.visible(…)` | ✅ |
+| `withLabelBag → labelBagAsOfLockedSnap` | `snap.visible(…)` | ✅ |
+| `NodePropertyByIDAsOf → propBagAsOfLocked` | `d.mustUndo(…)` | ❌ |
+| `withPropBag → propBagAsOfLocked` | `d.mustUndo(…)` | ❌ |
+| `HasNodeLabelByIDAsOf → labelBagAsOfLocked` | `d.mustUndo(…)` | ❌ |
+| six per-edge side reads → `sideVersions.asOf` | `d.mustUndo(…)` | ❌ |
+
+**Both open isolation defects fall out of that table, and each reads through a path the fix
+missed.**
+
+- **#2420** reads two node **properties**. `propBagAsOfLocked` had *no snapshot-aware variant
+  at all*, so it could not consult the memo even where the caller held a snapshot.
+- **#2378** reads an edge and two **labels** through `ReadView.HasNodeLabel`, which resolves to
+  `HasNodeLabelByIDAsOf` — the per-row predicate, and **not** the accessor the memo was wired
+  into. That is why the previous cycle measured *"pinning the verdict alone does NOT fix it"*
+  at 2 in 100: its own label reads never consulted the verdict.
+
+This is the "fixed one of N call sites" pattern this project has hit before — and here the fix
+missed the very reads its own test performs.
+
+**The fix** adds `propBagAsOfLockedSnap` and `sideVersions.asOfSnap`, mirroring the existing
+`labelBagAsOfLockedSnap` exactly, and routes all nine paths through the memo. The timestamped
+forms are kept for write-transaction callers that hold no snapshot; a nil snapshot resolves
+straight through, so those are unchanged. Commit `7b435445`.
+
+**What is NOT claimed.** `go test -race` is green on `graph/lpg`, `graph/mvcc` and `cypher`
+including the TCK — but that is not a demonstration. **The fix is reasoned from the code and
+has not yet been shown to remove the failure**, and this defect has already refuted eleven
+mechanisms that were convincing on inspection. Two measurements are owed:
+
+1. **Correctness.** Criterion fixed in advance: at the pooled pre-fix rate of **3 violations in
+   200 package runs (1.5%)**, a post-fix run of **200 package runs** must show **zero** for both
+   oracles. P(0 | rate unchanged) ≈ 4.8%, so zero is meaningful; one violation means incomplete.
+2. **Throughput, and this one carries a real risk.** `Snapshot.visible` takes a **mutex on the
+   snapshot** per classification, and the paths just converted are the **per-row** accessors. In
+   the Cypher engine one snapshot serves an entire query, so a scan whose rows each visit a
+   delta would serialise on a single lock — which the concurrency mandate forbids on a hot path.
+   `propBagAsOfLocked`'s own comment records this path as sensitive enough that two extra call
+   frames cost 21 ns/row, 23% of `BenchmarkEngReadProjectLargeSerial`. If the measurement shows
+   that, the memo needs a cheaper representation (the project's own tiered `instMap` is the
+   obvious precedent), not abandonment — correctness outranks speed, but the cost must be known
+   and stated rather than discovered later.
+
 ### 2.2 FIXED — rmp #2250: a reverse type filter admitted the pair, not the instance
 
 Confirmed at the entry commit, reproducing the ticket's matrix cell for cell. `want` is
