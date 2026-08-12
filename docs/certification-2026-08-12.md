@@ -230,11 +230,44 @@ of the fall-through paths being taken: `sh.d == nil` at shard level
 family the previous cycle refuted **for labels** — and it has never been tested for
 **properties**, which is precisely this arm.
 
-It is not yet a diagnosis: the horizon and watermark arguments above say reclamation should
-not be able to drop a version a live snapshot needs, so if that is what is happening, one of
-those arguments has a hole. The next step is the one the previous cycle's recipe prescribes —
-capture the per-shard substrate state (`sh.d == nil`, `sh.d[id] == nil`, the head's stamp) **at
-the violation**, in this environment, now that the environment is known to reproduce it.
+### 2.1.3 The substrate capture fired, and it refutes the fall-through reading
+
+An 80-run capture at the corrected recipe produced a second violation, this time with the
+substrate state sampled at the violation:
+
+```
+a.v=42607 b.v=42657 (delta -50)   startTS=42608
+re-read of the SAME snapshot gave a.v=42657 b.v=42657 — TRANSIENT
+substrate at the violation:
+  a: live chain, head stamped 85468 | b: live chain, head stamped 42735
+```
+
+**Both nodes held LIVE delta chains.** So the fall-through reading of §2.1.2 is **refuted for
+properties**, exactly as the previous cycle refuted it for labels: neither the shard-level nil
+gate nor the per-node chain-absent branch was taken. Reclamation is not dropping a chain a live
+snapshot needs. That is now established for both substructures and should not be re-proposed.
+
+**And one number does not fit.** `a`'s chain head is stamped **85468** on a graph whose
+`mvcc.Clock` is a per-graph value and whose writer performs at most `iterations = 50000`
+transactions — so that clock can never issue an instant above ~50 001. It is not `AbortedTS`
+either (that is `^uint64(0)`). Three checks were run against my own harness before recording
+this, because a harness is the first thing to distrust:
+
+| check | result |
+|---|---|
+| the oracle's packed encoding round-trips | raw 1001 → packed 4004 → decoded 1001 ✓ |
+| instants allocated per transaction, quiescent | **exactly 1.0000** over 20 000 transactions |
+| instants allocated per transaction, with 8 readers | **exactly 1.0000**; both heads agree |
+
+So the encoding is sound and nothing allocates extra instants under concurrency. **The stamp
+is therefore either a genuine anomaly of the first order, or evidence of a flaw in the capture
+that these three checks did not reach.** It is recorded as an open question, not as a
+diagnosis, because it rests on **one sample** — and this cycle has already had to withdraw
+three separate figures stated from a single observation.
+
+**The next step is a second sample.** If a subsequent capture reproduces a head stamp above
+what the graph's clock can issue, the lead is real and specific; if it shows a stamp in range,
+the first one was a capture artefact and the fall-through refutation above still stands.
 
 **Work landed for the next cycle.** The oracle was given the self-diagnosing treatment its
 sibling received at `469aea82` and did not have: it now captures the first violating pair,
