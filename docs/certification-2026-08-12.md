@@ -23,12 +23,21 @@ proceed to a verdict on the others. Two findings are sufficient on their own:
    partial writes of an in-flight transaction."* Filed as **rmp #2420**. Not yet fixed.
 
    **Read that as intermittent, not deterministic.** The defect fires at roughly **1.2% per
-   invocation** of its test (§2.1), so `make ci` passes far more often than it fails — a
-   second full gate run during this cycle had the entire race-enabled test stage green.
-   Running it once and seeing green does not contradict this report; it is the expected
-   outcome. **An intermittent breach of an ACID guarantee is still a breach**, and a
-   defect that appears in roughly one CI run in eighty is worse than a deterministic one,
-   because it will be attributed to flakiness.
+   invocation** of its test (§2.1), so `make ci` passes far more often than it fails. The
+   three full gate runs of this cycle were:
+
+   | run | tree | result |
+   |---|---|---|
+   | 1 | entry commit `50bf53fd` | **`MAKE_CI_EXIT=2`** — the Isolation tear |
+   | 2 | `sprint-343`, mid-cycle | `MAKE_CI_EXIT=2` — **lint**, on a defect of mine (§1); test stage green |
+   | 3 | `sprint-343`, exit | **`MAKE_CI_EXIT=0`** — green, coverage 87.1% |
+
+   Run 3 is **not evidence that #2420 is fixed**, and is not offered as any. Nothing in this
+   cycle touched the mechanism; at a 1.2% rate a green run is simply the likely outcome.
+   Running the gate once and seeing green does not contradict this report — it is what the
+   measured rate predicts. **An intermittent breach of an ACID guarantee is still a breach**,
+   and a defect that surfaces in roughly one CI run in eighty is more dangerous than a
+   deterministic one, because it will be dismissed as flakiness.
 2. **A silent wrong answer in openCypher conformance**, confirmed by measurement at the
    entry commit: a reverse-direction, type-filtered `MATCH` over parallel relationships
    returned an over-count on one type and **zero** on every other. Filed long ago as
