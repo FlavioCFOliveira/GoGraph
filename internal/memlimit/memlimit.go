@@ -121,6 +121,9 @@ func resolve() (int64, bool) {
 // not an error. The literal "max" is cgroup v2's way of spelling "no limit", and
 // v1 spells the same thing as an implausibly large integer.
 func readCgroupLimit(path string) (int64, bool) {
+	// #nosec G304 -- path is one of this package's two unexported constants; it is
+	// never derived from a caller, an argument, or the environment. The parameter
+	// exists so the tests can point the same parser at a fixture.
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return 0, false
