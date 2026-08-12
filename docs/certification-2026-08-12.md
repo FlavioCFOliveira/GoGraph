@@ -159,10 +159,81 @@ It then recorded **0 violations in 290 236 345 reads across all 25 invocations.*
 | exposure scales with **invocations** (≈1.2% per invocation) | ≈0.30 | ≈74% |
 
 The per-invocation model fits the data substantially better. That points at a **transient
-condition near the start of a workload** rather than a steady-state race — which would also
-explain why running the shipped test longer has never been what reproduces it. This is
-stated as *favoured*, not established: the two models are separated only at p≈0.08, and the
-amplified probe differs from the shipped test in more than exposure.
+condition near the start of a workload** rather than a steady-state race. There is such a
+thing: `reclaimThreshold` is 4096 versions, so the vacuum first engages after roughly 2048
+two-property transactions and then keeps running — a 50 000-transaction workload and a
+500 000-transaction one each cross that boundary exactly **once**.
+
+**So I tested it, and it is refuted too.** A second probe ran **400 short workloads on fresh
+graphs** in one process, each sized past the vacuum threshold, multiplying the transient
+instead of the read count: **0 violations in 34 901 832 reads across 400 workload starts.**
+At 1.2% per start that predicts ≈4.8 hits, so P(0) ≈ **0.8%**.
+
+| model | prediction for the probe that tested it | P(observing 0) | verdict |
+|---|---|---:|---|
+| exposure ∝ **reads** | ≈2.6 in 290M reads | ≈8% | disfavoured |
+| exposure ∝ **workload starts** | ≈4.8 in 400 starts | ≈0.8% | **refuted** |
+
+### 2.1.1 The methodological error, and what it means for the next cycle
+
+Both probes isolated the test with a `-run` filter. **That is what removed the reproduction.**
+`TestIsolation_ApplyAtomically_View_NoPartialReads` calls `t.Parallel()`, and its package
+contains **229 `t.Parallel()` calls** — so under `make ci` it executes concurrently with a
+large set of sibling tests, each building its own graphs, driving its own vacuum, and
+allocating, all inside **one process**. A `-run` filter deletes every one of them and leaves
+only *inter-process* peer load, which is a different thing.
+
+This is the identical error recorded for the sibling defect at commit `1d5f6609`, where five
+substitute environments returned green and only the real one reproduced it in three minutes.
+**Modelling the load is not running it.** The two "refuted" models above are therefore
+refutations of *my probes*, and are only evidence about the defect to the extent the probes
+shared its environment — which, it turns out, they did not.
+
+**The standing instruction is therefore:** reproduce with the whole `graph/lpg` package running
+(`go test -race -count=N ./graph/lpg/`, **no `-run` filter**) under inter-process peer load,
+never with an isolating filter.
+
+### 2.1.2 Reproduced in the real environment, and the capture fired
+
+Run under that corrected recipe — whole package, `-count=15`, `-race`, inter-process peer
+load — it reproduced **1 failure in 15 package runs (≈6.7%)**, five times the rate the
+isolated probes suggested. The self-diagnosing oracle produced the first real observation this
+defect has ever yielded:
+
+```
+first observation a.v=36406 b.v=36408 (delta -2,
+  the LATER read (b) saw the newer transaction — the visibility basis moved FORWARD
+  between the two reads);
+re-read of the SAME snapshot (startTS=36407) gave a.v=36408 b.v=36408 —
+  TRANSIENT — the same pinned snapshot AGREED on re-read
+```
+
+Three facts fall out of it, and together they are the most specific evidence this defect has
+produced:
+
+1. **The distance is 2, not 1.** A single transaction observed half-applied would read as a
+   difference of one. Two transactions apart is time passing between the reads, not one
+   write landing between them.
+2. **The snapshot's answer for `a` CHANGED under the pin**: 36406 on the first read, 36408 on
+   the re-read, same `*Snapshot`. A pinned snapshot re-reading one property and getting a
+   newer value is the violation in its purest form, and it is a stronger statement than the
+   original `a.v != b.v`.
+3. **Both properties converged on the newer value**, and `startTS=36407` sits *between* the
+   two observed values.
+
+**What that points at — stated as a direction, not a diagnosis.** All three are consistent
+with the reads resolving to **present-time values** rather than as-of the snapshot, i.e. one
+of the fall-through paths being taken: `sh.d == nil` at shard level
+(`graph/lpg/snapshot_read.go:193`) or `s.d[id] == nil` at node level
+(`graph/lpg/mvcc_props.go:151-159`), either of which returns the CURRENT bag. That is the
+family the previous cycle refuted **for labels** — and it has never been tested for
+**properties**, which is precisely this arm.
+
+It is not yet a diagnosis: the horizon and watermark arguments above say reclamation should
+not be able to drop a version a live snapshot needs, so if that is what is happening, one of
+those arguments has a hole. The next step is the one the previous cycle's recipe prescribes —
+capture the per-shard substrate state (`sh.d == nil`, `sh.d[id] == nil`, the head's stamp) **at
+the violation**, in this environment, now that the environment is known to reproduce it.
 
 **Work landed for the next cycle.** The oracle was given the self-diagnosing treatment its
 sibling received at `469aea82` and did not have: it now captures the first violating pair,
@@ -321,6 +392,47 @@ fails. The cgroup read is asserted once-per-process across 64 concurrent callers
 
 ---
 
+### 3.3 FIXED — rmp #2422: the leak gate did not cover the concurrency substrate
+
+The Reliability and Concurrency Mandates require that every goroutine the library spawns is
+"verified via `go.uber.org/goleak` in test teardown for **every** package that spawns
+goroutines". Audited at HEAD:
+
+- `graph/mvcc/gate.go:341` spawns a helper on the context-aware acquisition path.
+- `graph/mvcc` had **no goleak verification at all** — no import in any `_test.go`, no
+  `TestMain`. Other packages carry it per-test (`bench/soak`, `bench/ldbc`, `bolt/server`,
+  `cypher`, `cypher/exec`).
+
+So the one package whose entire subject is concurrency was the one the leak gate missed.
+
+**This is not a report of a leak, and is not filed as one.** The helper always terminates: it
+blocks in `lock()`, then either hands the lock off and returns or unlocks and returns, so it
+cannot outlive the holder's tenure — and the godoc already documents the transient's cost with
+measurements. What was wrong is that **nothing verified it**, so a future change that did leak
+would have been caught by nothing. A documented exemption would have been acceptable; silence
+was not.
+
+The gate is at `TestMain` rather than per test, deliberately: the helper's lifetime is bounded
+by *another party's* lock tenure, so a per-test check after a deliberately abandoned
+acquisition can observe a helper still parked and report a false positive. After every test in
+the package has finished, no holder remains, so a parked helper really is a leak.
+
+**Validated by injection, not by one green run.** A goroutine blocked in `select{}` makes the
+package fail with the leaked frame named; removing it restores green. Stability: 5 runs of
+`-count=4` under `-race` at load average 25, no flake — a leak assertion is a timing assertion,
+and on this project such assertions are load questions before they are code questions.
+
+**The audit was generalised so the next cycle need not re-derive it.** Every module package
+that spawns a goroutine in non-test code now carries goleak: `bolt/server`, `cypher`,
+`cypher/exec`, `graph/adjlist`, `graph/generation`, `graph/index/count`, `graph/lpg`,
+`graph/mvcc`, `internal/crashinject`, `internal/goldens`, `internal/isolationtest`,
+`internal/shapegen`, `internal/sim`, `search`, `search/centrality`, `store/bulk`,
+`store/checkpoint`, `store/txn`, `store/wal`. Four packages appear to lack it —
+`cypher/parser`, `internal/metrics`, `internal/testlayers`, `search/community` — and all four
+are **false positives** whose only matches are inside comments (`go generate`, `can go down`,
+`go test`, `Reads go through`). `examples/` and `cmd/` are excluded: examples are instruments,
+not part of the module.
+
 ## 4. Efficient and fast — what was measured
 
 These were taken **after** the reproduction environment had drained (load average 6–10 on 10
@@ -410,12 +522,19 @@ misleading.
    (`store/txn/write_scaling_bench_test.go`). §4.2 is a read workload.
 4. **The whole-tree soak layer was not run**, and remains unmeasured, as it was at the
    previous certification.
-5. **Container and cgroup behaviour was not exercised.** This remains the most significant
-   known gap: the module sets `GOMEMLIMIT` **nowhere**, the engine-wide ceilings introduced
-   at the previous certification are fixed constants rather than host-adaptive, and a
-   4M-relationship Cypher load was **OOM-killed** in an 8 GB container on 2026-08-11 while
-   Memgraph held the same graph in 658 MB. Filed as rmp #2407/#2405/#2404; unaddressed.
-6. **Single host, single architecture.** No Linux, no NUMA, no multi-socket.
+5. **No container was actually run.** §3.2 makes the ceilings derive from a cgroup limit, and
+   that derivation is tested against injected limits — but **no container reproduction was
+   performed**, so the claim that a memory-capped deployment now degrades instead of being
+   OOM-killed is *reasoned and unit-tested, not demonstrated end to end*. The cgroup read
+   paths themselves have never executed on this host, which is `darwin/arm64` and has no
+   cgroup filesystem at all. This is #2421's one unmet acceptance criterion and it is
+   recorded as unmet rather than waived.
+6. **The remaining memory findings are untouched.** rmp #2404 (the synthetic string node key,
+   re-measured here at 44.55 B/node), #2405 (the per-node record — an architecture decision
+   that is the user's to take) and #2407 (peak versus steady during shard growth) are open
+   and were not addressed.
+7. **Single host, single architecture.** Apple M4, 10 cores, `darwin/arm64`. No Linux, no
+   NUMA, no multi-socket, no container.
 
 ---
 
@@ -427,6 +546,7 @@ misleading.
 | #2250 | 9 / 8 | Reverse type filter admitted the pair, not the instance | **FIXED** `588f75b8` |
 | #2421 | 8 / 7 | Fixed engine-wide ceilings exceed a container's cap; OOM instead of a typed error | **FIXED** `d369f4f1` |
 | #2366 | 8 / 7 | UNIQUE value permanently unusable after a peer's committed release | **OPEN — designed, not implemented** |
+| #2422 | 5 / 4 | `graph/mvcc` spawns goroutines and had no goleak verification | **FIXED** — gate added |
 | #2413 | 8 / 6 | By-handle latch oracle (stale: fixed at `6fc5a693`) | **CLOSED — verified 50/50** |
 
 `#2420` was opened by this certification. `#2421` was opened by it too — it had been recorded
@@ -474,3 +594,6 @@ go test -run='^$' -bench='^BenchmarkBoltPooledReadWork$' -benchmem -count=3 ./be
 | `588f75b8` | `fix(cypher)`: a reverse type filter admits the INSTANCE, not the pair (#2250) |
 | `32e9c3ae` | `test(lpg)`: make the partial-read oracle self-diagnosing when it fires (#2420) |
 | `d369f4f1` | `fix(cypher,bolt)`: derive the engine-wide ceilings from the container's cap (#2421) |
+| `1a38378a` | `fix(memlimit)`: annotate the cgroup read for gosec (#2421) |
+| `2f279543` | `test(mvcc)`: give the concurrency substrate the leak gate the mandate requires (#2422) |
+| `3be02ecd` | `test(lpg)`: capture the per-shard substrate at the partial-read violation (#2420) |
