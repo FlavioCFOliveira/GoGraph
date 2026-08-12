@@ -195,9 +195,10 @@ never with an isolating filter.
 
 ### 2.1.2 Reproduced in the real environment, and the capture fired
 
-Run under that corrected recipe — whole package, `-count=15`, `-race`, inter-process peer
-load — it reproduced **1 failure in 15 package runs (≈6.7%)**, five times the rate the
-isolated probes suggested. The self-diagnosing oracle produced the first real observation this
+Run under that corrected recipe — whole package, `-race`, inter-process peer load — it
+reproduced. **The rate, pooled over both runs at that recipe, is 1 failure in 40 package runs
+(≈2.5%)**: 1 in 15, then 0 in a subsequent 25. The first run alone would have said 6.7%, and
+quoting that would have repeated this cycle's own single-sample error a third time. The self-diagnosing oracle produced the first real observation this
 defect has ever yielded:
 
 ```
@@ -466,7 +467,58 @@ Two things follow directly.
   2 610.91 B/edge before the sprint-339 remediation and 976.36 after. The amplification lives
   above the storage layer, exactly as that audit concluded.
 
-### 4.2 Concurrency — the levels the module publishes
+### 4.2 CPU — where it actually goes
+
+`examples/35_mvcc_mixed_workload`, the MVCC mixed-workload example, driven at **60 000
+nodes / 8 readers / 6 s phase windows** — deliberately far above its 3 000-node default,
+because the previous sweep established that these examples produce useless profiles at
+default scale. `-profile-dir` writes `cpu.pprof` and `heap.pprof` through the shared
+`exprof` harness. Duration 176.23 s, 330.03 s of samples (≈1.87 cores average).
+
+**Flat CPU, the hot leaves:**
+
+| flat % | symbol |
+|---:|---|
+| 9.15% | `runtime.pthread_cond_signal` |
+| 6.69% | `runtime.usleep` |
+| 3.91% | `runtime.mallocgc` (**16.15% cumulative**) |
+| 3.51% | `runtime.pthread_cond_wait` |
+| 2.97% | `runtime.kevent` |
+| 2.97% | `runtime.mallocgcTiny` |
+| 2.61% | `runtime.mapaccess1_fast64` |
+| 2.51% | `exec.(*Project).Next` (**65.64% cumulative** — top of the read pipeline) |
+| 2.17% | `aeshashbody` (map hashing) |
+| 2.08% | `runtime.pthread_kill` |
+
+Two things stand out, and both are stated as **measurements, not attributions** — a profile
+locates cost, it does not explain it:
+
+1. **Roughly a quarter of all CPU is spent in thread signalling and parking**, not in graph
+   work: `pthread_cond_signal` + `usleep` + `pthread_cond_wait` + `kevent` + `pthread_kill`
+   sum to **24.4%**. That is the signature of frequent goroutine handoff. The workload runs
+   `ParallelScanProject` (33.21% cumulative) with morsel dispatch plus 8 reader goroutines,
+   so a handoff-heavy shape is expected — but a quarter of CPU is a large number to leave
+   uninvestigated, and no mechanism is claimed here.
+2. **Allocation is 16.15% cumulative.** Adding the map machinery — `mapaccess1_fast64`,
+   `aeshashbody`, `getWithoutKeySmallFastStr` — brings hashed-map work to ≈6.5% on top.
+
+The engine's own hot path is expression evaluation: `newRowPredicate.func1` 29.56%,
+`evalRowPooledWalk` 29.45%, `evalRow` 21.21%, `expr.EvalWith` 21.07%, `evalExpr` 14.87%,
+`evalBinaryOp` 14.73% (all cumulative).
+
+**Live heap, and it corroborates the 2026-08-11 memory audit independently:**
+
+| inuse % | symbol |
+|---:|---|
+| 25.82% | `lpg.setNodeLabelInfo` |
+| 23.48% | `lpg.setNodePropertyInfo` |
+| 16.35% | `runtime.mallocgc` |
+| 12.39% | `graph.Mapper.internSlowHook` |
+
+The label store, the property store and the identity mapper are **61.7% of live heap between
+them** — the same three structures that audit named, arrived at from a different direction.
+
+### 4.3 Concurrency — the levels the module publishes
 
 `BenchmarkBoltPooledReadWork`, the arm whose own godoc says it is the engine-throughput
 figure to quote because neither the connection nor a trivial query dominates it. Pooled
@@ -510,16 +562,15 @@ published-levels requirement remains unmeasured.
 Stated plainly, because an unmeasured axis reported as sound is how a certification becomes
 misleading.
 
-1. **CPU was not profiled in this cycle.** No `pprof` capture was taken and no example was
-   exercised under a profiler, so no statement is made about where CPU time goes. The
-   standing figures are those of `docs/cpu-vs-neo4j-memgraph-2026-08-11.md` and the
-   sprint-340/341 remediation, not re-derived here. §4 measures throughput and allocation,
-   which is not the same thing as attributing CPU.
-2. **Latency was not measured at the published levels.** §4.2 reports throughput only; no
+1. **The 24.4% in thread signalling is located, not explained.** §4.2 measures it; nothing
+   here attributes it to a mechanism, and a profile cannot do that on its own. It is the
+   single largest unexplained item this certification produced and it is the obvious next
+   piece of CPU work.
+2. **Latency was not measured at the published levels.** §4.3 reports throughput only; no
    p50/p99 was captured, so half of the "latency and throughput at 1, 8, 64, 256, 1024"
    requirement is unmet.
 3. **The write-scaling half of the concurrency sweep was not run**
-   (`store/txn/write_scaling_bench_test.go`). §4.2 is a read workload.
+   (`store/txn/write_scaling_bench_test.go`). §4.3 is a read workload.
 4. **The whole-tree soak layer was not run**, and remains unmeasured, as it was at the
    previous certification.
 5. **No container was actually run.** §3.2 makes the ceilings derive from a cgroup limit, and
@@ -582,9 +633,16 @@ for t in NodesWithLabel NodesWithLabelAndProp EdgesTyped EdgesTypedWithProp \
   go test -tags=threeway -count=1 -v -run "^TestProbe_${t}\$" ./bench/memprobe/
 done
 
-# §4.2 concurrency at the published levels. Pooled, so it measures the engine
+# §4.3 concurrency at the published levels. Pooled, so it measures the engine
 # and not the handshake.
 go test -run='^$' -bench='^BenchmarkBoltPooledReadWork$' -benchmem -count=3 ./bench/soak/
+
+# §4.2 CPU + heap. The scale flags matter: at its 3000-node default this example
+# produces a useless profile.
+go run ./examples/35_mvcc_mixed_workload \
+  -nodes=60000 -readers=8 -phase-window=6s -profile-dir=/tmp/prof35
+go tool pprof -top -nodecount=18 /tmp/prof35/cpu.pprof
+go tool pprof -top -sample_index=inuse_space -nodecount=12 /tmp/prof35/heap.pprof
 ```
 
 ## 8. Commits
