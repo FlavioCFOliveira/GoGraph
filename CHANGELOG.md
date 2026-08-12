@@ -31,6 +31,22 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Bulk delete degraded without bound and used one core** (rmp #2400, #2418). Six
+  seed-and-wipe cycles of the *same* 20 000 nodes against one live engine took 990 ms,
+  1.771 s, 2.349 s, 3.061 s, 3.841 s, 4.622 s, and deleting 90 000 nodes in a single
+  statement took 15.97 s against a 30 s transaction timeout — reachable as a
+  `TransactionTimedOut` failure, not merely as slowness. `InNeighbours` answered "which
+  nodes hold an edge into n" by walking **every interned node**, once per node deleted,
+  so a delete cost O(k·n) with *n* counting every node ever interned rather than the
+  live ones. The adjacency now maintains a live in-edge index and answers in
+  O(in-degree): **cycle six falls from 4.622 s to 77.2 ms**, the curve is flat instead
+  of linear, `DETACH DELETE` improves 22.2×, and the 90 000-node statement takes
+  375.6 ms. End-to-end relationship creation costs +1.92% for it; the read path is
+  unchanged. The 2026-08-11 concurrency assessment had attributed this to the tombstone
+  bitmap's copy-on-write clone, which a profile prices at 0.99%; that document is
+  corrected in place. Evidence in
+  `docs/benchmarks/delete-in-edge-index-2026-08-11.md`.
+
 - **A node created by an edge append was visible before its transaction committed**
   (rmp #2331). `adjlist.addEdge` interned its endpoints without recording a versioned
   birth, so a node an append *created* was visible to snapshots predating the
@@ -70,6 +86,21 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 
 ### Changed
+
+- **`bolt/server.DefaultMaxOpenTxPerPrincipal` raised from 16 to 2048** (rmp #2419).
+  An observable change of default. This module publishes 1, 8, 64, 256 and 1024
+  goroutines as the concurrency levels it measures and reports at, and a single
+  principal could not reach them through explicit transactions without overriding this
+  default first — every benchmark harness in the repository had already had to. The
+  default configuration now reaches the published levels. Note the consequence: a
+  connection holds at most one open transaction and `MaxConnections` defaults to 1024,
+  so under the default configuration this quota can no longer bind, and the connection
+  ceiling is what bounds the resource. The quota stays finite, still refuses with a
+  typed `LimitExceeded`, and still isolates one principal from another; an embedder who
+  wants the previous tight bound must now set `Options.MaxOpenTxPerPrincipal`
+  explicitly. **Every open transaction pins an MVCC read snapshot and holds the
+  reclamation horizon back for its lifetime**, so the higher ceiling is a weaker bound
+  on that resource; `DefaultMaxTxIdleTime` (5 s) is what limits the exposure.
 
 - **BREAKING: `Graph.DisableMVCC`, `Graph.EnableMVCC` and `Graph.MVCCEnabled` are
   removed** (rmp #2311). MVCC is the module's only concurrency-control mechanism and is

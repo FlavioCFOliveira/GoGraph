@@ -375,9 +375,21 @@ benchmark's own fixture cleanup, twice, before it was diagnosed.
 `bolt/server.Options.MaxOpenTxPerPrincipal` defaults to 16
 (`DefaultMaxOpenTxPerPrincipal`), so a single principal opening explicit transactions above
 that level is refused. CLAUDE.md publishes 256 and 1024 as levels the module reports at.
-`bench/comparison/ggserver` therefore sets it explicitly, exactly as `bench/soak` had to after
-rmp #2387. The server is behaving as configured; the point is that **the default configuration
-cannot reach the concurrency the module publishes**, and every harness has to know that.
+`bench/comparison/ggserver` therefore sets it explicitly, exactly as `bench/soak` had to. The
+server is behaving as configured; the point is that **the default configuration cannot reach
+the concurrency the module publishes**, and every harness has to know that.
+
+> **FIXED 2026-08-11, rmp #2419.** `DefaultMaxOpenTxPerPrincipal` is now 2048, above the
+> highest published level, so the default configuration reaches the concurrency this module
+> publishes. The consequence is worth stating: a connection holds at most one open
+> transaction and `MaxConnections` defaults to 1024, so under the default configuration the
+> per-principal quota can no longer bind — the connection ceiling bounds the resource, and
+> the quota's remaining job is isolating one principal from another. The trade accepted is
+> that every open transaction pins an MVCC read snapshot and holds the reclamation horizon
+> back for its lifetime, so the bound on *that* resource is weaker;
+> `DefaultMaxTxIdleTime` (5 s) limits the exposure. Gated by
+> `bolt/server/txquota_published_levels_test.go`, which asserts the admitted
+> concurrency rather than the constant.
 
 ---
 

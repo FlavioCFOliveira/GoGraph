@@ -141,15 +141,38 @@ const (
 	// not by this. Counting waiting BEGINs here would reject legitimate concurrent
 	// traffic.
 	//
-	// The default of 16 is generous for a connection pool — one connection holds at
-	// most one open transaction — while still bounding the resource, as the
-	// bounded-resources mandate requires. It is KEPT at 16 rather than raised now
-	// that it binds on writers: a pool with more than sixteen connections per
-	// principal should say so explicitly.
+	// # Why 2048, and what it gives up (rmp #2419)
+	//
+	// It was 16, defended here on the grounds that "a pool with more than sixteen
+	// connections per principal should say so explicitly". The 2026-08-11
+	// concurrency assessment recorded the consequence as finding F2: CLAUDE.md
+	// publishes 1, 8, 64, 256 and 1024 goroutines as the levels this module
+	// measures and reports at, and a single principal could not reach them through
+	// explicit transactions without overriding this first. Every harness that got
+	// there had already had to — bench/soak with 1200, bench/comparison/ggserver
+	// with a flag — which is the shape of a default disagreeing with a published
+	// contract rather than of two harnesses being unusual.
+	//
+	// 2048 is above the highest published level, so the default configuration now
+	// reaches the concurrency the module publishes. Note what that means in
+	// practice: a connection holds at most one open transaction and
+	// [Options.MaxConnections] defaults to 1024, so under the default
+	// configuration this quota CANNOT BIND — the connection ceiling is reached
+	// first, and it is the connection ceiling that bounds the resource. This
+	// quota binds again only for an operator who raises MaxConnections above
+	// 2048, and it remains what isolates one principal from another.
+	//
+	// THE COST, stated rather than glossed: every open transaction pins an MVCC
+	// read snapshot and holds the reclamation horizon back for its lifetime
+	// (rmp #2305, #2307), so a higher ceiling is a weaker bound on that resource.
+	// What limits the damage is [DefaultMaxTxIdleTime]: an abandoned transaction
+	// is reclaimed after 5 s rather than held until the client disconnects. An
+	// embedder that wants the old tight bound sets Options.MaxOpenTxPerPrincipal
+	// explicitly, which is now the only way to get it.
 	//
 	// Set a negative value to disable enforcement — which is a deliberate,
 	// visible choice at the call site, not something reachable by accident.
-	DefaultMaxOpenTxPerPrincipal = 16
+	DefaultMaxOpenTxPerPrincipal = 2048
 
 	// DefaultDatabaseName is the value applied to Options.DatabaseName when the
 	// caller leaves it empty, and the name reported in the `db` field of result
