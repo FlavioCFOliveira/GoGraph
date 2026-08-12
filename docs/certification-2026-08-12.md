@@ -275,8 +275,53 @@ space must be checked against its real range before packing — `stampTS` spans 
 
 The capture now returns the stamp unmodified and names the state explicitly — `COMMITTED at
 N`, `IN FLIGHT as transaction N`, or `ABORTED` — and additionally reports **whether the two
-heads share one commit record**, which is the premise the whole guarantee rests on. A fresh
-120-run capture is in flight with the corrected instrument.
+heads share one commit record**, which is the premise the whole guarantee rests on. A fresh 120-run capture with the corrected instrument then produced **two** clean
+observations, and they agree:
+
+| # | startTS | a.v → its instant | b.v → its instant | heads |
+|---|---:|---|---|---|
+| 1 | 17142 | 17141 → **17142** ✓ | 17144 → **17145** ✗ | both COMMITTED at 17160, **sharing ONE record** |
+| 2 | 31421 | 31420 → **31421** ✓ | 31421 → **31422** ✗ | both COMMITTED at 31425, **sharing ONE record** |
+
+(The instant of a value is fixed empirically, not assumed: a snapshot pinned immediately
+after the seed reports `startTS=1` with `a.v=0`, so value *v* was written by the transaction
+that committed at instant *v+1*.)
+
+So in both observations **`a` resolved CORRECTLY for the snapshot's start instant, and `b` was
+OVER-VISIBLE by one to three transactions** — the second read admitted a transaction that
+committed strictly *after* the snapshot began. And the premise holds under concurrency: the
+two heads share one commit record, so the shared-record hypothesis is confirmed rather than
+assumed.
+
+### 2.1.4 Two more hypotheses of mine, refuted by measurement
+
+Every observation says **TRANSIENT — the same pinned snapshot agreed on re-read**, with both
+properties then at the newer value. That suggested a pinned snapshot's answers **drift forward**
+as the writer advances — which, if true, would mean isolation is simply not provided, and the
+oracle merely catches it when two reads straddle a write. It would also be deterministic.
+
+**It is not true.** Pin one snapshot and read one property while a writer advances:
+
+| probe | reads | drifts |
+|---|---:|---:|
+| snapshot pinned on a quiescent graph, held across 20 000 writes | 20 692 | **0** |
+| snapshot pinned **mid-stream**, concurrently with the writer (3 runs) | ~62 000 | **0** |
+
+A pinned snapshot is stable, including one born while a writer is running. Both forms of the
+drift hypothesis are refuted.
+
+**What that leaves, and it is a sharp localisation.** The failing oracle differs from those
+probes in exactly one respect: it creates a **short-lived snapshot per read** —
+`BeginRead` → two reads → `EndRead`, thousands of times a second — where the probes hold one
+snapshot for the whole run. A snapshot held for 20 000 writes never answers wrongly; a
+snapshot that lives for two reads occasionally does, and then answers correctly on the very
+next read. **So the fault is bound to the birth of a snapshot concurrent with a commit, and it
+self-corrects.** It is not a property of resolution over time.
+
+**The next instrument is therefore chain COMPLETENESS, not chain existence.** "Live chain" was
+established, but a chain can be live and still be missing the record needed to undo back to a
+given instant. Walking `b`'s chain at the violation and recording the sequence of stamps is
+the measurement that would settle it.
 
 **Work landed for the next cycle.** The oracle was given the self-diagnosing treatment its
 sibling received at `469aea82` and did not have: it now captures the first violating pair,
