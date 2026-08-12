@@ -323,10 +323,39 @@ snapshot that lives for two reads occasionally does, and then answers correctly 
 next read. **So the fault is bound to the birth of a snapshot concurrent with a commit, and it
 self-corrects.** It is not a property of resolution over time.
 
-**The next instrument is therefore chain COMPLETENESS, not chain existence.** "Live chain" was
-established, but a chain can be live and still be missing the record needed to undo back to a
-given instant. Walking `b`'s chain at the violation and recording the sequence of stamps is
-the measurement that would settle it.
+**Two instruments are therefore in flight for the next cycle**, and both corrections below
+were needed before either could be trusted.
+
+**Chain COMPLETENESS, not chain existence.** "Live chain" is established, but a chain can be
+live and still be missing the record needed to undo back to a given instant — and the walk in
+`propBagAsOfLocked` stops at the first visible record, so an absent record can never be
+undone. The oracle now walks the chain at the violation and reports the stamp sequence, whether
+the record stamped `startTS+1` is present, and whether the sequence has a gap.
+
+**An ABSOLUTE oracle, which is strictly more sensitive than the one in place.** The shipped
+test only fires when the two reads disagree (`a != b`), which needs both reads to straddle a
+write. But this fixture makes the correct answer arithmetic — the seed writes value 0 at
+instant 1 and transaction *i* writes value *i* at instant *i+1*, so a snapshot at `startTS`
+must read exactly `startTS-1`. That fires on **a single wrong read**.
+
+### 2.1.5 Two corrections to my own instruments, both of which had produced clean results
+
+Neither of the following results should be read as evidence about the engine, and both were
+nearly reported as such.
+
+**The drift probe was a differential against its own first sample.** It checked that repeated
+reads of a pinned snapshot never *changed*, and reported 0 drifts in ~82 000 reads. But a
+snapshot that was **already over-visible when created** agrees with itself for ever, so the
+probe reports perfect health. It established that the answer is **stable**, never that it is
+**correct** — and stability was not the question.
+
+**And both replacement probes were run under a `-run` filter — the very trap §2.1.1 documents.**
+Having written that finding down, I then built a drift probe and an absolute-correctness probe
+and isolated both, collecting a further "0 wrong in 94 017 reads" that means nothing, because
+that environment has already produced 0-in-290M over a defect that reproduces at 2.5% in the
+real one. Writing the rule did not disarm the reflex; re-reading this report did. **Both
+probes have been moved into the package, given eight concurrent readers, and run with no
+filter.**
 
 **Work landed for the next cycle.** The oracle was given the self-diagnosing treatment its
 sibling received at `469aea82` and did not have: it now captures the first violating pair,

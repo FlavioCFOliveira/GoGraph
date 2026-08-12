@@ -243,6 +243,8 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 		firstAFacts atomic.Value // string
 		firstBFacts atomic.Value // string
 		firstShared atomic.Value // string
+		firstWalkA  atomic.Value // string
+		firstWalkB  atomic.Value // string
 	)
 
 	wg.Add(1)
@@ -315,6 +317,8 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 							firstAFacts.Store(sa)
 							firstBFacts.Store(sb)
 							firstShared.Store(headsShareRecord(g, "a", "b"))
+							firstWalkA.Store(chainWalk(g, "a", snap.startTS))
+							firstWalkB.Store(chainWalk(g, "b", snap.startTS))
 						}
 					}
 				}()
@@ -338,10 +342,11 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 		}
 		t.Fatalf("observed %d partial-transaction violations (a.v != b.v inside a pinned SNAPSHOT); "+
 			"first observation a.v=%d b.v=%d (delta %d, %s); re-read of the SAME snapshot (startTS=%d) gave a.v=%d b.v=%d — %s; "+
-			"substrate at the violation: a: %s | b: %s | %s",
+			"substrate at the violation: a: %s | b: %s | %s; chain a %s; chain b %s",
 			v, ia, ib, ia-ib, tearDirection(ia, ib),
 			firstStartTS.Load(), ra, rb, persistence,
-			firstAFacts.Load(), firstBFacts.Load(), firstShared.Load())
+			firstAFacts.Load(), firstBFacts.Load(), firstShared.Load(),
+			firstWalkA.Load(), firstWalkB.Load())
 	}
 	if reads.Load() == 0 {
 		t.Fatal("readers never observed both properties; test did not exercise the invariant")
@@ -402,6 +407,86 @@ func propChainFacts(g *Graph[string, int64], key string) (stamp uint64, state st
 	default:
 		return ts, fmt.Sprintf("live chain, head COMMITTED at %d", ts)
 	}
+}
+
+// chainWalk renders the head of id's version chain as the sequence of stamps a
+// reader would step through, and reports whether the record needed to resolve as
+// of startTS is actually THERE.
+//
+// # Existence is not completeness, and that is the whole point (rmp #2420)
+//
+// [propChainFacts] establishes that a chain is live. A live chain can still be
+// missing the one record a given snapshot needs: the walk in propBagAsOfLocked
+// undoes records while they are invisible and stops at the first visible one, so
+// if the record stamped startTS+1 is absent, the value it superseded can never be
+// restored and the read keeps a write it should have undone. That is exactly the
+// shape of the captured violations, where the second read was over-visible by one
+// to three transactions.
+//
+// Sampled after the fact, so the chain may have grown at the head — but a record
+// that is ABSENT cannot reappear, because records are only ever prepended or
+// reclaimed. A gap seen here was therefore a gap at read time.
+func chainWalk(g *Graph[string, int64], key string, startTS uint64) string {
+	id, ok := g.adj.Mapper().Lookup(key)
+	if !ok {
+		return "no such node"
+	}
+	sh := g.nodePropShardFor(id)
+	sh.mu.RLock()
+	defer sh.mu.RUnlock()
+	d := sh.d[id]
+	if d == nil {
+		return "no chain"
+	}
+	const maxWalk = 24
+	var (
+		stamps    []string
+		n         int
+		sawNeeded bool
+		prev      uint64
+		gapAt     = ""
+	)
+	for ; d != nil && n < maxWalk; d, n = d.next, n+1 {
+		ts := d.stampTS()
+		switch {
+		case ts == mvcc.AbortedTS:
+			stamps = append(stamps, "ABORTED")
+		case ts >= mvcc.TxIDBase:
+			stamps = append(stamps, fmt.Sprintf("inflight:%d", ts-mvcc.TxIDBase))
+		default:
+			stamps = append(stamps, fmt.Sprintf("%d", ts))
+			if ts == startTS+1 {
+				sawNeeded = true
+			}
+			// A committed chain should descend by one per transaction on this
+			// fixture, since every transaction writes this property exactly once.
+			if n > 0 && prev > ts+1 && gapAt == "" {
+				gapAt = fmt.Sprintf(" GAP between %d and %d", prev, ts)
+			}
+			prev = ts
+		}
+	}
+	more := ""
+	if d != nil {
+		more = ", …"
+	}
+	needed := "the record stamped startTS+1 is PRESENT"
+	if !sawNeeded {
+		needed = fmt.Sprintf("THE RECORD STAMPED startTS+1 (%d) IS ABSENT from the walked prefix", startTS+1)
+	}
+	return fmt.Sprintf("[%s%s] — %s%s", joinStamps(stamps), more, needed, gapAt)
+}
+
+// joinStamps is strings.Join without importing strings for one call.
+func joinStamps(s []string) string {
+	out := ""
+	for i, v := range s {
+		if i > 0 {
+			out += ","
+		}
+		out += v
+	}
+	return out
 }
 
 // headsShareRecord reports whether the two nodes' chain heads carry the SAME
