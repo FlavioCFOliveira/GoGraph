@@ -105,7 +105,7 @@ func (g *Graph[N, W]) overflowLabelsAsOf(sh *edgeLabelShard, k edgeKey, s *Snaps
 	if s == nil || sh.v.empty() {
 		return cur
 	}
-	out, had := sh.v.asOf(k, cur, cur != nil, s.startTS, s.txID)
+	out, had := sh.v.asOfSnap(k, cur, cur != nil, s, s.startTS, s.txID)
 	if !had {
 		return nil
 	}
@@ -163,7 +163,7 @@ func (g *Graph[N, W]) handleLabelBagAsOf(sh *edgeHandleLabelShard, k edgeKey, ha
 	if s == nil || sh.v.empty() {
 		return bag, had
 	}
-	return sh.v.asOf(edgeHandleKey{pair: k, handle: handle}, bag, had, s.startTS, s.txID)
+	return sh.v.asOfSnap(edgeHandleKey{pair: k, handle: handle}, bag, had, s, s.startTS, s.txID)
 }
 
 // ── per-handle properties ────────────────────────────────────────────────────

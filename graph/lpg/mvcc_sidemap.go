@@ -196,6 +196,36 @@ func (sv *sideVersions[K, V]) push(k K, pre V, had bool, info *commitInfo, ts ui
 //
 // curHad distinguishes "absent" from "present and zero", which matters for a
 // store whose zero value is a legitimate empty set.
+// asOfSnap is [sideVersions.asOf] resolved through the SNAPSHOT's pinned verdict
+// rather than a live read of each record's commit stamp.
+//
+// Every per-edge side store — edge labels, edge properties, and their by-handle
+// forms — read through the timestamped form, so a snapshot's correlated reads
+// each re-decided visibility against [mvcc.CommitInfo.TS], a MUTABLE field that
+// flips at commit. That is the defect [Snapshot.visible] exists to close, and it
+// reached only the adjacency and one label accessor when it landed for rmp #2378;
+// see [Graph.propBagAsOfLockedSnap] for the full account.
+//
+// A nil snapshot resolves straight through, so the write-transaction callers that
+// hold no snapshot keep their behaviour exactly.
+func (sv *sideVersions[K, V]) asOfSnap(k K, cur V, curHad bool, snap *Snapshot, startTS, txID uint64) (V, bool) {
+	if sv.d == nil {
+		return cur, curHad
+	}
+	d := sv.d[k]
+	if d == nil {
+		return cur, curHad
+	}
+	val, had := cur, curHad
+	for ; d != nil; d = d.next {
+		if snap.visible(d.info, d.ts, startTS, txID) {
+			break
+		}
+		val, had = d.pre, d.had
+	}
+	return val, had
+}
+
 func (sv *sideVersions[K, V]) asOf(k K, cur V, curHad bool, startTS, txID uint64) (V, bool) {
 	if sv.d == nil {
 		return cur, curHad

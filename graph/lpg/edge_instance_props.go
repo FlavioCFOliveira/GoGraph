@@ -128,7 +128,7 @@ func (g *Graph[N, W]) EdgePropertiesAtAsOf(src, dst N, idx int64, snap *Snapshot
 	im := sh.m[k]
 	bag, ok := im.get(idx)
 	if snap != nil && !sh.v.empty() {
-		bag, ok = sh.v.asOf(edgeInstanceKey{pair: k, idx: idx}, bag, ok, snap.startTS, snap.txID)
+		bag, ok = sh.v.asOfSnap(edgeInstanceKey{pair: k, idx: idx}, bag, ok, snap, snap.startTS, snap.txID)
 	}
 	if !ok {
 		return nil

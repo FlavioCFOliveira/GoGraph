@@ -258,7 +258,7 @@ func (g *Graph[N, W]) EdgeLabelsByHandleIDAsOf(srcID, dstID graph.NodeID, handle
 	im := sh.m[k]
 	bag, ok := im.get(handle)
 	if snap != nil && !sh.v.empty() {
-		bag, ok = sh.v.asOf(edgeHandleKey{pair: k, handle: handle}, bag, ok, snap.startTS, snap.txID)
+		bag, ok = sh.v.asOfSnap(edgeHandleKey{pair: k, handle: handle}, bag, ok, snap, snap.startTS, snap.txID)
 	}
 	if !ok {
 		return nil
@@ -300,7 +300,7 @@ func (g *Graph[N, W]) EdgePropertiesByHandleIDAsOf(srcID, dstID graph.NodeID, ha
 	im := sh.m[k]
 	bag, ok := im.get(handle)
 	if snap != nil && !sh.v.empty() {
-		bag, ok = sh.v.asOf(edgeHandleKey{pair: k, handle: handle}, bag, ok, snap.startTS, snap.txID)
+		bag, ok = sh.v.asOfSnap(edgeHandleKey{pair: k, handle: handle}, bag, ok, snap, snap.startTS, snap.txID)
 	}
 	if !ok {
 		return nil
