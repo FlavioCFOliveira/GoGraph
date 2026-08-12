@@ -770,9 +770,18 @@ go tool pprof -top -sample_index=inuse_space -nodecount=12 /tmp/prof35/heap.ppro
 
 | commit | what |
 |---|---|
-| `588f75b8` | `fix(cypher)`: a reverse type filter admits the INSTANCE, not the pair (#2250) |
-| `32e9c3ae` | `test(lpg)`: make the partial-read oracle self-diagnosing when it fires (#2420) |
-| `d369f4f1` | `fix(cypher,bolt)`: derive the engine-wide ceilings from the container's cap (#2421) |
-| `1a38378a` | `fix(memlimit)`: annotate the cgroup read for gosec (#2421) |
-| `2f279543` | `test(mvcc)`: give the concurrency substrate the leak gate the mandate requires (#2422) |
-| `3be02ecd` | `test(lpg)`: capture the per-shard substrate at the partial-read violation (#2420) |
+| `588f75b8` | fix(cypher): a reverse type filter now admits the INSTANCE, not the pair (#2250) |
+| `32e9c3ae` | test(lpg): make the partial-read oracle self-diagnosing when it fires (#2420) |
+| `d369f4f1` | fix(cypher,bolt): derive the engine-wide ceilings from the container's cap (#2421) |
+| `1a38378a` | fix(memlimit): annotate the cgroup read for gosec (#2421) |
+| `26a9780a` | docs(certification): NOT CERTIFIED — an ACID Isolation tear refuses the first rung |
+| `925f3713` | docs(certification): record all three gate runs, and what the green one does not prove |
+| `2f279543` | test(mvcc): give the concurrency substrate the leak gate the mandate requires (#2422) |
+| `3be02ecd` | test(lpg): capture the per-shard substrate at the partial-read violation (#2420) |
+| `e77a247d` | docs(certification): the reproduction recipe was wrong, and correcting it worked |
+| `18a6e684` | docs(certification): profile the CPU, and correct a rate from one sample for the third time |
+| `2e6d6b50` | docs(certification): the substrate capture fired — fall-through refuted, one stamp does not fit |
+| `0f0f1256` | fix(lpg): the capture packed a flag into a field that spans 2^63 — retract the anomaly (#2420) |
+| `22df24d4` | docs(certification): two clean captures localise the tear to snapshot BIRTH |
+| `ac035676` | docs(certification): record the exit gate and the full reproduction tally |
+| `03533ee0` | test(lpg): walk the chain at the violation, and correct two instruments of my own (#2420) |
