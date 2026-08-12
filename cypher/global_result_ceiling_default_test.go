@@ -66,3 +66,43 @@ func TestGlobalResultCeiling_AggregateExceedsPerQueryBound(t *testing.T) {
 		t.Errorf("DefaultGlobalMaxResultBytes = %d, want finite and positive", DefaultGlobalMaxResultBytes)
 	}
 }
+
+// TestGlobalCeiling_DerivedFromAContainerCap covers rmp #2421: the fixed default
+// is not a bound inside a container smaller than it, so a discoverable limit must
+// LOWER the ceiling.
+//
+// The derivation is tested against injected limits rather than against whatever
+// the host running this test reports, because a developer machine is not
+// memory-constrained and would exercise only the fall-through.
+func TestGlobalCeiling_DerivedFromAContainerCap(t *testing.T) {
+	t.Parallel()
+	const giB = int64(1) << 30
+	for _, tc := range []struct {
+		name  string
+		avail int64
+		want  int64
+		why   string
+	}{
+		{"512 MiB container", giB / 2, giB / 4, "half of a cap far below the default"},
+		{"2 GiB container", 2 * giB, giB, "half, still below the 4 GiB default"},
+		{"8 GiB container", 8 * giB, DefaultGlobalMaxResultBytes, "half is 4 GiB, not BELOW the default, so the default stands"},
+		{"64 GiB host", 64 * giB, DefaultGlobalMaxResultBytes, "a large bound may not RAISE the aggregate ceiling"},
+		{"absurdly small", 1, DefaultGlobalMaxResultBytes, "half rounds to zero, which is the unlimited sentinel — must not be returned"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := globalCeilingFromAvailable(tc.avail)
+			if got != tc.want {
+				t.Errorf("globalCeilingFromAvailable(%d) = %d, want %d — %s", tc.avail, got, tc.want, tc.why)
+			}
+			if got <= 0 {
+				t.Errorf("derived ceiling %d is not positive; zero means UNLIMITED here", got)
+			}
+			if got > DefaultGlobalMaxResultBytes {
+				t.Errorf("derived ceiling %d exceeds the fixed default %d; the derivation may only lower it",
+					got, DefaultGlobalMaxResultBytes)
+			}
+		})
+	}
+}

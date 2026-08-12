@@ -20,6 +20,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/internal/clock"
+	"github.com/FlavioCFOliveira/GoGraph/internal/memlimit"
 )
 
 const (
@@ -489,8 +490,29 @@ func resolveMaxInboundDecodeBytes(opt int64) int64 {
 		// No soft memory limit to derive from. This branch used to return 0,
 		// i.e. no ceiling at all, which is the state of any process that has not
 		// set GOMEMLIMIT — see [DefaultMaxInboundDecodeBytes].
+		//
+		// It then returned the fixed constant unconditionally, and inside a
+		// container capped BELOW it that is a ceiling larger than the container,
+		// which the OOM killer reaches first. See cypher's
+		// resolveGlobalMaxResultBytes for the full reasoning (rmp #2421); this
+		// keeps the one-eighth fraction, and like it can only ever LOWER the
+		// ceiling.
+		if avail, ok := memlimit.Available(); ok {
+			return inboundCeilingFromAvailable(avail)
+		}
 		return DefaultMaxInboundDecodeBytes
 	}
+}
+
+// inboundCeilingFromAvailable derives the engine-wide inbound-decode ceiling from
+// a bound on the memory this process may use, keeping the one-eighth fraction the
+// GOMEMLIMIT branch uses. See cypher's globalCeilingFromAvailable for why the
+// derivation is a separate function and why it may only ever lower the ceiling.
+func inboundCeilingFromAvailable(avail int64) int64 {
+	if eighth := avail / 8; eighth > 0 && eighth < DefaultMaxInboundDecodeBytes {
+		return eighth
+	}
+	return DefaultMaxInboundDecodeBytes
 }
 
 // Server is the Bolt v5 TCP server. It accepts connections from a

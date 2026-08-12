@@ -76,3 +76,39 @@ func TestResolveMaxInboundDecodeBytes_NoMemoryLimit(t *testing.T) {
 		t.Errorf("resolveMaxInboundDecodeBytes(4096) = %d, want 4096", got)
 	}
 }
+
+// TestInboundCeiling_DerivedFromAContainerCap is the bolt half of rmp #2421; see
+// cypher's TestGlobalCeiling_DerivedFromAContainerCap for the reasoning. The
+// fraction here is one eighth, because inbound decode is transient where the
+// result ceiling is not.
+func TestInboundCeiling_DerivedFromAContainerCap(t *testing.T) {
+	t.Parallel()
+	const giB = int64(1) << 30
+	for _, tc := range []struct {
+		name  string
+		avail int64
+		want  int64
+		why   string
+	}{
+		{"512 MiB container", giB / 2, giB / 16, "an eighth of a cap far below the default"},
+		{"4 GiB container", 4 * giB, giB / 2, "an eighth, still below the 1 GiB default"},
+		{"8 GiB container", 8 * giB, DefaultMaxInboundDecodeBytes, "an eighth is 1 GiB, not BELOW the default"},
+		{"64 GiB host", 64 * giB, DefaultMaxInboundDecodeBytes, "a large bound may not RAISE the ceiling"},
+		{"absurdly small", 1, DefaultMaxInboundDecodeBytes, "an eighth rounds to zero, which is the unlimited sentinel"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := inboundCeilingFromAvailable(tc.avail)
+			if got != tc.want {
+				t.Errorf("inboundCeilingFromAvailable(%d) = %d, want %d — %s", tc.avail, got, tc.want, tc.why)
+			}
+			if got <= 0 {
+				t.Errorf("derived ceiling %d is not positive; zero means UNLIMITED here", got)
+			}
+			if got > DefaultMaxInboundDecodeBytes {
+				t.Errorf("derived ceiling %d exceeds the fixed default %d", got, DefaultMaxInboundDecodeBytes)
+			}
+		})
+	}
+}

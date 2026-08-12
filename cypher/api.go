@@ -107,6 +107,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 	"github.com/FlavioCFOliveira/GoGraph/internal/crashpoint"
+	"github.com/FlavioCFOliveira/GoGraph/internal/memlimit"
 	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
@@ -4111,8 +4112,38 @@ func resolveGlobalMaxResultBytes(opt int64) int64 {
 		// No soft memory limit to derive from. This branch used to return 0, i.e.
 		// no engine-wide ceiling, which is the state of any process that has not
 		// set GOMEMLIMIT — see [DefaultGlobalMaxResultBytes].
+		//
+		// It then returned the fixed constant unconditionally, and inside a
+		// container capped BELOW that constant a ceiling larger than the whole
+		// container is no ceiling at all: the kernel's OOM killer binds first, so
+		// the process dies where it should have returned a typed error (rmp #2421).
+		// A cgroup limit, when there is one, is a real bound on this process and
+		// takes precedence — but only ever to LOWER the ceiling, never to raise it
+		// above what an unconstrained host already gets.
+		if avail, ok := memlimit.Available(); ok {
+			return globalCeilingFromAvailable(avail)
+		}
 		return DefaultGlobalMaxResultBytes
 	}
+}
+
+// globalCeilingFromAvailable derives the engine-wide result ceiling from a bound
+// on the memory this process may use, keeping the same one-half fraction the
+// GOMEMLIMIT branch uses.
+//
+// It is a separate function so the derivation can be tested against injected
+// limits rather than against whatever the host running the tests happens to
+// report — which is neither deterministic nor, on a developer machine,
+// constrained at all.
+//
+// It may only ever LOWER the ceiling. A bound larger than twice the fixed default
+// says nothing new: the default already survives on any host that big, and
+// raising it there would widen an aggregate bound that exists to be narrow.
+func globalCeilingFromAvailable(avail int64) int64 {
+	if half := avail / 2; half > 0 && half < DefaultGlobalMaxResultBytes {
+		return half
+	}
+	return DefaultGlobalMaxResultBytes
 }
 
 // DefaultGlobalMaxResultBytes is the engine-wide result-byte ceiling applied when
