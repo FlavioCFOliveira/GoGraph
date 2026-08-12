@@ -22,9 +22,11 @@ proceed to a verdict on the others. Two findings are sufficient on their own:
    breach of Compliance Mandate 2 (100% ACID), Isolation clause: *"Readers never observe the
    partial writes of an in-flight transaction."* Filed as **rmp #2420**. Not yet fixed.
 
-   **Read that as intermittent, not deterministic.** The defect fires at roughly **1.2% per
-   invocation** of its test (§2.1), so `make ci` passes far more often than it fails. The
-   three full gate runs of this cycle were:
+   **Read that as intermittent, not deterministic.** Pooled over every run at the corrected
+   recipe (§2.1.1) — the whole `graph/lpg` package under peer load — the defect fires **3
+   times in 160 package runs, roughly 2%**. Since `make ci` runs that package once, that is
+   about **one CI run in fifty**, so the gate passes far more often than it fails. The four
+   full gate runs of this cycle were:
 
    | run | tree | result |
    |---|---|---|
@@ -37,12 +39,16 @@ proceed to a verdict on the others. Two findings are sufficient on their own:
    times** under peer load across this cycle, producing **3 further violations** — the three
    observations §2.1 is built on.
 
-   The green runs are **not evidence that #2420 is fixed**, and are not offered as any. Nothing in this
-   cycle touched the mechanism; at a 1.2% rate a green run is simply the likely outcome.
-   Running the gate once and seeing green does not contradict this report — it is what the
-   measured rate predicts. **An intermittent breach of an ACID guarantee is still a breach**,
-   and a defect that surfaces in roughly one CI run in eighty is more dangerous than a
-   deterministic one, because it will be dismissed as flakiness.
+   The green runs are **not evidence that #2420 is fixed**, and are not offered as any.
+   Nothing in this cycle touched the mechanism; at a 2% rate a green run is simply the likely
+   outcome. Running the gate once and seeing green does not contradict this report — it is
+   what the measured rate predicts. **An intermittent breach of an ACID guarantee is still a
+   breach**, and a defect that surfaces in roughly one CI run in fifty is more dangerous than
+   a deterministic one, because it will be dismissed as flakiness.
+
+   (An earlier draft of this section quoted 1.2% and one-in-eighty. That figure came from the
+   **isolated** `-run` arms, which §2.1.1 shows could not reproduce the defect at all; it is
+   superseded by the pooled figure above.)
 2. **A silent wrong answer in openCypher conformance**, confirmed by measurement at the
    entry commit: a reverse-direction, type-filtered `MATCH` over parallel relationships
    returned an over-count on one type and **zero** on every other. Filed long ago as
