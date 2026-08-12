@@ -1996,6 +1996,50 @@ property field through a `runtime.memmove` CALL — 10.20 % of all engine CPU,
 After this sprint GoGraph is the cheapest of the three engines on seven of the
 eight measured workloads; `scan_filter` remains at 1.99× Memgraph and is #2411.
 
+### Sprint 342 sync — closing the concurrency assessment's findings (2026-08-12)
+
+Recorded at `1fa1bb6a` and `93410102`. Added: `Sprint 342` (CLOSED); `Component`
+`adjlist.revIndex` (`graph/adjlist/reverse.go`); `Defect`s 2400, 2418 and 2419,
+all `fixed`; and `Lesson` `confirmed-at-source-is-not-priced`. Edges:
+`Sprint -[CLOSED_DEFECT]->` each defect, `Defect -[FIXED_BY]-> Component` for
+2400 and 2418, and `Defect 2400 -[TAUGHT]-> Lesson`.
+
+**The finding worth carrying: a root cause recorded as "confirmed at source"
+had never been priced, and was wrong.** The 2026-08-11 concurrency assessment
+attributed its one defect — bulk delete degrading without bound, 4.8× over five
+cycles at exactly one core — to `removeNodeInfo` cloning the whole roaring64
+tombstone bitmap per node removed. That code does exactly what the report says.
+A CPU profile of the reproduction prices it at **0.99 %**, and a microbenchmark
+of the named mechanism moves only 1.53× across an eightyfold increase in the
+set being cloned, because a dense id range compresses to a handful of roaring
+containers. Reading a mechanism in the source confirms that it EXISTS, never
+that it COSTS.
+
+The real cause was **78.77 %** of that same profile: `lpgMutatorAdapter.InNeighbours`
+answered "which nodes hold an edge into n" with a walk of every interned node,
+once per node deleted, so a delete cost O(k·n) with *n* counting every node ever
+interned rather than the live ones — which is why the cost grew across cycles,
+stayed flat within a wipe, used one core, and left `count(*)` fast. The
+adjacency now keeps a live in-edge index, as Neo4j and Memgraph both do:
+cycle six falls 4.622 s → 77.2 ms, `DETACH DELETE` 22.2×, and 90 000 nodes in
+one statement 15.97 s → 375.6 ms, for +1.92 % on end-to-end relationship
+creation with the read path unchanged.
+
+Two defects in that fix were caught only by the benchstat comparison the user
+required before accepting it, and by no correctness test: the first draft grew
+the per-shard array to exactly `intra+1` per new destination (O(n²), +1057 %
+memory on a 100 k-edge hub), and it carried its own atomic counter of recorded
+in-edges — a second globally shared cache line on the write path for a number
+`AdjList.Size` already had.
+
+#2419 raised `DefaultMaxOpenTxPerPrincipal` 16 → 2048 so the default
+configuration reaches the concurrency levels the project guidelines publish. The
+trade is explicit: every open transaction pins an MVCC read snapshot and holds
+the reclamation horizon back for its lifetime, so the bound on that resource is
+weaker, and `DefaultMaxTxIdleTime` (5 s) is what limits the exposure. Under the
+defaults the quota can no longer bind at all, because a connection holds at most
+one open transaction and `MaxConnections` defaults to 1024.
+
 ## Known limitations (faithful, by design)
 
 - **Build-tag duplicates.** The extractor parses every `.go` file regardless of build
