@@ -363,6 +363,22 @@ real one. Writing the rule did not disarm the reflex; re-reading this report did
 probes have been moved into the package, given eight concurrent readers, and run with no
 filter.**
 
+**And that corrected run was inconclusive, for a third instrument reason.** Moved into the
+package with eight readers and no filter, the absolute probe ran 12 counts and found **0 wrong
+reads**, with the shipped oracle also silent. Neither number is usable:
+
+- 0 in 12 package runs is unsurprising on its own — at the measured ~2% rate, P(0) ≈ 0.79.
+- More seriously, **the probe took 4 hours for those 12 counts and dominated the package**.
+  A heavy co-resident test changes the interleaving the defect depends on, so this arm may
+  have suppressed what it was built to catch. That is the "the probe hides the defect" failure
+  mode, and it is the reason the probe was **removed rather than kept**.
+
+**The recommendation stands, with a size constraint attached.** An absolute oracle is the
+right instrument — it fires on one wrong read where the shipped test needs two reads to
+straddle a write. But it must be **small enough not to dominate the package** (thousands of
+writes, not tens of thousands), or it must live in the soak layer and be run alone. Landing
+the heavy version would have traded a real gate for a slow one that hides its own target.
+
 **Work landed for the next cycle.** The oracle was given the self-diagnosing treatment its
 sibling received at `469aea82` and did not have: it now captures the first violating pair,
 classifies the direction, and — the decisive addition — **re-reads both properties from the
