@@ -30,9 +30,14 @@ proceed to a verdict on the others. Two findings are sufficient on their own:
    |---|---|---|
    | 1 | entry commit `50bf53fd` | **`MAKE_CI_EXIT=2`** — the Isolation tear |
    | 2 | `sprint-343`, mid-cycle | `MAKE_CI_EXIT=2` — **lint**, on a defect of mine (§1); test stage green |
-   | 3 | `sprint-343`, exit | **`MAKE_CI_EXIT=0`** — green, coverage 87.1% |
+   | 3 | `sprint-343`, mid-cycle | `MAKE_CI_EXIT=0` — green |
+   | 4 | `sprint-343`, exit | **`MAKE_CI_EXIT=0`** — green, coverage 87.1% |
 
-   Run 3 is **not evidence that #2420 is fixed**, and is not offered as any. Nothing in this
+   Beyond the gate itself, the targeted reproduction ran the `graph/lpg` package **240 more
+   times** under peer load across this cycle, producing **3 further violations** — the three
+   observations §2.1 is built on.
+
+   The green runs are **not evidence that #2420 is fixed**, and are not offered as any. Nothing in this
    cycle touched the mechanism; at a 1.2% rate a green run is simply the likely outcome.
    Running the gate once and seeing green does not contradict this report — it is what the
    measured rate predicts. **An intermittent breach of an ACID guarantee is still a breach**,
