@@ -1,6 +1,7 @@
 package lpg
 
 import (
+	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -229,6 +230,16 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 		firstReA     atomic.Int64
 		firstReB     atomic.Int64
 		firstStartTS atomic.Uint64
+		// The per-shard substrate state, sampled AT the violation. This is the
+		// question the values alone cannot answer: a snapshot read falls through to
+		// the CURRENT bag when the shard holds no history (snapshot_read.go, the
+		// `sh.d != nil` gate) or when this node has no chain (propBagAsOfLocked),
+		// and a present-time read is indistinguishable from a correct one until you
+		// look. The previous cycle established for LABELS that both nodes held live
+		// chains at the violation; nothing has ever established it for PROPERTIES,
+		// which is this arm.
+		firstAFacts atomic.Uint64
+		firstBFacts atomic.Uint64
 	)
 
 	wg.Add(1)
@@ -296,6 +307,8 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 							firstReA.Store(ra)
 							firstReB.Store(rb)
 							firstStartTS.Store(snap.startTS)
+							firstAFacts.Store(propChainFacts(g, "a"))
+							firstBFacts.Store(propChainFacts(g, "b"))
 						}
 					}
 				}()
@@ -318,12 +331,58 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 			persistence = "PERSISTENT — the same pinned snapshot STILL disagreed on re-read, so this snapshot resolves the two nodes inconsistently as a matter of state"
 		}
 		t.Fatalf("observed %d partial-transaction violations (a.v != b.v inside a pinned SNAPSHOT); "+
-			"first observation a.v=%d b.v=%d (delta %d, %s); re-read of the SAME snapshot (startTS=%d) gave a.v=%d b.v=%d — %s",
+			"first observation a.v=%d b.v=%d (delta %d, %s); re-read of the SAME snapshot (startTS=%d) gave a.v=%d b.v=%d — %s; "+
+			"substrate at the violation: a: %s | b: %s",
 			v, ia, ib, ia-ib, tearDirection(ia, ib),
-			firstStartTS.Load(), ra, rb, persistence)
+			firstStartTS.Load(), ra, rb, persistence,
+			describeChainFacts(firstAFacts.Load()), describeChainFacts(firstBFacts.Load()))
 	}
 	if reads.Load() == 0 {
 		t.Fatal("readers never observed both properties; test did not exercise the invariant")
+	}
+}
+
+// propChainFacts encodes, for one node key, the per-shard substrate state a
+// snapshot read of it would have consulted. It is packed into a uint64 so the
+// capture is a single atomic store on a path that must perturb the interleaving
+// as little as possible.
+//
+// Layout: bit 0 set when the SHARD holds no history at all (the `sh.d != nil`
+// gate declines and the read returns the current bag); bit 1 set when the shard
+// has history but THIS NODE has no chain (propBagAsOfLocked returns the current
+// bag); the remaining bits carry the head record's stamp, which is 0 when there
+// is no head.
+//
+// Either of the first two bits being set at a violation would mean the read was a
+// present-time read rather than an as-of-snapshot one, which is a materially
+// different defect from a mis-ordered visibility decision.
+func propChainFacts(g *Graph[string, int64], key string) uint64 {
+	id, ok := g.adj.Mapper().Lookup(key)
+	if !ok {
+		return 1 // no such node: treat as "no history", the conservative reading
+	}
+	sh := g.nodePropShardFor(id)
+	sh.mu.RLock()
+	defer sh.mu.RUnlock()
+	if sh.d == nil {
+		return 1
+	}
+	d := sh.d[id]
+	if d == nil {
+		return 2
+	}
+	return d.stampTS() << 2
+}
+
+// describeChainFacts renders [propChainFacts] for a failure message.
+func describeChainFacts(v uint64) string {
+	switch {
+	case v&1 != 0:
+		return "SHARD HELD NO HISTORY — the read returned the CURRENT bag, not an as-of-snapshot one"
+	case v&2 != 0:
+		return "NODE HAD NO CHAIN — the read returned the CURRENT bag, not an as-of-snapshot one"
+	default:
+		return fmt.Sprintf("live chain, head stamped %d", v>>2)
 	}
 }
 
