@@ -210,6 +210,25 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 		violation atomic.Int64
 		reads     atomic.Int64
 		writeErr  atomic.Int64
+		// The first violating observation, so a failure names WHAT was seen
+		// rather than only how many times. The sibling oracle
+		// TestIsolation_CrossSubstructure_EdgeImpliesLabels was given this
+		// treatment at rmp #2378; this one was not, and when it fired it could
+		// say nothing about its own cause.
+		//
+		// The captured values are self-describing: the writer sets BOTH
+		// properties to the loop counter, so each value IS the iteration that
+		// wrote it and their difference is how many transactions apart the two
+		// reads landed. A difference of one is a single transaction observed
+		// half-applied; anything larger is a different suspect.
+		firstSeen atomic.Bool
+		firstIA   atomic.Int64
+		firstIB   atomic.Int64
+		// The same two properties re-read from the SAME pinned snapshot straight
+		// after the violation, plus that snapshot's start instant.
+		firstReA     atomic.Int64
+		firstReB     atomic.Int64
+		firstStartTS atomic.Uint64
 	)
 
 	wg.Add(1)
@@ -259,6 +278,25 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 					reads.Add(1)
 					if ia != ib {
 						violation.Add(1)
+						// Only the FIRST observation is kept, via CompareAndSwap:
+						// it is the one whose interleaving is least perturbed by
+						// the recording.
+						if firstSeen.CompareAndSwap(false, true) {
+							firstIA.Store(ia)
+							firstIB.Store(ib)
+							// RE-READ THE SAME PINNED SNAPSHOT. This separates the two
+							// possibilities that the values alone cannot: if the same
+							// snapshot now AGREES, the tear was a transient window and
+							// something the read consulted changed between the two
+							// reads; if it still DISAGREES, this snapshot resolves the
+							// two nodes inconsistently as a matter of state, and that
+							// state can then be dissected at leisure instead of chased.
+							ra, _ := mustInt64(view.GetNodeProperty("a", "v"))
+							rb, _ := mustInt64(view.GetNodeProperty("b", "v"))
+							firstReA.Store(ra)
+							firstReB.Store(rb)
+							firstStartTS.Store(snap.startTS)
+						}
 					}
 				}()
 				if stop {
@@ -273,10 +311,54 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 		t.Fatalf("writer hit %d errors", writeErr.Load())
 	}
 	if v := violation.Load(); v != 0 {
-		t.Fatalf("observed %d partial-transaction violations (a.v != b.v inside a pinned SNAPSHOT)", v)
+		ia, ib := firstIA.Load(), firstIB.Load()
+		ra, rb := firstReA.Load(), firstReB.Load()
+		persistence := "TRANSIENT — the same pinned snapshot AGREED on re-read, so something the read consulted changed between the two reads"
+		if ra != rb {
+			persistence = "PERSISTENT — the same pinned snapshot STILL disagreed on re-read, so this snapshot resolves the two nodes inconsistently as a matter of state"
+		}
+		t.Fatalf("observed %d partial-transaction violations (a.v != b.v inside a pinned SNAPSHOT); "+
+			"first observation a.v=%d b.v=%d (delta %d, %s); re-read of the SAME snapshot (startTS=%d) gave a.v=%d b.v=%d — %s",
+			v, ia, ib, ia-ib, tearDirection(ia, ib),
+			firstStartTS.Load(), ra, rb, persistence)
 	}
 	if reads.Load() == 0 {
 		t.Fatal("readers never observed both properties; test did not exercise the invariant")
+	}
+}
+
+// mustInt64 unwraps a property read for the diagnostic re-read, reporting -1 for
+// an absent key so a missing property is distinguishable from a real value
+// rather than silently reading as zero.
+func mustInt64(v PropertyValue, ok bool) (int64, bool) {
+	if !ok {
+		return -1, false
+	}
+	i, iok := v.Int64()
+	if !iok {
+		return -2, false
+	}
+	return i, true
+}
+
+// tearDirection classifies a partial-transaction observation by which of the two
+// reads saw the newer transaction. The reader reads "a" and then "b" from one
+// pinned snapshot, and the writer sets both to the same loop counter, so the
+// values order the two reads against the writer's timeline.
+//
+// The two directions have different suspects, which is the whole point of
+// recording it: a later-read-is-newer tear means the visibility basis moved
+// FORWARD between the two reads (a version the snapshot still needed stopped
+// being resolved as-of that snapshot), whereas an earlier-read-is-newer tear
+// means the second read undid more than it should have.
+func tearDirection(ia, ib int64) string {
+	switch {
+	case ia < ib:
+		return "the LATER read (b) saw the newer transaction — the visibility basis moved FORWARD between the two reads"
+	case ia > ib:
+		return "the EARLIER read (a) saw the newer transaction — the later read undid a change its snapshot should have kept"
+	default:
+		return "values equal — the capture did not record the violating pair"
 	}
 }
 
