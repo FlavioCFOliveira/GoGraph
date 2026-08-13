@@ -178,11 +178,18 @@ certification does *not* establish.
 #### Bulk import, Bolt and the edges
 
 - **`store/bulkimport`, with `Publish`** — builds a labelled property graph at
-  bulk-loader speed and publishes it as an openable store snapshot. **233 ms median /
-  0.86 M edges/s** for 20 000 nodes and 200 000 edges; **0.28 s** process wall clock
+  bulk-loader speed and publishes it as an openable store snapshot. On **20 000 nodes
+  and 200 000 edges**: import phase **233 ms median / 0.86 M edges/s**, and **0.28 s**
+  of process wall clock once CSV parsing and startup are counted
   ([`docs/benchmarks/bulk-import-2026-07-26.md`](docs/benchmarks/bulk-import-2026-07-26.md)).
-  Roughly **690×** the Cypher route on the same task, on 483 KB of disk instead of
-  1.43 MB. **State the trade with the number**: the bulk route writes no WAL, is not a
+  On a **separate, smaller fixture** — 2 000 nodes and 4 000 typed edges into an
+  openable store — the same task runs at **236 elem/s through Cypher against
+  121 000–172 000 elem/s through `bulkimport.Publish`**, about **690×**, on 483 KB of
+  disk instead of 1.43 MB, with the published store verified reopenable via
+  `recovery.OpenCtx`
+  ([release delta §7](docs/benchmarks/release-delta-v0.10.0-to-head-2026-08-10.md)).
+  The two figures are different datasets and must not be combined.
+  **State the trade with the number**: the bulk route writes no WAL, is not a
   transaction, cannot be rolled back, requires an empty directory, and is concurrent
   with nothing.
 - **`cmd/gograph-import`** — loads a store from CSV.
