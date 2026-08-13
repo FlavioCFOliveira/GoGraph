@@ -107,6 +107,98 @@ func (e *ConstraintViolationError) Error() string {
 func (e *ConstraintViolationError) Unwrap() error { return ErrConstraintViolation }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ConstraintTxn
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ckeyval identifies one (label, property, value) reservation.
+type ckeyval struct {
+	key ckey
+	val string
+}
+
+// ConstraintTxn is one transaction's UNCOMMITTED contribution to the UNIQUE
+// value-sets: the values it has RELEASED and not yet committed.
+//
+// # Why a release is deferred and a reservation is not (rmp #2366)
+//
+// The two directions are not symmetric, and treating them as if they were is the
+// defect. A RESERVATION is taken eagerly into the shared value-set, and that is
+// correct: it must block every peer immediately, and rolling it back — deleting a
+// value no committed peer can have taken, because it was reserved throughout —
+// cannot disturb anyone. A RELEASE is different. Applied eagerly it hands the value
+// to any peer that asks, and if the releasing transaction then rolls back the value
+// has two holders; so the old code applied it eagerly and journaled the RE-RESERVE
+// as the rollback inverse, which put the value back into SHARED state judged
+// against the rolling-back transaction's OWN view:
+//
+//	T1  REMOVE b:Person          releases 'old' (eagerly, shared)
+//	T2  SET b.email = 'new'      releases 'old', reserves 'new'
+//	T2  ROLLBACK                 replays: releases 'new', RE-RESERVES 'old'
+//	T1  COMMIT                   the label removal stands — no live :Person holds 'old'
+//	    CREATE (y:Person {email:'old'})  -> REFUSED, for ever
+//
+// Both transactions behaved correctly in isolation; the merged state is wrong
+// because a rollback wrote to state a peer's COMMITTED release had already changed.
+// Deferring the release removes the write: a rollback drops a private mark and
+// touches nothing shared, so there is nothing to order against a peer's commit.
+//
+// The transaction still sees its own release — that is what the mark is for, and it
+// is what lets one transaction free a value and take it again on another node.
+//
+// The zero value is ready to use and allocates nothing until the first release, so
+// a statement under a schema with no UNIQUE constraint costs nothing at all.
+//
+// Not safe for concurrent use: it belongs to one transaction, which is driven by
+// one goroutine at a time, exactly like the undo log it travels beside.
+type ConstraintTxn struct {
+	released map[ckeyval]struct{}
+}
+
+// markReleased records that this transaction has released val under key.
+func (t *ConstraintTxn) markReleased(key ckey, val string) {
+	if t == nil {
+		return
+	}
+	if t.released == nil {
+		t.released = make(map[ckeyval]struct{}, 2)
+	}
+	t.released[ckeyval{key: key, val: val}] = struct{}{}
+}
+
+// unmarkReleased withdraws a release this transaction recorded. It is the inverse a
+// rolled-back STATEMENT replays: it touches only this transaction's own mark, never
+// the shared value-set, which is the whole point (see the type comment).
+func (t *ConstraintTxn) unmarkReleased(key ckey, val string) {
+	if t == nil || t.released == nil {
+		return
+	}
+	delete(t.released, ckeyval{key: key, val: val})
+}
+
+// releasedHere reports whether this transaction has released val under key, so its
+// own subsequent write of that value is not refused by a reservation it has itself
+// given up.
+func (t *ConstraintTxn) releasedHere(key ckey, val string) bool {
+	if t == nil || t.released == nil {
+		return false
+	}
+	_, ok := t.released[ckeyval{key: key, val: val}]
+	return ok
+}
+
+// Reset drops every mark, which is what a ROLLBACK does. Nothing shared was
+// touched, so there is nothing to undo.
+//
+// It keeps the map for reuse: the adapters hold a ConstraintTxn inline and are
+// pooled per statement.
+func (t *ConstraintTxn) Reset() {
+	if t == nil {
+		return
+	}
+	clear(t.released)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ConstraintRegistry
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -653,10 +745,14 @@ func (r *ConstraintRegistry) UniqueProperties(label string) []string {
 //
 // This entry point remains for callers that genuinely only want to ASK —
 // pre-validation and diagnostics — and for the existing test surface.
-func (r *ConstraintRegistry) CheckSetProperty(labels []string, prop string, value lpg.PropertyValue, mgr *index.Manager) error {
+//
+// ct carries the caller's own uncommitted releases, so asking about a value the
+// asking transaction has itself given up answers "free"; nil means "no
+// transaction". See [ConstraintTxn].
+func (r *ConstraintRegistry) CheckSetProperty(ct *ConstraintTxn, labels []string, prop string, value lpg.PropertyValue, mgr *index.Manager) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.checkSetPropertyLocked(labels, prop, value, mgr)
+	return r.checkSetPropertyLocked(ct, labels, prop, value, mgr)
 }
 
 // ReserveSetProperty validates that setting prop = value on a node with the given
@@ -709,7 +805,11 @@ func (r *ConstraintRegistry) CheckSetProperty(labels []string, prop string, valu
 // pass, because every check ran before any record. Reserving at check time rejects
 // the second write. That is a fix, not a side effect: such a statement leaves the
 // graph violating a declared invariant.
-func (r *ConstraintRegistry) ReserveSetProperty(labels []string, prop string, value lpg.PropertyValue, mgr *index.Manager) error {
+// ct carries the reservations this transaction has released but not committed, so a
+// value it has itself given up is not refused as its own duplicate; see
+// [ConstraintTxn]. It may be nil, which means "no transaction" — a caller with
+// nothing to roll back.
+func (r *ConstraintRegistry) ReserveSetProperty(ct *ConstraintTxn, labels []string, prop string, value lpg.PropertyValue, mgr *index.Manager) error {
 	// No constraint of EITHER kind: nothing to check and nothing to reserve, so do not
 	// take this registry's global lock — it would put one mutex on every property write
 	// for no benefit. BOTH counters, because this method enforces UNIQUE and NOT NULL;
@@ -726,7 +826,7 @@ func (r *ConstraintRegistry) ReserveSetProperty(labels []string, prop string, va
 	// violation on the second label cannot leave the first one reserved. A node
 	// carries all its labels at once; a partial reservation would be a phantom that
 	// only a whole-graph reseed could clear.
-	if err := r.checkSetPropertyLocked(labels, prop, value, mgr); err != nil {
+	if err := r.checkSetPropertyLocked(ct, labels, prop, value, mgr); err != nil {
 		return err
 	}
 
@@ -738,6 +838,11 @@ func (r *ConstraintRegistry) ReserveSetProperty(labels []string, prop string, va
 			if vs := r.valueSets[key]; vs != nil {
 				vs[strVal] = struct{}{}
 			}
+			// This transaction is taking the value again, so its own pending release
+			// of it is spent. Without this a transaction that released a value and
+			// re-reserved it would, at commit, apply the release and delete the
+			// reservation it had just taken.
+			ct.unmarkReleased(key, strVal)
 		}
 	}
 	return nil
@@ -751,7 +856,7 @@ func (r *ConstraintRegistry) ReserveSetProperty(labels []string, prop string, va
 // Extracting it is what lets the two entry points differ ONLY in atomicity rather
 // than in what they consider a violation — a second copy of this logic would be
 // free to drift, and a drift here is an unenforced constraint.
-func (r *ConstraintRegistry) checkSetPropertyLocked(labels []string, prop string, value lpg.PropertyValue, mgr *index.Manager) error {
+func (r *ConstraintRegistry) checkSetPropertyLocked(ct *ConstraintTxn, labels []string, prop string, value lpg.PropertyValue, mgr *index.Manager) error {
 	for _, label := range labels {
 		key := constraintKey(label, prop)
 
@@ -773,7 +878,14 @@ func (r *ConstraintRegistry) checkSetPropertyLocked(labels []string, prop string
 			// Primary: check the in-memory value set.
 			if vs := r.valueSets[key]; vs != nil {
 				if strVal, ok := propertyValueToString(value); ok {
-					if _, exists := vs[strVal]; exists {
+					// A reservation THIS transaction has released is not an obstacle to
+					// its own write: the release is deferred to commit, so the value is
+					// still in the shared set and would otherwise refuse the transaction
+					// that gave it up (rmp #2366). A PEER's pending release is
+					// deliberately NOT consulted — the value is still committed to that
+					// peer's node until the peer commits, and handing it over before then
+					// is how a rolled-back release ends up with two holders.
+					if _, exists := vs[strVal]; exists && !ct.releasedHere(key, strVal) {
 						return &ConstraintViolationError{
 							Label:    label,
 							Property: prop,
@@ -869,7 +981,20 @@ func (r *ConstraintRegistry) RecordPropertySet(labels []string, prop string, val
 // ReleasePropertyValue is a no-op when the value was not present in the
 // value-set, or when no unique constraint exists for (label, prop). It is
 // safe for concurrent use.
-func (r *ConstraintRegistry) ReleasePropertyValue(labels []string, prop string, value lpg.PropertyValue) {
+//
+// # It is DEFERRED when a transaction owns it (rmp #2366)
+//
+// With ct non-nil the release is recorded as that transaction's own pending
+// contribution and the shared value-set is left alone until
+// [ConstraintRegistry.CommitTxn]. That is what makes a rollback free: it drops a
+// private mark instead of writing a re-reservation into shared state that a peer's
+// COMMITTED release may already have changed. [ConstraintTxn] carries the
+// interleaving this closes.
+//
+// With ct nil there is no transaction and therefore nothing to roll back, so the
+// release applies immediately — the correct reading of a change that is committed
+// the instant it is made.
+func (r *ConstraintRegistry) ReleasePropertyValue(ct *ConstraintTxn, labels []string, prop string, value lpg.PropertyValue) {
 	// No UNIQUE constraint anywhere: nothing to release, and taking this registry's
 	// global lock would put one mutex on every property write for no benefit. See
 	// [ConstraintRegistry.uniqueActive].
@@ -880,6 +1005,16 @@ func (r *ConstraintRegistry) ReleasePropertyValue(labels []string, prop string, 
 	if !ok {
 		return
 	}
+	if ct != nil {
+		// Deferred: no lock, because nothing shared is touched. That also removes one
+		// acquisition of this registry's global mutex from the write path, which
+		// [ConstraintRegistry.uniqueActive] records as having measured 57 % of all
+		// lock delay at sixteen writers.
+		for _, label := range labels {
+			ct.markReleased(constraintKey(label, prop), strVal)
+		}
+		return
+	}
 	r.mu.Lock()
 	for _, label := range labels {
 		key := constraintKey(label, prop)
@@ -888,6 +1023,32 @@ func (r *ConstraintRegistry) ReleasePropertyValue(labels []string, prop string, 
 		}
 	}
 	r.mu.Unlock()
+}
+
+// CommitTxn applies ct's pending releases to the shared value-sets and clears it.
+//
+// It must be called exactly once per transaction that committed, from inside the
+// same window that publishes the transaction's writes, so the value a committed
+// release frees becomes available at the instant the graph stops holding it.
+//
+// A rolled-back transaction calls [ConstraintTxn.Reset] instead — there is nothing
+// to undo, because a deferred release never touched anything shared.
+//
+// Safe for concurrent use.
+func (r *ConstraintRegistry) CommitTxn(ct *ConstraintTxn) {
+	// A nil registry is a query with no enforcement, and an empty contribution is the
+	// common case: both are no-ops, so every caller can call this unconditionally.
+	if r == nil || ct == nil || len(ct.released) == 0 {
+		return
+	}
+	r.mu.Lock()
+	for kv := range ct.released {
+		if vs := r.valueSets[kv.key]; vs != nil {
+			delete(vs, kv.val)
+		}
+	}
+	r.mu.Unlock()
+	ct.Reset()
 }
 
 // ReseedFromGraph clears every UNIQUE value-set and rebuilds it from the

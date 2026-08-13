@@ -61,7 +61,7 @@ func TestConstraintRegistry_CheckSetProperty_NoConstraint_OK(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	reg := exec.NewConstraintRegistry()
 	// No constraints: any value must pass.
-	err := reg.CheckSetProperty([]string{"Person"}, "email", lpg.StringValue("a@b.com"), nil)
+	err := reg.CheckSetProperty(nil, []string{"Person"}, "email", lpg.StringValue("a@b.com"), nil)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -73,7 +73,7 @@ func TestConstraintRegistry_CheckSetProperty_NotNull_Null_Violation(t *testing.T
 	reg.RegisterNotNull("Person", "name")
 	// Zero PropertyValue (Kind == 0) is null.
 	var null lpg.PropertyValue
-	err := reg.CheckSetProperty([]string{"Person"}, "name", null, nil)
+	err := reg.CheckSetProperty(nil, []string{"Person"}, "name", null, nil)
 	if err == nil {
 		t.Fatal("expected constraint violation, got nil")
 	}
@@ -86,7 +86,7 @@ func TestConstraintRegistry_CheckSetProperty_NotNull_NonNull_OK(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	reg := exec.NewConstraintRegistry()
 	reg.RegisterNotNull("Person", "name")
-	err := reg.CheckSetProperty([]string{"Person"}, "name", lpg.StringValue("Alice"), nil)
+	err := reg.CheckSetProperty(nil, []string{"Person"}, "name", lpg.StringValue("Alice"), nil)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -109,7 +109,7 @@ func TestConstraintRegistry_CheckSetProperty_Unique_Violation(t *testing.T) {
 	// primary source.
 	reg.SeedUniqueValuesIgnoringDuplicates("Person", "email", []lpg.PropertyValue{lpg.StringValue("alice@example.com")})
 
-	err := reg.CheckSetProperty([]string{"Person"}, "email", lpg.StringValue("alice@example.com"), mgr)
+	err := reg.CheckSetProperty(nil, []string{"Person"}, "email", lpg.StringValue("alice@example.com"), mgr)
 	if err == nil {
 		t.Fatal("expected unique constraint violation, got nil")
 	}
@@ -130,7 +130,7 @@ func TestConstraintRegistry_CheckSetProperty_Unique_NoViolation(t *testing.T) {
 	reg.RegisterUnique("Person", "email", "__uniq__Person.email")
 
 	// Index is empty, so no violation.
-	err := reg.CheckSetProperty([]string{"Person"}, "email", lpg.StringValue("new@example.com"), mgr)
+	err := reg.CheckSetProperty(nil, []string{"Person"}, "email", lpg.StringValue("new@example.com"), mgr)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -143,7 +143,7 @@ func TestConstraintRegistry_CheckSetProperty_MultiLabel_Violation(t *testing.T) 
 	reg.RegisterNotNull("Employee", "empID")
 	var null lpg.PropertyValue
 	// Node has both Person and Employee labels.
-	err := reg.CheckSetProperty([]string{"Person", "Employee"}, "empID", null, nil)
+	err := reg.CheckSetProperty(nil, []string{"Person", "Employee"}, "empID", null, nil)
 	if err == nil {
 		t.Fatal("expected not-null violation via Employee label")
 	}
@@ -157,7 +157,7 @@ func TestConstraintViolationError_Wraps(t *testing.T) {
 	reg := exec.NewConstraintRegistry()
 	reg.RegisterNotNull("Person", "name")
 	var null lpg.PropertyValue
-	err := reg.CheckSetProperty([]string{"Person"}, "name", null, nil)
+	err := reg.CheckSetProperty(nil, []string{"Person"}, "name", null, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}

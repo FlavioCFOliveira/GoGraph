@@ -175,6 +175,20 @@ func buildRangeSeekIfEnabled(
 // EngineOptions.DisableBitmapIntersection knob as the label intersection, since
 // both are the same lever — a set operation over Roaring bitmaps — and a caller
 // disabling one means to disable the other.
+// labelBitmapOf returns the resolver closure a range scan uses to intersect its
+// candidates with the label's own bitmap (rmp #2423).
+//
+// It resolves through lpgLabelResolver, so the seek path and the label scan answer
+// membership from the SAME snapshot-aware accessor and cannot disagree — the index
+// over-reports a label after a removal, and this is what filters it.
+func labelBitmapOf(g *lpg.ReadView[string, float64], label string) func() *roaring64.Bitmap {
+	if g == nil || label == "" {
+		return nil
+	}
+	src := &lpgLabelResolver{g: g}
+	return func() *roaring64.Bitmap { return src.ResolveLabelBitmap(label) }
+}
+
 func tryBuildRangeSeekChild(
 	sel *ir.Selection,
 	schema map[string]int,
@@ -278,7 +292,11 @@ func tryStringRangeSeek(
 	if pred.hi != nil {
 		hiB = *pred.hi
 	}
-	op := exec.NewNodeByIndexRangeScan(exec.NewStringRangeIndex(sub), loB, hiB)
+	// The label the replaced scan leaf carried must still restrict the result
+	// (rmp #2423): the residual Selection filter re-checks the PROPERTY, never the
+	// label, so without this the scan admits nodes that lost it.
+	op := exec.NewNodeByIndexRangeScan(exec.NewStringRangeIndex(sub), loB, hiB).
+		RestrictToLabel(labelBitmapOf(g, lblScan.Label))
 	schema[nodeVar] = schemaWidth(schema)
 	return op, true
 }
@@ -730,7 +748,9 @@ func tryNumericRangeSeek(
 	if pred.hi != nil {
 		hiB = exec.RangeBound{Value: expr.FloatValue(pred.hi.value), Include: true}
 	}
-	op := exec.NewNodeByIndexRangeScan(exec.NewFloat64RangeIndex(sub), loB, hiB)
+	// See the string path: the label must still restrict the result (rmp #2423).
+	op := exec.NewNodeByIndexRangeScan(exec.NewFloat64RangeIndex(sub), loB, hiB).
+		RestrictToLabel(labelBitmapOf(g, lblScan.Label))
 	schema[nodeVar] = schemaWidth(schema)
 	return op, true
 }

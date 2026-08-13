@@ -193,6 +193,7 @@ func TestUnique_RollbackLeavesNoPhantomReservation(t *testing.T) {
 		peerFate string
 	}{
 		{name: "peer rolls back", peerFate: "rollback"},
+		{name: "peer commits", peerFate: "commit"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			eng, ctx := newLabelConflictEngine(t, uniqueSetup...)

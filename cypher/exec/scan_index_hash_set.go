@@ -70,7 +70,11 @@ var ErrSeekSetOverBudget = errors.New("exec: index seek set exceeds its posting 
 // on a property hash index for each of several keys, emitting each matching
 // NodeID exactly once. Each Row has a single column: expr.IntegerValue(nodeID).
 type NodeByIndexSeekSet struct {
-	idx    hashLookup
+	idx HashLookup
+	// admit, when non-nil, qualifies every candidate the index returns — the label
+	// check this rewrite owes because it SUBSUMES a labelled scan leaf exactly as the
+	// single-key seek does. See [NodeByIndexSeek] for the defect and rmp #2423.
+	admit  func(nodeID uint64) bool
 	ctx    context.Context //nolint:containedctx // stored for per-Next ctx check
 	keys   []expr.Value
 	buf    [1]expr.Value // fixed backing buffer — zero-alloc per Next
@@ -85,8 +89,16 @@ type NodeByIndexSeekSet struct {
 // Duplicate keys in keys are harmless — they are probed once. A budget of 0
 // disables the over-budget check; any other value caps the merged posting count,
 // above which Init reports [ErrSeekSetOverBudget].
-func NewNodeByIndexSeekSet(idx hashLookup, keys []expr.Value, budget uint64) *NodeByIndexSeekSet {
+func NewNodeByIndexSeekSet(idx HashLookup, keys []expr.Value, budget uint64) *NodeByIndexSeekSet {
 	return &NodeByIndexSeekSet{idx: idx, keys: keys, budget: budget}
+}
+
+// Admitting installs the residual predicate every candidate must pass, and returns
+// op so a builder can chain it onto the constructor. A nil admit is a no-op. See the
+// admit field (rmp #2423).
+func (op *NodeByIndexSeekSet) Admitting(admit func(nodeID uint64) bool) *NodeByIndexSeekSet {
+	op.admit = admit
+	return op
 }
 
 // Init probes the index once per distinct key and merges the results into one
@@ -134,6 +146,19 @@ func (op *NodeByIndexSeekSet) Init(ctx context.Context) error {
 	}
 
 	op.ids = dedupeSorted(ids)
+	// The residual predicate runs AFTER the dedupe, so a node is qualified once
+	// however many keys reached it, and BEFORE the budget test, so the budget is
+	// measured against the rows this operator will actually emit. In place, so a
+	// guarded set seek allocates exactly what an unguarded one does (rmp #2423).
+	if op.admit != nil {
+		kept := op.ids[:0]
+		for _, id := range op.ids {
+			if op.admit(id) {
+				kept = append(kept, id)
+			}
+		}
+		op.ids = kept
+	}
 	if op.budget > 0 && uint64(len(op.ids)) > op.budget {
 		return ErrSeekSetOverBudget
 	}

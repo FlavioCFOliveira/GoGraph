@@ -67,10 +67,30 @@ type RangeBound struct {
 //
 // NodeByIndexRangeScan is NOT safe for concurrent use.
 type NodeByIndexRangeScan struct {
-	idx  rangeLookup
-	ctx  context.Context //nolint:containedctx // stored for per-Next ctx check
-	iter roaring64.IntPeekable64
-	buf  [1]expr.Value // fixed backing buffer — zero-alloc per Next
+	idx rangeLookup
+	// labelBM, when non-nil, resolves the label bitmap this scan's candidates must
+	// also belong to, and Init INTERSECTS with it (rmp #2423).
+	//
+	// # Why a range scan needs it
+	//
+	// This operator REPLACES a labelled scan leaf: the planner rewrites
+	// Selection(range) over NodeByLabelScan(L) into this scan plus the residual
+	// property filter, and the residual filter re-checks the PROPERTY, never the
+	// label. A property index over-reports for a label — removing a label leaves the
+	// node's entries in that label's property indexes behind — so with no label
+	// intersection the scan admits nodes that no longer carry it. That is the same
+	// defect the equality seek exhibited, where one row matched (n:Person) while
+	// reporting labels(n) as the empty list; here it is gated behind the
+	// selectivity/population floor, so it needs a populated graph to appear rather
+	// than being unreachable.
+	//
+	// An AND of two bitmaps rather than a per-row check, because this scan's result
+	// set is bounded only by the selectivity gate and roaring's AND is the primitive
+	// the module already uses for the multi-label conjunction.
+	labelBM func() *roaring64.Bitmap
+	ctx     context.Context //nolint:containedctx // stored for per-Next ctx check
+	iter    roaring64.IntPeekable64
+	buf     [1]expr.Value // fixed backing buffer — zero-alloc per Next
 	// extra holds the ADDITIONAL indexed conjuncts of a composed intersection
 	// (#2134). Empty for the ordinary single-index range scan.
 	extra []IndexRangePart
@@ -87,8 +107,22 @@ type IndexRangePart struct {
 }
 
 // NewNodeByIndexRangeScan creates a NodeByIndexRangeScan.
+//
+// It carries NO label restriction; a rewrite that replaced a labelled scan leaf must
+// use [NodeByIndexRangeScan.RestrictToLabel]. See the labelBM field.
 func NewNodeByIndexRangeScan(idx rangeLookup, lo, hi RangeBound) *NodeByIndexRangeScan {
 	return &NodeByIndexRangeScan{idx: idx, lo: lo, hi: hi}
+}
+
+// RestrictToLabel makes this scan intersect its candidates with the label bitmap
+// resolve returns, and returns op so a builder can chain it onto a constructor.
+//
+// resolve is called once per Init, so it observes the reading transaction's own
+// snapshot rather than a bitmap captured at plan time. A nil resolve is a no-op,
+// which keeps the unlabelled shape expressible without a second constructor.
+func (op *NodeByIndexRangeScan) RestrictToLabel(resolve func() *roaring64.Bitmap) *NodeByIndexRangeScan {
+	op.labelBM = resolve
+	return op
 }
 
 // NewNodeByIndexIntersectionScan composes SEVERAL single-property indexes into one
@@ -130,6 +164,12 @@ func (op *NodeByIndexRangeScan) Init(ctx context.Context) error {
 		}
 		other := op.extra[i].Index.RangeBitmap(op.extra[i].Lo.Value, op.extra[i].Hi.Value)
 		bm.And(other)
+	}
+	// THE LABEL, last: the range bitmaps are already narrowed, so the label AND runs
+	// against the smallest intermediate. Skipped when the bitmap is already empty,
+	// for the same reason the extra-conjunct loop above short-circuits.
+	if op.labelBM != nil && !bm.IsEmpty() {
+		bm.And(op.labelBM())
 	}
 	op.iter = bm.Iterator()
 	return nil

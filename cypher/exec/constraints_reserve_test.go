@@ -73,7 +73,7 @@ func TestReserveSetProperty_ExactlyOneWinnerUnderRace(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start // release them together, so the race is real rather than staggered
-			switch err := r.ReserveSetProperty([]string{"Person"}, "email", val, nil); {
+			switch err := r.ReserveSetProperty(nil, []string{"Person"}, "email", val, nil); {
 			case err == nil:
 				winners.Add(1)
 			case errors.Is(err, ErrConstraintViolation):
@@ -121,14 +121,14 @@ func TestReserveSetProperty_NothingReservedOnViolation(t *testing.T) {
 		t.Fatalf("seed B: %v", err)
 	}
 
-	if err := r.ReserveSetProperty([]string{"A", "B"}, "k", taken, nil); err == nil {
+	if err := r.ReserveSetProperty(nil, []string{"A", "B"}, "k", taken, nil); err == nil {
 		t.Fatal("a value already in use under B was reserved for (A, B)")
 	}
 
 	// A must still be free. Asking through the single-label path is what detects a
 	// partial reservation: if phase 1 had reserved A before phase 2 rejected B, this
 	// would now report a violation.
-	if err := r.ReserveSetProperty([]string{"A"}, "k", taken, nil); err != nil {
+	if err := r.ReserveSetProperty(nil, []string{"A"}, "k", taken, nil); err != nil {
 		t.Fatalf("label A holds a reservation from a call that FAILED: %v", err)
 	}
 }
@@ -147,16 +147,16 @@ func TestReserveSetProperty_IsIdempotentAfterRelease(t *testing.T) {
 	r := reserveRig(t)
 	val := lpg.StringValue("bob@example.com")
 
-	if err := r.ReserveSetProperty([]string{"Person"}, "email", val, nil); err != nil {
+	if err := r.ReserveSetProperty(nil, []string{"Person"}, "email", val, nil); err != nil {
 		t.Fatalf("first reservation: %v", err)
 	}
 	// Re-reserving without releasing must be refused: that is the constraint working.
-	if err := r.ReserveSetProperty([]string{"Person"}, "email", val, nil); err == nil {
+	if err := r.ReserveSetProperty(nil, []string{"Person"}, "email", val, nil); err == nil {
 		t.Fatal("the same value was reserved twice with no release in between")
 	}
 	// After releasing it, the same value is free again — the SET-same-value path.
-	r.ReleasePropertyValue([]string{"Person"}, "email", val)
-	if err := r.ReserveSetProperty([]string{"Person"}, "email", val, nil); err != nil {
+	r.ReleasePropertyValue(nil, []string{"Person"}, "email", val)
+	if err := r.ReserveSetProperty(nil, []string{"Person"}, "email", val, nil); err != nil {
 		t.Fatalf("reservation after release: %v", err)
 	}
 }
@@ -175,7 +175,7 @@ func TestReserveSetProperty_NullIsUnconstrainedByUnique(t *testing.T) {
 	var null lpg.PropertyValue // zero value is null in the lpg type system
 
 	for i := 0; i < 3; i++ {
-		if err := r.ReserveSetProperty([]string{"Person"}, "email", null, nil); err != nil {
+		if err := r.ReserveSetProperty(nil, []string{"Person"}, "email", null, nil); err != nil {
 			t.Fatalf("null reservation %d was refused by a UNIQUE constraint: %v", i, err)
 		}
 	}
@@ -191,7 +191,7 @@ func TestReserveSetProperty_NotNullStillEnforced(t *testing.T) {
 	r.RegisterNotNull("Person", "name")
 	var null lpg.PropertyValue
 
-	err := r.ReserveSetProperty([]string{"Person"}, "name", null, nil)
+	err := r.ReserveSetProperty(nil, []string{"Person"}, "name", null, nil)
 	if err == nil {
 		t.Fatal("a null value was accepted under a NOT NULL constraint")
 	}

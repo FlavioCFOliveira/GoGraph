@@ -54,7 +54,7 @@ func TestConstraintRegistry_UniqueAllKinds(t *testing.T) {
 			labels := []string{"N"}
 
 			// A fresh value must pass the check.
-			if err := reg.CheckSetProperty(labels, "p", tc.dup, nil); err != nil {
+			if err := reg.CheckSetProperty(nil, labels, "p", tc.dup, nil); err != nil {
 				t.Fatalf("%s: first value unexpectedly rejected: %v", tc.name, err)
 			}
 			// Record it as written.
@@ -63,7 +63,7 @@ func TestConstraintRegistry_UniqueAllKinds(t *testing.T) {
 			// Re-checking the SAME value must now report a UNIQUE violation —
 			// this is the assertion that fails before the #1318 fix for the
 			// non-string/int kinds.
-			err := reg.CheckSetProperty(labels, "p", tc.dup, nil)
+			err := reg.CheckSetProperty(nil, labels, "p", tc.dup, nil)
 			if err == nil {
 				t.Fatalf("%s: duplicate value accepted (UNIQUE constraint not enforced)", tc.name)
 			}
@@ -72,7 +72,7 @@ func TestConstraintRegistry_UniqueAllKinds(t *testing.T) {
 			}
 
 			// A DIFFERENT value of the same kind must still pass.
-			if err := reg.CheckSetProperty(labels, "p", tc.different, nil); err != nil {
+			if err := reg.CheckSetProperty(nil, labels, "p", tc.different, nil); err != nil {
 				t.Fatalf("%s: distinct value unexpectedly rejected: %v", tc.name, err)
 			}
 		})
@@ -98,13 +98,13 @@ func TestConstraintRegistry_UniqueCrossKindNoCollision(t *testing.T) {
 	for _, v := range []lpg.PropertyValue{
 		lpg.StringValue("1"), lpg.Int64Value(1), lpg.Float64Value(1),
 	} {
-		if err := reg.CheckSetProperty(labels, "p", v, nil); err == nil {
+		if err := reg.CheckSetProperty(nil, labels, "p", v, nil); err == nil {
 			t.Fatalf("value of kind %d should already be recorded (its own kind)", v.Kind())
 		}
 	}
 	// A bool false renders as "0" internally but must not collide with int 0.
 	reg.RecordPropertySet(labels, "p", lpg.BoolValue(false))
-	if err := reg.CheckSetProperty(labels, "p", lpg.Int64Value(0), nil); err != nil {
+	if err := reg.CheckSetProperty(nil, labels, "p", lpg.Int64Value(0), nil); err != nil {
 		t.Fatal("int 0 collided with bool false in the value-set")
 	}
 }
@@ -122,7 +122,7 @@ func TestConstraintRegistry_UniqueNullSkipped(t *testing.T) {
 	var null lpg.PropertyValue // zero value: Kind() == 0
 	reg.RecordPropertySet(labels, "p", null)
 	reg.RecordPropertySet(labels, "p", null)
-	if err := reg.CheckSetProperty(labels, "p", null, nil); err != nil {
+	if err := reg.CheckSetProperty(nil, labels, "p", null, nil); err != nil {
 		t.Fatalf("null value rejected by UNIQUE constraint: %v", err)
 	}
 }

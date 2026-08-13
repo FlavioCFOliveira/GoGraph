@@ -531,7 +531,7 @@ func TestTryNewHashSeek_Int64Index(t *testing.T) {
 	idx := hash.New[int64]()
 	idx.Insert(int64(42), graph.NodeID(1))
 
-	op, ok := tryNewHashSeek(idx, expr.IntegerValue(42))
+	op, ok := tryNewHashSeek(idx, expr.IntegerValue(42), nil)
 	if !ok {
 		t.Fatal("expected ok=true for int64 hash index")
 	}
@@ -548,7 +548,7 @@ func TestTryNewHashSeek_UnsupportedType(t *testing.T) {
 	// Lookup(string) or Lookup(int64) method so tryNewHashSeek must return false.
 	// We use the existing hash.New[bool]() which satisfies neither interface.
 	boolIdx := hash.New[bool]()
-	_, ok := tryNewHashSeek(boolIdx, expr.StringValue("x"))
+	_, ok := tryNewHashSeek(boolIdx, expr.StringValue("x"), nil)
 	if ok {
 		t.Fatal("expected ok=false for unsupported index type (bool hash)")
 	}
@@ -608,6 +608,13 @@ func TestBuildIndexSeekOperator_StringHash(t *testing.T) {
 	if err := g.AddNode("Alice"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
+	// THE NODE MUST CARRY THE LABEL THE SEEK NAMES (rmp #2423). This fixture used to
+	// leave it unlabelled and still expect the row, which is precisely the defect:
+	// an index-driven seek that replaces a labelled scan must qualify its candidates,
+	// so a node with no labels is correctly no longer returned for (:Person).
+	if err := g.SetNodeLabel("Alice", "Person"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
+	}
 	id, _ := g.AdjList().Mapper().Lookup("Alice")
 
 	// Populate a string hash index named "person_name_hash".
@@ -622,7 +629,7 @@ func TestBuildIndexSeekOperator_StringHash(t *testing.T) {
 	p := ir.NewNodeByIndexSeek("n", "Person", "name", "'Alice'")
 	schema := make(map[string]int)
 
-	op, err := buildIndexSeekOperator(p, nil, schema, mgr)
+	op, err := buildIndexSeekOperator(p, nil, schema, mgr, labelSrcFromView(g.ReadAt(nil)))
 	if err != nil {
 		t.Fatalf("buildIndexSeekOperator: %v", err)
 	}
@@ -663,7 +670,7 @@ func TestBuildIndexSeekOperator_NilManager(t *testing.T) {
 	p := ir.NewNodeByIndexSeek("n", "Person", "name", "'Alice'")
 	schema := make(map[string]int)
 
-	_, err := buildIndexSeekOperator(p, nil, schema, nil)
+	_, err := buildIndexSeekOperator(p, nil, schema, nil, nil)
 	if err == nil {
 		t.Fatal("expected error when index manager is nil")
 	}
@@ -684,7 +691,7 @@ func TestBuildIndexSeekOperator_NoMatchingIndex(t *testing.T) {
 	p := ir.NewNodeByIndexSeek("n", "Person", "name", "'Alice'")
 	schema := make(map[string]int)
 
-	_, err := buildIndexSeekOperator(p, nil, schema, mgr)
+	_, err := buildIndexSeekOperator(p, nil, schema, mgr, labelSrcFromView(g.ReadAt(nil)))
 	if err == nil {
 		t.Fatal("expected error when no matching hash index found")
 	}
@@ -702,6 +709,11 @@ func TestBuildOperator_NodeByIndexSeekCase(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	if err := g.AddNode("Alice"); err != nil {
 		t.Fatalf("AddNode: %v", err)
+	}
+	// Labelled for the reason given in TestBuildIndexSeekOperator_StringHash
+	// (rmp #2423).
+	if err := g.SetNodeLabel("Alice", "Person"); err != nil {
+		t.Fatalf("SetNodeLabel: %v", err)
 	}
 	id, _ := g.AdjList().Mapper().Lookup("Alice")
 

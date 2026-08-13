@@ -2806,7 +2806,11 @@ func explainWithIndexesNode(
 	rangeSeek := false
 	if sel, ok := plan.(*ir.Selection); ok && idxMgr != nil {
 		schema := make(map[string]int)
-		if op, fired, err := tryBuildIndexSeekFromSelection(sel, params, schema, idxMgr); err == nil && fired && op != nil {
+		// EXPLAIN rendering only asks WHETHER the rewrite fires. It passes the same
+		// label source the build would, so the answer it renders is the plan the build
+		// would choose — including a DECLINE when the label cannot be verified
+		// (rmp #2423).
+		if op, fired, err := tryBuildIndexSeekFromSelection(sel, params, schema, idxMgr, labelSrc); err == nil && fired && op != nil {
 			opName = "NodeByIndexSeek"
 		} else if _, fired := tryBuildIndexSeekSetFromSelection(sel, params, make(map[string]int), idxMgr, explainGraph); fired {
 			// A key-set seek SUBSUMES the pushed Selection exactly as the single-key
@@ -4878,6 +4882,10 @@ type Result struct {
 	// read queries and write queries on an engine with no active constraints.
 	constraintReg *exec.ConstraintRegistry
 	g             *lpg.Graph[string, float64]
+	// conTxn is the transaction's DEFERRED UNIQUE releases (rmp #2366), applied by
+	// commitUnderBarrier and dropped by rollbackUnderBarrier. It is the mutator's, so
+	// it is nil for a read query and for a write on an engine with no constraints.
+	conTxn *exec.ConstraintTxn
 	// mvccG and wtx are how a durable write allocates its MVCC commit timestamp
 	// BEFORE the WAL fsync, so the timestamp is inside the durable record and
 	// recovery can derive the clock from the WAL rather than trust a persisted
@@ -5693,6 +5701,13 @@ func (r *Result) commitUnderBarrier() {
 	// Mark the WAL handled even when tx == nil (a store-less engine has no WAL to
 	// commit) so the idempotency guard above trips on a second call.
 	r.walHandled = true
+	// APPLY THE DEFERRED UNIQUE RELEASES (rmp #2366). A committed release frees its
+	// value here, alongside the index buffer and on the same durable-then-visible
+	// side of the barrier, so no peer can take the value before the graph has stopped
+	// holding it. A rolled-back transaction drops the same marks instead, in
+	// [Result.rollbackUnderBarrier], and touches nothing shared — which is the whole
+	// reason the release is deferred. See [exec.ConstraintTxn].
+	r.constraintReg.CommitTxn(r.conTxn)
 	// Success: the transaction is keeping its writes; drop the undo log so its
 	// closures (and their captured pre-images) are released for GC.
 	r.undo = nil
@@ -5725,6 +5740,13 @@ func (r *Result) rollbackUnderBarrier() {
 	// instead — which is what stood here — destroyed CONCURRENT writers'
 	// reservations too, since a rebuild cannot see a commit that is not yet durable;
 	// that file has the measurement.
+	//
+	// The DEFERRED RELEASES are dropped rather than inverted (rmp #2366): they never
+	// reached the shared value-set, so a rollback has nothing to put back and cannot
+	// disturb a peer whose own committed release has already changed the same value.
+	// Belt and braces with the journaled unmarks the replay above already ran, which
+	// is what unwinds a single failed statement inside a still-live transaction.
+	r.conTxn.Reset()
 	if r.buf != nil {
 		r.buf.Rollback()
 	}
@@ -6177,6 +6199,18 @@ func (s *lpgLabelResolver) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 	return s.g.Raw().LabelBitmapAsOf(lid, s.g.Snapshot())
 }
 
+// HasLabelByID reports whether the node identified by id carries name AT THIS
+// VIEW'S INSTANT, which is the residual check an index-driven rewrite owes when it
+// replaces a labelled scan leaf (rmp #2423).
+//
+// It resolves through the same snapshot-aware accessor
+// [ResolveLabelBitmap] uses, so a seek and a scan cannot disagree about
+// membership. The label index over-reports while a removal is deferred, and this is
+// the only thing that filters it on the seek path.
+func (s *lpgLabelResolver) HasLabelByID(id uint64, name string) bool {
+	return s.g.HasNodeLabelByID(graph.NodeID(id), name)
+}
+
 // ResolveLabelsCardinality reports the EXACT size of the labels' intersection
 // without materialising it, backing the planner's gate (#2133).
 //
@@ -6367,6 +6401,43 @@ type nodeWalkerIface interface {
 // exec.labelResolver without importing the unexported type.
 type labelResolverIface interface {
 	ResolveLabelBitmap(name string) *roaring64.Bitmap
+}
+
+// labelSrcFromView adapts a read view to the label resolver the seek rewrites need,
+// returning an UNTYPED nil when there is no view — a typed nil inside the interface
+// would pass the non-nil test and then panic on first use.
+//
+// It exists for the EXPLAIN and probe paths, which hold a view rather than the
+// build's resolver and must ask the same question the build asks (rmp #2423).
+func labelSrcFromView(g *lpg.ReadView[string, float64]) labelResolverIface {
+	if g == nil {
+		return nil
+	}
+	return &lpgLabelResolver{g: g}
+}
+
+// labelMembership is the per-node label check an index-driven rewrite must have
+// before it may replace a labelled scan leaf (rmp #2423). It is asserted rather
+// than required, and a resolver that lacks it makes the rewrite DECLINE, so the
+// plan falls back to the scan that filters correctly.
+type labelMembership interface {
+	HasLabelByID(id uint64, name string) bool
+}
+
+// labelAdmitFn returns the residual label predicate for an index-driven rewrite
+// over a labelled scan leaf, and false when src cannot supply one.
+//
+// An empty label means the leaf was an unlabelled AllNodesScan, which qualifies
+// nothing and therefore needs no residual check.
+func labelAdmitFn(src labelResolverIface, label string) (func(uint64) bool, bool) {
+	if label == "" {
+		return nil, true
+	}
+	h, ok := src.(labelMembership)
+	if !ok {
+		return nil, false
+	}
+	return func(id uint64) bool { return h.HasLabelByID(id, label) }, true
 }
 
 // mergeLabelSource adapts the build-time label resolver to the
@@ -8477,7 +8548,7 @@ func buildOperatorRec(
 		return exec.NewNodeByLabelScan(p.Label, src), nil
 
 	case *ir.NodeByIndexSeek:
-		return buildIndexSeekOperator(p, params, schema, idxMgr)
+		return buildIndexSeekOperator(p, params, schema, idxMgr, labelSrc)
 
 	case *ir.Selection:
 		// Single-edge anchor swap (#2090): when this Selection is the top of a
@@ -8533,7 +8604,7 @@ func buildOperatorRec(
 		// n.prop = $name and a hash index is available, produce NodeByIndexSeek
 		// directly without first building the scan child.
 		if idxMgr != nil {
-			if op, ok, err := tryBuildIndexSeekFromSelection(p, params, schema, idxMgr); err != nil {
+			if op, ok, err := tryBuildIndexSeekFromSelection(p, params, schema, idxMgr, labelSrc); err != nil {
 				return nil, err
 			} else if ok {
 				return op, nil
@@ -11375,6 +11446,7 @@ func buildIndexSeekOperator(
 	params map[string]expr.Value,
 	schema map[string]int,
 	idxMgr *index.Manager,
+	labelSrc labelResolverIface,
 ) (exec.Operator, error) {
 	seekVal, err := resolveSeekValue(p.Value, params)
 	if err != nil {
@@ -11383,13 +11455,22 @@ func buildIndexSeekOperator(
 	if idxMgr == nil {
 		return nil, fmt.Errorf("cypher: NodeByIndexSeek requires an index manager")
 	}
+	// The plan node carries the label, and the index does not imply it; see
+	// [tryBuildIndexSeekFromSelection] (rmp #2423). A resolver that cannot verify
+	// membership is an error here rather than a decline, because this form has no
+	// scan child to fall back to.
+	admit, canVerify := labelAdmitFn(labelSrc, p.Label)
+	if !canVerify {
+		return nil, fmt.Errorf("cypher: NodeByIndexSeek on %q.%q cannot verify the label: "+
+			"the label resolver supplies no per-node membership check", p.Label, p.Property)
+	}
 	names := idxMgr.ListIndexes()
 	for _, name := range names {
 		sub, err := idxMgr.GetIndex(name)
 		if err != nil || sub.Kind() != "hash" || !indexCoversNode(sub, p.Label, p.Property) {
 			continue
 		}
-		if op, ok := tryNewHashSeek(sub, seekVal); ok {
+		if op, ok := tryNewHashSeek(sub, seekVal, admit); ok {
 			schema[p.NodeVar] = schemaWidth(schema)
 			return op, nil
 		}
@@ -11401,11 +11482,18 @@ func buildIndexSeekOperator(
 // "n.prop = $name" or "$name = n.prop" over an AllNodesScan or NodeByLabelScan
 // child, and when a hash index is available returns a NodeByIndexSeek operator.
 // ok is false when the rewrite does not apply.
+// THE LABEL IS NOT IMPLIED BY THE INDEX (rmp #2423). This rewrite replaces a
+// LABELLED scan leaf, and the index covering (label, prop) over-reports: removing a
+// label leaves the node's entries in that label's property indexes behind, so a seek
+// with no residual check returned a node for (n:Person) whose labels(n) was empty.
+// labelSrc supplies the per-candidate check; when it cannot, the rewrite DECLINES and
+// the plan keeps the scan that filters correctly.
 func tryBuildIndexSeekFromSelection(
 	sel *ir.Selection,
 	params map[string]expr.Value,
 	schema map[string]int,
 	idxMgr *index.Manager,
+	labelSrc labelResolverIface,
 ) (exec.Operator, bool, error) {
 	nodeVar, label, ok := scanLeafNodeVar(sel.Child)
 	if !ok {
@@ -11415,11 +11503,15 @@ func tryBuildIndexSeekFromSelection(
 	if err != nil || seekVal == nil {
 		return nil, false, err
 	}
-	if op, ok := tryNamedHashSeek(idxMgr, label, propKey, seekVal); ok {
+	admit, canVerify := labelAdmitFn(labelSrc, label)
+	if !canVerify {
+		return nil, false, nil
+	}
+	if op, ok := tryNamedHashSeek(idxMgr, label, propKey, seekVal, admit); ok {
 		schema[nodeVar] = schemaWidth(schema)
 		return op, true, nil
 	}
-	if op, ok := tryAnyHashSeek(idxMgr, label, propKey, seekVal); ok {
+	if op, ok := tryAnyHashSeek(idxMgr, label, propKey, seekVal, admit); ok {
 		schema[nodeVar] = schemaWidth(schema)
 		return op, true, nil
 	}
@@ -11498,7 +11590,7 @@ func indexCoversNode(sub index.Subscriber, label, propKey string) bool {
 // tryNamedHashSeek looks up the auto-named hash index for a (label,
 // propKey) pair and returns the seek operator + true when present
 // and applicable to seekVal.
-func tryNamedHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value) (exec.Operator, bool) {
+func tryNamedHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value, admit func(uint64) bool) (exec.Operator, bool) {
 	if label == "" || propKey == "" {
 		return nil, false
 	}
@@ -11507,19 +11599,19 @@ func tryNamedHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr
 	if err != nil || sub.Kind() != "hash" || !indexCoversNode(sub, label, propKey) {
 		return nil, false
 	}
-	return tryNewHashSeek(sub, seekVal)
+	return tryNewHashSeek(sub, seekVal, admit)
 }
 
 // tryAnyHashSeek iterates every registered index and returns the
 // first hash index that both covers the (label, propKey) predicate and can
 // serve seekVal. It is the fallback when the named-index lookup misses.
-func tryAnyHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value) (exec.Operator, bool) {
+func tryAnyHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value, admit func(uint64) bool) (exec.Operator, bool) {
 	for _, name := range idxMgr.ListIndexes() {
 		sub, err := idxMgr.GetIndex(name)
 		if err != nil || sub.Kind() != "hash" || !indexCoversNode(sub, label, propKey) {
 			continue
 		}
-		if op, ok := tryNewHashSeek(sub, seekVal); ok {
+		if op, ok := tryNewHashSeek(sub, seekVal, admit); ok {
 			return op, true
 		}
 	}
@@ -11700,12 +11792,22 @@ type hashInt64Lookup interface {
 // back to the scan+filter, which yields the same zero-row result a non-indexed
 // graph would — rather than building a seek that fails at Init with
 // [exec.ErrIndexTypeMismatch].
-func tryNewHashSeek(sub index.Subscriber, seekVal expr.Value) (*exec.NodeByIndexSeek, bool) {
+// newHashSeekOp builds the seek operator with or without a residual predicate, so
+// the two forms are chosen in ONE place and a future seek site cannot silently pick
+// the unguarded one (rmp #2423).
+func newHashSeekOp(idx exec.HashLookup, seekVal expr.Value, admit func(uint64) bool) *exec.NodeByIndexSeek {
+	if admit == nil {
+		return exec.NewNodeByIndexSeek(idx, seekVal)
+	}
+	return exec.NewNodeByIndexSeekAdmitting(idx, seekVal, admit)
+}
+
+func tryNewHashSeek(sub index.Subscriber, seekVal expr.Value, admit func(uint64) bool) (*exec.NodeByIndexSeek, bool) {
 	if sl, ok := sub.(hashStringLookup); ok {
 		if seekVal.Kind() != expr.KindString {
 			return nil, false
 		}
-		return exec.NewNodeByIndexSeek(exec.NewStringHashIndex(sl), seekVal), true
+		return newHashSeekOp(exec.NewStringHashIndex(sl), seekVal, admit), true
 	}
 	if il, ok := sub.(hashInt64Lookup); ok {
 		if seekVal.Kind() != expr.KindInteger {
@@ -11721,7 +11823,7 @@ func tryNewHashSeek(sub index.Subscriber, seekVal expr.Value) (*exec.NodeByIndex
 		// it on float64 and keep a residual filter (as the range companion does),
 		// or gate this branch to decline cross-type — otherwise a float-valued node
 		// equal to an integer seek would be silently dropped.
-		return exec.NewNodeByIndexSeek(exec.NewInt64HashIndex(il), seekVal), true
+		return newHashSeekOp(exec.NewInt64HashIndex(il), seekVal, admit), true
 	}
 	return nil, false
 }
@@ -14765,7 +14867,7 @@ func indexSeekWouldFire(
 	}
 
 	// Hash seek on `n.prop = <const>`.
-	if op, ok, err := tryBuildIndexSeekFromSelection(sel, params, copySchema(schema), idxMgr); err == nil && ok {
+	if op, ok, err := tryBuildIndexSeekFromSelection(sel, params, copySchema(schema), idxMgr, labelSrcFromView(g)); err == nil && ok {
 		closeProbe(op)
 		return true
 	}
@@ -16190,6 +16292,17 @@ func (a *execLabelAdapter) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 	return a.labelSrc.ResolveLabelBitmap(name)
 }
 
+// HasLabelByID forwards the per-node label check an index-driven rewrite needs
+// (rmp #2423) when the underlying resolver supports one. A resolver that does not
+// reports false for the SUPPORTED flag, and the rewrite then declines rather than
+// emitting candidates it cannot qualify.
+func (a *execLabelAdapter) HasLabelByID(id uint64, name string) bool {
+	if h, ok := a.labelSrc.(labelMembership); ok {
+		return h.HasLabelByID(id, name)
+	}
+	return false
+}
+
 // ResolveLabelsCardinality forwards the allocation-free intersection count to the
 // underlying resolver when it supports one (#2133). A resolver that does not
 // reports ok == false, and the planner then declines rather than guessing.
@@ -16403,6 +16516,7 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 		// the adapter itself.
 		wa.counters = &wa.countersStore
 		wa.buf, wa.undo = &wa.bufStore, &wa.undoStore
+		wa.conTxn = &wa.conTxnStore
 		buf, undo = wa.buf, wa.undo
 		queryReg = wa.nowReg.bind(e.reg, stmtNow)
 		mutator = wa
@@ -16410,6 +16524,7 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 		la := &lpgMutatorAdapter{g: e.g, touched: touched, stampCon: stampCon, eng: e}
 		la.counters = &la.countersStore // see the walMutatorAdapter branch above
 		la.buf, la.undo = &la.bufStore, &la.undoStore
+		la.conTxn = &la.conTxnStore
 		buf, undo = la.buf, la.undo
 		queryReg = la.nowReg.bind(e.reg, stmtNow)
 		mutator = la
@@ -16630,6 +16745,13 @@ func (e *Engine) execUnderBarrier(
 			// Use newWriteResult so that rollbackUnderBarrier can reseed the
 			// constraint registry's UNIQUE value-sets after an undo replay (#1342).
 			r = newWriteResult(rs, cols, buf, e.g.IndexManager(), walTx, e.maxResultRows, e.maxResultBytes, e.constraintReg, e.g)
+			// The transaction's deferred UNIQUE releases travel with the Result, which
+			// is what commits or drops them inside the barrier (rmp #2366).
+			if h, ok := mutator.(interface {
+				ConstraintTxn() *exec.ConstraintTxn
+			}); ok {
+				r.conTxn = h.ConstraintTxn()
+			}
 			r.counters = mutatorCounters(mutator)
 			r.globalMem = e.globalMem
 			r.undo = undo
@@ -16838,6 +16960,15 @@ type lpgMutatorAdapter struct {
 	// cannot live inside a per-statement adapter. See [ExplicitTx].
 	bufStore  exec.IndexBuffer
 	undoStore undoLog
+	// conTxn is the transaction's UNCOMMITTED constraint contribution: the UNIQUE
+	// values it has released and not yet committed (rmp #2366). Nil on a read-only
+	// or stub adapter, which [exec.ConstraintRegistry.ReleasePropertyValue] reads as
+	// "no transaction" and applies immediately — correct, since nothing can roll
+	// back. conTxnStore is its inline backing store on the AUTOCOMMIT path, for the
+	// same reason bufStore and undoStore are inline; an EXPLICIT transaction points
+	// conTxn at the handle's shared one, which outlives any single statement.
+	conTxn      *exec.ConstraintTxn
+	conTxnStore exec.ConstraintTxn
 	// nowReg is the inline statement-frozen-"now" function registry, bound once
 	// per statement by [nowAwareRegistry.bind]; see it for why it is not allocated.
 	nowReg nowAwareRegistry
@@ -17645,6 +17776,11 @@ func (a *lpgMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle u
 // roll back and nothing to record — the same reading undoLog.record itself takes.
 func (a *lpgMutatorAdapter) RecordConstraintInverse(inv func()) { a.undo.record(inv) }
 
+// ConstraintTxn returns the transaction's uncommitted constraint contribution, or
+// nil when this adapter has no transaction (a read-only or stub adapter). See
+// [exec.ConstraintTxn].
+func (a *lpgMutatorAdapter) ConstraintTxn() *exec.ConstraintTxn { return a.conTxn }
+
 // FirstEdgeHandle resolves the handle on the first src→dst adjacency slot,
 // delegating to [lpg.Graph.FirstEdgeHandle]; used by the MERGE ON MATCH /
 // ON CREATE action path to mirror per-pair property writes onto the matched
@@ -17773,6 +17909,15 @@ type walMutatorAdapter struct {
 	// must not use them.
 	bufStore  exec.IndexBuffer
 	undoStore undoLog
+	// conTxn is the transaction's UNCOMMITTED constraint contribution: the UNIQUE
+	// values it has released and not yet committed (rmp #2366). Nil on a read-only
+	// or stub adapter, which [exec.ConstraintRegistry.ReleasePropertyValue] reads as
+	// "no transaction" and applies immediately — correct, since nothing can roll
+	// back. conTxnStore is its inline backing store on the AUTOCOMMIT path, for the
+	// same reason bufStore and undoStore are inline; an EXPLICIT transaction points
+	// conTxn at the handle's shared one, which outlives any single statement.
+	conTxn      *exec.ConstraintTxn
+	conTxnStore exec.ConstraintTxn
 	// nowReg is the inline statement-frozen-"now" function registry, bound once
 	// per statement by [nowAwareRegistry.bind]; see it for why it is not allocated.
 	nowReg nowAwareRegistry
@@ -18536,6 +18681,9 @@ func (a *walMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle u
 // durable write path. Both adapters implement it because both are reachable write
 // paths and a rolled-back statement must release its reservations either way.
 func (a *walMutatorAdapter) RecordConstraintInverse(inv func()) { a.undo.record(inv) }
+
+// ConstraintTxn is [lpgMutatorAdapter.ConstraintTxn] for the WAL-backed adapter.
+func (a *walMutatorAdapter) ConstraintTxn() *exec.ConstraintTxn { return a.conTxn }
 
 // FirstEdgeHandle resolves the handle on the first src→dst adjacency slot,
 // delegating to [lpg.Graph.FirstEdgeHandle]; used by the MERGE ON MATCH /

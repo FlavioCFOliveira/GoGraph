@@ -64,6 +64,29 @@ type constraintJournal interface {
 	RecordConstraintInverse(inv func())
 }
 
+// constraintTxnHolder is implemented by a mutator that owns the transaction's
+// UNCOMMITTED constraint contribution — the values it has released and not yet
+// committed. See [ConstraintTxn] for why a release is deferred and a reservation is
+// not.
+//
+// Optional for the same reason as [constraintJournal]: a read-only or stub mutator
+// has no transaction, and for such a caller applying a release immediately is the
+// correct answer rather than a missing capability.
+type constraintTxnHolder interface {
+	// ConstraintTxn returns the transaction's contribution, never nil.
+	ConstraintTxn() *ConstraintTxn
+}
+
+// constraintTxnOf returns the transaction's constraint contribution, or nil when the
+// mutator owns none.
+func constraintTxnOf(mutator GraphMutator) *ConstraintTxn {
+	h, ok := mutator.(constraintTxnHolder)
+	if !ok {
+		return nil
+	}
+	return h.ConstraintTxn()
+}
+
 // reserveConstraintValue validates and reserves value under every label, and
 // journals the release so a rollback gives it back.
 //
@@ -80,22 +103,46 @@ func reserveConstraintValue(
 	if reg == nil {
 		return nil
 	}
-	if err := reg.ReserveSetProperty(labels, prop, value, mgr); err != nil {
+	ct := constraintTxnOf(mutator)
+	if err := reg.ReserveSetProperty(ct, labels, prop, value, mgr); err != nil {
 		return err
 	}
 	ls := copyLabels(labels)
 	journalConstraintInverse(mutator, func() {
-		reg.ReleasePropertyValue(ls, prop, value)
+		// A rolled-back RESERVATION is given back to the shared value-set directly,
+		// and that stays correct: the value was reserved for the whole life of the
+		// statement, so no peer can have committed it in the meantime and deleting it
+		// cannot disturb anyone. Only the RELEASE direction had to be deferred; see
+		// [ConstraintTxn]. Passing nil applies the delete immediately, which is what
+		// an inverse must do.
+		reg.ReleasePropertyValue(nil, ls, prop, value)
 	})
 	return nil
 }
 
-// releaseConstraintValue drops value from the value-set under every label, and
-// journals the re-record so a rollback puts it back.
+// releaseConstraintValue records that value is released under every label, and
+// journals the withdrawal of that record so a rolled-back statement takes it back.
 //
 // Callers release the OLD value of a property they are about to overwrite or remove.
-// The journal entry is what stops a rolled-back statement from leaving the value-set
-// under-reporting — see the file comment.
+//
+// # The release is DEFERRED, and the inverse is now PRIVATE (rmp #2366)
+//
+// Both halves used to touch the SHARED value-set: the release deleted the value, and
+// the journaled inverse re-inserted it. The inverse is the defect. It judges the
+// re-insertion against the rolling-back transaction's own view, while a PEER's
+// COMMITTED release may already have freed the same value — so the value came back
+// reserved with no live node holding it, permanently unusable. The file comment above
+// explains why rebuilding from the graph is not the answer either.
+//
+// So the release is recorded on the transaction ([ConstraintTxn]) and applied to the
+// shared set only by [ConstraintRegistry.CommitTxn]. The inverse then withdraws a
+// PRIVATE mark, which no peer can observe and which therefore needs no ordering
+// against a peer's commit. A statement that rolls back inside a still-live
+// transaction unwinds exactly its own contribution, and a whole-transaction rollback
+// unwinds all of it, by the same mechanism.
+//
+// With no transaction (ct nil) the release applies immediately and there is nothing
+// to journal, because there is nothing that can roll back.
 func releaseConstraintValue(
 	reg *ConstraintRegistry, mutator GraphMutator,
 	labels []string, prop string, value lpg.PropertyValue,
@@ -103,11 +150,25 @@ func releaseConstraintValue(
 	if reg == nil {
 		return
 	}
-	reg.ReleasePropertyValue(labels, prop, value)
+	ct := constraintTxnOf(mutator)
+	reg.ReleasePropertyValue(ct, labels, prop, value)
+	if ct == nil {
+		return
+	}
 	ls := copyLabels(labels)
 	journalConstraintInverse(mutator, func() {
-		reg.RecordPropertySet(ls, prop, value)
+		for _, label := range ls {
+			ct.unmarkReleased(constraintKey(label, prop), valueSetKeyOf(value))
+		}
 	})
+}
+
+// valueSetKeyOf is the value-set's string form of value, or the empty string when the
+// value is not one UNIQUE constrains. A release of an unconstrained value records no
+// mark, so withdrawing one is a no-op on a key that was never written.
+func valueSetKeyOf(value lpg.PropertyValue) string {
+	s, _ := propertyValueToString(value)
+	return s
 }
 
 // journalConstraintInverse records inv on the statement's undo log when the mutator
