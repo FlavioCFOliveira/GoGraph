@@ -27,8 +27,9 @@ package mvccwrite
 // variable is how a previous sweep manufactured a 0.145x "collapse" that was really an
 // unindexed label scan getting bigger with its peers; the tell was allocs/op climbing
 // with the writer count, which cannot happen for a per-op metric. Here the UNIQUE
-// constraint supplies a backing hash index on the constrained property and the seek key
-// is that same property, so every arm seeks rather than scans.
+// constraint supplies a backing hash index on the constrained property, and the seek key
+// IS that property, so every arm seeks rather than scans. See [updateUnique] for what
+// happened when it was not.
 //
 // Values are globally distinct across writers, so the arms never collide on the
 // constraint: a colliding workload would measure retry rather than throughput.
@@ -116,13 +117,26 @@ func uniqueValue(writer, i, round int) string {
 
 // updateUnique is the timed unit: one autocommit transaction that moves one node's
 // constrained value to a fresh one, releasing the old and reserving the new.
+//
+// # It seeks by the CONSTRAINED property, and that is the whole fixture
+//
+// The node is found by `email`, which the UNIQUE constraint backs with a hash index, so
+// the lookup is a SEEK whose cost does not depend on how many nodes exist. Finding it
+// by `k` instead — which nothing indexes — makes it a LABEL SCAN over a population of
+// 64 x writers, and the benchmark then reports the scan growing rather than the write
+// path contending: measured that way, ns/commit rose 41 us to 131 us from 1 to 32
+// writers and the "scaling" looked like a 0.32x collapse. A per-operation cost that
+// moves with the peer count is a fixture bug every time.
+//
+// The round number is derived, not stored: iteration i touches pool member i%pool for
+// the (i/pool)-th time, so the value it currently holds is computable and every update
+// is a genuine release-and-reserve rather than a no-op the equality test would skip.
 func updateUnique(ctx context.Context, eng *cypher.Engine, writer, i int) error {
-	res, err := eng.RunInTx(ctx, `MATCH (n:Acct {k: $k}) SET n.email = $email`,
+	j, round := i%uniquePoolPerWriter, i/uniquePoolPerWriter
+	res, err := eng.RunInTx(ctx, `MATCH (n:Acct {email: $old}) SET n.email = $new`,
 		map[string]expr.Value{
-			"k": expr.StringValue(uniqueKey(writer, i%uniquePoolPerWriter)),
-			// The round number makes every value new, so each update is a genuine
-			// release-and-reserve rather than a no-op the equality test would skip.
-			"email": expr.StringValue(uniqueValue(writer, i%uniquePoolPerWriter, i+1)),
+			"old": expr.StringValue(uniqueValue(writer, j, round)),
+			"new": expr.StringValue(uniqueValue(writer, j, round+1)),
 		})
 	if err != nil {
 		return err
