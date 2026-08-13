@@ -325,3 +325,66 @@ func TestUnique_PeerUncommittedLabelRemovalDoesNotLeakTheOldValue(t *testing.T) 
 		}
 	}
 }
+
+// TestUnique_ReleaseThenReserveOfTheSameValueRollsBackWhole is the interleaving the
+// DEFERRED release (rmp #2366) could get wrong, and it is the dangerous direction: a
+// value left FREE while a live node still holds it, which a later write can then
+// duplicate.
+//
+// One transaction moves a value from one node to another, then rolls back:
+//
+//	a holds 'v'
+//	T: SET a.email = 'moved'   -- releases 'v' (a deferred mark, nothing shared yet)
+//	T: SET b.email = 'v'       -- reserves 'v', allowed because T itself released it
+//	T: ROLLBACK
+//
+// After the rollback a still holds 'v', so 'v' must still be reserved. The hazard is
+// that the reservation's journaled inverse DELETES the value from the shared set —
+// correct when the reservation put it there, wrong when the value was already
+// committed and this transaction had merely marked it released. The inverse therefore
+// has to restore the PRE-STATE: re-mark the release rather than delete.
+//
+// It is the mirror of the defect #2366 fixed, and a fix for one that breaks the other
+// has moved the problem rather than solved it — which is why both directions are
+// pinned.
+func TestUnique_ReleaseThenReserveOfTheSameValueRollsBackWhole(t *testing.T) {
+	eng, ctx := newLabelConflictEngine(t,
+		`CREATE CONSTRAINT person_email_uq ON (n:Person) ASSERT n.email IS UNIQUE`,
+		`CREATE (a:Person {k:'a', email:'v'})`,
+		`CREATE (b:Person {k:'b', email:'other'})`)
+
+	tx, err := eng.BeginTx(ctx)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	if err := execInTx(tx, `MATCH (a:Person {k:'a'}) SET a.email = 'moved'`); err != nil {
+		t.Fatalf("release 'v' by moving a: %v", err)
+	}
+	if err := execInTx(tx, `MATCH (b:Person {k:'b'}) SET b.email = 'v'`); err != nil {
+		t.Fatalf("re-reserve 'v' on b inside the same transaction: %v — the transaction "+
+			"released 'v' itself, so it must be allowed to take it", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+
+	// The premise: the rollback restored both properties.
+	if got := countQ(t, ctx, eng,
+		`MATCH (n:Person) WHERE n.email = 'v' RETURN count(n) AS c`); got != 1 {
+		t.Fatalf("premise: %d :Person hold 'v' after the rollback, want 1 (node a)", got)
+	}
+	// So 'v' is held by a live node and must NOT be available.
+	if err := runLabelConstraintTx(ctx, eng,
+		`CREATE (z:Person {k:'z', email:'v'})`); err == nil {
+		after := countQ(t, ctx, eng,
+			`MATCH (n:Person) WHERE n.email = 'v' RETURN count(n) AS c`)
+		t.Errorf("CONSISTENCY: 'v' was accepted for a second node although node a still "+
+			"holds it — %d :Person nodes now carry the UNIQUE value", after)
+	}
+	// And the value the transaction tried to move TO must be free again, since nothing
+	// committed it.
+	if err := runLabelConstraintTx(ctx, eng,
+		`CREATE (y:Person {k:'y', email:'moved'})`); err != nil {
+		t.Errorf("PHANTOM: 'moved' was never committed by anybody, yet it is reserved: %v", err)
+	}
+}

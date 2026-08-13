@@ -104,20 +104,83 @@ func reserveConstraintValue(
 		return nil
 	}
 	ct := constraintTxnOf(mutator)
+	// THE INVERSE MUST RESTORE THE PRE-STATE, NOT ALWAYS DELETE.
+	//
+	// [ConstraintRegistry.ReserveSetProperty] spends this transaction's own pending
+	// release of the value it is taking — it must, or the commit would apply that
+	// release and delete the reservation it just took. So for those labels the value
+	// was ALREADY in the shared set before this reserve, put there by a COMMITTED
+	// writer, and the inverse of "spend the mark" is "restore the mark" — never
+	// "delete the value".
+	//
+	// Deleting it is a CONSISTENCY defect in the duplicate-creating direction, and it
+	// is the mirror of the one rmp #2366 fixed. One transaction moving a value between
+	// two of its own nodes and then rolling back:
+	//
+	//	a holds 'v'
+	//	SET a.email = 'moved'   releases 'v' (a mark; nothing shared changed)
+	//	SET b.email = 'v'       reserves 'v', allowed because THIS transaction freed it
+	//	ROLLBACK                inverses run LIFO: the reserve's inverse deleted 'v'
+	//
+	// leaving 'v' free while node a still held it — measured as two :Person nodes
+	// carrying one UNIQUE value, by
+	// TestUnique_ReleaseThenReserveOfTheSameValueRollsBackWhole, which the whole suite
+	// passed without.
+	//
+	// remark is allocated ONLY in that case, so the ordinary reserve — no pending
+	// release of the same value — journals exactly the single delete it always did.
+	var remark []string
+	if sv := valueSetKeyOf(value); ct != nil && sv != "" {
+		for _, label := range labels {
+			if ct.releasedHere(constraintKey(label, prop), sv) {
+				remark = append(remark, label)
+			}
+		}
+	}
 	if err := reg.ReserveSetProperty(ct, labels, prop, value, mgr); err != nil {
 		return err
 	}
-	ls := copyLabels(labels)
+	del := copyLabels(labels)
+	if len(remark) > 0 {
+		del = withoutLabels(labels, remark)
+	}
 	journalConstraintInverse(mutator, func() {
-		// A rolled-back RESERVATION is given back to the shared value-set directly,
-		// and that stays correct: the value was reserved for the whole life of the
-		// statement, so no peer can have committed it in the meantime and deleting it
-		// cannot disturb anyone. Only the RELEASE direction had to be deferred; see
-		// [ConstraintTxn]. Passing nil applies the delete immediately, which is what
-		// an inverse must do.
-		reg.ReleasePropertyValue(nil, ls, prop, value)
+		// A rolled-back RESERVATION that genuinely PUT the value in the shared set is
+		// given back directly, and that stays correct: the value was reserved for the
+		// whole life of the statement, so no peer can have committed it in the meantime
+		// and deleting it cannot disturb anyone. Passing nil applies the delete
+		// immediately, which is what an inverse must do.
+		if len(del) > 0 {
+			reg.ReleasePropertyValue(nil, del, prop, value)
+		}
+		for _, label := range remark {
+			ct.markReleased(constraintKey(label, prop), valueSetKeyOf(value))
+		}
 	})
 	return nil
+}
+
+// withoutLabels returns a copy of labels with every entry of drop removed.
+//
+// Both slices are the labels of ONE node, so they are a handful of entries and the
+// quadratic scan is cheaper than building a set. It is called only on the rare path
+// where a reserve spent this transaction's own pending release; see
+// [reserveConstraintValue].
+func withoutLabels(labels, drop []string) []string {
+	out := make([]string, 0, len(labels))
+	for _, l := range labels {
+		keep := true
+		for _, d := range drop {
+			if l == d {
+				keep = false
+				break
+			}
+		}
+		if keep {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 // releaseConstraintValue records that value is released under every label, and

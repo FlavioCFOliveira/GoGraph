@@ -118,9 +118,18 @@ type MVCCStats struct {
 	// represented in the watermark, so versions it can still reach became
 	// reclaimable — an Isolation violation rather than a leak. See
 	// [vacuumState.wmRegress] for why a decrease is impossible while the substrate
-	// is sound, and [mvcc.Horizon.StaleLeaves] for the release-side detector of the
-	// same family.
+	// is sound.
 	WatermarkRegressions int64
+	// HorizonStaleLeaves counts horizon slots released that nobody held, and MUST be
+	// zero. It is the RELEASE-side detector of the same family as
+	// WatermarkRegressions — a slot returned twice, or a slot number released by
+	// something that never claimed it, whose next release lands on another reader's
+	// bit and removes that reader from the watermark. See [mvcc.Horizon.StaleLeaves].
+	//
+	// Published separately rather than summed with WatermarkRegressions: both must be
+	// zero, but they are different observations and an operator seeing one number
+	// cannot tell which of them fired.
+	HorizonStaleLeaves int64
 	// Now is the clock's current published instant, so Now-Watermark is how far
 	// behind the oldest reader is.
 	Now uint64
@@ -260,10 +269,10 @@ func (g *Graph[N, W]) MVCCStats() MVCCStats {
 		ChainDepth:            g.ChainDepths(),
 		InFlightCommits:       g.mvccClock.InFlightCommits(),
 		SessionsWaiting:       g.mvccClock.AwaitingVisible(),
-		// The two detectors of the same family: the watermark moving backwards, and
-		// a horizon slot released that nobody held. Both must be zero; see
-		// [MVCCStats.WatermarkRegressions].
-		WatermarkRegressions: g.vac.wmRegress.Load() + g.horizon.StaleLeaves(),
+		// The two detectors of the same family, kept SEPARATE: the watermark moving
+		// backwards, and a horizon slot released that nobody held. Both must be zero.
+		WatermarkRegressions: g.vac.wmRegress.Load(),
+		HorizonStaleLeaves:   g.horizon.StaleLeaves(),
 	}
 	s.Watermark = g.horizon.Oldest(s.Now)
 	s.Total = s.LabelDeltas + s.PropDeltas + s.AdjVersions +
@@ -290,10 +299,11 @@ func (g *Graph[N, W]) publishMVCCMetrics() {
 	metrics.SetGauge("lpg.mvcc.versions.bound", float64(s.Bound))
 	metrics.SetGauge("lpg.mvcc.versions.ceiling", float64(s.Ceiling))
 	metrics.SetGauge("lpg.mvcc.watermark", float64(s.Watermark))
-	// A gauge as well as the counter incremented at the breach, so an operator
+	// Gauges as well as the counter incremented at the breach, so an operator
 	// scraping only gauges still sees a substrate that has lost its watermark
-	// invariant. Zero is the only correct value.
+	// invariant. Zero is the only correct value for either.
 	metrics.SetGauge("lpg.mvcc.watermark_regressions", float64(s.WatermarkRegressions))
+	metrics.SetGauge("lpg.mvcc.horizon.stale_leaves", float64(s.HorizonStaleLeaves))
 	// ONE series for the watermark age, which is also the oldest snapshot's age;
 	// see [MVCCStats.OldestSnapshotAge] for why it is not published twice.
 	metrics.SetGauge("lpg.mvcc.oldest_snapshot_age", float64(s.OldestSnapshotAge()))
