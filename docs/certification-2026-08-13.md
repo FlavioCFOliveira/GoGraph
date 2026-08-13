@@ -19,8 +19,7 @@ Host: Apple M4, 10 cores, 32 GB, `darwin/arm64`, Go 1.26.
 ## Verdict
 
 **CERTIFIED for production use under extreme load and concurrency, WITHIN THE
-ENVELOPE STATED IN §5** — conditional on one measurement still in flight, named
-below, and refused if it does not come back clean.
+ENVELOPE STATED IN §5.**
 
 The certification is granted rung by rung, in the project's own order:
 
@@ -47,19 +46,15 @@ The certification is granted rung by rung, in the project's own order:
 - **Fast.** No regression, and nothing is claimed as faster: this cycle bought
   correctness, not throughput.
 
-**The condition.** rmp #2420's acceptance criterion asks for **150 package runs** at
-the corrected recipe with zero violations. Forty are recorded and clean on all five
-oracles (§1.4). The second arm was **stopped at 71 runs** — 70 clean, and one failure
-that was not an oracle at all but a **fourth defect**, #2424 (§4.2): version memory
-settling above the stated bound permanently. So the full 150 are being re-run on the
-tree that includes that fix, because a demonstration of a superseded tree demonstrates
-nothing about the shipped one.
+**The condition is discharged.** rmp #2420's acceptance criterion asks for **150
+package runs** at the corrected recipe with zero violations. The full 150 ran on the
+final tree: **150 clean, zero firings of all five oracles**, verified as genuine
+executions rather than cache replays (§1.4.1).
 
-The criterion is honoured to the letter rather than reinterpreted downward on the
+The criterion was honoured to the letter rather than reinterpreted downward on the
 grounds that the new detector — which fired ~5 times per run before the fix, against
-the symptom's own ~2 % per run — already makes forty runs the stronger evidence. That
-decision has now paid for itself twice: the runs the criterion demanded are what found
-#2424.
+the symptom's own ~2 % per run — already made forty runs the stronger evidence. **That
+decision paid for itself:** the runs the criterion demanded are what found #2424.
 
 **And a fourth defect changes the verdict's shape.** Three of the four defects closed
 this cycle were found BY this certification rather than inherited by it, and two of
@@ -195,7 +190,7 @@ the two follow-ups in §6.1 — bringing the total to 150 at the corrected recip
 result is recorded in §1.4.1 rather than summarised here, so that the number reported
 is the number measured.
 
-#### 1.4.1 The second arm, and the defect it found instead
+#### 1.4.1 The second arm found a defect instead, and the third one discharged the criterion
 
 The second arm was **stopped at 71 runs** — 70 clean, and one failure that was **not
 one of the five oracles**. It is worth more than the 110th run of a clean arm would
@@ -210,8 +205,22 @@ have been:
 
 No reader was holding anything back, and the sweeper had **exited with 3767 records of
 reclamation debt outstanding**. Filed as **rmp #2424** and fixed; §4.2 has the account.
-The arm is being re-run in full — 150 runs — on the tree that includes it, because a
-150-run demonstration of a superseded tree demonstrates nothing about the shipped one.
+
+A third arm then ran the **full 150** on the tree that includes that fix, because a
+150-run demonstration of a superseded tree demonstrates nothing about the shipped one:
+
+> **150 runs, 150 clean, zero firings of all five oracles.**
+
+The arm's own execution was verified rather than assumed, which on this project is not
+a formality — a previous cycle published four parameter sweeps that were all the same
+cached run. Run 1 at 12:00:24 and run 150 at 14:22:59, so **2 h 22 min** of real
+elapsed time; per-run package durations spread **35.3 s to 71.9 s**, which is the
+signature of 150 genuine executions under varying peer load; and `-count=1` on every
+invocation with **zero** runs reporting `(cached)`.
+
+That discharges #2420's acceptance criterion 2 in full, and criterion 3 with it: the
+sibling oracle `TestIsolation_CrossSubstructure_EdgeImpliesLabels` lives in the same
+package and therefore ran in all 150.
 
 ### 1.5 The absolute oracle, and why it was worth building
 
