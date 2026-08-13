@@ -3,6 +3,31 @@
 **Base:** `v0.10.0` = `00072149`, 2026-07-25 00:58 +0100 · **Head:** `7a70eb3f`, 2026-08-10 18:44 +0100
 · Apple M4 (10 cores), 32 GB, `darwin/arm64`, go1.26.5
 
+> **READ THIS FIRST — superseded in part by `v0.11.0` (2026-08-13).** This record's head,
+> `7a70eb3f`, is **five sprints behind the `v0.11.0` tag** (`ba436a5b`). Sprints 339–343
+> landed afterwards and contain the largest memory and CPU wins of the release — the
+> 2.74× cut in memory per relationship, the byte-stream node property bag, the 6.03×
+> Bolt CPU reduction, and the bulk-delete fix that took a 90 000-node `DELETE` from
+> 15.97 s to 375.6 ms. **Its READ and WRITE gains are therefore a floor, not a ceiling,
+> for that tag; its REGRESSION figures are the ones to treat as still-current.**
+> [`v0.11.0.md`](v0.11.0.md) re-measures at the real tag: the headline guard-band set,
+> the read-path concurrency sweep, the store-level write-scaling ladder (which this
+> record could not cover), and §6's defect.
+>
+> **§6's defect is CONFIRMED OPEN at `ba436a5b`, and its ratio is 21.1× there, not
+> 24.4×.** Re-attributed with 1 000 rows asserted in every arm: default 4.087 ms on
+> `ParallelScanProject` against 0.194 ms on `NodeByLabelScan [Rare]` with
+> `DisableParallelScan`; the bitmap intersection is still not implicated; the anchor at
+> 0.194 ms is now *faster* than v0.10.0 and still never chosen. **This document's
+> closing recommendation — that it "belongs on the backlog before the next release" —
+> was not acted on: it was never filed, and it survived three further sprints.** It is
+> now **rmp #2431**. See [`v0.11.0.md`](v0.11.0.md) §5.
+>
+> **§9's documentation gap is CLOSED.** The `CHANGELOG.md` omission it found — the
+> entire planner and executor body absent from `[Unreleased]`, with no mention anywhere
+> of `STARTS WITH`, `ExpandIntersect`, `leapfrog` or `dbhits` — was fixed when the
+> `0.11.0` section was written from `git log v0.10.0..HEAD`.
+
 This is the record of what the sixteen days between the last release and the current commit
 bought, and what they cost. It exists because no such comparison existed: the ledger in
 `docs/benchmarks/history/` compares each change against the run before it, on a curated set
