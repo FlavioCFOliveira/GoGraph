@@ -38,11 +38,15 @@ The certification is granted rung by rung, in the project's own order:
 - **Secure.** Nothing new was examined this cycle, and nothing regressed: the previous
   cycle's container-aware ceilings (#2421) stand, with their one unmet criterion — no
   container was ever run — restated in §5 rather than quietly retired.
-- **Efficient.** Three correctness fixes cost **no measurable time** on any end-to-end
-  arm (§4.1). One microcost is real and quantified: `Horizon.Leave`'s extra store is
-  +7.55 % of a 4 ns operation, which is 0.0005 % of the read transaction that contains
-  it. Allocation rises 0.39–1.58 % on reads under concurrent writers, with the
-  mechanism named as a hypothesis rather than a diagnosis.
+- **Efficient.** The READ path costs nothing measurable (§4.1); the one microcost is
+  quantified — `Horizon.Leave`'s extra store is +7.55 % of a 4 ns operation, which is
+  0.0005 % of the read transaction containing it — and allocation rises 0.39–1.58 % on
+  reads under concurrent writers, with the mechanism named as a hypothesis rather than a
+  diagnosis. The WRITE path carries a **real, reproduced cost of 3–10 % on CONSTRAINED
+  writes only** (§4.3), with the unconstrained control flat. It is accepted, not hidden:
+  it is the price of closing a consistency defect, correctness outranks speed by this
+  project's order, and it is filed as rmp #2425 with three candidate causes already
+  eliminated.
 - **Fast.** No regression, and nothing is claimed as faster: this cycle bought
   correctness, not throughput.
 
@@ -456,6 +460,66 @@ now claims a graph horizon slot with `EnterHolding` — the documented
 hold-everything-back state — which suspends the sweeper's EFFECT rather than its
 existence. That is the third and fourth test this cycle found to be passing for a reason
 other than the one it asserted.
+
+---
+
+### 4.3 The write path — a measured cost, and three attributions I had to retract
+
+rmp #2366 and #2424 both require an interleaved write-contention comparison, and it is
+the one measurement of this cycle that came back negative. It also took five arms,
+because four of my own conclusions along the way were wrong.
+
+**The benchmark had to be built, and its first version measured itself.**
+`BenchmarkWriteScaling` covers a schema declaring NOTHING, which cannot show what the
+constraint machinery costs a workload that has one, so `BenchmarkWriteScalingUnique` was
+added: each writer moves its own nodes' constrained value to a fresh one, driving both a
+release and a reserve per commit. Its first version found the node by `k`, which nothing
+indexes, making the lookup a LABEL SCAN over a population of 64 × writers. It reported
+24.4k commits/s falling to 7.8k at 32 writers — **a 0.32× "collapse" under a UNIQUE
+constraint**, which would have been a headline finding about extreme concurrency and was
+entirely the fixture. Seeking the indexed property instead: **234k at one writer, 311k
+at thirty-two, scaling 1.33×**. A per-operation cost that moves with the peer count is a
+fixture bug every time, and this project has manufactured that exact result before.
+
+**The result, from two independent interleaved arms (n = 10 each) against the cycle's
+entry commit:**
+
+| writers | constrained (`WriteScalingUnique`) | unconstrained control |
+|---:|---|---|
+| 1 | **−6.05 %** (p=0.000) | ~ |
+| 2 | **−2.82 %** (p=0.035) | ~ |
+| 4 | ~ | ~ |
+| 8 | ~ (p=0.063) | ~ |
+| 16 | **−10.12 %** (p=0.002) | ~ |
+| 32 | **−9.09 %** (p=0.035) | ~ |
+| geomean | **−3.23 %** | flat |
+
+The shape is informative: ~6 % at ONE writer is added per-statement work, not contention,
+and the further loss at 16 and 32 is a contention component on top of it.
+
+**Three named causes, all cleared by measurement rather than by argument:**
+
+| suspect | how it was tested | verdict |
+|---|---|---|
+| the per-transaction map in `ConstraintTxn` | replaced with a four-slot inline array + spill | **cleared** — the number did not move |
+| #2424's sub-threshold vacuum wake | arm isolating it (HEAD vs the commit before it) | **cleared** — HEAD is FASTER, +4.7 % to +12.5 % |
+| #2423's per-candidate label guard | arm with the guard branch disabled, one line apart | **cleared** — geomean **+0.06 %**, five of six arms flat |
+
+**And one phantom of my own.** The first arm also showed the UNCONSTRAINED control
+regressing 6.9 % and 7.7 %, which none of this cycle's changes can reach — with no
+constraint declared the whole path short-circuits on an atomic load. It ran immediately
+after a 2.5-hour 150-run arm and a full `make ci`; re-run on a rested host the control is
+flat on every writer count. That is the rule about back-to-back A/Bs on this machine
+being worthless, arriving as a bill rather than as advice.
+
+**What remains, and what is NOT claimed.** The cost belongs to #2366's deferred-release
+machinery, by elimination rather than by attribution — the next step is a profile, not
+another A/B, and it is filed as **rmp #2425** with the three cleared suspects recorded so
+they are not re-proposed. It is **not** grounds to revert: #2366 closes a consistency
+defect in which two nodes held one UNIQUE value, and correctness outranks speed in this
+project's own order. So the certification records a 3–10 % cost on constrained writes as
+**the documented price of that fix**, which is the one thing the mandate asks of a
+regression it accepts.
 
 ---
 
