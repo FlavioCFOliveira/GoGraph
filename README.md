@@ -5,38 +5,56 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 
 ## Status
 
-**Current release: `v0.10.0`.** This is the project's **thirteenth
+**Current release: `v0.11.0`.** This is the project's **fourteenth
 release**, published at a pre-1.0 baseline: under Semantic Versioning a
 `0.y.z` version signals that the public API is **not yet stable** and may
 change without a major bump while the module matures toward `1.0.0`.
-`v0.10.0` is a pre-1.0 **MINOR** release, and an entirely **Cypher
-query-planner and execution-engine** cycle. Its headline is a new **planner
-statistics and cardinality-estimation foundation** — an exact relationship
-**count-store** maintained in `O(delta)` on the commit fan-out and recomputed
-at reopen, plus off-write-path statistics (HyperLogLog NDV, exact MCV,
-equi-depth histograms) that now drive **statistics-backed cardinality
-estimates in `EXPLAIN` / `PROFILE`**. On top of the exact count-store sit
-result-identical, cost-gated **reordering peepholes** (min-cardinality
-multi-label anchor scan, single-edge anchor-swap, disjoint-component reorder),
-a **deepening of the columnar / vectorised read path** (columnar aggregation,
-`Expand` as a chunk producer, columnar hash-join with late materialisation),
-and a broadening of **automatic intra-query parallelism** to
-`min` / `max` / `count` aggregation with a byte-identical-to-serial combine.
-The release is **purely additive** — it removes no exported identifier and no
-behaviour — so the documented public-API surface is unaffected. The five major
-subsystems below are functional and tested under race, lint, and soak gates.
-The two compliance invariants are already in force at this version: the
-module is **100 % openCypher TCK-compliant at the execution level**
-(**3 897/3 897 scenarios, 16 006/16 006 steps**) and **100 % ACID-compliant**;
-every change is gated by the project's local validation pipeline (build,
-vet, race, lint, `govulncheck`, TCK conformance, and the deterministic
-crash-injection battery), run via `make ci`/`make release-preflight` before
-it lands. The module uses
-the conventional Go path `github.com/FlavioCFOliveira/GoGraph` and is
-fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.10.0`. See
-[CHANGELOG.md](CHANGELOG.md) and
-[release-notes/v0.10.0.md](release-notes/v0.10.0.md) for the full release
-narrative.
+`v0.11.0` is a pre-1.0 **MINOR** release and the **largest the project has
+cut** — 505 commits, of which **31 are breaking**. Where `v0.10.0` was purely
+additive, this release is not: **read
+[release-notes/v0.11.0.md](release-notes/v0.11.0.md) before upgrading.**
+
+Two things define it. **Concurrency control became MVCC and nothing else** —
+the `store/txn` single-writer semaphore, the engine writer mutex and
+`Graph.View`, the read barrier, are all gone, replaced by a transaction clock
+with shared commit records, version chains on every store, a contiguous commit
+frontier, optimistic write–write conflict detection with a retriable error, a
+bounded background vacuum, and an MVCC clock derived from the WAL at recovery.
+The consequence a user feels is that **durable write throughput is now
+monotonic in writer count and scales 415× from 1 to 1024 writers**, where
+`v0.10.0` delivered the same throughput at 32 writers as at one. And the
+**planner gained six new access paths**, several asymptotic rather than
+constant-factor: a prefix range seek for `STARTS WITH` (385×), multi-label
+conjunction by Roaring bitmap intersection (2909×), btree seek for string and
+numeric equality (849×), destination-ordered CSR neighbour runs probed in
+`O(log d)`, an index nested-loop join (55–258×), and an opt-in fused cyclic
+expand. Separately, a **parameterised index seek that had been a full scan**
+is now 50–65× faster on the shape every Bolt client actually sends.
+
+**One regression is worse, and is stated rather than omitted:** a plan-choice
+defect regressed a selective multi-label query **≈21.6×** in the default
+configuration (rmp #2431, open — see the release notes for the workaround).
+Graph iteration pays **+7–16 %** and WAL recovery is **1.51× slower**: the
+bounded, coherent price of MVCC.
+
+The two compliance invariants remain in force: the module is **100 %
+openCypher TCK-compliant at the execution level** (**3 897/3 897 scenarios**,
+preserved rather than extended) and **100 % ACID-compliant** — four ACID
+defects were fixed this cycle, two of them CRITICAL. Every change is gated by
+the project's local validation pipeline, run via `make ci` /
+`make release-preflight` before it lands; at the release commit that gate
+reports **123 packages ok with zero failures** under `go test -race ./...`,
+**0 lint issues**, and **87.1 %** aggregate coverage. The module is
+**certified for production use under extreme load and concurrency within a
+stated envelope** — the whole-tree soak layer and latency percentiles at the
+published concurrency levels are **not** part of that certification. The
+module uses the conventional Go path
+`github.com/FlavioCFOliveira/GoGraph` and is fetchable with
+`go get github.com/FlavioCFOliveira/GoGraph@v0.11.0`. See
+[CHANGELOG.md](CHANGELOG.md),
+[release-notes/v0.11.0.md](release-notes/v0.11.0.md) and
+[docs/benchmarks/v0.11.0.md](docs/benchmarks/v0.11.0.md) for the full release
+narrative, the measured performance delta, and the certification envelope.
 
 ### Core graph (`graph/`)
 
