@@ -25,6 +25,24 @@ func reclaimGraph(t *testing.T) *Graph[string, float64] {
 	}
 	g.EnableLabelDeltas()
 	g.EnablePropDeltas()
+	// THE GRAPH'S OWN SWEEPER IS SUSPENDED FOR THE TEST'S DURATION (rmp #2424).
+	//
+	// Every test on this fixture is a WHITE-BOX test of a reclaimer as a function of
+	// the watermark it is GIVEN: it counts deltas and calls ReclaimVersions with a
+	// watermark it computes itself, frequently from a private mvcc.Horizon the graph
+	// knows nothing about. A background pass is entitled to free those same records —
+	// the graph's own horizon has no reader in it — so a concurrent sweep makes the
+	// counts non-deterministic. Two of these tests failed exactly that way ("three
+	// label writes left 2 deltas, want 3") the moment a sub-threshold charge began
+	// starting a sweeper, and they had been passing only because a handful of direct
+	// writes left none alive.
+	//
+	// EnterHolding claims a slot WITHOUT publishing an instant, which is the documented
+	// hold-everything-back state: Horizon.Oldest reports zero, so a pass that does run
+	// frees nothing. That suspends the sweeper's EFFECT rather than its existence,
+	// which is what these tests need and all they need.
+	slot := g.horizon.EnterHolding()
+	t.Cleanup(func() { g.horizon.Leave(slot) })
 	return g
 }
 

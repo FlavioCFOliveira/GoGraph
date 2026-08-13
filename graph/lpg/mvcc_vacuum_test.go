@@ -536,3 +536,104 @@ func TestVacuum_WatermarkRegressionIsDetected(t *testing.T) {
 		}
 	})
 }
+
+// TestVacuum_SubThresholdDebtDoesNotStrandWhenNoSweeperIsAlive pins the invariant
+// rmp #2424 broke: there must never be an outstanding reclamation debt with NO
+// sweeper alive to serve it.
+//
+// # Why the invariant and not the symptom
+//
+// The symptom is retention above the stated bound, and it needs a residue plus a
+// burst to exceed it — which makes it a race to reproduce and a race to assert. The
+// invariant is exact and deterministic: the reclamation debt is work only the sweeper
+// does, so a non-zero debt with `Running` false is stranded by definition, whatever
+// the totals happen to be.
+//
+// # The case the wake signal cannot see
+//
+// [Graph.chargeReclaimDebt] signals only above [reclaimThreshold], because the
+// threshold amortises the signal. That is sound only while a sweeper is alive. This
+// test therefore lets the sweeper reach its idle exit and THEN charges a burst that
+// stops deliberately short of the threshold — the one shape neither the churn signal
+// (below the threshold) nor the drain signal (no reader leaves) can observe.
+//
+// Observed before the fix: 4 883 records held against a bound of 4 096 with zero
+// active readers and `Running:false Backlog:3767`, permanently.
+func TestVacuum_SubThresholdDebtDoesNotStrandWhenNoSweeperIsAlive(t *testing.T) {
+	g := vacuumGraph(t)
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+
+	// Phase 1 — enough churn to start the sweeper, then let it settle and exit.
+	churn(t, g, reclaimThreshold*2)
+	waitWithinBound(t, g)
+	deadline := time.Now().Add(5 * time.Second)
+	for g.VacuumStats().Running {
+		if time.Now().After(deadline) {
+			// Not a failure of the property under test: the sweeper simply had work
+			// throughout, so the case this test exists for was never set up.
+			t.Skip("the sweeper never reached its idle exit within 5s; the stranding case " +
+				"cannot be constructed on this run")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// Phase 2 — a burst that stops JUST SHORT of the threshold, charged while no
+	// sweeper is alive.
+	churn(t, g, reclaimThreshold-1)
+
+	// THE INVARIANT. A debt outstanding with nobody to sweep it is stranded, and no
+	// later event in this test can clear it: the workload has stopped and no reader
+	// exists to leave.
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		v := g.VacuumStats()
+		if v.Backlog == 0 {
+			return // swept: the charge found or started a sweeper
+		}
+		if !v.Running {
+			t.Fatalf("a reclamation debt of %d records is outstanding with NO sweeper alive: "+
+				"nothing will ever sweep it, because the churn signal fires only above %d and no "+
+				"reader will leave. vacuum %+v; stats %+v",
+				v.Backlog, reclaimThreshold, v, g.MVCCStats())
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a debt of %d records was still outstanding after 5s with a sweeper alive: "+
+				"vacuum %+v", v.Backlog, v)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// TestVacuum_SubThresholdWakeDoesNotStartASweeperPerCommit is the PROPORTIONALITY
+// control for the rmp #2424 fix: ensuring a sweeper EXISTS for a sub-threshold debt
+// must not turn into starting or signalling one per commit.
+//
+// Without it, "no stranded debt" would be satisfied by waking on every charge, which
+// would put a channel send on every commit and undo the amortisation
+// [reclaimThreshold] exists for. The observable is [VacuumStats.Starts]: it must stay
+// a small constant while the commit count grows by thousands, because a sweeper that
+// is already alive is found by one atomic load and nothing else.
+func TestVacuum_SubThresholdWakeDoesNotStartASweeperPerCommit(t *testing.T) {
+	g := vacuumGraph(t)
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+
+	churn(t, g, reclaimThreshold*4)
+	v := g.VacuumStats()
+	// One start is the steady state; a handful more is scheduling — the sweeper may
+	// reach its idle exit between bursts and be restarted, which is the mechanism
+	// working. What must NOT happen is a count that tracks the commits.
+	const tolerated = 16
+	if v.Starts > tolerated {
+		t.Errorf("the sweeper was started %d times across %d modifications: the sub-threshold "+
+			"wake is firing per commit rather than only when no sweeper is alive. vacuum %+v",
+			v.Starts, reclaimThreshold*4, v)
+	}
+	if v.Starts == 0 {
+		t.Fatalf("the sweeper never started at all across %d modifications, so this control "+
+			"proves nothing: vacuum %+v", reclaimThreshold*4, v)
+	}
+}
