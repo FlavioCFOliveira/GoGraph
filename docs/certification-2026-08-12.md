@@ -937,6 +937,10 @@ misleading.
 | #2422 | 5 / 4 | `graph/mvcc` spawns goroutines and had no goleak verification | **FIXED** — gate added |
 | #2413 | 8 / 6 | By-handle latch oracle (stale: fixed at `6fc5a693`) | **CLOSED — verified 50/50** |
 
+**#2420 was diagnosed, not closed.** Fourteen mechanisms are refuted, the reproduction recipe
+is reliable, and its instruments are validated — but the account does not close (§2.1.9), so it
+remains the blocker and this certification remains refused.
+
 `#2420` was opened by this certification. `#2421` was opened by it too — it had been recorded
 as an envelope note by the previous certification and as an aside on #2407, but never filed as
 an actionable defect. `#2413` was already fixed and had been left open in the backlog, which
@@ -1001,3 +1005,13 @@ go tool pprof -top -sample_index=inuse_space -nodecount=12 /tmp/prof35/heap.ppro
 | `22df24d4` | docs(certification): two clean captures localise the tear to snapshot BIRTH |
 | `ac035676` | docs(certification): record the exit gate and the full reproduction tally |
 | `03533ee0` | test(lpg): walk the chain at the violation, and correct two instruments of my own (#2420) |
+| `4655996a` | docs(certification): refresh the commit ledger |
+| `4045f2d2` | docs(certification): the verdict quoted a rate from the arms that could not reproduce |
+| `04b75cfa` | docs(certification): the corrected absolute-oracle arm was inconclusive, and the probe was the reason |
+| `7b435445` | fix(lpg): route every snapshot read through the pinned verdict, not the live stamp (#2420, #2378) |
+| `57fd3683` | docs(certification): the blocker is DIAGNOSED — the verdict memo reached 2 of 9 read paths |
+| `ef4d3871` | docs(certification): the criterion was NOT met, and the capture named the real cause |
+| `13335ee5` | docs(certification): both explanations for the missing record are refuted; the suspect moves to the WRITE path |
+| `77c2a36b` | docs(certification): the account does not close, and the instrument is the next thing to doubt |
+| `771afe6a` | docs(certification): the chain-walk instrument is VALIDATED, so the observation stands |
+| `40ed3028` | refactor(lpg): drop the side-store timestamped walkers, now unreachable (#2420) |
