@@ -61,7 +61,14 @@ narrative, the measured performance delta, and the certification envelope.
 - `github.com/FlavioCFOliveira/GoGraph/graph` — generic node identifiers and the `Graph[N, W]`
   contract.
 - `github.com/FlavioCFOliveira/GoGraph/graph/adjlist` — mutable, sharded adjacency-list backend
-  with copy-on-write snapshots and lock-free reads.
+  with copy-on-write snapshots and lock-free reads. Every edge slot carries a
+  stable identity, and adjacency is versioned inside the immutable entry so a
+  snapshot resolves it at one instant.
+- `github.com/FlavioCFOliveira/GoGraph/graph/mvcc` — the concurrency-control substrate: a
+  transaction clock and shared commit records, a contiguous commit frontier,
+  the reclamation horizon and watermark, `Gate` (a weak/strong admission gate),
+  and `ErrSerializationConflict`. New in `v0.11.0`; MVCC is the module's only
+  concurrency-control mechanism and is armed by `lpg.New`.
 - `github.com/FlavioCFOliveira/GoGraph/graph/csr` — immutable Compressed Sparse Row view for
   read-mostly analytics.
 - `github.com/FlavioCFOliveira/GoGraph/graph/generation` — atomic pointer swap for snapshot
@@ -82,6 +89,11 @@ narrative, the measured performance delta, and the certification envelope.
   `graph/io/jsonl` — interchange formats for CSV, GraphML, DOT,
   and JSON Lines.
 - `github.com/FlavioCFOliveira/GoGraph/ds` — disjoint-set (union-find) primitive.
+- `github.com/FlavioCFOliveira/GoGraph/metrics` — the observability seam: `SetBackend` plus
+  counters, gauges, latency histograms and `Time`. Every cache, pool and bounded
+  queue publishes utilisation through it, as does the MVCC substrate (writers in
+  flight, outcomes, conflicts by store, version-chain depth, vacuum latency,
+  horizon utilisation). Wire-up in [docs/metrics.md](docs/metrics.md).
 
 ### Search and analytics (`search/`)
 
@@ -102,8 +114,12 @@ narrative, the measured performance delta, and the certification envelope.
 
 - `github.com/FlavioCFOliveira/GoGraph/store/wal` — Write-Ahead Log with CRC32C framing.
 - `github.com/FlavioCFOliveira/GoGraph/store/snapshot` — atomic on-disk snapshot directories.
-- `github.com/FlavioCFOliveira/GoGraph/store/txn` — single-writer transactional API
-  (Begin/Commit/Rollback).
+- `github.com/FlavioCFOliveira/GoGraph/store/txn` — transactional API
+  (Begin/Commit/Rollback). **Independent write transactions run concurrently**:
+  the single-writer semaphore was retired in `v0.11.0`, so a write-write
+  collision is *detected* by MVCC first-updater-wins and returned as a retriable
+  error wrapping `mvcc.ErrSerializationConflict`, rather than prevented by
+  exclusion.
 - `github.com/FlavioCFOliveira/GoGraph/store/checkpoint` — background WAL → snapshot folder.
 - `github.com/FlavioCFOliveira/GoGraph/store/recovery` — snapshot + WAL replay on open.
 - `github.com/FlavioCFOliveira/GoGraph/store/csrfile` — mmap-backed Tier 2 CSR file format,
@@ -115,19 +131,32 @@ narrative, the measured performance delta, and the certification envelope.
 - `github.com/FlavioCFOliveira/GoGraph/store/bulkimport` — offline bulk **import**: builds a
   labelled property graph and publishes it as a store snapshot, so
   `recovery.Open` reads it back with no WAL. Loads 20 000 nodes and 200 000 edges
-  in 0.28 s through the `gograph-import` command, against 35 m 33 s for the same
-  data through the Cypher write path — see
+  in **0.28 s** of process wall clock (a 233 ms import phase, 0.86 M edges/s) —
+  see
   [docs/benchmarks/bulk-import-2026-07-26.md](docs/benchmarks/bulk-import-2026-07-26.md)
-  and [docs/design-bulk-import.md](docs/design-bulk-import.md). The whole import is
-  atomic; it is not a transaction, and it requires an empty target directory.
+  and [docs/design-bulk-import.md](docs/design-bulk-import.md). For scale, the
+  Cypher write path loads comparable data (20 000 nodes / 199 941 edges in
+  `UNWIND` batches of 5 000) in **2.056 s**, measured in
+  [docs/benchmarks/threeway-durability-2026-07-27.md](docs/benchmarks/threeway-durability-2026-07-27.md)
+  — down from 35 m 10 s before `#2228` admitted the hash join for writing
+  statements. Those are two different harnesses, so treat them as two figures
+  rather than one ratio. The whole import is atomic; it is not a transaction, it
+  cannot be rolled back, and it requires an empty target directory.
 
 ### Cypher engine (`cypher/`)
 
 - `github.com/FlavioCFOliveira/GoGraph/cypher` — openCypher-compatible parser, planner, and
-  execution engine; WAL-durable writes via `NewEngineWithStore`.
+  execution engine; WAL-durable writes via `NewEngineWithStore`. An explicit read
+  transaction (`BeginReadTx`) is **snapshot isolated across all of its
+  statements**; an explicit write transaction (`BeginTx`) holds no lock, so two
+  clients can hold open write transactions and both make progress.
+  `Engine.NewSession` returns a `Session` giving **read-your-own-writes** across
+  transactions.
 - `github.com/FlavioCFOliveira/GoGraph/cypher/parser` · `cypher/ast` · `cypher/sema` ·
   `cypher/ir` · `cypher/plan` · `cypher/exec` — parser-to-execution
-  pipeline with plan-cache, EXPLAIN/PROFILE, and dbhits accounting.
+  pipeline with plan-cache, `EXPLAIN` of the **physical** plan, `PROFILE` with
+  per-operator rows/time/dbhits, and per-statement write-effect counters
+  (`Result.Counters`).
 - `github.com/FlavioCFOliveira/GoGraph/cypher/funcs` · `cypher/procs` — built-in functions and
   procedures.
 - `github.com/FlavioCFOliveira/GoGraph/cypher/tck` — openCypher TCK harness (parser 100 %,
@@ -140,7 +169,13 @@ narrative, the measured performance delta, and the certification envelope.
   PackStream encoding (v5.0–v5.6 preferred; v4.4 fallback).
 - `github.com/FlavioCFOliveira/GoGraph/bolt/server` — TCP server compatible with
   `neo4j-go-driver` v5 and `cypher-shell`, with TLS certificate
-  hot-reload and graceful shutdown.
+  hot-reload and graceful shutdown. Nodes, relationships and paths are sent as
+  Bolt **structures** (so the official driver materialises them as
+  `dbtype.Node`/`Relationship`/`Path`), each connection owns a `cypher.Session`
+  for read-your-own-writes, and open transactions are **operable** — bounded by
+  idle time and per-principal count, and listable and terminable through an
+  operator API. Engine-wide memory ceilings are bounded by default and derived
+  from a container's cap where one exists.
 
 Subsystem references: [docs/persistence.md](docs/persistence.md)
 (WAL, snapshots, recovery) · [docs/tier2.md](docs/tier2.md) (csrfile)
@@ -151,9 +186,12 @@ Subsystem references: [docs/persistence.md](docs/persistence.md)
 
 ## Examples
 
-The `examples/` directory contains 25 runnable demonstrations. See
-[examples/README.md](examples/README.md) for the full categorized index
-with per-example links and run commands.
+The `examples/` directory contains **37 runnable demonstrations**, numbered
+`01`–`37`. They are not part of the module — nothing in GoGraph imports them —
+they are exercise harnesses and usage simulators: each drives real features
+under realistic conditions and emits telemetry, and **every one can produce a
+pprof profile**. See [examples/README.md](examples/README.md) for the full
+categorized index with per-example links and run commands.
 
 ### Basics
 
@@ -197,8 +235,32 @@ with per-example links and run commands.
 - **13_network_reliability** — Hopcroft-Tarjan SPOF analysis + max-flow with the limiting min-cut bottleneck, both over the same network.
 - **19_pattern_query** — multi-hop MATCH-style queries combining labels and property predicates.
 - **20_concurrent_reads** — multiple algorithms run concurrently over a shared immutable CSR.
+- **28_negative_weights** — negative-weight routing.
+- **29_all_pairs** — all-pairs shortest paths.
+- **30_min_spanning_tree** — minimum spanning tree as a least-cost backbone.
+- **32_euler** — Eulerian circuits for route inspection.
 
-Run any example with `go run ./examples/<NAME>/`.
+### Concurrency, MVCC and isolation
+
+- **27_concurrent_txn** — concurrent transaction isolation, with a conserved-total oracle.
+- **33_generation_swap** — generation snapshot-swap on a read-mostly workload.
+- **35_mvcc_mixed_workload** — reader latency under a mixed OLTP-and-analytics workload.
+- **36_mvcc_snapshot_topology** — snapshot isolation on the topology dimension.
+- **37_mvcc_write_contention** — MVCC under concurrent **writers**.
+
+### Scale, observability and operations
+
+- **26_social_scale_bench** — social-network scale benchmark; the reference harness for planner and execution work.
+- **31_metrics_observability** — the `metrics` seam exported in Prometheus format.
+- **34_bolt_transactions** — Bolt transactions, writes, auth and TLS.
+
+Run any example with `go run ./examples/<NAME>/`, and `-h` to see its flags.
+Every example binds one identical profiling contract from
+`examples/internal/exprof`: **`-profile-dir`** writes `cpu.pprof` and
+`heap.pprof`, and **`-trace`** writes a `runtime/trace`. Both are **inert by
+default** — with neither flag set no profiler runs and not one byte reaches the
+example's output, which is what lets each example's regression test pin its
+deterministic output unedited. Flags beyond those two vary per example.
 
 ## Getting Started
 
@@ -254,45 +316,82 @@ coverage. Every change must pass it before being committed.
 
 ## Performance
 
-Benchmarks (Apple M4, Go 1.26.3):
+**The authoritative, per-release record is
+[docs/benchmarks/v0.11.0.md](docs/benchmarks/v0.11.0.md)** — run environment,
+method, the figures below, what they do *not* establish, and reproduce commands.
+This section is a summary of it, not a second source. Every number here was
+measured first-hand at the `v0.11.0` commit (`ba436a5b`) on Apple M4 (10-core),
+32 GB, `darwin/arm64`, go1.26.5, on a host gated below a 1-minute load average of
+2.5.
 
-| Operation | Throughput |
+**Durable write throughput, at the concurrency levels the module publishes**
+(`store/txn`, one durable single-edge transaction per op, median of 6):
+
+| Writers | 1 | 8 | 64 | 256 | 1024 |
+|---|---:|---:|---:|---:|---:|
+| Store API | 268 | 1,099 | 8,322 | 32,234 | **111,483 ops/s** |
+| Cypher engine | 271 | 1,060 | 8,254 | 30,804 | **115,301 ops/s** |
+| commits/fsync | 1.00 | 4.08 | 31.50 | 121.20 | **422.05** |
+
+Throughput is **monotonic in writer count** and scales **415×** (store API) /
+**425×** (Cypher) from 1 to 1024 writers. The scaling factor equals
+`commits/fsync` at every level, so the gain is group-commit fsync amortisation
+and nothing else; the single-writer rate is this device's fsync rate and is
+unchanged from `v0.10.0`, so nothing was traded for it. At `v0.10.0` this curve
+was flat — the module had no write concurrency.
+
+**Read path under concurrency** — the hot-key intern probe, where every goroutine
+contends for one cache line, is **flat at 75–89 ns/op with zero allocations from
+8 to 1024 goroutines** (a 128× over-subscription of 10 cores). Note `ns/op` under
+`RunParallel` is inverse *aggregate* throughput, not per-goroutine latency.
+
+**Primitive operations** and the guard-band algorithm set (median of 6):
+
+| Operation | Result |
 |---|---|
-| `Mapper.Intern` (hot key) | 17 ns/op, 0 allocs |
-| `adjlist.HasEdge` (hot cache) | 49 ns/op, 0 allocs |
-| `csr.NeighboursByID` | 10.6 ns/op, 0 allocs |
-| `csr.BuildFromAdjList` of 10^7 edges | 51 ms |
-| `search.BFS` on 10^7-node chain | 38 ms, 1.25 MB peak, 0 allocs/call after warmup |
-| `search.Dijkstra` on 1M-node / 4M-edge random graph | 320 ms |
-| `search.BellmanFord` on 16K-vertex / 64K-edge | 1.8 ms |
+| `Mapper.Intern` (hot key, uncontended) | 8.67 ns/op, 0 B, 0 allocs |
+| `search.Dijkstra` (post-warmup, reusable state) | 8.27 ms, **0 B, 0 allocs** |
+| `search.BFS` direction-optimising (power law) | 29.87 ms, **0 B, 0 allocs** |
+| `search.Yen` k=100 | 14.47 ms, 459 KB, 1,280 allocs |
+| `centrality.Brandes` (random graph) | 8.09 ms, 62 KB, 10 allocs |
 
-> **Measured on:** 2026-05-22 against commit `1a2f00e`, Apple M4
-> (10-core), Go 1.26.3, macOS 25.4.0 (darwin/arm64).
-> **Reproduce:** `make bench BENCH_PATTERN=. BENCH_COUNT=5`
-> (see [docs/profiling.md](docs/profiling.md) for the sample
-> workflow). Per-run variance is captured by `benchstat` and the
-> headline numbers above are the median of five runs at `-count=5`.
+The two post-warmup traversal paths allocate **zero** bytes per call, and every
+allocation count above is identical to `v0.10.0` — the zero-allocation hot-path
+mandate holds.
+
+**And the costs, because a README that lists only wins is not a faithful one.**
+Graph iteration and bulk write pay **+7–16 %** across seven independent
+benchmarks, WAL recovery is **1.51× slower** (the price of deriving the MVCC clock
+from the WAL), on-disk bytes per node rise **2.9 %**, the uncontended intern path
+is **+14 %**, and one **open defect** (rmp #2431) makes a selective multi-label
+query **≈21.6× slower in the default configuration** — see
+[the release notes](release-notes/v0.11.0.md#known-issues) for the workaround.
+
+> **Reproduce:** the exact commands are in
+> [docs/benchmarks/v0.11.0.md](docs/benchmarks/v0.11.0.md#7-reproduce); the
+> general workflow is `make bench BENCH_PATTERN=. BENCH_COUNT=5` and
+> [docs/profiling.md](docs/profiling.md).
 > Hardware deltas should be reported in CHANGELOG.md alongside
 > any number that regresses beyond the local `benchstat` regression
 > gate (`scripts/bench_gate.sh`), which is run locally to compare a
 > candidate against its baseline before the change lands.
 
-The `v0.3.1` performance cycle lifts the write, analytics, and query
-paths without regressing the single-threaded figures above: **group
-commit** raises concurrent write throughput ≈ 118× at 256 goroutines
-(with zero single-thread regression), **parallel PageRank** runs 1.7–2.4×
-on large graphs (bit-identical results), and a **range-predicate B+tree
-index seek** is ≈ 114× on selective indexed ranges. See
-[docs/benchmarks/v0.3.1.md](docs/benchmarks/v0.3.1.md) for the full
-per-release report and concurrency sweeps.
+Per-release reports live in [docs/benchmarks/](docs/benchmarks/), one per tag;
+per-change tracking is in [docs/benchmarks/history/](docs/benchmarks/history/)
+with the narrative ledger at
+[history/LEDGER.md](docs/benchmarks/history/LEDGER.md). The end-to-end comparison
+of `v0.10.0` against this release — including the regressions — is
+[release-delta-v0.10.0-to-head-2026-08-10.md](docs/benchmarks/release-delta-v0.10.0-to-head-2026-08-10.md).
 
 ## Module Layout
 
 ```
 graph/                    — core types: NodeID, Graph[N,W] contract, sharded Mapper
-graph/adjlist             — mutable copy-on-write adjacency list (writer-side)
+graph/adjlist             — mutable copy-on-write adjacency list, version-chained per slot
 graph/csr                 — immutable Compressed Sparse Row snapshot (reader-side)
 graph/generation          — refcount-protected Publisher for atomic snapshot rotation
+graph/mvcc                — transaction clock, commit records, commit frontier, reclamation
+                            horizon/watermark, Gate, ErrSerializationConflict
 graph/lpg                 — labelled property graph (labels + typed properties)
 graph/lpg/schema          — declarative type schema with Validate
 graph/index               — Manager fanning out Change events to subscribers
@@ -314,14 +413,28 @@ search/flow               — Dinic, Edmonds-Karp, push-relabel, Stoer-Wagner, M
 
 store/wal                 — versioned, CRC32C-checksummed Write-Ahead Log
 store/snapshot            — atomic snapshot directories with manifest and per-file CRC
-store/txn                 — single-writer transactions (Begin/Commit/Rollback)
+store/txn                 — transactions (Begin/Commit/Rollback); writers run CONCURRENTLY,
+                            collisions detected by MVCC rather than prevented
 store/checkpoint          — background WAL → snapshot folder goroutine
 store/recovery            — snapshot + WAL replay on open
 store/csrfile             — mmap'd Tier 2 CSR file format (versioned, 64-byte aligned)
 store/bulk                — high-throughput bulk ingestion bypassing the WAL (adjacency only)
 store/bulkimport          — offline import: labelled property graph → published store snapshot
 
+cypher/                   — openCypher parser, planner and execution engine; snapshot-isolated
+                            read transactions, lock-free write transactions, Session (RYOW)
+cypher/parser · ast · sema · ir · plan · exec
+                          — parser-to-execution pipeline: plan cache, physical-plan EXPLAIN,
+                            PROFILE with per-operator rows/time/dbhits, write counters
+cypher/funcs · procs      — built-in functions and procedures
+cypher/tck                — openCypher TCK harness (execution 100 %, 3 897/3 897)
+
+bolt/proto · packstream   — Bolt v5 protocol and PackStream encoding
+bolt/server               — TCP server for neo4j-go-driver v5 / cypher-shell; TLS hot-reload,
+                            per-connection Session, operable + bounded transactions
+
 ds/                       — supporting data structures (Union-Find, ...)
+metrics/                  — public observability seam (SetBackend, counters, gauges, latency)
 
 cmd/gograph-import        — offline CSV → store importer (see store/bulkimport)
 
@@ -329,9 +442,12 @@ bench/ldbc                — LDBC SNB SF1 / SF10 benchmark harness
 bench/dimacs9             — DIMACS 9 USA-road SSSP benchmark
 bench/rmat                — RMAT power-law graph generator
 bench/soak                — 4-hour mixed-workload reliability soak harness
-bench/comparison          — cross-library performance comparison vs NetworkX
+bench/comparison          — head-to-head harnesses: three-way vs Neo4j and Memgraph over Bolt
+                            (throughput, CPU via cgroup counters, memory, concurrency), plus
+                            NetworkX and SuiteSparse:GraphBLAS/LAGraph baselines
 
-internal/metrics          — observability API hook (Backend, IncCounter, ObserveLatency, Time)
+internal/metrics          — observability implementation behind the public metrics/ facade;
+                            external consumers import metrics/, not this
 internal/stress           — concurrency stress test suite (CI under -race)
 internal/shapegen         — graph shape generators (trivial, classic, random models, adversarial)
 internal/invariants       — graph invariant checkers (connected, DAG, bipartite, distance bound)
@@ -343,7 +459,7 @@ internal/goldens          — golden-file assertion helper with -update and atom
 See [docs/test-battery.md](docs/test-battery.md) for the production-readiness
 test battery guide and the add-new-shape recipe.
 
-examples/                 — 25 runnable example programs (see "Examples" section)
+examples/                 — 37 runnable example programs, each pprof-able (see "Examples")
 ```
 
 ## Labelled Property Graph + Query Example
@@ -369,9 +485,14 @@ for _, n := range e.Match().Vertex(
 ## Security
 
 Vulnerability reports follow the process documented in
-[SECURITY.md](SECURITY.md). Use GitHub Security Advisories or the
-private email listed there — please do not open a public issue for a
-suspected vulnerability.
+[SECURITY.md](SECURITY.md). **Report privately through GitHub Security
+Advisories** —
+<https://github.com/FlavioCFOliveira/GoGraph/security/advisories/new>. Please do
+not open a public issue for a suspected vulnerability; if you cannot use
+Security Advisories, open an issue containing **no vulnerability details**, only
+a request for a maintainer to open a private advisory. SECURITY.md states the
+response targets (48 h acknowledgement, 5 business days to triage, 30 days to a
+fix under embargo, 90-day coordinated disclosure) and the scope.
 
 ## License
 

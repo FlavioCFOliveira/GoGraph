@@ -21,9 +21,29 @@
 // produced; the v1 constructor has been removed and recovery rejects any
 // v1 frame found on disk (see [store/recovery.ErrUnsupportedRecordVersion]).
 //
-// Single-writer is enforced by a per-store mutex acquired in Begin
-// and released in Commit or Rollback; reads on the underlying graph
-// remain lock-free in the lpg / adjlist contracts.
+// # Concurrency
+//
+// Independent write transactions run CONCURRENTLY. The store is safe for
+// concurrent use by any number of goroutines, and reads on the underlying
+// graph remain lock-free in the lpg / adjlist contracts.
+//
+// This is a change of contract. Until rmp #2306 a capacity-one semaphore
+// acquired in Begin and released in Commit or Rollback made the store
+// single-writer. That semaphore is retired: [Store.Begin] and [Store.BeginCtx]
+// now only REGISTER the transaction as an admitted writer, and the
+// registration excludes no other writer — see [Store.enterWriter], which takes
+// its mutex solely to increment an in-flight count and blocks only while a
+// quiesce ([Store.RunUnderCommitLock]) is draining.
+//
+// A write-write collision is therefore DETECTED rather than prevented: MVCC
+// applies first-updater-wins on the version chain and the loser receives an
+// error wrapping [graph/mvcc.ErrSerializationConflict], which is retriable.
+// Callers that require two writers to be serialised must arrange that
+// themselves; the store does not.
+//
+// Retiring the semaphore was measured throughput-neutral — it was released
+// after the WAL append and never covered the coalesced fsync that dominates a
+// durable commit. See docs/benchmarks/store-semaphore-retirement-2026-08-04.md.
 //
 // # Constructor matrix
 //
@@ -423,11 +443,13 @@ type Options[N comparable, W any] struct {
 // needs: [Store.BeginCtx] waits on the current quiesce against ctx.Done() and
 // returns the context error without blocking for the quiesce's full
 // duration. A [sync.Mutex] cannot honour a deadline while it is contended;
-// the semaphore can, which is what makes the engine write path
-// ([cypher.Engine.RunInTx]) respect a caller's deadline under write
-// contention. Capacity one preserves exact mutual exclusion: a second
-// acquire blocks (or fails with ctx) until the holder releases, so the
-// single-writer contract is identical to the previous mutex.
+// waiting on the quiesce channel can, which is what makes the engine write
+// path ([cypher.Engine.RunInTx]) respect a caller's deadline.
+//
+// There is no longer any mutual exclusion between writers to preserve. A
+// write-write collision is DETECTED by MVCC first-updater-wins on the version
+// chain and reported as a retriable error wrapping
+// [graph/mvcc.ErrSerializationConflict], rather than prevented by admission.
 type Store[N comparable, W any] struct {
 	codec  codecHolder[N]
 	wcodec WeightCodec[W]
@@ -781,14 +803,23 @@ func (s *Store[N, W]) exitWriter() {
 	s.inflightMu.Unlock()
 }
 
-// RunUnderCommitLock runs fn while holding the store's single-writer
-// commit lock — the SAME semaphore [Store.Begin] acquires and
-// [Tx.Commit]/[Tx.CommitWALOnly]/[Tx.Rollback] release. While fn runs no
-// transaction can be between Begin and its commit/rollback: neither a new
-// in-memory apply (the [lpg.Graph.ApplyVersioned] window opened inside a
-// transaction) nor a new WAL frame append can race fn. Since rmp #2320 that
-// exclusion rests on THIS lock plus the in-flight drain and no longer on visMu,
-// because an ordinary write holds visMu shared.
+// RunUnderCommitLock runs fn with the store QUIESCED: it closes the admission
+// gate so no further writer is admitted, then drains the already-admitted
+// writers to zero, and only then runs fn. Both steps happen under one mutex, so
+// a writer cannot slip in between them.
+//
+// It does NOT borrow a single-writer semaphore — there is none since rmp #2306.
+// Two quiesces exclude each other explicitly (a second waits for the first to
+// finish) rather than as a side effect of serialising every writer, which is
+// what the retired semaphore did incidentally.
+//
+// While fn runs no transaction can be between Begin and its commit/rollback:
+// neither a new in-memory apply (the [lpg.Graph.ApplyVersioned] window opened
+// inside a transaction) nor a new WAL frame append can race fn. Since rmp #2320
+// that exclusion rests on the admission gate plus the in-flight drain and no
+// longer on visMu, because an ordinary write holds visMu shared.
+//
+// The drain itself is uncancellable, as the semaphore acquire it replaces was.
 //
 // This is the serialisation seam a background checkpointer needs to take a
 // consistent snapshot and truncate the WAL atomically against the commit
@@ -865,15 +896,26 @@ func (s *Store[N, W]) Begin() *Tx[N, W] {
 	return tx
 }
 
-// BeginCtx is the context-aware variant of [Store.Begin]. The single-writer
-// lock is a capacity-one semaphore, so the acquire itself is cancellable:
-// BeginCtx selects the acquire against ctx.Done() and returns (nil, ctx.Err())
-// the instant ctx is cancelled or its deadline elapses — even while another
-// writer holds the lock — rather than blocking for the holder's full
-// duration. This is what lets a deadline-bearing engine write
-// ([cypher.Engine.RunInTx]) honour its deadline under write contention. On a
-// nil error the returned Tx is a registered writer until Commit or Rollback
-// runs; once admitted, further ctx checks happen at the caller's discretion.
+// BeginCtx is the context-aware variant of [Store.Begin].
+//
+// Admission does not wait for another writer: since rmp #2306 there is no
+// single-writer lock to queue behind, so in the common case BeginCtx registers
+// the writer and returns without blocking at all, however many writers are
+// already in flight.
+//
+// It can still block for one reason — a quiesce
+// ([Store.RunUnderCommitLock], used by store.DB.Close and the checkpointer) is
+// draining the admitted writers to zero and admits nobody until it finishes.
+// That wait is cancellable: BeginCtx selects against ctx.Done() and returns
+// (nil, ctx.Err()) the instant ctx is cancelled or its deadline elapses, rather
+// than blocking for the quiesce's full duration. This is what lets a
+// deadline-bearing engine write ([cypher.Engine.RunInTx]) honour its deadline.
+//
+// On a nil error the returned Tx is a registered writer until Commit or
+// Rollback runs; once admitted, further ctx checks happen at the caller's
+// discretion. Registration is for quiesce accounting only — it excludes no
+// other writer, and a collision with one is reported at commit as a retriable
+// error wrapping [graph/mvcc.ErrSerializationConflict].
 func (s *Store[N, W]) BeginCtx(ctx context.Context) (*Tx[N, W], error) {
 	defer metrics.Time("store.txn.BeginCtx").Stop()
 	if err := s.enterWriter(ctx); err != nil {
@@ -1479,13 +1521,20 @@ func acquireApplySlot() chan struct{} { return applySlotPool.Get().(chan struct{
 func releaseApplySlot(ch chan struct{}) { applySlotPool.Put(ch) }
 
 // appendOnly performs group-commit phase 1: it encodes and appends every
-// buffered op to the WAL (without fsyncing) and then RELEASES the single-writer
-// semaphore so the next transaction can append while this one fsyncs. It is the
-// append half of the old appendAndSync; the fsync is now a separate, coalesced
-// step ([wal.Writer.SyncGroup]) the caller runs with the semaphore free.
+// buffered op to the WAL (without fsyncing), leaving the fsync to a separate,
+// coalesced step ([wal.Writer.SyncGroup]) so one fsync amortises across every
+// transaction that appended while it was pending. It is the append half of the
+// old appendAndSync.
+//
+// It releases no writer lock, because since rmp #2306 there is none to release:
+// concurrent appenders are admitted freely and the WAL writer serialises the
+// appends themselves. Before that, this function's release of the capacity-one
+// semaphore is what let the next transaction append while this one fsynced —
+// which is why group commit was already reachable here, and why retiring the
+// semaphore measured throughput-neutral.
 //
 // Every op is encoded as a v3 frame carrying a fresh per-transaction sequence
-// ([Store.txnSeq]) assigned under the semaphore, and an [OpCommit] marker frame
+// ([Store.txnSeq]), and an [OpCommit] marker frame
 // for the same sequence is appended after the last op. The on-disk frame order
 // is therefore unchanged from the per-commit path — each transaction's ops are
 // contiguous in sequence order, followed by its marker — so recovery's
