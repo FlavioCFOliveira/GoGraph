@@ -450,6 +450,66 @@ mechanisms that were convincing on inspection. Two measurements are owed:
    obvious precedent), not abandonment — correctness outranks speed, but the cost must be known
    and stated rather than discovered later.
 
+### 2.1.7 The fix did NOT meet its criterion — and the capture named the real cause
+
+The criterion was fixed in advance: **zero violations of both oracles across 200 package runs**.
+The result was **1 and 1**. The criterion is not met, and **the memo gap is therefore not the
+cause of either tear.** Twelve mechanisms refuted.
+
+What the run bought instead is the answer the chain-completeness instrument was built for:
+
+```
+a.v=39713  b.v=39712  (delta 1)   startTS=39713
+re-read of the SAME snapshot gave 39713/39713
+a: live chain, head COMMITTED at 39715 | b: head COMMITTED at 39715
+   both heads share ONE commit record
+chain a [39715] — THE RECORD STAMPED startTS+1 (39714) IS ABSENT
+chain b [39715] — THE RECORD STAMPED startTS+1 (39714) IS ABSENT
+```
+
+**The chain is INCOMPLETE.** Only the record stamped 39715 survives; the record for instant
+39714 — the one the walk must undo to resolve back to `startTS` — is gone. So the walk undoes
+39715, reaches nil, and stops one transaction short. That is exactly the observed value:
+`a.v=39713`, which is instant 39714's write, over-visible by one.
+
+This is why the previous cycle's refutation did not hold. It excluded reclamation using chain
+**existence** — both nodes had live chains — and existence is the weaker test. A chain can be
+live and still be missing the record a given snapshot needs, which is the case here.
+
+**It is a live-snapshot violation, not a stale sample.** The walk is captured *inside* the
+reader's critical section, before the deferred `EndRead`, so the snapshot at `startTS=39713`
+was still registered with the horizon when the record for 39714 was already absent.
+
+**The statement is now falsifiable and precise.** A reader at `startTS=39713` requires every
+record stamped **above** 39713. `Horizon.Oldest` should therefore return at most 39713 while
+that reader is live, and `reclaimPropVersions(watermark)` frees only records with
+`stampTS() <= watermark`. Record 39714 is above 39713 and must have been kept. So **either the
+reclaimer freed a record above its watermark, or the watermark exceeded a live reader's start
+instant.** The horizon primitives read as sound — `EnterHolding` stores `holdEverything = 1`
+so `Oldest` computes 0 and suspends reclamation during the claim window, `Leave` leaves only
+older residue, and the fallback is read before the scan — so one of those readings has a hole.
+**Instrumenting the reclaimer to record the watermark it used against the live readers'
+published instants is the next measurement**, and it is a much narrower question than any this
+defect has posed so far.
+
+### 2.1.8 What became of the memo change
+
+It is **kept**, and its justification is corrected rather than left standing.
+
+- It did **not** fix #2420 or #2378, and this report says so where it previously implied
+  otherwise. A change that does not move the number is not a fix, whatever its reasoning.
+- It is still a **real inconsistency closed**: `labelBagAsOfLockedSnap` exists solely because
+  deciding visibility from the live mutable stamp is wrong, and seven sibling paths were doing
+  exactly that. Reverting would restore a state in which the memo protects two paths and is
+  bypassed by seven.
+- **Its cost is UNMEASURED, and the obvious benchmark does not measure it.**
+  `BenchmarkEngReadProjectLargeSerial` gave 8.23 ms/op with the change and 8.21 ms without —
+  but `B/op` and `allocs/op` are **byte-identical** across the arms, which on this project is
+  the signal that the arm never reaches the changed code. A read-only benchmark over a graph
+  with no live delta chains never walks a chain and never consults the memo. So "no regression"
+  is **not** claimed. The measurement that matters needs concurrent writers, and it is recorded
+  as owed.
+
 ### 2.2 FIXED — rmp #2250: a reverse type filter admitted the pair, not the instance
 
 Confirmed at the entry commit, reproducing the ticket's matrix cell for cell. `want` is
