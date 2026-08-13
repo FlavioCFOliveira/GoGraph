@@ -520,7 +520,35 @@ seven lines of the write path rather than about the whole MVCC substrate.
 established here, and every one of the three was killed by an instrument built to test it
 rather than by an argument.
 
-### 2.1.9 What became of the memo change
+### 2.1.9 The account does not close, and the instrument is the next thing to doubt
+
+Every removal path for a property version chain has now been enumerated and each is guarded:
+
+| path | guard |
+|---|---|
+| `reclaimPropVersions`, whole-chain delete | `head.stampTS() <= watermark`, asserted 0 above |
+| `reclaimPropVersions`, truncation | `d.next.stampTS() <= watermark`, asserted 0 above |
+| `reclaimPropVersions`, empty-entry cleanup | only when `head == nil` |
+| `reclaimAbortedPropsLocked` | stops at the first non-aborted record |
+| `withdrawAbortedProps`, `sh.d = nil` | only when `len(sh.d) == 0` |
+
+And the write path always creates the record: `propValuesDefinitelyEqual` compares `int64`
+values exactly, so consecutive distinct values always push an undo record.
+
+**So no path can remove it and the write path always creates it — yet it is absent.** Those
+three statements cannot all be true, which means one of them is wrong, and **the most likely
+candidate is the instrument**. Three instruments built in this cycle were already wrong: one
+packed a flag into a field spanning 2^63, one was a differential against its own first sample,
+one was heavy enough to perturb its own environment. The prior on a fourth is not low, and
+`chainWalk` has **never been validated** — nothing has yet checked that it reports the depth and
+stamps a quiescent chain is known to have.
+
+**So the next step is not another hypothesis. It is to validate `chainWalk` against a chain of
+known contents**, and only then to trust "the record is absent". Recording a conclusion drawn
+from an unvalidated instrument is how this cycle's retracted anomaly happened, and that mistake
+is not worth making twice.
+
+### 2.1.9b What became of the memo change
 
 It is **kept**, and its justification is corrected rather than left standing.
 
