@@ -573,8 +573,15 @@ comparison against v0.10.0 is
   and the columnar edge-property word backings merged, **240 B → 168 B per column**
   ([`docs/benchmarks/edge-property-column-2026-08-11.md`](docs/benchmarks/edge-property-column-2026-08-11.md)).
 - **Bolt stopped flushing per message: 6.03× less CPU on a 1000-row result**
-  (rmp #2410). One `write(2)` syscall per row accounted for ~97 % of the per-row cost.
-  Memgraph had fixed the identical defect.
+  (rmp #2410). `ChunkedWriter.WriteMessage` ended in a `Flush()` and every Bolt
+  `RECORD` is one message, so a K-row result issued **K `write(2)` syscalls** and the
+  `bufio.Writer` in front of the connection could never accumulate anything. A live
+  profile put **70.19 % of all server processor time in `Syscall6`**, and **97 % of
+  GoGraph's per-row cost was delivery rather than computation**. Auto-flush stays on by
+  default so every existing caller is unchanged; only the Bolt server opts out, and it
+  flushes explicitly on every message that is not a `RECORD` — the protocol terminates
+  every run of `RECORD`s with a summary, so the buffer is always drained before the
+  exchange can block. Memgraph had fixed the identical defect.
 - **The apply gate woke a thundering herd: 7 425 → 111 897 commits/s at 1024 writers
   (+1407 %, 15.1×)** (rmp #2221). `Tx.advanceApply` woke the sequence-ordered apply gate
   with `sync.Cond.Broadcast`, so every committed transaction woke **every** parked
