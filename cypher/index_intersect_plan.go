@@ -229,8 +229,12 @@ func tryIndexIntersectionSeek(
 	for _, p := range parts[1:] {
 		extra = append(extra, p.index)
 	}
+	// The label restriction the replaced scan leaf carried (rmp #2423). The residual
+	// Selection filter re-checks every PROPERTY conjunct and no label, so without
+	// this the composition admits nodes that lost the label.
 	op := exec.NewNodeByIndexIntersectionScan(
-		parts[0].index.Index, parts[0].index.Lo, parts[0].index.Hi, extra)
+		parts[0].index.Index, parts[0].index.Lo, parts[0].index.Hi, extra).
+		RestrictToLabel(labelBitmapOf(g, lblScan.Label))
 	schema[nodeVar] = schemaWidth(schema)
 	indexIntersectBuildCount.Add(1)
 	return op, true
@@ -255,7 +259,7 @@ func recogniseIndexedConjunct(
 	prefixSeek bool,
 ) (indexRangeConjunct, bool) {
 	// String / prefix conjunct over a bound string btree.
-	if pred, ok := extractSingleStringCmp(e, nodeVar, prefixSeek); ok {
+	if pred, ok := extractSingleStringCmp(e, nodeVar, params, prefixSeek); ok {
 		if sub, found := findBoundStringBTree(idxMgr, label, pred.propKey); found {
 			lo, hi := boundsOf(pred.lo, pred.hi)
 			count, exact := budgetedStringRangeCount(sub, pred, budget)

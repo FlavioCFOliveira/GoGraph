@@ -34,9 +34,12 @@ import (
 // value's Kind is incompatible with the index's key type.
 var ErrIndexTypeMismatch = errors.New("exec: index type mismatch")
 
-// hashLookup is the minimal interface that NodeByIndexSeek requires.
+// HashLookup is the minimal interface that NodeByIndexSeek requires.
 // hash.Index[V] satisfies it for every supported V.
-type hashLookup interface {
+//
+// Exported so the engine's build path can name it when it chooses between the
+// guarded and unguarded seek forms in one place (rmp #2423).
+type HashLookup interface {
 	// LookupAppend appends the NodeIDs matching the seek value to dst in
 	// ascending order and returns the extended slice, draining the index's
 	// posting list under its read lock without materialising a bitmap.
@@ -50,8 +53,28 @@ type hashLookup interface {
 //
 // NodeByIndexSeek is NOT safe for concurrent use.
 type NodeByIndexSeek struct {
-	idx   hashLookup
-	seek  expr.Value
+	idx  HashLookup
+	seek expr.Value
+	// admit, when non-nil, is consulted for every candidate the index returns and
+	// drops the ones it rejects.
+	//
+	// # Why a seek needs a residual predicate at all (rmp #2423)
+	//
+	// This operator replaces a LABELLED scan: the planner rewrites
+	// Selection(n.prop = v) over NodeByLabelScan(L) into a bare seek on the index
+	// covering (L, prop). That is sound only if membership in the index implies the
+	// label, and it does NOT: an index is a CANDIDATE source that over-reports,
+	// because removing a label leaves the node's entries in that label's property
+	// indexes behind. Without a residual check the engine returned a node for the
+	// pattern (n:Person) whose labels(n) was the EMPTY LIST — one row contradicting
+	// itself.
+	//
+	// The label scan has never had this problem: it resolves through
+	// LabelBitmapAsOf, which filters the over-reporting bitmap against the reader's
+	// snapshot. This predicate is how the seek path gets the same guarantee, and the
+	// planner DECLINES the rewrite altogether when it cannot supply one — an
+	// unverifiable rewrite must not become a silent wrong answer.
+	admit func(nodeID uint64) bool
 	ctx   context.Context //nolint:containedctx // stored for per-Next ctx check
 	buf   [1]expr.Value   // fixed backing buffer — zero-alloc per Next
 	ids   []uint64        // matching NodeIDs, drained once at Init
@@ -60,8 +83,22 @@ type NodeByIndexSeek struct {
 }
 
 // NewNodeByIndexSeek creates a NodeByIndexSeek that looks up seekValue in idx.
-func NewNodeByIndexSeek(idx hashLookup, seekValue expr.Value) *NodeByIndexSeek {
+//
+// It carries NO residual predicate, so it is correct only where the index's
+// candidates need no further qualification. A rewrite that dropped a label must use
+// [NewNodeByIndexSeekAdmitting]; see [NodeByIndexSeek.admit].
+func NewNodeByIndexSeek(idx HashLookup, seekValue expr.Value) *NodeByIndexSeek {
 	return &NodeByIndexSeek{idx: idx, seek: seekValue}
+}
+
+// NewNodeByIndexSeekAdmitting is [NewNodeByIndexSeek] with a residual predicate
+// applied to every candidate the index returns — the label check a rewrite over a
+// labelled scan leaf owes (rmp #2423).
+//
+// admit must be non-nil; a caller with nothing to verify uses [NewNodeByIndexSeek]
+// so the distinction stays visible at the call site rather than hiding behind a nil.
+func NewNodeByIndexSeekAdmitting(idx HashLookup, seekValue expr.Value, admit func(nodeID uint64) bool) *NodeByIndexSeek {
+	return &NodeByIndexSeek{idx: idx, seek: seekValue, admit: admit}
 }
 
 // Init performs the index lookup, draining the matching NodeIDs into the
@@ -72,6 +109,20 @@ func (op *NodeByIndexSeek) Init(ctx context.Context) error {
 	ids, err := op.idx.LookupAppend(op.seek, op.idbuf[:0])
 	if err != nil {
 		return err
+	}
+	// The residual predicate is applied HERE, in place, rather than per Next: the
+	// filter runs once per candidate either way, and doing it at Init keeps Next's
+	// zero-allocation single-branch shape and lets rowCountHint-style consumers see the
+	// true count. Compacting in place reuses the same backing array, so a guarded
+	// seek allocates exactly what an unguarded one does.
+	if op.admit != nil {
+		kept := ids[:0]
+		for _, id := range ids {
+			if op.admit(id) {
+				kept = append(kept, id)
+			}
+		}
+		ids = kept
 	}
 	op.ids = ids
 	op.pos = 0
@@ -103,7 +154,7 @@ func (op *NodeByIndexSeek) Close() error {
 // StringHashIndex — production adapter over hash.Index[string]
 // ─────────────────────────────────────────────────────────────────────────────
 
-// StringHashIndex adapts hash.Index[string] to the [hashLookup] interface.
+// StringHashIndex adapts hash.Index[string] to the [HashLookup] interface.
 // It accepts only [expr.StringValue] seek keys; other kinds return
 // [ErrIndexTypeMismatch].
 type StringHashIndex struct {
@@ -119,7 +170,7 @@ func NewStringHashIndex(idx interface {
 	return &StringHashIndex{idx: idx}
 }
 
-// LookupAppend implements [hashLookup].
+// LookupAppend implements [HashLookup].
 func (h *StringHashIndex) LookupAppend(value expr.Value, dst []uint64) ([]uint64, error) {
 	sv, ok := value.(expr.StringValue)
 	if !ok {
@@ -128,7 +179,7 @@ func (h *StringHashIndex) LookupAppend(value expr.Value, dst []uint64) ([]uint64
 	return h.idx.LookupAppend(string(sv), dst), nil
 }
 
-// Int64HashIndex adapts hash.Index[int64] to the [hashLookup] interface.
+// Int64HashIndex adapts hash.Index[int64] to the [HashLookup] interface.
 // It accepts only [expr.IntegerValue] seek keys.
 type Int64HashIndex struct {
 	idx interface {
@@ -143,7 +194,7 @@ func NewInt64HashIndex(idx interface {
 	return &Int64HashIndex{idx: idx}
 }
 
-// LookupAppend implements [hashLookup].
+// LookupAppend implements [HashLookup].
 func (h *Int64HashIndex) LookupAppend(value expr.Value, dst []uint64) ([]uint64, error) {
 	iv, ok := value.(expr.IntegerValue)
 	if !ok {

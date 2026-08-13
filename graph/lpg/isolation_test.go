@@ -1,12 +1,15 @@
 package lpg
 
 import (
+	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
 
 // TestIsolation_CrossSubstructure_EdgeImpliesLabels proves the barrier flips a
@@ -210,6 +213,67 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 		violation atomic.Int64
 		reads     atomic.Int64
 		writeErr  atomic.Int64
+		// The first violating observation, so a failure names WHAT was seen
+		// rather than only how many times. The sibling oracle
+		// TestIsolation_CrossSubstructure_EdgeImpliesLabels was given this
+		// treatment at rmp #2378; this one was not, and when it fired it could
+		// say nothing about its own cause.
+		//
+		// The captured values are self-describing: the writer sets BOTH
+		// properties to the loop counter, so each value IS the iteration that
+		// wrote it and their difference is how many transactions apart the two
+		// reads landed. A difference of one is a single transaction observed
+		// half-applied; anything larger is a different suspect.
+		firstSeen atomic.Bool
+		firstIA   atomic.Int64
+		firstIB   atomic.Int64
+		// The same two properties re-read from the SAME pinned snapshot straight
+		// after the violation, plus that snapshot's start instant.
+		firstReA     atomic.Int64
+		firstReB     atomic.Int64
+		firstStartTS atomic.Uint64
+		// The per-shard substrate state, sampled AT the violation. This is the
+		// question the values alone cannot answer: a snapshot read falls through to
+		// the CURRENT bag when the shard holds no history (snapshot_read.go, the
+		// `sh.d != nil` gate) or when this node has no chain (propBagAsOfLocked),
+		// and a present-time read is indistinguishable from a correct one until you
+		// look. The previous cycle established for LABELS that both nodes held live
+		// chains at the violation; nothing has ever established it for PROPERTIES,
+		// which is this arm.
+		firstAFacts atomic.Value // string
+		firstBFacts atomic.Value // string
+		firstShared atomic.Value // string
+		firstWalkA  atomic.Value // string
+		firstWalkB  atomic.Value // string
+
+		// THE ABSOLUTE ORACLE, and the two continuous invariant checks beside it
+		// (rmp #2420). The equality oracle above only fires when two reads STRADDLE
+		// a write, so it needs a coincidence on top of the defect; this one fires on
+		// a SINGLE wrong read.
+		//
+		// The fixture hands it to us exactly: the seed transaction is the graph's
+		// first commit, so it publishes at instant 1 with both values 0, and
+		// iteration i is the (i+1)-th commit and publishes value i at instant i+1.
+		// A snapshot pinned at startTS must therefore read exactly startTS-1 in BOTH
+		// nodes — nothing else in this test allocates a commit instant (every write
+		// is inside one ApplyAtomicallyTx, and a bracket that versions nothing
+		// publishes none).
+		//
+		// A wrong ARITHMETIC premise would fire on essentially every read with a
+		// constant offset, which the capture reports, so the oracle diagnoses itself
+		// rather than manufacturing a defect.
+		absViolation atomic.Int64
+		absSeen      atomic.Bool
+		absFacts     atomic.Value // string
+		// slotLost counts reads taken while this reader's OWN horizon slot no longer
+		// announces its own start instant — the corruption that makes a live reader
+		// invisible to [mvcc.Horizon.Oldest] and lets the watermark advance past it.
+		// Checked on EVERY read rather than once per snapshot: the previous cycle
+		// checked the watermark only at snapshot birth, which cannot see a slot lost
+		// afterwards, and the whole window that matters is afterwards.
+		slotLost  atomic.Int64
+		slotSeen  atomic.Bool
+		slotFacts atomic.Value // string
 	)
 
 	wg.Add(1)
@@ -257,8 +321,67 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 					ia, _ := va.Int64()
 					ib, _ := vb.Int64()
 					reads.Add(1)
+					// Continuous, and in this order: the slot check first because it
+					// is two atomic loads and describes the state the reads just
+					// ran under, the absolute oracle second because it needs only
+					// the values already in hand.
+					if slotTS, occupied := g.horizon.SlotState(snap.slot); !occupied || slotTS != snap.startTS {
+						slotLost.Add(1)
+						if slotSeen.CompareAndSwap(false, true) {
+							slotFacts.Store(fmt.Sprintf(
+								"slot %d announced startTS=%d occupied=%v while THIS reader is live at startTS=%d "+
+									"(watermark now %d, active readers %d, unregistered %d, stale leaves %d)",
+								snap.slot, slotTS, occupied, snap.startTS,
+								g.horizon.Oldest(g.mvccClock.ReadTS()), g.horizon.Active(),
+								g.horizon.Unregistered(), g.horizon.StaleLeaves()))
+						}
+					}
+					if want := int64(snap.startTS) - 1; ia != want || ib != want {
+						absViolation.Add(1)
+						if absSeen.CompareAndSwap(false, true) {
+							_, sa := propChainFacts(g, "a")
+							_, sb := propChainFacts(g, "b")
+							slotTS, occupied := g.horizon.SlotState(snap.slot)
+							absFacts.Store(fmt.Sprintf(
+								"a.v=%d b.v=%d want=%d (offset a %+d, b %+d) startTS=%d; "+
+									"slot %d announces %d occupied=%v; watermark %d; active %d; unregistered %d; stale leaves %d; "+
+									"substrate a: %s | b: %s | %s; chain a %s; chain b %s",
+								ia, ib, want, ia-want, ib-want, snap.startTS,
+								snap.slot, slotTS, occupied,
+								g.horizon.Oldest(g.mvccClock.ReadTS()), g.horizon.Active(),
+								g.horizon.Unregistered(), g.horizon.StaleLeaves(),
+								sa, sb, headsShareRecord(g, "a", "b"),
+								chainWalk(g, "a", snap.startTS), chainWalk(g, "b", snap.startTS)))
+						}
+					}
 					if ia != ib {
 						violation.Add(1)
+						// Only the FIRST observation is kept, via CompareAndSwap:
+						// it is the one whose interleaving is least perturbed by
+						// the recording.
+						if firstSeen.CompareAndSwap(false, true) {
+							firstIA.Store(ia)
+							firstIB.Store(ib)
+							// RE-READ THE SAME PINNED SNAPSHOT. This separates the two
+							// possibilities that the values alone cannot: if the same
+							// snapshot now AGREES, the tear was a transient window and
+							// something the read consulted changed between the two
+							// reads; if it still DISAGREES, this snapshot resolves the
+							// two nodes inconsistently as a matter of state, and that
+							// state can then be dissected at leisure instead of chased.
+							ra, _ := mustInt64(view.GetNodeProperty("a", "v"))
+							rb, _ := mustInt64(view.GetNodeProperty("b", "v"))
+							firstReA.Store(ra)
+							firstReB.Store(rb)
+							firstStartTS.Store(snap.startTS)
+							_, sa := propChainFacts(g, "a")
+							_, sb := propChainFacts(g, "b")
+							firstAFacts.Store(sa)
+							firstBFacts.Store(sb)
+							firstShared.Store(headsShareRecord(g, "a", "b"))
+							firstWalkA.Store(chainWalk(g, "a", snap.startTS))
+							firstWalkB.Store(chainWalk(g, "b", snap.startTS))
+						}
 					}
 				}()
 				if stop {
@@ -273,10 +396,259 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 		t.Fatalf("writer hit %d errors", writeErr.Load())
 	}
 	if v := violation.Load(); v != 0 {
-		t.Fatalf("observed %d partial-transaction violations (a.v != b.v inside a pinned SNAPSHOT)", v)
+		ia, ib := firstIA.Load(), firstIB.Load()
+		ra, rb := firstReA.Load(), firstReB.Load()
+		persistence := "TRANSIENT — the same pinned snapshot AGREED on re-read, so something the read consulted changed between the two reads"
+		if ra != rb {
+			persistence = "PERSISTENT — the same pinned snapshot STILL disagreed on re-read, so this snapshot resolves the two nodes inconsistently as a matter of state"
+		}
+		t.Fatalf("observed %d partial-transaction violations (a.v != b.v inside a pinned SNAPSHOT); "+
+			"first observation a.v=%d b.v=%d (delta %d, %s); re-read of the SAME snapshot (startTS=%d) gave a.v=%d b.v=%d — %s; "+
+			"substrate at the violation: a: %s | b: %s | %s; chain a %s; chain b %s",
+			v, ia, ib, ia-ib, tearDirection(ia, ib),
+			firstStartTS.Load(), ra, rb, persistence,
+			firstAFacts.Load(), firstBFacts.Load(), firstShared.Load(),
+			firstWalkA.Load(), firstWalkB.Load())
 	}
 	if reads.Load() == 0 {
 		t.Fatal("readers never observed both properties; test did not exercise the invariant")
+	}
+	// Reported AFTER the equality oracle so a run that trips both keeps the
+	// historical failure message first, and as Errorf so one run reports every
+	// oracle it broke rather than only the first.
+	if n := slotLost.Load(); n != 0 {
+		t.Errorf("a live reader's horizon slot stopped announcing its own start instant %d time(s) in %d reads: %v",
+			n, reads.Load(), slotFacts.Load())
+	}
+	if n := g.horizon.StaleLeaves(); n != 0 {
+		t.Errorf("horizon released an unheld slot %d time(s): a slot was returned twice or a slot number was invented, "+
+			"which silently removes another reader from the reclamation watermark", n)
+	}
+	if n := g.vac.wmRegress.Load(); n != 0 {
+		t.Errorf("the reclamation watermark moved BACKWARDS %d time(s), first from %d to %d: a live reader stopped being "+
+			"represented in it, so versions it could still reach became reclaimable",
+			n, g.vac.wmRegressFrom.Load(), g.vac.wmRegressTo.Load())
+	}
+	if n := absViolation.Load(); n != 0 {
+		t.Errorf("ABSOLUTE oracle: %d read(s) of %d returned a value other than the one committed at the snapshot's own instant; "+
+			"first: %v", n, reads.Load(), absFacts.Load())
+	}
+}
+
+// propChainFacts encodes, for one node key, the per-shard substrate state a
+// snapshot read of it would have consulted. It is packed into a uint64 so the
+// capture is a single atomic store on a path that must perturb the interleaving
+// as little as possible.
+//
+// Layout: bit 0 set when the SHARD holds no history at all (the `sh.d != nil`
+// gate declines and the read returns the current bag); bit 1 set when the shard
+// has history but THIS NODE has no chain (propBagAsOfLocked returns the current
+// bag); the remaining bits carry the head record's stamp, which is 0 when there
+// is no head.
+//
+// Either of the first two bits being set at a violation would mean the read was a
+// present-time read rather than an as-of-snapshot one, which is a materially
+// different defect from a mis-ordered visibility decision.
+// It returns the stamp UNMODIFIED, and reports the two absent cases through a
+// separate return value rather than through reserved bits of the stamp.
+//
+// # An earlier version packed both into one word, and that destroyed the signal
+//
+// It returned `stampTS() << 2` with the low two bits as flags. A stamp is not a
+// small number: an IN-FLIGHT record carries the transaction id, which is
+// [mvcc.TxIDBase] + k = 2^63 + k, so the shift OVERFLOWED and
+// (2^63+k)<<2 mod 2^64 == 4k. The decoder's >>2 then printed k — a plausible
+// small integer that looked exactly like a commit timestamp. The first captured
+// violation reported "head stamped 85468", which was never a timestamp at all but
+// the sequence number of a transaction that was still IN FLIGHT, and the one fact
+// that mattered — that this node's head was uncommitted — was the fact the
+// encoding erased.
+//
+// Hence: no packing, no reserved bits, and the in-flight case named explicitly.
+func propChainFacts(g *Graph[string, int64], key string) (stamp uint64, state string) {
+	id, ok := g.adj.Mapper().Lookup(key)
+	if !ok {
+		return 0, "NO SUCH NODE"
+	}
+	sh := g.nodePropShardFor(id)
+	sh.mu.RLock()
+	defer sh.mu.RUnlock()
+	if sh.d == nil {
+		return 0, "SHARD HELD NO HISTORY — the read returned the CURRENT bag, not an as-of-snapshot one"
+	}
+	d := sh.d[id]
+	if d == nil {
+		return 0, "NODE HAD NO CHAIN — the read returned the CURRENT bag, not an as-of-snapshot one"
+	}
+	ts := d.stampTS()
+	switch {
+	case ts == mvcc.AbortedTS:
+		return ts, "live chain, head ABORTED"
+	case ts >= mvcc.TxIDBase:
+		return ts, fmt.Sprintf("live chain, head IN FLIGHT as transaction %d", ts-mvcc.TxIDBase)
+	default:
+		return ts, fmt.Sprintf("live chain, head COMMITTED at %d", ts)
+	}
+}
+
+// chainWalk renders the head of id's version chain as the sequence of stamps a
+// reader would step through, and reports whether the record needed to resolve as
+// of startTS is actually THERE.
+//
+// # Existence is not completeness, and that is the whole point (rmp #2420)
+//
+// [propChainFacts] establishes that a chain is live. A live chain can still be
+// missing the one record a given snapshot needs: the walk in propBagAsOfLocked
+// undoes records while they are invisible and stops at the first visible one, so
+// if the record stamped startTS+1 is absent, the value it superseded can never be
+// restored and the read keeps a write it should have undone. That is exactly the
+// shape of the captured violations, where the second read was over-visible by one
+// to three transactions.
+//
+// Sampled after the fact, so the chain may have grown at the head — but a record
+// that is ABSENT cannot reappear, because records are only ever prepended or
+// reclaimed. A gap seen here was therefore a gap at read time.
+func chainWalk(g *Graph[string, int64], key string, startTS uint64) string {
+	id, ok := g.adj.Mapper().Lookup(key)
+	if !ok {
+		return "no such node"
+	}
+	sh := g.nodePropShardFor(id)
+	sh.mu.RLock()
+	defer sh.mu.RUnlock()
+	d := sh.d[id]
+	if d == nil {
+		return "no chain"
+	}
+	const maxWalk = 24
+	var (
+		stamps    []string
+		n         int
+		sawNeeded bool
+		prev      uint64
+		gapAt     = ""
+	)
+	for ; d != nil && n < maxWalk; d, n = d.next, n+1 {
+		ts := d.stampTS()
+		switch {
+		case ts == mvcc.AbortedTS:
+			stamps = append(stamps, "ABORTED")
+		case ts >= mvcc.TxIDBase:
+			stamps = append(stamps, fmt.Sprintf("inflight:%d", ts-mvcc.TxIDBase))
+		default:
+			stamps = append(stamps, fmt.Sprintf("%d", ts))
+			if ts == startTS+1 {
+				sawNeeded = true
+			}
+			// A committed chain should descend by one per transaction on this
+			// fixture, since every transaction writes this property exactly once.
+			if n > 0 && prev > ts+1 && gapAt == "" {
+				gapAt = fmt.Sprintf(" GAP between %d and %d", prev, ts)
+			}
+			prev = ts
+		}
+	}
+	more := ""
+	if d != nil {
+		more = ", …"
+	}
+	needed := "the record stamped startTS+1 is PRESENT"
+	if !sawNeeded {
+		needed = fmt.Sprintf("THE RECORD STAMPED startTS+1 (%d) IS ABSENT from the walked prefix", startTS+1)
+	}
+	return fmt.Sprintf("[%s%s] — %s%s", joinStamps(stamps), more, needed, gapAt)
+}
+
+// joinStamps is strings.Join without importing strings for one call.
+func joinStamps(s []string) string {
+	out := ""
+	for i, v := range s {
+		if i > 0 {
+			out += ","
+		}
+		out += v
+	}
+	return out
+}
+
+// headsShareRecord reports whether the two nodes' chain heads carry the SAME
+// commit record. That is the premise the whole isolation guarantee rests on here:
+// both properties are written inside ONE ApplyAtomicallyTx, so their deltas must
+// share one *commitInfo and therefore commit at one instant. If they ever do not,
+// the two writes commit separately and a snapshot landing between them sees a
+// partial transaction — which is exactly the failure mode this file's other test
+// documents for the bare autocommit path.
+//
+// It is sampled at the violation rather than asserted up front because a
+// quiescent check already passes; the question is whether it still holds under
+// the interleaving that produces the tear.
+func headsShareRecord(g *Graph[string, int64], ka, kb string) string {
+	ia, oka := g.adj.Mapper().Lookup(ka)
+	ib, okb := g.adj.Mapper().Lookup(kb)
+	if !oka || !okb {
+		return "record comparison unavailable (a node was absent)"
+	}
+	ra, oka := headRecord(g, ia)
+	rb, okb := headRecord(g, ib)
+	switch {
+	case !oka || !okb:
+		return "record comparison unavailable (a chain was absent)"
+	case ra == nil || rb == nil:
+		return fmt.Sprintf("AT LEAST ONE HEAD CARRIES NO RECORD (a=%v b=%v) — that write took a fresh instant of its own", ra != nil, rb != nil)
+	case ra == rb:
+		return "both heads share ONE commit record, as the transaction requires"
+	default:
+		return "THE TWO HEADS CARRY DIFFERENT COMMIT RECORDS — the two writes of one transaction did not commit together"
+	}
+}
+
+// headRecord returns the commit record of id's chain head.
+func headRecord(g *Graph[string, int64], id graph.NodeID) (*commitInfo, bool) {
+	sh := g.nodePropShardFor(id)
+	sh.mu.RLock()
+	defer sh.mu.RUnlock()
+	if sh.d == nil {
+		return nil, false
+	}
+	d := sh.d[id]
+	if d == nil {
+		return nil, false
+	}
+	return d.info, true
+}
+
+// mustInt64 unwraps a property read for the diagnostic re-read, reporting -1 for
+// an absent key so a missing property is distinguishable from a real value
+// rather than silently reading as zero.
+func mustInt64(v PropertyValue, ok bool) (int64, bool) {
+	if !ok {
+		return -1, false
+	}
+	i, iok := v.Int64()
+	if !iok {
+		return -2, false
+	}
+	return i, true
+}
+
+// tearDirection classifies a partial-transaction observation by which of the two
+// reads saw the newer transaction. The reader reads "a" and then "b" from one
+// pinned snapshot, and the writer sets both to the same loop counter, so the
+// values order the two reads against the writer's timeline.
+//
+// The two directions have different suspects, which is the whole point of
+// recording it: a later-read-is-newer tear means the visibility basis moved
+// FORWARD between the two reads (a version the snapshot still needed stopped
+// being resolved as-of that snapshot), whereas an earlier-read-is-newer tear
+// means the second read undid more than it should have.
+func tearDirection(ia, ib int64) string {
+	switch {
+	case ia < ib:
+		return "the LATER read (b) saw the newer transaction — the visibility basis moved FORWARD between the two reads"
+	case ia > ib:
+		return "the EARLIER read (a) saw the newer transaction — the later read undid a change its snapshot should have kept"
+	default:
+		return "values equal — the capture did not record the violating pair"
 	}
 }
 

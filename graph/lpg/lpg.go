@@ -411,8 +411,24 @@ type Graph[N comparable, W any] struct {
 	// stores key by the immutable per-edge handle allocated by
 	// [Graph.AddEdgeH], so the read path resolves an edge's type and
 	// properties by an identity that survives sibling-edge deletion.
-	// Populated only in multigraph mode (one handle per CREATE); see
-	// edge_handle.go.
+	//
+	// Populated in BOTH storage modes, not only in multigraph mode. This
+	// comment used to claim the latter, and the memory audit of 2026-08-11
+	// measured otherwise (rmp #2402): a Cypher CREATE costs the same per
+	// relationship with adjlist.Config.Multigraph false as with it true, to
+	// within 0.01 %, and a heap profile of the simple-graph arm still
+	// attributes ~45 % of the graph to these stores. The reason is that
+	// cypher/exec.CreateRelationship calls [Graph.AddEdgeH] unconditionally
+	// and the adjacency stamps a handle on the new slot in either mode, so
+	// the read path resolves by handle in either mode too.
+	//
+	// The one case in which a write here is genuinely unreachable is a
+	// DUPLICATE (src, dst) in simple-graph storage: the append is collapsed,
+	// no slot carries the returned handle, and the entry written under it can
+	// never be resolved. That is a small residual waste on a path that is
+	// already discarding the caller's edge, not the general case.
+	//
+	// See edge_handle.go.
 	edgeHandleLabelShards [propMapShards]edgeHandleLabelShard
 	edgeHandlePropShards  [propMapShards]edgeHandlePropShard
 

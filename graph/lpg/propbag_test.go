@@ -109,8 +109,8 @@ func TestPropBag_PromotionThreshold(t *testing.T) {
 	if b.m == nil {
 		t.Fatalf("did not promote at %d entries", smallBagMax+1)
 	}
-	if b.pairs != nil {
-		t.Fatal("promoted bag still holds a pairs slice")
+	if b.buf != nil {
+		t.Fatal("promoted bag still holds an encoded buffer")
 	}
 	if b.len() != smallBagMax+1 {
 		t.Fatalf("promoted len = %d, want %d", b.len(), smallBagMax+1)

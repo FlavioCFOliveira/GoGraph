@@ -49,6 +49,40 @@ func newBtreeStringEngine(t *testing.T, n int, extra ...map[string]any) *cypher.
 	return eng
 }
 
+// newBtreeStringScanEngine is newBtreeStringEngine with the range seek turned
+// OFF, which is how the differential below obtains a genuine scan arm.
+//
+// It used to obtain one by writing the predicate with a PARAMETER, because the
+// string extractor declined parameters. Parameters now seek (rmp #2414), which
+// silently collapsed that arm onto the seek and left the differential comparing
+// a plan against itself — so the scan arm is now forced by the knob that exists
+// for it rather than by a limitation that happened to be there.
+func newBtreeStringScanEngine(t *testing.T, n int, extra ...map[string]any) *cypher.Engine {
+	t.Helper()
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	g.SetIndexManager(index.NewManager())
+	eng := cypher.NewEngineWithOptions(g, cypher.EngineOptions{DisableRangeIndexSeek: true})
+	ctx := context.Background()
+	run := func(cy string, params map[string]any) {
+		t.Helper()
+		res, err := eng.RunInTxAny(ctx, cy, params)
+		if err != nil {
+			t.Fatalf("%s: %v", cy, err)
+		}
+		if cerr := res.Close(); cerr != nil {
+			t.Fatalf("%s: close: %v", cy, cerr)
+		}
+	}
+	for i := 0; i < n; i++ {
+		run("CREATE (:K {sk: $s})", map[string]any{"s": fmt.Sprintf("s%d", i)})
+	}
+	for _, e := range extra {
+		run("CREATE (:K {sk: $s})", e)
+	}
+	run("CREATE INDEX k_sk FOR (n:K) ON (n.sk) OPTIONS {indexType: 'btree'}", nil)
+	return eng
+}
+
 // rowsFor runs a read query and returns the sk values it produced, sorted.
 func rowsFor(t *testing.T, eng *cypher.Engine, cy string, params map[string]any) []string {
 	t.Helper()
@@ -139,11 +173,11 @@ func TestBTreeStringEq_SeekAndScanAgree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Explain seek arm: %v", err)
 	}
-	scanBound, err := cypher.BindParams(map[string]any{"k": "s42"})
-	if err != nil {
-		t.Fatalf("bind: %v", err)
-	}
-	scanPlan, err := eng.Explain("MATCH (a:K) WHERE a.sk = $k RETURN a.sk AS k", scanBound)
+	scanEng := newBtreeStringScanEngine(t, 2000,
+		map[string]any{"s": empty},
+		map[string]any{"s": multi},
+	)
+	scanPlan, err := scanEng.Explain(`MATCH (a:K {sk: "s42"}) RETURN a.sk AS k`, nil)
 	if err != nil {
 		t.Fatalf("Explain scan arm: %v", err)
 	}
@@ -167,9 +201,10 @@ func TestBTreeStringEq_SeekAndScanAgree(t *testing.T) {
 			// Seek arm: literal key, so the rewrite fires.
 			seek := rowsFor(t, eng,
 				fmt.Sprintf("MATCH (a:K {sk: %q}) RETURN a.sk AS k", key), nil)
-			// Scan arm: parameterised key, which the rewrite declines.
-			scan := rowsFor(t, eng,
-				"MATCH (a:K) WHERE a.sk = $k RETURN a.sk AS k", map[string]any{"k": key})
+			// Scan arm: the SAME query on an engine with the range seek
+			// disabled, so the two arms differ in the access path alone.
+			scan := rowsFor(t, scanEng,
+				fmt.Sprintf("MATCH (a:K {sk: %q}) RETURN a.sk AS k", key), nil)
 
 			if len(seek) != len(scan) {
 				t.Fatalf("seek returned %d rows, scan returned %d for key %q\nseek=%v\nscan=%v",

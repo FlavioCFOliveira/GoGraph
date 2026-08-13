@@ -102,16 +102,6 @@ type preimageDelta[V any] struct {
 	had bool
 }
 
-// mustUndo reports whether a reader at (startTS, txID) must step back over this
-// record — the same three cases, in the same order, as [nodeLabelDelta.mustUndo].
-func (d *preimageDelta[V]) mustUndo(startTS, txID uint64) bool {
-	ts := d.ts
-	if d.info != nil {
-		ts = d.info.TS()
-	}
-	return !mvcc.Visible(ts, startTS, txID)
-}
-
 // sideVersions is the sparse chain index for one shard of a side store.
 //
 // The map is allocated on the first write, so a shard nothing has written keeps
@@ -196,7 +186,21 @@ func (sv *sideVersions[K, V]) push(k K, pre V, had bool, info *commitInfo, ts ui
 //
 // curHad distinguishes "absent" from "present and zero", which matters for a
 // store whose zero value is a legitimate empty set.
-func (sv *sideVersions[K, V]) asOf(k K, cur V, curHad bool, startTS, txID uint64) (V, bool) {
+// asOfSnap is [sideVersions.asOf] resolved through the SNAPSHOT's pinned verdict
+// rather than a live read of each record's commit stamp.
+//
+// Every per-edge side store — edge labels, edge properties, and their by-handle
+// forms — read through the timestamped form, so a snapshot's correlated reads
+// each re-decided visibility against [mvcc.CommitInfo.TS], a MUTABLE field that
+// flips at commit. That is the defect [Snapshot.visible] exists to close, and it
+// reached only the adjacency and one label accessor when it landed for rmp #2378;
+// see [Graph.propBagAsOfLockedSnap] for the full account.
+//
+// A nil snapshot resolves straight through in [Snapshot.visible], so a caller
+// that holds none keeps the old behaviour exactly. There is no timestamped form
+// beside this one: every caller of the side stores has a snapshot in hand, which
+// is precisely why the old form went unnoticed reading the mutable stamp live.
+func (sv *sideVersions[K, V]) asOfSnap(k K, cur V, curHad bool, snap *Snapshot, startTS, txID uint64) (V, bool) {
 	if sv.d == nil {
 		return cur, curHad
 	}
@@ -206,7 +210,7 @@ func (sv *sideVersions[K, V]) asOf(k K, cur V, curHad bool, startTS, txID uint64
 	}
 	val, had := cur, curHad
 	for ; d != nil; d = d.next {
-		if !d.mustUndo(startTS, txID) {
+		if snap.visible(d.info, d.ts, startTS, txID) {
 			break
 		}
 		val, had = d.pre, d.had

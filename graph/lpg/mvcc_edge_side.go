@@ -105,7 +105,7 @@ func (g *Graph[N, W]) overflowLabelsAsOf(sh *edgeLabelShard, k edgeKey, s *Snaps
 	if s == nil || sh.v.empty() {
 		return cur
 	}
-	out, had := sh.v.asOf(k, cur, cur != nil, s.startTS, s.txID)
+	out, had := sh.v.asOfSnap(k, cur, cur != nil, s, s.startTS, s.txID)
 	if !had {
 		return nil
 	}
@@ -134,9 +134,9 @@ func (g *Graph[N, W]) pushHandleLabelVersion(sh *edgeHandleLabelShard, k edgeKey
 	}
 	var pre labelBag
 	had := false
-	if byHandle, ok := sh.m[k]; ok {
+	if im, ok := sh.m[k]; ok {
 		var bag labelBag
-		bag, had = byHandle[handle]
+		bag, had = im.get(handle)
 		if had {
 			pre = cloneLabelBag(bag)
 		}
@@ -156,13 +156,14 @@ func (g *Graph[N, W]) handleLabelBagAsOf(sh *edgeHandleLabelShard, k edgeKey, ha
 	// walk lives in a separate function, so the fast path stays small enough to
 	// inline. A first version that folded the walk in here cost 6.4 ns on
 	// BenchmarkEdgeSideRead_LabelsByHandle — a fifth of the whole read, paid by
-	// workloads that never write. Indexing the nil inner map is deliberate: Go
-	// returns the zero value and false, which is exactly "no record".
-	bag, had := sh.m[k][handle]
+	// workloads that never write. Indexing the nil OUTER map is deliberate: Go
+	// returns the zero instMap, whose get reports "no record".
+	im := sh.m[k]
+	bag, had := im.get(handle)
 	if s == nil || sh.v.empty() {
 		return bag, had
 	}
-	return sh.v.asOf(edgeHandleKey{pair: k, handle: handle}, bag, had, s.startTS, s.txID)
+	return sh.v.asOfSnap(edgeHandleKey{pair: k, handle: handle}, bag, had, s, s.startTS, s.txID)
 }
 
 // ── per-handle properties ────────────────────────────────────────────────────
@@ -182,9 +183,9 @@ func (g *Graph[N, W]) pushHandlePropVersion(sh *edgeHandlePropShard, k edgeKey, 
 	}
 	var pre propBag
 	had := false
-	if byHandle, ok := sh.m[k]; ok {
+	if im, ok := sh.m[k]; ok {
 		var bag propBag
-		bag, had = byHandle[handle]
+		bag, had = im.get(handle)
 		if had {
 			pre = clonePropBag(bag)
 		}
@@ -211,9 +212,9 @@ func (g *Graph[N, W]) pushInstanceLabelVersion(sh *edgeInstanceLabelShard, k edg
 	}
 	var pre labelBag
 	had := false
-	if byIdx, ok := sh.m[k]; ok {
+	if im, ok := sh.m[k]; ok {
 		var bag labelBag
-		bag, had = byIdx[idx]
+		bag, had = im.get(idx)
 		if had {
 			pre = cloneLabelBag(bag)
 		}
@@ -238,9 +239,9 @@ func (g *Graph[N, W]) pushInstancePropVersion(sh *edgeInstancePropShard, k edgeK
 	}
 	var pre propBag
 	had := false
-	if byIdx, ok := sh.m[k]; ok {
+	if im, ok := sh.m[k]; ok {
 		var bag propBag
-		bag, had = byIdx[idx]
+		bag, had = im.get(idx)
 		if had {
 			pre = clonePropBag(bag)
 		}
@@ -255,7 +256,7 @@ func (g *Graph[N, W]) pushInstancePropVersion(sh *edgeInstancePropShard, k edgeK
 // clearEdgePairState drops a whole pair's per-instance metadata in one map
 // delete once the last edge between the endpoints is gone. A reader from before
 // that must still see all of it, so every instance the pair held needs its own
-// pre-image recorded. The loops are over the pair's own inner map, so their
+// pre-image recorded. The walks are over the pair's own [instMap], so their
 // cost is the number of parallel edges the pair had, and they run only on the
 // path that is already deleting them.
 //
@@ -269,48 +270,52 @@ func (g *Graph[N, W]) pushHandleLabelVersionsForPair(sh *edgeHandleLabelShard, k
 	if !g.mvccArmed {
 		return true
 	}
-	for handle := range sh.m[k] {
-		if !g.pushHandleLabelVersion(sh, k, handle, tx) {
-			return false
-		}
-	}
-	return true
+	im := sh.m[k]
+	ok := true
+	im.forEachKey(func(handle uint64) bool {
+		ok = g.pushHandleLabelVersion(sh, k, handle, tx)
+		return ok
+	})
+	return ok
 }
 
 func (g *Graph[N, W]) pushHandlePropVersionsForPair(sh *edgeHandlePropShard, k edgeKey, tx *writeCtx) bool {
 	if !g.mvccArmed {
 		return true
 	}
-	for handle := range sh.m[k] {
-		if !g.pushHandlePropVersion(sh, k, handle, tx) {
-			return false
-		}
-	}
-	return true
+	im := sh.m[k]
+	ok := true
+	im.forEachKey(func(handle uint64) bool {
+		ok = g.pushHandlePropVersion(sh, k, handle, tx)
+		return ok
+	})
+	return ok
 }
 
 func (g *Graph[N, W]) pushInstanceLabelVersionsForPair(sh *edgeInstanceLabelShard, k edgeKey, tx *writeCtx) bool {
 	if !g.mvccArmed {
 		return true
 	}
-	for idx := range sh.m[k] {
-		if !g.pushInstanceLabelVersion(sh, k, idx, tx) {
-			return false
-		}
-	}
-	return true
+	im := sh.m[k]
+	ok := true
+	im.forEachKey(func(idx int64) bool {
+		ok = g.pushInstanceLabelVersion(sh, k, idx, tx)
+		return ok
+	})
+	return ok
 }
 
 func (g *Graph[N, W]) pushInstancePropVersionsForPair(sh *edgeInstancePropShard, k edgeKey, tx *writeCtx) bool {
 	if !g.mvccArmed {
 		return true
 	}
-	for idx := range sh.m[k] {
-		if !g.pushInstancePropVersion(sh, k, idx, tx) {
-			return false
-		}
-	}
-	return true
+	im := sh.m[k]
+	ok := true
+	im.forEachKey(func(idx int64) bool {
+		ok = g.pushInstancePropVersion(sh, k, idx, tx)
+		return ok
+	})
+	return ok
 }
 
 // ── reclamation ──────────────────────────────────────────────────────────────

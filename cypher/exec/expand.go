@@ -700,7 +700,7 @@ func (op *Expand) advanceRevEdge() (src, edge, dst int64, st edgeStatus) {
 	// CSR. The scan is O(deg(dst)) per reverse edge; acceptable for typical
 	// graphs where in-degree and out-degree are bounded.
 	if op.edgeType != "" {
-		if !op.reverseEdgePassesFilter(uint64(d), uint64(op.srcID)) {
+		if !op.reverseEdgePassesFilter(uint64(d), uint64(op.srcID), pos) {
 			return 0, 0, 0, edgeSkip // filtered out; caller retries
 		}
 	}
@@ -737,30 +737,69 @@ func (op *Expand) advanceRevEdge() (src, edge, dst int64, st edgeStatus) {
 	return op.srcID, edgeID, int64(d), edgeEmit
 }
 
-// reverseEdgePassesFilter reports whether the forward edge (dst → src),
-// corresponding to a reverse traversal from src to dst, has an
-// edge-type filter entry. It scans the forward CSR's outgoing range of
-// dst to locate the position of the (dst → src) edge, then consults the
-// edge-type filter map. Returns true on no match (edge type filter
-// declined the edge).
-func (op *Expand) reverseEdgePassesFilter(dst, src uint64) bool {
+// reverseEdgePassesFilter reports whether the reverse-CSR slot revPos — the
+// traversal from src back to dst, whose forward edge is (dst → src) — is of a
+// type the query's edge-type filter admits. The filter is keyed by FORWARD
+// position, so the reverse slot must be mapped to its own forward slot before it
+// can be tested.
+//
+// # It must resolve the INSTANCE, not the pair (rmp #2250)
+//
+// Resolving the pair by lower bound alone returns the FIRST forward slot with
+// this destination, and that verdict was then applied to every parallel edge of
+// the pair. With `(a)-[:T1]->(b)` and `(a)-[:T2]->(b)` both present, a reverse
+// `()<-[r:T1]-()` counted BOTH slots and `()<-[r:T2]-()` counted NEITHER — a
+// silent over-count on one type and a silent zero on every other, while the
+// forward direction of the identical data was correct. That is the same class of
+// defect [revTypeAdmitSet] was built for on the shortestPath side (#2236): a
+// reverse-side type test that resolves the position first is either slow or
+// permissive, and permissive is indistinguishable from correct until someone
+// counts.
+//
+// The reverse slot carries the handle that identifies its own instance, and
+// since rmp #2141/#2142 the forward run for a pair is contiguous, so the exact
+// sibling is found by [matchFwdByHandle] in O(log d + r) over that run — no
+// O(V+E) table, which matters because Init runs once per outer row here.
+//
+// The lower bound remains the fallback for a CSR carrying no handles (a
+// non-multigraph or a legacy snapshot). There a pair occupies a single slot, so
+// the first match IS the instance and the two agree.
+func (op *Expand) reverseEdgePassesFilter(dst, src, revPos uint64) bool {
 	if op.edgeTypeFilter == nil {
 		return true // no filter declared → accept all
 	}
 	if dst+1 >= uint64(len(op.fwdVerts)) {
 		return false
 	}
-	// O(log d) since rmp #2142. The prior linear scan consulted the filter for
-	// the FIRST matching slot only and returned immediately, so the lower bound
-	// reproduces its decision exactly, including for parallel edges.
-	fwdPos, ok := firstDstPos(op.fwdEdges, op.fwdVerts[dst], op.fwdVerts[dst+1], src)
+	fStart, fEnd := op.fwdVerts[dst], op.fwdVerts[dst+1]
+	// Membership in the filter map is sufficient — the map only
+	// contains edges of accepted types (multi-type [r:A|B] support).
+	if op.handlesUsable() && revPos < uint64(len(op.revHandles)) {
+		if fp := matchFwdByHandle(
+			op.fwdEdges, op.fwdHandles, fStart, fEnd, src, op.revHandles[revPos],
+		); fp != unresolvedFwdPos {
+			_, admitted := op.edgeTypeFilter[fp]
+			return admitted
+		}
+		// Unresolved: this slot carries a handle no forward sibling of the pair
+		// has, which a consistent CSR pair cannot produce. Fall through to the
+		// pair-level answer rather than silently dropping the edge.
+	}
+	fwdPos, ok := firstDstPos(op.fwdEdges, fStart, fEnd, src)
 	if !ok {
 		return false
 	}
-	// Membership in the filter map is sufficient — the map only
-	// contains edges of accepted types (multi-type [r:A|B] support).
 	_, admitted := op.edgeTypeFilter[fwdPos]
 	return admitted
+}
+
+// handlesUsable reports whether both handle columns are present and long enough
+// to index alongside their edge columns, which is the precondition every
+// by-handle disambiguation in this operator shares.
+func (op *Expand) handlesUsable() bool {
+	return op.fwdHandles != nil && op.revHandles != nil &&
+		len(op.fwdHandles) >= len(op.fwdEdges) &&
+		len(op.revHandles) >= len(op.revEdges)
 }
 
 // advanceInput pulls the next row from the child operator and loads the

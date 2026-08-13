@@ -76,7 +76,7 @@ func TestEdgePropCols_DateFoldsToInt32(t *testing.T) {
 	if col.days == nil {
 		t.Fatalf("date column has no int32 epoch-day backing")
 	}
-	if col.i64 != nil || col.str != nil || col.boxed != nil {
+	if col.nums != nil || col.str != nil || col.boxed != nil {
 		t.Fatalf("date column unexpectedly allocated a non-date backing")
 	}
 	// 2020-01-15 is 18276 days after the Unix epoch.
@@ -526,11 +526,11 @@ func poisonValues(col *edgePropColumn) {
 	for i := 0; i < n; i++ {
 		switch col.kind {
 		case PropInt64:
-			col.i64[i] = math.MaxInt64
+			col.nums[i] = uint64(math.MaxInt64)
 		case PropFloat64:
-			col.f64[i] = math.NaN()
+			col.nums[i] = math.Float64bits(math.NaN())
 		case PropBool:
-			col.boolBits[i>>6] = ^uint64(0)
+			col.nums[i>>6] = ^uint64(0)
 		case dateKind:
 			col.days[i] = math.MaxInt32
 		case PropString:
@@ -807,7 +807,7 @@ func TestEdgePropCols_DatePacksAtCompact(t *testing.T) {
 // int32 backing.
 func datesColBytes(col *edgePropColumn) int {
 	if col.packedDate {
-		return cap(col.packed)*8 + forHeaderBytes
+		return cap(col.nums)*8 + forHeaderBytes
 	}
 	return cap(col.days) * 4
 }
@@ -879,8 +879,8 @@ func TestEdgePropCols_DateConstantColumnWidth0(t *testing.T) {
 	if pc.forWidth != 0 {
 		t.Fatalf("forWidth = %d, want 0 for a constant column", pc.forWidth)
 	}
-	if pc.packed != nil {
-		t.Fatalf("constant column allocated a packed slice (%d words), want nil", len(pc.packed))
+	if pc.nums != nil {
+		t.Fatalf("constant column allocated a packed slice (%d words), want nil", len(pc.nums))
 	}
 	for i := 0; i < n; i++ {
 		got, ok := pc.slotValue(i)
@@ -1134,7 +1134,7 @@ func BenchmarkDateColumnPacking(b *testing.B) {
 	}
 
 	plainBytes := cap(plainCol.days) * 4
-	packedBytes := cap(packedCol.packed)*8 + forHeaderBytes
+	packedBytes := cap(packedCol.nums)*8 + forHeaderBytes
 	// Log the headline before/after so the evidence is visible even when the
 	// benchmark formatter suppresses same-unit custom metric columns.
 	b.Logf("date column value backing: plain=%d B (%.3f B/slot) -> packed=%d B (%.3f B/slot), %.1f%% smaller",

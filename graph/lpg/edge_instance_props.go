@@ -18,7 +18,7 @@ import (
 // #1633), stored by value, so a 1-2-property edge instance pays a small slice
 // instead of a ~300 B Go map.
 type edgeInstancePropShard struct {
-	m map[edgeKey]map[int64]propBag
+	m map[edgeKey]instMap[int64, propBag]
 	// v indexes the pre-image chains of the instances a writer has touched.
 	// See [edgeInstanceLabelShard].v.
 	v sideVersions[edgeInstanceKey, propBag]
@@ -64,22 +64,20 @@ func (g *Graph[N, W]) setEdgePropertyAtInfo(src, dst N, idx int64, key string, v
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	if sh.m == nil {
-		sh.m = make(map[edgeKey]map[int64]propBag)
+		sh.m = make(map[edgeKey]instMap[int64, propBag])
 	}
-	byIdx, ok := sh.m[k]
-	if !ok {
-		byIdx = make(map[int64]propBag)
-		sh.m[k] = byIdx
-	}
-	// propBag is stored by value: mutate a local copy and write it back under
-	// the shard lock (the write-back is load-bearing — set may grow/promote).
-	bag := byIdx[idx]
+	// Both the instMap and the propBag inside it are stored BY VALUE: mutate
+	// local copies and write both back under the shard lock. Each write-back is
+	// load-bearing — set may grow or promote either tier.
+	im := sh.m[k]
+	bag, _ := im.get(idx)
 	if !g.pushInstancePropVersion(sh, k, idx, tx) {
 		// Refused: the conflict is recorded on tx and this write must not land.
 		return nil
 	}
 	bag.set(pid, value)
-	byIdx[idx] = bag
+	im.set(idx, bag)
+	sh.m[k] = im
 	return nil
 }
 
@@ -127,9 +125,10 @@ func (g *Graph[N, W]) EdgePropertiesAtAsOf(src, dst N, idx int64, snap *Snapshot
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
 	// Inline for the reason given on [Graph.EdgeLabelsByHandleIDAsOf].
-	bag, ok := sh.m[k][idx]
+	im := sh.m[k]
+	bag, ok := im.get(idx)
 	if snap != nil && !sh.v.empty() {
-		bag, ok = sh.v.asOf(edgeInstanceKey{pair: k, idx: idx}, bag, ok, snap.startTS, snap.txID)
+		bag, ok = sh.v.asOfSnap(edgeInstanceKey{pair: k, idx: idx}, bag, ok, snap, snap.startTS, snap.txID)
 	}
 	if !ok {
 		return nil

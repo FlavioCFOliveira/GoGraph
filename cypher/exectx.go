@@ -225,6 +225,12 @@ type ExplicitTx struct {
 	// statements (the cross-statement accumulation hook in undo.go). Replayed in
 	// reverse on Rollback; discarded on Commit. Shared by all statement mutators.
 	undo *undoLog
+	// conTxn accumulates, across every statement, the UNIQUE values this
+	// transaction has RELEASED and not yet committed (rmp #2366). Commit applies
+	// them to the shared value-sets inside the barrier; Rollback drops them, which
+	// costs nothing because a deferred release never touched anything shared. See
+	// [exec.ConstraintTxn] for the interleaving that made deferral necessary.
+	conTxn *exec.ConstraintTxn
 
 	// touched accumulates, across every statement, the node keys the transaction
 	// created, labelled, or stripped a property from, for the commit-time NOT
@@ -378,6 +384,11 @@ func (e *Engine) beginTxSession(ctx context.Context, sess *lpg.Session[string, f
 		buf:  &exec.IndexBuffer{},
 		cbuf: &exec.CountBuffer{},
 		undo: &undoLog{},
+		// Shared across every statement, exactly like buf and undo: a release taken
+		// in one statement is committed or dropped with the WHOLE transaction (rmp
+		// #2366). It allocates its map only on the first release, so a transaction
+		// under a schema with no UNIQUE constraint pays one pointer.
+		conTxn: &exec.ConstraintTxn{},
 	}
 	// Allocate the touched-node set only when an existence constraint is active,
 	// so a transaction with none records nothing (#1754).
@@ -570,7 +581,8 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 
 	queryReg := newNowAwareRegistry(tx.eng.reg, time.Now())
 
-	entry, err := tx.eng.parseAndAnalyse(query)
+	entry, autoParams, err := tx.eng.parseAndAnalyse(query)
+	params = mergeAutoParams(params, autoParams)
 	if err != nil {
 		return nil, err
 	}
@@ -593,9 +605,9 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 	// buffer so every statement's count deltas accumulate together and the handle
 	// flushes them once at Commit (#2082), mirroring the shared index buffer.
 	if tx.walTx != nil {
-		mutator = &walMutatorAdapter{g: tx.eng.g, tx: tx.walTx, buf: tx.buf, undo: tx.undo, touched: tx.touched, stampCon: tx.stampCon, cbuf: tx.cbuf, eng: tx.eng}
+		mutator = &walMutatorAdapter{g: tx.eng.g, tx: tx.walTx, buf: tx.buf, undo: tx.undo, touched: tx.touched, stampCon: tx.stampCon, cbuf: tx.cbuf, eng: tx.eng, conTxn: tx.conTxn}
 	} else {
-		mutator = &lpgMutatorAdapter{g: tx.eng.g, buf: tx.buf, undo: tx.undo, touched: tx.touched, stampCon: tx.stampCon, cbuf: tx.cbuf, eng: tx.eng}
+		mutator = &lpgMutatorAdapter{g: tx.eng.g, buf: tx.buf, undo: tx.undo, touched: tx.touched, stampCon: tx.stampCon, cbuf: tx.cbuf, eng: tx.eng, conTxn: tx.conTxn}
 	}
 
 	// One statement, one SHARED hold on the schema barrier, carrying THIS handle's
@@ -765,6 +777,12 @@ func (tx *ExplicitTx) Commit() (err error) {
 			recordCountCommit(tx.eng.countStore, tx.cbuf) // observability (#2087)
 			tx.cbuf.Commit(tx.eng.countStore)
 		}
+		// APPLY THE DEFERRED UNIQUE RELEASES (rmp #2366), on the same
+		// durable-then-visible side of the barrier as the index buffer: a value this
+		// transaction vacated becomes available exactly when the graph stops holding
+		// it, and not before. Every failure branch above rolls back through
+		// rollbackInBarrierLocked, which drops the same marks instead.
+		tx.eng.constraintReg.CommitTxn(tx.conTxn)
 		// Drop the undo log: the transaction is keeping its writes.
 		tx.undo = nil
 		return nil
@@ -857,6 +875,12 @@ func (tx *ExplicitTx) rollbackInBarrierLocked() (undoOK bool) {
 	// value-sets from the graph — which is what stood here — also destroyed
 	// CONCURRENT writers' reservations, since a rebuild cannot see a commit that is
 	// not yet durable.
+	//
+	// The DEFERRED RELEASES are dropped rather than inverted (rmp #2366): they never
+	// reached the shared value-set, so there is nothing to put back and nothing that
+	// could collide with a peer's own committed release. This is what makes the
+	// rollback order-independent.
+	tx.conTxn.Reset()
 	if tx.buf != nil {
 		tx.buf.Rollback()
 	}

@@ -102,7 +102,7 @@ func TestReadPhasePrefixMatchesRunRead(t *testing.T) {
 func collectPrefixRows(t *testing.T, eng *Engine, query string, params map[string]expr.Value) []string {
 	t.Helper()
 	ctx := context.Background()
-	entry, err := eng.parseAndAnalyse(query)
+	entry, _, err := eng.parseAndAnalyse(query)
 	if err != nil {
 		t.Fatalf("parseAndAnalyse: %v", err)
 	}

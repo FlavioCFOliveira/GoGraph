@@ -523,9 +523,16 @@ func TestPrefixSeekConjunctions(t *testing.T) {
 	}
 }
 
-// TestPrefixSeekParameterised proves a parameterised prefix is declined (the
-// string extractor admits literals only, as it does for >= / <) and still
-// returns the right answer.
+// TestPrefixSeekParameterised proves a parameterised prefix SEEKS, and returns
+// exactly what the Go oracle says it should.
+//
+// It used to assert the opposite — that a parameterised prefix was declined,
+// because the string extractor admitted literals only. That limitation is gone
+// (rmp #2414): declining it meant `p.name STARTS WITH $pfx`, the form every
+// driver sends, fell back to a full label scan while the literal spelling
+// seeked. The oracle below is the half that matters and it is unchanged: the
+// seek must agree with a scan for a present prefix, the empty prefix, a
+// non-matching one and an absent one.
 func TestPrefixSeekParameterised(t *testing.T) {
 	t.Parallel()
 
@@ -536,8 +543,8 @@ func TestPrefixSeekParameterised(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
-	if strings.Contains(plan, "NodeByIndexRangeScan") {
-		t.Fatalf("a parameterised prefix must not seek\nplan:\n%s", plan)
+	if !strings.Contains(plan, "NodeByIndexRangeScan") {
+		t.Fatalf("a parameterised prefix must seek, exactly as the literal spelling does\nplan:\n%s", plan)
 	}
 	for _, pfx := range []string{"name000", "", "caf", "zzz"} {
 		got := runPrefixRows(t, engOn, query, map[string]expr.Value{"pfx": expr.StringValue(pfx)})

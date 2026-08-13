@@ -127,7 +127,14 @@ func tryBuildIndexSeekSetFromSelection(
 	if !ok {
 		return nil, false
 	}
-	return buildSeekSetOperator(idxMgr, label, propKey, keys, budget, nodeVar, schema)
+	// The label the subsumed scan leaf carried must still qualify every candidate
+	// (rmp #2423); a set seek that cannot verify it declines, exactly as the
+	// single-key seek does.
+	admit, canVerify := labelAdmitFn(labelSrcFromView(g), label)
+	if !canVerify {
+		return nil, false
+	}
+	return buildSeekSetOperator(idxMgr, label, propKey, keys, budget, nodeVar, schema, admit)
 }
 
 // countOrDisjuncts counts the operands of a chain of OR without allocating.
@@ -188,6 +195,7 @@ func buildSeekSetOperator(
 	budget uint64,
 	nodeVar string,
 	schema map[string]int,
+	admit func(uint64) bool,
 ) (exec.Operator, bool) {
 	for _, name := range idxMgr.ListIndexes() {
 		sub, err := idxMgr.GetIndex(name)
@@ -209,7 +217,7 @@ func buildSeekSetOperator(
 		if !servable || total == 0 {
 			return nil, false
 		}
-		op := exec.NewNodeByIndexSeekSet(exec.NewStringHashIndex(sl), keys, budget)
+		op := exec.NewNodeByIndexSeekSet(exec.NewStringHashIndex(sl), keys, budget).Admitting(admit)
 		schema[nodeVar] = schemaWidth(schema)
 		return op, true
 	}
@@ -333,7 +341,7 @@ func seekClaimsHint(
 	idxMgr *index.Manager,
 	g *lpg.ReadView[string, float64],
 ) bool {
-	if op, fired, err := tryBuildIndexSeekFromSelection(sel, params, make(map[string]int), idxMgr); err == nil && fired && op != nil {
+	if op, fired, err := tryBuildIndexSeekFromSelection(sel, params, make(map[string]int), idxMgr, labelSrcFromView(g)); err == nil && fired && op != nil {
 		return true
 	}
 	_, fired := tryBuildIndexSeekSetFromSelection(sel, params, make(map[string]int), idxMgr, g)

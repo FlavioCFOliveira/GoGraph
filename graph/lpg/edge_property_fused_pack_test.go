@@ -39,7 +39,7 @@ import (
 func colPhysicalBytes(col *edgePropColumn) int {
 	n := cap(col.idx)*4 + cap(col.valid)*8
 	if col.packedDate {
-		return n + cap(col.packed)*8 + forHeaderBytes
+		return n + cap(col.nums)*8 + forHeaderBytes
 	}
 	return n + cap(col.days)*4
 }
@@ -146,7 +146,7 @@ func TestFusedPack_FusedMatchesSetAfter(t *testing.T) {
 			}
 			// The value planes must be byte-identical too.
 			if fc.forWidth == sc.forWidth {
-				if got, want := cap(fc.packed)*8, cap(sc.packed)*8; got != want {
+				if got, want := cap(fc.nums)*8, cap(sc.nums)*8; got != want {
 					t.Fatalf("packed value plane differs: fused %d bytes, set-after %d", got, want)
 				}
 			}

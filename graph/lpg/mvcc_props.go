@@ -148,6 +148,64 @@ func (g *Graph[N, W]) propBagAsOf(id graph.NodeID, startTS, txID uint64) propBag
 
 // propBagAsOfLocked is [Graph.propBagAsOfSlow] with the shard read lock already
 // held. See [Graph.labelBagAsOfLocked] for why the distinction matters.
+// propBagAsOfLockedSnap is [Graph.propBagAsOfLocked] resolved through the
+// SNAPSHOT's pinned verdict instead of a live read of each record's timestamp.
+//
+// # Why the property path needed this, and did not have it (rmp #2420)
+//
+// [mvcc.Visible] is evaluated against [mvcc.CommitInfo.TS], a field that is
+// MUTABLE and flips when the transaction commits. [Snapshot.visible] exists to
+// pin that answer per record for a snapshot's lifetime, so two reads taken
+// through one snapshot cannot classify the same transaction differently — which
+// is the whole subject of rmp #2378.
+//
+// That fix reached the adjacency path ([Graph.EntryViewAsOf]) and ONE of the two
+// label paths ([Graph.labelBagAsOfLockedSnap]). It never reached the node-property
+// path: [Graph.propBagAsOfLocked] takes only the two timestamps, so it cannot
+// consult the memo even when the caller holds a snapshot, and every property read
+// therefore decided visibility from the live mutable field the memo exists to pin.
+//
+// TestIsolation_ApplyAtomically_View_NoPartialReads reads two node PROPERTIES, so
+// it exercises exactly the path the fix missed — which is why it kept tearing
+// after #2378 was closed, at about 2% of package runs, with the second read
+// over-visible by one to three transactions.
+//
+// The timestamped form is kept for the callers that genuinely have no snapshot
+// (a write transaction resolving its own view through [writeCtx]); a nil snapshot
+// resolves straight through in [Snapshot.visible], so those keep their behaviour
+// exactly.
+func (g *Graph[N, W]) propBagAsOfLockedSnap(s *nodePropShard, id graph.NodeID, snap *Snapshot, startTS, txID uint64) propBag {
+	cur := s.m[id]
+	if s.d == nil {
+		return cur
+	}
+	d := s.d[id]
+	if d == nil {
+		return cur
+	}
+	var out propBag
+	copied := false
+	for ; d != nil; d = d.next {
+		if snap.visible(d.info, d.ts, startTS, txID) {
+			break
+		}
+		if !copied {
+			out = clonePropBag(cur)
+			copied = true
+		}
+		switch d.action {
+		case undoSetProp:
+			out.set(d.key, d.prev)
+		case undoDelProp:
+			out.del(d.key)
+		}
+	}
+	if !copied {
+		return cur
+	}
+	return out
+}
+
 func (g *Graph[N, W]) propBagAsOfLocked(s *nodePropShard, id graph.NodeID, startTS, txID uint64) propBag {
 	cur := s.m[id]
 	if s.d == nil {
@@ -190,9 +248,13 @@ func clonePropBag(b propBag) propBag {
 		for k, v := range b.m {
 			out.m[k] = v
 		}
-	case len(b.pairs) > 0:
-		out.pairs = make([]kv, len(b.pairs))
-		copy(out.pairs, b.pairs)
+	case len(b.buf) > 0:
+		// The buffer must be copied even though it is immutable: the caller is
+		// entitled to mutate the clone, and a mutation of the stream tier
+		// rebuilds the buffer rather than writing it, so sharing would be safe
+		// today and a trap the first time that changes.
+		out.buf = make([]byte, len(b.buf))
+		copy(out.buf, b.buf)
 	}
 	return out
 }

@@ -107,6 +107,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 	"github.com/FlavioCFOliveira/GoGraph/internal/crashpoint"
+	"github.com/FlavioCFOliveira/GoGraph/internal/memlimit"
 	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
@@ -1983,7 +1984,28 @@ func checkParamTypesCached(entry *planCacheEntry, params map[string]expr.Value) 
 	if len(params) == 0 {
 		return nil
 	}
-	return sema.CheckParams(entry.paramTypes, params)
+	// An AUTO-parameter is a literal the engine hoisted out of the query text
+	// (see [parser.StripLiterals]), so it must behave like the literal it
+	// replaced. This check exists to tell a caller that the value THEY supplied
+	// has the wrong type; openCypher says a type-incompatible LITERAL simply
+	// compares false and yields zero rows. Applying the check to a hoisted
+	// literal would turn `MATCH (n:Person {age: 'thirty'})` from an empty result
+	// into an error purely because of an internal rewrite.
+	inferred := entry.paramTypes
+	for name := range inferred {
+		if !parser.IsAutoParam(name) {
+			continue
+		}
+		filtered := make(map[string]expr.Kind, len(inferred))
+		for k, v := range inferred {
+			if !parser.IsAutoParam(k) {
+				filtered[k] = v
+			}
+		}
+		inferred = filtered
+		break
+	}
+	return sema.CheckParams(inferred, params)
 }
 
 // checkParamPresence validates that every parameter name referenced by the
@@ -2191,7 +2213,8 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 	}
 
 	// ── 1. Parse, analyse, and retrieve from plan cache ──────────────────────
-	entry, err := e.parseAndAnalyse(query)
+	entry, autoParams, err := e.parseAndAnalyse(query)
+	params = mergeAutoParams(params, autoParams)
 	if err != nil {
 		return nil, err
 	}
@@ -2494,7 +2517,8 @@ func (e *Engine) Explain(query string, params map[string]expr.Value) (s string, 
 	if ir.IsDDL(query) {
 		return "(DDL — no query plan)", nil
 	}
-	entry, err := e.parseAndAnalyse(query)
+	entry, autoParams, err := e.parseAndAnalyse(query)
+	params = mergeAutoParams(params, autoParams)
 	if err != nil {
 		return "", err
 	}
@@ -2549,7 +2573,8 @@ func (e *Engine) Profile(ctx context.Context, query string, params map[string]ex
 	if ir.IsDDL(query) {
 		return "", fmt.Errorf("cypher: Profile: DDL has no query plan")
 	}
-	entry, err := e.parseAndAnalyse(query)
+	entry, autoParams, err := e.parseAndAnalyse(query)
+	params = mergeAutoParams(params, autoParams)
 	if err != nil {
 		return "", err
 	}
@@ -2634,7 +2659,8 @@ func (e *Engine) ExplainLogical(query string, params map[string]expr.Value) (s s
 	if ir.IsDDL(query) {
 		return "(DDL — no query plan)", nil
 	}
-	entry, perr := e.parseAndAnalyse(query)
+	entry, autoParams, perr := e.parseAndAnalyse(query)
+	params = mergeAutoParams(params, autoParams)
 	if perr != nil {
 		return "", perr
 	}
@@ -2780,7 +2806,11 @@ func explainWithIndexesNode(
 	rangeSeek := false
 	if sel, ok := plan.(*ir.Selection); ok && idxMgr != nil {
 		schema := make(map[string]int)
-		if op, fired, err := tryBuildIndexSeekFromSelection(sel, params, schema, idxMgr); err == nil && fired && op != nil {
+		// EXPLAIN rendering only asks WHETHER the rewrite fires. It passes the same
+		// label source the build would, so the answer it renders is the plan the build
+		// would choose — including a DECLINE when the label cannot be verified
+		// (rmp #2423).
+		if op, fired, err := tryBuildIndexSeekFromSelection(sel, params, schema, idxMgr, labelSrc); err == nil && fired && op != nil {
 			opName = "NodeByIndexSeek"
 		} else if _, fired := tryBuildIndexSeekSetFromSelection(sel, params, make(map[string]int), idxMgr, explainGraph); fired {
 			// A key-set seek SUBSUMES the pushed Selection exactly as the single-key
@@ -4086,8 +4116,38 @@ func resolveGlobalMaxResultBytes(opt int64) int64 {
 		// No soft memory limit to derive from. This branch used to return 0, i.e.
 		// no engine-wide ceiling, which is the state of any process that has not
 		// set GOMEMLIMIT — see [DefaultGlobalMaxResultBytes].
+		//
+		// It then returned the fixed constant unconditionally, and inside a
+		// container capped BELOW that constant a ceiling larger than the whole
+		// container is no ceiling at all: the kernel's OOM killer binds first, so
+		// the process dies where it should have returned a typed error (rmp #2421).
+		// A cgroup limit, when there is one, is a real bound on this process and
+		// takes precedence — but only ever to LOWER the ceiling, never to raise it
+		// above what an unconstrained host already gets.
+		if avail, ok := memlimit.Available(); ok {
+			return globalCeilingFromAvailable(avail)
+		}
 		return DefaultGlobalMaxResultBytes
 	}
+}
+
+// globalCeilingFromAvailable derives the engine-wide result ceiling from a bound
+// on the memory this process may use, keeping the same one-half fraction the
+// GOMEMLIMIT branch uses.
+//
+// It is a separate function so the derivation can be tested against injected
+// limits rather than against whatever the host running the tests happens to
+// report — which is neither deterministic nor, on a developer machine,
+// constrained at all.
+//
+// It may only ever LOWER the ceiling. A bound larger than twice the fixed default
+// says nothing new: the default already survives on any host that big, and
+// raising it there would widen an aggregate bound that exists to be narrow.
+func globalCeilingFromAvailable(avail int64) int64 {
+	if half := avail / 2; half > 0 && half < DefaultGlobalMaxResultBytes {
+		return half
+	}
+	return DefaultGlobalMaxResultBytes
 }
 
 // DefaultGlobalMaxResultBytes is the engine-wide result-byte ceiling applied when
@@ -4573,10 +4633,44 @@ func analyseNodeScalarUseFor(bopts *buildOpts, x ast.Expression) (map[string]*no
 // A non-nil error is returned only for parse or translation failures; a
 // semantically invalid (but parseable) query yields a cache entry whose
 // semaErr field is set, and parseAndAnalyse returns (entry, nil).
-func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, error) {
-	if v, ok := e.cache.get(query); ok {
-		return v, nil
+func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, map[string]string, error) {
+	// The cache is keyed on query text, so a query that inlines a rotating
+	// string literal would miss on every execution and pay a full parse —
+	// measured at 65% more CPU per query than the same query written with a
+	// parameter (docs/cpu-vs-neo4j-memgraph-2026-08-11.md §6). Hoisting the
+	// literal onto a parameter collapses every spelling onto one entry.
+	//
+	// The key is resolved BEFORE the cache is consulted, so each call performs
+	// exactly one counted lookup. Probing the raw text first and the rewritten
+	// text second would be cheaper by a hair and would report a permanent extra
+	// MISS for every hoisted query — a miss that can never become a hit, which
+	// makes the hit ratio lie. StripLiterals rejects a quote-free query in a
+	// single IndexByte pass, so a fully parameterised query pays almost nothing
+	// for the attempt.
+	key, auto := query, map[string]string(nil)
+	if stripped, hoisted, ok := parser.StripLiterals(query); ok {
+		key, auto = stripped, hoisted
 	}
+	if v, ok := e.cache.get(key); ok {
+		return v, auto, nil
+	}
+	entry, err := e.buildPlanCacheEntry(key)
+	if err != nil && key != query {
+		// The rewrite does not parse. Abandon it and use the original: the
+		// scanner may forgo an optimisation, never turn a working query into a
+		// failing one.
+		entry, err = e.buildPlanCacheEntry(query)
+		auto = nil
+	}
+	return entry, auto, err
+}
+
+// buildPlanCacheEntry parses, analyses and translates query, then publishes the
+// result under query's own text. It is the cache-miss half of
+// [Engine.parseAndAnalyse], split out so the literal-hoisting path can build an
+// entry for the rewritten text and fall back to the original when the rewrite
+// does not parse.
+func (e *Engine) buildPlanCacheEntry(query string) (*planCacheEntry, error) {
 	astNode, err := parser.Parse(query)
 	if err != nil {
 		return nil, fmt.Errorf("cypher: parse: %w", err)
@@ -4788,6 +4882,10 @@ type Result struct {
 	// read queries and write queries on an engine with no active constraints.
 	constraintReg *exec.ConstraintRegistry
 	g             *lpg.Graph[string, float64]
+	// conTxn is the transaction's DEFERRED UNIQUE releases (rmp #2366), applied by
+	// commitUnderBarrier and dropped by rollbackUnderBarrier. It is the mutator's, so
+	// it is nil for a read query and for a write on an engine with no constraints.
+	conTxn *exec.ConstraintTxn
 	// mvccG and wtx are how a durable write allocates its MVCC commit timestamp
 	// BEFORE the WAL fsync, so the timestamp is inside the durable record and
 	// recovery can derive the clock from the WAL rather than trust a persisted
@@ -5603,6 +5701,13 @@ func (r *Result) commitUnderBarrier() {
 	// Mark the WAL handled even when tx == nil (a store-less engine has no WAL to
 	// commit) so the idempotency guard above trips on a second call.
 	r.walHandled = true
+	// APPLY THE DEFERRED UNIQUE RELEASES (rmp #2366). A committed release frees its
+	// value here, alongside the index buffer and on the same durable-then-visible
+	// side of the barrier, so no peer can take the value before the graph has stopped
+	// holding it. A rolled-back transaction drops the same marks instead, in
+	// [Result.rollbackUnderBarrier], and touches nothing shared — which is the whole
+	// reason the release is deferred. See [exec.ConstraintTxn].
+	r.constraintReg.CommitTxn(r.conTxn)
 	// Success: the transaction is keeping its writes; drop the undo log so its
 	// closures (and their captured pre-images) are released for GC.
 	r.undo = nil
@@ -5635,6 +5740,13 @@ func (r *Result) rollbackUnderBarrier() {
 	// instead — which is what stood here — destroyed CONCURRENT writers'
 	// reservations too, since a rebuild cannot see a commit that is not yet durable;
 	// that file has the measurement.
+	//
+	// The DEFERRED RELEASES are dropped rather than inverted (rmp #2366): they never
+	// reached the shared value-set, so a rollback has nothing to put back and cannot
+	// disturb a peer whose own committed release has already changed the same value.
+	// Belt and braces with the journaled unmarks the replay above already ran, which
+	// is what unwinds a single failed statement inside a still-live transaction.
+	r.conTxn.Reset()
 	if r.buf != nil {
 		r.buf.Rollback()
 	}
@@ -6087,6 +6199,18 @@ func (s *lpgLabelResolver) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 	return s.g.Raw().LabelBitmapAsOf(lid, s.g.Snapshot())
 }
 
+// HasLabelByID reports whether the node identified by id carries name AT THIS
+// VIEW'S INSTANT, which is the residual check an index-driven rewrite owes when it
+// replaces a labelled scan leaf (rmp #2423).
+//
+// It resolves through the same snapshot-aware accessor
+// [ResolveLabelBitmap] uses, so a seek and a scan cannot disagree about
+// membership. The label index over-reports while a removal is deferred, and this is
+// the only thing that filters it on the seek path.
+func (s *lpgLabelResolver) HasLabelByID(id uint64, name string) bool {
+	return s.g.HasNodeLabelByID(graph.NodeID(id), name)
+}
+
 // ResolveLabelsCardinality reports the EXACT size of the labels' intersection
 // without materialising it, backing the planner's gate (#2133).
 //
@@ -6277,6 +6401,43 @@ type nodeWalkerIface interface {
 // exec.labelResolver without importing the unexported type.
 type labelResolverIface interface {
 	ResolveLabelBitmap(name string) *roaring64.Bitmap
+}
+
+// labelSrcFromView adapts a read view to the label resolver the seek rewrites need,
+// returning an UNTYPED nil when there is no view — a typed nil inside the interface
+// would pass the non-nil test and then panic on first use.
+//
+// It exists for the EXPLAIN and probe paths, which hold a view rather than the
+// build's resolver and must ask the same question the build asks (rmp #2423).
+func labelSrcFromView(g *lpg.ReadView[string, float64]) labelResolverIface {
+	if g == nil {
+		return nil
+	}
+	return &lpgLabelResolver{g: g}
+}
+
+// labelMembership is the per-node label check an index-driven rewrite must have
+// before it may replace a labelled scan leaf (rmp #2423). It is asserted rather
+// than required, and a resolver that lacks it makes the rewrite DECLINE, so the
+// plan falls back to the scan that filters correctly.
+type labelMembership interface {
+	HasLabelByID(id uint64, name string) bool
+}
+
+// labelAdmitFn returns the residual label predicate for an index-driven rewrite
+// over a labelled scan leaf, and false when src cannot supply one.
+//
+// An empty label means the leaf was an unlabelled AllNodesScan, which qualifies
+// nothing and therefore needs no residual check.
+func labelAdmitFn(src labelResolverIface, label string) (func(uint64) bool, bool) {
+	if label == "" {
+		return nil, true
+	}
+	h, ok := src.(labelMembership)
+	if !ok {
+		return nil, false
+	}
+	return func(id uint64) bool { return h.HasLabelByID(id, label) }, true
 }
 
 // mergeLabelSource adapts the build-time label resolver to the
@@ -7257,6 +7418,39 @@ func setSnap[V any](m map[string]V) map[string]struct{} {
 }
 
 // copySchema returns a shallow copy of the schema map.
+// schemaBinding is one variable's place in a row: its name and its column.
+type schemaBinding struct {
+	name string
+	col  int
+}
+
+// schemaWalk is a query's schema flattened into a fixed traversal order.
+//
+// populateRowCtx runs once per ROW and used to obtain that order by ranging the
+// schema map, so every row paid a Go map iteration — `internal/runtime/maps.
+// (*Iter).Next` measured 7.18% of all engine CPU on a scan-and-filter workload,
+// with the string hashing beneath it on top (docs/cpu-vs-neo4j-memgraph-2026-08-11.md
+// §5). The order is a pure function of the schema, which is fixed for a whole
+// execution, so it is derived once and walked as a slice thereafter.
+//
+// Bindings are ordered by COLUMN, not by name, so the walk reads the row left to
+// right instead of jumping around it.
+//
+// This does not remove the per-row map WRITES into the RowContext, nor the
+// name-keyed lookups the evaluator then performs; those need the row context
+// itself to become slot-addressed (rmp #2411).
+type schemaWalk []schemaBinding
+
+// newSchemaWalk flattens schema into a column-ordered walk.
+func newSchemaWalk(schema map[string]int) schemaWalk {
+	w := make(schemaWalk, 0, len(schema))
+	for name, col := range schema {
+		w = append(w, schemaBinding{name: name, col: col})
+	}
+	slices.SortFunc(w, func(a, b schemaBinding) int { return a.col - b.col })
+	return w
+}
+
 func copySchema(schema map[string]int) map[string]int {
 	cp := make(map[string]int, len(schema))
 	for k, v := range schema {
@@ -8354,7 +8548,7 @@ func buildOperatorRec(
 		return exec.NewNodeByLabelScan(p.Label, src), nil
 
 	case *ir.NodeByIndexSeek:
-		return buildIndexSeekOperator(p, params, schema, idxMgr)
+		return buildIndexSeekOperator(p, params, schema, idxMgr, labelSrc)
 
 	case *ir.Selection:
 		// Single-edge anchor swap (#2090): when this Selection is the top of a
@@ -8410,7 +8604,7 @@ func buildOperatorRec(
 		// n.prop = $name and a hash index is available, produce NodeByIndexSeek
 		// directly without first building the scan child.
 		if idxMgr != nil {
-			if op, ok, err := tryBuildIndexSeekFromSelection(p, params, schema, idxMgr); err != nil {
+			if op, ok, err := tryBuildIndexSeekFromSelection(p, params, schema, idxMgr, labelSrc); err != nil {
 				return nil, err
 			} else if ok {
 				return op, nil
@@ -11252,6 +11446,7 @@ func buildIndexSeekOperator(
 	params map[string]expr.Value,
 	schema map[string]int,
 	idxMgr *index.Manager,
+	labelSrc labelResolverIface,
 ) (exec.Operator, error) {
 	seekVal, err := resolveSeekValue(p.Value, params)
 	if err != nil {
@@ -11260,13 +11455,22 @@ func buildIndexSeekOperator(
 	if idxMgr == nil {
 		return nil, fmt.Errorf("cypher: NodeByIndexSeek requires an index manager")
 	}
+	// The plan node carries the label, and the index does not imply it; see
+	// [tryBuildIndexSeekFromSelection] (rmp #2423). A resolver that cannot verify
+	// membership is an error here rather than a decline, because this form has no
+	// scan child to fall back to.
+	admit, canVerify := labelAdmitFn(labelSrc, p.Label)
+	if !canVerify {
+		return nil, fmt.Errorf("cypher: NodeByIndexSeek on %q.%q cannot verify the label: "+
+			"the label resolver supplies no per-node membership check", p.Label, p.Property)
+	}
 	names := idxMgr.ListIndexes()
 	for _, name := range names {
 		sub, err := idxMgr.GetIndex(name)
 		if err != nil || sub.Kind() != "hash" || !indexCoversNode(sub, p.Label, p.Property) {
 			continue
 		}
-		if op, ok := tryNewHashSeek(sub, seekVal); ok {
+		if op, ok := tryNewHashSeek(sub, seekVal, admit); ok {
 			schema[p.NodeVar] = schemaWidth(schema)
 			return op, nil
 		}
@@ -11278,11 +11482,18 @@ func buildIndexSeekOperator(
 // "n.prop = $name" or "$name = n.prop" over an AllNodesScan or NodeByLabelScan
 // child, and when a hash index is available returns a NodeByIndexSeek operator.
 // ok is false when the rewrite does not apply.
+// THE LABEL IS NOT IMPLIED BY THE INDEX (rmp #2423). This rewrite replaces a
+// LABELLED scan leaf, and the index covering (label, prop) over-reports: removing a
+// label leaves the node's entries in that label's property indexes behind, so a seek
+// with no residual check returned a node for (n:Person) whose labels(n) was empty.
+// labelSrc supplies the per-candidate check; when it cannot, the rewrite DECLINES and
+// the plan keeps the scan that filters correctly.
 func tryBuildIndexSeekFromSelection(
 	sel *ir.Selection,
 	params map[string]expr.Value,
 	schema map[string]int,
 	idxMgr *index.Manager,
+	labelSrc labelResolverIface,
 ) (exec.Operator, bool, error) {
 	nodeVar, label, ok := scanLeafNodeVar(sel.Child)
 	if !ok {
@@ -11292,11 +11503,15 @@ func tryBuildIndexSeekFromSelection(
 	if err != nil || seekVal == nil {
 		return nil, false, err
 	}
-	if op, ok := tryNamedHashSeek(idxMgr, label, propKey, seekVal); ok {
+	admit, canVerify := labelAdmitFn(labelSrc, label)
+	if !canVerify {
+		return nil, false, nil
+	}
+	if op, ok := tryNamedHashSeek(idxMgr, label, propKey, seekVal, admit); ok {
 		schema[nodeVar] = schemaWidth(schema)
 		return op, true, nil
 	}
-	if op, ok := tryAnyHashSeek(idxMgr, label, propKey, seekVal); ok {
+	if op, ok := tryAnyHashSeek(idxMgr, label, propKey, seekVal, admit); ok {
 		schema[nodeVar] = schemaWidth(schema)
 		return op, true, nil
 	}
@@ -11375,7 +11590,7 @@ func indexCoversNode(sub index.Subscriber, label, propKey string) bool {
 // tryNamedHashSeek looks up the auto-named hash index for a (label,
 // propKey) pair and returns the seek operator + true when present
 // and applicable to seekVal.
-func tryNamedHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value) (exec.Operator, bool) {
+func tryNamedHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value, admit func(uint64) bool) (exec.Operator, bool) {
 	if label == "" || propKey == "" {
 		return nil, false
 	}
@@ -11384,19 +11599,19 @@ func tryNamedHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr
 	if err != nil || sub.Kind() != "hash" || !indexCoversNode(sub, label, propKey) {
 		return nil, false
 	}
-	return tryNewHashSeek(sub, seekVal)
+	return tryNewHashSeek(sub, seekVal, admit)
 }
 
 // tryAnyHashSeek iterates every registered index and returns the
 // first hash index that both covers the (label, propKey) predicate and can
 // serve seekVal. It is the fallback when the named-index lookup misses.
-func tryAnyHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value) (exec.Operator, bool) {
+func tryAnyHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value, admit func(uint64) bool) (exec.Operator, bool) {
 	for _, name := range idxMgr.ListIndexes() {
 		sub, err := idxMgr.GetIndex(name)
 		if err != nil || sub.Kind() != "hash" || !indexCoversNode(sub, label, propKey) {
 			continue
 		}
-		if op, ok := tryNewHashSeek(sub, seekVal); ok {
+		if op, ok := tryNewHashSeek(sub, seekVal, admit); ok {
 			return op, true
 		}
 	}
@@ -11577,12 +11792,22 @@ type hashInt64Lookup interface {
 // back to the scan+filter, which yields the same zero-row result a non-indexed
 // graph would — rather than building a seek that fails at Init with
 // [exec.ErrIndexTypeMismatch].
-func tryNewHashSeek(sub index.Subscriber, seekVal expr.Value) (*exec.NodeByIndexSeek, bool) {
+// newHashSeekOp builds the seek operator with or without a residual predicate, so
+// the two forms are chosen in ONE place and a future seek site cannot silently pick
+// the unguarded one (rmp #2423).
+func newHashSeekOp(idx exec.HashLookup, seekVal expr.Value, admit func(uint64) bool) *exec.NodeByIndexSeek {
+	if admit == nil {
+		return exec.NewNodeByIndexSeek(idx, seekVal)
+	}
+	return exec.NewNodeByIndexSeekAdmitting(idx, seekVal, admit)
+}
+
+func tryNewHashSeek(sub index.Subscriber, seekVal expr.Value, admit func(uint64) bool) (*exec.NodeByIndexSeek, bool) {
 	if sl, ok := sub.(hashStringLookup); ok {
 		if seekVal.Kind() != expr.KindString {
 			return nil, false
 		}
-		return exec.NewNodeByIndexSeek(exec.NewStringHashIndex(sl), seekVal), true
+		return newHashSeekOp(exec.NewStringHashIndex(sl), seekVal, admit), true
 	}
 	if il, ok := sub.(hashInt64Lookup); ok {
 		if seekVal.Kind() != expr.KindInteger {
@@ -11598,7 +11823,7 @@ func tryNewHashSeek(sub index.Subscriber, seekVal expr.Value) (*exec.NodeByIndex
 		// it on float64 and keep a residual filter (as the range companion does),
 		// or gate this branch to decline cross-type — otherwise a float-valued node
 		// equal to an integer seek would be silently dropped.
-		return exec.NewNodeByIndexSeek(exec.NewInt64HashIndex(il), seekVal), true
+		return newHashSeekOp(exec.NewInt64HashIndex(il), seekVal, admit), true
 	}
 	return nil, false
 }
@@ -12672,7 +12897,7 @@ func buildRowCtxWithUse(row exec.Row, schema map[string]int, g *lpg.ReadView[str
 	ctx := make(expr.RowContext, len(schema))
 	// arena nil: this path allocates a fresh map (escaping/eager callers) and so
 	// must allocate fresh lazy nodes too — no reuse, no pooled lifecycle.
-	populateRowCtx(ctx, row, schema, g, bopts, scalarUse, nil)
+	populateRowCtx(ctx, row, newSchemaWalk(schema), g, bopts, scalarUse, nil)
 	return ctx
 }
 
@@ -12797,12 +13022,21 @@ func releaseRowCtx(p *pooledRowCtx) {
 // historical behaviour), preserving exact semantics. It is the shared body of
 // the non-escaping Filter-predicate and scalar-projection evaluation closures.
 func evalRowPooled(bopts *buildOpts, e ast.Expression, row exec.Row, schema map[string]int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, scalarUse map[string]*nodeScalarUse) (expr.Value, error) {
+	return evalRowPooledWalk(bopts, e, row, newSchemaWalk(schema), len(schema), g, params, reg, scalarUse)
+}
+
+// evalRowPooledWalk is [evalRowPooled] for a caller that already derived the
+// schema walk once for the whole execution, which is where it belongs: the walk
+// is a pure function of the schema and rebuilding it per row was measurable.
+func evalRowPooledWalk(bopts *buildOpts, e ast.Expression, row exec.Row, walk schemaWalk, width int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, scalarUse map[string]*nodeScalarUse) (expr.Value, error) {
 	if scalarUse == nil {
-		return evalRow(bopts, e, buildRowCtxWithUse(row, schema, g, bopts, nil), params, reg)
+		ctx := make(expr.RowContext, width)
+		populateRowCtx(ctx, row, walk, g, bopts, nil, nil)
+		return evalRow(bopts, e, ctx, params, reg)
 	}
-	p := acquireRowCtx(len(schema))
+	p := acquireRowCtx(width)
 	defer releaseRowCtx(p)
-	populateRowCtx(p.ctx, row, schema, g, bopts, scalarUse, p)
+	populateRowCtx(p.ctx, row, walk, g, bopts, scalarUse, p)
 	return evalRow(bopts, e, p.ctx, params, reg)
 }
 
@@ -12816,8 +13050,9 @@ func evalRowPooled(bopts *buildOpts, e ast.Expression, row exec.Row, schema map[
 // caller passes nil and gets a freshly allocated lazy node per row, preserving
 // the exact prior behaviour and escape safety. A borrowed lazy node is valid
 // only until the arena's pooledRowCtx is released and must never escape the row.
-func populateRowCtx(ctx expr.RowContext, row exec.Row, schema map[string]int, g *lpg.ReadView[string, float64], bopts *buildOpts, scalarUse map[string]*nodeScalarUse, arena *pooledRowCtx) {
-	for varName, colIdx := range schema {
+func populateRowCtx(ctx expr.RowContext, row exec.Row, walk schemaWalk, g *lpg.ReadView[string, float64], bopts *buildOpts, scalarUse map[string]*nodeScalarUse, arena *pooledRowCtx) {
+	for _, b := range walk {
+		varName, colIdx := b.name, b.col
 		if colIdx >= len(row) || row[colIdx] == nil {
 			continue
 		}
@@ -14632,7 +14867,7 @@ func indexSeekWouldFire(
 	}
 
 	// Hash seek on `n.prop = <const>`.
-	if op, ok, err := tryBuildIndexSeekFromSelection(sel, params, copySchema(schema), idxMgr); err == nil && ok {
+	if op, ok, err := tryBuildIndexSeekFromSelection(sel, params, copySchema(schema), idxMgr, labelSrcFromView(g)); err == nil && ok {
 		closeProbe(op)
 		return true
 	}
@@ -15359,12 +15594,16 @@ func buildScalarPropertyChunkFiller(nodeChunkCol int, propName string, g *lpg.Re
 // disables the lazy path and restores full eager materialisation.
 func newRowPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, bopts *buildOpts) exec.FilterFn {
 	schemaSnap := copySchema(schema)
+	// Derived ONCE per execution: the predicate closure runs per row, and the
+	// walk is a pure function of the schema.
+	walk := newSchemaWalk(schemaSnap)
+	width := len(schemaSnap)
 	scalarUse, bail := analyseNodeScalarUseFor(bopts, predExpr)
 	if bail {
 		scalarUse = nil
 	}
 	return func(row exec.Row) (expr.Value, error) {
-		return evalRowPooled(bopts, predExpr, row, schemaSnap, g, params, reg, scalarUse)
+		return evalRowPooledWalk(bopts, predExpr, row, walk, width, g, params, reg, scalarUse)
 	}
 }
 
@@ -16053,6 +16292,17 @@ func (a *execLabelAdapter) ResolveLabelBitmap(name string) *roaring64.Bitmap {
 	return a.labelSrc.ResolveLabelBitmap(name)
 }
 
+// HasLabelByID forwards the per-node label check an index-driven rewrite needs
+// (rmp #2423) when the underlying resolver supports one. A resolver that does not
+// reports false for the SUPPORTED flag, and the rewrite then declines rather than
+// emitting candidates it cannot qualify.
+func (a *execLabelAdapter) HasLabelByID(id uint64, name string) bool {
+	if h, ok := a.labelSrc.(labelMembership); ok {
+		return h.HasLabelByID(id, name)
+	}
+	return false
+}
+
 // ResolveLabelsCardinality forwards the allocation-free intersection count to the
 // underlying resolver when it supports one (#2133). A resolver that does not
 // reports ok == false, and the planner then declines rather than guessing.
@@ -16179,7 +16429,8 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 	// this point and there consults the registry.
 	stmtNow := time.Now()
 
-	entry, err := e.parseAndAnalyse(query)
+	entry, autoParams, err := e.parseAndAnalyse(query)
+	params = mergeAutoParams(params, autoParams)
 	if err != nil {
 		return nil, err
 	}
@@ -16265,6 +16516,7 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 		// the adapter itself.
 		wa.counters = &wa.countersStore
 		wa.buf, wa.undo = &wa.bufStore, &wa.undoStore
+		wa.conTxn = &wa.conTxnStore
 		buf, undo = wa.buf, wa.undo
 		queryReg = wa.nowReg.bind(e.reg, stmtNow)
 		mutator = wa
@@ -16272,6 +16524,7 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 		la := &lpgMutatorAdapter{g: e.g, touched: touched, stampCon: stampCon, eng: e}
 		la.counters = &la.countersStore // see the walMutatorAdapter branch above
 		la.buf, la.undo = &la.bufStore, &la.undoStore
+		la.conTxn = &la.conTxnStore
 		buf, undo = la.buf, la.undo
 		queryReg = la.nowReg.bind(e.reg, stmtNow)
 		mutator = la
@@ -16492,6 +16745,13 @@ func (e *Engine) execUnderBarrier(
 			// Use newWriteResult so that rollbackUnderBarrier can reseed the
 			// constraint registry's UNIQUE value-sets after an undo replay (#1342).
 			r = newWriteResult(rs, cols, buf, e.g.IndexManager(), walTx, e.maxResultRows, e.maxResultBytes, e.constraintReg, e.g)
+			// The transaction's deferred UNIQUE releases travel with the Result, which
+			// is what commits or drops them inside the barrier (rmp #2366).
+			if h, ok := mutator.(interface {
+				ConstraintTxn() *exec.ConstraintTxn
+			}); ok {
+				r.conTxn = h.ConstraintTxn()
+			}
 			r.counters = mutatorCounters(mutator)
 			r.globalMem = e.globalMem
 			r.undo = undo
@@ -16700,6 +16960,15 @@ type lpgMutatorAdapter struct {
 	// cannot live inside a per-statement adapter. See [ExplicitTx].
 	bufStore  exec.IndexBuffer
 	undoStore undoLog
+	// conTxn is the transaction's UNCOMMITTED constraint contribution: the UNIQUE
+	// values it has released and not yet committed (rmp #2366). Nil on a read-only
+	// or stub adapter, which [exec.ConstraintRegistry.ReleasePropertyValue] reads as
+	// "no transaction" and applies immediately — correct, since nothing can roll
+	// back. conTxnStore is its inline backing store on the AUTOCOMMIT path, for the
+	// same reason bufStore and undoStore are inline; an EXPLICIT transaction points
+	// conTxn at the handle's shared one, which outlives any single statement.
+	conTxn      *exec.ConstraintTxn
+	conTxnStore exec.ConstraintTxn
 	// nowReg is the inline statement-frozen-"now" function registry, bound once
 	// per statement by [nowAwareRegistry.bind]; see it for why it is not allocated.
 	nowReg nowAwareRegistry
@@ -17507,6 +17776,11 @@ func (a *lpgMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle u
 // roll back and nothing to record — the same reading undoLog.record itself takes.
 func (a *lpgMutatorAdapter) RecordConstraintInverse(inv func()) { a.undo.record(inv) }
 
+// ConstraintTxn returns the transaction's uncommitted constraint contribution, or
+// nil when this adapter has no transaction (a read-only or stub adapter). See
+// [exec.ConstraintTxn].
+func (a *lpgMutatorAdapter) ConstraintTxn() *exec.ConstraintTxn { return a.conTxn }
+
 // FirstEdgeHandle resolves the handle on the first src→dst adjacency slot,
 // delegating to [lpg.Graph.FirstEdgeHandle]; used by the MERGE ON MATCH /
 // ON CREATE action path to mirror per-pair property writes onto the matched
@@ -17529,25 +17803,17 @@ func (a *lpgMutatorAdapter) OutNeighbours(n string) []string {
 // performing a full graph walk. This is O(V+E) and should only be called for
 // DETACH DELETE operations where correctness trumps performance.
 func (a *lpgMutatorAdapter) InNeighbours(n string) []string {
-	nID, ok := a.g.AdjList().Mapper().Lookup(n)
-	if !ok {
-		return nil
-	}
-	var result []string
-	a.g.AdjList().Mapper().Walk(func(id graph.NodeID, key string) bool {
-		if id == nID {
-			return true
-		}
-		nbs, _ := a.g.AdjList().LoadEntry(id)
-		for _, nb := range nbs {
-			if nb == nID {
-				result = append(result, key)
-				break
-			}
-		}
-		return true
-	})
-	return result
+	// Reads the adjacency's live in-edge index, in O(in-degree).
+	//
+	// It used to walk every interned node and scan that node's whole adjacency
+	// entry looking for n — O(order + size) per call, on a question the delete
+	// path asks ONCE PER NODE DELETED. Deleting k nodes from a graph of n
+	// therefore cost O(k·n), and because the graph keeps its slots after a
+	// delete, the cost grew with every node ever interned rather than with the
+	// live graph: five seed-and-wipe cycles of the same 20 000 nodes measured
+	// 895 ms, 1.635 s, 2.393 s, 3.143 s, 3.924 s for identical work, at exactly
+	// one core. That is rmp #2400, and the walk was 78% of its CPU profile.
+	return a.g.AdjList().InNeighbours(n)
 }
 
 // RemoveAllEdgesFrom removes all outgoing edges from n in O(degree) time.
@@ -17643,6 +17909,15 @@ type walMutatorAdapter struct {
 	// must not use them.
 	bufStore  exec.IndexBuffer
 	undoStore undoLog
+	// conTxn is the transaction's UNCOMMITTED constraint contribution: the UNIQUE
+	// values it has released and not yet committed (rmp #2366). Nil on a read-only
+	// or stub adapter, which [exec.ConstraintRegistry.ReleasePropertyValue] reads as
+	// "no transaction" and applies immediately — correct, since nothing can roll
+	// back. conTxnStore is its inline backing store on the AUTOCOMMIT path, for the
+	// same reason bufStore and undoStore are inline; an EXPLICIT transaction points
+	// conTxn at the handle's shared one, which outlives any single statement.
+	conTxn      *exec.ConstraintTxn
+	conTxnStore exec.ConstraintTxn
 	// nowReg is the inline statement-frozen-"now" function registry, bound once
 	// per statement by [nowAwareRegistry.bind]; see it for why it is not allocated.
 	nowReg nowAwareRegistry
@@ -18407,6 +18682,9 @@ func (a *walMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle u
 // paths and a rolled-back statement must release its reservations either way.
 func (a *walMutatorAdapter) RecordConstraintInverse(inv func()) { a.undo.record(inv) }
 
+// ConstraintTxn is [lpgMutatorAdapter.ConstraintTxn] for the WAL-backed adapter.
+func (a *walMutatorAdapter) ConstraintTxn() *exec.ConstraintTxn { return a.conTxn }
+
 // FirstEdgeHandle resolves the handle on the first src→dst adjacency slot,
 // delegating to [lpg.Graph.FirstEdgeHandle]; used by the MERGE ON MATCH /
 // ON CREATE action path to mirror per-pair property writes onto the matched
@@ -18425,28 +18703,11 @@ func (a *walMutatorAdapter) OutNeighbours(n string) []string {
 	return out
 }
 
-// InNeighbours returns a snapshot of the incoming neighbour keys of n by
-// performing a full graph walk.
+// InNeighbours returns a snapshot of the incoming neighbour keys of n, read
+// from the adjacency's live in-edge index in O(in-degree). See
+// [lpgMutatorAdapter.InNeighbours] for why this is not a graph walk.
 func (a *walMutatorAdapter) InNeighbours(n string) []string {
-	nID, ok := a.g.AdjList().Mapper().Lookup(n)
-	if !ok {
-		return nil
-	}
-	var result []string
-	a.g.AdjList().Mapper().Walk(func(id graph.NodeID, key string) bool {
-		if id == nID {
-			return true
-		}
-		nbs, _ := a.g.AdjList().LoadEntry(id)
-		for _, nb := range nbs {
-			if nb == nID {
-				result = append(result, key)
-				break
-			}
-		}
-		return true
-	})
-	return result
+	return a.g.AdjList().InNeighbours(n)
 }
 
 // RemoveAllEdgesFrom removes all outgoing edges from n in O(degree) time.

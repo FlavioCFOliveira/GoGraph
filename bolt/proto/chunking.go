@@ -240,20 +240,48 @@ func (cr *ChunkedReader) ReadMessage() ([]byte, error) {
 
 // ChunkedWriter frames a logical Bolt message into one or more chunks and
 // writes them to the underlying buffered writer, followed by the uint16(0)
-// end-of-message sentinel. It then flushes the buffer.
+// end-of-message sentinel. By default it then flushes the buffer, so one
+// WriteMessage call reaches the peer on its own; see [ChunkedWriter.SetAutoFlush]
+// for the streaming case.
 //
 // ChunkedWriter is NOT safe for concurrent use.
 type ChunkedWriter struct {
 	w *bufio.Writer
+	// autoFlush reports whether WriteMessage flushes on return. It defaults to
+	// true so that a caller which writes one message and then waits for the
+	// peer — the request side of the protocol, and any caller that has not
+	// thought about framing — is correct without doing anything.
+	autoFlush bool
 }
 
-// NewChunkedWriter returns a ChunkedWriter that writes to w.
+// NewChunkedWriter returns a ChunkedWriter that writes to w and flushes after
+// every message.
 func NewChunkedWriter(w io.Writer) *ChunkedWriter {
-	return &ChunkedWriter{w: bufio.NewWriter(w)}
+	return &ChunkedWriter{w: bufio.NewWriter(w), autoFlush: true}
 }
 
-// WriteMessage writes msg as one or more Bolt chunks, appends the uint16(0)
-// sentinel, and flushes the underlying writer.
+// SetAutoFlush controls whether [ChunkedWriter.WriteMessage] flushes the
+// underlying writer before returning. It defaults to true.
+//
+// Disabling it lets a run of messages accumulate in the buffer and reach the
+// peer in a small number of writes instead of one write per message, which is
+// what a result stream wants: a K-row result otherwise costs K write syscalls,
+// and the buffer in front of the connection can never do its job. Measured on
+// the Bolt server, a 1 000-row result cost 1 953 µs of CPU with a flush per
+// message and 324 µs without one (docs/cpu-vs-neo4j-memgraph-2026-08-11.md §4).
+//
+// A caller that disables auto-flush TAKES OVER responsibility for delivery: it
+// MUST call [ChunkedWriter.Flush] before it blocks waiting for the peer, or the
+// buffered messages will never be sent and the exchange deadlocks.
+func (cw *ChunkedWriter) SetAutoFlush(on bool) { cw.autoFlush = on }
+
+// Flush writes any buffered bytes to the underlying writer. It is a no-op when
+// the buffer is empty, so it is safe to call unconditionally.
+func (cw *ChunkedWriter) Flush() error { return cw.w.Flush() }
+
+// WriteMessage writes msg as one or more Bolt chunks and appends the uint16(0)
+// sentinel. It flushes the underlying writer unless auto-flush has been
+// disabled with [ChunkedWriter.SetAutoFlush].
 //
 // If msg is empty, WriteMessage writes only the sentinel (a valid, zero-length
 // Bolt message).
@@ -284,5 +312,8 @@ func (cw *ChunkedWriter) WriteMessage(msg []byte) error {
 		return fmt.Errorf("bolt chunk: write sentinel: %w", err)
 	}
 
-	return cw.w.Flush()
+	if cw.autoFlush {
+		return cw.w.Flush()
+	}
+	return nil
 }

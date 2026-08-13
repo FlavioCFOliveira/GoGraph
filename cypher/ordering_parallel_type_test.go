@@ -225,3 +225,90 @@ func TestOrdering_QueryResultsMatchAdjacencyOracle(t *testing.T) {
 		t.Errorf("reverse traversal returned %d relationships, adjacency has %d", got, want)
 	}
 }
+
+// TestOrdering_ParallelEdgeTypes_ReverseDirection is the reverse-direction half
+// of this file's oracle, and it is the regression test for rmp #2250.
+//
+// The forward assertions above passed throughout the defect's life. Reversing the
+// same pattern returned silently wrong counts as soon as an ordered pair carried
+// more than one relationship type: the FIRST type absorbed every parallel edge of
+// the pair (nPar × nDest instead of nDest) and every other type matched NOTHING.
+// Both directions of error at once — an over-count and a false zero — from data
+// the forward direction reported correctly.
+//
+// The cause was that the reverse hop resolved its edge-type verdict for the PAIR
+// rather than for the INSTANCE: it took the first forward slot with that
+// destination and applied that slot's verdict to every parallel sibling
+// (cypher/exec/expand.go, reverseEdgePassesFilter). The fix resolves the exact
+// sibling through the handle the reverse slot already carries.
+//
+// Every expectation is stated by hand from the fixture, in the style of the rest
+// of this file — nDest relationships of each type, whichever way they are walked.
+//
+// The TCK could not catch this. It is green at 3897/3897 both before and after the
+// fix: no scenario walks a type-filtered reverse pattern over parallel
+// relationships of DISTINCT types between one ordered pair, which is the exact and
+// only shape that reproduces it.
+func TestOrdering_ParallelEdgeTypes_ReverseDirection(t *testing.T) {
+	t.Parallel()
+	for _, nPar := range []int{1, 2, 3} {
+		for _, nDest := range []int{1, 2} {
+			nPar, nDest := nPar, nDest
+			t.Run(fmt.Sprintf("types%d_dests%d", nPar, nDest), func(t *testing.T) {
+				t.Parallel()
+				eng, _ := inMemMultigraphEngine(t)
+				mustRunWrite(t, eng, `CREATE (a:N {key:'src'})`)
+				for d := 0; d < nDest; d++ {
+					mustRunWrite(t, eng, fmt.Sprintf(`CREATE (b:N {key:'d%d'})`, d))
+				}
+				// One relationship of each distinct type on every ordered pair, so
+				// each pair carries nPar parallel edges of nPar different types.
+				for d := 0; d < nDest; d++ {
+					for p := 1; p <= nPar; p++ {
+						mustRunWrite(t, eng, fmt.Sprintf(
+							`MATCH (a:N {key:'src'}),(b:N {key:'d%d'}) CREATE (a)-[:T%d]->(b)`, d, p))
+					}
+				}
+				want := int64(nDest)
+				for p := 1; p <= nPar; p++ {
+					// Forward — correct throughout the defect, and kept as the control
+					// that says the fixture really holds what the reverse arms read.
+					if got := countScalar(t, eng, fmt.Sprintf(
+						`MATCH (:N {key:'src'})-[r:T%d]->() RETURN count(r) AS c`, p)); got != want {
+						t.Errorf("forward :T%d returned %d, want %d", p, got, want)
+					}
+					// Reverse, anchored on the source.
+					if got := countScalar(t, eng, fmt.Sprintf(
+						`MATCH ()<-[r:T%d]-(:N {key:'src'}) RETURN count(r) AS c`, p)); got != want {
+						t.Errorf("reverse (anchored) :T%d returned %d, want %d", p, got, want)
+					}
+					// Reverse, fully anonymous — the form in the defect report.
+					if got := countScalar(t, eng, fmt.Sprintf(
+						`MATCH ()<-[r:T%d]-() RETURN count(r) AS c`, p)); got != want {
+						t.Errorf("reverse (anonymous) :T%d returned %d, want %d", p, got, want)
+					}
+					// DirBoth. This was CORRECT while the reverse arm was wrong,
+					// because cyphermorphism dedupes the two hops on the handle and
+					// hides the over-admission — so it is a guard, not a witness.
+					if got := countScalar(t, eng, fmt.Sprintf(
+						`MATCH (:N {key:'src'})-[r:T%d]-() RETURN count(r) AS c`, p)); got != want {
+						t.Errorf("undirected :T%d returned %d, want %d", p, got, want)
+					}
+				}
+				// Multi-type [r:A|B]: the filter admits several types at once, so a
+				// pair-level verdict cannot be papered over by picking one type.
+				if nPar >= 2 {
+					wantPair := int64(nDest * 2)
+					if got := countScalar(t, eng,
+						`MATCH ()<-[r:T1|T2]-(:N {key:'src'}) RETURN count(r) AS c`); got != wantPair {
+						t.Errorf("reverse :T1|T2 returned %d, want %d", got, wantPair)
+					}
+					if got := countScalar(t, eng,
+						`MATCH (:N {key:'src'})-[r:T1|T2]->() RETURN count(r) AS c`); got != wantPair {
+						t.Errorf("forward :T1|T2 returned %d, want %d", got, wantPair)
+					}
+				}
+			})
+		}
+	}
+}

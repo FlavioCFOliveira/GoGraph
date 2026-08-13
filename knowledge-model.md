@@ -1905,6 +1905,240 @@ coverage instrumentation; a test that measures the MODULE is a GATE, and it neve
 does. The two must not be confused, because guarding a gate that way would stop the
 coverage arm gating anything.
 
+### Sprint 339 sync — the CPU-efficiency head-to-head vs Neo4j and Memgraph (2026-08-11)
+
+Recorded at `2ba5d36e` (and `283c7eb1` for the concurrency harness committed with it).
+Added: 2 `Commit`s (`2ba5d36e`, `283c7eb1`); 2 `Spec`s
+(`docs/cpu-vs-neo4j-memgraph-2026-08-11.md`,
+`docs/concurrency-vs-neo4j-memgraph-2026-08-11.md`); 3 `Test`s (`TestCPUEfficiency`,
+`TestConcurrencySweep`, `TestDeleteBatchScaling`, all in `bench/comparison`); 3 `Task`s
+(2410 BUG, 2411 SPIKE, 2412 IMPROVEMENT, all BACKLOG); and 1 `Function`
+(`cypher.populateRowCtx`) that the extractor had never captured — a genuine fidelity
+gap found by this audit, not a new symbol.
+
+Edges: `Commit -[TOUCHES]->` `bench/comparison` and each `Spec`; `CONTAINS` for
+`TestCPUEfficiency`; `Spec -[FOUND]->` the four symbols the audit indicted
+(`proto.ChunkedWriter.WriteMessage`, `expr.RowContext`, `cypher.populateRowCtx`,
+`cypher.planCache`); `Task -[CONCERNS]->` its symbol; `Task -[FROM_AUDIT]-> Spec`.
+No new label or edge type: `FOUND`, `CONCERNS` and `FROM_AUDIT` already existed in the
+live graph (see the edge-table data-quality note).
+
+Why these four symbols are worth having in the graph as *indicted*: the audit measured
+processor time per operation against both peers and found GoGraph has the **lowest**
+fixed CPU per query of the three (47.8 µs vs Memgraph 71.6, Neo4j 167.7) but the
+**highest** marginal cost per row (1.88 µs vs 0.88 and 0.96). A matched pair isolating
+delivery from computation showed 97 % of that per-row cost is
+`ChunkedWriter.WriteMessage` flushing per Bolt message — one `write(2)` syscall per
+returned row. Separately, `RowContext` being a `map[string]Value` rebuilt per row by
+`populateRowCtx` puts ~19 % of engine CPU in Go map machinery on a scan-plus-filter,
+and `planCache` being keyed on raw query text costs +65 % CPU when a literal rotates.
+At 64 concurrent clients GoGraph uses 2.51× less CPU per point lookup than Memgraph
+and 3.66× less than Neo4j, and is the only one of the three whose per-operation cost
+falls as clients are added.
+
+### Sprint 340 sync — remediating the CPU audit (2026-08-11)
+
+Recorded at `8a4be5b2`. Added: `Sprint 340` (CLOSED); 4 `Commit`s (`6fc5a693`,
+`d7f6c1a8`, `80e16db2`, `88e6be61`); 4 `Task`s (2413, 2414, 2415, 2416); and the
+symbols the sprint introduced — `proto.ChunkedWriter.SetAutoFlush` and `.Flush`,
+`cypher.schemaWalk` and `cypher.newSchemaWalk`, `lpg.bagKeyAt`.
+
+Edges: `Sprint 340 -[CONTAINS]->` each commit; `Task -[IMPLEMENTED_IN]->` its
+commit for 2410, 2413, 2415 and 2416; `Commit -[TOUCHES]->` `bolt/proto`,
+`bolt/server`, `cypher`, `graph/lpg`; and `Task 2412 -[DEPENDS_ON]-> Task 2414`,
+which is the one relationship in this sync worth reading twice.
+
+**What the sprint established, and why the graph should carry it.** Three
+findings went in; two came out fixed, one came out *blocked with its blocker
+measured*, and the spike redirected itself:
+
+- **#2410** — the Bolt writer flushed per message, so a K-row result cost K
+  `write(2)` syscalls. Fixed by defaulting auto-flush ON and letting only the
+  server opt out: a 1 000-row query fell **1 943.6 → 322.2 µs of CPU (6.03×)**.
+- **#2412** — literal normalisation WORKED (eight literals collapsed onto one
+  cache entry, TCK still 3897) and was reverted anyway, because a parameter is
+  not planned like a literal here: the btree string-equality, range and prefix
+  seeks all fall back to `NodeByLabelScan`, and a type mismatch that yields zero
+  rows for a literal *raises* for a parameter. Hence #2414 and the `DEPENDS_ON`.
+- **#2411** — the spike found the row context was no longer the biggest item.
+  After **#2415** hoisted the schema walk out of the per-row loop (−12.6 %),
+  `lpg.bagDecodeAt` was 28.18 % cumulative, and **#2416** stopped the property
+  lookup decoding the value of every record it walks past (−12.7 %). Together
+  `scan_filter` went **314.7 → 238.4 ns/node**, narrowing the gap to Memgraph
+  from 2.74× to 2.07×, with no architecture change. The spike's recommendation is
+  to do #2414 first, re-profile, and only then decide #2411.
+- **#2413** — `TestHandlePropLatch_SetBeforeVisible` had never been green, so
+  `make ci` was red on the cover-gate stage before any of this work started.
+
+### Sprint 341 sync — parameter/literal parity (2026-08-11)
+
+Recorded at `797d2182`. Added: `Sprint 341` (CLOSED); 3 `Commit`s (`3fd78c5e`,
+`1a9aa1e4`, `30c04fa9`); `Task` 2417; and the symbols introduced —
+`parser.StripLiterals`, `cypher.stringOperand`, and the rewritten `lpg.bagUint`.
+Edges: `Sprint -[CONTAINS]->` each commit, `Task -[IMPLEMENTED_IN]->` its commit
+for 2412/2414/2417, `Commit -[TOUCHES]->` `cypher`, `cypher/parser`, `graph/lpg`.
+
+**The finding worth carrying: #2414 was a defect on the RECOMMENDED usage.** The
+string range extractor admitted literals only — a documented scope limitation
+("parameter range seeks are deliberately out of scope for this increment") whose
+numeric companion had been extended by #1652 and which nobody went back for. So
+`n.sk = 'lit'` seeked a btree index while `n.sk = $p`, the spelling every driver
+sends, planned a full `NodeByLabelScan`. Nothing failed: the answers stayed
+right and only the plan collapsed, which is why it survived. It was found only
+because literal hoisting (#2412) rewrote literals into parameters and the
+existing plan tests went red.
+
+With parity in place #2412 re-landed, and re-profiling then surfaced #2417: a
+`copy` with a VARIABLE length does not inline, so `bagUint` decoded every
+property field through a `runtime.memmove` CALL — 10.20 % of all engine CPU,
+100 % of it from that one function, removed by a switch on the four widths.
+
+After this sprint GoGraph is the cheapest of the three engines on seven of the
+eight measured workloads; `scan_filter` remains at 1.99× Memgraph and is #2411.
+
+### Sprint 342 sync — closing the concurrency assessment's findings (2026-08-12)
+
+Recorded at `1fa1bb6a` and `93410102`. Added: `Sprint 342` (CLOSED); `Component`
+`adjlist.revIndex` (`graph/adjlist/reverse.go`); `Defect`s 2400, 2418 and 2419,
+all `fixed`; and `Lesson` `confirmed-at-source-is-not-priced`. Edges:
+`Sprint -[CLOSED_DEFECT]->` each defect, `Defect -[FIXED_BY]-> Component` for
+2400 and 2418, and `Defect 2400 -[TAUGHT]-> Lesson`.
+
+**The finding worth carrying: a root cause recorded as "confirmed at source"
+had never been priced, and was wrong.** The 2026-08-11 concurrency assessment
+attributed its one defect — bulk delete degrading without bound, 4.8× over five
+cycles at exactly one core — to `removeNodeInfo` cloning the whole roaring64
+tombstone bitmap per node removed. That code does exactly what the report says.
+A CPU profile of the reproduction prices it at **0.99 %**, and a microbenchmark
+of the named mechanism moves only 1.53× across an eightyfold increase in the
+set being cloned, because a dense id range compresses to a handful of roaring
+containers. Reading a mechanism in the source confirms that it EXISTS, never
+that it COSTS.
+
+The real cause was **78.77 %** of that same profile: `lpgMutatorAdapter.InNeighbours`
+answered "which nodes hold an edge into n" with a walk of every interned node,
+once per node deleted, so a delete cost O(k·n) with *n* counting every node ever
+interned rather than the live ones — which is why the cost grew across cycles,
+stayed flat within a wipe, used one core, and left `count(*)` fast. The
+adjacency now keeps a live in-edge index, as Neo4j and Memgraph both do:
+cycle six falls 4.622 s → 77.2 ms, `DETACH DELETE` 22.2×, and 90 000 nodes in
+one statement 15.97 s → 375.6 ms, for +1.92 % on end-to-end relationship
+creation with the read path unchanged.
+
+Two defects in that fix were caught only by the benchstat comparison the user
+required before accepting it, and by no correctness test: the first draft grew
+the per-shard array to exactly `intra+1` per new destination (O(n²), +1057 %
+memory on a 100 k-edge hub), and it carried its own atomic counter of recorded
+in-edges — a second globally shared cache line on the write path for a number
+`AdjList.Size` already had.
+
+#2419 raised `DefaultMaxOpenTxPerPrincipal` 16 → 2048 so the default
+configuration reaches the concurrency levels the project guidelines publish. The
+trade is explicit: every open transaction pins an MVCC read snapshot and holds
+the reclamation horizon back for its lifetime, so the bound on that resource is
+weaker, and `DefaultMaxTxIdleTime` (5 s) is what limits the exposure. Under the
+defaults the quota can no longer bind at all, because a connection holds at most
+one open transaction and `MaxConnections` defaults to 1024.
+
+### Sprint 343 sync — the certification's three correctness defects (2026-08-13)
+
+Recorded at `9167d3d3` and `fca34a0c`. Added: `Defect`s 2420, 2366 and 2423, all
+`FIXED`; `Lesson`s `a-fallback-is-a-ceiling-not-a-default` and
+`an-index-is-a-candidate-source-never-a-label-proof`. Edges:
+`Sprint 343 -[ADDRESSES]->` each defect, and `Defect -[TAUGHT]-> Lesson` for 2420
+and 2423.
+
+**#2420 — the fallback is a CEILING, not a default.** `mvcc.Horizon.Oldest`
+computes the reclamation watermark by scanning the occupancy words once. It
+carried a `found` flag and took the first occupied slot's instant
+unconditionally, so the fallback — the published frontier, sampled by the caller
+BEFORE the scan — was discarded the moment any reader was seen, and with every
+live reader newer than it the watermark came out ABOVE it. Claiming the occupancy
+bit before reading the clock protects a reader the scan SEES; it cannot protect
+one that claims a slot in a word the scan has already passed, and the fallback is
+the only bound that covers such a reader. A sweep at the inflated watermark frees
+the version that reader must undo, and it reads a value from after its own
+instant — an Isolation violation with nothing reporting it, which is what the
+previous cycle's fourteen refuted mechanisms had been circling.
+
+**Two of the previous cycle's assertions were TRUE and both were blind to it**:
+the reclaimer never freed a record above the watermark it was given, and a reader
+that checks the watermark at its own birth is always visible to its own scan.
+
+**The detector is worth more than the fix.** `Graph.publishWatermark` now counts a
+watermark that moves BACKWARDS, judged against the caller's own earlier sample so
+a reordered publish of two near-simultaneous scans cannot read as a breach, and
+`mvcc.Horizon.Leave` invalidates the slot's timestamp before clearing the
+occupancy bit so an occupied slot never reads as a previous occupant's stale
+instant. With the residue in place the counter reported 1 734–4 165 benign events
+per run; with it gone, 5 per run, all real; with `Oldest` capped, zero. It fires
+at the corruption rather than at the read that suffers it, which turned a
+2 %-per-run symptom into a 5-per-run signal. `Horizon.StaleLeaves` and
+`Horizon.SlotState` are the release-side and reader-side detectors of the same
+family, both pinned on sound AND broken controls.
+
+**#2366 — the two directions of a UNIQUE value-set change are not symmetric.** A
+reservation is eager and its rollback is sound, because the value was reserved
+throughout. A release applied eagerly hands the value to any peer that asks, so
+its rollback wrote a RE-RESERVATION into shared state judged against the
+rolling-back transaction's own view — while a peer's COMMITTED release had already
+freed the same value, leaving it reserved with no live holder. A release is now
+recorded on `exec.ConstraintTxn` and applied only by `CommitTxn`; rollback drops a
+private mark. That also closes the mirror hazard, in which a peer could take a
+value an uncommitted transaction had vacated and share it if that transaction
+rolled back.
+
+**#2423 — an index is a CANDIDATE source, never proof of a label.** Found while
+fixing #2366, whose fix stopped masking it. The planner rewrote
+`Selection(n.email = 'old')` over `NodeByLabelScan(Person)` into a bare
+`NodeByIndexSeek`, assuming a label-scoped index implies the label; a label
+removal leaves the node's entries in that label's property indexes, so the engine
+returned a row that matched `(n:Person)` while reporting `labels(n)` as the EMPTY
+LIST. The label scan was never affected because it resolves through
+`LabelBitmapAsOf`, which filters exactly this. Every rewrite that replaces a
+labelled scan leaf now qualifies its candidates — a residual predicate for the
+hash and key-set seeks, a bitmap intersection for the range and intersection
+scans — and one that cannot verify DECLINES. Only the hash-equality shape
+REPRODUCED; the others planned as `Filter` over `NodeByLabelScan` in that fixture,
+so they are fixed as latent rather than demonstrated, and two existing tests were
+found to be asserting the defect (both seeded a node with no label and expected a
+labelled seek to return it).
+
+### Sprint 343 sync — #2424, the defect the acceptance criterion found (2026-08-13)
+
+Recorded at `f3e8f48f` and `5909b3ad`. Added: `Defect` 2424 (`FIXED`) and `Lesson`
+`when-a-fix-breaks-N-fixtures-suspect-the-condition`, with
+`Sprint 343 -[ADDRESSES]-> Defect 2424` and `Defect 2424 -[TAUGHT]-> Lesson`.
+
+**Version memory could settle ABOVE the stated bound, permanently.** `MVCCStats`
+admits two reasons for retention to exceed `Bound` — a reader holding versions back,
+or a burst the vacuum has not caught up with, which `Ceiling` bounds. The observed
+state was neither: 4 883 records held against a bound of 4 096 with **zero active
+readers** and the sweeper **exited** holding 3 767 records of reclamation debt.
+`chargeReclaimDebt` signals only above `reclaimThreshold`; the threshold amortises the
+SIGNAL, and that is sound only while a sweeper is alive to do the work eventually. A
+workload that stops just short of the threshold after the sweeper's idle exit therefore
+keeps its versions for the life of the process.
+
+**It was found by running the 150 package runs #2420's acceptance criterion demanded,**
+after the new watermark detector had already made 40 runs the stronger evidence. The
+criterion was honoured to the letter anyway, and that is what surfaced it.
+
+**The first fix was too aggressive and four fixtures said so.** Waking on ANY
+sub-threshold charge starts a sweeper for a single write on an idle graph, and four
+white-box tests failed in succession — two reclaim tests, the adjacency-stamp bound
+test, a label-delta accounting test — each deterministic only because no sweeper had
+ever been alive to race it. A debt below the threshold cannot breach a bound that IS the
+threshold, so the condition was simply wrong; it is now `!running && VersionCount() >
+reclaimThreshold`, the mandate's own statement, and it perturbs none of them.
+
+**The regression test CONSTRUCTS the state** rather than waiting for it: a graph horizon
+slot claimed without publishing an instant holds every version back, the sweeper reaches
+its idle exit with the retention intact, and releasing the slot directly rather than
+through `EndRead` leaves no wake behind. One ordinary write must then suffice. Against
+the previous behaviour: 8 194 records against a bound of 4 096 with `Running` false,
+deterministically, where the symptom appeared once in 71 package runs.
+
 ## Known limitations (faithful, by design)
 
 - **Build-tag duplicates.** The extractor parses every `.go` file regardless of build

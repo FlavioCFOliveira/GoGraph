@@ -20,6 +20,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/internal/clock"
+	"github.com/FlavioCFOliveira/GoGraph/internal/memlimit"
 )
 
 const (
@@ -141,15 +142,38 @@ const (
 	// not by this. Counting waiting BEGINs here would reject legitimate concurrent
 	// traffic.
 	//
-	// The default of 16 is generous for a connection pool — one connection holds at
-	// most one open transaction — while still bounding the resource, as the
-	// bounded-resources mandate requires. It is KEPT at 16 rather than raised now
-	// that it binds on writers: a pool with more than sixteen connections per
-	// principal should say so explicitly.
+	// # Why 2048, and what it gives up (rmp #2419)
+	//
+	// It was 16, defended here on the grounds that "a pool with more than sixteen
+	// connections per principal should say so explicitly". The 2026-08-11
+	// concurrency assessment recorded the consequence as finding F2: CLAUDE.md
+	// publishes 1, 8, 64, 256 and 1024 goroutines as the levels this module
+	// measures and reports at, and a single principal could not reach them through
+	// explicit transactions without overriding this first. Every harness that got
+	// there had already had to — bench/soak with 1200, bench/comparison/ggserver
+	// with a flag — which is the shape of a default disagreeing with a published
+	// contract rather than of two harnesses being unusual.
+	//
+	// 2048 is above the highest published level, so the default configuration now
+	// reaches the concurrency the module publishes. Note what that means in
+	// practice: a connection holds at most one open transaction and
+	// [Options.MaxConnections] defaults to 1024, so under the default
+	// configuration this quota CANNOT BIND — the connection ceiling is reached
+	// first, and it is the connection ceiling that bounds the resource. This
+	// quota binds again only for an operator who raises MaxConnections above
+	// 2048, and it remains what isolates one principal from another.
+	//
+	// THE COST, stated rather than glossed: every open transaction pins an MVCC
+	// read snapshot and holds the reclamation horizon back for its lifetime
+	// (rmp #2305, #2307), so a higher ceiling is a weaker bound on that resource.
+	// What limits the damage is [DefaultMaxTxIdleTime]: an abandoned transaction
+	// is reclaimed after 5 s rather than held until the client disconnects. An
+	// embedder that wants the old tight bound sets Options.MaxOpenTxPerPrincipal
+	// explicitly, which is now the only way to get it.
 	//
 	// Set a negative value to disable enforcement — which is a deliberate,
 	// visible choice at the call site, not something reachable by accident.
-	DefaultMaxOpenTxPerPrincipal = 16
+	DefaultMaxOpenTxPerPrincipal = 2048
 
 	// DefaultDatabaseName is the value applied to Options.DatabaseName when the
 	// caller leaves it empty, and the name reported in the `db` field of result
@@ -466,8 +490,29 @@ func resolveMaxInboundDecodeBytes(opt int64) int64 {
 		// No soft memory limit to derive from. This branch used to return 0,
 		// i.e. no ceiling at all, which is the state of any process that has not
 		// set GOMEMLIMIT — see [DefaultMaxInboundDecodeBytes].
+		//
+		// It then returned the fixed constant unconditionally, and inside a
+		// container capped BELOW it that is a ceiling larger than the container,
+		// which the OOM killer reaches first. See cypher's
+		// resolveGlobalMaxResultBytes for the full reasoning (rmp #2421); this
+		// keeps the one-eighth fraction, and like it can only ever LOWER the
+		// ceiling.
+		if avail, ok := memlimit.Available(); ok {
+			return inboundCeilingFromAvailable(avail)
+		}
 		return DefaultMaxInboundDecodeBytes
 	}
+}
+
+// inboundCeilingFromAvailable derives the engine-wide inbound-decode ceiling from
+// a bound on the memory this process may use, keeping the one-eighth fraction the
+// GOMEMLIMIT branch uses. See cypher's globalCeilingFromAvailable for why the
+// derivation is a separate function and why it may only ever lower the ceiling.
+func inboundCeilingFromAvailable(avail int64) int64 {
+	if eighth := avail / 8; eighth > 0 && eighth < DefaultMaxInboundDecodeBytes {
+		return eighth
+	}
+	return DefaultMaxInboundDecodeBytes
 }
 
 // Server is the Bolt v5 TCP server. It accepts connections from a
@@ -920,6 +965,12 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	// budget (the default when no GOMEMLIMIT is set) detaches the accounting.
 	cr.SetInboundBudget(s.inbound)
 	cw := proto.NewChunkedWriter(conn)
+	// RECORD frames accumulate in the writer's buffer instead of each costing a
+	// write syscall of its own; sendResponse flushes on every other message
+	// type. Every run of RECORDs is terminated by SUCCESS, FAILURE or IGNORED,
+	// so the client still has every record in hand before this loop goes back to
+	// waiting for its next request. See sendResponse for the full argument.
+	cw.SetAutoFlush(false)
 	// Pass the listener address so ROUTE responses can populate the routing table.
 	localAddr := ""
 	s.mu.Lock()
@@ -1409,6 +1460,22 @@ func sendResponse(cw *proto.ChunkedWriter, msg any) error {
 	}
 	if err := cw.WriteMessage(rb.buf.Bytes()); err != nil {
 		return fmt.Errorf("bolt: write response %T: %w", msg, err)
+	}
+	// The connection's writer has auto-flush disabled (see handleConn), so a
+	// RECORD costs no syscall of its own and a K-row result is delivered in
+	// O(bytes/bufsize) writes rather than K. Flushing on every message that is
+	// NOT a RECORD is what keeps that safe: the Bolt protocol terminates every
+	// run of RECORDs with a SUCCESS, FAILURE or IGNORED summary, and the server
+	// only ever waits for the client after sending one. So the buffer is always
+	// drained before the exchange can block, and a client that is streaming
+	// still sees each batch as soon as its summary lands.
+	//
+	// Flushing per RECORD instead measured 70% of all server CPU in write(2)
+	// under a row-returning query (docs/cpu-vs-neo4j-memgraph-2026-08-11.md §4).
+	if _, isRecord := msg.(*proto.Record); !isRecord {
+		if err := cw.Flush(); err != nil {
+			return fmt.Errorf("bolt: flush response %T: %w", msg, err)
+		}
 	}
 	return nil
 }

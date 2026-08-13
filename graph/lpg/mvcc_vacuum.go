@@ -203,6 +203,33 @@ type vacuumState struct {
 	// watermark past it can free nothing, so it wakes nobody. Monotonic, so it
 	// cannot latch.
 	lastWatermark atomic.Uint64
+	// wmRegress counts STRICT DECREASES of the reclamation watermark, and
+	// wmRegressFrom/To keep the first pair observed.
+	//
+	// # Why a decrease is impossible, and therefore worth counting
+	//
+	// The watermark is min(the published frontier, every live reader's start
+	// instant). The frontier is monotone ([mvcc.Clock.ReadTS]), and a reader claims
+	// its horizon slot BEFORE it reads the frontier, so any reader that is invisible
+	// to a scan started after that scan sampled its fallback and therefore begins at
+	// or after it ([mvcc.Horizon.EnterHolding]). Every watermark computed later is
+	// consequently at least every watermark computed earlier, and the suspended
+	// answer is zero rather than a small number.
+	//
+	// So a strict decrease cannot happen while the substrate is sound, and if it
+	// does it is the ONE corruption reclamation cannot survive: a live reader has
+	// stopped being represented in the watermark — a slot returned twice, a slot
+	// number invented, or two readers sharing a slot — and the next sweep frees
+	// versions that reader can still reach. The reader then observes a value from
+	// after its own instant, which is an Isolation violation with nothing reporting
+	// it (rmp #2420).
+	//
+	// It is FREE: both call sites already compare the new watermark against this
+	// field to decide whether to wake the sweeper, so the breach is the branch they
+	// already take. Surfaced through [MVCCStats.WatermarkRegressions].
+	wmRegress     atomic.Int64
+	wmRegressFrom atomic.Uint64
+	wmRegressTo   atomic.Uint64
 	// cursor is the unit the next pass starts at, so a pass that stops at the
 	// record cap resumes where it left off instead of restarting at unit zero
 	// and starving the later stores.
@@ -443,23 +470,64 @@ func (g *Graph[N, W]) wakeVacuumOnRelease() {
 	if !g.mvccArmed || g.VersionCount() == 0 {
 		return
 	}
+	// Sampled BEFORE the watermark, and that order is what makes the regression
+	// test sound; see [Graph.publishWatermark].
+	before := g.vac.lastWatermark.Load()
 	wm := g.horizon.Oldest(g.mvccClock.ReadTS())
 	if wm == 0 {
 		// Reclamation is suspended: a reader could not be registered, so the
 		// oldest is unknown and nothing may be freed.
 		return
 	}
+	if !g.publishWatermark(before, wm) {
+		// No advance, so nothing this release could free. Silence is correct.
+		return
+	}
+	g.wakeVacuum()
+}
+
+// publishWatermark records wm as the newest watermark any pass or release has
+// computed, and reports whether it ADVANCED past what was already recorded.
+//
+// It is the one place the watermark's monotonicity is asserted, because it is the
+// one place both producers meet: a decrease is counted on [vacuumState.wmRegress]
+// rather than silently folded into "no advance". See that field for why a decrease
+// is impossible and what it would mean.
+//
+// # before is the caller's OWN earlier sample, and only that comparison is sound
+//
+// The breach is judged against before — the value the caller read BEFORE it
+// computed wm — and never against the current value of the field. Two producers
+// (the sweeper's pass and a reader's release) compute watermarks nanoseconds apart
+// and can publish them in either order, so a comparison against whatever is in the
+// field at this instant flags "an older sample arrived after a newer one", which is
+// ordinary and harmless. Measured with that spelling: 1 734 to 4 165 flagged per
+// run, none of them a defect (rmp #2420).
+//
+// Against before it is exact: before was already stored when the caller read it, so
+// it was computed strictly earlier than wm, and the true watermark never decreases
+// — [Horizon.Oldest] returns either the exact watermark or zero, never a stale
+// value, which is what [mvcc.Horizon.Leave] invalidating its timestamp buys.
+func (g *Graph[N, W]) publishWatermark(before, wm uint64) bool {
+	if wm < before {
+		g.vac.wmRegress.Add(1)
+		// The FIRST pair is kept: it is the one whose interleaving is least
+		// perturbed by the recording, and a later pair adds nothing once the
+		// invariant is known to be broken.
+		g.vac.wmRegressFrom.CompareAndSwap(0, before)
+		g.vac.wmRegressTo.CompareAndSwap(0, wm)
+		metrics.IncCounter("lpg.mvcc.watermark_regressions", 1)
+		return false
+	}
 	for {
 		last := g.vac.lastWatermark.Load()
 		if wm <= last {
-			// No advance, so nothing this release could free. Silence is correct.
-			return
+			return false
 		}
 		if g.vac.lastWatermark.CompareAndSwap(last, wm) {
-			break
+			return true
 		}
 	}
-	g.wakeVacuum()
 }
 
 // awaitVacuumProgress blocks until the vacuum has completed one pass or the debt
@@ -682,6 +750,9 @@ func (g *Graph[N, W]) vacuumPass() (freed int, capped, ran bool) {
 	}
 	defer g.vac.releaseSweeper()
 
+	// Sampled BEFORE the watermark; see [Graph.publishWatermark] for why the
+	// comparison is only sound in that order.
+	before := g.vac.lastWatermark.Load()
 	watermark := g.horizon.Oldest(g.mvccClock.ReadTS())
 	if watermark == 0 {
 		// Reclamation is suspended: a reader could not be registered with the
@@ -694,13 +765,9 @@ func (g *Graph[N, W]) vacuumPass() (freed int, capped, ran bool) {
 	// Record the watermark this pass is about to use, so a horizon release that
 	// does not advance past it wakes nobody. Monotonic: never move it backwards,
 	// or a release that genuinely advanced the watermark could be silenced by a
-	// later pass that ran at an older one.
-	for {
-		last := g.vac.lastWatermark.Load()
-		if watermark <= last || g.vac.lastWatermark.CompareAndSwap(last, watermark) {
-			break
-		}
-	}
+	// later pass that ran at an older one — and a decrease is an invariant breach
+	// rather than a stale sample, which is what [Graph.publishWatermark] records.
+	g.publishWatermark(before, watermark)
 	const units = uint64(vacuumUnitCount)
 	cur := g.vac.cursor.Load() % units
 	for n := uint64(0); n < units; n++ {

@@ -81,6 +81,42 @@ func (g *Graph[N, W]) chargeReclaimDebt(n int64) {
 	}
 	debt := g.reclaimDebt.Add(n)
 	if debt < reclaimThreshold {
+		// A DEBT WITH NO SWEEPER ALIVE IS NOT AMORTISED, IT IS STRANDED (rmp #2424).
+		//
+		// The threshold amortises the SIGNAL, and that is sound only while a sweeper
+		// exists to do the work eventually. With none alive this debt is invisible to
+		// everything: the churn signal fires only above the threshold, and the drain
+		// signal only when a reader leaves. A workload that stops just short of the
+		// threshold after the sweeper's idle exit therefore keeps its versions for the
+		// life of the process.
+		//
+		// Observed exactly that, once in 71 runs of the whole graph/lpg package under
+		// peer load: 4 883 records held against a bound of 4 096 with ZERO active
+		// readers and `Running:false Backlog:3767`. Neither of the two states
+		// [MVCCStats] admits for exceeding the bound — a reader holding versions back,
+		// or a burst the vacuum has not caught up with — and the retention was
+		// permanent.
+		//
+		// [Graph.vacuumLoop]'s exit path already covers the symmetric case: it
+		// re-checks the wake CHANNEL after clearing `running`, so a sender that reads
+		// `running` false starts a sweeper itself and one that reads it true is
+		// guaranteed to have left its signal first. That cover never engaged here,
+		// because a sub-threshold charge left no signal at all.
+		//
+		// THE CONDITION IS THE MANDATE'S OWN, not merely "a debt exists". A debt below
+		// the threshold cannot by itself breach the stated bound, because the bound IS
+		// [reclaimThreshold] — so waking for every such charge would start a sweeper for
+		// a single write on an idle graph, which is work nobody needs and which perturbs
+		// every measurement of a small fixture. What must never happen is RETENTION above
+		// the bound with nobody alive to reduce it, which is exactly what
+		// [MVCCStats.WithinBound] reports and what the observed failure was.
+		//
+		// `running` is tested FIRST so the ordinary path — a sweeper already alive — pays
+		// one atomic load of a line written only when a sweeper starts or exits, and the
+		// version-count sum is reached only when there is no sweeper at all.
+		if !g.vac.running.Load() && g.VersionCount() > reclaimThreshold {
+			g.wakeVacuum()
+		}
 		return
 	}
 	g.wakeVacuum()

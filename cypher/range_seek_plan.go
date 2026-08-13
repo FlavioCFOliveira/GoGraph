@@ -175,6 +175,20 @@ func buildRangeSeekIfEnabled(
 // EngineOptions.DisableBitmapIntersection knob as the label intersection, since
 // both are the same lever — a set operation over Roaring bitmaps — and a caller
 // disabling one means to disable the other.
+// labelBitmapOf returns the resolver closure a range scan uses to intersect its
+// candidates with the label's own bitmap (rmp #2423).
+//
+// It resolves through lpgLabelResolver, so the seek path and the label scan answer
+// membership from the SAME snapshot-aware accessor and cannot disagree — the index
+// over-reports a label after a removal, and this is what filters it.
+func labelBitmapOf(g *lpg.ReadView[string, float64], label string) func() *roaring64.Bitmap {
+	if g == nil || label == "" {
+		return nil
+	}
+	src := &lpgLabelResolver{g: g}
+	return func() *roaring64.Bitmap { return src.ResolveLabelBitmap(label) }
+}
+
 func tryBuildRangeSeekChild(
 	sel *ir.Selection,
 	schema map[string]int,
@@ -214,7 +228,7 @@ func tryBuildRangeSeekChild(
 	// Try the string-btree path first (a string range over a string-typed
 	// index). When the predicate is not a string range — typically a numeric
 	// range n.age > 30 — fall through to the unified numeric companion.
-	if op, ok := tryStringRangeSeek(sel, schema, idxMgr, g, lblScan, nodeVar, prefixSeek); ok {
+	if op, ok := tryStringRangeSeek(sel, schema, idxMgr, g, lblScan, nodeVar, params, prefixSeek); ok {
 		return op, true
 	}
 	return tryNumericRangeSeek(sel, schema, idxMgr, g, lblScan, nodeVar, params)
@@ -231,9 +245,10 @@ func tryStringRangeSeek(
 	g *lpg.ReadView[string, float64],
 	lblScan *ir.NodeByLabelScan,
 	nodeVar string,
+	params map[string]expr.Value,
 	prefixSeek bool,
 ) (exec.Operator, bool) {
-	pred, ok := extractStringRangePred(sel.PredicateExpr, nodeVar, prefixSeek)
+	pred, ok := extractStringRangePred(sel.PredicateExpr, nodeVar, params, prefixSeek)
 	if !ok {
 		return nil, false
 	}
@@ -277,7 +292,11 @@ func tryStringRangeSeek(
 	if pred.hi != nil {
 		hiB = *pred.hi
 	}
-	op := exec.NewNodeByIndexRangeScan(exec.NewStringRangeIndex(sub), loB, hiB)
+	// The label the replaced scan leaf carried must still restrict the result
+	// (rmp #2423): the residual Selection filter re-checks the PROPERTY, never the
+	// label, so without this the scan admits nodes that lost it.
+	op := exec.NewNodeByIndexRangeScan(exec.NewStringRangeIndex(sub), loB, hiB).
+		RestrictToLabel(labelBitmapOf(g, lblScan.Label))
 	schema[nodeVar] = schemaWidth(schema)
 	return op, true
 }
@@ -400,16 +419,16 @@ func asBoundStringRange(sub index.Subscriber, label, propKey string) (boundStrin
 // in the accepted set and is declined too. Widening this descent — pushing
 // through NOT, or accepting OR — would break the superset invariant that every
 // caller of this file relies on. See docs/design-prefix-range-seek.md §5.1.
-func extractStringRangePred(e ast.Expression, nodeVar string, prefixSeek bool) (stringRangePred, bool) {
+func extractStringRangePred(e ast.Expression, nodeVar string, params map[string]expr.Value, prefixSeek bool) (stringRangePred, bool) {
 	if bo, ok := e.(*ast.BinaryOp); ok && strings.EqualFold(bo.Operator, "AND") {
-		left, lok := extractSingleStringCmp(bo.Left, nodeVar, prefixSeek)
-		right, rok := extractSingleStringCmp(bo.Right, nodeVar, prefixSeek)
+		left, lok := extractSingleStringCmp(bo.Left, nodeVar, params, prefixSeek)
+		right, rok := extractSingleStringCmp(bo.Right, nodeVar, params, prefixSeek)
 		if lok && rok && left.propKey == right.propKey {
 			return mergeRangeBounds(left, right)
 		}
 		return stringRangePred{}, false
 	}
-	return extractSingleStringCmp(e, nodeVar, prefixSeek)
+	return extractSingleStringCmp(e, nodeVar, params, prefixSeek)
 }
 
 // startsWithOp is the AST operator string the parser emits for a prefix
@@ -510,7 +529,7 @@ func prefixSuccessor(p string) (string, bool) {
 // matching and the middle one not), so the tightest sound interval degenerates
 // to the whole index: not unsound, but useless, and vetoed by the selectivity
 // gate anyway (docs/design-prefix-range-seek.md §5.3).
-func extractSingleStringCmp(e ast.Expression, nodeVar string, prefixSeek bool) (stringRangePred, bool) {
+func extractSingleStringCmp(e ast.Expression, nodeVar string, params map[string]expr.Value, prefixSeek bool) (stringRangePred, bool) {
 	bo, ok := e.(*ast.BinaryOp)
 	if !ok {
 		return stringRangePred{}, false
@@ -522,7 +541,7 @@ func extractSingleStringCmp(e ast.Expression, nodeVar string, prefixSeek bool) (
 	}
 	// Property on the left: n.prop <op> lit.
 	if propKey, isProp := nodePropKey(bo.Left, nodeVar); isProp {
-		if sv, isStr := stringLiteral(bo.Right); isStr {
+		if sv, isStr := stringOperand(bo.Right, params); isStr {
 			return boundFor(propKey, op, sv, false), true
 		}
 		return stringRangePred{}, false
@@ -533,7 +552,7 @@ func extractSingleStringCmp(e ast.Expression, nodeVar string, prefixSeek bool) (
 		if isPrefix {
 			return stringRangePred{}, false
 		}
-		if sv, isStr := stringLiteral(bo.Left); isStr {
+		if sv, isStr := stringOperand(bo.Left, params); isStr {
 			return boundFor(propKey, op, sv, true), true
 		}
 		return stringRangePred{}, false
@@ -627,13 +646,35 @@ func nodePropKey(e ast.Expression, nodeVar string) (string, bool) {
 	return prop.Key, true
 }
 
-// stringLiteral returns (value, true) when e is a plain string literal. A
-// parameter or any other expression is declined: the seek is a build-time
-// decision and only a literal string can be a same-class scalar bound here
-// (parameter range seeks are deliberately out of scope for this increment).
-func stringLiteral(e ast.Expression) (expr.StringValue, bool) {
-	if sl, ok := e.(*ast.StringLiteral); ok {
-		return expr.StringValue(sl.Value), true
+// stringOperand returns (value, true) when e is a plain string literal, or a
+// parameter bound to a string for this execution. Anything else is declined.
+//
+// The parameter case is the whole point. It used to be declined — "parameter
+// range seeks are deliberately out of scope for this increment" — with the
+// numeric companion (#1652) extended to parameters and this one left behind.
+// The consequence was that `n.sk = 'lit'` seeked the index while the SAME query
+// written the way every driver writes it, `n.sk = $p`, fell back to a full
+// NodeByLabelScan. The engine was at its worst on precisely the shape callers
+// are told to use.
+//
+// Resolving a parameter here is sound for the same reason the numeric path's is:
+// the physical plan is rebuilt per execution, so a bound derived from this
+// execution's parameters is never carried into another one, and the original
+// predicate is retained as a residual Filter above the seek, so an over-return
+// is removed. A parameter that is absent, null or not a string declines and the
+// scan+filter path answers.
+func stringOperand(e ast.Expression, params map[string]expr.Value) (expr.StringValue, bool) {
+	switch lit := e.(type) {
+	case *ast.StringLiteral:
+		return expr.StringValue(lit.Value), true
+	case *ast.Parameter:
+		v, ok := params[lit.Name]
+		if !ok || v == nil {
+			return "", false
+		}
+		if sv, isStr := v.(expr.StringValue); isStr {
+			return sv, true
+		}
 	}
 	return "", false
 }
@@ -707,7 +748,9 @@ func tryNumericRangeSeek(
 	if pred.hi != nil {
 		hiB = exec.RangeBound{Value: expr.FloatValue(pred.hi.value), Include: true}
 	}
-	op := exec.NewNodeByIndexRangeScan(exec.NewFloat64RangeIndex(sub), loB, hiB)
+	// See the string path: the label must still restrict the result (rmp #2423).
+	op := exec.NewNodeByIndexRangeScan(exec.NewFloat64RangeIndex(sub), loB, hiB).
+		RestrictToLabel(labelBitmapOf(g, lblScan.Label))
 	schema[nodeVar] = schemaWidth(schema)
 	return op, true
 }

@@ -148,6 +148,12 @@ type Config struct {
 type AdjList[N comparable, W any] struct {
 	shards [shardCount]adjShard[W]
 
+	// rev is the live in-edge index — the answer to "what points at this node",
+	// which the forward shards above cannot give at any price short of a full
+	// scan. It is maintained by the same funnels that publish an edge slot; see
+	// reverse.go for why it exists and what its lock order is.
+	rev revIndex
+
 	mapper *graph.Mapper[N]
 
 	// auxFactory constructs the higher layer's opaque [AuxColumn] for the FIRST
@@ -901,6 +907,21 @@ func growCap(cur int) int {
 // capacity (growCap), amortising the copy cost to O(log d) large allocations
 // per degree-d hub.
 func (a *AdjList[N, W]) upsertEdgeLocked(src, dst graph.NodeID, w W, ex edgeExtra, tx mvcc.Tx) (bool, error) {
+	inserted, err := a.upsertEdgeSlotLocked(src, dst, w, ex, tx)
+	if inserted {
+		// THE one place an edge slot comes into existence, so the one place the
+		// reverse index has to learn of it. Called with this shard's lock held,
+		// which is sound because the reverse index is a leaf in the lock order
+		// (reverse.go) and never reaches back for an adjacency lock.
+		a.rev.add(dst, src)
+	}
+	return inserted, err
+}
+
+// upsertEdgeSlotLocked is [AdjList.upsertEdgeLocked] without the reverse-index
+// maintenance, so that the forward publication has exactly one implementation
+// and the index update has exactly one call site.
+func (a *AdjList[N, W]) upsertEdgeSlotLocked(src, dst graph.NodeID, w W, ex edgeExtra, tx mvcc.Tx) (bool, error) {
 	s := &a.shards[src&shardMask]
 	intraIdx := uint64(src) >> shardBits
 
@@ -1235,6 +1256,13 @@ func (a *AdjList[N, W]) removeAllEdgesFromTx(src N, tx mvcc.Tx) {
 	copy(dsts, old.neighbours)
 	s.mu.Unlock()
 
+	// Every slot just published away was an in-edge of its destination. One
+	// call per SLOT, not per distinct destination, so parallel edges lose
+	// exactly as many recorded in-edges as the forward entry held.
+	for _, dstID := range dsts {
+		a.rev.remove(dstID, srcID)
+	}
+
 	// Adjust the edge counter atomically. The two's-complement trick
 	// (^uint64(removed-1)) is equivalent to -removed for unsigned arithmetic.
 	a.size.Add(^uint64(removed - 1))
@@ -1286,11 +1314,13 @@ func (a *AdjList[N, W]) removeOneEdgeWithHandle(src, dst graph.NodeID, tx mvcc.T
 		// instead of an empty struct to avoid a small allocation on each
 		// last-edge removal; loadEntry handles nil slots correctly.
 		_ = a.storeEntry(s, intraIdx, nil, tx)
+		a.rev.remove(dst, src)
 		return true, removedH
 	}
 	newEntry := compactEntry(current, idx)
 	// storeEntry cannot fail here: same slot, no growth required.
 	_ = a.storeEntry(s, intraIdx, newEntry, tx)
+	a.rev.remove(dst, src)
 	return true, removedH
 }
 
@@ -1325,9 +1355,11 @@ func (a *AdjList[N, W]) removeOneEdgeLocked(src, dst graph.NodeID, tx mvcc.Tx) {
 	}
 	if len(current.neighbours) == 1 {
 		_ = a.storeEntry(s, intraIdx, nil, tx)
+		a.rev.remove(dst, src)
 		return
 	}
 	_ = a.storeEntry(s, intraIdx, compactEntry(current, idx), tx)
+	a.rev.remove(dst, src)
 }
 
 // removeOneEdgeByHandle publishes a new adjacency snapshot for src that omits
@@ -1344,7 +1376,7 @@ func (a *AdjList[N, W]) removeOneEdgeByHandle(src, dst graph.NodeID, targetHandl
 	current := loadEntry[W](s, intraIdx)
 	if current == nil || current.handles == nil {
 		// No handle column: fall back to first-match by neighbour.
-		return a.removeOneEdgeFallback(s, intraIdx, current, dst, tx)
+		return a.removeOneEdgeFallback(s, intraIdx, current, src, dst, tx)
 	}
 	// Find the slot whose neighbour is dst AND whose handle matches.
 	idx := -1
@@ -1359,16 +1391,18 @@ func (a *AdjList[N, W]) removeOneEdgeByHandle(src, dst graph.NodeID, targetHandl
 	}
 	if len(current.neighbours) == 1 {
 		_ = a.storeEntry(s, intraIdx, nil, tx)
+		a.rev.remove(dst, src)
 		return true
 	}
 	_ = a.storeEntry(s, intraIdx, compactEntry(current, idx), tx)
+	a.rev.remove(dst, src)
 	return true
 }
 
 // removeOneEdgeFallback is the first-match fallback used inside
 // [AdjList.removeOneEdgeByHandle] when the handle column is absent.
 // The caller must hold s.mu.
-func (a *AdjList[N, W]) removeOneEdgeFallback(s *adjShard[W], intraIdx uint64, current *adjEntry[W], dst graph.NodeID, tx mvcc.Tx) bool {
+func (a *AdjList[N, W]) removeOneEdgeFallback(s *adjShard[W], intraIdx uint64, current *adjEntry[W], src, dst graph.NodeID, tx mvcc.Tx) bool {
 	if current == nil {
 		return false
 	}
@@ -1384,9 +1418,11 @@ func (a *AdjList[N, W]) removeOneEdgeFallback(s *adjShard[W], intraIdx uint64, c
 	}
 	if len(current.neighbours) == 1 {
 		_ = a.storeEntry(s, intraIdx, nil, tx)
+		a.rev.remove(dst, src)
 		return true
 	}
 	_ = a.storeEntry(s, intraIdx, compactEntry(current, idx), tx)
+	a.rev.remove(dst, src)
 	return true
 }
 

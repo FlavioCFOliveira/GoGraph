@@ -84,7 +84,15 @@ func (g *Graph[N, W]) HasNodeLabelByIDAsOf(id graph.NodeID, name string, s *Snap
 	sh.mu.RLock()
 	bag := sh.m[id]
 	if s != nil && sh.d != nil {
-		bag = g.labelBagAsOfLocked(sh, id, s.startTS, s.txID)
+		// Through the SNAPSHOT (rmp #2420/#2378). This predicate is what
+		// ReadView.HasNodeLabel resolves to, and it used to pass only the
+		// timestamps — so it read each record's MUTABLE commit stamp live and
+		// never consulted [Snapshot.visible]. The verdict memo was wired into
+		// [Graph.withLabelBag] and [Graph.EntryViewAsOf] but not here, which is
+		// why TestIsolation_CrossSubstructure_EdgeImpliesLabels kept tearing after
+		// #2378 was closed: its two label reads go through THIS function, so they
+		// never saw the pinned verdict at all.
+		bag = g.labelBagAsOfLockedSnap(sh, id, s, s.startTS, s.txID)
 	}
 	present := bag.has(lid)
 	sh.mu.RUnlock()
@@ -191,7 +199,11 @@ func (g *Graph[N, W]) NodePropertyByIDAsOf(id graph.NodeID, key string, s *Snaps
 	sh.mu.RLock()
 	bag := sh.m[id]
 	if s != nil && sh.d != nil {
-		bag = g.propBagAsOfLocked(sh, id, s.startTS, s.txID)
+		// Through the SNAPSHOT (rmp #2420), not the bare timestamps: the record's
+		// TS is mutable and flips at commit, so two reads of one snapshot that
+		// straddle that flip classify the same transaction differently and observe
+		// a partial one. See [Graph.propBagAsOfLockedSnap].
+		bag = g.propBagAsOfLockedSnap(sh, id, s, s.startTS, s.txID)
 	}
 	v, ok2 := bag.get(pid)
 	sh.mu.RUnlock()
@@ -221,7 +233,10 @@ func (g *Graph[N, W]) withPropBag(id graph.NodeID, s *Snapshot, fn func(propBag)
 		fn(sh.m[id])
 		return
 	}
-	fn(g.propBagAsOfLocked(sh, id, startTS, txID))
+	// Through the SNAPSHOT (rmp #2420); see [Graph.propBagAsOfLockedSnap]. This is
+	// the accessor behind NodeProperties/NodePropertiesByIDAsOf, so a projection
+	// reading a whole bag pins its verdicts exactly as a single-key read does.
+	fn(g.propBagAsOfLockedSnap(sh, id, s, startTS, txID))
 }
 
 // ── adjacency ────────────────────────────────────────────────────────────────

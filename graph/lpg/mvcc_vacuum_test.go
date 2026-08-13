@@ -491,3 +491,144 @@ func TestDeferredIndexRemoval_ConcurrentReaddIsNotLost(t *testing.T) {
 		}
 	}
 }
+
+// TestVacuum_WatermarkRegressionIsDetected pins [Graph.publishWatermark] on both
+// controls: a monotone sequence of watermarks must report nothing, and a decrease
+// must be recorded with the pair that produced it.
+//
+// The invariant it guards is the one reclamation rests on — see
+// [vacuumState.wmRegress] for why a decrease cannot happen while the substrate is
+// sound, and why it is an Isolation violation rather than a leak when it does.
+// Without this test the counter is one that can only ever read zero, which is
+// indistinguishable from a sound system (rmp #2420).
+func TestVacuum_WatermarkRegressionIsDetected(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a monotone sequence reports nothing", func(t *testing.T) {
+		g := New[string, int64](adjlist.Config{Directed: true})
+		for _, wm := range []uint64{1, 1, 5, 5, 900, 901} {
+			g.publishWatermark(g.vac.lastWatermark.Load(), wm)
+		}
+		if n := g.vac.wmRegress.Load(); n != 0 {
+			t.Fatalf("wmRegress = %d after a monotone sequence, want 0", n)
+		}
+		if got := g.MVCCStats().WatermarkRegressions; got != 0 {
+			t.Fatalf("MVCCStats().WatermarkRegressions = %d, want 0", got)
+		}
+	})
+
+	t.Run("a decrease is reported with its pair", func(t *testing.T) {
+		g := New[string, int64](adjlist.Config{Directed: true})
+		if advanced := g.publishWatermark(g.vac.lastWatermark.Load(), 100); !advanced {
+			t.Fatal("publishWatermark(100) on a fresh graph did not report an advance")
+		}
+		if advanced := g.publishWatermark(g.vac.lastWatermark.Load(), 50); advanced {
+			t.Fatal("publishWatermark(50) after 100 reported an ADVANCE")
+		}
+		if n := g.vac.wmRegress.Load(); n != 1 {
+			t.Fatalf("wmRegress = %d after a decrease, want 1", n)
+		}
+		if from, to := g.vac.wmRegressFrom.Load(), g.vac.wmRegressTo.Load(); from != 100 || to != 50 {
+			t.Fatalf("recorded regression %d -> %d, want 100 -> 50", from, to)
+		}
+		if got := g.MVCCStats().WatermarkRegressions; got != 1 {
+			t.Fatalf("MVCCStats().WatermarkRegressions = %d, want 1", got)
+		}
+	})
+}
+
+// TestVacuum_RetentionAboveTheBoundAlwaysFindsASweeper pins the invariant rmp #2424
+// broke: version memory must never sit ABOVE the stated bound with no sweeper alive to
+// reduce it.
+//
+// # Why this invariant and not "no outstanding debt"
+//
+// A reclamation debt below [reclaimThreshold] is the amortisation working, and it
+// cannot by itself breach the bound — the bound IS that threshold. The state that must
+// not exist is the one [MVCCStats.WithinBound] reports false for while
+// [VacuumStats.Running] is false: retention above the bound, nobody holding it back,
+// and nobody coming to sweep it. That is what was observed, permanently:
+//
+//	4883 records held against a bound of 4096, with 0 ACTIVE READERS,
+//	vacuum {Running:FALSE … Backlog:3767}
+//
+// # How the state is constructed deterministically
+//
+// The natural route to it is a residue plus a sub-threshold burst, which is a race —
+// it appeared once in 71 package runs. So the residue is built on purpose: a graph
+// horizon slot claimed WITHOUT publishing an instant holds every version back, so a
+// pass frees nothing and the sweeper reaches its idle exit with the retention still
+// there. Releasing the slot directly (rather than through [Graph.EndRead]) leaves no
+// wake behind, which is precisely the gap: retention is above the bound, no sweeper is
+// alive, and nothing is pending.
+//
+// One ordinary write then has to be enough to get it swept. Against the previous build
+// it is not, and the retention stays for the life of the process.
+func TestVacuum_RetentionAboveTheBoundAlwaysFindsASweeper(t *testing.T) {
+	g := vacuumGraph(t)
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+
+	// Build retention the sweeper cannot touch, and let it exit while it cannot.
+	hold := g.horizon.EnterHolding()
+	churn(t, g, reclaimThreshold*2)
+	deadline := time.Now().Add(10 * time.Second)
+	for g.VacuumStats().Running {
+		if time.Now().After(deadline) {
+			g.horizon.Leave(hold)
+			t.Skip("the sweeper never reached its idle exit within 10s; the state this test " +
+				"exists for could not be constructed on this run")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// Release the hold WITHOUT going through EndRead, so no drain wake is left behind.
+	g.horizon.Leave(hold)
+
+	// The premise: above the bound, nobody holding it, nobody sweeping.
+	if s := g.MVCCStats(); s.WithinBound() {
+		t.Skipf("retention settled within the bound before the hold was released (%d <= %d), "+
+			"so the state this test exists for was not constructed", s.Total, s.Bound)
+	}
+	if v := g.VacuumStats(); v.Running {
+		t.Skip("a sweeper was alive after the idle-exit wait, so this run cannot observe " +
+			"the stranded state")
+	}
+
+	// ONE ordinary write must be enough to get it swept.
+	churn(t, g, 1)
+	waitWithinBound(t, g)
+}
+
+// TestVacuum_SubThresholdWakeDoesNotStartASweeperPerCommit is the PROPORTIONALITY
+// control for the rmp #2424 fix: ensuring a sweeper EXISTS for a sub-threshold debt
+// must not turn into starting or signalling one per commit.
+//
+// Without it, "no stranded debt" would be satisfied by waking on every charge, which
+// would put a channel send on every commit and undo the amortisation
+// [reclaimThreshold] exists for. The observable is [VacuumStats.Starts]: it must stay
+// a small constant while the commit count grows by thousands, because a sweeper that
+// is already alive is found by one atomic load and nothing else.
+func TestVacuum_SubThresholdWakeDoesNotStartASweeperPerCommit(t *testing.T) {
+	g := vacuumGraph(t)
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+
+	churn(t, g, reclaimThreshold*4)
+	v := g.VacuumStats()
+	// One start is the steady state; a handful more is scheduling — the sweeper may
+	// reach its idle exit between bursts and be restarted, which is the mechanism
+	// working. What must NOT happen is a count that tracks the commits.
+	const tolerated = 16
+	if v.Starts > tolerated {
+		t.Errorf("the sweeper was started %d times across %d modifications: the sub-threshold "+
+			"wake is firing per commit rather than only when no sweeper is alive. vacuum %+v",
+			v.Starts, reclaimThreshold*4, v)
+	}
+	if v.Starts == 0 {
+		t.Fatalf("the sweeper never started at all across %d modifications, so this control "+
+			"proves nothing: vacuum %+v", reclaimThreshold*4, v)
+	}
+}
