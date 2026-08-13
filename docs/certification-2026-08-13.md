@@ -24,15 +24,18 @@ below, and refused if it does not come back clean.
 
 The certification is granted rung by rung, in the project's own order:
 
-- **Correct.** The gate is green at HEAD — `MAKE_CI_EXIT=0`, read from inside the log:
-  `go test -race ./...` with no failure, `golangci-lint` with 0 issues, the openCypher
-  TCK at **3897/3897**, coverage 87.1 % aggregate with every package above its floor.
-  The blocker that refused the 2026-08-12 certification is closed **at its root cause**
-  (§1), not worked around, and the mechanism is pinned by a deterministic test that
-  fails against the previous behaviour. Two further defects were found and fixed, one
-  of them a p9 silent wrong answer that a phantom reservation had been masking (§3).
-  ACID Isolation now carries three permanent, always-on detectors for the corruption
-  class that produced #2420, each proven on a broken control as well as a sound one.
+- **Correct.** The gate was green at `fca34a0c` — `MAKE_CI_EXIT=0`, read from inside
+  the log: `go test -race ./...` with no failure, `golangci-lint` with 0 issues, the
+  openCypher TCK at **3897/3897**, coverage 87.1 % aggregate with every package above
+  its floor. Two further fixes landed after it (§4.2, §6.1), each race-tested on the
+  packages it touches; the gate is re-run at the exit commit and its status recorded in
+  §7. The blocker that refused the 2026-08-12 certification is closed **at its root
+  cause** (§1), not worked around, and the mechanism is pinned by a deterministic test
+  that fails against the previous behaviour. Three further defects were found and
+  fixed, one of them a p9 silent wrong answer that a phantom reservation had been
+  masking (§3) and one a permanent breach of the bounded-resources mandate (§4.2). ACID
+  Isolation now carries three permanent, always-on detectors for the corruption class
+  that produced #2420, each proven on a broken control as well as a sound one.
 - **Secure.** Nothing new was examined this cycle, and nothing regressed: the previous
   cycle's container-aware ceilings (#2421) stand, with their one unmet criterion — no
   container was ever run — restated in §5 rather than quietly retired.
@@ -45,11 +48,25 @@ The certification is granted rung by rung, in the project's own order:
   correctness, not throughput.
 
 **The condition.** rmp #2420's acceptance criterion asks for **150 package runs** at
-the corrected recipe with zero violations. Forty are recorded and clean, on all five
-oracles (§1.4); the remaining 110 are running on the final tree as this is written. The
-criterion is honoured to the letter rather than reinterpreted downward on the grounds
-that the new detector — which fired ~5 times per run before the fix, against the
-symptom's own ~2 % per run — already makes forty runs the stronger evidence.
+the corrected recipe with zero violations. Forty are recorded and clean on all five
+oracles (§1.4). The second arm was **stopped at 71 runs** — 70 clean, and one failure
+that was not an oracle at all but a **fourth defect**, #2424 (§4.2): version memory
+settling above the stated bound permanently. So the full 150 are being re-run on the
+tree that includes that fix, because a demonstration of a superseded tree demonstrates
+nothing about the shipped one.
+
+The criterion is honoured to the letter rather than reinterpreted downward on the
+grounds that the new detector — which fired ~5 times per run before the fix, against
+the symptom's own ~2 % per run — already makes forty runs the stronger evidence. That
+decision has now paid for itself twice: the runs the criterion demanded are what found
+#2424.
+
+**And a fourth defect changes the verdict's shape.** Three of the four defects closed
+this cycle were found BY this certification rather than inherited by it, and two of
+them were found by fixing another one or by running the arm a criterion demanded. The
+honest reading is not "the module is now correct" but "this module rewards being
+measured, and the measurements are not exhausted" — which is why the envelope in §5 is
+part of the verdict rather than a footnote to it.
 
 **What "certified within an envelope" means here.** It means the module is fit for the
 workloads this report measured, on the platform it measured them on, with the
