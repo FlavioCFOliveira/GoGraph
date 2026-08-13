@@ -27,8 +27,9 @@ The certification is granted rung by rung, in the project's own order:
   inside the log, not from the wrapper: 123 packages ok with zero `FAIL` lines under
   `go test -race ./...`, `golangci-lint` with 0 issues, the openCypher TCK at
   **3897/3897**, coverage 87.1 % aggregate with every package above its 75 % floor. It
-  was also green mid-cycle at `fca34a0c`; both runs are recorded because the second
-  covers two fixes the first could not. The blocker that refused the 2026-08-12 certification is closed **at its root
+  ran three times across the cycle — mid-cycle, after the last correctness fix, and at
+  the exit commit — and all three are green; the later runs are what matter, because each
+  covers fixes the earlier ones could not. The blocker that refused the 2026-08-12 certification is closed **at its root
   cause** (§1), not worked around, and the mechanism is pinned by a deterministic test
   that fails against the previous behaviour. Three further defects were found and
   fixed, one of them a p9 silent wrong answer that a phantom reservation had been
