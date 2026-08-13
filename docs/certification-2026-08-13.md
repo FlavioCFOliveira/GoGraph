@@ -29,9 +29,11 @@ The certification is granted rung by rung, in the project's own order:
   **3897/3897**, coverage 87.1 % aggregate with every package above its 75 % floor. It
   ran three times across the cycle — mid-cycle, after the last correctness fix, and at
   the exit commit — and all three are green; the later runs are what matter, because each
-  covers fixes the earlier ones could not. The blocker that refused the 2026-08-12 certification is closed **at its root
-  cause** (§1), not worked around, and the mechanism is pinned by a deterministic test
-  that fails against the previous behaviour. Three further defects were found and
+  covers fixes the earlier ones could not.
+
+  The blocker that refused the 2026-08-12 certification is closed **at its root cause**
+  (§1), not worked around, and the mechanism is pinned by a deterministic test that
+  fails against the previous behaviour. Three further defects were found and
   fixed, one of them a p9 silent wrong answer that a phantom reservation had been
   masking (§3) and one a permanent breach of the bounded-resources mandate (§4.2). ACID
   Isolation now carries three permanent, always-on detectors for the corruption class
@@ -71,9 +73,14 @@ part of the verdict rather than a footnote to it.
 **What "certified within an envelope" means here.** It means the module is fit for the
 workloads this report measured, on the platform it measured them on, with the
 guarantees it verified. It does **not** mean the eight items in §5 are sound — they are
-unmeasured, and three of them (latency at the published concurrency levels, the
-write-scaling sweep, the whole-tree soak layer) have now gone unmeasured for three
-consecutive certifications, which is itself a finding worth acting on.
+unmeasured, and two of them — **latency at the published concurrency levels** and the
+**whole-tree soak layer** — have now gone unmeasured for three consecutive
+certifications, which is itself a finding worth acting on.
+
+The write path is no longer among them: §4.3 measures write scaling at 1–32 writers for
+both a constrained and an unconstrained schema. What remains unrun there is the
+different, store-level sweep in `store/txn/write_scaling_bench_test.go`, and §5 says so
+in those terms rather than leaving "the write-scaling sweep" ambiguous between the two.
 
 ---
 
@@ -542,8 +549,10 @@ becomes misleading.
 3. **Latency was not measured at the published levels.** §4 reports throughput and the
    A/B of the changed paths; no p50/p99 at 1, 8, 64, 256, 1024 goroutines, so half of
    that requirement remains unmet, exactly as it was on 2026-08-12.
-4. **The write-scaling half of the concurrency sweep was not run**
-   (`store/txn/write_scaling_bench_test.go`).
+4. **The STORE-LEVEL write-scaling sweep was not run**
+   (`store/txn/write_scaling_bench_test.go`). §4.3 measures write scaling through the
+   Cypher engine at 1–32 writers for two schemas, which is a different benchmark against
+   a different surface; this one exercises the store API directly and remains unrun.
 5. **The whole-tree soak layer was not run**, and remains unmeasured for the third
    consecutive certification.
 6. **No container was run.** #2421 derives the engine-wide ceilings from a cgroup limit
