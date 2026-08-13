@@ -358,7 +358,11 @@ func (g *Graph[N, W]) setNodePropertyInfo(n N, key string, value PropertyValue, 
 	bag.set(keyID, value)
 	s.m[id] = bag
 	s.mu.Unlock()
-	return nil
+	// The write is CLAIMED in this store; now cross-check the existence store —
+	// a pending DETACH DELETE of this node by another transaction refuses the
+	// write, symmetrically with the delete's own property-head cross-check
+	// (rmp #2444; ordering argument in mvcc_node_conflict.go).
+	return g.crossCheckNodeLife(id, tx)
 }
 
 // GetNodeProperty returns the property value attached to n under
@@ -429,6 +433,10 @@ func (g *Graph[N, W]) delNodePropertyInfo(n N, key string, tx *writeCtx) {
 		}
 	}
 	s.mu.Unlock()
+	// Symmetric existence cross-check after the claim (rmp #2444); this path
+	// cannot return an error, so the conflict is recorded on the transaction
+	// and commit refuses it, exactly like the in-shard check above.
+	_ = g.crossCheckNodeLife(id, tx)
 }
 
 // NodeProperties returns a snapshot of every property currently

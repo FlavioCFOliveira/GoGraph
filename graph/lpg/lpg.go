@@ -1953,7 +1953,14 @@ func (g *Graph[N, W]) addEdgeInfo(src, dst N, w W, tx *writeCtx) error {
 				return err
 			}
 		}
-		if !g.adj.Directed() {
+		// The DESTINATION is checked and stamped on DIRECTED graphs too (rmp
+		// #2444): an edge references both endpoints, so a pending exclusive
+		// write on dst — above all a pending node removal, which claims the
+		// node's adjacency exclusively — must refuse the append even though the
+		// physical insert touches only src's list. Memgraph prepares BOTH
+		// endpoint vertices for an edge creation for the same reason (see
+		// [adjVersions]).
+		if src != dst {
 			if dstID, ok := g.adj.Mapper().Lookup(dst); ok {
 				if err := g.adjVer.checkAppend(dstID, tx); err != nil {
 					return err
@@ -1997,10 +2004,20 @@ func (g *Graph[N, W]) addEdgeInfo(src, dst N, w W, tx *writeCtx) error {
 	if tx != nil {
 		if srcID, ok := g.adj.Mapper().Lookup(src); ok {
 			g.adjVer.stampAppend(srcID, tx)
+			// The append is CLAIMED; now cross-check the endpoint's existence —
+			// a node removal committed after this transaction began, or pending
+			// in another transaction, refuses the edge rather than letting it
+			// dangle (rmp #2444; ordering argument in mvcc_node_conflict.go).
+			if err := g.crossCheckNodeLife(srcID, tx); err != nil {
+				return err
+			}
 		}
-		if !g.adj.Directed() {
+		if src != dst {
 			if dstID, ok := g.adj.Mapper().Lookup(dst); ok {
 				g.adjVer.stampAppend(dstID, tx)
+				if err := g.crossCheckNodeLife(dstID, tx); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -2169,7 +2186,8 @@ func (g *Graph[N, W]) addEdgeHInfo(src, dst N, w W, tx *writeCtx) (handle uint64
 				return 0, err
 			}
 		}
-		if !g.adj.Directed() {
+		// dst checked on DIRECTED graphs too; see [Graph.addEdgeInfo] (rmp #2444).
+		if src != dst {
 			if dstID, ok := g.adj.Mapper().Lookup(dst); ok {
 				if err := g.adjVer.checkAppend(dstID, tx); err != nil {
 					return 0, err
@@ -2192,10 +2210,18 @@ func (g *Graph[N, W]) addEdgeHInfo(src, dst N, w W, tx *writeCtx) (handle uint64
 	if tx != nil {
 		if srcID, ok := g.adj.Mapper().Lookup(src); ok {
 			g.adjVer.stampAppend(srcID, tx)
+			// Claimed, then existence cross-checked; see [Graph.addEdgeInfo]
+			// (rmp #2444).
+			if err := g.crossCheckNodeLife(srcID, tx); err != nil {
+				return 0, err
+			}
 		}
-		if !g.adj.Directed() {
+		if src != dst {
 			if dstID, ok := g.adj.Mapper().Lookup(dst); ok {
 				g.adjVer.stampAppend(dstID, tx)
+				if err := g.crossCheckNodeLife(dstID, tx); err != nil {
+					return 0, err
+				}
 			}
 		}
 	}
@@ -2868,7 +2894,11 @@ func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, tx *writeCtx) error {
 	g.cancelDeferredIndexRemoval(uint32(lid), id)
 	g.nodeIdx.Add(uint32(lid), id)
 	sh.mu.Unlock()
-	return nil
+	// The write is CLAIMED in this store; now cross-check the existence store —
+	// a pending DETACH DELETE of this node by another transaction refuses the
+	// write, symmetrically with the delete's own label-head cross-check
+	// (rmp #2444; ordering argument in mvcc_node_conflict.go).
+	return g.crossCheckNodeLife(id, tx)
 }
 
 // RemoveNode marks the node n as removed. Subsequent reads through
@@ -2891,13 +2921,55 @@ func (g *Graph[N, W]) removeNodeInfo(n N, tx *writeCtx) {
 	if !ok {
 		return
 	}
+	claimed := false
+	if g.mvccArmed && tx != nil {
+		// CLAIM the death in the existence store BEFORE any mutation (rmp
+		// #2444). The check-and-record runs under the life shard's lock, so a
+		// concurrent node write either sees this claim on its own cross-check
+		// or landed first and is seen by the cross-checks below — see
+		// mvcc_node_conflict.go for the ordering argument. A refusal leaves
+		// the graph untouched: before this, the death was noted only AFTER the
+		// tombstone bitmap flipped and the label bitmaps were stripped, so a
+		// delete that lost its conflict check had already mutated present
+		// state that a rollback could not fully restore.
+		if !g.noteNodeDied(id, tx) {
+			return
+		}
+		claimed = true
+		// CROSS-CHECK the node's other stores: a pending write by another
+		// transaction on this node's properties or labels refuses the delete
+		// (first-committer-wins, the node being the unit of conflict), exactly
+		// as a second property write on the same node would be refused. The
+		// death claim above stays with the transaction and is withdrawn by the
+		// abort machinery if the transaction rolls back.
+		if head := g.nodePropHeadFor(id); tx.conflicts(head) {
+			_ = tx.conflictErr(mvcc.StoreNodeProperties, head)
+			return
+		}
+		if head := g.nodeLabelHeadFor(id); tx.conflicts(head) {
+			_ = tx.conflictErr(mvcc.StoreNodeLabels, head)
+			return
+		}
+		// Claim the node's adjacency EXCLUSIVELY: a pending edge append touching
+		// this node (either endpoint — appends stamp both since rmp #2444) is a
+		// write this removal may not step over, and the claim is what a racing
+		// append's own cross-check sees. noteExclusive records the conflict on
+		// the transaction itself.
+		if err := g.adjVer.noteExclusive(id, tx); err != nil {
+			return
+		}
+	}
 	died := false
 	defer func() {
 		// Outside the tombstone lock, for the lock-order reason given on
 		// [Graph.revive]. A reader older than this instant must still SEE the
-		// node, and the bitmap alone cannot tell it that.
+		// node, and the bitmap alone cannot tell it that. The claim-first path
+		// above already recorded the death; the autocommit path (tx == nil)
+		// records it here, at the flip, exactly as before.
 		if died {
-			g.noteNodeDied(id, tx)
+			if !claimed {
+				g.noteNodeDied(id, tx)
+			}
 			g.reclaimAfterDirectWrite(tx)
 		}
 	}()
@@ -4029,6 +4101,10 @@ func (g *Graph[N, W]) removeNodeLabelInfo(n N, name string, tx *writeCtx) {
 		}
 	}
 	sh.mu.Unlock()
+	// Symmetric existence cross-check after the claim (rmp #2444); this path
+	// cannot return an error, so the conflict is recorded on the transaction
+	// and commit refuses it, exactly like the in-shard check above.
+	_ = g.crossCheckNodeLife(id, tx)
 }
 
 // HasNodeLabel reports whether n carries the named label.

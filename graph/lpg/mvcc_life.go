@@ -160,7 +160,17 @@ func (g *Graph[N, W]) noteNodeLife(id graph.NodeID, tx *writeCtx, alive bool) bo
 	}
 	sh := g.nodeLifeShardFor(id)
 	sh.mu.Lock()
-	if head := sh.headStamp(id); tx.conflicts(head) {
+	// A BIRTH on a slot with NO life record displaces nobody's version, so it
+	// is exempt from the doomed-transaction refusal: the mapper has ALREADY
+	// interned the slot by the time this hook runs, and refusing to record the
+	// birth left the slot as a permanently visible bare node once the
+	// transaction aborted — no record means "exists" to every reader, and the
+	// abort reclaim had nothing to withdraw. Recording it instead stamps the
+	// slot with the doomed transaction, and [Graph.reclaimAbortedLife]
+	// tombstones it when the abort is processed (rmp #2444, found by the DST
+	// multi-session mode: a CREATE on an already-doomed transaction leaked its
+	// slot). A genuine collision (head != 0) is still refused.
+	if head := sh.headStamp(id); tx.conflicts(head) && (!alive || head != 0) {
 		sh.mu.Unlock()
 		_ = tx.conflictErr(mvcc.StoreNodeExistence, head)
 		return false

@@ -23,6 +23,7 @@ package cypher_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -32,6 +33,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
 
 // countTxNodes runs MATCH (n:Tx) RETURN count(n) AS c via Engine.Run and
@@ -495,5 +497,271 @@ func TestExplicitTx_ConflictedRollbackLeavesNoPhantom(t *testing.T) {
 
 	if got := countAll(); got != 1 {
 		t.Fatalf("after conflicted rollback: MATCH (n) count=%d, want 1 (aborted creates leaked as phantoms)", got)
+	}
+}
+
+// TestExplicitTx_DeleteVsPendingWriteConflicts is the regression gate for rmp
+// #2444: the NODE is the unit of write-write conflict, so a DETACH DELETE of a
+// node carrying another in-flight transaction's pending property write must be
+// refused with the typed serialization conflict (and symmetrically, a property
+// write on a node with a pending delete must not commit). The broken build let
+// the delete through silently, and after BOTH transactions rolled back the
+// committed node was gone from the label scan permanently.
+func TestExplicitTx_DeleteVsPendingWriteConflicts(t *testing.T) {
+	newEng := func(t *testing.T) *cypher.Engine {
+		t.Helper()
+		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		eng := cypher.NewEngine(g)
+		if _, err := eng.RunInTxAny(context.Background(), `CREATE (:P {name:'victim', v:1})`, nil); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		return eng
+	}
+	exec := func(tx *cypher.ExplicitTx, q string) error {
+		res, err := tx.ExecAny(q, nil)
+		if err != nil {
+			return err
+		}
+		for res.Next() {
+		}
+		derr := res.Err()
+		_ = res.Close()
+		return derr
+	}
+	countRows := func(t *testing.T, eng *cypher.Engine, q string) int64 {
+		t.Helper()
+		res, err := eng.Run(context.Background(), q, nil)
+		if err != nil {
+			t.Fatalf("read %q: %v", q, err)
+		}
+		defer func() { _ = res.Close() }()
+		var n int64
+		for res.Next() {
+			n++
+		}
+		if derr := res.Err(); derr != nil {
+			t.Fatalf("read %q drain: %v", q, derr)
+		}
+		return n
+	}
+
+	t.Run("delete of a node with a pending write is refused", func(t *testing.T) {
+		eng := newEng(t)
+		ctx := context.Background()
+		txS, err := eng.BeginTx(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := exec(txS, `MATCH (n:P {name:'victim'}) SET n.v = 2`); err != nil {
+			t.Fatalf("pending SET: %v", err)
+		}
+		txD, err := eng.BeginTx(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		delErr := exec(txD, `MATCH (n:P {name:'victim'}) DETACH DELETE n`)
+		if delErr == nil {
+			// The conflict may legally surface at COMMIT instead of the statement.
+			delErr = txD.Commit()
+		} else {
+			_ = txD.Rollback()
+		}
+		if !errors.Is(delErr, mvcc.ErrSerializationConflict) {
+			t.Fatalf("delete over a pending write: err=%v, want ErrSerializationConflict", delErr)
+		}
+		_ = txS.Rollback()
+
+		// The double rollback must leave the committed victim fully intact in
+		// EVERY read path — the broken build lost it from the label scan.
+		if got := countRows(t, eng, `MATCH (n:P) RETURN n.name`); got != 1 {
+			t.Fatalf("label scan after double rollback: %d rows, want 1", got)
+		}
+		if got := countRows(t, eng, `MATCH (n:P {name:'victim'}) RETURN n`); got != 1 {
+			t.Fatalf("by-name after double rollback: %d rows, want 1", got)
+		}
+		if got := countRows(t, eng, `MATCH (n) RETURN n`); got != 1 {
+			t.Fatalf("all-scan after double rollback: %d rows, want 1", got)
+		}
+	})
+
+	t.Run("write on a node with a pending delete does not commit", func(t *testing.T) {
+		eng := newEng(t)
+		ctx := context.Background()
+		txD, err := eng.BeginTx(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := exec(txD, `MATCH (n:P {name:'victim'}) DETACH DELETE n`); err != nil {
+			t.Fatalf("pending delete: %v", err)
+		}
+		txS, err := eng.BeginTx(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		setErr := exec(txS, `MATCH (n:P {name:'victim'}) SET n.v = 3`)
+		if setErr == nil {
+			setErr = txS.Commit()
+		} else {
+			_ = txS.Rollback()
+		}
+		if !errors.Is(setErr, mvcc.ErrSerializationConflict) {
+			t.Fatalf("write over a pending delete: err=%v, want ErrSerializationConflict", setErr)
+		}
+		_ = txD.Rollback()
+		if got := countRows(t, eng, `MATCH (n:P) RETURN n.name`); got != 1 {
+			t.Fatalf("label scan after double rollback: %d rows, want 1", got)
+		}
+	})
+}
+
+// TestExplicitTx_EdgeVsPendingNodeDelete extends the rmp #2444 gate to the
+// edge-endpoint half: an edge CREATE whose endpoint carries another
+// transaction's pending DETACH DELETE must be refused, and a DETACH DELETE of
+// a node that carries another transaction's pending incident edge (either
+// direction — the graph is directed) must be refused. The broken build let an
+// edge commit onto a concurrently deleted endpoint.
+func TestExplicitTx_EdgeVsPendingNodeDelete(t *testing.T) {
+	seed := func(t *testing.T) *cypher.Engine {
+		t.Helper()
+		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		eng := cypher.NewEngine(g)
+		if _, err := eng.RunInTxAny(context.Background(),
+			`CREATE (:P {name:'a'}), (:P {name:'b'})`, nil); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		return eng
+	}
+	exec := func(tx *cypher.ExplicitTx, q string) error {
+		res, err := tx.ExecAny(q, nil)
+		if err != nil {
+			return err
+		}
+		for res.Next() {
+		}
+		derr := res.Err()
+		_ = res.Close()
+		return derr
+	}
+	finish := func(tx *cypher.ExplicitTx, stmtErr error) error {
+		if stmtErr != nil {
+			_ = tx.Rollback()
+			return stmtErr
+		}
+		return tx.Commit()
+	}
+
+	t.Run("edge create onto a pending-deleted endpoint is refused", func(t *testing.T) {
+		for _, endpoint := range []string{"a", "b"} {
+			eng := seed(t)
+			ctx := context.Background()
+			txD, err := eng.BeginTx(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := exec(txD, fmt.Sprintf(`MATCH (n:P {name:'%s'}) DETACH DELETE n`, endpoint)); err != nil {
+				t.Fatalf("pending delete of %s: %v", endpoint, err)
+			}
+			txE, err := eng.BeginTx(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			edgeErr := finish(txE, exec(txE, `MATCH (x:P {name:'a'}),(y:P {name:'b'}) CREATE (x)-[:R]->(y)`))
+			if !errors.Is(edgeErr, mvcc.ErrSerializationConflict) {
+				t.Fatalf("edge onto pending-deleted %q: err=%v, want ErrSerializationConflict", endpoint, edgeErr)
+			}
+			_ = txD.Rollback()
+		}
+	})
+
+	t.Run("delete of a node with a pending incident edge is refused", func(t *testing.T) {
+		// The pending edge is INCOMING at 'b' — the direction the physical
+		// insert does not touch, which is exactly the case rmp #2444 closed by
+		// stamping both endpoints on directed graphs.
+		for _, victim := range []string{"a", "b"} {
+			eng := seed(t)
+			ctx := context.Background()
+			txE, err := eng.BeginTx(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := exec(txE, `MATCH (x:P {name:'a'}),(y:P {name:'b'}) CREATE (x)-[:R]->(y)`); err != nil {
+				t.Fatalf("pending edge: %v", err)
+			}
+			txD, err := eng.BeginTx(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			delErr := finish(txD, exec(txD, fmt.Sprintf(`MATCH (n:P {name:'%s'}) DETACH DELETE n`, victim)))
+			if !errors.Is(delErr, mvcc.ErrSerializationConflict) {
+				t.Fatalf("delete of %q under a pending incident edge: err=%v, want ErrSerializationConflict", victim, delErr)
+			}
+			_ = txE.Rollback()
+		}
+	})
+}
+
+// TestExplicitTx_DoomedCreateLeavesNoOrphanSlot is the rmp #2444 gate for the
+// orphan-slot leak: a transaction doomed by a serialization conflict runs a
+// further CREATE (refused), then rolls back — no bare node may remain. On the
+// broken build the CREATE's mapper intern survived with no life record, so the
+// slot read as a permanently visible unnamed node.
+func TestExplicitTx_DoomedCreateLeavesNoOrphanSlot(t *testing.T) {
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	eng := cypher.NewEngine(g)
+	ctx := context.Background()
+	if _, err := eng.RunInTxAny(ctx, `CREATE (:P {name:'target', v:1})`, nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	exec := func(tx *cypher.ExplicitTx, q string) error {
+		res, err := tx.ExecAny(q, nil)
+		if err != nil {
+			return err
+		}
+		for res.Next() {
+		}
+		derr := res.Err()
+		_ = res.Close()
+		return derr
+	}
+
+	txA, err := eng.BeginTx(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	txB, err := eng.BeginTx(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := exec(txB, `MATCH (n:P {name:'target'}) SET n.v = 2`); err != nil {
+		t.Fatal(err)
+	}
+	if err := txB.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	// Doom A on the contended write, then run a CREATE on the doomed handle.
+	if err := exec(txA, `MATCH (n:P {name:'target'}) SET n.v = 3`); err == nil {
+		t.Fatal("contended write did not doom the transaction")
+	}
+	if err := exec(txA, `CREATE (:P {name:'late'})`); err == nil {
+		t.Fatal("a doomed transaction accepted a further CREATE")
+	}
+	if err := txA.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+
+	res, err := eng.Run(ctx, `MATCH (n) RETURN count(n) AS c`, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = res.Close() }()
+	if !res.Next() {
+		t.Fatal("no row")
+	}
+	v, ok := res.ValueAt(0).(expr.IntegerValue)
+	if !ok {
+		t.Fatalf("not an integer: %T", res.ValueAt(0))
+	}
+	if int64(v) != 1 {
+		t.Fatalf("after doomed-create rollback: MATCH (n) count=%d, want 1 (orphan slot leaked)", int64(v))
 	}
 }
