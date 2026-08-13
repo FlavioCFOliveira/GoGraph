@@ -543,10 +543,33 @@ one was heavy enough to perturb its own environment. The prior on a fourth is no
 `chainWalk` has **never been validated** — nothing has yet checked that it reports the depth and
 stamps a quiescent chain is known to have.
 
-**So the next step is not another hypothesis. It is to validate `chainWalk` against a chain of
-known contents**, and only then to trust "the record is absent". Recording a conclusion drawn
-from an unvalidated instrument is how this cycle's retracted anomaly happened, and that mistake
-is not worth making twice.
+**So the instrument was validated before anything further was built on it.** With a snapshot
+pinned at `startTS=1` and five subsequent writes — a chain whose contents are known exactly,
+because a pinned snapshot holds the watermark at its own instant and no record above it may be
+freed — `chainWalk` reports:
+
+```
+CHAINWALK startTS=1 -> [6,5,4,3,2,1] — the record stamped startTS+1 is PRESENT
+```
+
+Six records, stamps descending, the `startTS+1` record present, and the pinned snapshot
+correctly reading the seed value through all five writes. **The instrument is sound, so the
+"record absent" observation stands.**
+
+**Which leaves a genuine contradiction, and it is stated rather than resolved.** The chain at
+the violation had depth 1 where a live reader at `startTS` should have held at least the two
+records above it; no removal path can free a record above the watermark (asserted); the
+watermark never passes a live reader (asserted); and the write path always creates the record.
+Those cannot all hold. The horizon ordering reads as airtight under the monotonicity of
+`ReadTS` — a vacuum pass samples its fallback *before* its scan, and any reader claiming a slot
+afterwards has a start instant at least as large — so the hole is somewhere the reading has not
+reached.
+
+**That is where this certification leaves it.** The defect is characterised, its recipe is
+reliable, its instruments are validated, and fourteen mechanisms are refuted. What remains is a
+narrow contradiction between two assertions and one observation, all three of which are now
+measured rather than argued — which is a far better starting point than the bare count this
+cycle began with.
 
 ### 2.1.9b What became of the memo change
 
