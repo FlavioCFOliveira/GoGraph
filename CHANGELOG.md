@@ -6,185 +6,376 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-08-13
+
+The largest release the project has cut: **505 commits**, of which 63 are features,
+83 fixes and 61 performance changes, with **31 marked breaking**. **Thirty-two sprints
+delivered work in this window — 311–322 and 324–343** — covering the round-3 and
+round-4 audit remediations, the planner access-path cycle, two production
+certifications, the MVCC epic, and the memory, CPU and concurrency remediation
+cycles.
+
+Two things define it. **Concurrency control became MVCC and nothing else** — the
+single-writer semaphore, the engine writer mutex and the `Graph.View` read barrier
+are all gone, replaced by a transaction clock, version chains, optimistic conflict
+detection and a bounded background vacuum. And the **planner gained six new access
+paths**, several of them asymptotic rather than constant-factor improvements.
+
+The openCypher TCK gate is unchanged at **3897/3897** — 100 % execution-level
+compliance is preserved, not extended.
+
+**Read [`release-notes/v0.11.0.md`](release-notes/v0.11.0.md) before upgrading.** It
+carries the migration steps for every breaking change, the measured performance
+delta including the regressions, and the envelope of what the production
+certification does *not* establish.
+
 ### Added
 
-- **`lpg.Session` — read-your-own-writes across transactions** (rmp #2328). The commit
-  frontier is contiguous, so `ApplyVersioned` returns at an instant that has not yet
-  published and a caller's next transaction could begin *below its own commit*.
-  Measured with twelve writers on disjoint keys: **9 of 660** read-backs missed a commit
-  the client was told had succeeded, and **6 of 6** serialization conflicts were a
-  transaction conflicting with itself on a key nothing else touched. A `Session`
-  obtained from `Graph.NewSession` records the instant it committed at and waits for the
-  frontier to reach it before its next operation. Within one session every operation
-  observes every commit that session has made; across two sessions nothing is promised
-  beyond snapshot isolation — the same contract a connection gives in any client-server
-  database. A writer that does not immediately read never waits.
-  **The Cypher and Bolt layers do not carry a session yet**, so clients driving GoGraph
-  through them still get the sessionless contract; see `docs/isolation-design.md`.
-- **MVCC observability** (rmp #2312). Writers in flight, commits, aborts, serialization
-  conflicts by store, the retained version-chain depth *distribution*, vacuum pass
-  latency, horizon utilisation and commit-latency histograms are published through the
-  metrics backend. The full inventory is in `docs/metrics.md`, which had no MVCC section
-  before. Cost measured: the read path is unchanged and a write transaction pays two
-  atomic increments — 1.42 ns on an otherwise empty bracket, unmeasurable on one that
-  writes.
+#### MVCC — the concurrency-control substrate
 
-### Fixed
+- **New public package `graph/mvcc`** (rmp #2266–#2312). A transaction clock and
+  shared commit records; a **contiguous commit frontier** (`Clock.ReadTS` returns the
+  highest timestamp below which nothing is still in flight, not the highest
+  published one); a reclamation horizon and watermark; `mvcc.Gate`, a weak/strong
+  admission gate that replaces a shared-counter `sync.RWMutex`; `mvcc.DepthHist`;
+  and the retriable sentinel `mvcc.ErrSerializationConflict`.
+- **Version chains** on node labels, node properties, adjacency (inside the
+  immutable entry), per-slot relationship types, and the five remaining per-edge
+  side stores. A snapshot resolves every store at one instant.
+- **Optimistic write–write conflict detection across seven stores**, first-updater-wins
+  on the version chain. The loser is refused at the conflicting statement rather than
+  at `COMMIT`, because detection is immediate — there is nothing to defer. Over Bolt
+  the error maps to a `TransientError`, so the official driver's managed transactions
+  retry it.
+- **A bounded background vacuum** (`refactor(mvcc)!`), governed by a reclamation
+  watermark sized from measurement for **1024 concurrent readers**. Reclamation is no
+  longer a commit step.
+- **The MVCC clock survives restart**: the commit timestamp is carried into the WAL,
+  allocated before the fsync, and the clock is *derived* from the WAL at recovery
+  rather than persisted separately.
+- **Snapshots record the instant they captured**, and **checkpoints capture at a
+  transactional instant while writers commit** — the checkpointer no longer excludes
+  writers.
+- **`cypher.Session` and `lpg.Session`, with `Engine.NewSession` and
+  `Graph.NewSession`** (rmp #2328) — read-your-own-writes across transactions. Within
+  one session every operation observes every commit that session has made; across two
+  sessions nothing is promised beyond snapshot isolation, which is the contract a
+  connection gives in any client-server database. A writer that does not immediately
+  read never waits. **Carried through the Cypher and Bolt layers**: every Bolt
+  connection owns a `cypher.Session` (`bolt/server/session.go`), so driver clients get
+  the guarantee too. Measured cost: none in either shape — 32.13 → 32.06 µs
+  read-after-write, 17.81 → 17.76 µs read-only, both inside run-to-run variance
+  ([`docs/benchmarks/session-ryow-2026-08-06.md`](docs/benchmarks/session-ryow-2026-08-06.md)).
+- **MVCC observability** (rmp #2312). Writers in flight, commits, aborts,
+  serialization conflicts by store, the retained version-chain depth *distribution*,
+  vacuum pass latency, horizon utilisation and commit-latency histograms, through the
+  metrics backend. Inventory in [`docs/metrics.md`](docs/metrics.md). Cost: the read
+  path is unchanged and a write transaction pays two atomic increments — 1.42 ns on an
+  otherwise empty bracket, unmeasurable on one that writes
+  ([`docs/benchmarks/mvcc-observability-2026-08-05.md`](docs/benchmarks/mvcc-observability-2026-08-05.md)).
+- **Every edge slot carries a stable identity** (`feat(adjlist)!`), and a
+  relationship's emitted identity is that stable handle rather than a position, so an
+  identity survives the compaction that a removal performs.
+- **`bench/mvccwrite`** (rmp #2297) — the write-scaling harness and its regression
+  gates, in the short test layer, so a change that re-serialises the writers turns the
+  local gate red.
 
-- **Bulk delete degraded without bound and used one core** (rmp #2400, #2418). Six
-  seed-and-wipe cycles of the *same* 20 000 nodes against one live engine took 990 ms,
-  1.771 s, 2.349 s, 3.061 s, 3.841 s, 4.622 s, and deleting 90 000 nodes in a single
-  statement took 15.97 s against a 30 s transaction timeout — reachable as a
-  `TransactionTimedOut` failure, not merely as slowness. `InNeighbours` answered "which
-  nodes hold an edge into n" by walking **every interned node**, once per node deleted,
-  so a delete cost O(k·n) with *n* counting every node ever interned rather than the
-  live ones. The adjacency now maintains a live in-edge index and answers in
-  O(in-degree): **cycle six falls from 4.622 s to 77.2 ms**, the curve is flat instead
-  of linear, `DETACH DELETE` improves 22.2×, and the 90 000-node statement takes
-  375.6 ms. End-to-end relationship creation costs +1.92% for it; the read path is
-  unchanged. The 2026-08-11 concurrency assessment had attributed this to the tombstone
-  bitmap's copy-on-write clone, which a profile prices at 0.99%; that document is
-  corrected in place. Evidence in
-  `docs/benchmarks/delete-in-edge-index-2026-08-11.md`.
+#### Planner and execution — new access paths
 
-- **A node created by an edge append was visible before its transaction committed**
-  (rmp #2331). `adjlist.addEdge` interned its endpoints without recording a versioned
-  birth, so a node an append *created* was visible to snapshots predating the
-  transaction while the arc itself correctly waited — one transaction becoming visible
-  in two pieces. All three edge paths are fixed, including the two handle-bearing ones
-  that every durable write goes through.
+- **Prefix range seek**: `n.p STARTS WITH 'x'` is rewritten to a seek over
+  `[x, succ(x))` on the sorted btree, reusing the shipped exact-count gate. `succ` is
+  the **byte** successor, not a code-point increment — both sides already share one
+  byte basis, and a byte successor always exists for a non-empty, non-all-`0xFF`
+  prefix. **385×**
+  ([`docs/benchmarks/prefix-range-seek-2026-07-28.md`](docs/benchmarks/prefix-range-seek-2026-07-28.md)).
+- **Multi-label conjunction by Roaring bitmap intersection**: `MATCH (n:A:B)` is one
+  container-wise AND instead of a scan plus a per-row label re-check, and the residual
+  label `Filter` is dropped — sound because the label index was *measured* to be
+  maintained on both delete and relabel. **2909×**
+  ([`docs/benchmarks/bitmap-intersection-2026-07-28.md`](docs/benchmarks/bitmap-intersection-2026-07-28.md)).
+- **Range-bitmap composition across single-property indexes** — two ordinary
+  single-property indexes compose, which Memgraph needs a dedicated composite index
+  type for, and they compose *across* index kinds.
+- **btree seek for string and numeric equality** instead of a scan: **849×** at 20 000
+  nodes, **202×** at 5 000, with the three cells that already worked unchanged
+  ([`docs/benchmarks/btree-string-eq-2026-07-28.md`](docs/benchmarks/btree-string-eq-2026-07-28.md)).
+  A numeric companion is now built for a hash index too, not only for a btree.
+- **Destination-ordered CSR neighbour runs** (`feat(csr)`), ordered by the total key
+  `(destination, handle)` and probed in **O(log d)** instead of scanned. The figure to
+  quote is the **Barabási–Albert power law: −7.37 % time, −58.47 % B/op**; the −31.77 %
+  geomean and the −81.76 % at controlled degree 4096 are dominated by synthetic
+  high-degree fixtures, and RMAT overstates the power-law result by **3.9×**
+  ([`docs/benchmarks/csr-neighbour-ordering-2026-07-29.md`](docs/benchmarks/csr-neighbour-ordering-2026-07-29.md)).
+  The cost is on the write path: a 2.5–34× more expensive CSR build and a +16.52 %
+  checkpoint.
+- **`Expand(Into)` seeks the bound destination's run** instead of enumerating it:
+  **−17.27 % / −50.56 % / −77.69 %** at out-degree 8 / 32 / 64 — the gain grows with
+  degree, the signature of Θ(d) becoming O(log d + r), with a fitted exponent moving
+  1.249 → 0.809. **The anchor-swap peephole widened from OUT-only to symmetric**:
+  **−93.73 % / −99.69 %** at hub out-degree 1601 / 40000
+  ([`docs/benchmarks/expand-into-symmetric-swap-2026-07-29.md`](docs/benchmarks/expand-into-symmetric-swap-2026-07-29.md)).
+- **`csr` multi-way sorted-set intersection primitive** with leapfrog seeking, and
+  **`exec.ExpandIntersect`**, a fused cyclic expand built on it: for a pattern that
+  closes a cycle, the open middle hop and the closing seek become one operator, so a
+  candidate that does not close the cycle is never built into a row. Geomean
+  **−54.24 % time and −70.35 % B/op** across every qualifying shape, −91.55 % time and
+  −98.30 % allocations at out-degree 64, and statistically inert on non-qualifying
+  shapes ([`docs/benchmarks/cyclic-join-2026-07-30.md`](docs/benchmarks/cyclic-join-2026-07-30.md)).
+  **This operator is OPT-IN and OFF by default** — set
+  `EngineOptions.EnableCyclicIntersect`. The polarity is deliberately positive: the
+  operator is new rather than a peephole, and the openCypher TCK contains no directed
+  cycle over three or more distinct node variables, so the TCK cannot gate it at all.
+  Sprint 315 is in this release as a **negative result** as much as a positive one —
+  the general worst-case-optimal join was rejected on measurement and only this narrow
+  fusion kept.
+- **An index nested-loop join for a per-row-varying key**, behind a measured cost
+  gate: **55.5×** to **258×** on reads
+  ([`docs/benchmarks/index-nested-loop-join-2026-07-28.md`](docs/benchmarks/index-nested-loop-join-2026-07-28.md)).
+- **The hash join is admitted for writing statements**, by proving the build side is
+  pinned. GoGraph's hash join never self-selects its build side — the planner pins
+  build = inner — so the emitted sequence is row-for-row identical and safe for `SET`.
+  The read path's hash-join order-safety scan is retired: **62.4×** on an equijoin
+  collect ([`docs/benchmarks/hash-join-order-scan-retired-2026-07-28.md`](docs/benchmarks/hash-join-order-scan-retired-2026-07-28.md)).
+- **Bidirectional search for single-path `shortestPath`**, widened to typed, `DirIn`
+  and `DirBoth`: **10.8×** untyped, and **12.7×–32.8×** across the widened forms
+  ([`docs/benchmarks/shortest-path-bidir-2026-07-27.md`](docs/benchmarks/shortest-path-bidir-2026-07-27.md),
+  [`…-widened-2026-07-28.md`](docs/benchmarks/shortest-path-bidir-widened-2026-07-28.md)).
+- **A per-node out-degree primitive** on `AdjList` and `lpg.Graph` — O(1) in the
+  node's degree, **1554×** at degree 4096 — and **degree-answerable `COUNT` and
+  `size()`** rewritten onto it, which retires a pattern predicate 28×, a list
+  comprehension 65× and `COUNT { … } > 0` **88×**
+  ([`docs/benchmarks/degree-primitive-2026-07-27.md`](docs/benchmarks/degree-primitive-2026-07-27.md)).
+  Counting a *labelled* single hop is a separate mechanism — one filtered adjacency
+  walk, Θ(d) not Θ(1) — deliberately not built as a widening of the degree rewrite.
+- **The MERGE match phase is driven from a label posting list** instead of walking
+  every interned node, so locating a node to merge no longer tracks the size of the
+  whole graph ([`docs/benchmarks/merge-access-path-2026-07-27.md`](docs/benchmarks/merge-access-path-2026-07-27.md)).
+- **A widened columnar tier** reaching ordinary query shapes, with the aggregate
+  argument filled unboxed like the grouping key, and the validity bitmap dropped from
+  a fully-populated edge column. **A partitioned label scan** so intra-query
+  parallelism engages on real queries, gated on the label's own cardinality rather
+  than the graph's live order. **An index seek now outranks columnar execution**,
+  closing a case where having an index made a query slower than not having one.
+- **An `UNWIND`-bound key set is served with one index seek**, size-gated before the
+  key set is extracted.
+- **Seek keys resolve from the bound expression, not from source text** — see
+  *Performance* below, this is the largest per-query gain in the release.
 
-- **CRITICAL: concurrent read-modify-write lost 46% of its committed updates**
-  (rmp #2324). Four writers each issuing 100 autocommit `SET a.bal = a.bal + 1`
-  statements, with every refusal retried until it succeeded, reported 400 successes
-  and left the property at **216**. Measured directly rather than inferred: those 400
-  successes wrote only ~200 **distinct** values, with one value written by five
-  different statements.
+#### Observability
 
-  The write-write conflict test sat behind a "records nothing" guard — skipped when
-  the value being written already equalled the **stored** value, on the reasoning
-  that a write recording no version has nothing to conflict over. That is sound for
-  an idempotent write and unsound for an arithmetic one, because the incoming value
-  can equal the stored one **by coincidence**: A reads 1 and writes 2; B, whose
-  snapshot also says 1, computes 2 as well; B's write is compared against the
-  now-stored 2, judged a no-op, and accepted with no conflict test at all. B's
-  statement reports success having applied nothing.
+- **`PROFILE`, with per-operator db-hits** (rmp #2222, #2237), and a **faithful
+  physical plan** from `EXPLAIN`. `Engine.Explain` previously rendered the logical IR
+  and re-derived the planner's physical decisions, so a reader diagnosing a query
+  could be shown `O(n·m)` where `O(n+m)` actually ran. Every operator in a `PROFILE`
+  is measured, **including composite intermediates** — an unmeasured node is worse
+  than an absent one, because a reader counts it as free.
+- **Per-statement write-effect counters, reported over Bolt** (`Result.Counters`),
+  modelling openCypher's eight side effects.
+- **`db.stats.refresh()`**, behind a rate limit.
+- **Every example can produce a pprof profile**, and the examples' telemetry was made
+  usable at a scale where a CPU profile means something.
 
-  The conflict test now runs unconditionally, before deciding whether anything needs
-  recording. This cannot cause the spurious abort the guard was added to prevent: a
-  `MERGE` re-asserting a property it just read re-asserts over a version that IS
-  visible to its own transaction, and a version that is NOT visible means another
-  transaction changed the object, which must be refused. Node **labels** keep their
-  equivalent guard and are sound with it, because set membership is genuinely
-  idempotent — adding a label another transaction already added leaves the same state,
-  with no arithmetic to lose.
+#### Bulk import, Bolt and the edges
 
-  The defect predates the MVCC sprint and was invisible to a fully green suite: the
-  one test covering this shape asserted the defective behaviour, and
-  `examples/27_concurrent_txn`'s conserved-total oracle passed because its default
-  contention rarely hit the window.
+- **`store/bulkimport`, with `Publish`** — builds a labelled property graph at
+  bulk-loader speed and publishes it as an openable store snapshot. On **20 000 nodes
+  and 200 000 edges**: import phase **233 ms median / 0.86 M edges/s**, and **0.28 s**
+  of process wall clock once CSV parsing and startup are counted
+  ([`docs/benchmarks/bulk-import-2026-07-26.md`](docs/benchmarks/bulk-import-2026-07-26.md)).
+  On a **separate, smaller fixture** — 2 000 nodes and 4 000 typed edges into an
+  openable store — the same task runs at **236 elem/s through Cypher against
+  121 000–172 000 elem/s through `bulkimport.Publish`**, about **690×**, on 483 KB of
+  disk instead of 1.43 MB, with the published store verified reopenable via
+  `recovery.OpenCtx`
+  ([release delta §7](docs/benchmarks/release-delta-v0.10.0-to-head-2026-08-10.md)).
+  The two figures are different datasets and must not be combined.
+  **State the trade with the number**: the bulk route writes no WAL, is not a
+  transaction, cannot be rolled back, requires an empty directory, and is concurrent
+  with nothing.
+- **`cmd/gograph-import`** — loads a store from CSV.
+- **Typed Go slices and maps bindable as query parameters.**
+- **Bolt transactions are operable**: bounded by idle time and by a per-principal
+  count, and listable and terminable through an operator API.
+- **A standing, ratcheted Bolt driver-compatibility suite**, run against the official
+  `neo4j-go-driver`.
+- **Container-aware engine-wide memory ceilings**, derived from the container's cap.
 
+#### Testing and tooling
+
+- **Every documented Cypher example is executed as a build gate**, so a doc example
+  that stops working fails the build.
+- **Examples 35 and 37** — reader latency under a mixed OLTP-and-analytics workload,
+  and the MVCC *write* side exercised and measured.
+- The deferred test layers take an **explicit, overridable timeout**.
 
 ### Changed
 
+- **BREAKING — `Graph.DisableMVCC`, `Graph.EnableMVCC` and `Graph.MVCCEnabled` are
+  removed** (rmp #2311). MVCC is the module's only concurrency-control mechanism and
+  is armed by `lpg.New`; there is no way to disarm it. An exported switch implied a
+  choice that does not exist, and a disarmed graph had no snapshot isolation, so every
+  guarantee the module documents was conditional on a setter any caller could reach.
+  **Migration:** delete the calls. There is no replacement and none is needed.
+- **BREAKING — `Graph.View` is removed** (`refactor(lpg)!`), the last pre-MVCC read
+  barrier. **Migration:** reads no longer need a barrier; take a snapshot-based read
+  path instead. `Graph.LockBarrier`/`UnlockBarrier`/`ApplyInsideLocked` remain for
+  callers that genuinely need exclusive access, but they must **not** be used to hold a
+  transaction — `ApplyInsideLockedTx` resolves the transaction from the graph's
+  *ambient* slot, which two concurrent transactions overwrite.
+- **BREAKING — two `store/wal` signatures changed** (rmp #2322).
+  `Writer.AppendRun` returns `(int64, error)` — the run's own end offset — and
+  `Writer.SyncGroup(target int64)` takes it. The offset could not be recovered after
+  the fact, because the writer's accepted offset is shared: another appender advances
+  it and a durability failure rewinds it, so a committer reading it later was asking
+  about somebody else's frames. **`Writer.SyncBuffered` is added** for callers with
+  nothing of their own to acknowledge (an empty commit's courtesy flush) and **must
+  not** be used to decide a commit's fate.
+- **BREAKING — `MVCCStats` field renames** (rmp #2312). `ActiveReaders` →
+  `ActiveSnapshots` (it counted writers too, since writers hold a snapshot),
+  `OldestReaderAge()` → `OldestSnapshotAge()`, `UnregisteredReaders` →
+  `UnregisteredSnapshots`. `ActiveReaders()` is now a derived method excluding
+  writers. The metric series `lpg.mvcc.readers.unregistered` and
+  `lpg.mvcc.oldest_reader_age` become `lpg.mvcc.snapshots.unregistered` and
+  `lpg.mvcc.oldest_snapshot_age`, and per-store conflict series use underscored store
+  names. **Migration:** rename at the call site and in any dashboard query.
+- **BREAKING — `AdjList.Reclaim` takes a `*mvcc.DepthHist`** (rmp #2312), so the
+  reclaimer can report retained chain depth from the walk it already performs.
+- **BREAKING — `txn.Tx.CommitWALOnly` takes the commit timestamp**:
+  `CommitWALOnly() error` becomes `CommitWALOnly(commitTS uint64) error`. The
+  timestamp is encoded *into* the WAL record, because the MVCC clock is derived from
+  the WAL at recovery rather than persisted separately, so it must be allocated before
+  the append rather than after it. **Migration:** pass
+  `Graph.AllocateCommitTS(writeTx)`, as `cypher/exectx.go` does. The method is not
+  removed and its role is unchanged — it is still the WAL-only commit that `CREATE
+  INDEX` uses and that never replays through the store apply path.
+- **BREAKING — `internal/ctxlock` is retired** (`refactor(mvcc)!`), and what it
+  guarded is re-established by the MVCC substrate.
+- **BREAKING — snapshot `labels.bin` format version 1 → 2** (rmp, `c5814d6c`). The
+  edge record gains a `Slot` field. A committed relationship *type* did not survive a
+  checkpoint: `labels.bin` stored `EdgeLabelEntry{Src, Dst, StringIdx}` with no slot
+  ordinal, so parallel edges folded into the same key on disk, and the adjacency label
+  column was never persisted at all — only reconstructed by replaying per-pair
+  `SetEdgeLabel`. Relationship types became per-slot in memory earlier in the sprint,
+  because openCypher means a type to belong to the relationship *instance* rather than
+  to the node pair; the durable format had stayed per-pair.
+- **Isolation — an explicit read transaction is now SNAPSHOT ISOLATED across all of
+  its statements** (rmp #2307). `cypher.Engine.BeginReadTx` pins one MVCC read instant
+  at `BEGIN`, registers it with the reclamation horizon, and routes every `Exec` on the
+  handle at that instant, so a commit made by another transaction between two
+  statements is invisible to the second. A Bolt `BEGIN` with `mode="r"` inherits this.
+  **This is an observable change, and it is strictly stronger.** Previously each
+  statement opened its own snapshot — read-committed across the transaction's
+  statements — which made an explicit read transaction *weaker* than a single
+  autocommit statement. No caller relying on the old contract can observe a weaker
+  result. Code that depended on seeing another transaction's commit mid-read-transaction
+  must now open a new read transaction. **The cost is explicit:** an open read
+  transaction pins the reclamation horizon, so no version it can still reach is freed
+  while it lives.
+- **An open explicit WRITE transaction no longer blocks anybody** (rmp #2305).
+  `BeginTx` took the graph's visibility barrier EXCLUSIVELY and held it from `BEGIN`
+  until `COMMIT`/`ROLLBACK` — across every client round-trip and all the think-time
+  between them. Over Bolt, one client that sent `BEGIN` and then paused blocked **every
+  other writer in the process**. That hold is gone: `BeginTx` opens one commit record
+  and takes no lock; each statement takes the schema barrier *shared* for its own
+  duration; `COMMIT` publishes the record exactly once, and that single publication is
+  the transaction's commit instant. Atomicity comes from the record, not from
+  exclusion. **Two clients may now hold open write transactions simultaneously and both
+  make progress**, verified end-to-end against the official `neo4j-go-driver`.
+  **New `lpg` API:** `Graph.BeginVersionedTx`, `Graph.ApplyInVersionedTx`,
+  `Graph.EndVersionedTx`. **An abandoned transaction still costs something, of a
+  different kind:** it pins the reclamation horizon, so no version it could read is
+  freed while it lives.
+- **Concurrency control is now MVCC and nothing else** (rmp #2306). The `txn.Store`'s
+  capacity-one single-writer semaphore is retired; `Begin`/`BeginCtx` now only register
+  the transaction as an admitted writer, excluding no other writer. The engine writer
+  mutex is retired too.
+  **Observable behaviour change:** with nothing serialising writers, two concurrent
+  `MERGE` statements on the same pattern can both find no match and both create —
+  measured at eight duplicates from eight writers. This is inherent to MVCC (two
+  CREATEs of two distinct new nodes are not a conflict, so there is nothing to
+  arbitrate) and matches Neo4j, which requires a uniqueness constraint for the same
+  reason. **With a `UNIQUE` constraint on the merged property the duplicates collapse
+  to exactly one**, because the constraint's reservation is atomic. **Callers relying
+  on `MERGE` being idempotent under concurrency must declare the constraint.**
+  Retiring the semaphore is **throughput-neutral** — the premise that it was a
+  bottleneck is refuted by measurement (all p > 0.18 at n=6; both arms scale ~15× at
+  32 writers), because it was released after the WAL append and never covered the
+  coalesced fsync that dominates a durable commit
+  ([`docs/benchmarks/store-semaphore-retirement-2026-08-04.md`](docs/benchmarks/store-semaphore-retirement-2026-08-04.md)).
+  Quiesce (`txn.Store.RunUnderCommitLock`, used by `store.DB.Close` and the
+  checkpointer) no longer borrows the semaphore: it closes a dedicated admission gate
+  and drains admitted writers to zero, both under one mutex, so a writer cannot be
+  admitted between the two steps.
 - **`bolt/server.DefaultMaxOpenTxPerPrincipal` raised from 16 to 2048** (rmp #2419).
-  An observable change of default. This module publishes 1, 8, 64, 256 and 1024
-  goroutines as the concurrency levels it measures and reports at, and a single
-  principal could not reach them through explicit transactions without overriding this
-  default first — every benchmark harness in the repository had already had to. The
-  default configuration now reaches the published levels. Note the consequence: a
+  An observable change of default. The module publishes 1, 8, 64, 256 and 1024
+  goroutines as the levels it measures and reports at, and a single principal could not
+  reach them through explicit transactions without overriding this default first —
+  every benchmark harness in the repository had already had to. Note the consequence: a
   connection holds at most one open transaction and `MaxConnections` defaults to 1024,
   so under the default configuration this quota can no longer bind, and the connection
   ceiling is what bounds the resource. The quota stays finite, still refuses with a
-  typed `LimitExceeded`, and still isolates one principal from another; an embedder who
-  wants the previous tight bound must now set `Options.MaxOpenTxPerPrincipal`
-  explicitly. **Every open transaction pins an MVCC read snapshot and holds the
-  reclamation horizon back for its lifetime**, so the higher ceiling is a weaker bound
-  on that resource; `DefaultMaxTxIdleTime` (5 s) is what limits the exposure.
+  typed `LimitExceeded`, and still isolates one principal from another. **Every open
+  transaction pins an MVCC read snapshot and holds the reclamation horizon back for its
+  lifetime**, so the higher ceiling is a weaker bound on that resource;
+  `DefaultMaxTxIdleTime` (5 s) is what limits the exposure.
+- **Both DDL-exclusion barriers moved off `sync.RWMutex` onto `mvcc.Gate`.** A shared
+  acquire goes from 3.75 ns to 0.434 ns at high concurrency where `sync.RWMutex`
+  degrades to 89.5 ns — a **206×** advantage at the top of the ladder, because the
+  RWMutex pays a coherence miss on a shared line twice purely to announce a reader
+  ([`docs/benchmarks/mvcc-weak-strong-gate-2026-08-07.md`](docs/benchmarks/mvcc-weak-strong-gate-2026-08-07.md)).
+- **Single-hop adjacency resolves at execution time** (`feat(cypher)!`), and **no
+  traversal structure is materialised at plan-build time**. This is what makes an edge
+  `CREATE` or `DELETE` visible to a pattern in the same statement; the measured cost is
+  none — `bench/cypher_scale` geomean −0.41 %
+  ([`docs/benchmarks/execution-time-adjacency-2026-08-06.md`](docs/benchmarks/execution-time-adjacency-2026-08-06.md)).
+- **The barrier re-entrancy guard is build-tagged out of released binaries.**
+- **Relationship types are stored per slot, not per node pair**, in memory as well as
+  on disk, because openCypher means a type to belong to the relationship instance.
 
-- **BREAKING: `Graph.DisableMVCC`, `Graph.EnableMVCC` and `Graph.MVCCEnabled` are
-  removed** (rmp #2311). MVCC is the module's only concurrency-control mechanism and is
-  armed by `lpg.New`; there is no way to disarm it. An exported switch implied a choice
-  that does not exist, and a disarmed graph had no snapshot isolation, so every
-  guarantee the module documents was conditional on a setter any caller could reach.
-- **BREAKING: `MVCCStats` field renames** (rmp #2312). `ActiveReaders` →
-  `ActiveSnapshots` (it counted writers too, since writers hold a snapshot),
-  `OldestReaderAge()` → `OldestSnapshotAge()`, `UnregisteredReaders` →
-  `UnregisteredSnapshots`. `ActiveReaders()` is now a derived method excluding writers.
-  The metric series `lpg.mvcc.readers.unregistered` and `lpg.mvcc.oldest_reader_age` are
-  renamed to `lpg.mvcc.snapshots.unregistered` and `lpg.mvcc.oldest_snapshot_age`, and
-  per-store conflict series use underscored store names.
-- **BREAKING: `AdjList.Reclaim` takes a `*mvcc.DepthHist`** (rmp #2312), so the
-  reclaimer can report retained chain depth from the walk it already performs.
+### Removed
 
-- **An open explicit write transaction no longer blocks anybody** (rmp #2305).
-  `cypher.Engine.BeginTx` took the graph's visibility barrier EXCLUSIVELY and held it
-  from `BEGIN` until `COMMIT`/`ROLLBACK` — across every client round-trip and all the
-  think-time between them. Over Bolt that meant one client which sent `BEGIN` and then
-  paused blocked **every other writer in the process** for as long as its transaction
-  stayed open. That hold is gone.
-
-  `BeginTx` now opens one **commit record** and takes no lock. Each statement takes the
-  schema barrier *shared* for its own duration and releases it before returning, so
-  nothing is held between statements. `COMMIT` publishes the record exactly once, and
-  that single publication is the transaction's commit instant: every version its
-  statements wrote becomes visible together, and a rolled-back transaction's versions
-  never become visible at all. Atomicity comes from the record, not from exclusion.
-
-  **Two clients may now hold open write transactions simultaneously and both make
-  progress**, verified end-to-end against the official neo4j-go-driver.
-
-  **A write-write collision between two open transactions is refused at the
-  conflicting statement** — `ExplicitTx.Exec` returns an error wrapping
-  `mvcc.ErrSerializationConflict` — rather than at `COMMIT`. Detection is
-  first-updater-wins on the version chain, so the loser is known the moment it tries to
-  install its version; there is nothing to defer. Over Bolt the error maps to a
-  `TransientError`, so the driver's managed transactions retry it. Callers driving
-  explicit transactions by hand should roll back and retry.
-
-  **New `lpg` API**: `Graph.BeginVersionedTx`, `Graph.ApplyInVersionedTx` and
-  `Graph.EndVersionedTx`. `Graph.LockBarrier`/`UnlockBarrier`/`ApplyInsideLocked` remain
-  for callers that genuinely need exclusive access, but they must not be used to hold a
-  transaction: `ApplyInsideLockedTx` resolves the transaction from the graph's *ambient*
-  slot, which two concurrent transactions overwrite.
-
-  **An abandoned transaction still costs something, but of a different kind:** it pins
-  the reclamation horizon, so no version it could read is freed while it lives.
-  `server.Options.MaxTxIdleTime` was reviewed for this and kept at its 5 s default —
-  the original availability justification is gone, but an unbounded resource cost
-  remains.
-
-- **Concurrency control is now MVCC and nothing else** (rmp #2306). The
-  `txn.Store`'s capacity-one single-writer semaphore is retired. Independent write
-  transactions run concurrently on both engine wirings, and a write-write
-  collision is DETECTED at commit by first-updater-wins on the version chain
-  rather than prevented by holding a lock. `txn.Store.Begin`/`BeginCtx` now only
-  register the transaction as an admitted writer; the registration excludes no
-  other writer.
-
-  **Observable behaviour change.** With nothing serialising writers, two
-  concurrent `MERGE` statements on the same pattern can both find no match and
-  both create — measured at eight duplicates from eight writers. This is inherent
-  to MVCC (two CREATEs of two distinct new nodes are not a conflict, so there is
-  nothing to arbitrate) and matches Neo4j, which requires a uniqueness constraint
-  for the same reason. **With a `UNIQUE` constraint on the merged property the
-  duplicates collapse to exactly one**, because the constraint's reservation is
-  atomic. Callers relying on MERGE to be idempotent under concurrency must declare
-  the constraint.
-
-  Retiring the semaphore is **throughput-neutral** — the premise that it was a
-  bottleneck is refuted by measurement (all p > 0.18 at n=6; both arms scale ~15×
-  at 32 writers), because it was released after the WAL append and never covered
-  the coalesced fsync that dominates a durable commit. Full A/B in
-  [docs/benchmarks/store-semaphore-retirement-2026-08-04.md](docs/benchmarks/store-semaphore-retirement-2026-08-04.md).
-
-  Quiesce (`txn.Store.RunUnderCommitLock`, used by `store.DB.Close` and the
-  checkpointer) no longer borrows the semaphore. It closes a dedicated admission
-  gate and drains the admitted writers to zero, both under one mutex, so a writer
-  cannot be admitted between the two steps. Two quiesces exclude each other
-  explicitly rather than as a side effect.
+- `Graph.DisableMVCC`, `Graph.EnableMVCC`, `Graph.MVCCEnabled` (see *Changed*).
+- `Graph.View`, the last pre-MVCC read barrier.
+- `internal/ctxlock`.
+- The `txn.Store` single-writer semaphore and the engine writer mutex.
+- The read path's hash-join order-safety scan.
+- The side-store timestamped walkers, unreachable once every snapshot read routes
+  through the pinned verdict.
 
 ### Fixed
+
+#### Correctness — the two CRITICAL ones
+
+- **CRITICAL: concurrent read-modify-write lost 46 % of its committed updates**
+  (rmp #2324). Four writers each issuing 100 autocommit `SET a.bal = a.bal + 1`
+  statements, with every refusal retried until it succeeded, reported **400 successes
+  and left the property at 216**. Measured directly rather than inferred: those 400
+  successes wrote only ~200 **distinct** values, with one value written by five
+  different statements.
+  The write-write conflict test sat behind a "records nothing" guard — skipped when the
+  value being written already equalled the **stored** value, on the reasoning that a
+  write recording no version has nothing to conflict over. That is sound for an
+  idempotent write and unsound for an arithmetic one, because the incoming value can
+  equal the stored one **by coincidence**: A reads 1 and writes 2; B, whose snapshot
+  also says 1, computes 2 as well; B's write is compared against the now-stored 2,
+  judged a no-op, and accepted with no conflict test at all. B's statement reports
+  success having applied nothing.
+  The conflict test now runs unconditionally, before deciding whether anything needs
+  recording. This cannot cause the spurious abort the guard was added to prevent. Node
+  **labels** keep their equivalent guard and are sound with it, because set membership
+  is genuinely idempotent.
+  **The defect predates the MVCC sprint and was invisible to a fully green suite:** the
+  one test covering this shape asserted the defective behaviour, and
+  `examples/27_concurrent_txn`'s conserved-total oracle passed because its default
+  contention rarely hit the window.
+- **CRITICAL: an acknowledged commit could be lost in the post-fsync, pre-publish
+  window** (rmp #2349, `0b8b8145`). Reproduced deterministically — under
+  `-covermode=atomic` with four fsync-heavy durable packages looped in parallel, seed
+  `0xBADF00D` lost **exactly one acknowledged commit in 2 of 15 runs**. Cost of the fix
+  measured at zero
+  ([`docs/benchmarks/checkpoint-instant-boundary-2026-08-07.md`](docs/benchmarks/checkpoint-instant-boundary-2026-08-07.md)).
+
+#### ACID — Atomicity, Isolation, Durability
 
 - **Durability — a commit whose frames were already on stable storage could be
   reported as FAILED** (rmp #2322). `wal.Writer.SyncGroup` consulted the writer's
@@ -194,64 +385,290 @@ and the project follows [Semantic Versioning](https://semver.org/).
   marker. Such a committer was told its commit was lost, while recovery correctly
   replayed the durable, fully marked transaction — a durable transaction nobody
   acknowledged, which the crash simulator's atomicity oracle reported as
-  `<failed-resurrected>`.
+  `<failed-resurrected>`. `SyncGroup` now tests the caller's watermark against the
+  durable size first. The defect was latent while the store serialised commits behind
+  its semaphore, and is a prerequisite for retiring it.
+- **Isolation — a pinned MVCC snapshot could observe half a transaction**
+  (rmp #2420, `9167d3d3`, `7b435445`). The root cause was in `mvcc.Horizon.Oldest`,
+  which **discarded its fallback**, so the reclamation watermark could pass a reader
+  that claimed its slot mid-scan. Two prior assertions about this defect were both
+  *true* and structurally *blind* to it. Every snapshot read now routes through the
+  pinned verdict rather than the live stamp, and **ACID Isolation carries three
+  permanent, always-on detectors** for this corruption class, each proven on a broken
+  control as well as a sound one. Discharged against a criterion fixed in advance:
+  **150 package runs, zero firings of all five oracles**, verified as genuine
+  executions rather than cache replays.
+- **Atomicity — a snapshot was not captured atomically** (`dbcc4366`), and a node
+  created by an edge append was visible before its transaction committed
+  (rmp #2331). `adjlist.addEdge` interned its endpoints without recording a versioned
+  birth, so a node an append *created* was visible to snapshots predating the
+  transaction while the arc itself correctly waited — one transaction becoming visible
+  in two pieces. All three edge paths are fixed, including the two handle-bearing ones
+  that every durable write goes through.
+- **An aborted transaction withdraws its writes instead of leaking them**
+  (`fix(mvcc)!`), and a refused transaction is aborted rather than published, keeping
+  the object writable.
+- **`UNIQUE` enforcement is atomic**, releasing only a statement's own reservations. A
+  `UNIQUE` constraint binds a *pair*, so either half must reserve; a `NOT NULL`
+  constraint binds two substores, so both halves must collide. The `NOT NULL` check no
+  longer decides constraints on uncommitted state.
+- **A rolled-back writer could re-reserve a value a peer's committed release had
+  freed** (rmp #2366). The first fix for this **moved** the defect instead of closing
+  it — a reserve that spends its own pending release must **restore** the mark on
+  rollback, not delete the value, and deleting it left two `:Person` nodes carrying one
+  UNIQUE value, which is the consistency direction and strictly worse. Both directions
+  are now pinned by tests, and the second fails against the first fix.
+- **Version memory could settle above the stated bound, permanently** (rmp #2424) —
+  the sweeper exited with an outstanding debt. The vacuum now wakes when *retention*
+  exceeds the bound rather than on any debt, and a debt below the wake threshold still
+  finds a sweeper. **Found by running the 150 runs another task's acceptance criterion
+  demanded.**
+- **The MVCC ratchet must rebase the commit log**, or the frontier never moves again.
+- **Each committer gets its own durability watermark**, and the durability fail-stop is
+  named so it cannot be mistaken for a retriable conflict.
 
-  `SyncGroup` now tests the caller's watermark against the durable size first, and
-  takes that watermark as a parameter instead of inferring it. **This is a breaking
-  change to two `store/wal` signatures**: `Writer.AppendRun` returns
-  `(int64, error)` — the run's own end offset — and `Writer.SyncGroup(target int64)`
-  takes it. The offset could not be recovered after the fact, because the writer's
-  accepted offset is shared: another appender advances it and a durability failure
-  rewinds it, so a committer reading it later was asking about somebody else's
-  frames. `Writer.SyncBuffered` is added for callers with nothing of their own to
-  acknowledge (an empty commit's courtesy flush) and must not be used to decide a
-  commit's fate.
+#### Query correctness
 
-  The defect was latent while the store serialised commits behind its
-  single-writer semaphore, because group rounds could not overlap; it is a
-  prerequisite for retiring that semaphore.
+- **An index-seek rewrite dropped the label predicate**, producing a
+  self-contradictory row — a `(n:Person)` pattern returning a row whose `labels(n)` is
+  `[]` (rmp #2423, `fca34a0c`). Every index seek is now qualified by its label.
+  **Unmasked by fixing rmp #2366**: a phantom reservation had been hiding it. Its
+  sibling rewrites (range, prefix, numeric-equality, key-set) are fixed as **latent**
+  — guarded on the strength of a code reading plus a control that the seeks still fire,
+  **not** on a reproduction.
+- **A reverse type filter admitted the pair rather than the instance** (rmp #2250), and
+  **`shortestPath` admitted an edge its type filter excludes** — a sentinel that could
+  not mean what it was asked to mean.
+- **A typed degree over parallel edges returned a silently wrong count** (rmp #2241).
+  The adjacency holds four slots for a pair but only the first carried an encoded
+  handle.
+- **`COUNT { pattern WHERE predicate }` dropped its predicate** (rmp #2242) —
+  `ast.CountSubquery` carried no `Where` field at all, where its `ast.ExistsSubquery`
+  sibling did.
+- **A projected pattern comprehension dropped its `WHERE`**, and cost 24× (`c963558c`).
+- **Phantom join rows**, and one `DELETE` costing **1212×** (`0073b5b1`).
+- **The write-clause classifier read comments and string literals** (rmp #2230), so a
+  keyword inside a comment or a string misrouted a read onto the **write** path — and a
+  misrouted read runs inside a write transaction. The classifier now masks comments and
+  literals to spaces, preserving word boundaries and offsets.
+- **`CALL db.*` resolves on the write path**, and a DDL sequence no longer leaks a
+  `Result`. `db.stats.refresh` no longer nests the visibility barrier.
+- **A `RETURN`-less `MATCH` block is accepted in `EXISTS` and `COUNT` subqueries.**
+- **Two `Project` operators are no longer stacked for a single `RETURN`.**
+- **The lexer rejects unrecognised characters instead of discarding them.**
+- **`ValueAt` serves a streaming result, not only a materialised one.**
+- **A count cell driven negative was deleted**, losing the decrement that made it; and
+  the O(1) count pushdown stays exact under write churn.
+- **The label-index gate reported violations that existed at no instant**, and the
+  label bag and the label index now transition together.
+- **CSR-keyed caches are invalidated at source**, the topology epoch is bumped after
+  the last epoch-keyed write and on an edge-label change, and the reconstruction CSR is
+  built at the reader's instant rather than the present.
+- **Pattern predicates read the reader's instant, not the present.**
 
-### Changed
+#### Bolt protocol
 
-- **Isolation — an explicit read transaction is now SNAPSHOT ISOLATED across all
-  of its statements** (rmp #2307). `cypher.Engine.BeginReadTx` pins one MVCC read
-  instant at `BEGIN`, registers it with the reclamation horizon, and routes every
-  `Exec` on the handle at that instant, so a commit made by another transaction
-  between two statements is invisible to the second. A Bolt `BEGIN` with
-  `mode="r"` inherits this.
+- **Graph entities were sent as PackStream maps instead of Bolt STRUCTURES**
+  (`b651d984`). `Node`, `Relationship` and `Path` are structures in the Bolt protocol,
+  but the server sent maps — a wire capture showed `a3`/`a5`/`a2` TinyMaps where
+  `b4 4e`, `b8 52` and `b3 50` belong — so **the official `neo4j-go-driver` could not
+  materialise them as `dbtype.Node`, `dbtype.Relationship` or `dbtype.Path` at all.**
+  That was a large part of the 13 hard failures the round-3 audit measured across 37
+  driver checks. The encoder now emits `'N' 0x4E`, `'R' 0x52`, `'r' 0x72` and
+  `'P' 0x50`, with field order and arity transcribed from the decoder that has to read
+  them — the `neo4j-go-driver` v5.28.4 hydrator. **Pre-Bolt-5 arities are honoured
+  too**: `element_id` arrived in Bolt 5, and a Bolt 4 client asserts a three-field
+  `Node`. `element_id` is the durable id in decimal, identical to what the Cypher
+  `elementId()` function returns, so a client reading `elementId()` in a projection and
+  one reading `Node.ElementId` off the wire see the same string for the same entity.
+- **The `db` field was missing from result metadata** (`b54b284e`).
+- **`BeginTx` did not honour the caller's context while acquiring its locks**
+  (`01f5bea9`).
 
-  **This is an observable behaviour change, and it is strictly stronger.**
-  Previously each statement opened its own snapshot — read-committed across the
-  statements of the transaction — which made an explicit read transaction weaker
-  than a single autocommit statement, since an autocommit statement has always
-  had one instant for its whole duration. Transaction-wide snapshot isolation is
-  Memgraph's default and is stronger than Neo4j's documented multi-statement
-  read-transaction behaviour, so no caller relying on the old contract can
-  observe a *weaker* result. Code that depended on seeing another transaction's
-  commit mid-read-transaction must now open a new read transaction to see it.
+#### Performance defects
 
-  The cost is explicit: an open read transaction pins the reclamation horizon, so
-  no version it can still reach is freed while it lives.
-  `lpg.MVCCStats.ActiveReaders` and `MVCCStats.OldestReaderAge()` report it, and
-  an abandoned Bolt handle is bounded by the existing idle reaper
-  (`Options.MaxTxIdleTime`) and total transaction timeout
-  (`Options.DefaultTxTimeout`), both of which roll the transaction back and so
-  return the horizon slot. Write transactions are unchanged: they reach the same
-  guarantee by holding the visibility barrier exclusively from `BEGIN` to
-  `COMMIT`.
+- **Bulk delete degraded without bound and used one core** (rmp #2400, #2418). Six
+  seed-and-wipe cycles of the *same* 20 000 nodes against one live engine took 990 ms,
+  1.771 s, 2.349 s, 3.061 s, 3.841 s, 4.622 s, and deleting 90 000 nodes in a single
+  statement took **15.97 s against a 30 s transaction timeout** — reachable as a
+  `TransactionTimedOut` failure, not merely as slowness. `InNeighbours` answered "which
+  nodes hold an edge into n" by walking **every interned node**, once per node deleted,
+  so a delete cost O(k·n) with *n* counting every node ever interned rather than the
+  live ones. The adjacency now maintains a live in-edge index and answers in
+  O(in-degree): **cycle six falls from 4.622 s to 77.2 ms**, the curve is flat instead
+  of linear, `DETACH DELETE` improves **22.2×**, and the 90 000-node statement takes
+  **375.6 ms**. End-to-end relationship creation costs **+1.92 %** for it; the read path
+  is unchanged. The 2026-08-11 concurrency assessment had attributed this to the
+  tombstone bitmap's copy-on-write clone, which a profile prices at **0.99 %**; that
+  document is corrected in place
+  ([`docs/benchmarks/delete-in-edge-index-2026-08-11.md`](docs/benchmarks/delete-in-edge-index-2026-08-11.md)).
+- **A string parameter now seeks the index, exactly as the identical literal does**
+  (rmp #2414) — see *Performance*.
+- **Eleven write paths took the constraint lock twice per property write.**
+- **The parallel-scan gate cloned a bitmap it discards**, and is now screened on a
+  bound rather than an exact count.
+- **The by-handle property probe is skipped behind a monotonic latch**, and a lookup no
+  longer decodes the value of every property record it walks past.
 
-  openCypher TCK unchanged at its full baseline. See
-  [`docs/isolation-design.md`](docs/isolation-design.md).
+#### Reliability of the gates themselves
 
-### Added
+- **`make ci` discarded a failing test's report through its own log filter**
+  (`9a2edbb8`) — the gate could not show what failed.
+- **The soak layer's reliability gates could not fail** (`7782e785`), and a pooled-connection
+  arm was added so the sweep measures the engine rather than connection setup.
+- **Four gates and five documents were stating things that were not true**
+  (`7ad2fca1`).
+- A permanently-red soak assertion in `extern`/`csrfile` was corrected and the
+  `NVertices` contract documented; the write-scaling instrument stopped reporting a
+  false NO-GO under load; and several oracles were made self-diagnosing rather than
+  silent.
 
-- **`bench/mvccwrite` — the write-scaling harness and its regression gates**
-  (rmp #2297). Measures engine write throughput against writer count in two
-  wirings — store-less (the concurrency-control ceiling) and WAL-backed (where
-  group commit can pay) — and gates it in the short test layer so a change that
-  re-serialises the writers turns the local CI gate red. Entry baseline and the
-  full rationale in
-  [`docs/benchmarks/mvcc-write-scaling-2026-08-02.md`](docs/benchmarks/mvcc-write-scaling-2026-08-02.md).
+### Performance
+
+Figures are first-hand, measured in this project. The authoritative end-to-end
+comparison against v0.10.0 is
+[`docs/benchmarks/release-delta-v0.10.0-to-head-2026-08-10.md`](docs/benchmarks/release-delta-v0.10.0-to-head-2026-08-10.md)
+(measured at `7a70eb3f`, i.e. **before** sprints 339–343) and the per-release snapshot is
+[`docs/benchmarks/v0.11.0.md`](docs/benchmarks/v0.11.0.md).
+
+- **Durable write throughput is now monotonic in writer count and scales 415× from 1 to
+  1024 writers**, where v0.10.0 delivered the same throughput at 32 writers as at one.
+  Measured at this tag on the published ladder
+  (`store/txn/write_scaling_bench_test.go`, median of 6): through the store API
+  268.4 → 1 098.5 → 8 321.5 → 32 234 → **111 483 ops/s** (1.00× / 4.09× / 31.00× /
+  120.07× / **415.28×**), and through the Cypher engine 271.0 → **115 300.5 ops/s**
+  (**425.46×**). **The mechanism is proven arithmetically, not asserted:** the scaling
+  factor equals `commits/fsync` at every level — 4.09 vs 4.08, 31.00 vs 31.50, 120.07 vs
+  121.20, 415.28 vs 422.05 — so the gain is group-commit fsync amortisation and nothing
+  else. The single-writer rate of 268 ops/s is this device's single-writer fsync rate and
+  is unchanged from v0.10.0, so **nothing was traded for the scaling**. Over the
+  1 → 32 range the 2026-08-10 delta measured **16.5×**. The store-less path scales 1.98×
+  from 1 to 16 writers where v0.10.0 *degraded* to 0.82×, and
+  `BenchmarkEngWriteAutocommit` fell **−80.22 %** (5.714 → 1.130 µs) with 38 % fewer
+  allocations.
+- **A parameterised index seek did not seek — 50–65× on the shape every Bolt client
+  actually sends.** Both revisions plan `NodeByIndexSeek` and return identical rows,
+  yet v0.10.0 spent 41 ns per node at 5 000 nodes and 44 ns at 20 000: its cost was
+  O(label population). It was a scan wearing a seek's name. Point lookup on an indexed
+  `id`: 204 673 → 3 171 ns (**64.5×**) at 5 000 nodes, 888 475 → 3 325 ns (**267×**) at
+  20 000. **The flagship read suite was structurally blind to this**, because every
+  benchmark in `bench/cypher_ldbc` passes literal keys in the query text, and literals
+  already seeked at v0.10.0. Any future read-path gate must carry a parameterised arm.
+- **The LDBC Interactive Complex workload: geomean 25.70 → 18.44 µs (−28.24 %)** across
+  fifteen queries with byte-identical benchmark source, best on IC5 (−69.28 %), IC8
+  (−68.97 %) and IC12 (−61.40 %), with IC1 and IC11 statistically flat. B/op is
+  **+3.17 %** and allocs/op −9.51 %.
+- **Readers and writers stopped fighting.** In-memory, v0.10.0 sustained ~109 000
+  writes/s with no readers and **1 771** with four — a 62× collapse caused by the read
+  barrier. HEAD goes ~470 000 → 150 509 under the same load, a 3.1× degradation.
+- **Memory per relationship fell 2.74×** by tiering the per-pair edge-instance maps
+  (rmp #2401, #2402): a relationship created through Cypher cost 1 078.87 B, of which
+  87.9 % was two nested per-edge maps. **The key was deliberately not flattened** — a
+  single `map[instanceKey]V` would cost less still, but the nesting is load-bearing for
+  deletes ([`docs/benchmarks/edge-instmap-2026-08-11.md`](docs/benchmarks/edge-instmap-2026-08-11.md)).
+  Node properties are now a **byte stream after Memgraph's `property_store.cpp`**, one
+  self-describing metadata byte per record, a boolean's value riding in the
+  payload-width field and occupying no payload bytes at all
+  ([`docs/benchmarks/propbag-bytestream-2026-08-11.md`](docs/benchmarks/propbag-bytestream-2026-08-11.md));
+  and the columnar edge-property word backings merged, **240 B → 168 B per column**
+  ([`docs/benchmarks/edge-property-column-2026-08-11.md`](docs/benchmarks/edge-property-column-2026-08-11.md)).
+- **Bolt stopped flushing per message: 6.03× less CPU on a 1000-row result**
+  (rmp #2410). `ChunkedWriter.WriteMessage` ended in a `Flush()` and every Bolt
+  `RECORD` is one message, so a K-row result issued **K `write(2)` syscalls** and the
+  `bufio.Writer` in front of the connection could never accumulate anything. A live
+  profile put **70.19 % of all server processor time in `Syscall6`**, and **97 % of
+  GoGraph's per-row cost was delivery rather than computation**. Auto-flush stays on by
+  default so every existing caller is unchanged; only the Bolt server opts out, and it
+  flushes explicitly on every message that is not a `RECORD` — the protocol terminates
+  every run of `RECORD`s with a summary, so the buffer is always drained before the
+  exchange can block. Memgraph had fixed the identical defect.
+- **The apply gate woke a thundering herd: 7 425 → 111 897 commits/s at 1024 writers
+  (+1407 %, 15.1×)** (rmp #2221). `Tx.advanceApply` woke the sequence-ordered apply gate
+  with `sync.Cond.Broadcast`, so every committed transaction woke **every** parked
+  committer; all but the holder of `seq+1` re-checked, failed and parked again — O(N)
+  wakeups per commit and O(N²) across a concurrent batch. A CPU profile put **77 % of
+  all samples in `sync.(*Cond).Wait`**, all of it beneath `waitApplyTurn`. The gate is a
+  strictly sequential chain, so a completing transaction has exactly one possible
+  successor, and it now wakes that one through a per-sequence parking slot — O(1) in the
+  number parked. **Throughput is now monotonic in concurrency**, 264 → 111 897 across
+  1 to 1024 writers, where it previously peaked at 256 and **collapsed 3.9×**. Mean
+  group size 26.8 → 424.0. No change at 1, 8 or 64 writers (p = 0.734 / 0.288 / 0.310).
+  The tell that separated this from a coalescing failure was that the group *shrank* as
+  writers were added: the re-parked herd starved the `Append` path that fills the next
+  batch ([`docs/benchmarks/apply-gate-wake-2026-07-27.md`](docs/benchmarks/apply-gate-wake-2026-07-27.md)).
+- **WAL group commit reaches the engine write path**: **fsyncs per commit fall 300×**
+  from one writer to 1024, monotonically at every step. The single-writer rate is
+  unchanged at ~270 commits/s — an fsync per commit is an fsync per commit.
+- **The aggregation pre-projection no longer materialises an unnamed relationship.**
+- **The commit's allocation rate is the write ceiling, not a lock.** One autocommit
+  `CREATE (n:Account {id: $id})` went from **56 allocations / 4 248 B to 43 / 4 159 B**
+  (−23.21 % at one writer, −24.07 % at 32), with latency improving at every writer
+  count ([`docs/benchmarks/mvcc-commit-allocation-cut-2026-08-08.md`](docs/benchmarks/mvcc-commit-allocation-cut-2026-08-08.md)).
+- **Graph algorithms**: parallel triangle counting −38.16 %, Hopcroft–Karp −16.09 %,
+  Prim MST −8.38 %, direction-optimising BFS −8.29 %, label propagation −6.39 %.
+  Seeding a 20 000-node / 60 000-edge graph through Cypher: 821 → 444 ms (**1.85×**).
+- **Smaller internal cuts on the write and plan paths**, none of them changing observable
+  behaviour, all of them contributing to the aggregate figures above: **one mapper shard
+  acquisition per write instead of two**; `analyseNodeScalarUse` **memoised per cached
+  plan** behind a declared ceiling; the row-context schema walk **derived once per
+  execution**; a dynamic column's backing **pre-sized when the `Put` commits it**; a
+  small floor reserved on commit rather than the whole chunk capacity; the relationship
+  presence answer **interned** instead of allocated per row; **13 of a commit's 56
+  allocations** removed as ladders and escapes; the count shards **padded with a
+  lock-free fast reject**; and the snapshot CSR apply **bracketed in one adjacency commit
+  window** during recovery.
+- **Costs, reported as measured.** Seven independent benchmarks in unrelated packages
+  regressed **7–16 %**, all of them paths that walk a graph and read its properties;
+  `WriteCSV` is the cleanest case, with B/op and allocs/op **byte-identical** while time
+  rose 15.72 %. **Recovery is 1.51× slower** for the same 15 000 replayed ops
+  (5.680 → 8.561 ms) with **+2.9 % bytes per node on disk** — the extra 8 bytes are the
+  commit timestamp. `DIMACS_SF1_SSSP` moves further at the tail than at the mean:
+  **p95 338.9 → 442.6 µs (+30.58 %)**. `store/bulk`'s large load pays +7.52 %
+  allocations. **A deferred UNIQUE release costs 3–10 % of constrained write
+  throughput** (rmp #2425, open, three candidate causes already eliminated).
+- **Steady-state memory was not the price of MVCC.** On the same 20 000-node /
+  60 000-edge graph, heap in use +1.3 %, peak RSS +0.2 %, and **mallocs −10.6 %** —
+  fewer, larger allocations. The settled reading is identical to the post-seed reading,
+  so version chains are reclaimed rather than retained.
+- **The headline guard-band set is unchanged to a few percent, with every allocation
+  count identical to v0.10.0** (0, 4, 0, 1 280, 10): `Dijkstra_PostWarmup` +3.83 %,
+  `Dijkstra_Large` +4.02 %, `BFSDirectionOpt_PowerLaw` +3.23 %, `Yen_K100` +1.51 %,
+  `Brandes_RandomGraph` +1.47 %, and the two post-warmup traversal paths still allocate
+  **zero** bytes per call. The read-path concurrency sweep is **flat at 75–89 ns/op with
+  zero allocations from 8 to 1024 goroutines** — a 128× over-subscription of 10 cores —
+  at the cost of **+14.35 % on the uncontended single-goroutine path** (7.68 → 8.782 ns),
+  which independently reproduces the +9.28 % the 2026-08-10 delta measured on the serial
+  variant.
+
+#### A regression that is a defect, not a trade-off — OPEN
+
+- **The parallel-scan tier outranks the min-cardinality label anchor by 21× in the
+  DEFAULT configuration** (rmp **#2431**, open). On a fixture of 100 000 `:Common` nodes
+  of which 1 000 also carry `:Rare`, `MATCH (n:Common:Rare) RETURN n.k` regressed from
+  **230.3 µs at v0.10.0 to 4.98 ms** — **≈21.6×** — with 131× more allocations, and
+  `BenchmarkMinLabelScanSelective_MinLabel` is now **slower than its own `_FirstLabel`
+  control**, which is the relationship its name asserts. Attributed at this tag by
+  sweeping `cypher.EngineOptions` with **1 000 rows asserted in every arm**: the default
+  takes 4.087 ms on `ParallelScanProject`, `DisableParallelScan` takes **0.194 ms** on
+  `NodeByLabelScan [Rare]`, and disabling the bitmap intersection changes neither the plan
+  nor the time. **The min-cardinality anchor still works — at 0.194 ms it is faster than
+  v0.10.0 — it is simply never chosen**, and the parallel-scan plan is worse than even the
+  legacy full-scan plan (3.308 ms) the anchor was built to replace. This is a gate
+  admitting a plan it should reject, not a trade-off. Full attribution in
+  [`docs/benchmarks/v0.11.0.md`](docs/benchmarks/v0.11.0.md) §5.
+
+### Security
+
+- **A HIGH-severity default is closed** (rmp #2421): both engine-wide memory ceilings
+  resolved to **unlimited** whenever `GOMEMLIMIT` was unset, which is the Go runtime's
+  default state — so the per-unit budgets were finite while the aggregate one was not.
+  The ceilings are now bounded by default and derived from the container's cap where
+  one exists. **Not established: no container was ever run** — the cgroup read paths are
+  unit-tested against injected limits but have never executed on the certification
+  host, which is `darwin/arm64` and has no cgroup filesystem.
+- The cgroup read is annotated for `gosec`, and example 26's pprof helpers satisfy it.
+
+[0.11.0]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.11.0
 
 ## [0.10.0] — 2026-07-25
 
@@ -409,6 +826,8 @@ go get github.com/FlavioCFOliveira/GoGraph@v0.10.0
 ### Removed
 
 - Nothing. This release removes no exported identifier and no behaviour.
+
+[0.10.0]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.10.0
 
 ## [0.9.0] — 2026-07-19
 

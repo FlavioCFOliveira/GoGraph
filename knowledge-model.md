@@ -1094,6 +1094,7 @@ high-water seed).
 | `Spec` | A documentation/specification file under `docs/` (plus root `README.md`/`CHANGELOG.md`). | `name` (basename), `path` (repo-relative), `title` (first `# ` heading) |
 | `Feature` | A curated major capability of the module. | `name`, `description` |
 | `Sprint` | A planning sprint from the `rmp` roadmap. | `id` (int), `name`, `status` (`OPEN`\|`CLOSED`\|`PENDING`), `objective` |
+| `Release` | A tagged — or prepared but not yet tagged — release of the module. Present in the live graph since before this table existed; documented 2026-08-13 (sprint 344). | `name` (`vX.Y.Z`, the identity), `date`, `headlineFeature`, `published` (bool — **false while the tag has not been pushed**), `latest` (bool), `releaseCommit` (full hash) / `releaseCommitShort`, `cveCleared` (false, or the advisory id), `forwardFixes` (optional). Added 2026-08-13: `commitCount` (int), `breakingChanges` (int), `tckScenarios` (int), `knownOpenDefect`, `certification` — so a release's honest posture is queryable without reading its notes |
 | `Commit` | A git commit that delivered one or more tasks, or that integrated a sprint into an integration branch. | `hash` (short — **8-char** in the live graph; this table said 7 until 2026-07-29 and the drift silently made 7-char lookups miss), `fullHash` (full 40-char), `message`, `sprintId` (int), `kind` (`merge` only — set on a sprint-integration merge commit; absent on an ordinary delivery commit), `branch` (the branch the merge landed on, e.g. `main`; set with `kind`) |
 | `Agent` | A specialist sub-agent mandated by `CLAUDE.md`. | `name`, `kind` (`subagent`), `description`, `source` |
 | `Skill` | A project-relevant Claude Code skill. | `name`, `kind` (`skill`), `description`, `path` |
@@ -1141,6 +1142,8 @@ All edges carry `gitCommit` and `gitDate`.
 | `IMPLEMENTS` | `(Method\|Function)-[:IMPLEMENTS]->(Feature)` | A specific symbol realises a curated feature, at finer grain than the package-level edge above. Added 2026-07-29 (sprint 314, task #2153) so a feature whose whole implementation is a handful of symbols inside a large package can be located directly. Note a perf commit uses `IMPROVES`, not this edge. |
 | `SPECIFIED_IN` | `(Feature)-[:SPECIFIED_IN]->(Spec)` | A feature is documented in a specification file. |
 | `CONTAINS` | `(Sprint)-[:CONTAINS]->(Commit)` | A sprint contains a commit that delivered work within it. |
+| `INCLUDES` | `(Release)-[:INCLUDES]->(Commit)` | A tagged (or prepared) release includes this commit. Present in the live graph since before this table existed; documented 2026-08-13 (sprint 344). |
+| `HAS_KNOWN_DEFECT` | `(Release)-[:HAS_KNOWN_DEFECT]->(Defect)` | A defect that is **open and known at the moment the release ships**, so the release's honest limitations are queryable rather than only narrated in its notes. Introduced 2026-08-13 (sprint 344, `v0.11.0` → rmp #2431). |
 | `FIXES` | `(Commit)-[:FIXES]->(Feature)` | A commit fixes a bug in (or hardens) a feature area. |
 | `IMPROVES` | `(Commit)-[:IMPROVES]->(Feature)` | A commit improves (perf/observability/tests) a feature area without fixing a defect. |
 | `TOUCHES` | `(Commit)-[:TOUCHES]->(Package\|Type\|Function\|Spec)` | A commit's diff touched this element; drives provenance re-stamping. |

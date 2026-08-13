@@ -571,11 +571,20 @@ Store-less scaling at sixteen writers: **0.83× (sprint entry) → 0.750× → 1
 
 Retiring `writeMu` did not end the unbounded stall an open explicit transaction imposes
 on other writers — it MOVED it onto the barrier's shared acquisition, which was equally
-context-blind. `lpg.Graph.ApplyVersionedCtx` bounds it through `internal/ctxlock`, the
-same mechanism rmp #2174 gave the exclusive side. The bound is owed even after
-rmp #2305 removes the transaction-lifetime hold, because a DDL statement legitimately
-excludes writers for as long as it runs and a caller with a deadline is entitled to
-hear about it.
+context-blind. `lpg.Graph.ApplyVersionedCtx` bounds it, originally through
+`internal/ctxlock` — the same mechanism rmp #2174 gave the exclusive side. The bound is
+owed even after rmp #2305 removes the transaction-lifetime hold, because a DDL statement
+legitimately excludes writers for as long as it runs and a caller with a deadline is
+entitled to hear about it.
+
+> **Current mechanism (`v0.11.0`).** `internal/ctxlock` was **retired** once the DDL
+> barriers moved off `sync.RWMutex` onto `mvcc.Gate`, which carries its own
+> context-aware acquire. `ApplyVersionedCtx` now bounds the wait through
+> `visGate.WeakLockCtxAuto(ctx)` (`graph/lpg/lpg.go`, `applyVersionedInstant`). The
+> guarantee described here is unchanged — only the primitive that provides it. A weak
+> (shared) acquire costs 0.434 ns at high concurrency where the `sync.RWMutex` it
+> replaced degrades to 89.5 ns; see
+> [`benchmarks/mvcc-weak-strong-gate-2026-08-07.md`](benchmarks/mvcc-weak-strong-gate-2026-08-07.md).
 
 Making the acquisition fallible exposed a latent bug: `execUnderBarrier` discarded the
 bracket's own error with `_ =`, which was safe only while the bracket could not fail
