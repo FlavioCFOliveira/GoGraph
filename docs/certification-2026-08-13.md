@@ -378,6 +378,16 @@ becomes misleading.
    were not addressed today.
 8. **Single host, single architecture.** Apple M4, 10 cores, `darwin/arm64`. No Linux,
    no NUMA, no multi-socket, no container.
+9. **rmp #2366's write-contention criterion is NOT yet discharged.** It asks for
+   `BenchmarkWriteScaling/mem` at 1/4/16/32 writers, interleaved with `n >= 10`, for a
+   schema declaring UNIQUE **and** one declaring nothing. §4.1 measured the read path,
+   the horizon and the seek — not that. The change's direction on the write path is
+   favourable by construction (a deferred release takes **no** registry lock where the
+   eager one took the global write lock, and the commit takes it once per transaction
+   instead of once per release), and this registry's lock is on record as 57 % of all
+   lock delay at sixteen writers. But "favourable by construction" is exactly the kind
+   of claim this project requires to be measured, so it is listed here as owed rather
+   than asserted.
 
 ---
 
