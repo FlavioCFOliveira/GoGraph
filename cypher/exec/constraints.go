@@ -151,51 +151,130 @@ type ckeyval struct {
 // Not safe for concurrent use: it belongs to one transaction, which is driven by
 // one goroutine at a time, exactly like the undo log it travels beside.
 type ConstraintTxn struct {
-	released map[ckeyval]struct{}
+	// inline holds the first few releases without allocating, and n is how many of
+	// its slots are in use. spill takes the rest, and is nil for every transaction
+	// that stays within the inline capacity.
+	//
+	// # Why an inline array and not a map
+	//
+	// The first version held a map, and `make(map[ckeyval]struct{}, 2)` on the first
+	// release of every transaction is one allocation per commit. That was the leading
+	// SUSPECT for a measured write-throughput regression on the constrained path, and
+	// replacing it with this array did NOT move the number — so the map was not the
+	// cause, and this comment says so rather than claiming a diagnosis the measurement
+	// refuted.
+	//
+	// It is kept because it is better regardless: it allocates NOTHING for the shape
+	// every statement has. A statement releases one or two constrained values — a SET
+	// replaces one value on one node, and a node carries one or two constrained labels —
+	// so four slots cover it, and a linear scan over four entries beats a map lookup
+	// outright. It is the same trade [undoLog.inline] and NodeByIndexSeek's id buffer
+	// already make.
+	inline [4]ckeyval
+	n      int
+	spill  map[ckeyval]struct{}
 }
 
 // markReleased records that this transaction has released val under key.
+//
+// Idempotent: a repeated release of the same value records one mark, so a statement
+// that releases the same value twice does not consume two slots.
 func (t *ConstraintTxn) markReleased(key ckey, val string) {
 	if t == nil {
 		return
 	}
-	if t.released == nil {
-		t.released = make(map[ckeyval]struct{}, 2)
+	kv := ckeyval{key: key, val: val}
+	for i := 0; i < t.n; i++ {
+		if t.inline[i] == kv {
+			return
+		}
 	}
-	t.released[ckeyval{key: key, val: val}] = struct{}{}
+	if t.n < len(t.inline) {
+		t.inline[t.n] = kv
+		t.n++
+		return
+	}
+	if t.spill == nil {
+		t.spill = make(map[ckeyval]struct{}, 4)
+	}
+	t.spill[kv] = struct{}{}
 }
 
 // unmarkReleased withdraws a release this transaction recorded. It is the inverse a
 // rolled-back STATEMENT replays: it touches only this transaction's own mark, never
 // the shared value-set, which is the whole point (see the type comment).
+//
+// The inline slot is closed over by moving the last entry into it, which is safe
+// because the order of the marks carries no meaning — they are a set.
 func (t *ConstraintTxn) unmarkReleased(key ckey, val string) {
-	if t == nil || t.released == nil {
+	if t == nil {
 		return
 	}
-	delete(t.released, ckeyval{key: key, val: val})
+	kv := ckeyval{key: key, val: val}
+	for i := 0; i < t.n; i++ {
+		if t.inline[i] == kv {
+			t.inline[i] = t.inline[t.n-1]
+			t.inline[t.n-1] = ckeyval{}
+			t.n--
+			return
+		}
+	}
+	if t.spill != nil {
+		delete(t.spill, kv)
+	}
 }
 
 // releasedHere reports whether this transaction has released val under key, so its
 // own subsequent write of that value is not refused by a reservation it has itself
 // given up.
 func (t *ConstraintTxn) releasedHere(key ckey, val string) bool {
-	if t == nil || t.released == nil {
+	if t == nil {
 		return false
 	}
-	_, ok := t.released[ckeyval{key: key, val: val}]
+	kv := ckeyval{key: key, val: val}
+	for i := 0; i < t.n; i++ {
+		if t.inline[i] == kv {
+			return true
+		}
+	}
+	if t.spill == nil {
+		return false
+	}
+	_, ok := t.spill[kv]
 	return ok
 }
+
+// forEachReleased calls fn for every value this transaction has released.
+func (t *ConstraintTxn) forEachReleased(fn func(ckeyval)) {
+	if t == nil {
+		return
+	}
+	for i := 0; i < t.n; i++ {
+		fn(t.inline[i])
+	}
+	for kv := range t.spill {
+		fn(kv)
+	}
+}
+
+// empty reports whether this transaction has released nothing.
+func (t *ConstraintTxn) empty() bool { return t == nil || (t.n == 0 && len(t.spill) == 0) }
 
 // Reset drops every mark, which is what a ROLLBACK does. Nothing shared was
 // touched, so there is nothing to undo.
 //
-// It keeps the map for reuse: the adapters hold a ConstraintTxn inline and are
-// pooled per statement.
+// The inline slots are zeroed rather than merely counted out, so a released value's
+// string does not stay reachable through a recycled adapter; the spill map is kept for
+// reuse, exactly as the undo log keeps its slice.
 func (t *ConstraintTxn) Reset() {
 	if t == nil {
 		return
 	}
-	clear(t.released)
+	for i := 0; i < t.n; i++ {
+		t.inline[i] = ckeyval{}
+	}
+	t.n = 0
+	clear(t.spill)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1038,15 +1117,15 @@ func (r *ConstraintRegistry) ReleasePropertyValue(ct *ConstraintTxn, labels []st
 func (r *ConstraintRegistry) CommitTxn(ct *ConstraintTxn) {
 	// A nil registry is a query with no enforcement, and an empty contribution is the
 	// common case: both are no-ops, so every caller can call this unconditionally.
-	if r == nil || ct == nil || len(ct.released) == 0 {
+	if r == nil || ct.empty() {
 		return
 	}
 	r.mu.Lock()
-	for kv := range ct.released {
+	ct.forEachReleased(func(kv ckeyval) {
 		if vs := r.valueSets[kv.key]; vs != nil {
 			delete(vs, kv.val)
 		}
-	}
+	})
 	r.mu.Unlock()
 	ct.Reset()
 }
