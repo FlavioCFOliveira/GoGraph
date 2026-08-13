@@ -425,6 +425,21 @@ free less and so reach the idle exit sooner, raising the frequency without being
 cause; that was not measured, and the failure mode is the one the existing debt guard's
 own comment already describes.
 
+**The first fix was too aggressive, and four test fixtures said so.** It woke the vacuum
+on ANY sub-threshold charge, which starts a sweeper for a single write on an idle graph.
+Four white-box tests then failed in succession — two reclaim tests, the adjacency-stamp
+bound test, and a label-delta accounting test — every one of them because it counts live
+versions and had been deterministic only while no sweeper existed to race it. Patching
+them one at a time would have been treating the messenger: a debt below the threshold
+cannot breach the bound, because the bound IS that threshold, so the condition was
+simply wrong. It is now the mandate's own statement — retention above the bound with no
+sweeper alive — and it perturbs none of them.
+
+Two of those fixtures keep an explicit hold anyway, because they compare SEPARATE
+samples of a live count and that agreement should not depend on the wake policy. Their
+comments say which of the two reasons applies, so a later reader is not told the hold is
+required when it is defensive.
+
 **Two white-box tests were passing only because no sweeper was alive.** They count
 deltas and drive `ReclaimVersions` from a PRIVATE `mvcc.Horizon` the graph knows nothing
 about, so a background pass is entitled to free the same records. Their shared fixture
@@ -543,3 +558,4 @@ go test -count=1 -run '^TestIndexSeek_LabelGuard' ./cypher/
 | `fca34a0c` | fix(cypher): defer UNIQUE releases to commit, and qualify every index seek by its label (#2366, #2423) |
 | `3b7bec2f` | fix(cypher): a reserve that spends its own pending release must RESTORE it on rollback (#2366) |
 | `f3e8f48f` | fix(lpg): a reclamation debt below the wake threshold must still find a sweeper (#2424) |
+| `5909b3ad` | fix(lpg): wake the vacuum when RETENTION exceeds the bound, not on any debt (#2424) |
