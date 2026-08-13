@@ -446,7 +446,8 @@ bench/comparison          — head-to-head harnesses: three-way vs Neo4j and Mem
                             (throughput, CPU via cgroup counters, memory, concurrency), plus
                             NetworkX and SuiteSparse:GraphBLAS/LAGraph baselines
 
-internal/metrics          — observability API hook (Backend, IncCounter, ObserveLatency, Time)
+internal/metrics          — observability implementation behind the public metrics/ facade;
+                            external consumers import metrics/, not this
 internal/stress           — concurrency stress test suite (CI under -race)
 internal/shapegen         — graph shape generators (trivial, classic, random models, adversarial)
 internal/invariants       — graph invariant checkers (connected, DAG, bipartite, distance bound)
@@ -484,9 +485,14 @@ for _, n := range e.Match().Vertex(
 ## Security
 
 Vulnerability reports follow the process documented in
-[SECURITY.md](SECURITY.md). Use GitHub Security Advisories or the
-private email listed there — please do not open a public issue for a
-suspected vulnerability.
+[SECURITY.md](SECURITY.md). **Report privately through GitHub Security
+Advisories** —
+<https://github.com/FlavioCFOliveira/GoGraph/security/advisories/new>. Please do
+not open a public issue for a suspected vulnerability; if you cannot use
+Security Advisories, open an issue containing **no vulnerability details**, only
+a request for a maintainer to open a private advisory. SECURITY.md states the
+response targets (48 h acknowledgement, 5 business days to triage, 30 days to a
+fix under embargo, 90-day coordinated disclosure) and the scope.
 
 ## License
 
