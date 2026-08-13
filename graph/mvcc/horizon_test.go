@@ -156,3 +156,133 @@ func TestHorizon_NeverNewerThanAnyActiveReader(t *testing.T) {
 			"Leave are not balanced", h.Active(), h.Unregistered())
 	}
 }
+
+// TestHorizon_StaleLeaveIsDetected pins [Horizon.StaleLeaves] on BOTH controls:
+// a balanced Enter/Leave must report zero, and a slot released twice must report
+// the breach.
+//
+// The counter exists because the damage of a double release is not to itself — it
+// is that the SECOND clear lands on whichever reader has since claimed that slot,
+// removing it from the watermark silently. Proving the detector on a sound arm as
+// well as a broken one is what stops it being a counter that can only ever read
+// zero (rmp #2420).
+func TestHorizon_StaleLeaveIsDetected(t *testing.T) {
+	t.Parallel()
+
+	t.Run("balanced enter and leave report nothing", func(t *testing.T) {
+		var h Horizon
+		for i := 0; i < 64; i++ {
+			slot := h.Enter(uint64(i + 1))
+			h.Leave(slot)
+		}
+		if n := h.StaleLeaves(); n != 0 {
+			t.Fatalf("StaleLeaves = %d after balanced use, want 0", n)
+		}
+	})
+
+	t.Run("a slot released twice is reported", func(t *testing.T) {
+		var h Horizon
+		slot := h.Enter(7)
+		h.Leave(slot)
+		if n := h.StaleLeaves(); n != 0 {
+			t.Fatalf("StaleLeaves = %d after the FIRST release, want 0", n)
+		}
+		h.Leave(slot)
+		if n := h.StaleLeaves(); n != 1 {
+			t.Fatalf("StaleLeaves = %d after a double release, want 1", n)
+		}
+	})
+
+	t.Run("a slot number nobody claimed is reported", func(t *testing.T) {
+		var h Horizon
+		h.Leave(300)
+		if n := h.StaleLeaves(); n != 1 {
+			t.Fatalf("StaleLeaves = %d after releasing an unclaimed slot, want 1", n)
+		}
+	})
+}
+
+// TestHorizon_SlotStateReportsTheOccupantsInstant pins [Horizon.SlotState], which
+// is how a reader verifies it is still represented in the watermark for as long as
+// it is reading.
+//
+// The three states it must distinguish are exactly the three the watermark scan
+// distinguishes: published (the instant, occupied), claimed-but-not-published
+// (zero, occupied — hold everything), and released (not occupied).
+func TestHorizon_SlotStateReportsTheOccupantsInstant(t *testing.T) {
+	t.Parallel()
+
+	var h Horizon
+	slot := h.EnterHolding()
+	if ts, occ := h.SlotState(slot); ts != 0 || !occ {
+		t.Fatalf("claimed-but-unpublished slot reads (%d, %v), want (0, true)", ts, occ)
+	}
+	h.Publish(slot, 4242)
+	if ts, occ := h.SlotState(slot); ts != 4242 || !occ {
+		t.Fatalf("published slot reads (%d, %v), want (4242, true)", ts, occ)
+	}
+	h.Leave(slot)
+	if _, occ := h.SlotState(slot); occ {
+		t.Fatal("a released slot still reads as occupied")
+	}
+	if ts, occ := h.SlotState(-1); ts != 0 || occ {
+		t.Fatalf("an unregistered slot reads (%d, %v), want (0, false)", ts, occ)
+	}
+}
+
+// TestHorizon_OldestNeverExceedsItsFallback pins the ceiling property that
+// protects a reader which arrives WHILE a scan is in progress (rmp #2420).
+//
+// The scan reads each occupancy word once, so a reader that claims a slot in a word
+// already passed is invisible to it — claiming the bit before reading the clock
+// cannot help, because nothing looks at that bit again. What covers such a reader is
+// that the caller sampled the fallback BEFORE the scan: every reader appearing
+// afterwards begins at or after the frontier of that moment, so a watermark capped
+// at the fallback is below every one of their start instants.
+//
+// This test therefore asserts the cap directly. It FAILS against the previous
+// implementation, which discarded the fallback as soon as any reader was found and
+// returned 105 here — a watermark above the fallback, and above the start instant of
+// any reader born in between.
+func TestHorizon_OldestNeverExceedsItsFallback(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a reader newer than the fallback does not raise the watermark", func(t *testing.T) {
+		var h Horizon
+		// A reader born AFTER the caller sampled its fallback: its start instant is
+		// above the fallback, which is exactly the case the old code mishandled.
+		slot := h.Enter(105)
+		if got := h.Oldest(100); got != 100 {
+			t.Fatalf("Oldest(100) with one reader at 105 = %d, want 100: a watermark above "+
+				"the fallback frees versions that a reader born during the scan still needs", got)
+		}
+		h.Leave(slot)
+	})
+
+	t.Run("a reader older than the fallback still lowers the watermark", func(t *testing.T) {
+		var h Horizon
+		slot := h.Enter(10)
+		if got := h.Oldest(100); got != 10 {
+			t.Fatalf("Oldest(100) with one reader at 10 = %d, want 10: the cap must not stop "+
+				"an older reader holding the watermark back", got)
+		}
+		h.Leave(slot)
+	})
+
+	t.Run("the oldest of several readers wins, still capped", func(t *testing.T) {
+		var h Horizon
+		a, b, c := h.Enter(40), h.Enter(70), h.Enter(900)
+		if got := h.Oldest(100); got != 40 {
+			t.Fatalf("Oldest(100) with readers at 40/70/900 = %d, want 40", got)
+		}
+		h.Leave(a)
+		if got := h.Oldest(100); got != 70 {
+			t.Fatalf("after the oldest left: Oldest(100) = %d, want 70", got)
+		}
+		h.Leave(b)
+		if got := h.Oldest(100); got != 100 {
+			t.Fatalf("with only a reader at 900 left: Oldest(100) = %d, want the fallback 100", got)
+		}
+		h.Leave(c)
+	})
+}

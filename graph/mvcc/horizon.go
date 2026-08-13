@@ -163,6 +163,21 @@ type Horizon struct {
 	// non-zero the watermark is zero and nothing is reclaimed.
 	unreg atomic.Int64
 	_     [cacheLine - 8]byte
+	// staleLeave counts releases of a slot whose occupancy bit was ALREADY CLEAR.
+	//
+	// It is the detector for the one corruption this structure cannot survive, and
+	// it costs a branch on a value [Horizon.Leave] already has in hand. A release
+	// that clears a bit nobody held means either a slot was returned twice or a
+	// slot number was invented — and the damage is not to the counter, it is that
+	// SOME OTHER READER'S bit is the one that gets cleared next time round: that
+	// reader becomes invisible to [Horizon.Oldest], the watermark advances past its
+	// start instant, and versions it can still reach are freed underneath it. The
+	// symptom is a snapshot silently reading a value from after its own instant,
+	// which is an Isolation violation with nothing anywhere reporting it.
+	//
+	// Zero is the only correct value. See [Horizon.StaleLeaves].
+	staleLeave atomic.Int64
+	_          [cacheLine - 8]byte
 }
 
 // claim reserves a slot exclusively and returns it, or [unregistered] when every
@@ -172,8 +187,9 @@ type Horizon struct {
 // in the only direction that matters. The reverse — stamp the slot, then advertise it
 // — would let [Horizon.Oldest] run between the two and compute a watermark that does
 // not account for this reader at all, freeing versions it is about to need. Claiming
-// first can only make the scan see a reader whose timestamp is not yet its own, and
-// the caller's contract below makes that residue conservative rather than unsound.
+// first can only make the scan see a slot whose timestamp is not yet stored, which
+// reads as zero — [Horizon.Leave] invalidated it — and [Horizon.Oldest] answers zero
+// by holding everything back.
 func (h *Horizon) claim() int {
 	// Rotate over WORDS rather than over slots: the word's cache line is the unit
 	// two registering readers can contend on, so spreading across words is what
@@ -222,20 +238,19 @@ const unregistered = -1
 // reader is UNREGISTERED, and the watermark collapses to zero until it leaves,
 // so nothing is reclaimed. That is the sound direction: reclamation stops, and
 // correctness does not. It is also observable, via [Horizon.Unregistered].
-// # The residue left in a released slot, and why it is safe
 //
-// [Horizon.Leave] clears the occupancy bit and leaves the timestamp behind, so a slot
-// being re-claimed holds its PREVIOUS occupant's start timestamp until this method
-// overwrites it. A scan landing in that window therefore reads an older timestamp
-// than the arriving reader's, and holds back MORE than the arriving reader needs —
-// never less. That relies on the clock being monotonic, which [Clock] guarantees and
-// which recovery preserves by deriving and ratcheting rather than trusting a
-// persisted counter.
+// # A slot between its claim and its stamp carries NO timestamp
 //
-// The alternative — clearing the timestamp in Leave — would make a released slot read
-// as "claimed but not yet stamped", suspending reclamation for a window on every
-// release rather than on the first use of each slot. Leaving the residue is the
-// cheaper of the two safe orders.
+// [Horizon.Leave] invalidates the timestamp before it clears the occupancy bit, so a
+// slot being re-claimed reads as zero — "claimed, instant not yet known" — until this
+// method stores its new occupant's instant. [Horizon.Oldest] answers zero by holding
+// everything back, so the window is conservative.
+//
+// It used to hold the PREVIOUS occupant's instant instead, which is also conservative
+// — an older instant holds back more, given the clock is monotonic — but which makes
+// the watermark UNDER-REPORT rather than suspend, and an under-reporting watermark
+// cannot be told apart from one that has passed a live reader. See [Horizon.Leave] for
+// the measurement that decided it and for what the invariant buys.
 func (h *Horizon) Enter(startTS uint64) int {
 	slot := h.claim()
 	if slot == unregistered {
@@ -293,15 +308,94 @@ func (h *Horizon) Publish(slot int, startTS uint64) {
 // Because a slot is exclusive, clearing it cannot release the watermark on
 // another reader's behalf.
 //
-// It clears the OCCUPANCY BIT and deliberately leaves the timestamp behind; see the
-// residue argument on [Horizon.Enter] for why that is both safe and the cheaper of
-// the two safe orders.
+// It INVALIDATES THE TIMESTAMP and then clears the OCCUPANCY BIT, in that order.
+//
+// It also DETECTS the release of a slot that was not held: the atomic And returns
+// the word as it stood, so testing the bit costs nothing beyond a branch. See
+// [Horizon.StaleLeaves] for why that particular corruption is the one worth a
+// permanent guard.
+//
+// # Why the timestamp is invalidated rather than left behind
+//
+// This method used to leave the timestamp behind, so a slot between its claim and
+// its [Horizon.Publish] read as its PREVIOUS occupant's instant. That is safe —
+// an older instant holds back more than the arriving reader needs — but it makes
+// the watermark UNDER-REPORT for that window, and an under-reporting watermark is
+// indistinguishable from the one corruption that matters. Measured: with the
+// residue in place the watermark was seen to move BACKWARDS 1 734 to 4 165 times
+// per 30-second run of TestIsolation_ApplyAtomically_View_NoPartialReads, all of
+// it benign, which left no way to assert the invariant that a live reader is never
+// passed (rmp #2420).
+//
+// Zeroing it instead makes an occupied slot's timestamp exactly one of two things:
+// zero, meaning "claimed, instant not yet known", which [Horizon.Oldest] answers
+// by holding EVERYTHING back; or this occupant's own published instant. Never a
+// third reader's stale one. The watermark is then monotone, and
+// [Horizon.StaleLeaves] and its lpg counterpart become assertable rather than
+// merely informative.
+//
+// The order is load-bearing: the timestamp is invalidated BEFORE the occupancy bit
+// is cleared, because until the bit is cleared this slot is still ours. Zeroing
+// after would race a re-claimer's Publish and clobber a LIVE reader's instant,
+// which is the unsafe direction.
+//
+// The cost is one store to a cache line this goroutine already owns — it published
+// its own instant into that same line when it entered — against the previous
+// version's zero stores. What it buys back is that a pass landing in the claim
+// window reclaims nothing instead of reclaiming conservatively, which is a window
+// one store wide.
 func (h *Horizon) Leave(slot int) {
 	if slot == unregistered {
 		h.unreg.Add(-1)
 		return
 	}
-	h.occ[slot>>6].bits.And(^(uint64(1) << uint(slot&63)))
+	h.slots[slot].ts.Store(0)
+	mask := uint64(1) << uint(slot&63)
+	if old := h.occ[slot>>6].bits.And(^mask); old&mask == 0 {
+		h.staleLeave.Add(1)
+	}
+}
+
+// StaleLeaves reports how many times a slot was released whose occupancy bit was
+// already clear.
+//
+// It must be ZERO. A non-zero value means a horizon slot was returned twice, or a
+// slot number was released by something that never claimed it, and the consequence
+// is an Isolation violation rather than a leak: the next release lands on ANOTHER
+// reader's bit, that reader stops being counted by [Horizon.Oldest], and the
+// reclamation watermark advances past an instant it can still reach.
+//
+// Exported so the invariant is observable from outside the package — a test or an
+// operator can assert it directly instead of inferring it from a torn read.
+//
+// Safe for concurrent use.
+func (h *Horizon) StaleLeaves() int64 { return h.staleLeave.Load() }
+
+// SlotState reports the start instant a slot currently announces and whether it is
+// still occupied, for a caller that must verify a reader is still represented in
+// the watermark.
+//
+// The instant is decoded: it is what [Horizon.Oldest] would contribute for this
+// slot, so a reader can compare it against its OWN start timestamp. A slot claimed
+// but not yet published reads as (0, true), which is the hold-everything state.
+// An unregistered slot reads as (0, false).
+//
+// Two atomic loads, no locks and no writes. It exists because the invariant "my
+// slot still holds MY instant for as long as I am reading" is the one the whole
+// reclamation design rests on, and until this accessor existed it could only be
+// checked from inside this package.
+//
+// Safe for concurrent use.
+func (h *Horizon) SlotState(slot int) (startTS uint64, occupied bool) {
+	if slot == unregistered || slot < 0 || slot >= horizonSlots {
+		return 0, false
+	}
+	occupied = h.occ[slot>>6].bits.Load()&(uint64(1)<<uint(slot&63)) != 0
+	v := h.slots[slot].ts.Load()
+	if v == 0 {
+		return 0, occupied
+	}
+	return v - 1, occupied
 }
 
 // Oldest returns the reclamation watermark: the oldest start timestamp any
@@ -333,15 +427,46 @@ func (h *Horizon) Leave(slot int) {
 // reading zero, which is not a timestamp. The only sound response is to hold
 // everything back, exactly as [Horizon.EnterHolding] does for the same reason: the
 // arriving reader's start timestamp is not yet known, and assuming anything about it
-// would be assuming in the unsafe direction. The window is one store wide and, after
-// the first use of each slot, the residue described on [Horizon.Enter] fills it with
-// a conservative value instead.
+// would be assuming in the unsafe direction. The window is one store wide, and since
+// [Horizon.Leave] invalidates the timestamp it is the ONLY state in which an occupied
+// slot reads zero — so this branch is what makes the returned watermark either exact
+// or "reclaim nothing", never a stale value from a previous occupant. That is the
+// property [MVCCStats.WatermarkRegressions] rests on.
 func (h *Horizon) Oldest(fallback uint64) uint64 {
 	if h.unreg.Load() != 0 {
 		return 0
 	}
+	// THE FALLBACK IS A CEILING, NOT A DEFAULT, and that is a correctness fix
+	// (rmp #2420).
+	//
+	// This loop used to carry a `found` flag and take the first occupied slot's
+	// timestamp UNCONDITIONALLY — `if !found || ts < oldest` — so the fallback was
+	// discarded the moment any reader was seen, and the result could come out ABOVE
+	// it. That is unsound, and it is the one hole in this structure's protection of
+	// a reader that arrives while a scan is in progress:
+	//
+	//	reclaimer   samples fallback = 100 (the published frontier)
+	//	reader X    claims a slot in a word the scan has ALREADY PASSED, then
+	//	            publishes startTS = 104 — invisible to this scan
+	//	reader Y    is seen, at startTS = 105
+	//	reclaimer   returns 105, having thrown 100 away
+	//	sweep       frees every version stamped <= 105, including the one stamped
+	//	            105 that X must undo to resolve back to 104
+	//	reader X    reads the value committed at 105 through a snapshot pinned at
+	//	            104 — over-visible by exactly one transaction
+	//
+	// Claiming the bit before reading the clock ([Horizon.EnterHolding]) protects a
+	// reader the scan SEES — it reads zero and the scan suspends. It cannot protect
+	// one the scan never looks at, because the word was read before the bit was set.
+	// The fallback is what covers that case, and only because the caller sampled it
+	// BEFORE this scan: every reader that appears afterwards begins at or after the
+	// frontier of that moment, so a watermark capped at the fallback is below every
+	// such reader's start instant by construction.
+	//
+	// Capping is also cheap and self-correcting: a pass whose readers are all newer
+	// than its fallback simply frees less, and the next pass samples a newer
+	// fallback. Nothing is retained for longer than one pass.
 	oldest := fallback
-	found := false
 	for w := 0; w < horizonWords; w++ {
 		m := h.occ[w].bits.Load()
 		for m != 0 {
@@ -351,9 +476,8 @@ func (h *Horizon) Oldest(fallback uint64) uint64 {
 			if v == 0 {
 				return 0
 			}
-			ts := v - 1
-			if !found || ts < oldest {
-				oldest, found = ts, true
+			if ts := v - 1; ts < oldest {
+				oldest = ts
 			}
 		}
 	}

@@ -113,6 +113,14 @@ type MVCCStats struct {
 	// Watermark is the oldest start timestamp among active readers, or zero when
 	// reclamation is suspended.
 	Watermark uint64
+	// WatermarkRegressions counts times the reclamation watermark moved BACKWARDS,
+	// and MUST be zero. A non-zero value means a live reader stopped being
+	// represented in the watermark, so versions it can still reach became
+	// reclaimable — an Isolation violation rather than a leak. See
+	// [vacuumState.wmRegress] for why a decrease is impossible while the substrate
+	// is sound, and [mvcc.Horizon.StaleLeaves] for the release-side detector of the
+	// same family.
+	WatermarkRegressions int64
 	// Now is the clock's current published instant, so Now-Watermark is how far
 	// behind the oldest reader is.
 	Now uint64
@@ -252,6 +260,10 @@ func (g *Graph[N, W]) MVCCStats() MVCCStats {
 		ChainDepth:            g.ChainDepths(),
 		InFlightCommits:       g.mvccClock.InFlightCommits(),
 		SessionsWaiting:       g.mvccClock.AwaitingVisible(),
+		// The two detectors of the same family: the watermark moving backwards, and
+		// a horizon slot released that nobody held. Both must be zero; see
+		// [MVCCStats.WatermarkRegressions].
+		WatermarkRegressions: g.vac.wmRegress.Load() + g.horizon.StaleLeaves(),
 	}
 	s.Watermark = g.horizon.Oldest(s.Now)
 	s.Total = s.LabelDeltas + s.PropDeltas + s.AdjVersions +
@@ -278,6 +290,10 @@ func (g *Graph[N, W]) publishMVCCMetrics() {
 	metrics.SetGauge("lpg.mvcc.versions.bound", float64(s.Bound))
 	metrics.SetGauge("lpg.mvcc.versions.ceiling", float64(s.Ceiling))
 	metrics.SetGauge("lpg.mvcc.watermark", float64(s.Watermark))
+	// A gauge as well as the counter incremented at the breach, so an operator
+	// scraping only gauges still sees a substrate that has lost its watermark
+	// invariant. Zero is the only correct value.
+	metrics.SetGauge("lpg.mvcc.watermark_regressions", float64(s.WatermarkRegressions))
 	// ONE series for the watermark age, which is also the oldest snapshot's age;
 	// see [MVCCStats.OldestSnapshotAge] for why it is not published twice.
 	metrics.SetGauge("lpg.mvcc.oldest_snapshot_age", float64(s.OldestSnapshotAge()))

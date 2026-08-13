@@ -491,3 +491,48 @@ func TestDeferredIndexRemoval_ConcurrentReaddIsNotLost(t *testing.T) {
 		}
 	}
 }
+
+// TestVacuum_WatermarkRegressionIsDetected pins [Graph.publishWatermark] on both
+// controls: a monotone sequence of watermarks must report nothing, and a decrease
+// must be recorded with the pair that produced it.
+//
+// The invariant it guards is the one reclamation rests on — see
+// [vacuumState.wmRegress] for why a decrease cannot happen while the substrate is
+// sound, and why it is an Isolation violation rather than a leak when it does.
+// Without this test the counter is one that can only ever read zero, which is
+// indistinguishable from a sound system (rmp #2420).
+func TestVacuum_WatermarkRegressionIsDetected(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a monotone sequence reports nothing", func(t *testing.T) {
+		g := New[string, int64](adjlist.Config{Directed: true})
+		for _, wm := range []uint64{1, 1, 5, 5, 900, 901} {
+			g.publishWatermark(g.vac.lastWatermark.Load(), wm)
+		}
+		if n := g.vac.wmRegress.Load(); n != 0 {
+			t.Fatalf("wmRegress = %d after a monotone sequence, want 0", n)
+		}
+		if got := g.MVCCStats().WatermarkRegressions; got != 0 {
+			t.Fatalf("MVCCStats().WatermarkRegressions = %d, want 0", got)
+		}
+	})
+
+	t.Run("a decrease is reported with its pair", func(t *testing.T) {
+		g := New[string, int64](adjlist.Config{Directed: true})
+		if advanced := g.publishWatermark(g.vac.lastWatermark.Load(), 100); !advanced {
+			t.Fatal("publishWatermark(100) on a fresh graph did not report an advance")
+		}
+		if advanced := g.publishWatermark(g.vac.lastWatermark.Load(), 50); advanced {
+			t.Fatal("publishWatermark(50) after 100 reported an ADVANCE")
+		}
+		if n := g.vac.wmRegress.Load(); n != 1 {
+			t.Fatalf("wmRegress = %d after a decrease, want 1", n)
+		}
+		if from, to := g.vac.wmRegressFrom.Load(), g.vac.wmRegressTo.Load(); from != 100 || to != 50 {
+			t.Fatalf("recorded regression %d -> %d, want 100 -> 50", from, to)
+		}
+		if got := g.MVCCStats().WatermarkRegressions; got != 1 {
+			t.Fatalf("MVCCStats().WatermarkRegressions = %d, want 1", got)
+		}
+	})
+}

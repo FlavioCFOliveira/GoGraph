@@ -245,6 +245,35 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 		firstShared atomic.Value // string
 		firstWalkA  atomic.Value // string
 		firstWalkB  atomic.Value // string
+
+		// THE ABSOLUTE ORACLE, and the two continuous invariant checks beside it
+		// (rmp #2420). The equality oracle above only fires when two reads STRADDLE
+		// a write, so it needs a coincidence on top of the defect; this one fires on
+		// a SINGLE wrong read.
+		//
+		// The fixture hands it to us exactly: the seed transaction is the graph's
+		// first commit, so it publishes at instant 1 with both values 0, and
+		// iteration i is the (i+1)-th commit and publishes value i at instant i+1.
+		// A snapshot pinned at startTS must therefore read exactly startTS-1 in BOTH
+		// nodes — nothing else in this test allocates a commit instant (every write
+		// is inside one ApplyAtomicallyTx, and a bracket that versions nothing
+		// publishes none).
+		//
+		// A wrong ARITHMETIC premise would fire on essentially every read with a
+		// constant offset, which the capture reports, so the oracle diagnoses itself
+		// rather than manufacturing a defect.
+		absViolation atomic.Int64
+		absSeen      atomic.Bool
+		absFacts     atomic.Value // string
+		// slotLost counts reads taken while this reader's OWN horizon slot no longer
+		// announces its own start instant — the corruption that makes a live reader
+		// invisible to [mvcc.Horizon.Oldest] and lets the watermark advance past it.
+		// Checked on EVERY read rather than once per snapshot: the previous cycle
+		// checked the watermark only at snapshot birth, which cannot see a slot lost
+		// afterwards, and the whole window that matters is afterwards.
+		slotLost  atomic.Int64
+		slotSeen  atomic.Bool
+		slotFacts atomic.Value // string
 	)
 
 	wg.Add(1)
@@ -292,6 +321,39 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 					ia, _ := va.Int64()
 					ib, _ := vb.Int64()
 					reads.Add(1)
+					// Continuous, and in this order: the slot check first because it
+					// is two atomic loads and describes the state the reads just
+					// ran under, the absolute oracle second because it needs only
+					// the values already in hand.
+					if slotTS, occupied := g.horizon.SlotState(snap.slot); !occupied || slotTS != snap.startTS {
+						slotLost.Add(1)
+						if slotSeen.CompareAndSwap(false, true) {
+							slotFacts.Store(fmt.Sprintf(
+								"slot %d announced startTS=%d occupied=%v while THIS reader is live at startTS=%d "+
+									"(watermark now %d, active readers %d, unregistered %d, stale leaves %d)",
+								snap.slot, slotTS, occupied, snap.startTS,
+								g.horizon.Oldest(g.mvccClock.ReadTS()), g.horizon.Active(),
+								g.horizon.Unregistered(), g.horizon.StaleLeaves()))
+						}
+					}
+					if want := int64(snap.startTS) - 1; ia != want || ib != want {
+						absViolation.Add(1)
+						if absSeen.CompareAndSwap(false, true) {
+							_, sa := propChainFacts(g, "a")
+							_, sb := propChainFacts(g, "b")
+							slotTS, occupied := g.horizon.SlotState(snap.slot)
+							absFacts.Store(fmt.Sprintf(
+								"a.v=%d b.v=%d want=%d (offset a %+d, b %+d) startTS=%d; "+
+									"slot %d announces %d occupied=%v; watermark %d; active %d; unregistered %d; stale leaves %d; "+
+									"substrate a: %s | b: %s | %s; chain a %s; chain b %s",
+								ia, ib, want, ia-want, ib-want, snap.startTS,
+								snap.slot, slotTS, occupied,
+								g.horizon.Oldest(g.mvccClock.ReadTS()), g.horizon.Active(),
+								g.horizon.Unregistered(), g.horizon.StaleLeaves(),
+								sa, sb, headsShareRecord(g, "a", "b"),
+								chainWalk(g, "a", snap.startTS), chainWalk(g, "b", snap.startTS)))
+						}
+					}
 					if ia != ib {
 						violation.Add(1)
 						// Only the FIRST observation is kept, via CompareAndSwap:
@@ -350,6 +412,26 @@ func TestIsolation_ApplyAtomically_View_NoPartialReads(t *testing.T) {
 	}
 	if reads.Load() == 0 {
 		t.Fatal("readers never observed both properties; test did not exercise the invariant")
+	}
+	// Reported AFTER the equality oracle so a run that trips both keeps the
+	// historical failure message first, and as Errorf so one run reports every
+	// oracle it broke rather than only the first.
+	if n := slotLost.Load(); n != 0 {
+		t.Errorf("a live reader's horizon slot stopped announcing its own start instant %d time(s) in %d reads: %v",
+			n, reads.Load(), slotFacts.Load())
+	}
+	if n := g.horizon.StaleLeaves(); n != 0 {
+		t.Errorf("horizon released an unheld slot %d time(s): a slot was returned twice or a slot number was invented, "+
+			"which silently removes another reader from the reclamation watermark", n)
+	}
+	if n := g.vac.wmRegress.Load(); n != 0 {
+		t.Errorf("the reclamation watermark moved BACKWARDS %d time(s), first from %d to %d: a live reader stopped being "+
+			"represented in it, so versions it could still reach became reclaimable",
+			n, g.vac.wmRegressFrom.Load(), g.vac.wmRegressTo.Load())
+	}
+	if n := absViolation.Load(); n != 0 {
+		t.Errorf("ABSOLUTE oracle: %d read(s) of %d returned a value other than the one committed at the snapshot's own instant; "+
+			"first: %v", n, reads.Load(), absFacts.Load())
 	}
 }
 
