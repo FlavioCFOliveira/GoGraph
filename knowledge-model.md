@@ -2104,6 +2104,41 @@ so they are fixed as latent rather than demonstrated, and two existing tests wer
 found to be asserting the defect (both seeded a node with no label and expected a
 labelled seek to return it).
 
+### Sprint 343 sync — #2424, the defect the acceptance criterion found (2026-08-13)
+
+Recorded at `f3e8f48f` and `5909b3ad`. Added: `Defect` 2424 (`FIXED`) and `Lesson`
+`when-a-fix-breaks-N-fixtures-suspect-the-condition`, with
+`Sprint 343 -[ADDRESSES]-> Defect 2424` and `Defect 2424 -[TAUGHT]-> Lesson`.
+
+**Version memory could settle ABOVE the stated bound, permanently.** `MVCCStats`
+admits two reasons for retention to exceed `Bound` — a reader holding versions back,
+or a burst the vacuum has not caught up with, which `Ceiling` bounds. The observed
+state was neither: 4 883 records held against a bound of 4 096 with **zero active
+readers** and the sweeper **exited** holding 3 767 records of reclamation debt.
+`chargeReclaimDebt` signals only above `reclaimThreshold`; the threshold amortises the
+SIGNAL, and that is sound only while a sweeper is alive to do the work eventually. A
+workload that stops just short of the threshold after the sweeper's idle exit therefore
+keeps its versions for the life of the process.
+
+**It was found by running the 150 package runs #2420's acceptance criterion demanded,**
+after the new watermark detector had already made 40 runs the stronger evidence. The
+criterion was honoured to the letter anyway, and that is what surfaced it.
+
+**The first fix was too aggressive and four fixtures said so.** Waking on ANY
+sub-threshold charge starts a sweeper for a single write on an idle graph, and four
+white-box tests failed in succession — two reclaim tests, the adjacency-stamp bound
+test, a label-delta accounting test — each deterministic only because no sweeper had
+ever been alive to race it. A debt below the threshold cannot breach a bound that IS the
+threshold, so the condition was simply wrong; it is now `!running && VersionCount() >
+reclaimThreshold`, the mandate's own statement, and it perturbs none of them.
+
+**The regression test CONSTRUCTS the state** rather than waiting for it: a graph horizon
+slot claimed without publishing an instant holds every version back, the sweeper reaches
+its idle exit with the retention intact, and releasing the slot directly rather than
+through `EndRead` leaves no wake behind. One ordinary write must then suffice. Against
+the previous behaviour: 8 194 records against a bound of 4 096 with `Running` false,
+deterministically, where the symptom appeared once in 71 package runs.
+
 ## Known limitations (faithful, by design)
 
 - **Build-tag duplicates.** The extractor parses every `.go` file regardless of build
