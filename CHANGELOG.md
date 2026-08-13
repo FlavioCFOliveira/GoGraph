@@ -9,8 +9,11 @@ and the project follows [Semantic Versioning](https://semver.org/).
 ## [0.11.0] — 2026-08-13
 
 The largest release the project has cut: **505 commits**, of which 63 are features,
-83 fixes and 61 performance changes, with **31 marked breaking**. Sprints 311–315,
-326, 327, 329 (six rounds), 334–336 and 338–343 merged in this window.
+83 fixes and 61 performance changes, with **31 marked breaking**. **Thirty-two sprints
+delivered work in this window — 311–322 and 324–343** — covering the round-3 and
+round-4 audit remediations, the planner access-path cycle, two production
+certifications, the MVCC epic, and the memory, CPU and concurrency remediation
+cycles.
 
 Two things define it. **Concurrency control became MVCC and nothing else** — the
 single-writer semaphore, the engine writer mutex and the `Graph.View` read barrier
