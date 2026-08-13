@@ -2040,6 +2040,70 @@ weaker, and `DefaultMaxTxIdleTime` (5 s) is what limits the exposure. Under the
 defaults the quota can no longer bind at all, because a connection holds at most
 one open transaction and `MaxConnections` defaults to 1024.
 
+### Sprint 343 sync — the certification's three correctness defects (2026-08-13)
+
+Recorded at `9167d3d3` and `fca34a0c`. Added: `Defect`s 2420, 2366 and 2423, all
+`FIXED`; `Lesson`s `a-fallback-is-a-ceiling-not-a-default` and
+`an-index-is-a-candidate-source-never-a-label-proof`. Edges:
+`Sprint 343 -[ADDRESSES]->` each defect, and `Defect -[TAUGHT]-> Lesson` for 2420
+and 2423.
+
+**#2420 — the fallback is a CEILING, not a default.** `mvcc.Horizon.Oldest`
+computes the reclamation watermark by scanning the occupancy words once. It
+carried a `found` flag and took the first occupied slot's instant
+unconditionally, so the fallback — the published frontier, sampled by the caller
+BEFORE the scan — was discarded the moment any reader was seen, and with every
+live reader newer than it the watermark came out ABOVE it. Claiming the occupancy
+bit before reading the clock protects a reader the scan SEES; it cannot protect
+one that claims a slot in a word the scan has already passed, and the fallback is
+the only bound that covers such a reader. A sweep at the inflated watermark frees
+the version that reader must undo, and it reads a value from after its own
+instant — an Isolation violation with nothing reporting it, which is what the
+previous cycle's fourteen refuted mechanisms had been circling.
+
+**Two of the previous cycle's assertions were TRUE and both were blind to it**:
+the reclaimer never freed a record above the watermark it was given, and a reader
+that checks the watermark at its own birth is always visible to its own scan.
+
+**The detector is worth more than the fix.** `Graph.publishWatermark` now counts a
+watermark that moves BACKWARDS, judged against the caller's own earlier sample so
+a reordered publish of two near-simultaneous scans cannot read as a breach, and
+`mvcc.Horizon.Leave` invalidates the slot's timestamp before clearing the
+occupancy bit so an occupied slot never reads as a previous occupant's stale
+instant. With the residue in place the counter reported 1 734–4 165 benign events
+per run; with it gone, 5 per run, all real; with `Oldest` capped, zero. It fires
+at the corruption rather than at the read that suffers it, which turned a
+2 %-per-run symptom into a 5-per-run signal. `Horizon.StaleLeaves` and
+`Horizon.SlotState` are the release-side and reader-side detectors of the same
+family, both pinned on sound AND broken controls.
+
+**#2366 — the two directions of a UNIQUE value-set change are not symmetric.** A
+reservation is eager and its rollback is sound, because the value was reserved
+throughout. A release applied eagerly hands the value to any peer that asks, so
+its rollback wrote a RE-RESERVATION into shared state judged against the
+rolling-back transaction's own view — while a peer's COMMITTED release had already
+freed the same value, leaving it reserved with no live holder. A release is now
+recorded on `exec.ConstraintTxn` and applied only by `CommitTxn`; rollback drops a
+private mark. That also closes the mirror hazard, in which a peer could take a
+value an uncommitted transaction had vacated and share it if that transaction
+rolled back.
+
+**#2423 — an index is a CANDIDATE source, never proof of a label.** Found while
+fixing #2366, whose fix stopped masking it. The planner rewrote
+`Selection(n.email = 'old')` over `NodeByLabelScan(Person)` into a bare
+`NodeByIndexSeek`, assuming a label-scoped index implies the label; a label
+removal leaves the node's entries in that label's property indexes, so the engine
+returned a row that matched `(n:Person)` while reporting `labels(n)` as the EMPTY
+LIST. The label scan was never affected because it resolves through
+`LabelBitmapAsOf`, which filters exactly this. Every rewrite that replaces a
+labelled scan leaf now qualifies its candidates — a residual predicate for the
+hash and key-set seeks, a bitmap intersection for the range and intersection
+scans — and one that cannot verify DECLINES. Only the hash-equality shape
+REPRODUCED; the others planned as `Filter` over `NodeByLabelScan` in that fixture,
+so they are fixed as latent rather than demonstrated, and two existing tests were
+found to be asserting the defect (both seeded a node with no label and expected a
+labelled seek to return it).
+
 ## Known limitations (faithful, by design)
 
 - **Build-tag duplicates.** The extractor parses every `.go` file regardless of build
