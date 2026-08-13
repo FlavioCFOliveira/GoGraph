@@ -240,6 +240,14 @@ certification does *not* establish.
   names. **Migration:** rename at the call site and in any dashboard query.
 - **BREAKING — `AdjList.Reclaim` takes a `*mvcc.DepthHist`** (rmp #2312), so the
   reclaimer can report retained chain depth from the walk it already performs.
+- **BREAKING — `txn.Tx.CommitWALOnly` takes the commit timestamp**:
+  `CommitWALOnly() error` becomes `CommitWALOnly(commitTS uint64) error`. The
+  timestamp is encoded *into* the WAL record, because the MVCC clock is derived from
+  the WAL at recovery rather than persisted separately, so it must be allocated before
+  the append rather than after it. **Migration:** pass
+  `Graph.AllocateCommitTS(writeTx)`, as `cypher/exectx.go` does. The method is not
+  removed and its role is unchanged — it is still the WAL-only commit that `CREATE
+  INDEX` uses and that never replays through the store apply path.
 - **BREAKING — `internal/ctxlock` is retired** (`refactor(mvcc)!`), and what it
   guarded is re-established by the MVCC substrate.
 - **BREAKING — snapshot `labels.bin` format version 1 → 2** (rmp, `c5814d6c`). The
@@ -329,7 +337,6 @@ certification does *not* establish.
 - `Graph.DisableMVCC`, `Graph.EnableMVCC`, `Graph.MVCCEnabled` (see *Changed*).
 - `Graph.View`, the last pre-MVCC read barrier.
 - `internal/ctxlock`.
-- `AdjList.BeginCommit` and `Tx.CommitWALOnly`.
 - The `txn.Store` single-writer semaphore and the engine writer mutex.
 - The read path's hash-join order-safety scan.
 - The side-store timestamped walkers, unreachable once every snapshot read routes
