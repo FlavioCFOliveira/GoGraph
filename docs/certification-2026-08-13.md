@@ -574,7 +574,8 @@ becomes misleading.
 | #2420 | 9 / 9 | The reclamation watermark could exceed a live reader's start instant | **FIXED** `9167d3d3` |
 | #2423 | 9 / 9 | An index-seek rewrite dropped the label predicate; a self-contradictory row | **FIXED** `fca34a0c` |
 | #2366 | 8 / 7 | A rolled-back writer re-reserved a value a peer's committed release had freed | **FIXED** `fca34a0c`, `3b7bec2f` |
-| #2424 | 8 / 8 | Version memory could settle above the stated bound, permanently: the sweeper exited with an outstanding debt | **FIXED** `f3e8f48f` |
+| #2424 | 8 / 8 | Version memory could settle above the stated bound, permanently: the sweeper exited with an outstanding debt | **FIXED** `f3e8f48f`, `5909b3ad` |
+| #2425 | 6 / 3 | The deferred UNIQUE release costs 3–10 % of constrained write throughput; cause not yet located | **OPEN — measured, three suspects cleared** |
 
 ### 6.1 A defect this cycle introduced, and caught before shipping
 
@@ -632,3 +633,5 @@ go test -count=1 -run '^TestIndexSeek_LabelGuard' ./cypher/
 | `3b7bec2f` | fix(cypher): a reserve that spends its own pending release must RESTORE it on rollback (#2366) |
 | `f3e8f48f` | fix(lpg): a reclamation debt below the wake threshold must still find a sweeper (#2424) |
 | `5909b3ad` | fix(lpg): wake the vacuum when RETENTION exceeds the bound, not on any debt (#2424) |
+| `c69fcc5b` | test(bench): write scaling under a UNIQUE constraint, beside the schema that declares nothing (#2366, #2424) |
+| `29483335` | perf(cypher): hold a transaction's UNIQUE releases inline, and retract the cause I had named |
