@@ -193,13 +193,31 @@ func (g *Graph[N, W]) reclaimAbortedLife() int {
 		sh := &g.nodeLifeShards[i]
 		sh.mu.Lock()
 		for id, st := range sh.born {
-			if st.at() == mvcc.AbortedTS {
-				delete(sh.born, id)
-				freed++
-				// Created by a transaction that never committed, so as far as
-				// every reader is concerned the node never existed.
-				toTombstone = append(toTombstone, id)
+			if st.at() != mvcc.AbortedTS {
+				continue
 			}
+			delete(sh.born, id)
+			freed++
+			if d, ok := sh.died[id]; ok && d.at() == mvcc.AbortedTS {
+				// BOTH events belong to the aborted transaction — a create (or
+				// revive) and a remove that cancel each other — so the state to
+				// restore is the one before the chain began, which only the
+				// primordial flag records. Deciding each direction independently
+				// tombstoned the node here and then REVIVED it in the loop below,
+				// so an aborted create+delete left a bare phantom node visible to
+				// every reader (rmp #2443, found by the DST multi-session mode).
+				delete(sh.died, id)
+				freed++
+				if st.primordial {
+					toRevive = append(toRevive, id)
+				} else {
+					toTombstone = append(toTombstone, id)
+				}
+				continue
+			}
+			// Created by a transaction that never committed, so as far as
+			// every reader is concerned the node never existed.
+			toTombstone = append(toTombstone, id)
 		}
 		for id, st := range sh.died {
 			if st.at() == mvcc.AbortedTS {

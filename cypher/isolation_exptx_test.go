@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
@@ -316,4 +317,183 @@ func TestExplicitTx_Isolation_ReadCommitted(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestExplicitTx_InTxCreateThenDeleteInvisibleToConcurrentReader is the
+// regression gate for rmp #2443, found by the DST multi-session mode: a
+// transaction that creates a node (CREATE or MERGE) and DETACH DELETEs it in
+// the SAME transaction must expose NOTHING to a concurrent autocommit reader
+// while it is open — the broken build showed a bare phantom node (no labels,
+// no properties: MATCH (n) counted 1, MATCH (n:Ghost) counted 0) until the
+// transaction terminated. The create,delete,create shape is covered too: the
+// still-uncommitted resurrected node must be equally invisible.
+func TestExplicitTx_InTxCreateThenDeleteInvisibleToConcurrentReader(t *testing.T) {
+	countAll := func(t *testing.T, eng *cypher.Engine) int64 {
+		t.Helper()
+		res, err := eng.Run(context.Background(), `MATCH (n) RETURN count(n) AS c`, nil)
+		if err != nil {
+			t.Fatalf("countAll Run: %v", err)
+		}
+		defer func() { _ = res.Close() }()
+		if !res.Next() {
+			t.Fatal("countAll: no row returned")
+		}
+		v, ok := res.ValueAt(0).(expr.IntegerValue)
+		if !ok {
+			t.Fatalf("countAll: not an integer: %T", res.ValueAt(0))
+		}
+		return int64(v)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		statements []string
+		rollback   bool
+		// wantOpen is the whole-graph node count a concurrent reader must see
+		// while the transaction is still open; wantAfter after it terminates.
+		wantOpen, wantAfter int64
+	}{
+		{"CREATE+delete, commit", []string{
+			`CREATE (:Ghost {name:'g'})`,
+			`MATCH (n:Ghost {name:'g'}) DETACH DELETE n`,
+		}, false, 0, 0},
+		{"CREATE+delete, rollback", []string{
+			`CREATE (:Ghost {name:'g'})`,
+			`MATCH (n:Ghost {name:'g'}) DETACH DELETE n`,
+		}, true, 0, 0},
+		{"MERGE+delete, commit", []string{
+			`MERGE (n:Ghost {name:'g'})`,
+			`MATCH (n:Ghost {name:'g'}) DETACH DELETE n`,
+		}, false, 0, 0},
+		{"MERGE+delete, rollback", []string{
+			`MERGE (n:Ghost {name:'g'})`,
+			`MATCH (n:Ghost {name:'g'}) DETACH DELETE n`,
+		}, true, 0, 0},
+		{"create,delete,create, commit", []string{
+			`CREATE (:Ghost {name:'g'})`,
+			`MATCH (n:Ghost {name:'g'}) DETACH DELETE n`,
+			`CREATE (:Ghost {name:'g'})`,
+		}, false, 0, 1},
+		{"create,delete,create, rollback", []string{
+			`CREATE (:Ghost {name:'g'})`,
+			`MATCH (n:Ghost {name:'g'}) DETACH DELETE n`,
+			`CREATE (:Ghost {name:'g'})`,
+		}, true, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			eng := cypher.NewEngine(g)
+
+			tx, err := eng.BeginTx(context.Background())
+			if err != nil {
+				t.Fatalf("BeginTx: %v", err)
+			}
+			for _, stmt := range tc.statements {
+				res, err := tx.ExecAny(stmt, nil)
+				if err != nil {
+					t.Fatalf("in-tx %q: %v", stmt, err)
+				}
+				for res.Next() {
+				}
+				if derr := res.Err(); derr != nil {
+					t.Fatalf("in-tx %q drain: %v", stmt, derr)
+				}
+				_ = res.Close()
+			}
+
+			// The concurrent reader: the transaction is OPEN, so its state —
+			// including the intermediate create+delete — must be invisible.
+			if got := countAll(t, eng); got != tc.wantOpen {
+				t.Fatalf("concurrent reader during open tx: MATCH (n) count=%d, want %d (uncommitted state leaked)", got, tc.wantOpen)
+			}
+
+			if tc.rollback {
+				if err := tx.Rollback(); err != nil {
+					t.Fatalf("Rollback: %v", err)
+				}
+			} else if err := tx.Commit(); err != nil {
+				t.Fatalf("Commit: %v", err)
+			}
+			if got := countAll(t, eng); got != tc.wantAfter {
+				t.Fatalf("after terminal: MATCH (n) count=%d, want %d", got, tc.wantAfter)
+			}
+		})
+	}
+}
+
+// TestExplicitTx_ConflictedRollbackLeavesNoPhantom is the second regression
+// gate for rmp #2443: a transaction that CREATEd nodes and was then DOOMED by a
+// serialization conflict on a contended write must, after Rollback, leave no
+// trace — the broken build left each aborted create behind as a bare phantom
+// node (the aborted birth+death life-record pair was tombstoned and then
+// revived by the abort reclaim, and the revive won).
+func TestExplicitTx_ConflictedRollbackLeavesNoPhantom(t *testing.T) {
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	eng := cypher.NewEngine(g)
+	ctx := context.Background()
+
+	exec := func(tx *cypher.ExplicitTx, q string) error {
+		res, err := tx.ExecAny(q, nil)
+		if err != nil {
+			return err
+		}
+		for res.Next() {
+		}
+		derr := res.Err()
+		_ = res.Close()
+		return derr
+	}
+	countAll := func() int64 {
+		res, err := eng.Run(ctx, `MATCH (n) RETURN count(n) AS c`, nil)
+		if err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		defer func() { _ = res.Close() }()
+		if !res.Next() {
+			t.Fatal("count: no row")
+		}
+		v, ok := res.ValueAt(0).(expr.IntegerValue)
+		if !ok {
+			t.Fatalf("count: not an integer: %T", res.ValueAt(0))
+		}
+		return int64(v)
+	}
+
+	// One committed contended target.
+	if _, err := eng.RunInTxAny(ctx, `CREATE (:T {name:'target', v:1})`, nil); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// A creates two nodes, B commits a write on the target, A's own write on the
+	// target is then refused (first-committer-wins), and A rolls back.
+	txA, err := eng.BeginTx(ctx)
+	if err != nil {
+		t.Fatalf("BeginTx A: %v", err)
+	}
+	if err := exec(txA, `CREATE (:Ghost {name:'a1'})`); err != nil {
+		t.Fatalf("A create 1: %v", err)
+	}
+	if err := exec(txA, `CREATE (:Ghost {name:'a2'})`); err != nil {
+		t.Fatalf("A create 2: %v", err)
+	}
+	txB, err := eng.BeginTx(ctx)
+	if err != nil {
+		t.Fatalf("BeginTx B: %v", err)
+	}
+	if err := exec(txB, `MATCH (n:T {name:'target'}) SET n.v = 2`); err != nil {
+		t.Fatalf("B set: %v", err)
+	}
+	if err := txB.Commit(); err != nil {
+		t.Fatalf("B commit: %v", err)
+	}
+	if err := exec(txA, `MATCH (n:T {name:'target'}) SET n.v = 3`); err == nil {
+		t.Fatal("A's contended write did not conflict; the scenario no longer exercises the doomed-rollback path")
+	}
+	if err := txA.Rollback(); err != nil {
+		t.Fatalf("A rollback: %v", err)
+	}
+
+	if got := countAll(); got != 1 {
+		t.Fatalf("after conflicted rollback: MATCH (n) count=%d, want 1 (aborted creates leaked as phantoms)", got)
+	}
 }
