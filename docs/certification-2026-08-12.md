@@ -492,7 +492,35 @@ older residue, and the fallback is read before the scan — so one of those read
 published instants is the next measurement**, and it is a much narrower question than any this
 defect has posed so far.
 
-### 2.1.8 What became of the memo change
+### 2.1.8 Both explanations for the missing record are refuted by direct assertion
+
+The missing record admits exactly two explanations, and each was tested with an assertion
+rather than an argument.
+
+**(b) The watermark passed a live reader.** A reader that has just published its own start
+instant is unambiguously live, so it can compute the watermark itself and check it does not
+exceed its own `startTS` — the invariant the whole reclamation design rests on.
+**0 violations in 1 122 311 checks.**
+
+**(a) The reclaimer freed a record above its watermark.** A scratch assertion inside
+`reclaimPropVersions`, at *both* removal sites — the whole-chain delete and the truncation —
+walked every record it was about to free and counted any stamped above the watermark.
+**0 across three runs** of 40 000 transactions with eight concurrent readers.
+
+**So the record was not reclaimed. It was never created.** That is a materially different
+suspect from everything considered so far, and it relocates the search from the read path and
+the vacuum to the WRITE path: `setNodePropertyInfo` pushes an undo record only when
+`!had` or `!propValuesDefinitelyEqual(prev, value)`, and pushes **nothing** otherwise — so a
+write that the equality test judges a no-op updates the stored bag while leaving no way to undo
+it. In this fixture consecutive values always differ, so that branch should be unreachable;
+establishing why a record is missing anyway is the next measurement, and it is a question about
+seven lines of the write path rather than about the whole MVCC substrate.
+
+**Fourteen mechanisms have now been refuted on this defect**, eleven inherited and three
+established here, and every one of the three was killed by an instrument built to test it
+rather than by an argument.
+
+### 2.1.9 What became of the memo change
 
 It is **kept**, and its justification is corrected rather than left standing.
 
