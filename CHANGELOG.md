@@ -583,6 +583,16 @@ comparison against v0.10.0 is
 - **Graph algorithms**: parallel triangle counting −38.16 %, Hopcroft–Karp −16.09 %,
   Prim MST −8.38 %, direction-optimising BFS −8.29 %, label propagation −6.39 %.
   Seeding a 20 000-node / 60 000-edge graph through Cypher: 821 → 444 ms (**1.85×**).
+- **Smaller internal cuts on the write and plan paths**, none of them changing observable
+  behaviour, all of them contributing to the aggregate figures above: **one mapper shard
+  acquisition per write instead of two**; `analyseNodeScalarUse` **memoised per cached
+  plan** behind a declared ceiling; the row-context schema walk **derived once per
+  execution**; a dynamic column's backing **pre-sized when the `Put` commits it**; a
+  small floor reserved on commit rather than the whole chunk capacity; the relationship
+  presence answer **interned** instead of allocated per row; **13 of a commit's 56
+  allocations** removed as ladders and escapes; the count shards **padded with a
+  lock-free fast reject**; and the snapshot CSR apply **bracketed in one adjacency commit
+  window** during recovery.
 - **Costs, reported as measured.** Seven independent benchmarks in unrelated packages
   regressed **7–16 %**, all of them paths that walk a graph and read its properties;
   `WriteCSV` is the cleanest case, with B/op and allocs/op **byte-identical** while time
