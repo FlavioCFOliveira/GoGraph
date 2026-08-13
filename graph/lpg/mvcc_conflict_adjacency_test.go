@@ -271,6 +271,21 @@ func TestConflict_NodeProperties(t *testing.T) {
 func TestConflict_AdjacencyStampsAreReclaimed(t *testing.T) {
 	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
 
+	// HOLD THE WATERMARK WHILE THE STAMPS ACCUMULATE (rmp #2424).
+	//
+	// The two assertions below sample g.adjVer.len() and MVCCStats().AdjConflictStamps
+	// separately and require them to agree, which they cannot while a BACKGROUND sweep
+	// is freeing stamps between the two reads: measured as "AdjConflictStamps = 17,
+	// want 5" against an intermediate #2424 fix that woke the vacuum on any
+	// sub-threshold charge. The shipped fix wakes only when retention exceeds the
+	// bound, which 64 small transactions never reach, so this hold is DEFENSIVE — it
+	// keeps the agreement of two samples from depending on the wake policy.
+	//
+	// EnterHolding claims a slot without publishing an instant, so Horizon.Oldest
+	// reports zero and no pass frees anything. It is released BEFORE the final
+	// assertion, which is the one that needs the watermark to advance.
+	hold := g.horizon.EnterHolding()
+
 	const sources = 64
 	for i := 0; i < sources; i++ {
 		src := "s" + strconv.Itoa(i)
@@ -294,6 +309,7 @@ func TestConflict_AdjacencyStampsAreReclaimed(t *testing.T) {
 
 	// No reader is open, so the watermark advances past every stamp above and the
 	// sweep must free all of them.
+	g.horizon.Leave(hold)
 	g.ReclaimNow()
 	if got := g.adjVer.len(); got != 0 {
 		t.Fatalf("%d adjacency stamps survived a sweep with no reader open: the map is "+

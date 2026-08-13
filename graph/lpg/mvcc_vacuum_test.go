@@ -537,73 +537,68 @@ func TestVacuum_WatermarkRegressionIsDetected(t *testing.T) {
 	})
 }
 
-// TestVacuum_SubThresholdDebtDoesNotStrandWhenNoSweeperIsAlive pins the invariant
-// rmp #2424 broke: there must never be an outstanding reclamation debt with NO
-// sweeper alive to serve it.
+// TestVacuum_RetentionAboveTheBoundAlwaysFindsASweeper pins the invariant rmp #2424
+// broke: version memory must never sit ABOVE the stated bound with no sweeper alive to
+// reduce it.
 //
-// # Why the invariant and not the symptom
+// # Why this invariant and not "no outstanding debt"
 //
-// The symptom is retention above the stated bound, and it needs a residue plus a
-// burst to exceed it — which makes it a race to reproduce and a race to assert. The
-// invariant is exact and deterministic: the reclamation debt is work only the sweeper
-// does, so a non-zero debt with `Running` false is stranded by definition, whatever
-// the totals happen to be.
+// A reclamation debt below [reclaimThreshold] is the amortisation working, and it
+// cannot by itself breach the bound — the bound IS that threshold. The state that must
+// not exist is the one [MVCCStats.WithinBound] reports false for while
+// [VacuumStats.Running] is false: retention above the bound, nobody holding it back,
+// and nobody coming to sweep it. That is what was observed, permanently:
 //
-// # The case the wake signal cannot see
+//	4883 records held against a bound of 4096, with 0 ACTIVE READERS,
+//	vacuum {Running:FALSE … Backlog:3767}
 //
-// [Graph.chargeReclaimDebt] signals only above [reclaimThreshold], because the
-// threshold amortises the signal. That is sound only while a sweeper is alive. This
-// test therefore lets the sweeper reach its idle exit and THEN charges a burst that
-// stops deliberately short of the threshold — the one shape neither the churn signal
-// (below the threshold) nor the drain signal (no reader leaves) can observe.
+// # How the state is constructed deterministically
 //
-// Observed before the fix: 4 883 records held against a bound of 4 096 with zero
-// active readers and `Running:false Backlog:3767`, permanently.
-func TestVacuum_SubThresholdDebtDoesNotStrandWhenNoSweeperIsAlive(t *testing.T) {
+// The natural route to it is a residue plus a sub-threshold burst, which is a race —
+// it appeared once in 71 package runs. So the residue is built on purpose: a graph
+// horizon slot claimed WITHOUT publishing an instant holds every version back, so a
+// pass frees nothing and the sweeper reaches its idle exit with the retention still
+// there. Releasing the slot directly (rather than through [Graph.EndRead]) leaves no
+// wake behind, which is precisely the gap: retention is above the bound, no sweeper is
+// alive, and nothing is pending.
+//
+// One ordinary write then has to be enough to get it swept. Against the previous build
+// it is not, and the retention stays for the life of the process.
+func TestVacuum_RetentionAboveTheBoundAlwaysFindsASweeper(t *testing.T) {
 	g := vacuumGraph(t)
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
 
-	// Phase 1 — enough churn to start the sweeper, then let it settle and exit.
+	// Build retention the sweeper cannot touch, and let it exit while it cannot.
+	hold := g.horizon.EnterHolding()
 	churn(t, g, reclaimThreshold*2)
-	waitWithinBound(t, g)
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for g.VacuumStats().Running {
 		if time.Now().After(deadline) {
-			// Not a failure of the property under test: the sweeper simply had work
-			// throughout, so the case this test exists for was never set up.
-			t.Skip("the sweeper never reached its idle exit within 5s; the stranding case " +
-				"cannot be constructed on this run")
+			g.horizon.Leave(hold)
+			t.Skip("the sweeper never reached its idle exit within 10s; the state this test " +
+				"exists for could not be constructed on this run")
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
 
-	// Phase 2 — a burst that stops JUST SHORT of the threshold, charged while no
-	// sweeper is alive.
-	churn(t, g, reclaimThreshold-1)
+	// Release the hold WITHOUT going through EndRead, so no drain wake is left behind.
+	g.horizon.Leave(hold)
 
-	// THE INVARIANT. A debt outstanding with nobody to sweep it is stranded, and no
-	// later event in this test can clear it: the workload has stopped and no reader
-	// exists to leave.
-	deadline = time.Now().Add(5 * time.Second)
-	for {
-		v := g.VacuumStats()
-		if v.Backlog == 0 {
-			return // swept: the charge found or started a sweeper
-		}
-		if !v.Running {
-			t.Fatalf("a reclamation debt of %d records is outstanding with NO sweeper alive: "+
-				"nothing will ever sweep it, because the churn signal fires only above %d and no "+
-				"reader will leave. vacuum %+v; stats %+v",
-				v.Backlog, reclaimThreshold, v, g.MVCCStats())
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("a debt of %d records was still outstanding after 5s with a sweeper alive: "+
-				"vacuum %+v", v.Backlog, v)
-		}
-		time.Sleep(2 * time.Millisecond)
+	// The premise: above the bound, nobody holding it, nobody sweeping.
+	if s := g.MVCCStats(); s.WithinBound() {
+		t.Skipf("retention settled within the bound before the hold was released (%d <= %d), "+
+			"so the state this test exists for was not constructed", s.Total, s.Bound)
 	}
+	if v := g.VacuumStats(); v.Running {
+		t.Skip("a sweeper was alive after the idle-exit wait, so this run cannot observe " +
+			"the stranded state")
+	}
+
+	// ONE ordinary write must be enough to get it swept.
+	churn(t, g, 1)
+	waitWithinBound(t, g)
 }
 
 // TestVacuum_SubThresholdWakeDoesNotStartASweeperPerCommit is the PROPORTIONALITY

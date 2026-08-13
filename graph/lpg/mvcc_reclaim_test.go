@@ -33,9 +33,14 @@ func reclaimGraph(t *testing.T) *Graph[string, float64] {
 	// knows nothing about. A background pass is entitled to free those same records —
 	// the graph's own horizon has no reader in it — so a concurrent sweep makes the
 	// counts non-deterministic. Two of these tests failed exactly that way ("three
-	// label writes left 2 deltas, want 3") the moment a sub-threshold charge began
-	// starting a sweeper, and they had been passing only because a handful of direct
-	// writes left none alive.
+	// label writes left 2 deltas, want 3") against an intermediate #2424 fix that woke
+	// the vacuum on any sub-threshold charge.
+	//
+	// The shipped fix wakes only when RETENTION exceeds the bound, which these small
+	// fixtures never reach, so the hold is DEFENSIVE rather than required today. It
+	// stays because the property these tests depend on — that nothing else mutates the
+	// chains while they count them — should not be a consequence of the current wake
+	// policy.
 	//
 	// EnterHolding claims a slot WITHOUT publishing an instant, which is the documented
 	// hold-everything-back state: Horizon.Oldest reports zero, so a pass that does run

@@ -103,10 +103,18 @@ func (g *Graph[N, W]) chargeReclaimDebt(n int64) {
 		// guaranteed to have left its signal first. That cover never engaged here,
 		// because a sub-threshold charge left no signal at all.
 		//
-		// `running` is tested BEFORE calling [Graph.wakeVacuum] so the ordinary path —
-		// a sweeper already alive — pays one atomic load of a line written only when a
-		// sweeper starts or exits, rather than a channel send per commit.
-		if !g.vac.running.Load() {
+		// THE CONDITION IS THE MANDATE'S OWN, not merely "a debt exists". A debt below
+		// the threshold cannot by itself breach the stated bound, because the bound IS
+		// [reclaimThreshold] — so waking for every such charge would start a sweeper for
+		// a single write on an idle graph, which is work nobody needs and which perturbs
+		// every measurement of a small fixture. What must never happen is RETENTION above
+		// the bound with nobody alive to reduce it, which is exactly what
+		// [MVCCStats.WithinBound] reports and what the observed failure was.
+		//
+		// `running` is tested FIRST so the ordinary path — a sweeper already alive — pays
+		// one atomic load of a line written only when a sweeper starts or exits, and the
+		// version-count sum is reached only when there is no sweeper at all.
+		if !g.vac.running.Load() && g.VersionCount() > reclaimThreshold {
 			g.wakeVacuum()
 		}
 		return
