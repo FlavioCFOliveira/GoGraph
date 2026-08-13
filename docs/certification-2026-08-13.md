@@ -18,9 +18,45 @@ Host: Apple M4, 10 cores, 32 GB, `darwin/arm64`, Go 1.26.
 
 ## Verdict
 
-**PENDING** — filled in once the exit gate and the remaining efficiency measurements
-are recorded. The correctness rung is now clear; §5 states exactly what has and has
-not been established.
+**CERTIFIED for production use under extreme load and concurrency, WITHIN THE
+ENVELOPE STATED IN §5** — conditional on one measurement still in flight, named
+below, and refused if it does not come back clean.
+
+The certification is granted rung by rung, in the project's own order:
+
+- **Correct.** The gate is green at HEAD — `MAKE_CI_EXIT=0`, read from inside the log:
+  `go test -race ./...` with no failure, `golangci-lint` with 0 issues, the openCypher
+  TCK at **3897/3897**, coverage 87.1 % aggregate with every package above its floor.
+  The blocker that refused the 2026-08-12 certification is closed **at its root cause**
+  (§1), not worked around, and the mechanism is pinned by a deterministic test that
+  fails against the previous behaviour. Two further defects were found and fixed, one
+  of them a p9 silent wrong answer that a phantom reservation had been masking (§3).
+  ACID Isolation now carries three permanent, always-on detectors for the corruption
+  class that produced #2420, each proven on a broken control as well as a sound one.
+- **Secure.** Nothing new was examined this cycle, and nothing regressed: the previous
+  cycle's container-aware ceilings (#2421) stand, with their one unmet criterion — no
+  container was ever run — restated in §5 rather than quietly retired.
+- **Efficient.** Three correctness fixes cost **no measurable time** on any end-to-end
+  arm (§4.1). One microcost is real and quantified: `Horizon.Leave`'s extra store is
+  +7.55 % of a 4 ns operation, which is 0.0005 % of the read transaction that contains
+  it. Allocation rises 0.39–1.58 % on reads under concurrent writers, with the
+  mechanism named as a hypothesis rather than a diagnosis.
+- **Fast.** No regression, and nothing is claimed as faster: this cycle bought
+  correctness, not throughput.
+
+**The condition.** rmp #2420's acceptance criterion asks for **150 package runs** at
+the corrected recipe with zero violations. Forty are recorded and clean, on all five
+oracles (§1.4); the remaining 110 are running on the final tree as this is written. The
+criterion is honoured to the letter rather than reinterpreted downward on the grounds
+that the new detector — which fired ~5 times per run before the fix, against the
+symptom's own ~2 % per run — already makes forty runs the stronger evidence.
+
+**What "certified within an envelope" means here.** It means the module is fit for the
+workloads this report measured, on the platform it measured them on, with the
+guarantees it verified. It does **not** mean the eight items in §5 are sound — they are
+unmeasured, and three of them (latency at the published concurrency levels, the
+write-scaling sweep, the whole-tree soak layer) have now gone unmeasured for three
+consecutive certifications, which is itself a finding worth acting on.
 
 ---
 
@@ -232,8 +268,82 @@ that was needed.
 
 ## 4. Efficient and fast
 
-_Pending — the measurements owed for the changed paths, and the axes carried over from
-the previous cycle._
+Everything changed this cycle sits on a read path, so the question is not whether the
+module got faster — it is whether three correctness fixes cost anything measurable.
+Four arms, **interleaved** HEAD against `30b5ecb3` one round each and repeated ten
+times, because a back-to-back A/B on this host manufactures significant-looking deltas
+from nothing (a byte-identical control once produced 22 of 36 flat-by-construction rows
+as "significant"). rmp #2420's own acceptance criterion asks for exactly this shape,
+`n >= 10`.
+
+What each arm is for:
+
+| arm | what it exercises of the change |
+|---|---|
+| `BenchmarkHorizonReal64` (`graph/mvcc`) | `Enter`/`Leave` — `Leave` gained a store — and `Oldest`, which lost its `found` flag |
+| `BenchmarkIndexSeek_vs_LabelScan` (`cypher`) | the residual label test the seek now applies per candidate |
+| `BenchmarkReadAtRealisticWriteRate` (`bench/mvccwrite`) | reads under CONCURRENT WRITERS: the chain walk, the visibility memo and the horizon together |
+| `BenchmarkEngReadProjectLargeSerial` (`bench/mtaudit`) | the benchmark #2420's criterion names — expected byte-identical, and why is the point |
+
+The last two are a pair, and the pairing is the lesson the previous cycle recorded:
+`EngReadProjectLargeSerial` reads a quiescent graph, which has no delta chain to walk,
+so it cannot see a change to the chain walk at all — it reported 8.23 ms against
+8.21 ms with `B/op` and `allocs/op` byte-identical, which on this project is the signal
+that an arm never reaches the code under test. The concurrent-writer arm is what
+actually exercises it, and it is the measurement that cycle recorded as OWED.
+
+### 4.1 Results — nothing the module does measurably slower, and one honest microcost
+
+`sec/op`, HEAD against `30b5ecb3`, ten interleaved rounds, `n=10`:
+
+| arm | sec/op | verdict |
+|---|---|---|
+| `ReadAtRealisticWriteRate/writers=0` | 61.34 µ → 61.03 µ | ~ (p=0.912) |
+| `ReadAtRealisticWriteRate/writers=1` | 61.88 µ → 61.86 µ | ~ (p=1.000) |
+| `ReadAtRealisticWriteRate/writers=4` | 63.37 µ → 63.74 µ | ~ (p=0.063) |
+| `IndexSeek_vs_LabelScan/IndexSeek` | 956.4 µ → 959.9 µ | ~ (p=0.853) |
+| `IndexSeek_vs_LabelScan/LabelScan` | 6.015 m → 6.117 m | ~ (p=0.436) |
+| `EngReadProjectLargeSerial` | 8.068 m → 8.118 m | ~ (p=0.971) |
+| `HorizonReal64/enter-leave/near-empty` | 4.072 n → 4.379 n | **+7.55 % (p=0.000)** |
+| `HorizonReal64/enter-leave/near-full` | 7.676 n → 7.853 n | **+2.31 % (p=0.000)** |
+| `HorizonReal64/oldest/near-full` | 718.4 n → 724.4 n | **+0.84 % (p=0.006)** |
+| `HorizonReal64/oldest/near-empty` | 7.869 n → 7.877 n | ~ (p=0.754) |
+
+**The microcost is real and it is 0.3 ns.** `Horizon.Leave` gained one store, and on a
+4-nanosecond operation that is +7.55 %. `Enter`/`Leave` run once per read
+transaction, and a read transaction in this same tree costs ~61 µs — so 0.3 ns is
+**0.0005 %** of it, which is why the end-to-end arms show no change at all. Both
+numbers are reported because quoting only the microbenchmark would overstate the cost
+and quoting only the end-to-end arm would hide that it exists. Zero allocations on
+every horizon arm, unchanged.
+
+**Allocation, where it moved:**
+
+| arm | B/op | allocs/op |
+|---|---|---|
+| `IndexSeek` | +0.03 % (p=0.000) | 2 913 → 2 915, +0.07 % |
+| `ReadAtRealisticWriteRate/writers=1` | +0.39 % (p=0.000) | +0.05 % |
+| `ReadAtRealisticWriteRate/writers=4` | +1.58 % (p=0.000) | +0.22 % |
+| `EngReadProjectLargeSerial` | byte-identical | byte-identical |
+| `HorizonReal64` (all four) | 0, unchanged | 0, unchanged |
+
+The seek's two extra allocations per operation are the residual-predicate closure,
+built once per plan build rather than per row — which is why the time is unmoved.
+
+The `writers=4` figure is +1.58 % of bytes with **no** time cost, and it grows with
+the writer count. The expected mechanism is the fix itself: a watermark capped at the
+fallback frees slightly less on a pass whose readers are all newer than it, so a few
+more version records are live when the allocation is sampled, and the next pass frees
+them. **That is a hypothesis, not a diagnosis** — it was not separately measured, and
+this project has a standing rule that a plausible mechanism named for a number is not
+the same as testing it. What is established is the size and the direction.
+
+**And the pairing predicted the right thing.** `EngReadProjectLargeSerial` — the
+benchmark #2420's own criterion names — came out byte-identical in both memory
+columns and statistically flat in time, exactly as §4 said it would: it reads a
+quiescent graph, so it never walks a chain and never touches the changed code. Had it
+been the only arm, the honest conclusion would have been "nothing to see", and the
+concurrent-writer arm is what gives that claim any content.
 
 ---
 
@@ -277,7 +387,33 @@ becomes misleading.
 |---|---|---|---|
 | #2420 | 9 / 9 | The reclamation watermark could exceed a live reader's start instant | **FIXED** `9167d3d3` |
 | #2423 | 9 / 9 | An index-seek rewrite dropped the label predicate; a self-contradictory row | **FIXED** `fca34a0c` |
-| #2366 | 8 / 7 | A rolled-back writer re-reserved a value a peer's committed release had freed | **FIXED** `fca34a0c` |
+| #2366 | 8 / 7 | A rolled-back writer re-reserved a value a peer's committed release had freed | **FIXED** `fca34a0c`, `3b7bec2f` |
+
+### 6.1 A defect this cycle introduced, and caught before shipping
+
+#2366's first fix moved the problem instead of solving it. `ReserveSetProperty` spends
+the transaction's own pending release of the value it takes, so for those labels the
+value was already in the shared set — put there by a COMMITTED writer — and the
+reservation's inverse must restore the mark, not delete the value. It deleted:
+
+```
+a holds 'v'
+SET a.email = 'moved'   releases 'v' (a mark; nothing shared changed)
+SET b.email = 'v'       reserves 'v', allowed because THIS transaction freed it
+ROLLBACK                inverses run LIFO: the reserve's inverse deleted 'v'
+```
+
+leaving `'v'` free while node `a` still held it — **two `:Person` nodes carrying one
+UNIQUE value**, which is the CONSISTENCY direction and strictly worse than the
+availability defect #2366 set out to fix.
+
+It is recorded here rather than quietly amended for two reasons. The whole `cypher`
+suite passed with the hole in it, so nothing but review would have found it. And a fix
+that trades one direction of a defect for the other has moved it, not closed it —
+which is why both directions are now pinned by tests
+(`TestUnique_RollbackLeavesNoPhantomReservation` and
+`TestUnique_ReleaseThenReserveOfTheSameValueRollsBackWhole`), and the second one fails
+against the first fix.
 
 ## 7. Reproduce
 
