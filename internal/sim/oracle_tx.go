@@ -21,15 +21,20 @@ type pendingEdge struct {
 //
 // # Model
 //
-// An OracleTx mirrors what the engine promises an explicit WRITE transaction
-// under MVCC (see cypher/exectx.go): each statement reads the PRESENT — the
-// committed state at the instant the statement runs — plus the transaction's
-// own pending writes, and nothing the transaction wrote is visible to anyone
-// else until Commit publishes it as one step. The workspace therefore keeps an
-// OVERLAY (pending creates, deletes, property updates, pending edges) over the
-// live parent oracle, decides every statement's effect at statement time
-// against parent+overlay, and folds the DECIDED effects into the parent only
-// at [OracleTx.Commit] — never re-evaluating them, exactly as the engine
+// An OracleTx mirrors what the engine gives an explicit WRITE transaction
+// under MVCC: SNAPSHOT ISOLATION. Each statement reads the committed state AS
+// OF BEGIN plus the transaction's own pending writes — a commit that lands
+// after BEGIN is invisible for the transaction's whole lifetime — and nothing
+// the transaction wrote is visible to anyone else until Commit publishes it
+// as one step. (Established empirically against the store-backed engine by
+// TestProbe_WriteTxSnapshotAtBegin: a post-BEGIN commit reads as absent,
+// count=0. The engine's own BeginTx godoc agrees: concurrent readers "observe
+// the state before it began until it commits".) The workspace therefore
+// captures a SNAPSHOT of the visible node set at [GraphOracle.BeginTx], keeps
+// an OVERLAY (pending creates, deletes, property updates, pending edges) over
+// that snapshot, decides every statement's effect at statement time against
+// snapshot+overlay, and folds the DECIDED effects into the parent only at
+// [OracleTx.Commit] — never re-evaluating them, exactly as the engine
 // publishes rather than re-runs a transaction at COMMIT.
 //
 // The workspace models the transactional workload's template set only, and it
@@ -60,6 +65,11 @@ type pendingEdge struct {
 // one goroutine, never parallel.
 type OracleTx struct {
 	parent *GraphOracle
+	// snap is the begin-snapshot: every Person name visible when the
+	// transaction began, mapped to the age it had at that instant. Values are
+	// copied at BeginTx, so parent folds that land later can neither add to
+	// nor mutate what this transaction observes (snapshot isolation).
+	snap map[string]any
 	// created holds Person nodes this transaction created or merged into
 	// existence, keyed by name. Their ids are allocated only at Commit, so an
 	// aborted transaction consumes nothing.
@@ -84,12 +94,18 @@ type OracleTx struct {
 }
 
 // BeginTx opens a per-transaction workspace over the oracle's committed
-// state. The workspace reads the parent LIVE (present + own pending writes,
-// the engine's write-transaction contract) and publishes nothing until
-// [OracleTx.Commit].
+// state. The workspace captures its begin-snapshot NOW — statements observe
+// that snapshot plus the transaction's own pending writes, never a commit
+// that lands later (the engine's snapshot-isolation contract) — and publishes
+// nothing until [OracleTx.Commit].
 func (o *GraphOracle) BeginTx() *OracleTx {
+	snap := make(map[string]any, len(o.byName))
+	for name, id := range o.byName {
+		snap[name] = o.nodes[id].Properties["age"]
+	}
 	return &OracleTx{
 		parent:  o,
+		snap:    snap,
 		created: make(map[string]*NodeState),
 		deleted: make(map[string]bool),
 		ageSet:  make(map[string]any),
@@ -104,21 +120,18 @@ func (t *OracleTx) record(cypher string, params map[string]any, res OracleResult
 }
 
 // visible reports whether a Person of the given name is visible to this
-// transaction (committed and not pending-deleted, or pending-created), along
-// with the node state it would observe. The returned state is the live record
-// (parent's or the overlay's) and must not be mutated by readers.
-func (t *OracleTx) visible(name string) (*NodeState, bool) {
-	if n, ok := t.created[name]; ok {
-		return n, true
+// transaction: pending-created, or present in the begin-snapshot and not
+// pending-deleted. Commits that landed after BEGIN are invisible by
+// construction — they are not in the snapshot.
+func (t *OracleTx) visible(name string) bool {
+	if _, ok := t.created[name]; ok {
+		return true
 	}
 	if t.deleted[name] {
-		return nil, false
+		return false
 	}
-	id, ok := t.parent.byName[name]
-	if !ok {
-		return nil, false
-	}
-	return t.parent.nodes[id], true
+	_, ok := t.snap[name]
+	return ok
 }
 
 // ApplyCreate models [tmplCreatePerson] inside the transaction: the node lands
@@ -146,8 +159,9 @@ func (t *OracleTx) ApplyCreate(cypher string, params map[string]any) OracleResul
 }
 
 // ApplyMatch models [tmplSetAge] and pure reads inside the transaction. A SET
-// on a node visible to the transaction is decided now (against present + own
-// writes) and folded at Commit; a miss is a committed zero-effect result.
+// on a node visible to the transaction is decided now (against the
+// begin-snapshot plus own writes) and folded at Commit; a miss is a committed
+// zero-effect result.
 func (t *OracleTx) ApplyMatch(cypher string, params map[string]any) OracleResult {
 	if t.finished {
 		return t.record(cypher, params, OracleResult{ErrorMsg: "oracle: op on finished tx"})
@@ -164,7 +178,7 @@ func (t *OracleTx) ApplyMatch(cypher string, params map[string]any) OracleResult
 		n.Properties["age"] = params["age"] // own uncommitted node: update in place
 		return t.record(cypher, params, OracleResult{Committed: true})
 	}
-	if _, ok := t.visible(name); !ok {
+	if !t.visible(name) {
 		return t.record(cypher, params, OracleResult{Committed: true}) // MATCH miss
 	}
 	t.ageSet[name] = params["age"]
@@ -185,7 +199,7 @@ func (t *OracleTx) ApplyMerge(cypher string, params map[string]any) OracleResult
 	if !ok {
 		return t.record(cypher, params, OracleResult{ErrorMsg: "oracle: merge missing name"})
 	}
-	if _, ok := t.visible(name); ok {
+	if t.visible(name) {
 		return t.record(cypher, params, OracleResult{Committed: true}) // matched; no create
 	}
 	// Like ApplyCreate, a MERGE-create over an in-tx-deleted name leaves the
@@ -216,7 +230,7 @@ func (t *OracleTx) ApplyDelete(cypher string, params map[string]any) OracleResul
 		t.dropPendingEdges(name)
 		return t.record(cypher, params, OracleResult{Committed: true})
 	}
-	if _, ok := t.visible(name); !ok {
+	if !t.visible(name) {
 		return t.record(cypher, params, OracleResult{Committed: true}) // MATCH miss
 	}
 	t.deleted[name] = true
@@ -226,9 +240,10 @@ func (t *OracleTx) ApplyDelete(cypher string, params map[string]any) OracleResul
 }
 
 // ApplyCreateKnows models [tmplCreateKnows] inside the transaction: the edge is
-// decided against the endpoints visible NOW (present + own pending nodes) and
-// folded at Commit. Like the parent model, a missing endpoint is a committed
-// zero-effect result and a duplicate (a,b) is idempotent.
+// decided against the endpoints visible to the transaction (begin-snapshot
+// plus own pending nodes) and folded at Commit. Like the parent model, a
+// missing endpoint is a committed zero-effect result and a duplicate (a,b) is
+// idempotent.
 func (t *OracleTx) ApplyCreateKnows(params map[string]any) OracleResult {
 	if t.finished {
 		return t.record(tmplCreateKnows, params, OracleResult{ErrorMsg: "oracle: op on finished tx"})
@@ -238,10 +253,7 @@ func (t *OracleTx) ApplyCreateKnows(params map[string]any) OracleResult {
 	if !okA || !okB {
 		return t.record(tmplCreateKnows, params, OracleResult{ErrorMsg: "oracle: createKnows missing endpoint"})
 	}
-	if _, ok := t.visible(a); !ok {
-		return t.record(tmplCreateKnows, params, OracleResult{Committed: true})
-	}
-	if _, ok := t.visible(b); !ok {
+	if !t.visible(a) || !t.visible(b) {
 		return t.record(tmplCreateKnows, params, OracleResult{Committed: true})
 	}
 	for _, e := range t.edges {
@@ -262,45 +274,58 @@ func (t *OracleTx) dropPendingEdges(name string) {
 }
 
 // HasPerson reports whether a Person of the given name is visible to this
-// transaction: its own pending writes overlaid on the committed present.
+// transaction: its own pending writes overlaid on the begin-snapshot.
 func (t *OracleTx) HasPerson(name string) bool {
-	_, ok := t.visible(name)
-	return ok
+	return t.visible(name)
+}
+
+// PendingKnows reports whether this transaction has already decided a KNOWS
+// edge between a and b. The multi-session workload combines it with the
+// parent's present-state [GraphOracle.HasKnowsByName] to avoid re-creating an
+// existing edge — the engine's parallel-edge check runs against the PRESENT
+// adjacency, so on the simulator's non-multigraph store a duplicate CREATE is
+// refused with a typed error rather than deduplicated.
+func (t *OracleTx) PendingKnows(a, b string) bool {
+	for _, e := range t.edges {
+		if e.a == a && e.b == b {
+			return true
+		}
+	}
+	return false
 }
 
 // AgeOf returns the age this transaction would observe for the named Person,
 // and whether the node is visible: a pending in-tx update wins over the
-// committed value.
+// begin-snapshot value.
 func (t *OracleTx) AgeOf(name string) (any, bool) {
 	if n, ok := t.created[name]; ok {
 		return n.Properties["age"], true
 	}
+	if !t.visible(name) {
+		return nil, false
+	}
 	if age, ok := t.ageSet[name]; ok {
 		return age, true
 	}
-	n, ok := t.visible(name)
-	if !ok {
-		return nil, false
-	}
-	return n.Properties["age"], true
+	return t.snap[name], true
 }
 
 // NodeNames returns the Person names visible to this transaction in ascending
-// sorted order — committed names minus pending deletes, plus pending creates.
-// The deterministic order is load-bearing for the same reason as
+// sorted order — the begin-snapshot minus pending deletes, plus pending
+// creates. The deterministic order is load-bearing for the same reason as
 // [GraphOracle.NodeNames]: actors index into it with seed-derived integers.
 func (t *OracleTx) NodeNames() []string {
-	out := make([]string, 0, len(t.parent.byName)+len(t.created))
-	for name := range t.parent.byName {
+	out := make([]string, 0, len(t.snap)+len(t.created))
+	for name := range t.snap {
 		if !t.deleted[name] {
 			out = append(out, name)
 		}
 	}
 	for name := range t.created {
-		// A created name is extra only when the committed side contributes no
+		// A created name is extra only when the snapshot side contributes no
 		// entry for it: absent there, or suppressed by this tx's own delete
 		// (the resurrect case, where created wins visibility).
-		if _, committed := t.parent.byName[name]; !committed || t.deleted[name] {
+		if _, inSnap := t.snap[name]; !inSnap || t.deleted[name] {
 			out = append(out, name)
 		}
 	}
@@ -310,9 +335,9 @@ func (t *OracleTx) NodeNames() []string {
 
 // NodeCount returns the number of nodes visible to this transaction.
 func (t *OracleTx) NodeCount() int {
-	n := len(t.parent.nodes) - len(t.deleted)
+	n := len(t.snap) - len(t.deleted)
 	for name := range t.created {
-		if _, committed := t.parent.byName[name]; !committed || t.deleted[name] {
+		if _, inSnap := t.snap[name]; !inSnap || t.deleted[name] {
 			n++
 		}
 	}

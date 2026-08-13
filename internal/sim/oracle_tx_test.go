@@ -16,7 +16,7 @@ func seedPerson(t *testing.T, o *GraphOracle, name string, age int64) {
 }
 
 // TestOracleTx_ReadsSnapshotPlusOwnWrites asserts a workspace read observes the
-// committed present overlaid with the transaction's own pending writes, while
+// begin-snapshot overlaid with the transaction's own pending writes, while
 // the committed state stays untouched until Commit.
 func TestOracleTx_ReadsSnapshotPlusOwnWrites(t *testing.T) {
 	o := NewGraphOracle()
@@ -287,5 +287,46 @@ func TestOracleTx_DeterministicAccessorsAndFold(t *testing.T) {
 		if a.byName[name] != b.byName[name] {
 			t.Fatalf("id allocation diverges for %q: %d vs %d", name, a.byName[name], b.byName[name])
 		}
+	}
+}
+
+// TestOracleTx_SnapshotIsolationAtBegin asserts a commit that lands AFTER the
+// workspace began is invisible to it for its whole lifetime — the engine's
+// snapshot-isolation contract the workspace mirrors (see
+// TestProbe_WriteTxSnapshotAtBegin for the engine-side evidence).
+func TestOracleTx_SnapshotIsolationAtBegin(t *testing.T) {
+	o := NewGraphOracle()
+	seedPerson(t, o, "alice", 30)
+
+	tx := o.BeginTx()
+	// A concurrent session commits carol and mutates alice AFTER tx began.
+	seedPerson(t, o, "carol", 40)
+	if res := o.ApplyMatch(tmplSetAge, map[string]any{"name": "alice", "age": int64(77)}); !res.Committed {
+		t.Fatalf("concurrent set: %+v", res)
+	}
+
+	if tx.HasPerson("carol") {
+		t.Fatal("post-BEGIN commit visible inside the workspace (snapshot isolation broken)")
+	}
+	if age, ok := tx.AgeOf("alice"); !ok || age != int64(30) {
+		t.Fatalf("workspace observes post-BEGIN mutation: AgeOf(alice)=%v,%v; want the begin value 30", age, ok)
+	}
+	if got, want := tx.NodeNames(), []string{"alice"}; !slices.Equal(got, want) {
+		t.Fatalf("workspace NodeNames=%v; want %v", got, want)
+	}
+	if tx.NodeCount() != 1 {
+		t.Fatalf("workspace NodeCount=%d; want 1", tx.NodeCount())
+	}
+
+	// An unrelated create still folds cleanly over the advanced parent.
+	tx.ApplyCreate(tmplCreatePerson, map[string]any{"name": "bob", "age": int64(1)})
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if o.NodeCount() != 3 {
+		t.Fatalf("committed NodeCount=%d; want 3", o.NodeCount())
+	}
+	if age := o.nodes[o.byName["alice"]].Properties["age"]; age != int64(77) {
+		t.Fatalf("fold disturbed the concurrent SET: age=%v; want 77", age)
 	}
 }
