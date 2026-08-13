@@ -178,10 +178,23 @@ the two follow-ups in §6.1 — bringing the total to 150 at the corrected recip
 result is recorded in §1.4.1 rather than summarised here, so that the number reported
 is the number measured.
 
-#### 1.4.1 The second arm
+#### 1.4.1 The second arm, and the defect it found instead
 
-_In flight at the time of writing: 110 runs, same recipe, same five oracles, on the
-tree at `3b7bec2f`. The verdict in the header is conditional on it._
+The second arm was **stopped at 71 runs** — 70 clean, and one failure that was **not
+one of the five oracles**. It is worth more than the 110th run of a clean arm would
+have been:
+
+```
+--- FAIL: TestVacuum_CommitPathPerformsNoReclamation (5.23s)
+    version memory did not settle within 5s: 4883 records held against a bound of 4096
+    (ceiling 16384), with 0 ACTIVE READERS, 0 unregistered, oldest reader age 0;
+    vacuum {Running:FALSE Starts:2 Exits:2 Passes:214 Reclaimed:11502 BACKLOG:3767 …}
+```
+
+No reader was holding anything back, and the sweeper had **exited with 3767 records of
+reclamation debt outstanding**. Filed as **rmp #2424** and fixed; §4.2 has the account.
+The arm is being re-run in full — 150 runs — on the tree that includes it, because a
+150-run demonstration of a superseded tree demonstrates nothing about the shipped one.
 
 ### 1.5 The absolute oracle, and why it was worth building
 
@@ -358,6 +371,53 @@ concurrent-writer arm is what gives that claim any content.
 
 ---
 
+### 4.2 FIXED — rmp #2424: version memory could settle ABOVE the stated bound, permanently
+
+The 150-run arm's own peer load found this, which is the argument for running the arm
+at all rather than reasoning about it.
+
+`MVCCStats` admits exactly two reasons for retained versions to exceed `Bound`: a
+reader is legitimately holding them back, or the vacuum has not yet caught up with a
+burst — and `Ceiling` bounds the second. The observed state was **neither**: zero
+active readers, the sweeper **exited**, and 3767 records of reclamation debt
+outstanding with 4883 records held against a bound of 4096.
+
+**Mechanism.** `Graph.chargeReclaimDebt` signals the vacuum only once the accumulated
+debt passes `reclaimThreshold`. The threshold amortises the SIGNAL, and that is sound
+only while a sweeper is alive to do the work eventually. With none alive the debt is
+invisible to everything: the churn signal fires only above the threshold, and the drain
+signal only when a reader leaves. A workload that stops **just short** of the threshold
+after the sweeper's idle exit therefore keeps its versions for the life of the process.
+
+**Fix.** A sub-threshold charge now ensures a sweeper EXISTS, testing `running` first so
+the ordinary path pays one atomic load of a line written only when a sweeper starts or
+exits — not a channel send per commit. The vacuum loop's exit path already re-checks the
+wake CHANNEL after clearing `running`, so a sender that reads `running` false starts a
+sweeper itself; this is the same cover for the case that leaves no signal at all.
+
+**Pinned by the invariant, not the symptom.** The symptom needs a residue *plus* a burst
+to cross the bound, which makes it a race to assert — it appeared once in 71 runs. The
+invariant is exact: there must never be an outstanding backlog with `Running` false. It
+fails deterministically against the previous build with **4095 records stranded**, and a
+proportionality control asserts the amortisation survives (the sweeper starts a small
+constant number of times across 16 384 modifications, not once per commit).
+
+**Attribution is NOT established, and is stated as unknown.** The mechanism is
+independent of §1's watermark fix. It is possible that capping the watermark made passes
+free less and so reach the idle exit sooner, raising the frequency without being the
+cause; that was not measured, and the failure mode is the one the existing debt guard's
+own comment already describes.
+
+**Two white-box tests were passing only because no sweeper was alive.** They count
+deltas and drive `ReclaimVersions` from a PRIVATE `mvcc.Horizon` the graph knows nothing
+about, so a background pass is entitled to free the same records. Their shared fixture
+now claims a graph horizon slot with `EnterHolding` — the documented
+hold-everything-back state — which suspends the sweeper's EFFECT rather than its
+existence. That is the third and fourth test this cycle found to be passing for a reason
+other than the one it asserted.
+
+---
+
 ## 5. What this certification does NOT establish
 
 Stated plainly, because an unmeasured axis reported as sound is how a certification
@@ -409,6 +469,7 @@ becomes misleading.
 | #2420 | 9 / 9 | The reclamation watermark could exceed a live reader's start instant | **FIXED** `9167d3d3` |
 | #2423 | 9 / 9 | An index-seek rewrite dropped the label predicate; a self-contradictory row | **FIXED** `fca34a0c` |
 | #2366 | 8 / 7 | A rolled-back writer re-reserved a value a peer's committed release had freed | **FIXED** `fca34a0c`, `3b7bec2f` |
+| #2424 | 8 / 8 | Version memory could settle above the stated bound, permanently: the sweeper exited with an outstanding debt | **FIXED** `f3e8f48f` |
 
 ### 6.1 A defect this cycle introduced, and caught before shipping
 
@@ -463,3 +524,5 @@ go test -count=1 -run '^TestIndexSeek_LabelGuard' ./cypher/
 |---|---|
 | `9167d3d3` | fix(mvcc): the reclamation watermark is CAPPED by its fallback (#2420) |
 | `fca34a0c` | fix(cypher): defer UNIQUE releases to commit, and qualify every index seek by its label (#2366, #2423) |
+| `3b7bec2f` | fix(cypher): a reserve that spends its own pending release must RESTORE it on rollback (#2366) |
+| `f3e8f48f` | fix(lpg): a reclamation debt below the wake threshold must still find a sweeper (#2424) |
