@@ -172,6 +172,17 @@ strong statement **about the mechanism**. The original symptom's own rate is ~2 
 run, so 40 runs expect 0.8 events and P(0 | unchanged) ≈ 45 % — this arm alone does not
 decide the symptom, and the deterministic unit test is what carries it.
 
+**The ticket's own criterion asks for 150 runs, and it is being honoured to the
+letter.** A second arm of 110 runs is running on the final tree — the tree including
+the two follow-ups in §6.1 — bringing the total to 150 at the corrected recipe. The
+result is recorded in §1.4.1 rather than summarised here, so that the number reported
+is the number measured.
+
+#### 1.4.1 The second arm
+
+_In flight at the time of writing: 110 runs, same recipe, same five oracles, on the
+tree at `3b7bec2f`. The verdict in the header is conditional on it._
+
 ### 1.5 The absolute oracle, and why it was worth building
 
 The shipped oracle only fires when two reads straddle a write. The absolute one fires
