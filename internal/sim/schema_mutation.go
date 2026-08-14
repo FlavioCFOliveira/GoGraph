@@ -278,7 +278,13 @@ func runSchemaMutation(ctx context.Context, seed uint64) (*SimReport, error) {
 
 		actor := sm.workload.SelectActor(sm.seed)
 		op := actor.NextOp(sm.seed, sm.oracle)
-		committed := sm.execute(ctx, op)
+		committed, counters := sm.executeCounted(ctx, op)
+		// Per-op counters oracle (#2448): every committed mutation's effect report
+		// (SET/REMOVE property, SET/REMOVE label, SET-map) must match the effect
+		// the oracle predicts, adjudicated on the pre-apply model.
+		if v := CheckOpCounters(tick, op, committed, counters, sm.oracle); len(v) > 0 {
+			return sm.report(tick, op, v), nil
+		}
 		sm.applyToOracle(op, committed)
 		lastTick, lastOp = tick, op
 

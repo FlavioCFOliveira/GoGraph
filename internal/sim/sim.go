@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
@@ -325,13 +326,19 @@ func (s *Simulator) Run(ctx context.Context) (*SimReport, error) {
 			s.cfg.OnOp(tick, op)
 		}
 
-		committed := s.execute(ctx, op)
+		committed, counters := s.executeCounted(ctx, op)
 		if !committed {
 			if op.Kind.IsWrite() {
 				s.rejectedWrites++
 			} else {
 				s.rejectedReads++
 			}
+		}
+		// Per-op counters oracle (#2448): the engine's effect report for this op
+		// must match the effect the oracle predicts, adjudicated on the pre-apply
+		// model — so it runs between execute and applyToOracle.
+		if violations := CheckOpCounters(tick, op, committed, counters, s.oracle); len(violations) > 0 {
+			return s.report(tick, op, violations), nil
 		}
 		s.applyToOracle(op, committed)
 		lastTick, lastOp = tick, op
@@ -427,7 +434,11 @@ func (s *Simulator) runWithDDL(ctx context.Context, ddlEvery int) (*SimReport, e
 		if s.cfg.OnOp != nil {
 			s.cfg.OnOp(tick, op)
 		}
-		committed := s.execute(ctx, op)
+		committed, counters := s.executeCounted(ctx, op)
+		// Per-op counters oracle (#2448), on the pre-apply model as in [Simulator.Run].
+		if violations := CheckOpCounters(tick, op, committed, counters, s.oracle); len(violations) > 0 {
+			return s.report(tick, op, violations), nil
+		}
 		s.applyToOracle(op, committed)
 		lastTick, lastOp = tick, op
 
@@ -549,6 +560,18 @@ func (s *Simulator) maybeCheckpoint(tick int64) error {
 // modelled state) and is reported as committed so a read still records its
 // (no-effect) history entry.
 func (s *Simulator) execute(ctx context.Context, op Op) bool {
+	committed, _ := s.executeCounted(ctx, op)
+	return committed
+}
+
+// executeCounted runs op exactly like [Simulator.execute] and additionally
+// returns the engine's per-statement write-effect counters, read from the SAME
+// drained result the tick executed — never from an extra query. The counters
+// are nil when the statement failed before producing a result, or when the op
+// ran on the read path (a read-only statement reports nil counters by the
+// engine contract). Reading them draws no randomness, so a run that feeds them
+// to [CheckOpCounters] stays byte-identical whenever the check finds nothing.
+func (s *Simulator) executeCounted(ctx context.Context, op Op) (bool, *exec.QueryCounters) {
 	var (
 		res Result
 		err error
@@ -559,7 +582,7 @@ func (s *Simulator) execute(ctx context.Context, op Op) bool {
 		res, err = s.engine.Run(ctx, op.Cypher, op.Params)
 	}
 	if err != nil {
-		return false
+		return false, nil
 	}
 	for res.Next() {
 	}
@@ -567,8 +590,12 @@ func (s *Simulator) execute(ctx context.Context, op Op) bool {
 	// fully materialise; treat it as not-committed so the oracle does not model
 	// an effect the engine may not have durably applied.
 	drainErr := res.Err()
+	var counters *exec.QueryCounters
+	if cr, ok := res.(counterReporter); ok {
+		counters = cr.Counters()
+	}
 	_ = res.Close()
-	return drainErr == nil
+	return drainErr == nil, counters
 }
 
 // applyToOracle advances the shadow model for op per its kind. A write is

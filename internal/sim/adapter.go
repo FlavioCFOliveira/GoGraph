@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
@@ -176,6 +177,14 @@ func (r *resultAdapter) StringAt(i int) (string, bool) {
 
 // RowCount reports how many rows have been produced so far.
 func (r *resultAdapter) RowCount() int { return r.rowCount }
+
+// Counters returns the per-statement write-effect counters of the underlying
+// engine result ([cypher.Result.Counters]): nil for a read-only statement, the
+// applied effect set for a write. It implements the checker's counterReporter
+// facet so the per-op counters oracle (#2448) can read the effect report from
+// the same execution the tick drained. The returned pointer is owned by the
+// underlying result and must be treated as read-only.
+func (r *resultAdapter) Counters() *exec.QueryCounters { return r.res.Counters() }
 
 // Err returns the underlying result error.
 func (r *resultAdapter) Err() error { return r.res.Err() }
