@@ -62,6 +62,17 @@ type MVCCSessionsConfig struct {
 	// the oracle folds a workspace exactly when the engine acknowledges the
 	// matching COMMIT.
 	CheckEvery int
+	// Crash opts into deterministic crash injection (rmp #2438): at
+	// seed-scheduled ticks the SimDisk crashes (unsynced state lost, exactly
+	// like SIGKILL), the store reopens through real WAL recovery, every open
+	// transaction dies unacknowledged, and the recovered state is adjudicated
+	// at TRANSACTION granularity against the folded oracle. The zero value
+	// disables crashes — the safe default, byte-identical to a pre-crash run.
+	//
+	// Crashes land BETWEEN scheduler steps (the mode is single-goroutine), so
+	// they always land with transactions OPEN mid-flight; intra-commit crash
+	// points remain the internal/crashpoint battery's domain.
+	Crash CrashConfig
 	// OnStep, when non-nil, is called synchronously after every scheduler step
 	// with the tick, the session advanced, and a one-line description of what
 	// happened. Like [Config.OnOp] it is an observation hook: it must not
@@ -144,6 +155,13 @@ type MVCCSessionsResult struct {
 	// the contract requires. A suspect that instead COMMITs cleanly is a
 	// Violation, never counted here.
 	TxDoomed int
+	// Crashes counts injected crash+recovery cycles (rmp #2438); TxCrashed
+	// counts transactions that were OPEN when a crash landed and therefore
+	// died unacknowledged — their effects must be absent after recovery.
+	// ReplayedOps totals the WAL operations recovery replayed.
+	Crashes     int
+	TxCrashed   int
+	ReplayedOps int
 	// OverlapTicks counts ticks at which >= 2 transactions were open at once;
 	// WriteOverlapTicks counts ticks with >= 2 WRITE transactions open. A run
 	// that never overlaps proves nothing about MVCC — the gates assert these
@@ -224,6 +242,10 @@ type mvccHarness struct {
 	sessions []*mvccSessionState
 	res      *MVCCSessionsResult
 	cfg      MVCCSessionsConfig
+	// disk is the faulting SimDisk under the store, kept so a crash can revoke
+	// its unsynced state; crash is the seed-driven schedule (rmp #2438).
+	disk  *SimDisk
+	crash *CrashSchedule
 	// step is the one-line description of the last scheduler step, for the
 	// OnStep observation hook. Single-goroutine, reset every tick.
 	step string
@@ -272,6 +294,8 @@ func RunMVCCSessions(ctx context.Context, cfg MVCCSessionsConfig) (*MVCCSessions
 		checker: NewInvariantChecker(NewSeed(cfg.Seed ^ checkerSeedMix)),
 		adapter: NewEngineAdapter(store.Engine()),
 		res:     &MVCCSessionsResult{Seed: cfg.Seed, Sessions: cfg.Sessions, Ticks: cfg.Ticks},
+		disk:    disk,
+		crash:   NewCrashSchedule(NewSeed(cfg.Seed^crashSeedMix), cfg.Crash),
 	}
 	// Per-session sub-seeds are drawn up front on this goroutine so each
 	// session's op stream is a function of (master seed, session index) alone,
@@ -315,6 +339,12 @@ func RunMVCCSessions(ctx context.Context, cfg MVCCSessionsConfig) (*MVCCSessions
 				return h.res, nil
 			}
 		}
+		if err := h.maybeCrash(int64(tick)); err != nil {
+			return nil, err
+		}
+		if len(h.res.Violations) > 0 {
+			return h.res, nil
+		}
 	}
 
 	// Drain: roll back every open transaction (a client that goes away), then
@@ -337,6 +367,98 @@ func RunMVCCSessions(ctx context.Context, cfg MVCCSessionsConfig) (*MVCCSessions
 		h.res.Violations = v
 	}
 	return h.res, nil
+}
+
+// maybeCrash injects a SIGKILL-equivalent crash at seed-scheduled ticks
+// (rmp #2438): the SimDisk revokes its unsynced state, the store reopens
+// through real WAL recovery, every OPEN transaction dies unacknowledged (its
+// oracle workspace is discarded — the folded oracle is exactly the
+// acknowledged-transaction set), and the recovered state is adjudicated at
+// TRANSACTION granularity:
+//
+//   - [InvariantChecker.CheckDurability] full-scans the folded model: a
+//     recovered state below it lost an acknowledged transaction's effects
+//     (Durability); above it, an unacknowledged transaction leaked partial
+//     effects in (Atomicity at the crash boundary). acked ⊆ recovered ⊆
+//     issued collapses to exact equality with the folded model, because the
+//     oracle folds whole transactions at COMMIT acknowledgement and nothing
+//     else.
+//   - every committed invariant-bearing pair is swept whole: a torn replay of
+//     a multi-statement transaction surfaces as exactly ONE member present —
+//     the "all present or all absent" clause made observable.
+//
+// Violations land in res.Violations (the caller stops at the tick, so the
+// seed reproduces the finding); a recovery failure is a hard fault. Inert
+// when crashes are disabled.
+func (h *mvccHarness) maybeCrash(tick int64) error {
+	if !h.crash.ShouldCrash(tick) {
+		return nil
+	}
+	// SIGKILL-equivalent: no graceful close; buffered-but-unsynced frames and
+	// unsynced directory entries are lost exactly as a real crash loses them.
+	h.disk.Crash()
+	store, err := OpenSimStore(h.disk, h.store.Config())
+	if err != nil {
+		return fmt.Errorf("sim: crash recovery at tick %d: %w", tick, err)
+	}
+	h.store = store
+	h.adapter = NewEngineAdapter(store.Engine())
+	h.res.Crashes++
+	h.res.ReplayedOps += store.WALOps()
+
+	// Every open transaction died with the store, unacknowledged: discard its
+	// workspace (nothing folds), drop the dead handle untouched, and rebind
+	// each session to the RECOVERED engine. lastCommitted survives — it names
+	// an acknowledged, folded write the recovery must serve.
+	for _, s := range h.sessions {
+		if s.open() {
+			h.res.TxCrashed++
+			if s.otx != nil {
+				s.otx.Abort()
+				s.otx = nil
+			}
+			s.tx = nil
+			s.clearPairState()
+			s.doomSuspect = ""
+			s.remaining = 0
+		}
+		s.sess = store.Engine().NewSession()
+	}
+
+	if v := h.checker.CheckDurability(tick, h.oracle, h.adapter); len(v) > 0 {
+		h.res.Violations = append(h.res.Violations, v...)
+		h.res.Violations = append(h.res.Violations, h.nameDiff(tick)...)
+		return nil
+	}
+	h.res.Violations = append(h.res.Violations, h.crashPairSweep(tick)...)
+	return nil
+}
+
+// crashPairSweep asserts, over EVERY committed invariant-bearing pair (not
+// the bounded per-statement sample), that recovery kept the pair whole: a
+// count of one is a torn multi-statement transaction — half a transaction
+// replayed — which is precisely the atomicity-at-transaction-granularity
+// breach rmp #2438 exists to detect.
+func (h *mvccHarness) crashPairSweep(tick int64) []Violation {
+	var out []Violation
+	for _, p := range h.pairs {
+		got, err := h.checker.countQuery(h.adapter, tmplCountPair, map[string]any{"a": p.a, "b": p.b})
+		if err != nil {
+			out = append(out, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "crash pair sweep",
+				Message: fmt.Sprintf("post-recovery pair probe (%q,%q) failed: %v", p.a, p.b, err)})
+			continue
+		}
+		if got != 2 {
+			detail := "an acknowledged multi-statement transaction did not survive recovery whole"
+			if got == 1 {
+				detail = "TORN TRANSACTION: exactly one member of an acknowledged pair survived replay"
+			}
+			out = append(out, Violation{Kind: ViolationACIDAtomicity, Tick: tick, Op: "crash pair sweep",
+				Message: fmt.Sprintf("committed pair (%q,%q) counts %d members after recovery, want 2 — %s",
+					p.a, p.b, got, detail)})
+		}
+	}
+	return out
 }
 
 // nameDiff renders the Person-name symmetric difference between the oracle
