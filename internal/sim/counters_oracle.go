@@ -166,6 +166,11 @@ func expectedOpCounters(op Op, oracle *GraphOracle) (want exec.QueryCounters, ok
 		// engine (committed == false), so it never reaches this derivation.
 		return exec.QueryCounters{NodesCreated: 1, LabelsAdded: 1, PropertiesSet: 2}, true
 
+	case tmplCreatePersonCity:
+		// CREATE (n:Person {name, age, city}): one node, one label, three
+		// properties (rmp #2452).
+		return exec.QueryCounters{NodesCreated: 1, LabelsAdded: 1, PropertiesSet: 3}, true
+
 	case tmplCreateKnows:
 		a, okA := paramString(op.Params, "a")
 		b, okB := paramString(op.Params, "b")

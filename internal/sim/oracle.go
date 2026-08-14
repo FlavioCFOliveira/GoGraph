@@ -16,6 +16,10 @@ import (
 const (
 	// tmplCreatePerson creates one Person node with name and age.
 	tmplCreatePerson = "CREATE (n:Person {name:$name, age:$age})"
+	// tmplCreatePersonCity creates one Person node with name, age, and a city
+	// drawn from a small seeded vocabulary, so grouped aggregation over
+	// n.city is non-trivial (rmp #2452). The cypher-surface workload uses it.
+	tmplCreatePersonCity = "CREATE (n:Person {name:$name, age:$age, city:$city})"
 	// tmplCreateKnows links two existing Person nodes by name with a KNOWS edge.
 	tmplCreateKnows = "MATCH (a:Person {name:$a}),(b:Person {name:$b}) CREATE (a)-[:KNOWS]->(b)"
 	// tmplSetAge updates the age of the Person matched by name.
@@ -189,7 +193,7 @@ func (o *GraphOracle) recordOp(cypher string, params map[string]any, res OracleR
 // state and returns the prediction.
 func (o *GraphOracle) ApplyCreate(cypher string, params map[string]any) OracleResult {
 	switch cypher {
-	case tmplCreatePerson:
+	case tmplCreatePerson, tmplCreatePersonCity:
 		return o.recordOp(cypher, params, o.createPerson(params))
 	case tmplCreateKnows:
 		return o.recordOp(cypher, params, o.createKnows(params))
@@ -314,12 +318,18 @@ func (o *GraphOracle) createPerson(params map[string]any) OracleResult {
 		}
 	}
 	age := params["age"]
+	props := map[string]any{"name": name, "age": age}
+	if city, ok := paramString(params, "city"); ok {
+		// The [tmplCreatePersonCity] variant additionally carries a city, the
+		// grouping key of the grouped-aggregation surface probes (rmp #2452).
+		props["city"] = city
+	}
 	id := o.nextNodeID
 	o.nextNodeID++
 	o.nodes[id] = &NodeState{
 		ID:         id,
 		Labels:     []string{"Person"},
-		Properties: map[string]any{"name": name, "age": age},
+		Properties: props,
 	}
 	o.byName[name] = id
 	return OracleResult{Committed: true, NodesCreated: 1}
@@ -637,6 +647,81 @@ func (o *GraphOracle) personsWithOutgoingKnows() int {
 		}
 	}
 	return len(srcs)
+}
+
+// cityStat is the oracle's per-city aggregate reference for the grouped
+// surface probes (rmp #2452): the number of Person rows grouped under City and
+// the sum of their integer ages.
+type cityStat struct {
+	City   string
+	Count  int64
+	AgeSum int64
+}
+
+// personCityStats returns one [cityStat] per distinct Person city, ascending
+// by city — the independent reference for the grouped count(*)/sum(n.age) BY
+// n.city surface probes. complete reports whether EVERY modelled Person
+// carries a string city: when false the engine would emit a null-key group
+// the stats do not model, so the grouped-by-city probes must be skipped.
+func (o *GraphOracle) personCityStats() (stats []cityStat, complete bool) {
+	byCity := make(map[string]*cityStat)
+	complete = true
+	for _, n := range o.nodes {
+		if !hasLabel(n, "Person") {
+			continue
+		}
+		city, ok := n.Properties["city"].(string)
+		if !ok {
+			complete = false
+			continue
+		}
+		st := byCity[city]
+		if st == nil {
+			st = &cityStat{City: city}
+			byCity[city] = st
+		}
+		st.Count++
+		if a, ok := n.Properties["age"].(int64); ok {
+			st.AgeSum += a
+		}
+	}
+	stats = make([]cityStat, 0, len(byCity))
+	for _, st := range byCity {
+		stats = append(stats, *st)
+	}
+	slices.SortFunc(stats, func(a, b cityStat) int { return cmp.Compare(a.City, b.City) })
+	return stats, complete
+}
+
+// knowsTargetNamesDistinct returns the ascending-sorted DISTINCT names of every
+// node reached by a KNOWS edge whose source is a Person — the independent
+// reference for the RETURN DISTINCT b.name / WITH DISTINCT surface probes
+// (rmp #2452). Targets without a string name are skipped (none exist in the
+// surface workload, whose targets are always named Persons).
+func (o *GraphOracle) knowsTargetNamesDistinct() []string {
+	seen := make(map[string]bool)
+	for k := range o.edges {
+		if k.label != "KNOWS" {
+			continue
+		}
+		src, ok := o.nodes[k.src]
+		if !ok || !hasLabel(src, "Person") {
+			continue
+		}
+		dst, ok := o.nodes[k.dst]
+		if !ok {
+			continue
+		}
+		if nm, ok := dst.Properties["name"].(string); ok {
+			seen[nm] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for nm := range seen {
+		out = append(out, nm)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // knowsCount returns how many KNOWS edges the oracle models.
