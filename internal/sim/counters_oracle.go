@@ -235,7 +235,8 @@ func expectedOpCounters(op Op, oracle *GraphOracle) (want exec.QueryCounters, ok
 		return exec.QueryCounters{RelationshipsCreated: 1, PropertiesSet: 1}, true
 
 	case tmplCreateKnowsInst, tmplSetKnowsWeight, tmplRemoveKnowsSince,
-		tmplSetKnowsSinceNull, tmplDeleteKnowsInst:
+		tmplSetKnowsSinceNull, tmplDeleteKnowsInst, tmplSetKnowsNote,
+		tmplReplaceKnowsInst, tmplReplaceKnowsInstWith:
 		// The eid-pinned relationship-write templates of the edge-properties
 		// scenario (rmp #2449, #2501) are derived by a dedicated helper.
 		return expectedKnowsInstCounters(op, oracle)
@@ -343,6 +344,12 @@ func expectedOpCounters(op Op, oracle *GraphOracle) (want exec.QueryCounters, ok
 //     nodes — a standalone edge deletion must never cascade to its endpoints,
 //     and the deleted edge's property teardown is suppressed as not
 //     user-visible.
+//   - [tmplSetKnowsNote]: exactly one assignment when the pinned instance
+//     exists (the instance-only-key seed of rmp #2502).
+//   - [tmplReplaceKnowsInst] / [tmplReplaceKnowsInstWith]: one -properties per
+//     key the pinned INSTANCE carries plus one +properties per map entry
+//     (three), re-set keys on both sides — the relationship analogue of
+//     [tmplReplaceProps], attributed per instance (rmp #2502).
 func expectedKnowsInstCounters(op Op, oracle *GraphOracle) (want exec.QueryCounters, ok bool) {
 	k, okP, found := oracle.knowsInstParams(op.Params)
 	if !okP {
@@ -374,6 +381,28 @@ func expectedKnowsInstCounters(op Op, oracle *GraphOracle) (want exec.QueryCount
 		if found {
 			if _, exists := oracle.edges[k]; exists {
 				return exec.QueryCounters{RelationshipsDeleted: 1, NodesDeleted: 0}, true
+			}
+		}
+		return exec.QueryCounters{}, true
+	case tmplSetKnowsNote:
+		if found {
+			if _, exists := oracle.edges[k]; exists {
+				return exec.QueryCounters{PropertiesSet: 1}, true
+			}
+		}
+		return exec.QueryCounters{}, true
+	case tmplReplaceKnowsInst, tmplReplaceKnowsInstWith:
+		// Whole-entity replace on one instance: every property the INSTANCE
+		// carries is cleared (each one -properties, attributed per instance
+		// through the by-handle bag gate — rmp #2500/#2501/#2502) and the
+		// map's three entries are written (each one +properties), re-set keys
+		// included on both sides — mirroring [tmplReplaceProps] for nodes.
+		if found {
+			if e, exists := oracle.edges[k]; exists {
+				return exec.QueryCounters{
+					PropertiesRemoved: int64(len(e.Properties)),
+					PropertiesSet:     3,
+				}, true
 			}
 		}
 		return exec.QueryCounters{}, true

@@ -483,7 +483,11 @@ func (op *SetProperty) applyToRelationship(ent entityBinding, row Row) error {
 	for _, p := range op.parsedMap {
 		keep[p.key] = struct{}{}
 	}
-	for k := range op.mutator.EdgeProperties(ent.relSrcKey, ent.relDstKey) {
+	// The teardown enumerates the UNION of the per-pair aggregate keys and the
+	// targeted instance's own by-handle bag (relClearKeys, #2502): a key the
+	// aggregate lost to a twin-pinned REMOVE would otherwise survive the
+	// replace on this instance, and reads are bag-authoritative.
+	for k := range relClearKeys(op.mutator, ent.relSrcKey, ent.relDstKey, ent.relHandle) {
 		if _, ok := keep[k]; ok {
 			continue
 		}

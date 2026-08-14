@@ -40,6 +40,24 @@ const (
 	// exactly the instance identified by $eid and must leave both endpoint
 	// nodes (and any parallel twin) alive.
 	tmplDeleteKnowsInst = "MATCH (a:Person {name:$a})-[r:KNOWS]->(b:Person {name:$b}) WHERE r.eid = $eid DELETE r"
+	// tmplSetKnowsNote plants `note` on exactly the instance identified by
+	// $eid. On a parallel pair this is the instance-only-key seed for the
+	// replace teardown (rmp #2502): a later whole-entity replace on ANY
+	// instance of the pair must tear `note` down from that instance's own bag
+	// even after the per-pair aggregate entry has been cleared by an op pinned
+	// to a sibling.
+	tmplSetKnowsNote = "MATCH (a:Person {name:$a})-[r:KNOWS]->(b:Person {name:$b}) WHERE r.eid = $eid SET r.note = $note"
+	// tmplReplaceKnowsInst is the whole-entity replace on one instance: the
+	// openCypher contract is "the resulting property map equals exactly the
+	// given map", so any key the instance carried outside the map — `note`
+	// included, however the aggregate/bag stores diverged — must be gone
+	// afterwards (rmp #2502, suspicion 1).
+	tmplReplaceKnowsInst = "MATCH (a:Person {name:$a})-[r:KNOWS]->(b:Person {name:$b}) WHERE r.eid = $eid SET r = {eid: $eid, since: $since, weight: $weight}"
+	// tmplReplaceKnowsInstWith is [tmplReplaceKnowsInst] issued AFTER a WITH
+	// projection boundary: the bound RelationshipValue must keep carrying its
+	// stable handle so the replace reaches the instance's own bag instead of
+	// degrading to the pairwise path (rmp #2502, suspicion 2 — class #2334).
+	tmplReplaceKnowsInstWith = "MATCH (a:Person {name:$a})-[r:KNOWS]->(b:Person {name:$b}) WHERE r.eid = $eid WITH r SET r = {eid: $eid, since: $since, weight: $weight}"
 )
 
 // KnowsInstance identifies one modelled KNOWS edge instance by its unique eid
@@ -55,10 +73,11 @@ type KnowsInstance struct {
 // ISO-8601 `since` string, and a float `weight`, then mutates individual edge
 // INSTANCES with the full relationship write surface — standalone SET
 // (r.weight), REMOVE (r.since), the SET-to-null removal (SET r.since = null),
-// and DELETE r — including over parallel-edge pairs, where one instance is
-// touched and its twin must survive with its own property map. Every op pins
-// its target instance by eid, so the oracle predicts exactly which instance
-// changes.
+// the instance-only-key SET (r.note), the whole-entity replace in its plain
+// and WITH-projected forms (SET r = {…}, rmp #2502), and DELETE r — including
+// over parallel-edge pairs, where one instance is touched and its twin must
+// survive with its own property map. Every op pins its target instance by
+// eid, so the oracle predicts exactly which instance changes.
 //
 // # Concurrency contract
 //
@@ -84,11 +103,11 @@ func (*EdgePropsWriter) Name() string { return "EdgePropsWriter" }
 func (w *EdgePropsWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 	names := oracle.NodeNames()
 	if len(names) >= 2 {
-		switch pick := seed.IntN(11); {
+		switch pick := seed.IntN(14); {
 		case pick < 3:
-			// 30%: grow the Person population (fall through to the create below).
+			// ~21%: grow the Person population (fall through to the create below).
 		case pick < 6:
-			// 30%: a KNOWS instance between a seed-chosen pair. A pair that is
+			// ~21%: a KNOWS instance between a seed-chosen pair. A pair that is
 			// already linked gains a parallel instance (multigraph); a self-pair
 			// draw falls back to a Person create (self-loops are out of scope).
 			a := names[seed.IntN(len(names))]
@@ -97,7 +116,7 @@ func (w *EdgePropsWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 				return w.opCreateInstance(seed, a, b)
 			}
 		case pick < 7:
-			// 10%: a deliberate PARALLEL twin of an existing instance — the
+			// ~7%: a deliberate PARALLEL twin of an existing instance — the
 			// defect-magnet shape: two edges between the same endpoints, each with
 			// its own eid and property map.
 			if insts := oracle.KnowsInstancesByEID(); len(insts) > 0 {
@@ -105,7 +124,7 @@ func (w *EdgePropsWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 				return w.opCreateInstance(seed, t.Src, t.Dst)
 			}
 		case pick < 8:
-			// 10%: standalone relationship SET on one instance.
+			// ~7%: standalone relationship SET on one instance.
 			if insts := oracle.KnowsInstancesByEID(); len(insts) > 0 {
 				t := insts[seed.IntN(len(insts))]
 				return Op{Kind: OpUpdate, Cypher: tmplSetKnowsWeight, Params: map[string]any{
@@ -113,7 +132,7 @@ func (w *EdgePropsWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 				}}
 			}
 		case pick < 9:
-			// 10%: standalone relationship REMOVE on one instance. Removing an
+			// ~7%: standalone relationship REMOVE on one instance. Removing an
 			// already-removed `since` is a modelled no-op the engine must agree on.
 			if insts := oracle.KnowsInstancesByEID(); len(insts) > 0 {
 				t := insts[seed.IntN(len(insts))]
@@ -122,7 +141,7 @@ func (w *EdgePropsWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 				}}
 			}
 		case pick < 10:
-			// ~9%: SET-to-null removal on one instance — same modelled removal
+			// ~7%: SET-to-null removal on one instance — same modelled removal
 			// semantics as REMOVE, but through the SET operator path (rmp #2501).
 			// Nulling an already-absent `since` is a modelled no-op the engine
 			// must agree on.
@@ -132,8 +151,33 @@ func (w *EdgePropsWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 					"a": t.Src, "b": t.Dst, "eid": t.EID,
 				}}
 			}
+		case pick < 11:
+			// ~7%: plant the instance-only `note` key on one instance (rmp
+			// #2502): the seed a later whole-entity replace must tear down.
+			if insts := oracle.KnowsInstancesByEID(); len(insts) > 0 {
+				t := insts[seed.IntN(len(insts))]
+				return Op{Kind: OpUpdate, Cypher: tmplSetKnowsNote, Params: map[string]any{
+					"a": t.Src, "b": t.Dst, "eid": t.EID, "note": fmt.Sprintf("n%d", seed.IntN(1000)),
+				}}
+			}
+		case pick < 12:
+			// ~7%: whole-entity replace on one instance — the resulting map must
+			// equal exactly {eid, since, weight}, dropping any planted `note`
+			// however the aggregate/bag stores diverged (rmp #2502).
+			if insts := oracle.KnowsInstancesByEID(); len(insts) > 0 {
+				t := insts[seed.IntN(len(insts))]
+				return w.opReplaceInstance(seed, t, tmplReplaceKnowsInst)
+			}
+		case pick < 13:
+			// ~7%: the same whole-entity replace issued across a WITH projection
+			// boundary — the stable handle must survive the projection (rmp
+			// #2502, class #2334).
+			if insts := oracle.KnowsInstancesByEID(); len(insts) > 0 {
+				t := insts[seed.IntN(len(insts))]
+				return w.opReplaceInstance(seed, t, tmplReplaceKnowsInstWith)
+			}
 		default:
-			// ~9%: standalone DELETE r of one instance — endpoints and any parallel
+			// ~7%: standalone DELETE r of one instance — endpoints and any parallel
 			// twin must survive.
 			if insts := oracle.KnowsInstancesByEID(); len(insts) > 0 {
 				t := insts[seed.IntN(len(insts))]
@@ -157,6 +201,16 @@ func (w *EdgePropsWriter) opCreateInstance(seed *Seed, a, b string) Op {
 	weight := float64(seed.IntN(100000)) / 100.0
 	return Op{Kind: OpCreate, Cypher: tmplCreateKnowsInst,
 		Params: map[string]any{"a": a, "b": b, "eid": w.nextEID, "since": since, "weight": weight}}
+}
+
+// opReplaceInstance builds a whole-entity replace (plain or WITH-projected)
+// pinned to instance t, with fresh seed-derived since/weight and t's own eid
+// (the eid is re-written by the map so the instance stays pinnable).
+func (*EdgePropsWriter) opReplaceInstance(seed *Seed, t KnowsInstance, tmpl string) Op {
+	since := fmt.Sprintf("2026-%02d-%02d", 1+int(seed.IntN(12)), 1+int(seed.IntN(28)))
+	weight := float64(seed.IntN(100000)) / 100.0
+	return Op{Kind: OpUpdate, Cypher: tmpl,
+		Params: map[string]any{"a": t.Src, "b": t.Dst, "eid": t.EID, "since": since, "weight": weight}}
 }
 
 // KnowsInstancesByEID returns every modelled KNOWS edge instance that carries a
@@ -251,6 +305,42 @@ func (o *GraphOracle) removeKnowsSince(params map[string]any) OracleResult {
 	if found {
 		if e, exists := o.edges[k]; exists {
 			delete(e.Properties, "since")
+		}
+	}
+	return OracleResult{Committed: true}
+}
+
+// setKnowsNote models [tmplSetKnowsNote]: it plants the `note` property on
+// exactly the instance pinned by eid — the instance-only-key seed for the
+// replace teardown (rmp #2502). A miss is a committed no-effect result.
+func (o *GraphOracle) setKnowsNote(params map[string]any) OracleResult {
+	k, ok, found := o.knowsInstParams(params)
+	if !ok {
+		return OracleResult{ErrorMsg: "oracle: setKnowsNote missing/ill-typed param"}
+	}
+	if found {
+		if e, exists := o.edges[k]; exists {
+			e.Properties["note"] = params["note"]
+		}
+	}
+	return OracleResult{Committed: true}
+}
+
+// replaceKnowsInst models [tmplReplaceKnowsInst] and
+// [tmplReplaceKnowsInstWith]: after the whole-entity replace, the instance's
+// property map equals EXACTLY {eid, since, weight} — any other key it carried
+// (a planted `note` included) is gone, and the parallel twin is untouched. The
+// read-back check ([CheckEdgeProperties]) then enforces the exact-map contract
+// continuously, across crash/recovery too. A miss is a committed no-effect
+// result.
+func (o *GraphOracle) replaceKnowsInst(params map[string]any) OracleResult {
+	k, ok, found := o.knowsInstParams(params)
+	if !ok {
+		return OracleResult{ErrorMsg: "oracle: replaceKnowsInst missing/ill-typed param"}
+	}
+	if found {
+		if e, exists := o.edges[k]; exists {
+			e.Properties = map[string]any{"eid": k.eid, "since": params["since"], "weight": params["weight"]}
 		}
 	}
 	return OracleResult{Committed: true}
@@ -377,7 +467,7 @@ func CheckEdgeProperties(tick int64, oracle *GraphOracle, engine *EngineAdapter)
 func edgePropertiesScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioEdgeProperties,
-		Description: "relationship writes on parallel KNOWS instances (SET r.weight / REMOVE r.since / SET r.since = null / DELETE r by eid): per-instance round-trip, twin survival, endpoints alive, crash/recovery",
+		Description: "relationship writes on parallel KNOWS instances (SET r.weight / REMOVE r.since / SET r.since = null / SET r.note / SET r = map plain+WITH / DELETE r by eid): per-instance round-trip, exact-map replace, twin survival, endpoints alive, crash/recovery",
 		Mode:        ModeDeterministic,
 		DefaultSeed: 0xED9E9405,
 		MaxTicks:    500,

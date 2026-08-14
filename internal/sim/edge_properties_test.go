@@ -91,9 +91,10 @@ func fingerprintOp(op Op) string {
 
 // TestEdgeProperties_NonVacuous confirms the workload actually exercises every
 // relationship-write family — instance CREATE, standalone SET r.weight,
-// REMOVE r.since, SET r.since = null, and DELETE r — and that a genuine
-// parallel-edge pair (two live instances between the same endpoints) existed
-// during the run.
+// REMOVE r.since, SET r.since = null, SET r.note (the instance-only-key seed),
+// the whole-entity replace in its plain and WITH-projected forms (rmp #2502),
+// and DELETE r — and that a genuine parallel-edge pair (two live instances
+// between the same endpoints) existed during the run.
 func TestEdgeProperties_NonVacuous(t *testing.T) {
 	sc := edgePropertiesScenario()
 	cfg := sc.DeterministicConfig(sc.DefaultSeed)
@@ -125,7 +126,8 @@ func TestEdgeProperties_NonVacuous(t *testing.T) {
 	}
 	for _, tmpl := range []string{
 		tmplCreateKnowsInst, tmplSetKnowsWeight, tmplRemoveKnowsSince,
-		tmplSetKnowsSinceNull, tmplDeleteKnowsInst,
+		tmplSetKnowsSinceNull, tmplDeleteKnowsInst, tmplSetKnowsNote,
+		tmplReplaceKnowsInst, tmplReplaceKnowsInstWith,
 	} {
 		if counts[tmpl] == 0 {
 			t.Errorf("vacuous: template never emitted: %s", tmpl)

@@ -35,9 +35,14 @@ const (
 	tmplCreateKnowsProps = "MATCH (a:Person {name:$a}),(b:Person {name:$b}) CREATE (a)-[:KNOWS {since:$since, weight:$weight}]->(b)"
 )
 
-// knowsEdgePropKeys are the property keys a [tmplCreateKnowsProps] edge carries,
-// in a fixed order; the edge-property checker projects exactly these.
-var knowsEdgePropKeys = []string{"since", "weight"}
+// knowsEdgePropKeys are the property keys the edge-property checker projects,
+// in a fixed order: the {since, weight} a [tmplCreateKnowsProps] /
+// [tmplCreateKnowsInst] edge carries, plus the instance-only `note` planted by
+// [tmplSetKnowsNote] (rmp #2502) — projecting `note` on every probe is what
+// makes the whole-entity replace's exact-map contract continuously enforced
+// (a `note` the replace failed to tear down reads back non-null while the
+// model says null).
+var knowsEdgePropKeys = []string{"since", "weight", "note"}
 
 // typedPropKeys are the property keys a [tmplCreateTyped] node carries, in a
 // fixed order, plus the never-set key "absent" the checker verifies reads NULL.
@@ -416,6 +421,13 @@ func (o *GraphOracle) ApplyMatch(cypher string, params map[string]any) OracleRes
 		// openCypher: SET r.x = null removes the property exactly as REMOVE r.x
 		// does, so both templates share the removal model (rmp #2501).
 		return o.recordOp(cypher, params, o.removeKnowsSince(params))
+	case tmplSetKnowsNote:
+		return o.recordOp(cypher, params, o.setKnowsNote(params))
+	case tmplReplaceKnowsInst, tmplReplaceKnowsInstWith:
+		// The WITH-projected variant carries the same modelled semantics: the
+		// projection boundary must not change which instance the replace
+		// reaches (rmp #2502).
+		return o.recordOp(cypher, params, o.replaceKnowsInst(params))
 	}
 	// Schema-mutation templates (REMOVE / SET-label / SET-map) mutate the matched
 	// node's labels/properties; the helper reports whether it recognised the
