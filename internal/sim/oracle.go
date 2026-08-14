@@ -193,6 +193,8 @@ func (o *GraphOracle) ApplyCreate(cypher string, params map[string]any) OracleRe
 		return o.recordOp(cypher, params, o.createPerson(params))
 	case tmplCreateKnows:
 		return o.recordOp(cypher, params, o.createKnows(params))
+	case tmplCreateFollows:
+		return o.recordOp(cypher, params, o.createFollows(params))
 	case tmplCreateTyped:
 		return o.recordOp(cypher, params, o.createTyped(params))
 	case tmplCreateKnowsProps:

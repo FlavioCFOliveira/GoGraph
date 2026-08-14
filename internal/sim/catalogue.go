@@ -35,6 +35,7 @@ const (
 	ScenarioEdgeProperties    = "edge-properties"
 	ScenarioIndexDiversity    = "index-diversity"
 	ScenarioCypherSurface     = "cypher-surface"
+	ScenarioPatternShapes     = "pattern-shapes"
 	ScenarioSchemaMutation    = "schema-mutation"
 	ScenarioMergeRel          = "merge-rel"
 )
@@ -105,6 +106,7 @@ func DefaultRegistry() (*Registry, error) {
 		edgePropertiesScenario(),
 		indexDiversityScenario(),
 		cypherSurfaceScenario(),
+		patternShapesScenario(),
 		schemaMutationScenario(),
 		mergeRelScenario(),
 		durableCommitCrashScenario(),

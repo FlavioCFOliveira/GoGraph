@@ -236,8 +236,10 @@ func (c *InvariantChecker) checkAllEdgesDurable(tick int64, oracle *GraphOracle,
 				fmt.Sprintf("committed edge %d-[%s]->%d has a missing endpoint", e.SrcID, e.Label, e.DstID))
 			continue
 		}
+		// The relationship type is interpolated from the oracle's own modelled
+		// label (a template constant such as KNOWS or FOLLOWS), never from input.
 		n, err := c.countQuery(engine,
-			"MATCH (a:Person {name:$a})-[r:KNOWS]->(b:Person {name:$b}) RETURN count(r)",
+			fmt.Sprintf("MATCH (a:Person {name:$a})-[r:%s]->(b:Person {name:$b}) RETURN count(r)", e.Label),
 			map[string]any{"a": src, "b": dst})
 		if err != nil {
 			c.add(ViolationOracleDeviation, tick, "durable edge existence", fmt.Sprintf("probe %s->%s failed: %v", src, dst, err))
@@ -245,7 +247,7 @@ func (c *InvariantChecker) checkAllEdgesDurable(tick int64, oracle *GraphOracle,
 		}
 		if n == 0 {
 			c.add(ViolationACIDDurability, tick, "durable edge existence",
-				fmt.Sprintf("committed edge %s-[KNOWS]->%s did not survive recovery", src, dst))
+				fmt.Sprintf("committed edge %s-[%s]->%s did not survive recovery", src, e.Label, dst))
 		}
 	}
 }
@@ -311,8 +313,10 @@ func (c *InvariantChecker) checkSampledEdges(tick int64, oracle *GraphOracle, en
 				fmt.Sprintf("oracle edge %d-[%s]->%d has a missing endpoint", e.SrcID, e.Label, e.DstID))
 			continue
 		}
+		// As in the durability sweep, the relationship type comes from the
+		// oracle's modelled label (a template constant), never from input.
 		n, err := c.countQuery(engine,
-			"MATCH (a:Person {name:$a})-[r:KNOWS]->(b:Person {name:$b}) RETURN count(r)",
+			fmt.Sprintf("MATCH (a:Person {name:$a})-[r:%s]->(b:Person {name:$b}) RETURN count(r)", e.Label),
 			map[string]any{"a": src, "b": dst})
 		if err != nil {
 			c.add(ViolationOracleDeviation, tick, "edge existence", fmt.Sprintf("probe %s->%s failed: %v", src, dst, err))
@@ -320,7 +324,7 @@ func (c *InvariantChecker) checkSampledEdges(tick int64, oracle *GraphOracle, en
 		}
 		if n == 0 {
 			c.add(ViolationGraphIntegrity, tick, "edge existence",
-				fmt.Sprintf("oracle edge %s-[KNOWS]->%s absent in engine", src, dst))
+				fmt.Sprintf("oracle edge %s-[%s]->%s absent in engine", src, e.Label, dst))
 		}
 	}
 }
