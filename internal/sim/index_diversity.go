@@ -43,9 +43,14 @@ const indexDiversityBulk = 9000
 // the seek-result diversity oracle (rmp #2450): bounded and half-open ranges,
 // STARTS WITH, and IN-shaped predicates — in literal and parameterised
 // spellings — must reproduce, as id-multisets and counts, an independent
-// full-scan reference filtered client-side. It is bit-reproducible (the
-// parallel backfill produces identical index contents regardless of worker
-// scheduling).
+// full-scan reference filtered client-side — and the statistics-regime oracle
+// (rmp #2456): CALL db.stats.refresh() is driven before the crash window,
+// after every recovery, and at seed-chosen ticks, pinning the procedure's
+// row/throttle contract, result identity across every refresh, and the
+// post-crash empty-collector regime. It is bit-reproducible (the parallel
+// backfill produces identical index contents regardless of worker
+// scheduling; the refresh outcome at the deterministic points is a pure
+// function of engine lifetime).
 func indexDiversityScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioIndexDiversity,
@@ -70,7 +75,13 @@ func indexDiversityScenario() Scenario {
 // the seek-result diversity check ([IndexSeekResults], whose terminal Finish
 // asserts the run was not vacuous), plus the plan-stability check after every
 // recovery and at the end (the probe set and baseline are fixed at scenario
-// start; see [indexDiversityParityProbes] and [CapturePlanBaseline]). It crashes WITHOUT the oracle durability check (the bulk nodes
+// start; see [indexDiversityParityProbes] and [CapturePlanBaseline]), plus
+// the statistics-regime oracle ([StatsRegime], rmp #2456): db.stats.refresh()
+// runs once before the crash window (with a back-to-back throttle probe),
+// once after every recovery (the recovered engine must start with an empty
+// collector and immediately allow a rebuild), and at seed-chosen ticks, with
+// the probe battery asserted result-identical across every refresh and a
+// terminal non-vacuity Finish. It crashes WITHOUT the oracle durability check (the bulk nodes
 // are not modelled in the minimal oracle; this scenario's invariant is engine
 // self-consistency — the index agreeing with its own base data — not oracle
 // parity). It is deterministic.
@@ -137,6 +148,29 @@ func runIndexDiversity(ctx context.Context, seed uint64) (*SimReport, error) {
 		return nil, fmt.Errorf("sim: index-diversity plan baseline: %w", err)
 	}
 
+	// Statistics-driven planning regime (rmp #2456): the first refresh runs
+	// HERE — before the crash window opens (StabilityWindow ticks) — so the
+	// engine leaves its no-statistics regime at least once per run, and a
+	// back-to-back second call pins the rate-limit refusal. The post-backfill
+	// battery just above is the immediately-before capture; the battery below
+	// re-verifies every seek answer and the parity probes on the refreshed
+	// engine. Mid-run refresh ticks are drawn from the checker's own sub-seed
+	// so the workload stream stays byte-identical.
+	statsRegime := NewStatsRegime(probes...)
+	statsSeed := NewSeed(seed ^ statsSeedMix)
+	if v := statsRegime.CheckRefresh(0, sm.engine, ExpectRebuild); len(v) > 0 {
+		return sm.report(0, Op{Kind: OpMatch, Cypher: "<post-backfill stats refresh>"}, v), nil
+	}
+	if v := statsRegime.CheckRefresh(0, sm.engine, ExpectRefusal); len(v) > 0 {
+		return sm.report(0, Op{Kind: OpMatch, Cypher: "<post-backfill stats refresh throttle>"}, v), nil
+	}
+	if v := seekResults.Check(0, sm.engine); len(v) > 0 {
+		return sm.report(0, Op{Kind: OpMatch, Cypher: "<post-refresh seek-result check>"}, v), nil
+	}
+	if v := CheckAccessPathParity(0, nil, sm.engine, probes...); len(v) > 0 {
+		return sm.report(0, Op{Kind: OpMatch, Cypher: "<post-refresh access-path parity check>"}, v), nil
+	}
+
 	churn := indexDiversityBulk
 	for i := 0; i < cfg.MaxTicks; i++ {
 		if err := ctx.Err(); err != nil {
@@ -177,6 +211,21 @@ func runIndexDiversity(ctx context.Context, seed uint64) (*SimReport, error) {
 			if v := seekResults.Check(tick, sm.engine); len(v) > 0 {
 				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery seek-result check>"}, v), nil
 			}
+			// Post-crash statistics regime (rmp #2456): the collector is
+			// in-memory and never rebuilt by recovery, so the recovered engine
+			// must report zero tracked pairs; its fresh rate limiter must then
+			// allow an immediate rebuild, across which every seek answer must
+			// hold (the seek-result check above is the immediately-before
+			// battery, the one below the immediately-after battery).
+			if v := statsRegime.CheckRecovered(tick, sm.engine); len(v) > 0 {
+				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery stats regime>"}, v), nil
+			}
+			if v := statsRegime.CheckRefresh(tick, sm.engine, ExpectRebuild); len(v) > 0 {
+				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery stats refresh>"}, v), nil
+			}
+			if v := seekResults.Check(tick, sm.engine); len(v) > 0 {
+				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery post-refresh seek-result check>"}, v), nil
+			}
 		}
 
 		// Churn: create a fresh indexed Person, and periodically delete one, so the
@@ -203,6 +252,19 @@ func runIndexDiversity(ctx context.Context, seed uint64) (*SimReport, error) {
 				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<periodic seek-result check>"}, v), nil
 			}
 		}
+
+		// Seed-chosen mid-run refresh probes (rmp #2456): the outcome is
+		// wall-clock dependent (the rate limiter measures real time, and only
+		// the first call of an engine lifetime is deterministically allowed),
+		// so the probe accepts either verdict while still pinning the row
+		// shape, the tracked-pairs observable, and result identity across the
+		// call. The draw comes from the checker's own stream, consumed every
+		// tick, so the probe ticks are a pure function of the run seed.
+		if statsSeed.Float64() < 0.02 {
+			if v := statsRegime.CheckRefresh(tick, sm.engine, ExpectEither); len(v) > 0 {
+				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<mid-run stats refresh probe>"}, v), nil
+			}
+		}
 	}
 	// Terminal consistency, introspection, parity, and plan-stability checks.
 	if v := CheckIndexConsistency(int64(cfg.MaxTicks), nil, sm.engine, indexDiversitySpecs...); len(v) > 0 {
@@ -224,6 +286,14 @@ func runIndexDiversity(ctx context.Context, seed uint64) (*SimReport, error) {
 	// returned rows at least once, or the checker compared only empty sets.
 	if v := seekResults.Finish(int64(cfg.MaxTicks)); len(v) > 0 {
 		return sm.report(int64(cfg.MaxTicks), Op{Kind: OpMatch, Cypher: "<seek-result vacuity check>"}, v), nil
+	}
+	// Statistics-regime non-vacuity (rmp #2456): the run must have completed
+	// at least one rebuild that published statistics (non-zero tracked pairs)
+	// and observed at least one rate-limit refusal, or the statistics path
+	// never engaged. Refresh-correlated plan changes are legal and are
+	// reported through [StatsRegime.PlanChanges], never failed.
+	if v := statsRegime.Finish(int64(cfg.MaxTicks)); len(v) > 0 {
+		return sm.report(int64(cfg.MaxTicks), Op{Kind: OpMatch, Cypher: "<stats regime vacuity check>"}, v), nil
 	}
 	return nil, nil
 }

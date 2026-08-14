@@ -83,6 +83,17 @@ func (a *EngineAdapter) Profile(ctx context.Context, query string, params map[st
 	return a.eng.Profile(ctx, query, ev)
 }
 
+// StatsTrackedPairs reports how many distinct (label, property) pairs the
+// wrapped engine currently holds planner statistics for
+// ([cypher.Engine.StatsTrackedPairs]): 0 until the first completed
+// db.stats.refresh() of the engine's lifetime, and 0 again on a recovered
+// engine until its next refresh. The statistics-regime checker (rmp #2456)
+// reads it as the something-was-seen observable that a rebuild really
+// published statistics.
+func (a *EngineAdapter) StatsTrackedPairs() int {
+	return a.eng.StatsTrackedPairs()
+}
+
 // NodeCount returns the live node count by running a whole-graph count query
 // through the real engine, so it exercises the same execution path the
 // workload uses.
