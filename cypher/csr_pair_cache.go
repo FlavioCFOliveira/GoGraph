@@ -213,7 +213,7 @@ func csrPairCached(cache *csrPairCache, g *lpg.ReadView[string, float64]) (fwd, 
 func csrPairCachedAt(
 	cache *csrPairCache, g *lpg.ReadView[string, float64],
 ) (fwd, rev *csr.CSR[float64], at csrPairKey) {
-	if cache == nil || g == nil {
+	if cache == nil || g == nil || viewCarriesOwnWrites(g) {
 		f, r, built := csrPairFromGraphAt(g)
 		return f, r, built
 	}
@@ -224,6 +224,23 @@ func csrPairCachedAt(
 	f, r, built := csrPairFromGraphAt(g)
 	cache.put(built, f, r)
 	return f, r, built
+}
+
+// viewCarriesOwnWrites reports whether g resolves through a WRITE
+// transaction's view — one whose snapshot carries the transaction's own id and
+// therefore sees its own uncommitted writes ([mvcc.Visible]'s own-id rule).
+//
+// Such a view must NEITHER be served from NOR stored into any cache shared
+// across transactions (rmp #2446, found by the DST multi-session mode): the
+// pair it builds embeds its own pending arcs, and a pure reader at the same
+// (epoch, startTS) served that pair sees uncommitted topology — CSR positions
+// shift and the position-keyed edge-type filter mislands, so committed edges
+// lose their types. The converse serve hides the writer's own writes from
+// itself. Pure readers carry TxID zero ([lpg.Graph.BeginRead]) and identical
+// visibility at identical (epoch, startTS), so their sharing stays sound.
+func viewCarriesOwnWrites(g *lpg.ReadView[string, float64]) bool {
+	snap := g.Snapshot()
+	return snap != nil && snap.TxID() != 0
 }
 
 // csrPairKeyFor is the key a lookup for g asks about. It must name exactly what
