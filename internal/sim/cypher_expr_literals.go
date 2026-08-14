@@ -63,6 +63,92 @@ var exprLiteralCases = []exprLiteralCase{
 	{"RETURN tail([1,2,3])", []string{"[2, 3]"}},
 	{"RETURN 'x' IN ['x','y']", []string{"true"}},
 
+	// CY11b — the remaining PURE scalar/list/string/math surface (rmp #2458).
+	// A coverage run measured these functions as never called by the DST at all.
+	// Every expectation is an absolute constant captured from the engine, so a
+	// regression in the argument order, the units, or the null policy fails the
+	// run. Registration and arity were verified in cypher/funcs (never assumed):
+	// `cot` and `haversin` are ABSENT from the registry and so cannot be probed
+	// here, and `extract`/`filter` are pass-through stubs whose real contract is
+	// pinned below rather than pretended away.
+	//
+	// String functions.
+	{"RETURN left('hello', 3)", []string{`"hel"`}},
+	{"RETURN left('hello', 0)", []string{`""`}},
+	{"RETURN right('hello', 3)", []string{`"llo"`}},
+	// A count past the end clamps to the whole string rather than erroring.
+	{"RETURN right('hello', 99)", []string{`"hello"`}},
+	// ltrim/rtrim strip on ONE side only, which is what distinguishes them from
+	// trim: the surviving padding is the assertion.
+	{"RETURN ltrim('  hi  ')", []string{`"hi  "`}},
+	{"RETURN rtrim('  hi  ')", []string{`"  hi"`}},
+	{"RETURN replace('abcabc', 'b', 'X')", []string{`"aXcaXc"`}},
+	// Non-overlapping, left to right: 'aaa' has one 'aa' match, leaving 'a'.
+	{"RETURN replace('aaa', 'aa', 'b')", []string{`"ba"`}},
+	// size() counts RUNES on a string, not bytes: 'héllo' is 6 bytes, 5 runes.
+	{"RETURN size('hello')", []string{"5"}},
+	{"RETURN size('héllo')", []string{"5"}},
+	{"RETURN size('')", []string{"0"}},
+
+	// Conversions. The engine's policy is HYBRID: unparseable string content
+	// yields null, while a wrong argument TYPE is a typed error — so the null
+	// cases below pin the content policy, not an error being swallowed.
+	{"RETURN toBoolean('true')", []string{"true"}},
+	{"RETURN toBoolean('TRUE')", []string{"true"}},
+	{"RETURN toBoolean('nope')", []string{"null"}},
+	{"RETURN toBoolean(true)", []string{"true"}},
+	{"RETURN toBooleanList([true, 'false', 1.5])", []string{"[true, false, null]"}},
+	{"RETURN toFloatList([1, '2.5', true])", []string{"[1, 2.5, null]"}},
+	// toInteger truncates toward zero (1.9 → 1), it does not round.
+	{"RETURN toIntegerList([1.9, '-3', 'x'])", []string{"[1, -3, null]"}},
+	{"RETURN toStringList([1, 2.5, true, null])", []string{`["1", "2.5", "true", null]`}},
+
+	// isNaN and the trig/log family. Each argument is chosen so the result is a
+	// long, function-specific expansion: a swapped or wrongly-scaled
+	// implementation cannot land on the same constant by accident.
+	{"RETURN isNaN(0.0/0.0)", []string{"true"}},
+	{"RETURN isNaN(sqrt(-1.0))", []string{"true"}},
+	{"RETURN isNaN(1.0)", []string{"false"}},
+	{"RETURN sin(1.0)", []string{"0.8414709848078965"}},
+	{"RETURN cos(1.0)", []string{"0.5403023058681398"}},
+	{"RETURN tan(1.0)", []string{"1.557407724654902"}},
+	{"RETURN asin(0.5)", []string{"0.5235987755982989"}},
+	{"RETURN acos(0.5)", []string{"1.0471975511965976"}},
+	{"RETURN atan(1.0)", []string{"0.7853981633974483"}},
+	// atan2(y, x): the y-first argument order is what this constant pins —
+	// atan2(1,2) is 0.4636…, while the transposed atan2(2,1) is 1.1071….
+	{"RETURN atan2(1.0, 2.0)", []string{"0.4636476090008061"}},
+	{"RETURN log(2.0)", []string{"0.6931471805599453"}},
+	{"RETURN log10(2.0)", []string{"0.3010299956639812"}},
+	{"RETURN exp(2.0)", []string{"7.38905609893065"}},
+	{"RETURN pi()", []string{"3.141592653589793"}},
+	{"RETURN e()", []string{"2.718281828459045"}},
+	// degrees/radians pin the direction of the conversion in both senses.
+	{"RETURN degrees(1.0)", []string{"57.29577951308232"}},
+	{"RETURN radians(90.0)", []string{"1.5707963267948966"}},
+
+	// sort(): openCypher's total order, stable, ascending. The mixed
+	// upper/lower case is deliberate — the order is by code point, so 'A'
+	// precedes 'a', which a locale-collating implementation would get wrong.
+	{"RETURN sort([3,1,2,1])", []string{"[1, 1, 2, 3]"}},
+	{"RETURN sort(['b','A','a'])", []string{`["A", "a", "b"]`}},
+	{"RETURN sort([])", []string{"[]"}},
+
+	// Null propagation on the scalar surface.
+	{"RETURN size(null)", []string{"null"}},
+	{"RETURN left(null, 3)", []string{"null"}},
+	{"RETURN isNaN(null)", []string{"null"}},
+
+	// extract() and filter() are registered STUBS (cypher/funcs/list_funcs.go:
+	// fnExtractStub / fnFilterStub), not implementations: each takes exactly one
+	// argument and returns it unchanged, existing only so a hand-built
+	// FunctionInvocation does not resolve to "unknown function" — the real
+	// comprehension semantics live in the evaluator, and the openCypher
+	// `extract(x IN list | expr)` spelling does not even parse here. The
+	// identity contract is pinned so a future change to it is visible.
+	{"RETURN extract([1,2])", []string{"[1, 2]"}},
+	{"RETURN filter([1,2])", []string{"[1, 2]"}},
+
 	// CY12 — subscript, slice, map projection.
 	{"RETURN [10,20,30][1]", []string{"20"}},
 	{"RETURN range(1,10)[2..5]", []string{"[3, 4, 5]"}},

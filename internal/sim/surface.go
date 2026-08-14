@@ -10,16 +10,20 @@ import (
 // checkSurfaceAll runs the full Cypher-surface battery: the original read-shape
 // probes ([CheckCypherSurface]), the extended read-clause/aggregation/subquery/
 // procedure probes ([CheckCypherSurfaceExtended]), the grouped-aggregation /
-// DISTINCT-row / UNION-over-data probes ([CheckCypherSurfaceGrouped]), and the
-// graph-independent expression battery ([CheckExprLiterals]). It is the single
-// entry point the scenario calls periodically, after each crash/recovery, and
-// at the end.
+// DISTINCT-row / UNION-over-data probes ([CheckCypherSurfaceGrouped]), the
+// entity-valued function and path-materialisation probes
+// ([CheckCypherSurfaceEntity]), the graph-independent expression battery
+// ([CheckExprLiterals]), and the non-deterministic function invariants
+// ([CheckNonDeterministicFuncs]). It is the single entry point the scenario
+// calls periodically, after each crash/recovery, and at the end.
 func checkSurfaceAll(tick int64, oracle *GraphOracle, engine *EngineAdapter) []Violation {
 	vs := make([]Violation, 0, 8)
 	vs = append(vs, CheckCypherSurface(tick, oracle, engine)...)
 	vs = append(vs, CheckCypherSurfaceExtended(tick, oracle, engine)...)
 	vs = append(vs, CheckCypherSurfaceGrouped(tick, oracle, engine)...)
+	vs = append(vs, CheckCypherSurfaceEntity(tick, oracle, engine)...)
 	vs = append(vs, CheckExprLiterals(tick, engine)...)
+	vs = append(vs, CheckNonDeterministicFuncs(tick, engine)...)
 	return vs
 }
 
