@@ -39,7 +39,11 @@ const indexDiversityBulk = 9000
 // every recovery. It also carries the access-path parity and plan-stability
 // oracles (rmp #2447): literal and parameterised predicates must agree on
 // results and on the physical access path, and a fixed probe set must re-plan
-// byte-identically after every plan-cache rebuild. It is bit-reproducible (the
+// byte-identically after every plan-cache rebuild. On top of those it carries
+// the seek-result diversity oracle (rmp #2450): bounded and half-open ranges,
+// STARTS WITH, and IN-shaped predicates — in literal and parameterised
+// spellings — must reproduce, as id-multisets and counts, an independent
+// full-scan reference filtered client-side. It is bit-reproducible (the
 // parallel backfill produces identical index contents regardless of worker
 // scheduling).
 func indexDiversityScenario() Scenario {
@@ -58,10 +62,11 @@ func indexDiversityScenario() Scenario {
 // backfill), then drives a churn loop that maintains the indexed properties and
 // crashes periodically. It runs the seek-vs-scan consistency check after the
 // initial backfill, periodically during churn, and immediately after every
-// crash/recovery, and — at the same cadence — the access-path parity check,
-// plus the plan-stability check after every recovery and at the end (the probe
-// set and baseline are fixed at scenario start; see
-// [indexDiversityParityProbes] and [CapturePlanBaseline]). It crashes WITHOUT the oracle durability check (the bulk nodes
+// crash/recovery, and — at the same cadence — the access-path parity check and
+// the seek-result diversity check ([IndexSeekResults], whose terminal Finish
+// asserts the run was not vacuous), plus the plan-stability check after every
+// recovery and at the end (the probe set and baseline are fixed at scenario
+// start; see [indexDiversityParityProbes] and [CapturePlanBaseline]). It crashes WITHOUT the oracle durability check (the bulk nodes
 // are not modelled in the minimal oracle; this scenario's invariant is engine
 // self-consistency — the index agreeing with its own base data — not oracle
 // parity). It is deterministic.
@@ -100,6 +105,15 @@ func runIndexDiversity(ctx context.Context, seed uint64) (*SimReport, error) {
 	probes := indexDiversityParityProbes(NewSeed(seed ^ paritySeedMix))
 	if v := CheckAccessPathParity(0, nil, sm.engine, probes...); len(v) > 0 {
 		return sm.report(0, Op{Kind: OpMatch, Cypher: "<post-backfill access-path parity check>"}, v), nil
+	}
+	// Seek-result diversity probes (rmp #2450): range, prefix, and IN-shaped
+	// predicates result-verified against an independent full-scan reference, in
+	// literal and parameterised spellings. Windows come from the checker's own
+	// sub-seed, so the workload stream stays byte-identical; the checker is
+	// stateful so the terminal Finish can assert non-vacuity over the run.
+	seekResults := NewIndexSeekResults(NewSeed(seed^seekResultsSeedMix), indexDiversityBulk)
+	if v := seekResults.Check(0, sm.engine); len(v) > 0 {
+		return sm.report(0, Op{Kind: OpMatch, Cypher: "<post-backfill seek-result check>"}, v), nil
 	}
 	// Plan-stability baseline: every later Explain of the same probes — above
 	// all after a crash rebuilt the plan cache — must reproduce these renderings
@@ -140,6 +154,9 @@ func runIndexDiversity(ctx context.Context, seed uint64) (*SimReport, error) {
 			if v := CheckAccessPathParity(tick, nil, sm.engine, probes...); len(v) > 0 {
 				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery access-path parity check>"}, v), nil
 			}
+			if v := seekResults.Check(tick, sm.engine); len(v) > 0 {
+				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery seek-result check>"}, v), nil
+			}
 		}
 
 		// Churn: create a fresh indexed Person, and periodically delete one, so the
@@ -159,6 +176,9 @@ func runIndexDiversity(ctx context.Context, seed uint64) (*SimReport, error) {
 			if v := CheckAccessPathParity(tick, nil, sm.engine, probes...); len(v) > 0 {
 				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<periodic access-path parity check>"}, v), nil
 			}
+			if v := seekResults.Check(tick, sm.engine); len(v) > 0 {
+				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<periodic seek-result check>"}, v), nil
+			}
 		}
 	}
 	// Terminal consistency, parity, and plan-stability checks.
@@ -170,6 +190,14 @@ func runIndexDiversity(ctx context.Context, seed uint64) (*SimReport, error) {
 	}
 	if v := CheckPlanStability(int64(cfg.MaxTicks), planBase, sm.engine); len(v) > 0 {
 		return sm.report(int64(cfg.MaxTicks), Op{Kind: OpMatch, Cypher: "<terminal plan stability check>"}, v), nil
+	}
+	if v := seekResults.Check(int64(cfg.MaxTicks), sm.engine); len(v) > 0 {
+		return sm.report(int64(cfg.MaxTicks), Op{Kind: OpMatch, Cypher: "<terminal seek-result check>"}, v), nil
+	}
+	// Non-vacuity over the whole run: at least one seek-result arm must have
+	// returned rows at least once, or the checker compared only empty sets.
+	if v := seekResults.Finish(int64(cfg.MaxTicks)); len(v) > 0 {
+		return sm.report(int64(cfg.MaxTicks), Op{Kind: OpMatch, Cypher: "<seek-result vacuity check>"}, v), nil
 	}
 	return nil, nil
 }

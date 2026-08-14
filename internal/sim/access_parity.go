@@ -260,8 +260,9 @@ func totalDbHits(prof string) int64 {
 
 // runProbeIDs executes a single-integer-column probe query and returns the ids
 // it produced, sorted ascending so callers compare and render multisets
-// deterministically.
-func runProbeIDs(engine PlanEngine, query string, params map[string]any) ([]int64, error) {
+// deterministically. It needs only the base [Engine] surface, so the
+// seek-result checker (rmp #2450) shares it.
+func runProbeIDs(engine Engine, query string, params map[string]any) ([]int64, error) {
 	res, err := engine.Run(context.Background(), query, params)
 	if err != nil {
 		return nil, err

@@ -133,6 +133,20 @@ rebuild) and at the end of the run. This closes the rmp #2414 blind spot: a
 parameterised predicate that full-scans while the identical literal seeks
 returns correct answers and is invisible to every result-only oracle.
 
+A seek-result diversity oracle (`index_seek_results.go`, also wired into the
+`index-diversity` scenario) result-verifies the non-equality index read paths
+the thorough index-consistency check does not cover: the bounded and half-open
+btree range (driving `RangeFrom`/`RangeCountFrom`), the `STARTS WITH` prefix
+rewrite, and `IN`-shaped predicates (both the `IN`-list spelling and its
+`UNWIND` twin, which may plan differently but must answer identically). Each
+arm runs in its literal and its parameterised spelling and must reproduce, as
+an id-multiset (and, for the range and prefix count arms, as a cardinality),
+an independent reference built from one plain label scan filtered client-side
+— a path that touches no index machinery. The checker is stateful: at the end
+of the run it asserts non-vacuity (at least one arm returned rows at least
+once), so a run that only ever compared empty sets is reported instead of
+passing silently.
+
 ## The search-algorithm battery
 
 The `search/` package — traversal, path-finding, and analytics — is the
@@ -197,7 +211,7 @@ schedule, budget, mode, checks). `cmd/sim --list-scenarios` prints them.
 | `constraint-enforce` | deterministic | UNIQUE(Person.name) enforcement: duplicate-name CREATEs must be rejected with a typed constraint-violation error (the oracle predicts each accept/reject and the harness flags any disagreement as an enforcement gap), and the constraint must survive crash/recovery still enforcing. |
 | `type-coverage` | deterministic | Property type system: nodes carry a value of every round-tripping Cypher kind (string, integer, float, boolean, list, ISO-8601 temporal) plus a never-set key that must read `NULL`. Each value is read back through the engine and compared to the oracle via the canonical typed rendering, and re-checked immediately after crash/recovery — so every kind is proven to round-trip and survive WAL recovery. |
 | `edge-properties` | deterministic | The relationship write surface on a directed MULTIGRAPH: KNOWS edge instances carry a unique `eid`, a `since` (ISO string), and a `weight` (float), including PARALLEL twins between the same endpoints; the workload mutates individual instances with standalone `SET r.weight`, `REMOVE r.since`, `SET r.since = null` (the SET-path removal, counted per instance since rmp #2501), and `DELETE r`, each pinned by `WHERE r.eid`. The per-instance shadow model verifies every surviving instance's properties round-trip (a mutated instance's parallel twin keeps its own map), every deleted instance stays absent with both endpoint nodes alive, and the per-op counters oracle pins each op's reported effect set — periodically and after each crash/recovery, so the by-handle parallel-edge instance identity survives WAL recovery. |
-| `index-diversity` | deterministic | Index-type diversity: a HASH (string), a BTREE (numeric), and a BTREE (string) index are created over an above-threshold graph (engaging the morsel-parallel backfill phase), then write churn + crash/recovery run while the thorough seek-vs-scan consistency check confirms each index agrees with its base data — for both kinds and both value types, including after WAL recovery re-registers and re-backfills them. The scenario also carries the access-path parity and plan-stability oracles: literal vs parameterised predicates (equality, range, `STARTS WITH`, `IN`-list) must agree on results and on the physical access path, and the fixed probe set must re-plan byte-identically after every crash/recovery. |
+| `index-diversity` | deterministic | Index-type diversity: a HASH (string), a BTREE (numeric), and a BTREE (string) index are created over an above-threshold graph (engaging the morsel-parallel backfill phase), then write churn + crash/recovery run while the thorough seek-vs-scan consistency check confirms each index agrees with its base data — for both kinds and both value types, including after WAL recovery re-registers and re-backfills them. The scenario also carries the access-path parity and plan-stability oracles: literal vs parameterised predicates (equality, range, `STARTS WITH`, `IN`-list) must agree on results and on the physical access path, and the fixed probe set must re-plan byte-identically after every crash/recovery; and the seek-result diversity oracle: bounded and half-open ranges, `STARTS WITH`, and `IN`-shaped predicates (list and `UNWIND` spellings), literal and parameterised, must reproduce an independent full-scan reference as id-multisets and counts, with a terminal non-vacuity assertion. |
 | `search` | deterministic | The `search/` algorithm battery over the live graph + structural parity. |
 | `cypher-paths` | deterministic | The Cypher-level `shortestPath()` operator: its hop count is compared to an independent BFS over the oracle's KNOWS edges for a bounded, deterministic set of pairs (comparing the path-length invariant, never a specific witness), periodically and after each crash/recovery. `allShortestPaths()` is also verified: every returned path is minimal-length and the path COUNT equals an independent layered-BFS shortest-path count. |
 | `cypher-surface` | deterministic | A battery of diverse read shapes — `count`/`sum` aggregation, `WHERE`, `WITH…WHERE`, pattern-count, `OPTIONAL MATCH`, `UNWIND range()`, and `ORDER BY` — is run against independently-computed oracle invariants (scalar values and the sorted-name sequence), broadening the DST's coverage of the Cypher read surface beyond the per-tick parity probe, including after crash/recovery. |
