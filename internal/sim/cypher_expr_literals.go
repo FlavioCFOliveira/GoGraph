@@ -76,6 +76,86 @@ var exprLiteralCases = []exprLiteralCase{
 	{"RETURN date('2026-07-13')", []string{"2026-07-13"}},
 	{"RETURN date('2026-07-13').year", []string{"2026"}},
 	{"RETURN duration({days:2}).days", []string{"2"}},
+
+	// CY15b — the temporal function surface (rmp #2457). Every expectation below
+	// is an ABSOLUTE constant captured from the engine, so a regression in the
+	// truncation calendar arithmetic, the duration normalisation, the epoch
+	// conversion, or the component accessors fails the run rather than being
+	// compared against another engine-derived value.
+	//
+	// truncate family — date / datetime / localdatetime / localtime / time
+	// (cypher/funcs/temporal.go registers all five).
+	{"RETURN date.truncate('year', date('2026-07-13'))", []string{"2026-01-01"}},
+	{"RETURN date.truncate('month', date('2026-07-13'))", []string{"2026-07-01"}},
+	// 2026-07-13 is itself a Monday, so week-truncation is a fixed point.
+	{"RETURN date.truncate('week', date('2026-07-13'))", []string{"2026-07-13"}},
+	// The optional third argument overrides a component AFTER truncation.
+	{"RETURN date.truncate('month', date('2026-07-13'), {day: 5})", []string{"2026-07-05"}},
+	{"RETURN datetime.truncate('day', datetime('2026-07-13T14:35:47.123456789Z'))", []string{"2026-07-13T00:00Z"}},
+	{"RETURN datetime.truncate('hour', datetime('2026-07-13T14:35:47Z'))", []string{"2026-07-13T14:00Z"}},
+	{"RETURN localdatetime.truncate('minute', localdatetime('2026-07-13T14:35:47.5'))", []string{"2026-07-13T14:35"}},
+	{"RETURN localdatetime.truncate('day', localdatetime('2026-07-13T14:35:47'))", []string{"2026-07-13T00:00"}},
+	{"RETURN localtime.truncate('hour', localtime('14:35:47.25'))", []string{"14:00"}},
+	{"RETURN localtime.truncate('second', localtime('14:35:47.25'))", []string{"14:35:47"}},
+	{"RETURN time.truncate('minute', time('14:35:47.25Z'))", []string{"14:35Z"}},
+	{"RETURN time.truncate('hour', time('14:35:47Z'))", []string{"14:00Z"}},
+
+	// duration.between and the inDays / inMonths / inSeconds projections. The
+	// two-argument forms compute the duration between two temporals; the
+	// one-argument forms project an existing duration onto a single unit.
+	{"RETURN duration.between(date('2026-01-01'), date('2026-03-15'))", []string{"P2M14D"}},
+	{"RETURN duration.between(localdatetime('2026-01-01T00:00:00'), localdatetime('2026-01-02T03:04:05'))", []string{"P1DT3H4M5S"}},
+	{"RETURN duration.inDays(date('2026-01-01'), date('2026-03-15'))", []string{"P73D"}},
+	{"RETURN duration.inMonths(date('2026-01-01'), date('2026-03-15'))", []string{"P2M"}},
+	{"RETURN duration.inSeconds(localtime('01:00:00'), localtime('02:30:00'))", []string{"PT1H30M"}},
+	{"RETURN duration.inSeconds(duration('PT1H30M'))", []string{"PT1H30M"}},
+	// The months stride is NOT rolled into days (it has no fixed day count).
+	{"RETURN duration.inDays(duration('P1M40D'))", []string{"P40D"}},
+	{"RETURN duration.inMonths(duration('P14M'))", []string{"P1Y2M"}},
+
+	// Epoch constructors.
+	{"RETURN datetime.fromepoch(1767225600, 0)", []string{"2026-01-01T00:00Z"}},
+	{"RETURN datetime.fromepochmillis(1767225600123)", []string{"2026-01-01T00:00:00.123Z"}},
+
+	// Component access on each temporal type.
+	{"RETURN date('2026-07-13').month", []string{"7"}},
+	{"RETURN date('2026-07-13').day", []string{"13"}},
+	{"RETURN date('2026-07-13').week", []string{"29"}},
+	{"RETURN date('2026-07-13').quarter", []string{"3"}},
+	{"RETURN date('2026-07-13').dayOfWeek", []string{"1"}},
+	{"RETURN localdatetime('2026-07-13T14:35:47.5').hour", []string{"14"}},
+	{"RETURN localdatetime('2026-07-13T14:35:47.5').minute", []string{"35"}},
+	{"RETURN localdatetime('2026-07-13T14:35:47.5').second", []string{"47"}},
+	{"RETURN datetime('2026-07-13T14:35:47+02:00').offsetSeconds", []string{"7200"}},
+	{"RETURN datetime('2026-07-13T14:35:47Z').epochSeconds", []string{"1783953347"}},
+	{"RETURN datetime('2026-07-13T14:35:47.500Z').epochMillis", []string{"1783953347500"}},
+	{"RETURN localtime('14:35:47.25').nanosecond", []string{"250000000"}},
+	{"RETURN time('14:35:47Z').hour", []string{"14"}},
+	// A duration's components are the CANONICAL ones: months rolls the years in
+	// (1Y2M → 14), and seconds rolls the hours and minutes in.
+	{"RETURN duration('P1Y2M3DT4H5M6S').years", []string{"1"}},
+	{"RETURN duration('P1Y2M3DT4H5M6S').months", []string{"14"}},
+	{"RETURN duration('P1Y2M3DT4H5M6S').days", []string{"3"}},
+	{"RETURN duration('P1Y2M3DT4H5M6S').hours", []string{"4"}},
+	{"RETURN duration('P1Y2M3DT4H5M6S').minutes", []string{"245"}},
+	{"RETURN duration('P1Y2M3DT4H5M6S').seconds", []string{"14706"}},
+
+	// Temporal arithmetic and comparison. Adding one month to 31 January
+	// overflows the shorter month exactly as time.Date normalisation does.
+	{"RETURN date('2026-01-31') + duration('P1M')", []string{"2026-03-03"}},
+	{"RETURN date('2026-03-01') - duration('P1D')", []string{"2026-02-28"}},
+	{"RETURN localdatetime('2026-01-01T00:00:00') + duration('PT90M')", []string{"2026-01-01T01:30"}},
+	{"RETURN date('2026-01-01') < date('2026-01-02')", []string{"true"}},
+	{"RETURN date('2026-01-01') = date('2026-01-01')", []string{"true"}},
+
+	// Statement-`now` stability: openCypher requires every "now" constructor
+	// within ONE statement to observe the SAME instant. The engine freezes it per
+	// query in cypher/stmt_now_reg.go, so these must be true/PT0S regardless of
+	// how long the statement takes; a per-call time.Now() would make them flap.
+	{"RETURN datetime() = datetime()", []string{"true"}},
+	{"RETURN date() = date()", []string{"true"}},
+	{"RETURN localdatetime() = localdatetime()", []string{"true"}},
+	{"RETURN duration.inSeconds(localtime(), localtime())", []string{"PT0S"}},
 }
 
 // CheckExprLiterals runs the graph-independent expression battery and asserts

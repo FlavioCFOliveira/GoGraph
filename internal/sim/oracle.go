@@ -35,10 +35,19 @@ const (
 	// tmplMergePerson merges a Person by name, marking newly-created ones.
 	tmplMergePerson = "MERGE (n:Person {name:$name}) ON CREATE SET n.created=true"
 	// tmplCreateTyped creates one Typed node carrying a property of every
-	// round-tripping Cypher kind — string, integer, float, boolean, list, and an
-	// ISO-8601 temporal string — keyed by a unique integer id. The type-coverage
-	// scenario uses it to verify each kind survives commit + crash/recovery.
-	tmplCreateTyped = "CREATE (n:Typed {id:$id, s:$s, i:$i, f:$f, b:$b, lst:$lst, ts:$ts})"
+	// round-tripping Cypher kind — string, integer, float, boolean, list, a plain
+	// ISO-8601 string, and all SIX genuine temporal types (date, localdatetime,
+	// datetime, localtime, time, duration) — keyed by a unique integer id. The
+	// type-coverage scenario uses it to verify each kind survives commit +
+	// crash/recovery.
+	//
+	// Since rmp #2457 the six temporal properties are bound as genuine temporal
+	// PARAMETERS, which the engine stores in its kind-tagged form; `ts` remains a
+	// plain ISO-8601 STRING and is the deliberate control — it must read back as
+	// a string, proving the checker's temporal-kind assertion discriminates
+	// rather than passing on text alone.
+	tmplCreateTyped = "CREATE (n:Typed {id:$id, s:$s, i:$i, f:$f, b:$b, lst:$lst, ts:$ts, " +
+		"d:$d, ldt:$ldt, dt:$dt, lt:$lt, tm:$tm, du:$du})"
 	// tmplCreateKnowsProps links two existing Person nodes with a KNOWS edge that
 	// carries an ISO-8601 `since` string and a float `weight`, for the
 	// edge-property coverage scenario.
@@ -57,7 +66,13 @@ var knowsEdgePropKeys = []string{"since", "weight", "note"}
 // typedPropKeys are the property keys a [tmplCreateTyped] node carries, in a
 // fixed order, plus the never-set key "absent" the checker verifies reads NULL.
 // The checker projects exactly these so engine and oracle compare the same set.
-var typedPropKeys = []string{"id", "s", "i", "f", "b", "lst", "ts", "absent"}
+// The six temporal keys (d/ldt/dt/lt/tm/du) are asserted to read back with
+// their temporal KIND, not merely their text — see [typedTemporalKinds].
+var typedPropKeys = []string{
+	"id", "s", "i", "f", "b", "lst", "ts",
+	"d", "ldt", "dt", "lt", "tm", "du",
+	"absent",
+}
 
 // NodeState is the oracle's record of a single node: its synthetic oracle id,
 // labels, and properties. It mirrors what the engine must hold, not how the

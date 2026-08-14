@@ -3,6 +3,7 @@ package sim
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
@@ -147,6 +148,33 @@ func (a *EngineAdapter) projectRowStrings(ctx context.Context, query string, nco
 	return out, res.Err()
 }
 
+// projectRowValues is the TYPE-PRESERVING sibling of
+// [EngineAdapter.projectRowStrings]: it runs a single-row read query and
+// returns the first ncols projected columns as the engine's own expr.Value
+// instances rather than their String() renderings, so a caller can assert the
+// value's KIND and not merely its text. It returns (nil, nil) when the query
+// yields no row.
+//
+// The type-coverage checker (rmp #2457) needs this because a temporal that has
+// degraded to a plain string is a DIFFERENT KIND carrying the SAME text: only
+// the [expr.Value.Kind] of the read-back value distinguishes a working
+// temporal round-trip from a broken one.
+func (a *EngineAdapter) projectRowValues(ctx context.Context, query string, ncols int) ([]expr.Value, error) {
+	res, err := a.eng.Run(ctx, query, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = res.Close() }()
+	if !res.Next() {
+		return nil, res.Err()
+	}
+	out := make([]expr.Value, ncols)
+	for i := 0; i < ncols; i++ {
+		out[i] = res.ValueAt(i)
+	}
+	return out, res.Err()
+}
+
 // queryRowStrings runs a read query and returns the canonical String()
 // rendering of the first ncols projected columns of EVERY row, in result
 // order. It is the multi-row sibling of [EngineAdapter.projectRowStrings],
@@ -257,9 +285,37 @@ func toExprParams(params map[string]any) (map[string]expr.Value, error) {
 // is what `SET n = $map`, `SET n += $map`, and `MERGE (n $map)` consume to set a
 // SET of scalar properties — openCypher does not permit a map as a single
 // property value, so the map's elements are themselves restricted to the scalar
-// and list kinds above. Temporal values are bound as ISO-8601 strings (the
-// canonical Cypher-visible temporal storage contract), so they need no separate
-// case.
+// and list kinds above.
+//
+// # Temporal binding
+//
+// A temporal is bound as a genuine temporal parameter, never as an ISO-8601
+// string. The engine's parameter write path
+// (cypher/api.go:exprValueToLPGProp) encodes each temporal expr.Value as an
+// [github.com/FlavioCFOliveira/GoGraph/graph/lpg.PropString] carrying the
+// kind tag byte that cypher/exec/temporal_literal.go defines (0x01 date,
+// 0x02 localdatetime, 0x03 datetime, 0x04 localtime, 0x05 time, 0x06
+// duration), and the read path decodes that tag back into the matching
+// temporal expr.Value. Binding the ISO-8601 STRING instead stores an
+// untagged PropString that reads back as an [expr.StringValue], which is
+// exactly the degradation the type-coverage checker exists to catch
+// (rmp #2457) — so the mapping here is load-bearing, not a convenience.
+//
+// Two Go-native kinds are accepted and mapped explicitly, because a Go value
+// alone cannot say which of the six Cypher temporal types was meant:
+//
+//   - time.Time     → [expr.DateTimeValue] (instant + zone, the faithful
+//     counterpart of a time.Time; the other five types would each discard a
+//     component a time.Time carries)
+//   - time.Duration → [expr.DurationValue] with only the seconds and
+//     nanoseconds components set, because a time.Duration has no month or
+//     day stride to carry
+//
+// A caller needing one of the other four types (or a duration with a month or
+// day stride) constructs the expr temporal value itself and binds it directly:
+// the six temporal expr.Value types are passed through verbatim. Every other
+// expr.Value kind is still rejected, so a workload bug surfaces loudly rather
+// than being silently coerced.
 func toExprValue(v any) (expr.Value, error) {
 	switch t := v.(type) {
 	case nil:
@@ -274,6 +330,18 @@ func toExprValue(v any) (expr.Value, error) {
 		return expr.FloatValue(t), nil
 	case bool:
 		return expr.BoolValue(t), nil
+	case expr.DateValue, expr.LocalDateTimeValue, expr.DateTimeValue,
+		expr.LocalTimeValue, expr.TimeValue, expr.DurationValue:
+		// An already-typed temporal binds verbatim; the engine tags it on write.
+		ev, ok := t.(expr.Value)
+		if !ok { // unreachable: every case type implements expr.Value
+			return nil, fmt.Errorf("temporal %T does not implement expr.Value", t)
+		}
+		return ev, nil
+	case time.Time:
+		return expr.DateTimeValue{T: t}, nil
+	case time.Duration:
+		return expr.NewDuration(0, 0, int64(t/time.Second), int32(t%time.Second)), nil
 	case []any:
 		items := make(expr.ListValue, 0, len(t))
 		for i, e := range t {
