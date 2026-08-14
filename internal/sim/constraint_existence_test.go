@@ -47,7 +47,9 @@ func TestConstraintExistence_NonVacuous(t *testing.T) {
 	}
 	sm.Oracle().SetExistenceOnEmail(true)
 
-	report, err := sm.runExistenceLoop(ctx)
+	model := NewSchemaModel()
+	model.AddNotNullConstraint("sim_acct_email_nn", "Acct", "email")
+	report, err := sm.runExistenceLoop(ctx, model)
 	if err != nil {
 		t.Fatalf("runExistenceLoop: %v", err)
 	}
@@ -86,7 +88,9 @@ func TestConstraintExistence_DetectsEnforcementGap(t *testing.T) {
 	// expects, so it commits an email-omitting CREATE the oracle predicts rejected.
 	sm.Oracle().SetExistenceOnEmail(true)
 
-	report, err := sm.runExistenceLoop(ctx)
+	// nil model: the meta-test declares no DDL, so the introspection oracle is
+	// skipped to isolate the per-op adjudicator.
+	report, err := sm.runExistenceLoop(ctx, nil)
 	if err != nil {
 		t.Fatalf("runExistenceLoop: %v", err)
 	}

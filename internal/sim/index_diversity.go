@@ -62,7 +62,11 @@ func indexDiversityScenario() Scenario {
 // backfill), then drives a churn loop that maintains the indexed properties and
 // crashes periodically. It runs the seek-vs-scan consistency check after the
 // initial backfill, periodically during churn, and immediately after every
-// crash/recovery, and — at the same cadence — the access-path parity check and
+// crash/recovery — and, at the same cadence, the schema-introspection oracle
+// ([CheckSchemaIntrospection], rmp #2455), which holds SHOW INDEXES and
+// db.indexes() to the harness's model of the three declared indexes (name,
+// kind, label, property), so a recovery that re-registers an index with the
+// wrong shape fails immediately — plus the access-path parity check and
 // the seek-result diversity check ([IndexSeekResults], whose terminal Finish
 // asserts the run was not vacuous), plus the plan-stability check after every
 // recovery and at the end (the probe set and baseline are fixed at scenario
@@ -92,9 +96,19 @@ func runIndexDiversity(ctx context.Context, seed uint64) (*SimReport, error) {
 			return nil, fmt.Errorf("sim: index-diversity DDL %q: %w", ddl, err)
 		}
 	}
+	// Schema-introspection model (rmp #2455): the three declared indexes, held
+	// against SHOW INDEXES / db.indexes() after the backfill, after every
+	// recovery (a recovered-DDL divergence check), periodically, and at the end.
+	model := NewSchemaModel()
+	model.AddIndex("idx_person_name", SchemaIndexHash, "Person", "name")
+	model.AddIndex("idx_person_age", SchemaIndexBTree, "Person", "age")
+	model.AddIndex("idx_person_city", SchemaIndexBTree, "Person", "city")
 	// Consistency right after the parallel backfill.
 	if v := CheckIndexConsistency(0, nil, sm.engine, indexDiversitySpecs...); len(v) > 0 {
 		return sm.report(0, Op{Kind: OpMatch, Cypher: "<post-backfill index check>"}, v), nil
+	}
+	if v := CheckSchemaIntrospection(0, model, sm.engine); len(v) > 0 {
+		return sm.report(0, Op{Kind: OpMatch, Cypher: "<post-backfill schema introspection>"}, v), nil
 	}
 
 	// Access-path parity probes (rmp #2447): drawn from their own sub-seed so
@@ -145,6 +159,12 @@ func runIndexDiversity(ctx context.Context, seed uint64) (*SimReport, error) {
 			if v := CheckIndexConsistency(tick, nil, sm.engine, indexDiversitySpecs...); len(v) > 0 {
 				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery index check>"}, v), nil
 			}
+			// Recovered-DDL introspection: the recovered engine must re-register
+			// every index with the same name, kind, and (label, property) shape,
+			// on both introspection surfaces (rmp #2455).
+			if v := CheckSchemaIntrospection(tick, model, sm.engine); len(v) > 0 {
+				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery schema introspection>"}, v), nil
+			}
 			// The recovery rebuilt the plan cache from scratch: the fixed probes
 			// must re-plan byte-identically, and literal/param parity must hold
 			// on the recovered engine.
@@ -173,6 +193,9 @@ func runIndexDiversity(ctx context.Context, seed uint64) (*SimReport, error) {
 			if v := CheckIndexConsistency(tick, nil, sm.engine, indexDiversitySpecs...); len(v) > 0 {
 				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<periodic index check>"}, v), nil
 			}
+			if v := CheckSchemaIntrospection(tick, model, sm.engine); len(v) > 0 {
+				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<periodic schema introspection>"}, v), nil
+			}
 			if v := CheckAccessPathParity(tick, nil, sm.engine, probes...); len(v) > 0 {
 				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<periodic access-path parity check>"}, v), nil
 			}
@@ -181,9 +204,12 @@ func runIndexDiversity(ctx context.Context, seed uint64) (*SimReport, error) {
 			}
 		}
 	}
-	// Terminal consistency, parity, and plan-stability checks.
+	// Terminal consistency, introspection, parity, and plan-stability checks.
 	if v := CheckIndexConsistency(int64(cfg.MaxTicks), nil, sm.engine, indexDiversitySpecs...); len(v) > 0 {
 		return sm.report(int64(cfg.MaxTicks), Op{Kind: OpMatch, Cypher: "<terminal index check>"}, v), nil
+	}
+	if v := CheckSchemaIntrospection(int64(cfg.MaxTicks), model, sm.engine); len(v) > 0 {
+		return sm.report(int64(cfg.MaxTicks), Op{Kind: OpMatch, Cypher: "<terminal schema introspection>"}, v), nil
 	}
 	if v := CheckAccessPathParity(int64(cfg.MaxTicks), nil, sm.engine, probes...); len(v) > 0 {
 		return sm.report(int64(cfg.MaxTicks), Op{Kind: OpMatch, Cypher: "<terminal access-path parity check>"}, v), nil

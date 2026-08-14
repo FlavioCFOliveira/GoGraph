@@ -44,9 +44,12 @@ func TestConstraintEnforce_NonVacuous(t *testing.T) {
 	if err := sm.engineRunDDL(ctx, constraintEnforceDDL); err != nil {
 		t.Fatalf("create constraint: %v", err)
 	}
+	if err := sm.engineRunDDL(ctx, constraintNumDDL); err != nil {
+		t.Fatalf("create numeric constraint: %v", err)
+	}
 	sm.Oracle().SetUniqueOnName(true)
 
-	report, err := sm.runConstraintLoop(ctx)
+	report, err := sm.runConstraintLoop(ctx, constraintEnforceSchemaModel())
 	if err != nil {
 		t.Fatalf("runConstraintLoop: %v", err)
 	}
@@ -83,10 +86,14 @@ func TestConstraintEnforce_DetectsEnforcementGap(t *testing.T) {
 	ctx := context.Background()
 
 	// Model an active UNIQUE constraint WITHOUT creating it in the engine: the
-	// engine is now (deliberately) not enforcing what the oracle expects.
+	// engine is now (deliberately) not enforcing what the oracle expects. The
+	// nil schema model skips the introspection oracle, isolating the per-op
+	// adjudicator — the first duplicate-shaped op of ANY route (CREATE, SET
+	// rename, MERGE ON CREATE, SET label, numeric) the engine commits against
+	// a predicted rejection must surface as the enforcement gap.
 	sm.Oracle().SetUniqueOnName(true)
 
-	report, err := sm.runConstraintLoop(ctx)
+	report, err := sm.runConstraintLoop(ctx, nil)
 	if err != nil {
 		t.Fatalf("runConstraintLoop: %v", err)
 	}

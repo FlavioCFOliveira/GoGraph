@@ -136,6 +136,33 @@ func (a *EngineAdapter) projectRowStrings(ctx context.Context, query string, nco
 	return out, res.Err()
 }
 
+// queryRowStrings runs a read query and returns the canonical String()
+// rendering of the first ncols projected columns of EVERY row, in result
+// order. It is the multi-row sibling of [EngineAdapter.projectRowStrings],
+// used by the schema-introspection oracle to materialise SHOW INDEXES /
+// SHOW CONSTRAINTS / db.* procedure row sets for comparison against the
+// harness's own DDL model. A query yielding no rows returns an empty
+// (non-nil) slice so callers can distinguish "ran, empty" from an error.
+func (a *EngineAdapter) queryRowStrings(ctx context.Context, query string, ncols int) ([][]string, error) {
+	res, err := a.eng.Run(ctx, query, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = res.Close() }()
+	rows := make([][]string, 0, 8)
+	for res.Next() {
+		row := make([]string, ncols)
+		for i := 0; i < ncols; i++ {
+			row[i] = res.ValueAt(i).String()
+		}
+		rows = append(rows, row)
+	}
+	if err := res.Err(); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
 // resultAdapter projects a *cypher.Result onto the checker's [Result].
 type resultAdapter struct {
 	res      *cypher.Result

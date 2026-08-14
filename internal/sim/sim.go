@@ -407,23 +407,55 @@ func (s *Simulator) engineRunDDL(ctx context.Context, query string) error {
 	return drainErr
 }
 
-// schemaChurnStatements is the fixed, idempotent DDL cycle runWithDDL rotates
-// through: drop then re-create the (:Person).name index. Idempotent forms (IF
-// [NOT] EXISTS) make each step a clean no-op when it races nothing, so the churn
-// never errors on a benign re-create/re-drop.
-var schemaChurnStatements = []string{
-	"DROP INDEX sim_person_name IF EXISTS",
-	"CREATE INDEX sim_person_name FOR (n:Person) ON (n.name)",
+// schemaChurnStep pairs one idempotent churn DDL statement with the mutation
+// it implies on the harness's schema model, so the introspection oracle
+// (rmp #2455) can hold SHOW INDEXES / SHOW CONSTRAINTS and the db.* procedures
+// to the model after every flip.
+type schemaChurnStep struct {
+	ddl   string
+	apply func(m *SchemaModel)
+}
+
+// schemaChurnSteps is the fixed, idempotent DDL cycle runWithDDL rotates
+// through: drop and re-create the (:Person).name index, and drop and
+// re-create a UNIQUE constraint on a label the workload never writes
+// (:Contact), so SHOW CONSTRAINTS churns too without perturbing the honest
+// write stream. Idempotent forms (IF [NOT] EXISTS) make each step a clean
+// no-op when it races nothing, so the churn never errors on a benign
+// re-create/re-drop. The constraint create deliberately uses the modern
+// FOR ... REQUIRE grammar (the legacy ON ... ASSERT spelling runs in the
+// constraint scenarios and the wire SchemaChanger), and the index create is
+// OPTIONS-free, so it exercises the default (hash) kind.
+var schemaChurnSteps = []schemaChurnStep{
+	{
+		ddl:   "CREATE CONSTRAINT sim_contact_email_uq IF NOT EXISTS FOR (n:Contact) REQUIRE n.email IS UNIQUE",
+		apply: func(m *SchemaModel) { m.AddUniqueConstraint("sim_contact_email_uq", "Contact", "email") },
+	},
+	{
+		ddl:   "DROP CONSTRAINT sim_contact_email_uq IF EXISTS",
+		apply: func(m *SchemaModel) { m.DropConstraint("sim_contact_email_uq") },
+	},
+	{
+		ddl:   "DROP INDEX sim_person_name IF EXISTS",
+		apply: func(m *SchemaModel) { m.DropIndex("sim_person_name") },
+	},
+	{
+		ddl:   "CREATE INDEX sim_person_name FOR (n:Person) ON (n.name)",
+		apply: func(m *SchemaModel) { m.AddIndex("sim_person_name", SchemaIndexHash, "Person", "name") },
+	},
 }
 
 // runWithDDL is the schema-chaos variant of [Simulator.Run]: it drives the same
 // deterministic tick loop but, every ddlEvery ticks, issues the next idempotent
-// DDL statement from [schemaChurnStatements] against the live engine, churning
-// the index under the honest write load. Like Run it returns a populated report
-// on the first invariant violation, or (nil, nil) on clean completion. The DDL
-// cadence is positional (tick-driven), so the run stays a deterministic function
-// of the seed.
-func (s *Simulator) runWithDDL(ctx context.Context, ddlEvery int) (*SimReport, error) {
+// DDL statement from [schemaChurnSteps] against the live engine, churning the
+// index and a constraint under the honest write load. After each DDL it
+// advances model in lock-step and runs the schema-introspection oracle
+// ([CheckSchemaIntrospection], rmp #2455), so a churn flip whose effect the
+// introspection surfaces do not reflect fails immediately. Like Run it returns
+// a populated report on the first invariant violation, or (nil, nil) on clean
+// completion. The DDL cadence is positional (tick-driven), so the run stays a
+// deterministic function of the seed.
+func (s *Simulator) runWithDDL(ctx context.Context, ddlEvery int, model *SchemaModel) (*SimReport, error) {
 	churnIdx := 0
 	var lastTick int64
 	var lastOp Op
@@ -434,10 +466,14 @@ func (s *Simulator) runWithDDL(ctx context.Context, ddlEvery int) (*SimReport, e
 		tick := s.clock.Tick()
 
 		if ddlEvery > 0 && tick%int64(ddlEvery) == 0 {
-			stmt := schemaChurnStatements[churnIdx%len(schemaChurnStatements)]
+			step := schemaChurnSteps[churnIdx%len(schemaChurnSteps)]
 			churnIdx++
-			if err := s.engineRunDDL(ctx, stmt); err != nil {
-				return nil, fmt.Errorf("sim: schema churn DDL %q at tick %d: %w", stmt, tick, err)
+			if err := s.engineRunDDL(ctx, step.ddl); err != nil {
+				return nil, fmt.Errorf("sim: schema churn DDL %q at tick %d: %w", step.ddl, tick, err)
+			}
+			step.apply(model)
+			if violations := CheckSchemaIntrospection(tick, model, s.engine); len(violations) > 0 {
+				return s.report(tick, Op{Kind: OpMatch, Cypher: "<post-DDL schema introspection>"}, violations), nil
 			}
 		}
 

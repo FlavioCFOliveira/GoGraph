@@ -6,27 +6,51 @@ import (
 )
 
 // constraintEnforceDDL declares the UNIQUE (Person, name) constraint the
-// constraint-enforcement scenario verifies. The engine parses the ON/ASSERT
-// form (cypher/ir/ddl_parser.go); the constraint is appended to the WAL and
-// fsynced, so it survives crash/recovery and is re-registered on reopen.
+// constraint-enforcement scenario verifies, deliberately in the LEGACY
+// ON ... ASSERT grammar (cypher/ir/ddl_parser.go); the constraint is appended
+// to the WAL and fsynced, so it survives crash/recovery and is re-registered
+// on reopen.
 const constraintEnforceDDL = "CREATE CONSTRAINT sim_person_name_unique ON (n:Person) ASSERT n.name IS UNIQUE"
 
+// constraintNumDDL declares the numeric UNIQUE (Num, val) constraint behind
+// the constraint-kind battery (rmp #2455), deliberately in the MODERN
+// FOR ... REQUIRE grammar, so both constraint grammars run — and recover —
+// under the same deterministic scenario.
+const constraintNumDDL = "CREATE CONSTRAINT sim_num_val_unique FOR (n:Num) REQUIRE n.val IS UNIQUE"
+
+// constraintEnforceSchemaModel returns the scenario's DDL model for the
+// schema-introspection oracle: both UNIQUE constraints (each implying its hash
+// backing index in the SHOW INDEXES / db.indexes() enumeration).
+func constraintEnforceSchemaModel() *SchemaModel {
+	m := NewSchemaModel()
+	m.AddUniqueConstraint("sim_person_name_unique", "Person", "name")
+	m.AddUniqueConstraint("sim_num_val_unique", "Num", "val")
+	return m
+}
+
 // constraintEnforceScenario verifies UNIQUE constraint enforcement under the
-// DST: it creates a UNIQUE (Person, name) constraint, then drives a workload that
-// interleaves fresh-name CREATEs (which must commit) with duplicate-name CREATEs
-// (which the engine MUST reject with a typed constraint-violation error, applying
-// nothing). The oracle predicts each outcome; a disagreement between the engine
-// and the oracle is an enforcement gap. Deterministic crash+recovery cycles then
-// prove the constraint survives recovery still enforcing. It is bit-reproducible.
+// DST across every engine-supported route into the constraint (rmp #2455): it
+// creates a UNIQUE (Person, name) constraint (legacy grammar) and a numeric
+// UNIQUE (Num, val) constraint (modern grammar), then drives a workload
+// interleaving, per route, writes that must commit with writes the engine MUST
+// reject with a typed constraint-violation error, applying nothing —
+// duplicate-name CREATEs, cross-node renames via SET n.name, MERGE ... ON
+// CREATE SET duplicates, SET-label promotions of colliding nodes, and numeric
+// duplicates including float spellings of held integer values. A local
+// prediction adjudicates every outcome; a disagreement is an enforcement gap.
+// Deterministic crash+recovery cycles prove both constraints survive recovery
+// still enforcing, the schema-introspection oracle holds SHOW / db.* to the
+// declared DDL after every recovery, and a terminal non-vacuity gate requires
+// every route/outcome arm to have actually occurred. It is bit-reproducible.
 func constraintEnforceScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioConstraintEnforce,
-		Description: "UNIQUE(Person.name) enforcement: duplicate CREATEs rejected, constraint survives crash/recovery",
+		Description: "UNIQUE enforcement on every route (CREATE, SET rename, MERGE ON CREATE, SET label, numeric key): violations rejected, constraints + introspection survive crash/recovery",
 		Mode:        ModeDeterministic,
 		DefaultSeed: 0xC047A157,
 		MaxTicks:    500,
-		// A durable store is required so the constraint (a WAL-logged schema
-		// change) survives the crash cycles; crashes are moderate so several
+		// A durable store is required so the constraints (WAL-logged schema
+		// changes) survive the crash cycles; crashes are moderate so several
 		// recovery boundaries are exercised within the budget.
 		Crash: CrashConfig{Enabled: true, CrashProb: 1.0 / 90.0, StabilityWindow: 25},
 		run:   runConstraintEnforce,
@@ -38,23 +62,34 @@ func constraintEnforceScenario() Scenario {
 // loop) so it can compare, per write, the engine's accept/reject outcome against
 // the oracle's prediction — the heart of constraint verification. Crashes reuse
 // [Simulator.maybeCrash] (drop the engine, reopen via real recovery, durability
-// check); after each the constraint must still be enforced.
+// check); after each the constraints must still be enforced.
 func runConstraintEnforce(ctx context.Context, seed uint64) (*SimReport, error) {
 	sc := constraintEnforceScenario()
-	cfg := sc.DeterministicConfig(seed)
+	return runConstraintEnforceCfg(ctx, sc.DeterministicConfig(seed))
+}
+
+// runConstraintEnforceCfg is [runConstraintEnforce] over an explicit [Config],
+// split out so tests can prove the terminal non-vacuity gate is wired: a
+// config whose budget cannot exercise every constraint-kind arm must yield a
+// violation report, not a silent pass.
+func runConstraintEnforceCfg(ctx context.Context, cfg Config) (*SimReport, error) {
 	sm, err := New(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("sim: constraint-enforce new: %w", err)
 	}
 	defer func() { _ = sm.Close() }()
 
-	// Declare the UNIQUE constraint in the engine and model it in the oracle.
+	// Declare both UNIQUE constraints in the engine and model the Person one in
+	// the oracle (the numeric one is modelled by the constraint-kind state).
 	if err := sm.engineRunDDL(ctx, constraintEnforceDDL); err != nil {
 		return nil, fmt.Errorf("sim: constraint-enforce create constraint: %w", err)
 	}
+	if err := sm.engineRunDDL(ctx, constraintNumDDL); err != nil {
+		return nil, fmt.Errorf("sim: constraint-enforce create numeric constraint: %w", err)
+	}
 	sm.Oracle().SetUniqueOnName(true)
 
-	report, err := sm.runConstraintLoop(ctx)
+	report, err := sm.runConstraintLoop(ctx, constraintEnforceSchemaModel())
 	if err != nil {
 		return nil, fmt.Errorf("sim: constraint-enforce run: %w", err)
 	}
@@ -62,34 +97,57 @@ func runConstraintEnforce(ctx context.Context, seed uint64) (*SimReport, error) 
 }
 
 // runConstraintLoop drives the constraint-enforcement safety loop: each tick it
-// emits a CREATE that is either a fresh unique name (must commit) or a duplicate
-// of an existing name (must be rejected by the UNIQUE constraint), runs it
-// against the engine, and asserts the engine's accept/reject outcome matches the
-// oracle's prediction. A mismatch — the engine accepting a duplicate the
-// constraint should forbid, or rejecting a valid create — is an
-// ACID_CONSISTENCY violation (the engine failed to enforce a declared invariant).
-// Crashes reuse [Simulator.maybeCrash]; the post-recovery enforcement is verified
-// by the same per-op comparison continuing against the recovered engine.
-func (s *Simulator) runConstraintLoop(ctx context.Context) (*SimReport, error) {
-	freshCounter := 0
+// emits one constraint-kind op (see constraint_kinds.go — CREATE, SET rename,
+// MERGE ... ON CREATE SET, Plain create, SET-label promote, or numeric create),
+// runs it against the engine, and asserts the engine's accept/reject outcome
+// matches the prediction. A mismatch — the engine accepting a write a
+// constraint should forbid, or rejecting a valid one — is an ACID_CONSISTENCY
+// violation (the engine failed to enforce a declared invariant). Crashes reuse
+// [Simulator.maybeCrash]; post-recovery enforcement is verified by the same
+// per-op comparison continuing against the recovered engine, and — when model
+// is non-nil — the schema-introspection oracle ([CheckSchemaIntrospection],
+// rmp #2455) holds SHOW CONSTRAINTS / SHOW INDEXES and db.constraints() /
+// db.indexes() to the declared DDL at the start, after every recovery, and at
+// the end. A nil model skips the introspection checks, so the
+// enforcement-gap meta-tests (which deliberately declare NO DDL in the
+// engine) can isolate the per-op adjudicator. A terminal non-vacuity gate
+// requires every route/outcome arm to have occurred.
+func (s *Simulator) runConstraintLoop(ctx context.Context, model *SchemaModel) (*SimReport, error) {
+	st := newConstraintKindState()
+	if model != nil {
+		if v := CheckSchemaIntrospection(0, model, s.engine); len(v) > 0 {
+			return s.report(0, Op{Kind: OpMatch, Cypher: "<initial schema introspection>"}, v), nil
+		}
+	}
+
+	var lastTick int64
+	var lastOp Op
 	for i := 0; i < s.cfg.MaxTicks; i++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		tick := s.clock.Tick()
 
+		crashesBefore := s.crashCount
 		if report, err := s.maybeCrash(ctx, tick); err != nil {
 			return nil, err
 		} else if report != nil {
 			return report, nil
 		}
+		if s.crashCount > crashesBefore && model != nil {
+			// Recovered-DDL introspection: both constraints (and the backing
+			// indexes) must re-register with the same names, kinds, and shapes.
+			if v := CheckSchemaIntrospection(tick, model, s.engine); len(v) > 0 {
+				return s.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery schema introspection>"}, v), nil
+			}
+		}
 
-		op := s.nextConstraintOp(&freshCounter)
+		op := st.nextOp(s.seed, s.oracle)
 		engineCommitted := s.execute(ctx, op)
-		predicted := s.oracle.ApplyCreate(op.Cypher, op.Params)
+		predicted := st.apply(s.oracle, op)
 		if !engineCommitted {
-			// A rejected write under this scenario is a UNIQUE-violating duplicate
-			// the constraint forbade; count it as the non-vacuity guard.
+			// A rejected write under this scenario is a UNIQUE-violating write a
+			// constraint forbade; count it as the non-vacuity guard.
 			s.rejectedWrites++
 		}
 
@@ -99,11 +157,13 @@ func (s *Simulator) runConstraintLoop(ctx context.Context) (*SimReport, error) {
 				Tick: tick,
 				Op:   "constraint enforcement",
 				Message: fmt.Sprintf(
-					"UNIQUE(Person.name) enforcement gap: engine committed=%t but oracle predicted committed=%t for %q params=%v",
+					"UNIQUE enforcement gap: engine committed=%t but oracle predicted committed=%t for %q params=%v",
 					engineCommitted, predicted.Committed, op.Cypher, op.Params),
 			}
 			return s.report(tick, op, []Violation{v}), nil
 		}
+		st.note(op, engineCommitted)
+		lastTick, lastOp = tick, op
 
 		if tick%int64(s.cfg.CheckEvery) == 0 {
 			if violations := s.checker.Check(tick, s.oracle, s.engine); len(violations) > 0 {
@@ -111,28 +171,15 @@ func (s *Simulator) runConstraintLoop(ctx context.Context) (*SimReport, error) {
 			}
 		}
 	}
+	if model != nil {
+		if v := CheckSchemaIntrospection(lastTick, model, s.engine); len(v) > 0 {
+			return s.report(lastTick, Op{Kind: OpMatch, Cypher: "<terminal schema introspection>"}, v), nil
+		}
+	}
+	// Assert-something-was-seen (rmp #2455): every constraint route, in both
+	// its commit and reject arm, must have actually run.
+	if v := st.checkNonVacuity(lastTick); len(v) > 0 {
+		return s.report(lastTick, lastOp, v), nil
+	}
 	return nil, nil
-}
-
-// nextConstraintOp returns the next CREATE for the constraint loop: a fresh
-// unique-name Person (which the UNIQUE constraint permits) or a duplicate of an
-// existing name (which it must forbid). The choice and the duplicate target are
-// drawn from the master seed so the op stream stays a pure function of the seed.
-// *fresh is the monotone counter for fresh names.
-func (s *Simulator) nextConstraintOp(fresh *int) Op {
-	names := s.oracle.NodeNames()
-	// ~40% duplicate attempts once names exist; always fresh while empty.
-	dup := len(names) > 0 && s.seed.Float64() < 0.4
-	var name string
-	if dup {
-		name = names[s.seed.IntN(len(names))]
-	} else {
-		name = fmt.Sprintf("c%d", *fresh)
-		*fresh++
-	}
-	return Op{
-		Kind:   OpCreate,
-		Cypher: tmplCreatePerson,
-		Params: map[string]any{"name": name, "age": int64(s.seed.IntN(100))},
-	}
 }

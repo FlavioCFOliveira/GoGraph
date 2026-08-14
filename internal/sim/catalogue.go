@@ -272,7 +272,7 @@ func readHeavyScenario() Scenario {
 func schemaChaosScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioSchemaChaos,
-		Description: "frequent DDL (index create/drop/re-create) under write load + full index-consistency check",
+		Description: "frequent DDL (index + constraint create/drop/re-create) under write load + schema-introspection oracle (SHOW vs db.* vs model) + full index-consistency check",
 		Mode:        ModeDeterministic,
 		DefaultSeed: 0x5C4A05,
 		MaxTicks:    500,
@@ -408,10 +408,13 @@ func malformedOnlyWorkload(_ *Seed) *Workload {
 const schemaChurnEvery = 50
 
 // runSchemaChaos is the schema-chaos custom run: it drives the deterministic
-// engine-API safety loop while periodically issuing DDL over the same engine,
-// then runs the full index-consistency check at the end. Determinism holds
-// because the DDL cadence is positional (tick-driven) and the workload draw
-// stream is the master seed's alone.
+// engine-API safety loop while periodically issuing DDL over the same engine —
+// holding the introspection surfaces (SHOW INDEXES / SHOW CONSTRAINTS and
+// db.indexes() / db.constraints()) to the harness's own DDL model after every
+// churn flip (rmp #2455) — then runs the full index-consistency check and a
+// terminal introspection check at the end. Determinism holds because the DDL
+// cadence is positional (tick-driven) and the workload draw stream is the
+// master seed's alone.
 func runSchemaChaos(ctx context.Context, seed uint64) (*SimReport, error) {
 	sc := schemaChaosScenario()
 	cfg := sc.DeterministicConfig(seed)
@@ -422,12 +425,18 @@ func runSchemaChaos(ctx context.Context, seed uint64) (*SimReport, error) {
 	}
 	defer func() { _ = sm.Close() }()
 
-	// Create the index up front so the whole run maintains it under DDL churn.
+	// Create the index up front so the whole run maintains it under DDL churn,
+	// and mirror it in the schema model the introspection oracle verifies.
+	model := NewSchemaModel()
 	if err := sm.engineRunDDL(ctx, "CREATE INDEX sim_person_name FOR (n:Person) ON (n.name)"); err != nil {
 		return nil, fmt.Errorf("sim: schema-chaos initial index: %w", err)
 	}
+	model.AddIndex("sim_person_name", SchemaIndexHash, "Person", "name")
+	if v := CheckSchemaIntrospection(0, model, sm.engine); len(v) > 0 {
+		return sm.report(0, Op{Kind: OpMatch, Cypher: "<initial schema introspection>"}, v), nil
+	}
 
-	report, err := sm.runWithDDL(ctx, schemaChurnEvery)
+	report, err := sm.runWithDDL(ctx, schemaChurnEvery, model)
 	if err != nil {
 		return nil, fmt.Errorf("sim: schema-chaos run: %w", err)
 	}
@@ -435,6 +444,9 @@ func runSchemaChaos(ctx context.Context, seed uint64) (*SimReport, error) {
 		return report, nil
 	}
 	if v := CheckIndexConsistency(int64(cfg.MaxTicks), sm.Oracle(), sm.engine, sc.Checks.IndexSpecs...); len(v) > 0 {
+		return finalReport(seed, int64(cfg.MaxTicks), sm.Oracle(), v), nil
+	}
+	if v := CheckSchemaIntrospection(int64(cfg.MaxTicks), model, sm.engine); len(v) > 0 {
 		return finalReport(seed, int64(cfg.MaxTicks), sm.Oracle(), v), nil
 	}
 	return nil, nil
