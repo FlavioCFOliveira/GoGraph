@@ -241,6 +241,11 @@ func expectedOpCounters(op Op, oracle *GraphOracle) (want exec.QueryCounters, ok
 		// scenario (rmp #2449, #2501) are derived by a dedicated helper.
 		return expectedKnowsInstCounters(op, oracle)
 
+	case tmplCopyKnowsInst:
+		// The copy-from-instance assignment (rmp #2503) carries two eids, so it
+		// has its own helper.
+		return expectedCopyKnowsCounters(op, oracle)
+
 	case tmplSetTag:
 		return expectSetProps(op, oracle, 1)
 
@@ -409,6 +414,33 @@ func expectedKnowsInstCounters(op Op, oracle *GraphOracle) (want exec.QueryCount
 	default:
 		return exec.QueryCounters{}, false
 	}
+}
+
+// expectedCopyKnowsCounters is the exact counters expectation for
+// [tmplCopyKnowsInst] (rmp #2503): when both pinned instances exist, the
+// whole-entity replace clears every property the TARGET instance carries (one
+// -properties each, attributed per instance through the by-handle bag gate)
+// and writes one +properties per key of the SOURCE instance's OWN map — the
+// bag-authoritative map, never the per-pair aggregate, whose key set can
+// differ on a parallel pair — plus one +properties for the trailing eid
+// re-pin (SET counts a same-value assignment). A miss on either endpoint or
+// either instance is a committed zero-effect statement.
+func expectedCopyKnowsCounters(op Op, oracle *GraphOracle) (exec.QueryCounters, bool) {
+	kSrc, kDst, ok, found := oracle.copyKnowsInstParams(op.Params)
+	if !ok {
+		return exec.QueryCounters{}, false
+	}
+	if found {
+		e1, ok1 := oracle.edges[kSrc]
+		e2, ok2 := oracle.edges[kDst]
+		if ok1 && ok2 {
+			return exec.QueryCounters{
+				PropertiesRemoved: int64(len(e2.Properties)),
+				PropertiesSet:     int64(len(e1.Properties)) + 1,
+			}, true
+		}
+	}
+	return exec.QueryCounters{}, true
 }
 
 // expectSetProps is the shared expectation for the MATCH-by-name SET templates:

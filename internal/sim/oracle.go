@@ -428,6 +428,11 @@ func (o *GraphOracle) ApplyMatch(cypher string, params map[string]any) OracleRes
 		// projection boundary must not change which instance the replace
 		// reaches (rmp #2502).
 		return o.recordOp(cypher, params, o.replaceKnowsInst(params))
+	case tmplCopyKnowsInst:
+		// Copy-from-instance: the target's map becomes the SOURCE instance's
+		// own map (bag-authoritative, rmp #2503) with the target's eid
+		// re-pinned.
+		return o.recordOp(cypher, params, o.copyKnowsInst(params))
 	}
 	// Schema-mutation templates (REMOVE / SET-label / SET-map) mutate the matched
 	// node's labels/properties; the helper reports whether it recognised the

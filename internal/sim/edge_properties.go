@@ -58,6 +58,14 @@ const (
 	// stable handle so the replace reaches the instance's own bag instead of
 	// degrading to the pairwise path (rmp #2502, suspicion 2 — class #2334).
 	tmplReplaceKnowsInstWith = "MATCH (a:Person {name:$a})-[r:KNOWS]->(b:Person {name:$b}) WHERE r.eid = $eid WITH r SET r = {eid: $eid, since: $since, weight: $weight}"
+	// tmplCopyKnowsInst is the copy-from-instance whole-entity assignment (rmp
+	// #2503): `SET r2 = r1` copies the SOURCE instance's own property map —
+	// exactly what `RETURN properties(r1)` shows — onto the target instance,
+	// never the per-pair aggregate, which on a parallel pair can carry keys
+	// only a twin ever had. The trailing `SET r2.eid = $dstEid` re-pins the
+	// target's unique eid (the copied map carries the source's), keeping every
+	// instance addressable by eid for the oracle and the checker.
+	tmplCopyKnowsInst = "MATCH (a:Person {name:$a})-[r1:KNOWS]->(b:Person {name:$b}) WHERE r1.eid = $srcEid MATCH (:Person {name:$a})-[r2:KNOWS]->(:Person {name:$b}) WHERE r2.eid = $dstEid SET r2 = r1 SET r2.eid = $dstEid"
 )
 
 // KnowsInstance identifies one modelled KNOWS edge instance by its unique eid
@@ -74,7 +82,8 @@ type KnowsInstance struct {
 // INSTANCES with the full relationship write surface — standalone SET
 // (r.weight), REMOVE (r.since), the SET-to-null removal (SET r.since = null),
 // the instance-only-key SET (r.note), the whole-entity replace in its plain
-// and WITH-projected forms (SET r = {…}, rmp #2502), and DELETE r — including
+// and WITH-projected forms (SET r = {…}, rmp #2502), the copy-from-instance
+// assignment (SET r2 = r1, rmp #2503), and DELETE r — including
 // over parallel-edge pairs, where one instance is touched and its twin must
 // survive with its own property map. Every op pins its target instance by
 // eid, so the oracle predicts exactly which instance changes.
@@ -103,11 +112,11 @@ func (*EdgePropsWriter) Name() string { return "EdgePropsWriter" }
 func (w *EdgePropsWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 	names := oracle.NodeNames()
 	if len(names) >= 2 {
-		switch pick := seed.IntN(14); {
+		switch pick := seed.IntN(15); {
 		case pick < 3:
-			// ~21%: grow the Person population (fall through to the create below).
+			// ~20%: grow the Person population (fall through to the create below).
 		case pick < 6:
-			// ~21%: a KNOWS instance between a seed-chosen pair. A pair that is
+			// ~20%: a KNOWS instance between a seed-chosen pair. A pair that is
 			// already linked gains a parallel instance (multigraph); a self-pair
 			// draw falls back to a Person create (self-loops are out of scope).
 			a := names[seed.IntN(len(names))]
@@ -175,6 +184,27 @@ func (w *EdgePropsWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 			if insts := oracle.KnowsInstancesByEID(); len(insts) > 0 {
 				t := insts[seed.IntN(len(insts))]
 				return w.opReplaceInstance(seed, t, tmplReplaceKnowsInstWith)
+			}
+		case pick < 14:
+			// ~7%: copy-from-instance assignment (rmp #2503): SET twin = pinned
+			// instance. The copied map must be the SOURCE instance's own bag,
+			// never the per-pair aggregate; a parallel twin is preferred as the
+			// target, with the degenerate self-copy as the no-twin fallback.
+			if insts := oracle.KnowsInstancesByEID(); len(insts) > 0 {
+				src := insts[seed.IntN(len(insts))]
+				var twins []KnowsInstance
+				for _, s := range insts {
+					if s.Src == src.Src && s.Dst == src.Dst && s.EID != src.EID {
+						twins = append(twins, s)
+					}
+				}
+				dst := src
+				if len(twins) > 0 {
+					dst = twins[seed.IntN(len(twins))]
+				}
+				return Op{Kind: OpUpdate, Cypher: tmplCopyKnowsInst, Params: map[string]any{
+					"a": src.Src, "b": src.Dst, "srcEid": src.EID, "dstEid": dst.EID,
+				}}
 			}
 		default:
 			// ~7%: standalone DELETE r of one instance — endpoints and any parallel
@@ -346,6 +376,54 @@ func (o *GraphOracle) replaceKnowsInst(params map[string]any) OracleResult {
 	return OracleResult{Committed: true}
 }
 
+// copyKnowsInstParams reads the (a, b, srcEid, dstEid) coordinates of a
+// copy-from-instance op and resolves both instance keys. ok is false when a
+// parameter is missing or ill-typed; found is false when either endpoint name
+// is not modelled (the MATCH finds no row and the op is a committed no-op).
+func (o *GraphOracle) copyKnowsInstParams(params map[string]any) (src, dst edgeKey, ok, found bool) {
+	a, okA := paramString(params, "a")
+	b, okB := paramString(params, "b")
+	srcEid, okS := params["srcEid"].(int64)
+	dstEid, okD := params["dstEid"].(int64)
+	if !okA || !okB || !okS || !okD {
+		return edgeKey{}, edgeKey{}, false, false
+	}
+	srcID, srcOK := o.byName[a]
+	dstID, dstOK := o.byName[b]
+	if !srcOK || !dstOK {
+		return edgeKey{}, edgeKey{}, true, false
+	}
+	return edgeKey{src: srcID, dst: dstID, label: "KNOWS", eid: srcEid},
+		edgeKey{src: srcID, dst: dstID, label: "KNOWS", eid: dstEid}, true, true
+}
+
+// copyKnowsInst models [tmplCopyKnowsInst]: the target instance's property map
+// becomes EXACTLY the SOURCE instance's map — what `RETURN properties(r1)`
+// shows, never the per-pair aggregate (rmp #2503) — with the target's own eid
+// re-pinned by the trailing single-property SET. The source map is cloned
+// before the target is touched, so the degenerate self-copy (srcEid == dstEid)
+// is modelled soundly. A miss on either instance is a committed no-effect
+// result (the MATCH found no row).
+func (o *GraphOracle) copyKnowsInst(params map[string]any) OracleResult {
+	kSrc, kDst, ok, found := o.copyKnowsInstParams(params)
+	if !ok {
+		return OracleResult{ErrorMsg: "oracle: copyKnowsInst missing/ill-typed param"}
+	}
+	if found {
+		e1, ok1 := o.edges[kSrc]
+		e2, ok2 := o.edges[kDst]
+		if ok1 && ok2 {
+			next := make(map[string]any, len(e1.Properties)+1)
+			for k, v := range e1.Properties {
+				next[k] = v
+			}
+			next["eid"] = kDst.eid
+			e2.Properties = next
+		}
+	}
+	return OracleResult{Committed: true}
+}
+
 // deleteKnowsInst models [tmplDeleteKnowsInst]: it deletes exactly the
 // instance pinned by eid — endpoints and any parallel twin survive — and
 // records the tombstone so [CheckEdgeProperties] keeps asserting the deleted
@@ -467,7 +545,7 @@ func CheckEdgeProperties(tick int64, oracle *GraphOracle, engine *EngineAdapter)
 func edgePropertiesScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioEdgeProperties,
-		Description: "relationship writes on parallel KNOWS instances (SET r.weight / REMOVE r.since / SET r.since = null / SET r.note / SET r = map plain+WITH / DELETE r by eid): per-instance round-trip, exact-map replace, twin survival, endpoints alive, crash/recovery",
+		Description: "relationship writes on parallel KNOWS instances (SET r.weight / REMOVE r.since / SET r.since = null / SET r.note / SET r = map plain+WITH / SET r2 = r1 copy-from-instance / DELETE r by eid): per-instance round-trip, exact-map replace, bag-authoritative copy source, twin survival, endpoints alive, crash/recovery",
 		Mode:        ModeDeterministic,
 		DefaultSeed: 0xED9E9405,
 		MaxTicks:    500,

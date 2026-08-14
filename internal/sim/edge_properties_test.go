@@ -127,7 +127,7 @@ func TestEdgeProperties_NonVacuous(t *testing.T) {
 	for _, tmpl := range []string{
 		tmplCreateKnowsInst, tmplSetKnowsWeight, tmplRemoveKnowsSince,
 		tmplSetKnowsSinceNull, tmplDeleteKnowsInst, tmplSetKnowsNote,
-		tmplReplaceKnowsInst, tmplReplaceKnowsInstWith,
+		tmplReplaceKnowsInst, tmplReplaceKnowsInstWith, tmplCopyKnowsInst,
 	} {
 		if counts[tmpl] == 0 {
 			t.Errorf("vacuous: template never emitted: %s", tmpl)

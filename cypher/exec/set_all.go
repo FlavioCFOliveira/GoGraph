@@ -501,7 +501,10 @@ func (op *SetAllProperties) applyExprValue(target entityBinding, v expr.Value) e
 		if !srcOK || !dstOK {
 			return nil
 		}
-		return op.copyFromSource(target, entityBinding{isRel: true, relSrcKey: srcKey, relDstKey: dstKey})
+		// Since rmp #2317 the value's ID IS the stable handle: carry it so
+		// copyFromSource reads the evaluated instance's own bag, not the
+		// per-pair aggregate (#2503).
+		return op.copyFromSource(target, entityBinding{isRel: true, relSrcKey: srcKey, relDstKey: dstKey, relHandle: src.ID})
 	default:
 		return fmt.Errorf("TypeError: SET %s: expected a Map, Node or Relationship but was %s", op.entityVar, v.Kind())
 	}
@@ -600,10 +603,22 @@ func (op *SetAllProperties) applyEntityCopy(target entityBinding, row Row) error
 // target. The full property snapshot is taken before any write, so copying a
 // relationship onto itself is safe. Existing target properties are cleared
 // first for `=` (replace) semantics.
+//
+// A relationship source is read exactly as reads route: the bound instance's
+// own by-handle bag when its stable handle resolves and the bag is non-empty,
+// the per-pair aggregate otherwise. Copying from the aggregate leaked a
+// parallel TWIN's keys into the target — `SET x = r` copied a map that
+// `RETURN properties(r)` never showed (#2503, the source-side sibling of the
+// #2502 refresh routing).
 func (op *SetAllProperties) copyFromSource(target, src entityBinding) error {
 	var sourceProps map[string]lpg.PropertyValue
 	if src.isRel {
 		sourceProps = op.mutator.EdgeProperties(src.relSrcKey, src.relDstKey)
+		if src.relHandle != 0 {
+			if bag := op.mutator.EdgePropertiesByHandle(src.relSrcKey, src.relDstKey, src.relHandle); len(bag) > 0 {
+				sourceProps = bag
+			}
+		}
 	} else {
 		sourceProps = op.mutator.NodeProperties(src.nodeKey)
 	}
