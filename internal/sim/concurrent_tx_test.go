@@ -126,7 +126,7 @@ func TestConcurrentTx_QuiescenceVerifierFires(t *testing.T) {
 	defer func() { _ = srv.Close() }()
 
 	// A real node that the fabricated "refused" ledger claims was refused.
-	if err := seedContendedCounter(srv, 0); err != nil {
+	if _, err := seedContendedCounter(srv, 0); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 

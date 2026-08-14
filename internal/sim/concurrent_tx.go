@@ -49,29 +49,48 @@ const (
 // wireCounterName names one shared contended counter.
 func wireCounterName(k int) string { return fmt.Sprintf("mv-wire-counter-%d", k) }
 
-// seedContendedCounter creates one shared counter node over a fresh setup
-// connection, committed before the contended connections spawn.
-func seedContendedCounter(srv *SimServer, k int) error {
+// seedContendedCounter ensures one shared counter node exists, over a fresh
+// setup connection, committed before the contended connections spawn. It is
+// IDEMPOTENT — a counter that already exists (a multi-cycle scenario reusing
+// one durable store) is left untouched — and reports whether it created the
+// node, so the caller's eventual-consistency accounting stays exact.
+func seedContendedCounter(srv *SimServer, k int) (created bool, err error) {
 	c, err := srv.Dial()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer func() { _ = c.Close() }()
 	if err := c.Connect(context.Background()); err != nil {
-		return err
+		return false, err
 	}
-	if _, err := c.Run("CREATE (n:Person {name:$name, val:$v})",
-		map[string]any{"name": wireCounterName(k), "v": int64(0)}); err != nil {
-		return err
+	run := func(q string, params map[string]any) ([]*proto.Record, error) {
+		if _, err := c.Run(q, params); err != nil {
+			return nil, err
+		}
+		records, term, err := c.PullAll()
+		if err != nil {
+			return nil, err
+		}
+		if f, ok := term.(*proto.Failure); ok {
+			return nil, fmt.Errorf("seed counter %d refused: %s %s", k, f.Code, f.Message)
+		}
+		return records, nil
 	}
-	_, term, err := c.PullAll()
+	records, err := run("MATCH (n:Person {name:$name}) RETURN count(n)",
+		map[string]any{"name": wireCounterName(k)})
 	if err != nil {
-		return err
+		return false, err
 	}
-	if f, ok := term.(*proto.Failure); ok {
-		return fmt.Errorf("seed counter %d refused: %s %s", k, f.Code, f.Message)
+	if len(records) == 1 && len(records[0].Data) == 1 {
+		if n, ok := records[0].Data[0].(int64); ok && n > 0 {
+			return false, nil // already seeded by an earlier cycle
+		}
 	}
-	return nil
+	if _, err := run("CREATE (n:Person {name:$name, val:$v})",
+		map[string]any{"name": wireCounterName(k), "v": int64(0)}); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // txOutcome is the terminal classification of one wire transaction.

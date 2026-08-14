@@ -114,6 +114,7 @@ func DefaultRegistry() (*Registry, error) {
 		walCorruptionFailStopScenario(),
 		checkpointDirFsyncFaultScenario(),
 		ioRoundTripFaultScenario(),
+		productionProfileScenario(),
 	)
 }
 

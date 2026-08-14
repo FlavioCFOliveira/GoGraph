@@ -247,10 +247,13 @@ func RunConcurrent(ctx context.Context, srv *SimServer, cfg ConcurrentConfig) (C
 	seededCounters := 0
 	if haveContended {
 		for k := 0; k < cfg.ContendedCounters; k++ {
-			if err := seedContendedCounter(srv, k); err != nil {
+			created, err := seedContendedCounter(srv, k)
+			if err != nil {
 				return res, fmt.Errorf("sim: seed contended counter %d: %w", k, err)
 			}
-			seededCounters++
+			if created {
+				seededCounters++
+			}
 		}
 	}
 
