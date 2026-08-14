@@ -408,11 +408,10 @@ func runEdgeProperties(ctx context.Context, seed uint64) (*SimReport, error) {
 		op := actor.NextOp(sm.seed, sm.oracle)
 		committed, counters := sm.executeCounted(ctx, op)
 		// Per-op counters oracle (#2448): a relationship SET must report exactly
-		// one property assignment and DELETE r exactly one deleted relationship
-		// with zero deleted nodes — adjudicated on the pre-apply model. REMOVE is
-		// currently skipped by expectedOpCounters because of a known per-pair
-		// counter-attribution defect (see the tmplRemoveKnowsSince note in
-		// counters_oracle.go); its state effect is still checked exactly.
+		// one property assignment, REMOVE exactly one -properties when the pinned
+		// instance still carries `since` (per-instance attribution, rmp #2500),
+		// and DELETE r exactly one deleted relationship with zero deleted nodes —
+		// all adjudicated on the pre-apply model.
 		if v := CheckOpCounters(tick, op, committed, counters, sm.oracle); len(v) > 0 {
 			return sm.report(tick, op, v), nil
 		}

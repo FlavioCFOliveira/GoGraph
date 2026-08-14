@@ -323,32 +323,34 @@ func expectedOpCounters(op Op, oracle *GraphOracle) (want exec.QueryCounters, ok
 //   - [tmplSetKnowsWeight]: exactly one assignment when the pinned instance
 //     exists (an assignment counts even when the value is unchanged), zero
 //     rows otherwise.
-//   - [tmplRemoveKnowsSince]: SKIPPED (ok == false) because of a KNOWN ENGINE
-//     DEFECT this oracle found: the exact expectation is one -properties when
-//     the pinned instance still carries `since`, but the engine gates
-//     PropertiesRemoved on the PER-PAIR aggregate presence probe
-//     (lpgMutatorAdapter.DelEdgeProperty, cypher/api.go) while the mutation
-//     itself is correctly per-handle (DelEdgePropertyByHandle counts
-//     nothing). On parallel edges only the first REMOVE per (src,dst) pair
-//     reports -properties 1; a later removal of a genuinely present property
-//     on a sibling instance reports 0. The per-instance STATE effect — right
-//     instance stripped, sibling untouched — stays fully guarded by
-//     [CheckEdgeProperties]. TestEdgeProperties_KnownDefect_RemoveCountersPerPair
-//     is the canary: it fails the moment the engine starts counting
-//     per-instance, which is the cue to restore the exact expectation here.
+//   - [tmplRemoveKnowsSince]: exactly one -properties when the pinned instance
+//     still carries `since`, zero when it no longer does (removing an absent
+//     property is an openCypher no-op) or when the instance is gone. The
+//     counter is attributed per INSTANCE: this exact expectation was skipped
+//     until the engine defect this oracle found (rmp #2500) was fixed — the
+//     -properties gate read the PER-PAIR aggregate store, so on parallel
+//     edges only the first REMOVE per (src,dst) pair counted.
+//     TestEdgeProperties_RemoveCountersPerInstance is the engine-facing
+//     regression guard for the corrected behaviour.
 //   - [tmplDeleteKnowsInst]: exactly one deleted relationship and ZERO deleted
 //     nodes — a standalone edge deletion must never cascade to its endpoints,
 //     and the deleted edge's property teardown is suppressed as not
 //     user-visible.
 func expectedKnowsInstCounters(op Op, oracle *GraphOracle) (want exec.QueryCounters, ok bool) {
-	if op.Cypher == tmplRemoveKnowsSince {
-		return exec.QueryCounters{}, false // known engine defect; see above.
-	}
 	k, okP, found := oracle.knowsInstParams(op.Params)
 	if !okP {
 		return exec.QueryCounters{}, false
 	}
 	switch op.Cypher {
+	case tmplRemoveKnowsSince:
+		if found {
+			if e, exists := oracle.edges[k]; exists {
+				if _, has := e.Properties["since"]; has {
+					return exec.QueryCounters{PropertiesRemoved: 1}, true
+				}
+			}
+		}
+		return exec.QueryCounters{}, true
 	case tmplCreateKnowsInst:
 		if !found {
 			return exec.QueryCounters{}, true

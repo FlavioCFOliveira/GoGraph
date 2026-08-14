@@ -28,6 +28,17 @@ import (
 // RemoveProperty
 // ─────────────────────────────────────────────────────────────────────────────
 
+// relInstancePropRemover is the optional per-instance removal seam (#2500): a
+// mutator implementing it removes key from both the per-pair store and the
+// targeted instance's by-handle bag, gating -properties on the instance's OWN
+// bag rather than the per-pair aggregate — on parallel edges the aggregate
+// probe reports the removal only once per (src, dst) pair. Both engine
+// adapters implement it; the interface stays optional so pairwise-only
+// mutators keep compiling.
+type relInstancePropRemover interface {
+	DelEdgePropertyOnInstance(src, dst string, handle uint64, key string)
+}
+
 // RemoveProperty removes a single named property from an already-bound node
 // or relationship per input row. For relationships, call WithRelCols to supply
 // the endpoint column indices.
@@ -114,10 +125,17 @@ func (op *RemoveProperty) Next(out *Row) (bool, error) {
 			// Per-pair removal (authoritative for reads), mirrored to the
 			// per-instance by-handle store so REMOVE r.x affects only the bound
 			// parallel edge (#1686). The by-handle removal is a no-op when the
-			// instance has no resolvable stable handle.
-			op.mutator.DelEdgeProperty(ent.relSrcKey, ent.relDstKey, op.propertyKey)
-			if ent.relHandle != 0 {
-				op.mutator.DelEdgePropertyByHandle(ent.relSrcKey, ent.relDstKey, ent.relHandle, op.propertyKey)
+			// instance has no resolvable stable handle. When the handle IS
+			// resolved, a mutator implementing [relInstancePropRemover] performs
+			// both removals itself so -properties is gated on the TARGETED
+			// instance's own bag, not the per-pair aggregate (#2500).
+			if m, ok := op.mutator.(relInstancePropRemover); ok && ent.relHandle != 0 {
+				m.DelEdgePropertyOnInstance(ent.relSrcKey, ent.relDstKey, ent.relHandle, op.propertyKey)
+			} else {
+				op.mutator.DelEdgeProperty(ent.relSrcKey, ent.relDstKey, op.propertyKey)
+				if ent.relHandle != 0 {
+					op.mutator.DelEdgePropertyByHandle(ent.relSrcKey, ent.relDstKey, ent.relHandle, op.propertyKey)
+				}
 			}
 		} else {
 			// DelNodeProperty frees the constrained slot, at the mutator choke

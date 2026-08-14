@@ -362,20 +362,18 @@ func TestEdgeProperties_CountersSensitivity_DeleteR(t *testing.T) {
 	}
 }
 
-// TestEdgeProperties_KnownDefect_RemoveCountersPerPair is the canary for the
-// engine defect this oracle found (rmp #2449): the STATE effect of REMOVE on
-// parallel edges is correctly per-instance (each removal strips exactly its
-// pinned instance, the sibling keeps its property — asserted here), but the
-// PropertiesRemoved counter is attributed per (src,dst) PAIR: only the first
-// removal on the pair reports -properties 1, and a later removal of a
-// genuinely present property on a sibling instance reports 0. This test PINS
-// today's defective counter behaviour on purpose: the moment the engine
-// counts per-instance, it fails — the cue to delete it and restore the exact
-// tmplRemoveKnowsSince expectation in expectedOpCounters (see the note
-// there). The defect lives in lpgMutatorAdapter.DelEdgeProperty
-// (cypher/api.go), whose presence gate reads the per-pair aggregate instead
-// of the by-handle map.
-func TestEdgeProperties_KnownDefect_RemoveCountersPerPair(t *testing.T) {
+// TestEdgeProperties_RemoveCountersPerInstance is the regression guard for
+// the engine defect the counters oracle found (rmp #2449, fixed as #2500):
+// REMOVE on parallel edges must attribute PropertiesRemoved per INSTANCE.
+// Before the fix, the -properties gate read the per-pair aggregate store
+// (lpgMutatorAdapter.DelEdgeProperty / walMutatorAdapter.DelEdgeProperty in
+// cypher/api.go), so only the first removal on a (src,dst) pair reported
+// -properties 1 and a later removal of a genuinely present property on a
+// sibling instance reported 0 — while the STATE effect was per-instance and
+// correct throughout. The DST demands the exact count via the
+// tmplRemoveKnowsSince expectation in expectedKnowsInstCounters; this test
+// pins the same contract directly, plus the absent-property no-op.
+func TestEdgeProperties_RemoveCountersPerInstance(t *testing.T) {
 	sm, err := New(Config{Seed: 5, MaxTicks: 1, Workload: edgePropertiesWorkload(NewSeed(5)), Multigraph: true})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -404,6 +402,9 @@ func TestEdgeProperties_KnownDefect_RemoveCountersPerPair(t *testing.T) {
 	}
 	first := remove(1)
 	second := remove(2)
+	// A third REMOVE re-targets instance 1, whose `since` is already gone:
+	// removing an absent property is an openCypher no-op and counts nothing.
+	absent := remove(1)
 
 	// The state effect is per-instance and correct: both `since` values are gone.
 	probe := func(eid int64) []string {
@@ -421,13 +422,17 @@ func TestEdgeProperties_KnownDefect_RemoveCountersPerPair(t *testing.T) {
 		t.Fatalf("eid 2 since after REMOVE = %v, want null", got)
 	}
 
-	// The counters are the defect: 1 then 0, where openCypher requires 1 then 1.
+	// The counters are per-instance: each removal of a present `since` reports
+	// exactly one -properties, and the absent-property re-removal reports zero.
 	if first == nil || first.PropertiesRemoved != 1 {
-		t.Fatalf("first REMOVE PropertiesRemoved = %+v, the defect baseline expects 1", first)
+		t.Fatalf("first REMOVE PropertiesRemoved = %+v, want 1 (per-instance attribution, rmp #2500)", first)
 	}
-	if second == nil || second.PropertiesRemoved != 0 {
-		t.Fatalf("second REMOVE PropertiesRemoved = %+v; the engine now counts per-instance — "+
-			"DELETE this canary and restore the exact tmplRemoveKnowsSince expectation in expectedOpCounters (counters_oracle.go)", second)
+	if second == nil || second.PropertiesRemoved != 1 {
+		t.Fatalf("second REMOVE PropertiesRemoved = %+v, want 1: a genuinely present property on a "+
+			"sibling parallel instance must count — the per-pair aggregate gate is the #2500 defect", second)
+	}
+	if absent == nil || absent.PropertiesRemoved != 0 {
+		t.Fatalf("absent-property REMOVE PropertiesRemoved = %+v, want 0 (openCypher no-op)", absent)
 	}
 }
 

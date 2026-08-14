@@ -17641,17 +17641,24 @@ func (a *lpgMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 
 // DelEdgeProperty removes the named property from the directed edge (src, dst).
 func (a *lpgMutatorAdapter) DelEdgeProperty(src, dst, key string) {
-	r := a.rec()
-	var prev lpg.PropertyValue
-	var had bool
-	if r.active() {
-		prev, had = a.g.GetEdgeProperty(src, dst, key)
-	}
 	// #2212: removing an absent property is a no-op and counts nothing.
 	if a.counters != nil {
 		if _, present := a.g.GetEdgeProperty(src, dst, key); present {
 			a.countPropertyRemoved()
 		}
+	}
+	a.delEdgePropertyUncounted(src, dst, key)
+}
+
+// delEdgePropertyUncounted is [lpgMutatorAdapter.DelEdgeProperty] without the
+// -properties gate, so DelEdgePropertyOnInstance can attribute the counter by
+// the targeted instance's own bag instead of the per-pair aggregate (#2500).
+func (a *lpgMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) {
+	r := a.rec()
+	var prev lpg.PropertyValue
+	var had bool
+	if r.active() {
+		prev, had = a.g.GetEdgeProperty(src, dst, key)
 	}
 	a.w().DelEdgeProperty(src, dst, key)
 	r.recordDelEdgeProperty(src, dst, key, prev, had)
@@ -17663,6 +17670,23 @@ func (a *lpgMutatorAdapter) DelEdgeProperty(src, dst, key string) {
 			Property: uint32(a.g.PropertyKeys().Intern(key)),
 		})
 	}
+}
+
+// DelEdgePropertyOnInstance removes key from the (src, dst) per-pair store and
+// from the targeted instance's by-handle bag, gating -properties on the
+// BY-HANDLE presence probe (#2500): the per-pair entry is aggregate state
+// shared by every parallel instance, so gating on it reports the removal only
+// once per pair — a REMOVE that strips a present property from a sibling
+// instance must still count 1, and a REMOVE of a property absent on the
+// targeted instance must count 0 (openCypher: a no-op).
+func (a *lpgMutatorAdapter) DelEdgePropertyOnInstance(src, dst string, handle uint64, key string) {
+	if a.counters != nil {
+		if _, present := a.g.EdgePropertiesByHandle(src, dst, handle)[key]; present {
+			a.countPropertyRemoved()
+		}
+	}
+	a.delEdgePropertyUncounted(src, dst, key)
+	a.DelEdgePropertyByHandle(src, dst, handle, key)
 }
 
 // EdgeProperties returns a snapshot of every property currently set on the
@@ -18532,17 +18556,24 @@ func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 
 // DelEdgeProperty removes the named property from the directed edge (src, dst).
 func (a *walMutatorAdapter) DelEdgeProperty(src, dst, key string) {
-	r := a.rec()
-	var prev lpg.PropertyValue
-	var had bool
-	if r.active() {
-		prev, had = a.g.GetEdgeProperty(src, dst, key)
-	}
 	// #2212: removing an absent property is a no-op and counts nothing.
 	if a.counters != nil {
 		if _, present := a.g.GetEdgeProperty(src, dst, key); present {
 			a.countPropertyRemoved()
 		}
+	}
+	a.delEdgePropertyUncounted(src, dst, key)
+}
+
+// delEdgePropertyUncounted is [walMutatorAdapter.DelEdgeProperty] without the
+// -properties gate, so DelEdgePropertyOnInstance can attribute the counter by
+// the targeted instance's own bag instead of the per-pair aggregate (#2500).
+func (a *walMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) {
+	r := a.rec()
+	var prev lpg.PropertyValue
+	var had bool
+	if r.active() {
+		prev, had = a.g.GetEdgeProperty(src, dst, key)
 	}
 	a.w().DelEdgeProperty(src, dst, key)
 	r.recordDelEdgeProperty(src, dst, key, prev, had)
@@ -18555,6 +18586,20 @@ func (a *walMutatorAdapter) DelEdgeProperty(src, dst, key string) {
 			Property: uint32(a.g.PropertyKeys().Intern(key)),
 		})
 	}
+}
+
+// DelEdgePropertyOnInstance is [lpgMutatorAdapter.DelEdgePropertyOnInstance]
+// for the durable write path (#2500): the per-pair removal, the by-handle
+// removal, and their WAL ops all land as before; only the -properties gate
+// moves from the per-pair aggregate probe to the targeted instance's own bag.
+func (a *walMutatorAdapter) DelEdgePropertyOnInstance(src, dst string, handle uint64, key string) {
+	if a.counters != nil {
+		if _, present := a.g.EdgePropertiesByHandle(src, dst, handle)[key]; present {
+			a.countPropertyRemoved()
+		}
+	}
+	a.delEdgePropertyUncounted(src, dst, key)
+	a.DelEdgePropertyByHandle(src, dst, handle, key)
 }
 
 // EdgeProperties returns a snapshot of every property currently set on the
