@@ -142,6 +142,14 @@ type writeCtx struct {
 	// inverse ever reached an object another transaction owns, the head test would
 	// still refuse it.
 	//
+	// ONE store falsifies that premise: the ADJACENCY, whose appends COMMUTE, so
+	// another transaction's append can commit onto a node this transaction also
+	// wrote — moving the head — without ever conflicting. The head test then
+	// refuses this transaction's own inverse and the rolled-back edge leaks into
+	// committed state (rmp #2445, found by the DST multi-session mode). The
+	// adjacency conflict sites therefore carry their own undoing exemption; see
+	// [adjVersions.checkAppend] and [adjVersions.noteExclusive].
+	//
 	// It is also what the prior art does. Memgraph's abort path walks the
 	// transaction's own deltas and restores each object directly, without going
 	// through PrepareForWrite at all — `InMemoryStorage::InMemoryAccessor::Abort`

@@ -61,20 +61,25 @@ type lifeStamp struct {
 	// node vanished for every reader afterwards; TestRunInTx_DeleteReturn
 	// caught it.
 	seq uint64
-	// primordial records whether the node was ALIVE before this record chain's
-	// EARLIEST event. It is what answers a reader that can see NEITHER of the
-	// two recorded events: such a reader observes the state before the chain
-	// began, and the chain itself cannot say what that state was — the records
-	// are only two deep, so a birth+death pair looks identical whether the
-	// node was fresh (create then delete in one uncommitted transaction: it
-	// never existed for that reader) or ancient (delete then revive: it very
-	// much existed). Set on the FIRST record for the id — false when that
-	// first event is a birth, true when it is a death — and propagated to
-	// every later record under the same shard lock, so both records always
-	// carry the chain's answer. Without it an outside reader saw a bare
-	// phantom node while a create+delete transaction was still open (rmp
-	// #2443, found by the DST multi-session mode).
-	primordial bool
+}
+
+// aliveBefore answers what a reader that can see NEITHER recorded event
+// observes: the state immediately before the EARLIEST still-recorded event.
+// The event's own kind encodes that state exactly — a death only happens to a
+// living node and a birth only to a dead (or absent) one — so a died-first
+// pair means the node was alive before the pair, and a born-first pair means
+// it was not.
+//
+// It replaced a chain-level `primordial` flag ("alive before the chain's
+// FIRST event", rmp #2443) that answered the virgin create+delete phantom but
+// misread every pair sitting on top of committed history: a rolled-back
+// DETACH DELETE publishes a died+born pair over the node's committed birth
+// record (the store is one record deep per direction, so the birth is
+// overwritten), and the flag — propagated from that committed birth — told a
+// reader older than the rollback that the still-committed node never existed
+// (rmp #2445, found by the DST multi-session snapshot-stability checker).
+func aliveBefore(born, died lifeStamp) bool {
+	return died.seq < born.seq
 }
 
 // at returns the instant, resolving the shared record when there is one.
@@ -180,19 +185,7 @@ func (g *Graph[N, W]) noteNodeLife(id graph.NodeID, tx *writeCtx, alive bool) bo
 	// first use; it takes no lock of its own and cannot reach back here.
 	info, ts := g.deltaStamp(tx.record())
 	seq := g.lifeSeq.Add(1)
-	// Propagate the chain's alive-before-epoch answer from whichever record
-	// already exists; on the chain's FIRST record, derive it from the event
-	// itself (a first birth means the node was NOT alive before; a first death
-	// means it was). See [lifeStamp.primordial].
-	var prim bool
-	if b, ok := sh.born[id]; ok {
-		prim = b.primordial
-	} else if d, ok := sh.died[id]; ok {
-		prim = d.primordial
-	} else {
-		prim = !alive
-	}
-	st := lifeStamp{info: info, ts: ts, seq: seq, primordial: prim}
+	st := lifeStamp{info: info, ts: ts, seq: seq}
 	if alive {
 		if sh.born == nil {
 			sh.born = make(map[graph.NodeID]lifeStamp, 8)
@@ -279,13 +272,15 @@ func (g *Graph[N, W]) NodeExistsAsOf(id graph.NodeID, s *Snapshot) bool {
 			return false
 		}
 		// NEITHER event is visible: the reader observes the state before the
-		// chain's earliest event, which only the primordial flag can answer. A
-		// fresh create+delete inside one still-invisible transaction reads
-		// false — without this an outside reader saw the node as a bare
-		// phantom, all its label and property versions invisible (rmp #2443,
-		// caught by the DST multi-session mode). A delete+revive pair on an
-		// ancient node reads true — the removal is in the reader's future.
-		return died.primordial
+		// EARLIEST recorded event, which the pair's write order encodes (see
+		// [aliveBefore]). A fresh create+delete inside one still-invisible
+		// transaction reads false — without this an outside reader saw the
+		// node as a bare phantom, all its label and property versions
+		// invisible (rmp #2443, caught by the DST multi-session mode). A
+		// delete+revive pair — an ancient node whose removal is in the
+		// reader's future, or a rolled-back DETACH DELETE published over the
+		// node's committed birth record (rmp #2445) — reads true.
+		return aliveBefore(born, died)
 	}
 	switch {
 	case bornVisible && diedVisible:

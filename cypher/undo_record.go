@@ -241,6 +241,15 @@ func (m mutationUndo) recordRemoveNode(n string, wasLive bool) {
 		return
 	}
 	m.undo.record(func() {
+		// The revive writes a birth record through the transaction, exactly
+		// like the forward mutations: on a PUBLISHED rollback (the normal
+		// path) the inverse writes become visible atomically with the
+		// publication, and on a conflict-DOOMED rollback they resolve as
+		// aborted and [lpg.Graph.reclaimAbortedLife] reconciles the life pair
+		// by write order (rmp #2445: the birth this replay writes lands over
+		// the node's committed birth record, so the reclaim must read the
+		// died-then-born order as "alive before the transaction", never the
+		// chain-level primordial flag).
 		m.wv.Revive(n)
 		m.wv.Graph().DecrNodesRemoved()
 	})

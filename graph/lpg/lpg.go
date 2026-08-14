@@ -64,6 +64,8 @@ package lpg
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 
@@ -1993,6 +1995,11 @@ func (g *Graph[N, W]) addEdgeInfo(src, dst N, w W, tx *writeCtx) error {
 	if src != dst {
 		g.internEndpoint(dst, tx)
 	}
+	// hadEdge distinguishes, on the cross-check failure path below, a REAL
+	// insert (a fresh arc that must be physically withdrawn) from the
+	// simple-graph duplicate collapse (a no-op whose "withdrawal" would delete
+	// the pre-existing committed arc).
+	hadEdge := tx != nil && g.adj.HasEdge(src, dst)
 	if err := g.adj.Writer(tx.adjTx()).AddEdge(src, dst, w); err != nil {
 		return err
 	}
@@ -2002,6 +2009,29 @@ func (g *Graph[N, W]) addEdgeInfo(src, dst N, w W, tx *writeCtx) error {
 	// nodes invisible to a later removal's conflict check. See
 	// [adjVersions.checkAppend].
 	if tx != nil {
+		// unInsert physically withdraws the arc the insert above just added,
+		// so a cross-check refusal leaves the adjacency EXACTLY as it found it
+		// (rmp #2446, found by the DST multi-session mode). Returning the error
+		// with the arc still in place left an invisible slot no undo would ever
+		// remove — the statement "failed", so the executor recorded no undo —
+		// and the NEXT committed append on the same node built its immutable
+		// entry from that dirty base and PUBLISHED the phantom arc. The removal
+		// runs under this same transaction, so linkVersion's same-transaction
+		// elision collapses insert+removal out of the version chain entirely.
+		unInsert := func() {
+			if !hadEdge {
+				g.adj.Writer(tx.adjTx()).RemoveEdge(src, dst)
+			} else if g.adj.Multigraph() {
+				// A parallel slot was appended; withdraw one (src,dst) slot.
+				// Handle-less parallel slots differ only in weight, so
+				// first-match is an acceptable identity here; the Cypher
+				// executor's CREATE path uses the by-handle form, which
+				// withdraws precisely.
+				g.adj.Writer(tx.adjTx()).RemoveEdge(src, dst)
+			}
+			// Simple graph with a pre-existing arc: the insert collapsed to a
+			// no-op, so there is nothing to withdraw.
+		}
 		if srcID, ok := g.adj.Mapper().Lookup(src); ok {
 			g.adjVer.stampAppend(srcID, tx)
 			// The append is CLAIMED; now cross-check the endpoint's existence —
@@ -2009,6 +2039,7 @@ func (g *Graph[N, W]) addEdgeInfo(src, dst N, w W, tx *writeCtx) error {
 			// in another transaction, refuses the edge rather than letting it
 			// dangle (rmp #2444; ordering argument in mvcc_node_conflict.go).
 			if err := g.crossCheckNodeLife(srcID, tx); err != nil {
+				unInsert()
 				return err
 			}
 		}
@@ -2016,6 +2047,7 @@ func (g *Graph[N, W]) addEdgeInfo(src, dst N, w W, tx *writeCtx) error {
 			if dstID, ok := g.adj.Mapper().Lookup(dst); ok {
 				g.adjVer.stampAppend(dstID, tx)
 				if err := g.crossCheckNodeLife(dstID, tx); err != nil {
+					unInsert()
 					return err
 				}
 			}
@@ -2208,11 +2240,17 @@ func (g *Graph[N, W]) addEdgeHInfo(src, dst N, w W, tx *writeCtx) (handle uint64
 	// Stamped AFTER the insert, because an append may CREATE its source and that
 	// node's id does not exist until now; see [Graph.addEdgeInfo].
 	if tx != nil {
+		// A cross-check refusal physically withdraws the arc just inserted —
+		// by its handle, so a pre-existing sibling is never touched (and the
+		// simple-graph duplicate collapse, which stores no handle, withdraws
+		// nothing). See [Graph.addEdgeInfo]'s unInsert for the phantom-arc leak
+		// this closes (rmp #2446).
 		if srcID, ok := g.adj.Mapper().Lookup(src); ok {
 			g.adjVer.stampAppend(srcID, tx)
 			// Claimed, then existence cross-checked; see [Graph.addEdgeInfo]
 			// (rmp #2444).
 			if err := g.crossCheckNodeLife(srcID, tx); err != nil {
+				g.adj.Writer(tx.adjTx()).RemoveEdgeByHandle(src, dst, h)
 				return 0, err
 			}
 		}
@@ -2220,6 +2258,7 @@ func (g *Graph[N, W]) addEdgeHInfo(src, dst N, w W, tx *writeCtx) (handle uint64
 			if dstID, ok := g.adj.Mapper().Lookup(dst); ok {
 				g.adjVer.stampAppend(dstID, tx)
 				if err := g.crossCheckNodeLife(dstID, tx); err != nil {
+					g.adj.Writer(tx.adjTx()).RemoveEdgeByHandle(src, dst, h)
 					return 0, err
 				}
 			}
@@ -2279,6 +2318,10 @@ func (g *Graph[N, W]) removeEdgeInfo(src, dst N, tx *writeCtx) {
 	defer g.reclaimAfterDirectWrite(tx)
 	srcID, srcOK := g.adj.Mapper().Lookup(src)
 	dstID, dstOK := g.adj.Mapper().Lookup(dst)
+	if os.Getenv("LPG_DEBUG_ABORT") != "" {
+		fmt.Printf("DBG removeEdgeInfo src=%v dst=%v srcOK=%v dstOK=%v txnil=%v undoing=%v\n",
+			src, dst, srcOK, dstOK, tx == nil, tx != nil && tx.undoing.Load())
+	}
 
 	// An arc removal is the NON-COMMUTATIVE adjacency write: it may not step over
 	// another transaction's in-flight append or removal on this source. Checked
@@ -2323,6 +2366,9 @@ func (g *Graph[N, W]) removeEdgeInfo(src, dst N, tx *writeCtx) {
 	}
 
 	g.adj.Writer(tx.adjTx()).RemoveEdge(src, dst)
+	if os.Getenv("LPG_DEBUG_ABORT") != "" {
+		fmt.Printf("DBG removeEdgeInfo after adjlist remove: HasEdge=%v\n", g.adj.HasEdge(src, dst))
+	}
 	// Deferred, not immediate: the bump must follow the LAST write to any
 	// epoch-keyed state, and the label/property re-assertion below is such a
 	// write. A reader that samples the epoch between an immediate bump and that
