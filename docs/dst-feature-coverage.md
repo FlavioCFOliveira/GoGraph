@@ -108,6 +108,20 @@ this section was first written, and the `readtx-isolation` scenario — which
 asserts only that no dirty or partial read is ever observed — certifies a
 property both levels satisfy, so it remains valid under the stronger contract.
 
+### MVCC multi-session and concurrency coverage (sprint 345)
+
+The MVCC machinery is exercised end to end by four dedicated modes (see
+[docs/dst.md](dst.md#mvcc-multi-session-and-concurrency-coverage) for the full
+description): the deterministic multi-session mode with in-transaction
+isolation checkers (`RunMVCCSessions` + `mvcc_isolation.go`, rmp #2436), the
+contended lost-update scenario (`RunMVCCContention`, rmp #2437), crashes with
+open transactions and transaction-granular recovery adjudication (rmp #2438),
+Bolt-wire transactional roles with typed conflict accounting and during-run
+isolation oracles (rmp #2439/#2440), and the `production-profile` catalogue
+scenario combining all of it over the durable store in crash cycles
+(rmp #2441). The checkers found four engine isolation defects on arrival
+(rmp #2445, #2446), all fixed and regression-pinned.
+
 ## Defects surfaced by this coverage work
 
 The coverage work exercised the engine against these scenarios and found:
