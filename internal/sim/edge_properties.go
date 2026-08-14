@@ -30,6 +30,12 @@ const (
 	// tmplRemoveKnowsSince is the standalone relationship REMOVE: it removes the
 	// `since` property of exactly the instance identified by $eid.
 	tmplRemoveKnowsSince = "MATCH (a:Person {name:$a})-[r:KNOWS]->(b:Person {name:$b}) WHERE r.eid = $eid REMOVE r.since"
+	// tmplSetKnowsSinceNull is the SET-to-null removal: openCypher defines
+	// `SET r.since = null` as removing the property, exactly like REMOVE, but it
+	// executes through the SetProperty operator's delRelProp path rather than
+	// RemoveProperty — the residual per-pair counter gate fixed by rmp #2501
+	// (the SET-path sibling of the #2500 REMOVE defect this scenario found).
+	tmplSetKnowsSinceNull = "MATCH (a:Person {name:$a})-[r:KNOWS]->(b:Person {name:$b}) WHERE r.eid = $eid SET r.since = null"
 	// tmplDeleteKnowsInst is the standalone edge deletion: DELETE r removes
 	// exactly the instance identified by $eid and must leave both endpoint
 	// nodes (and any parallel twin) alive.
@@ -48,10 +54,11 @@ type KnowsInstance struct {
 // population and links pairs with KNOWS edges carrying a unique `eid`, an
 // ISO-8601 `since` string, and a float `weight`, then mutates individual edge
 // INSTANCES with the full relationship write surface — standalone SET
-// (r.weight), REMOVE (r.since), and DELETE r — including over parallel-edge
-// pairs, where one instance is touched and its twin must survive with its own
-// property map. Every op pins its target instance by eid, so the oracle
-// predicts exactly which instance changes.
+// (r.weight), REMOVE (r.since), the SET-to-null removal (SET r.since = null),
+// and DELETE r — including over parallel-edge pairs, where one instance is
+// touched and its twin must survive with its own property map. Every op pins
+// its target instance by eid, so the oracle predicts exactly which instance
+// changes.
 //
 // # Concurrency contract
 //
@@ -70,13 +77,14 @@ func (*EdgePropsWriter) Name() string { return "EdgePropsWriter" }
 
 // NextOp returns the next seed-chosen operation: a fresh Person, a KNOWS
 // instance between a random pair, a PARALLEL twin of an existing instance, or
-// a standalone SET / REMOVE / DELETE r pinned to one existing instance. Every
-// family that lacks a viable target falls back to a Person CREATE, so the op
-// stream stays a pure function of (seed state, oracle state).
+// a standalone SET / REMOVE / SET-to-null / DELETE r pinned to one existing
+// instance. Every family that lacks a viable target falls back to a Person
+// CREATE, so the op stream stays a pure function of (seed state, oracle
+// state).
 func (w *EdgePropsWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 	names := oracle.NodeNames()
 	if len(names) >= 2 {
-		switch pick := seed.IntN(10); {
+		switch pick := seed.IntN(11); {
 		case pick < 3:
 			// 30%: grow the Person population (fall through to the create below).
 		case pick < 6:
@@ -113,8 +121,19 @@ func (w *EdgePropsWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 					"a": t.Src, "b": t.Dst, "eid": t.EID,
 				}}
 			}
+		case pick < 10:
+			// ~9%: SET-to-null removal on one instance — same modelled removal
+			// semantics as REMOVE, but through the SET operator path (rmp #2501).
+			// Nulling an already-absent `since` is a modelled no-op the engine
+			// must agree on.
+			if insts := oracle.KnowsInstancesByEID(); len(insts) > 0 {
+				t := insts[seed.IntN(len(insts))]
+				return Op{Kind: OpUpdate, Cypher: tmplSetKnowsSinceNull, Params: map[string]any{
+					"a": t.Src, "b": t.Dst, "eid": t.EID,
+				}}
+			}
 		default:
-			// 10%: standalone DELETE r of one instance — endpoints and any parallel
+			// ~9%: standalone DELETE r of one instance — endpoints and any parallel
 			// twin must survive.
 			if insts := oracle.KnowsInstancesByEID(); len(insts) > 0 {
 				t := insts[seed.IntN(len(insts))]
@@ -219,10 +238,11 @@ func (o *GraphOracle) setKnowsWeight(params map[string]any) OracleResult {
 	return OracleResult{Committed: true}
 }
 
-// removeKnowsSince models [tmplRemoveKnowsSince]: it removes the `since`
-// property of exactly the instance pinned by eid. Removing an absent property
-// (or missing the instance entirely) is a committed no-effect result, exactly
-// as the engine counts it.
+// removeKnowsSince models [tmplRemoveKnowsSince] and [tmplSetKnowsSinceNull]
+// (openCypher gives `SET r.since = null` the same removal semantics as
+// `REMOVE r.since`): it removes the `since` property of exactly the instance
+// pinned by eid. Removing an absent property (or missing the instance
+// entirely) is a committed no-effect result, exactly as the engine counts it.
 func (o *GraphOracle) removeKnowsSince(params map[string]any) OracleResult {
 	k, ok, found := o.knowsInstParams(params)
 	if !ok {
@@ -347,7 +367,8 @@ func CheckEdgeProperties(tick int64, oracle *GraphOracle, engine *EngineAdapter)
 // DST, on a directed MULTIGRAPH: the workload creates KNOWS edge instances
 // carrying {eid, since, weight} — including parallel twins between the same
 // endpoints — and mutates individual instances with standalone SET r.weight,
-// REMOVE r.since, and DELETE r, each pinned by eid. [CheckEdgeProperties]
+// REMOVE r.since, SET r.since = null, and DELETE r, each pinned by eid.
+// [CheckEdgeProperties]
 // confirms every surviving instance's properties round-trip (a mutated
 // instance's parallel twin keeps its own map), every deleted instance stays
 // absent with both endpoints alive, and all of it survives crash/recovery.
@@ -356,7 +377,7 @@ func CheckEdgeProperties(tick int64, oracle *GraphOracle, engine *EngineAdapter)
 func edgePropertiesScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioEdgeProperties,
-		Description: "relationship writes on parallel KNOWS instances (SET r.weight / REMOVE r.since / DELETE r by eid): per-instance round-trip, twin survival, endpoints alive, crash/recovery",
+		Description: "relationship writes on parallel KNOWS instances (SET r.weight / REMOVE r.since / SET r.since = null / DELETE r by eid): per-instance round-trip, twin survival, endpoints alive, crash/recovery",
 		Mode:        ModeDeterministic,
 		DefaultSeed: 0xED9E9405,
 		MaxTicks:    500,

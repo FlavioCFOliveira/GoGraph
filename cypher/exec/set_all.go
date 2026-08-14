@@ -692,6 +692,17 @@ func (op *SetAllProperties) writeOne(target entityBinding, key string, value lpg
 // is released so the registry stays in sync with the graph.
 func (op *SetAllProperties) deleteOne(target entityBinding, key string) {
 	if target.isRel {
+		// When the targeted instance's stable handle is resolved and the
+		// mutator implements [relInstancePropRemover], it performs both
+		// removals itself so -properties is gated on that instance's OWN bag
+		// rather than the per-pair aggregate (#2501): a whole-entity replace
+		// teardown must not count a key the targeted parallel instance never
+		// carried. The handle==0 fallback keeps the pairwise path
+		// byte-identical.
+		if m, ok := op.mutator.(relInstancePropRemover); ok && target.relHandle != 0 {
+			m.DelEdgePropertyOnInstance(target.relSrcKey, target.relDstKey, target.relHandle, key)
+			return
+		}
 		op.mutator.DelEdgeProperty(target.relSrcKey, target.relDstKey, key)
 		if target.relHandle != 0 {
 			op.mutator.DelEdgePropertyByHandle(target.relSrcKey, target.relDstKey, target.relHandle, key)

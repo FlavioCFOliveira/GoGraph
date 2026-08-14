@@ -234,9 +234,10 @@ func expectedOpCounters(op Op, oracle *GraphOracle) (want exec.QueryCounters, ok
 		// MERGE created: the edge plus ON CREATE SET r.n = 1.
 		return exec.QueryCounters{RelationshipsCreated: 1, PropertiesSet: 1}, true
 
-	case tmplCreateKnowsInst, tmplSetKnowsWeight, tmplRemoveKnowsSince, tmplDeleteKnowsInst:
+	case tmplCreateKnowsInst, tmplSetKnowsWeight, tmplRemoveKnowsSince,
+		tmplSetKnowsSinceNull, tmplDeleteKnowsInst:
 		// The eid-pinned relationship-write templates of the edge-properties
-		// scenario (rmp #2449) are derived by a dedicated helper.
+		// scenario (rmp #2449, #2501) are derived by a dedicated helper.
 		return expectedKnowsInstCounters(op, oracle)
 
 	case tmplSetTag:
@@ -332,6 +333,12 @@ func expectedOpCounters(op Op, oracle *GraphOracle) (want exec.QueryCounters, ok
 //     edges only the first REMOVE per (src,dst) pair counted.
 //     TestEdgeProperties_RemoveCountersPerInstance is the engine-facing
 //     regression guard for the corrected behaviour.
+//   - [tmplSetKnowsSinceNull]: identical expectation to [tmplRemoveKnowsSince]
+//     — openCypher gives SET-to-null the same removal semantics as REMOVE.
+//     The SET operator path carried the same per-pair counter gate until rmp
+//     #2501 routed it through the by-handle instance seam;
+//     cypher/setnull_parallel_edge_counters_test.go is the engine-facing
+//     regression guard.
 //   - [tmplDeleteKnowsInst]: exactly one deleted relationship and ZERO deleted
 //     nodes — a standalone edge deletion must never cascade to its endpoints,
 //     and the deleted edge's property teardown is suppressed as not
@@ -342,7 +349,7 @@ func expectedKnowsInstCounters(op Op, oracle *GraphOracle) (want exec.QueryCount
 		return exec.QueryCounters{}, false
 	}
 	switch op.Cypher {
-	case tmplRemoveKnowsSince:
+	case tmplRemoveKnowsSince, tmplSetKnowsSinceNull:
 		if found {
 			if e, exists := oracle.edges[k]; exists {
 				if _, has := e.Properties["since"]; has {

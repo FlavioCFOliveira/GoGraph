@@ -1239,10 +1239,21 @@ func (op *MergePattern) applyRelAction(srcKey, dstKey string, act mergeAction, e
 			return evalErr
 		}
 		if remove {
-			op.mutator.DelEdgeProperty(srcKey, dstKey, act.key)
+			// Gate -properties on the merge-bound instance's OWN bag via the
+			// optional [relInstancePropRemover] seam when its stable handle is
+			// resolved (#2501): the per-pair aggregate can carry a key only a
+			// parallel SIBLING wrote, and removing that must count 0. The
+			// handle==0 fallback keeps the pairwise path byte-identical.
 			if handle, ok := op.mutator.FirstEdgeHandle(srcKey, dstKey); ok && handle != 0 {
+				if m, isInst := op.mutator.(relInstancePropRemover); isInst {
+					m.DelEdgePropertyOnInstance(srcKey, dstKey, handle, act.key)
+					return nil
+				}
+				op.mutator.DelEdgeProperty(srcKey, dstKey, act.key)
 				op.mutator.DelEdgePropertyByHandle(srcKey, dstKey, handle, act.key)
+				return nil
 			}
+			op.mutator.DelEdgeProperty(srcKey, dstKey, act.key)
 			return nil
 		}
 		if !resolved {

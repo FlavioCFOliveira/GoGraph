@@ -516,8 +516,18 @@ func (op *SetProperty) setRelProp(ent entityBinding, key string, value lpg.Prope
 
 // delRelProp removes key from the bound relationship's per-pair store and
 // mirrors the removal to the per-instance by-handle store (no-op when
-// ent.relHandle is 0).
+// ent.relHandle is 0). When the instance's stable handle is resolved and the
+// mutator implements [relInstancePropRemover], both removals are performed by
+// the mutator itself so -properties is gated on the TARGETED instance's own
+// bag rather than the per-pair aggregate — on parallel edges the aggregate
+// probe reports a SET-to-null removal only once per (src, dst) pair (#2501,
+// the SET-path residual of #2500). The handle==0 fallback keeps the pairwise
+// path byte-identical.
 func (op *SetProperty) delRelProp(ent entityBinding, key string) {
+	if m, ok := op.mutator.(relInstancePropRemover); ok && ent.relHandle != 0 {
+		m.DelEdgePropertyOnInstance(ent.relSrcKey, ent.relDstKey, ent.relHandle, key)
+		return
+	}
 	op.mutator.DelEdgeProperty(ent.relSrcKey, ent.relDstKey, key)
 	if ent.relHandle != 0 {
 		op.mutator.DelEdgePropertyByHandle(ent.relSrcKey, ent.relDstKey, ent.relHandle, key)

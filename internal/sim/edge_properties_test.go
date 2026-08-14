@@ -91,8 +91,9 @@ func fingerprintOp(op Op) string {
 
 // TestEdgeProperties_NonVacuous confirms the workload actually exercises every
 // relationship-write family — instance CREATE, standalone SET r.weight,
-// REMOVE r.since, and DELETE r — and that a genuine parallel-edge pair (two
-// live instances between the same endpoints) existed during the run.
+// REMOVE r.since, SET r.since = null, and DELETE r — and that a genuine
+// parallel-edge pair (two live instances between the same endpoints) existed
+// during the run.
 func TestEdgeProperties_NonVacuous(t *testing.T) {
 	sc := edgePropertiesScenario()
 	cfg := sc.DeterministicConfig(sc.DefaultSeed)
@@ -123,7 +124,8 @@ func TestEdgeProperties_NonVacuous(t *testing.T) {
 		}
 	}
 	for _, tmpl := range []string{
-		tmplCreateKnowsInst, tmplSetKnowsWeight, tmplRemoveKnowsSince, tmplDeleteKnowsInst,
+		tmplCreateKnowsInst, tmplSetKnowsWeight, tmplRemoveKnowsSince,
+		tmplSetKnowsSinceNull, tmplDeleteKnowsInst,
 	} {
 		if counts[tmpl] == 0 {
 			t.Errorf("vacuous: template never emitted: %s", tmpl)
@@ -192,12 +194,18 @@ func opDeleteInst(a, b string, eid int64) Op {
 	return Op{Kind: OpDelete, Cypher: tmplDeleteKnowsInst, Params: map[string]any{"a": a, "b": b, "eid": eid}}
 }
 
+func opSetSinceNull(a, b string, eid int64) Op {
+	return Op{Kind: OpUpdate, Cypher: tmplSetKnowsSinceNull, Params: map[string]any{"a": a, "b": b, "eid": eid}}
+}
+
 // scriptParallelPair drives the canonical scripted sequence over a
 // parallel-edge pair on sm: persons A and B, twin instances eid 1 and 2, SET
 // r.weight on eid 1, REMOVE r.since on eid 2 (twice — the second is the no-op
-// removal the counters must report as nothing), then DELETE r on eid 1. Each
-// op's reported counters are checked against the oracle, and the read-back
-// check must be clean at every stage.
+// removal the counters must report as nothing), SET r.since = null on eid 1
+// (twice — a genuine per-instance removal through the SET path, rmp #2501,
+// then the absent-property no-op), then DELETE r on eid 1. Each op's reported
+// counters are checked against the oracle, and the read-back check must be
+// clean at every stage.
 func scriptParallelPair(t *testing.T, sm *Simulator) {
 	t.Helper()
 	scriptOp(t, sm, 1, opPerson("A"))
@@ -210,11 +218,16 @@ func scriptParallelPair(t *testing.T, sm *Simulator) {
 	scriptOp(t, sm, 5, opSetWeight("A", "B", 1, 9.75))
 	scriptOp(t, sm, 6, opRemoveSince("A", "B", 2))
 	scriptOp(t, sm, 7, opRemoveSince("A", "B", 2)) // removing an absent property counts nothing
-	if v := CheckEdgeProperties(7, sm.oracle, sm.engine); len(v) > 0 {
-		t.Fatalf("after SET/REMOVE: %v", v)
+	// SET-to-null removal on eid 1 while its sibling's `since` is already gone:
+	// the counter must follow eid 1's OWN bag (one -properties), and the
+	// re-null of the now-absent property must count nothing (rmp #2501).
+	scriptOp(t, sm, 8, opSetSinceNull("A", "B", 1))
+	scriptOp(t, sm, 9, opSetSinceNull("A", "B", 1))
+	if v := CheckEdgeProperties(9, sm.oracle, sm.engine); len(v) > 0 {
+		t.Fatalf("after SET/REMOVE/SET-null: %v", v)
 	}
-	scriptOp(t, sm, 8, opDeleteInst("A", "B", 1))
-	if v := CheckEdgeProperties(8, sm.oracle, sm.engine); len(v) > 0 {
+	scriptOp(t, sm, 10, opDeleteInst("A", "B", 1))
+	if v := CheckEdgeProperties(10, sm.oracle, sm.engine); len(v) > 0 {
 		t.Fatalf("after DELETE r: %v", v)
 	}
 }

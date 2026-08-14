@@ -652,7 +652,18 @@ func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, han
 // ON CREATE / ON MATCH SET RHS evaluates to null (openCypher removes the
 // property). Previously a null literal on this fast path was a silent skip;
 // removal matches the regular SET operator and the node MERGE path.
+//
+// When handle is resolved and the mutator implements [relInstancePropRemover],
+// the mutator performs both removals itself so -properties is gated on the
+// merge-bound instance's OWN bag rather than the per-pair aggregate (#2501):
+// on parallel edges the aggregate can carry a key a SIBLING wrote, which the
+// bound instance never had — removing it must count 0. The handle==0 fallback
+// keeps the pairwise path byte-identical.
 func (op *MergeRelationship) delEdgeProp(srcKey, dstKey string, handle uint64, key string) {
+	if m, ok := op.mutator.(relInstancePropRemover); ok && handle != 0 {
+		m.DelEdgePropertyOnInstance(srcKey, dstKey, handle, key)
+		return
+	}
 	op.mutator.DelEdgeProperty(srcKey, dstKey, key)
 	if handle != 0 {
 		op.mutator.DelEdgePropertyByHandle(srcKey, dstKey, handle, key)

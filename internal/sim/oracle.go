@@ -412,7 +412,9 @@ func (o *GraphOracle) ApplyMatch(cypher string, params map[string]any) OracleRes
 		return o.recordOp(cypher, params, o.setAge(params))
 	case tmplSetKnowsWeight:
 		return o.recordOp(cypher, params, o.setKnowsWeight(params))
-	case tmplRemoveKnowsSince:
+	case tmplRemoveKnowsSince, tmplSetKnowsSinceNull:
+		// openCypher: SET r.x = null removes the property exactly as REMOVE r.x
+		// does, so both templates share the removal model (rmp #2501).
 		return o.recordOp(cypher, params, o.removeKnowsSince(params))
 	}
 	// Schema-mutation templates (REMOVE / SET-label / SET-map) mutate the matched
