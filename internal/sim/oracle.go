@@ -516,6 +516,16 @@ func (o *GraphOracle) NodeNames() []string {
 	return out
 }
 
+// HasPersonName reports whether the committed model currently holds a Person
+// node of the given name. The multi-session isolation checkers use it to
+// adjudicate cross-transaction read-your-own-writes probes: a name the session
+// committed is expected to be visible to its next transaction exactly while the
+// committed model still holds it.
+func (o *GraphOracle) HasPersonName(name string) bool {
+	_, ok := o.byName[name]
+	return ok
+}
+
 // personAges returns the ascending-sorted int64 ages of every modelled Person
 // node that carries an integer age, for the Cypher-surface aggregate/filter
 // invariants (sum, avg, WHERE n.age >= k). Persons without an integer age (none

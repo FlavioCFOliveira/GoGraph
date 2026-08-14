@@ -333,6 +333,14 @@ func (t *OracleTx) NodeNames() []string {
 	return out
 }
 
+// CreatedNames returns, in ascending sorted order, the names this transaction
+// has pending-created (CREATE or MERGE-create) and not since cancelled. The
+// isolation checkers use it to pick a committed name for the session's
+// cross-transaction read-your-own-writes probe.
+func (t *OracleTx) CreatedNames() []string {
+	return slices.Sorted(maps.Keys(t.created))
+}
+
 // NodeCount returns the number of nodes visible to this transaction.
 func (t *OracleTx) NodeCount() int {
 	n := len(t.snap) - len(t.deleted)
