@@ -242,27 +242,37 @@ func (pe *patternEvaluator) enumerateSteps(ctx context.Context, srcID graph.Node
 		case ast.RelDirectionOutgoing:
 			return pe.collectOutgoingCandidates(srcID, srcKey, s)
 		case ast.RelDirectionIncoming:
-			return pe.collectIncomingCandidates(srcID, srcKey, s)
+			// A self-loop IS an incoming edge and must be enumerated here.
+			return pe.collectIncomingCandidates(srcID, srcKey, s, true)
 		default:
+			// Undirected: the outgoing collector has already emitted every
+			// self-loop, and openCypher matches each relationship of an
+			// undirected pattern exactly ONCE, so the incoming leg must not
+			// emit it a second time.
 			out := pe.collectOutgoingCandidates(srcID, srcKey, s)
-			return append(out, pe.collectIncomingCandidates(srcID, srcKey, s)...)
+			return append(out, pe.collectIncomingCandidates(srcID, srcKey, s, false)...)
 		}
 	}()
 	for _, c := range candidates {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if !pe.checkEndNode(s.node, c.dstID, row) {
+		// Advance to the TRAVERSAL destination, not to the hop's stored dstID.
+		// The two coincide on a forward leg but are opposite on the reverse leg
+		// of an incoming / undirected hop, where the anchor is the stored dstID
+		// and the neighbour we are walking to is the stored srcID (rmp #2505).
+		dstID := c.traversalDst()
+		if !pe.checkEndNode(s.node, dstID, row) {
 			continue
 		}
 		next := cloneRow(row)
 		if s.node != nil && s.node.Variable != nil {
-			next[*s.node.Variable] = nodeValueForID(pe.g, c.dstID)
+			next[*s.node.Variable] = nodeValueForID(pe.g, dstID)
 		}
 		if s.rel != nil && s.rel.Variable != nil {
 			next[*s.rel.Variable] = relValueFromHop(pe.g, c, s.rel)
 		}
-		if err := pe.enumerateSteps(ctx, c.dstID, remaining, next, cb); err != nil {
+		if err := pe.enumerateSteps(ctx, dstID, remaining, next, cb); err != nil {
 			return err
 		}
 	}
@@ -276,11 +286,35 @@ func (pe *patternEvaluator) enumerateSteps(ctx context.Context, srcID graph.Node
 // the type of THIS parallel instance rather than the whole pair's deterministic
 // pick, so an untyped `[r]` over a multi-type parallel pair enumerates each
 // instance's own type(r) (rmp #2017).
+//
+// # Orientation contract
+//
+// srcID/srcKey and dstID/dstKey are ALWAYS recorded in STORAGE order — the
+// edge's CREATE direction — never in traversal order, and forward says which
+// way the traversal crossed it. Storage order is what the by-handle type and
+// property stores are keyed by, and what startNode/endNode must report (the
+// #2504 contract), so recording it here lets [relValueFromHop] read all three
+// off the hop with no orientation guesswork. The price is that consumers which
+// need the node the traversal ADVANCES to must ask for it: use
+// [candidateHop.traversalDst], never dstID (rmp #2505).
 type candidateHop struct {
 	srcKey, dstKey string
 	srcID, dstID   graph.NodeID
 	handle         uint64
 	forward        bool
+}
+
+// traversalDst returns the node this hop advances the traversal to. Because the
+// hop records STORAGE order, that is dstID on a forward leg and srcID on the
+// reverse leg of an incoming / undirected hop — where dstID is the anchor the
+// traversal came FROM. Reading dstID directly on a reverse leg re-binds the
+// anchor and leaves the walk standing still, which is precisely the defect
+// rmp #2505 fixed.
+func (c candidateHop) traversalDst() graph.NodeID {
+	if c.forward {
+		return c.dstID
+	}
+	return c.srcID
 }
 
 func (pe *patternEvaluator) collectOutgoingCandidates(srcID graph.NodeID, srcKey string, s step) []candidateHop {
@@ -306,16 +340,60 @@ func (pe *patternEvaluator) collectOutgoingCandidates(srcID graph.NodeID, srcKey
 		if i < len(handles) {
 			handle = handles[i]
 		}
+		if !pe.slotMatchesRelType(srcID, dstID, handle, s.rel) {
+			continue
+		}
 		out = append(out, candidateHop{srcID: srcID, dstID: dstID, srcKey: srcKey, dstKey: dstKey, handle: handle, forward: true})
 	}
 	return out
 }
 
-func (pe *patternEvaluator) collectIncomingCandidates(dstID graph.NodeID, dstKey string, s step) []candidateHop {
+// slotMatchesRelType narrows the per-PAIR verdict of [edgeMatchesRel] to THIS
+// parallel slot. edgeMatchesRel answers an existence question — does the pair
+// carry at least one edge of an accepted type — which is exactly right for the
+// existential WHERE predicate but too weak for enumeration: over a multi-type
+// parallel pair such as (a)-[:KNOWS]->(b) / (a)-[:LIKES]->(b) it admits BOTH
+// slots for a `[r:KNOWS]` hop, so the comprehension emitted one row per parallel
+// edge where the MATCH baseline emits one per edge of the requested type
+// (rmp #2505).
+//
+// The narrowing applies only where it is decidable: with no type filter every
+// slot qualifies, and a slot whose handle carries no per-instance label record
+// (handle 0 on simple-graph / pre-handle storage, or a Go-API edge that stamped
+// a handle without recording a type) cannot be distinguished from its siblings,
+// so the per-pair verdict already reached stands. Both fallbacks preserve the
+// pre-#2505 behaviour exactly for graphs that have no per-instance types to
+// disagree about.
+func (pe *patternEvaluator) slotMatchesRelType(srcID, dstID graph.NodeID, handle uint64, rel *ast.RelationshipPattern) bool {
+	if rel == nil || len(rel.Types) == 0 || handle == 0 {
+		return true
+	}
+	instanceLabels := pe.g.EdgeLabelsByHandleID(srcID, dstID, handle)
+	if len(instanceLabels) == 0 {
+		return true
+	}
+	for _, label := range instanceLabels {
+		for _, t := range rel.Types {
+			if label == t {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// collectIncomingCandidates enumerates every adjacency slot pointing AT dstID.
+//
+// includeSelfLoop decides whether dstID's own loops count. A pure incoming hop
+// `(n)<-[r]-(x)` matches a self-loop — the MATCH baseline does, so the
+// comprehension must — but the undirected composition must not re-emit a loop
+// the outgoing collector has already produced, because openCypher matches each
+// relationship of an undirected pattern exactly once (rmp #2505).
+func (pe *patternEvaluator) collectIncomingCandidates(dstID graph.NodeID, dstKey string, s step, includeSelfLoop bool) []candidateHop {
 	mapper := pe.g.AdjList().Mapper()
 	var out []candidateHop
 	mapper.Walk(func(candidateID graph.NodeID, candidateKey string) bool {
-		if candidateID == dstID {
+		if candidateID == dstID && !includeSelfLoop {
 			return true
 		}
 		// Emit one candidate PER parallel slot pointing at dstID (not just the
@@ -334,6 +412,12 @@ func (pe *patternEvaluator) collectIncomingCandidates(dstID graph.NodeID, dstKey
 			var handle uint64
 			if i < len(handles) {
 				handle = handles[i]
+			}
+			// The slot is stored candidateID → dstID, so the per-instance type
+			// lookup uses that orientation even though the traversal crosses it
+			// backwards (see [candidateHop]'s orientation contract).
+			if !pe.slotMatchesRelType(candidateID, dstID, handle, s.rel) {
+				continue
 			}
 			out = append(out, candidateHop{srcID: candidateID, dstID: dstID, srcKey: candidateKey, dstKey: dstKey, handle: handle, forward: false})
 		}
@@ -372,18 +456,29 @@ func nodeValueForID(g *lpg.ReadView[string, float64], id graph.NodeID) expr.Node
 	return expr.NodeValue{ID: uint64(id), Labels: labels, Properties: props}
 }
 
-// relValueFromHop materialises an expr.RelationshipValue for a single
-// hop produced by enumerateSteps. The edge's storage direction is
-// (forward ? srcKey→dstKey : dstKey→srcKey) — callers pass forward=true
-// when the traversal followed the storage direction and false for the
-// reverse leg of an undirected / incoming match.
+// relValueFromHop materialises an expr.RelationshipValue for a single hop
+// produced by enumerateSteps.
+//
+// Every field is read in the hop's STORAGE orientation (see the
+// [candidateHop] orientation contract), which is what the three in-tree
+// reference materialisers — buildRelationshipValueFromRow, resolveHopRel and
+// the Expand operator behind the RollUpApply route — all report:
+//
+//   - ID is the stable per-edge handle. Since rmp #2317 the handle IS the
+//     relationship identity in both traversal directions, so the same physical
+//     edge reached forwards and backwards compares equal and id(r) agrees with
+//     the MATCH baseline. Leaving ID unset made id(r) report 0 for EVERY hop on
+//     this route, in both directions (rmp #2505).
+//   - StartID/EndID are the stored endpoints, NOT the traversal endpoints. A
+//     reverse leg used to transpose them, so `(c)<-[r]-(x)` reported
+//     startNode(r)=c / endNode(r)=x — the exact inverse of the orientation
+//     rmp #2504 pinned and cypher/tck/features/clauses/merge/Merge5.feature
+//     asserts.
+//   - Properties come from the bound instance's by-handle bag when the pair has
+//     one, falling back to the per-pair coalesced union otherwise. Reading them
+//     under the transposed keys returned nothing at all, so every reverse hop
+//     reported null properties.
 func relValueFromHop(g *lpg.ReadView[string, float64], hop candidateHop, rel *ast.RelationshipPattern) expr.RelationshipValue {
-	srcKey, dstKey := hop.srcKey, hop.dstKey
-	startID, endID := uint64(hop.srcID), uint64(hop.dstID)
-	if !hop.forward {
-		srcKey, dstKey = hop.dstKey, hop.srcKey
-		startID, endID = endID, startID
-	}
 	var relTypes []string
 	if rel != nil {
 		relTypes = rel.Types
@@ -396,8 +491,8 @@ func relValueFromHop(g *lpg.ReadView[string, float64], hop candidateHop, rel *as
 	// enumerate FIRST for one instance and SECOND for the other, rather than the
 	// single deterministic per-pair pick both instances used to collapse onto
 	// (rmp #2017). The handle store is keyed by the STORED edge direction
-	// (hop.srcID → hop.dstID) regardless of traversal direction, so it is looked
-	// up before the forward/reverse orientation swap above.
+	// (hop.srcID → hop.dstID), which is the orientation the hop already records,
+	// so no swap is involved.
 	//
 	// The per-pair union is the fallback for a handle-less slot (handle 0 —
 	// simple-graph / pre-handle storage) or a handle that carries no per-instance
@@ -406,21 +501,51 @@ func relValueFromHop(g *lpg.ReadView[string, float64], hop candidateHop, rel *as
 	// filter accepts, else the deterministic alphabetically-smallest label. A
 	// typed `[r:SECOND]` hop still reports SECOND via that pick even without a
 	// handle (rmp #2016).
+	instanceLabels := g.EdgeLabelsByHandleID(hop.srcID, hop.dstID, hop.handle)
 	var typeName string
-	if instanceLabels := g.EdgeLabelsByHandleID(hop.srcID, hop.dstID, hop.handle); len(instanceLabels) > 0 {
+	if len(instanceLabels) > 0 {
 		typeName = pickEdgeType(instanceLabels, relTypes)
 	} else {
-		typeName = pickEdgeType(g.EdgeLabels(srcKey, dstKey), relTypes)
+		typeName = pickEdgeType(g.EdgeLabels(hop.srcKey, hop.dstKey), relTypes)
 	}
-	// Stream the coalesced properties straight into the expr map (M2 / #1662),
-	// dropping the transient lpg map the prior two-step build allocated per hop.
-	props := edgePropsToExprMap(g, srcKey, dstKey)
 	return expr.RelationshipValue{
-		StartID:    startID,
-		EndID:      endID,
+		ID:         hop.handle,
+		StartID:    uint64(hop.srcID),
+		EndID:      uint64(hop.dstID),
 		Type:       typeName,
-		Properties: props,
+		Properties: relPropsFromHop(g, hop, len(instanceLabels) > 0),
 	}
+}
+
+// relPropsFromHop resolves the property map of the ONE parallel instance the
+// hop bound, mirroring the routing ladder [buildEdgeProps] applies on the
+// primary Expand path so both routes report the same map for the same edge.
+//
+// hasByHandleLabel is the membership signal, carried in from the type
+// resolution the caller has already done: Cypher CREATE/MERGE always records
+// the mandatory relationship TYPE by handle, so a by-handle label entry marks a
+// per-instance edge even when it holds no properties at all — which is what
+// keeps a zero-property parallel edge from leaking a propertied sibling's keys.
+// A non-zero handle alone is NOT sufficient, because the public Go API stamps a
+// handle on the slot while writing only the per-pair store (rmp #1684).
+//
+// The by-handle property probe is skipped when the graph has never recorded one
+// (rmp #2387): the latch being false proves the store is empty, so the probe
+// could only return nil and the decision reduces to hasByHandleLabel.
+func relPropsFromHop(g *lpg.ReadView[string, float64], hop candidateHop, hasByHandleLabel bool) expr.MapValue {
+	if hop.handle != 0 {
+		var byHandle expr.MapValue
+		if hasByHandleLabel || g.AnyEdgeHandlePropertyEverWritten() {
+			byHandle = edgePropsByHandleToExprMap(g, hop.srcKey, hop.dstKey, hop.handle)
+		}
+		if hasByHandleLabel || len(byHandle) > 0 {
+			return byHandle
+		}
+	}
+	// Per-pair fallback: stream the coalesced properties straight into the expr
+	// map (M2 / #1662), dropping the transient lpg map the prior two-step build
+	// allocated per hop.
+	return edgePropsToExprMap(g, hop.srcKey, hop.dstKey)
 }
 
 // matchPattern returns true iff at least one path in the graph matches pp
@@ -575,6 +700,12 @@ func (pe *patternEvaluator) matchOutgoing(ctx context.Context, srcID graph.NodeI
 // matchIncoming scans all nodes for those that have an outgoing edge to dstID
 // (= the current "source" in the traversal direction), satisfying the rel
 // pattern and end-node constraints, and recurses.
+//
+// dstID's own self-loops are included: a self-loop is a real incoming edge, so
+// `WHERE (n)<-[:R]-(:L)` must hold for a node whose only :R edge is a loop —
+// which is what both MATCH and EXISTS { } already answered. Skipping self here
+// made the existential predicate the lone dissenter (rmp #2505). The recursion
+// still terminates on a loop because each step consumes one entry of remaining.
 func (pe *patternEvaluator) matchIncoming(ctx context.Context, dstID graph.NodeID, dstKey string, s step, remaining []step, row expr.RowContext) (bool, error) {
 	mapper := pe.g.AdjList().Mapper()
 	found := false
@@ -583,9 +714,6 @@ func (pe *patternEvaluator) matchIncoming(ctx context.Context, dstID graph.NodeI
 		if err := ctx.Err(); err != nil {
 			walkErr = err
 			return false
-		}
-		if candidateID == dstID {
-			return true // skip self
 		}
 		nbs := pe.g.EntryView(candidateID).Neighbours
 		for _, nb := range nbs {

@@ -59,6 +59,10 @@ var reUUIDv4 = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][
 //     engine transposed reads back transposed. Read three ways: FORWARD, in
 //     REVERSE, and UNDIRECTED, because the reverse and undirected reads are the
 //     only ones that constrain the direction rmp #2504 lived in;
+//   - the same edge projection driven through BOTH consumers of a pattern
+//     comprehension — hoisted by WITH into a RollUpApply, and left to the
+//     expression-level fallback by UNWIND — each compared against the same
+//     oracle reference, which is what keeps rmp #2505 from returning;
 //   - path materialisation on `MATCH p=(a:Person)-[:KNOWS*1..3]->(b)`:
 //     size(nodes(p)) = length(p)+1 and size(relationships(p)) = length(p) per
 //     row, the path's first node identical to the anchor and its last node
@@ -76,6 +80,7 @@ func CheckCypherSurfaceEntity(tick int64, oracle *GraphOracle, engine *EngineAda
 	vs = append(vs, checkEntityLabels(ctx, tick, oracle, engine)...)
 	vs = append(vs, checkEntityProperties(ctx, tick, oracle, engine)...)
 	vs = append(vs, checkEntityEdges(ctx, tick, oracle, engine)...)
+	vs = append(vs, checkEntityCompRoutes(ctx, tick, oracle, engine)...)
 	vs = append(vs, checkEntityPaths(ctx, tick, oracle, engine)...)
 	vs = append(vs, checkEntityElementID(ctx, tick, oracle, engine)...)
 	return vs
@@ -382,6 +387,101 @@ func checkEntityEdges(ctx context.Context, tick int64, oracle *GraphOracle, engi
 	}
 	return compareEntityEdges(ctx, tick, "undirected type(r)/startNode(r)/endNode(r)/r.eid",
 		entityEdgeUndirectedQuery, entityEdgeRows(pairs, true), eids, engine)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pattern-comprehension route parity
+// ─────────────────────────────────────────────────────────────────────────────
+
+// entityCompProjection is the six-column projection every route below emits,
+// element for element identical to the one the [entityEdgeForwardQuery] family
+// projects, so all of them are compared against the same oracle reference by
+// the same comparator.
+const entityCompProjection = "[a.name, b.name, type(r), startNode(r).name," +
+	" endNode(r).name, r.eid]"
+
+// entityCompTail unpacks the projected list back into the six named columns and
+// imposes the reference's ordering.
+const entityCompTail = " RETURN t[0] AS an, t[1] AS bn, t[2] AS ty, t[3] AS sn," +
+	" t[4] AS en, t[5] AS eid ORDER BY an, bn, sn, en"
+
+// entityCompRoute is one (name, query) arm of the route-parity probe.
+type entityCompRoute struct {
+	route string
+	query string
+}
+
+// entityCompRoutes builds the HOISTED and FALLBACK routes of ONE pattern
+// comprehension over pattern, anchored on a `MATCH (anchor:Person)`.
+//
+// The two queries are identical but for where the comprehension sits, and that
+// placement alone decides which evaluator runs it:
+//
+//   - WITH consumes it, so cypher/ir translateWith hoists it into a RollUpApply
+//     and the real Expand operator produces the rows. The trailing UNWIND then
+//     just flattens a plain list variable.
+//   - UNWIND consumes it directly. Nothing hoists a comprehension for UNWIND, so
+//     it survives to evaluation as a raw AST node and is enumerated by the
+//     expression-level fallback, cypher.patternEvaluator.EvalPatternComp.
+//
+// Two evaluators, one pattern, one required answer.
+func entityCompRoutes(anchor, pattern string) []entityCompRoute {
+	comp := "[" + pattern + " | " + entityCompProjection + "]"
+	base := "MATCH (" + anchor + ":Person)"
+	return []entityCompRoute{
+		{"hoisted", base + " WITH " + comp + " AS l UNWIND l AS t" + entityCompTail},
+		{"fallback", base + " UNWIND " + comp + " AS t" + entityCompTail},
+	}
+}
+
+// checkEntityCompRoutes asserts that a pattern comprehension returns the SAME
+// relationship bindings whichever clause consumes it, and that both agree with
+// the oracle (rmp #2505).
+//
+// It reuses the reference rows and the comparator of [checkEntityEdges], so
+// each route is measured against the model rather than merely against its
+// sibling: two routes that agreed on a wrong answer would still be caught, and
+// agreement with a common reference implies agreement with each other.
+//
+// This is the arm that keeps the #2505 class from returning. That defect lived
+// entirely in the fallback evaluator, which the DST had never driven: every
+// pattern the sim ran reached the operator pipeline, so a comprehension whose
+// reverse leg re-bound the anchor, reported id(r) as 0, read its properties
+// under transposed keys, transposed startNode/endNode, over-enumerated a typed
+// hop across a multi-type parallel pair, and dropped self-loops outright was
+// invisible to a green simulator. All three directions are driven because the
+// defect was direction-specific — forward traversal was correct throughout, so
+// a forward-only arm could not have seen any of it.
+func checkEntityCompRoutes(ctx context.Context, tick int64, oracle *GraphOracle, engine *EngineAdapter) []Violation {
+	pairs, complete := knowsEndpointNames(oracle)
+	if !complete {
+		return nil
+	}
+	eids := knowsEIDByEndpointNames(oracle)
+	directed := entityEdgeRows(pairs, false)
+	for _, arm := range []struct {
+		name    string
+		anchor  string
+		pattern string
+		want    [][4]string
+	}{
+		// `a` is the stored source and `b` the stored destination in EVERY arm,
+		// so the forward and reverse arms share the directed reference: which way
+		// the traversal crossed the edge must not change a single attribute of
+		// the relationship it binds.
+		{"forward", "a", "(a)-[r:KNOWS]->(b:Person)", directed},
+		{"reverse", "b", "(b)<-[r:KNOWS]-(a:Person)", directed},
+		{"undirected", "a", "(a)-[r:KNOWS]-(b:Person)", entityEdgeRows(pairs, true)},
+	} {
+		for _, rt := range entityCompRoutes(arm.anchor, arm.pattern) {
+			op := "comprehension " + arm.name + " " + rt.route +
+				" route type(r)/startNode(r)/endNode(r)/r.eid"
+			if vs := compareEntityEdges(ctx, tick, op, rt.query, arm.want, eids, engine); len(vs) > 0 {
+				return vs
+			}
+		}
+	}
+	return nil
 }
 
 // knowsEIDByEndpointNames maps each modelled KNOWS edge's (source, destination)

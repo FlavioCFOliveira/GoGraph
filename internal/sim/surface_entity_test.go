@@ -3,6 +3,8 @@ package sim
 import (
 	"context"
 	"testing"
+
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // entityFixture is the standard fixture for the entity probes: five Persons
@@ -99,6 +101,65 @@ func TestSurfaceEntity_PassAndCatch(t *testing.T) {
 		}
 		if v := checkEntityEdges(ctx, 0, o, a); len(v) == 0 {
 			t.Fatal("startNode/endNode FAILED to detect a transposed edge endpoint")
+		}
+	})
+
+	t.Run("comprehension route probe is driven and sensitive", func(t *testing.T) {
+		a, o := entityFixture(t)
+		if v := checkEntityCompRoutes(ctx, 0, o, a); len(v) > 0 {
+			t.Fatalf("baseline comprehension-route probe should be clean, got: %v", v)
+		}
+		// Prove the probe actually RAN rather than short-circuiting on an
+		// incomplete model: every arm must produce rows, so a reference the
+		// engine cannot satisfy has to fire. Transposing s1->s2 in the model
+		// leaves the row COUNT untouched, so only a probe that compares the
+		// bindings — through both consumers — can see it.
+		src, dst := o.byName["s1"], o.byName["s2"]
+		if o.edges[edgeKey{src: src, dst: dst, label: "KNOWS"}] == nil {
+			t.Fatal("fixture is missing the s1->s2 edge")
+		}
+		delete(o.edges, edgeKey{src: src, dst: dst, label: "KNOWS"})
+		o.edges[edgeKey{src: dst, dst: src, label: "KNOWS"}] = &EdgeState{
+			SrcID: dst, DstID: src, Label: "KNOWS", Properties: map[string]any{},
+		}
+		if v := checkEntityCompRoutes(ctx, 0, o, a); len(v) == 0 {
+			t.Fatal("comprehension route probe FAILED to detect a transposed edge endpoint")
+		}
+	})
+
+	t.Run("each comprehension route arm produces rows", func(t *testing.T) {
+		// An arm whose query returned nothing would compare empty against empty
+		// and pass for ever. Assert each of the six queries is non-empty and that
+		// the two routes of one direction return the SAME number of rows, so a
+		// route that silently enumerates nothing cannot hide behind the oracle
+		// comparison above.
+		a, o := entityFixture(t)
+		pairs, complete := knowsEndpointNames(o)
+		if !complete || len(pairs) == 0 {
+			t.Fatal("fixture produced no reference edges")
+		}
+		for _, arm := range []struct{ anchor, pattern string }{
+			{"a", "(a)-[r:KNOWS]->(b:Person)"},
+			{"b", "(b)<-[r:KNOWS]-(a:Person)"},
+			{"a", "(a)-[r:KNOWS]-(b:Person)"},
+		} {
+			counts := map[string]int{}
+			for _, rt := range entityCompRoutes(arm.anchor, arm.pattern) {
+				n := 0
+				if err := forEachRow(ctx, a, rt.query, func(func(int) expr.Value) error {
+					n++
+					return nil
+				}); err != nil {
+					t.Fatalf("%s %s: %v", arm.pattern, rt.route, err)
+				}
+				if n == 0 {
+					t.Fatalf("%s %s route returned NO rows — the probe would be vacuous", arm.pattern, rt.route)
+				}
+				counts[rt.route] = n
+			}
+			if counts["hoisted"] != counts["fallback"] {
+				t.Fatalf("%s: hoisted=%d rows, fallback=%d rows", arm.pattern, counts["hoisted"], counts["fallback"])
+			}
 		}
 	})
 
