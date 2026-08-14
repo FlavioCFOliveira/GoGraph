@@ -54,9 +54,11 @@ var reUUIDv4 = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][
 //     labels a node carries, beyond a count;
 //   - properties(n) per Person vs the oracle's modelled property map, compared
 //     as a key SET plus a per-key canonical value;
-//   - type(r), startNode(r) and endNode(r) over every KNOWS edge vs the
-//     oracle's modelled endpoints — an edge whose endpoints the engine
-//     transposed reads back transposed;
+//   - type(r), startNode(r), endNode(r) and r.eid over every KNOWS edge vs the
+//     oracle's modelled endpoints and instance id — an edge whose endpoints the
+//     engine transposed reads back transposed. Read three ways: FORWARD, in
+//     REVERSE, and UNDIRECTED, because the reverse and undirected reads are the
+//     only ones that constrain the direction rmp #2504 lived in;
 //   - path materialisation on `MATCH p=(a:Person)-[:KNOWS*1..3]->(b)`:
 //     size(nodes(p)) = length(p)+1 and size(relationships(p)) = length(p) per
 //     row, the path's first node identical to the anchor and its last node
@@ -312,21 +314,47 @@ func knowsEndpointNames(o *GraphOracle) (out [][2]string, complete bool) {
 // the pattern's start variable could not satisfy them.
 const entityEdgeForwardQuery = "MATCH (a:Person)-[r:KNOWS]->(b:Person)" +
 	" WITH a.name AS an, b.name AS bn, r AS r" +
-	" RETURN an, bn, type(r) AS t, startNode(r).name AS sn, endNode(r).name AS en" +
-	" ORDER BY an, bn"
+	" RETURN an, bn, type(r) AS t, startNode(r).name AS sn, endNode(r).name AS en," +
+	" r.eid AS eid" +
+	" ORDER BY an, bn, sn, en"
 
-// checkEntityEdges asserts, for every KNOWS edge, that type(r) is "KNOWS" and
-// that startNode(r) and endNode(r) resolve to the oracle's modelled source and
-// destination.
+// entityEdgeReverseQuery reads the SAME edges against storage direction. `a` is
+// still the source and `b` still the destination, so it produces the forward
+// query's rows in the forward query's order and is compared against the same
+// reference — which is the whole point: traversal direction must not change any
+// attribute of the relationship it binds.
+const entityEdgeReverseQuery = "MATCH (b:Person)<-[r:KNOWS]-(a:Person)" +
+	" WITH a.name AS an, b.name AS bn, r AS r" +
+	" RETURN an, bn, type(r) AS t, startNode(r).name AS sn, endNode(r).name AS en," +
+	" r.eid AS eid" +
+	" ORDER BY an, bn, sn, en"
+
+// entityEdgeUndirectedQuery reads every edge from BOTH ends. Each non-loop edge
+// answers twice — once per traversal orientation — while startNode(r) and
+// endNode(r) must report the stored orientation in both, so the two rows of one
+// edge differ in (an, bn) and agree in (sn, en). ORDER BY carries sn and en
+// because a reciprocal pair puts two DIFFERENT edges on the same (an, bn), and
+// they are told apart only by the endpoints under test.
+const entityEdgeUndirectedQuery = "MATCH (a:Person)-[r:KNOWS]-(b:Person)" +
+	" WITH a.name AS an, b.name AS bn, r AS r" +
+	" RETURN an, bn, type(r) AS t, startNode(r).name AS sn, endNode(r).name AS en," +
+	" r.eid AS eid" +
+	" ORDER BY an, bn, sn, en"
+
+// checkEntityEdges asserts, for every KNOWS edge, that type(r) is "KNOWS", that
+// r.tag carries the modelled property, and that startNode(r) and endNode(r)
+// resolve to the oracle's modelled source and destination — read FORWARD, read
+// in REVERSE, and read UNDIRECTED.
 //
-// Only FORWARD traversal is probed. The natural companion — reading the same
-// edge through `(b)<-[r:KNOWS]-(a)` and requiring the same stored endpoints —
-// is NOT asserted here because the engine currently fails it: when a reciprocal
-// edge exists between the same ordered pair, a reverse-expanded (or undirected)
-// row keeps the correct id(r) while startNode(r), endNode(r), r.<prop> and
-// properties(r) all resolve against the OTHER edge of the pair. That is a
-// pre-existing engine defect, well outside this checker's remit to fix, so the
-// arm is left out rather than pinned as if the wrong answer were the contract.
+// The three arms exist because for a long time only the forward one did, and
+// rmp #2504 is what came of that: on a RECIPROCAL pair — edges in both
+// directions between one node pair — a reverse-expanded or undirected row kept
+// the correct id(r) while startNode(r), endNode(r) and every property read
+// resolved against the OTHER edge of the pair. Forward traversal was correct
+// throughout, so a forward-only probe could not see it, and neither could a
+// row-count assertion: the count was right and only the contents were wrong.
+// The reverse and undirected arms are therefore not redundant with the forward
+// one, they are the only arms that constrain the direction the defect lived in.
 //
 // Note for anyone reading a coverage report: the code this probe executes is
 // the engine's own graph-aware startnode/endnode overlay
@@ -336,17 +364,99 @@ const entityEdgeForwardQuery = "MATCH (a:Person)-[r:KNOWS]->(b:Person)" +
 // matter how hard this probe drives startNode() — the zero is the overlay's
 // signature, not a gap in the battery.
 func checkEntityEdges(ctx context.Context, tick int64, oracle *GraphOracle, engine *EngineAdapter) []Violation {
-	want, complete := knowsEndpointNames(oracle)
+	pairs, complete := knowsEndpointNames(oracle)
 	if !complete {
 		return nil
 	}
-	return compareEntityEdges(ctx, tick, "type(r)/startNode(r)/endNode(r)", entityEdgeForwardQuery, want, engine)
+	directed := entityEdgeRows(pairs, false)
+	eids := knowsEIDByEndpointNames(oracle)
+	vs := compareEntityEdges(ctx, tick, "forward type(r)/startNode(r)/endNode(r)/r.eid",
+		entityEdgeForwardQuery, directed, eids, engine)
+	if len(vs) > 0 {
+		return vs
+	}
+	vs = compareEntityEdges(ctx, tick, "reverse type(r)/startNode(r)/endNode(r)/r.eid",
+		entityEdgeReverseQuery, directed, eids, engine)
+	if len(vs) > 0 {
+		return vs
+	}
+	return compareEntityEdges(ctx, tick, "undirected type(r)/startNode(r)/endNode(r)/r.eid",
+		entityEdgeUndirectedQuery, entityEdgeRows(pairs, true), eids, engine)
+}
+
+// knowsEIDByEndpointNames maps each modelled KNOWS edge's (source, destination)
+// names to its modelled instance id, omitting every edge whose EID is 0 (the
+// "not modelled" sentinel) or whose endpoints the model cannot name. It is the
+// reference for the r.eid arm of [compareEntityEdges].
+func knowsEIDByEndpointNames(o *GraphOracle) map[[2]string]int64 {
+	out := make(map[[2]string]int64, len(o.edges))
+	for k, e := range o.edges {
+		if k.label != "KNOWS" || e == nil || e.EID == 0 {
+			continue
+		}
+		src, srcOK := o.nodes[k.src]
+		dst, dstOK := o.nodes[k.dst]
+		if !srcOK || !dstOK {
+			continue
+		}
+		sn, snOK := src.Properties["name"].(string)
+		dn, dnOK := dst.Properties["name"].(string)
+		if !snOK || !dnOK {
+			continue
+		}
+		out[[2]string{sn, dn}] = e.EID
+	}
+	return out
+}
+
+// entityEdgeRows expands the oracle's (source, destination) pairs into the
+// (an, bn, sn, en) rows a probe must observe, sorted the way the queries order
+// them. sn/en are the STORED endpoints and are therefore the same in every arm;
+// an/bn are the pattern's, and only the undirected arm binds them both ways.
+//
+// A self-loop answers an undirected pattern ONCE, not twice: openCypher matches
+// each relationship of an undirected pattern exactly once, and the loop's two
+// orientations are the same relationship.
+func entityEdgeRows(pairs [][2]string, undirected bool) [][4]string {
+	out := make([][4]string, 0, len(pairs)*2)
+	for _, p := range pairs {
+		s, d := p[0], p[1]
+		out = append(out, [4]string{s, d, s, d})
+		if undirected && s != d {
+			out = append(out, [4]string{d, s, s, d})
+		}
+	}
+	slices.SortFunc(out, func(a, b [4]string) int {
+		for i := range a {
+			if a[i] != b[i] {
+				if a[i] < b[i] {
+					return -1
+				}
+				return 1
+			}
+		}
+		return 0
+	})
+	return out
 }
 
 // compareEntityEdges drains one edge-entity projection and compares it, row for
-// row, against the oracle's (source, destination) name pairs.
-func compareEntityEdges(ctx context.Context, tick int64, op, query string, want [][2]string, engine *EngineAdapter) []Violation {
-	type row struct{ an, bn, typ, sn, en string }
+// row, against the reference rows: the pattern's endpoints (an, bn), the
+// relationship's type, and its STORED endpoints (sn, en).
+//
+// It also carries a PROPERTY read, r.eid, checked against the oracle's modelled
+// instance id for the same edge. The endpoints alone would not have caught the
+// whole of rmp #2504: startNode/endNode resolve through the storage pair, while
+// r.<prop> resolves through that pair's property bag, and the defect corrupted
+// both. eid is used rather than an invented key because the model already
+// carries it (see [GraphOracle.KnowsInstancesByEID]); it is 0 for every edge a
+// template that predates instance modelling created, and such a row is
+// compared on its endpoints only.
+func compareEntityEdges(ctx context.Context, tick int64, op, query string, want [][4]string, eids map[[2]string]int64, engine *EngineAdapter) []Violation {
+	type row struct {
+		an, bn, typ, sn, en string
+		eid                 int64
+	}
 	var got []row
 	err := forEachRow(ctx, engine, query, func(at func(int) expr.Value) error {
 		cells := make([]string, 5)
@@ -357,7 +467,9 @@ func compareEntityEdges(ctx context.Context, tick int64, op, query string, want 
 			}
 			cells[i] = string(s)
 		}
-		got = append(got, row{an: cells[0], bn: cells[1], typ: cells[2], sn: cells[3], en: cells[4]})
+		// A NULL eid is not a deviation: the edge predates instance modelling.
+		eid, _ := at(5).(expr.IntegerValue)
+		got = append(got, row{an: cells[0], bn: cells[1], typ: cells[2], sn: cells[3], en: cells[4], eid: int64(eid)})
 		return nil
 	})
 	if err != nil {
@@ -376,15 +488,20 @@ func compareEntityEdges(ctx context.Context, tick int64, op, query string, want 
 		}
 		if g.typ != "KNOWS" {
 			return []Violation{entityDeviation(tick, op,
-				fmt.Sprintf("(%q)->(%q): type(r)=%q, oracle=%q", w[0], w[1], g.typ, "KNOWS"))}
+				fmt.Sprintf("(%q,%q): type(r)=%q, oracle=%q", w[0], w[1], g.typ, "KNOWS"))}
 		}
-		if g.sn != w[0] {
+		if g.sn != w[2] {
 			return []Violation{entityDeviation(tick, op,
-				fmt.Sprintf("(%q)->(%q): startNode(r).name=%q, oracle=%q", w[0], w[1], g.sn, w[0]))}
+				fmt.Sprintf("pattern (%q,%q): startNode(r).name=%q, oracle=%q", w[0], w[1], g.sn, w[2]))}
 		}
-		if g.en != w[1] {
+		if g.en != w[3] {
 			return []Violation{entityDeviation(tick, op,
-				fmt.Sprintf("(%q)->(%q): endNode(r).name=%q, oracle=%q", w[0], w[1], g.en, w[1]))}
+				fmt.Sprintf("pattern (%q,%q): endNode(r).name=%q, oracle=%q", w[0], w[1], g.en, w[3]))}
+		}
+		if want := eids[[2]string{w[2], w[3]}]; want != 0 && g.eid != want {
+			return []Violation{entityDeviation(tick, op,
+				fmt.Sprintf("pattern (%q,%q) stored (%q)->(%q): r.eid=%d, oracle=%d",
+					w[0], w[1], w[2], w[3], g.eid, want))}
 		}
 	}
 	return nil

@@ -13228,6 +13228,86 @@ func decodeVLEHops(lv expr.ListValue, g *lpg.ReadView[string, float64], bopts *b
 	return rels
 }
 
+// relStoredInverted reports whether the bound relationship is stored as
+// (dstID -> srcID) rather than in the row's TRAVERSAL orientation
+// (srcID -> dstID). The caller swaps the storage pair — and the emitted
+// StartID/EndID — when it says so.
+//
+// [exec.Expand] emits (src, edge, dst) in traversal order and keeps no
+// direction flag, so the hydrator has to recover the stored direction itself.
+// It is asked three questions in order, each strictly more informative than
+// the one that follows, and the first that can answer wins.
+//
+//  1. The bound edge's own stable HANDLE, against the by-handle type record
+//     (rmp #2504). Cypher CREATE/MERGE always records the mandatory
+//     relationship type by-handle, so for every Cypher-written edge exactly one
+//     of the two orientations holds a record for this handle, and that
+//     orientation IS the stored one. This is a sharded map probe and allocates
+//     nothing.
+//
+//  2. TOPOLOGY, unchanged since rmp #2294 and #1630: an edge that exists in
+//     only one direction is stored in that direction. Reached for an edge with
+//     no by-handle type record — a legacy snapshot, or one built through the Go
+//     API ([lpg.Graph.AddEdgeH] plus [lpg.Graph.SetEdgeLabel], which writes the
+//     per-pair store only). ReadView.HasEdge, not AdjList().HasEdge, because the
+//     direction must be resolved AT THIS READ'S INSTANT or a relationship
+//     committed after the snapshot decides how one visible to it is rendered.
+//
+//  3. The ADJACENCY, when topology is AMBIGUOUS. That is the whole of rmp
+//     #2504: a RECIPROCAL pair — edges in both directions between the same two
+//     nodes — makes both HasEdge probes true, so question 2 cannot decide and
+//     used to fall through to the traversal orientation. On a reverse or
+//     undirected hop the traversal orientation is the INVERSE of the stored one,
+//     so every by-pair read below it — the coalesced type, the property bag,
+//     the emitted StartID/EndID — resolved to the RECIPROCAL edge while id(r),
+//     being the handle, stayed correct. Scanning the slot column for the handle
+//     answers exactly which pair owns it. It is O(deg) and therefore run last,
+//     only for a handle-less reciprocal pair, and never on the path question 1
+//     already settled.
+//
+// A handle of 0 (the no-handle sentinel) skips questions 1 and 3; such an edge
+// is indistinguishable from its reciprocal by identity, so the topology answer
+// is the only one available and the pre-#2504 behaviour is kept exactly.
+func relStoredInverted(g *lpg.ReadView[string, float64], srcID, dstID graph.NodeID, srcKey, dstKey string, handle uint64) bool {
+	if handle != 0 {
+		if g.HasEdgeHandleLabelRecordByID(srcID, dstID, handle) {
+			return false
+		}
+		if g.HasEdgeHandleLabelRecordByID(dstID, srcID, handle) {
+			return true
+		}
+	}
+	if !g.HasEdge(srcKey, dstKey) {
+		return g.HasEdge(dstKey, srcKey)
+	}
+	if handle == 0 || !g.HasEdge(dstKey, srcKey) {
+		return false // unambiguous, or nothing left that could tell them apart
+	}
+	// Reciprocal pair with a handle but no by-handle type record: ask the slot
+	// column which pair actually owns this handle.
+	if slotHoldsHandle(g, srcID, dstID, handle) {
+		return false
+	}
+	return slotHoldsHandle(g, dstID, srcID, handle)
+}
+
+// slotHoldsHandle reports whether srcID's adjacency holds a slot to dstID
+// carrying handle at this view's instant. Returns false when the graph carries
+// no handle column at all, which leaves [relStoredInverted] on its topology
+// answer.
+func slotHoldsHandle(g *lpg.ReadView[string, float64], srcID, dstID graph.NodeID, handle uint64) bool {
+	ev := g.EntryView(srcID)
+	if ev.Handles == nil {
+		return false
+	}
+	for i, nb := range ev.Neighbours {
+		if nb == dstID && i < len(ev.Handles) && ev.Handles[i] == handle {
+			return true
+		}
+	}
+	return false
+}
+
 // buildRelationshipValueFromRow reconstructs a [expr.RelationshipValue] from
 // the (srcCol, edgeCol, dstCol) triplet emitted by the [exec.Expand]
 // operator. The edge type and Properties are looked up on the live graph
@@ -13286,11 +13366,10 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.ReadVi
 			// defaulted to forward) and, crucially, lets the property fetch be
 			// skipped (#1630) without losing the direction signal.
 			stKey, enKey := srcKey, dstKey
-			// ReadView.HasEdge, not AdjList().HasEdge: the direction must be
-			// resolved AT THIS READ'S INSTANT, or a relationship committed after
-			// the snapshot decides how one visible to it is rendered
-			// (rmp #2294).
-			if !g.HasEdge(srcKey, dstKey) && g.HasEdge(dstKey, srcKey) {
+			// The row's edge id IS the stable handle since rmp #2317, so it is
+			// recovered BEFORE the orientation decision below, which consults it.
+			fwdHandle := uint64(edgeIDVal)
+			if relStoredInverted(g, graph.NodeID(srcID), graph.NodeID(dstID), srcKey, dstKey, fwdHandle) {
 				storageStart, storageEnd = dstID, srcID
 				stKey, enKey = dstKey, srcKey
 			}
@@ -13329,10 +13408,6 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.ReadVi
 			// latest-wins union over parallel siblings — keeping the property
 			// granularity congruent with the type granularity.
 			handled := false
-			// The row's edge id IS the stable handle since rmp #2317, so no lookup is
-			// needed: it used to be a forward-CSR POSITION that had to be resolved
-			// against a per-query CSR snapshot to recover the handle.
-			fwdHandle := uint64(edgeIDVal)
 			// hasByHandleEntry is the by-handle MEMBERSHIP signal that gates the
 			// property routing below (rmp #1684). A non-zero fwdHandle is NOT on
 			// its own sufficient: the public Go API (Graph.AddEdge[H] +
@@ -14344,24 +14419,31 @@ func buildIRProjection(
 								srcKey, srcResolved := capturedG.AdjList().Mapper().Resolve(graph.NodeID(srcID))
 								dstKey, dstResolved := capturedG.AdjList().Mapper().Resolve(graph.NodeID(dstID))
 								if srcResolved && dstResolved {
-									// Resolve the storage direction first: probe the
-									// forward pair, and on an undirected reverse pass
-									// (no labels AND no properties forward) fall back to
-									// the reverse pair, swapping the reported endpoints.
-									// propSrc/propDst then name the winning direction so
-									// the property map is streamed straight into the
-									// expr map (M2 / #1662), dropping the transient lpg
-									// map the prior `make`+copy allocated per row.
-									ets := capturedG.EdgeLabels(srcKey, dstKey)
+									// Resolve the storage direction first, then read the
+									// type and the properties from THAT pair. propSrc/
+									// propDst name the winning direction so the property
+									// map is streamed straight into the expr map (M2 /
+									// #1662), dropping the transient lpg map the prior
+									// `make`+copy allocated per row.
+									//
+									// The probe used to be "forward pair has no labels
+									// AND no properties, so try the reverse" — a test
+									// that a RECIPROCAL pair passes trivially, because
+									// the traversal pair really does hold an edge of its
+									// own. A reverse or undirected row therefore kept the
+									// traversal orientation and reported the OTHER edge
+									// of the pair (rmp #2504). [relStoredInverted] asks
+									// the bound edge's own handle instead, which is the
+									// only thing that separates the two.
 									propSrc, propDst := srcKey, dstKey
-									if len(ets) == 0 && len(capturedG.EdgeProperties(srcKey, dstKey)) == 0 {
-										revEts := capturedG.EdgeLabels(dstKey, srcKey)
-										revProps := capturedG.EdgeProperties(dstKey, srcKey)
-										if len(revEts) > 0 || len(revProps) > 0 {
-											ets = revEts
-											propSrc, propDst = dstKey, srcKey
-											storageStart, storageEnd = dstID, srcID
-										}
+									if relStoredInverted(capturedG, graph.NodeID(srcID), graph.NodeID(dstID),
+										srcKey, dstKey, edgeID) {
+										propSrc, propDst = dstKey, srcKey
+										storageStart, storageEnd = dstID, srcID
+									}
+									ets := capturedG.EdgeLabelsByHandle(propSrc, propDst, edgeID)
+									if len(ets) == 0 {
+										ets = capturedG.EdgeLabels(propSrc, propDst)
 									}
 									if len(ets) > 0 {
 										edgeType = pickEdgeType(ets, capturedMeta.acceptedTypes)

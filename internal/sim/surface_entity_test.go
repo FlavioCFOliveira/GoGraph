@@ -108,7 +108,9 @@ func TestSurfaceEntity_PassAndCatch(t *testing.T) {
 		if !complete || len(want) == 0 {
 			t.Fatal("fixture produced no reference edges")
 		}
-		if v := compareEntityEdges(ctx, 0, "forward", entityEdgeForwardQuery, want, a); len(v) > 0 {
+		eids := knowsEIDByEndpointNames(o)
+		rows := entityEdgeRows(want, false)
+		if v := compareEntityEdges(ctx, 0, "forward", entityEdgeForwardQuery, rows, eids, a); len(v) > 0 {
 			t.Fatalf("forward arm should be clean, got: %v", v)
 		}
 		// Transposing every reference pair must fire: the fixture contains the
@@ -118,8 +120,42 @@ func TestSurfaceEntity_PassAndCatch(t *testing.T) {
 		for i, w := range want {
 			transposed[i] = [2]string{w[1], w[0]}
 		}
-		if v := compareEntityEdges(ctx, 0, "forward", entityEdgeForwardQuery, transposed, a); len(v) == 0 {
+		if v := compareEntityEdges(ctx, 0, "forward", entityEdgeForwardQuery,
+			entityEdgeRows(transposed, false), eids, a); len(v) == 0 {
 			t.Fatal("forward arm did NOT fire against a fully transposed reference")
+		}
+	})
+
+	t.Run("transposed reference fires the reverse and undirected arms", func(t *testing.T) {
+		// The reverse and undirected arms exist because of rmp #2504, where the
+		// forward read of a reciprocal pair was correct and the other two were
+		// not. The fixture's 2-cycle s3⇄s4 IS such a pair, so a transposed
+		// reference must fire on each arm — otherwise the arm is decoration.
+		a, o := entityFixture(t)
+		want, complete := knowsEndpointNames(o)
+		if !complete || len(want) == 0 {
+			t.Fatal("fixture produced no reference edges")
+		}
+		eids := knowsEIDByEndpointNames(o)
+		transposed := make([][2]string, len(want))
+		for i, w := range want {
+			transposed[i] = [2]string{w[1], w[0]}
+		}
+		if v := compareEntityEdges(ctx, 0, "reverse", entityEdgeReverseQuery,
+			entityEdgeRows(want, false), eids, a); len(v) > 0 {
+			t.Fatalf("reverse arm should be clean, got: %v", v)
+		}
+		if v := compareEntityEdges(ctx, 0, "reverse", entityEdgeReverseQuery,
+			entityEdgeRows(transposed, false), eids, a); len(v) == 0 {
+			t.Fatal("reverse arm did NOT fire against a fully transposed reference")
+		}
+		if v := compareEntityEdges(ctx, 0, "undirected", entityEdgeUndirectedQuery,
+			entityEdgeRows(want, true), eids, a); len(v) > 0 {
+			t.Fatalf("undirected arm should be clean, got: %v", v)
+		}
+		if v := compareEntityEdges(ctx, 0, "undirected", entityEdgeUndirectedQuery,
+			entityEdgeRows(transposed, true), eids, a); len(v) == 0 {
+			t.Fatal("undirected arm did NOT fire against a fully transposed reference")
 		}
 	})
 
