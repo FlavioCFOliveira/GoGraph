@@ -38,6 +38,7 @@ const (
 	ScenarioPatternShapes     = "pattern-shapes"
 	ScenarioSchemaMutation    = "schema-mutation"
 	ScenarioMergeRel          = "merge-rel"
+	ScenarioNullSemantics     = "null-semantics"
 )
 
 // cpuStarvationGOMAXPROCS is the processor clamp the cpu-starvation scenario
@@ -109,6 +110,7 @@ func DefaultRegistry() (*Registry, error) {
 		patternShapesScenario(),
 		schemaMutationScenario(),
 		mergeRelScenario(),
+		nullSemanticsScenario(),
 		durableCommitCrashScenario(),
 		checkpointTeardownScenario(),
 		readTxIsolationScenario(),

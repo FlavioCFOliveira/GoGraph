@@ -20,6 +20,12 @@ const (
 	// drawn from a small seeded vocabulary, so grouped aggregation over
 	// n.city is non-trivial (rmp #2452). The cypher-surface workload uses it.
 	tmplCreatePersonCity = "CREATE (n:Person {name:$name, age:$age, city:$city})"
+	// tmplCreatePersonNoAge creates one Person node with name and city but NO
+	// age property, so the null-semantics scenario's IS NULL / count(n.prop) /
+	// 3VL probes run against genuinely NULL-aged rows (rmp #2453). Only the
+	// null-semantics workload emits it: the cypher-surface scenario never draws
+	// an ageless Person, keeping its aggregate invariants unambiguous.
+	tmplCreatePersonNoAge = "CREATE (n:Person {name:$name, city:$city})"
 	// tmplCreateKnows links two existing Person nodes by name with a KNOWS edge.
 	tmplCreateKnows = "MATCH (a:Person {name:$a}),(b:Person {name:$b}) CREATE (a)-[:KNOWS]->(b)"
 	// tmplSetAge updates the age of the Person matched by name.
@@ -193,7 +199,7 @@ func (o *GraphOracle) recordOp(cypher string, params map[string]any, res OracleR
 // state and returns the prediction.
 func (o *GraphOracle) ApplyCreate(cypher string, params map[string]any) OracleResult {
 	switch cypher {
-	case tmplCreatePerson, tmplCreatePersonCity:
+	case tmplCreatePerson, tmplCreatePersonCity, tmplCreatePersonNoAge:
 		return o.recordOp(cypher, params, o.createPerson(params))
 	case tmplCreateKnows:
 		return o.recordOp(cypher, params, o.createKnows(params))
@@ -317,8 +323,14 @@ func (o *GraphOracle) createPerson(params map[string]any) OracleResult {
 			return OracleResult{Committed: false, ErrorMsg: "oracle: UNIQUE(Person.name) violation"}
 		}
 	}
-	age := params["age"]
-	props := map[string]any{"name": name, "age": age}
+	props := map[string]any{"name": name}
+	if age, ok := params["age"]; ok {
+		// Every template except [tmplCreatePersonNoAge] binds an age; the
+		// ageless variant (null-semantics scenario, rmp #2453) omits the key so
+		// the model tracks age-present vs age-absent per Person, mirroring the
+		// optional city below.
+		props["age"] = age
+	}
 	if city, ok := paramString(params, "city"); ok {
 		// The [tmplCreatePersonCity] variant additionally carries a city, the
 		// grouping key of the grouped-aggregation surface probes (rmp #2452).

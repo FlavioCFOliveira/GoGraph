@@ -171,6 +171,12 @@ func expectedOpCounters(op Op, oracle *GraphOracle) (want exec.QueryCounters, ok
 		// properties (rmp #2452).
 		return exec.QueryCounters{NodesCreated: 1, LabelsAdded: 1, PropertiesSet: 3}, true
 
+	case tmplCreatePersonNoAge:
+		// CREATE (n:Person {name, city}): one node, one label, two properties —
+		// the deliberately ageless Person of the null-semantics scenario
+		// (rmp #2453). No age key means no third assignment.
+		return exec.QueryCounters{NodesCreated: 1, LabelsAdded: 1, PropertiesSet: 2}, true
+
 	case tmplCreateKnows:
 		a, okA := paramString(op.Params, "a")
 		b, okB := paramString(op.Params, "b")
