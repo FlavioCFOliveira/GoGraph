@@ -57,6 +57,17 @@ type ConcurrentMix struct {
 	// plus a unique marker create, so serialization conflicts are an expected,
 	// typed outcome the run accounts for separately from failures.
 	TxContendedWeight float64
+	// BatchWriterWeight selects the atomic-batch writer (rmp #2440): one
+	// explicit transaction of exactly isoBatchSize tagged creates, always
+	// committed, so readers can assert batch-multiple visibility.
+	BatchWriterWeight float64
+	// IsoReaderWeight selects the during-run oracle reader (rmp #2440):
+	// per-connection monotonic reads over the shared counters and the
+	// batch-multiple atomic-visibility check.
+	IsoReaderWeight float64
+	// RYOWWriterWeight selects the read-your-own-writes probe role
+	// (rmp #2440): write then immediately read back on the same connection.
+	RYOWWriterWeight float64
 }
 
 // defaultConcurrentMix is a write/read/overload population that keeps the graph
@@ -136,6 +147,19 @@ type ConcurrentResult struct {
 	// markers present in it. Both must be zero.
 	TxMissingAcked   int64
 	TxPhantomRefused int64
+
+	// During-run isolation oracle tallies (rmp #2440), reconciled from the
+	// per-connection state after the join and asserted zero on HEAD:
+	// a monotonic-read regression (a shared counter or the batch population
+	// observed going backwards on one connection), a same-connection
+	// read-your-own-writes miss, and a torn atomic batch (a count that is not
+	// a multiple of the batch size).
+	IsoMonotonicViolations int64
+	IsoRYOWViolations      int64
+	IsoBatchViolations     int64
+	// IsoReads counts the oracle observations actually made, so a green run
+	// is provably non-vacuous.
+	IsoReads int64
 }
 
 // TxConserved reports whether every issued transaction landed in exactly one
@@ -285,6 +309,10 @@ func RunConcurrent(ctx context.Context, srv *SimServer, cfg ConcurrentConfig) (C
 		res.TxRolledBack += writerLogs[i].txRolledBack
 		res.TxFailed += writerLogs[i].txFailed
 		res.TxAmbiguous += writerLogs[i].txAmbiguous
+		res.IsoMonotonicViolations += writerLogs[i].isoMonotonicViolations
+		res.IsoRYOWViolations += writerLogs[i].isoRYOWViolations
+		res.IsoBatchViolations += writerLogs[i].isoBatchViolations
+		res.IsoReads += writerLogs[i].isoReads
 		for k, v := range writerLogs[i].contendedAcked {
 			res.ContendedAcked[k] += v
 		}
@@ -326,30 +354,43 @@ const (
 	roleOverload
 	roleTxWriter
 	roleTxContended
+	roleBatchWriter
+	roleIsoReader
+	roleRYOWWriter
 )
 
 // pickRole draws a role from the weighted mix using one float64 from seed.
 func pickRole(seed *Seed, mix *ConcurrentMix) concurrentRole {
-	total := mix.WriterWeight + mix.ReaderWeight + mix.OverloadWeight +
-		mix.TxWriterWeight + mix.TxContendedWeight
+	weights := [...]struct {
+		w    float64
+		role concurrentRole
+	}{
+		{mix.WriterWeight, roleWriter},
+		{mix.ReaderWeight, roleReader},
+		{mix.OverloadWeight, roleOverload},
+		{mix.TxWriterWeight, roleTxWriter},
+		{mix.TxContendedWeight, roleTxContended},
+		{mix.BatchWriterWeight, roleBatchWriter},
+		{mix.IsoReaderWeight, roleIsoReader},
+		{mix.RYOWWriterWeight, roleRYOWWriter},
+	}
+	total := 0.0
+	for _, e := range weights {
+		total += e.w
+	}
 	if total <= 0 {
 		_ = seed.Float64()
 		return roleWriter
 	}
 	t := seed.Float64() * total
-	if t < mix.WriterWeight {
-		return roleWriter
+	acc := 0.0
+	for _, e := range weights {
+		acc += e.w
+		if t < acc {
+			return e.role
+		}
 	}
-	if t < mix.WriterWeight+mix.ReaderWeight {
-		return roleReader
-	}
-	if t < mix.WriterWeight+mix.ReaderWeight+mix.OverloadWeight {
-		return roleOverload
-	}
-	if t < mix.WriterWeight+mix.ReaderWeight+mix.OverloadWeight+mix.TxWriterWeight {
-		return roleTxWriter
-	}
-	return roleTxContended
+	return roleRYOWWriter
 }
 
 // counters bundles the atomic tallies a connection goroutine updates. The
@@ -386,6 +427,16 @@ type writerLog struct {
 	// read-modify-write increments this connection made (len = the run's
 	// contended counter count; nil for other roles).
 	contendedAcked []int64
+
+	// During-run isolation oracle state (rmp #2440), goroutine-owned like the
+	// rest: last-observed floors, violation tallies, and the observation count
+	// that proves a green run non-vacuous.
+	isoLastCounter         []int64
+	isoLastBatchCount      int64
+	isoMonotonicViolations int64
+	isoRYOWViolations      int64
+	isoBatchViolations     int64
+	isoReads               int64
 }
 
 // runConnection opens one client connection, plays its role for up to opsPerConn
@@ -411,6 +462,9 @@ func runConnection(ctx context.Context, srv *SimServer, connSeed uint64, role co
 
 	if role == roleTxContended {
 		wl.contendedAcked = make([]int64, contendedCounters)
+	}
+	if role == roleIsoReader {
+		wl.isoLastCounter = make([]int64, contendedCounters)
 	}
 	seed := NewSeed(connSeed)
 	uniq := connSeed // per-connection namespace so writers never collide on names
@@ -438,6 +492,12 @@ func playOneOp(client *WireClient, role concurrentRole, seed *Seed, uniq uint64,
 		return txWriterOp(client, seed, uniq, op, false, contendedCounters, c, wl)
 	case roleTxContended:
 		return txWriterOp(client, seed, uniq, op, true, contendedCounters, c, wl)
+	case roleBatchWriter:
+		return batchWriterOp(client, seed, uniq, op, c, wl)
+	case roleIsoReader:
+		return isoReaderOp(client, seed, contendedCounters, c, wl)
+	case roleRYOWWriter:
+		return ryowWriterOp(client, seed, uniq, op, c, wl)
 	default:
 		return false
 	}
