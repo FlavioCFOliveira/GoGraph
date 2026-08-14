@@ -211,6 +211,10 @@ func (o *GraphOracle) ApplyCreate(cypher string, params map[string]any) OracleRe
 		return o.recordOp(cypher, params, o.createKnowsProps(params))
 	case tmplCreateKnowsInst:
 		return o.recordOp(cypher, params, o.createKnowsInst(params))
+	case tmplForeachCreatePersons:
+		// FOREACH is modelled as its expansion: one Person per list element
+		// (rmp #2454).
+		return o.recordOp(cypher, params, o.applyForeachCreatePersons(params))
 	case tmplCreateAcctWithEmail:
 		return o.recordOp(cypher, params, o.createAcct(params, true))
 	case tmplCreateAcctNoEmail:
@@ -457,6 +461,10 @@ func (o *GraphOracle) ApplyMatch(cypher string, params map[string]any) OracleRes
 		// own map (bag-authoritative, rmp #2503) with the target's eid
 		// re-pinned.
 		return o.recordOp(cypher, params, o.copyKnowsInst(params))
+	case tmplForeachSetTag:
+		// FOREACH SET is modelled as its expansion: len(tags) assignments whose
+		// net state effect is the last element (rmp #2454).
+		return o.recordOp(cypher, params, o.applyForeachSetTag(params))
 	}
 	// Schema-mutation templates (REMOVE / SET-label / SET-map) mutate the matched
 	// node's labels/properties; the helper reports whether it recognised the
