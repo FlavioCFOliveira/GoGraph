@@ -28,8 +28,13 @@ type ConcurrentConfig struct {
 	// each). Values <= 0 are normalised to 1.
 	Connections int
 	// OpsPerConn is the number of operations each connection performs before it
-	// closes. Values <= 0 are normalised to 1.
+	// closes. Values <= 0 are normalised to 1. For the transactional roles one
+	// operation is one whole transaction.
 	OpsPerConn int
+	// ContendedCounters is the size of the shared counter key space the
+	// contended transactional role collides on (rmp #2439). Values <= 0
+	// normalise to 2. Fewer counters means more conflicts.
+	ContendedCounters int
 }
 
 // ConcurrentMix is the per-connection actor selection for a concurrent run. Each
@@ -42,6 +47,16 @@ type ConcurrentMix struct {
 	WriterWeight   float64
 	ReaderWeight   float64
 	OverloadWeight float64
+	// TxWriterWeight selects the DISJOINT transactional writer (rmp #2439):
+	// explicit multi-statement transactions over the real Bolt wire (BEGIN, one
+	// to three uniquely-named creates, COMMIT or a seed-chosen ROLLBACK), whose
+	// keys never collide with another connection's.
+	TxWriterWeight float64
+	// TxContendedWeight selects the CONTENDED transactional writer: an explicit
+	// read-modify-write on a small shared counter space (the lost-update shape)
+	// plus a unique marker create, so serialization conflicts are an expected,
+	// typed outcome the run accounts for separately from failures.
+	TxContendedWeight float64
 }
 
 // defaultConcurrentMix is a write/read/overload population that keeps the graph
@@ -78,6 +93,20 @@ type ConcurrentResult struct {
 	// ambiguous, so it is left as merely issued, never asserted-absent.
 	FailedNames []string
 
+	// TxMarkersAcked / TxMarkersRefused are the transaction-granular ledgers
+	// (rmp #2439): the unique marker names created inside transactions whose
+	// COMMIT the server acknowledged, and inside transactions the server
+	// REFUSED (a typed conflict, an explicit rollback, or a failed commit).
+	// At quiescence every acked marker must be present and every refused
+	// marker absent — the all-or-nothing assertion at transaction granularity.
+	TxMarkersAcked   []string
+	TxMarkersRefused []string
+	// ContendedAcked is, per shared counter, the number of read-modify-write
+	// increments acknowledged; ContendedFinal is each counter's value read at
+	// quiescence. Equality is the zero-lost-updates oracle.
+	ContendedAcked []int64
+	ContendedFinal []int64
+
 	Seed             uint64
 	Connections      int
 	AckedCreates     int64 // nodes connections committed (eventual oracle)
@@ -87,6 +116,32 @@ type ConcurrentResult struct {
 	BoundedRejects   int64 // typed bound errors (overload caps) — acceptable, not a fault
 	BaselineRoutines int   // goroutine count captured before the run
 	FinalRoutines    int   // goroutine count after teardown
+
+	// Transaction outcome accounting (rmp #2439). TxIssued counts explicit
+	// transactions BEGUN; every one ends in exactly one bucket: committed
+	// (COMMIT acknowledged), conflicted (the typed retriable serialization
+	// conflict, classified by its Bolt code), rolled back (a deliberate
+	// client ROLLBACK), failed (any other explicit FAILURE), or ambiguous
+	// (the connection stopped mid-transaction on a transport error or
+	// cancellation — its outcome is unknowable client-side and is never
+	// asserted). Conservation: TxIssued == the sum of the five.
+	TxIssued     int64
+	TxCommitted  int64
+	TxConflicted int64
+	TxRolledBack int64
+	TxFailed     int64
+	TxAmbiguous  int64
+	// TxMissingAcked / TxPhantomRefused are the quiescence verification
+	// outcomes: acknowledged markers absent from the engine, and refused
+	// markers present in it. Both must be zero.
+	TxMissingAcked   int64
+	TxPhantomRefused int64
+}
+
+// TxConserved reports whether every issued transaction landed in exactly one
+// outcome bucket.
+func (r *ConcurrentResult) TxConserved() bool {
+	return r.TxIssued == r.TxCommitted+r.TxConflicted+r.TxRolledBack+r.TxFailed+r.TxAmbiguous
 }
 
 // Consistent reports whether the eventual-consistency oracle holds: the engine's
@@ -148,9 +203,31 @@ func RunConcurrent(ctx context.Context, srv *SimServer, cfg ConcurrentConfig) (C
 	master := NewSeed(cfg.Seed)
 	connSeeds := make([]uint64, cfg.Connections)
 	roles := make([]concurrentRole, cfg.Connections)
+	haveContended := false
 	for i := range connSeeds {
 		connSeeds[i] = master.Uint64N(^uint64(0))
 		roles[i] = pickRole(master, mix)
+		if roles[i] == roleTxContended {
+			haveContended = true
+		}
+	}
+
+	if cfg.ContendedCounters <= 0 {
+		cfg.ContendedCounters = 2
+	}
+	// Seed the shared counters BEFORE any contended connection spawns, over a
+	// setup connection on this goroutine, so every contended transaction finds
+	// its counter committed. The seeded nodes are acknowledged creates like any
+	// other, so they enter the eventual-consistency oracle (added to the tally
+	// after the post-join load below).
+	seededCounters := 0
+	if haveContended {
+		for k := 0; k < cfg.ContendedCounters; k++ {
+			if err := seedContendedCounter(srv, k); err != nil {
+				return res, fmt.Errorf("sim: seed contended counter %d: %w", k, err)
+			}
+			seededCounters++
+		}
 	}
 
 	var (
@@ -178,7 +255,7 @@ func RunConcurrent(ctx context.Context, srv *SimServer, cfg ConcurrentConfig) (C
 					panics.Add(1)
 				}
 			}()
-			runConnection(ctx, srv, connSeed, role, cfg.OpsPerConn, &counters{
+			runConnection(ctx, srv, connSeed, role, cfg.OpsPerConn, cfg.ContendedCounters, &counters{
 				ackedCreates:    &ackedCreates,
 				transportErrors: &transportErrors,
 				boundedRejects:  &boundedRejects,
@@ -187,7 +264,7 @@ func RunConcurrent(ctx context.Context, srv *SimServer, cfg ConcurrentConfig) (C
 	}
 	wg.Wait()
 
-	res.AckedCreates = ackedCreates.Load()
+	res.AckedCreates = ackedCreates.Load() + int64(seededCounters)
 	res.Panics = panics.Load()
 	res.TransportErrors = transportErrors.Load()
 	res.BoundedRejects = boundedRejects.Load()
@@ -195,10 +272,37 @@ func RunConcurrent(ctx context.Context, srv *SimServer, cfg ConcurrentConfig) (C
 	// Union the per-connection name logs now that every writer goroutine has been
 	// joined (wg.Wait publishes their appends). The order is not significant — the
 	// durable-commit scenario compares SETS — so a simple concatenation suffices.
+	res.ContendedAcked = make([]int64, cfg.ContendedCounters)
 	for i := range writerLogs {
 		res.AckedNames = append(res.AckedNames, writerLogs[i].acked...)
 		res.IssuedNames = append(res.IssuedNames, writerLogs[i].issued...)
 		res.FailedNames = append(res.FailedNames, writerLogs[i].failed...)
+		res.TxMarkersAcked = append(res.TxMarkersAcked, writerLogs[i].txMarkersAcked...)
+		res.TxMarkersRefused = append(res.TxMarkersRefused, writerLogs[i].txMarkersRefused...)
+		res.TxIssued += writerLogs[i].txIssued
+		res.TxCommitted += writerLogs[i].txCommitted
+		res.TxConflicted += writerLogs[i].txConflicted
+		res.TxRolledBack += writerLogs[i].txRolledBack
+		res.TxFailed += writerLogs[i].txFailed
+		res.TxAmbiguous += writerLogs[i].txAmbiguous
+		for k, v := range writerLogs[i].contendedAcked {
+			res.ContendedAcked[k] += v
+		}
+	}
+
+	// Transaction-granular quiescence verification (rmp #2439): every
+	// acknowledged marker present, every refused marker absent, and every
+	// contended counter equal to its acknowledged increments (zero lost
+	// updates). Runs over a fresh connection, like the node-count oracle.
+	if res.TxIssued > 0 {
+		missing, phantom, finals, err := verifyTxQuiescence(srv, res.TxMarkersAcked, res.TxMarkersRefused,
+			ifElseInt(haveContended, cfg.ContendedCounters, 0))
+		if err != nil {
+			return res, fmt.Errorf("sim: concurrent tx quiescence verification: %w", err)
+		}
+		res.TxMissingAcked = missing
+		res.TxPhantomRefused = phantom
+		res.ContendedFinal = finals
 	}
 
 	// Reconcile the eventual-consistency oracle at quiescence: count the engine's
@@ -220,11 +324,14 @@ const (
 	roleWriter concurrentRole = iota
 	roleReader
 	roleOverload
+	roleTxWriter
+	roleTxContended
 )
 
 // pickRole draws a role from the weighted mix using one float64 from seed.
 func pickRole(seed *Seed, mix *ConcurrentMix) concurrentRole {
-	total := mix.WriterWeight + mix.ReaderWeight + mix.OverloadWeight
+	total := mix.WriterWeight + mix.ReaderWeight + mix.OverloadWeight +
+		mix.TxWriterWeight + mix.TxContendedWeight
 	if total <= 0 {
 		_ = seed.Float64()
 		return roleWriter
@@ -236,7 +343,13 @@ func pickRole(seed *Seed, mix *ConcurrentMix) concurrentRole {
 	if t < mix.WriterWeight+mix.ReaderWeight {
 		return roleReader
 	}
-	return roleOverload
+	if t < mix.WriterWeight+mix.ReaderWeight+mix.OverloadWeight {
+		return roleOverload
+	}
+	if t < mix.WriterWeight+mix.ReaderWeight+mix.OverloadWeight+mix.TxWriterWeight {
+		return roleTxWriter
+	}
+	return roleTxContended
 }
 
 // counters bundles the atomic tallies a connection goroutine updates. The
@@ -257,13 +370,29 @@ type writerLog struct {
 	issued []string // every create name sent (RUN issued), any outcome
 	acked  []string // create names with a SUCCESS-terminated PULL
 	failed []string // create names with an explicit proto.Failure (never IGNORED)
+
+	// Transaction-granular ledger (rmp #2439), used by the transactional
+	// roles and empty for the others. Same ownership rule: one goroutine,
+	// no synchronisation, read only after the join.
+	txMarkersAcked   []string
+	txMarkersRefused []string
+	txIssued         int64
+	txCommitted      int64
+	txConflicted     int64
+	txRolledBack     int64
+	txFailed         int64
+	txAmbiguous      int64
+	// contendedAcked is the per-shared-counter tally of acknowledged
+	// read-modify-write increments this connection made (len = the run's
+	// contended counter count; nil for other roles).
+	contendedAcked []int64
 }
 
 // runConnection opens one client connection, plays its role for up to opsPerConn
 // operations (stopping early on ctx cancellation), and closes the connection. It
 // never panics out: a transport error stops the connection cleanly (recorded in
 // the counters), so a connection reset by the server does not crash the harness.
-func runConnection(ctx context.Context, srv *SimServer, connSeed uint64, role concurrentRole, opsPerConn int, c *counters, wl *writerLog) {
+func runConnection(ctx context.Context, srv *SimServer, connSeed uint64, role concurrentRole, opsPerConn, contendedCounters int, c *counters, wl *writerLog) {
 	client, err := srv.Dial()
 	if err != nil {
 		c.transportErrors.Add(1)
@@ -280,13 +409,16 @@ func runConnection(ctx context.Context, srv *SimServer, connSeed uint64, role co
 		return
 	}
 
+	if role == roleTxContended {
+		wl.contendedAcked = make([]int64, contendedCounters)
+	}
 	seed := NewSeed(connSeed)
 	uniq := connSeed // per-connection namespace so writers never collide on names
 	for op := 0; op < opsPerConn; op++ {
 		if ctx.Err() != nil {
 			return
 		}
-		if stop := playOneOp(client, role, seed, uniq, op, c, wl); stop {
+		if stop := playOneOp(client, role, seed, uniq, op, contendedCounters, c, wl); stop {
 			return
 		}
 	}
@@ -294,7 +426,7 @@ func runConnection(ctx context.Context, srv *SimServer, connSeed uint64, role co
 
 // playOneOp performs one operation for the connection's role and returns true if
 // the connection should stop (a transport error indicating the server closed it).
-func playOneOp(client *WireClient, role concurrentRole, seed *Seed, uniq uint64, op int, c *counters, wl *writerLog) (stop bool) {
+func playOneOp(client *WireClient, role concurrentRole, seed *Seed, uniq uint64, op, contendedCounters int, c *counters, wl *writerLog) (stop bool) {
 	switch role {
 	case roleWriter:
 		return writerOp(client, seed, uniq, op, c, wl)
@@ -302,6 +434,10 @@ func playOneOp(client *WireClient, role concurrentRole, seed *Seed, uniq uint64,
 		return readerOp(client, seed, c)
 	case roleOverload:
 		return overloadOp(client, seed, c)
+	case roleTxWriter:
+		return txWriterOp(client, seed, uniq, op, false, contendedCounters, c, wl)
+	case roleTxContended:
+		return txWriterOp(client, seed, uniq, op, true, contendedCounters, c, wl)
 	default:
 		return false
 	}
