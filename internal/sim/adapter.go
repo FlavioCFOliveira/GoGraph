@@ -59,6 +59,29 @@ func (a *EngineAdapter) RunWrite(ctx context.Context, query string, params map[s
 	return &resultAdapter{res: res}, nil
 }
 
+// Explain converts params and returns the engine's physical-plan rendering for
+// query without executing it ([cypher.Engine.Explain]). The access-path parity
+// checker reads the chosen access path (seek vs scan) from this rendering.
+func (a *EngineAdapter) Explain(query string, params map[string]any) (string, error) {
+	ev, err := toExprParams(params)
+	if err != nil {
+		return "", err
+	}
+	return a.eng.Explain(query, ev)
+}
+
+// Profile converts params, executes the read-only query, and returns the
+// physical plan annotated with per-operator rows, db-hits, and time
+// ([cypher.Engine.Profile]). The access-path parity checker uses it to assert
+// that a data-touching probe reports non-zero db-hits.
+func (a *EngineAdapter) Profile(ctx context.Context, query string, params map[string]any) (string, error) {
+	ev, err := toExprParams(params)
+	if err != nil {
+		return "", err
+	}
+	return a.eng.Profile(ctx, query, ev)
+}
+
 // NodeCount returns the live node count by running a whole-graph count query
 // through the real engine, so it exercises the same execution path the
 // workload uses.

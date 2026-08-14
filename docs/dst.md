@@ -120,6 +120,19 @@ nodes and edges in the engine; a full (non-sampled) durability scan at every
 crash boundary; and a thorough index-consistency check that cross-checks the
 index-seek path against a full scan.
 
+An access-path parity oracle (`access_parity.go`, wired into the
+`index-diversity` scenario) additionally runs each predicate shape — equality,
+bounded range, `STARTS WITH`, and `IN`-list — on an indexed property in both
+its literal and its parameterised spelling, asserting identical result
+multisets and, via the engine's physical `Explain` rendering, the same
+access-path leaf operator (seek vs scan) for both arms; a `Profile` probe
+asserts non-zero db-hits for a data-touching query. A companion plan-stability
+oracle captures the `Explain` rendering of the fixed probe set at scenario
+start and asserts it is byte-identical after every crash/recovery (plan-cache
+rebuild) and at the end of the run. This closes the rmp #2414 blind spot: a
+parameterised predicate that full-scans while the identical literal seeks
+returns correct answers and is invisible to every result-only oracle.
+
 ## The search-algorithm battery
 
 The `search/` package — traversal, path-finding, and analytics — is the
@@ -184,7 +197,7 @@ schedule, budget, mode, checks). `cmd/sim --list-scenarios` prints them.
 | `constraint-enforce` | deterministic | UNIQUE(Person.name) enforcement: duplicate-name CREATEs must be rejected with a typed constraint-violation error (the oracle predicts each accept/reject and the harness flags any disagreement as an enforcement gap), and the constraint must survive crash/recovery still enforcing. |
 | `type-coverage` | deterministic | Property type system: nodes carry a value of every round-tripping Cypher kind (string, integer, float, boolean, list, ISO-8601 temporal) plus a never-set key that must read `NULL`. Each value is read back through the engine and compared to the oracle via the canonical typed rendering, and re-checked immediately after crash/recovery — so every kind is proven to round-trip and survive WAL recovery. |
 | `edge-properties` | deterministic | Edge properties: KNOWS edges carry a `since` (ISO string) and `weight` (float); each is read back through the Cypher path (exercising the columnar edge-property tier) and compared to the oracle, periodically and after each crash/recovery, proving edge properties round-trip and survive WAL recovery. |
-| `index-diversity` | deterministic | Index-type diversity: a HASH (string), a BTREE (numeric), and a BTREE (string) index are created over an above-threshold graph (engaging the morsel-parallel backfill phase), then write churn + crash/recovery run while the thorough seek-vs-scan consistency check confirms each index agrees with its base data — for both kinds and both value types, including after WAL recovery re-registers and re-backfills them. |
+| `index-diversity` | deterministic | Index-type diversity: a HASH (string), a BTREE (numeric), and a BTREE (string) index are created over an above-threshold graph (engaging the morsel-parallel backfill phase), then write churn + crash/recovery run while the thorough seek-vs-scan consistency check confirms each index agrees with its base data — for both kinds and both value types, including after WAL recovery re-registers and re-backfills them. The scenario also carries the access-path parity and plan-stability oracles: literal vs parameterised predicates (equality, range, `STARTS WITH`, `IN`-list) must agree on results and on the physical access path, and the fixed probe set must re-plan byte-identically after every crash/recovery. |
 | `search` | deterministic | The `search/` algorithm battery over the live graph + structural parity. |
 | `cypher-paths` | deterministic | The Cypher-level `shortestPath()` operator: its hop count is compared to an independent BFS over the oracle's KNOWS edges for a bounded, deterministic set of pairs (comparing the path-length invariant, never a specific witness), periodically and after each crash/recovery. `allShortestPaths()` is also verified: every returned path is minimal-length and the path COUNT equals an independent layered-BFS shortest-path count. |
 | `cypher-surface` | deterministic | A battery of diverse read shapes — `count`/`sum` aggregation, `WHERE`, `WITH…WHERE`, pattern-count, `OPTIONAL MATCH`, `UNWIND range()`, and `ORDER BY` — is run against independently-computed oracle invariants (scalar values and the sorted-name sequence), broadening the DST's coverage of the Cypher read surface beyond the per-tick parity probe, including after crash/recovery. |
