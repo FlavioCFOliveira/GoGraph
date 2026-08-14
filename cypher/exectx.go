@@ -129,6 +129,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 )
@@ -140,6 +141,19 @@ import (
 // is rejected rather than acting on a released transaction. Matchable with
 // [errors.Is].
 var ErrTxFinished = errors.New("cypher: explicit transaction already finished")
+
+// ErrSerializationConflict is the typed, RETRIABLE write-write conflict error:
+// the transaction attempted to displace a version another transaction wrote
+// after this one began (first-committer-wins; the node is the unit of
+// conflict). It can surface from a statement or from [ExplicitTx.Commit] —
+// including for a write a void primitive recorded silently, per the doomed-tx
+// contract (rmp #2354) — and the failed transaction applied NOTHING: roll it
+// back and retry it whole. Matchable with [errors.Is].
+//
+// It is the [mvcc.ErrSerializationConflict] sentinel re-exported at the
+// surface clients import (rmp #2437), the same classification Neo4j gives its
+// TransientError.
+var ErrSerializationConflict = mvcc.ErrSerializationConflict
 
 // ErrTxPoisoned is returned by [ExplicitTx.Commit] when a prior
 // [ExplicitTx.Exec] call returned an [ErrStatementPipeline] error. A poisoned
