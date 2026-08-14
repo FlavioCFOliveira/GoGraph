@@ -54,11 +54,15 @@ type NodeState struct {
 }
 
 // EdgeState is the oracle's record of a single directed edge between two
-// oracle node ids, carrying its relationship label and properties.
+// oracle node ids, carrying its relationship label and properties. EID is the
+// edge instance's unique discriminator for scenarios that model parallel
+// edges (mirroring the edge's own eid property); it is 0 for every edge
+// created by a template that predates instance modelling.
 type EdgeState struct {
 	Properties   map[string]any
 	Label        string
 	SrcID, DstID uint64
+	EID          int64
 }
 
 // OracleResult is the oracle's prediction for one operation: whether it commits,
@@ -118,6 +122,12 @@ type GraphOracle struct {
 	// keeps modelling it across a crash — the recovered engine must still enforce
 	// it. See [GraphOracle.SetUniqueOnName].
 	uniqueOnName bool
+	// deletedKnows records every KNOWS edge instance the model deleted through
+	// the standalone DELETE r template ([tmplDeleteKnowsInst]), by eid and
+	// endpoint names. [CheckEdgeProperties] probes each entry to assert the
+	// deleted instance stays absent (including across crash/recovery) while both
+	// endpoint nodes remain alive — DELETE r must never cascade to a node.
+	deletedKnows []KnowsInstance
 	// existenceOnEmail, when true, models an active NOT NULL (Acct, email)
 	// existence constraint: an Acct CREATE that OMITS the email property must be
 	// REJECTED by the engine (a typed constraint-violation error, no state
@@ -128,11 +138,15 @@ type GraphOracle struct {
 	existenceOnEmail bool
 }
 
-// edgeKey identifies an edge by source, destination, and label, matching the
-// (src,dst,label) identity the checker probes.
+// edgeKey identifies an edge by source, destination, label, and — for
+// scenarios that model parallel-edge instances (the edge-properties scenario,
+// rmp #2449) — the instance's unique eid property. eid 0 is the simple-graph
+// case: every template that predates instance modelling leaves it zero, so one
+// (src,dst,label) triple maps to at most one modelled edge exactly as before.
 type edgeKey struct {
 	label    string
 	src, dst uint64
+	eid      int64
 }
 
 // NewGraphOracle returns an empty oracle. Node ids start at 1 so zero can mean
@@ -178,6 +192,8 @@ func (o *GraphOracle) ApplyCreate(cypher string, params map[string]any) OracleRe
 		return o.recordOp(cypher, params, o.createTyped(params))
 	case tmplCreateKnowsProps:
 		return o.recordOp(cypher, params, o.createKnowsProps(params))
+	case tmplCreateKnowsInst:
+		return o.recordOp(cypher, params, o.createKnowsInst(params))
 	case tmplCreateAcctWithEmail:
 		return o.recordOp(cypher, params, o.createAcct(params, true))
 	case tmplCreateAcctNoEmail:
@@ -370,25 +386,34 @@ func (o *GraphOracle) KnowsEdgesByName() []EdgeByName {
 			continue
 		}
 		out = append(out, EdgeByName{
-			Src: o.nameOf(e.SrcID), Dst: o.nameOf(e.DstID), Props: e.Properties,
+			Src: o.nameOf(e.SrcID), Dst: o.nameOf(e.DstID), Props: e.Properties, EID: e.EID,
 		})
 	}
 	return out
 }
 
 // EdgeByName is a KNOWS edge identified by its endpoint Person names plus its
-// modelled properties, the form the edge-property checker probes the engine with.
+// modelled properties, the form the edge-property checker probes the engine
+// with. EID is the instance discriminator for parallel-edge scenarios (0 for
+// edges created by templates that predate instance modelling); a non-zero EID
+// lets the checker pin the probe to exactly one of several parallel edges.
 type EdgeByName struct {
 	Props    map[string]any
 	Src, Dst string
+	EID      int64
 }
 
 // ApplyMatch models read-only and SET templates. Pure reads ([RETURN]/aggregate
 // queries) never change state and commit trivially; the SET template
 // ([tmplSetAge]) updates the matched node's age in place.
 func (o *GraphOracle) ApplyMatch(cypher string, params map[string]any) OracleResult {
-	if cypher == tmplSetAge {
+	switch cypher {
+	case tmplSetAge:
 		return o.recordOp(cypher, params, o.setAge(params))
+	case tmplSetKnowsWeight:
+		return o.recordOp(cypher, params, o.setKnowsWeight(params))
+	case tmplRemoveKnowsSince:
+		return o.recordOp(cypher, params, o.removeKnowsSince(params))
 	}
 	// Schema-mutation templates (REMOVE / SET-label / SET-map) mutate the matched
 	// node's labels/properties; the helper reports whether it recognised the
@@ -447,6 +472,11 @@ func (o *GraphOracle) ApplyMerge(cypher string, params map[string]any) OracleRes
 // matched by name together with every incident edge. A miss is a committed
 // zero-effect result.
 func (o *GraphOracle) ApplyDelete(cypher string, params map[string]any) OracleResult {
+	// Standalone edge deletion (DELETE r on one KNOWS instance) is modelled by a
+	// dedicated helper; DETACH DELETE of a Person falls through below.
+	if cypher == tmplDeleteKnowsInst {
+		return o.recordOp(cypher, params, o.deleteKnowsInst(params))
+	}
 	if cypher != tmplDetachDelete {
 		return o.recordOp(cypher, params, OracleResult{ErrorMsg: "oracle: unmodelled DELETE"})
 	}
@@ -610,7 +640,8 @@ func hasLabel(n *NodeState, l string) bool {
 }
 
 // edgeStates returns a freshly-allocated slice of the modelled edges in a
-// deterministic order (by source id, then destination id, then label) so the
+// deterministic order (by source id, then destination id, then label, then
+// instance eid) so the
 // checker's seed-driven sampling is reproducible. The returned EdgeState values
 // are copies.
 func (o *GraphOracle) edgeStates() []EdgeState {
@@ -625,7 +656,12 @@ func (o *GraphOracle) edgeStates() []EdgeState {
 		if a.DstID != b.DstID {
 			return cmp.Compare(a.DstID, b.DstID)
 		}
-		return cmp.Compare(a.Label, b.Label)
+		if a.Label != b.Label {
+			return cmp.Compare(a.Label, b.Label)
+		}
+		// Parallel instances tie on (src,dst,label); the eid breaks the tie so
+		// the order stays deterministic (eids are unique per run).
+		return cmp.Compare(a.EID, b.EID)
 	})
 	return out
 }

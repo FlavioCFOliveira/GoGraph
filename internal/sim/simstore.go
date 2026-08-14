@@ -79,7 +79,9 @@ func defaultSimStoreConfig() simStoreConfig {
 // would let two CREATE (a)-[:KNOWS]->(b) statements on the same pair produce two
 // engine edges where the oracle models one, a spurious count divergence after
 // recovery. Keeping the durable store simple makes the oracle a faithful model
-// of the engine across a crash.
+// of the engine across a crash. A scenario whose oracle DOES model edges per
+// instance (edge-properties, rmp #2449) opts into a multigraph via
+// [Config.Multigraph], which [New] applies on top of this base shape.
 func simulatorStoreConfig() simStoreConfig {
 	return simStoreConfig{
 		graphConfig: adjlist.Config{Directed: true, Multigraph: false},

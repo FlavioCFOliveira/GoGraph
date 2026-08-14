@@ -85,6 +85,15 @@ type Config struct {
 	// durable store even when Crash is disabled; the zero value leaves the disk
 	// unbounded (the prior behaviour). See [DiskConfig].
 	Disk DiskConfig
+	// Multigraph, when true, opens the engine's graph (durable and in-memory
+	// alike) as a directed MULTIGRAPH, so a repeated CREATE between the same
+	// endpoints adds a parallel edge instance instead of being rejected. Only a
+	// scenario whose oracle models edges per instance may set it (the
+	// edge-properties scenario, rmp #2449, discriminates instances by a unique
+	// eid property); the default (false) keeps the simple-graph shape every
+	// other scenario's (src,dst,label)-keyed oracle model requires, byte for
+	// byte.
+	Multigraph bool
 	// Seed is the master seed; the entire run is a pure function of it.
 	Seed uint64
 	// MaxTicks is the number of ticks (operations) the safety phase runs.
@@ -242,6 +251,9 @@ func New(cfg Config) (*Simulator, error) {
 		// non-zero disk capacity, or in-loop checkpointing, opts in even without
 		// crashes.
 		storeCfg := simulatorStoreConfig()
+		// A per-instance-modelling scenario opts into parallel edges; every other
+		// scenario keeps the simple-graph base shape (see [Config.Multigraph]).
+		storeCfg.graphConfig.Multigraph = cfg.Multigraph
 		if cfg.Checkpoint.Enabled {
 			// Full-stack layout: WAL + snapshot under a checkpoint directory so a
 			// real Checkpointer can publish a snapshot and truncate the WAL prefix,
@@ -272,7 +284,7 @@ func New(cfg Config) (*Simulator, error) {
 		// layer, byte-identical to the pre-crash simulator. EngineOpts is the zero
 		// value for every scenario except mem-pressure (which clamps the logical
 		// budgets); a zero EngineOptions is byte-identical to cypher.NewEngine.
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: cfg.Multigraph})
 		s.engine = NewEngineAdapter(cypher.NewEngineWithOptions(g, cfg.EngineOpts))
 	}
 
