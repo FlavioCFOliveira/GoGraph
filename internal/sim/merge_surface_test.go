@@ -435,7 +435,7 @@ func TestMergeSurface_RejectionCheck(t *testing.T) {
 // an empty stats record fires every clause, and a fully-exercised record is
 // clean.
 func TestMergeSurface_NonVacuityGate(t *testing.T) {
-	const wantClauses = 10 // four families + three branches + sub-cases + crash + survivor
+	const wantClauses = 12 // five families + four branches + sub-cases + crash + survivor
 	if v := checkMergeSurfaceNonVacuity(0, newMergeSurfaceStats()); len(v) != wantClauses {
 		t.Fatalf("empty stats must fire all %d clauses, got %d: %v", wantClauses, len(v), v)
 	}
@@ -464,6 +464,12 @@ func TestMergeSurface_NonVacuityGate(t *testing.T) {
 		ms.noteOp(op, true, oracle)
 		oracle.ApplyMerge(op.Cypher, op.Params)
 	}
+	// The whole-entity relationship arm, on a fresh ordered pair so its ON CREATE
+	// branch fires (rmp #2510).
+	pairSetAllOp := mergeOp(tmplMergePairSetAll, map[string]any{
+		"a": "wp3", "b": "wp4", "map": map[string]any{mergePairRelKey: int64(7)}})
+	ms.noteOp(pairSetAllOp, true, oracle)
+	oracle.ApplyMerge(pairSetAllOp.Cypher, pairSetAllOp.Params)
 	ms.noteOp(Op{Kind: OpMalformed, Cypher: tmplMergeParamMap}, false, oracle)
 	ms.noteRecovery(oracle)
 

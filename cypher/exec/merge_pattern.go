@@ -402,26 +402,60 @@ func (op *MergePattern) WithSetAllActions(onCreate, onMatch []MergeSetAllAction)
 	return op
 }
 
-// applySetAllActions applies each whole-entity SET action to the chain node it
-// names (resolved via b). An action targeting a relationship variable is left
-// to the relationship machinery and skipped here (#2031 covers node targets).
+// applySetAllActions applies each whole-entity SET action to the chain node OR
+// chain relationship it names (resolved via b), dispatching on the target
+// variable exactly as [MergePattern.applyActions] does for the per-property
+// form.
+//
+// The relationship arm used to be absent: a relationship target was skipped as
+// "left to the relationship machinery", meaning [MergeRelationship]'s KVAction
+// path. But that path only runs when BOTH endpoints are already bound and the
+// right-hand side is an all-literal map — every other shape routes here, so the
+// write had no owner and was lost silently, with no error and no +properties
+// (rmp #2510). The per-property form (`ON CREATE SET r.k = v`) was never lost
+// because applyActions has always had the relationship arm; that asymmetry is
+// what hid the defect.
 func (op *MergePattern) applySetAllActions(b binding, evalRow Row, actions []MergeSetAllAction) error {
 	for _, a := range actions {
-		idx, ok := op.nodeIndexByVar(a.TargetVar)
-		if !ok {
+		if idx, ok := op.nodeIndexByVar(a.TargetVar); ok {
+			nodeKey, resolved := op.mutator.ResolveNodeLabel(b[idx])
+			if !resolved {
+				continue
+			}
+			v, err := a.Eval(evalRow)
+			if err != nil {
+				return err
+			}
+			if err := applyWholeEntityValueToNode(op.mutator, a.TargetVar, nodeKey, a.IsReplace, v); err != nil {
+				return err
+			}
 			continue
 		}
-		nodeKey, ok := op.mutator.ResolveNodeLabel(b[idx])
-		if !ok {
+		if hopIdx, ok := op.hopIndexByRelVar(a.TargetVar); ok {
+			hop := &op.hops[hopIdx]
+			srcIdx, dstIdx := hop.storageOrder(hopIdx)
+			srcKey, ok1 := op.mutator.ResolveNodeLabel(b[srcIdx])
+			dstKey, ok2 := op.mutator.ResolveNodeLabel(b[dstIdx])
+			if !ok1 || !ok2 {
+				continue
+			}
+			v, err := a.Eval(evalRow)
+			if err != nil {
+				return err
+			}
+			// binding carries no per-edge identity, so the instance is pinned
+			// the same way the per-property path pins it: the first handle on
+			// the resolved pair, with 0 meaning "no handle" (simple graph).
+			handle, _ := op.mutator.FirstEdgeHandle(srcKey, dstKey)
+			if err := applyWholeEntityValueToEdge(
+				op.mutator, a.TargetVar, srcKey, dstKey, handle, a.IsReplace, v,
+			); err != nil {
+				return err
+			}
 			continue
 		}
-		v, err := a.Eval(evalRow)
-		if err != nil {
-			return err
-		}
-		if err := applyWholeEntityValueToNode(op.mutator, a.TargetVar, nodeKey, a.IsReplace, v); err != nil {
-			return err
-		}
+		// a.TargetVar names neither a chain node nor a chain relationship: not a
+		// target this operator can resolve. Skipped, matching applyActions.
 	}
 	return nil
 }

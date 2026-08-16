@@ -64,11 +64,27 @@ package sim
 //     an [OpMalformed] no-op and adjudicated by [checkMergeRejection], which
 //     fails if the engine ever ACCEPTS it — the negative-space coverage that
 //     makes a silent relaxation of the rule visible to the DST.
+//
+//  5. ON CREATE SET r += $map on a WHOLE-PATTERN merge writes the relationship's
+//     properties, and reports them. This is the shape rmp #2510 lost outright: a
+//     whole-entity action on the relationship variable of a pattern whose
+//     endpoints are NOT already bound reaches MergePattern, which deferred every
+//     relationship target to a fast path that only ever runs for
+//     both-endpoints-bound, all-literal-map statements. The write therefore had
+//     no owner: the statement committed, created the pattern, reported only the
+//     two endpoint-name properties, and left the relationship property unset,
+//     with no error anywhere. The family is modelled with its exact effect set
+//     (2 nodes / 1 relationship / 2+len(map) properties / 2 labels on create,
+//     all-zero on match) and read back in BOTH directions by
+//     [CheckMergePairRelProps], so a regression surfaces as a counters deviation
+//     on the tick that caused it AND as a value deviation at the next check.
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // MERGE-surface templates (rmp #2461). Like every workload template they are
@@ -93,7 +109,19 @@ const (
 	// compile time (openCypher TCK Merge1 scenario [16]). It is emitted as an
 	// [OpMalformed] op and must never commit.
 	tmplMergeParamMap = "MERGE (n $map)"
+	// tmplMergePairSetAll merges the SAME whole pattern as
+	// [tmplMergePairPattern] and, on creation only, applies a WHOLE-ENTITY
+	// action to the RELATIONSHIP variable from a bound map — the shape rmp
+	// #2510 lost. See semantics 5 in the file comment.
+	tmplMergePairSetAll = "MERGE (a:Person {name:$a})-[r:PAIRED]->(b:Person {name:$b}) ON CREATE SET r += $map"
 )
+
+// mergePairRelKey is the single property key the whole-entity relationship
+// action writes. One key keeps the modelled effect set exact (the create reports
+// 2 endpoint names + 1 relationship property) while still being the write that
+// vanished, and it is read back by [CheckMergePairRelProps] in BOTH directions —
+// present where the model says present, absent where it says absent.
+const mergePairRelKey = "w"
 
 // relPaired is the relationship type of the whole-pattern MERGE family. It is
 // deliberately distinct from KNOWS so no KNOWS-keyed helper or checker can see
@@ -159,6 +187,24 @@ func (SchemaMutationWriter) opMergePairPattern(seed *Seed) Op {
 		b = mergePairKeys[seed.IntN(len(mergePairKeys))]
 	}
 	return Op{Kind: OpMerge, Cypher: tmplMergePairPattern, Params: map[string]any{"a": a, "b": b}}
+}
+
+// opMergePairSetAll builds a [tmplMergePairSetAll] op over two DISTINCT keys of
+// [mergePairKeys], drawn exactly as [SchemaMutationWriter.opMergePairPattern]
+// draws them so both families share the one key namespace and therefore the one
+// match-or-create adjudication: an edge either family created makes the other
+// family's next MERGE for that ordered pair MATCH, which is precisely the
+// ON-CREATE-does-not-fire path worth covering.
+func (SchemaMutationWriter) opMergePairSetAll(seed *Seed) Op {
+	a := mergePairKeys[seed.IntN(len(mergePairKeys))]
+	b := a
+	for b == a {
+		b = mergePairKeys[seed.IntN(len(mergePairKeys))]
+	}
+	return Op{Kind: OpMerge, Cypher: tmplMergePairSetAll, Params: map[string]any{
+		"a": a, "b": b,
+		"map": map[string]any{mergePairRelKey: int64(seed.IntN(1000))},
+	}}
 }
 
 // opMergeParamMap builds the [tmplMergeParamMap] op the engine must reject. It
@@ -251,6 +297,39 @@ func (o *GraphOracle) applyMergePairPattern(params map[string]any) OracleResult 
 	dstID := o.newPairNode(b)
 	o.edges[edgeKey{src: srcID, dst: dstID, label: relPaired}] = &EdgeState{
 		SrcID: srcID, DstID: dstID, Label: relPaired, Properties: map[string]any{},
+	}
+	return OracleResult{Committed: true, NodesCreated: 2, EdgesCreated: 1}
+}
+
+// applyMergePairSetAll advances the model for [tmplMergePairSetAll]. The
+// match-or-create decision is [tmplMergePairPattern]'s, unchanged — the pattern
+// is identical, so an edge either family created matches here. The only delta is
+// on create: the ON CREATE branch fires and its whole-entity `+=` writes the
+// bound map's non-nil entries onto the NEW relationship. On a match the branch
+// does not fire, so the existing edge's properties are left exactly as they are
+// (including left ABSENT when the plain family created it), which is what makes
+// [CheckMergePairRelProps]'s absent-direction assertion meaningful.
+func (o *GraphOracle) applyMergePairSetAll(params map[string]any) OracleResult {
+	a, okA := paramString(params, "a")
+	b, okB := paramString(params, "b")
+	m, okM := params["map"].(map[string]any)
+	if !okA || !okB || !okM {
+		return OracleResult{ErrorMsg: "oracle: merge pair set-all missing endpoint/map"}
+	}
+	if o.hasPairedEdge(a, b) {
+		return OracleResult{Committed: true} // whole pattern matched; ON CREATE does not fire.
+	}
+	props := make(map[string]any, len(m))
+	for k, v := range m {
+		if v == nil {
+			continue // a null map entry removes the key rather than assigning it.
+		}
+		props[k] = v
+	}
+	srcID := o.newPairNode(a)
+	dstID := o.newPairNode(b)
+	o.edges[edgeKey{src: srcID, dst: dstID, label: relPaired}] = &EdgeState{
+		SrcID: srcID, DstID: dstID, Label: relPaired, Properties: props,
 	}
 	return OracleResult{Committed: true, NodesCreated: 2, EdgesCreated: 1}
 }
@@ -418,9 +497,112 @@ func expectedMergeSurfaceCounters(op Op, oracle *GraphOracle) (exec.QueryCounter
 			NodesCreated: 2, RelationshipsCreated: 1, PropertiesSet: 2, LabelsAdded: 2,
 		}, true
 
+	case tmplMergePairSetAll:
+		c, ok := classifyMergePattern(op, oracle)
+		m, okM := op.Params["map"].(map[string]any)
+		if !ok || !okM {
+			return exec.QueryCounters{}, false
+		}
+		if c == mergePatternWhole {
+			return exec.QueryCounters{}, true
+		}
+		// The pattern's own effect set plus one assignment per non-nil map entry
+		// — the whole-entity relationship write. Reporting only the pattern's 2
+		// properties is exactly the shape of rmp #2510, so this arm fails the run
+		// on the tick the write is lost.
+		return exec.QueryCounters{
+			NodesCreated: 2, RelationshipsCreated: 1,
+			PropertiesSet: 2 + nonNilEntries(m), LabelsAdded: 2,
+		}, true
+
 	default:
 		return exec.QueryCounters{}, false
 	}
+}
+
+// CheckMergePairRelProps reads every modelled PAIRED relationship's property
+// back through the real engine and asserts it matches the model in BOTH
+// directions: the value the whole-entity ON CREATE action wrote where the model
+// carries one, and NULL where it does not.
+//
+// Both directions are load-bearing. The present-direction is the rmp #2510
+// regression detector — a lost whole-entity relationship write reads back null.
+// The absent-direction is what stops the checker from degenerating into a
+// tautology satisfied by an engine that writes the property onto every edge: the
+// plain [tmplMergePairPattern] family creates PAIRED edges with NO properties in
+// the same key namespace, so a spurious write is caught too.
+//
+// Each ordered (name_a, name_b) pair carries at most one PAIRED edge — a second
+// MERGE of the same pair matches rather than creating — so the by-name read is
+// unambiguous even though the family deliberately leaves duplicate Person nodes
+// behind. Running it after crash/recovery is what proves the relationship write
+// is DURABLE and not merely present in memory.
+func CheckMergePairRelProps(tick int64, oracle *GraphOracle, engine *EngineAdapter) []Violation {
+	ctx := context.Background()
+	var vs []Violation
+	for _, e := range oracle.pairedEdgesByName() {
+		q := fmt.Sprintf(
+			"MATCH (a:Person {name:'%s'})-[r:PAIRED]->(b:Person {name:'%s'}) RETURN r.%s",
+			e.src, e.dst, mergePairRelKey)
+		got, err := engine.projectRowValues(ctx, q, 1)
+		if err != nil {
+			vs = append(vs, Violation{Kind: ViolationGraphIntegrity, Tick: tick, Op: "merge pair rel-prop read",
+				Message: fmt.Sprintf("PAIRED(%q->%q).%s read failed: %v", e.src, e.dst, mergePairRelKey, err)})
+			continue
+		}
+		if got == nil {
+			vs = append(vs, Violation{Kind: ViolationACIDDurability, Tick: tick, Op: "merge pair existence",
+				Message: fmt.Sprintf("committed PAIRED(%q->%q) absent (did not survive recovery)", e.src, e.dst)})
+			continue
+		}
+		want, modelled := e.props[mergePairRelKey]
+		isNull := got[0] == nil || expr.IsNull(got[0])
+		if !modelled {
+			if !isNull {
+				vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "merge pair rel-prop",
+					Message: fmt.Sprintf("PAIRED(%q->%q).%s = %s, want null (no ON CREATE action wrote this edge)",
+						e.src, e.dst, mergePairRelKey, got[0].String())})
+			}
+			continue
+		}
+		if isNull {
+			vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "merge pair rel-prop",
+				Message: fmt.Sprintf("PAIRED(%q->%q).%s is null, want %s (ON CREATE SET r += $map was LOST: rmp #2510)",
+					e.src, e.dst, mergePairRelKey, canonicalValueString(want))})
+			continue
+		}
+		if wantStr := canonicalValueString(want); got[0].String() != wantStr {
+			vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "merge pair rel-prop",
+				Message: fmt.Sprintf("PAIRED(%q->%q).%s = %s, want %s (whole-entity relationship write did not round-trip)",
+					e.src, e.dst, mergePairRelKey, got[0].String(), wantStr)})
+		}
+	}
+	return vs
+}
+
+// pairedEdgeByName is one modelled PAIRED edge addressed by its endpoint NAMES,
+// which is how [CheckMergePairRelProps] reaches it through Cypher.
+type pairedEdgeByName struct {
+	props    map[string]any
+	src, dst string
+}
+
+// pairedEdgesByName returns every modelled PAIRED edge with its endpoint names
+// and property map. Edges whose endpoints have lost their name (which the family
+// itself never does) are skipped, since no by-name query could address them.
+func (o *GraphOracle) pairedEdgesByName() []pairedEdgeByName {
+	out := make([]pairedEdgeByName, 0, len(o.edges))
+	for k, e := range o.edges {
+		if k.label != relPaired {
+			continue
+		}
+		src, dst := o.nameOf(k.src), o.nameOf(k.dst)
+		if src == "" || dst == "" {
+			continue
+		}
+		out = append(out, pairedEdgeByName{src: src, dst: dst, props: e.Properties})
+	}
+	return out
 }
 
 // checkMergeRejection adjudicates the map-parameter MERGE family: the engine
@@ -451,12 +633,20 @@ type mergeSurfaceStats struct {
 	counterNames map[string]bool
 	// issued counts the ops of each family the workload emitted.
 	counterIssued, setAllIssued, patternIssued, paramMapIssued int
+	// pairSetAllIssued counts the whole-pattern MERGE ops carrying a
+	// whole-entity relationship action (rmp #2510).
+	pairSetAllIssued int
 	// counterCreated / counterMatched report that the ON CREATE and the ON
 	// MATCH branch of the counter family each fired at least once.
 	counterCreated, counterMatched bool
 	// setAllCreated reports that the whole-map ON CREATE branch actually fired
 	// (an arm that only ever matched would never exercise the replace).
 	setAllCreated bool
+	// pairSetAllCreated reports that the whole-pattern family's ON CREATE branch
+	// fired at least once, which is the only path on which the whole-entity
+	// relationship write runs at all: a run that only ever MATCHED would never
+	// have exercised the rmp #2510 shape, and its green result would be vacuous.
+	pairSetAllCreated bool
 	// crashAfterMerge reports that at least one crash/recovery happened after a
 	// MERGE-surface op had already committed.
 	crashAfterMerge bool
@@ -504,6 +694,21 @@ func (ms *mergeSurfaceStats) noteOp(op Op, committed bool, oracle *GraphOracle) 
 		}
 		if c, ok := classifyMergePattern(op, oracle); ok {
 			ms.patternCases[c] = true
+		}
+	case tmplMergePairSetAll:
+		ms.pairSetAllIssued++
+		if !committed {
+			return
+		}
+		// The sub-case adjudication is the plain family's, so both families feed
+		// the one patternCases record; only a create fires the relationship write.
+		c, ok := classifyMergePattern(op, oracle)
+		if !ok {
+			return
+		}
+		ms.patternCases[c] = true
+		if c != mergePatternWhole {
+			ms.pairSetAllCreated = true
 		}
 	case tmplMergeParamMap:
 		ms.paramMapIssued++
@@ -580,6 +785,12 @@ func checkMergeSurfaceNonVacuity(tick int64, ms *mergeSurfaceStats) []Violation 
 	}
 	if !ms.setAllCreated {
 		fail("the whole-map MERGE never took its ON CREATE branch, so SET n = $map never ran")
+	}
+	if ms.pairSetAllIssued == 0 {
+		fail("no whole-pattern MERGE … ON CREATE SET r += $map op was issued: the whole-entity relationship arm was vacuous")
+	}
+	if !ms.pairSetAllCreated {
+		fail("the whole-pattern MERGE with a relationship action never took its ON CREATE branch, so SET r += $map never ran")
 	}
 	if seen := ms.patternCasesSeen(); seen < mergePatternCasesRequired {
 		fail(fmt.Sprintf("whole-pattern MERGE reached only %d of the %d sub-cases (need %d): %s",

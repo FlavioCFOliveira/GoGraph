@@ -73,7 +73,7 @@ func (w SchemaMutationWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 		return HonestWriter{}.opCreatePerson(seed)
 	}
 	name := names[seed.IntN(len(names))]
-	switch seed.IntN(12) {
+	switch seed.IntN(13) {
 	case 0:
 		return Op{Kind: OpUpdate, Cypher: tmplSetTag, Params: map[string]any{"name": name, "tag": fmt.Sprintf("t%d", seed.IntN(1000))}}
 	case 1:
@@ -97,6 +97,8 @@ func (w SchemaMutationWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 		return w.opMergePairPattern(seed)
 	case 10:
 		return w.opMergeParamMap(seed)
+	case 11:
+		return w.opMergePairSetAll(seed)
 	default:
 		// SET n = $props REPLACES the property set — it must carry name (the key)
 		// and age so the node stays matchable and the durability probe keeps working.
@@ -181,6 +183,13 @@ func (o *GraphOracle) removeLabel(id uint64, label string) {
 // REMOVE / SET-label / SET-map mutation round-trips and survives WAL + snapshot
 // recovery. It reads the shared oracle's own NodeState, so it needs no second
 // model.
+//
+// It also runs [CheckMergePairRelProps], so the whole-entity relationship write
+// of the MERGE-surface family (rmp #2510) is verified at every one of this
+// check's call sites — periodically, immediately after every crash/recovery, and
+// once at the end — rather than needing its own schedule. The PAIRED endpoints
+// are deliberately absent from the name index this function's Person loop walks,
+// so the two probes cover disjoint state.
 func CheckSchemaMutation(tick int64, oracle *GraphOracle, engine *EngineAdapter) []Violation {
 	ctx := context.Background()
 	var vs []Violation
@@ -234,7 +243,7 @@ func CheckSchemaMutation(tick int64, oracle *GraphOracle, engine *EngineAdapter)
 				Message: fmt.Sprintf("Person{name:%q} :Vip membership: engine=%d, want=%d (SET/REMOVE label did not round-trip)", name, vipGot, want)})
 		}
 	}
-	return vs
+	return append(vs, CheckMergePairRelProps(tick, oracle, engine)...)
 }
 
 // schemaMutationWorkload mixes HonestWriter (which creates/links/deletes Persons,
