@@ -513,6 +513,17 @@ func (o *GraphOracle) ApplyMerge(cypher string, params map[string]any) OracleRes
 	if cypher == tmplMergeKnowsN {
 		return o.recordOp(cypher, params, o.applyMergeKnowsN(params))
 	}
+	// The MERGE-surface families (rmp #2461) each have a dedicated helper: a node
+	// MERGE with both action branches, the whole-map ON CREATE assignment, and
+	// the whole-pattern MERGE that creates both endpoints and the relationship.
+	switch cypher {
+	case tmplMergePersonCounter:
+		return o.recordOp(cypher, params, o.applyMergePersonCounter(params))
+	case tmplMergePersonSetAll:
+		return o.recordOp(cypher, params, o.applyMergePersonSetAll(params))
+	case tmplMergePairPattern:
+		return o.recordOp(cypher, params, o.applyMergePairPattern(params))
+	}
 	if cypher != tmplMergePerson {
 		return o.recordOp(cypher, params, OracleResult{ErrorMsg: "oracle: unmodelled MERGE"})
 	}

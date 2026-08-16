@@ -282,10 +282,16 @@ func toExprParams(params map[string]any) (map[string]expr.Value, error) {
 // singleton), a homogeneous-or-mixed list ([]any of supported kinds → an
 // expr.ListValue), and a string-keyed map (map[string]any → an expr.MapValue),
 // so scenarios can bind list-, null-, and map-valued parameters. A map parameter
-// is what `SET n = $map`, `SET n += $map`, and `MERGE (n $map)` consume to set a
-// SET of scalar properties — openCypher does not permit a map as a single
+// is what `SET n = $map`, `SET n += $map`, and `CREATE (n $map)` consume to set
+// a SET of scalar properties — openCypher does not permit a map as a single
 // property value, so the map's elements are themselves restricted to the scalar
 // and list kinds above.
+//
+// A map parameter as a whole MERGE node pattern (`MERGE (n $map)`) is a
+// different matter: the engine REJECTS it at compile time, as the openCypher
+// TCK requires (cypher/tck/features/clauses/merge/Merge1.feature scenario
+// [16]), and the simulator drives that rejection deliberately as an
+// [OpMalformed] op — see [tmplMergeParamMap] and [checkMergeRejection].
 //
 // # Temporal binding
 //

@@ -25,8 +25,13 @@ const (
 
 // schemaMutationProps are the scalar property keys the checker projects and
 // verifies on each Person, in a fixed order. name is the key and is verified
-// implicitly by the probe matching on it; age/tag/score are the mutable scalars.
-var schemaMutationProps = []string{"age", "tag", "score"}
+// implicitly by the probe matching on it; age/tag/score are the mutable
+// scalars. Since rmp #2461 the list also carries mc, the hit counter the
+// two-branch node MERGE ([tmplMergePersonCounter]) maintains: projecting it on
+// every probe is what makes the ON CREATE/ON MATCH counter value round-trip
+// continuously — and, because the probe re-runs immediately after every
+// crash/recovery, survive the WAL and the snapshot.
+var schemaMutationProps = []string{"age", "tag", "score", "mc"}
 
 // SchemaMutationWriter mutates the labels and properties of existing Person
 // nodes: it removes a property (REMOVE n.tag), removes a label (REMOVE n:Vip),
@@ -35,11 +40,20 @@ var schemaMutationProps = []string{"age", "tag", "score"}
 // the FOREACH write path with two genuinely different bodies: a per-element
 // CREATE over a bound list ([tmplForeachCreatePersons] — the one op family
 // through which this writer creates nodes) and a per-element SET on an outer
-// MATCH variable ([tmplForeachSetTag]). Apart from the FOREACH create arm it
-// never creates or deletes a node (the co-actor HonestWriter keeps the
-// population churning), and every op targets a name the oracle already models,
-// so it never emits a statement the engine would reject on well-formedness
-// grounds.
+// MATCH variable ([tmplForeachSetTag]).
+//
+// Since rmp #2461 it additionally drives the four MERGE families the DST did
+// not reach: a node MERGE with BOTH action branches
+// ([tmplMergePersonCounter]), the whole-map ON CREATE assignment
+// ([tmplMergePersonSetAll]), a whole-pattern MERGE that creates both endpoints
+// and the relationship together ([tmplMergePairPattern]), and the
+// map-parameter MERGE the engine must REJECT ([tmplMergeParamMap]). The first
+// three create nodes, so the writer is no longer create-free; the last is the
+// one statement it emits deliberately expecting an engine error, and it is
+// modelled as an [OpMalformed] no-op for exactly that reason. Every other op
+// targets a name the oracle already models, so it emits nothing the engine
+// would reject on well-formedness grounds. The co-actor HonestWriter keeps the
+// population churning and is still the only actor that deletes.
 //
 // # Concurrency contract
 //
@@ -59,7 +73,7 @@ func (w SchemaMutationWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 		return HonestWriter{}.opCreatePerson(seed)
 	}
 	name := names[seed.IntN(len(names))]
-	switch seed.IntN(8) {
+	switch seed.IntN(12) {
 	case 0:
 		return Op{Kind: OpUpdate, Cypher: tmplSetTag, Params: map[string]any{"name": name, "tag": fmt.Sprintf("t%d", seed.IntN(1000))}}
 	case 1:
@@ -75,6 +89,14 @@ func (w SchemaMutationWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 		return w.opForeachCreate(seed)
 	case 6:
 		return w.opForeachSetTag(seed, names)
+	case 7:
+		return w.opMergeCounter(seed, names)
+	case 8:
+		return w.opMergeSetAll(seed, names)
+	case 9:
+		return w.opMergePairPattern(seed)
+	case 10:
+		return w.opMergeParamMap(seed)
 	default:
 		// SET n = $props REPLACES the property set — it must carry name (the key)
 		// and age so the node stays matchable and the durability probe keeps working.
@@ -233,15 +255,20 @@ const schemaMutationCheckEvery = 60
 // DST: the workload exercises REMOVE property, REMOVE label, SET label,
 // SET n += $map, and SET n = $map on Person nodes — plus, since rmp #2454, the
 // FOREACH write path (per-element CREATE over a bound list and per-element SET
-// on an outer variable, each modelled by the oracle as its expansion) — and
+// on an outer variable, each modelled by the oracle as its expansion), and
+// since rmp #2461 the four MERGE families the DST did not previously reach (a
+// node MERGE with both action branches, ON CREATE SET n = $map, a whole-pattern
+// MERGE, and the map-parameter MERGE the engine must reject) — and
 // [CheckSchemaMutation] confirms each mutation round-trips and — with
-// crash+checkpoint injected — survives both WAL and snapshot recovery. A
-// terminal gate ([checkForeachNonVacuity]) proves the FOREACH templates were
-// actually issued and exercised through recovery. It is bit-reproducible.
+// crash+checkpoint injected — survives both WAL and snapshot recovery. Two
+// terminal gates ([checkForeachNonVacuity] and [checkMergeSurfaceNonVacuity])
+// prove the added templates were actually issued, that each of their branches
+// and sub-cases fired, and that the state they wrote was exercised through
+// recovery. It is bit-reproducible.
 func schemaMutationScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioSchemaMutation,
-		Description: "schema mutation: REMOVE prop/label, SET label, SET n += $map, SET n = $map, FOREACH create/set expansion + multi-label match; survives crash/recovery",
+		Description: "schema mutation: REMOVE prop/label, SET label, SET n += $map, SET n = $map, FOREACH create/set expansion, MERGE surface (both action branches, ON CREATE SET n = $map, whole-pattern, rejected map param) + multi-label match; survives crash/recovery",
 		Mode:        ModeDeterministic,
 		DefaultSeed: 0x5C4E3A17,
 		MaxTicks:    500,
@@ -275,6 +302,7 @@ func runSchemaMutationCfg(ctx context.Context, cfg Config) (*SimReport, error) {
 	defer func() { _ = sm.Close() }()
 
 	foreach := newForeachStats()
+	merges := newMergeSurfaceStats()
 	var lastTick int64
 	var lastOp Op
 	for i := 0; i < cfg.MaxTicks; i++ {
@@ -294,6 +322,7 @@ func runSchemaMutationCfg(ctx context.Context, cfg Config) (*SimReport, error) {
 		}
 		if sm.crashCount > crashesBefore {
 			foreach.noteRecovery(sm.oracle)
+			merges.noteRecovery(sm.oracle)
 			if v := CheckSchemaMutation(tick, sm.oracle, sm.engine); len(v) > 0 {
 				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery schema-mutation>"}, v), nil
 			}
@@ -303,9 +332,18 @@ func runSchemaMutationCfg(ctx context.Context, cfg Config) (*SimReport, error) {
 		op := actor.NextOp(sm.seed, sm.oracle)
 		committed, counters := sm.executeCounted(ctx, op)
 		foreach.noteOp(op, committed)
+		// Both stats records read the PRE-apply model, so they must be updated
+		// before applyToOracle advances it (rmp #2454, #2461).
+		merges.noteOp(op, committed, sm.oracle)
+		// The map-parameter MERGE must be rejected by the engine, never applied
+		// (rmp #2461); an acceptance is a deviation on the tick that caused it.
+		if v := checkMergeRejection(tick, op, committed); len(v) > 0 {
+			return sm.report(tick, op, v), nil
+		}
 		// Per-op counters oracle (#2448): every committed mutation's effect report
-		// (SET/REMOVE property, SET/REMOVE label, SET-map, FOREACH expansion) must
-		// match the effect the oracle predicts, adjudicated on the pre-apply model.
+		// (SET/REMOVE property, SET/REMOVE label, SET-map, FOREACH expansion, and
+		// since #2461 each MERGE family's create-vs-match adjudication) must match
+		// the effect the oracle predicts, adjudicated on the pre-apply model.
 		if v := CheckOpCounters(tick, op, committed, counters, sm.oracle); len(v) > 0 {
 			return sm.report(tick, op, v), nil
 		}
@@ -326,10 +364,15 @@ func runSchemaMutationCfg(ctx context.Context, cfg Config) (*SimReport, error) {
 	if v := CheckSchemaMutation(lastTick, sm.oracle, sm.engine); len(v) > 0 {
 		return sm.report(lastTick, lastOp, v), nil
 	}
-	// Assert-something-was-seen (rmp #2454): both FOREACH templates were issued
-	// and FOREACH-written state was exercised through crash/recovery.
-	if v := checkForeachNonVacuity(lastTick, foreach); len(v) > 0 {
-		return sm.report(lastTick, lastOp, v), nil
+	// Assert-something-was-seen (rmp #2454, #2461): both FOREACH templates and
+	// all four MERGE families were issued, each family's branches and sub-cases
+	// actually fired, and the state they wrote was exercised through
+	// crash/recovery. The two gates are evaluated together and their violations
+	// concatenated, so neither can mask the other.
+	terminal := checkForeachNonVacuity(lastTick, foreach)
+	terminal = append(terminal, checkMergeSurfaceNonVacuity(lastTick, merges)...)
+	if len(terminal) > 0 {
+		return sm.report(lastTick, lastOp, terminal), nil
 	}
 	return nil, nil
 }

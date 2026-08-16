@@ -257,6 +257,12 @@ func expectedOpCounters(op Op, oracle *GraphOracle) (want exec.QueryCounters, ok
 		// has its own helper.
 		return expectedCopyKnowsCounters(op, oracle)
 
+	case tmplMergePersonCounter, tmplMergePersonSetAll, tmplMergePairPattern:
+		// The MERGE-surface templates (rmp #2461) — two-branch node MERGE,
+		// whole-map ON CREATE assignment, and whole-pattern MERGE — are derived
+		// by a dedicated helper from the pre-apply model.
+		return expectedMergeSurfaceCounters(op, oracle)
+
 	case tmplForeachCreatePersons, tmplForeachSetTag:
 		// The FOREACH write-path templates (rmp #2454) are derived by a
 		// dedicated helper from the statement's list length and the pre-apply
