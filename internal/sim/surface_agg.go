@@ -196,8 +196,10 @@ func CheckCypherSurfaceGrouped(tick int64, oracle *GraphOracle, engine *EngineAd
 	return vs
 }
 
-// groupedRow is one engine row of a (string key, integer aggregate) grouped
-// query, in result order.
+// groupedRow is one engine row of a (string, integer) two-column query, in
+// result order: the grouping key and its integer aggregate for the grouped
+// probes here, and the (name, sort key) pair the ordering probes compare in
+// sequence (rmp #2460).
 type groupedRow struct {
 	Key string
 	Val int64
@@ -439,24 +441,10 @@ func floatClose(got, want float64) bool {
 // collectStringRows drains a one-string-column query, preserving result order
 // and failing loudly on a non-string cell (the callers' projections are
 // name-valued by construction, so a null or non-string row is a defect, not a
-// row to skip).
+// row to skip). It is the unparameterised spelling of
+// [collectStringRowsParams].
 func collectStringRows(ctx context.Context, engine *EngineAdapter, query string) ([]string, error) {
-	res, err := engine.Run(ctx, query, nil)
-	if err != nil {
-		return nil, err
-	}
-	var out []string
-	for res.Next() {
-		s, ok := res.StringAt(0)
-		if !ok {
-			_ = res.Close()
-			return nil, fmt.Errorf("row %d is not a string", len(out))
-		}
-		out = append(out, s)
-	}
-	derr := res.Err()
-	_ = res.Close()
-	return out, derr
+	return collectStringRowsParams(ctx, engine, query, nil)
 }
 
 // surfaceScalar runs a single-row integer query and returns its first column.

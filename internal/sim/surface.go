@@ -12,16 +12,21 @@ import (
 // procedure probes ([CheckCypherSurfaceExtended]), the grouped-aggregation /
 // DISTINCT-row / UNION-over-data probes ([CheckCypherSurfaceGrouped]), the
 // entity-valued function and path-materialisation probes
-// ([CheckCypherSurfaceEntity]), the graph-independent expression battery
-// ([CheckExprLiterals]), and the non-deterministic function invariants
-// ([CheckNonDeterministicFuncs]). It is the single entry point the scenario
-// calls periodically, after each crash/recovery, and at the end.
-func checkSurfaceAll(tick int64, oracle *GraphOracle, engine *EngineAdapter) []Violation {
+// ([CheckCypherSurfaceEntity]), the ordering / pagination / multi-part
+// structure probes ([CheckCypherSurfaceOrdering]), the graph-independent
+// expression battery ([CheckExprLiterals]), and the non-deterministic function
+// invariants ([CheckNonDeterministicFuncs]). It is the single entry point the
+// scenario calls periodically, after each crash/recovery, and at the end.
+//
+// ord accumulates the ordering probes' run-level observations for the terminal
+// non-vacuity gate ([checkOrderingNonVacuity]); it may be nil.
+func checkSurfaceAll(tick int64, oracle *GraphOracle, engine *EngineAdapter, ord *OrderingStats) []Violation {
 	vs := make([]Violation, 0, 8)
 	vs = append(vs, CheckCypherSurface(tick, oracle, engine)...)
 	vs = append(vs, CheckCypherSurfaceExtended(tick, oracle, engine)...)
 	vs = append(vs, CheckCypherSurfaceGrouped(tick, oracle, engine)...)
 	vs = append(vs, CheckCypherSurfaceEntity(tick, oracle, engine)...)
+	vs = append(vs, CheckCypherSurfaceOrdering(tick, oracle, engine, ord)...)
 	vs = append(vs, CheckExprLiterals(tick, engine)...)
 	vs = append(vs, CheckNonDeterministicFuncs(tick, engine)...)
 	return vs
@@ -416,6 +421,7 @@ func runCypherSurface(ctx context.Context, seed uint64) (*SimReport, error) {
 	}
 	defer func() { _ = sm.Close() }()
 
+	ord := newOrderingStats()
 	var lastTick int64
 	var lastOp Op
 	for i := 0; i < cfg.MaxTicks; i++ {
@@ -431,7 +437,7 @@ func runCypherSurface(ctx context.Context, seed uint64) (*SimReport, error) {
 			return report, nil
 		}
 		if sm.crashCount > crashesBefore {
-			if v := checkSurfaceAll(tick, sm.oracle, sm.engine); len(v) > 0 {
+			if v := checkSurfaceAll(tick, sm.oracle, sm.engine, ord); len(v) > 0 {
 				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery surface>"}, v), nil
 			}
 		}
@@ -448,15 +454,18 @@ func runCypherSurface(ctx context.Context, seed uint64) (*SimReport, error) {
 			}
 		}
 		if tick%cypherSurfaceCheckEvery == 0 {
-			if v := checkSurfaceAll(tick, sm.oracle, sm.engine); len(v) > 0 {
+			if v := checkSurfaceAll(tick, sm.oracle, sm.engine, ord); len(v) > 0 {
 				return sm.report(tick, op, v), nil
 			}
 		}
 	}
-	if v := checkSurfaceAll(lastTick, sm.oracle, sm.engine); len(v) > 0 {
+	if v := checkSurfaceAll(lastTick, sm.oracle, sm.engine, ord); len(v) > 0 {
 		return sm.report(lastTick, lastOp, v), nil
 	}
 	if v := checkSurfaceNonVacuity(lastTick, sm.oracle); len(v) > 0 {
+		return sm.report(lastTick, lastOp, v), nil
+	}
+	if v := checkOrderingNonVacuity(lastTick, ord); len(v) > 0 {
 		return sm.report(lastTick, lastOp, v), nil
 	}
 	return nil, nil

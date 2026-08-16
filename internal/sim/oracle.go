@@ -668,6 +668,70 @@ func (o *GraphOracle) personNamesSorted() []string {
 	return names
 }
 
+// personOrderRow is one modelled Person as the ordering probes read it: the
+// name and the integer age, the two keys every ordering probe sorts on
+// (rmp #2460).
+type personOrderRow struct {
+	Name string
+	Age  int64
+}
+
+// personOrderRows returns one row per modelled Person, ascending by name — the
+// independent reference the ordering probes sort with their own comparators
+// ([expectedOrdering]).
+//
+// complete reports whether the rows define a TOTAL order: every modelled Person
+// must carry both a string name and an integer age, and the names must be
+// distinct. When it is false the expected row SEQUENCE would be ambiguous — two
+// rows equal on both keys may legitimately come back either way round — so the
+// caller must skip the ordering probes rather than compare against a reference
+// that cannot be right. The surface workload always binds both properties and
+// numbers its names, so this is a guard, not an expectation.
+func (o *GraphOracle) personOrderRows() (rows []personOrderRow, complete bool) {
+	complete = true
+	seen := make(map[string]bool, len(o.nodes))
+	for _, n := range o.nodes {
+		if !hasLabel(n, "Person") {
+			continue
+		}
+		name, okName := n.Properties["name"].(string)
+		age, okAge := n.Properties["age"].(int64)
+		if !okName || !okAge || seen[name] {
+			complete = false
+			continue
+		}
+		seen[name] = true
+		rows = append(rows, personOrderRow{Name: name, Age: age})
+	}
+	slices.SortFunc(rows, func(a, b personOrderRow) int { return cmp.Compare(a.Name, b.Name) })
+	return rows, complete
+}
+
+// knowsOutDegreeByName returns, per modelled Person name, how many outgoing
+// KNOWS edges that Person has to a node the oracle still models — the
+// independent reference for the "top-k then expand" probe, which expands from
+// exactly the Persons the ordering puts in the top k (rmp #2460). A Person with
+// no outgoing KNOWS edge is absent from the map, which reads as zero.
+func (o *GraphOracle) knowsOutDegreeByName() map[string]int64 {
+	out := make(map[string]int64)
+	for k := range o.edges {
+		if k.label != "KNOWS" {
+			continue
+		}
+		src, ok := o.nodes[k.src]
+		if !ok || !hasLabel(src, "Person") {
+			continue
+		}
+		if _, ok := o.nodes[k.dst]; !ok {
+			continue
+		}
+		if nm, ok := src.Properties["name"].(string); ok {
+			out[nm]++
+		}
+	}
+	return out
+}
+
 // personsWithOutgoingKnows returns how many Person nodes have at least one
 // outgoing KNOWS edge — the independent reference for the EXISTS { (n)-[:KNOWS]->() }
 // subquery count in the Cypher-surface battery.
