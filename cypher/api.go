@@ -2403,6 +2403,19 @@ func (e *Engine) buildReadPhysical(
 	// result list — the same bound collect() enforces (#1294, #1298).
 	patEval := newPatternEvaluator(rv, e.maxCollectItems)
 	bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx, maxCollectItems: e.maxCollectItems}
+	// Hand the subquery evaluator this query's parameters and build options so an
+	// inner plan is compiled in a scope that can resolve them (rmp #2507). It has
+	// to happen HERE rather than at construction because bopts holds subEval, so
+	// neither can be built with the other already in hand. Every field the child
+	// reads is set above this line; nothing assigned below it is carried (see
+	// [buildOpts.forSubquery]).
+	subEval.bind(params, bopts)
+	// The pattern evaluator needs the same parameters, for the same reason: it
+	// matches an inline property map itself instead of through a planned Filter,
+	// and a string literal inside a WHERE arrives there as a hoisted parameter. It
+	// also needs the subquery evaluator, so an EXISTS { … } inside a pattern
+	// comprehension is evaluated rather than answered false (rmp #2507).
+	patEval.bind(params, subEval)
 	bopts.profiler = prof
 	// Point the build at this plan's cross-execution analysis memo (rmp #2383).
 	// entry is nil on no read path today, but the guard keeps the coupling
@@ -10080,6 +10093,72 @@ func (b *buildOpts) forWorker() *buildOpts {
 	cp.vleRelMeta = nil
 	cp.expandTripletSeq = nil
 	return &cp
+}
+
+// forSubquery returns the buildOpts an EXISTS { … } / COUNT { … } inner plan must
+// be built with (rmp #2507).
+//
+// # Why the inner plan needs one at all
+//
+// It used to be built with a nil bopts, and four things the inner predicate needs
+// were therefore absent. Two were silent wrong answers and two were hard failures:
+//
+//   - edgeVarMeta was never populated, so an inner relationship variable stayed a
+//     raw IntegerValue in the RowContext. `WHERE r.since = 2020` read a property
+//     off an integer and yielded NULL, and `type(r)` failed outright with
+//     "got Integer, want Relationship".
+//   - subEval was nil, so a subquery NESTED inside a subquery had no evaluator.
+//     EXISTS answered false and COUNT answered 0 rather than reporting anything.
+//   - patEval was nil, so a pattern predicate in the inner WHERE failed the whole
+//     query with "no PatternEvaluator wired".
+//   - queryCtx was nil, so a nested drive would fall back to context.Background()
+//     and outlive the cancellation of the query that started it.
+//
+// # Why the outer one cannot simply be passed through
+//
+// A subquery is a NEW SCOPE with its OWN row layout: its seed Row holds the
+// correlation variables, and the inner build assigns columns from there. Every
+// column-indexed field on this struct (edgeVarMeta, pathVarMeta, pathVarChain,
+// vleRelMeta, expandTripletSeq, and the scalar-column sets) is keyed to the OUTER
+// layout, so carrying it would have the inner RowContext reconstruct entities from
+// the wrong slots. pendingPathPred is worse than useless: it is keyed by path
+// variable NAME, so an inner shortestPath() binding a path variable the outer plan
+// also named would consume the OUTER clause's pending predicate.
+//
+// # What it carries, and what it deliberately does not
+//
+// Only the three scope-independent services above. Everything else is left at its
+// zero value, which is exactly the state the inner build saw before this existed —
+// so this fix cannot change the shape of any inner plan, only what its predicates
+// can see. Four omissions are load-bearing rather than incidental:
+//
+//   - THE PARALLEL FIELDS (parallelGov, parallelScanEnabled,
+//     parallelScanThreshold) stay zero, so no morsel-parallel leaf can be built
+//     inside a subquery. That is a safety requirement, not a performance choice:
+//     subEval and patEval are documented NOT safe for concurrent use, and this
+//     child hands both to operators built beneath it. rmp #2257 is what a worker
+//     goroutine reaching one of them costs — a process-fatal concurrent map write.
+//   - THE PROFILER stays nil, so PROFILE output is unchanged by this fix.
+//   - scalarUseMemo stays nil. It is a pointer into the SHARED plan-cache entry,
+//     and the inner AST is re-derived per run, so memoising against it would grow
+//     without bound across executions.
+//   - THE PLAN-SHAPE GATES stay false. They key on *ir node pointers from the
+//     outer plan (reorderSwap, seekHint, anchorSwap) or would substitute access
+//     paths the inner plan has never been measured on.
+//
+// The allowlist is written out field by field on purpose. A copy-then-clear like
+// [buildOpts.forWorker] fails OPEN — a future field that is row-indexed would leak
+// into the inner scope silently — whereas an allowlist fails CLOSED: a future
+// service field is merely absent, which is the behaviour this path already had.
+func (b *buildOpts) forSubquery() *buildOpts {
+	if b == nil {
+		return &buildOpts{}
+	}
+	return &buildOpts{
+		subEval:  b.subEval,
+		patEval:  b.patEval,
+		queryCtx: b.queryCtx,
+	}
 }
 
 // tryBuildParallelCountScan returns a [exec.ParallelCountScan] and true when p

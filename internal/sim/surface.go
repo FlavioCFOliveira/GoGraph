@@ -274,6 +274,16 @@ func CheckCypherSurfaceExtended(tick int64, oracle *GraphOracle, engine *EngineA
 	scalar("EXISTS subquery", "MATCH (n:Person) WHERE EXISTS { (n)-[:KNOWS]->() } RETURN count(n)", pwok)
 	scalar("COUNT subquery sum", "MATCH (n:Person) RETURN sum(COUNT { (n)-[:KNOWS]->() })", knows)
 	scalar("pattern comprehension", "MATCH (a:Person) RETURN sum(size([(a)-[:KNOWS]->(b) | b]))", knows)
+	// CY13b — the same subqueries with an inner FILTER, in PROJECTION position
+	// (rmp #2507). The three probes above are UNFILTERED and stay exactly as they
+	// are: they were correct throughout the defect, which is precisely why the
+	// battery could not see it. A filtered inner pattern is refused by both
+	// adjacency fast paths (#2232, #2235) and falls through to a compiled inner
+	// plan, and that plan was built with no parameters, no relationship metadata
+	// and no nested evaluators — so a property predicate matched nothing, a
+	// relationship variable was not a relationship, and a nested subquery
+	// answered zero.
+	checkFilteredSubqueries(oracle, scalar)
 
 	// CY8 — ORDER BY … SKIP … LIMIT pagination against the sorted name slice.
 	const skipK, limitM = 3, 5
@@ -483,4 +493,94 @@ func checkSurfaceNonVacuity(tick int64, oracle *GraphOracle) []Violation {
 			Message: "terminal graph has no KNOWS target: the DISTINCT-row probes never saw a row"})
 	}
 	return vs
+}
+
+// checkFilteredSubqueries drives the FILTERED EXISTS { … } / COUNT { … } shapes
+// in PROJECTION position and verifies each against a value the oracle computed
+// from its own model (rmp #2507).
+//
+// # Why the unfiltered probes could not have found this
+//
+// Both adjacency fast paths — the degree rewrite (#2232) and the labelled single
+// hop (#2235) — REFUSE a pattern node that carries a property, so an unfiltered
+// subquery is answered from the adjacency and never builds an inner plan at all.
+// It was the inner plan that was mis-built. Filtering the pattern is what routes
+// the probe onto the repaired path, so these probes and the unfiltered ones
+// exercise different code and both must stay.
+//
+// # Why each probe cannot pass vacuously
+//
+// TargetName is chosen from the KNOWS TARGETS, so ToNamed is at least 1 whenever
+// the model is Usable; and when it is not Usable every expectation would be 0 and
+// the whole block is skipped rather than recorded as a pass. The age floor is the
+// MEDIAN modelled age, so both the matching and the non-matching side of the
+// predicate are populated whenever the ages have any spread — an inner filter
+// that had stopped filtering would answer PersonToPerson and be caught.
+//
+// It reports through scalar — the caller's probe helper — rather than returning
+// violations of its own, so a deviation here is recorded with exactly the same
+// Violation shape, tick and engine handle as every other surface probe.
+func checkFilteredSubqueries(oracle *GraphOracle, scalar func(label, query string, want int64)) {
+	ages := oracle.personAges() // ascending
+	if len(ages) == 0 {
+		return
+	}
+	st := oracle.subqueryFilterStats(ages[len(ages)/2])
+	if !st.Usable {
+		// No Person→Person KNOWS edge: every probe would be 0 == 0. Skipping is
+		// the honest response; the terminal non-vacuity check already reports a
+		// run whose graph never held a KNOWS target.
+		return
+	}
+	name := quoteCypherString(st.TargetName)
+
+	// The reported spelling: an INLINE property map on the far node, in a RETURN
+	// projection. This is the exact query #2507 was filed against.
+	scalar("COUNT subquery inline filter",
+		fmt.Sprintf("MATCH (n:Person) RETURN sum(COUNT { MATCH (n)-[:KNOWS]->(:Person {name:%s}) })", name),
+		st.ToNamed)
+	// The same predicate written as an inner WHERE, which the planner lowers
+	// differently.
+	scalar("COUNT subquery WHERE filter",
+		fmt.Sprintf("MATCH (n:Person) RETURN sum(COUNT { MATCH (n)-[:KNOWS]->(m:Person) WHERE m.name = %s })", name),
+		st.ToNamed)
+	// A NUMERIC inner filter. Numbers are never hoisted onto an auto-parameter by
+	// parser.StripLiterals, so this probe is the control for the parameter half of
+	// the fix: it isolates everything else about the inner plan.
+	scalar("COUNT subquery numeric filter",
+		fmt.Sprintf("MATCH (n:Person) RETURN sum(COUNT { MATCH (n)-[:KNOWS]->(m:Person) WHERE m.age >= %d })", st.AgeFloor),
+		st.ToAgeAtLeast)
+	// EXISTS in PROJECTION position: bound to a WITH alias and then filtered, so
+	// the boolean the projection produced decides row survival and the probe reads
+	// as an exact count.
+	scalar("EXISTS subquery projected filter",
+		fmt.Sprintf("MATCH (n:Person) WITH n, EXISTS { MATCH (n)-[:KNOWS]->(m:Person) WHERE m.age >= %d } AS hit WHERE hit RETURN count(n)", st.AgeFloor),
+		st.SrcWithAgeAtLeast)
+	// A RELATIONSHIP variable read inside the subquery. Before the fix the inner
+	// plan carried no edge metadata, so `r` reached the predicate as a raw integer
+	// and type(r) failed the query outright rather than answering wrongly.
+	scalar("COUNT subquery relationship variable",
+		"MATCH (n:Person) RETURN sum(COUNT { MATCH (n)-[r:KNOWS]->(:Person) WHERE type(r) = 'KNOWS' })",
+		st.PersonToPerson)
+	// A NESTED subquery: the inner plan needs its own subquery evaluator, which it
+	// did not have. The inner EXISTS is unfiltered on purpose — the discrimination
+	// here is the nesting, not the predicate.
+	scalar("nested subquery",
+		fmt.Sprintf("MATCH (n:Person) RETURN sum(COUNT { MATCH (n)-[:KNOWS]->(m:Person) WHERE m.name = %s AND EXISTS { MATCH (m) } })", name),
+		st.ToNamed)
+	// A pattern PREDICATE carrying an inline string property, which the pattern
+	// evaluator matches itself rather than through a planned Filter — the second
+	// site of the same parameter defect.
+	scalar("pattern predicate inline filter",
+		fmt.Sprintf("MATCH (n:Person) WHERE (n)-[:KNOWS]->(:Person {name:%s}) RETURN count(n)", name),
+		st.SrcToNamed)
+}
+
+// quoteCypherString renders s as a single-quoted Cypher string literal, escaping
+// the backslash first and then the quote so an already-escaped backslash is not
+// re-escaped. The surface workload's names are plain identifiers, but the probe
+// interpolates a value read from the model and must not be able to produce an
+// unparseable query if that ever changes.
+func quoteCypherString(s string) string {
+	return "'" + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `'`, `\'`) + "'"
 }

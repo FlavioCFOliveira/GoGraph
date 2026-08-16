@@ -759,6 +759,106 @@ func (o *GraphOracle) knowsTargetNamesDistinct() []string {
 	return out
 }
 
+// subqueryFilterStats is the oracle's independent reference for the FILTERED
+// EXISTS { … } / COUNT { … } probes in the Cypher-surface battery (rmp #2507).
+//
+// The battery already drove the UNFILTERED spellings, and they were correct
+// throughout the defect: a subquery whose inner pattern carried a property
+// predicate returned a wrong value while the same subquery without one did not.
+// Adding a filtered probe is what makes the battery able to see that class at
+// all, and every field here is computed by walking the modelled graph so the
+// probe verifies a VALUE rather than merely that the query did not crash.
+type subqueryFilterStats struct {
+	// TargetName is the name of a Person that at least one other modelled Person
+	// KNOWS. It is chosen as the smallest such name so the probe is deterministic,
+	// and it is chosen from the TARGETS specifically so ToNamed is never zero — a
+	// probe expecting zero would pass on an engine that had stopped matching.
+	TargetName string
+	// PersonToPerson is the number of KNOWS edges whose endpoints are both
+	// modelled Persons.
+	PersonToPerson int64
+	// ToNamed is the number of KNOWS edges from a Person to the Person named
+	// TargetName. At least 1 whenever Usable.
+	ToNamed int64
+	// SrcToNamed is the number of DISTINCT Persons with at least one KNOWS edge to
+	// the Person named TargetName. It differs from ToNamed when the graph holds
+	// parallel edges, and it is what a pattern PREDICATE counts: the predicate asks
+	// whether a match exists, so each source row is counted once however many
+	// qualifying edges it has.
+	SrcToNamed int64
+	// ToAgeAtLeast is the number of KNOWS edges from a Person to a Person whose
+	// integer age is >= AgeFloor.
+	ToAgeAtLeast int64
+	// SrcWithAgeAtLeast is the number of Persons with at least one outgoing KNOWS
+	// to a Person whose integer age is >= AgeFloor.
+	SrcWithAgeAtLeast int64
+	// AgeFloor is the threshold the two age fields were computed against.
+	AgeFloor int64
+	// Usable reports whether the model holds at least one Person→Person KNOWS
+	// edge. When false every probe below would compare 0 against 0, which cannot
+	// fail, so the caller must SKIP them rather than record a vacuous pass.
+	Usable bool
+}
+
+// subqueryFilterStats computes [subqueryFilterStats] against ageFloor by walking
+// the modelled nodes and edges. It is deliberately independent of the engine: it
+// reads only the oracle's own model.
+func (o *GraphOracle) subqueryFilterStats(ageFloor int64) subqueryFilterStats {
+	st := subqueryFilterStats{AgeFloor: ageFloor}
+
+	// Pass 1: the Person→Person KNOWS edges, and the candidate target names.
+	type pair struct{ src, dst uint64 }
+	var links []pair
+	targets := make(map[string]bool)
+	for k := range o.edges {
+		if k.label != "KNOWS" {
+			continue
+		}
+		src, ok := o.nodes[k.src]
+		if !ok || !hasLabel(src, "Person") {
+			continue
+		}
+		dst, ok := o.nodes[k.dst]
+		if !ok || !hasLabel(dst, "Person") {
+			continue
+		}
+		links = append(links, pair{k.src, k.dst})
+		if nm, ok := dst.Properties["name"].(string); ok {
+			targets[nm] = true
+		}
+	}
+	if len(links) == 0 || len(targets) == 0 {
+		return st
+	}
+	st.PersonToPerson = int64(len(links))
+
+	names := make([]string, 0, len(targets))
+	for nm := range targets {
+		names = append(names, nm)
+	}
+	slices.Sort(names)
+	st.TargetName = names[0]
+
+	// Pass 2: the filtered counts.
+	srcsWithOld := make(map[uint64]bool)
+	srcsToNamed := make(map[uint64]bool)
+	for _, l := range links {
+		dst := o.nodes[l.dst]
+		if nm, ok := dst.Properties["name"].(string); ok && nm == st.TargetName {
+			st.ToNamed++
+			srcsToNamed[l.src] = true
+		}
+		if age, ok := dst.Properties["age"].(int64); ok && age >= ageFloor {
+			st.ToAgeAtLeast++
+			srcsWithOld[l.src] = true
+		}
+	}
+	st.SrcWithAgeAtLeast = int64(len(srcsWithOld))
+	st.SrcToNamed = int64(len(srcsToNamed))
+	st.Usable = true
+	return st
+}
+
 // knowsCount returns how many KNOWS edges the oracle models.
 func (o *GraphOracle) knowsCount() int {
 	c := 0

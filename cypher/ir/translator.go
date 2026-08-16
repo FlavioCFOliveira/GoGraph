@@ -3,6 +3,7 @@ package ir
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 )
@@ -38,6 +39,18 @@ func FromAST(q ast.Query) (LogicalPlan, error) {
 // Concurrency: stateless; safe to call concurrently.
 func TranslateSubquery(q *ast.SingleQuery, outerVars []string, argTag uint32) (LogicalPlan, error) {
 	t := &translator{}
+	// The subquery is a NEW translator, so its anonymous-variable counter would
+	// otherwise restart at zero and mint `__anon_0` for the inner pattern's first
+	// anonymous entity — a name the outer scope may ALREADY have bound and which
+	// therefore arrives in the seed row (rmp #2507).
+	//
+	// The collision is silent and it is a wrong ANSWER, not an error. In
+	// `MATCH (a)-[:KNOWS]->(x) RETURN COUNT { MATCH (x)-[:KNOWS]->(y) WHERE … }`
+	// the outer anonymous relationship is `__anon_0`; the inner one claims the same
+	// name, the inner build binds it over the seeded column, and the subquery
+	// counts zero. Naming the outer relationship — `-[rr:KNOWS]->` — made the same
+	// query answer correctly, which is what identified the cause.
+	t.reserveAnonVars(outerVars)
 	arg := NewArgumentWithTag(outerVars, argTag)
 	plan := LogicalPlan(arg)
 	for _, rc := range q.ReadingClauses {
@@ -89,13 +102,73 @@ type translator struct {
 	anonCounter   int // monotonic counter for synthetic anonymous-node vars
 }
 
+// anonVarPrefix is the reserved prefix [translator.freshAnonVar] gives every
+// synthetic variable it mints. It is not a legal openCypher identifier start, so
+// no user variable can collide with one.
+const anonVarPrefix = "__anon_"
+
 // freshAnonVar returns a unique internal variable name for an anonymous node
 // created in a CREATE clause. The name is prefixed with "__anon_" to avoid
 // collisions with user-visible variable names.
+//
+// Uniqueness holds only WITHIN one translator. A translator that inherits
+// variables from an enclosing scope must call [translator.reserveAnonVars] first.
 func (t *translator) freshAnonVar() string {
 	n := t.anonCounter
 	t.anonCounter++
-	return "__anon_" + strconv.Itoa(n)
+	return anonVarPrefix + strconv.Itoa(n)
+}
+
+// reserveAnonVars advances this translator's anonymous-variable counter past
+// every `__anon_N` name in vars, so no name it goes on to mint can collide with
+// one an enclosing scope already bound (rmp #2507).
+//
+// It is needed because "unique" is a per-translator property: [FromAST] and
+// [TranslateSubquery] each start a counter at zero, and the subquery's seed row
+// carries the outer scope's names into the inner one. Only the ORDINAL is read,
+// so the suffixed forms the match translator mints (`__anon_N_to_x`,
+// `__anon_N_rel_x`, `__anon_N_vle_elem`) reserve their ordinal too — they share
+// the same counter and would collide the same way.
+func (t *translator) reserveAnonVars(vars []string) {
+	for _, v := range vars {
+		n, ok := anonVarOrdinal(v)
+		if !ok {
+			continue
+		}
+		if n >= t.anonCounter {
+			t.anonCounter = n + 1
+		}
+	}
+}
+
+// anonVarOrdinal returns the ordinal N of a name minted by [translator.freshAnonVar],
+// with or without one of the suffixes the match translator appends, and reports
+// false for every other name.
+//
+// The digits must follow the prefix IMMEDIATELY. That is what keeps the physical
+// builder's own synthetic schema keys — `__anon_rel_3`, `__anon_to_4`,
+// `__anon_merge_rel_1` and friends, which are minted against column indices and
+// not against this counter — out of the reservation: none of them has a digit in
+// that position.
+func anonVarOrdinal(name string) (int, bool) {
+	rest, found := strings.CutPrefix(name, anonVarPrefix)
+	if !found {
+		return 0, false
+	}
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(rest[:end])
+	if err != nil {
+		// Unreachable for a name freshAnonVar minted; an ordinal wider than an
+		// int is not one, so leaving the counter alone is the correct response.
+		return 0, false
+	}
+	return n, true
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

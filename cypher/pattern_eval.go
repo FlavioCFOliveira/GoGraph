@@ -58,6 +58,34 @@ type patternEvaluator struct {
 	// (rmp #2235), so the recogniser runs once per pattern rather than once per
 	// outer row. Lazily created: most patterns never reach the recogniser.
 	labelledHop map[*ast.PathPattern]*labelledHopShape
+
+	// params is the enclosing query's fully-resolved parameter map (rmp #2507).
+	//
+	// [patternEvaluator.checkNodePattern] evaluates an inline property map itself
+	// rather than through a planned Filter, and it used to do so with a nil
+	// parameter map. That silently broke the ordinary spelling of a pattern
+	// predicate: [parser.StripLiterals] hoists a string literal inside a WHERE onto
+	// an auto-parameter, so `WHERE (a)-[:KNOWS]->(:Person {name:'B'})` reached this
+	// matcher as `{name: $«auto_1»}`, the reference evaluated to NULL, the equality
+	// was not truthy, and the predicate rejected every row. A numeric literal is
+	// never hoisted, which is why `{age:40}` had always worked and the defect stayed
+	// invisible.
+	params map[string]expr.Value
+
+	// subEval dispatches an EXISTS { … } / COUNT { … } written inside a pattern
+	// comprehension's WHERE or projection (rmp #2507). It was hard-coded nil at
+	// both [expr.EvalWith] call sites in [patternEvaluator.EvalPatternComp], so
+	// such a subquery answered false / 0 instead of being evaluated.
+	subEval expr.SubqueryEvaluator
+}
+
+// bind attaches the enclosing query's parameter map and subquery evaluator. It is
+// a setter rather than a constructor argument so that the several test call sites
+// of [newPatternEvaluator] — which exercise traversal and the element budget, and
+// need neither — stay unchanged.
+func (pe *patternEvaluator) bind(params map[string]expr.Value, subEval expr.SubqueryEvaluator) {
+	pe.params = params
+	pe.subEval = subEval
 }
 
 // newPatternEvaluator constructs the evaluator for one query run. The
@@ -133,7 +161,10 @@ func (pe *patternEvaluator) EvalPatternComp(ctx context.Context, pc *ast.Pattern
 			}
 		}
 		if pc.Predicate != nil {
-			pv, perr := expr.EvalWith(ctx, pc.Predicate, innerRow, params, reg, nil, pe)
+			// pe.subEval, not nil: a comprehension's WHERE may hold an
+			// EXISTS { … } / COUNT { … }, which without an evaluator answered
+			// false / 0 rather than being evaluated at all (rmp #2507).
+			pv, perr := expr.EvalWith(ctx, pc.Predicate, innerRow, params, reg, pe.subEval, pe)
 			if perr != nil {
 				return perr
 			}
@@ -143,7 +174,7 @@ func (pe *patternEvaluator) EvalPatternComp(ctx context.Context, pc *ast.Pattern
 		}
 		var projVal = expr.Null
 		if pc.Projection != nil {
-			v, perr := expr.EvalWith(ctx, pc.Projection, innerRow, params, reg, nil, pe)
+			v, perr := expr.EvalWith(ctx, pc.Projection, innerRow, params, reg, pe.subEval, pe)
 			if perr != nil {
 				return perr
 			}
@@ -981,7 +1012,12 @@ func (pe *patternEvaluator) checkNodePattern(np *ast.NodePattern, nodeID graph.N
 		}
 		rawProps := pe.g.NodeProperties(key)
 		for i, k := range ml.Keys {
-			want, err := expr.Eval(ml.Values[i], expr.RowContext{}, nil, nil)
+			// pe.params, not nil (rmp #2507). The value is very often a PARAMETER
+			// even when the query text spells a literal, because StripLiterals
+			// hoists a string literal inside a WHERE — and a pattern predicate is a
+			// WHERE. Passing nil made every such reference NULL and the whole
+			// predicate reject its row.
+			want, err := expr.Eval(ml.Values[i], expr.RowContext{}, pe.params, nil)
 			if err != nil {
 				return false
 			}
