@@ -54,6 +54,10 @@ var reUUIDv4 = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][
 //     labels a node carries, beyond a count;
 //   - properties(n) per Person vs the oracle's modelled property map, compared
 //     as a key SET plus a per-key canonical value;
+//   - the MAP PROJECTION over a real node — n{.name, .age}, n{.*}, a selector
+//     naming a key the node lacks, and a literal entry — vs the same modelled
+//     map, which is the entity-property-resolution path the literal-map probe
+//     in the expression battery cannot reach (rmp #2459);
 //   - type(r), startNode(r), endNode(r) and r.eid over every KNOWS edge vs the
 //     oracle's modelled endpoints and instance id — an edge whose endpoints the
 //     engine transposed reads back transposed. Read three ways: FORWARD, in
@@ -79,6 +83,7 @@ func CheckCypherSurfaceEntity(tick int64, oracle *GraphOracle, engine *EngineAda
 	vs := make([]Violation, 0, 4)
 	vs = append(vs, checkEntityLabels(ctx, tick, oracle, engine)...)
 	vs = append(vs, checkEntityProperties(ctx, tick, oracle, engine)...)
+	vs = append(vs, checkEntityMapProjection(ctx, tick, oracle, engine)...)
 	vs = append(vs, checkEntityEdges(ctx, tick, oracle, engine)...)
 	vs = append(vs, checkEntityCompRoutes(ctx, tick, oracle, engine)...)
 	vs = append(vs, checkEntityPaths(ctx, tick, oracle, engine)...)
@@ -257,6 +262,157 @@ func checkEntityProperties(ctx context.Context, tick int64, oracle *GraphOracle,
 				return []Violation{entityDeviation(tick, op,
 					fmt.Sprintf("%q.%s: engine=%s, oracle=%s", w.Name, k, gv, want))}
 			}
+		}
+	}
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// map projection — n{.name, .age} / n{.*} (rmp #2459)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// entityMapProjectionQuery drives all four map-projection shapes in ONE scan of
+// the Person nodes, so the probe costs a single pass rather than four: an
+// explicit key selection, the whole-entity `.*` selection, a selection naming a
+// key no Person carries, and a selection mixing a property selector with a
+// LITERAL entry.
+const entityMapProjectionQuery = "MATCH (n:Person) RETURN n.name AS name," +
+	" n{.name, .age} AS sel, n{.*} AS whole, n{.name, .nosuch} AS miss," +
+	" n{.name, extra: 1} AS lit ORDER BY name"
+
+// entityMapProjectionShapes are the projection expressions, in the column order
+// [entityMapProjectionQuery] returns them, for the failure messages.
+var entityMapProjectionShapes = [4]string{
+	"n{.name, .age}", "n{.*}", "n{.name, .nosuch}", "n{.name, extra: 1}",
+}
+
+// checkEntityMapProjection asserts that the MAP PROJECTION applied to a real
+// node resolves its selectors against that node's own stored properties, with
+// every expectation taken from the oracle's modelled property map (rmp #2459).
+//
+// Before #2459 the DST projected a map only from a LITERAL
+// (`WITH {a:1,b:2,c:3} AS m RETURN size(keys(m{.a,.b}))` in the expression
+// battery), so the half of the projection that must look each selector up in an
+// ENTITY was never driven at all. Four shapes are adjudicated per Person, all
+// from the same scan:
+//
+//   - n{.name, .age} — the key set is exactly {name, age} and each value equals
+//     the modelled property;
+//   - n{.*} — the key set is exactly the modelled key SET, so a property the
+//     projection invented or dropped fires, with matching values;
+//   - n{.name, .nosuch} — the engine's VERIFIED contract for a selector naming
+//     a key the node does not carry is that the key is PRESENT and NULL, not
+//     omitted, so the probe pins the key's presence AND its null rendering. An
+//     engine that started omitting it (or that returned a value for it) fires;
+//   - n{.name, extra: 1} — a literal entry (verified supported) rides alongside
+//     a property selector without disturbing it.
+//
+// The projected map is compared as a key set plus per-key canonical values,
+// never as a whole rendering: expr.MapValue is a Go map, so its String() key
+// ORDER is not stable and comparing the rendering would be flaky.
+func checkEntityMapProjection(ctx context.Context, tick int64, oracle *GraphOracle, engine *EngineAdapter) []Violation {
+	const op = "n{.k, …} map projection"
+	want, complete := personEntities(oracle)
+	if !complete {
+		return nil
+	}
+	type row struct {
+		maps [4]map[string]string
+		name string
+	}
+	var got []row
+	nonEmpty := 0
+	err := forEachRow(ctx, engine, entityMapProjectionQuery, func(at func(int) expr.Value) error {
+		name, ok := at(0).(expr.StringValue)
+		if !ok {
+			return fmt.Errorf("row %d: name column is %T, want a string", len(got), at(0))
+		}
+		r := row{name: string(name)}
+		for i := range r.maps {
+			m, ok := at(i + 1).(expr.MapValue)
+			if !ok {
+				return fmt.Errorf("row %d: %s is %T, want a map",
+					len(got), entityMapProjectionShapes[i], at(i+1))
+			}
+			flat := make(map[string]string, len(m))
+			for k, v := range m {
+				flat[k] = v.String()
+			}
+			if len(flat) > 0 {
+				nonEmpty++
+			}
+			r.maps[i] = flat
+		}
+		got = append(got, r)
+		return nil
+	})
+	if err != nil {
+		return []Violation{entityQueryViolation(tick, op, err)}
+	}
+	if len(got) != len(want) {
+		return []Violation{entityDeviation(tick, op,
+			fmt.Sprintf("row count: engine=%d, oracle=%d", len(got), len(want)))}
+	}
+	// Non-vacuity: modelled Persons that yield only empty projections would let
+	// every comparison below pass while proving nothing was resolved.
+	if len(want) > 0 && nonEmpty == 0 {
+		return []Violation{entityDeviation(tick, op, fmt.Sprintf(
+			"%d modelled Persons but every map projection returned an EMPTY key set:"+
+				" no entity property was resolved", len(want)))}
+	}
+	for i, w := range want {
+		if got[i].name != w.Name {
+			return []Violation{entityDeviation(tick, op,
+				fmt.Sprintf("row %d: engine name=%q, oracle=%q", i, got[i].name, w.Name))}
+		}
+		name := canonicalValueString(w.Props["name"])
+		// A modelled Person without an `age` key is legitimate for a workload that
+		// omits it; `n{.age}` then yields NULL, which is exactly what
+		// canonicalValueString(nil) renders — so the expectation stays correct
+		// without a special case.
+		expect := [4]map[string]string{
+			{"name": name, "age": canonicalValueString(w.Props["age"])},
+			projectedWholeEntity(w.Props),
+			{"name": name, "nosuch": canonicalValueString(nil)},
+			{"name": name, "extra": canonicalValueString(int64(1))},
+		}
+		for shape, e := range expect {
+			if vs := compareProjectedMap(tick, op, w.Name,
+				entityMapProjectionShapes[shape], got[i].maps[shape], e); len(vs) > 0 {
+				return vs
+			}
+		}
+	}
+	return nil
+}
+
+// projectedWholeEntity renders the oracle's modelled property map as the
+// canonical strings `n{.*}` must produce for it.
+func projectedWholeEntity(props map[string]any) map[string]string {
+	out := make(map[string]string, len(props))
+	for k, v := range props {
+		out[k] = canonicalValueString(v)
+	}
+	return out
+}
+
+// compareProjectedMap adjudicates one projected map against the oracle's
+// expectation as a KEY SET plus a per-key canonical value. Keys are visited in
+// ascending order so the reported failure is deterministic.
+func compareProjectedMap(tick int64, op, person, shape string, got, want map[string]string) []Violation {
+	if len(got) != len(want) {
+		return []Violation{entityDeviation(tick, op, fmt.Sprintf(
+			"%q %s: engine key set=%v, oracle=%v", person, shape, sortedKeys(got), sortedKeys(want)))}
+	}
+	for _, k := range sortedKeys(want) {
+		gv, present := got[k]
+		if !present {
+			return []Violation{entityDeviation(tick, op, fmt.Sprintf(
+				"%q %s: projection lacks key %q (engine keys=%v)", person, shape, k, sortedKeys(got)))}
+		}
+		if gv != want[k] {
+			return []Violation{entityDeviation(tick, op, fmt.Sprintf(
+				"%q %s: key %q = %s, oracle=%s", person, shape, k, gv, want[k]))}
 		}
 	}
 	return nil

@@ -255,6 +255,180 @@ func TestSurfaceEntity_PassAndCatch(t *testing.T) {
 	})
 }
 
+// TestEntityMapProjection_ContractsPinned is the happy-path pin for rmp #2459:
+// over a two-Person fixture it asserts, by hand, the exact map each projection
+// shape must produce — including the two contracts the checker depends on and
+// that were VERIFIED against this engine rather than assumed:
+//
+//   - a selector naming a key the node does NOT carry yields the key PRESENT
+//     with a NULL value (it is not omitted from the map);
+//   - a LITERAL entry is supported alongside property selectors.
+//
+// The map is compared key by key because expr.MapValue is a Go map: its
+// String() key order is not stable, so a whole-rendering comparison would be
+// flaky rather than strict.
+func TestEntityMapProjection_ContractsPinned(t *testing.T) {
+	a, o := seedCityFixture(t,
+		[]cityPerson{{"s1", 40, "c0"}, {"s2", 30, "c1"}}, nil)
+	ctx := context.Background()
+
+	want := map[string][4]map[string]string{
+		"s1": {
+			{"name": `"s1"`, "age": "40"},
+			{"name": `"s1"`, "age": "40", "city": `"c0"`},
+			{"name": `"s1"`, "nosuch": "null"},
+			{"name": `"s1"`, "extra": "1"},
+		},
+		"s2": {
+			{"name": `"s2"`, "age": "30"},
+			{"name": `"s2"`, "age": "30", "city": `"c1"`},
+			{"name": `"s2"`, "nosuch": "null"},
+			{"name": `"s2"`, "extra": "1"},
+		},
+	}
+	seen := 0
+	err := forEachRow(ctx, a, entityMapProjectionQuery, func(at func(int) expr.Value) error {
+		name, ok := at(0).(expr.StringValue)
+		if !ok {
+			t.Fatalf("name column is %T, want a string", at(0))
+		}
+		w, ok := want[string(name)]
+		if !ok {
+			t.Fatalf("unexpected Person %q in the projection result", name)
+		}
+		seen++
+		for i := range w {
+			m, ok := at(i + 1).(expr.MapValue)
+			if !ok {
+				t.Fatalf("%s is %T, want a map", entityMapProjectionShapes[i], at(i+1))
+			}
+			if len(m) != len(w[i]) {
+				t.Errorf("%s %s: got %d keys, want %d (%v)", name, entityMapProjectionShapes[i],
+					len(m), len(w[i]), m.String())
+				continue
+			}
+			for k, wv := range w[i] {
+				gv, present := m[k]
+				if !present {
+					t.Errorf("%s %s: key %q absent (got %v)", name, entityMapProjectionShapes[i], k, m.String())
+					continue
+				}
+				if gv.String() != wv {
+					t.Errorf("%s %s: key %q = %s, want %s", name, entityMapProjectionShapes[i],
+						k, gv.String(), wv)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("map-projection query: %v", err)
+	}
+	if seen != len(want) {
+		t.Fatalf("projection returned %d rows, want %d", seen, len(want))
+	}
+	if v := checkEntityMapProjection(ctx, 0, o, a); len(v) > 0 {
+		t.Fatalf("map-projection checker fired on a faithful model: %v", v)
+	}
+}
+
+// TestEntityMapProjection_DetectsPerturbation is the SENSITIVITY PROOF for the
+// map-projection arm: each way the oracle's modelled property map can diverge
+// from what the engine projects must FIRE. The probe is driven directly (not
+// through [CheckCypherSurfaceEntity]) so a perturbation that also trips the
+// neighbouring properties(n) probe cannot be mistaken for this one firing.
+func TestEntityMapProjection_DetectsPerturbation(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("baseline clean", func(t *testing.T) {
+		a, o := entityFixture(t)
+		if v := checkEntityMapProjection(ctx, 0, o, a); len(v) > 0 {
+			t.Fatalf("consistent fixture should be clean, got: %v", v)
+		}
+	})
+
+	t.Run("perturbed value fires", func(t *testing.T) {
+		a, o := entityFixture(t)
+		o.nodes[o.byName["s1"]].Properties["age"] = int64(41)
+		if v := checkEntityMapProjection(ctx, 0, o, a); len(v) == 0 {
+			t.Fatal("map projection FAILED to detect a perturbed property VALUE")
+		}
+	})
+
+	t.Run("removed modelled key fires n{.*}", func(t *testing.T) {
+		a, o := entityFixture(t)
+		// Only n{.*} enumerates the whole entity, so dropping `city` — which the
+		// explicit selections never name — is the perturbation that isolates it.
+		delete(o.nodes[o.byName["s2"]].Properties, "city")
+		if v := checkEntityMapProjection(ctx, 0, o, a); len(v) == 0 {
+			t.Fatal("n{.*} FAILED to detect a key the model dropped")
+		}
+	})
+
+	t.Run("extra modelled key fires n{.*}", func(t *testing.T) {
+		a, o := entityFixture(t)
+		o.nodes[o.byName["s3"]].Properties["nickname"] = "ghost"
+		if v := checkEntityMapProjection(ctx, 0, o, a); len(v) == 0 {
+			t.Fatal("n{.*} FAILED to detect a modelled key the engine never stored")
+		}
+	})
+
+	t.Run("missing Person fires the row count", func(t *testing.T) {
+		a, o := entityFixture(t)
+		o.ApplyCreate(tmplCreatePersonCity,
+			map[string]any{"name": "ghost", "age": int64(1), "city": "c9"})
+		if v := checkEntityMapProjection(ctx, 0, o, a); len(v) == 0 {
+			t.Fatal("map projection FAILED to detect a Person the engine never stored")
+		}
+	})
+
+	t.Run("wired into the entity battery", func(t *testing.T) {
+		// A dropped key fires this probe AND properties(n) — both read the same
+		// modelled map — so the assertion is only that the aggregate REPORTS the
+		// map-projection arm, which is what proves it is not dead code in the run.
+		a, o := entityFixture(t)
+		delete(o.nodes[o.byName["s2"]].Properties, "city")
+		saw := false
+		for _, v := range CheckCypherSurfaceEntity(0, o, a) {
+			if v.Op == "n{.k, …} map projection" {
+				saw = true
+				break
+			}
+		}
+		if !saw {
+			t.Fatal("CheckCypherSurfaceEntity does not report the map-projection arm")
+		}
+	})
+
+	t.Run("no modelled Person is not asserted against", func(t *testing.T) {
+		// An empty graph has nothing to resolve; the probe must stay silent rather
+		// than report its own non-vacuity gate against a graph with no Persons.
+		a, o := seedCityFixture(t, nil, nil)
+		if v := checkEntityMapProjection(ctx, 0, o, a); len(v) > 0 {
+			t.Fatalf("empty fixture should be clean, got: %v", v)
+		}
+	})
+}
+
+// TestEntityMapProjection_NonVacuityGateFires proves the "no entity property was
+// resolved" gate is a real assertion and not decoration: with modelled Persons
+// present, a projection result whose every map is EMPTY must be reported. It is
+// driven through the pure comparison helper because no engine produces that
+// result today — which is exactly why the gate exists.
+func TestEntityMapProjection_NonVacuityGateFires(t *testing.T) {
+	_, o := entityFixture(t)
+	want, complete := personEntities(o)
+	if !complete || len(want) == 0 {
+		t.Fatalf("fixture must model complete Persons, got complete=%v n=%d", complete, len(want))
+	}
+	// An empty projected map against a non-empty modelled map must be a failure,
+	// which is what the per-row key-set comparison enforces.
+	if v := compareProjectedMap(0, "op", want[0].Name, "n{.*}",
+		map[string]string{}, projectedWholeEntity(want[0].Props)); len(v) == 0 {
+		t.Fatal("an EMPTY projected map compared clean against a non-empty modelled map")
+	}
+}
+
 // TestEntityPaths_HappyPathHandChecked pins the path probe's own arithmetic on
 // the hand-enumerated fixture, so the probe is known to have SEEN the paths it
 // claims to check rather than passing on an empty result. Over the fixture's

@@ -2,6 +2,8 @@ package sim
 
 import (
 	"context"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -221,6 +223,311 @@ func TestTypeCoverage_DetectsTemporalDegradedToString(t *testing.T) {
 		if !found {
 			t.Errorf("degraded temporal %q was NOT reported as a kind violation; got %v", k, vs)
 		}
+	}
+}
+
+// typedListFixture seeds one Typed node per entry of lists — with the given
+// `lst` value and every other typed property from [typedSeedParams] — in BOTH
+// the engine and the oracle, so the list-predicate checker sees a consistent
+// state. The caller owns nothing: the simulator is closed by t.Cleanup.
+func typedListFixture(t *testing.T, lists map[int64][]any) *Simulator {
+	t.Helper()
+	cfg := Config{Seed: 1, MaxTicks: 1, Workload: typeCoverageWorkload(NewSeed(1))}
+	sm, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = sm.Close() })
+	ctx := context.Background()
+	for id, l := range lists {
+		params := typedSeedParams(id)
+		params["lst"] = l
+		if _, err := sm.engine.RunWrite(ctx, tmplCreateTyped, params); err != nil {
+			t.Fatalf("seed Typed{id:%d}: %v", id, err)
+		}
+		sm.oracle.typed[id] = params
+	}
+	return sm
+}
+
+// TestTypeCoverage_ListPredicateContractsPinned is the happy-path pin for rmp
+// #2459: over a hand-chosen stored list it asserts the exact value AND expr kind
+// every list predicate must produce, so the contracts the checker relies on are
+// recorded here rather than assumed — a subscript past either end yields NULL
+// (not an error and not a clamp), a NEGATIVE index counts from the end, and a
+// slice is half-open and clamps to the list's own bounds. The oracle-driven
+// checker must then be clean on the same fixture.
+func TestTypeCoverage_ListPredicateContractsPinned(t *testing.T) {
+	sm := typedListFixture(t, map[int64][]any{
+		1: {int64(10), int64(20), int64(30)},
+		2: {int64(20), int64(40)},
+	})
+	ctx := context.Background()
+
+	single := []struct {
+		expr string
+		text string
+		kind expr.Kind
+	}{
+		{"n.lst[0]", "10", expr.KindInteger},
+		{"n.lst[1]", "20", expr.KindInteger},
+		{"n.lst[-1]", "30", expr.KindInteger},       // negative counts from the END
+		{"n.lst[-3]", "10", expr.KindInteger},       // …to the first element
+		{"n.lst[3]", "null", expr.KindNull},         // past the end: NULL, not an error
+		{"n.lst[-4]", "null", expr.KindNull},        // before the start: NULL
+		{"n.lst[99]", "null", expr.KindNull},        // far past the end: still NULL
+		{"size(n.lst)", "3", expr.KindInteger},      // size of a STORED list
+		{"n.lst[0..2]", "[10, 20]", expr.KindList},  // half-open [from, to)
+		{"n.lst[1..99]", "[20, 30]", expr.KindList}, // clamps to the list bounds
+		{"reduce(acc = 0, x IN n.lst | acc + x)", "60", expr.KindInteger},
+	}
+	for _, w := range single {
+		got, err := sm.engine.projectRowValues(ctx, "MATCH (n:Typed {id:1}) RETURN "+w.expr, 1)
+		if err != nil {
+			t.Fatalf("read %s: %v", w.expr, err)
+		}
+		if got == nil {
+			t.Fatalf("read %s: no row", w.expr)
+		}
+		if got[0].Kind() != w.kind {
+			t.Errorf("%s kind = %v, want %v (value %s)", w.expr, got[0].Kind(), w.kind, got[0].String())
+		}
+		if got[0].String() != w.text {
+			t.Errorf("%s = %s, want %s", w.expr, got[0].String(), w.text)
+		}
+	}
+
+	// UNWIND over the STORED list, aggregated three ways.
+	got, err := sm.engine.projectRowValues(ctx,
+		"MATCH (n:Typed {id:1}) UNWIND n.lst AS x RETURN count(x), sum(x), collect(x)", 3)
+	if err != nil || got == nil {
+		t.Fatalf("UNWIND probe: got=%v err=%v", got, err)
+	}
+	for i, w := range []string{"3", "60", "[10, 20, 30]"} {
+		if got[i].String() != w {
+			t.Errorf("UNWIND column %d = %s, want %s", i, got[i].String(), w)
+		}
+	}
+
+	// Membership over the whole label: 20 is in both lists, 10 in one, and the
+	// absent-element control in none.
+	for _, m := range []struct {
+		elem int64
+		want string
+	}{{20, "2"}, {10, "1"}, {40, "1"}, {typedListAbsentElem, "0"}} {
+		q := fmt.Sprintf("MATCH (n:Typed) WHERE %d IN n.lst RETURN count(n)", m.elem)
+		got, err := sm.engine.projectRowValues(ctx, q, 1)
+		if err != nil || got == nil {
+			t.Fatalf("membership %d: got=%v err=%v", m.elem, got, err)
+		}
+		if got[0].String() != m.want {
+			t.Errorf("count of `%d IN n.lst` = %s, want %s", m.elem, got[0].String(), m.want)
+		}
+	}
+
+	if v := CheckTypedListPredicates(1, sm.oracle, sm.engine); len(v) > 0 {
+		t.Fatalf("list-predicate checker fired on a faithful model: %v", v)
+	}
+}
+
+// TestTypeCoverage_ListPredicatesDetectPerturbation is the SENSITIVITY PROOF for
+// rmp #2459: each arm of the list battery must FIRE when the oracle's modelled
+// list is perturbed in the one way that arm is responsible for seeing. Without
+// it the arm could be reading the engine's answer back into its own expectation
+// and proving nothing.
+func TestTypeCoverage_ListPredicatesDetectPerturbation(t *testing.T) {
+	base := func() map[int64][]any {
+		return map[int64][]any{
+			1: {int64(10), int64(20), int64(30)},
+			2: {int64(20), int64(40)},
+		}
+	}
+	// perturb replaces the modelled (NOT the stored) list of one node.
+	perturb := func(sm *Simulator, id int64, l []any) {
+		props := typedSeedParams(id)
+		props["lst"] = l
+		sm.oracle.typed[id] = props
+	}
+
+	t.Run("baseline clean", func(t *testing.T) {
+		sm := typedListFixture(t, base())
+		if v := CheckTypedListPredicates(1, sm.oracle, sm.engine); len(v) > 0 {
+			t.Fatalf("baseline should be clean, got: %v", v)
+		}
+	})
+
+	t.Run("first element changed fires the subscript arm", func(t *testing.T) {
+		sm := typedListFixture(t, base())
+		perturb(sm, 1, []any{int64(11), int64(20), int64(30)})
+		if v := CheckTypedListPredicates(1, sm.oracle, sm.engine); len(v) == 0 {
+			t.Fatal("n.lst[0] FAILED to detect a changed first element")
+		}
+	})
+
+	t.Run("last element changed fires the negative-subscript arm", func(t *testing.T) {
+		sm := typedListFixture(t, base())
+		perturb(sm, 1, []any{int64(10), int64(20), int64(31)})
+		if v := CheckTypedListPredicates(1, sm.oracle, sm.engine); len(v) == 0 {
+			t.Fatal("n.lst[-1] FAILED to detect a changed last element")
+		}
+	})
+
+	t.Run("interior element changed fires reduce and UNWIND", func(t *testing.T) {
+		sm := typedListFixture(t, base())
+		// Neither subscript column reads element 1, so only the sum-bearing arms
+		// (reduce, sum(x), collect(x)) can see this one.
+		perturb(sm, 1, []any{int64(10), int64(99), int64(30)})
+		vs := CheckTypedListPredicates(1, sm.oracle, sm.engine)
+		if len(vs) == 0 {
+			t.Fatal("reduce/UNWIND FAILED to detect a changed interior element")
+		}
+		saw := map[string]bool{}
+		for _, v := range vs {
+			saw[v.Op] = true
+		}
+		if !saw["typed list predicate"] || !saw["typed list UNWIND"] {
+			t.Errorf("expected BOTH the reduce and the UNWIND arms to fire, got ops %v", saw)
+		}
+	})
+
+	t.Run("element removed fires size and the out-of-range column", func(t *testing.T) {
+		sm := typedListFixture(t, base())
+		perturb(sm, 1, []any{int64(10), int64(20)})
+		if v := CheckTypedListPredicates(1, sm.oracle, sm.engine); len(v) == 0 {
+			t.Fatal("size(n.lst) FAILED to detect a removed element")
+		}
+	})
+
+	t.Run("order reversed fires the ORDERED columns only", func(t *testing.T) {
+		sm := typedListFixture(t, base())
+		// A reversal leaves size, sum, reduce and the collect MULTISET untouched:
+		// it is exactly the defect the ordered subscript/slice columns exist for.
+		perturb(sm, 1, []any{int64(30), int64(20), int64(10)})
+		vs := CheckTypedListPredicates(1, sm.oracle, sm.engine)
+		if len(vs) == 0 {
+			t.Fatal("the ordered columns FAILED to detect a reversed list")
+		}
+		for _, v := range vs {
+			if v.Op == "typed list UNWIND" {
+				t.Errorf("the UNWIND multiset arm must be blind to a reversal, but it fired: %v", v)
+			}
+		}
+	})
+
+	t.Run("membership counts the WHOLE model, not the sample", func(t *testing.T) {
+		// More nodes than the per-node probe samples, so a node the sample skips
+		// can be perturbed to isolate the membership arm from every other arm.
+		lists := make(map[int64][]any, 10)
+		ids := make([]int64, 0, 10)
+		for id := int64(0); id < 10; id++ {
+			lists[id] = []any{id, int64(100 + id)}
+			ids = append(ids, id)
+		}
+		sm := typedListFixture(t, lists)
+		if v := CheckTypedListPredicates(1, sm.oracle, sm.engine); len(v) > 0 {
+			t.Fatalf("baseline should be clean, got: %v", v)
+		}
+		sample := typedListSample(ids)
+		var skipped int64 = -1
+		for _, id := range ids {
+			if !slices.Contains(sample, id) {
+				skipped = id
+				break
+			}
+		}
+		if skipped < 0 {
+			t.Fatalf("no id was skipped by the sample %v: the isolation is impossible", sample)
+		}
+		// The probe element is the last element of the NEWEST list (id 9 → 109);
+		// claiming a non-sampled node also holds it changes only the count.
+		perturb(sm, skipped, []any{skipped, int64(109)})
+		vs := CheckTypedListPredicates(1, sm.oracle, sm.engine)
+		if len(vs) == 0 {
+			t.Fatal("membership FAILED to detect a model that claims one more node holds the element")
+		}
+		for _, v := range vs {
+			if v.Op != "typed list membership" {
+				t.Errorf("only the membership arm should fire, got %s: %s", v.Op, v.Message)
+			}
+		}
+	})
+
+	t.Run("empty modelled list is reported as vacuous", func(t *testing.T) {
+		sm := typedListFixture(t, base())
+		perturb(sm, 1, []any{})
+		vs := CheckTypedListPredicates(1, sm.oracle, sm.engine)
+		if len(vs) == 0 {
+			t.Fatal("an EMPTY modelled list must be reported: every predicate over it is vacuous")
+		}
+		if vs[0].Op != "typed list model" {
+			t.Errorf("empty list reported as %q, want the model gate", vs[0].Op)
+		}
+	})
+
+	t.Run("a single distinct element across the model is reported as vacuous", func(t *testing.T) {
+		sm := typedListFixture(t, map[int64][]any{
+			1: {int64(7)},
+			2: {int64(7), int64(7)},
+		})
+		vs := CheckTypedListPredicates(1, sm.oracle, sm.engine)
+		if len(vs) == 0 {
+			t.Fatal("a model with one distinct element must be reported: membership/reduce prove nothing")
+		}
+		if vs[0].Op != "typed list model" {
+			t.Errorf("degenerate model reported as %q, want the model gate", vs[0].Op)
+		}
+	})
+}
+
+// TestTypeCoverage_ListPredicatesNonVacuous confirms the registered scenario
+// really drove the list arm: the run must model lists that are non-empty and
+// carry at least two distinct elements over the whole run — the condition
+// [CheckTypedListPredicates] enforces — and the checker must be clean on the
+// terminal graph.
+func TestTypeCoverage_ListPredicatesNonVacuous(t *testing.T) {
+	sm, report, err := runTypeCoverageSim(context.Background(), 0x7A9E5)
+	if sm != nil {
+		t.Cleanup(func() { _ = sm.Close() })
+	}
+	if err != nil {
+		t.Fatalf("runTypeCoverageSim: %v", err)
+	}
+	if report != nil {
+		t.Fatalf("violation:\n%s", report)
+	}
+	ids := sm.Oracle().TypedIDs()
+	lists, vs := typedModelledLists(0, sm.Oracle(), ids)
+	if len(vs) > 0 {
+		t.Fatalf("terminal model is not a usable list model: %v", vs)
+	}
+	if len(lists) < 2 {
+		t.Fatalf("run modelled %d lists, want >= 2", len(lists))
+	}
+	for id, l := range lists {
+		if len(l) == 0 {
+			t.Fatalf("Typed{id:%d} modelled an EMPTY list", id)
+		}
+	}
+	if d := typedListDistinctElems(lists); d < 2 {
+		t.Fatalf("the whole run carries %d distinct list element(s), want >= 2", d)
+	}
+	if v := CheckTypedListPredicates(0, sm.Oracle(), sm.engine); len(v) > 0 {
+		t.Fatalf("list predicates fired on the terminal graph: %v", v)
+	}
+	// Wiring: the battery entry point the scenario loop calls must really include
+	// the list arm, else the checker above would be dead code inside the run.
+	perturbed := typedSeedParams(ids[0])
+	perturbed["lst"] = []any{int64(-1), int64(-2), int64(-3)}
+	sm.oracle.typed[ids[0]] = perturbed
+	saw := false
+	for _, v := range checkTypedAll(0, sm.Oracle(), sm.engine) {
+		if strings.HasPrefix(v.Op, "typed list") {
+			saw = true
+			break
+		}
+	}
+	if !saw {
+		t.Fatal("checkTypedAll does not report the list arm: the scenario never runs it")
 	}
 }
 
