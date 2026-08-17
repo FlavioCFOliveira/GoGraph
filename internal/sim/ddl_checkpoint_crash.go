@@ -35,9 +35,7 @@ package sim
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io/fs"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
@@ -341,7 +339,7 @@ func runDDLCheckpointPhase(
 	report := func(v []Violation) *SimReport { return ddlCheckpointReport(env.seed, tick, v) }
 
 	// --- declare the schema, bracketed by the durable WAL image ---
-	before, err := ddlWALSize(disk, cfg.dir)
+	before, err := simWALSize(disk, cfg.dir)
 	if err != nil {
 		return st, cyc, nil, fmt.Errorf("WAL size before DDL: %w", err)
 	}
@@ -352,7 +350,7 @@ func runDDLCheckpointPhase(
 		}
 	}
 	phase.applyModel(model)
-	if cyc.walAfterDDL, err = ddlWALSize(disk, cfg.dir); err != nil {
+	if cyc.walAfterDDL, err = simWALSize(disk, cfg.dir); err != nil {
 		return st, cyc, nil, fmt.Errorf("WAL size after DDL: %w", err)
 	}
 
@@ -368,13 +366,13 @@ func runDDLCheckpointPhase(
 	}
 
 	// --- publish a real checkpoint and measure the WAL prefix it reclaims ---
-	if cyc.walBeforeCheckpoint, err = ddlWALSize(disk, cfg.dir); err != nil {
+	if cyc.walBeforeCheckpoint, err = simWALSize(disk, cfg.dir); err != nil {
 		return st, cyc, nil, fmt.Errorf("WAL size before checkpoint: %w", err)
 	}
 	if err := ddlCheckpointPublish(st, env.opts); err != nil {
 		return st, cyc, nil, fmt.Errorf("checkpoint: %w", err)
 	}
-	if cyc.walAfterCheckpoint, err = ddlWALSize(disk, cfg.dir); err != nil {
+	if cyc.walAfterCheckpoint, err = simWALSize(disk, cfg.dir); err != nil {
 		return st, cyc, nil, fmt.Errorf("WAL size after checkpoint: %w", err)
 	}
 	cyc.snapshotPublished = disk.Exists(cfg.dir + "/" + simSnapshotName + "/manifest.json")
@@ -464,20 +462,6 @@ func ddlCheckpointWriteBatch(ctx context.Context, engine *EngineAdapter, rnd *Se
 		*written++
 	}
 	return nil
-}
-
-// ddlWALSize returns the byte length of the durable WAL image inside disk for a
-// store opened with dir. An absent WAL is 0 bytes, not an error: a store whose
-// checkpoint reclaimed everything may legitimately hold none.
-func ddlWALSize(disk *SimDisk, dir string) (int64, error) {
-	b, err := disk.ReadFile(walPathFor(dir))
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return 0, nil
-		}
-		return 0, err
-	}
-	return int64(len(b)), nil
 }
 
 // engineRunDDLOn runs a DDL statement through an engine adapter and drains it.

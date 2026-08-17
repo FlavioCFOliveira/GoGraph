@@ -542,6 +542,16 @@ func CheckEdgeProperties(tick int64, oracle *GraphOracle, engine *EngineAdapter)
 // absent with both endpoints alive, and all of it survives crash/recovery.
 // The per-op counters oracle ([CheckOpCounters]) additionally pins each op's
 // reported effect set. It is bit-reproducible.
+//
+// Checkpointing is enabled (rmp #2468) so the per-instance property maps are
+// proven across BOTH durable paths. A crash before the next checkpoint restores
+// them by replaying the WAL through the transaction codec; a crash after one
+// restores them from the published snapshot, where the per-handle bag has its
+// own component (store/snapshot/edgehandles.go) precisely because labels.bin
+// and properties.bin deliberately collapse parallel edges onto a single
+// per-pair record. A snapshot that lost the per-handle bag would hand every
+// twin of a pair the per-pair UNION of their maps — which is exactly what the
+// eid-pinned read-back below refuses.
 func edgePropertiesScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioEdgeProperties,
@@ -551,6 +561,7 @@ func edgePropertiesScenario() Scenario {
 		MaxTicks:    500,
 		Workload:    edgePropertiesWorkload,
 		Crash:       CrashConfig{Enabled: true, CrashProb: 1.0 / 90.0, StabilityWindow: 25},
+		Checkpoint:  CheckpointConfig{Enabled: true, Every: edgePropertiesCheckpointEvery},
 		Multigraph:  true,
 		run:         runEdgeProperties,
 	}
@@ -559,38 +570,78 @@ func edgePropertiesScenario() Scenario {
 // edgePropertiesCheckEvery is the periodic edge-property check cadence.
 const edgePropertiesCheckEvery = 80
 
+// edgePropertiesCheckpointEvery is the in-loop checkpoint cadence. It is
+// deliberately co-prime with neither the check cadence nor the crash mean, so
+// the crashes the schedule fires land at varying distances after a checkpoint
+// and the run covers both a snapshot-plus-WAL-tail recovery and (at the
+// terminal boundary) a pure-snapshot one.
+const edgePropertiesCheckpointEvery = 55
+
 // runEdgeProperties drives the edge-property safety loop: it builds and
 // mutates KNOWS edge instances (SET / REMOVE / DELETE r over parallel pairs),
 // verifies each op's reported counters against the oracle's expectation
-// ([CheckOpCounters], rmp #2448), and runs [CheckEdgeProperties] periodically,
-// after every crash/recovery, and once at the end. It is deterministic.
+// ([CheckOpCounters], rmp #2448), publishes real checkpoints so recovery
+// alternates between the WAL and the snapshot path (rmp #2468), and runs
+// [CheckEdgeProperties] periodically, after every crash/recovery, and once at
+// the end. It is deterministic.
 func runEdgeProperties(ctx context.Context, seed uint64) (*SimReport, error) {
+	sm, report, err := runEdgePropertiesSim(ctx, seed)
+	if sm != nil {
+		defer func() { _ = sm.Close() }()
+	}
+	return report, err
+}
+
+// runEdgePropertiesSim is [runEdgeProperties] with the simulator handed back to
+// the caller instead of closed, so a test can assert on what the run actually
+// exercised — that crashes AND checkpoints really fired, and what the forced
+// snapshot boundary measured. The caller owns closing the returned simulator,
+// which is non-nil whenever construction succeeded (even when a violation is
+// reported).
+func runEdgePropertiesSim(ctx context.Context, seed uint64) (*Simulator, *SimReport, error) {
 	sc := edgePropertiesScenario()
-	cfg := sc.DeterministicConfig(seed)
+	return runEdgePropertiesWith(ctx, sc.DeterministicConfig(seed))
+}
+
+// runEdgePropertiesWith is [runEdgePropertiesSim] driven from an explicit
+// config, so a test can vary the run — above all DISABLE checkpointing — and
+// prove the non-vacuity gates are wired into the loop rather than merely
+// present.
+func runEdgePropertiesWith(ctx context.Context, cfg Config) (*Simulator, *SimReport, error) {
 	sm, err := New(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("sim: edge-properties new: %w", err)
+		return nil, nil, fmt.Errorf("sim: edge-properties new: %w", err)
 	}
-	defer func() { _ = sm.Close() }()
 
 	var lastTick int64
 	var lastOp Op
 	for i := 0; i < cfg.MaxTicks; i++ {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return sm, nil, err
 		}
 		tick := sm.clock.Tick()
 
 		crashesBefore := sm.crashCount
 		if report, err := sm.maybeCrash(ctx, tick); err != nil {
-			return nil, err
+			return sm, nil, err
 		} else if report != nil {
-			return report, nil
+			return sm, report, nil
 		}
 		if sm.crashCount > crashesBefore {
 			if v := CheckEdgeProperties(tick, sm.oracle, sm.engine); len(v) > 0 {
-				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery edge props>"}, v), nil
+				rep := sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery edge props>"}, v)
+				return sm, rep, nil
 			}
+		}
+		// A real checkpoint folds the committed prefix into a snapshot — the
+		// per-handle bag included, via edgehandles.bin — and truncates the WAL, so
+		// the NEXT crash recovers the parallel instances through the snapshot path
+		// rather than by WAL replay. The call is explicit because a
+		// [CheckpointConfig] is INERT unless the run loop makes it (only
+		// [Simulator.Run] wires it automatically), which is the trap rmp
+		// #2457/#2464 hit; [Simulator.checkCheckpointsFired] below gates on it.
+		if err := sm.maybeCheckpoint(tick); err != nil {
+			return sm, nil, err
 		}
 
 		actor := sm.workload.SelectActor(sm.seed)
@@ -602,24 +653,60 @@ func runEdgeProperties(ctx context.Context, seed uint64) (*SimReport, error) {
 		// and DELETE r exactly one deleted relationship with zero deleted nodes —
 		// all adjudicated on the pre-apply model.
 		if v := CheckOpCounters(tick, op, committed, counters, sm.oracle); len(v) > 0 {
-			return sm.report(tick, op, v), nil
+			rep := sm.report(tick, op, v)
+			return sm, rep, nil
 		}
 		sm.applyToOracle(op, committed)
 		lastTick, lastOp = tick, op
 
 		if tick%int64(sm.cfg.CheckEvery) == 0 {
 			if v := sm.checker.Check(tick, sm.oracle, sm.engine); len(v) > 0 {
-				return sm.report(tick, op, v), nil
+				rep := sm.report(tick, op, v)
+				return sm, rep, nil
 			}
 		}
 		if tick%edgePropertiesCheckEvery == 0 {
 			if v := CheckEdgeProperties(tick, sm.oracle, sm.engine); len(v) > 0 {
-				return sm.report(tick, op, v), nil
+				rep := sm.report(tick, op, v)
+				return sm, rep, nil
 			}
 		}
 	}
+	// Baseline on the live engine: every instance's map must already be correct
+	// here, so a failure after the snapshot crossing below is unambiguously a
+	// snapshot/recovery defect rather than a mutation that never worked.
 	if v := CheckEdgeProperties(lastTick, sm.oracle, sm.engine); len(v) > 0 {
-		return sm.report(lastTick, lastOp, v), nil
+		rep := sm.report(lastTick, lastOp, v)
+		return sm, rep, nil
 	}
-	return nil, nil
+
+	// ── the snapshot boundary, forced and measured (rmp #2468) ───────────────
+	// The gate runs FIRST: the forced crossing publishes a checkpoint of its
+	// own, so running it afterwards would let a loop that never calls
+	// maybeCheckpoint pass on the strength of the crossing alone.
+	if v := sm.checkCheckpointsFired(lastTick); len(v) > 0 {
+		rep := sm.report(lastTick, lastOp, v)
+		return sm, rep, nil
+	}
+	if err := sm.crossSnapshotBoundary("edge-properties terminal snapshot boundary"); err != nil {
+		return sm, nil, err
+	}
+	if v := checkSnapshotSourcedRecovery(lastTick, sm.boundary); len(v) > 0 {
+		rep := sm.report(lastTick, lastOp, v)
+		return sm, rep, nil
+	}
+	// The WAL is empty and the replay contributed nothing, so every surviving
+	// instance's own property map, every parallel twin's separate map, and every
+	// DELETE r tombstone the checks below adjudicate was reconstructed by the
+	// snapshot codec alone — csr.bin's handle column plus edgehandles.bin, not
+	// the per-pair union in labels.bin/properties.bin.
+	if v := sm.checker.CheckDurability(lastTick, sm.oracle, sm.engine); len(v) > 0 {
+		rep := sm.report(lastTick, Op{Kind: OpMatch, Cypher: "<post-snapshot durability>"}, v)
+		return sm, rep, nil
+	}
+	if v := CheckEdgeProperties(lastTick, sm.oracle, sm.engine); len(v) > 0 {
+		rep := sm.report(lastTick, Op{Kind: OpMatch, Cypher: "<post-snapshot edge props>"}, v)
+		return sm, rep, nil
+	}
+	return sm, nil, nil
 }

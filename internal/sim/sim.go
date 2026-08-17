@@ -204,6 +204,13 @@ type Simulator struct {
 	// checkpointCount accumulates the number of successful in-loop checkpoints for
 	// reports and tests.
 	checkpointCount int
+	// boundary holds the measurements of the most recent FORCED crossing of the
+	// snapshot boundary ([Simulator.crossSnapshotBoundary], rmp #2468) — the WAL
+	// image before and after the checkpoint and the ops the following recovery
+	// replayed. Its zero value (crossed == false) means the run never crossed,
+	// which [checkSnapshotSourcedRecovery] reports as a violation rather than
+	// treating as "nothing to check".
+	boundary snapshotBoundary
 }
 
 // New builds a Simulator with a fresh in-memory engine, oracle, checker, clock,

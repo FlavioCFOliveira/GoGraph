@@ -706,7 +706,13 @@ func runTypeCoverage(ctx context.Context, seed uint64) (*SimReport, error) {
 // non-nil whenever construction succeeded (even when a violation is reported).
 func runTypeCoverageSim(ctx context.Context, seed uint64) (*Simulator, *SimReport, error) {
 	sc := typeCoverageScenario()
-	cfg := sc.DeterministicConfig(seed)
+	return runTypeCoverageWith(ctx, sc.DeterministicConfig(seed))
+}
+
+// runTypeCoverageWith is [runTypeCoverageSim] driven from an explicit config, so
+// a test can vary the run — above all DISABLE checkpointing — and prove the
+// non-vacuity gates are wired into the loop rather than merely present.
+func runTypeCoverageWith(ctx context.Context, cfg Config) (*Simulator, *SimReport, error) {
 	sm, err := New(cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sim: type-coverage new: %w", err)
@@ -762,9 +768,42 @@ func runTypeCoverageSim(ctx context.Context, seed uint64) (*Simulator, *SimRepor
 			}
 		}
 	}
-	// Terminal typed + temporal-ordering + list-predicate check.
+	// Terminal typed + temporal-ordering + list-predicate check. This is the
+	// BASELINE, taken on the live engine: the matrix must already be correct
+	// here, so a failure after the snapshot crossing below is unambiguously a
+	// snapshot/recovery defect and not a value that never round-tripped at all.
 	if v := checkTypedAll(lastTick, sm.oracle, sm.engine); len(v) > 0 {
 		rep := sm.report(lastTick, lastOp, v)
+		return sm, rep, nil
+	}
+
+	// ── the snapshot boundary, forced and measured (rmp #2468) ───────────────
+	// The gate runs FIRST: the forced crossing publishes a checkpoint of its
+	// own, so running it afterwards would let a loop that never calls
+	// maybeCheckpoint pass on the strength of the crossing alone.
+	if v := sm.checkCheckpointsFired(lastTick); len(v) > 0 {
+		rep := sm.report(lastTick, lastOp, v)
+		return sm, rep, nil
+	}
+	if err := sm.crossSnapshotBoundary("type-coverage terminal snapshot boundary"); err != nil {
+		return sm, nil, err
+	}
+	if v := checkSnapshotSourcedRecovery(lastTick, sm.boundary); len(v) > 0 {
+		rep := sm.report(lastTick, lastOp, v)
+		return sm, rep, nil
+	}
+	// Everything the engine now serves was reconstructed by the snapshot codec
+	// from properties.bin / labels.bin / csr.bin alone — the WAL is empty and
+	// the replay contributed nothing. The general durability oracle first (every
+	// ACKed op survived), then the full typed matrix: string, integer, float,
+	// boolean, list, the plain-ISO control, all six temporals and the absent key
+	// must each come back with their KIND intact.
+	if v := sm.checker.CheckDurability(lastTick, sm.oracle, sm.engine); len(v) > 0 {
+		rep := sm.report(lastTick, Op{Kind: OpMatch, Cypher: "<post-snapshot durability>"}, v)
+		return sm, rep, nil
+	}
+	if v := checkTypedAll(lastTick, sm.oracle, sm.engine); len(v) > 0 {
+		rep := sm.report(lastTick, Op{Kind: OpMatch, Cypher: "<post-snapshot typed check>"}, v)
 		return sm, rep, nil
 	}
 	return sm, nil, nil
