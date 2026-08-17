@@ -7277,6 +7277,11 @@ func buildOperatorWrite(
 		// matches the emitted row the operator hands the evaluator (nodes at
 		// their output columns, relationships at theirs).
 		actionSchema := copySchema(schema)
+		// The same snapshot is the operator's full row scope, so an ON CREATE /
+		// ON MATCH action may name a variable a PRECEDING clause bound and not
+		// only one this pattern introduces (rmp #2511). Without it such a target
+		// resolved to nothing and its write was dropped silently.
+		mp.WithSchema(actionSchema).WithOuterRelCols(mergeOuterRelCols(actionSchema, bopts))
 		mp.WithActionEvals(
 			buildMergeActionEvals(p.OnCreateExprs, actionSchema, params, reg, mutator, bopts),
 			buildMergeActionEvals(p.OnMatchExprs, actionSchema, params, reg, mutator, bopts),
@@ -7347,6 +7352,11 @@ func buildOperatorWrite(
 		// Label posting list for the row-aware search, so a per-row MERGE key
 		// examines the label's population instead of the whole graph (#2217).
 		m.WithLabelSource(mergeLabelSource(labelSrc))
+		// An ON CREATE / ON MATCH action may target a RELATIONSHIP bound by a
+		// preceding clause. The operator resolves a node target through
+		// schemaCopy already; a relationship needs its endpoint/handle triplet
+		// too, and without it the write was dropped silently (rmp #2511).
+		m.WithOuterRelCols(mergeOuterRelCols(schemaCopy, bopts))
 		// Row-aware property map: when the IR carried a *ast.MapLiteral whose
 		// values include non-literal expressions (variable references,
 		// property accesses, parameter forms outside `$name`), install a
@@ -7816,6 +7826,33 @@ func buildMergeSetAllActions(
 			IsReplace: it.IsReplace,
 			Eval:      buildExprMapEvalFn(it.Value, schemaCopy, params, reg, mutator, bopts),
 		})
+	}
+	return out
+}
+
+// mergeOuterRelCols returns, for every relationship variable that is visible in
+// schema and was bound by an [exec.Expand] in the child plan, the (src, edge,
+// dst) column triplet that Expand writes into each row.
+//
+// A MERGE ON CREATE / ON MATCH action may target such a variable, and the merge
+// operators need the triplet to resolve it: the variable's own column holds a
+// bare edge handle, indistinguishable from a NodeID without this map. Before rmp
+// #2511 no merge operator was given it and every such action was silently
+// dropped. Returns nil when the child bound no relationship variable, which
+// leaves the operators on their pattern-local dispatch.
+func mergeOuterRelCols(schema map[string]int, bopts *buildOpts) map[string]exec.RelCols {
+	if bopts == nil || len(bopts.edgeVarMeta) == 0 {
+		return nil
+	}
+	out := make(map[string]exec.RelCols, len(bopts.edgeVarMeta))
+	for name, info := range bopts.edgeVarMeta {
+		if _, visible := schema[name]; !visible {
+			continue
+		}
+		out[name] = exec.RelCols{SrcCol: info.srcCol, DstCol: info.dstCol, EdgeCol: info.edgeCol}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

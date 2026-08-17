@@ -31,7 +31,13 @@ const (
 // every probe is what makes the ON CREATE/ON MATCH counter value round-trip
 // continuously — and, because the probe re-runs immediately after every
 // crash/recovery, survive the WAL and the snapshot.
-var schemaMutationProps = []string{"age", "tag", "score", "mc"}
+//
+// Since rmp #2511 it also carries mo, the scalar the whole-pattern MERGE writes
+// onto a Person bound by the clause PRECEDING it ([tmplMergePairOuter]). That
+// makes this one probe the outer-node family's entire verification, in both
+// directions: the written value on the Persons the family targeted, and null on
+// every other Person — including after a co-actor's SET n = $props wipes it.
+var schemaMutationProps = []string{"age", "tag", "score", "mc", mergeOuterNodeKey}
 
 // SchemaMutationWriter mutates the labels and properties of existing Person
 // nodes: it removes a property (REMOVE n.tag), removes a label (REMOVE n:Vip),
@@ -47,7 +53,11 @@ var schemaMutationProps = []string{"age", "tag", "score", "mc"}
 // ([tmplMergePersonCounter]), the whole-map ON CREATE assignment
 // ([tmplMergePersonSetAll]), a whole-pattern MERGE that creates both endpoints
 // and the relationship together ([tmplMergePairPattern]), and the
-// map-parameter MERGE the engine must REJECT ([tmplMergeParamMap]). The first
+// map-parameter MERGE the engine must REJECT ([tmplMergeParamMap]). Since rmp
+// #2510 it also drives the whole-entity action on a pattern's relationship
+// variable ([tmplMergePairSetAll]), and since rmp #2511 the two actions whose
+// target is bound by the clause PRECEDING the MERGE — a node
+// ([tmplMergePairOuter]) and a relationship ([tmplMergePairOuterRel]). The first
 // three create nodes, so the writer is no longer create-free; the last is the
 // one statement it emits deliberately expecting an engine error, and it is
 // modelled as an [OpMalformed] no-op for exactly that reason. Every other op
@@ -73,7 +83,7 @@ func (w SchemaMutationWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 		return HonestWriter{}.opCreatePerson(seed)
 	}
 	name := names[seed.IntN(len(names))]
-	switch seed.IntN(13) {
+	switch seed.IntN(15) {
 	case 0:
 		return Op{Kind: OpUpdate, Cypher: tmplSetTag, Params: map[string]any{"name": name, "tag": fmt.Sprintf("t%d", seed.IntN(1000))}}
 	case 1:
@@ -99,6 +109,10 @@ func (w SchemaMutationWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 		return w.opMergeParamMap(seed)
 	case 11:
 		return w.opMergePairSetAll(seed)
+	case 12:
+		return w.opMergePairOuter(seed, names)
+	case 13:
+		return w.opMergePairOuterRel(seed, oracle.pairedEdgesByName())
 	default:
 		// SET n = $props REPLACES the property set — it must carry name (the key)
 		// and age so the node stays matchable and the durability probe keeps working.
@@ -265,19 +279,21 @@ const schemaMutationCheckEvery = 60
 // SET n += $map, and SET n = $map on Person nodes — plus, since rmp #2454, the
 // FOREACH write path (per-element CREATE over a bound list and per-element SET
 // on an outer variable, each modelled by the oracle as its expansion), and
-// since rmp #2461 the four MERGE families the DST did not previously reach (a
-// node MERGE with both action branches, ON CREATE SET n = $map, a whole-pattern
-// MERGE, and the map-parameter MERGE the engine must reject) — and
-// [CheckSchemaMutation] confirms each mutation round-trips and — with
-// crash+checkpoint injected — survives both WAL and snapshot recovery. Two
-// terminal gates ([checkForeachNonVacuity] and [checkMergeSurfaceNonVacuity])
-// prove the added templates were actually issued, that each of their branches
-// and sub-cases fired, and that the state they wrote was exercised through
-// recovery. It is bit-reproducible.
+// since rmp #2461 the MERGE families the DST did not previously reach (a node
+// MERGE with both action branches, ON CREATE SET n = $map, a whole-pattern
+// MERGE, and the map-parameter MERGE the engine must reject), since rmp #2510
+// the whole-entity action on a pattern's relationship variable, and since rmp
+// #2511 the two actions whose target is bound by the clause PRECEDING the MERGE
+// (a node and a relationship) — and [CheckSchemaMutation] confirms each mutation
+// round-trips and — with crash+checkpoint injected — survives both WAL and
+// snapshot recovery. Two terminal gates ([checkForeachNonVacuity] and
+// [checkMergeSurfaceNonVacuity]) prove the added templates were actually issued,
+// that each of their branches and sub-cases fired, and that the state they wrote
+// was exercised through recovery. It is bit-reproducible.
 func schemaMutationScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioSchemaMutation,
-		Description: "schema mutation: REMOVE prop/label, SET label, SET n += $map, SET n = $map, FOREACH create/set expansion, MERGE surface (both action branches, ON CREATE SET n = $map, whole-pattern, rejected map param) + multi-label match; survives crash/recovery",
+		Description: "schema mutation: REMOVE prop/label, SET label, SET n += $map, SET n = $map, FOREACH create/set expansion, MERGE surface (both action branches, ON CREATE SET n = $map, whole-pattern, whole-entity relationship action, outer-node and outer-relationship actions, rejected map param) + multi-label match; survives crash/recovery",
 		Mode:        ModeDeterministic,
 		DefaultSeed: 0x5C4E3A17,
 		MaxTicks:    500,

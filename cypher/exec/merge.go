@@ -94,6 +94,13 @@ type Merge struct {
 	// they are applied separately via [applyWholeEntityValueToNode] (#2031).
 	onCreateSetAll []MergeSetAllAction
 	onMatchSetAll  []MergeSetAllAction
+	// outerRelCols carries the endpoint/handle triplet an [Expand] leaves in the
+	// row for each relationship variable a PRECEDING clause bound. An action
+	// naming one is a legitimate target — `MATCH ()-[rr:U]->() MERGE (z:P)
+	// ON CREATE SET rr.w = 7` — but schema-plus-[resolveNodeIDFromRow] only ever
+	// understood node values, so such a target was skipped and its write lost
+	// silently (rmp #2511). nil when the builder threads none in.
+	outerRelCols map[string]RelCols
 	// iteration state, reset on each Init call
 	matched    []Row
 	createdRow Row
@@ -212,12 +219,50 @@ func (op *Merge) WithSetAllActions(onCreate, onMatch []MergeSetAllAction) *Merge
 	return op
 }
 
+// WithOuterRelCols attaches, per relationship variable bound by a preceding
+// clause, the (src, edge, dst) column triplet the [Expand] operator writes into
+// the row, so an action targeting one can be resolved (rmp #2511). May be nil.
+// Returns op for chaining.
+func (op *Merge) WithOuterRelCols(cols map[string]RelCols) *Merge {
+	op.outerRelCols = cols
+	return op
+}
+
+// resolveActionRel resolves an action target that is not a node in scope but may
+// be a relationship bound by a preceding clause. Reports ok=false for anything
+// else, which the callers skip exactly as they always skipped an unresolvable
+// target.
+func (op *Merge) resolveActionRel(targetVar string, row Row) (entityBinding, bool) {
+	if op.schema == nil {
+		return entityBinding{}, false
+	}
+	ent, ok := resolveRowEntity(targetVar, op.schema, op.outerRelCols, row, op.mutator)
+	if !ok || !ent.isRel {
+		return entityBinding{}, false
+	}
+	return ent, true
+}
+
 // applySetAllActions applies each whole-entity SET action to the node it names,
-// resolved from row exactly as [Merge.applyActions] resolves a property action.
+// resolved from row exactly as [Merge.applyActions] resolves a property action,
+// falling back to a relationship bound by a preceding clause (rmp #2511).
 func (op *Merge) applySetAllActions(actions []MergeSetAllAction, row Row) error {
 	for _, a := range actions {
 		nodeKey, ok := op.resolveActionNodeKey(a.TargetVar, row)
 		if !ok {
+			ent, isRel := op.resolveActionRel(a.TargetVar, row)
+			if !isRel {
+				continue
+			}
+			v, err := a.Eval(row)
+			if err != nil {
+				return err
+			}
+			if err := applyWholeEntityValueToEdge(
+				op.mutator, a.TargetVar, ent.relSrcKey, ent.relDstKey, ent.relHandle, a.IsReplace, v,
+			); err != nil {
+				return err
+			}
 			continue
 		}
 		v, err := a.Eval(row)
@@ -542,6 +587,14 @@ func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalF
 		}
 
 		if !resolved {
+			// Not a node in scope. A relationship bound by a preceding clause is
+			// still a legitimate target; resolveNodeIDFromRow only understands node
+			// values, so such an action used to be skipped and lost (rmp #2511).
+			if ent, isRel := op.resolveActionRel(a.nodeVar, row); isRel {
+				if err := op.applyRelAction(ent, a, evals, row); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 
@@ -564,8 +617,10 @@ func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalF
 		}
 
 		// Property-set action. Resolve the value: literal fast path first,
-		// then the per-row expression evaluator for a non-literal RHS.
-		pv, ok, remove, err := op.resolveActionValue(a, evals, row, nodeID)
+		// then the per-row expression evaluator for a non-literal RHS. The
+		// evaluator sees the row with the target's NodeID pinned at its schema
+		// column, so `a.nodeVar.<key>` reads the matched/created node.
+		pv, ok, remove, err := op.resolveActionValue(a, evals, op.actionEvalRow(row, a.nodeVar, nodeID))
 		if err != nil {
 			return err
 		}
@@ -609,7 +664,12 @@ func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalF
 //   - a non-literal RHS with no evaluator returns (_, false, false, nil) — the
 //     prior skip behaviour (defensive: every non-literal action is wired with
 //     an evaluator by the physical builder).
-func (op *Merge) resolveActionValue(a mergeAction, evals map[string]ValueEvalFn, row Row, nodeID graph.NodeID) (pv lpg.PropertyValue, ok, remove bool, err error) {
+//
+// evalRow is the row the per-row evaluator runs against. The node path passes the
+// row with the target pinned at its schema column ([Merge.actionEvalRow]); the
+// relationship path passes the row unchanged, since it already carries the bound
+// relationship and pinning a NodeID over it would destroy the binding.
+func (op *Merge) resolveActionValue(a mergeAction, evals map[string]ValueEvalFn, evalRow Row) (pv lpg.PropertyValue, ok, remove bool, err error) {
 	lit, perr := parsePropValue(a.value)
 	switch {
 	case perr == nil:
@@ -625,7 +685,6 @@ func (op *Merge) resolveActionValue(a mergeAction, evals map[string]ValueEvalFn,
 		if !has {
 			return lpg.PropertyValue{}, false, false, nil
 		}
-		evalRow := op.actionEvalRow(row, a.nodeVar, nodeID)
 		val, isNull, hasValue, evalErr := fn(evalRow)
 		if evalErr != nil {
 			return lpg.PropertyValue{}, false, false, evalErr
@@ -638,6 +697,34 @@ func (op *Merge) resolveActionValue(a mergeAction, evals map[string]ValueEvalFn,
 		}
 		return val, true, false, nil
 	}
+}
+
+// applyRelAction applies one per-property mergeAction to the relationship
+// instance ent names — a relationship bound by a clause preceding the MERGE
+// (rmp #2511). ent.relHandle is the row's own stable handle, so the write pins
+// the bound parallel instance rather than the pair's first edge; 0 means the
+// storage carries no stable handle and only the per-pair bag exists.
+//
+// A label-set action cannot occur on a relationship (sema rejects `SET r:Foo`),
+// so it is a defensive no-op. Value resolution reuses [Merge.resolveActionValue]
+// with the row unchanged, which is where a relationship RHS such as `rr.n + 1`
+// reads the bound relationship's current properties.
+func (op *Merge) applyRelAction(ent entityBinding, a mergeAction, evals map[string]ValueEvalFn, row Row) error {
+	if len(a.setLabels) > 0 {
+		return nil
+	}
+	pv, ok, remove, err := op.resolveActionValue(a, evals, row)
+	if err != nil {
+		return err
+	}
+	if remove {
+		delEdgeProp(op.mutator, ent.relSrcKey, ent.relDstKey, ent.relHandle, a.key)
+		return nil
+	}
+	if !ok {
+		return nil
+	}
+	return setEdgeProp(op.mutator, ent.relSrcKey, ent.relDstKey, ent.relHandle, a.key, pv)
 }
 
 // actionEvalRow returns a row for a per-row RHS evaluator: a copy of row with

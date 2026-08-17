@@ -189,6 +189,16 @@ type MergePattern struct {
 	// of every interned node (#2217). nil falls back to the full walk.
 	labelSrc MergeLabelSource
 
+	// rowScope maps every variable visible in the emitted row to its column, and
+	// outerRelCols carries the endpoint/handle triplet an [Expand] leaves in the
+	// row for each relationship variable a PRECEDING clause bound. Together they
+	// let an ON CREATE / ON MATCH action reach a target this pattern does not
+	// itself bind — see [resolveRowEntity] and rmp #2511. Both nil when the
+	// builder threads none in, which degrades to the pattern-local dispatch this
+	// operator had before.
+	rowScope     map[string]int
+	outerRelCols map[string]RelCols
+
 	nodes           []mergePatternNode
 	hops            []mergePatternHop // len(hops) == len(nodes)-1
 	onCreateActions []mergeAction
@@ -392,6 +402,39 @@ func (op *MergePattern) WithActionEvals(onCreate, onMatch map[string]ValueEvalFn
 	return op
 }
 
+// WithSchema attaches the full row scope: every variable visible in the row this
+// operator emits, mapped to its column. It is what lets an ON CREATE / ON MATCH
+// action name a target bound by a PRECEDING clause instead of by this pattern
+// (rmp #2511). The map must be the snapshot taken after every one of this
+// pattern's own columns was assigned, so it describes the emitted row exactly.
+// Returns op for chaining.
+func (op *MergePattern) WithSchema(schema map[string]int) *MergePattern {
+	op.rowScope = schema
+	return op
+}
+
+// WithOuterRelCols attaches, per relationship variable bound by a preceding
+// clause, the (src, edge, dst) column triplet the [Expand] operator writes into
+// the row. Without it such a variable's column holds a bare handle this operator
+// cannot tell from a NodeID, so an action targeting it could not be resolved
+// (rmp #2511). May be nil. Returns op for chaining.
+func (op *MergePattern) WithOuterRelCols(cols map[string]RelCols) *MergePattern {
+	op.outerRelCols = cols
+	return op
+}
+
+// resolveOuterEntity resolves an action target that names neither a chain node
+// nor a chain hop, against the full row scope attached by [MergePattern.WithSchema]
+// and [MergePattern.WithOuterRelCols]. Reports ok=false for a target that is not
+// an entity in scope, which the callers treat exactly as they always treated an
+// unresolvable target: skip, do not error.
+func (op *MergePattern) resolveOuterEntity(varName string, row Row) (entityBinding, bool) {
+	if op.rowScope == nil {
+		return entityBinding{}, false
+	}
+	return resolveRowEntity(varName, op.rowScope, op.outerRelCols, row, op.mutator)
+}
+
 // WithSetAllActions attaches whole-entity ON CREATE / ON MATCH SET actions
 // (`SET n = <expr>` / `SET n += <expr>`) on a chain node variable, which the
 // per-property action path cannot represent. Each is evaluated per row and
@@ -415,6 +458,11 @@ func (op *MergePattern) WithSetAllActions(onCreate, onMatch []MergeSetAllAction)
 // (rmp #2510). The per-property form (`ON CREATE SET r.k = v`) was never lost
 // because applyActions has always had the relationship arm; that asymmetry is
 // what hid the defect.
+//
+// The third arm — a target bound by a clause PRECEDING the MERGE — was absent for
+// the same reason and lost its write the same way, in BOTH action paths this time
+// (rmp #2511). It runs last, so a chain node or chain hop of the same name still
+// takes precedence, exactly as it did before.
 func (op *MergePattern) applySetAllActions(b binding, evalRow Row, actions []MergeSetAllAction) error {
 	for _, a := range actions {
 		if idx, ok := op.nodeIndexByVar(a.TargetVar); ok {
@@ -454,8 +502,32 @@ func (op *MergePattern) applySetAllActions(b binding, evalRow Row, actions []Mer
 			}
 			continue
 		}
-		// a.TargetVar names neither a chain node nor a chain relationship: not a
-		// target this operator can resolve. Skipped, matching applyActions.
+		// Not a chain variable: a node or relationship bound by a preceding
+		// clause is still a legitimate target (rmp #2511). A relationship
+		// resolved here carries the row's own stable handle, so the write pins
+		// the bound instance rather than the pair's first edge.
+		if ent, ok := op.resolveOuterEntity(a.TargetVar, evalRow); ok {
+			v, err := a.Eval(evalRow)
+			if err != nil {
+				return err
+			}
+			if ent.isRel {
+				if err := applyWholeEntityValueToEdge(
+					op.mutator, a.TargetVar, ent.relSrcKey, ent.relDstKey, ent.relHandle, a.IsReplace, v,
+				); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := applyWholeEntityValueToNode(
+				op.mutator, a.TargetVar, ent.nodeKey, a.IsReplace, v,
+			); err != nil {
+				return err
+			}
+			continue
+		}
+		// a.TargetVar names no entity in scope — an unbound or null target. Skipped,
+		// matching applyActions.
 	}
 	return nil
 }
@@ -1163,16 +1235,39 @@ func (op *MergePattern) applyActions(b binding, evalRow Row, actions []mergeActi
 			if !ok1 || !ok2 {
 				continue
 			}
-			if err := op.applyRelAction(srcKey, dstKey, act, evalRow, evals); err != nil {
+			// binding carries no per-edge identity, so the instance is pinned the
+			// only way this arm can pin it: the first handle on the resolved pair,
+			// with 0 meaning "no handle" (simple graph).
+			handle, hasHandle := op.mutator.FirstEdgeHandle(srcKey, dstKey)
+			if !hasHandle {
+				handle = 0
+			}
+			if err := op.applyRelAction(srcKey, dstKey, handle, act, evalRow, evals); err != nil {
 				return err
 			}
 			continue
 		}
-		// act.nodeVar names neither a chain node nor a chain relationship —
-		// parseMergeActions only recognises the `var.key = value` and
-		// `var:Label` shapes, so an out-of-scope or unrecognised target is
-		// simply not one this operator can apply; skip rather than error,
-		// matching Merge's own tolerant behaviour.
+		// Not a chain variable: a node or relationship bound by a preceding clause
+		// is still a legitimate target, and skipping it lost the write silently
+		// (rmp #2511). Unlike the hop arm above, a relationship resolved here
+		// carries the row's own stable handle, so the write pins the bound
+		// instance rather than the pair's first edge.
+		if ent, ok := op.resolveOuterEntity(act.nodeVar, evalRow); ok {
+			if ent.isRel {
+				if err := op.applyRelAction(ent.relSrcKey, ent.relDstKey, ent.relHandle, act, evalRow, evals); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := op.applyNodeAction(ent.nodeKey, act, evalRow, evals); err != nil {
+				return err
+			}
+			continue
+		}
+		// act.nodeVar names no entity in scope — parseMergeActions only recognises
+		// the `var.key = value` and `var:Label` shapes, so an unbound, null, or
+		// unrecognised target is simply not one this operator can apply; skip
+		// rather than error, matching Merge's own tolerant behaviour.
 	}
 	return nil
 }
@@ -1253,13 +1348,14 @@ func (op *MergePattern) applyNodeAction(key string, act mergeAction, evalRow Row
 	return nil
 }
 
-// applyRelAction applies one mergeAction to the relationship (srcKey,
-// dstKey). Only the single-property write and label-set shapes are
-// supported here (matching the pre-existing scope: whole-entity REPLACE /
-// entity-copy actions on a compound-pattern relationship are not yet
-// supported and are silently skipped, mirroring how such actions on an
-// out-of-scope target are already tolerated elsewhere in this operator).
-func (op *MergePattern) applyRelAction(srcKey, dstKey string, act mergeAction, evalRow Row, evals map[string]ValueEvalFn) error {
+// applyRelAction applies one mergeAction to the relationship instance pinned by
+// (srcKey, dstKey, handle), where handle is 0 when no stable per-edge identity is
+// available. The caller resolves the handle because the two call sites know
+// different things: the chain-hop arm has only the resolved node pair, while an
+// outer relationship target carries its own handle in the row (rmp #2511).
+// Only the single-property write and label-set shapes are handled here; the
+// whole-entity forms travel [MergePattern.applySetAllActions].
+func (op *MergePattern) applyRelAction(srcKey, dstKey string, handle uint64, act mergeAction, evalRow Row, evals map[string]ValueEvalFn) error {
 	if len(act.setLabels) > 0 {
 		// A relationship has no labels beyond its single type; SET r:Foo
 		// is rejected at compile time (sema), so this shape cannot occur
@@ -1278,7 +1374,7 @@ func (op *MergePattern) applyRelAction(srcKey, dstKey string, act mergeAction, e
 			// resolved (#2501): the per-pair aggregate can carry a key only a
 			// parallel SIBLING wrote, and removing that must count 0. The
 			// handle==0 fallback keeps the pairwise path byte-identical.
-			if handle, ok := op.mutator.FirstEdgeHandle(srcKey, dstKey); ok && handle != 0 {
+			if handle != 0 {
 				if m, isInst := op.mutator.(relInstancePropRemover); isInst {
 					m.DelEdgePropertyOnInstance(srcKey, dstKey, handle, act.key)
 					return nil
@@ -1298,7 +1394,7 @@ func (op *MergePattern) applyRelAction(srcKey, dstKey string, act mergeAction, e
 	if err := op.mutator.SetEdgeProperty(srcKey, dstKey, act.key, v); err != nil {
 		return fmt.Errorf("exec: MergePattern: SetEdgeProperty: %w", err)
 	}
-	if handle, ok := op.mutator.FirstEdgeHandle(srcKey, dstKey); ok && handle != 0 {
+	if handle != 0 {
 		if err := op.mutator.SetEdgePropertyByHandle(srcKey, dstKey, handle, act.key, v); err != nil {
 			return fmt.Errorf("exec: MergePattern: SetEdgePropertyByHandle: %w", err)
 		}

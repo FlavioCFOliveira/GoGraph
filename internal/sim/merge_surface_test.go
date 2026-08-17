@@ -435,7 +435,7 @@ func TestMergeSurface_RejectionCheck(t *testing.T) {
 // an empty stats record fires every clause, and a fully-exercised record is
 // clean.
 func TestMergeSurface_NonVacuityGate(t *testing.T) {
-	const wantClauses = 12 // five families + four branches + sub-cases + crash + survivor
+	const wantClauses = 16 // seven families + six branches + sub-cases + crash + survivor
 	if v := checkMergeSurfaceNonVacuity(0, newMergeSurfaceStats()); len(v) != wantClauses {
 		t.Fatalf("empty stats must fire all %d clauses, got %d: %v", wantClauses, len(v), v)
 	}
@@ -470,21 +470,36 @@ func TestMergeSurface_NonVacuityGate(t *testing.T) {
 		"a": "wp3", "b": "wp4", "map": map[string]any{mergePairRelKey: int64(7)}})
 	ms.noteOp(pairSetAllOp, true, oracle)
 	oracle.ApplyMerge(pairSetAllOp.Cypher, pairSetAllOp.Params)
+	// The two outer-target arms, each on a fresh ordered pair so their ON CREATE
+	// branch fires (rmp #2511). The outer node is the counter family's Person,
+	// which the model already indexes by name; the outer relationship is the
+	// PAIRED edge the loop above created.
+	pairOuterOp := mergeOp(tmplMergePairOuter, map[string]any{
+		"a": "wp3", "b": "wp5", "m": "Ada", "v": int64(11)})
+	ms.noteOp(pairOuterOp, true, oracle)
+	oracle.ApplyMerge(pairOuterOp.Cypher, pairOuterOp.Params)
+	pairOuterRelOp := mergeOp(tmplMergePairOuterRel, map[string]any{
+		"a": "wp4", "b": "wp5", "x": "wp0", "y": "wp1", "v": int64(13)})
+	ms.noteOp(pairOuterRelOp, true, oracle)
+	oracle.ApplyMerge(pairOuterRelOp.Cypher, pairOuterRelOp.Params)
 	ms.noteOp(Op{Kind: OpMalformed, Cypher: tmplMergeParamMap}, false, oracle)
 	ms.noteRecovery(oracle)
 
-	if seen := ms.patternCasesSeen(); seen != mergePatternCasesRequired {
-		t.Fatalf("stats recorded %d sub-cases, want %d", seen, mergePatternCasesRequired)
+	if seen := ms.patternCasesSeen(); seen < mergePatternCasesRequired {
+		t.Fatalf("stats recorded %d sub-cases, want at least %d", seen, mergePatternCasesRequired)
 	}
 	if v := checkMergeSurfaceNonVacuity(0, ms); len(v) > 0 {
 		t.Fatalf("fully-exercised stats must be clean: %v", v)
 	}
 
-	// The sub-case clause must genuinely discriminate: drop one and it fires.
-	ms.patternCases[mergePatternOneEndpoint] = false
+	// The sub-case clause must genuinely discriminate: drop sub-cases until the
+	// record falls below the threshold and exactly that one clause fires.
+	for c := mergePatternCase(0); c < mergePatternCaseCount && ms.patternCasesSeen() >= mergePatternCasesRequired; c++ {
+		ms.patternCases[c] = false
+	}
 	v := checkMergeSurfaceNonVacuity(0, ms)
 	if len(v) != 1 || !strings.Contains(v[0].Message, "sub-cases") {
-		t.Fatalf("dropping a sub-case must fire exactly the sub-case clause, got: %v", v)
+		t.Fatalf("dropping sub-cases must fire exactly the sub-case clause, got: %v", v)
 	}
 }
 

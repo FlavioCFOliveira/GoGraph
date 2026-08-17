@@ -402,6 +402,12 @@ func resolveRelBindingFromRow(rc *RelCols, row Row, mut GraphMutator) (resolvedE
 // sentinel [errNullTarget] so callers can treat the row as a no-op rather
 // than a hard error — matches the openCypher contract that DELETE / REMOVE /
 // SET on a NULL target is silently skipped.
+//
+// An UNSET slot — a plain nil interface rather than the null singleton, which a
+// row widened past its bound columns carries — is the same no-op. It used to
+// reach [expr.IsNull] and panic there on the nil receiver, crashing the whole
+// statement; `MATCH (m:M {name:'absent'}) MERGE (z:P {name:'z'}) ON CREATE SET
+// m.w = 1` is one statement that produced such a row.
 func resolveNodeIDFromRow(varName string, schema map[string]int, row Row) (graph.NodeID, error) {
 	colIdx, ok := schema[varName]
 	if !ok {
@@ -416,7 +422,7 @@ func resolveNodeIDFromRow(varName string, schema map[string]int, row Row) (graph
 	case expr.NodeValue:
 		return graph.NodeID(v.ID), nil
 	}
-	if expr.IsNull(row[colIdx]) {
+	if row[colIdx] == nil || expr.IsNull(row[colIdx]) {
 		return 0, errNullTarget
 	}
 	return 0, fmt.Errorf("variable %q is not IntegerValue/NodeValue (got %T)", varName, row[colIdx])

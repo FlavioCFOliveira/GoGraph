@@ -257,10 +257,17 @@ func expectedOpCounters(op Op, oracle *GraphOracle) (want exec.QueryCounters, ok
 		// has its own helper.
 		return expectedCopyKnowsCounters(op, oracle)
 
-	case tmplMergePersonCounter, tmplMergePersonSetAll, tmplMergePairPattern:
-		// The MERGE-surface templates (rmp #2461) — two-branch node MERGE,
-		// whole-map ON CREATE assignment, and whole-pattern MERGE — are derived
-		// by a dedicated helper from the pre-apply model.
+	case tmplMergePersonCounter, tmplMergePersonSetAll, tmplMergePairPattern,
+		tmplMergePairSetAll, tmplMergePairOuter, tmplMergePairOuterRel:
+		// The MERGE-surface templates — two-branch node MERGE, whole-map ON CREATE
+		// assignment, and whole-pattern MERGE (rmp #2461), the whole-entity
+		// relationship action (rmp #2510), and the two outer-target actions
+		// (rmp #2511) — are derived by a dedicated helper from the pre-apply model.
+		//
+		// tmplMergePairSetAll was MISSING from this list until rmp #2511, so its
+		// arm in expectedMergeSurfaceCounters was unreachable and #2510's counters
+		// guard never adjudicated anything: the family's only live assertion was
+		// the read-back in CheckMergePairRelProps.
 		return expectedMergeSurfaceCounters(op, oracle)
 
 	case tmplForeachCreatePersons, tmplForeachSetTag:
