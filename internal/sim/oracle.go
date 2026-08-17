@@ -533,6 +533,12 @@ func (o *GraphOracle) ApplyMerge(cypher string, params map[string]any) OracleRes
 		// The driving MATCH binds nothing, so the MERGE runs zero times: a
 		// committed statement that changed nothing (rmp #2512).
 		return o.recordOp(cypher, params, o.applyMergeZeroDriver())
+	case tmplMergeHandleOuterRelCreate:
+		// Node-only MERGE with an outer-RELATIONSHIP action (rmp #2515), ON CREATE.
+		return o.recordOp(cypher, params, o.applyMergeHandleOuterRel(params, true))
+	case tmplMergeHandleOuterRelMatch:
+		// The same shape, ON MATCH.
+		return o.recordOp(cypher, params, o.applyMergeHandleOuterRel(params, false))
 	}
 	if cypher != tmplMergePerson {
 		return o.recordOp(cypher, params, OracleResult{ErrorMsg: "oracle: unmodelled MERGE"})

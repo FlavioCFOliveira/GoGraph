@@ -107,6 +107,26 @@ package sim
 //     phantom write is reported, and [CheckMergeZeroDriverAbsent] fails at the
 //     next check — including after a crash, which is what proves a phantom node
 //     was not merely created but durably persisted.
+//
+//  8. An outer-relationship action on the NODE-ONLY merge operator must reach the
+//     relationship, not a node that happens to share the handle's value. This is
+//     rmp #2515, and it is the shape semantics 6 does NOT cover: [tmplMergePairOuterRel]
+//     routes to MergePattern, which matches an action target by variable NAME and
+//     is therefore immune, whereas the node-only [exec.Merge] resolved the target
+//     by reading its row column as a node id. Since rmp #2317 a relationship rides
+//     in the row as a bare [expr.IntegerValue] holding its stable HANDLE, which
+//     shares its representation with graph.NodeID, so on a graph that happened to
+//     hold a node whose id equalled that handle the property landed on THAT
+//     unrelated node — a MISDIRECTED write, not a lost one, reported as
+//     `+properties = 1` either way and therefore invisible to the counters oracle.
+//     [tmplMergeHandleOuterRelCreate] and [tmplMergeHandleOuterRelMatch] drive the
+//     shape in both branches. The collision is a property of the GRAPH rather than
+//     of the statement, so it is CONSTRUCTED at run start by
+//     [seedMergeHandleCollision] and re-VERIFIED on every check by
+//     [CheckMergeHandleCollision], which also owns the read-back that
+//     discriminates this defect from #2510's: the relationship carrying the
+//     modelled value AND no Person carrying the key at all. Either half alone is
+//     satisfied by a lost write; only the pair identifies a misdirected one.
 
 import (
 	"cmp"
@@ -116,6 +136,8 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
 // MERGE-surface templates (rmp #2461). Like every workload template they are
@@ -177,7 +199,57 @@ const (
 	// template could not have covered the defect.
 	tmplMergeZeroDriverPair = "MATCH (m:Person {name:$absent}) " +
 		"MERGE (a:Person {name:$za})-[r:PAIRED]->(b:Person {name:$zb})"
+	// tmplMergeHandleOuterRelCreate is the shape rmp #2515 MISDIRECTED: a
+	// NODE-ONLY MERGE whose ON CREATE action targets a relationship bound by the
+	// preceding clause. Its MATCH prefix is [tmplMergePairOuterRel]'s, but the
+	// MERGE is a bare node pattern, so it routes to the node-only [exec.Merge]
+	// operator instead of MergePattern — the operator that read the target's row
+	// column as a node id. See semantics 8 in the file comment.
+	tmplMergeHandleOuterRelCreate = "MATCH (x:Person {name:$x})-[k:PAIRED]->(y:Person {name:$y}) " +
+		"MERGE (n:Person {name:$n}) ON CREATE SET k." + mergePairRelKey + " = $v"
+	// tmplMergeHandleOuterRelMatch is the ON MATCH branch of the same shape. It is
+	// a separate template rather than a rendered one because the two branches
+	// reach the action applier down DIFFERENT paths — the create branch builds its
+	// own row before applying the actions — and each must be modelled exactly.
+	tmplMergeHandleOuterRelMatch = "MATCH (x:Person {name:$x})-[k:PAIRED]->(y:Person {name:$y}) " +
+		"MERGE (n:Person {name:$n}) ON MATCH SET k." + mergePairRelKey + " = $v"
+	// tmplMergeHandleCreatePerson creates one node of the handle-collision fixture.
+	// It is issued only by [seedMergeHandleCollision], never by an actor, and it
+	// carries ONLY the name so the modelled property set is exactly [newPairNode]'s.
+	tmplMergeHandleCreatePerson = "CREATE (n:Person {name:$name})"
+	// tmplMergeHandleCreateEdge creates the fixture's single PAIRED relationship,
+	// AFTER the handle counter has been raised, so the engine's own write path is
+	// what stamps the colliding handle. Also issued only by
+	// [seedMergeHandleCollision].
+	tmplMergeHandleCreateEdge = "MATCH (x:Person {name:$x}),(y:Person {name:$y}) " +
+		"CREATE (x)-[:" + relPaired + "]->(y)"
 )
+
+// The handle-collision fixture's node names (rmp #2515). They are in their own
+// namespace, disjoint from every name the workload binds — [HonestWriter.uniqueName]
+// always produces "<FirstName>-<n>", [mergePairKeys] is "wp<n>" and [mergeZeroKeys]
+// is "zd<n>" — and they are deliberately kept OUT of the oracle's name index (see
+// [GraphOracle.seedMergeHandleFixture]), so no actor can draw, mutate, or DELETE
+// them. A deleted endpoint would silently turn the family's driving MATCH into a
+// zero-row one and make its whole expectation wrong.
+const (
+	// mergeHandleSrcName and mergeHandleDstName are the endpoints of the one
+	// PAIRED relationship every op of the family targets.
+	mergeHandleSrcName = "hc-src"
+	mergeHandleDstName = "hc-dst"
+	// mergeHandleDecoyName is the node whose id the fixture makes equal to that
+	// relationship's stable handle. It is an endpoint of NOTHING and is named by
+	// NO statement the family issues, so a property appearing on it can only have
+	// arrived by the misdirection rmp #2515 fixed.
+	mergeHandleDecoyName = "hc-decoy"
+)
+
+// mergeHandleNodeKeys is the closed key namespace of the node the handle-collision
+// family MERGES. It is small so both branches fire early in a run: the first draw
+// of a key creates the node (ON CREATE) and every later draw of it matches (ON
+// MATCH). Like the fixture endpoints these nodes are never indexed by name, so no
+// other actor can reach them.
+var mergeHandleNodeKeys = [...]string{"hk0", "hk1", "hk2"}
 
 // mergeOuterNodeKey is the single property key the outer-NODE action writes. It
 // is in [schemaMutationProps], so the per-name Person probe verifies it in both
@@ -339,6 +411,39 @@ func (w SchemaMutationWriter) opMergePairOuterRel(seed *Seed, edges []pairedEdge
 		"a": a, "b": b,
 		"x": e.src, "y": e.dst,
 		"v": int64(seed.IntN(1000)),
+	}}
+}
+
+// opMergeHandleOuterRel builds a handle-collision op (rmp #2515): a NODE-ONLY
+// MERGE whose action targets the fixture's PAIRED relationship. One draw in two
+// selects the ON CREATE branch and the rest the ON MATCH branch, so both reach
+// the engine over a run; the merged node is drawn from [mergeHandleNodeKeys], and
+// which branch actually FIRES then follows from whether that key is already
+// present, exactly as the oracle adjudicates it.
+//
+// The family is emitted only when the fixture [seedMergeHandleCollision] builds
+// is modelled, and falls back to the zero-row-driver node op otherwise. The
+// fallback is NOT dead code: [runSchemaMutationCfg] runs the bootstrap, but the
+// GENERIC tick loop ([Simulator.Run]) — which [RecordTrace] and therefore the
+// record/replay/shrink integration drive this same workload through — does not,
+// and without the fixture the family's driving MATCH would bind nothing and its
+// whole expectation would be wrong. The fallback is the zero-row driver precisely
+// because that family is a committed no-op on ANY graph, so it can never itself
+// become a source of divergence. That the family is never inert in the run it was
+// built for is what [checkMergeSurfaceNonVacuity] asserts.
+func (w SchemaMutationWriter) opMergeHandleOuterRel(seed *Seed, oracle *GraphOracle) Op {
+	tmpl := tmplMergeHandleOuterRelMatch
+	if seed.IntN(2) == 0 {
+		tmpl = tmplMergeHandleOuterRelCreate
+	}
+	n := mergeHandleNodeKeys[seed.IntN(len(mergeHandleNodeKeys))]
+	v := int64(seed.IntN(1000))
+	if oracle.pairedEdgeBetween(mergeHandleSrcName, mergeHandleDstName) == nil {
+		return w.opMergeZeroDriverNode(seed)
+	}
+	return Op{Kind: OpMerge, Cypher: tmpl, Params: map[string]any{
+		"x": mergeHandleSrcName, "y": mergeHandleDstName,
+		"n": n, "v": v,
 	}}
 }
 
@@ -560,6 +665,40 @@ func (o *GraphOracle) applyMergePairOuterRel(params map[string]any) OracleResult
 	}
 	outer.Properties[mergePairRelKey] = params["v"]
 	return OracleResult{Committed: true, NodesCreated: 2, EdgesCreated: 1}
+}
+
+// applyMergeHandleOuterRel advances the model for the handle-collision families
+// (rmp #2515). onCreate selects which branch the statement carries.
+//
+// The MERGE is a NODE-ONLY one over [mergeHandleNodeKeys], so the match decision
+// is "does any Person carry this name" — [GraphOracle.anyPersonNamed] rather than
+// the name index, because the family's nodes are deliberately not indexed. The
+// branch fires only on the side it names: ON CREATE when the node was created, ON
+// MATCH when it was matched. When it fires it writes $v onto the FIXTURE
+// relationship the preceding MATCH bound — never onto the merged node, and never
+// onto the decoy, which is what [CheckMergeHandleCollision] reads back.
+func (o *GraphOracle) applyMergeHandleOuterRel(params map[string]any, onCreate bool) OracleResult {
+	x, okX := paramString(params, "x")
+	y, okY := paramString(params, "y")
+	n, okN := paramString(params, "n")
+	if !okX || !okY || !okN {
+		return OracleResult{ErrorMsg: "oracle: merge handle outer-rel missing endpoint/merge key"}
+	}
+	outer := o.pairedEdgeBetween(x, y)
+	if outer == nil {
+		return OracleResult{ErrorMsg: "oracle: merge handle outer-rel names an unmodelled PAIRED edge: " + x + "->" + y}
+	}
+	matched := o.anyPersonNamed(n)
+	if !matched {
+		o.newPairNode(n)
+	}
+	if (onCreate && !matched) || (!onCreate && matched) {
+		outer.Properties[mergePairRelKey] = params["v"]
+	}
+	if matched {
+		return OracleResult{Committed: true}
+	}
+	return OracleResult{Committed: true, NodesCreated: 1}
 }
 
 // applyMergeZeroDriver advances the model for the zero-row-driver families
@@ -787,6 +926,33 @@ func expectedMergeSurfaceCounters(op Op, oracle *GraphOracle) (exec.QueryCounter
 			NodesCreated: 2, RelationshipsCreated: 1, PropertiesSet: 3, LabelsAdded: 2,
 		}, true
 
+	case tmplMergeHandleOuterRelCreate, tmplMergeHandleOuterRelMatch:
+		// The driving MATCH binds EXACTLY ONE row — the fixture holds one PAIRED
+		// edge between two uniquely-named Persons — so the MERGE runs once. The
+		// node contributes 1 node / 1 label / 1 property (the pattern's name) when
+		// it is created and nothing when it is matched, and the branch adds ONE
+		// assignment on the side it names. A SET counts even when it assigns the
+		// value the target already carried, so that term is unconditional.
+		//
+		// This arm CANNOT see rmp #2515: a misdirected write reports +1 property
+		// exactly as a correct one does. The counters guard is here to pin the
+		// create-vs-match adjudication; the misdirection is caught by
+		// [CheckMergeHandleCollision]'s read-back alone.
+		n, okN := paramString(op.Params, "n")
+		if !okN {
+			return exec.QueryCounters{}, false
+		}
+		matched := oracle.anyPersonNamed(n)
+		onCreate := op.Cypher == tmplMergeHandleOuterRelCreate
+		want := exec.QueryCounters{}
+		if !matched {
+			want.NodesCreated, want.LabelsAdded, want.PropertiesSet = 1, 1, 1
+		}
+		if (onCreate && !matched) || (!onCreate && matched) {
+			want.PropertiesSet++
+		}
+		return want, true
+
 	case tmplMergeZeroDriverNode, tmplMergeZeroDriverPair:
 		// The leading MATCH binds nothing, so the MERGE runs zero times and the
 		// statement reports the ALL-ZERO effect set — unconditionally, with no
@@ -852,6 +1018,238 @@ func CheckMergeZeroDriverAbsent(tick int64, engine *EngineAdapter) []Violation {
 						"produced no rows CREATED the pattern (rmp #2512)", n, a, b)})
 			}
 		}
+	}
+	return vs
+}
+
+// mergeHandleFixture is the CONSTRUCTED handle/id collision the rmp #2515 family
+// needs: the engine's stable handle for the fixture's one PAIRED relationship,
+// and the id of the decoy node that handle collides with.
+//
+// The two node KEYS are captured once, at construction, and reused for every later
+// verification. Keys are the graph's natural identity and survive a reopen, so a
+// re-verification after crash/recovery addresses the same slot the fixture built.
+type mergeHandleFixture struct {
+	srcKey, dstKey string
+	handle         uint64
+	decoyID        graph.NodeID
+}
+
+// seedMergeHandleCollision builds the graph state the rmp #2515 family needs and
+// PROVES it was built, before the first tick runs.
+//
+// The precondition — a node whose id equals a relationship's stable handle — is a
+// property of the graph, not of any statement, so it cannot be drawn for: the
+// equivalent end-to-end matrix in cypher/merge_outer_target_test.go reproduced it
+// on about 1% of its runs. It is therefore constructed:
+//
+//  1. create the two endpoints and the decoy, so their ids exist;
+//  2. raise the per-graph handle counter to the decoy's id
+//     ([lpg.Graph.SeedEdgeHandle]);
+//  3. create the relationship, so the ENGINE's own write path stamps the
+//     colliding handle rather than the harness back-dating one;
+//  4. read the handle back with [lpg.Graph.FirstEdgeHandle] and require it to
+//     equal the decoy's id.
+//
+// Step 4 is what stops the arm decaying into a green run that proves nothing. The
+// counter is monotone — seeding at or below it is a no-op — so step 2 can silently
+// fail on a graph that has already minted handles; every violation this returns
+// says so rather than letting the family run over a graph where the defect it
+// exists to catch could not manifest.
+//
+// The three statements run through the engine but NOT through the op dispatch:
+// they are setup, not workload, so the oracle is advanced once by
+// [GraphOracle.seedMergeHandleFixture] instead.
+func seedMergeHandleCollision(ctx context.Context, sm *Simulator) (*mergeHandleFixture, []Violation) {
+	fail := func(format string, args ...any) []Violation {
+		return []Violation{{Kind: ViolationGraphIntegrity, Tick: 0, Op: "merge handle-collision fixture",
+			Message: fmt.Sprintf(format, args...)}}
+	}
+	g := sm.graph()
+	if g == nil {
+		return nil, fail("no live graph behind the engine: the handle/id collision cannot be constructed, " +
+			"so the node-only outer-relationship family would run over a graph that cannot expose rmp #2515")
+	}
+	for _, name := range []string{mergeHandleSrcName, mergeHandleDstName, mergeHandleDecoyName} {
+		op := Op{Kind: OpCreate, Cypher: tmplMergeHandleCreatePerson, Params: map[string]any{"name": name}}
+		if committed, _ := sm.executeCounted(ctx, op); !committed {
+			return nil, fail("fixture CREATE of Person{name:%q} did not commit", name)
+		}
+	}
+
+	var srcKey, dstKey string
+	var decoyID graph.NodeID
+	var decoyFound bool
+	g.AdjList().Mapper().Walk(func(id graph.NodeID, key string) bool {
+		switch personNameByID(g, id) {
+		case mergeHandleSrcName:
+			srcKey = key
+		case mergeHandleDstName:
+			dstKey = key
+		case mergeHandleDecoyName:
+			decoyID, decoyFound = id, true
+		}
+		return true
+	})
+	switch {
+	case srcKey == "" || dstKey == "":
+		return nil, fail("fixture endpoints %q/%q are not interned in the graph", mergeHandleSrcName, mergeHandleDstName)
+	case !decoyFound:
+		return nil, fail("fixture decoy %q is not interned in the graph", mergeHandleDecoyName)
+	case decoyID == 0:
+		// 0 is the reserved no-handle sentinel, so no relationship can ever be
+		// stamped with it and the collision would be unconstructible.
+		return nil, fail("fixture decoy %q received node id 0, the reserved no-handle sentinel", mergeHandleDecoyName)
+	}
+
+	g.SeedEdgeHandle(uint64(decoyID))
+	edge := Op{Kind: OpCreate, Cypher: tmplMergeHandleCreateEdge,
+		Params: map[string]any{"x": mergeHandleSrcName, "y": mergeHandleDstName}}
+	if committed, _ := sm.executeCounted(ctx, edge); !committed {
+		return nil, fail("fixture CREATE of the %s relationship did not commit", relPaired)
+	}
+
+	handle, ok := g.FirstEdgeHandle(srcKey, dstKey)
+	if !ok {
+		return nil, fail("the fixture %s relationship carries no stable handle", relPaired)
+	}
+	if handle != uint64(decoyID) {
+		return nil, fail("handle = %d, want %d (the decoy Person's node id): the handle/id collision was NOT "+
+			"constructed, so the node-only outer-relationship family cannot expose rmp #2515 and its green "+
+			"result would prove nothing", handle, decoyID)
+	}
+	sm.oracle.seedMergeHandleFixture()
+	return &mergeHandleFixture{srcKey: srcKey, dstKey: dstKey, handle: handle, decoyID: decoyID}, nil
+}
+
+// seedMergeHandleFixture advances the model for [seedMergeHandleCollision]: the
+// two endpoints, the decoy, and the property-free PAIRED relationship between the
+// endpoints. All three nodes go in as [GraphOracle.newPairNode] does — counted,
+// named, but NOT indexed by name — so count parity and the by-name edge probes
+// reach them while no actor can draw or delete them.
+func (o *GraphOracle) seedMergeHandleFixture() {
+	srcID := o.newPairNode(mergeHandleSrcName)
+	dstID := o.newPairNode(mergeHandleDstName)
+	o.newPairNode(mergeHandleDecoyName)
+	o.edges[edgeKey{src: srcID, dst: dstID, label: relPaired}] = &EdgeState{
+		SrcID: srcID, DstID: dstID, Label: relPaired, Properties: map[string]any{},
+	}
+}
+
+// personNameByID returns the `name` property of the node with this id, or "" when
+// the node does not exist or carries no string name. It reads through the
+// callback form so the lookup allocates no property map.
+func personNameByID(g *lpg.Graph[string, float64], id graph.NodeID) string {
+	var name string
+	g.NodePropertiesByIDFunc(id, func(k string, pv lpg.PropertyValue) {
+		if k != "name" {
+			return
+		}
+		if s, ok := pv.String(); ok {
+			name = s
+		}
+	})
+	return name
+}
+
+// CheckMergeHandleCollision is the rmp #2515 detector. It asserts three things,
+// and needs all three: the PRECONDITION still holds, the relationship carries what
+// the model says it carries, and NO Person carries the key at all.
+//
+//   - Precondition. The fixture relationship's stable handle must still equal the
+//     decoy's node id, and the node with that id must still be the decoy. A
+//     regression that moved either would leave the family driving a shape on which
+//     a misdirected write has nowhere wrong to land — so it would pass for the
+//     wrong reason. Re-running this after every crash is what proves the collision
+//     survives recovery rather than assuming handles and node ids are both durable.
+//
+//   - Present-direction. The relationship must carry the value the model wrote.
+//     This overlaps [CheckMergePairRelProps]'s walk deliberately: that checker
+//     reports a LOST whole-entity write (rmp #2510), and this one reports a
+//     MISDIRECTED per-property write, which is a different defect with the same
+//     first symptom.
+//
+//   - Absent-direction. No Person may carry [mergePairRelKey] — no workload
+//     template ever writes it to a node — so a Person that has it acquired it by
+//     the misdirection. This is the half neither the counters oracle nor the
+//     relationship read-back can see: the statement reports `+properties = 1`
+//     whether the write landed on the relationship or on the decoy, and a lost
+//     write leaves the relationship null with no node holding the value, whereas a
+//     misdirected one leaves the relationship null AND the decoy holding it.
+func CheckMergeHandleCollision(tick int64, f *mergeHandleFixture, g *lpg.Graph[string, float64],
+	oracle *GraphOracle, engine *EngineAdapter,
+) []Violation {
+	var vs []Violation
+	add := func(kind ViolationKind, op, format string, args ...any) {
+		vs = append(vs, Violation{Kind: kind, Tick: tick, Op: op, Message: fmt.Sprintf(format, args...)})
+	}
+	if f == nil || g == nil {
+		add(ViolationGraphIntegrity, "merge handle-collision premise",
+			"no handle-collision fixture is bound: the node-only outer-relationship family (rmp #2515) "+
+				"ran without the graph state that makes a misdirected write observable")
+		return vs
+	}
+
+	// Precondition, from the engine's own durable identity rather than from memory.
+	switch handle, ok := g.FirstEdgeHandle(f.srcKey, f.dstKey); {
+	case !ok:
+		add(ViolationGraphIntegrity, "merge handle-collision premise",
+			"the fixture %s(%q->%q) carries no stable handle any more", relPaired, mergeHandleSrcName, mergeHandleDstName)
+	case handle != f.handle:
+		add(ViolationOracleDeviation, "merge handle-collision premise",
+			"the fixture relationship's handle changed from %d to %d: its identity is not stable across the run",
+			f.handle, handle)
+	default:
+		if got := personNameByID(g, graph.NodeID(handle)); got != mergeHandleDecoyName {
+			add(ViolationOracleDeviation, "merge handle-collision premise",
+				"node id %d is %q, want the decoy %q: the handle/id COLLISION no longer holds, so the family "+
+					"is exercising a shape on which rmp #2515 could not manifest and a clean run proves nothing",
+				handle, got, mergeHandleDecoyName)
+		}
+	}
+
+	// Present-direction: the relationship holds what the model says it holds.
+	outer := oracle.pairedEdgeBetween(mergeHandleSrcName, mergeHandleDstName)
+	if outer == nil {
+		add(ViolationGraphIntegrity, "merge handle-collision premise",
+			"the fixture %s(%q->%q) is not modelled", relPaired, mergeHandleSrcName, mergeHandleDstName)
+		return vs
+	}
+	if want, modelled := outer.Properties[mergePairRelKey]; modelled {
+		q := fmt.Sprintf("MATCH (x:Person {name:'%s'})-[k:%s]->(y:Person {name:'%s'}) RETURN k.%s",
+			mergeHandleSrcName, relPaired, mergeHandleDstName, mergePairRelKey)
+		got, err := engine.projectRowValues(context.Background(), q, 1)
+		switch {
+		case err != nil:
+			add(ViolationGraphIntegrity, "merge handle-collision rel-prop", "read %q failed: %v", q, err)
+		case got == nil:
+			add(ViolationACIDDurability, "merge handle-collision rel-prop",
+				"the fixture %s(%q->%q) is absent (did not survive recovery)",
+				relPaired, mergeHandleSrcName, mergeHandleDstName)
+		case got[0] == nil || expr.IsNull(got[0]):
+			add(ViolationOracleDeviation, "merge handle-collision rel-prop",
+				"fixture relationship .%s is null, want %s: the node-only MERGE's outer-relationship action "+
+					"did not reach the relationship (rmp #2515)", mergePairRelKey, canonicalValueString(want))
+		default:
+			if wantStr := canonicalValueString(want); got[0].String() != wantStr {
+				add(ViolationOracleDeviation, "merge handle-collision rel-prop",
+					"fixture relationship .%s = %s, want %s", mergePairRelKey, got[0].String(), wantStr)
+			}
+		}
+	}
+
+	// Absent-direction: the misdirected write, which nothing else can see.
+	q := fmt.Sprintf("MATCH (p:Person) WHERE p.%s IS NOT NULL RETURN count(p)", mergePairRelKey)
+	n, err := engine.scalarCount(q)
+	if err != nil {
+		add(ViolationGraphIntegrity, "merge handle-collision decoy", "read %q failed: %v", q, err)
+		return vs
+	}
+	if n != 0 {
+		add(ViolationOracleDeviation, "merge handle-collision decoy",
+			"%d Person node(s) carry .%s, want 0: no template ever writes that key to a node, so a MERGE's "+
+				"outer-relationship action was MISDIRECTED onto the node whose id equals the relationship's "+
+				"stable handle (%d, %q) — rmp #2515", n, mergePairRelKey, f.handle, mergeHandleDecoyName)
 	}
 	return vs
 }
@@ -995,6 +1393,9 @@ type mergeSurfaceStats struct {
 	// non-zero for the run to be evidence: the family's whole assertion is that
 	// nothing happened, which an unissued family satisfies trivially.
 	zeroDriverNodeIssued, zeroDriverPairIssued int
+	// handleOuterRelIssued counts the NODE-ONLY MERGE ops whose action targets the
+	// handle-collision fixture's relationship (rmp #2515).
+	handleOuterRelIssued int
 	// counterCreated / counterMatched report that the ON CREATE and the ON
 	// MATCH branch of the counter family each fired at least once.
 	counterCreated, counterMatched bool
@@ -1011,6 +1412,13 @@ type mergeSurfaceStats struct {
 	// the outer write runs at all: a run that only ever MATCHED would never have
 	// exercised the rmp #2511 shape, and its green result would be vacuous.
 	pairOuterCreated, pairOuterRelCreated bool
+	// handleOuterRelCreated / handleOuterRelMatched report that the node-only
+	// outer-relationship family (rmp #2515) actually WROTE down each of its two
+	// branches — ON CREATE over a merge key it created, ON MATCH over one it
+	// matched. Issuing a template whose branch never fires writes nothing, so
+	// without both flags a green run would be consistent with the misdirected
+	// write never having been attempted.
+	handleOuterRelCreated, handleOuterRelMatched bool
 	// crashAfterMerge reports that at least one crash/recovery happened after a
 	// MERGE-surface op had already committed.
 	crashAfterMerge bool
@@ -1099,6 +1507,24 @@ func (ms *mergeSurfaceStats) noteOp(op Op, committed bool, oracle *GraphOracle) 
 		ms.patternCases[c] = true
 		if c != mergePatternWhole {
 			ms.pairOuterRelCreated = true
+		}
+	case tmplMergeHandleOuterRelCreate, tmplMergeHandleOuterRelMatch:
+		ms.handleOuterRelIssued++
+		if !committed {
+			return
+		}
+		n, ok := paramString(op.Params, "n")
+		if !ok {
+			return
+		}
+		// The branch that FIRED, adjudicated on the pre-apply model exactly as the
+		// oracle and the counters arm adjudicate it.
+		matched := oracle.anyPersonNamed(n)
+		if op.Cypher == tmplMergeHandleOuterRelCreate && !matched {
+			ms.handleOuterRelCreated = true
+		}
+		if op.Cypher == tmplMergeHandleOuterRelMatch && matched {
+			ms.handleOuterRelMatched = true
 		}
 	case tmplMergeZeroDriverNode:
 		ms.zeroDriverNodeIssued++
@@ -1197,6 +1623,17 @@ func checkMergeSurfaceNonVacuity(tick int64, ms *mergeSurfaceStats) []Violation 
 	}
 	if !ms.pairOuterRelCreated {
 		fail("the outer-relationship MERGE action never took its ON CREATE branch, so the outer-relationship write never ran")
+	}
+	if ms.handleOuterRelIssued == 0 {
+		fail("no node-only MERGE … SET <outer relationship>.x op was issued: the handle-collision arm was vacuous (rmp #2515)")
+	}
+	if !ms.handleOuterRelCreated {
+		fail("the node-only outer-relationship MERGE never took its ON CREATE branch, so the misdirection-prone " +
+			"write never ran down the create path (rmp #2515)")
+	}
+	if !ms.handleOuterRelMatched {
+		fail("the node-only outer-relationship MERGE never took its ON MATCH branch, so the misdirection-prone " +
+			"write never ran down the match path (rmp #2515)")
 	}
 	// The zero-row-driver family asserts an ABSENCE, so an unissued family passes
 	// its checker trivially. These two clauses are what stop that silent pass.

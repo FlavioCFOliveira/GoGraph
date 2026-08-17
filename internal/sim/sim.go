@@ -160,7 +160,11 @@ type Simulator struct {
 	// crash mode; nil when crashes are disabled (the engine is then a plain
 	// in-memory engine with no durable layer). On a crash it is reopened from the
 	// durable SimDisk image via real recovery.
-	store    *SimStore
+	store *SimStore
+	// memGraph is the plain in-memory graph the non-durable path builds, retained
+	// so [Simulator.graph] can reach the live graph in BOTH modes. It is nil
+	// whenever store is non-nil (the durable path owns its graph).
+	memGraph *lpg.Graph[string, float64]
 	clock    *VirtualClock
 	disk     *SimDisk
 	oracle   *GraphOracle
@@ -285,10 +289,26 @@ func New(cfg Config) (*Simulator, error) {
 		// value for every scenario except mem-pressure (which clamps the logical
 		// budgets); a zero EngineOptions is byte-identical to cypher.NewEngine.
 		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: cfg.Multigraph})
+		s.memGraph = g
 		s.engine = NewEngineAdapter(cypher.NewEngineWithOptions(g, cfg.EngineOpts))
 	}
 
 	return s, nil
+}
+
+// graph returns the live graph the engine writes through, in either mode: the
+// recovered store's graph on the durable path (which [Simulator.maybeCrash]
+// replaces wholesale on every recovery, so this must never be cached across a
+// crash) and the retained in-memory graph otherwise.
+//
+// It exists for the few checks that must read the engine's own durable IDENTITY
+// rather than a Cypher projection — the stable edge handles and node ids the
+// handle-collision fixture (rmp #2515) is built on, which no query surfaces.
+func (s *Simulator) graph() *lpg.Graph[string, float64] {
+	if s.store != nil {
+		return s.store.Graph()
+	}
+	return s.memGraph
 }
 
 // Run executes the safety-phase tick loop. Each tick advances the clock,

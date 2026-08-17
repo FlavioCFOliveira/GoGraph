@@ -60,7 +60,14 @@ var schemaMutationProps = []string{"age", "tag", "score", "mc", mergeOuterNodeKe
 // ([tmplMergePairOuter]) and a relationship ([tmplMergePairOuterRel]) — and
 // since rmp #2512 the two MERGE forms behind a driving clause that binds NOTHING
 // ([tmplMergeZeroDriverNode], [tmplMergeZeroDriverPair]), which must therefore
-// change nothing at all. The first
+// change nothing at all. Since rmp #2515 it also drives the NODE-ONLY MERGE whose
+// branch action targets a relationship bound by the preceding clause
+// ([tmplMergeHandleOuterRelCreate], [tmplMergeHandleOuterRelMatch]) — the shape
+// whose write was misdirected onto an unrelated node. That family REQUIRES the
+// handle/id collision [seedMergeHandleCollision] constructs, so a workload that
+// mixes this writer in without running that bootstrap first would drive its
+// driving MATCH against nothing; only [schemaMutationWorkload] uses this writer,
+// and [runSchemaMutationCfg] runs the bootstrap before its first tick. The first
 // three create nodes, so the writer is no longer create-free; the last is the
 // one statement it emits deliberately expecting an engine error, and it is
 // modelled as an [OpMalformed] no-op for exactly that reason. Every other op
@@ -86,7 +93,7 @@ func (w SchemaMutationWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 		return HonestWriter{}.opCreatePerson(seed)
 	}
 	name := names[seed.IntN(len(names))]
-	switch seed.IntN(17) {
+	switch seed.IntN(18) {
 	case 0:
 		return Op{Kind: OpUpdate, Cypher: tmplSetTag, Params: map[string]any{"name": name, "tag": fmt.Sprintf("t%d", seed.IntN(1000))}}
 	case 1:
@@ -120,6 +127,8 @@ func (w SchemaMutationWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 		return w.opMergeZeroDriverNode(seed)
 	case 15:
 		return w.opMergeZeroDriverPair(seed)
+	case 16:
+		return w.opMergeHandleOuterRel(seed, oracle)
 	default:
 		// SET n = $props REPLACES the property set — it must carry name (the key)
 		// and age so the node stays matchable and the durability probe keeps working.
@@ -341,8 +350,24 @@ func runSchemaMutationCfg(ctx context.Context, cfg Config) (*SimReport, error) {
 	}
 	defer func() { _ = sm.Close() }()
 
+	// The handle/id collision the node-only outer-relationship family needs
+	// (rmp #2515) is CONSTRUCTED before the first tick and proven, so the family is
+	// never driven over a graph on which a misdirected write would land nowhere.
+	fixture, v := seedMergeHandleCollision(ctx, sm)
+	if len(v) > 0 {
+		return sm.report(0, Op{Kind: OpCreate, Cypher: "<handle-collision fixture>"}, v), nil
+	}
+
 	foreach := newForeachStats()
 	merges := newMergeSurfaceStats()
+	// checkState runs both read-back batteries at one of this loop's three check
+	// points — periodic, immediately post-recovery, and once at the end — so the
+	// handle-collision detector inherits the same schedule as the per-name
+	// property/label parity, crash boundaries included.
+	checkState := func(tick int64) []Violation {
+		vs := CheckSchemaMutation(tick, sm.oracle, sm.engine)
+		return append(vs, CheckMergeHandleCollision(tick, fixture, sm.graph(), sm.oracle, sm.engine)...)
+	}
 	var lastTick int64
 	var lastOp Op
 	for i := 0; i < cfg.MaxTicks; i++ {
@@ -363,7 +388,7 @@ func runSchemaMutationCfg(ctx context.Context, cfg Config) (*SimReport, error) {
 		if sm.crashCount > crashesBefore {
 			foreach.noteRecovery(sm.oracle)
 			merges.noteRecovery(sm.oracle)
-			if v := CheckSchemaMutation(tick, sm.oracle, sm.engine); len(v) > 0 {
+			if v := checkState(tick); len(v) > 0 {
 				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery schema-mutation>"}, v), nil
 			}
 		}
@@ -396,12 +421,12 @@ func runSchemaMutationCfg(ctx context.Context, cfg Config) (*SimReport, error) {
 			}
 		}
 		if tick%schemaMutationCheckEvery == 0 {
-			if v := CheckSchemaMutation(tick, sm.oracle, sm.engine); len(v) > 0 {
+			if v := checkState(tick); len(v) > 0 {
 				return sm.report(tick, op, v), nil
 			}
 		}
 	}
-	if v := CheckSchemaMutation(lastTick, sm.oracle, sm.engine); len(v) > 0 {
+	if v := checkState(lastTick); len(v) > 0 {
 		return sm.report(lastTick, lastOp, v), nil
 	}
 	// Assert-something-was-seen (rmp #2454, #2461): both FOREACH templates and

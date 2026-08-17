@@ -7,13 +7,19 @@ package sim
 // duplicating an existing endpoint), the sensitivity proofs that INVERTING the
 // oracle's created-vs-matched adjudication is CAUGHT by the counters and parity
 // checks, and the wiring proof for the terminal non-vacuity gate.
+//
+// It also holds the tests for the two families added since: the zero-row-driver
+// no-ops (rmp #2512) and the node-only outer-relationship action over a
+// CONSTRUCTED handle/id collision (rmp #2515).
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
 // wantCounters asserts the engine reported exactly want, so every number in the
@@ -435,7 +441,7 @@ func TestMergeSurface_RejectionCheck(t *testing.T) {
 // an empty stats record fires every clause, and a fully-exercised record is
 // clean.
 func TestMergeSurface_NonVacuityGate(t *testing.T) {
-	const wantClauses = 18 // nine families + six branches + sub-cases + crash + survivor
+	const wantClauses = 21 // ten families + eight branches + sub-cases + crash + survivor
 	if v := checkMergeSurfaceNonVacuity(0, newMergeSurfaceStats()); len(v) != wantClauses {
 		t.Fatalf("empty stats must fire all %d clauses, got %d: %v", wantClauses, len(v), v)
 	}
@@ -492,6 +498,20 @@ func TestMergeSurface_NonVacuityGate(t *testing.T) {
 		ms.noteOp(op, true, oracle)
 		oracle.ApplyMerge(op.Cypher, op.Params)
 	}
+	// The node-only outer-relationship arm (rmp #2515), both branches. Its action
+	// targets the handle-collision fixture's relationship, so the fixture must be
+	// modelled first; the create branch runs over a fresh merge key and the match
+	// branch over the key the create just made.
+	oracle.seedMergeHandleFixture()
+	for _, op := range []Op{
+		mergeOp(tmplMergeHandleOuterRelCreate, map[string]any{
+			"x": mergeHandleSrcName, "y": mergeHandleDstName, "n": mergeHandleNodeKeys[0], "v": int64(17)}),
+		mergeOp(tmplMergeHandleOuterRelMatch, map[string]any{
+			"x": mergeHandleSrcName, "y": mergeHandleDstName, "n": mergeHandleNodeKeys[0], "v": int64(19)}),
+	} {
+		ms.noteOp(op, true, oracle)
+		oracle.ApplyMerge(op.Cypher, op.Params)
+	}
 	ms.noteOp(Op{Kind: OpMalformed, Cypher: tmplMergeParamMap}, false, oracle)
 	ms.noteRecovery(oracle)
 
@@ -517,6 +537,13 @@ func TestMergeSurface_NonVacuityGate(t *testing.T) {
 // wired into the run loop: a schema-mutation run too short to issue the MERGE
 // families and to crash after one must end with a merge non-vacuity report
 // rather than a silent pass.
+//
+// It also pins the rmp #2515 clauses specifically. Together with the full-length
+// TestSchemaMutation_Scenario_Passes — which returns a CLEAN report, and therefore
+// could not have left any of these clauses unsatisfied — this is what proves the
+// live workload actually issued the node-only outer-relationship family and fired
+// BOTH of its branches, rather than the family having quietly fallen back to its
+// fixture-absent arm on every tick.
 func TestSchemaMutation_MergeGateWired(t *testing.T) {
 	sc := schemaMutationScenario()
 	cfg := sc.DeterministicConfig(sc.DefaultSeed)
@@ -531,14 +558,24 @@ func TestSchemaMutation_MergeGateWired(t *testing.T) {
 		t.Fatal("a run too short to exercise the MERGE families must fail the gate; got a clean report")
 	}
 	found := false
+	var msgs []string
 	for _, v := range report.Violations {
 		if v.Op == "merge non-vacuity" {
 			found = true
-			break
+			msgs = append(msgs, v.Message)
 		}
 	}
 	if !found {
 		t.Fatalf("expected a merge non-vacuity violation, got:\n%s", report)
+	}
+	for _, want := range []string{
+		"the handle-collision arm was vacuous",
+		"never took its ON CREATE branch, so the misdirection-prone",
+		"never took its ON MATCH branch, so the misdirection-prone",
+	} {
+		if !slices.ContainsFunc(msgs, func(m string) bool { return strings.Contains(m, want) }) {
+			t.Fatalf("gate did not fire the rmp #2515 clause %q; fired: %v", want, msgs)
+		}
 	}
 }
 
@@ -695,5 +732,290 @@ func TestMergeZeroDriver_CheckerCatchesPhantom(t *testing.T) {
 				t.Fatalf("expected a %q violation containing %q, got: %v", tc.wantOp, tc.wantMsg, v)
 			}
 		})
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Node-only outer-relationship action over a constructed collision (rmp #2515)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// newHandleCollisionSim builds a schema-mutation Simulator and runs the fixture
+// bootstrap on it, returning both. It is the shared setup for the family's tests:
+// every one of them needs the CONSTRUCTED collision, because on any other graph
+// the defect they exist to detect cannot manifest.
+func newHandleCollisionSim(t *testing.T) (*Simulator, *mergeHandleFixture) {
+	t.Helper()
+	sc := schemaMutationScenario()
+	sm, err := New(sc.DeterministicConfig(sc.DefaultSeed))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = sm.Close() })
+	f, v := seedMergeHandleCollision(context.Background(), sm)
+	if len(v) > 0 {
+		t.Fatalf("fixture bootstrap reported violations: %v", v)
+	}
+	return sm, f
+}
+
+// TestMergeHandleCollision_FixtureIsConstructed proves the precondition is BUILT
+// rather than awaited: the fixture relationship's stable handle equals a live
+// node's id, that node is the decoy, and the detector agrees on the state the
+// bootstrap just produced.
+//
+// The equivalent end-to-end matrix reproduced this collision on about 1% of its
+// runs, so a family that merely hoped for it would adjudicate nothing on 99 runs
+// in 100 while reporting green.
+func TestMergeHandleCollision_FixtureIsConstructed(t *testing.T) {
+	sm, f := newHandleCollisionSim(t)
+	g := sm.graph()
+	t.Logf("fixture: %s(%q->%q) handle=%d, decoy %q node id=%d",
+		relPaired, f.srcKey, f.dstKey, f.handle, mergeHandleDecoyName, f.decoyID)
+
+	if f.decoyID == 0 {
+		t.Fatal("decoy node id 0 is the reserved no-handle sentinel: no relationship could ever collide with it")
+	}
+	if f.handle != uint64(f.decoyID) {
+		t.Fatalf("handle = %d, want %d (the decoy's node id): the collision was not constructed", f.handle, f.decoyID)
+	}
+	if got := personNameByID(g, graph.NodeID(f.handle)); got != mergeHandleDecoyName {
+		t.Fatalf("node id %d is %q, want the decoy %q", f.handle, got, mergeHandleDecoyName)
+	}
+	// The handle must come from the ENGINE's own durable identity for the edge,
+	// not from the counter the bootstrap seeded.
+	handle, ok := g.FirstEdgeHandle(f.srcKey, f.dstKey)
+	if !ok || handle != f.handle {
+		t.Fatalf("FirstEdgeHandle(%q,%q) = (%d,%v), want (%d,true)", f.srcKey, f.dstKey, handle, ok, f.handle)
+	}
+	if v := CheckMergeHandleCollision(0, f, g, sm.oracle, sm.engine); len(v) > 0 {
+		t.Fatalf("the freshly-built fixture must be clean: %v", v)
+	}
+	// The bootstrap's three nodes and one relationship are modelled, so count
+	// parity holds and nothing it created is loose in the graph.
+	if v := NewInvariantChecker(NewSeed(1)).Check(0, sm.oracle, sm.engine); len(v) > 0 {
+		t.Fatalf("count parity after the fixture bootstrap: %v", v)
+	}
+}
+
+// TestMergeHandleCollision_ScriptedBranches drives both branches of the family
+// through the REAL engine over the constructed collision and asserts the whole
+// chain per step: the hand-computed effect set, the counters oracle accepting it,
+// and the detector confirming the write reached the RELATIONSHIP and no node.
+//
+// Each of the four (template × created/matched) cells is covered, because the
+// branch a statement carries and the branch that FIRES are independent.
+func TestMergeHandleCollision_ScriptedBranches(t *testing.T) {
+	sm, f := newHandleCollisionSim(t)
+	ctx := context.Background()
+
+	step := func(label, tmpl, n string, v int64, want exec.QueryCounters) {
+		t.Helper()
+		op := mergeOp(tmpl, map[string]any{
+			"x": mergeHandleSrcName, "y": mergeHandleDstName, "n": n, "v": v})
+		committed, counters := sm.executeCounted(ctx, op)
+		mustCleanCounters(t, op, committed, counters, sm.oracle)
+		wantCounters(t, label, counters, &want)
+		sm.oracle.ApplyMerge(op.Cypher, op.Params)
+		if vs := CheckMergeHandleCollision(0, f, sm.graph(), sm.oracle, sm.engine); len(vs) > 0 {
+			t.Fatalf("%s: %v", label, vs)
+		}
+		if vs := CheckSchemaMutation(0, sm.oracle, sm.engine); len(vs) > 0 {
+			t.Fatalf("%s: parity: %v", label, vs)
+		}
+	}
+
+	// ON CREATE, node created: the pattern's name plus the relationship write.
+	step("ON CREATE / created", tmplMergeHandleOuterRelCreate, mergeHandleNodeKeys[0], 17,
+		exec.QueryCounters{NodesCreated: 1, LabelsAdded: 1, PropertiesSet: 2})
+	// ON MATCH, node matched: the relationship write alone.
+	step("ON MATCH / matched", tmplMergeHandleOuterRelMatch, mergeHandleNodeKeys[0], 19,
+		exec.QueryCounters{PropertiesSet: 1})
+	// ON CREATE, node matched: the branch does not fire, so nothing is applied.
+	step("ON CREATE / matched", tmplMergeHandleOuterRelCreate, mergeHandleNodeKeys[0], 23,
+		exec.QueryCounters{})
+	// ON MATCH, node created: the node is written, the branch is not.
+	step("ON MATCH / created", tmplMergeHandleOuterRelMatch, mergeHandleNodeKeys[1], 29,
+		exec.QueryCounters{NodesCreated: 1, LabelsAdded: 1, PropertiesSet: 1})
+
+	// The last write that fired was the ON MATCH one, so 19 is what the
+	// relationship must still hold — read back through the engine, not the model.
+	got, err := sm.engine.projectRowStrings(ctx, "MATCH (x:Person {name:'"+mergeHandleSrcName+"'})-[k:"+
+		relPaired+"]->(y:Person {name:'"+mergeHandleDstName+"'}) RETURN k."+mergePairRelKey, 1)
+	if err != nil {
+		t.Fatalf("relationship read-back: %v", err)
+	}
+	if got[0] != "19" {
+		t.Fatalf("fixture relationship .%s = %s, want 19", mergePairRelKey, got[0])
+	}
+}
+
+// TestMergeHandleCollision_CountersArmIsReachable proves the counters oracle
+// ADJUDICATES this family rather than skipping it. expectedOpCounters returns
+// (want, exact) and CheckOpCounters accepts anything when exact is false, so a
+// template missing from the dispatch list in counters_oracle.go has a guard that
+// can never fail — which is how rmp #2510's arm sat dead for two tasks.
+func TestMergeHandleCollision_CountersArmIsReachable(t *testing.T) {
+	created := exec.QueryCounters{NodesCreated: 1, LabelsAdded: 1, PropertiesSet: 2}
+	matched := exec.QueryCounters{PropertiesSet: 1}
+	for _, tc := range []struct {
+		name, tmpl string
+		present    bool
+		want       exec.QueryCounters
+	}{
+		{"on_create_creates", tmplMergeHandleOuterRelCreate, false, created},
+		{"on_create_matches", tmplMergeHandleOuterRelCreate, true, exec.QueryCounters{}},
+		{"on_match_matches", tmplMergeHandleOuterRelMatch, true, matched},
+		{"on_match_creates", tmplMergeHandleOuterRelMatch, false,
+			exec.QueryCounters{NodesCreated: 1, LabelsAdded: 1, PropertiesSet: 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oracle := NewGraphOracle()
+			oracle.seedMergeHandleFixture()
+			if tc.present {
+				oracle.newPairNode(mergeHandleNodeKeys[0])
+			}
+			op := mergeOp(tc.tmpl, map[string]any{
+				"x": mergeHandleSrcName, "y": mergeHandleDstName, "n": mergeHandleNodeKeys[0], "v": int64(7)})
+			want, exact := expectedOpCounters(op, oracle)
+			if !exact {
+				t.Fatalf("%q is not reached by the counters dispatch: its guard is DEAD CODE and can never fail", tc.tmpl)
+			}
+			if want != tc.want {
+				t.Fatalf("expectation = %+v, want %+v", want, tc.want)
+			}
+			// And it must REJECT a report that is off by the branch's one assignment.
+			wrong := want
+			wrong.PropertiesSet++
+			if v := CheckOpCounters(0, op, true, &wrong, oracle); len(v) == 0 {
+				t.Fatalf("counters oracle accepted %+v against an expectation of %+v", wrong, want)
+			}
+		})
+	}
+}
+
+// TestMergeHandleCollision_CheckerCatchesMisdirection is the meta-test for the
+// read-back: it INJECTS by hand exactly the state a regressed engine leaves — the
+// relationship without the property and the DECOY node with it — and asserts the
+// detector reports both halves. Without this the clean result of the scripted
+// test would be consistent with a checker that cannot fail.
+//
+// It also pins the two halves as independent detectors: the decoy clause fires
+// even when the relationship is correct, which is what makes a write landing on
+// BOTH (a partially-fixed engine) visible too.
+func TestMergeHandleCollision_CheckerCatchesMisdirection(t *testing.T) {
+	t.Run("misdirected_write", func(t *testing.T) {
+		sm, f := newHandleCollisionSim(t)
+		// The model records the write the statement was supposed to perform...
+		outer := sm.oracle.pairedEdgeBetween(mergeHandleSrcName, mergeHandleDstName)
+		if outer == nil {
+			t.Fatal("the fixture relationship is not modelled")
+		}
+		outer.Properties[mergePairRelKey] = int64(17)
+		// ...while the engine put it on the node whose id equals the handle.
+		inject := Op{Kind: OpUpdate, Cypher: "MATCH (p:Person {name:'" + mergeHandleDecoyName + "'}) SET p." +
+			mergePairRelKey + " = 17"}
+		if committed, _ := sm.executeCounted(context.Background(), inject); !committed {
+			t.Fatal("injection did not commit")
+		}
+		v := CheckMergeHandleCollision(0, f, sm.graph(), sm.oracle, sm.engine)
+		var sawRel, sawDecoy bool
+		for _, viol := range v {
+			switch viol.Op {
+			case "merge handle-collision rel-prop":
+				sawRel = strings.Contains(viol.Message, "did not reach the relationship")
+			case "merge handle-collision decoy":
+				sawDecoy = strings.Contains(viol.Message, "MISDIRECTED")
+			}
+		}
+		if !sawRel || !sawDecoy {
+			t.Fatalf("detector missed a misdirected write (rel=%v decoy=%v): %v", sawRel, sawDecoy, v)
+		}
+	})
+
+	t.Run("decoy_clause_fires_alone", func(t *testing.T) {
+		sm, f := newHandleCollisionSim(t)
+		// The relationship is correct in both engine and model; only the stray node
+		// property is wrong, so the decoy clause is the sole detector.
+		op := mergeOp(tmplMergeHandleOuterRelCreate, map[string]any{
+			"x": mergeHandleSrcName, "y": mergeHandleDstName, "n": mergeHandleNodeKeys[0], "v": int64(17)})
+		if committed, _ := sm.executeCounted(context.Background(), op); !committed {
+			t.Fatal("family op did not commit")
+		}
+		sm.oracle.ApplyMerge(op.Cypher, op.Params)
+		if v := CheckMergeHandleCollision(0, f, sm.graph(), sm.oracle, sm.engine); len(v) > 0 {
+			t.Fatalf("a correct write must be clean: %v", v)
+		}
+		inject := Op{Kind: OpUpdate, Cypher: "MATCH (p:Person {name:'" + mergeHandleDecoyName + "'}) SET p." +
+			mergePairRelKey + " = 17"}
+		if committed, _ := sm.executeCounted(context.Background(), inject); !committed {
+			t.Fatal("injection did not commit")
+		}
+		v := CheckMergeHandleCollision(0, f, sm.graph(), sm.oracle, sm.engine)
+		if len(v) != 1 || v[0].Op != "merge handle-collision decoy" {
+			t.Fatalf("want exactly the decoy violation, got: %v", v)
+		}
+	})
+
+	t.Run("broken_premise", func(t *testing.T) {
+		sm, f := newHandleCollisionSim(t)
+		// A fixture whose handle no longer names the decoy is a graph on which the
+		// defect cannot manifest. Reporting it is what stops the family passing for
+		// the wrong reason.
+		stale := *f
+		stale.handle++
+		v := CheckMergeHandleCollision(0, &stale, sm.graph(), sm.oracle, sm.engine)
+		if len(v) == 0 {
+			t.Fatal("detector accepted a fixture whose handle changed: the premise check is vacuous")
+		}
+		if v[0].Op != "merge handle-collision premise" || !strings.Contains(v[0].Message, "not stable") {
+			t.Fatalf("want a premise violation naming the changed handle, got: %v", v)
+		}
+	})
+
+	t.Run("no_fixture", func(t *testing.T) {
+		sm, _ := newHandleCollisionSim(t)
+		v := CheckMergeHandleCollision(0, nil, sm.graph(), sm.oracle, sm.engine)
+		if len(v) != 1 || !strings.Contains(v[0].Message, "no handle-collision fixture") {
+			t.Fatalf("an unbound fixture must be reported, got: %v", v)
+		}
+	})
+}
+
+// TestMergeHandleCollision_SurvivesRecovery proves the CONSTRUCTED precondition is
+// durable: after a crash and a real snapshot+WAL recovery the relationship keeps
+// its handle, the decoy keeps the node id that handle collides with, and the
+// family's write is still on the relationship.
+//
+// The family runs behind crash injection, so a collision that dissolved on the
+// first recovery would leave every later tick adjudicating nothing — the precise
+// failure the premise clause exists to make loud, verified here to be absent.
+func TestMergeHandleCollision_SurvivesRecovery(t *testing.T) {
+	sm, f := newHandleCollisionSim(t)
+	ctx := context.Background()
+
+	op := mergeOp(tmplMergeHandleOuterRelCreate, map[string]any{
+		"x": mergeHandleSrcName, "y": mergeHandleDstName, "n": mergeHandleNodeKeys[0], "v": int64(41)})
+	if committed, _ := sm.executeCounted(ctx, op); !committed {
+		t.Fatal("family op did not commit")
+	}
+	sm.oracle.ApplyMerge(op.Cypher, op.Params)
+
+	if err := sm.store.Checkpoint(); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	// SIGKILL-equivalent, exactly as [Simulator.maybeCrash] performs it.
+	sm.disk.Crash()
+	store, err := OpenSimStore(sm.disk, sm.store.Config())
+	if err != nil {
+		t.Fatalf("crash recovery: %v", err)
+	}
+	sm.store = store
+	sm.engine = NewEngineAdapter(store.Engine())
+
+	if v := CheckMergeHandleCollision(0, f, sm.graph(), sm.oracle, sm.engine); len(v) > 0 {
+		t.Fatalf("the collision did not survive crash + recovery: %v", v)
+	}
+	if v := CheckSchemaMutation(0, sm.oracle, sm.engine); len(v) > 0 {
+		t.Fatalf("post-recovery parity: %v", v)
 	}
 }
