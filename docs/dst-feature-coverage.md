@@ -88,6 +88,7 @@ undirected Euler; `BiBFS`; direction-optimised BFS on a hub fixture; the
 | Crash **during** the snapshot publish, at each step of the crash-atomic swap | `checkpoint-crash-storm` | acked ⊆ recovered ⊆ issued across a crash inside the publish window; a stranded backup is promoted by recovery (measured on the durable image and on `store.recovery.snapshot.promoteParentFsync`), never a half-published snapshot |
 | Node-key and edge-weight CODEC matrix across crash and upgrade | `codec-matrix` (soak; `internal/sim/codec_matrix.go`) | seven `(key codec, weight codec)` arms each survive the three snapshot-publish crash windows AND the upgrade + snapshot boundaries with acked ⊆ recovered ⊆ issued adjudicated BY KEY; the durable `mapper.bin` carries the layout the key type selects (v1 for the string control, v2 for the other six) and the snapshot-only reopen replays ZERO WAL ops, so every recovered key came through the mapper; `txn.ErrNoWeightCodec` is provoked and its actual behaviour pinned. One measured gap is pinned rather than tolerated: a struct weight is dropped by the snapshot CSR writer — see below |
 | Corruption of a published snapshot COMPONENT | `snapshot-corruption-failstop` | a byte flipped in any of the nine components fail-stops recovery with that component's typed sentinel; recovery returns no store, mutates nothing on disk and leaves `db/wal` byte-identical; the restored image still recovers the exact committed model. One documented non-fail-stop is pinned in the same run: a corrupt `indexes/<name>.bin` is REBUILT (and the rebuild verified against a full scan). The manifest's key-name region was the second until rmp #2520 checksummed it — see below |
+| Per-transaction op caps (CWE-770), producer **and** replay | `txn-oversize` (`internal/sim/txn_oversize.go`) | an over-cap commit is refused with `txn.ErrTransactionTooLarge` **before any frame is written** — proved by the durable WAL image being BYTE-identical across the refusal and the live graph unmutated, not by the error alone — and the surviving file recovers clean with every refused key absent; a hand-built WAL whose marker-less run exceeds the replay cap fail-stops with `recovery.ErrTransactionTooLarge`, keeps exactly the committed prefix, and is refused by the store-open rather than appended onto. The boundary is MEASURED on both sides and the two caps agree exactly (cap ops passes, cap+1 fails both). Until this task the cap reached only the replayer, so neither sentinel was reachable under simulation at any setting — see below |
 
 ### Snapshot component corruption is now covered; the manifest is checksummed (rmp #2467, #2520)
 
@@ -589,6 +590,107 @@ cannot express them, so a skip never reads as a pass.
 
 Every gate here is proved falsifiable as well as satisfied — a doctored record for
 each clause, plus the live per-frame control for contiguity.
+
+### Transaction-size caps: producer refusal and replay fail-stop (rmp #2474)
+
+The store bounds a single transaction on **both** sides, and for one reason:
+recovery buffers a whole transaction's ops in memory before applying them on its
+`OpCommit` marker, so a producer able to commit an arbitrarily large transaction
+could write a WAL that recovery cannot replay without allocating in proportion to
+it. That is the CWE-770 shape of the persistence layer. Two typed sentinels
+answer it:
+
+| Bound | Default | Refusal |
+|---|---|---|
+| Producer (`txn.Tx.appendOnly`) | `txn.DefaultMaxTxnOps` = 16 000 000 | `txn.ErrTransactionTooLarge`, **before** a sequence is minted or a frame written |
+| Replay (`recovery.Options.MaxTxnOps`) | the same value | `recovery.ErrTransactionTooLarge`, classified by `tailErrIsCorruption` as genuine corruption |
+
+**Neither sentinel had ever been produced under simulation, and the workloads
+were not the reason.** `simStoreConfig.maxTxnOps` was plumbed carefully — through
+`recovery.OpenFS` on the full-stack path and `recovery.ReplayWAL` on the WAL-only
+one — and reached **recovery and nothing else**: the store itself was built with
+the uncapped `txn.NewStoreWithOptions`, so the replay bound was configurable and
+the commit bound was not. Lowering the cap could never make the producer refuse,
+and reaching 16 000 000 ops by workload is not a test but an out-of-memory. The
+`overload` actor's own comment records the gap: it pushes "toward"
+`DefaultMaxTxnOps`, and nothing ever arrived. `simstore.go` now passes the cap to
+`txn.NewStoreWithOptionsCapped` as well; the change is behaviour-neutral for
+every existing caller, all of which carry `0` and resolve to the same default as
+before.
+
+**A typed error is not the assertion.** A refusal that appended frames and then
+truncated them is how a bug becomes permanent loss (rmp #2526), so the producer
+arm reads the whole durable WAL image off the `SimDisk` before and after each
+refused attempt and requires them **byte-identical**, and reads the live graph's
+node count across the same boundary. Measured at a deliberately small cap of 32
+ops:
+
+| attempt | ops | outcome | WAL bytes | live order |
+|---|---|---|---|---|
+| `warmup` | 8 | committed | 0 → 436 | 0 → 4 |
+| `one-over` | 33 | **refused**, `txn.ErrTransactionTooLarge` | 436 → 436, **identical** | 4 → 4 |
+| `far-over` | 128 | **refused**, same sentinel | 436 → 436, **identical** | 4 → 4 |
+| `at-cap` | 32 | committed | 436 → 2084 | 4 → 20 |
+
+The at-cap transaction is driven **after** the refusals deliberately: a refusal
+that had silently poisoned the writer fails there rather than passing as a clean
+refusal. The reopen then recovers clean and equal to the model, with all 80 keys
+of the two refused transactions absent.
+
+**The boundary is measured, not inferred from the two comparisons.** The producer
+refuses when `len(ops) > cap`; recovery stops when, before appending another
+frame, `len(pending) >= cap`. The operators differ because the counts are taken
+at different moments, and the arms pin what that actually yields: **32 ops
+commits and replays, 33 does neither** — the two caps agree exactly, which is the
+`producer <= replay` invariant `txn.DefaultMaxTxnOps` documents.
+
+**The oversize WAL is built by hand, because the engine cannot produce one.**
+The producer cap is `<=` the replay cap by construction, so any transaction large
+enough to trouble recovery is refused before a frame is written — that is the
+whole point of the pairing. The file is therefore constructed one v3 op payload
+at a time and written through the real `wal.Writer`, so only the op stream is
+hand-made and the framing, CRC and fsync are the production ones. Measured with a
+replay cap of 16 over a 4-op committed prefix:
+
+| arm | run ops | cap | outcome | ops applied |
+|---|---|---|---|---|
+| `at-cap` | 16 | 16 | clean | 20 (prefix + run) |
+| `over-cap` | 17 | 16 | **fail-stop**, `recovery.ErrTransactionTooLarge` | 4 — exactly the committed prefix |
+| `over-cap-unlimited` | 17 | unlimited | clean | 21 |
+
+The harness store-open is checked alongside recovery's own report: an embedder
+that swallowed the fail-stop would append onto the corruption and embed it
+permanently, so the `over-cap` image must be **refused** by `openSimTypedStore`
+with the sentinel intact, and the two clean arms must not be.
+
+**Three sensitivity seams pin the oracles, and two drive the real defect rather
+than fabricated evidence.**
+
+- `txn.MaxTxnOpsUnlimited` runs the byte-identical producer plan and commits all
+  four transactions, so the capped arm's refusals are attributable to the cap and
+  not to those op counts being rejected for some reason of their own.
+- The `over-cap-unlimited` replay arm replays the **byte-identical** 954-byte file
+  with the cap disabled and recovers all 21 ops, which rules out a file the
+  harness simply built wrong. It doubles as the standing proof that the
+  hand-written v3 payload layout matches `store/txn`'s unexported encoder: a wrong
+  version tag, kind, sequence width or body layout could not decode into exactly
+  the nodes the frames name.
+- `simStoreConfig.uncappedProducerSeam` restores the pre-#2474 plumbing — the cap
+  reaching the replayer and not the producer — and **measures the hazard the
+  invariant exists to prevent**, which is worse than a missed refusal: the 33-op
+  transaction is acknowledged durable, and recovery then refuses to replay the
+  file at all. The store does not lose that transaction; it **fails to reopen**,
+  and every committed transaction in the WAL becomes unreachable behind a
+  fail-stop.
+
+The non-vacuity gate is **separate and shape-only**, so an uninformative run never
+reads as a faulty one: it requires an attempt genuinely larger than the reference
+cap, a **non-empty** WAL underneath it — a byte-unchanged assertion over an absent
+file is satisfied by definition — and at least one transaction actually
+committed. Every clause of both verdicts and both non-vacuity gates is proved
+falsifiable by perturbing a hand-built control one field at a time, with the
+unperturbed control silent.
+
 
 ### Read-transaction isolation
 

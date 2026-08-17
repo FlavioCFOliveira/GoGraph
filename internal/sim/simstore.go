@@ -70,6 +70,19 @@ type simStoreConfig struct {
 	// indistinguishable from an invariant that always holds. Never set it in a
 	// scenario that is asserting correct behaviour.
 	noResumeTxnSeq bool
+	// uncappedProducerSeam opens the store with the UNCAPPED producer bound —
+	// [txn.DefaultMaxTxnOps] — regardless of maxTxnOps, while recovery still
+	// honours the configured cap. It reproduces this harness exactly as it
+	// behaved before rmp #2474, when maxTxnOps reached the replayer and not the
+	// producer.
+	//
+	// It exists solely as the SENSITIVITY SEAM of the transaction-size cap
+	// oracles (rmp #2474). A store opened this way violates the invariant
+	// [txn.DefaultMaxTxnOps] documents — producer cap <= replay cap — so it
+	// ACKNOWLEDGES a transaction recovery then refuses to replay, and the whole
+	// store fails to reopen. Never set it in a scenario that is asserting
+	// correct behaviour.
+	uncappedProducerSeam bool
 }
 
 // defaultSimStoreConfig is a directed multigraph (openCypher's additive-CREATE
@@ -270,11 +283,24 @@ func openSimTypedStore[N comparable, W any](
 	if cfg.noResumeTxnSeq {
 		resumeSeq = 0 // sensitivity seam only; see simStoreConfig.noResumeTxnSeq.
 	}
-	store := txn.NewStoreWithOptions(g, wlog, txn.Options[N, W]{
+	// CAP THE PRODUCER, not only the replayer (rmp #2474). Until this task the
+	// store was built with the UNCAPPED constructor, so cfg.maxTxnOps reached
+	// recovery (recoverSimGraph, both cores) and nothing else: the simulator
+	// could lower the replay bound but never the commit bound, and
+	// [txn.ErrTransactionTooLarge] was unreachable under simulation at any
+	// configured cap. Passing it here is behaviour-neutral for every existing
+	// caller — they all carry maxTxnOps 0, which both constructors resolve to
+	// [txn.DefaultMaxTxnOps] — and it is what lets a scenario open a store whose
+	// producer refuses before its replayer would.
+	producerCap := simMaxTxnOpsOption(cfg.maxTxnOps)
+	if cfg.uncappedProducerSeam {
+		producerCap = 0 // sensitivity seam only; see simStoreConfig.uncappedProducerSeam.
+	}
+	store := txn.NewStoreWithOptionsCapped(g, wlog, txn.Options[N, W]{
 		Codec:        codec,
 		WeightCodec:  wcodec,
 		ResumeTxnSeq: resumeSeq,
-	})
+	}, producerCap)
 	return &simTypedStore[N, W]{
 		disk:          disk,
 		graph:         g,
@@ -387,7 +413,7 @@ func recoverSimGraph[N comparable, W any](
 			recovery.Options[N, W]{
 				Codec:       codec,
 				WeightCodec: wcodec,
-				MaxTxnOps:   recoveryMaxTxnOpsOption(cfg.maxTxnOps),
+				MaxTxnOps:   simMaxTxnOpsOption(cfg.maxTxnOps),
 			},
 		)
 		if err != nil {
@@ -469,11 +495,18 @@ func hasDurableSnapshot(disk *SimDisk, dir string) bool {
 		disk.Exists(dir+"/"+simSnapshotName+".bak/manifest.json")
 }
 
-// recoveryMaxTxnOpsOption maps the simulator's maxTxnOps convention (0 ->
-// default, <0 -> unlimited) onto the recovery.Options convention (0 -> default,
-// txn.MaxTxnOpsUnlimited -> no cap, positive verbatim), so the full-stack path
-// caps recovery exactly as the WAL-only path does.
-func recoveryMaxTxnOpsOption(maxTxnOps int) int {
+// simMaxTxnOpsOption maps the simulator's maxTxnOps convention (0 -> default,
+// <0 -> unlimited) onto the convention BOTH the recovery options
+// ([recovery.Options.MaxTxnOps]) and the capped store constructors
+// ([txn.NewStoreWithOptionsCapped]) share: 0 -> default,
+// [txn.MaxTxnOpsUnlimited] -> no cap, positive verbatim.
+//
+// One helper serves both sides deliberately. The producer cap must be <= the
+// replay cap or a transaction could be made durable that recovery then refuses
+// to replay (the invariant [txn.DefaultMaxTxnOps] documents); feeding both from
+// a single simulator-side value makes them equal by construction, so the
+// simulator cannot accidentally configure the unreplayable combination.
+func simMaxTxnOpsOption(maxTxnOps int) int {
 	if maxTxnOps < 0 {
 		return txn.MaxTxnOpsUnlimited
 	}
