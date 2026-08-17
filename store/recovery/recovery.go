@@ -132,8 +132,14 @@ type Result[N comparable, W any] struct {
 	// It is DERIVED, not persisted, which is the same decision rmp #2309 takes
 	// for the MVCC clock: the WAL already carries the sequence in every frame, so
 	// a separate durable counter would be a second source of truth that can
-	// disagree with the log after a torn tail. Feed it to
-	// [txn.Options.ResumeTxnSeq].
+	// disagree with the log after a torn tail.
+	//
+	// Do not wire it by hand. [Result.NewStore] applies it for you; reporting it
+	// and trusting every embedder to feed it back to [txn.Options.ResumeTxnSeq]
+	// is what rmp #2522 found had failed at every call site in the module. The
+	// field stays exported because a scenario may want to ADJUDICATE the floor
+	// against the durable record (the simulation harness does), not because a
+	// reopen path should be reading it to configure itself.
 	MaxTxnSeq uint64
 	// MaxCommitTS is the highest MVCC commit timestamp any replayed [txn.OpCommit]
 	// marker carried, or 0 when none carried one — a WAL written before rmp #2309,
@@ -186,6 +192,85 @@ type Result[N comparable, W any] struct {
 // every committed op that followed the bad frame.
 func (r Result[N, W]) IsClean() bool {
 	return !tailErrIsCorruption(r.TailErr)
+}
+
+// NewStore binds this recovery's reconstructed graph to wlog and returns a
+// [txn.Store] ready to append to it, with the recovered transaction sequence
+// ALREADY RESUMED. It is the handoff from the recovering half of a reopen to
+// the writing half, and it exists because that handoff must not be something an
+// embedder can forget.
+//
+// # Why the library performs the handoff
+//
+// [Result.MaxTxnSeq] is the highest sequence the durable log actually spent. A
+// store that does not resume from it mints 1 again on its next commit, so ONE
+// WAL ends up holding two different transactions under one sequence number —
+// and that number is precisely what recovery's TxnSeq-suffix atomicity filter
+// tells transactions apart by. It survived only because frame contiguity plus
+// equality happened to disambiguate, and it stops surviving the moment a reopen
+// follows a torn tail.
+//
+// Recovery derived that value on every single open and every single embedder
+// discarded it: before this method existed the only non-test assignment of
+// [txn.Options.ResumeTxnSeq] in the whole module was the simulation harness
+// (rmp #2469), while the shipped examples and commands each hand-wrote the
+// reopen and each omitted it. A contract that every caller violates is
+// mis-PLACED rather than universally mis-implemented. That is the same
+// conclusion rmp #2309 reached one field over for the MVCC clock, which
+// recovery now restores itself rather than reporting and hoping — see the
+// comment at the RestoreMVCCClock call in openCodec.
+//
+// The reference engines place it the same way. InnoDB seeds its allocator
+// inside startup (trx_sys.init_max_trx_id, at the end of the rollback-segment
+// scan) rather than returning a value; Memgraph folds RecoveryInfo.next_timestamp
+// into the storage constructor (timestamp_ = max(timestamp_, next_timestamp));
+// PostgreSQL's StartupXLOG writes the shared next-XID directly and ratchets it
+// per replayed record. None of them hands a recovered counter back to a caller
+// as an obligation.
+//
+// # What the caller still owns, and why
+//
+// wlog. Recovery deliberately does not open the WAL for append: a directory
+// whose [Result.IsClean] reports false must NEVER be appended to, and keeping
+// the wal.Open call at the embedder keeps that gate visible where the decision
+// is actually taken. Check IsClean (or the error from [Open]) first, open the
+// WAL, then call this:
+//
+//	res, err := recovery.Open[string, float64](dir, ropts)
+//	if err != nil { return err }          // genuine corruption: do not append
+//	w, err := wal.Open(filepath.Join(dir, "wal"))
+//	if err != nil { return err }
+//	st := res.NewStore(w, txn.Options[string, float64]{
+//		Codec:       txn.NewStringCodec(),
+//		WeightCodec: txn.NewFloat64WeightCodec(),
+//	})
+//
+// opts supplies the codecs, exactly as [txn.NewStoreWithOptions] requires; its
+// [txn.Options.ResumeTxnSeq] is RATCHETED rather than overwritten, so the store
+// resumes from max(opts.ResumeTxnSeq, r.MaxTxnSeq). A floor a caller set for
+// its own reasons is honoured, a missing one is filled in, and the value can
+// only ever move UP — mirroring [lpg.Graph.RestoreMVCCClock] for the sibling
+// counter, and PostgreSQL's AdvanceNextFullTransactionIdPastXid ratchet.
+//
+// r.Graph must be non-nil, which it is for any Result returned by a completed
+// [Open] / [OpenCtx] / [OpenFS] — including one that reported corruption, whose
+// graph holds the committed prefix for diagnostics but must not be appended to.
+func (r Result[N, W]) NewStore(wlog *wal.Writer, opts txn.Options[N, W]) *txn.Store[N, W] {
+	return r.NewStoreCapped(wlog, opts, 0)
+}
+
+// NewStoreCapped is [Result.NewStore] with an explicit per-transaction op cap.
+// maxTxnOps follows the standard convention: 0 selects [txn.DefaultMaxTxnOps],
+// [txn.MaxTxnOpsUnlimited] disables the cap, and any other positive value is
+// the cap verbatim. Pass the same value the recovery ran under
+// ([Options.MaxTxnOps]) so the producer and its own replay agree on the bound.
+func (r Result[N, W]) NewStoreCapped(wlog *wal.Writer, opts txn.Options[N, W], maxTxnOps int) *txn.Store[N, W] {
+	// Ratchet, never assign: raise-only is what makes it safe to apply on top of
+	// a caller-supplied floor, and it is the same rule the MVCC clock follows.
+	if r.MaxTxnSeq > opts.ResumeTxnSeq {
+		opts.ResumeTxnSeq = r.MaxTxnSeq
+	}
+	return txn.NewStoreWithOptionsCapped(r.Graph, wlog, opts, maxTxnOps)
 }
 
 // tailErrIsCorruption classifies a [Result.TailErr] value as genuine
@@ -1447,6 +1532,26 @@ func ReplayWAL[N comparable, W any](
 	res, err := replayWALInto(ctx, r, g, codec, wcodec, maxTxnOps, cAcc, iAcc)
 	res.Constraints = cAcc.snapshot()
 	res.Indexes = iAcc.snapshot()
+	// RESTORE THE MVCC CLOCK, exactly as the snapshot+WAL core does (rmp #2309;
+	// see the RestoreMVCCClock call in openCodec for the full reasoning). This
+	// core reconstructs a graph from a WAL alone, so it owns the same obligation:
+	// the clock is process-local and starts at zero, and a graph handed back
+	// without the floor re-mints instants a previous process already published
+	// AND made durable.
+	//
+	// It is done HERE and not left to the caller for the reason rmp #2522
+	// established for the sibling sequence counter: a restoration every reopen
+	// path must remember is one some reopen path will forget, and the failure is
+	// silent. The one caller that had it right — the simulation harness — was
+	// carrying a hand-copied duplicate of this exact three lines.
+	//
+	// Unconditional on err: the only non-nil err is a ctx cancellation observed
+	// mid-replay, and the instants already replayed are spent whether or not the
+	// pass finished. RestoreMVCCClock RAISES ONLY, so applying it to a partial
+	// replay can never lower a floor another path established.
+	if res.MaxCommitTS > 0 {
+		g.RestoreMVCCClock(res.MaxCommitTS + 1)
+	}
 	return res, err
 }
 

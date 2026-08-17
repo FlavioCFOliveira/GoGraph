@@ -545,14 +545,33 @@ func phaseRestart(ctx context.Context, w io.Writer, cfg *config) error {
 	const nodes = 200
 	var beforeTS uint64
 	if err := func() error {
+		// -store-dir is documented as a directory the caller keeps, so this phase
+		// can run against a WAL that ALREADY holds transactions from an earlier
+		// run. Derive the durable sequence floor before appending to it: a store
+		// that restarts at 0 over a non-empty WAL re-mints numbers the log already
+		// spent, putting two different transactions under one sequence (rmp #2522).
+		// On the default temp-dir path the directory is empty, MaxTxnSeq is 0, and
+		// this resolves to exactly the previous behaviour.
+		prior, err := recovery.Open[string, float64](dir, recovery.Options[string, float64]{
+			Codec:       txn.NewStringCodec(),
+			WeightCodec: txn.NewFloat64WeightCodec(),
+		})
+		if err != nil {
+			return fmt.Errorf("derive durable txn-sequence floor: %w", err)
+		}
 		wlog, err := wal.Open(filepath.Join(dir, "wal"))
 		if err != nil {
 			return fmt.Errorf("open wal: %w", err)
 		}
+		// The store runs over this phase's own freshly-shaped graph rather than
+		// prior.Graph — the phase is measuring what a WRITER publishes, not what a
+		// reopen recovers (that is what the reopen below is for) — so the floor is
+		// passed explicitly instead of via prior.NewStore.
 		g := newGraph()
 		st := txn.NewStoreWithOptions[string, float64](g, wlog, txn.Options[string, float64]{
-			Codec:       txn.NewStringCodec(),
-			WeightCodec: txn.NewFloat64WeightCodec(),
+			Codec:        txn.NewStringCodec(),
+			WeightCodec:  txn.NewFloat64WeightCodec(),
+			ResumeTxnSeq: prior.MaxTxnSeq,
 		})
 		db := store.New(wlog, store.WithQuiesce(st.RunUnderCommitLock))
 		defer func() { _ = db.Close() }()

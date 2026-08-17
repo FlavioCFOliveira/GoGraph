@@ -321,14 +321,11 @@ func recoverSimGraph(
 	if err := truncateSimWALAt(disk, walPath, replay.WALTailOffset); err != nil {
 		return nil, recoveredSchema{}, false, fmt.Errorf("sim: truncate torn WAL tail: %w", err)
 	}
-	// The WAL-only core does not restore the MVCC clock itself (that happens
-	// inside the full-stack path), so raise the floor here exactly as
-	// [recovery.Open] does: one PAST the highest durable instant, because an
-	// instant that reached the file is spent even if the crash landed between its
-	// fsync and its visibility publish (rmp #2309).
-	if replay.MaxCommitTS > 0 {
-		g.RestoreMVCCClock(replay.MaxCommitTS + 1)
-	}
+	// The MVCC clock floor is restored by [recovery.ReplayWAL] itself (rmp #2522),
+	// as it always was on the full-stack path: this harness used to carry a
+	// hand-copied duplicate of that restore, which is exactly the shape of bug
+	// #2522 was filed about. Both recovery cores now leave the graph with its
+	// floor already raised past every durable instant.
 	return g, recoveredSchema{
 		constraints: replay.Constraints,
 		indexes:     replay.Indexes,
