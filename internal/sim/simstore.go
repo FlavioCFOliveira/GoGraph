@@ -387,7 +387,23 @@ func (s *SimStore) Crash() {
 // checkpoint directory); on a WAL-only store it returns an error rather than
 // silently doing nothing, since a WAL-only layout has no snapshot directory to
 // recover the truncated prefix from.
-func (s *SimStore) Checkpoint() error {
+func (s *SimStore) Checkpoint() error { return s.runCheckpoint(true) }
+
+// checkpointWithoutSchemaSpecs publishes a checkpoint with the constraint and
+// index spec providers DELIBERATELY unwired — the checkpointer as it behaved
+// before #1464/#1755 taught it to persist the schema. It exists solely as the
+// SENSITIVITY SEAM of the ddl-checkpoint-crash scenario (rmp #2464): a snapshot
+// that carries no constraints.bin/indexdefs.bin for a graph that HAS
+// constraints or indexes is not self-sufficient, so the checkpointer's phase-3
+// re-verification refuses to truncate the WAL prefix, and the scenario's
+// "the DDL frames are gone from the WAL" oracle must fire. Never call it from a
+// scenario that is asserting correct behaviour.
+func (s *SimStore) checkpointWithoutSchemaSpecs() error { return s.runCheckpoint(false) }
+
+// runCheckpoint is the shared body of [SimStore.Checkpoint] and
+// [SimStore.checkpointWithoutSchemaSpecs]. withSchemaSpecs selects whether the
+// engine's constraint/index spec providers are wired into the checkpointer.
+func (s *SimStore) runCheckpoint(withSchemaSpecs bool) error {
 	if s.cfg.dir == "" {
 		return fmt.Errorf("sim: Checkpoint requires a full-stack store (opened with a checkpoint dir)")
 	}
@@ -397,14 +413,19 @@ func (s *SimStore) Checkpoint() error {
 	// storeMu is a throwaway: WithCommitSerialiser supersedes it (the engine's
 	// commit mutex is private), exactly as the production engine wiring does.
 	var unusedMu sync.Mutex
-	cp := checkpoint.New[string, float64](
-		checkpoint.Config{Dir: s.cfg.dir}, s.graph, s.wlog, &unusedMu,
+	opts := []checkpoint.Option[string, float64]{
 		checkpoint.WithCommitSerialiser[string, float64](s.store.RunUnderCommitLock),
 		checkpoint.WithMapperCodec[string, float64](s.store.Codec()),
 		checkpoint.WithSnapshotFS[string, float64](simCheckpointBackend{disk: s.disk}),
-		checkpoint.WithConstraintSpecs[string, float64](s.engine.ConstraintSpecsForSnapshot),
-		checkpoint.WithIndexSpecs[string, float64](s.engine.IndexSpecsForSnapshot),
-	)
+	}
+	if withSchemaSpecs {
+		opts = append(opts,
+			checkpoint.WithConstraintSpecs[string, float64](s.engine.ConstraintSpecsForSnapshot),
+			checkpoint.WithIndexSpecs[string, float64](s.engine.IndexSpecsForSnapshot),
+		)
+	}
+	cp := checkpoint.New[string, float64](
+		checkpoint.Config{Dir: s.cfg.dir}, s.graph, s.wlog, &unusedMu, opts...)
 	if err := cp.RunCheckpoint(); err != nil {
 		return fmt.Errorf("sim: checkpoint: %w", err)
 	}

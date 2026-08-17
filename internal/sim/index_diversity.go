@@ -51,15 +51,28 @@ const indexDiversityBulk = 9000
 // backfill produces identical index contents regardless of worker
 // scheduling; the refresh outcome at the deterministic points is a pure
 // function of engine lifetime).
+//
+// Checkpointing is enabled (rmp #2464) so the three index DEFINITIONS cross the
+// snapshot boundary: a checkpoint truncates the WAL prefix that declared them,
+// after which they can only be recovered from the snapshot's indexdefs.bin and
+// indexes/ components. Before that this scenario ran WAL-only, so every
+// post-recovery index-consistency and introspection check was validating a
+// REPLAYED CREATE INDEX rather than a snapshot-loaded definition. A terminal
+// gate ([Simulator.checkCheckpointsFired]) requires the checkpoints to have
+// actually fired, because a [CheckpointConfig] is inert unless the custom run
+// loop calls [Simulator.maybeCheckpoint].
 func indexDiversityScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioIndexDiversity,
-		Description: "hash + btree + numeric indexes, parallel backfill, seek-vs-scan consistency through crash/recovery",
+		Description: "hash + btree + numeric indexes, parallel backfill, seek-vs-scan consistency through checkpoint + crash/recovery",
 		Mode:        ModeDeterministic,
 		DefaultSeed: 0x10DE5,
 		MaxTicks:    260,
 		Crash:       CrashConfig{Enabled: true, CrashProb: 1.0 / 60.0, StabilityWindow: 20},
-		run:         runIndexDiversity,
+		// Well inside the crash stability window, so most crashes follow at least
+		// one snapshot+WAL-truncate and recover through [recovery.OpenFS].
+		Checkpoint: CheckpointConfig{Enabled: true, Every: 40},
+		run:        runIndexDiversity,
 	}
 }
 
@@ -87,15 +100,39 @@ func indexDiversityScenario() Scenario {
 // parity). It is deterministic.
 func runIndexDiversity(ctx context.Context, seed uint64) (*SimReport, error) {
 	sc := indexDiversityScenario()
-	cfg := sc.DeterministicConfig(seed)
+	sm, report, err := runIndexDiversitySim(ctx, seed, sc.DeterministicConfig(seed), indexDiversityBulk)
+	if sm != nil {
+		defer func() { _ = sm.Close() }()
+	}
+	return report, err
+}
+
+// runIndexDiversitySim is [runIndexDiversity] over an explicit [Config] and bulk
+// size, with the simulator handed back instead of closed. It is split out so a
+// short-layer test can drive the SAME loop — and therefore the same
+// checkpoint/crash wiring and the same terminal gates — at a budget the short
+// layer can afford, and can then assert on what the run actually exercised. The
+// full-scale scenario (an above-threshold graph engaging the morsel-parallel
+// backfill) stays soak-gated; see index_diversity_test.go. The caller owns
+// closing the returned simulator, which is non-nil whenever construction
+// succeeded.
+func runIndexDiversitySim(
+	ctx context.Context, seed uint64, cfg Config, bulk int,
+) (*Simulator, *SimReport, error) {
 	sm, err := New(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("sim: index-diversity new: %w", err)
+		return nil, nil, fmt.Errorf("sim: index-diversity new: %w", err)
 	}
-	defer func() { _ = sm.Close() }()
+	report, rerr := indexDiversityLoop(ctx, sm, seed, cfg, bulk)
+	return sm, report, rerr
+}
 
+// indexDiversityLoop is the scenario body, over a simulator the caller owns and
+// closes. Splitting it from [runIndexDiversitySim] keeps every violation exit a
+// plain two-value return.
+func indexDiversityLoop(ctx context.Context, sm *Simulator, seed uint64, cfg Config, bulk int) (*SimReport, error) {
 	// Bulk-load an above-threshold Person graph with string + numeric properties.
-	for i := 0; i < indexDiversityBulk; i++ {
+	for i := 0; i < bulk; i++ {
 		q := fmt.Sprintf("CREATE (:Person {name:'p%d', age:%d, city:'c%d'})", i, i%500, i%100)
 		if !sm.execute(ctx, Op{Kind: OpCreate, Cypher: q}) {
 			return nil, fmt.Errorf("sim: index-diversity bulk load failed at %d", i)
@@ -127,7 +164,7 @@ func runIndexDiversity(ctx context.Context, seed uint64) (*SimReport, error) {
 	// from the workload stream — the scenario's op/param sequence stays
 	// byte-identical to the pre-parity behaviour. The same fixed set backs the
 	// plan-stability baseline below.
-	probes := indexDiversityParityProbes(NewSeed(seed ^ paritySeedMix))
+	probes := indexDiversityParityProbes(NewSeed(seed^paritySeedMix), bulk)
 	if v := CheckAccessPathParity(0, nil, sm.engine, probes...); len(v) > 0 {
 		return sm.report(0, Op{Kind: OpMatch, Cypher: "<post-backfill access-path parity check>"}, v), nil
 	}
@@ -136,7 +173,7 @@ func runIndexDiversity(ctx context.Context, seed uint64) (*SimReport, error) {
 	// literal and parameterised spellings. Windows come from the checker's own
 	// sub-seed, so the workload stream stays byte-identical; the checker is
 	// stateful so the terminal Finish can assert non-vacuity over the run.
-	seekResults := NewIndexSeekResults(NewSeed(seed^seekResultsSeedMix), indexDiversityBulk)
+	seekResults := NewIndexSeekResults(NewSeed(seed^seekResultsSeedMix), bulk)
 	if v := seekResults.Check(0, sm.engine); len(v) > 0 {
 		return sm.report(0, Op{Kind: OpMatch, Cypher: "<post-backfill seek-result check>"}, v), nil
 	}
@@ -171,24 +208,44 @@ func runIndexDiversity(ctx context.Context, seed uint64) (*SimReport, error) {
 		return sm.report(0, Op{Kind: OpMatch, Cypher: "<post-refresh access-path parity check>"}, v), nil
 	}
 
-	churn := indexDiversityBulk
+	churn := bulk
 	for i := 0; i < cfg.MaxTicks; i++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		tick := sm.clock.Tick()
 
+		// Checkpoint BEFORE the crash decision, matching [Simulator.Run]: a
+		// checkpoint that lands just before a crash is the realistic ordering the
+		// full snapshot+WAL recovery path must survive, and it is what makes the
+		// index DEFINITIONS cross the snapshot boundary (rmp #2464) — the
+		// truncated WAL prefix no longer holds the CREATE INDEX frames, so the
+		// post-recovery checks below validate a snapshot-loaded schema.
+		if err := sm.maybeCheckpoint(tick); err != nil {
+			return nil, err
+		}
+
 		// Manual crash (no oracle durability check — see the doc comment). On
 		// recovery the indexes are re-registered and re-backfilled; the
 		// consistency check must then still hold against the recovered graph.
 		if sm.crash.ShouldCrash(tick) {
+			// Reopen with the SAME durable layout the crashed store used: under
+			// checkpointing that is the full-stack layout (WAL at <dir>/wal beside
+			// the snapshot), and reopening with the default WAL-only config would
+			// point recovery at an empty root-level WAL and drop every committed op.
+			storeCfg := sm.store.Config()
 			sm.store.Crash()
-			store, oerr := OpenSimStore(sm.disk, simulatorStoreConfig())
+			store, oerr := OpenSimStore(sm.disk, storeCfg)
 			if oerr != nil {
 				return nil, fmt.Errorf("sim: index-diversity crash recovery at tick %d: %w", tick, oerr)
 			}
 			sm.store = store
 			sm.engine = NewEngineAdapter(store.Engine())
+			// Record what recovery actually replayed, as [Simulator.maybeCrash]
+			// does for the loops that use it: with checkpointing on, a crash that
+			// follows a snapshot replays only the WAL suffix, so this is the
+			// measured evidence of which recovery path each cycle took.
+			sm.replayedOps += store.WALOps()
 			sm.crashCount++
 			if v := CheckIndexConsistency(tick, nil, sm.engine, indexDiversitySpecs...); len(v) > 0 {
 				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery index check>"}, v), nil
@@ -294,6 +351,12 @@ func runIndexDiversity(ctx context.Context, seed uint64) (*SimReport, error) {
 	// reported through [StatsRegime.PlanChanges], never failed.
 	if v := statsRegime.Finish(int64(cfg.MaxTicks)); len(v) > 0 {
 		return sm.report(int64(cfg.MaxTicks), Op{Kind: OpMatch, Cypher: "<stats regime vacuity check>"}, v), nil
+	}
+	// Checkpoint non-vacuity (rmp #2464): without at least one published
+	// snapshot the index definitions never crossed the snapshot boundary and
+	// every post-recovery check above merely re-validated a WAL replay.
+	if v := sm.checkCheckpointsFired(int64(cfg.MaxTicks)); len(v) > 0 {
+		return sm.report(int64(cfg.MaxTicks), Op{Kind: OpMatch, Cypher: "<checkpoint vacuity check>"}, v), nil
 	}
 	return nil, nil
 }

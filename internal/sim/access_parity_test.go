@@ -292,8 +292,8 @@ func TestTotalDbHits(t *testing.T) {
 // (bulk "p" names, in-range ages, two-digit city prefixes).
 func TestIndexDiversityParityProbes_Deterministic(t *testing.T) {
 	t.Parallel()
-	a := indexDiversityParityProbes(NewSeed(42 ^ paritySeedMix))
-	b := indexDiversityParityProbes(NewSeed(42 ^ paritySeedMix))
+	a := indexDiversityParityProbes(NewSeed(42^paritySeedMix), indexDiversityBulk)
+	b := indexDiversityParityProbes(NewSeed(42^paritySeedMix), indexDiversityBulk)
 	if len(a) != 4 || len(b) != 4 {
 		t.Fatalf("expected 4 probes, got %d and %d", len(a), len(b))
 	}

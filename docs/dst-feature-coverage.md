@@ -82,11 +82,32 @@ undirected Euler; `BiBFS`; direction-optimised BFS on a hub fixture; the
 | Atomic csrfile publish under fault/ENOSPC | `csrfile-publish-fault` | a failed publish leaves either no file or the complete prior csrfile — never torn |
 | Recovery genuine-corruption fail-stop | `wal-corruption-failstop` | a corrupted interior WAL frame is detected (CRC), recovery reconstructs exactly the clean prefix and refuses to append; a benign torn tail is not treated as corruption |
 | Post-rename dir-fsync fail-stop (WAL prefix reclaim) | `checkpoint-dirfsync-fault` | a post-rename parent-dir fsync failure poisons the writer, yet reopen recovers the exact committed state |
+| DDL (index + UNIQUE constraint) across the checkpoint/snapshot boundary | `ddl-checkpoint-crash`; `constraint-enforce` and `index-diversity` now checkpoint too | the checkpoint's reclaimed WAL prefix COVERS the DDL frames (measured on the SimDisk image), the pure-snapshot phase replays ZERO WAL ops, and the recovered schema still enforces UNIQUE, answers every index seek, and matches `SHOW`/`db.*` |
 | CSV / JSONL export→import round-trip under fault | `io-roundtrip-fault` | a clean round-trip reproduces the modelled edge set exactly; an export under ENOSPC fails with a typed error and leaves no partial artifact a re-import would accept |
 
 The `DiskConfig.FaultRate` knob and three `SimDisk` fault primitives
 (`CorruptRange`, `ArmSyncFaultAt`, `ArmParentDirSyncFaultForPath`) back these
 scenarios; all default to inert, so existing scenarios are byte-identical.
+
+### DDL across the snapshot boundary (rmp #2464)
+
+Until sprint 347 every DDL-issuing scenario (`schema-chaos`, `constraint-enforce`,
+`index-diversity`) ran **WAL-only**, so recovery always replayed the
+`CREATE INDEX` / `CREATE CONSTRAINT` frames and the snapshot's schema components
+(`store/snapshot/constraints.go`, `indexdefs.go`, `indexes.go`) were never the
+source of a recovered index or constraint. The loss mode the checkpointer's
+phase-3 self-sufficiency re-verification exists to prevent — truncating the WAL
+prefix that first *declared* a constraint or an index (#1334 / #1464 / #1755) —
+was therefore never exercised.
+
+`ddl-checkpoint-crash` occupies that intersection directly, and
+`constraint-enforce` and `index-diversity` now enable in-loop checkpointing so
+their existing post-recovery oracles adjudicate a **snapshot-loaded** schema.
+A `CheckpointConfig` is INERT unless the run loop calls `maybeCheckpoint`, which
+only the default `Simulator.Run` does automatically; each custom loop wires the
+call and each scenario carries a terminal gate asserting a **non-zero checkpoint
+count**, so a configuration that stops taking effect fails the run rather than
+passing quietly.
 
 ### The group-commit clarification
 

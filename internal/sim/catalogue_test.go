@@ -20,7 +20,7 @@ func TestDefaultRegistry_ListsAllScenarios(t *testing.T) {
 	}
 	want := []string{
 		ScenarioBadActors, ScenarioBulkVsOnline, ScenarioCPUStarvation, ScenarioCheckpointDirFsyncFault, ScenarioCheckpointTeardown, ScenarioConstraintEnforce, ScenarioConstraintExistence,
-		ScenarioCrashStorm, ScenarioCSRFilePublishFault, ScenarioCypherPaths, ScenarioCypherSurface, ScenarioDiskFull, ScenarioDurableCommitCrash, ScenarioEdgeProperties, ScenarioIndexDiversity, ScenarioIORoundTripFault, ScenarioLongRunning, ScenarioMemPressure, ScenarioMergeRel, ScenarioNullSemantics, ScenarioOverload,
+		ScenarioCrashStorm, ScenarioCSRFilePublishFault, ScenarioCypherPaths, ScenarioCypherSurface, ScenarioDDLCheckpointCrash, ScenarioDiskFull, ScenarioDurableCommitCrash, ScenarioEdgeProperties, ScenarioIndexDiversity, ScenarioIORoundTripFault, ScenarioLongRunning, ScenarioMemPressure, ScenarioMergeRel, ScenarioNullSemantics, ScenarioOverload,
 		ScenarioPatternShapes, ScenarioProductionProfile, ScenarioReadHeavy, ScenarioReadTxIsolation, ScenarioSchemaChaos, ScenarioSchemaMutation, ScenarioSearch, ScenarioSearchCrash, ScenarioTypeCoverage,
 		ScenarioWALCorruptionFailStop, ScenarioWriteHeavy,
 	}

@@ -594,6 +594,30 @@ func (s *Simulator) maybeCheckpoint(tick int64) error {
 	return nil
 }
 
+// checkCheckpointsFired is the assert-something-was-seen gate for any scenario
+// that opts into in-loop checkpointing: it reports a violation when the run
+// published no checkpoint at all.
+//
+// It exists because a [CheckpointConfig] is INERT unless the run loop actually
+// calls [Simulator.maybeCheckpoint] — which only [Simulator.Run] does
+// automatically, so every custom run loop must wire the call itself (rmp
+// #2457/#2464). Without this gate a scenario could carry a checkpoint
+// configuration, never publish a snapshot, and still pass: the snapshot
+// recovery path it claims to exercise would simply never run. The gate is
+// deliberately UNCONDITIONAL on the configuration — it fires just as loudly
+// when the configuration was removed as when the call was — so it cannot be
+// silenced by the very change it is there to catch.
+func (s *Simulator) checkCheckpointsFired(tick int64) []Violation {
+	if s.checkpointCount > 0 {
+		return nil
+	}
+	return []Violation{{
+		Kind: ViolationACIDDurability, Tick: tick, Op: "checkpoint non-vacuity",
+		Message: "the run published NO checkpoint: the snapshot recovery path was never exercised" +
+			" (either Config.Checkpoint is disabled or the run loop never calls maybeCheckpoint)",
+	}}
+}
+
 // execute runs op against the engine via the read or write path per its kind
 // and reports whether a write committed (the engine ACKed it without error and
 // the result drained cleanly). Engine errors are not treated as violations

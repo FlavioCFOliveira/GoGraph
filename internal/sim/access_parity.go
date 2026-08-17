@@ -394,15 +394,21 @@ func (c *InvariantChecker) checkOnePlanStable(tick int64, engine PlanEngine, sha
 // resolves through a label scan on BOTH arms, so its probe asserts parity only
 // — if the engine later learns an IN seek, parity still requires both arms to
 // learn it together.
-func indexDiversityParityProbes(seed *Seed) []ParityProbe {
-	name := fmt.Sprintf("p%d", seed.IntN(indexDiversityBulk))
+//
+// bulk is the number of Persons the scenario bulk-loaded, so every name draw
+// lands on a node that EXISTS. Passing the wrong bulk would draw names no node
+// carries, and the probe's own non-vacuity assertions (a seek that returns no
+// row reports zero db-hits) would fire — correctly, since a probe over absent
+// data proves nothing about the access path.
+func indexDiversityParityProbes(seed *Seed, bulk int) []ParityProbe {
+	name := fmt.Sprintf("p%d", seed.IntN(bulk))
 	lo := seed.IntN(495)
 	hi := lo + 5
 	city := fmt.Sprintf("c%d", 10+seed.IntN(90))
 	in := []string{
-		fmt.Sprintf("p%d", seed.IntN(indexDiversityBulk)),
-		fmt.Sprintf("p%d", seed.IntN(indexDiversityBulk)),
-		fmt.Sprintf("p%d", seed.IntN(indexDiversityBulk)),
+		fmt.Sprintf("p%d", seed.IntN(bulk)),
+		fmt.Sprintf("p%d", seed.IntN(bulk)),
+		fmt.Sprintf("p%d", seed.IntN(bulk)),
 	}
 	return []ParityProbe{
 		{

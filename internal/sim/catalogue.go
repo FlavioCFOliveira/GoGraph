@@ -119,6 +119,7 @@ func DefaultRegistry() (*Registry, error) {
 		checkpointDirFsyncFaultScenario(),
 		ioRoundTripFaultScenario(),
 		productionProfileScenario(),
+		ddlCheckpointCrashScenario(),
 	)
 }
 

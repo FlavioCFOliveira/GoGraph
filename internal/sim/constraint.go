@@ -42,10 +42,18 @@ func constraintEnforceSchemaModel() *SchemaModel {
 // still enforcing, the schema-introspection oracle holds SHOW / db.* to the
 // declared DDL after every recovery, and a terminal non-vacuity gate requires
 // every route/outcome arm to have actually occurred. It is bit-reproducible.
+//
+// Checkpointing is enabled (rmp #2464) so the constraint DECLARATIONS cross the
+// snapshot boundary: a checkpoint truncates the WAL prefix holding the
+// OpCreateConstraint frames, after which a recovered constraint can only have
+// come from the snapshot's constraints.bin — the loss mode #1334/#1464 exists
+// to prevent. Before that this scenario ran WAL-only, so every post-recovery
+// enforcement check validated a REPLAYED constraint rather than a
+// snapshot-loaded one.
 func constraintEnforceScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioConstraintEnforce,
-		Description: "UNIQUE enforcement on every route (CREATE, SET rename, MERGE ON CREATE, SET label, numeric key): violations rejected, constraints + introspection survive crash/recovery",
+		Description: "UNIQUE enforcement on every route (CREATE, SET rename, MERGE ON CREATE, SET label, numeric key): violations rejected, constraints + introspection survive checkpoint + crash/recovery",
 		Mode:        ModeDeterministic,
 		DefaultSeed: 0xC047A157,
 		MaxTicks:    500,
@@ -53,7 +61,10 @@ func constraintEnforceScenario() Scenario {
 		// changes) survive the crash cycles; crashes are moderate so several
 		// recovery boundaries are exercised within the budget.
 		Crash: CrashConfig{Enabled: true, CrashProb: 1.0 / 90.0, StabilityWindow: 25},
-		run:   runConstraintEnforce,
+		// Comfortably inside the crash stability window, so most crashes follow a
+		// snapshot+WAL-truncate and recover the constraints from constraints.bin.
+		Checkpoint: CheckpointConfig{Enabled: true, Every: 60},
+		run:        runConstraintEnforce,
 	}
 }
 
@@ -93,7 +104,19 @@ func runConstraintEnforceCfg(ctx context.Context, cfg Config) (*SimReport, error
 	if err != nil {
 		return nil, fmt.Errorf("sim: constraint-enforce run: %w", err)
 	}
-	return report, nil
+	if report != nil {
+		return report, nil
+	}
+	// Checkpoint non-vacuity (rmp #2464): without a published snapshot the
+	// constraints never crossed the snapshot boundary and every post-recovery
+	// enforcement check above merely re-validated a WAL replay. The gate lives
+	// HERE rather than inside runConstraintLoop so the enforcement-gap
+	// meta-tests — which drive the loop directly, deliberately without DDL —
+	// keep isolating the per-op adjudicator.
+	if v := sm.checkCheckpointsFired(int64(cfg.MaxTicks)); len(v) > 0 {
+		return sm.report(int64(cfg.MaxTicks), Op{Kind: OpMatch, Cypher: "<checkpoint vacuity check>"}, v), nil
+	}
+	return nil, nil
 }
 
 // runConstraintLoop drives the constraint-enforcement safety loop: each tick it
@@ -127,6 +150,15 @@ func (s *Simulator) runConstraintLoop(ctx context.Context, model *SchemaModel) (
 			return nil, err
 		}
 		tick := s.clock.Tick()
+
+		// Checkpoint BEFORE the crash decision, matching [Simulator.Run]: the
+		// snapshot folds (and the truncated WAL prefix loses) the constraint
+		// declarations, so the crash that follows must recover them from
+		// constraints.bin (rmp #2464). A CheckpointConfig is inert unless this
+		// call is made, which is why the scenario also gates on the count.
+		if err := s.maybeCheckpoint(tick); err != nil {
+			return nil, err
+		}
 
 		crashesBefore := s.crashCount
 		if report, err := s.maybeCrash(ctx, tick); err != nil {

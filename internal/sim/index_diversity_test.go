@@ -17,9 +17,10 @@ import (
 func TestIndexDiversity_Scenario_Passes(t *testing.T) {
 	// Layer: soak. This scenario runs a ~9000-node above-threshold graph with
 	// parallel index backfill through repeated crash/recovery; under `go test
-	// -race` it is by far the most expensive test in the package and pushed
-	// internal/sim over the 240 s per-package hard ceiling (scripts/
-	// pkg_time_budget.sh; docs/test-layers.md). Its numeric seek-vs-scan path is
+	// -race` it is by far the most expensive test in the package. Soak-gating it
+	// keeps the short layer inside the 60 s per-package SOFT budget that
+	// scripts/pkg_time_budget.sh warns on (HARD_BUDGET defaults to 0, i.e.
+	// disabled, so no hard ceiling is in force). Its numeric seek-vs-scan path is
 	// covered in the short layer by the fast sibling
 	// TestIndexConsistency_NumericBranch, so soak-gating the full-scale scenario
 	// keeps the short layer under budget without losing short-layer coverage of
@@ -40,6 +41,84 @@ func TestIndexDiversity_Scenario_Passes(t *testing.T) {
 	}
 	if report != nil {
 		t.Fatalf("index-diversity reported a violation (index inconsistency):\n%s", report)
+	}
+}
+
+// indexDiversityShortBulk / indexDiversityShortTicks size the SHORT-layer slice
+// of the index-diversity loop. The graph is deliberately BELOW the parallel
+// backfill threshold — that arm is the soak-gated scenario's business — because
+// what the short slice exists to prove is the checkpoint/crash WIRING (rmp
+// #2464): that the run loop really publishes snapshots and really recovers
+// through them.
+const (
+	indexDiversityShortBulk  = 3000
+	indexDiversityShortTicks = 100
+)
+
+// TestIndexDiversity_CheckpointCrashWiredShort drives the SAME index-diversity
+// loop at a short-layer budget and proves, with measured counters, that
+// checkpointing is not merely configured but actually fires: a
+// [CheckpointConfig] is inert unless the custom run loop calls
+// [Simulator.maybeCheckpoint], which is exactly the trap rmp #2457 hit.
+//
+// A published checkpoint truncates the WAL prefix that declared the three
+// indexes, so the crashes that follow recover their DEFINITIONS from the
+// snapshot's indexdefs.bin rather than by replaying CREATE INDEX — the property
+// the whole scenario now covers and did not before.
+func TestIndexDiversity_CheckpointCrashWiredShort(t *testing.T) {
+	sc := indexDiversityScenario()
+	if !sc.Checkpoint.Enabled {
+		t.Fatal("the index-diversity scenario no longer enables checkpointing")
+	}
+	cfg := sc.DeterministicConfig(sc.DefaultSeed)
+	cfg.MaxTicks = indexDiversityShortTicks
+	// Crash more often than the full-scale scenario so the short budget still
+	// contains crash/recovery cycles after a checkpoint.
+	cfg.Crash.CrashProb = 1.0 / 25.0
+
+	sm, report, err := runIndexDiversitySim(context.Background(), sc.DefaultSeed, cfg, indexDiversityShortBulk)
+	if sm != nil {
+		t.Cleanup(func() { _ = sm.Close() })
+	}
+	if err != nil {
+		t.Fatalf("runIndexDiversitySim: %v", err)
+	}
+	if report != nil {
+		t.Fatalf("index-diversity (short slice) reported a violation:\n%s", report)
+	}
+	t.Logf("index-diversity short slice: checkpoints=%d crashes=%d replayedWALOps=%d",
+		sm.CheckpointCount(), sm.CrashCount(), sm.ReplayedOps())
+	if sm.CheckpointCount() == 0 {
+		t.Fatal("the run published NO checkpoint: the loop does not call maybeCheckpoint," +
+			" so the index definitions never crossed the snapshot boundary")
+	}
+	if sm.CrashCount() == 0 {
+		t.Fatal("the run never crashed: the post-checkpoint recovery path was never exercised")
+	}
+}
+
+// TestIndexDiversity_CheckpointGateWired proves the terminal checkpoint
+// non-vacuity gate is really wired into the index-diversity run rather than
+// merely present: with checkpointing DISABLED the run must report the gate's
+// violation instead of passing silently.
+func TestIndexDiversity_CheckpointGateWired(t *testing.T) {
+	sc := indexDiversityScenario()
+	cfg := sc.DeterministicConfig(sc.DefaultSeed)
+	cfg.MaxTicks = indexDiversityShortTicks
+	cfg.Checkpoint = CheckpointConfig{} // disabled: no snapshot can be published
+
+	sm, report, err := runIndexDiversitySim(context.Background(), sc.DefaultSeed, cfg, indexDiversityShortBulk)
+	if sm != nil {
+		t.Cleanup(func() { _ = sm.Close() })
+	}
+	if err != nil {
+		t.Fatalf("runIndexDiversitySim: %v", err)
+	}
+	if report == nil {
+		t.Fatal("a run that published no checkpoint passed silently: the gate is not wired")
+	}
+	if !violationMentions(report, "checkpoint non-vacuity", "published NO checkpoint") {
+		t.Fatalf("expected the checkpoint non-vacuity gate to fire, got:\n%s", report)
 	}
 }
 
