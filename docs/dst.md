@@ -688,6 +688,67 @@ across every crash. The short layer runs a 24-connection two-cycle
 configuration; the soak layer (`-tags=soak`) runs 256 connections over three
 cycles.
 
+Since rmp #2469 the profile runs over the **checkpoint-backed** layout and each
+cycle takes a checkpoint **while its MVCC traffic is in flight**, so recovery
+goes through the snapshot plus the WAL tail rather than through a complete WAL.
+The overlap is measured, not assumed: the MVCC clock advances by one per
+published commit, so the clock delta across the checkpoint call counts the
+commits that landed inside it — tens of them per short-layer cycle, with the
+client population still running when the checkpoint returned. The exact count
+varies with goroutine scheduling, so the gate is that at least one cycle
+measured a non-zero one, never a particular number.
+
+### MVCC clock and transaction-sequence recovery across the boundary (rmp #2469)
+
+Every other MVCC crash scenario re-derives the clock from a **complete** WAL,
+because none of them checkpoints. The case that matters is the other one: the
+checkpoint has truncated away the prefix carrying the early timestamps, so the
+only durable record of them is the instant the snapshot manifest carries
+(`snapshot.Manifest.CommitTS`, folded into the derived floor by recovery,
+rmp #2309/#2520). `internal/sim/mvcc_clock_recovery.go` measures that reopen
+directly from the durable bytes — every v3 commit marker carries its
+transaction's sequence and the MVCC instant it became visible at — and holds it
+to:
+
+- **No instant is re-minted.** Every post-recovery commit timestamp strictly
+  exceeds every timestamp the recovered image carried, over both the surviving
+  WAL and the manifest's recorded instant, and no two post-recovery commits
+  share one.
+- **The sequence resumes, it does not restart.** No post-recovery transaction
+  takes a sequence the recovered WAL image still carries — one WAL holding two
+  different transactions under one number is the ambiguity rmp #2302 exists to
+  prevent — and none sits at or below the image maximum. The reopen seeds
+  `txn.Options.ResumeTxnSeq` from `recovery.Result.MaxTxnSeq`, which is what
+  recovery derives that value for; the oracle is what keeps the two ends wired
+  together.
+- **A pure-snapshot recovery reconciles its floor against the image.** With the
+  WAL truncated to zero and nothing replayed (proved by the rmp #2468 evidence
+  helper), the clock floor is at least the instant the manifest recorded, **and**
+  the maximum recovery *derived* is at least that instant.
+
+The last clause is the load-bearing one. Rehydrating an image mints instants of
+its own — measured at about three per restored node — so a wide graph lifts its
+own clock past its recorded instant whether or not that instant was ever read,
+and a floor-only oracle would pass on the size of the graph. The derived maximum
+cannot be satisfied that way: with an empty WAL it can only have come from the
+manifest.
+
+Each obligation has a sensitivity arm in
+`internal/sim/mvcc_clock_recovery_test.go`, run over the real recovery path:
+
+| Perturbation | Effect | Oracle |
+|---|---|---|
+| manifest instant rewritten to 2^40 | floor rises to 2^40+1 | the floor is *derived from that field*, not a coincidence |
+| manifest instant dropped (trailer re-framed, so recovery accepts it) | one node updated 40 times recovers with floor 3 against a captured instant of 41, and then re-mints instants 4–7 | floor, derived-maximum and re-minted-instant clauses all fire |
+| `ResumeTxnSeq` left unseeded on the reopen | the sequence restarts at 1 against an image carrying 1–7 | sequence clauses fire, including a genuine collision on 4 |
+
+The profile also proves the run entered each case rather than skipping it, and
+fails as a scenario when it did not: at least one checkpoint overlapped by a
+published commit, at least one recovery through snapshot plus a replayed WAL
+tail, and one through the snapshot alone — the forced crossing, which reclaims
+the whole WAL (tens of kilobytes → 0 bytes), replays zero ops, and comes up on a
+floor at least one past the instant the manifest recorded.
+
 ## Language-surface gaps (rmp #2462)
 
 Four narrow surfaces the DST issued but never adjudicated. Each is an

@@ -111,41 +111,60 @@ func (s *Simulator) crossSnapshotBoundary(label string) error {
 		return fmt.Errorf("sim: %s: no durable store to checkpoint"+
 			" (the scenario enabled neither crashes, a disk budget, nor checkpointing)", label)
 	}
-	cfg := s.store.Config()
+	store, b, err := crossSnapshotBoundaryOn(s.disk, s.store, label)
+	if err != nil {
+		return err
+	}
+	s.store = store
+	s.engine = NewEngineAdapter(store.Engine())
+	s.checkpointCount++
+	s.crashCount++
+	s.replayedOps += b.walOpsReplayed
+	s.boundary = b
+	return nil
+}
+
+// crossSnapshotBoundaryOn is the store-level body of
+// [Simulator.crossSnapshotBoundary]: it performs the checkpoint, the crash and
+// the recovery reopen over st, and returns the REPLACEMENT store together with
+// the measurements. st must not be used afterwards — it has been crashed.
+//
+// It exists so a scenario that drives a [SimStore] directly, without a
+// [Simulator] around it (the production profile, rmp #2469), gets the identical
+// forced crossing rather than an approximation of it. The Simulator method keeps
+// the run-statistics bookkeeping, which is the only part that is not about the
+// store.
+func crossSnapshotBoundaryOn(disk *SimDisk, st *SimStore, label string) (*SimStore, snapshotBoundary, error) {
+	var b snapshotBoundary
+	cfg := st.Config()
 	if cfg.dir == "" {
-		return fmt.Errorf("sim: %s: the store is WAL-only (no checkpoint dir),"+
+		return nil, b, fmt.Errorf("sim: %s: the store is WAL-only (no checkpoint dir),"+
 			" so no snapshot can be published and no snapshot-sourced recovery can be proven", label)
 	}
 
-	b := snapshotBoundary{label: label, crossed: true}
+	b = snapshotBoundary{label: label, crossed: true}
 	var err error
-	if b.walBefore, err = simWALSize(s.disk, cfg.dir); err != nil {
-		return fmt.Errorf("sim: %s: WAL size before checkpoint: %w", label, err)
+	if b.walBefore, err = simWALSize(disk, cfg.dir); err != nil {
+		return nil, b, fmt.Errorf("sim: %s: WAL size before checkpoint: %w", label, err)
 	}
-	if err = s.store.Checkpoint(); err != nil {
-		return fmt.Errorf("sim: %s: checkpoint: %w", label, err)
+	if err = st.Checkpoint(); err != nil {
+		return nil, b, fmt.Errorf("sim: %s: checkpoint: %w", label, err)
 	}
-	s.checkpointCount++
-	if b.walAfter, err = simWALSize(s.disk, cfg.dir); err != nil {
-		return fmt.Errorf("sim: %s: WAL size after checkpoint: %w", label, err)
+	if b.walAfter, err = simWALSize(disk, cfg.dir); err != nil {
+		return nil, b, fmt.Errorf("sim: %s: WAL size after checkpoint: %w", label, err)
 	}
-	b.snapshotPublished = s.disk.Exists(cfg.dir + "/" + simSnapshotName + "/manifest.json")
+	b.snapshotPublished = disk.Exists(cfg.dir + "/" + simSnapshotName + "/manifest.json")
 
 	// SIGKILL-equivalent, byte for byte what [Simulator.maybeCrash] does: drop
 	// the live engine and store without a graceful close, revoke every dirent
 	// whose parent directory was never fsynced, keep the SimDisk image.
-	s.disk.Crash()
-	store, err := OpenSimStore(s.disk, cfg)
+	disk.Crash()
+	store, err := OpenSimStore(disk, cfg)
 	if err != nil {
-		return fmt.Errorf("sim: %s: recovery reopen: %w", label, err)
+		return nil, b, fmt.Errorf("sim: %s: recovery reopen: %w", label, err)
 	}
-	s.store = store
-	s.engine = NewEngineAdapter(store.Engine())
-	s.crashCount++
 	b.walOpsReplayed = store.WALOps()
-	s.replayedOps += b.walOpsReplayed
-	s.boundary = b
-	return nil
+	return store, b, nil
 }
 
 // checkSnapshotSourcedRecovery adjudicates that a forced crossing really put the

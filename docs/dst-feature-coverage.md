@@ -379,7 +379,9 @@ open transactions and transaction-granular recovery adjudication (rmp #2438),
 Bolt-wire transactional roles with typed conflict accounting and during-run
 isolation oracles (rmp #2439/#2440), and the `production-profile` catalogue
 scenario combining all of it over the durable store in crash cycles
-(rmp #2441). The checkers found four engine isolation defects on arrival
+(rmp #2441), which since rmp #2469 checkpoints inside its traffic and
+adjudicates the MVCC clock and the transaction sequence across the snapshot
+boundary. The checkers found four engine isolation defects on arrival
 (rmp #2445, #2446), all fixed and regression-pinned.
 
 ## Defects surfaced by this coverage work

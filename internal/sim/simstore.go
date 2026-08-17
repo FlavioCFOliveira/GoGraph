@@ -59,6 +59,17 @@ type simStoreConfig struct {
 	dir         string
 	graphConfig adjlist.Config
 	maxTxnOps   int
+	// noResumeTxnSeq opens the store WITHOUT seeding [txn.Options.ResumeTxnSeq]
+	// from what recovery derived — the embedder as it behaved before rmp #2302
+	// taught recovery to report [recovery.Result.MaxTxnSeq]. A store opened this
+	// way restarts its transaction sequence at 0, so ONE WAL image ends up
+	// holding two different transactions under one sequence number.
+	//
+	// It exists solely as the SENSITIVITY SEAM of the MVCC clock/sequence
+	// recovery oracles (rmp #2469): without it, an oracle that never fires is
+	// indistinguishable from an invariant that always holds. Never set it in a
+	// scenario that is asserting correct behaviour.
+	noResumeTxnSeq bool
 }
 
 // defaultSimStoreConfig is a directed multigraph (openCypher's additive-CREATE
@@ -121,6 +132,16 @@ type SimStore struct {
 	// on-disk corruption (a benign torn tail is clean). A corrupt reopen is a
 	// hard durability fault the caller must surface, never silently append onto.
 	clean bool
+	// resumedTxnSeq is the transaction sequence this store continued FROM: the
+	// highest sequence the recovered WAL carried, fed back into
+	// [txn.Options.ResumeTxnSeq]. It is 0 for a fresh store and for a recovery
+	// whose surviving WAL held no v3 frame (a pure-snapshot recovery).
+	resumedTxnSeq uint64
+	// maxCommitTS is the highest durable MVCC commit instant the recovery folded
+	// into the clock floor — the maximum over every replayed commit marker AND
+	// the snapshot's recorded capture instant. It is 0 when nothing durable
+	// carried one.
+	maxCommitTS uint64
 }
 
 // OpenSimStore opens (or reopens) a store whose WAL lives in disk under
@@ -163,9 +184,22 @@ func OpenSimStore(disk *SimDisk, cfg simStoreConfig) (*SimStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sim: WAL OpenFS: %w", err)
 	}
+	// RESUME THE TRANSACTION SEQUENCE (rmp #2302, wired for rmp #2469). Recovery
+	// derives the highest sequence any durable v3 frame carried; the EMBEDDER has
+	// to feed it back, and this harness is an embedder. Left unseeded, the
+	// reopened store mints 1 again and one WAL image ends up holding two different
+	// transactions under one sequence number — which recovery's TxnSeq-suffix
+	// atomicity filter survives only because frame contiguity happens to
+	// disambiguate it, and which fuses an orphaned prefix into the wrong
+	// transaction the moment a reopen follows a torn tail.
+	resumeSeq := recovered.maxTxnSeq
+	if cfg.noResumeTxnSeq {
+		resumeSeq = 0 // sensitivity seam only; see simStoreConfig.noResumeTxnSeq.
+	}
 	store := txn.NewStoreWithOptions(g, wlog, txn.Options[string, float64]{
-		Codec:       codec,
-		WeightCodec: wcodec,
+		Codec:        codec,
+		WeightCodec:  wcodec,
+		ResumeTxnSeq: resumeSeq,
 	})
 	// Re-register recovered schema so a UNIQUE/index declared before the crash
 	// is enforced after restart, mirroring the production reopen path
@@ -173,14 +207,16 @@ func OpenSimStore(disk *SimDisk, cfg simStoreConfig) (*SimStore, error) {
 	engine := cypher.NewEngineWithStoreAndSchema(store, recovered.constraints, recovered.indexes)
 
 	return &SimStore{
-		disk:   disk,
-		cfg:    cfg,
-		graph:  g,
-		store:  store,
-		wlog:   wlog,
-		engine: engine,
-		walOps: recovered.walOps,
-		clean:  clean,
+		disk:          disk,
+		cfg:           cfg,
+		graph:         g,
+		store:         store,
+		wlog:          wlog,
+		engine:        engine,
+		walOps:        recovered.walOps,
+		clean:         clean,
+		resumedTxnSeq: resumeSeq,
+		maxCommitTS:   recovered.maxCommitTS,
 	}, nil
 }
 
@@ -191,6 +227,16 @@ type recoveredSchema struct {
 	constraints []recovery.ConstraintRecord
 	indexes     []recovery.IndexRecord
 	walOps      int
+	// maxTxnSeq is [recovery.Result.MaxTxnSeq]: the highest per-transaction
+	// sequence any replayed v3 frame carried, which the reopened store resumes
+	// from so no sequence is minted twice (rmp #2302).
+	maxTxnSeq uint64
+	// maxCommitTS is [recovery.Result.MaxCommitTS]: the highest durable MVCC
+	// commit instant, over the WAL AND (on the full-stack path) the snapshot's
+	// recorded capture instant. Recovery has already raised the graph's clock to
+	// maxCommitTS+1 by the time it is read here (rmp #2309); it is carried out so
+	// a scenario can adjudicate the floor against the durable record.
+	maxCommitTS uint64
 }
 
 // recoverSimGraph rebuilds the durable graph from the SimDisk image and returns
@@ -243,6 +289,8 @@ func recoverSimGraph(
 			constraints: res.Constraints,
 			indexes:     res.Indexes,
 			walOps:      res.WALOps,
+			maxTxnSeq:   res.MaxTxnSeq,
+			maxCommitTS: res.MaxCommitTS,
 		}, true, nil
 	}
 
@@ -273,10 +321,20 @@ func recoverSimGraph(
 	if err := truncateSimWALAt(disk, walPath, replay.WALTailOffset); err != nil {
 		return nil, recoveredSchema{}, false, fmt.Errorf("sim: truncate torn WAL tail: %w", err)
 	}
+	// The WAL-only core does not restore the MVCC clock itself (that happens
+	// inside the full-stack path), so raise the floor here exactly as
+	// [recovery.Open] does: one PAST the highest durable instant, because an
+	// instant that reached the file is spent even if the crash landed between its
+	// fsync and its visibility publish (rmp #2309).
+	if replay.MaxCommitTS > 0 {
+		g.RestoreMVCCClock(replay.MaxCommitTS + 1)
+	}
 	return g, recoveredSchema{
 		constraints: replay.Constraints,
 		indexes:     replay.Indexes,
 		walOps:      replay.WALOps,
+		maxTxnSeq:   replay.MaxTxnSeq,
+		maxCommitTS: replay.MaxCommitTS,
 	}, true, nil
 }
 
@@ -360,6 +418,30 @@ func (s *SimStore) WALOps() int { return s.walOps }
 // Clean reports whether the most recent recovery completed without genuine
 // on-disk corruption (a benign torn tail counts as clean).
 func (s *SimStore) Clean() bool { return s.clean }
+
+// ResumedTxnSeq reports the transaction sequence this store continued from —
+// [recovery.Result.MaxTxnSeq] fed back into [txn.Options.ResumeTxnSeq], so the
+// first transaction it commits is assigned ResumedTxnSeq+1. It is 0 for a fresh
+// store and for a recovery whose surviving WAL carried no v3 frame.
+func (s *SimStore) ResumedTxnSeq() uint64 { return s.resumedTxnSeq }
+
+// RecoveredMaxCommitTS reports the highest durable MVCC commit instant the
+// recovery observed — over every replayed commit marker and, on the full-stack
+// path, the snapshot's recorded capture instant. Recovery has already raised the
+// graph's MVCC clock to one past it, so it is the durable floor a post-recovery
+// commit must exceed (rmp #2309). It is 0 when nothing durable carried one.
+func (s *SimStore) RecoveredMaxCommitTS() uint64 { return s.maxCommitTS }
+
+// ClockNow reports the MVCC clock's currently published instant. Read
+// immediately after a reopen it is the RECOVERED clock floor; read during a run
+// it advances by one per published commit, which is what makes it a measure of
+// how much MVCC traffic overlapped a concurrent operation.
+func (s *SimStore) ClockNow() uint64 {
+	if s.graph == nil {
+		return 0
+	}
+	return s.graph.MVCCStats().Now
+}
 
 // Crash models a SIGKILL: it discards the in-memory engine, store, and WAL
 // writer WITHOUT a graceful close, so any buffered-but-unsynced frame is lost

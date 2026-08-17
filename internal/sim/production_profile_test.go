@@ -34,6 +34,81 @@ func TestProductionProfile_ShortRunsClean(t *testing.T) {
 	}
 }
 
+// TestProductionProfile_CrossesTheSnapshotBoundary is the rmp #2469 gate: the
+// profile's crash cycles now checkpoint WHILE their MVCC traffic is in flight,
+// and the run must have entered — measurably — the three cases it adjudicates:
+// a checkpoint overlapped by live commits, a recovery through snapshot plus a
+// replayed WAL tail, and a recovery through the snapshot ALONE.
+//
+// Every number here is measured from the durable image, never inferred: the WAL
+// bytes either side of each checkpoint, the MVCC instants and transaction
+// sequences the commit markers carry, and the instant the manifest recorded.
+func TestProductionProfile_CrossesTheSnapshotBoundary(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	report, ev, err := runProductionProfileEvidence(
+		context.Background(), productionProfileScenario().DefaultSeed, shortProductionProfile())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if report != nil {
+		t.Fatalf("production profile failed:\n%s", report.String())
+	}
+	if len(ev.cycles) != shortProductionProfile().cycles {
+		t.Fatalf("measured %d cycles, want %d", len(ev.cycles), shortProductionProfile().cycles)
+	}
+
+	var overlapped, tails int
+	for _, c := range ev.cycles {
+		t.Logf("cycle %d: %d commits published during the checkpoint (clients still running=%t), "+
+			"WAL %d -> %d bytes, snapshot instant %d | %s",
+			c.cycle, c.commitsDuringCheckpoint, c.clientsRunningAfterCheckpoint,
+			c.walBeforeCheckpoint, c.walAfterCheckpoint, c.snapshotInstant, c.recovery.summary())
+		if c.commitsDuringCheckpoint > 0 {
+			overlapped++
+		}
+		if c.recovery.snapshotPlusWALTail() {
+			tails++
+		}
+		// The sequence must have resumed from what the image carried, not
+		// restarted: the reopened store continues at the image maximum.
+		if c.recovery.resumedTxnSeq != c.recovery.imageMaxSeq {
+			t.Errorf("cycle %d resumed from sequence %d, want the image maximum %d",
+				c.cycle, c.recovery.resumedTxnSeq, c.recovery.imageMaxSeq)
+		}
+		if len(c.recovery.post) == 0 {
+			t.Errorf("cycle %d observed no post-recovery commit", c.cycle)
+		}
+	}
+	if overlapped == 0 {
+		t.Fatal("no checkpoint was overlapped by a published commit: the checkpoints ran over a quiesced store")
+	}
+	if tails == 0 {
+		t.Fatal("no cycle recovered through a snapshot plus a replayed WAL tail")
+	}
+
+	// The forced crossing: the WAL emptied, nothing replayed, and a clock floor
+	// that can only have come from the instant the manifest recorded.
+	t.Logf("crossing: %s", ev.boundary.summary())
+	t.Logf("crossing: %s", ev.crossing.summary())
+	if !ev.crossing.pureSnapshot() {
+		t.Fatalf("the forced crossing did not produce a pure-snapshot recovery: %s", ev.crossing.summary())
+	}
+	if ev.boundary.walBefore <= 0 || ev.boundary.walAfter != 0 || ev.boundary.walOpsReplayed != 0 {
+		t.Fatalf("the crossing did not truncate the WAL to nothing: %s", ev.boundary.summary())
+	}
+	if ev.crossing.recoveredMaxTS != ev.crossing.snapshotInstant {
+		t.Fatalf("the pure-snapshot recovery derived maximum instant %d from an image recording %d",
+			ev.crossing.recoveredMaxTS, ev.crossing.snapshotInstant)
+	}
+	if ev.crossing.snapshotInstant == 0 {
+		t.Fatal("the published image recorded no MVCC instant: the floor oracle would be vacuous")
+	}
+	if ev.crossing.post[0].ts <= ev.crossing.snapshotInstant {
+		t.Fatalf("the first post-recovery commit was made visible at instant %d, at or below the instant %d the "+
+			"image records", ev.crossing.post[0].ts, ev.crossing.snapshotInstant)
+	}
+}
+
 // TestProductionProfile_ReportCarriesReproduceLine asserts a failing report
 // renders the scenario name and the reproduce line an operator needs.
 func TestProductionProfile_ReportCarriesReproduceLine(t *testing.T) {
