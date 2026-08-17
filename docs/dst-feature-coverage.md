@@ -84,10 +84,62 @@ undirected Euler; `BiBFS`; direction-optimised BFS on a hub fixture; the
 | Post-rename dir-fsync fail-stop (WAL prefix reclaim) | `checkpoint-dirfsync-fault` | a post-rename parent-dir fsync failure poisons the writer, yet reopen recovers the exact committed state |
 | DDL (index + UNIQUE constraint) across the checkpoint/snapshot boundary | `ddl-checkpoint-crash`; `constraint-enforce` and `index-diversity` now checkpoint too | the checkpoint's reclaimed WAL prefix COVERS the DDL frames (measured on the SimDisk image), the pure-snapshot phase replays ZERO WAL ops, and the recovered schema still enforces UNIQUE, answers every index seek, and matches `SHOW`/`db.*` |
 | CSV / JSONL export→import round-trip under fault | `io-roundtrip-fault` | a clean round-trip reproduces the modelled edge set exactly; an export under ENOSPC fails with a typed error and leaves no partial artifact a re-import would accept |
+| Crash **during** the snapshot publish, at each step of the crash-atomic swap | `checkpoint-crash-storm` | acked ⊆ recovered ⊆ issued across a crash inside the publish window; a stranded backup is promoted by recovery (measured on the durable image and on `store.recovery.snapshot.promoteParentFsync`), never a half-published snapshot |
 
-The `DiskConfig.FaultRate` knob and three `SimDisk` fault primitives
-(`CorruptRange`, `ArmSyncFaultAt`, `ArmParentDirSyncFaultForPath`) back these
-scenarios; all default to inert, so existing scenarios are byte-identical.
+The `DiskConfig.FaultRate` knob and five `SimDisk` primitives back these
+scenarios — four faults (`CorruptRange`, `ArmSyncFaultAt`,
+`ArmParentDirSyncFaultForPath`, `ArmRenameFaultForPath`) and one crash-window
+selector (`ArmRenameWritebackForPath`, which chooses whether a rename's dirent
+had reached stable storage when the crash landed). All default to inert, so
+existing scenarios are byte-identical.
+
+### Crash during the snapshot publish (rmp #2465, closing #1827)
+
+Until sprint 347 a checkpoint could never be *interrupted*: `SimStore.Checkpoint`
+is synchronous and always ran to completion, and `Simulator.maybeCheckpoint`
+treats any checkpoint error as a hard run failure. The whole interrupted-publish
+half of the durability contract was therefore unexercised, and recovery's
+snapshot-promote repair — the block in `store/recovery` that promotes a stranded
+`snapshot.bak` back to the live name, marked by the
+`recovery.snapshot-promote-post-rename-pre-fsync` crash point — was **dead code
+under simulation**.
+
+Two things had to change before the window could be reached at all, and both
+were found by measurement rather than assumed:
+
+* **The renames could not fail.** Every other step of the publish
+  (`write+fsync components → fsync staging dir → archive rename → publish rename
+  → fsync parent`) could already be faulted, but the two renames could not, so
+  the publish path's own archive-restore branch was unreachable.
+  `ArmRenameFaultForPath` closes that gap. The task's premise that the
+  *parent fsync* also could not fail was **wrong**: the pre-existing
+  path-keyed `ArmParentDirSyncFaultForPath` already targets it, which a probe
+  confirmed.
+* **A crash in the publish window manufactured a false total loss.**
+  `SimDisk.Crash` revokes *every* not-yet-fsync'd dirent, and the publish issues
+  its two renames back to back with no fsync between them — so the crash dropped
+  both the archived backup and the newly published snapshot, an outcome no real
+  filesystem produces (a lost rename leaves the *old* name). That single
+  modelled outcome is also the reason the promote repair was unreachable: it
+  exists precisely for "the archive rename reached disk, the publish rename did
+  not". `ArmRenameWritebackForPath` selects that other, equally legal branch of
+  the crash-window non-determinism, one rename at a time and opt-in.
+
+`checkpoint-crash-storm` then crashes at three points of the swap
+(`stranded-backup`, `publish-rename`, `archive-rename`) while concurrent Bolt
+committers are still writing — the publish is checkpoint phase 2 and holds no
+commit lock, so the window is genuinely raced, which the run measures as durable
+commits landing *during* the interrupted checkpoint.
+
+The DST does not observe crash points directly (see
+`CoverageTracker.UnobservableSignals`): `crashpoint.Breakpoint` is compiled out
+without the `gograph_crashinject` tag and SIGKILLs the process with it, which
+would kill the test binary instead of producing the harness's in-process crash.
+Bridging it would mean adding a pluggable handler to a production-callable
+package. The scenario instead reproduces the *window* the site marks and observes
+the *branch* it guards through surfaces that already exist — the durable image
+(backup-only before the reopen, live-only after it) and store/recovery's own
+exported `store.recovery.snapshot.promoteParentFsync` counter.
 
 ### DDL across the snapshot boundary (rmp #2464)
 

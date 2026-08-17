@@ -120,6 +120,33 @@ type SimDisk struct {
 	//
 	// It has no effect when capacityBytes is 0.
 	enospcOnSync bool
+	// renameFaultPath / renameWritebackPath are the DESTINATION paths the two
+	// one-shot Rename arms below are keyed on. Both are keyed on the destination
+	// rather than a call ordinal for the same reason
+	// [SimDisk.ArmParentDirSyncFaultForPath] is: one snapshot publish issues a
+	// variable number of renames (every component writes through a sibling .tmp
+	// and renames it into place) before the two renames of the publish protocol
+	// itself, so an ordinal would be fragile against that count whereas the
+	// destinations ("<dir>/snapshot", "<dir>/snapshot.bak") are stable.
+	renameFaultPath     string
+	renameWritebackPath string
+	// renameFaults / renameWritebacks count how many times each armed Rename arm
+	// actually FIRED. They are the reachability observable: an arm whose path
+	// never matched is a silent no-op, and a scenario that depends on one firing
+	// must be able to tell "the primitive fired" from "the primitive was ignored"
+	// rather than diagnosing the resulting durable image as an engine defect.
+	// Mutated only under d.mu.
+	renameFaults     int64
+	renameWritebacks int64
+	// renameFaultArmed / renameFaultPath implement a ONE-SHOT deterministic fault
+	// on [SimDisk.Rename]: when armed, the next Rename onto renameFaultPath
+	// returns [ErrSimFault] and moves NOTHING, then disarms. See
+	// [SimDisk.ArmRenameFaultForPath].
+	renameFaultArmed bool
+	// renameWritebackArmed / renameWritebackPath implement a ONE-SHOT selection
+	// of the OTHER branch of the crash-window non-determinism a rename has: see
+	// [SimDisk.ArmRenameWritebackForPath].
+	renameWritebackArmed bool
 	// parentDirSyncFaultArmed / parentDirSyncFaultPath implement a ONE-SHOT
 	// deterministic fault on [SimDisk.ParentDirSync]: when armed, the next
 	// ParentDirSync whose childPath equals parentDirSyncFaultPath returns
@@ -348,13 +375,32 @@ func (d *SimDisk) Rename(oldPath, newPath string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	// One-shot injected failure of the rename(2) call itself (see
+	// [SimDisk.ArmRenameFaultForPath]). It fires before the source is looked up,
+	// so it models the syscall failing rather than a missing source.
+	if d.renameFaultArmed && d.renameFaultPath == newPath {
+		d.renameFaultArmed = false
+		d.renameFaultPath = ""
+		d.renameFaults++
+		return ErrSimFault
+	}
+	// One-shot selection of the "this rename reached stable storage" branch of
+	// the crash window (see [SimDisk.ArmRenameWritebackForPath]).
+	durable := isRootLevel(newPath)
+	if d.renameWritebackArmed && d.renameWritebackPath == newPath {
+		d.renameWritebackArmed = false
+		d.renameWritebackPath = ""
+		d.renameWritebacks++
+		durable = true
+	}
+
 	if f, ok := d.files[oldPath]; ok {
 		// Single-file rename: replace any destination, link the new name with
 		// a not-yet-durable dirent (unless root-level — see [isRootLevel] and
 		// the rationale in OpenFile — so the WAL's own renames stay governed by
 		// the data-durability model, not the dirent model).
 		delete(d.files, oldPath)
-		f.direntDurable = isRootLevel(newPath)
+		f.direntDurable = durable
 		d.files[newPath] = f
 		return nil
 	}
@@ -390,9 +436,105 @@ func (d *SimDisk) Rename(oldPath, newPath string) error {
 	}
 	// The directory's own dirent under its parent is not durable until a
 	// ParentDirSync(newPath); root-level directories are durably linked on
-	// creation, mirroring root-level files (see [isRootLevel]).
-	d.dirs[newPath] = isRootLevel(newPath)
+	// creation, mirroring root-level files (see [isRootLevel]). An armed
+	// write-back (see above) links it durably here instead.
+	d.dirs[newPath] = durable
 	return nil
+}
+
+// ArmRenameFaultForPath arms a ONE-SHOT fault on [SimDisk.Rename]: the next
+// rename whose DESTINATION equals newPath returns [ErrSimFault] and moves
+// nothing, then the arm clears so no further rename is affected. An empty
+// newPath disarms. [SimDisk.RenameFaultCount] reports how many times it fired.
+//
+// It is the rename analogue of [SimDisk.ArmSyncFaultAt] and
+// [SimDisk.ArmParentDirSyncFaultForPath], and closes the last gap in the
+// snapshot publish protocol's fault surface: every other step of
+//
+//	write+fsync components -> fsync staging dir -> archive rename -> publish
+//	rename -> fsync parent
+//
+// could already be made to fail under simulation, but the two renames could
+// not, so the publish path's own archive-restore branch (store/snapshot, the
+// best-effort Rename(bak, dir) after a failed publish rename) was unreachable.
+// Arming the publish destination ("<dir>/snapshot") exercises that restore;
+// arming the archive destination ("<dir>/snapshot.bak") aborts the publish
+// before the live snapshot is touched at all.
+//
+// The fault fires before the source path is looked up, so it models the
+// rename(2) call failing (EIO), not a missing source. It draws nothing from the
+// [Seed], so arming never perturbs the reproducible fault stream, and it must be
+// called from the controlling goroutine before the operation that will trigger
+// it. It defaults disarmed: a [SimDisk] that never arms it behaves exactly as
+// before.
+func (d *SimDisk) ArmRenameFaultForPath(newPath string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if newPath == "" {
+		d.renameFaultArmed = false
+		d.renameFaultPath = ""
+		return
+	}
+	d.renameFaultArmed = true
+	d.renameFaultPath = newPath
+}
+
+// ArmRenameWritebackForPath arms a ONE-SHOT dirent WRITE-BACK on
+// [SimDisk.Rename]: the next rename whose DESTINATION equals newPath links that
+// destination with an ALREADY-DURABLE directory entry, as if the kernel had
+// written the rename back to stable storage before the crash. The arm then
+// clears. An empty newPath disarms. [SimDisk.RenameWritebackCount] reports how
+// many times it fired.
+//
+// It exists because a crash immediately after a rename has TWO legal outcomes on
+// a real filesystem — the rename reached stable storage, or it did not — and
+// [SimDisk.Crash] models only the second (every not-yet-fsync'd dirent is
+// revoked). That is sound but incomplete, and the incompleteness is
+// load-bearing: the snapshot publish protocol issues two renames back to back
+// with no fsync between them, so under the revoke-everything model a crash in
+// the publish window drops BOTH the archived backup and the newly published
+// snapshot. No real filesystem produces that outcome, and it is precisely the
+// outcome recovery's interrupted-publish repair (store/recovery, promoting a
+// stranded "<dir>/snapshot.bak" back to the live name) exists to handle — so
+// without this arm that repair path is unreachable under simulation.
+//
+// Arming it on the archive destination therefore selects the "the archive
+// rename reached disk, the publish rename did not" branch of the window, which
+// is what strands a backup for recovery to promote.
+//
+// It draws nothing from the [Seed], so arming never perturbs the reproducible
+// fault stream, and it must be called from the controlling goroutine before the
+// rename it targets. It defaults disarmed: a [SimDisk] that never arms it
+// behaves exactly as before.
+func (d *SimDisk) ArmRenameWritebackForPath(newPath string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if newPath == "" {
+		d.renameWritebackArmed = false
+		d.renameWritebackPath = ""
+		return
+	}
+	d.renameWritebackArmed = true
+	d.renameWritebackPath = newPath
+}
+
+// RenameFaultCount returns how many armed rename faults actually fired since
+// construction (see [SimDisk.ArmRenameFaultForPath]). A scenario reads it to
+// prove the fault it armed was really reached rather than silently ignored
+// because the destination never matched.
+func (d *SimDisk) RenameFaultCount() int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.renameFaults
+}
+
+// RenameWritebackCount returns how many armed rename write-backs actually fired
+// since construction (see [SimDisk.ArmRenameWritebackForPath]). A scenario reads
+// it to prove the crash window it selected was really entered.
+func (d *SimDisk) RenameWritebackCount() int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.renameWritebacks
 }
 
 // removeSubtreeLocked deletes path and every key under path/. The caller holds

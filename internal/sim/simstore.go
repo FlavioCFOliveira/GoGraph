@@ -223,7 +223,7 @@ func recoverSimGraph(
 	// the truncated prefix). recovery.OpenFS reads dir/snapshot + dir/wal, honours
 	// the snapshot's persisted graph config, and truncates the benign WAL tail it
 	// returns as part of the recovered Result.
-	if cfg.dir != "" && disk.Exists(cfg.dir+"/"+simSnapshotName+"/manifest.json") {
+	if cfg.dir != "" && hasDurableSnapshot(disk, cfg.dir) {
 		res, err := recovery.OpenFS[string, float64](
 			simRecoveryFS{disk: disk}, cfg.dir,
 			recovery.Options[string, float64]{
@@ -278,6 +278,28 @@ func recoverSimGraph(
 		indexes:     replay.Indexes,
 		walOps:      replay.WALOps,
 	}, true, nil
+}
+
+// hasDurableSnapshot reports whether dir holds a snapshot the FULL
+// snapshot+WAL recovery core must run over — either a published one at
+// dir/snapshot, or one STRANDED at dir/snapshot.bak by a publish that a crash
+// interrupted between its archive rename and its publish rename.
+//
+// The stranded case is the load-bearing half. Recovery owns the repair for it
+// (store/recovery promotes the backup back to the live name before probing for
+// a manifest), but it can only run that repair if it is called at all: a gate
+// that admits only the live manifest would route an interrupted-publish
+// directory to the WAL-only core, which replays a WAL whose prefix the previous
+// checkpoint already truncated and so silently recovers a graph missing every
+// checkpointed transaction. Production never faces this because
+// [recovery.Open] is called unconditionally on the directory and decides
+// internally; this restores the same decision boundary to the simulation.
+//
+// A directory with neither manifest still takes the WAL-only path, so every
+// scenario that never publishes a snapshot is unaffected.
+func hasDurableSnapshot(disk *SimDisk, dir string) bool {
+	return disk.Exists(dir+"/"+simSnapshotName+"/manifest.json") ||
+		disk.Exists(dir+"/"+simSnapshotName+".bak/manifest.json")
 }
 
 // recoveryMaxTxnOpsOption maps the simulator's maxTxnOps convention (0 ->

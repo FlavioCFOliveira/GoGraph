@@ -120,6 +120,7 @@ func DefaultRegistry() (*Registry, error) {
 		ioRoundTripFaultScenario(),
 		productionProfileScenario(),
 		ddlCheckpointCrashScenario(),
+		checkpointCrashStormScenario(),
 	)
 }
 
