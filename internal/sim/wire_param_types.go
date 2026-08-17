@@ -15,7 +15,7 @@ package sim
 // including a genuine Map parameter used as the property map of a CREATE — the
 // RunAny-with-a-real-map path.
 //
-// # What round-trips, and what does not
+// # What round-trips
 //
 // Verified empirically against the wire (see [wireParamEchoProbe]):
 //
@@ -25,22 +25,23 @@ package sim
 //	Boolean  → packstream Boolean  ✔ round-trips
 //	Null     → packstream Null     ✔ round-trips
 //	Map      → packstream Map      ✔ round-trips
-//	List     → packstream String   ✘ DOES NOT round-trip — see below
+//	List     → packstream List     ✔ round-trips (since rmp #2513)
 //
-// A LIST binds correctly in both directions of evaluation — indexing, size, and
-// equality against a literal list all give the right answers, so the engine
-// really does receive a list — but the RECORD encoder has no expr.ListValue
-// arm: bolt/server/session.go's exprValueToPackstream documents that it handles
-// expr.ListValue while its switch does not, so a list-valued column falls
-// through to the `default` arm and is emitted as its String() rendering. A
-// LITERAL list return (`RETURN [1,2,3]`) is stringified identically, so this is
-// the RECORD encoder, not parameter binding.
+// # The list arm (rmp #2462 found it, rmp #2513 fixed it)
 //
-// The probe therefore splits the list into two assertions: its INPUT semantics
-// are verified through defect-immune scalar projections, and its OUTPUT
-// encoding is PINNED to the current stringified form by
-// [wireParamListEncodingPin], so that fixing the encoder flips this probe
-// deliberately rather than silently.
+// A LIST always bound correctly in both directions of evaluation — indexing,
+// size, and equality against a literal list gave the right answers, so the
+// engine really did receive a list — but the RECORD encoder had no
+// expr.ListValue arm, so a list-valued column fell through to the `default` arm
+// of bolt/server/session.go's exprValueToPackstream and was emitted as its
+// String() rendering. That was the RECORD encoder, not parameter binding: a
+// LITERAL list return (`RETURN [1,2,3]`) was stringified identically.
+//
+// #2513 added the arm, and [wireParamListProbe] now asserts BOTH halves live:
+// the input semantics through defect-immune scalar projections, and the output
+// encoding as a genuine packstream List whose elements keep their own types.
+// The broader end-to-end matrix — nesting, entities, temporals, and the
+// list-producing functions — lives in wire_list_encoding_test.go.
 
 import (
 	"context"
@@ -55,12 +56,12 @@ import (
 // without touching the population.
 const wireParamLabel = "WireParam"
 
-// wireParamListStringEncoding is the CURRENT wire encoding of a list-valued
-// column: the RECORD encoder stringifies it (see the file comment). Pinning the
-// exact rendering makes the known gap explicit — when the encoder gains its
-// expr.ListValue arm this constant is what fails, prompting a deliberate flip
-// of the expectation to a genuine packstream List.
-const wireParamListStringEncoding = "[1, 2, 3]"
+// wireParamListStringRendering is the DEFECTIVE encoding a list column had
+// before rmp #2513: its String() rendering instead of a PackStream List. It is
+// retained only so [wireParamListEncodingProbe] can name the regression it
+// guards against by its exact shape — arriving as this string again means the
+// expr.ListValue arm has been lost.
+const wireParamListStringRendering = "[1, 2, 3]"
 
 // probeWireParamTypes binds every PackStream parameter kind over a fresh Bolt
 // connection to srv and verifies each by read-back. It returns one description
@@ -114,8 +115,10 @@ func wireParamEchoProbe(q wireQueryFn) []string {
 		"b":   true,
 		"nul": nil,
 		"m":   map[string]any{"k": int64(9), "s": "v"},
+		"l":   []any{int64(1), "two", nil},
 	}
-	recs, ok := q("wire param echo", "RETURN $s AS s, $i AS i, $f AS f, $b AS b, $nul AS nul, $m AS m", params)
+	recs, ok := q("wire param echo",
+		"RETURN $s AS s, $i AS i, $f AS f, $b AS b, $nul AS nul, $m AS m, $l AS l", params)
 	if !ok {
 		return nil
 	}
@@ -129,17 +132,17 @@ func wireParamEchoProbe(q wireQueryFn) []string {
 		true,
 		nil,
 		map[string]any{"k": int64(9), "s": "v"},
+		[]any{int64(1), "two", nil},
 	}
 	return compareWireRow("wire param echo", recs[0].Data, want,
-		[]string{"String", "Integer", "Float", "Boolean", "Null", "Map"})
+		[]string{"String", "Integer", "Float", "Boolean", "Null", "Map", "List"})
 }
 
 // wireParamListProbe verifies a List parameter in two parts. Its INPUT
 // semantics are checked through scalar projections — indexing, size, and
-// equality against a literal list — which are immune to the RECORD encoder's
-// missing list arm and so genuinely prove the engine received a list. Its
-// OUTPUT encoding is then pinned to the current stringified form; see the file
-// comment for why that is a pin and not an endorsement.
+// equality against a literal list — which prove the engine received a list
+// without depending on how a list is encoded back. Its OUTPUT encoding is then
+// asserted to be a genuine PackStream List (rmp #2513); see the file comment.
 func wireParamListProbe(q wireQueryFn) []string {
 	var fails []string
 	list := []any{int64(1), int64(2), int64(3)}
@@ -156,16 +159,15 @@ func wireParamListProbe(q wireQueryFn) []string {
 		}
 	}
 
-	fails = append(fails, wireParamListEncodingPin(q, list)...)
+	fails = append(fails, wireParamListEncodingProbe(q, list)...)
 	return fails
 }
 
-// wireParamListEncodingPin pins the CURRENT (defective) wire encoding of a
-// list-valued column: the RECORD encoder emits a packstream String instead of a
-// packstream List, because bolt/server/session.go's exprValueToPackstream has
-// no expr.ListValue arm. When that arm is added this assertion fails, which is
-// the point — the fix must flip the expectation here deliberately.
-func wireParamListEncodingPin(q wireQueryFn, list []any) []string {
+// wireParamListEncodingProbe asserts the wire encoding of a list-valued column
+// is a genuine PackStream List whose elements keep their own types (rmp #2513).
+// The concrete Go type IS the encoding: a String carrying the same text is the
+// defect this probe exists to catch, so it is named explicitly in the failure.
+func wireParamListEncodingProbe(q wireQueryFn, list []any) []string {
 	recs, ok := q("wire param list encoding", "RETURN $l AS l", map[string]any{"l": list})
 	if !ok {
 		return nil
@@ -173,20 +175,14 @@ func wireParamListEncodingPin(q wireQueryFn, list []any) []string {
 	if len(recs) != 1 || len(recs[0].Data) != 1 {
 		return []string{"wire param list encoding: expected exactly one column in one row"}
 	}
-	got := recs[0].Data[0]
-	if s, isString := got.(string); isString && s == wireParamListStringEncoding {
-		return nil
-	}
-	if _, isList := got.([]any); isList {
+	if s, isString := recs[0].Data[0].(string); isString {
 		return []string{fmt.Sprintf(
-			"wire param list encoding: a list column now arrives as a packstream List (%#v). This is the "+
-				"CORRECT Bolt encoding and means the missing expr.ListValue arm in "+
-				"bolt/server/session.go exprValueToPackstream has been fixed — update this probe to assert "+
-				"the list natively and drop wireParamListStringEncoding", got)}
+			"wire param list encoding: a list column arrived as the packstream String %q (the pre-#2513 "+
+				"rendering was %q) — the expr.ListValue arm in bolt/server/session.go "+
+				"exprValueToPackstream has been LOST",
+			s, wireParamListStringRendering)}
 	}
-	return []string{fmt.Sprintf(
-		"wire param list encoding: got %T %#v, want the pinned stringified form %q",
-		got, got, wireParamListStringEncoding)}
+	return compareWireRow("wire param list encoding", recs[0].Data, []any{list}, []string{"List"})
 }
 
 // wireParamMapCreateProbe drives a genuine Map parameter through the autocommit
@@ -224,13 +220,20 @@ func wireParamMapCreateProbe(q wireQueryFn) []string {
 		}
 	}
 
-	// The stored list must compare equal to the same list rebound as a
-	// parameter — the read-back that the RECORD encoder cannot express directly.
+	// A stored list must compare equal to the same list rebound as a parameter,
+	// AND come back over the wire as a PackStream List (rmp #2513) — the
+	// equality check alone would pass even with a stringifying encoder.
 	recs, ok = q("wire param stored list equality",
 		"MATCH (n:"+wireParamLabel+" {id:$id}) RETURN n.l = $l AS eq",
 		map[string]any{"id": "wp-1", "l": []any{int64(1), int64(2), int64(3)}})
 	if ok {
 		fails = append(fails, expectSingleWireValue("wire param stored list equality", recs, true)...)
+	}
+	recs, ok = q("wire param stored list read-back",
+		"MATCH (n:"+wireParamLabel+" {id:$id}) RETURN n.l AS l", map[string]any{"id": "wp-1"})
+	if ok {
+		fails = append(fails, expectSingleWireValue("wire param stored list read-back", recs,
+			[]any{int64(1), int64(2), int64(3)})...)
 	}
 
 	// Float and Boolean parameters as pattern-predicate seek keys: the shape a

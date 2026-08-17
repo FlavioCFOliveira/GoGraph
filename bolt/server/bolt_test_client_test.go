@@ -45,13 +45,22 @@ func newBoltTestClient(t *testing.T, addr string) *boltTestClient {
 // Bolt wire response format (big-endian): [0x00, 0x00, minor, major].
 func (c *boltTestClient) negotiate(t *testing.T) proto.Version {
 	t.Helper()
+	return c.negotiateVersion(t, 5, 0)
+}
+
+// negotiateVersion is [boltTestClient.negotiate] with the offered version under
+// the caller's control, offering exactly major.minor in slot 0 and nothing else.
+// It is how a test pins behaviour that branches on the negotiated version — the
+// entity and temporal encodings differ between Bolt 4.4 and 5.x.
+func (c *boltTestClient) negotiateVersion(t *testing.T, major, minor uint8) proto.Version {
+	t.Helper()
 	var buf [20]byte
 	binary.BigEndian.PutUint32(buf[:4], proto.Magic)
-	// Slot 0: version 5.0 — [pad=0x00, minor_range=0, minor=0, major=5]
+	// Slot 0 — [pad=0x00, minor_range=0, minor, major]
 	buf[4] = 0 // pad
 	buf[5] = 0 // minor_range
-	buf[6] = 0 // minor
-	buf[7] = 5 // major
+	buf[6] = minor
+	buf[7] = major
 	// Slots 1–3: zero (not offered)
 	if _, err := c.conn.Write(buf[:]); err != nil {
 		t.Fatalf("negotiate write: %v", err)

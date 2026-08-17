@@ -105,3 +105,49 @@ func TestErrPayloadTooLarge_Sentinel(t *testing.T) {
 		t.Fatal("plain error with same message must not match ErrPayloadTooLarge via errors.Is")
 	}
 }
+
+// TestCollectionHeader_LengthContract pins the container-size contract this
+// file's header states but did not exercise: a collection count above the
+// 32-bit wire prefix is refused with the typed [packstream.ErrPayloadTooLarge],
+// and a negative count is refused outright. Neither may be silently truncated to
+// the low 32 bits — a truncated header would frame a valid-looking message whose
+// element count disagrees with its payload, which a peer cannot detect.
+//
+// Only the HEADER is written, so no oversized collection is ever allocated.
+func TestCollectionHeader_LengthContract(t *testing.T) {
+	tooLarge := uint64(math.MaxUint32) + 1
+	if tooLarge > uint64(math.MaxInt) {
+		t.Skip("int is 32 bits on this platform: a count above MaxUint32 is unrepresentable")
+	}
+	n := int(tooLarge)
+
+	for _, c := range []struct {
+		name  string
+		write func(*packstream.Encoder, int) error
+	}{
+		{"list", (*packstream.Encoder).WriteListHeader},
+		{"map", (*packstream.Encoder).WriteMapHeader},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			enc := packstream.NewEncoder(&buf)
+			err := c.write(enc, n)
+			if err == nil {
+				t.Fatalf("a %s count of %d was accepted; want ErrPayloadTooLarge", c.name, n)
+			}
+			if !errors.Is(err, packstream.ErrPayloadTooLarge) {
+				t.Fatalf("%s count %d: got %v, want ErrPayloadTooLarge", c.name, n, err)
+			}
+
+			if err := c.write(enc, -1); err == nil {
+				t.Fatalf("a negative %s count was accepted", c.name)
+			}
+
+			// Control: the largest representable count is accepted, so the
+			// guard above is the boundary firing and not a blanket rejection.
+			if err := c.write(enc, math.MaxUint32); err != nil {
+				t.Fatalf("%s count MaxUint32 was refused: %v", c.name, err)
+			}
+		})
+	}
+}

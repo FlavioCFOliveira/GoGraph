@@ -546,17 +546,19 @@ What round-trips:
 |---|---|---|
 | String, Integer, Float, Boolean, Null | native | yes |
 | Map | native PackStream Map | yes |
-| **List** | **PackStream String** | **no — see below** |
+| List | native PackStream List | yes (since #2513) |
 
-A **List** binds correctly in both directions of evaluation — indexing, `size`,
-and equality against a literal list all give the right answers, so the engine
-really does receive a list — but the RECORD encoder has no `expr.ListValue` arm
-(`bolt/server/session.go`), so a list column is emitted as its `String()`
-rendering. A literal list return is stringified identically, which locates the
-gap in the encoder rather than in parameter binding. The probe therefore checks
-the list's input semantics through defect-immune scalar projections and PINS the
-current stringified output, so fixing the encoder flips the probe deliberately
-rather than silently.
+A **List** always bound correctly in both directions of evaluation — indexing,
+`size`, and equality against a literal list all gave the right answers, so the
+engine really did receive a list — but the RECORD encoder had no
+`expr.ListValue` arm (`bolt/server/session.go`), so a list column was emitted as
+its `String()` rendering. A literal list return was stringified identically,
+which located the gap in the encoder rather than in parameter binding. #2513
+added the arm; the probe now asserts both halves live — the list's input
+semantics through scalar projections, and its output encoding as a genuine
+PackStream List. The full end-to-end matrix (nesting, entities, temporals, and
+the list-producing functions `collect`/`labels`/`keys`/`nodes`/`relationships`)
+is `internal/sim/wire_list_encoding_test.go`.
 
 ## Concurrency hypotheses chased
 

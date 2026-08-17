@@ -160,12 +160,13 @@ func TestWireParamTypes_SensitivityToAWrongExpectation(t *testing.T) {
 	}
 }
 
-// TestWireParamTypes_ListEncodingPinIsLive proves the known-gap pin is doing
-// real work: the RECORD encoder currently stringifies a list column (there is no
-// expr.ListValue arm in bolt/server/session.go's exprValueToPackstream), so the
-// pinned rendering must be what actually arrives. When the encoder is fixed this
-// test is the one that flips.
-func TestWireParamTypes_ListEncodingPinIsLive(t *testing.T) {
+// TestWireParamTypes_ListEncodesAsAPackstreamList is the flipped pin (rmp
+// #2513). Until the RECORD encoder gained its expr.ListValue arm this test
+// asserted the DEFECT — a list column arriving as the packstream String
+// "[1, 2, 3]" — so that fixing the encoder would flip it deliberately rather
+// than silently. It now asserts the correct Bolt encoding: a genuine packstream
+// List whose elements keep their own wire types.
+func TestWireParamTypes_ListEncodesAsAPackstreamList(t *testing.T) {
 	srv := newWireRoundTripServer(t)
 	c, err := srv.Dial()
 	if err != nil {
@@ -184,19 +185,32 @@ func TestWireParamTypes_ListEncodingPinIsLive(t *testing.T) {
 		t.Fatalf("expected one column in one row, got %d row(s)", len(recs))
 	}
 	switch got := recs[0].Data[0].(type) {
-	case string:
-		if got != wireParamListStringEncoding {
-			t.Errorf("pinned list rendering = %q, but the wire produced %q", wireParamListStringEncoding, got)
-		}
 	case []any:
-		t.Fatalf("a list column now arrives as a packstream List (%#v): the encoder gap is FIXED — "+
-			"update wireParamListEncodingPin to assert the native list", got)
+		if fails := compareWireRow("list echo", got,
+			[]any{int64(1), int64(2), int64(3)},
+			[]string{"element 0", "element 1", "element 2"}); len(fails) > 0 {
+			t.Fatalf("list elements diverged:\n%s", strings.Join(fails, "\n"))
+		}
+	case string:
+		t.Fatalf("a list column arrived as the packstream String %q — the expr.ListValue arm in "+
+			"bolt/server/session.go exprValueToPackstream has been LOST (#2513)", got)
 	default:
 		t.Fatalf("unexpected list encoding %T %#v", got, got)
 	}
 
-	// The list nonetheless BINDS correctly: evaluation over it gives right
-	// answers, so the gap is in the RECORD encoder, not in parameter binding.
+	// A LITERAL list takes the same encoder path, which is what proves this is
+	// the RECORD encoder rather than parameter binding.
+	recs, err = wireQuery(c, "RETURN [1, 2, 3] AS l", nil)
+	if err != nil {
+		t.Fatalf("literal list: %v", err)
+	}
+	if _, isList := recs[0].Data[0].([]any); !isList {
+		t.Fatalf("a LITERAL list column arrived as %T %#v, want a packstream List",
+			recs[0].Data[0], recs[0].Data[0])
+	}
+
+	// The list also BINDS correctly: evaluation over it gives the right answers,
+	// so input semantics and output encoding are independently established.
 	recs, err = wireQuery(c, "RETURN $l[1] AS second, size($l) AS n, $l = [1,2,3] AS eq",
 		map[string]any{"l": []any{int64(1), int64(2), int64(3)}})
 	if err != nil {
@@ -205,6 +219,33 @@ func TestWireParamTypes_ListEncodingPinIsLive(t *testing.T) {
 	if fails := compareWireRow("list semantics", recs[0].Data,
 		[]any{int64(2), int64(3), true}, []string{"index", "size", "equality"}); len(fails) > 0 {
 		t.Fatalf("a bound list did not evaluate correctly:\n%s", strings.Join(fails, "\n"))
+	}
+}
+
+// TestWireParamTypes_ListEncodingProbeIsSensitive proves the flipped assertion
+// can still FAIL: fed the pre-#2513 stringified rendering, and fed a list whose
+// element types are wrong, the comparison must fire. An assertion that cannot
+// fail would make the flip cosmetic.
+func TestWireParamTypes_ListEncodingProbeIsSensitive(t *testing.T) {
+	want := []any{[]any{int64(1), int64(2), int64(3)}}
+	cases := []struct {
+		name string
+		got  []any
+	}{
+		{"pre-#2513 stringified rendering", []any{wireParamListStringRendering}},
+		{"wrong element type", []any{[]any{"1", "2", "3"}}},
+		{"truncated list", []any{[]any{int64(1), int64(2)}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if fails := compareWireRow("probe", c.got, want, []string{"List"}); len(fails) == 0 {
+				t.Fatalf("comparison FAILED to fire for got=%#v", c.got)
+			}
+		})
+	}
+	if fails := compareWireRow("probe", []any{[]any{int64(1), int64(2), int64(3)}}, want,
+		[]string{"List"}); len(fails) > 0 {
+		t.Fatalf("comparison fired on an exact match: %v", fails)
 	}
 }
 

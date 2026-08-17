@@ -141,16 +141,23 @@ The coverage work exercised the engine against these scenarios and found:
 3. **k-shortest multigraph semantics** diverge between `YenKShortest` (dedups by
    node sequence, cheapest parallel edge) and `Loopless`/`Eppstein` (parallel
    edges as distinct paths). Recorded for adjudication (#1967).
-4. **A list-valued column is stringified on the Bolt wire.**
-   `bolt/server/session.go`'s `exprValueToPackstream` documents an
-   `expr.ListValue` case but its switch has none, so a list column falls through
-   to the `default` arm and is emitted as a PackStream **String** (`"[1, 2, 3]"`)
-   instead of a PackStream **List**. A literal list (`RETURN [1,2,3]`) is
-   stringified identically, so this is the RECORD encoder rather than parameter
-   binding — a bound list evaluates correctly (indexing, `size`, and equality
-   against a literal list all agree). Found by the wire parameter matrix
-   (rmp #2462), which PINS the current rendering so a fix flips the probe
-   deliberately.
+4. **A list-valued column was stringified on the Bolt wire.**
+   `bolt/server/session.go`'s `exprValueToPackstream` documented an
+   `expr.ListValue` case but its switch had none, so a list column fell through
+   to the `default` arm and was emitted as a PackStream **String**
+   (`"[1, 2, 3]"`) instead of a PackStream **List**. A literal list
+   (`RETURN [1,2,3]`) was stringified identically, so this was the RECORD encoder
+   rather than parameter binding — a bound list evaluated correctly (indexing,
+   `size`, and equality against a literal list all agreed). It affected every
+   list-producing construct: `collect()`, `labels()`, `keys()`, `nodes(p)`,
+   `relationships(p)`, list literals, and list-valued properties; `nodes(p)`
+   additionally lost all node structure. Found by the wire parameter matrix
+   (rmp #2462), which PINNED the rendering so a fix would flip the probe
+   deliberately. **Fixed** (#2513) — the arm encodes element-wise with the
+   negotiated Bolt major threaded through, so nested containers and entity or
+   temporal elements encode structurally on both 4.4 and 5.x. The pin is now the
+   live assertion, and `internal/sim/wire_list_encoding_test.go` carries the
+   end-to-end matrix.
 
 ## Documented debt / out of scope
 
