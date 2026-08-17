@@ -7180,7 +7180,14 @@ func buildOperatorWrite(
 		// includes the pattern node columns assigned to its left and can
 		// reference a fresh same-pattern node (#2024). The operator widens the
 		// row with those bindings at runtime (bindingEvalRow).
-		mp := exec.NewMergePattern(child, mutator).WithLabelSource(mergeLabelSource(labelSrc))
+		// p.Child == nil is the LEADING-clause plan shape: the MERGE has no
+		// driving clause, so buildOperatorWrite gave it a SingleRow leaf above
+		// and it owns the query's one initial empty row. Any other shape is
+		// driven by a real subplan and must fire once per row that subplan
+		// delivers — zero rows, zero firings (rmp #2512).
+		mp := exec.NewMergePattern(child, mutator).
+			WithLabelSource(mergeLabelSource(labelSrc)).
+			WithLeadingClause(p.Child == nil)
 		nodeCols := make([]int, len(p.Nodes))
 		for i, n := range p.Nodes {
 			if exec.PropMapContainsNullLiteral(n.PropsRaw) {
@@ -7352,6 +7359,11 @@ func buildOperatorWrite(
 		// Label posting list for the row-aware search, so a per-row MERGE key
 		// examines the label's population instead of the whole graph (#2217).
 		m.WithLabelSource(mergeLabelSource(labelSrc))
+		// p.Child == nil is the LEADING-clause plan shape: the MERGE has no
+		// driving clause, so buildOperatorWrite gave it a SingleRow leaf above
+		// and it owns the query's one initial empty row. Any other shape fires
+		// once per row its subplan delivers — zero rows, zero firings (#2512).
+		m.WithLeadingClause(p.Child == nil)
 		// An ON CREATE / ON MATCH action may target a RELATIONSHIP bound by a
 		// preceding clause. The operator resolves a node target through
 		// schemaCopy already; a relationship needs its endpoint/handle triplet

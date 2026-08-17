@@ -1,6 +1,6 @@
 package sim
 
-// merge_surface.go — MERGE surface completeness (rmp #2461).
+// merge_surface.go — MERGE surface completeness (rmp #2461, #2510, #2511, #2512).
 //
 // Before this file the DST drove exactly two MERGE shapes: a node MERGE with an
 // ON CREATE branch only ([tmplMergePerson]) and a relationship MERGE with both
@@ -94,6 +94,19 @@ package sim
 //     write lands on a PAIRED edge, which [CheckMergePairRelProps] already reads
 //     back in both directions. Both probes re-run after every crash, so the
 //     writes are proven durable and not merely present in memory.
+//
+//  7. A MERGE whose DRIVING CLAUSE produced no rows must not run at all. This is
+//     rmp #2512, and it is the one family here whose oracle expectation is the
+//     ALL-ZERO effect set on every tick and whose read-back asserts the ABSENCE
+//     of state. Both merge operators were defective — [tmplMergeZeroDriverNode]
+//     reaches the node-only one and [tmplMergeZeroDriverPair] the whole-pattern
+//     one — each firing once against an empty row whenever the child was
+//     exhausted, because an exhausted child is indistinguishable from a MERGE
+//     that is the query's LEADING clause. Every cell of the family is therefore a
+//     detector in two places at once: the counters oracle fails on the tick the
+//     phantom write is reported, and [CheckMergeZeroDriverAbsent] fails at the
+//     next check — including after a crash, which is what proves a phantom node
+//     was not merely created but durably persisted.
 
 import (
 	"cmp"
@@ -150,6 +163,20 @@ const (
 	tmplMergePairOuterRel = "MATCH (x:Person {name:$x})-[k:PAIRED]->(y:Person {name:$y}) " +
 		"MERGE (a:Person {name:$a})-[r:PAIRED]->(b:Person {name:$b}) ON CREATE SET k." +
 		mergePairRelKey + " = $v"
+	// tmplMergeZeroDriverNode is a node MERGE whose DRIVING clause binds nothing:
+	// $absent is [mergeZeroAbsentName], a key no actor can ever create. openCypher
+	// runs MERGE once per incoming row, so zero rows must run it zero times — the
+	// statement must report the ALL-ZERO effect set and create no node. The ON
+	// CREATE action is attached so a regression that fires the clause is caught by
+	// its property count too, not only by the node. See semantics 7.
+	tmplMergeZeroDriverNode = "MATCH (m:Person {name:$absent}) " +
+		"MERGE (n:Person {name:$z}) ON CREATE SET n.mc = 1"
+	// tmplMergeZeroDriverPair is [tmplMergeZeroDriverNode]'s whole-pattern
+	// counterpart, driven by the same never-matching clause. The two forms route
+	// to the two DIFFERENT merge operators, and rmp #2512 defeated both, so one
+	// template could not have covered the defect.
+	tmplMergeZeroDriverPair = "MATCH (m:Person {name:$absent}) " +
+		"MERGE (a:Person {name:$za})-[r:PAIRED]->(b:Person {name:$zb})"
 )
 
 // mergeOuterNodeKey is the single property key the outer-NODE action writes. It
@@ -187,6 +214,26 @@ const relPaired = "PAIRED"
 // exactly as the engine creates them while node- and edge-count parity, and the
 // endpoint-name edge probes, all keep working unchanged.
 var mergePairKeys = [...]string{"wp0", "wp1", "wp2", "wp3", "wp4", "wp5"}
+
+// mergeZeroKeys is the closed key namespace of the ZERO-ROW-DRIVER family
+// (rmp #2512). Unlike every other namespace in this file it names state that must
+// NEVER exist: the family's MERGE clauses are unreachable, so no Person may ever
+// carry one of these keys and no PAIRED edge may ever join two of them. That is
+// what [CheckMergeZeroDriverAbsent] asserts.
+//
+// Disjointness from every other name the workload binds is what makes the
+// assertion exact rather than probabilistic: [HonestWriter.uniqueName] always
+// produces "<FirstName>-<n>", and [mergePairKeys] is the "wp<n>" namespace, so no
+// actor can create a "zd<n>" Person by any route other than the defect.
+var mergeZeroKeys = [...]string{"zd0", "zd1", "zd2"}
+
+// mergeZeroAbsentName is the name the zero-row-driver family's leading MATCH
+// looks for. It is in the same unreachable namespace as [mergeZeroKeys], so the
+// MATCH binds nothing on every tick of every run — the premise the whole family
+// rests on, and one [CheckMergeZeroDriverAbsent] verifies rather than assumes: a
+// Person by this name would silently turn the family into a ONE-row driver, whose
+// all-zero expectation would then be wrong.
+const mergeZeroAbsentName = "zd-absent"
 
 // opMergeCounter builds a [tmplMergePersonCounter] op. One draw in two targets
 // an EXISTING name (driving the ON MATCH branch) and the rest a fresh unique
@@ -292,6 +339,32 @@ func (w SchemaMutationWriter) opMergePairOuterRel(seed *Seed, edges []pairedEdge
 		"a": a, "b": b,
 		"x": e.src, "y": e.dst,
 		"v": int64(seed.IntN(1000)),
+	}}
+}
+
+// opMergeZeroDriverNode builds a [tmplMergeZeroDriverNode] op: a node MERGE
+// behind a MATCH that binds nothing. The merge key is drawn from
+// [mergeZeroKeys], the namespace that must stay empty; the draw exists so a
+// regression cannot be confined to one key.
+func (SchemaMutationWriter) opMergeZeroDriverNode(seed *Seed) Op {
+	return Op{Kind: OpMerge, Cypher: tmplMergeZeroDriverNode, Params: map[string]any{
+		"absent": mergeZeroAbsentName,
+		"z":      mergeZeroKeys[seed.IntN(len(mergeZeroKeys))],
+	}}
+}
+
+// opMergeZeroDriverPair builds a [tmplMergeZeroDriverPair] op: the whole-pattern
+// MERGE behind the same never-matching MATCH, over two DISTINCT keys of
+// [mergeZeroKeys] so the pattern is a two-node one, exactly as the reachable
+// whole-pattern families draw theirs.
+func (SchemaMutationWriter) opMergeZeroDriverPair(seed *Seed) Op {
+	a := mergeZeroKeys[seed.IntN(len(mergeZeroKeys))]
+	b := a
+	for b == a {
+		b = mergeZeroKeys[seed.IntN(len(mergeZeroKeys))]
+	}
+	return Op{Kind: OpMerge, Cypher: tmplMergeZeroDriverPair, Params: map[string]any{
+		"absent": mergeZeroAbsentName, "za": a, "zb": b,
 	}}
 }
 
@@ -487,6 +560,16 @@ func (o *GraphOracle) applyMergePairOuterRel(params map[string]any) OracleResult
 	}
 	outer.Properties[mergePairRelKey] = params["v"]
 	return OracleResult{Committed: true, NodesCreated: 2, EdgesCreated: 1}
+}
+
+// applyMergeZeroDriver advances the model for the zero-row-driver families
+// ([tmplMergeZeroDriverNode], [tmplMergeZeroDriverPair]): the leading MATCH binds
+// nothing, so the MERGE runs zero times and the statement commits having changed
+// nothing at all. The model is therefore untouched — deliberately, and on every
+// tick: this is the one MERGE family whose correct outcome is that the graph did
+// not move (rmp #2512).
+func (o *GraphOracle) applyMergeZeroDriver() OracleResult {
+	return OracleResult{Committed: true}
 }
 
 // pairedEdgeBetween returns the modelled PAIRED edge running from a Person named
@@ -704,9 +787,73 @@ func expectedMergeSurfaceCounters(op Op, oracle *GraphOracle) (exec.QueryCounter
 			NodesCreated: 2, RelationshipsCreated: 1, PropertiesSet: 3, LabelsAdded: 2,
 		}, true
 
+	case tmplMergeZeroDriverNode, tmplMergeZeroDriverPair:
+		// The leading MATCH binds nothing, so the MERGE runs zero times and the
+		// statement reports the ALL-ZERO effect set — unconditionally, with no
+		// dependence on the model, because the driver never matches on any tick.
+		// Any non-zero counter here is rmp #2512 reappearing, caught on the very
+		// tick the phantom write is reported.
+		return exec.QueryCounters{}, true
+
 	default:
 		return exec.QueryCounters{}, false
 	}
+}
+
+// CheckMergeZeroDriverAbsent asserts that the zero-row-driver family (rmp #2512)
+// created nothing: no Person carries a [mergeZeroKeys] name, and no PAIRED edge
+// joins two of them. It is the read-back half of the guard — the counters oracle
+// catches the phantom effect REPORT on the tick it happens, this catches the
+// phantom STATE, and running it after crash/recovery is what distinguishes a
+// phantom that was merely created from one that was durably persisted.
+//
+// It also verifies the family's PREMISE rather than assuming it: [mergeZeroAbsentName]
+// must not exist, since a Person by that name would turn the never-matching driver
+// into a one-row driver and make the all-zero expectation wrong. The namespace is
+// disjoint from every name the workload can bind, so this can only fail if that
+// disjointness is ever broken — which is exactly when a silent pass would begin.
+func CheckMergeZeroDriverAbsent(tick int64, engine *EngineAdapter) []Violation {
+	var vs []Violation
+	count := func(q, what string) (int64, bool) {
+		n, err := engine.scalarCount(q)
+		if err != nil {
+			vs = append(vs, Violation{Kind: ViolationGraphIntegrity, Tick: tick, Op: "merge zero-driver read",
+				Message: fmt.Sprintf("%s: query %q failed: %v", what, q, err)})
+			return 0, false
+		}
+		return n, true
+	}
+	if n, ok := count(
+		fmt.Sprintf("MATCH (m:Person {name:'%s'}) RETURN count(m)", mergeZeroAbsentName),
+		"zero-driver premise",
+	); ok && n != 0 {
+		vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "merge zero-driver premise",
+			Message: fmt.Sprintf("%d Person{name:%q} exist; the zero-row-driver family's MATCH must bind NOTHING, "+
+				"otherwise its all-zero expectation is wrong and the guard is vacuous", n, mergeZeroAbsentName)})
+	}
+	for _, k := range mergeZeroKeys {
+		n, ok := count(fmt.Sprintf("MATCH (n:Person {name:'%s'}) RETURN count(n)", k), "zero-driver node")
+		if !ok || n == 0 {
+			continue
+		}
+		vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "merge zero-driver node",
+			Message: fmt.Sprintf("%d Person{name:%q} exist, want 0: a MERGE whose driving clause produced no rows "+
+				"CREATED a node (rmp #2512)", n, k)})
+	}
+	for _, a := range mergeZeroKeys {
+		for _, b := range mergeZeroKeys {
+			if a == b {
+				continue
+			}
+			q := fmt.Sprintf("MATCH (:Person {name:'%s'})-[r:PAIRED]->(:Person {name:'%s'}) RETURN count(r)", a, b)
+			if n, ok := count(q, "zero-driver relationship"); ok && n != 0 {
+				vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "merge zero-driver relationship",
+					Message: fmt.Sprintf("%d PAIRED(%q->%q) exist, want 0: a whole-pattern MERGE whose driving clause "+
+						"produced no rows CREATED the pattern (rmp #2512)", n, a, b)})
+			}
+		}
+	}
+	return vs
 }
 
 // CheckMergePairRelProps reads every modelled PAIRED relationship's property
@@ -843,6 +990,11 @@ type mergeSurfaceStats struct {
 	// action targets a NODE / a RELATIONSHIP bound by the preceding clause
 	// (rmp #2511).
 	pairOuterIssued, pairOuterRelIssued int
+	// zeroDriverNodeIssued / zeroDriverPairIssued count the ops of the
+	// zero-row-driver family (rmp #2512), one per merge operator. Both must be
+	// non-zero for the run to be evidence: the family's whole assertion is that
+	// nothing happened, which an unissued family satisfies trivially.
+	zeroDriverNodeIssued, zeroDriverPairIssued int
 	// counterCreated / counterMatched report that the ON CREATE and the ON
 	// MATCH branch of the counter family each fired at least once.
 	counterCreated, counterMatched bool
@@ -948,6 +1100,10 @@ func (ms *mergeSurfaceStats) noteOp(op Op, committed bool, oracle *GraphOracle) 
 		if c != mergePatternWhole {
 			ms.pairOuterRelCreated = true
 		}
+	case tmplMergeZeroDriverNode:
+		ms.zeroDriverNodeIssued++
+	case tmplMergeZeroDriverPair:
+		ms.zeroDriverPairIssued++
 	case tmplMergeParamMap:
 		ms.paramMapIssued++
 	}
@@ -1041,6 +1197,14 @@ func checkMergeSurfaceNonVacuity(tick int64, ms *mergeSurfaceStats) []Violation 
 	}
 	if !ms.pairOuterRelCreated {
 		fail("the outer-relationship MERGE action never took its ON CREATE branch, so the outer-relationship write never ran")
+	}
+	// The zero-row-driver family asserts an ABSENCE, so an unissued family passes
+	// its checker trivially. These two clauses are what stop that silent pass.
+	if ms.zeroDriverNodeIssued == 0 {
+		fail("no zero-row-driver node MERGE op was issued: the node arm of the zero-row-driver family was vacuous (rmp #2512)")
+	}
+	if ms.zeroDriverPairIssued == 0 {
+		fail("no zero-row-driver whole-pattern MERGE op was issued: the pattern arm of the zero-row-driver family was vacuous (rmp #2512)")
 	}
 	if seen := ms.patternCasesSeen(); seen < mergePatternCasesRequired {
 		fail(fmt.Sprintf("whole-pattern MERGE reached only %d of the %d sub-cases (need %d): %s",

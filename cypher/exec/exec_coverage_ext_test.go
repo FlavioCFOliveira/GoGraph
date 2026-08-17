@@ -821,6 +821,10 @@ func TestMerge_WithParams(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMerge: %v", err)
 	}
+	// Empty child + WithLeadingClause(true) is the leading-clause plan shape;
+	// without the flag an exhausted child means the driving clause produced no
+	// rows and the operator writes nothing (rmp #2512).
+	op.WithLeadingClause(true)
 	op2, err := op.WithParams(map[string]expr.Value{"val": expr.IntegerValue(42)})
 	if err != nil {
 		t.Fatalf("WithParams: %v", err)
@@ -1060,6 +1064,7 @@ func TestMerge_WithPropsEvalFn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMerge: %v", err)
 	}
+	op.WithLeadingClause(true) // leading-clause plan shape (rmp #2512)
 
 	// Attach a dynamic property evaluator.
 	op.WithPropsEvalFn(func(_ exec.Row) ([]exec.PropEntry, error) {

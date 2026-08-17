@@ -435,7 +435,7 @@ func TestMergeSurface_RejectionCheck(t *testing.T) {
 // an empty stats record fires every clause, and a fully-exercised record is
 // clean.
 func TestMergeSurface_NonVacuityGate(t *testing.T) {
-	const wantClauses = 16 // seven families + six branches + sub-cases + crash + survivor
+	const wantClauses = 18 // nine families + six branches + sub-cases + crash + survivor
 	if v := checkMergeSurfaceNonVacuity(0, newMergeSurfaceStats()); len(v) != wantClauses {
 		t.Fatalf("empty stats must fire all %d clauses, got %d: %v", wantClauses, len(v), v)
 	}
@@ -482,6 +482,16 @@ func TestMergeSurface_NonVacuityGate(t *testing.T) {
 		"a": "wp4", "b": "wp5", "x": "wp0", "y": "wp1", "v": int64(13)})
 	ms.noteOp(pairOuterRelOp, true, oracle)
 	oracle.ApplyMerge(pairOuterRelOp.Cypher, pairOuterRelOp.Params)
+	// The zero-row-driver arms (rmp #2512). They have no branch to fire — the
+	// clause never runs — so being issued is the whole record.
+	for _, op := range []Op{
+		mergeOp(tmplMergeZeroDriverNode, map[string]any{"absent": mergeZeroAbsentName, "z": mergeZeroKeys[0]}),
+		mergeOp(tmplMergeZeroDriverPair, map[string]any{
+			"absent": mergeZeroAbsentName, "za": mergeZeroKeys[0], "zb": mergeZeroKeys[1]}),
+	} {
+		ms.noteOp(op, true, oracle)
+		oracle.ApplyMerge(op.Cypher, op.Params)
+	}
 	ms.noteOp(Op{Kind: OpMalformed, Cypher: tmplMergeParamMap}, false, oracle)
 	ms.noteRecovery(oracle)
 
@@ -529,5 +539,161 @@ func TestSchemaMutation_MergeGateWired(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected a merge non-vacuity violation, got:\n%s", report)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Zero-row-driver family (rmp #2512)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// zeroDriverOps are the two ops of the zero-row-driver family, one per merge
+// operator: the node-only [exec.Merge] and the whole-pattern [exec.MergePattern].
+// Both were defective, so both are driven.
+func zeroDriverOps() []Op {
+	return []Op{
+		mergeOp(tmplMergeZeroDriverNode, map[string]any{
+			"absent": mergeZeroAbsentName, "z": mergeZeroKeys[0]}),
+		mergeOp(tmplMergeZeroDriverPair, map[string]any{
+			"absent": mergeZeroAbsentName, "za": mergeZeroKeys[0], "zb": mergeZeroKeys[1]}),
+	}
+}
+
+// TestMergeZeroDriver_ScriptedNoOp drives both zero-row-driver ops through the
+// REAL engine and asserts the whole guard end to end: the statement commits, its
+// effect report is all-zero, the counters oracle accepts it, node and edge counts
+// are unchanged, and [CheckMergeZeroDriverAbsent] finds nothing.
+//
+// The graph is seeded first, so the assertion is that the MERGE changed a
+// NON-EMPTY graph not at all — a stronger statement than that an empty graph
+// stayed empty, and one an engine that no-ops everything could not pass, because
+// the seeding itself is counted.
+func TestMergeZeroDriver_ScriptedNoOp(t *testing.T) {
+	a := NewEngineAdapter(newTestEngine(t))
+	oracle := NewGraphOracle()
+
+	seed := mergeOp(tmplMergePersonCounter, map[string]any{"name": "Ada"})
+	committed, counters := runCountedOp(t, a, seed)
+	mustCleanCounters(t, seed, committed, counters, oracle)
+	oracle.ApplyMerge(seed.Cypher, seed.Params)
+
+	nodesBefore, err := a.NodeCount()
+	if err != nil {
+		t.Fatalf("NodeCount: %v", err)
+	}
+	edgesBefore, err := a.EdgeCount()
+	if err != nil {
+		t.Fatalf("EdgeCount: %v", err)
+	}
+
+	for _, op := range zeroDriverOps() {
+		committed, counters := runCountedOp(t, a, op)
+		if !committed {
+			t.Fatalf("%q did not commit; a MERGE behind a MATCH that binds nothing is a legal no-op", op.Cypher)
+		}
+		wantCounters(t, "zero-row driver "+op.Cypher, counters, &exec.QueryCounters{})
+		mustCleanCounters(t, op, committed, counters, oracle)
+		oracle.ApplyMerge(op.Cypher, op.Params)
+	}
+
+	if got, err := a.NodeCount(); err != nil || got != nodesBefore {
+		t.Fatalf("node count = %d (err %v), want %d: a MERGE driven by zero rows created a node (rmp #2512)",
+			got, err, nodesBefore)
+	}
+	if got, err := a.EdgeCount(); err != nil || got != edgesBefore {
+		t.Fatalf("edge count = %d (err %v), want %d: a MERGE driven by zero rows created a relationship (rmp #2512)",
+			got, err, edgesBefore)
+	}
+	if v := CheckMergeZeroDriverAbsent(0, a); len(v) > 0 {
+		t.Fatalf("zero-driver absence check must be clean after the family ran: %v", v)
+	}
+	if v := CheckSchemaMutation(0, oracle, a); len(v) > 0 {
+		t.Fatalf("schema-mutation parity must be clean after the family ran: %v", v)
+	}
+}
+
+// TestMergeZeroDriver_CountersArmIsReachable proves the counters oracle actually
+// ADJUDICATES this family rather than skipping it. expectedOpCounters returns
+// (want, exact); CheckOpCounters silently accepts anything when exact is false,
+// so a template missing from the dispatch list in counters_oracle.go has a guard
+// that can never fail. That is precisely how rmp #2510's arm sat dead until rmp
+// #2511 found it, so the reachability is pinned here rather than assumed.
+func TestMergeZeroDriver_CountersArmIsReachable(t *testing.T) {
+	oracle := NewGraphOracle()
+	for _, op := range zeroDriverOps() {
+		want, exact := expectedOpCounters(op, oracle)
+		if !exact {
+			t.Fatalf("%q is not reached by the counters dispatch: its guard is DEAD CODE and can never fail", op.Cypher)
+		}
+		if want != (exec.QueryCounters{}) {
+			t.Fatalf("%q expectation = %+v, want the all-zero effect set", op.Cypher, want)
+		}
+	}
+	// The check must also REJECT a non-zero report — the shape rmp #2512 produced.
+	phantom := &exec.QueryCounters{NodesCreated: 1, LabelsAdded: 1, PropertiesSet: 1}
+	for _, op := range zeroDriverOps() {
+		if v := CheckOpCounters(0, op, true, phantom, oracle); len(v) == 0 {
+			t.Fatalf("%q: counters oracle accepted a phantom effect report %+v", op.Cypher, *phantom)
+		}
+	}
+}
+
+// TestMergeZeroDriver_CheckerCatchesPhantom is the meta-test for the read-back
+// half: it INJECTS by hand exactly the state a regressed engine would leave —
+// a Person in the unreachable key namespace, a PAIRED edge between two of them,
+// and a Person by the driver's never-matching name — and asserts the checker
+// reports each one. Without this the clean result in
+// TestMergeZeroDriver_ScriptedNoOp would be consistent with a checker that
+// cannot fail.
+func TestMergeZeroDriver_CheckerCatchesPhantom(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		inject  string
+		wantOp  string
+		wantMsg string
+	}{
+		{
+			name:    "phantom_node",
+			inject:  "CREATE (:Person {name:'" + mergeZeroKeys[0] + "'})",
+			wantOp:  "merge zero-driver node",
+			wantMsg: "CREATED a node",
+		},
+		{
+			name: "phantom_pattern",
+			inject: "CREATE (:Person {name:'" + mergeZeroKeys[0] + "'})-[:" + relPaired +
+				"]->(:Person {name:'" + mergeZeroKeys[1] + "'})",
+			wantOp:  "merge zero-driver relationship",
+			wantMsg: "CREATED the pattern",
+		},
+		{
+			name:    "broken_premise",
+			inject:  "CREATE (:Person {name:'" + mergeZeroAbsentName + "'})",
+			wantOp:  "merge zero-driver premise",
+			wantMsg: "must bind NOTHING",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := NewEngineAdapter(newTestEngine(t))
+			if v := CheckMergeZeroDriverAbsent(0, a); len(v) > 0 {
+				t.Fatalf("empty graph must be clean: %v", v)
+			}
+			op := Op{Kind: OpCreate, Cypher: tc.inject}
+			if committed, _ := runCountedOp(t, a, op); !committed {
+				t.Fatalf("injection %q did not commit", tc.inject)
+			}
+			v := CheckMergeZeroDriverAbsent(0, a)
+			if len(v) == 0 {
+				t.Fatalf("checker did not fire on %q: it cannot detect rmp #2512", tc.inject)
+			}
+			found := false
+			for _, viol := range v {
+				if viol.Op == tc.wantOp && strings.Contains(viol.Message, tc.wantMsg) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("expected a %q violation containing %q, got: %v", tc.wantOp, tc.wantMsg, v)
+			}
+		})
 	}
 }

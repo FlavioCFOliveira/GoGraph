@@ -258,7 +258,8 @@ func expectedOpCounters(op Op, oracle *GraphOracle) (want exec.QueryCounters, ok
 		return expectedCopyKnowsCounters(op, oracle)
 
 	case tmplMergePersonCounter, tmplMergePersonSetAll, tmplMergePairPattern,
-		tmplMergePairSetAll, tmplMergePairOuter, tmplMergePairOuterRel:
+		tmplMergePairSetAll, tmplMergePairOuter, tmplMergePairOuterRel,
+		tmplMergeZeroDriverNode, tmplMergeZeroDriverPair:
 		// The MERGE-surface templates — two-branch node MERGE, whole-map ON CREATE
 		// assignment, and whole-pattern MERGE (rmp #2461), the whole-entity
 		// relationship action (rmp #2510), and the two outer-target actions
@@ -267,7 +268,9 @@ func expectedOpCounters(op Op, oracle *GraphOracle) (want exec.QueryCounters, ok
 		// tmplMergePairSetAll was MISSING from this list until rmp #2511, so its
 		// arm in expectedMergeSurfaceCounters was unreachable and #2510's counters
 		// guard never adjudicated anything: the family's only live assertion was
-		// the read-back in CheckMergePairRelProps.
+		// the read-back in CheckMergePairRelProps. The zero-row-driver templates
+		// (rmp #2512) are listed here for the same reason, and
+		// TestCounters_ZeroDriverArmIsReachable pins that this list reaches them.
 		return expectedMergeSurfaceCounters(op, oracle)
 
 	case tmplForeachCreatePersons, tmplForeachSetTag:

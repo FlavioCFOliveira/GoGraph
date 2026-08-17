@@ -55,9 +55,12 @@ var schemaMutationProps = []string{"age", "tag", "score", "mc", mergeOuterNodeKe
 // and the relationship together ([tmplMergePairPattern]), and the
 // map-parameter MERGE the engine must REJECT ([tmplMergeParamMap]). Since rmp
 // #2510 it also drives the whole-entity action on a pattern's relationship
-// variable ([tmplMergePairSetAll]), and since rmp #2511 the two actions whose
+// variable ([tmplMergePairSetAll]), since rmp #2511 the two actions whose
 // target is bound by the clause PRECEDING the MERGE — a node
-// ([tmplMergePairOuter]) and a relationship ([tmplMergePairOuterRel]). The first
+// ([tmplMergePairOuter]) and a relationship ([tmplMergePairOuterRel]) — and
+// since rmp #2512 the two MERGE forms behind a driving clause that binds NOTHING
+// ([tmplMergeZeroDriverNode], [tmplMergeZeroDriverPair]), which must therefore
+// change nothing at all. The first
 // three create nodes, so the writer is no longer create-free; the last is the
 // one statement it emits deliberately expecting an engine error, and it is
 // modelled as an [OpMalformed] no-op for exactly that reason. Every other op
@@ -83,7 +86,7 @@ func (w SchemaMutationWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 		return HonestWriter{}.opCreatePerson(seed)
 	}
 	name := names[seed.IntN(len(names))]
-	switch seed.IntN(15) {
+	switch seed.IntN(17) {
 	case 0:
 		return Op{Kind: OpUpdate, Cypher: tmplSetTag, Params: map[string]any{"name": name, "tag": fmt.Sprintf("t%d", seed.IntN(1000))}}
 	case 1:
@@ -113,6 +116,10 @@ func (w SchemaMutationWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 		return w.opMergePairOuter(seed, names)
 	case 13:
 		return w.opMergePairOuterRel(seed, oracle.pairedEdgesByName())
+	case 14:
+		return w.opMergeZeroDriverNode(seed)
+	case 15:
+		return w.opMergeZeroDriverPair(seed)
 	default:
 		// SET n = $props REPLACES the property set — it must carry name (the key)
 		// and age so the node stays matchable and the durability probe keeps working.
@@ -257,7 +264,13 @@ func CheckSchemaMutation(tick int64, oracle *GraphOracle, engine *EngineAdapter)
 				Message: fmt.Sprintf("Person{name:%q} :Vip membership: engine=%d, want=%d (SET/REMOVE label did not round-trip)", name, vipGot, want)})
 		}
 	}
-	return append(vs, CheckMergePairRelProps(tick, oracle, engine)...)
+	vs = append(vs, CheckMergePairRelProps(tick, oracle, engine)...)
+	// The zero-row-driver family (rmp #2512) asserts an ABSENCE, so it has no
+	// modelled state to walk and needs only the engine. Hanging it here gives it
+	// this function's whole schedule — periodic, immediately post-recovery, and
+	// once at the end — so a phantom MERGE is caught whether it survived a crash
+	// or not.
+	return append(vs, CheckMergeZeroDriverAbsent(tick, engine)...)
 }
 
 // schemaMutationWorkload mixes HonestWriter (which creates/links/deletes Persons,
@@ -282,9 +295,11 @@ const schemaMutationCheckEvery = 60
 // since rmp #2461 the MERGE families the DST did not previously reach (a node
 // MERGE with both action branches, ON CREATE SET n = $map, a whole-pattern
 // MERGE, and the map-parameter MERGE the engine must reject), since rmp #2510
-// the whole-entity action on a pattern's relationship variable, and since rmp
+// the whole-entity action on a pattern's relationship variable, since rmp
 // #2511 the two actions whose target is bound by the clause PRECEDING the MERGE
-// (a node and a relationship) — and [CheckSchemaMutation] confirms each mutation
+// (a node and a relationship), and since rmp #2512 the two MERGE forms driven by
+// a clause that binds nothing, which must change nothing — and
+// [CheckSchemaMutation] confirms each mutation
 // round-trips and — with crash+checkpoint injected — survives both WAL and
 // snapshot recovery. Two terminal gates ([checkForeachNonVacuity] and
 // [checkMergeSurfaceNonVacuity]) prove the added templates were actually issued,
@@ -293,7 +308,7 @@ const schemaMutationCheckEvery = 60
 func schemaMutationScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioSchemaMutation,
-		Description: "schema mutation: REMOVE prop/label, SET label, SET n += $map, SET n = $map, FOREACH create/set expansion, MERGE surface (both action branches, ON CREATE SET n = $map, whole-pattern, whole-entity relationship action, outer-node and outer-relationship actions, rejected map param) + multi-label match; survives crash/recovery",
+		Description: "schema mutation: REMOVE prop/label, SET label, SET n += $map, SET n = $map, FOREACH create/set expansion, MERGE surface (both action branches, ON CREATE SET n = $map, whole-pattern, whole-entity relationship action, outer-node and outer-relationship actions, zero-row-driver no-ops, rejected map param) + multi-label match; survives crash/recovery",
 		Mode:        ModeDeterministic,
 		DefaultSeed: 0x5C4E3A17,
 		MaxTicks:    500,

@@ -1031,7 +1031,12 @@ func TestMerge_NoMatch(t *testing.T) {
 
 	noMatchFn := func(_ context.Context) ([]exec.Row, error) { return nil, nil }
 	schema := map[string]int{}
-	src := newSliceOperator() // empty child (no driving rows needed for Merge)
+	// Empty child + WithLeadingClause(true) is the LEADING-clause plan shape: a
+	// MERGE with no driving clause, which owns the query's one initial empty row.
+	// The flag is mandatory — without it an exhausted child means "the driving
+	// clause produced no rows", and the operator correctly writes nothing (rmp
+	// #2512, pinned by TestMerge_NonLeadingWithEmptyChildWritesNothing).
+	src := newSliceOperator()
 	op, err := exec.NewMerge(
 		"n",
 		[]string{"Person"},
@@ -1045,6 +1050,7 @@ func TestMerge_NoMatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	op.WithLeadingClause(true)
 
 	rows, drainErr := exec.Drain(context.Background(), op)
 	if drainErr != nil {
@@ -1069,7 +1075,7 @@ func TestMerge_Match(t *testing.T) {
 		return []exec.Row{existingRow}, nil
 	}
 	schema := map[string]int{"n": 0}
-	src := newSliceOperator()
+	src := newSliceOperator() // leading-clause shape; see TestMerge_NoMatch
 	op, err := exec.NewMerge(
 		"n",
 		[]string{"Person"},
@@ -1083,6 +1089,7 @@ func TestMerge_Match(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	op.WithLeadingClause(true)
 
 	rows, drainErr := exec.Drain(context.Background(), op)
 	if drainErr != nil {
@@ -1122,6 +1129,7 @@ func TestMerge_NoMatchOnceUnderConcurrency(t *testing.T) {
 				t.Errorf("goroutine %d: NewMerge: %v", i, err)
 				return
 			}
+			op.WithLeadingClause(true) // leading-clause shape; see TestMerge_NoMatch
 			if _, err := exec.Drain(context.Background(), op); err != nil {
 				t.Errorf("goroutine %d: Drain: %v", i, err)
 			}
@@ -1135,6 +1143,51 @@ func TestMerge_NoMatchOnceUnderConcurrency(t *testing.T) {
 		if m.nodeCount() != 1 {
 			t.Errorf("goroutine %d: expected 1 node, got %d", i, m.nodeCount())
 		}
+	}
+}
+
+// TestMerge_NonLeadingWithEmptyChildWritesNothing is the exec-level statement of
+// rmp #2512, and the assertion that makes WithLeadingClause load-bearing rather
+// than decorative: the SAME operator shape as TestMerge_NoMatch — empty child,
+// search finds nothing — writes a node when the plan declares it the leading
+// clause and writes nothing when it does not.
+//
+// A MERGE that is not the leading clause is driven by a real subplan, so an
+// exhausted child means that subplan produced no rows, and openCypher runs an
+// updating clause once per incoming row (CIP2015-10-27, which tabulates
+// nodes-created against rows-in). Zero rows in, zero nodes out.
+func TestMerge_NonLeadingWithEmptyChildWritesNothing(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		leading   bool
+		wantRows  int
+		wantNodes int
+	}{
+		{name: "leading_clause_fires_once", leading: true, wantRows: 1, wantNodes: 1},
+		{name: "driven_by_zero_rows_does_not_fire", leading: false, wantRows: 0, wantNodes: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mut := newStubMutator()
+			noMatchFn := func(_ context.Context) ([]exec.Row, error) { return nil, nil }
+			op, err := exec.NewMerge("n", []string{"Person"}, `{name: "Bob"}`, nil, nil,
+				noMatchFn, map[string]int{}, newSliceOperator(), mut)
+			if err != nil {
+				t.Fatalf("NewMerge: %v", err)
+			}
+			op.WithLeadingClause(tc.leading)
+			rows, drainErr := exec.Drain(context.Background(), op)
+			if drainErr != nil {
+				t.Fatalf("Drain: %v", drainErr)
+			}
+			if len(rows) != tc.wantRows {
+				t.Errorf("emitted %d rows, want %d", len(rows), tc.wantRows)
+			}
+			if mut.nodeCount() != tc.wantNodes {
+				t.Errorf("created %d nodes, want %d", mut.nodeCount(), tc.wantNodes)
+			}
+		})
 	}
 }
 

@@ -529,6 +529,10 @@ func (o *GraphOracle) ApplyMerge(cypher string, params map[string]any) OracleRes
 		return o.recordOp(cypher, params, o.applyMergePairOuter(params))
 	case tmplMergePairOuterRel:
 		return o.recordOp(cypher, params, o.applyMergePairOuterRel(params))
+	case tmplMergeZeroDriverNode, tmplMergeZeroDriverPair:
+		// The driving MATCH binds nothing, so the MERGE runs zero times: a
+		// committed statement that changed nothing (rmp #2512).
+		return o.recordOp(cypher, params, o.applyMergeZeroDriver())
 	}
 	if cypher != tmplMergePerson {
 		return o.recordOp(cypher, params, OracleResult{ErrorMsg: "oracle: unmodelled MERGE"})

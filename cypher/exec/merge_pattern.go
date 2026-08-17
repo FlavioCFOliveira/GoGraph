@@ -227,6 +227,12 @@ type MergePattern struct {
 	created   bool
 	done      bool
 	firedOnce bool
+	// leadingClause records that this MERGE is the LEADING clause of its query —
+	// it has no driving clause at all, so its child is the synthetic single-row
+	// leaf rather than a real subplan. Decided by plan shape in the physical
+	// builder (see [MergePattern.WithLeadingClause]), never inferred at runtime
+	// from whether rows arrived (rmp #2512).
+	leadingClause bool
 }
 
 // NewMergePattern creates an empty MergePattern; call AddBoundNode/
@@ -543,6 +549,19 @@ func (op *MergePattern) WithConstraints(reg *ConstraintRegistry, mgr *index.Mana
 	return op
 }
 
+// WithLeadingClause declares whether this MERGE is the LEADING clause of its
+// query — that is, whether it has a driving clause at all. Pass true only when
+// the plan has no preceding clause feeding the MERGE. The physical builder
+// decides this from the logical plan (a nil IR child); the operator never infers
+// it from its own runtime behaviour. Returns op for chaining.
+//
+// See [Merge.WithLeadingClause] for the openCypher rule this implements and the
+// defect that made the distinction necessary (rmp #2512).
+func (op *MergePattern) WithLeadingClause(leading bool) *MergePattern {
+	op.leadingClause = leading
+	return op
+}
+
 // Init initialises the operator and its child. The first MergePattern.Init
 // (or [CreateNode.Init] / [Merge.Init]) in the process also seeds
 // [globalNodeCounter], exactly as those operators do, so fresh-node keys
@@ -569,7 +588,8 @@ func (op *MergePattern) Close() error { return op.child.Close() }
 // more than one satisfying binding) so each is emitted as its own row.
 // Mirrors [Merge.Next]'s buffering shape, including firing exactly once
 // against an empty driving row when MergePattern is the leading clause
-// (no preceding MATCH/WITH at all).
+// (no preceding MATCH/WITH at all, as declared by
+// [MergePattern.WithLeadingClause]).
 func (op *MergePattern) Next(out *Row) (bool, error) {
 	if err := op.ctx.Err(); err != nil {
 		return false, err
@@ -594,7 +614,11 @@ func (op *MergePattern) Next(out *Row) (bool, error) {
 			return false, err
 		}
 		if !ok {
-			if !op.firedOnce {
+			// Child exhausted. Only the LEADING-clause shape — no driving clause
+			// at all — fires against the empty row here; a driving clause that
+			// produced no rows must produce no execution (rmp #2512). See
+			// [Merge.Next] for the full reasoning.
+			if op.leadingClause && !op.firedOnce {
 				op.firedOnce = true
 				op.done = true
 				if err := op.runForRow(Row{}); err != nil {

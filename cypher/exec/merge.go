@@ -110,6 +110,13 @@ type Merge struct {
 	created   bool
 	done      bool
 	firedOnce bool // tracks whether at least one merge cycle has run
+	// leadingClause records that this MERGE is the LEADING clause of its query —
+	// it has no driving clause at all, so its child is the synthetic single-row
+	// leaf rather than a real subplan. It is decided by plan shape in the physical
+	// builder (see [Merge.WithLeadingClause]) and NEVER inferred at runtime from
+	// whether rows arrived, because an exhausted child looks identical in both
+	// cases and guessing created data no statement asked for (rmp #2512).
+	leadingClause bool
 }
 
 // mergeAction is a pre-parsed ON CREATE / ON MATCH SET item. Two shapes
@@ -225,6 +232,27 @@ func (op *Merge) WithSetAllActions(onCreate, onMatch []MergeSetAllAction) *Merge
 // Returns op for chaining.
 func (op *Merge) WithOuterRelCols(cols map[string]RelCols) *Merge {
 	op.outerRelCols = cols
+	return op
+}
+
+// WithLeadingClause declares whether this MERGE is the LEADING clause of its
+// query — that is, whether it has a driving clause at all. Pass true only when
+// the plan has no preceding clause feeding the MERGE; the physical builder
+// decides this from the logical plan (a nil IR child), never the operator from
+// its runtime behaviour. Returns op for chaining.
+//
+// openCypher executes an updating clause once per incoming row: CIP2015-10-27
+// "State visibility between clauses" tabulates nodes-created against rows-in for
+// `MATCH () CREATE ()`, and gives the leading clause exactly one incoming row.
+// A leading MERGE therefore runs once against the empty row, and a MERGE whose
+// driving clause produced no rows runs not at all.
+//
+// Both cases reach [Merge.Next] as an exhausted child, which is why the
+// distinction cannot be recovered there: the operator used to fire whenever no
+// row had ever arrived, so `MATCH (m:M {name:'absent'}) MERGE (q:Q)` created a
+// :Q node on a statement that matched nothing (rmp #2512).
+func (op *Merge) WithLeadingClause(leading bool) *Merge {
+	op.leadingClause = leading
 	return op
 }
 
@@ -514,13 +542,18 @@ func (op *Merge) Next(out *Row) (bool, error) {
 			return false, err
 		}
 		if !ok {
-			// Child has no more rows. When MERGE is the leading clause
-			// (no driving rows at all) the operator still fires once
-			// against an empty driving row so a standalone
-			// `MERGE (a:Foo)` creates the node — this matches the
-			// openCypher single-empty-row semantics that powers the
-			// Argument leaf.
-			if !op.firedOnce {
+			// Child has no more rows. openCypher runs MERGE once per incoming
+			// row, so a driving clause that produced none produces no execution
+			// at all (rmp #2512) — this arm must NOT create the pattern.
+			//
+			// The sole exception is the LEADING-clause plan shape, which has no
+			// driving clause: it owns the query's one initial empty row and so
+			// fires once against it. That is decided by the plan builder, not
+			// discovered here. In the physical plan the shape is already driven
+			// by [SingleRow], which delivers that row through the branch below,
+			// so this is the belt to its braces — and the contract an operator
+			// built directly against an empty child relies on.
+			if op.leadingClause && !op.firedOnce {
 				op.firedOnce = true
 				op.done = true
 				if err := op.runMergeForChild(Row{}); err != nil {
