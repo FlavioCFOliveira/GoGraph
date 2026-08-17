@@ -408,6 +408,18 @@ func (s *SimStore) Engine() *cypher.Engine { return s.engine }
 // Graph returns the live recovered graph.
 func (s *SimStore) Graph() *lpg.Graph[string, float64] { return s.graph }
 
+// WAL returns the live WAL writer this store commits through, so an oracle can
+// read the writer's OWN view of durability — [wal.Writer.DurableOffset],
+// [wal.Writer.Stats] and [wal.Writer.Poisoned] — alongside the durable byte
+// image on the [SimDisk] (rmp #2472). Reading those two independently is the
+// point: the byte image is what exists, the writer's counters are what it
+// believes, and a watermark defect is a disagreement between them.
+//
+// The returned writer is OWNED by the store: a caller must only READ it.
+// Appending or syncing through it directly bypasses the transaction layer's
+// sequence minting and apply gate, and [SimStore.Close] closes it.
+func (s *SimStore) WAL() *wal.Writer { return s.wlog }
+
 // WALOps reports how many WAL ops the most recent recovery replayed back into
 // the graph on open (0 for a freshly-created store).
 func (s *SimStore) WALOps() int { return s.walOps }

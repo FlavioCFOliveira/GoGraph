@@ -394,6 +394,151 @@ DST adds is a group whose membership is constructed rather than assumed: the WAL
 unit test fails *every* fsync, so it cannot distinguish one shared round from N
 serialised ones.
 
+### The WAL writer surface: watermark, frame contiguity, truncate, guards (rmp #2472)
+
+Most of what `store/wal.Writer` **exports** was invisible to the simulator.
+`Stats`, `DurableOffset`, `Poisoned` and `SyncBuffered` were never read by any
+scenario, and the whole-file `Truncate` — as distinct from `TruncatePrefix`, which
+the checkpoint path drives — was never called. Each states a contract the rest of
+the store depends on: the checkpointer picks its WAL cut point from
+`DurableOffset` and aborts on `Poisoned`, and the txn layer's empty commit resolves
+through `SyncBuffered`. `internal/sim/wal_writer_surface.go` adjudicates all of
+them.
+
+**The durability watermark** is observed after *every* acknowledged commit, and
+what "expected" means is split in two, because only one form is available to every
+caller:
+
+- **Exact**, when the harness chose the payloads (`RunWALWatermarkDirect`): the
+  durable offset must equal the watermark `AppendRun` returned for that commit, and
+  `wal.Stats` must equal `SUM(wal.HeaderSize + len(payload))` over every frame
+  emitted. Measured: 12 commits, 24 frames, `durable == appended == boundary ==
+  imageLen == 656`.
+- **Relative**, when the payloads are the engine's (`RunWALWatermarkEngine`): every
+  counter is monotonic, the durable offset never exceeds the bytes accepted, and it
+  lands on a **frame boundary** of the durable image — the accumulation over some
+  whole number of leading complete frames. Measured: 8 commits, 32 frames, final
+  offset 1456.
+
+The relative form deliberately asserts **no absolute size**. rmp #2521 measured
+that the durable image varies with process wall-clock time, because a commit marker
+encodes the instant it was written; an oracle pinning a byte count would be pinning
+the clock. The frame-boundary relation is derived from the frames actually on disk,
+so it is invariant under that variation and is still exactly the invariant
+`DurableOffset` documents.
+
+**Per-transaction frame contiguity** is the claim `AppendRun` makes *by
+construction* — it holds `w.mu` across a whole transaction's frames — and that
+claim is only testable under concurrency. Before commit `9eee3b18` the contiguity
+came from the store's single-writer semaphore two layers up, and `store/recovery`
+discards a transaction's buffered prefix as orphaned on the stated ground that
+frames never interleave, so an interleaved image makes recovery drop **committed**
+ops. `RunWALContiguity` drives 8 concurrent committers × 12 transactions × 4 frames
+through the real writer, then partitions the durable image by payload tag — what is
+physically on disk, not what any counter claims:
+
+| append path | frames | transactions | maximal runs | split transactions | worst fragments |
+|---|---|---|---|---|---|
+| `AppendRun` (one call per transaction) | 384 | 96 | **96** | **0** | 1 |
+
+**The claim holds**, and it is asserted **unconditionally** — a split is a defect
+however little concurrency produced it.
+
+**The evidence that attributes contiguity to `AppendRun` is CONSTRUCTED, not
+raced.** The first version of the control drove eight committers concurrently and
+asserted that per-frame `Append` produced at least one split. It did on an idle
+machine — 31 of 96 transactions — and then failed under `make ci`'s coverage step
+with the suite running in parallel, where all four retries measured
+`committerSwitches=7, split=0`: the scheduler simply never overlapped the
+committers. **An assertion on a scheduling outcome measures the machine, not the
+module** (the defect class filed as rmp #2517), and raising the retry count would
+have traded a red gate for a slow one while still measuring the scheduler.
+
+`RunWALContiguityAlternating` replaces it with a handoff protocol. Two committers
+pass a token, so exactly one is eligible to append at any instant and the durable
+image is determined by the protocol. Both modes run the **same** protocol; only the
+append API changes, so the difference is attributable to the API alone:
+
+| mode | frames | transactions | maximal runs | split | worst fragments | committer switches |
+|---|---|---|---|---|---|---|
+| per-frame `Append`, strict alternation | 8 | 2 | **8** | **2** | 4 | 7 |
+| `AppendRun`, same handoff | 8 | 2 | **2** | **0** | 1 | 1 |
+
+Per-frame `Append` releases the writer mutex between frames, so the partner's frame
+really does land in the middle and each transaction ends up in four fragments —
+a genuinely interleaved image from the real writer, reproducible byte for byte.
+Under `AppendRun` the partner signals from *inside* the run and still cannot get
+in, because the run holds the mutex throughout; that ordering is decided by the
+**mutex, not the scheduler**, so it is equally deterministic. The signal is one-way
+on purpose: a full ping-pong would deadlock there, and that deadlock is the
+mechanism under test. The **whole layout** is asserted, not just "at least one
+split", so a lost frame or a skipped handoff changes a number and is caught.
+
+Verified in the condition that broke the original: under `GOMAXPROCS=1` with
+coverage instrumentation — where the concurrent arm reproduces
+`committerSwitches=7` exactly — five consecutive runs produced **byte-identical**
+layouts for both alternating modes and exited 0.
+
+Three gates are kept apart:
+
+- **Non-vacuity** rejects shapes that would make the census worthless: fewer than 8
+  committers, a **single frame per transaction** (contiguous by definition), or a
+  transaction missing or short of frames.
+- **The verdict** (`checkWALContiguity`) is asserted unconditionally.
+- **The concurrency witness** (`checkWALContiguityConcurrencyWitness`) reports
+  whether the machine actually granted concurrency. A shortfall is logged as
+  **UNINFORMATIVE, never as a failure**, because it measures the scheduler; it
+  never excuses a split, and the deterministic proof does not depend on it.
+
+**`Truncate` and the poisoned writer** are pinned by `RunWALLifecycle`. The
+documented parts hold: `Truncate` returns the bytes that were in the file, zeroes
+the watermark, leaves the **lifetime** counters untouched, and the next append
+restarts at offset 0 of the empty file; a poisoned writer reports a stable sticky
+error carrying `wal.ErrDurabilityFailed`, rejects every append with that same value,
+fails a `SyncGroup` for a watermark the poison discarded, and — per rmp #2322 —
+still returns nil for a watermark that was already durable. Two members of the
+contract were **undocumented and are pinned as measured**:
+
+- **`SyncBuffered` on a poisoned writer returns nil.** The poison rewinds the
+  accepted offset to the durable one, so "make everything accepted durable" is
+  already satisfied and the durable-already fast path fires. It is correct —
+  nothing accepted is un-durable — but it means `SyncBuffered` is **not** a health
+  probe; `Poisoned` is.
+- **`Truncate` on a poisoned writer succeeds** and empties the file, while the
+  writer stays poisoned. `Truncate` is the one mutator that does not consult the
+  sticky error. It is not a durability hole — the writer still refuses every
+  append, so nothing can be written after the emptied file — and `Truncate` is
+  documented as a maintenance helper off the production checkpoint path, which cuts
+  the WAL with `TruncatePrefix` instead. It is pinned so a change putting `Truncate`
+  on a live path is caught rather than absorbed.
+
+Also measured: after `Close`, `Append` and `Truncate` return `wal.ErrWriterClosed`
+rather than the poison (the closed check precedes the poison check), while
+`Poisoned` still reports why the handle died.
+
+**`ErrWALLocked` and the `O_NOFOLLOW` refusal remain unreachable through
+`SimDisk`, and that is stated rather than papered over.** `SimDisk` is a flat
+in-memory key table with no inodes, links or advisory locks, so a flock and a
+symlink cannot exist in it. Of the two honest routes — grow `SimDisk` a
+lock-and-symlink model, or drive the two opens against a real directory —
+`RunWALRealFSGuards` takes the second, on the ground that a modelled flock would
+prove the model while a real second `wal.Open` exercises the syscall the guard is
+made of. (`os.MkdirTemp` where the SimDisk seam does not exist is already
+precedent, rmp #2466.) It asserts a second `wal.Open` of a locked path returns
+`wal.ErrWALLocked` — `flock(2)` binds to the open file description, so the two
+opens conflict within one process and no subprocess is needed — that closing the
+first releases it, and that a symlinked final component is refused at **both**
+`O_NOFOLLOW` sites: the WAL data file and the `LOCK` sentinel, which is opened
+before any WAL data is touched. The victim file outside the directory is verified
+byte-unchanged, which is the property that actually matters (CWE-59, security
+finding #1843). The consequence to record: **these two guards sit outside every
+seeded, crash-injecting scenario in this package, and will while `SimDisk` has no
+link or lock semantics.** The adjudicator makes no claim at all on a platform that
+cannot express them, so a skip never reads as a pass.
+
+Every gate here is proved falsifiable as well as satisfied — a doctored record for
+each clause, plus the live per-frame control for contiguity.
+
 ### Read-transaction isolation
 
 `cypher.Engine.BeginReadTx` provides **snapshot isolation across the whole
@@ -496,3 +641,14 @@ The coverage work exercised the engine against these scenarios and found:
   coalescing and fail-all are now gated in the DST; see
   [Group-commit coalescing and fail-all](#group-commit-coalescing-and-fail-all-rmp-2471)
   above.
+- **`wal.ErrWALLocked` and the WAL `O_NOFOLLOW` refusal are STRUCTURALLY
+  unreachable through `SimDisk`** — it is a flat in-memory key table with no
+  inodes, links or advisory locks — so they are **not** covered by any seeded,
+  crash-injecting scenario, and will not be unless `SimDisk` grows a
+  lock-and-symlink model. Since rmp #2472 both are driven against a real
+  temporary directory by `RunWALRealFSGuards`, alongside the store-layer unit
+  tests (`store/wal/lock_test.go`, `store/wal/symlink_escape_test.go`); that arm
+  is their only representation in the simulator, it leaves the simulated disk to
+  do it, and it makes no claim on a platform that cannot express the guards. See
+  [The WAL writer surface](#the-wal-writer-surface-watermark-frame-contiguity-truncate-guards-rmp-2472)
+  above for why a real directory was chosen over a model.
