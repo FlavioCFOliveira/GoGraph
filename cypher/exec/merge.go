@@ -256,6 +256,27 @@ func (op *Merge) WithLeadingClause(leading bool) *Merge {
 	return op
 }
 
+// isOuterRelVar reports whether targetVar names a relationship bound by a
+// PRECEDING clause — one of the variables [Merge.WithOuterRelCols] threads in.
+//
+// The node arms must ask this BEFORE they try to read the variable's column as a
+// node id. Since rmp #2317 a relationship rides in the row as a bare
+// [expr.IntegerValue] holding the instance's stable HANDLE, which is a different
+// namespace from [graph.NodeID] and shares its representation:
+// [resolveNodeIDFromRow] converts one to the other unconditionally, so a handle
+// that happens to equal an existing node's id resolved to that unrelated node and
+// the action wrote its property THERE — a silent misdirected write, not merely a
+// lost one (rmp #2515). Node ids are not dense, so whether any node carries the
+// value of a given handle varies with the graph; the defect therefore surfaced
+// only intermittently while being fully deterministic for a given graph.
+//
+// [resolveRowEntity] disambiguates the same integer with the same evidence; this
+// predicate simply stops the node arms from answering first and answering wrong.
+func (op *Merge) isOuterRelVar(targetVar string) bool {
+	_, ok := op.outerRelCols[targetVar]
+	return ok
+}
+
 // resolveActionRel resolves an action target that is not a node in scope but may
 // be a relationship bound by a preceding clause. Reports ok=false for anything
 // else, which the callers skip exactly as they always skipped an unresolvable
@@ -307,7 +328,13 @@ func (op *Merge) applySetAllActions(actions []MergeSetAllAction, row Row) error 
 // resolveActionNodeKey resolves the node key an ON CREATE / ON MATCH action
 // targets: via the schema column first, then falling back to column 0 when the
 // action names the merge variable and that column carries the node id.
+//
+// A relationship bound by a preceding clause is declined outright — see
+// [Merge.isOuterRelVar] for why its column must never reach a node-id lookup.
 func (op *Merge) resolveActionNodeKey(targetVar string, row Row) (string, bool) {
+	if op.isOuterRelVar(targetVar) {
+		return "", false
+	}
 	if id, err := resolveNodeIDFromRow(targetVar, op.schema, row); err == nil {
 		if nodeKey, ok := op.mutator.ResolveNodeLabel(id); ok {
 			return nodeKey, true
@@ -601,11 +628,15 @@ func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalF
 		var nodeID graph.NodeID
 		var resolved bool
 
-		// Try to resolve via schema first.
-		id, schemaErr := resolveNodeIDFromRow(a.nodeVar, op.schema, row)
-		if schemaErr == nil {
-			if nodeKey, resolved = op.mutator.ResolveNodeLabel(id); resolved {
-				nodeID = id
+		// Try to resolve via schema first — unless the target is a relationship
+		// bound by a preceding clause, whose column carries a handle rather than a
+		// node id and must not be read as one ([Merge.isOuterRelVar], rmp #2515).
+		if !op.isOuterRelVar(a.nodeVar) {
+			id, schemaErr := resolveNodeIDFromRow(a.nodeVar, op.schema, row)
+			if schemaErr == nil {
+				if nodeKey, resolved = op.mutator.ResolveNodeLabel(id); resolved {
+					nodeID = id
+				}
 			}
 		}
 
