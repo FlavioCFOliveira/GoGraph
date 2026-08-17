@@ -361,14 +361,62 @@ func captureAndWrite[N comparable, W any](
 	constraints []ConstraintSpec,
 	indexDefs []IndexDefSpec,
 ) error {
+	return captureAndWriteW[N, W](ctx, fsys, dir, c, g, codec, nil, constraints, indexDefs)
+}
+
+// captureAndWriteW is [captureAndWrite] with the weight codec exposed. The
+// codec reaches the CSR writer through the Capture and is consulted only for
+// weight types the fixed-width layout cannot size (rmp #2526); a nil wcodec
+// reproduces the historical behaviour for every fixed-width weight, and makes a
+// graph whose weights cannot be expressed REFUSE to publish rather than publish
+// a weightless image.
+func captureAndWriteW[N comparable, W any](
+	ctx context.Context,
+	fsys fileSystem,
+	dir string,
+	c *csr.CSR[W],
+	g *lpg.Graph[N, W],
+	codec keyEncoder[N],
+	wcodec weightEncoder[W],
+	constraints []ConstraintSpec,
+	indexDefs []IndexDefSpec,
+) error {
 	// nil instant: this path is the full, one-shot snapshot writer, whose caller holds
 	// its own exclusion and is reading the present. The CONCURRENT capture — the one
 	// rmp #2310 built — goes through CaptureGraph with a snapshot instead.
-	capt, err := CaptureGraph(g, c, codec, nil)
+	capt, err := CaptureGraphWithWeightCodec(g, c, codec, wcodec, nil)
 	if err != nil {
 		return err
 	}
 	return writeCaptureCore(ctx, fsys, dir, capt, constraints, indexDefs)
+}
+
+// WriteSnapshotFullWithWeightCodecCtx is the weight-codec-aware variant of
+// [WriteSnapshotFullCtx]: it persists edge weights of ANY type W by encoding
+// them through wcodec.
+//
+// Without a codec this writer can persist only weights whose Go type has a
+// fixed width (the built-in integer, float and bool primitives), and a graph
+// holding any other weight type fails with [ErrWeightNotPersistable] rather
+// than publishing a weightless snapshot (rmp #2526). A nil wcodec is accepted
+// and behaves exactly as [WriteSnapshotFullCtx].
+//
+// The mapper is persisted for string-keyed graphs only, as on
+// [WriteSnapshotFullCtx]; pair with a mapper codec via the
+// WriteSnapshotFullWithMapperCodec* family when the key type needs one.
+func WriteSnapshotFullWithWeightCodecCtx[N comparable, W any](
+	ctx context.Context,
+	dir string,
+	c *csr.CSR[W],
+	g *lpg.Graph[N, W],
+	wcodec weightEncoder[W],
+) error {
+	defer metrics.Time("store.snapshot.WriteSnapshotFullWithWeightCodecCtx").Stop()
+	err := captureAndWriteW[N, W](ctx, osBackend{}, dir, c, g, nil, wcodec, nil, nil)
+	if err != nil {
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithWeightCodecCtx.errors", 1)
+	}
+	return err
 }
 
 // WriteCapture publishes a [Capture] taken earlier to dir, emitting
@@ -446,7 +494,13 @@ func writeCaptureCore[W any](
 	// csr.bin
 	csrPath := filepath.Join(tmp, CSRFile)
 	csrSize, csrCRC, err := writeAndSync(fsys, csrPath, func(w io.Writer) (int64, uint32, error) {
-		return WriteCSR(w, capt.csr)
+		// The capture's own weight codec, adopted at CaptureGraphWithWeightCodec
+		// time. When it is nil and the weights cannot be expressed by the
+		// fixed-width layout, this returns ErrWeightNotPersistable and the whole
+		// publish fails here — before any manifest is written, before the atomic
+		// rename, and therefore before the caller's checkpoint can truncate the
+		// WAL prefix that still holds those weights (rmp #2526).
+		return writeCSRWith(w, capt.csr, capt.wenc)
 	})
 	if err != nil {
 		_ = fsys.RemoveAll(tmp)

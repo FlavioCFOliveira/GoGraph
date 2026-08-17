@@ -670,17 +670,22 @@ The coverage work exercised the engine against these scenarios and found:
    builds; see the section above for why the framing and schema layers are kept
    apart.
 6. **A struct edge weight is silently dropped by the snapshot CSR writer**
-   (fail-silent, permanent data loss). `store/snapshot` never consults
+   (fail-silent, permanent data loss). `store/snapshot` never consulted
    `txn.WeightCodec`: `csrWeightSize` (`store/snapshot/writer.go`) returns 0 for
-   every weight type outside the Go primitives, so `WriteCSR` emits
-   `hasWeights=0` — the same encoding a deliberately weightless graph produces —
-   and the checkpoint then truncates the WAL prefix holding the true values.
-   Measured by `codec-matrix` (rmp #2473): the same image returned **95 of 95**
-   weights at the WAL-only boundary and **0 of 191** after one folding
-   checkpoint. **NOT fixed** — the fix is in `store/snapshot`, outside the
-   task's scope. The behaviour is PINNED by the matrix's
-   `snapshotWeightSupported` arm flag plus a non-vacuity check that the drop was
-   really observed, so any change in either direction fails the suite.
+   every weight type outside the Go primitives — every struct, and every NAMED
+   integer type such as `time.Duration` — so `WriteCSR` emitted `hasWeights=0`,
+   the same encoding a deliberately weightless graph produces, and the
+   checkpoint then truncated the WAL prefix holding the true values. Measured by
+   `codec-matrix` (rmp #2473): the same image returned **95 of 95** weights at
+   the WAL-only boundary and **0 of 191** after one folding checkpoint.
+   **FIXED (rmp #2526).** The snapshot persists weights of any type through the
+   store's own codec (`checkpoint.WithWeightCodec` /
+   `recovery.Options.WeightCodec`), and a weight that still cannot be encoded
+   fails the snapshot write with `snapshot.ErrWeightNotPersistable` instead of
+   publishing a weightless image, so the WAL prefix holding the surviving copy
+   is never truncated. The matrix assertion is inverted: every arm must now
+   confirm its weights after a SNAPSHOT-ONLY recovery, and a non-vacuity gate
+   refuses a run in which any arm never crossed a checkpoint.
 
 ## Documented debt / out of scope
 

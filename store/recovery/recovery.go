@@ -1237,7 +1237,13 @@ func openCodec[N comparable, W any](
 			// since a leak is not observable through the public API and so
 			// cannot be regression-tested from outside graph/adjlist.
 			g.AdjList().BeginExclusiveBuild()
-			csrErr := snapshot.ApplyCSRToGraph(g, &loaded.CSR)
+			// wcodec is threaded in so a snapshot whose weights column is
+			// codec-encoded (rmp #2526 — any weight type without a fixed
+			// width) decodes to the committed values instead of being refused.
+			// It is the same codec WAL replay already uses below, so an edge
+			// recovered from the snapshot and one recovered from the WAL are
+			// decoded by one authority.
+			csrErr := snapshot.ApplyCSRToGraphWithWeightCodec(g, &loaded.CSR, wcodec)
 			g.AdjList().EndExclusiveBuild()
 			if csrErr != nil {
 				metrics.IncCounter("store.recovery.openCodec.errors", 1)

@@ -146,7 +146,7 @@ func TestCodecMatrix_NonVacuityGateDiscriminates(t *testing.T) {
 	healthy := codecArmEvidence{
 		arm: "int64/int64", scenario: codecScenarioUpgrade, ran: true,
 		ackedNodes: 16, recoveredNodes: 16, ackedEdges: 12,
-		recoveredWeights: 12, mapperFormat: codecMapperFormatBytes,
+		recoveredWeights: 12, snapshotOnlyWeights: 12, mapperFormat: codecMapperFormatBytes,
 	}
 	if v := checkCodecMatrixNonVacuity(arms, []codecArmEvidence{healthy}); len(v) > 0 {
 		t.Fatalf("the gate rejected healthy evidence: %v", v)
@@ -162,6 +162,7 @@ func TestCodecMatrix_NonVacuityGateDiscriminates(t *testing.T) {
 		{"no edges, so no weight codec", func(e *codecArmEvidence) { e.ackedEdges = 0 }},
 		{"no mapper published", func(e *codecArmEvidence) { e.mapperFormat = 0 }},
 		{"no weight ever confirmed", func(e *codecArmEvidence) { e.recoveredWeights = 0 }},
+		{"no weight confirmed across a checkpoint", func(e *codecArmEvidence) { e.snapshotOnlyWeights = 0 }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -174,37 +175,48 @@ func TestCodecMatrix_NonVacuityGateDiscriminates(t *testing.T) {
 	}
 }
 
-// TestCodecMatrix_PinnedWeightGapMustBeObserved guards the pin on the arm whose
-// weight type the snapshot CSR writer cannot persist. The pin is only worth
-// having while it is exercised: an arm documented as losing its weights that
-// never observes a dropped weight is asserting nothing, and the gate must say
-// so rather than pass.
-func TestCodecMatrix_PinnedWeightGapMustBeObserved(t *testing.T) {
-	arm := findCodecArm(t, "binarymarshaler/binarymarshaler")
-	if arm.weightSurvivesSnapshot() {
-		t.Fatal("the binary-marshaler weight arm is no longer marked as unpersistable by the" +
-			" snapshot CSR writer; if the engine now persists it, restore the full round-trip" +
-			" assertion and delete this test")
-	}
-	arms := []codecArm{arm}
-	base := codecArmEvidence{
-		arm: arm.name(), scenario: codecScenarioUpgrade, ran: true,
-		ackedNodes: 16, recoveredNodes: 16, ackedEdges: 12,
-		mapperFormat: codecMapperFormatBytes,
-	}
+// TestCodecMatrix_EveryArmMustCrossACheckpoint is the successor to the pinned
+// weight-gap test, which asserted that the binary-marshaler arm's weights came
+// back as the ZERO value after a checkpoint because the snapshot's CSR writer
+// could not persist them (rmp #2473's measured gap). rmp #2526 closed that, so
+// the assertion is inverted: every arm must now confirm its weights across a
+// checkpoint, and the gate must REFUSE a run that never did.
+//
+// The distinction the gate has to keep is the one the defect exploited. A
+// weight codec that round-trips perfectly through WAL replay and loses
+// everything through the snapshot produces a full recoveredWeights count and a
+// zero snapshotOnlyWeights count. Accepting that is how the loss stayed
+// invisible, so a healthy total is explicitly NOT enough.
+func TestCodecMatrix_EveryArmMustCrossACheckpoint(t *testing.T) {
+	for _, arm := range codecMatrixArms() {
+		t.Run(arm.name(), func(t *testing.T) {
+			arms := []codecArm{arm}
+			base := codecArmEvidence{
+				arm: arm.name(), scenario: codecScenarioUpgrade, ran: true,
+				ackedNodes: 16, recoveredNodes: 16, ackedEdges: 12,
+				mapperFormat: arm.wantMapperFormat(),
+			}
 
-	observed := base
-	observed.weightGaps = 12
-	if v := checkCodecMatrixNonVacuity(arms, []codecArmEvidence{observed}); len(v) > 0 {
-		t.Fatalf("the gate rejected evidence in which the pinned gap WAS observed: %v", v)
-	}
+			crossed := base
+			crossed.recoveredWeights = 12
+			crossed.snapshotOnlyWeights = 12
+			if v := checkCodecMatrixNonVacuity(arms, []codecArmEvidence{crossed}); len(v) > 0 {
+				t.Fatalf("the gate rejected an arm that DID confirm its weights across a"+
+					" checkpoint: %v", v)
+			}
 
-	unobserved := base
-	unobserved.weightGaps = 0
-	unobserved.recoveredWeights = 12
-	if v := checkCodecMatrixNonVacuity(arms, []codecArmEvidence{unobserved}); len(v) == 0 {
-		t.Fatal("the gate accepted a run in which the pinned weight gap was never observed:" +
-			" the pin would be vacuous")
+			// WAL-only: every weight confirmed, none of them across a checkpoint.
+			// This is the exact evidence shape the pre-#2526 engine produced, and
+			// it must be refused.
+			walOnly := base
+			walOnly.recoveredWeights = 12
+			walOnly.snapshotOnlyWeights = 0
+			if v := checkCodecMatrixNonVacuity(arms, []codecArmEvidence{walOnly}); len(v) == 0 {
+				t.Fatal("the gate accepted a run whose weights were confirmed only over WAL" +
+					" replay and never across a checkpoint: the durable CSR weights column" +
+					" would be unadjudicated, which is how rmp #2526 stayed invisible")
+			}
+		})
 	}
 }
 

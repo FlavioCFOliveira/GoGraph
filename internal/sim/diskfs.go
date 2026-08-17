@@ -130,7 +130,7 @@ func (s simWALFS) ParentDirSync(childPath string) error { return s.disk.ParentDi
 // emitting, which is the point.
 type simCheckpointBackend[N comparable, W any] struct{ disk *SimDisk }
 
-func (s simCheckpointBackend[N, W]) CaptureGraph(cs *csr.CSR[W], g *lpg.Graph[N, W], codec txn.Codec[N], at *lpg.Snapshot) (*snapshot.Capture[W], error) {
+func (s simCheckpointBackend[N, W]) CaptureGraph(cs *csr.CSR[W], g *lpg.Graph[N, W], codec txn.Codec[N], wcodec txn.WeightCodec[W], at *lpg.Snapshot) (*snapshot.Capture[W], error) {
 	if codec == nil {
 		// No codec configured: the simulator always supplies one, but honour the
 		// nil case for completeness. For string keys substitute the canonical
@@ -140,6 +140,12 @@ func (s simCheckpointBackend[N, W]) CaptureGraph(cs *csr.CSR[W], g *lpg.Graph[N,
 		if sc, ok := any(txn.NewStringCodec()).(txn.Codec[N]); ok {
 			codec = sc
 		}
+	}
+	// A nil txn.WeightCodec must reach the snapshot package as an untyped nil,
+	// or its own nil check sees a non-nil interface holding a nil value and it
+	// calls through it (rmp #2526).
+	if wcodec != nil {
+		return snapshot.CaptureGraphWithWeightCodec[N, W](g, cs, codec, wcodec, at)
 	}
 	return snapshot.CaptureGraph[N, W](g, cs, codec, at)
 }

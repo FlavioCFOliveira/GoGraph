@@ -106,6 +106,13 @@ type Checkpointer[N comparable, W any] struct {
 	// retained rather than truncated.
 	codec txn.Codec[N]
 
+	// wcodec, when non-nil, serialises the CSR weights column for ANY weight
+	// type W (see WithWeightCodec). When nil the snapshot can persist only
+	// fixed-width primitive weights, and a checkpoint of a graph holding any
+	// other weight type FAILS rather than publishing a weightless image
+	// (rmp #2526).
+	wcodec txn.WeightCodec[W]
+
 	// snap is the snapshot-publish/probe backend. It defaults to
 	// [osSnapshotBackend] in [New] (byte-identical production path); the
 	// deterministic simulation harness injects an in-memory backend via
@@ -230,6 +237,42 @@ func WithMapperCodec[N comparable, W any](codec txn.Codec[N]) Option[N, W] {
 	return func(c *Checkpointer[N, W]) {
 		if codec != nil {
 			c.codec = codec
+		}
+	}
+}
+
+// WithWeightCodec supplies the edge-weight codec the checkpointer uses to
+// persist the snapshot's CSR weights column for ANY weight type W. Pass the
+// owning store's codec, [txn.Store.WeightCodec].
+//
+// Without this option the snapshot can only persist weights whose Go type has a
+// fixed width the CSR writer knows (the built-in integer, float and bool
+// primitives). Every other weight type — any struct, any NAMED integer type
+// such as [time.Duration], any string — has no fixed width, and until rmp #2526
+// the writer silently recorded such a graph as having NO weights at all: the
+// exact bytes of a weightless graph, after which the checkpoint truncated the
+// WAL prefix that still held the real values and the loss became permanent.
+//
+// That silent path is gone. A checkpoint of such a graph now FAILS with
+// [snapshot.ErrWeightNotPersistable] rather than publishing a lossy snapshot,
+// which leaves the WAL intact and the data recoverable. This option is what
+// makes the checkpoint succeed instead of fail, by giving the writer a way to
+// encode those weights:
+//
+//	cp := checkpoint.New(cfg, g, wlog, &unusedMu,
+//		checkpoint.WithCommitSerialiser[N, W](st.RunUnderCommitLock),
+//		checkpoint.WithMapperCodec[N, W](st.Codec()),
+//		checkpoint.WithWeightCodec[N, W](st.WeightCodec()))
+//
+// It is not needed for a float64, int64 or int32 weight, and supplying it for
+// one changes nothing: the codec is consulted only where the fixed-width layout
+// cannot work, so those snapshots stay byte-identical either way.
+//
+// A nil codec is ignored.
+func WithWeightCodec[N comparable, W any](wcodec txn.WeightCodec[W]) Option[N, W] {
+	return func(c *Checkpointer[N, W]) {
+		if wcodec != nil {
+			c.wcodec = wcodec
 		}
 	}
 }
@@ -953,7 +996,7 @@ func (c *Checkpointer[N, W]) runNonBlocking() error {
 			func(id graph.NodeID) bool { return c.g.NodeExistsAsOf(id, at) },
 			at.StartTS(), at.TxID())
 		var capErr error
-		capt, capErr = c.snap.CaptureGraph(cs, c.g, c.codec, at)
+		capt, capErr = c.snap.CaptureGraph(cs, c.g, c.codec, c.wcodec, at)
 
 		// Released as soon as the bytes exist, and BEFORE phase 2's disk I/O: holding
 		// it longer would pin the reclamation horizon for the whole snapshot write.

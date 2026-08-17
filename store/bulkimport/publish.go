@@ -10,6 +10,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
+	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 )
 
 // snapshotName is the ONE directory name recovery reads a snapshot from.
@@ -89,7 +90,32 @@ type PublishResult struct {
 // discipline — each file fsynced, then the parent directory — which is the same
 // protocol the checkpointer uses and which the crash-injection battery already
 // exercises. This adds no new durability mechanism, deliberately.
+// # Weight types
+//
+// Publish persists edge weights whose Go type has a fixed width the CSR writer
+// knows (the built-in integer, float and bool primitives). For any other weight
+// type — a struct, a NAMED integer type such as [time.Duration], a string — it
+// returns [snapshot.ErrWeightNotPersistable] and publishes nothing; use
+// [PublishWithWeightCodec] to supply a codec for those.
+//
+// Failing is the point. Until rmp #2526 this path wrote such a graph as having
+// NO weights, byte-identical to a genuinely weightless import, and reported
+// success. Bulk import bypasses the WAL entirely, so unlike the checkpoint path
+// there was no second copy anywhere: the weights were gone the moment the
+// import returned nil.
 func Publish[W any](ctx context.Context, storeDir string, b *Builder[W]) (PublishResult, error) {
+	return PublishWithWeightCodec[W](ctx, storeDir, b, nil)
+}
+
+// PublishWithWeightCodec is the weight-codec-aware variant of [Publish]. wcodec
+// encodes edge weights of any type W into the snapshot's CSR weights column —
+// pass the codec the resulting store will be opened with, so the weights it
+// reads back are the ones written here.
+//
+// The codec is consulted only for weight types the fixed-width layout cannot
+// size, so a float64 or int64 import publishes byte-identical bytes with or
+// without it. A nil wcodec behaves exactly as [Publish].
+func PublishWithWeightCodec[W any](ctx context.Context, storeDir string, b *Builder[W], wcodec txn.WeightCodec[W]) (PublishResult, error) {
 	var res PublishResult
 	if b == nil {
 		return res, fmt.Errorf("bulkimport: nil builder")
@@ -113,8 +139,17 @@ func Publish[W any](ctx context.Context, storeDir string, b *Builder[W]) (Publis
 
 	snapDir := filepath.Join(storeDir, snapshotName)
 	c := csr.BuildFromAdjList[string, W](g.AdjList())
-	if err := snapshot.WriteSnapshotFullCtx[string, W](ctx, snapDir, c, g); err != nil {
-		return res, fmt.Errorf("bulkimport: publish snapshot to %q: %w", snapDir, err)
+	// Branch rather than assign through a variable: a nil txn.WeightCodec must
+	// reach the snapshot package as an untyped nil, or its own nil check sees a
+	// non-nil interface holding a nil value and it calls through it.
+	var perr error
+	if wcodec != nil {
+		perr = snapshot.WriteSnapshotFullWithWeightCodecCtx[string, W](ctx, snapDir, c, g, wcodec)
+	} else {
+		perr = snapshot.WriteSnapshotFullCtx[string, W](ctx, snapDir, c, g)
+	}
+	if perr != nil {
+		return res, fmt.Errorf("bulkimport: publish snapshot to %q: %w", snapDir, perr)
 	}
 	res.SnapshotDir = snapDir
 	res.Stats = b.stats

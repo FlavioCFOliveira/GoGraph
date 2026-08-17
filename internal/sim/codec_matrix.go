@@ -190,15 +190,20 @@ type codecArm interface {
 	// runUpgrade crosses the graceful-restart boundary, then the snapshot
 	// boundary, and adjudicates that the recovered graph came out of the mapper.
 	runUpgrade(ctx context.Context, seed uint64, size codecMatrixSize) (codecArmEvidence, []Violation, error)
-	// weightSurvivesSnapshot reports whether this arm's WEIGHT type survives a
-	// checkpoint. See [codecArmOf.snapshotWeightSupported] for the measured
-	// engine limitation this exists to describe.
-	weightSurvivesSnapshot() bool
 }
 
-// codecPhase names WHERE the graph under adjudication came from, which is what
-// decides how strictly the weight can be asserted (see
-// [codecArmOf.snapshotWeightSupported]).
+// codecPhase names WHERE the graph under adjudication came from.
+//
+// Every phase now asserts the full weight round-trip for every arm. The phase
+// is still tracked, and still reported in violations, because it says which
+// DURABLE PATH a lost or drifted weight came through — WAL replay, the
+// snapshot's CSR component, or a mixture — and that is the first thing anyone
+// diagnosing such a failure needs to know.
+//
+// It used to do more than that: until rmp #2526 the snapshot's CSR component
+// could not persist a weight whose Go type had no fixed width, so an arm with
+// such a weight was asserted DIFFERENTLY depending on where its edges came
+// from. See [checkCodecMatrixNonVacuity] for what replaced that.
 type codecPhase int
 
 const (
@@ -247,35 +252,11 @@ type codecArmOf[N comparable, W comparable] struct {
 	weightOf func(ord int) W
 	// mapperFormat is the mapper.bin version this key type must produce.
 	mapperFormat uint16
-	// snapshotWeightSupported records whether this arm's WEIGHT type survives a
-	// checkpoint. It is false ONLY for the binary-marshaler weight arm, and it
-	// pins a MEASURED engine limitation rather than a harness preference:
-	//
-	// store/snapshot's CSR component does not use the transaction layer's
-	// [txn.WeightCodec] at all. It sizes a weight with the fixed table in
-	// csrWeightSize (store/snapshot/writer.go), which answers 0 for every type
-	// outside the Go primitives — including any struct, which is precisely the
-	// case [txn.NewBinaryMarshalerWeightCodec] exists to persist. WriteCSR then
-	// writes hasWeights=0, the SAME on-disk encoding a deliberately weightless
-	// graph produces (adjlist.Config{Weightless: true}), and the checkpoint goes
-	// on to truncate the WAL prefix that held the real values. Measured directly:
-	// csrWeightSize[float64] = 8, csrWeightSize[int64] = 8, csrWeightSize[struct
-	// with one int64 field] = 0, csrWeightSize[struct{}] = 0.
-	//
-	// The flag does not excuse that. It SCOPES the assertion so the gap is
-	// pinned instead of tolerated: on a snapshot-only recovery an arm with this
-	// flag false must come back with the ZERO weight — not a lost edge, and not
-	// the right weight either. The day the engine learns to persist these
-	// weights, that assertion fails and this flag has to be retired, which is the
-	// point of writing it as an assertion rather than as a skip.
-	snapshotWeightSupported bool
 }
 
 func (a codecArmOf[N, W]) name() string { return a.label }
 
 func (a codecArmOf[N, W]) wantMapperFormat() uint16 { return a.mapperFormat }
-
-func (a codecArmOf[N, W]) weightSurvivesSnapshot() bool { return a.snapshotWeightSupported }
 
 // codecMatrixArms is the matrix this file drives: every key codec the txn
 // package exports, paired with a weight codec, plus the string/float64 arm as
@@ -289,19 +270,19 @@ func codecMatrixArms() []codecArm {
 			label: "string/float64", codec: txn.NewStringCodec(), wcodec: txn.NewFloat64WeightCodec(),
 			keyOf:        func(ord int) string { return fmt.Sprintf("k%08d", ord) },
 			weightOf:     func(ord int) float64 { return float64(ord) + 0.5 },
-			mapperFormat: codecMapperFormatString, snapshotWeightSupported: true,
+			mapperFormat: codecMapperFormatString,
 		},
 		codecArmOf[[16]byte, float64]{
 			label: "uuid/float64", codec: txn.NewUUIDCodec(), wcodec: txn.NewFloat64WeightCodec(),
 			keyOf:        codecUUIDKey,
 			weightOf:     func(ord int) float64 { return float64(ord) + 0.5 },
-			mapperFormat: codecMapperFormatBytes, snapshotWeightSupported: true,
+			mapperFormat: codecMapperFormatBytes,
 		},
 		codecArmOf[int64, int64]{
 			label: "int64/int64", codec: txn.NewInt64Codec(), wcodec: txn.NewInt64WeightCodec(),
 			keyOf:        func(ord int) int64 { return int64(ord) },
 			weightOf:     func(ord int) int64 { return int64(ord) * 7 },
-			mapperFormat: codecMapperFormatBytes, snapshotWeightSupported: true,
+			mapperFormat: codecMapperFormatBytes,
 		},
 		codecArmOf[simCodecKey, simCodecWeight]{
 			label:  "binarymarshaler/binarymarshaler",
@@ -310,28 +291,26 @@ func codecMatrixArms() []codecArm {
 			keyOf: func(ord int) simCodecKey {
 				return simCodecKey{Tenant: 0xA5A5_5A5A, Serial: uint32(ord)}
 			},
-			weightOf: func(ord int) simCodecWeight { return simCodecWeight{Millis: int64(ord) * 13} },
-			// The ONLY arm whose weight does not survive a checkpoint; see
-			// snapshotWeightSupported for the measured cause.
-			mapperFormat: codecMapperFormatBytes, snapshotWeightSupported: false,
+			weightOf:     func(ord int) simCodecWeight { return simCodecWeight{Millis: int64(ord) * 13} },
+			mapperFormat: codecMapperFormatBytes,
 		},
 		codecArmOf[int, float64]{
 			label: "int/float64", codec: txn.NewIntCodec(), wcodec: txn.NewFloat64WeightCodec(),
 			keyOf:        func(ord int) int { return ord },
 			weightOf:     func(ord int) float64 { return float64(ord) + 0.25 },
-			mapperFormat: codecMapperFormatBytes, snapshotWeightSupported: true,
+			mapperFormat: codecMapperFormatBytes,
 		},
 		codecArmOf[int32, int64]{
 			label: "int32/int64", codec: txn.NewInt32Codec(), wcodec: txn.NewInt64WeightCodec(),
 			keyOf:        func(ord int) int32 { return int32(ord) },
 			weightOf:     func(ord int) int64 { return int64(ord) * 3 },
-			mapperFormat: codecMapperFormatBytes, snapshotWeightSupported: true,
+			mapperFormat: codecMapperFormatBytes,
 		},
 		codecArmOf[uint64, float64]{
 			label: "uint64/float64", codec: txn.NewUint64Codec(), wcodec: txn.NewFloat64WeightCodec(),
 			keyOf:        func(ord int) uint64 { return uint64(ord) },
 			weightOf:     func(ord int) float64 { return float64(ord) * 1.5 },
-			mapperFormat: codecMapperFormatBytes, snapshotWeightSupported: true,
+			mapperFormat: codecMapperFormatBytes,
 		},
 	}
 }
@@ -429,12 +408,19 @@ type codecArmEvidence struct {
 	ackedEdges     int
 	recoveredEdges int
 	// recoveredWeights is how many of those edges also came back with the weight
-	// they were written with; weightGaps is how many came back with a weight the
-	// snapshot CSR writer could not persist. The two are kept apart so an arm
-	// whose weight type the snapshot drops is visible as a MEASURED number rather
-	// than as an absence (see [codecArmOf.snapshotWeightSupported]).
+	// they were written with.
 	recoveredWeights int
-	weightGaps       int
+	// snapshotOnlyWeights is how many of those confirmations came from a
+	// SNAPSHOT-ONLY recovery — an image whose WAL was folded to zero, so the
+	// weight can only have come out of the snapshot's own CSR component.
+	//
+	// It is counted separately because it is the number that actually pins
+	// rmp #2526. A weight codec that works perfectly through WAL replay and
+	// loses everything through a checkpoint produces a healthy recoveredWeights
+	// and a zero here, which is precisely the defect that shipped. The
+	// non-vacuity gate requires this to be non-zero for EVERY arm, so no arm can
+	// pass by never crossing a checkpoint boundary.
+	snapshotOnlyWeights int
 	// liveOrder is the recovered graph's own live node count, read independently
 	// of the ordinal sweep so a phantom outside the modelled range is visible.
 	liveOrder uint64
@@ -455,10 +441,10 @@ type codecArmEvidence struct {
 func (e *codecArmEvidence) summary() string {
 	return fmt.Sprintf(
 		"%s/%s: nodes issued=%d acked=%d recovered=%d (liveOrder=%d), edges acked=%d recovered=%d "+
-			"(weights kept=%d, dropped by the snapshot CSR writer=%d), mapper.bin v%d (%d bytes), "+
+			"(weights confirmed=%d, of which across a checkpoint=%d), mapper.bin v%d (%d bytes), "+
 			"windows entered=%d promotes=%d",
 		e.arm, e.scenario, e.issuedNodes, e.ackedNodes, e.recoveredNodes, e.liveOrder,
-		e.ackedEdges, e.recoveredEdges, e.recoveredWeights, e.weightGaps,
+		e.ackedEdges, e.recoveredEdges, e.recoveredWeights, e.snapshotOnlyWeights,
 		e.mapperFormat, e.mapperBytes, e.windowsEntered, e.promotes)
 }
 
@@ -623,11 +609,22 @@ func (a codecArmOf[N, W]) checkRecovered(
 		}
 	}
 
-	// Weight-codec round-trip. The EDGE must always come back — that half is
-	// unconditional, on every arm and in every phase. What may be asserted about
-	// its WEIGHT depends on where the edge came from, because the snapshot's CSR
-	// component does not consult the weight codec at all (see
-	// [codecArmOf.snapshotWeightSupported]).
+	// Weight-codec round-trip. BOTH halves are unconditional now: the edge must
+	// come back, and it must come back with the weight it was written with, on
+	// every arm and through every durable path (rmp #2526).
+	//
+	// This assertion used to be conditional. The snapshot's CSR component sized
+	// a weight from a hardcoded type switch over Go primitives and wrote
+	// "hasWeights=0" for everything else — the same bytes a genuinely weightless
+	// graph produces — so an arm whose weight was a struct was asserted to come
+	// back as the ZERO value after a checkpoint, pinning the loss rather than
+	// tolerating it. The snapshot now persists those weights through the store's
+	// own [txn.WeightCodec], so the pin is retired and the full round-trip is
+	// required everywhere.
+	//
+	// The zero value is worth naming explicitly in the failure message: a weight
+	// that comes back as exactly zero is the SIGNATURE of that defect returning,
+	// as distinct from a codec that round-tripped to some other wrong value.
 	var zeroW W
 	for _, e := range sortedCodecEdges(led.ackedEdges) {
 		w, ok := g.EdgeWeight(a.keyOf(e[0]), a.keyOf(e[1]))
@@ -639,42 +636,26 @@ func (a codecArmOf[N, W]) checkRecovered(
 		}
 		ev.recoveredEdges++
 		want := a.weightOf(e[0])
-		switch {
-		case a.snapshotWeightSupported || phase == codecPhaseWAL:
-			// The weight codec is genuinely in the path: assert the round-trip.
-			if w != want {
-				add(ViolationACIDConsistency, "<codec-weight-drift>",
-					"[%s] edge %d->%d came back from a %s recovery with weight %v, want %v:"+
-						" the weight codec did not round-trip", a.label, e[0], e[1], phase, w, want)
-				continue
+		if w != want {
+			hint := ""
+			if w == zeroW && want != zeroW {
+				hint = " — the weight came back as exactly the ZERO value, which is the" +
+					" signature of the snapshot CSR writer failing to persist this weight" +
+					" type and recording the graph as weightless (rmp #2526)"
 			}
-			ev.recoveredWeights++
-		case phase == codecPhaseSnapshotOnly:
-			// PINNED GAP. Every edge here came out of the snapshot, whose CSR
-			// writer sized this weight type at 0 bytes and wrote hasWeights=0. The
-			// documented consequence is the ZERO weight — assert exactly that, so
-			// the day the engine learns to persist these weights this fires and
-			// the snapshotWeightSupported flag has to be retired.
-			if w != zeroW {
-				add(ViolationOracleDeviation, "<codec-weight-gap-changed>",
-					"[%s] edge %d->%d came back from a snapshot-only recovery with weight %v,"+
-						" but this arm's weight type is documented as unpersistable by the snapshot"+
-						" CSR writer (expected the zero value %v). The engine's behaviour has changed:"+
-						" retire snapshotWeightSupported for this arm and restore the full round-trip"+
-						" assertion", a.label, e[0], e[1], w, zeroW)
-				continue
-			}
-			ev.weightGaps++
-		default:
-			// Mixed snapshot+WAL recovery: this edge's provenance is not
-			// determined, so no weight assertion is possible for an arm whose
-			// weight survives only one of the two paths. Counted as evidence and
-			// logged by the caller, never silently ignored.
-			if w == want {
-				ev.recoveredWeights++
-			} else {
-				ev.weightGaps++
-			}
+			add(ViolationACIDConsistency, "<codec-weight-drift>",
+				"[%s] edge %d->%d came back from a %s recovery with weight %v, want %v:"+
+					" the weight codec did not round-trip%s", a.label, e[0], e[1], phase, w, want, hint)
+			continue
+		}
+		ev.recoveredWeights++
+		if phase == codecPhaseSnapshotOnly {
+			// Counted separately so the non-vacuity gate can require that this
+			// arm's weight really CROSSED A CHECKPOINT, rather than passing on
+			// WAL-sourced edges alone. Before #2526 a snapshot-sourced weight was
+			// the one that got lost, so "was a weight confirmed after a
+			// snapshot-only recovery" is the question that matters.
+			ev.snapshotOnlyWeights++
 		}
 	}
 
@@ -758,16 +739,13 @@ func checkCodecMatrixNonVacuity(arms []codecArm, ev []codecArmEvidence) []Violat
 		})
 	}
 
-	byName := make(map[string]codecArm, len(arms))
-	for _, arm := range arms {
-		byName[arm.name()] = arm
-	}
-	// weightEvidence[arm] records whether the arm's weight behaviour was
-	// actually observed in the phase where it is assertable, so neither the full
-	// round-trip assertion nor the PINNED-GAP assertion can pass by never having
-	// looked at an edge.
+	// weightsKept counts weights confirmed after ANY recovery; weightsAcrossCkpt
+	// counts only those confirmed after a SNAPSHOT-ONLY recovery. Both are
+	// required to be non-zero per arm, so neither the round-trip assertion nor
+	// the checkpoint-crossing requirement can pass by never having looked at an
+	// edge.
 	weightsKept := make(map[string]int, len(arms))
-	weightsDropped := make(map[string]int, len(arms))
+	weightsAcrossCkpt := make(map[string]int, len(arms))
 
 	seen := make(map[string]bool, len(ev))
 	for i := range ev {
@@ -778,7 +756,7 @@ func checkCodecMatrixNonVacuity(arms []codecArm, ev []codecArmEvidence) []Violat
 		}
 		seen[e.arm] = true
 		weightsKept[e.arm] += e.recoveredWeights
-		weightsDropped[e.arm] += e.weightGaps
+		weightsAcrossCkpt[e.arm] += e.snapshotOnlyWeights
 		if e.ackedNodes < codecMatrixMinNodes {
 			add("<arm-degenerate>",
 				"arm %s (%s) acknowledged only %d nodes (want >= %d): the durability oracle had"+
@@ -806,23 +784,24 @@ func checkCodecMatrixNonVacuity(arms []codecArm, ev []codecArmEvidence) []Violat
 			add("<arm-unexercised>", "codec arm %s produced no evidence at all", name)
 			continue
 		}
-		if arm.weightSurvivesSnapshot() {
-			if weightsKept[name] == 0 {
-				add("<weight-roundtrip-unobserved>",
-					"arm %s never had a single edge weight confirmed after a recovery, so its weight"+
-						" codec was never actually round-tripped", name)
-			}
-			continue
+		if weightsKept[name] == 0 {
+			add("<weight-roundtrip-unobserved>",
+				"arm %s never had a single edge weight confirmed after a recovery, so its weight"+
+					" codec was never actually round-tripped", name)
 		}
-		// The PINNED GAP has to be observed to be a pin at all. An arm documented
-		// as losing its weights through the snapshot, which never once produced a
-		// dropped weight, is either no longer reaching the snapshot or no longer
-		// losing them — and in both cases the assertion is proving nothing.
-		if weightsDropped[name] == 0 {
-			add("<weight-gap-unobserved>",
-				"arm %s is documented as having a weight type the snapshot CSR writer cannot persist,"+
-					" but no dropped weight was observed: either the gap closed (retire"+
-					" snapshotWeightSupported) or the run never reached a snapshot-sourced edge", name)
+		// EVERY weight codec must cross a CHECKPOINT, not only the WAL boundary
+		// (rmp #2526). This is the gate that makes the round-trip assertion above
+		// mean something: the defect it replaced lost weights ONLY through the
+		// snapshot, so an arm exercised purely over WAL replay would have shown a
+		// perfect round-trip while the durable image on disk held nothing. An arm
+		// that never confirmed a weight on a snapshot-only recovery has not tested
+		// the path the defect lived on.
+		if weightsAcrossCkpt[name] == 0 {
+			add("<weight-checkpoint-uncrossed>",
+				"arm %s never had an edge weight confirmed after a SNAPSHOT-ONLY recovery, so its"+
+					" weight codec never crossed a checkpoint boundary: the durable CSR weights"+
+					" column was never adjudicated for this arm, which is exactly the path"+
+					" rmp #2526 lost data on", name)
 		}
 	}
 	return v

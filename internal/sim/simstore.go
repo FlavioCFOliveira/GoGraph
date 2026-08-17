@@ -662,10 +662,14 @@ func runSimCheckpoint[N comparable, W any](
 	// storeMu is a throwaway: WithCommitSerialiser supersedes it (the engine's
 	// commit mutex is private), exactly as the production engine wiring does.
 	var unusedMu sync.Mutex
-	opts := make([]checkpoint.Option[N, W], 0, 3+len(extra))
+	opts := make([]checkpoint.Option[N, W], 0, 4+len(extra))
 	opts = append(opts,
 		checkpoint.WithCommitSerialiser[N, W](store.RunUnderCommitLock),
 		checkpoint.WithMapperCodec[N, W](store.Codec()),
+		// The store's own weight codec, so the snapshot's CSR weights column
+		// survives a checkpoint for EVERY weight type the matrix drives and not
+		// only the fixed-width primitives (rmp #2526).
+		checkpoint.WithWeightCodec[N, W](store.WeightCodec()),
 		checkpoint.WithSnapshotFS[N, W](simCheckpointBackend[N, W]{disk: disk}),
 	)
 	opts = append(opts, extra...)

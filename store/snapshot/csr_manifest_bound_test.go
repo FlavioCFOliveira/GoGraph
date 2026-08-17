@@ -198,9 +198,29 @@ func TestOpen_ManifestSizeBoundRejectsHostileWeightsSize(t *testing.T) {
 	// nE = 4, hostile wsize = 255. The file carries the real 8-byte edge
 	// payload so the edge array read succeeds and execution reaches the
 	// weights guard. Manifest Size = 18 (header) + 8*4 (edges) = 50 bytes
-	// => recordCap = 50/8 = 6, so nE=4 passes the count guard. Weights
-	// then demand 255*4 = 1020 bytes, far past the 50-byte file budget =>
-	// weightsByteLen rejects via the maxBytes>0 budget bound.
+	// => recordCap = 50/8 = 6, so nE=4 passes the count guard.
+	//
+	// WHAT 255 MEANS CHANGED (rmp #2526). It was an arbitrary out-of-range
+	// width, chosen so 255*nE = 1020 bytes overshot the 50-byte file budget and
+	// weightsByteLen rejected it. 255 is now weightSizeCodec, the sentinel
+	// selecting the variable-width codec layout, so this file is no longer
+	// "an absurd fixed width" — it is a well-formed header for a section whose
+	// (nE+1)*8 = 40-byte offsets array the 50-byte file cannot hold on top of
+	// its 18-byte header and 32 bytes of edges.
+	//
+	// The CONTRACT is unchanged and still the point: a manifest that lies about
+	// the file's extent must produce a clean typed refusal from Open, with no
+	// panic and no short buffer. What moved is which guard catches it and which
+	// sentinel it carries — the offsets array is short, so this is now a short
+	// read, and the package deliberately classifies a short read as an I/O error
+	// rather than as ErrCSRCorrupted (see TestReadCSR_BackstopHostileWeightsNeverPanics,
+	// which pins that distinction on the bare reader). Open wraps it under
+	// ErrCorrupted, which is what a caller of Open actually classifies on.
+	//
+	// The unknown-width class this test used to cover incidentally — every
+	// wsize that is neither a real width nor the sentinel — moved to
+	// [TestOpen_UnknownWeightWidthRejectedAtHeader], which does assert
+	// ErrCSRCorrupted, so closing the #2526 gap did not delete that coverage.
 	const nE = 4
 	body := csrHeader(0, nE, 1, 255)
 	for i := 0; i < nE; i++ {
@@ -228,10 +248,54 @@ func TestOpen_ManifestSizeBoundRejectsHostileWeightsSize(t *testing.T) {
 	}
 	assertNoPanic(t, func() {
 		_, err := Open(dir)
-		if !errors.Is(err, ErrCSRCorrupted) {
-			t.Fatalf("Open = %v, want ErrCSRCorrupted (weights budget)", err)
+		if !errors.Is(err, ErrCorrupted) {
+			t.Fatalf("Open = %v, want ErrCorrupted (a manifest that lies about the file's"+
+				" extent must be refused cleanly, not read short)", err)
 		}
 	})
+}
+
+// TestOpen_UnknownWeightWidthRejectedAtHeader covers the widths that are neither
+// a width any writer emits nor the codec sentinel. Since rmp #2526 the reader
+// range-checks the width byte BEFORE dispatching on it, so these are refused at
+// the header rather than being allowed to select a layout and mis-slice the rest
+// of the file.
+//
+// This is the case the sibling test above USED to cover with width 255, before
+// 255 acquired a meaning. Without it, closing that gap would have left the
+// unknown-width class untested.
+func TestOpen_UnknownWeightWidthRejectedAtHeader(t *testing.T) {
+	// Not t.Parallel: same encoding/json sync.Pool interaction as the sibling.
+	for _, wsize := range []uint8{3, 5, 6, 7, 9, 16, 128, 254} {
+		const nE = 4
+		body := csrHeader(0, nE, 1, wsize)
+		for i := 0; i < nE; i++ {
+			body = binary.LittleEndian.AppendUint64(body, uint64(i))
+		}
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, CSRFile), body, 0o600); err != nil {
+			t.Fatalf("WriteFile(csr.bin): %v", err)
+		}
+		m := Manifest{
+			Version:   manifestVersionLegacy,
+			CreatedAt: time.Now().UTC(),
+			Files: []FileEntry{{
+				Name: CSRFile, Size: int64(18 + 8*nE), CRC32C: crc32.Checksum(body, castagnoli),
+			}},
+		}
+		var buf bytes.Buffer
+		if err := WriteManifest(&buf, m); err != nil {
+			t.Fatalf("WriteManifest: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "manifest.json"), buf.Bytes(), 0o600); err != nil {
+			t.Fatalf("WriteFile(manifest.json): %v", err)
+		}
+		assertNoPanic(t, func() {
+			if _, err := Open(dir); !errors.Is(err, ErrCSRCorrupted) {
+				t.Fatalf("Open with weight width %d = %v, want ErrCSRCorrupted", wsize, err)
+			}
+		})
+	}
 }
 
 // TestOpen_ManifestSizeBoundValidRoundTrip is the positive regression on
