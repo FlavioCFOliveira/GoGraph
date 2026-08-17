@@ -86,6 +86,101 @@ undirected Euler; `BiBFS`; direction-optimised BFS on a hub fixture; the
 | CSV / JSONL export→import round-trip under fault | `io-roundtrip-fault` | a clean round-trip reproduces the modelled edge set exactly; an export under ENOSPC fails with a typed error and leaves no partial artifact a re-import would accept |
 | Offline bulk-import publication (`store/bulkimport`) — **parity only, NOT fault coverage** | `bulkimport-parity` | a published snapshot reopens through real recovery equal to the harness model exactly (node set two-sided, labels, properties by **kind and value**, per-handle edge multisets including parallel twins), `SnapshotHit` with **zero** replayed WAL ops on two successive opens, and the measured lifecycle contract (`ErrNotFinished` / `ErrFinished` / `ErrStoreNotEmpty`, their precedence, and `PublishResult.Stats`); plus the publish's byte-reproducibility boundary. **No fault regime is reachable** — see the note below |
 | Crash **during** the snapshot publish, at each step of the crash-atomic swap | `checkpoint-crash-storm` | acked ⊆ recovered ⊆ issued across a crash inside the publish window; a stranded backup is promoted by recovery (measured on the durable image and on `store.recovery.snapshot.promoteParentFsync`), never a half-published snapshot |
+| Corruption of a published snapshot COMPONENT | `snapshot-corruption-failstop` | a byte flipped in any of the nine components fail-stops recovery with that component's typed sentinel; recovery returns no store, mutates nothing on disk and leaves `db/wal` byte-identical; the restored image still recovers the exact committed model. Two documented non-fail-stops are pinned in the same run: a corrupt `indexes/<name>.bin` is REBUILT (and the rebuild verified against a full scan), and the manifest's un-checksummed key-name region is UNDETECTED (measured on `commit_ts`, and required to be contained) |
+
+### Snapshot component corruption is now covered; the manifest is not checksummed (rmp #2467)
+
+`store/snapshot` declares **nine** typed corruption sentinels — one per durable
+component — and the manifest carries a CRC32C for each. Before this task the
+only corruption the simulator injected was a byte flip inside a WAL frame
+(`wal-corruption-failstop`), `SimDisk.CorruptRange` appeared nowhere else
+outside the disk's own unit tests, and **none of the nine sentinels had ever
+been reached under simulation**. `snapshot-corruption-failstop` now flips a byte
+in each component of a published snapshot and adjudicates the reopen that
+follows, over a fixture whose checkpoint has folded the **whole** WAL — so the
+snapshot is the only durable source of the committed graph and a refusal is a
+genuine fail-stop rather than a fallback.
+
+The sentinel a flip produces is a function of **where** it lands, which the
+scenario measures rather than assumes:
+
+| Component | flip at byte 0 (the header) | flip anywhere else |
+|---|---|---|
+| `manifest.json` | `ErrManifestCorrupted` (JSON parse) | see the gap below |
+| `csr.bin` | `ErrCSRCorrupted` + `ErrCorrupted` | `ErrCorrupted` (CRC) |
+| `labels.bin` | `ErrLabelsCorrupted` + `ErrCorrupted` | `ErrCorrupted`, or both |
+| `properties.bin` | `ErrPropertiesCorrupted` + `ErrCorrupted` | `ErrCorrupted` |
+| `mapper.bin` | `ErrMapperCorrupted` **alone** | `ErrCorrupted`, or both |
+| `tombstones.bin` | `ErrTombstonesCorrupted` + `ErrCorrupted` | `ErrCorrupted`, or both |
+| `edgehandles.bin` | `ErrEdgeHandlesCorrupted` + `ErrCorrupted` | `ErrCorrupted` |
+| `constraints.bin` | `ErrConstraintsCorrupted` + `ErrCorrupted` | `ErrCorrupted`, or both |
+| `indexdefs.bin` | `ErrIndexDefsCorrupted` + `ErrCorrupted` | `ErrCorrupted` |
+| `indexes/<name>.bin` | *(no error — see below)* | *(no error)* |
+
+Two asymmetries in that table are worth naming. First, a component's **own**
+sentinel is raised only when the flip breaks the structural parse; a flip in a
+payload region parses cleanly and is caught later, when the CRC32C is compared
+against the manifest entry, which surfaces as the directory-level
+`snapshot.ErrCorrupted` **without** the component's own sentinel. Second,
+`mapper.bin` is the one component whose header failure is **not** wrapped in
+`ErrCorrupted`: `LoadSnapshotFull` peeks the mapper's format version before
+handing it to the verified reader, and that peek returns its error unwrapped.
+Everything else in the load path wraps.
+
+`indexes/<name>.bin` is **tolerated by design**, not a gap: `snapshot.LoadIndexes`
+reports a CRC-failing payload as nil bytes and recovery rebuilds that index from
+the LPG. The scenario therefore requires the reopen to SUCCEED for a corrupt
+payload — and then cross-checks every declared index against a full label scan,
+so "tolerated" cannot degrade into "silently wrong".
+
+**The finding: `manifest.json` carries the CRC of every other component and none
+of its own.** A byte flipped inside a JSON **key name** leaves a syntactically
+valid document whose key `encoding/json` no longer recognises, so the field is
+dropped and decodes to its zero value with no error anywhere. A byte-by-byte
+sweep of this scenario's published manifest (~1400 bytes) found **360 bytes,
+25.7% of it, whose corruption recovery accepts silently** — the key names (`"version"`,
+`"order"`, `"size"`, `"commit_ts"`, `"crc32c"`, `"name"`), the index-name string
+values, and the trailing newline (`TestSnapshotCorruption_ManifestUncheckedByteCensus`
+re-measures the census on every run). The consequence measured on the worst of them: flipping
+one character of the `"commit_ts"` **key** drops the MVCC clock floor recovery
+derives (`recovery.Result.MaxCommitTS`) from 20 to 0, so `RestoreMVCCClock` is
+never called and the reopened graph re-mints instants the image already
+contains — the loss rmp #2309 exists to prevent, reachable through an
+undetected corruption. `TestSnapshotCorruption_ManifestKeyRegionIsNotChecksummed`
+pins the measurement and fails if the store ever gains a manifest integrity
+check, so the fix and this note move together. No committed node is lost, which
+the scenario requires as a containment property; the damage is to the clock, not
+to the data.
+
+That region is also what makes the battery's primary oracle **reachable**. Every
+binary component is CRC-covered end to end, so no flip in one is ever wrongly
+accepted and an "assert recovery refused" oracle could never be shown to fire.
+`TestSnapshotCorruption_OracleFiresWhenRecoveryWronglySucceeds` aims one arm at a
+`commit_ts` key-name byte and requires the run to REPORT the acceptance.
+
+A third observation, measured by the scenario's own determinism check rather
+than assumed: two identical fixtures built in the same process publish snapshots
+whose components differ in LENGTH in two places. `manifest.json` embeds
+`created_at`, whose RFC3339 fraction trims trailing zeros; and `mapper.bin` holds
+the engine-minted natural keys, which are `__cx_<hex>` drawn from a
+**process-global** counter (`cypher/exec/create_node.go`, where the counter is
+deliberately seeded from the largest existing suffix so a new process cannot
+collide with keys an earlier one persisted). The keys' hex width — and with it
+the component's size — therefore grows as a process creates more nodes: a
+measured 303-byte `mapper.bin` on a process's first fixture against 318 bytes on
+every later one. This is documented, intentional behaviour, not a defect, but it
+means a snapshot's component sizes are a function of process history, so
+`TestSnapshotCorruption_Deterministic` compares offsets where the sizes match and
+REPORTS a size difference rather than hiding it. It is the same class of
+observation as the bulk-import byte-reproducibility note below.
+
+A second, smaller finding, measured while probing the manifest guards:
+`ErrManifestTooLarge` bounds what the decoder **consumes**, not the file's
+length. `json.Decoder` stops at the end of the first complete value, so
+whitespace appended after the closing brace is never read and a `manifest.json`
+of any size on disk is accepted. That is correct for a guard whose stated purpose
+is to bound the transient decode allocation, but it means the ceiling is reached
+only by bytes inside the JSON value — which is how the scenario drives it.
 
 ### Bulk-import publication is covered for PARITY, not for faults (rmp #2466)
 
@@ -268,6 +363,19 @@ The coverage work exercised the engine against these scenarios and found:
    temporal elements encode structurally on both 4.4 and 5.x. The pin is now the
    live assertion, and `internal/sim/wire_list_encoding_test.go` carries the
    end-to-end matrix.
+
+5. **`manifest.json` is not checksummed.** It carries a CRC32C for every other
+   snapshot component and none of its own, so a single byte flipped inside a
+   JSON **key name** decodes as an unknown field, is dropped by
+   `encoding/json`, and zeroes the corresponding `Manifest` field with no error
+   anywhere — 360 bytes, 25.7% of a published ~1400-byte manifest, are
+   silently accepted. Measured consequence on the worst field: flipping one character of
+   the `"commit_ts"` key drops the recovered MVCC clock floor from 20 to 0, so
+   `RestoreMVCCClock` is skipped and the reopened graph re-mints instants the
+   image already contains (the loss #2309 prevents). No committed node is lost.
+   Found by `snapshot-corruption-failstop` (rmp #2467) and pinned by
+   `TestSnapshotCorruption_ManifestKeyRegionIsNotChecksummed`; **not fixed**
+   under #2467, which changed nothing outside `internal/sim` and `docs/`.
 
 ## Documented debt / out of scope
 
