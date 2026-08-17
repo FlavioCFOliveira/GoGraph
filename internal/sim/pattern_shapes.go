@@ -23,6 +23,13 @@ const patternShapesCheckEvery = 70
 // many times within the scenario's tick budget.
 const deleteContractEvery = 31
 
+// varlenPathsCheckEvery is the tick cadence of the variable-length path
+// battery ([CheckVarlenPaths], rmp #2463) inside [runPatternShapes]. It is
+// coprime with both [patternShapesCheckEvery] and [deleteContractEvery], so the
+// three probes almost never land on the same tick and no single tick carries
+// all of their cost.
+const varlenPathsCheckEvery = 47
+
 // patternMotifEvery is the writer-op cadence at which [PatternShapesWriter]
 // plants one deterministic motif (a directed triangle, a mutual KNOWS pair, a
 // KNOWS+FOLLOWS both-types pair, and a KNOWS self-loop), so the terminal
@@ -393,7 +400,12 @@ func patternShapesVacuity(tick int64, oracle *GraphOracle) []Violation {
 // bound-both-endpoints ExpandInto shape — each count(*) verified against an
 // independent adjacency-composition reference over the oracle's KNOWS/FOLLOWS
 // edge sets, periodically, after each crash/recovery, and at the end, with a
-// terminal non-vacuity assertion. It opens the engine as a directed
+// terminal non-vacuity assertion. Since rmp #2463 it also carries the
+// variable-length path battery ([CheckVarlenPaths]): exact `*2`, zero-length
+// `*0..n`, lower-bound-only `*2..`, bounded `*1..3`, predicates over the path's
+// intermediate nodes, multi-type and undirected VLE, and the path functions
+// over VLE rows — every one of them enumerated from the same adjacency by
+// trail composition. It opens the engine as a directed
 // multigraph — a simple graph admits only one edge per ordered pair regardless
 // of type, making both-types pairs impossible — but the writer never issues a
 // duplicate (src,dst,label) CREATE, so edge identity stays (src,dst,label)-
@@ -414,8 +426,9 @@ func patternShapesScenario() Scenario {
 }
 
 // runPatternShapes drives the pattern-shapes safety loop: the standard
-// per-cadence parity check, the pattern battery periodically, after each
-// crash/recovery, and at the end, plus the terminal non-vacuity assertion.
+// per-cadence parity check, the pattern battery and the variable-length path
+// battery periodically (on their own coprime cadences), after each
+// crash/recovery, and at the end, plus the terminal non-vacuity assertions.
 // Deterministic.
 func runPatternShapes(ctx context.Context, seed uint64) (*SimReport, error) {
 	sc := patternShapesScenario()
@@ -427,6 +440,7 @@ func runPatternShapes(ctx context.Context, seed uint64) (*SimReport, error) {
 	defer func() { _ = sm.Close() }()
 
 	var delStats deleteContractStats
+	var vleSt vleStats
 	var lastTick int64
 	var lastOp Op
 	for i := 0; i < cfg.MaxTicks; i++ {
@@ -444,6 +458,11 @@ func runPatternShapes(ctx context.Context, seed uint64) (*SimReport, error) {
 		if sm.crashCount > crashesBefore {
 			if v := CheckPatternShapes(tick, sm.oracle, sm.engine); len(v) > 0 {
 				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery pattern shapes>"}, v), nil
+			}
+			// Variable-length expansion reads through the recovered adjacency, so
+			// every VLE reference must hold across a crash exactly as before it.
+			if v := CheckVarlenPaths(tick, sm.oracle, sm.engine, &vleSt); len(v) > 0 {
+				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery variable-length paths>"}, v), nil
 			}
 			// The advisory is a pure function of the query, so it must survive
 			// recovery exactly as it stood before the crash.
@@ -471,6 +490,11 @@ func runPatternShapes(ctx context.Context, seed uint64) (*SimReport, error) {
 				return sm.report(tick, op, v), nil
 			}
 		}
+		if tick%varlenPathsCheckEvery == 0 {
+			if v := CheckVarlenPaths(tick, sm.oracle, sm.engine, &vleSt); len(v) > 0 {
+				return sm.report(tick, op, v), nil
+			}
+		}
 		// The non-detach DELETE contract (rmp #2462) rides this scenario because
 		// its oracle knows adjacency exactly, which is what lets both arms be
 		// PREDICTED: a degree-0 Person must delete, a connected one must be
@@ -487,6 +511,9 @@ func runPatternShapes(ctx context.Context, seed uint64) (*SimReport, error) {
 	if v := CheckPatternShapes(lastTick, sm.oracle, sm.engine); len(v) > 0 {
 		return sm.report(lastTick, lastOp, v), nil
 	}
+	if v := CheckVarlenPaths(lastTick, sm.oracle, sm.engine, &vleSt); len(v) > 0 {
+		return sm.report(lastTick, lastOp, v), nil
+	}
 	if v := CheckCartesianNotification(lastTick, sm.engine); len(v) > 0 {
 		return sm.report(lastTick, lastOp, v), nil
 	}
@@ -494,6 +521,9 @@ func runPatternShapes(ctx context.Context, seed uint64) (*SimReport, error) {
 		return sm.report(lastTick, lastOp, v), nil
 	}
 	if v := deleteContractVacuity(lastTick, &delStats); len(v) > 0 {
+		return sm.report(lastTick, lastOp, v), nil
+	}
+	if v := varlenPathsVacuity(lastTick, sm.oracle, &vleSt); len(v) > 0 {
 		return sm.report(lastTick, lastOp, v), nil
 	}
 	return nil, nil
