@@ -564,7 +564,7 @@ func (o *GraphOracle) ApplyDelete(cypher string, params map[string]any) OracleRe
 	if cypher == tmplDeleteKnowsInst {
 		return o.recordOp(cypher, params, o.deleteKnowsInst(params))
 	}
-	if cypher != tmplDetachDelete {
+	if cypher != tmplDetachDelete && cypher != tmplDeleteNode {
 		return o.recordOp(cypher, params, OracleResult{ErrorMsg: "oracle: unmodelled DELETE"})
 	}
 	name, ok := paramString(params, "name")
@@ -574,6 +574,15 @@ func (o *GraphOracle) ApplyDelete(cypher string, params map[string]any) OracleRe
 	id, found := o.byName[name]
 	if !found {
 		return o.recordOp(cypher, params, OracleResult{Committed: true})
+	}
+	// The non-detach form ([tmplDeleteNode], rmp #2462) is only ever applied
+	// after the engine COMMITTED it, which openCypher permits solely for a node
+	// with no relationships. Applying it to a connected node would silently
+	// diverge the model from the engine, so it is refused loudly instead.
+	if cypher == tmplDeleteNode && o.incidentEdges(id) > 0 {
+		return o.recordOp(cypher, params, OracleResult{
+			ErrorMsg: "oracle: non-detach DELETE applied to a connected node",
+		})
 	}
 	for k := range o.edges {
 		if k.src == id || k.dst == id {

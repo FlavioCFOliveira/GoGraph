@@ -214,6 +214,31 @@ func expectedOpCounters(op Op, oracle *GraphOracle) (want exec.QueryCounters, ok
 		// and property teardown is suppressed (not a user-visible effect).
 		return exec.QueryCounters{NodesDeleted: 1, RelationshipsDeleted: oracle.incidentEdges(id)}, true
 
+	case tmplDeleteNode:
+		// Non-detach `DELETE n` (rmp #2462). Reachable only for a node the
+		// engine agreed to delete, which openCypher permits solely at degree 0 —
+		// so the committed effect is exactly one -nodes.
+		name, okN := paramString(op.Params, "name")
+		if !okN {
+			return exec.QueryCounters{}, false
+		}
+		id, found := oracle.byName[name]
+		if !found {
+			// MATCH found nothing: DELETE ran zero times.
+			return exec.QueryCounters{}, true
+		}
+		if n := oracle.incidentEdges(id); n > 0 {
+			// The engine REFUSES this (exec.ErrDeleteNodeHasRelationships), so a
+			// COMMITTED op never reaches this branch and the delete-contract
+			// probe adjudicates the refusal directly. The arm still returns an
+			// EXACT expectation rather than reporting itself inexact: an inexact
+			// arm silently accepts any counters at all, so were the engine ever
+			// to commit such a delete, this states the only effect set that
+			// could describe it and the mismatch surfaces loudly.
+			return exec.QueryCounters{NodesDeleted: 1, RelationshipsDeleted: n}, true
+		}
+		return exec.QueryCounters{NodesDeleted: 1}, true
+
 	case tmplMergePerson:
 		name, okN := paramString(op.Params, "name")
 		if !okN {

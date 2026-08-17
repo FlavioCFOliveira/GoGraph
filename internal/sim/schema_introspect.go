@@ -264,6 +264,30 @@ func (m *SchemaModel) btreeIndexNames() []string {
 	return names
 }
 
+// constraintNameList returns every modelled constraint name, sorted — the
+// enumeration the `CALL db.constraints() YIELD … WHERE …` probe filters
+// (rmp #2462).
+func (m *SchemaModel) constraintNameList() []string {
+	enum := m.constraintEnumeration()
+	names := make([]string, 0, len(enum))
+	for _, r := range enum {
+		names = append(names, r.name)
+	}
+	return names
+}
+
+// indexNameList returns every modelled index name — user indexes and the
+// backing indexes implied by UNIQUE constraints — sorted, the enumeration the
+// `CALL db.indexes() YIELD … WHERE …` probe filters (rmp #2462).
+func (m *SchemaModel) indexNameList() []string {
+	enum := m.indexEnumeration()
+	names := make([]string, 0, len(enum))
+	for _, r := range enum {
+		names = append(names, r.name)
+	}
+	return names
+}
+
 // joinRows flattens rows into sorted "a | b | c" lines for order-insensitive
 // set comparison and readable mismatch reports. (Both surfaces are name-sorted
 // already; sorting again costs nothing and keeps the comparison a pure
@@ -423,6 +447,13 @@ func CheckSchemaIntrospection(tick int64, model *SchemaModel, engine *EngineAdap
 				"SHOW INDEXES YIELD-alias/WHERE/RETURN projection diverges from the model:\n"+diff)
 		}
 	}
+
+	// The PROCEDURE form of the same projection (rmp #2462). The statement forms
+	// above cover `SHOW … YIELD … WHERE`; this covers `CALL … YIELD … WHERE`,
+	// which is a distinct code path (cypher/ir/translator.go lifts the predicate
+	// as a Selection over the ProcedureCall) and the one that silently dropped
+	// its WHERE until #1966 was fixed. Both surfaces are held to the same model.
+	vs = append(vs, checkCallYieldWhere(ctx, tick, model, engine)...)
 
 	// db.schema.visualization() must execute and drain cleanly under
 	// simulation. Its row set is deliberately not pinned: the procedure

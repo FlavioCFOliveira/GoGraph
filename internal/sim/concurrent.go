@@ -160,6 +160,13 @@ type ConcurrentResult struct {
 	// IsoReads counts the oracle observations actually made, so a green run
 	// is provably non-vacuous.
 	IsoReads int64
+
+	// WireParamFailures holds one description per divergence found by the Bolt
+	// parameter type matrix ([probeWireParamTypes], rmp #2462): every PackStream
+	// kind a driver can bind — String, Integer, Float, Boolean, Null, List, Map —
+	// is sent over the real wire and verified by read-back before any connection
+	// spawns. Empty on a clean run; a non-empty slice breaks [Consistent].
+	WireParamFailures []string
 }
 
 // TxConserved reports whether every issued transaction landed in exactly one
@@ -170,13 +177,15 @@ func (r *ConcurrentResult) TxConserved() bool {
 
 // Consistent reports whether the eventual-consistency oracle holds: the engine's
 // node count equals the acknowledged creates, with no panics and no unexpected
-// transport errors. Bounded rejects (overload caps) are expected and do not
-// break consistency because a rejected write is never acknowledged and so is
-// never counted in AckedCreates.
+// transport errors, and every Bolt parameter kind round-tripped as specified.
+// Bounded rejects (overload caps) are expected and do not break consistency
+// because a rejected write is never acknowledged and so is never counted in
+// AckedCreates.
 func (r *ConcurrentResult) Consistent() bool {
 	return r.Panics == 0 &&
 		r.TransportErrors == 0 &&
-		r.EngineNodeCount == r.AckedCreates
+		r.EngineNodeCount == r.AckedCreates &&
+		len(r.WireParamFailures) == 0
 }
 
 // RunConcurrent drives cfg.Connections concurrent client connections through the
@@ -235,6 +244,13 @@ func RunConcurrent(ctx context.Context, srv *SimServer, cfg ConcurrentConfig) (C
 			haveContended = true
 		}
 	}
+
+	// Bolt parameter type matrix (rmp #2462), before any connection spawns: every
+	// PackStream kind a driver can bind is sent over the real wire and verified
+	// by read-back. The probe is population-neutral (it deletes the single node
+	// it creates), so it perturbs neither the node-count oracle below nor the
+	// per-connection seed streams.
+	res.WireParamFailures = probeWireParamTypes(ctx, srv)
 
 	if cfg.ContendedCounters <= 0 {
 		cfg.ContendedCounters = 2

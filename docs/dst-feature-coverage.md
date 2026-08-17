@@ -131,11 +131,26 @@ The coverage work exercised the engine against these scenarios and found:
    **Fixed** — the merge operators now evaluate a non-literal RHS per-row
    (openCypher TCK unchanged at 3897/3897). The `merge-rel` scenario is the
    regression guard.
-2. **`CALL … YIELD … WHERE <pred>`** silently ignores the `WHERE` filter
-   (read-only). Backlogged (#1966).
+2. **`CALL … YIELD … WHERE <pred>`** silently ignored the `WHERE` filter
+   (read-only). **Fixed** (#1966) — the visitor now captures `Call.Where` and
+   the translator lifts it as a `Selection` over the `ProcedureCall`. The
+   engine-level guard is `cypher/call_yield_where_test.go`; since rmp #2462 the
+   DST also holds the procedure form to the harness's DDL model on every
+   schema-introspection check (`checkCallYieldWhere`, see
+   [DST language-surface gaps](dst.md#language-surface-gaps-rmp-2462)).
 3. **k-shortest multigraph semantics** diverge between `YenKShortest` (dedups by
    node sequence, cheapest parallel edge) and `Loopless`/`Eppstein` (parallel
    edges as distinct paths). Recorded for adjudication (#1967).
+4. **A list-valued column is stringified on the Bolt wire.**
+   `bolt/server/session.go`'s `exprValueToPackstream` documents an
+   `expr.ListValue` case but its switch has none, so a list column falls through
+   to the `default` arm and is emitted as a PackStream **String** (`"[1, 2, 3]"`)
+   instead of a PackStream **List**. A literal list (`RETURN [1,2,3]`) is
+   stringified identically, so this is the RECORD encoder rather than parameter
+   binding — a bound list evaluates correctly (indexing, `size`, and equality
+   against a literal list all agree). Found by the wire parameter matrix
+   (rmp #2462), which PINS the current rendering so a fix flips the probe
+   deliberately.
 
 ## Documented debt / out of scope
 

@@ -252,6 +252,15 @@ func (r *resultAdapter) RowCount() int { return r.rowCount }
 // underlying result and must be treated as read-only.
 func (r *resultAdapter) Counters() *exec.QueryCounters { return r.res.Counters() }
 
+// Notifications returns the out-of-band plan-time advisories the engine attached
+// to this result ([cypher.Result.Notifications]) — for example the
+// Cartesian-product warning raised for a query whose reading clauses build a
+// cross product between disconnected patterns (#1483). It implements the
+// checker's [notificationReporter] facet so the DST can adjudicate an advisory
+// that is invisible to the result rows. Notifications never affect iteration, so
+// reading them cannot perturb a run.
+func (r *resultAdapter) Notifications() []cypher.Notification { return r.res.Notifications() }
+
 // Err returns the underlying result error.
 func (r *resultAdapter) Err() error { return r.res.Err() }
 

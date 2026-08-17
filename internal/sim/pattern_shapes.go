@@ -16,6 +16,13 @@ const tmplCreateFollows = "MATCH (a:Person {name:$a}),(b:Person {name:$b}) CREAT
 // pattern-shape battery inside [runPatternShapes].
 const patternShapesCheckEvery = 70
 
+// deleteContractEvery is the tick cadence of the non-detach DELETE probe
+// ([probeDeleteContract], rmp #2462) inside [runPatternShapes]. It is coprime
+// with [patternShapesCheckEvery] so the mutating probe and the read battery do
+// not land on the same tick, and frequent enough that both contract arms fire
+// many times within the scenario's tick budget.
+const deleteContractEvery = 31
+
 // patternMotifEvery is the writer-op cadence at which [PatternShapesWriter]
 // plants one deterministic motif (a directed triangle, a mutual KNOWS pair, a
 // KNOWS+FOLLOWS both-types pair, and a KNOWS self-loop), so the terminal
@@ -419,6 +426,7 @@ func runPatternShapes(ctx context.Context, seed uint64) (*SimReport, error) {
 	}
 	defer func() { _ = sm.Close() }()
 
+	var delStats deleteContractStats
 	var lastTick int64
 	var lastOp Op
 	for i := 0; i < cfg.MaxTicks; i++ {
@@ -437,6 +445,11 @@ func runPatternShapes(ctx context.Context, seed uint64) (*SimReport, error) {
 			if v := CheckPatternShapes(tick, sm.oracle, sm.engine); len(v) > 0 {
 				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery pattern shapes>"}, v), nil
 			}
+			// The advisory is a pure function of the query, so it must survive
+			// recovery exactly as it stood before the crash.
+			if v := CheckCartesianNotification(tick, sm.engine); len(v) > 0 {
+				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery cartesian notification>"}, v), nil
+			}
 		}
 
 		actor := sm.workload.SelectActor(sm.seed)
@@ -454,12 +467,33 @@ func runPatternShapes(ctx context.Context, seed uint64) (*SimReport, error) {
 			if v := CheckPatternShapes(tick, sm.oracle, sm.engine); len(v) > 0 {
 				return sm.report(tick, op, v), nil
 			}
+			if v := CheckCartesianNotification(tick, sm.engine); len(v) > 0 {
+				return sm.report(tick, op, v), nil
+			}
+		}
+		// The non-detach DELETE contract (rmp #2462) rides this scenario because
+		// its oracle knows adjacency exactly, which is what lets both arms be
+		// PREDICTED: a degree-0 Person must delete, a connected one must be
+		// refused. It runs on its own cadence, offset from the read battery so
+		// the two do not stack on one tick, and it MUTATES (the accepted delete
+		// is applied to the oracle too). Only degree-0 nodes are ever removed,
+		// so every planted motif survives for the terminal shape assertions.
+		if tick%deleteContractEvery == 0 {
+			if v := probeDeleteContract(ctx, tick, sm.oracle, sm.engine, &delStats); len(v) > 0 {
+				return sm.report(tick, op, v), nil
+			}
 		}
 	}
 	if v := CheckPatternShapes(lastTick, sm.oracle, sm.engine); len(v) > 0 {
 		return sm.report(lastTick, lastOp, v), nil
 	}
+	if v := CheckCartesianNotification(lastTick, sm.engine); len(v) > 0 {
+		return sm.report(lastTick, lastOp, v), nil
+	}
 	if v := patternShapesVacuity(lastTick, sm.oracle); len(v) > 0 {
+		return sm.report(lastTick, lastOp, v), nil
+	}
+	if v := deleteContractVacuity(lastTick, &delStats); len(v) > 0 {
 		return sm.report(lastTick, lastOp, v), nil
 	}
 	return nil, nil

@@ -29,10 +29,11 @@ soak / nightly), see [docs/test-layers.md](test-layers.md).
 7. [Scenario catalogue](#scenario-catalogue)
 8. [Crash and recovery](#crash-and-recovery)
 9. [MVCC multi-session and concurrency coverage](#mvcc-multi-session-and-concurrency-coverage)
-10. [Swarm, coverage, and cross-checking modes](#swarm-coverage-and-cross-checking-modes)
-11. [Command-line usage](#command-line-usage)
-12. [Reproduce, replay, and shrink](#reproduce-replay-and-shrink)
-13. [Extending the harness](#extending-the-harness)
+10. [Language-surface gaps (rmp #2462)](#language-surface-gaps-rmp-2462)
+11. [Swarm, coverage, and cross-checking modes](#swarm-coverage-and-cross-checking-modes)
+12. [Command-line usage](#command-line-usage)
+13. [Reproduce, replay, and shrink](#reproduce-replay-and-shrink)
+14. [Extending the harness](#extending-the-harness)
 
 ---
 
@@ -473,6 +474,89 @@ leave nothing, and the contended counters carry their acknowledged increments
 across every crash. The short layer runs a 24-connection two-cycle
 configuration; the soak layer (`-tags=soak`) runs 256 connections over three
 cycles.
+
+## Language-surface gaps (rmp #2462)
+
+Four narrow surfaces the DST issued but never adjudicated. Each is an
+oracle-computed or contract-pinning check wired into an existing scenario at its
+existing cadences, with a sensitivity test that makes it fire.
+
+### Non-detach `DELETE n`
+
+Every other scenario deletes through `DETACH DELETE`, so the plain form — and
+openCypher's rule that it must REFUSE a node that still has relationships — was
+never exercised. `internal/sim/delete_contract.go` predicts both arms from the
+oracle's adjacency and holds the engine to them:
+
+- degree 0 → the delete COMMITS, reporting exactly one `-nodes`, adjudicated
+  through the per-op counters oracle (`CheckOpCounters`);
+- degree > 0 → the delete is REFUSED with `exec.ErrDeleteNodeHasRelationships`
+  and applies nothing; the node must still be there afterwards.
+
+The typed error arrives on the **drain**, not from the write call: the engine
+accepts the statement and fails while producing rows, so the probe inspects both
+sides. It rides the `pattern-shapes` scenario, whose oracle knows adjacency
+exactly, on its own cadence; only degree-0 nodes are ever removed, so every
+planted motif survives for that scenario's shape assertions. A terminal gate
+requires both arms to have fired.
+
+### `CALL … YIELD … WHERE` (the #1966 surface)
+
+`SHOW … YIELD … WHERE` was already covered; the **procedure** form is a distinct
+code path — the translator lifts the predicate as a `Selection` over the
+`ProcedureCall` — and is the one that silently dropped its `WHERE` until #1966
+was fixed. `checkCallYieldWhere` filters `db.constraints()` and `db.indexes()`
+by a name the DDL model knows and requires the result to equal the model-side
+filter. Because a predicate that selects everything would still compare equal if
+the `WHERE` were dropped again, each probe additionally asserts the filter is
+**strictly narrowing** whenever the model enumerates two or more rows.
+
+### Cartesian-product notification
+
+The engine analyses every planned query for a cross product between disconnected
+patterns and attaches an advisory, reachable through
+`cypher.Result.Notifications` (and the Bolt SUCCESS `notifications` metadata).
+The DST issued Cartesian shapes routinely but never inspected one, so the whole
+advisory surface was unguarded. `CheckCartesianNotification` pins **both**
+directions over four shapes — comma-separated disconnected paths and two
+sequential `MATCH` clauses must warn; a connected pattern and disconnected paths
+joined by a `WHERE` predicate must not — so neither an always-on nor an
+always-off implementation can pass. Notifications are attached on the read path
+(`Engine.Run`); the `RunInTx` write path leaves them empty, so every probe is a
+read. The check is a plan-time property of the query text, so it is meaningful
+on an empty graph and runs at the periodic cadence, after each recovery, and at
+the end.
+
+### Bolt wire parameter type matrix
+
+The wire actors bound only String and Integer, leaving every other PackStream
+kind untested on the path where a literal/parameter divergence actually reaches
+a driver user — the Bolt server hands the decoded parameter map straight to the
+engine. `probeWireParamTypes` binds each kind over the real wire before any
+connection spawns and verifies it by read-back, including a genuine **Map** used
+as the property map of a `CREATE` (the `RunAny`-with-a-real-map path), Float and
+Boolean parameters as pattern-predicate seek keys, and a Null parameter through
+`SET` (which must remove the property). The probe is population-neutral — it
+deletes the one node it creates — and its findings gate
+`ConcurrentResult.Consistent`.
+
+What round-trips:
+
+| Kind | Wire encoding | Round-trips |
+|---|---|---|
+| String, Integer, Float, Boolean, Null | native | yes |
+| Map | native PackStream Map | yes |
+| **List** | **PackStream String** | **no — see below** |
+
+A **List** binds correctly in both directions of evaluation — indexing, `size`,
+and equality against a literal list all give the right answers, so the engine
+really does receive a list — but the RECORD encoder has no `expr.ListValue` arm
+(`bolt/server/session.go`), so a list column is emitted as its `String()`
+rendering. A literal list return is stringified identically, which locates the
+gap in the encoder rather than in parameter binding. The probe therefore checks
+the list's input semantics through defect-immune scalar projections and PINS the
+current stringified output, so fixing the encoder flips the probe deliberately
+rather than silently.
 
 ## Concurrency hypotheses chased
 
