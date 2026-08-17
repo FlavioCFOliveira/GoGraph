@@ -133,6 +133,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
@@ -242,6 +243,23 @@ const (
 	// NO statement the family issues, so a property appearing on it can only have
 	// arrived by the misdirection rmp #2515 fixed.
 	mergeHandleDecoyName = "hc-decoy"
+	// mergeHandleDecoyAltName is the SECOND decoy candidate, used only when the
+	// first one draws node id 0 — the reserved no-handle sentinel, with which no
+	// relationship can ever collide (rmp #2524).
+	//
+	// A node's id is [graph.NodeID](intraShardIndex<<8 | shard), so id 0 means
+	// "first key interned in shard 0". Which shard a node lands in is decided by
+	// the FNV-1a hash of the synthetic key the engine mints for it
+	// (cypher/exec: "__cx_"+hex(globalNodeCounter)), and that counter is
+	// PROCESS-GLOBAL: its value when this fixture runs depends on how many nodes
+	// every earlier test in the process created. The scenario's seed does not
+	// reach it, so on roughly 0.4% of process histories the first decoy lands on
+	// id 0 through no fault of the engine.
+	//
+	// One alternative always suffices, and deterministically: if the first
+	// candidate drew id 0 then it IS the occupant of shard 0 slot 0, so no key
+	// interned after it can be id 0 again.
+	mergeHandleDecoyAltName = "hc-decoy2"
 )
 
 // mergeHandleNodeKeys is the closed key namespace of the node the handle-collision
@@ -1033,6 +1051,12 @@ type mergeHandleFixture struct {
 	srcKey, dstKey string
 	handle         uint64
 	decoyID        graph.NodeID
+	// decoyName is the name of the decoy candidate that actually got a usable
+	// node id — [mergeHandleDecoyName] normally, [mergeHandleDecoyAltName] on the
+	// process histories where the first candidate drew the reserved id 0. Every
+	// consumer must read the decoy's identity from here rather than from the
+	// constant, or it will probe the wrong node (rmp #2524).
+	decoyName string
 }
 
 // seedMergeHandleCollision builds the graph state the rmp #2515 family needs and
@@ -1044,22 +1068,34 @@ type mergeHandleFixture struct {
 // on about 1% of its runs. It is therefore constructed:
 //
 //  1. create the two endpoints and the decoy, so their ids exist;
-//  2. raise the per-graph handle counter to the decoy's id
+//  2. if the decoy drew node id 0 — the reserved no-handle sentinel, with which
+//     nothing can collide — create a second candidate and use that one instead
+//     (rmp #2524);
+//  3. raise the per-graph handle counter to the decoy's id
 //     ([lpg.Graph.SeedEdgeHandle]);
-//  3. create the relationship, so the ENGINE's own write path stamps the
+//  4. create the relationship, so the ENGINE's own write path stamps the
 //     colliding handle rather than the harness back-dating one;
-//  4. read the handle back with [lpg.Graph.FirstEdgeHandle] and require it to
+//  5. read the handle back with [lpg.Graph.FirstEdgeHandle] and require it to
 //     equal the decoy's id.
 //
-// Step 4 is what stops the arm decaying into a green run that proves nothing. The
-// counter is monotone — seeding at or below it is a no-op — so step 2 can silently
+// Step 2 exists because a node's id is not the scenario's to choose: it encodes
+// the mapper shard its synthetic key hashes to, and that key counts up from a
+// process-global counter whose value here depends on how many nodes every
+// earlier test in the process created. Roughly one process history in 250 put
+// the decoy on id 0. That is a draw, not a defect, so it is corrected rather
+// than reported — and one alternative always suffices, because a first candidate
+// that drew id 0 is precisely what occupies that slot from then on.
+//
+// Step 5 is what stops the arm decaying into a green run that proves nothing. The
+// counter is monotone — seeding at or below it is a no-op — so step 3 can silently
 // fail on a graph that has already minted handles; every violation this returns
 // says so rather than letting the family run over a graph where the defect it
 // exists to catch could not manifest.
 //
-// The three statements run through the engine but NOT through the op dispatch:
-// they are setup, not workload, so the oracle is advanced once by
-// [GraphOracle.seedMergeHandleFixture] instead.
+// The statements run through the engine but NOT through the op dispatch: they
+// are setup, not workload, so the oracle is advanced once by
+// [GraphOracle.seedMergeHandleFixture] instead — which is told whether step 2
+// fired, so the model holds exactly the nodes the engine holds.
 func seedMergeHandleCollision(ctx context.Context, sm *Simulator) (*mergeHandleFixture, []Violation) {
 	fail := func(format string, args ...any) []Violation {
 		return []Violation{{Kind: ViolationGraphIntegrity, Tick: 0, Op: "merge handle-collision fixture",
@@ -1077,29 +1113,61 @@ func seedMergeHandleCollision(ctx context.Context, sm *Simulator) (*mergeHandleF
 		}
 	}
 
-	var srcKey, dstKey string
-	var decoyID graph.NodeID
-	var decoyFound bool
-	g.AdjList().Mapper().Walk(func(id graph.NodeID, key string) bool {
-		switch personNameByID(g, id) {
-		case mergeHandleSrcName:
-			srcKey = key
-		case mergeHandleDstName:
-			dstKey = key
-		case mergeHandleDecoyName:
-			decoyID, decoyFound = id, true
-		}
-		return true
-	})
-	switch {
-	case srcKey == "" || dstKey == "":
+	// resolve reads the fixture's own nodes back out of the engine's identity map:
+	// the endpoints' interned keys, and the node id of every decoy candidate that
+	// exists so far. It is a closure because the alt-candidate path below must
+	// re-read after creating one more node.
+	resolve := func() (srcKey, dstKey string, decoyIDs map[string]graph.NodeID) {
+		decoyIDs = make(map[string]graph.NodeID, 2)
+		g.AdjList().Mapper().Walk(func(id graph.NodeID, key string) bool {
+			switch name := personNameByID(g, id); name {
+			case mergeHandleSrcName:
+				srcKey = key
+			case mergeHandleDstName:
+				dstKey = key
+			case mergeHandleDecoyName, mergeHandleDecoyAltName:
+				decoyIDs[name] = id
+			}
+			return true
+		})
+		return srcKey, dstKey, decoyIDs
+	}
+
+	srcKey, dstKey, decoyIDs := resolve()
+	if srcKey == "" || dstKey == "" {
 		return nil, fail("fixture endpoints %q/%q are not interned in the graph", mergeHandleSrcName, mergeHandleDstName)
-	case !decoyFound:
-		return nil, fail("fixture decoy %q is not interned in the graph", mergeHandleDecoyName)
-	case decoyID == 0:
-		// 0 is the reserved no-handle sentinel, so no relationship can ever be
-		// stamped with it and the collision would be unconstructible.
-		return nil, fail("fixture decoy %q received node id 0, the reserved no-handle sentinel", mergeHandleDecoyName)
+	}
+	decoyName := mergeHandleDecoyName
+	decoyID, ok := decoyIDs[decoyName]
+	if !ok {
+		return nil, fail("fixture decoy %q is not interned in the graph", decoyName)
+	}
+	// Node id 0 is the reserved no-handle sentinel, so no relationship can ever be
+	// stamped with it and the collision would be unconstructible with this decoy.
+	// That is a property of the PROCESS-GLOBAL synthetic-key counter, not of the
+	// engine and not of the scenario seed, so it is corrected rather than
+	// reported: a second candidate is created and cannot draw id 0 in its turn,
+	// because the first candidate is precisely what now occupies that slot
+	// (rmp #2524).
+	altCreated := false
+	if decoyID == 0 {
+		alt := Op{Kind: OpCreate, Cypher: tmplMergeHandleCreatePerson,
+			Params: map[string]any{"name": mergeHandleDecoyAltName}}
+		if committed, _ := sm.executeCounted(ctx, alt); !committed {
+			return nil, fail("fixture CREATE of the alternate decoy Person{name:%q} did not commit",
+				mergeHandleDecoyAltName)
+		}
+		altCreated = true
+		_, _, decoyIDs = resolve()
+		decoyName = mergeHandleDecoyAltName
+		if decoyID, ok = decoyIDs[decoyName]; !ok {
+			return nil, fail("alternate fixture decoy %q is not interned in the graph", decoyName)
+		}
+		if decoyID == 0 {
+			return nil, fail("both decoy candidates %q and %q drew node id 0, which is impossible unless the "+
+				"mapper stopped assigning ids in intern order; %s",
+				mergeHandleDecoyName, mergeHandleDecoyAltName, mergeHandleMapperDump(g))
+		}
 	}
 
 	g.SeedEdgeHandle(uint64(decoyID))
@@ -1118,8 +1186,9 @@ func seedMergeHandleCollision(ctx context.Context, sm *Simulator) (*mergeHandleF
 			"constructed, so the node-only outer-relationship family cannot expose rmp #2515 and its green "+
 			"result would prove nothing", handle, decoyID)
 	}
-	sm.oracle.seedMergeHandleFixture()
-	return &mergeHandleFixture{srcKey: srcKey, dstKey: dstKey, handle: handle, decoyID: decoyID}, nil
+	sm.oracle.seedMergeHandleFixture(altCreated)
+	return &mergeHandleFixture{srcKey: srcKey, dstKey: dstKey, handle: handle,
+		decoyID: decoyID, decoyName: decoyName}, nil
 }
 
 // seedMergeHandleFixture advances the model for [seedMergeHandleCollision]: the
@@ -1127,13 +1196,36 @@ func seedMergeHandleCollision(ctx context.Context, sm *Simulator) (*mergeHandleF
 // endpoints. All three nodes go in as [GraphOracle.newPairNode] does — counted,
 // named, but NOT indexed by name — so count parity and the by-name edge probes
 // reach them while no actor can draw or delete them.
-func (o *GraphOracle) seedMergeHandleFixture() {
+//
+// withAlt adds the fourth node for the process histories on which the bootstrap
+// had to fall back to [mergeHandleDecoyAltName] (rmp #2524). It must mirror the
+// bootstrap exactly: the FIRST candidate is created either way, so it is modelled
+// either way, and count parity would break if the model dropped it.
+func (o *GraphOracle) seedMergeHandleFixture(withAlt bool) {
 	srcID := o.newPairNode(mergeHandleSrcName)
 	dstID := o.newPairNode(mergeHandleDstName)
 	o.newPairNode(mergeHandleDecoyName)
+	if withAlt {
+		o.newPairNode(mergeHandleDecoyAltName)
+	}
 	o.edges[edgeKey{src: srcID, dst: dstID, label: relPaired}] = &EdgeState{
 		SrcID: srcID, DstID: dstID, Label: relPaired, Properties: map[string]any{},
 	}
+}
+
+// mergeHandleMapperDump renders every (node id, interned key, name) triple the
+// graph holds, in mapper Walk order. It exists for the one failure the fixture
+// cannot correct — both decoy candidates drawing node id 0 — where the mapper's
+// own id assignment is the thing in question, so the report must carry it rather
+// than describe it.
+func mergeHandleMapperDump(g *lpg.Graph[string, float64]) string {
+	var b strings.Builder
+	b.WriteString("mapper:")
+	g.AdjList().Mapper().Walk(func(id graph.NodeID, key string) bool {
+		fmt.Fprintf(&b, " [id=%d key=%q name=%q]", id, key, personNameByID(g, id))
+		return true
+	})
+	return b.String()
 }
 
 // personNameByID returns the `name` property of the node with this id, or "" when
@@ -1200,11 +1292,11 @@ func CheckMergeHandleCollision(tick int64, f *mergeHandleFixture, g *lpg.Graph[s
 			"the fixture relationship's handle changed from %d to %d: its identity is not stable across the run",
 			f.handle, handle)
 	default:
-		if got := personNameByID(g, graph.NodeID(handle)); got != mergeHandleDecoyName {
+		if got := personNameByID(g, graph.NodeID(handle)); got != f.decoyName {
 			add(ViolationOracleDeviation, "merge handle-collision premise",
 				"node id %d is %q, want the decoy %q: the handle/id COLLISION no longer holds, so the family "+
 					"is exercising a shape on which rmp #2515 could not manifest and a clean run proves nothing",
-				handle, got, mergeHandleDecoyName)
+				handle, got, f.decoyName)
 		}
 	}
 
@@ -1249,7 +1341,7 @@ func CheckMergeHandleCollision(tick int64, f *mergeHandleFixture, g *lpg.Graph[s
 		add(ViolationOracleDeviation, "merge handle-collision decoy",
 			"%d Person node(s) carry .%s, want 0: no template ever writes that key to a node, so a MERGE's "+
 				"outer-relationship action was MISDIRECTED onto the node whose id equals the relationship's "+
-				"stable handle (%d, %q) — rmp #2515", n, mergePairRelKey, f.handle, mergeHandleDecoyName)
+				"stable handle (%d, %q) — rmp #2515", n, mergePairRelKey, f.handle, f.decoyName)
 	}
 	return vs
 }

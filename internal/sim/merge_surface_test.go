@@ -502,7 +502,7 @@ func TestMergeSurface_NonVacuityGate(t *testing.T) {
 	// targets the handle-collision fixture's relationship, so the fixture must be
 	// modelled first; the create branch runs over a fresh merge key and the match
 	// branch over the key the create just made.
-	oracle.seedMergeHandleFixture()
+	oracle.seedMergeHandleFixture(false)
 	for _, op := range []Op{
 		mergeOp(tmplMergeHandleOuterRelCreate, map[string]any{
 			"x": mergeHandleSrcName, "y": mergeHandleDstName, "n": mergeHandleNodeKeys[0], "v": int64(17)}),
@@ -770,7 +770,7 @@ func TestMergeHandleCollision_FixtureIsConstructed(t *testing.T) {
 	sm, f := newHandleCollisionSim(t)
 	g := sm.graph()
 	t.Logf("fixture: %s(%q->%q) handle=%d, decoy %q node id=%d",
-		relPaired, f.srcKey, f.dstKey, f.handle, mergeHandleDecoyName, f.decoyID)
+		relPaired, f.srcKey, f.dstKey, f.handle, f.decoyName, f.decoyID)
 
 	if f.decoyID == 0 {
 		t.Fatal("decoy node id 0 is the reserved no-handle sentinel: no relationship could ever collide with it")
@@ -778,8 +778,8 @@ func TestMergeHandleCollision_FixtureIsConstructed(t *testing.T) {
 	if f.handle != uint64(f.decoyID) {
 		t.Fatalf("handle = %d, want %d (the decoy's node id): the collision was not constructed", f.handle, f.decoyID)
 	}
-	if got := personNameByID(g, graph.NodeID(f.handle)); got != mergeHandleDecoyName {
-		t.Fatalf("node id %d is %q, want the decoy %q", f.handle, got, mergeHandleDecoyName)
+	if got := personNameByID(g, graph.NodeID(f.handle)); got != f.decoyName {
+		t.Fatalf("node id %d is %q, want the decoy %q", f.handle, got, f.decoyName)
 	}
 	// The handle must come from the ENGINE's own durable identity for the edge,
 	// not from the counter the bootstrap seeded.
@@ -870,7 +870,7 @@ func TestMergeHandleCollision_CountersArmIsReachable(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			oracle := NewGraphOracle()
-			oracle.seedMergeHandleFixture()
+			oracle.seedMergeHandleFixture(false)
 			if tc.present {
 				oracle.newPairNode(mergeHandleNodeKeys[0])
 			}
@@ -912,7 +912,7 @@ func TestMergeHandleCollision_CheckerCatchesMisdirection(t *testing.T) {
 		}
 		outer.Properties[mergePairRelKey] = int64(17)
 		// ...while the engine put it on the node whose id equals the handle.
-		inject := Op{Kind: OpUpdate, Cypher: "MATCH (p:Person {name:'" + mergeHandleDecoyName + "'}) SET p." +
+		inject := Op{Kind: OpUpdate, Cypher: "MATCH (p:Person {name:'" + f.decoyName + "'}) SET p." +
 			mergePairRelKey + " = 17"}
 		if committed, _ := sm.executeCounted(context.Background(), inject); !committed {
 			t.Fatal("injection did not commit")
@@ -945,7 +945,7 @@ func TestMergeHandleCollision_CheckerCatchesMisdirection(t *testing.T) {
 		if v := CheckMergeHandleCollision(0, f, sm.graph(), sm.oracle, sm.engine); len(v) > 0 {
 			t.Fatalf("a correct write must be clean: %v", v)
 		}
-		inject := Op{Kind: OpUpdate, Cypher: "MATCH (p:Person {name:'" + mergeHandleDecoyName + "'}) SET p." +
+		inject := Op{Kind: OpUpdate, Cypher: "MATCH (p:Person {name:'" + f.decoyName + "'}) SET p." +
 			mergePairRelKey + " = 17"}
 		if committed, _ := sm.executeCounted(context.Background(), inject); !committed {
 			t.Fatal("injection did not commit")

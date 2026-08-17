@@ -314,6 +314,24 @@ const schemaMutationCheckEvery = 60
 // [checkMergeSurfaceNonVacuity]) prove the added templates were actually issued,
 // that each of their branches and sub-cases fired, and that the state they wrote
 // was exercised through recovery. It is bit-reproducible.
+//
+// # The one thing the seed does not reach
+//
+// Bit-reproducibility covers the op stream, the crash and checkpoint schedule,
+// and the outcome: all three are pure functions of the seed. It does NOT cover
+// the synthetic keys the engine mints for created nodes. Those are
+// "__cx_"+hex(n) drawn from a PROCESS-GLOBAL counter (cypher/exec), so their
+// values — and therefore the [graph.NodeID]s derived from them, since a node's
+// id encodes the mapper shard its key hashes to — depend on how many nodes every
+// other test in the process created first. Two runs of the same seed take the
+// same decisions over graphs whose node ids differ.
+//
+// Nothing this scenario asserts may therefore depend on a particular node id.
+// The handle-collision fixture ([seedMergeHandleCollision]) is the one place that
+// touches node ids at all, and since rmp #2524 it tolerates every id it can draw
+// rather than reporting the unlucky ones as engine violations: before that fix
+// roughly 0.4% of process histories put its decoy on the reserved id 0 and failed
+// the run with no defect present.
 func schemaMutationScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioSchemaMutation,
