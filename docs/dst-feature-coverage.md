@@ -348,16 +348,51 @@ call and each scenario carries a terminal gate asserting a **non-zero checkpoint
 count**, so a configuration that stops taking effect fails the run rather than
 passing quietly.
 
-### The group-commit clarification
+### Group-commit coalescing and fail-all (rmp #2471)
 
-Through the engine (and therefore the Bolt wire), every write commit — including
-its WAL `fsync` — is serialised under a single `visMu` lock, so `SyncGroup` is
-always a **solo leader with zero followers**. Multi-member group-commit
-coalescing and the fail-all path are unreachable via the engine and are covered
-by store-layer unit tests (`store/wal/syncgroup_test.go`,
-`store/txn/group_commit_durability_test.go`). The DST drives the solo-leader
-`SyncGroup` on every durable write, and now additionally under concurrent
-crash/recovery.
+This section previously stated that every write commit — including its WAL
+`fsync` — is serialised under a single `visMu` lock, so `SyncGroup` was "always a
+solo leader with zero followers" and multi-member coalescing was unreachable
+through the engine. **That is false, and has been since sprint 334 made MVCC the
+module's concurrency control.** An ordinary write takes the barrier SHARED
+(`cypher/api.go`, `Engine.schemaGate.WeakLockAuto`), so two commits run
+concurrently by design and their fsyncs coalesce.
+
+The correction is measured, not argued. Driving 12 concurrent Bolt writer
+connections × 40 commits through a real WAL-backed store on a `SimDisk`
+(`RunGroupCommitCoalescing`, `internal/sim/group_commit.go`):
+
+| committers | SyncGroup rounds | leaders | followers | acked commits |
+|---|---|---|---|---|
+| 12 | 483 | 422 | **61** | 480 |
+| 1 (control) | 43 | 43 | **0** | 40 |
+
+Both properties are now gated in the DST rather than recorded in a comment:
+
+- **Coalescing** is a coverage precondition. `checkGroupCommitCoverage` fails the
+  run if `store.wal.SyncGroup.coalesced` is zero under ≥ 8 concurrent
+  committers — the signature of a regression to solo-leader commits, which halves
+  write throughput and un-covers the fail-all branch entirely while leaving every
+  other scenario green. `checkGroupCommitNonVacuity` is a **separate** gate, so a
+  run that simply failed to commit is reported as uninformative rather than as a
+  writer regression. The single-committer control arm is retained as a permanent
+  sensitivity proof: it must read zero followers, which also keeps the
+  `coalesced` counter honest (it is shared with `SyncBuffered`'s
+  durable-already path).
+- **Fail-all** is asserted end to end by `RunGroupCommitFailAll`. It builds a
+  genuine 8-member group — `SimDisk.ArmSyncGateAt` holds the leader inside its
+  fsync while the followers arrive, which is the only way the group is
+  deterministic rather than lucky — fails that one shared fsync, and asserts every
+  member receives the durability fail-stop (`wal.ErrDurabilityFailed`), that
+  **none** is acknowledged, that exactly **one** round was poisoned, and that
+  recovery keeps the commit acknowledged before the group while discarding the
+  whole failed group.
+
+The store-layer unit tests (`store/wal/syncgroup_test.go`,
+`store/txn/group_commit_durability_test.go`) remain the arithmetic gate. What the
+DST adds is a group whose membership is constructed rather than assumed: the WAL
+unit test fails *every* fsync, so it cannot distinguish one shared round from N
+serialised ones.
 
 ### Read-transaction isolation
 
@@ -441,15 +476,23 @@ The coverage work exercised the engine against these scenarios and found:
 
 ## Documented debt / out of scope
 
-- **GraphML round-trip under fault** is not yet covered: its ergonomic entry
-  point is a property-graph, not the edge-list the fault scenario builds. CSV
-  and JSONL round-trips are covered. (A property-graph fixture would extend this
-  to GraphML.)
+- ~~**GraphML round-trip under fault** is not yet covered.~~ **Closed** (verified
+  rmp #2471): `internal/sim/storage_fault_scenarios.go` carries the
+  property-graph fixture this bullet said was missing (`graphmlModel`, labelled
+  and propertied) and drives it through both halves of the ST8 contract —
+  `graphmlRoundTripClean` (exact round-trip via `graphml.WriteWithProps` /
+  `ReadWithProps`) and `graphmlExportFaultFailsClean` (a clean typed failure
+  under a sub-full ENOSPC bound, with no silently-accepted partial). CSV, JSONL
+  and GraphML are all covered.
 - **Snapshot isolation for read transactions** shipped in rmp #2307 (sprint
   334) via MVCC version chains rather than the copy-on-write epic (#1671) once
   considered for it. The DST scenarios assert no-dirty-read, which the stronger
   contract still satisfies; the isolation level itself is gated by
   `cypher/readtx_snapshot_test.go` and `bolt/server/e2e_readtx_snapshot_test.go`.
-- **Multi-member WAL group-commit coalescing / fail-all** is engine-unreachable
-  (serialised under `visMu`) and is covered by store-layer unit tests, not the
-  DST — see the group-commit clarification above.
+- ~~**Multi-member WAL group-commit coalescing / fail-all** is engine-unreachable
+  (serialised under `visMu`).~~ **Closed** (rmp #2471): the premise was false —
+  an ordinary write has taken the barrier SHARED since sprint 334, and multi-member
+  coalescing is measured at 61 followers in 483 rounds through the engine. Both
+  coalescing and fail-all are now gated in the DST; see
+  [Group-commit coalescing and fail-all](#group-commit-coalescing-and-fail-all-rmp-2471)
+  above.

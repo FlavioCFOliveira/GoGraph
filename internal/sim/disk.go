@@ -9,6 +9,7 @@ import (
 	pathpkg "path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -162,6 +163,96 @@ type SimDisk struct {
 	// poison the writer (store/wal/writer.go poisonAfterRename) yet leave the
 	// on-disk suffix-only WAL intact and recoverable.
 	parentDirSyncFaultArmed bool
+	// syncGate, when non-nil, is a ONE-SHOT rendezvous armed on a Sync ordinal by
+	// [SimDisk.ArmSyncGateAt]: the syncGateAt-th Sync blocks inside the call until
+	// the controlling goroutine releases it. It is the only primitive here that
+	// controls sync TIMING rather than sync OUTCOME, and it exists because the WAL
+	// group-commit leader is only a leader for as long as its fsync runs — against
+	// an in-memory disk that window is far too short for another committer to
+	// reach the follower path, so a multi-member group cannot otherwise be
+	// constructed deterministically. Like every other arm here it draws NOTHING
+	// from the [Seed]. See [SimDisk.ArmSyncGateAt] for the ordering rule against
+	// [SimDisk.ArmSyncFaultAt].
+	syncGate   *SyncGate
+	syncGateAt int64
+}
+
+// SyncGate is a one-shot rendezvous on a chosen [SimFileHandle.Sync] call,
+// returned by [SimDisk.ArmSyncGateAt]. The gated Sync blocks inside the call —
+// with the disk lock RELEASED, so the rest of the disk stays usable — until
+// [SyncGate.Release] is called, which is what lets a scenario hold the WAL
+// group-commit leader inside its fsync while other committers arrive and become
+// followers.
+//
+// # Concurrency contract
+//
+// SyncGate is safe for concurrent use. [SyncGate.Reached] may be received from
+// any goroutine and [SyncGate.Release] may be called from any goroutine and more
+// than once; the gated Sync itself runs on whichever goroutine issued it.
+type SyncGate struct {
+	reached   chan struct{}
+	release   chan struct{}
+	reachOnce sync.Once
+	once      sync.Once
+	fired     atomic.Bool
+}
+
+// reach marks the gate entered and wakes whoever is waiting on
+// [SyncGate.Reached]. The one-shot claim in [SimDisk.syncOutcome] already
+// guarantees a single caller; the Once makes that independent of it.
+func (g *SyncGate) reach() {
+	g.reachOnce.Do(func() {
+		g.fired.Store(true)
+		close(g.reached)
+	})
+}
+
+// Reached returns a channel closed when the gated Sync has been entered and is
+// blocked. Receiving from it is how a controlling goroutine learns the leader is
+// parked inside its fsync, rather than guessing with a sleep.
+func (g *SyncGate) Reached() <-chan struct{} { return g.reached }
+
+// Release unblocks the gated Sync, which then returns whatever outcome the other
+// arms selected for it (a [SimDisk.ArmSyncFaultAt] fault, an ENOSPC, or success).
+// It is idempotent and safe to call even if the gate was never reached.
+func (g *SyncGate) Release() { g.once.Do(func() { close(g.release) }) }
+
+// Fired reports whether the gated Sync was actually entered. It is the
+// reachability observable the rename arms established (rmp #2465): an ordinal
+// that never matched is a silent no-op, and a scenario that depends on the gate
+// firing must be able to tell "the gate held the leader" from "the gate was
+// never reached" rather than misreading the resulting timing as an engine
+// property.
+func (g *SyncGate) Fired() bool { return g.fired.Load() }
+
+// ArmSyncGateAt arms a ONE-SHOT rendezvous on the at-th [SimFileHandle.Sync]
+// call on this disk, counted from the current [SimDisk.SyncCount]+1, and returns
+// the gate. That Sync blocks — outside the disk lock — until
+// [SyncGate.Release]; every other Sync is unaffected and the arm clears once it
+// fires. A non-positive at disarms and returns nil.
+//
+// # Ordering against ArmSyncFaultAt
+//
+// Unlike [SimDisk.ArmSyncFaultAt] this does NOT reset the Sync counter, so that
+// arming a gate never moves a fault ordinal already in place. To gate and fail
+// the SAME Sync, arm the fault FIRST (it resets the counter) and the gate
+// second, with the same ordinal.
+//
+// It draws nothing from the [Seed], so arming never perturbs the reproducible
+// fault stream, and must be called from the controlling goroutine before the
+// work that will trigger it begins.
+func (d *SimDisk) ArmSyncGateAt(at int64) *SyncGate {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if at <= 0 {
+		d.syncGate = nil
+		d.syncGateAt = 0
+		return nil
+	}
+	g := &SyncGate{reached: make(chan struct{}), release: make(chan struct{})}
+	d.syncGate = g
+	d.syncGateAt = d.syncCount + at
+	return g
 }
 
 // simFile is the in-memory backing store for one path. data holds the file
@@ -264,11 +355,18 @@ func (d *SimDisk) SetCapacity(capacityBytes int64, enospcOnSync bool) {
 // counted from the moment of arming, letting a scenario arm "the K-th commit's
 // fsync" right before it starts issuing. A non-positive at disarms.
 //
-// It models an fsync failure on a chosen durable commit: through the Cypher
-// engine a commit's WAL fsync is a solo-leader [wal.Writer.SyncGroup], so the
-// faulted Sync poisons the writer, which discards its un-synced suffix and fails
-// that commit (the client sees a wire FAILURE, never an ack) while every earlier
-// acked commit stays durable. It draws nothing from the [Seed], so arming never
+// It models an fsync failure on a chosen durable commit: the faulted Sync
+// poisons the WAL writer, which discards its un-synced suffix and fails the
+// commit (the client sees a wire FAILURE, never an ack) while every earlier
+// acked commit stays durable.
+//
+// The faulted commit is not necessarily the ONLY one that fails. A commit's WAL
+// fsync is a [wal.Writer.SyncGroup] round, and through the engine that round may
+// carry followers (measured — see the group-commit note in
+// durable_scenarios.go), in which case the poison fails every member of the
+// group by design. This doc claimed the round was "always a solo leader" until
+// rmp #2471; it is not, and a scenario must therefore treat the set of failed
+// commits as a set rather than a singleton. It draws nothing from the [Seed], so arming never
 // perturbs the reproducible fault stream. It must be called from the controlling
 // goroutine before the workload that will trigger it begins.
 func (d *SimDisk) ArmSyncFaultAt(at int64) {
@@ -953,17 +1051,51 @@ func (h *SimFileHandle) Sync() error {
 	if h.closed {
 		return fs.ErrClosed
 	}
-	h.disk.mu.Lock()
-	defer h.disk.mu.Unlock()
+	gate, err := h.disk.syncOutcome(h.path)
+	// Block on an armed gate with the disk lock RELEASED, so the rest of the disk
+	// stays usable while this Sync is held. The outcome was already decided above
+	// under the lock, so releasing it here selects the same result the ungated
+	// call would have returned — the gate controls only WHEN this Sync returns.
+	if gate != nil {
+		// Announce that the leader is parked INSIDE the fsync, then hold it there.
+		// The announcement must come before the wait, or the controlling goroutine
+		// would block for a rendezvous that has already happened.
+		gate.reach()
+		<-gate.release
+	}
+	return err
+}
+
+// syncOutcome decides one Sync's result under the disk lock and reports whether
+// that Sync is gated. It exists so [SimFileHandle.Sync] can block on a gate
+// OUTSIDE the lock: holding d.mu across a rendezvous would wedge every other
+// file operation on the disk, including the appends of the very committers a
+// gated WAL leader is waiting for.
+func (d *SimDisk) syncOutcome(path string) (*SyncGate, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	// Count this Sync first, so the ordinal a one-shot fault is armed against
 	// (ArmSyncFaultAt) and the SyncCount observability surface both include it.
-	h.disk.syncCount++
+	d.syncCount++
+	// One-shot rendezvous: claim the gate on its ordinal and disarm. It is
+	// resolved by the caller after the lock is dropped.
+	var gate *SyncGate
+	if d.syncGate != nil && d.syncCount == d.syncGateAt {
+		gate = d.syncGate
+		d.syncGate = nil
+	}
+	return gate, d.syncResultLocked(path)
+}
+
+// syncResultLocked returns the outcome the arms select for the Sync just
+// counted. The caller holds d.mu.
+func (d *SimDisk) syncResultLocked(path string) error {
 	// One-shot deterministic Sync fault: fire ErrSimFault on the armed ordinal
 	// exactly once, then disarm. Checked before the ENOSPC gate and the seed
 	// draw and drawing nothing from the seed, so it neither depends on nor
 	// perturbs the probabilistic fault stream.
-	if h.disk.syncFaultArmed && h.disk.syncCount == h.disk.syncFaultAt {
-		h.disk.syncFaultArmed = false
+	if d.syncFaultArmed && d.syncCount == d.syncFaultAt {
+		d.syncFaultArmed = false
 		return ErrSimFault
 	}
 	// Delayed-allocation disk-full: the bytes were buffered by Write but the
@@ -971,10 +1103,10 @@ func (h *SimFileHandle) Sync() error {
 	// surfaces here at fsync. Checked before the seed draw and gated on a
 	// non-zero capacity, so the default (capacity 0) Sync fault stream is
 	// unchanged.
-	if h.disk.enospcOnSync && h.disk.capacityBytes > 0 && h.disk.totalBytesLocked() > h.disk.capacityBytes {
-		return enospc("fsync", h.path)
+	if d.enospcOnSync && d.capacityBytes > 0 && d.totalBytesLocked() > d.capacityBytes {
+		return enospc("fsync", path)
 	}
-	if h.disk.seed.Bool(h.disk.faultRate) {
+	if d.seed.Bool(d.faultRate) {
 		return ErrSimFault
 	}
 	return nil
