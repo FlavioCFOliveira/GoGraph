@@ -160,12 +160,86 @@ type SimStore struct {
 // false) is a hard fault: the function returns an error rather than appending
 // onto the corruption (which would permanently embed it and drop every op past
 // the bad frame), mirroring the production [recovery.Open] fail-stop contract.
+//
+// OpenSimStore is the string/float64 SPECIALISATION of [openSimTypedStore]
+// (rmp #2473): it opens the codec-generic core with [txn.NewStringCodec] and
+// [txn.NewFloat64WeightCodec] and bolts a [cypher.Engine] on top. The engine is
+// what pins the specialisation — [cypher.NewEngineWithStoreAndSchema] takes a
+// *txn.Store[string, float64] and nothing else — so every Cypher-driven
+// scenario necessarily runs on the string key codec, and the codec matrix
+// (codec_matrix.go) drives the other pairs through the typed core directly.
 func OpenSimStore(disk *SimDisk, cfg simStoreConfig) (*SimStore, error) {
+	ts, err := openSimTypedStore(disk, cfg, txn.NewStringCodec(), txn.NewFloat64WeightCodec())
+	if err != nil {
+		return nil, err
+	}
+	// Re-register recovered schema so a UNIQUE/index declared before the crash
+	// is enforced after restart, mirroring the production reopen path
+	// ([cypher.NewEngineWithStoreAndSchema]).
+	engine := cypher.NewEngineWithStoreAndSchema(ts.store, ts.schema.constraints, ts.schema.indexes)
+
+	return &SimStore{
+		disk:          ts.disk,
+		cfg:           ts.cfg,
+		graph:         ts.graph,
+		store:         ts.store,
+		wlog:          ts.wlog,
+		engine:        engine,
+		walOps:        ts.schema.walOps,
+		clean:         ts.clean,
+		resumedTxnSeq: ts.resumedTxnSeq,
+		maxCommitTS:   ts.schema.maxCommitTS,
+	}, nil
+}
+
+// simTypedStore is the codec-parameterised core of a durable simulator store:
+// the recovered graph, the WAL-backed [txn.Store] and the recovery facts, for
+// an ARBITRARY key/weight codec pair (rmp #2473). [SimStore] is its
+// string/float64 specialisation.
+//
+// It exists because the codec surface is otherwise unreachable from the
+// simulator. Every Cypher-driven scenario goes through [cypher.Engine], which
+// is fixed at *txn.Store[string, float64], so the string key codec and the
+// float64 weight codec were the only two the whole DST ever exercised — and
+// with them the only mapper.bin layout ever written was the frozen
+// string-specialised version-1 one ([snapshot.WriteMapper] delegates to
+// WriteMapperString for N == string). A store opened here with any other key
+// codec drives the version-2 byte-mapper on the way out and
+// [snapshot.ApplyMapperToGraphWithCodec] on the way back in.
+//
+// # Concurrency contract
+//
+// simTypedStore is NOT safe for concurrent use, matching [SimStore]: the codec
+// matrix drives it from a single goroutine.
+type simTypedStore[N comparable, W any] struct {
+	disk   *SimDisk
+	graph  *lpg.Graph[N, W]
+	store  *txn.Store[N, W]
+	wlog   *wal.Writer
+	codec  txn.Codec[N]
+	wcodec txn.WeightCodec[W]
+	// schema carries what the reopen's recovery reported: the durable schema,
+	// the replayed op count, and the sequence/clock floors.
+	schema recoveredSchema
+	cfg    simStoreConfig
+	// clean mirrors [SimStore.clean]: the most recent recovery found no genuine
+	// on-disk corruption (a benign torn tail is clean).
+	clean bool
+	// resumedTxnSeq mirrors [SimStore.resumedTxnSeq].
+	resumedTxnSeq uint64
+}
+
+// openSimTypedStore opens (or reopens) a durable store over disk with an
+// explicit key/weight codec pair. It is the shared body of [OpenSimStore] and
+// of every codec-matrix arm, so a non-string arm exercises byte-for-byte the
+// same recovery, WAL-reopen and transaction-sequence-resume plumbing the string
+// arm does — the codecs are the ONLY difference between them.
+func openSimTypedStore[N comparable, W any](
+	disk *SimDisk, cfg simStoreConfig, codec txn.Codec[N], wcodec txn.WeightCodec[W],
+) (*simTypedStore[N, W], error) {
 	if disk == nil {
 		return nil, fmt.Errorf("sim: OpenSimStore: nil disk")
 	}
-	codec := txn.NewStringCodec()
-	wcodec := txn.NewFloat64WeightCodec()
 	walPath := walPathFor(cfg.dir)
 
 	g, recovered, clean, err := recoverSimGraph(disk, cfg, codec, wcodec)
@@ -196,28 +270,61 @@ func OpenSimStore(disk *SimDisk, cfg simStoreConfig) (*SimStore, error) {
 	if cfg.noResumeTxnSeq {
 		resumeSeq = 0 // sensitivity seam only; see simStoreConfig.noResumeTxnSeq.
 	}
-	store := txn.NewStoreWithOptions(g, wlog, txn.Options[string, float64]{
+	store := txn.NewStoreWithOptions(g, wlog, txn.Options[N, W]{
 		Codec:        codec,
 		WeightCodec:  wcodec,
 		ResumeTxnSeq: resumeSeq,
 	})
-	// Re-register recovered schema so a UNIQUE/index declared before the crash
-	// is enforced after restart, mirroring the production reopen path
-	// ([cypher.NewEngineWithStoreAndSchema]).
-	engine := cypher.NewEngineWithStoreAndSchema(store, recovered.constraints, recovered.indexes)
-
-	return &SimStore{
+	return &simTypedStore[N, W]{
 		disk:          disk,
-		cfg:           cfg,
 		graph:         g,
 		store:         store,
 		wlog:          wlog,
-		engine:        engine,
-		walOps:        recovered.walOps,
+		codec:         codec,
+		wcodec:        wcodec,
+		schema:        recovered,
+		cfg:           cfg,
 		clean:         clean,
 		resumedTxnSeq: resumeSeq,
-		maxCommitTS:   recovered.maxCommitTS,
 	}, nil
+}
+
+// Checkpoint runs ONE synchronous checkpoint over the typed store, publishing a
+// self-sufficient snapshot through the SAME production checkpointer
+// [SimStore.Checkpoint] drives. The store's own key codec is wired in as the
+// mapper codec, so a non-string arm publishes the version-2 byte-mapper.
+//
+// No constraint/index spec providers are wired: a typed store has no
+// [cypher.Engine] and therefore no DDL, so there is no schema for the snapshot
+// to carry. DDL-across-the-boundary stays the string arm's scenario
+// (ddl_checkpoint_crash.go).
+func (s *simTypedStore[N, W]) Checkpoint() error {
+	return runSimCheckpoint(s.disk, s.cfg.dir, s.graph, s.store, s.wlog)
+}
+
+// Crash models a SIGKILL over a typed store, with the same semantics as
+// [SimStore.Crash]: no graceful flush, the SimDisk byte image survives, and
+// every not-yet-dir-fsync'd dirent is revoked.
+func (s *simTypedStore[N, W]) Crash() {
+	if s.disk != nil {
+		s.disk.Crash()
+	}
+	s.store = nil
+	s.wlog = nil
+	s.graph = nil
+}
+
+// Close shuts the typed store down gracefully, flushing and fsyncing the WAL so
+// every acknowledged commit is durable, with the same semantics as
+// [SimStore.Close].
+func (s *simTypedStore[N, W]) Close() error {
+	if s.wlog == nil {
+		return nil
+	}
+	err := s.wlog.Close()
+	s.wlog = nil
+	s.store = nil
+	return err
 }
 
 // recoveredSchema carries the schema and op-count a recovery produced, decoupled
@@ -256,12 +363,17 @@ type recoveredSchema struct {
 // In every case the benign torn WAL tail is truncated to the last durable frame
 // boundary BEFORE the caller reopens for append (auditor finding F1), and
 // genuine corruption fail-stops with an error rather than appending onto it.
-func recoverSimGraph(
+//
+// It is generic over the key/weight codec pair (rmp #2473) so a codec-matrix
+// arm recovers through exactly this code, and therefore through
+// [snapshot.ApplyMapperToGraphWithCodec] on the full-stack path whenever the
+// snapshot carries a version-2 byte-mapper.
+func recoverSimGraph[N comparable, W any](
 	disk *SimDisk,
 	cfg simStoreConfig,
-	codec txn.Codec[string],
-	wcodec txn.WeightCodec[float64],
-) (*lpg.Graph[string, float64], recoveredSchema, bool, error) {
+	codec txn.Codec[N],
+	wcodec txn.WeightCodec[W],
+) (*lpg.Graph[N, W], recoveredSchema, bool, error) {
 	walPath := walPathFor(cfg.dir)
 
 	// Full-stack recovery: a published snapshot folds an arbitrarily long WAL
@@ -270,9 +382,9 @@ func recoverSimGraph(
 	// the snapshot's persisted graph config, and truncates the benign WAL tail it
 	// returns as part of the recovered Result.
 	if cfg.dir != "" && hasDurableSnapshot(disk, cfg.dir) {
-		res, err := recovery.OpenFS[string, float64](
+		res, err := recovery.OpenFS[N, W](
 			simRecoveryFS{disk: disk}, cfg.dir,
-			recovery.Options[string, float64]{
+			recovery.Options[N, W]{
 				Codec:       codec,
 				WeightCodec: wcodec,
 				MaxTxnOps:   recoveryMaxTxnOpsOption(cfg.maxTxnOps),
@@ -296,7 +408,7 @@ func recoverSimGraph(
 
 	// WAL-only recovery (no snapshot, or legacy mode): replay the committed prefix
 	// into a graph with the simulator's configured shape.
-	g := lpg.New[string, float64](cfg.graphConfig)
+	g := lpg.New[N, W](cfg.graphConfig)
 	if !disk.Exists(walPath) {
 		return g, recoveredSchema{}, true, nil
 	}
@@ -305,7 +417,7 @@ func recoverSimGraph(
 		return nil, recoveredSchema{}, false, fmt.Errorf("sim: open WAL for replay: %w", err)
 	}
 	reader := wal.NewReader(rh, rh)
-	replay, err := recovery.ReplayWAL[string, float64](
+	replay, err := recovery.ReplayWAL[N, W](
 		context.Background(), reader, g, codec, wcodec,
 		resolveSimMaxTxnOps(cfg.maxTxnOps),
 	)
@@ -517,28 +629,47 @@ func (s *SimStore) checkpointWithoutSchemaSpecs() error { return s.runCheckpoint
 // [SimStore.checkpointWithoutSchemaSpecs]. withSchemaSpecs selects whether the
 // engine's constraint/index spec providers are wired into the checkpointer.
 func (s *SimStore) runCheckpoint(withSchemaSpecs bool) error {
-	if s.cfg.dir == "" {
+	var extra []checkpoint.Option[string, float64]
+	if withSchemaSpecs {
+		extra = append(extra,
+			checkpoint.WithConstraintSpecs[string, float64](s.engine.ConstraintSpecsForSnapshot),
+			checkpoint.WithIndexSpecs[string, float64](s.engine.IndexSpecsForSnapshot),
+		)
+	}
+	return runSimCheckpoint(s.disk, s.cfg.dir, s.graph, s.store, s.wlog, extra...)
+}
+
+// runSimCheckpoint is the shared, codec-generic checkpoint body behind
+// [SimStore.Checkpoint] and [simTypedStore.Checkpoint] (rmp #2473). It wires
+// the production [checkpoint.Checkpointer] over the SimDisk with the store's
+// OWN key codec as the mapper codec, so the mapper layout the snapshot carries
+// is decided by the key type exactly as it is in production: string keys take
+// the frozen version-1 layout, every other key type the version-2 codec-framed
+// one.
+//
+// extra options are appended AFTER the three base ones, preserving the option
+// order the string path used before the generalisation.
+func runSimCheckpoint[N comparable, W any](
+	disk *SimDisk, dir string, g *lpg.Graph[N, W], store *txn.Store[N, W], wlog *wal.Writer,
+	extra ...checkpoint.Option[N, W],
+) error {
+	if dir == "" {
 		return fmt.Errorf("sim: Checkpoint requires a full-stack store (opened with a checkpoint dir)")
 	}
-	if s.store == nil || s.wlog == nil {
+	if store == nil || wlog == nil {
 		return fmt.Errorf("sim: Checkpoint on a closed/crashed store")
 	}
 	// storeMu is a throwaway: WithCommitSerialiser supersedes it (the engine's
 	// commit mutex is private), exactly as the production engine wiring does.
 	var unusedMu sync.Mutex
-	opts := []checkpoint.Option[string, float64]{
-		checkpoint.WithCommitSerialiser[string, float64](s.store.RunUnderCommitLock),
-		checkpoint.WithMapperCodec[string, float64](s.store.Codec()),
-		checkpoint.WithSnapshotFS[string, float64](simCheckpointBackend{disk: s.disk}),
-	}
-	if withSchemaSpecs {
-		opts = append(opts,
-			checkpoint.WithConstraintSpecs[string, float64](s.engine.ConstraintSpecsForSnapshot),
-			checkpoint.WithIndexSpecs[string, float64](s.engine.IndexSpecsForSnapshot),
-		)
-	}
-	cp := checkpoint.New[string, float64](
-		checkpoint.Config{Dir: s.cfg.dir}, s.graph, s.wlog, &unusedMu, opts...)
+	opts := make([]checkpoint.Option[N, W], 0, 3+len(extra))
+	opts = append(opts,
+		checkpoint.WithCommitSerialiser[N, W](store.RunUnderCommitLock),
+		checkpoint.WithMapperCodec[N, W](store.Codec()),
+		checkpoint.WithSnapshotFS[N, W](simCheckpointBackend[N, W]{disk: disk}),
+	)
+	opts = append(opts, extra...)
+	cp := checkpoint.New[N, W](checkpoint.Config{Dir: dir}, g, wlog, &unusedMu, opts...)
 	if err := cp.RunCheckpoint(); err != nil {
 		return fmt.Errorf("sim: checkpoint: %w", err)
 	}

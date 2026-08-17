@@ -121,24 +121,33 @@ func (s simWALFS) ParentDirSync(childPath string) error { return s.disk.ParentDi
 
 // simCheckpointBackend adapts a [SimDisk] to the store/checkpoint snapshot
 // backend seam, routing the snapshot write and the manifest read-back through
-// the in-memory disk via [simSnapshotFS]. It is typed on the store's key/weight
-// (string/float64) to match the checkpointer.
-type simCheckpointBackend struct{ disk *SimDisk }
+// the in-memory disk via [simSnapshotFS].
+//
+// It is generic over the store's key/weight pair (rmp #2473) so the codec
+// matrix can publish snapshots for any key type; [SimStore] instantiates it at
+// [string, float64]. Nothing about the publish protocol varies with the type
+// parameters — only which mapper.bin layout [snapshot.CaptureGraph] ends up
+// emitting, which is the point.
+type simCheckpointBackend[N comparable, W any] struct{ disk *SimDisk }
 
-func (s simCheckpointBackend) CaptureGraph(cs *csr.CSR[float64], g *lpg.Graph[string, float64], codec txn.Codec[string], at *lpg.Snapshot) (*snapshot.Capture[float64], error) {
-	if codec != nil {
-		return snapshot.CaptureGraph[string, float64](g, cs, codec, at)
+func (s simCheckpointBackend[N, W]) CaptureGraph(cs *csr.CSR[W], g *lpg.Graph[N, W], codec txn.Codec[N], at *lpg.Snapshot) (*snapshot.Capture[W], error) {
+	if codec == nil {
+		// No codec configured: the simulator always supplies one, but honour the
+		// nil case for completeness. For string keys substitute the canonical
+		// string codec so the snapshot stays self-sufficient; for any other key
+		// type the assertion fails and nil is passed through, which is exactly
+		// what the production backend (checkpoint.osSnapshotBackend) does.
+		if sc, ok := any(txn.NewStringCodec()).(txn.Codec[N]); ok {
+			codec = sc
+		}
 	}
-	// No codec configured: the simulator always supplies the string codec, but
-	// honour the nil case for completeness by capturing with an explicit string
-	// codec so the snapshot stays self-sufficient.
-	return snapshot.CaptureGraph[string, float64](g, cs, txn.NewStringCodec(), at)
+	return snapshot.CaptureGraph[N, W](g, cs, codec, at)
 }
 
-func (s simCheckpointBackend) WriteCapture(snapDir string, capt *snapshot.Capture[float64], constraints []snapshot.ConstraintSpec, indexDefs []snapshot.IndexDefSpec) error {
+func (s simCheckpointBackend[N, W]) WriteCapture(snapDir string, capt *snapshot.Capture[W], constraints []snapshot.ConstraintSpec, indexDefs []snapshot.IndexDefSpec) error {
 	return snapshot.WriteCaptureFS(simSnapshotFS(s), snapDir, capt, constraints, indexDefs)
 }
 
-func (s simCheckpointBackend) ReadManifest(path string) (snapshot.Manifest, error) {
+func (s simCheckpointBackend[N, W]) ReadManifest(path string) (snapshot.Manifest, error) {
 	return snapshot.ReadManifestFileFS(simSnapshotFS(s), path)
 }

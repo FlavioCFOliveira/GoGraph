@@ -86,6 +86,7 @@ undirected Euler; `BiBFS`; direction-optimised BFS on a hub fixture; the
 | CSV / JSONL export→import round-trip under fault | `io-roundtrip-fault` | a clean round-trip reproduces the modelled edge set exactly; an export under ENOSPC fails with a typed error and leaves no partial artifact a re-import would accept |
 | Offline bulk-import publication (`store/bulkimport`) — **parity only, NOT fault coverage** | `bulkimport-parity` | a published snapshot reopens through real recovery equal to the harness model exactly (node set two-sided, labels, properties by **kind and value**, per-handle edge multisets including parallel twins), `SnapshotHit` with **zero** replayed WAL ops on two successive opens, and the measured lifecycle contract (`ErrNotFinished` / `ErrFinished` / `ErrStoreNotEmpty`, their precedence, and `PublishResult.Stats`); plus the publish's byte-reproducibility boundary. **No fault regime is reachable** — see the note below |
 | Crash **during** the snapshot publish, at each step of the crash-atomic swap | `checkpoint-crash-storm` | acked ⊆ recovered ⊆ issued across a crash inside the publish window; a stranded backup is promoted by recovery (measured on the durable image and on `store.recovery.snapshot.promoteParentFsync`), never a half-published snapshot |
+| Node-key and edge-weight CODEC matrix across crash and upgrade | `codec-matrix` (soak; `internal/sim/codec_matrix.go`) | seven `(key codec, weight codec)` arms each survive the three snapshot-publish crash windows AND the upgrade + snapshot boundaries with acked ⊆ recovered ⊆ issued adjudicated BY KEY; the durable `mapper.bin` carries the layout the key type selects (v1 for the string control, v2 for the other six) and the snapshot-only reopen replays ZERO WAL ops, so every recovered key came through the mapper; `txn.ErrNoWeightCodec` is provoked and its actual behaviour pinned. One measured gap is pinned rather than tolerated: a struct weight is dropped by the snapshot CSR writer — see below |
 | Corruption of a published snapshot COMPONENT | `snapshot-corruption-failstop` | a byte flipped in any of the nine components fail-stops recovery with that component's typed sentinel; recovery returns no store, mutates nothing on disk and leaves `db/wal` byte-identical; the restored image still recovers the exact committed model. One documented non-fail-stop is pinned in the same run: a corrupt `indexes/<name>.bin` is REBUILT (and the rebuild verified against a full scan). The manifest's key-name region was the second until rmp #2520 checksummed it — see below |
 
 ### Snapshot component corruption is now covered; the manifest is checksummed (rmp #2467, #2520)
@@ -327,6 +328,56 @@ package. The scenario instead reproduces the *window* the site marks and observe
 the *branch* it guards through surfaces that already exist — the durable image
 (backup-only before the reopen, live-only after it) and store/recovery's own
 exported `store.recovery.snapshot.promoteParentFsync` counter.
+
+### The codec surface is now covered; struct weights do not survive a checkpoint (rmp #2473)
+
+Before sprint 347 the simulator drove exactly **one** codec pair. That was
+structural rather than an omission: every Cypher-driven scenario reaches the
+graph through `cypher.Engine`, whose constructors take a
+`*txn.Store[string, float64]` and nothing else, so `OpenSimStore` hardcoded
+`txn.NewStringCodec` / `txn.NewFloat64WeightCodec`. `NewIntCodec`,
+`NewInt32Codec`, `NewInt64Codec`, `NewUint64Codec`, `NewUUIDCodec`,
+`NewBinaryMarshalerCodec`, `NewInt64WeightCodec` and
+`NewBinaryMarshalerWeightCodec` had never appeared in a simulated crash, and
+neither had the **version-2 byte-mapper**: `snapshot.WriteMapper` delegates to
+`WriteMapperString` for `N == string`, so the codec-framed layout (and its read
+side, `ReadMapperBytes` → `snapshot.ApplyMapperToGraphWithCodec`) was
+unreachable from this harness.
+
+`OpenSimStore` is now the string/float64 specialisation of a codec-generic core,
+and `codec-matrix` runs seven arms through the crash-storm and upgrade
+scenarios. Six of the seven hold completely.
+
+**The seventh measured a real gap.** For a `BinaryMarshaler` weight the numbers
+separate the two durable paths cleanly: at the WAL-only boundary **95 of 95**
+acknowledged edges came back with their weight; after one folding checkpoint
+over the same image — WAL measured to 0 bytes, 0 WAL ops replayed — **191 of
+191** came back with the ZERO weight.
+
+The cause is that `store/snapshot`'s CSR component never consults
+`txn.WeightCodec`. It sizes a weight with the fixed table in `csrWeightSize`
+(`store/snapshot/writer.go`), which returns 0 for every type outside the Go
+primitives — including any struct, the case
+`txn.NewBinaryMarshalerWeightCodec` exists for. `WriteCSR` then emits
+`hasWeights=0`, which is **the same on-disk encoding a deliberately weightless
+graph produces**, and the checkpoint truncates the WAL prefix holding the true
+values. So an embedder using a non-primitive weight with checkpointing enabled
+loses those weights silently and permanently, with no error at any layer.
+Measured: `csrWeightSize[float64]` = 8, `csrWeightSize[int64]` = 8,
+`csrWeightSize` of a struct with one `int64` field = 0,
+`csrWeightSize[struct{}]` = 0.
+
+Fixing it means changing `store/snapshot`, which was outside this task's scope,
+so the behaviour is **pinned** instead: the affected arm must come back with the
+zero weight on a snapshot-only recovery, and a separate non-vacuity check
+requires that outcome to have actually been observed. Both fire the day the
+engine changes, in either direction.
+
+**Still uncovered on the codec dimension**: the codec arms are single-writer,
+because every concurrency, Bolt and Cypher oracle in `internal/sim` is bound to
+string keys through `cypher.Engine`. Concurrent-writer coverage for a non-string
+key codec would require the engine itself to be generic, and is not reachable
+from the harness as it stands.
 
 ### DDL across the snapshot boundary (rmp #2464)
 
@@ -618,6 +669,18 @@ The coverage work exercised the engine against these scenarios and found:
    is unchanged, so old snapshots open and new ones stay readable by older
    builds; see the section above for why the framing and schema layers are kept
    apart.
+6. **A struct edge weight is silently dropped by the snapshot CSR writer**
+   (fail-silent, permanent data loss). `store/snapshot` never consults
+   `txn.WeightCodec`: `csrWeightSize` (`store/snapshot/writer.go`) returns 0 for
+   every weight type outside the Go primitives, so `WriteCSR` emits
+   `hasWeights=0` — the same encoding a deliberately weightless graph produces —
+   and the checkpoint then truncates the WAL prefix holding the true values.
+   Measured by `codec-matrix` (rmp #2473): the same image returned **95 of 95**
+   weights at the WAL-only boundary and **0 of 191** after one folding
+   checkpoint. **NOT fixed** — the fix is in `store/snapshot`, outside the
+   task's scope. The behaviour is PINNED by the matrix's
+   `snapshotWeightSupported` arm flag plus a non-vacuity check that the drop was
+   really observed, so any change in either direction fails the suite.
 
 ## Documented debt / out of scope
 

@@ -18,7 +18,7 @@ func TestDiskFS_CheckpointOptionAccepts(t *testing.T) {
 	disk := NewSimDisk(NewSeed(1), 0)
 	// The option is generic on the store's key/weight; the simulator store is
 	// string/float64. Constructing it proves the adapter satisfies the seam.
-	_ = checkpoint.WithSnapshotFS[string, float64](simCheckpointBackend{disk: disk})
+	_ = checkpoint.WithSnapshotFS[string, float64](simCheckpointBackend[string, float64]{disk: disk})
 }
 
 // TestDiskFS_CSRFileRoundTripOnSimDisk exercises the csrfile write+read seam on

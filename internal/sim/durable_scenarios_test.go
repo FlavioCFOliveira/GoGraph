@@ -245,7 +245,7 @@ func TestST3_CheckpointerStopTerminates(t *testing.T) {
 			checkpoint.Config{Dir: st.Config().dir}, st.graph, st.wlog, &unusedMu,
 			checkpoint.WithCommitSerialiser[string, float64](st.store.RunUnderCommitLock),
 			checkpoint.WithMapperCodec[string, float64](st.store.Codec()),
-			checkpoint.WithSnapshotFS[string, float64](simCheckpointBackend{disk: disk}),
+			checkpoint.WithSnapshotFS[string, float64](simCheckpointBackend[string, float64]{disk: disk}),
 			checkpoint.WithConstraintSpecs[string, float64](st.engine.ConstraintSpecsForSnapshot),
 			checkpoint.WithIndexSpecs[string, float64](st.engine.IndexSpecsForSnapshot),
 		)
