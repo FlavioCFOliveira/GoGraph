@@ -86,9 +86,9 @@ undirected Euler; `BiBFS`; direction-optimised BFS on a hub fixture; the
 | CSV / JSONL export→import round-trip under fault | `io-roundtrip-fault` | a clean round-trip reproduces the modelled edge set exactly; an export under ENOSPC fails with a typed error and leaves no partial artifact a re-import would accept |
 | Offline bulk-import publication (`store/bulkimport`) — **parity only, NOT fault coverage** | `bulkimport-parity` | a published snapshot reopens through real recovery equal to the harness model exactly (node set two-sided, labels, properties by **kind and value**, per-handle edge multisets including parallel twins), `SnapshotHit` with **zero** replayed WAL ops on two successive opens, and the measured lifecycle contract (`ErrNotFinished` / `ErrFinished` / `ErrStoreNotEmpty`, their precedence, and `PublishResult.Stats`); plus the publish's byte-reproducibility boundary. **No fault regime is reachable** — see the note below |
 | Crash **during** the snapshot publish, at each step of the crash-atomic swap | `checkpoint-crash-storm` | acked ⊆ recovered ⊆ issued across a crash inside the publish window; a stranded backup is promoted by recovery (measured on the durable image and on `store.recovery.snapshot.promoteParentFsync`), never a half-published snapshot |
-| Corruption of a published snapshot COMPONENT | `snapshot-corruption-failstop` | a byte flipped in any of the nine components fail-stops recovery with that component's typed sentinel; recovery returns no store, mutates nothing on disk and leaves `db/wal` byte-identical; the restored image still recovers the exact committed model. Two documented non-fail-stops are pinned in the same run: a corrupt `indexes/<name>.bin` is REBUILT (and the rebuild verified against a full scan), and the manifest's un-checksummed key-name region is UNDETECTED (measured on `commit_ts`, and required to be contained) |
+| Corruption of a published snapshot COMPONENT | `snapshot-corruption-failstop` | a byte flipped in any of the nine components fail-stops recovery with that component's typed sentinel; recovery returns no store, mutates nothing on disk and leaves `db/wal` byte-identical; the restored image still recovers the exact committed model. One documented non-fail-stop is pinned in the same run: a corrupt `indexes/<name>.bin` is REBUILT (and the rebuild verified against a full scan). The manifest's key-name region was the second until rmp #2520 checksummed it — see below |
 
-### Snapshot component corruption is now covered; the manifest is not checksummed (rmp #2467)
+### Snapshot component corruption is now covered; the manifest is checksummed (rmp #2467, #2520)
 
 `store/snapshot` declares **nine** typed corruption sentinels — one per durable
 component — and the manifest carries a CRC32C for each. Before this task the
@@ -106,7 +106,7 @@ scenario measures rather than assumes:
 
 | Component | flip at byte 0 (the header) | flip anywhere else |
 |---|---|---|
-| `manifest.json` | `ErrManifestCorrupted` (JSON parse) | see the gap below |
+| `manifest.json` | `ErrManifestCorrupted` (JSON parse) | `ErrManifestCorrupted` (CRC32C trailer) |
 | `csr.bin` | `ErrCSRCorrupted` + `ErrCorrupted` | `ErrCorrupted` (CRC) |
 | `labels.bin` | `ErrLabelsCorrupted` + `ErrCorrupted` | `ErrCorrupted`, or both |
 | `properties.bin` | `ErrPropertiesCorrupted` + `ErrCorrupted` | `ErrCorrupted` |
@@ -133,30 +133,81 @@ the LPG. The scenario therefore requires the reopen to SUCCEED for a corrupt
 payload — and then cross-checks every declared index against a full label scan,
 so "tolerated" cannot degrade into "silently wrong".
 
-**The finding: `manifest.json` carries the CRC of every other component and none
-of its own.** A byte flipped inside a JSON **key name** leaves a syntactically
-valid document whose key `encoding/json` no longer recognises, so the field is
-dropped and decodes to its zero value with no error anywhere. A byte-by-byte
-sweep of this scenario's published manifest (~1400 bytes) found **360 bytes,
-25.7% of it, whose corruption recovery accepts silently** — the key names (`"version"`,
-`"order"`, `"size"`, `"commit_ts"`, `"crc32c"`, `"name"`), the index-name string
-values, and the trailing newline (`TestSnapshotCorruption_ManifestUncheckedByteCensus`
-re-measures the census on every run). The consequence measured on the worst of them: flipping
-one character of the `"commit_ts"` **key** drops the MVCC clock floor recovery
-derives (`recovery.Result.MaxCommitTS`) from 20 to 0, so `RestoreMVCCClock` is
-never called and the reopened graph re-mints instants the image already
-contains — the loss rmp #2309 exists to prevent, reachable through an
-undetected corruption. `TestSnapshotCorruption_ManifestKeyRegionIsNotChecksummed`
-pins the measurement and fails if the store ever gains a manifest integrity
-check, so the fix and this note move together. No committed node is lost, which
-the scenario requires as a containment property; the damage is to the clock, not
-to the data.
+**The finding (rmp #2467): `manifest.json` carried the CRC of every other
+component and none of its own.** A byte flipped inside a JSON **key name** left a
+syntactically valid document whose key `encoding/json` no longer recognised, so
+the field was dropped and decoded to its zero value with no error anywhere. A
+byte-by-byte sweep of this scenario's published manifest (1399 bytes) found **360
+bytes, 25.7% of it, whose corruption recovery accepted silently** — the key names
+(`"version"`, `"order"`, `"size"`, `"commit_ts"`, `"crc32c"`, `"name"`), the
+index-name string values, and the trailing newline. The consequence measured on
+the worst of them: flipping one character of the `"commit_ts"` **key** dropped the
+MVCC clock floor recovery derives (`recovery.Result.MaxCommitTS`) from 20 to 0, so
+`RestoreMVCCClock` was never called and the reopened graph re-minted instants the
+image already contained — the loss rmp #2309 exists to prevent, reachable through
+an undetected corruption. No committed node was lost; the damage was to the clock,
+not to the data, which is why no test that counts recovered nodes could see it.
 
-That region is also what makes the battery's primary oracle **reachable**. Every
-binary component is CRC-covered end to end, so no flip in one is ever wrongly
-accepted and an "assert recovery refused" oracle could never be shown to fire.
-`TestSnapshotCorruption_OracleFiresWhenRecoveryWronglySucceeds` aims one arm at a
-`commit_ts` key-name byte and requires the run to REPORT the acceptance.
+**The fix (rmp #2520): a CRC32C trailer.** `snapshot.WriteManifest` now appends a
+fixed 16-byte trailer after the JSON document — an 8-byte magic, a 4-byte
+algorithm identifier, and a CRC32C over every preceding byte. `LoadManifest`
+verifies it **before it reads a single field**, the version check included, since
+a manifest is the first thing a store open reads and nothing in it may be trusted
+until its bytes are established.
+
+The checksum lives *outside* the structure it protects, which is the property
+that closes the gap. A `crc32c` field *inside* the JSON would have to be excluded
+from its own computation, leaving its own key name unprotected — the same defect,
+merely relocated. The trailer covers the document whole: every key name, every
+value, every byte of indentation.
+
+Two rules make the coverage total rather than nearly total:
+
+- **A non-empty tail MUST verify.** The reader splits the file at
+  `json.Decoder.InputOffset()`. A tail of nothing but whitespace means "written
+  before the trailer existed" and is accepted unverified; anything else must be a
+  well-formed, verifying trailer. Without this a flip in the *magic* would demote
+  a protected manifest to "legacy, accepted" — the silent acceptance moved into
+  the trailer instead of removed.
+- **A manifest that declares a trailer must carry one.** `Manifest.Integrity`
+  records the framing scheme, so a manifest whose trailer was lost entirely
+  (a zeroed tail block, a truncating copy) is refused rather than mistaken for a
+  legacy file. Losing the protection needs two independent damages, not one.
+
+Re-measured after the fix: **0 of 1450 bytes** of the published manifest can be
+flipped without recovery refusing (`TestSnapshotCorruption_ManifestUncheckedByteCensus`,
+which now requires zero). `TestSnapshotCorruption_ManifestKeyRegionIsChecksummed`
+pins the `commit_ts` key specifically, and
+`TestSnapshotCorruption_MVCCClockFloorIsNotSilentlyZeroable` states the same
+guarantee in engine terms: sweeping all 1449 manifest bytes, the restored clock
+floor of 20 was never moved — 1449 flips refused, 0 accepted.
+
+**Forward compatibility is preserved in both directions, and `ManifestVersion` is
+deliberately NOT bumped.** The trailer is a change to the file *framing*, not to
+the JSON *schema*, and keeping those layers apart is what lets integrity and
+`encoding/json`'s ignore-unknown-fields policy hold together. An older snapshot
+has no trailer, is accepted unverified, and reports `Manifest.IntegrityVerified`
+false — the frozen v1 fixture in `store/snapshot/testdata` still loads byte-for-byte
+unchanged, with no migration. A newer snapshot read by an older build is
+unaffected too: `json.Decoder` stops at the end of the first complete value, so a
+build that predates the trailer never reads past the closing brace. Bumping the
+schema version would have made those readers reject the file with
+`ErrManifestUnsupported` for no reason. The "absent means no value" policy
+`Manifest.CommitTS` documents is therefore unchanged — but it is now only ever
+evaluated over bytes the trailer has established, so "absent" can only mean the
+writer omitted the field, never that corruption renamed its key.
+
+The guarantee is scoped to *accidental* corruption. CRC32C is not a MAC: an
+attacker who can rewrite `manifest.json` can recompute the trailer. The defence
+against a hostile store directory remains the surrounding controls (`O_NOFOLLOW`
+component opens, `DefaultMaxManifestBytes`, the per-component allocation bounds).
+
+Closing the gap removed the substrate the battery's primary oracle stood on.
+Every arm asserts recovery REFUSED, and an assertion that can only ever hold
+proves nothing, so the reachability control moved rather than being dropped:
+`TestSnapshotCorruption_OracleFiresWhenRecoveryWronglySucceeds` now aims its arm
+at an `indexes/<name>.bin` payload — the one durable file in a published snapshot
+a reopen accepts damaged — and still requires the run to REPORT the acceptance.
 
 A third observation, measured by the scenario's own determinism check rather
 than assumed: two identical fixtures built in the same process publish snapshots
@@ -175,12 +226,16 @@ REPORTS a size difference rather than hiding it. It is the same class of
 observation as the bulk-import byte-reproducibility note below.
 
 A second, smaller finding, measured while probing the manifest guards:
-`ErrManifestTooLarge` bounds what the decoder **consumes**, not the file's
+`ErrManifestTooLarge` bounded what the decoder **consumed**, not the file's
 length. `json.Decoder` stops at the end of the first complete value, so
-whitespace appended after the closing brace is never read and a `manifest.json`
-of any size on disk is accepted. That is correct for a guard whose stated purpose
-is to bound the transient decode allocation, but it means the ceiling is reached
-only by bytes inside the JSON value — which is how the scenario drives it.
+whitespace appended after the closing brace was never read and a `manifest.json`
+of any size on disk was accepted. That was defensible for a guard whose stated
+purpose is to bound the transient decode allocation, but it meant the ceiling
+could only be reached by bytes inside the JSON value — which is how the scenario
+drives it. **Closed by rmp #2520**: verifying the trailer requires reading to the
+end of the file, so the ceiling now bounds the bytes read. The scenario still
+pads *inside* the object, because that probe reaches the guard under both
+readings and so remains the stricter one.
 
 ### Bulk-import publication is covered for PARITY, not for faults (rmp #2466)
 
@@ -364,18 +419,23 @@ The coverage work exercised the engine against these scenarios and found:
    live assertion, and `internal/sim/wire_list_encoding_test.go` carries the
    end-to-end matrix.
 
-5. **`manifest.json` is not checksummed.** It carries a CRC32C for every other
+5. **`manifest.json` was not checksummed.** It carried a CRC32C for every other
    snapshot component and none of its own, so a single byte flipped inside a
-   JSON **key name** decodes as an unknown field, is dropped by
-   `encoding/json`, and zeroes the corresponding `Manifest` field with no error
-   anywhere — 360 bytes, 25.7% of a published ~1400-byte manifest, are
+   JSON **key name** decoded as an unknown field, was dropped by
+   `encoding/json`, and zeroed the corresponding `Manifest` field with no error
+   anywhere — 360 bytes, 25.7% of a published 1399-byte manifest, were
    silently accepted. Measured consequence on the worst field: flipping one character of
-   the `"commit_ts"` key drops the recovered MVCC clock floor from 20 to 0, so
-   `RestoreMVCCClock` is skipped and the reopened graph re-mints instants the
-   image already contains (the loss #2309 prevents). No committed node is lost.
-   Found by `snapshot-corruption-failstop` (rmp #2467) and pinned by
-   `TestSnapshotCorruption_ManifestKeyRegionIsNotChecksummed`; **not fixed**
-   under #2467, which changed nothing outside `internal/sim` and `docs/`.
+   the `"commit_ts"` key dropped the recovered MVCC clock floor from 20 to 0, so
+   `RestoreMVCCClock` was skipped and the reopened graph re-minted instants the
+   image already contained (the loss #2309 prevents). No committed node was lost,
+   which is why a green suite could not see it. Found by
+   `snapshot-corruption-failstop` (rmp #2467), which changed nothing outside
+   `internal/sim` and `docs/`. **Fixed** (#2520): `WriteManifest` appends a
+   CRC32C trailer over the whole document and `LoadManifest` verifies it before
+   reading any field. Re-measured census: **0 of 1450 bytes**. `ManifestVersion`
+   is unchanged, so old snapshots open and new ones stay readable by older
+   builds; see the section above for why the framing and schema layers are kept
+   apart.
 
 ## Documented debt / out of scope
 

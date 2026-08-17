@@ -24,7 +24,7 @@ package recovery
 // goleak-clean (graphs/WALs are local and closed).
 
 import (
-	"encoding/json"
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -256,9 +256,14 @@ func stripGraphConfigFromManifest(t *testing.T, snapDir string) {
 	if err != nil {
 		t.Fatalf("ReadFile(manifest.json): %v", err)
 	}
-	var m snapshot.Manifest
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatalf("json.Unmarshal(manifest): %v", err)
+	// Decode through the real reader, not json.Unmarshal: manifest.json is a JSON
+	// document followed by a CRC32C trailer, so json.Unmarshal rejects the tail
+	// ("invalid character '\x00' after top-level value"). snapshot.WriteManifest
+	// below re-frames the stripped manifest, which is what keeps this helper
+	// producing a manifest recovery will actually open.
+	m, err := snapshot.LoadManifest(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("LoadManifest(manifest): %v", err)
 	}
 	if m.GraphConfig == nil {
 		t.Fatalf("precondition failed: a freshly written snapshot manifest has no graph_config; the writer is not persisting it")

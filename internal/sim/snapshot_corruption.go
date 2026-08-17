@@ -109,13 +109,17 @@ type snapshotCorruptionComponent struct {
 	// sentinelName is the sentinel's Go identifier, so a violation message names
 	// what was expected rather than printing an error string.
 	sentinelName string
-	// crcCovered records whether the manifest holds a CRC32C over this
-	// component's whole byte range, so a flip ANYWHERE in it must be detected.
-	// It is true for every binary component and FALSE for manifest.json, which
-	// carries the CRCs of everything else and none of its own — measured, see
-	// [runSnapshotManifestGapArm]. Only a CRC-covered component gets the
-	// seed-chosen interior arm; the manifest's un-covered region is adjudicated
-	// by the dedicated gap arm instead.
+	// crcCovered records whether a CRC32C covers this component's whole byte
+	// range, so a flip ANYWHERE in it must be detected. Only a CRC-covered
+	// component gets the seed-chosen interior arm.
+	//
+	// It is now true for EVERY component including manifest.json, which since
+	// rmp #2520 carries a CRC32C trailer over its own bytes in addition to the
+	// per-file CRCs it holds for everything else. It was false for the manifest
+	// before that: the manifest checksummed the whole directory and none of
+	// itself, so a byte flipped in a JSON key name left valid JSON whose renamed
+	// key encoding/json dropped, and 360 of 1399 bytes (25.7%) of a published
+	// manifest were accepted silently. See [runSnapshotManifestGapArm].
 	crcCovered bool
 }
 
@@ -128,7 +132,7 @@ type snapshotCorruptionComponent struct {
 // the image it damaged, so the arms are independent.
 func snapshotCorruptionComponents() []snapshotCorruptionComponent {
 	return []snapshotCorruptionComponent{
-		{file: snapshotManifestFile, sentinel: snapshot.ErrManifestCorrupted, sentinelName: "ErrManifestCorrupted", crcCovered: false},
+		{file: snapshotManifestFile, sentinel: snapshot.ErrManifestCorrupted, sentinelName: "ErrManifestCorrupted", crcCovered: true},
 		{file: snapshot.CSRFile, sentinel: snapshot.ErrCSRCorrupted, sentinelName: "ErrCSRCorrupted", crcCovered: true},
 		{file: snapshot.LabelsFile, sentinel: snapshot.ErrLabelsCorrupted, sentinelName: "ErrLabelsCorrupted", crcCovered: true},
 		{file: snapshot.PropertiesFile, sentinel: snapshot.ErrPropertiesCorrupted, sentinelName: "ErrPropertiesCorrupted", crcCovered: true},
@@ -340,9 +344,10 @@ func runSnapshotCorruptionWith(
 		if err := ctx.Err(); err != nil {
 			return ev, nil, err
 		}
-		// The interior arm asserts that the manifest CRC catches a flip the
-		// structural parser would accept, so it applies only where a CRC covers
-		// the component (every binary one; NOT manifest.json).
+		// The interior arm asserts that a CRC catches a flip the structural parser
+		// would accept, so it applies only where a CRC covers the component. Since
+		// rmp #2520 that is every component: the binary ones through the manifest's
+		// per-file CRC32C, and manifest.json itself through its own CRC32C trailer.
 		kinds := []string{"magic"}
 		if !opts.skipInteriorArm && comp.crcCovered {
 			kinds = append(kinds, "interior")
@@ -780,25 +785,44 @@ func runSnapshotManifestGuards(
 	}
 
 	// Version guard: bump the recorded version past what this build understands.
-	// The manifest is pretty-printed JSON, so the substitution is exact.
-	bumped := bytes.Replace(original,
-		[]byte(fmt.Sprintf("\"version\": %d", snapshot.ManifestVersion)),
-		[]byte(fmt.Sprintf("\"version\": %d", snapshot.ManifestVersion+1)), 1)
+	//
+	// The bump goes through snapshot.LoadManifest -> WriteManifest rather than a
+	// byte substitution, so the probe is RE-FRAMED with a valid CRC32C trailer
+	// (rmp #2520). A patched-in-place manifest would fail its own checksum and
+	// this guard would then observe ErrManifestCorrupted — passing for the wrong
+	// reason and never reaching the version gate it exists to test.
+	loaded, err := snapshot.LoadManifest(bytes.NewReader(original))
+	if err != nil {
+		return nil, nil, fmt.Errorf("decode the published manifest: %w", err)
+	}
+	if loaded.Version != snapshot.ManifestVersion {
+		return nil, nil, fmt.Errorf("published manifest is version %d, want %d", loaded.Version, snapshot.ManifestVersion)
+	}
+	loaded.Version = snapshot.ManifestVersion + 1
+	var bumpedBuf bytes.Buffer
+	if err := snapshot.WriteManifest(&bumpedBuf, loaded); err != nil {
+		return nil, nil, fmt.Errorf("re-frame the version-bumped manifest: %w", err)
+	}
+	bumped := bumpedBuf.Bytes()
 	if bytes.Equal(bumped, original) {
-		return nil, nil, fmt.Errorf("manifest carries no %q field to bump", "version")
+		return nil, nil, fmt.Errorf("the version-bumped manifest is byte-identical to the published one")
 	}
 
 	// Size guard: pad past DefaultMaxManifestBytes with JSON whitespace INSIDE the
-	// object, so the document stays syntactically valid and the decoder is forced
-	// to consume the padding.
+	// object, so the document stays syntactically valid.
 	//
-	// The padding must go inside because the ceiling bounds what the DECODER
-	// consumes, not the file's length: json.Decoder stops the moment it has read
-	// one complete value, so whitespace appended AFTER the closing brace is never
-	// read and a manifest.json of any size on disk is accepted (measured). That is
-	// the correct behaviour for a guard whose stated purpose is to bound the
-	// transient decode allocation — but it means the guard can only be reached by
-	// bytes the value itself contains.
+	// Padding inside the object was once the ONLY way to reach this guard: the
+	// ceiling bounded what the DECODER consumed, and json.Decoder stops the moment
+	// it has read one complete value, so whitespace after the closing brace was
+	// never read and a manifest.json of any size on disk was accepted (measured).
+	// Since rmp #2520 the ceiling bounds the bytes READ — verifying the CRC32C
+	// trailer requires reading to the end of the file — so padding either side now
+	// trips it. The padding is kept inside because that is the stricter probe: it
+	// reaches the guard under both readings.
+	//
+	// The probe carries no trailer, which is deliberate. It must fail on its SIZE,
+	// and the ceiling is checked before any framing, so an unframed image proves
+	// the ordering as well as the guard.
 	if original[0] != '{' {
 		return nil, nil, fmt.Errorf("manifest does not start with '{': cannot pad inside the object")
 	}
@@ -969,37 +993,43 @@ func snapshotIndexPayloadPaths(fx *snapshotCorruptionFixture) []string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// the un-checksummed region: the manifest's JSON key names
+// the manifest's JSON key names, and the MVCC clock floor behind them
 // ─────────────────────────────────────────────────────────────────────────────
 
-// snapshotManifestGapResult is what the un-checksummed-region arm measured.
+// snapshotManifestGapResult is what the manifest key-region arm measured.
 type snapshotManifestGapResult struct {
-	// detected records whether recovery rejected the flip after all.
+	// detected records whether recovery rejected the key-name flip.
 	detected bool
-	// cleanTS / corruptTS are the MVCC clock floors recovery derived from the
-	// intact and the key-flipped manifest.
+	// cleanTS is the MVCC clock floor recovery derives from the intact manifest.
+	// corruptTS is the floor it derives from the key-flipped one, and is only
+	// meaningful when detected is false — a refused reopen restores no clock at
+	// all, which is the point.
 	cleanTS, corruptTS uint64
 }
 
-// runSnapshotManifestGapArm drives the SENSITIVITY arm the rest of the battery
-// needs: a region no checksum covers.
+// runSnapshotManifestGapArm drives the arm aimed at what used to be the store's
+// only un-checksummed durable region: a JSON KEY NAME inside manifest.json.
 //
-// Every binary component is CRC32C-covered end to end, so there is no byte in
-// one whose corruption goes unnoticed — an arm that "proves the checker fires
-// when recovery wrongly succeeds" cannot be built from them. manifest.json is
-// different: it carries the CRCs of everything else and none of its own. A byte
-// flipped inside a JSON KEY NAME leaves a syntactically valid document whose key
+// A byte flipped there leaves a syntactically valid document whose key
 // `encoding/json` no longer recognises, so the field is silently dropped and
-// decodes to its zero value.
+// decodes to its zero value. Until rmp #2520 nothing caught that, because the
+// manifest carried the CRC32C of every other component and none of its own; 360
+// of 1399 bytes (25.7%) of a published manifest could be flipped with no error
+// from recovery.
 //
-// The arm flips a byte of the `commit_ts` key, because that field is the MVCC
-// clock floor recovery restores (`recovery.Result.MaxCommitTS` ->
-// `RestoreMVCCClock`, rmp #2309), and MEASURES the floor recovery derives before
-// and after. It requires the damage to be contained: whatever happens to the
-// clock, the reopen must still return exactly the committed node set. The floor
-// itself is recorded rather than asserted, so the arm reports the gap instead of
-// passing silently — and [checkSnapshotCorruptionNonVacuity] fails the run if the
-// arm never produced a measurement at all.
+// The arm flips a byte of the `commit_ts` key specifically, because that field
+// is the MVCC clock floor recovery restores (`recovery.Result.MaxCommitTS` ->
+// `RestoreMVCCClock`, rmp #2309) and zeroing it makes a reopened graph re-mint
+// instants the image already contains — the worst measured consequence of the
+// gap, and the one rmp #2309 exists to prevent.
+//
+// It now asserts the closed behaviour: the flip MUST be detected, so the clock
+// floor is not silently zeroable. The arm keeps measuring the intact floor first,
+// which is what makes the assertion non-vacuous — a fixture that restored no
+// clock at all would satisfy "the floor was not zeroed" for the wrong reason.
+// It also keeps the containment check for the case where a future change makes
+// the flip survivable again: whatever happens to the clock, the reopen must
+// still return exactly the committed node set.
 func runSnapshotManifestGapArm(
 	ctx context.Context, fx *snapshotCorruptionFixture,
 ) (snapshotManifestGapResult, []Violation, error) {
@@ -1036,30 +1066,52 @@ func runSnapshotManifestGapArm(
 	}
 
 	st, rerr := OpenSimStore(fx.disk, snapshotCorruptionStoreConfig())
+	var vs []Violation
 	if rerr != nil {
-		// The store grew a manifest integrity check: an improvement, not a failure.
+		// The manifest's own CRC32C trailer caught the flip (rmp #2520). Recovery
+		// fail-stops, so no clock floor is restored at all and the MVCC clock
+		// cannot be zeroed by this damage.
 		res.detected = true
 		if st != nil {
 			_ = st.Close()
+			vs = append(vs, Violation{
+				Kind: ViolationACIDDurability, Op: "<snapshot-manifest-key-region>",
+				Message: fmt.Sprintf("a refused reopen over a key-flipped manifest (%v) still returned a store:"+
+					" a partially-populated graph is observable", rerr),
+			})
 		}
-		return res, nil, nil
+		if !errors.Is(rerr, snapshot.ErrManifestCorrupted) {
+			vs = append(vs, Violation{
+				Kind: ViolationACIDDurability, Op: "<snapshot-manifest-key-region>",
+				Message: fmt.Sprintf("a manifest key-name flip was refused with %v, want ErrManifestCorrupted", rerr),
+			})
+		}
+		return res, vs, nil
 	}
 	defer func() { _ = st.Close() }()
 
+	// Recovery ACCEPTED a manifest whose bytes were damaged. That is the defect
+	// rmp #2520 closed, so it is a violation and not a measurement any more.
 	if res.corruptTS, err = snapshotCorruptionClockFloor(fx); err != nil {
 		return res, nil, fmt.Errorf("clock floor from the key-flipped manifest: %w", err)
 	}
-	// Containment: an undetected manifest flip must not cost a committed node.
+	vs = append(vs, Violation{
+		Kind: ViolationACIDDurability, Op: "<snapshot-manifest-key-region>",
+		Message: fmt.Sprintf("a flipped byte in the manifest's commit_ts KEY NAME was ACCEPTED by recovery"+
+			" (MVCC clock floor %d -> %d): the manifest's CRC32C trailer is not covering its own key region",
+			res.cleanTS, res.corruptTS),
+	})
+	// Containment: whatever the clock did, the undetected flip must not have cost
+	// a committed node.
 	got, err := snapshotCorruptionKeys(ctx, NewEngineAdapter(st.Engine()))
 	if err != nil {
-		return res, nil, fmt.Errorf("read keys after the manifest key flip: %w", err)
+		return res, vs, fmt.Errorf("read keys after the manifest key flip: %w", err)
 	}
-	var vs []Violation
 	for _, missing := range setMinus(fx.committed, got) {
 		vs = append(vs, Violation{
-			Kind: ViolationACIDDurability, Op: "<snapshot-manifest-gap>",
+			Kind: ViolationACIDDurability, Op: "<snapshot-manifest-key-region>",
 			Message: fmt.Sprintf("an UNDETECTED manifest key-name flip lost committed node %q:"+
-				" the manifest carries no checksum of its own, and the damage is not contained", missing),
+				" the damage is not even contained", missing),
 		})
 	}
 	return res, vs, nil

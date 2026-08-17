@@ -75,8 +75,8 @@ func TestSnapshotCorruption_CoversEveryTypedSentinel(t *testing.T) {
 		}
 	}
 	// Every component got a magic arm, and every CRC-COVERED one also got the
-	// seed-chosen interior arm (manifest.json carries no CRC of its own, so its
-	// un-covered region is adjudicated by the dedicated gap arm instead).
+	// seed-chosen interior arm — since rmp #2520 that is all nine, manifest.json
+	// included, because it now carries a CRC32C trailer over its own bytes.
 	wantArms := len(want)
 	for _, comp := range want {
 		if comp.crcCovered {
@@ -134,14 +134,20 @@ func TestSnapshotCorruption_DegenerateSweepFailsTheGate(t *testing.T) {
 // TestSnapshotCorruption_OracleFiresWhenRecoveryWronglySucceeds is the
 // reachability proof for the battery's primary oracle. Every arm asserts that
 // recovery REFUSED; an assertion that can only ever hold proves nothing, so this
-// test aims one arm at a byte that is KNOWN to be outside every checksum — a
-// character of the manifest's `commit_ts` KEY NAME — and requires the run to
-// REPORT the acceptance rather than pass.
+// test aims one arm at a component whose corruption the store is KNOWN to
+// tolerate, and requires the run to REPORT the acceptance rather than pass.
 //
-// The manifest is the only place such a byte exists: every binary component is
-// CRC32C-covered end to end (see
-// TestSnapshotCorruption_EveryComponentByteIsCRCCovered), so there is no byte in
+// The substrate is an indexes/<name>.bin payload. It is the only durable file in
+// a published snapshot a reopen accepts damaged, because a corrupt index payload
+// is a rebuild trigger rather than a fatal error (pinned by
+// TestSnapshotCorruption_IndexPayloadIsToleratedNotIgnored). Every other
+// component — manifest.json now included, since rmp #2520 gave it a CRC32C
+// trailer over its own bytes — is checksummed end to end, so there is no byte in
 // one whose corruption recovery would wrongly accept.
+//
+// It used to be built on a byte of the manifest's `commit_ts` KEY NAME, which
+// was outside every checksum. Closing that gap removed the control's substrate,
+// so the control moved rather than being dropped.
 func TestSnapshotCorruption_OracleFiresWhenRecoveryWronglySucceeds(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	ctx := context.Background()
@@ -149,22 +155,22 @@ func TestSnapshotCorruption_OracleFiresWhenRecoveryWronglySucceeds(t *testing.T)
 	if err != nil {
 		t.Fatalf("fixture: %v", err)
 	}
-	img, err := fx.disk.ReadFile(fx.snapDir + "/" + snapshotManifestFile)
-	if err != nil {
-		t.Fatalf("read manifest: %v", err)
+	paths := snapshotIndexPayloadPaths(fx)
+	if len(paths) == 0 {
+		t.Fatal("the fixture published no index payloads: the reachability control has no substrate")
 	}
-	idx := bytes.Index(img, []byte(`"commit_ts"`))
-	if idx < 0 {
-		t.Fatal("the published manifest carries no commit_ts key")
+	rel := strings.TrimPrefix(paths[0], fx.snapDir+"/")
+	if rel == paths[0] {
+		t.Fatalf("index payload %q is not under the snapshot directory %q", paths[0], fx.snapDir)
 	}
 
-	// Treat manifest.json as if it WERE CRC-covered, and aim its interior arm at
-	// a byte of the key name. The arm must report that recovery succeeded.
-	manifest := snapshotCorruptionComponents()[0]
-	manifest.crcCovered = true
+	// Drive the arm as if a damaged index payload had to fail-stop. It does not,
+	// so the arm must report that recovery succeeded.
+	tolerated := snapshotCorruptionComponent{
+		file: rel, sentinel: snapshot.ErrCorrupted, sentinelName: "ErrCorrupted",
+	}
 	opts := defaultSnapshotCorruptionOptions()
-	opts.components = []snapshotCorruptionComponent{manifest}
-	opts.interiorOffsets = map[string]int64{snapshotManifestFile: int64(idx + 3)}
+	opts.components = []snapshotCorruptionComponent{tolerated}
 	opts.skipManifestGuards = true
 	opts.skipIndexTolerance = true
 	opts.skipManifestGap = true
@@ -201,9 +207,13 @@ func TestSnapshotCorruption_NoOpCorruptionIsRejected(t *testing.T) {
 }
 
 // TestSnapshotCorruption_EveryComponentByteIsCRCCovered establishes the fact the
-// interior arm rests on: for the BINARY components there is no byte whose
+// interior arm rests on: there is no byte of any published component whose
 // corruption goes unnoticed. It sweeps every byte of the smallest components and
 // a stride through the larger ones, requiring each flip to be refused.
+//
+// manifest.json is included since rmp #2520 gave it a CRC32C trailer over its
+// own bytes; it was the one exception before that, and the exception is what
+// TestSnapshotCorruption_ManifestUncheckedByteCensus measured.
 func TestSnapshotCorruption_EveryComponentByteIsCRCCovered(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	ctx := context.Background()
@@ -212,9 +222,6 @@ func TestSnapshotCorruption_EveryComponentByteIsCRCCovered(t *testing.T) {
 		t.Fatalf("fixture: %v", err)
 	}
 	for _, comp := range snapshotCorruptionComponents() {
-		if comp.file == snapshotManifestFile {
-			continue // manifest.json has no CRC of its own; see the gap test below
-		}
 		path := fx.snapDir + "/" + comp.file
 		img, err := fx.disk.ReadFile(path)
 		if err != nil {
@@ -241,20 +248,20 @@ func TestSnapshotCorruption_EveryComponentByteIsCRCCovered(t *testing.T) {
 	}
 }
 
-// TestSnapshotCorruption_ManifestKeyRegionIsNotChecksummed PINS the measured
-// coverage gap the battery reports rather than hides: manifest.json carries the
-// CRC32C of every other component and none of its own, so a single byte flipped
-// inside a JSON KEY NAME leaves valid JSON whose key encoding/json then ignores,
-// and the field decodes to its zero value with no error anywhere.
+// TestSnapshotCorruption_ManifestKeyRegionIsChecksummed pins the closure of the
+// coverage gap rmp #2467 measured and rmp #2520 fixed.
 //
-// The consequence measured here is the worst of the set: `commit_ts` is the MVCC
-// clock floor recovery restores (rmp #2309), so zeroing it makes a reopened
-// graph re-mint instants the image already contains.
+// manifest.json used to carry the CRC32C of every other component and none of
+// its own, so a single byte flipped inside a JSON KEY NAME left valid JSON whose
+// key encoding/json then ignored, and the field decoded to its zero value with
+// no error anywhere. It now carries a CRC32C trailer over its own bytes, so the
+// same flip fail-stops recovery with snapshot.ErrManifestCorrupted.
 //
-// If the store ever gains a manifest integrity check this test fails, which is
-// the intended ratchet: the gap is documented in docs/dst-feature-coverage.md
-// and both must move together.
-func TestSnapshotCorruption_ManifestKeyRegionIsNotChecksummed(t *testing.T) {
+// This is the inverse of the assertion that stood here before, which required
+// the flip to go UNDETECTED. That test was written as a ratchet — "if the store
+// ever gains a manifest integrity check this test fails" — and this is that
+// check landing.
+func TestSnapshotCorruption_ManifestKeyRegionIsChecksummed(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	ctx := context.Background()
 	fx, err := buildSnapshotCorruptionFixture(ctx, 0x2467_C0DE)
@@ -266,33 +273,91 @@ func TestSnapshotCorruption_ManifestKeyRegionIsNotChecksummed(t *testing.T) {
 		t.Fatalf("gap arm: %v", err)
 	}
 	if len(vs) > 0 {
-		t.Fatalf("the undetected manifest flip was NOT contained:\n%s", violationsText(vs))
+		t.Fatalf("the manifest key-region arm reported a violation:\n%s", violationsText(vs))
 	}
-	if gap.detected {
-		t.Fatalf("recovery now DETECTS a manifest key-name flip (clean floor %d):"+
-			" the gap documented in docs/dst-feature-coverage.md has been closed — update the doc and this test", gap.cleanTS)
-	}
+	// Non-vacuity first: the fixture must really restore a clock floor, or
+	// "the floor was not zeroed" would hold for the wrong reason.
 	if gap.cleanTS == 0 {
-		t.Fatal("the intact manifest yielded a zero clock floor: nothing was measured")
+		t.Fatal("the intact manifest yielded a zero clock floor: the assertion below would be vacuous")
 	}
-	if gap.corruptTS >= gap.cleanTS {
-		t.Fatalf("the key flip did not drop the clock floor (clean=%d corrupt=%d):"+
-			" the measured consequence of the gap has changed", gap.cleanTS, gap.corruptTS)
+	if !gap.detected {
+		t.Fatalf("a byte flipped in the manifest's commit_ts KEY NAME was ACCEPTED by recovery"+
+			" (clock floor %d -> %d): the CRC32C trailer is not covering the manifest's key region",
+			gap.cleanTS, gap.corruptTS)
 	}
-	t.Logf("measured gap: MVCC clock floor %d -> %d after flipping one byte of the commit_ts KEY NAME,"+
-		" recovery reported clean", gap.cleanTS, gap.corruptTS)
+	t.Logf("manifest key-name flip REFUSED; the intact image still restores an MVCC clock floor of %d", gap.cleanTS)
 }
 
-// TestSnapshotCorruption_ManifestUncheckedByteCensus measures HOW MUCH of a
-// published manifest is outside every check, so the figure quoted in
-// docs/dst-feature-coverage.md is reproducible rather than asserted. It flips
-// each byte of the manifest in turn, reopens, and counts the flips recovery
-// accepts.
+// TestSnapshotCorruption_MVCCClockFloorIsNotSilentlyZeroable is the specific
+// durability assertion behind the test above, stated in the terms that matter to
+// the engine rather than to the file format.
 //
-// It asserts only the shape of the result — that a substantial region is
-// unchecked and that the checked region is non-empty — so the exact census can
-// move with the fixture without turning the gate red. The precise consequence is
-// pinned separately by TestSnapshotCorruption_ManifestKeyRegionIsNotChecksummed.
+// recovery.Result.MaxCommitTS feeds RestoreMVCCClock (rmp #2309): a graph
+// reopened with a floor of 0 re-mints instants the durable image already
+// contains, which is silent MVCC corruption rather than a lost node — no test
+// that counts recovered nodes can see it. The manifest is the only place that
+// floor is stored once a checkpoint has truncated the WAL prefix that carried
+// it, so it must not be possible for a byte flip to drop it.
+//
+// The test sweeps EVERY byte of the published manifest and requires each flip to
+// either be refused outright or to leave the floor exactly where it was. A run
+// that never observed the intact floor, or never drove a flip, fails.
+func TestSnapshotCorruption_MVCCClockFloorIsNotSilentlyZeroable(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	fx, err := buildSnapshotCorruptionFixture(context.Background(), 0x2467_C0DE)
+	if err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	path := fx.snapDir + "/" + snapshotManifestFile
+	img, err := fx.disk.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	clean, err := snapshotCorruptionClockFloor(fx)
+	if err != nil {
+		t.Fatalf("clock floor from the intact manifest: %v", err)
+	}
+	if clean == 0 {
+		t.Fatal("the intact manifest restores a zero MVCC clock floor: the sweep below would be vacuous")
+	}
+
+	refused, accepted := 0, 0
+	for off := range int64(len(img)) {
+		if err := fx.disk.CorruptRange(path, off, 1); err != nil {
+			t.Fatalf("corrupt manifest@%d: %v", off, err)
+		}
+		got, rerr := snapshotCorruptionClockFloor(fx)
+		switch {
+		case rerr != nil:
+			refused++
+		default:
+			accepted++
+			if got != clean {
+				t.Errorf("flipping manifest byte %d of %d moved the MVCC clock floor %d -> %d with no error",
+					off, len(img), clean, got)
+			}
+		}
+		if err := fx.disk.CorruptRange(path, off, 1); err != nil {
+			t.Fatalf("restore manifest@%d: %v", off, err)
+		}
+	}
+	if refused == 0 {
+		t.Fatalf("no manifest flip was refused across %d bytes: the sweep proves nothing", len(img))
+	}
+	t.Logf("MVCC clock floor %d held across %d manifest byte flips: %d refused, %d accepted without moving it",
+		clean, len(img), refused, accepted)
+}
+
+// TestSnapshotCorruption_ManifestUncheckedByteCensus is the census the fix is
+// measured against: it flips each byte of a PUBLISHED manifest in turn, reopens
+// the full stack, and counts the flips recovery accepts.
+//
+// The figure it produces is the one quoted in docs/dst-feature-coverage.md, and
+// it is reproducible rather than asserted. Before rmp #2520 it measured 360 of
+// 1399 bytes (25.7%) accepted silently, because manifest.json carried the CRC32C
+// of every other component and none of its own. With the CRC32C trailer the only
+// acceptable figure is ZERO: every byte of the document and of the trailer is
+// covered, so there is no flip a reopen can miss.
 func TestSnapshotCorruption_ManifestUncheckedByteCensus(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	ctx := context.Background()
@@ -305,14 +370,14 @@ func TestSnapshotCorruption_ManifestUncheckedByteCensus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
-	undetected := 0
+	var undetected []int64
 	for off := range int64(len(img)) {
 		if err := fx.disk.CorruptRange(path, off, 1); err != nil {
 			t.Fatalf("corrupt manifest@%d: %v", off, err)
 		}
 		st, rerr := OpenSimStore(fx.disk, snapshotCorruptionStoreConfig())
 		if rerr == nil {
-			undetected++
+			undetected = append(undetected, off)
 		}
 		if st != nil {
 			_ = st.Close()
@@ -322,12 +387,11 @@ func TestSnapshotCorruption_ManifestUncheckedByteCensus(t *testing.T) {
 		}
 	}
 	t.Logf("manifest census: %d of %d bytes (%.1f%%) can be flipped with NO error from recovery",
-		undetected, len(img), 100*float64(undetected)/float64(len(img)))
-	if undetected == 0 {
-		t.Fatal("no manifest byte was silently accepted: the documented gap has closed — update docs/dst-feature-coverage.md")
-	}
-	if undetected == len(img) {
-		t.Fatal("every manifest byte was silently accepted: the manifest is not checked at all")
+		len(undetected), len(img), 100*float64(len(undetected))/float64(len(img)))
+	if len(undetected) != 0 {
+		t.Fatalf("%d of %d manifest bytes were accepted silently (offsets %v):"+
+			" the CRC32C trailer does not cover the whole file — update docs/dst-feature-coverage.md if this is intended",
+			len(undetected), len(img), undetected)
 	}
 }
 

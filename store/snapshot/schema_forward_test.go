@@ -1,7 +1,7 @@
 package snapshot
 
 import (
-	"encoding/json"
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -39,17 +39,24 @@ func TestSnapshot_SchemaVersionForwardRejected(t *testing.T) {
 		t.Fatalf("ReadFile(manifest.json): %v", err)
 	}
 
-	// Decode, bump version to 999, and re-encode.
-	var m Manifest
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatalf("json.Unmarshal: %v", err)
+	// Decode, bump version to 999, and re-encode through the REAL writer.
+	//
+	// The round trip must go through [LoadManifest]/[WriteManifest] rather than
+	// json.Unmarshal/json.Marshal: manifest.json is a JSON document followed by a
+	// checksum trailer, so json.Unmarshal rejects it ("invalid character '\x00'
+	// after top-level value") and json.Marshal would emit an unframed document
+	// that [LoadManifest] refuses as corrupt. Re-framing here is what keeps this
+	// test aimed at the VERSION gate instead of accidentally testing the trailer.
+	m, err := LoadManifest(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
 	}
 	m.Version = 999
-	patched, err := json.Marshal(m)
-	if err != nil {
-		t.Fatalf("json.Marshal: %v", err)
+	var patched bytes.Buffer
+	if err := WriteManifest(&patched, m); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
 	}
-	if err := os.WriteFile(manifestPath, patched, 0o600); err != nil { //nolint:gosec // path under t.TempDir
+	if err := os.WriteFile(manifestPath, patched.Bytes(), 0o600); err != nil { //nolint:gosec // path under t.TempDir
 		t.Fatalf("WriteFile(manifest.json): %v", err)
 	}
 

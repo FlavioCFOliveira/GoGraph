@@ -131,6 +131,13 @@ func mustWriteSnapshotFixture() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	// Encoded here rather than through snapshot.WriteManifest, deliberately.
+	// WriteManifest appends the CRC32C integrity trailer (rmp #2520); this
+	// fixture must stay UNFRAMED, because its job is to be a manifest written by
+	// a build that predates the trailer. It is the standing evidence that such a
+	// manifest still opens — see
+	// snapshot.TestManifestTrailer_LegacyManifestLoadsUnverified. Framing it here
+	// would delete that evidence while leaving every test green.
 	enc := json.NewEncoder(mf)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(m); err != nil {
