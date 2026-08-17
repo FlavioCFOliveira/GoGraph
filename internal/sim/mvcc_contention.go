@@ -57,6 +57,18 @@ type MVCCContentionConfig struct {
 	Counters int
 	// OnStep is the observation hook, as in [MVCCSessionsConfig.OnStep].
 	OnStep func(tick, session int, what string)
+	// OnQuiesce, when set, is called once at the DRAIN POINT: every open
+	// transaction has been rolled back and no write is in flight, but the store
+	// is still open and the adjudication has not yet run.
+	//
+	// It exists for the MVCC-substrate telemetry oracle (rmp #2470), which must
+	// read [lpg.MVCCStats] at a point where in-flight commits returning to zero
+	// is a fair question. It is deliberately NOT allowed to influence the run:
+	// it is called after the last transaction and its observations go to the
+	// caller, never into [MVCCContentionResult], because substrate telemetry is
+	// scheduling-dependent and the result is compared byte for byte by the
+	// determinism gate.
+	OnQuiesce func(st *SimStore)
 }
 
 func (c *MVCCContentionConfig) normalise() {
@@ -198,6 +210,11 @@ func RunMVCCContention(ctx context.Context, cfg MVCCContentionConfig) (*MVCCCont
 			return nil, fmt.Errorf("sim: drain rollback (session %d): %w", s.id, err)
 		}
 		s.tx = nil
+	}
+
+	// The drain point: nothing is in flight, and the store is still open.
+	if cfg.OnQuiesce != nil {
+		cfg.OnQuiesce(store)
 	}
 
 	h.res.Violations = append(h.res.Violations, h.adjudicate(ctx)...)

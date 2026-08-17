@@ -604,7 +604,11 @@ Sprint 345 gave the simulator first-class MVCC coverage: deterministic
 interleaving of multiple explicit transactions, isolation checkers that
 adjudicate every read against a per-transaction oracle, deliberate contention,
 crashes landing while transactions are open, and a production-profile scenario
-that combines all of it over the durable store.
+that combines all of it over the durable store. Sprint 347 added the substrate's
+own telemetry to that picture (rmp #2470): the scenarios above adjudicate
+isolation *outcomes*, all of which stay green while the vacuum quietly stops
+reclaiming, so the version counts, the reclamation watermark and the vacuum's
+progress are now read and held to bounds of their own.
 
 ### The deterministic multi-session mode (`RunMVCCSessions`)
 
@@ -698,6 +702,16 @@ client population still running when the checkpoint returned. The exact count
 varies with goroutine scheduling, so the gate is that at least one cycle
 measured a non-zero one, never a particular number.
 
+Since rmp #2470 each cycle also carries a **standing MVCC-substrate watch**: the
+recovered store is read at two genuinely quiescent points — once when the reopen
+completes and before any client touches it, and again after the post-recovery
+beacon commits — and adjudicated by `checkMVCCSubstrate`. That is where a
+recovery that came up holding a commit it never published, or with the horizon's
+integrity counters already non-zero, would be caught. The non-vacuity gate is
+deliberately **not** applied here: the profile watches the substrate while doing
+something else, and it is `RunMVCCSubstrateChurn` that certifies it. See
+[MVCC substrate telemetry](#mvcc-substrate-telemetry-rmp-2470).
+
 ### MVCC clock and transaction-sequence recovery across the boundary (rmp #2469)
 
 Every other MVCC crash scenario re-derives the clock from a **complete** WAL,
@@ -748,6 +762,135 @@ published commit, at least one recovery through snapshot plus a replayed WAL
 tail, and one through the snapshot alone — the forced crossing, which reclaims
 the whole WAL (tens of kilobytes → 0 bytes), replays zero ops, and comes up on a
 floor at least one past the instant the manifest recorded.
+
+### MVCC substrate telemetry (rmp #2470)
+
+The substrate publishes a full account of what versioning is holding and why —
+`lpg.MVCCStats` (live records per store, the two published bounds, the
+reclamation watermark, in-flight commits, the retained chain-depth
+distribution, the write-outcome counters) and `lpg.VacuumStats` (sweeps,
+records released, backlog). Before this oracle the simulator read exactly **one
+field** of it, `MVCCStats.Now`, through `SimStore.ClockNow`, and `VacuumStats`
+not at all.
+
+That mattered because every MVCC scenario asserts isolation **outcomes** — no
+lost update, no phantom apply, a stable snapshot — and all of them stay green
+while the vacuum quietly stops reclaiming. A substrate that never releases a
+version answers every query correctly and grows without bound.
+
+`internal/sim/mvcc_substrate.go` folds readings into a single evidence record
+and `checkMVCCSubstrate` adjudicates them; `internal/sim/mvcc_substrate_arms.go`
+drives the workloads. Every clause is a **bound**, a **monotonicity**, or a
+**must-be-zero** — never an exact value — because the vacuum is a background
+goroutine and the readings are therefore scheduling-dependent even though the
+committed data is a pure function of the seed.
+
+| Property | Observable | Clause |
+|---|---|---|
+| Version chain depth returns to a bound | `MVCCStats.ChainDepth` (`mvcc.Depths`: log2 buckets + exact `Deepest`) | deepest retained depth observed **with no snapshot registered** stays within `maxRetainedChainDepth` |
+| The vacuum watermark advances rather than stalling | `MVCCStats.Watermark`, against `.Now` | over a window of ≥2 readings the watermark moves while transactions commit, and never moves backwards |
+| In-flight commits return to zero at quiescence | `MVCCStats.InFlightCommits` | zero at every reading the scenario declares quiescent |
+| Version memory stays under a published ceiling | `MVCCStats.Total` vs `.Bound` and `.Ceiling` | no reading exceeds the instantaneous ceiling, and once reclamation pressure has been applied the vacuum must have released something |
+
+Three further clauses come from counters the substrate documents as impossible
+while it is sound: `WatermarkRegressions`, `HorizonStaleLeaves`, and
+`UnregisteredSnapshots` — the last being the one state in which version memory
+genuinely has no bound, since while it is non-zero the watermark is zero and
+nothing is reclaimed.
+
+**All four properties have a genuine public observable**, but two are not
+readable in the shape one would guess, and both traps were found by measurement
+before the oracle was written:
+
+- **The vacuum is not always running.** It is woken by churn crossing
+  `MVCCStats.Bound` (4096 records as configured here), not by a timer, and it
+  exits once consecutive passes free nothing. Measured: 800 committed writes
+  left 815 live records with `passes=0, reclaimed=0` — and every bound assertion
+  passing, because nothing had been asked of the substrate. A run that never
+  applies reclamation pressure proves nothing, which is why
+  `checkMVCCSubstrateNonVacuity` is a separate gate rather than a clause.
+- **The chain-depth histogram describes the last complete sweep, not the
+  present.** The reclaimer resets a store's histogram when it starts that store
+  and fills it as it walks, so a graph whose versions have all been released
+  reads back as `chains=0, deepest=0` — indistinguishable, to a bound check
+  asserted at quiescence, from "every chain is short". The oracle therefore
+  samples **during** churn and counts the readings that carried a non-empty
+  distribution, so the population can be shown to be non-trivial.
+
+The depth bound is the **oracle's**, not the substrate's: `mvcc.Depths` is a
+distribution with no declared ceiling, and `maxRetainedChainDepth` is documented
+as stated here rather than dressed up as a published contract.
+
+#### The abort-heavy arm
+
+`RunMVCCSubstrateAborts` drives the contention scenario (`RunMVCCContention`,
+rmp #2437) through a new `OnQuiesce` hook that fires at the drain point — every
+open transaction rolled back, the store still open — and asserts the refused
+transactions' versions were **withdrawn** rather than left to accumulate.
+
+It forces serialization conflicts rather than rollbacks, because
+`mvcc.WriteCounts.Aborts` counts transactions the *substrate* refused, not
+transactions a *client* rolled back: GoGraph's explicit rollback is served by
+the statement undo log, so a voluntary rollback publishes its inverses and is
+counted as a **commit**. Measured: 50 rollbacks produced `commits +49,
+aborts 0`, while 29 conflicts produced `aborts=29, conflicts=29,
+byStore[1]=29`. Withdrawal itself is **synchronous** — `Graph.abortWake` calls
+`withdrawAbortedNow` before returning, because a present-time read takes the
+stored value directly — so the assertion is the strong one: the aborted versions
+are not in the live count at the drain point at all.
+
+#### The commit-quiescence boundary
+
+A checkpoint's phase 1 runs under the commit serialiser with writer admission
+closed and waits out the durable-but-unpublished window
+(`Checkpointer.awaitCommitQuiescence`, rmp #2349), so the reading taken
+immediately after a checkpoint returns on a single-writer store must show no
+commit allocated and unpublished. `MVCCSubstrateConfig.Checkpoints` publishes
+checkpoints spread through the churn and asserts exactly that.
+
+The 30-second `commitQuiesceTimeout` fail-stop is pinned **by contract rather
+than provoked**: reaching it needs a transaction held between its WAL fsync and
+its MVCC publish, and the only seam that could do so lives in `graph/lpg`,
+outside this package. What is asserted instead is the observable the timeout
+exists to report — `InFlightCommits` at the boundary — which catches the same
+defect without a 30-second wait. In the production profile, where traffic
+overlaps the checkpoint and the point after it is *not* quiescent, the
+checkpoint **returning at all** is the assertion that the boundary drained.
+
+#### Sensitivity and non-vacuity
+
+| Arm | What it proves |
+|---|---|
+| `TestMVCCSubstrate_TooSmallRunIsRejectedAsVacuous` | **live** — 200 committed writes never wake the vacuum, the adjudication is clean, and only the non-vacuity gate refuses the run. This is the specific trap the oracle was warned about: a bound satisfied because the workload never produced enough versions to stress it |
+| `TestMVCCSubstrate_PinnedReaderIsNotAViolation` | **live specificity** — one reader held open across 6000 writes stalls the watermark at 4 while the clock reaches 6004 and drives retained depth to **1372**, past the bound; the oracle correctly reports nothing, because the registered snapshot explains both |
+| `TestMVCCSubstrate_ClausesFire` | 11 fabricated-evidence perturbations, each firing one clause, with the unperturbed control silent |
+| `TestMVCCSubstrateNonVacuity_ClausesFire` | 9 perturbations over the non-vacuity gate itself |
+| `TestMVCCAbortWithdrawal_ClausesFire` | 5 perturbations over the withdrawal clauses, including aborted versions that look retained |
+
+Two false positives were found and fixed by the live arms rather than by
+inspection, both of the same shape — a *window* quantity judged on evidence
+with no window, or a *legitimate* explanation ignored:
+
+- the watermark-stall clause fired on a single-reading record, where
+  `first == last` makes the advance zero by construction;
+- the "vacuum released nothing" clause would have fired on the pinned-reader
+  run, where the vacuum ran 18 passes and freed 16 records **because isolation
+  required it to**. Both are now guarded on having ≥2 readings and on no
+  snapshot having been registered at any reading.
+
+#### Where it stands
+
+| Scenario | Layer | Role |
+|---|---|---|
+| `RunMVCCSubstrateChurn` | short (6 000 rounds) / soak (400 000 rounds, 8 checkpoints) | the certifying arm — adjudication **plus** the non-vacuity gate |
+| `RunMVCCSubstrateAborts` | short (600 ticks) / soak (40 000 ticks, 12 sessions) | the abort-heavy arm |
+| `production-profile` | short / soak | **standing watch** — the recovered store is read at two quiescent points per crash cycle and adjudicated by `checkMVCCSubstrate`, without the non-vacuity gate, because the profile watches the substrate rather than certifying it |
+
+The production-profile evidence is scoped to **one store instance** per cycle
+deliberately: a crash replaces the graph wholesale and the substrate's counters
+restart at zero with it, so folding readings from either side of a crash into
+one record would show the watermark moving backwards and report the harness's
+own bookkeeping as an isolation defect.
 
 ## Language-surface gaps (rmp #2462)
 

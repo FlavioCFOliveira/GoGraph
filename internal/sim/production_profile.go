@@ -141,6 +141,17 @@ type productionProfileCycleEvidence struct {
 	snapshotInstant uint64
 	// recovery is what the post-crash reopen measured (rmp #2469).
 	recovery mvccRecoveryEvidence
+	// substrate is the MVCC-substrate telemetry watched across this cycle's
+	// RECOVERED store (rmp #2470): read once the reopen is complete and again
+	// after the post-recovery commits, both at genuinely quiescent points.
+	//
+	// It is scoped to ONE store instance deliberately. A crash replaces the graph
+	// wholesale and the substrate's counters — commits, the watermark, the vacuum's
+	// pass count — restart at zero with it, so folding readings from either side of
+	// a crash into one record would show the watermark moving BACKWARDS and the
+	// commit count collapsing, and would report the harness's own bookkeeping as an
+	// isolation defect.
+	substrate mvccSubstrateEvidence
 }
 
 // productionProfileEvidence is what one profile run measured, across its crash
@@ -302,6 +313,10 @@ func runProductionProfileEvidence(ctx context.Context, seed uint64, size product
 			_ = st2.Close()
 			return nil, ev, err
 		}
+		// The recovered store is quiescent here: the reopen has completed and no
+		// client has been pointed at it yet (rmp #2470).
+		cyc.substrate.label = fmt.Sprintf("cycle %d recovered-store substrate", cycle)
+		cyc.substrate.observe(st2.Graph(), "post-recovery, before any commit", true)
 		recovered, partial, err := recoveredPersonNames(ctx, st2.Engine())
 		if err != nil {
 			_ = st2.Close()
@@ -346,6 +361,12 @@ func runProductionProfileEvidence(ctx context.Context, seed uint64, size product
 			return nil, ev, err
 		}
 		violations = append(violations, checkMVCCRecovery(int64(cycle), &cyc.recovery)...)
+		// The beacons have returned, so the recovered store is quiescent again:
+		// in-flight commits must have drained back to zero, the watermark must have
+		// followed the commits that just published, and the integrity counters must
+		// still be zero (rmp #2470).
+		cyc.substrate.observe(st2.Graph(), "post-recovery, after beacon commits", true)
+		violations = append(violations, checkMVCCSubstrate(int64(cycle), &cyc.substrate)...)
 		ev.cycles = append(ev.cycles, cyc)
 		_ = st2.Close()
 	}
