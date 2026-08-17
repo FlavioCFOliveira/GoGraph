@@ -29,11 +29,12 @@ soak / nightly), see [docs/test-layers.md](test-layers.md).
 7. [Scenario catalogue](#scenario-catalogue)
 8. [Crash and recovery](#crash-and-recovery)
 9. [MVCC multi-session and concurrency coverage](#mvcc-multi-session-and-concurrency-coverage)
-10. [Language-surface gaps (rmp #2462)](#language-surface-gaps-rmp-2462)
-11. [Swarm, coverage, and cross-checking modes](#swarm-coverage-and-cross-checking-modes)
-12. [Command-line usage](#command-line-usage)
-13. [Reproduce, replay, and shrink](#reproduce-replay-and-shrink)
-14. [Extending the harness](#extending-the-harness)
+10. [Bulk-import publication parity (rmp #2466)](#bulk-import-publication-parity-rmp-2466)
+11. [Language-surface gaps (rmp #2462)](#language-surface-gaps-rmp-2462)
+12. [Swarm, coverage, and cross-checking modes](#swarm-coverage-and-cross-checking-modes)
+13. [Command-line usage](#command-line-usage)
+14. [Reproduce, replay, and shrink](#reproduce-replay-and-shrink)
+15. [Extending the harness](#extending-the-harness)
 
 ---
 
@@ -269,6 +270,7 @@ schedule, budget, mode, checks). `cmd/sim --list-scenarios` prints them.
 | `overload` | concurrent | Giant transactions / huge `UNWIND` / large result sets / deep variable-length expansion; bounded-resource graceful degradation. |
 | `cpu-starvation` | liveness | A compute-hog workload (60% overload) competing with honest queries on a single clamped `GOMAXPROCS` core, then a liveness convergence assertion. Verifies fair scheduling under CPU starvation: the system keeps making forward progress (no deadlock/livelock — the watchdog classifies a stuck run as resonance), no panic, no goroutine leak. Latency percentiles are deliberately not asserted (statistical). |
 | `bulk-vs-online` | bulk-vs-online | A concurrent offline bulk CSR load alongside transactional online writes; resource stability. |
+| `bulkimport-parity` | deterministic | **Offline bulk-import publication, round-tripped through real recovery** (rmp #2466). `bulk-vs-online` above drives `store/bulk`, whose record is adjacency only — `(src, dst, weight)`, no labels and no properties — so every label, property, relationship type and parallel-edge handle that `store/bulkimport` carries was unexercised. This scenario builds a seed-derived labelled property multigraph through `bulkimport.Builder`, publishes it to a **real temporary directory**, reopens it through `recovery.Open`, and requires the recovered graph to equal a harness model EXACTLY: node set (two-sided — live order *and* per-key presence), labels, properties (**kind and value**, so an integer `7` and the string `"7"` cannot compare equal), and the per-handle multiset of (type, weight, properties) on every pair, including the parallel twins a pair-addressed carriage would collapse. It also pins the package's lifecycle contract **as measured**, reopens the directory a second time and adjudicates again, and pins the publish's byte-reproducibility boundary — an identical republish is byte-identical only while items carry at most one property, because `Node.Properties` is a map (logically identical every run, physically not). **Fault injection is out of reach:** `bulkimport.Publish` is hard-wired to the OS filesystem (`os.MkdirAll`, `os.ReadDir`, the non-seamed `snapshot.WriteSnapshotFullCtx`) and `ImportInto` takes a `storeDir string` with no filesystem in its `Options`, so no `SimDisk` can be placed underneath a publish without a production change — filed as rmp #2518. See [Bulk-import publication parity](#bulk-import-publication-parity-rmp-2466). |
 | `long-running` | deterministic | Millions of small bounded-churn ops; oracle parity plus heap/goroutine stability (soak). |
 
 ## Crash and recovery
@@ -376,6 +378,164 @@ in-memory undo log recorded a `RemoveEdge` inverse, so rolling the transaction
 back (here via an `ENOSPC` WAL sync, but any rollback triggers it) deleted the
 pre-existing committed edge. The fix gates the edge bookkeeping on whether the
 edge was actually added.
+
+## Bulk-import publication parity (rmp #2466)
+
+`store/bulkimport` is the one write path in the module that builds a store from
+nothing: it assembles a labelled property graph in memory, writes it as the
+store's snapshot, and hands the directory to recovery. Until sprint 347 no
+scenario touched it. The `bulk-vs-online` scenario drives `store/bulk`, a
+different package whose record is adjacency only — `(src, dst, weight)`, no
+labels and no properties — so every label, every property, every relationship
+type and every parallel-edge handle that `bulkimport` carries went through no
+simulation at all.
+
+The `bulkimport-parity` scenario (`internal/sim/bulkimport_parity.go`) occupies
+that gap. It is deterministic and bit-reproducible: the fixture is drawn from the
+seed, and the build and the publish are single-goroutine.
+
+### What it adjudicates
+
+A seed-derived multigraph — 400 distinct keys, 1 280 edge instances, repeated
+node records, deliberately bare nodes, and 40 pairs carrying two typed twins
+each — is built through `bulkimport.Builder`, published to a **real temporary
+directory** (removed on return), and reopened through `recovery.Open`. The
+recovered graph must equal a harness-side model exactly:
+
+* **Nodes, two-sided.** Every modelled key must be present and live, *and* the
+  graph's live order must equal the model's cardinality — so an extra node is
+  caught as surely as a missing one.
+* **Labels and properties**, compared by **kind and value**. The kind is part of
+  the comparison on purpose: rendering values textually alone would let an
+  integer `7` and the string `"7"` compare equal, so a round trip that lost the
+  type would pass.
+* **Edges, two-sided and per handle.** Each pair's multiset of
+  (type, weight, properties) must match instance for instance, and the walk
+  covers every out-edge of every node — not only the modelled pairs — so an edge
+  to an unmodelled pair is caught too. Because `bulkimport` attaches type and
+  properties to the edge *handle*, the parallel twins prove that carriage
+  survived rather than collapsing to one edge per pair.
+
+The directory is then reopened a **second** time and adjudicated again, so a
+reopen that mutated the store, or a first reopen that happened to be lucky, is
+caught. Both opens must report `SnapshotHit` with **zero** replayed WAL ops: the
+published snapshot has to carry every byte itself.
+
+### The lifecycle contract, as measured
+
+The scenario probes the package's contract and records what it **observed**,
+rather than restating the documentation. Each probe that stops holding turns into
+a violation, so a contract that moves underneath the harness fails it instead of
+being silently absorbed. Measured today:
+
+| Probe | Observed |
+|---|---|
+| `Builder.Graph()` before `Finish` | `nil` |
+| `Publish` with an unfinished builder | `ErrNotFinished` |
+| `AddNode` / `AddEdge` after `Finish` | `ErrFinished` |
+| A second `Finish` | `ErrFinished`, **and still returns the accumulated stats** |
+| `Publish` / `ImportInto` into a non-empty directory | `ErrStoreNotEmpty` |
+| `Publish` into an absent directory | created, not refused |
+| `Publish(nil builder)` | a plain error matching **neither** sentinel |
+| Unfinished builder **and** cancelled context | `ErrNotFinished` — the builder check runs first |
+| Finished builder, cancelled context **and** non-empty directory | the context error — the context check precedes the directory check |
+| `ImportInto` with a non-empty directory **and** unbuildable records | `ErrStoreNotEmpty` — the directory is inspected before any work |
+| `PublishResult.SnapshotDir` | `<storeDir>/snapshot`, the one name recovery reads |
+| `PublishResult.Stats` | `{Nodes, Edges, NodeRecords}`, asserted against the model; `NodeRecords > Nodes` confirms the repeated-key merge ran |
+
+The two precedence rows and the nil-builder row are the ones worth knowing: a
+caller that switches on the sentinels alone will mis-handle a nil builder, and
+the two entry points disagree about **when** the directory is inspected —
+`Publish` checks the builder and the context first, `ImportInto` checks the
+directory before doing anything.
+
+### What this scenario CANNOT reach — read before assuming coverage
+
+**Bulk-import publication is not fault-covered.** Every other durability scenario
+here injects faults through `SimDisk`, which reaches the persistence packages via
+their filesystem seams (`wal.OpenFS`, `recovery.OpenFS`,
+`snapshot.WriteSnapshotFullWithMapperCodecAndConstraintsFS` and siblings).
+`bulkimport.Publish` has **no such seam**: it calls `os.MkdirAll` and
+`os.ReadDir` directly and writes through the **non-seamed**
+`snapshot.WriteSnapshotFullCtx`, and `ImportInto` takes a `storeDir string` plus
+an `Options` that carries no filesystem. There is therefore no way to put a
+`SimDisk` underneath a publish without changing the production API. That change
+is **filed for a user decision as rmp #2518** and was deliberately not made here.
+
+Unreachable, and covered by nothing below:
+
+* `ENOSPC` part-way through writing the snapshot components.
+* A failing `fsync` on a component file, on the staging directory, or on the
+  store's parent directory.
+* A failing or crash-interrupted rename of `snapshot.tmp` to `snapshot` — the
+  exact instant `Publish`'s atomicity claim rests on.
+* A crash landing **inside** the publish window, with the crash-window
+  non-determinism (`ArmRenameWritebackForPath`) that `checkpoint-crash-storm`
+  uses to select which dirent survived.
+
+What **is** reachable against a real directory is the publish's *outcome* state
+rather than its interruption. The scenario's third arm publishes a complete
+snapshot to a scratch directory and moves it to the assembly name
+(`snapshot.tmp`) in a fresh one. That is byte-for-byte the directory shape a
+crash between assembly and rename leaves, and recovery must find nothing
+(`SnapshotHit` false, live order 0) and remove the debris — with the staged
+bytes measured *before* the reopen, so "recovery removed it" is a measured delta
+rather than an assumption that anything was there. It is a **reconstruction, not
+an interruption**: it proves recovery's treatment of that state, not the writer's
+behaviour while reaching it.
+
+### Byte-reproducibility: where it begins and ends
+
+A publish of the same records twice produces data components with the same names
+and the same **sizes**, but **not the same bytes**. The cause was isolated by
+measurement rather than inferred, by republishing at three property regimes:
+
+| Regime | Identical republish is byte-identical? |
+|---|---|
+| Items carrying two or more properties (the fixture) | **no** |
+| Items carrying exactly one property | yes |
+| No properties at all (labels and types kept) | yes |
+
+Publishing the *identical record slices* twice within one process already
+diverges, which rules out the fixture's construction, a timestamp, or an address.
+The whole of the divergence is Go map iteration order over
+`bulkimport.Node.Properties` / `Edge.Properties` — both are maps, so no caller
+can avoid it.
+
+**This is not a correctness defect.** `bulkimport.Node` documents that properties
+are set "in map-iteration order, which is unspecified. That is safe because each
+key is written once, so no ordering can change the result", and that claim holds
+exactly as written: the *logical* result is identical on every run, which the
+parity pass re-proves each execution. What is not promised, and is not true, is
+byte-identity of the *physical* image. The practical consequence is worth knowing
+before relying on it: **two imports of identical data cannot be compared by
+checksum, and bulk-import snapshots will not deduplicate in content-addressed
+storage.**
+
+Two further things are therefore deliberately *not* asserted as seed-stable. The
+snapshot's total byte count is excluded because `manifest.json` carries a
+`created_at` wall clock whose rendering drops a trailing zero about one run in
+ten (a measured 654-vs-655-byte swing). Byte-identity of the data components is
+excluded for the reason above; their combined **size** is asserted instead, since
+the same keys are written whatever the order. `TestBulkImportParity_ByteBoundary`
+pins all three regimes, so a flip — including an improvement, such as ordering
+property keys — is noticed rather than quietly making this section false.
+
+### Proving the check can fail
+
+`TestBulkImportParity_Sensitivity` perturbs the **model** — never the durable
+image — across twelve dimensions and requires each to produce a violation on the
+expected dimension: missing node, extra node, wrong label, wrong property value,
+missing property, missing edge, phantom edge, collapsed parallel edges, wrong
+edge type, wrong edge weight, wrong edge property, and a **kind swap that keeps
+the same digits** (rebinding an integer property to the string of its own
+decimal rendering), which is the case a kind-blind comparison would wave
+through. Perturbing the model rather than the graph is deliberate: the published
+image stays exactly as a passing run publishes it, so what is measured is the
+checker's power to see a difference. Alongside it,
+`TestBulkImportParity_NonVacuous` reads the run's measured evidence — snapshot
+file count and byte size, publish stats, per-dimension comparison counters — and
+fails a run that degenerated into comparing nothing.
 
 ## Read-only transaction isolation
 

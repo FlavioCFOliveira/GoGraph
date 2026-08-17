@@ -84,7 +84,44 @@ undirected Euler; `BiBFS`; direction-optimised BFS on a hub fixture; the
 | Post-rename dir-fsync fail-stop (WAL prefix reclaim) | `checkpoint-dirfsync-fault` | a post-rename parent-dir fsync failure poisons the writer, yet reopen recovers the exact committed state |
 | DDL (index + UNIQUE constraint) across the checkpoint/snapshot boundary | `ddl-checkpoint-crash`; `constraint-enforce` and `index-diversity` now checkpoint too | the checkpoint's reclaimed WAL prefix COVERS the DDL frames (measured on the SimDisk image), the pure-snapshot phase replays ZERO WAL ops, and the recovered schema still enforces UNIQUE, answers every index seek, and matches `SHOW`/`db.*` |
 | CSV / JSONL export→import round-trip under fault | `io-roundtrip-fault` | a clean round-trip reproduces the modelled edge set exactly; an export under ENOSPC fails with a typed error and leaves no partial artifact a re-import would accept |
+| Offline bulk-import publication (`store/bulkimport`) — **parity only, NOT fault coverage** | `bulkimport-parity` | a published snapshot reopens through real recovery equal to the harness model exactly (node set two-sided, labels, properties by **kind and value**, per-handle edge multisets including parallel twins), `SnapshotHit` with **zero** replayed WAL ops on two successive opens, and the measured lifecycle contract (`ErrNotFinished` / `ErrFinished` / `ErrStoreNotEmpty`, their precedence, and `PublishResult.Stats`); plus the publish's byte-reproducibility boundary. **No fault regime is reachable** — see the note below |
 | Crash **during** the snapshot publish, at each step of the crash-atomic swap | `checkpoint-crash-storm` | acked ⊆ recovered ⊆ issued across a crash inside the publish window; a stranded backup is promoted by recovery (measured on the durable image and on `store.recovery.snapshot.promoteParentFsync`), never a half-published snapshot |
+
+### Bulk-import publication is covered for PARITY, not for faults (rmp #2466)
+
+The `bulkimport-parity` row above is deliberately narrower than every other row
+in the table, and the gap is structural rather than an omission.
+
+Every other durability scenario injects its faults through `SimDisk`, which
+reaches the persistence packages via their filesystem seams (`wal.OpenFS`,
+`recovery.OpenFS`, `snapshot.WriteSnapshotFullWithMapperCodecAndConstraintsFS`
+and siblings). `bulkimport.Publish` has **no such seam**: it calls `os.MkdirAll`
+and `os.ReadDir` directly and writes through the **non-seamed**
+`snapshot.WriteSnapshotFullCtx`, while `ImportInto` takes a `storeDir string`
+plus an `Options` that carries no filesystem. A `SimDisk` therefore cannot be
+placed underneath a bulk-import publish without changing the production API —
+**filed for a user decision as rmp #2518**, and deliberately not done under
+#2466.
+
+So for bulk-import publication the following remain **uncovered**: `ENOSPC`
+mid-write; a failing `fsync` on a component, on the staging directory, or on the
+parent directory; a failing or crash-interrupted `snapshot.tmp` → `snapshot`
+rename; and a crash landing inside the publish window. The scenario's
+crashed-import arm reconstructs the *outcome* state of such a crash — a complete
+snapshot moved to the assembly name, which recovery must ignore and clean up —
+which measures recovery's treatment of that state, **not** the writer's
+behaviour while reaching it.
+
+A second finding from the same task, measured rather than assumed: a bulk-import
+publish is **not byte-reproducible** once items carry two or more properties.
+Republishing the identical record slices twice yields data components of the same
+names and sizes but different bytes, and stripping properties — or reducing each
+item to exactly one — makes it byte-identical, which isolates the cause to Go map
+iteration over the `Properties` maps. The *logical* result is identical every run
+(the parity pass proves it), so this is not a correctness defect and matches what
+`bulkimport.Node` documents; but two imports of identical data cannot be compared
+by checksum, and bulk-import snapshots will not deduplicate in content-addressed
+storage. `TestBulkImportParity_ByteBoundary` pins the boundary.
 
 The `DiskConfig.FaultRate` knob and five `SimDisk` primitives back these
 scenarios — four faults (`CorruptRange`, `ArmSyncFaultAt`,

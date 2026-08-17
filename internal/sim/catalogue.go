@@ -121,6 +121,7 @@ func DefaultRegistry() (*Registry, error) {
 		productionProfileScenario(),
 		ddlCheckpointCrashScenario(),
 		checkpointCrashStormScenario(),
+		bulkImportParityScenario(),
 	)
 }
 
