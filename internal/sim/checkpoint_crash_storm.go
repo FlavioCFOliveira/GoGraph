@@ -229,7 +229,9 @@ type checkpointStormOptions struct {
 	// into the run.
 	windows []publishWindow
 	// discardStrandedBackup is the SENSITIVITY SEAM: when true, the stranded
-	// backup is deleted from the durable image after the crash and before the
+	// backup is deleted from the durable image — durably, via
+	// [SimDisk.ArmRemoveWritebackForPath], because this is damage rather than an
+	// unlink the engine issued — after the crash and before the
 	// reopen, so recovery has neither a live snapshot nor a backup to promote
 	// while the earlier clean checkpoint has already truncated the WAL prefix
 	// those commits lived in. That is a genuine lost acknowledged commit — not
@@ -464,6 +466,12 @@ func runCheckpointStormCycle(
 	// Sensitivity seam only: destroy the stranded backup so the commits the
 	// clean checkpoint folded into it are genuinely unrecoverable.
 	if env.opts.discardStrandedBackup {
+		// DAMAGE to the durable image, not an unlink the engine issued, so the
+		// removal is declared durable: since rmp #2536 an ordinary removal stays
+		// reversible until its parent directory is fsync'd, and a LATER cycle's
+		// crash on this shared disk could otherwise put the backup back and
+		// silently un-arm the seam.
+		env.disk.ArmRemoveWritebackForPath(env.snapDir + ".bak")
 		_ = env.disk.RemoveAll(env.snapDir + ".bak")
 		cyc.bakBeforeReopen = env.disk.Exists(env.snapDir + ".bak/manifest.json")
 	}

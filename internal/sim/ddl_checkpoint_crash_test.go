@@ -125,7 +125,15 @@ func TestDDLCheckpointCrash_DetectsUntruncatedWAL(t *testing.T) {
 func TestDDLCheckpointCrash_DetectsSnapshotMissingIndexDefs(t *testing.T) {
 	opts := defaultDDLCheckpointOptions()
 	opts.damageSnapshot = func(disk *SimDisk, dir string) {
-		_ = disk.Remove(dir + "/" + simSnapshotName + "/indexdefs.bin")
+		path := dir + "/" + simSnapshotName + "/indexdefs.bin"
+		// The component must be GONE for recovery to be fed the image this arm
+		// models. This is damage, not an unlink the engine issued, so the removal
+		// is declared durable: the seam runs before the crash, and since rmp #2536
+		// an unarmed removal is reversible until its parent is fsync'd — the crash
+		// would restore the component and this sensitivity proof would pass
+		// vacuously.
+		disk.ArmRemoveWritebackForPath(path)
+		_ = disk.Remove(path)
 	}
 
 	_, report, err := runDDLCheckpointCrashWith(context.Background(),

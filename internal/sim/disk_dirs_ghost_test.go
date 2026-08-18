@@ -344,7 +344,9 @@ func TestSimDisk_DirsDeletionIsCentralised(t *testing.T) {
 				return true
 			}
 			if _, ok := permitted[fn.Name.Name]; !ok {
-				t.Errorf("%s: %s deletes from d.dirs; keep the removal in removeSubtreeLocked so the invariant \"d.dirs never outlives its subtree\" holds by construction (rmp #2538)",
+				t.Errorf("%s: %s deletes from d.dirs, which breaks the invariant \"d.dirs never outlives its subtree\" by hand instead of by construction (rmp #2538). "+
+					"Three sites are sanctioned: removeSubtreeLocked for a whole subtree, pruneGhostDirEntriesLocked for a single name, and Rename, which hands the source's entry to the destination rather than removing it. "+
+					"Route the deletion through whichever of the two removal helpers fits, or add this function to the permitted map with the reason it cannot",
 					fset.Position(call.Pos()), fn.Name.Name)
 			}
 			seen[fn.Name.Name]++
@@ -359,51 +361,82 @@ func TestSimDisk_DirsDeletionIsCentralised(t *testing.T) {
 	}
 }
 
-// TestSimDisk_RolledBackRenameRestoresPrunedDirEntry proves the pruning of
-// #2538's ghost does not buy fidelity in one direction by losing it in the other.
-// Moving the last name out of a directory published by rename drops that
-// directory's entry, but a crash may roll the rename back and put the name
-// straight back in. The entry has to return WITH ITS NON-DURABILITY, or the model
-// would keep a subtree whose directory name never reached stable storage — a
-// crash losing LESS than a real one, which is the mirror of the false accusation
-// the ghost produced.
-func TestSimDisk_RolledBackRenameRestoresPrunedDirEntry(t *testing.T) {
-	d := NewSimDisk(NewSeed(3), 0)
-	writeFile(t, d, "db/tmp/f", []byte("data"))
-	if err := d.Rename("db/tmp", "db/live"); err != nil {
-		t.Fatalf("publish Rename: %v", err)
-	}
-	// Harden the FILE's own dirent while never fsyncing the parent of db/live,
-	// so the name INSIDE the directory is durable and the directory's own name
-	// is not. That asymmetry is what makes the directory entry the deciding
-	// fact: without it the crash drops the restored file on its own dirent and
-	// the two outcomes are indistinguishable — the first version of this test
-	// passed with the restore disabled for exactly that reason.
-	if err := d.DirSync("db/live"); err != nil {
-		t.Fatalf("DirSync: %v", err)
-	}
-	// Take the publish rename out of the rollback log without curing its
-	// non-durability: an operation on an ANCESTOR pins it into the durable
-	// prefix. Left pending, the crash could KEEP it, which flips the entry
-	// durable and again collapses the two outcomes into one.
-	if err := d.Remove("db"); err != nil {
-		t.Fatalf("Remove: %v", err)
-	}
-	if got := d.PendingRenameCount(); got != 0 {
-		t.Fatalf("PendingRenameCount = %d; want 0: the publish must not be rollback-able, or the crash can flip its entry durable", got)
-	}
-	d.ArmRenameRollbackForPath("db/elsewhere/f")
-	if err := d.Rename("db/live/f", "db/elsewhere/f"); err != nil {
-		t.Fatalf("Rename out: %v", err)
-	}
-	requireNoGhostDirs(t, d, "a rename that emptied a published directory")
+// TestSimDisk_EmptiedPublishedDirectoryKeepsExactlyOneName is what remains
+// testable of the fidelity claim #2538 made in the other direction: pruning the
+// ghost must not buy fidelity in one direction by losing it in the other, so a
+// crash inside the (publish, empty-out) rename pair must never lose the file
+// altogether.
+//
+// It replaces TestSimDisk_RolledBackRenameRestoresPrunedDirEntry, whose
+// mechanism rmp #2536 removed. That test needed a state in which the publish
+// rename had left the undo log while its directory entry was STILL non-durable,
+// and it built that state with Remove("db") — a removal of a directory path,
+// which under the old model unlinked nothing and only pinned the log. That state
+// is now unreachable by construction: a record leaves the log only when its
+// effect is declared durable, and every departure APPLIES that durability (see
+// SimDisk.dropDirentUndoPrefixLocked). It was also not merely unreachable but
+// WRONG — a pinned-yet-non-durable record is what made a chained rename lose both
+// of its names, the very outcome rmp #2514 exists to forbid, which
+// TestSimDiskDirentUndo_ChainedRenameKeepsOneName now guards.
+//
+// What survives here is the end-to-end verdict on the same sequence, which is
+// strictly stronger than the old assertion: whichever prefix of the two renames
+// reached stable storage, EXACTLY ONE name holds the file afterwards.
+func TestSimDisk_EmptiedPublishedDirectoryKeepsExactlyOneName(t *testing.T) {
+	// The three names the file can legally be under after the crash, one per
+	// durable prefix of the pair: neither rename (db/tmp/f), the publish only
+	// (db/live/f), or both (db/elsewhere/f).
+	legal := []string{"db/tmp/f", "db/live/f", "db/elsewhere/f"}
+	seen := map[string]int{}
+	for i := uint64(0); i < 96; i++ {
+		seed := 0x2538 + i*0x9E37_79B1
+		d := NewSimDisk(NewSeed(seed), 0)
+		writeFile(t, d, "db/tmp/f", []byte("data"))
+		if err := d.Rename("db/tmp", "db/live"); err != nil {
+			t.Fatalf("seed %#x: publish Rename: %v", seed, err)
+		}
+		// Harden the FILE's own dirent while never fsyncing the parent of
+		// db/live, so the name INSIDE the directory is durable and the
+		// directory's own name is not. That asymmetry is what makes the
+		// directory entry the deciding fact rather than the file's own dirent.
+		if err := d.DirSync("db/live"); err != nil {
+			t.Fatalf("seed %#x: DirSync: %v", seed, err)
+		}
+		if err := d.Rename("db/live/f", "db/elsewhere/f"); err != nil {
+			t.Fatalf("seed %#x: Rename out: %v", seed, err)
+		}
+		requireNoGhostDirs(t, d, "a rename that emptied a published directory")
+		pending := d.PendingRenameCount()
+		d.CrashHost()
 
-	d.CrashHost()
-	if got := d.RenameRollbackCount(); got != 1 {
-		t.Fatalf("RenameRollbackCount = %d; want 1: the rollback branch was never selected, so this test asserts nothing", got)
+		// Verdict, unconditional: exactly one of the three names survives.
+		held := make([]string, 0, len(legal))
+		for _, name := range legal {
+			if d.Exists(name) {
+				held = append(held, name)
+			}
+		}
+		if len(held) != 1 {
+			t.Fatalf("seed %#x: the file is under %v after the crash (pending=%d); exactly one of %v must hold it",
+				seed, held, pending, legal)
+		}
+		if got := len(d.Snapshot()); got != 1 {
+			t.Fatalf("seed %#x: %d file keys survived, want 1: a name outside %v holds the file", seed, got, legal)
+		}
+		if pending != 2 {
+			t.Fatalf("seed %#x: PendingRenameCount = %d, want 2: the crash did not land inside the rename pair, so the verdict above adjudicated nothing",
+				seed, pending)
+		}
+		seen[held[0]]++
 	}
-	if d.Exists("db/live/f") || d.Exists("db/elsewhere/f") {
-		t.Fatalf("db/live's own name never reached stable storage, so the rolled-back name must be lost with it; live=%v elsewhere=%v",
-			d.Exists("db/live/f"), d.Exists("db/elsewhere/f"))
+
+	// Shape, separate from the verdict: the sequence really samples all three
+	// durable prefixes. A verdict over a set with an unreachable member pins
+	// less than it claims.
+	for _, name := range legal {
+		if seen[name] == 0 {
+			t.Errorf("the file never survived under %q across 96 seeds: that durable prefix is not sampled", name)
+		}
 	}
+	t.Logf("surviving name distribution: %v", seen)
 }

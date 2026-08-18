@@ -73,16 +73,20 @@ var _ walFile = (*SimFileHandle)(nil)
 //	                outcome is always one of the two legal ones. See
 //	                [SimDisk.Crash].
 //
-//	Remove          NOT MODELLED, coverage gap (never a false accusation). An
-//	RemoveAll       unlink is metadata: until the parent directory is fsync'd a
-//	                crash may legally leave the removed name in place. SimDisk
-//	                applies the unlink immediately and [SimDisk.Crash] never
-//	                restores it, so the harness only ever presents the EASIER
-//	                input to recovery. The states it cannot produce are a stale
-//	                "<dir>/snapshot.bak" surviving the publish path's happy-path
-//	                cleanup, and a stale "<dir>/snapshot.tmp" surviving
-//	                recovery's own best-effort staging cleanup — both of which
-//	                recovery is written to tolerate but is never made to.
+//	Remove          FIXED (rmp #2536). An unlink is metadata, in the same
+//	RemoveAll       durability class as the create and the rename above: until
+//	                the parent directory is fsync'd a crash may legally leave the
+//	                removed name in place. The model applied the unlink
+//	                immediately and [SimDisk.Crash] could never restore it, so
+//	                the harness only ever presented the EASIER input to
+//	                recovery — a stale "<dir>/snapshot.bak" surviving the publish
+//	                path's happy-path cleanup, and a stale "<dir>/snapshot.tmp"
+//	                surviving recovery's own best-effort staging cleanup, were
+//	                both unreachable from the removal side although recovery is
+//	                written to tolerate them. A removal now records an undo (see
+//	                [unlinkUndo]) in the SAME ordered log as a rename, so one
+//	                durable-prefix draw adjudicates both and no crash can keep an
+//	                unlink while discarding a rename issued before it.
 //
 //	Truncate        NOT MODELLED, coverage gap (never a false accusation).
 //	TruncatePath    A shrink is applied immediately and a crash never restores
@@ -254,32 +258,42 @@ type SimDisk struct {
 	// of the OTHER branch of the crash-window non-determinism a rename has: see
 	// [SimDisk.ArmRenameWritebackForPath].
 	renameWritebackArmed bool
-	// renameUndos is the ORDERED log of renames whose new directory entry is not
-	// yet durable, newest last. It is what makes a crash inside a rename produce
-	// a state a real filesystem can produce: without an undo record a crash can
-	// only revoke the new name, losing the old one too, which no filesystem does
-	// (rmp #2514). Each record carries the source name and the dirent durability
-	// that source name itself had at the instant of the rename, so
-	// [SimDisk.Crash] can put the old name back exactly as it was — and so that
-	// a source whose OWN name was never durable is NOT resurrected, because
-	// losing both names is legal precisely when the old name was never
+	// direntUndos is the ONE ORDERED log of directory-entry mutations whose
+	// effect is not yet on stable storage, newest last. It holds renames (rmp
+	// #2514) and unlinks (rmp #2536) TOGETHER, and that is the load-bearing part
+	// of its design: both are metadata mutations of the same directories, a
+	// journalling filesystem commits metadata in ORDER, and therefore an unlink
+	// issued after a rename cannot be durable while that rename is not. One log
+	// with ONE durable-prefix draw is the only shape that guarantees it. Two
+	// independent logs with two draws would let a crash keep an unlink while
+	// rolling back a rename issued before it — an interleaving no filesystem can
+	// produce, which is exactly the class of outcome this model exists to
+	// eliminate.
+	//
+	// Each record carries what is needed to reverse its operation, including the
+	// dirent durability the affected names carried at the instant of the
+	// operation, so [SimDisk.Crash] can put the filesystem back exactly as it
+	// was — and so that a name that was never durable is NOT resurrected,
+	// because losing it is legal precisely when it had never been
 	// crash-survivable.
 	//
-	// A record leaves the log when the rename becomes durable (a
-	// [SimDisk.DirSync] of the new parent) or when a later operation observes
-	// its effect (see [SimDisk.pinRenameUndosLocked]). Both drop the record AND
-	// every record before it, which is what keeps the surviving log a SUFFIX of
-	// the rename history: a journalling filesystem commits in order, so the set
-	// of durable renames is always a prefix of the issued ones.
-	renameUndos []renameUndo
-	// renameSeed is the deterministic sub-stream the crash-outcome choice draws
-	// from. It is derived from the disk seed's VALUE (xor renameCrashSeedMix),
+	// A record leaves the log when its effect becomes durable (a
+	// [SimDisk.DirSync] of the affected parent directory) or when a later
+	// operation makes its undo inapplicable (see
+	// [SimDisk.pinDirentUndosLocked]). Both drop the record AND every record
+	// before it, which is what keeps the surviving log a SUFFIX of the mutation
+	// history, and both APPLY the durability the drop declares (see
+	// [SimDisk.hardenDurableDirentLocked]) rather than only forgetting the
+	// record.
+	direntUndos []direntUndo
+	// direntSeed is the deterministic sub-stream the crash-outcome choice draws
+	// from. It is derived from the disk seed's VALUE (xor direntCrashSeedMix),
 	// exactly as every call site derives the disk seed from the run seed
 	// (NewSeed(cfg.Seed^diskSeedMix)), so the choice is a pure function of the
 	// run seed and replays bit-for-bit — while drawing NOTHING from d.seed, so
 	// turning the model on never perturbs the reproducible torn-write/Sync fault
 	// stream that every other arm here is careful to leave alone.
-	renameSeed *Seed
+	direntSeed *Seed
 	// renameRollbackPath / renameRevokePath are the DESTINATION paths of the two
 	// crash-outcome arms that pin a rename's crash outcome instead of letting
 	// the seed choose it; renameRollbacks / renameRevokes are their fire counts,
@@ -292,13 +306,48 @@ type SimDisk struct {
 	renameRevokes       int64
 	renameRollbackArmed bool
 	renameRevokeArmed   bool
+	// removeWritebackPath / removeRollbackPath are the paths the two one-shot
+	// unlink arms are keyed on, and removeWritebacks / removeRollbacks are their
+	// fire counts — the same reachability observable every other arm here
+	// exposes. They pin the two outcomes a crash immediately after unlink(2) can
+	// produce, exactly as [SimDisk.ArmRenameWritebackForPath] and
+	// [SimDisk.ArmRenameRollbackForPath] pin a rename's two. There is
+	// deliberately no third, impossible-outcome arm: unlike a rename, BOTH of an
+	// unlink's outcomes are legal, so there is no illegal one to reproduce.
+	removeWritebackPath  string
+	removeRollbackPath   string
+	removeWritebacks     int64
+	removeRollbacks      int64
+	removeWritebackArmed bool
+	removeRollbackArmed  bool
+	// removeHits counts the removals that actually unlinked at least one existing
+	// name, in total and per path. It answers a question no other observable can:
+	// whether a TOLERANT cleanup — recovery's best-effort RemoveAll of a stale
+	// staging directory, the publish path's RemoveAll of a stale backup — really
+	// found something to clean, or ran as a no-op. A test that makes a removal
+	// fail to stick and then asserts recovery "handled" the leftover proves
+	// nothing unless the cleanup is known to have deleted it. Mutated only under
+	// d.mu.
+	//
+	// removeHitsByPath is keyed on the paths a caller actually removes, which for
+	// the store are the fixed names of its on-disk layout (wal.tmp,
+	// snapshot.tmp, snapshot.bak and the staged component files), so its size is
+	// bounded by that layout and not by the length of the run.
+	removeHits       int64
+	removeHitsByPath map[string]int64
 	// crashPendingRenames / crashRolledBackRenames record what the LAST
-	// [SimDisk.Crash] adjudicated: how many not-yet-durable renames were in the
-	// log, and how many of them it rolled back. They are the shape observable a
-	// non-vacuity gate reads to prove the crash really landed inside a rename
-	// window rather than after it, and which of the two legal branches it took.
+	// [SimDisk.Crash] adjudicated about RENAMES: how many not-yet-durable ones
+	// were in the log, and how many of them it rolled back.
+	// crashPendingRemoves / crashRestoredRemoves are the same two numbers for
+	// UNLINKS. They are the shape observable a non-vacuity gate reads to prove
+	// the crash really landed inside a metadata window rather than after it, and
+	// which of the legal branches it took. They are counted per kind even though
+	// the log and the draw are shared, because a scenario asserts about the
+	// operation it issued.
 	crashPendingRenames    int
 	crashRolledBackRenames int
+	crashPendingRemoves    int
+	crashRestoredRemoves   int
 	// syncGate, when non-nil, is a ONE-SHOT rendezvous armed on a Sync ordinal by
 	// [SimDisk.ArmSyncGateAt]: the syncGateAt-th Sync blocks inside the call until
 	// the controlling goroutine releases it. It is the only primitive here that
@@ -636,11 +685,124 @@ func (f *simFile) revertToDurable() int64 {
 	return discarded
 }
 
-// renameCrashSeedMix decorrelates the rename crash-outcome sub-stream from the
+// direntCrashSeedMix decorrelates the dirent crash-outcome sub-stream from the
 // disk's own fault stream, so the two draw independently from the same run seed.
 // It follows the derivation convention every [NewSimDisk] call site already uses
 // (NewSeed(cfg.Seed^diskSeedMix)).
-const renameCrashSeedMix uint64 = 0x2514_A70D_5E11_C0DE
+//
+// Its VALUE is unchanged from when the sub-stream carried renames alone (rmp
+// #2514), so a seed that drew a given sequence of crash outcomes still draws that
+// same sequence; what changed with rmp #2536 is only how many records a given
+// crash has to adjudicate.
+const direntCrashSeedMix uint64 = 0x2514_A70D_5E11_C0DE
+
+// direntUndoKind identifies which operation a [direntUndo] reverses. The two
+// kinds share one log and one durable-prefix draw (see the direntUndos field
+// docs on [SimDisk]) and differ only in how a record is undone and in how it is
+// recognised as durable.
+type direntUndoKind uint8
+
+const (
+	// direntUndoRename reverses a [SimDisk.Rename]; the payload is rec.rename.
+	direntUndoRename direntUndoKind = iota
+	// direntUndoUnlink reverses a [SimDisk.Remove] or [SimDisk.RemoveAll]; the
+	// payload is rec.unlink.
+	direntUndoUnlink
+)
+
+// direntUndo is one entry of the shared ordered undo log: a directory-entry
+// mutation whose effect has not yet reached stable storage, tagged with the kind
+// of operation that produced it.
+//
+// The two payloads are held inline rather than behind a pointer or an interface:
+// the log is bounded by the number of metadata operations inside one crash
+// window (single digits in every scenario the harness drives), so the untaken
+// payload costs nothing that matters, and keeping the concrete types visible
+// keeps each one's own documentation and undo function where they belong.
+type direntUndo struct {
+	rename renameUndo
+	unlink unlinkUndo
+	kind   direntUndoKind
+}
+
+// pinsRollback reports whether an arm has pinned this record to the rolled-back
+// branch, which lowers the durable-prefix boundary to it (see
+// [SimDisk.rollbackDirentUndosLocked]).
+func (u *direntUndo) pinsRollback() bool {
+	if u.kind == direntUndoUnlink {
+		return u.unlink.forceRestore
+	}
+	return u.rename.forceRollback
+}
+
+// unlinkUndo is one removal whose unlink has not yet reached stable storage,
+// recorded so [SimDisk.Crash] can put the removed name — or the whole removed
+// subtree — back.
+//
+// It exists because unlink(2) and rmdir(2) mutate a DIRECTORY, which puts them in
+// the same durability class as the create and the rename this model already
+// treats carefully. Neither POSIX nor the Linux man pages address removal
+// durability directly; the applicable rule is the general one in Linux
+// fsync(2) — an fsync of a file "does not necessarily ensure that the entry in
+// the directory containing the file has also reached disk" — strengthened by
+// POSIX Issue 8 XBD §3.368, which states that "an operation that modifies a
+// directory is considered to be a write operation, and a directory's entries are
+// considered to be the data read or written", bringing directory-entry changes,
+// removals included, formally inside synchronized I/O. Two reference
+// implementations treat a deletion as a durability event outright: RocksDB gives
+// it its own reason code (DirFsyncOptions::FsyncReason::kFileDeleted, and
+// PosixDirectory::FsyncWithDirOptions really does fsync the directory for it,
+// even on btrfs where it elides the fsync for a newly synced file), and SQLite
+// makes a deletion the commit point itself (atomiccommit.html §3.11: deleting the
+// rollback journal "is the instant where the transaction commits", with §9.3
+// flagging that assumption as load-bearing). ALICE decomposes unlink into
+// "delete dir entry + truncate if last link", so a removal is not even atomic in
+// its default persistence model.
+//
+// Unlike a rename, a removal has NO illegal crash outcome: the name is either
+// still there or gone, and both are states a filesystem produces. That is why
+// there is no unlink counterpart to [SimDisk.ArmRenameRevokeBothForPath].
+type unlinkUndo struct {
+	// path is the name the caller removed. For [SimDisk.RemoveAll] it is the root
+	// of the removed subtree.
+	path string
+	// files / dirs are the file and directory-durability entries the removal
+	// deleted, captured before the deletion. The *simFile values are shared, not
+	// cloned — an undo restores NAMES, and the inode a name points at is the same
+	// object either way — which is also why no separate dirent-durability field
+	// is needed for the files: each simFile carries its own, so restoring the
+	// object restores the durability the name had at the instant of the unlink.
+	files map[string]*simFile
+	dirs  map[string]bool
+	// prunedDirs holds the directory-durability entries the removal deleted
+	// because unlinking this name emptied the directory that held it (see
+	// [SimDisk.pruneGhostDirEntriesLocked]). Restoring the removal puts a name
+	// back INTO that directory, so the entry is put back to describe it again,
+	// with its original value. It is nil in the common case, where the directory
+	// still holds other names. This is the record [SimDisk.Remove] discarded
+	// until rmp #2536, when it had no undo record to put it on.
+	//
+	// Stated precisely, because the obvious justification for it is no longer
+	// true: restoring the entry is NOT what keeps the crash from losing less than
+	// a real one, and it is not observable in any post-crash state. Measured over
+	// 96 seeds, for this record and for [renameUndo.prunedDirs] alike, suppressing
+	// the restore leaves the durable image identical. The reason is that every
+	// record which leaves the undo log now has its durability APPLIED
+	// ([SimDisk.dropDirentUndoPrefixLocked]), so "a non-durable directory entry
+	// with no live record behind it" — the state whose restore would have
+	// mattered — is unreachable by construction. It is kept because the undo pass
+	// walks the log backwards over LIVE state ([SimDisk.undoRenameLocked] re-reads
+	// the current subtree), so an intermediate state that misdescribed a
+	// directory's durability would be a trap for the next record's undo.
+	prunedDirs map[string]bool
+	// subtree distinguishes a [SimDisk.RemoveAll] from a [SimDisk.Remove]. It is
+	// carried for diagnostics and for the shape observables; the undo itself is
+	// the same map restore either way.
+	subtree bool
+	// forceRestore pins this record's outcome to the restored branch instead of
+	// letting the seed choose ([SimDisk.ArmRemoveRollbackForPath]).
+	forceRestore bool
+}
 
 // renameUndo is one rename whose new directory entry is not yet durable,
 // recorded so [SimDisk.Crash] can put the filesystem back the way it was before
@@ -710,14 +872,15 @@ func NewSimDisk(seed *Seed, faultRate float64) *SimDisk {
 		faultRate = 1
 	}
 	return &SimDisk{
-		files:     make(map[string]*simFile),
-		faultRate: faultRate,
-		seed:      seed,
-		dirs:      make(map[string]bool),
-		// Derived sub-stream for the rename crash-outcome choice: a pure
+		files:            make(map[string]*simFile),
+		faultRate:        faultRate,
+		seed:             seed,
+		dirs:             make(map[string]bool),
+		removeHitsByPath: make(map[string]int64),
+		// Derived sub-stream for the dirent crash-outcome choice: a pure
 		// function of the same seed value, drawn independently of the fault
-		// stream (see the renameSeed field docs).
-		renameSeed: NewSeed(seed.Value() ^ renameCrashSeedMix),
+		// stream (see the direntSeed field docs).
+		direntSeed: NewSeed(seed.Value() ^ direntCrashSeedMix),
 	}
 }
 
@@ -997,8 +1160,8 @@ func (d *SimDisk) Rename(oldPath, newPath string) error {
 	// a call that returns an error moved nothing and must therefore make nothing
 	// durable.
 	pin := func() {
-		d.pinRenameUndosLocked(oldPath)
-		d.pinRenameUndosLocked(newPath)
+		d.pinDirentUndosLocked(oldPath)
+		d.pinDirentUndosLocked(newPath)
 	}
 
 	if f, ok := d.files[oldPath]; ok {
@@ -1021,8 +1184,12 @@ func (d *SimDisk) Rename(oldPath, newPath string) error {
 		// same-directory rename (every rename the engine actually issues:
 		// path+".tmp" -> path) leaves the directory populated and prunes nothing.
 		rec.prunedDirs = d.pruneGhostDirEntriesLocked(oldPath)
-		if !durable {
-			d.renameUndos = append(d.renameUndos, rec)
+		if durable {
+			// This rename's dirent is already on stable storage, so by journal
+			// order every pending mutation before it is too.
+			d.pinAllDirentUndosLocked()
+		} else {
+			d.direntUndos = append(d.direntUndos, direntUndo{kind: direntUndoRename, rename: rec})
 		}
 		return nil
 	}
@@ -1098,8 +1265,10 @@ func (d *SimDisk) Rename(oldPath, newPath string) error {
 	// creation, mirroring root-level files (see [isRootLevel]). An armed
 	// write-back (see above) links it durably here instead.
 	d.dirs[newPath] = durable
-	if !durable {
-		d.renameUndos = append(d.renameUndos, rec)
+	if durable {
+		d.pinAllDirentUndosLocked()
+	} else {
+		d.direntUndos = append(d.direntUndos, direntUndo{kind: direntUndoRename, rename: rec})
 	}
 	return nil
 }
@@ -1133,51 +1302,143 @@ func (d *SimDisk) captureSubtreeLocked(path string) (map[string]*simFile, map[st
 	return files, dirs
 }
 
-// pinRenameUndosLocked pins into the durable prefix every pending rename whose
+// pinDirentUndosLocked pins into the durable prefix every pending RENAME whose
 // new name is path, or lies under path — that is, every record whose undo would
-// now resurrect a name this operation is about to move or unlink — together with
-// every record BEFORE it.
+// now resurrect a name this operation is about to move — together with every
+// record BEFORE it, of either kind.
 //
 // Dropping the earlier records too is not incidental: a journalling filesystem
-// commits its metadata in order, so the durable renames are always a PREFIX of
+// commits its metadata in order, so the durable mutations are always a PREFIX of
 // the issued ones. Keeping the log a suffix is what makes the crash outcomes
 // compose — rolling back the publish rename of an archive/publish pair yields
 // the stranded-backup state, and there is no interleaving in which the publish
 // survives while the archive that made room for it does not.
 //
+// Only rename records are MATCHED. A removal's undo stays applicable when a later
+// operation touches the same path, because the records are undone newest first:
+// the later record is reversed before the earlier one, which puts the path back
+// in the state that earlier undo expects. An unlink record therefore leaves the
+// log only through the prefix rule, or when its own directory is fsync'd.
+//
 // The caller holds d.mu.
-func (d *SimDisk) pinRenameUndosLocked(path string) {
+func (d *SimDisk) pinDirentUndosLocked(path string) {
 	last := -1
-	for i, rec := range d.renameUndos {
-		if rec.newPath == path || strings.HasPrefix(rec.newPath, path+"/") {
+	for i := range d.direntUndos {
+		rec := &d.direntUndos[i]
+		if rec.kind != direntUndoRename {
+			continue
+		}
+		if rec.rename.newPath == path || strings.HasPrefix(rec.rename.newPath, path+"/") {
 			last = i
 		}
 	}
-	if last >= 0 {
-		d.renameUndos = append(d.renameUndos[:0:0], d.renameUndos[last+1:]...)
-	}
+	d.dropDirentUndoPrefixLocked(last)
 }
 
-// pruneDurableRenameUndosLocked drops every pending rename whose new name has
-// since become durable, and every record before it (see
-// [SimDisk.pinRenameUndosLocked] for why the log stays a suffix). It is called
-// after a [SimDisk.DirSync], the only operation that makes a dirent durable.
+// pruneDurableDirentUndosLocked drops every pending record whose effect has since
+// become durable, and every record before it (see [SimDisk.pinDirentUndosLocked]
+// for why the log stays a suffix). It is called after a directory fsync of dir,
+// the only operation that makes a dirent durable.
+//
+// A rename is recognised as durable by inspecting the name it created. An unlink
+// cannot be: the name is gone, so there is nothing left to carry a flag. What
+// makes an unlink durable is an fsync of the directory the name was removed FROM,
+// which is what dir is compared against here. The two recognitions have to live
+// in the same pass, because the prefix rule spans both kinds.
+//
 // The caller holds d.mu.
-func (d *SimDisk) pruneDurableRenameUndosLocked() {
+func (d *SimDisk) pruneDurableDirentUndosLocked(dir string) {
 	last := -1
-	for i, rec := range d.renameUndos {
-		if rec.dirRename {
-			if dur, tracked := d.dirs[rec.newPath]; tracked && dur {
+	for i := range d.direntUndos {
+		rec := &d.direntUndos[i]
+		if rec.kind == direntUndoUnlink {
+			if pathpkg.Dir(rec.unlink.path) == dir {
 				last = i
 			}
 			continue
 		}
-		if f, ok := d.files[rec.newPath]; ok && f.direntDurable {
+		if rec.rename.dirRename {
+			if dur, tracked := d.dirs[rec.rename.newPath]; tracked && dur {
+				last = i
+			}
+			continue
+		}
+		if f, ok := d.files[rec.rename.newPath]; ok && f.direntDurable {
 			last = i
 		}
 	}
-	if last >= 0 {
-		d.renameUndos = append(d.renameUndos[:0:0], d.renameUndos[last+1:]...)
+	d.dropDirentUndoPrefixLocked(last)
+}
+
+// dropDirentUndoPrefixLocked removes records [0, last] from the log and APPLIES
+// the durability that dropping them declares. A record with no undo left is a
+// record whose effect a crash can no longer reverse, which is precisely the
+// definition of durable, so the state has to say so too.
+//
+// Forgetting the record without hardening its dirent was a real defect, not a
+// theoretical one: a chained rename (a -> b, then b -> c) pinned the first record
+// while leaving b's dirent non-durable, so a crash that rolled back the second
+// rename restored b and the ordinary revoke pass then deleted it — losing BOTH
+// names of a rename, the exact outcome rmp #2514 exists to eliminate, reachable
+// with no arming at all on 23 of 64 sampled seeds. The same hole opened through
+// the prune path, where an fsync of one directory declares an earlier rename in a
+// DIFFERENT directory durable by the prefix rule; and it would have opened a
+// third time through rmp #2536, since a removal of a pending rename's destination
+// pins that rename and the restored name would then have been dropped. Applying
+// the durability at the single point where records leave the log closes all
+// three. last < 0 means nothing matched. The caller holds d.mu.
+// pinAllDirentUndosLocked declares the ENTIRE pending log durable. It is called
+// when an operation's own effect is durable the instant it is issued — a
+// root-level name (see [isRootLevel]) or an armed write-back
+// ([SimDisk.ArmRenameWritebackForPath], [SimDisk.ArmRemoveWritebackForPath]) —
+// because metadata reaches the journal in ORDER: if this mutation is on stable
+// storage then every mutation issued before it is too.
+//
+// Without it a write-back arm manufactured the impossible interleaving it exists
+// to avoid. Arming the publish rename of the snapshot protocol while the archive
+// rename before it stayed pending left the crash free to roll the archive back
+// while keeping the publish — a durable prefix with a hole in it, which no
+// journalling filesystem produces — and it needed no second arm to do it, only
+// the ordinary seed draw over the one remaining record. The caller holds d.mu,
+// and must call it only once the operation is known to have succeeded: a call
+// that returns an error mutated nothing and must therefore make nothing durable.
+func (d *SimDisk) pinAllDirentUndosLocked() {
+	d.dropDirentUndoPrefixLocked(len(d.direntUndos) - 1)
+}
+
+func (d *SimDisk) dropDirentUndoPrefixLocked(last int) {
+	if last < 0 {
+		return
+	}
+	for i := 0; i <= last; i++ {
+		d.hardenDurableDirentLocked(&d.direntUndos[i])
+	}
+	d.direntUndos = append(d.direntUndos[:0:0], d.direntUndos[last+1:]...)
+}
+
+// hardenDurableDirentLocked marks the names a record created as crash-survivable,
+// which is what "this record's effect reached stable storage" means in the state
+// rather than merely in the log.
+//
+// For a rename it hardens the destination — for a DIRECTORY rename only the
+// directory's OWN name, because the dirents inside it keep whatever durability
+// they had: a staging tree published without its own directory fsync still loses
+// its components, and a publish rename surviving never implies the component
+// creates did. For an unlink there is nothing to harden: the name is absent, and
+// a durable unlink is exactly an absence the crash can no longer undo. The caller
+// holds d.mu.
+func (d *SimDisk) hardenDurableDirentLocked(rec *direntUndo) {
+	if rec.kind != direntUndoRename {
+		return
+	}
+	if rec.rename.dirRename {
+		if _, tracked := d.dirs[rec.rename.newPath]; tracked {
+			d.dirs[rec.rename.newPath] = true
+		}
+		return
+	}
+	if f, ok := d.files[rec.rename.newPath]; ok {
+		f.direntDurable = true
 	}
 }
 
@@ -1240,6 +1501,15 @@ func (d *SimDisk) ArmRenameFaultForPath(newPath string) {
 // Arming it on the archive destination therefore selects the "the archive
 // rename reached disk, the publish rename did not" branch of the window, which
 // is what strands a backup for recovery to promote.
+//
+// Firing it also declares every mutation still pending at that instant durable
+// (see [SimDisk.pinAllDirentUndosLocked]), because metadata reaches the journal in
+// order. Without that, arming the LATER rename of a pair — the publish rather
+// than the archive — left the crash free to roll the earlier one back while
+// keeping this one, a durable prefix with a hole in it that no filesystem
+// produces. Arming the later step is therefore no longer a way to construct an
+// impossible interleaving; it simply pins more of the window than intended, which
+// [SimDisk.PendingRenameCount] makes visible.
 //
 // It draws nothing from the [Seed], so arming never perturbs the reproducible
 // fault stream, and it must be called from the controlling goroutine before the
@@ -1360,14 +1630,170 @@ func (d *SimDisk) RenameRevokeBothCount() int64 {
 	return d.renameRevokes
 }
 
+// ArmRemoveWritebackForPath arms a ONE-SHOT unlink WRITE-BACK: the next
+// [SimDisk.Remove] or [SimDisk.RemoveAll] of path is treated as having reached
+// stable storage immediately, so no [SimDisk.Crash] can bring the name back. The
+// arm then clears. An empty path disarms. [SimDisk.RemoveWritebackCount] reports
+// how many times it fired.
+//
+// It pins the "the removal stuck" branch of the crash window, and is the exact
+// counterpart of [SimDisk.ArmRemoveRollbackForPath]. Neither is needed for the
+// model to be sound — an unarmed removal gets a seed-chosen outcome from the same
+// two — but a test that must assert ONE of them unconditionally needs the choice
+// pinned rather than sampled. Pinning it here rather than by fsyncing the parent
+// directory is what keeps the rest of the scenario's dirents untouched: a
+// [SimDisk.DirSync] would harden every name in that directory too, so the
+// assertion would no longer be about the removal.
+//
+// Firing it also declares every mutation still pending at that instant durable
+// (see [SimDisk.pinAllDirentUndosLocked]): an unlink that reached the journal
+// implies everything issued before it did, so pinning the prefix is what stops
+// this arm from producing the one interleaving the shared undo log exists to
+// forbid — an unlink kept while a rename issued before it is rolled back.
+//
+// It draws nothing from the [Seed] or from the dirent sub-stream, so arming never
+// perturbs either reproducible stream, and it must be called from the controlling
+// goroutine before the removal it targets.
+func (d *SimDisk) ArmRemoveWritebackForPath(path string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if path == "" {
+		d.removeWritebackArmed = false
+		d.removeWritebackPath = ""
+		return
+	}
+	d.removeWritebackArmed = true
+	d.removeWritebackPath = path
+}
+
+// ArmRemoveRollbackForPath arms a ONE-SHOT selection of the RESTORED branch of an
+// unlink's crash window: the next [SimDisk.Remove] or [SimDisk.RemoveAll] of path
+// is pinned so that a subsequent [SimDisk.Crash] puts the name — or the whole
+// removed subtree — back, each entry with the dirent durability it carried at the
+// instant of the removal. The arm then clears. An empty path disarms.
+// [SimDisk.RemoveRollbackCount] reports how many times it fired.
+//
+// It is the arm that reaches the engine's leftover-artefact tolerance FROM THE
+// REMOVAL SIDE, which no other primitive can: recovery's best-effort
+// RemoveAll("<dir>/snapshot.tmp") and the publish path's stale-backup
+// RemoveAll("<dir>/snapshot.bak") both exist to tolerate an artefact a previous
+// crash left behind, and before rmp #2536 the harness could only reach that state
+// by crashing BEFORE the removal, never by the removal failing to reach disk —
+// which is the case a real deployment hits. [SimDisk.RemoveHitCountForPath] is
+// how a scenario then proves the tolerant cleanup really found something rather
+// than running as a no-op.
+//
+// Because the durable metadata mutations of a journalling filesystem are always a
+// prefix of the issued ones, pinning a removal to the restored branch also rolls
+// back every LATER pending record, rename or removal alike; it never rolls back an
+// earlier one.
+//
+// It draws nothing from the [Seed] or from the dirent sub-stream, and must be
+// called from the controlling goroutine before the removal it targets.
+func (d *SimDisk) ArmRemoveRollbackForPath(path string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if path == "" {
+		d.removeRollbackArmed = false
+		d.removeRollbackPath = ""
+		return
+	}
+	d.removeRollbackArmed = true
+	d.removeRollbackPath = path
+}
+
+// RemoveWritebackCount returns how many armed unlink write-backs actually fired
+// since construction (see [SimDisk.ArmRemoveWritebackForPath]). A scenario reads
+// it to prove the branch it pinned was really reached rather than silently
+// ignored because the path never matched.
+func (d *SimDisk) RemoveWritebackCount() int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.removeWritebacks
+}
+
+// RemoveRollbackCount returns how many armed unlink rollbacks actually fired
+// since construction (see [SimDisk.ArmRemoveRollbackForPath]). A scenario reads
+// it to prove the branch it pinned was really reached rather than silently
+// ignored because the path never matched.
+func (d *SimDisk) RemoveRollbackCount() int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.removeRollbacks
+}
+
+// RemoveHitCount returns how many removals actually unlinked at least one
+// existing name since construction. A removal of an absent path is a no-op and is
+// not counted.
+//
+// It is the observable that separates a tolerant cleanup which really cleaned
+// something from one that ran as a no-op — the difference between demonstrating
+// that an engine branch handled a leftover artefact and merely asserting it.
+func (d *SimDisk) RemoveHitCount() int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.removeHits
+}
+
+// RemoveHitCountForPath returns how many removals of exactly path actually
+// unlinked something (see [SimDisk.RemoveHitCount]). A scenario brackets it
+// around the operation under test and reads the DELTA, so a cleanup that runs
+// several times over the same name stays attributable.
+func (d *SimDisk) RemoveHitCountForPath(path string) int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.removeHitsByPath[path]
+}
+
+// PendingRemoveCount returns how many removals are currently recorded as
+// not-yet-durable, i.e. how many a [SimDisk.Crash] issued now could put back. A
+// scenario reads it to prove it really is INSIDE an unlink window before
+// crashing, instead of assuming the timing worked out.
+func (d *SimDisk) PendingRemoveCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.countPendingLocked(direntUndoUnlink)
+}
+
+// LastCrashRemoveOutcome reports what the most recent [SimDisk.Crash] adjudicated
+// about REMOVALS: how many not-yet-durable ones it found pending, and how many of
+// those it restored. The remainder (pending-restored) stuck. Both are zero before
+// the first crash.
+//
+// It is the shape observable a non-vacuity gate reads: "the crash landed inside
+// the unlink window" is pending > 0, and "the removal did not stick" is
+// restored > 0. A verdict gate must never be conditioned on it — an unmet
+// precondition is a reason to report, not to pass.
+func (d *SimDisk) LastCrashRemoveOutcome() (pending, restored int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.crashPendingRemoves, d.crashRestoredRemoves
+}
+
 // PendingRenameCount returns how many renames are currently recorded as
 // not-yet-durable, i.e. how many a [SimDisk.Crash] issued now would have to
 // adjudicate. A scenario reads it to prove it really is INSIDE a rename window
 // before crashing, instead of assuming the timing worked out.
+//
+// Renames and removals share ONE ordered log (see the direntUndos field docs on
+// [SimDisk]), but they are counted separately here because a scenario asserts
+// about the operation it issued.
 func (d *SimDisk) PendingRenameCount() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return len(d.renameUndos)
+	return d.countPendingLocked(direntUndoRename)
+}
+
+// countPendingLocked returns how many records of the given kind the shared undo
+// log currently holds. The caller holds d.mu.
+func (d *SimDisk) countPendingLocked(kind direntUndoKind) int {
+	n := 0
+	for i := range d.direntUndos {
+		if d.direntUndos[i].kind == kind {
+			n++
+		}
+	}
+	return n
 }
 
 // LastCrashRenameOutcome reports what the most recent [SimDisk.Crash]
@@ -1392,8 +1818,9 @@ func (d *SimDisk) LastCrashRenameOutcome() (pending, rolledBack int) {
 // removal leaves a d.dirs entry behind" hold by construction: every path that
 // unlinks a whole subtree goes through this one body. The name-level unlinks are
 // covered by [SimDisk.pruneGhostDirEntriesLocked]; together the two give the
-// invariant that a non-durable entry never outlives its subtree. Maintaining it by hand was
-// violable and duly violated — [SimDisk.Rename] and [SimDisk.undoRenameLocked]
+// invariant that a non-durable entry never outlives its subtree. Maintaining it
+// by hand was violable and duly violated — [SimDisk.Rename] and
+// [SimDisk.undoRenameLocked]
 // hand-deleted the entries while Remove/RemoveAll did not, so a directory that
 // had once been published by rename and was then removed left an entry behind
 // with its value false. If a directory was later created in place at that same
@@ -1429,20 +1856,75 @@ func (d *SimDisk) MkdirAll(_ string, _ fs.FileMode) error { return nil }
 
 // Remove deletes the file at path. Removing an absent path is a no-op, matching
 // the tolerant cleanup the snapshot writer relies on.
+//
+// # Crash outcome
+//
+// The unlink is a mutation of the containing DIRECTORY, so until that directory
+// is fsync'd a crash may legally leave the name in place. It is recorded in the
+// shared dirent undo log (see [unlinkUndo] and the direntUndos field docs on
+// [SimDisk]) so a [SimDisk.Crash] can restore it; which of the two legal
+// outcomes a given crash selects is drawn from the seed unless an arm pins it
+// ([SimDisk.ArmRemoveWritebackForPath], [SimDisk.ArmRemoveRollbackForPath]).
 func (d *SimDisk) Remove(path string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	// Unlinking a name a pending rename created makes that rename's undo
-	// unusable — rolling it back would resurrect a path the caller deliberately
-	// deleted — so pin it into the durable prefix first.
-	d.pinRenameUndosLocked(path)
+	f, ok := d.files[path]
+	if !ok {
+		// Nothing was unlinked, so there is no metadata mutation to record and
+		// no cleanup to count as having found anything.
+		return nil
+	}
+	d.noteRemoveHitLocked(path)
+	rec := unlinkUndo{path: path, files: map[string]*simFile{path: f}}
+	durable := d.consumeRemoveArmsLocked(path, &rec)
 	delete(d.files, path)
-	// The report is discarded: an unlink has no undo record for a crash to roll
-	// back, so nothing can put a name back into the emptied directory. When
-	// removal becomes crash-reversible (rmp #2536) it must record this exactly as
-	// [SimDisk.Rename] does.
-	_ = d.pruneGhostDirEntriesLocked(path)
+	// Recorded rather than discarded, which closes the note rmp #2538 left here: a
+	// restored name returns into a directory whose entry this prune may have
+	// deleted, so the entry travels on the record. See [unlinkUndo] for why the
+	// post-crash state is nonetheless insensitive to it.
+	rec.prunedDirs = d.pruneGhostDirEntriesLocked(path)
+	if durable {
+		// This unlink is already on stable storage, so by journal order every
+		// pending mutation before it is too.
+		d.pinAllDirentUndosLocked()
+	} else {
+		d.direntUndos = append(d.direntUndos, direntUndo{kind: direntUndoUnlink, unlink: rec})
+	}
 	return nil
+}
+
+// consumeRemoveArmsLocked applies the two one-shot unlink arms to a removal of
+// path and reports whether the unlink is to be treated as already durable, in
+// which case the caller records no undo at all.
+//
+// Both arms are consumed here even when the removal turns out to be durable for
+// another reason, so an arm is one-shot in the same sense as every other arm on
+// this disk. A root-level name is durable by the same rule that governs its
+// creation and its renames (see [isRootLevel]): the WAL's own unlinks stay
+// governed by the data-durability model, not the dirent model, which keeps
+// WAL-only scenarios byte-compatible. The caller holds d.mu.
+func (d *SimDisk) consumeRemoveArmsLocked(path string, rec *unlinkUndo) bool {
+	durable := isRootLevel(path)
+	if d.removeWritebackArmed && d.removeWritebackPath == path {
+		d.removeWritebackArmed = false
+		d.removeWritebackPath = ""
+		d.removeWritebacks++
+		durable = true
+	}
+	if d.removeRollbackArmed && d.removeRollbackPath == path {
+		d.removeRollbackArmed = false
+		d.removeRollbackPath = ""
+		d.removeRollbacks++
+		rec.forceRestore = true
+	}
+	return durable
+}
+
+// noteRemoveHitLocked records that a removal actually unlinked something, in
+// total and for path. The caller holds d.mu.
+func (d *SimDisk) noteRemoveHitLocked(path string) {
+	d.removeHits++
+	d.removeHitsByPath[path]++
 }
 
 // pruneGhostDirEntriesLocked drops every not-yet-durable directory entry that the
@@ -1494,13 +1976,41 @@ func (d *SimDisk) hasSubtreeLocked(dir string) bool {
 // RemoveAll deletes path and every file under path/. Removing an absent path is
 // a no-op, matching os.RemoveAll and the staging/backup cleanup the snapshot
 // writer relies on.
+//
+// # Crash outcome
+//
+// Same as [SimDisk.Remove], extended to the subtree: the whole removal is one
+// record in the shared dirent undo log, so a crash either keeps it or restores
+// the entire subtree with each name's original dirent durability. It is one
+// record and not one per name because the caller issued one removal, and a crash
+// that restored half a subtree would model an interleaving os.RemoveAll's
+// callers never see.
 func (d *SimDisk) RemoveAll(path string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	// Same reasoning as [SimDisk.Remove], extended to the subtree: a pending
-	// rename whose new name is path, or lies under it, can no longer be undone.
-	d.pinRenameUndosLocked(path)
+	files, dirs := d.captureSubtreeLocked(path)
+	if len(files) == 0 && len(dirs) == 0 {
+		return nil
+	}
+	if len(files) > 0 {
+		// A subtree of directory entries alone (an emptied publish directory that
+		// still carries its durability entry) is a metadata mutation worth
+		// reversing, but it never removed a NAME a tolerant cleanup could have
+		// found, so it is not counted as a hit.
+		d.noteRemoveHitLocked(path)
+	}
+	rec := unlinkUndo{path: path, files: files, dirs: dirs, subtree: true}
+	durable := d.consumeRemoveArmsLocked(path, &rec)
 	d.removeSubtreeLocked(path)
+	// The subtree's own root is gone, so only an ANCESTOR can be left describing
+	// an empty directory; the capture above already holds every entry at or under
+	// path (see [SimDisk.pruneGhostDirEntriesLocked]).
+	rec.prunedDirs = d.pruneGhostDirEntriesLocked(path)
+	if durable {
+		d.pinAllDirentUndosLocked()
+	} else {
+		d.direntUndos = append(d.direntUndos, direntUndo{kind: direntUndoUnlink, unlink: rec})
+	}
 	return nil
 }
 
@@ -1748,8 +2258,8 @@ func (d *SimDisk) dirSyncLocked(dir, child string) error {
 			d.dirs[dp] = true
 		}
 	}
-	// A rename that has reached stable storage can no longer be rolled back.
-	d.pruneDurableRenameUndosLocked()
+	// A mutation that has reached stable storage can no longer be reversed.
+	d.pruneDurableDirentUndosLocked(dir)
 	return nil
 }
 
@@ -1779,10 +2289,12 @@ func (d *SimDisk) CrashProcess() {
 	defer d.mu.Unlock()
 	d.lastCrashKind = CrashKindProcess
 	d.lastCrashDiscardedBytes = 0
-	// The rename log is untouched, but the shape observables still report what
-	// this crash SAW, so a gate can prove it landed inside a publish window.
-	d.crashPendingRenames = len(d.renameUndos)
+	// The undo log is untouched, but the shape observables still report what this
+	// crash SAW, so a gate can prove it landed inside a publish window.
+	d.crashPendingRenames = d.countPendingLocked(direntUndoRename)
+	d.crashPendingRemoves = d.countPendingLocked(direntUndoUnlink)
 	d.crashRolledBackRenames = 0
+	d.crashRestoredRemoves = 0
 	// hostCrashGen is deliberately NOT bumped: an fsync already issued to the
 	// kernel completes even though the process that issued it is gone.
 }
@@ -1832,16 +2344,34 @@ func (d *SimDisk) CrashProcess() {
 // pass below, which is the one case in which losing both names IS legal: that
 // name had never been crash-survivable.
 //
-// How many of the pending renames are rolled back is drawn from the disk's
-// rename sub-stream, so it is a reproducible function of the run seed
-// (see the renameSeed field docs), and the renames that survive are always a
-// PREFIX of the issued ones, as a journalling filesystem guarantees. An armed
-// [SimDisk.ArmRenameRollbackForPath] pins the boundary at or before that rename
+// # Removals are restored, not applied unconditionally
+//
+// An unlink is a mutation of the containing directory, in the same durability
+// class as the create and the rename above, so a crash before that directory is
+// fsync'd may legally leave the removed name IN PLACE. Crash therefore restores
+// the removals it does not keep, each entry with the dirent durability it carried
+// at the instant of the unlink (see [unlinkUndo]). Both outcomes are legal here —
+// unlike a rename there is no impossible third one — and the branch that matters
+// is the restore: it is the only way the harness can reach the engine's tolerance
+// of a leftover "<dir>/snapshot.tmp" or "<dir>/snapshot.bak" FROM THE REMOVAL
+// SIDE, rather than by crashing before the removal was ever issued (rmp #2536).
+//
+// # One ordered log, one draw
+//
+// How much of the pending metadata is kept is drawn ONCE from the disk's dirent
+// sub-stream over the renames and the removals TOGETHER, so it is a reproducible
+// function of the run seed (see the direntSeed field docs) and the mutations that
+// survive are always a PREFIX of the issued ones, as a journalling filesystem
+// guarantees. Drawing per kind would let a crash keep an unlink while rolling back
+// a rename issued before it, which is not an interleaving a filesystem can
+// produce. An armed [SimDisk.ArmRenameRollbackForPath] or
+// [SimDisk.ArmRemoveRollbackForPath] pins the boundary at or before that record
 // instead of sampling it, and an armed [SimDisk.ArmRenameRevokeBothForPath]
 // deliberately produces the impossible both-names-lost outcome for tests of the
-// harness itself. Renames already made durable — by a [SimDisk.DirSync] of the
-// new parent, by [SimDisk.ArmRenameWritebackForPath], or by being root-level —
-// are never rolled back.
+// harness itself. Mutations already made durable — by a [SimDisk.DirSync] of the
+// affected directory, by [SimDisk.ArmRenameWritebackForPath] or
+// [SimDisk.ArmRemoveWritebackForPath], or by being root-level — are never
+// reversed.
 //
 // CrashHost mutates the SimDisk in place. It is driven from the single
 // simulation goroutine, but it may run while another goroutine is parked inside
@@ -1855,7 +2385,7 @@ func (d *SimDisk) CrashHost() {
 	// Invalidate every fsync currently in flight before anything else: the power
 	// went out with the write-back incomplete.
 	d.hostCrashGen++
-	d.rollbackRenamesLocked()
+	d.rollbackDirentUndosLocked()
 	// Drop directories whose own dirent never became durable, taking their
 	// whole subtree with them (a lost directory rename loses every child).
 	for dp, durable := range d.dirs {
@@ -1882,26 +2412,38 @@ func (d *SimDisk) CrashHost() {
 	d.lastCrashDiscardedBytes = discarded
 }
 
-// rollbackRenamesLocked undoes the trailing run of not-yet-durable renames the
-// crash did not keep, newest first, and clears the log. The caller holds d.mu.
+// rollbackDirentUndosLocked undoes the trailing run of not-yet-durable dirent
+// mutations the crash did not keep, newest first, and clears the log. The caller
+// holds d.mu.
 //
-// keep is the number of leading records treated as durable. It is drawn
-// uniformly from [0, n] — every prefix length is equally likely, so for the
-// publish protocol's archive/publish pair each of the three reachable durable
-// images is sampled — and then lowered to the first record an arm pinned to the
-// rolled-back branch. The draw is taken whenever the log is non-empty, armed or
-// not, so the sub-stream's position depends only on the sequence of crash log
-// lengths and not on which arms a scenario happened to install.
-func (d *SimDisk) rollbackRenamesLocked() {
-	n := len(d.renameUndos)
-	d.crashPendingRenames = n
+// keep is the number of leading records treated as durable. It is drawn ONCE,
+// uniformly from [0, n] over the WHOLE log — renames and removals together —
+// because a journalling filesystem commits metadata in order and the two are
+// metadata mutations of the same directories: an unlink issued after a rename
+// cannot be durable while that rename is not. A second, independent draw per kind
+// would produce exactly that impossible interleaving. Every prefix length is
+// equally likely, so for the publish protocol's archive/publish pair each of the
+// three reachable durable images is sampled. The boundary is then lowered to the
+// first record an arm pinned to the rolled-back branch, of either kind. The draw
+// is taken whenever the log is non-empty, armed or not, so the sub-stream's
+// position depends only on the sequence of crash log lengths and not on which arms
+// a scenario happened to install.
+//
+// Undoing newest first is what lets records of different kinds compose: a removal
+// of a name a pending rename created is reversed before that rename is, so the
+// rename's undo finds the path in the state it expects.
+func (d *SimDisk) rollbackDirentUndosLocked() {
+	n := len(d.direntUndos)
+	d.crashPendingRenames = d.countPendingLocked(direntUndoRename)
+	d.crashPendingRemoves = d.countPendingLocked(direntUndoUnlink)
 	d.crashRolledBackRenames = 0
+	d.crashRestoredRemoves = 0
 	if n == 0 {
 		return
 	}
-	keep := d.renameSeed.IntN(n + 1)
-	for i, rec := range d.renameUndos {
-		if rec.forceRollback {
+	keep := d.direntSeed.IntN(n + 1)
+	for i := range d.direntUndos {
+		if d.direntUndos[i].pinsRollback() {
 			// The earliest pinned record lowers the boundary; anything after it
 			// is rolled back by the prefix rule anyway.
 			if i < keep {
@@ -1911,32 +2453,46 @@ func (d *SimDisk) rollbackRenamesLocked() {
 		}
 	}
 	for i := n - 1; i >= keep; i-- {
-		d.undoRenameLocked(d.renameUndos[i])
-	}
-	// A rename this crash KEPT is a rename that reached stable storage, so its
-	// new name must survive the revoke pass that follows. Without this the kept
-	// branch would revoke the new dirent while the old name has already been
-	// unlinked — which is the impossible both-names-lost outcome this whole
-	// model exists to eliminate.
-	//
-	// For a directory rename only the directory's OWN name becomes durable. The
-	// dirents INSIDE it keep whatever durability they had, so a staging tree
-	// published without its own directory fsync still loses its components: the
-	// publish rename surviving never implies the component creates did.
-	for i := 0; i < keep; i++ {
-		rec := d.renameUndos[i]
-		if rec.dirRename {
-			if _, tracked := d.dirs[rec.newPath]; tracked {
-				d.dirs[rec.newPath] = true
-			}
+		rec := &d.direntUndos[i]
+		if rec.kind == direntUndoUnlink {
+			d.undoUnlinkLocked(&rec.unlink)
+			d.crashRestoredRemoves++
 			continue
 		}
-		if f, ok := d.files[rec.newPath]; ok {
-			f.direntDurable = true
-		}
+		d.undoRenameLocked(&rec.rename)
+		d.crashRolledBackRenames++
 	}
-	d.crashRolledBackRenames = n - keep
-	d.renameUndos = nil
+	// A record this crash KEPT is a mutation that reached stable storage, so the
+	// name it created must survive the revoke pass that follows. Without this the
+	// kept branch of a rename would revoke the new dirent while the old name has
+	// already been unlinked — the impossible both-names-lost outcome this whole
+	// model exists to eliminate. It is the same hardening a record gets when it
+	// leaves the log through a pin or a prune, so the three paths cannot drift.
+	for i := 0; i < keep; i++ {
+		d.hardenDurableDirentLocked(&d.direntUndos[i])
+	}
+	d.direntUndos = nil
+}
+
+// undoUnlinkLocked reverses one recorded removal: it puts every file and
+// directory-durability entry the removal deleted back where it was, each with the
+// dirent durability it carried at the instant of the unlink.
+//
+// A restored name whose own dirent was never durable is put back non-durable and
+// then dropped again by the ordinary revoke pass, which is correct rather than
+// wasteful: that name had never been crash-survivable, so its absence after the
+// crash is not the removal having stuck. The prunedDirs restore is what keeps the
+// crash from losing LESS than a real one — see [unlinkUndo]. The caller holds d.mu.
+func (d *SimDisk) undoUnlinkLocked(rec *unlinkUndo) {
+	for p, f := range rec.files {
+		d.files[p] = f
+	}
+	for dp, dur := range rec.dirs {
+		d.dirs[dp] = dur
+	}
+	for dp, dur := range rec.prunedDirs {
+		d.dirs[dp] = dur
+	}
 }
 
 // undoRenameLocked reverses one recorded rename: it moves whatever the new name
@@ -1953,7 +2509,7 @@ func (d *SimDisk) rollbackRenamesLocked() {
 // A record armed with revokeBoth skips every restore, reproducing on purpose the
 // physically impossible outcome this model exists to eliminate. The caller holds
 // d.mu.
-func (d *SimDisk) undoRenameLocked(rec renameUndo) {
+func (d *SimDisk) undoRenameLocked(rec *renameUndo) {
 	if rec.dirRename {
 		files, dirs := d.captureSubtreeLocked(rec.newPath)
 		d.removeSubtreeLocked(rec.newPath)

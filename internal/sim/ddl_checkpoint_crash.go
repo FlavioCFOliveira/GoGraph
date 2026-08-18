@@ -126,6 +126,13 @@ type ddlCheckpointOptions struct {
 	// remove a published snapshot COMPONENT, so recovery is fed a snapshot
 	// that cannot carry the schema and the post-recovery oracles must fire.
 	// Nil — the scenario's own configuration — leaves the image untouched.
+	//
+	// An injector that removes something MUST declare the removal durable with
+	// [SimDisk.ArmRemoveWritebackForPath]. Since rmp #2536 an ordinary removal is
+	// reversible until its parent directory is fsync'd, and this seam runs BEFORE
+	// the crash, so an unarmed removal is liable to be undone by that very crash —
+	// which restores the component and leaves the sensitivity proof asserting
+	// nothing.
 	damageSnapshot func(disk *SimDisk, dir string)
 	// phases overrides the fixed phase plan. Nil selects [ddlCheckpointPhases],
 	// the scenario's own plan; a test supplies a DEGENERATE plan to prove the

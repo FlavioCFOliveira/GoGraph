@@ -319,12 +319,45 @@ iteration over the `Properties` maps. The *logical* result is identical every ru
 by checksum, and bulk-import snapshots will not deduplicate in content-addressed
 storage. `TestBulkImportParity_ByteBoundary` pins the boundary.
 
-The `DiskConfig.FaultRate` knob and five `SimDisk` primitives back these
-scenarios — four faults (`CorruptRange`, `ArmSyncFaultAt`,
-`ArmParentDirSyncFaultForPath`, `ArmRenameFaultForPath`) and one crash-window
-selector (`ArmRenameWritebackForPath`, which chooses whether a rename's dirent
-had reached stable storage when the crash landed). All default to inert, so
-existing scenarios are byte-identical.
+The `DiskConfig.FaultRate` knob, the direct `CorruptRange` mutator and ten
+one-shot arms back these scenarios. All default to inert and none draws from the
+[Seed], so arming one never perturbs the fault stream and existing scenarios stay
+byte-identical.
+
+**Faults** — an operation fails: `CorruptRange` (applied directly rather than
+armed), `ArmSyncFaultAt`,
+`ArmDirSyncFaultForPath` (rmp #2537), `ArmParentDirSyncFaultForPath` and
+`ArmRenameFaultForPath`. `ArmSyncGateAt` parks a caller inside its fsync instead
+of failing it, which is how a crash is made to land in the phantom-commit window.
+
+**Crash-window selectors** — an operation succeeds, and the arm pins *which* of
+its legal crash outcomes the run takes, because a metadata mutation is not
+crash-survivable until the containing directory is fsynced.
+`ArmRenameWritebackForPath` pins "the rename had reached stable storage";
+`ArmRenameRollbackForPath` (rmp #2514) pins the other legal branch; and
+`ArmRemoveWritebackForPath` / `ArmRemoveRollbackForPath` (rmp #2536) do the same
+for an unlink, whose two outcomes are "the removal stuck" and "the file I deleted
+is back after the crash". A removal has no illegal outcome, so it has no
+counterpart to `ArmRenameRevokeBothForPath`, which exists purely to reproduce the
+physically impossible both-names-lost state on purpose so the harness's own gates
+can be shown to reject it.
+
+Because a journalling filesystem commits metadata **in order**, renames and
+unlinks share ONE ordered log with a single durable-prefix draw
+(`SimDisk.direntUndos`, rmp #2536): the crash keeps a prefix of the issued
+mutations and reverses the suffix. Two independent draws would let a crash keep
+an unlink while reversing a rename issued before it, which is an interleaving no
+filesystem can produce.
+
+Every arm has a reachability observable, and a scenario that arms one is expected
+to assert it: `RenameFaultCount`, `RenameWritebackCount`, `RenameRollbackCount`,
+`RenameRevokeBothCount`, `DirSyncFaultCount`, `RemoveWritebackCount`,
+`RemoveRollbackCount`, plus the window and shape observables `SyncCount`,
+`PendingRenameCount`, `PendingRemoveCount`, `LastCrashRenameOutcome`,
+`LastCrashRemoveOutcome`, `LastCrashDiscardedBytes` and the removal-hit counters
+`RemoveHitCount` / `RemoveHitCountForPath`. An arm that never fires is not an
+assertion, so the counter is what distinguishes "the primitive fired" from "the
+arm was silently ignored".
 
 ### Crash during the snapshot publish (rmp #2465, closing #1827)
 
