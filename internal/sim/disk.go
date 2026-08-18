@@ -59,10 +59,10 @@ var _ walFile = (*SimFileHandle)(nil)
 //
 // This is a summary of the limits that bear on CRASH OUTCOMES, written where the
 // code is; it is not the complete audit of the type. In particular it does not
-// cover the operations whose modelling gap is that they cannot FAIL (a DirSync
-// always succeeds, a Sync retry always succeeds after a fault, a write is never
-// partial), which bound which engine error branches a scenario can reach rather
-// than which durable images a crash can leave.
+// cover the operations whose modelling gap is that they cannot FAIL (a Sync
+// retry always succeeds after a fault, a write is never partial), which bound
+// which engine error branches a scenario can reach rather than which durable
+// images a crash can leave.
 //
 //	Rename          FIXED. A crash used to revoke the new directory entry while
 //	                the old one had already been unlinked, losing BOTH names —
@@ -111,12 +111,20 @@ var _ walFile = (*SimFileHandle)(nil)
 //	                lost. A real mkdir without a parent fsync can be. Nothing in
 //	                the store depends on an empty directory existing.
 //
-//	DirSync         NARROWER THAN REALITY, safe direction. It durabilises only
-//	                the entries whose parent is exactly dir, whereas fsync(2) on
-//	                a directory forces a journal commit that makes earlier
-//	                metadata durable filesystem-wide. Fewer things become
-//	                durable than would in reality, so the harness is stricter,
-//	                never more forgiving.
+//	DirSync         FIXED (rmp #2537), and NARROWER THAN REALITY in the safe
+//	                direction. It could not FAIL: the body ended in an
+//	                unconditional return nil while its sibling ParentDirSync
+//	                already consulted an arm, so four snapshot staging-fsync
+//	                error branches were unreachable under simulation — including
+//	                the last durability gate before the publish renames. Both
+//	                entry points now share ONE body ([SimDisk.dirSyncLocked]) and
+//	                one arm mechanism ([dirSyncArm]), so neither the fault nor
+//	                its effects can diverge again. What stays narrower is the
+//	                SUCCESS path: it durabilises only the entries whose parent is
+//	                exactly dir, whereas fsync(2) on a directory forces a journal
+//	                commit that makes earlier metadata durable filesystem-wide.
+//	                Fewer things become durable than would in reality, so the
+//	                harness is stricter, never more forgiving.
 //
 // SimDisk is an in-memory filesystem with seed-driven fault injection. It backs
 // the durability layer of the simulation: files live entirely in memory, and a
@@ -149,8 +157,35 @@ type SimDisk struct {
 	// implicitly durable (it was created in place via MkdirAll, never via a
 	// publish rename). A [SimDisk.Crash] drops every directory whose dirent is
 	// not yet durable, taking its entire subtree with it.
-	dirs                   map[string]bool
-	parentDirSyncFaultPath string
+	dirs map[string]bool
+	// dirSyncFault / parentDirSyncFault are the two ONE-SHOT arms of the SAME
+	// primitive — a directory fsync that fails — and they differ only in the KEY
+	// each is matched against. dirSyncFault is keyed on the directory being
+	// fsync'd ([SimDisk.DirSync]); parentDirSyncFault is keyed on the CHILD path
+	// whose parent is being fsync'd ([SimDisk.ParentDirSync]). Both are consulted
+	// by the one shared body, [SimDisk.dirSyncLocked], which is what stops them
+	// from drifting apart: DirSync used to have no arm at all and ended in an
+	// unconditional return nil, leaving four snapshot directory-fsync error
+	// branches unreachable (rmp #2537).
+	//
+	// The two keys are deliberately NOT unified. ParentDirSync is keyed on the
+	// exact childPath because a full-stack checkpoint issues a variable number of
+	// parent fsyncs of the SAME directory ("db/snapshot" then "db/wal", both
+	// children of "db"), so a directory-keyed arm would fire on whichever came
+	// first rather than on the one the scenario means. Arming the directory key
+	// is nonetheless the stronger statement — "every fsync of this directory
+	// fails" — and it therefore also fires for a ParentDirSync whose parent is
+	// that directory, because that call IS an fsync of it.
+	dirSyncFault       dirSyncArm
+	parentDirSyncFault dirSyncArm
+	// dirSyncFaults counts how many times a directory-fsync fault actually FIRED,
+	// through EITHER entry point — they are one primitive, so they share one
+	// reachability observable ([SimDisk.DirSyncFaultCount]). An arm whose key
+	// never matched is a silent no-op, and a scenario that depends on one firing
+	// must be able to tell "the fault fired" from "the arm was ignored" rather
+	// than diagnosing the resulting durable image as an engine defect. Mutated
+	// only under d.mu.
+	dirSyncFaults int64
 	// capacityBytes, when > 0, bounds the total number of bytes the in-memory
 	// filesystem may hold across all files. It models a finite disk so the DST
 	// can drive the engine through a disk-full (ENOSPC) condition. Zero (the
@@ -264,21 +299,6 @@ type SimDisk struct {
 	// window rather than after it, and which of the two legal branches it took.
 	crashPendingRenames    int
 	crashRolledBackRenames int
-	// parentDirSyncFaultArmed / parentDirSyncFaultPath implement a ONE-SHOT
-	// deterministic fault on [SimDisk.ParentDirSync]: when armed, the next
-	// ParentDirSync whose childPath equals parentDirSyncFaultPath returns
-	// [ErrSimFault] WITHOUT making any dirent durable, then disarms. Like
-	// [SimDisk.ArmSyncFaultAt] it draws NOTHING from the [Seed] — the trigger is a
-	// pure function of the path — so arming it never perturbs the reproducible
-	// fault stream. It is keyed on the exact childPath rather than a call ordinal
-	// because a full-stack checkpoint issues a variable number of ParentDirSync
-	// calls during the snapshot publish before the single WAL-truncate dir-fsync
-	// the fault must target; an ordinal would be fragile against that count,
-	// whereas the WAL path ("<dir>/wal") is stable. It models the post-rename
-	// parent-directory fsync failing in [wal.Writer.TruncatePrefix], which must
-	// poison the writer (store/wal/writer.go poisonAfterRename) yet leave the
-	// on-disk suffix-only WAL intact and recoverable.
-	parentDirSyncFaultArmed bool
 	// syncGate, when non-nil, is a ONE-SHOT rendezvous armed on a Sync ordinal by
 	// [SimDisk.ArmSyncGateAt]: the syncGateAt-th Sync blocks inside the call until
 	// the controlling goroutine releases it. It is the only primitive here that
@@ -1429,15 +1449,175 @@ func (d *SimDisk) TruncatePath(path string, size int64) error {
 	return nil
 }
 
+// dirSyncArm is ONE one-shot, path-keyed arm of the directory-fsync fault. Both
+// directory-fsync entry points ([SimDisk.DirSync] and [SimDisk.ParentDirSync])
+// hold one and consult it through the same body, so the arming, the matching,
+// the one-shot disarm and the failure effects are written once and cannot drift
+// between them (rmp #2537).
+//
+// It draws NOTHING from the [Seed]: the trigger is a pure function of the path,
+// exactly like [SimDisk.ArmSyncFaultAt]'s ordinal, so arming one never perturbs
+// the reproducible torn-write/Sync fault stream. Its zero value is disarmed.
+type dirSyncArm struct {
+	// path is the key this arm fires on: a directory for the DirSync arm, a
+	// child path for the ParentDirSync arm. Empty means disarmed.
+	path  string
+	armed bool
+}
+
+// arm keys the arm on path, or disarms it when path is empty.
+func (a *dirSyncArm) arm(path string) {
+	a.path = path
+	a.armed = path != ""
+}
+
+// fire reports whether this arm selects key, and disarms when it does — the
+// ONE-SHOT rule. An empty key never matches, so an entry point that has no such
+// key (DirSync has no child path) can pass "" and be sure the other arm stays
+// out of its way.
+func (a *dirSyncArm) fire(key string) bool {
+	if !a.armed || key == "" || a.path != key {
+		return false
+	}
+	a.path = ""
+	a.armed = false
+	return true
+}
+
+// ArmDirSyncFaultForPath arms a ONE-SHOT durability fault on [SimDisk.DirSync]:
+// the next directory fsync of dir returns [ErrSimFault] and makes NO dirent
+// durable, then the arm clears so no further directory fsync is affected. An
+// empty dir disarms. [SimDisk.DirSyncFaultCount] reports how many times a
+// directory-fsync fault has fired.
+//
+// Because a [SimDisk.ParentDirSync] of a child of dir IS an fsync of dir, it
+// fires for that call too; the converse does not hold, since
+// [SimDisk.ArmParentDirSyncFaultForPath] names one specific child (see the field
+// docs on [SimDisk] for why the two keys stay distinct).
+//
+// It is the arm the snapshot publish protocol's directory fsyncs need. Audit
+// finding F3 named four error branches that no fault could reach; this arm
+// reaches the two on the full publish path — store/snapshot/full.go's staging
+// fsync in writeCaptureCore and its indexes/ fsync in writeCapturedIndexes —
+// through a real checkpoint. The remaining two (writer.go's legacy CSR staging
+// fsync and indexes.go's standalone index writer) bind the OS backend at their
+// entry points, so no in-memory disk can reach them however it is faulted; they
+// are driven from inside store/snapshot instead.
+//
+// The staging fsync is the one that matters most: it is the LAST durability gate
+// before the archive and publish renames, so it must RemoveAll the staging tree
+// and abort rather than publish a directory whose dirents never reached stable
+// storage. It draws nothing from the [Seed], so arming never perturbs the
+// reproducible fault stream, and must be called from the controlling goroutine
+// before the operation that will trigger it.
+func (d *SimDisk) ArmDirSyncFaultForPath(dir string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.dirSyncFault.arm(dir)
+}
+
+// ArmParentDirSyncFaultForPath arms a ONE-SHOT durability fault on
+// [SimDisk.ParentDirSync]: the next call whose childPath equals childPath
+// returns [ErrSimFault] and makes NO dirent durable, then the arm clears so no
+// further ParentDirSync is affected. An empty childPath disarms.
+//
+// It is the same primitive as [SimDisk.ArmDirSyncFaultForPath] — one directory
+// fsync, one shared body, one fire count — differing only in being keyed on the
+// exact childPath rather than on the directory, so it targets a specific fsync
+// robustly where several fsyncs of the SAME parent directory occur in one
+// operation (see the field docs on [SimDisk]). It models the post-rename
+// parent-directory fsync failing inside [wal.Writer.TruncatePrefix]: that
+// failure must poison the WAL writer (store/wal/writer.go poisonAfterRename)
+// while the on-disk suffix-only WAL — and any snapshot published before it —
+// stays intact and recoverable. It draws nothing from the [Seed], so arming
+// never perturbs the reproducible fault stream, and must be called from the
+// controlling goroutine before the operation that will trigger it.
+func (d *SimDisk) ArmParentDirSyncFaultForPath(childPath string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.parentDirSyncFault.arm(childPath)
+}
+
+// DirSyncFaultCount returns how many armed directory-fsync faults actually fired
+// since the disk was created, counting both entry points ([SimDisk.DirSync] and
+// [SimDisk.ParentDirSync]) because they are one primitive. It is the reachability
+// observable a non-vacuity gate reads to prove an armed fault really bit rather
+// than being silently ignored because its path never matched.
+func (d *SimDisk) DirSyncFaultCount() int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.dirSyncFaults
+}
+
 // DirSync makes every dirent in directory dir durable: it is the in-memory
 // analogue of fsync(2) on a directory descriptor. The snapshot/csrfile publish
 // protocol calls it on the staging directory before the publish rename and on
 // the parent directory after it; only after DirSync does a freshly created or
 // renamed name survive a [SimDisk.Crash]. A DirSync of a directory with no
 // entries is a harmless no-op (it models fsync of an empty directory).
+//
+// When a one-shot fault is armed for dir ([SimDisk.ArmDirSyncFaultForPath]) it
+// returns [ErrSimFault] and durabilises NOTHING.
 func (d *SimDisk) DirSync(dir string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.dirSyncLocked(dir, "")
+}
+
+// ParentDirSync makes the dirent of childPath durable by fsyncing its parent
+// directory. It is the analogue of the post-rename parent-directory fsync the
+// publish protocols issue.
+//
+// It faults when a one-shot arm is set for this exact childPath
+// ([SimDisk.ArmParentDirSyncFaultForPath]) OR for the parent directory it is
+// about to fsync ([SimDisk.ArmDirSyncFaultForPath]) — the same body decides
+// both, since this call IS an fsync of that directory.
+func (d *SimDisk) ParentDirSync(childPath string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.dirSyncLocked(pathpkg.Dir(childPath), childPath)
+}
+
+// dirSyncLocked is the ONE body behind both directory-fsync entry points: dir is
+// the directory being fsync'd and child is the path whose dirent the caller is
+// making durable, or "" when the caller named the directory itself. The caller
+// holds d.mu.
+//
+// A failed directory fsync must compose with the two crash-model refinements
+// that surround it, and it does so by returning BEFORE any of the durability
+// work below:
+//
+//   - Dirents. Nothing becomes durable. POSIX states that when fsync fails
+//     "outstanding I/O operations are not guaranteed to have been completed", so
+//     the harness must assume no directory entry reached stable storage. This is
+//     also the stricter direction, which is the standing rule for this model.
+//
+//   - Rename undo log (rmp #2514). The pending renames are NOT pruned. Pruning
+//     is precisely the act of declaring a rename durable and therefore no longer
+//     rollback-able; a fsync that failed declares the opposite. Were the log
+//     pruned here, a later [SimDisk.CrashHost] would be obliged to KEEP a publish
+//     rename whose staging tree was never made durable — which is exactly the
+//     state the snapshot writer's staging-fsync branch exists to prevent, so the
+//     harness would have manufactured the defect it is meant to detect.
+//
+//   - Durable shadow (rmp #2535). A directory fsync never advances a file's
+//     durable watermark, on the success path or the failure path: fsync(2) on a
+//     directory descriptor hardens metadata, not file contents, and only
+//     [SimFileHandle.Sync] -> [SimDisk.completeSync] moves durableLen. So after a
+//     failed DirSync a component can hold durable DATA under a name that is not
+//     durable; [SimDisk.CrashHost] then deletes it outright, since it revokes
+//     unsynced dirents before reverting data. That is the physically correct
+//     outcome — blocks on the platter that no directory entry points at are
+//     unreachable — and it is what makes the staging-fsync gate meaningful.
+//
+// Unlike [SimFileHandle.Sync] there is no issue/complete split and no
+// hostCrashGen stamp: this body runs entirely under d.mu, which [SimDisk.Crash]
+// also takes, so no crash can land inside a directory fsync.
+func (d *SimDisk) dirSyncLocked(dir, child string) error {
+	if d.dirSyncFault.fire(dir) || d.parentDirSyncFault.fire(child) {
+		d.dirSyncFaults++
+		return ErrSimFault
+	}
 	for p, f := range d.files {
 		if pathpkg.Dir(p) == dir {
 			f.direntDurable = true
@@ -1454,50 +1634,6 @@ func (d *SimDisk) DirSync(dir string) error {
 	// A rename that has reached stable storage can no longer be rolled back.
 	d.pruneDurableRenameUndosLocked()
 	return nil
-}
-
-// ArmParentDirSyncFaultForPath arms a ONE-SHOT durability fault on
-// [SimDisk.ParentDirSync]: the next call whose childPath equals childPath
-// returns [ErrSimFault] and makes NO dirent durable, then the arm clears so no
-// further ParentDirSync is affected. An empty childPath disarms.
-//
-// It is the directory-fsync analogue of [SimDisk.ArmSyncFaultAt], keyed on the
-// exact childPath rather than a call ordinal so it targets a specific fsync
-// robustly (see the field docs on [SimDisk]). It models the post-rename
-// parent-directory fsync failing inside [wal.Writer.TruncatePrefix]: that
-// failure must poison the WAL writer (store/wal/writer.go poisonAfterRename)
-// while the on-disk suffix-only WAL — and any snapshot published before it —
-// stays intact and recoverable. It draws nothing from the [Seed], so arming
-// never perturbs the reproducible fault stream, and must be called from the
-// controlling goroutine before the operation that will trigger it.
-func (d *SimDisk) ArmParentDirSyncFaultForPath(childPath string) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if childPath == "" {
-		d.parentDirSyncFaultArmed = false
-		d.parentDirSyncFaultPath = ""
-		return
-	}
-	d.parentDirSyncFaultArmed = true
-	d.parentDirSyncFaultPath = childPath
-}
-
-// ParentDirSync makes the dirent of childPath durable by DirSyncing its parent
-// directory. It is the analogue of the post-rename parent-directory fsync the
-// publish protocols issue. When a one-shot fault is armed for this exact
-// childPath ([SimDisk.ArmParentDirSyncFaultForPath]) it returns [ErrSimFault]
-// and disarms WITHOUT making the dirent durable, modelling the directory fsync
-// failing after a rename.
-func (d *SimDisk) ParentDirSync(childPath string) error {
-	d.mu.Lock()
-	if d.parentDirSyncFaultArmed && d.parentDirSyncFaultPath == childPath {
-		d.parentDirSyncFaultArmed = false
-		d.parentDirSyncFaultPath = ""
-		d.mu.Unlock()
-		return ErrSimFault
-	}
-	d.mu.Unlock()
-	return d.DirSync(pathpkg.Dir(childPath))
 }
 
 // Crash is an alias for [SimDisk.CrashHost], the STRONGER of the two crash
