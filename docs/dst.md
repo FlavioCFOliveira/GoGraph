@@ -28,10 +28,11 @@ soak / nightly), see [docs/test-layers.md](test-layers.md).
 6. [The search-algorithm battery](#the-search-algorithm-battery)
 7. [Scenario catalogue](#scenario-catalogue)
 8. [Crash and recovery](#crash-and-recovery)
-9. [Swarm, coverage, and cross-checking modes](#swarm-coverage-and-cross-checking-modes)
-10. [Command-line usage](#command-line-usage)
-11. [Reproduce, replay, and shrink](#reproduce-replay-and-shrink)
-12. [Extending the harness](#extending-the-harness)
+9. [MVCC multi-session and concurrency coverage](#mvcc-multi-session-and-concurrency-coverage)
+10. [Swarm, coverage, and cross-checking modes](#swarm-coverage-and-cross-checking-modes)
+11. [Command-line usage](#command-line-usage)
+12. [Reproduce, replay, and shrink](#reproduce-replay-and-shrink)
+13. [Extending the harness](#extending-the-harness)
 
 ---
 
@@ -311,6 +312,96 @@ counts taken inside ONE read transaction are equal — snapshot isolation across
 statements — on the end-to-end path under crash and fsync-fault injection. The
 level was per-statement read-committed until then, and ST7 recorded that as a
 property the engine did not have.
+
+## MVCC multi-session and concurrency coverage
+
+Sprint 345 gave the simulator first-class MVCC coverage: deterministic
+interleaving of multiple explicit transactions, isolation checkers that
+adjudicate every read against a per-transaction oracle, deliberate contention,
+crashes landing while transactions are open, and a production-profile scenario
+that combines all of it over the durable store.
+
+### The deterministic multi-session mode (`RunMVCCSessions`)
+
+K logical sessions run explicit multi-statement transactions over the
+WAL-backed SimDisk store, interleaved at statement granularity by the seeded
+scheduler on a single goroutine (`internal/sim/mvcc_sessions.go`). The oracle
+gives each write transaction a begin-snapshot workspace
+(`internal/sim/oracle_tx.go`) folded into the committed model only when the
+engine acknowledges the COMMIT, so parity holds at every tick.
+
+Isolation checkers (`internal/sim/mvcc_isolation.go`, rmp #2436) run inside
+the transactions themselves:
+
+- **Snapshot stability** — a read-only transaction captures the committed
+  counts, names, and edges at BEGIN; every in-transaction count read must
+  match, however many commits fold in between (counted, so the contested case
+  is provably exercised).
+- **Read-your-own-writes** — every write statement is probed back through the
+  same handle; a divergence is held as a *doom suspect* under the refused-void
+  contract (rmp #2354) and the transaction must then fail with the typed
+  conflict — a clean COMMIT of a suspect is the violation. A session-level
+  probe at BEGIN asserts the session sees its own earlier commit.
+- **Atomic visibility** — write transactions create invariant-bearing node
+  pairs across two statements; every reader must observe both members or
+  neither, dated by the fold sequence. Observing exactly one is a strict
+  subset of a committed multi-object transaction.
+
+These checkers found four engine defects on arrival (rmp #2445, #2446), all
+fixed and pinned by regressions in
+`internal/sim/mvcc_isolation_regression_test.go`.
+
+### Contention: the lost-update scenario (`RunMVCCContention`)
+
+Sessions deliberately collide on a small shared counter space with the classic
+lost-update shape — a snapshot read plus a blind write-back — beside disjoint
+control keys (`internal/sim/mvcc_contention.go`, rmp #2437). The adjudication
+is exact at transaction granularity: each counter's final value equals its
+acknowledged increments (a shortfall is a lost update, an excess a phantom
+apply), refused transactions leave no trace, and every refusal must match
+`cypher.ErrSerializationConflict` — the typed retriable sentinel exported for
+clients.
+
+### Crashes with open transactions
+
+`MVCCSessionsConfig.Crash` (rmp #2438) injects seed-scheduled SIGKILL-style
+crashes while transactions are open; the store reopens through real WAL
+recovery and the recovered state is adjudicated at transaction granularity:
+the full folded model must be recovered exactly (acked ⊆ recovered ⊆ issued
+collapses to equality, because the oracle folds whole transactions at
+acknowledgement and nothing else), and a sweep of every committed pair detects
+a torn replay as exactly one surviving member.
+
+### Concurrent-mode transactional roles and during-run oracles
+
+The genuinely parallel Bolt-wire mode gained explicit-transaction roles
+(rmp #2439): disjoint multi-statement writers and contended read-modify-write
+writers, with per-connection transaction ledgers and conflict classification
+by the driver-verified Bolt code `Neo.TransientError.Transaction.Outdated`
+(RESET recovery after every explicit refusal; IGNORED never classifies as
+success). Quiescence verifies every acknowledged marker present, every
+refused marker absent, totals conserved, and zero lost updates on the shared
+counters.
+
+During-run oracles (rmp #2440) observe correctness while the run executes:
+per-connection monotonic reads, same-connection read-your-own-writes, and
+atomic batch visibility (a batch writer commits fixed-size tagged
+transactions; readers must only ever observe whole multiples).
+
+### The production profile (`--scenario=production-profile`)
+
+One command simulates a realistic multi-client production environment
+(rmp #2441, `internal/sim/production_profile.go`): the full role population —
+contended and disjoint transactions of mixed sizes, atomic batches,
+during-run oracle readers, RYOW probes, plain writers/readers, and overload
+traffic — over the durable store, in crash cycles. Each cycle joins every
+client and the server, crashes the disk, reopens through real recovery, and
+adjudicates the accumulated transaction-granular ledgers: acknowledged
+transactions survive (acked ⊆ recovered ⊆ issued), refused transactions
+leave nothing, and the contended counters carry their acknowledged increments
+across every crash. The short layer runs a 24-connection two-cycle
+configuration; the soak layer (`-tags=soak`) runs 256 connections over three
+cycles.
 
 ## Concurrency hypotheses chased
 

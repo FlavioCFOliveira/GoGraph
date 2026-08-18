@@ -129,6 +129,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 )
@@ -140,6 +141,19 @@ import (
 // is rejected rather than acting on a released transaction. Matchable with
 // [errors.Is].
 var ErrTxFinished = errors.New("cypher: explicit transaction already finished")
+
+// ErrSerializationConflict is the typed, RETRIABLE write-write conflict error:
+// the transaction attempted to displace a version another transaction wrote
+// after this one began (first-committer-wins; the node is the unit of
+// conflict). It can surface from a statement or from [ExplicitTx.Commit] —
+// including for a write a void primitive recorded silently, per the doomed-tx
+// contract (rmp #2354) — and the failed transaction applied NOTHING: roll it
+// back and retry it whole. Matchable with [errors.Is].
+//
+// It is the [mvcc.ErrSerializationConflict] sentinel re-exported at the
+// surface clients import (rmp #2437), the same classification Neo4j gives its
+// TransientError.
+var ErrSerializationConflict = mvcc.ErrSerializationConflict
 
 // ErrTxPoisoned is returned by [ExplicitTx.Commit] when a prior
 // [ExplicitTx.Exec] call returned an [ErrStatementPipeline] error. A poisoned
@@ -265,11 +279,12 @@ type ExplicitTx struct {
 	// wtx is the zero value. Each [ExplicitTx.Exec]
 	// rejects any writing/DDL statement with [ErrWriteInReadOnlyTx] before
 	// execution and routes a read through the engine's concurrent read path
-	// ([Engine.Run]), which pins its own per-statement snapshot — so reads
-	// observe per-statement SNAPSHOT isolation (a stable instant within a
-	// statement, a fresh one between statements) and never block, or are
-	// blocked by, other readers or writers. Commit and Rollback on a read-only
-	// handle are teardown-only no-ops.
+	// at the handle's ONE pinned snapshot (the view field, rmp #2307) — so
+	// reads observe SNAPSHOT isolation for the WHOLE transaction (every
+	// statement sees the same instant; a commit landing between two statements
+	// is invisible to the second) and never block, or are blocked by, other
+	// readers or writers. Commit and Rollback on a read-only handle are
+	// teardown-only no-ops.
 	readOnly bool
 
 	// wtx is THE TRANSACTION, and since rmp #2305 it is the only thing this handle
@@ -465,11 +480,18 @@ func (e *Engine) beginTxSession(ctx context.Context, sess *lpg.Session[string, f
 //     writing clause ([QueryHasWritingClause]) or is DDL ([ir.IsDDL]) — the
 //     rejection is what keeps the lock-free read path safe, since a write would
 //     otherwise run with no writer lock, no barrier, and no WAL; and
-//   - otherwise runs through the engine's concurrent read path ([Engine.Run]),
-//     taking its OWN per-statement snapshot ([lpg.Graph.BeginRead]). Reads therefore
-//     observe READ-COMMITTED isolation across the statements of the transaction
-//     (each RUN sees the latest committed state, matching Neo4j's default), and
-//     run fully in parallel with other readers and writers.
+//   - otherwise runs through the engine's concurrent read path at the
+//     transaction's ONE pinned snapshot, taken here at BEGIN and held for the
+//     handle's whole lifetime (rmp #2307). Reads therefore observe SNAPSHOT
+//     isolation across the statements of the transaction — every statement
+//     executes at the same instant, so a commit made by anyone else between two
+//     statements is invisible to the second (stronger than Neo4j's documented
+//     read-committed default; matching Memgraph's default) — and run fully in
+//     parallel with other readers and writers.
+//
+// The pinned snapshot registers with the version-reclamation horizon for the
+// transaction's lifetime, so finish the handle promptly: an abandoned read
+// transaction pins version memory until it is torn down.
 //
 // If ctx is already cancelled or its deadline has elapsed, BeginReadTx returns
 // promptly with an error wrapping the context error (matchable via [errors.Is]
@@ -530,10 +552,10 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 	}
 	// Read-only transaction: reject any writing/DDL statement BEFORE execution
 	// (no writer lock, no barrier, no WAL backs this handle), and route every
-	// permitted read through the engine's concurrent read path so it takes its
-	// own per-statement snapshot (snapshot isolation within a statement, a fresh
-	// instant between statements). This path never touches buf/undo/walTx (all
-	// nil) or the visibility barrier.
+	// permitted read through the engine's concurrent read path at the
+	// transaction's ONE pinned snapshot (rmp #2307) — snapshot isolation for
+	// the whole transaction, not per statement. This path never touches
+	// buf/undo/walTx (all nil) or the visibility barrier.
 	if tx.readOnly {
 		if err := checkContext(tx.ctx); err != nil {
 			return nil, err

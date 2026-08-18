@@ -20,54 +20,59 @@ import (
 // "someone else changed node Z". Applying the standard rule to it would make
 // every writer conflict with every other writer that touched the graph at all.
 //
-// # The rule adjacency uses instead, and the source that settled it
+// # The rule adjacency uses instead, and how it was revised
 //
-// An adjacency APPEND is commutative. Adding A→B and adding A→C are independent
-// facts; either order yields the same adjacency, and adding the same arc twice is
-// idempotent. Two transactions appending to the SAME source node therefore do not
-// conflict, and must not be made to, because on a power-law graph most arcs share
-// few source nodes — conflicting on every append would serialise exactly the hot
-// path that MVCC exists to open.
+// The design ORIGINALLY treated an adjacency APPEND as commutative — adding
+// A→B and adding A→C are independent facts, so two transactions appending to
+// the same source did not conflict, modelled on Memgraph's
+// PrepareForNonSequentialWrite (memgraph/memgraph @ b3ac3cd,
+// src/storage/v2/inmemory/storage.cpp CreateEdge → src/storage/v2/mvcc.hpp),
+// which admits an edge creation over another transaction's uncommitted edge
+// creations and refuses only a BLOCKING upstream delta.
 //
-// This is not a liberty GoGraph is taking. It is what Memgraph does, and the
-// distinction is visible in the name of the function it calls: CreateEdge invokes
-// PrepareForNonSequentialWrite, not PrepareForWrite, on both endpoint vertices
-// (memgraph/memgraph @ b3ac3cd, src/storage/v2/inmemory/storage.cpp CreateEdge →
-// src/storage/v2/mvcc.hpp). That function returns NON_SEQUENTIAL rather than
-// SERIALIZATION_ERROR when the head delta is itself an edge creation, and says so
-// in its own comment: "Check if this is a situation where the entire uncommitted
-// delta chain is of edge creations: if so, we can safely add a non-sequential
-// delta." A serialization error arises only when a BLOCKING delta — a property,
-// a label, an edge removal — sits upstream in the other transaction's chain.
+// rmp #2445 (found by the DST multi-session mode) retired the premise for
+// GoGraph: Memgraph mutates per-vertex delta CHAINS, where two pending edge
+// creations stay independent records, but GoGraph's adjacency entry is an
+// IMMUTABLE SNAPSHOT built from the node's current slot — so the second
+// transaction's entry physically EMBEDS the first one's still-pending arc.
+// When the embedder commits, every reader sees an uncommitted edge; when the
+// arc's owner then aborts, the aborted arc survives inside the committed
+// entry, unrecoverably (an immutable snapshot cannot be repaired). The
+// commutativity was a property of the operations, not of this representation.
+// The approved revision makes the NODE the unit of write-write conflict for
+// appends exactly as rmp #2444 made it for removals — which is also what
+// Memgraph's ordinary PrepareForWrite enforces for every other same-vertex
+// write. Measured on BenchmarkCreateRelationships: no statistically
+// significant change (benchstat, 6 samples per arm, interleaved).
 //
-// # The two stamps, and why the append must still record one
+// # The two stamps
 //
-// Memgraph reaches that answer by walking a delta chain and asking
-// IsDeltaNonSequential of each link. GoGraph has no chain to walk and no
-// per-vertex struct to hang one on, so it keeps the same information as two
-// stamps per node:
+// GoGraph has no chain to walk and no per-vertex struct to hang one on, so it
+// keeps the conflict information as two stamps per node:
 //
 //   - appendTS — the newest COMMUTATIVE adjacency write (an arc appended).
 //   - exclusiveTS — the newest NON-COMMUTATIVE adjacency write (an arc removed,
 //     a pair cleared, a same-pair slot replaced), and the kind of write a
 //     concurrent append must not step over.
 //
-// The rules, which are the table the user approved:
+// The rules, as revised by the rmp #2445 decision (the original table let
+// appends commute; see [adjVersions.checkAppend] for the entry-snapshot
+// embedding that retired it):
 //
-//	append(A→B)      conflicts iff conflicts(exclusiveTS(A)) — bumps appendTS(A)
+//	append(A→B)      conflicts iff conflicts(exclusiveTS(A)) or conflicts(appendTS(A))
+//	                                                        — bumps appendTS(A)
 //	exclusive on A   conflicts iff conflicts(exclusiveTS(A)) or conflicts(appendTS(A))
 //	                                                        — bumps exclusiveTS(A)
 //
-// So append ‖ append commits; append ‖ remove conflicts; remove ‖ remove
-// conflicts.
+// So append ‖ append conflicts; append ‖ remove conflicts; remove ‖ remove
+// conflicts; writes on DISJOINT nodes never conflict. The UNDO replay is
+// exempt from all of it (rmp #2445; see [writeCtx.undoing]).
 //
-// AN APPEND STILL BUMPS ITS STAMP EVEN THOUGH IT NEVER CONFLICTS WITH ANOTHER
-// APPEND, and that is the subtle half. Without the bump, `AddEdge(A→C)` followed
-// by a concurrent `RemoveEdge(A→B)` would be undetectable in that order: the
-// removal would find nothing recorded and proceed, losing the append. The bump is
-// what Memgraph gets for free by linking a delta onto the vertex whatever its
-// action, and what its has_uncommitted_non_sequential_deltas flag then
-// distinguishes.
+// The append's stamp is what a later append or removal on the node tests:
+// without it, `AddEdge(A→C)` followed by a concurrent `RemoveEdge(A→B)` (or a
+// second append) would be undetectable in that order — the checker would find
+// nothing recorded and proceed, losing the append. The bump is what Memgraph
+// gets for free by linking a delta onto the vertex whatever its action.
 //
 // # What this store deliberately does NOT do
 //
@@ -134,11 +139,22 @@ func (av *adjVersions) shard(id graph.NodeID) *adjVersionShard {
 	return &av.shards[(h>>58)%adjVersionShards]
 }
 
-// checkAppend reports the conflict a commutative adjacency write to src would
-// hit, or nil. It records nothing.
+// checkAppend reports the conflict an adjacency append to src would hit, or
+// nil. It records nothing.
 //
-// Only the EXCLUSIVE side can refuse an append: a concurrent append is
-// commutative with this one by construction.
+// BOTH sides can refuse an append (rmp #2445). The exclusive side always
+// could. The append side used to be exempt — "a concurrent append is
+// commutative with this one by construction" — and the DST multi-session mode
+// disproved the construction: an adjacency ENTRY is an immutable snapshot
+// built from the node's current slot, so a second transaction's entry EMBEDS
+// the first one's still-pending arc. When the embedder commits, readers see an
+// uncommitted edge; when the arc's owner then aborts, the aborted arc survives
+// in the committed entry permanently (nothing can rewrite an immutable
+// snapshot). The node is therefore the unit of write-write conflict for
+// appends exactly as rmp #2444 made it for deletes, which is Memgraph's
+// semantics too: PrepareForWrite refuses ANY write on a vertex whose delta
+// head is not visible to the writer, edge inserts included
+// (src/storage/v2/mvcc.hpp, read 2026-08-02).
 //
 // Check and record are SEPARATE because they happen either side of the mutation,
 // and for different reasons. The check must precede the insert so a doomed
@@ -153,7 +169,16 @@ func (av *adjVersions) shard(id graph.NodeID) *adjVersionShard {
 // it is committed the instant it is made, so there is no window in which another
 // transaction could displace it.
 func (av *adjVersions) checkAppend(src graph.NodeID, tx *writeCtx) error {
-	if tx == nil {
+	if tx == nil || tx.undoing.Load() {
+		// An UNDO-replay append is the withdrawal of this transaction's own
+		// arc removal: it re-adds exactly what the transaction took out, which
+		// commutes with every other transaction's writes the way the forward
+		// append did. It cannot be refused — the transaction is already
+		// rolling back and a skipped inverse leaves its forward write applied
+		// (rmp #2445: the adjacency is the one store where another
+		// transaction's COMMUTING append legitimately moves the head this
+		// transaction wrote under, so the head test refuses an inverse the
+		// [writeCtx.undoing] doomed-shortcut exemption was designed to admit).
 		return nil
 	}
 	sh := av.shard(src)
@@ -167,14 +192,19 @@ func (av *adjVersions) checkAppend(src graph.NodeID, tx *writeCtx) error {
 	if head := adjEffective(e.exclusiveInfo, e.exclusiveTS); tx.conflicts(head) {
 		return tx.conflictErr(mvcc.StoreAdjacency, head)
 	}
+	if head := adjEffective(e.appendInfo, e.appendTS); tx.conflicts(head) {
+		return tx.conflictErr(mvcc.StoreAdjacency, head)
+	}
 	return nil
 }
 
 // stampAppend records that tx appended an arc from src.
 //
-// It is recorded even though an append cannot conflict with another append: a
-// LATER exclusive write on this node must be able to see that an append is in
-// flight, or it would silently displace it. See the file comment.
+// The stamp is what a later append or exclusive write on this node tests in
+// [adjVersions.checkAppend] / [adjVersions.noteExclusive]: since rmp #2445 an
+// append conflicts with a foreign in-flight (or invisible-committed) append on
+// the same node, because adjacency entries are immutable snapshots that embed
+// whatever the slot held when they were built. See the file comment.
 //
 // Charging a stamp to a nil tx would leave an instant no record will ever
 // publish, so an untransacted write records nothing.
@@ -212,11 +242,21 @@ func (av *adjVersions) noteExclusive(src graph.NodeID, tx *writeCtx) error {
 
 	e := sh.d[src]
 	if e != nil {
-		if head := adjEffective(e.exclusiveInfo, e.exclusiveTS); tx.conflicts(head) {
-			return tx.conflictErr(mvcc.StoreAdjacency, head)
-		}
-		if head := adjEffective(e.appendInfo, e.appendTS); tx.conflicts(head) {
-			return tx.conflictErr(mvcc.StoreAdjacency, head)
+		// An UNDO-replay removal withdraws exactly the arc this transaction
+		// appended, which commutes with every other transaction's appends —
+		// and a refusal cannot be answered mid-rollback: the skipped inverse
+		// leaves the rolled-back edge applied and committed (rmp #2445, found
+		// by the DST multi-session mode as a leaked edge after a voluntary
+		// rollback that overlapped a committed append on the same node). The
+		// claim below is still stamped, so later writers order against the
+		// rollback's publication exactly as against any other write.
+		if !tx.undoing.Load() {
+			if head := adjEffective(e.exclusiveInfo, e.exclusiveTS); tx.conflicts(head) {
+				return tx.conflictErr(mvcc.StoreAdjacency, head)
+			}
+			if head := adjEffective(e.appendInfo, e.appendTS); tx.conflicts(head) {
+				return tx.conflictErr(mvcc.StoreAdjacency, head)
+			}
 		}
 	} else {
 		e = &adjStamps{}

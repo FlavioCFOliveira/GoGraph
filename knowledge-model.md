@@ -37,6 +37,19 @@ the new Spec; `Task 1526 -[ABOUT]->` both Features). New edge type
 dependency. Task #1526 captures the per-shard versioned `Snapshot` root
 (`atomic.Pointer[Snapshot]`) foundation that SI-safe lazy result streaming
 depends on.
+Incrementally synced at commits `d879b9fb`/`df0d3d2f`/`88053b46` (2026-08-14,
+sprint 345, tasks #2436/#2445/#2446 — DST MVCC isolation checkers and the four
+engine defects they surfaced): +6 nodes (`Commit` x3; `Task` 2436 TASK, 2445 BUG,
+2446 BUG, all COMPLETED), +16 edges (3 `IMPLEMENTED_IN`; 6 `TOUCHES` to Packages
+`sim`/`lpg`/`cypher`; `d879b9fb -[IMPLEMENTS]-> DST Simulator`; `df0d3d2f
+-[FIXES]->` `MVCC snapshot isolation` + `ACID Transactions`; `88053b46 -[FIXES]->
+MVCC snapshot isolation`). Engine semantics changed by df0d3d2f: the life store's
+`primordial` flag is replaced by write-order (`aliveBefore`), the undo replay is
+exempt from adjacency conflict refusal, adjacency APPENDS now conflict per node
+(the #2444 rule extended; Memgraph PrepareForWrite parity), and AddEdge/AddEdgeH
+physically withdraw the inserted arc on a cross-check refusal. 88053b46 gates the
+engine-scoped CSR pair and edge-type-filter caches on `viewCarriesOwnWrites`
+(write-transaction views are never cached or served).
 Incrementally synced at commit `9516d52` (2026-06-15, task #1508, sprint 191 —
 non-blocking LSN-watermarked checkpoint with WAL prefix truncation): +12 nodes
 (`Commit` `9516d52`; `Sprint` `191`; `Task` `1508` COMPLETED; new `Method`s on

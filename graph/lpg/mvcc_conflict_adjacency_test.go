@@ -7,17 +7,22 @@ package lpg
 // # Why adjacency needs its own file and its own table
 //
 // Every other store here answers one question — may I displace the newest
-// version at this key? — and one test shape covers it. Adjacency answers two,
-// because an adjacency APPEND is commutative and a removal is not, so its
-// correctness is a TABLE rather than a single case:
+// version at this key? — and one test shape covers it. Adjacency has a TABLE:
 //
-//	append(A→B)      ‖ append(A→C)      → both commit
+//	append(A→B)      ‖ append(A→C)      → conflict   (rmp #2445)
 //	append(A→B)      ‖ removeEdge(A→C)  → conflict
 //	removeEdge(A→B)  ‖ removeEdge(A→C)  → conflict
+//	append(A→B)      ‖ append(Z→C)      → both commit (disjoint sources)
 //
-// The first row is the one worth being careful about, because it is the row a
-// naive port gets wrong: it is a NEGATIVE assertion, and a negative assertion
-// passes just as happily against a build where the store does not exist at all.
+// The first row used to read "both commit" — appends were treated as
+// commutative facts. The DST multi-session mode disproved the premise
+// (rmp #2445): an adjacency ENTRY is an immutable snapshot built from the
+// node's current slot, so the second transaction's entry EMBEDS the first
+// one's still-pending arc; when the embedder commits, readers see an
+// uncommitted edge, and when the arc's owner aborts, the aborted arc survives
+// in the committed entry permanently. The node is therefore the unit of
+// write-write conflict for appends exactly as rmp #2444 made it for deletes —
+// Memgraph's PrepareForWrite semantics.
 // TestConflict_AdjacencyAppendsCommuteAndAreStillRecorded therefore also proves
 // the append was RECORDED, by showing a subsequent removal is refused because of
 // it — so the row cannot pass vacuously.
@@ -39,19 +44,15 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
-// TestConflict_AdjacencyAppendsCommuteAndAreStillRecorded is the first row of
-// the table, plus the proof that it does not hold vacuously.
-//
-// Two transactions append DIFFERENT arcs from the same source. Adding A→B and
-// adding A→C are independent facts and either order yields the same adjacency, so
-// both must commit — on a power-law graph most arcs share few sources, and
-// refusing this would serialise exactly the hot path MVCC exists to open.
-//
-// Then a THIRD transaction removes an arc from that same source while an append
-// is still in flight, and must be refused. That second half is what makes the
-// first half meaningful: it can only pass if the commuting appends were recorded,
-// so this test cannot be satisfied by a build that tracks nothing.
-func TestConflict_AdjacencyAppendsCommuteAndAreStillRecorded(t *testing.T) {
+// TestConflict_AdjacencyAppendsConflictPerNode is the first row of the table:
+// two transactions appending DIFFERENT arcs from the same source conflict —
+// the second is refused (rmp #2445; see the file comment for the entry-
+// snapshot embedding that retired the old "appends commute" row). Sequential
+// appends on the same source still succeed once the first has committed and
+// published, which is also what proves the stamps are RECORDED rather than
+// the refusal firing vacuously — and a removal concurrent with an in-flight
+// append stays refused, as before.
+func TestConflict_AdjacencyAppendsConflictPerNode(t *testing.T) {
 	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
 	for _, n := range []string{"a", "b", "c", "d"} {
 		if err := g.AddNode(n); err != nil {
@@ -59,28 +60,46 @@ func TestConflict_AdjacencyAppendsCommuteAndAreStillRecorded(t *testing.T) {
 		}
 	}
 
-	// Two appends from the same source, both in flight at once.
+	// Two appends from the same source, both in flight at once: the second is
+	// refused, because its entry snapshot would embed A's pending arc.
 	txA := g.beginLabelTx()
 	if err := txA.addEdge("a", "b", 1); err != nil {
 		t.Fatalf("A addEdge: %v", err)
 	}
 	txB := g.beginLabelTx()
-	if err := txB.addEdge("a", "c", 2); err != nil {
-		t.Fatalf("B addEdge was refused, but two appends from one source commute: %v", err)
+	if err := txB.addEdge("a", "c", 2); err == nil {
+		t.Fatal("B's concurrent append on the same source was admitted; it must conflict (rmp #2445)")
 	}
+	// wantConflictAt drives txB to commit, asserts the typed refusal, and the
+	// failed commit aborts the transaction.
+	wantConflictAt(t, txB, "adjacency")
 
-	if _, err := txB.commit(); err != nil {
-		t.Fatalf("B was refused at commit for appending a DIFFERENT arc from the same source: %v", err)
-	}
 	if _, err := txA.commit(); err != nil {
-		t.Fatalf("A was refused at commit: %v", err)
+		t.Fatalf("A, the first writer, was refused: %v", err)
 	}
-	if !g.AdjList().HasEdge("a", "b") || !g.AdjList().HasEdge("a", "c") {
-		t.Fatal("both commuting appends committed, so both arcs must be present")
+	if !g.AdjList().HasEdge("a", "b") {
+		t.Fatal("A's committed arc is missing")
+	}
+	if g.AdjList().HasEdge("a", "c") {
+		t.Fatal("B's refused arc leaked into the adjacency")
 	}
 
-	// The other half: an append in flight must refuse a concurrent removal on the
-	// same source. If the appends above recorded nothing, this cannot fire.
+	// SEQUENTIAL appends on the same source still succeed: a transaction begun
+	// after A's commit sees A's stamp as visible. This is what proves the
+	// appends are recorded rather than the refusal above firing vacuously.
+	txB2 := g.beginLabelTx()
+	if err := txB2.addEdge("a", "c", 2); err != nil {
+		t.Fatalf("sequential append on the same source was refused: %v", err)
+	}
+	if _, err := txB2.commit(); err != nil {
+		t.Fatalf("sequential append refused at commit: %v", err)
+	}
+	if !g.AdjList().HasEdge("a", "c") {
+		t.Fatal("sequential append's arc is missing")
+	}
+
+	// A removal concurrent with an in-flight append on the same source stays
+	// refused.
 	txC := g.beginLabelTx()
 	if err := txC.addEdge("a", "d", 3); err != nil {
 		t.Fatalf("C addEdge: %v", err)

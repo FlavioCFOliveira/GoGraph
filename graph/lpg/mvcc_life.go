@@ -63,6 +63,25 @@ type lifeStamp struct {
 	seq uint64
 }
 
+// aliveBefore answers what a reader that can see NEITHER recorded event
+// observes: the state immediately before the EARLIEST still-recorded event.
+// The event's own kind encodes that state exactly — a death only happens to a
+// living node and a birth only to a dead (or absent) one — so a died-first
+// pair means the node was alive before the pair, and a born-first pair means
+// it was not.
+//
+// It replaced a chain-level `primordial` flag ("alive before the chain's
+// FIRST event", rmp #2443) that answered the virgin create+delete phantom but
+// misread every pair sitting on top of committed history: a rolled-back
+// DETACH DELETE publishes a died+born pair over the node's committed birth
+// record (the store is one record deep per direction, so the birth is
+// overwritten), and the flag — propagated from that committed birth — told a
+// reader older than the rollback that the still-committed node never existed
+// (rmp #2445, found by the DST multi-session snapshot-stability checker).
+func aliveBefore(born, died lifeStamp) bool {
+	return died.seq < born.seq
+}
+
 // at returns the instant, resolving the shared record when there is one.
 func (s lifeStamp) at() uint64 {
 	if s.info != nil {
@@ -146,7 +165,17 @@ func (g *Graph[N, W]) noteNodeLife(id graph.NodeID, tx *writeCtx, alive bool) bo
 	}
 	sh := g.nodeLifeShardFor(id)
 	sh.mu.Lock()
-	if head := sh.headStamp(id); tx.conflicts(head) {
+	// A BIRTH on a slot with NO life record displaces nobody's version, so it
+	// is exempt from the doomed-transaction refusal: the mapper has ALREADY
+	// interned the slot by the time this hook runs, and refusing to record the
+	// birth left the slot as a permanently visible bare node once the
+	// transaction aborted — no record means "exists" to every reader, and the
+	// abort reclaim had nothing to withdraw. Recording it instead stamps the
+	// slot with the doomed transaction, and [Graph.reclaimAbortedLife]
+	// tombstones it when the abort is processed (rmp #2444, found by the DST
+	// multi-session mode: a CREATE on an already-doomed transaction leaked its
+	// slot). A genuine collision (head != 0) is still refused.
+	if head := sh.headStamp(id); tx.conflicts(head) && (!alive || head != 0) {
 		sh.mu.Unlock()
 		_ = tx.conflictErr(mvcc.StoreNodeExistence, head)
 		return false
@@ -234,10 +263,24 @@ func (g *Graph[N, W]) NodeExistsAsOf(id graph.NodeID, s *Snapshot) bool {
 	bornVisible := hasBorn && born.visibleTo(s.startTS, s.txID)
 	diedVisible := hasDied && died.visibleTo(s.startTS, s.txID)
 
-	if hasBorn && !bornVisible && !hasDied {
-		// Created after this reader started, or by a transaction that has not
-		// committed, and never removed. It does not exist yet.
-		return false
+	if hasBorn && !bornVisible {
+		// The recorded birth is in this reader's future (or belongs to a
+		// transaction it cannot see), so the birth contributes nothing.
+		if !hasDied || diedVisible {
+			// Never removed — it does not exist yet for this reader; or the
+			// death IS visible while the (re)birth is not — it is gone.
+			return false
+		}
+		// NEITHER event is visible: the reader observes the state before the
+		// EARLIEST recorded event, which the pair's write order encodes (see
+		// [aliveBefore]). A fresh create+delete inside one still-invisible
+		// transaction reads false — without this an outside reader saw the
+		// node as a bare phantom, all its label and property versions
+		// invisible (rmp #2443, caught by the DST multi-session mode). A
+		// delete+revive pair — an ancient node whose removal is in the
+		// reader's future, or a rolled-back DETACH DELETE published over the
+		// node's committed birth record (rmp #2445) — reads true.
+		return aliveBefore(born, died)
 	}
 	switch {
 	case bornVisible && diedVisible:

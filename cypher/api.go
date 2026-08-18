@@ -19191,7 +19191,11 @@ func edgeTypeFilterFor(
 	g *lpg.ReadView[string, float64], fwdCSR *csr.CSR[float64], relTypes []string,
 	bopts *buildOpts, at csrPairKey,
 ) map[uint64]string {
-	if bopts == nil || bopts.edgeTypeFilterCache == nil {
+	// A write transaction's view sees its own uncommitted writes, so a filter
+	// built through it describes a private CSR no other reader may be served —
+	// and the shared cache's key carries no transaction identity (rmp #2446,
+	// see [viewCarriesOwnWrites]).
+	if bopts == nil || bopts.edgeTypeFilterCache == nil || viewCarriesOwnWrites(g) {
 		return buildEdgeTypeFilter(g, fwdCSR, relTypes)
 	}
 	return bopts.edgeTypeFilterCache.getOrBuild(canonicalRelTypesKey(relTypes), at, func() map[uint64]string {
