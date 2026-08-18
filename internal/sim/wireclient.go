@@ -80,6 +80,41 @@ func (c *WireClient) Handshake(_ context.Context) (proto.Version, error) {
 	return c.ver, nil
 }
 
+// HandshakeOffering performs the 20-byte Bolt client handshake offering exactly
+// the given versions, one per slot, and records the negotiated version. It is the
+// explicit-offer counterpart of [WireClient.Handshake], which always leads with
+// 5.6: a probe that must reach the pre-5.1 INLINE-auth path (credentials on
+// HELLO) or a specific entity layout has to be able to withhold the newer
+// versions, because the server correctly picks the highest it is offered.
+//
+// At most four versions may be offered (the preamble has four slots); each is
+// offered with a minor RANGE of zero, i.e. that exact version and no fallback.
+// It returns an error when the server rejects negotiation (responds 0.0).
+func (c *WireClient) HandshakeOffering(_ context.Context, offers ...proto.Version) (proto.Version, error) {
+	if len(offers) == 0 || len(offers) > 4 {
+		return proto.Version{}, fmt.Errorf("sim: handshake offers %d versions, want 1..4", len(offers))
+	}
+	var buf [20]byte
+	binary.BigEndian.PutUint32(buf[:4], proto.Magic)
+	for i, v := range offers {
+		off := 4 + i*4
+		// Slot layout: [pad=0x00, minor_range=0, minor, major].
+		buf[off], buf[off+1], buf[off+2], buf[off+3] = 0, 0, v.Minor, v.Major
+	}
+	if _, err := c.conn.Write(buf[:]); err != nil {
+		return proto.Version{}, fmt.Errorf("sim: handshake write: %w", err)
+	}
+	var resp [4]byte
+	if _, err := io.ReadFull(c.conn, resp[:]); err != nil {
+		return proto.Version{}, fmt.Errorf("sim: handshake read: %w", err)
+	}
+	if resp[2] == 0 && resp[3] == 0 {
+		return proto.Version{}, fmt.Errorf("sim: server rejected version negotiation")
+	}
+	c.ver = proto.Version{Major: resp[3], Minor: resp[2]}
+	return c.ver, nil
+}
+
 // Version reports the negotiated protocol version (zero before Handshake).
 func (c *WireClient) Version() proto.Version { return c.ver }
 
@@ -139,6 +174,73 @@ func (c *WireClient) Hello(extra map[string]packstream.Value) (any, error) {
 // and returns the response.
 func (c *WireClient) Logon() (any, error) {
 	return c.Request(&proto.Logon{Auth: map[string]packstream.Value{"scheme": "none"}})
+}
+
+// LogonWith sends a LOGON carrying the given auth token and returns the
+// response. It is the credential-bearing counterpart of [WireClient.Logon],
+// used by the auth-surface scenario to present a right or a wrong password to a
+// server whose [github.com/FlavioCFOliveira/GoGraph/bolt/server.AuthHandler]
+// actually validates one (rmp #2481).
+func (c *WireClient) LogonWith(auth map[string]packstream.Value) (any, error) {
+	return c.Request(&proto.Logon{Auth: auth})
+}
+
+// Logoff sends a LOGOFF and returns the response. A successful LOGOFF
+// de-authorises the connection: every subsequent query-bearing or
+// transaction-finalising message must be refused until a fresh LOGON
+// re-authenticates (the CWE-306 gate).
+func (c *WireClient) Logoff() (any, error) {
+	return c.Request(&proto.Logoff{})
+}
+
+// basicAuthToken builds the auth map a Bolt driver sends for the "basic" scheme.
+func basicAuthToken(principal, credentials string) map[string]packstream.Value {
+	return map[string]packstream.Value{
+		"scheme":      "basic",
+		"principal":   principal,
+		"credentials": credentials,
+	}
+}
+
+// ConnectAs negotiates a version if one is not negotiated yet and then
+// authenticates with the given basic-scheme credentials, returning the response
+// that carried the authentication decision so the caller can adjudicate it.
+// Unlike [WireClient.Connect] it does NOT treat a FAILURE as an error — a refused
+// credential is the very outcome an auth probe is measuring — so the returned
+// error is reserved for transport failures.
+//
+// A caller that needs a SPECIFIC version negotiates it first with
+// [WireClient.HandshakeOffering]; ConnectAs then keeps it, because re-sending a
+// preamble on a negotiated connection is not a second handshake — it is 20 bytes
+// of garbage arriving where the server expects a chunked message.
+func (c *WireClient) ConnectAs(ctx context.Context, principal, credentials string) (any, error) {
+	if c.ver == (proto.Version{}) {
+		if _, err := c.Handshake(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return c.AuthenticateAs(principal, credentials)
+}
+
+// AuthenticateAs sends the credential-bearing message(s) for the ALREADY
+// negotiated version and returns the response that carried the decision. The
+// credentials travel on the message the version puts them on: LOGON for Bolt
+// >= 5.1 (which authenticates separately from a credential-less HELLO), HELLO
+// itself for <= 5.0.
+func (c *WireClient) AuthenticateAs(principal, credentials string) (any, error) {
+	if !c.deferredAuth() {
+		token := basicAuthToken(principal, credentials)
+		token["user_agent"] = "gograph-sim/3.0"
+		return c.Hello(token)
+	}
+	helloResp, err := c.Hello(map[string]packstream.Value{"user_agent": "gograph-sim/3.0"})
+	if err != nil {
+		return nil, err
+	}
+	if f, ok := helloResp.(*proto.Failure); ok {
+		return f, nil
+	}
+	return c.LogonWith(basicAuthToken(principal, credentials))
 }
 
 // Run sends a RUN for query with params and returns the response (a *proto.Success

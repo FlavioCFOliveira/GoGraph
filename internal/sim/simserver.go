@@ -21,11 +21,15 @@ import (
 // OS socket and no reimplementation of the server. New client connections are
 // obtained with [SimServer.Dial].
 //
-// The server is started with [server.NoAuthHandler] (development/testing mode):
-// the DST harness asserts robustness and ACID under abuse, not credential
-// handling, which has its own dedicated test battery in bolt/server. A finite
-// result-row cap is configured on the engine so a single overload query cannot
-// materialise an unbounded result set.
+// [NewSimServer] starts the server with [server.NoAuthHandler]
+// (development/testing mode), which is what the robustness and ACID scenarios
+// want: they abuse the wire and the transaction machinery, not the credential
+// check. The credential surface itself is driven by [NewSimServerAuth], which
+// takes an arbitrary [server.AuthHandler] so the auth scenarios can present a
+// server that genuinely REFUSES a wrong password (rmp #2481) — against a
+// NoAuthHandler a bad-credential probe would pass by admitting everything, which
+// proves nothing. A finite result-row cap is configured on the engine so a single
+// overload query cannot materialise an unbounded result set.
 //
 // # Concurrency contract
 //
@@ -56,9 +60,62 @@ const defaultSimResultRowCap = 100_000
 // must be non-nil; callers typically pass an engine with a finite result-row cap
 // (see [SimEngineForServer]). The returned server is already accepting; obtain
 // connections with [SimServer.Dial] and tear it down with [SimServer.Close].
+//
+// Authentication is [server.NoAuthHandler]; use [NewSimServerAuth] to drive a
+// server that validates credentials.
 func NewSimServer(eng *cypher.Engine, clk clock.Clock) (*SimServer, error) {
-	return newSimServerWithLogger(eng, clk, nil)
+	return newSimServer(eng, clk, simServerOptions{})
 }
+
+// NewSimServerAuth builds a SimServer whose sessions authenticate through auth
+// instead of [server.NoAuthHandler], so a scenario can drive the credential
+// surface over the genuine wire: a wrong password, an unknown scheme, LOGOFF
+// followed by a write, and re-authentication.
+//
+// A nil auth is REFUSED rather than defaulted. The internal constructor treats a
+// nil handler as NoAuthHandler (which is what every pre-existing scenario wants),
+// but silently doing that here would hand a credential-validating scenario a
+// server that admits everything — and every refusal it then failed to observe
+// would look like a passing test. A caller that wants NoAuth asks for it by name
+// with [NewSimServer].
+//
+// The server's own log is discarded, because every rejected credential is
+// reported at ERROR level by design and an auth scenario provokes dozens of them
+// on purpose (see [quietSimLogger]).
+func NewSimServerAuth(eng *cypher.Engine, clk clock.Clock, auth server.AuthHandler) (*SimServer, error) {
+	if auth == nil {
+		return nil, fmt.Errorf("sim: NewSimServerAuth: nil auth handler (use NewSimServer for an unauthenticated server)")
+	}
+	return newSimServer(eng, clk, simServerOptions{
+		auth:      auth,
+		log:       quietSimLogger(),
+		maxTxIdle: simAuthMaxTxIdle,
+	})
+}
+
+// simAuthMaxTxIdle is the idle bound [NewSimServerAuth] installs. See
+// [simServerOptions.maxTxIdle] for why an auth scenario lifts it well clear of
+// its own runtime instead of racing the default 5 s.
+const simAuthMaxTxIdle = 10 * time.Minute
+
+// Server exposes the embedded [server.Server] so a scenario can drive its
+// operator API — [server.Server.Transactions] and
+// [server.Server.TerminateTransaction], both of which take the registry's own lock
+// and are safe on a serving server. It is the accessor rmp #2482 needs.
+//
+// The returned server is owned by the SimServer and must not be Shutdown by the
+// caller ([SimServer.Close] does that).
+//
+// # Do NOT call SetClock on it
+//
+// [server.Server.SetClock] writes s.clk AND replaces s.txReg, and the accept path
+// reads both unguarded (bolt/server/serve.go: sess.setClock(s.clk) and
+// sess.setTxRegistry(s.txReg, remote)). This constructor has already started the
+// serve goroutine by the time it returns, so injecting a clock through this
+// accessor is a data race the detector will report. A scenario that needs a fake
+// clock must have it installed BEFORE Serve starts, i.e. from inside the
+// constructor.
+func (s *SimServer) Server() *server.Server { return s.srv }
 
 // quietSimLogger returns a logger that discards everything. The durable-commit /
 // checkpoint scenarios back a SimServer with an engine built by OpenSimStore,
@@ -72,18 +129,51 @@ func quietSimLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// newSimServerWithLogger is the shared constructor behind [NewSimServer]: a nil
-// log preserves the historical behaviour ([server.NewServer] falls back to
-// slog.Default); a non-nil log routes the server's events (including the
-// unbounded-engine / NoAuth / no-TLS warnings) to that logger.
+// simServerOptions carries the parts of [server.Options] a SimServer scenario is
+// allowed to vary. The zero value reproduces the historical wiring exactly: a
+// [server.NoAuthHandler] and a nil logger (so [server.NewServer] falls back to
+// slog.Default). Everything else — the connection timeout, the listener, the
+// serve goroutine — is fixed by the harness.
+type simServerOptions struct {
+	// auth overrides the session auth handler. Nil means [server.NoAuthHandler].
+	auth server.AuthHandler
+	// log routes the server's events (including the unbounded-engine / NoAuth /
+	// no-TLS warnings) somewhere other than slog.Default. Nil keeps the default.
+	log *slog.Logger
+	// maxTxIdle overrides [server.Options.MaxTxIdleTime]. Zero keeps
+	// [server.DefaultMaxTxIdleTime] (5 s of REAL time, since a SimServer runs on
+	// clock.Real).
+	//
+	// A scenario that holds an explicit transaction open across several round trips
+	// while pinning an exact failure code needs this: if a scheduling stall lets the
+	// idle reaper fire mid-arm, the client is answered
+	// Neo.ClientError.Transaction.TransactionTimedOut and the arm reports a
+	// violation of something it was not testing. The reaper itself is the subject of
+	// rmp #2482, not of an auth arm, so an auth scenario lifts the bound rather than
+	// racing it.
+	maxTxIdle time.Duration
+}
+
+// newSimServerWithLogger is the logger-only entry point kept for the durable and
+// checkpoint scenarios, which want the standard NoAuth wiring but a quiet log.
 func newSimServerWithLogger(eng *cypher.Engine, clk clock.Clock, log *slog.Logger) (*SimServer, error) {
+	return newSimServer(eng, clk, simServerOptions{log: log})
+}
+
+// newSimServer is the single constructor behind every SimServer entry point.
+func newSimServer(eng *cypher.Engine, clk clock.Clock, opts simServerOptions) (*SimServer, error) {
 	if eng == nil {
 		return nil, fmt.Errorf("sim: NewSimServer: nil engine")
 	}
+	auth := opts.auth
+	if auth == nil {
+		auth = server.NoAuthHandler{}
+	}
 	srv, err := server.NewServer(eng, server.Options{
-		Auth:        server.NoAuthHandler{},
-		ConnTimeout: 30 * time.Second,
-		Logger:      log,
+		Auth:          auth,
+		ConnTimeout:   30 * time.Second,
+		Logger:        opts.log,
+		MaxTxIdleTime: opts.maxTxIdle,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("sim: NewSimServer: %w", err)

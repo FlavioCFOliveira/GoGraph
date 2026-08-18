@@ -27,7 +27,7 @@ func TestBoltAbuser_AllFamiliesAcceptable(t *testing.T) {
 
 	abuser := BoltAbuser{}
 
-	for fam := AbuseFamily(0); fam < abuseFamilyCount; fam++ {
+	for fam := AbuseFamily(0); fam < abuseAnyServerFamilyCount; fam++ {
 		out, err := abuser.Abuse(srv, fam)
 		if err != nil {
 			t.Fatalf("Abuse(%s) harness error: %v", fam, err)
@@ -82,7 +82,7 @@ func TestBoltAbuser_NoStateCorruption(t *testing.T) {
 	defer func() { _ = srv.Close() }()
 
 	abuser := BoltAbuser{}
-	for fam := AbuseFamily(0); fam < abuseFamilyCount; fam++ {
+	for fam := AbuseFamily(0); fam < abuseAnyServerFamilyCount; fam++ {
 		if _, err := abuser.Abuse(srv, fam); err != nil {
 			t.Fatalf("Abuse(%s): %v", fam, err)
 		}

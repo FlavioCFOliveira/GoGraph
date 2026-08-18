@@ -351,6 +351,19 @@ func (s *Session) failUnsupportedImpersonation() []any {
 			"the request was refused rather than executed with the connection's own identity")
 }
 
+// setLogger routes this session's events through log instead of the process
+// default. The server bootstrap threads [Options.Logger] here: without it every
+// session-level event — a refused credential, a failed query, a failed commit,
+// a quota refusal — bypassed the configured logger and went to slog.Default(),
+// so an embedder that configured a logger still had the majority of the server's
+// own events written somewhere it did not choose (rmp #2481). A nil log is
+// ignored, leaving slog.Default() in place.
+func (s *Session) setLogger(log *slog.Logger) {
+	if log != nil {
+		s.log = log
+	}
+}
+
 // setClock overrides the session's wall-clock source for the
 // explicit-transaction deadline computation. A nil clock is ignored, leaving
 // the default real clock in place. Intended for the server bootstrap (so the

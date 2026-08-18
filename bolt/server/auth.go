@@ -73,6 +73,22 @@ func (NoAuthHandler) Authenticate(_, principal, _ string) (Identity, error) {
 // in a middleware wrapping the AuthHandler instead so the Bolt server
 // remains stateless per-connection.
 //
+// # Attempt limits: what the server does and does not bound
+//
+// Because lockout lives outside this interface, the server itself bounds
+// credential attempts only in one place. A FIRST authentication that fails
+// terminates the connection (the session goes DEFUNCT), so a client gets one
+// guess per connection before it must dial again. A RE-authentication — a LOGON
+// on a connection that already authenticated — is NOT bounded: it fails the
+// session, RESET recovers it, and the client may try again on the same
+// connection indefinitely. Measured, not inferred: five wrong-password LOGONs
+// on one connection, each recovered by RESET (rmp #2481).
+//
+// That asymmetry is a consequence of the design above, not an oversight, and it
+// is stated here so it is a conscious contract: an embedder who needs an attempt
+// budget must impose it in the middleware wrapping this handler, where the
+// per-principal state such a budget requires can live.
+//
 // BasicAuthHandler is safe for concurrent use as long as Validate is.
 type BasicAuthHandler struct {
 	// Validate is called with the principal and credentials from the client.

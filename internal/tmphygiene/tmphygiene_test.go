@@ -75,6 +75,10 @@ var ownedTempPrefixes = []string{
 	"sim-bulkimport-",
 	"sim-bulk-",
 	"sim-extern-",
+	// internal/sim — the cert-rotation scenario's projection directory (rmp #2481).
+	// CertReloader reads through os.Stat and tls.LoadX509KeyPair, so the images the
+	// SimDisk holds must be projected onto real files for it to read at all.
+	"sim-cert-rotation-",
 	// examples/ — each example's throwaway store.
 	"gograph-ex04-",
 	"gograph-ex05-",

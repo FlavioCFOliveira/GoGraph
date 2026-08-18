@@ -295,8 +295,14 @@ type Options struct {
 	// assigning it here.
 	TLSConfig *tls.Config
 
-	// Logger is the structured logger for server events. When nil, the
-	// default slog handler is used.
+	// Logger is the structured logger for server events, per-connection and
+	// per-session alike: accept-loop and handshake events, and every session-level
+	// event (authentication outcomes, query, BEGIN and COMMIT failures, and the
+	// transaction-quota refusal). When nil, the default slog handler is used.
+	//
+	// The session half was added in rmp #2481: until then newSession hard-coded
+	// slog.Default(), so an embedder that configured a logger still had the
+	// majority of the server's events written to the process default.
 	Logger *slog.Logger
 
 	// DatabaseName is the name this server reports as the database serving a
@@ -649,11 +655,30 @@ func NewServer(eng *cypher.Engine, opts Options) (*Server, error) {
 	}, nil
 }
 
-// setClock overrides the server's wall-clock source for the explicit-transaction
-// timeout reaper. It is an unexported test seam (used by the clock-injection
-// test and the DST harness) so the public Options contract is unchanged; a nil
-// clock is ignored. It must be called before Serve starts accepting
-// connections, as each connection captures the clock at session construction.
+// SetClock overrides the server's wall-clock source for the explicit-transaction
+// timeout reaper and for the transaction registry's start and elapsed times, so a
+// harness can drive both on virtual time. A nil clock is ignored. It must be
+// called BEFORE [Server.Serve] starts accepting connections, because each
+// connection captures the clock at session construction.
+//
+// # Why this is exported, and why it is still not a public API
+//
+// It is a MODULE-INTERNAL seam. [clock.Clock] lives under internal/ and its
+// method set returns internal types ([clock.Timer], [clock.Ticker]), so no
+// package outside this module can name the parameter type or structurally
+// implement it: the method is unreachable from outside GoGraph even though its
+// name is capitalised. The alternative — an Options.Clock field — would place an
+// unusable internal type in the public configuration struct of every embedder.
+//
+// It was previously unexported, reachable only through an export_test.go wrapper
+// whose godoc claimed the DST harness used it. That claim could not have been
+// true: a _test.go file is compiled only into its own package's test binary, so
+// internal/sim could never reach it. rmp #2482 needs the seam for real — the
+// idle-transaction reaper on a fake clock — and this is it.
+func (s *Server) SetClock(clk clock.Clock) { s.setClock(clk) }
+
+// setClock is the implementation behind [Server.SetClock], kept unexported so the
+// in-package callers (the clock-injection tests) read unchanged.
 func (s *Server) setClock(clk clock.Clock) {
 	if clk != nil {
 		s.clk = clk
@@ -979,6 +1004,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	}
 	s.mu.Unlock()
 	sess := newSession(s.eng, s.opts.Auth, localAddr)
+	sess.setLogger(s.log)
 	sess.setBoltVersion(ver)
 	sess.setMaxInFlight(s.opts.MaxInFlightPerConnection)
 	sess.setMaxStmtTimeout(s.opts.MaxStatementTimeout)

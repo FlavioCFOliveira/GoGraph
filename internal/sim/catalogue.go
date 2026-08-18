@@ -39,6 +39,8 @@ const (
 	ScenarioSchemaMutation    = "schema-mutation"
 	ScenarioMergeRel          = "merge-rel"
 	ScenarioNullSemantics     = "null-semantics"
+	ScenarioBoltAuth          = "bolt-auth"
+	ScenarioBoltCertRotation  = "bolt-cert-rotation"
 )
 
 // cpuStarvationGOMAXPROCS is the processor clamp the cpu-starvation scenario
@@ -123,6 +125,8 @@ func DefaultRegistry() (*Registry, error) {
 		checkpointCrashStormScenario(),
 		bulkImportParityScenario(),
 		snapshotCorruptionFailStopScenario(),
+		boltAuthSurfaceScenario(),
+		boltCertRotationScenario(),
 	)
 }
 

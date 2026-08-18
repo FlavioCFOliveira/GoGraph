@@ -1096,6 +1096,205 @@ adjudicates the MVCC clock and the transaction sequence across the snapshot
 boundary. The checkers found four engine isolation defects on arrival
 (rmp #2445, #2446), all fixed and regression-pinned.
 
+## Bolt wire-surface coverage
+
+### The authentication surface, and why the WAL is the witness (rmp #2481)
+
+Every SimServer in `internal/sim` was constructed with
+`server.NoAuthHandler` — a handler that returns success for any scheme, any
+principal and any credential. The consequence is stronger than "the credential
+path was untested": an assertion made against that handler is **vacuous**,
+because it asserts the absence of a check nobody installed. A probe that sent a
+wrong password and then observed a successful write would have been observing
+correct behaviour. So the gap could not be closed by adding arms to the existing
+servers; the harness first needed a server that genuinely refuses, which is what
+`NewSimServerAuth` provides (`BasicAuthHandler` over `ConstantTimeValidate`).
+
+Four facts about the surface came out of reading the server rather than
+describing it, and each one shaped an arm.
+
+**The credentials arrive on two different messages, handled by two different
+functions.** On Bolt >= 5.1 `handleLogon` authenticates and `HELLO` carries only
+driver metadata; on <= 5.0 `handleHello` authenticates inline. Covering one
+leaves the other untested, and the harness's `WireClient.Handshake` always leads
+with 5.6 — the server correctly picks the highest version it is offered — so the
+inline path was unreachable until `HandshakeOffering` was added to withhold the
+newer versions. The wrong-password arm therefore runs twice, at 5.6 and at 4.4.
+
+**A first authentication failure and a re-authentication failure are different
+branches.** A failed first `LOGON` (or a failed inline `HELLO`) sets
+`StateDefunct` and the connection closes; a failed `LOGON` from `READY`/`TX_READY`
+calls `enterFailed`, which reclaims any open transaction and leaves the session
+recoverable through `RESET`. Both are driven, and the second is the one that can
+leave an explicit transaction open, so it is also where a reclaim defect would
+show.
+
+**`LOGOFF` from `TX_READY` leaves the session in `TX_READY`.** The state machine
+does not close the transaction; only `s.authenticated` changes. That is precisely
+why `handleCommit` and `handleRollback` carry their own authentication gate
+(CWE-306, audit 2026-07-13 security F5) rather than relying on the state machine
+— and it is what makes the `commit-after-logoff` arm the sharpest one in the set:
+the write is already staged in the engine, and one boolean stands between it and
+the durable log.
+
+**A FAILURE reply proves the server SAID no, not that nothing happened.** This is
+the reason the scenario is backed by a real WAL (`SimStore` over `SimDisk`) rather
+than the in-memory engine every other wire scenario uses. Each arm is bracketed
+between two readings of `wal.Writer.Stats`, and a refused arm must leave both the
+frame and the byte counter exactly where it found them. The sentinel node its
+statement would have created is then censused twice — in the live engine, and in a
+graph reopened through real recovery after a crash — because a frame appended but
+not yet visible would hide from the live census alone.
+
+The exact failure **code** is pinned per arm rather than "some failure", since
+mapping one onto another changes what a driver is told. Measured:
+`Neo.ClientError.Security.Unauthorized` for a bad credential (both entry points,
+and both branches),
+`Neo.ClientError.Security.AuthProviderFailed` for an unknown scheme, and
+`Neo.ClientError.Request.Invalid` for every de-authorised transition — the
+illegal-transition code, not a security code, because the session reaches those
+gates through `failTransition`.
+
+**A shared failure code cannot attribute a refusal, so the ORIGIN STATE does.**
+The authentication gate and the state-machine gate both answer
+`Neo.ClientError.Request.Invalid`, because both go through `failTransition`. A
+code-only assertion is therefore blind to the case that matters: if `LOGOFF`'s
+target state regressed, `commit-after-logoff` would be refused by the *state*
+check one line above the auth check, the arm would still see the expected code,
+and the CWE-306 gate would be untested behind a green scenario. `failTransition`
+names the state the session was in, which is exactly the discriminator — a refusal
+by the auth gate names a LEGAL state, one by the state machine names `FAILED` —
+so every gate arm pins it. Measured: `... in state AUTHENTICATION`,
+`... in state READY`, `... in state TX_READY`, `... in state TX_STREAMING`,
+`... in state NEGOTIATION`, `... in state FAILED`.
+
+**Four arms exist because a security review asked what the roster still could not
+see.** `route-after-logoff` completes the five auth-gated verbs and is the only
+one whose violation neither the WAL counter nor the census could ever catch — a
+leaked `ROUTE` writes nothing, so it needs its own assertion or none.
+`logoff-in-tx-streaming` asserts the guard that lets `handlePull` and
+`handleDiscard` run with NO authentication gate of their own: the flag can only be
+cleared by `LOGOFF`, and `LOGOFF` is illegal in the streaming states, so a session
+cannot become de-authorised mid-stream. That edge — load-bearing for two ungated
+handlers — was driven by no test at any level. `reset-after-logoff-open-tx`
+reaches the reclamation limb of `handleReset`, which every existing RESET test
+misses because they all run with no transaction open; it asserts that RESET
+discards the staged write and returns an unauthenticated connection to
+NEGOTIATION, where a bare `LOGON` is illegal. And
+`second-message-after-refusal` pins the scoping of the soft-IGNORE: `dispatch`
+softens a request in FAILED to `IGNORED` only when the session is still
+authenticated, so a de-authorised client must get a hard FAILURE — dropping the
+`&& s.authenticated` half would have broken no other arm, because every one of
+them stops at its first refusal.
+
+**The instrument is shown moving in the same run.** Two arms are ADMIT arms: an
+honest authenticated write, and a write after re-authenticating following
+`LOGOFF`. Both must ADVANCE the counters (measured +4 frames, +183 and +188 bytes)
+and both nodes must survive recovery. The second carries a second duty: a server
+that refused every post-`LOGOFF` write — including the legitimate one — would
+satisfy every refusal clause in the scenario and fail only here.
+
+Non-vacuity is adjudicated by a separate shape-only gate (rmp #2470): the full
+arm roster must have run, refusals and admissions must both have occurred, the
+frame counter must have been observed moving, and all three failure codes must
+have been seen. The **control** is a real alternative configuration rather than a
+perturbed value — the identical wrong-password exchange against a
+`NoAuthHandler` server must be ADMITTED — which is what attributes the refusals
+to the `AuthHandler` and not to the state machine, the framing, or a mistake in
+the harness. Every clause of both adjudicators is additionally falsified by
+injection into the pure checker: 22 single-field perturbations, each required to
+produce a violation naming its own defect.
+
+The three new abuse families are classified by what they need, not by what they
+are. `AbuseLogoffThenRun` and `AbuseCommitAfterLogoff` are refused by ANY server,
+because the gate they reach is the session's own `authenticated` flag, so they
+join the randomly-drawn set that runs against the NoAuth `bad-actors` server.
+`AbuseBadCredentials` is admitted by `NoAuthHandler` — correctly — so
+`BoltAbuser.PickFamily` must never draw it there, and a test drives it against
+both server kinds to prove the distinction is real rather than decorative.
+
+### TLS certificate rotation under fault (rmp #2481)
+
+`server.CertReloader` had unit tests for its happy path, a parse failure and
+missing files; what it had never been driven through is the sequence an operator
+actually produces. The scenario runs seven steps — initial load, clean rotation,
+torn key, garbled key, absent key, mismatched pair, completed rotation — and
+three things about it are worth recording.
+
+**The oracle is a real TLS handshake, because the dangerous failure mode parses
+cleanly.** A cert rotated without its key leaves two files that both decode
+perfectly and no longer belong together. `crypto/tls` is the independent
+reference that can see it: the verifier completes a genuine TLS 1.3 handshake
+over a `net.Pipe` against whatever `GetCertificate` currently serves, with the
+client trusting exactly that certificate and verifying the SAN. A successful
+handshake proves the certificate parses, the name matches, and the private key
+corresponds to the certificate's public key. It deliberately does NOT trust a
+pre-agreed root, so it cannot by itself detect that the WRONG pair went live —
+that is settled separately by the served leaf's Common Name, and crediting the
+handshake with it would overstate what it checks. Measured across all four
+faults:
+`rotation-B` stayed in service and kept handshaking, and `rotation-C` took over
+the moment its key landed. The verifier's own falsifiability is proved by pointing
+it at a certificate issued for a different name, which `crypto/tls` rejects.
+
+**Three documented contract halves were untested and are now pinned.** An
+unloaded `CertReloader` refuses to serve rather than returning a nil certificate
+the TLS stack would dereference; `NewCertReloader` over a torn key fails closed —
+the initial load is mandatory, and a reloader that started on unparseable material
+would put a server into service with no certificate at all; and the `Watch`
+poller's `onError` callback is now asserted to FIRE over a broken pair. That last
+one was reachable by nothing in the module: `onError` appeared only in
+`tls_reload.go` itself, every caller passed a discarding closure, and deleting
+`r.onError(err)` from `Watch` would have broken no test — even though it is the
+only operator-visible signal that an unattended rotation failed and a stale
+certificate is still in service. It is the same defect class as the
+`Options.Logger` bypass this sprint fixed, and it is now evidence: measured 2
+deliveries per broken-pair arm.
+
+One latent defect in the scenario itself was found the same way and fixed. The
+fixtures carry fixed validity bounds so their bytes are seed-reproducible, but the
+verifying handshake originally evaluated them against the real clock — which made
+the whole scenario a TIME BOMB that would start failing on 2036-01-01 for a reason
+having nothing to do with the code under test. Both sides of the handshake now
+pin `tls.Config.Time` to a fixed instant inside the window.
+
+**The torn key is produced by an actual crash, not by writing a short file.** The
+first draft of this section claimed the opposite — that `SimDisk.CrashHost` never
+discards un-synced data, so the truncation had to be faked. That was a
+restatement of the model rmp #2535 *replaced*: #2535 is the fix that made fsync
+load-bearing, and since it landed each file carries a durable image advanced only
+by a `Sync` that returned nil, with `CrashHost` reverting to that image (power
+failure) and `CrashProcess` keeping the bytes (SIGKILL). The claim was corrected
+by reading `internal/sim/disk.go` rather than by trusting the note, and the arm
+now uses the real mechanism: write the prefix, `Sync` it, write the remainder,
+leave it un-synced, `CrashHost`. Measured: 85 of 119 bytes survive, and the arm
+fails loudly if a crash ever discards nothing. `SimDisk` is likewise the image
+authority for the garbled arm (`SimDisk.CorruptRange`). Only the projection onto
+a real temporary directory leaves the simulated disk, and it must: `CertReloader`
+reads through `os.Stat` and `tls.LoadX509KeyPair` and exposes no filesystem seam,
+so growing one purely for this scenario would change a production API rather than
+test it. The precedent is `wal_writer_surface.go`.
+
+Two details make the run reproducible and the roster honest. The fixtures are
+**Ed25519 with fixed validity bounds**, so the PEM bytes are a pure function of
+the seed; an ECDSA pair, whose signature draws randomness, would regenerate
+differently every run. And because the torn and garbled arms produce the
+IDENTICAL parse error (`tls: failed to find any PEM data in key input`), the
+non-vacuity gate compares the key sizes each step left on disk — a torn key must
+be strictly shorter than the key it truncates (measured 85 of 119 bytes), a
+garbled one exactly as long (119 of 119), an absent one zero — so the scenario
+cannot claim two faults where only one was ever applied. The gate also requires at
+least one reload to have succeeded, at least one to have failed, and the
+certificate in service to have genuinely changed, since a reloader that ignored
+every rotation would pass every retention clause.
+
+One projection detail is load-bearing and easy to lose: the mtimes are stamped
+**explicitly**, one second apart. `CertReloader.Reload` short-circuits when
+neither file's mtime has advanced past the last successful load, so on a
+filesystem whose timestamp granularity is coarser than the time two consecutive
+projections take, an honest rotation would be silently skipped and the scenario
+would be measuring the clock instead of the reloader.
+
 ## Defects surfaced by this coverage work
 
 The coverage work exercised the engine against these scenarios and found:
@@ -1183,6 +1382,23 @@ The coverage work exercised the engine against these scenarios and found:
    suffix for its own use and the verdict asserts byte-reproducibility for every
    OTHER encoder, so this one is recorded rather than papered over. Not fixed:
    the fix is in `graph/io`, outside that task's scope.
+8. **`Options.Logger` never reached the Bolt session** (fail-silent; no data
+   loss). `Options.Logger` documents itself as "the structured logger for server
+   events", and `NewServer` threads it into the `Server`. `newSession`
+   nevertheless hard-coded `slog.Default()` and the bootstrap never overrode it,
+   so all eleven session-level log sites — every refused credential, every failed
+   query, every failed `BEGIN` and `COMMIT`, the transaction-quota refusal, and
+   the received-bookmark debug records — bypassed the configured logger. That is
+   the majority of what a Bolt server logs: an embedder who routed the server's
+   output to a file, a collector, or `io.Discard` still had its
+   security-relevant events written to the process default. Found while building
+   the auth scenario (rmp #2481), which discards its server's log precisely
+   because it provokes dozens of refused credentials on purpose — and saw them on
+   stderr anyway. Measured on the unfixed build: a capturing handler received 4
+   records and NEITHER the authentication failure nor the query failure was among
+   them. **Fixed** — the bootstrap calls `sess.setLogger(s.log)`;
+   `bolt/server/session_logger_test.go` is the regression guard and was verified
+   to fail without the fix.
 
 
 ## Documented debt / out of scope
