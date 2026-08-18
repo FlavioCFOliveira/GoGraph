@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -102,6 +103,36 @@ type PriorReleaseHelper struct {
 // it as a clean skip, exactly like an optional external tool being absent, NOT
 // as a test failure.
 func BuildPriorReleaseHelper(ctx context.Context, repoRoot, tag string) (*PriorReleaseHelper, error) {
+	return BuildPriorReleaseHelperWithOptions(ctx, repoRoot, tag, XReleaseBuildOptions{})
+}
+
+// XReleaseBuildOptions tunes how a prior-release helper is built.
+type XReleaseBuildOptions struct {
+	// ForceWALOnly skips the checkpoint-bearing build stage entirely and builds
+	// the WAL-only helper directly, so the resulting image carries NO snapshot
+	// directory however capable the tag actually is.
+	//
+	// It exists to keep the snapshot oracle falsifiable (rmp #2531). Once every
+	// tag in the harness's list publishes a snapshot, every arm reports
+	// SnapshotOpened=true — and a flag that is true in every run observed is
+	// indistinguishable from a flag hard-wired to true. This option constructs the
+	// opposite case on demand: a genuine run of the whole pipeline over an image
+	// that provably has no snapshot, where SnapshotOpened MUST read false.
+	//
+	// It is the permanent form of "revert the fix and check the test fails". A
+	// one-off manual revert proves the oracle discriminates on the day it is done
+	// and proves nothing thereafter; wiring the negative case into the harness
+	// keeps it proven on every soak run.
+	//
+	// [PriorReleaseHelper.BuildFallbackErr] stays nil under this option: nothing
+	// failed, so there is no build error to report. CheckpointSupported is false,
+	// which is the honest description of the binary that was produced.
+	ForceWALOnly bool
+}
+
+// BuildPriorReleaseHelperWithOptions is [BuildPriorReleaseHelper] with explicit
+// build options. See [XReleaseBuildOptions].
+func BuildPriorReleaseHelperWithOptions(ctx context.Context, repoRoot, tag string, opts XReleaseBuildOptions) (*PriorReleaseHelper, error) {
 	if !commitishExists(ctx, repoRoot, tag) {
 		return nil, fmt.Errorf("sim: cross-release: ref %q not present in repo", tag)
 	}
@@ -139,13 +170,20 @@ func BuildPriorReleaseHelper(ctx context.Context, repoRoot, tag string) (*PriorR
 		binPath += ".exe"
 	}
 
-	// Stage 1: build WITH the checkpoint file.
-	withCheckpointErr := buildXreleaseHelper(ctx, worktree, binPath)
-	if withCheckpointErr == nil {
-		return &PriorReleaseHelper{
-			Tag: tag, BinPath: binPath, worktree: worktree, tmpRoot: tmpRoot,
-			CheckpointSupported: true,
-		}, nil
+	// Stage 1: build WITH the checkpoint file. Skipped entirely under
+	// ForceWALOnly, whose whole purpose is to reach stage 2 on a tag that would
+	// have passed stage 1.
+	var withCheckpointErr error
+	if opts.ForceWALOnly {
+		withCheckpointErr = errForcedWALOnly
+	} else {
+		withCheckpointErr = buildXreleaseHelper(ctx, worktree, binPath)
+		if withCheckpointErr == nil {
+			return &PriorReleaseHelper{
+				Tag: tag, BinPath: binPath, worktree: worktree, tmpRoot: tmpRoot,
+				CheckpointSupported: true,
+			}, nil
+		}
 	}
 
 	// Stage 2: drop the checkpoint file and retry. Only a failure HERE is an
@@ -158,11 +196,24 @@ func BuildPriorReleaseHelper(ctx context.Context, repoRoot, tag string) (*PriorR
 		cleanup()
 		return nil, fmt.Errorf("sim: cross-release: build helper at %q: %w", tag, err)
 	}
-	return &PriorReleaseHelper{
+	out := &PriorReleaseHelper{
 		Tag: tag, BinPath: binPath, worktree: worktree, tmpRoot: tmpRoot,
 		CheckpointSupported: false, BuildFallbackErr: withCheckpointErr,
-	}, nil
+	}
+	if opts.ForceWALOnly {
+		// Nothing failed, so there is no build error to report: reporting one would
+		// make a deliberate negative control look like a tag whose API drifted.
+		out.BuildFallbackErr = nil
+	}
+	return out, nil
 }
+
+// errForcedWALOnly stands in for stage 1's build error when
+// [XReleaseBuildOptions.ForceWALOnly] skipped stage 1 altogether. It never
+// escapes: BuildPriorReleaseHelperWithOptions clears BuildFallbackErr in that
+// case. It exists so the stage-2 error path, which wraps the stage-1 error, has a
+// non-nil value to wrap and cannot print "%!w(<nil>)".
+var errForcedWALOnly = errors.New("sim: cross-release: checkpoint stage skipped by ForceWALOnly")
 
 // buildXreleaseHelper runs `go build` for the helper package inside worktree,
 // writing the binary to binPath. It is the single build seam both stages of

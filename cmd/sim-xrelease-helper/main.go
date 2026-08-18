@@ -19,6 +19,13 @@
 // cypher.Result reader. It must not reference anything newer, or the build at an
 // older tag fails (which the harness reports as "tag unbuildable", a clean skip).
 //
+// v0.2.0 is the floor this file is PINNED to, not the floor it was measured at.
+// rmp #2531 swept every release tag the repository holds and this file, together
+// with checkpoint.go, builds and drives the full pipeline at v0.1.0 as well. The
+// pinned range is left as the contract — it is the promise future edits must keep
+// — while the measured reach is recorded here so a decision to add older tags to
+// the harness's list does not have to re-derive it.
+//
 // # Protocol
 //
 // Invocation:  sim-xrelease-helper write <dir>

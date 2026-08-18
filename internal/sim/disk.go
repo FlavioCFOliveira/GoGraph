@@ -843,11 +843,17 @@ type renameUndo struct {
 	// prunedDirs holds the directory-durability entries this rename deleted
 	// because moving the name emptied the directory that held it (see
 	// [SimDisk.pruneGhostDirEntriesLocked]). Rolling the rename back puts a name
-	// back INTO that directory, so the entry has to be there to describe it
-	// again — without this the rolled-back state would show the directory as
-	// implicitly durable and a host crash would keep a subtree whose own name
-	// never reached stable storage. It is nil in the common case, where the
-	// directory still holds other names.
+	// back INTO that directory, so the entry is put back to describe it again,
+	// with its original value. It is nil in the common case, where the directory
+	// still holds other names.
+	//
+	// Its original justification — that without the restore a host crash would
+	// keep a subtree whose own name never reached stable storage — was measured
+	// FALSE once pinning became coherent, and the reasoning is set out in full on
+	// [unlinkUndo.prunedDirs]: the restore changes no post-crash state, and the
+	// field is kept only because the undo pass walks the log backwards over live
+	// state, so an intermediate entry that misdescribed a directory's durability
+	// would be a trap for the next record's undo.
 	prunedDirs map[string]bool
 	// dirRename distinguishes a whole-subtree rename from a single-file one.
 	dirRename bool
@@ -2481,8 +2487,10 @@ func (d *SimDisk) rollbackDirentUndosLocked() {
 // A restored name whose own dirent was never durable is put back non-durable and
 // then dropped again by the ordinary revoke pass, which is correct rather than
 // wasteful: that name had never been crash-survivable, so its absence after the
-// crash is not the removal having stuck. The prunedDirs restore is what keeps the
-// crash from losing LESS than a real one — see [unlinkUndo]. The caller holds d.mu.
+// crash is not the removal having stuck. The prunedDirs restore, by contrast,
+// changes no post-crash state at all — it keeps the intermediate state honest for
+// the next record's undo, and [unlinkUndo.prunedDirs] gives the measurement that
+// withdrew the stronger claim once made here. The caller holds d.mu.
 func (d *SimDisk) undoUnlinkLocked(rec *unlinkUndo) {
 	for p, f := range rec.files {
 		d.files[p] = f

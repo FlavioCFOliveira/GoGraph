@@ -276,6 +276,22 @@ behind the snapshot-provenance verdict, and the three guards against a silently
 regenerated fixture — is described in
 [docs/dst.md](dst.md#cross-release-compatibility-beyond-the-wal-rmp-2477).
 
+**The checkpoint half did not build at any real tag (rmp #2531).** As shipped,
+that coverage reached `HEAD`-as-prior only. `Checkpointer.RunCheckpoint` was
+exported only from **v0.6.0**, so at `v0.2.0` and `v0.3.0` the helper's checkpoint
+file failed to compile, the two-stage build dropped it, and both tags fell back to
+a WAL-only image — reporting the degradation loudly, which is how it was found.
+Driving the checkpoint through `Start`/`TriggerCtx`/`Stop` instead — exported
+unchanged since **v0.1.0** — makes every one of the fourteen release tags publish
+a manifest-v3 snapshot that current code opens with snapshot-only recovery, so
+there is no snapshot floor. The snapshot facts are now asserted per tag rather
+than logged. Because a published snapshot truncates the WAL and thereby hides any
+prior defect living in WAL replay — `v0.1.0` and `v0.2.0` have one, reading their
+own 32-node image back as 79 nodes — a deliberately WAL-only arm
+(`ForceWALOnly`) retains that path and doubles as the negative control proving
+`SnapshotOpened` can read false. Both are described in
+[docs/dst.md](dst.md#the-fallback-fired-at-every-real-tag-rmp-2531).
+
 **Measured on arrival.** No cross-version defect was found: a pre-#2520 manifest
 loads and reports `IntegrityVerified` false, a pre-#2526 dense `csr.bin` returns
 its exact weights, a sentinel-bearing `csr.bin` is refused by both legacy guards

@@ -1149,6 +1149,83 @@ cross-release coverage. Degrading one capability is preferable to losing a tag,
 and which happened is recorded (`HelperCheckpointBuilt`, `BuildFallbackErr`) and
 logged rather than inferred.
 
+#### The fallback fired at every real tag (rmp #2531)
+
+The two-stage build worked exactly as designed, and that is how the following was
+found: it was taking the fallback at **every tag the harness actually
+exercised**. Against `HEAD`-as-prior the checkpoint half built and the whole
+chain passed; against `v0.2.0` and `v0.3.0` it did not compile, so both fell back
+to a WAL-only image and reported — correctly, and in its own words — that the tag
+contributed no snapshot-format coverage. The loud degradation is what made this
+visible; the effect was nonetheless that **no snapshot written by a genuinely
+older binary had ever been opened by current code**, and the compatibility claim
+rested entirely on HEAD-as-prior, which is not a compatibility test.
+
+The cause was one symbol. `Checkpointer.RunCheckpoint` was only **exported from
+v0.6.0**; before that the same body existed solely as the unexported
+`runCheckpoint`. The fix drives the checkpoint through
+`New` → `Start` → `TriggerCtx` → `Stop` instead, a trio exported with an
+unchanged shape since **v0.1.0**, reaching the entire tag history the repository
+holds. It is the same body either way — the loop's trigger arm calls precisely
+the `runCheckpoint` that `RunCheckpoint` later exposed — so nothing about the
+artefact on disk depends on which door was used. `Start` is not optional:
+`TriggerCtx` parks on a reply from the loop, so triggering without a running loop
+would **hang** rather than fail.
+
+Measured across all fourteen release tags (`v0.1.0` … `v0.11.0`), every one now
+publishes a manifest-v3 snapshot that the current reader opens, with
+**snapshot-only recovery** (`walOps=0`) and 52 label plus 65 property records
+arriving from the image. There is therefore **no documented snapshot floor**: no
+release in the repository predates snapshot support. A `SnapshotFloorReason` field
+exists on the tag list for a future tag that needs one, and is asserted in the
+negative — a floor declared on a tag that can in fact publish fails, so a stale
+declaration cannot quietly cost coverage.
+
+Consequently the snapshot facts are now **asserted, not logged**, for every tag
+declared capable. A tag that falls back to WAL-only fails the arm instead of
+recording a note, because once the staged half names only symbols exported since
+v0.1.0, a fallback is no longer a property of the tag — it is a regression in the
+helper.
+
+#### Publishing a snapshot masks a prior release's WAL-replay defect
+
+Closing the snapshot gap moved a different path out of coverage, and the harness
+keeps both rather than trading one blindness for the other.
+
+A checkpoint truncates the WAL to the snapshot watermark, so recovery satisfies
+itself from the snapshot and replays almost nothing — that is exactly why
+`SnapshotOnlyRecovery` can require `walOps == 0`. A prior-release defect that
+lives in **WAL replay** therefore disappears the moment the image gains a
+snapshot. One does:
+
+> **Prior-release defect, `v0.1.0` and `v0.2.0` (not a current-code defect).**
+> At the fixed reproducer (seed `0xC0FFEE`, 300 ops) those releases write an
+> image whose live state is 32 nodes / 20 edges, but **their own** recovery reads
+> it back as **79 nodes / 23 edges** after replaying 682 WAL ops. The current code
+> reproduces that same 79/23 reading **faithfully**, which is the cross-version
+> contract — current recovery must reproduce the prior release's own reading of
+> its own image, never retroactively repair it. The gap is absent from `v0.3.0`
+> onwards.
+
+This is documented here and pinned in executable form as
+`priorRelease.WALReplayGapExpected`, so it is not rediscovered as a new finding on
+a later audit. A tag whose declared gap stops reproducing fails, and so does a tag
+that develops an undeclared one.
+
+`TestCrossRelease_WALOnlyImageIsSnapshotFree` keeps that path covered, via
+`XReleaseBuildOptions.ForceWALOnly`, which skips the checkpoint stage on a tag
+that would have passed it. It serves two purposes at once:
+
+- **It is the snapshot oracle's negative control.** Every ordinary arm now
+  reports `SnapshotOpened=true`, and a flag observed true in every run performed
+  is indistinguishable from one wired to true. This arm requires it to read
+  **false** — on an image proven to have no snapshot — so the true readings carry
+  information. It is the permanent form of "revert the fix and check the test
+  fails", which proves the oracle discriminates on every run rather than once.
+- **It is the only remaining exercise of a prior release's WAL-replay path**, with
+  a non-vacuity assertion that `walOps > 0` so the arm cannot pass while
+  exercising nothing.
+
 **Frozen artefacts pin the old shapes.** `internal/sim/testdata/xrelease/`
 carries a complete pre-#2520/#2526 snapshot directory: a manifest with no
 integrity trailer and no `integrity` key, and a `csr.bin` with the dense

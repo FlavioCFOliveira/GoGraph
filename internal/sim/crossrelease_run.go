@@ -153,7 +153,28 @@ func (r CrossReleaseUpgradeResult) String() string {
 // skip; an honest data-compatibility fault is carried in the result, not the
 // error.
 func RunCrossReleaseUpgrade(ctx context.Context, repoRoot, tag string, seed uint64, ops int) (CrossReleaseUpgradeResult, error) {
-	helper, err := BuildPriorReleaseHelper(ctx, repoRoot, tag)
+	return RunCrossReleaseUpgradeWithOptions(ctx, repoRoot, tag, seed, ops, XReleaseBuildOptions{})
+}
+
+// RunCrossReleaseUpgradeWithOptions is [RunCrossReleaseUpgrade] with explicit
+// helper-build options.
+//
+// [XReleaseBuildOptions.ForceWALOnly] drives the whole pipeline over a
+// deliberately WAL-only image. That serves two distinct purposes, and both are
+// load-bearing (rmp #2531):
+//
+//  1. It is the snapshot oracle's negative control. Every tag in the harness's
+//     list now publishes a snapshot, so every ordinary arm reports
+//     SnapshotOpened=true; this arm is the one that must report false, which is
+//     what makes the true ones mean anything.
+//  2. It is the ONLY remaining exercise of a prior release's WAL-REPLAY path.
+//     Publishing a checkpoint truncates the WAL to the snapshot watermark, so
+//     recovery satisfies itself from the snapshot and never replays the full op
+//     history. A prior-release defect that lives in WAL replay — v0.2.0 has one —
+//     becomes invisible the moment the image gains a snapshot. Keeping this arm
+//     keeps that path covered rather than trading one blindness for another.
+func RunCrossReleaseUpgradeWithOptions(ctx context.Context, repoRoot, tag string, seed uint64, ops int, opts XReleaseBuildOptions) (CrossReleaseUpgradeResult, error) {
+	helper, err := BuildPriorReleaseHelperWithOptions(ctx, repoRoot, tag, opts)
 	if err != nil {
 		return CrossReleaseUpgradeResult{}, err
 	}
