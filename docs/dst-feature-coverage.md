@@ -88,6 +88,7 @@ undirected Euler; `BiBFS`; direction-optimised BFS on a hub fixture; the
 | Crash **during** the snapshot publish, at each step of the crash-atomic swap | `checkpoint-crash-storm` | acked ⊆ recovered ⊆ issued across a crash inside the publish window; a stranded backup is promoted by recovery (measured on the durable image and on `store.recovery.snapshot.promoteParentFsync`), never a half-published snapshot |
 | Node-key and edge-weight CODEC matrix across crash and upgrade | `codec-matrix` (soak; `internal/sim/codec_matrix.go`) | seven `(key codec, weight codec)` arms each survive the three snapshot-publish crash windows AND the upgrade + snapshot boundaries with acked ⊆ recovered ⊆ issued adjudicated BY KEY; the durable `mapper.bin` carries the layout the key type selects (v1 for the string control, v2 for the other six) and the snapshot-only reopen replays ZERO WAL ops, so every recovered key came through the mapper; `txn.ErrNoWeightCodec` is provoked and its actual behaviour pinned. One measured gap is pinned rather than tolerated: a struct weight is dropped by the snapshot CSR writer — see below |
 | Corruption of a published snapshot COMPONENT | `snapshot-corruption-failstop` | a byte flipped in any of the nine components fail-stops recovery with that component's typed sentinel; recovery returns no store, mutates nothing on disk and leaves `db/wal` byte-identical; the restored image still recovers the exact committed model. One documented non-fail-stop is pinned in the same run: a corrupt `indexes/<name>.bin` is REBUILT (and the rebuild verified against a full scan). The manifest's key-name region was the second until rmp #2520 checksummed it — see below |
+| Cross-release compatibility of the on-disk SNAPSHOT format | `TestCrossRelease_*` (soak: prior-tag subprocess) + `TestCrossReleaseCompat_*` (short: frozen fixtures) | a PRIOR release publishes a **checkpoint** — snapshot directory plus truncated WAL — and the current code reopens it through the FULL-STACK `recovery.OpenCtx`, so that release's `manifest.json`, `csr.bin`, `labels.bin`, `properties.bin` and `mapper.bin` are parsed by current code. "The snapshot was opened" is adjudicated from two INDEPENDENT observations — the filesystem read with the current manifest reader, and recovery's own `SnapshotHit` — so a directory present but skipped is a `SnapshotProvenanceGap` that fails parity, not an unfalsifiable false. On the short layer a frozen pre-#2520/#2526 snapshot directory asserts both directions of the documented contract: an older artefact still opens (manifest loads reporting `IntegrityVerified` **false**; the dense width-8 weights column parses with its exact `float64` values), and a newer artefact is refused by the older reader's documented rule **deterministically**, by both of that release's guards. Fixture digests are pinned in the test source rather than in a golden, so `-update` cannot regenerate the old format away — see below |
 | Per-transaction op caps (CWE-770), producer **and** replay | `txn-oversize` (`internal/sim/txn_oversize.go`) | an over-cap commit is refused with `txn.ErrTransactionTooLarge` **before any frame is written** — proved by the durable WAL image being BYTE-identical across the refusal and the live graph unmutated, not by the error alone — and the surviving file recovers clean with every refused key absent; a hand-built WAL whose marker-less run exceeds the replay cap fail-stops with `recovery.ErrTransactionTooLarge`, keeps exactly the committed prefix, and is refused by the store-open rather than appended onto. The boundary is MEASURED on both sides and the two caps agree exactly (cap ops passes, cap+1 fails both). Until this task the cap reached only the replayer, so neither sentinel was reachable under simulation at any setting — see below |
 
 ### Snapshot component corruption is now covered; the manifest is checksummed (rmp #2467, #2520)
@@ -238,6 +239,49 @@ drives it. **Closed by rmp #2520**: verifying the trailer requires reading to th
 end of the file, so the ceiling now bounds the bytes read. The scenario still
 pads *inside* the object, because that probe reaches the guard under both
 readings and so remains the stricter one.
+
+### Cross-release testing reached the WAL and nothing else (rmp #2477)
+
+The cross-release harness (`internal/sim/crossrelease*.go`,
+`cmd/sim-xrelease-helper`) imported `store/wal`, `store/recovery` and
+`store/txn` — grepping that path for `snapshot` returned nothing. A prior
+release therefore only ever handed the current code a **WAL**: no prior
+release's snapshot directory had ever been opened by current code, and no v1 or
+v2 manifest had ever been loaded by the current reader. The entire on-disk
+snapshot format family — `manifest.json`, `csr.bin`, `labels.bin`,
+`properties.bin`, `mapper.bin`, `edgehandles.bin` — sat outside cross-version
+testing.
+
+Two surfaces created in this same sprint sat exactly in that gap, and both were
+shipped **without a schema-version step** precisely so old and new artefacts
+would keep interoperating:
+
+- **rmp #2520** appended a CRC32C integrity trailer after the manifest JSON.
+  Older snapshots have no trailer and must still open, reporting themselves
+  unverified rather than claiming an integrity they do not have.
+- **rmp #2526** introduced the `0xFF` sentinel in `csr.bin`'s weight-width
+  header byte to select a variable-width, codec-encoded weights section. Older
+  files keep the dense native layout byte for byte, and an older reader meeting
+  a sentinel-bearing file must fail loudly rather than mis-slice the column.
+
+Because neither bumped a version, no version gate would have caught a regression
+in either direction, and neither had a cross-release test.
+
+**What now covers it.** The helper publishes a checkpoint before it exits and
+the reopen routes through the full-stack recovery path; frozen fixtures pin the
+old shapes on the short layer and hold the legacy reader's documented rule to
+both directions. The design — the two-stage helper build that degrades one
+capability instead of skipping a whole tag, the two independent observations
+behind the snapshot-provenance verdict, and the three guards against a silently
+regenerated fixture — is described in
+[docs/dst.md](dst.md#cross-release-compatibility-beyond-the-wal-rmp-2477).
+
+**Measured on arrival.** No cross-version defect was found: a pre-#2520 manifest
+loads and reports `IntegrityVerified` false, a pre-#2526 dense `csr.bin` returns
+its exact weights, a sentinel-bearing `csr.bin` is refused by both legacy guards
+(over-determined, not by luck), and the full-stack reopen recovers the whole
+graph from a directory whose WAL had shrunk to zero bytes with zero replayed WAL
+ops. What changed is that all of that is now falsifiable.
 
 ### Bulk-import publication is covered for PARITY, not for faults (rmp #2466)
 

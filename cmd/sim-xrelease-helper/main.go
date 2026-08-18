@@ -28,13 +28,28 @@
 //	stdout  one JSON object per line, each {"i","committed","rows"} where rows
 //	        is a canonical order-independent signature of the op's result rows
 //	        (empty for ops that produced none). A trailing line
-//	        {"done":true,"nodes":N,"edges":E} reports the final engine counts.
+//	        {"done":true,"nodes":N,"edges":E,"checkpoint":B} reports the final
+//	        engine counts and whether a checkpoint was published.
 //	exit    0 on success (store written to <dir> and fsynced via store close);
 //	        non-zero with a diagnostic on stderr on any harness-level failure.
 //
 // The helper writes a real WAL under <dir>/"wal" via the prior release's
 // txn.Store, so the current code can reopen <dir> with recovery.Open — the
 // genuine cross-version data-compatibility boundary.
+//
+// # The checkpoint (rmp #2477)
+//
+// Before exiting, the write path also publishes a durable CHECKPOINT: the prior
+// release writes a SNAPSHOT DIRECTORY under <dir>/snapshot and truncates the WAL
+// prefix the snapshot now covers. Without it the cross-release harness only ever
+// handed the current code a WAL, so a prior release's manifest.json, csr.bin,
+// labels.bin, properties.bin and mapper.bin had never been parsed by current
+// code at all — the whole snapshot format was outside the cross-version test.
+//
+// The checkpoint lives in a SEPARATE staged file (checkpoint.go) reached through
+// [publishCheckpointHook], so a tag whose checkpoint API differs degrades to a
+// WAL-only image that says so on the wire instead of becoming an unbuildable
+// skip. See the hook's own documentation.
 package main
 
 import (
@@ -75,10 +90,35 @@ type wireResult struct {
 
 // wireDone is the final summary line.
 type wireDone struct {
-	Done  bool  `json:"done"`
-	Nodes int64 `json:"nodes"`
-	Edges int64 `json:"edges"`
+	// CheckpointErr is the prior release's checkpoint failure, empty when the
+	// checkpoint succeeded or was not attempted. It is reported rather than
+	// raised so a tag whose checkpoint cannot run still yields a usable WAL
+	// image instead of aborting the whole cross-release run.
+	CheckpointErr string `json:"checkpoint_err,omitempty"`
+	Done          bool   `json:"done"`
+	Nodes         int64  `json:"nodes"`
+	Edges         int64  `json:"edges"`
+	// Checkpoint reports that this build published a durable CHECKPOINT before
+	// exiting: a snapshot directory under <dir>/snapshot plus a WAL truncated to
+	// the snapshot's watermark. False means the binary was built WITHOUT the
+	// staged checkpoint source (see publishCheckpointHook), so <dir> holds a
+	// WAL-only image exactly as it did before rmp #2477.
+	Checkpoint bool `json:"checkpoint"`
 }
+
+// publishCheckpointHook publishes a durable checkpoint over the store this
+// helper just wrote, or is nil when the binary was built without the staged
+// checkpoint source.
+//
+// The hook exists because this file is compiled against a PRIOR RELEASE'S
+// package tree, where the checkpoint API may not exist in the shape the current
+// tree uses — or at all. Keeping the checkpoint in a SEPARATE staged file
+// (cmd/sim-xrelease-helper/checkpoint.go) lets the harness build with it, and,
+// if that build fails, drop just that file and rebuild: the tag then yields a
+// WAL-only image and SAYS SO on the wire (wireDone.Checkpoint = false), rather
+// than the whole tag becoming an unbuildable skip. Declaring the seam here — in
+// the file that is always staged — is what makes the second file removable.
+var publishCheckpointHook func(dir string, g *lpg.Graph[string, float64], st *txn.Store[string, float64], wlog *wal.Writer) error
 
 func main() {
 	if len(os.Args) < 3 {
@@ -190,7 +230,24 @@ func run(dir string, in, out *os.File) (retErr error) {
 	}
 
 	nodes, edges := scalarCount(ctx, eng, "MATCH (n) RETURN count(n)"), scalarCount(ctx, eng, "MATCH ()-[r]->() RETURN count(r)")
-	if err := enc.Encode(wireDone{Done: true, Nodes: nodes, Edges: edges}); err != nil {
+
+	// Publish the checkpoint while the WAL writer is still open: the checkpoint
+	// truncates the WAL prefix through that writer, so it cannot run after the
+	// deferred close. The counts above are read from the LIVE engine and are
+	// therefore unaffected by where in this function the checkpoint runs.
+	done := wireDone{Done: true, Nodes: nodes, Edges: edges}
+	if publishCheckpointHook != nil {
+		if cperr := publishCheckpointHook(dir, g, store, wlog); cperr != nil {
+			// Report, do not raise. A tag that cannot check-point still produced a
+			// valid WAL image, and the harness's contract for that image is
+			// unchanged; hiding the failure, or aborting on it, would both be worse
+			// than saying which of the two shapes <dir> actually holds.
+			done.CheckpointErr = cperr.Error()
+		} else {
+			done.Checkpoint = true
+		}
+	}
+	if err := enc.Encode(done); err != nil {
 		return fmt.Errorf("encode done: %w", err)
 	}
 	return nil

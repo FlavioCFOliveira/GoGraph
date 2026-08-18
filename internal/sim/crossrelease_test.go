@@ -88,6 +88,48 @@ func TestCrossRelease_HelperBuildsAtHead(t *testing.T) {
 	if res.RecoveredNodes == 0 {
 		t.Fatalf("HEAD-as-prior wrote an empty image, nothing to verify: %s", res)
 	}
+
+	// The snapshot half (rmp #2477). HEAD is the one "prior release" whose
+	// checkpoint API is the current one BY CONSTRUCTION, so every step of the
+	// chain is a hard assertion here — this is where a silent regression to the
+	// old WAL-only image would be caught. For a genuine prior tag the same facts
+	// are reported rather than required, because a tag whose checkpoint half does
+	// not build is a known, recorded degradation and not a current-code defect.
+	if !res.HelperCheckpointBuilt {
+		t.Fatalf("HEAD helper did not build with its checkpoint half (fallback: %v):\n%s",
+			res.HelperBuildFallbackErr, res)
+	}
+	if !res.CheckpointPublished {
+		t.Fatalf("HEAD-as-prior did not publish a checkpoint (err %q):\n%s", res.CheckpointErr, res)
+	}
+	if !res.PriorSnapshot.Present {
+		t.Fatalf("HEAD-as-prior published a checkpoint but left no snapshot manifest on disk:\n%s", res)
+	}
+	if !res.SnapshotOpened {
+		t.Fatalf("current recovery did not open the HEAD-written snapshot directory:\n%s", res)
+	}
+	// The provenance gate: a full graph recovered with ZERO replayed WAL ops can
+	// only have come through the snapshot bytes, so the snapshot path is proven
+	// load-bearing rather than merely present. Without this, an image whose WAL
+	// still held every op would pass every assertion above while the snapshot
+	// contributed nothing.
+	if !res.SnapshotOnlyRecovery {
+		t.Fatalf("HEAD-as-prior recovery was not snapshot-only (walOps=%d nodes=%d): the WAL, "+
+			"not the snapshot, could account for the recovered graph:\n%s",
+			res.ReplayedWALOps, res.RecoveredNodes, res)
+	}
+	if res.PriorSnapshot.ManifestVersion == 0 {
+		t.Fatalf("HEAD snapshot manifest read back version 0:\n%s", res)
+	}
+	// HEAD writes the rmp #2520 trailer, so its own manifest must verify. This is
+	// the two-sided half of the golden-fixture assertion in
+	// crossrelease_compat_test.go, which requires the OPPOSITE of a pre-#2520
+	// artefact: together they prove IntegrityVerified discriminates.
+	if !res.PriorSnapshot.IntegrityVerified {
+		t.Fatalf("HEAD-written manifest did not verify its own integrity trailer (integrity=%q):\n%s",
+			res.PriorSnapshot.Integrity, res)
+	}
+	t.Logf("HEAD-as-prior snapshot provenance: %s", res)
 }
 
 // TestCrossRelease_DifferentialHeadSmoke is the fast differential smoke: prior
@@ -165,6 +207,17 @@ func TestCrossRelease_UpgradeFromPriorTags(t *testing.T) {
 					"PRIOR-release WAL fidelity gap noted (not a current-code defect): %s", tag, res)
 			} else {
 				t.Logf("cross-release upgrade %s -> current: full PARITY (live==self==current): %s", tag, res)
+			}
+			// The snapshot half is reported, not required, for a genuine prior tag:
+			// whether that release's checkpoint API matches the staged helper half is
+			// a property of the tag. Parity() already fails the run if the tag DID
+			// publish a snapshot the current reader then skipped or could not parse.
+			if !res.HelperCheckpointBuilt {
+				t.Logf("cross-release upgrade %s: image is WAL-only — the helper's checkpoint half "+
+					"does not build at this tag, so this tag contributes no snapshot-format coverage: %v",
+					tag, res.HelperBuildFallbackErr)
+			} else if !res.CheckpointPublished {
+				t.Logf("cross-release upgrade %s: checkpoint built but did not publish: %s", tag, res.CheckpointErr)
 			}
 		})
 	}

@@ -13,11 +13,9 @@ import (
 	"strings"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
-	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
-	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
+	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
-	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
 // xreleaseHelperPkg is the import path of the prior-release subprocess driver
@@ -27,10 +25,18 @@ import (
 const xreleaseHelperPkg = "cmd/sim-xrelease-helper"
 
 // xreleaseHelperMainRel is the path, relative to the repository root, of the
-// helper's single source file. It is copied verbatim into the prior-tag
+// helper's ALWAYS-staged source file. It is copied verbatim into the prior-tag
 // worktree (which ships no such file) so it compiles against that tag's
 // packages.
 const xreleaseHelperMainRel = "cmd/sim-xrelease-helper/main.go"
+
+// xreleaseHelperCheckpointRel is the helper's OPTIONALLY-staged source file: the
+// half that publishes a checkpoint (rmp #2477). It is staged first and dropped
+// only if the tag will not build with it, so a tag whose checkpoint API differs
+// still yields a WAL-only image instead of disappearing from coverage as an
+// "unbuildable tag" skip. See [BuildPriorReleaseHelper] and the file's own
+// package comment.
+const xreleaseHelperCheckpointRel = "cmd/sim-xrelease-helper/checkpoint.go"
 
 // PriorReleaseHelper is a built prior-release helper binary plus the worktree it
 // was compiled in. Close removes both, deterministically. It is the
@@ -48,24 +54,53 @@ type PriorReleaseHelper struct {
 	Tag string
 	// BinPath is the absolute path of the built helper binary.
 	BinPath string
+	// BuildFallbackErr is the error the FIRST (checkpoint-bearing) build
+	// returned, when the harness had to fall back to the WAL-only helper. It is
+	// nil when the checkpoint-bearing build succeeded. Callers report it so a
+	// silent loss of checkpoint coverage at some tag is visible in the test log
+	// rather than inferred from CheckpointSupported alone.
+	BuildFallbackErr error
+	// CheckpointSupported reports that the tag built WITH
+	// [xreleaseHelperCheckpointRel] staged, so [PriorReleaseHelper.WriteImage]
+	// will publish a snapshot directory alongside the WAL. False means the tag's
+	// checkpoint API is not the one the staged file uses and the helper was
+	// rebuilt without it.
+	CheckpointSupported bool
 
 	worktree string
 	tmpRoot  string
 }
 
 // BuildPriorReleaseHelper checks out tag into a temporary git worktree, copies
-// the current helper source ([xreleaseHelperMainRel]) into it, and builds the
-// helper binary against that tag's packages. The returned helper's Close removes
-// the worktree and the temporary build root.
+// the current helper sources into it, and builds the helper binary against that
+// tag's packages. The returned helper's Close removes the worktree and the
+// temporary build root.
 //
 // repoRoot must be the absolute path of the GoGraph repository working tree
 // (the directory holding .git). The build runs `go build` inside the worktree so
 // the binary links the tag's store/txn/wal/cypher code.
 //
+// # The build is two-stage (rmp #2477)
+//
+// Both [xreleaseHelperMainRel] and [xreleaseHelperCheckpointRel] are staged and
+// the build is attempted. If THAT build fails, the checkpoint file alone is
+// removed and the build is retried with the WAL-only helper. The distinction is
+// recorded in [PriorReleaseHelper.CheckpointSupported] and, for the failing
+// case, [PriorReleaseHelper.BuildFallbackErr].
+//
+// The fallback exists because the two files carry different compatibility
+// risk. main.go is pinned to the API stable across v0.2.0..HEAD; checkpoint.go
+// reaches the younger store/checkpoint API. Putting both in one file would make
+// any checkpoint-API drift at some tag fail the WHOLE build, which the caller
+// reports as an environment-precondition SKIP — silently deleting that release
+// from cross-release coverage entirely. Two stages degrade one capability
+// instead of losing the tag.
+//
 // An error from this function is an ENVIRONMENT-PRECONDITION failure (the tag is
 // not present, git worktree is unavailable, or the tag's tree does not build
-// with the current toolchain): callers gate on it as a clean skip, exactly like
-// an optional external tool being absent, NOT as a test failure.
+// with the current toolchain EVEN WITHOUT the checkpoint file): callers gate on
+// it as a clean skip, exactly like an optional external tool being absent, NOT
+// as a test failure.
 func BuildPriorReleaseHelper(ctx context.Context, repoRoot, tag string) (*PriorReleaseHelper, error) {
 	if !commitishExists(ctx, repoRoot, tag) {
 		return nil, fmt.Errorf("sim: cross-release: ref %q not present in repo", tag)
@@ -89,20 +124,51 @@ func BuildPriorReleaseHelper(ctx context.Context, repoRoot, tag string) (*PriorR
 		_ = os.RemoveAll(tmpRoot)
 	}
 
-	// Copy the current helper source into the worktree, overwriting any tag copy
+	// Copy the current helper sources into the worktree, overwriting any tag copy
 	// (there is none, but be idempotent). The destination directory may not exist
 	// at the tag, so create it.
-	srcMain := filepath.Join(repoRoot, xreleaseHelperMainRel)
-	dstMain := filepath.Join(worktree, xreleaseHelperMainRel)
-	if err := copyFileInto(srcMain, dstMain); err != nil {
-		cleanup()
-		return nil, fmt.Errorf("sim: cross-release: stage helper source: %w", err)
+	for _, rel := range []string{xreleaseHelperMainRel, xreleaseHelperCheckpointRel} {
+		if err := copyFileInto(filepath.Join(repoRoot, rel), filepath.Join(worktree, rel)); err != nil {
+			cleanup()
+			return nil, fmt.Errorf("sim: cross-release: stage helper source %q: %w", rel, err)
+		}
 	}
 
 	binPath := filepath.Join(tmpRoot, "helper")
 	if runtime.GOOS == "windows" {
 		binPath += ".exe"
 	}
+
+	// Stage 1: build WITH the checkpoint file.
+	withCheckpointErr := buildXreleaseHelper(ctx, worktree, binPath)
+	if withCheckpointErr == nil {
+		return &PriorReleaseHelper{
+			Tag: tag, BinPath: binPath, worktree: worktree, tmpRoot: tmpRoot,
+			CheckpointSupported: true,
+		}, nil
+	}
+
+	// Stage 2: drop the checkpoint file and retry. Only a failure HERE is an
+	// unbuildable tag.
+	if err := os.Remove(filepath.Join(worktree, xreleaseHelperCheckpointRel)); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("sim: cross-release: drop checkpoint source at %q: %w (first build: %w)", tag, err, withCheckpointErr)
+	}
+	if err := buildXreleaseHelper(ctx, worktree, binPath); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("sim: cross-release: build helper at %q: %w", tag, err)
+	}
+	return &PriorReleaseHelper{
+		Tag: tag, BinPath: binPath, worktree: worktree, tmpRoot: tmpRoot,
+		CheckpointSupported: false, BuildFallbackErr: withCheckpointErr,
+	}, nil
+}
+
+// buildXreleaseHelper runs `go build` for the helper package inside worktree,
+// writing the binary to binPath. It is the single build seam both stages of
+// [BuildPriorReleaseHelper] use, so the two attempts differ ONLY in which source
+// files are staged — never in build flags or environment.
+func buildXreleaseHelper(ctx context.Context, worktree, binPath string) error {
 	//nolint:gosec // G204: fixed `go build` of a constant, harness-internal package path.
 	build := exec.CommandContext(ctx, "go", "build", "-o", binPath, "./"+xreleaseHelperPkg)
 	build.Dir = worktree
@@ -110,11 +176,9 @@ func BuildPriorReleaseHelper(ctx context.Context, repoRoot, tag string) (*PriorR
 	var buildErr bytes.Buffer
 	build.Stderr = &buildErr
 	if err := build.Run(); err != nil {
-		cleanup()
-		return nil, fmt.Errorf("sim: cross-release: build helper at %q: %w (%s)", tag, err, strings.TrimSpace(buildErr.String()))
+		return fmt.Errorf("%w (%s)", err, strings.TrimSpace(buildErr.String()))
 	}
-
-	return &PriorReleaseHelper{Tag: tag, BinPath: binPath, worktree: worktree, tmpRoot: tmpRoot}, nil
+	return nil
 }
 
 // Close removes the worktree and temporary build artefacts. It is idempotent.
@@ -139,21 +203,31 @@ type HelperOpResult struct {
 }
 
 // HelperRunResult is the full outcome of driving an op stream through the prior
-// release: the per-op results in order, plus the prior engine's final counts.
+// release: the per-op results in order, the prior engine's final counts, and
+// whether the prior release published a checkpoint over the image.
 type HelperRunResult struct {
-	Ops   []HelperOpResult
-	Nodes int64
-	Edges int64
+	// CheckpointErr is the prior release's own checkpoint failure message, empty
+	// when it succeeded or was never attempted.
+	CheckpointErr string
+	Ops           []HelperOpResult
+	Nodes         int64
+	Edges         int64
+	// Checkpoint reports that the image at dir carries a SNAPSHOT DIRECTORY the
+	// prior release published, not merely a WAL (rmp #2477).
+	Checkpoint bool
 }
 
 // WriteImage drives ops through the prior-release helper, which opens a
-// WAL-backed store under dir, runs each op, and closes (flush+fsync) so dir
-// holds a durable store image written ENTIRELY by the prior release. It returns
-// the prior release's per-op results and final counts.
+// WAL-backed store under dir, runs each op, publishes a checkpoint when the tag
+// supports it, and closes (flush+fsync) so dir holds a durable store image
+// written ENTIRELY by the prior release. It returns the prior release's per-op
+// results, final counts, and whether the image carries a snapshot directory.
 //
 // dir must be an existing, empty directory the current process owns; after this
 // returns, the current code can reopen dir via [recovery.Open] to perform the
-// cross-version upgrade check.
+// cross-version upgrade check. When [HelperRunResult.Checkpoint] is true that
+// reopen parses the PRIOR RELEASE'S snapshot bytes — manifest.json, csr.bin and
+// the component files — which is the surface the WAL-only image never reached.
 func (h *PriorReleaseHelper) WriteImage(ctx context.Context, dir string, ops []Op) (HelperRunResult, error) {
 	var stdin bytes.Buffer
 	enc := json.NewEncoder(&stdin)
@@ -212,12 +286,14 @@ type wireOp struct {
 }
 
 type wireResultLine struct {
-	Rows      string `json:"rows"`
-	Index     int    `json:"i"`
-	Nodes     int64  `json:"nodes"`
-	Edges     int64  `json:"edges"`
-	Committed bool   `json:"committed"`
-	Done      bool   `json:"done"`
+	Rows          string `json:"rows"`
+	CheckpointErr string `json:"checkpoint_err"`
+	Index         int    `json:"i"`
+	Nodes         int64  `json:"nodes"`
+	Edges         int64  `json:"edges"`
+	Committed     bool   `json:"committed"`
+	Done          bool   `json:"done"`
+	Checkpoint    bool   `json:"checkpoint"`
 }
 
 // parseHelperOutput decodes the helper's line protocol: nOps result lines
@@ -240,6 +316,8 @@ func parseHelperOutput(stdout []byte, nOps int) (HelperRunResult, error) {
 		if l.Done {
 			res.Nodes = l.Nodes
 			res.Edges = l.Edges
+			res.Checkpoint = l.Checkpoint
+			res.CheckpointErr = l.CheckpointErr
 			sawDone = true
 			continue
 		}
@@ -311,57 +389,138 @@ func normaliseOpThroughJSON(op Op) (Op, error) {
 	return Op{Kind: op.Kind, Cypher: op.Cypher, Params: decoded}, nil
 }
 
-// recoveredImage is the outcome of reopening a prior-release WAL image with the
-// CURRENT recovery core: an engine over the rebuilt graph plus the replay
-// metadata the upgrade check inspects.
+// recoveredImage is the outcome of reopening a prior-release image with the
+// CURRENT full-stack recovery: an engine over the rebuilt graph plus the
+// provenance the upgrade check inspects — how much of the graph came from the
+// prior release's SNAPSHOT and how much from its WAL.
 type recoveredImage struct {
 	engine  *EngineAdapter
 	tailErr error
-	walOps  int
-	clean   bool
+	// walOps is how many WAL ops the current recovery replayed. After a prior
+	// release published a checkpoint this is the POST-checkpoint tail only, which
+	// is what makes it evidence: a full graph recovered from few WAL ops can only
+	// have come through the snapshot.
+	walOps int
+	// snapshotHit reports that the current recovery found and loaded a snapshot
+	// directory under <dir>/snapshot — one the PRIOR RELEASE wrote.
+	snapshotHit bool
+	// snapshotVersion is the on-disk manifest version of the snapshot the current
+	// reader accepted, or 0 when there was none.
+	snapshotVersion int
+	// snapshotLabels / snapshotProperties are how many label and property records
+	// the prior release's snapshot components contributed back into the graph.
+	snapshotLabels     int
+	snapshotProperties int
+	clean              bool
 }
 
 // recoverImageGraph reopens a prior-release-written store image at dir with the
 // CURRENT recovery code and returns an engine over the recovered graph plus the
-// replay metadata. A non-nil error is a fail-stop signal: the current code
+// replay provenance. A non-nil error is a fail-stop signal: the current code
 // REFUSED to open the prior image (genuine corruption or an unsupported format),
 // which the upgrade check treats as a data-compatibility fault to surface, never
 // to swallow.
 //
-// It replays the WAL via the SAME [recovery.ReplayWAL] core that the in-process
-// upgrade harness ([OpenSimStore]) uses, into a graph constructed with the
-// helper's exact configuration (a directed SIMPLE graph — see
-// cmd/sim-xrelease-helper). This matches the writer's shape: a prior-release WAL
-// predates the persisted graph_config, so [recovery.Open]'s no-config default
-// (Multigraph: true) would rebuild a simple-graph image as a multigraph and
-// inflate parallel-edge and node counts — a harness artefact, not a
-// data-compatibility fault. Replaying into the matching config keeps the oracle
-// (which models a simple graph) a faithful reference.
+// # Why the FULL-STACK path, not the WAL-only core (rmp #2477)
+//
+// It routes through [recovery.OpenCtx] — snapshot load THEN WAL replay — rather
+// than calling [recovery.ReplayWAL] directly. Two reasons, and the second is the
+// whole point of the change:
+//
+//  1. The prior release now publishes a checkpoint, so its WAL holds only the
+//     post-checkpoint tail. A WAL-only replay of that image would recover an
+//     almost-empty graph and compare it against a full one.
+//  2. A WAL-only replay never opens <dir>/snapshot at all. The prior release's
+//     manifest.json, csr.bin, labels.bin, properties.bin and mapper.bin — an
+//     entire on-disk format family — were therefore never parsed by current code
+//     in any cross-release test. Now they are.
+//
+// The graph shape is whatever the image declares. [recovery.OpenCtx] honours the
+// snapshot manifest's persisted graph_config when it carries one and falls back
+// to its documented no-config default (Multigraph: true) when it does not, so a
+// pre-config prior image can rebuild as a multigraph where the writer had a
+// simple graph. That is a real property of the image, not a harness artefact, and
+// it is why the upgrade contract compares NODE counts — which no adjacency
+// configuration can change — and reports edge counts rather than asserting them.
+// The comparison is also like-for-like: the prior release's own self-recovery
+// (cmd/sim-xrelease-helper "selfcheck") goes through ITS recovery.Open, the same
+// full-stack path, so both sides resolve the config by the same rule.
 func recoverImageGraph(ctx context.Context, dir string) (recoveredImage, error) {
-	walPath := filepath.Join(dir, "wal")
-	rh, err := os.Open(walPath) //nolint:gosec // walPath is a harness-owned temp dir join
+	res, err := recovery.OpenCtx[string, float64](ctx, dir, recovery.Options[string, float64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewFloat64WeightCodec(),
+	})
 	if err != nil {
-		return recoveredImage{}, fmt.Errorf("open prior image WAL: %w", err)
+		return recoveredImage{}, fmt.Errorf("full-stack reopen of prior image: %w", err)
 	}
-	defer func() { _ = rh.Close() }()
-
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: false})
-	reader := wal.NewReader(rh, rh)
-	replay, err := recovery.ReplayWAL[string, float64](
-		ctx, reader, g, txn.NewStringCodec(), txn.NewFloat64WeightCodec(), txn.DefaultMaxTxnOps,
-	)
-	if err != nil {
-		return recoveredImage{}, fmt.Errorf("replay prior image WAL: %w", err)
-	}
-	if !replay.IsClean() {
-		return recoveredImage{}, fmt.Errorf("current recovery found corruption in prior image: %w", replay.TailErr)
+	if !res.IsClean() {
+		return recoveredImage{}, fmt.Errorf("current recovery found corruption in prior image: %w", res.TailErr)
 	}
 	return recoveredImage{
-		engine:  NewEngineAdapter(cypher.NewEngine(g)),
-		walOps:  replay.WALOps,
-		clean:   replay.IsClean(),
-		tailErr: replay.TailErr,
+		engine:             NewEngineAdapter(cypher.NewEngine(res.Graph)),
+		walOps:             res.WALOps,
+		snapshotHit:        res.SnapshotHit,
+		snapshotVersion:    res.SnapshotSchemaVersion,
+		snapshotLabels:     res.SnapshotLabels,
+		snapshotProperties: res.SnapshotProperties,
+		clean:              res.IsClean(),
+		tailErr:            res.TailErr,
 	}, nil
+}
+
+// PriorSnapshotFacts is what the snapshot directory a PRIOR RELEASE published
+// looks like from the CURRENT reader's point of view, read straight off disk and
+// independently of what recovery reports (rmp #2477).
+//
+// It is read independently on purpose. "The current code opened the prior
+// release's snapshot" is otherwise a single-source claim — recovery's own
+// SnapshotHit — and a reader that silently ignored the directory would report
+// exactly the same false as one that was never given a directory at all. Reading
+// the filesystem separately makes those two states distinguishable.
+type PriorSnapshotFacts struct {
+	// ManifestErr is the error the CURRENT manifest reader returned for the
+	// prior release's manifest.json, or nil when it loaded. A non-nil value with
+	// Present true is a cross-version manifest-format fault.
+	ManifestErr error
+	// Integrity is the manifest's declared integrity scheme, empty for a manifest
+	// written before the CRC32C trailer existed (rmp #2520).
+	Integrity string
+	// Files lists the component file names the manifest declares, in manifest
+	// order.
+	Files []string
+	// ManifestVersion is the on-disk schema version the prior release stamped.
+	ManifestVersion int
+	// Present reports that <dir>/snapshot/manifest.json exists on disk.
+	Present bool
+	// IntegrityVerified reports that the current reader VERIFIED a checksum
+	// trailer over these bytes. False for every manifest written before rmp
+	// #2520 — which is the expected, documented outcome for a prior release and
+	// is asserted as such, not tolerated.
+	IntegrityVerified bool
+}
+
+// InspectPriorSnapshotDir reads <dir>/snapshot/manifest.json with the CURRENT
+// manifest reader and reports what it found. A missing directory is not an
+// error: it yields Present false, which is the WAL-only image shape.
+func InspectPriorSnapshotDir(dir string) PriorSnapshotFacts {
+	path := filepath.Join(dir, "snapshot", "manifest.json")
+	if _, err := os.Stat(path); err != nil {
+		return PriorSnapshotFacts{}
+	}
+	out := PriorSnapshotFacts{Present: true}
+	m, err := snapshot.ReadManifestFile(path)
+	if err != nil {
+		out.ManifestErr = err
+		return out
+	}
+	out.ManifestVersion = m.Version
+	out.Integrity = m.Integrity
+	out.IntegrityVerified = m.IntegrityVerified
+	out.Files = make([]string, 0, len(m.Files))
+	for _, f := range m.Files {
+		out.Files = append(out.Files, f.Name)
+	}
+	return out
 }
 
 // runGit runs a git subcommand in dir (cwd when dir is empty) and returns its

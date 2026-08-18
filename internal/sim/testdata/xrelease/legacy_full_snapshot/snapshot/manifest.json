@@ -1,0 +1,33 @@
+{
+  "created_at": "2026-08-18T00:16:24.171714Z",
+  "graph_config": {
+    "directed": true,
+    "multigraph": false
+  },
+  "files": [
+    {
+      "name": "csr.bin",
+      "size": 2171,
+      "crc32c": 1583821769
+    },
+    {
+      "name": "labels.bin",
+      "size": 215,
+      "crc32c": 1426829021
+    },
+    {
+      "name": "properties.bin",
+      "size": 315,
+      "crc32c": 1506481604
+    },
+    {
+      "name": "mapper.bin",
+      "size": 70,
+      "crc32c": 99025485
+    }
+  ],
+  "version": 3,
+  "order": 4,
+  "size": 4,
+  "commit_ts": 28
+}

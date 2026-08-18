@@ -1100,7 +1100,7 @@ fair-scheduling / barrier hypotheses, each under a deadlock watchdog:
 - **Coverage** (`--coverage-report`, `--bias`) tracks which scenarios have been
   exercised and can bias selection toward under-covered ones.
 - **Differential**, **upgrade**, **cross-release**, and **metrics-oracle** modes
-  cross-check equivalent engine configurations, WAL data-compatibility across
+  cross-check equivalent engine configurations, on-disk data-compatibility across
   releases, and metrics against the oracle. See the corresponding `*_test.go`
   files in `internal/sim/`. The differential variant pairs prove that
   result-equivalent engine toggles produce byte-identical observable output on
@@ -1112,6 +1112,79 @@ fair-scheduling / barrier hypotheses, each under a deadlock watchdog:
   (`cypher.TestBackfillNodeHashIndex_SerialVsParallelIdentical`, via
   `EngineOptions.DisableParallelBackfill`), since a backfill engages its parallel
   phase only above 8192 nodes — more than a scripted trace builds.
+
+### Cross-release compatibility beyond the WAL (rmp #2477)
+
+The cross-release harness imported `store/{wal,recovery,txn}` and nothing else,
+so the only thing a prior release ever handed the current code was a **WAL**. A
+prior release's `manifest.json`, `csr.bin`, `labels.bin`, `properties.bin` and
+`mapper.bin` had never been parsed by current code in any cross-version test —
+an entire on-disk format family outside the harness. Two surfaces created in
+this sprint sat squarely in that gap: the manifest integrity trailer (#2520) and
+the variable-width weights sentinel (#2526), both deliberately shipped **without
+a schema-version step**, so nothing else would have caught a regression in
+either direction.
+
+Two vehicles now close it, and they are deliberately different in strength.
+
+**The prior release publishes a checkpoint.** `cmd/sim-xrelease-helper` now
+writes a **snapshot directory plus a truncated WAL** before it exits, and the
+reopen routes through `recovery.OpenCtx` — the full stack — instead of the
+WAL-only `recovery.ReplayWAL` core. The current reader therefore parses bytes a
+prior release wrote. The claim "the snapshot was opened" is adjudicated from
+**two independent observations**, because recovery's own `SnapshotHit` cannot be
+its own witness: the filesystem is read separately with the current manifest
+reader (`InspectPriorSnapshotDir`), and a directory that exists on disk but is
+not loaded — or is loaded but cannot be parsed — is a
+`SnapshotProvenanceGap` that fails `Parity()`.
+
+The checkpoint lives in a **second, removable source file**
+(`cmd/sim-xrelease-helper/checkpoint.go`) staged into the tag's worktree
+alongside `main.go`. If the tag will not build with it, only that file is
+dropped and the build is retried. The alternative — one file — would have made
+any checkpoint-API drift fail the whole build, which the caller reports as an
+environment-precondition **skip**, silently deleting that release from
+cross-release coverage. Degrading one capability is preferable to losing a tag,
+and which happened is recorded (`HelperCheckpointBuilt`, `BuildFallbackErr`) and
+logged rather than inferred.
+
+**Frozen artefacts pin the old shapes.** `internal/sim/testdata/xrelease/`
+carries a complete pre-#2520/#2526 snapshot directory: a manifest with no
+integrity trailer and no `integrity` key, and a `csr.bin` with the dense
+8-byte-wide `float64` weights column. It runs on the **short layer**, needs no
+git, no worktree and no tag, and asserts the documented contract in both
+directions:
+
+| Surface | Older artefact, current reader | Newer artefact, older reader |
+|---|---|---|
+| `manifest.json` framing (#2520) | loads, and reports `IntegrityVerified` **false** — it declares no integrity it does not have | accepted: the trailer follows the JSON value, which a pre-#2520 decoder never reads past. No version step, by design |
+| `csr.bin` weight width (#2526) | dense width-8 column parses through the native path with the exact `float64` values | refused **deterministically**, by both of that release's guards — the extent guard (255 × nEdges exceeds the file) and the width guard (`0xFF` is not a width `csrWeightSize` could return) |
+
+The old reader is a build that no longer exists in this tree, so the second
+column applies its documented **decision rule**, restated from the two guards it
+contained. A model is weaker than the binary and is treated as such: the same
+rule must **accept** the frozen old artefact and **refuse** the new one, so a
+rule hardwired in either direction cannot pass. The prior-tag subprocess remains
+the authority; this is the half that runs on every change.
+
+**Non-vacuity.** A fixture silently regenerated in the current format would keep
+every assertion passing while testing nothing — the trap #2520 avoided by
+leaving its own frozen fixture unframed. Three separate guards prevent it:
+
+- every component's **SHA-256 is pinned in the test source**, not in a golden
+  file, because `go test -update` rewrites a golden and cannot rewrite a
+  constant. `internal/goldens` is still used, for the artefact that is *supposed*
+  to track the current writer: the sentinel-bearing `csr.bin`;
+- the fixture's **raw framing** is decoded independently of
+  `snapshot.LoadManifest` — trailer magic, bytes past the JSON value, the
+  `integrity` key — so the loader is never asked to describe its own input;
+- every oracle is **two-sided in the same test**: a manifest the current writer
+  produces must come back *verified*, and the legacy width rule must *accept*
+  the frozen artefact.
+
+For the reopen itself, the graph must come back whole from a directory whose WAL
+shrank to nothing across the checkpoint and whose replay reported **zero** WAL
+ops — so the snapshot bytes, and only the snapshot bytes, can account for it.
 
 ## Command-line usage
 
