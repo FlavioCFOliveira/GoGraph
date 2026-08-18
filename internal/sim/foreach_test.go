@@ -212,7 +212,7 @@ func TestForeach_ParitySensitivity(t *testing.T) {
 // empty stats record fires every clause, and a fully-exercised record is
 // clean.
 func TestForeach_NonVacuityGate(t *testing.T) {
-	if v := checkForeachNonVacuity(0, newForeachStats()); len(v) != 4 {
+	if v := checkForeachNonVacuity(newForeachStats()); len(v) != 4 {
 		t.Fatalf("empty stats must fire all four clauses, got %d: %v", len(v), v)
 	}
 
@@ -224,36 +224,60 @@ func TestForeach_NonVacuityGate(t *testing.T) {
 	fs.noteOp(Op{Kind: OpUpdate, Cypher: tmplForeachSetTag,
 		Params: map[string]any{"name": "Ada", "tags": []any{"t1"}}}, true)
 	fs.noteRecovery(oracle)
-	if v := checkForeachNonVacuity(0, fs); len(v) > 0 {
+	if v := checkForeachNonVacuity(fs); len(v) > 0 {
 		t.Fatalf("fully-exercised stats must be clean: %v", v)
 	}
 }
 
-// TestSchemaMutation_ForeachGateWired proves the terminal gate is actually
-// wired into the run loop: a schema-mutation run whose crash schedule is
-// disabled can never satisfy the crash-after-FOREACH clause, so it must end
-// with a foreach non-vacuity report rather than a silent pass.
+// TestSchemaMutation_ForeachGateWired proves the terminal FOREACH gate is
+// actually wired into the run loop, in both directions, and — since rmp #2554 —
+// that it reports a shortfall rather than a violation.
+//
+// The crash-free leg can never satisfy the crash-after-FOREACH clause, so it
+// pins that the gate is present and can fire; the default-configuration leg
+// requires NO shortfall, so it pins that the gate is fed and that the scenario's
+// own budget reaches the FOREACH surface. Neither leg alone survives deleting
+// the gate or unplugging foreach.noteOp.
 func TestSchemaMutation_ForeachGateWired(t *testing.T) {
 	sc := schemaMutationScenario()
-	cfg := sc.DeterministicConfig(sc.DefaultSeed)
-	cfg.Crash = CrashConfig{}
-	cfg.Checkpoint = CheckpointConfig{}
-	cfg.MaxTicks = 120 // enough ticks to issue both FOREACH templates
-	report, err := runSchemaMutationCfg(context.Background(), cfg)
-	if err != nil {
-		t.Fatalf("runSchemaMutationCfg: %v", err)
-	}
-	if report == nil {
-		t.Fatal("a crash-free run must fail the FOREACH non-vacuity gate; got a clean report")
-	}
-	found := false
-	for _, v := range report.Violations {
-		if v.Op == "foreach non-vacuity" {
-			found = true
-			break
+
+	t.Run("crash_free", func(t *testing.T) {
+		cfg := sc.DeterministicConfig(sc.DefaultSeed)
+		cfg.Crash = CrashConfig{}
+		cfg.Checkpoint = CheckpointConfig{}
+		cfg.MaxTicks = 120 // enough ticks to issue both FOREACH templates
+		report, coverage, err := runSchemaMutationCfg(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("runSchemaMutationCfg: %v", err)
 		}
-	}
-	if !found {
-		t.Fatalf("expected a foreach non-vacuity violation, got:\n%s", report)
-	}
+		// rmp #2554: a crash schedule that cannot satisfy a coverage clause is a
+		// property of the configuration, not a defect of the engine.
+		if report != nil {
+			t.Fatalf("a crash-free run must not report a violation:\n%s", report)
+		}
+		if !hasClause(coverage, "no crash/recovery happened after a FOREACH op") {
+			t.Fatalf("expected the crash-after-FOREACH shortfall, got: %v", coverage)
+		}
+		for _, c := range coverage {
+			if strings.HasPrefix(c, foreachGate+": ") {
+				return
+			}
+		}
+		t.Fatalf("no clause was attributed to the foreach gate: %v", coverage)
+	})
+
+	t.Run("full", func(t *testing.T) {
+		report, coverage, err := runSchemaMutationCfg(context.Background(), sc.DeterministicConfig(sc.DefaultSeed))
+		if err != nil {
+			t.Fatalf("runSchemaMutationCfg: %v", err)
+		}
+		if report != nil {
+			t.Fatalf("the default seed must pass every verdict:\n%s", report)
+		}
+		for _, c := range coverage {
+			if strings.HasPrefix(c, foreachGate+": ") {
+				t.Fatalf("the scenario's own budget and seed must reach the FOREACH surface, got: %v", coverage)
+			}
+		}
+	})
 }

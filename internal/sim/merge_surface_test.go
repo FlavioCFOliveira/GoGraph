@@ -14,6 +14,7 @@ package sim
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -442,7 +443,7 @@ func TestMergeSurface_RejectionCheck(t *testing.T) {
 // clean.
 func TestMergeSurface_NonVacuityGate(t *testing.T) {
 	const wantClauses = 21 // ten families + eight branches + sub-cases + crash + survivor
-	if v := checkMergeSurfaceNonVacuity(0, newMergeSurfaceStats()); len(v) != wantClauses {
+	if v := checkMergeSurfaceNonVacuity(newMergeSurfaceStats()); len(v) != wantClauses {
 		t.Fatalf("empty stats must fire all %d clauses, got %d: %v", wantClauses, len(v), v)
 	}
 
@@ -518,7 +519,7 @@ func TestMergeSurface_NonVacuityGate(t *testing.T) {
 	if seen := ms.patternCasesSeen(); seen < mergePatternCasesRequired {
 		t.Fatalf("stats recorded %d sub-cases, want at least %d", seen, mergePatternCasesRequired)
 	}
-	if v := checkMergeSurfaceNonVacuity(0, ms); len(v) > 0 {
+	if v := checkMergeSurfaceNonVacuity(ms); len(v) > 0 {
 		t.Fatalf("fully-exercised stats must be clean: %v", v)
 	}
 
@@ -527,56 +528,287 @@ func TestMergeSurface_NonVacuityGate(t *testing.T) {
 	for c := mergePatternCase(0); c < mergePatternCaseCount && ms.patternCasesSeen() >= mergePatternCasesRequired; c++ {
 		ms.patternCases[c] = false
 	}
-	v := checkMergeSurfaceNonVacuity(0, ms)
-	if len(v) != 1 || !strings.Contains(v[0].Message, "sub-cases") {
+	v := checkMergeSurfaceNonVacuity(ms)
+	if len(v) != 1 || !strings.Contains(v[0], "sub-cases") {
 		t.Fatalf("dropping sub-cases must fire exactly the sub-case clause, got: %v", v)
+	}
+	// Every clause names its own gate, so pooling the two gates' clauses cannot
+	// lose which one raised a shortfall (rmp #2554).
+	if !strings.HasPrefix(v[0], mergeSurfaceGate+": ") {
+		t.Fatalf("clause must be prefixed with the gate that raised it, got: %q", v[0])
 	}
 }
 
-// TestSchemaMutation_MergeGateWired proves the terminal MERGE gate is actually
-// wired into the run loop: a schema-mutation run too short to issue the MERGE
-// families and to crash after one must end with a merge non-vacuity report
-// rather than a silent pass.
+// mergeGateClauses2515 are the three clauses the node-only outer-relationship
+// family (rmp #2515) contributes to the gate: the family was never issued, and
+// each of its two branches never fired.
+var mergeGateClauses2515 = []string{
+	"the handle-collision arm was vacuous",
+	"never took its ON CREATE branch, so the misdirection-prone",
+	"never took its ON MATCH branch, so the misdirection-prone",
+}
+
+// hasClause reports whether any clause in got contains want.
+func hasClause(got []string, want string) bool {
+	return slices.ContainsFunc(got, func(c string) bool { return strings.Contains(c, want) })
+}
+
+// constructedShortfall reports whether clause is one a HEALTHY run must never
+// produce, so a test may assert its absence over arbitrary seeds without
+// measuring the draw instead of the code (rmp #2516).
 //
-// It also pins the rmp #2515 clauses specifically. Together with the full-length
-// TestSchemaMutation_Scenario_Passes — which returns a CLEAN report, and therefore
-// could not have left any of these clauses unsatisfied — this is what proves the
-// live workload actually issued the node-only outer-relationship family and fired
-// BOTH of its branches, rather than the family having quietly fallen back to its
-// fixture-absent arm on every tick.
+// Two kinds qualify, and only two:
+//
+//   - "…was vacuous" — a family that was never issued at all. The draw reaches
+//     each family on ~1 tick in 30 over a 500-tick budget, so a run that issued
+//     none of one family is not an unlucky seed, it is an unplugged actor.
+//   - The rmp #2515 branch clauses, whose precondition [mergeHandleBranch]
+//     CONSTRUCTS rather than draws.
+//
+// Everything else the gates can report is genuinely a function of the seed —
+// notably whether the crash schedule landed after a family's op and whether a
+// family-created Person was still alive when it did. MEASURED over 400 seeds at
+// workers=1: the survivor and crash-after clauses fire on a few per cent of
+// seeds with nothing wrong. Those are WITNESSED, never asserted; asserting them
+// is what made this a defect in the first place.
+func constructedShortfall(clause string) bool {
+	if strings.Contains(clause, "was vacuous") {
+		return true
+	}
+	for _, c := range mergeGateClauses2515 {
+		if strings.Contains(clause, c) {
+			return true
+		}
+	}
+	return false
+}
+
+// assertNoConstructedShortfall fails t for every clause in coverage that a
+// healthy run must never produce. It returns the clauses it tolerated, for the
+// caller's witness log.
+func assertNoConstructedShortfall(t *testing.T, what string, coverage []string) []string {
+	t.Helper()
+	var tolerated []string
+	for _, c := range coverage {
+		if constructedShortfall(c) {
+			t.Errorf("%s: a clause the harness constructs was reported as unreached: %s", what, c)
+			continue
+		}
+		tolerated = append(tolerated, c)
+	}
+	return tolerated
+}
+
+// TestSchemaMutation_MergeGateWired proves the terminal MERGE gate is actually
+// wired into the run loop, in BOTH directions — which is what stops it becoming
+// dead code — and, since rmp #2554, that it is a gate rather than a verdict.
+//
+// The two legs fail for different mutations of the code, and neither alone is
+// sufficient:
+//
+//   - "starved" runs a budget too short to issue the MERGE families or to crash
+//     after one. It requires the shortfall clauses, so DELETING the gate — or
+//     any clause of it — fails here. It also requires the run itself to come
+//     back CLEAN, which is rmp #2554's whole point: a run that proved little is
+//     uninformative, never faulty, and must not exit 1 as an engine deviation.
+//   - "full" runs the scenario's real budget at its default seed and requires
+//     the shortfall list to be EMPTY. It therefore fails if the gate stops being
+//     FED — drop merges.noteOp from the loop and the starved leg still passes
+//     while this one fires every clause — and it is the standing proof that the
+//     live workload really does issue the node-only outer-relationship family
+//     and fire BOTH of its branches, rather than falling back to its
+//     fixture-absent arm on every tick.
+//
+// A gate that always returned nil passes "full" and fails "starved"; a gate that
+// always returned every clause passes "starved" and fails "full". Only a gate
+// that is present, complete, and fed passes both.
 func TestSchemaMutation_MergeGateWired(t *testing.T) {
 	sc := schemaMutationScenario()
-	cfg := sc.DeterministicConfig(sc.DefaultSeed)
-	cfg.Crash = CrashConfig{}
-	cfg.Checkpoint = CheckpointConfig{}
-	cfg.MaxTicks = 6
-	report, err := runSchemaMutationCfg(context.Background(), cfg)
-	if err != nil {
-		t.Fatalf("runSchemaMutationCfg: %v", err)
+
+	t.Run("starved", func(t *testing.T) {
+		cfg := sc.DeterministicConfig(sc.DefaultSeed)
+		cfg.Crash = CrashConfig{}
+		cfg.Checkpoint = CheckpointConfig{}
+		cfg.MaxTicks = 6
+		report, coverage, err := runSchemaMutationCfg(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("runSchemaMutationCfg: %v", err)
+		}
+		// rmp #2554: the shortfall is NOT a violation. A run that exercised too
+		// little must not be reported as an engine defect.
+		if report != nil {
+			t.Fatalf("an uninformative run must not report a violation:\n%s", report)
+		}
+		if len(coverage) == 0 {
+			t.Fatal("a run too short to exercise the MERGE families must report shortfall clauses; got none")
+		}
+		var merge []string
+		for _, c := range coverage {
+			if strings.HasPrefix(c, mergeSurfaceGate+": ") {
+				merge = append(merge, c)
+			}
+		}
+		if len(merge) == 0 {
+			t.Fatalf("expected merge non-vacuity clauses, got: %v", coverage)
+		}
+		for _, want := range mergeGateClauses2515 {
+			if !hasClause(merge, want) {
+				t.Fatalf("gate did not fire the rmp #2515 clause %q; fired: %v", want, merge)
+			}
+		}
+		t.Logf("starved run (%d ticks) shortfalls:\n  %s", cfg.MaxTicks, strings.Join(coverage, "\n  "))
+	})
+
+	t.Run("full", func(t *testing.T) {
+		report, coverage, err := runSchemaMutationCfg(context.Background(), sc.DeterministicConfig(sc.DefaultSeed))
+		if err != nil {
+			t.Fatalf("runSchemaMutationCfg: %v", err)
+		}
+		if report != nil {
+			t.Fatalf("the default seed must pass every verdict:\n%s", report)
+		}
+		// Unplugging merges.noteOp leaves every family "vacuous" and every branch
+		// unfired, so this is what makes the starved leg above insufficient on its
+		// own. What it deliberately does NOT assert is an empty shortfall list: two
+		// of the gate's clauses are a function of where the crash schedule landed,
+		// and pinning those would rebuild the defect this test exists to prevent.
+		if tolerated := assertNoConstructedShortfall(t, "default seed", coverage); len(tolerated) > 0 {
+			t.Logf("default seed left %d draw-dependent clause(s) unreached:\n  %s",
+				len(tolerated), strings.Join(tolerated, "\n  "))
+		}
+	})
+}
+
+// TestMergeHandleBranch_ConstructsBothCreateCells pins the construction rmp #2554
+// put in place of a coin flip: the two cells whose precondition occurs at most
+// ONCE per key — a branch firing against an ABSENT key — are chosen by the rule,
+// not by the draw.
+//
+// It drives [mergeHandleBranch] directly, so it is deterministic and does not
+// depend on any seed reaching the family. The falsification is explicit: each
+// constructed case is asserted for BOTH coin values, so an implementation that
+// let the coin back in fails on one of the two.
+func TestMergeHandleBranch_ConstructsBothCreateCells(t *testing.T) {
+	newOracleWith := func(present ...string) *GraphOracle {
+		o := NewGraphOracle()
+		// The family's DRIVING clause is a MATCH on the fixture relationship, so
+		// without the fixture every op below would be a zero-row no-op and the
+		// keys would never appear — the same fallback the live generator takes.
+		o.seedMergeHandleFixture(false)
+		for _, k := range present {
+			op := mergeOp(tmplMergeHandleOuterRelCreate, map[string]any{
+				"x": mergeHandleSrcName, "y": mergeHandleDstName, "n": k, "v": int64(1)})
+			o.ApplyMerge(op.Cypher, op.Params)
+		}
+		if got := mergeHandleKeysPresent(o); got != len(present) {
+			t.Fatalf("fixture: %d keys present, want %d", got, len(present))
+		}
+		return o
 	}
-	if report == nil {
-		t.Fatal("a run too short to exercise the MERGE families must fail the gate; got a clean report")
-	}
-	found := false
-	var msgs []string
-	for _, v := range report.Violations {
-		if v.Op == "merge non-vacuity" {
-			found = true
-			msgs = append(msgs, v.Message)
+
+	// No key present yet: the very first create occasion of the run must go down
+	// the ON CREATE branch whatever the coin says. Before rmp #2554 the coin
+	// decided, and all three keys drawing MATCH first — a 1-in-8 event, measured
+	// at 51 failures in 400 seeds — left the create branch unfired for the run.
+	for coin := 0; coin < 2; coin++ {
+		o := newOracleWith()
+		if got := mergeHandleBranch(o, mergeHandleNodeKeys[0], coin); got != tmplMergeHandleOuterRelCreate {
+			t.Fatalf("coin=%d on the first absent key must construct the ON CREATE branch, got %q", coin, got)
 		}
 	}
-	if !found {
-		t.Fatalf("expected a merge non-vacuity violation, got:\n%s", report)
-	}
-	for _, want := range []string{
-		"the handle-collision arm was vacuous",
-		"never took its ON CREATE branch, so the misdirection-prone",
-		"never took its ON MATCH branch, so the misdirection-prone",
-	} {
-		if !slices.ContainsFunc(msgs, func(m string) bool { return strings.Contains(m, want) }) {
-			t.Fatalf("gate did not fire the rmp #2515 clause %q; fired: %v", want, msgs)
+	// One key present: the second create occasion is spent on ON MATCH, so the
+	// cell where a create OUTCOME must leave the ON MATCH branch unfired is
+	// reached too, again whatever the coin says.
+	for coin := 0; coin < 2; coin++ {
+		o := newOracleWith(mergeHandleNodeKeys[0])
+		if got := mergeHandleBranch(o, mergeHandleNodeKeys[1], coin); got != tmplMergeHandleOuterRelMatch {
+			t.Fatalf("coin=%d on the second absent key must construct the ON MATCH branch, got %q", coin, got)
 		}
 	}
+	// A PRESENT key matches under either template, so nothing is one-shot and the
+	// draw decides — which is what keeps both MATCHED cells reachable.
+	o := newOracleWith(mergeHandleNodeKeys[:]...)
+	if got := mergeHandleBranch(o, mergeHandleNodeKeys[0], 0); got != tmplMergeHandleOuterRelCreate {
+		t.Fatalf("coin=0 on a present key must draw the ON CREATE template, got %q", got)
+	}
+	if got := mergeHandleBranch(o, mergeHandleNodeKeys[0], 1); got != tmplMergeHandleOuterRelMatch {
+		t.Fatalf("coin=1 on a present key must draw the ON MATCH template, got %q", got)
+	}
+	// Once both one-shot cells are spent the third absent key is free again, so
+	// the construction costs the family no draw entropy beyond the two occasions
+	// it exists to pin.
+	two := newOracleWith(mergeHandleNodeKeys[0], mergeHandleNodeKeys[1])
+	if got := mergeHandleBranch(two, mergeHandleNodeKeys[2], 0); got != tmplMergeHandleOuterRelCreate {
+		t.Fatalf("coin=0 on the third absent key must be free, got %q", got)
+	}
+	if got := mergeHandleBranch(two, mergeHandleNodeKeys[2], 1); got != tmplMergeHandleOuterRelMatch {
+		t.Fatalf("coin=1 on the third absent key must be free, got %q", got)
+	}
+}
+
+// mergeNonVacuitySweepSeeds is how many arbitrary seeds
+// [TestSchemaMutation_NonVacuityGatesAreNotVerdicts] sweeps. It is the short
+// layer's share of the evidence; the standing measurement behind rmp #2554 is a
+// 400-seed sweep at workers=1, recorded in the task.
+const mergeNonVacuitySweepSeeds = 24
+
+// TestSchemaMutation_NonVacuityGatesAreNotVerdicts is the rmp #2554 regression
+// test. It sweeps arbitrary seeds and requires that NONE of them is failed by a
+// coverage shortfall, which is the property that was violated: 51 of 400 seeds
+// exited 1 as an ORACLE_DEVIATION because their seeded workload happened not to
+// drive one branch, with no defect present.
+//
+// It asserts three separate things, because the fix has three parts:
+//
+//   - No seed's report is non-nil. This is the demotion, and it holds by
+//     construction of the return type — a []string cannot become a Violation —
+//     but it is asserted end to end anyway, because that is where a future
+//     regression would land.
+//   - No seed reports a CONSTRUCTED shortfall (see [constructedShortfall]).
+//     This is the other half of the fix ([mergeHandleBranch]): demoting the
+//     clause alone would have silenced the false failure while leaving the
+//     coverage genuinely unreached, which is exactly the trap of measuring the
+//     draw instead of the code (rmp #2516). Before the construction the rmp
+//     #2515 ON CREATE clause fired on 1 seed in 8.
+//   - At least one seed reaches the WHOLE surface. Without it the two clauses
+//     above are satisfied by a gate that reports every draw-dependent clause on
+//     every run, i.e. by a scenario that never proves anything.
+//
+// The draw-dependent clauses are tallied and LOGGED rather than asserted — the
+// witness leg of the three-gate structure (rmp #2472) — so a sweep that proved
+// less than usual is visible without being a failure.
+func TestSchemaMutation_NonVacuityGatesAreNotVerdicts(t *testing.T) {
+	sc := schemaMutationScenario()
+	// The master seed is arbitrary, but it is not unverified: with the
+	// construction in [mergeHandleBranch] reverted to the coin flip it replaced,
+	// this sweep reports the rmp #2515 ON CREATE shortfall on 3 of its 24 seeds
+	// and fails. A sweep that cannot go red proves nothing.
+	seed := NewSeed(0x2554_5EED_C0FF_EE03)
+	tally := map[string]int{}
+	fullyExercised := 0
+	for i := 0; i < mergeNonVacuitySweepSeeds; i++ {
+		s := seed.Uint64N(1 << 62)
+		report, coverage, err := runSchemaMutationCfg(context.Background(), sc.DeterministicConfig(s))
+		if err != nil {
+			t.Fatalf("seed %d: runSchemaMutationCfg: %v", s, err)
+		}
+		if report != nil {
+			t.Fatalf("seed %d reported a violation:\n%s", s, report)
+		}
+		assertNoConstructedShortfall(t, fmt.Sprintf("seed %d", s), coverage)
+		for _, c := range coverage {
+			tally[c]++
+		}
+		if len(coverage) == 0 {
+			fullyExercised++
+		}
+	}
+	if fullyExercised == 0 {
+		t.Fatalf("no seed of %d reached the whole MERGE/FOREACH surface: the sweep proves nothing",
+			mergeNonVacuitySweepSeeds)
+	}
+	t.Logf("%d seeds swept, %d reached the whole surface, %d distinct draw-dependent clause(s) witnessed: %v",
+		mergeNonVacuitySweepSeeds, fullyExercised, len(tally), tally)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

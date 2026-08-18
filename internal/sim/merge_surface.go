@@ -433,11 +433,11 @@ func (w SchemaMutationWriter) opMergePairOuterRel(seed *Seed, edges []pairedEdge
 }
 
 // opMergeHandleOuterRel builds a handle-collision op (rmp #2515): a NODE-ONLY
-// MERGE whose action targets the fixture's PAIRED relationship. One draw in two
-// selects the ON CREATE branch and the rest the ON MATCH branch, so both reach
-// the engine over a run; the merged node is drawn from [mergeHandleNodeKeys], and
-// which branch actually FIRES then follows from whether that key is already
-// present, exactly as the oracle adjudicates it.
+// MERGE whose action targets the fixture's PAIRED relationship. The merged node
+// is drawn from [mergeHandleNodeKeys]; which branch actually FIRES then follows
+// from whether that key is already present, exactly as the oracle adjudicates
+// it, and [mergeHandleBranch] chooses the branch template so that both create
+// outcomes are CONSTRUCTED rather than hoped for (rmp #2554).
 //
 // The family is emitted only when the fixture [seedMergeHandleCollision] builds
 // is modelled, and falls back to the zero-row-driver node op otherwise. The
@@ -448,21 +448,76 @@ func (w SchemaMutationWriter) opMergePairOuterRel(seed *Seed, edges []pairedEdge
 // whole expectation would be wrong. The fallback is the zero-row driver precisely
 // because that family is a committed no-op on ANY graph, so it can never itself
 // become a source of divergence. That the family is never inert in the run it was
-// built for is what [checkMergeSurfaceNonVacuity] asserts.
+// built for is what [checkMergeSurfaceNonVacuity] reports, and since rmp #2554
+// [mergeHandleBranch] constructs the part of it a draw could miss.
 func (w SchemaMutationWriter) opMergeHandleOuterRel(seed *Seed, oracle *GraphOracle) Op {
-	tmpl := tmplMergeHandleOuterRelMatch
-	if seed.IntN(2) == 0 {
-		tmpl = tmplMergeHandleOuterRelCreate
-	}
+	coin := seed.IntN(2)
 	n := mergeHandleNodeKeys[seed.IntN(len(mergeHandleNodeKeys))]
 	v := int64(seed.IntN(1000))
 	if oracle.pairedEdgeBetween(mergeHandleSrcName, mergeHandleDstName) == nil {
 		return w.opMergeZeroDriverNode(seed)
 	}
-	return Op{Kind: OpMerge, Cypher: tmpl, Params: map[string]any{
+	return Op{Kind: OpMerge, Cypher: mergeHandleBranch(oracle, n, coin), Params: map[string]any{
 		"x": mergeHandleSrcName, "y": mergeHandleDstName,
 		"n": n, "v": v,
 	}}
+}
+
+// mergeHandleBranch picks which branch template the handle-collision family
+// issues for the merge key n, given one coin drawn from the seed.
+//
+// # Why the coin alone was not enough (rmp #2554)
+//
+// The family has four cells — {ON CREATE, ON MATCH} template × {created,
+// matched} outcome — and the OUTCOME is a property of the graph, not of the
+// statement: a branch fires only when the key's presence agrees with it. A key
+// is absent at most once per run, so the two CREATED cells are reachable only on
+// a key's FIRST draw. Leaving that first draw to a coin made "the ON CREATE
+// branch fired" a 1-in-2 miss per key and, over the three keys, a 1-in-8 miss
+// per run: MEASURED at 51 failures in 400 seeds at workers=1, every one of them
+// a run in which the engine was never asked to take the path, not a run in which
+// it refused to. Asserting a draw outcome measures the draw, not the code
+// (rmp #2516), so the draw is replaced by a construction on exactly the two
+// occasions that cannot be repeated.
+//
+// The rule is a pure function of (oracle state, coin), so the op stream stays a
+// pure function of (seed state, oracle state) and the scenario stays
+// bit-reproducible. The coin is drawn either way, so the seed stream does not
+// depend on which arm is taken.
+func mergeHandleBranch(oracle *GraphOracle, n string, coin int) string {
+	if !oracle.anyPersonNamed(n) {
+		// The key is ABSENT, so whichever template is issued will CREATE the node.
+		// The first such occasion in a run is spent on the ON CREATE template (so
+		// the create branch fires) and the second on the ON MATCH template (so the
+		// cell where a create outcome must leave ON MATCH unfired is reached too).
+		// Every later one is free, because by then both are already recorded.
+		switch mergeHandleKeysPresent(oracle) {
+		case 0:
+			return tmplMergeHandleOuterRelCreate
+		case 1:
+			return tmplMergeHandleOuterRelMatch
+		}
+	}
+	// A present key matches under either template, so the coin decides which of
+	// the two MATCHED cells this op drives.
+	if coin == 0 {
+		return tmplMergeHandleOuterRelCreate
+	}
+	return tmplMergeHandleOuterRelMatch
+}
+
+// mergeHandleKeysPresent counts how many of [mergeHandleNodeKeys] the model
+// already holds. It is the run's progress through the family's one-shot create
+// occasions, derived from the oracle rather than carried in the actor, which is
+// stateless by construction.
+func mergeHandleKeysPresent(oracle *GraphOracle) int {
+	n := 0
+	for _, k := range mergeHandleNodeKeys {
+		if oracle.anyPersonNamed(k) {
+			n++
+		}
+	}
+	return n
 }
 
 // opMergeZeroDriverNode builds a [tmplMergeZeroDriverNode] op: a node MERGE
@@ -1664,6 +1719,11 @@ func (ms *mergeSurfaceStats) patternCasesSeen() int {
 // first drawn rather than of whether the surface was exercised.
 const mergePatternCasesRequired = 3
 
+// mergeSurfaceGate prefixes every clause [checkMergeSurfaceNonVacuity] reports,
+// so a shortfall names the gate that raised it once the clauses are pooled with
+// another gate's (rmp #2554).
+const mergeSurfaceGate = "merge non-vacuity"
+
 // checkMergeSurfaceNonVacuity is the terminal assert-something-was-seen gate of
 // the MERGE-surface coverage (rmp #2461). A clean schema-mutation run must have
 // issued every one of the four families, fired BOTH branches of the counter
@@ -1672,10 +1732,29 @@ const mergePatternCasesRequired = 3
 // MERGE-written state through a crash into a post-recovery probe — so a green
 // run is genuine evidence that the surface was exercised, not a run in which
 // the new templates never fired.
-func checkMergeSurfaceNonVacuity(tick int64, ms *mergeSurfaceStats) []Violation {
-	var vs []Violation
+//
+// # It is a gate, not a verdict (rmp #2554)
+//
+// It answers "did this run prove anything?", never "did the engine misbehave?".
+// It therefore returns SHORTFALL CLAUSES — plain strings — and the type is the
+// enforcement: a []string cannot be appended into the run's []Violation, so no
+// later edit can quietly promote a coverage shortfall back into an
+// [ViolationOracleDeviation] the way it once was. Until rmp #2554 it did exactly
+// that, and a run whose seeded workload simply never drove a branch exited 1 as
+// an engine deviation: MEASURED at 51 failures in 400 seeds at workers=1, none
+// of them an engine defect. The project's three-gate structure (rmp #2472) is
+// verdict, then SEPARATE non-vacuity gate, then witness — an uninformative run
+// must never read as a faulty one.
+//
+// The clauses are unchanged and are still evaluated on EVERY run, so they cannot
+// rot. What changed is who may act on them: a caller that has pinned the seed
+// and the tick budget — a test — asserts them, and a caller that has not
+// witnesses them. Where a clause's precondition can be CONSTRUCTED instead of
+// drawn it now is; see [mergeHandleBranch].
+func checkMergeSurfaceNonVacuity(ms *mergeSurfaceStats) []string {
+	var vs []string
 	fail := func(msg string) {
-		vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "merge non-vacuity", Message: msg})
+		vs = append(vs, mergeSurfaceGate+": "+msg)
 	}
 	if ms.counterIssued == 0 {
 		fail("no MERGE … ON CREATE/ON MATCH counter op was issued: the two-branch node-MERGE arm was vacuous")

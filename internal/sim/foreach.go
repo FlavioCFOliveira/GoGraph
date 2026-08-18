@@ -234,16 +234,31 @@ func (fs *foreachStats) noteRecovery(oracle *GraphOracle) {
 	}
 }
 
+// foreachGate prefixes every clause [checkForeachNonVacuity] reports, so a
+// shortfall names the gate that raised it once the clauses are pooled with
+// another gate's (rmp #2554).
+const foreachGate = "foreach non-vacuity"
+
 // checkForeachNonVacuity is the terminal assert-something-was-seen gate of the
 // FOREACH coverage (rmp #2454): a clean schema-mutation run must have issued
 // BOTH FOREACH templates, crashed at least once after a FOREACH op, and run a
 // post-recovery check while a FOREACH-created Person was still modelled — so a
 // green run is genuine evidence that FOREACH-written state was exercised
 // through crash/recovery, not a run in which the new templates never fired.
-func checkForeachNonVacuity(tick int64, fs *foreachStats) []Violation {
-	var vs []Violation
+//
+// # It is a gate, not a verdict (rmp #2554)
+//
+// Like [checkMergeSurfaceNonVacuity] it returns SHORTFALL CLAUSES rather than
+// [Violation]s, for the same reason and with the same type-level enforcement.
+// Its last two clauses are the ones that made it a false-failure source: both
+// depend on the CRASH SCHEDULE landing after a FOREACH op and on a
+// FOREACH-created Person surviving the churn, neither of which the workload
+// constructs. MEASURED in the same 400-seed sweep that condemned the MERGE gate:
+// 2 seeds of 400 failed here, on a workload that had done nothing wrong.
+func checkForeachNonVacuity(fs *foreachStats) []string {
+	var vs []string
 	fail := func(msg string) {
-		vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "foreach non-vacuity", Message: msg})
+		vs = append(vs, foreachGate+": "+msg)
 	}
 	if fs.createIssued == 0 {
 		fail("no FOREACH…CREATE op was issued: the FOREACH create arm was vacuous")

@@ -311,9 +311,14 @@ const schemaMutationCheckEvery = 60
 // [CheckSchemaMutation] confirms each mutation
 // round-trips and — with crash+checkpoint injected — survives both WAL and
 // snapshot recovery. Two terminal gates ([checkForeachNonVacuity] and
-// [checkMergeSurfaceNonVacuity]) prove the added templates were actually issued,
-// that each of their branches and sub-cases fired, and that the state they wrote
-// was exercised through recovery. It is bit-reproducible.
+// [checkMergeSurfaceNonVacuity]) report whether the added templates were
+// actually issued, whether each of their branches and sub-cases fired, and
+// whether the state they wrote was exercised through recovery. Since rmp #2554
+// they are SEPARATE from the verdict and return shortfall CLAUSES rather than
+// violations, so a seed that reached less than the whole surface is
+// uninformative, not faulty; the clauses are asserted where the seed is pinned
+// ([TestSchemaMutation_MergeGateWired],
+// [TestSchemaMutation_NonVacuityGatesAreNotVerdicts]). It is bit-reproducible.
 //
 // # The one thing the seed does not reach
 //
@@ -351,20 +356,36 @@ func schemaMutationScenario() Scenario {
 // shared parity check plus [CheckSchemaMutation] periodically, immediately after
 // every crash/recovery (the DST-unique value — the mutations are validated
 // against a graph that survived recovery), and once at the end, followed by the
-// FOREACH non-vacuity gate (rmp #2454). Deterministic.
+// terminal non-vacuity gates (rmp #2454, #2461), whose shortfall clauses this
+// entry point discards because they are coverage, not correctness (rmp #2554).
+// Deterministic.
 func runSchemaMutation(ctx context.Context, seed uint64) (*SimReport, error) {
 	sc := schemaMutationScenario()
-	return runSchemaMutationCfg(ctx, sc.DeterministicConfig(seed))
+	// The coverage shortfalls are DISCARDED here, and that is the whole point of
+	// rmp #2554: a live run — the CLI, the swarm — is never failed by what its
+	// seeded workload happened not to reach. See [runSchemaMutationCfg].
+	report, _, err := runSchemaMutationCfg(ctx, sc.DeterministicConfig(seed))
+	return report, err
 }
 
 // runSchemaMutationCfg is [runSchemaMutation] over an explicit [Config], split
-// out so tests can prove the terminal FOREACH non-vacuity gate is wired: a
-// config whose budget or crash schedule cannot satisfy the gate must yield a
-// violation report, not a silent pass.
-func runSchemaMutationCfg(ctx context.Context, cfg Config) (*SimReport, error) {
+// out so tests can prove the terminal non-vacuity gates are wired: a config
+// whose budget or crash schedule cannot satisfy them must yield the
+// corresponding shortfall clauses, not a silent pass.
+//
+// It returns THREE values, and the middle one is the separation rmp #2554
+// introduced. The report is the VERDICT: non-nil means an invariant was
+// violated and the run failed. The shortfalls are the NON-VACUITY GATES'
+// output: they say what this particular seed did not reach, which is a
+// statement about the workload, never about the engine, and they are carried
+// out of the run rather than folded into the report so that a caller who has
+// pinned the seed and the tick budget can assert them while a caller who has
+// not can witness them. Before #2554 they were violations, and 51 of 400
+// arbitrary seeds exited 1 with no defect present.
+func runSchemaMutationCfg(ctx context.Context, cfg Config) (*SimReport, []string, error) {
 	sm, err := New(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("sim: schema-mutation new: %w", err)
+		return nil, nil, fmt.Errorf("sim: schema-mutation new: %w", err)
 	}
 	defer func() { _ = sm.Close() }()
 
@@ -373,7 +394,7 @@ func runSchemaMutationCfg(ctx context.Context, cfg Config) (*SimReport, error) {
 	// never driven over a graph on which a misdirected write would land nowhere.
 	fixture, v := seedMergeHandleCollision(ctx, sm)
 	if len(v) > 0 {
-		return sm.report(0, Op{Kind: OpCreate, Cypher: "<handle-collision fixture>"}, v), nil
+		return sm.report(0, Op{Kind: OpCreate, Cypher: "<handle-collision fixture>"}, v), nil, nil
 	}
 
 	foreach := newForeachStats()
@@ -390,24 +411,24 @@ func runSchemaMutationCfg(ctx context.Context, cfg Config) (*SimReport, error) {
 	var lastOp Op
 	for i := 0; i < cfg.MaxTicks; i++ {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		tick := sm.clock.Tick()
 
 		if err := sm.maybeCheckpoint(tick); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		crashesBefore := sm.crashCount
 		if report, err := sm.maybeCrash(ctx, tick); err != nil {
-			return nil, err
+			return nil, nil, err
 		} else if report != nil {
-			return report, nil
+			return report, nil, nil
 		}
 		if sm.crashCount > crashesBefore {
 			foreach.noteRecovery(sm.oracle)
 			merges.noteRecovery(sm.oracle)
 			if v := checkState(tick); len(v) > 0 {
-				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery schema-mutation>"}, v), nil
+				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery schema-mutation>"}, v), nil, nil
 			}
 		}
 
@@ -421,41 +442,42 @@ func runSchemaMutationCfg(ctx context.Context, cfg Config) (*SimReport, error) {
 		// The map-parameter MERGE must be rejected by the engine, never applied
 		// (rmp #2461); an acceptance is a deviation on the tick that caused it.
 		if v := checkMergeRejection(tick, op, committed); len(v) > 0 {
-			return sm.report(tick, op, v), nil
+			return sm.report(tick, op, v), nil, nil
 		}
 		// Per-op counters oracle (#2448): every committed mutation's effect report
 		// (SET/REMOVE property, SET/REMOVE label, SET-map, FOREACH expansion, and
 		// since #2461 each MERGE family's create-vs-match adjudication) must match
 		// the effect the oracle predicts, adjudicated on the pre-apply model.
 		if v := CheckOpCounters(tick, op, committed, counters, sm.oracle); len(v) > 0 {
-			return sm.report(tick, op, v), nil
+			return sm.report(tick, op, v), nil, nil
 		}
 		sm.applyToOracle(op, committed)
 		lastTick, lastOp = tick, op
 
 		if tick%int64(sm.cfg.CheckEvery) == 0 {
 			if v := sm.checker.Check(tick, sm.oracle, sm.engine); len(v) > 0 {
-				return sm.report(tick, op, v), nil
+				return sm.report(tick, op, v), nil, nil
 			}
 		}
 		if tick%schemaMutationCheckEvery == 0 {
 			if v := checkState(tick); len(v) > 0 {
-				return sm.report(tick, op, v), nil
+				return sm.report(tick, op, v), nil, nil
 			}
 		}
 	}
 	if v := checkState(lastTick); len(v) > 0 {
-		return sm.report(lastTick, lastOp, v), nil
+		return sm.report(lastTick, lastOp, v), nil, nil
 	}
 	// Assert-something-was-seen (rmp #2454, #2461): both FOREACH templates and
 	// all four MERGE families were issued, each family's branches and sub-cases
 	// actually fired, and the state they wrote was exercised through
-	// crash/recovery. The two gates are evaluated together and their violations
-	// concatenated, so neither can mask the other.
-	terminal := checkForeachNonVacuity(lastTick, foreach)
-	terminal = append(terminal, checkMergeSurfaceNonVacuity(lastTick, merges)...)
-	if len(terminal) > 0 {
-		return sm.report(lastTick, lastOp, terminal), nil
-	}
-	return nil, nil
+	// crash/recovery. The two gates are evaluated together and their clauses
+	// pooled, so neither can mask the other, and each clause names its own gate.
+	//
+	// They are returned, NOT reported (rmp #2554). Reaching this line means every
+	// verdict above passed, so the run found no defect; what the gates add is how
+	// much this seed proved, which is the caller's to judge.
+	coverage := checkForeachNonVacuity(foreach)
+	coverage = append(coverage, checkMergeSurfaceNonVacuity(merges)...)
+	return nil, coverage, nil
 }
