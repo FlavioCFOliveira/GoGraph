@@ -79,7 +79,7 @@ undirected Euler; `BiBFS`; direction-optimised BFS on a hub fixture; the
 | Concurrent durable commits + crash recovery | `durable-commit-crash` | acked ⊆ recovered ⊆ issued; failures absent; no torn CREATE |
 | Background checkpointer + crash-safe `store.DB` teardown | `checkpoint-teardown` | no `ErrWriterClosed` into an acked commit; recovered ⊇ acked; `Stop()` joins |
 | Read-transaction behaviour under concurrency + crash | `readtx-isolation` | no dirty/partial reads; whole-batch atomicity on recovery |
-| Atomic csrfile publish under fault/ENOSPC | `csrfile-publish-fault` | a failed publish leaves either no file or the complete prior csrfile — never torn |
+| Atomic csrfile publish under fault/ENOSPC, across every weight kind and access pattern | `csrfile-publish-fault` (`internal/sim/csrfile_access_matrix.go`) | a failed publish leaves either no file or the complete prior csrfile — never torn, now also at a SEED-DRAWN weight kind; and the whole `WeightKind` x `AccessPattern` grid round-trips exactly, with the weights decoded independently of the package's typed accessors, an advisory access hint proven to change no byte, `WeightAbsent` distinguished from a weighted file on four independent signals, and a truncated file refused with a typed sentinel while `Reinterpret` refuses to build a view — see below |
 | Recovery genuine-corruption fail-stop | `wal-corruption-failstop` | a corrupted interior WAL frame is detected (CRC), recovery reconstructs exactly the clean prefix and refuses to append; a benign torn tail is not treated as corruption |
 | Post-rename dir-fsync fail-stop (WAL prefix reclaim) | `checkpoint-dirfsync-fault` | a post-rename parent-dir fsync failure poisons the writer, yet reopen recovers the exact committed state |
 | DDL (index + UNIQUE constraint) across the checkpoint/snapshot boundary | `ddl-checkpoint-crash`; `constraint-enforce` and `index-diversity` now checkpoint too | the checkpoint's reclaimed WAL prefix COVERS the DDL frames (measured on the SimDisk image), the pure-snapshot phase replays ZERO WAL ops, and the recovered schema still enforces UNIQUE, answers every index seek, and matches `SHOW`/`db.*` |
@@ -734,6 +734,95 @@ file is satisfied by definition — and at least one transaction actually
 committed. Every clause of both verdicts and both non-vacuity gates is proved
 falsifiable by perturbing a hand-built control one field at a time, with the
 unperturbed control silent.
+
+
+### csrfile access patterns, weight kinds, and what truncation does NOT reach (rmp #2478)
+
+The csrfile arm published **one** fixture before this task: a `float64`-weighted
+CSR read back through the default access pattern. Four of the five
+`csrfile.WeightKind` values were therefore never written by the simulator,
+`csrfile.AccessPattern` and `Reader.SetHint` were never called at all, and
+`csrfile.Reinterpret`'s alignment precondition was never probed. The arm now
+enumerates the whole 5 x 5 grid. Five things it measured are worth recording,
+because three of them contradict what the surface suggests.
+
+**There are five access patterns, not three.** `AccessDefault`,
+`AccessSequential`, `AccessRandom`, `AccessWillNeed` and `AccessDontNeed`.
+`store/csrfile`'s own `TestReader_SetHint` drives four of them; `AccessDontNeed`
+was reached by no test in the repository before this task, and it is the one that
+makes "a hint does not change the data" a real question rather than a formality —
+on a live mapping it tells the kernel to drop the resident pages, so the read that
+follows must fault them back in and yield the same bytes.
+
+**The in-memory disk cannot reach madvise, and a green matrix over it is not
+evidence that it did.** `Reader.SetHint` short-circuits when there is no mapping
+to advise, and the DST filesystem seam produces exactly that: `csrfile.OpenWith`
+over a non-OS backend reads the whole image into a heap buffer and leaves the
+Reader's `mm` nil, so `SetHint` returns nil **before** the platform call. Every
+cell of the in-memory grid therefore proves the CONTRACT — a hint is accepted on a
+live reader, refused with `ErrReaderClosed` on a closed one, and alters no byte —
+and none of them proves the syscall ran. The madvise path is reachable only
+through `csrfile.Open`, which always mmaps; one test
+(`TestCSRFileMatrix_MadviseOverRealMapping`) drives all five patterns against a
+real temp directory for that reason. A second measured fact belongs with it: an
+**out-of-range** `AccessPattern` is not rejected — the switch falls through to
+`MADV_NORMAL` and `SetHint` returns nil — so `SetHint` validates nothing.
+
+**An aligned truncation and a misaligned one behave identically, and the reason is
+structural.** `Header.validate` compares the file's length against the ONE
+canonical layout for its counts and demands EXACT equality, so alignment never
+enters the decision. Measured on a 964-byte file: a cut at 128 (a multiple of
+`Alignment` = 64), a cut at 277 (a multiple of neither 64 nor 8), a cut at the
+edges offset, a cut at the CRC offset and a cut one byte short all produce the
+same `ErrHeaderInconsistent`, which wraps `ErrFileCorrupted`. The only threshold
+that changes the answer is `HeaderSize+4`: **67 bytes gives `ErrHeaderTooShort`
+and 68 gives `ErrHeaderInconsistent`**, because below 68 the length gate fires
+before the header is decoded. The two backends diverge at exactly one length —
+zero. The byte-backed reader reports `ErrHeaderTooShort`; the mmap path fails
+earlier, because `mmap(2)` refuses a zero-length mapping, and surfaces an
+**untyped** wrapped syscall error that no `errors.Is` against a package sentinel
+will match.
+
+**`Reinterpret` refuses by PANIC, and truncation cannot reach its alignment
+half.** There is no error return: a short buffer, a negative `n` and an `n` whose
+byte requirement overflows all panic, and the refusal must be caught with
+`recover`. More importantly, its alignment precondition is on the **base address**
+of the buffer, which truncating a file cannot change — truncation only ever trips
+the LENGTH half. The alignment gate is therefore probed the only way it can be:
+by sweeping all eight byte phases of a buffer, of which exactly one is 8-byte
+aligned. The measurement is 1 accepted, 7 refused with "base address not aligned
+to 8 bytes". `n == 0` is the documented non-refusal — it returns nil without
+inspecting the buffer at all — so an alignment probe written at `n = 0` would
+prove nothing.
+
+**`WeightAbsent` is distinguishable from a weighted file on four independent
+signals, and collapses in exactly one case.** Over one shared topology the
+unweighted file differs in its header kind, in `WeightsRaw()` being nil, in
+`WeightsOffset` being 0, and — the signal that owes nothing to any header field —
+in being strictly smaller (measured: 580 bytes unweighted, 708 with a 4-byte
+weight, 836 with an 8-byte one). The collapse is the csrfile-side shape of what
+rmp #2526 fixed in the snapshot: a CSR declared at a weighted Go type but
+carrying an **empty weights slice at runtime** is downgraded by the writer and
+lands on disk **byte-identical** to a graph that never had weights. That is
+pinned rather than tolerated silently, and it is also what makes the coverage
+gate honest — the gate counts which kinds were OBSERVED in the published headers,
+so driving the `float64` arm with an empty weights slice registers as `float64`
+**unreached**, not as `float64` covered.
+
+One thing found here is out of this task's scope and filed as **rmp #2529**:
+`weightKindOf` advertises `int`, `uint` and `uintptr` as `WeightUint64`, but
+`binary.Write` refuses them ("some values are not fixed-sized in type `[]int`"),
+so a publish at those types always fails — cleanly, leaving neither the file nor
+the temp behind, but failing. The arm table stays on the four widths that
+round-trip, plus `struct{}`.
+
+Every verdict here is proved falsifiable by a control that drives it red: the
+round-trip check is run against a DIFFERENT topology and against the same
+topology with one weight value changed (so it cannot be passing on length
+alone), the truncation check is run against a file that was not truncated (which
+makes all three of its clauses fire at once), the size-discrimination check is
+fed collapsed sizes, and the alignment sweep is fed both a gate that refuses
+nothing and one whose refusals come from the length check.
 
 
 ### Read-transaction isolation
