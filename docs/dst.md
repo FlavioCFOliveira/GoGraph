@@ -1187,6 +1187,67 @@ For the reopen itself, the graph must come back whole from a directory whose WAL
 shrank to nothing across the checkpoint and whose replay reported **zero** WAL
 ops — so the snapshot bytes, and only the snapshot bytes, can account for it.
 
+### Required counters per fault scenario (rmp #2479)
+
+The metrics oracle above reads four counters, all from the Cypher layer. Every
+storage- and Bolt-layer metric the module emits was unasserted, so the counter
+that would prove a fault fired was the one nothing read.
+`internal/sim/metrics_required.go` adds a **per-scenario required-counters
+declaration**: each fault scenario states the counters its faults must move, and
+failing to move a declared counter is a violation. It is a coverage precondition,
+kept apart from the scenario's own verdict for the reason rmp #2470 established —
+an uninformative run must not read as a faulty one — and adjudicated in the
+standing three-part shape: a **separate, shape-only** non-vacuity gate over the
+declaration itself (`CheckCounterDeclShape`, which reads no run and asks only
+whether the declaration could ever have failed), then the **unconditional**
+verdict (`ScenarioCounterDecl.Check`), then the **witness** — what the run
+actually emitted — logged and never asserted.
+
+Seven scenarios carry declarations: the three mechanical storage-fault arms
+(`csrfile-publish-fault`, `wal-corruption-failstop`,
+`checkpoint-dirfsync-fault`), `checkpoint-crash-storm`,
+`snapshot-corruption-failstop`, the `db-teardown` fault arm, and the
+`checkpoint-cadence` transient-failure arm. Every metric name in them was
+obtained by **driving the scenario** with a recording sink installed and reading
+what arrived, across the scenario's own spread of seeds; nothing was copied out
+of `docs/metrics.md`. That mattered twice: the cadence arm never moves
+`store.checkpoint.RunCheckpoint.errors` at all — its environment drives the
+checkpointer through its own fold callback, so the counters that move are the
+snapshot writer's — and the csrfile arm moves nothing whatsoever.
+
+Two findings are the substance of the task.
+
+**A counter shared with another path is satisfiable without the fault firing.**
+`store.wal.Decode.errors` is the only fault counter the WAL-corruption arm emits,
+and `store/wal/format.go` increments it on every decode failure class — including
+the `io.EOF` path that yields `wal.ErrTornFrame`, which is a benign crash tail
+with no corruption in it. The declaration therefore records the counter as
+`shared` and names its discriminator: `runWALCorruptionFailStopWith` re-runs the
+identical scenario with the interior byte flip **withheld** and requires the
+counter to stay at zero. MEASURED: 2 with the flip, 0 without. The same shape
+appears wherever a declared counter is an aggregate — the storm's
+`store.checkpoint.RunCheckpoint.errors` is discriminated by
+`store.recovery.snapshot.promoteParentFsync`, which has exactly one emission site
+in the module; the snapshot battery's three aggregates are discriminated by the
+eight per-component decoder counters.
+
+**Where no counter exists, the blindness is asserted rather than assumed.**
+`store/csrfile` emits no metric at all, so nothing can witness the ENOSPC bound or
+the armed `Sync` fault in the atomic-publish arm. The declaration says so, and
+pins it: no name under `store.` may be emitted while the arm runs. An empty
+declaration would have passed silently; this one fails the day csrfile gains a
+counter, which is what forces it to be updated instead of quietly aging. The same
+honesty applies inside the snapshot battery, where eight of the nine components
+have a unique per-component witness and the mapper — whose damage is caught
+before `snapshot.ReadMapperString` is reached — has none, and is logged as such
+on every run.
+
+Falsifiability is proved on **three different scenarios**: withdrawing the WAL
+byte flip, withdrawing `FaultOnClose` from the composed teardown, and running the
+clean cadence arm each leave every declared counter at zero and make the
+corresponding declaration fire, with each proof asserting that the specific
+declared counters are the ones reported missing.
+
 ## Command-line usage
 
 ```bash

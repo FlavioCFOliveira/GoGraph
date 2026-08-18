@@ -239,6 +239,11 @@ type DBTeardownEvidence struct {
 	CloseErrorMetric           uint64
 	FinalCheckpointErrorMetric uint64
 	TriggerCtxErrors           uint64
+	// Counters is every metric the recording sink saw across the teardown. It is
+	// what the arm's [ScenarioCounterDecl] is adjudicated against, so the
+	// coverage precondition reads the SAME observation the clauses above do.
+	Counters MetricsObservation
+
 	// CheckpointsBefore / CheckpointsAfter bracket the teardown, so the witness
 	// can report whether step 1 actually folded under a cancelled context.
 	CheckpointsBefore uint64
@@ -544,6 +549,7 @@ func RunDBTeardown(ctx context.Context, cfg DBTeardownConfig) (DBTeardownEvidenc
 	errs = append(errs, env.db.Close(), env.db.CloseCtx(context.Background()))
 
 	metrics.SetBackend(nil)
+	ev.Counters = rb.snapshot()
 	ev.CloseCalls = rb.latencyCount("store.DB.Close")
 	ev.CloseErrorMetric = rb.counter("store.DB.Close.errors")
 	ev.FinalCheckpointErrorMetric = rb.counter("store.DB.Close.finalCheckpointErrors")

@@ -421,8 +421,29 @@ func walCorruptionFailStopScenario() Scenario {
 	}
 }
 
-// runWALCorruptionFailStop performs one ST5 run.
+// walCorruptionOptions varies one ST5 run. The zero value is the scenario
+// exactly as registered; the field exists for the CONTROL arm that must observe
+// what the run emits with the fault WITHHELD.
+type walCorruptionOptions struct {
+	// skipCorruption withholds the interior-frame byte flip, leaving every other
+	// step of the run untouched: the same commits, the same clean close, the same
+	// clean and prefix replays, the same reopen. It exists because
+	// "store.wal.Decode.errors" is emitted for a BENIGN torn tail as well as for
+	// genuine corruption (store/wal/format.go), so the required-counters
+	// declaration for this scenario is only falsifiable against a run that proves
+	// the counter stays at zero when nothing is corrupted. See
+	// [walCorruptionDecl]. The run's own oracles are EXPECTED to report
+	// violations under it — the control reads the metrics, not the verdict.
+	skipCorruption bool
+}
+
+// runWALCorruptionFailStop performs one ST5 run as registered.
 func runWALCorruptionFailStop(ctx context.Context, seed uint64) (*SimReport, error) {
+	return runWALCorruptionFailStopWith(ctx, seed, walCorruptionOptions{})
+}
+
+// runWALCorruptionFailStopWith performs one ST5 run under opts.
+func runWALCorruptionFailStopWith(ctx context.Context, seed uint64, opts walCorruptionOptions) (*SimReport, error) {
 	disk := NewSimDisk(NewSeed(seed), 0)
 	cfg := defaultSimStoreConfig() // WAL-only layout (dir == ""), recovered via ReplayWAL
 	walPath := walPathFor(cfg.dir)
@@ -484,8 +505,10 @@ func runWALCorruptionFailStop(ctx context.Context, seed uint64) (*SimReport, err
 		return nil, fmt.Errorf("sim: ST5 middle frame %d has an empty payload", mid)
 	}
 	corruptOff := offsets[mid] + int64(wal.HeaderSize)
-	if err := disk.CorruptRange(walPath, corruptOff, 1); err != nil {
-		return nil, fmt.Errorf("sim: ST5 corrupt frame %d: %w", mid, err)
+	if !opts.skipCorruption {
+		if err := disk.CorruptRange(walPath, corruptOff, 1); err != nil {
+			return nil, fmt.Errorf("sim: ST5 corrupt frame %d: %w", mid, err)
+		}
 	}
 
 	// The clean prefix up to (but excluding) the corrupt frame is what recovery

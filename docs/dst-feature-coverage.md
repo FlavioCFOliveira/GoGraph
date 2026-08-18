@@ -825,6 +825,97 @@ fed collapsed sizes, and the alignment sweep is fed both a gate that refuses
 nothing and one whose refusals come from the length check.
 
 
+### Which counter proves the fault fired (rmp #2479)
+
+A fault scenario that asserts the **effect** of a fault without confirming the
+faulted code path was **entered** proves less than it appears to. rmp #2465 had
+to establish that the mid-publish crash window was genuinely entered before its
+durability verdict meant anything; rmp #2471 gated group-commit coalescing on a
+metric and then found the metric itself could be satisfied by an unrelated path;
+rmp #2478 found the in-memory backend silently skips `madvise`, so a green matrix
+would have been evidence of nothing.
+
+The simulator's metrics oracle read **four** counters, all from the Cypher layer:
+`cypher.Run`, `cypher.RunInTx` and their paired `.errors`. Every storage- and
+Bolt-layer metric emitted across the module was unasserted — so the counter that
+would prove a fault fired was precisely the one nothing read.
+`internal/sim/metrics_required.go` closes that. Each fault scenario now
+**declares** the counters its faults must move, and failing to move a declared
+counter is a violation: a coverage precondition in the shape rmp #2470/#2471
+established, kept apart from the scenario's own verdict because a declaration
+that did not fire means the **run** proved nothing, not that the **engine** is
+broken.
+
+**Every name was driven out, not read off a list.** `docs/metrics.md` carries an
+inventory of wired metric names and nothing here was taken from it. Each
+scenario was run with a recording sink installed and the arriving names were
+read; the floors are the structural counts the scenario fixes (one per publish
+window, one per corrupted component), not the total one run happened to produce.
+Two of the declarations would have been wrong if written from the obvious guess:
+the cadence arm never moves `store.checkpoint.RunCheckpoint.errors` at all,
+because the cadence environment drives the checkpointer through its own fold
+callback, and the csrfile arm moves nothing whatsoever.
+
+**`store.wal.Decode.errors` is the trap, and it is not hypothetical.**
+`store/wal/format.go` increments it on **every** decode failure class, including
+the `io.EOF` / `io.ErrUnexpectedEOF` path that yields `wal.ErrTornFrame` — the
+ordinary shape of a WAL whose writer was killed mid-write, with no corruption
+anywhere. It is the only fault counter the WAL-corruption arm emits, so declaring
+it alone would be satisfied by a benign crash tail. The discriminator is a
+**control**, the standing guard rmp #2471 kept for the same reason:
+`runWALCorruptionFailStopWith` runs the identical scenario with the interior byte
+flip withheld — same commits, same clean close, same clean and prefix replays,
+same reopen — and the control requires the counter to stay at **0**. Measured: 2
+with the flip, 0 without.
+
+**The csrfile publish arm is metrics-blind, and the blindness is now asserted.**
+`store/csrfile` contains no reference to `internal/metrics`, and a full driven run
+of the scenario emitted **zero** metric names of any kind. The atomic publish
+protocol (tmp write -> fsync -> rename -> parent-dir fsync) is entirely
+unobserved: no counter can witness the ENOSPC bound or the armed `Sync` fault,
+and borrowing one from a neighbouring layer would be exactly the non-unique
+declaration this task exists to prevent. So the declaration states the blindness
+and pins it — no name under `store.` may be emitted while the arm runs — which
+turns "we declared nothing" from a vacuous pass into a falsifiable claim. The day
+csrfile gains a counter, the declaration fails and must be replaced by the real
+name.
+
+**Eight of the nine snapshot components carry a unique witness; the mapper does
+not.** The aggregates (`store.recovery.OpenCtxFS.errors`,
+`store.recovery.openCodec.errors`, `store.snapshot.LoadSnapshotFull.errors`) move
+for **any** reopen failure, WAL-side included, so none of them can say the damage
+was seen where it was done. The per-component decoder counters can, and
+`ReadCSR`, `ReadLabels`, `ReadProperties`, `ReadTombstones`, `ReadEdgeHandles`,
+`ReadConstraints`, `ReadIndexDefs` and `ReadManifestFile` all move on their own
+arm. `store.snapshot.ReadMapperString.errors` does not: the mapper arm's damage
+is caught before that decoder is reached, so the mapper is witnessed only by the
+aggregates. That is recorded rather than papered over, and logged as a witness on
+every run.
+
+The declared arms, with the counters as **observed**:
+
+| Scenario / arm | Required counters | Uniqueness |
+|---|---|---|
+| `csrfile-publish-fault` | *(none — metrics-blind; `store.` asserted silent)* | n/a |
+| `wal-corruption-failstop` | `store.wal.Decode.errors` >= 2 | shared with the benign torn tail — control arm discriminates |
+| `checkpoint-dirfsync-fault` | `store.wal.TruncatePrefix.errors`, `store.wal.Close.errors` >= 1 (unique); `store.checkpoint.RunCheckpoint.errors`, `store.wal.Append.errors`, `store.wal.Sync.errors` >= 1 | the truncate failure is unique; the append/sync/close triple is the **poison signature** downstream of it |
+| `checkpoint-crash-storm` | `store.recovery.snapshot.promoteParentFsync` >= 1 (unique); `store.checkpoint.RunCheckpoint.errors`, `store.snapshot.WriteSnapshotFullCtx.errors` >= 3 | the promote counter has one emission site in the module; the other two are required at the **window count** |
+| `snapshot-corruption-failstop` | three aggregates >= 9; eight per-component `Read*.errors` >= 1 | aggregates shared, per-component decoders unique |
+| `db-teardown[fault-on-close]` | `store.DB.Close.errors`, `store.wal.Close.errors` >= 1 | both unique: the teardown failed **and** it failed at step 3, where the fault was armed |
+| `checkpoint-cadence[transient-fault]` | `store.snapshot.WriteSnapshotFullCtx.errors`, `store.snapshot.WriteCapture.errors` >= 1 | shared — the clean cadence arm is the standing control |
+
+**Three disable-a-fault proofs, on three different scenarios**, show the
+declarations are load-bearing rather than incidentally satisfied. Withdrawing the
+WAL byte flip, withdrawing `FaultOnClose` from the teardown, and running the
+clean cadence arm each leave **every** declared counter at zero, and each proof
+asserts that the specific declared counters are the ones reported missing — not
+merely that something failed. A separate, shape-only gate
+(`CheckCounterDeclShape`) reads no run at all: it rejects a declaration that
+names nothing, that claims blindness and counters at once, that sets a floor of
+zero, or that admits a shared counter with no discriminator — every form that
+would pass by saying nothing.
+
+
 ### Read-transaction isolation
 
 `cypher.Engine.BeginReadTx` provides **snapshot isolation across the whole
