@@ -139,6 +139,11 @@ type productionProfileCycleEvidence struct {
 	walAfterCheckpoint  int64
 	// snapshotInstant is the MVCC instant the published image recorded.
 	snapshotInstant uint64
+	// contendedConnections is how many of this cycle's connections drew the
+	// contended-writer role. The draw is seeded, so a cycle can legitimately get
+	// NONE — the case that used to crash the process at the counter adjudication
+	// (rmp #2552). Recording it lets a test prove a run entered that case.
+	contendedConnections int
 	// recovery is what the post-crash reopen measured (rmp #2469).
 	recovery mvccRecoveryEvidence
 	// substrate is the MVCC-substrate telemetry watched across this cycle's
@@ -247,6 +252,10 @@ func runProductionProfileEvidence(ctx context.Context, seed uint64, size product
 			return nil, ev, fmt.Errorf("sim: production profile cycle %d run: %w", cycle, runErr)
 		}
 
+		// Population evidence: how many connections this cycle's seeded draw gave
+		// the contended-writer role (possibly none — see the field's doc).
+		cyc.contendedConnections = res.ContendedConnections
+
 		// In-cycle health: no panics, no transport faults, ledger conserved,
 		// during-run oracles silent, quiescence verification clean.
 		if res.Panics != 0 || res.TransportErrors != 0 {
@@ -283,14 +292,8 @@ func runProductionProfileEvidence(ctx context.Context, seed uint64, size product
 		for _, n := range res.FailedNames {
 			refusedSet[n] = true
 		}
-		for k, v := range res.ContendedAcked {
-			expectedCtr[k] += v
-		}
+		violations = append(violations, foldContendedCounters(cycle, expectedCtr, &res)...)
 		for k := range expectedCtr {
-			if res.ContendedFinal[k] != expectedCtr[k] {
-				fail("lost update", "cycle %d: counter %d final=%d, accumulated acked=%d",
-					cycle, k, res.ContendedFinal[k], expectedCtr[k])
-			}
 			issuedSet[wireCounterName(k)] = true
 		}
 
@@ -495,6 +498,57 @@ func crossProductionProfileSnapshot(
 	}
 	*violations = append(*violations, checkMVCCRecovery(tick, &ev.crossing)...)
 	return nil
+}
+
+// foldContendedCounters folds one cycle's acknowledged contended increments
+// into the run-wide expected tally and adjudicates the zero-lost-updates
+// oracle against the values that cycle's quiescence verification read.
+//
+// expected is indexed by counter and accumulates ACROSS cycles, because the
+// durable store persists across the crash boundary: counter k's value at the
+// end of cycle n must equal every increment acknowledged in cycles 0..n.
+//
+// expected and the result's two counter slices are sized by different code — the
+// former by the profile's configured counter count, the latter by
+// [RunConcurrent] — so this never indexes one by the other's bound. A slice too
+// short to answer for a counter is reported as MISSING EVIDENCE, a typed
+// violation that fails the run: the comparison is never quietly dropped, and it
+// is never a panic that takes the whole process (and, in a swarm, its siblings'
+// remaining work) with it (rmp #2552).
+func foldContendedCounters(cycle int, expected []int64, res *ConcurrentResult) []Violation {
+	var out []Violation
+	evidence := func(format string, args ...any) {
+		out = append(out, Violation{
+			Kind: ViolationACIDDurability, Op: "contended counter evidence",
+			Message: fmt.Sprintf("cycle %d: ", cycle) + fmt.Sprintf(format, args...),
+		})
+	}
+	if n := len(res.ContendedAcked); n != len(expected) {
+		evidence("the run reported %d acknowledged counter tallies, the profile tracks %d:"+
+			" the acknowledged increments and the accumulated total are not the same counters", n, len(expected))
+	}
+	for k, v := range res.ContendedAcked {
+		if k >= len(expected) {
+			break
+		}
+		expected[k] += v
+	}
+	for k := range expected {
+		if k >= len(res.ContendedFinal) {
+			evidence("counter %d was never read at quiescence (the run reported %d of %d counter values),"+
+				" so its accumulated acked=%d could not be adjudicated", k, len(res.ContendedFinal),
+				len(expected), expected[k])
+			continue
+		}
+		if res.ContendedFinal[k] != expected[k] {
+			out = append(out, Violation{
+				Kind: ViolationACIDDurability, Op: "lost update",
+				Message: fmt.Sprintf("cycle %d: counter %d final=%d, accumulated acked=%d",
+					cycle, k, res.ContendedFinal[k], expected[k]),
+			})
+		}
+	}
+	return out
 }
 
 // engineScalar reads one single-scalar value through an engine (autocommit).

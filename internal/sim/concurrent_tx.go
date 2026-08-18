@@ -375,11 +375,3 @@ func verifyTxQuiescence(srv *SimServer, acked, refused []string, contendedCounte
 	}
 	return missing, phantom, finals, nil
 }
-
-// ifElseInt is a tiny branch helper for the quiescence call.
-func ifElseInt(cond bool, a, b int) int {
-	if cond {
-		return a
-	}
-	return b
-}

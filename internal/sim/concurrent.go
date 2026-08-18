@@ -115,8 +115,19 @@ type ConcurrentResult struct {
 	// ContendedAcked is, per shared counter, the number of read-modify-write
 	// increments acknowledged; ContendedFinal is each counter's value read at
 	// quiescence. Equality is the zero-lost-updates oracle.
+	//
+	// Both are ALWAYS ConcurrentCounters long, on every path, so a caller may
+	// index them by the same k without checking (rmp #2552). A counter no
+	// connection touched reads 0 rather than being absent.
 	ContendedAcked []int64
 	ContendedFinal []int64
+	// ContendedConnections is how many connections the seeded role draw gave the
+	// contended-writer role. It is POPULATION evidence, not a result: a run that
+	// drew none never touches a shared counter, so any counter oracle over it is
+	// vacuous — and the harness must still produce well-formed counter evidence
+	// for it. It is what lets a test assert it really entered that case instead
+	// of replicating the draw and hoping (rmp #2552).
+	ContendedConnections int
 
 	Seed             uint64
 	Connections      int
@@ -242,6 +253,7 @@ func RunConcurrent(ctx context.Context, srv *SimServer, cfg ConcurrentConfig) (C
 		roles[i] = pickRole(master, mix)
 		if roles[i] == roleTxContended {
 			haveContended = true
+			res.ContendedConnections++
 		}
 	}
 
@@ -341,16 +353,28 @@ func RunConcurrent(ctx context.Context, srv *SimServer, cfg ConcurrentConfig) (C
 	// acknowledged marker present, every refused marker absent, and every
 	// contended counter equal to its acknowledged increments (zero lost
 	// updates). Runs over a fresh connection, like the node-count oracle.
-	if res.TxIssued > 0 {
-		missing, phantom, finals, err := verifyTxQuiescence(srv, res.TxMarkersAcked, res.TxMarkersRefused,
-			ifElseInt(haveContended, cfg.ContendedCounters, 0))
-		if err != nil {
-			return res, fmt.Errorf("sim: concurrent tx quiescence verification: %w", err)
-		}
-		res.TxMissingAcked = missing
-		res.TxPhantomRefused = phantom
-		res.ContendedFinal = finals
+	//
+	// It reads all cfg.ContendedCounters counters UNCONDITIONALLY, so
+	// ContendedFinal comes back sized exactly like ContendedAcked whatever the
+	// seeded role draw produced and whether or not any transaction was issued
+	// (rmp #2552). Sizing the two by different predicates — the acknowledged
+	// tally by the configured counter count, the finals by whether a contended
+	// writer happened to be drawn — is what let a caller indexing both by the
+	// same k run off the end of one of them, killing the PROCESS rather than
+	// failing the run.
+	//
+	// Reading a counter no connection touched costs one query and is not
+	// vacuous: it has no node, so it reads 0, which is exactly its acknowledged
+	// total — and a counter that nonetheless holds a value nobody acknowledged is
+	// now caught instead of never being looked at.
+	missing, phantom, finals, err := verifyTxQuiescence(srv,
+		res.TxMarkersAcked, res.TxMarkersRefused, cfg.ContendedCounters)
+	if err != nil {
+		return res, fmt.Errorf("sim: concurrent tx quiescence verification: %w", err)
 	}
+	res.TxMissingAcked = missing
+	res.TxPhantomRefused = phantom
+	res.ContendedFinal = finals
 
 	// Reconcile the eventual-consistency oracle at quiescence: count the engine's
 	// live nodes over a fresh connection and compare to the acknowledged creates.
