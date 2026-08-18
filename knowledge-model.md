@@ -1092,13 +1092,50 @@ documented NON-dependency (edge-handle order does not track WAL order and nothin
 that correspondence: the handle travels in the frame and every restore path is a
 high-water seed).
 
+Incrementally synced at commit `0f288333` (2026-08-18, task #2481, sprint 348 — the DST
+exercises the Bolt wire surface to full extent). The Bolt authentication surface had been
+driven by no scenario at all: every SimServer used `NoAuthHandler`, which admits every
+client by construction, so an assertion made there was VACUOUS rather than merely weak.
++18 nodes: `Sprint` `348` OPEN; `Commit` `0f288333`; `Task` 2481 COMPLETED and 2556/2557/
+2558 BUG + 2559 CHORE in BACKLOG; `Feature` `DST Bolt wire-surface coverage`; `Defect`
+2481 FIXED; four `Lesson`s (`an-assertion-against-a-disabled-check-is-vacuous`,
+`a-process-global-counter-puts-wal-byte-totals-out-of-seed-reach`,
+`a-crash-model-note-can-outlive-the-model-it-described`,
+`a-shared-failure-code-cannot-attribute-a-refusal`); five `Type`s, six `Function`s and
+seven `Method`s for the two new scenarios and the seams they needed. Edges: `CONTAINS`,
+`DELIVERS`, `IMPLEMENTED_IN` (Task→Commit, the documented direction), `IMPROVES`, `FOUND`
+(→Defect), `REMEDIATED_BY`, four `TAUGHT`, four `FOLLOWED_BY`, `SPECIFIED_IN` ×2 and
+`TOUCHES` ×5.
+
+Three things this sync recorded that the model did not previously describe:
+
+- **`Task` was never in the node-label table** although 207 `IMPLEMENTED_IN` edges start
+  at one. It is documented below now, with the properties the live nodes actually carry.
+- **New properties.** `Task` gains `type`, `severity`, `foundDuring` and `measured` (the
+  same evidence-bearing shape `Defect` already has, because a BACKLOG bug filed from a
+  review carries its reproduction or it carries nothing). `Type`/`Function`/`Method` gain
+  `introducedBy` (the rmp task that added the symbol), so a symbol's origin is queryable
+  without walking commits.
+- **A divergence in `IMPLEMENTED_IN`, observed not introduced.** The audit query the edge
+  table mandates returns, besides the documented 207 `Task`→`Commit`: `Commit`→`Feature`
+  ×5, `Feature`→`Commit` ×10 and `Task`→`Package` ×1. None is the `Commit`→`Task`
+  reversal that table calls a defect, but three shapes are using one edge type for
+  distinct relations that `IMPROVES`/`FIXES`/`TOUCHES` already model. Recorded rather than
+  repaired: reconciling it is a hygiene task, and silently rewriting ten edges would
+  destroy the only evidence of how they came to be.
+
+Also corrected here: the guard-rail is **clause**-based, not substring-based. A working
+note claimed `graph create` rejects the words set/delete/remove/detach anywhere in the
+query text; measured at this commit, `MERGE (m:Method {name: 'setLogger', …})` is
+ACCEPTED. What is rejected is a `SET` clause, `MERGE … ON CREATE SET` included.
+
 ## Node labels
 
 | Label | Meaning | Properties (beyond `gitCommit`, `gitDate`) |
 |---|---|---|
 | `Package` | A Go package (one per source directory). | `name` (package clause), `path` (repo-relative dir, `"."` for root), `importPath` (full), `kind`. Added 2026-08-18 (`15c77ddc`): `testOnly` (bool — the package contains no non-test source file, as with `internal/tmphygiene`) and `responsibility` (one sentence stating what the package owns, per the *Exemplary components* mandate in `CLAUDE.md`) |
 | `Type` | A `type` declaration. | `name`, `pkg` (importPath), `file` (repo-relative), `kind`, `exported` (bool), `generic` (bool), optional `doc`. **Divergence observed 2026-08-18:** the `internal/sim` Type nodes are keyed on a `package` property holding the repo-relative dir (`internal/sim`) instead of `pkg` holding the importPath, so a `pkg`-based query misses them. New sim Types at `124eca54` followed the existing local convention rather than splitting the package's identity across two property names; reconciling the two is a hygiene task. |
-| `Function` | A top-level `func` with no receiver that is not a Test/Benchmark/Fuzz/Example. | `name`, `pkg`, `file`, `exported`, `generic` |
+| `Function` | A top-level `func` with no receiver that is not a Test/Benchmark/Fuzz/Example. | `name`, `pkg`, `file`, `exported`, `generic`. Added 2026-08-18 (`0f288333`): `introducedBy` (int — the rmp task that added the symbol), so a symbol's origin is queryable without walking commits. The same property is set on `Type` and `Method`. |
 | `Method` | A `func` with a receiver. | `name`, `pkg`, `file`, `recv` (receiver type, `*` stripped), `exported` |
 | `Test` | A `func TestXxx(*testing.T)`-style function (name prefix `Test`). | `name`, `pkg`, `file` |
 | `Benchmark` | A `func BenchmarkXxx` (name prefix `Benchmark`). | `name`, `pkg`, `file` |
@@ -1106,6 +1143,7 @@ high-water seed).
 | `Example` | A runnable godoc `func ExampleXxx` (name prefix `Example`). | `name`, `pkg`, `file` |
 | `Spec` | A documentation/specification file under `docs/` (plus root `README.md`/`CHANGELOG.md`). | `name` (basename), `path` (repo-relative), `title` (first `# ` heading) |
 | `Feature` | A curated major capability of the module. | `name`, `description` |
+| `Task` | An `rmp` roadmap task. **Present in the live graph long before this table documented it** (207 `IMPLEMENTED_IN` edges start at one); documented 2026-08-18 (`0f288333`, rmp #2481). | `id` (the rmp ticket number, the identity), `title`, `status` (`BACKLOG`\|`SPRINT`\|`DOING`\|`TESTING`\|`COMPLETED`), `sprint` (int — the sprint id, `0` while the task is in no sprint). Added 2026-08-18 (`0f288333`): `type` (the rmp task type, e.g. `TASK`\|`BUG`\|`CHORE`), `severity` (int), `foundDuring` (what surfaced the task, for one filed from a review rather than planned), and `measured` (the figures a filing rests on) — the same evidence-bearing shape `Defect` carries, because a bug filed and then left in the backlog keeps only what its filing recorded. A `Task` whose `type` is `BUG` is itself a defect record, which is why `TAUGHT` accepts it as a source. |
 | `Sprint` | A planning sprint from the `rmp` roadmap. | `id` (int), `name`, `status` (`OPEN`\|`CLOSED`\|`PENDING`), `objective` |
 | `Release` | A tagged — or prepared but not yet tagged — release of the module. Present in the live graph since before this table existed; documented 2026-08-13 (sprint 344). | `name` (`vX.Y.Z`, the identity), `date`, `headlineFeature`, `published` (bool — **false while the tag has not been pushed**), `latest` (bool), `releaseCommit` (full hash) / `releaseCommitShort`, `cveCleared` (false, or the advisory id), `forwardFixes` (optional). Added 2026-08-13: `commitCount` (int), `breakingChanges` (int), `tckScenarios` (int), `knownOpenDefect`, `certification` — so a release's honest posture is queryable without reading its notes |
 | `Commit` | A git commit that delivered one or more tasks, or that integrated a sprint into an integration branch. | `hash` (short — **8-char** in the live graph; this table said 7 until 2026-07-29 and the drift silently made 7-char lookups miss), `fullHash` (full 40-char), `message`, `sprintId` (int), `kind` (`merge` only — set on a sprint-integration merge commit; absent on an ordinary delivery commit), `branch` (the branch the merge landed on, e.g. `main`; set with `kind`) |
