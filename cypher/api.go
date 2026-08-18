@@ -2403,6 +2403,19 @@ func (e *Engine) buildReadPhysical(
 	// result list — the same bound collect() enforces (#1294, #1298).
 	patEval := newPatternEvaluator(rv, e.maxCollectItems)
 	bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx, maxCollectItems: e.maxCollectItems}
+	// Hand the subquery evaluator this query's parameters and build options so an
+	// inner plan is compiled in a scope that can resolve them (rmp #2507). It has
+	// to happen HERE rather than at construction because bopts holds subEval, so
+	// neither can be built with the other already in hand. Every field the child
+	// reads is set above this line; nothing assigned below it is carried (see
+	// [buildOpts.forSubquery]).
+	subEval.bind(params, bopts)
+	// The pattern evaluator needs the same parameters, for the same reason: it
+	// matches an inline property map itself instead of through a planned Filter,
+	// and a string literal inside a WHERE arrives there as a hoisted parameter. It
+	// also needs the subquery evaluator, so an EXISTS { … } inside a pattern
+	// comprehension is evaluated rather than answered false (rmp #2507).
+	patEval.bind(params, subEval)
 	bopts.profiler = prof
 	// Point the build at this plan's cross-execution analysis memo (rmp #2383).
 	// entry is nil on no read path today, but the guard keeps the coupling
@@ -7167,7 +7180,14 @@ func buildOperatorWrite(
 		// includes the pattern node columns assigned to its left and can
 		// reference a fresh same-pattern node (#2024). The operator widens the
 		// row with those bindings at runtime (bindingEvalRow).
-		mp := exec.NewMergePattern(child, mutator).WithLabelSource(mergeLabelSource(labelSrc))
+		// p.Child == nil is the LEADING-clause plan shape: the MERGE has no
+		// driving clause, so buildOperatorWrite gave it a SingleRow leaf above
+		// and it owns the query's one initial empty row. Any other shape is
+		// driven by a real subplan and must fire once per row that subplan
+		// delivers — zero rows, zero firings (rmp #2512).
+		mp := exec.NewMergePattern(child, mutator).
+			WithLabelSource(mergeLabelSource(labelSrc)).
+			WithLeadingClause(p.Child == nil)
 		nodeCols := make([]int, len(p.Nodes))
 		for i, n := range p.Nodes {
 			if exec.PropMapContainsNullLiteral(n.PropsRaw) {
@@ -7264,6 +7284,11 @@ func buildOperatorWrite(
 		// matches the emitted row the operator hands the evaluator (nodes at
 		// their output columns, relationships at theirs).
 		actionSchema := copySchema(schema)
+		// The same snapshot is the operator's full row scope, so an ON CREATE /
+		// ON MATCH action may name a variable a PRECEDING clause bound and not
+		// only one this pattern introduces (rmp #2511). Without it such a target
+		// resolved to nothing and its write was dropped silently.
+		mp.WithSchema(actionSchema).WithOuterRelCols(mergeOuterRelCols(actionSchema, bopts))
 		mp.WithActionEvals(
 			buildMergeActionEvals(p.OnCreateExprs, actionSchema, params, reg, mutator, bopts),
 			buildMergeActionEvals(p.OnMatchExprs, actionSchema, params, reg, mutator, bopts),
@@ -7334,6 +7359,16 @@ func buildOperatorWrite(
 		// Label posting list for the row-aware search, so a per-row MERGE key
 		// examines the label's population instead of the whole graph (#2217).
 		m.WithLabelSource(mergeLabelSource(labelSrc))
+		// p.Child == nil is the LEADING-clause plan shape: the MERGE has no
+		// driving clause, so buildOperatorWrite gave it a SingleRow leaf above
+		// and it owns the query's one initial empty row. Any other shape fires
+		// once per row its subplan delivers — zero rows, zero firings (#2512).
+		m.WithLeadingClause(p.Child == nil)
+		// An ON CREATE / ON MATCH action may target a RELATIONSHIP bound by a
+		// preceding clause. The operator resolves a node target through
+		// schemaCopy already; a relationship needs its endpoint/handle triplet
+		// too, and without it the write was dropped silently (rmp #2511).
+		m.WithOuterRelCols(mergeOuterRelCols(schemaCopy, bopts))
 		// Row-aware property map: when the IR carried a *ast.MapLiteral whose
 		// values include non-literal expressions (variable references,
 		// property accesses, parameter forms outside `$name`), install a
@@ -7803,6 +7838,33 @@ func buildMergeSetAllActions(
 			IsReplace: it.IsReplace,
 			Eval:      buildExprMapEvalFn(it.Value, schemaCopy, params, reg, mutator, bopts),
 		})
+	}
+	return out
+}
+
+// mergeOuterRelCols returns, for every relationship variable that is visible in
+// schema and was bound by an [exec.Expand] in the child plan, the (src, edge,
+// dst) column triplet that Expand writes into each row.
+//
+// A MERGE ON CREATE / ON MATCH action may target such a variable, and the merge
+// operators need the triplet to resolve it: the variable's own column holds a
+// bare edge handle, indistinguishable from a NodeID without this map. Before rmp
+// #2511 no merge operator was given it and every such action was silently
+// dropped. Returns nil when the child bound no relationship variable, which
+// leaves the operators on their pattern-local dispatch.
+func mergeOuterRelCols(schema map[string]int, bopts *buildOpts) map[string]exec.RelCols {
+	if bopts == nil || len(bopts.edgeVarMeta) == 0 {
+		return nil
+	}
+	out := make(map[string]exec.RelCols, len(bopts.edgeVarMeta))
+	for name, info := range bopts.edgeVarMeta {
+		if _, visible := schema[name]; !visible {
+			continue
+		}
+		out[name] = exec.RelCols{SrcCol: info.srcCol, DstCol: info.dstCol, EdgeCol: info.edgeCol}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
@@ -10080,6 +10142,72 @@ func (b *buildOpts) forWorker() *buildOpts {
 	cp.vleRelMeta = nil
 	cp.expandTripletSeq = nil
 	return &cp
+}
+
+// forSubquery returns the buildOpts an EXISTS { … } / COUNT { … } inner plan must
+// be built with (rmp #2507).
+//
+// # Why the inner plan needs one at all
+//
+// It used to be built with a nil bopts, and four things the inner predicate needs
+// were therefore absent. Two were silent wrong answers and two were hard failures:
+//
+//   - edgeVarMeta was never populated, so an inner relationship variable stayed a
+//     raw IntegerValue in the RowContext. `WHERE r.since = 2020` read a property
+//     off an integer and yielded NULL, and `type(r)` failed outright with
+//     "got Integer, want Relationship".
+//   - subEval was nil, so a subquery NESTED inside a subquery had no evaluator.
+//     EXISTS answered false and COUNT answered 0 rather than reporting anything.
+//   - patEval was nil, so a pattern predicate in the inner WHERE failed the whole
+//     query with "no PatternEvaluator wired".
+//   - queryCtx was nil, so a nested drive would fall back to context.Background()
+//     and outlive the cancellation of the query that started it.
+//
+// # Why the outer one cannot simply be passed through
+//
+// A subquery is a NEW SCOPE with its OWN row layout: its seed Row holds the
+// correlation variables, and the inner build assigns columns from there. Every
+// column-indexed field on this struct (edgeVarMeta, pathVarMeta, pathVarChain,
+// vleRelMeta, expandTripletSeq, and the scalar-column sets) is keyed to the OUTER
+// layout, so carrying it would have the inner RowContext reconstruct entities from
+// the wrong slots. pendingPathPred is worse than useless: it is keyed by path
+// variable NAME, so an inner shortestPath() binding a path variable the outer plan
+// also named would consume the OUTER clause's pending predicate.
+//
+// # What it carries, and what it deliberately does not
+//
+// Only the three scope-independent services above. Everything else is left at its
+// zero value, which is exactly the state the inner build saw before this existed —
+// so this fix cannot change the shape of any inner plan, only what its predicates
+// can see. Four omissions are load-bearing rather than incidental:
+//
+//   - THE PARALLEL FIELDS (parallelGov, parallelScanEnabled,
+//     parallelScanThreshold) stay zero, so no morsel-parallel leaf can be built
+//     inside a subquery. That is a safety requirement, not a performance choice:
+//     subEval and patEval are documented NOT safe for concurrent use, and this
+//     child hands both to operators built beneath it. rmp #2257 is what a worker
+//     goroutine reaching one of them costs — a process-fatal concurrent map write.
+//   - THE PROFILER stays nil, so PROFILE output is unchanged by this fix.
+//   - scalarUseMemo stays nil. It is a pointer into the SHARED plan-cache entry,
+//     and the inner AST is re-derived per run, so memoising against it would grow
+//     without bound across executions.
+//   - THE PLAN-SHAPE GATES stay false. They key on *ir node pointers from the
+//     outer plan (reorderSwap, seekHint, anchorSwap) or would substitute access
+//     paths the inner plan has never been measured on.
+//
+// The allowlist is written out field by field on purpose. A copy-then-clear like
+// [buildOpts.forWorker] fails OPEN — a future field that is row-indexed would leak
+// into the inner scope silently — whereas an allowlist fails CLOSED: a future
+// service field is merely absent, which is the behaviour this path already had.
+func (b *buildOpts) forSubquery() *buildOpts {
+	if b == nil {
+		return &buildOpts{}
+	}
+	return &buildOpts{
+		subEval:  b.subEval,
+		patEval:  b.patEval,
+		queryCtx: b.queryCtx,
+	}
 }
 
 // tryBuildParallelCountScan returns a [exec.ParallelCountScan] and true when p
@@ -13228,6 +13356,86 @@ func decodeVLEHops(lv expr.ListValue, g *lpg.ReadView[string, float64], bopts *b
 	return rels
 }
 
+// relStoredInverted reports whether the bound relationship is stored as
+// (dstID -> srcID) rather than in the row's TRAVERSAL orientation
+// (srcID -> dstID). The caller swaps the storage pair — and the emitted
+// StartID/EndID — when it says so.
+//
+// [exec.Expand] emits (src, edge, dst) in traversal order and keeps no
+// direction flag, so the hydrator has to recover the stored direction itself.
+// It is asked three questions in order, each strictly more informative than
+// the one that follows, and the first that can answer wins.
+//
+//  1. The bound edge's own stable HANDLE, against the by-handle type record
+//     (rmp #2504). Cypher CREATE/MERGE always records the mandatory
+//     relationship type by-handle, so for every Cypher-written edge exactly one
+//     of the two orientations holds a record for this handle, and that
+//     orientation IS the stored one. This is a sharded map probe and allocates
+//     nothing.
+//
+//  2. TOPOLOGY, unchanged since rmp #2294 and #1630: an edge that exists in
+//     only one direction is stored in that direction. Reached for an edge with
+//     no by-handle type record — a legacy snapshot, or one built through the Go
+//     API ([lpg.Graph.AddEdgeH] plus [lpg.Graph.SetEdgeLabel], which writes the
+//     per-pair store only). ReadView.HasEdge, not AdjList().HasEdge, because the
+//     direction must be resolved AT THIS READ'S INSTANT or a relationship
+//     committed after the snapshot decides how one visible to it is rendered.
+//
+//  3. The ADJACENCY, when topology is AMBIGUOUS. That is the whole of rmp
+//     #2504: a RECIPROCAL pair — edges in both directions between the same two
+//     nodes — makes both HasEdge probes true, so question 2 cannot decide and
+//     used to fall through to the traversal orientation. On a reverse or
+//     undirected hop the traversal orientation is the INVERSE of the stored one,
+//     so every by-pair read below it — the coalesced type, the property bag,
+//     the emitted StartID/EndID — resolved to the RECIPROCAL edge while id(r),
+//     being the handle, stayed correct. Scanning the slot column for the handle
+//     answers exactly which pair owns it. It is O(deg) and therefore run last,
+//     only for a handle-less reciprocal pair, and never on the path question 1
+//     already settled.
+//
+// A handle of 0 (the no-handle sentinel) skips questions 1 and 3; such an edge
+// is indistinguishable from its reciprocal by identity, so the topology answer
+// is the only one available and the pre-#2504 behaviour is kept exactly.
+func relStoredInverted(g *lpg.ReadView[string, float64], srcID, dstID graph.NodeID, srcKey, dstKey string, handle uint64) bool {
+	if handle != 0 {
+		if g.HasEdgeHandleLabelRecordByID(srcID, dstID, handle) {
+			return false
+		}
+		if g.HasEdgeHandleLabelRecordByID(dstID, srcID, handle) {
+			return true
+		}
+	}
+	if !g.HasEdge(srcKey, dstKey) {
+		return g.HasEdge(dstKey, srcKey)
+	}
+	if handle == 0 || !g.HasEdge(dstKey, srcKey) {
+		return false // unambiguous, or nothing left that could tell them apart
+	}
+	// Reciprocal pair with a handle but no by-handle type record: ask the slot
+	// column which pair actually owns this handle.
+	if slotHoldsHandle(g, srcID, dstID, handle) {
+		return false
+	}
+	return slotHoldsHandle(g, dstID, srcID, handle)
+}
+
+// slotHoldsHandle reports whether srcID's adjacency holds a slot to dstID
+// carrying handle at this view's instant. Returns false when the graph carries
+// no handle column at all, which leaves [relStoredInverted] on its topology
+// answer.
+func slotHoldsHandle(g *lpg.ReadView[string, float64], srcID, dstID graph.NodeID, handle uint64) bool {
+	ev := g.EntryView(srcID)
+	if ev.Handles == nil {
+		return false
+	}
+	for i, nb := range ev.Neighbours {
+		if nb == dstID && i < len(ev.Handles) && ev.Handles[i] == handle {
+			return true
+		}
+	}
+	return false
+}
+
 // buildRelationshipValueFromRow reconstructs a [expr.RelationshipValue] from
 // the (srcCol, edgeCol, dstCol) triplet emitted by the [exec.Expand]
 // operator. The edge type and Properties are looked up on the live graph
@@ -13286,11 +13494,10 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.ReadVi
 			// defaulted to forward) and, crucially, lets the property fetch be
 			// skipped (#1630) without losing the direction signal.
 			stKey, enKey := srcKey, dstKey
-			// ReadView.HasEdge, not AdjList().HasEdge: the direction must be
-			// resolved AT THIS READ'S INSTANT, or a relationship committed after
-			// the snapshot decides how one visible to it is rendered
-			// (rmp #2294).
-			if !g.HasEdge(srcKey, dstKey) && g.HasEdge(dstKey, srcKey) {
+			// The row's edge id IS the stable handle since rmp #2317, so it is
+			// recovered BEFORE the orientation decision below, which consults it.
+			fwdHandle := uint64(edgeIDVal)
+			if relStoredInverted(g, graph.NodeID(srcID), graph.NodeID(dstID), srcKey, dstKey, fwdHandle) {
 				storageStart, storageEnd = dstID, srcID
 				stKey, enKey = dstKey, srcKey
 			}
@@ -13329,10 +13536,6 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.ReadVi
 			// latest-wins union over parallel siblings — keeping the property
 			// granularity congruent with the type granularity.
 			handled := false
-			// The row's edge id IS the stable handle since rmp #2317, so no lookup is
-			// needed: it used to be a forward-CSR POSITION that had to be resolved
-			// against a per-query CSR snapshot to recover the handle.
-			fwdHandle := uint64(edgeIDVal)
 			// hasByHandleEntry is the by-handle MEMBERSHIP signal that gates the
 			// property routing below (rmp #1684). A non-zero fwdHandle is NOT on
 			// its own sufficient: the public Go API (Graph.AddEdge[H] +
@@ -14344,24 +14547,31 @@ func buildIRProjection(
 								srcKey, srcResolved := capturedG.AdjList().Mapper().Resolve(graph.NodeID(srcID))
 								dstKey, dstResolved := capturedG.AdjList().Mapper().Resolve(graph.NodeID(dstID))
 								if srcResolved && dstResolved {
-									// Resolve the storage direction first: probe the
-									// forward pair, and on an undirected reverse pass
-									// (no labels AND no properties forward) fall back to
-									// the reverse pair, swapping the reported endpoints.
-									// propSrc/propDst then name the winning direction so
-									// the property map is streamed straight into the
-									// expr map (M2 / #1662), dropping the transient lpg
-									// map the prior `make`+copy allocated per row.
-									ets := capturedG.EdgeLabels(srcKey, dstKey)
+									// Resolve the storage direction first, then read the
+									// type and the properties from THAT pair. propSrc/
+									// propDst name the winning direction so the property
+									// map is streamed straight into the expr map (M2 /
+									// #1662), dropping the transient lpg map the prior
+									// `make`+copy allocated per row.
+									//
+									// The probe used to be "forward pair has no labels
+									// AND no properties, so try the reverse" — a test
+									// that a RECIPROCAL pair passes trivially, because
+									// the traversal pair really does hold an edge of its
+									// own. A reverse or undirected row therefore kept the
+									// traversal orientation and reported the OTHER edge
+									// of the pair (rmp #2504). [relStoredInverted] asks
+									// the bound edge's own handle instead, which is the
+									// only thing that separates the two.
 									propSrc, propDst := srcKey, dstKey
-									if len(ets) == 0 && len(capturedG.EdgeProperties(srcKey, dstKey)) == 0 {
-										revEts := capturedG.EdgeLabels(dstKey, srcKey)
-										revProps := capturedG.EdgeProperties(dstKey, srcKey)
-										if len(revEts) > 0 || len(revProps) > 0 {
-											ets = revEts
-											propSrc, propDst = dstKey, srcKey
-											storageStart, storageEnd = dstID, srcID
-										}
+									if relStoredInverted(capturedG, graph.NodeID(srcID), graph.NodeID(dstID),
+										srcKey, dstKey, edgeID) {
+										propSrc, propDst = dstKey, srcKey
+										storageStart, storageEnd = dstID, srcID
+									}
+									ets := capturedG.EdgeLabelsByHandle(propSrc, propDst, edgeID)
+									if len(ets) == 0 {
+										ets = capturedG.EdgeLabels(propSrc, propDst)
 									}
 									if len(ets) > 0 {
 										edgeType = pickEdgeType(ets, capturedMeta.acceptedTypes)
@@ -17641,17 +17851,24 @@ func (a *lpgMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 
 // DelEdgeProperty removes the named property from the directed edge (src, dst).
 func (a *lpgMutatorAdapter) DelEdgeProperty(src, dst, key string) {
-	r := a.rec()
-	var prev lpg.PropertyValue
-	var had bool
-	if r.active() {
-		prev, had = a.g.GetEdgeProperty(src, dst, key)
-	}
 	// #2212: removing an absent property is a no-op and counts nothing.
 	if a.counters != nil {
 		if _, present := a.g.GetEdgeProperty(src, dst, key); present {
 			a.countPropertyRemoved()
 		}
+	}
+	a.delEdgePropertyUncounted(src, dst, key)
+}
+
+// delEdgePropertyUncounted is [lpgMutatorAdapter.DelEdgeProperty] without the
+// -properties gate, so DelEdgePropertyOnInstance can attribute the counter by
+// the targeted instance's own bag instead of the per-pair aggregate (#2500).
+func (a *lpgMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) {
+	r := a.rec()
+	var prev lpg.PropertyValue
+	var had bool
+	if r.active() {
+		prev, had = a.g.GetEdgeProperty(src, dst, key)
 	}
 	a.w().DelEdgeProperty(src, dst, key)
 	r.recordDelEdgeProperty(src, dst, key, prev, had)
@@ -17663,6 +17880,23 @@ func (a *lpgMutatorAdapter) DelEdgeProperty(src, dst, key string) {
 			Property: uint32(a.g.PropertyKeys().Intern(key)),
 		})
 	}
+}
+
+// DelEdgePropertyOnInstance removes key from the (src, dst) per-pair store and
+// from the targeted instance's by-handle bag, gating -properties on the
+// BY-HANDLE presence probe (#2500): the per-pair entry is aggregate state
+// shared by every parallel instance, so gating on it reports the removal only
+// once per pair — a REMOVE that strips a present property from a sibling
+// instance must still count 1, and a REMOVE of a property absent on the
+// targeted instance must count 0 (openCypher: a no-op).
+func (a *lpgMutatorAdapter) DelEdgePropertyOnInstance(src, dst string, handle uint64, key string) {
+	if a.counters != nil {
+		if _, present := a.g.EdgePropertiesByHandle(src, dst, handle)[key]; present {
+			a.countPropertyRemoved()
+		}
+	}
+	a.delEdgePropertyUncounted(src, dst, key)
+	a.DelEdgePropertyByHandle(src, dst, handle, key)
 }
 
 // EdgeProperties returns a snapshot of every property currently set on the
@@ -18532,17 +18766,24 @@ func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 
 // DelEdgeProperty removes the named property from the directed edge (src, dst).
 func (a *walMutatorAdapter) DelEdgeProperty(src, dst, key string) {
-	r := a.rec()
-	var prev lpg.PropertyValue
-	var had bool
-	if r.active() {
-		prev, had = a.g.GetEdgeProperty(src, dst, key)
-	}
 	// #2212: removing an absent property is a no-op and counts nothing.
 	if a.counters != nil {
 		if _, present := a.g.GetEdgeProperty(src, dst, key); present {
 			a.countPropertyRemoved()
 		}
+	}
+	a.delEdgePropertyUncounted(src, dst, key)
+}
+
+// delEdgePropertyUncounted is [walMutatorAdapter.DelEdgeProperty] without the
+// -properties gate, so DelEdgePropertyOnInstance can attribute the counter by
+// the targeted instance's own bag instead of the per-pair aggregate (#2500).
+func (a *walMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) {
+	r := a.rec()
+	var prev lpg.PropertyValue
+	var had bool
+	if r.active() {
+		prev, had = a.g.GetEdgeProperty(src, dst, key)
 	}
 	a.w().DelEdgeProperty(src, dst, key)
 	r.recordDelEdgeProperty(src, dst, key, prev, had)
@@ -18555,6 +18796,20 @@ func (a *walMutatorAdapter) DelEdgeProperty(src, dst, key string) {
 			Property: uint32(a.g.PropertyKeys().Intern(key)),
 		})
 	}
+}
+
+// DelEdgePropertyOnInstance is [lpgMutatorAdapter.DelEdgePropertyOnInstance]
+// for the durable write path (#2500): the per-pair removal, the by-handle
+// removal, and their WAL ops all land as before; only the -properties gate
+// moves from the per-pair aggregate probe to the targeted instance's own bag.
+func (a *walMutatorAdapter) DelEdgePropertyOnInstance(src, dst string, handle uint64, key string) {
+	if a.counters != nil {
+		if _, present := a.g.EdgePropertiesByHandle(src, dst, handle)[key]; present {
+			a.countPropertyRemoved()
+		}
+	}
+	a.delEdgePropertyUncounted(src, dst, key)
+	a.DelEdgePropertyByHandle(src, dst, handle, key)
 }
 
 // EdgeProperties returns a snapshot of every property currently set on the

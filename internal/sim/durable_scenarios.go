@@ -38,6 +38,18 @@ package sim
 // The fold still stands — ST2 drives the path either way — but its reason is
 // now coverage of the end-to-end stack, never unreachability.
 //
+// # The measurement is now a GATE (rmp #2471)
+//
+// The follower rate above sat in this comment and nothing read it, so a
+// regression back to solo-leader commits would have passed every scenario here:
+// a solo-leader SyncGroup is still durable and still correct, merely slower and
+// no longer covering the fail-all branch. group_commit.go now gates it —
+// [checkGroupCommitCoverage] fails a concurrent run whose follower count is
+// zero, with [checkGroupCommitNonVacuity] kept separate so an uninformative run
+// does not read as a faulty one — and [RunGroupCommitFailAll] asserts the
+// fail-all branch over a deliberately constructed multi-member group. Re-measured
+// there on 2026-08-17: 61 followers in 483 rounds at 12 committers, 0 in 43 at 1.
+//
 // # ST7 note: snapshot isolation, since rmp #2307
 //
 // [Engine.BeginReadTx] provides SNAPSHOT ISOLATION across the whole
@@ -136,8 +148,10 @@ func fullStackStoreConfig() simStoreConfig {
 
 // durableCommitCrashScenario is ST2 (subsuming ST1). It owns a real WAL-backed
 // store on a [SimDisk], serves it over the genuine Bolt wire, drives many
-// concurrent writer connections whose every commit is a solo-leader
-// [wal.Writer.SyncGroup], arms a deterministic mid-flight fsync fault at a
+// concurrent writer connections whose every commit is a [wal.Writer.SyncGroup]
+// round — a solo leader or a coalesced group, never always the former (this
+// godoc claimed "solo-leader" until rmp #2471; see the group-commit note at the
+// top of this file) — arms a deterministic mid-flight fsync fault at a
 // seed-chosen commit ordinal so one commit's fsync is poisoned (its client sees
 // a wire FAILURE, never an ack; the WAL discards the un-synced suffix), then
 // crashes (drop the engine, keep the SimDisk image — never a graceful flush) and
@@ -439,7 +453,8 @@ func runCheckpointTeardown(ctx context.Context, seed uint64, faultAtTeardown boo
 		checkpoint.Config{Dir: cfg.dir}, st.graph, st.wlog, &unusedMu,
 		checkpoint.WithCommitSerialiser[string, float64](st.store.RunUnderCommitLock),
 		checkpoint.WithMapperCodec[string, float64](st.store.Codec()),
-		checkpoint.WithSnapshotFS[string, float64](simCheckpointBackend{disk: disk}),
+		checkpoint.WithWeightCodec[string, float64](st.store.WeightCodec()),
+		checkpoint.WithSnapshotFS[string, float64](simCheckpointBackend[string, float64]{disk: disk}),
 		checkpoint.WithConstraintSpecs[string, float64](st.engine.ConstraintSpecsForSnapshot),
 		checkpoint.WithIndexSpecs[string, float64](st.engine.IndexSpecsForSnapshot),
 	)
@@ -697,7 +712,7 @@ func runReadTxIsolation(ctx context.Context, seed uint64) (*SimReport, error) {
 	}
 
 	// --- Phase B: crash + recovery (durability + atomicity). ---
-	st.Crash() // SIGKILL: drop the engine, keep the SimDisk WAL image.
+	st.Crash() // HOST crash: drop the engine, keep only the fsync'd WAL prefix.
 	st2, err := OpenSimStore(disk, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("sim: ST7 reopen: %w", err)

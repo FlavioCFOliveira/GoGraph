@@ -245,11 +245,32 @@ func (ct *CoverageTracker) ScenarioCoverage() map[string]int {
 //     require instrumenting cypher/exec. The differential test (#1567) instead
 //     exercises operator EQUIVALENCE via the DisableHashJoin / DisableRangeIndexSeek
 //     toggles, which is the observable proxy.
+//
 //   - "crashpoint-sites": which internal/crashpoint sites a run armed/hit. Crash
 //     points are a test-only injection seam with no public hit-counter; the
 //     crash-storm scenario exercises them but does not expose which fired. The
 //     metrics oracle (#1568) reads only already-exported metrics for the same
 //     reason.
+//
+//     The seam is also structurally unbridgeable into the in-process
+//     simulation, not merely unobservable: crashpoint.Breakpoint is compiled
+//     out without the gograph_crashinject build tag, and with it the hook
+//     SIGKILLs the calling process — which would kill the test binary rather
+//     than produce the harness's crash (drop the engine, revoke the
+//     not-yet-fsync'd dirents, reopen in the same process). Bridging it would
+//     require a pluggable handler in internal/crashpoint, i.e. a new hook in a
+//     production-callable package, which is exactly what this list exists to
+//     refuse.
+//
+//     What the DST does instead is reproduce the WINDOW each site marks using
+//     the SimDisk fault primitives, and observe the branch the site guards
+//     through surfaces that already exist. The checkpoint-crash-storm scenario
+//     (rmp #2465) does this for
+//     "recovery.snapshot-promote-post-rename-pre-fsync": it strands a snapshot
+//     backup exactly as an interrupted publish would, and adjudicates the
+//     promote repair on the durable image (backup-only before the reopen,
+//     live-only after it) and on store/recovery's own exported
+//     store.recovery.snapshot.promoteParentFsync counter.
 func (ct *CoverageTracker) UnobservableSignals() []string {
 	return []string{"cypher-exec-operators", "crashpoint-sites"}
 }

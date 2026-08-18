@@ -44,9 +44,12 @@ func TestConstraintEnforce_NonVacuous(t *testing.T) {
 	if err := sm.engineRunDDL(ctx, constraintEnforceDDL); err != nil {
 		t.Fatalf("create constraint: %v", err)
 	}
+	if err := sm.engineRunDDL(ctx, constraintNumDDL); err != nil {
+		t.Fatalf("create numeric constraint: %v", err)
+	}
 	sm.Oracle().SetUniqueOnName(true)
 
-	report, err := sm.runConstraintLoop(ctx)
+	report, err := sm.runConstraintLoop(ctx, constraintEnforceSchemaModel())
 	if err != nil {
 		t.Fatalf("runConstraintLoop: %v", err)
 	}
@@ -64,8 +67,39 @@ func TestConstraintEnforce_NonVacuous(t *testing.T) {
 	if sm.CrashCount() == 0 {
 		t.Fatalf("expected crash/recovery cycles to test the survives-recovery property")
 	}
-	t.Logf("constraint-enforce: rejectedDuplicates=%d uniqueNodes=%d crashes=%d",
-		sm.RejectedWrites(), sm.Oracle().NodeCount(), sm.CrashCount())
+	// rmp #2464: the constraints must cross the SNAPSHOT boundary, not only the
+	// WAL one. A CheckpointConfig is inert unless the loop calls
+	// maybeCheckpoint, so a zero here means every post-recovery enforcement
+	// check merely re-validated a replayed OpCreateConstraint frame.
+	if sm.CheckpointCount() == 0 {
+		t.Fatalf("the run published NO checkpoint: the constraints never crossed the snapshot boundary")
+	}
+	t.Logf("constraint-enforce: rejectedDuplicates=%d uniqueNodes=%d crashes=%d checkpoints=%d replayedWALOps=%d",
+		sm.RejectedWrites(), sm.Oracle().NodeCount(), sm.CrashCount(), sm.CheckpointCount(), sm.ReplayedOps())
+}
+
+// TestConstraintEnforce_CheckpointGateWired proves the terminal checkpoint
+// non-vacuity gate is really wired into the constraint-enforce run rather than
+// merely present: with checkpointing disabled the run must report the gate's
+// violation instead of passing silently.
+func TestConstraintEnforce_CheckpointGateWired(t *testing.T) {
+	sc := constraintEnforceScenario()
+	if !sc.Checkpoint.Enabled {
+		t.Fatal("the constraint-enforce scenario no longer enables checkpointing")
+	}
+	cfg := sc.DeterministicConfig(sc.DefaultSeed)
+	cfg.Checkpoint = CheckpointConfig{} // disabled: no snapshot can be published
+
+	report, err := runConstraintEnforceCfg(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("runConstraintEnforceCfg: %v", err)
+	}
+	if report == nil {
+		t.Fatal("a run that published no checkpoint passed silently: the gate is not wired")
+	}
+	if !violationMentions(report, "checkpoint non-vacuity", "published NO checkpoint") {
+		t.Fatalf("expected the checkpoint non-vacuity gate to fire, got:\n%s", report)
+	}
 }
 
 // TestConstraintEnforce_DetectsEnforcementGap is the meta-test required by the
@@ -83,10 +117,14 @@ func TestConstraintEnforce_DetectsEnforcementGap(t *testing.T) {
 	ctx := context.Background()
 
 	// Model an active UNIQUE constraint WITHOUT creating it in the engine: the
-	// engine is now (deliberately) not enforcing what the oracle expects.
+	// engine is now (deliberately) not enforcing what the oracle expects. The
+	// nil schema model skips the introspection oracle, isolating the per-op
+	// adjudicator — the first duplicate-shaped op of ANY route (CREATE, SET
+	// rename, MERGE ON CREATE, SET label, numeric) the engine commits against
+	// a predicted rejection must surface as the enforcement gap.
 	sm.Oracle().SetUniqueOnName(true)
 
-	report, err := sm.runConstraintLoop(ctx)
+	report, err := sm.runConstraintLoop(ctx, nil)
 	if err != nil {
 		t.Fatalf("runConstraintLoop: %v", err)
 	}

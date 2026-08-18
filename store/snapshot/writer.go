@@ -86,12 +86,20 @@ func capHint(count uint64, maxCap int) int {
 //	uint64 nVertices      (little-endian)
 //	uint64 nEdges
 //	uint8  hasWeights     (1 = weights array present)
-//	uint8  weightSizeBytes (0 when hasWeights = 0)
+//	uint8  weightSizeBytes (0 when hasWeights = 0; 0xFF = codec-encoded)
 //	[vertices]            (nVertices * 8 bytes)
 //	[edges]               (nEdges * 8 bytes)
 //	[weights]             (nEdges * weightSizeBytes bytes, when present)
 //	uint8  hasHandles      (OPTIONAL trailing block; 1 = handle array present)
 //	[handles]             (nEdges * 8 bytes, when hasHandles = 1)
+//
+// WriteCSR persists weights only for the fixed-width primitives [csrWeightSize]
+// knows. A graph whose weights are of any other type — a struct, a NAMED
+// integer type such as [time.Duration], a string — needs a weight codec, which
+// this entry point does not take: it returns [ErrWeightNotPersistable] rather
+// than writing a weightless snapshot, because a weightless snapshot would let
+// the caller's checkpoint truncate the WAL prefix holding the only surviving
+// copy (rmp #2526). Use [WriteCSRWithWeightCodec] to persist those weights.
 //
 // The trailing handles block (Stage 2 of the stable-edge-handle work) is
 // emitted ONLY when the source CSR carries a per-slot handle column
@@ -102,6 +110,31 @@ func capHint(count uint64, maxCap int) int {
 // to read one more byte after the weights array: present → handles follow,
 // EOF → none (the backward-compatible read branch).
 func WriteCSR[W any](w io.Writer, c *csr.CSR[W]) (size int64, crc uint32, err error) {
+	return writeCSRWith[W](w, c, nil)
+}
+
+// WriteCSRWithWeightCodec is the weight-codec-aware variant of [WriteCSR]. It
+// persists edge weights of ANY type W by encoding each one through wenc — pass
+// the owning store's codec, [txn.Store.WeightCodec] — into a variable-width
+// section indexed by an offsets array. See csr_weight_codec.go for the layout
+// and the compatibility argument.
+//
+// The codec is consulted ONLY for weight types the fixed-width path cannot
+// size. A float64, int64 or int32 weight still takes the original dense native
+// layout and the bytes are unchanged, so a snapshot written with a codec
+// installed is byte-identical to one written without it whenever W is one of
+// those types.
+//
+// A nil wenc is accepted and behaves exactly as [WriteCSR].
+func WriteCSRWithWeightCodec[W any](w io.Writer, c *csr.CSR[W], wenc weightEncoder[W]) (size int64, crc uint32, err error) {
+	return writeCSRWith(w, c, wenc)
+}
+
+// writeCSRWith is the implementation behind [WriteCSR] and
+// [WriteCSRWithWeightCodec].
+//
+//nolint:gocyclo // CSR serialisation: header + vertices + edges + two weight layouts + optional handles
+func writeCSRWith[W any](w io.Writer, c *csr.CSR[W], wenc weightEncoder[W]) (size int64, crc uint32, err error) {
 	defer metrics.Time("store.snapshot.WriteCSR").Stop()
 	bw := bufio.NewWriterSize(w, 1<<20)
 	hasher := crc32.New(castagnoli)
@@ -112,6 +145,45 @@ func WriteCSR[W any](w io.Writer, c *csr.CSR[W]) (size int64, crc uint32, err er
 	weights := c.WeightsSlice()
 	handles := c.HandlesSlice()
 
+	// Decide the weights layout BEFORE writing the header, because the header
+	// declares it. Three outcomes: the dense native array (wsize 1..8), the
+	// codec-encoded section (wsize == weightSizeCodec), or no weights at all
+	// (wsize 0). The fourth possibility — weights that carry information but
+	// cannot be encoded — is refused here rather than written as "no weights"
+	// (rmp #2526); see [ErrWeightNotPersistable].
+	wsize := uint8(0)
+	var encoded encodedWeights
+	if weights != nil {
+		wsize = csrWeightSize[W]()
+		if wsize == 0 && !isEmptyWeight[W]() {
+			switch {
+			case wenc != nil:
+				if encoded, err = encodeCSRWeights(weights, wenc); err != nil {
+					metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
+					return 0, 0, err
+				}
+				wsize = weightSizeCodec
+			case anyWeightNonZero(weights):
+				// Weights that carry information and nothing that can encode
+				// them. Fail the write: the caller's checkpoint must NOT go on
+				// to truncate the WAL prefix that still holds them.
+				metrics.IncCounter("store.snapshot.WriteCSR.weightNotPersistable", 1)
+				metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
+				return 0, 0, fmt.Errorf("%w (weight type %T, %d edges)",
+					ErrWeightNotPersistable, *new(W), len(weights))
+			default:
+				// Every weight is the zero value, so recording none loses
+				// nothing. This is the shape of a store built without a weight
+				// codec, where txn.ErrNoWeightCodec already rejected every
+				// non-zero weight at write time.
+				metrics.IncCounter("store.snapshot.WriteCSR.weightAllZeroElided", 1)
+			}
+		}
+	}
+	hasW := uint8(0)
+	if wsize > 0 {
+		hasW = 1
+	}
 	if err := binary.Write(tee, binary.LittleEndian, uint64(len(verts))); err != nil {
 		metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
 		return 0, 0, err
@@ -119,14 +191,6 @@ func WriteCSR[W any](w io.Writer, c *csr.CSR[W]) (size int64, crc uint32, err er
 	if err := binary.Write(tee, binary.LittleEndian, uint64(len(edges))); err != nil {
 		metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
 		return 0, 0, err
-	}
-	wsize := uint8(0)
-	if weights != nil {
-		wsize = csrWeightSize[W]()
-	}
-	hasW := uint8(0)
-	if wsize > 0 {
-		hasW = 1
 	}
 	if _, err := tee.Write([]byte{hasW, wsize}); err != nil {
 		metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
@@ -153,11 +217,21 @@ func WriteCSR[W any](w io.Writer, c *csr.CSR[W]) (size int64, crc uint32, err er
 		metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
 		return 0, 0, err
 	}
-	if hasW == 1 {
+	weightBytes := int64(0)
+	switch {
+	case wsize == weightSizeCodec:
+		// Variable-width codec section: offsets array then payload.
+		if err := writeEncodedWeights(tee, &encoded); err != nil {
+			metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
+			return 0, 0, err
+		}
+		weightBytes = encoded.byteLen()
+	case hasW == 1:
 		if err := streamLE(tee, weightsAsBytes(weights, int(wsize))); err != nil {
 			metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
 			return 0, 0, err
 		}
+		weightBytes = int64(int(wsize)) * int64(len(edges))
 	}
 	// Optional trailing handle block. Emitted only when the CSR carries a
 	// handle column; absent otherwise so a handle-less graph's bytes match
@@ -178,8 +252,20 @@ func WriteCSR[W any](w io.Writer, c *csr.CSR[W]) (size int64, crc uint32, err er
 		metrics.IncCounter("store.snapshot.WriteCSR.errors", 1)
 		return 0, 0, err
 	}
-	total := int64(8+8+2+8*len(verts)+8*len(edges)) + int64(int(wsize))*int64(len(edges)) + handleBytes
+	total := int64(8+8+2+8*len(verts)+8*len(edges)) + weightBytes + handleBytes
 	return total, hasher.Sum32(), nil
+}
+
+// isEmptyWeight reports whether W is the empty struct, the one weight type that
+// carries no information and for which "no weights section" is the correct and
+// complete encoding. It is the reason [csrWeightSize] returning 0 is not on its
+// own evidence that a weight is unpersistable: 0 means BOTH "nothing to store"
+// (struct{}) and "I do not know how to store this" (everything else it does not
+// recognise), and conflating those two is the whole of rmp #2526.
+func isEmptyWeight[W any]() bool {
+	var zero W
+	_, empty := any(zero).(struct{})
+	return empty
 }
 
 // csrWeightSize returns the size in bytes of one weight value, or 0
@@ -227,7 +313,24 @@ type CSRReadback struct {
 	// as Edges. See the trailing-block note on [WriteCSR].
 	Handles    []uint64
 	HasWeights bool
+	// WeightSize is the per-weight width in bytes for the dense native layout,
+	// or [weightSizeCodec] (0xFF) when the weights are codec-encoded and
+	// variable width, in which case WeightOffsets indexes WeightBytes.
 	WeightSize uint8
+	// WeightOffsets is the (len(Edges)+1) offsets array of a codec-encoded
+	// weights section: WeightBytes[WeightOffsets[k]:WeightOffsets[k+1]] is the
+	// encoded weight of the edge at Edges[k]. It is nil for the dense native
+	// layout and for a weightless snapshot. Validated at parse time to be
+	// zero-based, monotonic and within the payload, so those slices are
+	// unconditionally in range. See csr_weight_codec.go.
+	WeightOffsets []uint64
+}
+
+// CodecWeights reports whether this readback carries a codec-encoded,
+// variable-width weights section, which can only be decoded with a weight
+// codec ([ApplyCSRToGraphWithWeightCodec]).
+func (r *CSRReadback) CodecWeights() bool {
+	return r.HasWeights && r.WeightSize == weightSizeCodec
 }
 
 // ReadCSR parses a CSR previously written by [WriteCSR] from r.
@@ -290,6 +393,24 @@ func readCSRLimited(r io.Reader, maxBytes int64) (CSRReadback, error) {
 	hasW := flag[0] == 1
 	wsize := flag[1]
 
+	// RANGE-CHECK THE WIDTH BYTE BEFORE DISPATCHING ON IT (rmp #2526).
+	//
+	// The width selects the entire layout of everything that follows, so a
+	// value in neither the legacy set nor the codec sentinel must be a loud
+	// corruption error, never a fallthrough into one of the branches. Without
+	// this, an unknown width (3, 7, 100 — a single flipped bit in an 8 or a 4)
+	// silently took the dense path and mis-sliced the whole weights column,
+	// caught only later and only if ApplyCSRToGraph happened to be reached.
+	//
+	// This mirrors Lucene, which does exactly this for its own sentinel-bearing
+	// header fields before acting on them: Lucene90DocValuesProducer.java
+	// range-checks `tableSize > 256` into a CorruptIndexException before
+	// branching on the negative sentinels -1 and -2 (lucene f7653e2a).
+	if hasW && !validCSRWeightSize(wsize) {
+		metrics.IncCounter("store.snapshot.ReadCSR.errors", 1)
+		return CSRReadback{}, fmt.Errorf("%w: unknown CSR weight width %d", ErrCSRCorrupted, wsize)
+	}
+
 	// vertexCap / edgeCap is the largest count the available bytes can
 	// hold, computed overflow-safely (never multiply count*8 first). When
 	// a manifest size is known we use maxBytes (precise bound); otherwise
@@ -342,7 +463,19 @@ func readCSRLimited(r io.Reader, maxBytes int64) (CSRReadback, error) {
 		return CSRReadback{}, err
 	}
 	var weightBytes []byte
-	if hasW {
+	var weightOffsets []uint64
+	switch {
+	case hasW && wsize == weightSizeCodec:
+		// Codec-encoded, variable-width section (rmp #2526): an (nEdges+1)
+		// offsets array then the payload it indexes. readCodecWeights bounds
+		// and validates both before either make().
+		offs, payload, rerr := readCodecWeights(br, nE, byteBudget)
+		if rerr != nil {
+			metrics.IncCounter("store.snapshot.ReadCSR.errors", 1)
+			return CSRReadback{}, rerr
+		}
+		weightOffsets, weightBytes = offs, payload
+	case hasW:
 		nbytes, err := weightsByteLen(wsize, nE, maxBytes, byteBudget)
 		if err != nil {
 			metrics.IncCounter("store.snapshot.ReadCSR.errors", 1)
@@ -379,12 +512,13 @@ func readCSRLimited(r io.Reader, maxBytes int64) (CSRReadback, error) {
 		return CSRReadback{}, fmt.Errorf("%w: bad handle-block flag %#x", ErrCSRCorrupted, flagByte)
 	}
 	return CSRReadback{
-		Vertices:    verts,
-		Edges:       edges,
-		HasWeights:  hasW,
-		WeightSize:  wsize,
-		WeightBytes: weightBytes,
-		Handles:     handles,
+		Vertices:      verts,
+		Edges:         edges,
+		HasWeights:    hasW,
+		WeightSize:    wsize,
+		WeightBytes:   weightBytes,
+		WeightOffsets: weightOffsets,
+		Handles:       handles,
 	}, nil
 }
 
@@ -405,6 +539,14 @@ func weightsByteLen(wsize uint8, nE uint64, maxBytes int64, byteBudget uint64) (
 	// The weights array alone cannot exceed the file's byte budget. When a
 	// manifest size is known, byteBudget == maxBytes (the whole file), an
 	// even tighter bound than the backstop.
+	//
+	// Since rmp #2526 this branch is DEFENCE IN DEPTH rather than the first
+	// line: the reader now range-checks the width byte before dispatching, so
+	// wsize reaching here is one of {1,2,4,8}, and nE was already bounded by
+	// recordCap = byteBudget/8 — hence wsize*nE <= byteBudget always. It is kept
+	// because it stays correct if the accepted width set ever widens, and
+	// because removing a bound is never an improvement. The overflow guard above
+	// it remains live on a 32-bit platform, where byteBudget can exceed maxInt.
 	if maxBytes > 0 && lo > byteBudget {
 		return 0, fmt.Errorf("%w: weights bytes %d exceed file budget %d: wsize=%d nE=%d",
 			ErrCSRCorrupted, lo, byteBudget, wsize, nE)

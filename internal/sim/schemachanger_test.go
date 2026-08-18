@@ -13,10 +13,12 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/internal/clock"
 )
 
-// TestSchemaChanger_AllFamiliesAcceptable drives every DDL family and asserts
-// each yields an acceptable outcome (success or typed FAILURE) without wedging
-// the connection, and that the server stays healthy. goleak-clean.
-func TestSchemaChanger_AllFamiliesAcceptable(t *testing.T) {
+// TestSchemaChanger_AllFamiliesMeetContract drives every DDL family — the
+// constraint create in BOTH grammars (legacy ON ... ASSERT and modern
+// FOR ... REQUIRE) — and asserts each outcome meets its family contract (the
+// IF NOT EXISTS create families must SUCCEED; drops accept success or a typed
+// FAILURE) without wedging the connection. goleak-clean.
+func TestSchemaChanger_AllFamiliesMeetContract(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	srv, err := NewSimServer(SimEngineForServer(), clock.Real())
@@ -26,21 +28,79 @@ func TestSchemaChanger_AllFamiliesAcceptable(t *testing.T) {
 	defer func() { _ = srv.Close() }()
 
 	a := SchemaChanger{}
-	for fam := SchemaChangeFamily(0); fam < schemaChangeFamilyCount; fam++ {
+	runs := []struct {
+		fam    SchemaChangeFamily
+		modern bool
+	}{
+		{SchemaCreateIndex, false},
+		{SchemaDropIndex, false},
+		{SchemaCreateConstraint, false}, // legacy ON ... ASSERT ... IF NOT EXISTS
+		{SchemaDropConstraint, false},
+		{SchemaCreateConstraint, true}, // modern IF NOT EXISTS FOR ... REQUIRE
+		{SchemaDropConstraint, false},
+	}
+	for _, r := range runs {
 		c, err := srv.Dial()
 		if err != nil {
-			t.Fatalf("%s Dial: %v", fam, err)
+			t.Fatalf("%s Dial: %v", r.fam, err)
 		}
 		if err := c.Connect(context.Background()); err != nil {
-			t.Fatalf("%s Connect: %v", fam, err)
+			t.Fatalf("%s Connect: %v", r.fam, err)
 		}
-		out, err := a.Run(c, fam)
+		out, err := a.Run(c, r.fam, r.modern)
 		_ = c.Close()
 		if err != nil {
-			t.Fatalf("%s Run: %v", fam, err)
+			t.Fatalf("%s (modern=%t) Run: %v", r.fam, r.modern, err)
 		}
-		if !out.Acceptable() {
-			t.Errorf("%s: unacceptable outcome %+v", fam, out)
+		if !out.MeetsContract() {
+			t.Errorf("%s (modern=%t): contract-breaching outcome %+v", r.fam, r.modern, out)
+		}
+	}
+}
+
+// TestSchemaChanger_IfNotExistsRecreateSucceeds pins the idempotent-SUCCESS
+// contract of the IF NOT EXISTS create families (rmp #2455): re-creating the
+// SAME index or constraint — in either constraint grammar — must SUCCEED as a
+// clean no-op, never return a tolerated "already exists" FAILURE. Before this
+// task the constraint create carried no IF NOT EXISTS and the churn treated
+// the re-create failure as acceptable; this test fails on that behaviour.
+func TestSchemaChanger_IfNotExistsRecreateSucceeds(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	srv, err := NewSimServer(SimEngineForServer(), clock.Real())
+	if err != nil {
+		t.Fatalf("NewSimServer: %v", err)
+	}
+	defer func() { _ = srv.Close() }()
+
+	c, err := srv.Dial()
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	if err := c.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	a := SchemaChanger{}
+	steps := []struct {
+		name   string
+		fam    SchemaChangeFamily
+		modern bool
+	}{
+		{"create index", SchemaCreateIndex, false},
+		{"re-create index", SchemaCreateIndex, false},
+		{"create constraint (legacy)", SchemaCreateConstraint, false},
+		{"re-create constraint (legacy)", SchemaCreateConstraint, false},
+		{"re-create constraint (modern)", SchemaCreateConstraint, true},
+	}
+	for _, s := range steps {
+		out, err := a.Run(c, s.fam, s.modern)
+		if err != nil {
+			t.Fatalf("%s: %v", s.name, err)
+		}
+		if !out.Succeeded {
+			t.Fatalf("%s: want idempotent SUCCESS, got %+v", s.name, out)
 		}
 	}
 }
@@ -66,11 +126,12 @@ func TestSchemaChanger_DDLUnderConcurrentWritesConsistent(t *testing.T) {
 	defer cancel()
 
 	var (
-		wg        sync.WaitGroup
-		panics    int
-		panicsMu  sync.Mutex
-		churnErr  error
-		writerErr error
+		wg            sync.WaitGroup
+		panics        int
+		panicsMu      sync.Mutex
+		churnErr      error
+		churnOutcomes []SchemaChangeOutcome
+		writerErr     error
 	)
 	recordPanic := func() {
 		if r := recover(); r != nil {
@@ -85,7 +146,7 @@ func TestSchemaChanger_DDLUnderConcurrentWritesConsistent(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		defer recordPanic()
-		_, churnErr = RunSchemaChurn(ctx, srv, NewSeed(0xDD1), 40)
+		churnOutcomes, churnErr = RunSchemaChurn(ctx, srv, NewSeed(0xDD1), 40)
 	}()
 
 	// Concurrent honest writer goroutines, adding more Person nodes while DDL runs.
@@ -118,6 +179,14 @@ func TestSchemaChanger_DDLUnderConcurrentWritesConsistent(t *testing.T) {
 	wg.Wait()
 	if churnErr != nil {
 		t.Fatalf("schema churn: %v", churnErr)
+	}
+	// Every churn outcome must meet its family contract: the IF NOT EXISTS
+	// create families succeed even when they re-create (rmp #2455), and the
+	// drops complete cleanly (success or a typed FAILURE under contention).
+	for i, out := range churnOutcomes {
+		if !out.MeetsContract() {
+			t.Errorf("churn outcome %d breaches its family contract: %+v", i, out)
+		}
 	}
 	if writerErr != nil {
 		t.Fatalf("concurrent writer: %v", writerErr)
@@ -188,13 +257,12 @@ func assertIndexConsistentWithData(t *testing.T, srv *SimServer) {
 // survived the concurrent DDL races and still enforces uniqueness.
 //
 // It deliberately uses a fresh label (SimUniq) rather than the churned Account
-// label and does NOT exercise DROP CONSTRAINT: DROP CONSTRAINT <name> (by name
-// only) is a known fail-silent no-op in this engine — it reports SUCCESS but
-// leaves both the backing index and the registry entry in place, so the
-// constraint stays enforced and a re-create later fails with "backing index
-// already exists". That defect is reported separately (see the package-level
-// finding note); this assertion isolates the property under test (enforcement
-// survives churn) from it by using a pristine label.
+// label and does NOT exercise DROP CONSTRAINT — not because the by-name drop
+// is defective (the historical #1556 fail-silent no-op is FIXED, and
+// dropconstraint_finding_test.go pins the correct behaviour: a by-name drop
+// removes enforcement and its backing index atomically), but to isolate the
+// property under test — enforcement survives churn — on a pristine label with
+// no other DDL in play.
 func assertConstraintEnforced(t *testing.T, srv *SimServer) {
 	t.Helper()
 	c, err := srv.Dial()

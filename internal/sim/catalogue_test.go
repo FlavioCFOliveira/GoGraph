@@ -19,9 +19,9 @@ func TestDefaultRegistry_ListsAllScenarios(t *testing.T) {
 		t.Fatalf("DefaultRegistry: %v", err)
 	}
 	want := []string{
-		ScenarioBadActors, ScenarioBulkVsOnline, ScenarioCPUStarvation, ScenarioCheckpointDirFsyncFault, ScenarioCheckpointTeardown, ScenarioConstraintEnforce, ScenarioConstraintExistence,
-		ScenarioCrashStorm, ScenarioCSRFilePublishFault, ScenarioCypherPaths, ScenarioCypherSurface, ScenarioDiskFull, ScenarioDurableCommitCrash, ScenarioEdgeProperties, ScenarioIndexDiversity, ScenarioIORoundTripFault, ScenarioLongRunning, ScenarioMemPressure, ScenarioMergeRel, ScenarioOverload,
-		ScenarioProductionProfile, ScenarioReadHeavy, ScenarioReadTxIsolation, ScenarioSchemaChaos, ScenarioSchemaMutation, ScenarioSearch, ScenarioSearchCrash, ScenarioTypeCoverage,
+		ScenarioBadActors, ScenarioBulkImportParity, ScenarioBulkVsOnline, ScenarioCPUStarvation, ScenarioCheckpointCrashStorm, ScenarioCheckpointDirFsyncFault, ScenarioCheckpointTeardown, ScenarioConstraintEnforce, ScenarioConstraintExistence,
+		ScenarioCrashStorm, ScenarioCSRFilePublishFault, ScenarioCypherPaths, ScenarioCypherSurface, ScenarioDDLCheckpointCrash, ScenarioDiskFull, ScenarioDurableCommitCrash, ScenarioEdgeProperties, ScenarioIndexDiversity, ScenarioIORoundTripFault, ScenarioLongRunning, ScenarioMemPressure, ScenarioMergeRel, ScenarioNullSemantics, ScenarioOverload,
+		ScenarioPatternShapes, ScenarioProductionProfile, ScenarioReadHeavy, ScenarioReadTxIsolation, ScenarioSchemaChaos, ScenarioSchemaMutation, ScenarioSearch, ScenarioSearchCrash, ScenarioSnapshotCorruptionFailStop, ScenarioTypeCoverage,
 		ScenarioWALCorruptionFailStop, ScenarioWriteHeavy,
 	}
 	if r.Len() != len(want) {

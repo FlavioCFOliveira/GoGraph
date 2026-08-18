@@ -78,7 +78,8 @@ func init() {
 // node-label records with a truncated body and whose manifest CRC matches the
 // real (tiny) file bytes, then calls LoadSnapshotFull. The child's working
 // directory is the parent-provided t.TempDir() (see subproc.RunCtx), so it
-// writes the snapshot there.
+// writes the snapshot there — which is what the relative MkdirTemp below
+// implements. The code used to contradict this paragraph by reaching for TMPDIR.
 //
 // Exit codes:
 //
@@ -94,7 +95,19 @@ func init() {
 // before either line is printed; the parent now treats that as a failure (the
 // bound was lost), not an accepted process-confined outcome.
 func secStoreHostileSnapshotChild(_ []string) int {
-	dir, err := os.MkdirTemp("", "sec-store-oom-*")
+	// "." — the child's WORKING DIRECTORY, which subproc.RunCtx sets to the
+	// parent's t.TempDir(). The snapshot must be laid out there and NOT under
+	// os.MkdirTemp("", ...) (rmp #2527): this child has three exits the parent
+	// treats as outcomes — clean rejection, forbidden load, and a runtime
+	// OOM-abort — and on the abort path no deferred cleanup in the child can
+	// run at all. Ownership therefore belongs to the surviving parent, whose
+	// t.TempDir() the test framework removes however the child died. Under
+	// TMPDIR the directory was stranded on EVERY soak run instead.
+	//
+	// This is the same ownership rule the crash-injection harness already
+	// follows: crashinject.Run hands the child a parent-owned t.TempDir()
+	// precisely because the child is SIGKILLed by design.
+	dir, err := os.MkdirTemp(".", "sec-store-oom-*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "child: MkdirTemp: %v\n", err)
 		return 1

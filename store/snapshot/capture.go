@@ -128,6 +128,13 @@ type capturedIndex struct {
 // published. That is the price of an atomic image; see [CaptureGraph].
 type Capture[W any] struct {
 	csr *csr.CSR[W]
+	// wenc, when non-nil, is the weight codec [WriteCapture] serialises the
+	// CSR's weights column through for weight types the fixed-width layout
+	// cannot size (rmp #2526). Nil means the fixed-width layout is the only one
+	// available, and publishing a capture whose weights carry information it
+	// cannot express fails with [ErrWeightNotPersistable] rather than silently
+	// publishing a weightless image.
+	wenc weightEncoder[W]
 	// order is how many nodes the image carries — the count admitted by the same
 	// instant filter the mapper used. orderKnown distinguishes "not computed" (the
 	// present-time capture, which falls back to the CSR) from a genuine zero.
@@ -242,18 +249,47 @@ func (c *Capture[W]) Size() uint64 { return c.csr.Size() }
 // deliberate: it is what lets the publish step run lock-free while remaining
 // atomic. The peak cost is the on-disk snapshot size, held for the duration of
 // the publish, on top of the CSR the caller already built.
+// A Capture taken through this entry point carries NO weight codec, so
+// publishing it fails with [ErrWeightNotPersistable] when the graph holds
+// weights of a type the fixed-width layout cannot size. Use
+// [CaptureGraphWithWeightCodec] for those. See csr_weight_codec.go.
 func CaptureGraph[N comparable, W any](
 	g *lpg.Graph[N, W],
 	cs *csr.CSR[W],
 	codec keyEncoder[N],
 	at *lpg.Snapshot,
 ) (*Capture[W], error) {
+	return CaptureGraphWithWeightCodec[N, W](g, cs, codec, nil, at)
+}
+
+// CaptureGraphWithWeightCodec is the weight-codec-aware variant of
+// [CaptureGraph]. wcodec is adopted by the returned Capture and used by
+// [WriteCapture] to serialise the CSR's weights column for any weight type W —
+// pass the owning store's codec, [txn.Store.WeightCodec].
+//
+// The codec is consulted only for weight types the fixed-width layout cannot
+// size, so a float64, int64 or int32 graph publishes byte-identical bytes with
+// or without it. A nil wcodec is accepted and behaves exactly as
+// [CaptureGraph].
+//
+// The codec is captured here rather than passed at publish time so that a
+// Capture stays what it claims to be: a self-contained image that
+// [WriteCapture] can publish without any further input about how to encode it.
+func CaptureGraphWithWeightCodec[N comparable, W any](
+	g *lpg.Graph[N, W],
+	cs *csr.CSR[W],
+	codec keyEncoder[N],
+	wcodec weightEncoder[W],
+	at *lpg.Snapshot,
+) (*Capture[W], error) {
 	defer metrics.Time("store.snapshot.CaptureGraph").Stop()
 	c, err := captureGraph(g, cs, codec, at)
 	if err != nil {
 		metrics.IncCounter("store.snapshot.CaptureGraph.errors", 1)
+		return c, err
 	}
-	return c, err
+	c.wenc = wcodec
+	return c, nil
 }
 
 //nolint:gocyclo // one capture per component: labels + properties + mapper + tombstones + edgehandles + indexes

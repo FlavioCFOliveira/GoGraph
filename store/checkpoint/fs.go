@@ -34,7 +34,12 @@ type snapshotBackend[N comparable, W any] interface {
 	// serialisation and calls this in phase 1b with the lock RELEASED, so the
 	// image is a single transaction-boundary instant while writers commit
 	// throughout (rmp #2310).
-	CaptureGraph(cs *csr.CSR[W], g *lpg.Graph[N, W], codec txn.Codec[N], at *lpg.Snapshot) (*snapshot.Capture[W], error)
+	// wcodec, when non-nil, is adopted by the capture and used to serialise the
+	// CSR weights column for weight types the fixed-width layout cannot size
+	// (rmp #2526). Nil keeps the fixed-width-only behaviour, under which a
+	// capture holding such weights REFUSES to publish rather than publishing a
+	// weightless image the WAL truncation would then make permanent.
+	CaptureGraph(cs *csr.CSR[W], g *lpg.Graph[N, W], codec txn.Codec[N], wcodec txn.WeightCodec[W], at *lpg.Snapshot) (*snapshot.Capture[W], error)
 	// WriteCapture publishes a capture taken by CaptureGraph to snapDir, adding
 	// constraints.bin from constraints (nil/empty emits none) and indexdefs.bin
 	// from indexDefs (nil/empty emits none). It touches no graph, so the
@@ -51,12 +56,21 @@ type snapshotBackend[N comparable, W any] interface {
 // the manifest read are byte-identical to the pre-seam checkpointer.
 type osSnapshotBackend[N comparable, W any] struct{}
 
-func (osSnapshotBackend[N, W]) CaptureGraph(cs *csr.CSR[W], g *lpg.Graph[N, W], codec txn.Codec[N], at *lpg.Snapshot) (*snapshot.Capture[W], error) {
+func (osSnapshotBackend[N, W]) CaptureGraph(cs *csr.CSR[W], g *lpg.Graph[N, W], codec txn.Codec[N], wcodec txn.WeightCodec[W], at *lpg.Snapshot) (*snapshot.Capture[W], error) {
+	// A nil txn.Codec / txn.WeightCodec interface value must be passed on as an
+	// untyped nil: handing a typed-nil interface to the snapshot package would
+	// make its own nil check false and it would call through a nil codec.
 	if codec != nil {
+		if wcodec != nil {
+			return snapshot.CaptureGraphWithWeightCodec[N, W](g, cs, codec, wcodec, at)
+		}
 		return snapshot.CaptureGraph[N, W](g, cs, codec, at)
 	}
 	// No codec: mapper.bin is emitted for string-keyed graphs only, keeping the
 	// historical v2 fallback for every other key type.
+	if wcodec != nil {
+		return snapshot.CaptureGraphWithWeightCodec[N, W](g, cs, nil, wcodec, at)
+	}
 	return snapshot.CaptureGraph[N, W](g, cs, nil, at)
 }
 

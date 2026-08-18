@@ -120,11 +120,24 @@ func TestFullStack_SnapshotRepublishCrashPromotesBackup(t *testing.T) {
 		t.Fatalf("archive parent fsync: %v", err)
 	}
 	// Publish: rename staged snapshot dir onto the live name, then CRASH before
-	// the parent fsync that would make the live dirent durable.
+	// the parent fsync that would make the live dirent durable. Pin the crash to
+	// the rolled-back branch: since rmp #2514 the other branch — the publish
+	// rename reached stable storage — is equally legal and is what an unpinned
+	// crash selects on some seeds, and this test is about the interrupted one.
+	disk.ArmRenameRollbackForPath("db/snapshot")
 	if err := disk.Rename("db/stage/snapshot", "db/snapshot"); err != nil {
 		t.Fatalf("publish rename: %v", err)
 	}
+	if got := disk.RenameRollbackCount(); got != 1 {
+		t.Fatalf("RenameRollbackCount = %d, want 1 — the arm never matched the publish rename", got)
+	}
 	disk.Crash() // lose the not-yet-durable live dirent.
+
+	// The rolled-back rename must have put the staging name back: a crash that
+	// left neither name would destroy the only other copy of the new snapshot.
+	if !disk.Exists("db/stage/snapshot/manifest.json") {
+		t.Fatal("the rolled-back publish rename did not restore the staging name")
+	}
 
 	// The live snapshot is gone; recovery must promote .bak (the 4-node graph)
 	// and lose nothing committed before the interrupted republish.

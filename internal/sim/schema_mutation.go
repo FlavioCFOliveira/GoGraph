@@ -25,16 +25,55 @@ const (
 
 // schemaMutationProps are the scalar property keys the checker projects and
 // verifies on each Person, in a fixed order. name is the key and is verified
-// implicitly by the probe matching on it; age/tag/score are the mutable scalars.
-var schemaMutationProps = []string{"age", "tag", "score"}
+// implicitly by the probe matching on it; age/tag/score are the mutable
+// scalars. Since rmp #2461 the list also carries mc, the hit counter the
+// two-branch node MERGE ([tmplMergePersonCounter]) maintains: projecting it on
+// every probe is what makes the ON CREATE/ON MATCH counter value round-trip
+// continuously — and, because the probe re-runs immediately after every
+// crash/recovery, survive the WAL and the snapshot.
+//
+// Since rmp #2511 it also carries mo, the scalar the whole-pattern MERGE writes
+// onto a Person bound by the clause PRECEDING it ([tmplMergePairOuter]). That
+// makes this one probe the outer-node family's entire verification, in both
+// directions: the written value on the Persons the family targeted, and null on
+// every other Person — including after a co-actor's SET n = $props wipes it.
+var schemaMutationProps = []string{"age", "tag", "score", "mc", mergeOuterNodeKey}
 
 // SchemaMutationWriter mutates the labels and properties of existing Person
 // nodes: it removes a property (REMOVE n.tag), removes a label (REMOVE n:Vip),
 // adds a label (SET n:Vip), merges a property map (SET n += $props), and
-// replaces the property set (SET n = $props). It never creates or deletes a node
-// (the co-actor HonestWriter keeps the population churning), and every op targets
-// a name the oracle already models, so it never emits a statement the engine
-// would reject on well-formedness grounds.
+// replaces the property set (SET n = $props). Since rmp #2454 it also drives
+// the FOREACH write path with two genuinely different bodies: a per-element
+// CREATE over a bound list ([tmplForeachCreatePersons] — the one op family
+// through which this writer creates nodes) and a per-element SET on an outer
+// MATCH variable ([tmplForeachSetTag]).
+//
+// Since rmp #2461 it additionally drives the four MERGE families the DST did
+// not reach: a node MERGE with BOTH action branches
+// ([tmplMergePersonCounter]), the whole-map ON CREATE assignment
+// ([tmplMergePersonSetAll]), a whole-pattern MERGE that creates both endpoints
+// and the relationship together ([tmplMergePairPattern]), and the
+// map-parameter MERGE the engine must REJECT ([tmplMergeParamMap]). Since rmp
+// #2510 it also drives the whole-entity action on a pattern's relationship
+// variable ([tmplMergePairSetAll]), since rmp #2511 the two actions whose
+// target is bound by the clause PRECEDING the MERGE — a node
+// ([tmplMergePairOuter]) and a relationship ([tmplMergePairOuterRel]) — and
+// since rmp #2512 the two MERGE forms behind a driving clause that binds NOTHING
+// ([tmplMergeZeroDriverNode], [tmplMergeZeroDriverPair]), which must therefore
+// change nothing at all. Since rmp #2515 it also drives the NODE-ONLY MERGE whose
+// branch action targets a relationship bound by the preceding clause
+// ([tmplMergeHandleOuterRelCreate], [tmplMergeHandleOuterRelMatch]) — the shape
+// whose write was misdirected onto an unrelated node. That family REQUIRES the
+// handle/id collision [seedMergeHandleCollision] constructs, so a workload that
+// mixes this writer in without running that bootstrap first would drive its
+// driving MATCH against nothing; only [schemaMutationWorkload] uses this writer,
+// and [runSchemaMutationCfg] runs the bootstrap before its first tick. The first
+// three create nodes, so the writer is no longer create-free; the last is the
+// one statement it emits deliberately expecting an engine error, and it is
+// modelled as an [OpMalformed] no-op for exactly that reason. Every other op
+// targets a name the oracle already models, so it emits nothing the engine
+// would reject on well-formedness grounds. The co-actor HonestWriter keeps the
+// population churning and is still the only actor that deletes.
 //
 // # Concurrency contract
 //
@@ -48,13 +87,13 @@ func (SchemaMutationWriter) Name() string { return "SchemaMutationWriter" }
 // NextOp picks a mutation on a seed-chosen existing Person. When the graph is
 // empty it creates a Person (nothing to mutate yet), so the op stream is a pure
 // function of (seed state, oracle state).
-func (SchemaMutationWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
+func (w SchemaMutationWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 	names := oracle.NodeNames()
 	if len(names) == 0 {
 		return HonestWriter{}.opCreatePerson(seed)
 	}
 	name := names[seed.IntN(len(names))]
-	switch seed.IntN(6) {
+	switch seed.IntN(18) {
 	case 0:
 		return Op{Kind: OpUpdate, Cypher: tmplSetTag, Params: map[string]any{"name": name, "tag": fmt.Sprintf("t%d", seed.IntN(1000))}}
 	case 1:
@@ -66,6 +105,30 @@ func (SchemaMutationWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 	case 4:
 		return Op{Kind: OpUpdate, Cypher: tmplMergeProps, Params: map[string]any{
 			"name": name, "props": map[string]any{"score": int64(seed.IntN(1000))}}}
+	case 5:
+		return w.opForeachCreate(seed)
+	case 6:
+		return w.opForeachSetTag(seed, names)
+	case 7:
+		return w.opMergeCounter(seed, names)
+	case 8:
+		return w.opMergeSetAll(seed, names)
+	case 9:
+		return w.opMergePairPattern(seed)
+	case 10:
+		return w.opMergeParamMap(seed)
+	case 11:
+		return w.opMergePairSetAll(seed)
+	case 12:
+		return w.opMergePairOuter(seed, names)
+	case 13:
+		return w.opMergePairOuterRel(seed, oracle.pairedEdgesByName())
+	case 14:
+		return w.opMergeZeroDriverNode(seed)
+	case 15:
+		return w.opMergeZeroDriverPair(seed)
+	case 16:
+		return w.opMergeHandleOuterRel(seed, oracle)
 	default:
 		// SET n = $props REPLACES the property set — it must carry name (the key)
 		// and age so the node stays matchable and the durability probe keeps working.
@@ -150,6 +213,13 @@ func (o *GraphOracle) removeLabel(id uint64, label string) {
 // REMOVE / SET-label / SET-map mutation round-trips and survives WAL + snapshot
 // recovery. It reads the shared oracle's own NodeState, so it needs no second
 // model.
+//
+// It also runs [CheckMergePairRelProps], so the whole-entity relationship write
+// of the MERGE-surface family (rmp #2510) is verified at every one of this
+// check's call sites — periodically, immediately after every crash/recovery, and
+// once at the end — rather than needing its own schedule. The PAIRED endpoints
+// are deliberately absent from the name index this function's Person loop walks,
+// so the two probes cover disjoint state.
 func CheckSchemaMutation(tick int64, oracle *GraphOracle, engine *EngineAdapter) []Violation {
 	ctx := context.Background()
 	var vs []Violation
@@ -203,7 +273,13 @@ func CheckSchemaMutation(tick int64, oracle *GraphOracle, engine *EngineAdapter)
 				Message: fmt.Sprintf("Person{name:%q} :Vip membership: engine=%d, want=%d (SET/REMOVE label did not round-trip)", name, vipGot, want)})
 		}
 	}
-	return vs
+	vs = append(vs, CheckMergePairRelProps(tick, oracle, engine)...)
+	// The zero-row-driver family (rmp #2512) asserts an ABSENCE, so it has no
+	// modelled state to walk and needs only the engine. Hanging it here gives it
+	// this function's whole schedule — periodic, immediately post-recovery, and
+	// once at the end — so a phantom MERGE is caught whether it survived a crash
+	// or not.
+	return append(vs, CheckMergeZeroDriverAbsent(tick, engine)...)
 }
 
 // schemaMutationWorkload mixes HonestWriter (which creates/links/deletes Persons,
@@ -222,13 +298,49 @@ const schemaMutationCheckEvery = 60
 
 // schemaMutationScenario verifies the schema-mutation clause surface under the
 // DST: the workload exercises REMOVE property, REMOVE label, SET label,
-// SET n += $map, and SET n = $map on Person nodes, and [CheckSchemaMutation]
-// confirms each mutation round-trips and — with crash+checkpoint injected —
-// survives both WAL and snapshot recovery. It is bit-reproducible.
+// SET n += $map, and SET n = $map on Person nodes — plus, since rmp #2454, the
+// FOREACH write path (per-element CREATE over a bound list and per-element SET
+// on an outer variable, each modelled by the oracle as its expansion), and
+// since rmp #2461 the MERGE families the DST did not previously reach (a node
+// MERGE with both action branches, ON CREATE SET n = $map, a whole-pattern
+// MERGE, and the map-parameter MERGE the engine must reject), since rmp #2510
+// the whole-entity action on a pattern's relationship variable, since rmp
+// #2511 the two actions whose target is bound by the clause PRECEDING the MERGE
+// (a node and a relationship), and since rmp #2512 the two MERGE forms driven by
+// a clause that binds nothing, which must change nothing — and
+// [CheckSchemaMutation] confirms each mutation
+// round-trips and — with crash+checkpoint injected — survives both WAL and
+// snapshot recovery. Two terminal gates ([checkForeachNonVacuity] and
+// [checkMergeSurfaceNonVacuity]) report whether the added templates were
+// actually issued, whether each of their branches and sub-cases fired, and
+// whether the state they wrote was exercised through recovery. Since rmp #2554
+// they are SEPARATE from the verdict and return shortfall CLAUSES rather than
+// violations, so a seed that reached less than the whole surface is
+// uninformative, not faulty; the clauses are asserted where the seed is pinned
+// ([TestSchemaMutation_MergeGateWired],
+// [TestSchemaMutation_NonVacuityGatesAreNotVerdicts]). It is bit-reproducible.
+//
+// # The one thing the seed does not reach
+//
+// Bit-reproducibility covers the op stream, the crash and checkpoint schedule,
+// and the outcome: all three are pure functions of the seed. It does NOT cover
+// the synthetic keys the engine mints for created nodes. Those are
+// "__cx_"+hex(n) drawn from a PROCESS-GLOBAL counter (cypher/exec), so their
+// values — and therefore the [graph.NodeID]s derived from them, since a node's
+// id encodes the mapper shard its key hashes to — depend on how many nodes every
+// other test in the process created first. Two runs of the same seed take the
+// same decisions over graphs whose node ids differ.
+//
+// Nothing this scenario asserts may therefore depend on a particular node id.
+// The handle-collision fixture ([seedMergeHandleCollision]) is the one place that
+// touches node ids at all, and since rmp #2524 it tolerates every id it can draw
+// rather than reporting the unlucky ones as engine violations: before that fix
+// roughly 0.4% of process histories put its decoy on the reserved id 0 and failed
+// the run with no defect present.
 func schemaMutationScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioSchemaMutation,
-		Description: "schema mutation: REMOVE prop/label, SET label, SET n += $map, SET n = $map + multi-label match; survives crash/recovery",
+		Description: "schema mutation: REMOVE prop/label, SET label, SET n += $map, SET n = $map, FOREACH create/set expansion, MERGE surface (both action branches, ON CREATE SET n = $map, whole-pattern, whole-entity relationship action, outer-node and outer-relationship actions, zero-row-driver no-ops, rejected map param) + multi-label match; survives crash/recovery",
 		Mode:        ModeDeterministic,
 		DefaultSeed: 0x5C4E3A17,
 		MaxTicks:    500,
@@ -243,58 +355,129 @@ func schemaMutationScenario() Scenario {
 // labels/properties, checkpoints and crashes per the schedule, and runs the
 // shared parity check plus [CheckSchemaMutation] periodically, immediately after
 // every crash/recovery (the DST-unique value — the mutations are validated
-// against a graph that survived recovery), and once at the end. Deterministic.
+// against a graph that survived recovery), and once at the end, followed by the
+// terminal non-vacuity gates (rmp #2454, #2461), whose shortfall clauses this
+// entry point discards because they are coverage, not correctness (rmp #2554).
+// Deterministic.
 func runSchemaMutation(ctx context.Context, seed uint64) (*SimReport, error) {
 	sc := schemaMutationScenario()
-	cfg := sc.DeterministicConfig(seed)
+	// The coverage shortfalls are DISCARDED here, and that is the whole point of
+	// rmp #2554: a live run — the CLI, the swarm — is never failed by what its
+	// seeded workload happened not to reach. See [runSchemaMutationCfg].
+	report, _, err := runSchemaMutationCfg(ctx, sc.DeterministicConfig(seed))
+	return report, err
+}
+
+// runSchemaMutationCfg is [runSchemaMutation] over an explicit [Config], split
+// out so tests can prove the terminal non-vacuity gates are wired: a config
+// whose budget or crash schedule cannot satisfy them must yield the
+// corresponding shortfall clauses, not a silent pass.
+//
+// It returns THREE values, and the middle one is the separation rmp #2554
+// introduced. The report is the VERDICT: non-nil means an invariant was
+// violated and the run failed. The shortfalls are the NON-VACUITY GATES'
+// output: they say what this particular seed did not reach, which is a
+// statement about the workload, never about the engine, and they are carried
+// out of the run rather than folded into the report so that a caller who has
+// pinned the seed and the tick budget can assert them while a caller who has
+// not can witness them. Before #2554 they were violations, and 51 of 400
+// arbitrary seeds exited 1 with no defect present.
+func runSchemaMutationCfg(ctx context.Context, cfg Config) (*SimReport, []string, error) {
 	sm, err := New(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("sim: schema-mutation new: %w", err)
+		return nil, nil, fmt.Errorf("sim: schema-mutation new: %w", err)
 	}
 	defer func() { _ = sm.Close() }()
 
+	// The handle/id collision the node-only outer-relationship family needs
+	// (rmp #2515) is CONSTRUCTED before the first tick and proven, so the family is
+	// never driven over a graph on which a misdirected write would land nowhere.
+	fixture, v := seedMergeHandleCollision(ctx, sm)
+	if len(v) > 0 {
+		return sm.report(0, Op{Kind: OpCreate, Cypher: "<handle-collision fixture>"}, v), nil, nil
+	}
+
+	foreach := newForeachStats()
+	merges := newMergeSurfaceStats()
+	// checkState runs both read-back batteries at one of this loop's three check
+	// points — periodic, immediately post-recovery, and once at the end — so the
+	// handle-collision detector inherits the same schedule as the per-name
+	// property/label parity, crash boundaries included.
+	checkState := func(tick int64) []Violation {
+		vs := CheckSchemaMutation(tick, sm.oracle, sm.engine)
+		return append(vs, CheckMergeHandleCollision(tick, fixture, sm.graph(), sm.oracle, sm.engine)...)
+	}
 	var lastTick int64
 	var lastOp Op
 	for i := 0; i < cfg.MaxTicks; i++ {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		tick := sm.clock.Tick()
 
 		if err := sm.maybeCheckpoint(tick); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		crashesBefore := sm.crashCount
 		if report, err := sm.maybeCrash(ctx, tick); err != nil {
-			return nil, err
+			return nil, nil, err
 		} else if report != nil {
-			return report, nil
+			return report, nil, nil
 		}
 		if sm.crashCount > crashesBefore {
-			if v := CheckSchemaMutation(tick, sm.oracle, sm.engine); len(v) > 0 {
-				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery schema-mutation>"}, v), nil
+			foreach.noteRecovery(sm.oracle)
+			merges.noteRecovery(sm.oracle)
+			if v := checkState(tick); len(v) > 0 {
+				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery schema-mutation>"}, v), nil, nil
 			}
 		}
 
 		actor := sm.workload.SelectActor(sm.seed)
 		op := actor.NextOp(sm.seed, sm.oracle)
-		committed := sm.execute(ctx, op)
+		committed, counters := sm.executeCounted(ctx, op)
+		foreach.noteOp(op, committed)
+		// Both stats records read the PRE-apply model, so they must be updated
+		// before applyToOracle advances it (rmp #2454, #2461).
+		merges.noteOp(op, committed, sm.oracle)
+		// The map-parameter MERGE must be rejected by the engine, never applied
+		// (rmp #2461); an acceptance is a deviation on the tick that caused it.
+		if v := checkMergeRejection(tick, op, committed); len(v) > 0 {
+			return sm.report(tick, op, v), nil, nil
+		}
+		// Per-op counters oracle (#2448): every committed mutation's effect report
+		// (SET/REMOVE property, SET/REMOVE label, SET-map, FOREACH expansion, and
+		// since #2461 each MERGE family's create-vs-match adjudication) must match
+		// the effect the oracle predicts, adjudicated on the pre-apply model.
+		if v := CheckOpCounters(tick, op, committed, counters, sm.oracle); len(v) > 0 {
+			return sm.report(tick, op, v), nil, nil
+		}
 		sm.applyToOracle(op, committed)
 		lastTick, lastOp = tick, op
 
 		if tick%int64(sm.cfg.CheckEvery) == 0 {
 			if v := sm.checker.Check(tick, sm.oracle, sm.engine); len(v) > 0 {
-				return sm.report(tick, op, v), nil
+				return sm.report(tick, op, v), nil, nil
 			}
 		}
 		if tick%schemaMutationCheckEvery == 0 {
-			if v := CheckSchemaMutation(tick, sm.oracle, sm.engine); len(v) > 0 {
-				return sm.report(tick, op, v), nil
+			if v := checkState(tick); len(v) > 0 {
+				return sm.report(tick, op, v), nil, nil
 			}
 		}
 	}
-	if v := CheckSchemaMutation(lastTick, sm.oracle, sm.engine); len(v) > 0 {
-		return sm.report(lastTick, lastOp, v), nil
+	if v := checkState(lastTick); len(v) > 0 {
+		return sm.report(lastTick, lastOp, v), nil, nil
 	}
-	return nil, nil
+	// Assert-something-was-seen (rmp #2454, #2461): both FOREACH templates and
+	// all four MERGE families were issued, each family's branches and sub-cases
+	// actually fired, and the state they wrote was exercised through
+	// crash/recovery. The two gates are evaluated together and their clauses
+	// pooled, so neither can mask the other, and each clause names its own gate.
+	//
+	// They are returned, NOT reported (rmp #2554). Reaching this line means every
+	// verdict above passed, so the run found no defect; what the gates add is how
+	// much this seed proved, which is the caller's to judge.
+	coverage := checkForeachNonVacuity(foreach)
+	coverage = append(coverage, checkMergeSurfaceNonVacuity(merges)...)
+	return nil, coverage, nil
 }

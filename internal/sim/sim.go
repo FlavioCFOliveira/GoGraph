@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
@@ -84,6 +85,15 @@ type Config struct {
 	// durable store even when Crash is disabled; the zero value leaves the disk
 	// unbounded (the prior behaviour). See [DiskConfig].
 	Disk DiskConfig
+	// Multigraph, when true, opens the engine's graph (durable and in-memory
+	// alike) as a directed MULTIGRAPH, so a repeated CREATE between the same
+	// endpoints adds a parallel edge instance instead of being rejected. Only a
+	// scenario whose oracle models edges per instance may set it (the
+	// edge-properties scenario, rmp #2449, discriminates instances by a unique
+	// eid property); the default (false) keeps the simple-graph shape every
+	// other scenario's (src,dst,label)-keyed oracle model requires, byte for
+	// byte.
+	Multigraph bool
 	// Seed is the master seed; the entire run is a pure function of it.
 	Seed uint64
 	// MaxTicks is the number of ticks (operations) the safety phase runs.
@@ -150,7 +160,11 @@ type Simulator struct {
 	// crash mode; nil when crashes are disabled (the engine is then a plain
 	// in-memory engine with no durable layer). On a crash it is reopened from the
 	// durable SimDisk image via real recovery.
-	store    *SimStore
+	store *SimStore
+	// memGraph is the plain in-memory graph the non-durable path builds, retained
+	// so [Simulator.graph] can reach the live graph in BOTH modes. It is nil
+	// whenever store is non-nil (the durable path owns its graph).
+	memGraph *lpg.Graph[string, float64]
 	clock    *VirtualClock
 	disk     *SimDisk
 	oracle   *GraphOracle
@@ -190,6 +204,13 @@ type Simulator struct {
 	// checkpointCount accumulates the number of successful in-loop checkpoints for
 	// reports and tests.
 	checkpointCount int
+	// boundary holds the measurements of the most recent FORCED crossing of the
+	// snapshot boundary ([Simulator.crossSnapshotBoundary], rmp #2468) — the WAL
+	// image before and after the checkpoint and the ops the following recovery
+	// replayed. Its zero value (crossed == false) means the run never crossed,
+	// which [checkSnapshotSourcedRecovery] reports as a violation rather than
+	// treating as "nothing to check".
+	boundary snapshotBoundary
 }
 
 // New builds a Simulator with a fresh in-memory engine, oracle, checker, clock,
@@ -241,6 +262,9 @@ func New(cfg Config) (*Simulator, error) {
 		// non-zero disk capacity, or in-loop checkpointing, opts in even without
 		// crashes.
 		storeCfg := simulatorStoreConfig()
+		// A per-instance-modelling scenario opts into parallel edges; every other
+		// scenario keeps the simple-graph base shape (see [Config.Multigraph]).
+		storeCfg.graphConfig.Multigraph = cfg.Multigraph
 		if cfg.Checkpoint.Enabled {
 			// Full-stack layout: WAL + snapshot under a checkpoint directory so a
 			// real Checkpointer can publish a snapshot and truncate the WAL prefix,
@@ -271,11 +295,27 @@ func New(cfg Config) (*Simulator, error) {
 		// layer, byte-identical to the pre-crash simulator. EngineOpts is the zero
 		// value for every scenario except mem-pressure (which clamps the logical
 		// budgets); a zero EngineOptions is byte-identical to cypher.NewEngine.
-		g := lpg.New[string, float64](adjlist.Config{Directed: true})
+		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: cfg.Multigraph})
+		s.memGraph = g
 		s.engine = NewEngineAdapter(cypher.NewEngineWithOptions(g, cfg.EngineOpts))
 	}
 
 	return s, nil
+}
+
+// graph returns the live graph the engine writes through, in either mode: the
+// recovered store's graph on the durable path (which [Simulator.maybeCrash]
+// replaces wholesale on every recovery, so this must never be cached across a
+// crash) and the retained in-memory graph otherwise.
+//
+// It exists for the few checks that must read the engine's own durable IDENTITY
+// rather than a Cypher projection — the stable edge handles and node ids the
+// handle-collision fixture (rmp #2515) is built on, which no query surfaces.
+func (s *Simulator) graph() *lpg.Graph[string, float64] {
+	if s.store != nil {
+		return s.store.Graph()
+	}
+	return s.memGraph
 }
 
 // Run executes the safety-phase tick loop. Each tick advances the clock,
@@ -325,13 +365,19 @@ func (s *Simulator) Run(ctx context.Context) (*SimReport, error) {
 			s.cfg.OnOp(tick, op)
 		}
 
-		committed := s.execute(ctx, op)
+		committed, counters := s.executeCounted(ctx, op)
 		if !committed {
 			if op.Kind.IsWrite() {
 				s.rejectedWrites++
 			} else {
 				s.rejectedReads++
 			}
+		}
+		// Per-op counters oracle (#2448): the engine's effect report for this op
+		// must match the effect the oracle predicts, adjudicated on the pre-apply
+		// model — so it runs between execute and applyToOracle.
+		if violations := CheckOpCounters(tick, op, committed, counters, s.oracle); len(violations) > 0 {
+			return s.report(tick, op, violations), nil
 		}
 		s.applyToOracle(op, committed)
 		lastTick, lastOp = tick, op
@@ -388,23 +434,55 @@ func (s *Simulator) engineRunDDL(ctx context.Context, query string) error {
 	return drainErr
 }
 
-// schemaChurnStatements is the fixed, idempotent DDL cycle runWithDDL rotates
-// through: drop then re-create the (:Person).name index. Idempotent forms (IF
-// [NOT] EXISTS) make each step a clean no-op when it races nothing, so the churn
-// never errors on a benign re-create/re-drop.
-var schemaChurnStatements = []string{
-	"DROP INDEX sim_person_name IF EXISTS",
-	"CREATE INDEX sim_person_name FOR (n:Person) ON (n.name)",
+// schemaChurnStep pairs one idempotent churn DDL statement with the mutation
+// it implies on the harness's schema model, so the introspection oracle
+// (rmp #2455) can hold SHOW INDEXES / SHOW CONSTRAINTS and the db.* procedures
+// to the model after every flip.
+type schemaChurnStep struct {
+	ddl   string
+	apply func(m *SchemaModel)
+}
+
+// schemaChurnSteps is the fixed, idempotent DDL cycle runWithDDL rotates
+// through: drop and re-create the (:Person).name index, and drop and
+// re-create a UNIQUE constraint on a label the workload never writes
+// (:Contact), so SHOW CONSTRAINTS churns too without perturbing the honest
+// write stream. Idempotent forms (IF [NOT] EXISTS) make each step a clean
+// no-op when it races nothing, so the churn never errors on a benign
+// re-create/re-drop. The constraint create deliberately uses the modern
+// FOR ... REQUIRE grammar (the legacy ON ... ASSERT spelling runs in the
+// constraint scenarios and the wire SchemaChanger), and the index create is
+// OPTIONS-free, so it exercises the default (hash) kind.
+var schemaChurnSteps = []schemaChurnStep{
+	{
+		ddl:   "CREATE CONSTRAINT sim_contact_email_uq IF NOT EXISTS FOR (n:Contact) REQUIRE n.email IS UNIQUE",
+		apply: func(m *SchemaModel) { m.AddUniqueConstraint("sim_contact_email_uq", "Contact", "email") },
+	},
+	{
+		ddl:   "DROP CONSTRAINT sim_contact_email_uq IF EXISTS",
+		apply: func(m *SchemaModel) { m.DropConstraint("sim_contact_email_uq") },
+	},
+	{
+		ddl:   "DROP INDEX sim_person_name IF EXISTS",
+		apply: func(m *SchemaModel) { m.DropIndex("sim_person_name") },
+	},
+	{
+		ddl:   "CREATE INDEX sim_person_name FOR (n:Person) ON (n.name)",
+		apply: func(m *SchemaModel) { m.AddIndex("sim_person_name", SchemaIndexHash, "Person", "name") },
+	},
 }
 
 // runWithDDL is the schema-chaos variant of [Simulator.Run]: it drives the same
 // deterministic tick loop but, every ddlEvery ticks, issues the next idempotent
-// DDL statement from [schemaChurnStatements] against the live engine, churning
-// the index under the honest write load. Like Run it returns a populated report
-// on the first invariant violation, or (nil, nil) on clean completion. The DDL
-// cadence is positional (tick-driven), so the run stays a deterministic function
-// of the seed.
-func (s *Simulator) runWithDDL(ctx context.Context, ddlEvery int) (*SimReport, error) {
+// DDL statement from [schemaChurnSteps] against the live engine, churning the
+// index and a constraint under the honest write load. After each DDL it
+// advances model in lock-step and runs the schema-introspection oracle
+// ([CheckSchemaIntrospection], rmp #2455), so a churn flip whose effect the
+// introspection surfaces do not reflect fails immediately. Like Run it returns
+// a populated report on the first invariant violation, or (nil, nil) on clean
+// completion. The DDL cadence is positional (tick-driven), so the run stays a
+// deterministic function of the seed.
+func (s *Simulator) runWithDDL(ctx context.Context, ddlEvery int, model *SchemaModel) (*SimReport, error) {
 	churnIdx := 0
 	var lastTick int64
 	var lastOp Op
@@ -415,10 +493,14 @@ func (s *Simulator) runWithDDL(ctx context.Context, ddlEvery int) (*SimReport, e
 		tick := s.clock.Tick()
 
 		if ddlEvery > 0 && tick%int64(ddlEvery) == 0 {
-			stmt := schemaChurnStatements[churnIdx%len(schemaChurnStatements)]
+			step := schemaChurnSteps[churnIdx%len(schemaChurnSteps)]
 			churnIdx++
-			if err := s.engineRunDDL(ctx, stmt); err != nil {
-				return nil, fmt.Errorf("sim: schema churn DDL %q at tick %d: %w", stmt, tick, err)
+			if err := s.engineRunDDL(ctx, step.ddl); err != nil {
+				return nil, fmt.Errorf("sim: schema churn DDL %q at tick %d: %w", step.ddl, tick, err)
+			}
+			step.apply(model)
+			if violations := CheckSchemaIntrospection(tick, model, s.engine); len(violations) > 0 {
+				return s.report(tick, Op{Kind: OpMatch, Cypher: "<post-DDL schema introspection>"}, violations), nil
 			}
 		}
 
@@ -427,7 +509,11 @@ func (s *Simulator) runWithDDL(ctx context.Context, ddlEvery int) (*SimReport, e
 		if s.cfg.OnOp != nil {
 			s.cfg.OnOp(tick, op)
 		}
-		committed := s.execute(ctx, op)
+		committed, counters := s.executeCounted(ctx, op)
+		// Per-op counters oracle (#2448), on the pre-apply model as in [Simulator.Run].
+		if violations := CheckOpCounters(tick, op, committed, counters, s.oracle); len(violations) > 0 {
+			return s.report(tick, op, violations), nil
+		}
 		s.applyToOracle(op, committed)
 		lastTick, lastOp = tick, op
 
@@ -453,9 +539,11 @@ func (s *Simulator) maybeCrash(_ context.Context, tick int64) (*SimReport, error
 	if !s.crash.ShouldCrash(tick) {
 		return nil, nil
 	}
-	// SIGKILL-equivalent: discard the live engine and store WITHOUT a graceful
-	// close, so any buffered-but-unsynced frame is lost exactly as a real crash
-	// would lose it. The durable WAL byte image in the SimDisk survives.
+	// HOST crash ([SimDisk.Crash] is [SimDisk.CrashHost]): discard the live
+	// engine and store WITHOUT a graceful close, and discard from the SimDisk
+	// every byte no successful fsync covered — both the frames still sitting in
+	// the WAL's bufio buffer and those written through to the disk but never
+	// fsync'd. Only the fsync'd WAL prefix survives.
 	//
 	// Revoke not-yet-durable directory entries too (#1811): a real power-loss
 	// crash loses any create/rename whose parent directory was never fsync'd.
@@ -535,6 +623,30 @@ func (s *Simulator) maybeCheckpoint(tick int64) error {
 	return nil
 }
 
+// checkCheckpointsFired is the assert-something-was-seen gate for any scenario
+// that opts into in-loop checkpointing: it reports a violation when the run
+// published no checkpoint at all.
+//
+// It exists because a [CheckpointConfig] is INERT unless the run loop actually
+// calls [Simulator.maybeCheckpoint] — which only [Simulator.Run] does
+// automatically, so every custom run loop must wire the call itself (rmp
+// #2457/#2464). Without this gate a scenario could carry a checkpoint
+// configuration, never publish a snapshot, and still pass: the snapshot
+// recovery path it claims to exercise would simply never run. The gate is
+// deliberately UNCONDITIONAL on the configuration — it fires just as loudly
+// when the configuration was removed as when the call was — so it cannot be
+// silenced by the very change it is there to catch.
+func (s *Simulator) checkCheckpointsFired(tick int64) []Violation {
+	if s.checkpointCount > 0 {
+		return nil
+	}
+	return []Violation{{
+		Kind: ViolationACIDDurability, Tick: tick, Op: "checkpoint non-vacuity",
+		Message: "the run published NO checkpoint: the snapshot recovery path was never exercised" +
+			" (either Config.Checkpoint is disabled or the run loop never calls maybeCheckpoint)",
+	}}
+}
+
 // execute runs op against the engine via the read or write path per its kind
 // and reports whether a write committed (the engine ACKed it without error and
 // the result drained cleanly). Engine errors are not treated as violations
@@ -549,6 +661,18 @@ func (s *Simulator) maybeCheckpoint(tick int64) error {
 // modelled state) and is reported as committed so a read still records its
 // (no-effect) history entry.
 func (s *Simulator) execute(ctx context.Context, op Op) bool {
+	committed, _ := s.executeCounted(ctx, op)
+	return committed
+}
+
+// executeCounted runs op exactly like [Simulator.execute] and additionally
+// returns the engine's per-statement write-effect counters, read from the SAME
+// drained result the tick executed — never from an extra query. The counters
+// are nil when the statement failed before producing a result, or when the op
+// ran on the read path (a read-only statement reports nil counters by the
+// engine contract). Reading them draws no randomness, so a run that feeds them
+// to [CheckOpCounters] stays byte-identical whenever the check finds nothing.
+func (s *Simulator) executeCounted(ctx context.Context, op Op) (bool, *exec.QueryCounters) {
 	var (
 		res Result
 		err error
@@ -559,7 +683,7 @@ func (s *Simulator) execute(ctx context.Context, op Op) bool {
 		res, err = s.engine.Run(ctx, op.Cypher, op.Params)
 	}
 	if err != nil {
-		return false
+		return false, nil
 	}
 	for res.Next() {
 	}
@@ -567,8 +691,12 @@ func (s *Simulator) execute(ctx context.Context, op Op) bool {
 	// fully materialise; treat it as not-committed so the oracle does not model
 	// an effect the engine may not have durably applied.
 	drainErr := res.Err()
+	var counters *exec.QueryCounters
+	if cr, ok := res.(counterReporter); ok {
+		counters = cr.Counters()
+	}
 	_ = res.Close()
-	return drainErr == nil
+	return drainErr == nil, counters
 }
 
 // applyToOracle advances the shadow model for op per its kind. A write is

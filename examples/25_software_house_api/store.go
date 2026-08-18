@@ -175,7 +175,13 @@ func openStore(ctx context.Context, dir string) (*dataStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open: wal: %w", err)
 	}
-	ts := txn.NewStoreWithOptions(res.Graph, w, txn.Options[string, float64]{
+	// res.NewStore, not txn.NewStoreWithOptions: this is a long-lived API server
+	// reopening a directory whose WAL already holds transactions, so the store
+	// must RESUME the sequence recovery derived rather than restart at 0 and
+	// re-mint numbers the log already spent (rmp #2522). Building it off the
+	// Result is what applies that floor; the plain constructor cannot, because it
+	// never saw the log.
+	ts := res.NewStore(w, txn.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
 	})

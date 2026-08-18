@@ -9,8 +9,20 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/internal/crashinject"
 )
 
+// TestMain installs the PROCESS-scoped removal of the cached crashinject-helper
+// binary (rmp #2527). The helper is built once per test process into its own
+// os.MkdirTemp directory and deliberately outlives every individual test, so
+// t.Cleanup is the wrong scope — see [crashinject.RemoveHelperBinary].
+//
+// The hook is passed to goleak rather than deferred: goleak.VerifyTestMain ends
+// in os.Exit, and a deferred function does not run through os.Exit. goleak's
+// Cleanup option REPLACES that os.Exit call, so this closure is responsible for
+// exiting with the suite's code.
 func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
+	goleak.VerifyTestMain(m, goleak.Cleanup(func(exitCode int) {
+		crashinject.RemoveHelperBinary()
+		os.Exit(exitCode)
+	}))
 }
 
 // TestBreakpoint_NoOp verifies that Breakpoint is a no-op when

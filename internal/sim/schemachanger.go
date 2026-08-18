@@ -12,13 +12,18 @@ type SchemaChangeFamily int
 
 // Schema-change families.
 const (
-	// SchemaCreateIndex creates a RANGE index on (:Person).name (idempotent via
-	// IF NOT EXISTS so it never errors on a re-create race).
+	// SchemaCreateIndex creates a hash index on (:Person).name. It is an
+	// idempotent op family: IF NOT EXISTS makes a re-create a clean no-op, so
+	// its contract is SUCCESS, never a tolerated failure (rmp #2455).
 	SchemaCreateIndex SchemaChangeFamily = iota
 	// SchemaDropIndex drops the (:Person).name index (idempotent via IF EXISTS).
 	SchemaDropIndex
-	// SchemaCreateConstraint creates a UNIQUE constraint on (:Account).email
-	// (idempotent via IF NOT EXISTS).
+	// SchemaCreateConstraint creates a UNIQUE constraint on (:Account).email,
+	// alternating (seed-chosen) between the legacy ON ... ASSERT grammar and
+	// the modern FOR ... REQUIRE grammar — both parsed by
+	// cypher/ir/ddl_parser.go into the same IR. Like SchemaCreateIndex it is
+	// idempotent via IF NOT EXISTS, so its contract is SUCCESS: a re-create is
+	// absorbed as a no-op, never a tolerated "already exists" failure.
 	SchemaCreateConstraint
 	// SchemaDropConstraint drops the (:Account).email UNIQUE constraint
 	// (idempotent via IF EXISTS).
@@ -68,6 +73,22 @@ type SchemaChangeOutcome struct {
 // FAILURE) without wedging the connection.
 func (o SchemaChangeOutcome) Acceptable() bool { return o.Succeeded || o.Failed }
 
+// MeetsContract reports whether the outcome satisfies the family's contract.
+// The idempotent IF NOT EXISTS create families (SchemaCreateIndex,
+// SchemaCreateConstraint) must SUCCEED — a re-create is a clean no-op by the
+// engine's IF NOT EXISTS contract (cypher: TestCreateConstraint_IfNotExists_
+// Idempotent), so a typed FAILURE there is a contract breach, not an
+// acceptable bounded outcome (rmp #2455). The drop families keep the tolerant
+// contract (success or typed FAILURE under contention).
+func (o SchemaChangeOutcome) MeetsContract() bool {
+	switch o.Family {
+	case SchemaCreateIndex, SchemaCreateConstraint:
+		return o.Succeeded
+	default:
+		return o.Acceptable()
+	}
+}
+
 // SchemaChanger issues DDL (CREATE/DROP INDEX, CREATE/DROP CONSTRAINT) over the
 // real Bolt wire, concurrently with honest writers and readers, to exercise
 // index and constraint maintenance under races. Every statement is idempotent
@@ -94,11 +115,20 @@ func (SchemaChanger) PickFamily(seed *Seed) SchemaChangeFamily {
 	return SchemaChangeFamily(seed.IntN(schemaChangeFamilyCount))
 }
 
+// PickModernForm chooses (one int draw) whether the next constraint DDL uses
+// the modern FOR ... REQUIRE grammar (true) or the legacy ON ... ASSERT
+// grammar (false), so the churn exercises both parse paths under the same
+// seed-deterministic stream (rmp #2455). Only [SchemaCreateConstraint]
+// consults the flag; the other families have a single grammar.
+func (SchemaChanger) PickModernForm(seed *Seed) bool { return seed.IntN(2) == 1 }
+
 // Run issues one DDL statement of the given family over c and returns the
-// classified outcome. The connection must already be Connected.
-func (a SchemaChanger) Run(c *WireClient, family SchemaChangeFamily) (SchemaChangeOutcome, error) {
+// classified outcome. modern selects the constraint grammar for
+// [SchemaCreateConstraint] (see [SchemaChanger.PickModernForm]); the other
+// families ignore it. The connection must already be Connected.
+func (a SchemaChanger) Run(c *WireClient, family SchemaChangeFamily, modern bool) (SchemaChangeOutcome, error) {
 	out := SchemaChangeOutcome{Family: family}
-	resp, err := c.Run(a.statement(family), nil)
+	resp, err := c.Run(a.statement(family, modern), nil)
 	if err != nil {
 		return out, fmt.Errorf("sim: schema-change RUN(%s): %w", family, err)
 	}
@@ -122,8 +152,13 @@ func (a SchemaChanger) Run(c *WireClient, family SchemaChangeFamily) (SchemaChan
 	return out, nil
 }
 
-// statement returns the idempotent DDL Cypher for a family.
-func (SchemaChanger) statement(family SchemaChangeFamily) string {
+// statement returns the idempotent DDL Cypher for a family. For
+// [SchemaCreateConstraint], modern selects the FOR ... REQUIRE grammar over
+// the legacy ON ... ASSERT grammar; both carry IF NOT EXISTS (the engine
+// parses it in either position — cypher/ir/ddl_parser.go parseCreateConstraint
+// accepts it before FOR/ON and after the assertion), so a re-create is a clean
+// idempotent SUCCESS in both grammars.
+func (SchemaChanger) statement(family SchemaChangeFamily, modern bool) string {
 	switch family {
 	case SchemaCreateIndex:
 		// IF NOT EXISTS makes a re-create race a clean no-op rather than an error.
@@ -131,10 +166,10 @@ func (SchemaChanger) statement(family SchemaChangeFamily) string {
 	case SchemaDropIndex:
 		return fmt.Sprintf("DROP INDEX %s IF EXISTS", schemaIndexName)
 	case SchemaCreateConstraint:
-		// The engine's constraint DDL uses the legacy ON ... ASSERT form and does
-		// NOT accept IF NOT EXISTS, so a re-create returns a typed "already exists"
-		// FAILURE — an acceptable bounded outcome under contention, not a fault.
-		return fmt.Sprintf("CREATE CONSTRAINT %s ON (a:Account) ASSERT a.email IS UNIQUE", schemaConstraintName)
+		if modern {
+			return fmt.Sprintf("CREATE CONSTRAINT %s IF NOT EXISTS FOR (a:Account) REQUIRE a.email IS UNIQUE", schemaConstraintName)
+		}
+		return fmt.Sprintf("CREATE CONSTRAINT %s ON (a:Account) ASSERT a.email IS UNIQUE IF NOT EXISTS", schemaConstraintName)
 	case SchemaDropConstraint:
 		return fmt.Sprintf("DROP CONSTRAINT %s IF EXISTS", schemaConstraintName)
 	default:
@@ -161,7 +196,15 @@ func RunSchemaChurn(ctx context.Context, srv *SimServer, seed *Seed, rounds int)
 		if ctx.Err() != nil {
 			break
 		}
-		out, err := a.Run(c, a.PickFamily(seed))
+		fam := a.PickFamily(seed)
+		modern := false
+		if fam == SchemaCreateConstraint {
+			// Seed-alternate the legacy and modern constraint grammars so both
+			// parse paths run under churn (rmp #2455). The draw is taken only for
+			// the constraint family, keeping the other families' streams unchanged.
+			modern = a.PickModernForm(seed)
+		}
+		out, err := a.Run(c, fam, modern)
 		if err != nil {
 			return outcomes, err
 		}

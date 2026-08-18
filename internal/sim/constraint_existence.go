@@ -71,7 +71,9 @@ func runConstraintExistence(ctx context.Context, seed uint64) (*SimReport, error
 	}
 	sm.Oracle().SetExistenceOnEmail(true)
 
-	report, err := sm.runExistenceLoop(ctx)
+	model := NewSchemaModel()
+	model.AddNotNullConstraint("sim_acct_email_nn", "Acct", "email")
+	report, err := sm.runExistenceLoop(ctx, model)
 	if err != nil {
 		return nil, fmt.Errorf("sim: constraint-existence run: %w", err)
 	}
@@ -88,18 +90,36 @@ func runConstraintExistence(ctx context.Context, seed uint64) (*SimReport, error
 // checker (which compares the recovered engine's node count to the oracle's) stays
 // consistent. Crashes reuse [Simulator.maybeCrash]; post-recovery enforcement is
 // verified by the same per-op comparison continuing against the recovered engine.
-func (s *Simulator) runExistenceLoop(ctx context.Context) (*SimReport, error) {
+// When model is non-nil, the schema-introspection oracle (rmp #2455) holds
+// SHOW CONSTRAINTS / db.constraints() to the declared NOT NULL constraint at
+// the start, after every recovery, and at the end; a nil model skips those
+// checks so the enforcement-gap meta-test (which declares no DDL) can isolate
+// the per-op adjudicator.
+func (s *Simulator) runExistenceLoop(ctx context.Context, model *SchemaModel) (*SimReport, error) {
+	if model != nil {
+		if v := CheckSchemaIntrospection(0, model, s.engine); len(v) > 0 {
+			return s.report(0, Op{Kind: OpMatch, Cypher: "<initial schema introspection>"}, v), nil
+		}
+	}
+
 	idCounter := int64(0)
+	var lastTick int64
 	for i := 0; i < s.cfg.MaxTicks; i++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		tick := s.clock.Tick()
 
+		crashesBefore := s.crashCount
 		if report, err := s.maybeCrash(ctx, tick); err != nil {
 			return nil, err
 		} else if report != nil {
 			return report, nil
+		}
+		if s.crashCount > crashesBefore && model != nil {
+			if v := CheckSchemaIntrospection(tick, model, s.engine); len(v) > 0 {
+				return s.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery schema introspection>"}, v), nil
+			}
 		}
 
 		op := s.nextExistenceOp(&idCounter)
@@ -126,10 +146,17 @@ func (s *Simulator) runExistenceLoop(ctx context.Context) (*SimReport, error) {
 			return s.report(tick, op, []Violation{v}), nil
 		}
 
+		lastTick = tick
+
 		if tick%int64(s.cfg.CheckEvery) == 0 {
 			if violations := s.checker.Check(tick, s.oracle, s.engine); len(violations) > 0 {
 				return s.report(tick, op, violations), nil
 			}
+		}
+	}
+	if model != nil {
+		if v := CheckSchemaIntrospection(lastTick, model, s.engine); len(v) > 0 {
+			return s.report(lastTick, Op{Kind: OpMatch, Cypher: "<terminal schema introspection>"}, v), nil
 		}
 	}
 	return nil, nil

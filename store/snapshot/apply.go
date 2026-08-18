@@ -123,11 +123,19 @@ func ApplyMapperToGraphWithCodec[N comparable, W any](g *lpg.Graph[N, W], rb Map
 // an error for them so a partial mapper degrades cleanly rather than
 // aborting recovery mid-way.
 //
-// Weight decoding is supported for the common int/float weight types
-// (int8/uint8/bool, int16/uint16, int32/uint32/float32, int/uint/
-// int64/uint64/float64/uintptr). Other W types apply zero weights;
-// the metric `store.snapshot.ApplyCSR.weightFallback` reports the
-// fallback count for observability.
+// Weights in the DENSE native layout are decoded for the fixed-width
+// primitives (int8/uint8/bool, int16/uint16, int32/uint32/float32,
+// int/uint/int64/uint64/float64/uintptr). Weights in the codec-encoded
+// layout are decoded through the supplied weight codec, which covers
+// every other W.
+//
+// The metric `store.snapshot.ApplyCSR.weightFallback` counts dense-layout
+// slots that decoded to the zero value for want of bytes. It is NOT a
+// signal that weights were lost to an unsupported type: that loss used to
+// happen at WRITE time, where the file recorded "no weights" and there
+// was nothing here to count. rmp #2526 removed that path — the writer now
+// refuses — so this counter means a malformed file, not an unsupported
+// weight type.
 //
 // ApplyCSRToGraph is idempotent against a freshly-loaded mapper but
 // not against a graph that already contains edges: re-applying a CSR
@@ -140,8 +148,27 @@ func ApplyMapperToGraphWithCodec[N comparable, W any](g *lpg.Graph[N, W], rb Map
 // readback (vertices, edges, weight bytes) on every call. The
 // function does not mutate rb.
 //
-//nolint:gocyclo // CSR apply walks every src slot, resolves endpoints, decodes weight by W type
+// A snapshot whose weights are codec-encoded cannot be applied through this
+// entry point, which has no codec to decode them: it returns
+// [ErrWeightCodecRequired]. Use [ApplyCSRToGraphWithWeightCodec].
 func ApplyCSRToGraph[N comparable, W any](g *lpg.Graph[N, W], rb *CSRReadback) error {
+	return ApplyCSRToGraphWithWeightCodec[N, W](g, rb, nil)
+}
+
+// ApplyCSRToGraphWithWeightCodec is the weight-codec-aware variant of
+// [ApplyCSRToGraph]. wdec decodes the variable-width weights section written by
+// [WriteCSRWithWeightCodec]; pass the owning store's codec,
+// [txn.Store.WeightCodec].
+//
+// A nil wdec is accepted and behaves exactly as [ApplyCSRToGraph] for every
+// snapshot whose weights are in the dense native layout (the fixed-width
+// primitives) or absent. It is refused with [ErrWeightCodecRequired] for a
+// snapshot whose weights ARE codec-encoded: those weights are durably present
+// on disk, and applying zero weights instead would discard committed data
+// (rmp #2526).
+//
+//nolint:gocyclo // CSR apply walks every src slot, resolves endpoints, decodes weight by W type
+func ApplyCSRToGraphWithWeightCodec[N comparable, W any](g *lpg.Graph[N, W], rb *CSRReadback, wdec weightDecoder[W]) error {
 	defer metrics.Time("store.snapshot.ApplyCSRToGraph").Stop()
 	if len(rb.Vertices) == 0 {
 		return nil
@@ -160,7 +187,29 @@ func ApplyCSRToGraph[N comparable, W any](g *lpg.Graph[N, W], rb *CSRReadback) e
 	// outside the per-connection recover guards — crashing the process. Fail
 	// stop with a typed error instead. A weightless snapshot carries no
 	// weight bytes (HasWeights == false), so the width is irrelevant there.
-	if rb.HasWeights && rb.WeightSize != csrWeightSize[W]() {
+	//
+	// The codec-encoded section (rmp #2526) is exempt from the WIDTH check —
+	// it has no fixed width by construction — but is subject to a stricter one
+	// of its own: it can only be applied by a caller that supplied a decoder.
+	// Falling back to zero weights here would discard weights that are durably
+	// on disk, which is the read-side form of the very loss #2526 closes.
+	switch {
+	case rb.CodecWeights():
+		if wdec == nil {
+			metrics.IncCounter("store.snapshot.ApplyCSR.weightCodecMissing", 1)
+			return fmt.Errorf("%w (weight type %T, %d edges): supply the store's WeightCodec"+
+				" (recovery.Options.WeightCodec / checkpoint.WithWeightCodec)",
+				ErrWeightCodecRequired, *new(W), len(rb.Edges))
+		}
+		// The offsets array must index the edge column exactly. readCodecWeights
+		// already proved it is zero-based, monotonic and within the payload; this
+		// pins the remaining degree of freedom, that it describes THIS many edges.
+		if len(rb.WeightOffsets) != len(rb.Edges)+1 {
+			metrics.IncCounter("store.snapshot.ApplyCSR.corrupt", 1)
+			return fmt.Errorf("%w: CSR codec weights offsets length %d, want %d (edges+1)",
+				ErrCorrupted, len(rb.WeightOffsets), len(rb.Edges)+1)
+		}
+	case rb.HasWeights && rb.WeightSize != csrWeightSize[W]():
 		metrics.IncCounter("store.snapshot.ApplyCSR.corrupt", 1)
 		return fmt.Errorf("%w: CSR weight width %d does not match store weight size %d",
 			ErrCorrupted, rb.WeightSize, csrWeightSize[W]())
@@ -174,6 +223,7 @@ func ApplyCSRToGraph[N comparable, W any](g *lpg.Graph[N, W], rb *CSRReadback) e
 	// overshoots Order()).
 	maxSrc := uint64(len(rb.Vertices) - 1)
 	weightSize := uint64(rb.WeightSize)
+	codecWeights := rb.CodecWeights()
 
 	// Validate the offset array once, up front. The vertices slice is
 	// file-controlled: in v3-snapshot recovery an attacker supplies both
@@ -246,7 +296,18 @@ func ApplyCSRToGraph[N comparable, W any](g *lpg.Graph[N, W], rb *CSRReadback) e
 				continue
 			}
 			var weight W
-			if rb.HasWeights && len(rb.WeightBytes) > 0 {
+			switch {
+			case codecWeights:
+				// Random access by slot: the offsets array was validated
+				// zero-based, monotonic, within the payload and exactly
+				// edges+1 long, so this slice is unconditionally in range.
+				var werr error
+				if weight, werr = decodeCSRWeightCodec(
+					rb.WeightBytes[rb.WeightOffsets[k]:rb.WeightOffsets[k+1]], wdec, k); werr != nil {
+					metrics.IncCounter("store.snapshot.ApplyCSR.corrupt", 1)
+					return werr
+				}
+			case rb.HasWeights && len(rb.WeightBytes) > 0:
 				off := k * weightSize
 				if uint64(len(rb.WeightBytes)) >= off+weightSize {
 					weight = decodeCSRWeight[W](rb.WeightBytes[off : off+weightSize])

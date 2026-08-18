@@ -132,6 +132,11 @@ type Scenario struct {
 	// finite size so the run drives the engine through a disk-full (ENOSPC)
 	// condition (ModeDeterministic). See [DiskConfig].
 	Disk DiskConfig
+	// Multigraph opens the engine's graph as a directed multigraph
+	// (ModeDeterministic), so repeated CREATEs between the same endpoints add
+	// parallel edge instances. Only a scenario whose oracle models edges per
+	// instance sets it (edge-properties, rmp #2449). See [Config.Multigraph].
+	Multigraph bool
 	// SearchEvery is the in-loop cadence (in ticks) for the search battery
 	// (ModeDeterministic): [runDeterministic] sets it on the simulator. 0 disables
 	// periodic search checks; the terminal search check still runs when
@@ -213,6 +218,7 @@ func (sc *Scenario) DeterministicConfig(seed uint64) Config {
 		Disk:       sc.Disk,
 		EngineOpts: sc.EngineOpts,
 		CheckEvery: sc.CheckEvery,
+		Multigraph: sc.Multigraph,
 	}
 }
 

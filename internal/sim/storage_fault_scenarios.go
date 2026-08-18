@@ -82,10 +82,24 @@ const csrFilePath = "bulk/graph.csr"
 // previously-published CSR (verified byte-for-byte and by reconstructing it with
 // the real reader) OR — for a first publish that never succeeded — nothing at
 // all, never a torn/partial file. It is deterministic and bit-reproducible.
+//
+// Since rmp #2478 the arm is no longer a single float64 fixture read back
+// through the default access pattern. Two parts were added:
+//
+//   - Part 3 enumerates the whole [csrfile.WeightKind] x [csrfile.AccessPattern]
+//     grid, adjudicates the round-trip for every combination, and runs the
+//     truncation battery — see csrfile_access_matrix.go.
+//   - Part 4 replays the ENOSPC atomicity invariant at a weight kind DRAWN FROM
+//     THE SEED and verifies the survivor through a seed-drawn access pattern,
+//     so the atomicity guarantee is exercised somewhere other than float64.
+//
+// The two are complementary on purpose: the grid is enumerated so coverage does
+// not depend on the draw, and the fault arm is drawn so the fault regime is not
+// permanently welded to one weight width.
 func csrfilePublishFaultScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioCSRFilePublishFault,
-		Description: "csrfile atomic publish under ENOSPC + armed Sync fault (prior file intact or absent, never torn)",
+		Description: "csrfile atomic publish under ENOSPC + armed Sync fault (prior file intact or absent, never torn), across every weight kind and access pattern",
 		Mode:        ModeDeterministic,
 		DefaultSeed: 0xC5F11E00,
 		run:         runCSRFilePublishFault,
@@ -192,7 +206,100 @@ func runCSRFilePublishFault(_ context.Context, seed uint64) (*SimReport, error) 
 	if len(v) > 0 {
 		return storageFaultReport(seed, v), nil
 	}
+
+	// --- Part 3: the WeightKind x AccessPattern grid, the truncation battery
+	// and the Reinterpret alignment sweep (rmp #2478). ---
+	matrix, err := runCSRFileAccessMatrix(seed)
+	if err != nil {
+		return nil, fmt.Errorf("sim: ST4 access matrix: %w", err)
+	}
+	// The scenario reports one list, but the two gates stay distinguishable by
+	// Kind: a verdict violation is an ACID_* kind, a non-vacuity violation is
+	// ORACLE_DEVIATION. The dedicated tests report them apart.
+	v = append(v, matrix.verdict...)
+	v = append(v, matrix.vacuity...)
+	if len(v) > 0 {
+		return storageFaultReport(seed, v), nil
+	}
+
+	// --- Part 4: the atomicity invariant at a SEED-DRAWN weight kind. ---
+	if fv, ferr := csrfileFaultAtDrawnWeightKind(seed); ferr != nil {
+		return nil, fmt.Errorf("sim: ST4 drawn-weight fault arm: %w", ferr)
+	} else if len(fv) > 0 {
+		return storageFaultReport(seed, fv), nil
+	}
 	return nil, nil
+}
+
+// csrfileFaultAtDrawnWeightKind replays ST4's ENOSPC atomicity invariant at a
+// weight kind and an access pattern drawn from the seed, rather than at the
+// float64 fixture the arm was welded to before rmp #2478.
+//
+// The republish uses a DIFFERENT topology from the published one, so "the prior
+// file is unchanged" is a real comparison: had any byte of the failed republish
+// reached the path, the image would differ from the one captured before it.
+func csrfileFaultAtDrawnWeightKind(seed uint64) ([]Violation, error) {
+	s := NewSeed(seed ^ 0xC5F1_2478)
+	arms := csrfileWeightArms()
+	patterns := csrfileAccessPatterns()
+	arm := arms[s.IntN(len(arms))]
+	pattern := patterns[s.IntN(len(patterns))]
+	first := buildCSRFileShape(s)
+	second := buildCSRFileShape(s)
+
+	disk := NewSimDisk(NewSeed(seed), 0)
+	fsys := simCSRFS{disk: disk}
+	if err := arm.publish(fsys, csrfileMatrixPath, first); err != nil {
+		return nil, fmt.Errorf("clean publish at %s: %w", arm.label(), err)
+	}
+	published, err := disk.ReadFile(csrfileMatrixPath)
+	if err != nil {
+		return nil, fmt.Errorf("read published %s: %w", arm.label(), err)
+	}
+	if _, v := arm.verify(fsys, csrfileMatrixPath, first, pattern); len(v) > 0 {
+		return v, nil
+	}
+
+	// Cap the disk at exactly its current total so the republish's temp-file
+	// grow breaches the budget and fails with ENOSPC BEFORE the rename.
+	disk.SetCapacity(int64(len(published)), false)
+	republishErr := arm.publish(fsys, csrfileMatrixPath, second)
+	disk.SetCapacity(0, false)
+	if republishErr == nil {
+		return []Violation{{
+			Kind: ViolationOracleDeviation, Op: "<csrfile-drawn-weight-nonvacuity>",
+			Message: fmt.Sprintf("the republish of a %s csrfile under an ENOSPC bound succeeded —"+
+				" the fault did not bite, so the atomicity assertion below is vacuous", arm.label()),
+		}}, nil
+	}
+
+	var v []Violation
+	if disk.Exists(csrfileMatrixPath + ".tmp") {
+		v = append(v, Violation{
+			Kind: ViolationACIDAtomicity, Op: "<csrfile-drawn-weight>",
+			Message: fmt.Sprintf("[%s] a failed republish left the temp file behind", arm.label()),
+		})
+	}
+	got, err := disk.ReadFile(csrfileMatrixPath)
+	if err != nil {
+		return append(v, Violation{
+			Kind: ViolationACIDDurability, Op: "<csrfile-drawn-weight>",
+			Message: fmt.Sprintf("[%s] the prior published csrfile vanished after a failed"+
+				" republish: %v", arm.label(), err),
+		}), nil
+	}
+	if !bytes.Equal(got, published) {
+		v = append(v, Violation{
+			Kind: ViolationACIDAtomicity, Op: "<csrfile-drawn-weight>",
+			Message: fmt.Sprintf("[%s] the prior published csrfile changed after a failed republish"+
+				" (a torn write reached the path): got %d bytes want %d",
+				arm.label(), len(got), len(published)),
+		})
+	}
+	// The survivor must still reconstruct the FIRST topology exactly, read back
+	// through the drawn access pattern.
+	_, rv := arm.verify(fsys, csrfileMatrixPath, first, pattern)
+	return append(v, rv...), nil
 }
 
 // csrFileFirstPublishCap is a byte budget smaller than any real csrfile layout,
@@ -314,8 +421,29 @@ func walCorruptionFailStopScenario() Scenario {
 	}
 }
 
-// runWALCorruptionFailStop performs one ST5 run.
+// walCorruptionOptions varies one ST5 run. The zero value is the scenario
+// exactly as registered; the field exists for the CONTROL arm that must observe
+// what the run emits with the fault WITHHELD.
+type walCorruptionOptions struct {
+	// skipCorruption withholds the interior-frame byte flip, leaving every other
+	// step of the run untouched: the same commits, the same clean close, the same
+	// clean and prefix replays, the same reopen. It exists because
+	// "store.wal.Decode.errors" is emitted for a BENIGN torn tail as well as for
+	// genuine corruption (store/wal/format.go), so the required-counters
+	// declaration for this scenario is only falsifiable against a run that proves
+	// the counter stays at zero when nothing is corrupted. See
+	// [walCorruptionDecl]. The run's own oracles are EXPECTED to report
+	// violations under it — the control reads the metrics, not the verdict.
+	skipCorruption bool
+}
+
+// runWALCorruptionFailStop performs one ST5 run as registered.
 func runWALCorruptionFailStop(ctx context.Context, seed uint64) (*SimReport, error) {
+	return runWALCorruptionFailStopWith(ctx, seed, walCorruptionOptions{})
+}
+
+// runWALCorruptionFailStopWith performs one ST5 run under opts.
+func runWALCorruptionFailStopWith(ctx context.Context, seed uint64, opts walCorruptionOptions) (*SimReport, error) {
 	disk := NewSimDisk(NewSeed(seed), 0)
 	cfg := defaultSimStoreConfig() // WAL-only layout (dir == ""), recovered via ReplayWAL
 	walPath := walPathFor(cfg.dir)
@@ -377,8 +505,10 @@ func runWALCorruptionFailStop(ctx context.Context, seed uint64) (*SimReport, err
 		return nil, fmt.Errorf("sim: ST5 middle frame %d has an empty payload", mid)
 	}
 	corruptOff := offsets[mid] + int64(wal.HeaderSize)
-	if err := disk.CorruptRange(walPath, corruptOff, 1); err != nil {
-		return nil, fmt.Errorf("sim: ST5 corrupt frame %d: %w", mid, err)
+	if !opts.skipCorruption {
+		if err := disk.CorruptRange(walPath, corruptOff, 1); err != nil {
+			return nil, fmt.Errorf("sim: ST5 corrupt frame %d: %w", mid, err)
+		}
 	}
 
 	// The clean prefix up to (but excluding) the corrupt frame is what recovery
@@ -631,7 +761,7 @@ func runCheckpointDirFsyncFault(ctx context.Context, seed uint64) (*SimReport, e
 func ioRoundTripFaultScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioIORoundTripFault,
-		Description: "graph/io CSV+JSONL+GraphML export/import round-trip: exact when clean, clean typed failure with no silently-accepted partial under ENOSPC",
+		Description: "graph/io CSV+JSONL+GraphML+DOT export/import: exact when clean, clean typed failure with no silently-accepted partial under ENOSPC, cross-format agreement, and a mutated-export sweep",
 		Mode:        ModeDeterministic,
 		DefaultSeed: 0x109F0117,
 		run:         runIORoundTripFault,
@@ -680,7 +810,7 @@ func ioRoundTripFormats() []ioFormat {
 }
 
 // runIORoundTripFault performs one ST8 run.
-func runIORoundTripFault(_ context.Context, seed uint64) (*SimReport, error) {
+func runIORoundTripFault(ctx context.Context, seed uint64) (*SimReport, error) {
 	model, err := buildDeterministicAdjList(NewSeed(seed))
 	if err != nil {
 		return nil, fmt.Errorf("sim: ST8 build model: %w", err)
@@ -718,6 +848,23 @@ func runIORoundTripFault(_ context.Context, seed uint64) (*SimReport, error) {
 	if v, herr := graphmlExportFaultFailsClean(seed); herr != nil {
 		return nil, fmt.Errorf("sim: ST8 graphml export-fault: %w", herr)
 	} else if len(v) > 0 {
+		return storageFaultReport(seed, v), nil
+	}
+
+	// --- The cross-format completeness surface (rmp #2480): the DOT export
+	// adjudicated by agreement with CSV and JSONL, the JSONL property-graph
+	// path, the csv.Options space beyond DefaultOptions, and the seed-mutated
+	// export sweep. It is folded in here so the swarm drives it across seeds;
+	// the crafted cap and cancellation battery is seed-independent and lives in
+	// [RunGraphIOGuards]. See graph_io_surface.go.
+	surface, serr := RunGraphIOSurface(ctx, seed)
+	if serr != nil {
+		return nil, fmt.Errorf("sim: ST8 graph-io surface: %w", serr)
+	}
+	if v := CheckGraphIOSurface(&surface); len(v) > 0 {
+		return storageFaultReport(seed, v), nil
+	}
+	if v := CheckGraphIOSurfaceShape(&surface); len(v) > 0 {
 		return storageFaultReport(seed, v), nil
 	}
 	return nil, nil

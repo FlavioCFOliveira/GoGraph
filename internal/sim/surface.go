@@ -9,21 +9,39 @@ import (
 
 // checkSurfaceAll runs the full Cypher-surface battery: the original read-shape
 // probes ([CheckCypherSurface]), the extended read-clause/aggregation/subquery/
-// procedure probes ([CheckCypherSurfaceExtended]), and the graph-independent
-// expression battery ([CheckExprLiterals]). It is the single entry point the
+// procedure probes ([CheckCypherSurfaceExtended]), the grouped-aggregation /
+// DISTINCT-row / UNION-over-data probes ([CheckCypherSurfaceGrouped]), the
+// entity-valued function and path-materialisation probes
+// ([CheckCypherSurfaceEntity]), the ordering / pagination / multi-part
+// structure probes ([CheckCypherSurfaceOrdering]), the graph-independent
+// expression battery ([CheckExprLiterals]), and the non-deterministic function
+// invariants ([CheckNonDeterministicFuncs]). It is the single entry point the
 // scenario calls periodically, after each crash/recovery, and at the end.
-func checkSurfaceAll(tick int64, oracle *GraphOracle, engine *EngineAdapter) []Violation {
+//
+// ord accumulates the ordering probes' run-level observations for the terminal
+// non-vacuity gate ([checkOrderingNonVacuity]); it may be nil.
+func checkSurfaceAll(tick int64, oracle *GraphOracle, engine *EngineAdapter, ord *OrderingStats) []Violation {
 	vs := make([]Violation, 0, 8)
 	vs = append(vs, CheckCypherSurface(tick, oracle, engine)...)
 	vs = append(vs, CheckCypherSurfaceExtended(tick, oracle, engine)...)
+	vs = append(vs, CheckCypherSurfaceGrouped(tick, oracle, engine)...)
+	vs = append(vs, CheckCypherSurfaceEntity(tick, oracle, engine)...)
+	vs = append(vs, CheckCypherSurfaceOrdering(tick, oracle, engine, ord)...)
 	vs = append(vs, CheckExprLiterals(tick, engine)...)
+	vs = append(vs, CheckNonDeterministicFuncs(tick, engine)...)
 	return vs
 }
 
+// surfaceCityVocab is the size of the seeded city vocabulary (c0..c9) the
+// surface workload draws from. Small on purpose: with ~10 cities over hundreds
+// of Persons every city groups several rows, so grouped aggregation is
+// non-trivial (rmp #2452) while the full grouped row set stays tiny.
+const surfaceCityVocab = 10
+
 // SurfaceWriter builds the graph the cypher-surface battery reads: it creates
-// Person nodes that ALWAYS carry name+age (so aggregate/filter invariants have
-// no null-age ambiguity) and KNOWS edges between existing Persons. It avoids
-// MERGE and SET so the oracle's Person/age model is unambiguous.
+// Person nodes that ALWAYS carry name+age+city (so aggregate/filter/grouping
+// invariants have no null ambiguity) and KNOWS edges between existing Persons.
+// It avoids MERGE and SET so the oracle's Person model is unambiguous.
 //
 // # Concurrency contract
 //
@@ -34,8 +52,8 @@ type SurfaceWriter struct{ counter int64 }
 // Name returns the actor's identifier.
 func (*SurfaceWriter) Name() string { return "SurfaceWriter" }
 
-// NextOp returns a fresh Person CREATE or a KNOWS edge between two existing
-// Persons, seed-derived.
+// NextOp returns a fresh Person CREATE (name, age, and a city from the seeded
+// c0..c9 vocabulary) or a KNOWS edge between two existing Persons, seed-derived.
 func (w *SurfaceWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 	names := oracle.NodeNames()
 	if len(names) >= 2 && seed.Float64() < 0.4 {
@@ -45,7 +63,11 @@ func (w *SurfaceWriter) NextOp(seed *Seed, oracle *GraphOracle) Op {
 	}
 	name := fmt.Sprintf("s%d", w.counter)
 	w.counter++
-	return Op{Kind: OpCreate, Cypher: tmplCreatePerson, Params: map[string]any{"name": name, "age": int64(seed.IntN(100))}}
+	return Op{Kind: OpCreate, Cypher: tmplCreatePersonCity, Params: map[string]any{
+		"name": name,
+		"age":  int64(seed.IntN(100)),
+		"city": fmt.Sprintf("c%d", seed.IntN(surfaceCityVocab)),
+	}}
 }
 
 // surfaceWorkload is a 100% SurfaceWriter mix.
@@ -154,10 +176,12 @@ func CheckCypherSurface(tick int64, oracle *GraphOracle, engine *EngineAdapter) 
 // model over the Person/KNOWS graph: DISTINCT and count(DISTINCT) (CY5); 3VL
 // boolean AND, list membership IN, IS NULL and <> (CY6); the STARTS WITH /
 // ENDS WITH / CONTAINS / =~ string predicates (CY7); ORDER BY … SKIP … LIMIT
-// pagination (CY8); the avg/min/max/percentile aggregations (CY10); EXISTS { }
-// / COUNT { } / pattern-comprehension subqueries (CY13); and the db.* schema
-// introspection procedures (CY16). It runs on the quiescent graph, including
-// after crash/recovery.
+// pagination (CY8); the min/max/sum aggregates plus the EXACT
+// avg/stDev/stDevP/percentileCont/percentileDisc oracle-arithmetic probes
+// (CY10, rmp #2452 — see [expectedAggregates] for the pinned definitions);
+// EXISTS { } / COUNT { } / pattern-comprehension subqueries (CY13); and the
+// db.* schema introspection procedures (CY16). It runs on the quiescent graph,
+// including after crash/recovery.
 func CheckCypherSurfaceExtended(tick int64, oracle *GraphOracle, engine *EngineAdapter) []Violation {
 	ctx := context.Background()
 	var vs []Violation
@@ -183,22 +207,6 @@ func CheckCypherSurfaceExtended(tick int64, oracle *GraphOracle, engine *EngineA
 				Message: fmt.Sprintf("%s drain error: %v", label, derr)})
 		}
 	}
-	// boolInvariant asserts a query whose single boolean result must be true —
-	// used for self-checking engine invariants (e.g. a percentile lies within
-	// [min,max]) where the engine computes the invariant itself.
-	boolInvariant := func(label, query string) {
-		got, err := engine.projectRowStrings(ctx, query, 1)
-		if err != nil {
-			vs = append(vs, Violation{Kind: ViolationGraphIntegrity, Tick: tick, Op: label,
-				Message: fmt.Sprintf("%s query error: %v", label, err)})
-			return
-		}
-		if len(got) > 0 && got[0] != "true" {
-			vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: label,
-				Message: fmt.Sprintf("%s: engine invariant did not hold (got %s)", label, got[0])})
-		}
-	}
-
 	ages := oracle.personAges() // sorted, all Persons carry an integer age here
 	names := oracle.personNamesSorted()
 	pc := int64(oracle.personCount())
@@ -251,21 +259,36 @@ func CheckCypherSurfaceExtended(tick int64, oracle *GraphOracle, engine *EngineA
 	scalar("CONTAINS 0", "MATCH (n:Person) WHERE n.name CONTAINS '0' RETURN count(n)", contains0)
 	scalar("ENDS WITH 5", "MATCH (n:Person) WHERE n.name ENDS WITH '5' RETURN count(n)", ends5)
 	scalar("=~ ^s[0-9]+$", `MATCH (n:Person) WHERE n.name =~ '^s[0-9]+$' RETURN count(n)`, regexAll)
-	// CY10 — aggregations. min/max/sum exact; avg and percentile via engine-computed invariants.
+	// CY10 — aggregations, all exact. min/max/sum as integers; avg / stDev /
+	// stDevP / percentileCont / percentileDisc against oracle arithmetic
+	// (rmp #2452). The exact probes REPLACE the former boolInvariant
+	// self-checks (avg∈[min,max], percentileCont∈[min,max], percentileDisc is
+	// a real age): an exact match implies every one of those interval
+	// invariants, and the multi-aggregate WITH projection the self-checks
+	// exercised is preserved by the five-aggregate probe query itself — so the
+	// replacement strictly strengthens the battery.
 	if len(ages) > 0 {
 		scalar("min(age)", "MATCH (n:Person) RETURN min(n.age)", ages[0])
 		scalar("max(age)", "MATCH (n:Person) RETURN max(n.age)", ages[len(ages)-1])
 		scalar("sum(age)", "MATCH (n:Person) RETURN sum(n.age)", sum)
-		// avg lies within [min,max]; percentileCont within [min,max]; percentileDisc
-		// is an actual data value present in the set.
-		boolInvariant("avg in [min,max]", "MATCH (n:Person) WITH min(n.age) AS lo, max(n.age) AS hi, avg(n.age) AS a RETURN a >= lo AND a <= hi")
-		boolInvariant("percentileCont in [min,max]", "MATCH (n:Person) WITH min(n.age) AS lo, max(n.age) AS hi, percentileCont(n.age,0.5) AS p RETURN p >= lo AND p <= hi")
-		boolInvariant("percentileDisc is a real age", "MATCH (n:Person) WITH percentileDisc(n.age,0.5) AS p MATCH (m:Person) WHERE m.age = p RETURN count(m) > 0")
+	}
+	if len(ages) >= 2 { // stDev is NULL for n < 2, so the exact probe needs two rows
+		vs = append(vs, compareExactAggregates(tick, expectedAggregates(ages), engine)...)
 	}
 	// CY13 — EXISTS / COUNT / pattern-comprehension subqueries.
 	scalar("EXISTS subquery", "MATCH (n:Person) WHERE EXISTS { (n)-[:KNOWS]->() } RETURN count(n)", pwok)
 	scalar("COUNT subquery sum", "MATCH (n:Person) RETURN sum(COUNT { (n)-[:KNOWS]->() })", knows)
 	scalar("pattern comprehension", "MATCH (a:Person) RETURN sum(size([(a)-[:KNOWS]->(b) | b]))", knows)
+	// CY13b — the same subqueries with an inner FILTER, in PROJECTION position
+	// (rmp #2507). The three probes above are UNFILTERED and stay exactly as they
+	// are: they were correct throughout the defect, which is precisely why the
+	// battery could not see it. A filtered inner pattern is refused by both
+	// adjacency fast paths (#2232, #2235) and falls through to a compiled inner
+	// plan, and that plan was built with no parameters, no relationship metadata
+	// and no nested evaluators — so a property predicate matched nothing, a
+	// relationship variable was not a relationship, and a nested subquery
+	// answered zero.
+	checkFilteredSubqueries(oracle, scalar)
 
 	// CY8 — ORDER BY … SKIP … LIMIT pagination against the sorted name slice.
 	const skipK, limitM = 3, 5
@@ -374,7 +397,7 @@ func containsAll(got []string, want ...string) bool {
 func cypherSurfaceScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioCypherSurface,
-		Description: "broad Cypher read surface (aggregation/WHERE/WITH/OPTIONAL MATCH/UNWIND/ORDER BY) vs oracle invariants",
+		Description: "broad Cypher read surface (grouped+exact aggregation/DISTINCT/UNION/WHERE/WITH/OPTIONAL MATCH/UNWIND/ORDER BY) vs oracle invariants",
 		Mode:        ModeDeterministic,
 		DefaultSeed: 0x5C0FACE,
 		MaxTicks:    500,
@@ -398,6 +421,7 @@ func runCypherSurface(ctx context.Context, seed uint64) (*SimReport, error) {
 	}
 	defer func() { _ = sm.Close() }()
 
+	ord := newOrderingStats()
 	var lastTick int64
 	var lastOp Op
 	for i := 0; i < cfg.MaxTicks; i++ {
@@ -413,7 +437,7 @@ func runCypherSurface(ctx context.Context, seed uint64) (*SimReport, error) {
 			return report, nil
 		}
 		if sm.crashCount > crashesBefore {
-			if v := checkSurfaceAll(tick, sm.oracle, sm.engine); len(v) > 0 {
+			if v := checkSurfaceAll(tick, sm.oracle, sm.engine, ord); len(v) > 0 {
 				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery surface>"}, v), nil
 			}
 		}
@@ -430,13 +454,142 @@ func runCypherSurface(ctx context.Context, seed uint64) (*SimReport, error) {
 			}
 		}
 		if tick%cypherSurfaceCheckEvery == 0 {
-			if v := checkSurfaceAll(tick, sm.oracle, sm.engine); len(v) > 0 {
+			if v := checkSurfaceAll(tick, sm.oracle, sm.engine, ord); len(v) > 0 {
 				return sm.report(tick, op, v), nil
 			}
 		}
 	}
-	if v := checkSurfaceAll(lastTick, sm.oracle, sm.engine); len(v) > 0 {
+	if v := checkSurfaceAll(lastTick, sm.oracle, sm.engine, ord); len(v) > 0 {
+		return sm.report(lastTick, lastOp, v), nil
+	}
+	if v := checkSurfaceNonVacuity(lastTick, sm.oracle); len(v) > 0 {
+		return sm.report(lastTick, lastOp, v), nil
+	}
+	if v := checkOrderingNonVacuity(lastTick, ord); len(v) > 0 {
 		return sm.report(lastTick, lastOp, v), nil
 	}
 	return nil, nil
+}
+
+// checkSurfaceNonVacuity is the terminal non-vacuity assertion of the
+// cypher-surface scenario (rmp #2452): it proves the grouped-aggregation and
+// DISTINCT probes actually exercised non-degenerate shapes during the run —
+// at least two distinct cities and two distinct ages among the surviving
+// Persons, and at least one KNOWS target — rather than passing vacuously on a
+// single-group or edgeless graph. It runs only at the end (mid-run the graph
+// may legitimately be small right after recovery).
+func checkSurfaceNonVacuity(tick int64, oracle *GraphOracle) []Violation {
+	var vs []Violation
+	stats, complete := oracle.personCityStats()
+	if !complete {
+		vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "surface non-vacuity",
+			Message: "a modelled Person lacks a city: the grouped-by-city probes were skipped for part of the run"})
+	}
+	if len(stats) < 2 {
+		vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "surface non-vacuity",
+			Message: fmt.Sprintf("terminal graph has %d distinct cities; grouped aggregation needs >= 2 groups to be non-trivial", len(stats))})
+	}
+	distinctAges := make(map[int64]bool)
+	for _, a := range oracle.personAges() {
+		distinctAges[a] = true
+	}
+	if len(distinctAges) < 2 {
+		vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "surface non-vacuity",
+			Message: fmt.Sprintf("terminal graph has %d distinct ages; the exact-aggregate probes need spread to be non-trivial", len(distinctAges))})
+	}
+	if len(oracle.knowsTargetNamesDistinct()) == 0 {
+		vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "surface non-vacuity",
+			Message: "terminal graph has no KNOWS target: the DISTINCT-row probes never saw a row"})
+	}
+	return vs
+}
+
+// checkFilteredSubqueries drives the FILTERED EXISTS { … } / COUNT { … } shapes
+// in PROJECTION position and verifies each against a value the oracle computed
+// from its own model (rmp #2507).
+//
+// # Why the unfiltered probes could not have found this
+//
+// Both adjacency fast paths — the degree rewrite (#2232) and the labelled single
+// hop (#2235) — REFUSE a pattern node that carries a property, so an unfiltered
+// subquery is answered from the adjacency and never builds an inner plan at all.
+// It was the inner plan that was mis-built. Filtering the pattern is what routes
+// the probe onto the repaired path, so these probes and the unfiltered ones
+// exercise different code and both must stay.
+//
+// # Why each probe cannot pass vacuously
+//
+// TargetName is chosen from the KNOWS TARGETS, so ToNamed is at least 1 whenever
+// the model is Usable; and when it is not Usable every expectation would be 0 and
+// the whole block is skipped rather than recorded as a pass. The age floor is the
+// MEDIAN modelled age, so both the matching and the non-matching side of the
+// predicate are populated whenever the ages have any spread — an inner filter
+// that had stopped filtering would answer PersonToPerson and be caught.
+//
+// It reports through scalar — the caller's probe helper — rather than returning
+// violations of its own, so a deviation here is recorded with exactly the same
+// Violation shape, tick and engine handle as every other surface probe.
+func checkFilteredSubqueries(oracle *GraphOracle, scalar func(label, query string, want int64)) {
+	ages := oracle.personAges() // ascending
+	if len(ages) == 0 {
+		return
+	}
+	st := oracle.subqueryFilterStats(ages[len(ages)/2])
+	if !st.Usable {
+		// No Person→Person KNOWS edge: every probe would be 0 == 0. Skipping is
+		// the honest response; the terminal non-vacuity check already reports a
+		// run whose graph never held a KNOWS target.
+		return
+	}
+	name := quoteCypherString(st.TargetName)
+
+	// The reported spelling: an INLINE property map on the far node, in a RETURN
+	// projection. This is the exact query #2507 was filed against.
+	scalar("COUNT subquery inline filter",
+		fmt.Sprintf("MATCH (n:Person) RETURN sum(COUNT { MATCH (n)-[:KNOWS]->(:Person {name:%s}) })", name),
+		st.ToNamed)
+	// The same predicate written as an inner WHERE, which the planner lowers
+	// differently.
+	scalar("COUNT subquery WHERE filter",
+		fmt.Sprintf("MATCH (n:Person) RETURN sum(COUNT { MATCH (n)-[:KNOWS]->(m:Person) WHERE m.name = %s })", name),
+		st.ToNamed)
+	// A NUMERIC inner filter. Numbers are never hoisted onto an auto-parameter by
+	// parser.StripLiterals, so this probe is the control for the parameter half of
+	// the fix: it isolates everything else about the inner plan.
+	scalar("COUNT subquery numeric filter",
+		fmt.Sprintf("MATCH (n:Person) RETURN sum(COUNT { MATCH (n)-[:KNOWS]->(m:Person) WHERE m.age >= %d })", st.AgeFloor),
+		st.ToAgeAtLeast)
+	// EXISTS in PROJECTION position: bound to a WITH alias and then filtered, so
+	// the boolean the projection produced decides row survival and the probe reads
+	// as an exact count.
+	scalar("EXISTS subquery projected filter",
+		fmt.Sprintf("MATCH (n:Person) WITH n, EXISTS { MATCH (n)-[:KNOWS]->(m:Person) WHERE m.age >= %d } AS hit WHERE hit RETURN count(n)", st.AgeFloor),
+		st.SrcWithAgeAtLeast)
+	// A RELATIONSHIP variable read inside the subquery. Before the fix the inner
+	// plan carried no edge metadata, so `r` reached the predicate as a raw integer
+	// and type(r) failed the query outright rather than answering wrongly.
+	scalar("COUNT subquery relationship variable",
+		"MATCH (n:Person) RETURN sum(COUNT { MATCH (n)-[r:KNOWS]->(:Person) WHERE type(r) = 'KNOWS' })",
+		st.PersonToPerson)
+	// A NESTED subquery: the inner plan needs its own subquery evaluator, which it
+	// did not have. The inner EXISTS is unfiltered on purpose — the discrimination
+	// here is the nesting, not the predicate.
+	scalar("nested subquery",
+		fmt.Sprintf("MATCH (n:Person) RETURN sum(COUNT { MATCH (n)-[:KNOWS]->(m:Person) WHERE m.name = %s AND EXISTS { MATCH (m) } })", name),
+		st.ToNamed)
+	// A pattern PREDICATE carrying an inline string property, which the pattern
+	// evaluator matches itself rather than through a planned Filter — the second
+	// site of the same parameter defect.
+	scalar("pattern predicate inline filter",
+		fmt.Sprintf("MATCH (n:Person) WHERE (n)-[:KNOWS]->(:Person {name:%s}) RETURN count(n)", name),
+		st.SrcToNamed)
+}
+
+// quoteCypherString renders s as a single-quoted Cypher string literal, escaping
+// the backslash first and then the quote so an already-escaped backslash is not
+// re-escaped. The surface workload's names are plain identifiers, but the probe
+// interpolates a value read from the model and must not be able to produce an
+// unparseable query if that ever changes.
+func quoteCypherString(s string) string {
+	return "'" + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `'`, `\'`) + "'"
 }

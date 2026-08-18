@@ -63,8 +63,9 @@ type MVCCSessionsConfig struct {
 	// matching COMMIT.
 	CheckEvery int
 	// Crash opts into deterministic crash injection (rmp #2438): at
-	// seed-scheduled ticks the SimDisk crashes (unsynced state lost, exactly
-	// like SIGKILL), the store reopens through real WAL recovery, every open
+	// seed-scheduled ticks the SimDisk takes a HOST crash (every byte and every
+	// dirent no successful fsync covered is lost — [SimDisk.CrashHost]), the
+	// store reopens through real WAL recovery, every open
 	// transaction dies unacknowledged, and the recovered state is adjudicated
 	// at TRANSACTION granularity against the folded oracle. The zero value
 	// disables crashes — the safe default, byte-identical to a pre-crash run.
@@ -369,7 +370,7 @@ func RunMVCCSessions(ctx context.Context, cfg MVCCSessionsConfig) (*MVCCSessions
 	return h.res, nil
 }
 
-// maybeCrash injects a SIGKILL-equivalent crash at seed-scheduled ticks
+// maybeCrash injects a HOST crash at seed-scheduled ticks
 // (rmp #2438): the SimDisk revokes its unsynced state, the store reopens
 // through real WAL recovery, every OPEN transaction dies unacknowledged (its
 // oracle workspace is discarded — the folded oracle is exactly the
@@ -394,8 +395,9 @@ func (h *mvccHarness) maybeCrash(tick int64) error {
 	if !h.crash.ShouldCrash(tick) {
 		return nil
 	}
-	// SIGKILL-equivalent: no graceful close; buffered-but-unsynced frames and
-	// unsynced directory entries are lost exactly as a real crash loses them.
+	// HOST crash: no graceful close; every byte no successful fsync covered and
+	// every not-yet-durable directory entry are lost, exactly as a power failure
+	// loses them ([SimDisk.Crash] is [SimDisk.CrashHost]).
 	h.disk.Crash()
 	store, err := OpenSimStore(h.disk, h.store.Config())
 	if err != nil {

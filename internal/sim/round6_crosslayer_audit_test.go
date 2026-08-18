@@ -62,8 +62,11 @@ func TestCrossLayer_AckedCommitSurvivesCrash(t *testing.T) {
 	}
 
 	// CRASH: drop the live stack without graceful close. (We intentionally do NOT
-	// call store.Close(); we drop references and reopen, modelling kill -9. Any
-	// frame still in the WAL bufio buffer that was never fsync'd is lost.)
+	// call store.Close(); we drop references and reopen, modelling kill -9 — a
+	// PROCESS crash, so the SimDisk itself is deliberately left alone and only
+	// the WAL's in-process bufio buffer is lost. See [SimDisk.CrashProcess] for
+	// the primitive that names this level; a power failure would additionally
+	// discard everything written through to the disk but never fsync'd.)
 	store = nil
 
 	// RECOVER from a fresh store object reading the same SimDisk image.

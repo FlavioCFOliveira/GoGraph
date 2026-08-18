@@ -299,32 +299,82 @@ func (c *WireClient) Recv() (any, error) { return c.recv() }
 // toPackstreamParams converts a simulator parameter map to the packstream value
 // map a RUN expects. The supported kinds mirror [toExprParams]; an unsupported
 // kind is a loud error rather than a silent coercion.
+//
+// Every PackStream scalar and composite kind an embedder can bind is covered
+// (rmp #2462): NULL, Boolean, Integer, Float, String, List, and Map — the last
+// two recursively, so a nested list-of-maps binds correctly. The Bolt server
+// hands the decoded map straight to the engine (bolt/server/session.go passes
+// map[string]any(m.Parameters) to RunAny), so this conversion IS the wire
+// contract for parameter binding, and it is the path on which a
+// literal/parameter divergence actually reaches a driver user.
 func toPackstreamParams(params map[string]any) (map[string]packstream.Value, error) {
 	if len(params) == 0 {
 		return map[string]packstream.Value{}, nil
 	}
 	out := make(map[string]packstream.Value, len(params))
 	for k, v := range params {
-		switch t := v.(type) {
-		case string:
-			out[k] = t
-		case int64:
-			out[k] = t
-		case int:
-			out[k] = int64(t)
-		case float64:
-			out[k] = t
-		case bool:
-			out[k] = t
-		case []int64:
-			lst := make([]packstream.Value, len(t))
-			for i, e := range t {
-				lst[i] = e
-			}
-			out[k] = lst
-		default:
-			return nil, fmt.Errorf("sim: wire param %q: unsupported type %T", k, v)
+		pv, err := toPackstreamValue(v)
+		if err != nil {
+			return nil, fmt.Errorf("sim: wire param %q: %w", k, err)
 		}
+		out[k] = pv
 	}
 	return out, nil
+}
+
+// toPackstreamValue converts one simulator parameter value to its PackStream
+// representation, recursing into lists and maps. An unsupported kind is a loud
+// error rather than a silent coercion, so a workload bug surfaces instead of
+// binding a wrong value.
+func toPackstreamValue(v any) (packstream.Value, error) {
+	switch t := v.(type) {
+	case nil:
+		// PackStream NULL. Typed as a nil packstream.Value so the encoder takes
+		// its WriteNull arm rather than a typed-nil interface.
+		return nil, nil
+	case string:
+		return t, nil
+	case int64:
+		return t, nil
+	case int:
+		return int64(t), nil
+	case float64:
+		return t, nil
+	case bool:
+		return t, nil
+	case []int64:
+		lst := make([]packstream.Value, len(t))
+		for i, e := range t {
+			lst[i] = e
+		}
+		return lst, nil
+	case []string:
+		lst := make([]packstream.Value, len(t))
+		for i, e := range t {
+			lst[i] = e
+		}
+		return lst, nil
+	case []any:
+		lst := make([]packstream.Value, len(t))
+		for i, e := range t {
+			ev, err := toPackstreamValue(e)
+			if err != nil {
+				return nil, fmt.Errorf("list element %d: %w", i, err)
+			}
+			lst[i] = ev
+		}
+		return lst, nil
+	case map[string]any:
+		m := make(map[string]packstream.Value, len(t))
+		for mk, e := range t {
+			ev, err := toPackstreamValue(e)
+			if err != nil {
+				return nil, fmt.Errorf("map key %q: %w", mk, err)
+			}
+			m[mk] = ev
+		}
+		return m, nil
+	default:
+		return nil, fmt.Errorf("unsupported type %T", v)
+	}
 }

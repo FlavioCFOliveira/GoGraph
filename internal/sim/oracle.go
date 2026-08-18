@@ -16,6 +16,16 @@ import (
 const (
 	// tmplCreatePerson creates one Person node with name and age.
 	tmplCreatePerson = "CREATE (n:Person {name:$name, age:$age})"
+	// tmplCreatePersonCity creates one Person node with name, age, and a city
+	// drawn from a small seeded vocabulary, so grouped aggregation over
+	// n.city is non-trivial (rmp #2452). The cypher-surface workload uses it.
+	tmplCreatePersonCity = "CREATE (n:Person {name:$name, age:$age, city:$city})"
+	// tmplCreatePersonNoAge creates one Person node with name and city but NO
+	// age property, so the null-semantics scenario's IS NULL / count(n.prop) /
+	// 3VL probes run against genuinely NULL-aged rows (rmp #2453). Only the
+	// null-semantics workload emits it: the cypher-surface scenario never draws
+	// an ageless Person, keeping its aggregate invariants unambiguous.
+	tmplCreatePersonNoAge = "CREATE (n:Person {name:$name, city:$city})"
 	// tmplCreateKnows links two existing Person nodes by name with a KNOWS edge.
 	tmplCreateKnows = "MATCH (a:Person {name:$a}),(b:Person {name:$b}) CREATE (a)-[:KNOWS]->(b)"
 	// tmplSetAge updates the age of the Person matched by name.
@@ -25,24 +35,44 @@ const (
 	// tmplMergePerson merges a Person by name, marking newly-created ones.
 	tmplMergePerson = "MERGE (n:Person {name:$name}) ON CREATE SET n.created=true"
 	// tmplCreateTyped creates one Typed node carrying a property of every
-	// round-tripping Cypher kind — string, integer, float, boolean, list, and an
-	// ISO-8601 temporal string — keyed by a unique integer id. The type-coverage
-	// scenario uses it to verify each kind survives commit + crash/recovery.
-	tmplCreateTyped = "CREATE (n:Typed {id:$id, s:$s, i:$i, f:$f, b:$b, lst:$lst, ts:$ts})"
+	// round-tripping Cypher kind — string, integer, float, boolean, list, a plain
+	// ISO-8601 string, and all SIX genuine temporal types (date, localdatetime,
+	// datetime, localtime, time, duration) — keyed by a unique integer id. The
+	// type-coverage scenario uses it to verify each kind survives commit +
+	// crash/recovery.
+	//
+	// Since rmp #2457 the six temporal properties are bound as genuine temporal
+	// PARAMETERS, which the engine stores in its kind-tagged form; `ts` remains a
+	// plain ISO-8601 STRING and is the deliberate control — it must read back as
+	// a string, proving the checker's temporal-kind assertion discriminates
+	// rather than passing on text alone.
+	tmplCreateTyped = "CREATE (n:Typed {id:$id, s:$s, i:$i, f:$f, b:$b, lst:$lst, ts:$ts, " +
+		"d:$d, ldt:$ldt, dt:$dt, lt:$lt, tm:$tm, du:$du})"
 	// tmplCreateKnowsProps links two existing Person nodes with a KNOWS edge that
 	// carries an ISO-8601 `since` string and a float `weight`, for the
 	// edge-property coverage scenario.
 	tmplCreateKnowsProps = "MATCH (a:Person {name:$a}),(b:Person {name:$b}) CREATE (a)-[:KNOWS {since:$since, weight:$weight}]->(b)"
 )
 
-// knowsEdgePropKeys are the property keys a [tmplCreateKnowsProps] edge carries,
-// in a fixed order; the edge-property checker projects exactly these.
-var knowsEdgePropKeys = []string{"since", "weight"}
+// knowsEdgePropKeys are the property keys the edge-property checker projects,
+// in a fixed order: the {since, weight} a [tmplCreateKnowsProps] /
+// [tmplCreateKnowsInst] edge carries, plus the instance-only `note` planted by
+// [tmplSetKnowsNote] (rmp #2502) — projecting `note` on every probe is what
+// makes the whole-entity replace's exact-map contract continuously enforced
+// (a `note` the replace failed to tear down reads back non-null while the
+// model says null).
+var knowsEdgePropKeys = []string{"since", "weight", "note"}
 
 // typedPropKeys are the property keys a [tmplCreateTyped] node carries, in a
 // fixed order, plus the never-set key "absent" the checker verifies reads NULL.
 // The checker projects exactly these so engine and oracle compare the same set.
-var typedPropKeys = []string{"id", "s", "i", "f", "b", "lst", "ts", "absent"}
+// The six temporal keys (d/ldt/dt/lt/tm/du) are asserted to read back with
+// their temporal KIND, not merely their text — see [typedTemporalKinds].
+var typedPropKeys = []string{
+	"id", "s", "i", "f", "b", "lst", "ts",
+	"d", "ldt", "dt", "lt", "tm", "du",
+	"absent",
+}
 
 // NodeState is the oracle's record of a single node: its synthetic oracle id,
 // labels, and properties. It mirrors what the engine must hold, not how the
@@ -54,11 +84,15 @@ type NodeState struct {
 }
 
 // EdgeState is the oracle's record of a single directed edge between two
-// oracle node ids, carrying its relationship label and properties.
+// oracle node ids, carrying its relationship label and properties. EID is the
+// edge instance's unique discriminator for scenarios that model parallel
+// edges (mirroring the edge's own eid property); it is 0 for every edge
+// created by a template that predates instance modelling.
 type EdgeState struct {
 	Properties   map[string]any
 	Label        string
 	SrcID, DstID uint64
+	EID          int64
 }
 
 // OracleResult is the oracle's prediction for one operation: whether it commits,
@@ -118,6 +152,12 @@ type GraphOracle struct {
 	// keeps modelling it across a crash — the recovered engine must still enforce
 	// it. See [GraphOracle.SetUniqueOnName].
 	uniqueOnName bool
+	// deletedKnows records every KNOWS edge instance the model deleted through
+	// the standalone DELETE r template ([tmplDeleteKnowsInst]), by eid and
+	// endpoint names. [CheckEdgeProperties] probes each entry to assert the
+	// deleted instance stays absent (including across crash/recovery) while both
+	// endpoint nodes remain alive — DELETE r must never cascade to a node.
+	deletedKnows []KnowsInstance
 	// existenceOnEmail, when true, models an active NOT NULL (Acct, email)
 	// existence constraint: an Acct CREATE that OMITS the email property must be
 	// REJECTED by the engine (a typed constraint-violation error, no state
@@ -128,11 +168,15 @@ type GraphOracle struct {
 	existenceOnEmail bool
 }
 
-// edgeKey identifies an edge by source, destination, and label, matching the
-// (src,dst,label) identity the checker probes.
+// edgeKey identifies an edge by source, destination, label, and — for
+// scenarios that model parallel-edge instances (the edge-properties scenario,
+// rmp #2449) — the instance's unique eid property. eid 0 is the simple-graph
+// case: every template that predates instance modelling leaves it zero, so one
+// (src,dst,label) triple maps to at most one modelled edge exactly as before.
 type edgeKey struct {
 	label    string
 	src, dst uint64
+	eid      int64
 }
 
 // NewGraphOracle returns an empty oracle. Node ids start at 1 so zero can mean
@@ -170,14 +214,22 @@ func (o *GraphOracle) recordOp(cypher string, params map[string]any, res OracleR
 // state and returns the prediction.
 func (o *GraphOracle) ApplyCreate(cypher string, params map[string]any) OracleResult {
 	switch cypher {
-	case tmplCreatePerson:
+	case tmplCreatePerson, tmplCreatePersonCity, tmplCreatePersonNoAge:
 		return o.recordOp(cypher, params, o.createPerson(params))
 	case tmplCreateKnows:
 		return o.recordOp(cypher, params, o.createKnows(params))
+	case tmplCreateFollows:
+		return o.recordOp(cypher, params, o.createFollows(params))
 	case tmplCreateTyped:
 		return o.recordOp(cypher, params, o.createTyped(params))
 	case tmplCreateKnowsProps:
 		return o.recordOp(cypher, params, o.createKnowsProps(params))
+	case tmplCreateKnowsInst:
+		return o.recordOp(cypher, params, o.createKnowsInst(params))
+	case tmplForeachCreatePersons:
+		// FOREACH is modelled as its expansion: one Person per list element
+		// (rmp #2454).
+		return o.recordOp(cypher, params, o.applyForeachCreatePersons(params))
 	case tmplCreateAcctWithEmail:
 		return o.recordOp(cypher, params, o.createAcct(params, true))
 	case tmplCreateAcctNoEmail:
@@ -290,13 +342,25 @@ func (o *GraphOracle) createPerson(params map[string]any) OracleResult {
 			return OracleResult{Committed: false, ErrorMsg: "oracle: UNIQUE(Person.name) violation"}
 		}
 	}
-	age := params["age"]
+	props := map[string]any{"name": name}
+	if age, ok := params["age"]; ok {
+		// Every template except [tmplCreatePersonNoAge] binds an age; the
+		// ageless variant (null-semantics scenario, rmp #2453) omits the key so
+		// the model tracks age-present vs age-absent per Person, mirroring the
+		// optional city below.
+		props["age"] = age
+	}
+	if city, ok := paramString(params, "city"); ok {
+		// The [tmplCreatePersonCity] variant additionally carries a city, the
+		// grouping key of the grouped-aggregation surface probes (rmp #2452).
+		props["city"] = city
+	}
 	id := o.nextNodeID
 	o.nextNodeID++
 	o.nodes[id] = &NodeState{
 		ID:         id,
 		Labels:     []string{"Person"},
-		Properties: map[string]any{"name": name, "age": age},
+		Properties: props,
 	}
 	o.byName[name] = id
 	return OracleResult{Committed: true, NodesCreated: 1}
@@ -370,25 +434,52 @@ func (o *GraphOracle) KnowsEdgesByName() []EdgeByName {
 			continue
 		}
 		out = append(out, EdgeByName{
-			Src: o.nameOf(e.SrcID), Dst: o.nameOf(e.DstID), Props: e.Properties,
+			Src: o.nameOf(e.SrcID), Dst: o.nameOf(e.DstID), Props: e.Properties, EID: e.EID,
 		})
 	}
 	return out
 }
 
 // EdgeByName is a KNOWS edge identified by its endpoint Person names plus its
-// modelled properties, the form the edge-property checker probes the engine with.
+// modelled properties, the form the edge-property checker probes the engine
+// with. EID is the instance discriminator for parallel-edge scenarios (0 for
+// edges created by templates that predate instance modelling); a non-zero EID
+// lets the checker pin the probe to exactly one of several parallel edges.
 type EdgeByName struct {
 	Props    map[string]any
 	Src, Dst string
+	EID      int64
 }
 
 // ApplyMatch models read-only and SET templates. Pure reads ([RETURN]/aggregate
 // queries) never change state and commit trivially; the SET template
 // ([tmplSetAge]) updates the matched node's age in place.
 func (o *GraphOracle) ApplyMatch(cypher string, params map[string]any) OracleResult {
-	if cypher == tmplSetAge {
+	switch cypher {
+	case tmplSetAge:
 		return o.recordOp(cypher, params, o.setAge(params))
+	case tmplSetKnowsWeight:
+		return o.recordOp(cypher, params, o.setKnowsWeight(params))
+	case tmplRemoveKnowsSince, tmplSetKnowsSinceNull:
+		// openCypher: SET r.x = null removes the property exactly as REMOVE r.x
+		// does, so both templates share the removal model (rmp #2501).
+		return o.recordOp(cypher, params, o.removeKnowsSince(params))
+	case tmplSetKnowsNote:
+		return o.recordOp(cypher, params, o.setKnowsNote(params))
+	case tmplReplaceKnowsInst, tmplReplaceKnowsInstWith:
+		// The WITH-projected variant carries the same modelled semantics: the
+		// projection boundary must not change which instance the replace
+		// reaches (rmp #2502).
+		return o.recordOp(cypher, params, o.replaceKnowsInst(params))
+	case tmplCopyKnowsInst:
+		// Copy-from-instance: the target's map becomes the SOURCE instance's
+		// own map (bag-authoritative, rmp #2503) with the target's eid
+		// re-pinned.
+		return o.recordOp(cypher, params, o.copyKnowsInst(params))
+	case tmplForeachSetTag:
+		// FOREACH SET is modelled as its expansion: len(tags) assignments whose
+		// net state effect is the last element (rmp #2454).
+		return o.recordOp(cypher, params, o.applyForeachSetTag(params))
 	}
 	// Schema-mutation templates (REMOVE / SET-label / SET-map) mutate the matched
 	// node's labels/properties; the helper reports whether it recognised the
@@ -422,6 +513,33 @@ func (o *GraphOracle) ApplyMerge(cypher string, params map[string]any) OracleRes
 	if cypher == tmplMergeKnowsN {
 		return o.recordOp(cypher, params, o.applyMergeKnowsN(params))
 	}
+	// The MERGE-surface families (rmp #2461) each have a dedicated helper: a node
+	// MERGE with both action branches, the whole-map ON CREATE assignment, and
+	// the whole-pattern MERGE that creates both endpoints and the relationship.
+	switch cypher {
+	case tmplMergePersonCounter:
+		return o.recordOp(cypher, params, o.applyMergePersonCounter(params))
+	case tmplMergePersonSetAll:
+		return o.recordOp(cypher, params, o.applyMergePersonSetAll(params))
+	case tmplMergePairPattern:
+		return o.recordOp(cypher, params, o.applyMergePairPattern(params))
+	case tmplMergePairSetAll:
+		return o.recordOp(cypher, params, o.applyMergePairSetAll(params))
+	case tmplMergePairOuter:
+		return o.recordOp(cypher, params, o.applyMergePairOuter(params))
+	case tmplMergePairOuterRel:
+		return o.recordOp(cypher, params, o.applyMergePairOuterRel(params))
+	case tmplMergeZeroDriverNode, tmplMergeZeroDriverPair:
+		// The driving MATCH binds nothing, so the MERGE runs zero times: a
+		// committed statement that changed nothing (rmp #2512).
+		return o.recordOp(cypher, params, o.applyMergeZeroDriver())
+	case tmplMergeHandleOuterRelCreate:
+		// Node-only MERGE with an outer-RELATIONSHIP action (rmp #2515), ON CREATE.
+		return o.recordOp(cypher, params, o.applyMergeHandleOuterRel(params, true))
+	case tmplMergeHandleOuterRelMatch:
+		// The same shape, ON MATCH.
+		return o.recordOp(cypher, params, o.applyMergeHandleOuterRel(params, false))
+	}
 	if cypher != tmplMergePerson {
 		return o.recordOp(cypher, params, OracleResult{ErrorMsg: "oracle: unmodelled MERGE"})
 	}
@@ -447,7 +565,12 @@ func (o *GraphOracle) ApplyMerge(cypher string, params map[string]any) OracleRes
 // matched by name together with every incident edge. A miss is a committed
 // zero-effect result.
 func (o *GraphOracle) ApplyDelete(cypher string, params map[string]any) OracleResult {
-	if cypher != tmplDetachDelete {
+	// Standalone edge deletion (DELETE r on one KNOWS instance) is modelled by a
+	// dedicated helper; DETACH DELETE of a Person falls through below.
+	if cypher == tmplDeleteKnowsInst {
+		return o.recordOp(cypher, params, o.deleteKnowsInst(params))
+	}
+	if cypher != tmplDetachDelete && cypher != tmplDeleteNode {
 		return o.recordOp(cypher, params, OracleResult{ErrorMsg: "oracle: unmodelled DELETE"})
 	}
 	name, ok := paramString(params, "name")
@@ -457,6 +580,15 @@ func (o *GraphOracle) ApplyDelete(cypher string, params map[string]any) OracleRe
 	id, found := o.byName[name]
 	if !found {
 		return o.recordOp(cypher, params, OracleResult{Committed: true})
+	}
+	// The non-detach form ([tmplDeleteNode], rmp #2462) is only ever applied
+	// after the engine COMMITTED it, which openCypher permits solely for a node
+	// with no relationships. Applying it to a connected node would silently
+	// diverge the model from the engine, so it is refused loudly instead.
+	if cypher == tmplDeleteNode && o.incidentEdges(id) > 0 {
+		return o.recordOp(cypher, params, OracleResult{
+			ErrorMsg: "oracle: non-detach DELETE applied to a connected node",
+		})
 	}
 	for k := range o.edges {
 		if k.src == id || k.dst == id {
@@ -572,6 +704,70 @@ func (o *GraphOracle) personNamesSorted() []string {
 	return names
 }
 
+// personOrderRow is one modelled Person as the ordering probes read it: the
+// name and the integer age, the two keys every ordering probe sorts on
+// (rmp #2460).
+type personOrderRow struct {
+	Name string
+	Age  int64
+}
+
+// personOrderRows returns one row per modelled Person, ascending by name — the
+// independent reference the ordering probes sort with their own comparators
+// ([expectedOrdering]).
+//
+// complete reports whether the rows define a TOTAL order: every modelled Person
+// must carry both a string name and an integer age, and the names must be
+// distinct. When it is false the expected row SEQUENCE would be ambiguous — two
+// rows equal on both keys may legitimately come back either way round — so the
+// caller must skip the ordering probes rather than compare against a reference
+// that cannot be right. The surface workload always binds both properties and
+// numbers its names, so this is a guard, not an expectation.
+func (o *GraphOracle) personOrderRows() (rows []personOrderRow, complete bool) {
+	complete = true
+	seen := make(map[string]bool, len(o.nodes))
+	for _, n := range o.nodes {
+		if !hasLabel(n, "Person") {
+			continue
+		}
+		name, okName := n.Properties["name"].(string)
+		age, okAge := n.Properties["age"].(int64)
+		if !okName || !okAge || seen[name] {
+			complete = false
+			continue
+		}
+		seen[name] = true
+		rows = append(rows, personOrderRow{Name: name, Age: age})
+	}
+	slices.SortFunc(rows, func(a, b personOrderRow) int { return cmp.Compare(a.Name, b.Name) })
+	return rows, complete
+}
+
+// knowsOutDegreeByName returns, per modelled Person name, how many outgoing
+// KNOWS edges that Person has to a node the oracle still models — the
+// independent reference for the "top-k then expand" probe, which expands from
+// exactly the Persons the ordering puts in the top k (rmp #2460). A Person with
+// no outgoing KNOWS edge is absent from the map, which reads as zero.
+func (o *GraphOracle) knowsOutDegreeByName() map[string]int64 {
+	out := make(map[string]int64)
+	for k := range o.edges {
+		if k.label != "KNOWS" {
+			continue
+		}
+		src, ok := o.nodes[k.src]
+		if !ok || !hasLabel(src, "Person") {
+			continue
+		}
+		if _, ok := o.nodes[k.dst]; !ok {
+			continue
+		}
+		if nm, ok := src.Properties["name"].(string); ok {
+			out[nm]++
+		}
+	}
+	return out
+}
+
 // personsWithOutgoingKnows returns how many Person nodes have at least one
 // outgoing KNOWS edge — the independent reference for the EXISTS { (n)-[:KNOWS]->() }
 // subquery count in the Cypher-surface battery.
@@ -586,6 +782,181 @@ func (o *GraphOracle) personsWithOutgoingKnows() int {
 		}
 	}
 	return len(srcs)
+}
+
+// cityStat is the oracle's per-city aggregate reference for the grouped
+// surface probes (rmp #2452): the number of Person rows grouped under City and
+// the sum of their integer ages.
+type cityStat struct {
+	City   string
+	Count  int64
+	AgeSum int64
+}
+
+// personCityStats returns one [cityStat] per distinct Person city, ascending
+// by city — the independent reference for the grouped count(*)/sum(n.age) BY
+// n.city surface probes. complete reports whether EVERY modelled Person
+// carries a string city: when false the engine would emit a null-key group
+// the stats do not model, so the grouped-by-city probes must be skipped.
+func (o *GraphOracle) personCityStats() (stats []cityStat, complete bool) {
+	byCity := make(map[string]*cityStat)
+	complete = true
+	for _, n := range o.nodes {
+		if !hasLabel(n, "Person") {
+			continue
+		}
+		city, ok := n.Properties["city"].(string)
+		if !ok {
+			complete = false
+			continue
+		}
+		st := byCity[city]
+		if st == nil {
+			st = &cityStat{City: city}
+			byCity[city] = st
+		}
+		st.Count++
+		if a, ok := n.Properties["age"].(int64); ok {
+			st.AgeSum += a
+		}
+	}
+	stats = make([]cityStat, 0, len(byCity))
+	for _, st := range byCity {
+		stats = append(stats, *st)
+	}
+	slices.SortFunc(stats, func(a, b cityStat) int { return cmp.Compare(a.City, b.City) })
+	return stats, complete
+}
+
+// knowsTargetNamesDistinct returns the ascending-sorted DISTINCT names of every
+// node reached by a KNOWS edge whose source is a Person — the independent
+// reference for the RETURN DISTINCT b.name / WITH DISTINCT surface probes
+// (rmp #2452). Targets without a string name are skipped (none exist in the
+// surface workload, whose targets are always named Persons).
+func (o *GraphOracle) knowsTargetNamesDistinct() []string {
+	seen := make(map[string]bool)
+	for k := range o.edges {
+		if k.label != "KNOWS" {
+			continue
+		}
+		src, ok := o.nodes[k.src]
+		if !ok || !hasLabel(src, "Person") {
+			continue
+		}
+		dst, ok := o.nodes[k.dst]
+		if !ok {
+			continue
+		}
+		if nm, ok := dst.Properties["name"].(string); ok {
+			seen[nm] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for nm := range seen {
+		out = append(out, nm)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// subqueryFilterStats is the oracle's independent reference for the FILTERED
+// EXISTS { … } / COUNT { … } probes in the Cypher-surface battery (rmp #2507).
+//
+// The battery already drove the UNFILTERED spellings, and they were correct
+// throughout the defect: a subquery whose inner pattern carried a property
+// predicate returned a wrong value while the same subquery without one did not.
+// Adding a filtered probe is what makes the battery able to see that class at
+// all, and every field here is computed by walking the modelled graph so the
+// probe verifies a VALUE rather than merely that the query did not crash.
+type subqueryFilterStats struct {
+	// TargetName is the name of a Person that at least one other modelled Person
+	// KNOWS. It is chosen as the smallest such name so the probe is deterministic,
+	// and it is chosen from the TARGETS specifically so ToNamed is never zero — a
+	// probe expecting zero would pass on an engine that had stopped matching.
+	TargetName string
+	// PersonToPerson is the number of KNOWS edges whose endpoints are both
+	// modelled Persons.
+	PersonToPerson int64
+	// ToNamed is the number of KNOWS edges from a Person to the Person named
+	// TargetName. At least 1 whenever Usable.
+	ToNamed int64
+	// SrcToNamed is the number of DISTINCT Persons with at least one KNOWS edge to
+	// the Person named TargetName. It differs from ToNamed when the graph holds
+	// parallel edges, and it is what a pattern PREDICATE counts: the predicate asks
+	// whether a match exists, so each source row is counted once however many
+	// qualifying edges it has.
+	SrcToNamed int64
+	// ToAgeAtLeast is the number of KNOWS edges from a Person to a Person whose
+	// integer age is >= AgeFloor.
+	ToAgeAtLeast int64
+	// SrcWithAgeAtLeast is the number of Persons with at least one outgoing KNOWS
+	// to a Person whose integer age is >= AgeFloor.
+	SrcWithAgeAtLeast int64
+	// AgeFloor is the threshold the two age fields were computed against.
+	AgeFloor int64
+	// Usable reports whether the model holds at least one Person→Person KNOWS
+	// edge. When false every probe below would compare 0 against 0, which cannot
+	// fail, so the caller must SKIP them rather than record a vacuous pass.
+	Usable bool
+}
+
+// subqueryFilterStats computes [subqueryFilterStats] against ageFloor by walking
+// the modelled nodes and edges. It is deliberately independent of the engine: it
+// reads only the oracle's own model.
+func (o *GraphOracle) subqueryFilterStats(ageFloor int64) subqueryFilterStats {
+	st := subqueryFilterStats{AgeFloor: ageFloor}
+
+	// Pass 1: the Person→Person KNOWS edges, and the candidate target names.
+	type pair struct{ src, dst uint64 }
+	var links []pair
+	targets := make(map[string]bool)
+	for k := range o.edges {
+		if k.label != "KNOWS" {
+			continue
+		}
+		src, ok := o.nodes[k.src]
+		if !ok || !hasLabel(src, "Person") {
+			continue
+		}
+		dst, ok := o.nodes[k.dst]
+		if !ok || !hasLabel(dst, "Person") {
+			continue
+		}
+		links = append(links, pair{k.src, k.dst})
+		if nm, ok := dst.Properties["name"].(string); ok {
+			targets[nm] = true
+		}
+	}
+	if len(links) == 0 || len(targets) == 0 {
+		return st
+	}
+	st.PersonToPerson = int64(len(links))
+
+	names := make([]string, 0, len(targets))
+	for nm := range targets {
+		names = append(names, nm)
+	}
+	slices.Sort(names)
+	st.TargetName = names[0]
+
+	// Pass 2: the filtered counts.
+	srcsWithOld := make(map[uint64]bool)
+	srcsToNamed := make(map[uint64]bool)
+	for _, l := range links {
+		dst := o.nodes[l.dst]
+		if nm, ok := dst.Properties["name"].(string); ok && nm == st.TargetName {
+			st.ToNamed++
+			srcsToNamed[l.src] = true
+		}
+		if age, ok := dst.Properties["age"].(int64); ok && age >= ageFloor {
+			st.ToAgeAtLeast++
+			srcsWithOld[l.src] = true
+		}
+	}
+	st.SrcWithAgeAtLeast = int64(len(srcsWithOld))
+	st.SrcToNamed = int64(len(srcsToNamed))
+	st.Usable = true
+	return st
 }
 
 // knowsCount returns how many KNOWS edges the oracle models.
@@ -610,7 +981,8 @@ func hasLabel(n *NodeState, l string) bool {
 }
 
 // edgeStates returns a freshly-allocated slice of the modelled edges in a
-// deterministic order (by source id, then destination id, then label) so the
+// deterministic order (by source id, then destination id, then label, then
+// instance eid) so the
 // checker's seed-driven sampling is reproducible. The returned EdgeState values
 // are copies.
 func (o *GraphOracle) edgeStates() []EdgeState {
@@ -625,7 +997,12 @@ func (o *GraphOracle) edgeStates() []EdgeState {
 		if a.DstID != b.DstID {
 			return cmp.Compare(a.DstID, b.DstID)
 		}
-		return cmp.Compare(a.Label, b.Label)
+		if a.Label != b.Label {
+			return cmp.Compare(a.Label, b.Label)
+		}
+		// Parallel instances tie on (src,dst,label); the eid breaks the tie so
+		// the order stays deterministic (eids are unique per run).
+		return cmp.Compare(a.EID, b.EID)
 	})
 	return out
 }

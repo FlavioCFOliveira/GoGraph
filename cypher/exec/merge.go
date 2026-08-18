@@ -94,6 +94,13 @@ type Merge struct {
 	// they are applied separately via [applyWholeEntityValueToNode] (#2031).
 	onCreateSetAll []MergeSetAllAction
 	onMatchSetAll  []MergeSetAllAction
+	// outerRelCols carries the endpoint/handle triplet an [Expand] leaves in the
+	// row for each relationship variable a PRECEDING clause bound. An action
+	// naming one is a legitimate target — `MATCH ()-[rr:U]->() MERGE (z:P)
+	// ON CREATE SET rr.w = 7` — but schema-plus-[resolveNodeIDFromRow] only ever
+	// understood node values, so such a target was skipped and its write lost
+	// silently (rmp #2511). nil when the builder threads none in.
+	outerRelCols map[string]RelCols
 	// iteration state, reset on each Init call
 	matched    []Row
 	createdRow Row
@@ -103,6 +110,13 @@ type Merge struct {
 	created   bool
 	done      bool
 	firedOnce bool // tracks whether at least one merge cycle has run
+	// leadingClause records that this MERGE is the LEADING clause of its query —
+	// it has no driving clause at all, so its child is the synthetic single-row
+	// leaf rather than a real subplan. It is decided by plan shape in the physical
+	// builder (see [Merge.WithLeadingClause]) and NEVER inferred at runtime from
+	// whether rows arrived, because an exhausted child looks identical in both
+	// cases and guessing created data no statement asked for (rmp #2512).
+	leadingClause bool
 }
 
 // mergeAction is a pre-parsed ON CREATE / ON MATCH SET item. Two shapes
@@ -212,12 +226,92 @@ func (op *Merge) WithSetAllActions(onCreate, onMatch []MergeSetAllAction) *Merge
 	return op
 }
 
+// WithOuterRelCols attaches, per relationship variable bound by a preceding
+// clause, the (src, edge, dst) column triplet the [Expand] operator writes into
+// the row, so an action targeting one can be resolved (rmp #2511). May be nil.
+// Returns op for chaining.
+func (op *Merge) WithOuterRelCols(cols map[string]RelCols) *Merge {
+	op.outerRelCols = cols
+	return op
+}
+
+// WithLeadingClause declares whether this MERGE is the LEADING clause of its
+// query — that is, whether it has a driving clause at all. Pass true only when
+// the plan has no preceding clause feeding the MERGE; the physical builder
+// decides this from the logical plan (a nil IR child), never the operator from
+// its runtime behaviour. Returns op for chaining.
+//
+// openCypher executes an updating clause once per incoming row: CIP2015-10-27
+// "State visibility between clauses" tabulates nodes-created against rows-in for
+// `MATCH () CREATE ()`, and gives the leading clause exactly one incoming row.
+// A leading MERGE therefore runs once against the empty row, and a MERGE whose
+// driving clause produced no rows runs not at all.
+//
+// Both cases reach [Merge.Next] as an exhausted child, which is why the
+// distinction cannot be recovered there: the operator used to fire whenever no
+// row had ever arrived, so `MATCH (m:M {name:'absent'}) MERGE (q:Q)` created a
+// :Q node on a statement that matched nothing (rmp #2512).
+func (op *Merge) WithLeadingClause(leading bool) *Merge {
+	op.leadingClause = leading
+	return op
+}
+
+// isOuterRelVar reports whether targetVar names a relationship bound by a
+// PRECEDING clause — one of the variables [Merge.WithOuterRelCols] threads in.
+//
+// The node arms must ask this BEFORE they try to read the variable's column as a
+// node id. Since rmp #2317 a relationship rides in the row as a bare
+// [expr.IntegerValue] holding the instance's stable HANDLE, which is a different
+// namespace from [graph.NodeID] and shares its representation:
+// [resolveNodeIDFromRow] converts one to the other unconditionally, so a handle
+// that happens to equal an existing node's id resolved to that unrelated node and
+// the action wrote its property THERE — a silent misdirected write, not merely a
+// lost one (rmp #2515). Node ids are not dense, so whether any node carries the
+// value of a given handle varies with the graph; the defect therefore surfaced
+// only intermittently while being fully deterministic for a given graph.
+//
+// [resolveRowEntity] disambiguates the same integer with the same evidence; this
+// predicate simply stops the node arms from answering first and answering wrong.
+func (op *Merge) isOuterRelVar(targetVar string) bool {
+	_, ok := op.outerRelCols[targetVar]
+	return ok
+}
+
+// resolveActionRel resolves an action target that is not a node in scope but may
+// be a relationship bound by a preceding clause. Reports ok=false for anything
+// else, which the callers skip exactly as they always skipped an unresolvable
+// target.
+func (op *Merge) resolveActionRel(targetVar string, row Row) (entityBinding, bool) {
+	if op.schema == nil {
+		return entityBinding{}, false
+	}
+	ent, ok := resolveRowEntity(targetVar, op.schema, op.outerRelCols, row, op.mutator)
+	if !ok || !ent.isRel {
+		return entityBinding{}, false
+	}
+	return ent, true
+}
+
 // applySetAllActions applies each whole-entity SET action to the node it names,
-// resolved from row exactly as [Merge.applyActions] resolves a property action.
+// resolved from row exactly as [Merge.applyActions] resolves a property action,
+// falling back to a relationship bound by a preceding clause (rmp #2511).
 func (op *Merge) applySetAllActions(actions []MergeSetAllAction, row Row) error {
 	for _, a := range actions {
 		nodeKey, ok := op.resolveActionNodeKey(a.TargetVar, row)
 		if !ok {
+			ent, isRel := op.resolveActionRel(a.TargetVar, row)
+			if !isRel {
+				continue
+			}
+			v, err := a.Eval(row)
+			if err != nil {
+				return err
+			}
+			if err := applyWholeEntityValueToEdge(
+				op.mutator, a.TargetVar, ent.relSrcKey, ent.relDstKey, ent.relHandle, a.IsReplace, v,
+			); err != nil {
+				return err
+			}
 			continue
 		}
 		v, err := a.Eval(row)
@@ -234,7 +328,13 @@ func (op *Merge) applySetAllActions(actions []MergeSetAllAction, row Row) error 
 // resolveActionNodeKey resolves the node key an ON CREATE / ON MATCH action
 // targets: via the schema column first, then falling back to column 0 when the
 // action names the merge variable and that column carries the node id.
+//
+// A relationship bound by a preceding clause is declined outright — see
+// [Merge.isOuterRelVar] for why its column must never reach a node-id lookup.
 func (op *Merge) resolveActionNodeKey(targetVar string, row Row) (string, bool) {
+	if op.isOuterRelVar(targetVar) {
+		return "", false
+	}
 	if id, err := resolveNodeIDFromRow(targetVar, op.schema, row); err == nil {
 		if nodeKey, ok := op.mutator.ResolveNodeLabel(id); ok {
 			return nodeKey, true
@@ -469,13 +569,18 @@ func (op *Merge) Next(out *Row) (bool, error) {
 			return false, err
 		}
 		if !ok {
-			// Child has no more rows. When MERGE is the leading clause
-			// (no driving rows at all) the operator still fires once
-			// against an empty driving row so a standalone
-			// `MERGE (a:Foo)` creates the node — this matches the
-			// openCypher single-empty-row semantics that powers the
-			// Argument leaf.
-			if !op.firedOnce {
+			// Child has no more rows. openCypher runs MERGE once per incoming
+			// row, so a driving clause that produced none produces no execution
+			// at all (rmp #2512) — this arm must NOT create the pattern.
+			//
+			// The sole exception is the LEADING-clause plan shape, which has no
+			// driving clause: it owns the query's one initial empty row and so
+			// fires once against it. That is decided by the plan builder, not
+			// discovered here. In the physical plan the shape is already driven
+			// by [SingleRow], which delivers that row through the branch below,
+			// so this is the belt to its braces — and the contract an operator
+			// built directly against an empty child relies on.
+			if op.leadingClause && !op.firedOnce {
 				op.firedOnce = true
 				op.done = true
 				if err := op.runMergeForChild(Row{}); err != nil {
@@ -523,11 +628,15 @@ func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalF
 		var nodeID graph.NodeID
 		var resolved bool
 
-		// Try to resolve via schema first.
-		id, schemaErr := resolveNodeIDFromRow(a.nodeVar, op.schema, row)
-		if schemaErr == nil {
-			if nodeKey, resolved = op.mutator.ResolveNodeLabel(id); resolved {
-				nodeID = id
+		// Try to resolve via schema first — unless the target is a relationship
+		// bound by a preceding clause, whose column carries a handle rather than a
+		// node id and must not be read as one ([Merge.isOuterRelVar], rmp #2515).
+		if !op.isOuterRelVar(a.nodeVar) {
+			id, schemaErr := resolveNodeIDFromRow(a.nodeVar, op.schema, row)
+			if schemaErr == nil {
+				if nodeKey, resolved = op.mutator.ResolveNodeLabel(id); resolved {
+					nodeID = id
+				}
 			}
 		}
 
@@ -542,6 +651,14 @@ func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalF
 		}
 
 		if !resolved {
+			// Not a node in scope. A relationship bound by a preceding clause is
+			// still a legitimate target; resolveNodeIDFromRow only understands node
+			// values, so such an action used to be skipped and lost (rmp #2511).
+			if ent, isRel := op.resolveActionRel(a.nodeVar, row); isRel {
+				if err := op.applyRelAction(ent, a, evals, row); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 
@@ -564,8 +681,10 @@ func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalF
 		}
 
 		// Property-set action. Resolve the value: literal fast path first,
-		// then the per-row expression evaluator for a non-literal RHS.
-		pv, ok, remove, err := op.resolveActionValue(a, evals, row, nodeID)
+		// then the per-row expression evaluator for a non-literal RHS. The
+		// evaluator sees the row with the target's NodeID pinned at its schema
+		// column, so `a.nodeVar.<key>` reads the matched/created node.
+		pv, ok, remove, err := op.resolveActionValue(a, evals, op.actionEvalRow(row, a.nodeVar, nodeID))
 		if err != nil {
 			return err
 		}
@@ -609,7 +728,12 @@ func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalF
 //   - a non-literal RHS with no evaluator returns (_, false, false, nil) — the
 //     prior skip behaviour (defensive: every non-literal action is wired with
 //     an evaluator by the physical builder).
-func (op *Merge) resolveActionValue(a mergeAction, evals map[string]ValueEvalFn, row Row, nodeID graph.NodeID) (pv lpg.PropertyValue, ok, remove bool, err error) {
+//
+// evalRow is the row the per-row evaluator runs against. The node path passes the
+// row with the target pinned at its schema column ([Merge.actionEvalRow]); the
+// relationship path passes the row unchanged, since it already carries the bound
+// relationship and pinning a NodeID over it would destroy the binding.
+func (op *Merge) resolveActionValue(a mergeAction, evals map[string]ValueEvalFn, evalRow Row) (pv lpg.PropertyValue, ok, remove bool, err error) {
 	lit, perr := parsePropValue(a.value)
 	switch {
 	case perr == nil:
@@ -625,7 +749,6 @@ func (op *Merge) resolveActionValue(a mergeAction, evals map[string]ValueEvalFn,
 		if !has {
 			return lpg.PropertyValue{}, false, false, nil
 		}
-		evalRow := op.actionEvalRow(row, a.nodeVar, nodeID)
 		val, isNull, hasValue, evalErr := fn(evalRow)
 		if evalErr != nil {
 			return lpg.PropertyValue{}, false, false, evalErr
@@ -638,6 +761,34 @@ func (op *Merge) resolveActionValue(a mergeAction, evals map[string]ValueEvalFn,
 		}
 		return val, true, false, nil
 	}
+}
+
+// applyRelAction applies one per-property mergeAction to the relationship
+// instance ent names — a relationship bound by a clause preceding the MERGE
+// (rmp #2511). ent.relHandle is the row's own stable handle, so the write pins
+// the bound parallel instance rather than the pair's first edge; 0 means the
+// storage carries no stable handle and only the per-pair bag exists.
+//
+// A label-set action cannot occur on a relationship (sema rejects `SET r:Foo`),
+// so it is a defensive no-op. Value resolution reuses [Merge.resolveActionValue]
+// with the row unchanged, which is where a relationship RHS such as `rr.n + 1`
+// reads the bound relationship's current properties.
+func (op *Merge) applyRelAction(ent entityBinding, a mergeAction, evals map[string]ValueEvalFn, row Row) error {
+	if len(a.setLabels) > 0 {
+		return nil
+	}
+	pv, ok, remove, err := op.resolveActionValue(a, evals, row)
+	if err != nil {
+		return err
+	}
+	if remove {
+		delEdgeProp(op.mutator, ent.relSrcKey, ent.relDstKey, ent.relHandle, a.key)
+		return nil
+	}
+	if !ok {
+		return nil
+	}
+	return setEdgeProp(op.mutator, ent.relSrcKey, ent.relDstKey, ent.relHandle, a.key, pv)
 }
 
 // actionEvalRow returns a row for a per-row RHS evaluator: a copy of row with

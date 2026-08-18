@@ -442,7 +442,17 @@ func (op *SetAllProperties) refreshRowEntity(row Row, target entityBinding) {
 		v.Properties = lpgPropsToMapValue(op.mutator.NodeProperties(target.nodeKey))
 		row[colIdx] = v
 	case expr.RelationshipValue:
-		v.Properties = lpgPropsToMapValue(op.mutator.EdgeProperties(target.relSrcKey, target.relDstKey))
+		// Route the refresh exactly as reads route: the instance's own by-handle
+		// bag when its stable handle resolves and the bag is non-empty, the
+		// per-pair aggregate otherwise. Refreshing from the aggregate leaked a
+		// parallel TWIN's keys into this row's snapshot (#2502).
+		props := op.mutator.EdgeProperties(target.relSrcKey, target.relDstKey)
+		if target.relHandle != 0 {
+			if bag := op.mutator.EdgePropertiesByHandle(target.relSrcKey, target.relDstKey, target.relHandle); len(bag) > 0 {
+				props = bag
+			}
+		}
+		v.Properties = lpgPropsToMapValue(props)
 		row[colIdx] = v
 	}
 }
@@ -491,7 +501,10 @@ func (op *SetAllProperties) applyExprValue(target entityBinding, v expr.Value) e
 		if !srcOK || !dstOK {
 			return nil
 		}
-		return op.copyFromSource(target, entityBinding{isRel: true, relSrcKey: srcKey, relDstKey: dstKey})
+		// Since rmp #2317 the value's ID IS the stable handle: carry it so
+		// copyFromSource reads the evaluated instance's own bag, not the
+		// per-pair aggregate (#2503).
+		return op.copyFromSource(target, entityBinding{isRel: true, relSrcKey: srcKey, relDstKey: dstKey, relHandle: src.ID})
 	default:
 		return fmt.Errorf("TypeError: SET %s: expected a Map, Node or Relationship but was %s", op.entityVar, v.Kind())
 	}
@@ -590,10 +603,22 @@ func (op *SetAllProperties) applyEntityCopy(target entityBinding, row Row) error
 // target. The full property snapshot is taken before any write, so copying a
 // relationship onto itself is safe. Existing target properties are cleared
 // first for `=` (replace) semantics.
+//
+// A relationship source is read exactly as reads route: the bound instance's
+// own by-handle bag when its stable handle resolves and the bag is non-empty,
+// the per-pair aggregate otherwise. Copying from the aggregate leaked a
+// parallel TWIN's keys into the target — `SET x = r` copied a map that
+// `RETURN properties(r)` never showed (#2503, the source-side sibling of the
+// #2502 refresh routing).
 func (op *SetAllProperties) copyFromSource(target, src entityBinding) error {
 	var sourceProps map[string]lpg.PropertyValue
 	if src.isRel {
 		sourceProps = op.mutator.EdgeProperties(src.relSrcKey, src.relDstKey)
+		if src.relHandle != 0 {
+			if bag := op.mutator.EdgePropertiesByHandle(src.relSrcKey, src.relDstKey, src.relHandle); len(bag) > 0 {
+				sourceProps = bag
+			}
+		}
 	} else {
 		sourceProps = op.mutator.NodeProperties(src.nodeKey)
 	}
@@ -643,8 +668,7 @@ func (op *SetAllProperties) applyMap(target entityBinding, row Row) error {
 // delNodePropConstrained in merge_setall.go.
 func (op *SetAllProperties) clearTarget(target entityBinding) {
 	if target.isRel {
-		props := op.mutator.EdgeProperties(target.relSrcKey, target.relDstKey)
-		for k := range props {
+		for k := range relClearKeys(op.mutator, target.relSrcKey, target.relDstKey, target.relHandle) {
 			op.deleteOne(target, k)
 		}
 		return
@@ -654,6 +678,28 @@ func (op *SetAllProperties) clearTarget(target entityBinding) {
 		// DelNodeProperty releases, at the mutator choke point (rmp #2358).
 		op.mutator.DelNodeProperty(target.nodeKey, k)
 	}
+}
+
+// relClearKeys returns the set of property keys a whole-entity replace must
+// tear down for the bound relationship: the per-pair aggregate keys plus —
+// when the instance's stable handle is resolved — the keys of that instance's
+// own by-handle bag. The aggregate alone is NOT sufficient: a REMOVE pinned to
+// a parallel twin deletes the pair-level entry while the targeted instance's
+// bag still carries the key, and reads are bag-authoritative — enumerating the
+// aggregate let that key survive `SET r = {…}` (#2502). Shared by
+// [SetAllProperties.clearTarget] and [SetProperty.applyToRelationship].
+func relClearKeys(mut GraphMutator, srcKey, dstKey string, handle uint64) map[string]struct{} {
+	pair := mut.EdgeProperties(srcKey, dstKey)
+	keys := make(map[string]struct{}, len(pair))
+	for k := range pair {
+		keys[k] = struct{}{}
+	}
+	if handle != 0 {
+		for k := range mut.EdgePropertiesByHandle(srcKey, dstKey, handle) {
+			keys[k] = struct{}{}
+		}
+	}
+	return keys
 }
 
 // writeOne writes a single (key, value) pair to the target, dispatching to the
@@ -692,6 +738,17 @@ func (op *SetAllProperties) writeOne(target entityBinding, key string, value lpg
 // is released so the registry stays in sync with the graph.
 func (op *SetAllProperties) deleteOne(target entityBinding, key string) {
 	if target.isRel {
+		// When the targeted instance's stable handle is resolved and the
+		// mutator implements [relInstancePropRemover], it performs both
+		// removals itself so -properties is gated on that instance's OWN bag
+		// rather than the per-pair aggregate (#2501): a whole-entity replace
+		// teardown must not count a key the targeted parallel instance never
+		// carried. The handle==0 fallback keeps the pairwise path
+		// byte-identical.
+		if m, ok := op.mutator.(relInstancePropRemover); ok && target.relHandle != 0 {
+			m.DelEdgePropertyOnInstance(target.relSrcKey, target.relDstKey, target.relHandle, key)
+			return
+		}
 		op.mutator.DelEdgeProperty(target.relSrcKey, target.relDstKey, key)
 		if target.relHandle != 0 {
 			op.mutator.DelEdgePropertyByHandle(target.relSrcKey, target.relDstKey, target.relHandle, key)
@@ -745,12 +802,17 @@ func resolveEntityBinding(
 		}
 		return entityBinding{nodeKey: nodeKey}, nil
 	case expr.RelationshipValue:
+		// Post-projection row: since rmp #2317 the value's ID IS the stable
+		// handle. Leaving it at 0 here degraded a whole-entity SET issued after
+		// a WITH boundary to the pairwise path — the per-pair store changed
+		// while the instance's own bag, which reads route through, kept the
+		// pre-SET map (#2502, the SetAllProperties residual of #2334).
 		srcKey, srcOK := mut.ResolveNodeLabel(graph.NodeID(v.StartID))
 		dstKey, dstOK := mut.ResolveNodeLabel(graph.NodeID(v.EndID))
 		if !srcOK || !dstOK {
 			return entityBinding{}, fmt.Errorf("cannot resolve relationship endpoints (%d, %d)", v.StartID, v.EndID)
 		}
-		return entityBinding{isRel: true, relSrcKey: srcKey, relDstKey: dstKey}, nil
+		return entityBinding{isRel: true, relSrcKey: srcKey, relDstKey: dstKey, relHandle: v.ID}, nil
 	default:
 		return entityBinding{}, fmt.Errorf("variable %q is not IntegerValue/NodeValue/RelationshipValue (got %T)", varName, row[colIdx])
 	}

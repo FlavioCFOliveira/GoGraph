@@ -2093,7 +2093,16 @@ func exprToPackstream(v any, boltMajor uint8) packstream.Value {
 // exprValueToPackstream converts a typed expr.Value to packstream.Value.
 // boltMajor is the negotiated Bolt major version; for temporal values the
 // correct PackStream Struct tag depends on whether the client speaks Bolt v4.4
-// or v5.0+ (task #1434).
+// or v5.0+ (task #1434), and for entities on whether the element_id fields are
+// carried (see entity_struct.go).
+//
+// Containers (List, Map) recurse element-wise with boltMajor threaded through,
+// so a nested container, and any entity or temporal inside one, encodes
+// structurally under both negotiated versions. Nesting is NOT bounded here:
+// [expr.MaxValueDepth] caps construction at 1000 levels while the wire caps
+// encoding at packstream.maxValueDepth (128), so an over-deep value is refused
+// by [packstream.Encoder.WriteValue] with the typed packstream.ErrNestingTooDeep
+// — a clean per-query error — rather than being silently truncated here.
 //
 //nolint:gocyclo,cyclop // dispatch over all expr.Value kinds; complexity is irreducible
 func exprValueToPackstream(v expr.Value, boltMajor uint8) packstream.Value {
@@ -2116,6 +2125,17 @@ func exprValueToPackstream(v expr.Value, boltMajor uint8) packstream.Value {
 		return relationshipToStruct(x, boltMajor)
 	case expr.PathValue:
 		return pathToStruct(x, boltMajor)
+	case expr.ListValue:
+		// A PackStream List, encoded element-wise (rmp #2513). The list markers
+		// themselves are version-independent, but the ELEMENTS are not — an
+		// entity or temporal element branches on the negotiated version — so
+		// boltMajor is threaded down rather than dropped. A nil or empty
+		// ListValue yields a non-nil empty List, never NULL.
+		l := make([]packstream.Value, len(x))
+		for i, ev := range x {
+			l[i] = exprValueToPackstream(ev, boltMajor)
+		}
+		return l
 	case expr.MapValue:
 		m := make(map[string]packstream.Value, len(x))
 		for k, mv := range x {

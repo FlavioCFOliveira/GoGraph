@@ -63,6 +63,92 @@ var exprLiteralCases = []exprLiteralCase{
 	{"RETURN tail([1,2,3])", []string{"[2, 3]"}},
 	{"RETURN 'x' IN ['x','y']", []string{"true"}},
 
+	// CY11b — the remaining PURE scalar/list/string/math surface (rmp #2458).
+	// A coverage run measured these functions as never called by the DST at all.
+	// Every expectation is an absolute constant captured from the engine, so a
+	// regression in the argument order, the units, or the null policy fails the
+	// run. Registration and arity were verified in cypher/funcs (never assumed):
+	// `cot` and `haversin` are ABSENT from the registry and so cannot be probed
+	// here, and `extract`/`filter` are pass-through stubs whose real contract is
+	// pinned below rather than pretended away.
+	//
+	// String functions.
+	{"RETURN left('hello', 3)", []string{`"hel"`}},
+	{"RETURN left('hello', 0)", []string{`""`}},
+	{"RETURN right('hello', 3)", []string{`"llo"`}},
+	// A count past the end clamps to the whole string rather than erroring.
+	{"RETURN right('hello', 99)", []string{`"hello"`}},
+	// ltrim/rtrim strip on ONE side only, which is what distinguishes them from
+	// trim: the surviving padding is the assertion.
+	{"RETURN ltrim('  hi  ')", []string{`"hi  "`}},
+	{"RETURN rtrim('  hi  ')", []string{`"  hi"`}},
+	{"RETURN replace('abcabc', 'b', 'X')", []string{`"aXcaXc"`}},
+	// Non-overlapping, left to right: 'aaa' has one 'aa' match, leaving 'a'.
+	{"RETURN replace('aaa', 'aa', 'b')", []string{`"ba"`}},
+	// size() counts RUNES on a string, not bytes: 'héllo' is 6 bytes, 5 runes.
+	{"RETURN size('hello')", []string{"5"}},
+	{"RETURN size('héllo')", []string{"5"}},
+	{"RETURN size('')", []string{"0"}},
+
+	// Conversions. The engine's policy is HYBRID: unparseable string content
+	// yields null, while a wrong argument TYPE is a typed error — so the null
+	// cases below pin the content policy, not an error being swallowed.
+	{"RETURN toBoolean('true')", []string{"true"}},
+	{"RETURN toBoolean('TRUE')", []string{"true"}},
+	{"RETURN toBoolean('nope')", []string{"null"}},
+	{"RETURN toBoolean(true)", []string{"true"}},
+	{"RETURN toBooleanList([true, 'false', 1.5])", []string{"[true, false, null]"}},
+	{"RETURN toFloatList([1, '2.5', true])", []string{"[1, 2.5, null]"}},
+	// toInteger truncates toward zero (1.9 → 1), it does not round.
+	{"RETURN toIntegerList([1.9, '-3', 'x'])", []string{"[1, -3, null]"}},
+	{"RETURN toStringList([1, 2.5, true, null])", []string{`["1", "2.5", "true", null]`}},
+
+	// isNaN and the trig/log family. Each argument is chosen so the result is a
+	// long, function-specific expansion: a swapped or wrongly-scaled
+	// implementation cannot land on the same constant by accident.
+	{"RETURN isNaN(0.0/0.0)", []string{"true"}},
+	{"RETURN isNaN(sqrt(-1.0))", []string{"true"}},
+	{"RETURN isNaN(1.0)", []string{"false"}},
+	{"RETURN sin(1.0)", []string{"0.8414709848078965"}},
+	{"RETURN cos(1.0)", []string{"0.5403023058681398"}},
+	{"RETURN tan(1.0)", []string{"1.557407724654902"}},
+	{"RETURN asin(0.5)", []string{"0.5235987755982989"}},
+	{"RETURN acos(0.5)", []string{"1.0471975511965976"}},
+	{"RETURN atan(1.0)", []string{"0.7853981633974483"}},
+	// atan2(y, x): the y-first argument order is what this constant pins —
+	// atan2(1,2) is 0.4636…, while the transposed atan2(2,1) is 1.1071….
+	{"RETURN atan2(1.0, 2.0)", []string{"0.4636476090008061"}},
+	{"RETURN log(2.0)", []string{"0.6931471805599453"}},
+	{"RETURN log10(2.0)", []string{"0.3010299956639812"}},
+	{"RETURN exp(2.0)", []string{"7.38905609893065"}},
+	{"RETURN pi()", []string{"3.141592653589793"}},
+	{"RETURN e()", []string{"2.718281828459045"}},
+	// degrees/radians pin the direction of the conversion in both senses.
+	{"RETURN degrees(1.0)", []string{"57.29577951308232"}},
+	{"RETURN radians(90.0)", []string{"1.5707963267948966"}},
+
+	// sort(): openCypher's total order, stable, ascending. The mixed
+	// upper/lower case is deliberate — the order is by code point, so 'A'
+	// precedes 'a', which a locale-collating implementation would get wrong.
+	{"RETURN sort([3,1,2,1])", []string{"[1, 1, 2, 3]"}},
+	{"RETURN sort(['b','A','a'])", []string{`["A", "a", "b"]`}},
+	{"RETURN sort([])", []string{"[]"}},
+
+	// Null propagation on the scalar surface.
+	{"RETURN size(null)", []string{"null"}},
+	{"RETURN left(null, 3)", []string{"null"}},
+	{"RETURN isNaN(null)", []string{"null"}},
+
+	// extract() and filter() are registered STUBS (cypher/funcs/list_funcs.go:
+	// fnExtractStub / fnFilterStub), not implementations: each takes exactly one
+	// argument and returns it unchanged, existing only so a hand-built
+	// FunctionInvocation does not resolve to "unknown function" — the real
+	// comprehension semantics live in the evaluator, and the openCypher
+	// `extract(x IN list | expr)` spelling does not even parse here. The
+	// identity contract is pinned so a future change to it is visible.
+	{"RETURN extract([1,2])", []string{"[1, 2]"}},
+	{"RETURN filter([1,2])", []string{"[1, 2]"}},
+
 	// CY12 — subscript, slice, map projection.
 	{"RETURN [10,20,30][1]", []string{"20"}},
 	{"RETURN range(1,10)[2..5]", []string{"[3, 4, 5]"}},
@@ -76,6 +162,86 @@ var exprLiteralCases = []exprLiteralCase{
 	{"RETURN date('2026-07-13')", []string{"2026-07-13"}},
 	{"RETURN date('2026-07-13').year", []string{"2026"}},
 	{"RETURN duration({days:2}).days", []string{"2"}},
+
+	// CY15b — the temporal function surface (rmp #2457). Every expectation below
+	// is an ABSOLUTE constant captured from the engine, so a regression in the
+	// truncation calendar arithmetic, the duration normalisation, the epoch
+	// conversion, or the component accessors fails the run rather than being
+	// compared against another engine-derived value.
+	//
+	// truncate family — date / datetime / localdatetime / localtime / time
+	// (cypher/funcs/temporal.go registers all five).
+	{"RETURN date.truncate('year', date('2026-07-13'))", []string{"2026-01-01"}},
+	{"RETURN date.truncate('month', date('2026-07-13'))", []string{"2026-07-01"}},
+	// 2026-07-13 is itself a Monday, so week-truncation is a fixed point.
+	{"RETURN date.truncate('week', date('2026-07-13'))", []string{"2026-07-13"}},
+	// The optional third argument overrides a component AFTER truncation.
+	{"RETURN date.truncate('month', date('2026-07-13'), {day: 5})", []string{"2026-07-05"}},
+	{"RETURN datetime.truncate('day', datetime('2026-07-13T14:35:47.123456789Z'))", []string{"2026-07-13T00:00Z"}},
+	{"RETURN datetime.truncate('hour', datetime('2026-07-13T14:35:47Z'))", []string{"2026-07-13T14:00Z"}},
+	{"RETURN localdatetime.truncate('minute', localdatetime('2026-07-13T14:35:47.5'))", []string{"2026-07-13T14:35"}},
+	{"RETURN localdatetime.truncate('day', localdatetime('2026-07-13T14:35:47'))", []string{"2026-07-13T00:00"}},
+	{"RETURN localtime.truncate('hour', localtime('14:35:47.25'))", []string{"14:00"}},
+	{"RETURN localtime.truncate('second', localtime('14:35:47.25'))", []string{"14:35:47"}},
+	{"RETURN time.truncate('minute', time('14:35:47.25Z'))", []string{"14:35Z"}},
+	{"RETURN time.truncate('hour', time('14:35:47Z'))", []string{"14:00Z"}},
+
+	// duration.between and the inDays / inMonths / inSeconds projections. The
+	// two-argument forms compute the duration between two temporals; the
+	// one-argument forms project an existing duration onto a single unit.
+	{"RETURN duration.between(date('2026-01-01'), date('2026-03-15'))", []string{"P2M14D"}},
+	{"RETURN duration.between(localdatetime('2026-01-01T00:00:00'), localdatetime('2026-01-02T03:04:05'))", []string{"P1DT3H4M5S"}},
+	{"RETURN duration.inDays(date('2026-01-01'), date('2026-03-15'))", []string{"P73D"}},
+	{"RETURN duration.inMonths(date('2026-01-01'), date('2026-03-15'))", []string{"P2M"}},
+	{"RETURN duration.inSeconds(localtime('01:00:00'), localtime('02:30:00'))", []string{"PT1H30M"}},
+	{"RETURN duration.inSeconds(duration('PT1H30M'))", []string{"PT1H30M"}},
+	// The months stride is NOT rolled into days (it has no fixed day count).
+	{"RETURN duration.inDays(duration('P1M40D'))", []string{"P40D"}},
+	{"RETURN duration.inMonths(duration('P14M'))", []string{"P1Y2M"}},
+
+	// Epoch constructors.
+	{"RETURN datetime.fromepoch(1767225600, 0)", []string{"2026-01-01T00:00Z"}},
+	{"RETURN datetime.fromepochmillis(1767225600123)", []string{"2026-01-01T00:00:00.123Z"}},
+
+	// Component access on each temporal type.
+	{"RETURN date('2026-07-13').month", []string{"7"}},
+	{"RETURN date('2026-07-13').day", []string{"13"}},
+	{"RETURN date('2026-07-13').week", []string{"29"}},
+	{"RETURN date('2026-07-13').quarter", []string{"3"}},
+	{"RETURN date('2026-07-13').dayOfWeek", []string{"1"}},
+	{"RETURN localdatetime('2026-07-13T14:35:47.5').hour", []string{"14"}},
+	{"RETURN localdatetime('2026-07-13T14:35:47.5').minute", []string{"35"}},
+	{"RETURN localdatetime('2026-07-13T14:35:47.5').second", []string{"47"}},
+	{"RETURN datetime('2026-07-13T14:35:47+02:00').offsetSeconds", []string{"7200"}},
+	{"RETURN datetime('2026-07-13T14:35:47Z').epochSeconds", []string{"1783953347"}},
+	{"RETURN datetime('2026-07-13T14:35:47.500Z').epochMillis", []string{"1783953347500"}},
+	{"RETURN localtime('14:35:47.25').nanosecond", []string{"250000000"}},
+	{"RETURN time('14:35:47Z').hour", []string{"14"}},
+	// A duration's components are the CANONICAL ones: months rolls the years in
+	// (1Y2M → 14), and seconds rolls the hours and minutes in.
+	{"RETURN duration('P1Y2M3DT4H5M6S').years", []string{"1"}},
+	{"RETURN duration('P1Y2M3DT4H5M6S').months", []string{"14"}},
+	{"RETURN duration('P1Y2M3DT4H5M6S').days", []string{"3"}},
+	{"RETURN duration('P1Y2M3DT4H5M6S').hours", []string{"4"}},
+	{"RETURN duration('P1Y2M3DT4H5M6S').minutes", []string{"245"}},
+	{"RETURN duration('P1Y2M3DT4H5M6S').seconds", []string{"14706"}},
+
+	// Temporal arithmetic and comparison. Adding one month to 31 January
+	// overflows the shorter month exactly as time.Date normalisation does.
+	{"RETURN date('2026-01-31') + duration('P1M')", []string{"2026-03-03"}},
+	{"RETURN date('2026-03-01') - duration('P1D')", []string{"2026-02-28"}},
+	{"RETURN localdatetime('2026-01-01T00:00:00') + duration('PT90M')", []string{"2026-01-01T01:30"}},
+	{"RETURN date('2026-01-01') < date('2026-01-02')", []string{"true"}},
+	{"RETURN date('2026-01-01') = date('2026-01-01')", []string{"true"}},
+
+	// Statement-`now` stability: openCypher requires every "now" constructor
+	// within ONE statement to observe the SAME instant. The engine freezes it per
+	// query in cypher/stmt_now_reg.go, so these must be true/PT0S regardless of
+	// how long the statement takes; a per-call time.Now() would make them flap.
+	{"RETURN datetime() = datetime()", []string{"true"}},
+	{"RETURN date() = date()", []string{"true"}},
+	{"RETURN localdatetime() = localdatetime()", []string{"true"}},
+	{"RETURN duration.inSeconds(localtime(), localtime())", []string{"PT0S"}},
 }
 
 // CheckExprLiterals runs the graph-independent expression battery and asserts

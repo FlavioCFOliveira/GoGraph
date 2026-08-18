@@ -186,6 +186,7 @@ func WithFinalCheckpoint() Option {
 //	cp := checkpoint.New(cfg, g, wlog, &unusedMu,
 //		checkpoint.WithCommitSerialiser[string, float64](st.RunUnderCommitLock),
 //		checkpoint.WithMapperCodec[string, float64](st.Codec()),
+//		checkpoint.WithWeightCodec[string, float64](st.WeightCodec()),
 //		checkpoint.WithConstraintSpecs[string, float64](eng.ConstraintSpecsForSnapshot),
 //		checkpoint.WithIndexSpecs[string, float64](eng.IndexSpecsForSnapshot))
 //	cp.Start(ctx)

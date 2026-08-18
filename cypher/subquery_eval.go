@@ -81,6 +81,44 @@ type subqueryEvaluator struct {
 	// recogniser: a pattern rejected by one may be accepted by the other, and
 	// sharing a cache would conflate the two verdicts.
 	labelledHop map[ast.Expression]*labelledHopShape
+
+	// params is the enclosing query's fully-resolved parameter map, threaded
+	// into every inner build (rmp #2507).
+	//
+	// It is NOT optional and it is not only about `$name`. [parser.StripLiterals]
+	// hoists a string literal written inside a MATCH pattern or a WHERE predicate
+	// onto an auto-parameter, so `(:Person {name: 'B'})` reaches the planner as
+	// `(:Person {name: $«auto_1»})` — including when it is written inside a
+	// subquery. Building the inner plan without the map left every such reference
+	// unbound, the comparison evaluated to NULL, and the inner Filter dropped rows
+	// that should have matched. That is why the defect looked like "only FILTERED
+	// subqueries are wrong": a numeric literal is never hoisted, so a numeric
+	// filter had always worked.
+	params map[string]expr.Value
+
+	// outer is the enclosing query's build options, the source from which each
+	// inner plan's SCOPED CHILD is derived by [buildOpts.forSubquery]. It is read,
+	// never mutated.
+	//
+	// Today it is always set: [buildReadPhysical] is the sole construction site and
+	// it calls [subqueryEvaluator.bind] immediately. [buildOpts.forSubquery]
+	// nonetheless tolerates a nil receiver, so a future construction site that
+	// forgets to bind degrades to the pre-#2507 behaviour — an unresolvable
+	// subquery predicate — rather than panicking mid-query.
+	outer *buildOpts
+}
+
+// bind attaches the enclosing query's parameter map and build options to the
+// evaluator. It is called once, after the outer [buildOpts] exists, because that
+// struct holds a back-pointer to this evaluator (bopts.subEval) and the two
+// therefore cannot be constructed in one step.
+//
+// Passing the outer buildOpts is what gives a NESTED subquery an evaluator: the
+// child that [buildOpts.forSubquery] derives carries this same evaluator in its
+// subEval field, so nesting recurses to any depth with a fresh scope each time.
+func (e *subqueryEvaluator) bind(params map[string]expr.Value, outer *buildOpts) {
+	e.params = params
+	e.outer = outer
 }
 
 // compiledSubquery bundles the runtime state of a single compiled subquery:
@@ -234,7 +272,14 @@ func (e *subqueryEvaluator) compileSubAST(innerAST *ast.SingleQuery, row expr.Ro
 		schema[v] = i
 	}
 
-	op, err := buildOperator(innerPlan, e.walker, e.labels, e.reg, nil, schema, nil, nil, argByTag, nil)
+	// The inner build receives the enclosing query's PARAMETERS and a SCOPED CHILD
+	// of its build options (rmp #2507). Both were nil before, and both had to
+	// change together: the parameter map is what makes a hoisted or user-supplied
+	// literal resolve, and the child buildOpts is what makes an inner relationship
+	// variable hydrate and a nested subquery or pattern predicate find its
+	// evaluator. See [buildOpts.forSubquery] for what the child carries and, more
+	// importantly, for what it must not.
+	op, err := buildOperator(innerPlan, e.walker, e.labels, e.reg, e.params, schema, nil, nil, argByTag, e.outer.forSubquery())
 	if err != nil {
 		return nil, fmt.Errorf("build inner operator: %w", err)
 	}

@@ -45,13 +45,57 @@ type CrossReleaseUpgradeResult struct {
 	// release). This is a PRIOR-release defect, recorded but NOT charged to the
 	// current code; the current/prior-self contract can still hold.
 	PriorWALFidelityGap bool
+
+	// ── Snapshot provenance (rmp #2477) ──────────────────────────────────────
+	//
+	// Everything below describes the half of the image the harness could not see
+	// before this task: the SNAPSHOT DIRECTORY the prior release published, and
+	// whether the current code genuinely opened it.
+
+	// HelperBuildFallbackErr is the error that forced the helper build to drop
+	// its checkpoint half at this tag, or nil when the checkpoint-bearing build
+	// succeeded. See [BuildPriorReleaseHelper].
+	HelperBuildFallbackErr error
+	// CheckpointErr is the prior release's own checkpoint failure, empty when the
+	// checkpoint succeeded or was never attempted.
+	CheckpointErr string
+	// SnapshotProvenanceGap is set when the image carries a snapshot directory on
+	// disk that the CURRENT recovery did not load, or loaded but could not parse.
+	// It is the fault this task exists to be able to detect at all.
+	SnapshotProvenanceGap string
+	// PriorSnapshot is what the current manifest reader saw in the prior
+	// release's snapshot directory, read straight off disk.
+	PriorSnapshot PriorSnapshotFacts
+	// SnapshotLabels / SnapshotProperties are how many label and property records
+	// the prior release's snapshot components fed back into the recovered graph.
+	SnapshotLabels     int
+	SnapshotProperties int
+	// HelperCheckpointBuilt reports that the helper for this tag was built WITH
+	// its checkpoint half; false means the tag's checkpoint API did not match and
+	// the image is WAL-only.
+	HelperCheckpointBuilt bool
+	// CheckpointPublished reports that the prior release actually published the
+	// checkpoint (it built AND ran).
+	CheckpointPublished bool
+	// SnapshotOpened reports that the CURRENT recovery loaded a snapshot from the
+	// image. Compared against [PriorSnapshotFacts.Present], which is read from
+	// the filesystem, so "there was a snapshot and the reader ignored it" is a
+	// distinguishable state rather than an unfalsifiable false.
+	SnapshotOpened bool
+	// SnapshotOnlyRecovery reports the strongest provenance outcome: a non-empty
+	// graph recovered with a snapshot loaded and ZERO WAL ops replayed, so every
+	// recovered node came through the prior release's snapshot bytes and the WAL
+	// cannot account for any of it.
+	SnapshotOnlyRecovery bool
 }
 
 // Parity reports whether the current code reopened the prior image faithfully:
-// no fail-stop and the current recovery matched the prior release's own
-// recovery. A prior-release WAL fidelity gap does not, by itself, fail parity.
+// no fail-stop, the current recovery matched the prior release's own recovery,
+// and — when the image carries one — the prior release's snapshot directory was
+// actually opened rather than skipped. A prior-release WAL fidelity gap does
+// not, by itself, fail parity.
 func (r *CrossReleaseUpgradeResult) Parity() bool {
-	return r.DataCompatError == nil && r.CountMismatch == ""
+	return r.DataCompatError == nil && r.CountMismatch == "" && r.SnapshotProvenanceGap == ""
 }
 
 // String renders the result for a test failure message.
@@ -59,6 +103,22 @@ func (r CrossReleaseUpgradeResult) String() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "cross-release upgrade %s -> current: priorLive(n=%d e=%d) priorSelf(n=%d e=%d) currentRecovered(n=%d e=%d) walOps=%d",
 		r.Tag, r.PriorLiveNodes, r.PriorLiveEdges, r.PriorSelfNodes, r.PriorSelfEdges, r.RecoveredNodes, r.RecoveredEdges, r.ReplayedWALOps)
+	fmt.Fprintf(&b, "\n  image: checkpointBuilt=%v published=%v snapshotOnDisk=%v snapshotOpened=%v snapshotOnly=%v manifestV%d integrity=%q verified=%v files=%v labels=%d props=%d",
+		r.HelperCheckpointBuilt, r.CheckpointPublished, r.PriorSnapshot.Present, r.SnapshotOpened, r.SnapshotOnlyRecovery,
+		r.PriorSnapshot.ManifestVersion, r.PriorSnapshot.Integrity, r.PriorSnapshot.IntegrityVerified,
+		r.PriorSnapshot.Files, r.SnapshotLabels, r.SnapshotProperties)
+	if r.HelperBuildFallbackErr != nil {
+		fmt.Fprintf(&b, "\n  NOTE: helper at %s built WITHOUT its checkpoint half (image is WAL-only): %v", r.Tag, r.HelperBuildFallbackErr)
+	}
+	if r.CheckpointErr != "" {
+		fmt.Fprintf(&b, "\n  NOTE: prior release %s checkpoint failed: %s", r.Tag, r.CheckpointErr)
+	}
+	if r.PriorSnapshot.ManifestErr != nil {
+		fmt.Fprintf(&b, "\n  MANIFEST READ FAULT: %v", r.PriorSnapshot.ManifestErr)
+	}
+	if r.SnapshotProvenanceGap != "" {
+		fmt.Fprintf(&b, "\n  SNAPSHOT PROVENANCE GAP: %s", r.SnapshotProvenanceGap)
+	}
 	if r.PriorWALFidelityGap {
 		fmt.Fprintf(&b, "\n  NOTE: prior release %s WAL does not round-trip in its OWN recovery (live!=self) — a PRIOR-release defect, not charged to current code", r.Tag)
 	}
@@ -93,7 +153,28 @@ func (r CrossReleaseUpgradeResult) String() string {
 // skip; an honest data-compatibility fault is carried in the result, not the
 // error.
 func RunCrossReleaseUpgrade(ctx context.Context, repoRoot, tag string, seed uint64, ops int) (CrossReleaseUpgradeResult, error) {
-	helper, err := BuildPriorReleaseHelper(ctx, repoRoot, tag)
+	return RunCrossReleaseUpgradeWithOptions(ctx, repoRoot, tag, seed, ops, XReleaseBuildOptions{})
+}
+
+// RunCrossReleaseUpgradeWithOptions is [RunCrossReleaseUpgrade] with explicit
+// helper-build options.
+//
+// [XReleaseBuildOptions.ForceWALOnly] drives the whole pipeline over a
+// deliberately WAL-only image. That serves two distinct purposes, and both are
+// load-bearing (rmp #2531):
+//
+//  1. It is the snapshot oracle's negative control. Every tag in the harness's
+//     list now publishes a snapshot, so every ordinary arm reports
+//     SnapshotOpened=true; this arm is the one that must report false, which is
+//     what makes the true ones mean anything.
+//  2. It is the ONLY remaining exercise of a prior release's WAL-REPLAY path.
+//     Publishing a checkpoint truncates the WAL to the snapshot watermark, so
+//     recovery satisfies itself from the snapshot and never replays the full op
+//     history. A prior-release defect that lives in WAL replay — v0.2.0 has one —
+//     becomes invisible the moment the image gains a snapshot. Keeping this arm
+//     keeps that path covered rather than trading one blindness for another.
+func RunCrossReleaseUpgradeWithOptions(ctx context.Context, repoRoot, tag string, seed uint64, ops int, opts XReleaseBuildOptions) (CrossReleaseUpgradeResult, error) {
+	helper, err := BuildPriorReleaseHelperWithOptions(ctx, repoRoot, tag, opts)
 	if err != nil {
 		return CrossReleaseUpgradeResult{}, err
 	}
@@ -115,7 +196,19 @@ func RunCrossReleaseUpgrade(ctx context.Context, repoRoot, tag string, seed uint
 		return CrossReleaseUpgradeResult{}, fmt.Errorf("sim: cross-release: prior %s write image: %w", tag, err)
 	}
 
-	out := CrossReleaseUpgradeResult{Tag: tag, PriorLiveNodes: prior.Nodes, PriorLiveEdges: prior.Edges}
+	out := CrossReleaseUpgradeResult{
+		Tag:                    tag,
+		PriorLiveNodes:         prior.Nodes,
+		PriorLiveEdges:         prior.Edges,
+		HelperCheckpointBuilt:  helper.CheckpointSupported,
+		HelperBuildFallbackErr: helper.BuildFallbackErr,
+		CheckpointPublished:    prior.Checkpoint,
+		CheckpointErr:          prior.CheckpointErr,
+		// Read the published directory off the filesystem BEFORE any reopen, with
+		// the current manifest reader. This is the independent half of the
+		// provenance check: recovery's own SnapshotHit cannot be its own witness.
+		PriorSnapshot: InspectPriorSnapshotDir(imageDir),
+	}
 
 	// Durable truth: how the PRIOR release reads its OWN image back.
 	selfN, selfE, err := helper.SelfRecoverCounts(ctx, imageDir)
@@ -134,10 +227,15 @@ func RunCrossReleaseUpgrade(ctx context.Context, repoRoot, tag string, seed uint
 		return out, nil
 	}
 	out.ReplayedWALOps = rec.walOps
+	out.SnapshotOpened = rec.snapshotHit
+	out.SnapshotLabels = rec.snapshotLabels
+	out.SnapshotProperties = rec.snapshotProperties
 	rn, _ := rec.engine.NodeCount()
 	re, _ := rec.engine.EdgeCount()
 	out.RecoveredNodes = rn
 	out.RecoveredEdges = re
+	out.SnapshotOnlyRecovery = rec.snapshotHit && rec.walOps == 0 && rn > 0
+	out.SnapshotProvenanceGap = classifySnapshotProvenance(&out)
 
 	// The cross-version contract: current recovery reproduces the prior release's
 	// own recovery node-for-node. Edges are compared under the harness's matched
@@ -148,6 +246,43 @@ func RunCrossReleaseUpgrade(ctx context.Context, repoRoot, tag string, seed uint
 		out.CountMismatch = fmt.Sprintf("nodes: current=%d prior-self=%d (prior-live=%d)", rn, selfN, prior.Nodes)
 	}
 	return out, nil
+}
+
+// classifySnapshotProvenance adjudicates the snapshot half of an upgrade run and
+// returns the fault description, or "" when the image's snapshot state and the
+// current reader's behaviour agree (rmp #2477).
+//
+// The rule is a comparison between two INDEPENDENT observations of the same
+// image: what the filesystem holds ([PriorSnapshotFacts], read by the current
+// manifest reader) and what recovery says it loaded (SnapshotOpened). A claim
+// resting on either alone is unfalsifiable — a reader that ignores a snapshot
+// directory reports exactly the false a WAL-only image reports — so only the
+// pair can distinguish "there was nothing to open" from "there was something and
+// it was skipped".
+//
+// It deliberately does NOT fault a WAL-only image. A tag whose checkpoint half
+// would not build produces one legitimately, and the harness records that
+// separately (HelperBuildFallbackErr); turning it into a failure here would
+// convert a known coverage degradation into noise on an unrelated contract.
+func classifySnapshotProvenance(r *CrossReleaseUpgradeResult) string {
+	switch {
+	case r.PriorSnapshot.Present && r.PriorSnapshot.ManifestErr != nil:
+		// The prior release wrote a manifest the CURRENT reader cannot parse: a
+		// genuine cross-version snapshot-format fault, and precisely the class this
+		// task made reachable.
+		return fmt.Sprintf("prior release %s published a manifest the current reader rejects: %v",
+			r.Tag, r.PriorSnapshot.ManifestErr)
+	case r.PriorSnapshot.Present && !r.SnapshotOpened:
+		return fmt.Sprintf("prior release %s published a snapshot directory (manifest v%d, files %v) "+
+			"but the current recovery did not load it (SnapshotHit=false)",
+			r.Tag, r.PriorSnapshot.ManifestVersion, r.PriorSnapshot.Files)
+	case r.SnapshotOpened && !r.PriorSnapshot.Present:
+		// Recovery claims a snapshot the filesystem does not show. Either the
+		// directory moved under the harness or SnapshotHit is not what it says.
+		return fmt.Sprintf("current recovery reports a snapshot hit on the %s image, "+
+			"but no manifest.json is present on disk", r.Tag)
+	}
+	return ""
 }
 
 // CrossReleaseDivergence classifies one op's prior-vs-current observable

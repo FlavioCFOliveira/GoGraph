@@ -416,14 +416,30 @@ type Options[N comparable, W any] struct {
 	// guarantee, and one that stops holding the moment a reopen follows a torn
 	// tail.
 	//
+	// # Do not set this field by hand
+	//
+	// Build the store with [store/recovery.Result.NewStore] instead: it is the
+	// same constructor with the recovered sequence already applied, and it is the
+	// supported way to reopen a store on a non-empty WAL. Leaving the value for
+	// the embedder to plug in is what rmp #2522 found had failed at EVERY call
+	// site in the module — the shipped examples, the commands, and the store
+	// composition all hand-wrote the reopen and all omitted it, so the sequence
+	// restarted at 0 on every reopen while transactions carrying those same
+	// numbers were still present in the WAL being appended to.
+	//
+	// The field remains exported for the wiring [store/recovery.Result.NewStore]
+	// itself performs, for a caller with an exotic reopen that reconstructs the
+	// graph some other way, and for the simulation harness's sensitivity seam,
+	// which sets it to 0 DELIBERATELY to prove its oracles can fail.
+	//
 	// # Why it is DERIVED and not persisted
 	//
-	// Set it from [store/recovery.Result.MaxTxnSeq], which is the highest
-	// sequence any replayed v3 frame carried. The WAL already records the
-	// sequence in every frame, so a separate durable counter would be a second
-	// source of truth that can disagree with the log — the same reasoning
-	// rmp #2309 applies to the MVCC clock. Zero, the value every fresh store
-	// carries, starts at 1 as before.
+	// The value is [store/recovery.Result.MaxTxnSeq], the highest sequence any
+	// replayed v3 frame carried. The WAL already records the sequence in every
+	// frame, so a separate durable counter would be a second source of truth that
+	// can disagree with the log — the same reasoning rmp #2309 applies to the
+	// MVCC clock. Zero, the value every fresh store carries, starts at 1 as
+	// before.
 	ResumeTxnSeq uint64
 }
 
