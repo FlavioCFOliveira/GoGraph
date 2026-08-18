@@ -1113,6 +1113,8 @@ high-water seed).
 | `Skill` | A project-relevant Claude Code skill. | `name`, `kind` (`skill`), `description`, `path` |
 | `Memory` | A persistent assistant memory file (mirror of the harness memory directory). | `name` (frontmatter slug), `file` (basename), `type` (`user`\|`feedback`\|`project`\|`reference`), `description` |
 | `Document` | A prose document under `docs/` that records a decision, a design, an audit or a certification. Present in the live graph since before this table existed (see the data-quality note below); its certification use was documented 2026-08-09 (sprint 337). | `path` (repo-relative, the identity), `title`, `kind` (`certification`\|`design`\|`audit`), `verdict` (certifications only — the cycle's stated outcome) |
+| `Defect` | A confirmed defect in the module or in its test harness, whether fixed or still open. **Present in the live graph long before this table documented it** (18 nodes at 2026-08-18); its property set is deliberately heterogeneous, because each defect records the evidence its own diagnosis produced. | `id` (the rmp ticket number, the identity) or `ref`; `title`, `status` (`OPEN`\|`FIXED`), `severity`, `component`, `rootCause`, `evidence`/`measured`, `fixCommit`, `regressionTest`. Added 2026-08-18 (`0ed5d4d1`, rmp #2547): `backlog` (bool — true while the defect is filed but in no sprint), `family` (a named class of related defects, e.g. `crash-model fidelity: rmp #2514, #2535, #2538`), `foundDuring` (what surfaced it, when that is not an audit) |
+| `Lesson` | A generalisable conclusion drawn from a defect — the part worth keeping once the ticket is closed. Present in the live graph before this table documented it; documented 2026-08-18. | `name` (a slug, the identity), `summary` (the lesson itself, stated so it applies beyond the originating defect), `claim`/`date` on the older nodes |
 
 ### Enumerated property values
 
@@ -1160,7 +1162,7 @@ All edges carry `gitCommit` and `gitDate`.
 | `FIXES` | `(Commit)-[:FIXES]->(Feature)` | A commit fixes a bug in (or hardens) a feature area. |
 | `IMPROVES` | `(Commit)-[:IMPROVES]->(Feature)` | A commit improves (perf/observability/tests) a feature area without fixing a defect. |
 | `TOUCHES` | `(Commit)-[:TOUCHES]->(Package\|Type\|Function\|Spec)` | A commit's diff touched this element; drives provenance re-stamping. |
-| `IMPLEMENTED_IN` | `(Task)-[:IMPLEMENTED_IN]->(Commit)` | The commit that delivered a task's work. |
+| `IMPLEMENTED_IN` | `(Task)-[:IMPLEMENTED_IN]->(Commit)` | The commit that delivered a task's work. **The direction is load-bearing, not incidental:** every documented read starts at the `Task`, so an edge written the other way round makes the work *invisible* to `MATCH (t:Task)-[:IMPLEMENTED_IN]->(c:Commit)` rather than merely awkward to reach — a query returning nothing reads as "no such work exists". Four sprint-347 edges (tasks #2480, #2514, #2535, #2537 — the whole DST crash-model family) were found reversed as `(Commit)-[:IMPLEMENTED_IN]->(Task)` and **repaired at `0ed5d4d1` (2026-08-18)**: the correct-direction edges carry `reconciledAt` and `reconciledNote` so the repair is auditable. Verify after any sync with `MATCH (a)-[e:IMPLEMENTED_IN]->(b) RETURN labels(a)[0], labels(b)[0], count(*)` — a `Commit`→`Task` row is a defect. |
 | `DEPENDS_ON` | `(Task)-[:DEPENDS_ON]->(Task)` | A task cannot start/complete until another task (a genuine prerequisite) does. |
 | `FOLLOWED_BY` | `(Task)-[:FOLLOWED_BY]->(Task)` | A completed task's work surfaced a distinct, non-blocking follow-up tracked as a new task — NOT a prerequisite (contrast `DEPENDS_ON`). Introduced 2026-07-02 (task #1866 → #1875). |
 | `ABOUT` | `(Memory)-[:ABOUT]->(Feature\|Sprint)` | A memory concerns a feature area or sprint. |
@@ -1170,6 +1172,8 @@ All edges carry `gitCommit` and `gitDate`.
 | `DELIVERS` | `(Sprint)-[:DELIVERS]->(Feature)` | The sprint that delivered a capability. Documented 2026-07-28 (sprint 311). |
 | `VERIFIES` | `(Test\|Benchmark)-[:VERIFIES]->(Feature)` | A test or benchmark that gates a feature's correctness or its measured performance. Documented 2026-07-28 (sprint 311). |
 | `MEASURES` | `(Benchmark)-[:MEASURES]->(Function\|Method)` | A benchmark whose measurement targets a specific symbol, as distinct from `VERIFIES`, which targets a `Feature`. Documented 2026-07-29 (sprint 313, task #2145). |
+| `TAUGHT` | `(Defect\|Task)-[:TAUGHT]->(Lesson)` | A defect record whose diagnosis produced a generalisable `Lesson` — knowledge that outlives the ticket. The `Defect` source is the older form; the `Task` source was **widened at `0ed5d4d1` (2026-08-18)** for rmp #2538, whose `Task` node carries `type='BUG'` and is therefore itself a defect record. Documented 2026-08-18. |
+| `FOUND` | `(Task\|SecurityAudit\|AuditRound)-[:FOUND]->(Finding\|Perf\|Defect)` | Work that surfaced a finding, a measurement or a defect. The `Defect` target was **widened at `0ed5d4d1` (2026-08-18)**, recording that rmp #2547 was found while validating #2538 rather than by the audit that scoped it. Documented 2026-08-18. |
 
 **Data-quality note (observed 2026-07-02, partially remediated):** the live graph has
 accumulated several more edge types across incremental syncs than this table documents in
@@ -1264,36 +1268,73 @@ maps onto a feature.
 
 ---
 
-## ⚠️ Guard-rail gotcha — `set`/`delete`/`remove`/`detach`
+## ⚠️ Guard-rail gotcha — what `rmp graph` actually rejects
 
-`rmp graph` enforces operation-class guard-rails by **scanning the raw Cypher text** for the
-write-keywords `SET`, `DELETE`, `REMOVE`, `DETACH` (whole-word, case-insensitive). This trips
-on those words appearing **inside string data** — both when writing and when reading:
+**Corrected 2026-08-18 by measurement (commit `0ed5d4d1`). The previous version of this
+section was wrong, and wrong in the expensive direction: it told every reader to mangle
+property values to dodge a raw-text scan that this `rmp` build does not perform.** The
+superseded claim is preserved at the end of this section so a corrected document can be told
+apart from a careless one.
 
-- `create`/`update`/`delete` reject a query if a forbidden keyword for the wrong class
-  appears anywhere, including inside a quoted literal.
-- `query`/`search` reject a read whose literals contain `SET`/`DELETE`/`REMOVE`/`DETACH`
-  (e.g. `WHERE m.name = 'Delete'` is rejected).
+### The rule that IS true — each subcommand is class-locked
 
-GoGraph's own source is full of such identifiers (`Delete`, `Set`, `RemoveLabel`,
-`detach_delete.go`, …). **Workaround: split the keyword with Cypher string concatenation** so
-the raw text never contains the contiguous token, while the evaluated value is byte-identical:
+`rmp graph` rejects a query whose **write clauses** belong to another operation class. This is
+a clause check, so it fires on the query's structure, never on its data:
 
-```cypher
--- write (creation):
-CREATE (m:Method {name:'Dele'+'te', ...})
--- read:
-MATCH (m:Method) WHERE m.name = 'Dele'+'te' RETURN m
-MATCH (n) WHERE n.file ENDS WITH 'se'+'t.go' RETURN n
-```
+| Subcommand | Accepts | A wrong-class clause gives |
+|---|---|---|
+| `create` | `CREATE` / `MERGE` only | `rc=6 graph create accepts only CREATE/MERGE queries` |
+| `update` | `SET` / `REMOVE` only | `rc=6 graph update accepts only SET/REMOVE queries` |
+| `delete` | `DELETE` / `DETACH DELETE` | `rc=6` for the same reason |
+| `query` / `search` | read-only | `rc=6 graph query accepts only read-only queries` |
 
-When querying for symbols whose names contain these tokens, prefer a guard-safe substring
-(`CONTAINS 'elete'`, `CONTAINS 'emove'`) or the split-literal form above.
+The consequence that still governs every write: **`create` rejects a real `SET` clause, even
+inside `MERGE … ON CREATE SET …`**, so upserting a node with mutable or provenance properties
+is always two calls — `create` to `MERGE` the identity, then `update` to `SET` the rest. Keep
+the `MERGE` map to identity properties only, since `MERGE` matches the *whole* pattern and a
+differing mutable property creates a duplicate instead of matching.
 
-Additionally, `rmp graph create` accepts **only `CREATE`/`MERGE` write clauses** — a real
-`SET` clause is rejected (`graph create accepts only CREATE/MERGE queries`), so upserts
-must carry every property inline in the `MERGE`/`CREATE` property map. Use the `update`
-class for `SET`/`REMOVE` clauses; `UNWIND … MATCH … SET` is accepted there.
+### What was measured, and how
+
+Probed directly against this build before relying on it (2026-08-18, all `rc=0`, and each
+probe bound nothing so the graph was unchanged — verified afterwards with a count of stray
+nodes and properties, which was 0):
+
+| Probe | Class | Result |
+|---|---|---|
+| `WHERE m.name = 'Delete'` — *the old section's own counter-example* | `query` | **accepted**, returned 2 rows |
+| `WHERE n.title = 'DETACH DELETE semantics'` | `query` | **accepted** |
+| `WHERE b.name = 'Delete'` over `CONTAINS*1..2` | `search` | **accepted**, returned 6 rows |
+| `WHERE m.name = 'Set' OR m.name = 'RemoveLabel'` | `query` | **accepted** |
+| `SET n.note = 'Remove and RemoveAll unlink a name'` | `update` | **accepted** |
+| `SET n.note = '… any delete(d.dirs) outside three bodies; no detach here'` | `update` | **accepted** |
+| `MERGE (m:Package {name:'a delete probe'})` | `create` | **accepted** (reached execution; failed later on a null bound variable) |
+
+So `SET`, `DELETE`, `REMOVE` and `DETACH` inside **string literals** are accepted in the
+`query`, `search`, `create` and `update` classes alike.
+
+### What this means for writing to the graph
+
+- **Write plain, readable prose in property values.** GoGraph's own vocabulary — `Delete`,
+  `Set`, `RemoveLabel`, `RemoveAll`, `detach_delete.go`, `delete(d.dirs)` — needs no
+  disguising, and disguising it made stored descriptions harder to read for no protection.
+- **No data migration is needed.** Values previously written as `'Dele'+'te'` evaluated to
+  `Delete` at insert time, so what is stored is already byte-identical to the plain form; the
+  old workaround cost readability of the *Cypher*, not correctness of the *data*.
+- **Re-probe before trusting this section again.** It was wrong once. If a future `rmp`
+  reinstates a raw-text scan, the four probes above are the cheapest way to find out, and a
+  read probe costs nothing.
+
+### Superseded claim (kept deliberately, do not act on it)
+
+Until 2026-08-18 this section asserted that `rmp graph` "enforces operation-class guard-rails
+by **scanning the raw Cypher text**" for `SET`/`DELETE`/`REMOVE`/`DETACH` (whole-word,
+case-insensitive), that this "trips on those words appearing **inside string data** — both
+when writing and when reading", that `query`/`search` "reject a read whose literals contain"
+them (offering `WHERE m.name = 'Delete'` as an example of a rejected read), and it prescribed
+splitting every such literal as `'Dele'+'te'`. **Every part of that except the class-lock rule
+was refuted by the probes above.** The claim also propagated into assistant memory, so treat a
+second-hand warning about this scan as unverified until re-probed.
 
 ---
 
@@ -3290,3 +3331,72 @@ SUBSTORE, while every declared invariant binds TWO substores — and the `UNIQUE
 sits outside the versioning substrate altogether. The reference engines do not have this
 class of defect because PostgreSQL and InnoDB version the whole ROW and Memgraph the whole
 VERTEX, so any two writers to one object meet.
+
+Incrementally synced at commit `0ed5d4d1` (2026-08-18, task **rmp #2538**, sprint 347 — the
+ghost dirent that destroyed its own successor). +10 nodes, +25 edges, −4 edges.
+
+**Nodes.** `Commit` `0ed5d4d1`; `Task` 2538 (COMPLETED, BUG, `sprint_id` 347); `Defect` 2547
+(OPEN, severity 6, `backlog` true); `Feature` `simdisk-ghost-dirent-pruning`; `Lesson`
+`a-crash-model-must-not-manufacture-a-loss-nor-hide-one`; 5 `Test`s — the first Test nodes
+`internal/sim` has ever had — from the new `internal/sim/disk_dirs_ghost_test.go`
+(`TestSimDisk_RecreatedDirAfterRemoveSurvivesCrash`, `…_DirsNeverOutliveTheirSubtree`,
+`…_GhostDirEntriesFires`, `…_DirsDeletionIsCentralised`,
+`…_RolledBackRenameRestoresPrunedDirEntry`), each carrying its own `verifies`. Provenance
+bumped on `Package` `internal/sim`, which was **three commits stale** at `455bbef7`
+(2026-06-16) despite `9cf79c71`, `18fe98dd` and `bdbb3d2f` all holding `TOUCHES` edges to it.
+
+**Edges.** `Task 2538 -[IMPLEMENTED_IN]-> Commit`; `Task 2538 -[FOUND_BY]-> Audit`
+`simdisk-crash-model-fidelity-2026-08-18` (the fix closes its finding **F4**);
+`Task 2538 -[TAUGHT]-> Lesson`; `Task 2538 -[FOUND]-> Defect 2547`;
+`Commit -[TOUCHES]-> Package internal/sim`; `Commit -[IMPLEMENTS]-> Feature` (new);
+`Commit -[FIXES]-> Feature` `DST Simulator`; `Feature -[LIVES_IN]-> Package`;
+`Feature -[BUILDS_ON]->` both `simdisk-rename-crash-fidelity` and `simdisk-durable-shadow`
+(the fix extends #2514's rename undo record with `prunedDirs` and is destroyed through
+#2535's `CrashHost` revoke pass, so the dependency is structural, not thematic);
+`Defect 2547 -[FOUND_IN]-> simdisk-rename-crash-fidelity`; 5 `CONTAINS` and 5 `VERIFIES` for
+the new Tests. Two shapes widened — `(Task)-[:TAUGHT]->(Lesson)` and
+`(Task)-[:FOUND]->(Defect)` — both now in the edge table.
+
+**THE RECONCILIATION THAT MATTERED MORE THAN THE SYNC.** Four `IMPLEMENTED_IN` edges in this
+same family — tasks #2480, #2514, #2535, #2537 — were written `(Commit)-[:IMPLEMENTED_IN]->(Task)`,
+against this document and against 198 of the other 202 live edges. The documented read
+`MATCH (t:Task)-[:IMPLEMENTED_IN]->(c:Commit)` therefore returned **nothing at all** for the
+entire DST crash-model family, which is worse than a missing node: an empty result reads as
+"no such work exists" rather than as "the graph is incomplete here". Repaired at this commit —
+correct-direction edges created and stamped with each task's own delivery commit plus
+`reconciledAt`/`reconciledNote`, then the four reversed edges dropped. The documented query now
+returns all 11 sprint-347 tasks. The direction note is now in the edge table, with the census
+query that detects a recurrence.
+
+**THE DURABLE INSIGHT (the `Lesson` node).** A simulated crash model must never manufacture a
+loss a real filesystem cannot produce, and the two failure directions are **distinct**: a
+*false accusation* is the harness inventing data loss so the oracle blames the engine for a
+defect that is not there, and its *mirror* is the harness keeping data a real crash would lose,
+so a genuine engine defect passes unseen. A fix in this class must close both, and closing one
+is the natural way to open the other — pruning the ghost dirent alone would have kept a subtree
+whose directory name never reached stable storage, which is why the pruned entry is restored
+*with its original non-durability* when a rename rolls back. Same family as #2514 (a crash lost
+both names of a rename, which `rename(2)` atomicity forbids) and #2535 (a crash discarded no
+unsynced data at all, so no scenario could fail a missing fsync).
+
+**A discrepancy reconciled to the code.** The commit message says the AST guard permits "the
+**two** sanctioned bodies"; the `permitted` map at `internal/sim/disk_dirs_ghost_test.go:315`
+lists **three** — `removeSubtreeLocked`, `pruneGhostDirEntriesLocked` and `Rename`. The code
+wins; the graph records three.
+
+**A QUERY TRAP worth knowing, because it fakes a data defect.** `RETURN e.gitDate AS d` where
+`d` is *also* a pattern variable in the same query silently returns **the node's internal id**
+instead of the property — a stamped edge then looks unstamped (observed: `16142` where
+`2026-08-18` was stored). Alias edge properties to names that no pattern variable uses
+(`etype`, `edate`, `ecommit`) and re-run before concluding anything is missing.
+
+**AN OPEN GAP, recorded so it is not rediscovered.** `internal/sim` — the DST harness itself —
+has effectively **no symbol tier**: at this commit the graph holds 2 `Type` nodes and 0
+`Method` nodes for a package of 254 `.go` files and ~90.5k lines, and there is no `Type` node
+for `SimDisk` at all. So "which function maintains invariant X" cannot be answered from the
+graph for the one package this sprint exists to sharpen; it must be answered by reading
+`disk.go`. Measured extraction cost, whole package: ~349 `Type`, ~854 `Method`, ~1068
+`Function`, 716 `Test`, 2 `Benchmark` — about 2990 nodes and ~3840 edges (`CONTAINS` +
+`HAS_METHOD`). `disk.go` alone plus its 12 sibling test files is ~174 nodes and ~270 edges.
+The extractor this document's Bootstrap section points at (`/tmp/kgextract.go`) **no longer
+exists on disk** and would have to be rebuilt.
