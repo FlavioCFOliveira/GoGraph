@@ -1096,7 +1096,7 @@ high-water seed).
 
 | Label | Meaning | Properties (beyond `gitCommit`, `gitDate`) |
 |---|---|---|
-| `Package` | A Go package (one per source directory). | `name` (package clause), `path` (repo-relative dir, `"."` for root), `importPath` (full), `kind` |
+| `Package` | A Go package (one per source directory). | `name` (package clause), `path` (repo-relative dir, `"."` for root), `importPath` (full), `kind`. Added 2026-08-18 (`15c77ddc`): `testOnly` (bool — the package contains no non-test source file, as with `internal/tmphygiene`) and `responsibility` (one sentence stating what the package owns, per the *Exemplary components* mandate in `CLAUDE.md`) |
 | `Type` | A `type` declaration. | `name`, `pkg` (importPath), `file` (repo-relative), `kind`, `exported` (bool), `generic` (bool), optional `doc`. **Divergence observed 2026-08-18:** the `internal/sim` Type nodes are keyed on a `package` property holding the repo-relative dir (`internal/sim`) instead of `pkg` holding the importPath, so a `pkg`-based query misses them. New sim Types at `124eca54` followed the existing local convention rather than splitting the package's identity across two property names; reconciling the two is a hygiene task. |
 | `Function` | A top-level `func` with no receiver that is not a Test/Benchmark/Fuzz/Example. | `name`, `pkg`, `file`, `exported`, `generic` |
 | `Method` | A `func` with a receiver. | `name`, `pkg`, `file`, `recv` (receiver type, `*` stripped), `exported` |
@@ -3462,10 +3462,73 @@ a DDL crash test's sensitivity proof had begun passing **vacuously** because the
 restored the very component its damage injector deleted. A green sensitivity arm is not evidence the
 oracle *can* fail. Re-verify every arm after any change to the substrate it provokes.
 
-**CODE-LEVEL DIVERGENCE, reported not fixed (no `.go` edits in this sync).** The corrected rationale
+**CODE-LEVEL DIVERGENCE — reported here, and RESOLVED at `af2d9c50` (2026-08-18).** ~~Reported not fixed~~: The corrected rationale
 lives on `unlinkUndo.prunedDirs` (`internal/sim/disk.go:785-796`), but two comments still assert the
 refuted claim: `renameUndo.prunedDirs` (~`:847`) still says "without this … a host crash would keep a
 subtree whose own name never reached stable storage", and `undoUnlinkLocked` (~`:2484`) still says
 "the `prunedDirs` restore is what keeps the crash from losing LESS than a real one — see
-`[unlinkUndo]`", **pointing at the very comment that refutes it**. The graph carries the measured
-version; the code carries both.
+`[unlinkUndo]`", **pointing at the very comment that refutes it**. The graph carried the measured version while the code
+carried both. **`af2d9c50` corrected both comments** — `renameUndo.prunedDirs` now records that its original justification "was measured FALSE once pinning became coherent" and defers to `unlinkUndo.prunedDirs` for the measurement, and `undoUnlinkLocked` now states that the restore "changes no post-crash state at all" and keeps the intermediate state honest for the next record's undo. Verified in the committed tree. Code and graph now agree.
+
+Incrementally synced at commits `15c77ddc` and `af2d9c50` (2026-08-18, tasks **rmp #2527** and
+**#2531**, sprint 347 — **the sprint's final two, closing it at 31 of 31**). **+24 nodes, +~60
+edges, 0 duplicates.**
+
+**`15c77ddc` (#2527) — temp directories that outlive their processes.** New `Package`
+`internal/tmphygiene` (the first node carrying `testOnly`), new exported `Function`
+`crashinject.RemoveHelperBinary`, `Feature` `tmphygiene-age-first-temp-guard`, 15 `Test`s.
+**The ticket's rate was wrong by ~9x** — the real leak is **2 directories per gate run at 15.24 MB
+each**, one per suite pass; the 18 in the ticket was an *accumulated population across roughly nine
+runs* mistaken for one run's output. Two sites: the crash-injection helper binary, where
+`t.Cleanup` is the wrong **scope** (the path is cached in a `sync.Once` for the whole process) and a
+bare `defer` is **unreachable** (`goleak.VerifyTestMain` ends in `os.Exit`), fixed with a
+process-scoped `TestMain` hook; and a soak-only OOM subprocess with no cleanup on **any** of its
+three return paths.
+
+**The guard's design is recorded because the threshold choice is the insight.** It is **age-based
+first** (24 h, twice the repo's longest sanctioned process lifetime) because *a count ceiling is
+structurally blind to this leak's shape*: at 2/run a ceiling of 128 first fires on the **65th** gate
+run, by which time the causing run is unidentifiable, while age fires the next day and **one**
+directory suffices. A soft warn/fail band still catches bursts, which age alone would miss, and a
+free-space band names WAL durability failures in a nearly-full volume as **environmental** rather
+than letting them present as engine defects. Two self-maintenance gates keep it honest: an AST scan
+asserting every temp-rooted `MkdirTemp` prefix is declared — **it found a 12th site passing its
+prefix as a parameter**, invisible to a literal-only scan — and a wiring scan asserting every package
+calling `crashinject.Run` installs the hook.
+
+**`af2d9c50` (#2531) — a snapshot from every prior release, WITHOUT losing the WAL-only path.** New
+`Feature` `dst-cross-release-snapshot-compat`, `Spec` `docs/dst.md`, 1 `Test`. Tag list grew from two
+to four (v0.1.0, v0.2.0, v0.3.0, **v0.11.0** — the release users upgrade *from*, never previously
+exercised, and its manifest predates the #2520 framing trailer, so the integrity check now
+discriminates across a one-sprint boundary). **Three facts recorded because each corrects something
+that was or could have been asserted:**
+
+1. **The cause was NOT "the method was unexported".** `RunCheckpoint` was exported only from v0.6.0,
+   but `New`, `Config{Dir}`, `Start`, `Stop`, `Trigger` and `TriggerCtx` have been exported and
+   shape-identical **since v0.1.0** — no prior release ever lacked a checkpoint entry point. The
+   staged helper simply named a symbol **five releases too young**, which is why one file now builds
+   at all 14 tags.
+2. **Publishing a checkpoint TRUNCATES the WAL** (`walOps` 682 → 0), so the fix as specified would
+   have moved the prior-release WAL-replay path *out* of coverage and **silently deleted the defect
+   the acceptance criteria asked to document**. The forced WAL-only arm is a **required arm, not a
+   control**, and `TestCrossRelease_WALOnlyImageIsSnapshotFree` pins it.
+3. **The v0.2.0 self-recovery gap is an artefact of the WAL-only image, not a standing defect** —
+   `WALReplayGapExpected` is `true` at v0.1.0/v0.2.0 and `false` from v0.3.0 on, and it is **distinct
+   from the adjlist panic fixed in v0.3.2** that older comments describe. Recorded on the Feature as
+   `v020GapIsAnArtefact`. *Checked before writing: the graph never carried it as a `Defect`, so this
+   is a defensive record rather than a correction.*
+
+**Two `Lesson`s.** `a-fix-that-widens-one-path-can-silently-narrow-another` — the danger is that it
+**looks like pure gain**, and nothing fails; the suite simply stops looking, so for any harness change
+enumerate the paths covered before and after and **diff them**. And
+`a-count-ceiling-is-blind-to-a-slow-steady-leak` — a threshold must match the *shape* of the failure,
+not its magnitude; measure the rate **per run**, then pick the band whose first firing is diagnostic.
+
+**A HYGIENE FINDING, reconciled in part.** `Task` 2527 and 2531 already existed as **bare stubs
+carrying nothing but `task_id`**, so `MERGE` on the identity matched them and they were *filled*
+rather than duplicated (`Task` count unchanged at 291 across this sync — the check that proves it).
+**Nine such stubs remain**: 2506, 2509, 2517, 2518, 2519, 2521, 2525, 2530, 2532 — ids **interleaved
+with** the verified sprint-347 range (2480–2547), though their sprint membership is an inference from
+numbering and was NOT verified here (task metadata is the `roadmap-manager` skill's authority, not
+this one's). Each is invisible to any query on title, status or sprint. Filling them is a small, bounded
+hygiene task and the natural companion to recording the `Sprint` layer.
