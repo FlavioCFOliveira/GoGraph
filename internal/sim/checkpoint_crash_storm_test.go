@@ -119,15 +119,23 @@ func TestSimDisk_ArmRenameWritebackForPath_SurvivesCrash(t *testing.T) {
 		}
 	}
 
-	// Control: no arm -> the renamed directory's name is revoked.
+	// Control: the rename is rolled back instead of written back, so the new
+	// name is gone and the SOURCE name is back. The control pins that branch
+	// rather than leaving it to the seed, because since rmp #2514 an un-fsync'd
+	// rename has two legal crash outcomes and the write-back arm is only
+	// meaningful against the other one.
 	ctrl := NewSimDisk(NewSeed(3), 0)
 	stage(ctrl)
+	ctrl.ArmRenameRollbackForPath("dir/dst")
 	if err := ctrl.Rename("dir/src", "dir/dst"); err != nil {
 		t.Fatalf("control Rename: %v", err)
 	}
 	ctrl.Crash()
 	if ctrl.Exists("dir/dst/f") {
 		t.Fatal("control: an un-fsynced directory rename survived the crash, so the write-back arm below would prove nothing")
+	}
+	if !ctrl.Exists("dir/src/f") {
+		t.Fatal("control: the rolled-back rename did not restore the source name")
 	}
 
 	// Armed: the rename is treated as having reached stable storage.
@@ -197,10 +205,14 @@ func TestCheckpointCrashStorm_NonVacuous(t *testing.T) {
 
 	promotes, raced := 0, 0
 	for i, c := range ev.cycles {
-		t.Logf("cycle %d window=%-16s cpErr=%v faults=%d writebacks=%d syncsDuringCheckpoint=%d "+
+		t.Logf("cycle %d window=%-16s cpErr=%v faults=%d writebacks=%d rollbacks=%d syncsDuringCheckpoint=%d "+
 			"live/bak before=%t/%t after=%t/%t promoted=%t",
-			i, c.window, c.cpErr, c.renameFaults, c.renameWritebacks, c.syncsDuringCheckpoint,
+			i, c.window, c.cpErr, c.renameFaults, c.renameWritebacks, c.renameRollbacks, c.syncsDuringCheckpoint,
 			c.liveBeforeReopen, c.bakBeforeReopen, c.liveAfterReopen, c.bakAfterReopen, c.promoted())
+		if c.window == windowStrandedBackup && c.renameRollbacks == 0 {
+			t.Errorf("cycle %d (%s): the rename-rollback arm never fired, so the stranded-backup "+
+				"branch was reached by chance rather than selected", i, c.window)
+		}
 		if c.cpErr == nil {
 			t.Errorf("cycle %d (%s): the checkpoint succeeded, so the publish window was never entered", i, c.window)
 		} else if !errors.Is(c.cpErr, ErrSimFault) {

@@ -116,6 +116,13 @@ func (w publishWindow) arm(disk *SimDisk, snapDir string) {
 		// not, because the fsync that would have made it durable fails.
 		disk.ArmRenameWritebackForPath(snapDir + ".bak")
 		disk.ArmParentDirSyncFaultForPath(snapDir)
+		// Pin the publish rename to the ROLLED-BACK branch. Since rmp #2514 a
+		// crash inside a rename picks between its two legal outcomes from the
+		// seed, so a publish rename left un-fsync'd survives some crashes — the
+		// stranded-backup state is reachable by default but no longer certain,
+		// and this cycle asserts it unconditionally. Pinning selects the branch;
+		// it does not create it.
+		disk.ArmRenameRollbackForPath(snapDir)
 	case windowPublishRename:
 		// The publish rename fails; the write-back arm is consumed by the
 		// archive-restore rename the publish path issues in response, which is
@@ -174,6 +181,11 @@ type checkpointStormCycle struct {
 	// the arms matched a real rename instead of being silently ignored.
 	renameFaults     int64
 	renameWritebacks int64
+	// renameRollbacks is the per-cycle delta of the crash-outcome arm that pins
+	// a not-yet-durable rename to its rolled-back branch (rmp #2514). Same role
+	// as the two above: an arm that never matched a rename is a silent no-op,
+	// and the stranded-backup window depends on this one firing.
+	renameRollbacks int64
 	// syncsDuringCheckpoint is how many durable commits landed while the
 	// interrupted checkpoint was running. It is the concurrency evidence: the
 	// publish is lock-free, so a positive value proves the window was raced by
@@ -425,12 +437,14 @@ func runCheckpointStormCycle(
 	target := int64(checkpointStormFaultMin + env.faultSeed.IntN(checkpointStormFaultSpan))
 	waitForSyncProgress(env.disk, target, deadline)
 	faultsBefore, writebacksBefore := env.disk.RenameFaultCount(), env.disk.RenameWritebackCount()
+	rollbacksBefore := env.disk.RenameRollbackCount()
 	syncsBefore := env.disk.SyncCount()
 	env.window.arm(env.disk, env.snapDir)
 	cyc.cpErr = st.Checkpoint()
 	cyc.syncsDuringCheckpoint = env.disk.SyncCount() - syncsBefore
 	cyc.renameFaults = env.disk.RenameFaultCount() - faultsBefore
 	cyc.renameWritebacks = env.disk.RenameWritebackCount() - writebacksBefore
+	cyc.renameRollbacks = env.disk.RenameRollbackCount() - rollbacksBefore
 
 	// Crash protocol (order is load-bearing, see runDurableCommitCrash): join
 	// the clients, join the server — neither flushes the WAL — then crash the

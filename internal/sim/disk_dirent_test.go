@@ -73,7 +73,14 @@ func TestSimDisk_RootLevelDurableOnCreate(t *testing.T) {
 }
 
 // TestSimDisk_DirRenameLostWithoutParentFsync: renaming a directory and crashing
-// before the parent fsync drops the whole moved subtree (the rename is lost).
+// before the parent fsync loses the rename — the new name is gone.
+//
+// Since rmp #2514 losing the rename means the OLD name comes back, not that the
+// subtree evaporates: rename(2) is atomic, so a crash leaves one of the two
+// names, never neither. The test therefore asserts both halves, and pins the
+// rolled-back branch with [SimDisk.ArmRenameRollbackForPath] because the other
+// branch — the rename reached stable storage — is equally legal and is what an
+// unpinned crash selects on some seeds.
 func TestSimDisk_DirRenameLostWithoutParentFsync(t *testing.T) {
 	d := NewSimDisk(NewSeed(1), 0)
 	writeFile(t, d, "db/stage/a", []byte("1"))
@@ -81,14 +88,24 @@ func TestSimDisk_DirRenameLostWithoutParentFsync(t *testing.T) {
 	if err := d.DirSync("db/stage"); err != nil { // children durable within stage
 		t.Fatalf("DirSync stage: %v", err)
 	}
+	d.ArmRenameRollbackForPath("db/live")
 	if err := d.Rename("db/stage", "db/live"); err != nil {
 		t.Fatalf("Rename: %v", err)
 	}
+	if got := d.RenameRollbackCount(); got != 1 {
+		t.Fatalf("RenameRollbackCount = %d, want 1 — the arm never matched the rename", got)
+	}
 	// Crash before ParentDirSync(db/live): the live directory's own dirent is
-	// not durable, so the whole subtree is lost.
+	// not durable, so the rename is undone.
 	d.Crash()
 	if d.Exists("db/live/a") || d.Exists("db/live/b") {
-		t.Fatal("directory rename not made durable must be fully dropped by crash")
+		t.Fatal("directory rename not made durable must be dropped by crash")
+	}
+	// The source name must be back, with the children the staging fsync made
+	// durable. A crash that left NEITHER name would be the physically
+	// impossible outcome rmp #2514 removed.
+	if !d.Exists("db/stage/a") || !d.Exists("db/stage/b") {
+		t.Fatal("a rolled-back directory rename must restore the source name: losing both names is not an outcome any filesystem produces")
 	}
 }
 
