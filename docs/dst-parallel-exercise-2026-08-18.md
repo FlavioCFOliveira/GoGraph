@@ -233,6 +233,62 @@ as an instrument**: F1 discards whole instances, and F2 injects a large, systema
 positive population into precisely the concurrent configuration the swarm is meant to be
 run in. Both should be fixed before the next swarm is used as evidence.
 
+## Re-run after the fixes
+
+All three findings were fixed (#2552 `69d03662`, #2553 `fb30434e`, #2554 `0b9eb1e2`) and
+the exercise was repeated with the SAME three master seeds, the same 30-minute budget and
+the same 3x3 worker layout, against the fixed binary.
+
+| | Before | After |
+|---|---|---|
+| Instances completing 30 minutes | 2 of 3 | **3 of 3** |
+| Total runs | 7813 | **10953** |
+| Passes | 7700 | **10953** |
+| Failures | 113 | **0** |
+| Process-killing panics | 1 | **0** |
+| Exit codes | 2, 1, 1 | **0, 0, 0** |
+| Scenarios exercised | 35 of 35 | 35 of 35 |
+| Non-vacuity gate | PASS | PASS |
+
+The 40% rise in run count is itself part of the result: instance 1 previously died at ~19
+minutes of its 30, so roughly a third of that instance's work never ran.
+
+The coverage dimensions drop from 43 buckets to 36, which is not lost coverage. `op-kind`
+and `violation` are failure-derived dimensions that only materialise once something fails,
+and `outcome` falls from two buckets to one. Their absence IS the zero-failure result;
+scenario coverage is unchanged at 35 of 35.
+
+Targeted replays, run separately because a swarm comparison is not exact (with `-bias`,
+scenario selection depends on a round-robin tie-break driven by call order across three
+concurrent workers, so run counts are close but not identical):
+
+* `production-profile` seed 17477768168859964485 — exit 0, no panic (was a deterministic
+  process kill).
+* `io-roundtrip-fault` — 120 of 120 at workers 1, 3 AND 8, seeds held fixed (was 4 of 120
+  at workers=3). Note a SERIAL replay of these seeds would have passed on the unfixed code
+  too, so it would have proved nothing; they must be replayed concurrently.
+* `schema-mutation` — 400 of 400 on master 20260818002 and 400 of 400 on master 25541818
+  (were 51 and 54 failures respectively). The second master is what makes the zero
+  falsifiable rather than a sweep that could not fail.
+
+`make ci` green on the final tree, exit read from inside the log: 124 packages, 0 FAIL,
+0 races, `cover_gate: OK (aggregate 86.9%)`, lint 0 issues.
+
+### What the clean re-run does and does not mean
+
+It establishes that the harness has stopped manufacturing failures, and therefore that its
+failure signal is now worth acting on: previously 72 false positives would have buried a
+genuine engine defect, and a panic could erase a third of the evidence before it was read.
+
+It does NOT establish that the engine is defect-free. 10953 runs is a larger sample than
+before, and it is still a sample.
+
+One residual is deliberately left open as **#2555**: #2553 moved the allocation BOUND to a
+serialised arm, but that arm's own sensitivity assertion still differences two
+process-global `TotalAlloc` counters, and it was observed to flake once by 360 bytes out of
+31.3 MB. It is the same root cause one layer up, and it is a test-stability defect rather
+than an engine one.
+
 ## Reproductions
 
 ```
