@@ -18,6 +18,7 @@ package sim
 import (
 	"context"
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -85,9 +86,12 @@ func TestGraphIOSurface_CrossFormatAgreement(t *testing.T) {
 			typed++
 		}
 	}
-	t.Logf("witness: %d mutations, %d effective, %d typed rejections, %d B allocated over %d B of input (%.1fx)",
-		len(r.Mutations), effective, typed, r.MutationAllocBytes, r.MutationInputBytes,
-		float64(r.MutationAllocBytes)/float64(r.MutationInputBytes))
+	// This path measures NO allocation (see RunGraphIOSurface): the figure it
+	// would report comes from a process-global counter, so the bounded-allocation
+	// bound is adjudicated by TestGraphIOSurface_MutationAllocBoundHoldsSerially
+	// instead.
+	t.Logf("witness: %d mutations, %d effective, %d typed rejections, over %d B of input",
+		len(r.Mutations), effective, typed, r.MutationInputBytes)
 	for _, name := range sortedCopy(keysOf(r.ExportStability)) {
 		t.Logf("witness: byte-reproducibility %-38s differed in %d of %d repeat exports",
 			name, r.ExportStability[name], graphIOStabilityRuns-1)
@@ -587,4 +591,197 @@ func sortedCopy(names []string) []string {
 		}
 	}
 	return out
+}
+
+// -----------------------------------------------------------------------------
+// The SERIALISED allocation arm (rmp #2553)
+// -----------------------------------------------------------------------------
+//
+// Every test below reads runtime.MemStats.TotalAlloc, a PROCESS-GLOBAL
+// cumulative counter, so none of them calls t.Parallel: a window opened while
+// anything else in this process allocates bills the measured code for its
+// neighbours. None of them is skipped under -race either. Measured at
+// graphIOTestSeed, the race detector inflates the figure by under 2%
+// (46.7-46.8x without it, 47.6x with it) against a bound of 64x, so the
+// headroom is ample and the property stays inside the race-enabled gate
+// rather than being skipped out of it.
+
+// TestGraphIOSurface_MutationAllocBoundHoldsSerially is the arm that adjudicates
+// the mutation sweep's bounded allocation. It is the ONLY place the bound is
+// decided: the swarm-reachable path does not measure at all, because it runs
+// concurrently with other scenarios.
+func TestGraphIOSurface_MutationAllocBoundHoldsSerially(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	seeds := append([]uint64{graphIOTestSeed}, storageFaultTestSeeds...)
+	for _, seed := range seeds {
+		r, err := runGraphIOSurface(ctx, seed, graphIOSurfaceOpts{measureAlloc: true})
+		if err != nil {
+			t.Fatalf("runGraphIOSurface seed %#x: %v", seed, err)
+		}
+		if !r.AllocMeasured {
+			t.Fatalf("seed %#x: the measured arm produced a result carrying no measurement", seed)
+		}
+		for _, viol := range checkGraphIOMutationAlloc(&r) {
+			t.Errorf("VERDICT seed %#x %s %s: %s", seed, viol.Kind, viol.Op, viol.Message)
+		}
+		t.Logf("witness: seed %#x allocated %d B over %d B of input (%.1fx, bound %dx)",
+			seed, r.MutationAllocBytes, r.MutationInputBytes,
+			float64(r.MutationAllocBytes)/float64(r.MutationInputBytes), graphIOMutationAllocRatio)
+	}
+}
+
+// TestGraphIOSurface_MutationAllocOracleCatchesOverAllocation proves the bound
+// above can FAIL. It re-runs the same seed with a deliberate over-allocation
+// injected inside the sweep and requires the oracle to condemn it — a bound
+// never seen to fail is a bound that proves nothing.
+//
+// The injection is 1 MiB per mutation. The sweep replays 16 (format, mutation)
+// pairs, so it adds 16 MiB on top of a control measured at 14 550 032 B over
+// 311 091 B of input: the ratio moves from 46.8x to 100.6x against the 64x
+// bound (47.7x to 101.5x under -race), so the margin is large in both
+// directions and neither arm sits near the ceiling.
+func TestGraphIOSurface_MutationAllocOracleCatchesOverAllocation(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	// The CONTROL first: a control that does not adjudicate clean would make
+	// the injected run's failure meaningless, since it would fail either way.
+	control, cerr := runGraphIOSurface(ctx, graphIOTestSeed, graphIOSurfaceOpts{measureAlloc: true})
+	if cerr != nil {
+		t.Fatalf("control run: %v", cerr)
+	}
+	if v := checkGraphIOMutationAlloc(&control); len(v) != 0 {
+		for _, viol := range v {
+			t.Errorf("CONTROL %s: %s", viol.Op, viol.Message)
+		}
+		t.Fatalf("the unmodified control does not adjudicate clean, so the sensitivity proof below would prove nothing")
+	}
+
+	const injectPerMutation = 1 << 20
+	var held [][]byte
+	inflated, ierr := runGraphIOSurface(ctx, graphIOTestSeed, graphIOSurfaceOpts{
+		measureAlloc: true,
+		inflate: func() {
+			b := make([]byte, injectPerMutation)
+			b[0] = 1 // written, so the allocation cannot be optimised away
+			held = append(held, b)
+		},
+	})
+	if ierr != nil {
+		t.Fatalf("inflated run: %v", ierr)
+	}
+	runtime.KeepAlive(held)
+
+	v := checkGraphIOMutationAlloc(&inflated)
+	if len(v) == 0 {
+		t.Fatalf("the oracle passed a run inflated by %d B per mutation (%d B over %d B of input, %.1fx) — it cannot detect over-allocation",
+			injectPerMutation, inflated.MutationAllocBytes, inflated.MutationInputBytes,
+			float64(inflated.MutationAllocBytes)/float64(inflated.MutationInputBytes))
+	}
+	for _, viol := range v {
+		if viol.Op != "<io-mutation-alloc>" {
+			t.Errorf("the violation carried Op %q, want %q", viol.Op, "<io-mutation-alloc>")
+		}
+	}
+	// The window must enclose the whole REPLAY the arm measures: if it did not,
+	// the injected bytes would not appear in the difference between the two runs.
+	injected := uint64(injectPerMutation) * uint64(len(inflated.Mutations))
+	if want := control.MutationAllocBytes + injected; inflated.MutationAllocBytes < want {
+		t.Errorf("the inflated run measured %d B, want at least %d B (control %d B + %d B injected across %d mutations) — the window does not enclose the replay",
+			inflated.MutationAllocBytes, want, control.MutationAllocBytes, injected, len(inflated.Mutations))
+	}
+	t.Logf("witness: control %d B over %d B (%.1fx); inflated %d B over %d B (%.1fx) after injecting %d B across %d mutations",
+		control.MutationAllocBytes, control.MutationInputBytes,
+		float64(control.MutationAllocBytes)/float64(control.MutationInputBytes),
+		inflated.MutationAllocBytes, inflated.MutationInputBytes,
+		float64(inflated.MutationAllocBytes)/float64(inflated.MutationInputBytes),
+		injected, len(inflated.Mutations))
+	t.Logf("witness: the oracle condemned it: %s", v[0].Message)
+}
+
+// TestGraphIOSurface_ConcurrentPathCarriesNoAllocClause is the regression gate
+// for rmp #2553 itself. Re-adding the process-global allocation clause to the
+// verdict the swarm runs fails here.
+//
+// Billing a scenario for its neighbours' allocations made io-roundtrip-fault
+// fail 116 of 120 seeds at -workers=3 that pass at -workers=1, so the clause
+// must be absent from the concurrently reachable path — and the separate
+// checker must REFUSE an unmeasured result rather than read its zero as a pass.
+func TestGraphIOSurface_ConcurrentPathCarriesNoAllocClause(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	r, err := RunGraphIOSurface(ctx, graphIOTestSeed)
+	if err != nil {
+		t.Fatalf("RunGraphIOSurface: %v", err)
+	}
+	if r.AllocMeasured {
+		t.Errorf("the swarm-reachable path reported AllocMeasured=true; it must open no process-global window")
+	}
+	if r.MutationAllocBytes != 0 {
+		t.Errorf("the swarm-reachable path reported %d B allocated; it must leave the figure zero", r.MutationAllocBytes)
+	}
+
+	// An absurd figure the path never measured must raise nothing in the
+	// verdict the swarm runs.
+	absurd := r
+	absurd.MutationAllocBytes = 1 << 40
+	if v := CheckGraphIOSurface(&absurd); len(v) != 0 {
+		for _, viol := range v {
+			t.Errorf("the swarm's verdict raised %s: %s", viol.Op, viol.Message)
+		}
+		t.Errorf("CheckGraphIOSurface adjudicated an unmeasured allocation figure of %d B — the process-global clause is back on the concurrently scheduled path",
+			absurd.MutationAllocBytes)
+	}
+
+	// ... and the separate checker must refuse the unmeasured result.
+	v := checkGraphIOMutationAlloc(&r)
+	if len(v) == 0 {
+		t.Errorf("checkGraphIOMutationAlloc passed a result carrying no measurement — a zero would then read as a pass")
+	} else {
+		t.Logf("witness: the unmeasured result is refused: %s", v[0].Message)
+	}
+}
+
+// TestGraphIOMeasureProcessAlloc_IsLive proves the shared instrument both
+// measuring sites use is live and sensitive. It is the sensitivity proof for the
+// guard battery's per-cap heap bounds too, since [graphIOMeasure] measures
+// through this same primitive.
+func TestGraphIOMeasureProcessAlloc_IsLive(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	// The noise floor: an empty window. It is witnessed rather than bounded
+	// tightly — the counter is process-global, so its floor is not ours to fix.
+	quiet := measureProcessAlloc(func() {})
+
+	const (
+		chunk  = 1 << 20
+		chunks = 8
+	)
+	var held [][]byte
+	loaded := measureProcessAlloc(func() {
+		for i := 0; i < chunks; i++ {
+			b := make([]byte, chunk)
+			b[0] = byte(i + 1) // written, so the allocation cannot be optimised away
+			held = append(held, b)
+		}
+	})
+	runtime.KeepAlive(held)
+
+	if want := uint64(chunk) * chunks; loaded < want {
+		t.Errorf("a window that allocated %d B reported only %d B — the instrument is not live", want, loaded)
+	}
+	if quiet >= loaded {
+		t.Errorf("the empty window reported %d B, not far below the loaded window's %d B — the figure is noise rather than measurement",
+			quiet, loaded)
+	}
+	t.Logf("witness: empty window %d B (the noise floor); loaded window %d B for %d B deliberately allocated",
+		quiet, loaded, uint64(chunk)*chunks)
 }

@@ -59,6 +59,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -470,11 +471,20 @@ type GraphIOSurfaceResult struct {
 	DOTBytes     int
 	CSVBytes     int
 	JSONLBytes   int
-	// MutationAllocBytes is the total heap allocated while replaying the whole
-	// mutation sweep, and MutationInputBytes the total input fed to it. The
-	// ratio is the bounded-allocation evidence for that sweep.
+	// MutationAllocBytes is the heap allocated by the mutation sweep's REPLAY
+	// LOOP — its own exports sit outside the window — and MutationInputBytes
+	// the total input fed to that loop. The ratio is the bounded-allocation
+	// evidence for the readers, but ONLY when
+	// AllocMeasured is true: the figure comes from a process-global counter, so
+	// [RunGraphIOSurface] — which the swarm runs concurrently — does not measure
+	// it at all and leaves it zero (rmp #2553).
 	MutationAllocBytes uint64
 	MutationInputBytes int
+	// AllocMeasured reports whether MutationAllocBytes was actually measured,
+	// under the exclusivity measureProcessAlloc requires. A verdict over the
+	// ratio must refuse a result where this is false rather than read a zero as
+	// a pass.
+	AllocMeasured bool
 	// ExportStability maps an encoder to the number of repeat exports of the
 	// SAME graph that differed byte for byte from the first, out of
 	// graphIOStabilityRuns-1 repeats. Every encoder here is expected to be
@@ -573,7 +583,30 @@ func graphIOMeasureExportStability(ctx context.Context, model *adjlist.AdjList[s
 // the mutated-export sweep. It reports a harness error only when the harness
 // itself could not proceed; every adjudication is left to
 // [CheckGraphIOSurface] and [CheckGraphIOSurfaceShape].
+//
+// It performs NO allocation measurement, because it is reachable from the
+// concurrently scheduled io-roundtrip-fault scenario; the bounded-allocation
+// property is adjudicated by the serialised arm through
+// [checkGraphIOMutationAlloc].
 func RunGraphIOSurface(ctx context.Context, seed uint64) (GraphIOSurfaceResult, error) {
+	return runGraphIOSurface(ctx, seed, graphIOSurfaceOpts{})
+}
+
+// graphIOSurfaceOpts configures one [runGraphIOSurface] pass. Both fields are
+// zero on every production path; they exist for the SERIALISED allocation arm.
+type graphIOSurfaceOpts struct {
+	// measureAlloc opens a process-global allocation window around the REPLAY
+	// LOOP inside the mutation sweep — the sweep's own exports and its offset
+	// draw stay outside it. See measureProcessAlloc for the contract it imposes
+	// on the caller: it is only ever set by a serialised arm.
+	measureAlloc bool
+	// inflate is handed to graphIOMutationSweep; see that function.
+	inflate func()
+}
+
+// runGraphIOSurface is the body of [RunGraphIOSurface], with the two options
+// only the serialised allocation arm ever sets.
+func runGraphIOSurface(ctx context.Context, seed uint64, opts graphIOSurfaceOpts) (GraphIOSurfaceResult, error) {
 	r := GraphIOSurfaceResult{Seed: seed}
 	s := NewSeed(seed)
 	model, err := graphIOModel(s)
@@ -637,11 +670,14 @@ func RunGraphIOSurface(ctx context.Context, seed uint64) (GraphIOSurfaceResult, 
 
 	// --- the mutated-export sweep. ---
 	muts, allocBytes, inBytes, merr := graphIOMutationSweep(ctx, s, model, r.ModelTriples,
-		csvBuf.Bytes(), jsonlBuf.Bytes(), csvOpts, cfg)
+		csvBuf.Bytes(), jsonlBuf.Bytes(), csvOpts, cfg, opts.measureAlloc, opts.inflate)
 	if merr != nil {
 		return r, fmt.Errorf("sim: graph-io mutation sweep: %w", merr)
 	}
-	r.Mutations, r.MutationAllocBytes, r.MutationInputBytes = muts, allocBytes, inBytes
+	r.Mutations, r.MutationInputBytes = muts, inBytes
+	if opts.measureAlloc {
+		r.MutationAllocBytes, r.AllocMeasured = allocBytes, true
+	}
 
 	// --- byte-reproducibility of every encoder. ---
 	stability, serr := graphIOMeasureExportStability(ctx, model)
@@ -859,6 +895,40 @@ func graphIOCSVArms(ctx context.Context, model *adjlist.AdjList[string, int64], 
 }
 
 // -----------------------------------------------------------------------------
+// The shared allocation instrument
+// -----------------------------------------------------------------------------
+
+// graphIOAllocMu serialises every allocation window this file opens, so two
+// measured arms in the same process cannot bill each other.
+var graphIOAllocMu sync.Mutex
+
+// measureProcessAlloc runs fn and reports the bytes the PROCESS allocated while
+// it ran.
+//
+// CONCURRENCY CONTRACT — the caller must hold the rest of the process quiet.
+// runtime.MemStats.TotalAlloc is a process-global cumulative counter, so the
+// delta below is what EVERY goroutine allocated during the window, not what fn
+// allocated. Go offers no per-goroutine attribution to do better with: as of
+// go1.26.6 the runtime exports only ReadMemStats (global) and MemProfile
+// (sampled, per call stack, up to two GC cycles stale), runtime/metrics carries
+// no per-goroutine allocation metric, and the heap profile does not record
+// pprof labels. The figure is therefore evidence ONLY in a serialised arm, and
+// is not evidence at all inside a scenario the swarm may schedule alongside
+// others (rmp #2553).
+//
+// runtime.ReadMemStats also stops the world, so a window opened on a
+// concurrently scheduled path stalls every other worker for its duration.
+func measureProcessAlloc(fn func()) uint64 {
+	graphIOAllocMu.Lock()
+	defer graphIOAllocMu.Unlock()
+	var m0, m1 runtime.MemStats
+	runtime.ReadMemStats(&m0)
+	fn()
+	runtime.ReadMemStats(&m1)
+	return m1.TotalAlloc - m0.TotalAlloc
+}
+
+// -----------------------------------------------------------------------------
 // The mutated-export sweep
 // -----------------------------------------------------------------------------
 
@@ -893,13 +963,31 @@ func graphIOMutate(kind string, src []byte, off int) []byte {
 }
 
 // graphIOMutationSweep replays every (format, mutation) pair for one seed and
-// returns the observations plus the heap allocated and the input consumed, so
-// bounded allocation is measured rather than assumed.
+// returns the observations, the heap the REPLAY LOOP allocated and the input
+// consumed.
 //
 // Every importer is driven through its CAPPED entry point at four times the
 // source size. That is the second half of the allocation bound: a mutation that
 // tricked a reader into consuming without limit trips the cap instead of
 // growing the heap, and the measured ratio then confirms the cap held.
+//
+// measure opens the allocation window, and encloses the REPLAY LOOP ALONE. The
+// sweep's own exports and the offset draw sit outside it deliberately: the
+// bound is over what the READERS allocate against hostile input, and
+// inputBytes — its denominator — counts the mutated inputs only, so billing an
+// exporter into the numerator would let an unrelated encoder flap the reader
+// bound. It is set only by the SERIALISED arm
+// (TestGraphIOSurface_MutationAllocBoundHoldsSerially, which adjudicates the
+// figure through [checkGraphIOMutationAlloc]), because
+// runtime.MemStats.TotalAlloc is process-global: measured on a path the swarm
+// schedules concurrently it bills this sweep for its neighbours (rmp #2553).
+// It is false everywhere else, and the figure is then left zero.
+//
+// inflate, when non-nil, is called once per mutation INSIDE the replay loop. It
+// is nil on every production path; it exists so the allocation oracle can be
+// shown to fail on genuine over-allocation (see the sensitivity test), and it
+// sits inside the loop deliberately, so a measurement window that stopped
+// enclosing the replay would be caught.
 func graphIOMutationSweep(
 	ctx context.Context,
 	s *Seed,
@@ -908,6 +996,8 @@ func graphIOMutationSweep(
 	csvBytes, jsonlBytes []byte,
 	csvOpts csv.Options,
 	cfg adjlist.Config,
+	measure bool,
+	inflate func(),
 ) ([]GraphIOMutation, uint64, int, error) {
 	var graphmlBuf bytes.Buffer
 	if err := graphml.WriteCtx(ctx, &graphmlBuf, model); err != nil {
@@ -979,29 +1069,37 @@ func graphIOMutationSweep(
 		}
 	}
 
-	var m0, m1 runtime.MemStats
 	inputBytes := 0
 	out := make([]GraphIOMutation, 0, len(jobs))
-	runtime.ReadMemStats(&m0)
-	for _, j := range jobs {
-		obs := GraphIOMutation{Format: j.t.name, Kind: j.kind, Offset: j.off, Source: len(j.t.src)}
-		mutated := graphIOMutate(j.kind, j.t.src, j.off)
-		obs.Changed = !bytes.Equal(mutated, j.t.src)
-		inputBytes += len(mutated)
-		// The cap scales with the MUTATED size, not the source: a fixed cap
-		// sized from the source would be tripped by the delimiter-run mutation
-		// itself, and every arm would then report the byte cap instead of the
-		// structural guard the corruption was aimed at.
-		equal, err := graphIOImportGuarded(j.t.imp, mutated, int64(4*len(mutated)+4096), &obs)
-		obs.Equal = equal
-		if err != nil {
-			obs.Err = err.Error()
-			obs.Typed = graphIOIsKnownSentinel(err)
+	replay := func() {
+		for _, j := range jobs {
+			obs := GraphIOMutation{Format: j.t.name, Kind: j.kind, Offset: j.off, Source: len(j.t.src)}
+			mutated := graphIOMutate(j.kind, j.t.src, j.off)
+			obs.Changed = !bytes.Equal(mutated, j.t.src)
+			inputBytes += len(mutated)
+			// The cap scales with the MUTATED size, not the source: a fixed cap
+			// sized from the source would be tripped by the delimiter-run mutation
+			// itself, and every arm would then report the byte cap instead of the
+			// structural guard the corruption was aimed at.
+			equal, err := graphIOImportGuarded(j.t.imp, mutated, int64(4*len(mutated)+4096), &obs)
+			obs.Equal = equal
+			if err != nil {
+				obs.Err = err.Error()
+				obs.Typed = graphIOIsKnownSentinel(err)
+			}
+			out = append(out, obs)
+			if inflate != nil {
+				inflate()
+			}
 		}
-		out = append(out, obs)
 	}
-	runtime.ReadMemStats(&m1)
-	return out, m1.TotalAlloc - m0.TotalAlloc, inputBytes, nil
+	var alloc uint64
+	if measure {
+		alloc = measureProcessAlloc(replay)
+	} else {
+		replay()
+	}
+	return out, alloc, inputBytes, nil
 }
 
 // graphIOCanonicalJSONLProps returns src with its "property" records sorted,
@@ -1082,7 +1180,47 @@ func graphIOIsKnownSentinel(err error) bool {
 // it long before it exhausted memory. It is a CEILING chosen with headroom over
 // the measured value, not a tight fit, so ordinary allocator variation cannot
 // make it flap.
+//
+// Measured at graphIOTestSeed (0x2480C0DE), process quiet, with the window
+// enclosing the replay loop alone: 46.7-46.8x without -race and 47.6x with
+// it, against this ceiling of 64. Across the seeds the serialised arm runs,
+// the widest measures 47.9-48.0x and the narrowest 18.2x, so the ceiling has
+// to clear a real spread rather than a single figure.
 const graphIOMutationAllocRatio = 64
+
+// checkGraphIOMutationAlloc is the verdict over the mutation sweep's bounded
+// allocation. It is SEPARATE from [CheckGraphIOSurface] because the figure it
+// reads is measured with a process-global counter: it is evidence only in a
+// serialised arm, and billing a scenario for its neighbours' allocations made
+// the swarm fail 116 of 120 seeds at -workers=3 that pass at -workers=1
+// (rmp #2553).
+//
+// It refuses an unmeasured result rather than reading a zero as a pass, so the
+// clause cannot be satisfied by the path that does not measure.
+func checkGraphIOMutationAlloc(r *GraphIOSurfaceResult) []Violation {
+	var v []Violation
+	add := func(msg string) {
+		v = append(v, Violation{Kind: ViolationOracleDeviation, Op: "<io-mutation-alloc>", Message: msg})
+	}
+	if !r.AllocMeasured {
+		add("the result carries no allocation measurement, so the bound cannot be adjudicated over it")
+		return v
+	}
+	if r.MutationInputBytes <= 0 {
+		add("the sweep consumed no input, so the allocation ratio is undefined")
+		return v
+	}
+	if r.MutationAllocBytes == 0 {
+		add("the measured window reported zero bytes allocated — the instrument is not live")
+		return v
+	}
+	if bound := uint64(graphIOMutationAllocRatio) * uint64(r.MutationInputBytes); r.MutationAllocBytes > bound {
+		add(fmt.Sprintf("the mutation sweep allocated %d bytes over %d bytes of input (ratio %.1f), above the bound of %d×",
+			r.MutationAllocBytes, r.MutationInputBytes,
+			float64(r.MutationAllocBytes)/float64(r.MutationInputBytes), graphIOMutationAllocRatio))
+	}
+	return v
+}
 
 // CheckGraphIOSurface is the unconditional verdict over one
 // [RunGraphIOSurface] result. It runs whatever the run produced and never
@@ -1181,14 +1319,10 @@ func CheckGraphIOSurface(r *GraphIOSurfaceResult) []Violation {
 		}
 	}
 
-	if r.MutationInputBytes > 0 {
-		if bound := uint64(graphIOMutationAllocRatio) * uint64(r.MutationInputBytes); r.MutationAllocBytes > bound {
-			add("<io-mutation-alloc>", fmt.Sprintf(
-				"the mutation sweep allocated %d bytes over %d bytes of input (ratio %.1f), above the bound of %d×",
-				r.MutationAllocBytes, r.MutationInputBytes,
-				float64(r.MutationAllocBytes)/float64(r.MutationInputBytes), graphIOMutationAllocRatio))
-		}
-	}
+	// The bounded-allocation clause is deliberately absent here: it cannot be
+	// measured on a path the swarm schedules concurrently, because the counter
+	// it reads is process-global. It lives in [checkGraphIOMutationAlloc], which
+	// a serialised arm runs (rmp #2553).
 	return v
 }
 
@@ -1827,6 +1961,11 @@ func adjTriplesOrNil(a *adjlist.AdjList[string, int64]) map[string]int {
 // RunGraphIOGuards drives the crafted half of the surface: every defensive cap
 // in graph/io, the reachability evidence for the one that cannot be provoked,
 // and every *Ctx reader cancelled mid-parse against an uncancelled control.
+//
+// CONCURRENCY CONTRACT — it measures heap through a process-global counter
+// (see measureProcessAlloc), so it must be driven from a serialised arm and
+// never from a scenario the swarm can schedule alongside others. It is called
+// from its own test only.
 func RunGraphIOGuards(ctx context.Context) (GraphIOGuardResult, error) {
 	var res GraphIOGuardResult
 
@@ -1908,18 +2047,19 @@ func graphIOCancelProbe(arm *graphIOCancelArm, want map[string]int) (GraphIOCanc
 // into a recorded string rather than letting it escape. The recovered value is
 // re-reported as a violation, so the panic still fails the run — with its text
 // attached to the probe that caused it.
+//
+// The window is process-global (see measureProcessAlloc), so [RunGraphIOGuards]
+// is a serialised arm. The runtime.GC() this function used to run before the
+// window was removed: it is process-wide and disruptive to anything else
+// running, and it cannot affect the figure at all, because TotalAlloc counts
+// cumulative allocation and is unchanged by collection (rmp #2553).
 func graphIOMeasure(fn func() (int64, bool, error)) (in int64, overran bool, alloc uint64, panicked string, err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			panicked = fmt.Sprintf("%v", rec)
 		}
 	}()
-	var m0, m1 runtime.MemStats
-	runtime.GC()
-	runtime.ReadMemStats(&m0)
-	in, overran, err = fn()
-	runtime.ReadMemStats(&m1)
-	alloc = m1.TotalAlloc - m0.TotalAlloc
+	alloc = measureProcessAlloc(func() { in, overran, err = fn() })
 	return in, overran, alloc, panicked, err
 }
 
