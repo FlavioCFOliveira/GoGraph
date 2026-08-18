@@ -1097,7 +1097,7 @@ high-water seed).
 | Label | Meaning | Properties (beyond `gitCommit`, `gitDate`) |
 |---|---|---|
 | `Package` | A Go package (one per source directory). | `name` (package clause), `path` (repo-relative dir, `"."` for root), `importPath` (full), `kind` |
-| `Type` | A `type` declaration. | `name`, `pkg` (importPath), `file` (repo-relative), `kind`, `exported` (bool), `generic` (bool) |
+| `Type` | A `type` declaration. | `name`, `pkg` (importPath), `file` (repo-relative), `kind`, `exported` (bool), `generic` (bool), optional `doc`. **Divergence observed 2026-08-18:** the `internal/sim` Type nodes are keyed on a `package` property holding the repo-relative dir (`internal/sim`) instead of `pkg` holding the importPath, so a `pkg`-based query misses them. New sim Types at `124eca54` followed the existing local convention rather than splitting the package's identity across two property names; reconciling the two is a hygiene task. |
 | `Function` | A top-level `func` with no receiver that is not a Test/Benchmark/Fuzz/Example. | `name`, `pkg`, `file`, `exported`, `generic` |
 | `Method` | A `func` with a receiver. | `name`, `pkg`, `file`, `recv` (receiver type, `*` stripped), `exported` |
 | `Test` | A `func TestXxx(*testing.T)`-style function (name prefix `Test`). | `name`, `pkg`, `file` |
@@ -1113,8 +1113,8 @@ high-water seed).
 | `Skill` | A project-relevant Claude Code skill. | `name`, `kind` (`skill`), `description`, `path` |
 | `Memory` | A persistent assistant memory file (mirror of the harness memory directory). | `name` (frontmatter slug), `file` (basename), `type` (`user`\|`feedback`\|`project`\|`reference`), `description` |
 | `Document` | A prose document under `docs/` that records a decision, a design, an audit or a certification. Present in the live graph since before this table existed (see the data-quality note below); its certification use was documented 2026-08-09 (sprint 337). | `path` (repo-relative, the identity), `title`, `kind` (`certification`\|`design`\|`audit`), `verdict` (certifications only — the cycle's stated outcome) |
-| `Defect` | A confirmed defect in the module or in its test harness, whether fixed or still open. **Present in the live graph long before this table documented it** (18 nodes at 2026-08-18); its property set is deliberately heterogeneous, because each defect records the evidence its own diagnosis produced. | `id` (the rmp ticket number, the identity) or `ref`; `title`, `status` (`OPEN`\|`FIXED`), `severity`, `component`, `rootCause`, `evidence`/`measured`, `fixCommit`, `regressionTest`. Added 2026-08-18 (`0ed5d4d1`, rmp #2547): `backlog` (bool — true while the defect is filed but in no sprint), `family` (a named class of related defects, e.g. `crash-model fidelity: rmp #2514, #2535, #2538`), `foundDuring` (what surfaced it, when that is not an audit) |
-| `Lesson` | A generalisable conclusion drawn from a defect — the part worth keeping once the ticket is closed. Present in the live graph before this table documented it; documented 2026-08-18. | `name` (a slug, the identity), `summary` (the lesson itself, stated so it applies beyond the originating defect), `claim`/`date` on the older nodes |
+| `Defect` | A confirmed defect in the module or in its test harness, whether fixed or still open. **Present in the live graph long before this table documented it** (18 nodes at 2026-08-18); its property set is deliberately heterogeneous, because each defect records the evidence its own diagnosis produced. | `id` (the rmp ticket number, the identity) or `ref`; `title`, `status` (`OPEN`\|`FIXED`), `severity`, `component`, `rootCause`, `evidence`/`measured`, `fixCommit`, `regressionTest`. Added 2026-08-18 (`0ed5d4d1`, rmp #2547): `backlog` (bool — true while the defect is filed but in no sprint), `family` (a named class of related defects, e.g. `crash-model fidelity: rmp #2514, #2535, #2538`), `foundDuring` (what surfaced it, when that is not an audit). Added 2026-08-18 (`124eca54`): `fixedWith` (the ticket a defect was closed *inside*, when the two were inseparable), `verification` (the probe that shows it fixed), `originalFilingUnderstated` (recording that the filed scope was narrower than the measured one) |
+| `Lesson` | A generalisable conclusion drawn from a defect — the part worth keeping once the ticket is closed. Present in the live graph before this table documented it; documented 2026-08-18. | `name` (a slug, the identity), `summary` (the lesson itself, stated so it applies beyond the originating defect), `claim`/`date` on the older nodes. Added 2026-08-18 (`124eca54`): `generalises` (the wider class the lesson covers), `method` (what to do differently), and — when a lesson survives but its worked example does not — `illustrationWithdrawn` plus `correctedAt`, so a corrected lesson is distinguishable from a rewritten one |
 
 ### Enumerated property values
 
@@ -1174,6 +1174,8 @@ All edges carry `gitCommit` and `gitDate`.
 | `MEASURES` | `(Benchmark)-[:MEASURES]->(Function\|Method)` | A benchmark whose measurement targets a specific symbol, as distinct from `VERIFIES`, which targets a `Feature`. Documented 2026-07-29 (sprint 313, task #2145). |
 | `TAUGHT` | `(Defect\|Task)-[:TAUGHT]->(Lesson)` | A defect record whose diagnosis produced a generalisable `Lesson` — knowledge that outlives the ticket. The `Defect` source is the older form; the `Task` source was **widened at `0ed5d4d1` (2026-08-18)** for rmp #2538, whose `Task` node carries `type='BUG'` and is therefore itself a defect record. Documented 2026-08-18. |
 | `FOUND` | `(Task\|SecurityAudit\|AuditRound)-[:FOUND]->(Finding\|Perf\|Defect)` | Work that surfaced a finding, a measurement or a defect. The `Defect` target was **widened at `0ed5d4d1` (2026-08-18)**, recording that rmp #2547 was found while validating #2538 rather than by the audit that scoped it. Documented 2026-08-18. |
+| `BUILDS_ON` | `(Feature)-[:BUILDS_ON]->(Feature)`, `(Lesson)-[:BUILDS_ON]->(Lesson)` | A capability — or a lesson — rests on an earlier one. The `Lesson` form was **added at `124eca54` (2026-08-18)**: rmp #2547's lesson about a pending-operations log builds on #2538's about a crash model manufacturing neither a loss nor a false survival. Documented 2026-08-18. |
+| `REMEDIATED_BY` | `(Finding\|Defect)-[:REMEDIATED_BY]->(Commit)`, `(AuditRound)-[:REMEDIATED_BY]->(Sprint)` | The commit (or sprint) that closed a finding or defect. The `Defect` source was **widened at `124eca54`**; note the older `Defect` nodes record their fix only as a `fixCommit` **property**, so a defect's closure must be looked for both ways until that is reconciled. Documented 2026-08-18. |
 
 **Data-quality note (observed 2026-07-02, partially remediated):** the live graph has
 accumulated several more edge types across incremental syncs than this table documents in
@@ -3400,3 +3402,70 @@ graph for the one package this sprint exists to sharpen; it must be answered by 
 `HAS_METHOD`). `disk.go` alone plus its 12 sibling test files is ~174 nodes and ~270 edges.
 The extractor this document's Bootstrap section points at (`/tmp/kgextract.go`) **no longer
 exists on disk** and would have to be rebuilt.
+
+Incrementally synced at commit `124eca54` (2026-08-18, tasks **rmp #2536 and #2547**, sprint 347
+— an unlink is a directory mutation). **+38 nodes, −1 node, +~90 edges.**
+
+**Nodes.** `Commit` `124eca54`; `Task` 2536 (COMPLETED, BUG — audit finding **F2**); `Feature`
+`simdisk-unlink-durability`; 2 `Lesson`s; `Spec` `docs/dst-feature-coverage.md`; **the first
+real symbol tier `internal/sim` has ever had** — `Type`s `SimDisk`, `unlinkUndo`, `direntUndo`
+and 13 `Method`s on `SimDisk` (`rollbackDirentUndosLocked`, `pinAllDirentUndosLocked`,
+`dropDirentUndoPrefixLocked`, `hardenDurableDirentLocked`, `undoUnlinkLocked`,
+`ArmRemoveWritebackForPath`, `ArmRemoveRollbackForPath`, `RemoveWritebackCount`,
+`RemoveRollbackCount`, `RemoveHitCount`, `RemoveHitCountForPath`, `PendingRemoveCount`,
+`LastCrashRemoveOutcome`); 18 `Test`s (15 in the new `disk_remove_crash_test.go`, 2 in the new
+`disk_remove_tolerance_test.go`, 1 replacement in `disk_dirs_ghost_test.go`). Five `Method`s carry
+`IMPLEMENTS` to the new Feature, so **"which function maintains this invariant" is now answerable
+from the graph for `SimDisk`** — the gap recorded in the `0ed5d4d1` entry, closed for the crash
+model at least.
+
+**A node was DELETED, which is the honest record of a test that no longer exists.**
+`TestSimDisk_RolledBackRenameRestoresPrunedDirEntry` was `DETACH DELETE`d: this commit replaced it
+with `TestSimDisk_EmptiedPublishedDirectoryKeepsExactlyOneName`. Its mechanism had required a
+publish rename that had left the undo log while its directory entry was still non-durable, built
+with a `Remove` of a directory path — a state now unreachable by construction, and one that was
+not merely unreachable but **wrong**, since a pinned-yet-non-durable record is exactly what made a
+chained rename lose both of its names.
+
+**TWO CORRECTIONS TO FACTS THIS DOCUMENT'S PREVIOUS ENTRY RECORDED.** Both were refuted by
+measurement, not by argument, and both are recorded as supersessions rather than silently rewritten.
+
+1. **`renameUndo.prunedDirs` does NOT stop the model understating a crash's loss.** The
+   `0ed5d4d1` entry asserted that without restoring a pruned entry a host crash would keep a
+   subtree whose own name never reached stable storage — the mirror of the false accusation.
+   **Measured false over 96 seeds**, for the unlink record and for `renameUndo.prunedDirs` alike:
+   suppressing the restore leaves the durable image *identical*. Since every record leaving the
+   dirent undo log now has its durability applied (`dropDirentUndoPrefixLocked`), the state whose
+   restore would have mattered — a non-durable directory entry with no live record behind it — is
+   unreachable. The field is kept for a different and weaker reason: the undo pass walks the log
+   backwards over **live** state, so an intermediate lie about a directory's durability is a trap
+   for the *next* record's undo. Carried on the `Feature` as `prunedDirsRationale` with the
+   `supersededClaim` beside it.
+2. **The #2538 `Lesson` kept its lesson and lost its example.** The two-direction insight (a crash
+   model must manufacture neither a loss nor a false survival) stands and is reinforced; the worked
+   example illustrating the mirror direction was the refuted claim above. Recorded as
+   `illustrationWithdrawn` — and the withdrawal is itself evidence *for* the lesson, since the
+   mirror risk had been asserted from the mechanism rather than measured.
+
+**rmp #2547 is FIXED, and was much wider than filed.** Closed inside #2536 because the two were
+inseparable: making an unlink reversible put removals into the same ordered log, and the incoherent
+pin was the route in. Three routes measured, **two needing no arming at all**: a chained rename
+`a→b→c` lost the file entirely on **23 of 64 seeds unarmed**; a directory fsync retiring an earlier
+rename in a *different* directory lost it deterministically via the prefix rule; and the snapshot
+writer's archive-restore path left no snapshot at all — live and backup both gone — on **4 of 8
+seeds** after a fully fsynced publish. `Defect 2547 -[REMEDIATED_BY]-> Commit`.
+
+**A METHOD LESSON worth more than the fix.** `an-oracle-whose-own-arm-is-defective-proves-nothing`:
+**three defects in this family were found by an oracle whose own arm or premise was itself
+defective.** #2538's rollback-fidelity test *passed with the fix disabled* until it was rebuilt, and
+a DDL crash test's sensitivity proof had begun passing **vacuously** because the crash model now
+restored the very component its damage injector deleted. A green sensitivity arm is not evidence the
+oracle *can* fail. Re-verify every arm after any change to the substrate it provokes.
+
+**CODE-LEVEL DIVERGENCE, reported not fixed (no `.go` edits in this sync).** The corrected rationale
+lives on `unlinkUndo.prunedDirs` (`internal/sim/disk.go:785-796`), but two comments still assert the
+refuted claim: `renameUndo.prunedDirs` (~`:847`) still says "without this … a host crash would keep a
+subtree whose own name never reached stable storage", and `undoUnlinkLocked` (~`:2484`) still says
+"the `prunedDirs` restore is what keeps the crash from losing LESS than a real one — see
+`[unlinkUndo]`", **pointing at the very comment that refutes it**. The graph carries the measured
+version; the code carries both.
