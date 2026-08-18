@@ -352,9 +352,9 @@ func (a codecArmOf[N, W]) crossCodecSnapshotBoundary(
 		ev.mapperFormat, ev.mapperBytes = format, mbytes
 	}
 
-	// Crash SIGKILL-style: the reopen that follows must reconstruct everything
-	// from the snapshot, because the WAL prefix it would otherwise have replayed
-	// is gone.
+	// Crash the HOST ([SimStore.Crash] is [SimDisk.CrashHost]): the reopen that
+	// follows must reconstruct everything from the snapshot, because the WAL
+	// prefix it would otherwise have replayed is gone.
 	st.Crash()
 	b.crossed = true
 	return b, nil

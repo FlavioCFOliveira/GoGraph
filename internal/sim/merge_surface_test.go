@@ -1003,7 +1003,8 @@ func TestMergeHandleCollision_SurvivesRecovery(t *testing.T) {
 	if err := sm.store.Checkpoint(); err != nil {
 		t.Fatalf("checkpoint: %v", err)
 	}
-	// SIGKILL-equivalent, exactly as [Simulator.maybeCrash] performs it.
+	// HOST crash ([SimDisk.Crash] is [SimDisk.CrashHost]), exactly as
+	// [Simulator.maybeCrash] performs it.
 	sm.disk.Crash()
 	store, err := OpenSimStore(sm.disk, sm.store.Config())
 	if err != nil {

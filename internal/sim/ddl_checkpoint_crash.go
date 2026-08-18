@@ -392,8 +392,9 @@ func runDDLCheckpointPhase(
 			return st, cyc, nil, err
 		}
 	}
-	// SIGKILL-equivalent: drop the engine, keep the SimDisk byte image, revoke
-	// every dirent whose parent directory was never fsynced.
+	// HOST crash ([SimStore.Crash] is [SimDisk.CrashHost]): drop the engine,
+	// discard every byte no successful fsync covered, and revoke every dirent
+	// whose parent directory was never fsynced.
 	st.Crash()
 	next, err := OpenSimStore(disk, cfg)
 	if err != nil {

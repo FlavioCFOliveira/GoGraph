@@ -539,9 +539,11 @@ func (s *Simulator) maybeCrash(_ context.Context, tick int64) (*SimReport, error
 	if !s.crash.ShouldCrash(tick) {
 		return nil, nil
 	}
-	// SIGKILL-equivalent: discard the live engine and store WITHOUT a graceful
-	// close, so any buffered-but-unsynced frame is lost exactly as a real crash
-	// would lose it. The durable WAL byte image in the SimDisk survives.
+	// HOST crash ([SimDisk.Crash] is [SimDisk.CrashHost]): discard the live
+	// engine and store WITHOUT a graceful close, and discard from the SimDisk
+	// every byte no successful fsync covered — both the frames still sitting in
+	// the WAL's bufio buffer and those written through to the disk but never
+	// fsync'd. Only the fsync'd WAL prefix survives.
 	//
 	// Revoke not-yet-durable directory entries too (#1811): a real power-loss
 	// crash loses any create/rename whose parent directory was never fsync'd.

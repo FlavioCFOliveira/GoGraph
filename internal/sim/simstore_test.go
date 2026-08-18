@@ -109,7 +109,7 @@ func TestSimStore_CrashKeepsDurableBytes(t *testing.T) {
 	runWrite(t, s, "CREATE (:T {k:2})")
 	runWrite(t, s, "CREATE (:T {k:3})")
 
-	// SIGKILL-equivalent: drop the engine, keep the SimDisk WAL image.
+	// HOST crash: drop the engine, keep only the fsync'd SimDisk WAL prefix.
 	s.Crash()
 
 	s2, err := OpenSimStore(disk, defaultSimStoreConfig())

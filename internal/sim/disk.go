@@ -86,19 +86,25 @@ var _ walFile = (*SimFileHandle)(nil)
 //
 //	Truncate        NOT MODELLED, coverage gap (never a false accusation).
 //	TruncatePath    A shrink is applied immediately and a crash never restores
-//	                the previous length, so the harness cannot present a WAL
+//	O_TRUNC         the previous length, so the harness cannot present a WAL
 //	                whose prefix truncation was lost. Recovery would then have
 //	                to re-read frames a checkpoint had already folded, which is
-//	                exactly the idempotence it claims.
+//	                exactly the idempotence it claims. The durable shadow added
+//	                for rmp #2535 leaves this unchanged on purpose — a shrink
+//	                lowers the durable image too ([simFile.truncateDurableTo]) —
+//	                and that one function is the seam rmp #2542 needs to make a
+//	                truncation itself survivable.
 //
-//	Write (data)    NOT MODELLED, coverage gap that can HIDE a defect. Bytes
-//	                written but never Sync'd survive [SimDisk.Crash] intact,
-//	                whereas a real crash loses whatever never left the page
-//	                cache. The per-Sync fault and the torn-write sector bitmap
-//	                model CORRUPTION of data on its way to disk, not LOSS of
-//	                data that never started the journey, so an engine that
-//	                depended on an unflushed write would pass here. This is the
-//	                single most consequential gap the audit found.
+//	Write (data)    FIXED (rmp #2535). Bytes written but never Sync'd used to
+//	                survive [SimDisk.Crash] intact, whereas a real crash loses
+//	                whatever never left the page cache — so every "the commit
+//	                was acked, therefore the bytes are recovered" assertion held
+//	                irrespective of any fsync, and deleting the WAL commit fsync
+//	                failed no scenario. Each file now carries a durable image
+//	                advanced ONLY by a Sync that returns nil, and the crash
+//	                primitive is split: [SimDisk.CrashHost] reverts to that
+//	                image (power failure), [SimDisk.CrashProcess] keeps the
+//	                bytes and the names (SIGKILL). [SimDisk.Crash] is CrashHost.
 //
 //	MkdirAll        NOT MODELLED, negligible. Directories are opaque keys and
 //	                MkdirAll is a no-op, so a directory creation can never be
@@ -285,6 +291,103 @@ type SimDisk struct {
 	// [SimDisk.ArmSyncFaultAt].
 	syncGate   *SyncGate
 	syncGateAt int64
+	// hostCrashGen counts [SimDisk.CrashHost] calls. A Sync captures it when the
+	// fsync is ISSUED and re-checks it when the fsync COMPLETES: a host crash
+	// landing in that window — which is exactly what [SimDisk.ArmSyncGateAt]
+	// constructs — means the fsync never completed, so its durability effect is
+	// dropped instead of being applied to an image the crash has already rolled
+	// back. [SimDisk.CrashProcess] deliberately does NOT bump it: SIGKILL does
+	// not abort an fsync already issued to the kernel, which owns the writeback.
+	hostCrashGen uint64
+	// lastCrashKind / lastCrashDiscardedBytes are the shape observables of the
+	// most recent crash: which primitive ran, and how many
+	// written-but-never-synced bytes [SimDisk.CrashHost] discarded from the files
+	// that survived it. A non-vacuity gate reads the byte count to prove the
+	// crash really landed on unsynced data rather than after a quiet fsync —
+	// the difference between an oracle that can fail and one that cannot.
+	lastCrashKind           CrashKind
+	lastCrashDiscardedBytes int64
+}
+
+// CrashKind identifies which crash primitive a [SimDisk] last ran. It is the
+// observable that lets a scenario state — and a gate check — which of the two
+// physically distinct events it intended to model.
+type CrashKind uint8
+
+const (
+	// CrashKindNone means no crash has been issued on this disk yet.
+	CrashKindNone CrashKind = iota
+	// CrashKindHost is a power failure: [SimDisk.CrashHost].
+	CrashKindHost
+	// CrashKindProcess is a SIGKILL of the process: [SimDisk.CrashProcess].
+	CrashKindProcess
+)
+
+// String renders the crash kind for test output and reports.
+func (k CrashKind) String() string {
+	switch k {
+	case CrashKindHost:
+		return "host"
+	case CrashKindProcess:
+		return "process"
+	default:
+		return "none"
+	}
+}
+
+// LastCrashKind reports which crash primitive this disk last ran, or
+// [CrashKindNone] if it has not crashed. It is the observable a scenario asserts
+// to prove it exercised the model it intended.
+func (d *SimDisk) LastCrashKind() CrashKind {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.lastCrashKind
+}
+
+// LastCrashDiscardedBytes reports how many written-but-never-synced bytes the
+// last [SimDisk.CrashHost] discarded, counted across the files that SURVIVED the
+// crash (bytes lost with a revoked dirent are a name loss, not a data loss, and
+// are not counted here). [SimDisk.CrashProcess] always leaves it at zero,
+// because a process crash discards nothing.
+//
+// It is the non-vacuity observable for every durability oracle: a scenario that
+// asserts "the unsynced tail is gone" must also be able to prove there WAS an
+// unsynced tail, or it is asserting nothing.
+func (d *SimDisk) LastCrashDiscardedBytes() int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.lastCrashDiscardedBytes
+}
+
+// DurableSize reports how many leading bytes of the file at path are on stable
+// storage — the length [SimDisk.CrashHost] would leave it at — and whether the
+// file exists at all. It is the direct read of the durable watermark that lets a
+// test distinguish "the engine fsync'd" from "the bytes merely exist".
+func (d *SimDisk) DurableSize(path string) (int64, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	f, ok := d.files[path]
+	if !ok {
+		return 0, false
+	}
+	return f.durableSize(), true
+}
+
+// DurableImage returns a copy of the bytes the file at path would hold after a
+// [SimDisk.CrashHost] — the durable image, as opposed to [SimDisk.ReadFile]'s
+// live image, which includes writes the process has issued but never fsync'd. It
+// returns an error wrapping fs.ErrNotExist when the file is absent.
+func (d *SimDisk) DurableImage(path string) ([]byte, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	f, ok := d.files[path]
+	if !ok {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+	}
+	img := f.durableImage()
+	out := make([]byte, len(img))
+	copy(out, img)
+	return out, nil
 }
 
 // SyncGate is a one-shot rendezvous on a chosen [SimFileHandle.Sync] call,
@@ -380,9 +483,137 @@ func (d *SimDisk) ArmSyncGateAt(at int64) *SyncGate {
 // separately by the per-Sync fault and the torn-write sector bitmap; this flag
 // is only about the name's link surviving a crash.
 type simFile struct {
-	faulted       map[int]bool
-	data          []byte
+	faulted map[int]bool
+	data    []byte
+	// durableData is the EXPLICIT durable image, materialised lazily and nil in
+	// the common case. While it is nil the durable image is data[:durableLen] —
+	// the O(1) watermark representation that costs an append-only writer such as
+	// the WAL nothing per fsync. It is materialised (copy-on-write) the moment a
+	// mutation would rewrite a byte the last successful Sync already placed on
+	// stable storage, because from that instant the platter and the page cache
+	// disagree and a watermark can no longer describe both.
+	durableData []byte
+	// durableLen is the number of leading bytes of data that a successful
+	// [SimFileHandle.Sync] has placed on stable storage. It is meaningful only
+	// while durableData is nil; use [simFile.durableSize] rather than reading it
+	// directly. It advances ONLY when a Sync returns nil (rmp #2535).
+	durableLen    int64
 	direntDurable bool
+}
+
+// durableSize returns the length of this file's durable image — the number of
+// bytes a [SimDisk.CrashHost] would leave behind.
+func (f *simFile) durableSize() int64 {
+	if f.durableData != nil {
+		return int64(len(f.durableData))
+	}
+	if f.durableLen > int64(len(f.data)) {
+		return int64(len(f.data))
+	}
+	return f.durableLen
+}
+
+// durableImage returns the bytes a [SimDisk.CrashHost] would leave in this file.
+// The returned slice may ALIAS f.data (the watermark representation), so callers
+// that keep it must copy.
+func (f *simFile) durableImage() []byte {
+	if f.durableData != nil {
+		return f.durableData
+	}
+	return f.data[:f.durableSize()]
+}
+
+// preserveDurableBelow pins an explicit copy of the durable image when a
+// mutation at byte offset off would otherwise rewrite bytes the last successful
+// Sync already placed on stable storage.
+//
+// It is the copy-on-write half of the watermark representation, and it is what
+// makes the cheap representation exact rather than merely append-only-correct:
+// an append (off at or beyond the watermark) costs nothing, and only a write
+// back into already-durable bytes pays for one copy, which is then reset to the
+// watermark form by the next successful Sync.
+func (f *simFile) preserveDurableBelow(off int64) {
+	if f.durableData != nil || off >= f.durableSize() {
+		return
+	}
+	n := f.durableSize()
+	buf := make([]byte, n)
+	copy(buf, f.data[:n])
+	f.durableData = buf
+}
+
+// truncateDurableTo shortens the durable image to size.
+//
+// It models a truncation as INSTANTLY durable, which is the pre-existing
+// behaviour of [SimFileHandle.Truncate], [SimDisk.TruncatePath] and O_TRUNC and
+// is deliberately left unchanged here: making a truncation itself survivable —
+// so that a crash restores the longer prior image — is audit finding F8, filed
+// separately as rmp #2542. This is the single seam that change needs.
+func (f *simFile) truncateDurableTo(size int64) {
+	if f.durableData != nil {
+		if int64(len(f.durableData)) > size {
+			f.durableData = f.durableData[:size]
+		}
+		return
+	}
+	if f.durableLen > size {
+		f.durableLen = size
+	}
+}
+
+// markSyncedTo records that an fsync covering the first n bytes completed
+// successfully, so those bytes are now on stable storage.
+//
+// n is the length captured when the fsync was ISSUED, not the length now: an
+// fsync makes durable what the file held when it started, and frames a
+// concurrent committer appended while it ran belong to the next round. That is
+// the same watermark discipline [github.com/FlavioCFOliveira/GoGraph/store/wal.Writer]
+// applies when leadGroupSyncLocked snapshots appendedSize before its own fsync.
+//
+// The watermark never moves backwards: with a gate armed, fsyncs can complete
+// out of order, and an earlier, smaller round completing last must not un-harden
+// what a later one already made durable.
+func (f *simFile) markSyncedTo(n int64) {
+	if n > int64(len(f.data)) {
+		n = int64(len(f.data))
+	}
+	if n < 0 {
+		n = 0
+	}
+	if n <= f.durableSize() {
+		// The fsync covered a prefix already deemed durable. It still REFRESHES
+		// that prefix's content — a durable byte rewritten in place and then
+		// fsync'd is durable again — so the explicit image, if there is one,
+		// takes the new bytes.
+		if f.durableData != nil {
+			copy(f.durableData[:n], f.data[:n])
+		}
+		return
+	}
+	// Everything up to n is now both durable and current, so the explicit image
+	// is redundant and the file returns to the cheap watermark representation.
+	f.durableData = nil
+	f.durableLen = n
+}
+
+// revertToDurable replaces the live bytes with the durable image and returns how
+// many written-but-never-synced bytes that discarded. It is what
+// [SimDisk.CrashHost] applies to every file that survives the crash.
+//
+// The per-sector fault bitmap is deliberately NOT touched: it models the
+// device's bad sectors, which a power failure does not repair, and leaving it
+// alone keeps a host crash's effect confined to the byte image. (That
+// [SimFileHandle.Truncate] does clear marks for vanished sectors is a separate,
+// pre-existing modelling choice — audit finding F13.)
+func (f *simFile) revertToDurable() int64 {
+	img := f.durableImage()
+	discarded := int64(len(f.data)) - int64(len(img))
+	buf := make([]byte, len(img))
+	copy(buf, img)
+	f.data = buf
+	f.durableData = nil
+	f.durableLen = int64(len(buf))
+	return discarded
 }
 
 // renameCrashSeedMix decorrelates the rename crash-outcome sub-stream from the
@@ -492,9 +723,49 @@ func (d *SimDisk) CorruptRange(path string, off int64, n int) error {
 	if off < 0 || n <= 0 || off+int64(n) > int64(len(f.data)) {
 		return fmt.Errorf("sim: CorruptRange out of range: off=%d n=%d len=%d", off, n, len(f.data))
 	}
+	// Corrupt the DURABLE image as well as the live one. Without this the
+	// injector would be silently undone by the next [SimDisk.CrashHost], which
+	// restores the durable image over the live bytes — turning a bad-sector
+	// scenario into a no-op. When durableData is nil the durable image aliases
+	// data, so the loop below has already covered it; only the materialised
+	// representation needs the second pass.
 	for i := int64(0); i < int64(n); i++ {
 		f.data[off+i] ^= 0xFF
 	}
+	if f.durableData != nil {
+		for i := int64(0); i < int64(n) && off+i < int64(len(f.durableData)); i++ {
+			f.durableData[off+i] ^= 0xFF
+		}
+	}
+	return nil
+}
+
+// MarkDataDurable declares the CURRENT contents of the file at path to be on
+// stable storage, advancing its durable watermark to the live length without
+// issuing a Sync. It returns an error wrapping fs.ErrNotExist when the file is
+// absent.
+//
+// It is the counterpart of [SimDisk.CorruptRange]: a harness primitive that
+// edits the durable image directly, for a scenario that SUBSTITUTES a crafted
+// component for a published one and needs the substitution to be what a crash
+// leaves behind. Going through [SimFileHandle.Sync] instead would draw from the
+// [Seed] — perturbing the reproducible fault stream — and could itself be failed
+// by the injector, turning a fixture step into a spurious error.
+//
+// It is NOT a way for engine code to obtain durability it did not fsync for.
+// Nothing outside a test fixture should call it; the durability an engine has is
+// the durability its Syncs earned.
+//
+// It draws NOTHING from the [Seed] and holds only [SimDisk]'s own mutex, so it
+// never perturbs the reproducible fault stream.
+func (d *SimDisk) MarkDataDurable(path string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	f, ok := d.files[path]
+	if !ok {
+		return &fs.PathError{Op: "markdurable", Path: path, Err: fs.ErrNotExist}
+	}
+	f.markSyncedTo(int64(len(f.data)))
 	return nil
 }
 
@@ -619,6 +890,9 @@ func (d *SimDisk) OpenFile(path string, flag int) (*SimFileHandle, error) {
 	if flag&os.O_TRUNC != 0 {
 		f.data = f.data[:0]
 		f.faulted = make(map[int]bool)
+		// The truncation is modelled as instantly durable, exactly as it was
+		// before the durable shadow existed; see [simFile.truncateDurableTo].
+		f.truncateDurableTo(0)
 	}
 	h := &SimFileHandle{disk: d, file: f, path: path}
 	if flag&os.O_APPEND != 0 {
@@ -1143,6 +1417,7 @@ func (d *SimDisk) TruncatePath(path string, size int64) error {
 	}
 	if size <= int64(len(f.data)) {
 		f.data = f.data[:size]
+		f.truncateDurableTo(size)
 		return nil
 	}
 	if d.wouldExceedLocked(int64(len(f.data)), size) {
@@ -1225,15 +1500,72 @@ func (d *SimDisk) ParentDirSync(childPath string) error {
 	return d.DirSync(pathpkg.Dir(childPath))
 }
 
-// Crash models a host crash / kill -9: it drops every dirent that is not yet
+// Crash is an alias for [SimDisk.CrashHost], the STRONGER of the two crash
+// models. Every scenario that has not consciously chosen otherwise therefore
+// gets power-failure semantics, in which unsynced data is lost; a scenario that
+// genuinely means SIGKILL calls [SimDisk.CrashProcess] and says so.
+func (d *SimDisk) Crash() { d.CrashHost() }
+
+// CrashProcess models a SIGKILL of the process (kill -9). The process dies; the
+// kernel does not. Everything the process had already handed the kernel — every
+// byte accepted by a write(2) and every directory entry created by a
+// create(2)/rename(2)/unlink(2) — is still there for the next process to read,
+// whether or not it was ever fsync'd. CrashProcess therefore discards NOTHING:
+// no data revert, no dirent revocation, no rename rollback.
+//
+// It is the model [SimStore.Crash]'s own documentation used to describe while
+// [SimDisk.Crash] actually applied dirent revocation, which is a host-crash
+// effect. The two are now separate primitives so a scenario can state which
+// event it means (rmp #2535).
+//
+// Pending renames stay pending: their dirents are in the page cache but not on
+// stable storage, so a LATER [SimDisk.CrashHost] can still lose them. It must be
+// driven from the single simulation goroutine.
+func (d *SimDisk) CrashProcess() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.lastCrashKind = CrashKindProcess
+	d.lastCrashDiscardedBytes = 0
+	// The rename log is untouched, but the shape observables still report what
+	// this crash SAW, so a gate can prove it landed inside a publish window.
+	d.crashPendingRenames = len(d.renameUndos)
+	d.crashRolledBackRenames = 0
+	// hostCrashGen is deliberately NOT bumped: an fsync already issued to the
+	// kernel completes even though the process that issued it is gone.
+}
+
+// CrashHost models a host crash — power failure, hard reset, hypervisor kill.
+// Nothing that had not reached stable storage survives. It is the model
+// [SimDisk.Crash] applies, and it has two halves that must agree with each other.
+//
+// # Data
+//
+// Every file reverts to its durable image: the bytes covered by a
+// [SimFileHandle.Sync] that returned nil, and nothing else. A successful
+// write(2) carries no durability whatever — Linux write(2) NOTES: "A successful
+// return from write() does not make any guarantee that data has been committed
+// to disk… The only way to be sure is to call fsync(2)" — and POSIX reaches
+// durability solely through Successfully Transferred, i.e. via
+// fsync/fdatasync/O_SYNC. Until rmp #2535 the model kept every byte ever
+// written, which granted data the guarantee RocksDB's file abstraction reserves
+// for Flush() ("should survive a process crash") while revoking names as if
+// power had been lost — an internal contradiction no real event has, and one
+// that made every "the commit was acked, so the bytes are recovered" assertion
+// pass irrespective of any fsync.
+//
+// [SimDisk.LastCrashDiscardedBytes] reports how much this crash actually threw
+// away, which is the non-vacuity observable an oracle needs to prove it was
+// tested at all.
+//
+// # Names
+//
+// It drops every dirent that is not yet
 // durable, exactly as a real crash within the kernel writeback window loses a
 // create or rename whose parent directory was never fsync'd. A name becomes
 // durable only after a [SimDisk.DirSync] of its parent; until then it is the
 // load-bearing job of the publish protocol's directory fsyncs to make the name
 // survive, and removing one of those fsyncs makes the corresponding name vanish
-// here — which is what the non-vacuity guard test asserts. File DATA that was
-// never Sync'd is handled separately by the per-Sync fault and the torn-write
-// sectors; Crash only revokes the not-yet-durable name links.
+// here — which is what the non-vacuity guard test asserts.
 //
 // # Renames are rolled back, not revoked
 //
@@ -1258,11 +1590,18 @@ func (d *SimDisk) ParentDirSync(childPath string) error {
 // new parent, by [SimDisk.ArmRenameWritebackForPath], or by being root-level —
 // are never rolled back.
 //
-// Crash mutates the SimDisk in place and is driven from the single simulation
-// goroutine; it must not run concurrently with disk I/O.
-func (d *SimDisk) Crash() {
+// CrashHost mutates the SimDisk in place. It is driven from the single
+// simulation goroutine, but it may run while another goroutine is parked inside
+// a gated [SimFileHandle.Sync]: that is the phantom-commit window, and the
+// generation stamp on the in-flight fsync (see [SimDisk.completeSync]) is what
+// stops the parked call from re-hardening bytes this crash has just discarded.
+func (d *SimDisk) CrashHost() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.lastCrashKind = CrashKindHost
+	// Invalidate every fsync currently in flight before anything else: the power
+	// went out with the write-back incomplete.
+	d.hostCrashGen++
 	d.rollbackRenamesLocked()
 	// Drop directories whose own dirent never became durable, taking their
 	// whole subtree with them (a lost directory rename loses every child).
@@ -1278,6 +1617,14 @@ func (d *SimDisk) Crash() {
 			delete(d.files, p)
 		}
 	}
+	// Revert the DATA of every file whose name survived. Reverting is idempotent,
+	// so a file reachable under two names (a rolled-back rename restores the
+	// same inode under its old name) is safe to visit twice.
+	var discarded int64
+	for _, f := range d.files {
+		discarded += f.revertToDurable()
+	}
+	d.lastCrashDiscardedBytes = discarded
 }
 
 // rollbackRenamesLocked undoes the trailing run of not-yet-durable renames the
@@ -1522,6 +1869,11 @@ func (h *SimFileHandle) Write(p []byte) (int, error) {
 		copy(grown, h.file.data)
 		h.file.data = grown
 	}
+	// A write back into already-durable bytes makes the page cache and the
+	// platter disagree, so the durable image must be pinned before the bytes
+	// change. A pure append — the WAL's whole access pattern — takes the early
+	// return inside preserveDurableBelow and copies nothing.
+	h.file.preserveDurableBelow(h.pos)
 	copy(h.file.data[h.pos:end], p)
 
 	// Decide, per touched sector, whether the write lands in a faulted sector
@@ -1546,6 +1898,13 @@ func (h *SimFileHandle) Write(p []byte) (int, error) {
 func (h *SimFileHandle) corruptSector(sec int) {
 	off := sec * sectorSize
 	if off < len(h.file.data) {
+		// The flip can reach BELOW the durable watermark even when the write
+		// itself did not: a write starting mid-sector still corrupts that
+		// sector's FIRST byte, which an earlier Sync may already have made
+		// durable. Pin the durable image before flipping, so the corruption is
+		// what the live process sees and what a later Sync would harden — never
+		// a retroactive edit of what is already on the platter.
+		h.file.preserveDurableBelow(int64(off))
 		h.file.data[off] ^= 0xFF
 	}
 }
@@ -1590,6 +1949,7 @@ func (h *SimFileHandle) Truncate(size int64) error {
 	defer h.disk.mu.Unlock()
 	if size <= int64(len(h.file.data)) {
 		h.file.data = h.file.data[:size]
+		h.file.truncateDurableTo(size)
 	} else {
 		if h.disk.wouldExceedLocked(int64(len(h.file.data)), size) {
 			return enospc("truncate", h.path)
@@ -1615,7 +1975,7 @@ func (h *SimFileHandle) Sync() error {
 	if h.closed {
 		return fs.ErrClosed
 	}
-	gate, err := h.disk.syncOutcome(h.path)
+	gate, req, err := h.disk.syncOutcome(h.path, h.file)
 	// Block on an armed gate with the disk lock RELEASED, so the rest of the disk
 	// stays usable while this Sync is held. The outcome was already decided above
 	// under the lock, so releasing it here selects the same result the ungated
@@ -1627,7 +1987,25 @@ func (h *SimFileHandle) Sync() error {
 		gate.reach()
 		<-gate.release
 	}
-	return err
+	if err != nil {
+		// A failed fsync advances nothing: the bytes it was carrying are still
+		// only in the page cache, so a crash still loses them.
+		return err
+	}
+	// The durability lands when the fsync RETURNS, not when it was issued. That
+	// ordering is the whole point of the split: a host crash while this call was
+	// parked means the fsync never completed, and completeSync then declines to
+	// grant durability the platter never received.
+	h.disk.completeSync(h.file, req)
+	return nil
+}
+
+// syncRequest is the durability an in-flight Sync will grant if — and only if —
+// it completes: the byte watermark captured when the fsync was issued, and the
+// host-crash generation it was issued under.
+type syncRequest struct {
+	covers int64
+	gen    uint64
 }
 
 // syncOutcome decides one Sync's result under the disk lock and reports whether
@@ -1635,7 +2013,7 @@ func (h *SimFileHandle) Sync() error {
 // OUTSIDE the lock: holding d.mu across a rendezvous would wedge every other
 // file operation on the disk, including the appends of the very committers a
 // gated WAL leader is waiting for.
-func (d *SimDisk) syncOutcome(path string) (*SyncGate, error) {
+func (d *SimDisk) syncOutcome(path string, f *simFile) (*SyncGate, syncRequest, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	// Count this Sync first, so the ordinal a one-shot fault is armed against
@@ -1648,7 +2026,29 @@ func (d *SimDisk) syncOutcome(path string) (*SyncGate, error) {
 		gate = d.syncGate
 		d.syncGate = nil
 	}
-	return gate, d.syncResultLocked(path)
+	// Capture what this fsync covers BEFORE the lock is released. Bytes a
+	// concurrent committer appends while it runs belong to the next round.
+	req := syncRequest{covers: int64(len(f.data)), gen: d.hostCrashGen}
+	return gate, req, d.syncResultLocked(path)
+}
+
+// completeSync applies the durability an fsync granted by returning nil: it
+// advances the file's durable watermark to the length the fsync covered.
+//
+// It declines when a [SimDisk.CrashHost] intervened between the fsync being
+// issued and it completing. That is not a defensive check but the model itself —
+// the machine lost power with the fsync in flight, so the write-back never
+// happened, and the frames the caller was hardening are gone even though its
+// Sync goes on to return nil. That combination (a nil Sync over a durable image
+// that does not contain its bytes) is precisely the phantom-commit shape audit
+// probe S1 constructed.
+func (d *SimDisk) completeSync(f *simFile, req syncRequest) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.hostCrashGen != req.gen {
+		return
+	}
+	f.markSyncedTo(req.covers)
 }
 
 // syncResultLocked returns the outcome the arms select for the Sync just

@@ -26,8 +26,9 @@ const (
 )
 
 // CrashSchedule decides, deterministically from the seed, at which ticks a
-// crash (a SIGKILL-equivalent: drop the in-memory engine, keep only the durable
-// SimDisk bytes) occurs. After a crash the simulator reopens the store from the
+// crash (a HOST crash: drop the in-memory engine and keep only what a
+// successful fsync placed on the SimDisk — see [SimDisk.CrashHost], which
+// [SimStore.Crash] aliases) occurs. After a crash the simulator reopens the store from the
 // durable image via real recovery; CrashSchedule then enforces a stability
 // window during which no further crash is scheduled, so recovery is given time
 // to settle and be re-validated before the next fault (mirroring TigerBeetle

@@ -328,12 +328,12 @@ func (s *simTypedStore[N, W]) Checkpoint() error {
 	return runSimCheckpoint(s.disk, s.cfg.dir, s.graph, s.store, s.wlog)
 }
 
-// Crash models a SIGKILL over a typed store, with the same semantics as
-// [SimStore.Crash]: no graceful flush, the SimDisk byte image survives, and
-// every not-yet-dir-fsync'd dirent is revoked.
+// Crash models a HOST crash over a typed store, with the same semantics as
+// [SimStore.Crash]: no graceful flush, every file reverts to the bytes a
+// successful Sync made durable, and every not-yet-dir-fsync'd dirent is revoked.
 func (s *simTypedStore[N, W]) Crash() {
 	if s.disk != nil {
-		s.disk.Crash()
+		s.disk.CrashHost()
 	}
 	s.store = nil
 	s.wlog = nil
@@ -597,26 +597,55 @@ func (s *SimStore) ClockNow() uint64 {
 	return s.graph.MVCCStats().Now
 }
 
-// Crash models a SIGKILL: it discards the in-memory engine, store, and WAL
-// writer WITHOUT a graceful close, so any buffered-but-unsynced frame is lost
-// exactly as a real crash would lose it. The durable WAL byte image inside the
-// SimDisk (and its fault state) survives untouched, ready for [OpenSimStore] to
-// reopen and replay. The SimStore must not be used after Crash.
+// Crash models a HOST crash — power failure, hard reset, hypervisor kill. It is
+// an alias for [SimStore.CrashHost], so every scenario that has not consciously
+// chosen otherwise gets the stronger of the two models. A scenario that really
+// means SIGKILL calls [SimStore.CrashProcess] and says so.
+func (s *SimStore) Crash() { s.CrashHost() }
+
+// CrashHost models a power failure. It discards the in-memory engine, store, and
+// WAL writer WITHOUT a graceful close, and then applies [SimDisk.CrashHost] to
+// the disk: every file reverts to the bytes a [SimFileHandle.Sync] returning nil
+// actually made durable, and every not-yet-dir-fsync'd dirent is revoked. What
+// remains is exactly what stable storage held, ready for [OpenSimStore] to
+// reopen and replay. The SimStore must not be used afterwards.
 //
-// Crash deliberately does NOT call s.wlog.Close(): a clean Close would flush and
+// It deliberately does NOT call s.wlog.Close(): a clean Close would flush and
 // fsync the buffer, which is the opposite of a crash. Dropping the references
 // lets the GC reclaim them; the only durable state is the SimDisk image.
 //
-// Crash also revokes every not-yet-dir-fsync'd dirent on the SimDisk (see
-// [SimDisk.Crash]), modelling the loss of a create or rename whose parent
-// directory was never fsync'd. For a WAL-only store the WAL is a root-level
-// file treated as durably linked on creation, so this is a no-op; once
-// snapshots back onto the same SimDisk it drops an interrupted snapshot publish
-// exactly as production would.
-func (s *SimStore) Crash() {
+// A frame the WAL had written but never fsync'd is therefore GONE, which is what
+// makes an oracle of the form "the commit was acked, so the bytes are recovered"
+// able to fail. Before rmp #2535 the byte image survived untouched and that
+// oracle held whatever the engine did with fsync.
+func (s *SimStore) CrashHost() {
 	if s.disk != nil {
-		s.disk.Crash()
+		s.disk.CrashHost()
 	}
+	s.dropRefs()
+}
+
+// CrashProcess models a SIGKILL of the process (kill -9). The process dies and
+// its in-memory engine, store and WAL writer go with it, but the kernel does
+// not: every byte already accepted by a write(2) and every directory entry
+// already created survives for the next process to read, fsync'd or not (see
+// [SimDisk.CrashProcess]).
+//
+// Only the WAL writer's own bufio buffer is lost, since that lives in the dead
+// process's address space. Use it when the scenario means "the process was
+// killed", and [SimStore.CrashHost] when it means "the machine went down" — the
+// two are physically different events and, since rmp #2535, they leave
+// different durable images.
+func (s *SimStore) CrashProcess() {
+	if s.disk != nil {
+		s.disk.CrashProcess()
+	}
+	s.dropRefs()
+}
+
+// dropRefs releases the in-memory objects a crash of either kind destroys. It is
+// what makes a crashed SimStore unusable rather than merely stale.
+func (s *SimStore) dropRefs() {
 	s.engine = nil
 	s.store = nil
 	s.wlog = nil

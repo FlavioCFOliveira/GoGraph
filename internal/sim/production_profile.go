@@ -13,7 +13,7 @@ package sim
 //	transaction sizes, atomic-batch writers, during-run isolation readers,
 //	same-connection RYOW probes, plain writers/readers and overload traffic) →
 //	CHECKPOINT while that traffic is in flight → join every client and the
-//	server → CRASH the disk (SIGKILL-equivalent) → reopen through real recovery
+//	server → CRASH the disk (a HOST crash, [SimDisk.CrashHost]) → reopen through real recovery
 //	(snapshot + WAL tail) → adjudicate → commit post-recovery beacons.
 //
 // The run then forces ONE pure-snapshot crossing (rmp #2468): a checkpoint that

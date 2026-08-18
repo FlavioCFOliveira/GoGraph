@@ -285,8 +285,8 @@ func TestEdgeProperties_ScriptedParallelPair_SurvivesCrash(t *testing.T) {
 
 	scriptParallelPair(t, sm)
 
-	// SIGKILL-equivalent crash, then reopen through real WAL recovery — exactly
-	// what Simulator.maybeCrash does.
+	// HOST crash ([SimDisk.Crash] is [SimDisk.CrashHost]), then reopen through
+	// real WAL recovery — exactly what Simulator.maybeCrash does.
 	sm.disk.Crash()
 	store, err := OpenSimStore(sm.disk, sm.store.Config())
 	if err != nil {

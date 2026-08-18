@@ -882,9 +882,20 @@ func runSnapshotManifestGuards(
 	return arms, vs, nil
 }
 
-// snapshotWriteFile replaces the whole contents of path on disk. It is the
-// harness's way of substituting a crafted component for the published one; the
-// caller restores the original afterwards.
+// snapshotWriteFile replaces the whole contents of path on disk and makes the
+// replacement DURABLE. It is the harness's way of substituting a crafted
+// component for the published one; the caller restores the original afterwards.
+//
+// The durability step is load-bearing, not hygiene. The substituted component
+// stands in for one the publish protocol had already fsync'd, so a scenario that
+// then crashes must find the crafted bytes, not the ones they replaced. Until
+// rmp #2535 the helper could omit it because [SimDisk.CrashHost] retained every
+// written byte; once a crash discards what no fsync covered, an unsynced
+// substitution is reverted — and, because the O_TRUNC above lowers the durable
+// image to zero first, reverted to an EMPTY file, which recovery reports as
+// "manifest corrupted: EOF". [SimDisk.MarkDataDurable] rather than a Sync
+// because a fixture step must draw nothing from the seed and must not be
+// failable by the fault injector.
 func snapshotWriteFile(disk *SimDisk, path string, data []byte) error {
 	h, err := disk.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC)
 	if err != nil {
@@ -894,7 +905,10 @@ func snapshotWriteFile(disk *SimDisk, path string, data []byte) error {
 		_ = h.Close()
 		return err
 	}
-	return h.Close()
+	if err := h.Close(); err != nil {
+		return err
+	}
+	return disk.MarkDataDurable(path)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

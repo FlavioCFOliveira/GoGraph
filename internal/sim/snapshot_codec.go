@@ -90,8 +90,8 @@ func simWALSize(disk *SimDisk, dir string) (int64, error) {
 //     snapshot folded;
 //  3. measure the WAL again (an emptied WAL is what makes the next step's claim
 //     falsifiable);
-//  4. crash SIGKILL-style and reopen through real recovery, recording how many
-//     WAL ops the replay contributed.
+//  4. take a HOST crash ([SimDisk.CrashHost]) and reopen through real recovery,
+//     recording how many WAL ops the replay contributed.
 //
 // It reopens with s.store.Config() — the layout the crashed store really used —
 // never the WAL-only default: pointing recovery at the wrong (empty) root-level
@@ -155,9 +155,10 @@ func crossSnapshotBoundaryOn(disk *SimDisk, st *SimStore, label string) (*SimSto
 	}
 	b.snapshotPublished = disk.Exists(cfg.dir + "/" + simSnapshotName + "/manifest.json")
 
-	// SIGKILL-equivalent, byte for byte what [Simulator.maybeCrash] does: drop
-	// the live engine and store without a graceful close, revoke every dirent
-	// whose parent directory was never fsynced, keep the SimDisk image.
+	// HOST crash, byte for byte what [Simulator.maybeCrash] does: drop the live
+	// engine and store without a graceful close, revoke every dirent whose parent
+	// directory was never fsynced, and keep only the bytes a successful fsync
+	// placed on the SimDisk ([SimDisk.Crash] is [SimDisk.CrashHost]).
 	disk.Crash()
 	store, err := OpenSimStore(disk, cfg)
 	if err != nil {

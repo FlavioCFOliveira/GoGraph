@@ -712,7 +712,7 @@ func runReadTxIsolation(ctx context.Context, seed uint64) (*SimReport, error) {
 	}
 
 	// --- Phase B: crash + recovery (durability + atomicity). ---
-	st.Crash() // SIGKILL: drop the engine, keep the SimDisk WAL image.
+	st.Crash() // HOST crash: drop the engine, keep only the fsync'd WAL prefix.
 	st2, err := OpenSimStore(disk, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("sim: ST7 reopen: %w", err)
