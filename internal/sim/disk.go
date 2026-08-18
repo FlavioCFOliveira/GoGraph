@@ -678,6 +678,15 @@ type renameUndo struct {
 	// "absent" and restoring "false" are different states and must not be
 	// conflated.
 	oldDirTracked bool
+	// prunedDirs holds the directory-durability entries this rename deleted
+	// because moving the name emptied the directory that held it (see
+	// [SimDisk.pruneGhostDirEntriesLocked]). Rolling the rename back puts a name
+	// back INTO that directory, so the entry has to be there to describe it
+	// again — without this the rolled-back state would show the directory as
+	// implicitly durable and a host crash would keep a subtree whose own name
+	// never reached stable storage. It is nil in the common case, where the
+	// directory still holds other names.
+	prunedDirs map[string]bool
 	// dirRename distinguishes a whole-subtree rename from a single-file one.
 	dirRename bool
 	// forceRollback pins this record's outcome to the rolled-back branch instead
@@ -1005,6 +1014,13 @@ func (d *SimDisk) Rename(oldPath, newPath string) error {
 		rec.oldDurable = f.direntDurable
 		f.direntDurable = durable
 		d.files[newPath] = f
+		// Moving the last name out of a directory published by rename empties
+		// that directory, so its own entry must go with it or it becomes the
+		// ghost of rmp #2538 — measured destroying a fully durable file at this
+		// exact site. It runs AFTER the destination is installed, so a
+		// same-directory rename (every rename the engine actually issues:
+		// path+".tmp" -> path) leaves the directory populated and prunes nothing.
+		rec.prunedDirs = d.pruneGhostDirEntriesLocked(oldPath)
 		if !durable {
 			d.renameUndos = append(d.renameUndos, rec)
 		}
@@ -1029,19 +1045,32 @@ func (d *SimDisk) Rename(oldPath, newPath string) error {
 	if len(moved) == 0 {
 		return &fs.PathError{Op: "rename", Path: oldPath, Err: fs.ErrNotExist}
 	}
+	// Directory entries nested inside the moved tree travel with it and keep
+	// their own dirent durability, for the same reason the child files do: their
+	// names live inside the moved inode, which this rename does not touch. They
+	// are collected before anything is mutated, so a rename that returns an
+	// error still moves nothing. Re-rooting them is also what makes the forward
+	// rename symmetric with [SimDisk.undoRenameLocked], which already re-roots
+	// them on the way back, and it stops the source path from keeping an entry
+	// whose subtree has left (see [SimDisk.removeSubtreeLocked]).
+	var movedDirs map[string]bool
+	for dp, dur := range d.dirs {
+		if strings.HasPrefix(dp, prefix) {
+			if movedDirs == nil {
+				movedDirs = make(map[string]bool)
+			}
+			movedDirs[newPath+"/"+dp[len(prefix):]] = dur
+		}
+	}
 	rec.dirRename = true
 	pin()
 	// Capture the destination subtree BEFORE replace semantics drop it, so a
 	// rolled-back rename can put it back.
 	rec.replacedFiles, rec.replacedDirs = d.captureSubtreeLocked(newPath)
-	// Drop any pre-existing destination subtree (replace semantics).
-	// removeSubtreeLocked clears the file keys; the directory-durability entries
-	// under the destination are cleared here, since replacing a directory
-	// unlinks the names inside it too.
+	// Drop any pre-existing destination subtree (replace semantics): both its
+	// file keys and its directory-durability entries, since replacing a
+	// directory unlinks the names inside it too.
 	d.removeSubtreeLocked(newPath)
-	for dp := range rec.replacedDirs {
-		delete(d.dirs, dp)
-	}
 	rec.oldDurable, rec.oldDirTracked = d.dirs[oldPath]
 	delete(d.dirs, oldPath)
 	for p := range d.files {
@@ -1049,9 +1078,21 @@ func (d *SimDisk) Rename(oldPath, newPath string) error {
 			delete(d.files, p)
 		}
 	}
+	for dp := range d.dirs {
+		if strings.HasPrefix(dp, prefix) {
+			delete(d.dirs, dp)
+		}
+	}
 	for np, f := range moved {
 		d.files[np] = f
 	}
+	for np, dur := range movedDirs {
+		d.dirs[np] = dur
+	}
+	// Moving a whole subtree out of a published directory can empty it too; the
+	// entry for oldPath itself is already gone above, so this catches only its
+	// ancestors.
+	rec.prunedDirs = d.pruneGhostDirEntriesLocked(oldPath)
 	// The directory's own dirent under its parent is not durable until a
 	// ParentDirSync(newPath); root-level directories are durably linked on
 	// creation, mirroring root-level files (see [isRootLevel]). An armed
@@ -1344,14 +1385,39 @@ func (d *SimDisk) LastCrashRenameOutcome() (pending, rolledBack int) {
 	return d.crashPendingRenames, d.crashRolledBackRenames
 }
 
-// removeSubtreeLocked deletes path and every key under path/. The caller holds
-// d.mu.
+// removeSubtreeLocked deletes path and every key under path/, files and
+// directory-durability entries alike. The caller holds d.mu.
+//
+// Clearing d.dirs HERE, rather than at each call site, is what makes "no subtree
+// removal leaves a d.dirs entry behind" hold by construction: every path that
+// unlinks a whole subtree goes through this one body. The name-level unlinks are
+// covered by [SimDisk.pruneGhostDirEntriesLocked]; together the two give the
+// invariant that a non-durable entry never outlives its subtree. Maintaining it by hand was
+// violable and duly violated — [SimDisk.Rename] and [SimDisk.undoRenameLocked]
+// hand-deleted the entries while Remove/RemoveAll did not, so a directory that
+// had once been published by rename and was then removed left an entry behind
+// with its value false. If a directory was later created in place at that same
+// path and fully fsync'd, [SimDisk.CrashHost] still honoured the stale entry and
+// deleted the whole subtree — a loss of data whose bytes AND whose dirent were
+// both on stable storage, which no filesystem produces. The simulator would then
+// have manufactured a durability violation and the oracle would have charged it
+// to the engine, the same false-accusation class as the rename model repaired
+// under rmp #2514 (rmp #2538, audit finding F4).
 func (d *SimDisk) removeSubtreeLocked(path string) {
 	delete(d.files, path)
+	delete(d.dirs, path)
 	prefix := path + "/"
 	for p := range d.files {
 		if strings.HasPrefix(p, prefix) {
 			delete(d.files, p)
+		}
+	}
+	// A nested entry goes too, whatever its own durability: its name lives
+	// inside a directory this call has just unlinked, so nothing under it is
+	// reachable any more.
+	for dp := range d.dirs {
+		if strings.HasPrefix(dp, prefix) {
+			delete(d.dirs, dp)
 		}
 	}
 }
@@ -1371,7 +1437,58 @@ func (d *SimDisk) Remove(path string) error {
 	// deleted — so pin it into the durable prefix first.
 	d.pinRenameUndosLocked(path)
 	delete(d.files, path)
+	// The report is discarded: an unlink has no undo record for a crash to roll
+	// back, so nothing can put a name back into the emptied directory. When
+	// removal becomes crash-reversible (rmp #2536) it must record this exactly as
+	// [SimDisk.Rename] does.
+	_ = d.pruneGhostDirEntriesLocked(path)
 	return nil
+}
+
+// pruneGhostDirEntriesLocked drops every not-yet-durable directory entry that the
+// removal of the name path has left without a subtree, and returns what it
+// deleted so a caller able to undo the removal can put it back. It is the
+// counterpart of [SimDisk.removeSubtreeLocked] for the paths that unlink a single
+// NAME instead of a whole tree — [SimDisk.Remove] and a [SimDisk.Rename] that
+// moves the last name out of a directory — and it closes the same hole: an entry
+// whose value is false and whose subtree is gone destroys whatever is created at
+// that path next (rmp #2538).
+//
+// Only path itself or an ancestor of path can be affected, and only entries that
+// are still non-durable: a DURABLE entry left over an empty directory is a
+// legitimate residue — a publish rename that reached stable storage while the
+// components inside it did not — and, being durable, it can never delete
+// anything. Forgetting a non-durable empty directory loses nothing observable,
+// since an empty directory has no representation in the opaque-key model at all
+// (see [SimDisk.Stat]). The caller holds d.mu.
+func (d *SimDisk) pruneGhostDirEntriesLocked(path string) map[string]bool {
+	var pruned map[string]bool
+	for dp, durable := range d.dirs {
+		if durable || (dp != path && !strings.HasPrefix(path, dp+"/")) {
+			continue
+		}
+		if !d.hasSubtreeLocked(dp) {
+			if pruned == nil {
+				pruned = make(map[string]bool)
+			}
+			pruned[dp] = durable
+			delete(d.dirs, dp)
+		}
+	}
+	return pruned
+}
+
+// hasSubtreeLocked reports whether any file key sits at dir or under dir + "/",
+// which is what "the directory exists" means in the opaque-key model. The caller
+// holds d.mu.
+func (d *SimDisk) hasSubtreeLocked(dir string) bool {
+	prefix := dir + "/"
+	for p := range d.files {
+		if p == dir || strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // RemoveAll deletes path and every file under path/. Removing an absent path is
@@ -1743,8 +1860,10 @@ func (d *SimDisk) CrashHost() {
 	// whole subtree with them (a lost directory rename loses every child).
 	for dp, durable := range d.dirs {
 		if !durable {
+			// removeSubtreeLocked drops the entry itself, and any nested entry,
+			// along with the files: the invariant is maintained there so no call
+			// site has to remember it (see [SimDisk.removeSubtreeLocked]).
 			d.removeSubtreeLocked(dp)
-			delete(d.dirs, dp)
 		}
 	}
 	// Drop individual files whose dirent never became durable.
@@ -1838,9 +1957,6 @@ func (d *SimDisk) undoRenameLocked(rec renameUndo) {
 	if rec.dirRename {
 		files, dirs := d.captureSubtreeLocked(rec.newPath)
 		d.removeSubtreeLocked(rec.newPath)
-		for dp := range dirs {
-			delete(d.dirs, dp)
-		}
 		if !rec.revokeBoth {
 			prefix := rec.newPath + "/"
 			for p, f := range files {
@@ -1875,6 +1991,13 @@ func (d *SimDisk) undoRenameLocked(rec renameUndo) {
 		d.files[p] = f
 	}
 	for dp, dur := range rec.replacedDirs {
+		d.dirs[dp] = dur
+	}
+	// The source directory holds a name again, so the entry that described it
+	// has to describe it again — including its NON-durability, which is what
+	// makes the following revoke pass drop a subtree whose directory name never
+	// reached stable storage.
+	for dp, dur := range rec.prunedDirs {
 		d.dirs[dp] = dur
 	}
 }
