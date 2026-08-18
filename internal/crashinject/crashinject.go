@@ -118,9 +118,15 @@ type Opts struct {
 
 // helperBin caches the result of compiling cmd/crashinject-helper so
 // every test in a single go test run reuses the same binary.
+//
+// helperBinDir records the temporary directory that holds the cached binary so
+// [RemoveHelperBinary] can delete it at process exit. It is written exactly
+// once, inside helperBinOnce.Do, and read only after every test has returned
+// (see [RemoveHelperBinary]), so it needs no separate synchronisation.
 var (
 	helperBinOnce sync.Once
 	helperBinPath string
+	helperBinDir  string
 	helperBinErr  error
 )
 
@@ -240,7 +246,12 @@ func isExitError(err error, target **exec.ExitError) bool {
 // process-unique temporary directory (created via os.MkdirTemp) so
 // that concurrent test processes never share a file path and cannot
 // race on the same binary (ETXTBSY on Linux, partial-write on others).
-// The temporary directory is removed when the triggering test ends.
+//
+// The directory outlives every individual test in the process, by design, and
+// is removed by [RemoveHelperBinary] when the process exits. It must NOT be
+// removed with t.Cleanup: the path is cached in helperBinOnce, so deleting it
+// when the triggering test ends would leave every later test in the same
+// process holding a path to a binary that no longer exists.
 func buildHelperOnce(t testing.TB) (string, error) {
 	t.Helper()
 	helperBinOnce.Do(func() {
@@ -252,15 +263,28 @@ func buildHelperOnce(t testing.TB) (string, error) {
 		// Per-process unique directory eliminates cross-process file-path
 		// collisions that cause ETXTBSY on Linux or partially-written
 		// binaries on other platforms. The directory is intentionally not
-		// cleaned up during the test run: removing it after the first test
+		// cleaned up DURING the test run: removing it after the first test
 		// that triggered the build would invalidate the cached path for all
-		// subsequent tests in the same process. OS temp-dir cleanup (reboot /
-		// tmpwatch / launchd) reclaims the directory between runs.
+		// subsequent tests in the same process.
+		//
+		// It is removed at PROCESS exit instead, by [RemoveHelperBinary].
+		// This used to rely on "OS temp-dir cleanup (reboot / tmpwatch /
+		// launchd) reclaims the directory between runs", which is false on
+		// macOS: launchd prunes /var/folders only on a very long idle
+		// schedule, so each `make ci` stranded two 15 MB directories (one per
+		// suite run: `go test -race`, then the coverage pass) and 697 of them
+		// had accumulated by the time the volume filled. A full temp volume
+		// then makes every WAL append fail with ENOSPC, which the WAL reports
+		// as a poisoned writer that discarded its un-synced suffix — the exact
+		// signature of a genuine durability defect. The leak was therefore not
+		// merely untidy: it manufactured false evidence of data loss
+		// (rmp #2527).
 		dir, err := os.MkdirTemp("", "gograph-crashinject-*")
 		if err != nil {
 			helperBinErr = fmt.Errorf("crashinject helper tmpdir: %w", err)
 			return
 		}
+		helperBinDir = dir
 
 		binPath := filepath.Join(dir, "crashinject-helper"+helperBinSuffix)
 		// helperBuildTags carries -tags gograph_crashinject only when this
@@ -283,6 +307,83 @@ func buildHelperOnce(t testing.TB) (string, error) {
 		helperBinPath = binPath
 	})
 	return helperBinPath, helperBinErr
+}
+
+// RemoveHelperBinary deletes the temporary directory holding this process's
+// cached crashinject-helper binary. It is a no-op when no helper was ever
+// built, so every package may call it unconditionally.
+//
+// # Why the hook is process-scoped, and not t.Cleanup
+//
+// [buildHelperOnce] caches the binary path in a sync.Once for the whole test
+// process, precisely so that N crash scenarios pay for one 15 MB `go build`
+// instead of N. A t.Cleanup registered by the test that happened to trigger
+// that build would delete the binary out from under every later test in the
+// same process, turning the cache into a use-after-free. The correct scope is
+// therefore the process, and TestMain is the only process-scoped hook the
+// testing package offers.
+//
+// # How to wire it
+//
+// Every package whose tests call [Run] must install this in its TestMain.
+// A bare `defer RemoveHelperBinary()` does NOT work alongside
+// goleak.VerifyTestMain, because goleak calls os.Exit and deferred functions do
+// not run through os.Exit. Use goleak's own cleanup hook, which replaces that
+// os.Exit call and is therefore responsible for exiting:
+//
+//	func TestMain(m *testing.M) {
+//		goleak.VerifyTestMain(m, goleak.Cleanup(func(exitCode int) {
+//			crashinject.RemoveHelperBinary()
+//			os.Exit(exitCode)
+//		}))
+//	}
+//
+// TestHelperCleanup_WiredInEveryCallerPackage enforces this wiring across the
+// module, so a new package that calls [Run] cannot silently reintroduce the
+// leak.
+//
+// # Concurrency
+//
+// RemoveHelperBinary is NOT safe for concurrent use with [Run]. It reads the
+// cached directory without synchronisation and deletes the binary that [Run]
+// executes, so it must be called only after every test in the process has
+// returned — which is exactly what the TestMain hook above guarantees.
+func RemoveHelperBinary() {
+	if helperBinDir == "" {
+		return
+	}
+	_ = removeHelperDir(helperBinDir)
+	helperBinDir = ""
+	helperBinPath = ""
+}
+
+// removeHelperDir removes dir and everything under it. A directory that has
+// already gone is not an error — os.RemoveAll returns nil for an absent path —
+// which is what makes the hook idempotent: a second call, a manual prune, or a
+// concurrent `make ci` in the same checkout must all be tolerated.
+//
+// It is a separate function so the removal itself is unit-testable against a
+// real populated directory, independently of the process-exit wiring.
+func removeHelperDir(dir string) error {
+	// dir originates from os.MkdirTemp inside this package; it is never
+	// caller-supplied, so gosec's G703 warning about os.RemoveAll on a
+	// variable path does not apply.
+	if err := os.RemoveAll(dir); err != nil { //nolint:gosec // G703: dir is this package's own os.MkdirTemp result, not user input
+		return fmt.Errorf("remove crashinject helper dir %q: %w", dir, err)
+	}
+	return nil
+}
+
+// HelperBinaryDir reports the temporary directory holding this process's cached
+// crashinject-helper binary, or "" when no helper has been built (or after
+// [RemoveHelperBinary] has run).
+//
+// It exists so a test can assert that the directory the process-exit hook will
+// delete is the directory the build actually created — the link between "the
+// removal works" and "the removal is aimed at the right path". It carries the
+// same concurrency restriction as [RemoveHelperBinary].
+func HelperBinaryDir() string {
+	return helperBinDir
 }
 
 // moduleRoot returns the absolute path of the Go module root by
