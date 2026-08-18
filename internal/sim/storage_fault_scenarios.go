@@ -761,7 +761,7 @@ func runCheckpointDirFsyncFault(ctx context.Context, seed uint64) (*SimReport, e
 func ioRoundTripFaultScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioIORoundTripFault,
-		Description: "graph/io CSV+JSONL+GraphML export/import round-trip: exact when clean, clean typed failure with no silently-accepted partial under ENOSPC",
+		Description: "graph/io CSV+JSONL+GraphML+DOT export/import: exact when clean, clean typed failure with no silently-accepted partial under ENOSPC, cross-format agreement, and a mutated-export sweep",
 		Mode:        ModeDeterministic,
 		DefaultSeed: 0x109F0117,
 		run:         runIORoundTripFault,
@@ -810,7 +810,7 @@ func ioRoundTripFormats() []ioFormat {
 }
 
 // runIORoundTripFault performs one ST8 run.
-func runIORoundTripFault(_ context.Context, seed uint64) (*SimReport, error) {
+func runIORoundTripFault(ctx context.Context, seed uint64) (*SimReport, error) {
 	model, err := buildDeterministicAdjList(NewSeed(seed))
 	if err != nil {
 		return nil, fmt.Errorf("sim: ST8 build model: %w", err)
@@ -848,6 +848,23 @@ func runIORoundTripFault(_ context.Context, seed uint64) (*SimReport, error) {
 	if v, herr := graphmlExportFaultFailsClean(seed); herr != nil {
 		return nil, fmt.Errorf("sim: ST8 graphml export-fault: %w", herr)
 	} else if len(v) > 0 {
+		return storageFaultReport(seed, v), nil
+	}
+
+	// --- The cross-format completeness surface (rmp #2480): the DOT export
+	// adjudicated by agreement with CSV and JSONL, the JSONL property-graph
+	// path, the csv.Options space beyond DefaultOptions, and the seed-mutated
+	// export sweep. It is folded in here so the swarm drives it across seeds;
+	// the crafted cap and cancellation battery is seed-independent and lives in
+	// [RunGraphIOGuards]. See graph_io_surface.go.
+	surface, serr := RunGraphIOSurface(ctx, seed)
+	if serr != nil {
+		return nil, fmt.Errorf("sim: ST8 graph-io surface: %w", serr)
+	}
+	if v := CheckGraphIOSurface(&surface); len(v) > 0 {
+		return storageFaultReport(seed, v), nil
+	}
+	if v := CheckGraphIOSurfaceShape(&surface); len(v) > 0 {
 		return storageFaultReport(seed, v), nil
 	}
 	return nil, nil

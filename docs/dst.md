@@ -1248,6 +1248,56 @@ clean cadence arm each leave every declared counter at zero and make the
 corresponding declaration fire, with each proof asserting that the specific
 declared counters are the ones reported missing.
 
+### The graph/io completeness surface (rmp #2480)
+
+ST8 drove a CSV and a JSONL edge-list round-trip and a GraphML property
+round-trip. `internal/sim/graph_io_surface.go` closes what that left, in two
+halves that are separated on purpose.
+
+The **seed-driven half** (`RunGraphIOSurface`) is folded into ST8, so the swarm
+drives it across seeds. It exports one model built to be hostile — a DOT reserved
+keyword, identifiers carrying a space, a quote, a backslash, `->`, a comma and a
+leading `-`, the empty identifier, zero and non-zero weights, and one isolated
+vertex — as DOT, CSV and JSONL, and requires the three to describe the same
+graph. `graph/io/dot` has no reader, which is why it was imported nowhere in the
+simulator; the agreement check is what adjudicates it, with a character scanner
+in this file reading the DOT text back. The same half round-trips the JSONL
+property path (`WriteWithProps` / `ReadWithProps`) over every property kind the
+wire tags — string, int64, float64, bool, time (at a non-UTC offset), bytes and a
+nested list — drives eleven points of the `csv.Options` space including the
+hand-built two-column, header and comment-line documents no exporter produces,
+measures every encoder for byte-reproducibility, and replays sixteen seed-derived
+corruptions of the exports through the importers.
+
+The **crafted half** (`RunGraphIOGuards`) is seed-independent by construction: no
+byte flip or truncation of an ordinary export will ever produce 65,537 `<key>`
+declarations, so the caps are provoked deterministically once rather than on
+every seed. It drives thirteen of the fourteen sentinels `graph/io` exports and
+matches each with `errors.Is`; the fourteenth, `jsonl.ErrListTooDeep`, is
+declared unreachable with its reason measured rather than asserted. It then
+cancels all five `*Ctx` readers mid-parse against an uncancelled control.
+
+Three corrections to the surface as it was described before this task are worth
+keeping, because each changes what a probe must do:
+
+- **`graph/io/csv` has no `*CappedCtx` variant.** Its ceiling is the
+  `Options.MaxBytes` field, and a bare `Options{}` leaves it at zero, which
+  DISABLES the cap.
+- **Three caps are writer-side.** `ErrPropertyValueTooLarge` and
+  `ErrPropertyNestingTooDeep` in both packages, and `graphml.ErrInvalidXMLChar`,
+  are raised by the encoders. No mutated export can reach them; they are provoked
+  with a hostile graph.
+- **Two sentinels were missing from the list.** `csv.ErrTooManyFields` and
+  `jsonl.ErrUnknownType` are reader-side caps in the same family and are driven
+  alongside the rest.
+
+Both halves are adjudicated in the standing three-part shape: a separate,
+shape-only non-vacuity gate first (`CheckGraphIOSurfaceShape`,
+`CheckGraphIOGuardDeclShape`), the verdict unconditionally
+(`CheckGraphIOSurface`, `CheckGraphIOGuards`), and the witness by `t.Logf` only.
+Every gate is proved falsifiable by a synthetic result that drives it red.
+
+
 ## Command-line usage
 
 ```bash

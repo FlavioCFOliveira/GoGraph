@@ -83,7 +83,7 @@ undirected Euler; `BiBFS`; direction-optimised BFS on a hub fixture; the
 | Recovery genuine-corruption fail-stop | `wal-corruption-failstop` | a corrupted interior WAL frame is detected (CRC), recovery reconstructs exactly the clean prefix and refuses to append; a benign torn tail is not treated as corruption |
 | Post-rename dir-fsync fail-stop (WAL prefix reclaim) | `checkpoint-dirfsync-fault` | a post-rename parent-dir fsync failure poisons the writer, yet reopen recovers the exact committed state |
 | DDL (index + UNIQUE constraint) across the checkpoint/snapshot boundary | `ddl-checkpoint-crash`; `constraint-enforce` and `index-diversity` now checkpoint too | the checkpoint's reclaimed WAL prefix COVERS the DDL frames (measured on the SimDisk image), the pure-snapshot phase replays ZERO WAL ops, and the recovered schema still enforces UNIQUE, answers every index seek, and matches `SHOW`/`db.*` |
-| CSV / JSONL export→import round-trip under fault | `io-roundtrip-fault` | a clean round-trip reproduces the modelled edge set exactly; an export under ENOSPC fails with a typed error and leaves no partial artifact a re-import would accept |
+| `graph/io` export→import: CSV, JSONL, GraphML and DOT | `io-roundtrip-fault` (`internal/sim/storage_fault_scenarios.go` + `internal/sim/graph_io_surface.go`) | a clean round-trip reproduces the modelled edge set exactly and an export under ENOSPC fails with a typed error leaving no partial artefact a re-import would accept; the DOT writer — which has no reader — is adjudicated by CROSS-FORMAT AGREEMENT with CSV and JSONL over a model built to force quoting, weight labels and a bare node statement, with the one legitimate disagreement (an edge-list CSV cannot carry an isolated vertex) asserted in shape rather than waived; the JSONL property path round-trips every property KIND; the `csv.Options` delimiter / comment / header / weight-column / formula-sanitisation space is driven beyond `DefaultOptions`; every export is checked for byte-reproducibility; and a seed-mutated export sweep requires no panic, an effective mutation per format and bounded allocation. Every defensive cap in `graph/io` is provoked, and every `*Ctx` reader is cancelled mid-parse, by `RunGraphIOGuards` — see below |
 | Offline bulk-import publication (`store/bulkimport`) — **parity only, NOT fault coverage** | `bulkimport-parity` | a published snapshot reopens through real recovery equal to the harness model exactly (node set two-sided, labels, properties by **kind and value**, per-handle edge multisets including parallel twins), `SnapshotHit` with **zero** replayed WAL ops on two successive opens, and the measured lifecycle contract (`ErrNotFinished` / `ErrFinished` / `ErrStoreNotEmpty`, their precedence, and `PublishResult.Stats`); plus the publish's byte-reproducibility boundary. **No fault regime is reachable** — see the note below |
 | Crash **during** the snapshot publish, at each step of the crash-atomic swap | `checkpoint-crash-storm` | acked ⊆ recovered ⊆ issued across a crash inside the publish window; a stranded backup is promoted by recovery (measured on the durable image and on `store.recovery.snapshot.promoteParentFsync`), never a half-published snapshot |
 | Node-key and edge-weight CODEC matrix across crash and upgrade | `codec-matrix` (soak; `internal/sim/codec_matrix.go`) | seven `(key codec, weight codec)` arms each survive the three snapshot-publish crash windows AND the upgrade + snapshot boundaries with acked ⊆ recovered ⊆ issued adjudicated BY KEY; the durable `mapper.bin` carries the layout the key type selects (v1 for the string control, v2 for the other six) and the snapshot-only reopen replays ZERO WAL ops, so every recovered key came through the mapper; `txn.ErrNoWeightCodec` is provoked and its actual behaviour pinned. One measured gap is pinned rather than tolerated: a struct weight is dropped by the snapshot CSR writer — see below |
@@ -916,6 +916,112 @@ zero, or that admits a shared counter with no discriminator — every form that
 would pass by saying nothing.
 
 
+### graph/io completeness: DOT, the property path, the caps, and cancellation (rmp #2480)
+
+`io-roundtrip-fault` drove two edge-list formats and one property format before
+this task. Four things were therefore untouched, and each was invisible to a
+green suite for the same reason: nothing referenced them at all.
+
+**The DOT writer has no reader, so a round-trip cannot adjudicate it.**
+`graph/io/dot` exports and never imports, which is why it was imported nowhere in
+the simulator. It is now adjudicated by **cross-format agreement**: the same
+model is written as DOT, as CSV and as JSONL, and the three must describe the
+same graph. The DOT text is read back by a character scanner in
+`internal/sim/graph_io_surface.go` rather than by a line split, because the
+writer quotes an identifier containing the edge operator or a statement
+terminator and a line-oriented parser would mis-split exactly the identifiers the
+arm exists to drive. The model is built to force every branch at once: a DOT
+reserved keyword (`graph`), identifiers carrying a space, a quote, a backslash,
+`->`, a comma and a leading `-`, the empty identifier the engine accepts (rmp
+#2043), zero and non-zero weights, and one isolated vertex. The measured census
+at the pinned seed is 36 quoted identifiers, 13 weight labels and 1 bare node
+statement over 26 edges.
+
+**The one legitimate format disagreement is asserted in SHAPE, not waived.** An
+edge-list CSV cannot encode a vertex with no incident edge. Rather than compare
+only the edges, the arm asserts that the CSV vertex set is **exactly** the model
+minus the isolated vertex and that DOT and JSONL both carry it — so a format that
+began losing ordinary vertices would fail, where "the formats differ, never mind"
+would not. The non-vacuity gate refuses a run in which CSV carried as many
+vertices as the model, because the disagreement the verdict adjudicates could
+then not arise.
+
+**Three of the eight caps in the audit list are WRITER-side and unreachable from
+a mutated export.** `ErrPropertyValueTooLarge`, `ErrPropertyNestingTooDeep` (both
+packages) and `graphml.ErrInvalidXMLChar` are raised by the encoders
+(`graph/io/jsonl/writer.go`, `graph/io/graphml/writer_props.go`), so they are
+provoked by handing the writer a hostile GRAPH, not by feeding a corrupted file
+to a reader. `graph/io/csv` also has no `*CappedCtx` variant at all — its ceiling
+is the `Options.MaxBytes` field — and it carries a sentinel the list omitted,
+`ErrTooManyFields`, as `jsonl` does with `ErrUnknownType`. The verified surface
+is 14 sentinels, declared with their side in `GraphIOGuardDecls`; **13 are
+provoked and matched with `errors.Is`** on every run, and the verdict fails when
+a cap declared reachable was not reached, so deleting a probe cannot quietly
+reduce the coverage.
+
+**The two size caps and the two depth caps need DIFFERENT payloads, and a single
+one would reach only one of them.** The encoders check depth on the way DOWN and
+size after serialising on the way back UP, and the nested-list wire grows ~2x per
+level, so a nested list carrying data trips the 64 MiB **size** cap at depth ~24
+and never reaches the depth ceiling of 128. The size probe is therefore a single
+oversized value and the depth probe is 130 nested EMPTY lists, which costs
+0.3 MiB and no serialisation at all.
+
+**One cap is structurally unreachable, and the reason is asserted rather than
+assumed.** `jsonl.ErrListTooDeep` fires at nesting depth 64. The wire embeds each
+level as a re-escaped JSON string, so the encoded size roughly doubles per level
+— measured 112 bytes at depth 1 and 2,097,401 bytes at depth 18, a ratio of
+**2.00x per level** — which puts an input reaching depth 64 at order 2^67 bytes.
+The declaration carries that reason, and the run still adjudicates it: the
+measured growth ratio must stay at or above 1.9x, the extrapolated size at the
+guard's depth must stay above 2^62 bytes, and the deepest nesting that still
+round-trips must stay well above the trivial, so a change to the encoding or to
+the depth ceiling that made the guard reachable fails the run instead of leaving
+a declaration quietly stale.
+
+**Bounded allocation is measured, not assumed — and what each bound proves
+differs by probe.** Every `ErrInputTooLarge` probe is fed an **unbounded**
+generator with a 64 MiB safety ceiling, so without the cap the reader would not
+stop; reaching the ceiling is itself a violation ("the cap did not stop the
+reader"), which is what makes those bounds decisive rather than decorative. The
+crafted probes (`ErrTooManyKeys`, `ErrTooManyData`, `ErrTooManyFields`) bound the
+per-element amplification the guard exists to refuse. The two writer size caps
+are checked **after** the value is serialised, so their bound is a ceiling on the
+encoder's blow-up and is documented as such rather than presented as a
+zero-copy claim. Measured under `-race`: 5.8-13.5 MiB for the endless probes,
+107.6 MiB for the `<key>` flood, 320.3 MiB for each 64 MiB size cap.
+
+**Mid-parse cancellation is now driven on all five `*Ctx` readers.** Every one
+checks `ctx.Err()` once per 4096 units — rows for the CSV and JSON Lines readers,
+**edges** for both GraphML readers — so a short document runs to completion and
+proves nothing. The arms import a 12,000-edge chain and cancel from inside the
+`io.Reader`, at the byte offset of the 5,000th unit, so the cancellation is
+observed at the check at unit 8,192 with thousands of units already folded in.
+All five return an error wrapping `context.Canceled` and a **nil** graph, so no
+partial graph escapes; each is paired with an uncancelled control over the same
+bytes that must reproduce the model exactly, because "the reader returned nil" is
+otherwise satisfied by a reader that always returns nil.
+
+**The caps are crafted, not seeded, and the split is recorded as an
+assertion.** No byte flip or truncation of an ordinary export produces 65,537
+`<key>` declarations, so the caps are driven deterministically once rather than
+on every seed. The seeded sweep does what a seed sweep can: four corruptions
+(byte flip, truncation, spliced prefix, delimiter run) against four importers,
+requiring no panic, a genuinely changed artefact, at least one semantically
+effective mutation per format, at least one rejection overall, and allocation
+bounded at 64x the bytes fed in. A test asserts that not every mutation reaches a
+typed cap — if it did, the crafted battery would be redundant, which contradicts
+its stated purpose.
+
+Every gate here is proved falsifiable by a synthetic result that drives it red:
+ten for the surface non-vacuity gate (each removing one piece of evidence the
+verdict rests on), eleven for the cap and cancellation verdict (an unprobed cap,
+a wrong sentinel, a panic, an overrun ceiling, a blown heap bound, a wire that
+stopped re-escaping, a depth guard firing early, an untyped cancellation, an
+escaped partial graph, a cancellation landing before parsing began, and a control
+that did not reproduce the model), and six for the declaration shape gate.
+
+
 ### Read-transaction isolation
 
 `cypher.Engine.BeginReadTx` provides **snapshot isolation across the whole
@@ -1012,6 +1118,23 @@ The coverage work exercised the engine against these scenarios and found:
    is never truncated. The matrix assertion is inverted: every arm must now
    confirm its weights after a SNAPSHOT-ONLY recovery, and a non-vacuity gate
    refuses a run in which any arm never crossed a checkpoint.
+7. **`jsonl.WriteWithProps` is not byte-reproducible** (fail-silent; no data
+   loss). It emits one `"property"` record per entry of the node's property
+   MAP, iterating it directly (`graph/io/jsonl/writer.go`), so two exports of
+   the same graph carry the same records in a different order. Measured by the
+   graph/io surface arm (rmp #2480) over a four-node, seven-kind fixture:
+   **7 of 7** repeat exports differed byte for byte from the first, while
+   `graphml.WriteWithProps` — which emits in a fixed key order — differed in
+   **0 of 7**, as did `dot.Write`, `csv.Write`, `jsonl.Write` and
+   `graphml.Write`. Nothing is lost (the reader is order-insensitive within a
+   node, and the round-trip is exact), but the artefact cannot be compared by
+   digest, diffs spuriously, and defeats content-addressing — and it made a
+   seed-derived byte offset into the export non-reproducible, which is how the
+   simulator found it. The mutation sweep canonicalises the JSONL property
+   suffix for its own use and the verdict asserts byte-reproducibility for every
+   OTHER encoder, so this one is recorded rather than papered over. Not fixed:
+   the fix is in `graph/io`, outside that task's scope.
+
 
 ## Documented debt / out of scope
 
@@ -1022,7 +1145,13 @@ The coverage work exercised the engine against these scenarios and found:
   `graphmlRoundTripClean` (exact round-trip via `graphml.WriteWithProps` /
   `ReadWithProps`) and `graphmlExportFaultFailsClean` (a clean typed failure
   under a sub-full ENOSPC bound, with no silently-accepted partial). CSV, JSONL
-  and GraphML are all covered.
+  and GraphML are all covered. **Extended** (rmp #2480): DOT was still
+  uncovered when that was written — `graph/io/dot` was imported nowhere in the
+  simulator — and is now adjudicated by cross-format agreement, alongside the
+  JSONL property path, the whole `csv.Options` space, every defensive cap and
+  mid-parse cancellation on every `*Ctx` reader. See
+  [graph/io completeness](#graphio-completeness-dot-the-property-path-the-caps-and-cancellation-rmp-2480)
+  above.
 - **Snapshot isolation for read transactions** shipped in rmp #2307 (sprint
   334) via MVCC version chains rather than the copy-on-write epic (#1671) once
   considered for it. The DST scenarios assert no-dirty-read, which the stronger
