@@ -348,6 +348,33 @@ func (c *WireClient) drainExchange(label string, msg any) (records []*proto.Reco
 // transaction's total lifetime bound.
 func (c *WireClient) Begin() (any, error) { return c.BeginMode("") }
 
+// BeginExtras sends BEGIN carrying an ARBITRARY extras map and returns the
+// response. It is the single primitive behind [WireClient.Begin] and
+// [WireClient.BeginMode], added for rmp #2485 so a scenario can drive the whole
+// documented BEGIN extras surface — `bookmarks`, `tx_timeout`, `tx_metadata`,
+// `mode`, `db` — instead of only the one key BeginMode reaches.
+//
+// # A nil extras map is passed through, as VERIFIED in the encoder
+//
+// The map reaches [proto.Begin] unchanged, nil included, because a nil map and an
+// empty one encode to the SAME bytes — BEGIN with either is b1 11 a0. encodeBegin
+// writes m.Extra as one PackStream value (bolt/proto/messages.go:304-309), and a
+// typed nil map[string]packstream.Value boxed into an interface does NOT reach the
+// encoder's `case nil` arm (bolt/packstream/value.go:73), which matches only an
+// untyped nil interface. It reaches `case map[string]Value`
+// (bolt/packstream/value.go:99-110), whose map header is len(x) and whose body is a
+// range over x — 0 and no iterations for a nil map, by Go's own semantics for len
+// and range. [WireClient.Begin] therefore stays byte-identical to what it sent
+// before this method existed WITHOUT any normalisation here, and normalising would
+// buy nothing but an allocation.
+// [TestWireClientBeginExtras_NilExtrasNeedsNoNormalisation] measures both spellings
+// and fails if they ever diverge.
+//
+// The caller owns the map and BeginExtras does not retain it past the call.
+func (c *WireClient) BeginExtras(extra map[string]packstream.Value) (any, error) {
+	return c.Request(&proto.Begin{Extra: extra})
+}
+
 // BeginMode sends BEGIN carrying the transaction access mode and returns the
 // response. It exists so a scenario can open a READ-ONLY explicit transaction over
 // the genuine wire — the Mode field server.Server.Transactions reports, and the
@@ -376,7 +403,7 @@ func (c *WireClient) BeginMode(mode string) (any, error) {
 	if mode != "" {
 		extra["mode"] = mode
 	}
-	return c.Request(&proto.Begin{Extra: extra})
+	return c.BeginExtras(extra)
 }
 
 // Commit sends COMMIT and returns the response.

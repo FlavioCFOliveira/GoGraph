@@ -22,7 +22,7 @@ func TestDefaultRegistry_ListsAllScenarios(t *testing.T) {
 		ScenarioBadActors, ScenarioBoltAuth, ScenarioBoltCertRotation, ScenarioBoltShutdownDrain, ScenarioBoltShutdownFleet, ScenarioBoltTxQuota, ScenarioBoltTxRegistry, ScenarioBulkImportParity, ScenarioBulkVsOnline, ScenarioCPUStarvation, ScenarioCheckpointCrashStorm, ScenarioCheckpointDirFsyncFault, ScenarioCheckpointTeardown, ScenarioConstraintEnforce, ScenarioConstraintExistence,
 		ScenarioCrashStorm, ScenarioCSRFilePublishFault, ScenarioCypherPaths, ScenarioCypherSurface, ScenarioDDLCheckpointCrash, ScenarioDiskFull, ScenarioDurableCommitCrash, ScenarioEdgeProperties, ScenarioIndexDiversity, ScenarioIORoundTripFault, ScenarioLongRunning, ScenarioMemPressure, ScenarioMergeRel, ScenarioNullSemantics, ScenarioOverload,
 		ScenarioPatternShapes, ScenarioProductionProfile, ScenarioReadHeavy, ScenarioReadTxIsolation, ScenarioSchemaChaos, ScenarioSchemaMutation, ScenarioSearch, ScenarioSearchCrash, ScenarioSnapshotCorruptionFailStop, ScenarioTypeCoverage,
-		ScenarioBoltStreaming, ScenarioBoltStreamingStall,
+		ScenarioBoltStreaming, ScenarioBoltStreamingStall, ScenarioBoltBeginExtras,
 		ScenarioWALCorruptionFailStop, ScenarioWriteHeavy,
 	}
 	if r.Len() != len(want) {

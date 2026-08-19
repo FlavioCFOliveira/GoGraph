@@ -1674,6 +1674,310 @@ means the harness itself stopped exercising the surface, which must fail loudly,
 it does for the constructed battery of rmp #2483. The soak sweep runs 400 seeds and
 was clean on all 400.
 
+### BEGIN extras: bookmarks, tx_timeout, metadata, mode, db and ROUTE (rmp #2485)
+
+The harness had exactly one way to open an explicit transaction — `WireClient.Begin`,
+which sends BEGIN with an EMPTY extras map. rmp #2482 added `WireClient.BeginMode`
+for the single key `mode`, and the three scenarios that used it sent only the two
+canonical spellings `"r"` and `"w"` (`internal/sim/bolt_tx_quota.go:696`,
+`bolt_tx_registry.go:1058-1070`, `bolt_tx_terminate.go:486-496`). Everything else a
+real driver puts in those extras was driven by nothing at all: no BEGIN or RUN
+anywhere in `internal/sim` had carried a `bookmarks` list, a `tx_timeout`, a
+`tx_metadata` map or a `db` name. rmp #2484 reads the `bookmark` key back OFF a
+terminal SUCCESS and pins its presence to exactly the terminal page
+(`internal/sim/bolt_stream_semantics.go:1150`), but nothing had ever SENT one, so
+nothing in the module distinguished a server that honours the token from one that
+ignores it. ROUTE had one call site in the package, rmp #2481's `route-after-logoff` arm
+(`internal/sim/bolt_auth_surface.go:671`), which sends the ZERO message on a
+DE-AUTHORISED session and requires it to be REFUSED — so `handleRoute` had never once
+produced a routing table under simulation, and its payload was reached by nothing.
+`WireClient.BeginExtras` (`internal/sim/wireclient.go:374`) is the new primitive, and
+`Begin` and `BeginMode` now both route through it.
+
+**This server does not honour an incoming bookmark, so the arm that looks like a
+causality test proves nothing on its own.** `server.ExtractBookmarks` has exactly two
+non-test call sites in the module — `bolt/server/session.go:1099` (RUN) and `:1529`
+(BEGIN) — and neither does anything with the result but write it to a Debug log. The
+RUN site says so in as many words: "Log any incoming bookmarks for observability;
+single-host server ignores them for causal consistency but they should not be
+silently dropped" (`:1097-1098`); the BEGIN site carries the shorter "Log incoming
+bookmarks for observability" (`:1528`). The extractor validates nothing — it reads
+the `bookmarks` key, keeps whichever elements assert to `string`, and returns nil
+when none do (`bolt/server/bookmark.go:28-47`).
+
+A reader on a second connection that presents the writer's bookmark and then sees the
+write has therefore seen it for a reason that has nothing to do with the token it
+sent. A single-host server has ONE store, and a committed write is already visible to
+every later read of it: the property a bookmark exists to provide holds here
+unconditionally. "The causal read observed the write" is a TRUE assertion that proves
+nothing, and an arm that stopped there would be exactly the vacuous shape this sprint
+has hit repeatedly.
+
+The scenario makes the assertion honest by driving the SAME causal read five ways, on
+five separate connections in a seed-drawn order, and requiring the five to be
+indistinguishable:
+
+- with the writer's REAL bookmark, which is what a driver actually depends on;
+- with a FABRICATED far-future token, `FB:kffffffff`, whose counter is separately
+  asserted to be strictly above every bookmark the server did issue, so "the server
+  never minted this" is an observation rather than an assumption;
+- with a token that is not of the shape this server mints at all
+  (`not-a-gograph-bookmark`), which the extractor nevertheless keeps, and which is
+  therefore logged like any other, because it validates nothing;
+- with a `bookmarks` list whose single element is an `int64`, which the extractor
+  filters out, so the server sees ZERO tokens rather than one it cannot parse;
+- with no `bookmarks` key at all, the baseline.
+
+All five must be ACCEPTED, must observe the identical count, and must reply inside a
+real-time bound. That a token the server never issued is accepted is the evidence
+that the token is IGNORED rather than honoured, and it is what makes the first arm's
+meaning honest: a server that honoured bookmarks and was handed a far-future one
+could only block until its own counter reached it — caught by `bookmark-does-not-wait`
+— or refuse it — caught by `bookmark-accepted`. Either way the pin fires deliberately
+and this section has to be rewritten, which is the point of the pin.
+
+This is pinned INTENDED behaviour, not a defect, and it belongs here rather than in
+the defect list below. What is new is not the behaviour but that anything in the
+module now asserts it: before this task, nothing distinguished "ignored" from
+"honoured", so a change in either direction would have gone unobserved.
+
+**What a bookmark IS here, and where it arrives, was measured rather than described.**
+`server.NextBookmark` (`bolt/server/bookmark.go:20-23`) returns `"FB:k"` followed by a
+process-global atomic counter (`:13`) as eight zero-padded hexadecimal digits. It is
+assigned in exactly ONE place — `s.bookmark = NextBookmark()` in `handleCommit`
+(`bolt/server/session.go:1694`) — and delivered in three: the COMMIT SUCCESS, whose
+metadata is that bookmark and nothing else (`:1696`); the terminal PULL SUCCESS, the
+one with `has_more` false (`:1397`); and the terminal DISCARD SUCCESS (`:1500`). Since
+rmp #2484 established that the terminal reply is also the durability acknowledgement,
+the bookmark rides on the ack.
+
+Two consequences follow from "assigned only in `handleCommit`", and both are pinned
+because both are what a driver sees:
+
+- On a session that has never committed an explicit transaction, an AUTOCOMMIT
+  write's terminal PULL SUCCESS carries the EMPTY string in its `bookmark` field —
+  measured, on a reply whose own `stats` map in that same SUCCESS reports
+  `contains-updates`. The stats reading is what stops the empty bookmark being
+  explained away as "the statement wrote nothing".
+- On a session that HAS committed one, a later autocommit write's terminal PULL
+  SUCCESS carries that EARLIER transaction's bookmark — measured EQUAL to it, not
+  merely similar. A driver chaining causality off an autocommit `ResultSummary` is
+  therefore chaining a strictly earlier transaction's token.
+
+Neither is asserted anywhere in `bolt/server`: the only bookmark-key assertion in that
+package is on a COMMIT SUCCESS and checks existence and non-emptiness alone
+(`bolt/server/tx_test.go:82-88`).
+
+**The bookmark VALUE is not reachable from the seed, and the rendering respects the
+difference.** `bookmarkCounter` is process-global (`bolt/server/bookmark.go:13`),
+exactly like the `"__cx_"+hex(n)` node key that bounds the authentication surface's
+byte oracle, so the literal text of an issued bookmark depends on how many
+transactions every other test in the process committed first. Every clause is
+consequently written over a DERIVED relation — equality between two observed
+bookmarks, a strict advance between two successive ones, an ordering against the
+fabricated counter — and never over a literal value; and the evidence rendering emits
+an issued bookmark purely positionally (`#0=<issued>`, `#1=<issued>`), so two runs of
+one seed render byte-identically.
+
+That rendering originally carried the ADVANCE between consecutive counters
+(`#1=<issued,+1>`), on the reasoning that the advance, unlike the absolute value, is
+seed-determined. It is not. The advance is one only while nothing else commits in
+between, and `sim -swarm -workers N` runs N scenarios concurrently in ONE process
+(`internal/sim/swarm.go:271-278`), so a concurrent COMMIT inflates it. MEASURED over
+six fixed seeds, the advance read `+1` at `workers=1` and `+5`, `+6` or `+7` at
+`workers=6` — six of six seeds rendering differently at the two worker counts — and
+with the advance dropped, sixteen of sixteen seeds render identically at `workers=16`.
+`TestBoltBeginExtras_Deterministic` could not have caught it, because it compares two
+SERIAL runs. The property was never in the rendering's gift anyway:
+`bookmark-strictly-advances` adjudicates the relation `n > prev` between two OBSERVED
+counters, which survives any interleaving.
+
+**`tx_timeout` is attributed by its CONTROL, not by its subject.** Four arms run in a
+FIXED order, each against its own server on its own fake clock
+(`internal/sim/bolt_begin_extras.go:1265-1306`); every advance is virtual, and no arm
+depends on wall time for its outcome, only for its bound. The order is fixed rather
+than drawn because an arm and its control are comparable only as the same script.
+
+- `client-tx-timeout`, the subject, asks for a 100 ms `tx_timeout` with the idle bound
+  and the server's default total bound both lifted to 10 virtual minutes, and a single
+  advance of exactly that bound must reap it. Lifting both is load-bearing: the serve
+  loop reaps at the EARLIER of the two bounds (`effectiveTxDeadline`,
+  `bolt/server/serve.go:1155-1167`, established by rmp #2482), so an arm that left the
+  idle bound at its default would be timing the wrong reaper. The non-vacuity gate
+  re-derives that separation from the arm's own recorded bounds rather than trusting
+  the plan.
+- `no-tx-timeout-control` is THE attribution. It is the byte-identical script with the
+  `tx_timeout` key removed, given the identical advance, and it must both survive and
+  COMMIT. Without it, "advance and the transaction died" is satisfiable by any timer
+  at all; with it, the single difference between the two arms is the extra.
+- `idle-bound-control` is a CONSTRUCTED collision: the same reap reached through the
+  IDLE bound instead. It differs from the subject in TWO fields, not one — the idle
+  bound is the small one AND `tx_timeout` is not sent — and the second is forced by the
+  first, since leaving the client's bound in place would arm a total-lifetime deadline
+  at the same instant and the arm could no longer attribute its reap to the idle
+  reaper.
+  The checker requires its code AND its message to be byte-identical to the subject's,
+  which is how the shared-failure finding is ASSERTED rather than restated. Reading
+  `bolt/server` widens rmp #2560 from two paths to three — the idle reaper, the
+  total-lifetime reaper and `Server.TerminateTransaction` all funnel through
+  `Session.reapTimedOutTx` (`bolt/server/session.go:1831`), which arms a single
+  `pendingTermErr` carrying one code and one message (`:1839-1842`). A client cannot
+  tell the three apart.
+- `overflow-tx-timeout` is the hostile arm, and its mechanism is worth stating exactly
+  because the obvious reading of it is wrong. It sends `tx_timeout = 1<<62`
+  milliseconds, and that value never reaches a multiplication: `clientMillisToDuration`
+  (`bolt/server/session.go:460-465`) returns `(0, false)` for
+  `ms <= 0 || ms > maxClientTimeoutMillis`, and `maxClientTimeoutMillis` is
+  `math.MaxInt64 / int64(time.Millisecond)` = 9,223,372,036,854 ms, about 2,562,047
+  hours (`:452`), which 1<<62 = 4,611,686,018,427,387,904 exceeds by a factor of
+  500,000. `handleBegin` treats `(0, false)` as "unset" and leaves the server default
+  in force (`:1543-1555`), so an out-of-range client bound is SILENTLY IGNORED. The
+  guard is what makes it silent rather than catastrophic: had the multiplication
+  happened, 2^62 x 10^6 is 2^68 x 5^6, a multiple of 2^64, so the int64 product would
+  be exactly ZERO — a non-positive duration that would leave `txDeadline` unset and
+  DISABLE the reaper altogether. The arm asserts the outcome in BOTH directions with
+  two advances of half the 100 ms server default each: the first must not reap, and
+  the second must. An arm that only advanced past the default could not tell "the
+  default is in force" from "a shorter bound is".
+
+**The abort is typed, delivered ONCE, and then the session ignores.** Every reaped arm
+is adjudicated by one shared checker, so the three cannot drift apart, and the checker
+is skipped entirely for an arm that was not reaped — an arm with nothing to report
+must not be able to satisfy a clause about a report. It pins the exact code
+`Neo.ClientError.Transaction.TransactionTimedOut` and the exact message "the
+transaction has been terminated because it exceeded its timeout; the writer lock was
+released" against the named constants of rmp #2482
+(`internal/sim/bolt_tx_registry.go:517-518`); it requires the SECOND request-phase
+message after the abort to draw `*proto.Ignored`, because `pendingTermErr` is
+delivered on the first such message and cleared there
+(`bolt/server/session.go:594-597`), after which the switch falls through to
+`&proto.Ignored{}` (`:599`); it brackets, in REAL time, the interval from the reaping
+advance to the abort reaching the client, so a stall reads as a failure rather than as
+a pass; and it requires the injected clock to have registered at least one timer,
+because a reap is attributable to the reaper only if the reaper was armed.
+
+**The `mode` coercion FAILS OPEN, and that is measured on two independent
+observables.** `handleBegin` selects read-only for the exact string `"r"` and for
+nothing else (`bolt/server/session.go:1560-1566`): a non-string value, a misspelling,
+the uppercase `"R"`, an absent key — every one of them silently yields a WRITE
+transaction, and the client is told nothing. Five arms drive `"r"`, `"w"`, `"R"`,
+`"bogus"` and no key at all, in a seed-drawn order, and each is adjudicated on two
+observables: the server's own `server.TransactionInfo.Mode`, read off
+`Server.Transactions()` while the transaction is open, and whether a `CREATE` inside
+that transaction is accepted. One observable alone could not tell a mis-recorded mode
+from a mis-enforced one. The read-only arm's refusal is pinned to the exact code
+`Neo.ClientError.Request.Invalid`, while its message is required only to CONTAIN
+"read-only transaction": that text comes from `cypher`, not from `bolt/server`, so
+pinning it verbatim would couple the scenario to a message the engine owns. `"R"` is
+in the roster because it is the plausible misspelling, and the clause that matters is
+that its write is ACCEPTED. No earlier scenario had ever attempted a write inside a
+Bolt read-only transaction, so the refusal itself is new coverage too.
+
+**`db` is echoed unvalidated, agrees across both replies, and is never empty.**
+`selectDatabaseFrom` (`bolt/server/session.go:322-324`) records the extra verbatim,
+and `databaseName` (`:309-317`) reports it, falling back to the server's own name and
+then to `DefaultDatabaseName`, which is `"neo4j"` (`bolt/server/serve.go:195`). A name
+this server does not serve is therefore ECHOED rather than refused with
+`Neo.ClientError.Database.DatabaseNotFound`, which `Options.DatabaseName`'s own godoc
+states deliberately (`bolt/server/serve.go:308-322`): GoGraph serves one graph per
+server, so the name is a label and not a selector. Four arms drive `"neo4j"`, a foreign
+`"not-this-server"`, `"system"` — a name that in Neo4j is a real and distinct database
+and here is echoed like any other label — and no key at all. Each pins the echo; pins
+that the RUN SUCCESS and the terminal PULL SUCCESS report the SAME name, because a
+driver reads it off whichever one it consumes; pins that the reported name is never
+empty, which is the rmp #2172 guard (the official driver returns a nil `DatabaseInfo`
+for an absent or empty `db`, so the idiomatic `summary.Database().Name()` panics inside
+the driver); and pins that the COMMIT SUCCESS carries the bookmark and NOTHING else, so
+a widening of that reply is noticed rather than absorbed. The name is sent on BEGIN and
+not on the following RUN, which is what a real driver does inside an explicit
+transaction and what `handleRun`'s `if !s.txActive` guard
+(`bolt/server/session.go:1134-1142`) makes safe: were that guard absent, the RUN's
+empty extras would CLEAR the selection BEGIN recorded, and this arm is what would see
+it.
+
+**`tx_metadata` is accepted and echoed nowhere, which is asserted instead of a round
+trip that does not happen.** The key is read in no file under `bolt/`: a sweep of every
+`.go` file in the module finds it only in this task's own files, the catalogue entry
+and `WireClient.BeginExtras`'s godoc, so unlike `bookmarks` it is not even logged.
+`docs/bolt.md:225-226` already claimed "accepted in `BEGIN`/`RUN` extras and silently
+ignored; the server stores and echoes no transaction metadata", and nothing drove it.
+The arm sends two keys on BEGIN and then requires the BEGIN SUCCESS, the terminal PULL
+SUCCESS and the COMMIT SUCCESS each to carry none of them.
+
+**The ROUTE payload is compared against an INDEPENDENT reference, not against a
+constant restated.** `handleRoute` (`bolt/server/session.go:1728-1753`) reads nothing
+whatever from the message — not its `Routing` map, not its `Bookmarks`, not its `DB`.
+Past the authentication gate (`:1745-1747`) and the state gate (`:1748-1750`) it
+answers `RoutingTable(s.localAddr)` (`:1751`), a table whose TTL is a hardcoded 300
+seconds, whose own `db` is the EMPTY string, and whose three roles WRITE, READ and
+ROUTE all point at the one address (`bolt/server/route.go:11-33`). Two ROUTE messages
+are sent on one connection, one carrying a routing context, a bookmark and a database
+name, and one the zero message. Their rendered tables must be IDENTICAL, which is the
+assertion that all three fields are dropped; and the populated request's table `db`
+must be empty, which pins that a ROUTE naming a database is answered by a table
+labelled with nothing. ROUTE's bookmarks are dropped without even the Debug line RUN
+and BEGIN give theirs. rmp #2481 covered ROUTE's authentication gate and deliberately
+left the payload here.
+
+The address clause is where the independence matters. The table is built from
+`s.localAddr`, which the accept loop copied off the listener —
+`localAddr = s.ln.Addr().String()` at `bolt/server/serve.go:1000-1005`, handed to
+`newSession` at `:1006` — and the checker compares every advertised address against
+`SimServer.ListenerAddr()` (`internal/sim/simserver.go:474`), which reads
+`s.ln.Addr().String()` on the harness side. The two reach the same source of truth by
+different routes, so "the table names THIS server" is a comparison of two independently
+obtained values. A checker that compared the reply against `server.RoutingTable`'s own
+output would be comparing that function with itself. The non-vacuity gate additionally
+fails the run when the listener reports an empty address, because every advertised
+address would then be compared against `""`.
+
+**The non-vacuity family is a separate function because it answers a different
+question.** `checkBoltBeginExtras` asks whether the server misbehaved;
+`checkBoltBeginExtrasNonVacuity` asks whether the run was in a position to notice.
+Between them they carry 36 named contract clauses and 22 `nv-` ones. Both feed the SAME
+report, so a coverage shortfall FAILS the scenario exactly as a contract violation does
+— the `Violation`-returning discipline rmp #2484 adopted, rather than the advisory
+`[]string` rmp #2554 demoted the MERGE and FOREACH gates to — but every `nv-` message
+names what the run failed to construct instead of accusing the server. Every
+precondition here is CONSTRUCTED rather than left to a seeded workload, so a shortfall
+means the harness itself stopped exercising the surface. What the gate refuses to let
+pass: a causal read of ZERO nodes, which could not distinguish "the reader saw the
+write" from "the write never happened" (the writer's node count is drawn from [2, 6],
+so a positive count is guaranteed by construction); fewer than one real and two
+fabricated tokens, without which "the token changed nothing" compares nothing; fewer
+than two arms that completed a read, which would compare a value with itself; fewer
+than two issued bookmarks, because one event is not a sequence a strict-advance clause
+can falsify; an EMPTY reference bookmark, which would collapse the stale-autocommit
+equality into "both are empty"; a timeout family with no reaped arm or no surviving
+one; any timeout arm whose injected clock registered no timer, which is what separates
+"the reaper declined" from "there was no reaper"; a `client-tx-timeout` whose server
+bounds are not strictly beyond its advance; a mode family missing either the read-only
+or the write side, or in which no write was ever accepted; a database family with no
+foreign name or no absent-key arm, without which an echo and a fallback are the same
+observation; an empty listener address, an unnamed database in the ROUTE request, an
+undecoded routing table, or an empty table rendering; and a `tx_metadata` arm that sent
+no keys, which would make "no reply echoed one" vacuously true.
+
+Measured at the catalogue seed 612741132: 3 nodes under `:BeginCausal` committed across
+2 transactions; all five causal arms accepted and each observing 3 of 3, with
+`ExtractBookmarks` keeping one token on three of them and zero on the other two; the
+autocommit bookmark EMPTY on a fresh session and equal to the prior COMMIT's on a
+session that had committed one, on a reply reporting `contains-updates`; the four
+timeout arms reaped after advance ordinals 0, never, 0 and 1 respectively, each with
+exactly one timer armed on its injected clock, and all three reaped arms answering the
+byte-identical code and message with IGNORED on the message after it; the registry
+reporting mode `"w"` for `"w"`, `"R"`, `"bogus"` and the absent key with the write
+ACCEPTED in every one, and `"r"` for `"r"` with the write refused
+`Neo.ClientError.Request.Invalid` / "cypher: write or DDL statement not allowed in a
+read-only transaction"; `db` reported as `neo4j` for the arm that sent no key and as
+`not-this-server`, `neo4j` and `system` verbatim for the three that named one, with
+the COMMIT SUCCESS carrying exactly `[bookmark]` in all four; the
+routing table advertising `[WRITE READ ROUTE]` over three entries at the listener's own
+address with `ttl=300` and `db=""`, the populated and zero ROUTE answered identically;
+and the `tx_metadata` BEGIN SUCCESS carrying no metadata keys at all, its terminal PULL
+carrying `[bookmark db has_more]` and its COMMIT `[bookmark]`, none of them a key the
+client sent. A serial sweep of seeds 1 to 100 was clean on all 100.
+
 ## Defects surfaced by this coverage work
 
 The coverage work exercised the engine against these scenarios and found:

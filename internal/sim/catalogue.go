@@ -60,6 +60,11 @@ const (
 	// slow consumer that stalls mid-stream and then disconnects. Registered
 	// separately because it is not bit-reproducible.
 	ScenarioBoltStreamingStall = "bolt-streaming-stall"
+	// ScenarioBoltBeginExtras is the deterministic BEGIN-extras scenario of rmp #2485:
+	// bookmark causality across connections (and the proof that the token is ignored
+	// rather than honoured), a client-supplied tx_timeout against its own control,
+	// tx_metadata, the access mode, database selection, and the ROUTE payload.
+	ScenarioBoltBeginExtras = "bolt-begin-extras"
 )
 
 // cpuStarvationGOMAXPROCS is the processor clamp the cpu-starvation scenario
@@ -152,6 +157,7 @@ func DefaultRegistry() (*Registry, error) {
 		boltShutdownFleetScenario(),
 		boltStreamSemanticsScenario(),
 		boltStreamStallScenario(),
+		boltBeginExtrasScenario(),
 	)
 }
 

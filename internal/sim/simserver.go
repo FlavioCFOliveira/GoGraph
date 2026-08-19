@@ -457,6 +457,22 @@ func (s *SimServer) Dial() (*WireClient, error) {
 // [WireClient] would never produce.
 func (s *SimServer) DialConn() (*SimConn, error) { return s.ln.Dial() }
 
+// ListenerAddr returns the address of the in-memory listener the embedded server
+// serves on, as [net.Listener.Addr] renders it.
+//
+// It exists as the INDEPENDENT REFERENCE for the ROUTE payload arm of rmp #2485.
+// The routing table a client receives is built from the address the accept loop
+// copied off the listener — localAddr = s.ln.Addr().String() at
+// bolt/server/serve.go:1000-1005, handed to newSession and read back by handleRoute
+// as RoutingTable(s.localAddr) (bolt/server/session.go:1751). Reading the listener
+// HERE therefore reaches that same source of truth by a different route than the
+// reply does, so "the routing table names THIS server" is a comparison between two
+// independently obtained values rather than a constant restated. A checker that
+// instead compared the reply against
+// [github.com/FlavioCFOliveira/GoGraph/bolt/server.RoutingTable]'s own output would
+// be comparing that function with itself.
+func (s *SimServer) ListenerAddr() string { return s.ln.Addr().String() }
+
 // Close stops accepting new connections, cancels the serve context, and waits
 // for the server to drain. It is idempotent and returns the server's exit error
 // (nil on a clean shutdown).
