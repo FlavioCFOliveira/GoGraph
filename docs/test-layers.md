@@ -292,6 +292,68 @@ points. The window is what gets extended.
 The release-grade variants remain `SOAK_FULL=1` (5 min warm-up + 55 min
 measurement for no-growth, ~330 samples; 4 h at 64 goroutines for p99).
 
+## Wall clock is not a short-layer instrument
+
+The short layer is not a quiet machine. `make ci` runs `go test -race ./...`,
+which executes package binaries concurrently, so a wall-clock measurement taken
+there reads machine load as much as it reads the code.
+
+**A last/first ratio is not a defence against this.** It cancels load that is
+*constant* across the measurement, and `make ci` load is not constant — sibling
+packages start and finish during a run. Measured on a 10-core `darwin/arm64`
+host under `-race`, against the *flat* (post-fix) delete path of
+`cypher/delete_scaling_test.go`, with `yes > /dev/null` workers as load:
+
+| Load regime | Wall per cycle, first … last | Wall last/first | CPU last/first |
+|---|---|---|---|
+| idle | 239 ms … 240 ms | 1.00× | 1.03× |
+| 300 workers, constant | 7.80 s … 9.10 s | 1.17× | 0.99× |
+| 300 workers, ramping up during the run | 620 ms … 9.91 s | **15.98×** | 1.00× |
+| idle at the first cycle, saturated at the last | 239 ms … 8.59 s | **35.88×** | 1.50× |
+
+The defect these gates gate against moves the same statistic by 5.2×. Wall
+clock in the short layer therefore carries up to 35.9× of noise against 5.2× of
+signal, and it duly failed `make ci` on a flat engine.
+
+An absolute **ceiling** — the shape recommended above, because it needs no
+window — does not rescue the measurement. To survive constant saturation it
+would have to sit above 9.10 s, while the regression it guards costs about
+1.2 s on an idle machine: it would be blinder than the ratio, not safer. A
+ceiling is the right short-layer shape only for a quantity the machine's load
+cannot inflate.
+
+The rules this yields:
+
+- **Assert on wall clock only where the machine is quiet** — the soak layer.
+- **In the short layer, assert on an instrument load cannot move.** Process CPU
+  time (`syscall.Getrusage(RUSAGE_SELF)`) is the load-invariant analogue of wall
+  time, and for a CPU-bound regression it is also the more faithful one.
+- **A test that measures process CPU must not call `t.Parallel()`.** `getrusage`
+  is process-scoped, so a concurrent sibling is charged to the measurement. Go
+  runs non-parallel top-level tests to completion before resuming any test that
+  called `t.Parallel()`, which is what makes the measurement attributable. Load
+  from *other packages* is irrelevant: that is a different process.
+- **`runtime/metrics` `/cpu/classes/*` is not CPU time** for this purpose. It is
+  derived from `GOMAXPROCS` × wall-clock accounting, so a goroutine descheduled
+  by the OS still accrues it. In the very run where `getrusage` moved 1.50×,
+  `/cpu/classes/user:cpu-seconds` moved 50.2× — it is wall clock wearing a CPU
+  name, and substituting it would look like a fix while changing nothing.
+- **A load-invariant instrument still needs proven power.** Allocation counts
+  are perfectly invariant here (0.5% apart across a 35.9× wall inflation) but
+  nothing establishes that the regression allocated in proportion to the work it
+  did, so they are not asserted on. Where the defective build cannot be rebuilt,
+  ship a control that drives a deliberately degrading workload and requires the
+  gate to *fire*.
+
+The delete-scaling gates are split accordingly:
+
+| Test | Layer | Asserts |
+|---|---|---|
+| `TestDeleteDoesNotDegradeAcrossCycles`, `TestDetachDeleteDoesNotDegradeAcrossCycles` | short | last/first **CPU** ratio ≤ 2.5× (rmp #2400 / #2418) |
+| `TestDeleteCycleGateDetectsDegradation` | short | that the 2.5× gate still **fires** on a workload engineered to degrade (6.48×–6.77× idle, 5.82× under 300 competing CPU-bound processes, 8.80× under a rising load) |
+| `TestDeleteWallTimeDoesNotDegradeAcrossCycles`, `TestDetachDeleteWallTimeDoesNotDegradeAcrossCycles` | soak | last/first **wall** ratio ≤ 2.5×, on a quiet machine |
+| `TestSingleStatementDeleteOfNinetyThousandNodes` | soak | an absolute 10 s budget for a 90 000-node single-statement delete |
+
 ## Sample invocations
 
 ```bash
