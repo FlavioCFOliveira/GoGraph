@@ -98,6 +98,67 @@ func NewSimServerAuth(eng *cypher.Engine, clk clock.Clock, auth server.AuthHandl
 // its own runtime instead of racing the default 5 s.
 const simAuthMaxTxIdle = 10 * time.Minute
 
+// NewSimServerTxRegistry builds a SimServer wired for the transaction-registry and
+// idle-reaper surface of rmp #2482: the server's own clock is serverClk, so the
+// message loop's timeout timer and the registry's StartedAt/Elapsed run on VIRTUAL
+// time, while the in-memory listener keeps listenerClk. maxTxIdle,
+// defaultTxTimeout and maxOpenTxPerPrincipal are passed straight through to
+// [server.Options]; a zero value in any of them takes that option's own documented
+// default, so this constructor can also stand in for [NewSimServer] with only a
+// clock changed. Authentication is [server.NoAuthHandler] and the server log is
+// discarded ([quietSimLogger]), because the reaper reports every reap at WARN and a
+// reaper arm provokes them deliberately.
+//
+// # Why the two clocks MUST be different objects
+//
+// The listener clock is not a spare copy of the server clock: it is the clock every
+// SimConn's blocked I/O uses, and pointing it at the same [clock.Fake] breaks the
+// instrument the reaper arm depends on. Both halves of this are verified in the
+// code, not assumed:
+//
+//   - EVERY server-side read has a deadline. The reader goroutine calls
+//     conn.SetReadDeadline(time.Now().Add(ConnTimeout)) before every single read
+//     (bolt/server/serve.go:1109), and a SimServer sets ConnTimeout to 30 s, so the
+//     branch is always taken.
+//   - A deadline-bearing blocked read arms a timer ON THE LISTENER CLOCK.
+//     halfPipe.waitDeadline does timer := h.clk.NewTimer(h.clk.Until(d)) and spawns
+//     a goroutine to broadcast on it (internal/sim/simconn.go:143), where h.clk is
+//     the clock handed to [NewSimListener] and shared by both ends of every
+//     [SimConn]. On a shared fake, every connection parked waiting for its next
+//     request therefore registers a timer, and a NewTimer-counting decorator like
+//     txClockProbe can no longer attribute its count to the transaction reaper —
+//     which is the whole point of counting.
+//   - The deadline instant is WALL-CLOCK. It comes from time.Now(), not from the
+//     injected clock, so on a shared fake the comparison h.clk.Now().Before(d) is
+//     between virtual and real time. A fake started at time.Now() would then time
+//     the connection out as soon as the arm advanced past ConnTimeout — reaping the
+//     socket instead of the transaction; a fake started at the Unix epoch would
+//     instead put the deadline ~56 years of virtual time away, so the arm's whole
+//     advance budget is silently inert against it. Neither is production behaviour.
+//   - Nothing on the server side needs a fake listener. All three of the server's
+//     socket deadlines are real-time by construction — the handshake
+//     conn.SetDeadline (bolt/server/serve.go:965), the per-read deadline (:1109) and
+//     the per-write deadline (:1394) all read time.Now() — so leaving listenerClk on
+//     [clock.Real] leaves connection liveness behaving exactly as it does in
+//     production while the transaction machinery runs on virtual time.
+//
+// The clock the returned SimServer hands to each [WireClient] from
+// [SimServer.Dial] is listenerClk, matching the connection it is built on.
+func NewSimServerTxRegistry(
+	eng *cypher.Engine,
+	listenerClk, serverClk clock.Clock,
+	maxTxIdle, defaultTxTimeout time.Duration,
+	maxOpenTxPerPrincipal int,
+) (*SimServer, error) {
+	return newSimServer(eng, listenerClk, simServerOptions{
+		log:                   quietSimLogger(),
+		clk:                   serverClk,
+		maxTxIdle:             maxTxIdle,
+		defaultTxTimeout:      defaultTxTimeout,
+		maxOpenTxPerPrincipal: maxOpenTxPerPrincipal,
+	})
+}
+
 // Server exposes the embedded [server.Server] so a scenario can drive its
 // operator API — [server.Server.Transactions] and
 // [server.Server.TerminateTransaction], both of which take the registry's own lock
@@ -114,7 +175,7 @@ const simAuthMaxTxIdle = 10 * time.Minute
 // serve goroutine by the time it returns, so injecting a clock through this
 // accessor is a data race the detector will report. A scenario that needs a fake
 // clock must have it installed BEFORE Serve starts, i.e. from inside the
-// constructor.
+// constructor — which is what [NewSimServerTxRegistry] does.
 func (s *SimServer) Server() *server.Server { return s.srv }
 
 // quietSimLogger returns a logger that discards everything. The durable-commit /
@@ -152,6 +213,31 @@ type simServerOptions struct {
 	// rmp #2482, not of an auth arm, so an auth scenario lifts the bound rather than
 	// racing it.
 	maxTxIdle time.Duration
+
+	// clk is the SERVER-side clock: the one [server.Server.SetClock] installs, which
+	// drives the message loop's transaction-timeout timer (bolt/server/serve.go
+	// syncTxTimer) and the transaction registry's StartedAt/Elapsed
+	// (bolt/server/txregistry.go register/list). Nil keeps [clock.Real], which is
+	// what every pre-existing SimServer scenario wants.
+	//
+	// It is NOT the listener clock. See [NewSimServerTxRegistry] for why the two
+	// must be different objects.
+	clk clock.Clock
+
+	// defaultTxTimeout overrides [server.Options.DefaultTxTimeout], the TOTAL
+	// lifetime bound handleBegin applies when the client sends no tx_timeout. Zero
+	// keeps [server.DefaultTxTimeout] (30 s).
+	//
+	// A scenario driving the IDLE reaper must set it ABOVE maxTxIdle: the serve
+	// loop's effectiveTxDeadline takes the EARLIER of the total and idle deadlines,
+	// so leaving it at 30 s while asking for an idle bound above that would arm the
+	// timer for the total bound and the reap would not be an idle reap at all.
+	defaultTxTimeout time.Duration
+
+	// maxOpenTxPerPrincipal overrides [server.Options.MaxOpenTxPerPrincipal]. Zero
+	// keeps [server.DefaultMaxOpenTxPerPrincipal] (2048); a NEGATIVE value disables
+	// enforcement, exactly as the server option documents.
+	maxOpenTxPerPrincipal int
 }
 
 // newSimServerWithLogger is the logger-only entry point kept for the durable and
@@ -170,13 +256,28 @@ func newSimServer(eng *cypher.Engine, clk clock.Clock, opts simServerOptions) (*
 		auth = server.NoAuthHandler{}
 	}
 	srv, err := server.NewServer(eng, server.Options{
-		Auth:          auth,
-		ConnTimeout:   30 * time.Second,
-		Logger:        opts.log,
-		MaxTxIdleTime: opts.maxTxIdle,
+		Auth:                  auth,
+		ConnTimeout:           30 * time.Second,
+		Logger:                opts.log,
+		MaxTxIdleTime:         opts.maxTxIdle,
+		DefaultTxTimeout:      opts.defaultTxTimeout,
+		MaxOpenTxPerPrincipal: opts.maxOpenTxPerPrincipal,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("sim: NewSimServer: %w", err)
+	}
+	// The server clock is installed HERE — after construction and STRICTLY BEFORE
+	// the serve goroutine below — because [server.Server.SetClock] writes s.clk and
+	// REPLACES s.txReg (bolt/server/serve.go setClock), and the accept path reads
+	// both with no synchronisation at all: sess.setClock(s.clk) and
+	// sess.setTxRegistry(s.txReg, remote) (bolt/server/serve.go:1013 and :1017, in
+	// handleConn). [Server.Transactions] reads s.txReg unguarded too
+	// (bolt/server/txregistry.go). Calling SetClock once no connection can yet be
+	// accepted is what makes those reads race-free; doing it through
+	// [SimServer.Server] after this constructor returns is a genuine data race the
+	// detector reports.
+	if opts.clk != nil {
+		srv.SetClock(opts.clk)
 	}
 	ln := NewSimListener(clk)
 	ctx, cancel := context.WithCancel(context.Background())

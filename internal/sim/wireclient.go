@@ -307,9 +307,40 @@ func (c *WireClient) Pull(n int64) (records []*proto.Record, terminal any, err e
 // Begin / Commit / Rollback / Reset / Route drive the explicit-transaction and
 // session-control messages; each returns the server's response.
 
-// Begin sends BEGIN and returns the response.
-func (c *WireClient) Begin() (any, error) {
-	return c.Request(&proto.Begin{Extra: map[string]packstream.Value{}})
+// Begin sends BEGIN with no extras and returns the response. The server then
+// applies its own defaults: mode "w" and server.Options.DefaultTxTimeout as the
+// transaction's total lifetime bound.
+func (c *WireClient) Begin() (any, error) { return c.BeginMode("") }
+
+// BeginMode sends BEGIN carrying the transaction access mode and returns the
+// response. It exists so a scenario can open a READ-ONLY explicit transaction over
+// the genuine wire — the Mode field server.Server.Transactions reports, and the
+// branch that takes cypher's lock-free BeginReadTx path instead of BeginTx.
+//
+// # The wire spelling, as VERIFIED in bolt/server/session.go handleBegin
+//
+// The key is "mode" in the BEGIN extras and the value is a PackStream string. Only
+// the exact string "r" selects read-only; handleBegin reads
+//
+//	if v, ok := m.Extra["mode"]; ok {
+//	        if modeStr, ok := v.(string); ok && modeStr == "r" { mode = "r" }
+//	}
+//
+// so every other value — "w", a misspelling, a non-string, or an absent key —
+// leaves the default "w". A caller asking for "w" is therefore asking for the
+// default explicitly rather than selecting a second behaviour, and an unknown mode
+// is silently a write transaction rather than an error.
+//
+// An EMPTY mode OMITS the key entirely rather than sending "mode": "", so
+// [WireClient.Begin] delegating here is byte-identical on the wire to the empty
+// extras map it sent before, not merely equivalent in the server's eventual
+// decision.
+func (c *WireClient) BeginMode(mode string) (any, error) {
+	extra := map[string]packstream.Value{}
+	if mode != "" {
+		extra["mode"] = mode
+	}
+	return c.Request(&proto.Begin{Extra: extra})
 }
 
 // Commit sends COMMIT and returns the response.

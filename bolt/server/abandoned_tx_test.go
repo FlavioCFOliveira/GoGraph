@@ -2,12 +2,22 @@ package server_test
 
 // abandoned_tx_test.go — rmp #2175 (round-3 comparative audit, finding A1).
 //
-// THE REPRODUCTION. One authenticated Bolt client sends BEGIN and then stops
-// talking. Because an open explicit write transaction holds the engine's global
-// visibility barrier, every reader on every other connection stalls behind it:
-// the audit measured a 4.7 ms read becoming 30.001 s — the full
-// DefaultTxTimeout — followed by a hard TransactionTimedOut, repeatable
-// indefinitely, since bolt/ had no per-principal or per-IP limit of any kind.
+// THE REPRODUCTION, AS IT WAS IN 2026-07. One authenticated Bolt client sent
+// BEGIN and then stopped talking. Because an open explicit write transaction then
+// held the engine's global visibility barrier, every reader on every other
+// connection stalled behind it: the audit measured a 4.7 ms read becoming
+// 30.001 s — the full DefaultTxTimeout — followed by a hard TransactionTimedOut,
+// repeatable indefinitely, since bolt/ had no per-principal or per-IP limit of
+// any kind.
+//
+// The tense is load-bearing. That hold is GONE: rmp #2305/#2306 retired both the
+// writer serialisation and the visibility barriers a transaction held across
+// client think-time, so an abandoned transaction blocks neither readers nor
+// writers today (cypher/exectx.go, "NO writer serialisation is acquired"). What
+// it still costs is resources — a pinned reclamation horizon, a registry entry
+// and a quota slot — which is what the bounds below now defend. The tests here
+// still pin those bounds; they no longer reproduce an outage, and the fixture
+// that once did is documented as having stopped reproducing one.
 //
 // Lowering the total transaction timeout cannot fix this: it converts the outage
 // into a shorter one, and it kills legitimate long transactions along the way.
@@ -120,9 +130,13 @@ func TestAbandonedTx_BusyTransactionIsNotReaped(t *testing.T) {
 }
 
 // TestAbandonedTx_PerPrincipalCapRejectsWithTypedError pins acceptance criterion
-// (2). The cap counts OPEN transactions, and read transactions are the ones that
-// can genuinely be concurrent — a write transaction holds the engine's writer
-// serialisation, which already caps those at one server-wide.
+// (2). The cap counts OPEN transactions of BOTH kinds: rmp #2306 retired the
+// writer serialisation BEGIN used to take (Engine.beginTxSession acquires none;
+// concurrency control is MVCC with per-object conflict detection), so write
+// transactions are no longer capped at one server-wide and are as concurrent as
+// read ones. Read transactions are used here only because they are the simplest
+// thing to leave open; internal/sim's bolt-tx-quota arm fills the cap with one of
+// each and asserts that both count against it (rmp #2482).
 func TestAbandonedTx_PerPrincipalCapRejectsWithTypedError(t *testing.T) {
 	t.Parallel()
 	const cap = 2

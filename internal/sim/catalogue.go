@@ -41,6 +41,8 @@ const (
 	ScenarioNullSemantics     = "null-semantics"
 	ScenarioBoltAuth          = "bolt-auth"
 	ScenarioBoltCertRotation  = "bolt-cert-rotation"
+	ScenarioBoltTxRegistry    = "bolt-tx-registry"
+	ScenarioBoltTxQuota       = "bolt-tx-quota"
 )
 
 // cpuStarvationGOMAXPROCS is the processor clamp the cpu-starvation scenario
@@ -127,6 +129,8 @@ func DefaultRegistry() (*Registry, error) {
 		snapshotCorruptionFailStopScenario(),
 		boltAuthSurfaceScenario(),
 		boltCertRotationScenario(),
+		boltTxRegistryScenario(),
+		boltTxQuotaScenario(),
 	)
 }
 

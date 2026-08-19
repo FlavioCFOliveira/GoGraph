@@ -1295,6 +1295,116 @@ filesystem whose timestamp granularity is coarser than the time two consecutive
 projections take, an honest rotation would be silently skipped and the scenario
 would be measuring the clock instead of the reloader.
 
+### The transaction registry, the idle reaper and the per-principal cap (rmp #2482)
+
+`Server.Transactions`, `Server.TerminateTransaction`, `Options.MaxTxIdleTime` and
+`Options.MaxOpenTxPerPrincipal` were all added after the round-3 comparative
+audit demonstrated a whole-server stall from one abandoned `BEGIN` (rmp #2175,
+#2176). Six tests in `bolt/server` cover them, and between them they establish
+what follows.
+
+**What the six pre-existing tests already covered.**
+`tx_introspection_test.go` covers the listing's FIELDS (id, principal, mode,
+remote, query, state, a non-zero `StartedAt` and a positive `Elapsed`), that a
+termination rolls back atomically, that a NEVER-SEEN id returns
+`ErrNoSuchTransaction`, that an idle offender blocks neither a reader nor a
+writer, and that both read and write transactions are listed oldest-first.
+`abandoned_tx_test.go` covers the idle reaper bounding a reader stall, a BUSY
+transaction NOT being reaped, the per-principal cap refusing with a typed error,
+one slot being returned by a client `ROLLBACK`, and the cap being per-principal
+rather than per-server.
+
+**What a wall clock cannot reach, and what the fake clock adds.** All six run on
+real time, and that is not a stylistic difference — it is a ceiling on what they
+can assert:
+
+- **Exact instants.** A test that does not know what the server's clock read when
+  an entry was registered can assert no more than `Elapsed > 0`. Driving the
+  server's clock through `Server.SetClock` makes the harness the sole author of
+  every instant, so `StartedAt` is EXACTLY the fake instant it opened at and
+  `Elapsed` is the listing instant minus that, to the nanosecond. A registry that
+  stamped every entry at once, or that computed `Elapsed` against wall time while
+  the clock was injected, passes `Elapsed > 0` and fails this.
+- **An ordinal instead of a timescale.** `TestAbandonedTx_IdleReaperBoundsTheReaderStall`
+  asserts an order of magnitude — the reader unblocked nearer the 300 ms idle
+  bound than the 20 s total bound — because a real-time test cannot do better
+  without becoming flaky. On virtual time the reap lands on a specific ADVANCE,
+  predicted before the run by an independent model of the rule and compared
+  exactly. A reaper one advance early or late is then a failure rather than
+  noise, which is precisely the deviation the arm's live control produces on
+  purpose by shortening the server's bound by one step.
+- **Quiet ordinals.** Real time cannot assert that the reaper DECLINED to reap at
+  a particular moment. The staggered plan gives five advances at the front of the
+  measured sequence at which nothing may be reclaimed, so a reaper that emptied
+  the registry on its first fire is caught.
+- **Reaper-free attribution.** A termination test on real time cannot rule out
+  that a bound fired instead. Arm 2 installs both bounds at ten minutes of FAKE
+  time and makes ZERO advances; `clock.Fake` delivers only from `Advance`
+  (`internal/clock/fake.go`), so no timer it armed can possibly fire and every
+  departure from the registry is provably the operator call's doing. That is
+  asserted as a non-vacuity clause rather than argued in a comment.
+- **Minutes of transaction lifetime in milliseconds of wall time.** The scale arm
+  drives 64 transactions through 70 advances — 13.3 s of simulated time — in
+  412 ms of real time under `-race`, and the churn arm drives 3m20s of simulated
+  time in 97 ms.
+
+**Three properties the pre-existing tests do not reach at all.**
+
+1. **Successor immunity.** `txRegistry` documents that a stale id can never
+   terminate whatever transaction the same connection opened next, and nothing
+   tested it. Two mechanisms implement it: `txRegistry.nextID` mints
+   `"<sessionID>-<seq>"` from a server-wide counter that only ever increases, and
+   `Session.unregisterTx` drains any terminate request that arrived for the
+   transaction just ended. The arm exercises the first directly — the stale id is
+   refused by the registry lookup, which sends no signal at all — and asserts the
+   OBSERVABLE property for the second across a settle window, because the
+   interleaving the drain exists for (a signal queued while the session is inside
+   `HandleMessage`) is a scheduler outcome the harness cannot construct. The
+   `ErrNoSuchTransaction` case the pre-existing test covers uses a hand-written
+   id the server never minted; the two here were WATCHED live and then watched
+   finish, one by termination and one by a client `COMMIT`.
+2. **Who was refused, and at what number.** The cap test checks the failure CODE
+   and that the message is non-empty. A code-only assertion is equally satisfied
+   by refusing the wrong principal, or the right one at the wrong count. The
+   quota arm RECOMPUTES the text from the principal and the limit it configured
+   and requires an exact match, which is sound because `handleBegin` returns the
+   quota error VERBATIM rather than through `Session.sanitiseErr`
+   (`session.go:1604`) — unlike every neighbouring failure in that handler.
+3. **The other three ways a slot comes back.** `abandoned_tx_test.go` covers a
+   client `ROLLBACK`. The arm drives the idle reaper, `TerminateTransaction`, and
+   a DE-AUTHORISED session's refused `COMMIT`, each ending in a `BEGIN` the cap
+   must now allow. The third is the clause rmp #2482 carries over from the #2481
+   security review, and it exists because no WAL or census oracle can see it: a
+   refusal that left the transaction OPEN with its slot held and its registry
+   entry live would write nothing either, so only the registry and the quota can
+   distinguish "declined the message" from "reclaimed the transaction".
+
+**One measurement worth recording.** `txRegistry.list` ranges a Go map — whose
+iteration order is randomised — and insertion-sorts the result by `StartedAt`,
+swapping only on a strict `Before`. Its cost therefore depends entirely on
+whether the instants are DISTINCT, and the first version of the measurement in
+the soak arm missed that: a fake-clock harness that never advances registers
+every entry at one instant, the sort makes ZERO swaps, and the per-entry cost
+came out FLAT with `n` — which looked like evidence the sort was cheap and was
+evidence it had nothing to do. Measured with both arrangements, one
+`Transactions()` call, no `-race`:
+
+| open | same instant | distinct instants |
+|---|---|---|
+| 8 | 326 ns (40 ns/entry) | 314 ns (39 ns/entry) |
+| 64 | 2.954 µs (46 ns/entry) | 11.839 µs (184 ns/entry) |
+| 256 | 8.628 µs (33 ns/entry) | 143.153 µs (559 ns/entry) |
+| 512 | 16.74 µs (32 ns/entry) | 599.715 µs (1.171 µs/entry) |
+
+A production server's clock is real, so it is always in the second column: the
+call is QUADRATIC in the number of open transactions, and 256 → 512 costs 4.19×
+for twice the input. The comment above the sort justifies it by saying open
+transactions are kept small, which was written when a writing transaction
+serialised every other writer; rmp #2305/#2306 retired that, so the bound on
+"small" is now `Options.MaxOpenTxPerPrincipal` (default 2048) times the
+principals in play. Recorded, not fixed — it is outside this task.
+
+
 ## Defects surfaced by this coverage work
 
 The coverage work exercised the engine against these scenarios and found:
@@ -1399,6 +1509,35 @@ The coverage work exercised the engine against these scenarios and found:
    them. **Fixed** — the bootstrap calls `sess.setLogger(s.log)`;
    `bolt/server/session_logger_test.go` is the regression guard and was verified
    to fail without the fix.
+9. **An OPERATOR termination tells the client its transaction timed out and that
+   a writer lock was released** (fail-misleading; no data loss).
+   `Server.TerminateTransaction` routes through `Session.reapTimedOutTx`, which
+   is shared with the idle/total reaper, so the client is answered
+   `Neo.ClientError.Transaction.TransactionTimedOut` with "the transaction has
+   been terminated because it exceeded its timeout; the writer lock was
+   released". BOTH halves are false for a termination on demand: it exceeded no
+   timeout, and no writer lock has been held for a transaction's lifetime since
+   rmp #2305/#2306 retired it (`Engine.beginTxSession` acquires no writer
+   serialisation, `cypher/exectx.go`). A driver cannot distinguish an operator
+   ending a transaction from a transaction that ran too long, which is exactly
+   the distinction an operator needs the client's logs to preserve. Filed as
+   **rmp #2560**; both strings are PINNED against named constants in
+   `internal/sim/bolt_tx_registry.go`, and both the abandoned-registry and the
+   operator-terminate arms adjudicate against them, so the eventual correction
+   fails those arms deliberately instead of slipping through.
+10. **A quota-refused `BEGIN` leaves the session READY** (behavioural
+    inconsistency; no data loss). `handleBegin`'s per-principal-cap branch
+    returns before `Transition` and never calls `enterFailed`
+    (`bolt/server/session.go:1597-1606`), unlike the `newTx` failure path
+    directly above it, which does (`:1583`). The two failures are a step apart in
+    one handler and leave the session in different states, so a client whose
+    `BEGIN` was refused by the cap is served normally on its next message while
+    one refused by `newTx` must `RESET` first. Which behaviour is correct is a
+    contract question, not an obvious bug — the Bolt state machine arguably
+    should not fail a session for a resource refusal — so it is filed as **rmp
+    #2561** and the OBSERVED behaviour is pinned: `internal/sim/bolt_tx_quota.go`
+    drives a statement down the refused connection and requires it to be served,
+    so whichever way #2561 is closed, the change is deliberate.
 
 
 ## Documented debt / out of scope
