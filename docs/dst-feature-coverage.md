@@ -2142,8 +2142,8 @@ CWE-770 the pool exists to close. The **wire nesting cap** (`packstream maxValue
 crafted message can request millions of stack frames and kill the process, and it is
 reachable during the FIRST HELLO decode. And a third that this task found by measurement
 rather than by reading: the engine's **own parameter nesting cap** (`cypher
-maxParamBindDepth = 32`, `cypher/api.go:4257`), a second, lower, independent cap on the
-same axis.
+maxParamBindDepth = 32`, declared at `cypher/api.go:4303` and enforced at `:4256`), a
+second, lower, independent cap on the same axis.
 
 **The load-bearing oracle is a closed-form model of the pool, not the server's word.** The
 harness re-derives what a RUN's decode holds from the shared pool out of packstream's
@@ -2209,9 +2209,11 @@ revision did exactly that.
 **The nesting family is bracketed at every boundary and is deliberately tiny on the wire.**
 32 accepted / 33 refused, and 127 refused-by-the-engine / 128 refused-by-the-decoder,
 identically for LIST chains and MAP chains — the bound is on composite depth, not on lists.
-Every payload is 55 to 4046 wire bytes, under a 64 KiB anti-confound ceiling that is
-asserted, because a message refused for its SIZE proves nothing about a DEPTH cap. The
-chains are hand-built from the marker table rather than through `packstream.Encoder`, and
+Every payload is far under the 64 KiB anti-confound ceiling that is asserted — 55 to
+4046 wire bytes at the catalogue seed, and at most 6166 on any seed, since the
+deliberately excessive arm's chain length is drawn from `[2048, 6144)` — because a
+message refused for its SIZE proves nothing about a DEPTH cap. The chains are
+hand-built from the marker table rather than through `packstream.Encoder`, and
 not for authenticity: the encoder CANNOT express them, because `writeValue` carries the
 same `maxValueDepth` bound as `readValue` (`value.go:68-69`). An abuse the module's own
 encoder refuses to encode is exactly the abuse a hostile peer hand-rolls, and building it

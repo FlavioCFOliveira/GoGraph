@@ -856,8 +856,10 @@ func TestBoltScenarios_SeedMixDoesNotCancelTheDefaultSeed(t *testing.T) {
 //
 // A scenario with genuinely no seed mix has none to check, so the table is the
 // only place that can record that fact; listing it with mix == 0 would be a lie.
-// There is no such Bolt scenario today, and if one appears the honest fix is to
-// say so here rather than to widen the exemption.
+// One Bolt scenario is in that position today — bolt-streaming-stall, which calls
+// NewSeed(seed) directly and sub-seeds nothing — and it is carried with noMix set
+// and its reason written down. Any further one takes the same honest route rather
+// than a widened exemption.
 func TestBoltScenarios_SeedMixTableCoversEveryBoltScenario(t *testing.T) {
 	t.Parallel()
 	reg, err := DefaultRegistry()

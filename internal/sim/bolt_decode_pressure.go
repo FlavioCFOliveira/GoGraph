@@ -22,8 +22,9 @@ package sim
 //     millions of stack frames and kill the process, and it is reachable during the
 //     first HELLO decode, before any authentication;
 //   - the ENGINE'S OWN parameter nesting cap (cypher maxParamBindDepth = 32,
-//     cypher/api.go:4257), which is a SECOND, LOWER, INDEPENDENT cap on the same
-//     axis and which this task discovered by measurement rather than by reading.
+//     declared at cypher/api.go:4303 and enforced at :4256), which is a SECOND,
+//     LOWER, INDEPENDENT cap on the same axis and which this task discovered by
+//     measurement rather than by reading.
 //
 // # The sharpest thing here: three abuse vectors, three DIFFERENT answers
 //
@@ -85,8 +86,9 @@ package sim
 // The model was calibrated against the real decoder by binary search on the
 // smallest budget that admits a payload — held was 48N + 1353 for every N tried
 // with an 8-byte query and a 1-byte key, exactly as the closed form says — and
-// then confirmed end to end at three ceilings (3, 4 and 8 MiB), where it named the
-// last accepted element count EXACTLY in all three. The scenario does not trust
+// then confirmed end to end at the nine ceilings from 2 MiB to 32 MiB the soak
+// sweep drives (TestBoltDecodePool_SoakCeilingSweep), where it named the last
+// accepted element count EXACTLY at every one. The scenario does not trust
 // that: it SCANS a small window around the prediction and requires the measured
 // boundary to be one element wide, monotone, and equal to the model's. That makes
 // the clause a tripwire on the five packstream cost constants — if one changes,
@@ -196,8 +198,9 @@ const (
 	// depth 0, so a chain of k composites under a parameter key puts its innermost
 	// value at depth k+1 and the refusal begins at k == cap.
 	boltDecodeWireDepthCap = 128
-	// boltDecodeParamDepthCap is cypher's maxParamBindDepth (cypher/api.go:4257),
-	// reached only by a message the decoder already ACCEPTED.
+	// boltDecodeParamDepthCap is cypher's maxParamBindDepth (declared at
+	// cypher/api.go:4303, enforced at :4256), reached only by a message the decoder
+	// already ACCEPTED.
 	boltDecodeParamDepthCap = 32
 )
 
@@ -499,8 +502,9 @@ type BoltDecodeEvidence struct {
 	AbuserReplies map[string]int
 	// TransportErrors names every abuser exchange that failed at the transport
 	// rather than drawing a Bolt reply. A reassembly-layer budget breach tears the
-	// connection down (see [boltDecodeSwarmFloorNote]), so a non-empty list here is
-	// the honest report of the swarm having been sized wrong — not a silent pass.
+	// connection down (see the floor arithmetic on [boltDecodeSwarmAbusers]), so a
+	// non-empty list here is the honest report of the swarm having been sized wrong
+	// — not a silent pass.
 	TransportErrors []string
 	// Window is the boundary scan, in ascending element count.
 	Window []BoltDecodeProbe
@@ -604,9 +608,10 @@ func boltDecodeParams(n int) map[string]any {
 // appends to its internal-error text with a fixed marker.
 //
 // The sanitised message reads "An internal error occurred. See server logs for
-// details (session: <16 hex>)". The id is minted per connection and is NOT a
-// function of the seed, so recording it verbatim would make the rendering vary
-// run to run — the exact trap rmp #2486's own determinism test caught. The
+// details (session: <16 hex>)." (bolt/server/session.go:1946). The id is minted
+// per connection and is NOT a function of the seed, so recording it verbatim
+// would make the rendering vary run to run — the exact trap rmp #2486's own
+// determinism test caught. The
 // STABLE prefix is what the oracle pins; the id is replaced rather than dropped
 // so the report still shows that a session id was present.
 func boltDecodeRedactSession(msg string) string {
@@ -1387,9 +1392,10 @@ func boltDecodeCountLabel(c *WireClient, label string) (int, error) {
 //     the swarm quiesces.
 //
 // Each abuser's message is sized at [boltDecodeSwarmChargeNum]/[boltDecodeSwarmChargeDen]
-// of the pool, so one fits and two cannot. See [boltDecodeSwarmFloorNote] for why
-// that sizing also keeps the honest client clear of the reassembly reader, whose
-// own budget breach is NOT the connection-preserving refusal the decode layer's is.
+// of the pool, so one fits and two cannot. See the floor arithmetic on
+// [boltDecodeSwarmAbusers] for why that sizing also keeps the honest client clear
+// of the reassembly reader, whose own budget breach is NOT the
+// connection-preserving refusal the decode layer's is.
 func RunBoltDecodeSwarm(ctx context.Context, seed uint64) (*BoltDecodeEvidence, error) {
 	srv, err := NewSimServerInboundBudget(SimEngineForServer(), clock.Real(), boltDecodeSwarmBudget)
 	if err != nil {
@@ -1942,7 +1948,14 @@ func checkBoltDecodeEffects(e *BoltDecodeEvidence) []Violation {
 		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "pool-fit-served",
 			fmt.Sprintf("the fit arm %s, but its model hold fits the ceiling", got)))
 	}
-	for census, counts := range map[string]map[string]int{"live": e.LiveCensus, "recovered": e.RecoveredCensus} {
+	// A FIXED order, not a map literal's: two runs of one seed must render the same
+	// report, and Go randomises map iteration, so a map here would have permuted a
+	// failing run's violations between runs at the same seed.
+	for _, c := range []struct {
+		name   string
+		counts map[string]int
+	}{{"live", e.LiveCensus}, {"recovered", e.RecoveredCensus}} {
+		census, counts := c.name, c.counts
 		if n := counts[boltDecodeFitLabel]; n != 1 {
 			v = append(v, boltDecodeViolation(ViolationACIDDurability, "pool-fit-durable",
 				fmt.Sprintf("%s census counts %d :%s node(s), want exactly 1: a message the pool ACCEPTED "+
