@@ -1143,6 +1143,19 @@ at 512, with distinct ones) and `the-obvious-barrier-is-not-the-barrier` (the BE
 the registry listing both precede the reaper's arming, and a harness synchronising on either
 passed 40 of 40 runs anyway).
 
+Incrementally synced at commit `61ef2e81` (2026-08-19, task #2483, sprint 348 — the DST
+drives `Server.Shutdown`'s drain and the `Options.Closer` ordering). +4 nodes: `Commit`
+`61ef2e81`; `Task` 2483 COMPLETED; two `Lesson`s. Edges: `CONTAINS`, `IMPLEMENTED_IN`
+(Task→Commit), `IMPROVES`, two `TAUGHT`, `TOUCHES`.
+
+Both lessons are about instruments and both cost real time to learn, so they are worth
+reading before writing another oracle:
+`an-acknowledgement-is-the-terminal-reply-and-nothing-else` (a Bolt RUN SUCCESS is not a
+durability ack — the bookmark rides on the terminal — and neither is a `proto.Ignored`;
+counting either manufactured `ACID_DURABILITY` reports in 4 of 25 and 8 of 30 runs) and
+`never-assert-a-go-select-coin-flip` (a branch that won 12 of 12 and then 8 of 8 was pinned,
+and the pin made 5 of 6 `-race` runs red once the other branch surfaced).
+
 ## Node labels
 
 | Label | Meaning | Properties (beyond `gitCommit`, `gitDate`) |
