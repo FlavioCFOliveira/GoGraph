@@ -2128,6 +2128,187 @@ missing zone database as a shortfall rather than letting the named-zone clause p
 unexercised. 38 named contract clauses and 10 `nv-` ones; 53 falsifiability subtests each
 perturb one field and assert the clause that must catch it.
 
+### Aggregate inbound-decode backpressure, and two nesting caps that are not one (rmp #2487)
+
+The harness had exactly one arm anywhere near inbound-memory abuse: the `BoltAbuser`'s
+oversized frame, which drives the PER-MESSAGE framing cap on ONE connection. Three bounds
+that matter more were driven by nothing. The **engine-wide inbound-decode pool**
+(`packstream.InboundBudget`) is created ONCE PER SERVER — `bolt/server/serve.go:654`,
+`NewInboundBudget(resolveMaxInboundDecodeBytes(opts.MaxInboundDecodeBytes))` — and that
+single pointer is what makes it the cross-connection vector, because the per-message cap
+times the connection limit is unbounded and pre-authentication-reachable, which is the
+CWE-770 the pool exists to close. The **wire nesting cap** (`packstream maxValueDepth =
+128`, `value.go:21`) is a hard security boundary rather than a convenience: without it a
+crafted message can request millions of stack frames and kill the process, and it is
+reachable during the FIRST HELLO decode. And a third that this task found by measurement
+rather than by reading: the engine's **own parameter nesting cap** (`cypher
+maxParamBindDepth = 32`, `cypher/api.go:4257`), a second, lower, independent cap on the
+same axis.
+
+**The load-bearing oracle is a closed-form model of the pool, not the server's word.** The
+harness re-derives what a RUN's decode holds from the shared pool out of packstream's
+published per-slot costs:
+
+```
+held(query, key, n) = 32 + 3*48    the RUN struct: container + 3 fields
+                    + 512 + 112    the one-entry parameters map
+                    + 32           the parameter list's container
+                    + 512          the empty extra map
+                    + len(query)   String payloads are charged 1:1 (decoder.go:712)
+                    + len(key)     and so is a map key
+                    + 48*n         one 48-byte slot per list element
+                    = 1344 + len(query) + len(key) + 48*n
+```
+
+The two string terms are not obvious and were found by measurement: `ReadString` charges
+its raw payload against the SAME shared pool that `chargeDecoded` draws on, so a longer
+query text moves the admission boundary. The model was calibrated against the real decoder
+by binary search on the smallest budget that admits a payload — `48n + 1353` for every `n`
+from 0 to 174,734 with an 8-byte query and a one-byte key, exactly what the closed form
+says — and it then named the last admitted element count EXACTLY at nine ceilings from
+2 MiB to 32 MiB (the soak sweep). The scenario does not trust that: it SCANS a window
+around the prediction and requires the measured boundary to be one element wide, monotone,
+and equal to the model's. That makes `pool-boundary-matches-model` a tripwire on five
+packstream constants; if one changes, this scenario names the divergence instead of
+drifting.
+
+**A one-element-wide boundary is the strongest available refutation of "the per-message cap
+did it."** At the 4 MiB ceiling, `n=87353` (modelled hold 4,194,304 B, slack +0 B) is
+SERVED and `n=87354` (slack -48 B) is REFUSED: the two differ by 48 charged bytes out of
+~4 MiB, both are ~200x under the 16 MiB framing cap and 32x under the 128 MiB per-message
+decoded-collection cap. The **control** closes it: a second server differing in the
+ceiling (64 MiB) and in NOTHING else serves the identical 165,796-element bytes the
+pressured one refused. The two write arms carry the same query shape and differ only in
+their parameter's element count, so the census is attributable: the accepted write's node
+is present live AND after real WAL recovery, the refused write's node is present nowhere,
+and the same bytes wrote a node into the control server's own engine.
+
+**Three abuse vectors, three DIFFERENT answers — measured, not inferred.** A server that
+collapsed any two would be indistinguishable, from a client's side, from one with no
+aggregate pool and no depth cap at all, and every other clause here could still pass
+against it:
+
+| vector | code | session afterwards |
+|---|---|---|
+| aggregate pool breach | `Neo.TransientError.General.OutOfMemoryError` | READY (usable with NO RESET) |
+| wire nesting cap (>= 128) | `Neo.ClientError.Request.Invalid` / `malformed Bolt message` | READY (usable with NO RESET) |
+| engine parameter cap (> 32) | `Neo.DatabaseError.General.UnknownError` | FAILED (next message IGNORED) |
+
+The first two are answered ABOVE the session state machine — the serve loop rejects them
+between the read and `sess.HandleMessage` (`serve.go:1258` and `:1289`) — which is why the
+session survives them intact; the third travels through it into `cypher.BindParams`, so it
+fails the session. That state-after difference is a **third discriminator, independent of
+the codes**, and it is asserted separately. The classification segment is asserted on its
+own too, read out of the OBSERVED code rather than compared to the literal this file
+declares: neo4j-go-driver's `IsRetriableTransient` tests `classification ==
+"TransientError"` (`bolt/server/errors.go:130-131`), so "typed RETRYABLE backpressure" is a
+checked property of the code's second segment. Testing the classification only after the
+whole code matched the literal would have made that guard unreachable, and an earlier
+revision did exactly that.
+
+**The nesting family is bracketed at every boundary and is deliberately tiny on the wire.**
+32 accepted / 33 refused, and 127 refused-by-the-engine / 128 refused-by-the-decoder,
+identically for LIST chains and MAP chains — the bound is on composite depth, not on lists.
+Every payload is 55 to 4046 wire bytes, under a 64 KiB anti-confound ceiling that is
+asserted, because a message refused for its SIZE proves nothing about a DEPTH cap. The
+chains are hand-built from the marker table rather than through `packstream.Encoder`, and
+not for authenticity: the encoder CANNOT express them, because `writeValue` carries the
+same `maxValueDepth` bound as `readValue` (`value.go:68-69`). An abuse the module's own
+encoder refuses to encode is exactly the abuse a hostile peer hand-rolls, and building it
+here keeps the harness from validating the decoder with the encoder that shares its bound.
+The **pre-authentication** arm is the one that isolates the wire cap cleanly, since no
+parameter is bound and the engine's cap is not in the way: a 127-deep HELLO succeeds, a
+128-deep one is refused, and the connection survives with the session still
+UNauthenticated — a following plain HELLO succeeds, which it could only do from
+NEGOTIATION.
+
+**No-leak is proved through the wire, not by reading the pool.** `InboundBudget` exposes
+`Enabled`, `TryReserve` and `Release` but no `Remaining`, and the Server's pool is
+unexported. Rather than reach for an accessor, the run repeats the calibrated
+boundary-sized message after every abuse arm: a message whose modelled hold is within one
+element's charge of the whole ceiling can only be admitted by a pool restored to within
+that many bytes of full. Measured slack at the 4 MiB ceiling is **+0 B**, so a leak of a
+single byte is detectable, and the gate asserts that slack stays tight — a probe that had
+gone slack would pass whether or not the pool came back short. The soak layer adds the
+statement the short layer structurally cannot make: 4000 alternating served and refused
+decodes against ONE long-lived server (2000 each, so both release paths run equally), after
+which the boundary probe is still admitted.
+
+**The concurrent sibling exists because the aggregate vector is unreachable without it.**
+Every charge is released before its reply is written — the reassembly reader releases on
+every return path from `ReadMessage` (`bolt/proto/chunking.go:160-165`), the decoder's hold
+by the deferred `ReleaseInboundBudget` (`serve.go:1419-1423`) — so a single-threaded
+lock-step script can never observe two charges outstanding at once, whatever it sends. The
+`bolt-decode-swarm` scenario runs four abusers at 55% of an 8 MiB pool (one fits, two
+cannot) against an honest client on its own connection.
+
+**Two of its oracles had to be CONSTRUCTED rather than raced for, and the cost of not doing
+so was measured at each step.** Started together with fixed counts, the abusers finished in
+~38 ms while the honest client was still pausing between exchanges: exactly ONE of 24
+honest exchanges straddled a refusal, a coverage clause one scheduling decision from
+failing for no reason and one from PASSING while the run showed honest traffic working
+before and after the pressure rather than during it. Pinning the window's ENDS — the honest
+client waits for the first refusal, the abusers push until it finishes — took it to 9 of
+24. That is still a race, and the measurement says why: under `-race` a narrow honest
+exchange takes 633 us at the median (357 us to 902 us over 20 samples) while refusals
+arrive about once per 3.8 ms of honest in-flight time, so most exchanges land in a gap. So
+the WIDTH is controlled too: every sixth honest exchange holds its open stream for 50 ms
+between RUN and PULL, genuinely in flight with the server holding a cursor for it, and the
+overlap clause gates on those alone. That hold is ~13x the inter-refusal interval and ~79x
+the median narrow exchange. Measured 4 of 4 across 25 seeds under `-race`, with the
+narrowest wide window holding 9 to 11 refusals against the 2 to 3 a 20 ms hold gave; the
+100-seed soak sweep, which runs under heavier concurrent load, saw a worst case of 6, and
+it asserts that worst case rather than only the pass. The hold is deliberately NOT
+a wait for a refusal to be counted: that would make the clause true by construction of the
+HARNESS instead of by behaviour of the SERVER. An independent density clause requires the
+whole honest run to contain at least 8 refusals (measured 41 to 47), so the liveness claim
+does not rest on the per-exchange overlap alone.
+
+**The liveness bound is a wall clock, and this is the case rmp #2567 left standing.** That
+task removed deadlines used as oracles over BOUNDED payloads, where a deadline can only
+misattribute a slow machine. This wait is bounded by nothing: a server that starved honest
+traffic under aggregate pressure would never serve it, so the honest client would wait for
+ever and only a clock can tell. The bound is set against a MEASUREMENT rather than a
+guess — 30 s against a measured 633 us median and 902 us worst honest exchange with the
+fleet pushing under `-race`, about 33,000x the worst observed service time — the
+message that fires says STARVED rather than "slow", and it is paired with the claim that
+matters and involves no clock at all — every honest exchange must return the value the
+harness chose for it, so a reply belonging to a different exchange is a failure and not a
+pass.
+
+The swarm's sizing also has to keep the honest client clear of the REASSEMBLY reader, whose
+budget breach is **not** the connection-preserving refusal the decode layer's is: it
+returns `packstream.ErrInboundBudgetExceeded` as a READ error (`chunking.go:223-227`) and
+the serve loop tears the connection down on every read error (`serve.go:1237-1247`). The
+pool floor is therefore computed rather than hoped for — one abuser's charge is 4.4 MiB of
+an 8 MiB pool, leaving 3.6 MiB, and three refused abusers transiently holding one 1 MiB
+reservation chunk each leaves a worst floor of ~0.6 MiB against ~100 bytes of honest
+reassembly — and
+`swarm-no-transport-loss` reports it by name if the sizing ever stops holding.
+
+The coverage gate is a separate family, as elsewhere. It requires the boundary window to
+have BRACKETED the transition (window counts and run-wide counts are kept separate, after
+an earlier revision summed them and a window that had gone entirely green still satisfied
+the bracketing clause because the breach arm's single refusal was being counted as if the
+scan had produced it), requires both a refusal and an ACCEPT (a pool stuck at zero refuses
+everything and satisfies "every refusal is typed" perfectly), requires the leak probe's
+slack to stay tight, requires the nesting family to be complete and to have produced all
+THREE outcomes (with fewer, the distinctness clause returns without adjudicating anything),
+requires an over-nested HELLO to have been refused so the pre-authentication path was
+actually visited, requires the control to be a genuinely different configuration that
+genuinely disagreed, and requires the live census to be non-empty so "the refused write
+left nothing behind" is not trivially true of an empty graph. 29 named contract clauses and
+16 `nv-` ones; 47 falsifiability subtests each perturb one field and assert the clause that
+must catch it.
+
+**One collision was found in the harness itself.** Generalising rmp #2485's single-scenario
+seed-mix guard into a table over every Bolt scenario immediately went red:
+`txQuotaSeedMix` and `boltTxQuotaDefaultSeed` were both `0x2482_9074`, so `bolt-tx-quota`
+built its `SimDisk` from `NewSeed(0)` on the one run every report starts from — precisely
+the defect the original guard was written to prevent, unnoticed because the guard had been
+copied per surface instead of iterating. Fixed to `0x2482_5EED`, and the table now fails if
+a Bolt scenario is added to the catalogue without an entry.
+
 ## Defects surfaced by this coverage work
 
 The coverage work exercised the engine against these scenarios and found:

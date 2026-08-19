@@ -70,6 +70,18 @@ const (
 	// entity and zoned-datetime encodings required to DIFFER across the Bolt 5
 	// boundary while the decoded semantics stay identical at every version.
 	ScenarioBoltVersionMatrix = "bolt-version-matrix"
+	// ScenarioBoltDecodePressure is the deterministic inbound-decode scenario of rmp
+	// #2487: the engine-wide (cross-connection) decode pool adjudicated against a
+	// closed-form model of its per-slot charges, and the nesting-depth family that
+	// separates the wire cap, the engine's parameter cap and the pool by the three
+	// different codes they answer with.
+	ScenarioBoltDecodePressure = "bolt-decode-pressure"
+	// ScenarioBoltDecodeSwarm is its concurrent sibling: K connections pushing
+	// large-collection parameters at one shared pool while an honest client works.
+	// Registered separately because it is not bit-reproducible — and because the
+	// aggregate vector is only reachable concurrently, since every charge is
+	// released before its reply is written.
+	ScenarioBoltDecodeSwarm = "bolt-decode-swarm"
 )
 
 // cpuStarvationGOMAXPROCS is the processor clamp the cpu-starvation scenario
@@ -164,6 +176,8 @@ func DefaultRegistry() (*Registry, error) {
 		boltStreamStallScenario(),
 		boltBeginExtrasScenario(),
 		boltVersionMatrixScenario(),
+		boltDecodePressureScenario(),
+		boltDecodeSwarmScenario(),
 	)
 }
 

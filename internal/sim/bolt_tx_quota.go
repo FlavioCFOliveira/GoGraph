@@ -180,7 +180,15 @@ var (
 )
 
 // txQuotaSeedMix decorrelates the SimDisk sub-seed from the arm seed.
-const txQuotaSeedMix = 0x2482_9074
+//
+// It must DIFFER from boltTxQuotaDefaultSeed. It did not until rmp #2487: both
+// were 0x2482_9074, so `NewSeed(seed ^ txQuotaSeedMix)` at the catalogue default
+// was `NewSeed(0)` and the mix decorrelated nothing on the one run every report
+// starts from. The guard that catches it is
+// TestBoltScenarios_SeedMixDoesNotCancelTheDefaultSeed, which is table-driven
+// over every Bolt scenario precisely because the per-surface copies it replaced
+// left this one unchecked.
+const txQuotaSeedMix = 0x2482_5EED
 
 // txQuotaRefusalMessage RECOMPUTES the text the server sends for a BEGIN over
 // the cap, from the principal and the limit the harness configured.

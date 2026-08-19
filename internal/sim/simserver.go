@@ -226,6 +226,41 @@ func NewSimServerInFlight(eng *cypher.Engine, clk clock.Clock, maxInFlight int) 
 	})
 }
 
+// NewSimServerInboundBudget builds a SimServer whose ENGINE-WIDE inbound-decode
+// ceiling is maxInboundDecodeBytes: one [packstream.InboundBudget] pool shared by
+// every connection the server accepts.
+//
+// That sharing is the whole point. The per-message decoded-collection cap
+// (packstream's maxDecodedCollectionBytes, 128 MiB) bounds a SINGLE message; the
+// pool this sets bounds the SUM in flight across the fleet, which is the CWE-770
+// vector the per-message cap cannot see. The server creates the pool once, in
+// [server.NewServer] (bolt/server/serve.go:654), and hands the same pointer to
+// every connection's reassembly reader and pooled decoder.
+//
+// A non-positive value is REFUSED rather than defaulted. Zero means "derive a
+// default" to the server option and -1 means "unlimited"
+// ([server.MaxInboundDecodeBytesUnlimited]), so silently passing either through
+// would hand a pressure-driving scenario a ceiling of 1 GiB or none at all — and
+// the rejection it then failed to observe would read as a passing test rather
+// than as an unreached bound. This mirrors [NewSimServerInFlight]'s refusal for
+// the same reason.
+//
+// Authentication is [server.NoAuthHandler] and the server log is discarded
+// ([quietSimLogger]): a scenario that provokes the ceiling makes the server log
+// "inbound decode memory budget exceeded" at WARN by design (serve.go:1264), so
+// the noise is expected output rather than a signal.
+func NewSimServerInboundBudget(eng *cypher.Engine, clk clock.Clock, maxInboundDecodeBytes int64) (*SimServer, error) {
+	if maxInboundDecodeBytes <= 0 {
+		return nil, fmt.Errorf("sim: NewSimServerInboundBudget: maxInboundDecodeBytes must be positive, got %d "+
+			"(zero takes the server's 1 GiB-scale default and -1 disables the ceiling; either leaves it unreachable)",
+			maxInboundDecodeBytes)
+	}
+	return newSimServer(eng, clk, &simServerOptions{
+		log:                   quietSimLogger(),
+		maxInboundDecodeBytes: maxInboundDecodeBytes,
+	})
+}
+
 // Shutdown stops the embedded server through [server.Server.Shutdown]: it stops
 // accepting, drains every active connection, and — when the SimServer was built
 // by [NewSimServerOwnedCloser] — closes the owned store-level closer on its
@@ -349,6 +384,20 @@ type simServerOptions struct {
 	// reach, which is neither a short-layer budget nor a legible report. See
 	// [NewSimServerInFlight].
 	maxInFlight int
+
+	// maxInboundDecodeBytes overrides [server.Options.MaxInboundDecodeBytes], the
+	// ENGINE-WIDE (per-Server) ceiling on inbound decode memory in flight across
+	// every connection at once. Zero keeps the server's own resolution, which
+	// derives a ceiling from GOMEMLIMIT or falls back to
+	// [server.DefaultMaxInboundDecodeBytes] (1 GiB);
+	// [server.MaxInboundDecodeBytesUnlimited] (-1) opts out entirely.
+	//
+	// A scenario that wants to OBSERVE the aggregate ceiling refusing a decode must
+	// lower it drastically. The default is 1 GiB and the largest message a client
+	// may send is 16 MiB, so provoking it at the default would need dozens of
+	// concurrent maximal messages — neither a short-layer budget nor a legible
+	// report. See [NewSimServerInboundBudget].
+	maxInboundDecodeBytes int64
 }
 
 // simServeListener decorates a [SimListener] so every accepted connection passes
@@ -392,6 +441,7 @@ func newSimServer(eng *cypher.Engine, clk clock.Clock, opts *simServerOptions) (
 		MaxOpenTxPerPrincipal:    opts.maxOpenTxPerPrincipal,
 		Closer:                   opts.closer,
 		MaxInFlightPerConnection: opts.maxInFlight,
+		MaxInboundDecodeBytes:    opts.maxInboundDecodeBytes,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("sim: NewSimServer: %w", err)
