@@ -1129,6 +1129,20 @@ note claimed `graph create` rejects the words set/delete/remove/detach anywhere 
 query text; measured at this commit, `MERGE (m:Method {name: 'setLogger', …})` is
 ACCEPTED. What is rejected is a `SET` clause, `MERGE … ON CREATE SET` included.
 
+Incrementally synced at commit `e2e45cf1` (2026-08-19, task #2482, sprint 348 — the DST
+drives the Bolt transaction registry on a fake clock). +12 nodes: `Commit` `e2e45cf1`;
+`Task` 2482 COMPLETED and 2560/2561 BUG + 2562 IMPROVEMENT in BACKLOG; three `Function`s and
+four `Type`s for the three arms and their instruments (`txClockProbe`, `txArmingRaceProbe`,
+`idleReapModel`, `BoltTxRegistryEvidence`); two `Lesson`s. Edges: `CONTAINS`,
+`IMPLEMENTED_IN` (Task→Commit), `IMPROVES`, three `FOLLOWED_BY`, two `TAUGHT`, `TOUCHES` ×2.
+
+The two lessons are worth reading before the next measurement or the next harness:
+`a-measurement-can-lie-flat-when-the-fixture-is-degenerate` (an insertion sort read as cheap
+at every size because equal start instants made it swap nothing — quadratic, 600 µs per call
+at 512, with distinct ones) and `the-obvious-barrier-is-not-the-barrier` (the BEGIN reply and
+the registry listing both precede the reaper's arming, and a harness synchronising on either
+passed 40 of 40 runs anyway).
+
 ## Node labels
 
 | Label | Meaning | Properties (beyond `gitCommit`, `gitDate`) |
