@@ -1172,15 +1172,89 @@ eight consecutive `-race` runs in isolation and then failed in the full suite on
 connection-peak count; the re-verification that meant anything was 25 repetitions run while
 a full package run saturated the machine).
 
+Incrementally synced at commits `a3685a35` and `201370e0` (2026-08-19, tasks #2485 and
+#2567, sprint 348 — the DST drives the whole BEGIN extras surface, and five cypher security
+gates stop reporting a slow machine as a failed subject). +53 nodes: two `Commit`s; `Task`
+2485 and 2567 COMPLETED, plus 2563, 2564, 2565, 2566, 2568 and 2569 BUG in BACKLOG; four
+`Lesson`s; nine `Type`s, seven `Function`s and three `Method`s for the `bolt-begin-extras`
+scenario and the two seams it needed (`WireClient.BeginExtras` and `SimServer.ListenerAddr`,
+the latter being the INDEPENDENT reference for the ROUTE payload — comparing the reply
+against `bolt/server.RoutingTable` would have compared that function with itself); eleven
+`Test`s for that scenario; and, for the cypher fix, three `Function`s (the two oracle
+helpers plus `runNotifications`) and six `Test`s. +81 edges: 41 `CONTAINS` (two
+Sprint→Commit, 39 Package→symbol), 17 `VERIFIES`, six `FOLLOWED_BY`, four `TAUGHT`, four
+`TOUCHES`, three `BUILDS_ON`, two `IMPLEMENTED_IN` (Task→Commit, the documented direction),
+`IMPROVES`, `FIXES`, `DEPENDS_ON` and `HAS_METHOD`. Five existing nodes also had their
+provenance bumped: the `DST Bolt wire-surface coverage` `Feature`, whose description had
+still listed only #2481's two scenarios and now names all nine Bolt scenarios the catalogue
+registers, the `sim` and `cypher` `Package`s, and the two DST `Spec`s. Every node and edge
+written here carries `gitCommit` and `gitDate`, and the direction audit the edge table
+mandates still returns no `Commit`→`Task` row.
+
+Four lessons, and the first three were all paid for inside a single file before it shipped:
+
+- `a-claim-in-a-comment-is-not-evidence` — thirteen false claims in one new file's own
+  comments, each confidently worded. A godoc asserted that normalising a nil extras map kept
+  BEGIN byte-identical; a typed nil map never reaches the encoder's `case nil` arm and lands
+  on the map arm, where `len` and `range` treat it as empty, so both spellings already
+  emitted `b111a0` and the normalisation was decorative. An arm named `overflow-tx-timeout`
+  does not overflow: the plain magnitude guard rejects `1<<62` before the multiplication, so
+  an out-of-range client bound is SILENTLY IGNORED instead. And a quote was attributed to
+  the BEGIN log site that belongs to the RUN site. A comment asserting behaviour is a claim
+  to be measured, never documentation.
+- `a-process-global-counter-reaches-the-report` — `renderIssued` rendered the ADVANCE
+  between bookmark counters, and `bookmarkCounter` is a package-level atomic that `swarm`
+  shares across N workers in one process: +1 at one worker and +5 to +7 at six, on 6 of 6
+  fixed seeds, then 0 of 16 at sixteen workers once fixed. The determinism test replays
+  serially in one process and could not see it. Expose this class with FIXED seeds and
+  VARYING worker counts, never with more seeds. It `BUILDS_ON`
+  `a-process-global-counter-puts-wal-byte-totals-out-of-seed-reach` from #2481, which is the
+  same mechanism reaching a different field.
+- `a-scheduler-dependent-probe-is-a-bad-permanent-guard` — the probe that FOUND that defect
+  was deliberately not kept as the regression test, because it reproduces through the
+  scheduler and goes quiet on a fast or lightly loaded machine. The guard that shipped pins
+  the property instead — two evidence values differing only in their counters, one pair
+  consecutive and one spaced +1192 and +122222, must render identically — and runs in
+  0.00 s with no scheduler dependence.
+- `a-deadline-is-not-an-oracle` — two cypher security gates scored `context.DeadlineExceeded`
+  as proof the byte budget had failed. The budget was fine, passing in 0.47 s and 0.48 s
+  alone under `-race`, and a ~21x slowdown under the full race suite pushed it past a 10 s
+  deadline. The discriminator is whether the PAYLOAD is bounded: where it is, the deadline
+  adds no detection power at all — a regressed guard surfaces as a COMPLETED run in a
+  fraction of a second — and the clock only misattributes slowness; where the wait is
+  genuinely unbounded the clock is the only possible oracle and is legitimate. A sweep over
+  277 occurrences, cross-checked three ways, left roughly 148 unbounded sites alone and
+  fixed five bounded ones.
+
+Three things recorded by this sync that the model did not previously describe, all observed
+rather than introduced:
+
+- **`Test.task`.** Live `Test` nodes have carried a `task` property (the rmp ticket that
+  added or last hardened the test) since `00645575` on 2026-07-27 — 89 nodes, 83 of them
+  stamped across eight commits and six carrying no stamp at all; the table said only
+  `name`, `pkg`, `file`. It is documented below, and set on all 17 `Test` nodes written
+  here.
+- **The `internal/sim` key divergence is wider than the `Type` row said.** `Function` and
+  `Method` nodes in that package are keyed on `package` (the repo-relative dir) too, not
+  only `Type`. The new symbols follow the existing local convention rather than splitting
+  the package's identity across two property names; reconciling it remains a hygiene task.
+- **`DSTScenario` is a dormant label.** Its five nodes all date from 2026-07-13 and use a
+  different property set (`id`, `title`, `note`, `commit`, `date`) from everything sprint
+  348 writes. Tasks #2481, #2482 and #2485 modelled their DST scenarios as `internal/sim`
+  `Type`/`Function`/`Method`/`Test` nodes under the `DST Bolt wire-surface coverage`
+  `Feature` (#2483 and #2484 recorded no symbol nodes at all), and this sync follows them;
+  the label is documented below so the next sync does not start a third convention by
+  accident.
+
 ## Node labels
 
 | Label | Meaning | Properties (beyond `gitCommit`, `gitDate`) |
 |---|---|---|
 | `Package` | A Go package (one per source directory). | `name` (package clause), `path` (repo-relative dir, `"."` for root), `importPath` (full), `kind`. Added 2026-08-18 (`15c77ddc`): `testOnly` (bool — the package contains no non-test source file, as with `internal/tmphygiene`) and `responsibility` (one sentence stating what the package owns, per the *Exemplary components* mandate in `CLAUDE.md`) |
-| `Type` | A `type` declaration. | `name`, `pkg` (importPath), `file` (repo-relative), `kind`, `exported` (bool), `generic` (bool), optional `doc`. **Divergence observed 2026-08-18:** the `internal/sim` Type nodes are keyed on a `package` property holding the repo-relative dir (`internal/sim`) instead of `pkg` holding the importPath, so a `pkg`-based query misses them. New sim Types at `124eca54` followed the existing local convention rather than splitting the package's identity across two property names; reconciling the two is a hygiene task. |
+| `Type` | A `type` declaration. | `name`, `pkg` (importPath), `file` (repo-relative), `kind`, `exported` (bool), `generic` (bool), optional `doc`. **Divergence observed 2026-08-18:** the `internal/sim` Type nodes are keyed on a `package` property holding the repo-relative dir (`internal/sim`) instead of `pkg` holding the importPath, so a `pkg`-based query misses them. New sim Types at `124eca54` followed the existing local convention rather than splitting the package's identity across two property names; reconciling the two is a hygiene task. **Widened 2026-08-19 (`a3685a35`):** the divergence is not confined to `Type` — `Function` and `Method` nodes in `internal/sim` are keyed on `package` as well, so a `pkg`-based query misses every sim symbol, not merely the types. |
 | `Function` | A top-level `func` with no receiver that is not a Test/Benchmark/Fuzz/Example. | `name`, `pkg`, `file`, `exported`, `generic`. Added 2026-08-18 (`0f288333`): `introducedBy` (int — the rmp task that added the symbol), so a symbol's origin is queryable without walking commits. The same property is set on `Type` and `Method`. |
 | `Method` | A `func` with a receiver. | `name`, `pkg`, `file`, `recv` (receiver type, `*` stripped), `exported` |
-| `Test` | A `func TestXxx(*testing.T)`-style function (name prefix `Test`). | `name`, `pkg`, `file` |
+| `Test` | A `func TestXxx(*testing.T)`-style function (name prefix `Test`). | `name`, `pkg`, `file`. Documented 2026-08-19 (`a3685a35`), present in the live graph since `00645575` (2026-07-27) and carried by 89 nodes before this sync: `task` (int — the rmp ticket that added the test, or that last hardened it), which is how a gate's provenance is reached without walking commits. Note `pkg` is the full importPath for the bulk-surveyed packages but the bare package name for `internal/sim`, the same divergence recorded on `Type` above |
 | `Benchmark` | A `func BenchmarkXxx` (name prefix `Benchmark`). | `name`, `pkg`, `file` |
 | `FuzzTarget` | A `func FuzzXxx` (name prefix `Fuzz`). | `name`, `pkg`, `file` |
 | `Example` | A runnable godoc `func ExampleXxx` (name prefix `Example`). | `name`, `pkg`, `file` |
@@ -1195,6 +1269,7 @@ a full package run saturated the machine).
 | `Memory` | A persistent assistant memory file (mirror of the harness memory directory). | `name` (frontmatter slug), `file` (basename), `type` (`user`\|`feedback`\|`project`\|`reference`), `description` |
 | `Document` | A prose document under `docs/` that records a decision, a design, an audit or a certification. Present in the live graph since before this table existed (see the data-quality note below); its certification use was documented 2026-08-09 (sprint 337). | `path` (repo-relative, the identity), `title`, `kind` (`certification`\|`design`\|`audit`), `verdict` (certifications only — the cycle's stated outcome) |
 | `Defect` | A confirmed defect in the module or in its test harness, whether fixed or still open. **Present in the live graph long before this table documented it** (18 nodes at 2026-08-18); its property set is deliberately heterogeneous, because each defect records the evidence its own diagnosis produced. | `id` (the rmp ticket number, the identity) or `ref`; `title`, `status` (`OPEN`\|`FIXED`), `severity`, `component`, `rootCause`, `evidence`/`measured`, `fixCommit`, `regressionTest`. Added 2026-08-18 (`0ed5d4d1`, rmp #2547): `backlog` (bool — true while the defect is filed but in no sprint), `family` (a named class of related defects, e.g. `crash-model fidelity: rmp #2514, #2535, #2538`), `foundDuring` (what surfaced it, when that is not an audit). Added 2026-08-18 (`124eca54`): `fixedWith` (the ticket a defect was closed *inside*, when the two were inseparable), `verification` (the probe that shows it fixed), `originalFilingUnderstated` (recording that the filed scope was narrower than the measured one) |
+| `DSTScenario` | **Dormant.** A named coverage cluster of the deterministic simulation harness. All five nodes date from 2026-07-13 and none has been written since; documented 2026-08-19 (`a3685a35`) so it is not mistaken for the current convention. DST scenarios from sprint 348 onwards are modelled as `internal/sim` `Type`/`Function`/`Method`/`Test` nodes hanging off a `Feature`, not as `DSTScenario` nodes. | `id` (a slug, the identity), `title`, `note`, `commit` (short hash), `date` — note it uses `commit`/`date` rather than the `gitCommit`/`gitDate` convention every other label follows |
 | `Lesson` | A generalisable conclusion drawn from a defect — the part worth keeping once the ticket is closed. Present in the live graph before this table documented it; documented 2026-08-18. | `name` (a slug, the identity), `summary` (the lesson itself, stated so it applies beyond the originating defect), `claim`/`date` on the older nodes. Added 2026-08-18 (`124eca54`): `generalises` (the wider class the lesson covers), `method` (what to do differently), and — when a lesson survives but its worked example does not — `illustrationWithdrawn` plus `correctedAt`, so a corrected lesson is distinguishable from a rewritten one |
 
 ### Enumerated property values
@@ -1244,7 +1319,7 @@ All edges carry `gitCommit` and `gitDate`.
 | `IMPROVES` | `(Commit)-[:IMPROVES]->(Feature)` | A commit improves (perf/observability/tests) a feature area without fixing a defect. |
 | `TOUCHES` | `(Commit)-[:TOUCHES]->(Package\|Type\|Function\|Spec)` | A commit's diff touched this element; drives provenance re-stamping. |
 | `IMPLEMENTED_IN` | `(Task)-[:IMPLEMENTED_IN]->(Commit)` | The commit that delivered a task's work. **The direction is load-bearing, not incidental:** every documented read starts at the `Task`, so an edge written the other way round makes the work *invisible* to `MATCH (t:Task)-[:IMPLEMENTED_IN]->(c:Commit)` rather than merely awkward to reach — a query returning nothing reads as "no such work exists". Four sprint-347 edges (tasks #2480, #2514, #2535, #2537 — the whole DST crash-model family) were found reversed as `(Commit)-[:IMPLEMENTED_IN]->(Task)` and **repaired at `0ed5d4d1` (2026-08-18)**: the correct-direction edges carry `reconciledAt` and `reconciledNote` so the repair is auditable. Verify after any sync with `MATCH (a)-[e:IMPLEMENTED_IN]->(b) RETURN labels(a)[0], labels(b)[0], count(*)` — a `Commit`→`Task` row is a defect. |
-| `DEPENDS_ON` | `(Task)-[:DEPENDS_ON]->(Task)` | A task cannot start/complete until another task (a genuine prerequisite) does. |
+| `DEPENDS_ON` | `(Task)-[:DEPENDS_ON]->(Task)` | A task cannot start/complete until another task (a genuine prerequisite) does. Contrast `FOLLOWED_BY`, which is explicitly non-blocking. Optional property added 2026-08-19 (`201370e0`): `note` — why the dependency exists, for a prerequisite discovered mid-task rather than planned, since rmp's own `depends_on` list is empty for such a pair and the edge would otherwise carry no evidence (#2485 depended on #2567: `make ci` could not go green until the security gate stopped scoring a slow machine as a failed subject). |
 | `FOLLOWED_BY` | `(Task)-[:FOLLOWED_BY]->(Task)` | A completed task's work surfaced a distinct, non-blocking follow-up tracked as a new task — NOT a prerequisite (contrast `DEPENDS_ON`). Introduced 2026-07-02 (task #1866 → #1875). |
 | `ABOUT` | `(Memory)-[:ABOUT]->(Feature\|Sprint)` | A memory concerns a feature area or sprint. |
 | `CONSULTED_BY` | `(Memory)-[:CONSULTED_BY]->(Agent\|Skill)` | A memory exists primarily for that agent's/skill's use. |
