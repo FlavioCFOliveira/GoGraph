@@ -1498,6 +1498,182 @@ cancellation surfacing from the engine is mapped to
 the retryable family. Both codes are pinned as named constants so a correction fails
 the arm deliberately.
 
+### Streaming semantics: PULL n paging, DISCARD, and the qid that routes nothing (rmp #2484)
+
+Every result stream this package had ever opened was drained with a single
+`PULL {n:-1, qid:-1}`. The consequence was not simply that paging was untested: no
+`PULL` had ever carried a finite `n`, so `has_more` had been false on every reading
+the harness ever took and never once observed true; `DISCARD` did not appear
+anywhere in `internal/sim`; and no arm had ever addressed a stream by an explicit
+qid. Three server paths — `handlePull`'s `n` limit and its look-ahead peek,
+`handleDiscard`'s own `n` accounting, and the qid validation both share — were
+reachable only from `bolt/server`'s unit tests.
+
+**The task's premise was half wrong, and the refutation is worth more than the
+scenario would have been.** It asked for "QID multiplexing" and "QID routing":
+several open result streams on one session, addressed by qid. This server has
+neither, and cannot, and each limb was verified in the code rather than inferred
+from a passing test:
+
+- `handlePull` refuses any `qid >= 0` outright, answering
+  `Neo.ClientError.Request.Invalid` with `no such query: qid %d`
+  (`bolt/server/session.go:1240-1243`). `handleDiscard` carries the identical guard
+  (`:1421-1424`).
+- RUN's SUCCESS always reports `"qid": int64(-1)` (`:1223`), so no positive qid is
+  ever minted for a client to send back.
+- A second RUN while a stream is open is refused by the state machine: `handleRun`
+  requires READY or TX_READY (`:1075`), and a live stream leaves the session in
+  STREAMING or TX_STREAMING (`bolt/server/state.go:181-228`, `:230-277`).
+
+There is therefore exactly ONE open stream per session at any instant, and
+"routing" is a property to REFUTE rather than to test. The scenario asserts the
+refutation instead of arguing it: every RUN reply in the run is inspected and must
+report `qid = -1` (26 readings at the catalogue seed, distinct set exactly `[-1]`),
+and both refusals are pinned to their exact code AND exact message text.
+
+What DOES exist — and is the honest reading of the objective — is that cursors
+ACCUMULATE across SEQUENTIAL RUNs inside one explicit transaction. Each RUN appends
+a cursor to `tx.results` (`bolt/server/tx.go:135` and `:140`), the slice is cleared
+only by `Tx.closeCursors` on COMMIT or ROLLBACK, and
+`Options.MaxInFlightPerConnection` is the bound (`session.go:518-526` counts it,
+`:1086` refuses past it). Nothing in the harness had ever passed that option, so the
+only cap the DST could have reached was the server's own default of 1024 cursors
+deep inside one transaction — neither a short-layer budget nor a legible report.
+`NewSimServerInFlight` now sets it, and REFUSES a non-positive value rather than
+defaulting it, because passing zero through would silently hand a cap-driving
+scenario a cap of 1024 and the refusal it then failed to observe would read as a
+pass.
+
+**The load-bearing oracle is an independent reference drain.** The same query is
+drained twice, on two connections: once with a single `PULL -1`, which is the
+reference record set, and once with a seed-drawn sequence of `PULL n` pages. The
+concatenation must equal the reference ELEMENT BY ELEMENT and IN ORDER, compared
+through the package's existing `compareWireRow`, which compares the decoded value
+AND its concrete Go type because the dynamic type IS the wire encoding. That
+distinction is load-bearing rather than decorative, and the falsifiability table
+proves it: replacing `int64(41)` with `float64(41)` — three identical characters
+under any `String()` rendering — fires the equivalence clause. The reference query
+spans five PackStream encodings (Integer, String, Boolean, List, Float) and touches
+no node, so every value it yields is a pure function of the query text with no
+created-node internal key anywhere in the rows.
+
+The partial-DISCARD arm sharpens equivalence into an exact statement about WHICH
+rows were skipped. A seed-drawn prefix is paged, a seed-drawn window is DISCARDed,
+the remainder is pulled, and prefix++remainder must equal the reference with exactly
+that window cut out of it. A DISCARD that dropped one row too many, or one too few,
+shifts the suffix and fails here; "the session still works afterwards" could see
+neither. A controlled revert confirms it end to end: changing `handleDiscard`'s loop
+bound from `discarded < n` to `discarded <= n` takes the scenario to exit 1 with
+`prefix(21 rows)++suffix after DISCARD n=7 delivered 21 row(s), want 90`.
+
+Measured at the catalogue seed: 12 pages from the plan
+`[12 5 3 11 5 5 8 16 11 3 16 8]`, `has_more` 11 true / 1 false, the bookmark present
+on exactly the terminal page and on no other, a window of 21 rows paged over 2 pages
+with `DISCARD n=7` and a 69-row suffix, and the `qid = -1` control served all 97
+rows.
+
+**DISCARD abandons delivery, not the statement.** An autocommit write commits during
+the DRAIN rather than at RUN (`session.go:1144-1148` explains why the statement's
+deadline is held across the drain for exactly that reason), and `handleDiscard`
+drains the cursor with the same `s.result.Next()` loop PULL uses (`:1453-1458`). So
+the interesting question was never whether DISCARD is safe but whether it silently
+drops the write along with the rows. Measured: it does not. The DISCARD delivers
+ZERO records, its terminal SUCCESS still reports
+`nodes-created=1 labels-added=1 properties-set=1 contains-updates=1` — the write
+counters being the only route by which the effect can reach a client that took no
+rows — and the node is present both in the live engine and in a graph reopened
+through real WAL recovery after a crash.
+
+**Two gates share one failure code, so the refusal is attributed by ORIGIN STATE.**
+`handleRun`'s authentication gate (`:1072`) and its state gate (`:1075`) both return
+`failTransition`'s `Neo.ClientError.Request.Invalid`, so a code match cannot say
+which one refused — the discipline rmp #2481 established. `failTransition` reports
+the ORIGIN state (`:1885`), which is the discriminator, and the needle is the whole
+`in state X` phrase rather than the bare state name: **`TX_STREAMING` contains
+`STREAMING` as a substring**, so a containment check on the name alone would let a
+TX_STREAMING refusal satisfy the STREAMING clause, which is precisely the confusion
+the attribution exists to prevent. A controlled revert moving `origin := s.state` to
+after `s.enterFailed()` — a plausible refactoring mistake — takes the scenario to
+exit 1 on `refusal-origin-state` and `refusal-message` alone.
+
+**Both refusals POISON the session, and that was measured rather than assumed.** A
+qid refusal routes through `failWith` → `enterFailed`, and the next request-phase
+message on that connection draws `*proto.Ignored`, not a FAILURE and not a SUCCESS.
+Only RESET restores it, after which a RUN+PULL is acknowledged again. Both facts are
+asserted, which matters twice over: an IGNORED is a refusal, so a helper that
+treated "not a FAILURE" as an acknowledgement would let every "the session is still
+usable" clause in the file pass on a poisoned connection. A dedicated test drives a
+real server into that state to prove the helper refuses it.
+
+The in-flight arm runs two transactions against a WAL-backed store, each bracketed
+by two readings of `wal.Writer.Stats`:
+
+- **Under the cap.** Exactly `MaxInFlightPerConnection` RUN+PULL cycles accumulate
+  and the transaction COMMITs. Measured frames +10, three nodes live and three
+  recovered. This half is the non-vacuity witness in two senses: it proves the cap
+  admits accumulation up to its bound, and it is the run in which the frame counter
+  is observed MOVING, without which "the doomed transaction appended no frame" would
+  be a statement about a dead instrument.
+- **Over the cap.** The same cycles, then one more RUN, which must draw
+  `Neo.ClientError.General.LimitExceeded` naming `cap=3, open=3`. The `open=` figure
+  is parsed back out of the message and cross-checked against the harness's own
+  cycle count, so two independent accountings of the same quantity must agree. The
+  decisive RUN runs under an armed read deadline, so a stall becomes a harness error
+  instead of a silent pass — the "backpressure or a typed error, never a block"
+  mandate stated as an observation rather than as a hope. Measured frames +0 and
+  bytes +0 across the whole arm, with the staged nodes absent both live and after
+  recovery: the cap breach moves the session to FAILED, which rolls the transaction
+  back.
+
+**Frame counts are seed-pure; byte totals are not, and the rendering respects the
+difference.** A created node's hidden internal key is minted by `cypher/exec` as
+`"__cx_"+hex(n)` from a PROCESS-GLOBAL counter, so the same seed yields frames of
+different widths depending on how many nodes every other test in the process created
+first — the limitation already documented for `bolt-auth` and `schema-mutation`. The
+evidence rendering therefore carries frame counts for both halves but a byte total
+only where the expected value is ZERO, since zero is zero at any width, and every
+map it walks is walked in sorted key order. Two runs of one seed render
+byte-identically.
+
+**The controls are real alternative configurations, not doctored values.** The
+identical `PULL`/`DISCARD` message with `qid = -1` must be SERVED the whole record
+set, which is what pins the refusals on the qid rather than on the message type, the
+framing, or a typo in the harness. And the identical cap script with only
+`MaxInFlightPerConnection` raised must stop being refused, which pins the refusal on
+the cap rather than on explicit transactions, sequential RUNs, or the `CREATE`
+statement — every one of which would refuse the raised-cap run too.
+
+**The concurrent arm reuses the existing slow-consumer actor**, and one of its
+oracles had to be demoted after reading the harness's own code. `halfPipe.write`
+chunks every write to the space remaining (`internal/sim/simconn.go:96-124`), so the
+queue can NEVER exceed `simConnBufferSize`: "the server did not buffer past the
+bound" is an invariant of the pipe, not a property of the server, and a clause
+asserting it cannot fail against a real server. It is kept as a labelled guard on
+the harness itself, and the server-side HEAP bound — that a page is not materialised
+into a second in-memory copy ahead of the wire — is left where it can actually be
+measured, the live-heap gate in `bolt/server/streaming_backpressure_test.go`, rather
+than restated where it cannot be. The reading also had to be CONSTRUCTED rather than
+sampled: a single `ReadBuffered` call at the instant the consumer stalls was MEASURED
+at 0 bytes on 2 of 3 seeds, and a bound asserted against 0 is a bound asserted
+against nothing, so the arm polls until the queue is full and reports the peak
+(65536 of 65536 on 9 of 9 runs under `-race`). What the arm then asserts is only what
+every interleaving shares: a non-empty PROPER prefix reached the consumer, the writer
+was provably blocked when the connection was torn down, the teardown leaked no
+goroutine, and a FRESH connection's paged drain still matched plain range arithmetic
+with `has_more` true on exactly its non-final pages.
+
+**The coverage gate returns `Violation`s rather than the `[]string` rmp #2554
+demoted the MERGE and FOREACH gates to**, and the distinction is deliberate. Those
+gates reported a shortfall when a SEEDED WORKLOAD happened not to drive a branch,
+which is an uninformative run and not a defect. Every precondition here is
+CONSTRUCTED: each arm runs by rule on its own connection, and the draws are bounded
+so that a discard window is always strictly interior (at most four prefix pages of at
+most 16 rows leaves at least 33 of the 97 behind, against a window of at most 16) and
+a paged drain always takes at least `ceil(97/16) = 7` pages. A shortfall therefore
+means the harness itself stopped exercising the surface, which must fail loudly, as
+it does for the constructed battery of rmp #2483. The soak sweep runs 400 seeds and
+was clean on all 400.
+
 ## Defects surfaced by this coverage work
 
 The coverage work exercised the engine against these scenarios and found:

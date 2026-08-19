@@ -199,6 +199,33 @@ func NewSimServerOwnedCloser(
 	})
 }
 
+// NewSimServerInFlight builds a SimServer whose per-connection in-flight cursor
+// cap is maxInFlight instead of [server.DefaultMaxInFlightPerConnection], so a
+// scenario can drive the cap to its refusal over the genuine wire rather than by
+// reaching into a [server.Session]. It is the constructor rmp #2484 needs; before
+// it, nothing in the harness passed Options.MaxInFlightPerConnection at all, so
+// the only cap the DST could ever have reached was 1024 cursors deep inside one
+// transaction.
+//
+// A non-positive maxInFlight is REFUSED rather than defaulted. The server option
+// treats zero as "take the default", so silently passing it through would hand a
+// cap-driving scenario a cap of 1024 — and the refusal it then failed to observe
+// would read as a passing test rather than as an unreached bound.
+//
+// Authentication is [server.NoAuthHandler] and the server log is discarded
+// ([quietSimLogger]), because a store-backed engine carries no result-row cap and
+// [server.NewServer] warns about that on every construction.
+func NewSimServerInFlight(eng *cypher.Engine, clk clock.Clock, maxInFlight int) (*SimServer, error) {
+	if maxInFlight <= 0 {
+		return nil, fmt.Errorf("sim: NewSimServerInFlight: maxInFlight must be positive, got %d "+
+			"(zero would take the server's own 1024 default and leave the cap unreachable)", maxInFlight)
+	}
+	return newSimServer(eng, clk, &simServerOptions{
+		log:         quietSimLogger(),
+		maxInFlight: maxInFlight,
+	})
+}
+
 // Shutdown stops the embedded server through [server.Server.Shutdown]: it stops
 // accepting, drains every active connection, and — when the SimServer was built
 // by [NewSimServerOwnedCloser] — closes the owned store-level closer on its
@@ -311,6 +338,17 @@ type simServerOptions struct {
 	// [NewSimServerOwnedCloser] for why the decoration is the drain-ordering
 	// observable.
 	wrapConn func(net.Conn) net.Conn
+
+	// maxInFlight overrides [server.Options.MaxInFlightPerConnection], the cap on
+	// how many result cursors one explicit transaction may accumulate before it
+	// must COMMIT or ROLLBACK. Zero keeps
+	// [server.DefaultMaxInFlightPerConnection] (1024).
+	//
+	// A scenario that wants to OBSERVE the cap refusing a RUN must lower it: the
+	// default would need 1024 RUN+PULL round trips inside one transaction to
+	// reach, which is neither a short-layer budget nor a legible report. See
+	// [NewSimServerInFlight].
+	maxInFlight int
 }
 
 // simServeListener decorates a [SimListener] so every accepted connection passes
@@ -346,13 +384,14 @@ func newSimServer(eng *cypher.Engine, clk clock.Clock, opts *simServerOptions) (
 		auth = server.NoAuthHandler{}
 	}
 	srv, err := server.NewServer(eng, server.Options{
-		Auth:                  auth,
-		ConnTimeout:           30 * time.Second,
-		Logger:                opts.log,
-		MaxTxIdleTime:         opts.maxTxIdle,
-		DefaultTxTimeout:      opts.defaultTxTimeout,
-		MaxOpenTxPerPrincipal: opts.maxOpenTxPerPrincipal,
-		Closer:                opts.closer,
+		Auth:                     auth,
+		ConnTimeout:              30 * time.Second,
+		Logger:                   opts.log,
+		MaxTxIdleTime:            opts.maxTxIdle,
+		DefaultTxTimeout:         opts.defaultTxTimeout,
+		MaxOpenTxPerPrincipal:    opts.maxOpenTxPerPrincipal,
+		Closer:                   opts.closer,
+		MaxInFlightPerConnection: opts.maxInFlight,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("sim: NewSimServer: %w", err)

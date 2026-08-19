@@ -262,44 +262,80 @@ func (c *WireClient) Run(query string, params map[string]any) (any, error) {
 // FAILURE, returning the records and the terminal message. A FAILURE terminates
 // the pull with the records gathered so far.
 func (c *WireClient) PullAll() (records []*proto.Record, terminal any, err error) {
-	if err := c.send(&proto.Pull{N: -1, QID: -1}); err != nil {
-		return nil, nil, err
-	}
-	for {
-		msg, err := c.recv()
-		if err != nil {
-			return records, nil, err
-		}
-		switch m := msg.(type) {
-		case *proto.Record:
-			records = append(records, m)
-		case *proto.Success, *proto.Failure, *proto.Ignored:
-			return records, m, nil
-		default:
-			return records, nil, fmt.Errorf("sim: PullAll: unexpected message %T", msg)
-		}
-	}
+	return c.drainExchange("PullAll", &proto.Pull{N: -1, QID: -1})
 }
 
 // Pull sends PULL {n:n} and reads up to n RECORDs plus the terminal message. It
 // is used by the SlowConsumer, which pulls in small batches with deliberate
-// stalls between calls.
+// stalls between calls, and by the paging arms of rmp #2484.
 func (c *WireClient) Pull(n int64) (records []*proto.Record, terminal any, err error) {
-	if err := c.send(&proto.Pull{N: n, QID: -1}); err != nil {
+	return c.drainExchange("Pull", &proto.Pull{N: n, QID: -1})
+}
+
+// Discard sends DISCARD {n:n, qid:-1} and reads to the terminal reply, returning
+// any RECORDs that arrived along the way and the terminal message.
+//
+// The record slice exists to be asserted EMPTY. DISCARD's contract is that the
+// rows are dropped server-side rather than delivered, so a non-empty slice here
+// is the defect; a helper that could not observe a stray RECORD could not tell
+// DISCARD from PULL. n <= 0 discards the whole remaining stream; n > 0 discards up
+// to n rows and the terminal SUCCESS reports has_more for the remainder
+// (bolt/server/session.go handleDiscard).
+//
+// Nothing in the harness sent DISCARD before rmp #2484: every call site used
+// PULL -1, so the whole discard path of the session — including its
+// statement-error guard and its own has_more accounting — was driven by no
+// scenario at all.
+func (c *WireClient) Discard(n int64) (records []*proto.Record, terminal any, err error) {
+	return c.drainExchange("Discard", &proto.Discard{N: n, QID: -1})
+}
+
+// PullQID sends PULL {n:n, qid:qid} with an EXPLICIT qid and reads to the terminal
+// reply. It exists so a scenario can address a stream by qid rather than by the
+// implicit current-stream -1.
+//
+// A qid >= 0 is expected to be REFUSED: this server keeps exactly one open stream
+// per session (RUN always reports qid = -1, and a second RUN while streaming is an
+// illegal transition), so handlePull answers any non-negative qid with
+// Neo.ClientError.Request.Invalid / "no such query: qid N"
+// (bolt/server/session.go:1240-1243).
+func (c *WireClient) PullQID(n, qid int64) (records []*proto.Record, terminal any, err error) {
+	return c.drainExchange("PullQID", &proto.Pull{N: n, QID: qid})
+}
+
+// DiscardQID sends DISCARD {n:n, qid:qid} with an EXPLICIT qid and reads to the
+// terminal reply. As with [WireClient.PullQID], a qid >= 0 is expected to be
+// refused with the same code and message shape
+// (bolt/server/session.go:1421-1424).
+func (c *WireClient) DiscardQID(n, qid int64) (records []*proto.Record, terminal any, err error) {
+	return c.drainExchange("DiscardQID", &proto.Discard{N: n, QID: qid})
+}
+
+// drainExchange sends one stream-consuming message and reads until the terminal
+// reply, accumulating every RECORD that arrives first. It is the single body
+// behind PullAll/Pull/Discard/PullQID/DiscardQID so those five differ only in the
+// message they put on the wire.
+//
+// IGNORED counts as terminal, not as an error: it is the Bolt-correct reply to a
+// request-phase message on a FAILED session, and a caller that treated it as a
+// transport fault could not distinguish "the session is poisoned" from "the
+// connection broke".
+func (c *WireClient) drainExchange(label string, msg any) (records []*proto.Record, terminal any, err error) {
+	if err := c.send(msg); err != nil {
 		return nil, nil, err
 	}
 	for {
-		msg, err := c.recv()
+		m, err := c.recv()
 		if err != nil {
 			return records, nil, err
 		}
-		switch m := msg.(type) {
+		switch t := m.(type) {
 		case *proto.Record:
-			records = append(records, m)
+			records = append(records, t)
 		case *proto.Success, *proto.Failure, *proto.Ignored:
-			return records, m, nil
+			return records, t, nil
 		default:
-			return records, nil, fmt.Errorf("sim: Pull: unexpected message %T", msg)
+			return records, nil, fmt.Errorf("sim: %s: unexpected message %T", label, m)
 		}
 	}
 }

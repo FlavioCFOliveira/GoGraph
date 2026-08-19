@@ -51,6 +51,15 @@ const (
 	// fleet of committers in flight. Registered separately because it is not
 	// bit-reproducible.
 	ScenarioBoltShutdownFleet = "bolt-shutdown-fleet"
+	// ScenarioBoltStreaming is the deterministic streaming-semantics scenario of rmp
+	// #2484: PULL n paging against an independent reference drain, the exact window a
+	// partial DISCARD removes, the qid and second-RUN refusals, and cursor
+	// accumulation up to the per-connection in-flight cap.
+	ScenarioBoltStreaming = "bolt-streaming"
+	// ScenarioBoltStreamingStall is its concurrent sibling: the same surface behind a
+	// slow consumer that stalls mid-stream and then disconnects. Registered
+	// separately because it is not bit-reproducible.
+	ScenarioBoltStreamingStall = "bolt-streaming-stall"
 )
 
 // cpuStarvationGOMAXPROCS is the processor clamp the cpu-starvation scenario
@@ -141,6 +150,8 @@ func DefaultRegistry() (*Registry, error) {
 		boltTxQuotaScenario(),
 		boltShutdownDrainScenario(),
 		boltShutdownFleetScenario(),
+		boltStreamSemanticsScenario(),
+		boltStreamStallScenario(),
 	)
 }
 
