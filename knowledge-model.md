@@ -1156,6 +1156,22 @@ counting either manufactured `ACID_DURABILITY` reports in 4 of 25 and 8 of 30 ru
 `never-assert-a-go-select-coin-flip` (a branch that won 12 of 12 and then 8 of 8 was pinned,
 and the pin made 5 of 6 `-race` runs red once the other branch surfaced).
 
+Incrementally synced at commits `e8b4388f` and `452799e3` (2026-08-19, tasks #2483 and
+#2484, sprint 348 — Bolt streaming semantics, plus a fix to the drain arms' determinism
+clause). +5 nodes: two `Commit`s; `Task` 2484 COMPLETED; two `Lesson`s. Edges: two
+`CONTAINS`, two `IMPLEMENTED_IN` (Task→Commit), `IMPROVES`, two `TAUGHT`.
+
+Both lessons are about the instrument again, and both were paid for twice, so they are the
+two to read before writing another oracle or chasing another flake:
+`a-clause-the-fixture-guarantees-is-not-a-property-of-the-subject` (an arm asserted the
+server never buffers past a bound, which the simulated pipe makes true whatever the server
+does — with two neighbours of the same shape, a state-name containment check a SIBLING state
+satisfies, and a bound compared against a measurement of zero) and
+`scheduling-dependence-needs-load-to-surface-not-repetition` (a determinism clause passed
+eight consecutive `-race` runs in isolation and then failed in the full suite on a
+connection-peak count; the re-verification that meant anything was 25 repetitions run while
+a full package run saturated the machine).
+
 ## Node labels
 
 | Label | Meaning | Properties (beyond `gitCommit`, `gitDate`) |
