@@ -36,7 +36,6 @@ import (
 	"errors"
 	"strconv"
 	"testing"
-	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
@@ -55,10 +54,13 @@ func TestSec_Cypher_StringConcat_DoublingBypassesBudget(t *testing.T) {
 	const k = 50000 // Σ(1+i) ≈ K²/2 ≈ 1.25e9 bytes > 2^30 (1 GiB); peak ≈50 KiB.
 	q := "RETURN size(reduce(s = '', i IN range(1," + strconv.Itoa(k) + ") | s + 'a')) AS n"
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	res, err := eng.Run(ctx, q, nil)
+	// No deadline: the payload is bounded by construction, so a regressed budget
+	// shows up as a COMPLETED run, not as a hang. See the extended rationale on
+	// secCypherStringGrowSize in security_cypher_string_byte_budget_test.go — a
+	// wall-clock deadline cannot tell "the budget failed to fire" apart from
+	// "the machine was slow", which made this gate non-deterministic under the
+	// parallel -race load of `make ci`.
+	res, err := eng.Run(context.Background(), q, nil)
 	if err != nil {
 		var ee *expr.EvalError
 		if errors.As(err, &ee) {
@@ -76,9 +78,6 @@ func TestSec_Cypher_StringConcat_DoublingBypassesBudget(t *testing.T) {
 		t.Logf("FIXED #1482: string-concat reduce rejected with typed EvalError: %v", ee)
 		return
 	}
-	if errors.Is(iterErr, context.DeadlineExceeded) {
-		t.Fatalf("Run(%q) hit the deadline instead of the byte budget: %v", q, iterErr)
-	}
 	t.Fatalf("Run(%q): completed without a byte-budget EvalError (iterErr=%v) — #1482 regressed", q, iterErr)
 }
 
@@ -95,10 +94,8 @@ func TestSec_Cypher_StringConcat_PlainConcatBypassesBudget(t *testing.T) {
 	q := "RETURN [x IN [0] | size(reduce(s = '', i IN range(1," +
 		strconv.Itoa(k) + ") | s + 'a'))] AS n"
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	res, err := eng.Run(ctx, q, nil)
+	// No deadline — same rationale as the reduce form above.
+	res, err := eng.Run(context.Background(), q, nil)
 	if err != nil {
 		var ee *expr.EvalError
 		if errors.As(err, &ee) {
@@ -115,9 +112,6 @@ func TestSec_Cypher_StringConcat_PlainConcatBypassesBudget(t *testing.T) {
 	if errors.As(iterErr, &ee) {
 		t.Logf("FIXED #1482 (comprehension path): %v", ee)
 		return
-	}
-	if errors.Is(iterErr, context.DeadlineExceeded) {
-		t.Fatalf("Run(%q) hit the deadline instead of the byte budget: %v", q, iterErr)
 	}
 	t.Fatalf("Run(%q): completed without a byte-budget EvalError (iterErr=%v) — #1482 regressed", q, iterErr)
 }
