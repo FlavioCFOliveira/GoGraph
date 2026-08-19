@@ -381,6 +381,13 @@ func TestBoltDecodePressure_ContractCanFail(t *testing.T) {
 			clause:  "pool-boundary-matches-model",
 		},
 		{
+			name: "the breach arm was SERVED, so the pool never refused the message the run is built on",
+			perturb: func(e *BoltDecodeEvidence) {
+				e.Arms[boltDecodeArmIndex(e, "pool-breach-write")].Reply = "SUCCESS"
+			},
+			clause: "pool-breach-refused",
+		},
+		{
 			name: "backpressure answered with a code no driver will retry",
 			perturb: func(e *BoltDecodeEvidence) {
 				e.Arms[boltDecodeArmIndex(e, "pool-breach-write")].Code = boltDecodeCodeInvalid

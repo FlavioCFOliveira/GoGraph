@@ -2300,8 +2300,22 @@ requires an over-nested HELLO to have been refused so the pre-authentication pat
 actually visited, requires the control to be a genuinely different configuration that
 genuinely disagreed, and requires the live census to be non-empty so "the refused write
 left nothing behind" is not trivially true of an empty graph. 29 named contract clauses and
-16 `nv-` ones; 47 falsifiability subtests each perturb one field and assert the clause that
+16 `nv-` ones; 48 falsifiability subtests each perturb one field and assert the clause that
 must catch it.
+
+**Five of those checks are guards on the harness, and say so (rmp #2576).**
+`nesting-not-by-size`, `pool-control-identical-payload`, the `ControlBudget <= Budget`
+branch of `nv-control-differs`, `nv-nesting-family-complete` and
+`nv-swarm-leak-probe-tight` read quantities that no server behaviour can move: the nesting
+payloads are built by the harness and top out at 6166 wire bytes against a 64 KiB ceiling,
+the control's element count is copied from the breach arm inside the same run, both
+ceilings are compile-time constants, a missing nesting arm aborts the run before
+adjudication, and the swarm's leak probe is sent at the MODELLED boundary so its slack is
+the constant 16 B. Each is kept — a harness that has been re-wired is worth catching — and
+each now carries the sibling scenario's label, "A guard on the HARNESS, not on the server",
+so a reader does not count it as evidence about the subject. The deterministic
+`nv-leak-probe-tight` is deliberately NOT in that list: it probes at the MEASURED boundary,
+so a server that admitted fewer elements widens its slack and fires it.
 
 **One collision was found in the harness itself.** Generalising rmp #2485's single-scenario
 seed-mix guard into a table over every Bolt scenario immediately went red:

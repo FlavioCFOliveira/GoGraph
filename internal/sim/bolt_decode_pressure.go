@@ -1981,6 +1981,10 @@ func checkBoltDecodeControl(e *BoltDecodeEvidence) []Violation {
 		return append(v, boltDecodeViolation(ViolationOracleDeviation, "pool-control-served",
 			"the control arm or the breach arm did not run"))
 	}
+	// A guard on the HARNESS, not on the server: [boltDecodeRunner.armControlRaisedCeiling]
+	// replays breach.Elements verbatim, so the two counts are one variable read twice
+	// inside a single run and no server behaviour can separate them. It is kept
+	// because the wiring it guards is exactly what makes the control a control.
 	if ctl.Elements != breach.Elements {
 		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "pool-control-identical-payload",
 			fmt.Sprintf("the control replayed %d elements against the breach arm's %d: a control that sent "+
@@ -2030,6 +2034,13 @@ func checkBoltDecodeNesting(e *BoltDecodeEvidence) []Violation {
 					"difference is the third discriminator between the caps and it is not optional",
 					a.Name, a.SessionUsable, wantUsable)))
 		}
+		// A guard on the HARNESS, not on the server: every nesting payload is built
+		// here, so its wire size is a function of this file's own constants and of the
+		// seeded depth draw alone. The largest one the family can reach is the
+		// far-over-cap RUN at depth boltDecodeFarDepthMin+boltDecodeFarDepthSpan-1,
+		// which is 6166 bytes — an order of magnitude under the ceiling. It is kept
+		// because it is the clause that would fire if the family were ever re-sized
+		// past the point where the anti-confound argument still holds.
 		if a.WireBytes >= boltDecodeNestingWireCeiling {
 			v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nesting-not-by-size",
 				fmt.Sprintf("%s is %d wire bytes, at or over the %d B anti-confound ceiling: a payload "+
@@ -2061,11 +2072,23 @@ func checkBoltDecodeNesting(e *BoltDecodeEvidence) []Violation {
 // checkBoltDecodeCapsAnswerDifferently requires the three abuse vectors to have
 // drawn three PAIRWISE DISTINCT codes, read off the arms that actually ran.
 //
-// This is the clause the whole scenario is built around. A server that answered
-// aggregate memory pressure, a stack-overflow attempt and an over-nested
-// parameter with one code would be indistinguishable, from the client's side,
-// from a server with no aggregate pool and no depth cap at all — every other
-// clause here could still pass against it.
+// A server that answered aggregate memory pressure, a stack-overflow attempt and
+// an over-nested parameter with one code would be indistinguishable, from the
+// client's side, from a server with no aggregate pool and no depth cap at all.
+//
+// This clause is not the only thing standing between the run and such a server,
+// and it does not need to be. [checkBoltDecodeNesting] pins each nesting arm's
+// exact expected code and [checkBoltDecodeRefusalTyping] pins the budget literal,
+// so as long as the three code constants stay pairwise distinct, a server-side
+// collapse necessarily moves an observed code off the literal it is pinned to,
+// and one of those two fires first.
+//
+// What this clause adds is what those literals cannot give. Every other code
+// clause here compares an observed code against one of this file's own constants;
+// this one compares the observed codes with EACH OTHER, and against no constant
+// at all. It is therefore the only distinctness statement that keeps its meaning
+// if the three constants are themselves edited to collide — which is the defect
+// their own godoc warns against, and the reason they must stay pairwise distinct.
 func checkBoltDecodeCapsAnswerDifferently(e *BoltDecodeEvidence) []Violation {
 	observed := map[string]string{} // vector -> code
 	for i := range e.Arms {
@@ -2276,6 +2299,11 @@ func checkBoltDecodePressureNonVacuity(e *BoltDecodeEvidence) []Violation {
 	for i := range e.Arms {
 		seen[e.Arms[i].Name] = true
 	}
+	// A guard on the HARNESS, not on the server: [boltDecodeRunner.driveNestArm]
+	// records an arm for every spec or returns an error, and an error aborts the run
+	// before anything is adjudicated, so at this point the roster is always complete.
+	// It is kept because it is what would fire if an arm were ever recorded
+	// conditionally rather than unconditionally.
 	for _, spec := range boltDecodeNestArms {
 		if !seen[spec.name] {
 			v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-nesting-family-complete",
@@ -2326,6 +2354,11 @@ func checkBoltDecodePressureNonVacuity(e *BoltDecodeEvidence) []Violation {
 	case ctl == nil || breach == nil:
 		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-control-differs",
 			"the control arm or the breach arm did not run"))
+	// This branch is a guard on the HARNESS, not on the server: both ceilings are
+	// compile-time constants (boltDecodePressuredBudget, 4 MiB, against
+	// boltDecodeControlBudget, 64 MiB), so it can fire only if one of them is edited
+	// to meet the other. The two branches around it are not: they read what the run
+	// and the server actually did.
 	case e.ControlBudget <= e.Budget:
 		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-control-differs",
 			fmt.Sprintf("the control's ceiling (%d B) is not above the pressured one (%d B), so the two "+
@@ -2463,6 +2496,12 @@ func checkBoltDecodeSwarmNonVacuity(e *BoltDecodeEvidence) []Violation {
 				"sampled less of the pressure window than it was meant to",
 				len(e.Honest), boltDecodeSwarmHonestOps)))
 	}
+	// A guard on the HARNESS, not on the server: the swarm's probe is sent at
+	// ev.ModelBoundary rather than at a MEASURED one, so its slack is a function of
+	// the constants alone — 16 B against the 8 MiB pool, inside [0, 48) on every run
+	// — and no server behaviour can move it. The deterministic scenario's sibling
+	// clause is a different case: it probes at the measured boundary, so a server
+	// that admitted fewer elements would widen the slack and fire it.
 	v = append(v, checkBoltDecodeLeakProbeTight(e, e.LeakProbeFinal, "nv-swarm-leak-probe-tight")...)
 	return v
 }
