@@ -767,8 +767,17 @@ func (e *BoltDrainEvidence) String() string {
 	fmt.Fprintf(&b, "bolt-shutdown-drain evidence (arm=%s seed=%#x):", e.Arm, e.Seed)
 	fmt.Fprintf(&b, "\n  wiring: closer=%t decorated=%t idle-conns=%d gate=armed:%t/fired:%t",
 		e.CloserWired, e.ConnDecorated, e.IdleConnsOpened, e.GateArmed, e.GateFired)
-	fmt.Fprintf(&b, "\n  conns: accepted=%d closed=%d peak=%d live-at-end=%d parked-live=%d listener-closed-while-parked=%t dial-refused-after=%t",
-		e.ConnsAccepted, e.ConnsClosed, e.ConnsPeak, e.ConnsLiveAtEnd, e.ParkedLiveConns,
+	// ConnsPeak is deliberately NOT rendered. It is a coverage witness the
+	// non-vacuity gate reads (at most one connection says little about draining),
+	// but it is not a function of the seed: whether an earlier connection's handler
+	// has finished by the time a later one is accepted is scheduling, so the peak
+	// was measured flipping between 3 and 4 across two runs of ONE seed — which is
+	// what made the determinism clause red in a full-suite run after eight
+	// consecutive clean ones. Rendering a scheduling observable inside a value whose
+	// stability is asserted turns the assertion into a coin flip; the sibling case
+	// was the expiry branch, and this is the same mistake one field over.
+	fmt.Fprintf(&b, "\n  conns: accepted=%d closed=%d live-at-end=%d parked-live=%d listener-closed-while-parked=%t dial-refused-after=%t",
+		e.ConnsAccepted, e.ConnsClosed, e.ConnsLiveAtEnd, e.ParkedLiveConns,
 		e.ListenerClosedWhileParked, e.DialRefusedAfterTeardown)
 	fmt.Fprintf(&b, "\n  teardown: bodies=%d while-parked=%d", len(e.CloseBodies), e.CloseBodiesWhileParked)
 	for i := range e.CloseBodies {

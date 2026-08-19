@@ -335,7 +335,15 @@ func TestBoltShutdownDrain_PublicationIsOneValue(t *testing.T) {
 // depends on what every other test in the process created first), and the identity
 // of whichever stop path won the race to close the store on a successful drain.
 //
-// The DEADLINE-bounded expiry arm is excluded for a fourth reason, and it is a
+// A fourth is excluded for the same reason as the third, and it took a full-suite
+// run to catch: the PEAK number of concurrently-open connections. Whether an
+// earlier connection's handler has finished when a later one is accepted is
+// scheduling, not seed — measured flipping between 3 and 4 across two runs of one
+// seed, after eight consecutive clean runs of this test had suggested otherwise. It
+// stays in the evidence, where the non-vacuity gate reads it as a coverage witness,
+// and out of the rendering, whose stability is asserted here.
+//
+// The DEADLINE-bounded expiry arm is excluded for a fifth reason, and it is a
 // property of the server rather than of the harness: which of Shutdown's two expiry
 // branches reports is a genuine race (the clamped time.After and ctx.Done() come due
 // together and Go's select is uniform when both are ready), so that arm's rendering
