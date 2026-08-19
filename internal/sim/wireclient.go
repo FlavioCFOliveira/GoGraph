@@ -57,27 +57,15 @@ func NewWireClient(conn *SimConn, clk clock.Clock) *WireClient {
 // down to 5.0 across the four slots, and records the negotiated version. It
 // returns an error if the server rejects negotiation (responds with 0.0) or an
 // I/O error occurs.
-func (c *WireClient) Handshake(_ context.Context) (proto.Version, error) {
-	var buf [20]byte
-	binary.BigEndian.PutUint32(buf[:4], proto.Magic)
-	// Slot 0 offers 5.6 with a minor range down to 5.0:
-	// [pad=0x00, minor_range=6, minor=6, major=5].
-	buf[4], buf[5], buf[6], buf[7] = 0, 6, 6, 5
-	// Slot 1 offers 4.4 as a fallback: [0x00, 0, 4, 4].
-	buf[8], buf[9], buf[10], buf[11] = 0, 0, 4, 4
-	// Slots 2–3 zero (not offered).
-	if _, err := c.conn.Write(buf[:]); err != nil {
-		return proto.Version{}, fmt.Errorf("sim: handshake write: %w", err)
-	}
-	var resp [4]byte
-	if _, err := io.ReadFull(c.conn, resp[:]); err != nil {
-		return proto.Version{}, fmt.Errorf("sim: handshake read: %w", err)
-	}
-	if resp[2] == 0 && resp[3] == 0 {
-		return proto.Version{}, fmt.Errorf("sim: server rejected version negotiation")
-	}
-	c.ver = proto.Version{Major: resp[3], Minor: resp[2]}
-	return c.ver, nil
+func (c *WireClient) Handshake(ctx context.Context) (proto.Version, error) {
+	return c.HandshakeOfferingSlots(ctx, [4]BoltOffer{
+		// Slot 0 offers 5.6 with a minor range down to 5.0:
+		// [pad=0x00, minor_range=6, minor=6, major=5].
+		{Version: proto.Version{Major: 5, Minor: 6}, MinorRange: 6},
+		// Slot 1 offers 4.4 as a fallback: [0x00, 0, 4, 4].
+		{Version: proto.Version{Major: 4, Minor: 4}},
+		// Slots 2-3 stay zero (not offered).
+	})
 }
 
 // HandshakeOffering performs the 20-byte Bolt client handshake offering exactly
@@ -90,16 +78,72 @@ func (c *WireClient) Handshake(_ context.Context) (proto.Version, error) {
 // At most four versions may be offered (the preamble has four slots); each is
 // offered with a minor RANGE of zero, i.e. that exact version and no fallback.
 // It returns an error when the server rejects negotiation (responds 0.0).
-func (c *WireClient) HandshakeOffering(_ context.Context, offers ...proto.Version) (proto.Version, error) {
+func (c *WireClient) HandshakeOffering(ctx context.Context, offers ...proto.Version) (proto.Version, error) {
 	if len(offers) == 0 || len(offers) > 4 {
 		return proto.Version{}, fmt.Errorf("sim: handshake offers %d versions, want 1..4", len(offers))
 	}
+	var slots [4]BoltOffer
+	for i, v := range offers {
+		// Slot layout: [pad=0x00, minor_range=0, minor, major].
+		slots[i] = BoltOffer{Version: v}
+	}
+	return c.HandshakeOfferingSlots(ctx, slots)
+}
+
+// BoltOffer is one version slot of the Bolt client preamble: a version and the
+// MINOR RANGE the client will accept below it.
+//
+// A slot's wire form is [0x00, minor_range, minor, major], and a minor_range of r
+// means the client accepts [minor-r, minor] (bolt/proto/handshake.go:39-45). The
+// zero value is an EMPTY slot: the preamble always carries four, and a client
+// offering fewer zero-fills the rest, which Negotiate skips
+// (bolt/proto/handshake.go:103-104).
+type BoltOffer struct {
+	// Version is the top of the offered range.
+	Version proto.Version
+	// MinorRange is how far below Version.Minor the client will accept. Zero
+	// offers that exact version and no fallback.
+	MinorRange uint8
+}
+
+// HandshakeOfferingSlots performs the 20-byte Bolt client handshake writing the
+// four preamble slots EXACTLY as given, and records the negotiated version. It is
+// the single primitive behind [WireClient.Handshake] and
+// [WireClient.HandshakeOffering], which are the two fixed spellings the harness
+// used before rmp #2486; both delegate here, so the preamble is built in one
+// place and [TestWireClientHandshake_PreambleBytesAreUnchanged] can pin the exact
+// 20 bytes each of them puts on the wire.
+//
+// It exists because neither of those two can express what a version-matrix probe
+// needs. [WireClient.HandshakeOffering] hard-codes a minor_range of ZERO and packs
+// its offers into slots 0..n-1, so nothing in the harness could send a RANGE offer
+// other than the one [WireClient.Handshake] hard-codes, and nothing could place an
+// offer in a chosen slot. Both matter: the range is a distinct branch of
+// Negotiate's matching loop (the `sv.Minor >= minMinor` half,
+// bolt/proto/handshake.go:121), and slot placement is what shows the server's
+// choice is driven by ITS preference order rather than by the client's, because
+// Negotiate scans SupportedVersions in the OUTER loop (:109-110).
+//
+// An all-empty preamble is REFUSED here rather than sent. Negotiate would answer
+// it with the no-common-version rejection, which is indistinguishable from a
+// deliberate probe of that path; a caller that wants the rejection asks for it by
+// offering a version this server does not support.
+//
+// It returns an error when the server rejects negotiation (responds 0.0).
+func (c *WireClient) HandshakeOfferingSlots(_ context.Context, slots [4]BoltOffer) (proto.Version, error) {
 	var buf [20]byte
 	binary.BigEndian.PutUint32(buf[:4], proto.Magic)
-	for i, v := range offers {
+	empty := true
+	for i, s := range slots {
+		if s.Version == (proto.Version{}) {
+			continue
+		}
+		empty = false
 		off := 4 + i*4
-		// Slot layout: [pad=0x00, minor_range=0, minor, major].
-		buf[off], buf[off+1], buf[off+2], buf[off+3] = 0, 0, v.Minor, v.Major
+		buf[off], buf[off+1], buf[off+2], buf[off+3] = 0, s.MinorRange, s.Version.Minor, s.Version.Major
+	}
+	if empty {
+		return proto.Version{}, fmt.Errorf("sim: handshake offers no version (all four slots are empty)")
 	}
 	if _, err := c.conn.Write(buf[:]); err != nil {
 		return proto.Version{}, fmt.Errorf("sim: handshake write: %w", err)

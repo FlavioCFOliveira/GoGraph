@@ -65,6 +65,11 @@ const (
 	// rather than honoured), a client-supplied tx_timeout against its own control,
 	// tx_metadata, the access mode, database selection, and the ROUTE payload.
 	ScenarioBoltBeginExtras = "bolt-begin-extras"
+	// ScenarioBoltVersionMatrix is the deterministic protocol-version scenario of
+	// rmp #2486: 4.4, 5.0, 5.1 and 5.6 negotiated and driven side by side, with the
+	// entity and zoned-datetime encodings required to DIFFER across the Bolt 5
+	// boundary while the decoded semantics stay identical at every version.
+	ScenarioBoltVersionMatrix = "bolt-version-matrix"
 )
 
 // cpuStarvationGOMAXPROCS is the processor clamp the cpu-starvation scenario
@@ -158,6 +163,7 @@ func DefaultRegistry() (*Registry, error) {
 		boltStreamSemanticsScenario(),
 		boltStreamStallScenario(),
 		boltBeginExtrasScenario(),
+		boltVersionMatrixScenario(),
 	)
 }
 

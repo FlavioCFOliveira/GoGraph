@@ -1978,6 +1978,156 @@ and the `tx_metadata` BEGIN SUCCESS carrying no metadata keys at all, its termin
 carrying `[bookmark db has_more]` and its COMMIT `[bookmark]`, none of them a key the
 client sent. A serial sweep of seeds 1 to 100 was clean on all 100.
 
+### The protocol version matrix: 4.4, 5.0 and 5.x side by side (rmp #2486)
+
+**Every DST connection before this task negotiated 5.6.** `WireClient.Handshake` offers
+5.6 with a minor range down to 5.0 in slot 0 and 4.4 in slot 1, and the server picks the
+highest version it supports inside any offered range, so 5.6 is what every arm of every
+scenario got. rmp #2481 added `HandshakeOffering` to reach a specific version and used it
+only to reach 5.0, only to check that a credential-bearing HELLO is accepted there. Bolt
+4.4 had never been negotiated by anything in `internal/sim`, and no two versions had ever
+been compared against each other.
+
+**Two whole axes of the server were undriven, and they are different axes.** The entity
+and temporal encodings branch on the MAJOR version: a Node is three fields at Bolt 4 and
+four at Bolt 5 (`bolt/server/entity_struct.go:96-98`), a Relationship five and eight
+(`:112-118`), an UnboundRelationship three and four (`:130-132`), and a Path inherits all
+of them by recursion (`:144-152`); a zoned DateTime switches both its struct tag and the
+MEANING of its seconds field — `0x49`/`0x69` carrying a true UTC epoch second at major
+≥ 5, `0x46`/`0x66` carrying the wall clock expressed as if UTC at 4.4
+(`dateTimeToPackstream`, `bolt/server/session.go:2222-2243`). Authentication branches on
+the MINOR version at a different place: `authDeferredToLogon` compares against
+`proto.Version{5, 1}` (`bolt/server/state.go:294-305`), so ≥ 5.1 sends a credential-less
+HELLO and authenticates on a separate LOGON while ≤ 5.0 carries the credentials on HELLO
+itself. **The task text calls the second axis "4.4 (no LOGON)"; reading the code says
+more than that** — 5.0 is on the same side of the auth split as 4.4 and the other side of
+the encoding split, which is exactly why it is called out separately as never entered,
+and it is what makes the matrix a CROSSED design rather than a list. 4.4 against 5.0
+moves the encoding axis with auth held fixed; 5.0 against 5.1 moves the auth axis with
+the encoding held fixed, so either difference is attributable to ONE axis, which a
+4.4-versus-5.6 comparison alone could never be.
+`TestBoltVersionMatrix_TableIsCrossed` pins that the 5.0 row exists, because dropping it
+would silently collapse the design while every clause still passed.
+
+**The load-bearing shape is that semantics are INVARIANT while encodings DIFFER, and both
+halves are asserted**, because either alone is satisfiable by a broken server. A run that
+only required the decoded values to agree across versions would pass against a server
+that ignored the negotiated version entirely and emitted Bolt 5 structures to a 4.4
+client — the values would agree perfectly and a real 4.4 driver would fail to hydrate
+them, since its hydrator asserts the field count. So
+`encoding-differs-across-majors` is written deliberately as the guard on the other
+clauses: the SAME query's record captured at 4.4 and at 5.6 must not produce the same
+struct census or the same byte length. Measured at the catalogue seed, `[N/3 R/5 P/3 N/3
+N/3 r/3]` against `[N/4 R/8 P/3 N/4 N/4 r/4]`, and 144 bytes against 168 — the census is
+stable run to run, the two lengths are not (see the instrument trap below), but they
+always differ, because the Bolt 5 layout adds seven decimal element_id strings to this
+record and cannot encode to the same size. **A controlled
+revert confirmed it end to end**: making `boltVersionExpectedWidths` version-blind turned
+the live 4.4 arm red on `encoding-struct-layout`, and declaring 5.0 deferred-auth turned
+the live 5.0 arm red on five auth clauses at once.
+
+**The oracle is an independent PackStream reader, not the codec it adjudicates.**
+`decodeBoltWire` is a minimal reader written in `internal/sim/bolt_version_matrix.go`
+from the marker table — derived first from real hex captures of this server and then
+confirmed against the published constants at `bolt/packstream/encoder.go:24-59` — and it
+is what produces each record's struct census from the raw chunked bytes.
+`TestDecodeBoltWire_ReadsHandBuiltBytes` pins it against hand-written byte strings whose
+content is known independently of any encoder, and `TestDecodeBoltWire_RejectsMalformed`
+pins its refusals, because a reader that tolerated a truncation could report a short
+census as a correct one. `encoding-walker-agrees-with-codec` then runs the module's own
+decoder over the identical bytes and requires the two censuses to match, so a bug in the
+independent reader surfaces as a disagreement rather than as a confident wrong verdict.
+The value-level oracles are computed by the harness: the entity ids and property maps are
+what the scenario itself created, each element_id must be `strconv.FormatInt` of the id
+the same structure reports, and every temporal field is computed with Go's `time` package
+from the literal the query carries.
+
+**The no-LOGON contract is measured against a CREDENTIALED server**, never
+`NoAuthHandler`: against a handler that admits everyone, "the credentials were accepted"
+is true at every version and proves nothing. With `BasicAuthHandler` the same bytes
+produce opposite outcomes on the two sides of 5.1, which is what makes the contract
+falsifiable. A WRONG password on HELLO draws `Neo.ClientError.Security.Unauthorized` and
+the connection is torn down at 4.4 and 5.0, and draws SUCCESS with the connection intact
+at 5.1 and 5.6. A credential-less HELLO is refused at 4.4 and 5.0 and succeeds at 5.1 and
+5.6. A RUN sent straight after a successful HELLO is SERVED at 4.4 and 5.0 and refused at
+5.1 and 5.6 by the state gate, which names the state it refused from. And a RESET on that
+pre-LOGON session returns it to NEGOTIATION rather than to READY — the deliberate
+pre-authentication RESET gate of task #1345 (`bolt/server/state.go:124-133` and
+`Session.handleReset`'s `!s.authenticated` branch, `bolt/server/session.go:1038-1041`) —
+so the following RUN is refused naming NEGOTIATION, while the same RESET on an inline-auth
+session leaves it usable. Every refusal clause pins the whole `in state X` phrase rather
+than the bare state name, following rmp #2484.
+
+**Negotiation is adjudicated by a literal expectation table over raw 20-byte preambles**,
+written directly on `SimConn` rather than through `WireClient`, because
+`HandshakeOfferingSlots` collapses a rejection into an error and telling a rejection apart
+from a transport failure by matching that error's text would be a fragile oracle. Fifteen
+cases: the four exact versions; four range offers, including one whose top is ABOVE
+everything the server supports and which still resolves, to 5.6; the legacy version
+offered FIRST and losing anyway, which shows the choice is driven by the server's
+preference and not by slot order; a supported version with an unsupported decoy alongside
+it; and four ways to have nothing in common, all refused. Because every expectation
+follows from `proto.SupportedVersions`, `negotiate-supported-list` is a TRIPWIRE that
+compares that list against a literal copy, so adding 5.7 upstream is a loud failure at the
+one clause whose job is to notice rather than silent staleness across the other fourteen.
+
+**The offer SPELLING is seed-chosen and its invariance is the claim.** Each arm negotiates
+its target twice — once canonically (exact version, slot 0, no range) and once with a
+seed-drawn slot, minor range and optional unsupported decoy — and the seeded spelling is
+the one the working connection uses, so every observation the arm makes was produced over
+it. This needed one new primitive, `WireClient.HandshakeOfferingSlots`, because nothing in
+the harness could send a range offer other than the one `Handshake` hard-codes or place an
+offer in a chosen slot. `Handshake` and `HandshakeOffering` were both refactored onto it,
+and `TestWireClientHandshake_PreambleBytesAreUnchanged` pins the exact 20 bytes each still
+writes, read off a bare `SimListener` with no server behind it — comparing negotiated
+versions could not have caught the change, because a range offer and an exact offer of the
+same top version negotiate the same result.
+
+**One trap was found in this scenario's own instrument rather than in the server.** An
+early draft rendered node ids and the record's byte length, on the stated belief that they
+were assigned in fixture-creation order and therefore a function of the seed. The
+determinism test refuted it: two runs of the same seed produced node ids 38/215 and then
+227/48, and records of 138 and then 140 bytes, because the id derives from a node key
+minted from a process-global counter and the byte length follows it through the decimal
+element_id strings. Both are now rendered POSITIONALLY — `n0`, `n1`, `e0` in
+first-encounter order, with each element_id shown as the token of the id whose decimal it
+is — which keeps every structural fact (which entity appears where, which element_id
+belongs to which id) while dropping the process-dependent value. The CHECKERS still read
+the raw values, and are entitled to: every clause over them is a derived relation, never a
+literal. This is the same class of defect as the rmp #2485 report field that rendered `+1`
+at one worker and `+5` at six.
+
+The remaining families are the version-invariant half. The parameter round trip drives
+seven kinds (null, boolean, integer, float, string, a mixed list, a map) and compares the
+decoded value AND its concrete Go type across versions, following rmp #2484 — the dynamic
+type IS the wire encoding, so an Integer re-encoded as the identically-rendered Float must
+fail. The zone-less temporals (`date` `0x44`, `localtime` `0x74`, `time` `0x54`,
+`localdatetime` `0x64`, `duration` `0x45`) are required to be BYTE-identical at every
+version, which is the control proving the version knob is narrow rather than global. Both
+zoned datetimes are asked at a NON-ZERO offset (`+02:00`, and Europe/Athens on 2 January,
+also `+02:00`) because at a zone offset of zero the legacy and UTC conventions encode the
+identical seconds field and the clause degenerates to a tag-only check — Europe/Lisbon in
+January is exactly that trap and was the first zone tried;
+`TestBoltVersionMatrix_TemporalReferenceOffsetIsNonZero` pins it. A bad-actor battery
+(garbage opcode, COMMIT with no transaction, PULL with no RUN) must draw the identical
+typed refusal at every version, pinned to the literal code and message so that two
+versions agreeing on a wrong answer does not pass. And each arm commits a marker node in an
+explicit transaction: the census must advance by exactly one per arm, and every marker must
+be present both live and in a graph reopened through real WAL recovery after a crash, so
+the protocol version a write arrived over provably does not reach the durable state.
+
+The non-vacuity gate is a separate function answering a different question — was the run in
+a position to notice — and its shortfalls fail the scenario just as a contract violation
+does. It censuses which versions were actually negotiated (the trap being an arm that
+silently landed on 5.6 while believing it negotiated 4.4), requires the crossed design to
+have been constructed, requires the same entity tag to have been SEEN at two different
+arities and both zoned-datetime conventions to have been seen, requires the negotiation
+table to have produced at least one refusal and one range resolution, requires the seeded
+spelling to have differed from the canonical one for at least one arm, and reports a
+missing zone database as a shortfall rather than letting the named-zone clause pass
+unexercised. 38 named contract clauses and 10 `nv-` ones; 53 falsifiability subtests each
+perturb one field and assert the clause that must catch it.
+
 ## Defects surfaced by this coverage work
 
 The coverage work exercised the engine against these scenarios and found:
