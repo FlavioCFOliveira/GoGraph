@@ -43,6 +43,14 @@ const (
 	ScenarioBoltCertRotation  = "bolt-cert-rotation"
 	ScenarioBoltTxRegistry    = "bolt-tx-registry"
 	ScenarioBoltTxQuota       = "bolt-tx-quota"
+	// ScenarioBoltShutdownDrain is the deterministic teardown scenario of rmp
+	// #2483: Server.Shutdown's connection drain against the Options.Closer the
+	// server owns.
+	ScenarioBoltShutdownDrain = "bolt-shutdown-drain"
+	// ScenarioBoltShutdownFleet is its concurrent sibling: the same drain against a
+	// fleet of committers in flight. Registered separately because it is not
+	// bit-reproducible.
+	ScenarioBoltShutdownFleet = "bolt-shutdown-fleet"
 )
 
 // cpuStarvationGOMAXPROCS is the processor clamp the cpu-starvation scenario
@@ -131,6 +139,8 @@ func DefaultRegistry() (*Registry, error) {
 		boltCertRotationScenario(),
 		boltTxRegistryScenario(),
 		boltTxQuotaScenario(),
+		boltShutdownDrainScenario(),
+		boltShutdownFleetScenario(),
 	)
 }
 

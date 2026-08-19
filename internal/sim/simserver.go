@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"sync"
 	"time"
 
@@ -64,7 +65,7 @@ const defaultSimResultRowCap = 100_000
 // Authentication is [server.NoAuthHandler]; use [NewSimServerAuth] to drive a
 // server that validates credentials.
 func NewSimServer(eng *cypher.Engine, clk clock.Clock) (*SimServer, error) {
-	return newSimServer(eng, clk, simServerOptions{})
+	return newSimServer(eng, clk, &simServerOptions{})
 }
 
 // NewSimServerAuth builds a SimServer whose sessions authenticate through auth
@@ -86,7 +87,7 @@ func NewSimServerAuth(eng *cypher.Engine, clk clock.Clock, auth server.AuthHandl
 	if auth == nil {
 		return nil, fmt.Errorf("sim: NewSimServerAuth: nil auth handler (use NewSimServer for an unauthenticated server)")
 	}
-	return newSimServer(eng, clk, simServerOptions{
+	return newSimServer(eng, clk, &simServerOptions{
 		auth:      auth,
 		log:       quietSimLogger(),
 		maxTxIdle: simAuthMaxTxIdle,
@@ -150,7 +151,7 @@ func NewSimServerTxRegistry(
 	maxTxIdle, defaultTxTimeout time.Duration,
 	maxOpenTxPerPrincipal int,
 ) (*SimServer, error) {
-	return newSimServer(eng, listenerClk, simServerOptions{
+	return newSimServer(eng, listenerClk, &simServerOptions{
 		log:                   quietSimLogger(),
 		clk:                   serverClk,
 		maxTxIdle:             maxTxIdle,
@@ -159,13 +160,72 @@ func NewSimServerTxRegistry(
 	})
 }
 
+// NewSimServerOwnedCloser builds a SimServer that OWNS a store-level teardown
+// closer: closer is installed as [server.Options.Closer], so the embedded server
+// closes it itself once it has drained every connection — the documented
+// "drain the connections, then close the DB" ordering that store/db.go says a
+// Bolt server provides (store/db.go:54-57). It is the constructor rmp #2483
+// needs, and nothing in the module passed Options.Closer outside
+// bolt/server's own tests before it.
+//
+// wrapConn, when non-nil, decorates every connection the server's accept loop
+// receives. It is the only observable in the harness that can time the closer
+// against the connection drain: the per-connection handler's FIRST deferred call
+// is conn.Close (bolt/server/serve.go:1063 and the outer defer at :904), which
+// runs strictly BEFORE the accept-loop wrapper's s.wg.Done (:798), so a decorator
+// counting Close calls sees a connection leave before the WaitGroup the drain
+// waits on can drop to zero. Counting accepts and closes therefore yields a
+// one-sided oracle: a closer entered while a decorated connection is still open
+// is a genuine drain-ordering breach, and the nanosecond window between a
+// connection's Close and its wg.Done can only read as drained, never as a false
+// breach.
+//
+// Authentication is [server.NoAuthHandler] and the server log is discarded
+// ([quietSimLogger]), because a store-backed engine carries no result-row cap and
+// [server.NewServer] warns about that on every construction.
+func NewSimServerOwnedCloser(
+	eng *cypher.Engine,
+	clk clock.Clock,
+	closer io.Closer,
+	wrapConn func(net.Conn) net.Conn,
+) (*SimServer, error) {
+	if closer == nil {
+		return nil, fmt.Errorf("sim: NewSimServerOwnedCloser: nil closer (use NewSimServer for a server that owns no teardown)")
+	}
+	return newSimServer(eng, clk, &simServerOptions{
+		log:      quietSimLogger(),
+		closer:   closer,
+		wrapConn: wrapConn,
+	})
+}
+
+// Shutdown stops the embedded server through [server.Server.Shutdown]: it stops
+// accepting, drains every active connection, and — when the SimServer was built
+// by [NewSimServerOwnedCloser] — closes the owned store-level closer on its
+// drain-success branch only. It returns Shutdown's own error verbatim, including
+// the drain-timeout error and a context expiry, so a scenario can adjudicate
+// WHICH branch was taken.
+//
+// It does NOT join the serve goroutine: on the two failure branches Shutdown
+// leaves a still-blocked [server.Server.Serve] waiting on the same drain, and
+// that goroutine's own exit path is what eventually performs the post-drain close
+// (bolt/server/serve.go:725-738). Call [SimServer.Close] afterwards to join it.
+//
+// Shutdown may be called more than once; the second call observes the same cached
+// close result from the server's own sync.Once.
+func (s *SimServer) Shutdown(ctx context.Context) error { return s.srv.Shutdown(ctx) }
+
 // Server exposes the embedded [server.Server] so a scenario can drive its
 // operator API — [server.Server.Transactions] and
 // [server.Server.TerminateTransaction], both of which take the registry's own lock
 // and are safe on a serving server. It is the accessor rmp #2482 needs.
 //
-// The returned server is owned by the SimServer and must not be Shutdown by the
-// caller ([SimServer.Close] does that).
+// The returned server is owned by the SimServer: tear it down with
+// [SimServer.Shutdown] (the graceful drain) or [SimServer.Close] (cancel the
+// serve context and join), never by calling Shutdown on the value returned here.
+// An earlier version of this godoc said [SimServer.Close] called Shutdown; it
+// never did — Close cancels the serve context and closes the listener, which is
+// the ctx-cancellation stop path, not the drain path (rmp #2483).
 //
 // # Do NOT call SetClock on it
 //
@@ -191,7 +251,8 @@ func quietSimLogger() *slog.Logger {
 }
 
 // simServerOptions carries the parts of [server.Options] a SimServer scenario is
-// allowed to vary. The zero value reproduces the historical wiring exactly: a
+// allowed to vary. It is passed to [newSimServer] by POINTER: it is over
+// gocritic's hugeParam threshold, and nothing mutates it. The zero value reproduces the historical wiring exactly: a
 // [server.NoAuthHandler] and a nil logger (so [server.NewServer] falls back to
 // slog.Default). Everything else — the connection timeout, the listener, the
 // serve goroutine — is fixed by the harness.
@@ -238,16 +299,45 @@ type simServerOptions struct {
 	// keeps [server.DefaultMaxOpenTxPerPrincipal] (2048); a NEGATIVE value disables
 	// enforcement, exactly as the server option documents.
 	maxOpenTxPerPrincipal int
+
+	// closer is installed as [server.Options.Closer]: the store-level teardown
+	// owner the server closes after its connection drain completes. Nil leaves the
+	// server owning nothing beyond its connections, which is what every
+	// pre-#2483 scenario wants. See [NewSimServerOwnedCloser].
+	closer io.Closer
+
+	// wrapConn decorates each connection handed to the server's accept loop. Nil
+	// hands the raw [SimConn] through, byte-for-byte the historical wiring. See
+	// [NewSimServerOwnedCloser] for why the decoration is the drain-ordering
+	// observable.
+	wrapConn func(net.Conn) net.Conn
+}
+
+// simServeListener decorates a [SimListener] so every accepted connection passes
+// through wrap before the server sees it. Close and Addr are the embedded
+// listener's, so [server.Server.Shutdown] closing s.ln closes the real listener.
+type simServeListener struct {
+	*SimListener
+	wrap func(net.Conn) net.Conn
+}
+
+// Accept implements [net.Listener.Accept], returning the decorated connection.
+func (l *simServeListener) Accept() (net.Conn, error) {
+	c, err := l.SimListener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return l.wrap(c), nil
 }
 
 // newSimServerWithLogger is the logger-only entry point kept for the durable and
 // checkpoint scenarios, which want the standard NoAuth wiring but a quiet log.
 func newSimServerWithLogger(eng *cypher.Engine, clk clock.Clock, log *slog.Logger) (*SimServer, error) {
-	return newSimServer(eng, clk, simServerOptions{log: log})
+	return newSimServer(eng, clk, &simServerOptions{log: log})
 }
 
 // newSimServer is the single constructor behind every SimServer entry point.
-func newSimServer(eng *cypher.Engine, clk clock.Clock, opts simServerOptions) (*SimServer, error) {
+func newSimServer(eng *cypher.Engine, clk clock.Clock, opts *simServerOptions) (*SimServer, error) {
 	if eng == nil {
 		return nil, fmt.Errorf("sim: NewSimServer: nil engine")
 	}
@@ -262,6 +352,7 @@ func newSimServer(eng *cypher.Engine, clk clock.Clock, opts simServerOptions) (*
 		MaxTxIdleTime:         opts.maxTxIdle,
 		DefaultTxTimeout:      opts.defaultTxTimeout,
 		MaxOpenTxPerPrincipal: opts.maxOpenTxPerPrincipal,
+		Closer:                opts.closer,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("sim: NewSimServer: %w", err)
@@ -280,6 +371,12 @@ func newSimServer(eng *cypher.Engine, clk clock.Clock, opts simServerOptions) (*
 		srv.SetClock(opts.clk)
 	}
 	ln := NewSimListener(clk)
+	// The listener the SERVER sees may be decorated; the listener the harness
+	// dials stays the SimListener itself, so [SimServer.Dial] is untouched.
+	var serveLn net.Listener = ln
+	if opts.wrapConn != nil {
+		serveLn = &simServeListener{SimListener: ln, wrap: opts.wrapConn}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &SimServer{
 		srv:      srv,
@@ -288,7 +385,7 @@ func newSimServer(eng *cypher.Engine, clk clock.Clock, opts simServerOptions) (*
 		serveErr: make(chan error, 1),
 		clk:      clk,
 	}
-	go func() { s.serveErr <- srv.Serve(ctx, ln) }()
+	go func() { s.serveErr <- srv.Serve(ctx, serveLn) }()
 	return s, nil
 }
 

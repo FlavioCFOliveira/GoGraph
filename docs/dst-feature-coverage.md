@@ -1405,6 +1405,99 @@ serialised every other writer; rmp #2305/#2306 retired that, so the bound on
 principals in play. Recorded, not fixed — it is outside this task.
 
 
+### The graceful teardown: drain, Closer ordering, and what a RUN reply means (rmp #2483)
+
+`Options.Closer` — the store-level teardown owner a Bolt server closes after its
+connections drain — was passed by nothing in the module outside `bolt/server`'s own
+tests. `SimServer.Close` only cancels the serve context, and the durable scenarios
+close their store directly, so the ordering `store.DB` documents a Bolt server as
+relying on was exercised end to end nowhere. Four deterministic arms and one
+concurrent arm now drive it.
+
+**The ordering is asserted on two observables, neither of them a timing guess.** A
+`net.Conn` decorator counts accepted-and-not-yet-closed server connections; it is
+one-sided by construction, because the connection handler's `conn.Close` runs
+strictly before its `wg.Done`, so the count can lag but cannot claim a connection
+finished before it did. And a rendezvous is CONSTRUCTED rather than waited for: a
+commit is parked inside its WAL fsync with `SimDisk.ArmSyncGateAt`, and the closer
+must have run zero times across a window in which the listener is already closed —
+the listener flag being positive evidence that `Shutdown` has entered its drain
+wait, rather than not yet started.
+
+**Three measurements refute the obvious model of `Shutdown`.** Neither of its
+failure branches closes the owned store: at the instant an expiring `Shutdown`
+returned, the closer had run zero times (12/12 with a deadline, 12/12 with a
+cancel), and the store is closed afterwards by `Serve`'s deferred exit path, once
+the abandoned connections finish. It is never left unclosed in any reachable case
+found. On a CLEAN drain, though, *who* closes is a genuine race: `Shutdown` cancels
+the accept context before draining, so `Serve`'s exit path and `Shutdown`'s
+drain-success branch wait on the same `WaitGroup` — measured **22 `Serve` / 3
+`Shutdown`** over 25 successful drains. A `Shutdown` returning nil therefore does
+not mean `Shutdown` closed the store, which is worth knowing for anyone reasoning
+about teardown ordering from its return value.
+
+**The third is a lesson about assertions, not about the server.** Which error a
+DEADLINE-bounded `Shutdown` reports is also a race: it clamps its drain timeout to
+`time.Until(deadline)` and then selects over both that clamped `time.After` and
+`ctx.Done()`, which come due at nearly the same instant, and Go's select is uniform
+when both are ready. The distribution is heavily skewed to the drain timeout —
+measured 12 of 12 when the arm was written, and 8 of 8 in a later sitting — and the
+arm PINNED that branch on the strength of it. Once the other branch surfaced under
+`-race`, that pin and its siblings made **5 of 6 `-race` runs of the file red**,
+each time on a different test. Both branches are now legal, the distribution is
+reported rather than asserted, and the deadline arm is excluded from the
+determinism clause because that field is not a function of its seed. An assertion
+that holds twenty times and then fails is worse than one that never held, because
+by the time it breaks it is trusted.
+
+**One clause could not be written as the task posed it.** "No `wal.ErrWriterClosed`
+reaches a client" is unfalsifiable as stated: it never can reach one, because
+`Session.sanitiseErr` replaces the text of any error that is not client-fault and
+`FailureCode` maps it to the catch-all — measured, a client whose store is closed
+under it receives `Neo.DatabaseError.General.UnknownError` and a message naming
+only a crypto-random session id. The oracle is therefore split in two: on the wire,
+no statement on an undrained connection may receive a DatabaseError-class code; at
+the store, `errors.Is(err, wal.ErrWriterClosed)` is checked on a commit attempted
+after the teardown — which is simultaneously the proof that the WAL really closed
+and the proof that the detector is not blind.
+
+**A RUN SUCCESS is not the durability acknowledgement for an auto-commit write.**
+This is the most transferable thing the task produced, and it arrived as two
+harness defects rather than one engine defect. The concurrent arm reported an
+`ACID_DURABILITY` violation in 4 of 25 runs; the lost row always had the same
+signature — `RUN` answered SUCCESS, the terminal never arrived, the connection cut
+— and the name was in neither the live engine nor the raw WAL bytes, with the WAL
+image fully durable. Nothing had been made durable, so nothing acknowledged had
+been lost. `handleRun` replies SUCCESS whenever the engine returns no error and
+never consults `Result.Err()`; its metadata is `fields`, `qid` and `db` — statement
+accepted, here are your columns. The BOOKMARK, which is what a driver uses to
+establish that a write landed, rides on the terminal `PULL`/`DISCARD` SUCCESS and
+on `COMMIT`, and is absent from `RUN`. When a graceful shutdown cancels an
+in-flight statement, `commitUnderBarrier` early-returns on the materialise error,
+appends no WAL frame, and the client that already holds its RUN SUCCESS is told
+nothing further.
+
+The same file had already made the same class of mistake once, in a way worth
+recording beside it: it counted a `*proto.Ignored` — the reply a session in FAILED
+gives every request-phase message until it is RESET — as an acknowledgement,
+manufacturing the identical violation in 8 of 30 runs. Both are one rule: **an
+acknowledgement is an explicit terminal SUCCESS and nothing else.** The RUN reply
+and any IGNORED are kept as witnesses, because they are what separates "never
+dispatched" from "dispatched, outcome unknown to the client", and the parked
+in-flight commit is adjudicated on the invariant that does hold for it — the
+statement the drain found executing must have RUN and must be DURABLE, read from a
+reopen through real recovery rather than from any reply. That also closes the escape
+hatch an absence-only oracle would leave: a drain that abandoned every in-flight
+write would satisfy "nothing acknowledged was lost" by acknowledging nothing.
+
+**A write cut short by a graceful shutdown can be reported as non-retryable.** The
+session's own checks answer `Neo.TransientError.General.RequestInterrupted`, but a
+cancellation surfacing from the engine is mapped to
+`Neo.ClientError.Transaction.Terminated` — and this module already documents that
+`neo4j-go-driver` v5.28.4's `reclassify()` demotes `Transaction.Terminated` out of
+the retryable family. Both codes are pinned as named constants so a correction fails
+the arm deliberately.
+
 ## Defects surfaced by this coverage work
 
 The coverage work exercised the engine against these scenarios and found:

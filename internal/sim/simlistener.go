@@ -79,6 +79,26 @@ func (l *SimListener) Close() error {
 	return nil
 }
 
+// Closed reports whether the listener has been closed.
+//
+// It is the drain-ordering observable rmp #2483 needs.
+// [github.com/FlavioCFOliveira/GoGraph/bolt/server.Server.Shutdown] closes the
+// listener BEFORE it starts waiting for its connection drain, so a closed listener
+// is positive evidence that a Shutdown call has progressed into that wait rather
+// than not yet started — which is what makes "the store's teardown had not begun"
+// a statement about the server instead of about a Shutdown that had not begun
+// either.
+//
+// A probe Dial would answer the same question (Dial refuses once closed) but
+// creates a connection when it arrives too early, and a connection accepted into a
+// drain window is counted live by a connection-accounting oracle. This accessor
+// has no such side effect, which is why it exists.
+func (l *SimListener) Closed() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.closed
+}
+
 // Addr implements [net.Listener.Addr].
 func (l *SimListener) Addr() net.Addr { return pipeAddr{name: "sim-listener"} }
 
