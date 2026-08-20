@@ -165,6 +165,7 @@ func DefaultRegistry() (*Registry, error) {
 		ddlCheckpointCrashScenario(),
 		checkpointCrashStormScenario(),
 		bulkImportParityScenario(),
+		bulkLoadOracleScenario(),
 		snapshotCorruptionFailStopScenario(),
 		boltAuthSurfaceScenario(),
 		boltCertRotationScenario(),

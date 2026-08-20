@@ -74,6 +74,19 @@ var ownedTempPrefixes = []string{
 	"sim-bulkimport-img-",
 	"sim-bulkimport-",
 	"sim-bulk-",
+	// internal/sim — the bulk-load-oracle scenario's real-filesystem arm (rmp
+	// #2488), which publishes through Finalise's own os-backed csrfile writer
+	// because that path binds the OS backend and no SimDisk can reach it.
+	//
+	// The name deliberately does NOT nest under "sim-bulk-". The coverage gate
+	// below matches a call site with matchOwnedPrefix(pattern), i.e. by
+	// CONTAINMENT, so a prefix such as "sim-bulk-oracle-" would satisfy the gate
+	// while being unlisted — and the per-prefix table would then credit this
+	// scenario's stranded directories to bulk-vs-online's bucket. A
+	// non-nesting name cannot be silently absorbed: it either appears here or
+	// fails the gate. (Nesting is reserved for a site that really is a sub-case
+	// of another, as "sim-bulkimport-img-" is of "sim-bulkimport-".)
+	"sim-bulkoracle-",
 	"sim-extern-",
 	// internal/sim — the cert-rotation scenario's projection directory (rmp #2481).
 	// CertReloader reads through os.Stat and tls.LoadX509KeyPair, so the images the
