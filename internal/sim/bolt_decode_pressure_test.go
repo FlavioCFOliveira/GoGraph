@@ -940,8 +940,19 @@ func TestBoltDecodeSwarm_NonVacuityCanFail(t *testing.T) {
 			clause: "nv-swarm-overlap",
 		},
 		{
-			name:    "the pressure was too thin across the honest run for the overlap to mean anything",
-			perturb: func(e *BoltDecodeEvidence) { e.RejectionsDuringHonest = 1 },
+			// Half one of the density clause: honest service ran entirely outside the
+			// pressure window, so nothing it observed was under backpressure. Fires
+			// this clause alone — the fixture's wide exchanges still straddle, so
+			// nv-swarm-overlap is satisfied.
+			name:    "NO abusive message was refused while honest service was in flight",
+			perturb: func(e *BoltDecodeEvidence) { e.RejectionsDuringHonest = 0 },
+			clause:  "nv-swarm-pressure-density",
+		},
+		{
+			// Half two: the start barrier expired, so honest service began before the
+			// pressure had demonstrably built. Also fires this clause alone.
+			name:    "the start barrier EXPIRED, so honest service did not begin inside the pressure window",
+			perturb: func(e *BoltDecodeEvidence) { e.PressureStarted = false },
 			clause:  "nv-swarm-pressure-density",
 		},
 		{
@@ -1001,6 +1012,91 @@ func TestBoltDecodeSwarm_NonVacuityCanFail(t *testing.T) {
 			if !violationsMentionClause(v, tc.clause) {
 				t.Fatalf("perturbation %q did not fire gate clause %q, so that clause cannot fail. Got:\n%s",
 					tc.name, tc.clause, renderViolations(v))
+			}
+		})
+	}
+}
+
+// TestBoltDecodeSwarm_DensityAcceptsLoadedRuns pins the runs that made two
+// successive versions of the density clause report a CLEAN engine as a failure
+// (rmp #2587).
+//
+// Both shapes are transcribed from real evidence lines, not invented:
+//
+//   - `make ci`, 2026-08-20: 24 of 24 honest exchanges served correctly, all four
+//     abuser connections alive, 18 abusive messages refused with the correct typed
+//     error — and 7 refusals across the honest run, distributed [3 0 2 2]. The
+//     first version of this clause failed it for 7 < 8; the second failed it for
+//     the empty second segment.
+//   - 32 concurrent -race test binaries: the same engine, 24 fleet messages, 2
+//     refusals across the honest run, distributed [2 0 0 0].
+//
+// Neither shape may fire nv-swarm-pressure-density. The test asserts on that
+// clause specifically rather than on the whole gate, because the deeper shape also
+// drops nv-swarm-overlap below its own floor — a separate, still-open issue that
+// this test must not silently absorb.
+func TestBoltDecodeSwarm_DensityAcceptsLoadedRuns(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		// perSegment is the refusal count to lay down inside each segment of the
+		// honest run, reproducing a MEASURED distribution.
+		perSegment []int64
+	}{
+		{name: "the make ci run of 2026-08-20", perSegment: []int64{3, 0, 2, 2}},
+		{name: "32 concurrent -race test binaries", perSegment: []int64{2, 0, 0, 0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := healthyBoltDecodeSwarmEvidence()
+			if len(tc.perSegment) != boltDecodeSwarmPressureSegments {
+				t.Fatalf("fixture describes %d segments, want %d", len(tc.perSegment), boltDecodeSwarmPressureSegments)
+			}
+
+			// Lay the measured distribution over the honest run: every refusal in a
+			// segment is attributed to that segment's FIRST exchange, which is enough
+			// to reproduce the per-segment counts the real runs reported.
+			var rejected int64
+			n := len(e.Honest)
+			for s, want := range tc.perSegment {
+				lo := s * n / boltDecodeSwarmPressureSegments
+				hi := (s + 1) * n / boltDecodeSwarmPressureSegments
+				for i := lo; i < hi; i++ {
+					e.Honest[i].RejectionsBefore = rejected
+					if i == lo {
+						rejected += want
+					}
+					e.Honest[i].RejectionsAfter = rejected
+				}
+			}
+			e.RejectionsDuringHonest = rejected
+			e.PressureStarted = true
+
+			// The fixture must really carry the measured shape, or it would pass for
+			// the wrong reason.
+			got := boltDecodeSwarmSegmentRefusals(e.Honest)
+			for i := range tc.perSegment {
+				if got[i] != tc.perSegment[i] {
+					t.Fatalf("fixture built segments %v, want the measured %v", got, tc.perSegment)
+				}
+			}
+			var total int64
+			for _, x := range tc.perSegment {
+				total += x
+			}
+			if e.RejectionsDuringHonest != total || total == 0 {
+				t.Fatalf("fixture models %d refusals during honest service, want %d (nonzero)",
+					e.RejectionsDuringHonest, total)
+			}
+
+			// The claim under test: this clause must NOT fire on any of these.
+			for _, viol := range checkBoltDecodePressureNonVacuity(e) {
+				if strings.Contains(viol.Op, "nv-swarm-pressure-density") {
+					t.Errorf("nv-swarm-pressure-density fired on a measured CLEAN run "+
+						"(segments %v, %d refusals during honest service, start barrier satisfied). "+
+						"A density that machine load moves is not a coverage criterion:\n%s",
+						got, e.RejectionsDuringHonest, renderViolations([]Violation{viol}))
+				}
 			}
 		})
 	}

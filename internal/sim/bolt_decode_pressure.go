@@ -542,11 +542,16 @@ type BoltDecodeEvidence struct {
 	// Abusers is how many pushed.
 	Abusers int
 	// RejectionsDuringHonest is how many abusive messages were refused between the
-	// first honest exchange starting and the last one finishing. It is the
-	// window-wide density claim, independent of whether any INDIVIDUAL exchange
-	// straddled: it says the server was under pressure for the whole time it was
-	// serving honest traffic, which is what "honest traffic stays live under
-	// backpressure" has to mean before the per-exchange overlap can sharpen it.
+	// first honest exchange starting and the last one finishing.
+	//
+	// It is REPORTED, never thresholded. It is a count of events over an interval
+	// whose length the machine controls, so any floor on it passes on an idle host
+	// and fails on a busy one (rmp #2587). The density claim — that the server was
+	// under pressure for the whole time it was serving honest traffic, which is
+	// what "honest traffic stays live under backpressure" has to mean before the
+	// per-exchange overlap can sharpen it — is adjudicated per SEGMENT instead; see
+	// [boltDecodeSwarmPressureSegments]. This total is kept in the rendering so an
+	// eroding margin stays visible.
 	RejectionsDuringHonest int64
 	// PressureStarted records whether the honest client saw a refusal counted
 	// before it began, i.e. whether the start barrier was satisfied rather than
@@ -2541,14 +2546,87 @@ const boltDecodeSwarmMinWide = boltDecodeSwarmHonestOps / boltDecodeSwarmWideEve
 // margin behind it.
 const boltDecodeSwarmMinWideStraddles = boltDecodeSwarmMinWide / 2
 
-// boltDecodeSwarmMinRefusalsDuringHonest is how many refusals must fall inside
-// the honest client's whole run. Measured 41 to 47 across the same 25 seeds under
-// -race, so eight is a ~5x margin. It is the density claim that keeps the
-// liveness oracle honest independently of the per-exchange overlap.
-const boltDecodeSwarmMinRefusalsDuringHonest = 8
+// boltDecodeSwarmPressureSegments is how many contiguous segments the honest
+// client's run is split into FOR REPORTING. Nothing thresholds it.
+//
+// It exists because the per-segment distribution is the diagnostic that made two
+// successive versions of this clause visibly wrong, so it is rendered on every
+// failing swarm run — but it must never be adjudicated. See
+// [checkBoltDecodeSwarmNonVacuity] for why, and what the density clause asserts
+// instead.
+const boltDecodeSwarmPressureSegments = boltDecodeSwarmMinWide
+
+// boltDecodeSwarmSegmentRefusals splits the honest exchanges into
+// [boltDecodeSwarmPressureSegments] contiguous segments and reports how many
+// abusive messages the fleet had refused inside each.
+//
+// DIAGNOSTIC ONLY — no clause thresholds this. Measured on a correct engine under
+// 32 concurrent -race test binaries, it returns shapes like [2 0 0 0]: three
+// empty segments while the server was serving 24 of 24 honest exchanges
+// correctly. See [checkBoltDecodeSwarmNonVacuity].
+//
+// A segment's count is read from the per-exchange counter samples, so it covers
+// the pauses between exchanges as well as the exchanges themselves. The gap
+// between one segment's last sample and the next segment's first is attributed to
+// neither, which can only understate a segment and never invent one.
+//
+// It returns nil when the run holds fewer exchanges than segments; that is a
+// honest client that stopped early, which nv-swarm-honest-count reports.
+func boltDecodeSwarmSegmentRefusals(honest []BoltDecodeHonest) []int64 {
+	if len(honest) < boltDecodeSwarmPressureSegments {
+		return nil
+	}
+	out := make([]int64, boltDecodeSwarmPressureSegments)
+	for s := range out {
+		lo := s * len(honest) / boltDecodeSwarmPressureSegments
+		hi := (s + 1) * len(honest) / boltDecodeSwarmPressureSegments
+		out[s] = honest[hi-1].RejectionsAfter - honest[lo].RejectionsBefore
+	}
+	return out
+}
 
 // checkBoltDecodeSwarmNonVacuity reports what the concurrent arm failed to
 // construct.
+//
+// # What nv-swarm-pressure-density asserts, and what it deliberately does not
+//
+// It asserts only that the honest window lay INSIDE the pressure window: the start
+// barrier was satisfied, and at least one abusive message was refused while honest
+// service was in flight. That is weaker than two earlier versions of this clause,
+// and the weakening is deliberate and measured (rmp #2587).
+//
+// The clause used to threshold HOW MANY refusals landed in the honest window
+// (eight), and then WHERE they landed (at least one in each of four segments).
+// Both are density claims, and density here is a rate over an interval whose
+// length the machine partly controls: the honest window contains four
+// [boltDecodeSwarmWideHold] sleeps, which do not dilate under load, while the
+// fleet's refusal rate does. Both versions therefore failed `make ci` on an engine
+// that had done nothing wrong. Measured on the reference host under -race, same
+// 12 seeds per regime:
+//
+//	regime                          wall/run    fleet msgs   refused during honest
+//	idle                            0.67 s      73..82       56..65
+//	12 concurrent -race binaries     2.0 s      28..43       16..32
+//	32 concurrent -race binaries    19..23 s    24           2..3
+//
+// At 32 binaries the per-segment distribution reads [2 0 0 0] on a correct engine
+// — three of four segments empty — while all 24 honest exchanges are still served
+// correctly and every abuser connection survives. So an empty stretch of honest
+// service is ORDINARY under load, not evidence of anything, and no threshold on
+// where refusals fall can survive.
+//
+// What the clause therefore CANNOT detect: pressure that stops part-way through
+// honest service. That is a real gap, accepted knowingly, because every instrument
+// that could see it is one the machine's load moves further than the defect does
+// — the trade docs/test-layers.md already forces for wall clock.
+//
+// What it CAN still detect is the vacuity it was written for: a run whose honest
+// client was served entirely outside the pressure window. `RejectionsDuringHonest`
+// never fell below 2 in any regime measured above, including the two runs that
+// failed the old clauses, so the floor of "nonzero" is not near the noise.
+//
+// The per-segment distribution and the total are RENDERED on every failing run
+// (see [BoltDecodeEvidence.renderSwarm]) so the erosion stays visible as data.
 func checkBoltDecodeSwarmNonVacuity(e *BoltDecodeEvidence) []Violation {
 	var v []Violation
 	if e.AbuserRejected == 0 {
@@ -2593,13 +2671,25 @@ func checkBoltDecodeSwarmNonVacuity(e *BoltDecodeEvidence) []Violation {
 				wideStraddled, wide, boltDecodeSwarmMinWideStraddles, boltDecodeSwarmWideHold,
 				narrowStraddled, e.PressureStarted)))
 	}
-	if e.RejectionsDuringHonest < boltDecodeSwarmMinRefusalsDuringHonest {
+	// The honest window must lie INSIDE the pressure window: pressure demonstrably
+	// under way before honest service began, and still live once it had. Both halves
+	// are needed — the first alone admits a run whose pressure had finished by the
+	// time the honest client started, and the second alone admits one whose honest
+	// client ran first and met the pressure only at the end.
+	if !e.PressureStarted {
 		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-swarm-pressure-density",
-			fmt.Sprintf("only %d abusive message(s) were refused across the whole honest client's run, "+
-				"want at least %d. The per-exchange overlap clause can be satisfied by one lucky window; "+
-				"this one says the server was under pressure for the DURATION of honest service, and it "+
-				"is the clause that makes the liveness claim non-vacuous when the other is thin",
-				e.RejectionsDuringHonest, boltDecodeSwarmMinRefusalsDuringHonest)))
+			fmt.Sprintf("the honest client's start barrier EXPIRED after %s without a single abusive "+
+				"message having been refused, so honest service did not begin inside the pressure "+
+				"window at all. Every clause about honest traffic staying live under backpressure is "+
+				"then a statement about an UNPRESSURED server", boltDecodeSwarmStartBarrier)))
+	}
+	if e.RejectionsDuringHonest <= 0 {
+		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-swarm-pressure-density",
+			fmt.Sprintf("NO abusive message was refused between the first honest exchange starting and "+
+				"the last one finishing (per segment: %v; start barrier satisfied: %v; the fleet drew %d "+
+				"refusals in total). The pressure had stopped by the time honest service ran, so "+
+				"'honest traffic stays live under backpressure' was never actually put to the test",
+				boltDecodeSwarmSegmentRefusals(e.Honest), e.PressureStarted, e.AbuserRejected)))
 	}
 	if wide < boltDecodeSwarmMinWide {
 		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-swarm-wide-exchanges",
@@ -2725,8 +2815,10 @@ func (e *BoltDecodeEvidence) renderSwarm() string {
 		}
 	}
 	fmt.Fprintf(&b, "  honest: %d/%d served correctly, %d straddled a refusal "+
-		"(wide: %d/%d, narrowest wide window held %d refusals; %d refusals across the honest run)\n",
-		served, len(e.Honest), straddled, wideStraddled, wide, minWideRefusals, e.RejectionsDuringHonest)
+		"(wide: %d/%d, narrowest wide window held %d refusals; %d refusals across the honest run, "+
+		"per segment %v)\n",
+		served, len(e.Honest), straddled, wideStraddled, wide, minWideRefusals,
+		e.RejectionsDuringHonest, boltDecodeSwarmSegmentRefusals(e.Honest))
 	for _, te := range e.TransportErrors {
 		b.WriteString("  transport loss: " + te + "\n")
 	}
