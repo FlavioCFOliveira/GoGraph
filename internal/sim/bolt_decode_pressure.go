@@ -39,8 +39,12 @@ package sim
 //
 // The classification segment is load-bearing and is asserted on its own:
 // neo4j-go-driver's IsRetriableTransient tests `classification == "TransientError"`
-// (recorded at bolt/server/errors.go:130-131), so "typed retryable backpressure"
-// is a checkable property of the code's SECOND segment and not a vibe. The pool
+// (recorded at bolt/server/errors.go:129-131), so "typed retryable backpressure"
+// is a checkable property of the code the server actually sent and not a vibe.
+// The driver populates that field only for a code of EXACTLY four dot-separated
+// segments, so the property is one of the code's SHAPE as well as of its second
+// segment, and [boltDecodeClassification] mirrors that arity deliberately
+// (rmp #2575). The pool
 // breach is the only one of the three that a driver will retry, which is exactly
 // right: it is the only one where retrying can succeed.
 //
@@ -1419,6 +1423,15 @@ func RunBoltDecodeSwarm(ctx context.Context, seed uint64) (*BoltDecodeEvidence, 
 		boltDecodeSwarmChargeNum, boltDecodeSwarmChargeDen)
 
 	s := &boltDecodeSwarm{srv: srv, ev: ev, abuseN: abuseN}
+
+	// MEASURE the boundary before the fleet starts, so the leak probe below is
+	// sized to what this server actually admits rather than to what the model
+	// predicts. See [boltDecodeSwarm.boundaryScan] for why that is what makes
+	// nv-swarm-leak-probe-tight a statement about the server (rmp #2579).
+	if err := s.boundaryScan(ctx); err != nil {
+		return nil, err
+	}
+
 	if err := s.run(ctx, NewSeed(seed^boltDecodeSwarmSeedMix)); err != nil {
 		return nil, err
 	}
@@ -1436,7 +1449,15 @@ func RunBoltDecodeSwarm(ctx context.Context, seed uint64) (*BoltDecodeEvidence, 
 	if err := c.Conn().SetReadDeadline(time.Now().Add(boltDecodeArmBound)); err != nil {
 		return nil, fmt.Errorf("sim: bolt-decode swarm leak probe deadline: %w", err)
 	}
-	p, err := boltDecodeSendProbe(c, boltDecodeProbeQuery, ev.ModelBoundary, ev.Budget)
+	n := ev.MeasuredBoundary
+	if n < 0 {
+		// The scan did not bracket a transition, so there is no calibrated size.
+		// Fall back to the model's and let nv-swarm-window-spans-boundary report the
+		// shortfall — the fallback must never be taken SILENTLY, because it is
+		// exactly what would turn this clause back into a harness guard.
+		n = ev.ModelBoundary
+	}
+	p, err := boltDecodeSendProbe(c, boltDecodeProbeQuery, n, ev.Budget)
 	if err != nil {
 		return nil, err
 	}
@@ -1464,6 +1485,75 @@ type boltDecodeSwarm struct {
 	// something any clause reads.
 	mu     sync.Mutex
 	abuseN int
+}
+
+// boundaryScan measures the shared pool's admission boundary against a PRISTINE
+// pool, before any abuser has dialled.
+//
+// # Why the swarm measures a boundary at all (rmp #2579)
+//
+// The leak probe's SLACK is its sensitivity: a probe that leaves room to spare
+// would be admitted by a pool that came back short, so nv-swarm-leak-probe-tight
+// requires the slack to stay under [boltDecodeLeakSensitivity]. Sizing the probe
+// from [boltDecodeModelElementsFor] alone made that requirement unfalsifiable:
+// the model and the ceiling are both compile-time constants, so the slack was the
+// constant 16 B on every run and no server behaviour could move it. The clause
+// was accurate but decorative, and #2576 had to label it a harness guard.
+//
+// Measuring the boundary is what removes the label. The probe is now sized to the
+// largest element count THIS server admitted, so a server that admits fewer
+// elements than the model predicts — a changed packstream per-slot cost, a charge
+// added or removed, a pool that starts short — moves the measured boundary down,
+// widens the probe's slack by 48 B per element, and fires the clause. That is the
+// same construction the deterministic scenario uses, and it is now the same kind
+// of statement.
+//
+// # Why measuring here is sound, and does not race the fleet
+//
+// The scan runs before [boltDecodeSwarm.run] starts a single goroutine, so it is
+// as sequential as the deterministic scenario's and observes the same pristine
+// pool. Measuring it DURING the swarm would have been unsound — under aggregate
+// pressure the boundary is whatever the other connections happen to be holding at
+// that instant, which is the scheduler's business and not the pool's arithmetic —
+// and that is precisely why it is measured before the fleet exists rather than
+// alongside it.
+//
+// Every charge is released before its reply is written, and every accepted probe
+// is drained, so the scan leaves the pool exactly as it found it: the fleet still
+// meets a full pool, and the post-swarm probe still asks whether it came back.
+// Nothing the scan records feeds any other clause — the swarm adjudicator reads
+// neither Window nor MeasuredBoundary — so the measurement adds a boundary for
+// the leak probe to stand on and changes no other verdict.
+func (s *boltDecodeSwarm) boundaryScan(ctx context.Context) error {
+	c, err := s.srv.Dial()
+	if err != nil {
+		return fmt.Errorf("sim: bolt-decode swarm boundary scan dial: %w", err)
+	}
+	defer func() { _ = c.Close() }()
+	if err := c.Connect(ctx); err != nil {
+		return fmt.Errorf("sim: bolt-decode swarm boundary scan connect: %w", err)
+	}
+	if err := c.Conn().SetReadDeadline(time.Now().Add(boltDecodeArmBound)); err != nil {
+		return fmt.Errorf("sim: bolt-decode swarm boundary scan deadline: %w", err)
+	}
+	// One connection carries the whole scan: a pool refusal is answered above the
+	// session state machine, so it leaves the session READY, and every accepted
+	// probe is drained.
+	for d := -boltDecodeBoundaryWindow; d <= boltDecodeBoundaryWindow; d++ {
+		n := s.ev.ModelBoundary + d
+		if n < 0 {
+			continue
+		}
+		p, err := boltDecodeSendProbe(c, boltDecodeProbeQuery, n, s.ev.Budget)
+		if err != nil {
+			return err
+		}
+		s.ev.Window = append(s.ev.Window, p)
+		if p.Accepted && n > s.ev.MeasuredBoundary {
+			s.ev.MeasuredBoundary = n
+		}
+	}
+	return nil
 }
 
 // awaitPressure blocks until at least one abusive message has been refused, or
@@ -1748,18 +1838,45 @@ func boltDecodeViolation(kind ViolationKind, clause, msg string) Violation {
 }
 
 // boltDecodeClassification returns a Bolt status code's classification segment —
-// the second of its four dot-separated parts — or "" when the code is not in that
-// shape.
+// the second of its EXACTLY four dot-separated parts — or "" when the code is not
+// in that shape.
 //
 // The segment is what a driver's retry decision turns on: neo4j-go-driver's
 // IsRetriableTransient tests `classification == "TransientError"`
-// (bolt/server/errors.go:130-131). Reading it out of the OBSERVED code, rather
+// (bolt/server/errors.go:129-131). Reading it out of the OBSERVED code, rather
 // than comparing the whole string to a literal, is what makes the retryability
 // clause a statement about what the server sent instead of a restatement of the
 // constant this file already declares.
+//
+// # Why the arity is EXACTLY four, and why that is a mirror (rmp #2575)
+//
+// The arity is not this harness's choice: it is copied from the driver whose
+// behaviour the clause claims to predict. In
+// github.com/neo4j/neo4j-go-driver/v5 v5.28.4, (*Neo4jError).parse
+// (neo4j/db/errors.go:114-127) returns early on `len(parts) != 4` and therefore
+// leaves the classification field the EMPTY string, so IsRetriableTransient
+// (neo4j/db/errors.go:156-159, `return e.classification == "TransientError"`)
+// reports false for any code that is not four segments long.
+//
+// A laxer guard here would have accepted arities the driver refuses. A regression
+// emitting the three-segment "Neo.TransientError.OutOfMemoryError" reads as
+// classification "TransientError" under a `len(parts) >= 2` rule and would have
+// SATISFIED pool-refusal-retryable, while no real driver would ever retry it —
+// which is precisely the property that clause exists to check. Mirroring the
+// driver's arity is what keeps the clause's claim and the client's actual
+// behaviour the same claim.
+//
+// The mirroring is deliberate, and it is a THIRD-PARTY contract that can drift
+// under this module: if the driver changes its parse rule or its arity, this
+// guard must be RE-DERIVED by reading the dependency at the version go.mod pins,
+// never reasoned about from memory. The consequence is pinned by the
+// "backpressure whose code the real driver cannot classify at all" case in
+// TestBoltDecodePressure_ContractCanFail.
 func boltDecodeClassification(code string) string {
 	parts := strings.Split(code, ".")
-	if len(parts) < 2 {
+	// Mirrors neo4j-go-driver v5.28.4 neo4j/db/errors.go:121-123 exactly; see the
+	// godoc above before relaxing this.
+	if len(parts) != 4 {
 		return ""
 	}
 	return parts[1]
@@ -2496,12 +2613,33 @@ func checkBoltDecodeSwarmNonVacuity(e *BoltDecodeEvidence) []Violation {
 				"sampled less of the pressure window than it was meant to",
 				len(e.Honest), boltDecodeSwarmHonestOps)))
 	}
-	// A guard on the HARNESS, not on the server: the swarm's probe is sent at
-	// ev.ModelBoundary rather than at a MEASURED one, so its slack is a function of
-	// the constants alone — 16 B against the 8 MiB pool, inside [0, 48) on every run
-	// — and no server behaviour can move it. The deterministic scenario's sibling
-	// clause is a different case: it probes at the measured boundary, so a server
-	// that admitted fewer elements would widen the slack and fire it.
+	// The pre-fleet scan has to have BRACKETED the transition, because the leak
+	// probe is sized from it. Without this clause the "no calibrated size" fallback
+	// in [RunBoltDecodeSwarm] would quietly re-size the probe to the MODEL's
+	// boundary, and the clause below would go back to reading a constant while
+	// still looking like a measurement (rmp #2579).
+	swarmWindowAccepted, swarmWindowRefused := 0, 0
+	for i := range e.Window {
+		if e.Window[i].Accepted {
+			swarmWindowAccepted++
+		} else {
+			swarmWindowRefused++
+		}
+	}
+	if swarmWindowAccepted == 0 || swarmWindowRefused == 0 || e.MeasuredBoundary < 0 {
+		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-swarm-window-spans-boundary",
+			fmt.Sprintf("the pre-fleet scan accepted %d and refused %d of %d probes (measured boundary %d): "+
+				"it did not bracket the pool's admission transition, so there is no MEASURED size for the "+
+				"leak probe to be sized to and it falls back to the model's, which no server behaviour can "+
+				"move. Either the window is too narrow for where the boundary now is, or the pool did not "+
+				"start full",
+				swarmWindowAccepted, swarmWindowRefused, len(e.Window), e.MeasuredBoundary)))
+	}
+	// NOT a guard on the harness: the swarm's leak probe is sent at the MEASURED
+	// boundary (see [boltDecodeSwarm.boundaryScan]), so a server that admits fewer
+	// elements than the model predicts widens the slack by 48 B per element and
+	// fires this. It reads the same way as the deterministic scenario's sibling
+	// because it is now the same construction.
 	v = append(v, checkBoltDecodeLeakProbeTight(e, e.LeakProbeFinal, "nv-swarm-leak-probe-tight")...)
 	return v
 }

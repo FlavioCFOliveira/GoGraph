@@ -2201,10 +2201,26 @@ fails the session. That state-after difference is a **third discriminator, indep
 the codes**, and it is asserted separately. The classification segment is asserted on its
 own too, read out of the OBSERVED code rather than compared to the literal this file
 declares: neo4j-go-driver's `IsRetriableTransient` tests `classification ==
-"TransientError"` (`bolt/server/errors.go:130-131`), so "typed RETRYABLE backpressure" is a
-checked property of the code's second segment. Testing the classification only after the
-whole code matched the literal would have made that guard unreachable, and an earlier
-revision did exactly that.
+"TransientError"` (`bolt/server/errors.go:129-131`), so "typed RETRYABLE backpressure" is a
+checked property of the code the server actually sent. Testing the classification only
+after the whole code matched the literal would have made that guard unreachable, and an
+earlier revision did exactly that.
+
+**The harness reads that segment at the driver's arity, not a laxer one (rmp #2575).**
+`boltDecodeClassification` accepts a code of EXACTLY four dot-separated segments and
+returns `""` for anything else, mirroring
+`github.com/neo4j/neo4j-go-driver/v5` v5.28.4, whose `(*Neo4jError).parse`
+(`neo4j/db/errors.go:114-127`) abandons a code on `len(parts) != 4` and so leaves the
+classification empty, making `IsRetriableTransient` (`neo4j/db/errors.go:156-159`) report
+false. An earlier revision split on dots and took `parts[1]` from any code with two or more
+segments, so a regression emitting the three-segment `Neo.TransientError.OutOfMemoryError`
+would have SATISFIED `pool-refusal-retryable` while no real driver would retry it. The gap
+was latent — every `Neo.*` code the server can emit is four-part, verified by sweeping the
+tree's Go AST rather than by assuming it, and every dynamic `Code:` assignment on the Bolt
+path resolves through `FailureCode`/`authErrorCode`/`evalErrorCode`, which return only
+four-part literals — so closing it changed no verdict. The mirroring is deliberate and is a
+third-party contract that can drift, so the arity must be re-derived from the pinned
+dependency rather than remembered.
 
 **The nesting family is bracketed at every boundary and is deliberately tiny on the wire.**
 32 accepted / 33 refused, and 127 refused-by-the-engine / 128 refused-by-the-decoder,
@@ -2300,22 +2316,63 @@ requires an over-nested HELLO to have been refused so the pre-authentication pat
 actually visited, requires the control to be a genuinely different configuration that
 genuinely disagreed, and requires the live census to be non-empty so "the refused write
 left nothing behind" is not trivially true of an empty graph. 29 named contract clauses and
-16 `nv-` ones; 48 falsifiability subtests each perturb one field and assert the clause that
-must catch it.
+17 `nv-` ones; 52 falsifiability subtests each perturb one field and assert the clause that
+must catch it, and a further 6 subtests drive every pairwise collapse direction (see below).
 
-**Five of those checks are guards on the harness, and say so (rmp #2576).**
+**Four of those checks are guards on the harness, and say so (rmp #2576, #2579).**
 `nesting-not-by-size`, `pool-control-identical-payload`, the `ControlBudget <= Budget`
-branch of `nv-control-differs`, `nv-nesting-family-complete` and
-`nv-swarm-leak-probe-tight` read quantities that no server behaviour can move: the nesting
-payloads are built by the harness and top out at 6166 wire bytes against a 64 KiB ceiling,
-the control's element count is copied from the breach arm inside the same run, both
-ceilings are compile-time constants, a missing nesting arm aborts the run before
-adjudication, and the swarm's leak probe is sent at the MODELLED boundary so its slack is
-the constant 16 B. Each is kept — a harness that has been re-wired is worth catching — and
-each now carries the sibling scenario's label, "A guard on the HARNESS, not on the server",
-so a reader does not count it as evidence about the subject. The deterministic
+branch of `nv-control-differs` and `nv-nesting-family-complete` read quantities that no
+server behaviour can move: the nesting payloads are built by the harness and top out at
+6166 wire bytes against a 64 KiB ceiling, the control's element count is copied from the
+breach arm inside the same run, both ceilings are compile-time constants, and a missing
+nesting arm aborts the run before adjudication. Each is kept — a harness that has been
+re-wired is worth catching — and each carries the label "A guard on the HARNESS, not on the
+server", so a reader does not count it as evidence about the subject. The deterministic
 `nv-leak-probe-tight` is deliberately NOT in that list: it probes at the MEASURED boundary,
 so a server that admitted fewer elements widens its slack and fires it.
+
+**`nv-swarm-leak-probe-tight` was the fifth, and is now a real clause about the server
+(rmp #2579).** It shares its checker with the deterministic `nv-leak-probe-tight` and
+differed from it only in which probe it was handed: the swarm's was sent at the MODELLED
+boundary, so its slack was the constant 16 B and neither a server nor anything else could
+move it. `RunBoltDecodeSwarm` now MEASURES the boundary first, with a seven-probe scan on
+one connection against a pristine pool, and sizes the post-swarm leak probe to the largest
+element count the server actually admitted. Measuring it DURING the swarm would have been
+unsound — under aggregate pressure the boundary is whatever the other connections happen to
+be holding at that instant — so the scan runs before `boltDecodeSwarm.run` starts a single
+goroutine and cannot race the abusers. That the clause is now server-falsifiable was
+demonstrated rather than asserted: shrinking the real server's pool by one element's charge
+(48 B) while leaving the harness's declared ceiling alone moved the measured boundary from
+174734 to 174733, widened the slack from 16 B to 64 B, and fired the clause; 96 B moved it
+two elements and gave 112 B. Measured across 13 seeds including the catalogue default, the
+scan brackets the transition every time (four probes accepted, three refused), the measured
+boundary equals the model's, and the slack stays 16 B, so no verdict changed. An A/B with
+the scan disabled showed it does not disturb the fleet's dynamics either — refusals across
+the honest run were 59-65 without it and 59-64 with it, and every wide exchange still
+straddled. It costs about 0.35 s per swarm run. Because the probe now depends on a
+measurement, the new `nv-swarm-window-spans-boundary` reports a scan that failed to bracket
+the transition, so the "no calibrated size" fallback to the model's boundary can never be
+taken silently — which is the only way this clause could quietly become a harness guard
+again.
+
+**The collapse-detection claim is pinned by a test rather than by a deleted probe
+(rmp #2579).** `checkBoltDecodeCapsAnswerDifferently`'s godoc says the clause is not the
+only thing standing between the run and a server that answers every abuse vector with one
+code, because the literal-pinning clauses catch such a collapse first. rmp #2576 justified
+that wording with a throwaway probe and then deleted it, leaving the claim resting on a
+measurement no longer in the tree: narrowing `nesting-answer` later would silently make the
+distinctness clause the sole detector and the godoc quietly false.
+`TestBoltDecodePressure_DistinctnessIsNeverTheSoleCollapseDetector` is that probe, kept. It
+enumerates the ordered pairs of the three vectors rather than listing them — six directions
+over three vectors, so a fourth vector cannot be added without the table growing — and for
+each one requires both that `caps-answer-differently` fires and that a literal-pinning
+clause fires with it. Re-derived independently, a literal-pinning clause co-fires in 6 of 6:
+`pool-refusal-typed` with `pool-refusal-retryable` on the two directions that move the pool
+arm, `nesting-answer` on all four that move a nesting arm, joined by
+`nesting-is-not-backpressure` on the two that collapse onto the budget code. The two
+directions between the wire cap and the parameter cap rest on `nesting-answer` ALONE, which
+is what gives the test its teeth: narrowing that clause to stop pinning the code turns
+exactly those two red.
 
 **One collision was found in the harness itself.** Generalising rmp #2485's single-scenario
 seed-mix guard into a table over every Bolt scenario immediately went red:

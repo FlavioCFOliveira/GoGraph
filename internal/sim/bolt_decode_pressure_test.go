@@ -283,10 +283,25 @@ func healthyBoltDecodeSwarmEvidence() *BoltDecodeEvidence {
 		MeasuredBoundary: -1,
 	}
 	e.ModelBoundary = boltDecodeModelElementsFor(boltDecodeProbeQuery, boltDecodeParamKey, e.Budget)
-	held := boltDecodeModelHeld(boltDecodeProbeQuery, boltDecodeParamKey, e.ModelBoundary)
-	e.LeakProbeFinal = BoltDecodeProbe{
-		Elements: e.ModelBoundary, ModelHeld: held, Slack: e.Budget - held, Accepted: true,
+
+	// The pre-fleet boundary scan, recorded exactly as
+	// [boltDecodeSwarm.boundaryScan] records it, and the leak probe sized to what
+	// that scan MEASURED rather than to what the model predicts (rmp #2579).
+	probe := func(n int) BoltDecodeProbe {
+		held := boltDecodeModelHeld(boltDecodeProbeQuery, boltDecodeParamKey, n)
+		return BoltDecodeProbe{
+			Elements: n, ModelHeld: held, Slack: e.Budget - held, Accepted: held <= e.Budget,
+			Code: map[bool]string{true: "", false: boltDecodeCodeBudget}[held <= e.Budget],
+		}
 	}
+	for d := -boltDecodeBoundaryWindow; d <= boltDecodeBoundaryWindow; d++ {
+		p := probe(e.ModelBoundary + d)
+		e.Window = append(e.Window, p)
+		if p.Accepted && p.Elements > e.MeasuredBoundary {
+			e.MeasuredBoundary = p.Elements
+		}
+	}
+	e.LeakProbeFinal = probe(e.MeasuredBoundary)
 
 	var rejected int64
 	for i := range boltDecodeSwarmHonestOps {
@@ -400,6 +415,23 @@ func TestBoltDecodePressure_ContractCanFail(t *testing.T) {
 				e.Arms[boltDecodeArmIndex(e, "pool-breach-write")].Code = "Neo.TransientError.General.DatabaseUnavailable"
 			},
 			clause: "pool-refusal-typed",
+		},
+		{
+			// The case that motivates the EXACTLY-four arity in
+			// [boltDecodeClassification] (rmp #2575). The code's second segment still
+			// reads "TransientError", so a guard that merely split on dots and took
+			// parts[1] would certify this as retryable backpressure. The real driver
+			// cannot classify it at all: neo4j-go-driver v5.28.4's
+			// (*Neo4jError).parse abandons any code that is not four segments long
+			// (neo4j/db/errors.go:121-123), leaving classification empty, so
+			// IsRetriableTransient returns false and a client sees a hard failure
+			// where the server meant "try again". The clause must therefore FIRE on
+			// the shape, not be satisfied by the substring.
+			name: "backpressure whose code the real driver cannot classify at all",
+			perturb: func(e *BoltDecodeEvidence) {
+				e.Arms[boltDecodeArmIndex(e, "pool-breach-write")].Code = "Neo.TransientError.OutOfMemoryError"
+			},
+			clause: "pool-refusal-retryable",
 		},
 		{
 			name: "the refusal no longer says WHICH ceiling was reached",
@@ -648,6 +680,168 @@ func TestBoltDecodePressure_NonVacuityCanFail(t *testing.T) {
 	}
 }
 
+// -----------------------------------------------------------------------------
+// The collapse-detection claim (rmp #2579)
+// -----------------------------------------------------------------------------
+
+// boltDecodeVectorOf classifies one arm into the abuse vector it represents,
+// using EXACTLY the discrimination [checkBoltDecodeCapsAnswerDifferently] uses —
+// the pool arm by name, then depth against the two caps, and only for a refused
+// arm. Sharing the rule rather than restating it is what makes a collapse built
+// here the same collapse that clause reads; it returns "" for an arm that is not
+// one of the three refused vectors.
+func boltDecodeVectorOf(a *BoltDecodeExchange) string {
+	if a.Reply != "FAILURE" {
+		return ""
+	}
+	switch {
+	case a.Name == "pool-breach-write":
+		return "aggregate pool"
+	case a.Depth >= boltDecodeWireDepthCap:
+		return "wire nesting cap"
+	case a.Depth > boltDecodeParamDepthCap:
+		return "engine parameter cap"
+	}
+	return ""
+}
+
+// boltDecodeObservedCodes returns the code each vector actually drew, by the same
+// last-arm-wins rule the distinctness clause applies.
+func boltDecodeObservedCodes(e *BoltDecodeEvidence) map[string]string {
+	observed := map[string]string{}
+	for i := range e.Arms {
+		if vector := boltDecodeVectorOf(&e.Arms[i]); vector != "" {
+			observed[vector] = e.Arms[i].Code
+		}
+	}
+	return observed
+}
+
+// boltDecodeCollapseVector simulates a server that has stopped telling two abuse
+// vectors apart, by rewriting EVERY arm of the from vector to answer the code the
+// onto vector draws.
+//
+// Every arm, not the first: the nesting family carries several arms per vector
+// (four for the engine's parameter cap, six for the wire cap) and the clause
+// reads the LAST one, so perturbing a single arm would leave the observed code
+// unchanged and the test would pass while measuring nothing.
+func boltDecodeCollapseVector(e *BoltDecodeEvidence, from, onto string) {
+	code := boltDecodeObservedCodes(e)[onto]
+	for i := range e.Arms {
+		if boltDecodeVectorOf(&e.Arms[i]) == from {
+			e.Arms[i].Code = code
+		}
+	}
+}
+
+// boltDecodeLiteralPinningClauses are the clauses that compare an OBSERVED code
+// against one of the scenario's own declared constants. They are the ones
+// [checkBoltDecodeCapsAnswerDifferently]'s godoc names when it claims not to be
+// the only thing standing between the run and a server that answers every abuse
+// vector alike.
+var boltDecodeLiteralPinningClauses = []string{
+	"pool-refusal-typed",          // pins boltDecodeCodeBudget on the pool arm
+	"pool-refusal-retryable",      // pins the classification segment of that code
+	"nesting-answer",              // pins each nesting arm's exact expected code
+	"nesting-is-not-backpressure", // pins boltDecodeCodeBudget off the nesting arms
+	"nesting-message",             // pins the message literal that accompanies a code
+}
+
+// TestBoltDecodePressure_DistinctnessIsNeverTheSoleCollapseDetector pins a claim
+// that until now rested on a measurement no longer in the tree (rmp #2579).
+//
+// rmp #2576 rewrote [checkBoltDecodeCapsAnswerDifferently]'s godoc to say that the
+// clause is NOT the only thing that catches a server which has collapsed two
+// abuse vectors onto one code, because the literal-pinning clauses catch such a
+// collapse first. That wording was justified by a throwaway probe which drove all
+// six pairwise collapse directions and recorded a literal-pinning clause
+// co-firing in every one. The probe was then deleted, so the surviving claim
+// rested on nothing executable: narrowing nesting-answer later would silently
+// make the distinctness clause the sole detector and the godoc quietly false,
+// and no test would object.
+//
+// This table is that probe, kept. It perturbs evidence structs and needs no
+// server, so it costs nothing to run on every change.
+//
+// It asserts the claim in both halves, because either alone is satisfiable by
+// accident: the distinctness clause must FIRE on the collapse (or it is not
+// doing the job its name claims), and a literal-pinning clause must fire TOO (or
+// the distinctness clause has become the sole detector, which is the state the
+// godoc denies). The direction list is ENUMERATED from the vector order rather
+// than written out, so a fourth abuse vector cannot be added without this table
+// growing to cover it.
+func TestBoltDecodePressure_DistinctnessIsNeverTheSoleCollapseDetector(t *testing.T) {
+	t.Parallel()
+
+	type direction struct{ from, onto string }
+	var directions []direction
+	for _, from := range boltDecodeVectorOrder {
+		for _, onto := range boltDecodeVectorOrder {
+			if from != onto {
+				directions = append(directions, direction{from, onto})
+			}
+		}
+	}
+	// n*(n-1) ordered pairs over the three vectors the scenario drives.
+	if want := len(boltDecodeVectorOrder) * (len(boltDecodeVectorOrder) - 1); len(directions) != want {
+		t.Fatalf("enumerated %d collapse directions, want %d over %d vectors",
+			len(directions), want, len(boltDecodeVectorOrder))
+	}
+
+	for _, d := range directions {
+		t.Run("the "+d.from+" collapsed onto the "+d.onto, func(t *testing.T) {
+			t.Parallel()
+			ev := healthyBoltDecodeEvidence()
+
+			before := boltDecodeObservedCodes(ev)
+			if before[d.from] == before[d.onto] {
+				t.Fatalf("the %s and the %s already answer %q in the HEALTHY fixture, so this "+
+					"direction collapses nothing and the case is vacuous",
+					d.from, d.onto, before[d.from])
+			}
+			boltDecodeCollapseVector(ev, d.from, d.onto)
+
+			// The perturbation must have TAKEN. A collapse helper that missed an arm
+			// would leave the observed code unchanged and every assertion below would
+			// then be measuring the healthy fixture.
+			after := boltDecodeObservedCodes(ev)
+			if after[d.from] != after[d.onto] {
+				t.Fatalf("the collapse did not take: the %s answers %q and the %s answers %q, "+
+					"so no vector pair actually shares a code",
+					d.from, after[d.from], d.onto, after[d.onto])
+			}
+			if len(after) != len(boltDecodeVectorOrder) {
+				t.Fatalf("only %d of %d vectors are present after the collapse, so the distinctness "+
+					"clause returns without adjudicating", len(after), len(boltDecodeVectorOrder))
+			}
+
+			v := checkBoltDecodePressure(ev)
+			if !violationsMentionClause(v, "caps-answer-differently") {
+				t.Fatalf("collapsing the %s onto the %s (both now answer %q) did not fire "+
+					"caps-answer-differently, so the clause does not detect the very state it is "+
+					"named for. Got:\n%s", d.from, d.onto, after[d.from], renderViolations(v))
+			}
+
+			var coFired []string
+			for _, clause := range boltDecodeLiteralPinningClauses {
+				if violationsMentionClause(v, clause) {
+					coFired = append(coFired, clause)
+				}
+			}
+			if len(coFired) == 0 {
+				t.Fatalf("collapsing the %s onto the %s fired caps-answer-differently and NOTHING "+
+					"that pins a literal, so that clause is now the SOLE detector of a collapsed "+
+					"server. checkBoltDecodeCapsAnswerDifferently's godoc says it is not, and that "+
+					"claim is now false: either restore the literal-pinning clause that was narrowed, "+
+					"or rewrite the godoc to say the clause stands alone. Got:\n%s",
+					d.from, d.onto, renderViolations(v))
+			}
+			t.Logf("collapse %s -> %s: caps-answer-differently fired, co-fired with %v",
+				d.from, d.onto, coFired)
+		})
+	}
+}
+
 // TestBoltDecodeSwarm_ContractCanFail proves every concurrent contract clause can
 // fail.
 func TestBoltDecodeSwarm_ContractCanFail(t *testing.T) {
@@ -768,6 +962,34 @@ func TestBoltDecodeSwarm_NonVacuityCanFail(t *testing.T) {
 			name:    "the leak probe went slack, so a pool that came back short would still admit it",
 			perturb: func(e *BoltDecodeEvidence) { e.LeakProbeFinal.Slack = boltDecodeLeakSensitivity },
 			clause:  "nv-swarm-leak-probe-tight",
+		},
+		{
+			// The pre-fleet scan is what gives the leak probe a MEASURED size. If it
+			// went entirely green the runner would silently fall back to the model's
+			// boundary and nv-swarm-leak-probe-tight would go back to reading a
+			// constant while still looking like a measurement (rmp #2579).
+			name: "the pre-fleet scan never refused, so the leak probe has no MEASURED boundary to stand on",
+			perturb: func(e *BoltDecodeEvidence) {
+				for i := range e.Window {
+					e.Window[i].Accepted, e.Window[i].Code = true, ""
+				}
+			},
+			clause: "nv-swarm-window-spans-boundary",
+		},
+		{
+			name: "the pre-fleet scan admitted nothing, so the pool did not start full",
+			perturb: func(e *BoltDecodeEvidence) {
+				for i := range e.Window {
+					e.Window[i].Accepted, e.Window[i].Code = false, boltDecodeCodeBudget
+				}
+				e.MeasuredBoundary = -1
+			},
+			clause: "nv-swarm-window-spans-boundary",
+		},
+		{
+			name:    "the scan ran but recorded no measured boundary, so the probe fell back to the model's",
+			perturb: func(e *BoltDecodeEvidence) { e.MeasuredBoundary = -1 },
+			clause:  "nv-swarm-window-spans-boundary",
 		},
 	}
 	for _, tc := range cases {
