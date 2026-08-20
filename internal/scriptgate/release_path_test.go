@@ -17,6 +17,33 @@ func readRepoFile(t *testing.T, rel string) string {
 	return string(b)
 }
 
+// makeRecipeFor returns the recipe body of the named Makefile target — the run of
+// tab-indented lines immediately following the target line — and whether the
+// target was found.
+//
+// Scoping the assertions to one target's recipe is the point: several recipes
+// mention $(RACE_FLAGS) and $(PACKAGES), so a file-wide substring check would go
+// on passing after the specific gate under test stopped using them.
+func makeRecipeFor(makefile, target string) (string, bool) {
+	lines := strings.Split(makefile, "\n")
+	for i, l := range lines {
+		if !strings.HasPrefix(l, target+":") {
+			continue
+		}
+		var body []string
+		for _, r := range lines[i+1:] {
+			// A recipe is the consecutive tab-prefixed lines; the first line that is
+			// not tab-prefixed ends it.
+			if !strings.HasPrefix(r, "\t") {
+				break
+			}
+			body = append(body, r)
+		}
+		return strings.Join(body, "\n"), true
+	}
+	return "", false
+}
+
 // TestReleasePathsConverge guards #1444: neither release path may publish
 // while bypassing the release gate.
 //
@@ -88,10 +115,27 @@ func TestReleasePathsConverge(t *testing.T) {
 		t.Errorf("RACE_FLAGS is no longer `-race`; the release gate would run the test " +
 			"suite without the race detector (#1444)")
 	}
-	if !strings.Contains(makefile, "test-short:") ||
-		!strings.Contains(makefile, "$(GO) test $(RACE_FLAGS) -count=1 $(PACKAGES)") {
-		t.Errorf("the `test-short` gate no longer runs `go test -race ... ./...`; the " +
-			"release gate would skip the race/TCK test pass (#1444)")
+	// Matched TOKEN BY TOKEN against the `test-short` recipe, not against one
+	// literal command string. The recipe legitimately grows flags over time — it
+	// gained `-timeout=$(SHORT_TIMEOUT)` for rmp #2584 — and a whole-line literal
+	// turns every such addition into a false failure here, which is how this guard
+	// broke. Each token is still required INDIVIDUALLY and is looked for inside
+	// THIS target's recipe only, so dropping `$(RACE_FLAGS)`, `-count=1` or
+	// `$(PACKAGES)` still fires. This is deliberately not a loose search of the
+	// whole file: `$(RACE_FLAGS)` appears in other recipes too, so a file-wide
+	// substring check would keep passing after test-short stopped using it.
+	recipe, ok := makeRecipeFor(makefile, "test-short")
+	if !ok {
+		t.Errorf("the Makefile no longer defines a `test-short` target; the release gate " +
+			"would skip the race/TCK test pass (#1444)")
+	} else {
+		for _, want := range []string{"$(GO) test", "$(RACE_FLAGS)", "-count=1", "$(PACKAGES)"} {
+			if !strings.Contains(recipe, want) {
+				t.Errorf("the `test-short` recipe no longer contains %q, so it no longer runs "+
+					"`go test -race ... ./...`; the release gate would skip the race/TCK test "+
+					"pass (#1444). Recipe is:\n%s", want, recipe)
+			}
+		}
 	}
 
 	// 5. The openCypher TCK execution baseline must run in the short layer, so
