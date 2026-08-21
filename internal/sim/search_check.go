@@ -35,6 +35,12 @@ const maxDenseCheckNodes = 4000
 //     compared to an independent naive reference on an invariant of the answer
 //     (reachable set, partition up to relabelling) rather than a non-unique
 //     witness.
+//   - The context-cancellation contract of every public context-accepting entry
+//     point in the five search families ([searchCtxCancelViolations]). This
+//     family reads no graph: it derives its own fixtures from the tick, because
+//     what it adjudicates is whether a cancelled context is honoured, whether
+//     the cancellable form computes what the plain form computes, and whether
+//     cancellation outranks a terminal sentinel such as [search.ErrCycle].
 //
 // CheckSearch must be called from the single simulation goroutine: it issues
 // read queries that require a consistent, quiescent view of the engine, which
@@ -72,6 +78,13 @@ func CheckSearch(tick int64, oracle *GraphOracle, engine Engine) []Violation {
 	vs = append(vs, diameterViolations(tick)...)
 	vs = append(vs, bfsDoViolations(tick)...)
 	vs = append(vs, externViolations(tick)...)
+	// The cancellation battery: every public context-accepting entry point of
+	// search, search/centrality, search/community, search/flow and search/extern,
+	// driven under context.Background() against its non-Ctx counterpart and under
+	// a pre-cancelled context. It builds its own deterministic fixtures from the
+	// tick (see search_ctx_cancel.go) rather than reading the live graph, because
+	// what it adjudicates is the context contract, not an algorithm's answer.
+	vs = append(vs, searchCtxCancelViolations(tick)...)
 	return vs
 }
 

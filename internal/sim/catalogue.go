@@ -347,12 +347,15 @@ func schemaChaosScenario() Scenario {
 // periodically (every SearchEvery ticks) and once more at the end. Each
 // exercised search/ algorithm is cross-checked against an independent naive
 // reference, and the engine graph is held to full structural parity with the
-// oracle model. It is bit-reproducible, so a failure replays and shrinks like
-// any other deterministic scenario.
+// oracle model. The battery also carries the context-cancellation family
+// ([searchCtxCancelViolations]), which drives every public context-accepting
+// entry point of the five search packages on the same cadence. It is
+// bit-reproducible, so a failure replays and shrinks like any other
+// deterministic scenario.
 func searchScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioSearch,
-		Description: "search/ battery (BFS/DFS/WCC) over the live graph + full engine-vs-oracle structural parity",
+		Description: "search/ battery (BFS/DFS/WCC + the ...Ctx cancellation contract) over the live graph + full engine-vs-oracle structural parity",
 		Mode:        ModeDeterministic,
 		DefaultSeed: 0x5EA4C8,
 		MaxTicks:    800,

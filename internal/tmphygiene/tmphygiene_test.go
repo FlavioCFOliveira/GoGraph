@@ -92,6 +92,16 @@ var ownedTempPrefixes = []string{
 	// CertReloader reads through os.Stat and tls.LoadX509KeyPair, so the images the
 	// SimDisk holds must be projected onto real files for it to read at all.
 	"sim-cert-rotation-",
+	// internal/sim — the ...Ctx cancellation battery's csrfile fixture (rmp #2489).
+	// The search/extern rows need a real mmap-backed csrfile.Reader, which
+	// csrfile.Open binds to the OS backend, so no SimDisk can serve it.
+	//
+	// Its own prefix, deliberately NOT nested under "sim-c..." or any other listed
+	// name, for the reason spelled out above "sim-bulkoracle-": the coverage gate
+	// matches by CONTAINMENT, so a nesting name would satisfy the gate while
+	// unlisted and its stranded directories would then be billed to the parent's
+	// bucket (rmp #2586).
+	"sim-ctxcancel-",
 	// examples/ — each example's throwaway store.
 	"gograph-ex04-",
 	"gograph-ex05-",

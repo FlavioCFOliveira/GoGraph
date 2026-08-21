@@ -77,9 +77,10 @@ type CheckSelection struct {
 	// indexes. The set of indexes to cross-check is [CheckSelection.IndexSpecs].
 	IndexConsistency bool
 	// Search runs the search-algorithm battery ([CheckSearch]) — structural
-	// parity between the engine graph and the oracle model, plus per-algorithm
-	// correctness against independent naive references — once at the end of the
-	// run. The search scenario also sets [Scenario.SearchEvery] for periodic
+	// parity between the engine graph and the oracle model, per-algorithm
+	// correctness against independent naive references, and the
+	// context-cancellation contract of every public context-accepting entry point
+	// in the five search packages — once at the end of the run. The search scenario also sets [Scenario.SearchEvery] for periodic
 	// in-loop checks. It is meaningful only for the deterministic mode (the
 	// battery needs a consistent, quiescent view of the graph).
 	Search bool
