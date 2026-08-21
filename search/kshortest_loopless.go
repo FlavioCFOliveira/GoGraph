@@ -101,8 +101,10 @@ func KShortestPathsLoopless[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k in
 }
 
 // KShortestPathsLooplessCtx is the context-aware variant of
-// [KShortestPathsLoopless]. ctx.Err() is checked every 4096 heap pops;
-// on cancellation returns (nil, wrapped ctx.Err()).
+// [KShortestPathsLoopless]. ctx.Err() is checked on entry and every 4096
+// heap pops thereafter; on cancellation returns (the paths completed so
+// far, the raw ctx.Err()), and nil paths when none had completed. A
+// cancelled context outranks [ErrInvalidInput].
 //
 // For an explicit resource cap use [KShortestPathsLooplessCtxWithOpts].
 func KShortestPathsLooplessCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst graph.NodeID, k int) ([]YenPath[W], error) {
@@ -113,8 +115,10 @@ func KShortestPathsLooplessCtx[W Weight](ctx context.Context, c *csr.CSR[W], src
 // KShortestPathsLooplessCtxWithOpts is the context-aware, resource-bounded
 // variant of [KShortestPathsLoopless].
 //
-// ctx.Err() is checked every 4096 heap pops; on cancellation returns
-// (partial, wrapped ctx.Err()).
+// ctx.Err() is checked on entry and every 4096 heap pops thereafter; on
+// cancellation returns (the paths completed so far, the raw ctx.Err()),
+// and nil paths when none had completed. A cancelled context outranks
+// [ErrInvalidInput].
 //
 // opts.MaxPops, when positive, caps the total number of priority-queue
 // pops. opts.MaxQueueBytes, when positive, caps the approximate memory
@@ -131,6 +135,19 @@ func KShortestPathsLooplessCtxWithOpts[W Weight](
 	opts KShortestPathsLooplessOpts,
 ) ([]YenPath[W], error) {
 	defer metrics.Time("search.KShortestPathsLooplessCtxWithOpts").Stop()
+	// Entry poll, before any work. This is THE implementation of the loopless
+	// k-shortest family -- KShortestPathsLooplessCtx and the deprecated
+	// EppsteinKShortestCtx both delegate here -- and it is the family whose
+	// runtime is unbounded and worst-case exponential in V, so it is the one
+	// that most needs to honour a dead context. Until rmp #2593 the pop loop
+	// below was the SOLE poll site, so every early return here, and every
+	// enumeration that finished in under 4096 pops, ignored cancellation
+	// entirely. A cancelled context outranks the early returns and
+	// [ErrInvalidInput].
+	if err := ctx.Err(); err != nil {
+		metrics.IncCounter("search.KShortestPathsLooplessCtxWithOpts.errors", 1)
+		return nil, err
+	}
 	if k <= 0 {
 		return nil, nil
 	}
@@ -156,13 +173,18 @@ func KShortestPathsLooplessCtxWithOpts[W Weight](
 	result := make([]YenPath[W], 0, k)
 	tick := 0
 	for pq.Len() > 0 && len(result) < k {
-		tick++
+		// Check the stride mask BEFORE incrementing, so the poll lands on
+		// iteration 0 (rmp #2593); the check-then-increment idiom matches
+		// dijkstra.go and prim.go. tick is still incremented ahead of the
+		// MaxPops guard below, so the budget admits exactly the same number
+		// of pops as before.
 		if tick&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
 				metrics.IncCounter("search.KShortestPathsLooplessCtxWithOpts.errors", 1)
 				return partialOrNil(result), err
 			}
 		}
+		tick++
 		// MaxPops guard: checked after each pop.
 		if opts.MaxPops > 0 && tick > opts.MaxPops {
 			return partialOrNil(result), ErrResourceBudgetExceeded

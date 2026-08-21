@@ -26,8 +26,8 @@ func KCore[W any](c *csr.CSR[W]) []int {
 }
 
 // KCoreCtx is the context-aware variant of [KCore]. ctx.Err() is
-// checked every 4096 peeled vertices; on cancellation returns
-// (nil, wrapped ctx.Err()).
+// checked on entry to the peel loop and every 4096 peeled vertices
+// thereafter; on cancellation returns (nil, the raw ctx.Err()).
 //
 //nolint:gocyclo // canonical Batagelj-Zaversnik bucket-peel
 func KCoreCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]int, error) {
@@ -77,13 +77,19 @@ func KCoreCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]int, error) {
 	coreness := make([]int, n)
 	peelCount := 0
 	for i := 0; i < n; i++ {
-		peelCount++
+		// Check the stride mask BEFORE incrementing, so the poll lands on
+		// iteration 0 and cancellation is honoured on a graph that peels in
+		// fewer than 4096 steps. The reverse order made the real threshold
+		// the CSR's QUANTISED slot count -- MaxNodeID() >= 4096, not the live
+		// vertex count -- so every smaller graph was blind (rmp #2593); the
+		// check-then-increment idiom matches dijkstra.go and prim.go.
 		if peelCount&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
 				metrics.IncCounter("search.KCoreCtx.errors", 1)
 				return nil, err
 			}
 		}
+		peelCount++
 		v := vert[i]
 		coreness[v] = deg[v]
 		// Decrement each neighbour u with strictly higher current

@@ -51,10 +51,11 @@ func JohnsonAPSPParallel[W Weight](c *csr.CSR[W], numWorkers int) (*APSP[W], err
 }
 
 // JohnsonAPSPParallelCtx is the context-aware variant of
-// [JohnsonAPSPParallel]. ctx.Err() is checked at every
-// relaxation-round boundary during the serial Bellman-Ford prologue
-// and once per source vertex inside every Dijkstra worker; on
-// cancellation returns (nil, wrapped ctx.Err()).
+// [JohnsonAPSPParallel]. ctx.Err() is checked on entry to the serial
+// Bellman-Ford prologue and every 4096 dequeues thereafter, then once per
+// source vertex inside every Dijkstra worker; on cancellation returns
+// (nil, the raw ctx.Err()). A cancelled context outranks
+// [ErrNegativeCycle].
 func JohnsonAPSPParallelCtx[W Weight](ctx context.Context, c *csr.CSR[W], numWorkers int) (*APSP[W], error) {
 	defer metrics.Time("search.JohnsonAPSPParallelCtx").Stop()
 	p, err := johnsonPrepare[W](ctx, c)
