@@ -700,12 +700,17 @@ func TestSearchCtxCancel_NoGoroutineLeak(t *testing.T) {
 // fire on a row constructed to break exactly that clause.
 func TestSearchCtxCancel_PrecedenceClausesCanFail(t *testing.T) {
 	t.Parallel()
-	if got := ctxRenderViolations(ctxCancelPrecedenceViolations(3)); got != "" {
+	if got := ctxRenderViolations(ctxCancelPrecedenceViolations(3, ctxCancelPrecedenceRows())); got != "" {
 		t.Fatalf("the real precedence table reported violations on a clean tree:\n%s", got)
 	}
 	// The arm must refuse to be empty, or removing every row would read as a pass.
-	if got := ctxRenderViolations(ctxCancelPrecedenceViolations(3)); strings.Contains(got, "table is empty") {
-		t.Fatal("unexpected empty-table violation on the real table")
+	// This asserts the empty-table clause by actually PASSING an empty table. The
+	// earlier shape re-ran the identical call as the line above, which had already
+	// fataled unless got was "", so strings.Contains("", ...) was unreachable and
+	// the clause had no test that failed if it were deleted (rmp #2597). Passing
+	// the table in is what makes the clause reachable at all.
+	if got := ctxRenderViolations(ctxCancelPrecedenceViolations(3, nil)); !strings.Contains(got, "table is empty") {
+		t.Errorf("an empty precedence table did not report the empty-table violation: %q", got)
 	}
 	if len(ctxCancelPrecedenceRows()) == 0 {
 		t.Fatal("the precedence table is empty")
@@ -779,8 +784,5 @@ func TestSearchCtxCancel_PrecedenceClausesCanFail(t *testing.T) {
 // ctxRenderPrecedence runs one precedence row through the same two clauses the
 // checker applies and renders the result.
 func ctxRenderPrecedence(tick int64, row ctxCancelPrecedenceRow) string {
-	saved := ctxCancelPrecedenceOverride
-	ctxCancelPrecedenceOverride = []ctxCancelPrecedenceRow{row}
-	defer func() { ctxCancelPrecedenceOverride = saved }()
-	return ctxRenderViolations(ctxCancelPrecedenceViolations(tick))
+	return ctxRenderViolations(ctxCancelPrecedenceViolations(tick, []ctxCancelPrecedenceRow{row}))
 }

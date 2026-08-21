@@ -1706,7 +1706,7 @@ func searchCtxCancelViolations(tick int64) []Violation {
 	for i := range entries {
 		out = append(out, ctxCancelCheckEntry(tick, &entries[i], f)...)
 	}
-	out = append(out, ctxCancelPrecedenceViolations(tick)...)
+	out = append(out, ctxCancelPrecedenceViolations(tick, ctxCancelPrecedenceRows())...)
 	return out
 }
 
@@ -1829,13 +1829,6 @@ func ctxCancelPrecedenceRows() []ctxCancelPrecedenceRow {
 	}
 }
 
-// ctxCancelPrecedenceOverride replaces the precedence table for the duration of a
-// test. It exists so [TestSearchCtxCancel_PrecedenceClausesCanFail] can drive a
-// deliberately-broken row through the REAL clause code rather than a copy of it —
-// a clause proven to fire against a re-implementation proves nothing about the
-// clause that ships. It is nil in every non-test path.
-var ctxCancelPrecedenceOverride []ctxCancelPrecedenceRow
-
 // ctxCancelPrecedenceViolations asserts, for every row of
 // [ctxCancelPrecedenceRows], that a context cancelled before the call outranks the
 // terminal error the input would otherwise produce.
@@ -1851,11 +1844,14 @@ var ctxCancelPrecedenceOverride []ctxCancelPrecedenceRow
 //
 // The result is a pure function of nothing but the fixed inputs above, so it is
 // trivially reproducible; tick enters only the violation records.
-func ctxCancelPrecedenceViolations(tick int64) []Violation {
-	rows := ctxCancelPrecedenceRows()
-	if ctxCancelPrecedenceOverride != nil {
-		rows = ctxCancelPrecedenceOverride
-	}
+//
+// The table is a PARAMETER rather than a package-level variable a test may swap.
+// A falsifiability test drives a deliberately-broken row through this REAL clause
+// code — a clause proven to fire against a re-implementation proves nothing about
+// the clause that ships — and it does so by passing its own one-row table, so two
+// parallel tests cannot reach the same storage. The earlier shape kept the table
+// in a package-level override and raced exactly that way (rmp #2597).
+func ctxCancelPrecedenceViolations(tick int64, rows []ctxCancelPrecedenceRow) []Violation {
 	if len(rows) == 0 {
 		return []Violation{ctxCancelDeviate(tick, "precedence",
 			"the cancellation-precedence table is empty, so nothing asserts that a cancelled context outranks a terminal sentinel")}
