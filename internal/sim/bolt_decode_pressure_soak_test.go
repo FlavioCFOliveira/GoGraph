@@ -56,13 +56,13 @@ func TestBoltDecodePressure_SoakSeedSweep(t *testing.T) {
 }
 
 // TestBoltDecodeSwarm_SoakSeedSweep runs the concurrent scenario across many
-// seeds. It is the arm that establishes the overlap construction's margin is a
-// property of the design: the short layer samples three seeds, which cannot tell
-// a robust construction from a lucky one.
+// seeds. It is where the overlap construction's MARGIN is measured rather than
+// merely relied on: the short layer samples three seeds, which cannot tell a robust
+// construction from a lucky one.
 func TestBoltDecodeSwarm_SoakSeedSweep(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	const seeds = 100
-	worstWide := -1
+	worstWide, worstOverlap := -1, int64(-1)
 	for i := uint64(0); i < seeds; i++ {
 		seed := 0x2487_A000 + i
 		ctx, cancel := context.WithTimeout(context.Background(), boltDecodeTestTimeout)
@@ -75,6 +75,9 @@ func TestBoltDecodeSwarm_SoakSeedSweep(t *testing.T) {
 		if len(v) > 0 {
 			t.Fatalf("seed %#x:\n%s%s", seed, ev, renderViolations(v))
 		}
+		if n := ev.RefusalsConcurrentWithHonest; worstOverlap < 0 || n < worstOverlap {
+			worstOverlap = n
+		}
 		for j := range ev.Honest {
 			h := &ev.Honest[j]
 			if !h.Wide {
@@ -85,15 +88,25 @@ func TestBoltDecodeSwarm_SoakSeedSweep(t *testing.T) {
 			}
 		}
 	}
-	// The MARGIN is the point of the sweep, not the pass. A run of 100 seeds whose
-	// narrowest wide window ever held a single refusal is one scheduling decision
-	// from a red short layer, and only a sweep can see that coming.
-	t.Logf("across %d seeds the NARROWEST wide honest window held %d refusals (hold %s)",
-		seeds, worstWide, boltDecodeSwarmWideHold)
-	if worstWide <= 1 {
-		t.Errorf("the narrowest wide honest window across %d seeds held only %d refusal(s). The overlap "+
-			"clause is meant to rest on a window wider than the interval between refusals; at this "+
-			"margin it rests on luck, and boltDecodeSwarmWideHold needs raising", seeds, worstWide)
+	// The MARGIN is the point of the sweep, not the pass, and rmp #2596 moved which
+	// margin matters. nv-swarm-overlap now reads how many refusals were drawn on a
+	// round trip overlapping honest flight, so THAT is the quantity whose worst case
+	// over 100 seeds says whether the clause rests on a construction or on luck.
+	//
+	// The narrowest wide window is logged beside it and no longer asserted: it is
+	// the old clause's margin, and it is expected to reach 0 under load — 9 to 13 of
+	// every 96 runs measured under 32 concurrent coverage-instrumented binaries had
+	// three of their four wide windows empty on a clean engine, which is exactly why
+	// nothing thresholds it any more.
+	t.Logf("across %d seeds the FEWEST overlapping refusals in any run was %d, and the narrowest wide "+
+		"honest window held %d refusals (hold %s)", seeds, worstOverlap, worstWide, boltDecodeSwarmWideHold)
+	if worstOverlap <= 1 {
+		t.Errorf("the fewest refusals overlapping honest flight in any of %d seeds was %d. "+
+			"nv-swarm-overlap fires at zero, so a worst case of one is a single scheduling decision from "+
+			"a red short layer. Measured minima when this guard was written: 4 under 32 concurrent "+
+			"coverage-instrumented binaries and 424 on an idle host, so this is erosion rather than "+
+			"noise — the arm is no longer driving the fleet and the honest client at the same time",
+			seeds, worstOverlap)
 	}
 }
 

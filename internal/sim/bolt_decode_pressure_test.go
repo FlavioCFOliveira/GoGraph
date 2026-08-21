@@ -320,6 +320,10 @@ func healthyBoltDecodeSwarmEvidence() *BoltDecodeEvidence {
 		e.Honest = append(e.Honest, h)
 	}
 	e.RejectionsDuringHonest = rejected
+	// Every refusal was drawn on a round trip overlapping honest flight, which is
+	// what a healthy concurrent run looks like: the honest client is in flight for
+	// most of its own window, and an abusive round trip carries 4.5 MiB.
+	e.RefusalsConcurrentWithHonest = rejected
 	return e
 }
 
@@ -931,13 +935,13 @@ func TestBoltDecodeSwarm_NonVacuityCanFail(t *testing.T) {
 			clause:  "nv-swarm-accepts",
 		},
 		{
-			name: "honest service did not overlap the pressure: it ran BEFORE or AFTER it, never DURING",
-			perturb: func(e *BoltDecodeEvidence) {
-				for i := range e.Honest {
-					e.Honest[i].RejectionsAfter = e.Honest[i].RejectionsBefore
-				}
-			},
-			clause: "nv-swarm-overlap",
+			// The fleet and the honest client took turns: the pressure was there for the
+			// whole honest window, but every refusal was drawn on a round trip that
+			// started and finished between two honest exchanges. Fires this clause alone
+			// — RejectionsDuringHonest is untouched, so the density clause is satisfied.
+			name:    "the fleet and the honest client took turns instead of overlapping",
+			perturb: func(e *BoltDecodeEvidence) { e.RefusalsConcurrentWithHonest = 0 },
+			clause:  "nv-swarm-overlap",
 		},
 		{
 			// Half one of the density clause: honest service ran entirely outside the
@@ -1032,9 +1036,11 @@ func TestBoltDecodeSwarm_NonVacuityCanFail(t *testing.T) {
 //     refusals across the honest run, distributed [2 0 0 0].
 //
 // Neither shape may fire nv-swarm-pressure-density. The test asserts on that
-// clause specifically rather than on the whole gate, because the deeper shape also
-// drops nv-swarm-overlap below its own floor — a separate, still-open issue that
-// this test must not silently absorb.
+// clause specifically rather than on the whole gate, so that a failure names the
+// clause it is about. The deeper shape used to drop nv-swarm-overlap below its own
+// floor as well — a second rate in the same gate, which this test deliberately did
+// not absorb — and rmp #2596 has since removed that floor;
+// [TestBoltDecodeSwarm_OverlapAcceptsLoadedRuns] pins the runs that exposed it.
 func TestBoltDecodeSwarm_DensityAcceptsLoadedRuns(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -1097,6 +1103,263 @@ func TestBoltDecodeSwarm_DensityAcceptsLoadedRuns(t *testing.T) {
 						"A density that machine load moves is not a coverage criterion:\n%s",
 						got, e.RejectionsDuringHonest, renderViolations([]Violation{viol}))
 				}
+			}
+		})
+	}
+}
+
+// boltDecodeSwarmShape lays a MEASURED refusal placement over a healthy swarm
+// fixture: which honest exchanges had refusals observed while they were in flight,
+// and which gaps between exchanges had refusals observed inside them.
+//
+// The two maps are keyed by exchange index. inFlight[i] refusals are attributed to
+// exchange i's own flight; gaps[i] refusals are attributed to the gap AFTER
+// exchange i, which is where a real run puts everything the fleet drew while the
+// honest client was between its own samples.
+type boltDecodeSwarmShape struct {
+	inFlight map[int]int64
+	gaps     map[int]int64
+	// concurrent is the run's measured count of refusals drawn on a round trip
+	// overlapping honest flight — the quantity nv-swarm-overlap reads. It is
+	// independent of where the counter samples fell, which is the whole point of
+	// the instrument, so the fixture carries it as its own number. It can exceed
+	// the total below, and in one transcribed run it does: a round trip that
+	// overlapped honest flight can have its refusal counted after the last honest
+	// exchange has closed.
+	concurrent int64
+	// tail is what the run counted between its last exchange's closing sample and
+	// the deferred read of RejectionsDuringHonest. Real runs have one; carrying it
+	// is what lets the fixture reproduce a measured (in flight, gaps, total) triple
+	// exactly instead of one that happens to add up.
+	tail int64
+}
+
+// apply rewrites the fixture's honest exchanges to carry the shape, and returns
+// the fixture. The counter is walked forward exactly as a run walks it, so the
+// evidence is coherent: every exchange's RejectionsBefore is the previous
+// exchange's RejectionsAfter plus whatever landed in the gap between them.
+func (sh boltDecodeSwarmShape) apply(e *BoltDecodeEvidence) *BoltDecodeEvidence {
+	var counter int64
+	for i := range e.Honest {
+		if i > 0 {
+			counter += sh.gaps[i-1]
+		}
+		e.Honest[i].RejectionsBefore = counter
+		counter += sh.inFlight[i]
+		e.Honest[i].RejectionsAfter = counter
+	}
+	e.RejectionsDuringHonest = counter - e.Honest[0].RejectionsBefore + sh.tail
+	e.RefusalsConcurrentWithHonest = sh.concurrent
+	e.PressureStarted = true
+	return e
+}
+
+// TestBoltDecodeSwarm_OverlapAcceptsLoadedRuns pins the runs that made
+// nv-swarm-overlap report a CLEAN engine as a failure (rmp #2596).
+//
+// Every shape is transcribed from real evidence, not invented. The clause used to
+// require half of the four WIDE honest exchanges to have straddled a refusal, and
+// each shape below is a run that missed that floor with one:
+//
+//   - `make ci`, 2026-08-21: the cover_gate run that opened the task reported
+//     "only 1 of 4 WIDE honest exchanges STRADDLED a refusal, want at least 2 ...
+//     1 narrow exchanges straddled". The engine was clean, and the same test passed
+//     in the same invocation's race run. Its straddle counts are that line's; its
+//     overlapping count is taken from a sweep run reporting the same two counts,
+//     because the instrument that measures overlapping refusals post-dates the
+//     failure and no run of that day recorded one.
+//   - the rest come from a 96-run sweep of the swarm under 32 concurrent
+//     coverage-instrumented test binaries on the reference host, in which 9 to 13
+//     runs per sweep missed that floor and NOTHING else in the gate fired. They are
+//     the run with the fewest overlapping refusals measured, the most gap-heavy one,
+//     and one whose overlapping count EXCEEDS its window total — which happens when
+//     a round trip that overlapped honest flight has its refusal counted after the
+//     last honest exchange has closed, and is the clearest single sign that the two
+//     instruments are measuring different things.
+//
+// The floor those runs missed is a rate: a wide exchange's window is a fixed 50 ms,
+// while the interval between refusals is whatever the machine's load makes it. None
+// of these shapes may fire any clause now that the question is whether any refusal
+// was drawn on a round trip overlapping honest flight.
+//
+// This test is the regression gate on that: it fails against the thresholded clause
+// and passes against the present one, verified by controlled reversion rather than
+// assumed.
+func TestBoltDecodeSwarm_OverlapAcceptsLoadedRuns(t *testing.T) {
+	t.Parallel()
+	// Wide exchanges are every boltDecodeSwarmWideEvery-th, so index 0 is wide and
+	// indices 5, 7, 11 and 17 are narrow. Each shape puts refusals on exactly the
+	// exchanges its measured straddle counts require.
+	for _, tc := range []struct {
+		name  string
+		shape boltDecodeSwarmShape
+		// The counts the real run reported, asserted against the fixture so that a
+		// fixture drifting away from the measurement fails here rather than passing
+		// for the wrong reason.
+		wantWideStraddled   int
+		wantNarrowStraddled int
+		wantInFlight        int64
+		wantGaps            int64
+		wantDuring          int64
+	}{
+		{
+			name: "the cover_gate run of 2026-08-21: 1 of 4 wide, 1 narrow",
+			shape: boltDecodeSwarmShape{
+				inFlight:   map[int]int64{0: 5, 7: 1},
+				gaps:       map[int]int64{3: 4},
+				concurrent: 10,
+			},
+			wantWideStraddled: 1, wantNarrowStraddled: 1,
+			wantInFlight: 6, wantGaps: 4, wantDuring: 10,
+		},
+		{
+			name: "the fewest overlapping refusals of 96 loaded runs: 4 of 6",
+			shape: boltDecodeSwarmShape{
+				inFlight:   map[int]int64{0: 2},
+				gaps:       map[int]int64{3: 4},
+				concurrent: 4,
+			},
+			wantWideStraddled: 1, wantNarrowStraddled: 0,
+			wantInFlight: 2, wantGaps: 4, wantDuring: 6,
+		},
+		{
+			name: "the most gap-heavy of 96 loaded runs: 14 refusals, 9 in the gaps",
+			shape: boltDecodeSwarmShape{
+				inFlight:   map[int]int64{0: 1, 5: 1, 11: 1, 17: 1},
+				gaps:       map[int]int64{2: 5, 9: 4},
+				concurrent: 11,
+				tail:       1,
+			},
+			wantWideStraddled: 1, wantNarrowStraddled: 3,
+			wantInFlight: 4, wantGaps: 9, wantDuring: 14,
+		},
+		{
+			name: "a loaded run whose overlapping count EXCEEDS its window total: 9 of 6",
+			shape: boltDecodeSwarmShape{
+				inFlight:   map[int]int64{0: 4},
+				gaps:       map[int]int64{3: 2},
+				concurrent: 9,
+			},
+			wantWideStraddled: 1, wantNarrowStraddled: 0,
+			wantInFlight: 4, wantGaps: 2, wantDuring: 6,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := tc.shape.apply(healthyBoltDecodeSwarmEvidence())
+
+			// The fixture must really carry the measured shape.
+			wide, wideStraddled, narrowStraddled := 0, 0, 0
+			for i := range e.Honest {
+				straddled := e.Honest[i].RejectionsAfter > e.Honest[i].RejectionsBefore
+				if e.Honest[i].Wide {
+					wide++
+					if straddled {
+						wideStraddled++
+					}
+					continue
+				}
+				if straddled {
+					narrowStraddled++
+				}
+			}
+			inFlight := boltDecodeSwarmInFlightRefusals(e.Honest)
+			gaps := boltDecodeSwarmGapRefusals(e.Honest)
+			switch {
+			case wide != boltDecodeSwarmMinWide:
+				t.Fatalf("fixture ran %d wide exchanges, want %d", wide, boltDecodeSwarmMinWide)
+			case wideStraddled != tc.wantWideStraddled || narrowStraddled != tc.wantNarrowStraddled:
+				t.Fatalf("fixture built %d wide and %d narrow straddles, want the measured %d and %d",
+					wideStraddled, narrowStraddled, tc.wantWideStraddled, tc.wantNarrowStraddled)
+			case inFlight != tc.wantInFlight || gaps != tc.wantGaps:
+				t.Fatalf("fixture built %d in-flight and %d gap refusals, want the measured %d and %d",
+					inFlight, gaps, tc.wantInFlight, tc.wantGaps)
+			case e.RejectionsDuringHonest != tc.wantDuring:
+				t.Fatalf("fixture models %d refusals across the honest run, want the measured %d",
+					e.RejectionsDuringHonest, tc.wantDuring)
+			case e.RefusalsConcurrentWithHonest != tc.shape.concurrent || tc.shape.concurrent == 0:
+				t.Fatalf("fixture models %d overlapping refusals, want the measured %d (nonzero)",
+					e.RefusalsConcurrentWithHonest, tc.shape.concurrent)
+			}
+
+			// Every one of these shapes is a run the removed floor rejected.
+			if wideStraddled >= boltDecodeSwarmMinWide/2 {
+				t.Fatalf("fixture straddled %d of %d wide exchanges, which the removed floor of %d would "+
+					"have ACCEPTED: this shape cannot regression-test the floor's removal",
+					wideStraddled, wide, boltDecodeSwarmMinWide/2)
+			}
+
+			// The claim under test: no clause may fire on any of them.
+			if v := checkBoltDecodePressureNonVacuity(e); len(v) > 0 {
+				t.Errorf("the coverage gate fired on a MEASURED clean run (%d of %d wide exchanges "+
+					"straddled, %d narrow; %d refusals in flight, %d in the gaps, %d overlapping a round "+
+					"trip). A count of fixed 50 ms windows that each contained a refusal is a rate, and "+
+					"machine load moves it:\n%s",
+					wideStraddled, wide, narrowStraddled, inFlight, gaps,
+					e.RefusalsConcurrentWithHonest, renderViolations(v))
+			}
+			if v := checkBoltDecodePressure(e); len(v) > 0 {
+				t.Errorf("the contract fired on a MEASURED clean run:\n%s", renderViolations(v))
+			}
+		})
+	}
+}
+
+// TestBoltDecodeSwarm_OverlapIsNotTheDensityClause proves the two clauses are not
+// one predicate, in both directions.
+//
+// This matters because an existence claim is only worth having if it can fail on a
+// shape a real run can produce. "The fleet and the honest client took turns" is
+// that shape: the pressure was live for the whole honest window and none of it ever
+// coincided with honest work in flight. It is what a server serialising honest
+// statements against the fleet would produce, and the harness has been driven into
+// it deliberately to check the instrument notices — the experiment is recorded on
+// [boltDecodeSwarmInFlightRefusals], along with the earlier instrument that did NOT
+// notice and is now reported rather than adjudicated.
+//
+// Density must stay silent on that shape and overlap must fire; a run with no
+// pressure at all in the window is density's own subject and overlap must stay
+// silent on it in turn, since it is gated on the window having held refusals at
+// all. Either clause implying the other would make one of them incapable of being
+// the clause that fires, and both firing together would name one cause twice.
+func TestBoltDecodeSwarm_OverlapIsNotTheDensityClause(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		shape  boltDecodeSwarmShape
+		fires  string
+		silent string
+	}{
+		{
+			name: "the fleet and the honest client took turns: 12 refusals, none overlapping",
+			// 12 refusals across the honest run, every one of them drawn on a round trip
+			// that began and ended between two honest exchanges. Density counts all 12
+			// and is satisfied; overlap counts none of them.
+			shape:  boltDecodeSwarmShape{gaps: map[int]int64{2: 4, 9: 4, 16: 4}, concurrent: 0},
+			fires:  "nv-swarm-overlap",
+			silent: "nv-swarm-pressure-density",
+		},
+		{
+			name: "no refusal landed anywhere in the honest window",
+			// Nothing to attribute either way: the run was served outside the pressure
+			// window altogether, which is the density clause's own subject.
+			shape:  boltDecodeSwarmShape{},
+			fires:  "nv-swarm-pressure-density",
+			silent: "nv-swarm-overlap",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := tc.shape.apply(healthyBoltDecodeSwarmEvidence())
+			v := checkBoltDecodePressureNonVacuity(e)
+			if !violationsMentionClause(v, tc.fires) {
+				t.Fatalf("shape %q did not fire %q, so that clause cannot fail on it. Got:\n%s",
+					tc.name, tc.fires, renderViolations(v))
+			}
+			if tc.silent != "" && violationsMentionClause(v, tc.silent) {
+				t.Errorf("shape %q fired %q as well as %q. The two clauses would then be one predicate, "+
+					"and the gate would be reporting one finding twice while claiming two:\n%s",
+					tc.name, tc.silent, tc.fires, renderViolations(v))
 			}
 		})
 	}

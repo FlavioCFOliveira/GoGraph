@@ -313,15 +313,31 @@ const (
 // exchange is a WIDE one: it sends its RUN, holds the open stream for
 // [boltDecodeSwarmWideHold] without pulling, and only then drains. The exchange is
 // genuinely in flight for that whole time — the server has acknowledged the
-// statement and is holding a cursor for it — so a wide exchange's overlap is a
-// property of the design rather than of the run.
+// statement and is holding a cursor for it.
 //
 // The hold is NOT set by waiting for a refusal to be counted. That would make
-// the clause true by construction of the HARNESS instead of by behaviour of the
-// SERVER, which is the failure mode a coverage gate exists to prevent. It is a
-// fixed duration, chosen against a measured rate, and the run REPORTS how many
-// refusals the narrowest wide window actually contained so a margin that has
-// quietly eroded is visible before it starts failing.
+// any clause resting on it true by construction of the HARNESS instead of by
+// behaviour of the SERVER, which is the failure mode a coverage gate exists to
+// prevent. It is a fixed duration, chosen against a measured rate.
+//
+// # What the width does NOT buy, measured (rmp #2596)
+//
+// The wide exchanges used to carry the overlap claim on their own: half of them
+// had to straddle a refusal. That made a FIXED 50 ms budget the yardstick for a
+// refusal cadence the machine controls, and it failed on a clean engine. Measured
+// on the reference host, 96 swarm runs under 32 concurrent coverage-instrumented
+// test binaries: 13 of 96 runs put only 1 of the 4 wide exchanges over a refusal
+// (1/4 in 13 runs, 2/4 in 27, 3/4 in 37, 4/4 in 19), and those 13 were the only
+// gate failures in the sweep. The cause is arithmetic: a wide window can only
+// contain a refusal if one arrives inside it, and under load the fleet's refusals
+// become both rarer (10 to 87 per run) and spread over a honest window that
+// dilates with the load while the 50 ms hold does not.
+//
+// So no COUNT of wide exchanges is adjudicated any more. The wide exchanges
+// themselves stay, and they stay load-bearing: at 50 ms each they are most of the
+// honest client's total in-flight time, and that in-flight time is what an abusive
+// round trip has to overlap for nv-swarm-overlap to count it. What went is the
+// threshold on how many of them individually contained an event.
 const (
 	boltDecodeSwarmWideEvery = 6
 	boltDecodeSwarmWideHold  = 50 * time.Millisecond
@@ -471,9 +487,15 @@ type BoltDecodeHonest struct {
 	Index int
 	// RejectionsBefore/RejectionsAfter sample the fleet-wide rejection counter
 	// immediately before the request is written and immediately after the reply is
-	// read. After > Before means abusive traffic was REJECTED WHILE this exchange
-	// was in flight: a clock-free, interleaving-invariant proof that honest service
-	// OVERLAPPED the pressure window rather than merely preceding or following it.
+	// read. After > Before means abusive traffic was REFUSED, AND COUNTED, while
+	// this exchange was in flight.
+	//
+	// That is weaker than it looks and it is REPORTED, never adjudicated: an abuser
+	// increments the counter only after decoding its reply, so a refusal issued
+	// before this exchange opened can be counted inside it. See
+	// [boltDecodeSwarmInFlightRefusals] for the measurement that establishes how
+	// badly, and [BoltDecodeEvidence.RefusalsConcurrentWithHonest] for the
+	// instrument nv-swarm-overlap uses instead.
 	RejectionsBefore int64
 	RejectionsAfter  int64
 	// Value is what the exchange returned, or -1 when it returned nothing.
@@ -484,8 +506,9 @@ type BoltDecodeHonest struct {
 	// OK is whether the exchange completed and returned exactly one record.
 	OK bool
 	// Wide marks an exchange that deliberately held its stream open for
-	// [boltDecodeSwarmWideHold] between RUN and PULL, so its in-flight window is
-	// wide enough to contain refusals by construction rather than by luck.
+	// [boltDecodeSwarmWideHold] between RUN and PULL. Its in-flight window is wide
+	// enough to hold several refusals when they are arriving quickly, and the run
+	// reports how many the narrowest one held; nothing thresholds it (rmp #2596).
 	Wide bool
 }
 
@@ -541,17 +564,34 @@ type BoltDecodeEvidence struct {
 	AbuserAliveAfter int
 	// Abusers is how many pushed.
 	Abusers int
+	// RefusalsConcurrentWithHonest is how many abusive messages were refused on a
+	// round trip that OVERLAPPED a honest exchange's own flight.
+	//
+	// It is the overlap instrument, and it is an interval intersection rather than
+	// an event-in-window test: the abuser samples the honest client's in-flight
+	// state immediately before it writes and again at the moment it counts the
+	// refusal, and both endpoints are published by the goroutine that owns them.
+	// See [boltDecodeSwarm.abuser] for the sampling and
+	// [checkBoltDecodeSwarmNonVacuity] for what the clause may and may not read
+	// into it.
+	RefusalsConcurrentWithHonest int64
 	// RejectionsDuringHonest is how many abusive messages were refused between the
 	// first honest exchange starting and the last one finishing.
 	//
-	// It is REPORTED, never thresholded. It is a count of events over an interval
-	// whose length the machine controls, so any floor on it passes on an idle host
-	// and fails on a busy one (rmp #2587). The density claim — that the server was
-	// under pressure for the whole time it was serving honest traffic, which is
-	// what "honest traffic stays live under backpressure" has to mean before the
-	// per-exchange overlap can sharpen it — is adjudicated per SEGMENT instead; see
-	// [boltDecodeSwarmPressureSegments]. This total is kept in the rendering so an
-	// eroding margin stays visible.
+	// No FLOOR is ever put on it beyond nonzero. It is a count of events over an
+	// interval whose length the machine controls, so any floor above that passes on
+	// an idle host and fails on a busy one — which is exactly what two earlier
+	// versions of nv-swarm-pressure-density did (rmp #2587). What the clause asks
+	// of it is only that it is not zero: pressure was still live once honest
+	// service had begun. Where those refusals fell inside the window is REPORTED
+	// per segment and adjudicated nowhere; see [boltDecodeSwarmPressureSegments].
+	//
+	// It is the TOTAL over the window and cannot carry the overlap claim on its own:
+	// a fleet that took turns with the honest client, never once refusing on a round
+	// trip that overlapped honest work, would produce a large count here and witness
+	// nothing about concurrency. Overlap is adjudicated on
+	// RefusalsConcurrentWithHonest above, and this total is what gates it — a window
+	// that held no refusals at all is this clause's own subject, not that one's.
 	RejectionsDuringHonest int64
 	// PressureStarted records whether the honest client saw a refusal counted
 	// before it began, i.e. whether the start barrier was satisfied rather than
@@ -1394,9 +1434,10 @@ func boltDecodeCountLabel(c *WireClient, label string) (int, error) {
 //   - at least one message was refused (the pressure was real) and at least one
 //     was served (the pool is not simply broken — a pool stuck at zero would
 //     satisfy "every refusal is typed" perfectly);
-//   - every honest exchange returned the value the harness computed for it, and at
-//     least one of them STRADDLED a refusal, so honest service demonstrably
-//     overlapped the pressure window rather than merely preceding or following it;
+//   - every honest exchange returned the value the harness computed for it, and a
+//     refusal was counted while one of them was IN FLIGHT, so honest service
+//     demonstrably overlapped the pressure window rather than merely preceding or
+//     following it (see [boltDecodeSwarmInFlightRefusals]);
 //   - the pool comes back: a message sized to the whole ceiling is admitted once
 //     the swarm quiesces.
 //
@@ -1440,6 +1481,8 @@ func RunBoltDecodeSwarm(ctx context.Context, seed uint64) (*BoltDecodeEvidence, 
 	if err := s.run(ctx, NewSeed(seed^boltDecodeSwarmSeedMix)); err != nil {
 		return nil, err
 	}
+	// Read after every goroutine has joined, so no further increment is possible.
+	ev.RefusalsConcurrentWithHonest = s.concurrent.Load()
 
 	// The pool must be whole again. This runs after every abuser and the honest
 	// client have joined, so nothing else can be holding a reservation.
@@ -1474,16 +1517,32 @@ func RunBoltDecodeSwarm(ctx context.Context, seed uint64) (*BoltDecodeEvidence, 
 type boltDecodeSwarm struct {
 	srv *SimServer
 	ev  *BoltDecodeEvidence
-	// rejected is the fleet-wide count of typed pool refusals, sampled by the
-	// honest client either side of every exchange. It is the OVERLAP instrument:
-	// a strictly increasing sample across one honest round trip proves abusive
-	// traffic was being refused while that round trip was in flight, without any
-	// reference to a clock.
+	// rejected is the fleet-wide count of typed pool refusals, sampled by the honest
+	// client either side of every exchange and once at each end of its whole run.
+	//
+	// It is the DENSITY instrument: the difference across the run is what tells
+	// nv-swarm-pressure-density whether the pressure was still live once honest
+	// service had begun. It is not the overlap instrument, and the difference across
+	// a single exchange does not prove a refusal was issued while that exchange was
+	// in flight — an abuser increments it only after decoding its reply, which the
+	// injected experiment on [boltDecodeSwarmInFlightRefusals] shows is late enough
+	// to make that reading wrong. Overlap is measured by the fleet instead; see
+	// [boltDecodeSwarm.concurrent].
 	rejected atomic.Int64
 	// honestDone is set once the honest client has finished its exchanges. The
 	// abusers read it every round and stop, so the pressure window is guaranteed to
 	// have OUTLASTED the honest window rather than merely overlapped it by luck.
 	honestDone atomic.Bool
+	// honestFlight is how many honest exchanges are in flight right now (0 or 1:
+	// the honest client is sequential), and honestStarts counts how many it has
+	// begun. The abusers read both either side of every message they send, which is
+	// what lets a refusal be attributed to a round trip that OVERLAPPED honest work
+	// rather than to one that merely followed it; see [boltDecodeSwarm.abuser].
+	honestFlight atomic.Int64
+	honestStarts atomic.Int64
+	// concurrent counts refusals whose round trip overlapped honest flight. It is
+	// the quantity nv-swarm-overlap adjudicates.
+	concurrent atomic.Int64
 	// mu guards the evidence slices the abusers append to. The abusers' own results
 	// are order-independent (the report is a census, never a sequence), so a plain
 	// mutex is the right primitive and the ordering it does not provide is not
@@ -1658,11 +1717,16 @@ func (s *boltDecodeSwarm) abuser(ctx context.Context, id int) error {
 		}
 		// Keep pushing until the honest client has finished, but never fewer than
 		// the floor: the honest window must lie INSIDE the pressure window, and a
-		// honest client that finished before the pressure built must still find
-		// some to have straddled.
+		// honest client that finished before the pressure built must still meet a
+		// fleet that is pushing.
 		if round >= boltDecodeSwarmMinRounds && s.honestDone.Load() {
 			break
 		}
+		// Sampled immediately before the write and again at the moment the refusal is
+		// counted. Their disjunction below is exact: honest work was in flight at the
+		// start of this round trip, or at its end, or an exchange began and ended
+		// entirely inside it.
+		flightBefore, startsBefore := s.honestFlight.Load(), s.honestStarts.Load()
 		resp, err := c.Run(boltDecodeProbeQuery, boltDecodeParams(s.abuseN))
 		if err != nil {
 			// A transport fault is recorded, not returned: a reassembly-layer budget
@@ -1679,6 +1743,9 @@ func (s *boltDecodeSwarm) abuser(ctx context.Context, id int) error {
 		if kind == "FAILURE" {
 			key = code
 			s.rejected.Add(1)
+			if flightBefore > 0 || s.honestFlight.Load() > 0 || s.honestStarts.Load() > startsBefore {
+				s.concurrent.Add(1)
+			}
 		}
 		s.mu.Lock()
 		s.ev.AbuserReplies[key]++
@@ -1749,11 +1816,16 @@ func (s *boltDecodeSwarm) honest(ctx context.Context, pauses []time.Duration) er
 			ok  bool
 			got int64
 		)
+		// Published for the fleet, around the wire operations alone: the pause before
+		// this exchange is NOT honest work in flight and must not be claimed as it.
+		s.honestStarts.Add(1)
+		s.honestFlight.Add(1)
 		if h.Wide {
 			ok, got = boltDecodeWideExchange(c, int64(i))
 		} else {
 			ok, got = boltDecodeFollowUp(c, int64(i))
 		}
+		s.honestFlight.Add(-1)
 		h.Elapsed = time.Since(start)
 		h.RejectionsAfter = s.rejected.Load()
 		h.OK, h.Value = ok, got
@@ -2524,27 +2596,14 @@ func checkBoltDecodeLeakProbeTight(e *BoltDecodeEvidence, p BoltDecodeProbe, cla
 
 // boltDecodeSwarmMinWide is how many WIDE honest exchanges a run must have driven.
 //
-// The overlap clause gates on the wide exchanges and on nothing else, because
-// they are the only ones whose in-flight window is guaranteed to be wider than
-// the interval between refusals. A run that drove none of them would satisfy the
-// clause by having nothing to check, so the count is asserted separately.
+// Nothing thresholds how many of them straddled a refusal any more — that was the
+// rate rmp #2596 removed — but the run still has to DRIVE them, and the overlap
+// clause still depends on them. At [boltDecodeSwarmWideHold] each they are most of
+// the honest client's in-flight time, and that is the time an abusive round trip has
+// to overlap for nv-swarm-overlap to count it: a run reduced to narrow exchanges
+// would shrink it by an order of magnitude. They are also the shape the report's
+// margin line is computed from.
 const boltDecodeSwarmMinWide = boltDecodeSwarmHonestOps / boltDecodeSwarmWideEvery
-
-// boltDecodeSwarmMinWideStraddles is how many of those wide exchanges must have
-// straddled a refusal.
-//
-// Half of them, not all and not one. Measured under -race at the 50 ms hold: 4 of
-// 4 wide exchanges straddled on every one of 25 seeds, with the narrowest wide
-// window holding 9 to 11 refusals; the 100-seed soak sweep, which runs under
-// heavier concurrent load, saw a WORST case of 6. A 20 ms hold had held only 2 or
-// 3, which is what the widening bought. The hold is ~13x the measured
-// inter-refusal interval (3.8 ms of honest in-flight time per refusal) and ~79x
-// the median narrow exchange (633 us), which is why the wide ones straddle and the
-// narrow ones mostly do not. Requiring all four would make one unlucky window a
-// red run; requiring one would leave the clause resting on a single sample, which
-// is not a threshold at all. Half keeps real falsification power with a measured
-// margin behind it.
-const boltDecodeSwarmMinWideStraddles = boltDecodeSwarmMinWide / 2
 
 // boltDecodeSwarmPressureSegments is how many contiguous segments the honest
 // client's run is split into FOR REPORTING. Nothing thresholds it.
@@ -2583,6 +2642,96 @@ func boltDecodeSwarmSegmentRefusals(honest []BoltDecodeHonest) []int64 {
 		out[s] = honest[hi-1].RejectionsAfter - honest[lo].RejectionsBefore
 	}
 	return out
+}
+
+// boltDecodeSwarmInFlightRefusals is how many abusive refusals were OBSERVED while
+// a honest exchange was in flight, judged by the fleet-wide counter sampled either
+// side of each exchange.
+//
+// DIAGNOSTIC ONLY — no clause thresholds it, and the section below is why. The
+// overlap claim is adjudicated on
+// [BoltDecodeEvidence.RefusalsConcurrentWithHonest] instead, which the abusers
+// measure at their own round trips rather than inferring from this counter.
+//
+// It is reported because it is the visible half of the arithmetic a reader expects:
+// this quantity plus [boltDecodeSwarmGapRefusals] is exactly
+// `RejectionsDuringHonest`, so the three together show where the pressure fell
+// relative to the honest client's own samples.
+//
+// # Why nothing thresholds it: measured on the shape it replaced
+//
+// Requiring half of the four wide exchanges to have straddled a refusal — the
+// clause rmp #2596 removed — asked each fixed 50 ms window separately to contain an
+// event, which is a rate. Over 96 swarm runs under 32 concurrent
+// coverage-instrumented test binaries on the reference host, 13 failed that floor
+// on a clean engine and nothing else in the gate fired. Widening it to "any refusal
+// observed inside any exchange" was measured too, and is not enough either: in the
+// whole-module coverage regime the gate actually runs in, that quantity came back
+// as 1 on 2 of 4 runs. A coverage clause whose measured minimum is a single event
+// has no margin at all.
+//
+// # What no clause built on this counter can claim, MEASURED
+//
+// The counter is incremented by an abuser goroutine AFTER its refusal reply has
+// been decoded, and the server released the budget and wrote that reply strictly
+// earlier. So each refusal is counted some unbounded, load-dependent time after it
+// happened, and an in-flight attribution is "OBSERVED while in flight", never
+// "issued while in flight".
+//
+// That lag is not a rounding error, it DOMINATES. Injected experiment (rmp #2596):
+// the fleet was made to hold off sending while any honest exchange was in flight,
+// so that no refusal could possibly be issued during one — the exact behaviour a
+// server serialising honest statements against the fleet would show. The
+// instrument still attributed 16 to 25 refusals per run to honest flight and still
+// reported 4 of 4 wide exchanges straddling, and every clause in the gate stayed
+// green over 6 runs. An abusive round trip carries 4.5 MiB and outlasts a honest
+// exchange, so refusals it produced land in the counter well after the exchange
+// they were concurrent with has closed.
+//
+// So this counter cannot carry the claim. What replaced it does not ask WHEN a
+// refusal was counted at all: each abuser samples the honest client's in-flight
+// state immediately before it writes and again at the moment it counts the refusal,
+// and a refusal is attributed to honest work only when those two samples bracket a
+// honest exchange's own flight. That is an intersection of two intervals, each
+// endpoint published by the goroutine that owns it, instead of an event compared
+// against a window it was recorded into late. Measured on an uninstrumented host it
+// attributes 413 to 432 of a run's 424 to 439 window refusals, against roughly half
+// for this counter — and under the injected experiment above it is the instrument
+// that can go to zero, because the fleet and the honest client really did take
+// turns.
+//
+// Sharper still would have to come from the server, and there is nothing to hand:
+// packstream.InboundBudget (bolt/packstream/inbound_budget.go) is an atomic counter
+// with no observer, and internal/metrics is a process-global sink another scenario
+// may already have replaced, so routing through it would be cross-scenario
+// contamination rather than a measurement.
+func boltDecodeSwarmInFlightRefusals(honest []BoltDecodeHonest) int64 {
+	var n int64
+	for i := range honest {
+		if d := honest[i].RejectionsAfter - honest[i].RejectionsBefore; d > 0 {
+			n += d
+		}
+	}
+	return n
+}
+
+// boltDecodeSwarmGapRefusals is how many abusive messages were refused in the gaps
+// BETWEEN honest exchanges: after one exchange's closing sample and before the
+// next one's opening sample.
+//
+// DIAGNOSTIC ONLY — no clause thresholds it. It is rendered on every failing swarm
+// run because it is the other half of the same total, and the two together are
+// what make a shortfall in [boltDecodeSwarmInFlightRefusals] readable: pressure
+// that stopped altogether looks nothing like pressure that kept going while the
+// honest client happened to be descheduled.
+func boltDecodeSwarmGapRefusals(honest []BoltDecodeHonest) int64 {
+	var n int64
+	for i := 1; i < len(honest); i++ {
+		if d := honest[i].RejectionsBefore - honest[i-1].RejectionsAfter; d > 0 {
+			n += d
+		}
+	}
+	return n
 }
 
 // checkBoltDecodeSwarmNonVacuity reports what the concurrent arm failed to
@@ -2627,6 +2776,40 @@ func boltDecodeSwarmSegmentRefusals(honest []BoltDecodeHonest) []int64 {
 //
 // The per-segment distribution and the total are RENDERED on every failing run
 // (see [BoltDecodeEvidence.renderSwarm]) so the erosion stays visible as data.
+//
+// # How nv-swarm-overlap differs from it, and why both are needed
+//
+// The density clause asks whether the honest window held any refusal at all.
+// nv-swarm-overlap asks a strictly harder question about the same events: whether
+// any of them was drawn on a round trip that OVERLAPPED a honest exchange's own
+// flight, rather than starting and finishing between two of them (see
+// [BoltDecodeEvidence.RefusalsConcurrentWithHonest]).
+//
+// The two are not one predicate, and the difference is the arm's whole reason to
+// exist. A fleet and a honest client that took turns would satisfy density
+// perfectly: the pressure was there, it just never coincided with honest work. That
+// is what a server serialising honest statements against the fleet would look like,
+// and it is reachable only by a concurrent arm — every other clause in this file a
+// deterministic script could satisfy.
+//
+// Overlap can therefore fail while density passes, which is proved by fixture in
+// [TestBoltDecodeSwarm_OverlapIsNotTheDensityClause] and by injection in the
+// harness experiment recorded on [boltDecodeSwarmInFlightRefusals]. What it cannot
+// do is fail while density fails: it is gated on the window having held refusals at
+// all, so one cause is never reported as two findings.
+//
+// Neither clause thresholds a rate. Density asks that the window's total is
+// nonzero; overlap asks that the overlapping count is nonzero. rmp #2596 removed
+// the last rate in this gate, which was a floor of 2 on how many of the four wide
+// exchanges individually contained a refusal.
+//
+// The two counts are close but neither contains the other. Overlap counts refusals
+// drawn on a round trip that overlapped honest flight, and such a round trip can
+// have its refusal counted after the honest window has closed — measured, one
+// loaded run reported 9 overlapping against a window total of 6. Both counts were
+// measured together: the overlapping count's minimum was 4 over 96 runs under 32
+// concurrent coverage-instrumented binaries, 386 over a 100-seed sweep on an idle
+// host, and it ran at about 97% of the window total there.
 func checkBoltDecodeSwarmNonVacuity(e *BoltDecodeEvidence) []Violation {
 	var v []Violation
 	if e.AbuserRejected == 0 {
@@ -2644,32 +2827,29 @@ func checkBoltDecodeSwarmNonVacuity(e *BoltDecodeEvidence) []Violation {
 				"satisfies 'every refusal is typed' exactly, so at least one message has to get through "+
 				"for the refusals to mean the pool was FULL rather than BROKEN", e.AbuserRejected)))
 	}
-	wide, wideStraddled, narrowStraddled := 0, 0, 0
+	wide := 0
 	for i := range e.Honest {
-		h := &e.Honest[i]
-		straddled := h.RejectionsAfter > h.RejectionsBefore
-		switch {
-		case !h.Wide:
-			if straddled {
-				narrowStraddled++
-			}
-		default:
+		if e.Honest[i].Wide {
 			wide++
-			if straddled {
-				wideStraddled++
-			}
 		}
 	}
-	if wideStraddled < boltDecodeSwarmMinWideStraddles {
+	// Gated on there having BEEN pressure inside the honest window. A run whose
+	// window held no refusal at all is nv-swarm-pressure-density's subject, and
+	// reporting it here as well would name one cause twice while looking like two
+	// findings. This clause answers only the next question: given that the window
+	// held refusals, did any of them coincide with honest work in flight?
+	if e.RefusalsConcurrentWithHonest <= 0 && e.RejectionsDuringHonest > 0 {
 		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-swarm-overlap",
-			fmt.Sprintf("only %d of %d WIDE honest exchanges STRADDLED a refusal, want at least %d "+
-				"(each held its stream open for %s; %d narrow exchanges straddled; start barrier "+
-				"satisfied: %v). A wide exchange's window is wider than the interval between refusals by "+
-				"design, so a shortfall means honest service did not overlap the pressure window — the "+
-				"run shows honest traffic working BEFORE or AFTER the abuse and never DURING it, which "+
-				"is the only thing the liveness claim is about",
-				wideStraddled, wide, boltDecodeSwarmMinWideStraddles, boltDecodeSwarmWideHold,
-				narrowStraddled, e.PressureStarted)))
+			fmt.Sprintf("NOT ONE of the %d refusals drawn while the honest client was running was drawn "+
+				"on a round trip that OVERLAPPED a honest exchange's own flight: every one of them "+
+				"started and finished between two honest exchanges (%d were observed inside an exchange "+
+				"and %d in the gaps between them; %d wide exchanges each held their stream open for %s; "+
+				"per segment %v; start barrier satisfied: %v). The fleet and the honest client then took "+
+				"turns instead of overlapping, and this arm exists precisely to drive them at the same "+
+				"time — a deterministic script can reach everything else it asserts",
+				e.RejectionsDuringHonest, boltDecodeSwarmInFlightRefusals(e.Honest),
+				boltDecodeSwarmGapRefusals(e.Honest), wide, boltDecodeSwarmWideHold,
+				boltDecodeSwarmSegmentRefusals(e.Honest), e.PressureStarted)))
 	}
 	// The honest window must lie INSIDE the pressure window: pressure demonstrably
 	// under way before honest service began, and still live once it had. Both halves
@@ -2693,9 +2873,11 @@ func checkBoltDecodeSwarmNonVacuity(e *BoltDecodeEvidence) []Violation {
 	}
 	if wide < boltDecodeSwarmMinWide {
 		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-swarm-wide-exchanges",
-			fmt.Sprintf("the honest client ran %d wide exchanges, want at least %d: the overlap clause "+
-				"gates on those alone, so a run without them certifies nothing about overlap",
-				wide, boltDecodeSwarmMinWide)))
+			fmt.Sprintf("the honest client ran %d wide exchanges, want at least %d: at %s each they are "+
+				"most of the in-flight time an abusive round trip has to overlap for the overlap clause "+
+				"to count it, so a run without them shrinks that time by an order of magnitude and "+
+				"certifies far less about overlap than the clause reads as claiming",
+				wide, boltDecodeSwarmMinWide, boltDecodeSwarmWideHold)))
 	}
 	if len(e.Honest) != boltDecodeSwarmHonestOps {
 		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-swarm-honest-count",
@@ -2799,10 +2981,10 @@ func (e *BoltDecodeEvidence) renderSwarm() string {
 			}
 		}
 	}
-	// The margin the wide clause rests on is the SMALLEST number of refusals any
-	// wide window contained: 1 would mean the construction only just held, and a
-	// large number means it held with room to spare. Reporting it is what keeps a
-	// clause that stopped being robust visible before it starts failing.
+	// The SMALLEST number of refusals any wide window contained. No clause reads
+	// it — rmp #2596 removed the threshold that did — but it is the sharpest single
+	// number for how quickly the fleet was being refused relative to a 50 ms
+	// honest hold, so it is reported and the margin stays visible as data.
 	minWideRefusals := -1
 	for i := range e.Honest {
 		h := &e.Honest[i]
@@ -2816,9 +2998,12 @@ func (e *BoltDecodeEvidence) renderSwarm() string {
 	}
 	fmt.Fprintf(&b, "  honest: %d/%d served correctly, %d straddled a refusal "+
 		"(wide: %d/%d, narrowest wide window held %d refusals; %d refusals across the honest run, "+
-		"per segment %v)\n",
+		"%d of them in flight and %d in the gaps between exchanges, per segment %v)\n",
 		served, len(e.Honest), straddled, wideStraddled, wide, minWideRefusals,
-		e.RejectionsDuringHonest, boltDecodeSwarmSegmentRefusals(e.Honest))
+		e.RejectionsDuringHonest, boltDecodeSwarmInFlightRefusals(e.Honest),
+		boltDecodeSwarmGapRefusals(e.Honest), boltDecodeSwarmSegmentRefusals(e.Honest))
+	fmt.Fprintf(&b, "  overlap: %d of those %d refusals were drawn on a round trip overlapping a "+
+		"honest exchange in flight\n", e.RefusalsConcurrentWithHonest, e.RejectionsDuringHonest)
 	for _, te := range e.TransportErrors {
 		b.WriteString("  transport loss: " + te + "\n")
 	}

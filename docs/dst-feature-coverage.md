@@ -537,6 +537,159 @@ call and each scenario carries a terminal gate asserting a **non-zero checkpoint
 count**, so a configuration that stops taking effect fails the run rather than
 passing quietly.
 
+### Index CONTENTS across the snapshot boundary: hydrate or rebuild (rmp #2490)
+
+#2464 brought the index **definitions** across the boundary. Their **contents**
+stayed out of reach: a recovered index is populated either by DESERIALIZING the
+snapshot's `indexes/<name>.bin` payload or by rebuilding from the recovered graph,
+and the simulator built its engine through `cypher.NewEngineWithStoreAndSchema`,
+which carries no payloads and therefore **always rebuilt**. Every
+`indexes/<name>.bin` the DST published was written and never read. The
+`index-diversity` scenario's own comment asserted recovery
+"re-registers and re-backfills" as unconditional; it is now conditional, and the
+comment is corrected.
+
+The decision is per index, by name, and hydration requires all three of:
+
+1. the snapshot was **self-sufficient** (it carried `mapper.bin`, so the payload's
+   raw node ids still name the same nodes);
+2. the payload is **readable and CRC-valid**;
+3. **nothing the replayed WAL suffix committed touched that index's
+   `(label, property)`** — the only precondition the engine, rather than recovery,
+   can evaluate, because only the engine knows which pair a name covers.
+
+Anything else is a rebuild. That is what makes the surface hard to test: a
+hydrated index and a rebuilt one must, by contract, answer **identically**, so no
+result-level oracle can tell them apart. The only sound instrument is the
+engine-scoped population counter `cypher.Engine.RecoveredIndexPopulation`
+(process-global `store.recovery.indexes.*` metrics cannot attribute a decision to
+one reopen, and the swarm runner builds engines concurrently), asserted in **both**
+directions with the answers verified independently on top.
+
+`index-diversity` therefore drives **two constructed arms**, not two hoped-for
+coincidences. Under its churn the WAL suffix carries a `:Person` write almost
+every tick, so the refused branch is the outcome of nearly any crash and the
+hydrate branch would need a crash landing on the very tick a checkpoint published,
+before that tick's write. Waiting for that would let the crash schedule, not the
+engine, decide whether the arm ran.
+
+| arm | construction | required population | measured (seed `0x10DE5`, 3000-node short slice) |
+|---|---|---|---|
+| **hydrate** | forced crossing of the snapshot boundary (`crossSnapshotBoundaryOn`): checkpoint, measure the WAL emptied, crash, reopen — nothing committed in between | every registered index **HYDRATED**, none rebuilt, **zero** node references backfilled | `hydrated=6 rebuilt=0 registered=6 backfilled=0`, with the crossing measuring `WAL 853468 → 0 bytes, replayed 0 WAL ops, snapshot published=true` |
+| **stale** | commit one `:Person {name, age, city}` on top of that snapshot, crash, reopen | every registered index **REBUILT**, none hydrated, and the post-checkpoint write reachable **through** those indexes | `hydrated=0 rebuilt=6 registered=6 backfilled=18006 walOps=5 probeVisible=true` |
+
+Six, not three, because each of the three user indexes carries an internal
+numeric companion; the assertion is anchored to `ListIndexes()` rather than to a
+constant so it survives that set changing.
+
+Two independent witnesses back each arm rather than one flag reporting on itself.
+The hydrate arm reuses the #2468 forced crossing and adjudicates it with
+`checkSnapshotSourcedRecovery`, which MEASURES the WAL going to zero and the
+recovery replaying zero ops — the substrate-level reason hydration is permitted.
+The stale arm requires `walOps > 0`, the substrate-level reason it is refused;
+without a replayed op the payload would have been hydratable and "rebuilt" would
+be the wrong expectation.
+
+The stale arm's second half is the DST analogue of the staleness gate, and it is
+what makes the first half matter. "Rebuilt" is the right answer only because the
+payload describes a state the graph has left; the consequence of getting it wrong
+is an index that silently omits every write committed after the checkpoint. So
+each indexed property is queried through a predicate the planner serves **from
+the index** — the leaf operator is asserted, because a query the planner scanned
+instead would answer correctly even from a stale index and prove nothing — and the
+answer must both equal an independent full-scan reference and contain the node the
+payload cannot know about.
+
+The in-loop crashes record which branch they took (`loop[reopens=3 hydrated=0
+rebuilt=18]` on that slice) but assert neither: under churn the rebuild branch is
+the correct answer for almost every one of them, and requiring either would put
+the crash schedule back in charge of the verdict. The terminal gate requires both
+CONSTRUCTED arms to have run, and is silent on a WAL-only configuration, which has
+no snapshot to hydrate from — a coverage clause may only fail a run whose
+precondition was constructed.
+
+Neither arm touches `Simulator.checkpointCount` or `crashCount`, which is why
+they call the store-level `crossSnapshotBoundaryOn` rather than the `Simulator`
+method that wraps it. Those counters are what the #2457/#2464 checkpoint gates
+assert on, and an arm that ran unconditionally and incremented them would satisfy
+those gates by itself and silence exactly the defect they were written to catch.
+
+### Conjunctive index intersection and its budgeted gate (rmp #2490)
+
+The planner composes two single-property indexes on the same label into one
+access path by ANDing their range bitmaps (`cypher/index_intersect_plan.go`,
+#2134), reaching that decision through a **budgeted** cardinality count per
+conjunct (#2266): `RangeCountFrom` for a string conjunct with no upper bound,
+`RangeCount` for one with both. None of it was reachable under the DST, because
+no scenario ever issued a two-predicate conjunction over two btree-indexed
+properties of one label — every indexed probe the simulator drove constrained a
+**single** property, which is the shipped single-property range seek and a
+different code path.
+
+`index-diversity` is the scenario that can reach it: it declares three indexes on
+`:Person`, two of them BTREE (`age` numeric, `city` string). The hash index on
+`name` deliberately cannot participate, since the recogniser requires a bound
+BTREE per conjunct.
+
+| arm | predicate | drives | order claim |
+|---|---|---|---|
+| `intersect-range-count-from` | `n.age >= A AND n.city >= 'c9k'` | the unbounded-above string branch (`RangeCountFrom`) | **yes** — see below |
+| `intersect-range-count` | `n.age >= A AND n.city STARTS WITH 'cNN'` | the bounded string branch (`RangeCount`) | no |
+| `solo-control` | `n.city >= 'c9k'` | the single-property range seek | n/a |
+
+Each composed arm runs in its literal and its parameterised spelling, is
+result-verified as an id-multiset against one plain label scan filtered
+client-side, and must retain its residual `Filter` — each part is only a SUPERSET
+of its conjunct (#F-EXEC1), so the exact predicate must still be re-applied per
+row.
+
+Three details are load-bearing:
+
+* **The composed marker is specific.** A composition renders one `∩ range=` per
+  index beyond the primary; the multi-label conjunction joins its labels with a
+  bare `∩` and no `range=`. The composition reuses
+  `exec.NodeByIndexRangeScan`, so the operator *name* cannot distinguish it —
+  which is why the `solo-control` arm exists. It must seek through that very
+  operator and still render no `∩ range=`, or nothing establishes that the marker
+  discriminates a composition rather than "some index was used".
+* **The rendered string bound identifies the SHAPE, not the function body.**
+  `"c95"..+inf` is rendered only when the extracted upper bound is nil, which is
+  exactly the condition `budgetedStringRangeCount` switches on to call
+  `RangeCountFrom`. So the fragment proves the arm drove that branch of the gate.
+  It does **not** pin the branch's body: rewriting `RangeCountFrom(lo, budget)` as
+  `RangeCount(lo, "\xff\xff\xff\xff", budget)` was measured to change nothing
+  observable, because every key in this fixture sorts below that sentinel. Such a
+  rewrite is an *equivalent mutant* and no result- or plan-level oracle can see
+  it; the counting functions themselves are pinned by
+  `graph/index/btree/range_from_test.go`.
+* **The AND order is the only observable a counted VALUE has.** The parts are
+  ANDed in ascending exact count, ties broken on the property key, and nothing
+  else in the plan or the answers depends on what the gate counted. The
+  unbounded-above arm therefore predicts the order from the two cardinalities it
+  derived client-side — both of its bounds are closed below and unbounded above,
+  so neither count is a superset — and requires the plan to agree. Counting one
+  city bucket instead of the tail (`RangeCount(lo, lo, budget)`) is invisible to
+  every result and every bound, and inverts this order. The bounded arm makes no
+  order claim: the planner counts a prefix over the CLOSED interval
+  `[prefix, prefix+1]`, which on this data spans the next city value too, so
+  predicting it client-side would mean re-implementing the operator's superset
+  semantics instead of observing it.
+
+The windows are drawn from the checker's own sub-seed (`intersectSeedMix`) so the
+workload, crash, parity, seek-result and statistics streams stay byte-identical,
+and sized to keep the string side comfortably the larger conjunct (at least
+1.67×), which is what keeps an under-count detectable rather than seed-dependent.
+`NewIndexIntersectProbes` **panics** on a fixture below the planner's 1024-node
+label-population floor plus margin, rather than producing arms that assert a
+composition which cannot happen.
+
+Measured on the 3000-node short slice: `composed=18 withRows=18 soloSeeks=9`. The
+terminal gate requires all three to be non-zero.
+
+Half-open `>= lo` **single-property** range probes are deliberately NOT duplicated
+here: rmp #2450 already ships them in `IndexSeekResults`, with the floor sized at
+~9% selectivity precisely so `RangeFrom` / `RangeCountFrom` engage.
+
 ### Group-commit coalescing and fail-all (rmp #2471)
 
 This section previously stated that every write commit — including its WAL
@@ -2304,27 +2457,52 @@ lock-step script can never observe two charges outstanding at once, whatever it 
 `bolt-decode-swarm` scenario runs four abusers at 55% of an 8 MiB pool (one fits, two
 cannot) against an honest client on its own connection.
 
-**Two of its oracles had to be CONSTRUCTED rather than raced for, and the cost of not doing
-so was measured at each step.** Started together with fixed counts, the abusers finished in
-~38 ms while the honest client was still pausing between exchanges: exactly ONE of 24
-honest exchanges straddled a refusal, a coverage clause one scheduling decision from
-failing for no reason and one from PASSING while the run showed honest traffic working
-before and after the pressure rather than during it. Pinning the window's ENDS — the honest
-client waits for the first refusal, the abusers push until it finishes — took it to 9 of
-24. That is still a race, and the measurement says why: under `-race` a narrow honest
-exchange takes 633 us at the median (357 us to 902 us over 20 samples) while refusals
-arrive about once per 3.8 ms of honest in-flight time, so most exchanges land in a gap. So
-the WIDTH is controlled too: every sixth honest exchange holds its open stream for 50 ms
-between RUN and PULL, genuinely in flight with the server holding a cursor for it, and the
-overlap clause gates on those alone. That hold is ~13x the inter-refusal interval and ~79x
-the median narrow exchange. Measured 4 of 4 across 25 seeds under `-race`, with the
-narrowest wide window holding 9 to 11 refusals against the 2 to 3 a 20 ms hold gave; the
-100-seed soak sweep, which runs under heavier concurrent load, saw a worst case of 6, and
-it asserts that worst case rather than only the pass. The hold is deliberately NOT
-a wait for a refusal to be counted: that would make the clause true by construction of the
-HARNESS instead of by behaviour of the SERVER. An independent density clause requires the
-whole honest run to contain at least 8 refusals (measured 41 to 47), so the liveness claim
-does not rest on the per-exchange overlap alone.
+**Its overlap oracle had to be CONSTRUCTED rather than raced for, and every attempt to
+threshold it instead was measured and abandoned.** Started together with fixed counts, the
+abusers finished in ~38 ms while the honest client was still pausing between exchanges:
+exactly ONE of 24 honest exchanges straddled a refusal, a coverage clause one scheduling
+decision from failing for no reason and one from PASSING while the run showed honest
+traffic working before and after the pressure rather than during it. Pinning the window's
+ENDS — the honest client waits for the first refusal, the abusers push until it finishes —
+took it to 9 of 24, and those two pins remain the arm's construction. Controlling the
+WIDTH came next: every sixth honest exchange holds its open stream for 50 ms between RUN
+and PULL, genuinely in flight with the server holding a cursor for it, which is ~13x the
+measured inter-refusal interval and ~79x the median narrow exchange (633 us). That hold is
+deliberately NOT a wait for a refusal to be counted, which would make the clause true by
+construction of the HARNESS instead of by behaviour of the SERVER.
+
+**What the width did not buy was a threshold, and rmp #2596 measured the cost of pretending
+otherwise.** Requiring half of the four wide exchanges to have straddled a refusal compares
+a FIXED 50 ms window against a refusal cadence the machine controls. Under 32 concurrent
+coverage-instrumented test binaries, 9 to 13 of every 96 swarm runs put only 1 of the 4 over
+a refusal and failed that clause on a clean engine, with nothing else in the gate firing; the
+same shape had already reddened `make ci` from the coverage run while passing in the same
+invocation's race run. Widening it to "any refusal observed inside any exchange" was measured
+too and rejected: in the whole-module coverage regime the gate actually runs in, that
+quantity came back as 1 on 2 of 4 runs, which is no margin at all.
+
+**The clause is now an interval intersection measured by the fleet itself.** Each abuser
+samples the honest client's in-flight state immediately before it writes and again at the
+moment it counts a refusal, and the refusal is attributed to honest work only when those
+samples bracket a honest exchange's own flight; nv-swarm-overlap requires that count to be
+nonzero. That replaces asking WHEN a refusal was counted, which is a question the harness
+cannot answer: the counter is incremented by an abuser goroutine after its reply has been
+decoded, so a refusal is recorded a load-dependent time after the server issued it. Driving
+the harness so that no refusal could possibly be issued during a honest exchange left the
+old event-in-window instrument reporting 16 to 25 in-flight refusals per run and the whole
+gate green, while the present one goes to zero and fires on all three catalogue seeds. It
+also has the margin the old one lacked: fewest overlapping refusals in a run was 4 under 32
+concurrent coverage-instrumented binaries, 386 across a 100-seed soak sweep, and the
+overlapping share of a run's window refusals is around 97%.
+
+**Nothing in the arm thresholds a rate any more.** The wide and narrow straddle counts, the
+narrowest wide window, the in-flight and gap splits and the per-segment distribution are all
+reported on every failing run and adjudicated nowhere. The density clause alongside it went
+the same way in rmp #2587: it once required 8 refusals across the honest run, then one per
+segment, and now requires only that the window's total is nonzero. Overlap counts a subset
+of the same events and is gated on that total being nonzero, so the two can never report one
+cause as two findings, and a fleet that took turns with the honest client — pressure present
+throughout, never once concurrent — fails overlap while satisfying density.
 
 **The liveness bound is a wall clock, and this is the case rmp #2567 left standing.** That
 task removed deadlines used as oracles over BOUNDED payloads, where a deadline can only
