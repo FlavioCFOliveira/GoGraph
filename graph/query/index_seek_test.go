@@ -13,6 +13,7 @@ package query_test
 
 import (
 	"fmt"
+	"math"
 	"math/rand"
 	"sort"
 	"testing"
@@ -261,6 +262,27 @@ func projActiveBool(pv lpg.PropertyValue) (bool, bool) {
 	return pv.Bool()
 }
 
+// projAgeNumeric mirrors cypher/index_binding.go projectNumericPropValue: both
+// integer and float values are keyed under ONE float64 order, which is the
+// coverage contract index_seek.go's numeric range arm requires.
+func projAgeNumeric(pv lpg.PropertyValue) (float64, bool) {
+	switch pv.Kind() {
+	case lpg.PropInt64:
+		i, ok := pv.Int64()
+		if !ok {
+			return 0, false
+		}
+		return float64(i), true
+	case lpg.PropFloat64:
+		f, ok := pv.Float64()
+		if !ok || math.IsNaN(f) {
+			return 0, false
+		}
+		return f, true
+	}
+	return 0, false
+}
+
 // collectSorted runs the pattern and returns its results sorted, for a
 // set-equality comparison independent of iteration order.
 func collectSorted(p *query.Pattern[string, int64]) []string {
@@ -355,10 +377,36 @@ func TestSeek_EqualityMatchesScan_AllKinds(t *testing.T) {
 
 // ----- range identity: btree index path == scan path -----------------------
 
+// TestSeek_RangeMatchesScan drives the range predicate against every index
+// shape that can cover (Person, age) and requires all of them to agree with the
+// no-index oracle.
+//
+// The int64-keyed shape is kept deliberately even though #2600 stopped
+// consulting it (an int64-keyed index cannot hold the float-valued nodes a
+// unified numeric range must also match, so it is a subset of the answer, not a
+// superset): what this test then asserts of it is that falling back to the scan
+// still produces the identical set. The numeric companion shape is the one that
+// actually exercises the seek here, and TestSeek_NumericRangeIsResidualFiltered
+// / TestSeek_Int64KeyedBTreeIsNotConsulted are the white-box proofs of WHICH arm
+// each shape takes.
 func TestSeek_RangeMatchesScan(t *testing.T) {
 	t.Parallel()
 
 	const n, seed = 4000, 11
+
+	shapes := []struct {
+		name   string
+		attach func(testing.TB, *lpg.Graph[string, int64])
+	}{
+		{name: "int64-keyed btree (falls back to the scan since #2600)",
+			attach: func(tb testing.TB, g *lpg.Graph[string, int64]) {
+				attachBTreeIndex(tb, g, fxLabelPerson, fxPropAge, "person_age_btree", projAgeInt64)
+			}},
+		{name: "float64 numeric companion (serves the seek)",
+			attach: func(tb testing.TB, g *lpg.Graph[string, int64]) {
+				attachBTreeIndex(tb, g, fxLabelPerson, fxPropAge, "person_age_btree_num", projAgeNumeric)
+			}},
+	}
 
 	cases := []struct {
 		name   string
@@ -368,28 +416,35 @@ func TestSeek_RangeMatchesScan(t *testing.T) {
 		{"age [21,21]", lpg.Int64Value(21), lpg.Int64Value(21)},
 		{"age [60,65]", lpg.Int64Value(60), lpg.Int64Value(65)},
 		{"age [100,200] empty", lpg.Int64Value(100), lpg.Int64Value(200)},
+		// Float bounds over an int64-valued property: the case that diverged
+		// between the two arms before #2600.
+		{"age [30.0,40.0]", lpg.Float64Value(30), lpg.Float64Value(40)},
+		{"age [29.5,40.5]", lpg.Float64Value(29.5), lpg.Float64Value(40.5)},
+		{"age [30,40.5] mixed bounds", lpg.Int64Value(30), lpg.Float64Value(40.5)},
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+	for _, shape := range shapes {
+		for _, tc := range cases {
+			t.Run(shape.name+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
 
-			gScan, cScan := buildEmployeeGraph(t, n, seed)
-			want := collectSorted(query.New(gScan, cScan).Match().
-				Vertex(query.WithLabel[string, int64](fxLabelPerson),
-					query.WithRange[string, int64](fxPropAge, tc.lo, tc.hi)))
+				gScan, cScan := buildEmployeeGraph(t, n, seed)
+				want := collectSorted(query.New(gScan, cScan).Match().
+					Vertex(query.WithLabel[string, int64](fxLabelPerson),
+						query.WithRange[string, int64](fxPropAge, tc.lo, tc.hi)))
 
-			gIdx, cIdx := buildEmployeeGraph(t, n, seed)
-			attachBTreeIndex(t, gIdx, fxLabelPerson, fxPropAge, "person_age_btree", projAgeInt64)
-			got := collectSorted(query.New(gIdx, cIdx).Match().
-				Vertex(query.WithLabel[string, int64](fxLabelPerson),
-					query.WithRange[string, int64](fxPropAge, tc.lo, tc.hi)))
+				gIdx, cIdx := buildEmployeeGraph(t, n, seed)
+				shape.attach(t, gIdx)
+				got := collectSorted(query.New(gIdx, cIdx).Match().
+					Vertex(query.WithLabel[string, int64](fxLabelPerson),
+						query.WithRange[string, int64](fxPropAge, tc.lo, tc.hi)))
 
-			if !equalStrings(got, want) {
-				t.Fatalf("range index path != scan path\n got (%d): %v\nwant (%d): %v",
-					len(got), trunc(got), len(want), trunc(want))
-			}
-		})
+				if !equalStrings(got, want) {
+					t.Fatalf("range index path != scan path\n got (%d): %v\nwant (%d): %v",
+						len(got), trunc(got), len(want), trunc(want))
+				}
+			})
+		}
 	}
 }
 

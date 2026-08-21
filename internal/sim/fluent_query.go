@@ -211,39 +211,59 @@ package sim
 //   - A STRING RANGE on a string property is btree-served: `CREATE INDEX ...
 //     indexType:'btree'` builds a btree.Index[string], which satisfies
 //     btreeRanger[string].
-//   - An INT64 RANGE is NEVER served. A btree CREATE INDEX builds a
-//     btree.Index[string] plus an internal numeric companion
-//     "<label>_<prop>_btree_num" that is a btree.Index[float64] (see
-//     cypher/index_binding.go). Neither satisfies btreeRanger[int64], so an
-//     [lpg.Int64Value]-bounded [query.WithRange] always falls back to the scan.
-//     The int64 range probe here therefore adjudicates the SCAN path and says
-//     so; it does not claim an index seek it cannot have.
+//   - A NUMERIC RANGE — INT64 bounds, FLOAT64 bounds, or one of each — is
+//     btree-served by the internal numeric companion
+//     "<label>_<prop>_btree_num", a btree.Index[float64] the engine registers
+//     alongside the user-named string btree (cypher/index_binding.go). Since
+//     rmp #2600 query.seekRangeInto routes EVERY numeric bound pair to that
+//     index and treats its answer as a SUPERSET rather than as the answer,
+//     because its int64 keys are widened to float64 and round above 2^53;
+//     query.valueInRange then runs over what the seek left as the exact
+//     residual filter. Both the int64-range and the mixed-kind probes below
+//     therefore adjudicate a real seek.
+//     Before #2600 seekRangeInto asserted a btreeRanger[int64] that no
+//     engine-created index satisfies and had no float64 route for int64 bounds,
+//     so an [lpg.Int64Value]-bounded [query.WithRange] was never served at all.
 //
-// # A MEASURED open inconsistency this scenario records but does not assert
+// # The mixed-kind divergence this scenario found, and now asserts
 //
-// The same measurement exposes a real divergence, and the honest thing is to
-// record it rather than to pin either side. With FLOAT64 bounds over an
-// INT64-valued property:
+// The measurement that built this scenario exposed a real divergence, recorded
+// as rmp #2600 and closed by it. With FLOAT64 bounds over an INT64-valued
+// property:
 //
-//   - the SEEK arm is served by the numeric companion btree, which indexes
+//   - the SEEK arm was served by the numeric companion btree, which indexes
 //     PropInt64 and PropFloat64 under one float64 order
-//     (cypher/index_binding.go: projectNumericPropValue), and returns the
+//     (cypher/index_binding.go: projectNumericPropValue), and returned the
 //     numeric matches — the same answer the Cypher engine and the model give;
-//   - the SCAN arm returns NOTHING, because query.valueInRange requires v, lo
+//   - the SCAN arm returned NOTHING, because query.valueInRange required v, lo
 //     and hi to be the SAME PropertyValue kind.
 //
-// So the two paths disagree, which contradicts index_seek.go's own statement
-// that "the index result is identical to the scan result", and
-// [query.WithRange]'s godoc ("bounds of a different kind ... match nothing")
-// describes only the scan. Which side should change is a semantics decision
-// about mixed int/float comparison — openCypher orders integers and floats in a
-// single numeric order, which argues the SCAN is the wrong side — and that
-// decision belongs to the project owner, not to this harness. So the mixed-kind
-// probe here is TELEMETRY: it records all four cardinalities in
-// [FluentQueryEvidence] and asserts nothing about them, and the run always
-// prints them. Turning it into a clause is the follow-up once the semantics are
-// settled; pinning today's behaviour would make the eventual fix look like a
+// The two paths disagreed, contradicting index_seek.go's own claim that they
+// cannot. The semantics were then settled from the primary sources — openCypher
+// orders INTEGER and FLOAT in ONE numeric order, the sole off-diagonal entry of
+// the comparability matrix in the normative CIP "Comparability and
+// Orderability", pinned by the TCK in expressions/comparison/Comparison2.feature
+// ("Comparing across types yields null, except numbers") and
+// Comparison1.feature ("1 = 1.0" is true) — so the SCAN was the defective side.
+//
+// #2600 unified the comparison, made the numeric seek a superset with
+// valueInRange as its exact residual filter, and this probe was promoted from
+// telemetry to the asserted "range-mixed" clause: the mixed-kind window is now
+// adjudicated three ways like every other probe, seek against scan included.
+// While the semantics were still open the probe deliberately asserted nothing,
+// so that pinning the old behaviour could not make the eventual fix look like a
 // regression.
+//
+// TWO windows are driven under that clause, because #2600 had two halves:
+//
+//	range-mixed-point    FLOAT64 bounds over an INT64 property — the divergence
+//	                     above, where the seek was right and the scan empty.
+//	range-mixed-bounds   bounds of DIFFERENT kinds ([age, age+0.5]). This shape
+//	                     used to be refused outright by query.trySeekRange,
+//	                     which bailed whenever lo.Kind() != hi.Kind(), so it was
+//	                     consistently wrong rather than divergent. The CIP makes
+//	                     the two bound tests independent, so the bounds need not
+//	                     share a kind.
 //
 // # Determinism: exactly what is reproducible
 //
@@ -285,7 +305,9 @@ package sim
 //     precondition fires rather than the comparison silently going wrong.
 //   - WHICH index served a seek, observed rather than deduced. See the guard
 //     enumeration above.
-//   - The mixed-kind divergence, which is measured and reported, not asserted.
+//   - WHICH index served a numeric range seek. The numeric companion is
+//     internal (db.indexes() filters its name suffix), so the eligibility
+//     enumeration below is again the available proof, not an observation.
 
 import (
 	"context"
@@ -356,9 +378,9 @@ const (
 // index whose Kind() is "hash" and query.trySeekRange only one whose Kind() is
 // "btree", so the hash serves the equality seek and the btree serves the string
 // range seek over the SAME well-populated property. The (Person, age) btree is
-// created for the mixed-kind TELEMETRY probe only: it is what causes the engine
-// to register the internal numeric companion btree.Index[float64] that serves a
-// float64-bounded range (see the file header).
+// created for the NUMERIC range probes: it is what causes the engine to register
+// the internal numeric companion btree.Index[float64] that serves every numeric
+// bound pair — int64, float64, or one of each (see the file header).
 var fluentQueryDDL = []string{
 	"CREATE INDEX fq_person_name_hash FOR (n:Person) ON (n.name) OPTIONS {indexType:'hash'}",
 	"CREATE INDEX fq_person_name_btree FOR (n:Person) ON (n.name) OPTIONS {indexType:'btree'}",
@@ -797,18 +819,28 @@ type FluentQueryEvidence struct {
 	// means that branch was never exercised.
 	GhostFixtures int
 	GhostArcsSeen int
-	// MixedKindProbes and MixedKindSeekScanDivergences are the TELEMETRY of the
-	// measured open inconsistency described in the file header: a float64-bounded
-	// range over an int64-valued property, where the index-served arm returns the
-	// numeric matches and the scan arm returns nothing. Nothing here is
-	// asserted; the numbers exist so the run reports the finding instead of
-	// hiding it.
-	MixedKindProbes              int
-	MixedKindSeekScanDivergences int
-	MixedKindLastSeek            uint64
-	MixedKindLastScan            uint64
-	MixedKindLastCypher          int
-	MixedKindLastOracle          int
+	// MixedKindProbes counts the mixed-kind probes — FLOAT64 bounds over an
+	// INT64-valued property — and MixedKindNonEmpty how many of them had a
+	// NON-EMPTY model answer. Since rmp #2600 this probe is a full three-way
+	// clause, not telemetry, so the second counter is the one that matters: two
+	// empty sets agree, and a probe that only ever compared empty sets would
+	// make the clause silent rather than satisfied. Both are gated in
+	// [FluentQueryProbes.Finish].
+	//
+	// MixedKindLastSeek and MixedKindLastOracle are the last probe's seek-arm
+	// and model cardinalities, kept so the run REPORTS the number the clause
+	// adjudicated instead of only whether it held.
+	MixedKindProbes     int
+	MixedKindNonEmpty   int
+	MixedKindLastSeek   uint64
+	MixedKindLastOracle int
+	// NumericSeekEligible / NumericSeekIneligible count the batteries at which
+	// every condition of query.trySeekRange held for the internal numeric
+	// companion btree over (Person, age). An ineligible battery means both
+	// numeric arms degraded to a scan and the range-int / range-mixed
+	// seek-vs-scan clauses compared one path with itself.
+	NumericSeekEligible   int
+	NumericSeekIneligible int
 	// CSRRawArcs / CSRLiveArcs are the arc counts of the LAST battery's two CSR
 	// builds, and CSRGenerationsDiffered counts how many batteries — over the
 	// whole run, not just the last — saw the two builds disagree.
@@ -830,9 +862,7 @@ type FluentQueryEvidence struct {
 	Digest uint64
 }
 
-// String renders the evidence for a report and for the run's own output. It
-// always prints the mixed-kind telemetry, so the open finding is visible in
-// every run rather than only in a task summary.
+// String renders the evidence for a report and for the run's own output.
 func (e *FluentQueryEvidence) String() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "batteries=%d (post-recovery=%d) churn=%d", e.Batteries, e.BatteriesAfterRecovery, e.ChurnCycles)
@@ -840,14 +870,13 @@ func (e *FluentQueryEvidence) String() string {
 		e.MaxLiveNames, e.MaxOutTargets, e.MaxTombstonedSlots, e.MaxTombstoneCount)
 	fmt.Fprintf(&b, " strRange=%d/%d(non-empty/empty) intRange=%d/%d",
 		e.StringRangeNonEmpty, e.StringRangeEmpty, e.IntRangeNonEmpty, e.IntRangeEmpty)
-	fmt.Fprintf(&b, " seekEligible hash=%d/%d btree=%d/%d",
-		e.HashSeekEligible, e.HashSeekIneligible, e.BTreeSeekEligible, e.BTreeSeekIneligible)
+	fmt.Fprintf(&b, " seekEligible hash=%d/%d btree=%d/%d numeric=%d/%d",
+		e.HashSeekEligible, e.HashSeekIneligible, e.BTreeSeekEligible, e.BTreeSeekIneligible,
+		e.NumericSeekEligible, e.NumericSeekIneligible)
 	fmt.Fprintf(&b, " ghostFixtures=%d ghostArcs=%d csrArcs raw=%d live=%d csrDiffered=%d",
 		e.GhostFixtures, e.GhostArcsSeen, e.CSRRawArcs, e.CSRLiveArcs, e.CSRGenerationsDiffered)
-	fmt.Fprintf(&b, " MIXED-KIND TELEMETRY (asserted: nothing) probes=%d divergences=%d"+
-		" last(seek=%d scan=%d cypher=%d oracle=%d)",
-		e.MixedKindProbes, e.MixedKindSeekScanDivergences,
-		e.MixedKindLastSeek, e.MixedKindLastScan, e.MixedKindLastCypher, e.MixedKindLastOracle)
+	fmt.Fprintf(&b, " mixedKind=%d/%d(probes/non-empty) last(seek=%d oracle=%d)",
+		e.MixedKindProbes, e.MixedKindNonEmpty, e.MixedKindLastSeek, e.MixedKindLastOracle)
 	fmt.Fprintf(&b, " digest=%#016x", e.Digest)
 	// Telemetry, printed LAST and labelled, so nobody mistakes it for a gated
 	// quantity: it is scheduler-dependent (see the field's doc).
@@ -869,13 +898,13 @@ func (e *FluentQueryEvidence) ReproducibleSummary() string {
 		e.MaxLiveNames, e.MaxOutTargets, e.MaxTombstonedSlots, e.MaxTombstoneCount)
 	fmt.Fprintf(&b, " strRange=%d/%d intRange=%d/%d",
 		e.StringRangeNonEmpty, e.StringRangeEmpty, e.IntRangeNonEmpty, e.IntRangeEmpty)
-	fmt.Fprintf(&b, " seek=%d/%d,%d/%d",
-		e.HashSeekEligible, e.HashSeekIneligible, e.BTreeSeekEligible, e.BTreeSeekIneligible)
+	fmt.Fprintf(&b, " seek=%d/%d,%d/%d,%d/%d",
+		e.HashSeekEligible, e.HashSeekIneligible, e.BTreeSeekEligible, e.BTreeSeekIneligible,
+		e.NumericSeekEligible, e.NumericSeekIneligible)
 	fmt.Fprintf(&b, " ghost=%d/%d csr=%d/%d diff=%d",
 		e.GhostFixtures, e.GhostArcsSeen, e.CSRRawArcs, e.CSRLiveArcs, e.CSRGenerationsDiffered)
-	fmt.Fprintf(&b, " mixed=%d/%d last=%d/%d/%d/%d",
-		e.MixedKindProbes, e.MixedKindSeekScanDivergences,
-		e.MixedKindLastSeek, e.MixedKindLastScan, e.MixedKindLastCypher, e.MixedKindLastOracle)
+	fmt.Fprintf(&b, " mixed=%d/%d last=%d/%d",
+		e.MixedKindProbes, e.MixedKindNonEmpty, e.MixedKindLastSeek, e.MixedKindLastOracle)
 	fmt.Fprintf(&b, " digest=%#016x", e.Digest)
 	return b.String()
 }
@@ -1364,6 +1393,16 @@ func (p *FluentQueryProbes) Check(
 		})
 		return ok
 	})
+	// The NUMERIC companion over (Person, age). Since rmp #2600 query.seekRangeInto
+	// routes every numeric bound pair — int64, float64, or one of each — to a
+	// btreeRanger[float64], so this is the guard the range-int and range-mixed
+	// seek arms depend on. Its absence would silently turn both into scan-vs-scan.
+	numericOK := fqSeekEligibility(g, "btree", fluentQueryLabel, "age", func(s index.Subscriber) bool {
+		_, ok := s.(interface {
+			Range(lo, hi float64) *roaring64.Bitmap
+		})
+		return ok
+	})
 	if hashOK {
 		p.ev.HashSeekEligible++
 	} else {
@@ -1374,12 +1413,17 @@ func (p *FluentQueryProbes) Check(
 	} else {
 		p.ev.BTreeSeekIneligible++
 	}
-	if !hashOK || !btreeOK {
+	if numericOK {
+		p.ev.NumericSeekEligible++
+	} else {
+		p.ev.NumericSeekIneligible++
+	}
+	if !hashOK || !btreeOK || !numericOK {
 		vs = append(vs, fqViolation(ViolationOracleDeviation, tick, "precondition:seek-eligibility",
-			"no bound index satisfies query/index_seek.go's guard for (%s,name): hash[string]=%v "+
-				"btree[string]=%v. The seek arm would silently degrade to the scan, so the "+
-				"seek-vs-scan clause would compare one path with itself",
-			fluentQueryLabel, hashOK, btreeOK))
+			"no bound index satisfies query/index_seek.go's guard: hash[string](%s,name)=%v "+
+				"btree[string](%s,name)=%v btree[float64](%s,age)=%v. The seek arm would silently "+
+				"degrade to the scan, so the seek-vs-scan clause would compare one path with itself",
+			fluentQueryLabel, hashOK, fluentQueryLabel, btreeOK, fluentQueryLabel, numericOK))
 	}
 
 	label := fqLabel(fluentQueryLabel)
@@ -1571,14 +1615,14 @@ func (p *FluentQueryProbes) Check(
 		vs = append(vs, v...)
 	}
 
-	// --- probes: int64 range over `age`. PROVABLY scan-served (see the header):
-	// a btree CREATE INDEX registers a btree.Index[string] plus a
-	// btree.Index[float64] companion, and neither satisfies btreeRanger[int64],
-	// so both arms below reach query.withRange.Match. The pair is still driven
-	// because the two Vertex shapes take different routes INTO the scan
-	// (seekIndexablePreds with a label vs without one), and because this is the
-	// probe that covers the age-absent (MERGE-created) Persons the model
-	// excludes and 3VL filters out of the Cypher answer.
+	// --- probes: int64 range over `age`. Since rmp #2600 the SEEK arm is served
+	// by the numeric companion btree.Index[float64] (see the header) as a
+	// superset, with query.valueInRange as the exact residual filter, while the
+	// SCAN arm reaches query.withRange.Match directly because its predicate sits
+	// in a second Vertex call with no label. So this pair now compares two
+	// genuinely different code paths, and it remains the probe that covers the
+	// age-absent (MERGE-created) Persons the model excludes and 3VL filters out
+	// of the Cypher answer.
 	intWindows := []struct {
 		name   string
 		lo, hi int64
@@ -1628,30 +1672,63 @@ func (p *FluentQueryProbes) Check(
 		vs = append(vs, v...)
 	}
 
-	// --- TELEMETRY (asserted: nothing): float64 bounds over an int64-valued
-	// property. See the file header: the index-served arm and the scan arm
-	// disagree here, which contradicts index_seek.go's own claim that they
-	// cannot. Which side is wrong is a semantics decision for the project owner,
-	// so this records all four cardinalities and pins neither.
+	// --- probe: MIXED-KIND. FLOAT64 bounds over an INT64-valued property, the
+	// divergence this scenario found and rmp #2600 closed (see the file header).
+	// It is now a full three-way clause like every other probe: openCypher orders
+	// INTEGER and FLOAT in ONE numeric order, so the model's int-keyed answer IS
+	// the expected answer for a float-bounded window, and the seek arm (numeric
+	// companion, superset) and the scan arm (query.valueInRange, exact) must both
+	// reproduce it.
 	if haveAged {
 		age := m.persons[agedName].age
 		lo, hi := lpg.Float64Value(float64(age)), lpg.Float64Value(float64(age))
-		seekCard := engLive.Match().Vertex(label, fqRange("age", lo, hi)).Cardinality()
-		scanCard := engLive.Match().Vertex(label).Vertex(fqRange("age", lo, hi)).Cardinality()
-		cypherNames, _, err := fqCypherNames(ctx, eng,
-			"MATCH (n:Person) WHERE n.age >= $lo AND n.age <= $hi RETURN n.name",
-			map[string]any{"lo": float64(age), "hi": float64(age)})
+		want := m.intRange(age, age)
+		p.ev.MixedKindProbes++
+		if len(want) > 0 {
+			p.ev.MixedKindNonEmpty++
+		}
+		p.ev.MixedKindLastOracle = len(want)
+		spec := fqProbeSpec{
+			name:      "range-mixed-point",
+			seek:      engLive.Match().Vertex(label, fqRange("age", lo, hi)),
+			scan:      engLive.Match().Vertex(label).Vertex(fqRange("age", lo, hi)),
+			cypher:    "MATCH (n:Person) WHERE n.age >= $lo AND n.age <= $hi RETURN n.name",
+			params:    map[string]any{"lo": float64(age), "hi": float64(age)},
+			want:      want,
+			armClause: "range-mixed",
+		}
+		v, seekObs, err := p.runProbe(ctx, tick, eng, sub, &spec, perturb)
 		if err != nil {
 			return nil, err
 		}
+		p.ev.MixedKindLastSeek = seekObs.cardinality
+		vs = append(vs, v...)
+
+		// The other half of #2600: bounds of DIFFERENT kinds. query.trySeekRange
+		// used to bail out whenever lo.Kind() != hi.Kind(), which made this shape
+		// consistently wrong rather than merely divergent; the CIP makes the two
+		// bound tests independent, so [age, age+0.5] is a well-formed numeric
+		// window and — ages being integers — its answer is exactly the age-point
+		// answer.
+		loMix, hiMix := lpg.Int64Value(age), lpg.Float64Value(float64(age)+0.5)
 		p.ev.MixedKindProbes++
-		p.ev.MixedKindLastSeek = seekCard
-		p.ev.MixedKindLastScan = scanCard
-		p.ev.MixedKindLastCypher = len(cypherNames)
-		p.ev.MixedKindLastOracle = len(m.intRange(age, age))
-		if seekCard != scanCard {
-			p.ev.MixedKindSeekScanDivergences++
+		if len(want) > 0 {
+			p.ev.MixedKindNonEmpty++
 		}
+		mixedSpec := fqProbeSpec{
+			name:      "range-mixed-bounds",
+			seek:      engLive.Match().Vertex(label, fqRange("age", loMix, hiMix)),
+			scan:      engLive.Match().Vertex(label).Vertex(fqRange("age", loMix, hiMix)),
+			cypher:    "MATCH (n:Person) WHERE n.age >= $lo AND n.age <= $hi RETURN n.name",
+			params:    map[string]any{"lo": age, "hi": float64(age) + 0.5},
+			want:      want,
+			armClause: "range-mixed",
+		}
+		mv, _, err := p.runProbe(ctx, tick, eng, sub, &mixedSpec, perturb)
+		if err != nil {
+			return nil, err
+		}
+		vs = append(vs, mv...)
 	}
 
 	// --- the constructed ghost-arc fixture: the ONLY place Out()'s ghost-arc
@@ -1909,6 +1986,21 @@ func (p *FluentQueryProbes) Finish(tick int64) []Violation {
 	if e.BTreeSeekEligible == 0 {
 		add("btree-seek", "no battery found a bound string btree satisfying query/index_seek.go's "+
 			"guard, so the string range seek arm was never actually index-served")
+	}
+	if e.NumericSeekEligible == 0 {
+		add("numeric-seek", "no battery found the internal numeric companion btree[float64] "+
+			"satisfying query/index_seek.go's guard for (%s,age), so the int64-range and mixed-kind "+
+			"seek arms were never actually index-served and their seek-vs-scan clauses compared one "+
+			"path with itself", fluentQueryLabel)
+	}
+	if e.MixedKindProbes == 0 {
+		add("mixed-kind", "the mixed-kind probe never ran, so the divergence rmp #2600 closed is no "+
+			"longer being adjudicated at all")
+	} else if e.MixedKindNonEmpty == 0 {
+		add("mixed-kind-non-empty", "every mixed-kind probe compared EMPTY sets (probes=%d): two "+
+			"empty answers agree whatever the comparison does, so the range-mixed clause could not "+
+			"have failed. The window is drawn from the first AGED Person precisely so this cannot "+
+			"happen", e.MixedKindProbes)
 	}
 	if e.GhostArcsSeen == 0 {
 		add("ghost-arcs", "the constructed fixture produced no ghost arc, so query.Pattern.Out's "+

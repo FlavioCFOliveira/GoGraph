@@ -202,6 +202,21 @@ func TestFluentQuery_ClausesAreFalsifiable(t *testing.T) {
 			wantClause: "seek-vs-scan",
 			wantProbe:  "eq-present",
 		},
+		{
+			// The clause rmp #2600 promoted from telemetry. Naming the probe as
+			// well as the clause is what keeps this case from being satisfied by
+			// any OTHER probe's seek-vs-scan going red.
+			name:       "the mixed-kind scan arm losing a name the seek arm kept",
+			perturb:    fqPerturbScanArmDrop,
+			wantClause: "range-mixed:seek-vs-scan",
+			wantProbe:  "range-mixed-point",
+		},
+		{
+			name:       "the mixed-kind scan arm diverging from the model",
+			perturb:    fqPerturbScanArmDrop,
+			wantClause: "range-mixed:scan-vs-oracle",
+			wantProbe:  "range-mixed-point",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -318,17 +333,19 @@ func TestFluentQuery_FinishGatesAllFire(t *testing.T) {
 	want := []string{
 		"vacuity:post-recovery", "vacuity:churn", "vacuity:live-names", "vacuity:out-targets",
 		"vacuity:tombstone-load-bearing", "vacuity:string-range", "vacuity:int-range",
-		"vacuity:hash-seek", "vacuity:btree-seek", "vacuity:ghost-arcs",
+		"vacuity:hash-seek", "vacuity:btree-seek", "vacuity:numeric-seek", "vacuity:ghost-arcs",
+		"vacuity:mixed-kind",
 	}
-	for _, clause := range want {
-		found := false
-		for _, x := range v {
+	fired := func(vs []Violation, clause string) bool {
+		for _, x := range vs {
 			if strings.Contains(x.Op, clause) {
-				found = true
-				break
+				return true
 			}
 		}
-		if !found {
+		return false
+	}
+	for _, clause := range want {
+		if !fired(v, clause) {
 			t.Errorf("gate %q did not fire on an empty run; got:\n%s", clause, renderViolations(v))
 		}
 	}
@@ -336,6 +353,27 @@ func TestFluentQuery_FinishGatesAllFire(t *testing.T) {
 		t.Errorf("Finish reported %d gate(s), want %d: a gate was added or removed without updating "+
 			"this test, so the list of things the scenario proves it exercised is no longer pinned\n%s",
 			len(v), len(want), renderViolations(v))
+	}
+
+	// The mixed-kind non-vacuity gate is the ELSE branch of the mixed-kind gate,
+	// so an empty run cannot reach it: a run whose probe RAN but only ever
+	// compared empty sets is a different, and more insidious, failure.
+	p = NewFluentQueryProbes(NewSeed(1))
+	p.Evidence().Batteries = 1
+	p.Evidence().MixedKindProbes = 3
+	v = p.Finish(7)
+	if fired(v, "vacuity:mixed-kind-non-empty") == false {
+		t.Errorf("the mixed-kind-non-empty gate did not fire for a probe that ran %d times with an "+
+			"empty answer every time; got:\n%s", 3, renderViolations(v))
+	}
+	// Exact Op match, not Contains: "vacuity:mixed-kind" is a PREFIX of
+	// "vacuity:mixed-kind-non-empty", so a substring test could not tell the two
+	// exclusive branches apart.
+	for _, x := range v {
+		if x.Op == fqOp("vacuity:mixed-kind") {
+			t.Errorf("both mixed-kind gates fired at once; they are exclusive branches\n%s",
+				renderViolations(v))
+		}
 	}
 }
 
@@ -509,24 +547,23 @@ func TestFluentQuery_ScenarioPasses(t *testing.T) {
 	}
 }
 
-// TestFluentQuery_MixedKindTelemetryIsRecordedNotAsserted pins the one thing the
-// scenario deliberately does NOT assert.
+// TestFluentQuery_MixedKindArmsAgree is the ASSERTED form of the divergence this
+// scenario found (rmp #2600), at the exact seed that measured it: 0x24920003
+// logged seek=1 scan=0 cypher=1 oracle=1 while the finding was open.
 //
 // A float64-bounded [query.WithRange] over an int64-valued property is served by
-// the internal numeric companion btree and returns the numeric matches, while
-// the scan arm's query.valueInRange requires identical kinds and returns
-// nothing. The two paths therefore disagree, which contradicts index_seek.go's
-// own statement that they cannot. Which side is wrong is a semantics decision
-// for the project owner (openCypher orders integers and floats in one numeric
-// order, which argues the SCAN is the wrong side), so the scenario records the
-// divergence and pins neither side.
+// the internal numeric companion btree, which keys PropInt64 and PropFloat64
+// under one float64 order. openCypher orders INTEGER and FLOAT in ONE numeric
+// order, so the model's int-keyed answer IS the expected answer and both fluent
+// arms must reproduce it. Before #2600 the scan arm returned nothing, because
+// query.valueInRange required v, lo and hi to share a kind.
 //
-// This test asserts only that the telemetry is COLLECTED — that the probe ran
-// and its four cardinalities were recorded — and deliberately does not assert
-// what the two arms returned. If a future change makes the two arms agree, the
-// divergence counter drops to zero and nothing here goes red; only the recorded
-// numbers move, which is the correct behaviour for a finding under review.
-func TestFluentQuery_MixedKindTelemetryIsRecordedNotAsserted(t *testing.T) {
+// The clause is only meaningful over a NON-EMPTY answer — two empty sets agree
+// whatever the comparison does — so the non-vacuity of that answer is asserted
+// here and gated in [FluentQueryProbes.Finish], and
+// TestFluentQuery_ClausesAreFalsifiable proves the clause goes red under a
+// perturbation of the scan arm.
+func TestFluentQuery_MixedKindArmsAgree(t *testing.T) {
 	t.Parallel()
 	sm := newFluentQueryFixture(t, 0x2492_0003)
 	probes := NewFluentQueryProbes(NewSeed(0x2492_0003 ^ fluentQueryProbeSeedMix))
@@ -539,17 +576,26 @@ func TestFluentQuery_MixedKindTelemetryIsRecordedNotAsserted(t *testing.T) {
 	}
 	ev := probes.Evidence()
 	if ev.MixedKindProbes == 0 {
-		t.Fatal("the mixed-kind telemetry probe did not run, so the open finding is not being " +
-			"observed at all")
+		t.Fatal("the mixed-kind probe did not run, so the divergence rmp #2600 closed is not being " +
+			"adjudicated at all")
 	}
-	if ev.MixedKindLastOracle == 0 {
-		t.Fatal("the mixed-kind probe's model answer was empty, so the two arms had nothing to " +
-			"disagree about and the telemetry is vacuous")
+	if ev.MixedKindNonEmpty == 0 || ev.MixedKindLastOracle == 0 {
+		t.Fatalf("the mixed-kind probe's model answer was EMPTY (nonEmpty=%d lastOracle=%d): the two "+
+			"arms had nothing to disagree about and the clause is vacuous",
+			ev.MixedKindNonEmpty, ev.MixedKindLastOracle)
 	}
-	t.Logf("mixed-kind telemetry (asserted: nothing): probes=%d divergences=%d "+
-		"seek=%d scan=%d cypher=%d oracle=%d",
-		ev.MixedKindProbes, ev.MixedKindSeekScanDivergences,
-		ev.MixedKindLastSeek, ev.MixedKindLastScan, ev.MixedKindLastCypher, ev.MixedKindLastOracle)
+	if ev.MixedKindLastSeek != uint64(ev.MixedKindLastOracle) {
+		t.Fatalf("the mixed-kind seek arm returned %d, the model %d",
+			ev.MixedKindLastSeek, ev.MixedKindLastOracle)
+	}
+	if ev.NumericSeekEligible == 0 {
+		t.Fatalf("no battery found the numeric companion btree[float64] (eligible=%d ineligible=%d), "+
+			"so the mixed-kind SEEK arm silently scanned and the clause compared one path with itself",
+			ev.NumericSeekEligible, ev.NumericSeekIneligible)
+	}
+	t.Logf("mixed-kind (asserted): probes=%d nonEmpty=%d seek=%d oracle=%d numericSeekEligible=%d",
+		ev.MixedKindProbes, ev.MixedKindNonEmpty, ev.MixedKindLastSeek, ev.MixedKindLastOracle,
+		ev.NumericSeekEligible)
 }
 
 // TestFluentQuery_SeekEligibilityPreconditionFires proves the precondition that

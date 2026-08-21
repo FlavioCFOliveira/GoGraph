@@ -1422,7 +1422,7 @@ MEASURED, the reachable arms against engine-created indexes are exactly:
 |---|---|---|---|
 | `WithProperty` on a string property | `PropString` | `hash.Index[string]` from `indexType:'hash'` | seek-served, agrees with the scan |
 | `WithRange` on a string property | `PropString` | `btree.Index[string]` from `indexType:'btree'` | seek-served, agrees with the scan |
-| `WithRange` on an int64 property | `PropInt64` | **nothing** | a btree `CREATE INDEX` registers a `btree.Index[string]` plus an internal `<label>_<prop>_btree_num` companion that is a `btree.Index[float64]` (`cypher/index_binding.go`), and neither satisfies `btreeRanger[int64]`, so an `Int64Value`-bounded range ALWAYS falls back to the scan. The scenario adjudicates the scan path and says so; it does not claim an index seek it cannot have |
+| `WithRange` on a numeric property | `PropInt64`, `PropFloat64`, or one of each | the internal `<label>_<prop>_btree_num` companion, a `btree.Index[float64]` a btree `CREATE INDEX` registers alongside the user-named `btree.Index[string]` (`cypher/index_binding.go`) | seek-served as a **superset**, with `query.valueInRange` as the exact residual filter, and agrees with the scan. Since **rmp #2600** `query.seekRangeInto` routes every numeric bound pair to this index; before it, `seekRangeInto` asserted a `btreeRanger[int64]` that no engine-created index satisfies and had no float64 route for int64 bounds, so an `Int64Value`-bounded range was never served at all. MEASURED: the numeric companion was eligible at **every** battery of all 24 soak seeds (`numeric=16/0 … 21/0`) |
 
 **What this scenario does not claim.** Resurrection is out of reach: Cypher
 `CREATE` mints a fresh synthetic node key (`__cx_<hex>`), so the re-created
@@ -2884,41 +2884,93 @@ The coverage work exercised the engine against these scenarios and found:
     #2561** and the OBSERVED behaviour is pinned: `internal/sim/bolt_tx_quota.go`
     drives a statement down the refused connection and requires it to be served,
     so whichever way #2561 is closed, the change is deliberate.
-11. **`graph/query`'s index seek and its scan fallback disagree for mixed-kind
-    range bounds** (silent wrong answer on one of the two paths; read-only, no
-    data loss). With `Float64Value` bounds over an **int64-valued** property, the
-    seek arm is served by the internal numeric companion btree — which indexes
-    `PropInt64` and `PropFloat64` under one float64 order
-    (`cypher/index_binding.go:projectNumericPropValue`) — and returns the numeric
-    matches, agreeing with the Cypher engine and with the model. The scan arm
-    returns **nothing**, because `query.valueInRange` requires `v`, `lo` and `hi`
-    to be the same `PropertyValue` kind. MEASURED and reproducible:
-    `TestFluentQuery_MixedKindTelemetryIsRecordedNotAsserted` (seed
-    `0x24920003`, short layer) logs seek=1 scan=0 cypher=1 oracle=1, and
-    `TestFluentQuery_SoakSeedSweep` (`-tags=soak`, 24 derived seeds, 500 ticks
+11. ~~**`graph/query`'s index seek and its scan fallback disagree for mixed-kind
+    range bounds**~~ **Closed by rmp #2600.** (Silent wrong answer on one of the
+    two paths; read-only, no data loss.) With `Float64Value` bounds over an
+    **int64-valued** property, the seek arm was served by the internal numeric
+    companion btree — which keys `PropInt64` and `PropFloat64` under one float64
+    order (`cypher/index_binding.go:projectNumericPropValue`) — and returned the
+    numeric matches, agreeing with the Cypher engine and with the model. The scan
+    arm returned **nothing**, because `query.valueInRange` required `v`, `lo` and
+    `hi` to be the same `PropertyValue` kind. MEASURED and reproducible before the
+    fix: seed `0x24920003` (short layer) logged seek=1 scan=0 cypher=1 oracle=1,
+    and `TestFluentQuery_SoakSeedSweep` (`-tags=soak`, 24 derived seeds, 500 ticks
     each) recorded 14–21 mixed-kind probes per seed with **every one** of them
-    diverging on **every** seed. This
-    contradicts `index_seek.go`'s own statement that "the index result is
-    identical to the scan result", and `WithRange`'s godoc ("bounds of a
-    different kind … match nothing") describes only the scan. Which side is wrong
-    is a **semantics decision**, not an obvious bug: openCypher orders integers
-    and floats in a single numeric order, which argues the SCAN is the wrong
-    side, but changing either side changes a public read path's observable
-    answer. It is therefore **recorded, not pinned**: `internal/sim/fluent_query.go`
-    runs the probe every battery and records all four cardinalities in
-    `FluentQueryEvidence`, which every run prints, and asserts **nothing** about
-    them — so the eventual fix moves a telemetry counter instead of reddening a
-    gate that had frozen the defect in place. Awaiting the project owner's
-    decision. A second, benign finding from the same measurement: the
-    `btreeRanger[int64]` and `hashLookuper[int64]`/`[float64]`/`[bool]` arms of
-    `index_seek.go` are **dead against every engine-created index** — a `hash`
-    `CREATE INDEX` builds a `hash.Index[string]` and a `btree` one builds a
-    `btree.Index[string]` plus a `btree.Index[float64]` companion — so an
-    `Int64Value`-bounded `WithRange` never takes the documented
-    `O(log n + k)` seek and always scans.
+    diverging on **every** seed.
+
+    The semantics were then settled from the primary sources rather than from
+    either implementation: openCypher orders INTEGER and FLOAT in a **single**
+    numeric order — the sole off-diagonal entry of the comparability matrix in the
+    normative CIP "Comparability and Orderability", pinned by the TCK in
+    `expressions/comparison/Comparison2.feature` ("Comparing across types yields
+    null, except numbers", whose 90-pair cross-type sweep keeps exactly the four
+    INTEGER/FLOAT rows) and `Comparison1.feature` (`1 = 1.0` is true). The **scan**
+    was therefore the defective side.
+
+    #2600 unified the comparison in `query.valueInRange`, comparing INTEGER
+    against FLOAT **exactly** rather than by widening the integer (the TCK pins
+    `4611686018427387905 != 4611686018427387900` although both round to 2^62);
+    made every numeric bound pair — including a mixed INTEGER/FLOAT pair, whose
+    two bound tests the CIP makes independent — routable to the float64 companion
+    as a **superset**, with `valueInRange` kept as the exact **residual filter**
+    over the seek's output; and removed the `btreeRanger[int64]` arm, because once
+    the comparison unified the two numeric kinds an int64-keyed index became a
+    *subset* of the answer (it cannot hold the float-valued nodes a numeric range
+    must also match) and a subset cannot be repaired by a residual filter. The
+    probe was promoted from telemetry to the asserted `range-mixed` clause, with
+    a `vacuity:mixed-kind` / `vacuity:mixed-kind-non-empty` pair in
+    `Finish` and a `vacuity:numeric-seek` gate so the seek arm cannot silently
+    degrade to a scan. TWO windows run under that clause, one per half of the
+    fix: `range-mixed-point` (FLOAT64 bounds over an INT64 property — the
+    divergence itself) and `range-mixed-bounds` (bounds of DIFFERENT kinds, the
+    shape `trySeekRange` used to refuse outright when `lo.Kind() != hi.Kind()`).
+    MEASURED after the fix, same host and same 24-seed soak sweep: **32–42**
+    mixed-kind probes per seed, **every one with a non-empty answer and every one
+    agreeing**, with the numeric companion eligible at **every** battery
+    (`numeric=16/0 … 21/0`).
+
+    MEASURED cost, `graph/query` benchmarks at 200 000 nodes with ages drawn
+    uniformly from [21, 65] (Apple M4, go1.26.6, `-benchmem -count=6`,
+    `benchstat`): against the path this query took BEFORE the fix — a full scan,
+    because an `Int64Value`-bounded range was never index-served — the new
+    seek-plus-residual path is **31.8× faster** on a selective window
+    (44.19 ms → 1.39 ms for `age ∈ [30, 31]`) and **1.4% slower** on a
+    100%-selectivity window (47.91 ms → 48.56 ms for `age ∈ [21, 65]`), with
+    B/op and allocs/op **identical** — the residual filter reads properties, it
+    allocates nothing. Against the pre-#2600 *float64-bounded* behaviour, which
+    took the seek and skipped the comparison, the residual costs **11.1×**
+    (125.7 µs → 1390 µs) selective and **18.7×** (2.59 ms → 48.56 ms) broad; that
+    arm returned a different, over-returning answer, so the comparison prices
+    EXACTNESS rather than a lost optimisation. A follow-up that would recover most
+    of it is noted in the debt section below.
+
+    A second finding from the same measurement was **partly wrong** and is
+    corrected here: the `hashLookuper[int64]`/`[float64]`/`[bool]` arms of
+    `index_seek.go` are dead against every *engine-created* index — a `hash`
+    `CREATE INDEX` builds a `hash.Index[string]` — but they are NOT dead code.
+    They are reachable through `hash.NewBound` from `graph/query`'s own public
+    API, and `TestSeek_EqualityMatchesScan_AllKinds`
+    (`graph/query/index_seek_test.go`) exercises all four. They also remain sound,
+    because equality is *not* unified across kinds: `query.equalValue` still
+    requires both sides to share a kind, so a single-kind index is an exact mirror
+    of the equality it serves. Only the *range* arm had to go.
 
 
 ## Documented debt / out of scope
+
+- **The numeric range residual filter runs unconditionally, and need not.** rmp
+  #2600 makes `query.valueInRange` a residual filter over every numeric range
+  seek, because the float64 companion's keys round above 2^53. MEASURED cost:
+  11.1× selective and 18.7× broad against a seek that skips it (see finding 11).
+  It is provably unnecessary whenever BOTH bounds lie strictly inside
+  (−2^53, 2^53): every value that can satisfy such a predicate is itself inside
+  that interval, where `int64 → float64` is lossless, so the companion's key
+  equals the exact value and the seek is EXACT. The bound must be strict — with
+  `hi = 2^53` a node valued 2^53+1 keys to 2^53 and would be admitted — and any
+  implementation of it needs that exact case as its falsifier. Not done under
+  #2600: the fix that closed the divergence was deliberately kept to the simplest
+  provably-correct shape, and making a correctness-critical filter conditional is
+  a separate, separately-reviewed decision.
 
 - ~~**GraphML round-trip under fault** is not yet covered.~~ **Closed** (verified
   rmp #2471): `internal/sim/storage_fault_scenarios.go` carries the

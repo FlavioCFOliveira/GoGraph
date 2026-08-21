@@ -259,13 +259,19 @@ func (e *Engine[N, W]) pruneTombstones(bm *roaring64.Bitmap) {
 // applied by seedFromPreds).
 //
 // Before the per-node scan, any property/range predicate that a covering
-// secondary index can serve is satisfied by an index seek that intersects the
-// match set into bm in place (see seekIndexablePreds and index_seek.go). A
-// served predicate is then skipped by the scan loop: the index is the
-// authoritative mirror of the graph for its (label, property) pair, so seek and
-// scan return the identical set, and the seek replaces an O(working-set)
-// property read with an O(log n)/O(1) lookup plus a bitmap intersection.
-// Predicates with no covering index keep the per-node scan path unchanged.
+// secondary index can serve is narrowed by an index seek that intersects the
+// index result into bm in place (see seekIndexablePreds and index_seek.go).
+//
+// A predicate is skipped by the scan loop only when the seek was EXACT — an
+// equality against a hash index, or a string range against a string-keyed btree
+// — because there the index is the authoritative mirror of the graph for its
+// (label, property) pair and the seek replaces an O(working-set) property read
+// with an O(log n)/O(1) lookup plus a bitmap intersection. A NUMERIC range seek
+// is only a SUPERSET of the answer (the float64-keyed companion index rounds
+// int64 keys above 2^53), so its predicate is NOT skipped and the per-node
+// comparison runs over the narrowed working set as the exact residual filter
+// (#2600). Predicates with no covering index keep the per-node scan path
+// unchanged.
 func (p *Pattern[N, W]) filterByPreds(bm *roaring64.Bitmap, preds []Predicate[N, W], skipLabel bool) *roaring64.Bitmap {
 	served := p.seekIndexablePreds(bm, preds)
 	out := roaring64.New()
@@ -292,15 +298,23 @@ func (p *Pattern[N, W]) filterByPreds(bm *roaring64.Bitmap, preds []Predicate[N,
 	return out
 }
 
-// seekIndexablePreds attempts to serve every property and range predicate in
-// preds from a covering secondary index, intersecting each index result into bm
-// in place, and returns a parallel slice marking which predicates were served
-// (and so must be skipped by the per-node scan in filterByPreds). A predicate
-// with no covering index — or when the graph has no index manager — is left
-// for the scan: its entry in the returned slice stays false. Label predicates
-// are never index-served here (the label seed already applied them). The label
-// names the predicate set constrains scope which bound indexes may serve a
-// property seek (a bound index is label-scoped).
+// seekIndexablePreds narrows bm from a covering secondary index for every
+// property and range predicate in preds, intersecting each index result into bm
+// in place, and returns a parallel slice marking which predicates the index
+// DISCHARGED (and which the per-node scan in filterByPreds must therefore skip).
+//
+// Narrowing bm and discharging a predicate are two different things. An entry is
+// true only when the index result is the answer; when the index result is merely
+// a superset of the answer — a numeric range, see index_seek.go's
+// "Exact seek vs superset seek" — bm is narrowed but the entry stays false, so
+// the per-node comparison still runs over what survived as the exact residual
+// filter (#2600).
+//
+// A predicate with no covering index — or when the graph has no index manager —
+// is left entirely to the scan: bm is untouched and its entry stays false. Label
+// predicates are never index-served here (the label seed already applied them).
+// The label names the predicate set constrains scope which bound indexes may
+// serve a seek (a bound index is label-scoped).
 func (p *Pattern[N, W]) seekIndexablePreds(bm *roaring64.Bitmap, preds []Predicate[N, W]) []bool {
 	served := make([]bool, len(preds))
 	labels := labelsInPreds(preds)
@@ -309,7 +323,11 @@ func (p *Pattern[N, W]) seekIndexablePreds(bm *roaring64.Bitmap, preds []Predica
 		case withProperty[N, W]:
 			served[i] = p.trySeekProperty(bm, pred, labels)
 		case withRange[N, W]:
-			served[i] = p.trySeekRange(bm, pred, labels)
+			// The narrowed result is discarded on purpose: only exactness decides
+			// whether the scan may skip this predicate. An inexact seek has already
+			// intersected its superset into bm.
+			_, exact := p.trySeekRange(bm, pred, labels)
+			served[i] = exact
 		}
 	}
 	return served
