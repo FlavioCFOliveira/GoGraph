@@ -91,6 +91,7 @@ undirected Euler; `BiBFS`; direction-optimised BFS on a hub fixture; the
 | Cross-release compatibility of the on-disk SNAPSHOT format | `TestCrossRelease_*` (soak: prior-tag subprocess) + `TestCrossReleaseCompat_*` (short: frozen fixtures) | a PRIOR release publishes a **checkpoint** — snapshot directory plus truncated WAL — and the current code reopens it through the FULL-STACK `recovery.OpenCtx`, so that release's `manifest.json`, `csr.bin`, `labels.bin`, `properties.bin` and `mapper.bin` are parsed by current code. "The snapshot was opened" is adjudicated from two INDEPENDENT observations — the filesystem read with the current manifest reader, and recovery's own `SnapshotHit` — so a directory present but skipped is a `SnapshotProvenanceGap` that fails parity, not an unfalsifiable false. On the short layer a frozen pre-#2520/#2526 snapshot directory asserts both directions of the documented contract: an older artefact still opens (manifest loads reporting `IntegrityVerified` **false**; the dense width-8 weights column parses with its exact `float64` values), and a newer artefact is refused by the older reader's documented rule **deterministically**, by both of that release's guards. Fixture digests are pinned in the test source rather than in a golden, so `-update` cannot regenerate the old format away — see below |
 | Per-transaction op caps (CWE-770), producer **and** replay | `txn-oversize` (`internal/sim/txn_oversize.go`) | an over-cap commit is refused with `txn.ErrTransactionTooLarge` **before any frame is written** — proved by the durable WAL image being BYTE-identical across the refusal and the live graph unmutated, not by the error alone — and the surviving file recovers clean with every refused key absent; a hand-built WAL whose marker-less run exceeds the replay cap fail-stops with `recovery.ErrTransactionTooLarge`, keeps exactly the committed prefix, and is refused by the store-open rather than appended onto. The boundary is MEASURED on both sides and the two caps agree exactly (cap ops passes, cap+1 fails both). Until this task the cap reached only the replayer, so neither sentinel was reachable under simulation at any setting — see below |
 | Lock-free CSR publisher refcount lifecycle (`graph/generation`) | `generation-swap` (`internal/sim/generation_swap.go`) | every acquisition's traversal matches the model's INDEPENDENTLY computed adjacency for the generation the artefact's own content declares, so a torn swap is caught by IDENTITY rather than by well-formedness (the package's own rotation test asserts a constant edge count and discriminates no generation from any other); every generation's refcount is audited AT REST, after every reader is joined and the publisher stopped — the only quiescent point — plus a structural floor (>=1 while held) and ceiling (<=readers+1) that hold at every instant; `PublishWithDrain` with a reference held by the publisher itself returns `ErrDrainTimeout` at ANY positive timeout (1ns..20ms measured) without corrupting `Current`, while the forced unbounded drain beside it must complete, so neither direction passes vacuously; `Close` drains a LIVE reader fleet racing a publisher with none left wedged, and the post-close contract (`Acquire`->nil, `Current`->nil, `Publish`/`PublishWithDrain`->`ErrClosed`) is pinned. The plan and every sub-seed are drawn up front so the plan digest is seed-reproducible while the interleaving is not — stated, not glossed. **USE-AFTER-FREE is out of reach** without a poisoned allocator and is not claimed; use-after-RECYCLE is what the sentinel clauses cover. **Eleven** library mutations were applied and reverted to prove the clauses fire, and the table in the file header is the authoritative count: five of them were REPRODUCED in a later validation pass and are stamped there with the seed and reader count each was measured at, while the other six are marked inherited-and-unverified because their sighting counts carry no conditions and are not reproducible as written. One (dropping `Acquire`'s re-check) is caught only probabilistically and, on the inherited measurements, needs both `-race` and a fleet wider than the core count; no detection RATE is claimed for any width set, because the only width those measurements share with the default fleet detected nothing in 5 runs. The wide 64/256/1024 fleets and the 64-seed geometry sweep run in the SHORT layer: they were gated behind the soak tag on an estimate of "a million Acquire/Release pairs per seed … minutes under the race detector", measurement put the whole set at **0.46 s** under `-race` on 10 cores, and they were promoted so the default gate exercises the published concurrency levels instead of skipping them |
+| Fluent pattern-query engine as an INDEPENDENT second read path (`graph/query`) | `fluent-query` (`internal/sim/fluent_query.go`) | every probe is adjudicated THREE ways against a model-computed arbiter, with the three comparisons as SEPARABLE clauses so a red run names the wrong path: `fluent-vs-oracle`, `cypher-vs-oracle` and `fluent-vs-cypher` (a shared-substrate defect moves both engines together and leaves the third clause silent, which is the correct attribution rather than a fluent-vs-Cypher divergence). This is deliberately NOT the stance `differential.go` takes — that facility compares the engine with itself, which is sound only because the engine guarantees its two planner variants are result-equivalent. A FOURTH channel, neither engine, walks the Mapper directly and is held to the model BEFORE any probe, so a probe failure cannot be explained away by an already-diverged substrate. `Out()` must answer identically over the live-filtered AND the tombstone-agnostic CSR build — a theorem of the two prunes together, not a coincidence — and the CSR is read by nothing except `Out()`, so the label / property / range probes are provably CSR-independent. The tombstone gate is on `seedAllLive`'s Mapper walk, which never forgets a slot and is therefore DETERMINISTIC; the label-bitmap corpse count is swept by lpg's background vacuum (MEASURED at 3 and 2 for the same seed in the same process) and is telemetry, gated on nothing. `Out()`'s ghost-arc prune is unreachable on the live graph (MEASURED: `DETACH DELETE` strips arcs, raw and live CSR `Size()` equal on all 24 sweep seeds) and is driven by a constructed fixture that asserts its own precondition. Seek and scan are separated BY CONSTRUCTION (`Vertex(label, pred)` vs `Vertex(label).Vertex(pred)`, since `labelsInPreds` of a label-free predicate list is empty and both seek helpers refuse it); served-ness is established by ENUMERATING the guard's conditions, which is stated as such rather than presented as observation. Not claimed: resurrection, concurrency, multi-hop |
 
 ### Snapshot component corruption is now covered; the manifest is checksummed (rmp #2467, #2520)
 
@@ -1293,6 +1294,151 @@ scenario combining all of it over the durable store in crash cycles
 adjudicates the MVCC clock and the transaction sequence across the snapshot
 boundary. The checkers found four engine isolation defects on arrival
 (rmp #2445, #2446), all fixed and regression-pinned.
+
+## Read-path coverage beyond Cypher
+
+### The fluent pattern-query engine as an independent second read path (rmp #2492)
+
+`graph/query` is a full reader of the same `lpg.Graph` the Cypher engine reads,
+and until this task **nothing under `internal/sim` imported it**. Its only
+exercisers were `examples/02_property_graph`, `examples/19_pattern_query` and its
+own in-package tests over hand-built fixtures, and the knowledge graph recorded
+no DST scenario touching it. It is not a thin wrapper: it has its own working-set
+representation (a `roaring64` bitmap of NodeIDs), its own label seeding
+(`NodeIndex().Intersect` when a label is constrained, a `Mapper.Walk` when none
+is), its own tombstone pruning (`pruneTombstones`) and its own index-seek
+decision logic (`index_seek.go`), and none of that is shared with the Cypher
+planner. Two independent readers of one substrate can disagree.
+
+**The arbiter is the model, and this is a different stance from `differential.go`.**
+This package already had a differential facility, and it deliberately validates
+the engine *against itself*: `DefaultVariantPair` compares the default planner
+with the same planner with the disconnected-equi-join hash join disabled. That is
+sound there, because `EngineOptions.DisableHashJoin` exists precisely so the two
+plans can be proven result-equivalent — any divergence is by construction a
+regression and it does not matter which side is "right", because both sides must
+be the same side. The fluent engine and the Cypher engine carry no such
+guarantee, so "they agree" is a **weak** claim (both read the same label bitmaps
+and the same property shards, and can be wrong the same way) and "they disagree"
+would name a divergence but no culprit. Every probe therefore carries three
+**separable** clauses:
+
+| Clause | What a red result means |
+|---|---|
+| `fluent-vs-oracle` | the fluent engine's working-set logic is wrong |
+| `cypher-vs-oracle` | the Cypher path is wrong |
+| `fluent-vs-cypher` | the two engines disagree — and its SILENCE alongside two red oracle clauses says both engines agree and the MODEL is wrong, i.e. look at the harness first |
+
+A defect in the shared substrate (a property store that loses a value) moves both
+engines together and shows up as two red oracle clauses with a silent
+`fluent-vs-cypher`. That is the correct attribution: it is not a fluent-vs-Cypher
+divergence. A **fourth** channel, neither engine, walks `graph.Mapper.Walk`
+directly, skips `IsTombstoned` ids and reads each survivor's `name`; its live-name
+set is held to the model *before* any probe runs, so a probe failure downstream
+cannot be explained away by a substrate that had already diverged.
+
+**Which CSR generation the engine is handed is answered by a measured
+invariant, not by a preference.** `query.New` takes both a graph and a CSR, so the
+scenario builds a FRESH pair at every probe point, on the single simulation
+goroutine, at a quiescent instant between two ticks — the topology the fluent
+engine expands over and the state the model describes are the same instant. It
+builds two: `BuildFromAdjListLive` with `LiveNodeFilter`, and the
+tombstone-agnostic `BuildFromAdjList`. `Out()` must answer **identically** over
+both. That is a theorem of the two prunes acting together — an arc whose source is
+tombstoned cannot contribute because the seed step already dropped that source,
+and an arc whose target is tombstoned is dropped by `Out`'s own prune, so between
+them they remove exactly the arcs the live filter removes — which makes the clause
+a detector rather than a tautology. The CSR is read by **nothing** except
+`Pattern.Out` (verified in `graph/query/query.go`: `Vertex`, `filterByPreds`,
+`seekIndexablePreds`, `Cardinality`, `Collect` and `NodeIDs` never touch
+`Engine.csr`), so the invariance clause is scoped to the `Out` probes and the
+label / property / range probes are provably CSR-independent.
+
+**The tombstone gate is on the DETERMINISTIC seed path, and the reason is a
+measurement.** `pruneTombstones` is the only thing between the fluent engine and a
+deleted node, and the two seeding paths differ in a way that decides where a
+non-vacuity gate can soundly go:
+
+- The **label-seeded** path intersects `NodeIndex()`'s bitmaps. A deleted node's
+  label-bitmap entry is not removed synchronously while MVCC is armed: lpg
+  DEFERS it (`graph/lpg/mvcc_index.go`) and the **background vacuum** applies it
+  in `applyDeferredIndexRemovals` once the reclamation watermark passes.
+  MEASURED: two runs of the *same seed in the same process* observed **3** and
+  **2** label-advertised corpses at the same tick. That count is therefore
+  recorded as telemetry, gated on nothing, and excluded from the
+  reproducible-evidence comparison. A non-vacuity gate on a scheduler-dependent
+  count is exactly the flake this sprint spent two tasks (#2587, #2596) removing
+  from other scenarios.
+- The **no-predicate** path (`Vertex()` with no predicates) seeds from
+  `seedAllLive`, which walks the Mapper. The Mapper **never forgets a slot** —
+  NodeID stability is a hard contract, restated in `lpg.RemoveNode`'s own godoc —
+  so every id ever interned is yielded on every call and every tombstoned one
+  must be removed by the prune for as long as the run lasts. MEASURED: the
+  tombstone count is monotonic and identical across runs of the same seed. The
+  gate lives here, and the `all-live` probe is the one whose answer the prune has
+  to earn.
+
+The **detector** for a prune regression is the `unknown-id` clause, not any
+name-set comparison, and the distinction is load-bearing. A corpse is *unnamed*
+in the substrate view by construction, so a corpse that leaks into a working set
+contributes no name and cannot change a name set. MEASURED by reproducing the
+broken output: with the prune omitted, `fluent-vs-oracle` stays **silent** and
+`unknown-id` fires alone. The name-set clauses detect a working set that gained
+or lost a LIVE node; the identity clause detects a corpse; neither substitutes
+for the other.
+
+**`Out()`'s ghost-arc prune is unreachable on the live graph, so it is driven by a
+constructed fixture.** MEASURED: `DETACH DELETE` strips the deleted node's
+incident arcs, so the raw and live-filtered CSR builds report the **same**
+`Size()` — on the catalogue seed and on all 24 seeds of the soak sweep. Letting
+the invariance clause pass vacuously there would have been the easy mistake, so a
+side fixture builds a path graph with the plain Go API and uses `lpg.RemoveNode`
+to tombstone interior nodes *without* stripping their arcs — the one documented
+way to produce a ghost arc. It **asserts its own precondition** (a raw arc into a
+tombstoned target exists, and `cRaw.Size() > cLive.Size()`) before asserting any
+answer, and because the removed nodes are drawn from the INTERIOR of a path — where
+an incoming arc always exists — the precondition holds for every seed. A 400-seed
+sweep proves that rather than asserting it, which is the lesson of #2491's
+fixture that was unbuildable for 120 of 200 seeds.
+
+**Seek and scan are separated by construction, and served-ness is claimed only as
+far as it can be established.** `Vertex(label, pred)` is seek-eligible;
+`Vertex(label).Vertex(pred)` is not, because `labelsInPreds` of a predicate list
+holding no `WithLabel` is empty and both `trySeekProperty` and `trySeekRange`
+return false immediately on an empty label list. So the two arms are genuinely
+different code paths with no DDL churn and no instrumentation, and
+`seek-vs-scan` is a real clause. Served-ness itself cannot be *observed* from
+another package — `graph/query/index_seek_spy_test.go` is where the path is
+observed — so the scenario **enumerates the guard's conditions** instead (a
+non-nil `IndexManager`, a constrained label, an index of the right `Kind()`, a
+`BoundNode()` matching the pair, and a concrete index satisfying the typed read
+interface for the bound value's kind) and asserts them as
+`precondition:seek-eligibility`. That is stated as an enumeration, not dressed up
+as observation.
+
+MEASURED, the reachable arms against engine-created indexes are exactly:
+
+| Predicate | Bound kind | Served by | Verdict |
+|---|---|---|---|
+| `WithProperty` on a string property | `PropString` | `hash.Index[string]` from `indexType:'hash'` | seek-served, agrees with the scan |
+| `WithRange` on a string property | `PropString` | `btree.Index[string]` from `indexType:'btree'` | seek-served, agrees with the scan |
+| `WithRange` on an int64 property | `PropInt64` | **nothing** | a btree `CREATE INDEX` registers a `btree.Index[string]` plus an internal `<label>_<prop>_btree_num` companion that is a `btree.Index[float64]` (`cypher/index_binding.go`), and neither satisfies `btreeRanger[int64]`, so an `Int64Value`-bounded range ALWAYS falls back to the scan. The scenario adjudicates the scan path and says so; it does not claim an index seek it cannot have |
+
+**What this scenario does not claim.** Resurrection is out of reach: Cypher
+`CREATE` mints a fresh synthetic node key (`__cx_<hex>`), so the re-created
+Person is a new NodeID and `lpg.AddNode`'s revive path — which needs the same
+mapper KEY — is never entered. The churn phase drives `pruneTombstones` against a
+GROWING tombstone set, which is a different property, and the file header says so
+rather than letting the task's "delete-then-recreate" wording imply revive
+coverage. Concurrent use of the fluent engine is also out of scope: the package
+documents an `Engine` as safe for concurrent use only while the graph and CSR are
+quiescent and a `Pattern` as owned by one goroutine, so a concurrent arm would
+need that contract relaxed first, which is a design question rather than a test.
+Only a single `Out()` hop is probed, and the one-hop equivalence rests on an
+ASSERTED precondition (`precondition:model-shape`: every modelled node is
+`:Person` and every modelled edge is `:KNOWS`, because `Out()` expands a CSR that
+carries no relationship type at all) — so a future workload that adds a second
+edge type fires that clause instead of silently comparing the wrong things.
 
 ## Bolt wire-surface coverage
 
@@ -2738,6 +2884,38 @@ The coverage work exercised the engine against these scenarios and found:
     #2561** and the OBSERVED behaviour is pinned: `internal/sim/bolt_tx_quota.go`
     drives a statement down the refused connection and requires it to be served,
     so whichever way #2561 is closed, the change is deliberate.
+11. **`graph/query`'s index seek and its scan fallback disagree for mixed-kind
+    range bounds** (silent wrong answer on one of the two paths; read-only, no
+    data loss). With `Float64Value` bounds over an **int64-valued** property, the
+    seek arm is served by the internal numeric companion btree — which indexes
+    `PropInt64` and `PropFloat64` under one float64 order
+    (`cypher/index_binding.go:projectNumericPropValue`) — and returns the numeric
+    matches, agreeing with the Cypher engine and with the model. The scan arm
+    returns **nothing**, because `query.valueInRange` requires `v`, `lo` and `hi`
+    to be the same `PropertyValue` kind. MEASURED and reproducible:
+    `TestFluentQuery_MixedKindTelemetryIsRecordedNotAsserted` (seed
+    `0x24920003`, short layer) logs seek=1 scan=0 cypher=1 oracle=1, and
+    `TestFluentQuery_SoakSeedSweep` (`-tags=soak`, 24 derived seeds, 500 ticks
+    each) recorded 14–21 mixed-kind probes per seed with **every one** of them
+    diverging on **every** seed. This
+    contradicts `index_seek.go`'s own statement that "the index result is
+    identical to the scan result", and `WithRange`'s godoc ("bounds of a
+    different kind … match nothing") describes only the scan. Which side is wrong
+    is a **semantics decision**, not an obvious bug: openCypher orders integers
+    and floats in a single numeric order, which argues the SCAN is the wrong
+    side, but changing either side changes a public read path's observable
+    answer. It is therefore **recorded, not pinned**: `internal/sim/fluent_query.go`
+    runs the probe every battery and records all four cardinalities in
+    `FluentQueryEvidence`, which every run prints, and asserts **nothing** about
+    them — so the eventual fix moves a telemetry counter instead of reddening a
+    gate that had frozen the defect in place. Awaiting the project owner's
+    decision. A second, benign finding from the same measurement: the
+    `btreeRanger[int64]` and `hashLookuper[int64]`/`[float64]`/`[bool]` arms of
+    `index_seek.go` are **dead against every engine-created index** — a `hash`
+    `CREATE INDEX` builds a `hash.Index[string]` and a `btree` one builds a
+    `btree.Index[string]` plus a `btree.Index[float64]` companion — so an
+    `Int64Value`-bounded `WithRange` never takes the documented
+    `O(log n + k)` seek and always scans.
 
 
 ## Documented debt / out of scope

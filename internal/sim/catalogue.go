@@ -180,6 +180,7 @@ func DefaultRegistry() (*Registry, error) {
 		boltDecodePressureScenario(),
 		boltDecodeSwarmScenario(),
 		generationSwapScenario(),
+		fluentQueryScenario(),
 	)
 }
 
