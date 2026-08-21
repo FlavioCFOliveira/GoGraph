@@ -25,6 +25,7 @@ func TestDefaultRegistry_ListsAllScenarios(t *testing.T) {
 		ScenarioBoltStreaming, ScenarioBoltStreamingStall, ScenarioBoltBeginExtras, ScenarioBoltVersionMatrix,
 		ScenarioBoltDecodePressure, ScenarioBoltDecodeSwarm,
 		ScenarioWALCorruptionFailStop, ScenarioWriteHeavy,
+		ScenarioGenerationSwap,
 	}
 	if r.Len() != len(want) {
 		t.Fatalf("registry has %d scenarios, want %d: %v", r.Len(), len(want), r.Names())

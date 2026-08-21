@@ -179,6 +179,7 @@ func DefaultRegistry() (*Registry, error) {
 		boltVersionMatrixScenario(),
 		boltDecodePressureScenario(),
 		boltDecodeSwarmScenario(),
+		generationSwapScenario(),
 	)
 }
 
