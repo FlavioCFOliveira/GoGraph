@@ -29,13 +29,14 @@ import (
 //     surface (edges, labels, properties, index) is rebuilt and that
 //     [Result.SnapshotSchemaVersion] reflects the v2 manifest.
 //
-// The index re-hydration follows the same two-phase pattern as
-// [TestRecovery_IndexesSurviveRestart]: Open builds the graph
-// without a Manager, then the test wires a fresh Manager onto the
-// recovered graph and re-applies the snapshot index payload via the
-// package-private [applySnapshotIndexes] helper. This is the
-// recommended production startup ordering because [Open] cannot
-// know the caller's preferred Manager / Index types in advance.
+// The index round-trip follows the same two-phase pattern as
+// [TestRecovery_IndexesSurviveRestart]: [Open] builds the graph and attaches no
+// index.Manager — it deliberately loads no index, because WAL replay cannot
+// maintain a registered one — so the test wires a fresh Manager onto the
+// recovered graph and deserialises the snapshot payload into it through the
+// local hydrateReadbacksForTest helper. Production hydration is the Cypher
+// engine's, per index and only for a payload recovery certified usable; see
+// cypher/index_hydration.go.
 //
 //nolint:gocyclo // test: end-to-end recovery + label + property + index assertions
 func TestOpen_StringInt64(t *testing.T) {
@@ -145,8 +146,8 @@ func TestOpen_StringInt64(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadSnapshotFull: %v", err)
 	}
-	if got := applySnapshotIndexes(res.Graph.IndexManager(), loaded.Indexes); got != 1 {
-		t.Fatalf("applySnapshotIndexes = %d, want 1", got)
+	if got := hydrateReadbacksForTest(t, res.Graph.IndexManager(), loaded.Indexes); got != 1 {
+		t.Fatalf("hydrateReadbacksForTest = %d, want 1", got)
 	}
 	if !freshBT.Lookup("score-alice").Contains(0) {
 		t.Fatal("btree.score index did not survive snapshot round-trip")

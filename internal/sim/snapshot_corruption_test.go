@@ -396,9 +396,15 @@ func TestSnapshotCorruption_ManifestUncheckedByteCensus(t *testing.T) {
 }
 
 // TestSnapshotCorruption_IndexPayloadIsToleratedNotIgnored pins the second
-// non-fail-stop behaviour: a corrupt indexes/<name>.bin is a rebuild trigger,
-// not a fatal error — and the rebuild is real, so a seek still agrees with a
-// full scan.
+// non-fail-stop behaviour, in BOTH directions (rmp #2490): over intact payloads
+// the reopen HYDRATES every index it registers; over payloads with a flipped
+// byte it REBUILDS every one of them, reports each payload unreadable, and still
+// answers exactly the same.
+//
+// The control half is the part that makes the corrupt half an observation rather
+// than a restatement. Until #2490 the engine rebuilt whatever the payload said,
+// so this arm's "recovery survived and the indexes are consistent" held
+// identically with a valid payload, a damaged one, and no payload at all.
 func TestSnapshotCorruption_IndexPayloadIsToleratedNotIgnored(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	ctx := context.Background()
@@ -410,21 +416,78 @@ func TestSnapshotCorruption_IndexPayloadIsToleratedNotIgnored(t *testing.T) {
 	if len(paths) == 0 {
 		t.Fatal("the fixture published no index payloads")
 	}
-	n, verified, vs, err := runSnapshotIndexToleranceArm(ctx, fx, NewSeed(0x1))
+	arm, vs, err := runSnapshotIndexToleranceArm(ctx, fx, NewSeed(0x1))
 	if err != nil {
 		t.Fatalf("tolerance arm: %v", err)
 	}
 	if len(vs) > 0 {
-		t.Fatalf("a corrupt index payload broke recovery:\n%s", violationsText(vs))
+		t.Fatalf("the paired index-payload arm reported a violation:\n%s", violationsText(vs))
 	}
-	if n != len(paths) || !verified {
-		t.Fatalf("tolerance arm corrupted %d of %d payloads, verified=%v", n, len(paths), verified)
+	t.Logf("paired index-payload arm: registered=%d flipped=%d control[hydrated=%d rebuilt=%d]"+
+		" corrupt[hydrated=%d rebuilt=%d unreadable=%d]",
+		arm.registered, arm.flipped, arm.controlHydrated, arm.controlRebuilt,
+		arm.corruptHydrated, arm.corruptRebuilt, arm.corruptUnreadable)
+	if arm.flipped != len(paths) || !arm.verified {
+		t.Fatalf("arm corrupted %d of %d payloads, verified=%v", arm.flipped, len(paths), arm.verified)
+	}
+	// The CONTROL half: intact payloads, so every registered index hydrated and
+	// nothing was rebuilt.
+	if arm.registered == 0 {
+		t.Fatal("the reopen registered no index: both population assertions would be vacuous")
+	}
+	if arm.controlHydrated != arm.registered || arm.controlRebuilt != 0 {
+		t.Fatalf("control half: hydrated=%d rebuilt=%d, want hydrated=%d rebuilt=0",
+			arm.controlHydrated, arm.controlRebuilt, arm.registered)
+	}
+	// The CORRUPT half: every payload unusable, so every index rebuilt and every
+	// payload reported unreadable — the rebuilds are attributable to the flips.
+	if arm.corruptRebuilt != arm.registered || arm.corruptHydrated != 0 {
+		t.Fatalf("corrupt half: hydrated=%d rebuilt=%d, want hydrated=0 rebuilt=%d",
+			arm.corruptHydrated, arm.corruptRebuilt, arm.registered)
+	}
+	if arm.corruptUnreadable != arm.flipped {
+		t.Fatalf("corrupt half reported %d unreadable payloads for %d flips: the rebuilds are not"+
+			" all attributable to the corruption", arm.corruptUnreadable, arm.flipped)
 	}
 	// And the payloads really were restored, so the fixture is reusable.
 	for _, path := range paths {
 		if !fx.disk.Exists(path) {
 			t.Fatalf("index payload %s vanished", path)
 		}
+	}
+}
+
+// TestSnapshotCorruption_PairedIndexGateRequiresBothHalves proves the terminal
+// non-vacuity gate really requires the PAIR, not just the corrupt half: evidence
+// in which the control reopen hydrated nothing must be refused, because that is
+// precisely the state this harness was in before rmp #2490 — and it passed.
+func TestSnapshotCorruption_PairedIndexGateRequiresBothHalves(t *testing.T) {
+	opts := snapshotCorruptionOptions{
+		components:         snapshotCorruptionComponents()[:0],
+		skipInteriorArm:    true,
+		skipManifestGuards: true,
+		skipManifestGap:    true,
+	}
+	// A corrupt half that looks perfect, with a control half that hydrated
+	// nothing: the exact shape of the pre-#2490 vacuity.
+	ev := &snapshotCorruptionEvidence{
+		indexPayloadsCorrupted: 5,
+		indexRebuildVerified:   true,
+		indexRegistered:        5,
+		indexControlHydrated:   0,
+		indexControlRebuilt:    5,
+		indexCorruptRebuilt:    5,
+		indexCorruptUnreadable: 5,
+	}
+	got := violationsText(checkSnapshotCorruptionNonVacuity(opts, ev))
+	if !strings.Contains(got, "hydrated nothing") {
+		t.Fatalf("the gate accepted a corrupt-only arm, so the pairing is not enforced:\n%s", got)
+	}
+	// With the control half hydrating, the pairing clauses fall silent.
+	ev.indexControlHydrated, ev.indexControlRebuilt = 5, 0
+	got = violationsText(checkSnapshotCorruptionNonVacuity(opts, ev))
+	if strings.Contains(got, "hydrated nothing") || strings.Contains(got, "rebuilt nothing") {
+		t.Fatalf("the gate still complains about a well-formed pair:\n%s", got)
 	}
 }
 

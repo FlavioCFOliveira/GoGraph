@@ -16,9 +16,12 @@ import (
 // SECURITY-GAP #1480 — btree Index.Deserialize eagerly reserves
 // make([]entry[V], 0, entryCount) with entryCount taken straight from the
 // untrusted header (rejected only when strictly > 1<<40). A crafted
-// indexes/<name>.bin reaches this decoder through
-// store/recovery.applySnapshotIndexes when a hostile snapshot directory is
-// restored. A 20-byte CRC-valid payload with entryCount == 2^40 drives a
+// indexes/<name>.bin reaches this decoder when a hostile snapshot directory is
+// restored: recovery reports the payload and the Cypher engine deserialises it
+// into the index registered under the same name
+// (cypher.Engine.hydrateRecoveredIndex; before rmp #2490 the entry point was the
+// since-deleted, and in fact unreachable, store/recovery.applySnapshotIndexes).
+// A 20-byte CRC-valid payload with entryCount == 2^40 drives a
 // single ~16 TiB reservation before the per-entry loop reads a single byte
 // and EOFs. CWE-789 / CWE-20: memory-exhaustion DoS on open.
 //

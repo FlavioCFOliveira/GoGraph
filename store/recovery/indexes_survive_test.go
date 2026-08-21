@@ -103,8 +103,10 @@ func TestRecovery_IndexesSurvive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Phase 2: recover. Wire the fresh manager BEFORE loading the
-	// snapshot index payload via applySnapshotIndexes.
+	// Phase 2: recover, then round-trip the snapshot's index payloads back into
+	// a fresh manager. Recovery itself never loads an index (rmp #2490): what is
+	// asserted here is the serialise/deserialise contract of each index kind
+	// through a real snapshot, which is why the helper is a local test one.
 	res, err := Open[string, int64](dir, Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewInt64WeightCodec(),
@@ -128,13 +130,13 @@ func TestRecovery_IndexesSurvive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Re-apply the snapshot index payload via the internal helper.
+	// Re-apply the snapshot index payloads via the local test helper.
 	loaded, err := snapshot.LoadSnapshotFull(snapDir)
 	if err != nil {
 		t.Fatalf("LoadSnapshotFull: %v", err)
 	}
-	if n := applySnapshotIndexes(freshMgr, loaded.Indexes); n != 3 {
-		t.Fatalf("applySnapshotIndexes = %d, want 3", n)
+	if n := hydrateReadbacksForTest(t, freshMgr, loaded.Indexes); n != 3 {
+		t.Fatalf("hydrateReadbacksForTest = %d, want 3", n)
 	}
 
 	// Phase 3: query each index using its dedicated API.

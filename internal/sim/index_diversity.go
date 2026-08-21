@@ -61,6 +61,18 @@ const indexDiversityBulk = 9000
 // gate ([Simulator.checkCheckpointsFired]) requires the checkpoints to have
 // actually fired, because a [CheckpointConfig] is inert unless the custom run
 // loop calls [Simulator.maybeCheckpoint].
+//
+// On top of the definitions it now covers the index CONTENTS across that
+// boundary (rmp #2490). A recovered index is populated either by DESERIALIZING
+// the snapshot's indexes/<name>.bin payload or by rebuilding from the recovered
+// graph, decided per index against three preconditions; the two constructed arms
+// of [indexHydrationArms] drive one reopen down each branch and assert the
+// engine-scoped population counters in BOTH directions, because a hydrated index
+// and a rebuilt one are — by contract — indistinguishable in their answers.
+// It also carries the intersect-planner probes ([IndexIntersectProbes]): a
+// two-predicate conjunction over the two BTREE-indexed properties, which is the
+// only shape that reaches the planner's bitmap composition and its budgeted
+// RangeCount / RangeCountFrom gate.
 func indexDiversityScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioIndexDiversity,
@@ -100,11 +112,28 @@ func indexDiversityScenario() Scenario {
 // parity). It is deterministic.
 func runIndexDiversity(ctx context.Context, seed uint64) (*SimReport, error) {
 	sc := indexDiversityScenario()
-	sm, report, err := runIndexDiversitySim(ctx, seed, sc.DeterministicConfig(seed), indexDiversityBulk)
+	sm, report, err := runIndexDiversitySim(ctx, seed, sc.DeterministicConfig(seed), indexDiversityBulk,
+		&indexDiversityEvidence{})
 	if sm != nil {
 		defer func() { _ = sm.Close() }()
 	}
 	return report, err
+}
+
+// indexDiversityEvidence is what the run MEASURED about the two surfaces rmp
+// #2490 added, handed back so a test asserts on numbers rather than on the mere
+// absence of a violation.
+//
+// It follows the shape the snapshot-corruption battery already uses: the
+// checkers themselves ARE the record, so a test reads the very counters the
+// terminal non-vacuity gates read and cannot drift from them.
+type indexDiversityEvidence struct {
+	// arms is the deserialize-not-rebuild arm pair with the population counters
+	// each of its reopens measured. Nil until the loop has constructed it.
+	arms *indexHydrationArms
+	// intersect is the intersect-planner probe set with its composed / rows /
+	// solo-control tallies. Nil until the loop has constructed it.
+	intersect *IndexIntersectProbes
 }
 
 // runIndexDiversitySim is [runIndexDiversity] over an explicit [Config] and bulk
@@ -117,20 +146,22 @@ func runIndexDiversity(ctx context.Context, seed uint64) (*SimReport, error) {
 // closing the returned simulator, which is non-nil whenever construction
 // succeeded.
 func runIndexDiversitySim(
-	ctx context.Context, seed uint64, cfg Config, bulk int,
+	ctx context.Context, seed uint64, cfg Config, bulk int, ev *indexDiversityEvidence,
 ) (*Simulator, *SimReport, error) {
 	sm, err := New(cfg)
 	if err != nil {
 		return nil, nil, fmt.Errorf("sim: index-diversity new: %w", err)
 	}
-	report, rerr := indexDiversityLoop(ctx, sm, seed, cfg, bulk)
+	report, rerr := indexDiversityLoop(ctx, sm, seed, cfg, bulk, ev)
 	return sm, report, rerr
 }
 
 // indexDiversityLoop is the scenario body, over a simulator the caller owns and
 // closes. Splitting it from [runIndexDiversitySim] keeps every violation exit a
 // plain two-value return.
-func indexDiversityLoop(ctx context.Context, sm *Simulator, seed uint64, cfg Config, bulk int) (*SimReport, error) {
+func indexDiversityLoop(
+	ctx context.Context, sm *Simulator, seed uint64, cfg Config, bulk int, ev *indexDiversityEvidence,
+) (*SimReport, error) {
 	// Bulk-load an above-threshold Person graph with string + numeric properties.
 	for i := 0; i < bulk; i++ {
 		q := fmt.Sprintf("CREATE (:Person {name:'p%d', age:%d, city:'c%d'})", i, i%500, i%100)
@@ -157,6 +188,47 @@ func indexDiversityLoop(ctx context.Context, sm *Simulator, seed uint64, cfg Con
 	}
 	if v := CheckSchemaIntrospection(0, model, sm.engine); len(v) > 0 {
 		return sm.report(0, Op{Kind: OpMatch, Cypher: "<post-backfill schema introspection>"}, v), nil
+	}
+
+	// Intersect-planner probes (rmp #2490): a two-predicate conjunction over the
+	// two BTREE-indexed properties, which is the shape that reaches the planner's
+	// bitmap composition and its budgeted RangeCount / RangeCountFrom gate. Drawn
+	// from the checker's OWN sub-seed so the workload, crash, parity, seek-result
+	// and statistics streams stay byte-identical. Constructed before the hydration
+	// arms so the arms' post-recovery battery can include it.
+	intersect := NewIndexIntersectProbes(NewSeed(seed^intersectSeedMix), bulk)
+	ev.intersect = intersect
+	if v := intersect.Check(0, sm.engine); len(v) > 0 {
+		return sm.report(0, Op{Kind: OpMatch, Cypher: "<post-backfill intersect probe>"}, v), nil
+	}
+
+	// The two CONSTRUCTED recovery arms (rmp #2490). They run here — before the
+	// parity probe set, the plan baseline and the statistics regime are primed —
+	// so everything downstream is captured on the engine and graph the churn loop
+	// will actually drive, and so the arms cannot perturb a baseline that was
+	// taken before them. Each arm replaces sm.store and sm.engine with a reopened
+	// pair, and each re-runs the scenario's own post-recovery battery: a hydrated
+	// index must answer exactly as a rebuilt one does.
+	arms := &indexHydrationArms{}
+	ev.arms = arms
+	armVerify := func(tick int64) []Violation {
+		if v := CheckIndexConsistency(tick, nil, sm.engine, indexDiversitySpecs...); len(v) > 0 {
+			return v
+		}
+		if v := CheckSchemaIntrospection(tick, model, sm.engine); len(v) > 0 {
+			return v
+		}
+		return intersect.Check(tick, sm.engine)
+	}
+	if v, err := arms.runHydrateArm(sm, 0, armVerify); err != nil {
+		return nil, err
+	} else if len(v) > 0 {
+		return sm.report(0, Op{Kind: OpMatch, Cypher: "<hydrate arm>"}, v), nil
+	}
+	if v, err := arms.runStaleArm(ctx, sm, 0, armVerify); err != nil {
+		return nil, err
+	} else if len(v) > 0 {
+		return sm.report(0, Op{Kind: OpMatch, Cypher: "<stale arm>"}, v), nil
 	}
 
 	// Access-path parity probes (rmp #2447): drawn from their own sub-seed so
@@ -195,6 +267,11 @@ func indexDiversityLoop(ctx context.Context, sm *Simulator, seed uint64, cfg Con
 	// so the workload stream stays byte-identical.
 	statsRegime := NewStatsRegime(probes...)
 	statsSeed := NewSeed(seed ^ statsSeedMix)
+	// The oracle set, bundled so the post-recovery battery is spelled once.
+	checks := &indexDiversityChecks{
+		sm: sm, model: model, probes: probes, planBase: planBase,
+		seek: seekResults, stats: statsRegime, intersect: intersect, arms: arms,
+	}
 	if v := statsRegime.CheckRefresh(0, sm.engine, ExpectRebuild); len(v) > 0 {
 		return sm.report(0, Op{Kind: OpMatch, Cypher: "<post-backfill stats refresh>"}, v), nil
 	}
@@ -226,8 +303,15 @@ func indexDiversityLoop(ctx context.Context, sm *Simulator, seed uint64, cfg Con
 		}
 
 		// Manual crash (no oracle durability check — see the doc comment). On
-		// recovery the indexes are re-registered and re-backfilled; the
-		// consistency check must then still hold against the recovered graph.
+		// recovery the indexes are re-registered and then populated — hydrated
+		// from the snapshot payload when all three preconditions hold, otherwise
+		// rebuilt from the recovered graph (rmp #2490). Under this loop's churn
+		// the WAL suffix almost always carries a :Person write, so almost every
+		// crash here legitimately takes the REBUILD branch; which branch each
+		// cycle took is recorded below rather than assumed, and the two branches
+		// are driven deliberately by [indexHydrationArms] before the loop starts.
+		// Either way the consistency check must still hold against the recovered
+		// graph.
 		if sm.crash.ShouldCrash(tick) {
 			// Reopen with the SAME durable layout the crashed store used: under
 			// checkpointing that is the full-stack layout (WAL at <dir>/wal beside
@@ -247,41 +331,8 @@ func indexDiversityLoop(ctx context.Context, sm *Simulator, seed uint64, cfg Con
 			// measured evidence of which recovery path each cycle took.
 			sm.replayedOps += store.WALOps()
 			sm.crashCount++
-			if v := CheckIndexConsistency(tick, nil, sm.engine, indexDiversitySpecs...); len(v) > 0 {
-				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery index check>"}, v), nil
-			}
-			// Recovered-DDL introspection: the recovered engine must re-register
-			// every index with the same name, kind, and (label, property) shape,
-			// on both introspection surfaces (rmp #2455).
-			if v := CheckSchemaIntrospection(tick, model, sm.engine); len(v) > 0 {
-				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery schema introspection>"}, v), nil
-			}
-			// The recovery rebuilt the plan cache from scratch: the fixed probes
-			// must re-plan byte-identically, and literal/param parity must hold
-			// on the recovered engine.
-			if v := CheckPlanStability(tick, planBase, sm.engine); len(v) > 0 {
-				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery plan stability check>"}, v), nil
-			}
-			if v := CheckAccessPathParity(tick, nil, sm.engine, probes...); len(v) > 0 {
-				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery access-path parity check>"}, v), nil
-			}
-			if v := seekResults.Check(tick, sm.engine); len(v) > 0 {
-				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery seek-result check>"}, v), nil
-			}
-			// Post-crash statistics regime (rmp #2456): the collector is
-			// in-memory and never rebuilt by recovery, so the recovered engine
-			// must report zero tracked pairs; its fresh rate limiter must then
-			// allow an immediate rebuild, across which every seek answer must
-			// hold (the seek-result check above is the immediately-before
-			// battery, the one below the immediately-after battery).
-			if v := statsRegime.CheckRecovered(tick, sm.engine); len(v) > 0 {
-				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery stats regime>"}, v), nil
-			}
-			if v := statsRegime.CheckRefresh(tick, sm.engine, ExpectRebuild); len(v) > 0 {
-				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery stats refresh>"}, v), nil
-			}
-			if v := seekResults.Check(tick, sm.engine); len(v) > 0 {
-				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery post-refresh seek-result check>"}, v), nil
+			if r := checks.postRecovery(tick, store); r != nil {
+				return r, nil
 			}
 		}
 
@@ -307,6 +358,9 @@ func indexDiversityLoop(ctx context.Context, sm *Simulator, seed uint64, cfg Con
 			}
 			if v := seekResults.Check(tick, sm.engine); len(v) > 0 {
 				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<periodic seek-result check>"}, v), nil
+			}
+			if v := intersect.Check(tick, sm.engine); len(v) > 0 {
+				return sm.report(tick, Op{Kind: OpMatch, Cypher: "<periodic intersect probe>"}, v), nil
 			}
 		}
 
@@ -339,6 +393,16 @@ func indexDiversityLoop(ctx context.Context, sm *Simulator, seed uint64, cfg Con
 	if v := seekResults.Check(int64(cfg.MaxTicks), sm.engine); len(v) > 0 {
 		return sm.report(int64(cfg.MaxTicks), Op{Kind: OpMatch, Cypher: "<terminal seek-result check>"}, v), nil
 	}
+	if v := intersect.Check(int64(cfg.MaxTicks), sm.engine); len(v) > 0 {
+		return sm.report(int64(cfg.MaxTicks), Op{Kind: OpMatch, Cypher: "<terminal intersect probe>"}, v), nil
+	}
+	// Intersect non-vacuity (rmp #2490): the planner must really have composed,
+	// a composed arm must really have returned rows, and the single-property
+	// control must really have seeked WITHOUT composing — without the last one
+	// the composed assertions cannot be told from "some index was used".
+	if v := intersect.Finish(int64(cfg.MaxTicks)); len(v) > 0 {
+		return sm.report(int64(cfg.MaxTicks), Op{Kind: OpMatch, Cypher: "<intersect vacuity check>"}, v), nil
+	}
 	// Non-vacuity over the whole run: at least one seek-result arm must have
 	// returned rows at least once, or the checker compared only empty sets.
 	if v := seekResults.Finish(int64(cfg.MaxTicks)); len(v) > 0 {
@@ -352,6 +416,13 @@ func indexDiversityLoop(ctx context.Context, sm *Simulator, seed uint64, cfg Con
 	if v := statsRegime.Finish(int64(cfg.MaxTicks)); len(v) > 0 {
 		return sm.report(int64(cfg.MaxTicks), Op{Kind: OpMatch, Cypher: "<stats regime vacuity check>"}, v), nil
 	}
+	// Hydration-arm non-vacuity (rmp #2490): both sides of the per-index
+	// deserialize-or-rebuild decision must have been driven. It is silent on a
+	// WAL-only configuration, which has no snapshot to hydrate from — a coverage
+	// clause may only fail a run whose precondition was constructed.
+	if v := arms.finish(int64(cfg.MaxTicks)); len(v) > 0 {
+		return sm.report(int64(cfg.MaxTicks), Op{Kind: OpMatch, Cypher: "<hydration arm vacuity check>"}, v), nil
+	}
 	// Checkpoint non-vacuity (rmp #2464): without at least one published
 	// snapshot the index definitions never crossed the snapshot boundary and
 	// every post-recovery check above merely re-validated a WAL replay.
@@ -359,4 +430,77 @@ func indexDiversityLoop(ctx context.Context, sm *Simulator, seed uint64, cfg Con
 		return sm.report(int64(cfg.MaxTicks), Op{Kind: OpMatch, Cypher: "<checkpoint vacuity check>"}, v), nil
 	}
 	return nil, nil
+}
+
+// indexDiversityChecks bundles the scenario's oracle set so the post-recovery
+// battery is spelled ONCE instead of being inlined in the run loop. It carries no
+// state of its own: every field is one of the stateful checkers the loop built.
+type indexDiversityChecks struct {
+	sm        *Simulator
+	model     *SchemaModel
+	probes    []ParityProbe
+	planBase  *PlanBaseline
+	seek      *IndexSeekResults
+	stats     *StatsRegime
+	intersect *IndexIntersectProbes
+	arms      *indexHydrationArms
+}
+
+// postRecovery runs the whole battery a crash recovery must survive, in order,
+// and returns the report of the first violation it finds (nil when all hold).
+//
+// store is the store the reopen produced, needed for the population counters the
+// branch recorder observes. The order and the op labels are exactly what the run
+// loop spelled inline before rmp #2490 split them out, so a report from this
+// scenario reads identically.
+func (c *indexDiversityChecks) postRecovery(tick int64, store *SimStore) *SimReport {
+	if v := CheckIndexConsistency(tick, nil, c.sm.engine, indexDiversitySpecs...); len(v) > 0 {
+		return c.sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery index check>"}, v)
+	}
+	// Recovered-DDL introspection: the recovered engine must re-register
+	// every index with the same name, kind, and (label, property) shape,
+	// on both introspection surfaces (rmp #2455).
+	if v := CheckSchemaIntrospection(tick, c.model, c.sm.engine); len(v) > 0 {
+		return c.sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery schema introspection>"}, v)
+	}
+	// The recovery rebuilt the plan cache from scratch: the fixed probes
+	// must re-plan byte-identically, and literal/param parity must hold
+	// on the recovered engine.
+	if v := CheckPlanStability(tick, c.planBase, c.sm.engine); len(v) > 0 {
+		return c.sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery plan stability check>"}, v)
+	}
+	if v := CheckAccessPathParity(tick, nil, c.sm.engine, c.probes...); len(v) > 0 {
+		return c.sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery access-path parity check>"}, v)
+	}
+	if v := c.seek.Check(tick, c.sm.engine); len(v) > 0 {
+		return c.sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery seek-result check>"}, v)
+	}
+	// The composed access path has to survive a recovery too: the
+	// intersection is built from two indexes the reopen populated, so a
+	// hydration or rebuild that lost entries shows up here as either a
+	// result divergence or a plan that no longer composes.
+	if v := c.intersect.Check(tick, c.sm.engine); len(v) > 0 {
+		return c.sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery intersect probe>"}, v)
+	}
+	// Which branch this cycle's reopen took, MEASURED. Under churn the
+	// WAL suffix normally carries a :Person write and the rebuild branch
+	// is the correct one; the counters are recorded so the report states
+	// what happened instead of implying it.
+	c.arms.record(store.RecoveredIndexPopulation())
+	// Post-crash statistics regime (rmp #2456): the collector is
+	// in-memory and never rebuilt by recovery, so the recovered engine
+	// must report zero tracked pairs; its fresh rate limiter must then
+	// allow an immediate rebuild, across which every seek answer must
+	// hold (the seek-result check above is the immediately-before
+	// battery, the one below the immediately-after battery).
+	if v := c.stats.CheckRecovered(tick, c.sm.engine); len(v) > 0 {
+		return c.sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery stats regime>"}, v)
+	}
+	if v := c.stats.CheckRefresh(tick, c.sm.engine, ExpectRebuild); len(v) > 0 {
+		return c.sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery stats refresh>"}, v)
+	}
+	if v := c.seek.Check(tick, c.sm.engine); len(v) > 0 {
+		return c.sm.report(tick, Op{Kind: OpMatch, Cypher: "<post-recovery post-refresh seek-result check>"}, v)
+	}
+	return nil
 }

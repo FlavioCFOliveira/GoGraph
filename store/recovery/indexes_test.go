@@ -2,10 +2,9 @@ package recovery
 
 import (
 	"bytes"
-	"log"
+	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -202,11 +201,11 @@ func TestRecovery_IndexesSurviveRestart_WiredEarly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Wire a fresh manager BEFORE recovery's snapshot apply.
-	// Open constructs its own graph; we can't pre-wire its
-	// IndexManager via the public API. Use the lower-level helper.
-	// Instead, we exercise SetIndexManager + applySnapshotIndexes via
-	// the same code path by re-opening a separate flow:
+	// Recovery constructs its own graph and never attaches an index.Manager, so
+	// the round-trip is exercised on a manager the test wires itself: what is
+	// under test here is that each index kind's payload deserialises back out of
+	// a real snapshot, not who calls the deserialiser (see
+	// hydrateReadbacksForTest).
 	g2 := lpg.New[string, int64](adjlist.Config{Directed: true})
 	mgr2 := index.NewManager()
 	g2.SetIndexManager(mgr2)
@@ -217,22 +216,31 @@ func TestRecovery_IndexesSurviveRestart_WiredEarly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadSnapshotFull: %v", err)
 	}
-	got := applySnapshotIndexes(g2.IndexManager(), loaded.Indexes)
+	got := hydrateReadbacksForTest(t, g2.IndexManager(), loaded.Indexes)
 	if got != 3 {
-		t.Fatalf("applySnapshotIndexes loaded=%d, want 3", got)
+		t.Fatalf("hydrateReadbacksForTest loaded=%d, want 3", got)
 	}
 }
 
-// TestRecovery_CorruptedIndex_RebuildsAndLogs writes a snapshot with
-// three indexes, corrupts one on disk, runs recovery, and asserts:
-// (a) Open succeeds, (b) the recovered graph is fully usable
-// (every committed edge is present), (c) the corrupted index is
-// reported via log.Printf with the expected warning, and (d)
-// SnapshotIndexes counts only the indexes that survived.
+// TestRecovery_CorruptedIndexPayload_IsPartiallyRoundTrippable writes a snapshot
+// with three indexes, corrupts one on disk, runs recovery, and asserts that
+// (a) Open succeeds — a damaged index payload is never fail-stop, because an
+// index is derived data a rebuild restores exactly — (b) the recovered graph is
+// fully usable, and (c) exactly the two intact payloads round-trip back into
+// fresh indexes while the corrupted one does not.
+//
+// It used to assert instead that applySnapshotIndexes emitted a log line
+// containing "corrupted" and "rebuild from LPG". rmp #2490 deleted that loader
+// (it was unreachable: recovery never attaches an index.Manager, so it returned
+// 0 on every execution), and a test whose only oracle is the wording of a
+// log.Printf inside dead code proves nothing about behaviour. The per-index
+// hydrate-or-rebuild decision, including the metered, non-silent fallback on a
+// corrupt payload, is asserted behaviourally in package cypher
+// (TestIndexHydration_PartialCorruption_IsPerIndex).
 //
 // Closes the acceptance criterion "Corruption in indexes/<name>.bin
-// triggers rebuild plus a logged warning, not failure".
-func TestRecovery_CorruptedIndex_RebuildsAndLogs(t *testing.T) {
+// triggers rebuild, not failure".
+func TestRecovery_CorruptedIndexPayload_IsPartiallyRoundTrippable(t *testing.T) {
 	dir := t.TempDir()
 	w, err := wal.Open(filepath.Join(dir, "wal"))
 	if err != nil {
@@ -287,17 +295,9 @@ func TestRecovery_CorruptedIndex_RebuildsAndLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Capture stderr-bound log output.
-	var sink bytes.Buffer
-	prev := log.Default().Writer()
-	log.SetOutput(&sink)
-	defer log.SetOutput(prev)
-
-	// Need a wired-up manager BEFORE recovery so the snapshot apply
-	// can take effect. We can't change res.Graph's manager
-	// mid-recovery, so we rebuild the live LPG manually via the
-	// lower-level helper. The test asserts the documented warning
-	// surfaces and the recovery does not abort.
+	// A corrupt index payload must not stop the open: LoadSnapshotFull reports
+	// the damaged component with nil bytes (metered under
+	// `store.snapshot.indexes.corrupted`) and returns success.
 	loaded, err := snapshot.LoadSnapshotFull(snapDir)
 	if err != nil {
 		t.Fatalf("LoadSnapshotFull after corruption = %v, want nil", err)
@@ -309,22 +309,54 @@ func TestRecovery_CorruptedIndex_RebuildsAndLogs(t *testing.T) {
 	_ = mgr2.CreateIndex("labels.nodes", label.NewIndex())
 	_ = mgr2.CreateIndex("hash.email", hash.New[string]())
 	_ = mgr2.CreateIndex("btree.age", btree.New[string]())
-	loadedCount := applySnapshotIndexes(g2.IndexManager(), loaded.Indexes)
+	loadedCount := hydrateReadbacksForTest(t, g2.IndexManager(), loaded.Indexes)
 	if loadedCount != 2 {
-		t.Fatalf("applySnapshotIndexes loaded=%d, want 2 (one corrupted, two healthy)", loadedCount)
+		t.Fatalf("hydrateReadbacksForTest loaded=%d, want 2 (one corrupted, two healthy)", loadedCount)
 	}
-	if !strings.Contains(sink.String(), "corrupted") {
-		t.Fatalf("expected log to mention 'corrupted', got %q", sink.String())
+	// Non-vacuity: the corruption must actually have been detected by the loader,
+	// not merely have produced a payload that happens to fail Deserialize. Exactly
+	// one readback must carry nil bytes.
+	nilBytes := 0
+	for i := range loaded.Indexes {
+		if loaded.Indexes[i].Bytes == nil {
+			nilBytes++
+		}
 	}
-	if !strings.Contains(sink.String(), "rebuild from LPG") {
-		t.Fatalf("expected log to mention 'rebuild from LPG', got %q", sink.String())
+	if nilBytes != 1 {
+		t.Fatalf("readbacks with nil bytes = %d, want exactly 1 — the flipped trailer was not detected, "+
+			"so the partial-hydration assertion above is not measuring corruption", nilBytes)
+	}
+	// The recovered graph is fully usable regardless of the damaged index.
+	res, err := Open[string, int64](dir, Options[string, int64]{
+		Codec:       txn.NewStringCodec(),
+		WeightCodec: txn.NewInt64WeightCodec(),
+	})
+	if err != nil {
+		t.Fatalf("Open over a snapshot with a corrupt index payload = %v, want nil: "+
+			"a derived index must never fail-stop a recovery", err)
+	}
+	for i := 0; i < len(commits)-1; i++ {
+		if !res.Graph.AdjList().HasEdge(commits[i], commits[i+1]) {
+			t.Fatalf("HasEdge(%q,%q) = false after recovery", commits[i], commits[i+1])
+		}
 	}
 }
 
-// TestRecovery_NoManagerNoIndexes is the negative path: a snapshot
-// produced with indexes but recovered into a graph that has no
-// IndexManager attached must succeed and report SnapshotIndexes == 0.
-func TestRecovery_NoManagerNoIndexes(t *testing.T) {
+// TestRecovery_PresentTimeSnapshotIsNeverHydratable is the back-compat
+// guarantee of the rmp #2490 format extension: a snapshot written by a
+// PRESENT-TIME writer ([snapshot.WriteSnapshotFull] and its siblings) carries no
+// `indexes_commit_ts` watermark, so recovery certifies NONE of its index
+// payloads hydratable and every index is rebuilt from the recovered graph —
+// exactly what happened before the extension existed. Every snapshot that
+// existed on disk before this change is in that state.
+//
+// It replaces an assertion that enshrined the defect. The test used to require
+// SnapshotIndexes == 0 "no manager wired", which held for every possible input
+// because the loader behind the field was unreachable — an oracle that cannot
+// fail. It now requires 0 for the reason that actually governs, and proves the
+// reason: a payload WAS declared (so the check is not vacuous) and its reported
+// Err is ErrIndexPayloadStale naming the missing watermark.
+func TestRecovery_PresentTimeSnapshotIsNeverHydratable(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	w, err := wal.Open(filepath.Join(dir, "wal"))
@@ -361,7 +393,34 @@ func TestRecovery_NoManagerNoIndexes(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	if res.SnapshotIndexes != 0 {
-		t.Fatalf("SnapshotIndexes = %d, want 0 (no manager wired)", res.SnapshotIndexes)
+		t.Fatalf("SnapshotIndexes = %d, want 0: a present-time snapshot carries no "+
+			"indexes_commit_ts, so no payload may be hydrated", res.SnapshotIndexes)
+	}
+	// NON-VACUITY: a payload must actually have been declared and reported. With
+	// none, the count above would be 0 for the trivial reason.
+	if len(res.SnapshotIndexPayloads) != 1 {
+		t.Fatalf("SnapshotIndexPayloads = %d entries, want 1 — the snapshot declared no index "+
+			"payload, so the count assertion above is vacuous", len(res.SnapshotIndexPayloads))
+	}
+	p := res.SnapshotIndexPayloads[0]
+	if p.Name != "labels.nodes" {
+		t.Fatalf("payload name = %q, want %q", p.Name, "labels.nodes")
+	}
+	if p.Bytes != nil {
+		t.Fatalf("payload bytes = %d, want nil: an unhydratable payload must not be handed out", len(p.Bytes))
+	}
+	if !errors.Is(p.Err, ErrIndexPayloadStale) {
+		t.Fatalf("payload Err = %v, want ErrIndexPayloadStale (no indexes_commit_ts watermark)", p.Err)
+	}
+	// The supported lookup reports the same reason and no bytes.
+	b, err := res.IndexPayloadFor("labels.nodes")
+	if b != nil || !errors.Is(err, ErrIndexPayloadStale) {
+		t.Fatalf("IndexPayloadFor = (%d bytes, %v), want (nil, ErrIndexPayloadStale)", len(b), err)
+	}
+	// And the manifest genuinely omits the watermark, which is what "byte-identical
+	// to what previous builds wrote" means for every pre-existing snapshot.
+	if ts := mustManifest(t, filepath.Join(dir, "snapshot")).IndexesCommitTS; ts != 0 {
+		t.Fatalf("manifest IndexesCommitTS = %d, want 0: a present-time writer must publish no watermark", ts)
 	}
 	// The graph itself is still recovered correctly.
 	if !res.Graph.AdjList().HasEdge("a", "b") {

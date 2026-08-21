@@ -243,7 +243,7 @@ a call records a single sample regardless of entry point (rmp #1524).
 | `store.snapshot.ReadManifestFile`       | Open + parse a manifest from disk.                             |
 | `store.snapshot.WriteIndexes`           | Serialise every registered index under `indexes/<name>.bin`.   |
 | `store.snapshot.LoadIndexes`            | Read every `indexes/<name>.bin` referenced by the manifest.    |
-| `store.snapshot.indexes.loaded`         | Counter: number of indexes successfully re-hydrated.           |
+| `store.snapshot.indexes.written`         | Counter: number of index payloads a snapshot publish wrote.    |
 | `store.snapshot.indexes.corrupted`      | Counter: number of indexes whose file was missing or CRC-bad.  |
 
 ### `store/txn`
@@ -270,6 +270,20 @@ a call records a single sample regardless of entry point (rmp #1524).
 | `store.recovery.Decode`               | Decode one transactional WAL payload.                            |
 | `store.recovery.Open`                 | Snapshot+WAL recovery into a fresh graph (any key type).         |
 | `store.recovery.OpenCtx`              | Context-aware recovery; honours cancellation and deadlines.      |
+
+The counters below are emitted by the **engine** (`cypher`) as it re-registers
+each recovered secondary index, not by `store/recovery` itself, which loads none.
+They name the recovery event rather than the emitting package so an operator can
+read a reopen's index work as one group. See "Recovery semantics" in
+[`persistence.md`](persistence.md).
+
+| Metric                                       | Description                                                                    |
+| -------------------------------------------- | ------------------------------------------------------------------------------ |
+| `store.recovery.indexes.hydrated`            | Counter: indexes populated from a snapshot `indexes/<name>.bin` payload.        |
+| `store.recovery.indexes.rebuilt`             | Counter: indexes populated by scanning the recovered graph instead.             |
+| `store.recovery.indexes.backfill_nodes`      | Counter: node references those rebuilds materialised (the work hydration saves).|
+| `store.recovery.indexes.payload_unreadable`  | Counter: payloads recovery reported unreadable (missing file or CRC mismatch).  |
+| `store.recovery.indexes.payload_corrupted`   | Counter: CRC-valid payloads whose own `Deserialize` rejected them.              |
 
 ### `store/bulk`
 

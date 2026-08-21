@@ -34,9 +34,18 @@ var ErrIndexCorrupted = errors.New("index: serialized form corrupted")
 
 // ErrIndexValueTypeUnsupported is returned by a generic index's
 // Serialize / Deserialize methods when the value-type parameter is
-// not in the supported on-disk encoding set (currently: string).
-// Callers can convert their value type to string before registering
-// the index for snapshot durability.
+// not in the supported on-disk encoding set.
+//
+// The set is per implementation and is wider than one type. The B+ tree
+// (graph/index/btree) encodes string, int64, int32, int, uint64, uint32, uint and
+// float64; the hash index (graph/index/hash) additionally encodes []byte and
+// bool. The engine relies on that breadth: its numeric companion index is keyed
+// by float64, so a float64-keyed btree MUST be serialisable for a numeric index
+// to survive a checkpoint. The authoritative list is the table under
+// "Supported value-type encodings" in docs/persistence.md.
+//
+// Callers whose value type is outside the set can convert to one of the
+// supported types before registering the index for snapshot durability.
 var ErrIndexValueTypeUnsupported = errors.New("index: value type not supported for serialization")
 
 // Subscriber is implemented by every concrete index that wishes to

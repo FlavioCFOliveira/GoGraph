@@ -16,8 +16,11 @@ import (
 // SECURITY-GAP #1481 — label Index.Deserialize sizes its destination map
 // with make(map[uint32]*roaring64.Bitmap, int(count)) where count is the
 // untrusted uint32 header field, never clamped. A crafted indexes/<name>.bin
-// reaches this decoder through store/recovery.applySnapshotIndexes when a
-// hostile snapshot directory is restored. A 16-byte CRC-valid payload with
+// reaches this decoder when a hostile snapshot directory is restored: recovery
+// reports the payload and the Cypher engine deserialises it into the index
+// registered under the same name (cypher.Engine.hydrateRecoveredIndex; before
+// rmp #2490 the entry point was the since-deleted, and in fact unreachable,
+// store/recovery.applySnapshotIndexes). A 16-byte CRC-valid payload with
 // count == 2^32-1 drives Go to eagerly allocate AND zero ~144 GiB of map
 // buckets (and ~tens of seconds of CPU) before the per-record loop reads a
 // single labelID and EOFs. CWE-789 / CWE-400 / CWE-20: memory + CPU

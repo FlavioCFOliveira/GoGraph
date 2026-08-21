@@ -17,10 +17,6 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
-	"github.com/FlavioCFOliveira/GoGraph/graph/index"
-	"github.com/FlavioCFOliveira/GoGraph/graph/index/btree"
-	"github.com/FlavioCFOliveira/GoGraph/graph/index/hash"
-	"github.com/FlavioCFOliveira/GoGraph/graph/index/label"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
@@ -1537,7 +1533,7 @@ func TestCrashInjection_ApplyOpCodec_PropertyShortBuffers(t *testing.T) {
 				t.Fatalf("Decode payload error: %v", err)
 			}
 			g := lpg.New[string, int64](adjlist.Config{Directed: true})
-			ok := applyOpCodec(g, &op, codec, wcodec)
+			ok := applyOpCodec(g, &op, codec, wcodec, nil)
 			if ok {
 				t.Fatalf("applyOpCodec accepted malformed payload %q", tc.name)
 			}
@@ -1576,7 +1572,7 @@ func TestCrashInjection_ApplyOpCodec_AddNodeAndRemoveNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
-	if !applyOpCodec(g, &op, codec, wcodec) {
+	if !applyOpCodec(g, &op, codec, wcodec, nil) {
 		t.Fatal("AddNode must apply")
 	}
 	if _, ok := g.AdjList().Mapper().Lookup("alice"); !ok {
@@ -1596,7 +1592,7 @@ func TestCrashInjection_ApplyOpCodec_AddNodeAndRemoveNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !applyOpCodec(g, &op2, codec, wcodec) {
+	if !applyOpCodec(g, &op2, codec, wcodec, nil) {
 		t.Fatal("RemoveNode must apply")
 	}
 	if g.HasNodeLabel("alice", "A") {
@@ -1628,7 +1624,7 @@ func TestCrashInjection_ApplyOpCodec_RemoveEdgeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !applyOpCodec(g, &op, codec, wcodec) {
+	if !applyOpCodec(g, &op, codec, wcodec, nil) {
 		t.Fatal("RemoveEdge must apply")
 	}
 	if g.AdjList().HasEdge("alice", "bob") {
@@ -1657,7 +1653,7 @@ func TestCrashInjection_ApplyOpCodec_RemoveNodeLabelRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !applyOpCodec(g, &op, codec, wcodec) {
+	if !applyOpCodec(g, &op, codec, wcodec, nil) {
 		t.Fatal("RemoveNodeLabel must apply")
 	}
 	if g.HasNodeLabel("alice", "Tmp") {
@@ -1701,7 +1697,7 @@ func TestCrashInjection_ApplyOpCodec_DelPropertiesRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !applyOpCodec(g, &op, codec, wcodec) {
+		if !applyOpCodec(g, &op, codec, wcodec, nil) {
 			t.Fatalf("del op must apply")
 		}
 	}
@@ -1812,82 +1808,6 @@ func TestCrashInjection_MixedSnapshotV1V2(t *testing.T) {
 	}
 	if got, _ := v.String(); got != "Alice" {
 		t.Fatalf("name = %q, want Alice", got)
-	}
-}
-
-// TestCrashInjection_ApplySnapshotIndexes_DeserializeError forces the
-// "deserialize fails" branch of applySnapshotIndexes by handing it a
-// readback whose bytes are well-formed in length but garbled in
-// content. The function must log a corruption warning and return
-// loaded=0, leaving the live index in its zero state.
-func TestCrashInjection_ApplySnapshotIndexes_DeserializeError(t *testing.T) {
-	t.Parallel()
-	mgr := index.NewManager()
-	if err := mgr.CreateIndex("hash.x", hash.New[string]()); err != nil {
-		t.Fatal(err)
-	}
-	if err := mgr.CreateIndex("btree.x", btree.New[string]()); err != nil {
-		t.Fatal(err)
-	}
-	if err := mgr.CreateIndex("labels.x", label.NewIndex()); err != nil {
-		t.Fatal(err)
-	}
-	// Garbled but non-nil byte blobs.
-	rb := []snapshot.IndexReadback{
-		{Name: "hash.x", Bytes: []byte{0xFF, 0xFF, 0xFF, 0xFF}},
-		{Name: "btree.x", Bytes: []byte{0x00}},
-		{Name: "labels.x", Bytes: []byte{0xAA, 0xBB}},
-	}
-	got := applySnapshotIndexes(mgr, rb)
-	if got != 0 {
-		t.Fatalf("expected 0 successful loads on garbled bytes, got %d", got)
-	}
-}
-
-// TestCrashInjection_ApplySnapshotIndexes_UnknownIndex forces the
-// "manager does not know this index" branch: the readback references
-// an index name the manager has never seen. The function must skip
-// silently (logged) and return loaded=0.
-func TestCrashInjection_ApplySnapshotIndexes_UnknownIndex(t *testing.T) {
-	t.Parallel()
-	mgr := index.NewManager()
-	rb := []snapshot.IndexReadback{
-		{Name: "ghost", Bytes: []byte{1, 2, 3}},
-	}
-	got := applySnapshotIndexes(mgr, rb)
-	if got != 0 {
-		t.Fatalf("expected 0 loads for unknown index, got %d", got)
-	}
-}
-
-// TestCrashInjection_ApplySnapshotIndexes_NilBytes forces the "bytes
-// are nil" branch: the snapshot loader returns a readback whose Bytes
-// is nil because the file was missing or its CRC32C failed validation.
-// The function must skip (metric incremented) and return loaded=0.
-func TestCrashInjection_ApplySnapshotIndexes_NilBytes(t *testing.T) {
-	t.Parallel()
-	mgr := index.NewManager()
-	if err := mgr.CreateIndex("hash.x", hash.New[string]()); err != nil {
-		t.Fatal(err)
-	}
-	rb := []snapshot.IndexReadback{
-		{Name: "hash.x", Bytes: nil},
-	}
-	got := applySnapshotIndexes(mgr, rb)
-	if got != 0 {
-		t.Fatalf("expected 0 loads for nil-bytes index, got %d", got)
-	}
-}
-
-// TestCrashInjection_ApplySnapshotIndexes_NilManager covers the early
-// return path when the recovered graph has no IndexManager wired up.
-func TestCrashInjection_ApplySnapshotIndexes_NilManager(t *testing.T) {
-	t.Parallel()
-	if got := applySnapshotIndexes(nil, []snapshot.IndexReadback{{Name: "x"}}); got != 0 {
-		t.Fatalf("nil manager must yield 0 loads, got %d", got)
-	}
-	if got := applySnapshotIndexes(index.NewManager(), nil); got != 0 {
-		t.Fatalf("nil readback slice must yield 0 loads, got %d", got)
 	}
 }
 

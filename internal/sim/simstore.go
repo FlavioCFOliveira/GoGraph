@@ -155,6 +155,11 @@ type SimStore struct {
 	// the snapshot's recorded capture instant. It is 0 when nothing durable
 	// carried one.
 	maxCommitTS uint64
+	// idxPopulation is how the reopened engine populated each secondary index it
+	// re-registered: hydrated from the snapshot payload or rebuilt from the
+	// recovered graph (rmp #2490). It is captured at open, like walOps and
+	// resumedTxnSeq, because a crash drops the engine that holds it.
+	idxPopulation cypher.RecoveredIndexPopulation
 }
 
 // OpenSimStore opens (or reopens) a store whose WAL lives in disk under
@@ -186,10 +191,32 @@ func OpenSimStore(disk *SimDisk, cfg simStoreConfig) (*SimStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Re-register recovered schema so a UNIQUE/index declared before the crash
-	// is enforced after restart, mirroring the production reopen path
-	// ([cypher.NewEngineWithStoreAndSchema]).
-	engine := cypher.NewEngineWithStoreAndSchema(ts.store, ts.schema.constraints, ts.schema.indexes)
+	// Re-register recovered schema so a UNIQUE/index declared before the crash is
+	// enforced after restart, AND hydrate each recovered index from the snapshot
+	// payload wherever recovery certified that safe (rmp #2490).
+	//
+	// This used to call [cypher.NewEngineWithStoreAndSchema], which carries no
+	// payloads and therefore ALWAYS rebuilds every recovered index by scanning
+	// the graph. The deserialize-not-rebuild path was consequently unreachable
+	// from the simulator: index-diversity published snapshots whose
+	// indexes/<name>.bin components no reopen ever read, and the
+	// snapshot-corruption battery's index arm could not tell "rebuilt because the
+	// payload was corrupt" from "rebuilt whatever the payload said".
+	//
+	// The options form is used rather than [cypher.NewEngineWithStoreAndRecovery]
+	// because that constructor takes a concrete recovery.Result[string, float64]
+	// and this harness has two recovery cores: the full-stack one produces such a
+	// Result, the WAL-only one a [recovery.ReplayResult] with no payloads at all.
+	// The three fields below are exactly what NewEngineWithStoreAndRecovery sets,
+	// so a full-stack reopen here is equivalent to the production reopen; a
+	// WAL-only reopen passes a nil source and so behaves exactly as it did before
+	// this task.
+	engine := cypher.NewEngineWithOptions(ts.store.Graph(), cypher.EngineOptions{
+		Store:                  ts.store,
+		RecoveredConstraints:   cypher.ConstraintDefsFromRecovery(ts.schema.constraints),
+		RecoveredIndexes:       cypher.IndexDefsFromRecovery(ts.schema.indexes),
+		RecoveredIndexPayloads: ts.schema.payloads,
+	})
 
 	return &SimStore{
 		disk:          ts.disk,
@@ -202,6 +229,7 @@ func OpenSimStore(disk *SimDisk, cfg simStoreConfig) (*SimStore, error) {
 		clean:         ts.clean,
 		resumedTxnSeq: ts.resumedTxnSeq,
 		maxCommitTS:   ts.schema.maxCommitTS,
+		idxPopulation: engine.RecoveredIndexPopulation(),
 	}, nil
 }
 
@@ -359,7 +387,26 @@ func (s *simTypedStore[N, W]) Close() error {
 type recoveredSchema struct {
 	constraints []recovery.ConstraintRecord
 	indexes     []recovery.IndexRecord
-	walOps      int
+	// payloads is the durable secondary-index payload source the reopened engine
+	// hydrates from, or nil when there is nothing to hydrate (rmp #2490).
+	//
+	// On the FULL-STACK path it is the [recovery.Result] itself: that value
+	// already satisfies [cypher.IndexPayloadSource] for every codec pair, since
+	// neither IndexPayloadFor nor WALSuffixTouchesNodeIndex mentions the type
+	// parameters. Handing the Result over rather than copying facts out of it is
+	// deliberate — the hydration preconditions are recovery's to evaluate, and a
+	// harness that re-derived them would be asserting its own re-implementation
+	// instead of the engine's decision.
+	//
+	// On the WAL-ONLY path it is nil, because a directory with no snapshot has no
+	// indexes/<name>.bin to hydrate from: [recovery.ReplayResult] carries the
+	// WAL-touched facets but no payloads at all, so a source wired here could
+	// only ever answer ErrIndexPayloadNotFound. Leaving it nil says exactly that
+	// and adds no second implementation of recovery's predicate; the scenarios
+	// ASSERT the consequence (a WAL-only reopen hydrates nothing) rather than
+	// trusting it.
+	payloads cypher.IndexPayloadSource
+	walOps   int
 	// maxTxnSeq is [recovery.Result.MaxTxnSeq]: the highest per-transaction
 	// sequence any replayed v3 frame carried, which the reopened store resumes
 	// from so no sequence is minted twice (rmp #2302).
@@ -426,6 +473,11 @@ func recoverSimGraph[N comparable, W any](
 		return res.Graph, recoveredSchema{
 			constraints: res.Constraints,
 			indexes:     res.Indexes,
+			// The Result IS the payload source (see recoveredSchema.payloads):
+			// the engine asks it, per index name, whether a snapshot payload was
+			// certified hydratable and whether the replayed WAL suffix touched
+			// that index's (label, property).
+			payloads:    res,
 			walOps:      res.WALOps,
 			maxTxnSeq:   res.MaxTxnSeq,
 			maxCommitTS: res.MaxCommitTS,
@@ -585,6 +637,21 @@ func (s *SimStore) ResumedTxnSeq() uint64 { return s.resumedTxnSeq }
 // graph's MVCC clock to one past it, so it is the durable floor a post-recovery
 // commit must exceed (rmp #2309). It is 0 when nothing durable carried one.
 func (s *SimStore) RecoveredMaxCommitTS() uint64 { return s.maxCommitTS }
+
+// RecoveredIndexPopulation reports how the most recent recovery populated each
+// secondary index the reopened engine re-registered: hydrated from the
+// snapshot's indexes/<name>.bin payload, or rebuilt by scanning the recovered
+// graph (rmp #2490). It is the ENGINE-SCOPED count
+// ([cypher.Engine.RecoveredIndexPopulation]), captured at open, which is what
+// makes it usable as an oracle: the `store.recovery.indexes.*` metrics are
+// process-global, and the swarm runner builds engines on concurrent goroutines,
+// so a metric delta cannot attribute a decision to THIS reopen.
+//
+// Every field is zero for a store whose recovery re-registered no index — a
+// fresh directory, or one whose durable schema carries no index definition.
+func (s *SimStore) RecoveredIndexPopulation() cypher.RecoveredIndexPopulation {
+	return s.idxPopulation
+}
 
 // ClockNow reports the MVCC clock's currently published instant. Read
 // immediately after a reopen it is the RECOVERED clock floor; read during a run

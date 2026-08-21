@@ -87,7 +87,7 @@ undirected Euler; `BiBFS`; direction-optimised BFS on a hub fixture; the
 | Offline bulk-import publication (`store/bulkimport`) — **parity only, NOT fault coverage** | `bulkimport-parity` | a published snapshot reopens through real recovery equal to the harness model exactly (node set two-sided, labels, properties by **kind and value**, per-handle edge multisets including parallel twins), `SnapshotHit` with **zero** replayed WAL ops on two successive opens, and the measured lifecycle contract (`ErrNotFinished` / `ErrFinished` / `ErrStoreNotEmpty`, their precedence, and `PublishResult.Stats`); plus the publish's byte-reproducibility boundary. **No fault regime is reachable** — see the note below |
 | Crash **during** the snapshot publish, at each step of the crash-atomic swap | `checkpoint-crash-storm` | acked ⊆ recovered ⊆ issued across a crash inside the publish window; a stranded backup is promoted by recovery (measured on the durable image and on `store.recovery.snapshot.promoteParentFsync`), never a half-published snapshot |
 | Node-key and edge-weight CODEC matrix across crash and upgrade | `codec-matrix` (soak; `internal/sim/codec_matrix.go`) | seven `(key codec, weight codec)` arms each survive the three snapshot-publish crash windows AND the upgrade + snapshot boundaries with acked ⊆ recovered ⊆ issued adjudicated BY KEY; the durable `mapper.bin` carries the layout the key type selects (v1 for the string control, v2 for the other six) and the snapshot-only reopen replays ZERO WAL ops, so every recovered key came through the mapper; `txn.ErrNoWeightCodec` is provoked and its actual behaviour pinned. One measured gap is pinned rather than tolerated: a struct weight is dropped by the snapshot CSR writer — see below |
-| Corruption of a published snapshot COMPONENT | `snapshot-corruption-failstop` | a byte flipped in any of the nine components fail-stops recovery with that component's typed sentinel; recovery returns no store, mutates nothing on disk and leaves `db/wal` byte-identical; the restored image still recovers the exact committed model. One documented non-fail-stop is pinned in the same run: a corrupt `indexes/<name>.bin` is REBUILT (and the rebuild verified against a full scan). The manifest's key-name region was the second until rmp #2520 checksummed it — see below |
+| Corruption of a published snapshot COMPONENT | `snapshot-corruption-failstop` | a byte flipped in any of the nine components fail-stops recovery with that component's typed sentinel; recovery returns no store, mutates nothing on disk and leaves `db/wal` byte-identical; the restored image still recovers the exact committed model. One documented non-fail-stop is pinned in the same run, as a PAIRED oracle (rmp #2490): an intact `indexes/<name>.bin` is HYDRATED and a corrupt one is REBUILT, asserted on the engine-scoped population counter in both directions, with both reopens verified against a full scan and against the committed key set. The manifest's key-name region was the second non-fail-stop until rmp #2520 checksummed it — see below |
 | Cross-release compatibility of the on-disk SNAPSHOT format | `TestCrossRelease_*` (soak: prior-tag subprocess) + `TestCrossReleaseCompat_*` (short: frozen fixtures) | a PRIOR release publishes a **checkpoint** — snapshot directory plus truncated WAL — and the current code reopens it through the FULL-STACK `recovery.OpenCtx`, so that release's `manifest.json`, `csr.bin`, `labels.bin`, `properties.bin` and `mapper.bin` are parsed by current code. "The snapshot was opened" is adjudicated from two INDEPENDENT observations — the filesystem read with the current manifest reader, and recovery's own `SnapshotHit` — so a directory present but skipped is a `SnapshotProvenanceGap` that fails parity, not an unfalsifiable false. On the short layer a frozen pre-#2520/#2526 snapshot directory asserts both directions of the documented contract: an older artefact still opens (manifest loads reporting `IntegrityVerified` **false**; the dense width-8 weights column parses with its exact `float64` values), and a newer artefact is refused by the older reader's documented rule **deterministically**, by both of that release's guards. Fixture digests are pinned in the test source rather than in a golden, so `-update` cannot regenerate the old format away — see below |
 | Per-transaction op caps (CWE-770), producer **and** replay | `txn-oversize` (`internal/sim/txn_oversize.go`) | an over-cap commit is refused with `txn.ErrTransactionTooLarge` **before any frame is written** — proved by the durable WAL image being BYTE-identical across the refusal and the live graph unmutated, not by the error alone — and the surviving file recovers clean with every refused key absent; a hand-built WAL whose marker-less run exceeds the replay cap fail-stops with `recovery.ErrTransactionTooLarge`, keeps exactly the committed prefix, and is refused by the store-open rather than appended onto. The boundary is MEASURED on both sides and the two caps agree exactly (cap ops passes, cap+1 fails both). Until this task the cap reached only the replayer, so neither sentinel was reachable under simulation at any setting — see below |
 
@@ -130,11 +130,55 @@ against the manifest entry, which surfaces as the directory-level
 handing it to the verified reader, and that peek returns its error unwrapped.
 Everything else in the load path wraps.
 
-`indexes/<name>.bin` is **tolerated by design**, not a gap: `snapshot.LoadIndexes`
-reports a CRC-failing payload as nil bytes and recovery rebuilds that index from
-the LPG. The scenario therefore requires the reopen to SUCCEED for a corrupt
-payload — and then cross-checks every declared index against a full label scan,
-so "tolerated" cannot degrade into "silently wrong".
+`indexes/<name>.bin` is **tolerated by design**, not a gap, and it is the
+battery's **one documented exception to the fail-stop rule**: `snapshot.LoadIndexes`
+reports a CRC-failing payload as nil bytes, recovery classifies it as
+`recovery.ErrIndexPayloadUnreadable`, and the engine rebuilds that index from the
+recovered graph — per index, never a fail-stop. An index is derived data over an
+already-recovered, independently integrity-checked graph, so a rebuild restores
+byte-identical content and loses nothing; refusing to open the database over it
+would deny service for a fault with a complete local repair. Every reference
+engine reaches the same conclusion: PostgreSQL discards and rebuilds
+`pg_internal.init`, Memgraph rebuilds its label indexes unconditionally on
+recovery, and Neo4j coerces an unreadable index header to `POPULATING` and
+repopulates.
+
+The one index-related condition that **is** fail-stop stays fail-stop: a manifest
+index name that would escape the `indexes/` directory raises
+`snapshot.ErrManifestCorrupted` from `validateIndexName` and refuses the open.
+That is a path-traversal security event driven by attacker-controlled manifest
+bytes, not benign corruption, and it is deliberately unreachable through the
+per-payload reason codes.
+
+**The arm is PAIRED (rmp #2490).** Requiring only that the reopen succeeds was
+*vacuous on the hydration axis*: before #2490 the simulator built its engine
+through a constructor that carries no snapshot payloads, so every reopen rebuilt
+every index whatever the payload said — "recovery survived and the indexes are
+consistent" held identically with a valid payload, a damaged one, and no payload
+at all. The arm now drives two reopens over the same fixture and asserts the
+engine-scoped population counter
+(`cypher.Engine.RecoveredIndexPopulation`, surfaced to the harness as
+`SimStore.RecoveredIndexPopulation`) in **both** directions:
+
+| half | payloads | required population | measured (seed `0x1`) |
+|---|---|---|---|
+| control | intact | every registered index **HYDRATED**, none rebuilt | `registered=5 hydrated=5 rebuilt=0` |
+| corrupt | one byte flipped in each | every registered index **REBUILT**, none hydrated, and **every** payload reported unreadable | `registered=5 flipped=5 hydrated=0 rebuilt=5 unreadable=5` |
+
+Both halves go through one shared verification body — the same
+`CheckIndexConsistency` cross-check against a full label scan and the same
+committed-key-set re-read — because the whole claim under test is that a hydrated
+index and a rebuilt one are indistinguishable in their answers; two near-identical
+bodies could drift and check one half more weakly than the other. The counts are
+anchored to `index.Manager.ListIndexes()` rather than to a constant, so the
+assertion survives the engine adding or removing an internal numeric companion,
+and `hydrated + rebuilt == registered` is asserted on its own: an index that is
+registered without being populated would be seekable while empty.
+
+`unreadable == flipped` is what attributes the rebuilds to the injected
+corruption rather than to a coincidence, and the terminal non-vacuity gate
+refuses evidence in which the control half hydrated nothing — precisely the state
+this harness was in before #2490, when it passed.
 
 **The finding (rmp #2467): `manifest.json` carried the CRC of every other
 component and none of its own.** A byte flipped inside a JSON **key name** left a
