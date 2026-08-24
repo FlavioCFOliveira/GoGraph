@@ -217,6 +217,30 @@ func TestFluentQuery_ClausesAreFalsifiable(t *testing.T) {
 			wantClause: "range-mixed:scan-vs-oracle",
 			wantProbe:  "range-mixed-point",
 		},
+		{
+			// The clause rmp #2601 added: the EQUALITY side of the same
+			// unification. Naming the probe as well as the clause is what keeps
+			// this case from being satisfied by the range-mixed pair going red.
+			name:       "the mixed-kind EQUALITY scan arm losing a name the seek arm kept",
+			perturb:    fqPerturbScanArmDrop,
+			wantClause: "eq-mixed:seek-vs-scan",
+			wantProbe:  "eq-mixed-point",
+		},
+		{
+			name:       "the mixed-kind EQUALITY scan arm diverging from the model",
+			perturb:    fqPerturbScanArmDrop,
+			wantClause: "eq-mixed:scan-vs-oracle",
+			wantProbe:  "eq-mixed-point",
+		},
+		{
+			// The clause that names the #2601 asymmetry directly. It has its own
+			// perturbation because the degenerate-range arm is read nowhere else in
+			// the battery, so nothing else could make it fire.
+			name:       "the degenerate-range arm diverging from the equality arm",
+			perturb:    fqPerturbDegenerateRangeDrop,
+			wantClause: "eq-mixed:equality-vs-degenerate-range",
+			wantProbe:  "eq-mixed-point",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -334,7 +358,7 @@ func TestFluentQuery_FinishGatesAllFire(t *testing.T) {
 		"vacuity:post-recovery", "vacuity:churn", "vacuity:live-names", "vacuity:out-targets",
 		"vacuity:tombstone-load-bearing", "vacuity:string-range", "vacuity:int-range",
 		"vacuity:hash-seek", "vacuity:btree-seek", "vacuity:numeric-seek", "vacuity:ghost-arcs",
-		"vacuity:mixed-kind",
+		"vacuity:mixed-kind", "vacuity:eq-mixed",
 	}
 	fired := func(vs []Violation, clause string) bool {
 		for _, x := range vs {
@@ -372,6 +396,24 @@ func TestFluentQuery_FinishGatesAllFire(t *testing.T) {
 	for _, x := range v {
 		if x.Op == fqOp("vacuity:mixed-kind") {
 			t.Errorf("both mixed-kind gates fired at once; they are exclusive branches\n%s",
+				renderViolations(v))
+		}
+	}
+
+	// The same two-branch structure for the EQUALITY side (rmp #2601). It is
+	// gated separately from the range side on purpose: the two predicates take
+	// different index arms, so one having run says nothing about the other.
+	p = NewFluentQueryProbes(NewSeed(1))
+	p.Evidence().Batteries = 1
+	p.Evidence().EqMixedProbes = 3
+	v = p.Finish(7)
+	if !fired(v, "vacuity:eq-mixed-non-empty") {
+		t.Errorf("the eq-mixed-non-empty gate did not fire for a probe that ran %d times with an "+
+			"empty answer every time; got:\n%s", 3, renderViolations(v))
+	}
+	for _, x := range v {
+		if x.Op == fqOp("vacuity:eq-mixed") {
+			t.Errorf("both eq-mixed gates fired at once; they are exclusive branches\n%s",
 				renderViolations(v))
 		}
 	}
@@ -596,6 +638,67 @@ func TestFluentQuery_MixedKindArmsAgree(t *testing.T) {
 	t.Logf("mixed-kind (asserted): probes=%d nonEmpty=%d seek=%d oracle=%d numericSeekEligible=%d",
 		ev.MixedKindProbes, ev.MixedKindNonEmpty, ev.MixedKindLastSeek, ev.MixedKindLastOracle,
 		ev.NumericSeekEligible)
+}
+
+// TestFluentQuery_EqMixedArmsAgree is the asserted form of the asymmetry rmp
+// #2600 CREATED and #2601 closed: over the same INT64-valued `age`, a FLOAT64
+// [query.WithProperty] and the degenerate FLOAT64 [query.WithRange] must return
+// the same non-empty set.
+//
+// It is the equality twin of [TestFluentQuery_MixedKindArmsAgree] and is a
+// separate test rather than an extra assertion inside it because the two
+// predicates reach DIFFERENT index arms: a numeric range goes to the companion
+// btree via seekRangeInto, and a numeric equality goes to the same btree via
+// trySeekProperty as the degenerate range [v, v] — never to a hash index, whose
+// single-kind posting list is a subset of a unified equality. One arm working
+// says nothing about the other.
+//
+// Non-vacuity is asserted here and gated in [FluentQueryProbes.Finish], and
+// TestFluentQuery_ClausesAreFalsifiable proves all three of the clauses this
+// probe carries go red under a perturbation.
+func TestFluentQuery_EqMixedArmsAgree(t *testing.T) {
+	t.Parallel()
+	sm := newFluentQueryFixture(t, 0x2492_0003)
+	probes := NewFluentQueryProbes(NewSeed(0x2492_0003 ^ fluentQueryProbeSeedMix))
+	v, err := probes.Check(context.Background(), 1, sm.graph(), sm.engine, sm.oracle, fqPerturbNone)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(v) != 0 {
+		t.Fatalf("the battery reported %d violation(s):\n%s", len(v), renderViolations(v))
+	}
+	ev := probes.Evidence()
+	if ev.EqMixedProbes == 0 {
+		t.Fatal("the mixed-kind EQUALITY probe did not run, so the asymmetry rmp #2601 closed is " +
+			"not being adjudicated at all")
+	}
+	if ev.EqMixedNonEmpty == 0 || ev.EqMixedLastOracle == 0 {
+		t.Fatalf("the mixed-kind equality probe's model answer was EMPTY (nonEmpty=%d "+
+			"lastOracle=%d): the arms had nothing to disagree about and both the eq-mixed clause "+
+			"and the equality-vs-degenerate-range clause are vacuous",
+			ev.EqMixedNonEmpty, ev.EqMixedLastOracle)
+	}
+	if ev.EqMixedLastSeek != uint64(ev.EqMixedLastOracle) {
+		t.Fatalf("the mixed-kind equality seek arm returned %d, the model %d",
+			ev.EqMixedLastSeek, ev.EqMixedLastOracle)
+	}
+	// The equality and the range must have adjudicated the SAME answer, since the
+	// value and the window are the same number. Comparing the two probes' recorded
+	// cardinalities is a second, independent statement of the identity the
+	// eq-mixed:equality-vs-degenerate-range clause asserts inside the battery.
+	if ev.EqMixedLastSeek != ev.MixedKindLastSeek {
+		t.Fatalf("the equality seek returned %d and the degenerate-range seek %d over the same "+
+			"value: an equality and a degenerate range must agree (#2601)",
+			ev.EqMixedLastSeek, ev.MixedKindLastSeek)
+	}
+	if ev.NumericSeekEligible == 0 {
+		t.Fatalf("no battery found the numeric companion btree[float64] (eligible=%d "+
+			"ineligible=%d), so the equality SEEK arm silently scanned and the clause compared one "+
+			"path with itself", ev.NumericSeekEligible, ev.NumericSeekIneligible)
+	}
+	t.Logf("eq-mixed (asserted): probes=%d nonEmpty=%d seek=%d oracle=%d rangeSeek=%d "+
+		"numericSeekEligible=%d", ev.EqMixedProbes, ev.EqMixedNonEmpty, ev.EqMixedLastSeek,
+		ev.EqMixedLastOracle, ev.MixedKindLastSeek, ev.NumericSeekEligible)
 }
 
 // TestFluentQuery_SeekEligibilityPreconditionFires proves the precondition that

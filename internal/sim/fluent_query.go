@@ -208,6 +208,15 @@ package sim
 //   - EQUALITY on a string property is hash-served: `CREATE INDEX ...
 //     indexType:'hash'` builds a hash.Index[string], which satisfies
 //     hashLookuper[string].
+//   - EQUALITY on a NUMERIC property is btree-served by the same numeric
+//     companion the ranges use, seeked as the DEGENERATE range [v, v], as a
+//     SUPERSET with query.equalValue as the exact residual filter (rmp #2601).
+//     It is NOT hash-served: a hash.Index[int64] or hash.Index[float64] holds
+//     one numeric kind only, which under a unified equality is a SUBSET of the
+//     answer, and a subset cannot be repaired by a residual filter — so #2601
+//     removed those arms exactly as #2600 removed btreeRanger[int64]. No
+//     engine-created hash index is numeric anyway (CREATE INDEX always builds a
+//     hash.Index[string]), so nothing an engine builds lost a seek.
 //   - A STRING RANGE on a string property is btree-served: `CREATE INDEX ...
 //     indexType:'btree'` builds a btree.Index[string], which satisfies
 //     btreeRanger[string].
@@ -264,6 +273,45 @@ package sim
 //	                     consistently wrong rather than divergent. The CIP makes
 //	                     the two bound tests independent, so the bounds need not
 //	                     share a kind.
+//
+// # The asymmetry #2600 CREATED, and #2601 closed
+//
+// Unifying the range and leaving the equality alone made the two disagree with
+// each other. Over the same INT64-valued `age`:
+//
+//	WithRange("age", Float64Value(age), Float64Value(age))   matched
+//	WithProperty("age", Float64Value(age))                   did NOT
+//
+// so the same data answered differently depending on whether the predicate was
+// written as an equality or as a degenerate range. Before #2600 both refused, so
+// they were at least coherent. The CIP that settles the order also says numbers
+// of different types can be EQUAL, and the TCK has 1 = 1.0 as true
+// (Comparison1.feature), so the equality was the side left wrong.
+//
+// #2601 unified query.equalValue through the SAME exact comparator the range
+// uses, and this scenario gained a third window plus a clause that names the
+// asymmetry directly:
+//
+//	eq-mixed-point       a FLOAT64 expected value over an INT64 property,
+//	                     adjudicated three ways like every other probe under the
+//	                     "eq-mixed" clause. Its seek arm is the only equality
+//	                     probe here that reaches the numeric companion btree.
+//
+//	eq-mixed:equality-vs-degenerate-range
+//	                     the equality answer held DIRECTLY against
+//	                     WithRange(age, age) over the same value. The three-way
+//	                     adjudication of the two probes already implies it, but
+//	                     only while both have a non-empty answer; asserting it
+//	                     directly makes the #2601 clause independent of that and
+//	                     names the asymmetry instead of leaving it to be inferred
+//	                     from two separate probe failures.
+//
+// The identity is deliberately NOT claimed for every kind. openCypher's
+// equatability is WIDER than its comparability: BOOLEAN, BYTES and TIME are
+// equal to themselves but are not ordered scalars, so over them WithProperty
+// matches where the degenerate WithRange cannot. `age` is numeric, so this
+// scenario only ever exercises the orderable case; the divergence for the other
+// kinds is pinned in graph/query's own tests, not here.
 //
 // # Determinism: exactly what is reproducible
 //
@@ -473,6 +521,15 @@ const (
 	// csr-generation-invariance clause is proven to fire — including inside the
 	// ghost fixture, which is the only place the two CSR builds actually differ.
 	fqPerturbRawArmDrop
+	// fqPerturbDegenerateRangeDrop drops one name from the DEGENERATE-RANGE
+	// observation the eq-mixed probe holds its equality answer against, so the
+	// "equality-vs-degenerate-range" clause rmp #2601 added is proven to fire.
+	//
+	// It perturbs that arm rather than the equality arm because the equality arm
+	// is already covered from two directions — the three-way model comparison and
+	// fqPerturbScanArmDrop — while the degenerate-range arm is read nowhere else
+	// and its silence would otherwise mean nothing.
+	fqPerturbDegenerateRangeDrop
 )
 
 // fqPerson is the model's record of one live Person: its name is the map key,
@@ -834,10 +891,27 @@ type FluentQueryEvidence struct {
 	MixedKindNonEmpty   int
 	MixedKindLastSeek   uint64
 	MixedKindLastOracle int
+	// EqMixed* are the same four quantities for the EQUALITY side of the same
+	// unification (rmp #2601): a FLOAT64 expected value in a [query.WithProperty]
+	// over an INT64-valued property. They are counted separately from the
+	// MixedKind* range counters on purpose — the two predicates take different
+	// index arms (a numeric equality is btree-served as a degenerate range, never
+	// hash-served) and one being exercised says nothing about the other, so a
+	// shared counter could not gate them independently.
+	//
+	// EqMixedNonEmpty is again the counter that matters: two empty answers agree
+	// whatever the comparison does, so a probe that only ever compared empty sets
+	// would make both the eq-mixed clause and the
+	// equality-vs-degenerate-range clause silent rather than satisfied.
+	EqMixedProbes     int
+	EqMixedNonEmpty   int
+	EqMixedLastSeek   uint64
+	EqMixedLastOracle int
 	// NumericSeekEligible / NumericSeekIneligible count the batteries at which
-	// every condition of query.trySeekRange held for the internal numeric
-	// companion btree over (Person, age). An ineligible battery means both
-	// numeric arms degraded to a scan and the range-int / range-mixed
+	// every condition of query.trySeekRange — and, since rmp #2601, of
+	// query.trySeekProperty for a numeric value — held for the internal numeric
+	// companion btree over (Person, age). An ineligible battery means every
+	// numeric arm degraded to a scan and the range-int / range-mixed / eq-mixed
 	// seek-vs-scan clauses compared one path with itself.
 	NumericSeekEligible   int
 	NumericSeekIneligible int
@@ -877,6 +951,8 @@ func (e *FluentQueryEvidence) String() string {
 		e.GhostFixtures, e.GhostArcsSeen, e.CSRRawArcs, e.CSRLiveArcs, e.CSRGenerationsDiffered)
 	fmt.Fprintf(&b, " mixedKind=%d/%d(probes/non-empty) last(seek=%d oracle=%d)",
 		e.MixedKindProbes, e.MixedKindNonEmpty, e.MixedKindLastSeek, e.MixedKindLastOracle)
+	fmt.Fprintf(&b, " eqMixed=%d/%d(probes/non-empty) last(seek=%d oracle=%d)",
+		e.EqMixedProbes, e.EqMixedNonEmpty, e.EqMixedLastSeek, e.EqMixedLastOracle)
 	fmt.Fprintf(&b, " digest=%#016x", e.Digest)
 	// Telemetry, printed LAST and labelled, so nobody mistakes it for a gated
 	// quantity: it is scheduler-dependent (see the field's doc).
@@ -905,6 +981,8 @@ func (e *FluentQueryEvidence) ReproducibleSummary() string {
 		e.GhostFixtures, e.GhostArcsSeen, e.CSRRawArcs, e.CSRLiveArcs, e.CSRGenerationsDiffered)
 	fmt.Fprintf(&b, " mixed=%d/%d last=%d/%d",
 		e.MixedKindProbes, e.MixedKindNonEmpty, e.MixedKindLastSeek, e.MixedKindLastOracle)
+	fmt.Fprintf(&b, " eqMixed=%d/%d last=%d/%d",
+		e.EqMixedProbes, e.EqMixedNonEmpty, e.EqMixedLastSeek, e.EqMixedLastOracle)
 	fmt.Fprintf(&b, " digest=%#016x", e.Digest)
 	return b.String()
 }
@@ -1393,10 +1471,13 @@ func (p *FluentQueryProbes) Check(
 		})
 		return ok
 	})
-	// The NUMERIC companion over (Person, age). Since rmp #2600 query.seekRangeInto
-	// routes every numeric bound pair — int64, float64, or one of each — to a
-	// btreeRanger[float64], so this is the guard the range-int and range-mixed
-	// seek arms depend on. Its absence would silently turn both into scan-vs-scan.
+	// The NUMERIC companion over (Person, age). Since rmp #2600
+	// query.seekRangeInto routes every numeric bound pair — int64, float64, or
+	// one of each — to a btreeRanger[float64], and since rmp #2601
+	// query.trySeekProperty routes a numeric EQUALITY to the same index as the
+	// degenerate range [v, v]. So this one guard underwrites the range-int,
+	// range-mixed AND eq-mixed seek arms, and its absence would silently turn all
+	// three into scan-vs-scan.
 	numericOK := fqSeekEligibility(g, "btree", fluentQueryLabel, "age", func(s index.Subscriber) bool {
 		_, ok := s.(interface {
 			Range(lo, hi float64) *roaring64.Bitmap
@@ -1421,8 +1502,10 @@ func (p *FluentQueryProbes) Check(
 	if !hashOK || !btreeOK || !numericOK {
 		vs = append(vs, fqViolation(ViolationOracleDeviation, tick, "precondition:seek-eligibility",
 			"no bound index satisfies query/index_seek.go's guard: hash[string](%s,name)=%v "+
-				"btree[string](%s,name)=%v btree[float64](%s,age)=%v. The seek arm would silently "+
-				"degrade to the scan, so the seek-vs-scan clause would compare one path with itself",
+				"btree[string](%s,name)=%v btree[float64](%s,age)=%v (the last one serves the "+
+				"numeric ranges AND, since #2601, the numeric equality). The seek arm would "+
+				"silently degrade to the scan, so the seek-vs-scan clause would compare one path "+
+				"with itself",
 			fluentQueryLabel, hashOK, fluentQueryLabel, btreeOK, fluentQueryLabel, numericOK))
 	}
 
@@ -1729,6 +1812,57 @@ func (p *FluentQueryProbes) Check(
 			return nil, err
 		}
 		vs = append(vs, mv...)
+
+		// --- probe: the EQUALITY side of the same unification (rmp #2601). A
+		// FLOAT64 expected value over an INT64-valued property. It is the exact
+		// mirror of range-mixed-point, and until #2601 the two DISAGREED with each
+		// other: the degenerate range [age, age] matched and the equality did not,
+		// so the same data answered differently depending on how the predicate was
+		// written. Both are now one relation over one comparator, so the model's
+		// int-keyed answer is the expected answer for both.
+		//
+		// The SEEK arm here exercises a different index arm from every other
+		// equality probe in this battery: a numeric equality is not hash-served at
+		// all (a single-kind hash index is a SUBSET of a unified equality), so it
+		// is served by the numeric companion btree as the degenerate range, with
+		// query.equalValue as the exact residual filter. That is why the
+		// numeric-seek eligibility gate now underwrites this probe too.
+		eqMixed := lpg.Float64Value(float64(age))
+		p.ev.EqMixedProbes++
+		if len(want) > 0 {
+			p.ev.EqMixedNonEmpty++
+		}
+		p.ev.EqMixedLastOracle = len(want)
+		eqSpec := fqProbeSpec{
+			name:      "eq-mixed-point",
+			seek:      engLive.Match().Vertex(label, fqProp("age", eqMixed)),
+			scan:      engLive.Match().Vertex(label).Vertex(fqProp("age", eqMixed)),
+			cypher:    "MATCH (n:Person) WHERE n.age = $age RETURN n.name",
+			params:    map[string]any{"age": float64(age)},
+			want:      want,
+			armClause: "eq-mixed",
+		}
+		ev, eqObs, err := p.runProbe(ctx, tick, eng, sub, &eqSpec, perturb)
+		if err != nil {
+			return nil, err
+		}
+		p.ev.EqMixedLastSeek = eqObs.cardinality
+		vs = append(vs, ev...)
+
+		// The SAME value as an equality and as a degenerate range must return the
+		// same set. Adjudicating the two against the shared model already implies
+		// it, but only while BOTH probes have a non-empty answer to disagree
+		// about; asserting the identity DIRECTLY is what makes the #2601 clause
+		// independent of that, and it names the asymmetry rather than leaving a
+		// reader to infer it from two separate probe failures.
+		degenerate := fqObserve(engLive.Match().Vertex(label, fqRange("age", eqMixed, eqMixed)), sub)
+		vs = append(vs, fqSelfConsistency(tick, "eq-mixed-point:degenerate-range", degenerate)...)
+		degenerateNames := degenerate.names
+		if perturb == fqPerturbDegenerateRangeDrop {
+			degenerateNames = fqDropOne(degenerateNames)
+		}
+		vs = append(vs, fqCompare(tick, "eq-mixed:equality-vs-degenerate-range", "eq-mixed-point",
+			eqObs.names, degenerateNames)...)
 	}
 
 	// --- the constructed ghost-arc fixture: the ONLY place Out()'s ghost-arc
@@ -1989,9 +2123,9 @@ func (p *FluentQueryProbes) Finish(tick int64) []Violation {
 	}
 	if e.NumericSeekEligible == 0 {
 		add("numeric-seek", "no battery found the internal numeric companion btree[float64] "+
-			"satisfying query/index_seek.go's guard for (%s,age), so the int64-range and mixed-kind "+
-			"seek arms were never actually index-served and their seek-vs-scan clauses compared one "+
-			"path with itself", fluentQueryLabel)
+			"satisfying query/index_seek.go's guard for (%s,age), so the int64-range, mixed-kind "+
+			"range and mixed-kind EQUALITY seek arms were never actually index-served and their "+
+			"seek-vs-scan clauses compared one path with itself", fluentQueryLabel)
 	}
 	if e.MixedKindProbes == 0 {
 		add("mixed-kind", "the mixed-kind probe never ran, so the divergence rmp #2600 closed is no "+
@@ -2001,6 +2135,16 @@ func (p *FluentQueryProbes) Finish(tick int64) []Violation {
 			"empty answers agree whatever the comparison does, so the range-mixed clause could not "+
 			"have failed. The window is drawn from the first AGED Person precisely so this cannot "+
 			"happen", e.MixedKindProbes)
+	}
+	if e.EqMixedProbes == 0 {
+		add("eq-mixed", "the mixed-kind EQUALITY probe never ran, so the asymmetry rmp #2601 closed "+
+			"— a degenerate range matching where the equality did not — is not being adjudicated at "+
+			"all")
+	} else if e.EqMixedNonEmpty == 0 {
+		add("eq-mixed-non-empty", "every mixed-kind equality probe compared EMPTY sets (probes=%d): "+
+			"two empty answers agree whatever the comparison does, so neither the eq-mixed clause "+
+			"nor the equality-vs-degenerate-range clause could have failed. The value is drawn from "+
+			"the first AGED Person precisely so this cannot happen", e.EqMixedProbes)
 	}
 	if e.GhostArcsSeen == 0 {
 		add("ghost-arcs", "the constructed fixture produced no ghost arc, so query.Pattern.Out's "+

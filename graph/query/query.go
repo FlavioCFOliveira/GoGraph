@@ -82,8 +82,9 @@ func WithLabel[N comparable, W any](name string) Predicate[N, W] {
 	return withLabel[N, W]{name: name}
 }
 
-// withProperty matches nodes whose given property equals an expected
-// PropertyValue under the graph's PropertyValue comparison rules.
+// withProperty matches nodes whose given property is EQUAL to an expected
+// PropertyValue under openCypher's equality relation — see [equalValue] for
+// which relation that is and how it treats NaN.
 type withProperty[N comparable, W any] struct {
 	expected lpg.PropertyValue
 	key      string
@@ -101,30 +102,91 @@ func (p withProperty[N, W]) Match(g *lpg.Graph[N, W], id graph.NodeID) bool {
 	return equalValue(v, p.expected)
 }
 
-// WithProperty returns a [Predicate] selecting nodes whose named
-// property matches the given expected value (kind and value-equality
-// both required).
+// WithProperty returns a [Predicate] selecting nodes whose named property is
+// EQUAL to the given expected value.
+//
+// # Equality semantics
+//
+// The relation is openCypher EQUALITY, not comparability and not equivalence:
+//
+//   - INTEGER and FLOAT are one numeric kind, compared EXACTLY. An
+//     [lpg.Int64Value] of 5 is equal to an [lpg.Float64Value] of 5, and an
+//     int64 is never widened to float64, so 4611686018427387905 and
+//     4611686018427387900 stay distinct even though both round to 2^62.
+//   - A NaN expected value is equal to nothing, and nothing is equal to a
+//     NaN-valued property — including another NaN. Equality is the relation in
+//     which NaN = NaN is FALSE; under equivalence it is true, and that other
+//     relation is not what this predicate implements.
+//   - STRING, BOOLEAN, BYTES and TIME are equal within their own kind. Note
+//     that openCypher's equatability is WIDER than its comparability, so for
+//     these kinds this predicate matches where the degenerate [WithRange]
+//     [v, v] does not: they are equatable but not ordered scalars.
+//   - Every other cross-kind pair is not equal. INTEGER x FLOAT is the sole
+//     off-diagonal entry openCypher unifies, so a number is never equal to a
+//     string.
+//
+// # Index acceleration
+//
+// When the owning graph carries an index covering the predicate's
+// (label, property) pair — and the same [Pattern.Vertex] call also constrains
+// that label — the engine narrows the working set from the index before any
+// property is read. A STRING or BOOLEAN equality is served EXACTLY from a
+// bound hash index of that key type and the per-node comparison is skipped; a
+// NUMERIC equality is served as a SUPERSET from the float64-keyed numeric btree
+// companion and the exact comparison still runs over what the seek left. Either
+// way the answer is identical to the answer the same query returns with no
+// index present (see index_seek.go).
 func WithProperty[N comparable, W any](key string, expected lpg.PropertyValue) Predicate[N, W] {
 	return withProperty[N, W]{key: key, expected: expected}
 }
 
-// equalValue compares two PropertyValues by kind and value.
+// equalValue reports whether a and b are EQUAL under openCypher's equality
+// relation.
+//
+// # Which relation this is
+//
+// Equality, comparability and equivalence all unify INTEGER and FLOAT, and this
+// is the EQUALITY one. The three differ in two ways that matter here:
+//
+//   - At NaN. Under equality NaN = NaN is FALSE, which is the IEEE-754 outcome
+//     openCypher adopts. Under EQUIVALENCE it is TRUE — a value set folds NaN
+//     onto itself (cypher/exec/constraints.go floatCanonicalKey) — so that
+//     canonical-key path must never be reused as an equality comparator.
+//     [compareValues] returns ok=false for a NaN operand, which is exactly the
+//     equality answer: not equal.
+//   - In WIDTH. openCypher's equatability is WIDER than its comparability.
+//     [lpg.PropBool], [lpg.PropBytes] and [lpg.PropTime] values are equal to
+//     themselves here, while [compareValues] reports every pair over them as
+//     unordered, so no [WithRange] over them can hold. That divergence between
+//     an equality and a degenerate range is a property of the two relations and
+//     is deliberate.
+//
+// # INTEGER and FLOAT are one numeric kind for equality (#2601)
+//
+// A numeric pair — INTEGER/INTEGER, FLOAT/FLOAT, or one of each — is routed
+// through [compareValues], the SAME exact comparator [valueInRange] uses. That
+// is what makes an equality and the degenerate range [v, v] agree over every
+// orderable value, which they did not between #2600 (which unified the range)
+// and #2601 (which unified this).
+//
+// It is EXACT: an int64 is never widened to float64, so 4611686018427387905 and
+// 4611686018427387900 stay distinct from each other and from 2^62 even though
+// all three share one float64. Every other cross-kind pair — a number against a
+// string above all — is not equal, since INTEGER x FLOAT is the sole
+// off-diagonal entry openCypher unifies.
 func equalValue(a, b lpg.PropertyValue) bool {
-	if a.Kind() != b.Kind() {
+	ak, bk := a.Kind(), b.Kind()
+	if isNumericKind(ak) && isNumericKind(bk) {
+		c, ok := compareValues(a, b)
+		return ok && c == 0
+	}
+	if ak != bk {
 		return false
 	}
-	switch a.Kind() {
+	switch ak {
 	case lpg.PropString:
 		x, _ := a.String()
 		y, _ := b.String()
-		return x == y
-	case lpg.PropInt64:
-		x, _ := a.Int64()
-		y, _ := b.Int64()
-		return x == y
-	case lpg.PropFloat64:
-		x, _ := a.Float64()
-		y, _ := b.Float64()
 		return x == y
 	case lpg.PropBool:
 		x, _ := a.Bool()
@@ -262,16 +324,20 @@ func (e *Engine[N, W]) pruneTombstones(bm *roaring64.Bitmap) {
 // secondary index can serve is narrowed by an index seek that intersects the
 // index result into bm in place (see seekIndexablePreds and index_seek.go).
 //
-// A predicate is skipped by the scan loop only when the seek was EXACT — an
-// equality against a hash index, or a string range against a string-keyed btree
-// — because there the index is the authoritative mirror of the graph for its
-// (label, property) pair and the seek replaces an O(working-set) property read
-// with an O(log n)/O(1) lookup plus a bitmap intersection. A NUMERIC range seek
-// is only a SUPERSET of the answer (the float64-keyed companion index rounds
-// int64 keys above 2^53), so its predicate is NOT skipped and the per-node
-// comparison runs over the narrowed working set as the exact residual filter
-// (#2600). Predicates with no covering index keep the per-node scan path
-// unchanged.
+// A predicate is skipped by the scan loop only when the seek was EXACT — a
+// STRING or BOOLEAN equality against a hash index of that key type, or a STRING
+// range against a string-keyed btree — because there the index is the
+// authoritative mirror of the graph for its (label, property) pair and the seek
+// replaces an O(working-set) property read with an O(log n)/O(1) lookup plus a
+// bitmap intersection.
+//
+// Every NUMERIC seek is only a SUPERSET of the answer, because the sole index
+// shape that can carry both INTEGER and FLOAT under one order is the
+// float64-keyed companion, whose keys round above 2^53. That holds for a numeric
+// range (#2600) and, since INTEGER and FLOAT are also one kind for equality, for
+// a numeric equality (#2601). Such a predicate is NOT skipped: the per-node
+// comparison runs over the narrowed working set as the exact residual filter.
+// Predicates with no covering index keep the per-node scan path unchanged.
 func (p *Pattern[N, W]) filterByPreds(bm *roaring64.Bitmap, preds []Predicate[N, W], skipLabel bool) *roaring64.Bitmap {
 	served := p.seekIndexablePreds(bm, preds)
 	out := roaring64.New()
@@ -305,10 +371,10 @@ func (p *Pattern[N, W]) filterByPreds(bm *roaring64.Bitmap, preds []Predicate[N,
 //
 // Narrowing bm and discharging a predicate are two different things. An entry is
 // true only when the index result is the answer; when the index result is merely
-// a superset of the answer — a numeric range, see index_seek.go's
-// "Exact seek vs superset seek" — bm is narrowed but the entry stays false, so
-// the per-node comparison still runs over what survived as the exact residual
-// filter (#2600).
+// a superset of the answer — any NUMERIC seek, equality or range, see
+// index_seek.go's "Exact seek vs superset seek" — bm is narrowed but the entry
+// stays false, so the per-node comparison still runs over what survived as the
+// exact residual filter (#2600, #2601).
 //
 // A predicate with no covering index — or when the graph has no index manager —
 // is left entirely to the scan: bm is untouched and its entry stays false. Label
@@ -321,7 +387,10 @@ func (p *Pattern[N, W]) seekIndexablePreds(bm *roaring64.Bitmap, preds []Predica
 	for i, pr := range preds {
 		switch pred := pr.(type) {
 		case withProperty[N, W]:
-			served[i] = p.trySeekProperty(bm, pred, labels)
+			// As for a range below, the narrowed result is discarded: only
+			// exactness decides whether the scan may skip this predicate.
+			_, exact := p.trySeekProperty(bm, pred, labels)
+			served[i] = exact
 		case withRange[N, W]:
 			// The narrowed result is discarded on purpose: only exactness decides
 			// whether the scan may skip this predicate. An inexact seek has already

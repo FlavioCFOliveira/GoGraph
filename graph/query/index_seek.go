@@ -26,8 +26,9 @@ package query
 // (hashLookuper / btreeRanger below) — never by re-boxing through a generic
 // any-typed read on the Manager. Which assertions the set contains is decided
 // by the PREDICATE's semantics, not by which value types the indexes can
-// encode: equality asserts one per supported kind, while a range asserts one
-// per bound FAMILY (see [btreeRanger]).
+// encode: both an equality and a range assert one per value FAMILY — the kinds
+// openCypher unifies are one family and are asserted once, under the only key
+// type that can carry them all (see [hashLookuper] and [btreeRanger]).
 //
 // Bound indexes are always label-scoped, so a covering index exists only when
 // the same Vertex predicate set also constrains a label. A property predicate
@@ -57,36 +58,57 @@ package query
 // any transiently-stale id an index might carry is dropped by the intersection
 // and no separate tombstone re-prune of the index result is needed.
 //
-// # Exact seek vs superset seek (task #2600)
+// # Exact seek vs superset seek (tasks #2600, #2601)
 //
 // A seek may REPLACE the per-node comparison only when the index it read is an
 // exact mirror of the predicate over its (label, property) pair. That holds for
-// an equality against a hash index and for a STRING range against a
-// string-keyed btree. It does NOT hold for a NUMERIC range.
+// a STRING or BOOLEAN equality against a hash index of that key type, and for a
+// STRING range against a string-keyed btree. It does NOT hold for anything
+// NUMERIC — neither a range nor an equality.
 //
-// openCypher orders INTEGER and FLOAT in one numeric order — it is the sole
-// off-diagonal entry of the comparability matrix in the normative CIP
-// "Comparability and Orderability" (cip/1.adopted/CIP2016-06-14-*), and the TCK
-// pins it in expressions/comparison/Comparison2.feature ("Comparing across
-// types yields null, except numbers") — so a numeric range must consider both
-// kinds at once. The only index shape carrying both is the engine's
-// float64-keyed numeric companion (cypher/index_binding.go
-// projectNumericPropValue), whose keys widen int64 to float64 and therefore
-// round above 2^53. Its Range is consequently a SUPERSET of the answer, never
-// the answer itself.
+// openCypher treats INTEGER and FLOAT as one numeric kind, for ORDER and for
+// EQUALITY alike. It is the sole off-diagonal entry of the comparability matrix
+// in the normative CIP "Comparability and Orderability"
+// (cip/1.adopted/CIP2016-06-14-*), which also says numbers of different types
+// can be EQUAL; the TCK pins the order in
+// expressions/comparison/Comparison2.feature ("Comparing across types yields
+// null, except numbers") and the equality in Comparison1.feature ("1 = 1.0" is
+// true). So a numeric predicate must consider both kinds at once. The only index
+// shape carrying both is the engine's float64-keyed numeric companion
+// (cypher/index_binding.go projectNumericPropValue), whose keys widen int64 to
+// float64 and therefore round above 2^53. Its Range is consequently a SUPERSET
+// of the answer, never the answer itself.
 //
-// So seekRangeInto reports BOTH whether it served the predicate and whether its
-// result was exact, and seekIndexablePreds marks the predicate served only when
-// it was exact. For an inexact seek [valueInRange] stays in place over the
-// narrowed working set as the exact residual filter — the same
+// So seekRangeInto and trySeekProperty each report BOTH whether they served the
+// predicate and whether the result was exact, and seekIndexablePreds marks the
+// predicate served only when it was exact. For an inexact seek the per-node
+// comparison — [valueInRange] for a range, [equalValue] for an equality — stays
+// in place over the narrowed working set as the exact residual filter: the same
 // superset-plus-residual shape the Cypher engine's planner already uses for the
 // numeric companion.
 //
-// Before #2600 there was no residual filter and the two arms disagreed: with
-// Float64Value bounds over an int64-valued property the seek returned the
-// numeric matches (agreeing with the Cypher engine and with an independent
-// model) while valueInRange required v, lo and hi to share a kind and returned
-// nothing.
+// The two tasks closed the two halves of the same divergence, and reading them
+// together is what makes this file's shape make sense.
+//
+// #2600: with Float64Value BOUNDS over an int64-valued property the range seek
+// returned the numeric matches (agreeing with the Cypher engine and with an
+// independent model) while valueInRange required v, lo and hi to share a kind
+// and returned nothing. The comparison was unified and the residual added.
+//
+// #2601: that left the EQUALITY still requiring a shared kind, so
+// WithRange("v", Float64Value(5), Float64Value(5)) matched a stored Int64Value(5)
+// and WithProperty("v", Float64Value(5)) did not — the same data answering
+// differently depending on how the predicate was written. equalValue was
+// unified through the same exact comparator, the numeric hash arms were removed
+// as unsound subsets, and a numeric equality is now served from the companion
+// btree as the degenerate range [v, v]. An equality and a degenerate range over
+// the same value therefore agree by CONSTRUCTION for every orderable value: one
+// comparator, one index, one residual.
+//
+// The identity is scoped to the orderable kinds, and deliberately so.
+// openCypher's equatability is wider than its comparability: BOOLEAN, BYTES and
+// TIME are equal to themselves but are not ordered scalars, so WithProperty
+// matches over them where the degenerate WithRange cannot. See [equalValue].
 
 import (
 	"cmp"
@@ -120,19 +142,44 @@ type boundNodeIndex interface {
 }
 
 // hashLookuper is the typed equality-read interface of hash.Index[V]. The query
-// engine asserts it for each supported V (string / int64 / float64 / bool) to
-// recover the value type the index.Manager erased, without any generic read on
-// the Manager. Cardinality drives the clone-avoidance branch; LookupAppend and
-// Lookup are the two read shapes the combination strategy selects between.
+// engine asserts it for the kinds an equality is NOT unified across — string
+// and bool — to recover the value type the index.Manager erased, without any
+// generic read on the Manager. Cardinality drives the clone-avoidance branch;
+// LookupAppend and Lookup are the two read shapes the combination strategy
+// selects between.
 //
-// All four instantiations are reachable, but only through a HAND-BUILT bound
-// index: a Cypher CREATE INDEX always builds a hash.Index[string], so the
-// int64 / float64 / bool arms are never taken for an engine-created index. They
-// are exercised through hash.NewBound in TestSeek_EqualityMatchesScan_AllKinds
-// (index_seek_test.go). They stay sound because equality — unlike the range
-// comparison below — is NOT unified across kinds: [equalValue] requires the
-// stored value and the expected value to share a kind, so an index keyed by one
-// kind is an exact mirror of the equality it serves.
+// Both instantiations are reachable, but only hashLookuper[string] is reachable
+// through an ENGINE-created index: a Cypher CREATE INDEX always builds a
+// hash.Index[string] (cypher/index_binding.go newBoundNodeHashIndex), so the
+// bool arm is taken only for a hand-built hash.NewBound index. Both are
+// exercised in TestSeek_EqualityMatchesScan_AllKinds (index_seek_test.go).
+//
+// # Why there is no numeric arm (#2601)
+//
+// A hashLookuper[int64] and a hashLookuper[float64] arm existed until #2601 and
+// were REMOVED, for the same reason #2600 removed btreeRanger[int64] one task
+// earlier. While equality required the stored value and the expected value to
+// share a kind, a single-kind hash index was an exact mirror of the equality it
+// served. Once equality unified INTEGER and FLOAT ([equalValue]), an
+// int64-keyed index became a SUBSET of the answer — it cannot hold the
+// float-valued nodes a unified equality must also match — and a subset cannot
+// be repaired by a residual filter.
+//
+// A float64-keyed hash index is not a way out, and the reason is worth stating
+// because it is not symmetric with the btree case. Its exactness rested on the
+// UNSTATED assumption that it keys only float-valued nodes; a hand-built index
+// keying integers under a float64 key — exactly what the engine's own
+// projectNumericPropValue does — breaks that, and above 2^53 several distinct
+// integers share one key. The typed read interface cannot tell the two
+// projections apart, so the arm is either a subset or an over-returning arm
+// trusted as exact, and neither is admissible. Unlike btreeRanger[float64],
+// there is also no engine-created hash index of that shape whose coverage
+// contract could be relied on: the engine builds hash.Index[string] only.
+//
+// So a NUMERIC equality is not hash-served at all. It is served instead from
+// the float64-keyed numeric btree companion as a degenerate range — a SUPERSET
+// with [equalValue] as the exact residual filter (see [seekNumericEqInto]),
+// which is the one shape that provably cannot under-return.
 type hashLookuper[V comparable] interface {
 	Cardinality(value V) uint64
 	LookupAppend(value V, dst []uint64) []uint64
@@ -147,18 +194,24 @@ type hashLookuper[V comparable] interface {
 //     holds precisely the string-valued nodes of its (label, property) pair,
 //     which is precisely the set a string-bounded [WithRange] can match, so the
 //     per-node comparison is skipped for it.
-//   - btreeRanger[float64] serves a NUMERIC range as a SUPERSET. INTEGER and
-//     FLOAT share one numeric order, so a numeric range must match both kinds,
-//     and a float64-keyed index is the only shape that can carry both. Its keys
-//     round above 2^53, so [valueInRange] always runs over its output as the
-//     exact residual filter.
+//   - btreeRanger[float64] serves EVERY numeric predicate as a SUPERSET — a
+//     range ([seekRangeInto]) and, since #2601, an equality seeked as the
+//     degenerate range [v, v] ([seekNumericEqInto]). INTEGER and FLOAT are one
+//     numeric kind for order and for equality alike, so a numeric predicate
+//     must match both, and a float64-keyed index is the only shape that can
+//     carry both. Its keys round above 2^53, so the exact per-node comparison —
+//     [valueInRange] or [equalValue] — always runs over its output as the
+//     residual filter.
 //
 // A btreeRanger[int64] arm existed until #2600 and was REMOVED rather than
 // retained: once the range comparison unified INTEGER and FLOAT, an int64-keyed
 // index became a SUBSET of the answer — it cannot hold the float-valued nodes a
 // numeric range must also match — and a subset cannot be repaired by a residual
 // filter. An int64-keyed btree is therefore no longer consulted at all and the
-// predicate scans, which is correct, if slower.
+// predicate scans, which is correct, if slower. #2601 removed the numeric
+// hashLookuper arms for the same reason one task later, so the two families now
+// carry the same rule: only the float64-keyed btree may serve a numeric
+// predicate, and only inexactly.
 //
 // # Coverage contract for the numeric arm
 //
@@ -171,6 +224,16 @@ type hashLookuper[V comparable] interface {
 // and would make the seek under-return; that is the one contract this file
 // requires of an index beyond the (label, property) coverage [indexCovers]
 // checks.
+//
+// The contract now underwrites the equality arm as well as the range arm, which
+// WIDENS its consequences without changing its wording: an index that violates
+// it used to make only a range under-return, and now makes an equality
+// under-return too.
+//
+// NaN is the one value the companion legitimately omits
+// (projectNumericPropValue never indexes it), and both arms are unaffected for
+// their own reason: no non-NaN range returns a NaN key, and nothing is EQUAL to
+// NaN, so a NaN-valued node is never in either answer.
 type btreeRanger[V comparable] interface {
 	Range(lo, hi V) *roaring64.Bitmap
 }
@@ -398,29 +461,56 @@ func labelsInPreds[N comparable, W any](preds []Predicate[N, W]) []string {
 	return labels
 }
 
-// trySeekProperty attempts to satisfy an equality predicate from a covering
-// hash index, intersecting the result into bm in place. ok reports whether the
-// seek was served by an index; when false bm is untouched and the caller must
-// apply the per-node fallback. labels are the label names the predicate set
-// constrains (a bound index is label-scoped).
-func (p *Pattern[N, W]) trySeekProperty(bm *roaring64.Bitmap, pred withProperty[N, W], labels []string) (ok bool) {
+// trySeekProperty attempts to narrow bm from a covering index for an equality
+// predicate, intersecting the result into bm in place.
+//
+// narrowed reports whether an index was consulted; when it is false bm is
+// untouched and the caller must apply the per-node comparison to the whole
+// working set. exact reports whether the intersected set is the ANSWER, so the
+// caller may skip the per-node comparison, or merely a SUPERSET of it, so the
+// caller must keep [equalValue] as a residual filter. exact is meaningful only
+// when narrowed is true.
+//
+// Two index families can serve an equality, and which one depends on the
+// expected value's kind rather than on which indexes happen to exist:
+//
+//   - STRING and BOOLEAN go to a bound hash index of that key type, EXACTLY
+//     ([seekHashInto]).
+//   - INTEGER and FLOAT go to the float64-keyed numeric btree companion as a
+//     degenerate range, as a SUPERSET ([seekNumericEqInto]). They are not
+//     hash-served at all since #2601 — see [hashLookuper].
+//
+// labels are the label names the predicate set constrains (a bound index is
+// label-scoped). A single pass over the manager's indexes serves both families:
+// an index of the wrong Kind() or the wrong key type simply declines, so the
+// first index that can serve the value's kind wins and the rest are skipped.
+func (p *Pattern[N, W]) trySeekProperty(
+	bm *roaring64.Bitmap, pred withProperty[N, W], labels []string,
+) (narrowed, exact bool) {
 	mgr := p.engine.g.IndexManager()
 	if mgr == nil || len(labels) == 0 {
-		return false
+		return false, false
 	}
 	for _, name := range mgr.ListIndexes() {
 		sub, err := mgr.GetIndex(name)
-		if err != nil || sub.Kind() != "hash" {
+		if err != nil {
 			continue
 		}
 		if !indexCovers(sub, labels, pred.key) {
 			continue
 		}
-		if seekHashInto(bm, sub, pred.expected) {
-			return true
+		switch sub.Kind() {
+		case "hash":
+			if seekHashInto(bm, sub, pred.expected) {
+				return true, true
+			}
+		case "btree":
+			if seekNumericEqInto(bm, sub, pred.expected) {
+				return true, false
+			}
 		}
 	}
-	return false
+	return false, false
 }
 
 // trySeekRange attempts to narrow bm from a covering btree index for a range
@@ -483,10 +573,18 @@ func indexCovers(sub index.Subscriber, labels []string, propKey string) bool {
 }
 
 // seekHashInto recovers the hash index's value type by asserting the typed
-// hashLookuper for each supported scalar kind, runs the seek for the matching
-// PropertyValue kind, and intersects the matches into bm in place. ok reports
-// whether a supported (index V, value kind) pair was found and served. A
-// kind/V mismatch (e.g. a string value against an int64 index) returns false so
+// [hashLookuper] for the kind of value, runs the seek, and intersects the
+// matches into bm in place. ok reports whether a supported (index V, value kind)
+// pair was found and served, and a served hash seek is always EXACT.
+//
+// Only STRING and BOOLEAN are served here. Those are the kinds an equality is
+// not unified across, so a bound hash index keyed by one of them holds exactly
+// the nodes the equality can match and is a faithful mirror of it. A NUMERIC
+// value is deliberately NOT served — see [hashLookuper] for why a single-kind
+// hash index cannot mirror a unified numeric equality — and falls through to
+// [seekNumericEqInto].
+//
+// A kind/V mismatch (e.g. a string value against a bool index) returns false so
 // the caller falls back to the scan, which yields the same (empty under
 // openCypher type rules) result a seek would.
 func seekHashInto(bm *roaring64.Bitmap, sub index.Subscriber, value lpg.PropertyValue) (ok bool) {
@@ -494,18 +592,6 @@ func seekHashInto(bm *roaring64.Bitmap, sub index.Subscriber, value lpg.Property
 	case lpg.PropString:
 		if idx, isT := sub.(hashLookuper[string]); isT {
 			v, _ := value.String()
-			intersectHashEq(bm, idx, v)
-			return true
-		}
-	case lpg.PropInt64:
-		if idx, isT := sub.(hashLookuper[int64]); isT {
-			v, _ := value.Int64()
-			intersectHashEq(bm, idx, v)
-			return true
-		}
-	case lpg.PropFloat64:
-		if idx, isT := sub.(hashLookuper[float64]); isT {
-			v, _ := value.Float64()
 			intersectHashEq(bm, idx, v)
 			return true
 		}
@@ -517,6 +603,60 @@ func seekHashInto(bm *roaring64.Bitmap, sub index.Subscriber, value lpg.Property
 		}
 	}
 	return false
+}
+
+// seekNumericEqInto narrows bm from a float64-keyed btree for a NUMERIC
+// equality, by seeking the DEGENERATE range [value, value] through exactly the
+// machinery [seekRangeInto] uses for a numeric range: [numericSeekBounds]
+// widens the bound outwards so no true match can fall outside the interval
+// seeked. narrowed reports whether an index was consulted and intersected into
+// bm; the result is NEVER exact, so the caller keeps [equalValue] as the
+// residual filter.
+//
+// # Why this cannot under-return
+//
+// It is [numericSeekBounds]' superset argument at lo = hi = value, and needs
+// nothing added to it. Any candidate property value u that satisfies the
+// equality is numerically EQUAL to value, so lof <= value = u <= hif, which is
+// the premise that argument already takes: the companion key float64(u) then
+// lies inside [lof, hif]. The argument assumes only that an int64 -> float64
+// conversion lands on one of the two bracketing float64 values, never that it
+// rounds to nearest.
+//
+// Above 2^53 the interval admits values that are NOT equal — the three integers
+// around 2^62 share one float64 key — so the seek over-returns and [equalValue]
+// removes the surplus exactly. Over-returning is repairable; under-returning is
+// not, which is the whole reason this arm reads a btree rather than a hash.
+//
+// A NaN-valued node is absent from the companion (cypher/index_binding.go
+// projectNumericPropValue never indexes NaN) and that is harmless HERE for a
+// reason specific to equality rather than inherited from the range arm: nothing
+// is equal to NaN, so a NaN-valued node is not in the answer to begin with.
+//
+// # The coverage contract, shared with the range arm
+//
+// A bound float64-keyed btree covering (label, property) must key EVERY numeric
+// value of that property, integers widened to float64 included, or its Range is
+// a subset rather than a superset. The engine's companion satisfies this by
+// construction; the contract is stated in full on [btreeRanger].
+func seekNumericEqInto(bm *roaring64.Bitmap, sub index.Subscriber, value lpg.PropertyValue) (narrowed bool) {
+	if !isNumericKind(value.Kind()) {
+		return false
+	}
+	idx, isT := sub.(btreeRanger[float64])
+	if !isT {
+		return false
+	}
+	lo, hi, satisfiable := numericSeekBounds(value, value)
+	if !satisfiable {
+		// A NaN expected value: nothing is equal to it, so the answer is empty and
+		// there is nothing to seek. The residual then runs over an empty working
+		// set at no cost.
+		bm.Clear()
+		return true
+	}
+	bm.And(idx.Range(lo, hi))
+	return true
 }
 
 // intersectHashEq narrows bm to the NodeIDs the hash index associates with v.

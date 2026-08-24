@@ -293,6 +293,20 @@ func collectSorted(p *query.Pattern[string, int64]) []string {
 
 // ----- equality identity: index path == scan path --------------------------
 
+// TestSeek_EqualityMatchesScan_AllKinds drives the equality predicate against
+// every hash index shape that can cover a (Person, prop) pair and requires all
+// of them to agree with the no-index oracle.
+//
+// Only the string and bool shapes still exercise a hash SEEK. The int64 and
+// float64 shapes are kept deliberately even though #2601 stopped consulting
+// them — under a unified numeric equality a single-kind hash index cannot hold
+// the other kind's nodes, so it is a subset of the answer, not a superset, and a
+// subset cannot be repaired by a residual filter. What this test then asserts of
+// them is that falling back to the scan still produces the identical set.
+// TestSeek_NumericHashIsNotConsulted and
+// TestSeek_StringAndBoolHashEqualityAreAuthoritative
+// (equal_numeric_order_internal_test.go) are the white-box proofs of WHICH arm
+// each shape takes.
 func TestSeek_EqualityMatchesScan_AllKinds(t *testing.T) {
 	t.Parallel()
 
