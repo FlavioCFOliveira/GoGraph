@@ -183,6 +183,7 @@ func DefaultRegistry() (*Registry, error) {
 		fluentQueryScenario(),
 		typedSchemaScenario(),
 		countStoreScenario(),
+		pageRankRankerScenario(),
 	)
 }
 

@@ -72,6 +72,146 @@ undirected Euler; `BiBFS`; direction-optimised BFS on a hub fixture; the
 `*Into` / `NewSSSP` buffer-reuse APIs; external-memory `extern.BFS` /
 `extern.PageRank`.
 
+### The stateful PageRanker: bit-identity across a reused object, and the aliasing contract (rmp #2495)
+
+`centrality.PageRanker` publishes two promises in its godoc, and until this task
+both were carried by that godoc alone.
+
+**What was and was not already reached.** `NewPageRanker`/`Run` was not undriven.
+`internal/sim/search_ctx_cancel.go` carries a `PageRanker.Run` row, and it is the
+one row in that table whose identity arm compares two genuinely independent
+implementations (`Run` against `PageRankCtx`) rather than a delegation, through a
+lossless hex-float digest. But every property that makes a PageRanker a
+PageRanker is outside what that row can see: it builds a **fresh** ranker per
+call, Runs **once**, with the default options, on a fixture of a few tens of
+nodes — which is below `pageRankParallelThreshold` (2048), so the reverse-CSR
+transpose is never built at all and the arm compares two **serial** runs. The
+in-package tests reach further and still stop short:
+`TestPageRanker_BitIdenticalToOneShot` does compare bit patterns over three runs
+on a 7-node and a 10 000-node graph, but all three runs use **identical**
+options, it never touches `GOMAXPROCS` (so which regime the large fixture takes
+is a property of the host and is asserted nowhere), and the transpose, if built,
+is built on the **first** run. `TestPageRank_ParallelBitIdentical` does clamp
+`GOMAXPROCS` and does compare serial against parallel — but only for the
+**one-shot** `PageRank`. And nothing anywhere pinned the aliasing contract: the
+only mention of it in the whole package was a comment in
+`TestPageRanker_ConcurrentIndependent` saying the test "mirrors the documented
+contract", above code that neither copies the result nor Runs again.
+
+**A premise in the task was wrong.** The brief asked for the sequence to
+interleave the regimes "with varying options". `PageRankOptions` has no
+parallelism knob — VERIFIED in source, its only fields are `Damping`,
+`MaxIterations` and `Tolerance` — and the regime is decided inside
+`pageRankState.run` as `runtime.GOMAXPROCS(0) > 1 && live >=
+pageRankParallelThreshold`. A PageRanker is bound to one immutable CSR, so `live`
+is fixed for its whole lifetime and options can never move the regime. The only
+reachable lever is the process-global `GOMAXPROCS` over a fixture above the
+threshold, which is also the only way to make the lazy transpose build land
+**mid-sequence**.
+
+**How the regime is established rather than assumed.** Two instruments, because
+the task refuses timing. A **derivation**: `live` is recomputed from the
+fixture's own edge list using the same definition `newPageRankState` uses,
+`GOMAXPROCS` is read back inside the clamped window, and the documented predicate
+is re-evaluated — labelled as a derivation, not an observation. And an
+**observation**, exact and deterministic: every worker of the parallel engine
+starts inside `pprof.Do(e.ctx, ...)`, and `pprof.Do` consults the parent label
+set through `Context.Value`, on the context the caller handed to `Run`. A
+counting context therefore reads **zero** lookups on the serial path (no engine,
+no worker) and one per worker at spawn on the parallel path, with the spawn
+provably preceding the first `iterate` return because `iterate` sends on each
+worker's unbuffered start channel and that receive happens inside the function
+`pprof.Do` wraps. Each worker performs a **second** lookup on the way out and
+`pageRankEngine.close` does not join its workers, so the clause is a **band** —
+0 for serial, `[workers, 2*workers]` for parallel. MEASURED: 0 for every serial
+window, and 4, 8, 9 or 11 for parallel windows at clamps of 4 and 8; the counts
+above the worker total are workers of the *previous* window's pool exiting, which
+is exactly why an equality would have flaked. Only band membership, never the raw
+count, enters the reproducible digest.
+
+**The two claims need different instruments.** Bit-identity is compared on the
+**bit pattern** (`math.Float64bits`), not with `==`, so a ±0 divergence or a NaN
+cannot read as agreement. The package's existing PageRank oracle compares within
+`pagerankEpsilon` = 1e-4, which is right for *its* claim (the
+library-versus-reference convergence gap) and would make a bit-identity clause
+unfalsifiable — and is the wrong **scale** here anyway: MEASURED on the
+catalogue seed's 3 069-node fixture the median rank is 2.03e-4 and the smallest
+1.69e-4, so an absolute 1e-4 tolerance is half a typical rank and would accept a
+rank wrong by 50%. The
+aliasing claim is pinned in both directions: the previous window's returned
+**slice** must read the new run's values (MEASURED: every element of 3 069
+changed, at all five transitions), a **copy** of it must still hash to what it
+hashed to at copy time (the control, checked against a recorded hash rather than
+against itself), and both are gated on the two consecutive results actually
+**differing** — which is why the plan gives every window its own damping.
+
+**The whole-sequence shape is "at most two", and that was a finding.** Which
+backing array a Run returns is `start XOR (iterations mod 2)`, because `run`
+swaps `cur` and `next` once per iteration and returns `cur`. MEASURED, seed
+`0x8d10afeecdf8dcf` gave all six windows an **even** iteration count and
+therefore returned the same array six times. An "exactly two backing arrays"
+assertion would have been a parity coincidence dressed up as an invariant, and it
+failed on the first 32-seed sweep; the asserted shape is at most two with at
+least one repeat.
+
+**What is not claimed.** The transpose **cache** is evidence, not a clause: it is
+observable only through allocation, and the allocated-byte counter is
+process-global, so an upper bound on a later window would flake in a swarm. Only
+the lower bound on the first parallel window is asserted — noise can only add —
+against the floor the structure-only transpose provably needs (`revVerts`
+(n+1)·8 + `revEdges` |E|·8 + the scatter cursor n·8). MEASURED at the catalogue
+seed: 0 and 16 bytes for the serial windows, 117 456 for the first parallel one
+against a 104 328-byte floor, and 11 144 then 2 288 for the two parallel windows
+after it — a 10.5x drop reported as a number rather than dressed up as a
+tripwire. The allocated-byte counter is read through `runtime.ReadMemStats`
+rather than the cheaper non-stop-the-world `runtime/metrics` counter for a
+measured reason: that counter is fed from per-P caches flushed at a GC or an
+mcache refill, and MEASURED through it every serial window read exactly 0 bytes
+while two of three parallel windows did too. There is also **no crash/recovery
+arm** in the scenario: both claims are pure functions of an immutable CSR
+snapshot, so repeating them after a recovery would cost time and detect nothing.
+The per-tick half of this coverage, which does run after every recovery on the
+recovered graph's own CSR, is `pagerankerStatefulViolations` in
+`internal/sim/search_pagerank.go` — two Runs on the small per-tick fixture,
+bit-identity against the one-shot plus the aliasing pin, in the serial regime.
+
+**A finding recorded rather than fixed.** `centrality.PageRank`'s godoc claims
+the parallel pull path is "bit-for-bit identical to the serial path regardless of
+GOMAXPROCS or worker scheduling", and that "the per-worker partial L1 deltas are
+reduced in fixed worker-id order, so the returned delta is likewise deterministic
+across worker counts". The second sentence is true for a **given** worker count
+and not across worker counts: reducing per-range partial sums is not the same
+float operation as one sequential sum. MEASURED over one pair of consecutive
+iterate vectors from a 2 400-node probe graph of the same family, a sequential L1
+reduction gave `0x3fb51ef43754e4b2` while equal-range partitioned reductions gave
+five **different** values for 2, 3, 4, 8 and 10 ranges — a spread of 73 ULP,
+about 1e-14 relative. The result stays bit-identical only because that difference
+has never straddled the convergence threshold, which would change the iteration
+count and with it the answer. How unlikely that is was measured, not assumed: 40
+seeds x 4 dampings x 9 tolerances x 12 worker counts — 17 280
+serial-versus-parallel comparisons — found **zero** bit divergences and zero
+iteration-count differences, and a 400-seed sweep of the scenario itself found
+zero across its own 1 600, as the arithmetic predicts (the stopping delta is
+spread over a log-width of about `ln(1/d)`, 0.11 to 0.60 across the damping band,
+so the chance of landing in a 1e-14 relative window is on the order of 1e-13 per
+run). The `cross-regime`
+clause is therefore **not** offered as a detector of that coincidence: what it
+detects is a structural change — a pull formulation that stopped summing each
+vertex's in-edges in the reverse-CSR's increasing-source order, a partition that
+stopped being contiguous, a reduction reordered — because those diverge
+systematically. The godoc's determinism sentence is over-stated as written and is
+left for the user to decide on.
+
+**`GOMAXPROCS` is process-global, and that is handled explicitly.** The scenario
+holds a package-level mutex across its whole clamped phase, so two instances in
+one swarm cannot decide each other's regimes nor corrupt the value permanently
+through interleaved save/restore, and `prWithClamp` reads the value back on both
+sides of every window: a **foreign** clamp (`runCPUStarvation` is the only other
+one in this package) is reported as a harness error rather than as a false
+violation. The pre-existing hazard that `runCPUStarvation` does not participate
+in that mutex is reported, not changed — making an existing scenario serialise
+against a new one is a behaviour change for the user to sanction.
+
 ## Storage / durability coverage
 
 | Feature | Scenario / vehicle | Invariant |
