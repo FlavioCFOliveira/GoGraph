@@ -2,7 +2,7 @@
 
 This document records how the Deterministic Simulation Testing harness
 (`internal/sim/`) exercises the GoGraph feature surface, and the coverage work
-completed on 2026-07-13 to make the DST drive **every implemented feature**.
+that makes the DST drive **every implemented feature**.
 
 The goal: for every implemented GoGraph feature, the DST has a scenario that
 drives it during simulation and validates it against an **independent** oracle
@@ -10,14 +10,40 @@ or reference — including, wherever applicable, across crash and recovery.
 
 ## Method
 
-Three domain audits (Cypher language, graph/search algorithms, storage/
-durability) enumerated the implemented feature surface and cross-referenced it
-against the scenarios the DST actually ran. Every "implemented but unexercised"
-feature became a tracked task. Each new check validates the engine against an
-independent computation — never the code under test — and every deterministic
-scenario is bit-reproducible from its seed.
+The coverage work has run in two passes, and this document carries both.
 
-Two classes of verification vehicle are used:
+**The first pass (2026-07-13).** Three domain audits (Cypher language,
+graph/search algorithms, storage/durability) enumerated the implemented feature
+surface and cross-referenced it against the scenarios the DST actually ran.
+Every "implemented but unexercised" feature became a tracked task.
+
+**The second pass (the 2026-08-14 audit, closed across sprints 346–349).** A
+second audit re-enumerated the surface against the DST as it then stood, and
+found both the gaps the first pass had left and everything the module had grown
+since. Its findings were closed one domain per sprint:
+
+| Sprint | Domain the audit named |
+|---|---|
+| 346 | the Cypher language surface — read, write, DDL and functions |
+| 347 | storage, durability and the MVCC substrate |
+| 348 | the Bolt wire surface |
+| 349 | the graph API, `search/` and the bulk-load surface, and the audit's own closure |
+
+Sprint 345, which closed the same day the audit was taken, is the immediately
+preceding cycle rather than one of its four: it made the simulator exercise MVCC
+and genuinely concurrent multi-client access, and is recorded in
+[MVCC multi-session and concurrency coverage](#mvcc-multi-session-and-concurrency-coverage-sprint-345)
+below.
+
+Sections below are tagged with the `rmp` task that produced them, so a claim can
+be traced to the change that made it true. Where a task's finding was later
+fixed, the section says so and the tense follows the code, not the finding.
+
+Each new check validates the engine against an independent computation — never
+the code under test — and every deterministic scenario is bit-reproducible from
+its seed.
+
+Three classes of verification vehicle are used:
 
 - **Oracle-computed checks**: an invariant computed independently from the
   shadow model (`GraphOracle`, or a scenario-private model) is compared to the
@@ -27,6 +53,183 @@ Two classes of verification vehicle are used:
 - **Independent naive references**: for the search algorithms, a from-scratch
   reference (naive BFS/Bellman-Ford/power-iteration/degree-parity/…) computed on
   a shaped fixture with known ground truth.
+
+## Whole-module coverage driven from the simulator
+
+This section records what the DST alone covers: **whole-module statement
+coverage with the simulator as the only driver**. It is not the coverage of
+`make ci`, which additionally runs every package's own unit tests and is a
+different and much larger number.
+
+**Method, so the measurement is repeatable.**
+
+```bash
+go test -count=1 -covermode=atomic -coverpkg=./... ./internal/sim/...
+```
+
+Run twice: once at `ccdca3e6` — the last sprint-345 commit, which is the
+2026-08-14 audit's baseline — in a detached worktree, and once at `21b8364f`,
+HEAD with sprint 349 complete.
+
+### The headline, and the caveat that travels with it
+
+**Excluding `internal/*`, over a near-stable denominator (60,246 → 61,405
+statements): 50.7% → 65.1%, +14.4 pp.** That is the figure that answers the
+sprint's question, because its denominator is the product surface and barely
+moved.
+
+Raw, over every package `-coverpkg=./...` admits: **54.5% → 71.4%, +16.9 pp**
+(37,611/69,005 → 65,903/92,350 statements). The raw number is the larger one and
+the weaker one, for a reason that has to travel with it: `-coverpkg=./...`
+includes `internal/sim` **itself**, and the harness grew from **8,619 to 30,726
+statements** across sprints 346–349 while sitting at ~84% covered. A substantial
+part of the raw gain is therefore the test harness entering its own denominator,
+not the product surface being better exercised. Excluding only `internal/sim`
+and keeping the other `internal/*` packages gives 50.7% → 65.0%, +14.3 pp —
+which shows the difference between the two exclusions is immaterial, and that
+`internal/sim` is the whole of the distortion.
+
+**The baseline re-measurement reproduced the inherited 54.5% exactly.** That is
+worth stating on its own: it validates both the 2026-08-14 audit's figure and
+this method, and it is the reason the delta above can be trusted rather than
+merely reported.
+
+### The two acceptance-criteria packages, both demonstrably off zero
+
+| Package | 2026-08-14 baseline | after sprint 349 |
+|---|---:|---:|
+| `graph/lpg/schema` | **0.0%** | **61.0%** (47/77) |
+| `graph/index/stats` | **0.0%** | **56.2%** (127/226) |
+
+**No package is now at genuine zero.** `internal/crashpoint` reports 0/0: it has
+**no statements** in a build without the `gograph_crashinject` tag, because
+`crashpoint.go` declares only constants and documentation and
+`crashpoint_disabled.go` is a single empty function body (`func Breakpoint(string) {}`).
+That is by design — the released binary must not link the self-kill path — and
+not a coverage gap.
+
+### Five packages were not linked into the sim test binary at all at baseline
+
+They appear in no baseline profile block, which is zero coverage in the
+strongest sense: the simulator never referenced them, even transitively.
+
+| Package | after sprint 349 |
+|---|---:|
+| `graph/generation` | 87.5% |
+| `store/bulkimport` | 78.0% |
+| `graph/query` | 75.5% |
+| `graph/io/dot` | 74.5% |
+| `internal/goldens` | 25.3% |
+
+Together they are 660 statements, **0.7% of the new denominator**, so they do
+**not** explain the delta. They are a qualitative result — four product packages
+and one test-support package went from unreferenced to driven — and should not
+be read as a quantitative one.
+
+### Per-package movement
+
+Baseline versus HEAD, sorted by movement.
+
+| Package | 2026-08-14 baseline | after sprint 349 | movement |
+|---|---:|---:|---:|
+| `graph/index/label` | 25.7% | 88.0% | +62.3 pp |
+| `graph/lpg/schema` | 0.0% | 61.0% | +61.0 pp |
+| `store/bulk` | 11.1% | 69.3% | +58.2 pp |
+| `graph/index/stats` | 0.0% | 56.2% | +56.2 pp |
+| `graph/io/jsonl` | 23.9% | 79.7% | +55.8 pp |
+| `graph/index/btree` | 14.0% | 59.7% | +45.7 pp |
+| `graph/index/hash` | 22.3% | 55.8% | +33.6 pp |
+| `cypher/procs` | 47.1% | 80.4% | +33.3 pp |
+| `cypher/funcs` | 24.6% | 55.1% | +30.6 pp |
+| `bolt/server` | 54.5% | 81.0% | +26.5 pp |
+| `graph` | 58.6% | 84.3% | +25.7 pp |
+| `graph/index` | 61.3% | 86.8% | +25.5 pp |
+| `graph/index/count` | 57.1% | 80.5% | +23.4 pp |
+| `search/centrality` | 67.1% | 90.3% | +23.2 pp |
+| `cypher/expr` | 28.5% | 51.7% | +23.1 pp |
+| `graph/io/graphml` | 49.7% | 72.5% | +22.8 pp |
+| `store/snapshot` | 44.9% | 65.1% | +20.2 pp |
+| `store/txn` | 43.4% | 63.4% | +19.9 pp |
+| `graph/csr` | 49.2% | 68.1% | +18.8 pp |
+| `graph/io/csv` | 59.5% | 77.9% | +18.5 pp |
+| `cypher` | 51.5% | 68.9% | +17.5 pp |
+| `store/wal` | 52.2% | 69.6% | +17.4 pp |
+| `store/csrfile` | 62.0% | 78.1% | +16.0 pp |
+| `cypher/exec` | 40.9% | 56.5% | +15.6 pp |
+| `store/checkpoint` | 73.6% | 86.8% | +13.2 pp |
+| `store/recovery` | 53.0% | 66.0% | +13.0 pp |
+| `bolt/packstream` | 51.0% | 63.7% | +12.7 pp |
+| `search/flow` | 81.4% | 92.8% | +11.4 pp |
+| `cypher/ir` | 51.9% | 62.9% | +11.1 pp |
+| `bolt/proto` | 67.2% | 78.0% | +10.8 pp |
+| `graph/lpg` | 60.3% | 71.1% | +10.8 pp |
+| `ds` | 34.5% | 39.7% | +5.2 pp |
+| `search` | 82.1% | 87.0% | +4.9 pp |
+| `cypher/parser/gen` | 52.5% | 57.4% | +4.9 pp |
+| `cypher/ast` | 22.5% | 26.5% | +4.0 pp |
+| `graph/adjlist` | 56.4% | 60.3% | +3.9 pp |
+| `search/extern` | 80.4% | 84.1% | +3.6 pp |
+| `cypher/parser` | 57.7% | 61.0% | +3.4 pp |
+| `cypher/sema` | 50.9% | 54.2% | +3.3 pp |
+| `internal/sim` | 80.8% | 84.0% | +3.2 pp |
+| `store` | 93.9% | 97.0% | +3.0 pp |
+| `internal/clock` | 84.4% | 87.0% | +2.6 pp |
+| `graph/mvcc` | 69.1% | 71.2% | +2.1 pp |
+| `search/community` | 93.1% | 93.9% | +0.8 pp |
+| `internal/memlimit` | 50.0% | 50.0% | +0.0 pp |
+| `internal/metrics` | 94.1% | 94.1% | +0.0 pp |
+| `internal/testlayers` | 29.2% | 29.2% | +0.0 pp |
+| `graph/generation` | not linked | 87.5% | newly linked |
+| `graph/io/dot` | not linked | 74.5% | newly linked |
+| `graph/query` | not linked | 75.5% | newly linked |
+| `internal/goldens` | not linked | 25.3% | newly linked |
+| `store/bulkimport` | not linked | 78.0% | newly linked |
+| `internal/crashpoint` | not linked | 0/0 statements | n/a — see above |
+
+**Module total: 54.5% (37,611/69,005) → 71.4% (65,903/92,350) = +16.9 pp.**
+
+Two rows deserve a note rather than a cheer. `ds` moves only +5.2 pp because
+`search/` calls three of its methods and nothing calls the rest — see
+[Documented debt](#documented-debt--out-of-scope). `internal/sim` rising 3.2 pp
+while more than tripling in size is what a growing harness that stays
+well-covered looks like, and is exactly the term the excluding-`internal/*`
+figure removes.
+
+### The soak layer, and the red that came with it
+
+```bash
+go test -tags=soak -count=1 -covermode=atomic -coverpkg=./... ./internal/sim/...
+```
+
+**71.6% of statements**, in 2073.7 s. Reported here with its verdict stated
+plainly rather than as a clean run: **the soak run exited 1.**
+
+`TestBoltDecodeSwarm_SoakSeedSweep` failed at seed `0x2487a018`
+(`internal/sim/bolt_decode_pressure_soak_test.go:76`): the
+`nv-swarm-pressure-density` oracle deviated with `RejectionsDuringHonest == 0`
+and per-segment `[0 0 0 0]`, the start barrier satisfied, the fleet having drawn
+3 refusals in total, and honest service 24 of 24 correct. **No engine
+misbehaviour.** It is the third iteration of the harness-defect family of
+rmp #2587 and #2596: the clause adjudicates a temporal coincidence the harness
+cannot force, and #2587's residual "nonzero" floor is still scheduler-dependent
+— under load the pressure can be entirely spent before honest service begins.
+Filed as **rmp #2611** (see
+[Harness and gate defects](#harness-and-gate-defects-surfaced-by-this-coverage-work)).
+
+**The 55.2% soak baseline is inherited from the 2026-08-14 audit and was NOT
+re-measured**, so no soak delta is claimed here. Only the short-layer baseline
+was reproduced.
+
+### Reading the delta
+
+Two cautions, both established elsewhere in this document. First, a
+statement-coverage percentage measures what was **executed**, not what was
+**adjudicated**: several sections here record clauses that execute an entry
+point and cannot fail (see
+[Documented debt](#documented-debt--out-of-scope)), and those raise coverage
+without raising assurance. Second, a package can fall while its assurance rises,
+because a scenario that stops driving a path through the engine and drives it
+through an independent model instead is a stronger check and a smaller number.
 
 ## Cypher language coverage
 
@@ -64,13 +267,22 @@ reference on shaped, seed-deterministic fixtures, folded into the
 `search` / `search-crash` battery (so each is validated post-crash-recovery):
 
 negative weights + negative-cycle detection (Bellman-Ford / Floyd-Warshall /
-Johnson); `MinCostMaxFlow`; `PushRelabelMaxFlow`; `Closeness` / `Harmonic` /
-`Eigenvector` / `Katz` / `PersonalisedPushPageRank`; serial-vs-parallel
-`Betweenness`; parallel-edge k-shortest; `TopologicalSort` DAG success;
-`Diameter`; triangle counting (serial == parallel); `WCCParallel` vs serial;
-undirected Euler; `BiBFS`; direction-optimised BFS on a hub fixture; the
-`*Into` / `NewSSSP` buffer-reuse APIs; external-memory `extern.BFS` /
-`extern.PageRank`.
+Johnson); `MinCostMaxFlow` in both its cost regimes; `PushRelabelMaxFlow`;
+`Closeness` / `Harmonic` / `Eigenvector` / `Katz` / `PersonalisedPushPageRank`,
+each under both its literal options and its shipped `Default…Options`;
+serial-vs-parallel `Betweenness` (unweighted and weighted); parallel-edge
+k-shortest; `TopologicalSort` DAG success; `Diameter`; triangle counting
+(serial == parallel); `WCCParallel` vs serial; undirected Euler
+(`HierholzerUndirected` beside the directed form); `BiBFS` / `BiBFSOn`;
+`BidirectionalDijkstra` / `BidirectionalDijkstraOn`; direction-optimised BFS on
+a hub fixture; the `*Into` / `NewSSSP` buffer-reuse APIs; external-memory
+`extern.BFS` / `extern.PageRank`.
+
+Beside the correctness battery, every public **context-accepting** entry point
+of `search`, `search/centrality`, `search/community`, `search/flow` and
+`search/extern` — 58 of them, enumerated from source rather than from a name
+pattern — is driven under `context.Background()` and under a pre-cancelled
+context on the same cadence (rmp #2489, below).
 
 ### The stateful PageRanker: bit-identity across a reused object, and the aliasing contract (rmp #2495)
 
@@ -212,6 +424,266 @@ violation. The pre-existing hazard that `runCPUStarvation` does not participate
 in that mutex is reported, not changed — making an existing scenario serialise
 against a new one is a behaviour change for the user to sanction.
 
+### Min-cost flow's negative-cost regime, the hoisted-reverse Dijkstra, and the shipped default option regimes (rmp #2497)
+
+Three residues the 2026-08-14 audit left in `search/`. Two are regimes: the DST
+called the entry point, but only ever in one of the configurations it ships with,
+so a whole branch of production code went undriven while the checker looked
+green. The third is an entry point the DST did not call at all.
+
+**A. `MinCostMaxFlow` had only ever seen strictly positive costs.** The cost
+flavour is now chosen by fixture **INDEX**, never by a seed draw
+(`flowMCMFNegFrom = 2`, `internal/sim/search_flow.go:65`): of the four
+min-cost fixtures a tick builds, 0–1 stay all-positive and 2–3 force a negative
+arc, so both the zero-potential fast path (`hasNegativeCost` false, the
+Bellman-Ford bootstrap skipped entirely) and the bootstrap itself run on **every**
+tick rather than when a tick draws luckily. Forcing is not cosmetic and the
+number is measured: under an unforced symmetric draw, **80 of 20,000** fixtures
+carried no negative arc at all, so the bootstrap would not have run. Costs come
+from `[-flowMaxCost, +flowMaxCost]` = `[-10, +10]` through exactly one `IntN`
+draw per cost (`flowDrawCost`, `:901`), so the per-fixture draw count is
+unchanged and the all-positive fixtures stay bit-identical to what they were
+before the flavour existed.
+
+**The check was also swallowing errors, which is a checker defect and not merely
+a coverage gap.** It called the non-context `flow.MinCostMaxFlow`, whose whole
+body is `out, c, _ := MinCostMaxFlowCtx(...)` (`search/flow/min_cost.go:68-72`) —
+the error is discarded. So the checker could not see `flow.ErrNegativeCycle`,
+`flow.ErrCapacityOverflow`, or the internal `rc < 0` invariant violation at
+`search/flow/min_cost.go:148-154`, which returns a **partial** flow beside its
+error. It now drives `flow.MinCostMaxFlowCtx` and asserts `err == nil` **by
+name**, with a parallel non-ctx call pinning the wrapper's own contract
+(`internal/sim/search_flow.go:573`, `:585`).
+
+**Two guards make the oracle's precondition structural rather than lucky.** The
+SPFA reference is a sound min-cost oracle only if the zero flow is min-cost of
+value 0, which (Ahuja–Magnanti–Orlin Thm 9.1) requires the `cap >= 1` arc set to
+hold no negative-cost cycle. The generator's low-index→high-index normalisation
+yields no directed cycle of **any** sign, so the condition holds structurally.
+That normalisation had been commented as a convenience; it is in fact both a
+**soundness** and a **liveness** precondition — SPFA has no negative-cycle
+detector, so on a negative cycle the reference did not fail, it **hung**. It now
+carries a relaxation budget that converts the hang into a named violation
+(`errFlowRefRelaxBudget`, `:491`), and `flowFirstNonDAGArc` (`:638`) asserts the
+DAG invariant before the reference is ever called.
+
+Two **planted** negative-cycle fixtures assert the `ErrNegativeCycle` refusal
+contract. They run on a separate path that never reaches the reference, are
+hand-built constants that consume **zero** draws (so they perturb neither the
+per-tick stream nor each other), and each asserts a non-zero plain-Dinic max
+flow on the same capacities — which is what makes the `(0, 0)` assertions
+evidential rather than vacuous (`flowCheckNegCycleFixture`, `:735`). Finally, a
+negative-cycle **optimality certificate** is run on the reference's own final
+residual (`:621`): it catches a misconception **shared** by production and
+reference, which a flow-value comparison structurally cannot.
+
+**B. `BidirectionalDijkstraOn` had no correctness coverage**, although
+`BiBFSOn` had already established the pattern. The reverse CSR is now built once
+per tick in `ssspViolations` (`internal/sim/search_sssp.go:42`) and threaded into
+the point-to-point checks — which is the hoist the `On` variant exists for — and
+the variant is judged **twice, by two deliberately separate assertions**: against
+the independent naive reference exactly as its two siblings are, and for **cost
+parity** against `BidirectionalDijkstra` on the same pair (`bidijkstraOnParity`,
+`:286`). Keeping them apart is the point: agreeing with the reference is a
+property each entry point can hold alone, whereas parity is the assertion that
+pins the caller-supplied reverse CSR to the internally built one, which is the
+only thing that differs between the two calls. Parity is asserted as **exact**
+equality, not within a tolerance: every edge weight is an integer in `[1, 16]`
+and the fixtures are small, so a correct implementation cannot round.
+
+**C. The shipped `Default…Options` regimes were entirely undriven.**
+`Eigenvector`, `Katz` and `PersonalisedPushPageRank` ran only under the
+hand-written literal options this file also drives, leaving the regime the
+library actually ships — including Katz's auto-alpha branch and the
+100-iteration eigenvector cap — unexercised. Each now runs in **both** regimes
+against the **same** independent reference, with the op labels kept distinct so a
+divergence names which regime diverged.
+
+The tolerances were **measured before being chosen**, and each constant records
+the observation, the headroom, and the size of defect it still catches
+(`internal/sim/search_centrality_measures.go:61-122`):
+
+| Measure | Worst observed \|diff\| | Sweep | Tolerance | Headroom |
+|---|---|---|---|---|
+| `Eigenvector` under `DefaultEigenvectorOptions` | 5.75e-06 | 25,000 runs (5,000 ticks × the 5 applicable fixtures) | `1e-4` | 17.4× |
+| `Katz` under `DefaultKatzOptions` | 1.00e-07 | 40,000 runs (5,000 ticks × all 8 fixtures) | `1e-6` | 9.96× |
+| `PersonalisedPushPageRank` under `DefaultPPRPushOptions` | 3.06e-06 | 5,000 runs | `1e-4` | 32.7× on the observation |
+
+The two spectral sweeps are **exhaustive**, not samples, and the reason is
+structural: eigenvector and Katz read only the adjacency (arc weights are
+ignored), and `centralityFixtures` yields exactly **23** distinct shapes — 7
+fixed plus the 16 `(a, b)` size combinations of `centralityRandomBridged`, whose
+two clique sizes are each drawn from `[2, 5]`. Twenty of the 23 are undirected
+and non-empty, which is exactly the subset `centralitySpectralApplicable`
+admits, and the sweep covered every one.
+
+The PPR sweep is a genuine **sample** — its fixture varies in order and in its
+seed-chosen extra arcs — so `pprDefaultEps` is placed above the **structural**
+residue bound rather than above the observation: local push leaves at most
+`epsilon * deg(v)` of residue un-pushed per node, hence at most `epsilon * |E|`
+overall, and `|E|` never exceeded 17 across the sweep, giving
+`1e-6 * 17 = 1.7e-05`. `1e-4` sits 5.9× above that worst case the algorithm is
+permitted to leave behind. Katz's auto-alpha, `0.85 / (1 + maxInDegree)`, is
+re-derived independently from the fixture, so the documented formula is pinned
+rather than trusted.
+
+Falsifiability was observed rather than asserted: ten controlled reverts were
+each driven and each turned a gate red, three of them proving the tolerances sit
+above a genuinely non-zero divergence (rmp #2497).
+
+**What this task does NOT claim.** Two clauses have **no falsifying witness**,
+and are kept because dropping them would drop the assertion, not because they
+have been shown to fire: the ctx-versus-non-ctx agreement clause and the
+`(flow, cost)`-versus-reference clause, because either would need a real engine
+defect to fire. The `rc < 0` guard is proved reachable by construction — the
+negative-cost flavour puts reduced costs on the boundary of it, with 4,743
+zero-cost arcs measured across the 10,000-fixture sweep the tests run — but it
+has never been **observed** firing. And the `inf → 0` potential substitution at
+`search/flow/min_cost.go:275-279` remains **dead code on this generator**: the
+spine gives every node an in-path of capacity ≥ 1, so every node is reachable
+from the source and no potential is ever left at `inf`. Reaching those lines
+needs an isolated-source fixture, which was deliberately left outside this
+task's scope and is recorded under
+[Documented debt](#documented-debt--out-of-scope).
+
+### Every public context-accepting search entry point, under cancellation (rmp #2489)
+
+`search`, `search/centrality`, `search/community`, `search/flow` and
+`search/extern` expose **58** entry points whose first parameter is a
+`context.Context`. Before this task the DST called exactly **one** of them —
+`search.FloydWarshallCtx`, from `negWeightCycleCheck`, and only because the
+non-context form cannot surface `search.ErrNegativeCycle` in its signature.
+Nothing at the DST layer asserted that a cancelled context is honoured, that the
+honouring is visible in the result, or that the cancellable form computes what
+the plain form computes. The family lives in `internal/sim/search_ctx_cancel.go`
+and runs on `CheckSearch`'s cadence, so it is re-driven after every crash and
+recovery.
+
+**The inventory is enumerated from the parameter type, not from a name.** The
+task was filed against "about 35 …Ctx entry points"; the truth is 58, and a
+`...Ctx` suffix search finds only 53.
+`TestSearchCtxCancel_TableCoversEveryEntryPoint`
+(`internal/sim/search_ctx_cancel_test.go:167`) parses the five packages with
+`go/ast` and requires the set of exported functions and exported-receiver
+methods taking a leading `context.Context` to **equal** the driven table, in both
+directions. The five a name filter loses are not marginal:
+`search.KShortestPathsLooplessCtxWithOpts` (THE implementation both other
+k-shortest forms delegate to, and the only one that can return a partial result
+beside its error), `centrality.PageRanker.Run` (a **method**, and one of only two
+genuinely independent implementations in the whole surface), and the three
+zero-allocation primitives `search.AStarInto`, `search.BellmanFordInto` and
+`search.DijkstraInto`, each of which takes a context and has no non-`Ctx`
+sibling. The test additionally names two rows explicitly, so a **narrowing of
+the enumerator itself** fails rather than silently shrinking the table it is
+compared against.
+
+**Three regimes, all in the short layer.** Every row runs under
+`context.Background()` and under a context cancelled **before** the call, with
+five clauses (`bg-err`, `twin-err`, `identity`, `cancel-err`, `cancel-val`); a
+third arm, `ctxCancelPrecedenceViolations`, drives **7** rows whose input makes
+the entry point return a terminal sentinel, and asserts both that the sentinel
+really is reached under a live context (`prec-setup`) and that a pre-cancelled
+context outranks it (`prec-order`). Two mechanics are load-bearing: the clauses
+use `errors.Is`, never `==`, because four centrality entry points wrap the
+context error while the other 54 return it raw; and they test **error identity**,
+never non-nilness, because `ErrCycle`, `ErrNegativeCycle`, `ErrNoPath` and
+`ErrInvalidInput` are all non-nil and none of them is a cancellation.
+`cancel-val` is the non-vacuity gate that makes `cancel-err` mean something, and
+it is why every fixture in `ctxFixtures` is constructed to have a **non-zero**
+answer.
+
+**What the identity arm proves, and where it is vacuous — stated rather than
+counted as coverage.** The task was written on the premise that the `Ctx` form
+might be a divergent code path; reading the five packages inverts it. Of the 58
+rows, **54** have a counterpart to compare against at all (the three `*Into`
+primitives and `KShortestPathsLooplessCtxWithOpts` have none), and for **52** of
+those 54 it is the NON-`Ctx` form that is the wrapper — its whole body is a
+tail-call to the context-aware form with `context.Background()` — so a bitwise
+difference is impossible by construction and the arm is a structural tripwire,
+not a correctness oracle. The file labels it as such, and
+`TestSearchCtxCancel_TwinIsAStructuralDelegation` (`:331`) checks the label in
+both directions against the source, so neither a twin that stops delegating nor
+one that starts can leave it stale. **Two** rows carry a real identity arm:
+`centrality.PageRanker.Run` against `centrality.PageRankCtx` — two genuinely
+separate implementations, duplicated on purpose because extracting `PageRankCtx`
+behind the method boundary was measured to regress the parallel SpMV by ~3% —
+and `search.BFSDirectionOptCtx` against `search.BFSDirectionOpt`, which does not
+delegate to the `Ctx` form. Six further rows (the `*Parallel*Ctx` set) have teeth
+in a weaker sense: delegation makes the code identical but two invocations are
+two independent work partitions, so for those the comparison is a determinism
+check. Twenty-seven of the 54 counterparts cannot report an error at all — the
+swallowing itself is pinned by
+`TestSearchCtxCancel_TwinErrorArityMatchesSource` (`:412`).
+
+**The battery found an engine defect, and it found it on the path its own main
+loop could not see.** Eight of the 58 rows could not honour a pre-cancelled
+context at all — seven through one shared increment-then-mask shape, and
+`search.TopologicalSortCtx` by a different mechanism entirely. This battery never
+saw them fail: the concurrency audit written for rmp #2489 found them first and
+they were corrected under rmp #2593 before the battery shipped, so those rows
+assert the mandate rather than the shortfall (see
+[Defects surfaced by this coverage work](#defects-surfaced-by-this-coverage-work),
+finding 19). One further site survived that first sweep, and it is the one this
+battery found rather than inherited: cancellation did not outrank
+`search.ErrNegativeCycle` in `search.JohnsonAPSPCtx`
+or `search.JohnsonAPSPParallelCtx`, because the shared prologue
+`bellmanFordVirtualSource` (`search/johnson.go`) polled on the same
+increment-then-mask shape, and Johnson runs that reweighting prologue **before**
+its per-source poll. The main row loop could not see it, and the reason will
+recur: that loop's fixtures are valid inputs by construction — they must be, or
+`bg-err` would mean nothing — and Johnson does poll before its per-source loop,
+so on a valid graph it looked compliant. The defect lived only where a prologue
+decides the input is unusable before the entry point consults its context, which
+is exactly the shape the precedence arm exists for; both Johnson rows are now in
+it as the regression guard.
+
+**Regimes this family does NOT reach.** Read these before assuming the context
+surface is certified:
+
+- **No mid-run cancellation, and therefore no promptness claim.** Both regimes
+  cancel before the call. Neither says where inside a running algorithm the poll
+  happens, nor how much work can still be done after cancellation is signalled.
+  The obvious deterministic mechanism does not work here either: the in-package
+  fakes `cancelAfterFirstCheck` and `cancelAfterNCalls` override only `Err()`
+  over an embedded `context.Background()`, and four of the parallel entry points
+  derive their own child with `context.WithCancel` and poll the **child** —
+  because `Background().Done()` is nil the child is never linked to the parent
+  and a `cancelCtx`'s `Err()` never consults its parent, so the fake's `Err()` is
+  never called at all. Measured: those four return a complete result with a nil
+  error under that fake, so a counted mid-run arm built on it would have been a
+  clause that cannot fail.
+- **The teardown arm proves no leak, not prompt joining.** Nine rows start
+  goroutines — including `search.DiameterCtx`, which does so without carrying
+  "Parallel" in its name, so scoping the arm by name would have missed it.
+  `TestSearchCtxCancel_NoGoroutineLeak` (`:666`) drives all nine under both
+  regimes inside `goleak`, which proves the pools do not leak indefinitely. It
+  does not prove they are joined before the call returns, and a goroutine-COUNT
+  comparison is not the fix: `pageRankEngine.close()` does not join its workers
+  and was measured returning with up to `GOMAXPROCS` still-live goroutines on 39
+  of 40 runs, which `goleak` correctly tolerates, while a count delta was
+  measured to flake in **both** directions on the same code.
+- **Several entry points have no inner poll at all, and this family cannot see
+  it.** `HopcroftKarpCtx` polls per phase and `HopcroftTarjanBCCCtx` per DFS
+  root, so on a connected graph the whole traversal is one uninterruptible
+  window; `WCCCtx` and `WCCParallelCtx` are checkable at two points only, because
+  `wccUnionEdgeRange` takes no context; `ClosenessCtx` and `HarmonicCtx` poll
+  every 1024 **sources** rather than at every source as their godoc says. All six
+  honour a pre-call cancellation, so all six are green here. That, and nothing
+  more, is what this family claims about them.
+- **Cancellation is not delivered through `Done()` alone.** Both regimes use a
+  real `context.WithCancel`, so `Done()` closes and `Err()` reports. An entry
+  point that selected on `Done()` and one that polls `Err()` are
+  indistinguishable to this family.
+- **The fixtures are small by design.** Each is a few tens of nodes, so the
+  whole 58-way sweep costs ~10–25 ms (rmp #2489 records 12.9 ms per invocation,
+  about 0.4% of the package's run time and inside its run-to-run spread), so it
+  can run on the search battery's cadence. Sizing up is not free: `FloydWarshallCtx`
+  alone costs ~9.6 s at `MaxNodeID` 4352.
+
+One caution the godoc of these packages does not carry: roughly forty clauses
+across the five packages claim a "wrapped `ctx.Err()`" and do **not** wrap.
+Assertions here are built from the poll site, never from the doc.
+
 ## Storage / durability coverage
 
 | Feature | Scenario / vehicle | Invariant |
@@ -225,6 +697,7 @@ against a new one is a behaviour change for the user to sanction.
 | DDL (index + UNIQUE constraint) across the checkpoint/snapshot boundary | `ddl-checkpoint-crash`; `constraint-enforce` and `index-diversity` now checkpoint too | the checkpoint's reclaimed WAL prefix COVERS the DDL frames (measured on the SimDisk image), the pure-snapshot phase replays ZERO WAL ops, and the recovered schema still enforces UNIQUE, answers every index seek, and matches `SHOW`/`db.*` |
 | `graph/io` export→import: CSV, JSONL, GraphML and DOT | `io-roundtrip-fault` (`internal/sim/storage_fault_scenarios.go` + `internal/sim/graph_io_surface.go`) | a clean round-trip reproduces the modelled edge set exactly and an export under ENOSPC fails with a typed error leaving no partial artefact a re-import would accept; the DOT writer — which has no reader — is adjudicated by CROSS-FORMAT AGREEMENT with CSV and JSONL over a model built to force quoting, weight labels and a bare node statement, with the one legitimate disagreement (an edge-list CSV cannot carry an isolated vertex) asserted in shape rather than waived; the JSONL property path round-trips every property KIND; the `csv.Options` delimiter / comment / header / weight-column / formula-sanitisation space is driven beyond `DefaultOptions`; every export is checked for byte-reproducibility; and a seed-mutated export sweep requires no panic and an effective mutation per format. The sweep's bounded-allocation bound is adjudicated in a SERIALISED test arm rather than in the scenario, because it is measured with a process-global counter that bills a concurrently scheduled scenario for its neighbours (rmp #2553). Every defensive cap in `graph/io` is provoked, and every `*Ctx` reader is cancelled mid-parse, by `RunGraphIOGuards` — see below |
 | Offline bulk-import publication (`store/bulkimport`) — **parity only, NOT fault coverage** | `bulkimport-parity` | a published snapshot reopens through real recovery equal to the harness model exactly (node set two-sided, labels, properties by **kind and value**, per-handle edge multisets including parallel twins), `SnapshotHit` with **zero** replayed WAL ops on two successive opens, and the measured lifecycle contract (`ErrNotFinished` / `ErrFinished` / `ErrStoreNotEmpty`, their precedence, and `PublishResult.Stats`); plus the publish's byte-reproducibility boundary. **No fault regime is reachable** — see the note below |
+| Offline bulk LOADER full contract (`store/bulk`) — content, streaming, caps and fault-injected publication | `bulk-load-oracle` (`internal/sim/bulk_load_oracle.go`) | every arm adjudicates the LOADED GRAPH against a harness model that reimplements the documented ingest rules in plain Go and calls neither `graph/adjlist` nor `csr.OrderRuns`, so a defect shared by every builder is still visible: `Drain` clean and ctx-cancelled mid-stream, `AddBatch` including the partial-ingest-then-`ErrTooManyRows` contract, `Parallel` true vs false asserting a BYTE-IDENTICAL csrfile and identical CSR slices, the `MaxRows` crossing on all three ingest entry points, all four Directed × Multigraph configurations, publication onto a `SimDisk` under `FaultRate` / `ArmSyncFaultAt`, reopen verified against the model, corruption fail-stop, and a host-crash differential across the publish rename → parent-fsync window. The post-fault oracle is THREE-way (absent, complete, or rejected), never two |
 | Crash **during** the snapshot publish, at each step of the crash-atomic swap | `checkpoint-crash-storm` | acked ⊆ recovered ⊆ issued across a crash inside the publish window; a stranded backup is promoted by recovery (measured on the durable image and on `store.recovery.snapshot.promoteParentFsync`), never a half-published snapshot |
 | Node-key and edge-weight CODEC matrix across crash and upgrade | `codec-matrix` (soak; `internal/sim/codec_matrix.go`) | seven `(key codec, weight codec)` arms each survive the three snapshot-publish crash windows AND the upgrade + snapshot boundaries with acked ⊆ recovered ⊆ issued adjudicated BY KEY; the durable `mapper.bin` carries the layout the key type selects (v1 for the string control, v2 for the other six) and the snapshot-only reopen replays ZERO WAL ops, so every recovered key came through the mapper; `txn.ErrNoWeightCodec` is provoked and its actual behaviour pinned. One measured gap is pinned rather than tolerated: a struct weight is dropped by the snapshot CSR writer — see below |
 | Corruption of a published snapshot COMPONENT | `snapshot-corruption-failstop` | a byte flipped in any of the nine components fail-stops recovery with that component's typed sentinel; recovery returns no store, mutates nothing on disk and leaves `db/wal` byte-identical; the restored image still recovers the exact committed model. One documented non-fail-stop is pinned in the same run, as a PAIRED oracle (rmp #2490): an intact `indexes/<name>.bin` is HYDRATED and a corrupt one is REBUILT, asserted on the engine-scoped population counter in both directions, with both reopens verified against a full scan and against the committed key set. The manifest's key-name region was the second non-fail-stop until rmp #2520 checksummed it — see below |
@@ -1568,6 +2041,266 @@ stopped re-escaping, a depth guard firing early, an untyped cancellation, an
 escaped partial graph, a cancellation landing before parsing began, and a control
 that did not reproduce the model), and six for the declaration shape gate.
 
+### The bulk loader's full contract: content, streaming, caps and a faulted publish (rmp #2488)
+
+`store/bulk.Loader` is the module's non-transactional ingest path: it streams
+`(src, dst, weight)` records into an in-memory adjacency, builds an immutable
+CSR, and publishes it as a Tier 2 csrfile. Until this scenario the DST touched
+three of its methods — `New`, `Add`, `Finalise` — and threw the result away. The
+pre-existing `bulk-vs-online` scenario drives 20,000 `Add` calls beside
+transactional writes and then compares ONE number, the row count, against the
+constant it just used to generate them; the returned CSR is discarded, the
+csrfile goes to a real OS temporary directory that no fault can reach, and the
+loader is only ever configured Directed+Multigraph. That scenario is a
+concurrency and resource-stability watch, it remains one, and it was left intact.
+`bulk-load-oracle` (`internal/sim/bulk_load_oracle.go`) occupies the content and
+fault gap beside it: every arm adjudicates the **loaded graph**, and every
+publication goes through a `SimDisk` so the atomicity of the publish can be
+attacked.
+
+**The model is independent of both builders.** `bulkOracleModel` reimplements
+the documented ingest contract in plain Go — per-edge interning order,
+simple-graph first-occurrence dedup, undirected mirroring with the self-loop
+exception, and the stable order-by-destination each row ends in — and calls
+neither `graph/adjlist` nor `csr.OrderRuns`; its sort is `slices.SortStableFunc`.
+That matters because `store/bulk`'s own identity tests are differentials between
+two ENGINE code paths (`TestCSRDirect_IdenticalToBuildFromAdjList` builds an
+`adjlist.AdjList` itself and compares `csr.BuildFromAdjList` against
+`buildCSRDirect`), and a differential cannot see a defect the two sides share.
+
+**One primitive is explicitly NOT certified here.** The NodeID a key receives is
+assigned by `graph.Mapper` first-seen-per-shard from a hash of the key, which the
+harness cannot derive without reimplementing the hash. The model therefore
+interns through its OWN `graph.Mapper`, Src then Dst per edge in input order,
+which is the rule `buildCSRDirect`'s doc comment states. What is certified is the
+edge multiset, the dedup, the mirroring, the within-row ordering, the row cap,
+the streaming contracts and the publication's atomicity — all of it **indexed by
+whatever ids the Mapper chose**. A Mapper that assigned ids differently but
+consistently would pass; a loader that lost, duplicated, reordered or
+mis-weighted an edge would not.
+
+**The arms.** `Drain` to completion and `Drain` cancelled mid-stream (the
+cancellation point is exact by construction: the producer sends into an
+UNBUFFERED channel and then cancels without sending again, so `Drain` has
+necessarily completed the `Add` for every send that returned); `AddBatch`,
+including the PARTIAL contract its godoc documents — the error identity, the
+exact surviving row count, and the CONTENT of the accepted prefix against the
+model, rather than merely that an error appeared; the `MaxRows` crossing on all
+three ingest entry points; all four Directed × Multigraph configurations, each
+built twice and required to produce a byte-identical csrfile and identical CSR
+slices under `Parallel` true and false; publication onto a `SimDisk` under armed
+sync, rename, ENOSPC and parent-fsync faults; a media-fault disk at a 0.30
+per-sector probability; a corruption arm; and a host-crash differential.
+
+**The post-fault oracle had to be THREE-way, not absent-or-complete.** A reader
+of the published path must observe exactly one of: ABSENT; present and
+reconstructing the expected graph EXACTLY; or present and REJECTED by the
+reader. The third is legal and reachable — with a non-zero fault rate a written
+sector is silently corrupted, so the writer can return nil over an image whose
+stored CRC no longer matches its bytes, and media corruption after a correct
+publication is not an atomicity failure but what the checksum exists to catch.
+The forbidden fourth state, and the one `bulkOracleAdjudicateImage` exists to
+catch, is present, accepted and DIFFERENT. Nor is a rejection required to be a
+CRC failure: `csrfile.DecodeHeader` validates magic, version, byte order and
+weight kind before the tail CRC is computed, and a TRUNCATED image is caught by
+neither — the `total == fileLen` equality in `Header.validate` yields
+`csrfile.ErrHeaderInconsistent` deterministically, so a torn publication is
+caught by SIZE, not by checksum. Pinning the oracle to `ErrFileCorrupted` alone
+would report false failures. The measurement that forced this: at the catalogue
+seed the media arm's eight attempts gave 2 absent, 6 rejected and 0 complete
+(rmp #2488), so a two-way oracle would have reported six false defects. The
+shipped gate does not pin that distribution — it requires at least one REJECTED
+outcome, and says in its own failure message why.
+
+**The crash window is a pinned differential, not a sample.** Three sub-arms
+publish generation 1, then generation 2, then crash the HOST: a *control* where
+generation 2 published cleanly (the crash must leave generation 2), a
+*treatment* where the parent-directory fsync is faulted and the rename pinned to
+its rolled-back branch (the crash must restore generation 1 — the publication is
+lost, whole, never torn), and a *writeback* arm pinning the other legal outcome
+of the same window (the crash must leave generation 2). Both branches are pinned
+rather than drawn, so each side is deterministic for every seed. Every verdict is
+read off the DURABLE image, never off the publisher's return value: real power
+loss ends the process, so what a still-running publisher would have returned is a
+harness artefact. `SimDisk.CrashProcess` is deliberately not used for this —
+a SIGKILL discards nothing, so it could only ever confirm "never torn"; only
+`CrashHost` can revoke a dirent. And the published path is a SUBDIRECTORY key on
+purpose: `SimDisk` treats a path whose parent is `.` or `/` as durably linked
+from creation, so publishing at root level would make the rename un-rollbackable
+and every "the name survived the crash" assertion would pass while proving
+nothing.
+
+**What this scenario CANNOT reach, stated rather than implied.**
+
+- **The goroutine fan-out is unreachable from outside the package.**
+  `Loader.buildParallel` — the phase-1-intern / phase-2-partition-by-shard
+  fan-out — is gated by `parallelEligible()`, which requires Directed AND at
+  least 50,000 buffered edges; but `Finalise` matches `Parallel &&
+  csrDirectEligible()` FIRST, and `csrDirectEligible()` is
+  `Directed && MaxShardCapacity == 0`, which no public `bulk.Options` can
+  falsify. So the byte-identity arm certifies the PRODUCTION parallel path —
+  `buildCSRDirect` against `BuildFromAdjList`, which is the code a caller setting
+  `Parallel: true` actually runs — and says nothing about multi-goroutine build
+  determinism. `TestBulkLoadOracle_ParallelFanOutStillUnreachable` fails if a
+  future revision adds a shard-capacity knob to `bulk.Options`, so this paragraph
+  cannot go stale silently. The eight (Directed × Multigraph × Parallel)
+  combinations reach exactly three builders, and `Parallel && !Directed` is the
+  only externally reachable route into the buffered-replay branch.
+- **`Finalise`'s own publication cannot be faulted.** It publishes through
+  `csrfile.WriteToFile`, which binds the OS backend at its entry point. The fault
+  arms call `csrfile.WriteToFileWith` over a `SimDisk` instead — the same writer
+  core, both forms tail-calling `writeToFileWith` and differing only in the `fs`
+  value, so the write/fsync/rename/parent-fsync protocol under test is the one
+  `Finalise` runs. What is NOT covered is the `Finalise` → `WriteToFile` call
+  edge under a fault; the closest reachable substitute, an unwritable
+  `OutputPath`, is driven by `bulkOracleArmRealFS` and pins the error wrapping
+  and the fact that the built CSR is still returned.
+- **A crash cannot land inside the build.** The build completes wholly in memory
+  before the single publication, so there is no partial-CSR state to crash into.
+- **A leftover temp file is an observation, not a violation.** Nothing in the
+  module enumerates the publish directory, so a stranded `<path>.tmp` is
+  invisible to every reader and never reclaimed. It is counted into the evidence
+  and reported, never raised as a violation. Measured on the default seed: zero
+  of the five armed publish faults strands one, because every failure path in
+  `writeToFileWith` removes the temp file before returning.
+
+**One harness defect was found before the tests were written and fixed there:**
+an atomicity clause guarded on a `lastGood` value that a zero-complete seed never
+assigned, so it could never fire. Falsifiability is observed rather than
+asserted: 16 of 16 scenario seams and 8 of 8 checker dimensions were driven RED
+(rmp #2488). No engine defect was found across all four configurations and 200
+seeds.
+
+### The lock-free CSR publisher's generation lifecycle (rmp #2491)
+
+`graph/generation` publishes an immutable `csr.CSR` under an `atomic.Pointer` and
+keeps every superseded generation alive until its refcount drains to zero. It had
+**zero** DST coverage, and its failure modes are exactly the class the DST exists
+to find: a refcount that leaks, a generation recycled while a reader still holds
+it, a drain that never completes, a `Close` that wedges. None of them is visible
+in the ANSWER a reader gets — a reader handed the wrong generation still returns
+a well-formed graph, it simply returns the wrong one — which is why the oracle in
+`internal/sim/generation_swap.go` is an **identity** oracle and not a
+well-formedness one.
+
+**The identity oracle is self-locating.** Every generation the plan builds is a
+different graph and carries its own publish sequence number INSIDE its content:
+node 0 has exactly one out-neighbour, and that neighbour is `1 + seq`. A reader
+can therefore decode from the artefact alone which generation it believes it
+holds, and then compare the WHOLE traversal against the model's independently
+computed fingerprint for that sequence number. Three identity channels must
+agree: the content's marker, the model's plan row for that sequence, and the
+generation POINTER's recorded sequence (checked terminally). The fingerprint is
+computed by the model from its own adjacency map and by the reader from the
+engine's read path (`csr.CSR.NeighboursByID`); neither side asks the engine what
+the answer should be. The package's own `csr_rotation_consistency_test.go`
+cannot reach any of this: the shared `makeCSR` helper it uses
+(`graph/generation/generation_test.go:14`) adds exactly ONE edge,
+`seed → seed+1`, whatever the seed, so its "`Size()` must equal 1" oracle holds
+for every generation that ever existed and cannot distinguish one from another —
+a well-formedness check wearing a torn-swap name.
+
+**No refcount clause can be flaky, because none of them samples.**
+`Generation.Refcount` is documented as an observability counter that races with
+concurrent `Acquire`/`Release`, so "the refcount is N" is never a sound
+assertion. Every clause is therefore a structural bound that holds at every
+instant, or is taken where nothing can move the counter: a FLOOR (a reader inside
+its own access window holds one reference, so a value below 1 is a lost increment
+or a double decrement, never a scheduling artefact); a CEILING (a reader holds at
+most one outstanding increment, since `Acquire`'s retry loop rolls its increment
+back before retrying, and the publisher holds at most one hostage reference, so
+the count can never exceed `readers + 1`); and AT REST, after every reader has
+been JOINED and the publisher stopped, where "every generation ever published has
+refcount 0" is a total, exact assertion. That last one — not a poll during the
+run — is the sound place for the task's "every superseded generation's refcount
+returns to zero".
+
+**The drain-timeout arm is structural, not timing-thresholded.** It does not race
+a short duration against a drain: the PUBLISHER acquires the generation it is
+about to supersede and holds that reference across the whole `PublishWithDrain`
+call, so the wait loop's condition is permanently true and the only exit is the
+timeout branch. `ErrDrainTimeout` is therefore guaranteed for any positive
+timeout — 1 ns or 1 s — and the timeout value changes only how long the call
+takes, never its verdict. The arm also asserts the hostage really was the
+captured predecessor, so a spurious timeout cannot be mistaken for the contract.
+The paired CONTROL is what makes it mean something: the plan forces the very next
+publish to be an unbounded `PublishWithDrain(c, 0)`, which must return nil, so
+timeout-when-held and drain-when-free are both measured and neither direction can
+pass vacuously. The post-`Close` contract is pinned alongside.
+
+**Determinism, exactly.** `ExecMode.Reproducible` is false for `ModeConcurrent`
+and this scenario does not pretend otherwise. The whole plan and every
+per-goroutine sub-seed are drawn up front on the calling goroutine, in a fixed
+order, before any goroutine spawns. Reproducible from the seed alone: the
+generation count, every generation's shape and fingerprint, the
+publish/drain/drain-timeout op for each publish, the index of the drain-timeout
+arm, and the plan digest the report pins. Reproducible from (seed, reader count):
+the reader sub-seeds — drawn AFTER the plan precisely so varying the reader count
+cannot perturb it. NOT reproducible, and recorded as telemetry rather than
+asserted: how many acquisitions happened, which generation each landed on, and
+the observed refcount values. Every non-vacuity clause is structural rather than
+a rate: each reader's first acquisition is taken before the publisher may publish
+and its last after the publisher has finished, so "every reader straddled at
+least one swap" is a fact of the construction rather than a hope about
+scheduling.
+
+**What this scenario CANNOT detect.** USE-AFTER-FREE is not reachable: Go's
+garbage collector keeps a `*csr.CSR` alive for exactly as long as a reader holds
+the pointer, so there is no freed memory to touch and no observable fault to
+catch; detecting a true use-after-free would need a poisoned allocator or unsafe
+reinterpretation of released storage, and this scenario has neither. What IS
+reachable is USE-AFTER-RECYCLE: the modelled decision to reclaim a generation's
+backing storage, which the publisher may only take once an unbounded
+`PublishWithDrain` has returned nil. A reader that ever finds that flag set on a
+generation `Acquire` just handed it has caught a premature reclamation.
+CONCURRENT PUBLISHERS are out of scope here deliberately — the readers'
+monotonicity clause is only sound under a single publisher, because the plan
+allocates sequence numbers before the swap rather than under the library's
+`publishMu`; the package's own
+`TestPublisher_ConcurrentPublishWithDrain_NoLostDrain` covers that through an
+unexported seam this scenario cannot see.
+
+**Falsifiability is tabulated in the file, with its provenance split.** Eleven
+library mutations are recorded against the clauses they fire, and the file names
+that table as authoritative over any prose. Five were reproduced in rmp #2491's
+validation pass and carry the host, seed and reader count they were measured
+under; the other six are inherited from the implementing session, were not re-run,
+and their sighting counts are marked unattributed — the split is kept because a
+count with no seed and no reader count behind it is not evidence. One mutation is
+caught only PROBABILISTICALLY (dropping `Acquire`'s re-check, whose window is a
+few instructions wide), and the inherited figures for it are recorded with an
+explicit statement of what they do and do not license: detection needed both the
+race detector's added preemption and a fleet wider than the host's core count,
+and no detection rate is claimed for any width set.
+
+**Two harness defects were found in validation and fixed.** `testing.AllocsPerRun`
+panics when called while any parallel test is in flight, so the
+fingerprint-allocation gate must stay in the sequential pass and its
+`t.Parallel()` is intentionally absent. And a shape forgery that dropped the
+highest node id from the SOURCES only is not encodable at all —
+`csr.Validate` rejects a destination that is not strictly below the node count —
+so it was refused for **120 of 200** seeds and passed only because the catalogue
+default is one of the other 80; dropping the destinations too makes it
+seed-independent and changes neither expected clause.
+
+**The wide fleets are in the SHORT layer, and the reason is a measurement that
+refuted the original justification by three orders of magnitude.** The
+64/256/1024-reader arms and a 64-seed geometry sweep were first gated behind
+`soak || nightly` on the estimate that 1024 readers would be "minutes of work
+under the race detector".
+Measured on darwin/arm64, 10 logical cores, under `-race`: one run at 1024
+readers is 10,247 acquisitions in 37 ms, the whole wide-fleet test is 0.28–0.29 s
+and the 64-seed sweep 0.17–0.18 s — 0.46 s together. The reason the estimate was
+so far out is a property of the scenario, not of the machine: a reader performs a
+minimum number of acquisitions and then stops as soon as the publisher is done,
+and the publisher does not pace itself, so per-reader work FALLS as the fleet
+widens (about 199 acquisitions each at 8 readers, 13 at 256, 10 at 1024) and
+total work grows sublinearly with width. The arms are therefore kept for
+FLEET-WIDTH and GEOMETRY diversity rather than for cost, and the direction is
+stated honestly: at 1024 readers the ceiling clause's bound is LOOSER, not
+tighter, so the wide arms add contention DEPTH rather than a sharper clause. The
+64-seed sweep is what varies the drain-timeout arm's POSITION in the publish
+sequence — measured at 31 distinct positions.
 
 ### Read-transaction isolation
 
@@ -3723,7 +4456,7 @@ The coverage work exercised the engine against these scenarios and found:
     of the equality it serves. Only the *range* arm had to go.
 
 
-11. **A bit-packed BOOL edge-property column PANICKED on the fused append
+12. **A bit-packed BOOL edge-property column PANICKED on the fused append
     path.** `edgePropColumn.grownWithValue` and `edgePropColumn.grownAbsentShared`
     — the two column-level halves of the fused build fast path
     `edgePropCols.GrowSlotWithValue` drives — converted a DENSE column to the
@@ -3776,7 +4509,7 @@ The coverage work exercised the engine against these scenarios and found:
     `grownAbsentShared` guard alone panics `…AsNonTarget` and `…AcrossManySlots`
     while `…AsTarget` still passes.
 
-12. **A validator-REFUSED value becomes durable, and recovery resurrects it, on
+13. **A validator-REFUSED value becomes durable, and recovery resurrects it, on
     the pure `store/txn` path.** The two durable paths order the validator
     differently, and only one of them is safe:
 
@@ -3807,7 +4540,7 @@ The coverage work exercised the engine against these scenarios and found:
     than delete the clause. Changing the commit ordering is a durability-contract
     decision, not a test fix, so it is recorded here and left for adjudication.
 
-13. **The single-edge anchor swap drops every row when the pattern's SOURCE node
+14. **The single-edge anchor swap drops every row when the pattern's SOURCE node
     is anonymous** (fail-silent, wrong answer). With the swap admissible,
     `MATCH (:Person)-[:KNOWS]->(:Vip) RETURN count(*)` returns **0** where
     `MATCH (a:Person)-[:KNOWS]->(b:Vip) RETURN count(*)` returns 1 over the same
@@ -3843,7 +4576,7 @@ The coverage work exercised the engine against these scenarios and found:
     patterns. Gated by
     `TestCountStore_AnchorSwapRetainsAnonymousSourceRows` here and by
     `cypher/anchor_swap_anonymous_test.go` in the planner's own package.
-14. **`count.Store.Snapshot`'s godoc contradicted its code** (documentation).
+15. **`count.Store.Snapshot`'s godoc contradicted its code** (documentation).
     It said it returns "every live cell (value > 0)"; the predicate has always
     been `v != 0`, and must be, because `Store.add` deliberately RETAINS a cell
     driven negative (rmp #2303) — that retention is what makes the aggregate
@@ -3853,7 +4586,7 @@ The coverage work exercised the engine against these scenarios and found:
     present value is positive. **Fixed** in this task: the doc now states the
     real predicate and why negative cells exist.
 
-15. **`AddRange`/`RemoveRange` silently drop the WHOLE range when it ends at
+16. **`AddRange`/`RemoveRange` silently drop the WHOLE range when it ends at
     `math.MaxUint64`** (fail-silent, latent). `index.NodeSet.AddRange` converts
     the inclusive upper endpoint to roaring's exclusive one with `to+1`
     (`graph/index/nodeset.go:339`), and `RemoveRange` does the same in its
@@ -3876,7 +4609,7 @@ The coverage work exercised the engine against these scenarios and found:
     the repair is a design choice (split the call, saturate, or refuse) that
     changes behaviour at the boundary. Pinned to the measured behaviour by
     `label-index-scoped`'s `boundary-pin`, which fires the day it changes.
-16. **An inverted or empty `AddRange` creates a permanent, serialized entry for a
+17. **An inverted or empty `AddRange` creates a permanent, serialized entry for a
     label with nothing in it** (unbounded growth, latent).
     `label.Index.AddRange` stores the `NodeSet` back unconditionally
     (`graph/index/label/index.go:151-153`) and `NodeSet.AddRange` promotes to the
@@ -3890,7 +4623,7 @@ The coverage work exercised the engine against these scenarios and found:
     unboundedly") and MEASURED keeps that promise; `AddRange` makes no such claim
     and does not behave that way. **Latent** for the same reason as #15. Reported
     rather than fixed; pinned by `label-index-scoped`'s `phantom-pin`.
-17. **The serialized label index is not idempotent for a run-encoded label small
+18. **The serialized label index is not idempotent for a run-encoded label small
     enough to be down-converted** (encoding instability, latent). A label built
     by `AddRange` holds a roaring RUN container; if its cardinality is at most
     `smallSetMax` (8), `index.NodeSetFromBitmap` moves it to the inline tier when
@@ -3909,7 +4642,248 @@ The coverage work exercised the engine against these scenarios and found:
     rather than fixed; pinned by `label-index-scoped`'s `dense-small-pin`, with
     the exact window swept under soak.
 
+19. **Exported `search` entry points ran to completion under an already-cancelled
+    context, one of them returning the true, complete answer with a nil error.**
+    Found by the concurrency audit that preceded the DST cancellation battery
+    (rmp #2489), filed and fixed as **rmp #2593** before the battery was written,
+    so the battery asserts the mandate rather than the shortfall. WORST CASE:
+    `flow.PushRelabelMaxFlowCtx` returned the correct maximum flow with a **nil**
+    error under a dead context, measured at `MaxNodeID` up to 1536 — a
+    request-scoped deadline fires, the caller's context is dead, the library does
+    the full work and reports success, and nothing downstream can tell. One root
+    cause behind five of the six sites: **increment-then-mask**
+    (`c++; if c&0xFFF == 0`), so the counter is 1 on the first iteration and the
+    mask first trips at 4096 units of work — any input below that stride returned
+    a complete answer under a dead context. Measured with a pre-cancelled context
+    at 8 nodes, all of these returned nil with a complete result:
+    `BellmanFordCtx`, `BellmanFordInto`, `KCoreCtx`, `KShortestPathsLooplessCtx`,
+    `KShortestPathsLooplessCtxWithOpts`, the deprecated `EppsteinKShortestCtx`
+    that delegates to it, and `PushRelabelMaxFlowCtx`. The correct idiom already
+    existed in the same codebase (`search/dijkstra.go`, `search/prim.go` poll on
+    iteration 0), and all five sites are check-then-increment now; the k-shortest
+    family additionally gained an entry poll, placed in the `WithOpts` form so one
+    poll covers all three callers. `TopologicalSortCtx` was a different mechanism:
+    on a fully cyclic graph every vertex has indegree ≥ 1, so the polled Kahn loop
+    never runs and `ErrCycle` outranked cancellation at every input size. A
+    **sixth site** was missed by that first sweep and found by the battery it was
+    meant to unblock: `bellmanFordVirtualSource` (`search/johnson.go`) is a shared
+    prologue, so neither `JohnsonAPSPCtx` nor `JohnsonAPSPParallelCtx` contained
+    the defect in its own file — see
+    [the cancellation battery](#every-public-context-accepting-search-entry-point-under-cancellation-rmp-2489)
+    for why the battery's main row loop could not see it either. `discharge`
+    (`search/flow/push_relabel.go`) gained its own poll, decided by measurement:
+    one discharge reaches 600,004 inner steps at 200k vertices, 146× the whole
+    stride, so counting discharges left the inter-poll interval unbounded in input
+    size; the poll costs +3.3% to +4.6% on one adversarial fan-out shape, accepted
+    under correct → secure → fast and recorded as the only measurable throughput
+    cost. The count is closed by SCAN rather than by trust: a detector for the
+    shape, run over all 47 stride-gated polls in the module, leaves exactly two
+    increment-then-mask sites, both benign because their callers poll
+    unconditionally first (`search/flow/dinic.go:152` and
+    `cypher/exec/hash_join.go:171`; the latter is outside the change's scope and
+    untouched). **No live-context result changed, and that is measured**: 3,622
+    byte-identical signatures before and after, including 540 Johnson ones at two
+    resolutions, one hashing `johnsonPrepare`'s potentials directly so a prologue
+    change would show even if it cancelled out downstream. Godoc was corrected
+    throughout — `bellman_ford.go` and both Johnson entry points had documented a
+    check "at every relaxation-round boundary" over what is SPFA on a deque, and
+    all of them claimed a wrapped `ctx.Err()` where none wraps. Fixed in
+    `ac16a8c9`; the DST regression guard is the cancellation battery
+    (`internal/sim/search_ctx_cancel.go`), which re-drives all 58 entry points
+    after every crash and recovery.
+
+### Harness and gate defects surfaced by this coverage work
+
+These are defects in the test harness and the local gate, not in the engine.
+They are listed apart from the numbered findings above because a green engine and
+a green gate are different claims, and conflating them is how a gate defect gets
+reported as an engine defect. Two earlier members of the same family are
+documented where their subject is — the Bolt swarm density clause (rmp #2587)
+and the `nv-swarm-overlap` straddle count (rmp #2596), both in
+[Aggregate inbound-decode backpressure](#aggregate-inbound-decode-backpressure-and-two-nesting-caps-that-are-not-one-rmp-2487)
+— and H5 below is the third time that same clause has had to be revisited.
+
+- **H1. `make ci` had no explicit `-timeout`, and a package sat 10.5 s from Go's
+  600 s default** (rmp #2584). One `make ci` run recorded `cypher 589.466s` — a
+  margin of 1.8% — while a concurrent second run on the same tree and commit
+  recorded `panic: test timed out after 10m0s` for the same package. Same code,
+  same commit; the only variable was available CPU, so a loaded machine was being
+  reported as a failed subject. `SHORT_TIMEOUT ?= 30m` is now passed by
+  `test-short`, `test-short-timings` and `make race`, chosen as 3.05× the slowest
+  completing package and 1.5× the `-timeout=20m` that `scripts/cover_gate.sh`
+  already applied — which is how it emerged that the `-race` pass was the only
+  whole-suite run in `make ci` with no explicit limit. Validated by outcome:
+  `internal/sim` now completes in-suite at 602.866 s, which the 600 s default had
+  killed twice.
+- **H2. The hypothesis that capping package parallelism would make the gate
+  faster AND more reliable was MEASURED AND REFUTED; no change was made**
+  (rmp #2590). A six-run sweep on the 10-core host (uncapped ×2, `-p` 6/4/3/2)
+  showed wall-clock is monotonic in the cap — 761 s uncapped rising to 1171 s at
+  `-p 2`, +54% — so the cores idle instead of working. Per-package inflation does
+  fall with the cap (`cypher` 417.2 s → 272.8 s), which confirms the contention
+  diagnosis, but the wall-clock penalty outweighs it and the reliability gain
+  measured NONE: all six runs green, zero failed tests, including both uncapped
+  runs. Recorded here because a refuted hypothesis is evidence too: the gate's
+  parallelism is not the cause of its timing-gate failures, and #2584's explicit
+  timeout is what was retained.
+- **H3. An alloc sensitivity meta-test demanded EXACT additivity, so 0.0076%
+  run-to-run variance failed it on correct code** (rmp #2591). The mutation-alloc
+  oracle under test was fine and its 64× bound is untouched — it correctly
+  condemned the injected run at 101.5× — but the meta-assertion required
+  `inflated >= control + injected` with zero tolerance, and netting out the
+  injection the same workload measured 14,804,360 B against the control's
+  14,805,480 B. The tolerance is now derived from a measured DISTRIBUTION rather
+  than from the single failing figure: 40 sampled pairs put the non-injected
+  portion between 31,728 B below the control and 8,336 B above, so the gate's
+  1,120 B shortfall understated the real noise by ~28× and anchoring to it would
+  have shipped a window still too tight. 1% of the injected 16 MiB is 167,772 B —
+  5.3× above the worst measured shortfall and 6.25× below the smallest real miss
+  — and it is expressed against the INJECTED amount so it does not scale with
+  unrelated allocation growth. The family was then surveyed with the
+  discriminator that a threshold is safe when it bounds what the HARNESS
+  determines and fragile when it bounds what the RUNTIME decides; ~15 candidates
+  were deliberately safe with the reasoning already in code, and two were filed
+  rather than guessed at (rmp #2592, #2588).
+- **H4. The cancellation battery's precedence override was package-level mutable
+  state, so two parallel tests raced and reddened the gate** (rmp #2597).
+  `var ctxCancelPrecedenceOverride` was declared in the non-test file
+  `search_ctx_cancel.go` and written by the falsifiability helper while the
+  checker test read it — exactly what CLAUDE.md forbids. ONE race failed SIXTEEN
+  tests, because Go's `testing` marks every parallel test in flight when the
+  detector fires. It was introduced by rmp #2489 itself and survived that task's
+  own validation because an isolated `go test -race ./internal/sim/` passed twice
+  at 480 s: the window opens only under the gate's concurrent whole-tree load.
+  Fixed by REMOVING the shared state — the precedence table is now a parameter,
+  so the helper supplies its own — rather than by dropping `t.Parallel()` or
+  adding a mutex, either of which would have preserved the forbidden variable.
+  An AST guard now fails if any package-level `var` in a non-test file is written
+  by a test, with nine non-vacuity fixtures; an audit of all 73 package-level
+  vars found exactly one offender. Fixed in `ab048fa6`.
+- **H5. The swarm density clause STILL has a scheduling-dependent floor, and it
+  reddened the closing coverage run** (rmp #2611, open). Found on 2026-08-24 by
+  the rmp #2498 coverage re-measurement itself: a coverage-instrumented soak run
+  of the whole package exited 1 because `TestBoltDecodeSwarm_SoakSeedSweep`
+  failed at seed `0x2487a018`
+  (`internal/sim/bolt_decode_pressure_soak_test.go:76`). The
+  `nv-swarm-pressure-density` oracle deviated with `RejectionsDuringHonest == 0`
+  and per-segment `[0 0 0 0]`, with the start barrier satisfied, 3 refusals drawn
+  by the fleet in total, and honest service 24 of 24 correct — **no engine
+  misbehaviour**. This is the THIRD iteration of the family that already produced
+  rmp #2587 and #2596: the clause adjudicates a TEMPORAL COINCIDENCE the harness
+  cannot force. #2587 removed that clause's numeric floor and left only a nonzero
+  floor; the residual floor is still scheduler-dependent, because whether any of
+  the fleet's refusals lands between the first honest exchange starting and the
+  last one finishing is decided by the machine and not by the construction —
+  under load the pressure can be spent entirely before honest service begins. It
+  is recorded here rather than among the engine findings for the same reason as
+  H1–H4, and it is the standing counter-example to treating a green soak run as
+  evidence about the engine. Open at the time of writing; the coverage figure it
+  accompanies is reported with this red stated, in
+  [The soak layer](#the-soak-layer-and-the-red-that-came-with-it).
+
 ## Documented debt / out of scope
+
+- **`ds` (union-find) is not named by any DST scenario, and is exercised only
+  TRANSITIVELY.** The task that closes this cycle records the package as "covered
+  at the unit layer and intentionally out of DST scope"; what is actually true is
+  more precise, and the distinction matters because "unit-tested" and
+  "DST-covered" are different claims. VERIFIED by an `os.walk`+`re` sweep of every
+  `.go` file in the tree (not by `grep`, which on the reference host can return a
+  silent empty result — an empty match is not evidence of absence): exactly four
+  files import `github.com/FlavioCFOliveira/GoGraph/ds`, namely `search/wcc.go`,
+  `search/wcc_parallel.go`, `search/kruskal.go` and `ds/example_test.go`. Nothing
+  under `internal/sim/` imports it or names either of its types, so **no scenario
+  drives it directly**.
+  - It IS driven transitively, on the DST's own cadence: `ds.UnionFindSlice` is
+    the working structure inside `search.KruskalMST` (`search/kruskal.go:119`),
+    serial `search.WCC` (`search/wcc.go:58`) and `search.WCCParallel`
+    (`search/wcc_parallel.go:95-116`), and the sim drives all three —
+    `internal/sim/search_mst.go:180`, `internal/sim/search_check.go:145` and
+    `:157`, plus the `Ctx` twins of all of them in the cancellation battery. Both
+    of those algorithm families are adjudicated against references that share no
+    code with `ds`: the MST arm compares total weight and spanning-forest validity
+    against `naiveKruskalTotal` over the sim's own private parent-array union-find
+    (`internal/sim/search_mst.go`), and the WCC arm compares the partition up to
+    relabelling against `nameGraph.naiveWCC`, whose `find`/`union` are inline
+    closures (`internal/sim/search_oracle.go`). So a defect in `Find`/`Union`
+    would surface as an MST-weight or WCC-partition divergence, not silently.
+  - What is genuinely NOT reached at all: the generic map-backed
+    `ds.UnionFind[T comparable]` has **no production caller anywhere in the
+    module** — its only callers are `ds/example_test.go`'s three runnable
+    examples — and `UnionFindSlice`'s `Connected`, `Len` and `Reset` are likewise
+    called by no production code, since `search/` uses only `NewSlice`, `Find` and
+    `Union`. Those are carried entirely by the package's own tests
+    (`ds/unionfind_test.go`, `ds/unionfind_len_test.go`,
+    `ds/unionfind_reset_test.go`, `ds/security_unionfind_int32_test.go` — the
+    last being the regression battery for the historical int32-truncation defect
+    rmp #1476), including a randomised cross-check of the slice variant against
+    the map variant and a property-style check against a naive relabel-array
+    model. That is the appropriate layer for them: a DST scenario cannot reach an
+    API no production path calls, and adding one would be the simulator testing
+    the simulator's own call.
+  - Both exported types state their concurrency contract explicitly ("not safe
+    for concurrent use; callers that need concurrent access must guard it
+    externally"), so the CLAUDE.md rule that silence about a contract is a defect
+    is satisfied without a DST arm.
+
+- **The `inf → 0` potential substitution in min-cost flow is DEAD CODE on the
+  DST's generator.** `search/flow/min_cost.go:275-279` replaces an unreachable
+  node's Bellman-Ford potential with 0 before the Dijkstra phase. The min-cost
+  fixtures give every node an in-path of capacity ≥ 1 through the connected
+  forward spine, so every node is reachable from the source and no potential is
+  ever left at `inf`. Reaching those lines needs an isolated-source fixture,
+  which was deliberately left outside rmp #2497's scope: adding a disconnected
+  component changes what the SPFA reference must assert about unreachable sinks,
+  and that is a separate, separately-reviewed change rather than a line added to
+  the generator. Open, and the only unreached branch left in the min-cost path.
+
+- **Two clauses in the min-cost-flow arm have no falsifying witness**, and are
+  kept as assertions of a construction rather than counted as coverage: the
+  ctx-versus-non-ctx agreement clause and the `(flow, cost)`-versus-reference
+  clause, either of which would need a real engine defect to fire. The `rc < 0`
+  invariant guard is proved REACHABLE by construction — the negative-cost flavour
+  puts reduced costs on its exact boundary — but has never been observed firing.
+  See
+  [Min-cost flow's negative-cost regime](#min-cost-flows-negative-cost-regime-the-hoisted-reverse-dijkstra-and-the-shipped-default-option-regimes-rmp-2497).
+
+- **The search cancellation battery makes NO promptness claim, and cannot.** Both
+  its regimes cancel before the call, so nothing is asserted about where inside a
+  running algorithm the poll happens or how much work can still be done after
+  cancellation is signalled. The obvious deterministic mechanism is unavailable:
+  the in-tree counting fakes override only `Err()` over an embedded
+  `context.Background()`, and four parallel entry points derive their own child
+  context and poll the child — which, because `Background().Done()` is nil, is
+  never linked to the parent — so the fake's `Err()` is never called at all and a
+  counted mid-run arm built on it would be a clause that cannot fail. Its
+  goroutine arm likewise proves NO LEAK, not prompt joining. See
+  [the cancellation battery](#every-public-context-accepting-search-entry-point-under-cancellation-rmp-2489)
+  for the full list of unreached regimes and the measurements behind each.
+
+- **`bulk.Loader`'s goroutine fan-out is unreachable from outside its own
+  package, so the byte-identity claim covers `buildCSRDirect` and not
+  `buildParallel`.** `Finalise` matches `Parallel && csrDirectEligible()` first,
+  and no public `bulk.Options` can falsify `csrDirectEligible()`, so a directed
+  parallel load never reaches the fan-out. The DST certifies the code a caller
+  setting `Parallel: true` actually runs; multi-goroutine build determinism is
+  covered only by `store/bulk`'s own in-package tests, which can inject a shard
+  capacity. `TestBulkLoadOracle_ParallelFanOutStillUnreachable` fails if a
+  shard-capacity knob is ever added to `bulk.Options`, so this bullet cannot go
+  stale silently. Likewise, `Finalise` → `csrfile.WriteToFile` binds the OS
+  backend at its entry point, so that ONE call edge cannot be faulted; the fault
+  arms drive the identical writer core through `WriteToFileWith` over a
+  `SimDisk`, and an unwritable `OutputPath` is the closest reachable substitute
+  for the edge itself.
+
+- **`graph/generation` use-after-FREE is unreachable, and concurrent publishers
+  are out of scope.** Go's garbage collector keeps a `*csr.CSR` alive for as long
+  as any reader holds the pointer, so there is no freed memory to touch and no
+  observable fault to catch; the `generation-swap` scenario claims
+  use-after-RECYCLE (the modelled reclamation decision) and says so. Concurrent
+  publishers are excluded deliberately: the readers' monotonicity clause is sound
+  only under a single publisher, because the plan allocates sequence numbers
+  before the swap rather than under the library's own `publishMu`. The package's
+  own `TestPublisher_ConcurrentPublishWithDrain_NoLostDrain` covers that case
+  through an unexported seam no scenario can see.
 
 - **The numeric range residual filter runs unconditionally, and need not.** rmp
   #2600 makes `query.valueInRange` a residual filter over every numeric range

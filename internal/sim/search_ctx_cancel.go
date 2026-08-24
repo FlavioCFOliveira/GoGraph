@@ -152,23 +152,30 @@ package sim
 // For those rows the identity arm compares values only, and the swallowing itself
 // is pinned by [TestSearchCtxCancel_TwinErrorArityMatchesSource].
 //
-// # The sub-stride blindness this battery found, and the one still open
+// # The sub-stride blindness around this battery, and the one still open
 //
-// When first written, seven of the 58 rows FAILED both pre-cancelled clauses at
-// every tick tried: [search.BellmanFordCtx], [search.BellmanFordInto],
-// [search.KCoreCtx], [search.KShortestPathsLooplessCtx],
+// These rows would have failed both pre-cancelled clauses at every tick, but
+// this battery never saw them do it: the concurrency audit written for rmp #2489
+// found them first, and the user chose to correct them BEFORE the battery was
+// written, so what the rows below assert is the mandate rather than the
+// shortfall. The affected entry points were [search.BellmanFordCtx],
+// [search.BellmanFordInto], [search.KCoreCtx],
+// [search.KShortestPathsLooplessCtx],
 // [search.KShortestPathsLooplessCtxWithOpts], the deprecated
 // [search.EppsteinKShortestCtx] that delegates to it, and
-// [flow.PushRelabelMaxFlowCtx]. All four underlying cores incremented their work
+// [flow.PushRelabelMaxFlowCtx]. Their underlying cores incremented the work
 // counter BEFORE masking it (`c++; if c&0xFFF == 0`), so the first ctx.Err() poll
 // happened only once 4096 units of work had been done and any input below that
-// stride returned the complete answer with a nil error under a dead context. Those
-// sites were corrected under rmp #2593 (check-then-increment, matching
-// `search/dijkstra.go` and `search/prim.go`) and all seven rows now assert the
-// full contract.
+// stride returned the complete answer with a nil error under a dead context.
+// [search.TopologicalSortCtx] failed the same clauses by a different mechanism —
+// on a fully cyclic graph the polled Kahn loop never runs, so [search.ErrCycle]
+// was returned in preference to the context error. All were corrected under
+// rmp #2593 (check-then-increment, matching `search/dijkstra.go` and
+// `search/prim.go`), and every one of those rows now asserts the full contract.
 //
-// A SIXTH site of the same defect survived that first pass and this battery found
-// it: cancellation did not outrank [search.ErrNegativeCycle] in
+// One further site of the same defect survived that first sweep, and this battery
+// DID find that one — the only one it found rather than inherited:
+// cancellation did not outrank [search.ErrNegativeCycle] in
 // [search.JohnsonAPSPCtx] or [search.JohnsonAPSPParallelCtx], because
 // `bellmanFordVirtualSource` (`search/johnson.go`) incremented before masking and
 // Johnson runs that reweighting prologue BEFORE its per-source poll. They were 2
