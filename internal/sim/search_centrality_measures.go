@@ -34,6 +34,93 @@ const (
 	katzMeasureBeta      = 1.0
 )
 
+// Op labels for the SHIPPED-DEFAULT regimes, kept distinct from the
+// literal-option ones so a divergence report names WHICH regime diverged (and
+// so the shrinker's violation signature does not conflate the two).
+const (
+	opEigenvectorDefaults = "search:Eigenvector/defaults"
+	opKatzDefaults        = "search:Katz/defaults"
+	opPPRDefaults         = "search:PersonalisedPushPageRank/defaults"
+)
+
+// katzAutoAlphaNumerator is the constant [centrality.KatzOptions] documents for
+// the auto-selected attenuation factor, alpha = 0.85 / (1 + maxInDegree). It is
+// restated here so [katzAutoAlphaReference] derives the value from the
+// FIXTURE's own arcs rather than reading it back out of the library.
+const katzAutoAlphaNumerator = 0.85
+
+// Tolerances for the SHIPPED-DEFAULT regimes. These are deliberately NOT the
+// literal-option tolerances above. The shipped defaults stop far earlier than
+// the hand-written options this file also drives — tolerance 1e-6 instead of
+// [spectralRefTol] for the two spectral measures, push epsilon 1e-6 instead of
+// [pprPushEpsilon] — so the residual gap to the near-exact reference is
+// correspondingly larger and reusing [spectralEps] would simply make the checks
+// fail. Every constant below was MEASURED before it was chosen; the note on
+// each records the observed maximum, the headroom, and the size of defect it
+// still catches. Re-measure if the fixture set changes.
+const (
+	// eigenvectorDefaultEps bounds the gap between [centrality.Eigenvector]
+	// under [centrality.DefaultEigenvectorOptions] (100 iterations, tolerance
+	// 1e-6) and the near-exact [eigenvectorReference].
+	//
+	// Measured: worst |difference| 5.75e-06 (fixture random-bridged-5-4) over
+	// 25,000 runs — 5,000 ticks x the 5 undirected fixtures the measure applies
+	// to. 1e-4 leaves 17.4x headroom. That sweep is EXHAUSTIVE rather than a
+	// sample: eigenvector centrality reads only the adjacency (arc weights are
+	// ignored), and [centralityFixtures] yields exactly 23 distinct shapes —
+	// 7 fixed plus the 16 (a,b) size combinations of [centralityRandomBridged].
+	// 20 of those 23 are undirected and non-empty, which is the subset
+	// [centralitySpectralApplicable] admits, and the sweep covered every one.
+	//
+	// Still catches: the vector is L2-normalised over at most 12 live nodes, so
+	// a typical component is 0.1-0.7. Against a component of 0.4, 1e-4 flags any
+	// error above 2.5e-4 relative (0.025%) — far below the 1e-2-and-larger
+	// shifts caused by the defects that matter here: the wrong edge orientation,
+	// a mis-seeded start vector, a live-mask entry dropped, a self-loop or
+	// parallel edge lost from A.
+	eigenvectorDefaultEps = 1e-4
+
+	// katzDefaultEps bounds the gap between [centrality.Katz] under
+	// [centrality.DefaultKatzOptions] (auto alpha, beta 1, 1000 iterations,
+	// tolerance 1e-6) and [katzReference] driven with the same independently
+	// re-derived alpha.
+	//
+	// Measured: worst |difference| 1.00e-07 (fixture random-bridged-5-4) over
+	// 40,000 runs — 5,000 ticks x all 8 fixtures, Katz being well-defined
+	// everywhere. 1e-6 leaves 9.96x headroom. Exhaustive for the same reason as
+	// above: Katz also reads only the adjacency. Katz converges far closer than
+	// eigenvector under the same 1e-6 tolerance because the auto alpha makes the
+	// iteration a hard contraction (rho = alpha*lambda_max < 0.85), which is why
+	// this constant is two orders tighter than [eigenvectorDefaultEps].
+	//
+	// Still catches: against a component of 0.4, any error above 2.5e-6 relative
+	// (0.00025%) — which includes a beta floor applied to the wrong node set, a
+	// transposed accumulation, and any change to the auto-alpha formula large
+	// enough to move the fixed point at all.
+	katzDefaultEps = 1e-6
+
+	// pprDefaultEps bounds the gap between
+	// [centrality.PersonalisedPushPageRank] under
+	// [centrality.DefaultPPRPushOptions] (damping 0.85, epsilon 1e-6, 1e7 steps)
+	// and the exact [pprReference] fixpoint.
+	//
+	// Measured: worst |difference| 3.06e-06 over 5,000 runs, so 1e-4 leaves
+	// 32.7x headroom on the observation. Unlike the two spectral measures this sweep
+	// is a SAMPLE — the PPR fixture varies in order (n in [5,9]) and in its
+	// seed-chosen extra arcs — so the constant is placed above the STRUCTURAL
+	// bound instead of merely above the sample: local push leaves at most
+	// epsilon*deg(v) of residue un-pushed at each node, hence at most
+	// epsilon*|E| of mass unaccounted for overall, and |E| never exceeded 17
+	// across the sweep, giving 1e-6 * 17 = 1.7e-05. 1e-4 sits 5.9x above that
+	// worst case the algorithm is permitted to leave behind.
+	//
+	// Still catches: the vector is a probability distribution summing to 1 with
+	// the seed itself holding ~0.46, so 1e-4 flags the misplacement of 0.01% of
+	// the total mass — far below a dangling-mass teleport sent to the wrong
+	// node, a wrong damping factor, or an edge dropped from a push.
+	pprDefaultEps = 1e-4
+)
+
 // pprPushEpsilon is the push-residue threshold handed to
 // [centrality.PersonalisedPushPageRank]. It is tight enough that the un-pushed
 // residual mass (bounded by ~epsilon * Σ degree over a tiny fixture) is far
@@ -62,22 +149,85 @@ const pprPushEpsilon = 1e-7
 //     power-iteration PPR with a single-source teleport (dangling mass teleported
 //     back to the source, matching the ACL model the push implements).
 //
+// Eigenvector, Katz and personalised PageRank are each driven TWICE: once with
+// the hand-written literal options above, and once more under the regime the
+// library actually ships — [centrality.DefaultEigenvectorOptions],
+// [centrality.DefaultKatzOptions], [centrality.DefaultPPRPushOptions]. The two
+// are not interchangeable. The literal options drive each algorithm far past its
+// shipped stopping point (tolerance 1e-13 against 1e-6, push epsilon 1e-7
+// against 1e-6, and an explicit Katz alpha instead of the auto-selected one), so
+// a check that only ever ran them would leave the configuration every ordinary
+// caller gets — including the auto-alpha branch and the 100-iteration
+// eigenvector cap — entirely undriven. Both regimes are judged against the SAME
+// independent references, each within its own measured tolerance
+// ([eigenvectorDefaultEps], [katzDefaultEps], [pprDefaultEps]).
+//
 // All randomness flows from a single seed; the fixture set and order are fixed,
 // so a divergence replays bit-for-bit. Divergences are tagged
 // ViolationSearchDivergence with the measure's Op.
 func centralityMeasureViolations(tick int64) []Violation {
 	seed := NewSeed(uint64(tick) ^ centralityMeasureSalt)
-	var vs []Violation
+	// prealloc would have this be make([]Violation, 0, <fixture count>), which
+	// allocates a backing array on EVERY tick. A clean tick — the overwhelmingly
+	// common case for a checker the simulator runs on every step — should return
+	// a nil slice rather than a heap-allocated empty one, and the fixture count
+	// is not the violation count in any case: each fixture contributes zero
+	// violations whenever the engine agrees. Appending lazily leaves vs nil on
+	// that path.
+	var vs []Violation //nolint:prealloc // a clean tick must not allocate; see above
 	for _, f := range centralityFixtures(seed) {
 		c := centralityBuildCSR(f)
-		vs = append(vs, closenessViolations(tick, f, c)...)
-		vs = append(vs, harmonicViolations(tick, f, c)...)
-		vs = append(vs, katzViolations(tick, f, c)...)
-		if centralitySpectralApplicable(f) {
-			vs = append(vs, eigenvectorViolations(tick, f, c)...)
-		}
+		vs = append(vs, centralityFixtureViolations(tick, f, c)...)
 	}
-	vs = append(vs, pprViolations(tick)...)
+	vs = append(vs, pprMeasureViolations(tick)...)
+	return vs
+}
+
+// pprMeasureViolations runs BOTH personalised-PageRank regimes for one tick —
+// the literal-option check ([pprViolations]) and the shipped-default one
+// ([pprDefaultRegimeViolations]) — against the graph the tick's own seed derives.
+//
+// They are grouped behind a single call deliberately. A top-level "append the
+// result of check X" line is invisible to every test here once deleted: nothing
+// diverges on a clean fixture, so nothing goes red, and a whole check
+// disappears silently. Grouping means the default regime cannot be dropped on
+// its own — the only line that removes it removes the long-standing literal
+// check with it — and the grouping itself is injection-tested through
+// [pprMeasureRegimeViolations].
+func pprMeasureViolations(tick int64) []Violation {
+	seed := NewSeed(uint64(tick) ^ pprMeasureSalt)
+	n, edges := pagerankGenGraph(seed)
+	return pprMeasureRegimeViolations(tick, pagerankBuildCSR(n, edges), n, edges)
+}
+
+// pprMeasureRegimeViolations is the body of [pprMeasureViolations], taking the
+// ENGINE's input (the CSR c) and the REFERENCE's input (n, edges) separately so
+// a test can hand the two different graphs and observe which regimes speak up.
+// [pprViolations] derives its own fixture from the tick and is left exactly as
+// it was, so an injection here moves only the default regime.
+func pprMeasureRegimeViolations(tick int64, c *csr.CSR[float64], n int, edges [][2]int) []Violation {
+	vs := pprViolations(tick)
+	return append(vs, pprDefaultRegimeViolations(tick, c, n, edges)...)
+}
+
+// centralityFixtureViolations runs every per-fixture measure check against one
+// fixture: closeness, harmonic, Katz in both its literal and its shipped-default
+// regime, and — where the measure is well-defined — eigenvector in both regimes.
+//
+// The CSR arrives as a parameter rather than being built here so that a test can
+// hand the ENGINE one graph while the references describe another and observe
+// which checks speak up. That is the wiring assertion: it is what stops a check
+// being silently dropped from this list, which no "clean on fixtures" run could
+// ever detect on its own.
+func centralityFixtureViolations(tick int64, f centralityFixture, c *csr.CSR[float64]) []Violation {
+	vs := closenessViolations(tick, f, c)
+	vs = append(vs, harmonicViolations(tick, f, c)...)
+	vs = append(vs, katzViolations(tick, f, c)...)
+	vs = append(vs, katzDefaultViolations(tick, f, c)...)
+	if centralitySpectralApplicable(f) {
+		vs = append(vs, eigenvectorViolations(tick, f, c)...)
+		vs = append(vs, eigenvectorDefaultViolations(tick, f, c)...)
+	}
 	return vs
 }
 
@@ -442,6 +592,214 @@ func pprReference(n int, edges [][2]int, d float64, src int) []float64 {
 		}
 	}
 	return pi
+}
+
+// --- Shipped default regimes ---------------------------------------------------
+//
+// The three checks below drive the SAME algorithms as the literal-option checks
+// above, but configured exactly as [centrality.DefaultEigenvectorOptions],
+// [centrality.DefaultKatzOptions] and [centrality.DefaultPPRPushOptions] ship
+// them. They are additional, never a replacement: the literal options remain the
+// tight regime that pins each algorithm against a near-exact fixpoint, while
+// these pin the configuration an ordinary caller actually receives — a looser
+// stopping rule, a much smaller eigenvector iteration budget, and (for Katz) the
+// auto-selected attenuation factor that the literal regime deliberately bypasses.
+//
+// Each is judged against the SAME independent reference the literal check uses.
+// The references are exact fixpoints, so they are regime-independent by
+// construction; only the tolerance differs, and each tolerance was measured
+// rather than guessed (see [eigenvectorDefaultEps] and its siblings).
+
+// eigenvectorDefaultViolations cross-checks [centrality.Eigenvector] under the
+// shipped [centrality.DefaultEigenvectorOptions] against the same near-exact
+// [eigenvectorReference] the literal-option check uses, within the measured
+// [eigenvectorDefaultEps].
+//
+// It also asserts the library converged STRICTLY inside the shipped iteration
+// cap. That is a real claim about the default, not a formality: the default caps
+// the power iteration at 100 steps — a tenth of the literal regime's budget —
+// so a fixture with a small enough spectral gap could legitimately exhaust it
+// and return [centrality.ErrMaxStepsExceeded]. It was measured before being
+// asserted: across 25,000 runs (5,000 ticks x the 5 applicable fixtures, which
+// covers every distinct shape the fixture family can produce) the worst case
+// used 45 iterations, 2.2x inside the cap, and the cap was never reached. A
+// future fixture with a tighter spectral gap would trip this assertion, and that
+// is the correct outcome: it means the shipped default no longer converges on
+// the battery, which is a fact the DST should surface rather than tolerate.
+func eigenvectorDefaultViolations(tick int64, f centralityFixture, c *csr.CSR[float64]) []Violation {
+	opts := centrality.DefaultEigenvectorOptions()
+	got, iters, err := centrality.Eigenvector(c, opts)
+	if err != nil {
+		return centralityDiverge(tick, opEigenvectorDefaults, fmt.Sprintf(
+			"%s: Eigenvector under DefaultEigenvectorOptions (max %d iterations, tolerance %g) returned an error on a connected undirected graph: %v",
+			f.name, opts.MaxIterations, opts.Tolerance, err))
+	}
+	if iters >= opts.MaxIterations {
+		return centralityDiverge(tick, opEigenvectorDefaults, fmt.Sprintf(
+			"%s: Eigenvector under DefaultEigenvectorOptions did not converge strictly inside the shipped cap of %d iterations (used %d)",
+			f.name, opts.MaxIterations, iters))
+	}
+	want := eigenvectorReference(f)
+	return measureCompare(tick, opEigenvectorDefaults, f, want, got, eigenvectorDefaultEps, eigenvectorDefaultEps)
+}
+
+// katzDefaultViolations cross-checks [centrality.Katz] under the shipped
+// [centrality.DefaultKatzOptions] — whose Alpha is the 0 sentinel that selects
+// the attenuation factor automatically — and makes two distinct assertions.
+//
+//  1. CORRECTNESS. The result must agree with [katzReference] within the
+//     measured [katzDefaultEps]. The reference is driven with alpha
+//     re-derived from the fixture's own arcs by [katzAutoAlphaReference], never
+//     read back from the library, so the comparison stays an independent oracle.
+//
+//  2. THE AUTO-ALPHA CONTRACT. Handing that same re-derived alpha back as an
+//     EXPLICIT option must reproduce the auto run bit for bit — identical
+//     iteration count, identical scores. This is a differential assertion about
+//     a documented contract, not a correctness oracle: it is the only check that
+//     can pin the exact formula [centrality.KatzOptions] publishes, because the
+//     chosen alpha is never surfaced in the result. Bit-exactness is the right
+//     predicate because both runs then execute the identical serial code on
+//     identical scalars; it was measured over 40,000 runs with zero mismatches.
+//     The two assertions are complementary: (1) alone would miss a formula
+//     change too small to move the fixed point past the tolerance, and (2) alone
+//     would be satisfied by any formula at all as long as both paths used it.
+//
+// Convergence inside the iteration cap is asserted as well; the shipped cap is
+// 1000 and the observed worst case was 31 iterations.
+func katzDefaultViolations(tick int64, f centralityFixture, c *csr.CSR[float64]) []Violation {
+	opts := centrality.DefaultKatzOptions()
+	got, iters, err := centrality.Katz(c, opts)
+	if err != nil {
+		return centralityDiverge(tick, opKatzDefaults, fmt.Sprintf(
+			"%s: Katz under DefaultKatzOptions (auto alpha, beta %g, max %d iterations, tolerance %g) returned an error: %v",
+			f.name, opts.Beta, opts.MaxIterations, opts.Tolerance, err))
+	}
+	if iters >= opts.MaxIterations {
+		return centralityDiverge(tick, opKatzDefaults, fmt.Sprintf(
+			"%s: Katz under DefaultKatzOptions did not converge strictly inside the shipped cap of %d iterations (used %d)",
+			f.name, opts.MaxIterations, iters))
+	}
+
+	alpha := katzAutoAlphaReference(f)
+	if vs := katzAutoAlphaContract(tick, f, c, opts, alpha, got, iters); len(vs) != 0 {
+		return vs
+	}
+
+	want := katzReference(f, alpha, opts.Beta)
+	return measureCompare(tick, opKatzDefaults, f, want, got, katzDefaultEps, katzDefaultEps)
+}
+
+// katzAutoAlphaContract asserts that re-running [centrality.Katz] with the
+// independently re-derived alpha supplied EXPLICITLY reproduces the auto-alpha
+// run exactly. See assertion (2) in [katzDefaultViolations] for why this is a
+// contract pin rather than a correctness oracle.
+func katzAutoAlphaContract(tick int64, f centralityFixture, c *csr.CSR[float64], opts centrality.KatzOptions, alpha float64, autoScores []float64, autoIters int) []Violation {
+	explicit := opts
+	explicit.Alpha = alpha
+	got, iters, err := centrality.Katz(c, explicit)
+	if err != nil {
+		return centralityDiverge(tick, opKatzDefaults, fmt.Sprintf(
+			"%s: Katz rejected the re-derived auto alpha %.17g supplied explicitly: %v", f.name, alpha, err))
+	}
+	if iters != autoIters {
+		return centralityDiverge(tick, opKatzDefaults, fmt.Sprintf(
+			"%s: auto-alpha contract broken: explicit alpha %.17g converged in %d iterations, the auto path in %d",
+			f.name, alpha, iters, autoIters))
+	}
+	if len(got) != len(autoScores) {
+		return centralityDiverge(tick, opKatzDefaults, fmt.Sprintf(
+			"%s: auto-alpha contract broken: explicit-alpha result length %d, auto-path length %d",
+			f.name, len(got), len(autoScores)))
+	}
+	for i := range got {
+		if got[i] != autoScores[i] {
+			return centralityDiverge(tick, opKatzDefaults, fmt.Sprintf(
+				"%s: auto-alpha contract broken: value[%d] = %.17g with explicit alpha %.17g, %.17g on the auto path (0.85/(1+maxInDegree) is no longer the selected attenuation)",
+				f.name, i, got[i], alpha, autoScores[i]))
+		}
+	}
+	return nil
+}
+
+// katzAutoAlphaReference re-derives, from the FIXTURE's own arc set, the
+// attenuation factor [centrality.KatzOptions] documents for the Alpha <= 0
+// sentinel: alpha = 0.85 / (1 + maxInDegree).
+//
+// "In-degree" here is the number of arcs whose DESTINATION is the node — the
+// same orientation Katz accumulates over, and the orientation the library's own
+// degree bound uses. For an undirected fixture the arcs are materialised in both
+// directions, so in- and out-degree coincide; for a directed one they do not,
+// which is exactly why the orientation has to be stated rather than assumed. An
+// arc-free fixture has no degree bound at all, and the library falls back to
+// 0.85 outright, so this does too.
+//
+// It never reads the value back from the library — the chosen alpha is not
+// surfaced in the result — so this is an independent statement of the published
+// contract rather than a restatement of the implementation.
+func katzAutoAlphaReference(f centralityFixture) float64 {
+	adj, _ := centralityAdjacency(f)
+	indeg := make([]int, f.order)
+	for u := range adj {
+		for _, v := range adj[u] {
+			indeg[v]++
+		}
+	}
+	var maxIn int
+	for _, d := range indeg {
+		if d > maxIn {
+			maxIn = d
+		}
+	}
+	if maxIn == 0 {
+		return katzAutoAlphaNumerator
+	}
+	return katzAutoAlphaNumerator / float64(1+maxIn)
+}
+
+// pprDefaultRegimeViolations cross-checks [centrality.PersonalisedPushPageRank]
+// under the shipped [centrality.DefaultPPRPushOptions] against the same
+// [pprReference] fixpoint the literal-option check uses, within the measured
+// [pprDefaultEps].
+//
+// It takes the ENGINE's input (the CSR c) and the REFERENCE's input (n, edges)
+// as separate arguments. Production always passes the two views of one graph;
+// keeping them separate is what makes the oracle falsifiable, since a test can
+// hand the engine one graph and the reference another and observe that the check
+// speaks up — the only way to show this comparison is not a check that can never
+// fail. It mirrors the shape [eigenvectorDefaultViolations] and
+// [katzDefaultViolations] already have, where the fixture (reference input) and
+// the CSR (engine input) likewise arrive as two parameters.
+//
+// Because [pprMeasureViolations] derives that graph from the same salted seed as
+// [pprViolations], both regimes are judged on the identical graph for a given
+// tick, so a divergence in one but not the other isolates the epsilon rather
+// than the graph. The reference's damping is taken from the shipped options
+// rather than repeated as a literal, so the two can never drift apart.
+func pprDefaultRegimeViolations(tick int64, c *csr.CSR[float64], n int, edges [][2]int) []Violation {
+	const src = 0
+
+	opts := centrality.DefaultPPRPushOptions()
+	got, err := centrality.PersonalisedPushPageRank(c, graph.NodeID(src), opts)
+	if err != nil {
+		return centralityDiverge(tick, opPPRDefaults, fmt.Sprintf(
+			"PersonalisedPushPageRank under DefaultPPRPushOptions (damping %g, epsilon %g, max %d steps) returned an error on a well-formed graph: %v",
+			opts.Damping, opts.Epsilon, opts.MaxSteps, err))
+	}
+	want := pprReference(n, edges, opts.Damping, src)
+
+	for v := 0; v < n; v++ {
+		if v >= len(got) {
+			break
+		}
+		if math.Abs(got[v]-want[v]) > pprDefaultEps {
+			return []Violation{{
+				Kind: ViolationSearchDivergence, Tick: tick, Op: opPPRDefaults,
+				Message: fmt.Sprintf("ppr[%d] got %.9f want %.9f (n=%d, |diff|=%.3g exceeds %g)",
+					v, got[v], want[v], n, math.Abs(got[v]-want[v]), pprDefaultEps),
+			}}
+		}
+	}
+	return nil
 }
 
 // --- Comparison ----------------------------------------------------------------

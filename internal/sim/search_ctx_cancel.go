@@ -822,7 +822,9 @@ func newCtxFixtures(tick int64) (*ctxFixtures, func(), []Violation) {
 
 	// --- flow fixtures ------------------------------------------------------
 	f.flowN, f.flowEdges = flowGenNetwork(seed)
-	f.costN, f.costEdges = flowGenCostNetwork(seed)
+	// false: this cancellation harness keeps the all-positive cost flavour it
+	// has always used, so its draw stream and fixtures are unchanged.
+	f.costN, f.costEdges = flowGenCostNetwork(seed, false)
 	f.swN, f.swWeights = flowGenWeightMatrix(seed)
 
 	// --- extern: a real csrfile over dir ------------------------------------
