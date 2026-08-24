@@ -156,6 +156,14 @@ func TestReverseSingleEdge_Match_DeclinesUnreversibleShapes(t *testing.T) {
 		{"unlabelled-to", "MATCH (a:A)-[r:R]->(b) RETURN a,b"},
 		{"unlabelled-from", "MATCH (a)-[r:R]->(b:B) RETURN a,b"},
 		{"from-property", "MATCH (a:A {x:1})-[r:R]->(b:B) RETURN a,b"},
+		// An ANONYMOUS pattern head (rmp #2603). Its label is enforced by the
+		// NodeByLabelScan, which needs no variable name, so ir.matchNodeScan leaves
+		// the name empty — and the mirror re-checks that same label as a
+		// LabelPredicate, which can only reach the node THROUGH its name. Reversing
+		// such a site produced a predicate over the empty name: it resolved to no
+		// column, evaluated to NULL, and dropped every row.
+		{"anonymous-from", "MATCH (:A)-[r:R]->(b:B) RETURN b"},
+		{"anonymous-both", "MATCH (:A)-[r:R]->(:B) RETURN r"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

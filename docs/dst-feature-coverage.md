@@ -1870,12 +1870,17 @@ becomes admissible and the same query starts answering 0. That is the task's
 fail-silent thesis reached from the other side: not a wrong count store producing
 a bad plan, but a *correct* one unlocking a broken plan.
 
-It is a planner correctness defect in another package and fixing it changes plan
-choice for a whole query class, so it is reported rather than fixed here. The
-scenario's `Vip` and `Hub` shapes use named variables, and
-`TestCountStore_AnchorSwapDropsAnonymousSourceRows_KnownDefect` pins the measured
-behaviour with the A/B attribution attached. That test **fails, with a message
-saying so, the moment the defect is fixed**, so the pin cannot outlive it.
+**FIXED in rmp #2603.** The reversal moved the from-label off the access path
+(`NodeByLabelScan`, which enforces a label with no variable name) and onto a
+predicate above the re-rooted expand (which can only reach a node through its
+name) — and an anonymous pattern *head* has no name, since the IR translator names
+every non-head node with a synthetic `__anon_N` but leaves the head's empty.
+`matchAnchorSite` now declines any site with an empty endpoint name, so these
+patterns keep the written order. The scenario's `Vip` shapes are back to the
+anonymous spelling, and
+`TestCountStore_AnchorSwapRetainsAnonymousSourceRows` is the regression gate that
+replaced the pin: it asserts all four spellings answer 1 with the swap ENABLED
+(the shipped default) and with it disabled.
 
 #### What is not claimed
 
@@ -3534,11 +3539,12 @@ The coverage work exercised the engine against these scenarios and found:
     type and 40 extra `(:A)` nodes to that same fixture makes it return 0. The
     whole suite is green with the defect present — `go test -race ./cypher/` passes
     and the TCK gate reports 3897/3897, 0 failed, 0 undefined. Found by
-    `count-store` (rmp #2494) on its first run. **Reported, not fixed** — it is
-    a planner correctness defect whose fix changes plan choice for a whole query
-    class. PINNED, with the A/B attribution attached, by
-    `TestCountStore_AnchorSwapDropsAnonymousSourceRows_KnownDefect`, which fails
-    loudly the moment the defect is fixed.
+    `count-store` (rmp #2494) on its first run. **FIXED in rmp #2603**:
+    `matchAnchorSite` declines a site whose endpoint variable name is empty, which
+    is what an anonymous pattern head has, so the written order stands for these
+    patterns. Gated by
+    `TestCountStore_AnchorSwapRetainsAnonymousSourceRows` here and by
+    `cypher/anchor_swap_anonymous_test.go` in the planner's own package.
 14. **`count.Store.Snapshot`'s godoc contradicted its code** (documentation).
     It said it returns "every live cell (value > 0)"; the predicate has always
     been `v != 0`, and must be, because `Store.add` deliberately RETAINS a cell

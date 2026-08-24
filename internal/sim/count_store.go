@@ -153,11 +153,11 @@ package sim
 // `T` cell that serves it. That closes the loop the task cares about: the store
 // cell, the model, and the query answer must all be the same number.
 //
-// # The defect this scenario surfaced, and why the Vip shapes name their nodes
+// # The defect this scenario surfaced, and why the Vip shapes are anonymous
 //
-// The two `Vip` shapes use NAMED variables — `(a:Person)-[:KNOWS]->(b:Vip)`
-// rather than `(:Person)-[:KNOWS]->(:Vip)` — because the anonymous spelling
-// returns the WRONG ANSWER today, and the reason is the count store itself.
+// The two `Vip` shapes deliberately use ANONYMOUS pattern elements —
+// `(:Person)-[:KNOWS]->(:Vip)` — because that spelling once returned the WRONG
+// ANSWER, and the reason was the count store itself.
 //
 // MEASURED, with no store, no recovery and no simulator (a plain
 // [cypher.NewEngine] over one `(:Person)-[:KNOWS]->(:Person:Vip)` edge plus
@@ -168,42 +168,45 @@ package sim
 //	MATCH (a:Person)-[:KNOWS]->(:Vip)  RETURN count(*)  => 1
 //	MATCH (a:Person)-[:KNOWS]->(b:Vip) RETURN count(*)  => 1
 //
-// All four render the IDENTICAL plan under EXPLAIN
-// (`NodeByLabelScan [Vip] -> Expand -> Filter`), so the plan text cannot tell
-// them apart; PROFILE localises the loss exactly — the `Filter` above the
-// re-rooted `Expand` receives one row and emits zero. The discriminator is the
+// All four rendered the IDENTICAL plan under EXPLAIN
+// (`NodeByLabelScan [Vip] -> Expand -> Filter`), so the plan text could not tell
+// them apart; PROFILE localised the loss exactly — the `Filter` above the
+// re-rooted `Expand` received one row and emitted zero. The discriminator was the
 // SOURCE node's anonymity, not the destination's.
 //
-// Attributed by A/B: `EngineOptions{DisableAnchorSwap: true}` makes all four
-// return 1. The culprit is the single-edge anchor-swap peephole
-// (cypher/anchor_swap_plan.go, rmp #2090/#2150). `matchNodeScan`
-// (cypher/ir/match.go) leaves an anonymous node's variable name as the EMPTY
-// STRING, so `matchAnchorSite` records `fromVar == ""` and `mirrorAnchorSite`
-// re-checks the from-label as `Selection{LabelPredicate{Receiver:
-// Variable{Name: ""}}}` above the re-rooted expand — a receiver that does not
-// resolve to the expand's destination binding, so the re-check is unsatisfiable.
+// Attributed by A/B: `EngineOptions{DisableAnchorSwap: true}` made all four
+// return 1. The culprit was the single-edge anchor-swap peephole
+// (cypher/anchor_swap_plan.go, rmp #2090/#2150). The reversal moves the
+// from-label off the ACCESS PATH and onto a predicate: the written plan enforces
+// it in `NodeByLabelScan{fromVar, fromLabel}`, which needs no variable name,
+// while the mirror re-checks it as `Selection{LabelPredicate(fromVar, …)}` above
+// the re-rooted expand, which can only reach the node THROUGH its name. An
+// anonymous pattern HEAD has no name — `matchNodeScan` (cypher/ir/match.go)
+// leaves its `NodeVar` empty, while every non-head node is given a synthetic
+// `__anon_N` — so the mirror carried `LabelPredicate{Receiver: Variable{Name:
+// ""}}`, which resolved to no column, evaluated to NULL, and dropped every row.
 //
-// The count store is what makes it reachable. The swap is admitted only when
-// every cost input is `EstExact ∧ ¬dirty`, so while a relabel keeps the `Vip`
-// IN-families dirty the swap is VETOED and the anonymous spelling answers
-// correctly; the moment a reopen clears the dirty flags — this scenario's own
-// central claim — the swap becomes admissible and the same query starts
+// The count store is what made it reachable. The swap is admitted only when
+// every cost input is `EstExact ∧ ¬dirty`, so while a relabel kept the `Vip`
+// IN-families dirty the swap was VETOED and the anonymous spelling answered
+// correctly; the moment a reopen cleared the dirty flags — this scenario's own
+// central claim — the swap became admissible and the same query started
 // answering 0. That is the task's fail-silent thesis reached from the other
 // side: not a wrong count store producing a bad plan, but a CORRECT one
 // unlocking a broken plan.
 //
 // Why the swap's own suite missed it: MEASURED, cypher/anchor_swap_diff_test.go
-// and cypher/anchor_swap_symmetric_test.go hold 24 `MATCH` patterns between them
-// and the only anonymous labelled nodes in either file are in fixture-building
-// CREATE clauses. Every read probe those differential suites issue names both
+// and cypher/anchor_swap_symmetric_test.go held 24 `MATCH` patterns between them
+// and the only anonymous labelled nodes in either file were in fixture-building
+// CREATE clauses. Every read probe those differential suites issued named both
 // endpoints, so the spelling that breaks was never driven.
 //
-// It is a planner correctness defect in another package, and fixing it changes
-// plan choice for a whole query class, so it is reported rather than fixed here.
-// [TestCountStore_AnchorSwapDropsAnonymousSourceRows_KnownDefect] PINS the
-// measured behaviour with the A/B attribution attached, and fails loudly — with
-// a message saying so — the moment the defect is fixed, so the pin cannot
-// outlive it.
+// FIXED in rmp #2603: `matchAnchorSite` now declines any site whose endpoint
+// variable is empty, so an anonymous-head pattern keeps the written order. These
+// shapes therefore use the anonymous spelling, which is the genuinely different
+// plan shape the requirement names, and
+// [TestCountStore_AnchorSwapRetainsAnonymousSourceRows] is the regression gate
+// that replaced the defect pin.
 //
 // # What this scenario does NOT reach
 //
@@ -1173,15 +1176,17 @@ func csShapes() []csShape {
 		{name: "person-knows-person",
 			query:    "MATCH (:Person)-[:KNOWS]->(:Person) RETURN count(*)",
 			srcLabel: csLabelPerson, dstLabel: csLabelPerson},
-		// NAMED variables, deliberately: the anonymous spelling of a
-		// Vip-constrained shape returns the wrong answer whenever the anchor swap
-		// is admissible, which is exactly after a reopen clears the dirty flags.
+		// ANONYMOUS pattern elements, deliberately. This spelling used to return
+		// the wrong answer whenever the anchor swap was admissible — which is
+		// exactly after a reopen clears the dirty flags — and it is the spelling
+		// this scenario surfaced that defect with. rmp #2603 fixed it, so the
+		// shapes are back to the anonymous form and this scenario drives it again.
 		// See the defect section in this file's header.
 		{name: "vip-knows-person",
-			query:    "MATCH (a:Vip)-[:KNOWS]->(b:Person) RETURN count(*)",
+			query:    "MATCH (:Vip)-[:KNOWS]->(:Person) RETURN count(*)",
 			srcLabel: csLabelVip, dstLabel: csLabelPerson},
 		{name: "person-knows-vip",
-			query:    "MATCH (a:Person)-[:KNOWS]->(b:Vip) RETURN count(*)",
+			query:    "MATCH (:Person)-[:KNOWS]->(:Vip) RETURN count(*)",
 			srcLabel: csLabelPerson, dstLabel: csLabelVip},
 		// The two HUB shapes are the ones whose serving T cell is comparable while
 		// LIVE. Every other labelled shape's cell is dirty-covered for most of a

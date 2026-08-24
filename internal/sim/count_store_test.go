@@ -18,10 +18,12 @@ package sim
 //     heal test that only checked the "after" would pass against a store that
 //     was never broken, which is the whole failure mode this scenario exists to
 //     rule out.
-//   - [TestCountStore_AnchorSwapDropsAnonymousSourceRows_KnownDefect] pins a
-//     DEFECT this scenario surfaced, with its A/B attribution attached, and is
-//     written to fail loudly the moment the defect is fixed. It is a pin, not an
-//     endorsement.
+//   - [TestCountStore_AnchorSwapRetainsAnonymousSourceRows] is the regression gate
+//     for the DEFECT this scenario surfaced (rmp #2603): a single-edge pattern with
+//     an anonymous, labelled SOURCE lost every row once the anchor-swap peephole
+//     re-rooted it. It replaced the pin that held the wrong answer with its A/B
+//     attribution attached, and it asserts BOTH the swap-enabled default and the
+//     swap-disabled control.
 
 import (
 	"context"
@@ -581,41 +583,41 @@ func TestCountStore_CellsBoundFormula(t *testing.T) {
 // The defect this scenario surfaced
 // -----------------------------------------------------------------------------
 
-// TestCountStore_AnchorSwapDropsAnonymousSourceRows_KnownDefect PINS a wrong
-// answer, with its attribution attached. It is not an endorsement.
+// TestCountStore_AnchorSwapRetainsAnonymousSourceRows is the regression gate that
+// REPLACED the defect pin this scenario surfaced (rmp #2603).
 //
-// MEASURED: on a graph with one `(:Person)-[:KNOWS]->(:Person:Vip)` edge and
-// forty bare Persons — no store, no recovery, no simulator — a single-edge
-// pattern whose SOURCE node is ANONYMOUS and labelled returns ZERO rows once the
-// single-edge anchor-swap peephole re-roots it onto the destination. Naming the
-// source fixes it; naming the destination does not. All four spellings render
-// the identical EXPLAIN tree, so the plan text cannot tell them apart; PROFILE
-// localises the loss to the Filter above the re-rooted Expand, which receives
-// one row and emits none.
+// MEASURED, on a graph with one `(:Person)-[:KNOWS]->(:Person:Vip)` edge and forty
+// bare Persons — no store, no recovery, no simulator — a single-edge pattern whose
+// SOURCE node was ANONYMOUS and labelled returned ZERO rows once the single-edge
+// anchor-swap peephole re-rooted it onto the destination. Naming the source fixed
+// it; naming the destination did not. All four spellings rendered the identical
+// EXPLAIN tree, so the plan text could not tell them apart; PROFILE localised the
+// loss to the Filter above the re-rooted Expand, which received one row and emitted
+// none.
 //
-// The count store is what makes it reachable: the swap is admitted only when
-// every cost input is exact and non-dirty, so a dirty `Vip` IN-family vetoes it
-// and the anonymous spelling answers correctly — until a reopen clears the dirty
-// flags, which is this scenario's central claim.
-//
-// Which answer is wrong is settled by the openCypher TCK, not by inspection:
+// Which answer is wrong was settled by the openCypher TCK, not by inspection:
 // cypher/tck/features/clauses/match/Match2.feature scenario [2] "Matching a
 // relationship pattern using a label predicate on both sides" runs
 // `MATCH (:A)-[r]->(:B) RETURN r` and requires one row, so the anonymous-both-
-// sides spelling must return the matching rows — the 0 is wrong. That scenario
+// sides spelling must return the matching rows — the 0 was wrong. That scenario
 // cannot catch this defect for two independent reasons, each sufficient: its
 // relationship is UNTYPED (`[r]`) and `matchAnchorSite` requires exactly one
 // relationship type, and its graph is BALANCED (2 :A, 2 :B) so the 2x cost margin
 // is unreachable. MEASURED: give that same fixture a relationship type and 40
-// extra `(:A)` nodes and `MATCH (:A)-[r:T1]->(:B) RETURN count(r)` returns 0.
+// extra `(:A)` nodes and `MATCH (:A)-[r:T1]->(:B) RETURN count(r)` returned 0.
 //
-// The second half of the test is the attribution:
-// `EngineOptions{DisableAnchorSwap: true}` makes all four spellings correct.
+// The fix (rmp #2603) makes `matchAnchorSite` decline any site whose endpoint
+// variable name is empty, which is what an anonymous pattern head has, so the
+// written order stands for these patterns.
 //
-// This test FAILS, with a message saying so, the moment the defect is fixed. That
-// is deliberate: a pin that outlived its defect would be a test asserting the
-// wrong answer.
-func TestCountStore_AnchorSwapDropsAnonymousSourceRows_KnownDefect(t *testing.T) {
+// The gate asserts BOTH halves, because either alone is weak:
+//
+//   - with the swap ENABLED all four spellings must answer 1 — that is the
+//     correctness claim, and it FAILED (0 for the two anonymous-source spellings)
+//     before the fix;
+//   - with the swap DISABLED all four must also answer 1 — the control that
+//     establishes the true answer independently of the peephole.
+func TestCountStore_AnchorSwapRetainsAnonymousSourceRows(t *testing.T) {
 	build := func(disableSwap bool) *EngineAdapter {
 		t.Helper()
 		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
@@ -636,7 +638,8 @@ func TestCountStore_AnchorSwapDropsAnonymousSourceRows_KnownDefect(t *testing.T)
 		}
 		write("CREATE (:Person)-[:KNOWS]->(:Person:Vip)")
 		// Enough bare Persons that N(Person) dwarfs N(Vip) and the cost model
-		// prefers the Vip anchor by more than the 2x margin.
+		// prefers the Vip anchor by more than the 2x margin. Without this skew the
+		// peephole is never admitted and the gate below cannot fail.
 		for i := 0; i < 40; i++ {
 			write("CREATE (:Person)")
 		}
@@ -648,12 +651,13 @@ func TestCountStore_AnchorSwapDropsAnonymousSourceRows_KnownDefect(t *testing.T)
 		namedSrcAnonDst  = "MATCH (a:Person)-[:KNOWS]->(:Vip) RETURN count(*)"
 		namedSrcNamedDst = "MATCH (a:Person)-[:KNOWS]->(b:Vip) RETURN count(*)"
 	)
+	all := []string{anonSrcAnonDst, anonSrcNamedDst, namedSrcAnonDst, namedSrcNamedDst}
 	ctx := context.Background()
 
-	// With the swap DISABLED every spelling is correct. This is the control: it
-	// establishes both the true answer and the attribution.
+	// The control: with the swap DISABLED every spelling is correct. This
+	// establishes the true answer independently of the peephole.
 	off := build(true)
-	for _, q := range []string{anonSrcAnonDst, anonSrcNamedDst, namedSrcAnonDst, namedSrcNamedDst} {
+	for _, q := range all {
 		got, err := csScalar(ctx, off, q)
 		if err != nil {
 			t.Fatalf("%s: %v", q, err)
@@ -664,35 +668,21 @@ func TestCountStore_AnchorSwapDropsAnonymousSourceRows_KnownDefect(t *testing.T)
 		}
 	}
 
+	// The gate: with the swap ENABLED (the shipped default) every spelling must
+	// still be correct. The two ANONYMOUS-SOURCE spellings are the ones that
+	// returned 0 before rmp #2603.
 	on := build(false)
-	// The named-source spellings stay correct with the swap enabled.
-	for _, q := range []string{namedSrcAnonDst, namedSrcNamedDst} {
+	for _, q := range all {
 		got, err := csScalar(ctx, on, q)
 		if err != nil {
 			t.Fatalf("%s: %v", q, err)
 		}
 		if got != 1 {
-			t.Fatalf("%s returned %d with the anchor swap enabled, want 1. The defect was believed to "+
-				"be specific to an ANONYMOUS source; it is wider than that and this pin must be "+
-				"rewritten", q, got)
+			t.Fatalf("%s returned %d with the anchor swap ENABLED (the shipped default), want 1. "+
+				"rmp #2603: re-rooting a single-edge pattern re-checks the from-label through a "+
+				"variable name, and an anonymous pattern head has none, so the mirror's predicate "+
+				"resolves to no column and drops every row. matchAnchorSite must decline any site "+
+				"with an empty endpoint name", q, got)
 		}
-	}
-	// The anonymous-source spellings are the defect.
-	for _, q := range []string{anonSrcAnonDst, anonSrcNamedDst} {
-		got, err := csScalar(ctx, on, q)
-		if err != nil {
-			t.Fatalf("%s: %v", q, err)
-		}
-		if got == 1 {
-			t.Fatalf("%s now returns the CORRECT answer 1 with the anchor swap enabled. The pinned "+
-				"defect appears to be FIXED — delete this pin, invert it into a regression gate "+
-				"asserting 1, and make the count-store scenario's Vip shapes use the anonymous "+
-				"spelling again (csShapes in count_store.go)", q)
-		}
-		if got != 0 {
-			t.Fatalf("%s returned %d; the pinned behaviour is 0. The defect has CHANGED rather than "+
-				"been fixed, so this pin no longer describes it", q, got)
-		}
-		t.Logf("PINNED DEFECT: %s returns %d (want 1); DisableAnchorSwap=true returns 1", q, got)
 	}
 }
