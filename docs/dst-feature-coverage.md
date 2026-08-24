@@ -757,6 +757,164 @@ method that wraps it. Those counters are what the #2457/#2464 checkpoint gates
 assert on, and an arm that ran unconditionally and incremented them would satisfy
 those gates by itself and silence exactly the defect they were written to catch.
 
+### The label index's scoped and range surface, and what its CRC can reach (rmp #2496)
+
+`graph/index/label/index.go` is 514 lines and all of it is public. The parts lpg
+drives — `Add`, `Remove`, `Count`, `Has`, `Intersect`, `IntersectCardinality` —
+are exercised by every DST run that touches a label. The rest was carried by its
+godoc alone. VERIFIED by an `os.walk`+`re` sweep of every production
+(non-`_test.go`) file in the tree (not by `grep`, which on the reference host
+can return a silent empty result — an empty match is not evidence of absence):
+`NewNodeIndex`, `NewEdgeIndex` and `Scope` have **no production caller**, and
+`AddRange`, `RemoveRange`, `Scan`, `Union`, `Serialize` and `Deserialize` have
+**no non-test caller anywhere**.
+
+**The constructor rationale, established rather than assumed.** The task asked
+why lpg builds both its indexes with the unscoped `NewIndex()`, and the answer
+is sharper than "the scope does not matter here". `Scope` is read in exactly one
+place, inside `Index.Apply`; `Apply` runs only through the `index.Manager`
+fan-out (`graph/index/manager.go:254` and `:266`); and no `label.Index` is ever
+registered with a manager. `Manager.CreateIndex` (`manager.go:166`) is the sole
+writer of the subscriber registry, and every one of its twelve production call
+sites — `cypher/index_binding.go:711,714,731,734,788,890,900`,
+`cypher/api.go:1728,3273,3289`, `cypher/exec/create_index.go:107`,
+`cypher/exec/create_constraint.go:125` — registers a `hash` or `btree` index.
+Only three production packages import `graph/index/label` at all (`cypher`,
+`cypher/exec`, `graph/lpg`, VERIFIED through `go list`), and two of them only
+read an index lpg owns. A second, structural check agrees without reading a
+single return type: only **four** production files name the package —
+`graph/lpg/lpg.go`, which constructs both indexes, `cypher/exec/scan_label.go`
+and `cypher/stats_estimate.go`, which take one as a read source, and
+`cypher/api.go`, whose two mentions are doc comments — and not one of the twelve
+`CreateIndex` call sites is in any of them. So `NewIndex()` is correct for both
+because the field the other constructors set is never read on a directly-driven
+index.
+
+The sharper half is that `NewEdgeIndex()` would not merely be inert — it would
+be **wrong** if it ever took effect. `index.OpAddEdgeLabel` **is** constructed
+in production (`cypher/api.go:17890` and `:18804`) and **is** delivered
+(`exec.IndexBuffer.Commit` calls `Manager.ApplyBatch` at
+`cypher/exec/index_writeback.go:45`); it is simply discarded by every registered
+subscriber, since `hash` and `btree` handle only the four node ops. Its partner
+`index.OpRemoveEdgeLabel` is constructed **nowhere** — all four production
+mentions are the enum declaration, the `IsEdgeChange` switch, one doc comment
+and the `Apply` case that consumes it. A registered `ScopeEdge` label index
+would therefore take every edge-label addition and never one removal,
+accumulating stale postings for as long as the process ran. That is now recorded
+in the `graph/index/label` package documentation, on `NewEdgeIndex` and on
+`Scope`.
+
+**Overlap and adjacency are CONSTRUCTED, not drawn.** The inclusive-to-exclusive
+`+1` conversions at `graph/index/nodeset.go:339` and `:378` are where an
+off-by-one would live, and a drawn pair of endpoints reaches an exact adjacency
+(`[a,b]` then `[b+1,c]`) only by luck. Thirteen relationships — disjoint,
+adjacent on each side, partial overlap on each side, contained, containing,
+identical, single-element inside and outside, inverted, and the off-by-one empty
+range — are swept in BOTH directions, twenty-six cells per epoch, in a
+seed-shuffled order, each cell driven twice: once on a fresh label carrying only
+the base band (so a mismatch is attributable to the relationship) and once on a
+label from a small reused pool that already holds a long history. The seed
+decides the order and the band; it never decides the coverage, and a gate names
+any cell that went undriven. `TestLabelIndexScoped_RelBoundsMatchTheirNames`
+asserts each relationship really has the geometry its name claims, because a
+mislabelled "adjacent" that quietly overlapped would delete the coverage while
+every clause still passed.
+
+**The model is naive, independent, and itself tested.** A plain
+`map[uint32]map[uint64]bool` recomputed from the op stream, whose range methods
+walk the closed interval one id at a time. It knows nothing about roaring and
+nothing about `NodeSet`'s tier machine, and it never asks the index what the
+answer should be. It deliberately does **not** model when the index deletes a
+label's map entry: that would be a second copy of `nodeset.go` agreeing with the
+original by construction. The one entry-population clause is therefore tier-free
+and one-sided — the image must declare at least as many labels as the model says
+carry a member — and the excess is reported as a measured number.
+`TestLabelIndexScoped_ModelIsIndependent` pins the model's own answers on
+hand-computed adjacency, overlap and inverted cases, because an unchecked oracle
+is an assumption with extra steps.
+
+**What the corruption arm can and cannot reach.** The serialized form ends in a
+CRC32C over every preceding byte, so a raw single-byte flip is caught by the
+checksum wherever it lands — MEASURED across all seven layout regions in the
+short layer, and under soak across **every one of the 143 byte offsets** of a
+small image, all 143 answered by the CRC and every one leaving a populated
+receiver byte-for-byte unchanged. That is the whole detectable population for a
+bad sector, and it means the four structural guards inside `Deserialize` are
+**unreachable by corruption alone**. To reach them the image must be damaged
+*and* its trailer recomputed, so a second family does exactly that and requires
+each trial to reach its NAMED guard: bad magic, unsupported version, implausible
+bitmap length, bitmap parse, and the truncated-entry read a too-high
+`labelCount` produces. A third family reads the image short, which reaches a
+different branch again — below four bytes the reader answers "short payload"
+before any CRC arithmetic. Guards are classified by WHOLE distinctive phrases
+rather than single words, because "bitmap" appears in two of them, and a message
+matching two needles comes back unclassified rather than approximated
+(`TestLabelIndexScoped_GuardClassifierIsExact`).
+
+The re-stamped family also records where the format has no redundancy: a
+re-stamped `labelCount` of **0** is ACCEPTED and yields an empty index, and the
+body's remaining bytes are never examined. That is not a defect against CRC32C's
+contract — an error-detecting code is not a MAC, and an adversary who can
+recompute the trailer is outside its threat model — but it does mean nothing
+ties `labelCount` to the payload length, and a structural "the body was fully
+consumed" check would cost nothing and does not exist.
+
+**Two clauses are TRIPWIRES on their production path, and say so rather than
+posing as detectors.** `corrupt-restore` cannot fire against the current
+`Deserialize`: it reads the whole payload, validates the trailer, parses into a
+FRESH map and only then takes the write lock and swaps, so every error path
+returns before the receiver is touched — untouched by construction, not by good
+behaviour. It is kept because the swap is exactly what a plausible optimisation
+would remove (parsing straight into the live map to save an allocation), which
+would leave a refused image half-applied; its logic is proved fireable by a
+perturbation. And `corrupt-refusal` on the raw family does not detect a CRC
+collision — CRC32C detects every single-byte error — it detects the CRC CHECK
+being weakened, reordered after the parse, or removed. Both are real regressions
+worth catching; neither is the thing the clause name suggests, and a clause that
+looks like a detector and cannot fail is worse than no clause.
+
+**An over-strong assertion of the harness's own, corrected before it shipped.**
+The tier arm's first draft compared an `Add`-built index with an
+`AddRange`-built one and required byte-identity. It FAILED at widths 4 and
+above, and the failure was the harness's fault: `Serialize`'s godoc promises the
+form is deterministic "for a given in-memory state", never that it is a function
+of the logical contents. What the module actually claims
+(`graph/index/label/index.go:407-415`) is that the INLINE tier serializes like a
+bitmap holding the same ids — the claim that made #1585 a zero-migration change
+— and that HOLDS, verified at six widths with the bitmap side reached by
+growth-then-trim (individual `Add`s past `smallSetMax`, then `Remove`s back
+down, exploiting the documented one-way promotion). The `Add`-versus-`AddRange`
+difference is kept as a MEASUREMENT with no clause on it, because the
+consequence is easy to assume away and is real: two indexes that answer every
+query identically can have different images, so byte-comparing two snapshots is
+not a valid way to ask whether two graphs carry the same labels.
+
+The same mistake nearly reached the round-trip clause, and finding it is what
+produced defect #17 above. `image == round-tripped image` is FALSE for a
+run-encoded label of 4 to 8 ids, and the sweep can reach exactly that shape — an
+`AddRange` followed by a `RemoveRange` that trims the label to a handful — so
+the clause would have passed on the catalogue seed and flaked on another. What
+is asserted instead is that the form is a **fixpoint after at most one cycle**,
+which is true at every width probed; whether the FIRST cycle was stable is
+recorded as a number, and the instability is pinned separately with a control
+one id above the threshold.
+
+**Coverage this adds.** Thirteen relationships x two directions x two label
+shapes adjudicated against the model on `Scan`, `Count` and `Has` after every
+operation (2 496 range operations and 1 875 comparisons at the catalogue seed,
+41 600 and 31 203 under the long soak arm); `Union` against a per-label naive
+union across multi-label, unknown-label, duplicate-label and empty subsets, all
+four gated as reached; the serialized form round-tripped twice and compared
+against the model at both, its emission proved deterministic, and its
+tier-independence claim verified at six widths; three damage families on a
+`SimDisk`; the three constructors' scopes and the twelve-row `Apply` routing
+table that is the only place a scope is observable; and three latent defects
+pinned to their measured behaviour. Twenty-five perturbations each fire their
+named clause with the unperturbed control silent, and every one of the fifteen
+non-vacuity gates is proved fireable by a knockout — including four that no
+configuration knob can reach, which would otherwise have been gates nobody had
+shown could fail.
+
 ### Conjunctive index intersection and its budgeted gate (rmp #2490)
 
 The planner composes two single-property indexes on the same label into one
@@ -3694,6 +3852,62 @@ The coverage work exercised the engine against these scenarios and found:
     leaves `T(X, KNOWS, X)` at -1. A consumer trusting the doc would assume every
     present value is positive. **Fixed** in this task: the doc now states the
     real predicate and why negative cells exist.
+
+15. **`AddRange`/`RemoveRange` silently drop the WHOLE range when it ends at
+    `math.MaxUint64`** (fail-silent, latent). `index.NodeSet.AddRange` converts
+    the inclusive upper endpoint to roaring's exclusive one with `to+1`
+    (`graph/index/nodeset.go:339`), and `RemoveRange` does the same in its
+    **bitmap branch** (`:378`). At `to == math.MaxUint64` that wraps to zero and
+    roaring treats `start >= end` as a no-op. The loss is total, not off-by-one:
+    MEASURED, `AddRange(max-5, max)` yields cardinality **0** where the closed
+    interval names 6, and `RemoveRange(max-3, max)` over a five-element
+    **bitmap-tier** set removes **nothing**. The control one id lower is exact
+    (`AddRange(max-5, max-1)` yields 5), so the loss is attributable to the final
+    id and not to the top of the id space. **The two tiers disagree, and only for
+    `RemoveRange`**: its singleton and small branches filter on the closed
+    interval directly (`v < from || v > to`, `nodeset.go:349-370`) with no `+1`
+    and so no wrap, and MEASURED the identical call over a five-element
+    **inline-tier** set leaves 1 — correct. The same logical operation on the
+    same membership therefore answers differently depending on a tier the public
+    surface does not expose. `AddRange` has no such split, promoting before it
+    reads the interval, so it is uniformly wrong at the boundary.
+    **Latent**: neither range method has a production caller, and
+    no graph in this module mints a NodeID there. Reported rather than fixed —
+    the repair is a design choice (split the call, saturate, or refuse) that
+    changes behaviour at the boundary. Pinned to the measured behaviour by
+    `label-index-scoped`'s `boundary-pin`, which fires the day it changes.
+16. **An inverted or empty `AddRange` creates a permanent, serialized entry for a
+    label with nothing in it** (unbounded growth, latent).
+    `label.Index.AddRange` stores the `NodeSet` back unconditionally
+    (`graph/index/label/index.go:151-153`) and `NodeSet.AddRange` promotes to the
+    bitmap tier BEFORE it looks at the interval (`nodeset.go:326-339`), so an
+    interval naming no ids still leaves a bitmap behind. The entry is invisible
+    to every query path — `Count` 0, `Scan` nil, `Has` false — and permanent.
+    MEASURED: 1 000 inverted `AddRange` calls on distinct labels turn a 16-byte
+    empty image into a **20 016-byte** one declaring 1 000 labels, 20 bytes
+    apiece, none carrying an id. `RemoveRange`'s own godoc promises the opposite
+    for its direction ("Empty bitmaps are deleted so the map does not grow
+    unboundedly") and MEASURED keeps that promise; `AddRange` makes no such claim
+    and does not behave that way. **Latent** for the same reason as #15. Reported
+    rather than fixed; pinned by `label-index-scoped`'s `phantom-pin`.
+17. **The serialized label index is not idempotent for a run-encoded label small
+    enough to be down-converted** (encoding instability, latent). A label built
+    by `AddRange` holds a roaring RUN container; if its cardinality is at most
+    `smallSetMax` (8), `index.NodeSetFromBitmap` moves it to the inline tier when
+    the image is read back, and the inline tier re-materialises through `AddMany`
+    as an ARRAY container. So the image the reader emits is not the image it was
+    handed. MEASURED, the window is exactly **[4, 8]**: at widths 1-3 roaring
+    keeps an array container and nothing changes; at 4-8 the image goes 55 bytes
+    in, 64/66/68/70/72 out; at 9 and above the down-convert does not run and 55
+    bytes come back unchanged. Every Add-built label is stable at every width, so
+    the instability is attributable to the run encoding. It converges after
+    exactly one cycle, and no content is ever lost — but a checkpoint, reload and
+    re-checkpoint produces different bytes for the same logical state, which is
+    what a fixture diff, a content-addressed store, or an incremental backup's
+    deduplication relies on not happening. **Latent**: `AddRange` has no
+    production caller, so no production label is ever a run container. Reported
+    rather than fixed; pinned by `label-index-scoped`'s `dense-small-pin`, with
+    the exact window swept under soak.
 
 ## Documented debt / out of scope
 

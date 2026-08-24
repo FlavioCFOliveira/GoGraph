@@ -184,6 +184,7 @@ func DefaultRegistry() (*Registry, error) {
 		typedSchemaScenario(),
 		countStoreScenario(),
 		pageRankRankerScenario(),
+		labelIndexScopedScenario(),
 	)
 }
 
