@@ -28,6 +28,7 @@ func TestDefaultRegistry_ListsAllScenarios(t *testing.T) {
 		ScenarioGenerationSwap,
 		ScenarioFluentQuery,
 		ScenarioTypedSchema,
+		ScenarioCountStore,
 	}
 	if r.Len() != len(want) {
 		t.Fatalf("registry has %d scenarios, want %d: %v", r.Len(), len(want), r.Names())

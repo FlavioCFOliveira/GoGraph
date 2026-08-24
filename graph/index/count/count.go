@@ -462,9 +462,23 @@ type Snapshot struct {
 	DirtyTB   []uint32
 }
 
-// Snapshot returns a copy of every live cell (value > 0) and every dirty marking.
-// It is a read taken under the shard and dirty read locks, so it is safe to call
-// concurrently with writers, which are NOT serialised against each other.
+// Snapshot returns a copy of every cell whose counter is currently NON-ZERO, and
+// every dirty marking. It is a read taken under the shard and dirty read locks,
+// so it is safe to call concurrently with writers, which are NOT serialised
+// against each other.
+//
+// NEGATIVE cells are included. This doc used to say "every live cell (value > 0)",
+// which the code has never done: the predicate is `v != 0`, and it must be, because
+// [Store.add] deliberately RETAINS a cell driven negative rather than clamping it —
+// that retention is what makes the aggregate order-insensitive (rmp #2303). A
+// negative cell is reachable from ordinary Cypher, not only from concurrent
+// writers: MEASURED, `SET a:X` then `SET b:X` then `REMOVE a:X` over an edge
+// `a -> b` leaves T(X, rel, X) at -1, because the +1 was never applied (b had no
+// out-edge, so the relabel's OUT recount returned early) while the -1 was, b having
+// acquired X by then. Such a cell is always covered by the [DirtyMark] the same
+// relabel raised, so it is non-exact rather than wrong; a consumer that treats an
+// absent key as zero and assumes every present value is positive will nonetheless
+// mis-read it.
 func (s *Store) Snapshot() Snapshot {
 	snap := Snapshot{
 		E:    make(map[uint32]int64),

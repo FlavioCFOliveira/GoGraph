@@ -61,6 +61,38 @@ func (e *Engine) CountStoreCells() int {
 	return e.countStore.Cells()
 }
 
+// CountSnapshot returns a point-in-time copy of the relationship count store's
+// live cells and dirty markings, for observability and differential testing. It
+// returns the zero Snapshot when the engine holds no count store.
+//
+// The returned maps are freshly allocated and owned by the caller. Their keys are
+// the graph's interned label and relationship-type ids
+// ([github.com/FlavioCFOliveira/GoGraph/graph/lpg.LabelRegistry]), so a caller
+// that wants names resolves them through that registry — and must do so against
+// the SAME graph generation, since ids are assigned in intern order and a graph
+// rebuilt by recovery re-interns from scratch. The four dirty slices list the
+// label ids each family currently holds as non-exact, in unspecified order; a
+// dirty cell's value is a lower bound, not an exact count (design
+// docs/count-store-design.md §3.3.1).
+//
+// Only cells the store currently holds appear: a cell is deleted the moment its
+// counter returns to zero, so an absent key means zero rather than unknown.
+//
+// It is an observability accessor deliberately narrower than the store handle:
+// exposing [github.com/FlavioCFOliveira/GoGraph/graph/index/count.Store] itself
+// would hand callers Apply, MarkDirty and RecomputeReset over the engine's own
+// derived state.
+//
+// CountSnapshot is safe for concurrent use — it reads the store under its own
+// shard and dirty read locks, so it may be called alongside writers, which are
+// NOT serialised against each other.
+func (e *Engine) CountSnapshot() count.Snapshot {
+	if e.countStore == nil {
+		return count.Snapshot{}
+	}
+	return e.countStore.Snapshot()
+}
+
 // recordCountCommit emits the delta.applied counter for one commit fan-out. It is
 // a no-op when no store is active or the buffer applied no delta, so a write that
 // touched no count cell — and the store-less engine — pay nothing. It must be

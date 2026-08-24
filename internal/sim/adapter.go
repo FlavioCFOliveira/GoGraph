@@ -8,6 +8,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph/index/count"
 )
 
 // EngineAdapter wraps the real [github.com/FlavioCFOliveira/GoGraph/cypher.Engine]
@@ -93,6 +94,25 @@ func (a *EngineAdapter) Profile(ctx context.Context, query string, params map[st
 // published statistics.
 func (a *EngineAdapter) StatsTrackedPairs() int {
 	return a.eng.StatsTrackedPairs()
+}
+
+// CountSnapshot returns a point-in-time copy of the wrapped engine's
+// relationship count-store cells and dirty markings
+// ([cypher.Engine.CountSnapshot]). The count-store oracle (rmp #2494) reads it as
+// the observed side of its cell-by-cell parity check; the keys are the interned
+// label/relationship-type ids of the graph THIS engine holds, so a caller must
+// resolve them through that same graph's registry — a recovered engine re-interns
+// from scratch and its ids are unrelated to the crashed one's.
+func (a *EngineAdapter) CountSnapshot() count.Snapshot {
+	return a.eng.CountSnapshot()
+}
+
+// CountStoreCells reports how many distinct live count-store cells the wrapped
+// engine holds ([cypher.Engine.CountStoreCells]). The count-store oracle reads it
+// as the footprint the boundedness clause bounds by observed schema cardinality
+// rather than by |V| or |E|.
+func (a *EngineAdapter) CountStoreCells() int {
+	return a.eng.CountStoreCells()
 }
 
 // NodeCount returns the live node count by running a whole-graph count query

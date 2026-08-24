@@ -216,6 +216,10 @@ func (o *GraphOracle) ApplyCreate(cypher string, params map[string]any) OracleRe
 	switch cypher {
 	case tmplCreatePerson, tmplCreatePersonCity, tmplCreatePersonNoAge:
 		return o.recordOp(cypher, params, o.createPerson(params))
+	case tmplCreatePersonHub:
+		// A Person that additionally carries the never-churned Hub label, whose
+		// count-store IN-side families therefore stay EXACT (rmp #2494).
+		return o.recordOp(cypher, params, o.createPersonHub(params))
 	case tmplCreateKnows:
 		return o.recordOp(cypher, params, o.createKnows(params))
 	case tmplCreateFollows:
@@ -485,6 +489,10 @@ func (o *GraphOracle) ApplyMatch(cypher string, params map[string]any) OracleRes
 	// node's labels/properties; the helper reports whether it recognised the
 	// template so a plain read falls through to the no-op case below.
 	if res, ok := o.applySchemaMutation(cypher, params); ok {
+		return o.recordOp(cypher, params, res)
+	}
+	// The count-store scenario's two churn-free label templates (rmp #2494).
+	if res, ok := o.applyCountStoreRelabel(cypher, params); ok {
 		return o.recordOp(cypher, params, res)
 	}
 	// Every other MATCH the workload emits is a pure read with no side effects.

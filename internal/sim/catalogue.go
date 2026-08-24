@@ -182,6 +182,7 @@ func DefaultRegistry() (*Registry, error) {
 		generationSwapScenario(),
 		fluentQueryScenario(),
 		typedSchemaScenario(),
+		countStoreScenario(),
 	)
 }
 

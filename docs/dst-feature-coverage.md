@@ -1668,6 +1668,242 @@ second registration of one key under a different kind, which returns
 `ErrTypeMismatch` at DECLARATION time) is a schema-construction error rather than
 a write-path verdict, and is left to `graph/lpg/schema`'s own tests.
 
+## Planner-statistics coverage
+
+### The derived count-store, and the reopen that heals it (rmp #2494)
+
+The relationship count-store (`graph/index/count`) is the planner's exact
+cardinality source: `E(relType)`, `D(label, relType, dir)` and
+`T(labelA, relType, labelB)`. Before this task the DST never looked at it.
+
+- **`count.Store.Snapshot` had no production caller.** It exists "for
+  observability and differential testing" and only the count package's own tests
+  ever called it, so nothing outside `cypher` could read a cell.
+- **No `CountE` / `CountT` / `TDirty` query shape was in the repertoire.** Every
+  count the sim issued named a bound variable (`count(n)`, `count(r)`), which the
+  planner does not serve from this store.
+- **So the reopen-time recompute was never asserted.** It *runs* on every
+  recovery already — `OpenSimStore` builds a fresh `cypher.Engine` per reopen and
+  `NewEngineWithOptions` calls `recomputeCountStore` at construction — but nothing
+  compared its result to anything.
+
+This is the fail-silent class the DST exists for. A wrong count store raises no
+error and fails no test: it yields a *plausible-but-wrong plan*. The rows are
+still correct, just reached by the wrong access path, so the whole suite stays
+green.
+
+The gap was invisible for the ordinary reason. `cypher` has good in-package
+coverage — `count_maintenance_test.go`'s `diffCounts` against an O(V+E) recount,
+`count_rapid_test.go`'s rapid property test and its same-seed determinism gate —
+but all of it runs on hand-built graphs inside the package with no crash
+injection, no WAL, no snapshot and no reopen. Its recount oracle compares the
+store with the **graph**, which is exactly what `recomputeCountStore` itself
+does, so it structurally cannot witness the recompute.
+
+**One accessor was added.** `cypher.Engine.CountSnapshot() count.Snapshot`
+returns a copy of the cells and dirty markings. It deliberately does not return
+the `*count.Store`: a store handle would hand every caller `Apply`, `MarkDirty`
+and `RecomputeReset` over the engine's own derived state. `Engine.CountStoreCells`
+already existed but is a size indicator, and `lpgLabelResolver.Counts()` sits on
+an unexported type.
+
+**The model is the shadow model, keyed by name.** `GraphOracle.countStoreModel`
+recomputes E/D/T from the oracle's own node and edge maps — the op stream alone.
+A model that recounted the *graph* would be a second copy of
+`recomputeCountStore` and would agree with it by construction on exactly the
+reopen this scenario checks. The store's keys are interned ids, so whether they
+survive a reopen is an empirical question: MEASURED, they did — a pre-crash
+registry of `0=Person 1=KNOWS 2=Vip 3=Gold` came back identical after a WAL-only
+replay *and* after a snapshot+WAL reopen, and `Vip` kept id 2 in a run where no
+live node carried it any more. Nothing documents that, so the model keys by NAME
+and resolves through the recovered graph's own registry at comparison time.
+
+**A dirty cell is not a wrong cell, and a `DETACH DELETE` makes one.**
+`countRelabel` cannot enumerate a node's in-edges in O(delta), so a relabel marks
+`D(X,*,IN)` and `T(*,*,X)` non-exact instead of writing a wrong exact (design
+§3.3.1). What was not obvious is how easily that is reached: MEASURED, one
+`DETACH DELETE` of a `Person` at tick 5 of a run left `DIn:[Person Vip]
+TB:[Person Vip]`, and **the dirty sets only ever grow until the next
+`RecomputeReset`**. So on any graph that has ever deleted a labelled node, the
+planner's IN-side degree and triple statistics for that label are vetoed for the
+rest of the session. That is what makes the reopen's heal consequential rather
+than cosmetic — and it is why the scenario carries a never-relabelled,
+never-deleted `Hub` label: without it the live `DIn` and `T` clauses would have
+compared two empty maps. The `ComparedLive` / `ComparedRecovered` counters, and
+the gate on them, are what turn that from an intention into an assertion.
+
+**A negative cell is legitimate, and it is constructed on purpose.** `Store.add`
+retains a cell driven negative rather than clamping it, because that is what makes
+the aggregate order-insensitive (rmp #2303). MEASURED, that is reachable from
+plain Cypher with no concurrency: with `a -> b` and both nodes plain Persons,
+`SET a:X`, `SET b:X`, `REMOVE a:X` leaves `T(X, KNOWS, X)` at **-1** — the `+1`
+was never applied (b has no out-edge, so the relabel's OUT recount returns early
+and the IN side is covered by the `TB(X)` marking) while the `-1` did land,
+because by then b carried X and the OUT recount reads the endpoint's *current*
+labels. The scenario builds exactly that, under a label (`Neg`) it owns
+exclusively so the cell cannot be cancelled by unrelated churn, and asserts two
+things about it: the negative must be dirty-**covered** (an uncovered negative is
+a lost decrement offered to the planner as exact) and it must be **gone** after
+the reopen.
+
+This also corrected a documentation defect. `Store.Snapshot`'s godoc said it
+returns "every live cell (value > 0)"; the code has always used `v != 0`, and
+must, for the reason above. The doc is now accurate and says why.
+
+**The sharpest claim: the reopen heals.** The recovered phase skips *nothing* and
+requires all four dirty sets empty. MEASURED on the constructed fixture:
+pre-recovery `dirty{DIn:[Neg] TB:[Neg]}`, `negatives=[T[Neg,KNOWS,Neg]=-1]` and two
+cells the dirty markings excused where ground truth says non-zero; post-recovery
+`dirty{}` with 11 cells, `DIn[Neg,KNOWS]=1`, `T[Person,KNOWS,Neg]=1` and no
+negative cell at all. The
+non-vacuity gate is built on the *transition*: `HealedFromDirty` and
+`HealedNegative` are credited only when the immediately preceding live
+observation was itself dirty (respectively held a negative cell), and the fixture
+is re-armed after every recovery — MEASURED before re-arming was added, a
+1500-tick soak run had 19 recoveries and healed exactly **one** negative cell;
+with the re-arm the same run reports 19 and 19, and all 152 of its live
+observations hold a negative cell to classify.
+
+**The query shapes.** `MATCH ()-[:KNOWS]->() RETURN count(*)` (the `E` shape) and
+`MATCH (:Person)-[:KNOWS]->(:Person) RETURN count(*)` (the `T` shape) are added to
+the shared surface battery, with references from
+`GraphOracle.knowsPatternCount`, a derivation that consults both endpoints'
+labels rather than counting edge-map keys like `knowsCount`. One honest
+limitation: in a population where every node carries `Person` the two references
+are the same number, so the labelled clause cannot fail where the unlabelled one
+passes — what it adds there is the plan shape, not a second oracle. The
+count-store scenario therefore probes four more shapes whose references genuinely
+differ (`Vip`- and `Hub`-constrained), and each is checked **three ways**: the
+query rows, the model, and the count-store `T` cell that serves it.
+
+**`Cells()` boundedness** is asserted in soak, where |E| has grown far enough for
+the claim to be distinguishable from "both numbers are small". MEASURED on a
+1500-tick run: `Cells()` peaked at 20 against a combinatorial ceiling of 25 for a
+four-label, one-type vocabulary, while the modelled edge count reached 227 — a
+footprint of 8.8% of |E|, and a function of the schema, exactly as design §2.3
+states.
+
+#### The defect this scenario surfaced: the anchor swap drops rows for an anonymous labelled source
+
+The scenario's first run failed immediately, on a post-recovery probe. Isolated,
+it reproduces with **no store, no recovery and no simulator** — a plain
+`cypher.NewEngine` over one `(:Person)-[:KNOWS]->(:Person:Vip)` edge plus forty
+bare Persons:
+
+| Query | Result | Correct |
+|---|---|---|
+| `MATCH (:Person)-[:KNOWS]->(:Vip) RETURN count(*)` | **0** | 1 |
+| `MATCH (:Person)-[:KNOWS]->(b:Vip) RETURN count(*)` | **0** | 1 |
+| `MATCH (a:Person)-[:KNOWS]->(:Vip) RETURN count(*)` | 1 | 1 |
+| `MATCH (a:Person)-[:KNOWS]->(b:Vip) RETURN count(*)` | 1 | 1 |
+
+The discriminator is the **source** node's anonymity, not the destination's. All
+four render the identical `EXPLAIN` tree
+(`NodeByLabelScan [Vip] -> Expand -> Filter`), so the plan text cannot tell them
+apart; `PROFILE` localises the loss exactly — the `Filter` above the re-rooted
+`Expand` receives one row and emits zero.
+
+**Which answer is wrong, per the TCK.** The openCypher TCK covers this exact
+pattern shape:
+`cypher/tck/features/clauses/match/Match2.feature`, scenario **[2] "Matching a
+relationship pattern using a label predicate on both sides"** — fixture
+`CREATE (:A)-[:T1]->(:B), (:B)-[:T2]->(:A), (:B)-[:T3]->(:B), (:A)-[:T4]->(:A)`,
+query `MATCH (:A)-[r]->(:B) RETURN r`, expected result one row `[:T1]`. So the
+anonymous-both-sides spelling is required to return the matching rows: **the 0 is
+wrong and the 1 is right.**
+
+**Why the TCK does not catch it, MEASURED on the TCK's own fixture.** Two
+independent reasons, each sufficient:
+
+1. That scenario's relationship is **untyped** (`[r]`), and `matchAnchorSite`
+   requires `len(exp.RelTypes) == 1`, so the pattern is not a swap candidate at
+   all. MEASURED: adding 40 further `(:A)` nodes to the TCK fixture leaves the
+   plan anchored on `[A]` and the answer at 1.
+2. The fixture is **balanced** (2 `:A`, 2 `:B`), so the 2x cost-win margin can
+   never be met even for a typed pattern.
+
+Give the TCK's own scenario a relationship type and label skew, and it breaks —
+same fixture, same shape:
+
+| Query on the TCK Match2 fixture + 40 extra `(:A)` | Result | TCK expects |
+|---|---|---|
+| `MATCH (:A)-[r]->(:B) RETURN count(r)` (verbatim, untyped) | 1 | 1 |
+| `MATCH (:A)-[r:T1]->(:B) RETURN count(r)` | **0** | 1 |
+| `MATCH (:A)-[:T1]->(:B) RETURN count(*)` | **0** | 1 |
+| `MATCH (:A)-[r:T1]->(b:B) RETURN count(r)` | **0** | 1 |
+| `MATCH (a:A)-[r:T1]->(:B) RETURN count(r)` | 1 | 1 |
+
+The discriminator is the SOURCE node's anonymity, isolated one variable at a time
+across three fixtures: naming the source always fixes it, naming the destination
+never does, the projection (`RETURN r` / `count(r)` / `count(*)`) is irrelevant,
+and a single-label destination behaves exactly like a multi-label one. Every wrong
+row is one where the plan anchored on the right-hand label; every balanced-graph
+row is correct because no swap fired.
+
+Why the swap's own suite missed it: MEASURED, `cypher/anchor_swap_diff_test.go`
+and `cypher/anchor_swap_symmetric_test.go` contain 24 `MATCH` patterns between
+them, and the only anonymous labelled nodes in either file appear in `CREATE`
+clauses that build the fixture (`CREATE (:Other {i:i})-[:R]->(h)`). Every read
+probe the two differential suites issue names both endpoints, so the spelling
+that breaks was never driven.
+
+The full suite is green with the defect present: MEASURED,
+`go test -race ./cypher/` passes (190.6 s) and the TCK gate reports
+**3897 scenarios, 3897 passed, 0 failed, 0 undefined (baseline=3897)**.
+
+Attributed by A/B: `EngineOptions{DisableAnchorSwap: true}` makes all four return
+1. The culprit is the single-edge anchor-swap peephole
+(`cypher/anchor_swap_plan.go`, rmp #2090/#2150). `matchNodeScan`
+(`cypher/ir/match.go`) leaves an anonymous node's variable name as the **empty
+string**, so `matchAnchorSite` records `fromVar == ""` and `mirrorAnchorSite`
+re-checks the from-label as `Selection{LabelPredicate{Receiver:
+Variable{Name: ""}}}` above the re-rooted expand — a receiver that does not
+resolve to that expand's destination binding, so the re-check is unsatisfiable and
+every row is dropped.
+
+The count store is what makes it reachable, and the direction of that is the
+interesting part. The swap is admitted only when every cost input is
+`EstExact ∧ ¬dirty`, so while a relabel keeps a label's IN families dirty the
+swap is **vetoed** and the anonymous spelling answers correctly. The moment a
+reopen clears the dirty flags — this scenario's own central claim — the swap
+becomes admissible and the same query starts answering 0. That is the task's
+fail-silent thesis reached from the other side: not a wrong count store producing
+a bad plan, but a *correct* one unlocking a broken plan.
+
+It is a planner correctness defect in another package and fixing it changes plan
+choice for a whole query class, so it is reported rather than fixed here. The
+scenario's `Vip` and `Hub` shapes use named variables, and
+`TestCountStore_AnchorSwapDropsAnonymousSourceRows_KnownDefect` pins the measured
+behaviour with the A/B attribution attached. That test **fails, with a message
+saying so, the moment the defect is fixed**, so the pin cannot outlive it.
+
+#### What is not claimed
+
+- **The OUT-side dirty branch.** `countRelabel` dirties `D(X,*,OUT)` and
+  `T(X,*,*)` only when the relabelled node's out-degree exceeds
+  `EngineOptions.MaxLabelRecountEdges` (default 4096), and that option does not
+  reach the durable store: `OpenSimStore` builds its engine with `Store` plus the
+  three recovered-schema fields and nothing else, while `Config.EngineOpts` is
+  applied only on the plain in-memory path. So `DirtyDOut` and `DirtyTA` are empty
+  for every observation this scenario takes, `parity:DOut` is always compared
+  live, and the over-budget branch stays with `cypher`'s in-package
+  `TestCountStore_BudgetTripDirtiesOut`. Threading the budget through would mean
+  widening `simStoreConfig` and `OpenSimStore` — a harness API change outside this
+  task.
+- **Multiple relationship types.** One type (`KNOWS`) is driven, so `E` has a
+  single term and the multi-type `T` fan-out is not exercised here; `cypher`'s
+  rapid property test drives three types over four labels.
+- **Concurrent readers of the snapshot.** `CountSnapshot` documents itself as safe
+  alongside writers, and the store's own package tests cover concurrent deltas;
+  this scenario drives a single goroutine, so it adds nothing there.
+- **The planner's use of the cells.** The scenario asserts the cells are right and
+  that the query answer matches them. Which plan the estimate selects is the
+  anchor-swap and join-reorder machinery's own coverage — and the defect above is
+  what happens when that machinery is wrong on cells that are right.
+- **A dirty cell's value.** A dirty cell is documented non-exact, so nothing here
+  asserts what it holds — only that a *negative* one is dirty-covered, and that
+  the reopen leaves none dirty at all.
+
 ## Bolt wire-surface coverage
 
 ### The authentication surface, and why the WAL is the witness (rmp #2481)
@@ -3267,6 +3503,51 @@ The coverage work exercised the engine against these scenarios and found:
     stops happening must update the pin, the file header and this document rather
     than delete the clause. Changing the commit ordering is a durability-contract
     decision, not a test fix, so it is recorded here and left for adjudication.
+
+13. **The single-edge anchor swap drops every row when the pattern's SOURCE node
+    is anonymous** (fail-silent, wrong answer). With the swap admissible,
+    `MATCH (:Person)-[:KNOWS]->(:Vip) RETURN count(*)` returns **0** where
+    `MATCH (a:Person)-[:KNOWS]->(b:Vip) RETURN count(*)` returns 1 over the same
+    data. Reproducible with **no store, no recovery and no simulator** — a plain
+    `cypher.NewEngine` over one `(:Person)-[:KNOWS]->(:Person:Vip)` edge plus
+    forty bare Persons. Naming the source fixes it; naming the destination does
+    not. All four spellings render the identical `EXPLAIN` tree
+    (`NodeByLabelScan [Vip] -> Expand -> Filter`), so the plan text cannot tell
+    them apart; `PROFILE` localises the loss to the `Filter` above the re-rooted
+    `Expand`, which receives one row and emits zero. Attributed by A/B:
+    `EngineOptions{DisableAnchorSwap: true}` makes all four return 1. Cause:
+    `matchNodeScan` (`cypher/ir/match.go`) leaves an anonymous node's variable
+    name as the **empty string**, so `matchAnchorSite` records `fromVar == ""` and
+    `mirrorAnchorSite` (`cypher/anchor_swap_plan.go`) re-checks the from-label as
+    `Selection{LabelPredicate{Receiver: Variable{Name: ""}}}` above the re-rooted
+    expand — a receiver that does not resolve to that expand's destination
+    binding. The count store is what makes it reachable: the swap needs every cost
+    input `EstExact ∧ ¬dirty`, so a relabel's dirty marking vetoes it and the
+    anonymous spelling answers correctly *until a reopen clears the flags*. The
+    swap's own differential suites missed it because, MEASURED, all 24 of their
+    `MATCH` patterns name both endpoints — the only anonymous labelled nodes in
+    either file are in fixture-building `CREATE` clauses. The openCypher TCK does
+    cover the shape (`clauses/match/Match2.feature` scenario [2], which requires
+    one row from `MATCH (:A)-[r]->(:B) RETURN r`) but is immune twice over: its
+    relationship is untyped, so the pattern is not a swap candidate, and its graph
+    is balanced, so the 2x margin is unreachable. MEASURED: adding a relationship
+    type and 40 extra `(:A)` nodes to that same fixture makes it return 0. The
+    whole suite is green with the defect present — `go test -race ./cypher/` passes
+    and the TCK gate reports 3897/3897, 0 failed, 0 undefined. Found by
+    `count-store` (rmp #2494) on its first run. **Reported, not fixed** — it is
+    a planner correctness defect whose fix changes plan choice for a whole query
+    class. PINNED, with the A/B attribution attached, by
+    `TestCountStore_AnchorSwapDropsAnonymousSourceRows_KnownDefect`, which fails
+    loudly the moment the defect is fixed.
+14. **`count.Store.Snapshot`'s godoc contradicted its code** (documentation).
+    It said it returns "every live cell (value > 0)"; the predicate has always
+    been `v != 0`, and must be, because `Store.add` deliberately RETAINS a cell
+    driven negative (rmp #2303) — that retention is what makes the aggregate
+    order-insensitive. MEASURED, a negative cell is reachable from ordinary Cypher
+    with no concurrency: `SET a:X`, `SET b:X`, `REMOVE a:X` over an `a -> b` edge
+    leaves `T(X, KNOWS, X)` at -1. A consumer trusting the doc would assume every
+    present value is positive. **Fixed** in this task: the doc now states the
+    real predicate and why negative cells exist.
 
 ## Documented debt / out of scope
 
