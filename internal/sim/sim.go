@@ -623,6 +623,45 @@ func (s *Simulator) maybeCheckpoint(tick int64) error {
 	return nil
 }
 
+// forceCrash performs ONE crash+recovery cycle unconditionally and runs the
+// harness's own durability check on the recovered engine. opLabel is the report
+// op the violation (if any) is attributed to, so a failure names the scenario
+// that forced the crash.
+//
+// It mirrors [Simulator.maybeCrash]'s body — a HOST crash on the SimDisk, a
+// reopen with the SAME store configuration the crashed store used (crucially the
+// same durable layout, or recovery would point at an empty root-level WAL and
+// drop every committed op), a rebind of the engine adapter, and
+// [InvariantChecker.CheckDurability] — because that is the sequence whose
+// semantics a post-recovery clause assumes.
+//
+// It exists so a scenario's post-recovery coverage claim can rest on a
+// CONSTRUCTED crash rather than on one the seeded schedule may or may not have
+// drawn inside the budget. On a run that already crashed the caller skips it, so
+// the forced arm never changes a run that already had coverage.
+//
+// A run with no durable layer has no recovery to construct and gets (nil, nil);
+// the caller's non-vacuity gate is what reports the missing coverage.
+func (s *Simulator) forceCrash(tick int64, opLabel string) (*SimReport, error) {
+	if s.store == nil {
+		return nil, nil
+	}
+	storeCfg := s.store.Config()
+	s.store.Crash()
+	store, err := OpenSimStore(s.disk, storeCfg)
+	if err != nil {
+		return nil, fmt.Errorf("sim: forced crash recovery (%s) at tick %d: %w", opLabel, tick, err)
+	}
+	s.store = store
+	s.engine = NewEngineAdapter(store.Engine())
+	s.crashCount++
+	s.replayedOps += store.WALOps()
+	if v := s.checker.CheckDurability(tick, s.oracle, s.engine); len(v) > 0 {
+		return s.report(tick, Op{Kind: OpMatch, Cypher: opLabel}, v), nil
+	}
+	return nil, nil
+}
+
 // checkCheckpointsFired is the assert-something-was-seen gate for any scenario
 // that opts into in-loop checkpointing: it reports a violation when the run
 // published no checkpoint at all.

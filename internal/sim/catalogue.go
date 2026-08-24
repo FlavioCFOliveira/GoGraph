@@ -181,6 +181,7 @@ func DefaultRegistry() (*Registry, error) {
 		boltDecodeSwarmScenario(),
 		generationSwapScenario(),
 		fluentQueryScenario(),
+		typedSchemaScenario(),
 	)
 }
 

@@ -92,6 +92,7 @@ undirected Euler; `BiBFS`; direction-optimised BFS on a hub fixture; the
 | Per-transaction op caps (CWE-770), producer **and** replay | `txn-oversize` (`internal/sim/txn_oversize.go`) | an over-cap commit is refused with `txn.ErrTransactionTooLarge` **before any frame is written** — proved by the durable WAL image being BYTE-identical across the refusal and the live graph unmutated, not by the error alone — and the surviving file recovers clean with every refused key absent; a hand-built WAL whose marker-less run exceeds the replay cap fail-stops with `recovery.ErrTransactionTooLarge`, keeps exactly the committed prefix, and is refused by the store-open rather than appended onto. The boundary is MEASURED on both sides and the two caps agree exactly (cap ops passes, cap+1 fails both). Until this task the cap reached only the replayer, so neither sentinel was reachable under simulation at any setting — see below |
 | Lock-free CSR publisher refcount lifecycle (`graph/generation`) | `generation-swap` (`internal/sim/generation_swap.go`) | every acquisition's traversal matches the model's INDEPENDENTLY computed adjacency for the generation the artefact's own content declares, so a torn swap is caught by IDENTITY rather than by well-formedness (the package's own rotation test asserts a constant edge count and discriminates no generation from any other); every generation's refcount is audited AT REST, after every reader is joined and the publisher stopped — the only quiescent point — plus a structural floor (>=1 while held) and ceiling (<=readers+1) that hold at every instant; `PublishWithDrain` with a reference held by the publisher itself returns `ErrDrainTimeout` at ANY positive timeout (1ns..20ms measured) without corrupting `Current`, while the forced unbounded drain beside it must complete, so neither direction passes vacuously; `Close` drains a LIVE reader fleet racing a publisher with none left wedged, and the post-close contract (`Acquire`->nil, `Current`->nil, `Publish`/`PublishWithDrain`->`ErrClosed`) is pinned. The plan and every sub-seed are drawn up front so the plan digest is seed-reproducible while the interleaving is not — stated, not glossed. **USE-AFTER-FREE is out of reach** without a poisoned allocator and is not claimed; use-after-RECYCLE is what the sentinel clauses cover. **Eleven** library mutations were applied and reverted to prove the clauses fire, and the table in the file header is the authoritative count: five of them were REPRODUCED in a later validation pass and are stamped there with the seed and reader count each was measured at, while the other six are marked inherited-and-unverified because their sighting counts carry no conditions and are not reproducible as written. One (dropping `Acquire`'s re-check) is caught only probabilistically and, on the inherited measurements, needs both `-race` and a fleet wider than the core count; no detection RATE is claimed for any width set, because the only width those measurements share with the default fleet detected nothing in 5 runs. The wide 64/256/1024 fleets and the 64-seed geometry sweep run in the SHORT layer: they were gated behind the soak tag on an estimate of "a million Acquire/Release pairs per seed … minutes under the race detector", measurement put the whole set at **0.46 s** under `-race` on 10 cores, and they were promoted so the default gate exercises the published concurrency levels instead of skipping them |
 | Fluent pattern-query engine as an INDEPENDENT second read path (`graph/query`) | `fluent-query` (`internal/sim/fluent_query.go`) | every probe is adjudicated THREE ways against a model-computed arbiter, with the three comparisons as SEPARABLE clauses so a red run names the wrong path: `fluent-vs-oracle`, `cypher-vs-oracle` and `fluent-vs-cypher` (a shared-substrate defect moves both engines together and leaves the third clause silent, which is the correct attribution rather than a fluent-vs-Cypher divergence). This is deliberately NOT the stance `differential.go` takes — that facility compares the engine with itself, which is sound only because the engine guarantees its two planner variants are result-equivalent. A FOURTH channel, neither engine, walks the Mapper directly and is held to the model BEFORE any probe, so a probe failure cannot be explained away by an already-diverged substrate. `Out()` must answer identically over the live-filtered AND the tombstone-agnostic CSR build — a theorem of the two prunes together, not a coincidence — and the CSR is read by nothing except `Out()`, so the label / property / range probes are provably CSR-independent. The tombstone gate is on `seedAllLive`'s Mapper walk, which never forgets a slot and is therefore DETERMINISTIC; the label-bitmap corpse count is swept by lpg's background vacuum (MEASURED at 3 and 2 for the same seed in the same process) and is telemetry, gated on nothing. `Out()`'s ghost-arc prune is unreachable on the live graph (MEASURED: `DETACH DELETE` strips arcs, raw and live CSR `Size()` equal on all 24 sweep seeds) and is driven by a constructed fixture that asserts its own precondition. Seek and scan are separated BY CONSTRUCTION (`Vertex(label, pred)` vs `Vertex(label).Vertex(pred)`, since `labelsInPreds` of a label-free predicate list is empty and both seek helpers refuse it); served-ness is established by ENUMERATING the guard's conditions, which is stated as such rather than presented as observation. The one divergence this scenario FOUND — the seek and scan arms disagreeing for mixed INTEGER/FLOAT range bounds — became the asserted `range-mixed` clause (rmp #2600), and closing it exposed a SECOND asymmetry between two PREDICATES rather than two arms: the unified range matched where the still-shared-kind equality did not, so the same data answered differently depending on how the predicate was written. rmp #2601 unified `equalValue` through the same exact comparator, removed the `hashLookuper[int64]`/`[float64]` arms as unsound SUBSETS of a unified equality, and moved a numeric equality onto the companion btree as the degenerate range `[v, v]` with `equalValue` as the residual — so an equality and a degenerate range now agree by CONSTRUCTION over one comparator, one index and one residual. The identity is scoped to the ORDERABLE kinds: openCypher's equatability is wider than its comparability, so for BOOLEAN, BYTES and TIME the two predicates legitimately differ, and that divergence is pinned rather than closed. Not claimed: resurrection, concurrency, multi-hop |
+| Typed-schema validator as a runtime ENFORCEMENT hook (`lpg.Graph.SetValidator`, `lpg.Graph.ValidateNode`, `graph/lpg/schema`) | `typed-schema` (`internal/sim/typed_schema.go`) | the accept/reject verdict is adjudicated against a DECLARATION-TABLE oracle — the same table the schema is built from, never the schema itself — on all **five** validator-consulting write paths (VERIFIED in source; the task brief named only the edge-property ones), and classified by SENTINEL rather than by non-nilness, because `ErrTypeMismatch`, `ErrUnknownProperty` and `ErrMissingRequired` are three different refusals. Coverage is CONSTRUCTED: the fifteen (path, verdict) cells are SWEPT once per epoch in a seed-shuffled order, so the seed decides the order and never the coverage. Every refusal is proven side-effect-free on five separate clauses — the value through the path's own accessor, the value through the columnar store's SECOND accessor, the node and edge population, whether the property key was INTERNED (MEASURED: the hook runs BEFORE the intern, so it is not), and on the fused path that neither the edge nor its fresh endpoint node appeared. `Graph.ValidateNode` **had no caller outside `graph/lpg`** before this task (MEASURED: only the package's own internal `NodeValidator` dispatch and its own tests), so required-property existence is embedder-invoked and gets its own arm: the mid-build rejection paired with the finalised acceptance, an unlabelled control, the never-interned benign exit, and a pre-installation fixture that is the only route (short of the recovery bypass) to ValidateNode's kind re-check over already-present properties. The recovery asymmetry is pinned as FIVE clauses from one constructed probe, not documented away. Two defects surfaced: a bit-packed BOOL column PANICKED on the fused append path (**fixed**, reachable from public `graph/lpg` on a three-node fixture with no DST involved), and `txn.Tx.Commit`'s fsync-BEFORE-validate ordering lets a REFUSED value become durable and be resurrected by recovery (**pinned, not fixed** — see below) |
 
 ### Snapshot component corruption is now covered; the manifest is checksummed (rmp #2467, #2520)
 
@@ -1465,6 +1466,207 @@ ASSERTED precondition (`precondition:model-shape`: every modelled node is
 `:Person` and every modelled edge is `:KNOWS`, because `Out()` expands a CSR that
 carries no relationship type at all) — so a future workload that adds a second
 edge type fires that clause instead of silently comparing the wrong things.
+
+## Write-path and schema-enforcement coverage
+
+### The typed schema as a runtime enforcement hook (rmp #2493)
+
+`graph/lpg/schema` is not advisory. A `*schema.Schema` installed through
+`lpg.Graph.SetValidator` is consulted on the write path and refuses a value whose
+kind disagrees with its declaration, before the mutation. Until this task
+**nothing under `internal/sim` called `SetValidator`, and nothing imported
+`graph/lpg/schema`** — every DST run, in every scenario, drove a graph with no
+validator installed. Three claims were therefore unfalsifiable under simulation:
+the accept/reject verdict on any write path, the all-or-nothing contract of a
+refused write, and the behaviour of a graph rebuilt by recovery.
+
+The gap was invisible to a green suite for the ordinary reason — nothing
+referenced the surface. `graph/lpg` and `graph/lpg/schema` do have in-package
+tests over hand-built fixtures (`validator_bypass_test.go`,
+`validate_node_finalise_test.go`, `schema/enforce_writes_test.go`) and
+`store/recovery` has one regression gate for a single op
+(`edge_property_recovery_test.go`, task #1418), but none runs under crash
+injection, none drives the paths side by side against one declaration, and none
+asks what a *recovered* graph does.
+
+**Five hook sites, verified in source.** The task's functional requirement said
+the hook "sits inside the edge-property write paths". It is consulted on five,
+node-side included:
+
+| Site | File |
+|---|---|
+| `setNodePropertyInfo` | `graph/lpg/property.go` |
+| `setEdgePropertyInfo` (columnar, per pair) | `graph/lpg/edge_property.go` |
+| `setEdgePropertyByHandleInfo` (per stable handle) | `graph/lpg/edge_handle.go` |
+| `setEdgePropertyAtInfo` (per CREATE ordinal) | `graph/lpg/edge_instance_props.go` |
+| `AddEdgeLabeledWithProperty` (fused create+property) | `graph/lpg/lpg.go` |
+
+Each is its own arm because the four property stores behind them are genuinely
+different stores. MEASURED, on one pair `(a,b)` carrying one write through each
+path: `EdgeProperties(a,b)` returned only the columnar value,
+`EdgePropertiesByHandle` only the per-handle one, and `EdgePropertiesAt` only the
+per-instance one. A single arm would have proved nothing about the other three.
+
+**The oracle is a declaration table, not the schema.** `typedSchemaModel` is built
+from the same `[]tsDecl` and `label -> required` map that are fed to
+`Schema.RegisterProperty` and `Schema.RequireProperty`, and it never calls
+`Validate` or `ValidateNode` to decide what the answer should be — the
+internal/sim rule against validating the engine with the engine. A model that
+asked the schema would agree with it by construction. The observed side is
+classified by SENTINEL: `schema.ErrTypeMismatch`, `schema.ErrUnknownProperty` and
+`schema.ErrMissingRequired` are three different refusals, an arm that accepted any
+error would pass while the wrong one was raised, and an error matching none of
+them is itself a violation.
+
+**Coverage is constructed, not drawn.** Five paths x three verdict classes is
+fifteen cells, and a non-vacuity gate on fifteen randomly drawn cells is a gate
+that fails a run whose draws were unlucky. The battery SWEEPS: each epoch visits
+every cell exactly once, in a seed-shuffled order. The seed decides the order and
+the values; it does not decide the coverage.
+`TestTypedSchema_SweepVisitsEveryCellExactlyOnce` pins that claim directly, and
+`TestTypedSchema_CoverageGateFires` proves the gate is wired by running a
+two-tick budget: MEASURED, that run reports exactly 13 coverage violations (34
+violations in total, since the node battery, the checkpoint and every no-mutation
+sub-clause are unreached too), one per cell the two ticks could not visit.
+
+**What a refusal must not do.** Every rejected write is followed by a five-clause
+battery, each clause separate because they fail for different reasons:
+
+| Clause | What it reads |
+|---|---|
+| `no-mutation:value` | the target slot through the path's own accessor |
+| `no-mutation:cross-accessor` | the columnar per-pair store through its SECOND public reader (`EdgeProperties` beside `GetEdgeProperty`) |
+| `no-mutation:population` | `AdjList().Order()` and `AdjList().Size()` |
+| `no-mutation:key-interning` | whether the unregistered key entered `Graph.PropertyKeys()` |
+| `no-mutation:fused-edge` / `fused-endpoint` | whether the refused fused write inserted the edge or interned its fresh endpoint |
+
+The interning clause is the one that distinguishes a hook running BEFORE the
+intern from one running after it. MEASURED: after a refused write under an
+unregistered key, `PropertyKeys().Lookup` still reports the key absent, and the
+refused fused write interned no endpoint node and added no edge. Those are
+asserted rather than assumed, because "the write returned an error" and "the write
+changed nothing" are different claims and only the second is the contract.
+
+The Cypher engine adds a sixth, coarser observation the direct API cannot make.
+MEASURED: a refused `CREATE (n:Person {name:$name, age:$age})` INTERNS a mapper
+slot and then TOMBSTONES it — the statement's undo runs — so the live node count
+is unchanged and the name is unfindable, while the mapper slot leaks. The leak is
+the documented NodeID-stability contract, not a defect, so the arm asserts the
+count and the unfindability and deliberately does not assert reclamation.
+
+**`Graph.ValidateNode` had no caller outside `graph/lpg`.** Required-property
+existence is enforced only where an embedder invokes it, never by the engine.
+MEASURED across the tree before this task, the only call was `graph/lpg`'s own
+internal dispatch (`lpg.go`, `nv.ValidateNode(labels, props)` on the
+`NodeValidator` interface) plus that package's own tests; every hit in
+`graph/lpg/schema` is `Schema.ValidateNode`, a different receiver. This scenario
+is now the first caller outside the package, and it invokes it at the
+node-finalisation boundary itself. Five clauses, each with a CONSTRUCTED
+precondition and, separately, the model's prediction over the node's actual
+labels and properties (so a perturbation that changes the fixture fires the
+literal clause while leaving the model clause silent, which is the correct
+attribution):
+
+| Clause | Fixture | Required verdict |
+|---|---|---|
+| `validate:mid-build` | label set, required property not yet written | `ErrMissingRequired` |
+| `validate:finalised` | the same node, one write later | clean |
+| `validate:unlabelled` | a node with no label | clean |
+| `validate:ghost` | a name never interned | clean (the documented nothing-to-check exit) |
+| `validate:pre-install` | a node whose forbidden value was written BEFORE `SetValidator` | `ErrTypeMismatch` |
+
+The last fixture exists because `ValidateNode` re-checks the kinds of properties
+that are already PRESENT — a branch `Validate` structurally cannot reach, since it
+runs before the write. With the validator installed no write can produce a
+forbidden stored value, so the branch is unreachable unless the value predates
+installation or arrives through the recovery bypass.
+`TestTypedSchema_PreInstallFixtureIsTheOnlyRouteToTheKindRecheck` asserts that
+unreachability, so a future reader cannot mistake the fixture for redundant
+scaffolding.
+
+**Why the direct-API arms run on a side graph.** A direct `lpg` write does not go
+through the WAL. Running these arms on the durable store's own graph would put
+nodes in the engine that the `GraphOracle` does not model — breaking the
+harness's node/edge count parity — and a checkpoint would then make those
+unmodelled nodes durable. So they run on a graph the scenario owns, and the
+durable store is driven only through modelled Cypher templates, which is what
+keeps `InvariantChecker.Check` and `CheckDurability` meaningful here instead of
+disabled.
+
+**The two durable paths order the validator differently.** This is the finding.
+
+| Path | Order | Consequence |
+|---|---|---|
+| Cypher engine (`walMutatorAdapter.SetNodeProperty`, `cypher/api.go`) | the validated `WriteView` write, **then** buffer the WAL op | a refused value never reaches the log |
+| `store/txn` (`txn.Tx.Commit`) | append + **fsync** every buffered op, **then** apply through the `WriteView` | a refused value is already durable when it is refused |
+
+The Cypher side is asserted across a real crash. Every `typedSchemaWitnessEvery`
+ticks the loop arms a WITNESS: a Person created with an accepted `age`,
+immediately followed by a refused string `age` on the same node. After every
+recovery — and at the end — every armed witness is read through TWO independent
+channels, a Cypher projection and a `Mapper.Walk` of the native store, and must
+carry the accepted INTEGER and nothing else. The pair is what makes the clause
+non-vacuous: "the refused value is absent" is satisfied by a recovery that
+replayed nothing, so the accepted value has to come back too.
+
+The `store/txn` side is measured by `typedSchemaPureStoreArm`, on its own
+`SimDisk`, through `openSimTypedStore` rather than `OpenSimStore` because it needs
+the `txn.Store` itself — the Cypher adapter cannot reach that ordering at all.
+MEASURED: the refused commit returns `txn.ErrCommittedNotApplied` wrapping
+`schema.ErrTypeMismatch`, the LIVE graph is correctly left without the property,
+and after a host crash and reopen the recovered graph carries `age` **as a
+STRING**. It is pinned in both directions and its message says that a run in
+which the resurrection stops happening must update the pin, the file header and
+this document rather than delete the clause. See item 12 under
+[Defects surfaced by this coverage work](#defects-surfaced-by-this-coverage-work).
+
+**The reopened graph carries no validator — asserted, not documented away.**
+`SimStore.Graph()` returns a graph rebuilt by recovery, and the schema is not
+among the snapshot's components, so nothing re-installs it. The pin is five
+clauses from one constructed probe on a dedicated pin node:
+
+| Clause | Required outcome |
+|---|---|
+| `pin:no-validator` | a write the live validator REFUSED is ACCEPTED on the freshly recovered graph |
+| `pin:node-clean` | `ValidateNode` reports clean there too, so the whole-node hook is absent as well |
+| `pin:reinstalled` | with a FRESH schema bound to the RECOVERED registries, the identical write is refused |
+| `pin:validate-detected` | `ValidateNode` now reports the planted value as a type mismatch |
+| `pin:validate-repaired` | once the value is repaired, `ValidateNode` reports clean |
+
+Clause 3 is what makes clause 1 mean something: without it, "the write was
+accepted" could hold because the write was never forbidden. The schema is REBUILT
+rather than re-installed because `schema.New` mints property-key and label ids
+through the registries it is handed, and a recovered graph has fresh ones. The
+plant is a direct `lpg` write, so it never reaches the WAL and cannot contaminate
+the durable image; the repair happens before control returns to the tick loop, so
+no checkpoint can capture it either.
+
+**Documented limitation.** *The schema is not persisted with snapshots, so a
+graph reopened by recovery carries no validator until an embedder re-installs
+one, and the durable replay path deliberately does not consult one.* The
+consequence is asymmetric enforcement across a restart: writes made through a
+live validated graph are checked, writes replayed by recovery are not, and on the
+`store/txn` path a value the live validator refused can be materialised by the
+replay (item 12). Persisting the schema alongside the snapshot components, and
+validating on replay, would close it — and would be a change to the durable
+format and to the recovery contract, so it is recorded here for adjudication
+rather than decided by a test. What this task does is make the limitation
+FALSIFIABLE: the five pin clauses above fail loudly the moment the behaviour
+changes in either direction, so the documentation cannot drift away from the code.
+
+**What this scenario does not claim.** Concurrency: the validator is installed and
+read through `atomicValidator`, which is lock-free, but the scenario drives one
+goroutine and asserts nothing about concurrent installation or about a swap racing
+a write. Per-edge-instance required properties: `NodeValidator` is a whole-NODE
+hook and `lpg` exposes no edge equivalent, so `RequireProperty` is exercised on
+nodes only. Property kinds beyond the four scalars: BYTES, LIST, TIME and the
+internal date kind go through the same `Validate` comparison, but the declaration
+table names only STRING, INTEGER, FLOAT and BOOLEAN, which is what makes every
+type mismatch constructible from another *declared* kind rather than from an
+exotic one. And the `Schema.RegisterProperty` conflict path (a
+second registration of one key under a different kind, which returns
+`ErrTypeMismatch` at DECLARATION time) is a schema-construction error rather than
+a write-path verdict, and is left to `graph/lpg/schema`'s own tests.
 
 ## Bolt wire-surface coverage
 
@@ -2981,6 +3183,90 @@ The coverage work exercised the engine against these scenarios and found:
     requires both sides to share a kind, so a single-kind index is an exact mirror
     of the equality it serves. Only the *range* arm had to go.
 
+
+11. **A bit-packed BOOL edge-property column PANICKED on the fused append
+    path.** `edgePropColumn.grownWithValue` and `edgePropColumn.grownAbsentShared`
+    — the two column-level halves of the fused build fast path
+    `edgePropCols.GrowSlotWithValue` drives — converted a DENSE column to the
+    sparse (COO) representation **unconditionally**. A bit-packed bool column has
+    no sparse representation, and the file says so in three places:
+    `allocSparseBacking`'s bool arm is commented "Unreachable: bool never goes
+    sparse", `appendSparseValueFromDense` has no bool case at all (so a bool
+    column falls through to the `boxed` backing, which is `nil` for bool), and
+    `edgePropColumn.slotValue`'s bool arm reads the bit at the backing index on
+    the assumption that "bool is never sparse, so i == slot", which holds only
+    while the column is dense. The result was
+    `panic: runtime error: index out of range [n] with length 0` inside
+    `edgePropColumn.toSparse`, reachable from the public
+    `Graph.AddEdgeLabeledWithProperty` on a **three-node, two-call fixture** with
+    no concurrency, no store, no schema and no DST:
+
+    ```go
+    g.AddEdge("a", "b", 1)
+    g.SetEdgeProperty("a", "b", "flag", BoolValue(true)) // general path -> DENSE bool column
+    g.AddEdgeLabeledWithProperty("a", "c", 1, "REL", "n", Int64Value(7)) // PANIC
+    ```
+
+    Two sibling functions already carried the guard — `newSparseSingleSlot`
+    builds a bool single-slot column dense, and `edgePropColumn.reshaped` never
+    demotes bool because `demoteThreshold` returns `-1` for it — which is exactly
+    what made the two fused paths' omission invisible: every *other* route into
+    the representation change was already correct, so the invariant held
+    everywhere it was checked. Nothing had ever combined a bool edge property with
+    a fused append, and the caller census says why: MEASURED across the tree, the
+    ONLY non-test caller of `Graph.AddEdgeLabeledWithProperty` is
+    `examples/26_social_scale_bench`, which passes a `lpg.DateValue`. Every other
+    call site is a test, and each carries an INTEGER or a STRING. The method's own
+    godoc describes it as "the simple single-edge-per-pair case the bulk builders
+    use", which is what it is FOR; what it is actually called by, today, is one
+    example and a handful of fixtures — none of them with a BOOLEAN.
+
+    Found by `typed-schema` (rmp #2493) on its first run: the scenario sweeps five
+    write paths x four declared kinds, so the (fused append, BOOLEAN) combination
+    is reached by CONSTRUCTION rather than by a draw. **Fixed** — both functions
+    now keep a bool column dense, delegating to the existing
+    `edgePropColumn.grown`, which has always handled `PropBool` correctly. The
+    dense absent-grow costs `O(length/64)` bitmap words instead of the `O(1)`
+    amortised tail push the sparse path buys for every other kind; that is what
+    the general mutation path already pays for bool, it is 64x cheaper than the
+    same copy on an 8-byte value, and correctness outranks the constant.
+    `graph/lpg/edge_prop_bool_fused_test.go` is the regression gate, and each half
+    of the fix was verified load-bearing by a controlled revert: reverting the
+    `grownWithValue` guard alone panics `TestFusedAppend_BoolColumnAsTarget` and
+    `…AcrossManySlots` while `…AsNonTarget` still passes, and reverting the
+    `grownAbsentShared` guard alone panics `…AsNonTarget` and `…AcrossManySlots`
+    while `…AsTarget` still passes.
+
+12. **A validator-REFUSED value becomes durable, and recovery resurrects it, on
+    the pure `store/txn` path.** The two durable paths order the validator
+    differently, and only one of them is safe:
+
+    | Path | Order | Consequence |
+    |---|---|---|
+    | Cypher engine (`walMutatorAdapter.SetNodeProperty`) | validated write, **then** buffer the WAL op | a refused value never reaches the log |
+    | `store/txn` (`txn.Tx.Commit`) | append + **fsync** every buffered op, **then** apply through the `WriteView` | a refused value is already durable when it is refused |
+
+    MEASURED. A transaction buffering `AddNode` + `SetNodeProperty("age",
+    StringValue(...))` against a graph whose installed schema declares `age` as
+    `PropInt64` returns `txn.ErrCommittedNotApplied` wrapping
+    `schema.ErrTypeMismatch`, and leaves the LIVE graph correctly without the
+    property. After a host crash and a reopen, the recovered graph carries `age`
+    **as a STRING**: four WAL ops replay, and the replay path installs no
+    validator — by design, since `Graph.SetEdgePropertyByHandleID`'s godoc states
+    that values replayed there "were validated at the time of the original write
+    and must not fail during recovery". On this path they were not. The promise in
+    `ErrCommittedNotApplied`'s own godoc — "recovery will reconcile" — is what
+    materialises the value.
+
+    The exposure is confined to an embedder that drives `store/txn` directly with
+    a validator installed; `store.DB` and every Cypher-driven path validate first.
+    It is **pinned, not fixed**: `checkTypedSchemaPureStore` asserts the behaviour
+    as measured, in both directions (the accepted sibling value must survive, or
+    an absent refused value would be indistinguishable from a recovery that
+    replayed nothing), and its message says that a run in which the resurrection
+    stops happening must update the pin, the file header and this document rather
+    than delete the clause. Changing the commit ordering is a durability-contract
+    decision, not a test fix, so it is recorded here and left for adjudication.
 
 ## Documented debt / out of scope
 

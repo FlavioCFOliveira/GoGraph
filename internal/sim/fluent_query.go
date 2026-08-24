@@ -2449,34 +2449,20 @@ func fluentQueryChurnOnce(
 // fluentQueryForceCrash performs one crash+recovery cycle unconditionally and
 // runs the harness's own durability check on the recovered engine.
 //
-// It mirrors [Simulator.maybeCrash]'s body — a HOST crash on the SimDisk, a
-// reopen with the SAME store configuration the crashed store used (crucially the
-// same durable layout, or recovery would point at an empty root-level WAL and
-// drop every committed op), a rebind of the engine adapter, and
-// [InvariantChecker.CheckDurability] — because that is the sequence whose
-// semantics the rest of this scenario's post-recovery clauses assume. It exists
-// so the post-recovery coverage claim rests on a CONSTRUCTED crash rather than on
-// one the seeded schedule may or may not have drawn.
+// It delegates to [Simulator.forceCrash], which mirrors [Simulator.maybeCrash]'s
+// body — a HOST crash on the SimDisk, a reopen with the SAME store configuration
+// the crashed store used (crucially the same durable layout, or recovery would
+// point at an empty root-level WAL and drop every committed op), a rebind of the
+// engine adapter, and [InvariantChecker.CheckDurability] — because that is the
+// sequence whose semantics the rest of this scenario's post-recovery clauses
+// assume. It exists so the post-recovery coverage claim rests on a CONSTRUCTED
+// crash rather than on one the seeded schedule may or may not have drawn.
 func fluentQueryForceCrash(sm *Simulator, tick int64) (*SimReport, error) {
-	if sm.store == nil {
-		// No durable layer means no recovery to construct; a run configured that
-		// way has no post-recovery coverage to claim and Finish will say so.
-		return nil, nil
-	}
-	storeCfg := sm.store.Config()
-	sm.store.Crash()
-	store, err := OpenSimStore(sm.disk, storeCfg)
-	if err != nil {
-		return nil, fmt.Errorf("sim: fluent-query forced crash recovery at tick %d: %w", tick, err)
-	}
-	sm.store = store
-	sm.engine = NewEngineAdapter(store.Engine())
-	sm.crashCount++
-	sm.replayedOps += store.WALOps()
-	if v := sm.checker.CheckDurability(tick, sm.oracle, sm.engine); len(v) > 0 {
-		return sm.report(tick, Op{Kind: OpMatch, Cypher: fqOp("forced-crash-recovery")}, v), nil
-	}
-	return nil, nil
+	// The body lives on the Simulator ([Simulator.forceCrash]) so this scenario
+	// and typed_schema.go share one implementation of the sequence rather than
+	// two copies that can drift; a run with no durable layer gets (nil, nil) and
+	// Finish reports the missing post-recovery coverage.
+	return sm.forceCrash(tick, fqOp("forced-crash-recovery"))
 }
 
 // fluentQueryBattery runs one battery and wraps any violation in a report

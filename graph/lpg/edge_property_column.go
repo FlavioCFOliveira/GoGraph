@@ -1346,6 +1346,27 @@ func (col *edgePropColumn) grownWithValue(oldLen int, v PropertyValue, days int3
 		u := col.unpackedDate()
 		return u.grownWithValue(oldLen, v, days)
 	}
+	if col.kind == PropBool && !col.sparse {
+		// A bit-packed bool column must NEVER be sparsified. The sparse
+		// representation has no compact COO value array for a bit-packed value —
+		// [allocSparseBacking] falls back to a per-present-slot bit word,
+		// [appendSparseValueFromDense] has no bool case at all (it would read the
+		// nil boxed backing), and the sparse READ path assumes a bool column is
+		// dense ([edgePropColumn.slotValue]: "bool is never sparse, so i == slot").
+		// Before this guard a fused append whose target key already had a DENSE
+		// bool column on the same source PANICKED with an index-out-of-range inside
+		// toSparse, reachable from the public [Graph.AddEdgeLabeledWithProperty] on
+		// a two-line fixture.
+		//
+		// The dense grow-then-set costs O(length/64) bitmap words rather than the
+		// O(1) amortised tail push this path buys for every other kind. That is the
+		// price the general (non-fused) mutation path already pays for bool, and it
+		// is 64x cheaper than the same copy on an 8-byte value; correctness before
+		// the constant, per the project's decision framework.
+		g := col.grown(oldLen)
+		g.setSlot(oldLen, v, days)
+		return g
+	}
 	if !col.sparse {
 		s := col.toSparse() // fresh, exactly-sized backing; safe to extend in place
 		s.length = oldLen + 1
@@ -1389,6 +1410,21 @@ func (col *edgePropColumn) grownAbsentShared(oldLen int) edgePropColumn {
 		// a plain dense []int32 column; the dense branch below converts it to sparse.
 		u := col.unpackedDate()
 		return u.grownAbsentShared(oldLen)
+	}
+	if col.kind == PropBool && !col.sparse {
+		// A bit-packed bool column must NEVER be sparsified; see the same guard in
+		// [edgePropColumn.grownWithValue] for why (the sparse form has no compact
+		// bool value array, and both the append and the read path assume dense).
+		// Before this guard a fused append on a source that already carried a DENSE
+		// bool column on ANOTHER key panicked here with an index-out-of-range
+		// inside toSparse, reachable from the public
+		// [Graph.AddEdgeLabeledWithProperty] on a two-line fixture.
+		//
+		// The dense absent-grow is O(length/64) bitmap words rather than O(1),
+		// which is exactly what this function's doc comment says the dense branch
+		// would cost — for a bit-packed value that is 64x cheaper than the same
+		// copy on an 8-byte one, and it is the only representation bool has.
+		return col.grown(oldLen)
 	}
 	if !col.sparse {
 		s := col.toSparse()
