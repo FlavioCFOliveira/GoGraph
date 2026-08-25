@@ -55,7 +55,7 @@ pinned commit. Three claims I could not source are stated as such in §5.
 | **F7** | No partial write; a truncated trailing frame is unreachable | 3 | **Medium** | **BLINDS** — the WAL's torn-tail path is not reachable from the model |
 | **F8** | `O_TRUNC` / `Truncate` / `TruncatePath` are instantly durable | 2 | **Medium** | **BLINDS** — stale-content-after-truncate unreachable |
 | **F9** | `MkdirAll` is a no-op: implicit directory durability, no empty directories | 2 + 3 | **Medium** | **BLINDS** + unreachable partial-publish states |
-| **F10** | A `SimFileHandle` stays live across `Crash()` and its writes vanish silently | — | **Low** | **FALSE ACCUSATION** (harness trap) |
+| **F10** | A `SimFileHandle` stays live across `Crash()` and its writes vanish silently | — | **Low** | **FALSE ACCUSATION** (harness trap) — **FIXED 2026-08-25, rmp #2544** |
 | **F11** | `Remove` on a directory or an absent path always succeeds | 3 | **Low** | Narrow |
 | **F12** | `OpenFile` ignores `O_EXCL` and the access mode | 3 | **Low** | Latent; no current call site |
 | **F13** | `TruncatePath` does not clear sector fault marks; handle `Truncate` does | — | Info | Inconsistency to settle deliberately |
@@ -555,6 +555,28 @@ the exposure is a scenario that opened a handle itself.
 **Recommended fix.** Set a `crashed` generation counter on the disk in `Crash()`, stamp it on each
 handle at open, and have every handle method return `fs.ErrClosed` (or a dedicated `ErrCrashedDisk`)
 when the stamps differ. Fail-stop beats silent discard.
+
+**FIXED 2026-08-25 (rmp #2544), as recommended.** `SimDisk.crashGen` is bumped by **both** crash
+kinds and stamped onto each handle at open; every handle method that touches the file returns
+`ErrCrashedDisk` when the stamps differ. Three details the recommendation did not settle:
+
+- **The counter is separate from `hostCrashGen`.** That one models in-flight fsync invalidation and
+  is deliberately *not* bumped by `CrashProcess`, because an fsync already handed to the kernel
+  completes even though the process that issued it is gone. A **file descriptor** does not survive
+  its process, so a handle must die on a `CrashProcess` too. Reusing the existing counter would have
+  left the SIGKILL case silently discarding exactly as before.
+- **`ErrCrashedDisk` wraps `fs.ErrClosed`**, so code that already treats a closed handle as terminal
+  keeps working unchanged, while `errors.Is` against the sentinel still tells a scenario author which
+  of the two happened.
+- **`Close` is deliberately not gated.** Every caller closes with `defer`; returning the error there
+  would turn one fail-stop into a second, spurious failure on a path that is only cleaning up.
+
+**No scenario legitimately held a handle across a crash**, which was checked by running rather than
+by reading: the whole `internal/sim` package passes with the guard in place (rc=0, zero failures,
+91.3 s). Pinned by `TestHandleDoesNotSurviveACrash` — which drives all three crash entry points and
+fails with the literal `(5, nil)` silent discard when the stamp check is removed — and by
+`TestHandleOpenedAfterACrashIsLive`, which stops the guard from being satisfied by a disk that simply
+refuses everything after its first crash.
 
 ---
 

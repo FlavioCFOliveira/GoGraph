@@ -368,6 +368,13 @@ type SimDisk struct {
 	// back. [SimDisk.CrashProcess] deliberately does NOT bump it: SIGKILL does
 	// not abort an fsync already issued to the kernel, which owns the writeback.
 	hostCrashGen uint64
+	// crashGen counts crashes of EITHER kind, and is what invalidates an open
+	// [SimFileHandle]. It is deliberately separate from hostCrashGen, which
+	// models in-flight fsync invalidation and is bumped only by CrashHost: a
+	// file descriptor does not survive its process, so a handle must die on a
+	// CrashProcess too, while an fsync already handed to the kernel does not
+	// (rmp #2544).
+	crashGen uint64
 	// lastCrashKind / lastCrashDiscardedBytes are the shape observables of the
 	// most recent crash: which primitive ran, and how many
 	// written-but-never-synced bytes [SimDisk.CrashHost] discarded from the files
@@ -1092,7 +1099,7 @@ func (d *SimDisk) OpenFile(path string, flag int) (*SimFileHandle, error) {
 		// before the durable shadow existed; see [simFile.truncateDurableTo].
 		f.truncateDurableTo(0)
 	}
-	h := &SimFileHandle{disk: d, file: f, path: path}
+	h := &SimFileHandle{disk: d, file: f, path: path, crashGen: d.crashGen}
 	if flag&os.O_APPEND != 0 {
 		h.pos = int64(len(f.data))
 	}
@@ -2295,6 +2302,8 @@ func (d *SimDisk) CrashProcess() {
 	defer d.mu.Unlock()
 	d.lastCrashKind = CrashKindProcess
 	d.lastCrashDiscardedBytes = 0
+	// Every file descriptor the dead process held is gone with it (rmp #2544).
+	d.crashGen++
 	// The undo log is untouched, but the shape observables still report what this
 	// crash SAW, so a gate can prove it landed inside a publish window.
 	d.crashPendingRenames = d.countPendingLocked(direntUndoRename)
@@ -2391,6 +2400,8 @@ func (d *SimDisk) CrashHost() {
 	// Invalidate every fsync currently in flight before anything else: the power
 	// went out with the write-back incomplete.
 	d.hostCrashGen++
+	// And every open file descriptor with it (rmp #2544).
+	d.crashGen++
 	d.rollbackDirentUndosLocked()
 	// Drop directories whose own dirent never became durable, taking their
 	// whole subtree with them (a lost directory rename loses every child).
@@ -2633,21 +2644,64 @@ func (d *SimDisk) Snapshot() map[string][]byte {
 //
 //nolint:revive // "Sim" prefix is intentional (see SimDisk).
 type SimFileHandle struct {
-	disk   *SimDisk
-	file   *simFile
-	path   string
-	pos    int64
-	closed bool
+	disk *SimDisk
+	file *simFile
+	path string
+	pos  int64
+	// crashGen is the disk's crash counter as it stood when this handle was
+	// opened. A crash of either kind bumps the disk's, so a stale stamp means
+	// this handle outlived the process that opened it (rmp #2544).
+	crashGen uint64
+	closed   bool
+}
+
+// ErrCrashedDisk is returned by every [SimFileHandle] method whose handle was
+// opened before a crash. It WRAPS [fs.ErrClosed], so code that already treats a
+// closed handle as terminal keeps working unchanged, while errors.Is against
+// this sentinel still tells a scenario author which of the two happened.
+//
+// It exists because the alternative was silent (rmp #2544). [SimDisk.CrashHost]
+// drops entries from the name maps, but a handle holds its *simFile DIRECTLY, so
+// a scenario that crashed while holding its own handle went on writing into an
+// ORPHANED file. The bytes went nowhere, no error was returned, and the symptom
+// presented as data missing from the engine — a false accusation pointing at the
+// subject under test. Fail-stop beats silent discard: the author learns the
+// handle is dead instead of debugging phantom data loss.
+var ErrCrashedDisk = fmt.Errorf("sim: file handle was opened before a crash and did not survive it: %w", fs.ErrClosed)
+
+// dead is [SimFileHandle.deadLocked] for a caller that does not already hold the
+// disk lock.
+func (h *SimFileHandle) dead() error {
+	h.disk.mu.Lock()
+	defer h.disk.mu.Unlock()
+	return h.deadLocked()
+}
+
+// deadLocked reports whether this handle is unusable, and why. It must be called
+// with d.mu held, because crashGen is disk state.
+//
+// The order matters: an explicitly closed handle reports fs.ErrClosed, because
+// that is what the caller did; a handle killed by a crash reports the crash,
+// because that is something the caller did NOT do and would otherwise have to
+// infer from missing bytes.
+func (h *SimFileHandle) deadLocked() error {
+	if h.closed {
+		return fs.ErrClosed
+	}
+	if h.crashGen != h.disk.crashGen {
+		return ErrCrashedDisk
+	}
+	return nil
 }
 
 // Read copies up to len(p) bytes from the current position into p, advancing
 // the position. It returns io.EOF when the position is at or past end of file.
 func (h *SimFileHandle) Read(p []byte) (int, error) {
-	if h.closed {
-		return 0, fs.ErrClosed
-	}
 	h.disk.mu.Lock()
 	defer h.disk.mu.Unlock()
+	if err := h.deadLocked(); err != nil {
+		return 0, err
+	}
 	if h.pos >= int64(len(h.file.data)) {
 		return 0, io.EOF
 	}
@@ -2660,11 +2714,11 @@ func (h *SimFileHandle) Read(p []byte) (int, error) {
 // current file size. The snapshot index writer calls it to record the
 // component's on-disk size in the manifest.
 func (h *SimFileHandle) Stat() (fs.FileInfo, error) {
-	if h.closed {
-		return nil, fs.ErrClosed
-	}
 	h.disk.mu.Lock()
 	defer h.disk.mu.Unlock()
+	if err := h.deadLocked(); err != nil {
+		return nil, err
+	}
 	return simFileInfo{name: baseName(h.path), size: int64(len(h.file.data))}, nil
 }
 
@@ -2673,11 +2727,13 @@ func (h *SimFileHandle) Stat() (fs.FileInfo, error) {
 // fault injector has marked faulted is corrupted deterministically (a single
 // byte in that sector is flipped), modelling a torn or mis-directed write.
 func (h *SimFileHandle) Write(p []byte) (int, error) {
-	if h.closed {
-		return 0, fs.ErrClosed
-	}
 	h.disk.mu.Lock()
 	defer h.disk.mu.Unlock()
+	// THE clause rmp #2544 exists for: without it these bytes landed in a simFile
+	// no name reaches any more, and were discarded in silence.
+	if err := h.deadLocked(); err != nil {
+		return 0, err
+	}
 
 	end := h.pos + int64(len(p))
 	oldLen := int64(len(h.file.data))
@@ -2736,11 +2792,11 @@ func (h *SimFileHandle) corruptSector(sec int) {
 // returns the resulting absolute offset. A negative resulting offset is an
 // error.
 func (h *SimFileHandle) Seek(offset int64, whence int) (int64, error) {
-	if h.closed {
-		return 0, fs.ErrClosed
-	}
 	h.disk.mu.Lock()
 	defer h.disk.mu.Unlock()
+	if err := h.deadLocked(); err != nil {
+		return 0, err
+	}
 	var abs int64
 	switch whence {
 	case io.SeekStart:
@@ -2762,14 +2818,14 @@ func (h *SimFileHandle) Seek(offset int64, whence int) (int64, error) {
 // Truncate resizes the file to size bytes, zero-filling when growing and
 // dropping fault marks for sectors that no longer exist.
 func (h *SimFileHandle) Truncate(size int64) error {
-	if h.closed {
-		return fs.ErrClosed
-	}
 	if size < 0 {
 		return errors.New("sim: negative truncate size")
 	}
 	h.disk.mu.Lock()
 	defer h.disk.mu.Unlock()
+	if err := h.deadLocked(); err != nil {
+		return err
+	}
 	if size <= int64(len(h.file.data)) {
 		h.file.data = h.file.data[:size]
 		h.file.truncateDurableTo(size)
@@ -2795,8 +2851,8 @@ func (h *SimFileHandle) Truncate(size int64) error {
 // a durability fault. Each call consumes exactly one draw from the seed so the
 // fault sequence is reproducible.
 func (h *SimFileHandle) Sync() error {
-	if h.closed {
-		return fs.ErrClosed
+	if err := h.dead(); err != nil {
+		return err
 	}
 	gate, req, err := h.disk.syncOutcome(h.path, h.file)
 	// Block on an armed gate with the disk lock RELEASED, so the rest of the disk
@@ -2901,6 +2957,10 @@ func (d *SimDisk) syncResultLocked(path string) error {
 
 // Close releases the handle. It is idempotent: a second Close is a no-op.
 func (h *SimFileHandle) Close() error {
+	// Deliberately NOT gated on [SimFileHandle.deadLocked]: closing a handle the
+	// crash already killed is a no-op, not an error. Every caller closes with
+	// `defer`, so returning ErrCrashedDisk here would turn the fail-stop of rmp
+	// #2544 into a second, spurious failure on a path that is only cleaning up.
 	h.closed = true
 	return nil
 }
