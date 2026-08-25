@@ -374,6 +374,36 @@ type Manifest struct {
 	// checksum and fail-stops recovery. See the integrity section above.
 	CommitTS uint64 `json:"commit_ts,omitempty"`
 
+	// IndexesCommitTS is the MVCC instant the `indexes/<name>.bin` payloads in
+	// this manifest describe, or absent when the writer could not name one.
+	//
+	// # Absent means NEVER HYDRATE, and that is the back-compat guarantee
+	//
+	// An index payload is only loadable if a reader can decide whether the WAL it
+	// is about to replay on top of the image invalidates it. That decision needs
+	// the instant the payload was taken at. Only the quiesced checkpointer path
+	// has one: it opens an MVCC snapshot, pairs it with the WAL watermark, and
+	// captures at that instant, so everything committed afterwards is in the WAL
+	// suffix a recovery replays. The present-time writers
+	// ([WriteSnapshotFull] and friends) call the capture with a nil instant —
+	// "read the present under the caller's own exclusion" — and have no such
+	// pairing, so they write NO watermark and every payload they publish is
+	// unhydratable by construction.
+	//
+	// Every snapshot that existed before this field was added therefore keeps its
+	// exact previous meaning: a recovery rebuilds its indexes from the graph, as
+	// it always did. There is no migration and no format break.
+	//
+	// NO MANIFEST VERSION BUMP, for the reason [Manifest.CommitTS] gives one
+	// field up: the manifest is JSON, an older reader ignores the unknown key, a
+	// newer reader on an older manifest decodes the zero value, and `omitempty`
+	// keeps a watermark-less manifest byte-identical to what previous builds
+	// wrote — so no fixture and no golden file moves. It sits inside the region
+	// the trailer checksums like every other field, so a flip in the
+	// `indexes_commit_ts` KEY (which would silently zero it and merely lose the
+	// optimisation) still fails the manifest checksum.
+	IndexesCommitTS uint64 `json:"indexes_commit_ts,omitempty"`
+
 	// Integrity names the framing scheme the writer used, or is empty for a
 	// manifest written before the trailer existed. The current writer always sets
 	// [IntegrityCRC32CTrailer]; `omitempty` keeps a legacy manifest — and the

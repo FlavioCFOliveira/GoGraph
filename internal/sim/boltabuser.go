@@ -41,12 +41,43 @@ const (
 	// AbuseDuplicateHello sends two HELLOs back to back (a duplicate/interleaved
 	// marker for an already-progressed session).
 	AbuseDuplicateHello
+	// AbuseLogoffThenRun authenticates, sends LOGOFF, then sends a WRITE RUN on
+	// the de-authorised connection. The CWE-306 gate must refuse it.
+	AbuseLogoffThenRun
+	// AbuseCommitAfterLogoff authenticates, opens an explicit transaction with a
+	// write in it, sends LOGOFF (legal from TX_READY, and it leaves the session in
+	// TX_READY but unauthenticated), then sends COMMIT. The transaction-finalising
+	// gate must refuse it, so the write never becomes durable.
+	AbuseCommitAfterLogoff
+	// AbuseBadCredentials presents a WRONG password on the authenticating message
+	// and then attempts a write. It is the one family that needs a server whose
+	// AuthHandler actually validates credentials — see [AbuseFamily.NeedsCredentialAuth].
+	AbuseBadCredentials
 )
 
-// abuseFamilyCount is the number of distinct abuse families. It MUST equal the
-// number of AbuseFamily constants; the unit test asserts every family is
-// reachable and produces an acceptable outcome.
-const abuseFamilyCount = 8
+// abuseAnyServerFamilyCount is the number of families that any SimServer must
+// refuse, whatever its [github.com/FlavioCFOliveira/GoGraph/bolt/server.AuthHandler]
+// is: the wire-protocol violations plus the two post-LOGOFF gates, which are
+// enforced by the session's own `authenticated` flag and so bite even under
+// [github.com/FlavioCFOliveira/GoGraph/bolt/server.NoAuthHandler]. The families
+// are ordered so these occupy [0, abuseAnyServerFamilyCount).
+const abuseAnyServerFamilyCount = 10
+
+// abuseFamilyCount is the number of distinct abuse families, credential-dependent
+// ones included. It MUST equal the number of AbuseFamily constants, which
+// TestRenderersCoverEveryValue pins through [AbuseFamily.String]. Acceptability is
+// asserted per family, but in two places rather than one: the loops in
+// boltabuser_test.go and phase3_soak_test.go cover [0, abuseAnyServerFamilyCount)
+// against a NoAuth server, and TestBoltAbuser_CredentialFamilyNeedsRealAuth covers
+// the credential-dependent remainder against a validating one.
+const abuseFamilyCount = 11
+
+// NeedsCredentialAuth reports whether driving this family proves anything only
+// against a server whose AuthHandler rejects a wrong credential. Against
+// NoAuthHandler, [AbuseBadCredentials] is admitted — correctly, since that
+// handler admits everything — so a battery that ran it there would be asserting
+// the absence of a check nobody installed.
+func (f AbuseFamily) NeedsCredentialAuth() bool { return f >= abuseAnyServerFamilyCount }
 
 // String renders an AbuseFamily for reports.
 func (f AbuseFamily) String() string {
@@ -67,6 +98,12 @@ func (f AbuseFamily) String() string {
 		return "GarbageOpcode"
 	case AbuseDuplicateHello:
 		return "DuplicateHello"
+	case AbuseLogoffThenRun:
+		return "LogoffThenRun"
+	case AbuseCommitAfterLogoff:
+		return "CommitAfterLogoff"
+	case AbuseBadCredentials:
+		return "BadCredentials"
 	default:
 		return fmt.Sprintf("AbuseFamily(%d)", int(f))
 	}
@@ -106,9 +143,12 @@ type BoltAbuser struct{}
 func (BoltAbuser) Name() string { return "BoltAbuser" }
 
 // PickFamily chooses an abuse family from the seed. It draws exactly one int so
-// the workload draw stream is stable.
+// the workload draw stream is stable. Only the families every server refuses are
+// drawn (see [AbuseFamily.NeedsCredentialAuth]): the random abuser runs against
+// the NoAuth SimServer the bad-actors scenario builds, where a wrong-credential
+// attempt is legitimately admitted and would be scored as a violation of nothing.
 func (BoltAbuser) PickFamily(seed *Seed) AbuseFamily {
-	return AbuseFamily(seed.IntN(abuseFamilyCount))
+	return AbuseFamily(seed.IntN(abuseAnyServerFamilyCount))
 }
 
 // Abuse opens a fresh connection to srv, emits the chosen abuse family over the
@@ -141,6 +181,12 @@ func (a BoltAbuser) Abuse(srv *SimServer, family AbuseFamily) (AbuseOutcome, err
 		a.abuseGarbageOpcode(conn, &out)
 	case AbuseDuplicateHello:
 		a.abuseDuplicateHello(conn, &out)
+	case AbuseLogoffThenRun:
+		a.abuseLogoffThenRun(conn, &out)
+	case AbuseCommitAfterLogoff:
+		a.abuseCommitAfterLogoff(conn, &out)
+	case AbuseBadCredentials:
+		a.abuseBadCredentials(conn, &out)
 	default:
 		return out, fmt.Errorf("sim: unknown abuse family %d", int(family))
 	}
@@ -370,6 +416,190 @@ func (a BoltAbuser) abuseDuplicateHello(conn *SimConn, out *AbuseOutcome) {
 		return
 	}
 	a.readTerminalWith(cr, out)
+}
+
+// ── post-LOGOFF and credential families (rmp #2481) ─────────────────────────
+
+// simAuthPrincipal / simAuthPassword are the sole credentials the auth-surface
+// scenario's server accepts, and simAuthWrongPassword the one it must refuse.
+// They live here, next to the abuse families that present them, so the abuser
+// needs no configuration to be driven against [NewSimServerAuth].
+const (
+	simAuthPrincipal     = "sim-operator"
+	simAuthPassword      = "correct-horse-battery-staple"
+	simAuthWrongPassword = "correct-horse-battery-stapl" //nolint:gosec // G101: a deliberately WRONG credential for a refusal probe.
+)
+
+// abuseGhostLabel is the label the post-LOGOFF write families try to create. A
+// node carrying it must never exist and its CREATE must never reach the WAL: it
+// is the sentinel the auth oracle looks for (see [checkBoltAuthSurface]).
+const abuseGhostLabel = "AbuseGhost"
+
+// abuseGhostCreate is the write statement the de-authorised families attempt.
+const abuseGhostCreate = "CREATE (:" + abuseGhostLabel + " {n: 1})"
+
+// abuseWriteRun builds the RUN carrying [abuseGhostCreate].
+func abuseWriteRun() *proto.Run {
+	return &proto.Run{
+		Query:      abuseGhostCreate,
+		Parameters: map[string]packstream.Value{},
+		Extra:      map[string]packstream.Value{},
+	}
+}
+
+// exchange writes one request and decodes exactly one response message. It is the
+// lock-step primitive the multi-step families are built from: every step's reply
+// is consumed before the next request is sent, so a given family always produces
+// the same wire trace.
+func (BoltAbuser) exchange(cr *proto.ChunkedReader, cw *proto.ChunkedWriter, msg any) (any, error) {
+	if err := writeFramed(cw, msg); err != nil {
+		return nil, err
+	}
+	raw, err := cr.ReadMessage()
+	if err != nil {
+		return nil, err
+	}
+	return proto.DecodeResponse(packstream.NewDecoder(bytes.NewReader(raw)))
+}
+
+// drainPull sends PULL(-1) and consumes every RECORD up to the terminal message,
+// which it returns. A stream left un-drained would leave the session in
+// STREAMING, where the next request is refused for the wrong reason.
+func (a BoltAbuser) drainPull(cr *proto.ChunkedReader, cw *proto.ChunkedWriter) (any, error) {
+	resp, err := a.exchange(cr, cw, &proto.Pull{N: -1, QID: -1})
+	if err != nil {
+		return nil, err
+	}
+	for {
+		if _, isRecord := resp.(*proto.Record); !isRecord {
+			return resp, nil
+		}
+		raw, err := cr.ReadMessage()
+		if err != nil {
+			return nil, err
+		}
+		if resp, err = proto.DecodeResponse(packstream.NewDecoder(bytes.NewReader(raw))); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// classifyAbuseResponse records a decoded response in out: a FAILURE is the
+// expected refusal, anything else leaves the outcome unacceptable so the caller's
+// checker reports it.
+func classifyAbuseResponse(resp any, out *AbuseOutcome) {
+	if f, ok := resp.(*proto.Failure); ok {
+		out.GotFailure = true
+		out.FailureMsg = f.Code + ": " + f.Message
+	}
+}
+
+// abuseLogoffThenRun authenticates, de-authorises with LOGOFF, then attempts a
+// WRITE. The session-level authentication gate (CWE-306, task #1345) must refuse
+// the RUN even though the state machine left the connection in READY.
+func (a BoltAbuser) abuseLogoffThenRun(conn *SimConn, out *AbuseOutcome) {
+	cr, cw, err := a.helloLogon(conn)
+	if err != nil {
+		classifyClose(err, out)
+		return
+	}
+	logoffResp, err := a.exchange(cr, cw, &proto.Logoff{})
+	if err != nil {
+		classifyClose(err, out)
+		return
+	}
+	if _, ok := logoffResp.(*proto.Success); !ok {
+		// LOGOFF itself is legal from READY; a refusal here is a defect, and
+		// leaving the outcome unacceptable is how it is reported.
+		return
+	}
+	resp, err := a.exchange(cr, cw, abuseWriteRun())
+	if err != nil {
+		classifyClose(err, out)
+		return
+	}
+	classifyAbuseResponse(resp, out)
+}
+
+// abuseCommitAfterLogoff opens an explicit transaction holding a write, then
+// LOGOFFs (legal from TX_READY, leaving the session in TX_READY but
+// unauthenticated) and attempts to COMMIT. The transaction-finalising gate must
+// refuse it, so the write never becomes durable.
+func (a BoltAbuser) abuseCommitAfterLogoff(conn *SimConn, out *AbuseOutcome) {
+	cr, cw, err := a.helloLogon(conn)
+	if err != nil {
+		classifyClose(err, out)
+		return
+	}
+	for _, step := range []any{&proto.Begin{Extra: map[string]packstream.Value{}}, abuseWriteRun()} {
+		resp, stepErr := a.exchange(cr, cw, step)
+		if stepErr != nil {
+			classifyClose(stepErr, out)
+			return
+		}
+		if _, ok := resp.(*proto.Success); !ok {
+			// BEGIN and the in-transaction RUN are both legal for an authenticated
+			// session; a refusal means the pre-condition of this family was never
+			// reached, and the unacceptable outcome reports it.
+			return
+		}
+	}
+	if term, drainErr := a.drainPull(cr, cw); drainErr != nil {
+		classifyClose(drainErr, out)
+		return
+	} else if _, ok := term.(*proto.Success); !ok {
+		return
+	}
+	if logoffResp, logoffErr := a.exchange(cr, cw, &proto.Logoff{}); logoffErr != nil {
+		classifyClose(logoffErr, out)
+		return
+	} else if _, ok := logoffResp.(*proto.Success); !ok {
+		return
+	}
+	resp, err := a.exchange(cr, cw, &proto.Commit{})
+	if err != nil {
+		classifyClose(err, out)
+		return
+	}
+	classifyAbuseResponse(resp, out)
+}
+
+// abuseBadCredentials presents [simAuthWrongPassword] on the authenticating
+// message. A FIRST authentication that fails terminates the connection, so the
+// acceptable outcome is the FAILURE (Unauthorized) and then a close; a SUCCESS
+// means the server admitted a wrong password.
+//
+// It is meaningful ONLY against a server whose AuthHandler validates credentials
+// (see [AbuseFamily.NeedsCredentialAuth]).
+func (a BoltAbuser) abuseBadCredentials(conn *SimConn, out *AbuseOutcome) {
+	ok, err := a.writeHandshake(conn)
+	if err != nil || !ok {
+		classifyClose(err, out)
+		return
+	}
+	cr := proto.NewChunkedReader(conn)
+	cw := proto.NewChunkedWriter(conn)
+	// The negotiated version is 5.6 (writeHandshake offers it first), so auth is
+	// deferred to LOGON: HELLO carries only driver metadata.
+	helloResp, err := a.exchange(cr, cw, &proto.Hello{Extra: map[string]packstream.Value{
+		"user_agent": "gograph-sim/3.0",
+	}})
+	if err != nil {
+		classifyClose(err, out)
+		return
+	}
+	if _, isSuccess := helloResp.(*proto.Success); !isSuccess {
+		classifyAbuseResponse(helloResp, out)
+		return
+	}
+	resp, err := a.exchange(cr, cw, &proto.Logon{Auth: map[string]packstream.Value{
+		"scheme": "basic", "principal": simAuthPrincipal, "credentials": simAuthWrongPassword,
+	}})
+	if err != nil {
+		classifyClose(err, out)
+		return
+	}
+	classifyAbuseResponse(resp, out)
 }
 
 // readTerminalWith reads one framed response from an existing reader and

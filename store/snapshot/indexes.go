@@ -63,10 +63,16 @@ type IndexFileEntry struct {
 	CRC32C uint32 `json:"crc32c"`
 }
 
-// IndexReadback is the raw byte payload of one secondary index file
-// returned by [LoadSnapshotFull]. The bytes are passed verbatim to
-// [index.Serializer.Deserialize] by [store/recovery.Open*]; the
-// snapshot loader does not interpret them further.
+// IndexReadback is the raw byte payload of one secondary index file returned by
+// [LoadSnapshotFull], or a nil Bytes when the file was missing or its CRC32C did
+// not match the manifest. The snapshot loader does not interpret the bytes.
+//
+// It is NOT deserialised by store/recovery. Recovery classifies each readback
+// into a per-payload reason code and reports it (store/recovery.IndexPayload);
+// the Cypher engine, which owns the index bindings and knows which concrete
+// implementation each name belongs to, is what calls
+// [index.Serializer.Deserialize] — and only for a payload recovery certified
+// usable. See the "Recovery semantics" section of docs/persistence.md.
 type IndexReadback struct {
 	Name  string
 	Bytes []byte
@@ -77,6 +83,15 @@ type IndexReadback struct {
 // successfully serialised index, which the caller threads into the
 // manifest. Subscribers that do not implement [index.Serializer] are
 // silently skipped (rebuild-on-restart contract).
+//
+// # It has no production caller in this module
+//
+// The snapshot writer publishes index payloads through [writeCapturedIndexes]
+// instead, from bytes serialised earlier at capture time, so the image is
+// transaction-boundary consistent. This function reads the LIVE manager and so
+// cannot offer that guarantee; it is retained as exported API for an embedder
+// that publishes a snapshot through its own path, and is exercised by this
+// package's tests. Prefer the capture-based writers.
 //
 // On any I/O error the partial directory under dir/IndexesDir is
 // removed (best effort) so the caller does not need to clean up.
@@ -159,7 +174,15 @@ func writeIndexesWith(fsys fileSystem, dir string, m *index.Manager) ([]IndexFil
 			return nil, fmt.Errorf("snapshot: fsync indexes dir %q: %w", idxDir, err)
 		}
 	}
-	metrics.IncCounter("store.snapshot.indexes.loaded", uint64(len(out)))
+	// COUNTS PAYLOADS WRITTEN, NOT LOADED. This is the WRITE path, so the
+	// counter it feeds must name the write: the metric was called
+	// `store.snapshot.indexes.loaded` and was incremented from here and from
+	// [writeCapturedIndexes] only — never from [LoadIndexes] — so in production
+	// it reported how many index payloads a checkpoint PUBLISHED while its name
+	// claimed how many a recovery had re-hydrated. Renamed under rmp #2490,
+	// which adds real hydration counters on the read side; a counter named
+	// `.loaded` that means "written" would have made those unreadable.
+	metrics.IncCounter("store.snapshot.indexes.written", uint64(len(out)))
 	return out, nil
 }
 

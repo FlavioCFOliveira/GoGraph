@@ -14,7 +14,14 @@ package sim
 //   - global min cut: search/flow's StoerWagner is compared, by WEIGHT only,
 //     against the global min cut computed independently as the minimum over every
 //     sink t in {1..n-1} of the s-t min cut (s fixed at 0), each s-t min cut
-//     obtained from the reference max-flow run on the symmetric capacities.
+//     obtained from the reference max-flow run on the symmetric capacities;
+//   - min-cost max-flow: search/flow's MinCostMaxFlow / MinCostMaxFlowCtx are
+//     compared, by (flow, cost), against an independent successive-shortest-path
+//     reference that augments along Bellman-Ford (SPFA) cheapest paths. Both cost
+//     regimes are driven on EVERY tick — all-positive costs (the zero-potential
+//     fast path) and forced-negative costs (the Bellman-Ford potential bootstrap)
+//     — plus two hand-built networks that plant a negative-cost CYCLE and must be
+//     refused with flow.ErrNegativeCycle.
 //
 // Determinism is load-bearing: every fixture is a pure function of the tick via
 // a single Seed draw stream; there is no time, no global rand, and no Go
@@ -22,6 +29,8 @@ package sim
 // used, so every comparison is an exact integer equality with no tolerance.
 
 import (
+	"context"
+	"errors"
 	"fmt"
 
 	"github.com/FlavioCFOliveira/GoGraph/search/flow"
@@ -43,6 +52,17 @@ const (
 	// flowMCMFFixtures is how many min-cost-max-flow fixtures flowViolations
 	// generates per tick.
 	flowMCMFFixtures = 4
+	// flowMCMFNegFrom is the first min-cost-max-flow fixture INDEX that carries
+	// negative arc costs. Fixtures [0, flowMCMFNegFrom) keep the all-positive
+	// costs the checker has always used — the ZERO-POTENTIAL FAST PATH, where
+	// search/flow's hasNegativeCost is false and the Bellman-Ford bootstrap is
+	// skipped entirely — and fixtures [flowMCMFNegFrom, flowMCMFFixtures) are
+	// forced-negative, which is the only way the DST drives that bootstrap.
+	//
+	// The flavour is selected by fixture INDEX and never by a seed draw. That is
+	// deliberate: with an index both flavours fire on EVERY tick, so neither code
+	// path can go unexercised because a tick drew unluckily.
+	flowMCMFNegFrom = 2
 )
 
 // flowMaxCost bounds the per-edge integer cost the min-cost-max-flow fixtures
@@ -81,9 +101,15 @@ func flowViolations(tick int64) []Violation {
 	for i := 0; i < flowCutFixtures; i++ {
 		out = append(out, flowCheckMinCut(tick, seed)...)
 	}
+	// Fixture INDEX (never a seed draw) selects the cost flavour, so the
+	// all-positive fast path and the negative-cost Bellman-Ford bootstrap are
+	// BOTH driven on every tick. See [flowMCMFNegFrom].
 	for i := 0; i < flowMCMFFixtures; i++ {
-		out = append(out, flowCheckMinCostMaxFlow(tick, seed)...)
+		out = append(out, flowCheckMinCostMaxFlow(tick, seed, i >= flowMCMFNegFrom)...)
 	}
+	// Planted negative-cycle fixtures: hand-built constants that consume no
+	// draws, so they perturb neither the stream above nor each other.
+	out = append(out, flowCheckNegativeCycle(tick)...)
 	return out
 }
 
@@ -431,39 +457,142 @@ func flowRefGlobalMinCut(n int, w []int) int {
 }
 
 // flowCostEdge is one directed arc of a generated min-cost-max-flow fixture,
-// carrying both a capacity and a per-unit cost (both positive integers).
+// carrying a capacity (always a positive integer) and a per-unit cost. The cost
+// is strictly positive on the all-positive fixture flavour and may be negative,
+// zero, or positive on the forced-negative flavour (see [flowGenCostNetwork]).
 type flowCostEdge struct {
 	src, dst, cap, cost int
 }
 
-// flowCheckMinCostMaxFlow builds one directed capacity+cost network from the
-// seed and asserts that:
-//
-//   - flow.MinCostMaxFlow's (flow, cost) equals an INDEPENDENT successive-
-//     shortest-path reference ([flowRefMinCostMaxFlow]) that shares no code with
-//     the production Dijkstra-with-potentials SSP — it augments along Bellman-
-//     Ford (SPFA) cheapest-cost paths on its own residual arrays. Agreement on
-//     BOTH the flow value and the total cost certifies the cost is minimal among
-//     all max-flows (the reference computes exactly the min-cost max-flow);
-//   - the flow VALUE equals the plain Dinic max-flow ([flow.MaxFlow]) on the
-//     same capacity topology (cost ignored) — a structurally-independent
-//     invariant proving MinCostMaxFlow ships the maximum flow, not merely a
-//     cheap sub-maximal one.
-//
-// Every fixture uses a freshly-built network per algorithm call because the
-// flow routines mutate residual capacities in place. Costs are non-negative, so
-// no negative-cycle bootstrap is exercised here (that path has its own unit
-// coverage); the emphasis is the min-cost/max-flow value correctness the DST
-// otherwise never drove. Comparisons are exact integer equalities.
-func flowCheckMinCostMaxFlow(tick int64, seed *Seed) []Violation {
-	const op = "search:MinCostMaxFlow"
-	n, edges := flowGenCostNetwork(seed)
-	src, sink := 0, n-1
+// flowResidualArc is one arc of the reference min-cost-max-flow's own residual
+// graph. Each generated edge contributes a forward arc (cap = capacity,
+// cost = cost) and a paired reverse arc (cap = 0, cost = -cost); rev indexes the
+// partner inside the head node's arc slice so an augmentation can move capacity
+// between them. Naming the residual as a type is what lets the optimality
+// certificate ([flowResidualHasNegativeCycle]) read the reference's FINAL
+// residual directly, without re-running any shortest-path search.
+type flowResidualArc struct {
+	to   int
+	cap  int
+	cost int
+	rev  int
+}
 
-	refFlow, refCost := flowRefMinCostMaxFlow(n, edges, src, sink)
-	gotFlow, gotCost := flow.MinCostMaxFlow(flowBuildCostNetwork(n, edges), src, sink)
+// errFlowRefRelaxBudget is returned by [flowRefMinCostMaxFlow] when its SPFA
+// exhausts the relaxation budget.
+//
+// SPFA has no negative-cycle detector. On a residual graph that contains a
+// negative-cost cycle its integer distances decrease without bound and nodes
+// requeue forever, so the reference does not FAIL on such a graph — it HANGS,
+// which in a deterministic simulation is the worst failure mode there is (a
+// hung tick reports nothing at all). The budget converts that hang into a named
+// violation, and it defends against any future route to a negative cycle, not
+// only the one anticipated when it was written.
+var errFlowRefRelaxBudget = errors.New("sim: reference SSP exhausted its relaxation budget (negative-cost cycle in the residual graph)")
+
+// flowCheckMinCostMaxFlow builds one directed capacity+cost network from the
+// seed — all-positive costs when negative is false, forced-negative costs when
+// it is true — and hands it to [flowCheckCostNetwork], which holds every
+// assertion. The split exists so a test can drive the exact production predicate
+// with a hand-built network and watch each clause fire.
+func flowCheckMinCostMaxFlow(tick int64, seed *Seed, negative bool) []Violation {
+	n, edges := flowGenCostNetwork(seed, negative)
+	return flowCheckCostNetwork(tick, n, edges, 0, n-1)
+}
+
+// flowCheckCostNetwork asserts every min-cost-max-flow invariant on one
+// WELL-FORMED capacity+cost network — one whose arcs all run strictly from a low
+// index to a high index, as [flowGenCostNetwork] guarantees.
+//
+// The clauses, in order:
+//
+//  0. STRUCTURAL PRECONDITION — every arc satisfies src < dst. Under negative
+//     costs this is not a convenience but a soundness AND a liveness
+//     precondition (both spelled out on [flowGenCostNetwork]). A violation is
+//     reported and the reference is NOT run, because a backward arc can close a
+//     negative cycle the reference cannot survive.
+//  1. [flow.MinCostMaxFlowCtx] returns a NIL ERROR, and the error is named when
+//     it does not. The non-context [flow.MinCostMaxFlow] wrapper discards its
+//     error, so driving only the wrapper silently swallows three distinct
+//     failures: flow.ErrNegativeCycle, flow.ErrCapacityOverflow, and — most
+//     valuable of all — the internal rc<0 invariant violation, which returns a
+//     PARTIAL flow alongside its error. That rc<0 guard is the exact tripwire
+//     for a broken potential bootstrap: it is unreachable while every cost is
+//     non-negative, and it is the single most informative signal the moment
+//     negative costs exist. Naming the error is the difference between "the
+//     bootstrap is broken" and a generic "(flow,cost) diverged".
+//  2. the non-context wrapper agrees with the context entry point on
+//     (flow, cost), which pins the wrapper's own documented contract.
+//  3. (flow, cost) equals an INDEPENDENT successive-shortest-path reference
+//     ([flowRefMinCostMaxFlow]) that shares no code with the production
+//     Dijkstra-with-potentials SSP — it augments along Bellman-Ford (SPFA)
+//     cheapest-cost paths on its own residual arrays. Agreement on BOTH numbers
+//     certifies the cost is minimal among all max-flows.
+//  4. the flow VALUE equals the plain Dinic max-flow ([flow.MaxFlow]) on the
+//     same capacity topology with the costs ignored, proving MinCostMaxFlow
+//     ships the MAXIMUM flow and not merely a cheap sub-maximal one.
+//  5. OPTIMALITY CERTIFICATE — the reference's own FINAL residual graph holds no
+//     negative-cost cycle. By Ahuja-Magnanti-Orlin Thm 9.1 a flow is min-cost
+//     for its value iff its residual graph has no negative cycle, so clause (4)
+//     and clause (5) together certify "min-cost MAX-flow" with no shortest-path
+//     search of any kind. It is also the only clause here able to catch a
+//     misconception SHARED by production and reference: the two implement the
+//     same SSP schema and differ only in the shortest-path engine, so an error
+//     in the schema itself would simply agree with itself in clause (3).
+//
+// Every algorithm call receives a freshly-built network because the flow
+// routines mutate residual capacities in place; reusing one would feed a drained
+// residual graph to the next call. All comparisons are exact integer equalities.
+func flowCheckCostNetwork(tick int64, n int, edges []flowCostEdge, src, sink int) []Violation {
+	const op = "search:MinCostMaxFlow"
+
+	// (0) Structural precondition, asserted BEFORE the reference is called.
+	if bad := flowFirstNonDAGArc(edges); bad >= 0 {
+		e := edges[bad]
+		return []Violation{{
+			Kind: ViolationSearchDivergence, Tick: tick, Op: op,
+			Message: fmt.Sprintf(
+				"min-cost-max-flow fixture broke its DAG precondition: arc #%d is %d->%d, but every arc must satisfy src < dst (n=%d, edges=%s)",
+				bad, e.src, e.dst, n, flowFmtCostEdges(edges)),
+		}}
+	}
+
+	refFlow, refCost, refResidual, refErr := flowRefMinCostMaxFlow(n, edges, src, sink)
+	if refErr != nil {
+		return []Violation{{
+			Kind: ViolationSearchDivergence, Tick: tick, Op: op,
+			Message: fmt.Sprintf(
+				"independent SSP reference failed on a well-formed fixture: %v (n=%d, src=%d, sink=%d, edges=%s)",
+				refErr, n, src, sink, flowFmtCostEdges(edges)),
+		}}
+	}
 
 	var out []Violation
+
+	// (1) The context entry point must succeed, and must say so.
+	gotFlow, gotCost, err := flow.MinCostMaxFlowCtx(
+		context.Background(), flowBuildCostNetwork(n, edges), src, sink)
+	if err != nil {
+		out = append(out, Violation{
+			Kind: ViolationSearchDivergence, Tick: tick, Op: op,
+			Message: fmt.Sprintf(
+				"MinCostMaxFlowCtx returned a non-nil error on a well-formed fixture: %v (partial=(%d,%d), n=%d, src=%d, sink=%d, edges=%s)",
+				err, gotFlow, gotCost, n, src, sink, flowFmtCostEdges(edges)),
+		})
+	}
+
+	// (2) The non-context wrapper must agree with the context entry point.
+	plainFlow, plainCost := flow.MinCostMaxFlow(flowBuildCostNetwork(n, edges), src, sink)
+	if plainFlow != gotFlow || plainCost != gotCost {
+		out = append(out, Violation{
+			Kind: ViolationSearchDivergence, Tick: tick, Op: op,
+			Message: fmt.Sprintf(
+				"MinCostMaxFlow wrapper disagreed with MinCostMaxFlowCtx: plain=(%d,%d) ctx=(%d,%d) (n=%d, src=%d, sink=%d, edges=%s)",
+				plainFlow, plainCost, gotFlow, gotCost, n, src, sink, flowFmtCostEdges(edges)),
+		})
+	}
+
+	// (3) Both numbers must match the independent SPFA-driven SSP reference.
 	if gotFlow != refFlow || gotCost != refCost {
 		out = append(out, Violation{
 			Kind: ViolationSearchDivergence, Tick: tick, Op: op,
@@ -473,7 +602,7 @@ func flowCheckMinCostMaxFlow(tick int64, seed *Seed) []Violation {
 		})
 	}
 
-	// The min-cost max-flow VALUE must equal the plain Dinic max-flow on the
+	// (4) The min-cost max-flow VALUE must equal the plain Dinic max-flow on the
 	// same capacities (cost ignored): MinCostMaxFlow ships the maximum flow.
 	capEdges := make([]flowEdge, len(edges))
 	for i, e := range edges {
@@ -488,23 +617,254 @@ func flowCheckMinCostMaxFlow(tick int64, seed *Seed) []Violation {
 				gotFlow, dinic, n, flowFmtCostEdges(edges)),
 		})
 	}
+
+	// (5) Optimality certificate on the REFERENCE's own final residual.
+	if flowResidualHasNegativeCycle(refResidual) {
+		out = append(out, Violation{
+			Kind: ViolationSearchDivergence, Tick: tick, Op: op,
+			Message: fmt.Sprintf(
+				"reference min-cost max-flow failed its optimality certificate: its final residual graph contains a negative-cost cycle, so the flow of value %d at cost %d is NOT min-cost (n=%d, src=%d, sink=%d, edges=%s)",
+				refFlow, refCost, n, src, sink, flowFmtCostEdges(edges)),
+		})
+	}
+
+	return out
+}
+
+// flowFirstNonDAGArc returns the index of the first arc that breaks the
+// generator's structural invariant src < dst, or -1 when every arc respects it.
+// The invariant is what makes the reference's DAG precondition structural rather
+// than lucky: see the DAG invariant section on [flowGenCostNetwork].
+func flowFirstNonDAGArc(edges []flowCostEdge) int {
+	for i, e := range edges {
+		if e.src >= e.dst {
+			return i
+		}
+	}
+	return -1
+}
+
+// flowNegCycleFixture is one hand-built network that plants a negative-cost
+// cycle in the INITIAL residual graph, so search/flow's Bellman-Ford bootstrap
+// must refuse it with [flow.ErrNegativeCycle].
+type flowNegCycleFixture struct {
+	name  string
+	edges []flowCostEdge
+	n     int
+	src   int
+	sink  int
+	// dinic is the hand-computed plain max-flow on the SAME capacities with the
+	// costs ignored. It is what makes the (0,0) assertions evidential instead of
+	// vacuous: it proves the (0,0) is a REFUSAL and not simply "there was no
+	// augmenting path to begin with".
+	dinic int
+}
+
+// flowNegCycleFixtures returns the planted-negative-cycle fixtures. They are
+// hand-built constants rather than seed-derived, and they must never reach
+// [flowRefMinCostMaxFlow]: each contains a backward arc, so the SPFA reference
+// would spin on them (see [errFlowRefRelaxBudget]). They therefore travel a
+// separate checker path, [flowCheckNegCycleFixture], which compares against
+// hand-computed values only.
+//
+// Both fixtures are verified by hand:
+//
+//	(a) "disjoint-cycle" — n=4, src=0, sink=3
+//	    0->1 c4 $2 ; 1->2 c4 $-5 ; 2->1 c4 $1 ; 0->3 c4 $1
+//	    The cycle 1->2->1 is worth -4 and is reachable from src while touching
+//	    NEITHER endpoint. Arc 0->3 is load-bearing: without it the network has no
+//	    src->sink path at all, (0,0) would be indistinguishable from "no
+//	    augmenting path", and the assertion would be vacuous. With it, plain
+//	    Dinic ships 4 units.
+//	(b) "cycle-through-src" — n=2, src=0, sink=1
+//	    0->1 c1 $-3 ; 1->0 c1 $1
+//	    The cycle 0->1->0 is worth -2 and CONTAINS src, matching the wording of
+//	    [flow.ErrNegativeCycle]'s own documentation. Plain Dinic ships 1 unit.
+//
+// Neither the cap=0 paired reverse arcs nor search/flow's validation can
+// manufacture a false positive here. validateCostCapacities constrains only
+// capacity magnitudes — never cost sign, never cycles — and runs BEFORE the
+// bootstrap, so it cannot mask ErrNegativeCycle; bellmanFordBootstrap skips
+// cap<=0 arcs in both its relaxation loop and its detection pass; and
+// hasNegativeCost requires cap>0 && cost<0, which no reverse arc satisfies at
+// rest.
+func flowNegCycleFixtures() []flowNegCycleFixture {
+	return []flowNegCycleFixture{
+		{
+			name:  "disjoint-cycle",
+			n:     4,
+			src:   0,
+			sink:  3,
+			dinic: 4,
+			edges: []flowCostEdge{
+				{src: 0, dst: 1, cap: 4, cost: 2},
+				{src: 1, dst: 2, cap: 4, cost: -5},
+				{src: 2, dst: 1, cap: 4, cost: 1},
+				{src: 0, dst: 3, cap: 4, cost: 1},
+			},
+		},
+		{
+			name:  "cycle-through-src",
+			n:     2,
+			src:   0,
+			sink:  1,
+			dinic: 1,
+			edges: []flowCostEdge{
+				{src: 0, dst: 1, cap: 1, cost: -3},
+				{src: 1, dst: 0, cap: 1, cost: 1},
+			},
+		},
+	}
+}
+
+// flowCheckNegativeCycle drives every planted-negative-cycle fixture for one
+// tick. The fixtures are constants, so this consumes no seed draws and cannot
+// perturb the tick's stream.
+func flowCheckNegativeCycle(tick int64) []Violation {
+	fixtures := flowNegCycleFixtures()
+	out := make([]Violation, 0, len(fixtures))
+	for i := range fixtures {
+		out = append(out, flowCheckNegCycleFixture(tick, fixtures[i])...)
+	}
+	return out
+}
+
+// flowCheckNegCycleFixture asserts the negative-cycle contract on one planted
+// fixture:
+//
+//   - [flow.MinCostMaxFlowCtx] returns (0, 0) together with an error that
+//     satisfies errors.Is(err, [flow.ErrNegativeCycle]);
+//   - the non-context [flow.MinCostMaxFlow] returns exactly (0, 0) — the
+//     documented behaviour of the wrapper that discards the error;
+//   - NON-VACUITY: plain Dinic on the SAME capacities ships f.dinic units, which
+//     is non-zero. Without this last clause the (0,0) assertions could be
+//     satisfied by a network that simply had no augmenting path, and an oracle
+//     that cannot fail proves nothing.
+func flowCheckNegCycleFixture(tick int64, f flowNegCycleFixture) []Violation {
+	op := "search:MinCostMaxFlow/negcycle:" + f.name
+	var out []Violation
+
+	gotFlow, gotCost, err := flow.MinCostMaxFlowCtx(
+		context.Background(), flowBuildCostNetwork(f.n, f.edges), f.src, f.sink)
+	if !errors.Is(err, flow.ErrNegativeCycle) {
+		out = append(out, Violation{
+			Kind: ViolationSearchDivergence, Tick: tick, Op: op,
+			Message: fmt.Sprintf(
+				"MinCostMaxFlowCtx did not report ErrNegativeCycle on a planted negative cycle: err=%v got=(%d,%d) (n=%d, src=%d, sink=%d, edges=%s)",
+				err, gotFlow, gotCost, f.n, f.src, f.sink, flowFmtCostEdges(f.edges)),
+		})
+	}
+	if gotFlow != 0 || gotCost != 0 {
+		out = append(out, Violation{
+			Kind: ViolationSearchDivergence, Tick: tick, Op: op,
+			Message: fmt.Sprintf(
+				"MinCostMaxFlowCtx augmented a network holding a negative cycle: got=(%d,%d), want (0,0) (n=%d, src=%d, sink=%d, edges=%s)",
+				gotFlow, gotCost, f.n, f.src, f.sink, flowFmtCostEdges(f.edges)),
+		})
+	}
+
+	plainFlow, plainCost := flow.MinCostMaxFlow(flowBuildCostNetwork(f.n, f.edges), f.src, f.sink)
+	if plainFlow != 0 || plainCost != 0 {
+		out = append(out, Violation{
+			Kind: ViolationSearchDivergence, Tick: tick, Op: op,
+			Message: fmt.Sprintf(
+				"MinCostMaxFlow wrapper returned %v on a negative cycle, want (0,0) (n=%d, src=%d, sink=%d, edges=%s)",
+				[2]int{plainFlow, plainCost}, f.n, f.src, f.sink, flowFmtCostEdges(f.edges)),
+		})
+	}
+
+	// NON-VACUITY: the same capacities must carry a non-zero plain max-flow, so
+	// the (0,0) above is a refusal rather than an empty network.
+	capEdges := make([]flowEdge, len(f.edges))
+	for i, e := range f.edges {
+		capEdges[i] = flowEdge{src: e.src, dst: e.dst, cap: e.cap}
+	}
+	if d := flow.MaxFlow(flowBuildNetwork(f.n, capEdges), f.src, f.sink); d != f.dinic {
+		out = append(out, Violation{
+			Kind: ViolationSearchDivergence, Tick: tick, Op: op,
+			Message: fmt.Sprintf(
+				"planted-negative-cycle fixture lost its non-vacuity witness: Dinic max-flow on the same capacities = %d, want %d (n=%d, src=%d, sink=%d, edges=%s)",
+				d, f.dinic, f.n, f.src, f.sink, flowFmtCostEdges(f.edges)),
+		})
+	}
 	return out
 }
 
 // flowGenCostNetwork derives a directed capacity+cost network from seed: n nodes
-// (6..10), src=0, sink=n-1, a connected forward spine guaranteeing positive
-// flow, plus seed-chosen extra forward arcs (src index < dst index keeps it a
-// DAG). Every arc carries a capacity in [1, flowMaxCap] and a cost in
-// [1, flowMaxCost]. Arcs are emitted in a fixed index-ordered sequence, so the
+// (6..10), src=0, sink=n-1, a connected forward spine guaranteeing a positive
+// flow, plus seed-chosen extra forward arcs. Every arc carries a capacity in
+// [1, flowMaxCap]. Arcs are emitted in a fixed index-ordered sequence, so the
 // output never depends on map iteration order.
-func flowGenCostNetwork(seed *Seed) (int, []flowCostEdge) {
+//
+// # Cost flavour
+//
+// negative=false emits every cost in [1, flowMaxCost]. This is the checker's
+// original behaviour and the ZERO-POTENTIAL FAST PATH: search/flow's
+// hasNegativeCost is false, so the Bellman-Ford bootstrap is skipped entirely.
+//
+// negative=true draws each cost from the SYMMETRIC interval
+// [-flowMaxCost, +flowMaxCost] and FORCES the first spine arc (0->1) strictly
+// negative, in [-flowMaxCost, -1]. Forcing is required, not cosmetic: with an
+// unforced symmetric draw, 80 of 20,000 measured fixtures contained no negative
+// arc at all, so hasNegativeCost would not fire and the bootstrap would not run.
+// Forcing gives 20,000 of 20,000. The symmetric interval is chosen because it
+// makes roughly 48% of the costs it draws negative (10 of its 21 values), which
+// produces multi-arc negative shortest-path trees rather than the trivially-right
+// single-negative-arc case; counting the always-negative forced arc as well,
+// 52.4% of all arcs on this flavour are negative in a measured 5,000-tick sweep.
+// It also INCLUDES 0, which lands a reduced cost of exactly 0 on the boundary of
+// the production rc<0 guard — 9,472 zero-cost arcs were measured across a 20,000-
+// fixture forced sweep, and 4,743 across the 10,000-fixture sweep the tests run.
+//
+// The magnitude is deliberately not widened. The source cut is at most 260 (one
+// spine arc plus at most n+2 extra arcs out of node 0, each capped by
+// flowMaxCap) and the largest absolute cost is flowMaxCost, so their product
+// stays seven orders of magnitude below search/flow's capInf: ErrCapacityOverflow
+// can never be entered by accident, and a reported fixture stays hand-
+// reproducible from [flowFmtCostEdges], which already renders a negative cost as
+// e.g. "$-7".
+//
+// # Draw count
+//
+// Every flavour spends EXACTLY ONE IntN draw per cost (see [flowDrawCost]),
+// identical to the original 1+IntN(flowMaxCost). The per-fixture draw count is
+// therefore unchanged and the flavours stay in lockstep on the shared per-tick
+// Seed. Preserving that is load-bearing for determinism, and it is also what
+// keeps the all-positive fixtures bit-identical to what they were before the
+// negative-cost flavour existed.
+//
+// # DAG invariant
+//
+// Every arc runs strictly from a low index to a high index: the spine is
+// i -> i+1, and every extra arc is normalised by swapping its endpoints. Under
+// purely positive costs that was a convenience. Under negative costs it is a
+// PRECONDITION, in two distinct ways:
+//
+//   - SOUNDNESS. The SPFA reference is a valid min-cost oracle only if the zero
+//     flow is min-cost of value 0, which (Ahuja-Magnanti-Orlin Thm 9.1) holds
+//     iff the arc set with cap>=1 has no negative-cost directed cycle. Because
+//     every arc goes low -> high, the generated network has no directed cycle of
+//     ANY sign, so the condition holds structurally rather than by luck. It keeps
+//     holding after every augmentation: augmenting along a shortest path leaves
+//     every residual reduced cost >= 0, and potentials telescope to 0 around any
+//     cycle — a path arc is tight, so the reverse arc it newly opens carries a
+//     reduced cost of exactly 0 and the resulting 2-cycle is worth 0, never
+//     negative.
+//   - LIVENESS. SPFA has no negative-cycle detector; on a negative cycle it hangs
+//     rather than fails. [flowRefMinCostMaxFlow]'s relaxation budget is the
+//     second line of defence, and [flowFirstNonDAGArc] asserts the invariant
+//     itself before the reference is ever called.
+func flowGenCostNetwork(seed *Seed, negative bool) (int, []flowCostEdge) {
 	n := 6 + seed.IntN(5) // 6..10
 	edges := make([]flowCostEdge, 0, n*2)
 	for i := 0; i < n-1; i++ {
 		edges = append(edges, flowCostEdge{
 			src: i, dst: i + 1,
-			cap:  1 + seed.IntN(flowMaxCap),
-			cost: 1 + seed.IntN(flowMaxCost),
+			cap: 1 + seed.IntN(flowMaxCap),
+			// The FIRST spine arc is forced strictly negative on the negative
+			// flavour, so hasNegativeCost is guaranteed to fire and the
+			// Bellman-Ford bootstrap is guaranteed to run.
+			cost: flowDrawCost(seed, negative, negative && i == 0),
 		})
 	}
 	extra := seed.IntN(n + 2)
@@ -520,10 +880,33 @@ func flowGenCostNetwork(seed *Seed) (int, []flowCostEdge) {
 		edges = append(edges, flowCostEdge{
 			src: a, dst: b,
 			cap:  1 + seed.IntN(flowMaxCap),
-			cost: 1 + seed.IntN(flowMaxCost),
+			cost: flowDrawCost(seed, negative, false),
 		})
 	}
 	return n, edges
+}
+
+// flowDrawCost draws EXACTLY ONE integer from seed and maps it into this
+// fixture's cost interval:
+//
+//	forceNegative : [-flowMaxCost, -1]           strictly negative
+//	negative      : [-flowMaxCost, +flowMaxCost] symmetric, includes 0
+//	otherwise     : [1, flowMaxCost]             strictly positive
+//
+// Holding every flavour to a single IntN call is what makes the positive and
+// negative flavours consume the same number of draws, so changing a fixture's
+// flavour cannot shift the rest of the tick's stream. Each branch performs its
+// own single draw; never compute one interval and then overwrite it with
+// another, because that would spend two draws.
+func flowDrawCost(seed *Seed, negative, forceNegative bool) int {
+	switch {
+	case forceNegative:
+		return -1 - seed.IntN(flowMaxCost)
+	case negative:
+		return -flowMaxCost + seed.IntN(2*flowMaxCost+1)
+	default:
+		return 1 + seed.IntN(flowMaxCost)
+	}
 }
 
 // flowBuildCostNetwork constructs a fresh flow.CostNetwork for one algorithm
@@ -537,6 +920,22 @@ func flowBuildCostNetwork(n int, edges []flowCostEdge) *flow.CostNetwork {
 	return g
 }
 
+// flowRefBuildResidual lays out the reference's residual graph: one forward arc
+// per generated edge (cap = capacity, cost = cost) paired with a reverse arc
+// (cap = 0, cost = -cost). The reverse cost is the NEGATION of the forward cost,
+// which is already correct when the forward cost is itself negative — cancelling
+// a unit of flow refunds what it cost — so no change was needed here to support
+// the negative-cost flavour.
+func flowRefBuildResidual(n int, edges []flowCostEdge) [][]flowResidualArc {
+	adj := make([][]flowResidualArc, n)
+	for _, e := range edges {
+		u, v := e.src, e.dst
+		adj[u] = append(adj[u], flowResidualArc{to: v, cap: e.cap, cost: e.cost, rev: len(adj[v])})
+		adj[v] = append(adj[v], flowResidualArc{to: u, cap: 0, cost: -e.cost, rev: len(adj[u]) - 1})
+	}
+	return adj
+}
+
 // flowRefMinCostMaxFlow is the independent reference for the min-cost-max-flow
 // fixtures. It runs Successive Shortest Paths where each augmenting path is the
 // CHEAPEST (minimum total cost) src->sink path with positive residual capacity,
@@ -544,23 +943,27 @@ func flowBuildCostNetwork(n int, edges []flowCostEdge) *flow.CostNetwork {
 // no code with the production Dijkstra-with-potentials implementation. Because
 // every augmentation is along a globally cheapest residual path, the loop
 // terminates at the maximum flow whose cost is minimal (the SSP optimality
-// theorem). Costs are non-negative and capacities/costs are small integers, so
-// the arithmetic is exact and no negative cycle can arise.
-func flowRefMinCostMaxFlow(n int, edges []flowCostEdge, src, sink int) (maxFlow, minCost int) {
-	type arc struct {
-		to   int
-		cap  int
-		cost int
-		rev  int
+// theorem). Capacities and costs are small integers, so the arithmetic is exact.
+//
+// SSP is a valid oracle here only because the zero flow is min-cost of value 0,
+// which holds because the generated arc set is acyclic; see the DAG invariant
+// section on [flowGenCostNetwork]. Negative arc costs are otherwise handled with
+// no special case: SPFA relaxes them directly, and dist[sink] is simply allowed
+// to be negative.
+//
+// It returns its FINAL residual arrays alongside the answer so the caller can
+// run the optimality certificate ([flowResidualHasNegativeCycle]) on them, and
+// it returns [errFlowRefRelaxBudget] rather than spinning if a single SPFA
+// exceeds (n+1)*arcs successful relaxations. That bound cannot be reached on a
+// graph free of negative cycles: SPFA settles each node at most n-1 times, so
+// its successful relaxations are at most (n-1)*arcs.
+func flowRefMinCostMaxFlow(n int, edges []flowCostEdge, src, sink int) (maxFlow, minCost int, residual [][]flowResidualArc, err error) {
+	adj := flowRefBuildResidual(n, edges)
+	arcs := 0
+	for u := range adj {
+		arcs += len(adj[u])
 	}
-	adj := make([][]arc, n)
-	addArc := func(u, v, c, w int) {
-		adj[u] = append(adj[u], arc{to: v, cap: c, cost: w, rev: len(adj[v])})
-		adj[v] = append(adj[v], arc{to: u, cap: 0, cost: -w, rev: len(adj[u]) - 1})
-	}
-	for _, e := range edges {
-		addArc(e.src, e.dst, e.cap, e.cost)
-	}
+	budget := (n + 1) * arcs
 
 	const inf = flowCapInf
 	for {
@@ -576,6 +979,7 @@ func flowRefMinCostMaxFlow(n int, edges []flowCostEdge, src, sink int) (maxFlow,
 		dist[src] = 0
 		queue := []int{src}
 		inQueue[src] = true
+		relaxations := 0
 		for len(queue) > 0 {
 			u := queue[0]
 			queue = queue[1:]
@@ -587,6 +991,10 @@ func flowRefMinCostMaxFlow(n int, edges []flowCostEdge, src, sink int) (maxFlow,
 					continue
 				}
 				if cand := du + a.cost; cand < dist[a.to] {
+					relaxations++
+					if relaxations > budget {
+						return maxFlow, minCost, adj, errFlowRefRelaxBudget
+					}
 					dist[a.to] = cand
 					parentNode[a.to] = u
 					parentArc[a.to] = ai
@@ -617,7 +1025,68 @@ func flowRefMinCostMaxFlow(n int, edges []flowCostEdge, src, sink int) (maxFlow,
 		maxFlow += push
 		minCost += push * dist[sink]
 	}
-	return maxFlow, minCost
+	return maxFlow, minCost, adj, nil
+}
+
+// flowResidualHasNegativeCycle reports whether the residual graph — its arcs
+// with cap > 0 — contains a negative-cost directed cycle. By
+// Ahuja-Magnanti-Orlin Thm 9.1 a flow is min-cost for its own value iff its
+// residual graph has no negative cycle, so a false verdict on a max-flow's final
+// residual is an OPTIMALITY CERTIFICATE that shares no machinery with the
+// shortest-path search that produced the flow.
+//
+// Two details are load-bearing and were both got wrong before they were got
+// right:
+//
+//   - dist starts ALL-ZERO, which is Bellman-Ford from a virtual super-source
+//     joined to every node by a zero-cost arc. That is what makes cycles
+//     unreachable from src detectable too; seeding only src would miss them.
+//   - the relaxation rounds and the detection pass are SEPARATE. With the
+//     virtual super-source the graph has n+1 nodes, so a shortest simple path
+//     spans at most n arcs and n full rounds are needed; "something still changed
+//     on the last round" is NOT detection, because a legitimate late improvement
+//     is indistinguishable from an unbounded one. Only a further improvement
+//     found AFTER convergence proves a negative cycle.
+//
+// Cost is negligible at fixture scale: n <= 10 and roughly 30 arcs give at most
+// a few hundred integer relaxations.
+func flowResidualHasNegativeCycle(adj [][]flowResidualArc) bool {
+	n := len(adj)
+	dist := make([]int, n) // all-zero: virtual super-source over every node
+	for round := 0; round < n; round++ {
+		changed := false
+		for u := 0; u < n; u++ {
+			for ai := range adj[u] {
+				a := adj[u][ai]
+				if a.cap <= 0 {
+					continue
+				}
+				if cand := dist[u] + a.cost; cand < dist[a.to] {
+					dist[a.to] = cand
+					changed = true
+				}
+			}
+		}
+		if !changed {
+			// Converged: no further improvement is possible, so the detection
+			// pass below cannot find one either.
+			break
+		}
+	}
+	// Separate detection pass: any improvement still available after n full
+	// rounds can only come from a negative-cost cycle.
+	for u := 0; u < n; u++ {
+		for ai := range adj[u] {
+			a := adj[u][ai]
+			if a.cap <= 0 {
+				continue
+			}
+			if dist[u]+a.cost < dist[a.to] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // flowFmtCostEdges renders a directed capacity+cost edge list deterministically

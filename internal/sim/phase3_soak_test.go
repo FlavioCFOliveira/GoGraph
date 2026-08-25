@@ -66,7 +66,7 @@ func TestPhase3_ConcurrentLivenessSoak(t *testing.T) {
 			// server; both must leave it healthy (these run on their own connections
 			// and do not perturb the acked-create oracle).
 			abuser := BoltAbuser{}
-			for fam := AbuseFamily(0); fam < abuseFamilyCount; fam++ {
+			for fam := AbuseFamily(0); fam < abuseAnyServerFamilyCount; fam++ {
 				out, aerr := abuser.Abuse(srv, fam)
 				if aerr != nil {
 					t.Fatalf("seed %d abuse(%s): %v", seed, fam, aerr)

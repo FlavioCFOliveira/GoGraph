@@ -33,8 +33,10 @@ func TopologicalSort[W any](c *csr.CSR[W]) ([]graph.NodeID, error) {
 }
 
 // TopologicalSortCtx is the context-aware variant of [TopologicalSort].
-// ctx.Err() is checked every 4096 emits; on cancellation returns
-// (nil, wrapped ctx.Err()).
+// ctx.Err() is checked on entry to the emit loop, every 4096 emits
+// thereafter, and once more before the cycle verdict is returned; on
+// cancellation returns (nil, the raw ctx.Err()). A cancelled context
+// outranks [ErrCycle].
 func TopologicalSortCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]graph.NodeID, error) {
 	defer metrics.Time("search.TopologicalSortCtx").Stop()
 	maxID := uint64(c.MaxNodeID())
@@ -91,6 +93,18 @@ func TopologicalSortCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]graph.Node
 				queue = append(queue, graph.NodeID(nb))
 			}
 		}
+	}
+	// Poll once more before the cycle verdict. On a fully cyclic graph every
+	// live vertex has indegree >= 1, so the Kahn queue starts EMPTY, the
+	// polled loop above never runs, and ErrCycle was returned in preference
+	// to the context error at every graph size -- the entry point could not
+	// report cancellation on that shape at all (rmp #2593). The same poll
+	// also covers the empty-CSR shape, where the loop is likewise never
+	// entered; cancellation now wins on every input shape. ErrCycle is
+	// still returned whenever the context is live.
+	if err := ctx.Err(); err != nil {
+		metrics.IncCounter("search.TopologicalSortCtx.errors", 1)
+		return nil, err
 	}
 	if emitted != totalLive {
 		metrics.IncCounter("search.TopologicalSortCtx.errors", 1)

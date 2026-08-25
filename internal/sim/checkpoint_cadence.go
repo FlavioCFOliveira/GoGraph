@@ -100,6 +100,7 @@ package sim
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1140,17 +1141,16 @@ func seriesMonotonicity(samples []uint64) (decreased bool, advances int) {
 }
 
 // equalInts reports whether two tick-ordinal sequences are identical.
-func equalInts(a, b []int) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
+//
+// It delegates to [slices.Equal], which has exactly the same contract — equal
+// lengths and elementwise equality, with a nil and an empty slice equal — and is
+// kept as a named helper because the ordinal comparisons read better at the call
+// sites. The hand-written index loop it replaces was semantically identical but
+// indexed b under a range over a, which gosec's G602 flags as an out-of-range
+// index the moment a call site gives it slices of known length: it cannot see that
+// the length guard above already made the two equal. That is a false positive, but
+// suppressing it would have left the rule off for a real one.
+func equalInts(a, b []int) bool { return slices.Equal(a, b) }
 
 // -----------------------------------------------------------------------------
 // Adjudication

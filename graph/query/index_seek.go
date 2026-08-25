@@ -23,8 +23,12 @@ package query
 // BoundNode() (label, property string, ok bool) method. The concrete value type
 // V the [index.Manager] erased is recovered by a small, closed set of type
 // assertions against the concrete index's own typed read interface
-// (hashLookuper / btreeRanger below), one per supported V — never by re-boxing
-// through a generic any-typed read on the Manager.
+// (hashLookuper / btreeRanger below) — never by re-boxing through a generic
+// any-typed read on the Manager. Which assertions the set contains is decided
+// by the PREDICATE's semantics, not by which value types the indexes can
+// encode: both an equality and a range assert one per value FAMILY — the kinds
+// openCypher unifies are one family and are asserted once, under the only key
+// type that can carry them all (see [hashLookuper] and [btreeRanger]).
 //
 // Bound indexes are always label-scoped, so a covering index exists only when
 // the same Vertex predicate set also constrains a label. A property predicate
@@ -53,8 +57,63 @@ package query
 // the seeding step, and W ∩ P ⊆ W can never reintroduce an id absent from W, so
 // any transiently-stale id an index might carry is dropped by the intersection
 // and no separate tombstone re-prune of the index result is needed.
+//
+// # Exact seek vs superset seek (tasks #2600, #2601)
+//
+// A seek may REPLACE the per-node comparison only when the index it read is an
+// exact mirror of the predicate over its (label, property) pair. That holds for
+// a STRING or BOOLEAN equality against a hash index of that key type, and for a
+// STRING range against a string-keyed btree. It does NOT hold for anything
+// NUMERIC — neither a range nor an equality.
+//
+// openCypher treats INTEGER and FLOAT as one numeric kind, for ORDER and for
+// EQUALITY alike. It is the sole off-diagonal entry of the comparability matrix
+// in the normative CIP "Comparability and Orderability"
+// (cip/1.adopted/CIP2016-06-14-*), which also says numbers of different types
+// can be EQUAL; the TCK pins the order in
+// expressions/comparison/Comparison2.feature ("Comparing across types yields
+// null, except numbers") and the equality in Comparison1.feature ("1 = 1.0" is
+// true). So a numeric predicate must consider both kinds at once. The only index
+// shape carrying both is the engine's float64-keyed numeric companion
+// (cypher/index_binding.go projectNumericPropValue), whose keys widen int64 to
+// float64 and therefore round above 2^53. Its Range is consequently a SUPERSET
+// of the answer, never the answer itself.
+//
+// So seekRangeInto and trySeekProperty each report BOTH whether they served the
+// predicate and whether the result was exact, and seekIndexablePreds marks the
+// predicate served only when it was exact. For an inexact seek the per-node
+// comparison — [valueInRange] for a range, [equalValue] for an equality — stays
+// in place over the narrowed working set as the exact residual filter: the same
+// superset-plus-residual shape the Cypher engine's planner already uses for the
+// numeric companion.
+//
+// The two tasks closed the two halves of the same divergence, and reading them
+// together is what makes this file's shape make sense.
+//
+// #2600: with Float64Value BOUNDS over an int64-valued property the range seek
+// returned the numeric matches (agreeing with the Cypher engine and with an
+// independent model) while valueInRange required v, lo and hi to share a kind
+// and returned nothing. The comparison was unified and the residual added.
+//
+// #2601: that left the EQUALITY still requiring a shared kind, so
+// WithRange("v", Float64Value(5), Float64Value(5)) matched a stored Int64Value(5)
+// and WithProperty("v", Float64Value(5)) did not — the same data answering
+// differently depending on how the predicate was written. equalValue was
+// unified through the same exact comparator, the numeric hash arms were removed
+// as unsound subsets, and a numeric equality is now served from the companion
+// btree as the degenerate range [v, v]. An equality and a degenerate range over
+// the same value therefore agree by CONSTRUCTION for every orderable value: one
+// comparator, one index, one residual.
+//
+// The identity is scoped to the orderable kinds, and deliberately so.
+// openCypher's equatability is wider than its comparability: BOOLEAN, BYTES and
+// TIME are equal to themselves but are not ordered scalars, so WithProperty
+// matches over them where the degenerate WithRange cannot. See [equalValue].
 
 import (
+	"cmp"
+	"math"
+
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -83,37 +142,123 @@ type boundNodeIndex interface {
 }
 
 // hashLookuper is the typed equality-read interface of hash.Index[V]. The query
-// engine asserts it for each supported V (string / int64 / float64 / bool) to
-// recover the value type the index.Manager erased, without any generic read on
-// the Manager. Cardinality drives the clone-avoidance branch; LookupAppend and
-// Lookup are the two read shapes the combination strategy selects between.
+// engine asserts it for the kinds an equality is NOT unified across — string
+// and bool — to recover the value type the index.Manager erased, without any
+// generic read on the Manager. Cardinality drives the clone-avoidance branch;
+// LookupAppend and Lookup are the two read shapes the combination strategy
+// selects between.
+//
+// Both instantiations are reachable, but only hashLookuper[string] is reachable
+// through an ENGINE-created index: a Cypher CREATE INDEX always builds a
+// hash.Index[string] (cypher/index_binding.go newBoundNodeHashIndex), so the
+// bool arm is taken only for a hand-built hash.NewBound index. Both are
+// exercised in TestSeek_EqualityMatchesScan_AllKinds (index_seek_test.go).
+//
+// # Why there is no numeric arm (#2601)
+//
+// A hashLookuper[int64] and a hashLookuper[float64] arm existed until #2601 and
+// were REMOVED, for the same reason #2600 removed btreeRanger[int64] one task
+// earlier. While equality required the stored value and the expected value to
+// share a kind, a single-kind hash index was an exact mirror of the equality it
+// served. Once equality unified INTEGER and FLOAT ([equalValue]), an
+// int64-keyed index became a SUBSET of the answer — it cannot hold the
+// float-valued nodes a unified equality must also match — and a subset cannot
+// be repaired by a residual filter.
+//
+// A float64-keyed hash index is not a way out, and the reason is worth stating
+// because it is not symmetric with the btree case. Its exactness rested on the
+// UNSTATED assumption that it keys only float-valued nodes; a hand-built index
+// keying integers under a float64 key — exactly what the engine's own
+// projectNumericPropValue does — breaks that, and above 2^53 several distinct
+// integers share one key. The typed read interface cannot tell the two
+// projections apart, so the arm is either a subset or an over-returning arm
+// trusted as exact, and neither is admissible. Unlike btreeRanger[float64],
+// there is also no engine-created hash index of that shape whose coverage
+// contract could be relied on: the engine builds hash.Index[string] only.
+//
+// So a NUMERIC equality is not hash-served at all. It is served instead from
+// the float64-keyed numeric btree companion as a degenerate range — a SUPERSET
+// with [equalValue] as the exact residual filter (see [seekNumericEqInto]),
+// which is the one shape that provably cannot under-return.
 type hashLookuper[V comparable] interface {
 	Cardinality(value V) uint64
 	LookupAppend(value V, dst []uint64) []uint64
 	Lookup(value V) *roaring64.Bitmap
 }
 
-// btreeRanger is the typed range-read interface of btree.Index[V]. Only the
-// ordered scalar kinds the btree supports are asserted (string / int64 /
-// float64); a bool range is meaningless and never attempted.
+// btreeRanger is the typed range-read interface of btree.Index[V]. Exactly two
+// instantiations are asserted, and which two is decided by the predicate's
+// semantics rather than by which value types the btree happens to encode:
+//
+//   - btreeRanger[string] serves a STRING range EXACTLY. A bound string btree
+//     holds precisely the string-valued nodes of its (label, property) pair,
+//     which is precisely the set a string-bounded [WithRange] can match, so the
+//     per-node comparison is skipped for it.
+//   - btreeRanger[float64] serves EVERY numeric predicate as a SUPERSET — a
+//     range ([seekRangeInto]) and, since #2601, an equality seeked as the
+//     degenerate range [v, v] ([seekNumericEqInto]). INTEGER and FLOAT are one
+//     numeric kind for order and for equality alike, so a numeric predicate
+//     must match both, and a float64-keyed index is the only shape that can
+//     carry both. Its keys round above 2^53, so the exact per-node comparison —
+//     [valueInRange] or [equalValue] — always runs over its output as the
+//     residual filter.
+//
+// A btreeRanger[int64] arm existed until #2600 and was REMOVED rather than
+// retained: once the range comparison unified INTEGER and FLOAT, an int64-keyed
+// index became a SUBSET of the answer — it cannot hold the float-valued nodes a
+// numeric range must also match — and a subset cannot be repaired by a residual
+// filter. An int64-keyed btree is therefore no longer consulted at all and the
+// predicate scans, which is correct, if slower. #2601 removed the numeric
+// hashLookuper arms for the same reason one task later, so the two families now
+// carry the same rule: only the float64-keyed btree may serve a numeric
+// predicate, and only inexactly.
+//
+// # Coverage contract for the numeric arm
+//
+// A bound float64-keyed btree covering (label, property) must key EVERY numeric
+// value of that property — integers widened to float64 as well as floats — so
+// that its Range is a superset of the numeric answer. The engine's numeric
+// companion satisfies this by construction (cypher/index_binding.go
+// projectNumericPropValue indexes both PropInt64 and PropFloat64). A hand-built
+// float64-keyed bound index that projected only PropFloat64 would be a subset
+// and would make the seek under-return; that is the one contract this file
+// requires of an index beyond the (label, property) coverage [indexCovers]
+// checks.
+//
+// The contract now underwrites the equality arm as well as the range arm, which
+// WIDENS its consequences without changing its wording: an index that violates
+// it used to make only a range under-return, and now makes an equality
+// under-return too.
+//
+// NaN is the one value the companion legitimately omits
+// (projectNumericPropValue never indexes it), and both arms are unaffected for
+// their own reason: no non-NaN range returns a NaN key, and nothing is EQUAL to
+// NaN, so a NaN-valued node is never in either answer.
 type btreeRanger[V comparable] interface {
 	Range(lo, hi V) *roaring64.Bitmap
 }
 
-// withRange matches nodes whose given property is an ordered scalar in the
-// inclusive interval [lo, hi]. It is the range counterpart to withProperty:
-// when a covering btree index exists the engine serves it with a single
-// Range seek, otherwise it falls back to the per-node comparison below.
+// withRange matches nodes whose given property lies in the inclusive interval
+// [lo, hi] under openCypher comparability. It is the range counterpart to
+// withProperty: a covering btree index narrows the working set with a single
+// Range seek, which for a string range IS the answer and for a numeric range is
+// a superset the per-node comparison below then filters exactly.
 type withRange[N comparable, W any] struct {
 	lo, hi lpg.PropertyValue
 	key    string
 }
 
-// Match implements the per-node fallback for a range predicate: it keeps a node
-// when its property value is the same kind as the bounds and lies within
-// [lo, hi] under that kind's natural order. Mixed-kind bounds (lo and hi of
-// different kinds) never match. This is the scan path; a covering btree index
-// short-circuits it in filterByPreds.
+// Match implements the per-node comparison for a range predicate: it keeps a
+// node when its property value satisfies BOTH bound tests of [WithRange] —
+// v >= lo and v <= hi — each evaluated independently under openCypher's
+// comparability rules, so lo and hi need not share a kind. INTEGER and FLOAT
+// compare in one numeric order, exactly (an int64 is never widened to float64);
+// every other cross-kind pair is not comparable and its bound test is false.
+//
+// This is the scan path. A covering btree index narrows the working set ahead
+// of it in filterByPreds, but only a STRING range skips it: a numeric range is
+// served from a lossy float64-keyed index, so this comparison remains as the
+// exact residual filter over the seek's output (#2600).
 func (p withRange[N, W]) Match(g *lpg.Graph[N, W], id graph.NodeID) bool {
 	n, ok := g.AdjList().Mapper().Resolve(id)
 	if !ok {
@@ -126,45 +271,181 @@ func (p withRange[N, W]) Match(g *lpg.Graph[N, W], id graph.NodeID) bool {
 	return valueInRange(v, p.lo, p.hi)
 }
 
-// WithRange returns a [Predicate] selecting nodes whose named property is an
-// ordered scalar (string, int64, or float64) within the inclusive interval
-// [lo, hi]. lo and hi must share the property's kind; bounds of a different
-// kind, or of a non-ordered kind (bool, bytes, time, list), match nothing.
+// WithRange returns a [Predicate] selecting nodes whose named property lies in
+// the inclusive interval [lo, hi].
+//
+// # Comparison semantics
+//
+// The two bound tests — v >= lo and v <= hi — are INDEPENDENT, exactly as
+// openCypher's comparability rules make them, so lo and hi need not share a
+// kind. A bound test holds only when the two values are comparable AND the
+// relation is true:
+//
+//   - STRING against STRING: byte-wise order.
+//   - INTEGER against INTEGER, FLOAT against FLOAT, and INTEGER against FLOAT:
+//     one numeric order, compared EXACTLY. An int64 is never widened to
+//     float64, so 4611686018427387905 and 4611686018427387900 stay distinct
+//     even though both round to the same float64 (2^62).
+//   - Every other pair — a number against a string, or either side a stored
+//     [lpg.PropBool], [lpg.PropBytes], [lpg.PropTime] or [lpg.PropList] — is
+//     not comparable, and its bound test is false. (A Cypher temporal value is
+//     delivered to the property layer as a TAGGED PropString, not as a
+//     PropTime, so it is ordered as a string; that is unchanged by #2600.)
+//
+// A NaN operand makes every comparison FALSE (never null), which is the
+// IEEE-754 outcome openCypher adopts: a NaN property value never matches, and a
+// NaN bound matches nothing.
+//
+// # Index acceleration
 //
 // When the owning graph carries a btree index covering the predicate's
 // (label, property) pair — and the same [Pattern.Vertex] call also constrains
-// that label — the engine serves the range from the index in O(log n + k)
-// instead of scanning every node in the working set. The index result is
-// identical to the scan result.
+// that label — the engine narrows the working set from the index with one
+// O(log n + k) seek before any property is read. What happens next depends on
+// whether that seek is exact:
+//
+//   - A STRING range is served EXACTLY, so the per-node comparison is skipped
+//     entirely and no property is read.
+//   - A NUMERIC range is served from a float64-keyed index whose keys round
+//     above 2^53, so the seek is only a SUPERSET: the exact comparison above
+//     still runs, but over what the seek left rather than over the whole
+//     working set.
+//
+// Either way the answer is identical to the answer the same query returns with
+// no index present.
 func WithRange[N comparable, W any](key string, lo, hi lpg.PropertyValue) Predicate[N, W] {
 	return withRange[N, W]{key: key, lo: lo, hi: hi}
 }
 
-// valueInRange reports whether v lies within [lo, hi] under the kind shared by
-// all three values. It returns false unless v, lo, and hi are the same ordered
-// kind, so it is the exact scan-side mirror of the btree's typed Range.
+// valueInRange reports whether v satisfies both bound tests of [WithRange]:
+// v >= lo AND v <= hi, each under openCypher comparability and each independent
+// of the other, so lo and hi need not share a kind.
+//
+// It is the predicate's DEFINITION, not a fallback. For a numeric range the
+// index seek is only a superset of the answer (see [btreeRanger]), so
+// filterByPreds runs this over the seek's output as the exact residual filter.
 func valueInRange(v, lo, hi lpg.PropertyValue) bool {
-	if v.Kind() != lo.Kind() || v.Kind() != hi.Kind() {
+	if c, ok := compareValues(v, lo); !ok || c < 0 {
 		return false
 	}
-	switch v.Kind() {
+	c, ok := compareValues(v, hi)
+	return ok && c <= 0
+}
+
+// compareValues orders two [lpg.PropertyValue]s under openCypher's
+// comparability rules, returning -1, 0 or +1 for a < b, a == b and a > b.
+//
+// ok is false when the pair is NOT ordered, and the caller must then treat
+// every relational test over it as false. Two situations produce ok=false, and
+// collapsing them is deliberate because [WithRange] cannot distinguish their
+// outcomes:
+//
+//   - A cross-type pair other than INTEGER/FLOAT. openCypher makes comparing
+//     across types null, and a null bound test fails the filter exactly as a
+//     false one does.
+//   - A NaN operand. Every comparison involving NaN is FALSE, so reporting the
+//     pair as unordered yields the same false for >=, <= and ==.
+//
+// It is NOT an equality or an equivalence test and must not be reused as one:
+// all three unify INTEGER and FLOAT but they differ at NaN, where equivalence
+// holds (a value set folds NaN onto itself — cypher/exec/constraints.go
+// floatCanonicalKey) and comparability does not.
+func compareValues(a, b lpg.PropertyValue) (int, bool) {
+	switch a.Kind() {
 	case lpg.PropString:
-		x, _ := v.String()
-		l, _ := lo.String()
-		h, _ := hi.String()
-		return x >= l && x <= h
+		if b.Kind() != lpg.PropString {
+			return 0, false
+		}
+		x, _ := a.String()
+		y, _ := b.String()
+		return cmp.Compare(x, y), true
 	case lpg.PropInt64:
-		x, _ := v.Int64()
-		l, _ := lo.Int64()
-		h, _ := hi.Int64()
-		return x >= l && x <= h
+		x, _ := a.Int64()
+		switch b.Kind() {
+		case lpg.PropInt64:
+			y, _ := b.Int64()
+			return cmp.Compare(x, y), true
+		case lpg.PropFloat64:
+			y, _ := b.Float64()
+			return cmpInt64Float64(x, y)
+		}
+		return 0, false
 	case lpg.PropFloat64:
-		x, _ := v.Float64()
-		l, _ := lo.Float64()
-		h, _ := hi.Float64()
-		return x >= l && x <= h
+		x, _ := a.Float64()
+		switch b.Kind() {
+		case lpg.PropInt64:
+			y, _ := b.Int64()
+			c, ok := cmpInt64Float64(y, x)
+			return -c, ok
+		case lpg.PropFloat64:
+			y, _ := b.Float64()
+			// Raw IEEE-754 comparison, deliberately: it is what makes every
+			// relation against NaN FALSE rather than giving NaN a position in the
+			// order. cmp.Compare cannot be used here — it treats NaN as less than
+			// every non-NaN and equal to itself, which is a sortable total order
+			// and neither the comparability rule nor openCypher's ORDER BY rule
+			// (which places NaN after every number — cypher/expr/value.go
+			// cmpFloat64).
+			switch {
+			case x < y:
+				return -1, true
+			case x > y:
+				return 1, true
+			case x == y:
+				return 0, true
+			}
+			return 0, false // an operand is NaN
+		}
+		return 0, false
 	}
-	return false
+	// PropBool, PropTime, PropBytes and PropList are not ordered scalars under
+	// openCypher comparability, so no bound test over them can hold.
+	return 0, false
+}
+
+// float64TwoTo63 is 2^63 as a float64, which is exactly representable. Every
+// int64 is strictly below it and at or above its negation, so comparing a
+// float64 against it is what makes the float64 -> int64 conversion in
+// [cmpInt64Float64] well defined.
+const float64TwoTo63 = 9223372036854775808.0
+
+// cmpInt64Float64 compares an int64 against a float64 EXACTLY — as
+// unlimited-precision numbers — returning -1, 0 or +1 for i < f, i == f and
+// i > f. ok is false when f is NaN, which is not a position in the order.
+//
+// It never widens i to float64. float64(i) rounds for |i| > 2^53, so a widening
+// comparison would fold 4611686018427387905 and 4611686018427387900 onto the
+// same value (both round to 2^62) and report them equal — which the openCypher
+// TCK explicitly forbids (expressions/comparison/Comparison1.feature, the
+// large-integer inequality scenarios). The precedent for refusing a lossy
+// widening in this repository is the int64 round-trip guard in
+// cypher/exec/constraints.go floatCanonicalKey.
+func cmpInt64Float64(i int64, f float64) (int, bool) {
+	if math.IsNaN(f) {
+		return 0, false
+	}
+	// A float outside int64's range settles the comparison on its own; the two
+	// guards also cover +Inf and -Inf, and are what bound the conversion below.
+	if f >= float64TwoTo63 {
+		return -1, true
+	}
+	if f < -float64TwoTo63 {
+		return 1, true
+	}
+	// f is finite and within int64 range, so its integral part converts exactly.
+	t := math.Trunc(f)
+	if c := cmp.Compare(i, int64(t)); c != 0 {
+		return c, true
+	}
+	// Equal integral parts: the fractional part decides. Trunc rounds towards
+	// zero, so a positive f has f > t and a negative f has f < t.
+	switch {
+	case f > t:
+		return -1, true
+	case f < t:
+		return 1, true
+	}
+	return 0, true
 }
 
 // labelsInPreds collects the label names constrained by the WithLabel
@@ -180,42 +461,77 @@ func labelsInPreds[N comparable, W any](preds []Predicate[N, W]) []string {
 	return labels
 }
 
-// trySeekProperty attempts to satisfy an equality predicate from a covering
-// hash index, intersecting the result into bm in place. ok reports whether the
-// seek was served by an index; when false bm is untouched and the caller must
-// apply the per-node fallback. labels are the label names the predicate set
-// constrains (a bound index is label-scoped).
-func (p *Pattern[N, W]) trySeekProperty(bm *roaring64.Bitmap, pred withProperty[N, W], labels []string) (ok bool) {
+// trySeekProperty attempts to narrow bm from a covering index for an equality
+// predicate, intersecting the result into bm in place.
+//
+// narrowed reports whether an index was consulted; when it is false bm is
+// untouched and the caller must apply the per-node comparison to the whole
+// working set. exact reports whether the intersected set is the ANSWER, so the
+// caller may skip the per-node comparison, or merely a SUPERSET of it, so the
+// caller must keep [equalValue] as a residual filter. exact is meaningful only
+// when narrowed is true.
+//
+// Two index families can serve an equality, and which one depends on the
+// expected value's kind rather than on which indexes happen to exist:
+//
+//   - STRING and BOOLEAN go to a bound hash index of that key type, EXACTLY
+//     ([seekHashInto]).
+//   - INTEGER and FLOAT go to the float64-keyed numeric btree companion as a
+//     degenerate range, as a SUPERSET ([seekNumericEqInto]). They are not
+//     hash-served at all since #2601 — see [hashLookuper].
+//
+// labels are the label names the predicate set constrains (a bound index is
+// label-scoped). A single pass over the manager's indexes serves both families:
+// an index of the wrong Kind() or the wrong key type simply declines, so the
+// first index that can serve the value's kind wins and the rest are skipped.
+func (p *Pattern[N, W]) trySeekProperty(
+	bm *roaring64.Bitmap, pred withProperty[N, W], labels []string,
+) (narrowed, exact bool) {
 	mgr := p.engine.g.IndexManager()
 	if mgr == nil || len(labels) == 0 {
-		return false
+		return false, false
 	}
 	for _, name := range mgr.ListIndexes() {
 		sub, err := mgr.GetIndex(name)
-		if err != nil || sub.Kind() != "hash" {
+		if err != nil {
 			continue
 		}
 		if !indexCovers(sub, labels, pred.key) {
 			continue
 		}
-		if seekHashInto(bm, sub, pred.expected) {
-			return true
+		switch sub.Kind() {
+		case "hash":
+			if seekHashInto(bm, sub, pred.expected) {
+				return true, true
+			}
+		case "btree":
+			if seekNumericEqInto(bm, sub, pred.expected) {
+				return true, false
+			}
 		}
 	}
-	return false
+	return false, false
 }
 
-// trySeekRange attempts to satisfy a range predicate from a covering btree
-// index, intersecting the result into bm in place. ok reports whether the seek
-// was served by an index; when false bm is untouched and the caller must apply
-// the per-node fallback.
-func (p *Pattern[N, W]) trySeekRange(bm *roaring64.Bitmap, pred withRange[N, W], labels []string) (ok bool) {
+// trySeekRange attempts to narrow bm from a covering btree index for a range
+// predicate.
+//
+// narrowed reports whether an index was consulted and intersected into bm; when
+// it is false bm is untouched. exact reports whether the intersected set is the
+// ANSWER, so the caller may skip the per-node comparison, or merely a SUPERSET
+// of it, so the caller must keep [valueInRange] as a residual filter. exact is
+// meaningful only when narrowed is true.
+//
+// There is no bail-out on pred.lo.Kind() != pred.hi.Kind(). The two bound tests
+// are independent under openCypher comparability, so a range with an INTEGER
+// lower bound and a FLOAT upper bound is a well-formed numeric range; refusing
+// it made the seek arm consistently wrong instead of merely divergent (#2600).
+func (p *Pattern[N, W]) trySeekRange(
+	bm *roaring64.Bitmap, pred withRange[N, W], labels []string,
+) (narrowed, exact bool) {
 	mgr := p.engine.g.IndexManager()
 	if mgr == nil || len(labels) == 0 {
-		return false
-	}
-	if pred.lo.Kind() != pred.hi.Kind() {
-		return false
+		return false, false
 	}
 	for _, name := range mgr.ListIndexes() {
 		sub, err := mgr.GetIndex(name)
@@ -225,11 +541,11 @@ func (p *Pattern[N, W]) trySeekRange(bm *roaring64.Bitmap, pred withRange[N, W],
 		if !indexCovers(sub, labels, pred.key) {
 			continue
 		}
-		if seekRangeInto(bm, sub, pred.lo, pred.hi) {
-			return true
+		if served, isExact := seekRangeInto(bm, sub, pred.lo, pred.hi); served {
+			return true, isExact
 		}
 	}
-	return false
+	return false, false
 }
 
 // indexCovers reports whether sub is a bound index covering (label, propKey)
@@ -257,10 +573,18 @@ func indexCovers(sub index.Subscriber, labels []string, propKey string) bool {
 }
 
 // seekHashInto recovers the hash index's value type by asserting the typed
-// hashLookuper for each supported scalar kind, runs the seek for the matching
-// PropertyValue kind, and intersects the matches into bm in place. ok reports
-// whether a supported (index V, value kind) pair was found and served. A
-// kind/V mismatch (e.g. a string value against an int64 index) returns false so
+// [hashLookuper] for the kind of value, runs the seek, and intersects the
+// matches into bm in place. ok reports whether a supported (index V, value kind)
+// pair was found and served, and a served hash seek is always EXACT.
+//
+// Only STRING and BOOLEAN are served here. Those are the kinds an equality is
+// not unified across, so a bound hash index keyed by one of them holds exactly
+// the nodes the equality can match and is a faithful mirror of it. A NUMERIC
+// value is deliberately NOT served — see [hashLookuper] for why a single-kind
+// hash index cannot mirror a unified numeric equality — and falls through to
+// [seekNumericEqInto].
+//
+// A kind/V mismatch (e.g. a string value against a bool index) returns false so
 // the caller falls back to the scan, which yields the same (empty under
 // openCypher type rules) result a seek would.
 func seekHashInto(bm *roaring64.Bitmap, sub index.Subscriber, value lpg.PropertyValue) (ok bool) {
@@ -268,18 +592,6 @@ func seekHashInto(bm *roaring64.Bitmap, sub index.Subscriber, value lpg.Property
 	case lpg.PropString:
 		if idx, isT := sub.(hashLookuper[string]); isT {
 			v, _ := value.String()
-			intersectHashEq(bm, idx, v)
-			return true
-		}
-	case lpg.PropInt64:
-		if idx, isT := sub.(hashLookuper[int64]); isT {
-			v, _ := value.Int64()
-			intersectHashEq(bm, idx, v)
-			return true
-		}
-	case lpg.PropFloat64:
-		if idx, isT := sub.(hashLookuper[float64]); isT {
-			v, _ := value.Float64()
 			intersectHashEq(bm, idx, v)
 			return true
 		}
@@ -291,6 +603,60 @@ func seekHashInto(bm *roaring64.Bitmap, sub index.Subscriber, value lpg.Property
 		}
 	}
 	return false
+}
+
+// seekNumericEqInto narrows bm from a float64-keyed btree for a NUMERIC
+// equality, by seeking the DEGENERATE range [value, value] through exactly the
+// machinery [seekRangeInto] uses for a numeric range: [numericSeekBounds]
+// widens the bound outwards so no true match can fall outside the interval
+// seeked. narrowed reports whether an index was consulted and intersected into
+// bm; the result is NEVER exact, so the caller keeps [equalValue] as the
+// residual filter.
+//
+// # Why this cannot under-return
+//
+// It is [numericSeekBounds]' superset argument at lo = hi = value, and needs
+// nothing added to it. Any candidate property value u that satisfies the
+// equality is numerically EQUAL to value, so lof <= value = u <= hif, which is
+// the premise that argument already takes: the companion key float64(u) then
+// lies inside [lof, hif]. The argument assumes only that an int64 -> float64
+// conversion lands on one of the two bracketing float64 values, never that it
+// rounds to nearest.
+//
+// Above 2^53 the interval admits values that are NOT equal — the three integers
+// around 2^62 share one float64 key — so the seek over-returns and [equalValue]
+// removes the surplus exactly. Over-returning is repairable; under-returning is
+// not, which is the whole reason this arm reads a btree rather than a hash.
+//
+// A NaN-valued node is absent from the companion (cypher/index_binding.go
+// projectNumericPropValue never indexes NaN) and that is harmless HERE for a
+// reason specific to equality rather than inherited from the range arm: nothing
+// is equal to NaN, so a NaN-valued node is not in the answer to begin with.
+//
+// # The coverage contract, shared with the range arm
+//
+// A bound float64-keyed btree covering (label, property) must key EVERY numeric
+// value of that property, integers widened to float64 included, or its Range is
+// a subset rather than a superset. The engine's companion satisfies this by
+// construction; the contract is stated in full on [btreeRanger].
+func seekNumericEqInto(bm *roaring64.Bitmap, sub index.Subscriber, value lpg.PropertyValue) (narrowed bool) {
+	if !isNumericKind(value.Kind()) {
+		return false
+	}
+	idx, isT := sub.(btreeRanger[float64])
+	if !isT {
+		return false
+	}
+	lo, hi, satisfiable := numericSeekBounds(value, value)
+	if !satisfiable {
+		// A NaN expected value: nothing is equal to it, so the answer is empty and
+		// there is nothing to seek. The residual then runs over an empty working
+		// set at no cost.
+		bm.Clear()
+		return true
+	}
+	bm.And(idx.Range(lo, hi))
+	return true
 }
 
 // intersectHashEq narrows bm to the NodeIDs the hash index associates with v.
@@ -321,34 +687,138 @@ func intersectHashEq[V comparable](bm *roaring64.Bitmap, idx hashLookuper[V], v 
 }
 
 // seekRangeInto recovers the btree index's value type by asserting the typed
-// btreeRanger for each supported ordered kind, runs the range seek for the
-// matching bound kind, and intersects the union into bm in place. ok reports
-// whether a supported (index V, bound kind) pair was found and served. The
-// btree returns a fresh, frequently large union bitmap, so the combination is
-// always the container-adaptive Roaring And (no clone-avoidance branch).
-func seekRangeInto(bm *roaring64.Bitmap, sub index.Subscriber, lo, hi lpg.PropertyValue) (ok bool) {
-	switch lo.Kind() {
-	case lpg.PropString:
-		if idx, isT := sub.(btreeRanger[string]); isT {
-			l, _ := lo.String()
-			h, _ := hi.String()
-			bm.And(idx.Range(l, h))
-			return true
+// [btreeRanger] for the FAMILY the bounds belong to, runs the range seek, and
+// intersects its result into bm in place. The btree returns a fresh, frequently
+// large union bitmap, so the combination is always the container-adaptive
+// Roaring And (no clone-avoidance branch).
+//
+// narrowed reports whether a supported (index V, bound family) pair was found
+// and served; exact reports whether the intersected set is the answer or a
+// superset of it:
+//
+//   - STRING bounds against a string-keyed index: EXACT.
+//   - NUMERIC bounds (INTEGER, FLOAT, or one of each) against the float64-keyed
+//     index: a SUPERSET. The index widens int64 keys to float64, and
+//     [numericSeekBounds] widens the bounds OUTWARDS so no true match can fall
+//     outside the interval seeked.
+//   - Bounds from two different families — a string against a number — can
+//     never both hold, so no index is consulted and the per-node comparison
+//     rejects every candidate.
+func seekRangeInto(
+	bm *roaring64.Bitmap, sub index.Subscriber, lo, hi lpg.PropertyValue,
+) (narrowed, exact bool) {
+	switch {
+	case lo.Kind() == lpg.PropString && hi.Kind() == lpg.PropString:
+		idx, isT := sub.(btreeRanger[string])
+		if !isT {
+			return false, false
 		}
-	case lpg.PropInt64:
-		if idx, isT := sub.(btreeRanger[int64]); isT {
-			l, _ := lo.Int64()
-			h, _ := hi.Int64()
-			bm.And(idx.Range(l, h))
-			return true
+		l, _ := lo.String()
+		h, _ := hi.String()
+		bm.And(idx.Range(l, h))
+		return true, true
+	case isNumericKind(lo.Kind()) && isNumericKind(hi.Kind()):
+		idx, isT := sub.(btreeRanger[float64])
+		if !isT {
+			return false, false
 		}
-	case lpg.PropFloat64:
-		if idx, isT := sub.(btreeRanger[float64]); isT {
-			l, _ := lo.Float64()
-			h, _ := hi.Float64()
-			bm.And(idx.Range(l, h))
-			return true
+		l, h, satisfiable := numericSeekBounds(lo, hi)
+		if !satisfiable {
+			// A NaN bound: no value can satisfy the predicate, so the answer is
+			// empty and there is nothing to seek. exact stays false so the numeric
+			// arm keeps exactly one contract — always residual-filtered — and the
+			// residual then runs over an empty working set at no cost.
+			bm.Clear()
+			return true, false
 		}
+		bm.And(idx.Range(l, h))
+		return true, false
 	}
-	return false
+	return false, false
+}
+
+// isNumericKind reports whether k is one of the two kinds openCypher places in
+// a single numeric order.
+func isNumericKind(k lpg.PropertyKind) bool {
+	return k == lpg.PropInt64 || k == lpg.PropFloat64
+}
+
+// numericSeekBounds converts a numeric bound pair into the float64 interval to
+// seek in the float64-keyed companion index. satisfiable is false when either
+// bound is NaN, because then no value can satisfy the predicate at all.
+//
+// # Why the interval is a superset
+//
+// The one invariant the superset property rests on is
+//
+//	lof <= lo   and   hi <= hif   (compared EXACTLY, never by widening)
+//
+// which [numericSeekBound] establishes rather than assumes. Given it, for any
+// candidate property value v that satisfies the predicate — an int64 or a
+// float64 with lo <= v <= hi — the companion key float64(v) lies inside
+// [lof, hif]:
+//
+//   - float64(v) is one of the two float64 values bracketing v (it equals v
+//     when v is a float64). Let D be the largest float64 <= v; then float64(v)
+//     is D or the next float64 above it, so float64(v) >= D.
+//   - lof is a float64 and lof <= lo <= v, so lof <= D <= float64(v).
+//   - Symmetrically, with U the smallest float64 >= v, float64(v) <= U, and hif
+//     is a float64 with hif >= hi >= v, so float64(v) <= U <= hif.
+//
+// The argument deliberately assumes only that an int64 -> float64 conversion
+// lands on one of the two bracketing float64 values, and NOT that it rounds to
+// nearest: the Go specification leaves the result implementation-dependent when
+// the destination type cannot represent the value exactly.
+func numericSeekBounds(lo, hi lpg.PropertyValue) (lof, hif float64, satisfiable bool) {
+	lof, ok := numericSeekBound(lo, true)
+	if !ok {
+		return 0, 0, false
+	}
+	hif, ok = numericSeekBound(hi, false)
+	if !ok {
+		return 0, 0, false
+	}
+	return lof, hif, true
+}
+
+// numericSeekBound converts one numeric bound to a float64 on the correct side
+// of it: lower=true returns a float64 <= b, lower=false a float64 >= b. ok is
+// false for a NaN bound.
+//
+// A float64 bound is already on the right side of itself. An int64 bound may not
+// be representable, so the conversion is CHECKED with the exact comparator and
+// stepped one ULP outwards when it landed on the wrong side. One step always
+// suffices: the conversion lands on one of the two float64 values bracketing i,
+// so if it overshot, the next float64 in the other direction is the bracketing
+// one on the correct side.
+//
+// The step is not merely defensive. At i = math.MaxInt64 the conversion yields
+// 2^63, which is strictly GREATER than i, so without the step a lower bound of
+// MaxInt64 would violate the lof <= lo invariant [numericSeekBounds] relies on.
+// TestNumericSeekBound_StaysOnTheCorrectSideOfTheBound asserts the invariant
+// directly for exactly that reason.
+func numericSeekBound(b lpg.PropertyValue, lower bool) (float64, bool) {
+	switch b.Kind() {
+	case lpg.PropFloat64:
+		f, _ := b.Float64()
+		if math.IsNaN(f) {
+			return 0, false
+		}
+		return f, true
+	case lpg.PropInt64:
+		i, _ := b.Int64()
+		f := float64(i)
+		// float64(i) is never NaN, so the comparator's ok result is always true.
+		c, _ := cmpInt64Float64(i, f)
+		switch {
+		case lower && c < 0:
+			// i < float64(i): the conversion overshot ABOVE a lower bound.
+			return math.Nextafter(f, math.Inf(-1)), true
+		case !lower && c > 0:
+			// i > float64(i): the conversion undershot BELOW an upper bound.
+			return math.Nextafter(f, math.Inf(1)), true
+		}
+		return f, true
+	}
+	return 0, false
 }

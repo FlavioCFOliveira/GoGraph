@@ -339,6 +339,11 @@ func (s *Swarm) runOne(ctx context.Context, idx int) SwarmRun {
 			Err:      fmt.Errorf("sim: swarm: selector chose unknown scenario %q", scenarioName),
 		}
 	}
+	// The GOMAXPROCS exclusion is enforced inside [Scenario.Run] itself, not here,
+	// so it covers every concurrent caller rather than only this one. Taking the
+	// shared side here as well would acquire it twice on this goroutine, which
+	// deadlocks whenever a clamping scenario is waiting between the two
+	// acquisitions. See [gomaxprocsMu] (rmp #2613).
 	report, err := sc.Run(ctx, seed)
 	return SwarmRun{
 		Index:    idx,

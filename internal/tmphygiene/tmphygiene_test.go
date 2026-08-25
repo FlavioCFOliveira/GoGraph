@@ -74,7 +74,34 @@ var ownedTempPrefixes = []string{
 	"sim-bulkimport-img-",
 	"sim-bulkimport-",
 	"sim-bulk-",
+	// internal/sim — the bulk-load-oracle scenario's real-filesystem arm (rmp
+	// #2488), which publishes through Finalise's own os-backed csrfile writer
+	// because that path binds the OS backend and no SimDisk can reach it.
+	//
+	// The name deliberately does NOT nest under "sim-bulk-". The coverage gate
+	// below matches a call site with matchOwnedPrefix(pattern), i.e. by
+	// CONTAINMENT, so a prefix such as "sim-bulk-oracle-" would satisfy the gate
+	// while being unlisted — and the per-prefix table would then credit this
+	// scenario's stranded directories to bulk-vs-online's bucket. A
+	// non-nesting name cannot be silently absorbed: it either appears here or
+	// fails the gate. (Nesting is reserved for a site that really is a sub-case
+	// of another, as "sim-bulkimport-img-" is of "sim-bulkimport-".)
+	"sim-bulkoracle-",
 	"sim-extern-",
+	// internal/sim — the cert-rotation scenario's projection directory (rmp #2481).
+	// CertReloader reads through os.Stat and tls.LoadX509KeyPair, so the images the
+	// SimDisk holds must be projected onto real files for it to read at all.
+	"sim-cert-rotation-",
+	// internal/sim — the ...Ctx cancellation battery's csrfile fixture (rmp #2489).
+	// The search/extern rows need a real mmap-backed csrfile.Reader, which
+	// csrfile.Open binds to the OS backend, so no SimDisk can serve it.
+	//
+	// Its own prefix, deliberately NOT nested under "sim-c..." or any other listed
+	// name, for the reason spelled out above "sim-bulkoracle-": the coverage gate
+	// matches by CONTAINMENT, so a nesting name would satisfy the gate while
+	// unlisted and its stranded directories would then be billed to the parent's
+	// bucket (rmp #2586).
+	"sim-ctxcancel-",
 	// examples/ — each example's throwaway store.
 	"gograph-ex04-",
 	"gograph-ex05-",

@@ -43,21 +43,69 @@ build: ## Build all packages
 test: ## Run unit tests
 	$(GO) test $(GOFLAGS) $(PACKAGES)
 
+# `race` is an ad-hoc developer convenience, not a gate — it is absent from `ci`'s
+# dependency list (tidy fmt vet build test-short lint cover-gate), so this flag
+# cannot alter any gate outcome. It carries SHORT_TIMEOUT because it runs the same
+# corpus under the same detector as test-short and so has the same exposure to
+# Go's 10-minute default (rmp #2584).
 .PHONY: race
-race: ## Run unit tests with the race detector
-	$(GO) test $(GOFLAGS) $(RACE_FLAGS) $(PACKAGES)
+race: ## Run unit tests with the race detector (SHORT_TIMEOUT overridable)
+	$(GO) test $(GOFLAGS) $(RACE_FLAGS) -timeout=$(SHORT_TIMEOUT) $(PACKAGES)
 
 # ── Three-layer test targets ──────────────────────────────────────
 # Each target is a strict superset of the one above it.
 # See docs/test-layers.md for the full specification.
 
-.PHONY: test-short
-test-short: ## [layer: short]   local default — race detector, no build tags
-	$(GO) test $(RACE_FLAGS) -count=1 $(PACKAGES)
+# SHORT_TIMEOUT — the short layer needs an EXPLICIT per-package timeout
+# (rmp #2584).
+#
+# Without one, Go applies its default of 10 minutes per package, and two
+# packages now run close enough to that ceiling that ordinary machine load
+# turns a green gate red. Measured on the reference host (Apple M4, 10 cores,
+# darwin/arm64, go1.26.6) on 2026-08-20:
+#
+#   * commit 147e28e4, in an isolated git worktree so contention could not be
+#     the explanation, `go test -race -count=1 ./...`: the whole suite passes
+#     (exit 0), but `ok internal/sim 545.794s` — only ~9% headroom under the
+#     600 s default — and `ok cypher 433.236s`.
+#   * with the rmp #2488 work in the tree, two consecutive `make ci` runs gave
+#     `FAIL internal/sim 600.705s` and `FAIL internal/sim 601.675s`, both
+#     `panic: test timed out after 10m0s`. Neither was hung: the second was
+#     3 s into TestTypeCoverage_NonVacuous when the alarm fired. This is
+#     cumulative budget exhaustion, not a deadlock.
+#   * run-to-run variance is large enough to swamp the signal on its own:
+#     cypher, which #2488 does not touch, measured 433.2 s / 589.5 s / 576.8 s
+#     across three runs (+33%). internal/sim takes 487.6 s in isolation against
+#     545.8 s inside `go test ./...`, because that command runs packages in
+#     parallel and they contend with each other.
+#
+# It is therefore a HEADROOM problem, not an attribution problem. The value is
+# chosen so the timeout is NOT the binding constraint — a backstop against a
+# genuinely hung package, never a budget the suite is expected to approach:
+# 30m is 3.05x the slowest package measured that actually completed (cypher,
+# 589.5 s) and 1.5x the `-timeout=20m` the coverage pass of this same `make ci`
+# gate already applies (scripts/cover_gate.sh), so a machine under sustained
+# competing load reaches the same verdict as an idle one.
+#
+# This is not a relaxation of the per-package COST budget. That budget is a
+# separate concern with its own instrument — `make test-short-timings`, 60 s
+# soft / 240 s hard, plus the documented internal/sim override in
+# docs/test-layers.md — and is deliberately untouched here.
+#
+# Overridable, so a slower or faster host needs no edit here.
+# See docs/test-layers.md for the same measurements.
+SHORT_TIMEOUT ?= 30m
 
+.PHONY: test-short
+test-short: ## [layer: short]   local default — race detector, no build tags (SHORT_TIMEOUT overridable)
+	$(GO) test $(RACE_FLAGS) -count=1 -timeout=$(SHORT_TIMEOUT) $(PACKAGES)
+
+# test-short-timings runs the IDENTICAL short layer, so it carries the identical
+# timeout: without it, the target that exists to report per-package timings
+# would be the one that could not survive long enough to report them.
 .PHONY: test-short-timings
-test-short-timings: ## [layer: short] Run the short layer (race, -json) and report packages over the 60s/pkg budget (SOFT_BUDGET/HARD_BUDGET overridable)
-	bash -o pipefail -c '$(GO) test $(RACE_FLAGS) -count=1 -json $(PACKAGES) | bash scripts/pkg_time_budget.sh'
+test-short-timings: ## [layer: short] Run the short layer (race, -json) and report packages over the 60s/pkg budget (SOFT_BUDGET/HARD_BUDGET/SHORT_TIMEOUT overridable)
+	bash -o pipefail -c '$(GO) test $(RACE_FLAGS) -count=1 -timeout=$(SHORT_TIMEOUT) -json $(PACKAGES) | bash scripts/pkg_time_budget.sh'
 
 # SOAK_TIMEOUT / NIGHTLY_TIMEOUT — the deferred layers need an EXPLICIT
 # per-package timeout (rmp #2259).

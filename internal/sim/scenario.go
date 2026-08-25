@@ -77,9 +77,10 @@ type CheckSelection struct {
 	// indexes. The set of indexes to cross-check is [CheckSelection.IndexSpecs].
 	IndexConsistency bool
 	// Search runs the search-algorithm battery ([CheckSearch]) — structural
-	// parity between the engine graph and the oracle model, plus per-algorithm
-	// correctness against independent naive references — once at the end of the
-	// run. The search scenario also sets [Scenario.SearchEvery] for periodic
+	// parity between the engine graph and the oracle model, per-algorithm
+	// correctness against independent naive references, and the
+	// context-cancellation contract of every public context-accepting entry point
+	// in the five search packages — once at the end of the run. The search scenario also sets [Scenario.SearchEvery] for periodic
 	// in-loop checks. It is meaningful only for the deterministic mode (the
 	// battery needs a consistent, quiescent view of the graph).
 	Search bool
@@ -132,6 +133,11 @@ type Scenario struct {
 	// finite size so the run drives the engine through a disk-full (ENOSPC)
 	// condition (ModeDeterministic). See [DiskConfig].
 	Disk DiskConfig
+	// ClampsGOMAXPROCS declares that this scenario WRITES process-global
+	// `GOMAXPROCS`. [Swarm] runs such a scenario alone, because the clamp would
+	// otherwise decide the regime of whatever its neighbours drew; every other
+	// scenario runs under a shared hold. See [gomaxprocsMu] (rmp #2613).
+	ClampsGOMAXPROCS bool
 	// Multigraph opens the engine's graph as a directed multigraph
 	// (ModeDeterministic), so repeated CREATEs between the same endpoints add
 	// parallel edge instances. Only a scenario whose oracle models edges per
@@ -179,6 +185,21 @@ func (sc *Scenario) resolveSeed(override uint64, useOverride bool) uint64 {
 // concurrent and liveness modes the run is convergence/leak-guarded and the
 // report, when non-nil, describes the inconsistency found at quiescence.
 func (sc *Scenario) Run(ctx context.Context, seed uint64) (*SimReport, error) {
+	// A scenario that does NOT clamp takes the shared side of [gomaxprocsMu] for
+	// its whole run, so it can never overlap a clamping scenario running beside
+	// it. A clamping scenario takes the exclusive side inside its own run, where
+	// it owns the save/restore window.
+	//
+	// This lives here rather than in [Swarm.runOne] so the guarantee is a property
+	// of the scenario API: any caller that runs two scenarios at once gets it,
+	// including tests that run in parallel. The one recursive Run in this package
+	// (runCPUStarvation's inner scenario) marks itself ClampsGOMAXPROCS precisely
+	// so it does not re-enter the shared side while the outer call holds the
+	// exclusive one. See [gomaxprocsMu] (rmp #2613).
+	if !sc.ClampsGOMAXPROCS {
+		defer holdGOMAXPROCSShared()()
+	}
+
 	if sc.run != nil {
 		return sc.run(ctx, seed)
 	}

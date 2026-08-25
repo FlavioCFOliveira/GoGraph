@@ -106,6 +106,22 @@ multiset).
 > occupies, so a general worst-case-optimal join degenerates on a binary relation and
 > is unconditionally out of scope.
 
+> **Note on anonymous pattern heads (#2603).** The single-edge anchor swap also
+> declines any site whose SOURCE endpoint is anonymous. This is a *representational*
+> veto rather than a cost or order one. The written plan enforces the source's label
+> in the access path itself (`NodeByLabelScan`), which needs no variable name; the
+> re-rooted plan has to re-check that same label as a predicate above the reversed
+> expand, and a predicate can only reach a node through its name. The IR translator
+> names every non-head node of a pattern with a synthetic variable but leaves the
+> head's name empty, so for a pattern such as `MATCH (:A)-[:R]->(b:B)` the mirror
+> would carry a label predicate over the empty name — which binds to no column,
+> evaluates to `NULL`, and silently discards every row. The veto keeps the written
+> order for these patterns, which costs the optimisation on them; recovering it
+> requires the mirror to bind that endpoint to a readable name, which is a change to
+> the reversal itself and not to this gate. It is the concrete shape in which §6's
+> "preserve all variable bindings" invariant cannot be honoured: there is no name to
+> bind, so the re-check has nothing to read.
+
 ## 4. Order-safety suppression (cypher-expert-consultant)
 
 Reordering permutes row emission order of a bag; openCypher leaves that order

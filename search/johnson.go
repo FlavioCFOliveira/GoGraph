@@ -169,9 +169,10 @@ func JohnsonAPSP[W Weight](c *csr.CSR[W]) (*APSP[W], error) {
 }
 
 // JohnsonAPSPCtx is the context-aware variant of [JohnsonAPSP].
-// ctx.Err() is checked once per source vertex during the Dijkstra
-// pass and at every relaxation-round boundary during the
-// Bellman-Ford pass; on cancellation returns (nil, wrapped ctx.Err()).
+// ctx.Err() is checked on entry to the Bellman-Ford reweighting pass and
+// every 4096 dequeues thereafter, then once per source vertex during the
+// Dijkstra pass; on cancellation returns (nil, the raw ctx.Err()). A
+// cancelled context outranks [ErrNegativeCycle].
 func JohnsonAPSPCtx[W Weight](ctx context.Context, c *csr.CSR[W]) (*APSP[W], error) {
 	defer metrics.Time("search.JohnsonAPSPCtx").Stop()
 	p, err := johnsonPrepare[W](ctx, c)
@@ -393,12 +394,21 @@ func bellmanFordVirtualSource[W Weight](ctx context.Context, c *csr.CSR[W], h []
 
 	yieldCtr := 0
 	for head != tail {
-		yieldCtr++
+		// Check the stride mask BEFORE incrementing, so the poll lands on
+		// iteration 0. This prologue runs ahead of either Johnson entry
+		// point's own per-source poll, so with the reverse order a graph
+		// whose reweighting pass finished in under 4096 dequeues returned
+		// this pass's terminal ErrNegativeCycle in preference to the context
+		// error -- the two Johnson entries were the only ones of nine APSP /
+		// shortest-path entry points that failed to honour a dead context on
+		// a negative-cycle input (rmp #2593). The check-then-increment idiom
+		// matches dijkstra.go and prim.go.
 		if yieldCtr&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 		}
+		yieldCtr++
 		v := dq[head]
 		head = (head + 1) & mask
 		inQueue[uint64(v)] = false

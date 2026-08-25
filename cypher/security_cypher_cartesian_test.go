@@ -60,11 +60,16 @@ func secCartesianEngine(t *testing.T, n int) *cypher.Engine {
 
 // runNotifications runs q and returns the plan-time notifications attached to the
 // result. The query is fully drained and the result closed.
+//
+// No deadline: the callers run over a 4-node graph, so the largest product here
+// is 4^4 = 256 tuples — bounded and sub-millisecond. A wall-clock ceiling would
+// add no detection power and would make a NOTIFICATION-shape assertion depend on
+// how busy the machine is, reporting a loaded host as a plan-notification defect.
+// See the rationale on secCypherStringGrowSize in
+// security_cypher_string_byte_budget_test.go.
 func runNotifications(t *testing.T, eng *cypher.Engine, q string) []cypher.Notification {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	res, err := eng.Run(ctx, q, nil)
+	res, err := eng.Run(context.Background(), q, nil)
 	if err != nil {
 		t.Fatalf("Run(%q): %v", q, err)
 	}
@@ -187,17 +192,24 @@ func TestSec_Cypher_Cartesian_FinalRowCapDoesNotBoundIntermediateWork(t *testing
 	const n = 40
 	eng := secCartesianEngine(t, n)
 
-	// The timeout is a generous harness completion ceiling, NOT the security
-	// bound under test: this test asserts the 2.56M-tuple product *completes*
-	// (all intermediate tuples streamed, one row out, notification emitted). The
-	// 4-way product streams 40^4 tuples, which under the race detector on a
-	// loaded shared CI runner can take well over ten seconds; a too-tight ceiling
-	// made this flake (context deadline exceeded) without ever exercising the
-	// security property. 120s keeps the test bounded (it returns as soon as the
-	// count finishes, typically well under a second un-raced) while absorbing
-	// -race CI variance.
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
+	// No deadline. This test asserts the 2.56M-tuple product *completes* (all
+	// intermediate tuples streamed, one row out, notification emitted), so the
+	// payload is BOUNDED by construction and self-terminating: 40^4 tuples of
+	// counting, and nothing here can wait on anything. A completion ceiling was
+	// therefore never a security bound, only a harness ceiling — and a harness
+	// ceiling on a bounded payload buys no detection at all, because the
+	// assertions below already fail when the count or the notification is wrong.
+	//
+	// It did, however, cost correctness. Expiry surfaced as `t.Fatalf("iterate:
+	// context deadline exceeded")`, which reads identically whether the engine
+	// broke or the machine was busy. This test has already flaked that way once
+	// and was "fixed" by widening the ceiling from a tighter value to 120s —
+	// treating the symptom. Widening only moves the threshold; the sibling
+	// string-byte-budget gate blew a 10s ceiling under the parallel -race load of
+	// `make ci` all the same. Removing the wall clock from the oracle is what
+	// actually makes the gate deterministic. A genuine non-terminating regression
+	// is still caught by `go test`'s own -timeout, with a full goroutine dump.
+	ctx := context.Background()
 
 	q := "MATCH (a:N),(b:N),(c:N),(d:N) RETURN count(*) AS c"
 	res, err := eng.Run(ctx, q, nil)

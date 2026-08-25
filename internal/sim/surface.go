@@ -131,6 +131,25 @@ func CheckCypherSurface(tick int64, oracle *GraphOracle, engine *EngineAdapter) 
 	scalar("WITH...WHERE n.age<30 count", "MATCH (n:Person) WITH n WHERE n.age < 30 RETURN count(n)", ltThirty)
 	scalar("count(KNOWS)", "MATCH ()-[r:KNOWS]->() RETURN count(r)", knows)
 	scalar("pattern count(*)", "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN count(*)", knows)
+	// The two ANONYMOUS-element count(*) shapes the relationship count-store
+	// serves (rmp #2494): `()-[:KNOWS]->()` is its E(relType) shape and
+	// `(:Person)-[:KNOWS]->(:Person)` its T(labelA, relType, labelB) shape. Both
+	// were absent from the DST's repertoire — every count it issued named a bound
+	// variable — so no simulated query ever went down the path a wrong count cell
+	// mis-plans.
+	//
+	// Their references come from [GraphOracle.knowsPatternCount], which walks the
+	// modelled edges and consults BOTH endpoints' labels, and deliberately NOT
+	// from knowsCount(), which counts edge-map keys and reads no endpoint at all.
+	// In THIS workload every node carries Person, so the two references are the
+	// same number and the labelled clause cannot fail where the unlabelled one
+	// passes; what it adds here is the plan shape, not a second oracle. The
+	// count-store scenario probes Vip-constrained shapes, whose references
+	// genuinely differ, for the discriminating case.
+	scalar("anon pattern count(*)", "MATCH ()-[:KNOWS]->() RETURN count(*)",
+		oracle.knowsPatternCount("", ""))
+	scalar("anon labelled count(*)", "MATCH (:Person)-[:KNOWS]->(:Person) RETURN count(*)",
+		oracle.knowsPatternCount("Person", "Person"))
 	scalar("OPTIONAL MATCH count(m)", "MATCH (n:Person) OPTIONAL MATCH (n)-[:KNOWS]->(m) RETURN count(m)", knows)
 	scalar("UNWIND range count", "UNWIND range(1, 25) AS x RETURN count(x)", 25)
 

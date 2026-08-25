@@ -168,6 +168,13 @@ type Capture[W any] struct {
 	// It is the same quantity Memgraph reads back as info.start_timestamp from its
 	// snapshot, and restores as timestamp_ = max(timestamp_, next_timestamp).
 	commitTS uint64
+	// indexesCommitTS is the instant the `indexes` payloads below are declared to
+	// describe, and indexesQuiesced reports whether the capture could name one at
+	// all. See [Manifest.IndexesCommitTS] for why "could not name one" is the
+	// answer that keeps every pre-existing snapshot unhydratable, and
+	// [Capture.IndexesCommitTS] for the accessor the writer reads.
+	indexesCommitTS uint64
+	indexesQuiesced bool
 }
 
 // Order reports how many NODES this image carries.
@@ -198,6 +205,30 @@ func (c *Capture[W]) Order() uint64 {
 // clock floor. Exported so a caller that publishes a capture through its own path
 // can carry the instant, and so a test can assert what an image claims.
 func (c *Capture[W]) CommitTS() uint64 { return c.commitTS }
+
+// IndexesCommitTS reports the MVCC instant this image's secondary-index payloads
+// are declared to describe, and whether the capture could name one at all.
+//
+// ok is true ONLY for a capture taken at an explicit instant — the quiesced
+// checkpointer path, whose instant is paired with the WAL watermark, so a
+// recovery can tell from the WAL suffix alone what changed after the payloads
+// were serialised. It is false for a present-time capture (a nil `at`), which
+// has no such pairing; the writer then omits [Manifest.IndexesCommitTS] and no
+// reader may hydrate from the payloads.
+//
+// # It is at-or-BEFORE the payload bytes, which is the safe direction
+//
+// [captureIndexes] serialises the live [index.Manager] rather than reading it as
+// of `at`, so a payload can carry entries for a transaction that committed
+// during this serialisation. Those transactions are all ABOVE the watermark, so
+// they are in the WAL suffix a recovery replays, and the recovery's own
+// per-index staleness filter refuses the payload whenever the suffix touched
+// that index's (label, property). The reported instant is therefore a floor on
+// what the payloads contain, never a ceiling — which is the direction that makes
+// the filter conservative rather than wrong.
+func (c *Capture[W]) IndexesCommitTS() (uint64, bool) {
+	return c.indexesCommitTS, c.indexesQuiesced
+}
 
 // Size reports the edge count of the captured CSR adjacency.
 func (c *Capture[W]) Size() uint64 { return c.csr.Size() }
@@ -320,6 +351,13 @@ func captureGraph[N comparable, W any](
 		commitTS = at.StartTS()
 	}
 	out := &Capture[W]{csr: cs, commitTS: commitTS}
+	// Name the instant for the index payloads ONLY when the caller supplied one.
+	// A present-time capture (at == nil) cannot pair its read with a WAL
+	// watermark, so it publishes no watermark and its payloads are never
+	// hydratable — see [Manifest.IndexesCommitTS].
+	if at != nil {
+		out.indexesCommitTS, out.indexesQuiesced = at.StartTS(), true
+	}
 
 	// ONE WALK OF THE MAPPER, and every number below derives from it (rmp #2310).
 	//
@@ -529,6 +567,19 @@ func captureMapper[N comparable, W any](g *lpg.Graph[N, W], codec keyEncoder[N],
 // an [index.Serializer] (rebuild-on-restart), skip an index dropped between
 // ListIndexes and GetIndex, and reject a name that would escape the indexes/
 // directory — so the published set is identical, only captured earlier.
+//
+// UNLIKE EVERY SIBLING COMPONENT, IT TAKES NO INSTANT. WriteEdgeHandles,
+// captureMapper and the CSR build are all bounded at `at`; an index is not,
+// because an [index.Manager] exposes no as-of read — [index.Serializer.Serialize]
+// dumps the live index. A payload can therefore include a transaction that
+// committed after `at`, during this very serialisation.
+//
+// That is why the instant the manifest records for these payloads
+// ([Capture.IndexesCommitTS]) is documented as a FLOOR: everything committed
+// after `at` is above the WAL watermark and so lands in the suffix a recovery
+// replays, and the reader refuses a payload whose (label, property) that suffix
+// touched. Widening the payload past `at` can only make the reader MORE
+// conservative, never wrong.
 func captureIndexes(m *index.Manager) ([]capturedIndex, error) {
 	if m == nil || m.Count() == 0 {
 		return nil, nil

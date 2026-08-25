@@ -189,17 +189,70 @@ discipline is enforced by tooling, not folklore.
 
 | Target | Layer | Equivalent command |
 |---|---|---|
-| `make test-short` | short | `go test -race -count=1 ./...` |
+| `make test-short` | short | `go test -race -count=1 -timeout=$(SHORT_TIMEOUT) ./...` |
 | `make test-soak` | soak | `go test -race -count=1 -timeout=$(SOAK_TIMEOUT) -tags=soak ./...` |
 | `make test-nightly` | nightly | `go test -race -count=1 -timeout=$(NIGHTLY_TIMEOUT) -tags=nightly ./...` |
 
-### Why the deferred layers pass an explicit `-timeout`
+### Why every layer passes an explicit `-timeout`
 
-`SOAK_TIMEOUT` (default `4h`), `NIGHTLY_TIMEOUT` (default `12h`) and
-`NIGHTLY_CI_TIMEOUT` (default `4h`) exist because Go applies a default of **10
-minutes per package** when no `-timeout` is given, and the soak layer cannot
-satisfy that. All three are overridable on the command line, so a slower or
-faster host needs no edit to the Makefile.
+Go applies a default of **10 minutes per package** when no `-timeout` is given.
+Every layer target therefore sets one explicitly, through an overridable
+variable, so the timeout is a **backstop against a hung package** and never a
+budget the suite is expected to approach.
+
+| Variable | Default | Applied by |
+|---|---|---|
+| `SHORT_TIMEOUT` | `30m` | `test-short`, `test-short-timings`, `race` |
+| `SOAK_TIMEOUT` | `4h` | `test-soak` |
+| `NIGHTLY_TIMEOUT` | `12h` | `test-nightly` |
+| `NIGHTLY_CI_TIMEOUT` | `4h` | `test-nightly-ci` |
+
+All four are overridable on the command line, so a slower or faster host needs
+no edit to the Makefile. `scripts/cover_gate.sh` — the *second* whole-suite pass
+inside `make ci` — carries its own hard-coded `-timeout=20m` for the same
+reason.
+
+**A `-timeout` is not a cost budget.** The per-package *cost* budget is a
+separate concern with a separate instrument: `make test-short-timings`
+(60 s soft, 240 s hard, plus the documented `internal/sim` override above).
+Raising a timeout must never be read as raising that budget.
+
+#### The short layer: `SHORT_TIMEOUT` (rmp #2584)
+
+`SHORT_TIMEOUT` defaults to **30m**. Before it existed, `test-short` passed no
+`-timeout` at all, so Go's 600 s default applied and two packages ran close
+enough to it that ordinary machine load turned a green gate red.
+
+Measured on the reference host (Apple M4, 10 cores, `darwin/arm64`, go1.26.6)
+on **2026-08-20**:
+
+| Observation | Result |
+|---|---|
+| Commit `147e28e4`, isolated worktree, `go test -race -count=1 ./...` | Whole suite green, exit 0 — but `ok internal/sim 545.794s`, i.e. only **~9% headroom** under the 600 s default, and `ok cypher 433.236s` |
+| With the rmp #2488 work in the tree, two consecutive `make ci` runs | `FAIL internal/sim 600.705s` and `FAIL internal/sim 601.675s`, both `panic: test timed out after 10m0s` |
+| Was it hung? | **No.** The second run was 3 s into `TestTypeCoverage_NonVacuous` when the alarm fired — cumulative budget exhaustion, not a deadlock |
+| Run-to-run variance | `cypher`, which #2488 does not touch, measured **433.2 s / 589.5 s / 576.8 s** across three runs (**+33%**) |
+| Parallel-package contention | `internal/sim` takes **487.6 s** in isolation against **545.8 s** inside `go test ./...`, which runs package binaries concurrently |
+
+The variance alone (+33% on an untouched package) exceeds the headroom, so this
+is a **headroom** problem, not an attribution problem: no amount of care in
+apportioning the cost would make a 600 s ceiling survive it.
+
+`make race` carries the same variable. It is not a gate — `ci` is
+`tidy fmt vet build test-short lint cover-gate` — but it runs the same corpus
+under the same detector, so it has the same exposure.
+
+**Why 30m.** It is **3.05×** the slowest package measured that actually
+completed (`cypher`, 589.5 s) and **1.5×** the `-timeout=20m` the coverage pass
+of the same `make ci` gate already applies. That margin is what makes a machine
+under sustained competing load reach the same verdict as an idle one, while
+still failing a genuinely hung package in bounded time. Check growth against
+the measurements above: a package approaching 30m is a cost regression to
+investigate, not a reason to raise the value.
+
+#### The deferred layers: `SOAK_TIMEOUT`, `NIGHTLY_TIMEOUT`, `NIGHTLY_CI_TIMEOUT`
+
+The soak layer cannot satisfy the 10-minute default at all.
 
 Measured on an Apple M4 (10 cores, `darwin/arm64`, go1.26.5), in an isolated
 worktree so machine contention could not be the explanation:
@@ -291,6 +344,68 @@ points. The window is what gets extended.
 
 The release-grade variants remain `SOAK_FULL=1` (5 min warm-up + 55 min
 measurement for no-growth, ~330 samples; 4 h at 64 goroutines for p99).
+
+## Wall clock is not a short-layer instrument
+
+The short layer is not a quiet machine. `make ci` runs `go test -race ./...`,
+which executes package binaries concurrently, so a wall-clock measurement taken
+there reads machine load as much as it reads the code.
+
+**A last/first ratio is not a defence against this.** It cancels load that is
+*constant* across the measurement, and `make ci` load is not constant — sibling
+packages start and finish during a run. Measured on a 10-core `darwin/arm64`
+host under `-race`, against the *flat* (post-fix) delete path of
+`cypher/delete_scaling_test.go`, with `yes > /dev/null` workers as load:
+
+| Load regime | Wall per cycle, first … last | Wall last/first | CPU last/first |
+|---|---|---|---|
+| idle | 239 ms … 240 ms | 1.00× | 1.03× |
+| 300 workers, constant | 7.80 s … 9.10 s | 1.17× | 0.99× |
+| 300 workers, ramping up during the run | 620 ms … 9.91 s | **15.98×** | 1.00× |
+| idle at the first cycle, saturated at the last | 239 ms … 8.59 s | **35.88×** | 1.50× |
+
+The defect these gates gate against moves the same statistic by 5.2×. Wall
+clock in the short layer therefore carries up to 35.9× of noise against 5.2× of
+signal, and it duly failed `make ci` on a flat engine.
+
+An absolute **ceiling** — the shape recommended above, because it needs no
+window — does not rescue the measurement. To survive constant saturation it
+would have to sit above 9.10 s, while the regression it guards costs about
+1.2 s on an idle machine: it would be blinder than the ratio, not safer. A
+ceiling is the right short-layer shape only for a quantity the machine's load
+cannot inflate.
+
+The rules this yields:
+
+- **Assert on wall clock only where the machine is quiet** — the soak layer.
+- **In the short layer, assert on an instrument load cannot move.** Process CPU
+  time (`syscall.Getrusage(RUSAGE_SELF)`) is the load-invariant analogue of wall
+  time, and for a CPU-bound regression it is also the more faithful one.
+- **A test that measures process CPU must not call `t.Parallel()`.** `getrusage`
+  is process-scoped, so a concurrent sibling is charged to the measurement. Go
+  runs non-parallel top-level tests to completion before resuming any test that
+  called `t.Parallel()`, which is what makes the measurement attributable. Load
+  from *other packages* is irrelevant: that is a different process.
+- **`runtime/metrics` `/cpu/classes/*` is not CPU time** for this purpose. It is
+  derived from `GOMAXPROCS` × wall-clock accounting, so a goroutine descheduled
+  by the OS still accrues it. In the very run where `getrusage` moved 1.50×,
+  `/cpu/classes/user:cpu-seconds` moved 50.2× — it is wall clock wearing a CPU
+  name, and substituting it would look like a fix while changing nothing.
+- **A load-invariant instrument still needs proven power.** Allocation counts
+  are perfectly invariant here (0.5% apart across a 35.9× wall inflation) but
+  nothing establishes that the regression allocated in proportion to the work it
+  did, so they are not asserted on. Where the defective build cannot be rebuilt,
+  ship a control that drives a deliberately degrading workload and requires the
+  gate to *fire*.
+
+The delete-scaling gates are split accordingly:
+
+| Test | Layer | Asserts |
+|---|---|---|
+| `TestDeleteDoesNotDegradeAcrossCycles`, `TestDetachDeleteDoesNotDegradeAcrossCycles` | short | last/first **CPU** ratio ≤ 2.5× (rmp #2400 / #2418) |
+| `TestDeleteCycleGateDetectsDegradation` | short | that the 2.5× gate still **fires** on a workload engineered to degrade (6.48×–6.77× idle, 5.82× under 300 competing CPU-bound processes, 8.80× under a rising load) |
+| `TestDeleteWallTimeDoesNotDegradeAcrossCycles`, `TestDetachDeleteWallTimeDoesNotDegradeAcrossCycles` | soak | last/first **wall** ratio ≤ 2.5×, on a quiet machine |
+| `TestSingleStatementDeleteOfNinetyThousandNodes` | soak | an absolute 10 s budget for a 90 000-node single-statement delete |
 
 ## Sample invocations
 

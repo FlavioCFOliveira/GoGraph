@@ -619,6 +619,27 @@ type EngineOptions struct {
 	// a store-less in-memory engine leaves the field nil.
 	RecoveredIndexes []IndexDef
 
+	// RecoveredIndexPayloads, when non-nil, supplies the durable secondary-index
+	// payloads the recovery that produced Store/Graph captured, so the
+	// constructor can HYDRATE a recovered index from its snapshot image instead
+	// of rebuilding it by scanning the whole graph. A
+	// [store/recovery.Result] value satisfies the interface directly; the
+	// recommended way to set it is [NewEngineWithStoreAndRecovery], which cannot
+	// be called without it.
+	//
+	// Nil — the zero value, and what every pre-existing caller carries — is
+	// EXACTLY the previous behaviour: every recovered index and every UNIQUE
+	// backing index is rebuilt from the recovered graph. Hydration is an
+	// optimisation with no observable effect on results, so nil is always safe;
+	// it is never a correctness fallback.
+	//
+	// Payloads are consumed during construction and the reference is dropped
+	// before the constructor returns, so the payload bytes are not retained for
+	// the Engine's lifetime. See index_hydration.go for the three preconditions
+	// a payload must satisfy and why a corrupt one falls back per index rather
+	// than failing the open.
+	RecoveredIndexPayloads IndexPayloadSource
+
 	// PlanCacheCapacity bounds the number of cached plans. Zero
 	// selects [DefaultPlanCacheCapacity]; positive values override
 	// it. A negative value is treated as misconfiguration and is
@@ -1061,7 +1082,27 @@ type Engine struct {
 	// this engine builds. It divides the GOMAXPROCS worker pool across the parallel
 	// queries currently in flight so concurrent scans do not oversubscribe the
 	// cores. Created once per Engine; safe for concurrent use.
-	parallelGov   *exec.ParallelGovernor
+	parallelGov *exec.ParallelGovernor
+
+	// recoveredIndexPayloads is EngineOptions.RecoveredIndexPayloads for the
+	// duration of construction ONLY. NewEngineWithOptions clears it before
+	// returning, which both releases the payload bytes (they can be a
+	// significant fraction of the index memory) and makes a post-construction
+	// hydration structurally impossible in addition to the published guard.
+	recoveredIndexPayloads IndexPayloadSource
+	// published reports that NewEngineWithOptions has finished and the Engine
+	// may now be read by other goroutines. It gates
+	// [Engine.populateRecoveredIndex], which performs a non-atomic
+	// shard-by-shard Deserialize and must never run once a reader can see the
+	// index. Written once by the constructor on its own goroutine and read only
+	// from that same goroutine's call chain, so it needs no atomic.
+	published bool
+	// recoveredIdx counts how each recovered index was populated (hydrated from
+	// the snapshot payload versus rebuilt from the graph, plus the rebuild work
+	// and the payload faults observed). Per-engine, because a process-global
+	// metric cannot attribute a reopen's decisions to one Engine.
+	recoveredIdx recoveredIndexStats
+
 	maxResultRows int64 // zero means no limit; from EngineOptions.MaxResultRows
 	// maxResultBytes is the aggregate-byte budget for a single result, threaded
 	// to the Result drain alongside maxResultRows. Zero means no budget (the
@@ -1543,6 +1584,9 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		parallelScanThreshold:   resolveParallelScanThreshold(opts.ParallelScanThreshold),
 		parallelGov:             &exec.ParallelGovernor{},
 		countStore:              count.New(resolveMaxLabelRecountEdges(opts.MaxLabelRecountEdges)),
+		// Held for the duration of this constructor only; cleared just before
+		// the Engine is returned (see the publish step at the end).
+		recoveredIndexPayloads: opts.RecoveredIndexPayloads,
 	}
 	procs.RegisterBuiltins(e.procReg, g.IndexManager(), procs.BuiltinSources{
 		ListConstraints:   func() [][]expr.Value { return e.constraintReg.ListConstraintRows() },
@@ -1616,6 +1660,14 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 	if gl := resolveGlobalMaxResultBytes(opts.GlobalMaxResultBytes); gl > 0 {
 		e.globalMem = &globalMemBudget{limit: gl}
 	}
+	// PUBLISH. Every recovered index has been populated and registered by now, so
+	// drop the payload source — releasing its bytes, which are a real fraction of
+	// the index memory for a large graph — and close the hydration window. A
+	// hydration attempted from here on panics rather than silently degrading to a
+	// backfill: hash.Index.Deserialize replaces shards sequentially, so running
+	// it once a reader can reach the index would expose a half-replaced index.
+	e.recoveredIndexPayloads = nil
+	e.published = true
 	return e
 }
 
@@ -1643,19 +1695,38 @@ func (e *Engine) registerRecoveredConstraints(defs []ConstraintDef) {
 		if d.Unique {
 			idxName := exec.UniqueIndexName(d.Label, d.Property)
 			// Build a bound index so it self-maintains from commit-time change
-			// events. Fall back to an unbound index when binding fails (e.g. the
-			// graph is not yet populated). Ignore ErrIndexExists: a previous
-			// constraint or a recovered plain index already claimed the name.
-			var sub index.Subscriber
-			if boundIdx, bidxErr := newBoundNodeHashIndex(e.g.ReadAt(nil), d.Label, d.Property); bidxErr == nil {
-				// Recovery must complete: a background context never cancels, so
-				// the backfill never returns an error here.
-				_ = e.backfillNodeHashIndex(context.Background(), boundIdx, d.Label, d.Property)
-				sub = boundIdx
-			} else {
-				sub = exec.NewUniqueBackingIndex()
+			// events, and POPULATE it before registering: from the snapshot
+			// payload recovery certified for this backing index's own
+			// deterministic name when that is usable, otherwise by backfilling
+			// the recovered graph (rmp #2490 — see index_hydration.go). Fall
+			// back to an unbound index when binding fails (e.g. the graph is not
+			// yet populated). Ignore ErrIndexExists: a previous constraint or a
+			// recovered plain index already claimed the name.
+			//
+			// Hydrating here and not only in registerRecoveredIndexes is what
+			// makes the name-collision case correct: this method runs FIRST, so
+			// on a collision the instance registered here is the incumbent every
+			// query reaches, and it is the one that must carry the payload.
+			//
+			// Two UNIQUE constraints with different names on the SAME
+			// (label, property) share one backing index, so a second def finds
+			// the name already taken. Skip building a rival for it: the
+			// incumbent is populated and is what every query reaches, and the
+			// registry/value-set steps below are per-constraint and still run.
+			if _, gerr := e.g.IndexManager().GetIndex(idxName); gerr != nil {
+				var sub index.Subscriber
+				if boundIdx, bidxErr := newBoundNodeHashIndex(e.g.ReadAt(nil), d.Label, d.Property); bidxErr == nil {
+					e.populateRecoveredIndex(idxName, d.Label, d.Property, boundIdx, func() {
+						// Recovery must complete: a background context never
+						// cancels, so the backfill never returns an error here.
+						_ = e.backfillNodeHashIndex(context.Background(), boundIdx, d.Label, d.Property)
+					})
+					sub = boundIdx
+				} else {
+					sub = exec.NewUniqueBackingIndex()
+				}
+				_ = e.g.IndexManager().CreateIndex(idxName, sub)
 			}
-			_ = e.g.IndexManager().CreateIndex(idxName, sub)
 			e.constraintReg.RegisterUnique(d.Label, d.Property, idxName)
 			e.constraintReg.SetConstraintName(true, d.Label, d.Property, d.Name)
 			// Recovery must complete: a background context never cancels, so

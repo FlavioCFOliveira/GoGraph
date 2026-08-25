@@ -742,6 +742,16 @@ func writeCaptureCore[W any](
 	// NEW full snapshot carries this; the legacy CSR-only writer cannot (it
 	// has no graph) and omits it, falling back to the recovery default.
 	cfg := capt.config
+	// Resolve the index-payload watermark. A capture that could not name an
+	// instant leaves it at 0, which omitempty then keeps out of the file entirely
+	// — the "never hydrate" encoding. Written even when idxEntries is empty: an
+	// empty index set and an unhydratable one are distinguished by the entries,
+	// not by the watermark, and keeping the two independent means a snapshot that
+	// gains its first index later cannot inherit a stale absence.
+	var indexesCommitTS uint64
+	if ts, quiesced := capt.IndexesCommitTS(); quiesced {
+		indexesCommitTS = ts
+	}
 	m := Manifest{
 		Version:   manifestVersion,
 		CreatedAt: time.Now().UTC(),
@@ -761,6 +771,14 @@ func writeCaptureCore[W any](
 		// (rmp #2309). Zero when the graph had no MVCC clock, which the
 		// omitempty tag then keeps out of the file entirely.
 		CommitTS: capt.commitTS,
+		// The instant the SECONDARY-INDEX payloads describe, written only when
+		// this capture could name one — i.e. only on the quiesced checkpointer
+		// path. Absent (the present-time writers, and every snapshot written
+		// before this field existed) means a reader must NEVER hydrate from
+		// indexes/<name>.bin and must rebuild each index from the recovered
+		// graph instead; see [Manifest.IndexesCommitTS]. omitempty keeps a
+		// watermark-less manifest byte-identical to what previous builds wrote.
+		IndexesCommitTS: indexesCommitTS,
 		GraphConfig: &GraphConfig{
 			Directed:   cfg.Directed,
 			Multigraph: cfg.Multigraph,
@@ -915,7 +933,9 @@ func writeCapturedIndexes(fsys fileSystem, dir string, idx []capturedIndex) ([]I
 		metrics.IncCounter("store.snapshot.WriteIndexes.errors", 1)
 		return nil, fmt.Errorf("snapshot: fsync indexes dir %q: %w", idxDir, err)
 	}
-	metrics.IncCounter("store.snapshot.indexes.loaded", uint64(len(out)))
+	// The WRITE-path counter; see the note on the same increment in
+	// [writeIndexesWith] for why it is not called `.loaded`.
+	metrics.IncCounter("store.snapshot.indexes.written", uint64(len(out)))
 	return out, nil
 }
 

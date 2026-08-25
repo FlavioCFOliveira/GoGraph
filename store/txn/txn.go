@@ -1264,8 +1264,15 @@ func (t *Tx[N, W]) DropConstraint(kind ConstraintKind, label, property, name str
 // secondary index named name of the given kind is declared on
 // (label).property. The op carries no node endpoints and mutates no graph
 // state on [Tx.Commit]; its sole effect is the durable WAL record that
-// [store/recovery.Open] replays to re-register and re-backfill the index,
-// so a user-created index survives a crash and a restart.
+// [store/recovery.Open] surfaces as a recovered index DEFINITION, from which the
+// engine re-registers the index on reopen — so a user-created index survives a
+// crash and a restart.
+//
+// How the re-registered index is POPULATED is the engine's decision, not this
+// record's: it hydrates the index from the snapshot's indexes/<name>.bin payload
+// when recovery certified that payload still describes the recovered graph, and
+// otherwise re-backfills it by scanning. Either way the definition, and the
+// resulting contents, are the same.
 func (t *Tx[N, W]) CreateIndex(kind IndexKind, label, property, name string) error {
 	if t.finished {
 		return ErrTxFinished

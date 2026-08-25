@@ -691,10 +691,35 @@ func TestGraphIOSurface_MutationAllocOracleCatchesOverAllocation(t *testing.T) {
 	}
 	// The window must enclose the whole REPLAY the arm measures: if it did not,
 	// the injected bytes would not appear in the difference between the two runs.
+	//
+	// The comparison carries a tolerance because both sides are MEASUREMENTS of
+	// a process-global counter, not terms of an arithmetic identity: two runs of
+	// the same workload differ by map growth, size-class rounding and GC timing.
+	// The zero-tolerance form of this clause failed a full gate run by 1120 B
+	// out of 31.5 MB (0.0035%) while the oracle under test worked, condemning
+	// the inflated run at 101.5x against its 64x bound.
+	//
+	// The tolerance is derived from the measured distribution rather than chosen
+	// to pass. Over 40 consecutive control/inflated pairs the inflated run's
+	// NON-injected portion — the measurement less the injected bytes — sat
+	// between 31728 B BELOW the control and 8336 B above it, a spread of
+	// 40064 B; 39 of the 40 landed above the control, and the single shortfall
+	// of 31728 B is 0.19% of the injected amount. The smallest miss this clause
+	// guards is a window that stopped enclosing one mutation's injection, 1 MiB.
+	//
+	// 1% of the INJECTED amount — 167772 B at 16 MiB injected — sits 5.3x above
+	// that worst measured shortfall and 6.25x below the 1 MiB defect floor,
+	// within 8% of the geometric mean of the two, so it separates the noise from
+	// the defect instead of straddling either. It is expressed against the
+	// injected amount and never against the total, so it does not widen as
+	// unrelated allocation grows. Verified in both directions: losing exactly
+	// one mutation's injection failed this clause by 907972 B (rmp #2591).
+	const allocTolerancePercent = 1
 	injected := uint64(injectPerMutation) * uint64(len(inflated.Mutations))
-	if want := control.MutationAllocBytes + injected; inflated.MutationAllocBytes < want {
-		t.Errorf("the inflated run measured %d B, want at least %d B (control %d B + %d B injected across %d mutations) — the window does not enclose the replay",
-			inflated.MutationAllocBytes, want, control.MutationAllocBytes, injected, len(inflated.Mutations))
+	tolerance := injected * allocTolerancePercent / 100
+	if want := control.MutationAllocBytes + injected - tolerance; inflated.MutationAllocBytes < want {
+		t.Errorf("the inflated run measured %d B, want at least %d B (control %d B + %d B injected across %d mutations, less a %d B tolerance) — the window does not enclose the replay",
+			inflated.MutationAllocBytes, want, control.MutationAllocBytes, injected, len(inflated.Mutations), tolerance)
 	}
 	t.Logf("witness: control %d B over %d B (%.1fx); inflated %d B over %d B (%.1fx) after injecting %d B across %d mutations",
 		control.MutationAllocBytes, control.MutationInputBytes,

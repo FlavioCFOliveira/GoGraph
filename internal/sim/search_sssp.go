@@ -19,9 +19,10 @@ import (
 const ssspParallelWorkers = 4
 
 // ssspViolations runs the weighted shortest-path battery on the graph. SSSP
-// (Dijkstra, Bellman-Ford, bidirectional Dijkstra, A*) from a few deterministic
-// sources is compared on the DISTANCE MAP — never path identity, which is not
-// unique — against an independent naive Bellman-Ford reference. APSP
+// (Dijkstra, Bellman-Ford, bidirectional Dijkstra in both its self-building and
+// its hoisted-reverse form, A*) from a few deterministic sources is compared on
+// the DISTANCE MAP — never path identity, which is not unique — against an
+// independent naive Bellman-Ford reference. APSP
 // (Floyd-Warshall and Johnson, serial and parallel; plus Dijkstra-APSP) is
 // compared to the same reference and serial-vs-parallel for exact agreement,
 // gated by the node cap because it materialises an O(n^2) result.
@@ -31,6 +32,14 @@ func ssspViolations(tick int64, g *nameGraph) []Violation {
 		return nil
 	}
 	c := g.toWeightedCSR()
+	// The reverse CSR is built ONCE per tick and threaded into the
+	// point-to-point checks. That hoist is the entire reason
+	// [search.BidirectionalDijkstraOn] exists — a caller issuing many
+	// point-to-point queries against one snapshot pays csr.BuildReverse's
+	// O(V+E) once rather than per query — so the checker drives it the way
+	// such a caller would, mirroring the structure [bibfsViolations] already
+	// uses for [search.BiBFSOn].
+	rev := c.BuildReverse()
 	var vs []Violation
 
 	for _, src := range g.checkSources() {
@@ -45,7 +54,7 @@ func ssspViolations(tick int64, g *nameGraph) []Violation {
 		} else {
 			vs = append(vs, compareDistances(tick, g, "BellmanFord", src, d, dist, reach)...)
 		}
-		vs = append(vs, pointToPointViolations(tick, g, c, src, dist, reach)...)
+		vs = append(vs, pointToPointViolations(tick, g, c, rev, src, dist, reach)...)
 	}
 
 	// Stateful / buffer-reuse primitives (NewSSSP, DijkstraInto, BellmanFordInto,
@@ -226,10 +235,35 @@ func compareDistances(tick int64, g *nameGraph, algo string, src int, d *search.
 	return nil
 }
 
-// pointToPointViolations checks the point-to-point algorithms (bidirectional
-// Dijkstra and A* with an admissible zero heuristic) against the reference: an
-// unreachable target must yield ErrNoPath, a reachable one the exact cost.
-func pointToPointViolations(tick int64, g *nameGraph, c *csr.CSR[float64], src int, dist []float64, reach []bool) []Violation {
+// pointToPointViolations checks the point-to-point algorithms against the
+// reference: an unreachable target must yield ErrNoPath, a reachable one the
+// exact cost. Three entry points are driven for every ordered (src, dst) pair
+// drawn from [nameGraph.checkSources]:
+//
+//   - [search.BidirectionalDijkstra], which builds the reverse CSR itself;
+//   - [search.BidirectionalDijkstraOn], the hoisted-reverse variant, handed the
+//     rev that [ssspViolations] built once for the whole tick;
+//   - [search.AStar] with an admissible zero heuristic.
+//
+// The hoisted-reverse variant is judged TWICE, by two deliberately separate
+// assertions:
+//
+//  1. against the independent naive reference (reachability plus exact cost),
+//     exactly as the other two are; and
+//  2. for cost parity against [search.BidirectionalDijkstra] on the same pair
+//     ([bidijkstraOnParity]).
+//
+// Folding (2) into (1) would weaken it. Agreeing with the reference is a
+// property each entry point can hold on its own; parity is the assertion that
+// pins the CALLER-SUPPLIED reverse CSR to the internally-built one, which is
+// the only thing that differs between the two calls. Keeping them apart also
+// keeps the diagnostic honest: a parity break names the two entry points, a
+// reference break names the algorithm.
+//
+// Path identity is deliberately NOT compared for any of the three. A shortest
+// path is not unique, so two correct implementations may legitimately return
+// different witnesses of the same cost; only endpoints and cost are contractual.
+func pointToPointViolations(tick int64, g *nameGraph, c, rev *csr.CSR[float64], src int, dist []float64, reach []bool) []Violation {
 	var vs []Violation
 	zeroH := func(graph.NodeID) float64 { return 0 }
 	for _, dst := range g.checkSources() {
@@ -238,10 +272,53 @@ func pointToPointViolations(tick int64, g *nameGraph, c *csr.CSR[float64], src i
 		}
 		_, cost, err := search.BidirectionalDijkstra(c, graph.NodeID(src), graph.NodeID(dst))
 		vs = append(vs, comparePointToPoint(tick, g, "BiDijkstra", src, dst, cost, err, dist, reach)...)
+
+		_, costOn, errOn := search.BidirectionalDijkstraOn(c, rev, graph.NodeID(src), graph.NodeID(dst))
+		vs = append(vs, comparePointToPoint(tick, g, "BiDijkstraOn", src, dst, costOn, errOn, dist, reach)...)
+		vs = append(vs, bidijkstraOnParity(tick, g, src, dst, cost, err, costOn, errOn)...)
+
 		_, costA, errA := search.AStar(c, graph.NodeID(src), graph.NodeID(dst), zeroH)
 		vs = append(vs, comparePointToPoint(tick, g, "AStar", src, dst, costA, errA, dist, reach)...)
 	}
 	return vs
+}
+
+// bidijkstraOnParity asserts [search.BidirectionalDijkstraOn] reached the same
+// outcome as [search.BidirectionalDijkstra] for one (src, dst) pair: the same
+// success/failure decision, the same ErrNoPath classification, and — when both
+// succeeded — a bit-identical cost.
+//
+// EXACT equality is the right predicate here, not a tolerance. Every edge
+// weight is an integer in [1, 16] (see [edgeWeight]) and the fixtures are
+// small, so every partial path sum is an integer far inside float64's exact
+// range: a correct implementation cannot round. The only thing that differs
+// between the two calls is WHO built the reverse CSR — BidirectionalDijkstra
+// calls csr.BuildReverse itself and then delegates to the same
+// BidirectionalDijkstraOnCtx — so any numeric difference whatsoever is a defect
+// in the caller-supplied-reverse path, and a tolerance would only hide it.
+//
+// Classifying the failure on ErrNoPath is exhaustive for this fixture family:
+// [edgeWeight] yields finite, strictly positive weights, so ErrInvalidInput
+// (NaN/Inf) and ErrNegativeWeight are both unreachable here.
+//
+// Path identity is deliberately not compared — see [pointToPointViolations].
+func bidijkstraOnParity(tick int64, g *nameGraph, src, dst int, cost float64, err error, costOn float64, errOn error) []Violation {
+	if (err == nil) != (errOn == nil) {
+		return ssspDiverge(tick, "BiDijkstraOn", fmt.Sprintf(
+			"%q->%q parity: BidirectionalDijkstra err=%v but BidirectionalDijkstraOn err=%v",
+			g.names[src], g.names[dst], err, errOn))
+	}
+	if errors.Is(err, search.ErrNoPath) != errors.Is(errOn, search.ErrNoPath) {
+		return ssspDiverge(tick, "BiDijkstraOn", fmt.Sprintf(
+			"%q->%q parity: ErrNoPath classification differs (BidirectionalDijkstra err=%v, BidirectionalDijkstraOn err=%v)",
+			g.names[src], g.names[dst], err, errOn))
+	}
+	if err == nil && costOn != cost {
+		return ssspDiverge(tick, "BiDijkstraOn", fmt.Sprintf(
+			"%q->%q parity: BidirectionalDijkstraOn cost %v != BidirectionalDijkstra cost %v",
+			g.names[src], g.names[dst], costOn, cost))
+	}
+	return nil
 }
 
 // comparePointToPoint folds a point-to-point (cost, err) outcome against the

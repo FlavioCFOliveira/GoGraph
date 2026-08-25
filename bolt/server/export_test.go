@@ -10,8 +10,12 @@ import (
 // explicit-transaction timeout reaper) so a test can drive a session timeout by
 // virtual time deterministically. It must be called before Serve starts
 // accepting connections, since each session captures the clock at construction.
-// Production code never sets a non-default clock; only tests do, through this
-// seam.
+//
+// It is retained for the in-package tests that already call it. Callers OUTSIDE
+// this package use [Server.SetClock], the module-internal seam, because an
+// identifier declared in a _test.go file exists only in this package's own test
+// binary — which is why the DST harness could not use this one however its godoc
+// once described it (rmp #2482).
 func (s *Server) SetClockForTest(clk clock.Clock) { s.setClock(clk) }
 
 // SetHandshakeTimeoutForTest overrides the package-level handshake deadline and

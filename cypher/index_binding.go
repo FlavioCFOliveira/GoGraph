@@ -653,13 +653,21 @@ func (e *Engine) forgetIndexDef(name string) {
 // after a restart. It is invoked once at construction from
 // [NewEngineWithOptions]. An empty slice is a no-op (store-less or fresh engine).
 //
-// Hash indexes are reconstructed as bound indexes backfilled from the live
-// graph, matching the behaviour of the original CREATE INDEX (task #1340).
-// BTree indexes are registered as fresh, empty subscribers — the BTree
-// implementation self-maintains from future change events. [index.ErrIndexExists]
-// is silently absorbed so that a snapshot that already wired the index does
-// not conflict with the WAL replay that also carries a CREATE INDEX op for
-// the same name.
+// Both index kinds are reconstructed as BOUND indexes — so they self-maintain
+// from the commit-time change fan-out — and POPULATED before registration,
+// either by hydrating the snapshot payload recovery certified for the name or by
+// backfilling from the recovered graph (see index_hydration.go for the
+// preconditions and the corruption contract). Populate-then-register is what
+// guarantees no index is ever seekable while still empty.
+//
+// A name already claimed by an earlier registration in this same constructor —
+// in practice a UNIQUE constraint's backing index, since
+// [Engine.registerRecoveredConstraints] runs first — belongs to the INCUMBENT.
+// That instance is the one queries reach and the one its own registration path
+// already populated, so nothing is built or populated for it here; only the
+// definition is recorded. This is where the pre-#2490 code built a full
+// duplicate, backfilled it over the whole mapper, and then discarded it when
+// CreateIndex returned [index.ErrIndexExists].
 func (e *Engine) registerRecoveredIndexes(defs []IndexDef) {
 	// The engine is now the authoritative owner of this graph's indexes, so
 	// discard any store-direct index count recovery seeded for the engine-less
@@ -677,25 +685,37 @@ func (e *Engine) registerRecoveredIndexes(defs []IndexDef) {
 		// re-persist it on the next checkpoint regardless of bind state — a
 		// reconstruction from the index.Manager via BoundNode() could not.
 		e.indexDefReg.record(d.Name, indexDefEntry{hash: d.Hash, label: d.Label, property: d.Property})
+		// An already-claimed name belongs to the incumbent (see the method doc):
+		// it is populated, it is what queries reach, and building a rival for it
+		// would cost a whole-mapper scan to produce something immediately
+		// discarded.
+		if _, gerr := idxMgr.GetIndex(d.Name); gerr == nil {
+			e.registerNumericCompanion(idxMgr, d.Label, d.Property)
+			continue
+		}
 		if d.Hash {
-			// Build a bound hash index and backfill it from the recovered graph
-			// so index seeks on the re-opened engine return the correct rows.
-			// Binding failures (e.g. an empty graph) fall back to an unbound
-			// index; the index will be correct for future writes but empty for
-			// pre-existing data — the worst outcome is a NodeByIndexSeek miss
-			// that is equivalent to the pre-fix behaviour.
+			// Build a bound hash index and POPULATE it from the recovered
+			// state — the snapshot payload when recovery certified it usable,
+			// otherwise a backfill of the recovered graph — so index seeks on
+			// the re-opened engine return the correct rows. Binding failures
+			// (e.g. an empty graph) fall back to an unbound index; the index
+			// will be correct for future writes but empty for pre-existing
+			// data — the worst outcome is a NodeByIndexSeek miss that is
+			// equivalent to the pre-fix behaviour.
 			if boundIdx, bidxErr := newBoundNodeHashIndex(e.g.ReadAt(nil), d.Label, d.Property); bidxErr == nil {
-				// Recovery must complete: a background context never cancels, so
-				// the backfill never returns an error here.
-				_ = e.backfillNodeHashIndex(context.Background(), boundIdx, d.Label, d.Property)
+				e.populateRecoveredIndex(d.Name, d.Label, d.Property, boundIdx, func() {
+					// Recovery must complete: a background context never
+					// cancels, so the backfill never returns an error here.
+					_ = e.backfillNodeHashIndex(context.Background(), boundIdx, d.Label, d.Property)
+				})
 				_ = idxMgr.CreateIndex(d.Name, boundIdx) // absorb ErrIndexExists
 			} else {
 				sub := indexhash.New[string]()
 				_ = idxMgr.CreateIndex(d.Name, sub) // absorb ErrIndexExists
 			}
 		} else {
-			// BTree index: rebuild a BOUND btree backfilled from the recovered
-			// graph so range seeks on the re-opened engine return the correct
+			// BTree index: rebuild a BOUND btree populated from the recovered
+			// state so range seeks on the re-opened engine return the correct
 			// rows (#1505). A fresh empty unbound btree (the pre-#1505
 			// behaviour) is never maintained and would make every range seek
 			// return zero rows. Binding failures (e.g. an empty graph) fall
@@ -703,42 +723,69 @@ func (e *Engine) registerRecoveredIndexes(defs []IndexDef) {
 			// (BoundNode reports false) — the worst outcome is a scan+filter,
 			// never wrong rows.
 			if boundIdx, bidxErr := newBoundNodeBTreeIndex(e.g.ReadAt(nil), d.Label, d.Property); bidxErr == nil {
-				// Recovery must complete: a background context never cancels, so
-				// the backfill never returns an error here.
-				_ = e.backfillNodeBTreeIndex(context.Background(), boundIdx, d.Label, d.Property)
+				e.populateRecoveredIndex(d.Name, d.Label, d.Property, boundIdx, func() {
+					// Recovery must complete: a background context never
+					// cancels, so the backfill never returns an error here.
+					_ = e.backfillNodeBTreeIndex(context.Background(), boundIdx, d.Label, d.Property)
+				})
 				_ = idxMgr.CreateIndex(d.Name, boundIdx) // absorb ErrIndexExists
 			} else {
 				sub := indexbtree.New[string]()
 				_ = idxMgr.CreateIndex(d.Name, sub) // absorb ErrIndexExists
 			}
 		}
-		// Rebuild the UNIFIED numeric companion from the SAME recovered def, for
-		// BOTH index kinds (#1652 for btree, #2226 for hash): the durable record
-		// carries only the one user def (format-neutral — no new persisted
-		// IndexKind), so recovery is self-sufficient by re-deriving the companion
-		// here, exactly as createBTreeIndexLocked and createHashIndexLocked build
-		// it on a live CREATE INDEX. Without this a numeric seek on the re-opened
-		// engine would find no companion and fall back to a scan+filter — correct,
-		// but the optimisation would be silently lost across a restart, which is
-		// the same class of defect as an index that reports ONLINE while holding
-		// no entries. The err-guard is defensive: newBoundNodeBTreeIndexNumeric
-		// supplies every Binding field, so it does not fail here; if it ever did,
-		// the seek would simply fall back to a scan+filter. When two user defs
-		// cover the same (label, property) the second CreateIndex(numName, …)
-		// returns ErrIndexExists and is absorbed (idempotent rebuild).
-		numName := numericBTreeName(d.Label, d.Property)
-		if numIdx, nerr := newBoundNodeBTreeIndexNumeric(e.g.ReadAt(nil), d.Label, d.Property); nerr == nil {
-			// Recovery must complete: a background context never cancels, so the
-			// backfill never returns an error here.
-			_ = e.backfillNodeBTreeIndexNumeric(context.Background(), numIdx, d.Label, d.Property)
-			_ = idxMgr.CreateIndex(numName, numIdx) // absorb ErrIndexExists
-		}
+		e.registerNumericCompanion(idxMgr, d.Label, d.Property)
 	}
 	// Mirror the recovered index set onto the graph's lock-free gate so a
 	// post-recovery checkpoint knows indexes exist even when the embedder did not
 	// wire checkpoint.WithIndexSpecs (#1755). Synced once after the loop rather
 	// than per-record since recovery seeds the registry directly.
 	e.syncIndexCount()
+}
+
+// registerNumericCompanion rebuilds the UNIFIED numeric companion btree for
+// (label, property) from a recovered user index definition, for BOTH index kinds
+// (#1652 for btree, #2226 for hash).
+//
+// The durable record carries only the one user def (format-neutral — no new
+// persisted IndexKind), so recovery is self-sufficient by re-deriving the
+// companion here, exactly as createBTreeIndexLocked and createHashIndexLocked
+// build it on a live CREATE INDEX. Without it a numeric seek on the re-opened
+// engine would find no companion and fall back to a scan+filter — correct, but
+// the optimisation would be silently lost across a restart, which is the same
+// class of defect as an index that reports ONLINE while holding no entries.
+//
+// The companion is populated before registration like every other recovered
+// index: hydrated from its own snapshot payload (it is a registered index, so a
+// checkpoint persisted it under its own deterministic internal name) or
+// backfilled from the recovered graph.
+//
+// When two user defs cover the same (label, property) they share ONE companion,
+// so the second call finds the name already taken and returns without building a
+// rival — the pre-#2490 code built and backfilled one, then discarded it on
+// [index.ErrIndexExists]. The err-guard on the build is defensive:
+// newBoundNodeBTreeIndexNumeric supplies every Binding field, so it does not
+// fail; if it ever did, a numeric seek would simply fall back to a scan+filter.
+//
+// Callers hold the engine's construction-time exclusivity (it is only reached
+// from [Engine.registerRecoveredIndexes]).
+func (e *Engine) registerNumericCompanion(idxMgr *index.Manager, label, property string) {
+	numName := numericBTreeName(label, property)
+	if _, gerr := idxMgr.GetIndex(numName); gerr == nil {
+		// Already registered: two user defs on the same (label, property) share
+		// one companion.
+		return
+	}
+	numIdx, nerr := newBoundNodeBTreeIndexNumeric(e.g.ReadAt(nil), label, property)
+	if nerr != nil {
+		return
+	}
+	e.populateRecoveredIndex(numName, label, property, numIdx, func() {
+		// Recovery must complete: a background context never cancels, so the
+		// backfill never returns an error here.
+		_ = e.backfillNodeBTreeIndexNumeric(context.Background(), numIdx, label, property)
+	})
+	_ = idxMgr.CreateIndex(numName, numIdx) // absorb ErrIndexExists
 }
 
 // runCreateHashIndex executes CREATE INDEX for the hash kind: it builds a

@@ -57,15 +57,94 @@ func NewWireClient(conn *SimConn, clk clock.Clock) *WireClient {
 // down to 5.0 across the four slots, and records the negotiated version. It
 // returns an error if the server rejects negotiation (responds with 0.0) or an
 // I/O error occurs.
-func (c *WireClient) Handshake(_ context.Context) (proto.Version, error) {
+func (c *WireClient) Handshake(ctx context.Context) (proto.Version, error) {
+	return c.HandshakeOfferingSlots(ctx, [4]BoltOffer{
+		// Slot 0 offers 5.6 with a minor range down to 5.0:
+		// [pad=0x00, minor_range=6, minor=6, major=5].
+		{Version: proto.Version{Major: 5, Minor: 6}, MinorRange: 6},
+		// Slot 1 offers 4.4 as a fallback: [0x00, 0, 4, 4].
+		{Version: proto.Version{Major: 4, Minor: 4}},
+		// Slots 2-3 stay zero (not offered).
+	})
+}
+
+// HandshakeOffering performs the 20-byte Bolt client handshake offering exactly
+// the given versions, one per slot, and records the negotiated version. It is the
+// explicit-offer counterpart of [WireClient.Handshake], which always leads with
+// 5.6: a probe that must reach the pre-5.1 INLINE-auth path (credentials on
+// HELLO) or a specific entity layout has to be able to withhold the newer
+// versions, because the server correctly picks the highest it is offered.
+//
+// At most four versions may be offered (the preamble has four slots); each is
+// offered with a minor RANGE of zero, i.e. that exact version and no fallback.
+// It returns an error when the server rejects negotiation (responds 0.0).
+func (c *WireClient) HandshakeOffering(ctx context.Context, offers ...proto.Version) (proto.Version, error) {
+	if len(offers) == 0 || len(offers) > 4 {
+		return proto.Version{}, fmt.Errorf("sim: handshake offers %d versions, want 1..4", len(offers))
+	}
+	var slots [4]BoltOffer
+	for i, v := range offers {
+		// Slot layout: [pad=0x00, minor_range=0, minor, major].
+		slots[i] = BoltOffer{Version: v}
+	}
+	return c.HandshakeOfferingSlots(ctx, slots)
+}
+
+// BoltOffer is one version slot of the Bolt client preamble: a version and the
+// MINOR RANGE the client will accept below it.
+//
+// A slot's wire form is [0x00, minor_range, minor, major], and a minor_range of r
+// means the client accepts [minor-r, minor] (bolt/proto/handshake.go:39-45). The
+// zero value is an EMPTY slot: the preamble always carries four, and a client
+// offering fewer zero-fills the rest, which Negotiate skips
+// (bolt/proto/handshake.go:103-104).
+type BoltOffer struct {
+	// Version is the top of the offered range.
+	Version proto.Version
+	// MinorRange is how far below Version.Minor the client will accept. Zero
+	// offers that exact version and no fallback.
+	MinorRange uint8
+}
+
+// HandshakeOfferingSlots performs the 20-byte Bolt client handshake writing the
+// four preamble slots EXACTLY as given, and records the negotiated version. It is
+// the single primitive behind [WireClient.Handshake] and
+// [WireClient.HandshakeOffering], which are the two fixed spellings the harness
+// used before rmp #2486; both delegate here, so the preamble is built in one
+// place and [TestWireClientHandshake_PreambleBytesAreUnchanged] can pin the exact
+// 20 bytes each of them puts on the wire.
+//
+// It exists because neither of those two can express what a version-matrix probe
+// needs. [WireClient.HandshakeOffering] hard-codes a minor_range of ZERO and packs
+// its offers into slots 0..n-1, so nothing in the harness could send a RANGE offer
+// other than the one [WireClient.Handshake] hard-codes, and nothing could place an
+// offer in a chosen slot. Both matter: the range is a distinct branch of
+// Negotiate's matching loop (the `sv.Minor >= minMinor` half,
+// bolt/proto/handshake.go:121), and slot placement is what shows the server's
+// choice is driven by ITS preference order rather than by the client's, because
+// Negotiate scans SupportedVersions in the OUTER loop (:109-110).
+//
+// An all-empty preamble is REFUSED here rather than sent. Negotiate would answer
+// it with the no-common-version rejection, which is indistinguishable from a
+// deliberate probe of that path; a caller that wants the rejection asks for it by
+// offering a version this server does not support.
+//
+// It returns an error when the server rejects negotiation (responds 0.0).
+func (c *WireClient) HandshakeOfferingSlots(_ context.Context, slots [4]BoltOffer) (proto.Version, error) {
 	var buf [20]byte
 	binary.BigEndian.PutUint32(buf[:4], proto.Magic)
-	// Slot 0 offers 5.6 with a minor range down to 5.0:
-	// [pad=0x00, minor_range=6, minor=6, major=5].
-	buf[4], buf[5], buf[6], buf[7] = 0, 6, 6, 5
-	// Slot 1 offers 4.4 as a fallback: [0x00, 0, 4, 4].
-	buf[8], buf[9], buf[10], buf[11] = 0, 0, 4, 4
-	// Slots 2–3 zero (not offered).
+	empty := true
+	for i, s := range slots {
+		if s.Version == (proto.Version{}) {
+			continue
+		}
+		empty = false
+		off := 4 + i*4
+		buf[off], buf[off+1], buf[off+2], buf[off+3] = 0, s.MinorRange, s.Version.Minor, s.Version.Major
+	}
+	if empty {
+		return proto.Version{}, fmt.Errorf("sim: handshake offers no version (all four slots are empty)")
+	}
 	if _, err := c.conn.Write(buf[:]); err != nil {
 		return proto.Version{}, fmt.Errorf("sim: handshake write: %w", err)
 	}
@@ -141,6 +220,73 @@ func (c *WireClient) Logon() (any, error) {
 	return c.Request(&proto.Logon{Auth: map[string]packstream.Value{"scheme": "none"}})
 }
 
+// LogonWith sends a LOGON carrying the given auth token and returns the
+// response. It is the credential-bearing counterpart of [WireClient.Logon],
+// used by the auth-surface scenario to present a right or a wrong password to a
+// server whose [github.com/FlavioCFOliveira/GoGraph/bolt/server.AuthHandler]
+// actually validates one (rmp #2481).
+func (c *WireClient) LogonWith(auth map[string]packstream.Value) (any, error) {
+	return c.Request(&proto.Logon{Auth: auth})
+}
+
+// Logoff sends a LOGOFF and returns the response. A successful LOGOFF
+// de-authorises the connection: every subsequent query-bearing or
+// transaction-finalising message must be refused until a fresh LOGON
+// re-authenticates (the CWE-306 gate).
+func (c *WireClient) Logoff() (any, error) {
+	return c.Request(&proto.Logoff{})
+}
+
+// basicAuthToken builds the auth map a Bolt driver sends for the "basic" scheme.
+func basicAuthToken(principal, credentials string) map[string]packstream.Value {
+	return map[string]packstream.Value{
+		"scheme":      "basic",
+		"principal":   principal,
+		"credentials": credentials,
+	}
+}
+
+// ConnectAs negotiates a version if one is not negotiated yet and then
+// authenticates with the given basic-scheme credentials, returning the response
+// that carried the authentication decision so the caller can adjudicate it.
+// Unlike [WireClient.Connect] it does NOT treat a FAILURE as an error — a refused
+// credential is the very outcome an auth probe is measuring — so the returned
+// error is reserved for transport failures.
+//
+// A caller that needs a SPECIFIC version negotiates it first with
+// [WireClient.HandshakeOffering]; ConnectAs then keeps it, because re-sending a
+// preamble on a negotiated connection is not a second handshake — it is 20 bytes
+// of garbage arriving where the server expects a chunked message.
+func (c *WireClient) ConnectAs(ctx context.Context, principal, credentials string) (any, error) {
+	if c.ver == (proto.Version{}) {
+		if _, err := c.Handshake(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return c.AuthenticateAs(principal, credentials)
+}
+
+// AuthenticateAs sends the credential-bearing message(s) for the ALREADY
+// negotiated version and returns the response that carried the decision. The
+// credentials travel on the message the version puts them on: LOGON for Bolt
+// >= 5.1 (which authenticates separately from a credential-less HELLO), HELLO
+// itself for <= 5.0.
+func (c *WireClient) AuthenticateAs(principal, credentials string) (any, error) {
+	if !c.deferredAuth() {
+		token := basicAuthToken(principal, credentials)
+		token["user_agent"] = "gograph-sim/3.0"
+		return c.Hello(token)
+	}
+	helloResp, err := c.Hello(map[string]packstream.Value{"user_agent": "gograph-sim/3.0"})
+	if err != nil {
+		return nil, err
+	}
+	if f, ok := helloResp.(*proto.Failure); ok {
+		return f, nil
+	}
+	return c.LogonWith(basicAuthToken(principal, credentials))
+}
+
 // Run sends a RUN for query with params and returns the response (a *proto.Success
 // carrying the field metadata, or a *proto.Failure). It does NOT pull records;
 // follow with [WireClient.PullAll] or [WireClient.Pull].
@@ -160,44 +306,80 @@ func (c *WireClient) Run(query string, params map[string]any) (any, error) {
 // FAILURE, returning the records and the terminal message. A FAILURE terminates
 // the pull with the records gathered so far.
 func (c *WireClient) PullAll() (records []*proto.Record, terminal any, err error) {
-	if err := c.send(&proto.Pull{N: -1, QID: -1}); err != nil {
-		return nil, nil, err
-	}
-	for {
-		msg, err := c.recv()
-		if err != nil {
-			return records, nil, err
-		}
-		switch m := msg.(type) {
-		case *proto.Record:
-			records = append(records, m)
-		case *proto.Success, *proto.Failure, *proto.Ignored:
-			return records, m, nil
-		default:
-			return records, nil, fmt.Errorf("sim: PullAll: unexpected message %T", msg)
-		}
-	}
+	return c.drainExchange("PullAll", &proto.Pull{N: -1, QID: -1})
 }
 
 // Pull sends PULL {n:n} and reads up to n RECORDs plus the terminal message. It
 // is used by the SlowConsumer, which pulls in small batches with deliberate
-// stalls between calls.
+// stalls between calls, and by the paging arms of rmp #2484.
 func (c *WireClient) Pull(n int64) (records []*proto.Record, terminal any, err error) {
-	if err := c.send(&proto.Pull{N: n, QID: -1}); err != nil {
+	return c.drainExchange("Pull", &proto.Pull{N: n, QID: -1})
+}
+
+// Discard sends DISCARD {n:n, qid:-1} and reads to the terminal reply, returning
+// any RECORDs that arrived along the way and the terminal message.
+//
+// The record slice exists to be asserted EMPTY. DISCARD's contract is that the
+// rows are dropped server-side rather than delivered, so a non-empty slice here
+// is the defect; a helper that could not observe a stray RECORD could not tell
+// DISCARD from PULL. n <= 0 discards the whole remaining stream; n > 0 discards up
+// to n rows and the terminal SUCCESS reports has_more for the remainder
+// (bolt/server/session.go handleDiscard).
+//
+// Nothing in the harness sent DISCARD before rmp #2484: every call site used
+// PULL -1, so the whole discard path of the session — including its
+// statement-error guard and its own has_more accounting — was driven by no
+// scenario at all.
+func (c *WireClient) Discard(n int64) (records []*proto.Record, terminal any, err error) {
+	return c.drainExchange("Discard", &proto.Discard{N: n, QID: -1})
+}
+
+// PullQID sends PULL {n:n, qid:qid} with an EXPLICIT qid and reads to the terminal
+// reply. It exists so a scenario can address a stream by qid rather than by the
+// implicit current-stream -1.
+//
+// A qid >= 0 is expected to be REFUSED: this server keeps exactly one open stream
+// per session (RUN always reports qid = -1, and a second RUN while streaming is an
+// illegal transition), so handlePull answers any non-negative qid with
+// Neo.ClientError.Request.Invalid / "no such query: qid N"
+// (bolt/server/session.go:1240-1243).
+func (c *WireClient) PullQID(n, qid int64) (records []*proto.Record, terminal any, err error) {
+	return c.drainExchange("PullQID", &proto.Pull{N: n, QID: qid})
+}
+
+// DiscardQID sends DISCARD {n:n, qid:qid} with an EXPLICIT qid and reads to the
+// terminal reply. As with [WireClient.PullQID], a qid >= 0 is expected to be
+// refused with the same code and message shape
+// (bolt/server/session.go:1421-1424).
+func (c *WireClient) DiscardQID(n, qid int64) (records []*proto.Record, terminal any, err error) {
+	return c.drainExchange("DiscardQID", &proto.Discard{N: n, QID: qid})
+}
+
+// drainExchange sends one stream-consuming message and reads until the terminal
+// reply, accumulating every RECORD that arrives first. It is the single body
+// behind PullAll/Pull/Discard/PullQID/DiscardQID so those five differ only in the
+// message they put on the wire.
+//
+// IGNORED counts as terminal, not as an error: it is the Bolt-correct reply to a
+// request-phase message on a FAILED session, and a caller that treated it as a
+// transport fault could not distinguish "the session is poisoned" from "the
+// connection broke".
+func (c *WireClient) drainExchange(label string, msg any) (records []*proto.Record, terminal any, err error) {
+	if err := c.send(msg); err != nil {
 		return nil, nil, err
 	}
 	for {
-		msg, err := c.recv()
+		m, err := c.recv()
 		if err != nil {
 			return records, nil, err
 		}
-		switch m := msg.(type) {
+		switch t := m.(type) {
 		case *proto.Record:
-			records = append(records, m)
+			records = append(records, t)
 		case *proto.Success, *proto.Failure, *proto.Ignored:
-			return records, m, nil
+			return records, t, nil
 		default:
-			return records, nil, fmt.Errorf("sim: Pull: unexpected message %T", msg)
+			return records, nil, fmt.Errorf("sim: %s: unexpected message %T", label, m)
 		}
 	}
 }
@@ -205,9 +387,67 @@ func (c *WireClient) Pull(n int64) (records []*proto.Record, terminal any, err e
 // Begin / Commit / Rollback / Reset / Route drive the explicit-transaction and
 // session-control messages; each returns the server's response.
 
-// Begin sends BEGIN and returns the response.
-func (c *WireClient) Begin() (any, error) {
-	return c.Request(&proto.Begin{Extra: map[string]packstream.Value{}})
+// Begin sends BEGIN with no extras and returns the response. The server then
+// applies its own defaults: mode "w" and server.Options.DefaultTxTimeout as the
+// transaction's total lifetime bound.
+func (c *WireClient) Begin() (any, error) { return c.BeginMode("") }
+
+// BeginExtras sends BEGIN carrying an ARBITRARY extras map and returns the
+// response. It is the single primitive behind [WireClient.Begin] and
+// [WireClient.BeginMode], added for rmp #2485 so a scenario can drive the whole
+// documented BEGIN extras surface — `bookmarks`, `tx_timeout`, `tx_metadata`,
+// `mode`, `db` — instead of only the one key BeginMode reaches.
+//
+// # A nil extras map is passed through, as VERIFIED in the encoder
+//
+// The map reaches [proto.Begin] unchanged, nil included, because a nil map and an
+// empty one encode to the SAME bytes — BEGIN with either is b1 11 a0. encodeBegin
+// writes m.Extra as one PackStream value (bolt/proto/messages.go:304-309), and a
+// typed nil map[string]packstream.Value boxed into an interface does NOT reach the
+// encoder's `case nil` arm (bolt/packstream/value.go:73), which matches only an
+// untyped nil interface. It reaches `case map[string]Value`
+// (bolt/packstream/value.go:99-110), whose map header is len(x) and whose body is a
+// range over x — 0 and no iterations for a nil map, by Go's own semantics for len
+// and range. [WireClient.Begin] therefore stays byte-identical to what it sent
+// before this method existed WITHOUT any normalisation here, and normalising would
+// buy nothing but an allocation.
+// [TestWireClientBeginExtras_NilExtrasNeedsNoNormalisation] measures both spellings
+// and fails if they ever diverge.
+//
+// The caller owns the map and BeginExtras does not retain it past the call.
+func (c *WireClient) BeginExtras(extra map[string]packstream.Value) (any, error) {
+	return c.Request(&proto.Begin{Extra: extra})
+}
+
+// BeginMode sends BEGIN carrying the transaction access mode and returns the
+// response. It exists so a scenario can open a READ-ONLY explicit transaction over
+// the genuine wire — the Mode field server.Server.Transactions reports, and the
+// branch that takes cypher's lock-free BeginReadTx path instead of BeginTx.
+//
+// # The wire spelling, as VERIFIED in bolt/server/session.go handleBegin
+//
+// The key is "mode" in the BEGIN extras and the value is a PackStream string. Only
+// the exact string "r" selects read-only; handleBegin reads
+//
+//	if v, ok := m.Extra["mode"]; ok {
+//	        if modeStr, ok := v.(string); ok && modeStr == "r" { mode = "r" }
+//	}
+//
+// so every other value — "w", a misspelling, a non-string, or an absent key —
+// leaves the default "w". A caller asking for "w" is therefore asking for the
+// default explicitly rather than selecting a second behaviour, and an unknown mode
+// is silently a write transaction rather than an error.
+//
+// An EMPTY mode OMITS the key entirely rather than sending "mode": "", so
+// [WireClient.Begin] delegating here is byte-identical on the wire to the empty
+// extras map it sent before, not merely equivalent in the server's eventual
+// decision.
+func (c *WireClient) BeginMode(mode string) (any, error) {
+	extra := map[string]packstream.Value{}
+	if mode != "" {
+		extra["mode"] = mode
+	}
+	return c.BeginExtras(extra)
 }
 
 // Commit sends COMMIT and returns the response.

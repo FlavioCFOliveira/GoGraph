@@ -25,10 +25,28 @@ package sim
 //     requires detection at all — every byte of a binary component is inside the
 //     manifest CRC, so a flip anywhere must be caught.
 //   - TOLERATED BY DESIGN (indexes/<name>.bin). A corrupt index payload is NOT
-//     fatal: `snapshot.LoadIndexes` reports nil bytes and recovery rebuilds the
-//     index from the LPG. The arm therefore requires the reopen to SUCCEED and
-//     the rebuilt index to still answer every seek exactly as a full scan does,
-//     so "tolerated" cannot degrade into "silently wrong".
+//     fatal: `snapshot.LoadIndexes` reports nil bytes for it and the engine
+//     REBUILDS that index from the recovered graph — per index, never a
+//     fail-stop, because an index is derived data over an already-recovered,
+//     independently integrity-checked graph, and every reference engine reaches
+//     the same conclusion (PostgreSQL discards and rebuilds pg_internal.init,
+//     Memgraph rebuilds its label indexes unconditionally, Neo4j coerces an
+//     unreadable index header to POPULATING). This is THE documented exception
+//     to the battery's fail-stop rule, and it is what keeps the nine-component
+//     oracle falsifiable: indexes/<name>.bin is the only durable file a reopen
+//     accepts damaged, so it is the only substrate on which
+//     TestSnapshotCorruption_OracleFiresWhenRecoveryWronglySucceeds can prove
+//     the fail-stop oracle fires at all.
+//
+//     The arm is PAIRED (rmp #2490). Requiring only that the reopen succeeds is
+//     vacuous on the hydration axis: before #2490 the engine rebuilt every index
+//     whatever the payload said, so "rebuilt" was indistinguishable from
+//     "rebuilt because corrupt". The arm therefore drives a CONTROL reopen over
+//     the intact payloads and requires every index HYDRATED, then the corrupt
+//     reopen and requires every index REBUILT and every payload reported
+//     unreadable — and both must return the exact committed node set with every
+//     declared index still agreeing with a full label scan, so neither
+//     "tolerated" nor "hydrated" can degrade into "silently wrong".
 //   - UNDETECTED (the manifest's JSON key-name region). manifest.json carries no
 //     checksum of its own, so a flip inside a KEY NAME leaves valid JSON whose
 //     key `encoding/json` then ignores — the field decodes to its zero value.
@@ -54,6 +72,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
@@ -274,6 +293,16 @@ type snapshotCorruptionEvidence struct {
 	// reopened engine's indexes still agreed with a full scan afterwards.
 	indexPayloadsCorrupted int
 	indexRebuildVerified   bool
+	// The PAIRED hydration measurements (rmp #2490). indexControl* are what the
+	// reopen over the INTACT payloads measured and indexCorrupt* what the reopen
+	// over the flipped ones measured; indexRegistered is how many indexes the
+	// reopened engine registered, which is the independent anchor both sides are
+	// compared against. Without the control arm the corrupt arm's "everything
+	// rebuilt" is satisfied by an engine that never hydrates at all.
+	indexRegistered                           int
+	indexControlHydrated, indexControlRebuilt int
+	indexCorruptHydrated, indexCorruptRebuilt int
+	indexCorruptUnreadable                    int
 	// manifestGapRan records that the un-checksummed key-region arm was driven;
 	// manifestGapDetected records whether recovery caught it after all.
 	manifestGapRan      bool
@@ -384,11 +413,15 @@ func runSnapshotCorruptionWith(
 	}
 
 	if !opts.skipIndexTolerance {
-		n, verified, vs, ierr := runSnapshotIndexToleranceArm(ctx, fx, rnd)
+		arm, vs, ierr := runSnapshotIndexToleranceArm(ctx, fx, rnd)
 		if ierr != nil {
 			return ev, nil, ierr
 		}
-		ev.indexPayloadsCorrupted, ev.indexRebuildVerified = n, verified
+		ev.indexPayloadsCorrupted, ev.indexRebuildVerified = arm.flipped, arm.verified
+		ev.indexRegistered = arm.registered
+		ev.indexControlHydrated, ev.indexControlRebuilt = arm.controlHydrated, arm.controlRebuilt
+		ev.indexCorruptHydrated, ev.indexCorruptRebuilt = arm.corruptHydrated, arm.corruptRebuilt
+		ev.indexCorruptUnreadable = arm.corruptUnreadable
 		if len(vs) > 0 {
 			return ev, snapshotCorruptionReport(seed, vs), nil
 		}
@@ -915,45 +948,100 @@ func snapshotWriteFile(disk *SimDisk, path string, data []byte) error {
 // tolerated corruption: indexes/<name>.bin
 // ─────────────────────────────────────────────────────────────────────────────
 
-// runSnapshotIndexToleranceArm corrupts EVERY published index payload at once
-// and requires the opposite of a fail-stop: `snapshot.LoadIndexes` reports a
-// CRC-failing payload as nil bytes and recovery REBUILDS that index from the
-// LPG, so the reopen must SUCCEED.
+// snapshotIndexArmResult is what the paired index-payload arm MEASURED.
+type snapshotIndexArmResult struct {
+	// flipped is how many indexes/<name>.bin payloads were corrupted.
+	flipped int
+	// registered is how many indexes the reopened engine registered. Both sides
+	// are compared against it rather than against a constant, so the arm cannot
+	// drift out of step with the engine's internal numeric companions or with the
+	// UNIQUE constraint's backing index.
+	registered int
+	// controlHydrated / controlRebuilt are the population counters of the reopen
+	// over the INTACT payloads; corruptHydrated / corruptRebuilt those of the
+	// reopen over the flipped ones, and corruptUnreadable how many payloads that
+	// reopen was told it could not use.
+	controlHydrated, controlRebuilt int
+	corruptHydrated, corruptRebuilt int
+	corruptUnreadable               int
+	// verified records that BOTH reopens returned the exact committed node set
+	// with every declared index still agreeing with a full label scan.
+	verified bool
+}
+
+// runSnapshotIndexToleranceArm drives the PAIRED index-payload arm: one reopen
+// over the intact payloads, which must HYDRATE every index it registers, and one
+// over payloads with a byte flipped in each, which must REBUILD every index it
+// registers — and both must answer identically.
 //
-// Tolerance is only acceptable if it is invisible in the results, so the arm
-// does not stop at "no error": it cross-checks every declared index against a
-// full label scan on the reopened engine ([CheckIndexConsistency]), which is
-// what separates "rebuilt" from "silently missing entries". It returns how many
-// payloads were flipped and whether the rebuild was verified.
+// It requires the opposite of a fail-stop from the corrupt half:
+// `snapshot.LoadIndexes` reports a CRC-failing payload as nil bytes, recovery
+// classifies it as [recovery.ErrIndexPayloadUnreadable], and the engine rebuilds
+// that index from the LPG, so the reopen must SUCCEED.
+//
+// The control half is what makes the corrupt half mean anything. "Every index
+// rebuilt" is the normal outcome of a reopen that CANNOT hydrate — which is
+// exactly what this harness did before rmp #2490 — so on its own it does not
+// distinguish "rebuilt because the payload was corrupt" from "rebuilt whatever
+// the payload said". Proving the same fixture hydrates when the payloads are
+// intact is what turns the corrupt arm into a real observation.
+//
+// Tolerance is only acceptable if it is invisible in the results, so neither
+// half stops at "no error": each cross-checks every declared index against a
+// full label scan on its reopened engine ([CheckIndexConsistency]) — which is
+// what separates "rebuilt" from "silently missing entries" — and each re-reads
+// the committed key set.
 func runSnapshotIndexToleranceArm(
 	ctx context.Context, fx *snapshotCorruptionFixture, rnd *Seed,
-) (int, bool, []Violation, error) {
+) (snapshotIndexArmResult, []Violation, error) {
+	var res snapshotIndexArmResult
 	paths := snapshotIndexPayloadPaths(fx)
 	if len(paths) == 0 {
-		return 0, false, nil, fmt.Errorf("the fixture published no indexes/ payloads: the tolerance arm would be vacuous")
+		return res, nil, fmt.Errorf("the fixture published no indexes/ payloads: the arm would be vacuous")
 	}
+
+	// ── CONTROL: the payloads are intact, so every index must hydrate. ────────
+	control, cvs, cerr := snapshotIndexReopen(ctx, fx, "control")
+	if cerr != nil {
+		return res, nil, cerr
+	}
+	res.registered = control.registered
+	res.controlHydrated, res.controlRebuilt = control.hydrated, control.rebuilt
+	if len(cvs) > 0 {
+		return res, cvs, nil
+	}
+	if vs := checkSnapshotIndexPopulation("control", control,
+		"every payload is intact and the checkpoint left no WAL suffix, so every index must be HYDRATED",
+		func(p cypher.RecoveredIndexPopulation, registered int) bool {
+			return p.Hydrated == registered && p.Rebuilt == 0
+		}); len(vs) > 0 {
+		return res, vs, nil
+	}
+
+	// ── CORRUPT: flip one interior byte of every payload. ─────────────────────
 	flipped := make(map[string]int64, len(paths))
 	for _, path := range paths {
 		img, err := fx.disk.ReadFile(path)
 		if err != nil {
-			return 0, false, nil, fmt.Errorf("read index payload %s: %w", path, err)
+			return res, nil, fmt.Errorf("read index payload %s: %w", path, err)
 		}
 		if len(img) < 2 {
 			continue
 		}
 		off := int64(rnd.Uint64N(uint64(len(img))))
 		if err := fx.disk.CorruptRange(path, off, 1); err != nil {
-			return 0, false, nil, fmt.Errorf("corrupt index payload %s: %w", path, err)
+			return res, nil, fmt.Errorf("corrupt index payload %s: %w", path, err)
 		}
 		now, err := fx.disk.ReadFile(path)
 		if err != nil {
-			return 0, false, nil, fmt.Errorf("read back index payload %s: %w", path, err)
+			return res, nil, fmt.Errorf("read back index payload %s: %w", path, err)
 		}
 		if bytes.Equal(img, now) {
-			return 0, false, nil, fmt.Errorf("flipping byte %d of %s changed nothing on disk", off, path)
+			return res, nil, fmt.Errorf("flipping byte %d of %s changed nothing on disk", off, path)
 		}
 		flipped[path] = off
 	}
+	res.flipped = len(flipped)
 	// Restore on every exit path, so the fixture stays usable for later arms.
 	defer func() {
 		for path, off := range flipped {
@@ -961,35 +1049,144 @@ func runSnapshotIndexToleranceArm(
 		}
 	}()
 
+	corrupt, kvs, kerr := snapshotIndexReopen(ctx, fx, "corrupt")
+	if kerr != nil {
+		return res, nil, kerr
+	}
+	res.corruptHydrated, res.corruptRebuilt = corrupt.hydrated, corrupt.rebuilt
+	res.corruptUnreadable = corrupt.unreadable
+	if len(kvs) > 0 {
+		return res, kvs, nil
+	}
+	if vs := checkSnapshotIndexPopulation("corrupt", corrupt,
+		"every payload has a flipped byte, so every index must be REBUILT from the recovered graph"+
+			" — never a fail-stop, because an index is derived data",
+		func(p cypher.RecoveredIndexPopulation, registered int) bool {
+			return p.Rebuilt == registered && p.Hydrated == 0
+		}); len(vs) > 0 {
+		return res, vs, nil
+	}
+	// The corruption must be the REASON, not a coincidence: every payload the
+	// reopen was offered must have been reported unreadable.
+	if corrupt.unreadable != res.flipped {
+		return res, []Violation{{
+			Kind: ViolationOracleDeviation, Op: "<snapshot-index-tolerance:corrupt>",
+			Message: fmt.Sprintf("%d payloads were flipped but recovery reported only %d unreadable:"+
+				" the rebuilds cannot all be attributed to the corruption", res.flipped, corrupt.unreadable),
+		}}, nil
+	}
+	// Both halves must have populated the SAME number of indexes, or the two are
+	// not comparable and the pairing proves nothing.
+	if corrupt.registered != control.registered {
+		return res, []Violation{{
+			Kind: ViolationOracleDeviation, Op: "<snapshot-index-tolerance>",
+			Message: fmt.Sprintf("the control reopen registered %d indexes and the corrupt reopen %d:"+
+				" the two halves are not comparable", control.registered, corrupt.registered),
+		}}, nil
+	}
+	res.verified = true
+	return res, nil, nil
+}
+
+// snapshotIndexReopenResult is one half of the paired arm: the population
+// counters of that reopen plus how many indexes it registered.
+type snapshotIndexReopenResult struct {
+	registered            int
+	hydrated, rebuilt     int
+	unreadable, corrupted int
+}
+
+// snapshotIndexReopen reopens the fixture through the normal recovery path and
+// verifies the reopened engine answers correctly: every declared index must
+// agree with a full label scan, and the committed key set must come back exactly.
+//
+// It is shared by both halves of the paired arm deliberately. The whole claim
+// being tested is that a hydrated index and a rebuilt one are indistinguishable
+// in their answers, so both halves must be held to ONE verification body — two
+// near-identical bodies could drift and let one half be checked more weakly than
+// the other.
+func snapshotIndexReopen(
+	ctx context.Context, fx *snapshotCorruptionFixture, half string,
+) (snapshotIndexReopenResult, []Violation, error) {
+	var out snapshotIndexReopenResult
+	op := "<snapshot-index-tolerance:" + half + ">"
 	st, rerr := OpenSimStore(fx.disk, snapshotCorruptionStoreConfig())
 	if rerr != nil {
-		return len(flipped), false, []Violation{{
-			Kind: ViolationOracleDeviation, Op: "<snapshot-index-tolerance>",
-			Message: fmt.Sprintf("a corrupt indexes/<name>.bin payload FAIL-STOPPED recovery (%v);"+
-				" store/snapshot documents it as a rebuild-on-restart contract, so either the contract or this arm is wrong", rerr),
+		return out, []Violation{{
+			Kind: ViolationOracleDeviation, Op: op,
+			Message: fmt.Sprintf("the %s reopen FAILED (%v); a damaged indexes/<name>.bin is a per-index"+
+				" REBUILD and never a fail-stop, so either that contract or this arm is wrong", half, rerr),
 		}}, nil
 	}
 	defer func() { _ = st.Close() }()
 
+	pop := st.RecoveredIndexPopulation()
+	out.registered = len(st.Engine().ListIndexes())
+	out.hydrated, out.rebuilt = pop.Hydrated, pop.Rebuilt
+	out.unreadable, out.corrupted = pop.PayloadUnreadable, pop.PayloadCorrupted
+
 	engine := NewEngineAdapter(st.Engine())
-	vs := CheckIndexConsistency(0, nil, engine, snapshotCorruptionSpecs()...)
-	if len(vs) > 0 {
-		return len(flipped), false, vs, nil
+	if vs := CheckIndexConsistency(0, nil, engine, snapshotCorruptionSpecs()...); len(vs) > 0 {
+		return out, vs, nil
 	}
-	// The tolerated path must still return the committed graph, not merely a
-	// consistent index over a graph that lost rows.
+	// A consistent index over a graph that lost rows is still wrong, so the
+	// committed model is re-read too.
 	got, err := snapshotCorruptionKeys(ctx, engine)
 	if err != nil {
-		return len(flipped), false, nil, fmt.Errorf("read keys after index-payload corruption: %w", err)
+		return out, nil, fmt.Errorf("read keys after the %s index reopen: %w", half, err)
 	}
 	if len(setMinus(fx.committed, got)) > 0 || len(setMinus(got, fx.committed)) > 0 {
-		return len(flipped), false, []Violation{{
-			Kind: ViolationACIDDurability, Op: "<snapshot-index-tolerance>",
-			Message: fmt.Sprintf("recovery tolerated the corrupt index payloads but returned %d nodes, want the %d committed",
-				len(got), len(fx.committed)),
+		return out, []Violation{{
+			Kind: ViolationACIDDurability, Op: op,
+			Message: fmt.Sprintf("the %s reopen returned %d nodes, want the %d committed",
+				half, len(got), len(fx.committed)),
 		}}, nil
 	}
-	return len(flipped), true, nil, nil
+	return out, nil, nil
+}
+
+// checkSnapshotIndexPopulation adjudicates one half's population counters
+// against the side that half requires, anchored to the number of indexes the
+// reopen actually registered.
+//
+// The anchor matters. "Some index hydrated" and "no index hydrated" are both
+// satisfiable by an engine that populated nothing, so the count is compared with
+// an INDEPENDENT measure of how many indexes exist — the manager's own
+// registered-name list — and the arm additionally requires that populating
+// accounts for every one of them.
+func checkSnapshotIndexPopulation(
+	half string, r snapshotIndexReopenResult, why string,
+	ok func(cypher.RecoveredIndexPopulation, int) bool,
+) []Violation {
+	op := "<snapshot-index-tolerance:" + half + ">"
+	pop := cypher.RecoveredIndexPopulation{
+		Hydrated: r.hydrated, Rebuilt: r.rebuilt,
+		PayloadUnreadable: r.unreadable, PayloadCorrupted: r.corrupted,
+	}
+	if r.registered == 0 {
+		return []Violation{{
+			Kind: ViolationOracleDeviation, Op: op,
+			Message: "the reopened engine registered NO index, so a population assertion of either side" +
+				" is vacuous: there was nothing to populate",
+		}}
+	}
+	if pop.Hydrated+pop.Rebuilt != r.registered {
+		return []Violation{{
+			Kind: ViolationOracleDeviation, Op: op,
+			Message: fmt.Sprintf("the %s reopen populated %d indexes (hydrated %d + rebuilt %d) but registered %d:"+
+				" an index registered without being populated is seekable while empty",
+				half, pop.Hydrated+pop.Rebuilt, pop.Hydrated, pop.Rebuilt, r.registered),
+		}}
+	}
+	if !ok(pop, r.registered) {
+		return []Violation{{
+			Kind: ViolationOracleDeviation, Op: op,
+			Message: fmt.Sprintf("%s: got hydrated=%d rebuilt=%d over %d registered indexes"+
+				" (payload unreadable=%d, corrupted=%d)",
+				why, pop.Hydrated, pop.Rebuilt, r.registered, pop.PayloadUnreadable, pop.PayloadCorrupted),
+		}}
+	}
+	return nil
 }
 
 // snapshotIndexPayloadPaths lists the published indexes/<name>.bin files, in a
@@ -1233,7 +1430,24 @@ func checkSnapshotCorruptionNonVacuity(
 			fail("no indexes/<name>.bin payload was corrupted: the tolerated-corruption arm was vacuous")
 		}
 		if !ev.indexRebuildVerified {
-			fail("the index-payload tolerance arm never verified the rebuilt indexes against a full scan")
+			fail("the index-payload arm never verified BOTH reopens against a full scan and the committed model")
+		}
+		// The PAIRING itself must be non-vacuous (rmp #2490). Each clause below is
+		// a way the arm could complete while proving nothing about the hydration
+		// axis, which is exactly what it did before the control half existed.
+		if ev.indexRegistered == 0 {
+			fail("the index-payload arm registered no index in either reopen: both population assertions were vacuous")
+		}
+		if ev.indexControlHydrated == 0 {
+			fail("the CONTROL reopen (intact payloads) hydrated nothing, so the corrupt reopen's" +
+				" all-rebuilt result is indistinguishable from an engine that never hydrates")
+		}
+		if ev.indexCorruptRebuilt == 0 {
+			fail("the CORRUPT reopen rebuilt nothing, so the flipped payloads changed no decision")
+		}
+		if ev.indexCorruptUnreadable == 0 {
+			fail("the CORRUPT reopen reported no unreadable payload, so its rebuilds cannot be" +
+				" attributed to the corruption this arm injected")
 		}
 	}
 	if !opts.skipManifestGap && !ev.manifestGapRan {

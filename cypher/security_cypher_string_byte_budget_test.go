@@ -41,13 +41,37 @@ import (
 )
 
 // secCypherStringGrowSize runs q (one integer column "n" = size/length of the
-// grown string) under a bounded deadline and returns (completed, the produced
-// value or -1, the iteration/entry error). It never runs an unbounded payload.
+// grown string) and returns (completed, the produced value or -1, the
+// iteration/entry error). It never runs an unbounded payload.
+//
+// There is deliberately NO context deadline, and one must not be reintroduced.
+// Every payload here is BOUNDED by construction: K is a compile-time constant
+// and the peak string stays ≈K bytes, so the query self-terminates whether or
+// not the byte budget fires. A regressed budget therefore surfaces as a
+// COMPLETED run — which [assertStringBudgetTrips] reports by name — and never
+// as a hang. Measured under -race on an idle host, the largest linear-append
+// payload that stays inside the ceiling (K=46000, charging 1.058e9 of the
+// 1 GiB budget) runs to completion in ~206 ms, so even a fully regressed budget
+// costs a fraction of a second.
+//
+// A deadline here would be actively harmful, because it makes a CORRECTNESS
+// oracle depend on the wall clock: `context.DeadlineExceeded` reads identically
+// whether the byte budget failed to fire or the machine was merely slow. That
+// is not hypothetical. `make ci` runs the whole module under -race with many
+// packages in parallel, and the resulting ~20x slowdown pushed a former 10 s
+// deadline past its own expiry, reporting a loaded machine as a byte-budget
+// defect — a gate that is red on a busy host and green on a quiet one. The
+// elapsed time is logged as a DIAGNOSTIC below, never as a verdict. A genuine
+// hang, as opposed to a slow run, is still caught by `go test`'s own -timeout,
+// whose full goroutine dump says far more than a bare DeadlineExceeded could.
 func secCypherStringGrowSize(t *testing.T, eng *cypher.Engine, q string) (bool, int64, error) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	res, err := eng.Run(ctx, q, nil)
+	start := time.Now()
+	// The query is truncated because one caller passes a 10,000-character literal.
+	defer func() {
+		t.Logf("secCypherStringGrowSize: %.60q… took %v (diagnostic only, never a verdict)", q, time.Since(start))
+	}()
+	res, err := eng.Run(context.Background(), q, nil)
 	if err != nil {
 		return false, -1, err
 	}
@@ -62,20 +86,37 @@ func secCypherStringGrowSize(t *testing.T, eng *cypher.Engine, q string) (bool, 
 	return iterErr == nil, n, iterErr
 }
 
+// secCypherStringByteBudgetMarker is the fragment of the #1482 byte-budget
+// message (expr.errStringTooLarge) that tells it apart from its two SIBLING
+// budgets, whose messages are deliberately the same shape: the list-element
+// budget (expr.errListTooLarge) says "list elements" and the value-depth budget
+// (expr.errValueTooDeep) says "nested deeper". Pinning the marker stops the gate
+// passing vacuously on some unrelated *expr.EvalError that happens to surface
+// from the same payload.
+const secCypherStringByteBudgetMarker = "string bytes"
+
 // assertStringBudgetTrips requires q to fail-stop with a typed *expr.EvalError
-// (the byte budget), surfaced either at Run() or during iteration.
+// naming the byte budget, surfaced either at Run() or during iteration. Each
+// rejection path names what actually went wrong, so a genuine regression is
+// never reported as something else.
 func assertStringBudgetTrips(t *testing.T, eng *cypher.Engine, name, q string) {
 	t.Helper()
 	completed, n, err := secCypherStringGrowSize(t, eng, q)
 	var ee *expr.EvalError
 	if errors.As(err, &ee) {
+		if !strings.Contains(ee.Error(), secCypherStringByteBudgetMarker) {
+			t.Fatalf("[%s] %q was rejected by a typed *expr.EvalError that is NOT the byte budget: %v; want a message naming %q, so this gate is asserting #1482 and not a sibling budget",
+				name, q, ee, secCypherStringByteBudgetMarker)
+		}
 		t.Logf("[%s] #1482: rejected with typed *expr.EvalError: %v", name, ee)
 		return
 	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("[%s] %q hit the deadline instead of the byte budget: %v — the byte budget must fail-stop fast", name, q, err)
+	if completed {
+		t.Fatalf("[%s] %q COMPLETED with size=%d instead of being rejected: the cumulative string-byte charge for this payload is far above expr.DefaultMaxStringEvalBytes (%d), so evalArith's string-\"+\" branch is no longer charging bytes before it allocates — #1482 has regressed",
+			name, q, n, expr.DefaultMaxStringEvalBytes)
 	}
-	t.Fatalf("[%s] %q completed=%v size=%d err=%v; want a typed *expr.EvalError (byte budget must fail-stop)", name, q, completed, n, err)
+	t.Fatalf("[%s] %q failed with a non-EvalError (%T): %v; want the typed *expr.EvalError of the #1482 byte budget",
+		name, q, err, err)
 }
 
 // TestSec_Cypher_StringConcat_OverBudgetReduceRejected drives the O(N²)

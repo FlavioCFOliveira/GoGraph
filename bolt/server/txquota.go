@@ -10,17 +10,27 @@ import (
 //
 // # Why it exists
 //
-// GoGraph serialises writers, and an open explicit transaction holds the global
-// visibility barrier for its whole life, so every reader on every connection
-// stalls behind it. The round-3 comparative audit turned that into a
-// demonstrated outage: one authenticated client sends BEGIN and stops talking,
-// and a 4.7 ms read becomes 30.001 s followed by a hard TransactionTimedOut —
-// repeatable indefinitely, because bolt/ has no per-principal or per-IP limit of
-// any kind (rmp #2175).
+// The round-3 comparative audit demonstrated an outage: one authenticated client
+// sent BEGIN and stopped talking, and a 4.7 ms read became 30.001 s followed by a
+// hard TransactionTimedOut — repeatable indefinitely, because bolt/ had no
+// per-principal or per-IP limit of any kind (rmp #2175). At the time an open
+// explicit transaction held the engine's global visibility barrier for its whole
+// life, so every reader on every connection stalled behind it.
 //
-// The companion bound is the idle reaper (Options.MaxTxIdleTime), which shortens
-// each individual outage. This one limits how many a single principal can start,
-// so the exposure does not simply move from duration to count.
+// That hold is GONE. rmp #2306 retired the writer serialisation BEGIN used to
+// take — Engine.beginTxSession acquires none, and concurrency control is MVCC
+// with per-object conflict detection (cypher/exectx.go) — and rmp #2305/#2274
+// retired the read and write visibility barriers a transaction held across client
+// think-time. An abandoned transaction therefore blocks neither readers nor
+// writers today.
+//
+// What it still costs is RESOURCES, and that is what this cap now bounds. Every
+// open transaction pins the reclamation horizon, so no version it could still
+// read is freed while it lives, and it occupies one registry entry and one slot
+// here. The companion bound is the idle reaper (Options.MaxTxIdleTime), which
+// shortens how long any one of them lives; this one limits how many a single
+// principal can hold at once, so the exposure does not simply move from duration
+// to count.
 //
 // # Bounded by construction
 //

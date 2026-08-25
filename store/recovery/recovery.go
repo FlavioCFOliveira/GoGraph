@@ -21,12 +21,10 @@
 package recovery
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -34,7 +32,6 @@ import (
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
-	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/internal/crashpoint"
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
@@ -106,12 +103,41 @@ type Result[N comparable, W any] struct {
 	// snapshots and v2 snapshots without a properties.bin leave it
 	// at 0; v2 snapshots that include properties.bin populate it.
 	SnapshotProperties int
-	// SnapshotIndexes reports how many secondary indexes were
-	// re-hydrated from indexes/<name>.bin payloads. Indexes whose
-	// snapshot file was missing or whose CRC32C did not validate are
-	// NOT counted here: they were rebuilt-on-replay instead, which is
-	// metered separately via `store.snapshot.indexes.corrupted`.
+	// SnapshotIndexes reports how many of the snapshot's indexes/<name>.bin
+	// payloads recovery CERTIFIED HYDRATABLE — the number of
+	// [Result.SnapshotIndexPayloads] entries whose Err is nil.
+	//
+	// It is a count of payloads recovery is willing to hand out, NOT of indexes
+	// it loaded: recovery loads none, because WAL replay cannot maintain a
+	// registered index (see index_payloads.go for why). The engine decides per
+	// index whether to hydrate from the payload or rebuild from the recovered
+	// graph, and reports which it did through
+	// `store.recovery.indexes.hydrated` / `store.recovery.indexes.rebuilt`.
+	//
+	// It was previously documented as "how many secondary indexes were
+	// re-hydrated", which no execution could produce: the loader it counted was
+	// reached only when the recovered graph already had an index.Manager
+	// attached, and recovery constructs the graph itself and never attaches one,
+	// so the value was provably always 0. rmp #2490 removed the dead loader and
+	// redefined the field to something a caller can act on.
 	SnapshotIndexes int
+	// SnapshotIndexPayloads holds one entry per indexes/<name>.bin the
+	// snapshot's manifest declared, carrying either the verified bytes or the
+	// reason they must not be used. It is exported for reporting and assertion;
+	// the supported lookup is [Result.IndexPayloadFor], which cannot be used
+	// without observing the reason. Deterministically ordered, following the
+	// manifest's own index order.
+	SnapshotIndexPayloads []IndexPayload
+	// WALTouchedNodeLabels is the sorted, de-duplicated set of node labels the
+	// replayed WAL added or removed, and WALTouchedNodePropertyKeys the same for
+	// node property keys written or deleted. Together they are the facts behind
+	// [Result.WALSuffixTouchesNodeIndex], the per-index staleness test a caller
+	// applies before hydrating an index payload. Both are nil when the WAL
+	// touched no such facet — including when there was no WAL at all — which is
+	// exactly the state in which a freshly checkpointed directory's payloads are
+	// all usable.
+	WALTouchedNodeLabels       []string
+	WALTouchedNodePropertyKeys []string
 	// SnapshotTombstones reports how many node tombstones were restored
 	// from the snapshot's tombstones.bin component before WAL replay. It is
 	// 0 for snapshots without the component (older snapshots, or any graph
@@ -174,6 +200,22 @@ type Result[N comparable, W any] struct {
 	// tails).
 	WALTailOffset int64
 	SnapshotHit   bool
+	// SnapshotSelfSufficient reports that the loaded snapshot could reconstruct
+	// the graph on its own: it carried a mapper.bin, so every node id was
+	// RESTORED from the image rather than re-derived by WAL-replay interning, and
+	// the snapshot's labels, properties, tombstones and edge handles were applied
+	// BEFORE the WAL replay rather than after it.
+	//
+	// It is the first precondition for using an index payload. On the
+	// mapper-less path the raw uint64 NodeIDs inside a payload name nothing:
+	// ids are minted by interning during replay, [graph.Mapper] has no
+	// un-intern, and one discarded transaction shifts every later id. It is
+	// surfaced rather than inferred because a caller cannot derive it —
+	// SnapshotSchemaVersion >= 3 implies a mapper was WRITTEN, not that this
+	// open restored one.
+	//
+	// False for a directory with no snapshot at all.
+	SnapshotSelfSufficient bool
 }
 
 // IsClean reports whether recovery completed without encountering genuine
@@ -369,51 +411,6 @@ type Options[N comparable, W any] struct {
 // on the returned value.
 func OptionsFromTxn[N comparable, W any](opts txn.Options[N, W]) Options[N, W] {
 	return Options[N, W]{Codec: opts.Codec, WeightCodec: opts.WeightCodec}
-}
-
-// applySnapshotIndexes feeds every readback in rb into the live
-// manager m, calling [index.Serializer.Deserialize] on the matching
-// registered index. An index whose readback Bytes are nil (file
-// missing or corrupted upstream), or whose Deserialize fails, is
-// logged via the standard library [log] package and counted under
-// `store.snapshot.indexes.corrupted`; the recovery proceeds with the
-// index in its zero state so the LPG remains usable.
-//
-// Returns the number of indexes successfully re-hydrated.
-func applySnapshotIndexes(m *index.Manager, rb []snapshot.IndexReadback) int {
-	if m == nil || len(rb) == 0 {
-		return 0
-	}
-	loaded := 0
-	for _, r := range rb {
-		sub, err := m.GetIndex(r.Name)
-		if err != nil {
-			// The manager does not know this index — skip; the
-			// corresponding file's bytes are dropped.
-			log.Printf("recovery: index %q on disk but not registered, ignoring", r.Name)
-			continue
-		}
-		if r.Bytes == nil {
-			metrics.IncCounter("store.snapshot.indexes.corrupted", 1)
-			log.Printf("recovery: index %q corrupted, will rebuild from LPG", r.Name)
-			continue
-		}
-		ser, ok := sub.(index.Serializer)
-		if !ok {
-			log.Printf("recovery: index %q does not implement Serializer, skipping", r.Name)
-			continue
-		}
-		if derr := ser.Deserialize(bytes.NewReader(r.Bytes)); derr != nil {
-			metrics.IncCounter("store.snapshot.indexes.corrupted", 1)
-			log.Printf("recovery: index %q corrupted (%v), will rebuild from LPG", r.Name, derr)
-			continue
-		}
-		loaded++
-	}
-	if loaded > 0 {
-		metrics.IncCounter("store.snapshot.indexes.loaded", uint64(loaded))
-	}
-	return loaded
 }
 
 // Op is the decoded form of a transaction-encoded WAL payload,
@@ -1102,11 +1099,19 @@ func openCodec[N comparable, W any](
 	// declared a constraint.
 	cAcc := newConstraintSet()
 
-	// iAcc accumulates durable index definitions from CREATE/DROP INDEX ops
-	// in the WAL. Unlike constraints, indexes have no snapshot component today;
-	// the entire durable set comes from WAL ops replayed here. The engine
-	// re-registers and re-backfills them on open.
+	// iAcc accumulates durable index definitions. It is seeded from the
+	// snapshot's indexdefs.bin component below (the checkpoint-survival source,
+	// #1755) and then reconciled with the CREATE/DROP INDEX ops the WAL replay
+	// feeds it, exactly as cAcc is for constraints. The engine re-registers each
+	// one on open, hydrating it from the snapshot payload or rebuilding it from
+	// the recovered graph.
 	iAcc := newIndexSet()
+
+	// touched accumulates the node labels and node property keys the WAL replay
+	// below writes, so recovery can report which secondary indexes the replayed
+	// suffix could have invalidated (rmp #2490). Declared here, beside the other
+	// accumulators, and read after the replay.
+	touched := newTouchSet()
 
 	// Load the snapshot manifest BEFORE constructing the live graph so the
 	// graph is reconstructed with the directed/multigraph shape the
@@ -1319,7 +1324,15 @@ func openCodec[N comparable, W any](
 		}
 		// best-effort: read-only WAL reader, close err is non-actionable for callers.
 		defer func() { _ = r.Close() }()
-		walRes, walErr := replayWALInto(ctx, r, g, codec, wcodec, maxTxnOps, cAcc, iAcc)
+		walRes, walErr := replayWALInto(ctx, r, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched)
+		// The node facets the SUFFIX touched. In a checkpointed directory the WAL
+		// on disk IS the suffix (its prefix was truncated), so this is exactly
+		// what a caller needs to decide whether a snapshot index payload still
+		// describes the graph. In a directory whose truncate was skipped the WAL
+		// still holds the pre-snapshot prefix, which only WIDENS the sets and so
+		// makes the hydration test more conservative, never wrong.
+		res.WALTouchedNodeLabels = touched.sortedLabels()
+		res.WALTouchedNodePropertyKeys = touched.sortedKeys()
 		res.WALOps = walRes.WALOps
 		res.TailErr = walRes.TailErr
 		res.WALTailOffset = walRes.WALTailOffset
@@ -1436,13 +1449,28 @@ func openCodec[N comparable, W any](
 	if haveSnapEdgeHandles && !snapshotSideAppliedEarly {
 		snapshot.ApplyEdgeHandlesToGraph(g, snapEdgeHandles)
 	}
-	// Secondary indexes (label / hash / btree) are re-hydrated last so
-	// the live graph is fully populated when we ask the Manager for the
-	// matching subscribers. Indexes are only re-hydrated when the LPG
-	// has a Manager wired in; absent that, the snapshot bytes are
-	// dropped (the index is rebuilt lazily on the next mutation pass).
+	// SECONDARY INDEXES ARE REPORTED, NEVER LOADED (rmp #2490).
+	//
+	// What stood here called a loader that fed each payload into
+	// g.IndexManager(). It could not work and never did: recovery constructs g
+	// itself (lpg.New above) and nothing in this package calls SetIndexManager,
+	// so g.IndexManager() was always nil and the loader returned 0 at its first
+	// guard. Result.SnapshotIndexes was therefore provably always 0.
+	//
+	// It could not be repaired in place either, because WAL replay cannot
+	// maintain a registered index — see index_payloads.go for the full argument
+	// — so an index registered here would be frozen at the snapshot instant
+	// while remaining seekable by the planner: silent wrong answers rather than a
+	// missed optimisation. Keeping a dead call that would be WRONG if it ever
+	// fired is worse than removing it.
+	//
+	// So classify the payloads and let the engine, which owns the index bindings
+	// and the name-to-(label, property) mapping, decide per index whether to
+	// hydrate or rebuild.
+	res.SnapshotSelfSufficient = snapshotSideAppliedEarly
 	if len(snapIndexes) > 0 {
-		res.SnapshotIndexes = applySnapshotIndexes(g.IndexManager(), snapIndexes)
+		res.SnapshotIndexPayloads, res.SnapshotIndexes =
+			classifyIndexPayloads(snapIndexes, indexImageReason(snapshotSideAppliedEarly, loaded.Manifest.IndexesCommitTS))
 	}
 	// Fail-stop on genuine corruption: a CRC mismatch, bad magic,
 	// unsupported frame/record version, or oversized length inside an
@@ -1474,11 +1502,20 @@ func openCodec[N comparable, W any](
 // They are surfaced rather than applied to the graph because a constraint or
 // index definition is engine schema, not graph topology.
 type ReplayResult struct {
-	TailErr       error
-	Constraints   []ConstraintRecord
-	Indexes       []IndexRecord
-	WALOps        int
-	WALTailOffset int64
+	TailErr     error
+	Constraints []ConstraintRecord
+	Indexes     []IndexRecord
+	// WALTouchedNodeLabels is the sorted, de-duplicated set of node labels this
+	// pass added or removed, and WALTouchedNodePropertyKeys the same for node
+	// property keys written or deleted. They exist so a caller that hydrates a
+	// secondary index from a snapshot payload can tell whether this pass
+	// invalidated it; see [Result.WALSuffixTouchesNodeIndex], which is the
+	// predicate over the identical fields on [Result]. Both are nil when the pass
+	// touched no such facet.
+	WALTouchedNodeLabels       []string
+	WALTouchedNodePropertyKeys []string
+	WALOps                     int
+	WALTailOffset              int64
 	// MaxTxnSeq is the highest per-transaction sequence any replayed v3 frame
 	// carried, or 0 when there was none. See [Result.MaxTxnSeq], which it feeds.
 	MaxTxnSeq uint64
@@ -1535,9 +1572,12 @@ func ReplayWAL[N comparable, W any](
 ) (ReplayResult, error) {
 	cAcc := newConstraintSet()
 	iAcc := newIndexSet()
-	res, err := replayWALInto(ctx, r, g, codec, wcodec, maxTxnOps, cAcc, iAcc)
+	touched := newTouchSet()
+	res, err := replayWALInto(ctx, r, g, codec, wcodec, maxTxnOps, cAcc, iAcc, touched)
 	res.Constraints = cAcc.snapshot()
 	res.Indexes = iAcc.snapshot()
+	res.WALTouchedNodeLabels = touched.sortedLabels()
+	res.WALTouchedNodePropertyKeys = touched.sortedKeys()
 	// RESTORE THE MVCC CLOCK, exactly as the snapshot+WAL core does (rmp #2309;
 	// see the RestoreMVCCClock call in openCodec for the full reasoning). This
 	// core reconstructs a graph from a WAL alone, so it owns the same obligation:
@@ -1583,6 +1623,7 @@ func replayWALInto[N comparable, W any](
 	maxTxnOps int,
 	cAcc *constraintSet,
 	iAcc *indexSet,
+	touched *touchSet,
 ) (ReplayResult, error) {
 	var res ReplayResult
 	// Bracket the whole replay in ONE adjacency commit window (task #1526): WAL
@@ -1673,7 +1714,7 @@ func replayWALInto[N comparable, W any](
 			committed := pending[start:]
 			ok := true
 			for i := range committed {
-				if !applyOrAccumulate(g, &committed[i], codec, wcodec, cAcc, iAcc) {
+				if !applyOrAccumulate(g, &committed[i], codec, wcodec, cAcc, iAcc, touched) {
 					ok = false
 					break
 				}
@@ -1689,7 +1730,7 @@ func replayWALInto[N comparable, W any](
 		// v2 frame: self-committing (one frame is one transaction). v1
 		// frames never reach here — Decode rejects them upstream with
 		// ErrUnsupportedRecordVersion.
-		if !applyOrAccumulate(g, &op, codec, wcodec, cAcc, iAcc) {
+		if !applyOrAccumulate(g, &op, codec, wcodec, cAcc, iAcc, touched) {
 			// A malformed v2 body (truncated endpoints, missing or
 			// overflowing trailing label/key length) failed to decode
 			// through the codec; stop replay so callers see the cut-off
@@ -1721,6 +1762,7 @@ func applyOrAccumulate[N comparable, W any](
 	wcodec txn.WeightCodec[W],
 	cs *constraintSet,
 	is *indexSet,
+	touched *touchSet,
 ) bool {
 	if isConstraint, ok := accumulateConstraintOp(cs, op); isConstraint {
 		return ok
@@ -1728,7 +1770,7 @@ func applyOrAccumulate[N comparable, W any](
 	if isIdx, ok := accumulateIndexOp(is, op); isIdx {
 		return ok
 	}
-	return applyOpCodec(g, op, codec, wcodec)
+	return applyOpCodec(g, op, codec, wcodec, touched)
 }
 
 // applyOpCodec applies a decoded op into g via codec. It returns
@@ -1748,6 +1790,12 @@ func applyOrAccumulate[N comparable, W any](
 // the `store.recovery.applyOp.fallbackZeroWeight` counter is
 // incremented.
 //
+// touched, when non-nil, accumulates the NODE labels and NODE property keys this
+// op writes, so recovery can report which secondary indexes the replayed WAL
+// could have invalidated (rmp #2490). A nil touched disables the accounting
+// entirely and is what a caller that only wants the graph state passes; see
+// [touchSet] for which op kinds contribute and why the rest are index-neutral.
+//
 // The Op is taken by pointer to keep the inner recovery loop
 // allocation-free; the function does not mutate op.
 //
@@ -1757,6 +1805,7 @@ func applyOpCodec[N comparable, W any](
 	op *Op,
 	codec txn.Codec[N],
 	wcodec txn.WeightCodec[W],
+	touched *touchSet,
 ) bool {
 	// v2 and v3 frames share the same codec-encoded body; v3 differs only
 	// in the envelope header (txnSeq) which Decode already stripped into
@@ -1833,10 +1882,18 @@ func applyOpCodec[N comparable, W any](
 				return false
 			}
 		case txn.OpRemoveNode:
+			// The removal already enumerates both facets in order to strip them,
+			// so recording them for the index-staleness report (rmp #2490) is
+			// free. A node a snapshot index payload holds under (L, P)
+			// necessarily still carries L and P here — unless an earlier op in
+			// this same replay already stripped them, and that op recorded them
+			// itself.
 			for _, lbl := range g.NodeLabels(src) {
+				touched.addLabel(lbl)
 				g.RemoveNodeLabel(src, lbl)
 			}
 			for k := range g.NodeProperties(src) {
+				touched.addKey(k)
 				g.DelNodeProperty(src, k)
 			}
 			// Reconstruct the tombstone so the node is logically deleted
@@ -1847,8 +1904,10 @@ func applyOpCodec[N comparable, W any](
 			// so replay order is honoured.
 			g.RemoveNode(src)
 		case txn.OpRemoveNodeLabel:
+			touched.addLabel(label)
 			g.RemoveNodeLabel(src, label)
 		case txn.OpSetNodeLabel:
+			touched.addLabel(label)
 			if err := g.SetNodeLabel(src, label); err != nil {
 				metrics.IncCounter("store.recovery.applyOp.setNodeLabelErrors", 1)
 				return false
@@ -1899,11 +1958,13 @@ func applyOpCodec[N comparable, W any](
 			if verr != nil {
 				return false
 			}
+			touched.addKey(key)
 			if err := g.SetNodeProperty(src, key, val); err != nil {
 				metrics.IncCounter("store.recovery.applyOp.setNodePropertyErrors", 1)
 				return false
 			}
 		case txn.OpDelNodeProperty:
+			touched.addKey(key)
 			g.DelNodeProperty(src, key)
 		case txn.OpSetEdgeProperty:
 			val, _, verr := decodeRecoveryPropertyValue(rest)

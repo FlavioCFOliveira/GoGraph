@@ -58,8 +58,9 @@ func BellmanFord[W Weight](c *csr.CSR[W], src graph.NodeID) (*Distances[W], erro
 }
 
 // BellmanFordCtx is the context-aware variant of [BellmanFord].
-// ctx.Err() is checked at every relaxation round boundary; on
-// cancellation returns (nil, wrapped ctx.Err()).
+// ctx.Err() is checked on entry to the SPFA relaxation loop and every
+// 4096 dequeues thereafter; on cancellation returns (nil, the raw
+// ctx.Err()).
 func BellmanFordCtx[W Weight](ctx context.Context, c *csr.CSR[W], src graph.NodeID) (*Distances[W], error) {
 	defer metrics.Time("search.BellmanFordCtx").Stop()
 	maxID := uint64(c.MaxNodeID())
@@ -179,12 +180,18 @@ func bellmanFordCore[W Weight](
 	relaxes[uint64(src)] = 1
 	yieldCtr := 0
 	for head != tail {
-		yieldCtr++
+		// Check the stride mask BEFORE incrementing, so the poll lands on
+		// iteration 0 and cancellation is honoured on a deque that drains
+		// in fewer than 4096 dequeues. The reverse order left every graph
+		// below the stride unable to honour cancellation at all (rmp
+		// #2593); the check-then-increment idiom matches dijkstra.go and
+		// prim.go.
 		if yieldCtr&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 		}
+		yieldCtr++
 		v := dq[head]
 		head = (head + 1) & mask
 		inQueue[uint64(v)] = false

@@ -1092,20 +1092,175 @@ documented NON-dependency (edge-handle order does not track WAL order and nothin
 that correspondence: the handle travels in the frame and every restore path is a
 high-water seed).
 
+Incrementally synced at commit `0f288333` (2026-08-18, task #2481, sprint 348 — the DST
+exercises the Bolt wire surface to full extent). The Bolt authentication surface had been
+driven by no scenario at all: every SimServer used `NoAuthHandler`, which admits every
+client by construction, so an assertion made there was VACUOUS rather than merely weak.
++18 nodes: `Sprint` `348` OPEN; `Commit` `0f288333`; `Task` 2481 COMPLETED and 2556/2557/
+2558 BUG + 2559 CHORE in BACKLOG; `Feature` `DST Bolt wire-surface coverage`; `Defect`
+2481 FIXED; four `Lesson`s (`an-assertion-against-a-disabled-check-is-vacuous`,
+`a-process-global-counter-puts-wal-byte-totals-out-of-seed-reach`,
+`a-crash-model-note-can-outlive-the-model-it-described`,
+`a-shared-failure-code-cannot-attribute-a-refusal`); five `Type`s, six `Function`s and
+seven `Method`s for the two new scenarios and the seams they needed. Edges: `CONTAINS`,
+`DELIVERS`, `IMPLEMENTED_IN` (Task→Commit, the documented direction), `IMPROVES`, `FOUND`
+(→Defect), `REMEDIATED_BY`, four `TAUGHT`, four `FOLLOWED_BY`, `SPECIFIED_IN` ×2 and
+`TOUCHES` ×5.
+
+Three things this sync recorded that the model did not previously describe:
+
+- **`Task` was never in the node-label table** although 207 `IMPLEMENTED_IN` edges start
+  at one. It is documented below now, with the properties the live nodes actually carry.
+- **New properties.** `Task` gains `type`, `severity`, `foundDuring` and `measured` (the
+  same evidence-bearing shape `Defect` already has, because a BACKLOG bug filed from a
+  review carries its reproduction or it carries nothing). `Type`/`Function`/`Method` gain
+  `introducedBy` (the rmp task that added the symbol), so a symbol's origin is queryable
+  without walking commits.
+- **A divergence in `IMPLEMENTED_IN`, observed not introduced.** The audit query the edge
+  table mandates returns, besides the documented 207 `Task`→`Commit`: `Commit`→`Feature`
+  ×5, `Feature`→`Commit` ×10 and `Task`→`Package` ×1. None is the `Commit`→`Task`
+  reversal that table calls a defect, but three shapes are using one edge type for
+  distinct relations that `IMPROVES`/`FIXES`/`TOUCHES` already model. Recorded rather than
+  repaired: reconciling it is a hygiene task, and silently rewriting ten edges would
+  destroy the only evidence of how they came to be.
+
+Also corrected here: the guard-rail is **clause**-based, not substring-based. A working
+note claimed `graph create` rejects the words set/delete/remove/detach anywhere in the
+query text; measured at this commit, `MERGE (m:Method {name: 'setLogger', …})` is
+ACCEPTED. What is rejected is a `SET` clause, `MERGE … ON CREATE SET` included.
+
+Incrementally synced at commit `e2e45cf1` (2026-08-19, task #2482, sprint 348 — the DST
+drives the Bolt transaction registry on a fake clock). +12 nodes: `Commit` `e2e45cf1`;
+`Task` 2482 COMPLETED and 2560/2561 BUG + 2562 IMPROVEMENT in BACKLOG; three `Function`s and
+four `Type`s for the three arms and their instruments (`txClockProbe`, `txArmingRaceProbe`,
+`idleReapModel`, `BoltTxRegistryEvidence`); two `Lesson`s. Edges: `CONTAINS`,
+`IMPLEMENTED_IN` (Task→Commit), `IMPROVES`, three `FOLLOWED_BY`, two `TAUGHT`, `TOUCHES` ×2.
+
+The two lessons are worth reading before the next measurement or the next harness:
+`a-measurement-can-lie-flat-when-the-fixture-is-degenerate` (an insertion sort read as cheap
+at every size because equal start instants made it swap nothing — quadratic, 600 µs per call
+at 512, with distinct ones) and `the-obvious-barrier-is-not-the-barrier` (the BEGIN reply and
+the registry listing both precede the reaper's arming, and a harness synchronising on either
+passed 40 of 40 runs anyway).
+
+Incrementally synced at commit `61ef2e81` (2026-08-19, task #2483, sprint 348 — the DST
+drives `Server.Shutdown`'s drain and the `Options.Closer` ordering). +4 nodes: `Commit`
+`61ef2e81`; `Task` 2483 COMPLETED; two `Lesson`s. Edges: `CONTAINS`, `IMPLEMENTED_IN`
+(Task→Commit), `IMPROVES`, two `TAUGHT`, `TOUCHES`.
+
+Both lessons are about instruments and both cost real time to learn, so they are worth
+reading before writing another oracle:
+`an-acknowledgement-is-the-terminal-reply-and-nothing-else` (a Bolt RUN SUCCESS is not a
+durability ack — the bookmark rides on the terminal — and neither is a `proto.Ignored`;
+counting either manufactured `ACID_DURABILITY` reports in 4 of 25 and 8 of 30 runs) and
+`never-assert-a-go-select-coin-flip` (a branch that won 12 of 12 and then 8 of 8 was pinned,
+and the pin made 5 of 6 `-race` runs red once the other branch surfaced).
+
+Incrementally synced at commits `e8b4388f` and `452799e3` (2026-08-19, tasks #2483 and
+#2484, sprint 348 — Bolt streaming semantics, plus a fix to the drain arms' determinism
+clause). +5 nodes: two `Commit`s; `Task` 2484 COMPLETED; two `Lesson`s. Edges: two
+`CONTAINS`, two `IMPLEMENTED_IN` (Task→Commit), `IMPROVES`, two `TAUGHT`.
+
+Both lessons are about the instrument again, and both were paid for twice, so they are the
+two to read before writing another oracle or chasing another flake:
+`a-clause-the-fixture-guarantees-is-not-a-property-of-the-subject` (an arm asserted the
+server never buffers past a bound, which the simulated pipe makes true whatever the server
+does — with two neighbours of the same shape, a state-name containment check a SIBLING state
+satisfies, and a bound compared against a measurement of zero) and
+`scheduling-dependence-needs-load-to-surface-not-repetition` (a determinism clause passed
+eight consecutive `-race` runs in isolation and then failed in the full suite on a
+connection-peak count; the re-verification that meant anything was 25 repetitions run while
+a full package run saturated the machine).
+
+Incrementally synced at commits `a3685a35` and `201370e0` (2026-08-19, tasks #2485 and
+#2567, sprint 348 — the DST drives the whole BEGIN extras surface, and five cypher security
+gates stop reporting a slow machine as a failed subject). +53 nodes: two `Commit`s; `Task`
+2485 and 2567 COMPLETED, plus 2563, 2564, 2565, 2566, 2568 and 2569 BUG in BACKLOG; four
+`Lesson`s; nine `Type`s, seven `Function`s and three `Method`s for the `bolt-begin-extras`
+scenario and the two seams it needed (`WireClient.BeginExtras` and `SimServer.ListenerAddr`,
+the latter being the INDEPENDENT reference for the ROUTE payload — comparing the reply
+against `bolt/server.RoutingTable` would have compared that function with itself); eleven
+`Test`s for that scenario; and, for the cypher fix, three `Function`s (the two oracle
+helpers plus `runNotifications`) and six `Test`s. +81 edges: 41 `CONTAINS` (two
+Sprint→Commit, 39 Package→symbol), 17 `VERIFIES`, six `FOLLOWED_BY`, four `TAUGHT`, four
+`TOUCHES`, three `BUILDS_ON`, two `IMPLEMENTED_IN` (Task→Commit, the documented direction),
+`IMPROVES`, `FIXES`, `DEPENDS_ON` and `HAS_METHOD`. Five existing nodes also had their
+provenance bumped: the `DST Bolt wire-surface coverage` `Feature`, whose description had
+still listed only #2481's two scenarios and now names all nine Bolt scenarios the catalogue
+registers, the `sim` and `cypher` `Package`s, and the two DST `Spec`s. Every node and edge
+written here carries `gitCommit` and `gitDate`, and the direction audit the edge table
+mandates still returns no `Commit`→`Task` row.
+
+Four lessons, and the first three were all paid for inside a single file before it shipped:
+
+- `a-claim-in-a-comment-is-not-evidence` — thirteen false claims in one new file's own
+  comments, each confidently worded. A godoc asserted that normalising a nil extras map kept
+  BEGIN byte-identical; a typed nil map never reaches the encoder's `case nil` arm and lands
+  on the map arm, where `len` and `range` treat it as empty, so both spellings already
+  emitted `b111a0` and the normalisation was decorative. An arm named `overflow-tx-timeout`
+  does not overflow: the plain magnitude guard rejects `1<<62` before the multiplication, so
+  an out-of-range client bound is SILENTLY IGNORED instead. And a quote was attributed to
+  the BEGIN log site that belongs to the RUN site. A comment asserting behaviour is a claim
+  to be measured, never documentation.
+- `a-process-global-counter-reaches-the-report` — `renderIssued` rendered the ADVANCE
+  between bookmark counters, and `bookmarkCounter` is a package-level atomic that `swarm`
+  shares across N workers in one process: +1 at one worker and +5 to +7 at six, on 6 of 6
+  fixed seeds, then 0 of 16 at sixteen workers once fixed. The determinism test replays
+  serially in one process and could not see it. Expose this class with FIXED seeds and
+  VARYING worker counts, never with more seeds. It `BUILDS_ON`
+  `a-process-global-counter-puts-wal-byte-totals-out-of-seed-reach` from #2481, which is the
+  same mechanism reaching a different field.
+- `a-scheduler-dependent-probe-is-a-bad-permanent-guard` — the probe that FOUND that defect
+  was deliberately not kept as the regression test, because it reproduces through the
+  scheduler and goes quiet on a fast or lightly loaded machine. The guard that shipped pins
+  the property instead — two evidence values differing only in their counters, one pair
+  consecutive and one spaced +1192 and +122222, must render identically — and runs in
+  0.00 s with no scheduler dependence.
+- `a-deadline-is-not-an-oracle` — two cypher security gates scored `context.DeadlineExceeded`
+  as proof the byte budget had failed. The budget was fine, passing in 0.47 s and 0.48 s
+  alone under `-race`, and a ~21x slowdown under the full race suite pushed it past a 10 s
+  deadline. The discriminator is whether the PAYLOAD is bounded: where it is, the deadline
+  adds no detection power at all — a regressed guard surfaces as a COMPLETED run in a
+  fraction of a second — and the clock only misattributes slowness; where the wait is
+  genuinely unbounded the clock is the only possible oracle and is legitimate. A sweep over
+  277 occurrences, cross-checked three ways, left roughly 148 unbounded sites alone and
+  fixed five bounded ones.
+
+Three things recorded by this sync that the model did not previously describe, all observed
+rather than introduced:
+
+- **`Test.task`.** Live `Test` nodes have carried a `task` property (the rmp ticket that
+  added or last hardened the test) since `00645575` on 2026-07-27 — 89 nodes, 83 of them
+  stamped across eight commits and six carrying no stamp at all; the table said only
+  `name`, `pkg`, `file`. It is documented below, and set on all 17 `Test` nodes written
+  here.
+- **The `internal/sim` key divergence is wider than the `Type` row said.** `Function` and
+  `Method` nodes in that package are keyed on `package` (the repo-relative dir) too, not
+  only `Type`. The new symbols follow the existing local convention rather than splitting
+  the package's identity across two property names; reconciling it remains a hygiene task.
+- **`DSTScenario` is a dormant label.** Its five nodes all date from 2026-07-13 and use a
+  different property set (`id`, `title`, `note`, `commit`, `date`) from everything sprint
+  348 writes. Tasks #2481, #2482 and #2485 modelled their DST scenarios as `internal/sim`
+  `Type`/`Function`/`Method`/`Test` nodes under the `DST Bolt wire-surface coverage`
+  `Feature` (#2483 and #2484 recorded no symbol nodes at all), and this sync follows them;
+  the label is documented below so the next sync does not start a third convention by
+  accident.
+
 ## Node labels
 
 | Label | Meaning | Properties (beyond `gitCommit`, `gitDate`) |
 |---|---|---|
 | `Package` | A Go package (one per source directory). | `name` (package clause), `path` (repo-relative dir, `"."` for root), `importPath` (full), `kind`. Added 2026-08-18 (`15c77ddc`): `testOnly` (bool — the package contains no non-test source file, as with `internal/tmphygiene`) and `responsibility` (one sentence stating what the package owns, per the *Exemplary components* mandate in `CLAUDE.md`) |
-| `Type` | A `type` declaration. | `name`, `pkg` (importPath), `file` (repo-relative), `kind`, `exported` (bool), `generic` (bool), optional `doc`. **Divergence observed 2026-08-18:** the `internal/sim` Type nodes are keyed on a `package` property holding the repo-relative dir (`internal/sim`) instead of `pkg` holding the importPath, so a `pkg`-based query misses them. New sim Types at `124eca54` followed the existing local convention rather than splitting the package's identity across two property names; reconciling the two is a hygiene task. |
-| `Function` | A top-level `func` with no receiver that is not a Test/Benchmark/Fuzz/Example. | `name`, `pkg`, `file`, `exported`, `generic` |
+| `Type` | A `type` declaration. | `name`, `pkg` (importPath), `file` (repo-relative), `kind`, `exported` (bool), `generic` (bool), optional `doc`. **Divergence observed 2026-08-18:** the `internal/sim` Type nodes are keyed on a `package` property holding the repo-relative dir (`internal/sim`) instead of `pkg` holding the importPath, so a `pkg`-based query misses them. New sim Types at `124eca54` followed the existing local convention rather than splitting the package's identity across two property names; reconciling the two is a hygiene task. **Widened 2026-08-19 (`a3685a35`):** the divergence is not confined to `Type` — `Function` and `Method` nodes in `internal/sim` are keyed on `package` as well, so a `pkg`-based query misses every sim symbol, not merely the types. |
+| `Function` | A top-level `func` with no receiver that is not a Test/Benchmark/Fuzz/Example. | `name`, `pkg`, `file`, `exported`, `generic`. Added 2026-08-18 (`0f288333`): `introducedBy` (int — the rmp task that added the symbol), so a symbol's origin is queryable without walking commits. The same property is set on `Type` and `Method`. |
 | `Method` | A `func` with a receiver. | `name`, `pkg`, `file`, `recv` (receiver type, `*` stripped), `exported` |
-| `Test` | A `func TestXxx(*testing.T)`-style function (name prefix `Test`). | `name`, `pkg`, `file` |
+| `Test` | A `func TestXxx(*testing.T)`-style function (name prefix `Test`). | `name`, `pkg`, `file`. Documented 2026-08-19 (`a3685a35`), present in the live graph since `00645575` (2026-07-27) and carried by 89 nodes before this sync: `task` (int — the rmp ticket that added the test, or that last hardened it), which is how a gate's provenance is reached without walking commits. Note `pkg` is the full importPath for the bulk-surveyed packages but the bare package name for `internal/sim`, the same divergence recorded on `Type` above |
 | `Benchmark` | A `func BenchmarkXxx` (name prefix `Benchmark`). | `name`, `pkg`, `file` |
 | `FuzzTarget` | A `func FuzzXxx` (name prefix `Fuzz`). | `name`, `pkg`, `file` |
 | `Example` | A runnable godoc `func ExampleXxx` (name prefix `Example`). | `name`, `pkg`, `file` |
 | `Spec` | A documentation/specification file under `docs/` (plus root `README.md`/`CHANGELOG.md`). | `name` (basename), `path` (repo-relative), `title` (first `# ` heading) |
 | `Feature` | A curated major capability of the module. | `name`, `description` |
+| `Task` | An `rmp` roadmap task. **Present in the live graph long before this table documented it** (207 `IMPLEMENTED_IN` edges start at one); documented 2026-08-18 (`0f288333`, rmp #2481). | `id` (the rmp ticket number, the identity), `title`, `status` (`BACKLOG`\|`SPRINT`\|`DOING`\|`TESTING`\|`COMPLETED`), `sprint` (int — the sprint id, `0` while the task is in no sprint). Added 2026-08-18 (`0f288333`): `type` (the rmp task type, e.g. `TASK`\|`BUG`\|`CHORE`), `severity` (int), `foundDuring` (what surfaced the task, for one filed from a review rather than planned), and `measured` (the figures a filing rests on) — the same evidence-bearing shape `Defect` carries, because a bug filed and then left in the backlog keeps only what its filing recorded. A `Task` whose `type` is `BUG` is itself a defect record, which is why `TAUGHT` accepts it as a source. |
 | `Sprint` | A planning sprint from the `rmp` roadmap. | `id` (int), `name`, `status` (`OPEN`\|`CLOSED`\|`PENDING`), `objective` |
 | `Release` | A tagged — or prepared but not yet tagged — release of the module. Present in the live graph since before this table existed; documented 2026-08-13 (sprint 344). | `name` (`vX.Y.Z`, the identity), `date`, `headlineFeature`, `published` (bool — **false while the tag has not been pushed**), `latest` (bool), `releaseCommit` (full hash) / `releaseCommitShort`, `cveCleared` (false, or the advisory id), `forwardFixes` (optional). Added 2026-08-13: `commitCount` (int), `breakingChanges` (int), `tckScenarios` (int), `knownOpenDefect`, `certification` — so a release's honest posture is queryable without reading its notes |
 | `Commit` | A git commit that delivered one or more tasks, or that integrated a sprint into an integration branch. | `hash` (short — **8-char** in the live graph; this table said 7 until 2026-07-29 and the drift silently made 7-char lookups miss), `fullHash` (full 40-char), `message`, `sprintId` (int), `kind` (`merge` only — set on a sprint-integration merge commit; absent on an ordinary delivery commit), `branch` (the branch the merge landed on, e.g. `main`; set with `kind`) |
@@ -1114,7 +1269,10 @@ high-water seed).
 | `Memory` | A persistent assistant memory file (mirror of the harness memory directory). | `name` (frontmatter slug), `file` (basename), `type` (`user`\|`feedback`\|`project`\|`reference`), `description` |
 | `Document` | A prose document under `docs/` that records a decision, a design, an audit or a certification. Present in the live graph since before this table existed (see the data-quality note below); its certification use was documented 2026-08-09 (sprint 337). | `path` (repo-relative, the identity), `title`, `kind` (`certification`\|`design`\|`audit`), `verdict` (certifications only — the cycle's stated outcome) |
 | `Defect` | A confirmed defect in the module or in its test harness, whether fixed or still open. **Present in the live graph long before this table documented it** (18 nodes at 2026-08-18); its property set is deliberately heterogeneous, because each defect records the evidence its own diagnosis produced. | `id` (the rmp ticket number, the identity) or `ref`; `title`, `status` (`OPEN`\|`FIXED`), `severity`, `component`, `rootCause`, `evidence`/`measured`, `fixCommit`, `regressionTest`. Added 2026-08-18 (`0ed5d4d1`, rmp #2547): `backlog` (bool — true while the defect is filed but in no sprint), `family` (a named class of related defects, e.g. `crash-model fidelity: rmp #2514, #2535, #2538`), `foundDuring` (what surfaced it, when that is not an audit). Added 2026-08-18 (`124eca54`): `fixedWith` (the ticket a defect was closed *inside*, when the two were inseparable), `verification` (the probe that shows it fixed), `originalFilingUnderstated` (recording that the filed scope was narrower than the measured one) |
-| `Lesson` | A generalisable conclusion drawn from a defect — the part worth keeping once the ticket is closed. Present in the live graph before this table documented it; documented 2026-08-18. | `name` (a slug, the identity), `summary` (the lesson itself, stated so it applies beyond the originating defect), `claim`/`date` on the older nodes. Added 2026-08-18 (`124eca54`): `generalises` (the wider class the lesson covers), `method` (what to do differently), and — when a lesson survives but its worked example does not — `illustrationWithdrawn` plus `correctedAt`, so a corrected lesson is distinguishable from a rewritten one |
+| `DSTScenario` | **REVIVED and now the primary model, 2026-08-20 (`f3c40f22`, sprint 349).** One node per scenario registered in `sim.DefaultRegistry` (`internal/sim/catalogue.go`) — the full catalogue of **49** was surveyed and written in one pass, closing the gap that had left the label with 6 nodes against 49 registered scenarios. The label was previously described as *dormant*, with sprint-348 scenarios modelled as bare `internal/sim` `Type`/`Function`/`Method`/`Test` nodes; that guidance is **superseded** — a scenario now gets a `DSTScenario` node **as well as** whatever symbol nodes its implementation contributes, because the catalogue key, the execution mode, the run override and above all the scenario's *stated non-coverage* have nowhere else to live. **Two shapes coexist and `kind` tells them apart:** `kind='registered'` is a real catalogue key; `kind='coverage-cluster'` is one of the three curated 2026-07-13 cluster nodes (`storage-fault-cluster`, `search-battery-16`, `cypher-surface-extended`) that are **not** registry keys and were left in place, marked, rather than deleted. | `id` (the kebab-case catalogue key — the identity, byte-equal to the `Scenario*` constant's value), `title`, `note` (**the load-bearing property**: what the scenario asserts AND what it explicitly does not — several scenarios document their own unreachable fault regimes in a header comment and those claims are transcribed here), `mode` (`deterministic`\|`concurrent`\|`liveness`\|`bulk-vs-online` — the `ExecMode.String()` value; only `deterministic` is bit-reproducible and therefore eligible for trace record/replay/shrink), `file`, `testFile`, `runOverride` (the unexported `run` field's function name, or `''` when the scenario uses the default mode dispatch — 36 of the 49 carry one), `defaultSeed` (as written in source, hex literal or named constant), `tasks` (comma-separated rmp ticket numbers cited in the implementing file), `kind`, `gitCommit`, `gitDate`. The three legacy cluster nodes keep the older `commit`/`date` pair and additionally carry `note2` saying they are not registry keys |
+| `Lesson` | A generalisable conclusion drawn from a defect — the part worth keeping once the ticket is closed. Present in the live graph before this table documented it; documented 2026-08-18. **Data-quality divergence observed 2026-08-20 (`f3c40f22`):** one node, `threshold-harness-vs-runtime-2026-08-20`, is keyed on `id` and carries `title`/`note`/`commit`/`date` — the `DSTScenario` shape, not this label's — so it is invisible to every `{name:…}` lookup and to any query reading `summary`. Reach it by `id`, or `coalesce(l.name, l.id)`. Not corrected here (it is a live, correct lesson; only its keying diverges). | `name` (a slug, the identity), `summary` (the lesson itself, stated so it applies beyond the originating defect), `claim`/`date` on the older nodes. Added 2026-08-18 (`124eca54`): `generalises` (the wider class the lesson covers), `method` (what to do differently), and — when a lesson survives but its worked example does not — `illustrationWithdrawn` plus `correctedAt`, so a corrected lesson is distinguishable from a rewritten one |
+| `Component` | A named unit of implementation finer than a `Package` and coarser than a symbol — a type plus the machinery around it, a subsystem, or a named mechanism. **Present in the live graph long before this table documented it** (48 nodes at 2026-08-20); documented 2026-08-20 (`f3c40f22`, sprint 349), when 22 nodes were added for the DST harness's units. | `name` (the identity — a dotted or qualified name, e.g. `sim.SimDisk`, `mvcc.Horizon`), `path` (**the file or directory the unit lives in — this label uses `path`, not `file`**), `responsibility` (one sentence stating what the unit owns, per the *Exemplary components* mandate), `note` (the non-obvious behaviour, fidelity limits, or traps), `gitCommit`, `gitDate`. Heterogeneous on the older nodes, which variously carry `location`, `mvcc_verdict`, `commit`, `commit_date`, `sprint`, `task` |
+| `Decision` | A recorded decision or standing convention, with the reasoning that settles it. **Present in the live graph long before this table documented it** (21 nodes at 2026-08-20); documented 2026-08-20 (`f3c40f22`), when the 7 DST conventions were added as `dst-*` nodes. | `name` (a slug, the identity), `statement` (the convention or decision, stated so it can be applied without reading the source), `kind` (`convention` on the `dst-*` nodes; older nodes use it differently), `date`, `gitCommit`, `gitDate`. Heterogeneous on the older nodes, which variously carry `verdict`, `reason`, `supersededBy`, `audit`, `task`, `premise`, `mechanism`, `justification`, `behaviourChange`, `sideEffect`, `ref` — and at least one older node has **no `name` at all**, so it is unreachable by identity |
 
 ### Enumerated property values
 
@@ -1163,7 +1321,7 @@ All edges carry `gitCommit` and `gitDate`.
 | `IMPROVES` | `(Commit)-[:IMPROVES]->(Feature)` | A commit improves (perf/observability/tests) a feature area without fixing a defect. |
 | `TOUCHES` | `(Commit)-[:TOUCHES]->(Package\|Type\|Function\|Spec)` | A commit's diff touched this element; drives provenance re-stamping. |
 | `IMPLEMENTED_IN` | `(Task)-[:IMPLEMENTED_IN]->(Commit)` | The commit that delivered a task's work. **The direction is load-bearing, not incidental:** every documented read starts at the `Task`, so an edge written the other way round makes the work *invisible* to `MATCH (t:Task)-[:IMPLEMENTED_IN]->(c:Commit)` rather than merely awkward to reach — a query returning nothing reads as "no such work exists". Four sprint-347 edges (tasks #2480, #2514, #2535, #2537 — the whole DST crash-model family) were found reversed as `(Commit)-[:IMPLEMENTED_IN]->(Task)` and **repaired at `0ed5d4d1` (2026-08-18)**: the correct-direction edges carry `reconciledAt` and `reconciledNote` so the repair is auditable. Verify after any sync with `MATCH (a)-[e:IMPLEMENTED_IN]->(b) RETURN labels(a)[0], labels(b)[0], count(*)` — a `Commit`→`Task` row is a defect. |
-| `DEPENDS_ON` | `(Task)-[:DEPENDS_ON]->(Task)` | A task cannot start/complete until another task (a genuine prerequisite) does. |
+| `DEPENDS_ON` | `(Task)-[:DEPENDS_ON]->(Task)` | A task cannot start/complete until another task (a genuine prerequisite) does. Contrast `FOLLOWED_BY`, which is explicitly non-blocking. Optional property added 2026-08-19 (`201370e0`): `note` — why the dependency exists, for a prerequisite discovered mid-task rather than planned, since rmp's own `depends_on` list is empty for such a pair and the edge would otherwise carry no evidence (#2485 depended on #2567: `make ci` could not go green until the security gate stopped scoring a slow machine as a failed subject). |
 | `FOLLOWED_BY` | `(Task)-[:FOLLOWED_BY]->(Task)` | A completed task's work surfaced a distinct, non-blocking follow-up tracked as a new task — NOT a prerequisite (contrast `DEPENDS_ON`). Introduced 2026-07-02 (task #1866 → #1875). |
 | `ABOUT` | `(Memory)-[:ABOUT]->(Feature\|Sprint)` | A memory concerns a feature area or sprint. |
 | `CONSULTED_BY` | `(Memory)-[:CONSULTED_BY]->(Agent\|Skill)` | A memory exists primarily for that agent's/skill's use. |
@@ -1176,6 +1334,12 @@ All edges carry `gitCommit` and `gitDate`.
 | `FOUND` | `(Task\|SecurityAudit\|AuditRound)-[:FOUND]->(Finding\|Perf\|Defect)` | Work that surfaced a finding, a measurement or a defect. The `Defect` target was **widened at `0ed5d4d1` (2026-08-18)**, recording that rmp #2547 was found while validating #2538 rather than by the audit that scoped it. Documented 2026-08-18. |
 | `BUILDS_ON` | `(Feature)-[:BUILDS_ON]->(Feature)`, `(Lesson)-[:BUILDS_ON]->(Lesson)` | A capability — or a lesson — rests on an earlier one. The `Lesson` form was **added at `124eca54` (2026-08-18)**: rmp #2547's lesson about a pending-operations log builds on #2538's about a crash model manufacturing neither a loss nor a false survival. Documented 2026-08-18. |
 | `REMEDIATED_BY` | `(Finding\|Defect)-[:REMEDIATED_BY]->(Commit)`, `(AuditRound)-[:REMEDIATED_BY]->(Sprint)` | The commit (or sprint) that closed a finding or defect. The `Defect` source was **widened at `124eca54`**; note the older `Defect` nodes record their fix only as a `fixCommit` **property**, so a defect's closure must be looked for both ways until that is reconciled. Documented 2026-08-18. |
+
+| `EXERCISES` | `(DSTScenario)-[:EXERCISES]->(Package)` | A DST scenario drives the code in this package. Introduced 2026-08-20 (`44081028`, rmp #2488) and applied to the whole catalogue at `f3c40f22`: 66 edges, derived from the GoGraph packages the scenario's own implementing file imports, so the edge is evidence-backed rather than thematic. Contrast `TOUCHES`, which is a commit's diff. |
+| `CONTAINS` | `(Package)-[:CONTAINS]->(Component\|DSTScenario)` | **Widened 2026-08-20 (`f3c40f22`).** The pre-existing form covered `Package`→`Package` and `Package`→symbol. `internal/sim -[:CONTAINS]-> DSTScenario` (49 edges) is what enumerates the scenario catalogue in one hop; `internal/sim`/`cmd/sim` → `Component` (22 edges) does the same for the harness units. |
+| `TAUGHT` | `(DSTScenario)-[:TAUGHT]->(Lesson)` | **Widened 2026-08-20 (`f3c40f22`).** Previously `Defect\|Task` → `Lesson`. A scenario whose construction produced a generalisable trap — a root-level path that voids a fault arm, a crash primitive that cannot lose a rename — is itself the source of the lesson, and linking it there is what puts the warning in front of the next author of that scenario. Note the direction: the *scenario* is the source, so read it as `MATCH (d:DSTScenario)-[:TAUGHT]->(l:Lesson)`. |
+| `ABOUT` | `(Task)-[:ABOUT]->(Feature\|Package\|Component\|DSTScenario)` | **Widened 2026-08-20 (`f3c40f22`).** Previously `Memory` → `Feature\|Sprint`. The 10 sprint-349 tasks (#2489–#2498) each point at the feature, the packages, the harness components and the existing scenarios their coverage gap concerns, which is how a brief is reached from the thing it is about (48 edges). |
+| `SPECIFIED_IN` | `(Decision)-[:SPECIFIED_IN]->(Spec)` | **Widened 2026-08-20 (`f3c40f22`).** Previously `Feature` → `Spec`. The 7 `dst-*` convention nodes point at `docs/dst.md` or `docs/test-layers.md`, the documents that state them at length. |
 
 **Data-quality note (observed 2026-07-02, partially remediated):** the live graph has
 accumulated several more edge types across incremental syncs than this table documents in
@@ -3532,3 +3696,101 @@ with** the verified sprint-347 range (2480–2547), though their sprint membersh
 numbering and was NOT verified here (task metadata is the `roadmap-manager` skill's authority, not
 this one's). Each is invisible to any query on title, status or sprint. Filling them is a small, bounded
 hygiene task and the natural companion to recording the `Sprint` layer.
+
+### Sprint 349 sync — the DST harness surveyed and recorded (2026-08-20)
+
+Read-and-record pass at commit `f3c40f22907037bfed8be368312d9e0677a3d2fd`
+(branch `sprint-349`, tree clean, no Go file touched and no test run), so the
+eight-plus remaining sprint-349 briefs can be planned from the graph instead of
+re-derived from the source each time.
+
+**Written.** +**43** `DSTScenario` nodes bringing the label to **52** (49
+`kind='registered'` catalogue keys + the 3 curated 2026-07-13 clusters, now
+marked `kind='coverage-cluster'`); 6 of the 49 already existed and were extended
+to the richer shape rather than duplicated (`merge-rel`, `schema-mutation`,
+`bulk-load-oracle`). +**22** `Component` nodes for the harness units. +**38**
+`Method` nodes on `SimDisk` — the complete exported fault and observability API,
+each with a one-line `note` — bringing that receiver to 43 nodes, all linked by
+`HAS_METHOD` from the `SimDisk` `Type`. +**7** `Decision` nodes (`dst-*`) for the
+harness's standing conventions. +**5** `Lesson` nodes for the traps. +**10**
+`Task` nodes (#2489–#2498, sprint 349) each carrying a `gap` property that
+states, in the functional requirement's own substance, what is currently
+untested. +1 `Sprint` node (349). Edges: 66 `EXERCISES`, 71 `CONTAINS`
+(`internal/sim`→scenario ×49, package→component ×22), 43 `HAS_METHOD`, 20
+`TAUGHT`, 48 `ABOUT`, 7 `SPECIFIED_IN`, 7 `ABOUT` (Decision→Feature).
+
+**The catalogue is 49, not the ~38 the brief assumed** — verified by extracting
+every `Scenario*` name constant from the package and diffing it against
+`DefaultRegistry`'s call list: the two sets match exactly, with no scenario in
+one and not the other. By mode: 38 `deterministic`, 9 `concurrent`, 1
+`liveness`, 1 `bulk-vs-online`. 36 carry an unexported `run` override.
+
+**The most valuable content is the stated non-coverage.** Eleven files carry a
+header section that names what the scenario CANNOT reach and why, and those
+claims are transcribed into the `note` verbatim in substance:
+`bulkimport_parity.go` is the house model (no filesystem seam under
+`bulkimport.Publish`, so ENOSPC mid-snapshot, a failing component/staging/parent
+fsync, a failing or crash-interrupted `snapshot.tmp` rename, and a crash inside
+the publish window are all unreachable — rmp #2518); `bulk_load_oracle.go` names
+four unreachable regimes plus one primitive its model does not certify (the
+`NodeID` a key receives); `bolt_decode_pressure.go` proves the aggregate vector
+is unreachable single-threaded because every charge is released before its reply
+is written; `bolt_stream_semantics.go` refutes its own task's premise (this
+server has no qid multiplexing and cannot have any); `bolt_shutdown_drain.go`
+records that the requested oracle cannot be written as asked and splits it in
+two; `checkpoint_cadence.go`, `codec_matrix.go`, `csrfile_access_matrix.go`,
+`db_teardown.go`, `graph_io_surface.go`, `mvcc_substrate.go`,
+`mvcc_substrate_arms.go`, `txn_oversize.go` and `wal_writer_surface.go` each
+record what had been unreached before them and why.
+
+**A structural note for a future survey.** `internal/sim` holds 282 files, and
+the registry is only part of it: `access_parity.go`, `checkpoint_cadence.go`,
+`codec_matrix.go`, `csrfile_access_matrix.go`, `db_teardown.go`,
+`graph_io_surface.go`, `group_commit.go`, `merge_surface.go`,
+`metrics_required.go`, `mvcc_*.go`, `txn_oversize.go`, `varlen_paths.go`,
+`wal_writer_surface.go`, `wire_param_types.go`, `notifications.go`,
+`delete_contract.go`, `call_yield_where.go`, `foreach.go` and others are
+checker/oracle/arm modules invoked from a scenario's run override or from a
+test, **not** registry keys. They are not modelled as `DSTScenario` nodes; only
+`sim.DefaultRegistry`'s 49 are. Their non-coverage claims are nonetheless folded
+into the `note` of the scenario or `Component` they serve.
+
+**Divergences found and reconciled to the code.** (1) This file described
+`DSTScenario` as *dormant* and directed new scenarios to bare symbol nodes; the
+code shows 49 registered scenarios whose catalogue key, mode, run override and
+stated non-coverage have nowhere else to live, so the label row was rewritten
+and the guidance superseded. (2) The label row said the shape is
+`commit`/`date`; the `bulk-load-oracle` node written earlier today already used
+`gitCommit`/`gitDate` plus `file`/`testFile`/`task`, and the 49 now follow that
+richer shape — the 3 legacy cluster nodes keep the old pair and are marked.
+(3) `Component` and `Decision` were undocumented despite 48 and 21 live nodes;
+both now have rows. (4) One `Lesson`,
+`threshold-harness-vs-runtime-2026-08-20`, is keyed on `id` with
+`title`/`note` rather than `name`/`summary`, so it is invisible to a
+`{name:…}` lookup; recorded on the `Lesson` row, not corrected.
+(5) `Component` uses `path` for the file, not `file` — recorded rather than
+duplicated into a second property.
+
+### Sprint 349 sync — a clamping scenario runs alone (2026-08-25)
+
+Post-commit sync for `c62319a23d6272fcd652b7789c19dc5b06e5ac03` (rmp #2613), the
+fix for the defect the 2026-08-25 DST parallel exercise found: `cpu-starvation`
+clamped process-global `GOMAXPROCS` to 1 while the swarm ran other scenarios in
+the same process, so 38 of 38 failures across 11141 runs were harness artefacts
+rather than engine defects.
+
+**Written.** +2 `Component` (`internal/sim/gomaxprocs.go`, the package-wide
+`gomaxprocsMu` clamp lock; `internal/sim/gomaxprocs_test.go`, its regression
+battery). +1 `Decision` (`2613-gomaxprocs-exclusivity`) recording that the hold
+lives in `Scenario.Run` rather than `Swarm.runOne`, the rejected alternatives,
+and the one hard constraint — `runCPUStarvation` performs the **only** recursive
+`Scenario.Run` in the package, so its inner value must set `ClampsGOMAXPROCS` or
+it deadlocks. +1 `Lesson`
+(`2613-red-control-silenced-by-its-own-fix`). +2 `Task` (#2613 COMPLETED, #2614
+BACKLOG). Edges: 2 `CONTAINS`, 4 `ABOUT`, 1 `TAUGHT`, all stamped.
+
+**New property on `DSTScenario`: `clampsGOMAXPROCS`** (boolean, present only where
+true). It holds on exactly two of the 49 registered scenarios — `cpu-starvation`
+and `pagerank-ranker` — and mirrors `Scenario.ClampsGOMAXPROCS` in the code. A
+scenario carrying it runs alone in the swarm. Query it before assuming any
+scenario can be co-scheduled.

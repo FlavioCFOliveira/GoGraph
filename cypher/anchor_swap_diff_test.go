@@ -258,3 +258,68 @@ func TestAnchorSwap_Differential_DirtyD_Vetoed(t *testing.T) {
 		t.Fatalf("result changed across the (match-neutral) relabel:\n  before = %v\n  after  = %v", firstRows, secondRows)
 	}
 }
+
+// TestAnchorSwap_Differential_AnonymousEndpoints closes the gap that let rmp #2603
+// ship: every OTHER pattern in this file and in anchor_swap_symmetric_test.go names
+// both endpoints, so the differential oracle only ever compared the spelling that was
+// already correct.
+//
+// The three spellings are NOT three failure modes. The IR translator names every
+// non-head node (ir.matchPathPattern assigns a synthetic `__anon_N`) but leaves the
+// pattern HEAD's variable empty (ir.matchNodeScan), so only an anonymous SOURCE
+// produces the empty name the mirror cannot re-check — which is why the
+// destination-anonymous spelling still swaps and still agrees. Keeping all three here
+// is what makes that asymmetry visible if either half ever changes.
+func TestAnchorSwap_Differential_AnonymousEndpoints(t *testing.T) {
+	for _, fx := range []struct {
+		name  string
+		seed  func(*testing.T) *lpg.Graph[string, float64]
+		arrow string
+	}{
+		{"outward_writtenIN", seedHubGraph, "<-[:R]-"},
+		{"inward_writtenOUT", seedReverseHubGraph, "-[:R]->"},
+	} {
+		t.Run(fx.name, func(t *testing.T) {
+			g := fx.seed(t)
+			for _, tc := range []struct {
+				name        string
+				q           string
+				wantTrigger bool
+			}{
+				{
+					// An anonymous SOURCE: the swap must decline, because the mirror
+					// would re-check :Hub through a name the head does not have.
+					name: "source_anonymous_rows",
+					q:    "MATCH (:Hub)" + fx.arrow + "(b:Leaf) RETURN b.i AS bi",
+				},
+				{
+					// The same, aggregated: the row COUNT is 1 either way, so only the
+					// VALUE can differ — the shape a row-counting oracle cannot see.
+					name: "source_anonymous_count",
+					q:    "MATCH (:Hub)" + fx.arrow + "(b:Leaf) RETURN count(*) AS n",
+				},
+				{
+					name: "both_anonymous_count",
+					q:    "MATCH (:Hub)" + fx.arrow + "(:Leaf) RETURN count(*) AS n",
+				},
+				{
+					// An anonymous DESTINATION keeps its synthetic name, so the swap is
+					// admissible and STILL FIRES. This case is the control: it fails if
+					// the guard is ever widened to decline more than it must.
+					name:        "destination_anonymous_rows",
+					q:           "MATCH (a:Hub)" + fx.arrow + "(:Leaf) RETURN a.tag AS at",
+					wantTrigger: true,
+				},
+				{
+					name:        "destination_anonymous_count",
+					q:           "MATCH (a:Hub)" + fx.arrow + "(:Leaf) RETURN count(*) AS n",
+					wantTrigger: true,
+				},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					assertAnchorIdentical(t, g, tc.q, tc.wantTrigger, false)
+				})
+			}
+		})
+	}
+}

@@ -19,10 +19,18 @@ func TestDefaultRegistry_ListsAllScenarios(t *testing.T) {
 		t.Fatalf("DefaultRegistry: %v", err)
 	}
 	want := []string{
-		ScenarioBadActors, ScenarioBulkImportParity, ScenarioBulkVsOnline, ScenarioCPUStarvation, ScenarioCheckpointCrashStorm, ScenarioCheckpointDirFsyncFault, ScenarioCheckpointTeardown, ScenarioConstraintEnforce, ScenarioConstraintExistence,
+		ScenarioBadActors, ScenarioBoltAuth, ScenarioBoltCertRotation, ScenarioBoltShutdownDrain, ScenarioBoltShutdownFleet, ScenarioBoltTxQuota, ScenarioBoltTxRegistry, ScenarioBulkImportParity, ScenarioBulkLoadOracle, ScenarioBulkVsOnline, ScenarioCPUStarvation, ScenarioCheckpointCrashStorm, ScenarioCheckpointDirFsyncFault, ScenarioCheckpointTeardown, ScenarioConstraintEnforce, ScenarioConstraintExistence,
 		ScenarioCrashStorm, ScenarioCSRFilePublishFault, ScenarioCypherPaths, ScenarioCypherSurface, ScenarioDDLCheckpointCrash, ScenarioDiskFull, ScenarioDurableCommitCrash, ScenarioEdgeProperties, ScenarioIndexDiversity, ScenarioIORoundTripFault, ScenarioLongRunning, ScenarioMemPressure, ScenarioMergeRel, ScenarioNullSemantics, ScenarioOverload,
 		ScenarioPatternShapes, ScenarioProductionProfile, ScenarioReadHeavy, ScenarioReadTxIsolation, ScenarioSchemaChaos, ScenarioSchemaMutation, ScenarioSearch, ScenarioSearchCrash, ScenarioSnapshotCorruptionFailStop, ScenarioTypeCoverage,
+		ScenarioBoltStreaming, ScenarioBoltStreamingStall, ScenarioBoltBeginExtras, ScenarioBoltVersionMatrix,
+		ScenarioBoltDecodePressure, ScenarioBoltDecodeSwarm,
 		ScenarioWALCorruptionFailStop, ScenarioWriteHeavy,
+		ScenarioGenerationSwap,
+		ScenarioFluentQuery,
+		ScenarioTypedSchema,
+		ScenarioCountStore,
+		ScenarioPageRankRanker,
+		ScenarioLabelIndexScoped,
 	}
 	if r.Len() != len(want) {
 		t.Fatalf("registry has %d scenarios, want %d: %v", r.Len(), len(want), r.Names())

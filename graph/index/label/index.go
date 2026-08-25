@@ -8,6 +8,31 @@
 // implements with run-length and array-bitmap hybrids.
 //
 // Index is safe for concurrent use.
+//
+// # Scope, and why lpg uses the unscoped constructor
+//
+// [Index.Scope] is consulted in exactly one place — [Index.Apply] — and Apply
+// runs only through the [index.Manager] fan-out. No Index is ever registered
+// with a Manager in this module: [index.Manager.CreateIndex] is the sole writer
+// of the subscriber registry, and every production call site registers a
+// btree or hash index. The only two Index values in the module are lpg's
+// nodeIdx and edgeIdx, which lpg maintains by calling Add and Remove directly.
+//
+// So lpg builds BOTH with [NewIndex], the edge index included, because on a
+// directly-driven index the scope field is never read. [NewNodeIndex] and
+// [NewEdgeIndex] exist for a caller that does register an Index as a
+// [index.Subscriber]; there is no such caller today.
+//
+// A caller that becomes one should know that the two scopes are not equally
+// well served. [index.OpAddEdgeLabel] is constructed and delivered in
+// production, but [index.OpRemoveEdgeLabel] is constructed nowhere, so a
+// registered ScopeEdge index would take every edge-label addition and never a
+// removal, accumulating postings for labels that no longer apply. ScopeNode has
+// both halves of its event stream; ScopeEdge, today, has one.
+//
+// The scoped surface, the range operations and the serialized form are
+// exercised by the `label-index-scoped` simulator scenario
+// (internal/sim/label_index_scoped.go).
 package label
 
 import (
@@ -75,12 +100,18 @@ func NewNodeIndex() *Index {
 
 // NewEdgeIndex returns an empty index that listens for edge-label
 // changes when registered with a [index.Manager].
+//
+// It has no caller in this module, and the package documentation records why,
+// together with the caveat that [index.OpRemoveEdgeLabel] is not currently
+// emitted anywhere in production.
 func NewEdgeIndex() *Index {
 	return &Index{bits: make(map[uint32]index.NodeSet), scope: ScopeEdge}
 }
 
 // Scope reports which label-event kind the index observes via
-// [Index.Apply].
+// [Index.Apply]. It has no effect on an index that is driven by direct Add and
+// Remove calls rather than registered with a [index.Manager], which is every
+// index in this module; see the package documentation.
 func (i *Index) Scope() Scope { return i.scope }
 
 // Add records that node carries label.

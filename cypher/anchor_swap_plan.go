@@ -221,6 +221,9 @@ type anchorSite struct {
 //   - the top must be a single-label LabelPredicate on the expand's ToVar (a
 //     property Selection or a multi-label predicate above the expand → decline,
 //     so the swap never has to relocate extra endpoint constraints);
+//   - BOTH endpoints must be NAMED: an anonymous pattern head has the empty
+//     variable name, which no relocated label predicate can read (rmp #2603 — see
+//     the guard's comment in the body);
 //   - the expand must carry exactly one relationship type (D is per-type), have
 //     no named-path variable (reversing a path changes its node order → not
 //     result-identical), and no sibling relationship variables (it must be the
@@ -241,6 +244,23 @@ func matchAnchorSite(sel *ir.Selection) (anchorSite, bool) {
 		return anchorSite{}, false
 	}
 	if exp.ToVar != toVarExpr.Name {
+		return anchorSite{}, false
+	}
+	// BOTH endpoints must be NAMED (rmp #2603). The reversal relocates the
+	// from-label from the access path onto a Selection predicate, and a predicate
+	// can only reach a node THROUGH ITS NAME — whereas a NodeByLabelScan enforces
+	// the same label structurally, with no name involved. An anonymous pattern HEAD
+	// has no name at all: ir.matchNodeScan leaves its NodeVar "" (only a non-head
+	// node gets a synthetic `__anon_N`), and the physical builder never registers ""
+	// for an Expand destination either — it substitutes the synthesised key
+	// `__anon_to_N`. So the mirror of `MATCH (:A)-[:R]->(b:B)` would carry
+	// Selection{LabelPredicate(Variable{""}, [A])} over a re-rooted Expand whose
+	// destination is bound under `__anon_to_N`: the receiver resolves to no column,
+	// evaluates to NULL, and the Filter drops EVERY row — a silent wrong answer with
+	// no error and no notification. Declining the site keeps the written order, which
+	// is correct for the shape; recovering the optimisation needs the mirror to bind
+	// that endpoint to a readable name, which is a separate change.
+	if exp.FromVar == "" || toVarExpr.Name == "" {
 		return anchorSite{}, false
 	}
 	if len(exp.RelTypes) != 1 || exp.PathVar != "" || len(exp.SiblingRelVars) != 0 {

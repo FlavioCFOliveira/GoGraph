@@ -39,6 +39,49 @@ const (
 	ScenarioSchemaMutation    = "schema-mutation"
 	ScenarioMergeRel          = "merge-rel"
 	ScenarioNullSemantics     = "null-semantics"
+	ScenarioBoltAuth          = "bolt-auth"
+	ScenarioBoltCertRotation  = "bolt-cert-rotation"
+	ScenarioBoltTxRegistry    = "bolt-tx-registry"
+	ScenarioBoltTxQuota       = "bolt-tx-quota"
+	// ScenarioBoltShutdownDrain is the deterministic teardown scenario of rmp
+	// #2483: Server.Shutdown's connection drain against the Options.Closer the
+	// server owns.
+	ScenarioBoltShutdownDrain = "bolt-shutdown-drain"
+	// ScenarioBoltShutdownFleet is its concurrent sibling: the same drain against a
+	// fleet of committers in flight. Registered separately because it is not
+	// bit-reproducible.
+	ScenarioBoltShutdownFleet = "bolt-shutdown-fleet"
+	// ScenarioBoltStreaming is the deterministic streaming-semantics scenario of rmp
+	// #2484: PULL n paging against an independent reference drain, the exact window a
+	// partial DISCARD removes, the qid and second-RUN refusals, and cursor
+	// accumulation up to the per-connection in-flight cap.
+	ScenarioBoltStreaming = "bolt-streaming"
+	// ScenarioBoltStreamingStall is its concurrent sibling: the same surface behind a
+	// slow consumer that stalls mid-stream and then disconnects. Registered
+	// separately because it is not bit-reproducible.
+	ScenarioBoltStreamingStall = "bolt-streaming-stall"
+	// ScenarioBoltBeginExtras is the deterministic BEGIN-extras scenario of rmp #2485:
+	// bookmark causality across connections (and the proof that the token is ignored
+	// rather than honoured), a client-supplied tx_timeout against its own control,
+	// tx_metadata, the access mode, database selection, and the ROUTE payload.
+	ScenarioBoltBeginExtras = "bolt-begin-extras"
+	// ScenarioBoltVersionMatrix is the deterministic protocol-version scenario of
+	// rmp #2486: 4.4, 5.0, 5.1 and 5.6 negotiated and driven side by side, with the
+	// entity and zoned-datetime encodings required to DIFFER across the Bolt 5
+	// boundary while the decoded semantics stay identical at every version.
+	ScenarioBoltVersionMatrix = "bolt-version-matrix"
+	// ScenarioBoltDecodePressure is the deterministic inbound-decode scenario of rmp
+	// #2487: the engine-wide (cross-connection) decode pool adjudicated against a
+	// closed-form model of its per-slot charges, and the nesting-depth family that
+	// separates the wire cap, the engine's parameter cap and the pool by the three
+	// different codes they answer with.
+	ScenarioBoltDecodePressure = "bolt-decode-pressure"
+	// ScenarioBoltDecodeSwarm is its concurrent sibling: K connections pushing
+	// large-collection parameters at one shared pool while an honest client works.
+	// Registered separately because it is not bit-reproducible — and because the
+	// aggregate vector is only reachable concurrently, since every charge is
+	// released before its reply is written.
+	ScenarioBoltDecodeSwarm = "bolt-decode-swarm"
 )
 
 // cpuStarvationGOMAXPROCS is the processor clamp the cpu-starvation scenario
@@ -122,7 +165,26 @@ func DefaultRegistry() (*Registry, error) {
 		ddlCheckpointCrashScenario(),
 		checkpointCrashStormScenario(),
 		bulkImportParityScenario(),
+		bulkLoadOracleScenario(),
 		snapshotCorruptionFailStopScenario(),
+		boltAuthSurfaceScenario(),
+		boltCertRotationScenario(),
+		boltTxRegistryScenario(),
+		boltTxQuotaScenario(),
+		boltShutdownDrainScenario(),
+		boltShutdownFleetScenario(),
+		boltStreamSemanticsScenario(),
+		boltStreamStallScenario(),
+		boltBeginExtrasScenario(),
+		boltVersionMatrixScenario(),
+		boltDecodePressureScenario(),
+		boltDecodeSwarmScenario(),
+		generationSwapScenario(),
+		fluentQueryScenario(),
+		typedSchemaScenario(),
+		countStoreScenario(),
+		pageRankRankerScenario(),
+		labelIndexScopedScenario(),
 	)
 }
 
@@ -136,37 +198,52 @@ func DefaultRegistry() (*Registry, error) {
 // convergence guarded), not bit-reproducible.
 func cpuStarvationScenario() Scenario {
 	return Scenario{
-		Name:        ScenarioCPUStarvation,
-		Description: "compute hog vs honest queries on a single clamped core (fair scheduling: forward progress, no resonance)",
-		Mode:        ModeLiveness,
-		DefaultSeed: 0xC9057A40,
-		Connections: cpuStarvationConns,
-		OpsPerConn:  cpuStarvationOps,
-		Mix:         &ConcurrentMix{WriterWeight: 0.2, ReaderWeight: 0.2, OverloadWeight: 0.6},
-		run:         runCPUStarvation,
+		Name:             ScenarioCPUStarvation,
+		Description:      "compute hog vs honest queries on a single clamped core (fair scheduling: forward progress, no resonance)",
+		Mode:             ModeLiveness,
+		DefaultSeed:      0xC9057A40,
+		Connections:      cpuStarvationConns,
+		OpsPerConn:       cpuStarvationOps,
+		Mix:              &ConcurrentMix{WriterWeight: 0.2, ReaderWeight: 0.2, OverloadWeight: 0.6},
+		ClampsGOMAXPROCS: true,
+		run:              runCPUStarvation,
 	}
 }
 
 // runCPUStarvation clamps GOMAXPROCS to a single core for the duration of the
 // run, so the hog-heavy safety phase and the liveness convergence phase both
 // contend for one OS thread, then delegates to the standard liveness flow. The
-// clamp is process-global, so the integration test must not run in parallel; it
-// is always restored on return. The liveness watchdog classifies a stuck run as
-// RESONANCE (deadlock/livelock), which is the real fair-scheduling failure this
-// scenario hunts — latency percentiles are deliberately NOT asserted (they are
-// statistical and would flake).
+// clamp is always restored on return. The liveness watchdog classifies a stuck
+// run as RESONANCE (deadlock/livelock), which is the real fair-scheduling
+// failure this scenario hunts — latency percentiles are deliberately NOT
+// asserted (they are statistical and would flake).
+//
+// The clamp is PROCESS-GLOBAL, so the run holds [gomaxprocsMu] exclusively for
+// its whole duration and no other scenario runs beside it. Before rmp #2613 it
+// did not, and a neighbour drawn onto another swarm worker silently inherited
+// the single core — which is a starved regime for a claim that never asked for
+// one. The scenario's own subject is unchanged: it still starves ITSELF.
 func runCPUStarvation(ctx context.Context, seed uint64) (*SimReport, error) {
+	defer holdGOMAXPROCSExclusive()()
+
 	prev := runtime.GOMAXPROCS(cpuStarvationGOMAXPROCS)
 	defer runtime.GOMAXPROCS(prev)
 
 	// Delegate to the standard liveness dispatch via a scenario value WITHOUT a
 	// run override (so Run routes to runLiveness rather than recursing here).
+	//
+	// ClampsGOMAXPROCS is set on the inner value too. It is not decorative: this
+	// call is the one recursive [Scenario.Run] in the package, and the outer call
+	// already holds [gomaxprocsMu] exclusively. Without the flag the inner Run
+	// would take the SHARED side of the same lock from the same goroutine and
+	// deadlock immediately.
 	inner := Scenario{
-		Name:        ScenarioCPUStarvation,
-		Mode:        ModeLiveness,
-		Connections: cpuStarvationConns,
-		OpsPerConn:  cpuStarvationOps,
-		Mix:         &ConcurrentMix{WriterWeight: 0.2, ReaderWeight: 0.2, OverloadWeight: 0.6},
+		Name:             ScenarioCPUStarvation,
+		Mode:             ModeLiveness,
+		Connections:      cpuStarvationConns,
+		OpsPerConn:       cpuStarvationOps,
+		ClampsGOMAXPROCS: true,
+		Mix:              &ConcurrentMix{WriterWeight: 0.2, ReaderWeight: 0.2, OverloadWeight: 0.6},
 	}
 	return inner.Run(ctx, seed)
 }
@@ -291,12 +368,15 @@ func schemaChaosScenario() Scenario {
 // periodically (every SearchEvery ticks) and once more at the end. Each
 // exercised search/ algorithm is cross-checked against an independent naive
 // reference, and the engine graph is held to full structural parity with the
-// oracle model. It is bit-reproducible, so a failure replays and shrinks like
-// any other deterministic scenario.
+// oracle model. The battery also carries the context-cancellation family
+// ([searchCtxCancelViolations]), which drives every public context-accepting
+// entry point of the five search packages on the same cadence. It is
+// bit-reproducible, so a failure replays and shrinks like any other
+// deterministic scenario.
 func searchScenario() Scenario {
 	return Scenario{
 		Name:        ScenarioSearch,
-		Description: "search/ battery (BFS/DFS/WCC) over the live graph + full engine-vs-oracle structural parity",
+		Description: "search/ battery (BFS/DFS/WCC + the ...Ctx cancellation contract) over the live graph + full engine-vs-oracle structural parity",
 		Mode:        ModeDeterministic,
 		DefaultSeed: 0x5EA4C8,
 		MaxTicks:    800,

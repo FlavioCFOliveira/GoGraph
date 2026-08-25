@@ -502,7 +502,8 @@ form bit-identical to pre-extension v2 snapshots.
   ],
   "indexes": [
     {"name": "labels.nodes",  "size":  1024, "crc32c": 123456789}
-  ]
+  ],
+  "indexes_commit_ts": 4271
 }
 ```
 
@@ -522,6 +523,22 @@ It is the quantity Memgraph reads back as `info.start_timestamp`.
 This is the half of the derivation that matters in a checkpointed directory: a
 checkpoint truncates the WAL prefix, so the instants of everything the image
 folded are no longer in the log at all.
+
+**`indexes_commit_ts` (optional).** The MVCC instant the `indexes/<name>.bin`
+payloads are declared to describe. It is written **only** by the quiesced
+checkpointer path, which pairs its MVCC instant with the WAL watermark so
+everything committed afterwards is in the WAL suffix a recovery replays. The
+present-time writers (`snapshot.WriteSnapshotFull` and its siblings) capture with
+a nil instant and have no such pairing, so they publish **no** watermark.
+
+**Absent means never hydrate.** That is the back-compat guarantee: every snapshot
+written before this field existed, and every snapshot a present-time writer
+produces, has its indexes rebuilt from the recovered graph exactly as before.
+`omitempty` keeps a watermark-less manifest byte-identical to what previous
+builds wrote, so the `version` field is **not** bumped — the same additive-JSON
+reasoning `commit_ts`, `indexdefs.bin` and `indexes/` already rely on. The field
+sits inside the region the manifest trailer checksums, so a flip in its key name
+fails the checksum rather than silently losing the optimisation.
 
 **No version bump.** The manifest is JSON, so an older reader ignores the field
 and a newer reader on an older manifest decodes zero — the same *"absent means no
@@ -876,29 +893,95 @@ registering for snapshot.
 
 #### Recovery semantics
 
-`snapshot.LoadSnapshotFull` returns one `IndexReadback` per entry
-in `manifest.indexes`. When the on-disk file is missing or the
-manifest's CRC32C does not match the file bytes,
-`IndexReadback.Bytes` is `nil` and the counter
-`store.snapshot.indexes.corrupted` is incremented; the recovery
-code path in `store/recovery` logs the warning
-`recovery: index "<name>" corrupted, will rebuild from LPG` and
-the index is left empty. The next mutation pass through the live
-`index.Manager` re-populates it via the change-stream fan-out, so
-the in-memory state is eventually consistent again without manual
-intervention.
+**Recovery reports the payloads; the engine loads them.** `store/recovery`
+never registers or populates an index itself, for two reasons. It cannot build
+the right one — an `index.Manager` has no "create an index from this definition"
+entry point, and the binding that makes an index self-maintaining (interned
+property/label ids, the value projection, the liveness and label gates) belongs
+to the Cypher engine. And it must not register one anyway: **WAL replay does not
+feed the `index.Manager` change fan-out** (the only production
+`Manager.ApplyBatch` call site is the engine's commit-time write-back, and
+`store/txn` does not import `graph/index` at all), so an index registered before
+replay would be frozen at the snapshot instant while the planner kept seeking
+it — silent wrong answers rather than a lost optimisation.
 
-A clean readback's `Bytes` are passed to
-`index.Serializer.Deserialize` on the live index registered under
-the same name; an extra `Deserialize` error (for example because
-the inner format version was bumped between writer and reader)
-surfaces as another `index.ErrIndexCorrupted` and the same
-rebuild-from-LPG path applies.
+`snapshot.LoadSnapshotFull` returns one `IndexReadback` per entry in
+`manifest.indexes`. When the on-disk file is missing or the manifest's CRC32C
+does not match the file bytes, `IndexReadback.Bytes` is `nil` and the counter
+`store.snapshot.indexes.corrupted` is incremented.
 
-`recovery.Result.SnapshotIndexes` records how many indexes
-successfully re-hydrated. Indexes that were rebuilt instead are
-not counted here; they show up via
-`store.snapshot.indexes.corrupted`.
+`recovery.Open` classifies those readbacks into `Result.SnapshotIndexPayloads`,
+one `IndexPayload{Name, Bytes, Err}` each, and exposes the supported lookup
+`Result.IndexPayloadFor(name) ([]byte, error)`. A non-nil `Err` (always paired
+with nil `Bytes`) is one of:
+
+| Reason | Meaning |
+|---|---|
+| `recovery.ErrIndexPayloadUnreadable` | the manifest declared the payload and it did not survive: missing file, or CRC32C mismatch |
+| `recovery.ErrIndexPayloadStale`      | readable and CRC-valid, but describes a state the recovered graph has left |
+| `recovery.ErrIndexPayloadNotFound`   | the snapshot declared no payload under that name (a new index, or no snapshot) |
+
+Neither sentinel is ever the **function** error of `Open` / `OpenCtx`: they are
+per-payload reason codes, exactly like `Result.TailErr`.
+
+**Three preconditions must hold before a payload may be used.** The first two are
+whole-image and are folded into `Err` by recovery; the third is per index and is
+evaluated by the caller, because only the engine knows which `(label, property)`
+an index name covers:
+
+1. **The snapshot was self-sufficient** (`Result.SnapshotSelfSufficient`) — it
+   carried a `mapper.bin`, so node ids were restored rather than re-derived by
+   replay interning. On the mapper-less path the raw `uint64` NodeIDs inside a
+   payload name nothing: `graph.Mapper` has no un-intern, and one discarded
+   transaction shifts every later id.
+2. **The manifest carried `indexes_commit_ts`** (see below). Without the instant
+   the payloads describe, there is no way to tell whether the WAL replayed on top
+   of them invalidates them.
+3. **The replayed WAL suffix did not touch that index's `(label, property)`**.
+   Recovery reports the facts — `Result.WALTouchedNodeLabels` and
+   `Result.WALTouchedNodePropertyKeys`, both sorted and de-duplicated — and the
+   predicate `Result.WALSuffixTouchesNodeIndex(label, property)` over them. The
+   union is a deliberate over-approximation: it can refuse a hydration that would
+   have been sound, never permit one that is not.
+
+`cypher.NewEngineWithStoreAndRecovery(store, res)` is the recommended
+constructor: it threads the whole `Result` so the payloads travel with it and
+cannot be dropped by accident. `NewEngineWithStoreAndSchema` remains available
+and unchanged — it carries no payloads and therefore always rebuilds.
+
+**A damaged payload is a per-index rebuild, never a fail-stop.** An index is
+derived data — a pure function of an already-recovered, independently
+integrity-checked graph — so a rebuild restores byte-identical content and loses
+nothing. This matches the reference engines: PostgreSQL discards and rebuilds
+`pg_internal.init`, Memgraph rebuilds its label indexes unconditionally on
+recovery, and Neo4j coerces an unreadable index header to `POPULATING` and
+repopulates. The fallback is not silent — a typed `Err`, a structured warning,
+and the counters below record it. A `Deserialize` failure on a CRC-valid payload
+(for example an inner format-version bump) takes the same per-index rebuild path.
+
+The one index-related condition that **is** fail-stop stays fail-stop: a manifest
+index name that would escape the `indexes/` directory raises
+`snapshot.ErrManifestCorrupted` and fails the open. That is a path-traversal
+attempt from attacker-controlled manifest bytes, not benign corruption.
+
+An index is never seekable while unpopulated: the engine populates each index —
+hydrate or backfill — and only then calls `index.Manager.CreateIndex`, so an
+index the planner can find is always already complete. Hydration is confined to
+`NewEngineWithOptions`, before the engine is published, because
+`hash.Index.Deserialize` swaps its shards sequentially and is not atomic across
+them; a call afterwards panics.
+
+`recovery.Result.SnapshotIndexes` is the number of payloads recovery certified
+hydratable (those whose `Err` is nil). It is **not** a count of indexes loaded —
+recovery loads none. Which path each index actually took is reported by:
+
+| Metric | Meaning |
+|---|---|
+| `store.recovery.indexes.hydrated`           | indexes populated from a snapshot payload |
+| `store.recovery.indexes.rebuilt`            | indexes populated by scanning the recovered graph |
+| `store.recovery.indexes.backfill_nodes`     | node references those rebuilds materialised (the work hydration avoids) |
+| `store.recovery.indexes.payload_unreadable` | payloads recovery reported unreadable |
+| `store.recovery.indexes.payload_corrupted`  | CRC-valid payloads whose `Deserialize` failed |
 
 #### Migrating a snapshot directory without `indexes/`
 
@@ -1105,8 +1188,18 @@ containing the rebuilt `*lpg.Graph[N, W]` plus:
   snapshot's `properties.bin` contributed back into the graph after
   WAL replay. v1 snapshots and v2 snapshots without
   `properties.bin` leave this at 0.
-- `SnapshotIndexes int` — how many secondary indexes were
-  re-hydrated from `indexes/<name>.bin` payloads.
+- `SnapshotIndexes int` — how many `indexes/<name>.bin` payloads recovery
+  certified **hydratable**. Recovery loads no index itself; see
+  [Recovery semantics](#recovery-semantics) above.
+- `SnapshotIndexPayloads []IndexPayload` — one entry per declared payload,
+  carrying the verified bytes or the reason they must not be used. The supported
+  lookup is `Result.IndexPayloadFor(name)`.
+- `SnapshotSelfSufficient bool` — whether the loaded snapshot carried a
+  `mapper.bin` and was applied before WAL replay. The first hydration
+  precondition.
+- `WALTouchedNodeLabels []string` / `WALTouchedNodePropertyKeys []string` — the
+  sorted, de-duplicated node facets the replayed WAL wrote, behind the
+  `Result.WALSuffixTouchesNodeIndex(label, property)` staleness predicate.
 - `WALOps int` — how many WAL ops were applied.
 - `TailErr error` — why WAL replay stopped before the end of the
   file, or nil at a clean EOF. A benign torn tail

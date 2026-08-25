@@ -351,6 +351,19 @@ func (s *Session) failUnsupportedImpersonation() []any {
 			"the request was refused rather than executed with the connection's own identity")
 }
 
+// setLogger routes this session's events through log instead of the process
+// default. The server bootstrap threads [Options.Logger] here: without it every
+// session-level event — a refused credential, a failed query, a failed commit,
+// a quota refusal — bypassed the configured logger and went to slog.Default(),
+// so an embedder that configured a logger still had the majority of the server's
+// own events written somewhere it did not choose (rmp #2481). A nil log is
+// ignored, leaving slog.Default() in place.
+func (s *Session) setLogger(log *slog.Logger) {
+	if log != nil {
+		s.log = log
+	}
+}
+
 // setClock overrides the session's wall-clock source for the
 // explicit-transaction deadline computation. A nil clock is ignored, leaving
 // the default real clock in place. Intended for the server bootstrap (so the
@@ -1559,9 +1572,16 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 
 	// Open the engine transaction rooted at the CONNECTION context (so a dropped
 	// connection or a server shutdown cancels an in-flight statement) bounded by
-	// the effective timeout. BeginTx acquires the engine writer serialisation; a
-	// failure here (e.g. an already-cancelled context) leaves the session in
-	// READY with no open transaction.
+	// the effective timeout. A failure here (e.g. an already-cancelled context)
+	// leaves the session in READY with no open transaction.
+	//
+	// This used to say "BeginTx acquires the engine writer serialisation". It does
+	// not, and has not since rmp #2306: Engine.beginTxSession acquires no writer
+	// mutex (cypher/exectx.go, "NO writer serialisation is acquired"), because
+	// holding one across client think-time made a paused client block every other
+	// writer in the process. Concurrency control is MVCC — two transactions
+	// overlap and a genuine collision is refused by per-object detection rather
+	// than prevented by exclusion.
 	tx, err := newTx(ctx, s.eng, s.csess, mode, effective)
 	if err != nil {
 		// newTx failed before acquiring any resources (s.tx is still nil), so
