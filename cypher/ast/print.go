@@ -358,7 +358,10 @@ func (p printer) pathPattern(pp *PathPattern) string {
 
 func (p printer) nodePattern(n *NodePattern) string {
 	out := "("
-	if n.Variable != nil {
+	// Skips a name minted under [SyntheticSubqueryVarPrefix], exactly as
+	// [NodePattern.String] does, so the two renderings of the same pattern cannot
+	// disagree about whether an entity looks user-named.
+	if userWritten(n.Variable) {
 		out += *n.Variable
 	}
 	for _, l := range n.Labels {

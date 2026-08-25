@@ -45,10 +45,36 @@ type NodePattern struct {
 
 func (*NodePattern) astNode() {}
 
+// SyntheticSubqueryVarPrefix marks a variable name GoGraph minted for an
+// anonymous entity inside an EXISTS { } / COUNT { } subquery body, before the AST
+// reaches the plan cache (see ir.NameSubqueryAnonymousEntities). It is declared
+// here, in the package that RENDERS patterns, because rendering is the one place
+// that must be able to tell such a name from one the user wrote.
+//
+// Rendering skips it. The rendered form of an un-aliased projection is the
+// default result-column name, so printing an engine-internal name there would
+// change a public map key: `RETURN COUNT { (n)-[:K]->(:P) }` produced the column
+// `COUNT { (n)-[__anon_sq_1:K]->(__anon_sq_0:P) }` instead of the text the user
+// wrote (rmp #2508). The openCypher TCK cannot catch this — it has no un-aliased
+// RETURN EXISTS{}/COUNT{} scenario at all — so [TestSubqueryColumnNames_2508]
+// guards it instead.
+//
+// Only THIS prefix is skipped, never the plain `__anon_` the translation walk
+// mints. Those names predate the pass and are already rendered — most visibly by
+// ir.NewMerge, which uses a MERGE pattern's rendering as the operator's identity
+// — so suppressing them would change behaviour rather than preserve it.
+const SyntheticSubqueryVarPrefix = "__anon_sq_"
+
+// userWritten reports whether v is a variable name to render: present, and not
+// one GoGraph minted for the user under [SyntheticSubqueryVarPrefix].
+func userWritten(v *string) bool {
+	return v != nil && !strings.HasPrefix(*v, SyntheticSubqueryVarPrefix)
+}
+
 // String returns the Cypher node pattern.
 func (n *NodePattern) String() string {
 	out := "("
-	if n.Variable != nil {
+	if userWritten(n.Variable) {
 		out += *n.Variable
 	}
 	for _, l := range n.Labels {
@@ -108,7 +134,7 @@ func (*RelationshipPattern) astNode() {}
 // String returns the Cypher relationship pattern (including direction arrows).
 func (r *RelationshipPattern) String() string {
 	inner := "["
-	if r.Variable != nil {
+	if userWritten(r.Variable) {
 		inner += *r.Variable
 	}
 	for i, t := range r.Types {
