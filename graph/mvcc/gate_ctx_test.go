@@ -24,6 +24,7 @@ import (
 	"context"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -161,19 +162,57 @@ func TestGateCtx_ReturnsWithinItsBudget(t *testing.T) {
 		callers      = 64
 		budget       = 5 * time.Millisecond
 		holderTenure = 500 * time.Millisecond
-		// Generous, because this runs under -race on a possibly loaded machine.
-		// It is still 5x below the holder tenure, which is what the failure mode
-		// would cost, so the test discriminates rather than merely tolerating.
-		margin = 100 * time.Millisecond
 	)
+	// THE INSTRUMENT IS A HAPPENS-BEFORE, NOT A DURATION BUDGET (rmp #2574).
+	//
+	// This test used to assert `elapsed <= budget + 100ms`. That ceiling was the
+	// thinnest deadline margin in the repository and it had no defensible value,
+	// because it was squeezed from both sides:
+	//
+	//	worst observed, no deliberate load, 3 runs   5.81 / 6.03 / 5.86 ms
+	//	worst observed, 300 spinners (30x cores)     15.69 / 38.66 / 20.06 /
+	//	                                             30.04 / 40.07 / 35.70 ms
+	//
+	// NEITHER row was taken on a genuinely quiet host: the machine carried
+	// unrelated concurrent builds throughout (an unrelated Rust build alone at
+	// ~170% CPU, host load average reaching 88). So the first row is an UPPER
+	// bound on the quiet figure, not the quiet figure, and the second overstates
+	// what 300 spinners alone would cost. Both errors point the same way — the
+	// noise floor is at worst what is written here — so the conclusion below is
+	// conservative. Do not quote either row as a clean-machine baseline.
+	//
+	// So the noise floor is 40 ms, leaving the 105 ms ceiling 2.6x of headroom —
+	// not the ~10x the task reported, which was measured at 10.02 ms and is four
+	// times optimistic. Every sibling absolute ceiling the sweep called safe keeps
+	// 30x or more. And the ceiling cannot simply be widened: holderTenure is
+	// 500 ms, so a 60x ceiling (601 ms) would EXCEED it, and a caller that blocked
+	// for the holder's whole tenure — the rmp #2174 defect, a 232x overrun
+	// reported as err=nil — would PASS. Widening destroys the gate rather than
+	// loosening it.
+	//
+	// The property was never really "returned inside 105 ms". It is "ABANDONED the
+	// wait instead of blocking for the tenure", which is an ORDERING fact: did the
+	// caller finish before the holder released? That needs no margin, because both
+	// sides of it inflate together under load — the release is a real event in the
+	// same run. The duration is still LOGGED, so the number stays available as a
+	// diagnostic, but it is not asserted, because the measurements above show no
+	// defensible value for it exists between 40 ms and 500 ms.
+	//
+	// TestGateCtx_BudgetGateDetectsBlocking below is the power control.
 	// ONE holder and CONCURRENT callers, rather than a sequential loop: the
 	// property is per-caller, so the callers can share the holder, and the test
 	// costs one tenure instead of `callers` of them.
 	var g Gate
 	g.StrongLock()
 	released := make(chan struct{})
+	// holderReleased flips the instant the strong holder lets go. Each caller
+	// samples it immediately after WeakLockCtx returns, which turns "did the
+	// caller outlive the holder" into a plain boolean rather than a duration
+	// compared against a tuned constant.
+	var holderReleased atomic.Bool
 	go func() {
 		time.Sleep(holderTenure)
+		holderReleased.Store(true)
 		g.StrongUnlock()
 		close(released)
 	}()
@@ -182,6 +221,10 @@ func TestGateCtx_ReturnsWithinItsBudget(t *testing.T) {
 		elapsed time.Duration
 		err     error
 		slot    int
+		// outlivedHolder records whether the strong holder had ALREADY released by
+		// the time this caller's WeakLockCtx returned. True means the caller waited
+		// out the tenure instead of abandoning on its context — the defect.
+		outlivedHolder bool
 	}
 	results := make([]outcome, callers)
 	var wg sync.WaitGroup
@@ -193,7 +236,7 @@ func TestGateCtx_ReturnsWithinItsBudget(t *testing.T) {
 			defer cancel()
 			start := time.Now()
 			slot, err := g.WeakLockCtx(ctx, uint64(i))
-			results[i] = outcome{time.Since(start), err, slot}
+			results[i] = outcome{time.Since(start), err, slot, holderReleased.Load()}
 		}(i)
 	}
 	wg.Wait()
@@ -209,21 +252,66 @@ func TestGateCtx_ReturnsWithinItsBudget(t *testing.T) {
 			t.Fatalf("caller %d: WeakLockCtx SUCCEEDED after %v while a strong holder was "+
 				"still in place for %v", i, r.elapsed, holderTenure)
 		}
-		if r.elapsed > budget+margin {
+		if r.outlivedHolder {
 			<-released
-			t.Fatalf("caller %d: WeakLockCtx honoured its %v deadline only after %v. The "+
-				"wait must be abandoned on ctx and the queued acquisition left to a helper; "+
-				"blocking for the holder's remaining tenure (%v) is the rmp #2174 defect, "+
-				"measured there as a 232x overrun reported as err=nil",
-				i, budget, r.elapsed, holderTenure)
+			t.Fatalf("caller %d: WeakLockCtx did not return until AFTER the strong holder "+
+				"released, %v into its %v budget. The wait must be abandoned on ctx and the "+
+				"queued acquisition left to a helper; blocking for the holder's remaining "+
+				"tenure (%v) is the rmp #2174 defect, measured there as a 232x overrun "+
+				"reported as err=nil. This is an ordering fact, not a timing one, so machine "+
+				"load cannot have caused it (rmp #2574)",
+				i, r.elapsed, budget, holderTenure)
 		}
 		if r.elapsed > worst {
 			worst = r.elapsed
 		}
 	}
 	<-released
-	t.Logf("%d concurrent contended acquires against a %v holder, all abandoned within "+
-		"their %v budget; worst observed %v", callers, holderTenure, budget, worst)
+	// Logged, deliberately not asserted — see the instrument note above.
+	t.Logf("%d concurrent contended acquires against a %v holder, all abandoned BEFORE the "+
+		"holder released; budget %v, worst observed %v (not asserted: no defensible ceiling "+
+		"exists between the 40ms saturated noise floor and the %v tenure)",
+		callers, holderTenure, budget, worst, holderTenure)
+}
+
+// TestGateCtx_BudgetGateDetectsBlocking is the power control for the gate above:
+// it drives a caller that BLOCKS for the holder's whole tenure — the rmp #2174
+// shape — and requires the happens-before instrument to see it.
+//
+// Without it the gate above is unfalsifiable in a healthy tree: the engine
+// abandons correctly, the pre-fix build cannot be rebuilt, and an instrument that
+// had quietly stopped discriminating would read exactly like one that is passing.
+// This matters more for an ordering check than for a duration one, because there
+// is no number in the output to eyeball.
+func TestGateCtx_BudgetGateDetectsBlocking(t *testing.T) {
+	const holderTenure = 200 * time.Millisecond
+	var g Gate
+	g.StrongLock()
+
+	var holderReleased atomic.Bool
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(holderTenure)
+		holderReleased.Store(true)
+		g.StrongUnlock()
+		close(released)
+	}()
+
+	// WeakLock, NOT WeakLockCtx: the blocking form has no deadline to abandon, so
+	// it waits out the tenure. That is exactly what the defect did.
+	slot := g.WeakLock(0)
+	outlived := holderReleased.Load()
+	g.WeakUnlock(slot)
+	<-released
+
+	if !outlived {
+		t.Fatalf("a caller that BLOCKED on the gate with no deadline still returned before "+
+			"the %v holder released: the happens-before instrument in "+
+			"TestGateCtx_ReturnsWithinItsBudget cannot see a caller waiting out the tenure, "+
+			"so that gate has lost its power", holderTenure)
+	}
+	t.Logf("power control: a deadline-less WeakLock waited out the %v holder and the "+
+		"instrument saw it (outlivedHolder=true)", holderTenure)
 }
 
 // TestGateCtx_ExpiredContextTakesNothing asserts the cheapest branch: an
