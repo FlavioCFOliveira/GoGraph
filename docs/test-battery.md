@@ -369,15 +369,16 @@ and the rmp #2336 classification attempt:
 
 | Layer | Build tag | Env var | Make target | Budget |
 |---|---|---|---|---|
-| **short** | _(default)_ | — | `make test-short` | < 60 s/pkg soft, 240 s/pkg hard (enforced) |
+| **short** | _(default)_ | — | `make test-short` | see [docs/test-layers.md](test-layers.md) |
 | **soak** | `-tags=soak` | `SOAK_FULL=1` | `make test-soak` | minutes |
 | **nightly** | `-tags=nightly` | `GOGRAPH_NIGHTLY=1` | `make test-nightly` | hours |
 
 Each layer is a strict superset: `nightly` always includes `soak` and
 `short`. The short-layer budget is enforced by `scripts/pkg_time_budget.sh`,
-which `make test-short` pipes its output through, so every `make ci` reads it:
-a warning above 60 s/pkg, a hard failure above 240 s/pkg, with two measured
-per-package overrides (`internal/sim`, `cypher`). See
+which `make test-short` pipes its output through, so every `make ci` reads it.
+**The figures are deliberately not repeated here** — they live in one place, with
+the measurements and the exceptions that justify them, because three documents
+restating one number is how they came to disagree (rmp #2585). See
 [docs/test-layers.md](test-layers.md) for the full specification and
 Makefile targets.
 

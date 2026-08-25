@@ -445,7 +445,7 @@ Before writing a single line of code for any non-trivial component, conduct a **
 - **Package naming** — single-word, lowercase, no underscores; package names must not stutter with their exported identifiers (`graph.Graph` is acceptable; `graph.GraphGraph` is not).
 - **Tests** — table-driven tests with `t.Run`; property-based tests with `testing/quick` or `pgregory.net/rapid` for algorithms where invariants can be expressed generically.
 - **Test layers** — every test belongs to one of three layers:
-  - `short` — the default; runs on `go test ./...` with no tags. Run the packages a change touches on every change; the whole layer runs via `make ci` at sprint close and before every push (see [Tests and validation](#concrete-applications)). Each package must stay under 60 s.
+  - `short` — the default; runs on `go test ./...` with no tags. Run the packages a change touches on every change; the whole layer runs via `make ci` at sprint close and before every push (see [Tests and validation](#concrete-applications)). The per-package cost budget, the ceilings that are enforced, and the measured exceptions are specified in [`docs/test-layers.md`](docs/test-layers.md) and are deliberately **not** restated here: this file carried its own copy of the number and the two drifted apart.
   - `soak` — minutes-long workloads. Activated by the `soak` build tag or by setting `SOAK_FULL=1`. The pre-existing `stress` and `soakfull` build tags are considered part of the soak family.
   - `nightly` — hours-long workloads. Activated by the `nightly` build tag or by setting `GOGRAPH_NIGHTLY=1`; implies soak.
 

@@ -110,3 +110,54 @@ func TestBudgetOverridesNameRealPackages(t *testing.T) {
 		}
 	}
 }
+
+// budgetFigureRe matches a per-package budget figure written as a duration in
+// seconds — "60 s", "240s", "420 s" — the form the two documents used to state
+// independently of each other.
+var budgetFigureRe = regexp.MustCompile(`\b(?:60|240|420|780)\s*s\b`)
+
+// TestBudgetIsStatedInExactlyOnePlace guards rmp #2585. The per-package cost
+// budget must live in docs/test-layers.md and be REFERENCED elsewhere, never
+// restated.
+//
+// This is not tidiness. The project instructions asserted "each package must
+// stay under 60 s" while docs/test-layers.md described a 60 s soft budget, a
+// 240 s hard ceiling and a per-package override — three different numbers for one
+// quantity, in two files, neither of which named which of `make ci`'s two
+// whole-suite passes it applied to. That distinction is worth a factor of 2.62:
+// the suite measures 2586.6 s under -race and 988.7 s under the coverage pass, so
+// the same tree is eleven-packages-over or one-package-over depending purely on
+// which is meant.
+//
+// A second copy of a number is a second thing to keep true. This asserts there
+// is only one.
+func TestBudgetIsStatedInExactlyOnePlace(t *testing.T) {
+	// Every document that is NOT the owner must refer, never restate. Three of
+	// them stated the number independently, which is precisely how they came to
+	// disagree.
+	for _, f := range []struct{ path, link string }{
+		{"CLAUDE.md", "docs/test-layers.md"},
+		{"docs/test-battery.md", "test-layers.md"},
+	} {
+		body := readRepoFile(t, f.path)
+		if m := budgetFigureRe.FindString(body); m != "" {
+			t.Errorf("%s restates a per-package budget figure (%q). The budget belongs "+
+				"in docs/test-layers.md alone; restating it is how these documents "+
+				"drifted to different numbers (rmp #2585)", f.path, m)
+		}
+		if !strings.Contains(body, f.link) {
+			t.Errorf("%s no longer references %s, so the budget is now stated in NO "+
+				"place its reader is pointed at (rmp #2585)", f.path, f.link)
+		}
+	}
+
+	// The owning document must actually carry the figures, or "stated in one
+	// place" would be satisfied by stating it nowhere.
+	layers := readRepoFile(t, "docs/test-layers.md")
+	for _, want := range []string{"SOFT_BUDGET", "HARD_BUDGET", "PKG_HARD_BUDGET_OVERRIDES"} {
+		if !strings.Contains(layers, want) {
+			t.Errorf("docs/test-layers.md does not mention %q, so it is not actually "+
+				"specifying the budget it is now the sole owner of", want)
+		}
+	}
+}

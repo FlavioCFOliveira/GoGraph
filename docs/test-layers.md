@@ -64,26 +64,68 @@ drift impossible.
 
 #### Measured cost, 2026-08-25
 
-Whole suite, `go test -race -count=1 ./...`, darwin/arm64, 10 cores, **load
-average 1.08 before / 5.00 after**, 11 m 34 s wall. Ten packages exceed the 60 s
-soft budget:
+Whole suite, `GOGRAPH_PARALLEL_SUITE=1 go test -race -count=1 -timeout=30m ./...`,
+darwin/arm64, 10 cores, **load average 2.33 before / 5.11 after**, 11 m 39 s wall,
+exit 0: **124 packages, 2586.6 s summed**, eleven over the 60 s soft budget, two
+over the 240 s hard ceiling.
 
-| Package | In-suite |
-|---|---|
-| `internal/sim` | **564.0 s** |
-| `cypher` | **276.4 s** |
-| `examples/26_social_scale_bench` | 146.3 s |
-| `internal/anomaly` | 115.8 s |
-| `bench/csrorder` | 86.0 s |
-| `bench/cyclicjoin` | 80.3 s |
-| `bench/cypher_scale` | 72.4 s |
-| `search` | 65.9 s |
-| `examples/24_social_network_cli` | 65.6 s |
-| `store/recovery` | 62.0 s |
+**The budget is only meaningful with the pass named, and the difference is a
+factor of 2.62.** `make ci` runs the suite twice: `test-short` under `-race`, and
+`scripts/cover_gate.sh` under `-coverpkg=./... -covermode=atomic` with **no**
+`-race`. The same tree, measured the same day:
 
-Only the first two exceed the 240 s hard ceiling. **The global ceiling was not
-relaxed to accommodate them**; each gets a named, measured override instead, so
-the accommodation is visible per package and cannot silently cover a third.
+| Pass | Total | Packages over 60 s |
+|---|---|---|
+| `-race` (`test-short`) | 2586.6 s | **11** |
+| coverage, no `-race` (`cover-gate`) | 988.7 s | **1** |
+
+So every figure in this section is **under `-race`**, which is the stricter of the
+two and the one the budget gates.
+
+#### The known exceptions
+
+Every package over the soft budget is listed, with its measured cost and the
+reason. The reason is the same for all eleven and it is measured, not asserted:
+**the race detector**, whose per-package amplification is what puts them over.
+Under coverage instrumentation only `internal/sim` exceeds 60 s at all.
+
+| Package | `-race` | no `-race` | Amplification |
+|---|---|---|---|
+| `internal/sim` | 565.8 s | 103.9 s | 5.4× |
+| `cypher` | 321.7 s | 54.4 s | 5.9× |
+| `cypher/exec` | 177.8 s | 3.0 s | **58.4×** |
+| `examples/26_social_scale_bench` | 167.8 s | 20.5 s | 8.2× |
+| `bench/csrorder` | 110.4 s | 30.2 s | 3.7× |
+| `bench/cyclicjoin` | 96.9 s | 10.6 s | 9.1× |
+| `bench/cypher_scale` | 89.2 s | 16.7 s | 5.4× |
+| `examples/24_social_network_cli` | 86.5 s | 40.2 s | 2.2× |
+| `search` | 71.4 s | 35.2 s | 2.0× |
+| `cypher/tck` | 68.5 s | 7.9 s | 8.7× |
+| `store/recovery` | 66.3 s | 58.6 s | 1.1× |
+
+Only the first two exceed the 240 s hard ceiling, and each carries a named
+override below. The other nine **warn and pass**: they are over the soft budget,
+which is what a soft budget is for.
+
+`cypher/exec` deserves its own note: **3.0 s becomes 177.8 s**, a 58× penalty far
+outside the 2.62× the suite pays on average. That is a property worth
+understanding rather than absorbing — it points at heavily shared mutable state
+under concurrent access — and it is recorded here so it is not mistaken for the
+package simply being large.
+
+#### The premise that did not reproduce
+
+rmp #2585 was filed against a 2026-08-20 run reporting **16 packages over budget
+and a 4699 s total**. Re-measured at HEAD, the suite totals **2586.6 s** — 55 % of
+that — with **11** packages over. Individual packages diverge far more than the
+whole: `cypher/exec` was cited at 295.0 s against 177.8 s here, and
+`bench/cyclicjoin` at 306.3 s against 96.9 s.
+
+Those figures carry **no recorded load average**, and a suite total 1.82× a
+load-qualified measurement of the same tree is evidence about the machine rather
+than about the code. They are therefore cited but **excluded** from the
+worst-observed rule below. A measurement without its conditions cannot set a
+threshold.
 
 #### The override rule
 
@@ -94,20 +136,24 @@ this document × 1.25, rounded up to the whole minute.
 | Package | Worst in-suite | × 1.25 | Ceiling |
 |---|---|---|---|
 | `internal/sim` | 602.9 s | 753.6 s | **780 s** |
-| `cypher` | 276.4 s | 345.5 s | **360 s** |
+| `cypher` | 321.7 s | 402.1 s | **420 s** |
 
 **Worst-observed, not last-measured.** `internal/sim` has been recorded in-suite
-on this hardware at 545.8 s, 557.4 s, 564.0 s and 602.9 s — a **10.5 % spread** —
-and twice more at 600.7 s and 601.7 s, both of which were `panic: test timed out`
-against the old 600 s default and so are *lower bounds* on the real cost. A
-ceiling fitted to whichever run happened to be measured would false-red on a
-busier day; 780 s leaves **29 %** headroom over the worst of them while still
-tripping on a genuine 25 % cost regression, and stays far clear of
-`SHORT_TIMEOUT` (30 m).
+on this hardware at 545.8 s, 557.4 s, 564.0 s, 565.8 s and 602.9 s — a **10.5 %
+spread** — and twice more at 600.7 s and 601.7 s, both of which were
+`panic: test timed out` against the old 600 s default and so are *lower bounds*
+on the real cost. A ceiling fitted to whichever run happened to be measured
+would false-red on a busier day; 780 s leaves **29 %** headroom over the worst of
+them while still tripping on a genuine 25 % cost regression, and stays far clear
+of `SHORT_TIMEOUT` (30 m).
 
-The `cypher` figure rests on a **single** observation. It carries less evidential
-weight than the `internal/sim` one and should be re-derived once a second is
-recorded.
+The `cypher` figure was **re-derived when its second observation arrived**, which
+is what the single-observation caveat was for. Two in-suite runs on 2026-08-25,
+both with load recorded, gave **276.4 s and 321.7 s** — a **16 %** swing, against
+`internal/sim`'s **0.3 %** (564.0 s and 565.8 s) across the same pair. Mid-sized
+packages vary far more run to run than the big one does, because their co-tenancy
+changes with scheduling order. That is also why the global 240 s ceiling, not a
+per-package one, is the right instrument for everything below these two.
 
 Keys match as a **suffix** of the import path, not as a substring. This matters:
 substring matching would have let `/cypher` also cover `cypher/tck`, `cypher/ir`

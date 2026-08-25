@@ -114,7 +114,7 @@ HARD_BUDGET ?= 240
 # package in docs/test-layers.md, times 1.25, rounded up to the whole minute.
 #
 #   internal/sim  602.9s x 1.25 = 753.6 -> 780
-#   cypher        276.4s x 1.25 = 345.5 -> 360
+#   cypher        321.7s x 1.25 = 402.1 -> 420
 #
 # Worst-observed, not last-measured: internal/sim has been recorded in-suite at
 # 545.8s, 557.4s, 564.0s and 602.9s on this hardware — a 10.5% spread — so a
@@ -123,9 +123,12 @@ HARD_BUDGET ?= 240
 # tripping on a genuine 25% cost regression, and stays far clear of
 # SHORT_TIMEOUT (30m).
 #
-# The cypher figure rests on a SINGLE observation; it carries less evidential
-# weight than the sim one and should be re-derived when a second is recorded.
-PKG_HARD_BUDGET_OVERRIDES ?= /internal/sim=780 /cypher=360
+# The cypher figure was re-derived when its second observation arrived, exactly as
+# the single-observation caveat required: two in-suite runs the same day, both
+# with load recorded, gave 276.4s and 321.7s — a 16% swing, against internal/sim
+# 0.3% across the same pair. Mid-sized packages vary far more run to run than the
+# big one does, because their co-tenancy changes with scheduling order.
+PKG_HARD_BUDGET_OVERRIDES ?= /internal/sim=780 /cypher=420
 export SOFT_BUDGET HARD_BUDGET PKG_HARD_BUDGET_OVERRIDES
 
 # GOGRAPH_PARALLEL_SUITE declares to the test binaries that packages are being
