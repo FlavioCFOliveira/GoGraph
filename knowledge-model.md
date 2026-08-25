@@ -1260,7 +1260,7 @@ rather than introduced:
 | `Example` | A runnable godoc `func ExampleXxx` (name prefix `Example`). | `name`, `pkg`, `file` |
 | `Spec` | A documentation/specification file under `docs/` (plus root `README.md`/`CHANGELOG.md`). | `name` (basename), `path` (repo-relative), `title` (first `# ` heading) |
 | `Feature` | A curated major capability of the module. | `name`, `description` |
-| `Task` | An `rmp` roadmap task. **Present in the live graph long before this table documented it** (207 `IMPLEMENTED_IN` edges start at one); documented 2026-08-18 (`0f288333`, rmp #2481). | `id` (the rmp ticket number, the identity), `title`, `status` (`BACKLOG`\|`SPRINT`\|`DOING`\|`TESTING`\|`COMPLETED`), `sprint` (int — the sprint id, `0` while the task is in no sprint). Added 2026-08-18 (`0f288333`): `type` (the rmp task type, e.g. `TASK`\|`BUG`\|`CHORE`), `severity` (int), `foundDuring` (what surfaced the task, for one filed from a review rather than planned), and `measured` (the figures a filing rests on) — the same evidence-bearing shape `Defect` carries, because a bug filed and then left in the backlog keeps only what its filing recorded. A `Task` whose `type` is `BUG` is itself a defect record, which is why `TAUGHT` accepts it as a source. |
+| `Task` | An `rmp` roadmap task. **Present in the live graph long before this table documented it** (207 `IMPLEMENTED_IN` edges start at one); documented 2026-08-18 (`0f288333`, rmp #2481). **Schema unified 2026-08-25 (rmp #2612)** — see the canonical shape below. | **`id` (INTEGER — the rmp ticket number, the identity; the type is part of the contract, see below), `title`, `status`, `type`, `sprint` (int), `closedAt` (`YYYY-MM-DD`), `commit`.** Optional, evidence-bearing, and deliberately heterogeneous: `severity` (int), `priority` (int), `foundDuring` (what surfaced the task, for one filed from a review rather than planned), `measured` (the figures a filing rests on), `note`, `outcome`, `verdict`, `evidence`, `gap`, `blockers` — the same shape `Defect` carries, because a bug filed and then left in the backlog keeps only what its filing recorded. A `Task` whose `type` is `BUG` is itself a defect record, which is why `TAUGHT` accepts it as a source. `status` ∈ `BACKLOG`\|`SPRINT`\|`DOING`\|`TESTING`\|`COMPLETED` — **`rmp` is the authority and these five are the only admissible values**; a graph-only value (`SUPERSEDED` was found on task 2140) duplicates something the rmp title already says |
 | `Sprint` | A planning sprint from the `rmp` roadmap. | `id` (int), `name`, `status` (`OPEN`\|`CLOSED`\|`PENDING`), `objective` |
 | `Release` | A tagged — or prepared but not yet tagged — release of the module. Present in the live graph since before this table existed; documented 2026-08-13 (sprint 344). | `name` (`vX.Y.Z`, the identity), `date`, `headlineFeature`, `published` (bool — **false while the tag has not been pushed**), `latest` (bool), `releaseCommit` (full hash) / `releaseCommitShort`, `cveCleared` (false, or the advisory id), `forwardFixes` (optional). Added 2026-08-13: `commitCount` (int), `breakingChanges` (int), `tckScenarios` (int), `knownOpenDefect`, `certification` — so a release's honest posture is queryable without reading its notes |
 | `Commit` | A git commit that delivered one or more tasks, or that integrated a sprint into an integration branch. | `hash` (short — **8-char** in the live graph; this table said 7 until 2026-07-29 and the drift silently made 7-char lookups miss), `fullHash` (full 40-char), `message`, `sprintId` (int), `kind` (`merge` only — set on a sprint-integration merge commit; absent on an ordinary delivery commit), `branch` (the branch the merge landed on, e.g. `main`; set with `kind`) |
@@ -1273,6 +1273,48 @@ rather than introduced:
 | `Lesson` | A generalisable conclusion drawn from a defect — the part worth keeping once the ticket is closed. Present in the live graph before this table documented it; documented 2026-08-18. **Data-quality divergence observed 2026-08-20 (`f3c40f22`):** one node, `threshold-harness-vs-runtime-2026-08-20`, is keyed on `id` and carries `title`/`note`/`commit`/`date` — the `DSTScenario` shape, not this label's — so it is invisible to every `{name:…}` lookup and to any query reading `summary`. Reach it by `id`, or `coalesce(l.name, l.id)`. Not corrected here (it is a live, correct lesson; only its keying diverges). | `name` (a slug, the identity), `summary` (the lesson itself, stated so it applies beyond the originating defect), `claim`/`date` on the older nodes. Added 2026-08-18 (`124eca54`): `generalises` (the wider class the lesson covers), `method` (what to do differently), and — when a lesson survives but its worked example does not — `illustrationWithdrawn` plus `correctedAt`, so a corrected lesson is distinguishable from a rewritten one |
 | `Component` | A named unit of implementation finer than a `Package` and coarser than a symbol — a type plus the machinery around it, a subsystem, or a named mechanism. **Present in the live graph long before this table documented it** (48 nodes at 2026-08-20); documented 2026-08-20 (`f3c40f22`, sprint 349), when 22 nodes were added for the DST harness's units. | `name` (the identity — a dotted or qualified name, e.g. `sim.SimDisk`, `mvcc.Horizon`), `path` (**the file or directory the unit lives in — this label uses `path`, not `file`**), `responsibility` (one sentence stating what the unit owns, per the *Exemplary components* mandate), `note` (the non-obvious behaviour, fidelity limits, or traps), `gitCommit`, `gitDate`. Heterogeneous on the older nodes, which variously carry `location`, `mvcc_verdict`, `commit`, `commit_date`, `sprint`, `task` |
 | `Decision` | A recorded decision or standing convention, with the reasoning that settles it. **Present in the live graph long before this table documented it** (21 nodes at 2026-08-20); documented 2026-08-20 (`f3c40f22`), when the 7 DST conventions were added as `dst-*` nodes. | `name` (a slug, the identity), `statement` (the convention or decision, stated so it can be applied without reading the source), `kind` (`convention` on the `dst-*` nodes; older nodes use it differently), `date`, `gitCommit`, `gitDate`. Heterogeneous on the older nodes, which variously carry `verdict`, `reason`, `supersededBy`, `audit`, `task`, `premise`, `mechanism`, `justification`, `behaviourChange`, `sideEffect`, `ref` — and at least one older node has **no `name` at all**, so it is unreachable by identity |
+
+### The canonical `Task` shape, and why the id TYPE is part of it (rmp #2612)
+
+**`Task.id` is an INTEGER.** This is not a formatting preference. `MERGE` matches the
+*whole* pattern, so `MERGE (t:Task {id: 2494})` and `MERGE (t:Task {id: '2494'})` bind
+**different nodes** — which is exactly how the graph acquired duplicate stubs. A schema
+that leaves the type unstated is a schema that permits this.
+
+The same rule applies to the key NAME. Before this sync the label had drifted into
+**49 distinct property signatures** across 337 nodes, with four competing identity keys
+and two competing title keys:
+
+| Axis | Canonical | Retired (migrated 2026-08-25) |
+|---|---|---|
+| identity | `id` (int) | `task_id` (86 nodes), `number` (7, string), `name` holding an id (1) |
+| title | `title` | `name` (20 nodes, where it held the title) |
+| sprint | `sprint` | `sprint_id` (76), `sprintId` (16) |
+| closed | `closedAt` | `closed_at` (55) |
+
+**The drift was self-reinforcing, and it caught the repair itself.** Stamping rmp #2508's
+provenance with `MERGE (t:Task {id: 2508})` created a *new* node, because the existing one
+was keyed on `task_id` — one of the four duplicates this migration folded was produced by
+following the drifted schema. The same trap fired again mid-migration: an edge rebuild
+matching `{id: 2507}` silently created nothing, because node 2507 was still on `task_id`,
+and `rmp graph create` reports `ok` for a `MATCH` that binds nothing. **Normalise the
+identity key before rebuilding any edge, and verify every write by reading it back.**
+
+Migration result, verified: 337 → **333** nodes (four duplicates folded, each after its
+single edge was recreated on the surviving node), **0** legacy keys, **0** string ids,
+**0** null titles, **0** ids mapping to more than one node, **0** status disagreements
+with `rmp` across all 333, and **18,812 edges before and after — delta zero**, so nothing
+was orphaned.
+
+**`rmp` is the authority; the graph is a stamped snapshot.** A node's `status` is true as
+of its `gitDate`, and 33 nodes were found stale — not the three the filing named. Re-derive
+from `rmp` rather than editing statuses one at a time.
+
+**`title` is a LABEL, not a copy.** 168 nodes carry a deliberately abbreviated form of the
+rmp title (`SetIndexManager IndexManager data race` for
+`SetIndexManager/IndexManager is a data race despite a godoc claiming cross-goroutine
+safety`). This is left as is: the graph's title exists to make a node readable in query
+output, and `rmp task get <id>` is where the full text lives. Do not mass-rewrite them.
 
 ### Enumerated property values
 
