@@ -3794,3 +3794,75 @@ true). It holds on exactly two of the 49 registered scenarios — `cpu-starvatio
 and `pagerank-ranker` — and mirrors `Scenario.ClampsGOMAXPROCS` in the code. A
 scenario carrying it runs alone in the swarm. Query it before assuming any
 scenario can be co-scheduled.
+
+### Sprint 350 sync — anonymous subquery entities are named before the plan cache (2026-08-25)
+
+Post-commit sync for `5e0e85f86f38f7e218f325bda228a293bc80ae84` (rmp #2508), the
+first task of sprint 350. Only the outer plan is cached, so an `EXISTS { }` /
+`COUNT { }` subquery's inner plan was re-translated on every execution over the
+**shared** cached AST, and the translation walk names anonymous entities by
+writing `NodePattern.Variable` / `RelationshipPattern.Variable` in place. The fix
+names them once, in `ir.NameSubqueryAnonymousEntities`, while the AST is still
+private to the plan-cache builder.
+
+**Written.** +1 `Sprint` (350 — **it did not exist**; see the warning below). +3
+`Task` (#2508 COMPLETED, #2615 and #2616 BACKLOG). +1 `Defect` (2508, FIXED). +1
+`Fix` (`subquery-anon-prenaming-2508`). +1 `Commit` (`5e0e85f8`). +2 `Component`
+(`ir.NameSubqueryAnonymousEntities`, `ir.UserNamed`). +4 `Function`
+(`NameSubqueryAnonymousEntities`, `nameAnonymousPathEntities`, `IsSyntheticVar`,
+`UserNamed`, all `introducedBy: 2508`). +4 `Test`. +5 `Finding`. +1 `Lesson`
+(`grep-hit-list-is-the-finding`). 14 edges, all stamped and **verified by a
+read-back**.
+
+**Warning recorded, because it cost five edges.** `rmp graph create` with a
+multi-pattern `MATCH` is all-or-nothing: `MATCH (a),(b),(c) MERGE …` writes
+**nothing** when any one pattern is unmatched, and still prints `{"ok":true}` and
+exits 0. `Sprint {id: 350}` was absent, so a five-edge statement silently created
+none of them. Bind one pattern pair per statement, or always follow a write batch
+with a counting read. Exit 0 from `rmp graph create` is not evidence of effect.
+
+**Two gates whose limits are modelled, not just their existence.**
+`TestSubqueryConcurrentFirstExecution_2508` carries `limitation`: it detects
+#2508 **only under `-race`** — with the fix reverted it passes 3 of 3 runs
+without it, because the racing writes store equal-length names. Its result
+comparison guards the different, race-free #2507 collision class.
+`TestSubqueryColumnNames_2508` carries `note`: the openCypher TCK contains
+**zero** un-aliased `RETURN EXISTS{}/COUNT{}` scenarios, so 3897/3897 is
+structurally blind to a subquery column name's rendering and must never be cited
+as covering it.
+
+**The fix's own two regressions are modelled as `Finding`, not hidden.**
+`2508-recogniser-regression`: the degree-rewrite (#2232) and labelled-hop (#2235)
+recognisers refuse a *named* relationship, spelled syntactically as
+`rel.Variable != nil`, so pre-naming silently stopped them firing and forced the
+per-row inner drive — 17 subtests red. Their guards are now semantic
+(`ir.UserNamed`). `2508-column-name-leak`: the synthetic names reached the public
+result-column name, since that name is derived by re-rendering the AST; rendering
+now skips `ast.SyntheticSubqueryVarPrefix` and **only** that prefix, because
+`ir.NewMerge` uses a MERGE pattern's rendering as the operator's identity and
+MERGE patterns carry plain `__anon_N` names.
+
+**New constant modelled: `ast.SyntheticSubqueryVarPrefix`** (`__anon_sq_`, in
+`cypher/ast/patterns.go`). It is a strict refinement of `ir.anonVarPrefix`
+(`__anon_`), and must stay one: `ir.IsSyntheticVar` tests only the shorter prefix,
+so a divergence would make every minted name read as user-written and silently
+disable the two recognisers again. Go cannot assert a string prefix at compile
+time, so `TestAnonSubqueryPrefixIsRefinement` asserts it.
+
+**Prior art recorded on `2508-prior-art-name-once-pre-cache`**, read in source at
+named commits: Neo4j `f213380f` (`NameAllPatternElements` in `AstRewriting`,
+inside `parsingPost`, so pre-cache; immutable case classes rebuilt with `.copy()`),
+Memgraph `37bb2376` (`visitSingleQuery` at parse time; `shared_ptr<const
+CachedQuery>` then `Clone()` per execution; `EvaluatePatternFilter` holds the
+inner plan so only cursors are per-execution), PostgreSQL `5c52858e`
+(`plancache.c` `copyObject` before every destructive pass — "the parser tends to
+scribble on its input"). Licences are BSL 1.1 / GPLv3 / PostgreSQL: structural
+insight only.
+
+**Measurement that settled the design, on `2508-subquery-compile-is-not-the-cost`.**
+The per-execution compile is **1.59 %** of CPU at one outer row and **0.38 %** at
+200, so caching the translated inner plan has a measured ceiling of ~1.6 % and was
+**not** the lever. The real cost is the per-outer-row inner drive: **115×** the
+equivalent `OPTIONAL MATCH` at 200 rows, 30× the allocations, attributed by
+`pprof -top -cum` to per-row expression evaluation and operator re-drive. Filed
+as #2616.
