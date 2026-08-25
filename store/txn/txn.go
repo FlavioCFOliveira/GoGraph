@@ -1108,10 +1108,83 @@ func (t *Tx[N, W]) RemoveNodeLabel(node N, label string) error {
 	return nil
 }
 
+// validateProperty runs the graph's installed schema validator against a value
+// about to be BUFFERED, so a refused write never reaches the write-ahead log.
+//
+// The ordering is the whole point (rmp #2602). [Tx.Commit] appends and fsyncs
+// every buffered op and only THEN applies them through lpg, which is where the
+// graph's own validator hook lives — so before this guard existed, a value the
+// schema refused was already durable when the rejection surfaced as
+// [ErrCommittedNotApplied]. The live graph stayed clean, but recovery installs
+// no validator, so replay materialised the refused value: MEASURED 2026-08-24,
+// an `age` declared PropInt64 came back from a host crash as a STRING.
+//
+// That breaks the Consistency half of the ACID contract, which names
+// label/property typing among the invariants a committed transaction must
+// leave satisfied. Validating here also makes this path agree with the Cypher
+// one, where walMutatorAdapter.SetNodeProperty has always validated before
+// buffering its WAL op.
+//
+// The cost is deliberate and stated: the error now surfaces at BUFFER time
+// rather than from Commit.
+func (t *Tx[N, W]) validateProperty(propKey string, value lpg.PropertyValue) error {
+	if t.store == nil || t.store.g == nil {
+		return nil
+	}
+	return t.store.g.ValidateProperty(propKey, value)
+}
+
+// SetNodePropertyPreValidated buffers a SetNodeProperty op WITHOUT running the
+// schema validator, for a caller that has ALREADY validated the value against
+// the same graph.
+//
+// It exists for the Cypher engine's walMutatorAdapter, which performs the
+// validated [lpg.WriteView] write and only then buffers the WAL op. Routing that
+// caller through the validating [Tx.SetNodeProperty] would validate the same
+// value TWICE, and a [lpg.SchemaValidator] is permitted to be stateful — a
+// counting validator (reject the Nth write of this key) sees a different call
+// sequence, which is not a hypothetical: it changed the outcome of
+// cypher.TestByHandle_RollbackRevertsByHandle when rmp #2602 first added the
+// buffer-time guard.
+//
+// USE ONLY when the value has already been validated. A caller that has not
+// validated must use [Tx.SetNodeProperty], or a refused value reaches the WAL —
+// which is the whole defect rmp #2602 closed.
+func (t *Tx[N, W]) SetNodePropertyPreValidated(node N, propKey string, value lpg.PropertyValue) error {
+	if t.finished {
+		return ErrTxFinished
+	}
+	t.ops = append(t.ops, Op[N, W]{Kind: OpSetNodeProperty, Src: node, Key: propKey, Value: value})
+	return nil
+}
+
+// SetEdgePropertyPreValidated is [Tx.SetNodePropertyPreValidated] for an edge
+// property. The same contract and the same warning apply.
+func (t *Tx[N, W]) SetEdgePropertyPreValidated(src, dst N, propKey string, value lpg.PropertyValue) error {
+	if t.finished {
+		return ErrTxFinished
+	}
+	t.ops = append(t.ops, Op[N, W]{Kind: OpSetEdgeProperty, Src: src, Dst: dst, Key: propKey, Value: value})
+	return nil
+}
+
+// SetEdgePropertyByHandlePreValidated is [Tx.SetNodePropertyPreValidated] for a
+// per-instance edge property. The same contract and the same warning apply.
+func (t *Tx[N, W]) SetEdgePropertyByHandlePreValidated(src, dst N, handle uint64, propKey string, value lpg.PropertyValue) error {
+	if t.finished {
+		return ErrTxFinished
+	}
+	t.ops = append(t.ops, Op[N, W]{Kind: OpSetEdgePropertyByHandle, Src: src, Dst: dst, Handle: handle, Key: propKey, Value: value})
+	return nil
+}
+
 // SetNodeProperty buffers a SetNodeProperty(node, propKey, value) operation.
 func (t *Tx[N, W]) SetNodeProperty(node N, propKey string, value lpg.PropertyValue) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := t.validateProperty(propKey, value); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpSetNodeProperty, Src: node, Key: propKey, Value: value})
 	return nil
@@ -1139,6 +1212,9 @@ func (t *Tx[N, W]) RemoveEdge(src, dst N) error {
 func (t *Tx[N, W]) SetEdgeProperty(src, dst N, propKey string, value lpg.PropertyValue) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := t.validateProperty(propKey, value); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpSetEdgeProperty, Src: src, Dst: dst, Key: propKey, Value: value})
 	return nil
@@ -1189,6 +1265,9 @@ func (t *Tx[N, W]) SetEdgeLabelByHandle(src, dst N, handle uint64, label string)
 func (t *Tx[N, W]) SetEdgePropertyByHandle(src, dst N, handle uint64, propKey string, value lpg.PropertyValue) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := t.validateProperty(propKey, value); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpSetEdgePropertyByHandle, Src: src, Dst: dst, Handle: handle, Key: propKey, Value: value})
 	return nil

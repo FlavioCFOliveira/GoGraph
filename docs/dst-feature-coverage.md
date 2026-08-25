@@ -2643,13 +2643,26 @@ replayed nothing, so the accepted value has to come back too.
 The `store/txn` side is measured by `typedSchemaPureStoreArm`, on its own
 `SimDisk`, through `openSimTypedStore` rather than `OpenSimStore` because it needs
 the `txn.Store` itself — the Cypher adapter cannot reach that ordering at all.
-MEASURED: the refused commit returns `txn.ErrCommittedNotApplied` wrapping
-`schema.ErrTypeMismatch`, the LIVE graph is correctly left without the property,
-and after a host crash and reopen the recovered graph carries `age` **as a
-STRING**. It is pinned in both directions and its message says that a run in
-which the resurrection stops happening must update the pin, the file header and
-this document rather than delete the clause. See item 12 under
+MEASURED 2026-08-24: the refused commit returned `txn.ErrCommittedNotApplied`
+wrapping `schema.ErrTypeMismatch`, the LIVE graph was correctly left without the
+property, and after a host crash and reopen the recovered graph carried `age`
+**as a STRING**. See item 12 under
 [Defects surfaced by this coverage work](#defects-surfaced-by-this-coverage-work).
+
+**FIXED 2026-08-25 (rmp #2602), and the arm inverted with it.** `txn.Tx.SetNodeProperty`
+and its value-bearing siblings now validate BEFORE buffering, so a refused op
+never reaches the log and there is nothing for a validator-less replay to
+materialise. The arm asserts the contract instead of pinning its breach: the
+refusal is expected at BUFFER time (`pure-store:precondition`), a second
+rejection from `Commit` is itself a violation (`pure-store:refused-twice`,
+because the op should never have been buffered), and resurrection after the crash
+is now an `ACID_CONSISTENCY` violation (`pure-store:resurrection`) where it used
+to be the pinned behaviour.
+
+This is the pin doing its job. It was a PIN on a measurement rather than prose,
+and its message named exactly what to update when the ordering changed — the pin,
+the file header, and this document. All three were, which is the argument for
+pinning a measurement: prose would have gone quietly stale instead.
 
 **The reopened graph carries no validator — asserted, not documented away.**
 `SimStore.Graph()` returns a graph rebuilt by recovery, and the schema is not
@@ -2676,9 +2689,13 @@ no checkpoint can capture it either.
 graph reopened by recovery carries no validator until an embedder re-installs
 one, and the durable replay path deliberately does not consult one.* The
 consequence is asymmetric enforcement across a restart: writes made through a
-live validated graph are checked, writes replayed by recovery are not, and on the
-`store/txn` path a value the live validator refused can be materialised by the
-replay (item 12). Persisting the schema alongside the snapshot components, and
+live validated graph are checked, and writes replayed by recovery are not.
+
+Since rmp #2602 that asymmetry no longer lets a REFUSED value through, because
+both write paths now validate before the write-ahead log, so the log cannot
+contain one (item 12). What remains open is narrower and stated as such: a log
+written by an older build, before that fix, is outside the guarantee, and replay
+still enforces nothing of its own. Persisting the schema alongside the snapshot components, and
 validating on replay, would close it — and would be a change to the durable
 format and to the recovery contract, so it is recorded here for adjudication
 rather than decided by a test. What this task does is make the limitation

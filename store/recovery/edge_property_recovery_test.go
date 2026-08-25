@@ -66,6 +66,19 @@ func buildSetEdgePropertyByHandleRest(key string, val int64, handle uint64) []by
 //
 // Pre-fix: _ = g.SetEdgePropertyByHandle(...) silences the error → Commit nil.
 // Post-fix: return g.SetEdgePropertyByHandle(...) propagates ErrCommittedNotApplied.
+//
+// THE VALIDATOR IS NOW INSTALLED AFTER BUFFERING, and that is the only way left
+// to reach this path. Since rmp #2602 txn.Tx.SetEdgePropertyByHandle validates
+// when the op is buffered, so a validator installed BEFORE the buffer refuses
+// there and the op never reaches apply — which is the point of that fix, and
+// would make this test assert nothing about the apply path.
+//
+// Installing it between the buffer and the Commit is not a contrivance: the
+// validator is swappable at runtime through a lock-free atomic
+// (lpg.atomicValidator), so a schema installed while a transaction is open is a
+// real ordering. It is also the ordering that keeps the ORIGINAL guard alive —
+// the apply path must PROPAGATE a rejection rather than silence it — which the
+// buffer-time check does not subsume.
 func TestEdgePropertyByHandle_Txn_ValidatorRejection_ReportsErrCommittedNotApplied(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -77,9 +90,6 @@ func TestEdgePropertyByHandle_Txn_ValidatorRejection_ReportsErrCommittedNotAppli
 		t.Fatalf("wal.Open: %v", err)
 	}
 	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
-	// Install the validator before building the store so it is active during
-	// the in-memory apply phase of Commit (applyOp runs after WAL fsync).
-	g.SetValidator(&rejectingValidator{key: propKey})
 	defer g.SetValidator(nil)
 
 	s := txn.NewStoreWithOptions[string, float64](g, w, txn.Options[string, float64]{
@@ -91,7 +101,12 @@ func TestEdgePropertyByHandle_Txn_ValidatorRejection_ReportsErrCommittedNotAppli
 	mustTx(t, tx.AddNode("x"))
 	mustTx(t, tx.AddNode("y"))
 	mustTx(t, tx.AddEdge("x", "y", 1))
+	// Buffered with NO validator installed, so the op reaches t.ops...
 	mustTx(t, tx.SetEdgePropertyByHandle("x", "y", 1, propKey, lpg.Int64Value(42)))
+
+	// ...and the validator arrives before the apply phase, which runs after the
+	// WAL fsync. This is the ordering the apply-path guard exists for.
+	g.SetValidator(&rejectingValidator{key: propKey})
 
 	commitErr := tx.Commit()
 	if commitErr == nil {

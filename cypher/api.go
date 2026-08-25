@@ -18699,7 +18699,9 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	}
 	a.countPropertySet()
 	r.recordSetNodeProperty(n, key, prev, had)
-	_ = a.tx.SetNodeProperty(n, key, value) //nolint:errcheck // ErrTxFinished impossible here
+	// PreValidated: a.w().SetNodeProperty above already ran the schema validator
+	// on this value, and a stateful validator must not see it twice (rmp #2602).
+	_ = a.tx.SetNodePropertyPreValidated(n, key, value) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
 		ch := index.Change{
 			Op:       index.OpSetNodeProperty,
@@ -18822,7 +18824,8 @@ func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 	}
 	a.countPropertySet()
 	r.recordSetEdgeProperty(src, dst, key, prev, had)
-	_ = a.tx.SetEdgeProperty(src, dst, key, value) //nolint:errcheck // ErrTxFinished impossible here
+	// PreValidated: see the SetNodeProperty twin (rmp #2602).
+	_ = a.tx.SetEdgePropertyPreValidated(src, dst, key, value) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpSetEdgeProperty,
@@ -18981,7 +18984,8 @@ func (a *walMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint
 		return err
 	}
 	r.recordSetEdgePropertyByHandle(src, dst, handle, key, prev, had)
-	_ = a.tx.SetEdgePropertyByHandle(src, dst, handle, key, value) //nolint:errcheck // ErrTxFinished impossible here
+	// PreValidated: see the SetNodeProperty twin (rmp #2602).
+	_ = a.tx.SetEdgePropertyByHandlePreValidated(src, dst, handle, key, value) //nolint:errcheck // ErrTxFinished impossible here
 	return nil
 }
 func (a *walMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint64, key string) {

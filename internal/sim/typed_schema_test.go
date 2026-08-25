@@ -96,8 +96,14 @@ func TestTypedSchema_EvidenceIsNonVacuous(t *testing.T) {
 		ev.PinValidateNodeDetected == 0 || ev.PinValidateNodeRepaired == 0 {
 		t.Errorf("the recovery pin did not reach every clause: %s", ev.String())
 	}
-	if ev.PureStoreArms == 0 || ev.PureStoreResurrected == 0 {
-		t.Errorf("the pure store/txn arm did not run or did not observe the resurrection: %s", ev.String())
+	if ev.PureStoreArms == 0 || ev.PureStoreRefusedAtBuffer == 0 {
+		t.Errorf("the pure store/txn arm did not run, or never saw a buffer-time refusal, so "+
+			"nothing it reports about the durable image is attributable: %s", ev.String())
+	}
+	if ev.PureStoreResurrected != 0 {
+		t.Errorf("the pure store/txn arm observed a refused value coming back from a crash %d "+
+			"time(s). Since rmp #2602 the refusal happens before the op is buffered, so the WAL "+
+			"cannot contain it: %s", ev.PureStoreResurrected, ev.String())
 	}
 	if ev.KeyInterningChecks == 0 || ev.CrossAccessorChecks == 0 || ev.FusedNoEdgeChecks == 0 {
 		t.Errorf("a no-mutation sub-clause never ran: %s", ev.String())
@@ -492,8 +498,10 @@ func TestTypedSchema_EngineRejectionNeverReachesTheWAL(t *testing.T) {
 // What it pins (MEASURED 2026-08-24): `txn.Tx.Commit` appends and fsyncs every
 // buffered op BEFORE it applies them, so a validator rejection during the apply
 // returns txn.ErrCommittedNotApplied with the frame already durable — and the
-// reopen, which installs no validator, materialises the value the live validator
-// refused. The live graph is correctly left without it; the durable image is not.
+// reopen, which installs no validator, would materialise the value the live
+// validator refused — which is what it MEASURED until rmp #2602 moved the guard
+// to buffer time. It now asserts the opposite: the refusal lands before the op is
+// buffered, so the WAL never carries it and the crash brings nothing back.
 //
 // The Cypher engine cannot reach this ordering: walMutatorAdapter.SetNodeProperty
 // performs the validated write before it buffers the WAL op, which is what
@@ -507,11 +515,14 @@ func TestTypedSchema_PureStoreArm(t *testing.T) {
 	if vs := checkTypedSchemaPureStore(1, obs); len(vs) > 0 {
 		t.Fatalf("the pure-store pin no longer holds:\n%v", vs)
 	}
-	if !obs.resurrected {
-		t.Fatal("the refused value was NOT resurrected; checkTypedSchemaPureStore should have said so")
+	// THE assertion rmp #2602 inverted. It used to require the resurrection; it
+	// now forbids it, and asserts the buffer-time refusal that replaced it.
+	if !obs.refusedAtBuffer {
+		t.Fatal("txn.Tx.SetNodeProperty accepted a value the schema refuses, so the op was " +
+			"buffered and Commit will make it durable before the validator sees it (rmp #2602)")
 	}
-	if obs.resurrectedKind != lpg.PropString {
-		t.Fatalf("the resurrected value is %s, want the STRING that was committed",
+	if obs.resurrected {
+		t.Fatalf("the refused value came back from the crash as %s: a refused op reached the WAL",
 			tsKindName(obs.resurrectedKind))
 	}
 }
@@ -522,10 +533,14 @@ func TestTypedSchema_PureStoreArm(t *testing.T) {
 // record is exactly what the clauses read.
 func TestTypedSchema_PureStoreCheckIsFalsifiable(t *testing.T) {
 	t.Parallel()
+	// The reference observation is the CONTRACT since rmp #2602: the refusal
+	// lands at buffer time, the commit has nothing left to reject, and the
+	// refused value is absent after recovery. Until 2026-08-25 the reference was
+	// its inverse — resurrected: true — because the arm pinned the defect.
 	good := tsPureStoreObservation{
-		acceptErr: "<nil>", rejectErr: "committed-not-applied", notApplied: true,
-		typeMismatch: true, liveAbsent: true, acceptedSurvived: true,
-		resurrected: true, resurrectedKind: lpg.PropString, stored: "STRING(\"x\")", walOps: 2,
+		acceptErr: "<nil>", rejectErr: "schema: type mismatch", refusedAtBuffer: true,
+		typeMismatch: true, notApplied: false, liveAbsent: true, acceptedSurvived: true,
+		resurrected: false, stored: "<absent>", walOps: 2,
 	}
 	if vs := checkTypedSchemaPureStore(1, good); len(vs) > 0 {
 		t.Fatalf("the reference observation must pass:\n%v", vs)
@@ -535,13 +550,19 @@ func TestTypedSchema_PureStoreCheckIsFalsifiable(t *testing.T) {
 		mutate func(o *tsPureStoreObservation)
 		clause string
 	}{
-		{"no ErrCommittedNotApplied", func(o *tsPureStoreObservation) { o.notApplied = false }, "pure-store:precondition"},
+		{"not refused at buffer time", func(o *tsPureStoreObservation) { o.refusedAtBuffer = false }, "pure-store:precondition"},
 		{"wrong sentinel", func(o *tsPureStoreObservation) { o.typeMismatch = false }, "pure-store:precondition"},
+		{"refused twice", func(o *tsPureStoreObservation) { o.notApplied = true }, "pure-store:refused-twice"},
 		{"accepted commit failed", func(o *tsPureStoreObservation) { o.acceptErr = "boom" }, "pure-store:accepted-commit"},
 		{"live graph mutated", func(o *tsPureStoreObservation) { o.liveAbsent = false }, "pure-store:live"},
 		{"accepted value lost", func(o *tsPureStoreObservation) { o.acceptedSurvived = false }, "pure-store:accepted-survived"},
-		{"no resurrection", func(o *tsPureStoreObservation) { o.resurrected = false }, "pure-store:resurrection-pin"},
-		{"resurrected as another kind", func(o *tsPureStoreObservation) { o.resurrectedKind = lpg.PropInt64 }, "pure-store:resurrection-kind"},
+		// THE clause rmp #2602 inverted: a refused value coming back from a crash
+		// is now a Consistency violation, where it used to be the pinned behaviour.
+		{"refused value resurrected", func(o *tsPureStoreObservation) {
+			o.resurrected = true
+			o.resurrectedKind = lpg.PropString
+			o.stored = "STRING(\"x\")"
+		}, "pure-store:resurrection"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1529,6 +1529,29 @@ func (g *Graph[N, W]) ApplyInsideLockedTx(fn func(WriteTx) error) error {
 // SetValidator is safe for concurrent use.
 func (g *Graph[N, W]) SetValidator(v SchemaValidator) { g.validator.store(v) }
 
+// ValidateProperty runs the installed [SchemaValidator] against one property
+// value WITHOUT writing anything, returning nil when no validator is installed.
+//
+// It exists so a caller that BUFFERS a write can reject it before the write
+// becomes durable. The graph's own setters validate at the mutation point,
+// which is the right place for them — but a write-ahead log is appended and
+// fsynced BEFORE it is applied, so on that path the mutation point is already
+// too late: the refused value is durable by the time the validator sees it, and
+// a replay that installs no validator materialises it (rmp #2602).
+//
+// [store/txn.Tx] calls this at buffer time for exactly that reason, which also
+// makes it agree with the Cypher write path, where walMutatorAdapter has always
+// validated before buffering its WAL op.
+//
+// ValidateProperty is safe for concurrent use.
+func (g *Graph[N, W]) ValidateProperty(propKey string, value PropertyValue) error {
+	v := g.validator.load()
+	if v == nil {
+		return nil
+	}
+	return v.Validate(propKey, value)
+}
+
 // ValidateNode enforces the installed validator's whole-node invariants
 // against the current, complete label and property set of the node interned
 // under n. It is the node-finalisation hook: a caller building a node (one

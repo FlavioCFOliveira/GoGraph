@@ -17,6 +17,30 @@ import "sync/atomic"
 // enforced separately by [NodeValidator]/[Graph.ValidateNode] at the
 // node-finalisation boundary.
 //
+// # Where the validator runs, and why it matters for durability
+//
+// The graph's own setters call Validate at the mutation point. A WRITE-AHEAD
+// path cannot rely on that alone, because it appends and fsyncs BEFORE it
+// applies: by the time the mutation point is reached the value is already
+// durable, and a replay installs no validator, so a refused value would be
+// materialised by recovery.
+//
+// Both write paths therefore validate BEFORE they buffer:
+//
+//   - the Cypher engine, in walMutatorAdapter.SetNodeProperty, which has always
+//     done so;
+//   - store/txn, in Tx.SetNodeProperty and its siblings, since rmp #2602 — see
+//     [Graph.ValidateProperty], which exists for exactly that call.
+//
+// So an installed validator IS a durability gate on both paths: a value it
+// refuses never reaches the write-ahead log. This is what the ACID Consistency
+// contract requires, since it names label/property typing among the invariants a
+// committed transaction must leave satisfied.
+//
+// Recovery still installs no validator and deliberately does not consult one; it
+// does not need to, because the log cannot contain a refused value. A log
+// written by an older build, before rmp #2602, is outside that guarantee.
+//
 // Implementations must be safe for concurrent use.
 type SchemaValidator interface {
 	Validate(propertyName string, value PropertyValue) error

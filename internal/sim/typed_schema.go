@@ -115,29 +115,36 @@ package sim
 //     across a crash, on both channels: the accepted value came back and the
 //     refused one was absent — asserted as a DIFFERENCE, because "absent" alone
 //     is satisfied by a recovery that replayed nothing.
-//   - The pure store path validates AFTER the fsync. `txn.Tx.Commit`
-//     (store/txn/txn.go) appends and fsyncs every buffered op and only then
-//     applies them through the WriteView, so a rejection there returns
-//     [txn.ErrCommittedNotApplied] with the frame ALREADY DURABLE.
+//   - The pure store path validates at BUFFER time, since rmp #2602.
+//     `txn.Tx.SetNodeProperty` (store/txn/txn.go) rejects a value the schema
+//     refuses before the op reaches the buffer, so the frame is never appended
+//     and never fsynced. Until 2026-08-25 it did NOT: `txn.Tx.Commit` appended
+//     and fsynced every buffered op and only then applied them through the
+//     WriteView, so a rejection there returned [txn.ErrCommittedNotApplied] with
+//     the frame ALREADY DURABLE.
 //
-// MEASURED, and this is the finding this scenario surfaced: on that second path
-// the rejected value is RESURRECTED by recovery. A commit of
-// AddNode + SetNodeProperty("age", StringValue) under a schema declaring `age`
-// as PropInt64 returned ErrCommittedNotApplied wrapping
+// THIS SCENARIO SURFACED THE DEFECT, AND THEN ITS FIX. As measured on
+// 2026-08-24, the rejected value was RESURRECTED by recovery on that second
+// path: a commit of AddNode + SetNodeProperty("age", StringValue) under a schema
+// declaring `age` as PropInt64 returned ErrCommittedNotApplied wrapping
 // [schema.ErrTypeMismatch], left the LIVE graph without the property — and after
 // a host crash and a reopen, the recovered graph carried `age` as a STRING (four
-// WAL ops replayed, the two transactions' two ops each); the replay path
-// installs no validator and, by
-// [lpg.Graph.SetEdgePropertyByHandleID]'s stated design, deliberately does not
-// consult one. So the durable image can hold a value the live validator refused,
-// and `ErrCommittedNotApplied`'s own promise that "recovery will reconcile" is
-// what materialises it.
+// WAL ops replayed, the two transactions' two ops each). The replay path
+// installs no validator and, by [lpg.Graph.SetEdgePropertyByHandleID]'s stated
+// design, deliberately does not consult one, so the durable image held a value
+// the live validator had refused and `ErrCommittedNotApplied`'s own promise that
+// "recovery will reconcile" was what materialised it.
 //
-// [typedSchemaPureStoreArm] pins that behaviour as it stands, in both
-// directions: the accepted value must survive (or recovery did nothing at all
-// and the arm would be vacuous) and the rejected value must be present. It is a
-// PIN on measured behaviour, not an endorsement: if the ordering is ever fixed
-// the arm fails loudly and says so in its message, which is the point.
+// rmp #2602 closed it by validating at BUFFER time, so a refused op never
+// reaches the log at all. [typedSchemaPureStoreArm] therefore now asserts the
+// contract instead of pinning its breach: the accepted value must survive (or
+// recovery did nothing and the arm is vacuous) and the refused value must be
+// ABSENT.
+//
+// The arm was a PIN on measured behaviour rather than an endorsement, and its
+// message named exactly what to update when the ordering was fixed. That is how
+// the change was caught and propagated here — a pinned measurement tells the
+// next person the behaviour moved, where prose would have gone quietly stale.
 //
 // # The reopened graph carries no validator — asserted, not documented away
 //
@@ -1080,15 +1087,18 @@ type TypedSchemaEvidence struct {
 	Checkpoints   int
 	ForcedCrashes int
 	// The pure-store arm's measurements (the finding in the file header):
-	// PureStoreArms is how many times it ran, PureStoreCommitNotApplied how often
-	// Commit reported [txn.ErrCommittedNotApplied] wrapping the schema sentinel,
+	// PureStoreArms is how many times it ran, PureStoreRefusedAtBuffer how often
+	// txn.Tx.SetNodeProperty refused the value before buffering it — which is
+	// where the guard has lived since rmp #2602, and what replaced counting
+	// [txn.ErrCommittedNotApplied] from a Commit that no longer has anything left
+	// to reject —
 	// PureStoreLiveAbsent how often the LIVE graph was left without the rejected
 	// value, PureStoreResurrected how often recovery brought it back, and
 	// PureStoreAcceptedSurvived how often the ACCEPTED sibling value survived (the
 	// non-vacuity half: without it, "absent" could just mean recovery did
 	// nothing).
 	PureStoreArms             int
-	PureStoreCommitNotApplied int
+	PureStoreRefusedAtBuffer  int
 	PureStoreLiveAbsent       int
 	PureStoreResurrected      int
 	PureStoreAcceptedSurvived int
@@ -1120,8 +1130,8 @@ func (e *TypedSchemaEvidence) String() string {
 	fmt.Fprintf(&b, " pin(noValidator=%d nodeClean=%d rejected=%d detected=%d repaired=%d)",
 		e.PinNoValidatorAccepted, e.PinNoValidatorNodeClean, e.PinReinstalledRejected,
 		e.PinValidateNodeDetected, e.PinValidateNodeRepaired)
-	fmt.Fprintf(&b, " pureStore(arms=%d notApplied=%d liveAbsent=%d RESURRECTED=%d acceptedSurvived=%d)",
-		e.PureStoreArms, e.PureStoreCommitNotApplied, e.PureStoreLiveAbsent,
+	fmt.Fprintf(&b, " pureStore(arms=%d refusedAtBuffer=%d liveAbsent=%d resurrected=%d acceptedSurvived=%d)",
+		e.PureStoreArms, e.PureStoreRefusedAtBuffer, e.PureStoreLiveAbsent,
 		e.PureStoreResurrected, e.PureStoreAcceptedSurvived)
 	fmt.Fprintf(&b, " digest=%#016x", e.Digest)
 	return b.String()
@@ -1284,13 +1294,14 @@ func (e *TypedSchemaEvidence) Finish(tick int64) []Violation {
 			"planted value (detected=%d repaired=%d)", e.PinValidateNodeDetected, e.PinValidateNodeRepaired)
 	}
 	if e.PureStoreArms == 0 {
-		add("pure-store", "the pure store/txn arm never ran, so the fsync-BEFORE-validate ordering — the "+
-			"one path on which a rejected value becomes durable — was not adjudicated")
+		add("pure-store", "the pure store/txn arm never ran, so the one path that could make a "+
+			"schema-refused value durable — store/txn, which the Cypher adapter cannot reach — was "+
+			"not adjudicated")
 	} else {
-		if e.PureStoreCommitNotApplied == 0 {
-			add("pure-store-not-applied", "the pure store/txn arm never saw txn.ErrCommittedNotApplied, "+
-				"so its precondition (a validator rejection during the post-fsync apply) was never "+
-				"constructed")
+		if e.PureStoreRefusedAtBuffer == 0 {
+			add("pure-store-refused", "the pure store/txn arm never saw txn.Tx.SetNodeProperty refuse a "+
+				"value, so its precondition — a write the installed schema rejects — was never "+
+				"constructed and nothing the arm says about the durable image is attributable")
 		}
 		if e.PureStoreAcceptedSurvived == 0 {
 			add("pure-store-accepted", "the pure store/txn arm never confirmed its ACCEPTED sibling value "+
@@ -2248,11 +2259,15 @@ type tsPureStoreObservation struct {
 	rejectErr string
 	// stored renders what the RECOVERED graph holds for the refused key.
 	stored string
-	// notApplied and typeMismatch are the two halves of the refused commit's
-	// error classification: [txn.ErrCommittedNotApplied] wrapping
-	// [schema.ErrTypeMismatch].
-	notApplied   bool
+	// refusedAtBuffer is whether txn.Tx.SetNodeProperty itself rejected the
+	// value, which is where the guard has lived since rmp #2602.
+	refusedAtBuffer bool
+	// typeMismatch is whether that refusal carried [schema.ErrTypeMismatch].
 	typeMismatch bool
+	// notApplied records whether the subsequent Commit ALSO reported
+	// [txn.ErrCommittedNotApplied]. It must now be FALSE: the refused op never
+	// reached the buffer, so the commit has nothing to reject at apply time.
+	notApplied bool
 	// liveAbsent is whether the LIVE graph was left without the refused value.
 	liveAbsent bool
 	// resurrected is whether the RECOVERED graph carries it, and resurrectedKind
@@ -2269,10 +2284,11 @@ type tsPureStoreObservation struct {
 
 // String renders the observation for a test's log line.
 func (o tsPureStoreObservation) String() string {
-	return fmt.Sprintf("acceptErr=%q rejectErr=%q notApplied=%t typeMismatch=%t liveAbsent=%t "+
-		"acceptedSurvived=%t resurrected=%t storedAfterRecovery=%s walOps=%d",
-		o.acceptErr, o.rejectErr, o.notApplied, o.typeMismatch, o.liveAbsent,
-		o.acceptedSurvived, o.resurrected, o.stored, o.walOps)
+	return fmt.Sprintf("acceptErr=%q rejectErr=%q refusedAtBuffer=%t typeMismatch=%t "+
+		"notApplied=%t liveAbsent=%t acceptedSurvived=%t resurrected=%t "+
+		"storedAfterRecovery=%s walOps=%d",
+		o.acceptErr, o.rejectErr, o.refusedAtBuffer, o.typeMismatch, o.notApplied,
+		o.liveAbsent, o.acceptedSurvived, o.resurrected, o.stored, o.walOps)
 }
 
 // typedSchemaPureStoreArm drives the store/txn path directly — no Cypher engine
@@ -2322,14 +2338,24 @@ func typedSchemaPureStoreArm(seed *Seed) (tsPureStoreObservation, error) {
 		st.Crash()
 		return obs, fmt.Errorf("sim: typed-schema pure-store AddNode: %w", err)
 	}
-	if err := rejectTx.SetNodeProperty(badName, tsEngineKeyAge, lpg.StringValue(poison)); err != nil {
-		st.Crash()
-		return obs, fmt.Errorf("sim: typed-schema pure-store buffer refused: %w", err)
+	// SINCE rmp #2602 THE REFUSAL LANDS HERE, at buffer time, not at Commit.
+	// txn.Tx.SetNodeProperty now validates before the op reaches t.ops, so the
+	// frame is never appended and never fsynced. Before that fix this call
+	// returned nil, the op was buffered, and Commit made it durable BEFORE the
+	// apply-time validator saw it — which is what the resurrection clause below
+	// used to pin.
+	bufErr := rejectTx.SetNodeProperty(badName, tsEngineKeyAge, lpg.StringValue(poison))
+	obs.rejectErr = fmt.Sprint(bufErr)
+	obs.refusedAtBuffer = bufErr != nil
+	obs.typeMismatch = errors.Is(bufErr, schema.ErrTypeMismatch)
+	// The transaction is still valid and its AddNode still commits: the refusal
+	// rejected one OP, not the batch. Committing it is what gives the recovery
+	// half of this arm something to replay.
+	commitErr := rejectTx.Commit()
+	obs.notApplied = errors.Is(commitErr, txn.ErrCommittedNotApplied)
+	if commitErr != nil && !obs.notApplied {
+		obs.rejectErr += " | commit: " + fmt.Sprint(commitErr)
 	}
-	rejectErr := rejectTx.Commit()
-	obs.rejectErr = fmt.Sprint(rejectErr)
-	obs.notApplied = errors.Is(rejectErr, txn.ErrCommittedNotApplied)
-	obs.typeMismatch = errors.Is(rejectErr, schema.ErrTypeMismatch)
 	_, liveHad := st.graph.GetNodeProperty(badName, tsEngineKeyAge)
 	obs.liveAbsent = !liveHad
 
@@ -2358,27 +2384,40 @@ func typedSchemaPureStoreArm(seed *Seed) (tsPureStoreObservation, error) {
 
 // checkTypedSchemaPureStore adjudicates the pure-store observation.
 //
-// It PINS the behaviour measured on 2026-08-24 rather than asserting the
-// behaviour one might prefer: `txn.Tx.Commit` fsyncs every buffered op and only
-// then applies them, so a validator rejection at apply time leaves the frame
-// durable, and the reopen — which installs no validator — materialises the very
-// value the live validator refused.
+// It ASSERTS the contract, and it did not always. Until 2026-08-25 it PINNED the
+// opposite measurement: `txn.Tx.Commit` fsynced every buffered op and only then
+// applied them, so a validator rejection at apply time left the frame durable
+// and the reopen — which installs no validator — materialised the very value the
+// live validator had refused.
 //
-// Both directions are clauses. If the ordering is ever changed so a rejected
-// value cannot become durable, the resurrection clause fails and its message
-// says the pin, this file's header and docs/dst-feature-coverage.md must be
-// updated — which is the whole point of pinning a measurement instead of
-// documenting it.
+// rmp #2602 fixed that ordering: `txn.Tx.SetNodeProperty` now validates BEFORE
+// buffering, so a refused op is never appended and never fsynced. The clause is
+// therefore inverted — resurrection is now an ACID_CONSISTENCY violation, since
+// the contract names label/property typing among the invariants a committed
+// transaction must leave satisfied.
+//
+// The pin's own message had said what to do when the ordering was fixed: update
+// it, this file's header and docs/dst-feature-coverage.md, and do not delete the
+// clause. That is what happened, which is the whole point of pinning a
+// measurement rather than documenting it — a measured pin tells the next person
+// that the behaviour changed, where prose would simply have gone stale.
 func checkTypedSchemaPureStore(tick int64, obs tsPureStoreObservation) []Violation {
 	var vs []Violation
-	if !obs.notApplied || !obs.typeMismatch {
+	if !obs.refusedAtBuffer || !obs.typeMismatch {
 		vs = append(vs, tsViolation(ViolationVacuousRun, tick, "pure-store:precondition",
-			"the refused commit reported %q; want an error satisfying BOTH "+
-				"errors.Is(txn.ErrCommittedNotApplied)=%t and errors.Is(schema.ErrTypeMismatch)=%t. "+
-				"Without it the arm's precondition — a validator rejection during the POST-FSYNC apply "+
-				"— was never constructed",
-			obs.rejectErr, obs.notApplied, obs.typeMismatch))
+			"txn.Tx.SetNodeProperty reported %q; want a refusal satisfying "+
+				"errors.Is(schema.ErrTypeMismatch) (refusedAtBuffer=%t typeMismatch=%t). Without it "+
+				"the arm's precondition — a value the installed schema refuses — was never "+
+				"constructed, and nothing below is attributable",
+			obs.rejectErr, obs.refusedAtBuffer, obs.typeMismatch))
 		return vs
+	}
+	if obs.notApplied {
+		vs = append(vs, tsViolation(ViolationOracleDeviation, tick, "pure-store:refused-twice",
+			"the Commit ALSO reported txn.ErrCommittedNotApplied (%q). Since rmp #2602 the refusal "+
+				"happens at buffer time, so the op never reaches t.ops and the commit has nothing "+
+				"left to reject: a second rejection means an op the buffer refused was appended "+
+				"anyway", obs.rejectErr))
 	}
 	if obs.acceptErr != "<nil>" {
 		vs = append(vs, tsViolation(ViolationOracleDeviation, tick, "pure-store:accepted-commit",
@@ -2396,20 +2435,19 @@ func checkTypedSchemaPureStore(tick int64, obs tsPureStoreObservation) []Violati
 				"from a recovery that replayed nothing", obs.walOps))
 		return vs
 	}
-	if !obs.resurrected {
-		vs = append(vs, tsViolation(ViolationOracleDeviation, tick, "pure-store:resurrection-pin",
-			"the refused value is ABSENT after recovery. That is BETTER than the behaviour this clause "+
-				"pins (MEASURED 2026-08-24: txn.Tx.Commit fsyncs before it applies, so the refused frame "+
-				"is durable and the validator-less replay materialises it, stored=%s walOps=%d). If the "+
-				"ordering was deliberately fixed, update this pin, the typed_schema.go header and "+
-				"docs/dst-feature-coverage.md; do not delete the clause", obs.stored, obs.walOps))
-		return vs
-	}
-	if obs.resurrectedKind != lpg.PropString {
-		vs = append(vs, tsViolation(ViolationOracleDeviation, tick, "pure-store:resurrection-kind",
-			"the refused value came back as %s, not the STRING that was committed (%s): the pin measures "+
-				"a different value than the one it thinks it does",
-			tsKindName(obs.resurrectedKind), obs.stored))
+	// INVERTED BY rmp #2602, which fixed the ordering this clause used to pin.
+	// It is a VERDICT now, not a pin: a value the schema refused must not come
+	// back from a crash, because the ACID contract names label/property typing
+	// among the invariants a committed transaction leaves satisfied. Until
+	// 2026-08-25 this clause asserted the opposite and said, in its own message,
+	// what to do when the ordering was fixed — which is what happened.
+	if obs.resurrected {
+		vs = append(vs, tsViolation(ViolationACIDConsistency, tick, "pure-store:resurrection",
+			"the refused value came back from the crash as %s (stored=%s, walOps=%d). Since rmp "+
+				"#2602 txn.Tx.SetNodeProperty refuses before the op is buffered, so the frame is "+
+				"never appended and a validator-less replay has nothing to materialise; a value "+
+				"here means a refused op reached the WAL anyway",
+			tsKindName(obs.resurrectedKind), obs.stored, obs.walOps))
 	}
 	return vs
 }
@@ -2742,8 +2780,8 @@ func typedSchemaLoop(
 		return nil, err
 	}
 	probes.ev.PureStoreArms++
-	if obs.notApplied {
-		probes.ev.PureStoreCommitNotApplied++
+	if obs.refusedAtBuffer {
+		probes.ev.PureStoreRefusedAtBuffer++
 	}
 	if obs.liveAbsent {
 		probes.ev.PureStoreLiveAbsent++
