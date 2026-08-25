@@ -6,7 +6,7 @@ strict supersets of the shallower ones.
 
 | Layer | Budget | Selector | Default? |
 |---|---|---|---|
-| `short` | < 60 s per package | none (default) | yes — the default local run |
+| `short` | < 60 s per package (**advisory** — see below) | none (default) | yes — the default local run |
 | `soak` | minutes | `-tags=soak` or `SOAK_FULL=1` | no |
 | `nightly` | hours | `-tags=nightly` or `GOGRAPH_NIGHTLY=1` | no |
 
@@ -38,44 +38,67 @@ real driver connection per check. It is excluded from the default run so
 each remaining check fails are recorded in the file's own header, which
 is the authoritative list.
 
-### Enforcing the short-layer budget
+### The short-layer budget is ADVISORY, and nothing enforces it (rmp #2566)
 
-The `< 60 s per package` budget is enforced, not merely documented. The
-`make test-short-timings` target runs the short layer once under `-race`
-with `-json` and pipes it through `scripts/pkg_time_budget.sh`, which parses
-per-package wall-clock and:
+**Read this before quoting the `< 60 s per package` budget as a gate. It is not
+one.** Until rmp #2566 this section claimed it was "enforced, not merely
+documented", together with a 240 s hard ceiling and a 420 s `internal/sim`
+override "set in the `build + test + race` job". All three were untrue at HEAD,
+and each was verified individually:
 
-- emits a `::warning::` for any package over `SOFT_BUDGET` (60 s) so creep
-  is visible in the job summary before it becomes a breach, and
-- fails the job for any package over `HARD_BUDGET` (240 s, i.e. 4× the
-  budget) — a genuine runaway, not a package merely near the line on a slow
-  runner.
+- **`make ci` does not invoke the gate.** It is
+  `tidy fmt vet build test-short test-timing lint cover-gate`.
+  `test-short-timings`, where the gate lives, is absent. (`test-timing` is a
+  different target — the serial wall-clock phase from rmp #2517 — and is not this
+  gate.)
+- **`HARD_BUDGET` defaults to `0`**, which `scripts/pkg_time_budget.sh` documents
+  as *disabled*: its exit `0` means "no package exceeds HARD_BUDGET (**or
+  HARD_BUDGET disabled**)". No target, script or workflow sets it.
+- **`PKG_HARD_BUDGET_OVERRIDES` is set nowhere.** It appears only in this file and
+  in the script's own header and reader. The `internal/sim` override did not exist,
+  and neither does the "build + test + race job" it was attributed to — the only
+  workflow is `release.yml`.
 
-The measurement is taken under `-race`, which inflates wall-clock several-fold
-over a plain run; the 240 s hard ceiling (4× the 60 s budget) is sized to
-absorb that overhead and still catch a runaway.
+What is true today: `make test-short-timings` exists, runs the short layer with
+`-json` through `scripts/pkg_time_budget.sh`, and **warns** on any package over
+`SOFT_BUDGET` (60 s). It fails nothing unless the caller sets `HARD_BUDGET`
+explicitly. Run it deliberately when you want the numbers; nothing runs it for you.
 
-Run it locally with `make test-short-timings` (override `SOFT_BUDGET` /
-`HARD_BUDGET` to tighten the check). When a package approaches the budget,
-split it or move its slow cases to the `soak` layer rather than relaxing
-the threshold.
+#### What must happen before it can be enforced
 
-#### Documented per-package hard-ceiling overrides
+Turning the gate on today would make `make ci` red, for a reason this section does
+not own. `internal/sim` measures far above the 420 s the old text claimed for it:
 
-A single package may carry a higher hard ceiling than the global 240 s when
-it is legitimately heavy under `-race` and reducing it further would cost
-required short-layer coverage. This is a documented, justified accommodation —
-never a blanket relaxation — mirroring `cover_gate.sh`'s
-`COVER_PKG_FLOOR_EXEMPT`. Overrides are supplied to `pkg_time_budget.sh` via
-the `PKG_HARD_BUDGET_OVERRIDES` environment variable, a whitespace- or
-comma-separated list of `path-substring=seconds` entries; a package whose
-import path contains a key uses that key's ceiling instead of `HARD_BUDGET`.
-
-The only current override, set in the `build + test + race` job:
-
-| Package | Ceiling | Justification |
+| Date | Measurement | Host load average |
 |---|---|---|
-| `internal/sim` | 420 s | The deterministic-simulation (DST) integration harness. Its ACID/DST scenario battery is serial-dominated, so under `-race` it legitimately runs longer than a unit-test package. Its heaviest cases already run soak-only (the 9000-node index-diversity scenario and the seed-varied search scenarios); the remaining battery must still run under `-race` on **every** PR to preserve the ACID/DST guarantee, which the uniform 240 s ceiling would force out of the short layer. 420 s accommodates that cost with margin while staying well below the pre-reduction runtime (so a genuine regression still trips the gate) and clear of `go test`'s 10-minute timeout. |
+| 2026-08-25 | `ok internal/sim 532.470s` (`go test -race -count=1 ./internal/sim/`) | **2.01 before, 4.89 after** |
+| 2026-08-25 | `ok internal/sim 528.618s` (same command, immediately after) | **4.89 before, 4.73 after** |
+| 2026-08-25 | `ok internal/sim 536.067s` (same command, earlier) | quiet, load average not recorded |
+| 2026-08-25 | `ok internal/sim 557.441s` inside the parallel suite | full `make ci`, ~124 packages concurrent |
+
+The three standalone figures agree within **1.4%** (528.6–536.1 s), so the number
+is stable and not an artefact of one noisy run. Every one is **~1.27× the 420 s**
+the old text claimed as this package's ceiling, and **~2.2× the global 240 s**.
+
+Each row records the load average it was taken at, because a figure labelled
+"quiet" without one is a guess — the third row is included with that caveat
+attached rather than silently.
+
+Bringing it under a ceiling is tracked as **rmp #2577** and **#2599**. Only once
+that lands can a ceiling be set and the gate turned on and pass.
+
+There is also a cost trap to avoid when it is turned on: `test-short-timings`
+re-runs the **entire** short layer to collect its `-json`, so adding it to `ci`
+would roughly double the suite. The right wiring is to have `test-short` itself
+emit `-json` through the budget script — one run, both outcomes.
+
+The `PKG_HARD_BUDGET_OVERRIDES` mechanism is real and works; it is simply unused.
+Overrides are `path-substring=seconds` pairs, whitespace- or comma-separated, and
+a package whose import path contains a key uses that key's ceiling instead of
+`HARD_BUDGET` — mirroring `cover_gate.sh`'s `COVER_PKG_FLOOR_EXEMPT`.
+
+When a package approaches the budget, split it or move its slow cases to the
+`soak` layer rather than relaxing the threshold.
 
 ## How a test selects its layer
 
