@@ -125,12 +125,13 @@ test-short: ## [layer: short]   local default — race detector, no build tags (
 TIMING_PKGS = \
 	./bench/cyclicjoin \
 	./bench/mvccwrite \
+	./bolt/server \
 	./cypher
 
 # TIMING_RUN selects only the guarded gates. Running the whole package serially
 # would reintroduce exactly the co-tenancy the phase exists to remove — the
 # gate's neighbours are as capable of loading the machine as another package is.
-TIMING_RUN ?= TestCyclicJoin_FittedExponents|TestWriteScalingGate|TestWALWriteScalingGate|TestWriteConcurrencyGate|TestWriteScalingInstrument_SeesConcurrency|TestWriteScalingInstrument_SeesSerialisation|TestDeleteDoesNotDegradeAcrossCycles|TestDetachDeleteDoesNotDegradeAcrossCycles|TestDeleteCycleGateDetectsDegradation
+TIMING_RUN ?= TestE2E_ConcurrentAutocommitReadsRunInParallel|TestCyclicJoin_FittedExponents|TestWriteScalingGate|TestWALWriteScalingGate|TestWriteConcurrencyGate|TestWriteScalingInstrument_SeesConcurrency|TestWriteScalingInstrument_SeesSerialisation|TestDeleteDoesNotDegradeAcrossCycles|TestDetachDeleteDoesNotDegradeAcrossCycles|TestDeleteCycleGateDetectsDegradation
 
 TIMING_TIMEOUT ?= 20m
 
