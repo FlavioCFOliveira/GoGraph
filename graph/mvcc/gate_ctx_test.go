@@ -169,17 +169,28 @@ func TestGateCtx_ReturnsWithinItsBudget(t *testing.T) {
 	// thinnest deadline margin in the repository and it had no defensible value,
 	// because it was squeezed from both sides:
 	//
-	//	worst observed, no deliberate load, 3 runs   5.81 / 6.03 / 5.86 ms
-	//	worst observed, 300 spinners (30x cores)     15.69 / 38.66 / 20.06 /
-	//	                                             30.04 / 40.07 / 35.70 ms
+	// Every row below records the host load average it was taken at, because a
+	// figure labelled "idle" without one is a guess. An earlier revision of this
+	// comment did exactly that, and the numbers were taken while the host carried
+	// unrelated builds at load average 88.
 	//
-	// NEITHER row was taken on a genuinely quiet host: the machine carried
-	// unrelated concurrent builds throughout (an unrelated Rust build alone at
-	// ~170% CPU, host load average reaching 88). So the first row is an UPPER
-	// bound on the quiet figure, not the quiet figure, and the second overstates
-	// what 300 spinners alone would cost. Both errors point the same way — the
-	// noise floor is at worst what is written here — so the conclusion below is
-	// conservative. Do not quote either row as a clean-machine baseline.
+	//	quiet, loadavg 2.5-2.8, 6 runs           5.03 / 5.93 / 5.74 /
+	//	                                         5.89 / 5.60 / 5.92 ms
+	//	300 spinners (30x cores) on an
+	//	otherwise quiet host, loadavg 26.8,      10.04 / 22.06 / 25.73 /
+	//	6 runs                                   25.65 / 33.08 / 45.63 ms
+	//
+	// So the saturated noise floor is 45.63 ms, and the 105 ms ceiling this test
+	// used to assert had 2.3x of headroom — thinner still than the 2.6x the first
+	// (confounded) measurement suggested, and far from the 30x its safest siblings
+	// keep. The task that filed this recorded 10.02 ms, which the clean run shows
+	// is the BEST of six samples rather than the worst.
+	//
+	// One prediction in the earlier revision was WRONG and is corrected here: it
+	// claimed the confounded saturated row "overstates what 300 spinners alone
+	// would cost". It understated it. The max of six samples of a tail statistic is
+	// itself noisy, and the two distributions are indistinguishable at this sample
+	// size — which is a further argument against gating on any of them.
 	//
 	// So the noise floor is 40 ms, leaving the 105 ms ceiling 2.6x of headroom —
 	// not the ~10x the task reported, which was measured at 10.02 ms and is four
@@ -197,6 +208,10 @@ func TestGateCtx_ReturnsWithinItsBudget(t *testing.T) {
 	// same run. The duration is still LOGGED, so the number stays available as a
 	// diagnostic, but it is not asserted, because the measurements above show no
 	// defensible value for it exists between 40 ms and 500 ms.
+	//
+	// Headroom on the instrument actually used below is the tenure itself, 500 ms
+	// against a 45.63 ms saturated worst — 11x, and a floor rather than a tuned
+	// constant, because the holder's release is a real event in the same run.
 	//
 	// TestGateCtx_BudgetGateDetectsBlocking below is the power control.
 	// ONE holder and CONCURRENT callers, rather than a sequential loop: the

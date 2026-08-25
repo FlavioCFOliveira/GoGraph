@@ -145,15 +145,20 @@ func TestHub_AddEdge_GateDetectsQuadratic(t *testing.T) {
 // charges real CPU through scheduler, cache and TLB pressure. CPU time is not
 // load-invariant, so it is not used here.
 //
-// Allocation volume IS invariant, and it is also the FAITHFUL instrument: the
-// defect this gate exists to catch (task #1406) is exact-fit reallocation, whose
-// signature is copy volume. Measured on this fixture, three consecutive reps:
+// Allocation volume IS invariant, and that was verified across a 34x swing in
+// host load rather than assumed. It is also the FAITHFUL instrument: the defect
+// this gate exists to catch (task #1406) is exact-fit reallocation, whose
+// signature is copy volume.
 //
-//	bytes  1k=551184  10k=6158352 / 6147152 / 6147824   ratio 11.17 / 11.15 / 11.15
-//	mallocs 1k=7864   10k=65672 / 65655 / 65661         ratio 8.35 / 8.35 / 8.35
+//	host load average ~88 (unrelated builds)   ratio 11.17 / 11.15 / 11.15
+//	host load average ~2.6 (quiet)             ratio 11.10 / 11.10 / 10.93
+//	the quadratic control, at loadavg ~88      ratio 100.14 / 100.15
+//	the quadratic control, at loadavg ~2.6     ratio 100.27 / 100.26 / 100.26
 //
-// A spread of 0.2% on the bytes ratio, against a wall-clock instrument that
-// missed by 2× on half its runs. [hubRatioLimit] is UNCHANGED at 40: it already
+// The real path moved 0.5% and the quadratic control 0.1% across that swing,
+// against a wall-clock instrument that missed by 2x on half its runs. Every figure
+// records the load average it was taken at, because a number labelled "idle"
+// without one is a guess. [hubRatioLimit] is UNCHANGED at 40: it already
 // sat between the geometric path's ~11× and an exact-fit path's ~100×, so the
 // instrument changed and the threshold did not.
 //
