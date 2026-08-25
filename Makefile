@@ -434,7 +434,19 @@ generate-cypher-parser: ## Regenerate cypher/parser/gen/ from ANTLR grammar (req
 	$(GO) vet ./$(CYPHER_GEN_DIR)/...
 
 .PHONY: clean
-clean: ## Remove build artefacts
+# The second rm reclaims per-invocation coverage temporaries left by a run that
+# was cancelled (rmp #2549). scripts/cover_gate.sh now reclaims its own, but a run
+# killed with SIGKILL cannot, and files stranded before that fix exist in working
+# trees today: one measured 248,840,121 bytes and was seven days old, and clearing
+# it took this tree from 2.4 GB to 791 MB. .gitignore hides them from
+# `git status`, so `make clean` is the only thing that surfaces them.
+#
+# The patterns name the TEMPORARIES only. cover.out.failed.*.log is deliberately
+# NOT matched: it is preserved failure evidence (rmp #2347), and a re-run chasing
+# a rare failure must not destroy the record of it.
+clean: ## Remove build artefacts, including coverage temporaries stranded by a cancelled gate
 	rm -f $(COVER_PROFILE) coverage.html cover.out cover.lib.out
+	rm -f cover.out.tmp.* cover.out.testlog.tmp.* cover.lib.out.tmp.* \
+	      cover.out.pub.* cover.lib.out.pub.*
 	rm -rf bin build dist
 	$(GO) clean -testcache
