@@ -143,7 +143,7 @@ func TestMVCCSubstrate_TooSmallRunIsRejectedAsVacuous(t *testing.T) {
 	// It must be the NON-VACUITY gate that fired, not the adjudication: a small
 	// run is uninformative, not faulty.
 	for _, v := range res.Violations {
-		if v.Kind != ViolationOracleDeviation {
+		if v.Kind != ViolationVacuousRun {
 			t.Fatalf("an undersized run produced a substantive violation, so the oracle reports a defect where"+
 				" there is none: %+v", v)
 		}
@@ -421,7 +421,7 @@ func TestMVCCSubstrateNonVacuity_ClausesFire(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := healthy()
 			tc.mutate(e)
-			assertFired(t, checkMVCCSubstrateNonVacuity(1, e), tc.wantSub, ViolationOracleDeviation)
+			assertFired(t, checkMVCCSubstrateNonVacuity(1, e), tc.wantSub, ViolationVacuousRun)
 		})
 	}
 }

@@ -1360,7 +1360,7 @@ func CheckGraphIOSurface(r *GraphIOSurfaceResult) []Violation {
 func CheckGraphIOSurfaceShape(r *GraphIOSurfaceResult) []Violation {
 	var v []Violation
 	add := func(op, msg string) {
-		v = append(v, Violation{Kind: ViolationOracleDeviation, Op: op, Message: msg})
+		v = append(v, Violation{Kind: ViolationVacuousRun, Op: op, Message: msg})
 	}
 
 	// The DOT arm adjudicates quoting, weight labels and bare node statements;

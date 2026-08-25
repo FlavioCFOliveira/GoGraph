@@ -372,7 +372,7 @@ func (k *IndexSeekResults) Finish(tick int64) []Violation {
 		return nil
 	}
 	return []Violation{{
-		Kind: ViolationOracleDeviation,
+		Kind: ViolationVacuousRun,
 		Tick: tick,
 		Op:   seekResultsOp,
 		Message: "vacuous run: no probe arm ever returned a row, so every seek-result " +

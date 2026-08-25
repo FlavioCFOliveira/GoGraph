@@ -286,13 +286,13 @@ func (k *StatsRegime) CheckRecovered(tick int64, engine StatsEngine) []Violation
 func (k *StatsRegime) Finish(tick int64) []Violation {
 	c := &InvariantChecker{}
 	if k.refreshes == 0 || k.maxTracked <= 0 {
-		c.add(ViolationOracleDeviation, tick, statsRegimeOp,
+		c.add(ViolationVacuousRun, tick, statsRegimeOp,
 			fmt.Sprintf("vacuous run: no completed rebuild with a non-zero tracked-pairs "+
 				"observable was ever seen (rebuilds=%d, max tracked pairs=%d), so the "+
 				"statistics path never engaged", k.refreshes, k.maxTracked))
 	}
 	if k.refusals == 0 {
-		c.add(ViolationOracleDeviation, tick, statsRegimeOp,
+		c.add(ViolationVacuousRun, tick, statsRegimeOp,
 			"vacuous run: the rate-limit refusal was never observed, so the throttle "+
 				"contract went unexercised")
 	}

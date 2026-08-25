@@ -618,7 +618,7 @@ func runSnapshotCorruptionArm(
 		// Undo before surfacing, so the fixture stays usable for the report.
 		_ = fx.disk.CorruptRange(path, arm.offset, 1)
 		return arm, []Violation{{
-			Kind: ViolationOracleDeviation, Op: "<snapshot-corruption-nonvacuity>",
+			Kind: ViolationVacuousRun, Op: "<snapshot-corruption-nonvacuity>",
 			Message: fmt.Sprintf("flipping byte %d of %s changed nothing on disk — every assertion below it would be vacuous",
 				arm.offset, comp.file),
 		}}, nil
@@ -1070,7 +1070,7 @@ func runSnapshotIndexToleranceArm(
 	// reopen was offered must have been reported unreadable.
 	if corrupt.unreadable != res.flipped {
 		return res, []Violation{{
-			Kind: ViolationOracleDeviation, Op: "<snapshot-index-tolerance:corrupt>",
+			Kind: ViolationVacuousRun, Op: "<snapshot-index-tolerance:corrupt>",
 			Message: fmt.Sprintf("%d payloads were flipped but recovery reported only %d unreadable:"+
 				" the rebuilds cannot all be attributed to the corruption", res.flipped, corrupt.unreadable),
 		}}, nil
@@ -1165,7 +1165,7 @@ func checkSnapshotIndexPopulation(
 	}
 	if r.registered == 0 {
 		return []Violation{{
-			Kind: ViolationOracleDeviation, Op: op,
+			Kind: ViolationVacuousRun, Op: op,
 			Message: "the reopened engine registered NO index, so a population assertion of either side" +
 				" is vacuous: there was nothing to populate",
 		}}

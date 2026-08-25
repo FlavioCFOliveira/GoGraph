@@ -1088,7 +1088,7 @@ func checkBoltTxQuotaRefusal(e *BoltTxQuotaEvidence) []Violation {
 	over := e.beginFor(txQuotaPhaseOverCap)
 	if over == nil {
 		v = append(v, Violation{
-			Kind: ViolationOracleDeviation, Op: txOp(e.Arm, "refusal"),
+			Kind: ViolationVacuousRun, Op: txOp(e.Arm, "refusal"),
 			Message: fmt.Sprintf("the run never drove the %q phase, so the cap was never asked to refuse",
 				txQuotaPhaseOverCap),
 		})
@@ -1317,7 +1317,7 @@ func checkBoltTxQuotaResidue(e *BoltTxQuotaEvidence) []Violation {
 func checkBoltTxQuotaNonVacuity(e *BoltTxQuotaEvidence) []Violation {
 	var v []Violation
 	shortfall := func(clause, msg string) {
-		v = append(v, Violation{Kind: ViolationOracleDeviation, Op: txOp(e.Arm, clause), Message: msg})
+		v = append(v, Violation{Kind: ViolationVacuousRun, Op: txOp(e.Arm, clause), Message: msg})
 	}
 	// THE geometry clause. At a cap of one, "BEGIN never works" and "the cap
 	// fired" produce the same wire trace.

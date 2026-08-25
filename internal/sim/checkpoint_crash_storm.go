@@ -510,7 +510,7 @@ func checkCheckpointStormCycle(
 	// The window is a precondition of everything below: a checkpoint that
 	// SUCCEEDED never entered the publish window, so the cycle proved nothing.
 	if cyc.cpErr == nil {
-		add(ViolationOracleDeviation, "<window-not-entered>",
+		add(ViolationVacuousRun, "<window-not-entered>",
 			"the %s checkpoint completed successfully — the armed publish fault never fired, so the crash did not land mid-publish",
 			cyc.window)
 		return v
@@ -547,7 +547,19 @@ func checkCheckpointStormCycle(
 // have had anything to check.
 func checkCheckpointStormNonVacuity(ev *checkpointStormEvidence, ledger *checkpointStormLedger) []Violation {
 	var v []Violation
+	// Two families live in this one function and they must not share a kind
+	// (rmp #2614). `add` reports a run that did not reach the state its clauses
+	// grade — an arm that never fired, a window never entered — which is a
+	// VACUOUS_RUN. `deviation` reports the engine actually losing a snapshot,
+	// which is an engine failure and keeps an engine kind. Folding the two would
+	// have relabelled a real durability loss as "the run proved nothing", the
+	// exact inversion of the defect this taxonomy change exists to fix.
 	add := func(op, format string, args ...any) {
+		v = append(v, Violation{
+			Kind: ViolationVacuousRun, Op: op, Message: fmt.Sprintf(format, args...),
+		})
+	}
+	deviation := func(op, format string, args ...any) {
 		v = append(v, Violation{
 			Kind: ViolationOracleDeviation, Op: op, Message: fmt.Sprintf(format, args...),
 		})
@@ -585,14 +597,14 @@ func checkCheckpointStormNonVacuity(ev *checkpointStormEvidence, ledger *checkpo
 				add("<arm-not-fired>", "cycle %d (%s): renameFaults=%d renameWritebacks=%d, want both positive (the publish rename must fail and its archive-restore must survive)", i, c.window, c.renameFaults, c.renameWritebacks)
 			}
 			if !c.liveAfterReopen {
-				add("<restore-lost>", "cycle %d (%s): no live snapshot after recovery — the publish path's archive restore did not survive the crash", i, c.window)
+				deviation("<restore-lost>", "cycle %d (%s): no live snapshot after recovery — the publish path's archive restore did not survive the crash", i, c.window)
 			}
 		case windowArchiveRename:
 			if c.renameFaults == 0 {
 				add("<arm-not-fired>", "cycle %d (%s): no rename fault fired, so the archive rename was not interrupted", i, c.window)
 			}
 			if !c.liveBeforeReopen {
-				add("<live-snapshot-lost>", "cycle %d (%s): the live snapshot did not survive a publish that aborted before touching it", i, c.window)
+				deviation("<live-snapshot-lost>", "cycle %d (%s): the live snapshot did not survive a publish that aborted before touching it", i, c.window)
 			}
 		}
 	}

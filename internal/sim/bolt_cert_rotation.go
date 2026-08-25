@@ -824,7 +824,7 @@ func checkBoltCertRotationNonVacuity(e *BoltCertRotationEvidence) []Violation {
 	for _, want := range certRotationExpectedSteps {
 		if !seen[want] {
 			v = append(v, Violation{
-				Kind: ViolationOracleDeviation, Op: "<cert-rotation-nonvacuity>",
+				Kind: ViolationVacuousRun, Op: "<cert-rotation-nonvacuity>",
 				Message: fmt.Sprintf("step %q did not run: the rotation surface was not fully driven", want),
 			})
 		}
@@ -843,13 +843,13 @@ func checkBoltCertRotationNonVacuity(e *BoltCertRotationEvidence) []Violation {
 	}
 	if ok == 0 || failed == 0 {
 		v = append(v, Violation{
-			Kind: ViolationOracleDeviation, Op: "<cert-rotation-nonvacuity>",
+			Kind: ViolationVacuousRun, Op: "<cert-rotation-nonvacuity>",
 			Message: fmt.Sprintf("run observed %d successful and %d failed reload(s); both must be non-zero or the oracle cannot fail", ok, failed),
 		})
 	}
 	if len(distinct) < 2 {
 		v = append(v, Violation{
-			Kind: ViolationOracleDeviation, Op: "<cert-rotation-nonvacuity>",
+			Kind: ViolationVacuousRun, Op: "<cert-rotation-nonvacuity>",
 			Message: fmt.Sprintf("only %d distinct certificate(s) were ever in service: a reloader that ignored every rotation would pass every retention check", len(distinct)),
 		})
 	}
@@ -868,21 +868,21 @@ func checkCertRotationFaultsDistinct(e *BoltCertRotationEvidence) []Violation {
 	}
 	if torn, ok := byName["torn-key"]; ok && torn.KeyBytes >= torn.KeyWantBytes {
 		v = append(v, Violation{
-			Kind: ViolationOracleDeviation, Op: "<cert-rotation-nonvacuity>",
+			Kind: ViolationVacuousRun, Op: "<cert-rotation-nonvacuity>",
 			Message: fmt.Sprintf("torn-key left %d of %d key bytes on disk: nothing was truncated, so the TORN fault was never injected",
 				torn.KeyBytes, torn.KeyWantBytes),
 		})
 	}
 	if garbled, ok := byName["garbled-key"]; ok && garbled.KeyBytes != garbled.KeyWantBytes {
 		v = append(v, Violation{
-			Kind: ViolationOracleDeviation, Op: "<cert-rotation-nonvacuity>",
+			Kind: ViolationVacuousRun, Op: "<cert-rotation-nonvacuity>",
 			Message: fmt.Sprintf("garbled-key left %d of %d key bytes on disk: a garbled key is FULL length, so this arm duplicated the torn one instead of corrupting in place",
 				garbled.KeyBytes, garbled.KeyWantBytes),
 		})
 	}
 	if absent, ok := byName["absent-key"]; ok && absent.KeyBytes != 0 {
 		v = append(v, Violation{
-			Kind: ViolationOracleDeviation, Op: "<cert-rotation-nonvacuity>",
+			Kind: ViolationVacuousRun, Op: "<cert-rotation-nonvacuity>",
 			Message: fmt.Sprintf("absent-key left %d key bytes on disk: the file was not removed", absent.KeyBytes),
 		})
 	}

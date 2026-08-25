@@ -111,7 +111,7 @@ func checkCallYieldWhere(ctx context.Context, tick int64, model *SchemaModel, en
 		// regression this probe exists to catch.
 		if len(p.names) >= 2 && len(rows) >= len(p.names) {
 			vs = append(vs, Violation{
-				Kind: ViolationOracleDeviation, Tick: tick, Op: p.label,
+				Kind: ViolationVacuousRun, Tick: tick, Op: p.label,
 				Message: fmt.Sprintf(
 					"vacuous filter: the model enumerates %d rows and the WHERE-filtered projection "+
 						"returned %d — the predicate excluded nothing, so it cannot detect a dropped "+

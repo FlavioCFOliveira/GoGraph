@@ -1004,7 +1004,7 @@ func checkBoltTxTerminateResidue(e *BoltTxTerminateEvidence) []Violation {
 func checkBoltTxTerminateNonVacuity(e *BoltTxTerminateEvidence) []Violation {
 	var v []Violation
 	shortfall := func(clause, msg string) {
-		v = append(v, Violation{Kind: ViolationOracleDeviation, Op: txOp(e.Arm, clause), Message: msg})
+		v = append(v, Violation{Kind: ViolationVacuousRun, Op: txOp(e.Arm, clause), Message: msg})
 	}
 	// THE attribution clause. clock.Fake delivers to a waiter only from Advance
 	// (internal/clock/fake.go), so zero advances is a PROOF that neither reaper

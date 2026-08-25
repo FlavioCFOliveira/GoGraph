@@ -111,6 +111,12 @@ schedule, and the same verdict. Concretely:
 The `InvariantChecker` (`checker.go`) classifies every breach with a typed
 `ViolationKind`:
 
+The kinds fall into **two families**, and the family is the first thing to read
+off a red run because it says which half of the system to suspect.
+
+**Engine versus oracle — suspect the engine.** The engine did something the model
+says it must not.
+
 | Kind | Meaning |
 |---|---|
 | `ACID_ATOMICITY` | A write applied partially, or uncommitted state leaked in at a crash boundary. |
@@ -120,6 +126,42 @@ The `InvariantChecker` (`checker.go`) classifies every breach with a typed
 | `GRAPH_INTEGRITY` | A structural invariant broke (e.g. an edge with a missing endpoint, or the engine graph diverging from the model). |
 | `ORACLE_DEVIATION` | An engine/oracle disagreement not more specifically classified. |
 | `SEARCH_DIVERGENCE` | A `search/` algorithm disagreed with its independent reference. |
+
+**Run not exercised — suspect the harness, the seed, the machine, or a
+co-resident scenario.** The engine did nothing wrong because it was never driven
+to the point where it could.
+
+| Kind | Meaning |
+|---|---|
+| `VACUOUS_RUN` | The run did not exercise its subject, so the clauses about that subject held **without ever being tested** — an armed fault that never fired, an arm that never ran, a pool never actually pressured, a probe that returned no row. |
+
+### Why `VACUOUS_RUN` exists (rmp #2614)
+
+Before it, every non-vacuity gate borrowed `ORACLE_DEVIATION`, because no member
+fitted and one was needed. The cost was measured on 2026-08-25: **37
+`bolt-decode-swarm` failures were reported as `ORACLE_DEVIATION`** when the cause
+was a co-resident `cpu-starvation` scenario clamping `GOMAXPROCS` (rmp #2613).
+Each clause's TEXT was honest — *"the pool was never actually pressured, so every
+clause about how it refuses passed without being tested"* — but the KIND pointed
+the investigation at the engine, and that is what an operator triaging a red
+swarm reads first.
+
+**`VACUOUS_RUN` still FAILS the run.** It is load-bearing, not advisory: rmp #2588
+records that a run whose honest client never met live pressure must not pass as
+evidence. What changed is what the failure is CALLED, never when it fires. The
+route rmp #2554 took elsewhere — returning `[]string` so the TYPE forbids
+promoting a coverage shortfall to a verdict — is deliberately not available here,
+precisely because these clauses must keep failing.
+
+The coverage tracker buckets by the kind's string, so `VACUOUS_RUN` appears in a
+swarm summary's `[violation]` dimension on its own, with no registration needed.
+
+**A clause that is genuinely a deviation keeps a deviation kind, even inside a
+non-vacuity function.** `checkCheckpointStormNonVacuity` holds both families and
+splits them across two helpers: an arm that never fired is `VACUOUS_RUN`, while
+`<restore-lost>` and `<live-snapshot-lost>` — the engine actually losing a
+snapshot across a crash — keep `ORACLE_DEVIATION`. Relabelling those would have
+been the exact inversion of the defect this kind exists to fix.
 
 The base checks are: node- and edge-count parity; sampled existence of oracle
 nodes and edges in the engine; a full (non-sampled) durability scan at every

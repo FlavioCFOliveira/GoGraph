@@ -1162,7 +1162,7 @@ func checkBoltAuthSurfaceNonVacuity(e BoltAuthEvidence) []Violation {
 	for _, want := range boltAuthExpectedArms {
 		if !seen[want] {
 			v = append(v, Violation{
-				Kind: ViolationOracleDeviation, Op: "<bolt-auth-nonvacuity>",
+				Kind: ViolationVacuousRun, Op: "<bolt-auth-nonvacuity>",
 				Message: fmt.Sprintf("arm %q did not run: the surface was not fully driven", want),
 			})
 		}
@@ -1184,20 +1184,20 @@ func checkBoltAuthSurfaceNonVacuity(e BoltAuthEvidence) []Violation {
 	}
 	if admitted == 0 || refused == 0 {
 		v = append(v, Violation{
-			Kind: ViolationOracleDeviation, Op: "<bolt-auth-nonvacuity>",
+			Kind: ViolationVacuousRun, Op: "<bolt-auth-nonvacuity>",
 			Message: fmt.Sprintf("run observed %d admitted and %d refused arm(s); both must be non-zero or the oracle cannot fail", admitted, refused),
 		})
 	}
 	if framesFromAdmit == 0 {
 		v = append(v, Violation{
-			Kind: ViolationOracleDeviation, Op: "<bolt-auth-nonvacuity>",
+			Kind: ViolationVacuousRun, Op: "<bolt-auth-nonvacuity>",
 			Message: "no arm appended a WAL frame: the frame counter is not a live instrument, so \"no frames appended\" proves nothing",
 		})
 	}
 	for _, want := range []string{authCodeUnauthorized, authCodeProviderFailed, authCodeRequestInvalid} {
 		if !codes[want] {
 			v = append(v, Violation{
-				Kind: ViolationOracleDeviation, Op: "<bolt-auth-nonvacuity>",
+				Kind: ViolationVacuousRun, Op: "<bolt-auth-nonvacuity>",
 				Message: fmt.Sprintf("failure code %q was never observed: that refusal path was not exercised", want),
 			})
 		}

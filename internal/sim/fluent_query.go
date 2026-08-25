@@ -1999,7 +1999,7 @@ func fluentQueryGhostFixture(tick int64, seed *Seed, perturb fqPerturb) ([]Viola
 	}
 	var vs []Violation
 	if ghostArcs == 0 || cRaw.Size() <= cLive.Size() {
-		vs = append(vs, fqViolation(ViolationOracleDeviation, tick, "ghost-fixture:precondition",
+		vs = append(vs, fqViolation(ViolationVacuousRun, tick, "ghost-fixture:precondition",
 			"the fixture constructed %d ghost arc(s) and cRaw.Size()=%d vs cLive.Size()=%d; without a "+
 				"raw arc into a tombstoned target the prune clauses below cannot fail and prove nothing",
 			ghostArcs, cRaw.Size(), cLive.Size()))
@@ -2074,7 +2074,7 @@ func (p *FluentQueryProbes) Finish(tick int64) []Violation {
 	e := p.ev
 	var vs []Violation
 	add := func(clause, format string, args ...any) {
-		vs = append(vs, fqViolation(ViolationOracleDeviation, tick, "vacuity:"+clause, format, args...))
+		vs = append(vs, fqViolation(ViolationVacuousRun, tick, "vacuity:"+clause, format, args...))
 	}
 	if e.Batteries == 0 {
 		add("batteries", "the probe battery never ran: no clause in this scenario was evaluated")

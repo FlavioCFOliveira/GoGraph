@@ -1740,7 +1740,7 @@ func checkBoltTxWindow(arm string, w *BoltTxWriteWindow) []Violation {
 func checkBoltTxRegistryNonVacuity(e *BoltTxRegistryEvidence) []Violation {
 	var v []Violation
 	shortfall := func(clause, msg string) {
-		v = append(v, Violation{Kind: ViolationOracleDeviation, Op: txOp(e.Arm, clause), Message: msg})
+		v = append(v, Violation{Kind: ViolationVacuousRun, Op: txOp(e.Arm, clause), Message: msg})
 	}
 	if len(e.Plan) != txAbandonCount {
 		shortfall("nonvacuity-plan", fmt.Sprintf("the run opened %d transaction(s), want %d: "+

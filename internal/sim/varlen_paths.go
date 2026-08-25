@@ -677,7 +677,7 @@ func varlenPathsVacuity(tick int64, oracle *GraphOracle, st *vleStats) []Violati
 		return nil
 	}
 	return []Violation{{
-		Kind: ViolationOracleDeviation, Tick: tick, Op: "variable-length paths non-vacuity",
+		Kind: ViolationVacuousRun, Tick: tick, Op: "variable-length paths non-vacuity",
 		Message: fmt.Sprintf("vacuous run: the variable-length battery proved nothing — %v", missing),
 	}}
 }

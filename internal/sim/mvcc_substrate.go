@@ -543,7 +543,7 @@ func checkMVCCSubstrateNonVacuity(tick int64, e *mvccSubstrateEvidence) []Violat
 	var out []Violation
 	fail := func(format string, args ...any) {
 		out = append(out, Violation{
-			Kind: ViolationOracleDeviation, Tick: tick, Op: op,
+			Kind: ViolationVacuousRun, Tick: tick, Op: op,
 			Message: fmt.Sprintf("%s: ", e.label) + fmt.Sprintf(format, args...),
 		})
 	}

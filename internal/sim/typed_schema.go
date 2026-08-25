@@ -1157,7 +1157,7 @@ func (e *TypedSchemaEvidence) coverageString() string {
 func (e *TypedSchemaEvidence) Finish(tick int64) []Violation {
 	var vs []Violation
 	add := func(clause, format string, args ...any) {
-		vs = append(vs, tsViolation(ViolationOracleDeviation, tick, "vacuity:"+clause, format, args...))
+		vs = append(vs, tsViolation(ViolationVacuousRun, tick, "vacuity:"+clause, format, args...))
 	}
 	if e.SideBatteries == 0 {
 		add("side-batteries", "the side write battery never ran: no accept/reject verdict in this "+
@@ -2372,7 +2372,7 @@ func typedSchemaPureStoreArm(seed *Seed) (tsPureStoreObservation, error) {
 func checkTypedSchemaPureStore(tick int64, obs tsPureStoreObservation) []Violation {
 	var vs []Violation
 	if !obs.notApplied || !obs.typeMismatch {
-		vs = append(vs, tsViolation(ViolationOracleDeviation, tick, "pure-store:precondition",
+		vs = append(vs, tsViolation(ViolationVacuousRun, tick, "pure-store:precondition",
 			"the refused commit reported %q; want an error satisfying BOTH "+
 				"errors.Is(txn.ErrCommittedNotApplied)=%t and errors.Is(schema.ErrTypeMismatch)=%t. "+
 				"Without it the arm's precondition — a validator rejection during the POST-FSYNC apply "+

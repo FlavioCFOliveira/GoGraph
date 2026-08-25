@@ -1651,7 +1651,7 @@ func checkBoltBookmarkCausality(e *BoltBeginExtrasEvidence) []Violation {
 	// is an assumption rather than an observation.
 	fab, ok := beginBookmarkCounter(beginFabricatedFarFuture)
 	if !ok {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "bookmark-fabricated-is-ahead",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "bookmark-fabricated-is-ahead",
 			fmt.Sprintf("the fabricated token %q does not parse as a %q + %d hex-digit bookmark, so it is not a "+
 				"syntactically valid token this server could have minted and the arm proves nothing about an "+
 				"UNKNOWN bookmark", beginFabricatedFarFuture, bookmarkPrefix, bookmarkHexDigits)))
@@ -1662,7 +1662,7 @@ func checkBoltBookmarkCausality(e *BoltBeginExtrasEvidence) []Violation {
 			continue
 		}
 		if n >= fab {
-			v = append(v, boltBeginViolation(ViolationOracleDeviation, "bookmark-fabricated-is-ahead",
+			v = append(v, boltBeginViolation(ViolationVacuousRun, "bookmark-fabricated-is-ahead",
 				fmt.Sprintf("this server issued bookmark counter %d, at or above the fabricated token's %d: the "+
 					"'far future' token is one the server COULD have minted, so the arm is no longer probing an "+
 					"unknown bookmark", n, fab)))
@@ -1778,7 +1778,7 @@ func checkBoltTxTimeout(e *BoltBeginExtrasEvidence) []Violation {
 	// identical advance: the transaction must live and its COMMIT must succeed.
 	if control != nil {
 		if control.reaped() {
-			v = append(v, boltBeginViolation(ViolationOracleDeviation, "txtimeout-control-survives",
+			v = append(v, boltBeginViolation(ViolationVacuousRun, "txtimeout-control-survives",
 				fmt.Sprintf("the control arm %q sent NO tx_timeout and its bounds are %s idle / %s total, yet an "+
 					"advance of %v reaped it. Some other deadline is firing, so the subject arm's reap cannot be "+
 					"attributed to its tx_timeout extra and the whole family proves nothing",
@@ -2154,14 +2154,14 @@ func checkBoltBookmarkNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 	want := slices.Clone(beginBookmarkArmNames)
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-bookmark-roster",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-bookmark-roster",
 			fmt.Sprintf("the causal-read roster ran %v, want %v: a missing arm removes its clause silently", got, want)))
 	}
 	// CLAUSE nv-bookmark-write-nonempty. A causal read of ZERO nodes could not
 	// distinguish "the reader saw the write" from "the write never happened", so the
 	// whole family would be satisfiable by an engine that stored nothing.
 	if e.CommittedNodes <= 0 {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-bookmark-write-nonempty",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-bookmark-write-nonempty",
 			fmt.Sprintf("the writer committed %d node(s): with nothing committed, every causal read trivially "+
 				"observes the full committed set and the causality clause cannot fail", e.CommittedNodes)))
 	}
@@ -2184,7 +2184,7 @@ func checkBoltBookmarkNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 		}
 	}
 	if issued < 1 || fabricated < 2 {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-bookmark-contrast",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-bookmark-contrast",
 			fmt.Sprintf("the family presented %d real bookmark(s) and %d fabricated one(s); it needs at least 1 and 2. "+
 				"Without both, 'the token changed nothing' compares nothing and the causal read's meaning is "+
 				"unestablished", issued, fabricated)))
@@ -2192,13 +2192,13 @@ func checkBoltBookmarkNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 	// CLAUSE nv-bookmark-arms-completed. The comparison is only over arms that completed
 	// their read; if fewer than two did, it compares a value with itself.
 	if completed < 2 {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-bookmark-arms-completed",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-bookmark-arms-completed",
 			fmt.Sprintf("only %d arm(s) completed a causal read; the cross-arm comparison needs at least 2", completed)))
 	}
 	// CLAUSE nv-bookmark-sequence. A single bookmark cannot falsify a strict-advance
 	// clause: one event is not a sequence.
 	if len(e.IssuedBookmarks) < 2 {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-bookmark-sequence",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-bookmark-sequence",
 			fmt.Sprintf("the writer produced %d bookmark(s); the strict-advance clause needs at least 2 to compare",
 				len(e.IssuedBookmarks))))
 	}
@@ -2206,7 +2206,7 @@ func checkBoltBookmarkNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 	// against an OBSERVED bookmark. Were that reference empty, the clause would collapse
 	// into "both are empty" and pass on a session that never committed at all.
 	if e.AutocommitAfterCommitExpected == "" {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-bookmark-stale-reference",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-bookmark-stale-reference",
 			"the reference bookmark for the stale-autocommit clause is EMPTY, so that clause degenerates into "+
 				"comparing two empty strings and would pass whatever the server reported"))
 	}
@@ -2222,7 +2222,7 @@ func checkBoltTimeoutNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 		got = append(got, e.Timeouts[i].Name)
 	}
 	if !slices.Equal(got, beginTimeoutArmNames) {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-timeout-roster",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-timeout-roster",
 			fmt.Sprintf("the timeout roster ran %v, want %v in that order: an arm and its control are only comparable "+
 				"as the same script", got, beginTimeoutArmNames)))
 	}
@@ -2238,7 +2238,7 @@ func checkBoltTimeoutNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 		}
 	}
 	if reaped < 1 || survived < 1 {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-timeout-both-outcomes",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-timeout-both-outcomes",
 			fmt.Sprintf("the timeout family produced %d reaped and %d surviving arm(s); it needs at least one of "+
 				"each. A family in which every arm is reaped cannot distinguish a bound that works from a reaper "+
 				"that fires unconditionally", reaped, survived)))
@@ -2249,7 +2249,7 @@ func checkBoltTimeoutNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 	for i := range e.Timeouts {
 		a := &e.Timeouts[i]
 		if a.TimersArmed < 1 {
-			v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-timeout-reaper-armed",
+			v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-timeout-reaper-armed",
 				fmt.Sprintf("arm %q registered %d timer(s) on the injected clock. A surviving arm is only evidence "+
 					"that the bound was not reached if the reaper was ARMED; with no timer, 'not reaped' means the "+
 					"reaper was never installed and the control attributes nothing", a.Name, a.TimersArmed)))
@@ -2264,7 +2264,7 @@ func checkBoltTimeoutNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 			total += d
 		}
 		if total <= 0 {
-			v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-timeout-advance-nonzero",
+			v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-timeout-advance-nonzero",
 				fmt.Sprintf("arm %q advanced %v of virtual time in total: with no advance, no deadline is reachable "+
 					"and the arm's outcome is independent of every bound it installed", a.Name, a.Advanced)))
 		}
@@ -2278,7 +2278,7 @@ func checkBoltTimeoutNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 			reach += d
 		}
 		if a.IdleBound <= reach || a.DefaultTotalBound <= reach {
-			v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-timeout-bounds-separated",
+			v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-timeout-bounds-separated",
 				fmt.Sprintf("arm %q advances %s of virtual time with the idle bound at %s and the server default "+
 					"total bound at %s. Both must lie strictly BEYOND the advance, or the reap is attributable to a "+
 					"server bound rather than to the client's tx_timeout and the arm measures the wrong reaper "+
@@ -2301,7 +2301,7 @@ func checkBoltModeDBNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 	wantModes := slices.Clone(beginModeArmNames)
 	slices.Sort(wantModes)
 	if !slices.Equal(gotModes, wantModes) {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-mode-roster",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-mode-roster",
 			fmt.Sprintf("the mode roster ran %v, want %v", gotModes, wantModes)))
 	}
 	// CLAUSE nv-mode-both-sides. The family needs a transaction the server recorded as
@@ -2318,7 +2318,7 @@ func checkBoltModeDBNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 		}
 	}
 	if readModes < 1 || writeModes < 1 {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-mode-both-sides",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-mode-both-sides",
 			fmt.Sprintf("the mode family produced %d read-only and %d write transaction(s) by the server's own "+
 				"registry; it needs at least one of each, or the fail-open pin and the read-only refusal are each "+
 				"one-sided", readModes, writeModes)))
@@ -2333,7 +2333,7 @@ func checkBoltModeDBNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 		}
 	}
 	if acceptedWrites < 1 {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-mode-write-observed",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-mode-write-observed",
 			"no mode arm's write was ACCEPTED, so the read-only refusal cannot be attributed to the access mode: "+
 				"the same statement may simply be refused everywhere"))
 	}
@@ -2346,7 +2346,7 @@ func checkBoltModeDBNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 	wantDBs := slices.Clone(beginDBArmNames)
 	slices.Sort(wantDBs)
 	if !slices.Equal(gotDBs, wantDBs) {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-db-roster",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-db-roster",
 			fmt.Sprintf("the database roster ran %v, want %v", gotDBs, wantDBs)))
 	}
 	// CLAUSE nv-db-contrast. The echo clause needs a name that is NOT this server's, and
@@ -2363,7 +2363,7 @@ func checkBoltModeDBNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 		}
 	}
 	if foreign < 1 || absent < 1 {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-db-contrast",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-db-contrast",
 			fmt.Sprintf("the database family sent %d foreign name(s) and %d arm(s) with no name; it needs at least "+
 				"one of each. With only the server's own name, an echo and a fallback are indistinguishable",
 				foreign, absent)))
@@ -2379,7 +2379,7 @@ func checkBoltRouteMetadataNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 	// view of itself. Were that empty, "every role advertises the listener's address"
 	// would pass on a table full of empty strings.
 	if o.ListenerAddr == "" {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-route-reference",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-route-reference",
 			"the listener reported an EMPTY address, so the routing-table address clause compares every advertised "+
 				"address against \"\" and cannot fail"))
 	}
@@ -2387,35 +2387,35 @@ func checkBoltRouteMetadataNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 	// ROUTE actually NAMED a database: against an empty request, "the table's db is
 	// empty" is what an honest echo would also produce.
 	if o.SentDB == "" {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-route-asked-for-a-db",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-route-asked-for-a-db",
 			"the ROUTE message named no database, so 'the table's db came back empty' is equally consistent with "+
 				"the server ECHOING the request and with it dropping the field"))
 	}
 	// CLAUSE nv-route-table-decoded. A table that did not decode leaves every structured
 	// field at its zero value, and several clauses would then pass on nothing.
 	if o.RoleCount == 0 || len(o.AddressesByRole) == 0 {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-route-table-decoded",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-route-table-decoded",
 			fmt.Sprintf("the routing table decoded to %d entr(y/ies) and %d role(s): with nothing decoded the role, "+
 				"address and ttl clauses have no values to adjudicate", o.RoleCount, len(o.AddressesByRole))))
 	}
 	// CLAUSE nv-route-renders-nonempty. The identical-answer clause compares two
 	// renderings; two empty strings are equal and would pass on two broken replies.
 	if o.PopulatedRender == "" || o.ZeroMessageRender == "" {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-route-renders-nonempty",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-route-renders-nonempty",
 			fmt.Sprintf("a routing-table rendering is empty (populated=%q, zero=%q), so the identical-answer clause "+
 				"compares two empty strings", o.PopulatedRender, o.ZeroMessageRender)))
 	}
 	// CLAUSE nv-metadata-sent. "No reply echoes any key the client sent" is vacuously
 	// true when the client sent none.
 	if len(e.Metadata.SentKeys) == 0 {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-metadata-sent",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-metadata-sent",
 			"the tx_metadata arm sent NO keys, so 'no reply echoed one' is vacuously true"))
 	}
 	// CLAUSE nv-metadata-replies-read. The echo clause searches three key lists; if the
 	// replies were never decoded, all three are empty and the search finds nothing
 	// whatever the server did.
 	if len(e.Metadata.TerminalMetaKeys) == 0 || len(e.Metadata.CommitMetaKeys) == 0 {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-metadata-replies-read",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-metadata-replies-read",
 			fmt.Sprintf("the tx_metadata arm read %d terminal and %d commit metadata key(s); both replies carry keys "+
 				"by contract (has_more/bookmark/db and bookmark), so an empty list means the reply was not decoded "+
 				"and the echo search ran over nothing",

@@ -3076,47 +3076,47 @@ func liGateSweep(e *LabelIndexScopedEvidence) []Violation {
 		}
 	}
 	if len(missing) > 0 {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:cells",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:cells",
 			"%d of the %d (relationship, direction) cells were never driven, so the "+
 				"inclusive/exclusive conversion was not swept: %s",
 			len(missing), int(liRelCount)*int(liDirCount), strings.Join(missing, ", ")))
 	}
 	if e.FinalLabels < liFloorLabels {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:model-size",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:model-size",
 			"the final index carries %d labels, below the floor of %d; a sweep that ends on one "+
 				"label never exercises the per-label map at all",
 			e.FinalLabels, liFloorLabels))
 	}
 	if e.PeakMembers < liFloorMembers {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:model-size",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:model-size",
 			"the model peaked at %d (label, node) pairs, below the floor of %d; below the "+
 				"small-set threshold of 8 per label the bitmap tier is never reached and the range "+
 				"methods are compared only against the inline path",
 			e.PeakMembers, liFloorMembers))
 	}
 	if e.RangeOps < liFloorRangeOps {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:model-size",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:model-size",
 			"the sweep drove %d range operations, below the floor of %d",
 			e.RangeOps, liFloorRangeOps))
 	}
 	if e.EmptiedLabels == 0 {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:emptied",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:emptied",
 			"no RemoveRange ever drove a non-empty label to empty, so the entry-deletion path "+
 				"RemoveRange's godoc describes was never taken"))
 	}
 	if e.PromotedAfterAdd == 0 {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:promoted",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:promoted",
 			"no epoch drove individual Adds BEFORE its range operations, so the add-then-range "+
 				"order — the one that folds an existing inline set into a fresh bitmap — was never "+
 				"driven"))
 	}
 	if e.TierChecks != len(liTierWidths()) {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:tier-checks",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:tier-checks",
 			"the tier-identity arm compared %d width pairs, want %d",
 			e.TierChecks, len(liTierWidths())))
 	}
 	if e.RoundTrips == 0 {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:roundtrip",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:roundtrip",
 			"no image was round-tripped, so the content, byte-stability and determinism clauses "+
 				"adjudicated nothing"))
 	}
@@ -3142,7 +3142,7 @@ func liGateUnion(e *LabelIndexScopedEvidence) []Violation {
 		missing = append(missing, "empty-subset")
 	}
 	if len(missing) > 0 {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:union-shapes",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:union-shapes",
 			"the Union arm never reached %s across %d draws; those are the shapes that separate a "+
 				"real fold from a single-label Scan", strings.Join(missing, ", "), e.UnionDraws))
 	}
@@ -3181,30 +3181,30 @@ func liGateCorruption(e *LabelIndexScopedEvidence) []Violation {
 		}
 	}
 	if len(missing) > 0 {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:corrupt-regions",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:corrupt-regions",
 			"the raw damage family never reached %s; every region of the layout must be flipped, "+
 				"because the claim being made is that the CRC covers all of them",
 			strings.Join(missing, ", ")))
 	}
 	if restampSeen < liRestampTrials {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:corrupt-regions",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:corrupt-regions",
 			"the re-stamped family drove %d trials, want %d; the structural guards inside "+
 				"Deserialize are unreachable without a recomputed trailer, so a run that skips them "+
 				"has tested only the checksum", restampSeen, liRestampTrials))
 	}
 	if truncateSeen < liTruncateTrialsMin {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:corrupt-regions",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:corrupt-regions",
 			"the truncate family drove %d trials, want at least %d — the short-payload branch and "+
 				"the truncated-body branch are different code",
 			truncateSeen, liTruncateTrialsMin))
 	}
 	if !control {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:clean-control",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:clean-control",
 			"no undamaged control was driven, so nothing established that this reader accepts a "+
 				"good image at all"))
 	}
 	if unpopulated > 0 {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:corrupt-populated",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:corrupt-populated",
 			"%d of %d damage trials deserialized into an EMPTY receiver, so \"the receiver was "+
 				"restored to its pre-call state\" was satisfied by an index that had no state to "+
 				"restore", unpopulated, len(e.Corrupt)))
@@ -3229,7 +3229,7 @@ func liGateScopeAndPins(e *LabelIndexScopedEvidence) []Violation {
 	var v []Violation
 	wantRows := 3 * len(liScopeOps())
 	if len(e.Scopes) != wantRows {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:scope-rows",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:scope-rows",
 			"the scope arm drove %d (constructor, change kind) rows, want %d",
 			len(e.Scopes), wantRows))
 	}
@@ -3242,20 +3242,20 @@ func liGateScopeAndPins(e *LabelIndexScopedEvidence) []Violation {
 		}
 	}
 	if accepts == 0 || drops == 0 {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:scope-rows",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:scope-rows",
 			"the routing table expects %d acceptances and %d drops; with either at zero the "+
 				"`scope-routing` clause would pass on an index that ignored every change, or on one "+
 				"that consumed every change", accepts, drops))
 	}
 	if e.Boundary.AddBelowGot != e.Boundary.AddBelowNaive {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:boundary-control",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:boundary-control",
 			"the boundary CONTROL — the same interval ending one id below math.MaxUint64 — yielded "+
 				"%d ids, want %d. Until the control is exact, the loss the pin records is not "+
 				"attributable to the final id rather than to the whole top of the id space",
 			e.Boundary.AddBelowGot, e.Boundary.AddBelowNaive))
 	}
 	if e.Phantom.AfterLabelCount == 0 {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:phantom-armed",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:phantom-armed",
 			"the phantom experiment produced no entries at all, so the pin adjudicated nothing"))
 	}
 	return v
@@ -3360,7 +3360,7 @@ func liCheckDenseSmallPin(e *LabelIndexScopedEvidence) []Violation {
 func liGateRoundTripShape(e *LabelIndexScopedEvidence) []Violation {
 	var v []Violation
 	if !e.DenseSmall.CtrlStable {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:dense-small-control",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:dense-small-control",
 			"the dense-small CONTROL — the same AddRange construction at %d ids, one ABOVE "+
 				"smallSetMax — was not byte-stable across its round trip (%d -> %d). Until the "+
 				"control holds, the instability at %d ids is not attributable to the down-convert "+
@@ -3377,7 +3377,7 @@ func liGateRoundTripShape(e *LabelIndexScopedEvidence) []Violation {
 		}
 	}
 	if same == 0 || differ == 0 {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:range-tier-crossover",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:range-tier-crossover",
 			"the Add-versus-AddRange measurement found %d identical and %d differing widths; it "+
 				"must BRACKET the crossover (below it roaring keeps an array container, at and above "+
 				"it a run container), or the row is an anecdote rather than a measurement",
