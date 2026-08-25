@@ -6,7 +6,7 @@ strict supersets of the shallower ones.
 
 | Layer | Budget | Selector | Default? |
 |---|---|---|---|
-| `short` | < 60 s per package (**advisory** — see below) | none (default) | yes — the default local run |
+| `short` | < 60 s per package soft, 240 s hard (**enforced on `make ci`** — see below) | none (default) | yes — the default local run |
 | `soak` | minutes | `-tags=soak` or `SOAK_FULL=1` | no |
 | `nightly` | hours | `-tags=nightly` or `GOGRAPH_NIGHTLY=1` | no |
 
@@ -38,67 +38,130 @@ real driver connection per check. It is excluded from the default run so
 each remaining check fails are recorded in the file's own header, which
 is the authoritative list.
 
-### The short-layer budget is ADVISORY, and nothing enforces it (rmp #2566)
+### The short-layer budget, and what enforces it (rmp #2566, #2577, #2599)
 
-**Read this before quoting the `< 60 s per package` budget as a gate. It is not
-one.** Until rmp #2566 this section claimed it was "enforced, not merely
-documented", together with a 240 s hard ceiling and a 420 s `internal/sim`
-override "set in the `build + test + race` job". All three were untrue at HEAD,
-and each was verified individually:
+The per-package cost budget is **enforced on the routine gate**: `test-short`
+pipes its output through `scripts/pkg_time_budget.sh`, so every `make ci` reads
+it. `SOFT_BUDGET` (60 s) warns; `HARD_BUDGET` (240 s) fails the run.
 
-- **`make ci` does not invoke the gate.** It is
-  `tidy fmt vet build test-short test-timing lint cover-gate`.
-  `test-short-timings`, where the gate lives, is absent. (`test-timing` is a
-  different target — the serial wall-clock phase from rmp #2517 — and is not this
-  gate.)
-- **`HARD_BUDGET` defaults to `0`**, which `scripts/pkg_time_budget.sh` documents
-  as *disabled*: its exit `0` means "no package exceeds HARD_BUDGET (**or
-  HARD_BUDGET disabled**)". No target, script or workflow sets it.
-- **`PKG_HARD_BUDGET_OVERRIDES` is set nowhere.** It appears only in this file and
-  in the script's own header and reader. The `internal/sim` override did not exist,
-  and neither does the "build + test + race job" it was attributed to — the only
-  workflow is `release.yml`.
+The script echoes the `go test` output through **verbatim** and reads the plain
+`ok<TAB>pkg<TAB>0.330s` summary lines, so **what you see on `make test-short` is
+unchanged**. It deliberately does not use `-json` on that path: `-json` implies
+`-v` and would bury the routine run in per-test noise to obtain the identical
+per-package numbers.
 
-What is true today: `make test-short-timings` exists, runs the short layer with
-`-json` through `scripts/pkg_time_budget.sh`, and **warns** on any package over
-`SOFT_BUDGET` (60 s). It fails nothing unless the caller sets `HARD_BUDGET`
-explicitly. Run it deliberately when you want the numbers; nothing runs it for you.
+| Target | What it is |
+|---|---|
+| `make test-short` | the short layer **and** the budget check — one run, both outcomes |
+| `make test-short-timings` | an alias for `test-short`, kept as the named entry point for ad-hoc exploration (`SOFT_BUDGET=30 make test-short-timings`) |
+| `make test-timing` | a different gate entirely: the serial wall-clock phase (rmp #2517), not this |
 
-#### What must happen before it can be enforced
+`test-short-timings` is now an alias because its own copy of the command had
+**drifted**: it omitted `GOGRAPH_PARALLEL_SUITE`, making it the one target that
+ran the whole parallel suite with the quiet-machine gates *asserting* — exactly
+the contention rmp #2517 removed everywhere else. Delegation makes that class of
+drift impossible.
 
-Turning the gate on today would make `make ci` red, for a reason this section does
-not own. `internal/sim` measures far above the 420 s the old text claimed for it:
+#### Measured cost, 2026-08-25
 
-| Date | Measurement | Host load average |
+Whole suite, `go test -race -count=1 ./...`, darwin/arm64, 10 cores, **load
+average 1.08 before / 5.00 after**, 11 m 34 s wall. Ten packages exceed the 60 s
+soft budget:
+
+| Package | In-suite |
+|---|---|
+| `internal/sim` | **564.0 s** |
+| `cypher` | **276.4 s** |
+| `examples/26_social_scale_bench` | 146.3 s |
+| `internal/anomaly` | 115.8 s |
+| `bench/csrorder` | 86.0 s |
+| `bench/cyclicjoin` | 80.3 s |
+| `bench/cypher_scale` | 72.4 s |
+| `search` | 65.9 s |
+| `examples/24_social_network_cli` | 65.6 s |
+| `store/recovery` | 62.0 s |
+
+Only the first two exceed the 240 s hard ceiling. **The global ceiling was not
+relaxed to accommodate them**; each gets a named, measured override instead, so
+the accommodation is visible per package and cannot silently cover a third.
+
+#### The override rule
+
+`PKG_HARD_BUDGET_OVERRIDES` entries are **one stated rule, not a number fitted
+per package**: the **worst** in-suite figure ever recorded for that package in
+this document × 1.25, rounded up to the whole minute.
+
+| Package | Worst in-suite | × 1.25 | Ceiling |
+|---|---|---|---|
+| `internal/sim` | 602.9 s | 753.6 s | **780 s** |
+| `cypher` | 276.4 s | 345.5 s | **360 s** |
+
+**Worst-observed, not last-measured.** `internal/sim` has been recorded in-suite
+on this hardware at 545.8 s, 557.4 s, 564.0 s and 602.9 s — a **10.5 % spread** —
+and twice more at 600.7 s and 601.7 s, both of which were `panic: test timed out`
+against the old 600 s default and so are *lower bounds* on the real cost. A
+ceiling fitted to whichever run happened to be measured would false-red on a
+busier day; 780 s leaves **29 %** headroom over the worst of them while still
+tripping on a genuine 25 % cost regression, and stays far clear of
+`SHORT_TIMEOUT` (30 m).
+
+The `cypher` figure rests on a **single** observation. It carries less evidential
+weight than the `internal/sim` one and should be re-derived once a second is
+recorded.
+
+Keys match as a **suffix** of the import path, not as a substring. This matters:
+substring matching would have let `/cypher` also cover `cypher/tck`, `cypher/ir`
+and `bench/cypher_scale`, handing an unrelated package a ceiling nobody measured
+for it. `internal/scriptgate` asserts every key still names an existing package
+directory, because a stale suffix left behind after a rename is not inert — it
+starts covering whatever package later ends with it.
+
+#### Where `internal/sim` spends its time
+
+Recorded so the next person does not re-derive it. Whole package,
+`go test -race -count=1 -v`, quiet host, 2026-08-25: **974 top-level tests** (22
+skipped), **570.1 s** summed against a ~530 s wall.
+
+| Test | Cost | Share |
 |---|---|---|
-| 2026-08-25 | `ok internal/sim 532.470s` (`go test -race -count=1 ./internal/sim/`) | **2.01 before, 4.89 after** |
-| 2026-08-25 | `ok internal/sim 528.618s` (same command, immediately after) | **4.89 before, 4.73 after** |
-| 2026-08-25 | `ok internal/sim 536.067s` (same command, earlier) | quiet, load average not recorded |
-| 2026-08-25 | `ok internal/sim 557.441s` inside the parallel suite | full `make ci`, ~124 packages concurrent |
+| `TestSchemaMutation_NonVacuityGatesAreNotVerdicts` | 97.20 s | 17.1 % |
+| `TestCypherSurface_Scenario_Passes` | 34.09 s | 6.0 % |
+| `TestMVCCSessionsCrash_Deterministic` | 25.58 s | 4.5 % |
+| `TestMVCCSessions_IsolationGreen20Seeds` | 25.56 s | 4.5 % |
+| `TestMergeRel_MultiSeed` | 19.82 s | 3.5 % |
+| *top 20 combined* | *331.4 s* | *58.1 %* |
 
-The three standalone figures agree within **1.4%** (528.6–536.1 s), so the number
-is stable and not an artefact of one noisy run. Every one is **~1.27× the 420 s**
-the old text claimed as this package's ceiling, and **~2.2× the global 240 s**.
+**The package was re-baselined rather than split, and that was a coverage
+decision, not an arithmetic one.** Removing even the single largest test leaves
+~433 s — still above the old 420 s figure — so no surgical cut reaches the
+ceiling; the remaining 954 tests hold the other 41.9 %. Moving the battery to
+`soak` was rejected because this document requires it to run under `-race` on
+**every** push to preserve the ACID/DST guarantee, and trading that for a cost
+target inverts the correct-before-fast order.
 
-Each row records the load average it was taken at, because a figure labelled
-"quiet" without one is a guess — the third row is included with that caveat
-attached rather than silently.
+The drift is real and is why the gate now runs: rmp #2577 measured **818 tests /
+460.9 s** at commit `147e28e4` on 2026-08-20. Five days later the same package is
+**974 tests / 570.1 s** — +19 % tests, +24 % cost, unremarked, because nothing on
+the routine path was reading the number.
 
-Bringing it under a ceiling is tracked as **rmp #2577** and **#2599**. Only once
-that lands can a ceiling be set and the gate turned on and pass.
+#### What rmp #2566 found, kept as the record
 
-There is also a cost trap to avoid when it is turned on: `test-short-timings`
-re-runs the **entire** short layer to collect its `-json`, so adding it to `ci`
-would roughly double the suite. The right wiring is to have `test-short` itself
-emit `-json` through the budget script — one run, both outcomes.
+Until rmp #2566 this section claimed the budget was "enforced, not merely
+documented". All three of its supporting claims were untrue at HEAD, and each was
+verified individually: `make ci` did not invoke the gate; `HARD_BUDGET` defaulted
+to `0`, which the script documents as *disabled*; and `PKG_HARD_BUDGET_OVERRIDES`
+was set nowhere, so the `internal/sim` override attributed to "the `build + test +
+race` job" existed no more than that job did — the only workflow is `release.yml`.
 
-The `PKG_HARD_BUDGET_OVERRIDES` mechanism is real and works; it is simply unused.
-Overrides are `path-substring=seconds` pairs, whitespace- or comma-separated, and
-a package whose import path contains a key uses that key's ceiling instead of
-`HARD_BUDGET` — mirroring `cover_gate.sh`'s `COVER_PKG_FLOOR_EXEMPT`.
+That paragraph is kept because it names the failure mode this section now exists
+to prevent: **a ceiling nothing reads is decoration, and it reports success in
+exactly the same way as a passing one.** `internal/scriptgate` holds the
+regression tests, which fail on the tree described above.
 
 When a package approaches the budget, split it or move its slow cases to the
-`soak` layer rather than relaxing the threshold.
+`soak` layer rather than relaxing the threshold — unless, as with `internal/sim`,
+moving it would cost coverage the layer exists to provide. Then re-baseline
+deliberately, with the measurement recorded here.
 
 ## How a test selects its layer
 
@@ -213,7 +276,7 @@ discipline is enforced by tooling, not folklore.
 
 | Target | Layer | Equivalent command |
 |---|---|---|
-| `make test-short` | short | `GOGRAPH_PARALLEL_SUITE=1 go test -race -count=1 -timeout=$(SHORT_TIMEOUT) ./...` |
+| `make test-short` | short | `GOGRAPH_PARALLEL_SUITE=1 go test -race -count=1 -timeout=$(SHORT_TIMEOUT) ./... \| bash scripts/pkg_time_budget.sh` |
 | `make test-timing` | short (serial phase) | `go test -race -count=1 -p 1 -timeout=$(TIMING_TIMEOUT) -run '$(TIMING_RUN)' $(TIMING_PKGS)` |
 | `make test-soak` | soak | `go test -race -count=1 -timeout=$(SOAK_TIMEOUT) -tags=soak ./...` |
 | `make test-nightly` | nightly | `go test -race -count=1 -timeout=$(NIGHTLY_TIMEOUT) -tags=nightly ./...` |
@@ -244,9 +307,11 @@ inside `make ci` — carries its own hard-coded `-timeout=20m` for the same
 reason.
 
 **A `-timeout` is not a cost budget.** The per-package *cost* budget is a
-separate concern with a separate instrument: `make test-short-timings`
-(60 s soft, 240 s hard, plus the documented `internal/sim` override above).
-Raising a timeout must never be read as raising that budget.
+separate concern with its own instrument, `scripts/pkg_time_budget.sh`, which
+`test-short` pipes through on every run (60 s soft, 240 s hard, plus the two
+measured overrides above). Raising a timeout must never be read as raising that
+budget: a 30 m timeout catches a package that HUNG, the budget catches one that
+merely grew.
 
 #### The short layer: `SHORT_TIMEOUT` (rmp #2584)
 

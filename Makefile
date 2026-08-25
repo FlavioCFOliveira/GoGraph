@@ -96,6 +96,38 @@ race: ## Run unit tests with the race detector (SHORT_TIMEOUT overridable)
 # See docs/test-layers.md for the same measurements.
 SHORT_TIMEOUT ?= 30m
 
+# Per-package short-layer COST budget, enforced on the routine gate by
+# scripts/pkg_time_budget.sh, which `test-short` pipes its output through
+# (rmp #2577, #2599). Before this it was enforced by nothing: HARD_BUDGET
+# defaulted to 0 (disabled), and the only target that ran the script at all was
+# absent from `ci`. A ceiling nothing reads is decoration.
+#
+# SOFT_BUDGET warns; HARD_BUDGET fails the gate. The global ceiling stays at the
+# documented 240 s: it is NOT relaxed to accommodate the two packages above it.
+# Those two get a NAMED, measured override instead, so the accommodation is
+# visible per package and cannot silently cover a third.
+SOFT_BUDGET ?= 60
+HARD_BUDGET ?= 240
+
+# Overrides are "path-suffix=seconds", derived by one stated rule rather than a
+# number fitted per package: the WORST in-suite figure ever recorded for that
+# package in docs/test-layers.md, times 1.25, rounded up to the whole minute.
+#
+#   internal/sim  602.9s x 1.25 = 753.6 -> 780
+#   cypher        276.4s x 1.25 = 345.5 -> 360
+#
+# Worst-observed, not last-measured: internal/sim has been recorded in-suite at
+# 545.8s, 557.4s, 564.0s and 602.9s on this hardware — a 10.5% spread — so a
+# ceiling fitted to the run that happened to be measured would false-red on a
+# busier day. 780s leaves 29% headroom over the worst of them while still
+# tripping on a genuine 25% cost regression, and stays far clear of
+# SHORT_TIMEOUT (30m).
+#
+# The cypher figure rests on a SINGLE observation; it carries less evidential
+# weight than the sim one and should be re-derived when a second is recorded.
+PKG_HARD_BUDGET_OVERRIDES ?= /internal/sim=780 /cypher=360
+export SOFT_BUDGET HARD_BUDGET PKG_HARD_BUDGET_OVERRIDES
+
 # GOGRAPH_PARALLEL_SUITE declares to the test binaries that packages are being
 # tested IN PARALLEL, so any wall-clock, throughput, or CPU-time assertion is
 # measuring the machine's load rather than the code (rmp #2517).
@@ -105,8 +137,14 @@ SHORT_TIMEOUT ?= 30m
 # The variable is exported by presence, not value, so an empty expansion cannot
 # silently re-enable a gate under load.
 .PHONY: test-short
-test-short: ## [layer: short]   local default — race detector, no build tags (SHORT_TIMEOUT overridable)
-	GOGRAPH_PARALLEL_SUITE=1 $(GO) test $(RACE_FLAGS) -count=1 -timeout=$(SHORT_TIMEOUT) $(PACKAGES)
+# The pipe carries the per-package cost budget. The script echoes the go test
+# output through VERBATIM, so what the developer sees is unchanged, and it reads
+# the plain "ok<TAB>pkg<TAB>0.330s" summary lines rather than -json, because
+# -json implies -v and would bury the run in per-test noise for the identical
+# numbers. pipefail (.SHELLFLAGS, line 2) keeps a test failure failing: the
+# budget check cannot mask it.
+test-short: ## [layer: short]   local default — race detector, no build tags, per-package cost budget (SHORT_TIMEOUT/SOFT_BUDGET/HARD_BUDGET overridable)
+	GOGRAPH_PARALLEL_SUITE=1 $(GO) test $(RACE_FLAGS) -count=1 -timeout=$(SHORT_TIMEOUT) $(PACKAGES) | bash scripts/pkg_time_budget.sh
 
 # TIMING_PKGS are the packages holding short-layer assertions whose subject is a
 # duration, a throughput, or a ratio of them. The full inventory, with the
@@ -141,12 +179,17 @@ TIMING_TIMEOUT ?= 20m
 test-timing: ## [layer: short] Serially re-run the wall-clock/throughput gates on a quiet machine, where their measurement is valid (rmp #2517)
 	$(GO) test $(RACE_FLAGS) -count=1 -p 1 -timeout=$(TIMING_TIMEOUT) -run '$(TIMING_RUN)' $(TIMING_PKGS)
 
-# test-short-timings runs the IDENTICAL short layer, so it carries the identical
-# timeout: without it, the target that exists to report per-package timings
-# would be the one that could not survive long enough to report them.
+# test-short-timings DELEGATES to test-short rather than restating its command.
+# It used to carry its own copy, and the two drifted: the copy omitted
+# GOGRAPH_PARALLEL_SUITE, so it was the one target that ran the whole parallel
+# suite with the quiet-machine gates ASSERTING — precisely the contention rmp
+# #2517 removed everywhere else. Delegation makes that class of drift impossible;
+# the budget now lives on test-short itself, so there is nothing left to restate.
+# The knobs still work: SOFT_BUDGET/HARD_BUDGET/PKG_HARD_BUDGET_OVERRIDES are
+# exported above, so `SOFT_BUDGET=30 make test-short-timings` behaves as before.
 .PHONY: test-short-timings
-test-short-timings: ## [layer: short] Run the short layer (race, -json) and report packages over the 60s/pkg budget (SOFT_BUDGET/HARD_BUDGET/SHORT_TIMEOUT overridable)
-	bash -o pipefail -c '$(GO) test $(RACE_FLAGS) -count=1 -timeout=$(SHORT_TIMEOUT) -json $(PACKAGES) | bash scripts/pkg_time_budget.sh'
+test-short-timings: ## [layer: short] Alias for test-short, kept as the named entry point for ad-hoc budget exploration (SOFT_BUDGET/HARD_BUDGET/SHORT_TIMEOUT overridable)
+	$(MAKE) test-short
 
 # SOAK_TIMEOUT / NIGHTLY_TIMEOUT — the deferred layers need an EXPLICIT
 # per-package timeout (rmp #2259).
