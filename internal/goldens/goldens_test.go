@@ -181,10 +181,3 @@ func TestUpdateRequested_EnvVar(t *testing.T) {
 		t.Error("UpdateRequested() = false with GOGRAPH_UPDATE_GOLDENS=1")
 	}
 }
-
-func TestUpdateRequested_EnvVar_Unset(t *testing.T) {
-	_ = os.Unsetenv("GOGRAPH_UPDATE_GOLDENS")
-	// Don't assert false here because the -update flag might be set
-	// globally by the test runner; just verify it doesn't panic.
-	_ = goldens.UpdateRequested()
-}

@@ -27,17 +27,6 @@ import (
 	"testing"
 )
 
-// TestUsingIndexHint_NotImplemented documents that the USING INDEX hint syntax
-// is not supported by the parser. The test is unconditionally skipped with an
-// explanatory message so the gap is visible in the test log.
-//
-// When the hint is eventually implemented, remove the t.Skip call and replace
-// this test body with an assertion on the plan output.
-func TestUsingIndexHint_NotImplemented(t *testing.T) {
-	t.Parallel()
-	t.Skip("USING INDEX hint not implemented in the parser — see docs/tck/DIVERGENCES.md")
-}
-
 // TestUsingIndexHint_AutomaticSelectionWithHashIndex verifies that, in the
 // absence of an explicit hint, the planner automatically selects
 // NodeByIndexSeek when a hash index on the queried property exists.
