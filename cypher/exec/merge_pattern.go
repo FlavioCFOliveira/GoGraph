@@ -881,10 +881,10 @@ func (op *MergePattern) expandCandidates(fromKey string, hop *mergePatternHop, t
 		if len(hopProps) > 0 && !nodeMatchesAllProperties(hopProps, op.mutator.EdgeProperties(edgeSrc, edgeDst)) {
 			return
 		}
-		if !nodeMatchesAllLabels(target.labels, op.mutator.NodeLabels(candKey)) {
+		if !nodeMatchesAllLabels(target.labels, labelsInTx(op.mutator, candKey)) {
 			return
 		}
-		if !nodeMatchesAllProperties(targetProps, op.mutator.NodeProperties(candKey)) {
+		if !nodeMatchesAllPropertiesInTx(op.mutator, candKey, targetProps) {
 			return
 		}
 		id, ok := op.mutator.ResolveNodeID(candKey)

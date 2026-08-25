@@ -97,10 +97,10 @@ func NewMergeSearchFnFromPattern(
 			if !ok {
 				return true
 			}
-			if !nodeMatchesAllLabels(wantLabels, mutator.NodeLabels(nodeKey)) {
+			if !nodeMatchesAllLabels(wantLabels, labelsInTx(mutator, nodeKey)) {
 				return true
 			}
-			if !nodeMatchesAllProperties(props, mutator.NodeProperties(nodeKey)) {
+			if !nodeMatchesAllPropertiesInTx(mutator, nodeKey, props) {
 				return true
 			}
 			matches = append(matches, Row{expr.IntegerValue(int64(id))})
@@ -214,10 +214,10 @@ func searchMergeNodes(ctx context.Context, mutator GraphMutator, labelSrc MergeL
 		if !ok {
 			return true
 		}
-		if !nodeMatchesAllLabels(labels, mutator.NodeLabels(nodeKey)) {
+		if !nodeMatchesAllLabels(labels, labelsInTx(mutator, nodeKey)) {
 			return true
 		}
-		if !nodeMatchesAllProperties(props, mutator.NodeProperties(nodeKey)) {
+		if !nodeMatchesAllPropertiesInTx(mutator, nodeKey, props) {
 			return true
 		}
 		matches = append(matches, Row{expr.IntegerValue(int64(id))})
@@ -253,6 +253,43 @@ func nodeMatchesAllLabels(want, got []string) bool {
 // empty want list always matches. A partial match — some properties of the
 // pattern present, others absent — does NOT match: every property in want
 // must be present.
+// nodeMatchesAllPropertiesInTx is [nodeMatchesAllProperties] resolved through the
+// mutator's own transaction view.
+//
+// It is the property half of rmp #2365, and it has the identical exposure the
+// label half had: GraphMutator.NodeProperties is a bare shard read returning the
+// NEWEST stored value, another transaction's eager uncommitted write included.
+// MEASURED on 2026-08-25, with a peer holding an uncommitted `SET n.k = 'new'`
+// on the only :Target node:
+//
+//	T2: MATCH (n:Target {k:'old'}) RETURN count(n)  => 1   (correctly visible)
+//	T2: MERGE (n:Target {k:'old'}) …                => DUPLICATE created
+//
+// MERGE contradicting MATCH inside ONE transaction is the sharpest statement of
+// the defect, and it is why the fix belongs at the decision site rather than in
+// the enumeration: the candidate was enumerated correctly and then dropped by
+// this comparison.
+//
+// It reads per KEY rather than fetching the whole bag, because that is what the
+// transaction view offers ([txVisibleNodeReader.NodePropertyInTx]) and because
+// MERGE only ever asks about the keys its pattern names.
+func nodeMatchesAllPropertiesInTx(mut GraphMutator, n string, want []propLiteral) bool {
+	if len(want) == 0 {
+		return true
+	}
+	r := nodeStateReaderFor(mut)
+	for _, w := range want {
+		gv, ok := r.property(n, w.key)
+		if !ok {
+			return false
+		}
+		if !mergePropValueEquals(w.value, gv) {
+			return false
+		}
+	}
+	return true
+}
+
 func nodeMatchesAllProperties(want []propLiteral, got map[string]lpg.PropertyValue) bool {
 	for _, w := range want {
 		gv, ok := got[w.key]
