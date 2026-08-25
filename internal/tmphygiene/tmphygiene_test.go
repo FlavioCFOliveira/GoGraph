@@ -60,6 +60,13 @@ import (
 // directory, say — stays listed, so the directories it stranded before the move
 // remain visible until someone prunes them. A prefix that is ADDED without being
 // listed fails that gate, so the guard cannot silently go blind on a new site.
+//
+// That last sentence held only for NON-NESTING names until rmp #2586. The gate
+// matched a call site's prefix by containment, so a new site whose prefix nested
+// under an already-listed one satisfied it while unregistered — and went blind
+// silently, which is precisely what the sentence promised could not happen. The
+// gate now requires EXACT membership via [ownedPrefixListedExactly]; attribution
+// keeps containment, because the nested sub-case below depends on it.
 var ownedTempPrefixes = []string{
 	// internal/crashinject — the helper binary cache (the #2527 leak itself).
 	"gograph-crashinject-",
@@ -289,6 +296,81 @@ func matchOwnedPrefix(name string) (string, bool) {
 		}
 	}
 	return best, best != ""
+}
+
+// ownedPrefixListedExactly reports whether prefix is itself an entry of
+// [ownedTempPrefixes], rather than merely nesting under one.
+//
+// # Why coverage needs this and attribution does not (rmp #2586)
+//
+// [matchOwnedPrefix] answers ATTRIBUTION — given a directory found on disk, which
+// listed family does it belong to? Longest-prefix containment is right there, and
+// load-bearing: "sim-bulkimport-img-" is deliberately nested under
+// "sim-bulkimport-" so a sub-case's directories are counted separately while
+// still rolling up.
+//
+// The COVERAGE gate asks a different question — is this call site registered? —
+// and containment answers it wrongly. Any new temp-rooted site whose prefix nests
+// under an already-listed one satisfied the gate while unregistered, so the guard
+// went blind to it silently. Measured: an unregistered non-nesting name failed the
+// gate as intended, while a nesting one passed.
+//
+// So attribution keeps containment and coverage requires exact membership. The two
+// questions are not the same question and must not share a matcher.
+func ownedPrefixListedExactly(prefix string) bool {
+	for _, p := range ownedTempPrefixes {
+		if p == prefix {
+			return true
+		}
+	}
+	return false
+}
+
+// TestOwnedPrefixCoverage_IsNotSatisfiedByNesting is the regression test for
+// rmp #2586. It pins the DIFFERENCE between the two matchers, which is where the
+// defect lived: coverage must require exact membership while attribution keeps
+// longest-prefix containment.
+//
+// On the old behaviour the coverage gate called [matchOwnedPrefix], so every
+// assertion below about ownedPrefixListedExactly being false would instead have
+// been true and the gate would have passed an unregistered site.
+func TestOwnedPrefixCoverage_IsNotSatisfiedByNesting(t *testing.T) {
+	t.Parallel()
+
+	// A hypothetical new sub-case nesting under the real nested pair. It is
+	// deliberately built from a prefix that IS listed, so nothing but the
+	// exact/containment distinction can make the assertions below differ.
+	const nested = "sim-bulkimport-img-extra-"
+
+	if !ownedPrefixListedExactly("sim-bulkimport-img-") {
+		t.Fatal("the fixture is stale: sim-bulkimport-img- is no longer listed, so this test " +
+			"no longer exercises a nesting name")
+	}
+
+	// ATTRIBUTION still resolves it, and to the LONGEST listed prefix. This is the
+	// half that must not change: it is how a sub-case's directories roll up.
+	if got, ok := matchOwnedPrefix(nested); !ok || got != "sim-bulkimport-img-" {
+		t.Errorf("matchOwnedPrefix(%q) = (%q, %v), want (%q, true): attribution must still "+
+			"resolve a nesting name to its longest listed ancestor", nested, got, ok, "sim-bulkimport-img-")
+	}
+
+	// COVERAGE must refuse it. This is the assertion that fails on the old
+	// behaviour, where the gate used matchOwnedPrefix and would have seen it as
+	// registered.
+	if ownedPrefixListedExactly(nested) {
+		t.Errorf("ownedPrefixListedExactly(%q) = true, want false: a site nesting under a listed "+
+			"prefix is NOT registered, and treating it as registered is how the guard went blind "+
+			"silently (rmp #2586)", nested)
+	}
+
+	// The legitimate nested sub-case still passes coverage on its own account,
+	// which is what stops the fix from being a blanket ban on nesting.
+	for _, p := range []string{"sim-bulkimport-", "sim-bulkimport-img-"} {
+		if !ownedPrefixListedExactly(p) {
+			t.Errorf("ownedPrefixListedExactly(%q) = false, want true: the deliberate nested "+
+				"sub-case must remain registered and attributable in its own right", p)
+		}
+	}
 }
 
 // staleDir is one owned directory that has outlived any process entitled to hold
@@ -907,7 +989,7 @@ func TestOwnedTempPrefixes_CoverEveryTempRootedCallSite(t *testing.T) {
 			}
 			indirectSeen[file]++
 			for _, prefix := range decl.prefixes {
-				if _, ok := matchOwnedPrefix(prefix); !ok {
+				if !ownedPrefixListedExactly(prefix) {
 					t.Errorf("indirectTempSites[%q] declares prefix %q, which ownedTempPrefixes "+
 						"does not list; the guard would still be blind to it", file, prefix)
 				}
@@ -915,7 +997,7 @@ func TestOwnedTempPrefixes_CoverEveryTempRootedCallSite(t *testing.T) {
 			continue
 		}
 
-		if _, ok := matchOwnedPrefix(strings.TrimSuffix(s.pattern, "*")); !ok {
+		if !ownedPrefixListedExactly(strings.TrimSuffix(s.pattern, "*")) {
 			t.Errorf("%s: os.MkdirTemp(\"\", %q) creates directories in the system temp area "+
 				"under a prefix that ownedTempPrefixes does not list, so the accumulation "+
 				"guard is blind to it. Add %q to ownedTempPrefixes, or hand the site a "+
