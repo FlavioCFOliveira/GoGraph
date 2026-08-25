@@ -82,6 +82,14 @@ func (w *world) assertSyntaxError(errType string) error {
 		w.result.Close() //nolint:errcheck // drained or already-errored result; close is best-effort
 		w.result = nil
 	}
+	// An INCONCLUSIVE run is not evidence that the expected error was raised: the
+	// query was cut off by its deadline before it could produce one, so accepting
+	// it here would let a slow host satisfy an error expectation FOR THE WRONG
+	// REASON — a false pass, which is worse than the false fail rmp #2568 set out
+	// to remove. Returning it leaves the scenario unverified, which is the truth.
+	if errors.Is(w.err, errInconclusive) || errors.Is(w.err, errWedged) {
+		return w.err
+	}
 	if w.err == nil {
 		return fmt.Errorf("expected SyntaxError(%s) but query succeeded", errType)
 	}
@@ -112,6 +120,14 @@ func (w *world) assertError(errType string) error {
 		}
 		w.result.Close() //nolint:errcheck // drained or already-errored result; close is best-effort
 		w.result = nil
+	}
+	// An INCONCLUSIVE run is not evidence that the expected error was raised: the
+	// query was cut off by its deadline before it could produce one, so accepting
+	// it here would let a slow host satisfy an error expectation FOR THE WRONG
+	// REASON — a false pass, which is worse than the false fail rmp #2568 set out
+	// to remove. Returning it leaves the scenario unverified, which is the truth.
+	if errors.Is(w.err, errInconclusive) || errors.Is(w.err, errWedged) {
+		return w.err
 	}
 	if w.err == nil {
 		return fmt.Errorf("expected error(%s) but query succeeded", errType)
