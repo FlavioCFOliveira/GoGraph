@@ -3770,3 +3770,27 @@ both now have rows. (4) One `Lesson`,
 `{name:…}` lookup; recorded on the `Lesson` row, not corrected.
 (5) `Component` uses `path` for the file, not `file` — recorded rather than
 duplicated into a second property.
+
+### Sprint 349 sync — a clamping scenario runs alone (2026-08-25)
+
+Post-commit sync for `c62319a23d6272fcd652b7789c19dc5b06e5ac03` (rmp #2613), the
+fix for the defect the 2026-08-25 DST parallel exercise found: `cpu-starvation`
+clamped process-global `GOMAXPROCS` to 1 while the swarm ran other scenarios in
+the same process, so 38 of 38 failures across 11141 runs were harness artefacts
+rather than engine defects.
+
+**Written.** +2 `Component` (`internal/sim/gomaxprocs.go`, the package-wide
+`gomaxprocsMu` clamp lock; `internal/sim/gomaxprocs_test.go`, its regression
+battery). +1 `Decision` (`2613-gomaxprocs-exclusivity`) recording that the hold
+lives in `Scenario.Run` rather than `Swarm.runOne`, the rejected alternatives,
+and the one hard constraint — `runCPUStarvation` performs the **only** recursive
+`Scenario.Run` in the package, so its inner value must set `ClampsGOMAXPROCS` or
+it deadlocks. +1 `Lesson`
+(`2613-red-control-silenced-by-its-own-fix`). +2 `Task` (#2613 COMPLETED, #2614
+BACKLOG). Edges: 2 `CONTAINS`, 4 `ABOUT`, 1 `TAUGHT`, all stamped.
+
+**New property on `DSTScenario`: `clampsGOMAXPROCS`** (boolean, present only where
+true). It holds on exactly two of the 49 registered scenarios — `cpu-starvation`
+and `pagerank-ranker` — and mirrors `Scenario.ClampsGOMAXPROCS` in the code. A
+scenario carrying it runs alone in the swarm. Query it before assuming any
+scenario can be co-scheduled.
