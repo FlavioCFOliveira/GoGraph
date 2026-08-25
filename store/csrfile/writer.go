@@ -47,8 +47,26 @@ var ErrPublishedNotDurable = errors.New("csrfile: published but durability unpro
 // readers see either the previous file or the new file, never a partial
 // write.
 //
-// On return with a NIL error the published file is crash-durable: it
-// survives process crash, host crash, and kill -9.
+// On return with a NIL error the published file's CONTENTS are durable
+// everywhere — the temp file is fsync'd before the rename — and on
+// linux/darwin/freebsd/netbsd/openbsd the rename's DIRECTORY ENTRY is durable
+// too, so the publication survives process crash, host crash and kill -9.
+//
+// # The platform scope of that sentence (rmp #2582)
+//
+// Outside that build set [parentDirFsync] is an unconditional no-op, so this
+// function performs no barrier after the rename and the durability of the
+// directory ENTRY is not established by anything GoGraph does. What happens to
+// it is then a property of the filesystem, and this godoc deliberately makes no
+// claim either way: the audit that raised this had inferred a Windows answer
+// from the absent barrier rather than measuring one, and found no normative
+// documentation on NTFS journal-commit ordering with respect to MoveFileEx.
+// Stating where the barrier IS is a fact; stating what other platforms do
+// without one would be a guess.
+//
+// Process crash and kill -9 are unaffected by the platform: the rename is a
+// single kernel operation and survives the death of the process that issued it
+// everywhere.
 //
 // On return with a NON-NIL error, which of the two states holds depends on the
 // error, and the caller must not guess:

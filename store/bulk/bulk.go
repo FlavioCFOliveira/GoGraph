@@ -259,6 +259,18 @@ func (l *Loader) Drain(ctx context.Context, ch <-chan Edge) (int, error) {
 //
 // The returned *csr.CSR is valid in both cases; only the on-disk artefact
 // differs.
+//
+// # The platform scope of the durability claim (rmp #2582)
+//
+// On a nil error the published file's CONTENTS are durable everywhere, and on
+// linux/darwin/freebsd/netbsd/openbsd the rename's DIRECTORY ENTRY is durable
+// too. Outside that build set csrfile performs no barrier after the rename, so
+// the entry's durability is a property of the filesystem rather than something
+// GoGraph establishes — see [csrfile.WriteToFile], which carries the full
+// statement and explains why no claim is made about those platforms either way.
+//
+// This caveat used to be absent here entirely, which mattered more than its
+// absence in csrfile: a bulk-loader caller reads THIS godoc.
 func (l *Loader) Finalise() (int, *csr.CSR[int64], error) {
 	defer metrics.Time("store.bulk.Finalise").Stop()
 
