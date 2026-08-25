@@ -199,7 +199,6 @@ import (
 	"math"
 	"runtime"
 	"strings"
-	"sync"
 	"sync/atomic"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
@@ -295,26 +294,6 @@ func pageRankerCrossRegimeWorkers() []int { return []int{2, 3, 4, 8} }
 // ([prAdjudicate]) rather than reading the report, so they always see the
 // complete list.
 const pageRankerReportCap = 16
-
-// prClampMu serialises the GOMAXPROCS-mutating phase of this scenario against
-// itself.
-//
-// GOMAXPROCS is process-global and [Swarm] runs many instances of one scenario
-// concurrently, so two unsynchronised instances would not merely slow each other
-// down: interleaved save/restore can leave the process permanently clamped (A
-// saves 8 and sets 1, B saves 1 and sets 4, A restores 8, B restores 1), and
-// each would decide the OTHER's regime. The mutex removes that for this
-// scenario; a FOREIGN clamp — `runCPUStarvation` is the only other one in this
-// package — is caught instead by [prWithClamp]'s read-back on both sides of the
-// window, which reports a harness error rather than a false violation.
-//
-// This is a package-level variable in a non-test file, which
-// global_state_guard_test.go exists to police. It is deliberate and it is not
-// the shape that guard forbids: the guard reports package-level state a TEST
-// file writes to, and nothing writes to this one — it is a lock over a resource
-// the runtime owns, not shared state of ours, and there is no parameter to thread
-// it through because the resource being serialised is not ours to pass.
-var prClampMu sync.Mutex
 
 // prLabelKeyType is the type name of the context key runtime/pprof uses for its
 // goroutine label set. [prLabelProbe] classifies lookups by it so a lookup from
@@ -1014,7 +993,13 @@ func prBufferIndex(seen *[]*float64, s []float64) int {
 // landed inside the window, which would decide this run's regime for it; that is
 // a harness interference, not an invariant violation, so it is returned as an
 // error and reaches the CLI through the error channel rather than as a false
-// report. [prClampMu] already excludes concurrent instances of this scenario.
+// report.
+//
+// The caller holds [gomaxprocsMu] exclusively across the whole clamped phase, so
+// since rmp #2613 no foreign clamp can land here. The read-back is kept
+// deliberately: it is the detector that caught the interference in the first
+// place, and a silent wrong regime is exactly the fail-silent class this suite
+// exists to catch. It should now never fire.
 func prWithClamp(want int, fn func() error) error {
 	prev := runtime.GOMAXPROCS(want)
 	defer runtime.GOMAXPROCS(prev)
@@ -1373,15 +1358,16 @@ func RunPageRankRanker(ctx context.Context, cfg PageRankRankerConfig) (*PageRank
 		Perturb:   cfg.Perturb,
 	}
 
-	// The whole GOMAXPROCS-mutating phase runs under the clamp lock, so no second
-	// instance of this scenario can decide this one's regimes. The reference power
-	// iteration below is deliberately OUTSIDE it: it is pure arithmetic and holding
-	// a process-global lock across it would serialise a swarm for no reason.
+	// The whole GOMAXPROCS-mutating phase runs under the package-wide exclusive
+	// clamp hold, so neither a second instance of this scenario nor any other
+	// scenario the swarm dispatches can decide this one's regimes — nor observe
+	// the clamped value (rmp #2613). The reference power iteration below is
+	// deliberately OUTSIDE it: it is pure arithmetic and holding a process-global
+	// lock across it would serialise a swarm for no reason.
 	var refCopy []float64
 	refDamping := plan[len(plan)-1].Opts.Damping
 	err := func() error {
-		prClampMu.Lock()
-		defer prClampMu.Unlock()
+		defer holdGOMAXPROCSExclusive()()
 		pr := centrality.NewPageRanker(fx.c)
 		st := &prSeqState{}
 		for i, w := range plan {
@@ -1725,9 +1711,10 @@ func pageRankRankerScenario() Scenario {
 			"actually differing — plus the whole-sequence shape that only two backing arrays are ever " +
 			"returned, one window adjudicated against the independent power-iteration reference, and " +
 			"the published serial-versus-parallel bit-identity claim swept across four worker counts",
-		Mode:        ModeDeterministic,
-		DefaultSeed: pageRankRankerDefaultSeed,
-		run:         runPageRankRankerScenario,
+		Mode:             ModeDeterministic,
+		DefaultSeed:      pageRankRankerDefaultSeed,
+		ClampsGOMAXPROCS: true,
+		run:              runPageRankRankerScenario,
 	}
 }
 

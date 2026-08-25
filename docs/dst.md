@@ -1188,6 +1188,42 @@ fair-scheduling / barrier hypotheses, each under a deadlock watchdog:
   failure.
 - **Coverage** (`--coverage-report`, `--bias`) tracks which scenarios have been
   exercised and can bias selection toward under-covered ones.
+
+#### Scenarios that mutate process-global state run alone (rmp #2613)
+
+The swarm's workers share one process, so a scenario that writes
+`runtime.GOMAXPROCS` does not merely slow itself down: it removes the
+parallelism every co-resident scenario's claims are built on. Two scenarios do
+write it — `cpu-starvation` (clamping to one core, which is its whole subject)
+and `pagerank-ranker` (moving PageRank between its serial and parallel regimes).
+
+Both declare `Scenario.ClampsGOMAXPROCS` and take `gomaxprocsMu` exclusively for
+their clamped phase; every other scenario takes the shared side inside
+`Scenario.Run` itself. A clamping scenario therefore runs **alone**, at a cost in
+swarm throughput that is paid only while it holds the process.
+
+The hold lives in `Scenario.Run` rather than in `Swarm.runOne` so the guarantee
+is a property of the scenario API: any caller running two scenarios at once gets
+it, package tests running in parallel included. The one recursive `Scenario.Run`
+in the package — `runCPUStarvation`'s inner scenario — marks itself
+`ClampsGOMAXPROCS` for that reason, since re-entering the shared side while the
+outer call holds the exclusive side would deadlock immediately.
+
+This is not a theoretical hazard. Before the guard existed, a 3 x 3 x 5-minute
+exercise on 2026-08-25 (11141 runs at `-workers=3`) produced 38 failures and
+every one traced here — 37 `bolt-decode-swarm` runs whose co-residence clauses
+cannot be satisfied at `GOMAXPROCS=1`, plus one `pagerank-ranker` run that caught
+the foreign clamp through its own read-back. Re-running the identical master
+seeds after the fix gave 4516/4516 clean while drawing `cpu-starvation` 84 times,
+against 25 failures in 49 `bolt-decode-swarm` runs before. See
+[docs/dst-parallel-exercise-2026-08-25.md](dst-parallel-exercise-2026-08-25.md).
+
+Such a failure is especially expensive to diagnose because it is **not
+seed-reproducible**: whether a run fails depends on what a neighbouring worker
+drew, which the seed does not capture, so the reproduce line the swarm prints
+does not reproduce. `internal/sim/gomaxprocs_test.go` pins the contract, and its
+structural arm fails the moment a new `GOMAXPROCS` write appears outside a
+declared clamping scenario.
 - **Differential**, **upgrade**, **cross-release**, and **metrics-oracle** modes
   cross-check equivalent engine configurations, on-disk data-compatibility across
   releases, and metrics against the oracle. See the corresponding `*_test.go`

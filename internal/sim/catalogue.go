@@ -198,37 +198,52 @@ func DefaultRegistry() (*Registry, error) {
 // convergence guarded), not bit-reproducible.
 func cpuStarvationScenario() Scenario {
 	return Scenario{
-		Name:        ScenarioCPUStarvation,
-		Description: "compute hog vs honest queries on a single clamped core (fair scheduling: forward progress, no resonance)",
-		Mode:        ModeLiveness,
-		DefaultSeed: 0xC9057A40,
-		Connections: cpuStarvationConns,
-		OpsPerConn:  cpuStarvationOps,
-		Mix:         &ConcurrentMix{WriterWeight: 0.2, ReaderWeight: 0.2, OverloadWeight: 0.6},
-		run:         runCPUStarvation,
+		Name:             ScenarioCPUStarvation,
+		Description:      "compute hog vs honest queries on a single clamped core (fair scheduling: forward progress, no resonance)",
+		Mode:             ModeLiveness,
+		DefaultSeed:      0xC9057A40,
+		Connections:      cpuStarvationConns,
+		OpsPerConn:       cpuStarvationOps,
+		Mix:              &ConcurrentMix{WriterWeight: 0.2, ReaderWeight: 0.2, OverloadWeight: 0.6},
+		ClampsGOMAXPROCS: true,
+		run:              runCPUStarvation,
 	}
 }
 
 // runCPUStarvation clamps GOMAXPROCS to a single core for the duration of the
 // run, so the hog-heavy safety phase and the liveness convergence phase both
 // contend for one OS thread, then delegates to the standard liveness flow. The
-// clamp is process-global, so the integration test must not run in parallel; it
-// is always restored on return. The liveness watchdog classifies a stuck run as
-// RESONANCE (deadlock/livelock), which is the real fair-scheduling failure this
-// scenario hunts — latency percentiles are deliberately NOT asserted (they are
-// statistical and would flake).
+// clamp is always restored on return. The liveness watchdog classifies a stuck
+// run as RESONANCE (deadlock/livelock), which is the real fair-scheduling
+// failure this scenario hunts — latency percentiles are deliberately NOT
+// asserted (they are statistical and would flake).
+//
+// The clamp is PROCESS-GLOBAL, so the run holds [gomaxprocsMu] exclusively for
+// its whole duration and no other scenario runs beside it. Before rmp #2613 it
+// did not, and a neighbour drawn onto another swarm worker silently inherited
+// the single core — which is a starved regime for a claim that never asked for
+// one. The scenario's own subject is unchanged: it still starves ITSELF.
 func runCPUStarvation(ctx context.Context, seed uint64) (*SimReport, error) {
+	defer holdGOMAXPROCSExclusive()()
+
 	prev := runtime.GOMAXPROCS(cpuStarvationGOMAXPROCS)
 	defer runtime.GOMAXPROCS(prev)
 
 	// Delegate to the standard liveness dispatch via a scenario value WITHOUT a
 	// run override (so Run routes to runLiveness rather than recursing here).
+	//
+	// ClampsGOMAXPROCS is set on the inner value too. It is not decorative: this
+	// call is the one recursive [Scenario.Run] in the package, and the outer call
+	// already holds [gomaxprocsMu] exclusively. Without the flag the inner Run
+	// would take the SHARED side of the same lock from the same goroutine and
+	// deadlock immediately.
 	inner := Scenario{
-		Name:        ScenarioCPUStarvation,
-		Mode:        ModeLiveness,
-		Connections: cpuStarvationConns,
-		OpsPerConn:  cpuStarvationOps,
-		Mix:         &ConcurrentMix{WriterWeight: 0.2, ReaderWeight: 0.2, OverloadWeight: 0.6},
+		Name:             ScenarioCPUStarvation,
+		Mode:             ModeLiveness,
+		Connections:      cpuStarvationConns,
+		OpsPerConn:       cpuStarvationOps,
+		ClampsGOMAXPROCS: true,
+		Mix:              &ConcurrentMix{WriterWeight: 0.2, ReaderWeight: 0.2, OverloadWeight: 0.6},
 	}
 	return inner.Run(ctx, seed)
 }
