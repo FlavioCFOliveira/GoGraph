@@ -8,8 +8,6 @@ package cypher_test
 import (
 	"context"
 	"testing"
-
-	"github.com/FlavioCFOliveira/GoGraph/cypher"
 )
 
 // BenchmarkRelBoundUnreferenced binds a property-bearing relationship r in the
@@ -17,9 +15,7 @@ import (
 // #1630 the executor built the full RelationshipValue per matched row,
 // fetching every edge's `w` property; after, r is demand-gated away.
 func BenchmarkRelBoundUnreferenced(b *testing.B) {
-	g := newBenchGraph()
-	eng := cypher.NewEngine(g)
-	seedRelGraph(b, eng, 400, 4)
+	eng := newRelBenchEngine(b, 400, 4)
 	const q = "MATCH (a)-[r]->(b) WHERE a.i >= 0 RETURN a.i"
 	b.ReportAllocs()
 	b.ResetTimer()
