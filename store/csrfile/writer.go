@@ -3,6 +3,7 @@ package csrfile
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash"
 	"hash/crc32"
@@ -14,6 +15,31 @@ import (
 
 var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 
+// ErrPublishedNotDurable reports that the publish RENAME already succeeded — the
+// new generation is visible and the previous one is gone — but the parent
+// directory fsync that makes that rename survive a crash did not.
+//
+// It exists because the two failure modes were indistinguishable from the
+// caller's side (rmp #2580's sibling, rmp #2581). Every earlier step's failure
+// leaves the previous generation intact and the temp file removed, so an error
+// from [WriteToFile] read naturally as "not published". A parent-fsync failure
+// returned an error over a state where publication HAD occurred, and a caller
+// that reacted by assuming the old file survived would be wrong.
+//
+// Wrap-and-return is the deliberate choice among the two shapes prior art takes:
+// RocksDB returns the survivable error (file/filename.cc, v9.7.3), while
+// PostgreSQL escalates a failed fsync to PANIC rather than let a caller carry on
+// (src/backend/storage/file/fd.c, REL_17_STABLE), on the reasoning that a LATER
+// fsync may falsely report success once the kernel has dropped the dirty page.
+// GoGraph is an embedded library and cannot take the process down on its
+// embedder's behalf, so it returns — but it returns something the embedder can
+// TELL APART, and documents that retrying the fsync, or failing the process, are
+// the two sound responses. Treating it as "not published" is not one of them.
+//
+// Test for it with errors.Is; the underlying filesystem error is wrapped and
+// remains reachable.
+var ErrPublishedNotDurable = errors.New("csrfile: published but durability unproven")
+
 // WriteToFile serialises c into the path atomically and durably: data
 // lands in path + ".tmp" first, the temp file's contents are fsync'd,
 // the file is renamed onto path, and finally the PARENT directory is
@@ -21,8 +47,20 @@ var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 // readers see either the previous file or the new file, never a partial
 // write.
 //
-// On return with a nil error the published file is crash-durable: it
-// survives process crash, host crash, and kill -9. This guarantee
+// On return with a NIL error the published file is crash-durable: it
+// survives process crash, host crash, and kill -9.
+//
+// On return with a NON-NIL error, which of the two states holds depends on the
+// error, and the caller must not guess:
+//
+//   - errors.Is(err, [ErrPublishedNotDurable]) — the rename SUCCEEDED. The new
+//     generation is visible and the previous one is gone; only the parent
+//     directory fsync failed, so the rename may not survive a crash. Retry the
+//     fsync or fail the process; do NOT assume the previous file survived.
+//   - any other error — nothing was published. The previous generation is intact
+//     and the temp file has been removed.
+//
+// This guarantee
 // matters because WriteToFile is the bulk loader's sole durability
 // mechanism — the bulk path bypasses the WAL, so there is no replay and
 // no later checkpoint of this artefact to recover a lost rename. Without
@@ -131,7 +169,12 @@ func writeToFileWith[W any](fsys fs, path string, c *csr.CSR[W]) (Header, error)
 	// the unlink of tmp and the link of path. No-op on platforms that
 	// lack a directory-fsync primitive (Windows); see [parentDirFsync].
 	if err := fsys.ParentDirSync(path); err != nil {
-		return Header{}, fmt.Errorf("csrfile: publish parent fsync: %w", err)
+		// THE RENAME ALREADY HAPPENED. The new generation is visible and the
+		// previous one is gone, so this error must not be read as "not published"
+		// (rmp #2581). ErrPublishedNotDurable is what lets a caller tell this
+		// apart from every earlier failure, each of which leaves the previous
+		// generation intact.
+		return Header{}, fmt.Errorf("%w: parent fsync of %q: %w", ErrPublishedNotDurable, path, err)
 	}
 	notePublishStep("parent-fsync", path)
 	return header, nil
