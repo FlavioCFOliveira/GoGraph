@@ -19,6 +19,15 @@ import (
 // guarantees of any implementation are the implementation's own.
 type File interface {
 	io.Writer
+	// Truncate resizes the open file to size bytes.
+	//
+	// It is on the HANDLE rather than on the path (where csrfile called
+	// os.Truncate until rmp #2580) because a path-based resize moments after the
+	// create is a TOCTOU window on a name an attacker controls: the temp name is
+	// OutputPath + ".tmp" and therefore fully predictable. Operating on the
+	// descriptor the create returned removes the second name resolution, so
+	// nothing can be swapped in between the two calls.
+	Truncate(size int64) error
 	Sync() error
 	Close() error
 }
@@ -37,8 +46,6 @@ type fs interface {
 	// existing content. It mirrors the historical
 	// os.OpenFile(O_CREATE|O_WRONLY|O_TRUNC, 0o600) call.
 	Create(path string) (File, error)
-	// Truncate resizes the file at path to size bytes.
-	Truncate(path string, size int64) error
 	// Rename atomically moves oldPath onto newPath.
 	Rename(oldPath, newPath string) error
 	// Remove deletes path; a best-effort cleanup, errors are ignored by callers.
@@ -64,10 +71,11 @@ func (osFS) Create(path string) (File, error) {
 	// Create the temp file mode 0600: the CSR payload contains full edge and
 	// weight data, so it must not be world- or group-readable. os.Rename
 	// preserves the mode, so the published file is 0600 too.
-	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) //nolint:gosec // caller-supplied path
+	// csrNoFollow rejects a symlinked final component (CWE-59, rmp #2580): the
+	// ".tmp" name is predictable, so without it a pre-planted symlink turned this
+	// O_TRUNC create into an arbitrary-file overwrite.
+	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|csrNoFollow, 0o600) //nolint:gosec // caller-supplied path; csrNoFollow rejects a symlinked final component (CWE-59)
 }
-
-func (osFS) Truncate(path string, size int64) error { return os.Truncate(path, size) }
 
 func (osFS) Rename(oldPath, newPath string) error { return os.Rename(oldPath, newPath) }
 

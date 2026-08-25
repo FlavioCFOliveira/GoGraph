@@ -640,8 +640,6 @@ var errBulkOracleReadOnly = errors.New("sim: bulk-load-oracle image backend is r
 
 func (b bulkOracleImageFS) Create(string) (csrfile.File, error) { return nil, errBulkOracleReadOnly }
 
-func (b bulkOracleImageFS) Truncate(string, int64) error { return errBulkOracleReadOnly }
-
 func (b bulkOracleImageFS) Rename(string, string) error { return errBulkOracleReadOnly }
 
 func (b bulkOracleImageFS) Remove(string) error { return errBulkOracleReadOnly }

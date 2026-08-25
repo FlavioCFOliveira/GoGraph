@@ -81,7 +81,10 @@ func writeToFileWith[W any](fsys fs, path string, c *csr.CSR[W]) (Header, error)
 	if err != nil {
 		return Header{}, err
 	}
-	if err := fsys.Truncate(tmp, int64(total)); err != nil {
+	// On the DESCRIPTOR, not the path (rmp #2580). A path-based os.Truncate here
+	// re-resolved a predictable name moments after the create, which is a TOCTOU
+	// window an attacker who can write the directory could step into.
+	if err := f.Truncate(int64(total)); err != nil {
 		_ = f.Close()        // best-effort: already on error path, truncate err preserved
 		_ = fsys.Remove(tmp) // best-effort: tmp file cleanup, truncate err preserved
 		return Header{}, err
